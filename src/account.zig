@@ -15,6 +15,10 @@ pub const Runtime = runtime_impl.Runtime;
 pub const Prepared = runtime_impl.Prepared;
 pub const PlatformServices = platform_impl.Services;
 pub const TestSupport = runtime_impl.TestSupport;
+pub const Transport = metask_client_impl.Transport;
+pub const TransportRequest = metask_client_impl.Request;
+pub const TransportResponse = metask_client_impl.Response;
+pub const TransportError = metask_client_impl.TransportError;
 
 test {
     _ = state_impl;

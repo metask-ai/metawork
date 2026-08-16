@@ -1,5 +1,12 @@
 import { createServer } from "node:http";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -11,10 +18,15 @@ import {
 } from "./agentcore-bundle.mjs";
 import { runChild } from "./run-child-process.mjs";
 
-const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const repositoryRoot = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+);
 const [mode] = process.argv.slice(2);
 if (process.argv.length > 3 || (mode !== undefined && mode !== "--staged"))
-  throw new Error("usage: node scripts/run-agentcore-run-state-probe.mjs [--staged]");
+  throw new Error(
+    "usage: node scripts/run-agentcore-run-state-probe.mjs [--staged]",
+  );
 const bundleRoot =
   mode === "--staged"
     ? path.join(repositoryRoot, ".agentcore", "bundle")
@@ -28,12 +40,10 @@ const bundle = await validateAgentCoreBundle(bundleRoot, {
   expectedManifest: lock.manifest,
   expectedManifestBytes: lock.bytes,
 });
-if (
-  !(
-    (process.platform === "win32" && process.arch === "x64") ||
-    (process.platform === "darwin" && process.arch === "arm64")
-  )
-)
+if (!(
+  (process.platform === "win32" && process.arch === "x64") ||
+  (process.platform === "darwin" && process.arch === "arm64")
+))
   throw new Error("run_state probe requires Windows x64 or macOS arm64");
 
 const sse = [
@@ -73,7 +83,9 @@ const server = createServer((request, response) => {
   request.on("end", () => {
     try {
       if (request.method !== "POST" || request.url !== "/v1/messages")
-        throw new Error(`unexpected provider route: ${request.method} ${request.url}`);
+        throw new Error(
+          `unexpected provider route: ${request.method} ${request.url}`,
+        );
       if (request.headers.authorization !== "Bearer run-state-probe-key")
         throw new Error("probe credential did not reach AgentCore");
       const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
@@ -92,7 +104,9 @@ const server = createServer((request, response) => {
   });
 });
 
-const scratch = await mkdtemp(path.join(tmpdir(), "metawork-agentcore-run-state-probe-"));
+const scratch = await mkdtemp(
+  path.join(tmpdir(), "metawork-agentcore-run-state-probe-"),
+);
 try {
   const address = await new Promise((resolve, reject) => {
     server.once("error", reject);
@@ -137,10 +151,18 @@ pub fn build(b: *std.Build) void {
 `,
   );
   const source = await readFile(
-    path.join(repositoryRoot, "scripts", "probes", "agentcore-run-state-probe.zig"),
+    path.join(
+      repositoryRoot,
+      "scripts",
+      "probes",
+      "agentcore-run-state-probe.zig",
+    ),
     "utf8",
   );
-  await writeFile(path.join(zigConsumerRoot, "main.zig"), source.replaceAll("__BASE_URL__", address));
+  await writeFile(
+    path.join(zigConsumerRoot, "main.zig"),
+    source.replaceAll("__BASE_URL__", address),
+  );
   await runChild(
     "zig",
     [

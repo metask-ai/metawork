@@ -53,7 +53,7 @@ export const zhCN: Record<MessageId, string> = {
   "account.error.no_api_keys":
     "这个 Metask 账号还没有可用的 API Key。请在 Metask 中添加后重试。",
   "account.error.no_models":
-    "所选 API Key 没有可用的受支持模型。请在 Metask 中检查后重试。",
+    "所选 API Key 没有可用模型（可能配额已用尽）。请换一个 API Key，或在 Metask 中检查后重试。",
   "account.error.deadline": "Metask 未能及时响应。请检查网络后重试。",
   "account.error.browser": "MetaWork 无法打开登录页面，请重新打开。",
   "account.error.authorization": "未能完成 Metask 登录，请重新登录。",
@@ -264,7 +264,8 @@ export const zhCN: Record<MessageId, string> = {
   "mcp.pipeline.test_connected": "已连接 · {tools} 个工具",
   "mcp.pipeline.test_failed": "连接失败 · {issues} 个问题",
   "mcp.pipeline.tools": "已放行 {allowed}/{total} 个工具",
-  "mcp.pipeline.restart_hint": "重启应用后，新任务可使用该连接；现有任务不受影响",
+  "mcp.pipeline.restart_hint":
+    "重启应用后，新任务可使用该连接；现有任务不受影响",
   "mcp.detail.allow_all": "允许全部 {count} 个",
   "mcp.confirm.allow_all.title": "放行全部已发现的工具？",
   "mcp.confirm.allow_all.body":

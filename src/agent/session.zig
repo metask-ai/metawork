@@ -2520,8 +2520,7 @@ pub const Session = struct {
             return error.RuntimeShuttingDown;
         switch (self.state) {
             .idle => {},
-            .queued, .running, .waiting_ui, .compact_queued, .compacting, .checkpointing =>
-                return error.SessionNotIdle,
+            .queued, .running, .waiting_ui, .compact_queued, .compacting, .checkpointing => return error.SessionNotIdle,
             .poisoned => return error.SessionPoisoned,
             .closing, .closed => return error.SessionClosing,
         }

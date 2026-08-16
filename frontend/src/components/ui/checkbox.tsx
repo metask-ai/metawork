@@ -14,7 +14,13 @@ export const Checkbox = {
       {...props}
     />
   ),
-  Indicator: ({ className, ...props }: ComponentProps<typeof BaseCheckbox.Indicator>) => (
-    <BaseCheckbox.Indicator className={cn("text-xs leading-none", className)} {...props} />
+  Indicator: ({
+    className,
+    ...props
+  }: ComponentProps<typeof BaseCheckbox.Indicator>) => (
+    <BaseCheckbox.Indicator
+      className={cn("text-xs leading-none", className)}
+      {...props}
+    />
   ),
 };

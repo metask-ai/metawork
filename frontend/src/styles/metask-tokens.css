@@ -28,10 +28,20 @@
   --metask-dark-text-muted: #a7abb7;
   --metask-dark-border: #2b2f3a;
 
-  --metask-font-sans: Inter, "SF Pro Display", "PingFang SC",
-    "Microsoft YaHei", Arial, sans-serif;
-  --metask-font-mono: "SFMono-Regular", Menlo, Monaco, Consolas,
-    "Liberation Mono", monospace;
+  --metask-font-sans:
+    Inter, "SF Pro Display", "PingFang SC", "Microsoft YaHei", Arial, sans-serif;
+  --metask-font-mono:
+    "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+
+  --metask-text-micro: 11px;
+  --metask-text-label: 12px;
+  --metask-text-control: 13px;
+  --metask-text-body: 14px;
+  --metask-text-lead: 16px;
+  --metask-text-title: 18px;
+  --metask-text-title-lg: 20px;
+  --metask-text-display: 24px;
+  --metask-text-display-lg: 28px;
 
   --ui-surface-canvas: var(--metask-light-canvas);
   --ui-surface-panel: var(--metask-light-panel);
@@ -169,4 +179,13 @@
   --font-sans: var(--metask-font-sans);
   --font-mono: var(--metask-font-mono);
   --font-display: var(--metask-font-sans);
+  --text-micro: var(--metask-text-micro);
+  --text-label: var(--metask-text-label);
+  --text-control: var(--metask-text-control);
+  --text-body: var(--metask-text-body);
+  --text-lead: var(--metask-text-lead);
+  --text-title: var(--metask-text-title);
+  --text-title-lg: var(--metask-text-title-lg);
+  --text-display: var(--metask-text-display);
+  --text-display-lg: var(--metask-text-display-lg);
 }

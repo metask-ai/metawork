@@ -153,18 +153,32 @@ export function SettingsPage({
     }
     return options;
   }, [account.models, requestedModel, t]);
-  const selectedApiId =
-    candidateApi?.selectionId ||
-    modelCatalogApi?.selectionId ||
-    committedApi?.selectionId ||
-    "";
-  const selectedModelId = candidateModel
-    ? candidateModel.selectionId
-    : account.models.some(
-          (model) => model.selectionId === account.selectedModelSelectionId,
-        )
-      ? account.selectedModelSelectionId
-      : "";
+  // While the host is asking for a choice (parked "choosing" with no
+  // candidate), the selector must not pre-fill the committed value: the
+  // select control never fires for the already-displayed value, which would
+  // make retrying the same key/model impossible after a failure park.
+  const awaitingApiChoice =
+    account.catalogState === "choosing" &&
+    account.candidateApiKeySelectionId.length === 0;
+  const awaitingModelChoice =
+    account.catalogState === "choosing" &&
+    account.candidateApiKeySelectionId.length > 0 &&
+    account.candidateModelSelectionId.length === 0;
+  const selectedApiId = awaitingApiChoice
+    ? requestedApi?.selectionId || ""
+    : candidateApi?.selectionId ||
+      modelCatalogApi?.selectionId ||
+      committedApi?.selectionId ||
+      "";
+  const selectedModelId = awaitingModelChoice
+    ? requestedModel?.selectionId || ""
+    : candidateModel
+      ? candidateModel.selectionId
+      : account.models.some(
+            (model) => model.selectionId === account.selectedModelSelectionId,
+          )
+        ? account.selectedModelSelectionId
+        : "";
   const apiHasAlternative = apiOptions.some(
     (option) => option.value !== selectedApiId,
   );
@@ -658,6 +672,11 @@ export function SettingsPage({
                   <span className="settings-error-copy">
                     <strong>{t("account.action_failed")}</strong>
                     <span>{accountErrorText(account.errorCode, t)}</span>
+                    {account.safeDiagnostic && (
+                      <span className="settings-error-diagnostic">
+                        {account.safeDiagnostic}
+                      </span>
+                    )}
                     {account.catalogState === "ready" && (
                       <span>
                         {t("settings.switch.failure_preserved", {

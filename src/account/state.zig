@@ -119,6 +119,10 @@ const CommittedState = struct {
     selected_model: ModelId = .{},
     pending_api_key_id: ApiKeyId = .{},
     pending_model: ModelId = .{},
+    /// A manual API selection arrived while a catalog load was in flight.
+    /// The next completion boundary reloads models for the queued key
+    /// instead of consuming the stale result; user intent beats automation.
+    pending_catalog_reload: bool = false,
     error_code: contract.ErrorCode = .none,
     safe_diagnostic: SafeDiagnostic = .{},
     catalog_generation: u64 = 0,
@@ -230,6 +234,16 @@ pub const Account = struct {
 
     pub fn catalogAttemptActive(self: *const Account) bool {
         return self.state.attempt_kind == .catalog;
+    }
+
+    /// True while a catalog attempt is loading models for a selected key.
+    /// A failure here parks back in choosing with the loaded key list kept
+    /// (see prepareFailure), so the owner must also keep the session that
+    /// holds those keys' secrets — resetting it would make every re-pick
+    /// dispatch a model load that cannot resolve its key.
+    pub fn catalogModelsLoadInFlight(self: *const Account) bool {
+        return self.state.attempt_kind == .catalog and
+            self.state.operation == .loading_models;
     }
 
     pub fn credentialValidationInFlight(self: *const Account) bool {
@@ -505,6 +519,7 @@ pub const Account = struct {
         next.attempt_kind = .none;
         next.pending_api_key_id.clear();
         next.pending_model.clear();
+        next.pending_catalog_reload = false;
         next.error_code = .user_cancelled;
         next.safe_diagnostic.clear();
         var result = transition(
@@ -558,6 +573,40 @@ pub const Account = struct {
                 .session_changed,
                 attempt.current,
                 .load_api_keys,
+            );
+        }
+        if (self.state.attempt_kind == .catalog and
+            self.state.active_attempt_id != null and
+            (self.state.operation == .loading_models or
+                self.state.operation == .selecting_model))
+        {
+            // Automatic continuation is mid-flight (or parked on a model
+            // choice). The user's explicit key choice supersedes it: queue
+            // the key and reload its models at the next completion boundary
+            // instead of discarding the click as invalid_state.
+            var next = self.state;
+            next.pending_api_key_id.set(id) catch
+                return .{ .rejected = .invalid_command };
+            next.pending_model.clear();
+            next.clearError();
+            if (self.state.operation == .selecting_model) {
+                // Parked: no worker in flight, reload immediately.
+                next.operation = .loading_models;
+                next.pending_catalog_reload = false;
+                const effect_id = ApiKeyId.init(id) catch
+                    return .{ .rejected = .invalid_command };
+                return transition(
+                    next,
+                    .session_changed,
+                    next.active_attempt_id.?,
+                    .{ .load_models = effect_id },
+                );
+            }
+            next.pending_catalog_reload = true;
+            return transitionNoEffect(
+                next,
+                .session_changed,
+                next.active_attempt_id.?,
             );
         }
         if (self.state.operation != .selecting_key or
@@ -626,7 +675,8 @@ pub const Account = struct {
                 u8,
                 next.pending_api_key_id.view(),
                 next.selected_api_key_id.view(),
-            )) {
+            ))
+        {
             next.selected_model.set(model) catch
                 return .{ .rejected = .invalid_command };
             next.operation = .none;
@@ -781,6 +831,22 @@ pub const Account = struct {
             return .{ .rejected = .generation_mismatch };
         var next = self.state;
         next.catalog_generation = generation;
+        if (next.pending_catalog_reload) {
+            // The loaded models belong to a key the user superseded while the
+            // load was in flight. Drop the stale result and reload for the
+            // queued key.
+            next.pending_catalog_reload = false;
+            next.operation = .loading_models;
+            next.clearError();
+            const effect_id = ApiKeyId.init(next.pending_api_key_id.view()) catch
+                return .{ .rejected = .invalid_command };
+            return transition(
+                next,
+                .catalog_changed,
+                next.active_attempt_id.?,
+                .{ .load_models = effect_id },
+            );
+        }
         if (next.pending_model.len != 0) {
             next.execution_state = if (next.execution_generation == 0)
                 .preparing
@@ -879,6 +945,33 @@ pub const Account = struct {
             WorkerFailure.fromCode(.dependency_contract_invalid)
         else
             failure;
+        // A model-catalog failure — empty catalog, quota exhaustion, server
+        // error — is a fact about the selected key, not about the catalog
+        // transaction: the model request authenticates with the API Key
+        // itself, so its failure never invalidates the session. Tearing the
+        // transaction down would discard the successfully loaded key list,
+        // and with automatic first-key selection every retry deterministically
+        // re-selects the same broken key: a bricked account whose only exit
+        // is logout. Park back in choosing instead, with the key list intact
+        // and the error surfaced, so the user re-picks.
+        if (self.state.attempt_kind == .catalog and
+            self.state.operation == .loading_models)
+        {
+            var parked = self.state;
+            parked.pending_api_key_id.clear();
+            parked.pending_model.clear();
+            parked.pending_catalog_reload = false;
+            if (parked.execution_state == .reconfiguring)
+                parked.execution_state = .ready;
+            parked.operation = .selecting_key;
+            parked.error_code = normalized_failure.error_code;
+            parked.safe_diagnostic = normalized_failure.safe_diagnostic;
+            return transitionNoEffect(
+                parked,
+                .catalog_changed,
+                self.state.active_attempt_id.?,
+            );
+        }
         const login_replaced = self.state.attempt_kind == .login and
             self.state.operation == .loading_identity;
         var next = self.state;
@@ -915,6 +1008,7 @@ pub const Account = struct {
             next.execution_state = .ready;
         next.pending_api_key_id.clear();
         next.pending_model.clear();
+        next.pending_catalog_reload = false;
         next.operation = .none;
         next.active_attempt_id = null;
         next.attempt_kind = .none;
@@ -1647,6 +1741,276 @@ test "refresh failure matrix distinguishes retryable and invalid credentials" {
     commitPrepared(&active, &invalid);
     try std.testing.expectEqual(contract.AccountState.signed_out, active.view().state);
     try std.testing.expectEqualStrings("", active.view().account_id);
+}
+
+test "manual key choice supersedes an in-flight automatic continuation" {
+    const allocator = std.testing.allocator;
+    var account = Account.initRestoring();
+    var restored_execution = try contract.OwnedExecutionConfig.initOwned(
+        allocator,
+        .anthropic,
+        try allocator.dupe(u8, "model-old"),
+        try allocator.dupe(u8, contract.metask_anthropic_messages_url),
+        9,
+        try allocator.dupe(u8, "secret"),
+    );
+    defer restored_execution.deinit();
+    var restored = try TestSupport.prepareReady(
+        &account,
+        try .init("account-1", "Metask User"),
+        "key-old",
+        &restored_execution,
+    );
+    var installed = restored.takeExecution().?;
+    installed.deinit();
+    restored.commit(&account);
+    restored.deinit();
+
+    var refresh = switch (account.prepareCommand(.refresh_catalog)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    _ = refresh.takeEffect();
+    commitPrepared(&account, &refresh);
+    var keys: WorkerCompletion = .{
+        .attempt_id = account.activeAttempt().?,
+        .payload = .api_keys_loaded,
+    };
+    var keys_ready = switch (account.prepareCompletion(&keys)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    commitPrepared(&account, &keys_ready);
+    // Automatic continuation picks a key; its model load goes in flight.
+    var auto_select = switch (account.prepareCommand(.{
+        .select_api_key = testSelection("key-auto"),
+    })) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(auto_select.takeEffect() != null);
+    commitPrepared(&account, &auto_select);
+
+    // The user clicks a different key while that load is in flight. The
+    // click must queue instead of bouncing as invalid_state.
+    var manual = switch (account.prepareCommand(.{
+        .select_api_key = testSelection("key-user"),
+    })) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(manual.takeEffect() == null);
+    commitPrepared(&account, &manual);
+
+    // The stale models result for key-auto is dropped and the load restarts
+    // for the user's key inside the same attempt.
+    var stale_models: WorkerCompletion = .{
+        .attempt_id = account.activeAttempt().?,
+        .payload = .models_loaded,
+    };
+    var reload = switch (account.prepareCompletion(&stale_models)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    const effect = reload.takeEffect().?;
+    try std.testing.expect(effect == .load_models);
+    try std.testing.expectEqualStrings("key-user", effect.load_models.view());
+    commitPrepared(&account, &reload);
+    try std.testing.expectEqual(
+        contract.CatalogState.loading,
+        account.view().catalog_state,
+    );
+    try std.testing.expectEqualStrings(
+        "key-user",
+        account.view().candidate_api_key_id,
+    );
+}
+
+test "empty model catalog parks back in choosing with the key list intact" {
+    const allocator = std.testing.allocator;
+    var account = Account.initRestoring();
+    var restored_execution = try contract.OwnedExecutionConfig.initOwned(
+        allocator,
+        .anthropic,
+        try allocator.dupe(u8, "model-old"),
+        try allocator.dupe(u8, contract.metask_anthropic_messages_url),
+        9,
+        try allocator.dupe(u8, "secret"),
+    );
+    defer restored_execution.deinit();
+    var restored = try TestSupport.prepareReady(
+        &account,
+        try .init("account-1", "Metask User"),
+        "key-old",
+        &restored_execution,
+    );
+    var installed = restored.takeExecution().?;
+    installed.deinit();
+    restored.commit(&account);
+    restored.deinit();
+
+    var refresh = switch (account.prepareCommand(.refresh_catalog)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    _ = refresh.takeEffect();
+    commitPrepared(&account, &refresh);
+    var keys: WorkerCompletion = .{
+        .attempt_id = account.activeAttempt().?,
+        .payload = .api_keys_loaded,
+    };
+    var keys_ready = switch (account.prepareCompletion(&keys)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    commitPrepared(&account, &keys_ready);
+    var select_key = switch (account.prepareCommand(.{
+        .select_api_key = testSelection("key-exhausted"),
+    })) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    _ = select_key.takeEffect();
+    commitPrepared(&account, &select_key);
+
+    // The selected key answers with an empty model catalog (for example a
+    // quota-exhausted key). The transaction must park back in choosing with
+    // the attempt alive instead of tearing down into a retry loop that
+    // deterministically re-selects the same key.
+    var empty_models: WorkerCompletion = .{
+        .attempt_id = account.activeAttempt().?,
+        .payload = .{ .failed = .fromCode(.no_models) },
+    };
+    var parked = switch (account.prepareCompletion(&empty_models)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(parked.takeEffect() == null);
+    commitPrepared(&account, &parked);
+
+    const view = account.view();
+    try std.testing.expectEqual(contract.CatalogState.choosing, view.catalog_state);
+    try std.testing.expectEqual(contract.ErrorCode.no_models, view.error_code);
+    try std.testing.expect(account.activeAttempt() != null);
+    try std.testing.expect(view.can_cancel);
+    // The committed execution keeps working; nothing was torn down.
+    try std.testing.expectEqualStrings("key-old", view.selected_api_key_id);
+    try std.testing.expectEqualStrings("model-old", view.selected_model);
+    try std.testing.expectEqual(@as(u64, 9), view.execution_generation);
+    // Admission stays closed while the catalog transaction is open; it
+    // reopens when the user completes the re-pick. The point of parking is
+    // that the re-pick is possible at all.
+    try std.testing.expect(!view.can_create_task);
+
+    // Re-picking a key continues inside the same parked transaction.
+    var reselect = switch (account.prepareCommand(.{
+        .select_api_key = testSelection("key-good"),
+    })) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(reselect.takeEffect() != null);
+    commitPrepared(&account, &reselect);
+    try std.testing.expectEqual(
+        contract.CatalogState.loading,
+        account.view().catalog_state,
+    );
+}
+
+test "model catalog service failure parks back in choosing the same way" {
+    var account = Account.initSignedOutForTest();
+    var login = switch (account.prepareCommand(.begin_login)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    _ = login.takeEffect();
+    commitPrepared(&account, &login);
+    var authorized: WorkerCompletion = .{
+        .attempt_id = account.activeAttempt().?,
+        .payload = .tokens_persisted,
+    };
+    var tokens = switch (account.prepareCompletion(&authorized)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    _ = tokens.takeEffect();
+    commitPrepared(&account, &tokens);
+    var identity: WorkerCompletion = .{
+        .attempt_id = account.activeAttempt().?,
+        .payload = .{ .identity_loaded = try .init(
+            "account-1",
+            "Metask User",
+        ) },
+    };
+    var identified = switch (account.prepareCompletion(&identity)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    _ = identified.takeEffect();
+    commitPrepared(&account, &identified);
+    var begin_catalog = switch (account.prepareCommand(.refresh_catalog)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    _ = begin_catalog.takeEffect();
+    commitPrepared(&account, &begin_catalog);
+    var keys: WorkerCompletion = .{
+        .attempt_id = account.activeAttempt().?,
+        .payload = .api_keys_loaded,
+    };
+    var keys_ready = switch (account.prepareCompletion(&keys)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    commitPrepared(&account, &keys_ready);
+    var select_key = switch (account.prepareCommand(.{
+        .select_api_key = testSelection("key-broken"),
+    })) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    _ = select_key.takeEffect();
+    commitPrepared(&account, &select_key);
+
+    // First setup, automatic continuation: the first key's model catalog
+    // answers with a server failure (quota-exhausted backend). The key list
+    // must survive so the user can re-pick a healthy key; tearing down here
+    // leaves an empty selector that rejects every selection.
+    var failure: WorkerCompletion = .{
+        .attempt_id = account.activeAttempt().?,
+        .payload = .{ .failed = .fromCode(.metask_service_unavailable) },
+    };
+    var parked = switch (account.prepareCompletion(&failure)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(parked.takeEffect() == null);
+    commitPrepared(&account, &parked);
+
+    const view = account.view();
+    try std.testing.expectEqual(
+        contract.CatalogState.choosing,
+        view.catalog_state,
+    );
+    try std.testing.expectEqual(
+        contract.ErrorCode.metask_service_unavailable,
+        view.error_code,
+    );
+    try std.testing.expect(account.activeAttempt() != null);
+
+    // Re-picking a key continues inside the same parked transaction.
+    var reselect = switch (account.prepareCommand(.{
+        .select_api_key = testSelection("key-good"),
+    })) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(reselect.takeEffect() != null);
+    commitPrepared(&account, &reselect);
+    try std.testing.expectEqual(
+        contract.CatalogState.loading,
+        account.view().catalog_state,
+    );
 }
 
 test "failed reconfiguration preserves the committed selection" {

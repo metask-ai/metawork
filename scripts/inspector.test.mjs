@@ -361,7 +361,10 @@ test("Inspector has one controlled panel and the central narrative is not chat",
     css,
     /@media \(max-width: 560px\)[\s\S]*?\.ai-message\.agent-user-message\s*\{[^}]*max-width:\s*88%/,
   );
-  assert.doesNotMatch(css, /\.ai-message\.agent-user-message::(?:before|after)/);
+  assert.doesNotMatch(
+    css,
+    /\.ai-message\.agent-user-message::(?:before|after)/,
+  );
 });
 
 test("Inspector breakpoint changes presentation without creating a modal or second state owner", async () => {

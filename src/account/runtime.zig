@@ -92,6 +92,10 @@ const Effects = struct {
     io: std.Io,
     wake: WakeSink,
     transport: metask_client.StdHttpTransport,
+    /// Test-only network seam: reproduction tests script Metask responses
+    /// through the same single-flight worker path production uses.
+    test_transport: if (builtin.is_test) ?metask_client.Transport else void =
+        if (builtin.is_test) null else {},
     queue: EffectQueue = .{},
     catalog: catalog_impl.CatalogSession,
     public_catalog: catalog_impl.PublicCatalog = .{},
@@ -117,6 +121,9 @@ const Effects = struct {
     }
 
     fn clientTransport(self: *Effects) metask_client.Transport {
+        if (builtin.is_test) {
+            if (self.test_transport) |value| return value;
+        }
         return self.transport.transport();
     }
 
@@ -878,7 +885,13 @@ pub const Runtime = struct {
                 ) },
             };
         }
-        if (catalog_attempt and completion.payload == .failed)
+        // A models-load failure parks the transaction in choosing with the
+        // key list kept (state prepareFailure); the session holding those
+        // keys' secrets must survive with it, or every re-pick dispatches a
+        // model load that cannot resolve its key. Only a torn-down catalog
+        // attempt resets the session.
+        if (catalog_attempt and completion.payload == .failed and
+            !self.account.catalogModelsLoadInFlight())
             self.effects.catalog.reset();
 
         if (completion.payload == .failed and
@@ -1309,7 +1322,7 @@ pub const Runtime = struct {
             const id = saved.apiKeyId();
             if (catalog.hasApiKey(id)) return id;
         }
-        return catalog.uniqueApiKeyId();
+        return catalog.firstApiKeyId();
     }
 
     fn automaticModelSelection(
@@ -1317,17 +1330,9 @@ pub const Runtime = struct {
         catalog: *const catalog_impl.CatalogSession,
         account_view: contract.AccountView,
     ) ?[]const u8 {
-        if (account_view.execution_generation != 0) {
-            if (account_view.candidate_model.len != 0 or
-                !std.mem.eql(
-                    u8,
-                    catalog.selectedApiKeyId(),
-                    account_view.selected_api_key_id,
-                )) return null;
-            if (catalog.hasModel(account_view.selected_model))
-                return account_view.selected_model;
-            return null;
-        }
+        if (account_view.candidate_model.len != 0) return null;
+        if (catalog.hasModel(account_view.selected_model))
+            return account_view.selected_model;
         if (self.savedPreferenceFor(account_view.account_id)) |saved| {
             const id = saved.modelId();
             if (std.mem.eql(
@@ -1336,7 +1341,7 @@ pub const Runtime = struct {
                 saved.apiKeyId(),
             ) and catalog.hasModel(id)) return id;
         }
-        return catalog.uniqueModelId();
+        return catalog.firstModelId();
     }
 
     fn scheduleRefresh(self: *Runtime) void {
@@ -1500,6 +1505,13 @@ pub const TestSupport = if (builtin.is_test) struct {
             "key-1",
             execution,
         ) };
+    }
+
+    pub fn overrideTransport(
+        runtime: *Runtime,
+        transport: metask_client.Transport,
+    ) void {
+        runtime.effects.test_transport = transport;
     }
 
     pub fn occupyEffectQueue(runtime: *Runtime) void {
@@ -1695,8 +1707,19 @@ test "Account Runtime owns automatic catalog selection policy" {
     first_login_view.selected_api_key_id = "";
     first_login_view.selected_model = "";
     first_login_view.execution_generation = 0;
-    try std.testing.expect(
-        runtime.automaticApiSelection(&catalog, first_login_view) == null,
+    // First login without a saved preference defaults to the catalog's
+    // first key; the user adjusts in settings afterwards.
+    try std.testing.expectEqualStrings(
+        "key-current",
+        runtime.automaticApiSelection(&catalog, first_login_view).?,
+    );
+    // Model selection also defaults to the first entry when neither the
+    // committed selection nor a saved preference survives in the catalog.
+    var first_model_view = first_login_view;
+    first_model_view.selected_model = "model-missing";
+    try std.testing.expectEqualStrings(
+        "model-current",
+        runtime.automaticModelSelection(&catalog, first_model_view).?,
     );
     runtime.saved_preference = try .init(
         "account-1",

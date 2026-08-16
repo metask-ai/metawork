@@ -70,7 +70,7 @@ export function WorkspaceContextSelector({
           title={title}
           disabled={disabled || options.length === 0}
           leading={<Icon name="workspace" />}
-          triggerClassName="composer-workspace-trigger"
+          triggerClassName="composer-workspace-trigger w-auto"
           contentClassName="composer-workspace-menu"
           onValueChange={onSelect}
         />

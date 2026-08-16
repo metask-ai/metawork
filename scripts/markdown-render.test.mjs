@@ -12,7 +12,9 @@ const vite = await createServer({
   server: { middlewareMode: true },
 });
 
-const { Markdown } = await vite.ssrLoadModule("/src/components/ai/Markdown.tsx");
+const { Markdown } = await vite.ssrLoadModule(
+  "/src/components/ai/Markdown.tsx",
+);
 
 test.after(async () => {
   await vite.close();

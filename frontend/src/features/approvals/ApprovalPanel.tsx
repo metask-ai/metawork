@@ -57,7 +57,7 @@ export function ApprovalPanel({
       className="inline-request"
       aria-busy={responseInFlight}
     >
-      <p className="font-mono text-[10px] tracking-[0.14em] text-ui-warning uppercase">
+      <p className="font-mono text-(length:--text-micro) tracking-[0.14em] text-ui-warning uppercase">
         {t("approval.response_required")}
       </p>
       {pending.redacted && (
@@ -168,7 +168,7 @@ export function ApprovalPanel({
                           </span>
                         )}
                         {option.preview && (
-                          <span className="approval-option-preview mt-1 block font-mono text-[10px] leading-5 text-ui-muted">
+                          <span className="approval-option-preview mt-1 block font-mono text-(length:--text-micro) leading-5 text-ui-muted">
                             {option.preview}
                           </span>
                         )}

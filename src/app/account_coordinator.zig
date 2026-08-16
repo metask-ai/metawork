@@ -35,16 +35,28 @@ pub const Coordinator = struct {
         const self: *Coordinator = @ptrCast(@alignCast(context));
         self.assertMainThread();
         const current = self.runtime.view();
-        const replacement: ExecutionReplacement = switch (command) {
-            // Account model selection changes only the default for future
-            // Tasks. Credential/provider execution generations stay intact.
-            .select_model => .none,
-            .begin_login => if (current.state == .authenticated) .identity else .none,
-            .logout => .identity,
-            else => .none,
-        };
         return switch (self.runtime.prepareCommand(command)) {
-            .prepared => |prepared| self.commitPrepared(prepared, replacement),
+            .prepared => |prepared| self.commitPrepared(prepared, replacement: {
+                // The replacement window must follow the prepared transition,
+                // not the command name: select_model on a ready execution is a
+                // model-only default change, but the same command inside a
+                // parked reconfiguration still rebuilds the execution config
+                // and therefore still needs the Workbench replacement window.
+                if (prepared.transition.effect) |effect| switch (effect) {
+                    .prepare_execution => break :replacement .default,
+                    else => {},
+                };
+                const kind: ExecutionReplacement = switch (command) {
+                    .select_model => .none,
+                    .begin_login => if (current.state == .authenticated)
+                        .identity
+                    else
+                        .none,
+                    .logout => .identity,
+                    else => .none,
+                };
+                break :replacement kind;
+            }),
             .rejected => |error_code| .rejected(error_code),
             .ignored_stale => unreachable,
         };
@@ -483,5 +495,517 @@ test "Application coordinator balances Workbench gate when Account effect admiss
     try std.testing.expect(!workbench.executionReplacementPending());
     try std.testing.expect(!workbench.accountView().can_create_task);
     account_api.TestSupport.clearEffectQueue(&account_runtime);
+    coordinator.shutdown();
+}
+
+// Headless reproduction rig for the full post-login catalog continuation:
+// restore with a stored refresh token -> token refresh -> identity -> API Key
+// catalog -> automatic first-key selection -> model catalog -> automatic
+// first-model selection -> execution persistence, then a manual key switch.
+// Every network step answers through the production single-flight worker via
+// a scripted Metask transport; only the OS keychain and timers are faked.
+const native_sdk = @import("native_sdk");
+
+const FakePlatform = struct {
+    secret: [256]u8 = undefined,
+    secret_len: usize = 0,
+    stored: bool = false,
+
+    fn seed(self: *FakePlatform, refresh_token: []const u8) void {
+        @memcpy(self.secret[0..refresh_token.len], refresh_token);
+        self.secret_len = refresh_token.len;
+        self.stored = true;
+    }
+
+    fn services(self: *FakePlatform) account_api.PlatformServices {
+        return .{
+            .context = self,
+            .set_credential_fn = setCredential,
+            .get_credential_fn = getCredential,
+            .delete_credential_fn = deleteCredential,
+            .start_timer_fn = startTimer,
+            .cancel_timer_fn = cancelTimer,
+            .open_external_url_fn = openExternalUrl,
+        };
+    }
+
+    fn setCredential(
+        context: ?*anyopaque,
+        credential: native_sdk.platform.Credential,
+    ) anyerror!void {
+        const self: *FakePlatform = @ptrCast(@alignCast(context.?));
+        if (credential.secret.len > self.secret.len) return error.WriteFailed;
+        @memcpy(self.secret[0..credential.secret.len], credential.secret);
+        self.secret_len = credential.secret.len;
+        self.stored = true;
+    }
+
+    fn getCredential(
+        context: ?*anyopaque,
+        key: native_sdk.platform.CredentialKey,
+        buffer: []u8,
+    ) anyerror![]const u8 {
+        _ = key;
+        const self: *FakePlatform = @ptrCast(@alignCast(context.?));
+        if (!self.stored) return error.CredentialNotFound;
+        if (self.secret_len > buffer.len) return error.ReadFailed;
+        @memcpy(buffer[0..self.secret_len], self.secret[0..self.secret_len]);
+        return buffer[0..self.secret_len];
+    }
+
+    fn deleteCredential(
+        context: ?*anyopaque,
+        key: native_sdk.platform.CredentialKey,
+    ) anyerror!void {
+        _ = key;
+        const self: *FakePlatform = @ptrCast(@alignCast(context.?));
+        self.stored = false;
+    }
+
+    fn startTimer(
+        _: ?*anyopaque,
+        _: u64,
+        _: u64,
+        _: bool,
+    ) anyerror!void {}
+
+    fn cancelTimer(_: ?*anyopaque, _: u64) anyerror!void {}
+
+    fn openExternalUrl(_: ?*anyopaque, _: []const u8) anyerror!void {}
+};
+
+const FakeMetask = struct {
+    requests: std.atomic.Value(usize) = .init(0),
+    /// When set, model requests whose bearer ends with this suffix answer
+    /// with a server failure — the broken-backend deviation observed on the
+    /// user's first (auto-selected) API Key.
+    fail_models_bearer_suffix: ?[]const u8 = null,
+
+    const keys_body =
+        \\{"code":0,"message":"success","data":{"items":[
+        \\{"id":1,"key":"sk-fake-key-0001","name":"First Key","group_id":10,
+        \\"status":"active","group":{"id":10,"platform":"anthropic","status":"active"}},
+        \\{"id":2,"key":"sk-fake-key-0002","name":"Second Key","group_id":10,
+        \\"status":"active","group":{"id":10,"platform":"anthropic","status":"active"}}
+        \\],"total":2,"page":1,"page_size":100,"pages":1}}
+    ;
+    const models_body =
+        \\{"object":"list","data":[
+        \\{"id":"claude-sonnet-4-5","object":"model","type":"model","display_name":"Sonnet"},
+        \\{"id":"claude-opus-4-6","object":"model","type":"model","display_name":"Opus"}
+        \\],"has_more":false}
+    ;
+    const token_body =
+        \\{"access_token":"access-2","refresh_token":"refresh-2","token_type":"Bearer","expires_in":3600,"scope":"metawork:use","account_id":"1"}
+    ;
+    const user_body =
+        \\{"code":0,"message":"success","data":{"id":1,"email":"user@example.com","username":"Meta User","role":"user"}}
+    ;
+
+    fn transport(self: *FakeMetask) account_api.Transport {
+        return .{ .context = self, .perform_fn = perform };
+    }
+
+    fn perform(
+        context: *anyopaque,
+        request: account_api.TransportRequest,
+        response_buffer: []u8,
+    ) account_api.TransportError!account_api.TransportResponse {
+        const self: *FakeMetask = @ptrCast(@alignCast(context));
+        const index = self.requests.fetchAdd(1, .acq_rel);
+        std.debug.print(
+            "fake-metask[{d}]: kind={s} bearer='{s}'\n",
+            .{ index, @tagName(request.kind), request.bearer orelse "" },
+        );
+        if (request.kind == .models) {
+            if (self.fail_models_bearer_suffix) |suffix| {
+                const bearer = request.bearer orelse "";
+                if (std.mem.endsWith(u8, bearer, suffix)) {
+                    std.debug.print(
+                        "fake-metask[{d}]: forced models failure\n",
+                        .{index},
+                    );
+                    const failure = "{\"error\":\"quota\"}";
+                    @memcpy(response_buffer[0..failure.len], failure);
+                    return .{
+                        .status = 500,
+                        .body = response_buffer[0..failure.len],
+                    };
+                }
+            }
+        }
+        const body: []const u8 = switch (request.kind) {
+            .refresh_token => token_body,
+            .current_user => user_body,
+            .keys => keys_body,
+            .models => models_body,
+            .exchange_code => return error.ProtocolFailed,
+        };
+        if (body.len > response_buffer.len) return error.ResponseTooLarge;
+        @memcpy(response_buffer[0..body.len], body);
+        return .{ .status = 200, .body = response_buffer[0..body.len] };
+    }
+};
+
+fn dumpView(label: []const u8, view: account_contract.AccountView) void {
+    std.debug.print(
+        "view[{s}]: state={s} catalog={s} keys={d} models={d} selected_key='{s}' selected_model='{s}' candidate_key='{s}' candidate_model='{s}' can_create={} err={s} diag='{s}'\n",
+        .{
+            label,
+            @tagName(view.state),
+            @tagName(view.catalog_state),
+            view.api_keys.len,
+            view.models.len,
+            view.selected_api_key_id,
+            view.selected_model,
+            view.candidate_api_key_id,
+            view.candidate_model,
+            view.can_create_task,
+            @tagName(view.error_code),
+            view.safe_diagnostic,
+        },
+    );
+}
+
+fn pumpUntilReady(
+    coordinator: *Coordinator,
+    account_runtime: *account_api.Runtime,
+    label: []const u8,
+) account_contract.AccountView {
+    var last_state: ?account_contract.AccountState = null;
+    var last_catalog: ?account_contract.CatalogState = null;
+    var iterations: usize = 0;
+    while (iterations < 600) : (iterations += 1) {
+        coordinator.drain();
+        const view = account_runtime.view();
+        if (last_state != view.state or last_catalog != view.catalog_state) {
+            dumpView(label, view);
+            last_state = view.state;
+            last_catalog = view.catalog_state;
+        }
+        if (view.state == .authenticated and view.catalog_state == .ready)
+            return view;
+        if (view.state == .authenticated and view.catalog_state == .failed)
+            return view;
+        // A stable parked choice: drain returned with no in-flight attempt,
+        // so nothing will advance without a user command.
+        if (view.state == .authenticated and
+            view.catalog_state == .choosing and
+            iterations > 20)
+            return view;
+        std.Io.Timeout.sleep(.{ .duration = .{
+            .raw = std.Io.Duration.fromMilliseconds(5),
+            .clock = .awake,
+        } }, std.testing.io) catch {};
+    }
+    dumpView("stalled", account_runtime.view());
+    return account_runtime.view();
+}
+
+test "restored login drives automatic key and model defaults end to end" {
+    const TestWake = struct {
+        fn notify(_: *anyopaque) void {}
+    };
+    var wake_context: u8 = 0;
+    const account_dir = if (builtin.os.tag == .windows)
+        "C:\\metawork-account-autoselect-test"
+    else
+        "/tmp/metawork-account-autoselect-test";
+    std.Io.Dir.cwd().deleteTree(std.testing.io, account_dir) catch {};
+
+    var account_runtime = try account_api.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        std.Thread.getCurrentId(),
+        account_dir,
+        .{ .context = &wake_context, .notify_fn = TestWake.notify },
+    );
+    defer account_runtime.deinit();
+
+    var fake_metask: FakeMetask = .{};
+    account_api.TestSupport.overrideTransport(
+        &account_runtime,
+        fake_metask.transport(),
+    );
+
+    var agent_runtime: agent.Runtime = undefined;
+    var workbench = try workbench_api.Workbench.init(
+        std.testing.allocator,
+        std.testing.io,
+        &agent_runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 1,
+            .max_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        .{},
+    );
+    defer workbench.deinit();
+    var coordinator = Coordinator.init(
+        &account_runtime,
+        &workbench,
+        std.Thread.getCurrentId(),
+    );
+
+    var fake_platform: FakePlatform = .{};
+    fake_platform.seed("stored-refresh-token");
+    coordinator.start(fake_platform.services());
+    dumpView("after-start", account_runtime.view());
+
+    // Phase 1: the automatic continuation must land the first key and the
+    // first model without any user action.
+    const settled = pumpUntilReady(&coordinator, &account_runtime, "auto");
+    dumpView("auto-settled", settled);
+    try std.testing.expectEqual(
+        account_contract.AccountState.authenticated,
+        settled.state,
+    );
+    try std.testing.expectEqual(
+        account_contract.CatalogState.ready,
+        settled.catalog_state,
+    );
+    try std.testing.expectEqualStrings("1", settled.selected_api_key_id);
+    try std.testing.expectEqualStrings(
+        "claude-sonnet-4-5",
+        settled.selected_model,
+    );
+    try std.testing.expect(settled.can_create_task);
+
+    // Phase 2: a manual key switch from the settled state must complete the
+    // same continuation for the second key.
+    const manual = coordinator.commandSink().submit(.{ .select_api_key = .{
+        .selection_id = "2",
+        .expected_catalog_generation = settled.catalog_generation,
+        .expected_execution_generation = settled.execution_generation,
+    } });
+    std.debug.print("manual select accepted={}\n", .{manual.accepted});
+    try std.testing.expect(manual.accepted);
+    const switched = pumpUntilReady(&coordinator, &account_runtime, "manual");
+    dumpView("manual-settled", switched);
+    try std.testing.expectEqual(
+        account_contract.CatalogState.ready,
+        switched.catalog_state,
+    );
+    try std.testing.expectEqualStrings("2", switched.selected_api_key_id);
+    try std.testing.expect(switched.can_create_task);
+
+    coordinator.shutdown();
+}
+
+test "relaunch with persisted selection restores the saved execution" {
+    const TestWake = struct {
+        fn notify(_: *anyopaque) void {}
+    };
+    var wake_context: u8 = 0;
+    const account_dir = if (builtin.os.tag == .windows)
+        "C:\\metawork-account-relaunch-test"
+    else
+        "/tmp/metawork-account-relaunch-test";
+    std.Io.Dir.cwd().deleteTree(std.testing.io, account_dir) catch {};
+
+    var fake_metask: FakeMetask = .{};
+    var fake_platform: FakePlatform = .{};
+    fake_platform.seed("stored-refresh-token");
+
+    // First boot: land the automatic defaults and persist the preference.
+    {
+        var account_runtime = try account_api.Runtime.init(
+            std.testing.allocator,
+            std.testing.io,
+            std.Thread.getCurrentId(),
+            account_dir,
+            .{ .context = &wake_context, .notify_fn = TestWake.notify },
+        );
+        defer account_runtime.deinit();
+        account_api.TestSupport.overrideTransport(
+            &account_runtime,
+            fake_metask.transport(),
+        );
+        var agent_runtime: agent.Runtime = undefined;
+        var workbench = try workbench_api.Workbench.init(
+            std.testing.allocator,
+            std.testing.io,
+            &agent_runtime,
+            .{
+                .worker_count = 1,
+                .queue_capacity = 1,
+                .max_tasks = 1,
+                .max_runs_per_task = 1,
+                .max_tools_per_run = 1,
+            },
+            .{},
+        );
+        defer workbench.deinit();
+        var coordinator = Coordinator.init(
+            &account_runtime,
+            &workbench,
+            std.Thread.getCurrentId(),
+        );
+        coordinator.start(fake_platform.services());
+        const settled = pumpUntilReady(&coordinator, &account_runtime, "boot1");
+        try std.testing.expectEqual(
+            account_contract.CatalogState.ready,
+            settled.catalog_state,
+        );
+        try std.testing.expectEqualStrings("1", settled.selected_api_key_id);
+        coordinator.shutdown();
+    }
+
+    // Second boot over the same store: the persisted selection must restore
+    // and the continuation must settle without any user action.
+    {
+        var account_runtime = try account_api.Runtime.init(
+            std.testing.allocator,
+            std.testing.io,
+            std.Thread.getCurrentId(),
+            account_dir,
+            .{ .context = &wake_context, .notify_fn = TestWake.notify },
+        );
+        defer account_runtime.deinit();
+        account_api.TestSupport.overrideTransport(
+            &account_runtime,
+            fake_metask.transport(),
+        );
+        var agent_runtime: agent.Runtime = undefined;
+        var workbench = try workbench_api.Workbench.init(
+            std.testing.allocator,
+            std.testing.io,
+            &agent_runtime,
+            .{
+                .worker_count = 1,
+                .queue_capacity = 1,
+                .max_tasks = 1,
+                .max_runs_per_task = 1,
+                .max_tools_per_run = 1,
+            },
+            .{},
+        );
+        defer workbench.deinit();
+        var coordinator = Coordinator.init(
+            &account_runtime,
+            &workbench,
+            std.Thread.getCurrentId(),
+        );
+        coordinator.start(fake_platform.services());
+        const settled = pumpUntilReady(&coordinator, &account_runtime, "boot2");
+        dumpView("boot2-settled", settled);
+        try std.testing.expectEqual(
+            account_contract.AccountState.authenticated,
+            settled.state,
+        );
+        try std.testing.expectEqual(
+            account_contract.CatalogState.ready,
+            settled.catalog_state,
+        );
+        try std.testing.expectEqualStrings("1", settled.selected_api_key_id);
+        try std.testing.expect(settled.can_create_task);
+
+        // The user's exact gesture: pick a key in settings right after the
+        // relaunch settles.
+        const manual = coordinator.commandSink().submit(.{
+            .select_api_key = .{
+                .selection_id = "2",
+                .expected_catalog_generation = settled.catalog_generation,
+                .expected_execution_generation = settled.execution_generation,
+            },
+        });
+        std.debug.print(
+            "boot2 manual select accepted={} err={s}\n",
+            .{ manual.accepted, @tagName(manual.error_code) },
+        );
+        try std.testing.expect(manual.accepted);
+        const switched = pumpUntilReady(&coordinator, &account_runtime, "boot2-manual");
+        dumpView("boot2-manual-settled", switched);
+        try std.testing.expectEqual(
+            account_contract.CatalogState.ready,
+            switched.catalog_state,
+        );
+        try std.testing.expectEqualStrings("2", switched.selected_api_key_id);
+        coordinator.shutdown();
+    }
+}
+
+test "broken first key parks the catalog and a manual switch recovers" {
+    const TestWake = struct {
+        fn notify(_: *anyopaque) void {}
+    };
+    var wake_context: u8 = 0;
+    const account_dir = if (builtin.os.tag == .windows)
+        "C:\\metawork-account-brokenkey-test"
+    else
+        "/tmp/metawork-account-brokenkey-test";
+    std.Io.Dir.cwd().deleteTree(std.testing.io, account_dir) catch {};
+
+    var fake_metask: FakeMetask = .{
+        .fail_models_bearer_suffix = "0001",
+    };
+    var fake_platform: FakePlatform = .{};
+    fake_platform.seed("stored-refresh-token");
+
+    var account_runtime = try account_api.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        std.Thread.getCurrentId(),
+        account_dir,
+        .{ .context = &wake_context, .notify_fn = TestWake.notify },
+    );
+    defer account_runtime.deinit();
+    account_api.TestSupport.overrideTransport(
+        &account_runtime,
+        fake_metask.transport(),
+    );
+    var agent_runtime: agent.Runtime = undefined;
+    var workbench = try workbench_api.Workbench.init(
+        std.testing.allocator,
+        std.testing.io,
+        &agent_runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 1,
+            .max_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        .{},
+    );
+    defer workbench.deinit();
+    var coordinator = Coordinator.init(
+        &account_runtime,
+        &workbench,
+        std.Thread.getCurrentId(),
+    );
+    coordinator.start(fake_platform.services());
+
+    // The automatic continuation picks key 1 whose model catalog fails.
+    const parked = pumpUntilReady(&coordinator, &account_runtime, "broken");
+    dumpView("broken-settled", parked);
+    try std.testing.expectEqual(
+        account_contract.AccountState.authenticated,
+        parked.state,
+    );
+    try std.testing.expectEqualStrings("models HTTP 500", parked.safe_diagnostic);
+
+    // The user's gesture: choose the second (healthy) key manually.
+    const manual = coordinator.commandSink().submit(.{ .select_api_key = .{
+        .selection_id = "2",
+        .expected_catalog_generation = parked.catalog_generation,
+        .expected_execution_generation = parked.execution_generation,
+    } });
+    std.debug.print(
+        "broken manual select accepted={} err={s}\n",
+        .{ manual.accepted, @tagName(manual.error_code) },
+    );
+    try std.testing.expect(manual.accepted);
+    const recovered = pumpUntilReady(&coordinator, &account_runtime, "recover");
+    dumpView("recover-settled", recovered);
+    try std.testing.expectEqual(
+        account_contract.CatalogState.ready,
+        recovered.catalog_state,
+    );
+    try std.testing.expectEqualStrings("2", recovered.selected_api_key_id);
+    try std.testing.expect(recovered.can_create_task);
+
     coordinator.shutdown();
 }

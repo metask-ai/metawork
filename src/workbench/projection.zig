@@ -90,7 +90,10 @@ pub const Limits = struct {
     max_runs_per_task: usize = 16,
     max_compacts_per_task: usize = 16,
     max_tools_per_run: usize = 32,
-    max_projection_bytes: usize = 512 * 1024,
+    // Must contain the maximum structural projection (every Task/Run/Compact
+    // at capacity, including their eager terminal diagnostics) plus one full
+    // assistant message; the budget test binds this floor exactly.
+    max_projection_bytes: usize = 1536 * 1024,
     max_workspace_bytes: usize = 16 * 1024,
     max_catalog_projection_bytes: usize = 64 * 1024,
     max_scheduled_task_projection_bytes: usize = 256 * 1024,
@@ -16814,7 +16817,7 @@ test "Workbench snapshot budget includes JSON escaping and structural overhead" 
     const worst_case = worstCaseSnapshotBytes(limits).?;
     try std.testing.expect(worst_case <= limits.max_snapshot_bytes);
     try std.testing.expect(worst_case > 1024 * 1024);
-    try std.testing.expectEqual(@as(usize, 512 * 1024), limits.max_projection_bytes);
+    try std.testing.expectEqual(@as(usize, 1536 * 1024), limits.max_projection_bytes);
     try std.testing.expectEqual(@as(usize, 16), limits.max_runs_per_task);
     const single_pending_budget = limits.max_pending_ui_json_bytes * pending_ui_reencode_expansion + pending_ui_snapshot_overhead;
     try std.testing.expect(worst_case >= single_pending_budget * limits.max_pending_ui_requests);

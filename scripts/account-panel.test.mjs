@@ -152,13 +152,15 @@ test("unresolved authenticated catalog opens account setup", () => {
     }),
     true,
   );
+  // Transient loading resolves through the automatic post-login
+  // continuation; redirecting on it flashes settings on every startup.
   assert.equal(
     requiresAccountSetup({
       state: "authenticated",
       catalogState: "loading",
       canCreateTask: false,
     }),
-    true,
+    false,
   );
   assert.equal(
     requiresAccountSetup({

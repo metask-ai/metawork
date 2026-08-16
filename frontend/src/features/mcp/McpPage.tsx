@@ -1095,248 +1095,253 @@ export function McpPage({
                   void createServer();
                 }}
               >
-                <p className="mcp-form-intro">
-                  {t(
-                    drawerState?.kind === "replace"
-                      ? "mcp.edit.intro"
-                      : "mcp.add.intro",
-                  )}
-                </p>
-                <fieldset className="mcp-transport-choice">
-                  <legend>{t("mcp.add.transport")}</legend>
-                  <button
-                    type="button"
-                    data-selected={transport === "stdio"}
-                    disabled={drawerState?.kind === "replace"}
-                    onClick={() => setTransport("stdio")}
-                  >
-                    <Icon name="mcp" />
-                    <span>
-                      <strong>STDIO</strong>
-                      <small>{t("mcp.add.stdio_help")}</small>
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    data-selected={transport === "streamable_http"}
-                    disabled={drawerState?.kind === "replace"}
-                    onClick={() => setTransport("streamable_http")}
-                  >
-                    <Icon name="mcp" />
-                    <span>
-                      <strong>Streamable HTTP</strong>
-                      <small>{t("mcp.add.http_help")}</small>
-                    </span>
-                  </button>
-                </fieldset>
-                <label>
-                  <span>{t("mcp.add.name")}</span>
-                  <Input
-                    autoComplete="off"
-                    value={displayName}
-                    maxLength={256}
-                    disabled={createPending}
-                    onChange={(event) => setDisplayName(event.target.value)}
-                  />
-                </label>
-                <div className="mcp-form-pair">
-                  <label>
-                    <span>{t("mcp.add.protocol")}</span>
-                    <SelectField
-                      value={negotiation}
-                      onValueChange={(value) =>
-                        setNegotiation(value as typeof negotiation)
-                      }
-                      options={[
-                        { value: "automatic", label: "Automatic" },
-                        { value: "modern_only", label: "2026-07-28" },
-                        { value: "compat_only", label: "2025-11-25" },
-                      ]}
-                      aria-label={t("mcp.add.protocol")}
-                    />
-                  </label>
-                  <label>
-                    <span>{t("mcp.add.timeout")}</span>
-                    <Input
-                      inputMode="numeric"
-                      value={timeoutMs}
-                      onChange={(event) => setTimeoutMs(event.target.value)}
-                    />
-                  </label>
-                </div>
-                {transport === "stdio" ? (
-                  <>
-                    <label>
-                      <span>{t("mcp.add.command")}</span>
-                      <Input
-                        autoComplete="off"
-                        value={command}
-                        placeholder="npx"
-                        onChange={(event) => setCommand(event.target.value)}
-                      />
-                    </label>
-                    <McpTextRows
-                      label={t("mcp.add.arguments")}
-                      addLabel={t("mcp.add.argument")}
-                      values={argumentsDraft}
-                      onChange={setArgumentsDraft}
-                    />
-                    <label>
-                      <span>{t("mcp.add.cwd")}</span>
-                      <Input
-                        autoComplete="off"
-                        value={cwd}
-                        onChange={(event) => setCwd(event.target.value)}
-                      />
-                    </label>
-                    <McpTextRows
-                      label={t("mcp.add.environment")}
-                      addLabel={t("mcp.add.environment_name")}
-                      values={environmentNames}
-                      onChange={setEnvironmentNames}
-                    />
-                  </>
-                ) : (
-                  <>
-                    <label>
-                      <span id="mcp-add-endpoint-label">
-                        {t("mcp.add.endpoint")}
+                <div className="mcp-add-fields">
+                  <p className="mcp-form-intro">
+                    {t(
+                      drawerState?.kind === "replace"
+                        ? "mcp.edit.intro"
+                        : "mcp.add.intro",
+                    )}
+                  </p>
+                  <fieldset className="mcp-transport-choice">
+                    <legend>{t("mcp.add.transport")}</legend>
+                    <button
+                      type="button"
+                      data-selected={transport === "stdio"}
+                      disabled={drawerState?.kind === "replace"}
+                      onClick={() => setTransport("stdio")}
+                    >
+                      <Icon name="mcp" />
+                      <span>
+                        <strong>STDIO</strong>
+                        <small>{t("mcp.add.stdio_help")}</small>
                       </span>
-                      <Input
-                        autoComplete="off"
-                        inputMode="url"
-                        placeholder="https://mcp.example.com"
-                        value={endpoint}
-                        maxLength={4096}
-                        disabled={createPending}
-                        aria-labelledby="mcp-add-endpoint-label"
-                        aria-describedby="mcp-add-endpoint-help"
-                        aria-invalid={
-                          endpoint.length > 0 && !validMcpHttpEndpoint(endpoint)
+                    </button>
+                    <button
+                      type="button"
+                      data-selected={transport === "streamable_http"}
+                      disabled={drawerState?.kind === "replace"}
+                      onClick={() => setTransport("streamable_http")}
+                    >
+                      <Icon name="mcp" />
+                      <span>
+                        <strong>Streamable HTTP</strong>
+                        <small>{t("mcp.add.http_help")}</small>
+                      </span>
+                    </button>
+                  </fieldset>
+                  <label>
+                    <span>{t("mcp.add.name")}</span>
+                    <Input
+                      autoComplete="off"
+                      value={displayName}
+                      maxLength={256}
+                      disabled={createPending}
+                      onChange={(event) => setDisplayName(event.target.value)}
+                    />
+                  </label>
+                  <div className="mcp-form-pair">
+                    <label>
+                      <span>{t("mcp.add.protocol")}</span>
+                      <SelectField
+                        value={negotiation}
+                        onValueChange={(value) =>
+                          setNegotiation(value as typeof negotiation)
                         }
-                        onChange={(event) => setEndpoint(event.target.value)}
+                        options={[
+                          { value: "automatic", label: "Automatic" },
+                          { value: "modern_only", label: "2026-07-28" },
+                          { value: "compat_only", label: "2025-11-25" },
+                        ]}
+                        aria-label={t("mcp.add.protocol")}
                       />
-                      <small id="mcp-add-endpoint-help">
-                        {t("mcp.add.endpoint_help")}
-                      </small>
                     </label>
-                    <fieldset className="mcp-auth-choice">
-                      <legend>{t("mcp.add.authentication")}</legend>
-                      {(["none", "static", "oauth"] as const).map((mode) => (
-                        <label key={mode}>
-                          <Input
-                            type="radio"
-                            name="mcp-auth-mode"
-                            checked={authMode === mode}
-                            disabled={
-                              (mode === "oauth" && !capabilities.oauth) ||
-                              (mode === "static" &&
+                    <label>
+                      <span>{t("mcp.add.timeout")}</span>
+                      <Input
+                        inputMode="numeric"
+                        value={timeoutMs}
+                        onChange={(event) => setTimeoutMs(event.target.value)}
+                      />
+                    </label>
+                  </div>
+                  {transport === "stdio" ? (
+                    <>
+                      <label>
+                        <span>{t("mcp.add.command")}</span>
+                        <Input
+                          autoComplete="off"
+                          value={command}
+                          placeholder="npx"
+                          onChange={(event) => setCommand(event.target.value)}
+                        />
+                      </label>
+                      <McpTextRows
+                        label={t("mcp.add.arguments")}
+                        addLabel={t("mcp.add.argument")}
+                        values={argumentsDraft}
+                        onChange={setArgumentsDraft}
+                      />
+                      <label>
+                        <span>{t("mcp.add.cwd")}</span>
+                        <Input
+                          autoComplete="off"
+                          value={cwd}
+                          onChange={(event) => setCwd(event.target.value)}
+                        />
+                      </label>
+                      <McpTextRows
+                        label={t("mcp.add.environment")}
+                        addLabel={t("mcp.add.environment_name")}
+                        values={environmentNames}
+                        onChange={setEnvironmentNames}
+                      />
+                    </>
+                  ) : (
+                    <>
+                      <label>
+                        <span id="mcp-add-endpoint-label">
+                          {t("mcp.add.endpoint")}
+                        </span>
+                        <Input
+                          autoComplete="off"
+                          inputMode="url"
+                          placeholder="https://mcp.example.com"
+                          value={endpoint}
+                          maxLength={4096}
+                          disabled={createPending}
+                          aria-labelledby="mcp-add-endpoint-label"
+                          aria-describedby="mcp-add-endpoint-help"
+                          aria-invalid={
+                            endpoint.length > 0 &&
+                            !validMcpHttpEndpoint(endpoint)
+                          }
+                          onChange={(event) => setEndpoint(event.target.value)}
+                        />
+                        <small id="mcp-add-endpoint-help">
+                          {t("mcp.add.endpoint_help")}
+                        </small>
+                      </label>
+                      <fieldset className="mcp-auth-choice">
+                        <legend>{t("mcp.add.authentication")}</legend>
+                        {(["none", "static", "oauth"] as const).map((mode) => (
+                          <label key={mode}>
+                            <Input
+                              type="radio"
+                              name="mcp-auth-mode"
+                              checked={authMode === mode}
+                              disabled={
+                                (mode === "oauth" && !capabilities.oauth) ||
+                                (mode === "static" &&
+                                  !capabilities.secretCapture &&
+                                  !(
+                                    drawerState?.kind === "replace" &&
+                                    selected?.authMode === "static"
+                                  ))
+                              }
+                              onChange={() => {
+                                setAuthMode(mode);
+                                if (mode !== "static") setHeaderNames([]);
+                              }}
+                            />
+                            <span>
+                              {t(`mcp.auth.${mode}`)}
+                              {mode === "static" &&
                                 !capabilities.secretCapture &&
                                 !(
                                   drawerState?.kind === "replace" &&
                                   selected?.authMode === "static"
-                                ))
-                            }
-                            onChange={() => {
-                              setAuthMode(mode);
-                              if (mode !== "static") setHeaderNames([]);
-                            }}
-                          />
-                          <span>
-                            {t(`mcp.auth.${mode}`)}
-                            {mode === "static" &&
-                              !capabilities.secretCapture &&
-                              !(
-                                drawerState?.kind === "replace" &&
-                                selected?.authMode === "static"
-                              ) && <small>{t("mcp.auth.static_locked")}</small>}
-                          </span>
-                        </label>
-                      ))}
-                    </fieldset>
-                    {authMode === "static" && (
-                      <McpTextRows
-                        label={t("mcp.add.headers")}
-                        addLabel={t("mcp.add.header_name")}
-                        values={headerNames}
-                        onChange={setHeaderNames}
-                      />
-                    )}
-                    {authMode === "oauth" && (
-                      <div className="mcp-oauth-fields">
-                        <label>
-                          <span>{t("mcp.add.registration")}</span>
-                          <SelectField
-                            value={registrationKind}
-                            onValueChange={(value) =>
-                              setRegistrationKind(
-                                value as typeof registrationKind,
-                              )
-                            }
-                            options={[
-                              {
-                                value: "automatic",
-                                label: t("mcp.add.registration.automatic"),
-                              },
-                              {
-                                value: "pre_registered",
-                                label: t("mcp.add.registration.existing"),
-                              },
-                            ]}
-                            aria-label={t("mcp.add.registration")}
-                          />
-                        </label>
-                        {registrationKind === "pre_registered" && (
-                          <>
-                            <label>
-                              <span>{t("mcp.add.client_id")}</span>
-                              <Input
-                                autoComplete="off"
-                                value={clientId}
-                                onChange={(event) =>
-                                  setClientId(event.target.value)
-                                }
-                              />
-                            </label>
-                            <label>
-                              <span>{t("mcp.add.client_auth_method")}</span>
-                              <SelectField
-                                value={tokenEndpointAuthMethod}
-                                onValueChange={(value) =>
-                                  setTokenEndpointAuthMethod(
-                                    value as typeof tokenEndpointAuthMethod,
-                                  )
-                                }
-                                options={[
-                                  {
-                                    value: "none",
-                                    label: t("mcp.client_auth.none"),
-                                  },
-                                  {
-                                    value: "client_secret_basic",
-                                    label: t(
-                                      "mcp.client_auth.client_secret_basic",
-                                    ),
-                                  },
-                                  {
-                                    value: "client_secret_post",
-                                    label: t(
-                                      "mcp.client_auth.client_secret_post",
-                                    ),
-                                  },
-                                ]}
-                                aria-label={t("mcp.add.client_auth_method")}
-                              />
-                            </label>
-                          </>
-                        )}
-                      </div>
-                    )}
-                  </>
-                )}
-                <div className="mcp-add-defaults">
-                  <Icon name="check" />
-                  <p>{t("mcp.add.defaults")}</p>
+                                ) && (
+                                  <small>{t("mcp.auth.static_locked")}</small>
+                                )}
+                            </span>
+                          </label>
+                        ))}
+                      </fieldset>
+                      {authMode === "static" && (
+                        <McpTextRows
+                          label={t("mcp.add.headers")}
+                          addLabel={t("mcp.add.header_name")}
+                          values={headerNames}
+                          onChange={setHeaderNames}
+                        />
+                      )}
+                      {authMode === "oauth" && (
+                        <div className="mcp-oauth-fields">
+                          <label>
+                            <span>{t("mcp.add.registration")}</span>
+                            <SelectField
+                              value={registrationKind}
+                              onValueChange={(value) =>
+                                setRegistrationKind(
+                                  value as typeof registrationKind,
+                                )
+                              }
+                              options={[
+                                {
+                                  value: "automatic",
+                                  label: t("mcp.add.registration.automatic"),
+                                },
+                                {
+                                  value: "pre_registered",
+                                  label: t("mcp.add.registration.existing"),
+                                },
+                              ]}
+                              aria-label={t("mcp.add.registration")}
+                            />
+                          </label>
+                          {registrationKind === "pre_registered" && (
+                            <>
+                              <label>
+                                <span>{t("mcp.add.client_id")}</span>
+                                <Input
+                                  autoComplete="off"
+                                  value={clientId}
+                                  onChange={(event) =>
+                                    setClientId(event.target.value)
+                                  }
+                                />
+                              </label>
+                              <label>
+                                <span>{t("mcp.add.client_auth_method")}</span>
+                                <SelectField
+                                  value={tokenEndpointAuthMethod}
+                                  onValueChange={(value) =>
+                                    setTokenEndpointAuthMethod(
+                                      value as typeof tokenEndpointAuthMethod,
+                                    )
+                                  }
+                                  options={[
+                                    {
+                                      value: "none",
+                                      label: t("mcp.client_auth.none"),
+                                    },
+                                    {
+                                      value: "client_secret_basic",
+                                      label: t(
+                                        "mcp.client_auth.client_secret_basic",
+                                      ),
+                                    },
+                                    {
+                                      value: "client_secret_post",
+                                      label: t(
+                                        "mcp.client_auth.client_secret_post",
+                                      ),
+                                    },
+                                  ]}
+                                  aria-label={t("mcp.add.client_auth_method")}
+                                />
+                              </label>
+                            </>
+                          )}
+                        </div>
+                      )}
+                    </>
+                  )}
+                  <div className="mcp-add-defaults">
+                    <Icon name="check" />
+                    <p>{t("mcp.add.defaults")}</p>
+                  </div>
                 </div>
                 <footer>
                   <Button
