@@ -46,7 +46,7 @@ export function ModelSelector({
       disabled={disabled}
       busy={pending}
       leading={<Icon name="model" />}
-      triggerClassName="composer-model-trigger"
+      triggerClassName="composer-model-trigger w-auto"
       contentClassName="composer-model-menu"
       onValueChange={onSelect}
     />
