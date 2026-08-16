@@ -4,14 +4,21 @@ import test from "node:test";
 import {
   buildAppleDevelopmentRequirement,
   buildCanonicalDesignatedRequirement,
+  buildDeveloperIdRequirement,
   isAppleDevelopmentIdentityName,
+  isDeveloperIdApplicationIdentityName,
+  localPackageMetadata,
   localProductIdentity,
   parseCodeDirectoryIdentifier,
   parseCodeSigningIdentities,
+  parseDeveloperIdCertificateReport,
   parseDesignatedRequirement,
   parseLocalSigningConfig,
   parseNativeProductIdentity,
+  parseNativePackageMetadata,
+  parseNotarySubmission,
   parseTeamIdentifier,
+  selectDistributionCodeSigningIdentity,
   selectLocalCodeSigningIdentity,
   validateCanonicalDesignatedRequirement,
 } from "./macos-local-signing.mjs";
@@ -22,6 +29,7 @@ const secondFingerprint = "FEDCBA9876543210FEDCBA9876543210FEDCBA98";
 const certificateSuffix = "6L6UHLW8L7";
 const teamId = "Z4T2BLNJ8X";
 const identityName = `Apple Development: developer@example.com (${certificateSuffix})`;
+const distributionIdentityName = `Developer ID Application: Developer Name (${teamId})`;
 
 test("local signing reads the existing Native product identity", () => {
   assert.deepEqual(localProductIdentity, {
@@ -38,6 +46,26 @@ test("local signing reads the existing Native product identity", () => {
     () =>
       parseNativeProductIdentity(`.{ .id = "invalid", .name = "bad name" }`),
     /invalid native product identity/u,
+  );
+});
+
+test("distribution archive metadata comes from the Native product manifest", () => {
+  assert.deepEqual(localPackageMetadata, {
+    displayName: "MetaWork",
+    version: "0.1.0",
+  });
+  assert.deepEqual(
+    parseNativePackageMetadata(
+      `.{\n.display_name = "ExampleApp",\n.version = "1.2.3-beta.1",\n}`,
+    ),
+    { displayName: "ExampleApp", version: "1.2.3-beta.1" },
+  );
+  assert.throws(
+    () =>
+      parseNativePackageMetadata(
+        `.{\n.display_name = "bad name",\n.version = "latest",\n}`,
+      ),
+    /invalid native package metadata/u,
   );
 });
 
@@ -87,6 +115,77 @@ test("local signing identity selection rejects self-signed, missing, and ambiguo
     fingerprint,
     name: identityName,
   });
+});
+
+test("distribution signing selects only one Developer ID Application identity", () => {
+  const output = `
+  1) ${fingerprint} "${identityName}"
+  2) ${secondFingerprint} "${distributionIdentityName}"
+     2 valid identities found
+`;
+  assert.equal(
+    isDeveloperIdApplicationIdentityName(distributionIdentityName),
+    true,
+  );
+  assert.deepEqual(selectDistributionCodeSigningIdentity(output), {
+    fingerprint: secondFingerprint,
+    name: distributionIdentityName,
+  });
+  assert.throws(
+    () =>
+      selectDistributionCodeSigningIdentity(
+        `1) ${fingerprint} "${identityName}"`,
+      ),
+    /Developer ID Application.*found 0/u,
+  );
+  assert.throws(
+    () =>
+      selectDistributionCodeSigningIdentity(
+        `${output}\n3) ${fingerprint} "Developer ID Application: Second Developer (${teamId})"`,
+      ),
+    /found 2/u,
+  );
+});
+
+test("Developer ID certificate metadata binds the selected fingerprint and Team ID", () => {
+  assert.deepEqual(
+    parseDeveloperIdCertificateReport(
+      `sha1 Fingerprint=01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67\nsubject=CN=${distributionIdentityName},OU=${teamId},O=Developer Name,C=US\n`,
+    ),
+    { fingerprint, teamId },
+  );
+  assert.throws(
+    () => parseDeveloperIdCertificateReport("subject=CN=missing metadata"),
+    /did not contain/u,
+  );
+});
+
+test("notary submission parser accepts only a typed terminal result", () => {
+  const id = "12345678-1234-4abc-8def-1234567890ab";
+  assert.deepEqual(
+    parseNotarySubmission(
+      JSON.stringify({
+        id,
+        message: "Processing complete",
+        status: "Accepted",
+      }),
+    ),
+    { id, status: "Accepted" },
+  );
+  assert.deepEqual(
+    parseNotarySubmission(JSON.stringify({ id, status: "Invalid" })),
+    { id, status: "Invalid" },
+  );
+  assert.throws(() => parseNotarySubmission("not json"), /not valid JSON/u);
+  assert.throws(
+    () =>
+      parseNotarySubmission(JSON.stringify({ id: "bad", status: "Accepted" })),
+    /invalid shape/u,
+  );
+  assert.throws(
+    () => parseNotarySubmission(JSON.stringify({ id, status: "Unknown" })),
+    /invalid shape/u,
+  );
 });
 
 test("local signing selection config has one strict schema", () => {
@@ -217,6 +316,26 @@ test("Apple Development verification policy binds identifier, Apple anchor, Team
       identityName,
     ),
     `designated => identifier "${localProductIdentity.bundleId}" and anchor apple generic and certificate leaf[subject.OU] = ${teamId} and certificate leaf[subject.CN] = "${identityName}"`,
+  );
+});
+
+test("Developer ID verification policy binds identifier, Apple anchor, Team, and certificate", () => {
+  assert.equal(
+    buildDeveloperIdRequirement(
+      localProductIdentity.bundleId,
+      teamId,
+      distributionIdentityName,
+    ),
+    `identifier "${localProductIdentity.bundleId}" and anchor apple generic and certificate leaf[subject.OU] = ${teamId} and certificate leaf[subject.CN] = "${distributionIdentityName}"`,
+  );
+  assert.throws(
+    () =>
+      buildDeveloperIdRequirement(
+        localProductIdentity.bundleId,
+        teamId,
+        identityName,
+      ),
+    /invalid identity metadata/u,
   );
 });
 

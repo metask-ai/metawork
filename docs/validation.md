@@ -83,7 +83,7 @@ Automatic Workspace 的正式 Zig graph 持续固定 Native SDK `.data/workspace
 
 ### macOS
 
-首次使用真实 Account 前，按 [macOS 本地开发签名](macos-local-development.md)选择 Apple Development identity：
+首次使用真实 Account 前，按 [macOS 开发与内部测试签名](macos-local-development.md)选择 Apple Development identity：
 
 ```bash
 node scripts/setup-macos-local-signing.mjs setup
@@ -95,7 +95,7 @@ npm run build:release
 npm run package:macos
 ```
 
-`package:macos` 必须验证精确 Bundle ID `com.metask.metawork.dev`、产品版本、Apple-issued `TeamIdentifier` 与显式 canonical designated requirement，并由系统 requirement engine 独立复核 identifier、Apple anchor、Team 与所选 Apple Development certificate。架构回归必须证明各平台产品 Bundle ID 只来自 `app.zon`，macOS 使用 `MetaWork Dev`、Account credential service `com.metask.metawork.dev.account` 与独立 MCP credential service `com.metask.metawork.dev.mcp`，Account store 独立拥有 `manifest.json` schema 1；Windows 使用同一产品 Bundle ID，但保持原 `MetaWork` 数据根目录、Credential Manager 与无版本 `account.json`。普通 check/test/build 不访问个人证书；`npm run dev` 和 `package:macos` 才使用本机选择；Account-owned legacy cleanup 只能由开发者显式执行。
+`package:macos` 只接受登录钥匙串中唯一有效的 Developer ID Application identity，必须从证书 subject 读取并验证 Team ID，不得从显示名称猜测或回退到 Apple Development、自签名或 ad-hoc identity。产物必须验证精确 Bundle ID `com.metask.metawork.dev`、产品版本、Renderer 资源、Developer ID leaf authority、Apple-issued `TeamIdentifier`、Apple anchor、hardened runtime 与可信时间戳；随后只通过钥匙串 `metawork-notary` profile 提交保留 macOS bundle 属性的临时 ZIP，等待 Apple 返回 typed `Accepted`，再 staple/validate 原 `.app`、通过 Gatekeeper `Notarized Developer ID` assessment、重新生成版本化 arm64 分发 ZIP 并输出 SHA-256。任一步失败都不得发布旧 ZIP、未 stapled app 或部分结果。该入口不等同于安装器或更新能力。`npm run dev` 继续使用项目显式选择的 Apple Development identity 和 canonical designated requirement。架构回归必须证明各平台产品 Bundle ID 只来自 `app.zon`，macOS 使用 `MetaWork Dev`、Account credential service `com.metask.metawork.dev.account` 与独立 MCP credential service `com.metask.metawork.dev.mcp`，Account store 独立拥有 `manifest.json` schema 1；Windows 使用同一产品 Bundle ID，但保持原 `MetaWork` 数据根目录、Credential Manager 与无版本 `account.json`。普通 check/test/build 不访问个人证书或 notary profile；只有 `npm run dev` 和 `package:macos` 分别访问其职责所需的本机 identity/credential；Account-owned legacy cleanup 只能由开发者显式执行。
 
 Keychain 跨重建授权稳定性属于真实系统 UI 行为，不能由 `codesign` 或 package success 替代。当前状态为 **人工验收待完成**；验收必须在同一精确 commit 上依次完成：启动当前签名的 Debug app 并让 Account 写入/读取 `com.metask.metawork.dev.account`，完全退出，重新执行 `npm run dev` 产生并启动新构建，再次恢复 Account，并确认没有出现新的 Account Keychain 授权框。首次选择 Apple Development private key 时由 `/usr/bin/codesign` 触发的签名授权不属于 Account Keychain 失败。完成前不得把“签名验证通过”升级成“跨重建 Keychain 授权已验证”。
 

@@ -6,8 +6,8 @@ import path from "node:path";
 
 import {
   localProductIdentity,
-  resolveIdentity,
-  verifyStableSignature,
+  resolveDistributionIdentity,
+  verifyDeveloperIdSignature,
 } from "./macos-local-signing.mjs";
 
 const repositoryRoot = path.resolve(
@@ -97,17 +97,16 @@ for (const [key, expected] of expectedMetadata) {
   }
 }
 
-const identity = resolveIdentity();
-const signature = verifyStableSignature(
+const identity = resolveDistributionIdentity();
+const signature = verifyDeveloperIdSignature(
   appRoot,
+  identity,
   localProductIdentity.bundleId,
   {
     deep: true,
-    expectedIdentityName: identity.name,
-    expectedTeamId: identity.teamId,
   },
 );
 
 console.log(
-  `verified macOS package executable, metadata, stable requirement, and ${sourceFiles.length} exact Renderer assets (${signature.requirement})`,
+  `verified macOS package executable, metadata, Developer ID signature, trusted timestamp, hardened runtime, and ${sourceFiles.length} exact Renderer assets (${signature.policy})`,
 );
