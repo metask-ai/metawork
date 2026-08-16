@@ -1,5 +1,12 @@
 import { createServer } from "node:http";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -11,14 +18,21 @@ import {
 } from "./agentcore-bundle.mjs";
 import { runChild } from "./run-child-process.mjs";
 
-const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const repositoryRoot = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+);
 const [mode] = process.argv.slice(2);
 if (process.argv.length > 3 || (mode !== undefined && mode !== "--staged"))
-  throw new Error("usage: node scripts/run-agentcore-abort-timing-probe.mjs [--staged]");
-const bundleRoot = mode === "--staged"
-  ? path.join(repositoryRoot, ".agentcore", "bundle")
-  : process.env.AGENTCORE_BUNDLE_ROOT;
-if (!bundleRoot) throw new Error("AGENTCORE_BUNDLE_ROOT is required for the candidate probe");
+  throw new Error(
+    "usage: node scripts/run-agentcore-abort-timing-probe.mjs [--staged]",
+  );
+const bundleRoot =
+  mode === "--staged"
+    ? path.join(repositoryRoot, ".agentcore", "bundle")
+    : process.env.AGENTCORE_BUNDLE_ROOT;
+if (!bundleRoot)
+  throw new Error("AGENTCORE_BUNDLE_ROOT is required for the candidate probe");
 
 const targetId = await readAgentCoreBundleTargetId(bundleRoot);
 const lock = await loadLockedAgentCoreManifest(repositoryRoot, targetId);
@@ -30,13 +44,31 @@ if (process.platform !== "win32" || process.arch !== "x64")
   throw new Error("abort timing probe requires Windows x64");
 
 const events = [
-  { type: "message_start", message: { id: "abort-timing-probe", role: "assistant", model: "abort-probe-model", usage: { input_tokens: 1, output_tokens: 1 } } },
-  { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+  {
+    type: "message_start",
+    message: {
+      id: "abort-timing-probe",
+      role: "assistant",
+      model: "abort-probe-model",
+      usage: { input_tokens: 1, output_tokens: 1 },
+    },
+  },
+  {
+    type: "content_block_start",
+    index: 0,
+    content_block: { type: "text", text: "" },
+  },
   ...Array.from({ length: 20 }, (_, index) => ({
-    type: "content_block_delta", index: 0, delta: { type: "text_delta", text: `slow chunk ${index} ` },
+    type: "content_block_delta",
+    index: 0,
+    delta: { type: "text_delta", text: `slow chunk ${index} ` },
   })),
   { type: "content_block_stop", index: 0 },
-  { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 20 } },
+  {
+    type: "message_delta",
+    delta: { stop_reason: "end_turn" },
+    usage: { output_tokens: 20 },
+  },
   { type: "message_stop" },
 ].map((event) => `data: ${JSON.stringify(event)}\n\n`);
 
@@ -46,18 +78,28 @@ const server = createServer((request, response) => {
   request.on("end", () => {
     try {
       if (request.method !== "POST" || request.url !== "/v1/messages")
-        throw new Error(`unexpected provider route: ${request.method} ${request.url}`);
+        throw new Error(
+          `unexpected provider route: ${request.method} ${request.url}`,
+        );
       if (request.headers.authorization !== "Bearer abort-probe-key")
         throw new Error("probe credential did not reach AgentCore");
       const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
       if (payload.model !== "abort-probe-model")
         throw new Error(`unexpected model ${payload.model}`);
-      response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "close" });
+      response.writeHead(200, {
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache",
+        connection: "close",
+      });
       // Stream deltas slowly so session_abort lands mid-run with events still
       // in flight; keep streaming briefly past the abort window.
       let index = 0;
       const timer = setInterval(() => {
-        if (index >= events.length) { clearInterval(timer); response.end(); return; }
+        if (index >= events.length) {
+          clearInterval(timer);
+          response.end();
+          return;
+        }
         response.write(events[index]);
         index += 1;
       }, 40);
@@ -69,16 +111,22 @@ const server = createServer((request, response) => {
   });
 });
 
-const scratch = await mkdtemp(path.join(tmpdir(), "metawork-agentcore-abort-timing-probe-"));
+const scratch = await mkdtemp(
+  path.join(tmpdir(), "metawork-agentcore-abort-timing-probe-"),
+);
 try {
   const address = await new Promise((resolve, reject) => {
     server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => resolve(`http://127.0.0.1:${server.address().port}/v1/messages`));
+    server.listen(0, "127.0.0.1", () =>
+      resolve(`http://127.0.0.1:${server.address().port}/v1/messages`),
+    );
   });
   const consumerRoot = path.join(scratch, "zig-consumer");
   await mkdir(consumerRoot);
   await symlink(bundle.root, path.join(consumerRoot, "bundle"), "junction");
-  await writeFile(path.join(consumerRoot, "build.zig.zon"), `.{
+  await writeFile(
+    path.join(consumerRoot, "build.zig.zon"),
+    `.{
     .name = .agentcore_abort_timing_probe,
     .fingerprint = 0xfcabccf405df8145,
     .version = "0.0.0",
@@ -86,8 +134,11 @@ try {
     .dependencies = .{ .agentcore = .{ .path = "bundle/bindings/zig" } },
     .paths = .{ "build.zig", "build.zig.zon", "main.zig", "bundle" },
 }
-`);
-  await writeFile(path.join(consumerRoot, "build.zig"), `const std = @import("std");
+`,
+  );
+  await writeFile(
+    path.join(consumerRoot, "build.zig"),
+    `const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -98,14 +149,38 @@ pub fn build(b: *std.Build) void {
     const run = b.addRunArtifact(executable);
     b.step("run", "Probe AgentCore model mutation boundaries").dependOn(&run.step);
 }
-`);
-  const source = await readFile(path.join(repositoryRoot, "scripts", "probes", "agentcore-abort-timing-probe.zig"), "utf8");
-  await writeFile(path.join(consumerRoot, "main.zig"), source.replaceAll("__BASE_URL__", address));
-  await runChild("zig", [
-    "build", "--cache-dir", path.join(scratch, "sdk-cache"), "--prefix", path.join(scratch, "sdk-out"),
-    "run", `-Dtarget=${bundle.target}`, "-Doptimize=Debug",
-  ], { cwd: consumerRoot, label: "isolated AgentCore model mutation probe" });
-  console.log(`AgentCore abort timing probe completed: ${bundle.manifest.version} ABI ${bundle.manifest.contract.binary_abi_version} revision ${bundle.manifest.contract.binary_abi_revision}`);
+`,
+  );
+  const source = await readFile(
+    path.join(
+      repositoryRoot,
+      "scripts",
+      "probes",
+      "agentcore-abort-timing-probe.zig",
+    ),
+    "utf8",
+  );
+  await writeFile(
+    path.join(consumerRoot, "main.zig"),
+    source.replaceAll("__BASE_URL__", address),
+  );
+  await runChild(
+    "zig",
+    [
+      "build",
+      "--cache-dir",
+      path.join(scratch, "sdk-cache"),
+      "--prefix",
+      path.join(scratch, "sdk-out"),
+      "run",
+      `-Dtarget=${bundle.target}`,
+      "-Doptimize=Debug",
+    ],
+    { cwd: consumerRoot, label: "isolated AgentCore model mutation probe" },
+  );
+  console.log(
+    `AgentCore abort timing probe completed: ${bundle.manifest.version} ABI ${bundle.manifest.contract.binary_abi_version} revision ${bundle.manifest.contract.binary_abi_revision}`,
+  );
 } finally {
   await new Promise((resolve) => server.close(resolve));
   await rm(scratch, { recursive: true, force: true });

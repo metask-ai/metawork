@@ -675,7 +675,8 @@ pub const Account = struct {
                 u8,
                 next.pending_api_key_id.view(),
                 next.selected_api_key_id.view(),
-            )) {
+            ))
+        {
             next.selected_model.set(model) catch
                 return .{ .rejected = .invalid_command };
             next.operation = .none;

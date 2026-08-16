@@ -40,5 +40,5 @@ content. `frontend-boundaries` enforces this.
 - `SearchField` — framed search input; container owns the frame and focus
   formula, consumers size it through `className` utilities.
 - `Alert` — inline status surface with `variant="neutral" | "warning" |
-  "danger"`; the variant owns tone surface/border/content, consumers own
+"danger"`; the variant owns tone surface/border/content, consumers own
   layout.

@@ -19,7 +19,6 @@ export function requiresAccountSetup(
   return (
     account.state === "authenticated" &&
     !account.canCreateTask &&
-    (account.catalogState === "choosing" ||
-      account.catalogState === "failed")
+    (account.catalogState === "choosing" || account.catalogState === "failed")
   );
 }

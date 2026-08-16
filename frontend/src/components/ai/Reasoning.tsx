@@ -25,9 +25,7 @@ export function Reasoning({
   onOpenChange?: (open: boolean) => void;
   children: ReactNode;
 }) {
-  const [internalOpen, setInternalOpen] = useState(
-    defaultOpen ?? isStreaming,
-  );
+  const [internalOpen, setInternalOpen] = useState(defaultOpen ?? isStreaming);
   const isControlled = open !== undefined;
   const resolvedOpen = isControlled ? open : internalOpen;
   const hasStreamed = useRef(isStreaming);

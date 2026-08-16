@@ -1,4 +1,9 @@
-import type { ComponentProps, FormHTMLAttributes, HTMLAttributes, ReactNode } from "react";
+import type {
+  ComponentProps,
+  FormHTMLAttributes,
+  HTMLAttributes,
+  ReactNode,
+} from "react";
 
 import { Button, type ButtonProps } from "../ui/button.tsx";
 import { Textarea } from "../ui/textarea.tsx";
@@ -20,7 +25,12 @@ export function PromptInputTextarea({
   className,
   ...props
 }: ComponentProps<typeof Textarea>) {
-  return <Textarea className={cn("ai-prompt-input-textarea", className)} {...props} />;
+  return (
+    <Textarea
+      className={cn("ai-prompt-input-textarea", className)}
+      {...props}
+    />
+  );
 }
 
 export function PromptInputFooter({

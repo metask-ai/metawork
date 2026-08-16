@@ -286,7 +286,8 @@ export const enUS = {
   "mcp.pipeline.test_connected": "Connected · {tools} tools",
   "mcp.pipeline.test_failed": "Connection failed · {issues} issues",
   "mcp.pipeline.tools": "{allowed}/{total} tools allowed",
-  "mcp.pipeline.restart_hint": "After restarting, new tasks can use this connection; existing tasks are unaffected",
+  "mcp.pipeline.restart_hint":
+    "After restarting, new tasks can use this connection; existing tasks are unaffected",
   "mcp.detail.allow_all": "Allow all {count}",
   "mcp.confirm.allow_all.title": "Allow every discovered tool?",
   "mcp.confirm.allow_all.body":

@@ -15,6 +15,12 @@ export const Switch = {
     />
   ),
   Thumb: ({ className, ...props }: ComponentProps<typeof BaseSwitch.Thumb>) => (
-    <BaseSwitch.Thumb className={cn("size-4 rounded-full bg-(--ui-control-thumb) transition-transform data-checked:translate-x-4", className)} {...props} />
+    <BaseSwitch.Thumb
+      className={cn(
+        "size-4 rounded-full bg-(--ui-control-thumb) transition-transform data-checked:translate-x-4",
+        className,
+      )}
+      {...props}
+    />
   ),
 };

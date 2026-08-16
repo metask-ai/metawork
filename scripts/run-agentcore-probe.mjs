@@ -93,7 +93,12 @@ pub fn build(b: *std.Build) void {
   await writeFile(
     path.join(zigConsumerRoot, "main.zig"),
     await readFile(
-      path.join(repositoryRoot, "scripts", "probes", "agentcore-restore-probe.zig"),
+      path.join(
+        repositoryRoot,
+        "scripts",
+        "probes",
+        "agentcore-restore-probe.zig",
+      ),
       "utf8",
     ),
   );
