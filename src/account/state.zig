@@ -236,6 +236,16 @@ pub const Account = struct {
         return self.state.attempt_kind == .catalog;
     }
 
+    /// True while a catalog attempt is loading models for a selected key.
+    /// A failure here parks back in choosing with the loaded key list kept
+    /// (see prepareFailure), so the owner must also keep the session that
+    /// holds those keys' secrets — resetting it would make every re-pick
+    /// dispatch a model load that cannot resolve its key.
+    pub fn catalogModelsLoadInFlight(self: *const Account) bool {
+        return self.state.attempt_kind == .catalog and
+            self.state.operation == .loading_models;
+    }
+
     pub fn credentialValidationInFlight(self: *const Account) bool {
         return self.state.attempt_kind == .login or
             self.state.attempt_kind == .refresh_token;
@@ -934,15 +944,17 @@ pub const Account = struct {
             WorkerFailure.fromCode(.dependency_contract_invalid)
         else
             failure;
-        // A key with an empty model catalog is a durable fact about that key,
-        // not a catalog-transaction failure. Tearing the transaction down
-        // would discard the successfully loaded key list and leave retry
-        // deterministically re-selecting the same key: a bricked account
-        // whose only exit is logout. Park back in choosing instead, with the
-        // key list intact and the error surfaced, so the user re-picks.
+        // A model-catalog failure — empty catalog, quota exhaustion, server
+        // error — is a fact about the selected key, not about the catalog
+        // transaction: the model request authenticates with the API Key
+        // itself, so its failure never invalidates the session. Tearing the
+        // transaction down would discard the successfully loaded key list,
+        // and with automatic first-key selection every retry deterministically
+        // re-selects the same broken key: a bricked account whose only exit
+        // is logout. Park back in choosing instead, with the key list intact
+        // and the error surfaced, so the user re-picks.
         if (self.state.attempt_kind == .catalog and
-            self.state.operation == .loading_models and
-            normalized_failure.error_code == .no_models)
+            self.state.operation == .loading_models)
         {
             var parked = self.state;
             parked.pending_api_key_id.clear();
@@ -1888,6 +1900,102 @@ test "empty model catalog parks back in choosing with the key list intact" {
     // reopens when the user completes the re-pick. The point of parking is
     // that the re-pick is possible at all.
     try std.testing.expect(!view.can_create_task);
+
+    // Re-picking a key continues inside the same parked transaction.
+    var reselect = switch (account.prepareCommand(.{
+        .select_api_key = testSelection("key-good"),
+    })) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(reselect.takeEffect() != null);
+    commitPrepared(&account, &reselect);
+    try std.testing.expectEqual(
+        contract.CatalogState.loading,
+        account.view().catalog_state,
+    );
+}
+
+test "model catalog service failure parks back in choosing the same way" {
+    var account = Account.initSignedOutForTest();
+    var login = switch (account.prepareCommand(.begin_login)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    _ = login.takeEffect();
+    commitPrepared(&account, &login);
+    var authorized: WorkerCompletion = .{
+        .attempt_id = account.activeAttempt().?,
+        .payload = .tokens_persisted,
+    };
+    var tokens = switch (account.prepareCompletion(&authorized)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    _ = tokens.takeEffect();
+    commitPrepared(&account, &tokens);
+    var identity: WorkerCompletion = .{
+        .attempt_id = account.activeAttempt().?,
+        .payload = .{ .identity_loaded = try .init(
+            "account-1",
+            "Metask User",
+        ) },
+    };
+    var identified = switch (account.prepareCompletion(&identity)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    _ = identified.takeEffect();
+    commitPrepared(&account, &identified);
+    var begin_catalog = switch (account.prepareCommand(.refresh_catalog)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    _ = begin_catalog.takeEffect();
+    commitPrepared(&account, &begin_catalog);
+    var keys: WorkerCompletion = .{
+        .attempt_id = account.activeAttempt().?,
+        .payload = .api_keys_loaded,
+    };
+    var keys_ready = switch (account.prepareCompletion(&keys)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    commitPrepared(&account, &keys_ready);
+    var select_key = switch (account.prepareCommand(.{
+        .select_api_key = testSelection("key-broken"),
+    })) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    _ = select_key.takeEffect();
+    commitPrepared(&account, &select_key);
+
+    // First setup, automatic continuation: the first key's model catalog
+    // answers with a server failure (quota-exhausted backend). The key list
+    // must survive so the user can re-pick a healthy key; tearing down here
+    // leaves an empty selector that rejects every selection.
+    var failure: WorkerCompletion = .{
+        .attempt_id = account.activeAttempt().?,
+        .payload = .{ .failed = .fromCode(.metask_service_unavailable) },
+    };
+    var parked = switch (account.prepareCompletion(&failure)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(parked.takeEffect() == null);
+    commitPrepared(&account, &parked);
+
+    const view = account.view();
+    try std.testing.expectEqual(
+        contract.CatalogState.choosing,
+        view.catalog_state,
+    );
+    try std.testing.expectEqual(
+        contract.ErrorCode.metask_service_unavailable,
+        view.error_code,
+    );
+    try std.testing.expect(account.activeAttempt() != null);
 
     // Re-picking a key continues inside the same parked transaction.
     var reselect = switch (account.prepareCommand(.{

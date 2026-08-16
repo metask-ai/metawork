@@ -296,7 +296,10 @@ pub const NetworkAttempt = struct {
                     self.identity.?,
                     control,
                 ) catch |err| {
-                    self.publishFailure(catalog.errorCode(err));
+                    self.publishCatalogFailure(
+                        "keys",
+                        catalog.errorCode(err),
+                    );
                     return;
                 };
                 self.publishCompletion(.api_keys_loaded);
@@ -308,7 +311,10 @@ pub const NetworkAttempt = struct {
                     self.transport,
                     control,
                 ) catch |err| {
-                    self.publishFailure(catalog.errorCode(err));
+                    self.publishCatalogFailure(
+                        "models",
+                        catalog.errorCode(err),
+                    );
                     return;
                 };
                 self.publishCompletion(.models_loaded);
@@ -332,6 +338,26 @@ pub const NetworkAttempt = struct {
         error_code: contract.ErrorCode,
     ) void {
         self.publishCompletion(.{ .failed = .fromCode(error_code) });
+    }
+
+    /// Catalog failures carry the request name and HTTP status so a refused
+    /// key or endpoint is diagnosable from the banner instead of a guess.
+    fn publishCatalogFailure(
+        self: *NetworkAttempt,
+        request_name: []const u8,
+        error_code: contract.ErrorCode,
+    ) void {
+        const status = self.catalog_session.?.last_http_status;
+        if (status == 0) return self.publishFailure(error_code);
+        var buffer: [64]u8 = undefined;
+        const text = std.fmt.bufPrint(
+            &buffer,
+            "{s} HTTP {d}",
+            .{ request_name, status },
+        ) catch return self.publishFailure(error_code);
+        const failure = state.WorkerFailure.init(error_code, text) catch
+            return self.publishFailure(error_code);
+        self.publishCompletion(.{ .failed = failure });
     }
 };
 

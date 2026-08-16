@@ -92,6 +92,10 @@ const Effects = struct {
     io: std.Io,
     wake: WakeSink,
     transport: metask_client.StdHttpTransport,
+    /// Test-only network seam: reproduction tests script Metask responses
+    /// through the same single-flight worker path production uses.
+    test_transport: if (builtin.is_test) ?metask_client.Transport else void =
+        if (builtin.is_test) null else {},
     queue: EffectQueue = .{},
     catalog: catalog_impl.CatalogSession,
     public_catalog: catalog_impl.PublicCatalog = .{},
@@ -117,6 +121,9 @@ const Effects = struct {
     }
 
     fn clientTransport(self: *Effects) metask_client.Transport {
+        if (builtin.is_test) {
+            if (self.test_transport) |value| return value;
+        }
         return self.transport.transport();
     }
 
@@ -878,7 +885,13 @@ pub const Runtime = struct {
                 ) },
             };
         }
-        if (catalog_attempt and completion.payload == .failed)
+        // A models-load failure parks the transaction in choosing with the
+        // key list kept (state prepareFailure); the session holding those
+        // keys' secrets must survive with it, or every re-pick dispatches a
+        // model load that cannot resolve its key. Only a torn-down catalog
+        // attempt resets the session.
+        if (catalog_attempt and completion.payload == .failed and
+            !self.account.catalogModelsLoadInFlight())
             self.effects.catalog.reset();
 
         if (completion.payload == .failed and
@@ -1492,6 +1505,13 @@ pub const TestSupport = if (builtin.is_test) struct {
             "key-1",
             execution,
         ) };
+    }
+
+    pub fn overrideTransport(
+        runtime: *Runtime,
+        transport: metask_client.Transport,
+    ) void {
+        runtime.effects.test_transport = transport;
     }
 
     pub fn occupyEffectQueue(runtime: *Runtime) void {

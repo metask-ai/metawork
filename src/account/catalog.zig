@@ -154,6 +154,10 @@ pub const CatalogSession = struct {
     models: std.ArrayList(ModelEntry) = .empty,
     selected_key_index: ?usize = null,
     owner_account_id: AccountId = .{},
+    /// HTTP status of the most recent catalog request, 0 before any request
+    /// or after a transport-level failure. Owned by the single in-flight
+    /// worker; read by the same worker to build the failure diagnostic.
+    last_http_status: u16 = 0,
 
     pub fn init(allocator: std.mem.Allocator) CatalogSession {
         return .{ .allocator = allocator };
@@ -178,11 +182,13 @@ pub const CatalogSession = struct {
         control: ?metask.RequestControl,
     ) Error!void {
         const validated_account_id = try AccountId.init(account_id);
+        self.last_http_status = 0;
         var replacement = try fetchApiKeys(
             self.allocator,
             transport,
             oauth_access_token,
             control,
+            &self.last_http_status,
         );
         errdefer replacement.deinit();
         self.clearApiKeys();
@@ -234,11 +240,13 @@ pub const CatalogSession = struct {
     ) Error!void {
         const credential = self.api_keys.items[index].secret.view();
         if (credential.len == 0) return error.ApiKeyNotFound;
+        self.last_http_status = 0;
         var replacement = try fetchModels(
             self.allocator,
             transport,
             credential,
             control,
+            &self.last_http_status,
         );
         errdefer replacement.deinit();
         self.models.deinit(self.allocator);
@@ -646,6 +654,7 @@ fn fetchApiKeys(
     transport: metask.Transport,
     oauth_access_token: []const u8,
     control: ?metask.RequestControl,
+    status_out: *u16,
 ) Error!ParsedApiKeys {
     const response_buffer = allocator.alloc(
         u8,
@@ -660,6 +669,7 @@ fn fetchApiKeys(
         .bearer = oauth_access_token,
         .control = control,
     }, response_buffer) catch |err| return transportError(err);
+    status_out.* = response.status;
     try requireSuccess(response.status);
     return parseApiKeys(allocator, response.body);
 }
@@ -669,6 +679,7 @@ fn fetchModels(
     transport: metask.Transport,
     api_key: []const u8,
     control: ?metask.RequestControl,
+    status_out: *u16,
 ) Error!ParsedModels {
     const response_buffer = allocator.alloc(
         u8,
@@ -683,6 +694,7 @@ fn fetchModels(
         .bearer = api_key,
         .control = control,
     }, response_buffer) catch |err| return transportError(err);
+    status_out.* = response.status;
     try requireSuccess(response.status);
     return parseModels(allocator, response.body);
 }
