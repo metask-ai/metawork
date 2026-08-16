@@ -3680,6 +3680,16 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   flex-direction: column;
   flex: 1;
   min-height: 0;
+}
+
+/* The scroll region is separate from the pinned footer: fields scroll here,
+ * the footer below stays a static flex row of the drawer column, so passing
+ * content can never show around it. */
+.mcp-add-fields {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
   padding: 20px;
   overflow: hidden auto;
   scrollbar-gutter: stable;
@@ -3954,14 +3964,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .mcp-add-form > footer {
-  /* Anchored to the drawer's visual bottom in both regimes: flex auto
-   * margin when content is short, sticky when it scrolls. Full-bleed over
-   * the container padding so scrolled fields pass beneath, not through. */
-  position: sticky;
-  bottom: 0;
-  z-index: 1;
   padding: 18px 20px 20px;
-  margin: auto -20px -20px;
   justify-content: flex-end;
   gap: 8px;
   border-top: 1px solid var(--ui-border);
