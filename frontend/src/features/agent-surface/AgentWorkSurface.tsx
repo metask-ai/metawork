@@ -340,17 +340,10 @@ export function AgentWorkSurface({
                             {renderUiRecord(activity.value)}
                           </Fragment>
                         );
-                      const pending = activity.value;
-                      return task ? (
-                        <Fragment key={`ui:${pending.requestId}`}>
-                          {renderPendingUi({
-                            taskId: task.id,
-                            pending,
-                            busy: responseDisabled,
-                            respond: onRespond,
-                          })}
-                        </Fragment>
-                      ) : null;
+                      // A pending request is the current wait state, not
+                      // history: it renders after the streamed text below,
+                      // at the position the user is actually reading.
+                      return null;
                     })}
                     {run.assistant && (
                       <div className="run-delivery">
@@ -373,6 +366,19 @@ export function AgentWorkSurface({
                         )}
                       </div>
                     )}
+                    {task &&
+                      run.activities.map((activity) =>
+                        activity.kind === "pending_ui" ? (
+                          <Fragment key={`ui:${activity.value.requestId}`}>
+                            {renderPendingUi({
+                              taskId: task.id,
+                              pending: activity.value,
+                              busy: responseDisabled,
+                              respond: onRespond,
+                            })}
+                          </Fragment>
+                        ) : null,
+                      )}
                     {!run.assistant &&
                       !isNonTerminalRun(run.phase) &&
                       run.outcome !== "failed" &&
