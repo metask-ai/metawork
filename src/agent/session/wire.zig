@@ -196,7 +196,7 @@ test "AgentCore JSON callbacks reject invalid UTF-8 at the ownership boundary" {
     );
 
     const invalid_ui =
-        "{\"ask_question\":[{\"question\":[203],\"header\":\"Choice\",\"multi\":false,\"options\":[]}]}}";
+        "{\"ask_question\":[{\"question\":[203],\"header\":\"Choice\",\"multi\":false,\"options\":[]}]}";
     try std.testing.expectError(
         error.InvalidPayload,
         decodeUiRequest(std.testing.allocator, invalid_ui),
