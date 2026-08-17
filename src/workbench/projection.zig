@@ -135,6 +135,7 @@ const automatic_title_max_codepoints: usize = 32;
 pub const Provider = enum {
     anthropic,
     openai,
+    gemini,
 };
 
 pub const TaskWorkspaceTrust = union(enum) {
@@ -13237,6 +13238,7 @@ fn agentProvider(provider: Provider) lifecycle.ProviderKind {
     return switch (provider) {
         .anthropic => .anthropic,
         .openai => .openai,
+        .gemini => .gemini,
     };
 }
 
@@ -13244,6 +13246,7 @@ fn accountProviderKind(provider: Provider) account_contract.ProviderKind {
     return switch (provider) {
         .anthropic => .anthropic,
         .openai => .openai,
+        .gemini => .gemini,
     };
 }
 
@@ -13253,6 +13256,7 @@ fn accountProvider(
     return switch (provider) {
         .anthropic => .anthropic,
         .openai => .openai,
+        .gemini => .gemini,
     };
 }
 
@@ -13260,6 +13264,7 @@ fn scheduledProvider(provider: Provider) scheduled_tasks_impl.Provider {
     return switch (provider) {
         .anthropic => .anthropic,
         .openai => .openai,
+        .gemini => .gemini,
     };
 }
 

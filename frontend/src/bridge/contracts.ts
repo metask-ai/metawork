@@ -37,7 +37,7 @@ export type AccountErrorCode =
   | "local_resource_exhausted"
   | "dependency_contract_invalid";
 
-export type Provider = "anthropic" | "openai";
+export type Provider = "anthropic" | "openai" | "gemini";
 
 export type AccountView = {
   state: AccountState;

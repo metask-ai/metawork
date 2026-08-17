@@ -36,12 +36,15 @@ pub const CatalogState = enum {
 pub const ProviderKind = enum {
     anthropic,
     openai,
+    gemini,
 };
 
 pub const metask_anthropic_messages_url =
     "https://napi.metask-ai.com/v1/messages";
 pub const metask_openai_chat_completions_url =
     "https://napi.metask-ai.com/v1/chat/completions";
+pub const metask_gemini_base_url =
+    "https://generativelanguage.googleapis.com";
 
 /// Stable product error identity. The Renderer localizes these codes and may
 /// display the accompanying bounded diagnostic; it never receives raw network
@@ -366,6 +369,7 @@ pub fn validateExecutionConfig(input: ExecutionConfigInput) ValidationError!void
     const expected_base_url: []const u8 = switch (input.target.provider_kind) {
         .anthropic => metask_anthropic_messages_url,
         .openai => metask_openai_chat_completions_url,
+        .gemini => metask_gemini_base_url,
     };
     if (!std.mem.eql(u8, input.target.base_url, expected_base_url))
         return error.InvalidBaseUrl;

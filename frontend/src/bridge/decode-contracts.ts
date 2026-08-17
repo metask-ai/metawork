@@ -172,7 +172,7 @@ const rendererBridgeConnectErrors = [
   "identity_mismatch",
   "revision_mismatch",
 ] as const;
-const providers = ["anthropic", "openai"] as const;
+const providers = ["anthropic", "openai", "gemini"] as const;
 const workspaceAuthorizations = [
   "available",
   "removing",

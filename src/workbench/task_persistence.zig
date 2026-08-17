@@ -910,7 +910,7 @@ fn validateRecoveredTask(
         !validText(task.workspace_root, limits.max_workspace_bytes, false) or
         !validText(task.title, limits.max_task_title_bytes, true) or
         task.binding.epoch == 0 or task.binding.execution_generation == 0 or
-        !oneOf(task.binding.provider, &.{ "anthropic", "openai" }) or
+        !oneOf(task.binding.provider, &.{ "anthropic", "openai", "gemini" }) or
         !validBinding(task.binding, limits.max_tool_field_bytes) or
         task.runs.len > limits.max_runs_per_task or
         task.compacts.len > limits.max_compacts_per_task or
@@ -980,7 +980,7 @@ fn validate(state: *const StateWire, limits: Limits) !void {
             !validText(task.workspace_root, limits.max_workspace_bytes, false) or
             !validText(task.title, limits.max_task_title_bytes, true) or
             task.binding.epoch == 0 or task.binding.execution_generation == 0 or
-            !oneOf(task.binding.provider, &.{ "anthropic", "openai" }) or
+            !oneOf(task.binding.provider, &.{ "anthropic", "openai", "gemini" }) or
             !validBinding(task.binding, limits.max_tool_field_bytes) or
             task.runs.len > limits.max_runs_per_task or
             task.compacts.len > limits.max_compacts_per_task or
@@ -1017,7 +1017,7 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
     var active_count: usize = 0;
     for (task.runs, 0..) |run, index| {
         if (run.id == 0 or run.generation == 0 or run.execution_generation == 0 or
-            !oneOf(run.execution_provider, &.{ "anthropic", "openai" }) or
+            !oneOf(run.execution_provider, &.{ "anthropic", "openai", "gemini" }) or
             !validText(run.execution_model, limits.max_tool_field_bytes, false) or
             run.execution_generation != task.binding.execution_generation or
             !std.mem.eql(u8, run.execution_provider, task.binding.provider) or

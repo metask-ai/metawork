@@ -588,6 +588,7 @@ export const zhCN: Record<MessageId, string> = {
   "account.model_fallback": "可用模型",
   "provider.anthropic": "Anthropic",
   "provider.openai": "OpenAI",
+  "provider.gemini": "Gemini",
   "settings.title": "设置",
   "settings.back": "返回工作台",
   "settings.intro": "管理 MetaWork 开始新任务时使用的默认配置。",

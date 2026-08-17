@@ -87,8 +87,13 @@ Model catalog：
 | --- | --- | --- |
 | `anthropic` | `anthropic` | `https://napi.metask-ai.com/v1/messages` |
 | `openai` | `openai` | `https://napi.metask-ai.com/v1/chat/completions` |
+| `gemini` | `gemini` | `https://generativelanguage.googleapis.com` |
 
 其他 platform 当前 fail closed。production 不接受 Renderer、环境变量或任意 URL 覆盖。
+
+Gemini 的 `base_url` 是 AgentCore Gemini Native client 使用的服务基址；AgentCore
+负责按其 provider 合同拼接 model 与 `streamGenerateContent` 路径、认证 header
+和请求/事件格式。MetaWork 不实现 Gemini transport，也不根据模型名推断 provider。
 
 Account 必须在当前会话持有 token 的 `account_id`，并以 `account_id + API Key id` 证明 catalog 与 execution credential 归属。自动 refresh 与冷启动恢复必须精确核对 `account_id`，防止后台静默切换账号；用户显式完成 OAuth 时以本次 OAuth token 与 `/me` 共同验证的 identity 为准。identity replacement gate 覆盖异步登录或退出直至 identity terminal commit，但不覆盖后续 catalog/default generation：token 提交前失败保留旧默认配置，verified identity、token 已提交后的失败或成功退出清除旧默认配置并立即释放 identity gate，再以独立 default transaction 为新账号准备目录；旧 execution 不得与新账号混用。`profile_id`、`/v1/profiles` 与 Profile header 不属于 MetaWork runtime、persistence、Bridge 或 AgentCore 合同。
 

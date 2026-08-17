@@ -9,6 +9,7 @@ pub const anthropic_messages_url =
     contract.metask_anthropic_messages_url;
 pub const openai_chat_completions_url =
     contract.metask_openai_chat_completions_url;
+pub const gemini_base_url = contract.metask_gemini_base_url;
 
 pub const Limits = struct {
     pub const response_bytes: usize = 4 * 1024 * 1024;
@@ -864,6 +865,7 @@ fn parseModels(
 fn providerKind(platform: []const u8) ?contract.ProviderKind {
     if (std.mem.eql(u8, platform, "anthropic")) return .anthropic;
     if (std.mem.eql(u8, platform, "openai")) return .openai;
+    if (std.mem.eql(u8, platform, "gemini")) return .gemini;
     return null;
 }
 
@@ -879,6 +881,7 @@ fn baseUrl(provider_kind: contract.ProviderKind) ?[]const u8 {
     return switch (provider_kind) {
         .anthropic => anthropic_messages_url,
         .openai => openai_chat_completions_url,
+        .gemini => gemini_base_url,
     };
 }
 
@@ -1018,6 +1021,38 @@ test "live-shape catalogs expose only masked views and move one key owner" {
     try std.testing.expectEqualStrings("model-1", public_view.models[0].id);
 }
 
+test "catalog maps Gemini platform to AgentCore Gemini target" {
+    const gemini_fixture = std.mem.replaceOwned(
+        u8,
+        std.testing.allocator,
+        key_fixture,
+        "\"platform\":\"anthropic\"",
+        "\"platform\":\"gemini\"",
+    ) catch return error.SkipZigTest;
+    defer std.testing.allocator.free(gemini_fixture);
+
+    var keys = try parseApiKeys(std.testing.allocator, gemini_fixture);
+    var session = CatalogSession.init(std.testing.allocator);
+    defer session.deinit();
+    session.api_keys = keys.entries;
+    keys.entries = .empty;
+    try session.selectApiKey("325");
+
+    var models = try parseModels(std.testing.allocator, model_fixture);
+    session.models = models.entries;
+    models.entries = .empty;
+    var execution = try session.prepareExecution("model-1", 1);
+    defer execution.deinit();
+    try std.testing.expectEqual(
+        contract.ProviderKind.gemini,
+        execution.input().target.provider_kind,
+    );
+    try std.testing.expectEqualStrings(
+        gemini_base_url,
+        execution.input().target.base_url,
+    );
+}
+
 test "catalog accepts additive metadata and rejects duplicate ids, pagination, and platforms" {
     const items_marker = "\"items\":[";
     const item_start =
@@ -1107,7 +1142,7 @@ test "catalog accepts additive metadata and rejects duplicate ids, pagination, a
         std.testing.allocator,
         key_fixture,
         "\"platform\":\"anthropic\"",
-        "\"platform\":\"gemini\"",
+        "\"platform\":\"unknown\"",
     ) catch return error.SkipZigTest;
     defer std.testing.allocator.free(unsupported);
     try std.testing.expectError(

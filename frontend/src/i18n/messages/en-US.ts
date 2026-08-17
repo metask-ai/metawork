@@ -636,6 +636,7 @@ export const enUS = {
   "account.model_fallback": "Available model",
   "provider.anthropic": "Anthropic",
   "provider.openai": "OpenAI",
+  "provider.gemini": "Gemini",
   "settings.title": "Settings",
   "settings.back": "Back to workbench",
   "settings.intro":
