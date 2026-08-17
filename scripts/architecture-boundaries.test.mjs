@@ -378,6 +378,25 @@ test("Agent and Workbench preserve execution owner boundaries", () => {
   assertNoImports(workbenchFiles, ["metask_agentcore"]);
 });
 
+test("Session leaf modules stay independent from lifecycle owners", () => {
+  for (const file of [
+    "src/agent/session/wire.zig",
+    "src/agent/session/control.zig",
+  ]) {
+    const source = read(file);
+    assert.doesNotMatch(
+      source,
+      /@import\(\s*["'][^"']*session\.zig["']\s*\)/,
+      `${file} must not import the Session lifecycle root`,
+    );
+    assert.doesNotMatch(
+      source,
+      /SessionControlBlock|RunControlLease|agent_runtime/,
+      `${file} must not own Session-bound lifecycle handles`,
+    );
+  }
+});
+
 test("Workbench receives IO independently from the Agent Runtime", () => {
   const workbench = read("src/workbench/projection.zig");
   const configuration = sliceBetween(

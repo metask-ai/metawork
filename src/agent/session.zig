@@ -12,6 +12,8 @@ const mcp_runtime = @import("agent_mcp_runtime");
 const mcp_catalog = @import("agent_mcp_catalog");
 const checkpoint = @import("agent_checkpoint");
 const checkpoint_restore = @import("agent_checkpoint_restore");
+const session_control = @import("session/control.zig");
+const session_wire = @import("session/wire.zig");
 
 var next_mcp_owner_id: std.atomic.Value(u64) = .init(1);
 
@@ -28,7 +30,6 @@ pub const PermissionProvenance = sdk.protocol.PermissionProvenance;
 pub const PermissionToolNamespace = sdk.protocol.PermissionToolNamespace;
 pub const RunState = sdk.protocol.RunState;
 pub const RunStatePhase = sdk.protocol.RunStatePhase;
-pub const ParsedUiRequest = sdk.ParsedUiRequest;
 pub const CatalogHealth = catalog.Health;
 pub const CatalogIssueCode = catalog.IssueCode;
 pub const CatalogIssue = catalog.Issue;
@@ -55,6 +56,39 @@ pub const McpTransportKind = mcp_runtime.TransportKind;
 pub const McpNegotiationPolicy = mcp_runtime.NegotiationPolicy;
 pub const mcpBindingIdentity = mcp_runtime.bindingIdentity;
 
+pub const SessionState = session_control.SessionState;
+pub const ExternalInterruption = session_control.ExternalInterruption;
+pub const CallbackFailure = session_control.CallbackFailure;
+pub const EventPumpFailure = session_control.EventPumpFailure;
+pub const EventConsumerNotificationFailure = session_control.EventConsumerNotificationFailure;
+pub const TerminationSignal = session_control.TerminationSignal;
+pub const TerminalFailure = session_control.TerminalFailure;
+pub const SessionDisposition = session_control.SessionDisposition;
+pub const DurableBudgetObservation = session_control.DurableBudgetObservation;
+pub const TerminalResult = session_control.TerminalResult;
+pub const CompactOutcome = session_control.CompactOutcome;
+pub const CompactTerminalResult = session_control.CompactTerminalResult;
+pub const TerminationRequestResult = session_control.TerminationRequestResult;
+pub const EventReadyNotification = session_control.EventReadyNotification;
+pub const EventReadyNotifier = session_control.EventReadyNotifier;
+pub const ProviderKind = session_control.ProviderKind;
+pub const PermissionMode = session_control.PermissionMode;
+pub const ShellPolicy = session_control.ShellPolicy;
+
+pub const ParsedUiRequest = sdk.ParsedUiRequest;
+pub const BuiltinToolProfile = session_wire.BuiltinToolProfile;
+pub const desktop_builtin_tools = session_wire.desktop_builtin_tools;
+pub const local_builtin_tools = session_wire.local_builtin_tools;
+pub const network_builtin_tools = session_wire.network_builtin_tools;
+pub const registered_builtin_tools = session_wire.registered_builtin_tools;
+pub const decodeUiRequest = session_wire.decodeUiRequest;
+pub const decodeCoreEvent = session_wire.decodeCoreEvent;
+pub const builtinToolsForProfile = session_wire.builtinToolsForProfile;
+const providerKindCode = session_wire.providerKindCode;
+const permissionModeCode = session_wire.permissionModeCode;
+const shellPolicyCode = session_wire.shellPolicyCode;
+const allSkillsEnabledSelection = session_wire.allSkillsEnabledSelection;
+
 pub const McpActivationUnavailableReason = enum {
     refresh_failed,
     invalid_catalog,
@@ -74,281 +108,6 @@ const McpRefreshLease = struct {
     raw_runtime: *wire.RuntimeHandle,
     expected_servers: []const mcp_runtime.ExpectedServer,
     registry_generation: ?u64,
-};
-
-pub fn decodeUiRequest(
-    allocator: std.mem.Allocator,
-    encoded: []const u8,
-) sdk.DecodeError!ParsedUiRequest {
-    if (!std.unicode.utf8ValidateSlice(encoded)) return error.MalformedJson;
-    var parsed = try sdk.decodeUiRequest(allocator, encoded);
-    errdefer parsed.deinit();
-    if (!uiRequestTextValid(parsed.value)) return error.InvalidPayload;
-    return parsed;
-}
-
-pub fn decodeCoreEvent(
-    allocator: std.mem.Allocator,
-    encoded: []const u8,
-) sdk.DecodeError!sdk.ParsedCoreEvent {
-    if (!std.unicode.utf8ValidateSlice(encoded)) return error.MalformedJson;
-    var parsed = try sdk.decodeCoreEvent(allocator, encoded);
-    errdefer parsed.deinit();
-    if (!coreEventTextValid(parsed.value)) return error.InvalidPayload;
-    return parsed;
-}
-
-fn coreEventTextValid(event: sdk.DecodedCoreEvent) bool {
-    return switch (event) {
-        .unknown => |unknown| validUtf8(&.{ unknown.tag, unknown.payload_json }),
-        .known => |known| switch (known) {
-            .text_chunk => |text| std.unicode.utf8ValidateSlice(text),
-            .tool_start => |tool| validUtf8(&.{ tool.id, tool.name, tool.input }),
-            .tool_progress => |progress| validUtf8(&.{ progress.id, progress.text }),
-            .progress => |progress| validUtf8(&.{ progress.tool_name, progress.tool_input }),
-            .tool_result => |result| {
-                if (!validUtf8(&.{ result.id, result.name, result.input, result.content })) return false;
-                if (comptime @hasField(@TypeOf(result), "file_refs")) {
-                    if (result.file_refs) |refs| {
-                        for (refs) |reference| {
-                            if (!std.unicode.utf8ValidateSlice(reference.title) or
-                                !std.unicode.utf8ValidateSlice(reference.kind)) return false;
-                            switch (reference.locator) {
-                                .workspace_path => |path| if (!std.unicode.utf8ValidateSlice(path)) return false,
-                                .absolute_path => |path| if (!std.unicode.utf8ValidateSlice(path)) return false,
-                                .uri => |uri| if (!std.unicode.utf8ValidateSlice(uri)) return false,
-                            }
-                        }
-                    }
-                }
-                return true;
-            },
-            .usage, .retry_notice, .stream_done => true,
-            .run_state => |state| {
-                if (state.run_id == 0) return false;
-                for (state.in_flight_tools) |tool|
-                    if (!validUtf8(&.{ tool.tool_call_id, tool.name })) return false;
-                return true;
-            },
-            .context_warning => |warning| std.unicode.utf8ValidateSlice(warning.level),
-            .auto_compact => |compact| std.unicode.utf8ValidateSlice(compact.cause),
-            .permission_provenance => |value| validUtf8(&.{
-                value.matched_rule_id orelse "",
-                value.session_id,
-                value.tool_call_id,
-                value.request_id orelse "",
-                value.tool.name,
-                value.tool.binding,
-                value.canonical_arguments_digest,
-            }),
-        },
-    };
-}
-
-fn uiRequestTextValid(request: sdk.UiRequest) bool {
-    return switch (request) {
-        .ask_question => |questions| questions: {
-            for (questions) |question| {
-                if (!validUtf8(&.{ question.question, question.header })) break :questions false;
-                for (question.options) |option|
-                    if (!validUtf8(&.{ option.label, option.description, option.preview }))
-                        break :questions false;
-            }
-            break :questions true;
-        },
-        .permission => |permission| validUtf8(&.{
-            permission.type,
-            permission.request_id,
-            permission.session_id,
-            permission.tool_call_id,
-            permission.tool.name,
-            permission.tool.binding,
-            permission.canonical_arguments_digest,
-            permission.arguments_json,
-            if (permission.candidate) |candidate| candidate.rule_id else "",
-        }),
-    };
-}
-
-fn validUtf8(values: []const []const u8) bool {
-    for (values) |value|
-        if (!std.unicode.utf8ValidateSlice(value)) return false;
-    return true;
-}
-
-test "AgentCore JSON callbacks reject invalid UTF-8 at the ownership boundary" {
-    const invalid_event =
-        "{\"tool_result\":{\"id\":\"tool-1\",\"name\":\"Bash\",\"input\":\"{}\",\"content\":[203],\"is_error\":false,\"elapsed_ms\":1}}";
-    try std.testing.expectError(
-        error.InvalidPayload,
-        decodeCoreEvent(std.testing.allocator, invalid_event),
-    );
-
-    const invalid_ui =
-        "{\"ask_question\":[{\"question\":[203],\"header\":\"Choice\",\"multi\":false,\"options\":[]}]}";
-    try std.testing.expectError(
-        error.InvalidPayload,
-        decodeUiRequest(std.testing.allocator, invalid_ui),
-    );
-}
-
-pub const BuiltinToolProfile = enum {
-    full,
-    local,
-    network,
-};
-
-pub const desktop_builtin_tools = [_][]const u8{
-    "Read",
-    "Write",
-    "Edit",
-    "Glob",
-    "Grep",
-    "Bash",
-    "BashOutput",
-    "KillShell",
-    "AskUserQuestion",
-    "WebSearch",
-    "WebFetch",
-};
-pub const local_builtin_tools = [_][]const u8{
-    "Read",
-    "Write",
-    "Edit",
-    "Glob",
-    "Grep",
-    "Bash",
-    "BashOutput",
-    "KillShell",
-    "AskUserQuestion",
-};
-pub const network_builtin_tools = [_][]const u8{ "WebSearch", "WebFetch" };
-
-pub const registered_builtin_tools = desktop_builtin_tools;
-
-pub fn builtinToolsForProfile(profile: BuiltinToolProfile) []const []const u8 {
-    return switch (profile) {
-        .full => &desktop_builtin_tools,
-        .local => &local_builtin_tools,
-        .network => &network_builtin_tools,
-    };
-}
-
-test "Desktop built-in profiles cover the verified name set without overlap" {
-    const local = builtinToolsForProfile(.local);
-    const network = builtinToolsForProfile(.network);
-    try std.testing.expectEqual(desktop_builtin_tools.len, local.len + network.len);
-    for (local) |name| {
-        for (network) |other| try std.testing.expect(!std.mem.eql(u8, name, other));
-    }
-    for (desktop_builtin_tools) |name| {
-        var found = false;
-        for (local) |candidate| {
-            if (std.mem.eql(u8, name, candidate)) found = true;
-        }
-        for (network) |candidate| {
-            if (std.mem.eql(u8, name, candidate)) found = true;
-        }
-        try std.testing.expect(found);
-    }
-}
-
-fn providerKindCode(value: ProviderKind) u32 {
-    return switch (value) {
-        .anthropic => wire.PROVIDER_ANTHROPIC,
-        .openai => wire.PROVIDER_OPENAI,
-        .gemini => wire.PROVIDER_GEMINI,
-    };
-}
-
-fn permissionModeCode(value: PermissionMode) u32 {
-    return switch (value) {
-        .default => wire.PERMISSION_DEFAULT,
-        .accept_edits => wire.PERMISSION_ACCEPT_EDITS,
-        .auto => wire.PERMISSION_AUTO,
-        .dont_ask => wire.PERMISSION_DONT_ASK,
-        .full_access => wire.PERMISSION_FULL_ACCESS,
-    };
-}
-
-fn shellPolicyCode(value: ShellPolicy) u32 {
-    return switch (value) {
-        .disabled => wire.SHELL_DISABLED,
-        .sandboxed => wire.SHELL_SANDBOXED,
-        .unrestricted => wire.SHELL_UNRESTRICTED,
-    };
-}
-
-fn allSkillsEnabledSelection() wire.SkillSelectionV1 {
-    return .{
-        .struct_size = @sizeOf(wire.SkillSelectionV1),
-        .default_state_code = wire.SKILL_SELECTION_ENABLED,
-        .exception_skill_ids = null,
-        .exception_skill_id_count = 0,
-        .reserved = [_]u64{0} ** 4,
-    };
-}
-
-pub const SessionState = enum {
-    idle,
-    queued,
-    running,
-    waiting_ui,
-    compact_queued,
-    compacting,
-    checkpointing,
-    poisoned,
-    closing,
-    closed,
-};
-
-pub const ExternalInterruption = enum {
-    user_cancel,
-    timeout,
-    session_close,
-    app_shutdown,
-};
-
-pub const CallbackFailure = enum {
-    event,
-    ui,
-};
-
-pub const EventPumpFailure = enum {
-    invalid_event,
-    event_too_large,
-    capacity,
-    allocation,
-    consumer_rejected,
-};
-
-pub const EventConsumerNotificationFailure = enum {
-    unavailable,
-};
-
-/// The single mutable, first-writer-wins termination latch for an active Run.
-/// This is execution control state, not a durable product outcome.
-pub const TerminationSignal = union(enum) {
-    interrupted: ExternalInterruption,
-    callback_failure: CallbackFailure,
-    event_pump_failure: EventPumpFailure,
-    event_consumer_notification_failure: EventConsumerNotificationFailure,
-};
-
-pub const TerminalFailure = enum {
-    abi_status,
-    dependency_contract,
-};
-
-pub const SessionDisposition = enum {
-    reusable,
-    poisoned,
-    closing,
-};
-
-pub const DurableBudgetObservation = struct {
-    durable_usage_bytes: u64,
-    required_checkpoint_bytes: u64,
 };
 
 pub const CheckpointLimits = checkpoint.Limits;
@@ -389,83 +148,6 @@ pub const CloseOutcome = union(enum) {
         err: Error,
         session_disposition: SessionDisposition,
     },
-};
-
-/// Immutable Agent-owned facts for exactly one begun Run. Workbench must copy
-/// the bounded diagnostic into its admission-reserved Run record, then deinit
-/// this value. `session_disposition_at_completion` is a completion-time
-/// snapshot, never live Session state.
-pub const TerminalResult = struct {
-    allocator: std.mem.Allocator,
-    diagnostic_storage: []u8,
-    diagnostic_len: usize,
-    diagnostic_truncated: bool,
-    abi_status: ?sdk.Status,
-    raw_status_code: ?u32,
-    stop_reason: ?sdk.StopReason,
-    raw_stop_reason_code: ?u32,
-    abort_status: ?sdk.Status,
-    raw_abort_status_code: ?u32,
-    termination_signal: ?TerminationSignal,
-    failure: ?TerminalFailure,
-    session_disposition_at_completion: SessionDisposition,
-    durable_budget: ?DurableBudgetObservation = null,
-
-    pub fn diagnostic(self: *const TerminalResult) []const u8 {
-        return self.diagnostic_storage[0..self.diagnostic_len];
-    }
-
-    pub fn deinit(self: *TerminalResult) void {
-        self.allocator.free(self.diagnostic_storage);
-        self.* = undefined;
-    }
-};
-
-pub const CompactOutcome = enum {
-    compacted,
-    no_change,
-    degraded,
-    aborted,
-};
-
-/// Immutable Agent-owned facts for one admitted manual compact. Context token
-/// values are estimates; usage fields are the operation's provider deltas.
-pub const CompactTerminalResult = struct {
-    allocator: std.mem.Allocator,
-    diagnostic_storage: []u8,
-    diagnostic_len: usize,
-    diagnostic_truncated: bool,
-    abi_status: ?sdk.Status,
-    raw_status_code: ?u32,
-    abort_status: ?sdk.Status,
-    raw_abort_status_code: ?u32,
-    outcome: ?CompactOutcome,
-    before_context_tokens: u64,
-    after_context_tokens: u64,
-    input_tokens: u64,
-    output_tokens: u64,
-    cache_read_input_tokens: u64,
-    cache_creation_input_tokens: u64,
-    interruption: ?ExternalInterruption,
-    failure: ?TerminalFailure,
-    session_disposition_at_completion: SessionDisposition,
-
-    pub fn diagnostic(self: *const CompactTerminalResult) []const u8 {
-        return self.diagnostic_storage[0..self.diagnostic_len];
-    }
-
-    pub fn deinit(self: *CompactTerminalResult) void {
-        self.allocator.free(self.diagnostic_storage);
-        self.* = undefined;
-    }
-};
-
-pub const TerminationRequestResult = enum {
-    requested,
-    already_requested,
-    already_terminal,
-    stale_run,
-    session_closing,
 };
 
 const control_closed_bit = @as(usize, 1) << (@bitSizeOf(usize) - 1);
@@ -716,124 +398,6 @@ const OwnedRunInput = union(enum) {
         }
         self.* = undefined;
     }
-};
-
-pub const EventReadyNotification = enum {
-    scheduled,
-    already_pending,
-    unavailable,
-};
-
-pub const EventReadyNotifier = struct {
-    context: ?*anyopaque,
-    notify_fn: *const fn (?*anyopaque) EventReadyNotification,
-
-    pub fn notify(self: EventReadyNotifier) EventReadyNotification {
-        return self.notify_fn(self.context);
-    }
-
-    pub fn notifyWithRetry(
-        self: EventReadyNotifier,
-        io: std.Io,
-        retry_interval: std.Io.Duration,
-        timeout: std.Io.Duration,
-    ) EventReadyNotification {
-        std.debug.assert(retry_interval.nanoseconds > 0);
-        std.debug.assert(timeout.nanoseconds > 0);
-        var waited: i96 = 0;
-        while (true) {
-            const result = self.notify();
-            if (result != .unavailable) return result;
-            if (waited >= timeout.nanoseconds) return .unavailable;
-            const sleep_ns = @min(retry_interval.nanoseconds, timeout.nanoseconds - waited);
-            io.sleep(.fromNanoseconds(sleep_ns), .awake) catch return .unavailable;
-            waited += sleep_ns;
-        }
-    }
-};
-
-test "EventReadyNotifier preserves scheduled, coalesced, and unavailable outcomes" {
-    const Harness = struct {
-        result: EventReadyNotification,
-
-        fn notify(context: ?*anyopaque) EventReadyNotification {
-            const self: *@This() = @ptrCast(@alignCast(context.?));
-            return self.result;
-        }
-    };
-    var harness = Harness{ .result = .scheduled };
-    const notifier = EventReadyNotifier{ .context = &harness, .notify_fn = Harness.notify };
-    inline for (.{
-        EventReadyNotification.scheduled,
-        EventReadyNotification.already_pending,
-        EventReadyNotification.unavailable,
-    }) |result| {
-        harness.result = result;
-        try std.testing.expectEqual(result, notifier.notify());
-    }
-}
-
-test "EventReadyNotifier retries unavailable without losing terminal outcomes" {
-    const Harness = struct {
-        unavailable_before_success: usize,
-        calls: usize = 0,
-
-        fn notify(context: ?*anyopaque) EventReadyNotification {
-            const self: *@This() = @ptrCast(@alignCast(context.?));
-            self.calls += 1;
-            if (self.calls <= self.unavailable_before_success) return .unavailable;
-            return .already_pending;
-        }
-    };
-    var recovering = Harness{ .unavailable_before_success = 2 };
-    const recovering_notifier = EventReadyNotifier{
-        .context = &recovering,
-        .notify_fn = Harness.notify,
-    };
-    try std.testing.expectEqual(
-        EventReadyNotification.already_pending,
-        recovering_notifier.notifyWithRetry(
-            std.testing.io,
-            .fromNanoseconds(1),
-            .fromNanoseconds(3),
-        ),
-    );
-    try std.testing.expectEqual(@as(usize, 3), recovering.calls);
-
-    var unavailable = Harness{ .unavailable_before_success = std.math.maxInt(usize) };
-    const unavailable_notifier = EventReadyNotifier{
-        .context = &unavailable,
-        .notify_fn = Harness.notify,
-    };
-    try std.testing.expectEqual(
-        EventReadyNotification.unavailable,
-        unavailable_notifier.notifyWithRetry(
-            std.testing.io,
-            .fromNanoseconds(1),
-            .fromNanoseconds(2),
-        ),
-    );
-    try std.testing.expectEqual(@as(usize, 3), unavailable.calls);
-}
-
-pub const ProviderKind = enum {
-    anthropic,
-    openai,
-    gemini,
-};
-
-pub const PermissionMode = enum {
-    default,
-    accept_edits,
-    auto,
-    dont_ask,
-    full_access,
-};
-
-pub const ShellPolicy = enum {
-    disabled,
-    sandboxed,
-    unrestricted,
 };
 
 pub const SessionOpenOptions = struct {
