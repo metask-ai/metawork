@@ -23,6 +23,14 @@ function filesWithExtensions(directory, extensions) {
 const zigFiles = (directory) => filesWithExtensions(directory, [".zig"]);
 const applicationFiles = () => ["src/app.zig", ...zigFiles("src/app/")];
 const applicationSource = () => applicationFiles().map(read).join("\n");
+// Production portion only: this repo appends test declarations at the end of
+// a file, so everything before the first top-level `test` is product code.
+// Inline test harnesses legitimately construct Bridge-shaped commands and
+// must not trip production-source invariants.
+const applicationProductionSource = () =>
+  applicationFiles()
+    .map((file) => read(file).split(/^test[ ("]/m)[0])
+    .join("\n");
 const boundaryDocs = [
   "README.md",
   "AGENTS.md",
@@ -318,11 +326,13 @@ test("lower layers cannot reach composition or transport internals", () => {
     "metawork_app",
     "metawork_workbench",
     "metawork_bridge",
+    "metawork_account",
   ]);
   assertNoImports(zigFiles("src/workbench/"), [
     "metawork_app",
     "metawork_bridge",
     "metawork_account",
+    "metask_agentcore",
   ]);
   assertNoImports(
     ["src/account/contract.zig"],
@@ -399,11 +409,26 @@ test("Session leaf modules stay independent from lifecycle owners", () => {
 
 test("Agent inline tests are connected to the formal test graph", () => {
   const build = read("build.zig");
-  const directAgentRoots = new Set(
-    [...build.matchAll(/\.root_source_file = b\.path\("(src\/agent\/[^\"]+\.zig)"\)/g)].map(
-      (match) => match[1],
-    ),
+  // Resolve roots that actually have TEST TARGETS, not merely module
+  // definitions: test spec entry -> test_modules key -> module variable in
+  // the final return block -> that variable's createModule root path.
+  const returnBlock = build.slice(
+    build.indexOf('root_module.addImport("metawork_app", app);'),
   );
+  const directAgentRoots = new Set();
+  for (const spec of build.matchAll(/\.root_module = test_modules\.(\w+)/g)) {
+    const assignment = returnBlock.match(
+      new RegExp(`\\.${spec[1]} = (\\w+),`),
+    );
+    if (!assignment) continue;
+    const module = build.match(
+      new RegExp(
+        `const ${assignment[1]} = b\\.createModule\\(\\.\\{\\s*` +
+          `\\.root_source_file = b\\.path\\("(src/agent/[^"]+\\.zig)"\\)`,
+      ),
+    );
+    if (module) directAgentRoots.add(module[1]);
+  }
   const sessionRoot = read("src/agent/session.zig");
   const agentTestFiles = zigFiles("src/agent/").filter((file) =>
     /^\s*test(?:\s+"|\s*\{)/m.test(read(file)),
@@ -1560,7 +1585,7 @@ test("Bridge owns ingress, Account owns validation, and Application coordinates 
     /return \.\{ \.rejected = \.generation_mismatch \}/,
   );
   assert.doesNotMatch(
-    applicationSource(),
+    applicationProductionSource(),
     /expected_catalog_generation|generation_mismatch/,
   );
   assert.match(
