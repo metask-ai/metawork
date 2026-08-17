@@ -456,33 +456,33 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     });
     agent_catalog.addImport("metask_agentcore", sdk);
     const agent_mcp_connector = b.createModule(.{
-        .root_source_file = b.path("src/agent/mcp_connector.zig"),
+        .root_source_file = b.path("src/agent/mcp/connector.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     agent_mcp_connector.addImport("metask_agentcore", sdk);
     const agent_mcp_http = b.createModule(.{
-        .root_source_file = b.path("src/agent/mcp_http.zig"),
+        .root_source_file = b.path("src/agent/mcp/http.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     agent_mcp_http.addImport("agent_mcp_connector", agent_mcp_connector);
     const agent_mcp_runtime = b.createModule(.{
-        .root_source_file = b.path("src/agent/mcp_runtime.zig"),
+        .root_source_file = b.path("src/agent/mcp/runtime.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     agent_mcp_runtime.addImport("metask_agentcore", sdk);
     agent_mcp_runtime.addImport("agent_mcp_connector", agent_mcp_connector);
     const agent_mcp_catalog = b.createModule(.{
-        .root_source_file = b.path("src/agent/mcp_catalog.zig"),
+        .root_source_file = b.path("src/agent/mcp/catalog.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     agent_mcp_catalog.addImport("metask_agentcore", sdk);
     agent_mcp_catalog.addImport("agent_mcp_runtime", agent_mcp_runtime);
     const agent_mcp_stdio = b.createModule(.{
-        .root_source_file = b.path("src/agent/mcp_stdio.zig"),
+        .root_source_file = b.path("src/agent/mcp/stdio.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
