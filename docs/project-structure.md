@@ -87,7 +87,7 @@ metawork/
 | Application     | Native SDK composition、窄 capability 注入、平台资源、bootstrap resolver、store 生命周期、跨 owner 用例编排与顶层生命周期顺序 | owner 领域状态与 policy、Bridge transport、AgentCore 协议、Renderer 实现        |
 | Account         | Runtime、OAuth/catalog 状态、credential、attempt/effect/mailbox、恢复、脱敏 Account view、ExecutionConfig transfer            | Workbench Task、Renderer 状态、AgentCore Runtime                                |
 | Workbench       | Workspace/Task/Run 产品状态、Executor、admission、terminal product record、snapshot projection                                | AgentCore raw protocol、Native WebView、Account secret                          |
-| Agent           | AgentCore Runtime/Session/Conversation、callback、event pump、Run terminal facts                                              | 产品队列、Task 历史、Bridge transport                                           |
+| Agent           | AgentCore integration、MetaWork Runtime/Session/Conversation、callback、event pump、Run terminal facts                     | 产品队列、Task 历史、Bridge transport、AgentCore 内部实现                        |
 | Bridge          | command authority、payload decode、Workspace grant、ProductDelivery connection/revision/snapshot transport                    | 产品策略真相、AgentCore handle、Account runtime                                 |
 | Renderer        | snapshot 消费、产品 WebUI 交互、纯 UI 状态与本地草稿、`frontend/src/bridge/` 合同实现层（transport 适配与 runtime decode）    | 原生窗口 owner、平台真实状态、安全决策、secret、AgentCore raw event、产品状态机 |
 

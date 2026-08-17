@@ -367,6 +367,17 @@ test("lower layers cannot reach composition or transport internals", () => {
   assertNoApplicationImplementationImports(lowerLayerFiles);
 });
 
+test("Agent and Workbench preserve execution owner boundaries", () => {
+  const agentFiles = ["src/agent.zig", ...zigFiles("src/agent/")];
+  const workbenchFiles = [
+    "src/workbench.zig",
+    ...zigFiles("src/workbench/"),
+  ];
+
+  assertNoImports(agentFiles, ["metawork_account"]);
+  assertNoImports(workbenchFiles, ["metask_agentcore"]);
+});
+
 test("Workbench receives IO independently from the Agent Runtime", () => {
   const workbench = read("src/workbench/projection.zig");
   const configuration = sliceBetween(

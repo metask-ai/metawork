@@ -7,7 +7,7 @@
 
 ## 1. 集成原则
 
-1. Metask AgentCore bundle SDK 是 Agent 结构化协议的唯一来源；
+1. Metask AgentCore bundle SDK 是 AgentCore canonical typed protocol 的唯一来源；
 2. MetaWork 不解析模型 Provider SSE；
 3. MetaWork 不建立平行的 `AgentEvent` / `WorkbenchEvent` 体系；
 4. MetaWork 正式 Agent module 只使用 bundle typed SDK 和 binary ABI；
@@ -56,6 +56,8 @@ candidate probe 只用于证明锁定 artifact 与官方 Zig package 可以 sour
 - Application 不直接 discover AgentCore ABI；`agent.Runtime.init()` 在 Agent 边界内完成 bundle SDK discovery，raw function-table injection 只保留给隔离测试；
 - Workbench 只通过 `metawork_agent` 公共表面协调 Session/Run，并消费 SDK-validated `OwnedCoreEvent`/UI types；这不是复制一套 `AgentEvent`/UI schema；
 - Bridge DTO 使用 Bridge-owned transport enum，由 Bridge 解码为 Workbench-owned `UiResponse`；Workbench 调用 Agent 的 validated response type，只有 Agent 内部把它映射为 SDK `UiResponse`，任何边界都不返回 SDK enum、owner 或 handle；
+- Workbench 可以持有 Agent 公共表面提供的受限 Session reference/lease 作为 `RuntimeAttachment` 的一部分，但不得读取或操作 Agent Session internals、AgentCore handle 或 callback state；所有 Session 操作必须经过 `metawork_agent` 公共 API；
+- Agent 不解析或查询 Account 当前状态；Account/Application/Workbench 先解析并在受控生命周期内转移 execution-scoped `ExecutionConfig`，Agent 只消费该已解析配置创建或重绑定 Session；
 - `src/main.zig` 只进入 `metawork_app`，不能绕过 Application 组装低层模块；
 - Executor、queue 与 workers 归 Workbench 独占，Agent Runtime 不接收 Scheduler capability。持久 Scheduled Task 的 recurrence、触发游标、wall clock、timer、恢复和 occurrence admission 同样只归 Workbench；Application 只注入 store/timer/notification/tray 平台能力。到期后必须先创建真实 Task，再由同一 Executor 进入 Agent Run。Agent active Run 只保留 first-writer-wins `TerminationSignal`，并通过 immutable `TerminalResult` 向 Workbench 提交 terminal facts；Session snapshot 不保存 Schedule 或 occurrence 历史结果。
 
