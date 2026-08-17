@@ -1,4 +1,4 @@
-//! Native SDK 0.8.0 System WebView drag-region support for macOS.
+//! Native SDK 0.9.2 System WebView drag-region support for macOS.
 
 const native_sdk = @import("native_sdk");
 const startup_window = @import("../system_webview_startup_window.zig");

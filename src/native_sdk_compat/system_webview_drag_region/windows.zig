@@ -1,4 +1,4 @@
-//! Native SDK 0.8.0 System WebView drag-region support for Windows.
+//! Native SDK 0.9.2 System WebView drag-region support for Windows.
 //!
 //! Startup HWND identity is acquired once by the private shared startup-window
 //! binding. This seam consumes that binding; it does not discover windows or

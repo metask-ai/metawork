@@ -1,6 +1,6 @@
 //! Application-owned compatibility seam for System WebView drag regions.
 //!
-//! Native SDK 0.8.0 owns the window, chrome geometry, and platform drag loop.
+//! Native SDK 0.9.2 owns the window, chrome geometry, and platform drag loop.
 //! It does not yet expose drag regions for the startup System WebView, so
 //! MetaWork keeps this bounded seam until that Runtime API is available.
 //! Renderer input is constrained to one top-band candidate plus bounded
