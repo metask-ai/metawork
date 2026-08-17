@@ -397,6 +397,47 @@ test("Session leaf modules stay independent from lifecycle owners", () => {
   }
 });
 
+test("Agent inline tests are connected to the formal test graph", () => {
+  const build = read("build.zig");
+  const directAgentRoots = new Set(
+    [...build.matchAll(/\.root_source_file = b\.path\("(src\/agent\/[^\"]+\.zig)"\)/g)].map(
+      (match) => match[1],
+    ),
+  );
+  const sessionRoot = read("src/agent/session.zig");
+  const agentTestFiles = zigFiles("src/agent/").filter((file) =>
+    /^\s*test(?:\s+"|\s*\{)/m.test(read(file)),
+  );
+
+  assert.ok(
+    directAgentRoots.has("src/agent/catalog.zig"),
+    "Agent catalog must have a direct test target",
+  );
+  assert.ok(
+    directAgentRoots.has("src/agent/checkpoint.zig"),
+    "Agent checkpoint must have a direct test target",
+  );
+  assert.ok(
+    directAgentRoots.has("src/agent/session.zig"),
+    "Agent Session must have a direct test target",
+  );
+
+  for (const file of agentTestFiles) {
+    if (directAgentRoots.has(file)) continue;
+    const relative = file.slice("src/agent/session/".length);
+    assert.ok(
+      file.startsWith("src/agent/session/") && relative.endsWith(".zig"),
+      `${file} must be a direct Agent test root or have an explicit aggregate`,
+    );
+    const symbol = `session_${relative.slice(0, -4)}`;
+    assert.match(
+      sessionRoot,
+      new RegExp(`_ = ${symbol}\\s*;`),
+      `${file} must be referenced by session.zig test aggregation`,
+    );
+  }
+});
+
 test("Workbench receives IO independently from the Agent Runtime", () => {
   const workbench = read("src/workbench/projection.zig");
   const configuration = sliceBetween(

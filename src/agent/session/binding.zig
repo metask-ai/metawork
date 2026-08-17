@@ -104,3 +104,45 @@ pub const RunControlLease = struct {
         self.block.release();
     }
 };
+
+test "Session control lifetime rejects closed and saturated references" {
+    var block = SessionControlBlock{ .session = undefined };
+
+    try std.testing.expect(block.tryRetain());
+    try std.testing.expectEqual(@as(usize, 2), block.lifetime.load(.acquire));
+    _ = block.lifetime.fetchSub(1, .acq_rel);
+
+    block.disableNewLeases();
+    try std.testing.expect(!block.tryRetain());
+    try std.testing.expectEqual(
+        control_closed_bit | 1,
+        block.lifetime.load(.acquire),
+    );
+
+    block.lifetime.store(control_reference_mask, .release);
+    try std.testing.expect(!block.tryRetain());
+    try std.testing.expectEqual(
+        control_reference_mask,
+        block.lifetime.load(.acquire),
+    );
+}
+
+test "RunControl acquires a linear lease at the current generation" {
+    var block = SessionControlBlock{ .session = undefined };
+    const control_handle = RunControl{
+        .block = &block,
+        .run_id = 7,
+        .generation = 11,
+    };
+    var lease = control_handle.tryAcquireLease() orelse
+        return error.TestExpectedLease;
+    defer {
+        lease.released = true;
+        _ = block.lifetime.fetchSub(1, .acq_rel);
+    }
+
+    try std.testing.expectEqual(@as(u64, 7), lease.run_id);
+    try std.testing.expectEqual(@as(u64, 11), lease.generation);
+    try std.testing.expect(!lease.released);
+    try std.testing.expectEqual(@as(usize, 2), block.lifetime.load(.acquire));
+}
