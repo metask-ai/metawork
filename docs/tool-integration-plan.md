@@ -36,7 +36,7 @@ WebSearch / WebFetch
 
 当前缺口是 MetaWork 侧工具集合没有接入 profile，而不是 AgentCore ABI 缺少工具执行接口：
 
-- `src/agent/session.zig` 的桌面默认工具集合此前固定为四个名称；
+- `src/agent/session/wire.zig` 的桌面默认工具集合此前固定为四个名称；
 - Runtime 创建时只发送这四个 `builtin_tools`，`host_tool_count` 仍为 0；
 - Session fresh create 和 restore 都从 `allowed_tools` 生成 Session 级收窄；
 - `src/workbench/projection.zig` 创建正式 Task Session 时没有传入新的工具选择，因此此前始终依赖四工具默认值；

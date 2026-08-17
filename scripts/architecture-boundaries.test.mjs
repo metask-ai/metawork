@@ -23,6 +23,14 @@ function filesWithExtensions(directory, extensions) {
 const zigFiles = (directory) => filesWithExtensions(directory, [".zig"]);
 const applicationFiles = () => ["src/app.zig", ...zigFiles("src/app/")];
 const applicationSource = () => applicationFiles().map(read).join("\n");
+// Production portion only: this repo appends test declarations at the end of
+// a file, so everything before the first top-level `test` is product code.
+// Inline test harnesses legitimately construct Bridge-shaped commands and
+// must not trip production-source invariants.
+const applicationProductionSource = () =>
+  applicationFiles()
+    .map((file) => read(file).split(/^test[ ("]/m)[0])
+    .join("\n");
 const boundaryDocs = [
   "README.md",
   "AGENTS.md",
@@ -318,11 +326,13 @@ test("lower layers cannot reach composition or transport internals", () => {
     "metawork_app",
     "metawork_workbench",
     "metawork_bridge",
+    "metawork_account",
   ]);
   assertNoImports(zigFiles("src/workbench/"), [
     "metawork_app",
     "metawork_bridge",
     "metawork_account",
+    "metask_agentcore",
   ]);
   assertNoImports(
     ["src/account/contract.zig"],
@@ -365,6 +375,92 @@ test("lower layers cannot reach composition or transport internals", () => {
   ];
   assertNoImports(lowerLayerFiles, ["metawork_app"]);
   assertNoApplicationImplementationImports(lowerLayerFiles);
+});
+
+test("Agent and Workbench preserve execution owner boundaries", () => {
+  const agentFiles = ["src/agent.zig", ...zigFiles("src/agent/")];
+  const workbenchFiles = [
+    "src/workbench.zig",
+    ...zigFiles("src/workbench/"),
+  ];
+
+  assertNoImports(agentFiles, ["metawork_account"]);
+  assertNoImports(workbenchFiles, ["metask_agentcore"]);
+});
+
+test("Session leaf modules stay independent from lifecycle owners", () => {
+  for (const file of [
+    "src/agent/session/wire.zig",
+    "src/agent/session/control.zig",
+  ]) {
+    const source = read(file);
+    assert.doesNotMatch(
+      source,
+      /@import\(\s*["'][^"']*session\.zig["']\s*\)/,
+      `${file} must not import the Session lifecycle root`,
+    );
+    assert.doesNotMatch(
+      source,
+      /SessionControlBlock|RunControlLease|agent_runtime/,
+      `${file} must not own Session-bound lifecycle handles`,
+    );
+  }
+});
+
+test("Agent inline tests are connected to the formal test graph", () => {
+  const build = read("build.zig");
+  // Resolve roots that actually have TEST TARGETS, not merely module
+  // definitions: test spec entry -> test_modules key -> module variable in
+  // the final return block -> that variable's createModule root path.
+  const returnBlock = build.slice(
+    build.indexOf('root_module.addImport("metawork_app", app);'),
+  );
+  const directAgentRoots = new Set();
+  for (const spec of build.matchAll(/\.root_module = test_modules\.(\w+)/g)) {
+    const assignment = returnBlock.match(
+      new RegExp(`\\.${spec[1]} = (\\w+),`),
+    );
+    if (!assignment) continue;
+    const module = build.match(
+      new RegExp(
+        `const ${assignment[1]} = b\\.createModule\\(\\.\\{\\s*` +
+          `\\.root_source_file = b\\.path\\("(src/agent/[^"]+\\.zig)"\\)`,
+      ),
+    );
+    if (module) directAgentRoots.add(module[1]);
+  }
+  const sessionRoot = read("src/agent/session.zig");
+  const agentTestFiles = zigFiles("src/agent/").filter((file) =>
+    /^\s*test(?:\s+"|\s*\{)/m.test(read(file)),
+  );
+
+  assert.ok(
+    directAgentRoots.has("src/agent/catalog.zig"),
+    "Agent catalog must have a direct test target",
+  );
+  assert.ok(
+    directAgentRoots.has("src/agent/checkpoint.zig"),
+    "Agent checkpoint must have a direct test target",
+  );
+  assert.ok(
+    directAgentRoots.has("src/agent/session.zig"),
+    "Agent Session must have a direct test target",
+  );
+
+  for (const file of agentTestFiles) {
+    if (directAgentRoots.has(file)) continue;
+    const relative = file.slice("src/agent/session/".length);
+    assert.ok(
+      file.startsWith("src/agent/session/") && relative.endsWith(".zig"),
+      `${file} must be a direct Agent test root or have an explicit aggregate`,
+    );
+    const symbol = `session_${relative.slice(0, -4)}`;
+    assert.match(
+      sessionRoot,
+      new RegExp(`_ = ${symbol}\\s*;`),
+      `${file} must be referenced by session.zig test aggregation`,
+    );
+  }
 });
 
 test("Workbench receives IO independently from the Agent Runtime", () => {
@@ -1489,7 +1585,7 @@ test("Bridge owns ingress, Account owns validation, and Application coordinates 
     /return \.\{ \.rejected = \.generation_mismatch \}/,
   );
   assert.doesNotMatch(
-    applicationSource(),
+    applicationProductionSource(),
     /expected_catalog_generation|generation_mismatch/,
   );
   assert.match(

@@ -91,11 +91,11 @@ MCP 不形成第五个 Product owner。Workbench 拥有 schema 2 Desired Registr
 
 ### 3.4 Agent 与 AgentCore
 
-Agent 是 MetaWork-owned 独立执行边界，拥有 Agent Runtime、Session、Conversation、callback、event pump 与 AgentCore terminal facts。Application 创建并关闭 Agent、注入其运行所需能力并把 event-ready wake 安排到主线程；Workbench 直接消费 Agent 公共执行类型和操作，但不管理 Agent Runtime 生命周期、不读取 Runtime 内部字段，也不借 Agent 获取通用 I/O。Agent 不拥有 Workspace、Task、产品 Run、Executor、持久化或 Bridge transport。
+Agent 是 MetaWork-owned 独立执行边界，也是 MetaWork 对 AgentCore 的 integration owner，拥有 Agent Runtime/Session/Conversation 的集成生命周期、callback、event pump 与 AgentCore terminal facts。Application 创建并关闭 Agent、注入其运行所需能力并把 event-ready wake 安排到主线程；Workbench 直接消费 Agent 公共执行类型和操作，但不管理 Agent Runtime 生命周期、不读取 Runtime 内部字段，也不借 Agent 获取通用 I/O。Agent 不拥有 Workspace、Task、产品 Run、Executor、持久化或 Bridge transport。
 
-AgentCore 拥有 Provider 调用、agent loop、Conversation、built-in tools、Session、结构化 CoreEvent、同步 UI request 和 RunResult。它不拥有 MetaWork 的 Workspace、Task、Run 产品历史、Renderer projection 或持久化 policy。
+AgentCore 拥有 Provider 调用、agent loop、Conversation、built-in tools、Session、结构化 CoreEvent、同步 UI request 和 RunResult；这些是 AgentCore 内部的执行机制与协议状态。Agent 通过官方 SDK 集成并管理这些机制在 MetaWork 中的 Runtime/Session 生命周期、同步、所有权引用和执行 API，但不取得 AgentCore 实现的内部 ownership。AgentCore 不拥有 MetaWork 的 Workspace、Task、Run 产品历史、Renderer projection 或持久化 policy。
 
-只有 Agent 边界可以消费官方 typed SDK 与 binary ABI；其他模块只使用 Agent 或对应 owner 暴露的 MetaWork-owned 类型。精确合同见 [AgentCore 集成契约](agentcore-integration.md)和 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。
+正式 MetaWork 产品模块中只有 Agent 边界可以消费官方 typed SDK 与 binary ABI；隔离 probe、bundle verifier 和 SDK 验证工具不进入正式产品 module graph。其他模块只使用 Agent 或对应 owner 暴露的 MetaWork-owned 类型。精确合同见 [AgentCore 集成契约](agentcore-integration.md)和 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。
 
 ### 3.5 Native SDK
 
