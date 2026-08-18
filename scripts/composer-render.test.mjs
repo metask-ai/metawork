@@ -195,17 +195,18 @@ function renderCompletedSurface(
     redacted: false,
   },
   compacts = [],
+  { pendingUi = null, uiHistory = [] } = {},
 ) {
   const task = {
     id: "3",
     runs: [
       {
         id: "9",
-        phase: "completed",
+        phase: pendingUi ? "waiting_ui" : "completed",
         input,
         assistant,
         assistantRedacted: false,
-        outcome: "completed",
+        outcome: pendingUi ? null : "completed",
         cause: null,
         usage: { input: "12", output: "5" },
         tools: [
@@ -229,8 +230,8 @@ function renderCompletedSurface(
       },
     ],
     compacts,
-    pendingUi: null,
-    uiHistory: [],
+    pendingUi,
+    uiHistory,
   };
   return renderToStaticMarkup(
     createElement(
@@ -252,10 +253,10 @@ function renderCompletedSurface(
         onInspect() {},
         onRespond() {},
         renderPendingUi() {
-          return null;
+          return createElement("div", null, "Pending decision");
         },
         renderUiRecord() {
-          return null;
+          return createElement("div", null, "Resolved decision");
         },
       }),
     ),
@@ -439,6 +440,48 @@ test("terminal delivery follows tool activity and precedes the outcome", () => {
     markup.indexOf("Release is ready") < markup.indexOf("Work completed"),
   );
   assert.match(renderCompletedSurface(""), /did not return a final response/);
+});
+
+test("pending UI follows the Assistant reading position while resolved UI stays chronological", () => {
+  const markup = renderCompletedSurface(
+    "Review this before continuing",
+    undefined,
+    [],
+    {
+      uiHistory: [
+        {
+          requestId: "request-resolved",
+          runId: "9",
+          order: "2",
+          kind: "permission",
+          state: "allowed_once",
+          agentRequestId: "agent-request-resolved",
+          permission: null,
+          detail: "allowed",
+          itemCount: 1,
+          detailTruncated: false,
+          redacted: false,
+        },
+      ],
+      pendingUi: {
+        requestId: "request-pending",
+        runId: "9",
+        order: "3",
+        redacted: false,
+        kind: "permission",
+        tool: "Bash",
+        args: "npm test",
+        availableChoices: ["deny_once", "allow_once"],
+      },
+    },
+  );
+  const tool = markup.indexOf("Read");
+  const resolved = markup.indexOf("Resolved decision");
+  const assistant = markup.indexOf("Review this before continuing");
+  const pending = markup.indexOf("Pending decision");
+  assert.ok(tool >= 0 && tool < resolved);
+  assert.ok(resolved < assistant);
+  assert.ok(assistant < pending);
 });
 
 test("each typed Tool stays an independent bounded detail card", async () => {
