@@ -9,7 +9,8 @@
 登录与执行配置是两个独立门槛：
 
 - **C1 登录**：OAuth、token rotation、严格 `/me` identity、token 恢复/刷新、退出和本地安全存储。当前信息已经足够实现，不依赖模型、API Key 或 AgentCore。
-- **C2 执行配置**：API Key catalog、model catalog 和 typed/fixed `ExecutionTarget { provider_kind, base_url, model }`。Account 只原子持久化无 secret 的默认选择；完整 ExecutionConfig 和 Provider API Key 始终留在当前进程。Workbench 安装对应 generation 后才能创建 Agent Task。
+- **C2 执行配置**：Metask API Key catalog、model catalog 和 typed/fixed `ExecutionTarget { provider_kind, base_url, model }`。Account 只原子持久化无 secret 的默认选择；完整 ExecutionConfig 和 Metask Provider API Key 始终留在当前进程。Workbench 安装对应 generation 后才能创建 Agent Task。
+- **Model Connection 扩展**：用户管理的 OpenAI Chat Completions 或 Gemini Native 连接使用独立的 typed connection registry 与 credential store；它不改变 C1/C2 的 Metask identity、catalog 或 fixed endpoint 合同。Anthropic Messages 保留为 AgentCore 能力候选，但在原生 API Key 鉴权合同通过前不进入产品 admission。
 
 MetaWork 只作为 Metask Account API 和 AgentCore bundle 的消费方。本文档不要求、也不授权修改 Metask 内部实现仓库（精确路径标识为 `cc-t2z/metacodes`）。
 
@@ -17,16 +18,16 @@ MetaWork 只作为 Metask Account API 和 AgentCore bundle 的消费方。本文
 
 Metask 产品 owner 已确认 MetaWork 作为 Metask 第一方客户端复用当前 public-client identity：
 
-| 项目 | 锁定值 |
-| --- | --- |
-| Flow | OAuth 2.0 Authorization Code + PKCE S256 |
-| Authority | `https://napi.metask-ai.com` |
-| Authorize | `https://napi.metask-ai.com/oauth/authorize` |
-| Token | `https://napi.metask-ai.com/oauth/token` |
-| Revoke | `https://napi.metask-ai.com/oauth/revoke`；C1 本地退出不依赖 remote revoke 成功 |
-| Client ID | `metawork-app`，无 `client_secret` 的 public client |
-| Scope | `metawork:use`，唯一可申请 scope |
-| Redirect | `http://127.0.0.1:{dynamic_port}/auth/callback` |
+| 项目                       | 锁定值                                                                                                                                                 |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Flow                       | OAuth 2.0 Authorization Code + PKCE S256                                                                                                               |
+| Authority                  | `https://napi.metask-ai.com`                                                                                                                           |
+| Authorize                  | `https://napi.metask-ai.com/oauth/authorize`                                                                                                           |
+| Token                      | `https://napi.metask-ai.com/oauth/token`                                                                                                               |
+| Revoke                     | `https://napi.metask-ai.com/oauth/revoke`；C1 本地退出不依赖 remote revoke 成功                                                                        |
+| Client ID                  | `metawork-app`，无 `client_secret` 的 public client                                                                                                    |
+| Scope                      | `metawork:use`，唯一可申请 scope                                                                                                                       |
+| Redirect                   | `http://127.0.0.1:{dynamic_port}/auth/callback`                                                                                                        |
 | Current user identity read | bearer `GET https://napi.metask-ai.com/api/v1/auth/me`；未进入 2026-08 发布文档，但当前 MetaWork 以 production 实测合同严格验证 authenticated identity |
 
 固定行为：
@@ -48,6 +49,8 @@ Metask 产品 owner 已确认 MetaWork 作为 Metask 第一方客户端复用当
 - production 与 automation 数据根在编译期固定隔离，automation Task、Schedule、Account preference 和 credential 不得进入 production 目录或 service；
 - 冷启动只依赖 refresh token。不存在 token 时直接 `signed_out`；存在 token 时先 refresh，并用 `/me` 建立当前 identity，再决定 preference 能否复用；
 - preference 缺失、损坏、owner 不同或 catalog membership 失效只清空默认选择，不影响登录，也不能制造 account mismatch；冷启动且当前进程尚未安装 execution 时，只有 owner、API Key 和 model 全部精确匹配才复用已保存 nonce；显式配置提交生成新 nonce；
+- Model Connection metadata 不写入 `preferences.json`。它使用独立的原子 registry；registry 只保存 connection id、display name、provider、normalized endpoint、bounded model metadata、credential status、generation 和待完成的 credential 删除 tombstone。系统 credential account 由公开 connection id 确定，不另存一份 locator；API credential 只保存于系统安全存储，registry 不保存 secret 或 Authorization header；
+- 冷启动恢复 durable default 时必须重新读取对应系统 credential。credential 已被系统或用户从安全存储移除时，Account 原子发布并持久化 `credential_status = missing`，撤销该默认并使 generation 回到不可执行的 `configuring`；不得继续显示 `ready`、安装空 credential 或回退到其他连接。安全存储读取本身失败时只 fail closed，不得把暂时不可读误写成已确认缺失；
 - refresh response 成功后先替换 secure refresh token，随后 `/me`、catalog 或 preference 失败都不得恢复已作废的旧 token；
 - refresh 或 `/me` 明确返回 `401/403` 时删除无效 refresh token 并进入 `signed_out`；网络、deadline、`429` 或 `5xx` 保留当前 refresh token 和明确重试入口，冷启动不得因此发布旧 identity；
 - 默认选择在候选 execution preparation 期间生成新 nonce，并使用同目录临时文件、文件 sync、原子 rename 和提交确认；只有 catalog ownership 校验与 preference 持久化全部成功后才安装 execution；熵源失败或结果不确定时 fail closed，不发布未确认 execution；
@@ -81,16 +84,39 @@ Model catalog：
 
 ## 5. Provider 与 ExecutionTarget
 
-`provider_kind` 只来自选中 API Key 的精确 `group.platform`，绝不根据模型名推断：
+对于 Metask managed execution，`provider_kind` 只来自选中 API Key 的精确 `group.platform`，绝不根据模型名推断：
 
-| `group.platform` | Account provider | AgentCore `base_url` |
-| --- | --- | --- |
-| `anthropic` | `anthropic` | `https://napi.metask-ai.com/v1/messages` |
-| `openai` | `openai` | `https://napi.metask-ai.com/v1/chat/completions` |
+| `group.platform` | Account provider | AgentCore `base_url`                             |
+| ---------------- | ---------------- | ------------------------------------------------ |
+| `anthropic`      | `anthropic`      | `https://napi.metask-ai.com/v1/messages`         |
+| `openai`         | `openai`         | `https://napi.metask-ai.com/v1/chat/completions` |
+| `gemini`         | `gemini`         | `https://generativelanguage.googleapis.com`      |
 
-其他 platform 当前 fail closed。production 不接受 Renderer、环境变量或任意 URL 覆盖。
+其他 platform 当前在 Metask managed catalog 中 fail closed；该 fixed catalog 不接受 Renderer、环境变量或任意 URL 覆盖。用户管理的 endpoint 只按 §5.1 的 Model Connection 合同校验。
+
+Gemini 的 `base_url` 是 AgentCore Gemini Native client 使用的服务基址；AgentCore
+负责按其 provider 合同拼接 model 与 `streamGenerateContent` 路径、认证 header
+和请求/事件格式。MetaWork 不实现 Gemini transport，也不根据模型名推断 provider。
 
 Account 必须在当前会话持有 token 的 `account_id`，并以 `account_id + API Key id` 证明 catalog 与 execution credential 归属。自动 refresh 与冷启动恢复必须精确核对 `account_id`，防止后台静默切换账号；用户显式完成 OAuth 时以本次 OAuth token 与 `/me` 共同验证的 identity 为准。identity replacement gate 覆盖异步登录或退出直至 identity terminal commit，但不覆盖后续 catalog/default generation：token 提交前失败保留旧默认配置，verified identity、token 已提交后的失败或成功退出清除旧默认配置并立即释放 identity gate，再以独立 default transaction 为新账号准备目录；旧 execution 不得与新账号混用。`profile_id`、`/v1/profiles` 与 Profile header 不属于 MetaWork runtime、persistence、Bridge 或 AgentCore 合同。
+
+### 5.1 User-managed Model Connection
+
+Model Connection 是 Account-owned 的本地连接对象，不是 Metask identity，也不从 `group.platform` 推导。创建时用户明确选择已登记协议：
+
+| Protocol                | AgentCore provider | Normalized endpoint contract                                        |
+| ----------------------- | ------------------ | ------------------------------------------------------------------- |
+| OpenAI Chat Completions | `openai`           | 完整 `/v1/chat/completions` endpoint；不支持 `/v1/responses`        |
+| Gemini Native           | `gemini`           | 服务 base URL；AgentCore 追加 model 与 `streamGenerateContent` 路径 |
+
+Anthropic Messages 当前不在可创建协议表内：staged AgentCore 仍把 API Key 作为 Bearer 发送，尚未满足 Anthropic Native 所需的 `x-api-key` 合同。MetaWork 不复制 transport 进行补偿；AgentCore 修复并通过同一 provider contract 后再开放。
+
+- Model Connection 不要求 Metask OAuth；但必须通过 Host 的 typed validation、credential persistence 和一次有界的 AgentCore streaming connection test 后，才能成为 default execution source；
+- endpoint 只允许 HTTPS，或用户明确配置的 loopback HTTP；拒绝 control character、userinfo、query/fragment credential、过长 URL 和未登记 provider path。Host 将用户输入规范化为 AgentCore 所需的 endpoint，Renderer 不直接拼接或覆盖 `base_url`；
+- API credential 只进入系统安全存储和当前 Session/Run 所需的 bounded owned copy。Renderer、Bridge、snapshot、Task/Run history、日志和 diagnostics 不得接收 credential 原文；
+- 第一版不做 model discovery；用户明确提交 bounded model id，Host 保存其模型 metadata，并仍以 provider contract 校验连接；
+- endpoint、provider 或 credential 变化生成新的 `connection_generation`；同一 ready connection 内切换已登记模型只生成新的 opaque execution generation。已有 live Session 不热替换，既有 Task 保留创建时的 execution binding；
+- Test connection 只验证 provider request/streaming response，不创建产品 Task、Run history、checkpoint 或 durable Conversation。连接的 generation readiness 与最新 `untested | testing | connected | failed` 测试状态是两个事实：首次成功把当前 generation 标记为 ready；对已 ready generation 的失败重测只更新最新测试结果，不撤销既有 default execution 或跨重启 binding。AgentCore provider SSE/JSON parsing 仍归 AgentCore，MetaWork 不维护平行 transport。
 
 ## 6. 持久化崩溃一致性
 
@@ -98,4 +124,5 @@ Account 必须在当前会话持有 token 的 `account_id`，并以 `account_id 
 - refresh token 提交失败不得安装新内存 identity；提交成功后任何后续失败都不得回滚到旧 refresh token；
 - preference 只描述默认选择及其不透明 nonce，丢失或损坏最多导致重新选择，不能影响 OAuth identity；
 - preference 写入采用同目录临时文件、文件 sync、原子 rename 和提交确认；rename 后结果不确定时不得发布新 execution；
+- Model Connection registry 使用独立的同目录临时文件、文件 sync、原子 rename 和提交确认；删除先持久化 credential cleanup tombstone，再删除系统 credential，最后原子清除 tombstone，启动和后续 mutation 会继续排空未完成清理。新增连接同样先持久化目标 connection id 的 cleanup tombstone，再写系统 credential，最后用一次原子 registry commit 将 tombstone 替换为完整连接；因此 credential write 前崩溃只留下无害 tombstone，write 后、连接 commit 前崩溃会在恢复时删除 credential，最终 commit 结果不确定时则由重启后的 registry 真相决定保留连接或排空 credential。创建或替换 credential 必须由 Account/Application-owned transaction 完成 secure capture、credential write、registry commit 与失败回滚；任何结果不确定都禁止安装新的 default execution；
 - logout 删除顺序固定为 refresh token → preference；refresh token 已删除后，即使 preference 删除失败也不能继续使用旧 identity。

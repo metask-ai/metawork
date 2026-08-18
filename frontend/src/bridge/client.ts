@@ -481,6 +481,84 @@ export class BridgeClient {
     );
   }
 
+  async activateMetask(
+    expectedCatalogGeneration: string,
+    expectedExecutionGeneration: string,
+  ) {
+    return decodeAccountCommandResult(
+      await this.invoke(commands.accountActivateMetask, {
+        expectedCatalogGeneration,
+        expectedExecutionGeneration,
+      }),
+    );
+  }
+
+  async createModelConnection(input: {
+    displayName: string;
+    protocol:
+      "anthropic_messages" | "openai_chat_completions" | "gemini_native";
+    normalizedBaseUrl: string;
+    modelId: string;
+    modelDisplayName?: string;
+  }) {
+    return decodeAccountCommandResult(
+      await this.invoke(commands.modelConnectionCreate, input),
+    );
+  }
+
+  async updateModelConnection(input: {
+    connectionId: string;
+    expectedConnectionGeneration: string;
+    displayName: string;
+    protocol:
+      "anthropic_messages" | "openai_chat_completions" | "gemini_native";
+    normalizedBaseUrl: string;
+  }) {
+    return decodeAccountCommandResult(
+      await this.invoke(commands.modelConnectionUpdate, input),
+    );
+  }
+
+  async removeModelConnection(
+    connectionId: string,
+    expectedConnectionGeneration: string,
+  ) {
+    return decodeAccountCommandResult(
+      await this.invoke(commands.modelConnectionRemove, {
+        connectionId,
+        expectedConnectionGeneration,
+      }),
+    );
+  }
+
+  async testModelConnection(
+    connectionId: string,
+    expectedConnectionGeneration: string,
+    modelId: string,
+  ) {
+    return decodeAccountCommandResult(
+      await this.invoke(commands.modelConnectionTest, {
+        connectionId,
+        expectedConnectionGeneration,
+        modelId,
+      }),
+    );
+  }
+
+  async selectDefaultModelConnection(
+    connectionId: string,
+    expectedConnectionGeneration: string,
+    modelId: string,
+  ) {
+    return decodeAccountCommandResult(
+      await this.invoke(commands.modelConnectionSelectDefault, {
+        connectionId,
+        expectedConnectionGeneration,
+        modelId,
+      }),
+    );
+  }
+
   async logout() {
     return decodeAccountCommandResult(
       await this.invoke(commands.accountLogout, {}),

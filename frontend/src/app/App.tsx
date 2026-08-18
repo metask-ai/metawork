@@ -373,11 +373,46 @@ export default function App() {
   const selectedModel = snapshot.account.models.find(
     (model) => model.selectionId === snapshot.account.selectedModelSelectionId,
   );
-  const selectedModelLabel =
-    selectedModel?.displayName ||
-    selectedModel?.selectionId ||
-    t("account.choose_model");
-  const selectedModelId = selectedModel?.selectionId ?? "";
+  const activeModelConnection = snapshot.account.modelConnections.find(
+    (connection) =>
+      connection.id === snapshot.account.selectedModelConnectionId,
+  );
+  const customModelId = activeModelConnection?.selectedModel ?? "";
+  const customModelConnectionSelected =
+    snapshot.account.executionSource === "model_connection" &&
+    activeModelConnection !== undefined;
+  const customModelConnectionContext = activeModelConnection
+    ? `${activeModelConnection.displayName} · ${t(
+        `settings.model_connection_protocol.${activeModelConnection.protocol}`,
+      )}`
+    : "";
+  const customModelOptions = activeModelConnection
+    ? activeModelConnection.models.map((model) => {
+        const displayName = model.displayName || model.id;
+        return {
+          selectionId: model.id,
+          displayName,
+          triggerLabel: `${activeModelConnection.displayName} · ${displayName}`,
+        };
+      })
+    : [];
+  const newTaskModelOptions = customModelConnectionSelected
+    ? customModelOptions
+    : snapshot.account.models;
+  const selectedModelLabel = customModelConnectionSelected
+    ? customModelOptions.find((model) => model.selectionId === customModelId)
+        ?.displayName || customModelId
+    : selectedModel?.displayName ||
+      selectedModel?.selectionId ||
+      t("account.choose_model");
+  const selectedModelId = customModelConnectionSelected
+    ? customModelId
+    : selectedModel?.selectionId || "";
+  const customModelConnectionActive =
+    customModelConnectionSelected &&
+    customModelId.length > 0 &&
+    activeModelConnection?.state === "ready" &&
+    activeModelConnection.credentialStatus === "ready";
   const taskModelId = activeTask?.binding.model ?? "";
   const pendingTaskModelId = activeTask
     ? (pendingTaskModels[activeTask.id] ?? null)
@@ -769,7 +804,7 @@ export default function App() {
       errorCode: string;
     }>,
   ) {
-    if (bridgeUnavailable || accountBusyRef.current) return;
+    if (bridgeUnavailable || accountBusyRef.current) return false;
     accountBusyRef.current = true;
     setAccountBusy(true);
     try {
@@ -788,22 +823,24 @@ export default function App() {
             { scope: "account" },
           ),
         );
-        return;
+        return false;
       }
       await refreshAfterCommit("account.updated", "operation.account", {
         scope: "account",
       });
+      return true;
     } catch (error) {
       if (
         await reconcileCommandTimeout(error, "operation.account", {
           scope: "account",
         })
       )
-        return;
+        return false;
       await refreshSnapshot().catch(() => undefined);
       setStatus(
         attentionStatus("account.command_failed", { scope: "account" }),
       );
+      return false;
     } finally {
       accountBusyRef.current = false;
       setAccountBusy(false);
@@ -1010,7 +1047,9 @@ export default function App() {
     }
     setSettingsFocus(target);
     setSettingsOpen(true);
+    const refreshesMetaskAccount = target === "account" || target === "signout";
     if (
+      !refreshesMetaskAccount ||
       bridgeUnavailable ||
       accountBusyRef.current ||
       snapshot.account.state !== "authenticated" ||
@@ -2083,25 +2122,39 @@ export default function App() {
       modelLabel={
         newTaskDraftActive ? selectedModelLabel : taskModelLabel || null
       }
-      modelOptions={snapshot.account.models}
+      modelOptions={
+        newTaskDraftActive ? newTaskModelOptions : snapshot.account.models
+      }
       selectedModelId={
         newTaskDraftActive ? selectedModelId : displayedTaskModelId
       }
-      modelEditable={newTaskDraftActive || activeTask !== null}
+      modelEditable={
+        newTaskDraftActive ||
+        (activeTask !== null && !customModelConnectionActive)
+      }
       modelSelectionDisabled={
         bridgeUnavailable ||
         accountBusy ||
-        snapshot.account.catalogState === "loading" ||
-        snapshot.account.models.length === 0 ||
-        !taskModelInCatalog
+        (newTaskDraftActive
+          ? newTaskModelOptions.length === 0 ||
+            (!customModelConnectionSelected &&
+              snapshot.account.catalogState === "loading")
+          : snapshot.account.catalogState === "loading" ||
+            snapshot.account.models.length === 0 ||
+            !taskModelInCatalog)
       }
       modelSelectionPending={
-        accountBusy || snapshot.account.catalogState === "loading"
+        accountBusy ||
+        (!newTaskDraftActive || !customModelConnectionSelected
+          ? snapshot.account.catalogState === "loading"
+          : false)
       }
       modelContextTitle={
-        newTaskDraftActive
-          ? t("settings.default_model_help")
-          : t("settings.task_binding_model")
+        newTaskDraftActive && customModelConnectionSelected
+          ? customModelConnectionContext
+          : newTaskDraftActive
+            ? t("settings.default_model_help")
+            : t("settings.task_binding_model")
       }
       actionDisabled={workbenchMutationDisabled || workspaceBusy}
       stopAction={
@@ -2135,13 +2188,21 @@ export default function App() {
       onSelectWorkspace={(workspaceId) => setDraftWorkspaceById(workspaceId)}
       onSelectModel={(id) =>
         newTaskDraftActive
-          ? void runAccountCommand(() =>
-              client.selectModel(
-                id,
-                snapshot.account.catalogGeneration,
-                snapshot.account.executionGeneration,
-              ),
-            )
+          ? customModelConnectionSelected && activeModelConnection
+            ? void runAccountCommand(() =>
+                client.selectDefaultModelConnection(
+                  activeModelConnection.id,
+                  activeModelConnection.connectionGeneration,
+                  id,
+                ),
+              )
+            : void runAccountCommand(() =>
+                client.selectModel(
+                  id,
+                  snapshot.account.catalogGeneration,
+                  snapshot.account.metaskExecutionGeneration,
+                ),
+              )
           : void selectModelForTask(id)
       }
     />
@@ -2366,6 +2427,11 @@ export default function App() {
         settingsOpen ? (
           <SettingsPage
             account={snapshot.account}
+            modelConnectionCapabilities={{
+              management: snapshot.capabilities.modelConnectionManagement,
+              secretCapture: snapshot.capabilities.modelConnectionSecretCapture,
+              connectionTest: snapshot.capabilities.modelConnectionTest,
+            }}
             focusTarget={settingsFocus}
             disabled={bridgeUnavailable || accountBusy}
             cancelDisabled={viewSyncFailed || !bridgeReady || accountCancelBusy}
@@ -2379,7 +2445,7 @@ export default function App() {
                 client.selectApiKey(
                   id,
                   snapshot.account.catalogGeneration,
-                  snapshot.account.executionGeneration,
+                  snapshot.account.metaskExecutionGeneration,
                 ),
               )
             }
@@ -2388,7 +2454,40 @@ export default function App() {
                 client.selectModel(
                   id,
                   snapshot.account.catalogGeneration,
-                  snapshot.account.executionGeneration,
+                  snapshot.account.metaskExecutionGeneration,
+                ),
+              )
+            }
+            onActivateMetask={() =>
+              void runAccountCommand(() =>
+                client.activateMetask(
+                  snapshot.account.catalogGeneration,
+                  snapshot.account.metaskExecutionGeneration,
+                ),
+              )
+            }
+            onCreateModelConnection={(input) =>
+              runAccountCommand(() => client.createModelConnection(input))
+            }
+            onUpdateModelConnection={(input) =>
+              runAccountCommand(() => client.updateModelConnection(input))
+            }
+            onRemoveModelConnection={(connectionId, generation) =>
+              runAccountCommand(() =>
+                client.removeModelConnection(connectionId, generation),
+              )
+            }
+            onTestModelConnection={(connectionId, generation, modelId) =>
+              void runAccountCommand(() =>
+                client.testModelConnection(connectionId, generation, modelId),
+              )
+            }
+            onSelectModelConnection={(connectionId, generation, modelId) =>
+              void runAccountCommand(() =>
+                client.selectDefaultModelConnection(
+                  connectionId,
+                  generation,
+                  modelId,
                 ),
               )
             }

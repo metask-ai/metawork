@@ -4,6 +4,8 @@ export type AccountState =
 export type CatalogState =
   "unavailable" | "loading" | "choosing" | "ready" | "failed";
 
+export type ExecutionSource = "metask" | "model_connection";
+
 export type AccountErrorCode =
   | "none"
   | "invalid_command"
@@ -35,13 +37,44 @@ export type AccountErrorCode =
   | "generation_mismatch"
   | "recovery_state_invalid"
   | "local_resource_exhausted"
-  | "dependency_contract_invalid";
+  | "dependency_contract_invalid"
+  | "model_connection_invalid"
+  | "model_connection_not_found"
+  | "model_connection_capture_unavailable"
+  | "model_connection_persistence_unavailable"
+  | "model_connection_test_unavailable";
 
-export type Provider = "anthropic" | "openai";
+export type Provider = "anthropic" | "openai" | "gemini";
+
+export type ModelConnectionProtocol =
+  "anthropic_messages" | "openai_chat_completions" | "gemini_native";
+
+export type ModelConnectionState = "configuring" | "ready" | "disabled";
+
+export type ModelConnectionTestStatus =
+  "untested" | "testing" | "connected" | "failed";
+
+export type ModelConnectionCredentialStatus =
+  "missing" | "ready" | "invalid" | "capture_unavailable";
+
+export type ModelConnectionView = {
+  id: string;
+  displayName: string;
+  protocol: ModelConnectionProtocol;
+  normalizedBaseUrl: string;
+  state: ModelConnectionState;
+  testStatus: ModelConnectionTestStatus;
+  credentialStatus: ModelConnectionCredentialStatus;
+  enabled: boolean;
+  models: { id: string; displayName: string }[];
+  selectedModel: string;
+  connectionGeneration: string;
+};
 
 export type AccountView = {
   state: AccountState;
   catalogState: CatalogState;
+  executionSource: ExecutionSource;
   canCancel: boolean;
   accountId: string;
   displayName: string;
@@ -57,10 +90,13 @@ export type AccountView = {
   candidateApiKeySelectionId: string;
   candidateModelSelectionId: string;
   modelCatalogApiKeySelectionId: string;
+  modelConnections: ModelConnectionView[];
+  selectedModelConnectionId: string;
   canCreateTask: boolean;
   errorCode: AccountErrorCode;
   safeDiagnostic: string;
   catalogGeneration: string;
+  metaskExecutionGeneration: string;
   executionGeneration: string;
 };
 
@@ -479,6 +515,9 @@ export type WorkbenchSnapshot = {
       | "corrupt"
       | "write_failed"
       | "outcome_unknown";
+    modelConnectionManagement: boolean;
+    modelConnectionSecretCapture: boolean;
+    modelConnectionTest: boolean;
     mcpManagement: boolean;
     mcpConnectionApproval: boolean;
     mcpSecretCapture: boolean;

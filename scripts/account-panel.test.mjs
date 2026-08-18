@@ -46,6 +46,7 @@ const signedOut = {
   errorCode: "none",
   safeDiagnostic: "",
   catalogGeneration: "0",
+  metaskExecutionGeneration: "0",
   executionGeneration: "0",
 };
 
@@ -69,6 +70,7 @@ const ready = {
   modelCatalogApiKeySelectionId: "key-1",
   canCreateTask: true,
   catalogGeneration: "1",
+  metaskExecutionGeneration: "1",
   executionGeneration: "1",
 };
 
@@ -120,19 +122,52 @@ function renderSettings(account) {
   return withI18n(
     createElement(SettingsPage, {
       account,
+      modelConnectionCapabilities: {
+        management: false,
+        secretCapture: false,
+        connectionTest: false,
+      },
       focusTarget: "title",
       disabled: false,
       cancelDisabled: false,
+      onCreateModelConnection: async () => false,
+      onUpdateModelConnection: async () => false,
+      onRemoveModelConnection: async () => false,
+      onTestModelConnection() {},
+      onSelectModelConnection() {},
+      onActivateMetask() {},
       ...callbacks,
     }),
   );
 }
 
 test("only checking and authorizing replace the Workbench surface", () => {
-  assert.equal(requiresAccountGate({ state: "checking" }), true);
-  assert.equal(requiresAccountGate({ state: "authorizing" }), true);
-  assert.equal(requiresAccountGate({ state: "signed_out" }), false);
-  assert.equal(requiresAccountGate({ state: "authenticated" }), false);
+  assert.equal(
+    requiresAccountGate({ state: "checking", executionSource: "metask" }),
+    true,
+  );
+  assert.equal(
+    requiresAccountGate({ state: "authorizing", executionSource: "metask" }),
+    true,
+  );
+  assert.equal(
+    requiresAccountGate({ state: "signed_out", executionSource: "metask" }),
+    false,
+  );
+  assert.equal(
+    requiresAccountGate({
+      state: "authenticated",
+      executionSource: "metask",
+    }),
+    false,
+  );
+  assert.equal(
+    requiresAccountGate({
+      state: "checking",
+      executionSource: "model_connection",
+    }),
+    false,
+  );
 });
 
 test("unresolved authenticated catalog opens account setup", () => {
@@ -218,6 +253,7 @@ test("authenticated settings project current catalog defaults", () => {
   assert.match(markup, /Primary/);
   assert.match(markup, /Model One/);
   assert.match(markup, /Sign out on this device/);
+  assert.match(markup, /id="settings-model-connections"[^>]*hidden=""/);
 });
 
 test("catalog failure remains an authenticated retryable settings state", () => {

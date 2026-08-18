@@ -379,10 +379,7 @@ test("lower layers cannot reach composition or transport internals", () => {
 
 test("Agent and Workbench preserve execution owner boundaries", () => {
   const agentFiles = ["src/agent.zig", ...zigFiles("src/agent/")];
-  const workbenchFiles = [
-    "src/workbench.zig",
-    ...zigFiles("src/workbench/"),
-  ];
+  const workbenchFiles = ["src/workbench.zig", ...zigFiles("src/workbench/")];
 
   assertNoImports(agentFiles, ["metawork_account"]);
   assertNoImports(workbenchFiles, ["metask_agentcore"]);
@@ -417,9 +414,7 @@ test("Agent inline tests are connected to the formal test graph", () => {
   );
   const directAgentRoots = new Set();
   for (const spec of build.matchAll(/\.root_module = test_modules\.(\w+)/g)) {
-    const assignment = returnBlock.match(
-      new RegExp(`\\.${spec[1]} = (\\w+),`),
-    );
+    const assignment = returnBlock.match(new RegExp(`\\.${spec[1]} = (\\w+),`));
     if (!assignment) continue;
     const module = build.match(
       new RegExp(
@@ -528,6 +523,7 @@ test("only Agent implementation imports the AgentCore SDK", () => {
       "agent_mcp_connector",
       "agent_mcp_catalog",
       "agent_mcp_runtime",
+      "agent_provider_probe",
       "event_pump",
       "event_sink",
       "fixture",
@@ -714,7 +710,11 @@ test("cold Account restore preserves Task history without impersonating an ident
   );
   assert.match(
     app,
-    /prepareStart\(services\),\s*\.startup[\s\S]*prepareAutomationStart\(\),\s*\.startup[\s\S]*prepareStartUnavailable\(\),\s*\.startup/,
+    /prepareStart\(services\),\s*\.none[\s\S]*restoreModelConnectionDefaultNoFail\(\)[\s\S]*prepareAutomationStart\(\),\s*\.startup[\s\S]*prepareStartUnavailable\(\),\s*\.startup/,
+  );
+  assert.match(
+    app,
+    /modelConnectionExecutionSelected\(\) and\s*!activates_metask[\s\S]*execution\.deinit\(\)/,
   );
   assert.match(
     app,
@@ -1444,9 +1444,12 @@ test("Workbench owns Task lifecycle, continuation, and canonical redaction", () 
     workbench.indexOf("const DurableTaskRecord = struct"),
     workbench.indexOf("fn FixedText"),
   );
+  const durableTaskRecordStart = taskRecord.indexOf(
+    "const DurableTaskRecord = struct",
+  );
   const durableTaskRecord = taskRecord.slice(
-    taskRecord.indexOf("const DurableTaskRecord = struct"),
-    taskRecord.indexOf("const CheckpointHealth = enum"),
+    durableTaskRecordStart,
+    taskRecord.indexOf("};", durableTaskRecordStart) + 2,
   );
   assert.doesNotMatch(durableTaskRecord, /lifecycle: TaskLifecycle/);
   assert.doesNotMatch(
@@ -1693,8 +1696,12 @@ test("Renderer Bridge fixed revision 1 owns the exact product wire catalog", () 
   assert.match(handlers, /toolNames/);
   assert.match(handlers, /parseTaskRunInput/);
   assert.doesNotMatch(handlers, /\bprompt\s*:/);
+  const taskCreationHandlers = handlers.slice(
+    handlers.indexOf("pub const TaskWorkspaceIntent"),
+    handlers.indexOf("pub const TaskModelSelection"),
+  );
   assert.doesNotMatch(
-    handlers,
+    taskCreationHandlers,
     /workspaceGrant|workspaceRoot|apiKeyId|modelId/,
   );
 

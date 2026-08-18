@@ -135,6 +135,7 @@ const automatic_title_max_codepoints: usize = 32;
 pub const Provider = enum {
     anthropic,
     openai,
+    gemini,
 };
 
 pub const TaskWorkspaceTrust = union(enum) {
@@ -314,7 +315,14 @@ pub const Configuration = struct {
     checkpoint_store: CheckpointStoreConfiguration = .{},
     schedule_notifier: ScheduleNotifier = .{},
     skill_management: SkillManagementConfiguration = .{},
+    model_connections: ModelConnectionCapabilities = .{},
     mcp: McpStartupConfiguration = .{},
+};
+
+pub const ModelConnectionCapabilities = struct {
+    management: bool = false,
+    secret_capture: bool = false,
+    connection_test: bool = false,
 };
 
 pub const CheckpointStoreConfiguration = struct {
@@ -1106,9 +1114,20 @@ const account_snapshot_text_bytes: usize =
     account_contract.Limits.model_entries *
         (account_contract.Limits.model_id_bytes +
             account_contract.Limits.model_display_name_bytes);
+const model_connection_snapshot_text_bytes: usize =
+    account_contract.Limits.model_connection_entries *
+    (account_contract.Limits.api_key_id_bytes +
+        account_contract.Limits.display_name_bytes +
+        account_contract.Limits.base_url_bytes +
+        account_contract.Limits.model_id_bytes +
+        account_contract.Limits.model_connection_model_entries *
+            (account_contract.Limits.model_id_bytes +
+                account_contract.Limits.model_display_name_bytes));
 const account_snapshot_overhead: usize = 1024 +
     account_contract.Limits.api_key_entries * 128 +
     account_contract.Limits.model_entries * 128;
+const model_connection_snapshot_overhead: usize = 1024 +
+    account_contract.Limits.model_connection_entries * 256;
 const workspace_snapshot_overhead: usize = 512;
 const task_snapshot_overhead: usize = 1024;
 const scheduled_task_snapshot_overhead: usize = 1024;
@@ -1977,6 +1996,25 @@ const ModelProjection = struct {
     display_name: FixedText(account_contract.Limits.model_display_name_bytes) = .{},
 };
 
+const ModelConnectionProjection = struct {
+    id: FixedText(account_contract.Limits.api_key_id_bytes) = .{},
+    display_name: FixedText(account_contract.Limits.display_name_bytes) = .{},
+    normalized_base_url: FixedText(account_contract.Limits.base_url_bytes) = .{},
+    protocol: account_contract.ModelConnectionProtocol = .anthropic_messages,
+    state: account_contract.ModelConnectionState = .configuring,
+    test_status: account_contract.ModelConnectionTestStatus = .untested,
+    credential_status: account_contract.ModelConnectionCredentialStatus = .missing,
+    enabled: bool = false,
+    selected_model: FixedText(account_contract.Limits.model_id_bytes) = .{},
+    connection_generation: u64 = 0,
+    models: std.ArrayList(ModelProjection) = .empty,
+
+    fn deinit(self: *ModelConnectionProjection, allocator: std.mem.Allocator) void {
+        self.models.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
 const AccountProjection = struct {
     allocator: std.mem.Allocator,
     state: account_contract.AccountState = .checking,
@@ -1996,9 +2034,14 @@ const AccountProjection = struct {
     models: []ModelProjection,
     model_views: []account_contract.ModelView,
     model_count: usize = 0,
+    model_connections: []ModelConnectionProjection,
+    model_connection_views: std.ArrayList(account_contract.ModelConnectionView) = .empty,
+    model_connection_model_views: std.ArrayList(account_contract.ModelConnectionModelView) = .empty,
+    model_connection_count: usize = 0,
     account_can_create_task: bool = false,
     error_code: account_contract.ErrorCode = .none,
     catalog_generation: u64 = 0,
+    metask_execution_generation: u64 = 0,
     execution_generation: u64 = 0,
 
     fn init(allocator: std.mem.Allocator) std.mem.Allocator.Error!AccountProjection {
@@ -2024,16 +2067,28 @@ const AccountProjection = struct {
             account_contract.Limits.model_entries,
         );
         errdefer allocator.free(model_views);
+        const model_connections = try allocator.alloc(
+            ModelConnectionProjection,
+            account_contract.Limits.model_connection_entries,
+        );
+        errdefer allocator.free(model_connections);
+        @memset(model_connections, .{});
         return .{
             .allocator = allocator,
             .api_keys = api_keys,
             .api_key_views = api_key_views,
             .models = models,
             .model_views = model_views,
+            .model_connections = model_connections,
         };
     }
 
     fn deinit(self: *AccountProjection) void {
+        for (self.model_connections[0..self.model_connection_count]) |*connection|
+            connection.deinit(self.allocator);
+        self.model_connection_model_views.deinit(self.allocator);
+        self.model_connection_views.deinit(self.allocator);
+        self.allocator.free(self.model_connections);
         self.allocator.free(self.model_views);
         self.allocator.free(self.models);
         self.allocator.free(self.api_key_views);
@@ -2049,6 +2104,10 @@ const AccountProjection = struct {
             @panic("Account published an invalid AccountView");
         std.debug.assert(source_view.api_keys.len <= self.api_keys.len);
         std.debug.assert(source_view.models.len <= self.models.len);
+        std.debug.assert(source_view.model_connections.len <= self.model_connections.len);
+        for (self.model_connections[0..self.model_connection_count]) |*connection|
+            connection.deinit(self.allocator);
+        self.model_connection_count = 0;
         self.state = source_view.state;
         self.catalog_state = source_view.catalog_state;
         self.can_cancel = source_view.can_cancel;
@@ -2079,6 +2138,28 @@ const AccountProjection = struct {
                 .provider_kind = target.provider_kind,
             };
         }
+        for (source_view.model_connections, self.model_connections[0..source_view.model_connections.len]) |source, *target| {
+            target.* = .{
+                .protocol = source.protocol,
+                .state = source.state,
+                .test_status = source.test_status,
+                .credential_status = source.credential_status,
+                .enabled = source.enabled,
+                .connection_generation = source.connection_generation,
+            };
+            target.id.setNoFail(source.id);
+            target.display_name.setNoFail(source.display_name);
+            target.normalized_base_url.setNoFail(source.normalized_base_url);
+            target.selected_model.setNoFail(source.selected_model);
+            for (source.models) |model| {
+                var owned: ModelProjection = .{};
+                owned.id.setNoFail(model.id);
+                owned.display_name.setNoFail(model.display_name);
+                target.models.append(self.allocator, owned) catch
+                    @panic("model connection projection capacity exhausted");
+            }
+        }
+        self.model_connection_count = source_view.model_connections.len;
         self.model_count = source_view.models.len;
         for (
             source_view.models,
@@ -2095,6 +2176,7 @@ const AccountProjection = struct {
         self.account_can_create_task = source_view.can_create_task;
         self.error_code = source_view.error_code;
         self.catalog_generation = source_view.catalog_generation;
+        self.metask_execution_generation = source_view.metask_execution_generation;
         self.execution_generation = source_view.execution_generation;
     }
 
@@ -2102,6 +2184,38 @@ const AccountProjection = struct {
         self: *const AccountProjection,
         can_create_task: bool,
     ) account_contract.AccountView {
+        const mutable = @constCast(self);
+        mutable.model_connection_views.clearRetainingCapacity();
+        mutable.model_connection_model_views.clearRetainingCapacity();
+        var model_count: usize = 0;
+        for (self.model_connections[0..self.model_connection_count]) |connection|
+            model_count += connection.models.items.len;
+        mutable.model_connection_views.ensureTotalCapacity(self.allocator, self.model_connection_count) catch
+            @panic("model connection view capacity exhausted");
+        mutable.model_connection_model_views.ensureTotalCapacity(self.allocator, model_count) catch
+            @panic("model connection view capacity exhausted");
+        for (self.model_connections[0..self.model_connection_count]) |connection| {
+            const start = mutable.model_connection_model_views.items.len;
+            for (connection.models.items) |model|
+                mutable.model_connection_model_views.append(self.allocator, .{
+                    .id = model.id.view(),
+                    .display_name = model.display_name.view(),
+                }) catch @panic("model connection view capacity exhausted");
+            const end = mutable.model_connection_model_views.items.len;
+            mutable.model_connection_views.append(self.allocator, .{
+                .id = connection.id.view(),
+                .display_name = connection.display_name.view(),
+                .protocol = connection.protocol,
+                .normalized_base_url = connection.normalized_base_url.view(),
+                .state = connection.state,
+                .test_status = connection.test_status,
+                .credential_status = connection.credential_status,
+                .enabled = connection.enabled,
+                .models = mutable.model_connection_model_views.items[start..end],
+                .selected_model = connection.selected_model.view(),
+                .connection_generation = connection.connection_generation,
+            }) catch @panic("model connection view capacity exhausted");
+        }
         return .{
             .state = self.state,
             .catalog_state = self.catalog_state,
@@ -2110,6 +2224,7 @@ const AccountProjection = struct {
             .display_name = self.display_name.view(),
             .api_keys = self.api_key_views[0..self.api_key_count],
             .models = self.model_views[0..self.model_count],
+            .model_connections = mutable.model_connection_views.items,
             .selected_api_key_id = self.selected_api_key_id.view(),
             .selected_model = self.selected_model.view(),
             .candidate_api_key_id = self.candidate_api_key_id.view(),
@@ -2119,6 +2234,7 @@ const AccountProjection = struct {
             .error_code = self.error_code,
             .safe_diagnostic = self.safe_diagnostic.view(),
             .catalog_generation = self.catalog_generation,
+            .metask_execution_generation = self.metask_execution_generation,
             .execution_generation = self.execution_generation,
         };
     }
@@ -2172,7 +2288,11 @@ const ActiveExecution = struct {
         execution: *account_contract.OwnedExecutionConfig,
     ) void {
         const input = execution.input();
-        account_contract.validateExecutionConfig(input) catch
+        const validation = if (execution.model_connection)
+            account_contract.validateModelConnectionExecutionConfig(input)
+        else
+            account_contract.validateExecutionConfig(input);
+        validation catch
             @panic("Account published an invalid ExecutionConfig");
         std.debug.assert(input.api_key.len <= self.credential_storage.len);
         std.debug.assert(input.target.model.len <= self.model_storage.len);
@@ -2283,6 +2403,32 @@ const ActiveExecution = struct {
 /// All methods currently run on the Native loop thread.
 const ExecutionReplacementKind = enum { none, default, identity };
 
+pub const PreparedModelConnectionBinding = struct {
+    allocator: std.mem.Allocator,
+    connection_id: []u8,
+    model_id: []u8,
+
+    fn init(
+        allocator: std.mem.Allocator,
+        connection_id: []const u8,
+        model_id: []const u8,
+    ) std.mem.Allocator.Error!PreparedModelConnectionBinding {
+        return .{
+            .allocator = allocator,
+            .connection_id = try allocator.dupe(u8, connection_id),
+            .model_id = try allocator.dupe(u8, model_id),
+        };
+    }
+
+    pub fn deinit(self: *PreparedModelConnectionBinding) void {
+        self.allocator.free(self.model_id);
+        self.allocator.free(self.connection_id);
+        self.* = undefined;
+    }
+};
+
+const CustomExecutionBinding = PreparedModelConnectionBinding;
+
 pub const Workbench = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -2326,6 +2472,8 @@ pub const Workbench = struct {
     skill_catalog_lease: ?*lifecycle.CatalogLease = null,
     skill_catalog: ?CatalogSnapshot = null,
     execution_replacement: ExecutionReplacementKind = .none,
+    custom_execution_binding: ?CustomExecutionBinding = null,
+    model_connection_capabilities: ModelConnectionCapabilities,
     mcp: ?McpProductState = null,
     builtin_tool_profile: ?lifecycle.BuiltinToolProfile,
     next_workspace_id: u64 = 1,
@@ -2550,6 +2698,7 @@ pub const Workbench = struct {
             .execution = execution,
             .canonical_user_home = canonical_user_home,
             .automatic_workspaces = automatic_workspaces,
+            .model_connection_capabilities = configuration.model_connections,
             .builtin_tool_profile = configuration.builtin_tool_profile,
         };
         if (workbench.skill_inventory != null) skill_inventory_owned = false;
@@ -3428,6 +3577,8 @@ pub const Workbench = struct {
         self: *Workbench,
         execution: *account_contract.OwnedExecutionConfig,
     ) void {
+        if (self.custom_execution_binding) |*binding| binding.deinit();
+        self.custom_execution_binding = null;
         std.debug.assert(self.execution_replacement != .none);
         const input = execution.input();
         std.debug.assert(self.account.catalog_state == .ready);
@@ -3444,11 +3595,43 @@ pub const Workbench = struct {
         self.execution.installNoFail(execution);
     }
 
+    /// Installs a Host-resolved user Model Connection execution without
+    /// pretending that it is a Metask OAuth account/catalog. The active
+    /// execution still uses the same Workbench-owned secret and generation
+    /// machinery as the built-in path.
+    pub fn prepareModelConnectionBinding(
+        self: *Workbench,
+        connection_id: []const u8,
+        model_id: []const u8,
+    ) std.mem.Allocator.Error!PreparedModelConnectionBinding {
+        return PreparedModelConnectionBinding.init(
+            self.allocator,
+            connection_id,
+            model_id,
+        );
+    }
+
+    pub fn installModelConnectionExecutionNoFail(
+        self: *Workbench,
+        execution: *account_contract.OwnedExecutionConfig,
+        prepared_binding: *PreparedModelConnectionBinding,
+    ) void {
+        std.debug.assert(self.execution_replacement != .none);
+        self.redactAllProductProjectionsNoFail(self.execution.credential());
+        self.redactAllProductProjectionsNoFail(execution.input().api_key);
+        self.execution.installNoFail(execution);
+        if (self.custom_execution_binding) |*previous| previous.deinit();
+        self.custom_execution_binding = prepared_binding.*;
+        prepared_binding.* = undefined;
+    }
+
     pub fn clearExecutionNoFail(self: *Workbench) void {
         std.debug.assert(self.execution_replacement != .none);
         std.debug.assert(self.account.execution_generation == 0);
         self.redactAllProductProjectionsNoFail(self.execution.credential());
         self.execution.clearNoFail();
+        if (self.custom_execution_binding) |*binding| binding.deinit();
+        self.custom_execution_binding = null;
     }
 
     pub fn finishAccountCommitNoFail(self: *Workbench) void {
@@ -3462,7 +3645,25 @@ pub const Workbench = struct {
     }
 
     pub fn accountView(self: *const Workbench) account_contract.AccountView {
-        return self.account.view(self.canCreateTask());
+        var result = self.account.view(self.canCreateTask());
+        if (self.custom_execution_binding != null) {
+            result.execution_source = .model_connection;
+            result.selected_model_connection_id = self.custom_execution_binding.?.connection_id;
+            result.execution_generation = self.execution.generation;
+        }
+        return result;
+    }
+
+    pub fn modelConnectionExecutionActive(
+        self: *const Workbench,
+        connection_id: []const u8,
+    ) bool {
+        const binding = self.custom_execution_binding orelse return false;
+        return std.mem.eql(u8, binding.connection_id, connection_id);
+    }
+
+    pub fn modelConnectionExecutionSelected(self: *const Workbench) bool {
+        return self.custom_execution_binding != null;
     }
 
     /// The AgentCore vertical fixture keeps its local provider outside the production Account
@@ -3941,9 +4142,7 @@ pub const Workbench = struct {
             return error.ExecutionInUse;
         if (!self.canCreateTask())
             return error.ExecutionUnavailable;
-        if (expected_execution_generation == 0 or
-            expected_execution_generation != self.execution.generation or
-            expected_execution_generation != self.account.execution_generation)
+        if (!self.validExecutionGeneration(expected_execution_generation))
             return error.ExecutionGenerationMismatch;
         const workspace_view = self.findWorkspace(workspace_id) orelse
             return error.UnknownWorkspace;
@@ -4006,7 +4205,7 @@ pub const Workbench = struct {
         const title = try self.copyBounded("", self.limits.max_task_title_bytes);
         errdefer self.freeTracked(title);
         const execution_model = try self.copyBounded(
-            self.account.selected_model.view(),
+            self.admissionModel(),
             account_contract.Limits.model_id_bytes,
         );
         errdefer self.freeTracked(execution_model);
@@ -4044,7 +4243,7 @@ pub const Workbench = struct {
             .permission_mode = .default,
             .shell_policy = .unrestricted,
             .credential = task_execution_input.api_key,
-            .model = self.account.selected_model.view(),
+            .model = self.admissionModel(),
             .base_url = task_execution_input.target.base_url,
             .workspace = .{
                 .canonical_root = canonical,
@@ -4124,9 +4323,7 @@ pub const Workbench = struct {
             return error.ExecutionInUse;
         if (!self.canCreateTask())
             return error.ExecutionUnavailable;
-        if (expected_execution_generation == 0 or
-            expected_execution_generation != self.execution.generation or
-            expected_execution_generation != self.account.execution_generation)
+        if (!self.validExecutionGeneration(expected_execution_generation))
             return error.ExecutionGenerationMismatch;
         if (expected_skill_catalog_revision != null)
             return error.CatalogUnavailable;
@@ -7703,7 +7900,7 @@ pub const Workbench = struct {
             if (mcp_management) mcp.host_capabilities else McpHostCapabilities{}
         else
             McpHostCapabilities{};
-        writer.print("{{\"revision\":\"{d}\",\"capabilities\":{{\"taskHistoryPersistence\":{},\"taskHistoryPersistenceHealth\":\"{s}\",\"conversationRecovery\":true,\"executionRebind\":false,\"structuredPlan\":false,\"typedOutputs\":false,\"typedFileChanges\":false,\"persistentWorkspacePermissions\":false,\"automaticWorkspaces\":{},\"scheduledTasks\":{},\"scheduledTaskPersistence\":{},\"scheduledTaskPersistenceHealth\":\"{s}\",\"backgroundScheduleWake\":{},\"localSkillManagement\":{},\"skillManagementHealth\":\"{s}\",\"mcpManagement\":{},\"mcpConnectionApproval\":{},\"mcpSecretCapture\":{},\"mcpOAuth\":{}}},\"account\":", .{
+        writer.print("{{\"revision\":\"{d}\",\"capabilities\":{{\"taskHistoryPersistence\":{},\"taskHistoryPersistenceHealth\":\"{s}\",\"conversationRecovery\":true,\"executionRebind\":false,\"structuredPlan\":false,\"typedOutputs\":false,\"typedFileChanges\":false,\"persistentWorkspacePermissions\":false,\"automaticWorkspaces\":{},\"scheduledTasks\":{},\"scheduledTaskPersistence\":{},\"scheduledTaskPersistenceHealth\":\"{s}\",\"backgroundScheduleWake\":{},\"localSkillManagement\":{},\"skillManagementHealth\":\"{s}\",\"modelConnectionManagement\":{},\"modelConnectionSecretCapture\":{},\"modelConnectionTest\":{},\"mcpManagement\":{},\"mcpConnectionApproval\":{},\"mcpSecretCapture\":{},\"mcpOAuth\":{}}},\"account\":", .{
             self.revision,
             task_persistence_ready,
             @tagName(self.task_persistence_health),
@@ -7715,6 +7912,9 @@ pub const Workbench = struct {
             background_schedule_wake,
             self.skill_management_health == .ready,
             @tagName(self.skill_management_health),
+            self.model_connection_capabilities.management,
+            self.model_connection_capabilities.secret_capture,
+            self.model_connection_capabilities.connection_test,
             mcp_management,
             mcp_host_capabilities.connection_approval,
             mcp_host_capabilities.secret_capture,
@@ -7862,10 +8062,11 @@ pub const Workbench = struct {
     ) Error!void {
         const view = self.accountView();
         writer.print(
-            "{{\"state\":\"{s}\",\"catalogState\":\"{s}\",\"canCancel\":{},\"accountId\":",
+            "{{\"state\":\"{s}\",\"catalogState\":\"{s}\",\"executionSource\":\"{s}\",\"canCancel\":{},\"accountId\":",
             .{
                 @tagName(view.state),
                 @tagName(view.catalog_state),
+                @tagName(view.execution_source),
                 view.can_cancel,
             },
         ) catch return error.SnapshotTooLarge;
@@ -7919,14 +8120,56 @@ pub const Workbench = struct {
         writer.writeAll(",\"modelCatalogApiKeySelectionId\":") catch
             return error.SnapshotTooLarge;
         try self.projectedJsonValue(writer, view.model_catalog_api_key_id);
+        writer.writeAll(",\"modelConnections\":[") catch
+            return error.SnapshotTooLarge;
+        for (view.model_connections, 0..) |connection, index| {
+            if (index != 0) writer.writeByte(',') catch
+                return error.SnapshotTooLarge;
+            writer.writeAll("{\"id\":") catch return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, connection.id);
+            writer.writeAll(",\"displayName\":") catch return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, connection.display_name);
+            writer.print(",\"protocol\":\"{s}\",\"normalizedBaseUrl\":", .{
+                @tagName(connection.protocol),
+            }) catch return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, connection.normalized_base_url);
+            writer.print(",\"state\":\"{s}\",\"testStatus\":\"{s}\",\"credentialStatus\":\"{s}\",\"enabled\":{},\"connectionGeneration\":\"{d}\",\"selectedModel\":", .{
+                @tagName(connection.state),
+                @tagName(connection.test_status),
+                @tagName(connection.credential_status),
+                connection.enabled,
+                connection.connection_generation,
+            }) catch return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, connection.selected_model);
+            writer.writeAll(",\"models\":[") catch return error.SnapshotTooLarge;
+            for (connection.models, 0..) |model, model_index| {
+                if (model_index != 0) writer.writeByte(',') catch
+                    return error.SnapshotTooLarge;
+                writer.writeAll("{\"id\":") catch return error.SnapshotTooLarge;
+                try self.projectedJsonValue(writer, model.id);
+                writer.writeAll(",\"displayName\":") catch return error.SnapshotTooLarge;
+                try self.projectedJsonValue(writer, model.display_name);
+                writer.writeByte('}') catch return error.SnapshotTooLarge;
+            }
+            writer.writeAll("]}") catch return error.SnapshotTooLarge;
+        }
+        writer.writeAll("],\"selectedModelConnectionId\":") catch
+            return error.SnapshotTooLarge;
+        try self.projectedJsonValue(writer, view.selected_model_connection_id);
+        writer.writeAll(",\"canCreateTask\":") catch
+            return error.SnapshotTooLarge;
         writer.print(
-            ",\"canCreateTask\":{},\"errorCode\":\"{s}\",\"safeDiagnostic\":",
+            "{},\"errorCode\":\"{s}\",\"safeDiagnostic\":",
             .{ view.can_create_task, @tagName(view.error_code) },
         ) catch return error.SnapshotTooLarge;
         try self.projectedJsonValue(writer, view.safe_diagnostic);
         writer.print(
-            ",\"catalogGeneration\":\"{d}\",\"executionGeneration\":\"{d}\"}}",
-            .{ view.catalog_generation, view.execution_generation },
+            ",\"catalogGeneration\":\"{d}\",\"metaskExecutionGeneration\":\"{d}\",\"executionGeneration\":\"{d}\"}}",
+            .{
+                view.catalog_generation,
+                view.metask_execution_generation,
+                view.execution_generation,
+            },
         ) catch return error.SnapshotTooLarge;
     }
 
@@ -8001,6 +8244,7 @@ pub const Workbench = struct {
         if (self.canonical_user_home) |home| self.allocator.free(home);
         if (self.mcp) |*mcp| mcp.deinit();
         self.execution.deinit();
+        if (self.custom_execution_binding) |*binding| binding.deinit();
         self.account.deinit();
         std.debug.assert(self.projection_bytes == 0);
         self.executor.deinit();
@@ -8802,13 +9046,17 @@ pub const Workbench = struct {
     }
 
     fn recoveryExecutionExact(self: *const Workbench, task: *const TaskView) bool {
-        return self.execution_replacement == .none and
-            self.account.account_can_create_task and
+        if (self.execution_replacement != .none or
+            !self.execution.ready() or
+            task.durable.execution_generation != self.execution.generation or
+            task.durable.execution_provider != self.execution.provider.?)
+            return false;
+        if (self.custom_execution_binding) |binding|
+            return std.mem.eql(u8, binding.model_id, self.execution.model()) and
+                std.mem.eql(u8, task.durable.execution_model, binding.model_id);
+        return self.account.account_can_create_task and
             self.account.catalog_state == .ready and
-            self.execution.ready() and
             self.account.execution_generation == self.execution.generation and
-            task.durable.execution_generation == self.execution.generation and
-            task.durable.execution_provider == self.execution.provider.? and
             self.accountHasModel(task.durable.execution_model);
     }
 
@@ -8851,10 +9099,26 @@ pub const Workbench = struct {
     fn canCreateTask(self: *const Workbench) bool {
         return !self.shutting_down and
             self.execution_replacement == .none and
-            self.account.account_can_create_task and
-            self.account.catalog_state == .ready and
             self.execution.ready() and
-            self.account.execution_generation == self.execution.generation;
+            if (self.custom_execution_binding != null)
+                true
+            else
+                self.account.account_can_create_task and
+                    self.account.catalog_state == .ready and
+                    self.account.execution_generation == self.execution.generation;
+    }
+
+    fn validExecutionGeneration(self: *const Workbench, generation: u64) bool {
+        return generation != 0 and generation == self.execution.generation and
+            (self.custom_execution_binding != null or
+                generation == self.account.execution_generation);
+    }
+
+    fn admissionModel(self: *const Workbench) []const u8 {
+        return if (self.custom_execution_binding != null)
+            self.execution.model()
+        else
+            self.account.selected_model.view();
     }
 
     fn scheduledTaskDefinition(
@@ -8862,9 +9126,7 @@ pub const Workbench = struct {
         input: ScheduledTaskDefinitionInput,
     ) Error!scheduled_tasks_impl.Definition {
         if (!self.canCreateTask()) return error.ExecutionUnavailable;
-        if (input.expected_execution_generation == 0 or
-            input.expected_execution_generation != self.execution.generation or
-            input.expected_execution_generation != self.account.execution_generation)
+        if (!self.validExecutionGeneration(input.expected_execution_generation))
             return error.ExecutionGenerationMismatch;
         const title = std.mem.trim(u8, input.title, " \t\r\n");
         if (title.len == 0 or title.len > self.limits.max_task_title_bytes or
@@ -8883,7 +9145,7 @@ pub const Workbench = struct {
             .title = title,
             .execution_generation = self.execution.generation,
             .execution_provider = scheduledProvider(self.execution.provider.?),
-            .execution_model = self.account.selected_model.view(),
+            .execution_model = self.admissionModel(),
             .input = scheduled_input,
             .recurrence = input.recurrence,
         };
@@ -9130,7 +9392,7 @@ pub const Workbench = struct {
                     item.execution_generation != self.execution.generation or
                     item.execution_provider != scheduledProvider(self.execution.provider orelse
                         break :binding .execution_changed) or
-                    !std.mem.eql(u8, item.execution_model, self.account.selected_model.view()))
+                    !std.mem.eql(u8, item.execution_model, self.admissionModel()))
                     break :binding .execution_changed;
                 if (self.automatic_workspaces == null)
                     break :binding .workspace_unavailable;
@@ -13237,6 +13499,7 @@ fn agentProvider(provider: Provider) lifecycle.ProviderKind {
     return switch (provider) {
         .anthropic => .anthropic,
         .openai => .openai,
+        .gemini => .gemini,
     };
 }
 
@@ -13244,6 +13507,7 @@ fn accountProviderKind(provider: Provider) account_contract.ProviderKind {
     return switch (provider) {
         .anthropic => .anthropic,
         .openai => .openai,
+        .gemini => .gemini,
     };
 }
 
@@ -13253,6 +13517,7 @@ fn accountProvider(
     return switch (provider) {
         .anthropic => .anthropic,
         .openai => .openai,
+        .gemini => .gemini,
     };
 }
 
@@ -13260,6 +13525,7 @@ fn scheduledProvider(provider: Provider) scheduled_tasks_impl.Provider {
     return switch (provider) {
         .anthropic => .anthropic,
         .openai => .openai,
+        .gemini => .gemini,
     };
 }
 
@@ -14209,6 +14475,17 @@ fn worstCaseSnapshotBytes(limits: Limits) ?usize {
         total,
         std.math.mul(
             usize,
+            model_connection_snapshot_text_bytes,
+            json_string_expansion,
+        ) catch return null,
+    ) catch return null;
+    total = std.math.add(usize, total, model_connection_snapshot_overhead) catch
+        return null;
+    total = std.math.add(
+        usize,
+        total,
+        std.math.mul(
+            usize,
             workspaceRecordCapacity(limits) orelse return null,
             workspace_snapshot_overhead,
         ) catch return null,
@@ -14391,9 +14668,11 @@ fn installTestExecution(workbench: *Workbench) !void {
             .model_catalog_api_key_id = "key-1",
             .can_create_task = true,
             .catalog_generation = 1,
+            .metask_execution_generation = 1,
             .execution_generation = 1,
         },
     });
+    try account_contract.validateView(workbench.accountView());
     workbench.installExecutionNoFail(&execution);
     workbench.endExecutionReplacementNoFail();
     workbench.finishAccountCommitNoFail();
@@ -15742,6 +16021,87 @@ test "Workbench starts without execution and fails Task admission closed" {
     try std.testing.expectEqual(@as(u64, 0), workbench.currentRevision());
 }
 
+test "Workbench publishes a user model connection as an independent execution source" {
+    test_agent_runtime.io = std.testing.io;
+    var workbench = try Workbench.init(
+        std.testing.allocator,
+        std.testing.io,
+        &test_agent_runtime,
+        .{
+            .max_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        .{},
+    );
+    defer workbench.deinit();
+    const models = [_]account_contract.ModelConnectionModelView{.{
+        .id = "gpt-5",
+        .display_name = "GPT-5",
+    }};
+    const connections = [_]account_contract.ModelConnectionView{.{
+        .id = "connection-1",
+        .display_name = "Team OpenAI",
+        .protocol = .openai_chat_completions,
+        .normalized_base_url = "https://api.openai.com/v1/chat/completions",
+        .state = .ready,
+        .test_status = .connected,
+        .credential_status = .ready,
+        .enabled = true,
+        .models = &models,
+        .selected_model = "gpt-5",
+        .connection_generation = 1,
+    }};
+    workbench.commitAccountFactNoFail(.{
+        .kind = .model_connections_changed,
+        .view = .{
+            .state = .signed_out,
+            .catalog_state = .unavailable,
+            .model_connections = &connections,
+        },
+    });
+    var execution = try account_contract.OwnedExecutionConfig.initModelConnectionOwned(
+        std.testing.allocator,
+        .openai,
+        try std.testing.allocator.dupe(u8, "gpt-5"),
+        try std.testing.allocator.dupe(u8, "https://api.openai.com/v1/chat/completions"),
+        1,
+        try std.testing.allocator.dupe(u8, "secret-key"),
+    );
+    errdefer execution.deinit();
+    var prepared_binding = try workbench.prepareModelConnectionBinding(
+        "connection-1",
+        "gpt-5",
+    );
+    var prepared_binding_owned = true;
+    defer if (prepared_binding_owned) prepared_binding.deinit();
+    try workbench.beginDefaultExecutionReplacement();
+    workbench.installModelConnectionExecutionNoFail(
+        &execution,
+        &prepared_binding,
+    );
+    prepared_binding_owned = false;
+    workbench.endExecutionReplacementNoFail();
+    const view = workbench.accountView();
+    try std.testing.expectEqual(account_contract.ExecutionSource.model_connection, view.execution_source);
+    try std.testing.expectEqual(account_contract.AccountState.signed_out, view.state);
+    try std.testing.expectEqual(account_contract.CatalogState.unavailable, view.catalog_state);
+    try std.testing.expect(view.can_create_task);
+    try std.testing.expectEqualStrings("", view.selected_model);
+    try std.testing.expectEqualStrings("gpt-5", view.model_connections[0].selected_model);
+    try std.testing.expectEqualStrings(
+        "connection-1",
+        view.selected_model_connection_id,
+    );
+    try std.testing.expect(workbench.modelConnectionExecutionActive("connection-1"));
+    try std.testing.expect(!workbench.modelConnectionExecutionActive("connection-2"));
+    try account_contract.validateModelConnectionSpec(.{
+        .display_name = "Team OpenAI",
+        .protocol = .openai_chat_completions,
+        .normalized_base_url = "https://api.openai.com/v1/chat/completions",
+    });
+}
+
 test "Account projection and execution install use preallocated no-fail storage" {
     test_agent_runtime.io = std.testing.io;
     var workbench = try Workbench.init(
@@ -15793,6 +16153,7 @@ test "Account projection and execution install use preallocated no-fail storage"
             .model_catalog_api_key_id = "key-1",
             .can_create_task = true,
             .catalog_generation = 2,
+            .metask_execution_generation = 1,
             .execution_generation = 1,
         },
     });
@@ -15906,6 +16267,7 @@ test "default replacement preserves Task generation and installs the next admiss
             .selected_model = "fixture-model-2",
             .model_catalog_api_key_id = "key-2",
             .can_create_task = true,
+            .metask_execution_generation = 2,
             .execution_generation = 2,
         },
     });
@@ -15995,6 +16357,7 @@ test "Account default model changes do not bump credentials" {
             .selected_model = "fixture-model-2",
             .model_catalog_api_key_id = "key-1",
             .can_create_task = true,
+            .metask_execution_generation = 1,
             .execution_generation = 1,
         },
     });
@@ -16036,6 +16399,7 @@ test "busy Task model selection keeps only the last runtime pending model" {
             .model_catalog_api_key_id = "key-1",
             .can_create_task = true,
             .catalog_generation = 2,
+            .metask_execution_generation = 1,
             .execution_generation = 1,
         },
     });
@@ -16486,6 +16850,7 @@ test "Workbench shutdown releases current and Task-owned execution generations" 
             .selected_model = "fixture-model-2",
             .model_catalog_api_key_id = "key-2",
             .can_create_task = true,
+            .metask_execution_generation = 2,
             .execution_generation = 2,
         },
     });
@@ -16916,6 +17281,7 @@ fn installMaximumAccountProjection(workbench: *Workbench) !void {
             .error_code = .invalid_state,
             .safe_diagnostic = &diagnostic,
             .catalog_generation = std.math.maxInt(u64),
+            .metask_execution_generation = std.math.maxInt(u64),
             .execution_generation = std.math.maxInt(u64),
         },
     });

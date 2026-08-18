@@ -36,6 +36,7 @@ const account = {
   errorCode: "none",
   safeDiagnostic: "",
   catalogGeneration: "0",
+  metaskExecutionGeneration: "0",
   executionGeneration: "0",
 };
 

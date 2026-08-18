@@ -142,6 +142,14 @@ const App = struct {
         const workbench_storage = self.workbench_storage orelse
             @panic("Workbench storage is not composed");
         var configuration = self.workbench_configuration;
+        const model_connection_platform_available = self.platform.services() != null;
+        configuration.model_connections = .{
+            .management = model_connection_platform_available,
+            // Native SDK currently exposes no trusted secret text-input
+            // surface. Keep create/credential replacement fail closed.
+            .secret_capture = false,
+            .connection_test = model_connection_platform_available,
+        };
         configuration.mcp = .{
             .preparation = &preparation,
             .activation = activation,
@@ -205,6 +213,10 @@ const App = struct {
         self.mcp_oauth_refresh.?.start();
         const coordinator = self.account_coordinator orelse
             @panic("Account coordinator is not composed");
+        coordinator.setModelConnectionProbeNotifier(.{
+            .context = &self.platform,
+            .notify_fn = app_platform.Adapter.notifyRequired,
+        });
         if (self.automation.active()) {
             coordinator.startAutomation();
             if (self.automation.executionFixture()) |execution| {
@@ -462,6 +474,7 @@ pub fn run(init: std.process.Init) !void {
         &account_runtime,
         &workbench,
         app.main_thread_id,
+        init.io,
     );
     app.account_coordinator = &account_coordinator_state;
     defer {

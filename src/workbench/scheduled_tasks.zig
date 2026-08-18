@@ -17,6 +17,7 @@ pub const Error = std.mem.Allocator.Error || error{
 pub const Provider = enum {
     anthropic,
     openai,
+    gemini,
 };
 
 pub const Recurrence = union(enum) {

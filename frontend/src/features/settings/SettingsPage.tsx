@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import type { AccountView } from "../../bridge/contracts.ts";
+import type {
+  AccountView,
+  ModelConnectionProtocol,
+} from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { Button } from "../../components/ui/button.tsx";
 import {
@@ -9,12 +12,46 @@ import {
 } from "../../components/ui/SelectionMenu.tsx";
 import { useI18n, type Locale } from "../../i18n/context.ts";
 import { accountErrorText } from "../../i18n/account-error.ts";
-export type SettingsFocusTarget = "title" | "account" | "signout";
-type SettingsSection = "general" | "account";
+
+const MODEL_CONNECTION_SETTINGS_ENABLED: boolean = false;
+
+export type SettingsFocusTarget =
+  "title" | "account" | "model_connections" | "signout";
+type SettingsSection = "general" | "account" | "model_connections";
 type RequestedSelection = {
   selectionId: string;
   label: string;
 };
+type ModelConnectionDraft = {
+  displayName: string;
+  protocol: ModelConnectionProtocol;
+  normalizedBaseUrl: string;
+  modelId: string;
+};
+type ModelConnectionEditDraft = Omit<ModelConnectionDraft, "modelId"> & {
+  connectionId: string;
+  expectedConnectionGeneration: string;
+};
+type ModelConnectionRemoval = {
+  connectionId: string;
+  expectedConnectionGeneration: string;
+};
+
+const modelConnectionEndpointDefaults: Record<ModelConnectionProtocol, string> =
+  {
+    anthropic_messages: "https://api.anthropic.com/v1/messages",
+    openai_chat_completions: "https://api.openai.com/v1/chat/completions",
+    gemini_native: "https://generativelanguage.googleapis.com",
+  };
+
+function newModelConnectionDraft(): ModelConnectionDraft {
+  return {
+    displayName: "",
+    protocol: "openai_chat_completions",
+    normalizedBaseUrl: modelConnectionEndpointDefaults.openai_chat_completions,
+    modelId: "",
+  };
+}
 
 function providerLabel(
   provider: AccountView["apiKeys"][number]["provider"],
@@ -37,8 +74,37 @@ function modelLabel(
   return model.displayName.trim() || model.selectionId;
 }
 
+function modelConnectionProtocolLabel(
+  protocol: AccountView["modelConnections"][number]["protocol"],
+  t: ReturnType<typeof useI18n>["t"],
+) {
+  return t(`settings.model_connection_protocol.${protocol}`);
+}
+
+function modelConnectionCredentialLabel(
+  status: AccountView["modelConnections"][number]["credentialStatus"],
+  t: ReturnType<typeof useI18n>["t"],
+) {
+  return t(`settings.model_connection_credential.${status}`);
+}
+
+function modelConnectionStateLabel(
+  state: AccountView["modelConnections"][number]["state"],
+  t: ReturnType<typeof useI18n>["t"],
+) {
+  return t(`settings.model_connection_state.${state}`);
+}
+
+function modelConnectionTestStatusLabel(
+  status: AccountView["modelConnections"][number]["testStatus"],
+  t: ReturnType<typeof useI18n>["t"],
+) {
+  return t(`settings.model_connection_test_status.${status}`);
+}
+
 export function SettingsPage({
   account,
+  modelConnectionCapabilities,
   focusTarget,
   disabled,
   cancelDisabled,
@@ -47,10 +113,21 @@ export function SettingsPage({
   onCancel,
   onSelectApiKey,
   onSelectModel,
+  onActivateMetask,
+  onCreateModelConnection,
+  onUpdateModelConnection,
+  onRemoveModelConnection,
+  onTestModelConnection,
+  onSelectModelConnection,
   onBeginLogin,
   onLogout,
 }: {
   account: AccountView;
+  modelConnectionCapabilities: {
+    management: boolean;
+    secretCapture: boolean;
+    connectionTest: boolean;
+  };
   focusTarget: SettingsFocusTarget;
   disabled: boolean;
   cancelDisabled: boolean;
@@ -59,10 +136,34 @@ export function SettingsPage({
   onCancel: () => void;
   onSelectApiKey: (id: string) => void;
   onSelectModel: (id: string) => void;
+  onActivateMetask: () => void;
+  onCreateModelConnection: (input: ModelConnectionDraft) => Promise<boolean>;
+  onUpdateModelConnection: (
+    input: ModelConnectionEditDraft,
+  ) => Promise<boolean>;
+  onRemoveModelConnection: (
+    connectionId: string,
+    expectedConnectionGeneration: string,
+  ) => Promise<boolean>;
+  onTestModelConnection: (
+    connectionId: string,
+    connectionGeneration: string,
+    modelId: string,
+  ) => void;
+  onSelectModelConnection: (
+    connectionId: string,
+    connectionGeneration: string,
+    modelId: string,
+  ) => void;
   onBeginLogin: () => void;
   onLogout: () => void;
 }) {
   const { locale, setLocale, t } = useI18n();
+  const modelConnectionSettingsAvailable =
+    MODEL_CONNECTION_SETTINGS_ENABLED &&
+    modelConnectionCapabilities.management &&
+    modelConnectionCapabilities.secretCapture &&
+    modelConnectionCapabilities.connectionTest;
   const [confirmSignOut, setConfirmSignOut] = useState(false);
   const [activeSection, setActiveSection] =
     useState<SettingsSection>("general");
@@ -71,10 +172,20 @@ export function SettingsPage({
   );
   const [requestedModel, setRequestedModel] =
     useState<RequestedSelection | null>(null);
+  const [modelConnectionDraft, setModelConnectionDraft] =
+    useState<ModelConnectionDraft | null>(null);
+  const [creatingModelConnection, setCreatingModelConnection] = useState(false);
+  const [modelConnectionEdit, setModelConnectionEdit] =
+    useState<ModelConnectionEditDraft | null>(null);
+  const [modelConnectionRemoval, setModelConnectionRemoval] =
+    useState<ModelConnectionRemoval | null>(null);
+  const [mutatingModelConnection, setMutatingModelConnection] = useState(false);
   const content = useRef<HTMLDivElement>(null);
   const title = useRef<HTMLHeadingElement>(null);
   const accountSection = useRef<HTMLElement>(null);
   const accountHeading = useRef<HTMLHeadingElement>(null);
+  const modelConnectionsSection = useRef<HTMLDivElement>(null);
+  const modelConnectionsHeading = useRef<HTMLHeadingElement>(null);
   const signOut = useRef<HTMLButtonElement>(null);
   const signOutCancel = useRef<HTMLButtonElement>(null);
   const modelCatalogApi = useMemo(
@@ -153,6 +264,16 @@ export function SettingsPage({
     }
     return options;
   }, [account.models, requestedModel, t]);
+  const modelConnectionProtocolOptions = useMemo<SelectionMenuOption[]>(
+    () =>
+      (["openai_chat_completions", "gemini_native"] as const).map(
+        (protocol) => ({
+          value: protocol,
+          label: modelConnectionProtocolLabel(protocol, t),
+        }),
+      ),
+    [t],
+  );
   // While the host is asking for a choice (parked "choosing" with no
   // candidate), the selector must not pre-fill the committed value: the
   // select control never fires for the already-displayed value, which would
@@ -282,10 +403,24 @@ export function SettingsPage({
         accountHeading.current?.focus();
         return;
       }
+      if (
+        focusTarget === "model_connections" &&
+        modelConnectionSettingsAvailable
+      ) {
+        setActiveSection("model_connections");
+        if (content.current && modelConnectionsSection.current) {
+          content.current.scrollTo({
+            top: contentTop(modelConnectionsSection.current) - 18,
+            behavior: "auto",
+          });
+        }
+        modelConnectionsHeading.current?.focus();
+        return;
+      }
       (focusTarget === "signout" ? signOut.current : title.current)?.focus();
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [focusTarget]);
+  }, [focusTarget, modelConnectionSettingsAvailable]);
 
   useEffect(() => {
     if (!confirmSignOut) return;
@@ -294,6 +429,35 @@ export function SettingsPage({
     );
     return () => window.cancelAnimationFrame(frame);
   }, [confirmSignOut]);
+
+  useEffect(() => {
+    if (modelConnectionCapabilities.secretCapture) return;
+    setModelConnectionDraft(null);
+    setCreatingModelConnection(false);
+  }, [modelConnectionCapabilities.secretCapture]);
+
+  useEffect(() => {
+    setModelConnectionEdit((current) => {
+      if (!current) return null;
+      const connection = account.modelConnections.find(
+        (candidate) => candidate.id === current.connectionId,
+      );
+      return connection?.connectionGeneration ===
+        current.expectedConnectionGeneration
+        ? current
+        : null;
+    });
+    setModelConnectionRemoval((current) => {
+      if (!current) return null;
+      const connection = account.modelConnections.find(
+        (candidate) => candidate.id === current.connectionId,
+      );
+      return connection?.connectionGeneration ===
+        current.expectedConnectionGeneration
+        ? current
+        : null;
+    });
+  }, [account.modelConnections]);
 
   useEffect(() => {
     if (
@@ -317,6 +481,56 @@ export function SettingsPage({
     window.requestAnimationFrame(() => signOut.current?.focus());
   }
 
+  async function submitModelConnection() {
+    if (!modelConnectionDraft || creatingModelConnection) return;
+    const input = {
+      ...modelConnectionDraft,
+      displayName: modelConnectionDraft.displayName.trim(),
+      normalizedBaseUrl: modelConnectionDraft.normalizedBaseUrl.trim(),
+      modelId: modelConnectionDraft.modelId.trim(),
+    };
+    if (!input.displayName || !input.normalizedBaseUrl || !input.modelId)
+      return;
+    setCreatingModelConnection(true);
+    try {
+      if (await onCreateModelConnection(input)) setModelConnectionDraft(null);
+    } finally {
+      setCreatingModelConnection(false);
+    }
+  }
+
+  async function submitModelConnectionEdit() {
+    if (!modelConnectionEdit || mutatingModelConnection) return;
+    const input = {
+      ...modelConnectionEdit,
+      displayName: modelConnectionEdit.displayName.trim(),
+      normalizedBaseUrl: modelConnectionEdit.normalizedBaseUrl.trim(),
+    };
+    if (!input.displayName || !input.normalizedBaseUrl) return;
+    setMutatingModelConnection(true);
+    try {
+      if (await onUpdateModelConnection(input)) setModelConnectionEdit(null);
+    } finally {
+      setMutatingModelConnection(false);
+    }
+  }
+
+  async function removeModelConnection() {
+    if (!modelConnectionRemoval || mutatingModelConnection) return;
+    setMutatingModelConnection(true);
+    try {
+      if (
+        await onRemoveModelConnection(
+          modelConnectionRemoval.connectionId,
+          modelConnectionRemoval.expectedConnectionGeneration,
+        )
+      )
+        setModelConnectionRemoval(null);
+    } finally {
+      setMutatingModelConnection(false);
+    }
+  }
+
   function contentTop(element: HTMLElement | null) {
     if (!content.current || !element) return 0;
     return (
@@ -327,11 +541,21 @@ export function SettingsPage({
   }
 
   function updateActiveSection() {
-    if (!content.current || !accountSection.current) return;
+    if (
+      !content.current ||
+      !accountSection.current ||
+      !modelConnectionsSection.current
+    )
+      return;
     const readingLine =
       content.current.scrollTop +
       Math.min(160, content.current.clientHeight * 0.3);
-    if (contentTop(accountSection.current) <= readingLine)
+    if (
+      modelConnectionSettingsAvailable &&
+      contentTop(modelConnectionsSection.current) <= readingLine
+    )
+      setActiveSection("model_connections");
+    else if (contentTop(accountSection.current) <= readingLine)
       setActiveSection("account");
     else setActiveSection("general");
   }
@@ -394,7 +618,26 @@ export function SettingsPage({
               });
             }}
           >
-            {t("settings.account_models")}
+            {t("settings.account")}
+          </a>
+          <a
+            className="focus-ring"
+            href="#settings-model-connections"
+            aria-current={
+              activeSection === "model_connections" ? "location" : undefined
+            }
+            hidden={!modelConnectionSettingsAvailable}
+            onClick={(event) => {
+              event.preventDefault();
+              setActiveSection("model_connections");
+              if (!content.current || !modelConnectionsHeading.current) return;
+              content.current.scrollTo({
+                top: contentTop(modelConnectionsHeading.current) - 18,
+                behavior: "smooth",
+              });
+            }}
+          >
+            {t("settings.model_connections")}
           </a>
         </nav>
 
@@ -436,7 +679,7 @@ export function SettingsPage({
             <div className="settings-section-heading">
               <p>{t("settings.section_label")}</p>
               <h2 ref={accountHeading} tabIndex={-1}>
-                {t("settings.account_models")}
+                {t("settings.account")}
               </h2>
             </div>
 
@@ -481,6 +724,18 @@ export function SettingsPage({
                   {t("settings.execution_defaults")}
                 </h3>
                 <div className="settings-execution-actions">
+                  {account.executionSource === "model_connection" &&
+                    authenticated &&
+                    account.catalogState === "ready" && (
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        disabled={disabled}
+                        onClick={onActivateMetask}
+                      >
+                        {t("settings.use_metask_default")}
+                      </Button>
+                    )}
                   <span className="settings-catalog-count">
                     {t("settings.catalog_count", {
                       apis: account.apiKeys.length,
@@ -746,6 +1001,446 @@ export function SettingsPage({
                 )}
               </div>
             )}
+          </section>
+
+          <section
+            ref={modelConnectionsSection}
+            id="settings-model-connections"
+            className="settings-section settings-model-connections"
+            aria-labelledby="settings-model-connections-title"
+            hidden={!modelConnectionSettingsAvailable}
+          >
+            <div className="settings-execution-header">
+              <div>
+                <h3
+                  id="settings-model-connections-title"
+                  ref={modelConnectionsHeading}
+                  tabIndex={-1}
+                >
+                  {t("settings.model_connections")}
+                </h3>
+                <p>{t("settings.model_connections_help")}</p>
+              </div>
+              {modelConnectionCapabilities.secretCapture && (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  disabled={disabled || creatingModelConnection}
+                  onClick={() =>
+                    setModelConnectionDraft((current) =>
+                      current ? null : newModelConnectionDraft(),
+                    )
+                  }
+                  aria-expanded={modelConnectionDraft !== null}
+                  aria-controls="settings-model-connection-create"
+                >
+                  {modelConnectionDraft
+                    ? t("common.cancel")
+                    : t("settings.model_connection_add")}
+                </Button>
+              )}
+            </div>
+            {modelConnectionDraft && (
+              <form
+                id="settings-model-connection-create"
+                className="settings-model-connection-create"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void submitModelConnection();
+                }}
+              >
+                <div
+                  className="settings-model-connection-route"
+                  aria-hidden="true"
+                >
+                  <span>{t("settings.model_connection_route.protocol")}</span>
+                  <span>{t("settings.model_connection_route.endpoint")}</span>
+                  <span>{t("settings.model_connection_route.model")}</span>
+                </div>
+                <label className="settings-model-connection-create-field">
+                  <span>{t("settings.model_connection_name")}</span>
+                  <input
+                    className="settings-model-connection-input focus-ring"
+                    autoComplete="off"
+                    maxLength={256}
+                    value={modelConnectionDraft.displayName}
+                    placeholder={t(
+                      "settings.model_connection_name_placeholder",
+                    )}
+                    disabled={disabled || creatingModelConnection}
+                    onChange={(event) =>
+                      setModelConnectionDraft((current) =>
+                        current
+                          ? { ...current, displayName: event.target.value }
+                          : current,
+                      )
+                    }
+                  />
+                </label>
+                <div className="settings-model-connection-create-field">
+                  <span>{t("settings.model_connection_protocol")}</span>
+                  <SelectionMenu
+                    value={modelConnectionDraft.protocol}
+                    options={modelConnectionProtocolOptions}
+                    placeholder={t("settings.model_connection_protocol")}
+                    ariaLabel={t("settings.model_connection_protocol")}
+                    disabled={disabled || creatingModelConnection}
+                    triggerClassName="settings-control"
+                    onValueChange={(value) => {
+                      const protocol = value as ModelConnectionProtocol;
+                      setModelConnectionDraft((current) =>
+                        current
+                          ? {
+                              ...current,
+                              protocol,
+                              normalizedBaseUrl:
+                                modelConnectionEndpointDefaults[protocol],
+                            }
+                          : current,
+                      );
+                    }}
+                  />
+                </div>
+                <label className="settings-model-connection-create-field settings-model-connection-create-field-wide">
+                  <span>{t("settings.model_connection_endpoint")}</span>
+                  <input
+                    className="settings-model-connection-input focus-ring"
+                    autoComplete="url"
+                    inputMode="url"
+                    maxLength={2048}
+                    value={modelConnectionDraft.normalizedBaseUrl}
+                    disabled={disabled || creatingModelConnection}
+                    onChange={(event) =>
+                      setModelConnectionDraft((current) =>
+                        current
+                          ? {
+                              ...current,
+                              normalizedBaseUrl: event.target.value,
+                            }
+                          : current,
+                      )
+                    }
+                  />
+                </label>
+                <label className="settings-model-connection-create-field settings-model-connection-create-field-wide">
+                  <span>{t("settings.model_connection_model_id")}</span>
+                  <input
+                    className="settings-model-connection-input settings-model-connection-input-mono focus-ring"
+                    autoComplete="off"
+                    maxLength={256}
+                    value={modelConnectionDraft.modelId}
+                    placeholder={t(
+                      "settings.model_connection_model_id_placeholder",
+                    )}
+                    disabled={disabled || creatingModelConnection}
+                    onChange={(event) =>
+                      setModelConnectionDraft((current) =>
+                        current
+                          ? { ...current, modelId: event.target.value }
+                          : current,
+                      )
+                    }
+                  />
+                </label>
+                <div className="settings-model-connection-create-footer">
+                  <p>{t("settings.model_connection_secure_capture_help")}</p>
+                  <Button
+                    type="submit"
+                    size="sm"
+                    disabled={
+                      disabled ||
+                      creatingModelConnection ||
+                      !modelConnectionDraft.displayName.trim() ||
+                      !modelConnectionDraft.normalizedBaseUrl.trim() ||
+                      !modelConnectionDraft.modelId.trim()
+                    }
+                  >
+                    {creatingModelConnection
+                      ? t("settings.model_connection_adding")
+                      : t("settings.model_connection_add")}
+                  </Button>
+                </div>
+              </form>
+            )}
+            {!modelConnectionCapabilities.management ? (
+              <p className="settings-model-connections-empty">
+                {t("settings.model_connections_unavailable")}
+              </p>
+            ) : account.modelConnections.length === 0 ? (
+              <p className="settings-model-connections-empty">
+                {t("settings.model_connections_empty")}
+              </p>
+            ) : (
+              <div className="settings-model-connection-list">
+                {account.modelConnections.map((connection) => (
+                  <div
+                    className="settings-model-connection"
+                    key={connection.id}
+                  >
+                    <div className="settings-model-connection-copy">
+                      <strong>{connection.displayName || connection.id}</strong>
+                      <span>
+                        {modelConnectionProtocolLabel(connection.protocol, t)}
+                        <span aria-hidden="true"> · </span>
+                        {connection.normalizedBaseUrl}
+                      </span>
+                      <span>
+                        {modelConnectionCredentialLabel(
+                          connection.credentialStatus,
+                          t,
+                        )}
+                        <span aria-hidden="true"> · </span>
+                        {modelConnectionStateLabel(connection.state, t)}
+                        <span aria-hidden="true"> · </span>
+                        {modelConnectionTestStatusLabel(
+                          connection.testStatus,
+                          t,
+                        )}
+                      </span>
+                    </div>
+                    <div className="settings-model-connection-actions">
+                      <button
+                        className="text-button focus-ring"
+                        disabled={
+                          disabled ||
+                          !modelConnectionCapabilities.connectionTest ||
+                          connection.testStatus === "testing" ||
+                          connection.credentialStatus !== "ready" ||
+                          connection.selectedModel.length === 0
+                        }
+                        onClick={() =>
+                          onTestModelConnection(
+                            connection.id,
+                            connection.connectionGeneration,
+                            connection.selectedModel,
+                          )
+                        }
+                      >
+                        {connection.testStatus === "testing"
+                          ? t("settings.model_connection_testing")
+                          : t("settings.model_connection_test")}
+                      </button>
+                      <SelectionMenu
+                        value={
+                          account.selectedModelConnectionId === connection.id
+                            ? connection.selectedModel
+                            : ""
+                        }
+                        options={connection.models.map((model) => ({
+                          value: model.id,
+                          label: model.displayName || model.id,
+                        }))}
+                        placeholder={t("settings.model_connection_set_default")}
+                        ariaLabel={t(
+                          "settings.model_connection_default_model",
+                          {
+                            connection: connection.displayName || connection.id,
+                          },
+                        )}
+                        disabled={
+                          disabled ||
+                          connection.state !== "ready" ||
+                          connection.credentialStatus !== "ready" ||
+                          connection.models.length === 0
+                        }
+                        triggerClassName="settings-control settings-model-connection-select"
+                        onValueChange={(modelId) =>
+                          onSelectModelConnection(
+                            connection.id,
+                            connection.connectionGeneration,
+                            modelId,
+                          )
+                        }
+                      />
+                      <button
+                        className="text-button focus-ring"
+                        disabled={
+                          disabled ||
+                          mutatingModelConnection ||
+                          account.selectedModelConnectionId === connection.id
+                        }
+                        onClick={() => {
+                          setModelConnectionRemoval(null);
+                          setModelConnectionEdit({
+                            connectionId: connection.id,
+                            expectedConnectionGeneration:
+                              connection.connectionGeneration,
+                            displayName: connection.displayName,
+                            protocol: connection.protocol,
+                            normalizedBaseUrl: connection.normalizedBaseUrl,
+                          });
+                        }}
+                      >
+                        {t("common.edit")}
+                      </button>
+                      <button
+                        className="text-button settings-model-connection-remove focus-ring"
+                        disabled={
+                          disabled ||
+                          mutatingModelConnection ||
+                          account.selectedModelConnectionId === connection.id
+                        }
+                        onClick={() => {
+                          setModelConnectionEdit(null);
+                          setModelConnectionRemoval({
+                            connectionId: connection.id,
+                            expectedConnectionGeneration:
+                              connection.connectionGeneration,
+                          });
+                        }}
+                      >
+                        {t("common.remove")}
+                      </button>
+                    </div>
+                    {account.selectedModelConnectionId === connection.id && (
+                      <p className="settings-model-connection-active-note">
+                        {t("settings.model_connection_active_mutation_help")}
+                      </p>
+                    )}
+                    {modelConnectionEdit?.connectionId === connection.id && (
+                      <form
+                        className="settings-model-connection-edit"
+                        onSubmit={(event) => {
+                          event.preventDefault();
+                          void submitModelConnectionEdit();
+                        }}
+                      >
+                        <label className="settings-model-connection-create-field">
+                          <span>{t("settings.model_connection_name")}</span>
+                          <input
+                            className="settings-model-connection-input focus-ring"
+                            autoComplete="off"
+                            maxLength={256}
+                            value={modelConnectionEdit.displayName}
+                            disabled={disabled || mutatingModelConnection}
+                            onChange={(event) =>
+                              setModelConnectionEdit((current) =>
+                                current
+                                  ? {
+                                      ...current,
+                                      displayName: event.target.value,
+                                    }
+                                  : current,
+                              )
+                            }
+                          />
+                        </label>
+                        <div className="settings-model-connection-create-field">
+                          <span>{t("settings.model_connection_protocol")}</span>
+                          <SelectionMenu
+                            value={modelConnectionEdit.protocol}
+                            options={modelConnectionProtocolOptions}
+                            placeholder={t(
+                              "settings.model_connection_protocol",
+                            )}
+                            ariaLabel={t("settings.model_connection_protocol")}
+                            disabled={disabled || mutatingModelConnection}
+                            triggerClassName="settings-control"
+                            onValueChange={(value) => {
+                              const protocol = value as ModelConnectionProtocol;
+                              setModelConnectionEdit((current) =>
+                                current
+                                  ? {
+                                      ...current,
+                                      protocol,
+                                      normalizedBaseUrl:
+                                        modelConnectionEndpointDefaults[
+                                          protocol
+                                        ],
+                                    }
+                                  : current,
+                              );
+                            }}
+                          />
+                        </div>
+                        <label className="settings-model-connection-create-field settings-model-connection-edit-endpoint">
+                          <span>{t("settings.model_connection_endpoint")}</span>
+                          <input
+                            className="settings-model-connection-input focus-ring"
+                            autoComplete="url"
+                            inputMode="url"
+                            maxLength={2048}
+                            value={modelConnectionEdit.normalizedBaseUrl}
+                            disabled={disabled || mutatingModelConnection}
+                            onChange={(event) =>
+                              setModelConnectionEdit((current) =>
+                                current
+                                  ? {
+                                      ...current,
+                                      normalizedBaseUrl: event.target.value,
+                                    }
+                                  : current,
+                              )
+                            }
+                          />
+                        </label>
+                        <div className="settings-model-connection-edit-actions">
+                          <p>{t("settings.model_connection_edit_help")}</p>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            disabled={mutatingModelConnection}
+                            onClick={() => setModelConnectionEdit(null)}
+                          >
+                            {t("common.cancel")}
+                          </Button>
+                          <Button
+                            type="submit"
+                            size="sm"
+                            disabled={
+                              disabled ||
+                              mutatingModelConnection ||
+                              !modelConnectionEdit.displayName.trim() ||
+                              !modelConnectionEdit.normalizedBaseUrl.trim()
+                            }
+                          >
+                            {mutatingModelConnection
+                              ? t("common.saving")
+                              : t("common.save")}
+                          </Button>
+                        </div>
+                      </form>
+                    )}
+                    {modelConnectionRemoval?.connectionId === connection.id && (
+                      <div
+                        className="settings-model-connection-confirm-remove"
+                        role="group"
+                        aria-label={t(
+                          "settings.model_connection_remove_confirm",
+                        )}
+                      >
+                        <p>{t("settings.model_connection_remove_confirm")}</p>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          disabled={mutatingModelConnection}
+                          onClick={() => setModelConnectionRemoval(null)}
+                        >
+                          {t("common.cancel")}
+                        </Button>
+                        <Button
+                          variant="danger"
+                          size="sm"
+                          disabled={disabled || mutatingModelConnection}
+                          onClick={() => void removeModelConnection()}
+                        >
+                          {mutatingModelConnection
+                            ? t("settings.model_connection_removing")
+                            : t("common.remove")}
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+            {modelConnectionCapabilities.management &&
+              !modelConnectionCapabilities.secretCapture && (
+                <p className="settings-model-connections-empty">
+                  {t("settings.model_connection_capture_unavailable")}
+                </p>
+              )}
           </section>
         </div>
       </div>

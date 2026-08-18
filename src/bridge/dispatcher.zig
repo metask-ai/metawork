@@ -141,6 +141,26 @@ pub const McpSecretSlot = union(enum) {
     oauth_client_secret,
 };
 
+/// Host-owned create transaction. Its owner must complete secure capture,
+/// credential persistence, Account registry commit, and definite-failure
+/// rollback before returning. Bridge never receives either the secret or an
+/// intermediate credential slot that it could commit separately.
+pub const ModelConnectionCreateOutcome = union(enum) {
+    submitted: account_contract.AccountCommandResult,
+    cancelled,
+    unavailable,
+};
+
+pub const ModelConnectionHost = struct {
+    context: *anyopaque,
+    create_fn: *const fn (
+        *anyopaque,
+        account_contract.ModelConnectionSpec,
+        []const u8,
+        []const u8,
+    ) ModelConnectionCreateOutcome,
+};
+
 /// Narrow Application effect port. It grants only the MCP management
 /// sequences owned by the Application coordinator, never platform authority.
 pub const McpManagementHost = struct {
@@ -158,6 +178,7 @@ pub const Dispatcher = struct {
     platform: Platform,
     automation: AutomationAuthority,
     mcp_management_host: ?McpManagementHost = null,
+    model_connection_host: ?ModelConnectionHost = null,
     bootstrap_window_id: native_sdk.platform.WindowId,
     delivery: product_delivery.Delivery,
     callbacks: callback_gate.State = .{},
@@ -198,6 +219,15 @@ pub const Dispatcher = struct {
         self.workbench = null;
         self.delivery.deinitOwnedBuffers();
         self.* = undefined;
+    }
+
+    /// Installs the Application-owned secure capture seam. Production keeps
+    /// this unset until Native SDK provides a secure text-input capability.
+    pub fn setModelConnectionHost(
+        self: *Dispatcher,
+        host: ?ModelConnectionHost,
+    ) void {
+        self.model_connection_host = host;
     }
 
     /// Registers the complete product command table. Automation may change
@@ -251,6 +281,12 @@ pub const Dispatcher = struct {
             .{ .name = commands.account_refresh_catalog, .function = accountRefreshCatalog },
             .{ .name = commands.account_select_api_key, .function = accountSelectApiKey },
             .{ .name = commands.account_select_model, .function = accountSelectModel },
+            .{ .name = commands.account_activate_metask, .function = accountActivateMetask },
+            .{ .name = commands.model_connection_create, .function = modelConnectionCreate },
+            .{ .name = commands.model_connection_update, .function = modelConnectionUpdate },
+            .{ .name = commands.model_connection_remove, .function = modelConnectionRemove },
+            .{ .name = commands.model_connection_test, .function = modelConnectionTest },
+            .{ .name = commands.model_connection_select_default, .function = modelConnectionSelectDefault },
             .{ .name = commands.account_logout, .function = accountLogout },
             .{ .name = commands.create_task, .function = createTask },
             .{ .name = commands.run, .function = runTask },
@@ -859,6 +895,192 @@ pub const Dispatcher = struct {
                 },
             }),
         );
+    }
+
+    fn accountActivateMetask(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireAccountAuthority(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(
+            handlers.AccountActivation,
+            invocation.request.payload,
+        );
+        defer parsed.deinit();
+        return encodeAccountResult(
+            output,
+            self.account_commands.submit(.{ .activate_metask = .{
+                .expected_catalog_generation = try handlers.parseWireId(
+                    parsed.value.expectedCatalogGeneration,
+                ),
+                .expected_execution_generation = try handlers.parseWireId(
+                    parsed.value.expectedExecutionGeneration,
+                ),
+            } }),
+        );
+    }
+
+    fn modelConnectionCreate(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireAccountAuthority(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(handlers.ModelConnectionCreate, invocation.request.payload);
+        defer parsed.deinit();
+        const protocol = parseModelConnectionProtocol(parsed.value.protocol) orelse
+            return error.InvalidBridgePayload;
+        const normalized_base_url = account_contract.normalizeModelConnectionEndpointAlloc(
+            std.heap.c_allocator,
+            protocol,
+            parsed.value.normalizedBaseUrl,
+        ) catch return error.InvalidBridgePayload;
+        defer std.heap.c_allocator.free(normalized_base_url);
+        if (parsed.value.displayName.len == 0 or
+            parsed.value.displayName.len > account_contract.Limits.display_name_bytes or
+            parsed.value.normalizedBaseUrl.len == 0 or
+            parsed.value.normalizedBaseUrl.len > account_contract.Limits.base_url_bytes or
+            parsed.value.modelId.len == 0 or
+            parsed.value.modelId.len > account_contract.Limits.model_id_bytes)
+            return error.InvalidBridgePayload;
+        const spec: account_contract.ModelConnectionSpec = .{
+            .display_name = parsed.value.displayName,
+            .protocol = protocol,
+            .normalized_base_url = normalized_base_url,
+        };
+        account_contract.validateModelConnectionSpec(spec) catch
+            return error.InvalidBridgePayload;
+        const host = self.model_connection_host orelse
+            return encodeAccountResult(
+                output,
+                .rejected(.model_connection_capture_unavailable),
+            );
+        return encodeAccountResult(output, switch (host.create_fn(
+            host.context,
+            spec,
+            parsed.value.modelId,
+            parsed.value.modelDisplayName,
+        )) {
+            .submitted => |result| result,
+            .cancelled => .rejected(.user_cancelled),
+            .unavailable => .rejected(.model_connection_capture_unavailable),
+        });
+    }
+
+    fn modelConnectionUpdate(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireAccountAuthority(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(handlers.ModelConnectionUpdate, invocation.request.payload);
+        defer parsed.deinit();
+        const protocol = parseModelConnectionProtocol(parsed.value.protocol) orelse
+            return error.InvalidBridgePayload;
+        const normalized_base_url = account_contract.normalizeModelConnectionEndpointAlloc(
+            std.heap.c_allocator,
+            protocol,
+            parsed.value.normalizedBaseUrl,
+        ) catch return error.InvalidBridgePayload;
+        defer std.heap.c_allocator.free(normalized_base_url);
+        const spec: account_contract.ModelConnectionSpec = .{
+            .display_name = parsed.value.displayName,
+            .protocol = protocol,
+            .normalized_base_url = normalized_base_url,
+        };
+        account_contract.validateModelConnectionSpec(spec) catch
+            return error.InvalidBridgePayload;
+        return encodeAccountResult(output, self.account_commands.submit(.{
+            .model_connection = .{ .update = .{
+                .selection = .{
+                    .connection_id = parsed.value.connectionId,
+                    .expected_connection_generation = try handlers.parseWireId(
+                        parsed.value.expectedConnectionGeneration,
+                    ),
+                },
+                .spec = spec,
+            } },
+        }));
+    }
+
+    fn modelConnectionRemove(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireAccountAuthority(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(handlers.ModelConnectionSelection, invocation.request.payload);
+        defer parsed.deinit();
+        return encodeAccountResult(output, self.account_commands.submit(.{
+            .model_connection = .{ .remove = .{
+                .connection_id = parsed.value.connectionId,
+                .expected_connection_generation = try handlers.parseWireId(parsed.value.expectedConnectionGeneration),
+            } },
+        }));
+    }
+
+    fn modelConnectionTest(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        return submitModelConnectionModelCommand(context, invocation, output, false);
+    }
+
+    fn modelConnectionSelectDefault(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        return submitModelConnectionModelCommand(context, invocation, output, true);
+    }
+
+    fn submitModelConnectionModelCommand(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+        select_default: bool,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireAccountAuthority(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(handlers.ModelConnectionModelSelection, invocation.request.payload);
+        defer parsed.deinit();
+        const command: account_contract.ModelConnectionCommand = if (select_default)
+            .{ .select_default = .{
+                .selection = .{
+                    .connection_id = parsed.value.connectionId,
+                    .expected_connection_generation = try handlers.parseWireId(parsed.value.expectedConnectionGeneration),
+                },
+                .model_id = parsed.value.modelId,
+            } }
+        else
+            .{ .test_connection = .{
+                .selection = .{
+                    .connection_id = parsed.value.connectionId,
+                    .expected_connection_generation = try handlers.parseWireId(parsed.value.expectedConnectionGeneration),
+                },
+                .model_id = parsed.value.modelId,
+            } };
+        return encodeAccountResult(output, self.account_commands.submit(.{ .model_connection = command }));
+    }
+
+    fn parseModelConnectionProtocol(value: []const u8) ?account_contract.ModelConnectionProtocol {
+        return std.meta.stringToEnum(account_contract.ModelConnectionProtocol, value);
     }
 
     fn chooseWorkspace(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
@@ -3486,6 +3708,13 @@ test "Dispatcher validates authority before domain calls and preserves committed
                     self.last_execution_generation =
                         selection.expected_execution_generation;
                 },
+                .activate_metask => |activation| {
+                    self.last_catalog_generation =
+                        activation.expected_catalog_generation;
+                    self.last_execution_generation =
+                        activation.expected_execution_generation;
+                },
+                .model_connection => {},
             }
             return self.account_result;
         }

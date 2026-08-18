@@ -5,8 +5,13 @@ const oauth = @import("account_oauth");
 const store = @import("account_credential_store");
 
 const preference_bytes = 8 * 1024;
+const model_connection_service = store.service ++ ".model-connections";
+const model_connection_slot_prefix = "model-connection-";
+pub const model_connection_slot_bytes = model_connection_slot_prefix.len + 32;
 
 pub const Services = native_sdk.platform.PlatformServices;
+pub const Credential = native_sdk.platform.Credential;
+pub const CredentialKey = native_sdk.platform.CredentialKey;
 
 pub const PlatformError = error{
     WrongThread,
@@ -79,6 +84,67 @@ pub const NativeBackend = struct {
             return error.InvalidAuthorizationUrl;
         self.services.openExternalUrl(url) catch
             return error.InvalidAuthorizationUrl;
+    }
+
+    pub fn generateModelConnectionCredentialSlot(
+        self: *NativeBackend,
+        output: *[model_connection_slot_bytes]u8,
+    ) store.StoreError![]const u8 {
+        self.assertMainThread() catch return error.WriteFailed;
+        var random: [16]u8 = undefined;
+        defer std.crypto.secureZero(u8, &random);
+        std.Io.randomSecure(self.io, &random) catch return error.WriteFailed;
+        @memcpy(output[0..model_connection_slot_prefix.len], model_connection_slot_prefix);
+        const hex = std.fmt.bytesToHex(random, .lower);
+        @memcpy(output[model_connection_slot_prefix.len..], &hex);
+        return output[0..];
+    }
+
+    pub fn storeModelConnectionCredentialAtSlot(
+        self: *NativeBackend,
+        slot: []const u8,
+        secret: []const u8,
+    ) store.StoreError!void {
+        self.assertMainThread() catch return error.WriteFailed;
+        if (!validModelConnectionSlot(slot) or secret.len == 0 or
+            secret.len > native_sdk.platform.max_credential_secret_bytes)
+            return error.WriteFailed;
+        self.services.setCredential(.{
+            .service = model_connection_service,
+            .account = slot,
+            .secret = secret,
+        }) catch return error.WriteFailed;
+    }
+
+    pub fn getModelConnectionCredential(
+        self: *NativeBackend,
+        slot: []const u8,
+        output: []u8,
+    ) store.StoreError!?[]const u8 {
+        self.assertMainThread() catch return error.ReadFailed;
+        if (!validModelConnectionSlot(slot)) return error.InvalidData;
+        return self.services.getCredential(.{
+            .service = model_connection_service,
+            .account = slot,
+        }, output) catch |err| switch (err) {
+            error.CredentialNotFound => null,
+            else => error.ReadFailed,
+        };
+    }
+
+    pub fn deleteModelConnectionCredential(
+        self: *NativeBackend,
+        slot: []const u8,
+    ) store.StoreError!void {
+        self.assertMainThread() catch return error.DeleteFailed;
+        if (!validModelConnectionSlot(slot)) return error.InvalidData;
+        self.services.deleteCredential(.{
+            .service = model_connection_service,
+            .account = slot,
+        }) catch |err| switch (err) {
+            error.CredentialNotFound => {},
+            else => return error.DeleteFailed,
+        };
     }
 
     fn assertMainThread(self: *const NativeBackend) PlatformError!void {
@@ -246,6 +312,15 @@ pub const NativeBackend = struct {
         return true;
     }
 };
+
+fn validModelConnectionSlot(slot: []const u8) bool {
+    if (slot.len != model_connection_slot_bytes or
+        !std.mem.startsWith(u8, slot, model_connection_slot_prefix))
+        return false;
+    for (slot[model_connection_slot_prefix.len..]) |byte|
+        if (!std.ascii.isHex(byte) or std.ascii.isUpper(byte)) return false;
+    return true;
+}
 
 pub fn startTimer(
     backend: *NativeBackend,

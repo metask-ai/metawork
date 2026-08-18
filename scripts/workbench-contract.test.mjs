@@ -607,6 +607,63 @@ test("Task metadata mutation acknowledgements are identity-checked and exact", (
   );
 });
 
+test("Model Connection readiness survives an isolated failed retest", () => {
+  const snapshot = clone(fixture);
+  snapshot.account = {
+    state: "signed_out",
+    catalogState: "unavailable",
+    executionSource: "model_connection",
+    canCancel: false,
+    accountId: "",
+    displayName: "",
+    apiKeys: [],
+    models: [],
+    selectedApiKeySelectionId: "",
+    selectedModelSelectionId: "",
+    candidateApiKeySelectionId: "",
+    candidateModelSelectionId: "",
+    modelCatalogApiKeySelectionId: "",
+    modelConnections: [
+      {
+        id: "connection-1",
+        displayName: "OpenAI",
+        protocol: "openai_chat_completions",
+        normalizedBaseUrl: "https://api.openai.com/v1/chat/completions",
+        state: "ready",
+        testStatus: "failed",
+        credentialStatus: "ready",
+        enabled: true,
+        connectionGeneration: "1",
+        selectedModel: "gpt-5",
+        models: [{ id: "gpt-5", displayName: "GPT-5" }],
+      },
+    ],
+    selectedModelConnectionId: "connection-1",
+    canCreateTask: true,
+    errorCode: "none",
+    safeDiagnostic: "",
+    catalogGeneration: "0",
+    metaskExecutionGeneration: "0",
+    executionGeneration: "9",
+  };
+  assert.doesNotThrow(() => decodeWorkbenchSnapshot(snapshot));
+
+  const neverVerified = clone(snapshot);
+  neverVerified.account.modelConnections[0].testStatus = "untested";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(neverVerified),
+    /ready connection must be verified/,
+  );
+
+  const impossibleConnected = clone(snapshot);
+  impossibleConnected.account.modelConnections[0].state = "configuring";
+  impossibleConnected.account.modelConnections[0].testStatus = "connected";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(impossibleConnected),
+    /only a ready connection can have a connected test/,
+  );
+});
+
 test("Conversation recovery projection is one coherent continuation state", () => {
   const recoverable = clone(fixture);
   const task = recoverable.tasks[0];
@@ -748,6 +805,7 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   assert.throws(() => decodeWorkbenchSnapshot(legacyRunInput), /expected keys/);
 
   const invalidReadyAccount = clone(fixture);
+  invalidReadyAccount.account.metaskExecutionGeneration = "0";
   invalidReadyAccount.account.executionGeneration = "0";
   assert.throws(
     () => decodeWorkbenchSnapshot(invalidReadyAccount),
@@ -842,6 +900,7 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   loadingIdentity.account.selectedModelSelectionId = "";
   loadingIdentity.account.modelCatalogApiKeySelectionId = "";
   loadingIdentity.account.canCreateTask = false;
+  loadingIdentity.account.metaskExecutionGeneration = "0";
   loadingIdentity.account.executionGeneration = "0";
   assert.doesNotThrow(() => decodeWorkbenchSnapshot(loadingIdentity));
 

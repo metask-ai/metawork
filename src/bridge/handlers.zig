@@ -46,6 +46,33 @@ pub const AccountSelection = struct {
     expectedCatalogGeneration: []const u8,
     expectedExecutionGeneration: []const u8,
 };
+pub const AccountActivation = struct {
+    expectedCatalogGeneration: []const u8,
+    expectedExecutionGeneration: []const u8,
+};
+pub const ModelConnectionCreate = struct {
+    displayName: []const u8,
+    protocol: []const u8,
+    normalizedBaseUrl: []const u8,
+    modelId: []const u8,
+    modelDisplayName: []const u8 = "",
+};
+pub const ModelConnectionUpdate = struct {
+    connectionId: []const u8,
+    expectedConnectionGeneration: []const u8,
+    displayName: []const u8,
+    protocol: []const u8,
+    normalizedBaseUrl: []const u8,
+};
+pub const ModelConnectionSelection = struct {
+    connectionId: []const u8,
+    expectedConnectionGeneration: []const u8,
+};
+pub const ModelConnectionModelSelection = struct {
+    connectionId: []const u8,
+    expectedConnectionGeneration: []const u8,
+    modelId: []const u8,
+};
 pub const WorkspaceIdentity = struct {
     workspaceId: []const u8,
     expectedWorkspaceEpoch: []const u8,

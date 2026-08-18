@@ -113,7 +113,11 @@ export function ComposerFooter({
   selectedWorkspaceOptionId: string;
   workspaceEditable: boolean;
   modelLabel: string | null;
-  modelOptions: { selectionId: string; displayName: string }[];
+  modelOptions: {
+    selectionId: string;
+    displayName: string;
+    triggerLabel?: string;
+  }[];
   selectedModelId: string;
   modelEditable: boolean;
   modelSelectionDisabled: boolean;

@@ -54,6 +54,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-account-oauth", .root_module = test_modules.account_oauth },
         .{ .name = "metawork-metask-client", .root_module = test_modules.metask_client },
         .{ .name = "metawork-account-credential-store", .root_module = test_modules.account_credential_store },
+        .{ .name = "metawork-account-model-connections", .root_module = test_modules.account_model_connections },
         .{ .name = "metawork-account-platform", .root_module = test_modules.account_platform },
         .{ .name = "metawork-account-loopback", .root_module = test_modules.account_loopback },
         .{ .name = "metawork-account-login-attempt", .root_module = test_modules.account_login_attempt },
@@ -67,6 +68,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-automation-enabled", .root_module = test_modules.automation_enabled },
         .{ .name = "metawork-bridge", .root_module = test_modules.bridge },
         .{ .name = "metawork-agent-mcp-connector", .root_module = test_modules.agent_mcp_connector },
+        .{ .name = "metawork-agent-provider-probe", .root_module = test_modules.agent_provider_probe },
         .{ .name = "metawork-agent-mcp-catalog", .root_module = test_modules.agent_mcp_catalog },
         .{ .name = "metawork-agent-mcp-http", .root_module = test_modules.agent_mcp_http },
         .{ .name = "metawork-agent-mcp-runtime", .root_module = test_modules.agent_mcp_runtime },
@@ -149,6 +151,7 @@ const WiredModules = struct {
     account_runtime: *std.Build.Module,
     account_catalog: *std.Build.Module,
     account_credentials_runtime: *std.Build.Module,
+    account_model_connections: *std.Build.Module,
     account_contract: *std.Build.Module,
     account_credential_store: *std.Build.Module,
     account_loopback: *std.Build.Module,
@@ -165,6 +168,7 @@ const WiredModules = struct {
     agent_session: *std.Build.Module,
     agent_catalog: *std.Build.Module,
     agent_checkpoint: *std.Build.Module,
+    agent_provider_probe: *std.Build.Module,
     agent_mcp_connector: *std.Build.Module,
     agent_mcp_catalog: *std.Build.Module,
     agent_mcp_http: *std.Build.Module,
@@ -527,6 +531,13 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     agent.addImport("agent_mcp_connector", agent_mcp_connector);
     agent.addImport("agent_mcp_stdio", agent_mcp_stdio);
     agent.addImport("agent_mcp_http", agent_mcp_http);
+    const agent_provider_probe = b.createModule(.{
+        .root_source_file = b.path("src/agent/provider_probe.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    agent_provider_probe.addImport("metask_agentcore", sdk);
+    agent.addImport("agent_provider_probe", agent_provider_probe);
     const account_contract = b.createModule(.{
         .root_source_file = b.path("src/account/contract.zig"),
         .target = target,
@@ -585,6 +596,12 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     account_credentials_runtime.addImport("metawork_account_contract", account_contract);
     account_credentials_runtime.addImport("metask_client", metask_client);
     account_credentials_runtime.addImport("account_catalog", account_catalog);
+    const account_model_connections = b.createModule(.{
+        .root_source_file = b.path("src/account/model_connections.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    account_model_connections.addImport("metawork_account_contract", account_contract);
     const account_network_attempt = b.createModule(.{
         .root_source_file = b.path("src/account/network_attempt.zig"),
         .target = target,
@@ -630,6 +647,8 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     account_runtime.addImport("account_catalog", account_catalog);
     account_runtime.addImport("account_credentials_runtime", account_credentials_runtime);
     account_runtime.addImport("account_network_attempt", account_network_attempt);
+    account_runtime.addImport("account_model_connections", account_model_connections);
+    account_runtime.addImport("native_sdk", existingImport(root_module, "native_sdk"));
     const account = b.createModule(.{
         .root_source_file = b.path("src/account.zig"),
         .target = target,
@@ -872,6 +891,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .account_runtime = account_runtime,
         .account_catalog = account_catalog,
         .account_credentials_runtime = account_credentials_runtime,
+        .account_model_connections = account_model_connections,
         .account_contract = account_contract,
         .account_credential_store = account_credential_store,
         .account_loopback = account_loopback,
@@ -888,6 +908,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .agent_session = session,
         .agent_catalog = agent_catalog,
         .agent_checkpoint = agent_checkpoint,
+        .agent_provider_probe = agent_provider_probe,
         .agent_mcp_connector = agent_mcp_connector,
         .agent_mcp_catalog = agent_mcp_catalog,
         .agent_mcp_http = agent_mcp_http,
