@@ -5,6 +5,11 @@ const workbench_api = @import("metawork_workbench");
 const automation_api = @import("metawork_automation");
 const app_window = @import("window.zig");
 
+pub const SecureInputResult = union(enum) {
+    submitted: usize,
+    cancelled,
+};
+
 pub const scheduled_task_timer_id: u64 = 0x4d57_5343_4844_544b;
 pub const mcp_oauth_timer_id: u64 = 0x4d57_4d43_504f_4155;
 
@@ -65,6 +70,31 @@ pub const Adapter = struct {
         if (self.native_runtime == null) return false;
         const services_value = self.platform_services orelse return false;
         return services_value.open_external_url_fn != null;
+    }
+
+    pub fn supportsSecureInput(self: *const Adapter) bool {
+        return self.native_runtime != null and self.window.secureInputAvailable();
+    }
+
+    pub fn captureSecureInput(
+        self: *Adapter,
+        title: []const u8,
+        message: []const u8,
+        accept_label: []const u8,
+        cancel_label: []const u8,
+        output: []u8,
+    ) ?SecureInputResult {
+        if (self.native_runtime == null) return null;
+        const result = self.window.captureSecureInput(.{
+            .title = title,
+            .message = message,
+            .accept_label = accept_label,
+            .cancel_label = cancel_label,
+        }, output) catch return null;
+        return switch (result) {
+            .submitted => |length| .{ .submitted = length },
+            .cancelled => .cancelled,
+        };
     }
 
     pub fn installScheduleHost(
