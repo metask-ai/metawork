@@ -27,7 +27,11 @@ const pending_ui_json_capacity = 256 * 1024;
 const terminal_diagnostic_capacity = 512;
 const agent_event_retry_interval: std.Io.Duration = .fromMilliseconds(5);
 const agent_event_notification_timeout: std.Io.Duration = .fromMilliseconds(50);
-const host_worker_count = 4;
+// 16 concurrent executions: workers spend their lives blocked on network
+// or on an indefinite UI wait, so the bound is about parallel model
+// conversations, not CPU. Sized so approval-blocked runs cannot easily
+// exhaust the pool.
+const host_worker_count = 16;
 const workbench_snapshot_capacity = bridge_api.snapshot_max_bytes;
 const App = struct {
     env_map: *std.process.Environ.Map,

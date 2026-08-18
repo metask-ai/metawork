@@ -1713,30 +1713,36 @@ test "Core identity failure discards an accepted UI permission response" {
     try closeSession(session, .session_close);
 }
 
-test "UI deadline returns unavailable and malformed UI fails the Run" {
+test "UI wait has no deadline and malformed UI fails the Run" {
     fake_core.reset();
     fake_core.setNextPlan(.ui_wait);
     const runtime = try createTestComposition(.{
         .worker_count = 1,
         .queue_capacity = 1,
         .max_sessions = 2,
-        .ui_request_timeout = .fromMilliseconds(20),
     });
     defer {
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
     }
-    const timed_out = try openSession(runtime);
-    const timeout_run = try submitSession(timed_out, "let UI expire");
-    try timed_out.waitForState(.waiting_ui);
-    try timed_out.waitForState(.running);
-    try std.testing.expect(timed_out.pendingUiRequest() == null);
+    const waiting = try openSession(runtime);
+    const wait_run = try submitSession(waiting, "wait for the user");
+    try waiting.waitForState(.waiting_ui);
+    // No expiry timer exists any more: well past the former test deadline
+    // the request must still be pending, and only an answer ends the wait.
+    std.Io.Timeout.sleep(.{ .duration = .{
+        .raw = std.Io.Duration.fromMilliseconds(120),
+        .clock = .awake,
+    } }, std.testing.io) catch {};
+    const request_id = waiting.pendingUiRequest() orelse
+        return error.TestExpectedPendingUi;
+    try waiting.respondPermission(wait_run, request_id, .allow_once);
     fake_core.releaseControlled();
-    try timed_out.waitRun(timeout_run);
-    var timeout_terminal = takeTestTerminal(timed_out, timeout_run);
-    defer timeout_terminal.deinit();
-    try std.testing.expectEqual(@as(?sdk.StopReason, .end_turn), timeout_terminal.stop_reason);
-    try closeSession(timed_out, .session_close);
+    try waiting.waitRun(wait_run);
+    var wait_terminal = takeTestTerminal(waiting, wait_run);
+    defer wait_terminal.deinit();
+    try std.testing.expectEqual(@as(?sdk.StopReason, .end_turn), wait_terminal.stop_reason);
+    try closeSession(waiting, .session_close);
 
     fake_core.setNextPlan(.malformed_ui_callback);
     const malformed = try openSession(runtime);

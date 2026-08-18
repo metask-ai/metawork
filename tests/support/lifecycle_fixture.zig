@@ -2092,7 +2092,6 @@ pub const TestCompositionLimits = struct {
     control_reserved_capacity: ?usize = null,
     per_session_control_reserved_capacity: ?usize = null,
     max_ui_response_bytes: ?usize = null,
-    ui_request_timeout: ?std.Io.Duration = null,
     event_ready_notifier: ?lifecycle.EventReadyNotifier = null,
     event_ready_retry_interval: ?std.Io.Duration = null,
     event_ready_timeout: ?std.Io.Duration = null,
@@ -2109,14 +2108,6 @@ pub const TestCompositionLimits = struct {
         limits.event_ready_notifier = self.event_ready_notifier;
         if (self.event_ready_retry_interval) |value| limits.event_ready_retry_interval = value;
         if (self.event_ready_timeout) |value| limits.event_ready_timeout = value;
-        if (self.ui_request_timeout) |value| {
-            limits.ui_request_timeout = value;
-        } else if (std.fs.path.sep == '\\') {
-            // Windows ThreadedIo retains canceled sleep futures until their
-            // deadline. Keep native cross-platform tests bounded; the explicit
-            // deadline test supplies its own shorter value.
-            limits.ui_request_timeout = .fromSeconds(5);
-        }
         return limits;
     }
 };

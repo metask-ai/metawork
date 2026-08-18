@@ -120,7 +120,7 @@ Permission request 是 SDK 校验后的 flat typed object，包含 request/sessi
 - 拒绝 stale、duplicate、错误类型和错误 Session/Run response；
 - 把 `permission_provenance` 作为 control event 处理，不得当作 unknown observation 丢弃。
 
-AskUserQuestion response 继续使用按 question 排列的 `values[]`。UI wait 是同步 active Run 子状态；deadline、cancel、close 和 shutdown 必须唤醒它。
+AskUserQuestion response 继续使用按 question 排列的 `values[]`。UI wait 是没有 deadline 的同步 active Run 子状态；只由 answered、cancel、close 或 shutdown 结束，Host 不得替用户让待决请求过期。
 
 ## 7. Status、RunResult 与 StopReason
 
