@@ -43,65 +43,6 @@ const bundle = await validateAgentCoreBundle(bundleRoot, {
 
 const providers = [
   {
-    name: "anthropic",
-    code: "wire.PROVIDER_ANTHROPIC",
-    apiKey: "anthropic-provider-test-key",
-    model: "anthropic-provider-test-model",
-    path: "/v1/messages",
-    baseUrlSuffix: "/v1/messages",
-    apiKeyHeader: "anthropic-provider-test-key",
-    anthropicVersion: "2023-06-01",
-    bodyOk(payload) {
-      return (
-        payload.model === this.model &&
-        payload.stream === true &&
-        Array.isArray(payload.messages) &&
-        payload.messages.some(
-          (message) =>
-            message?.role === "user" &&
-            Array.isArray(message.content) &&
-            message.content.some(
-              (block) =>
-                block?.type === "text" &&
-                block.text === "Reply with one short sentence.",
-            ),
-        )
-      );
-    },
-    response: [
-      {
-        type: "message_start",
-        message: {
-          id: "msg_provider_test",
-          type: "message",
-          role: "assistant",
-          content: [],
-          model: "anthropic-provider-test-model",
-          stop_reason: null,
-          stop_sequence: null,
-          usage: { input_tokens: 3, output_tokens: 0 },
-        },
-      },
-      {
-        type: "content_block_start",
-        index: 0,
-        content_block: { type: "text", text: "" },
-      },
-      {
-        type: "content_block_delta",
-        index: 0,
-        delta: { type: "text_delta", text: "anthropic provider test" },
-      },
-      { type: "content_block_stop", index: 0 },
-      {
-        type: "message_delta",
-        delta: { stop_reason: "end_turn", stop_sequence: null },
-        usage: { output_tokens: 3 },
-      },
-      { type: "message_stop" },
-    ],
-  },
-  {
     name: "openai",
     code: "wire.PROVIDER_OPENAI",
     apiKey: "openai-provider-test-key",
@@ -191,11 +132,6 @@ const server = createServer((request, response) => {
           throw new Error("Gemini API key did not reach AgentCore");
         if (request.headers.authorization !== undefined)
           throw new Error("Gemini request must not use Authorization");
-      } else if (activeProvider.apiKeyHeader) {
-        if (request.headers["x-api-key"] !== activeProvider.apiKeyHeader)
-          throw new Error(
-            `${activeProvider.name} API key did not reach AgentCore in x-api-key`,
-          );
       } else if (
         request.headers.authorization !== activeProvider.authorization
       ) {
@@ -203,11 +139,6 @@ const server = createServer((request, response) => {
           `${activeProvider.name} authorization did not reach AgentCore`,
         );
       }
-      if (
-        activeProvider.anthropicVersion &&
-        request.headers["anthropic-version"] !== activeProvider.anthropicVersion
-      )
-        throw new Error("Anthropic version header did not reach AgentCore");
       if (request.headers["content-type"] !== "application/json")
         throw new Error(
           `${activeProvider.name} request must use application/json`,

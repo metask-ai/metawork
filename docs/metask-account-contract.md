@@ -10,7 +10,7 @@
 
 - **C1 登录**：OAuth、token rotation、严格 `/me` identity、token 恢复/刷新、退出和本地安全存储。当前信息已经足够实现，不依赖模型、API Key 或 AgentCore。
 - **C2 执行配置**：Metask API Key catalog、model catalog 和 typed/fixed `ExecutionTarget { provider_kind, base_url, model }`。Account 只原子持久化无 secret 的默认选择；完整 ExecutionConfig 和 Metask Provider API Key 始终留在当前进程。Workbench 安装对应 generation 后才能创建 Agent Task。
-- **Model Connection 扩展**：用户管理的 Anthropic、OpenAI Chat Completions 或 Gemini Native 连接使用独立的 typed connection registry 与 credential store；它不改变 C1/C2 的 Metask identity、catalog 或 fixed endpoint 合同。
+- **Model Connection 扩展**：用户管理的 OpenAI Chat Completions 或 Gemini Native 连接使用独立的 typed connection registry 与 credential store；它不改变 C1/C2 的 Metask identity、catalog 或 fixed endpoint 合同。Anthropic Messages 保留为 AgentCore 能力候选，但在原生 API Key 鉴权合同通过前不进入产品 admission。
 
 MetaWork 只作为 Metask Account API 和 AgentCore bundle 的消费方。本文档不要求、也不授权修改 Metask 内部实现仓库（精确路径标识为 `cc-t2z/metacodes`）。
 
@@ -106,9 +106,10 @@ Model Connection 是 Account-owned 的本地连接对象，不是 Metask identit
 
 | Protocol                | AgentCore provider | Normalized endpoint contract                                        |
 | ----------------------- | ------------------ | ------------------------------------------------------------------- |
-| Anthropic Messages      | `anthropic`        | 完整 `/v1/messages` endpoint                                        |
 | OpenAI Chat Completions | `openai`           | 完整 `/v1/chat/completions` endpoint；不支持 `/v1/responses`        |
 | Gemini Native           | `gemini`           | 服务 base URL；AgentCore 追加 model 与 `streamGenerateContent` 路径 |
+
+Anthropic Messages 当前不在可创建协议表内：staged AgentCore 仍把 API Key 作为 Bearer 发送，尚未满足 Anthropic Native 所需的 `x-api-key` 合同。MetaWork 不复制 transport 进行补偿；AgentCore 修复并通过同一 provider contract 后再开放。
 
 - Model Connection 不要求 Metask OAuth；但必须通过 Host 的 typed validation、credential persistence 和一次有界的 AgentCore streaming connection test 后，才能成为 default execution source；
 - endpoint 只允许 HTTPS，或用户明确配置的 loopback HTTP；拒绝 control character、userinfo、query/fragment credential、过长 URL 和未登记 provider path。Host 将用户输入规范化为 AgentCore 所需的 endpoint，Renderer 不直接拼接或覆盖 `base_url`；

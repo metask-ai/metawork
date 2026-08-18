@@ -16041,9 +16041,9 @@ test "Workbench publishes a user model connection as an independent execution so
     }};
     const connections = [_]account_contract.ModelConnectionView{.{
         .id = "connection-1",
-        .display_name = "Team Anthropic",
-        .protocol = .anthropic_messages,
-        .normalized_base_url = "https://api.anthropic.com/v1/messages",
+        .display_name = "Team OpenAI",
+        .protocol = .openai_chat_completions,
+        .normalized_base_url = "https://api.openai.com/v1/chat/completions",
         .state = .ready,
         .test_status = .connected,
         .credential_status = .ready,
@@ -16062,9 +16062,9 @@ test "Workbench publishes a user model connection as an independent execution so
     });
     var execution = try account_contract.OwnedExecutionConfig.initModelConnectionOwned(
         std.testing.allocator,
-        .anthropic,
+        .openai,
         try std.testing.allocator.dupe(u8, "gpt-5"),
-        try std.testing.allocator.dupe(u8, "https://api.anthropic.com/v1/messages"),
+        try std.testing.allocator.dupe(u8, "https://api.openai.com/v1/chat/completions"),
         1,
         try std.testing.allocator.dupe(u8, "secret-key"),
     );
@@ -16096,9 +16096,9 @@ test "Workbench publishes a user model connection as an independent execution so
     try std.testing.expect(workbench.modelConnectionExecutionActive("connection-1"));
     try std.testing.expect(!workbench.modelConnectionExecutionActive("connection-2"));
     try account_contract.validateModelConnectionSpec(.{
-        .display_name = "Team Anthropic",
-        .protocol = .anthropic_messages,
-        .normalized_base_url = "https://api.anthropic.com/v1/messages",
+        .display_name = "Team OpenAI",
+        .protocol = .openai_chat_completions,
+        .normalized_base_url = "https://api.openai.com/v1/chat/completions",
     });
 }
 

@@ -974,7 +974,7 @@ Account 状态在设置中的投影只遵循公开合同：
 
 - Renderer 分别消费 `modelConnectionManagement`、`modelConnectionSecretCapture` 与 `modelConnectionTest` 三个 Host capability；management 不代表可以采集 secret。当前 Native SDK 缺少 trusted secure text-input 时，连接列表、测试和默认选择可以继续工作，但 Add/替换 credential 动作必须隐藏并显示能力不可用说明，不得回退到 DOM 密码框；
 - 页面显示连接名称、Provider、脱敏服务地址、credential 状态、模型目录状态和可用动作；不显示完整 API Key，不回填秘密字段；
-- `Add connection` 先选择协议，再填写连接名称、API Base URL 和模型 ID；API Key 通过 Host-owned secure capture 单独采集，不作为普通 Bridge 字段回传。OpenAI 连接明确标注 `Chat Completions`，不暗示支持 `/v1/responses`；Anthropic 与 Gemini 显示各自的原生协议；
+- `Add connection` 先选择协议，再填写连接名称、API Base URL 和模型 ID；API Key 通过 Host-owned secure capture 单独采集，不作为普通 Bridge 字段回传。当前只显示已通过 staged AgentCore provider contract 的 OpenAI Chat Completions 与 Gemini Native；不暗示支持 `/v1/responses`，Anthropic Messages 在原生 `x-api-key` 合同通过前不显示且 Host 拒绝 admission；
 - Host 在提交时规范化 endpoint、校验 scheme/host/path/长度和控制字符，并根据 provider 生成 AgentCore 所需的 normalized base URL；Renderer 不能把 arbitrary URL 或 query credential 直接交给 Run；
 - `Test connection` 只通过 Host/AgentCore 发起有界流式请求，不创建 Task、历史 Run 或持久 Conversation；页面分别显示 generation readiness 和最新测试状态。已成为默认连接后仍可重测，失败只显示“最近测试失败”，不能把正在使用的 ready generation、默认选择或新 Task admission 静默撤销；
 - 第一版由用户明确填写 bounded model ID，不提供自动模型发现；连接没有可用模型时不能成为默认连接；

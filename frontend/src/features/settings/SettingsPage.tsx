@@ -258,16 +258,12 @@ export function SettingsPage({
   }, [account.models, requestedModel, t]);
   const modelConnectionProtocolOptions = useMemo<SelectionMenuOption[]>(
     () =>
-      (
-        [
-          "anthropic_messages",
-          "openai_chat_completions",
-          "gemini_native",
-        ] as const
-      ).map((protocol) => ({
-        value: protocol,
-        label: modelConnectionProtocolLabel(protocol, t),
-      })),
+      (["openai_chat_completions", "gemini_native"] as const).map(
+        (protocol) => ({
+          value: protocol,
+          label: modelConnectionProtocolLabel(protocol, t),
+        }),
+      ),
     [t],
   );
   // While the host is asking for a choice (parked "choosing" with no

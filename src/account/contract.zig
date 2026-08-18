@@ -518,7 +518,17 @@ pub const ValidationError = error{
     InvalidEncoding,
     InconsistentState,
     SecretExposed,
+    UnsupportedProtocol,
 };
+
+/// Product admission is narrower than AgentCore's wire enum. A protocol is
+/// exposed only after its staged native provider contract passes.
+pub fn modelConnectionProtocolAvailable(protocol: ModelConnectionProtocol) bool {
+    return switch (protocol) {
+        .anthropic_messages => false,
+        .openai_chat_completions, .gemini_native => true,
+    };
+}
 
 pub fn providerKindForProtocol(protocol: ModelConnectionProtocol) ProviderKind {
     return switch (protocol) {
@@ -581,6 +591,8 @@ pub fn validateModelConnectionCommand(command: ModelConnectionCommand) Validatio
 pub fn validateModelConnectionSpec(spec: ModelConnectionSpec) ValidationError!void {
     try validateRequired(spec.display_name, Limits.display_name_bytes);
     try validateRequired(spec.normalized_base_url, Limits.base_url_bytes);
+    if (!modelConnectionProtocolAvailable(spec.protocol))
+        return error.UnsupportedProtocol;
     if (!validModelConnectionEndpoint(spec.protocol, spec.normalized_base_url)) {
         return error.InvalidBaseUrl;
     }
@@ -622,6 +634,8 @@ pub fn normalizeModelConnectionEndpointAlloc(
     protocol: ModelConnectionProtocol,
     value: []const u8,
 ) (std.mem.Allocator.Error || ValidationError)![]u8 {
+    if (!modelConnectionProtocolAvailable(protocol))
+        return error.UnsupportedProtocol;
     if (!validModelConnectionEndpoint(protocol, value))
         return error.InvalidBaseUrl;
     const scheme_end = std.mem.indexOf(u8, value, "://") orelse
@@ -664,6 +678,8 @@ pub fn validateModelConnectionView(view: ModelConnectionView) ValidationError!vo
     try validateRequired(view.id, Limits.api_key_id_bytes);
     try validateRequired(view.display_name, Limits.display_name_bytes);
     try validateRequired(view.normalized_base_url, Limits.base_url_bytes);
+    if (!modelConnectionProtocolAvailable(view.protocol))
+        return error.UnsupportedProtocol;
     if (!validModelConnectionEndpoint(view.protocol, view.normalized_base_url))
         return error.InvalidBaseUrl;
     if (view.connection_generation == 0) return error.InvalidGeneration;
@@ -731,8 +747,11 @@ pub fn validateModelConnectionExecutionConfig(
 ) ValidationError!void {
     try validateRequired(input.target.model, Limits.model_id_bytes);
     try validateRequired(input.target.base_url, Limits.base_url_bytes);
+    const protocol = protocolForProviderKind(input.target.provider_kind);
+    if (!modelConnectionProtocolAvailable(protocol))
+        return error.UnsupportedProtocol;
     if (!validModelConnectionEndpoint(
-        protocolForProviderKind(input.target.provider_kind),
+        protocol,
         input.target.base_url,
     )) return error.InvalidBaseUrl;
     try validateOpaqueRequired(input.api_key, Limits.api_key_bytes);
@@ -1025,6 +1044,11 @@ test "user-managed model connection accepts only registered native endpoints" {
         .protocol = .gemini_native,
         .normalized_base_url = "http://127.0.0.1:9000",
     });
+    try std.testing.expectError(error.UnsupportedProtocol, validateModelConnectionSpec(.{
+        .display_name = "Anthropic pending AgentCore support",
+        .protocol = .anthropic_messages,
+        .normalized_base_url = "https://api.anthropic.com/v1/messages",
+    }));
     try std.testing.expectError(error.InvalidBaseUrl, validateModelConnectionSpec(.{
         .display_name = "Responses is not registered",
         .protocol = .openai_chat_completions,
@@ -1058,10 +1082,15 @@ test "user-managed model connection endpoint normalization is deterministic" {
         "https://generativelanguage.googleapis.com",
         gemini,
     );
-    try std.testing.expectError(error.InvalidBaseUrl, normalizeModelConnectionEndpointAlloc(
+    try std.testing.expectError(error.UnsupportedProtocol, normalizeModelConnectionEndpointAlloc(
         std.testing.allocator,
         .anthropic_messages,
-        "https://api%2eanthropic.com/v1/messages",
+        "https://api.anthropic.com/v1/messages",
+    ));
+    try std.testing.expectError(error.InvalidBaseUrl, normalizeModelConnectionEndpointAlloc(
+        std.testing.allocator,
+        .openai_chat_completions,
+        "https://api%2eexample.com/v1/chat/completions",
     ));
 }
 
@@ -1139,23 +1168,23 @@ test "model connection commands carry only opaque credential slots" {
     try validateModelConnectionCommand(.{ .create = .{
         .connection_id = "slot-1",
         .spec = .{
-            .display_name = "Anthropic",
-            .protocol = .anthropic_messages,
-            .normalized_base_url = "https://api.anthropic.com/v1/messages",
+            .display_name = "OpenAI",
+            .protocol = .openai_chat_completions,
+            .normalized_base_url = "https://api.openai.com/v1/chat/completions",
         },
         .credential_slot = .{ .id = "slot-1" },
-        .model_id = "claude-sonnet-4-5",
+        .model_id = "gpt-5",
     } });
     try std.testing.expectError(error.FieldEmpty, validateModelConnectionCommand(.{
         .create = .{
             .connection_id = "",
             .spec = .{
-                .display_name = "Anthropic",
-                .protocol = .anthropic_messages,
-                .normalized_base_url = "https://api.anthropic.com/v1/messages",
+                .display_name = "OpenAI",
+                .protocol = .openai_chat_completions,
+                .normalized_base_url = "https://api.openai.com/v1/chat/completions",
             },
             .credential_slot = .{ .id = "" },
-            .model_id = "claude-sonnet-4-5",
+            .model_id = "gpt-5",
         },
     }));
 }

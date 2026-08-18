@@ -899,12 +899,12 @@ test "registry updates public metadata without exposing credential bytes" {
     try registry.create(.{
         .connection_id = "slot-opaque",
         .spec = .{
-            .display_name = "Anthropic",
-            .protocol = .anthropic_messages,
-            .normalized_base_url = "https://api.anthropic.com/v1/messages",
+            .display_name = "OpenAI",
+            .protocol = .openai_chat_completions,
+            .normalized_base_url = "https://api.openai.com/v1/chat/completions",
         },
         .credential_slot = .{ .id = "slot-opaque" },
-        .model_id = "claude-sonnet-4-5",
+        .model_id = "gpt-5",
     });
     try registry.update(.{
         .selection = .{
@@ -912,13 +912,13 @@ test "registry updates public metadata without exposing credential bytes" {
             .expected_connection_generation = 1,
         },
         .spec = .{
-            .display_name = "Anthropic Team",
-            .protocol = .anthropic_messages,
-            .normalized_base_url = "https://api.anthropic.com/v1/messages",
+            .display_name = "OpenAI Team",
+            .protocol = .openai_chat_completions,
+            .normalized_base_url = "https://api.openai.com/v1/chat/completions",
         },
     });
     const view = registry.views()[0];
-    try std.testing.expectEqualStrings("Anthropic Team", view.display_name);
+    try std.testing.expectEqualStrings("OpenAI Team", view.display_name);
     try std.testing.expectEqual(@as(u64, 1), view.connection_generation);
     try std.testing.expect(view.credential_status == .ready);
 }
