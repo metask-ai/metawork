@@ -351,7 +351,6 @@ pub const Limits = struct {
     max_ui_request_bytes: usize = 256 * 1024,
     max_ui_response_bytes: usize = 256 * 1024,
     max_terminal_diagnostic_bytes: usize = 512,
-    ui_request_timeout: std.Io.Duration = .fromSeconds(30),
     event_ready_notifier: ?EventReadyNotifier = null,
     event_ready_retry_interval: std.Io.Duration = .fromMilliseconds(5),
     event_ready_timeout: std.Io.Duration = .fromMilliseconds(50),
@@ -1903,7 +1902,6 @@ pub const Session = struct {
             return wire.UI_FATAL;
         }
         self.ui_request_id += 1;
-        const request_id = self.ui_request_id;
         self.ui_active = true;
         self.ui_answered = false;
         std.debug.assert(self.ui_request_json == null);
@@ -1927,7 +1925,10 @@ pub const Session = struct {
             self.unlock();
         }
 
-        var timer = self.agent_runtime.io.async(expireUiRequest, .{ self, request_id });
+        // The wait is indefinite by contract: a UI request ends only through
+        // an answer, cancellation, close, or Runtime shutdown — every one of
+        // those paths wakes this loop (wakeUiLocked / respond paths). A
+        // human decision must never be expired by the Host.
         self.lock();
         while (self.ui_active and self.state == .waiting_ui)
             self.wait();
@@ -1943,9 +1944,6 @@ pub const Session = struct {
         self.broadcast();
         self.unlock();
 
-        timer.cancel(self.agent_runtime.io) catch |err| switch (err) {
-            error.Canceled => {},
-        };
         self.agent_runtime.allocator.free(request_copy);
         _ = self.agent_runtime.notifyEventConsumer();
 
@@ -1962,20 +1960,6 @@ pub const Session = struct {
             wire.UI_FATAL
         else
             wire.UI_UNAVAILABLE;
-    }
-
-    fn expireUiRequest(self: *Session, request_id: u64) std.Io.Cancelable!void {
-        try self.agent_runtime.io.sleep(self.agent_runtime.ui_request_timeout, .awake);
-        self.lock();
-        var expired = false;
-        if (self.ui_active and self.ui_request_id == request_id) {
-            self.ui_active = false;
-            if (self.state == .waiting_ui) self.state = .running;
-            self.broadcast();
-            expired = true;
-        }
-        self.unlock();
-        if (expired) _ = self.agent_runtime.notifyEventConsumer();
     }
 
     pub fn releaseUiResponse(context: ?*anyopaque, out: ?*wire.OwnedBytesV1) callconv(.c) void {

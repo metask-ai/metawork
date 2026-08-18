@@ -201,7 +201,7 @@ Renderer Bridge revision、Account persistence layout、AgentCore artifact versi
 | callback 数据返回后失效                | callback 内验证并深拷贝                                                |
 | callback/close race 造成 UAF           | abort、join、callback quiescence 后 destroy                            |
 | callback identity race 泄漏 permission | UI request publication 与 response extraction 均在 Session lock 下复检 |
-| 同步 UI 耗尽 executor                  | bounded slots、deadline、cancel/close/shutdown 唤醒和压力测试          |
+| 同步 UI 耗尽 executor                  | 16 个 bounded slots、同界 pending 容量、cancel/close/shutdown 唤醒和压力测试；Host 不为人类决策设置 deadline |
 | Bridge/event 造成无限内存              | count/byte/time 多维上限和公平调度                                     |
 | Run failure 被误报用户取消             | active first-writer cause 与 Product write-once terminal history 分层  |
 | Renderer 掉线杀死后台 Run              | typed transport policy 不向 Agent termination 反向泄漏                 |

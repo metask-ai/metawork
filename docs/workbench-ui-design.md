@@ -693,7 +693,7 @@ Skill draft 与 Text draft 一样按 Task/New-task scope 保存在 Renderer sess
 - Plan approval：`Request changes / Start work`；
 - 应用级危险操作：使用原生确认窗口或应用级 sheet。
 
-普通请求使用时间线内联卡片。左栏和 Inspector 只负责提醒，点击后跳转到原请求，不在多个位置重复生成可操作按钮。
+普通请求使用工作轨迹内联卡片。待处理请求是当前 wait state，不是历史：它显示在当前 Assistant 正文之后的阅读位置；响应完成后，resolved record 再按稳定 activity order 留在历史时间线。左栏和 Inspector 只负责提醒，点击后跳转到原请求，不在多个位置重复生成可操作按钮。
 
 ### 9.2 请求状态
 
@@ -704,11 +704,10 @@ Skill draft 与 Text draft 一样按 Task/New-task scope 保存在 Renderer sess
 - Allowed once；
 - Allowed for this session；
 - Denied；
-- Expired；
 - Cancelled because the task stopped；
 - No longer available。
 
-用户点击后立即禁用重复操作，但只有 Host 确认接受后才能显示最终决定。Renderer reload 后必须从 Host 状态恢复，过期请求不能重新变成可操作状态。
+用户点击后立即禁用重复操作，但只有 Host 确认接受后才能显示最终决定。UI wait 没有 Host deadline，只由 answered、cancel、close 或 shutdown 结束；Renderer reload 后必须从 Host 状态恢复，已取消或不再可用的请求不能重新变成可操作状态。
 
 危险批准不能由裸 Enter 触发；开放问题可以使用 `Cmd/Ctrl + Enter` 提交。
 

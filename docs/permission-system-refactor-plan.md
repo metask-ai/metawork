@@ -166,7 +166,7 @@ Renderer 不接收或提交：
 - Session choice 缺少 candidate 或 rule ID 不匹配：拒绝 response。
 - generation 不匹配、request identity 不匹配、错误 Session/Run：拒绝并按 AgentCore 合同处理，必要时 poison Session。
 - Renderer 重复提交：第一次有效 response 线性化，后续返回 stale/duplicate，不二次执行。
-- deadline、cancel、close、shutdown：唤醒同步 UI wait，不能静默丢弃 control event。
+- answered、cancel、close、shutdown：唤醒并结束同步 UI wait，不能静默丢弃 control event；Host 不设置 deadline，也不替用户让待决请求过期。
 - malformed/unknown ABI observation：由 Agent 按 canonical 合同 fail closed，不由 Bridge 或 Renderer 猜测。
 
 ## 7. Session grant 与重复授权

@@ -68,7 +68,6 @@ pub const Runtime = struct {
     max_ui_request_bytes: usize,
     max_ui_response_bytes: usize,
     max_terminal_diagnostic_bytes: usize,
-    ui_request_timeout: std.Io.Duration,
     event_ready_notifier: ?EventReadyNotifier,
     event_ready_retry_interval: std.Io.Duration,
     event_ready_timeout: std.Io.Duration,
@@ -122,7 +121,6 @@ pub const Runtime = struct {
             limits.per_session_event_bytes == 0 or limits.max_event_bytes == 0 or
             limits.event_enqueue_timeout.nanoseconds <= 0 or limits.max_ui_request_bytes == 0 or
             limits.max_ui_response_bytes == 0 or limits.max_terminal_diagnostic_bytes == 0 or
-            limits.ui_request_timeout.nanoseconds <= 0 or
             limits.event_ready_retry_interval.nanoseconds <= 0 or
             limits.event_ready_timeout.nanoseconds <= 0 or
             limits.event_ready_retry_interval.nanoseconds > limits.event_ready_timeout.nanoseconds)
@@ -201,7 +199,6 @@ pub const Runtime = struct {
             .max_ui_request_bytes = limits.max_ui_request_bytes,
             .max_ui_response_bytes = limits.max_ui_response_bytes,
             .max_terminal_diagnostic_bytes = limits.max_terminal_diagnostic_bytes,
-            .ui_request_timeout = limits.ui_request_timeout,
             .event_ready_notifier = limits.event_ready_notifier,
             .event_ready_retry_interval = limits.event_ready_retry_interval,
             .event_ready_timeout = limits.event_ready_timeout,
@@ -481,7 +478,7 @@ pub const Runtime = struct {
     /// Runtime mutex across the synchronous ABI call prevents a catalog
     /// refresh, shutdown, or Session release from changing the validated
     /// Runtime generation while AgentCore copies the selection.
-    fn updateSessionMcpSelection(
+    pub fn updateSessionMcpSelection(
         self: *Runtime,
         session: *Session,
         selection: ?*const McpSelection,

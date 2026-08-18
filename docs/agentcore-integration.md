@@ -135,7 +135,7 @@ Core calls synchronous UI callback
 → Host atomically validates the same full Session/Run identity tuple
 → enqueue control item
 → callback waits on Host-owned condition/channel
-→ response / deadline / cancel / close / shutdown
+→ response / cancel / close / shutdown
 → SDK encodes a response into Host-owned bytes when one was supplied
 → under the Session lock, recheck identity/dependency-contract health
 → transfer answered bytes, or free them and return unavailable/fatal
@@ -223,7 +223,7 @@ Compact 的 `Queued / Compacting / Stopping` 不是由 Worker 直接覆盖同一
 
 初始 raw lifecycle foundation 使用 bundle SDK 提供的精确 `ApiV1` table 作为可注入依赖，并显式接收 Zig `std.Io` 来实现 mutex/condition；它不导入 AgentCore 实现源码，也不建立 Adapter。`submit` 在持有 Session lock 时完成 bounded executor enqueue，避免 enqueue 与 close 之间出现未入队的悬空 `Queued` 状态。Core callback 在 `Closing` 后不得再取得新的 lifetime reference；已经进入的 callback 必须在 destroy 前归零。
 
-正式 Host 在同一状态机上直接加入 bundle typed SDK，不另建 Adapter：event callback 先校验并形成 SDK-owned parse owner，再以单调 Host Session ID 和 Run ID 进入 FIFO bounded sink；UI callback 保留校验后的 request owner，response 只由 request-aware SDK encoder 生成。同步 UI deadline 使用 Host `std.Io` future，response、cancel、close、shutdown 或 deadline 都在 callback 返回前收敛并回收 timer。
+正式 Host 在同一状态机上直接加入 bundle typed SDK，不另建 Adapter：event callback 先校验并形成 SDK-owned parse owner，再以单调 Host Session ID 和 Run ID 进入 FIFO bounded sink；UI callback 保留校验后的 request owner，response 只由 request-aware SDK encoder 生成。同步 UI 等待没有 deadline：response、cancel、close 或 shutdown 之一在 callback 返回前收敛等待；人类决策不由 Host 过期。
 
 当前实现由 Workbench 预留 durable Run record、generation、tool slots 与 terminal diagnostic buffer，再调用 `Session.prepareRun(RunInput)` 并把 Workbench-owned job 放入自身 bounded Executor。`RunInput` 只有 Text 与 typed Skill 两个分支；Agent 在 admission 时有界深拷贝整个输入，Skill argument JSON 只通过官方 SDK encoder 在同步 `sessionRunSkill` 调用边界内生成，旧 `session_run` 和 slash 字符串不进入 Agent。worker claim 后以原子 `starting` 状态调用 `Session.beginRun()`；成功后先发布 generation-bound `RunControl` 和 `running`，再调用唯一 latch-aware `Run.execute()`。`beginRun()` 失败会在同一 Session lock 下返回 typed completion disposition，Workbench 据此生成 pre-execution terminal payload，不再额外读取 Session snapshot。cancel/close/shutdown 在 `starting` 时只发布 first-writer pending termination，在 `running` 时取得 `RunControlLease` 后于锁外请求终止。Agent Runtime 不 enqueue、不停止、也不销毁 Executor。
 
@@ -422,7 +422,7 @@ Workbench revision 通知只在 revision 变化时发送，Renderer 合并并发
 - unavailable 表示当前 Host 无法回答，Core 按其工具语义安全失败；
 - fatal 表示 Host request pipeline 失败，Run 必须退出；
 - 每个 Run 同时最多一个 active UI wait；
-- deadline 到期默认 deny/unavailable，不允许无限等待；
+- UI 等待没有 deadline：等待只由 answered、cancel、close 或 shutdown 结束，Host 不得代替用户过期一个待决请求；
 - cancel、close、shutdown 唤醒 wait；
 - response 必须拒绝 stale、duplicate、错误 Session/Run 和错误类型；
 - 同步 wait crash 后不恢复，工具保持未执行，Run 标记 interrupted。
