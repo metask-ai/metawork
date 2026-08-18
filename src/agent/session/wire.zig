@@ -35,7 +35,7 @@ fn coreEventTextValid(event: sdk.DecodedCoreEvent) bool {
     return switch (event) {
         .unknown => |unknown| validUtf8(&.{ unknown.tag, unknown.payload_json }),
         .known => |known| switch (known) {
-            .text_chunk => |text| std.unicode.utf8ValidateSlice(text),
+            .text_chunk, .thinking_chunk => |text| std.unicode.utf8ValidateSlice(text),
             .tool_start => |tool| validUtf8(&.{ tool.id, tool.name, tool.input }),
             .tool_progress => |progress| validUtf8(&.{ progress.id, progress.text }),
             .progress => |progress| validUtf8(&.{ progress.tool_name, progress.tool_input }),

@@ -5859,6 +5859,7 @@ pub const Workbench = struct {
         };
         var durable_boundary = false;
         switch (event) {
+            .thinking_chunk => return,
             .text_chunk => |text| {
                 try self.appendTrackedText(&run.assistant, text, self.limits.max_assistant_message_bytes);
                 if (self.redactTrackedText(&run.assistant, run.redaction_secret))
