@@ -517,7 +517,7 @@ Execution binding availability 是下一次 admission 的独立前置事实，�
 - 不使用头像和大气泡，使用正文排版；
 - 支持 Markdown、表格、代码、引用和链接；
 - 流式生成只显示克制的末尾活动指示；
-- 不展示原始 chain-of-thought；`thinking_chunk` 只显示“正在思考”的安全状态，`text_chunk` 开始后显示“正在撰写回复”；
+- 不展示原始 chain-of-thought；`thinking_chunk` 只显示“正在思考”的安全状态，`text_chunk` 开始后显示“正在撰写回复”；Renderer 还必须把 Host 已投影的 Starting、Generating response、Executing tools、Retrying、Compacting 与 Finishing 显示为本地化 Current activity；存在 running tool 时显示“正在执行工具”，尚未取得可识别细粒度事件时显示“正在等待模型响应”，active Run 不能统一退化成“正在工作”；
 - `assistant` 只表示回复内容，不标记为 Delivery、Output 或最终成果；
 - 不从回复文本解析活动、计划、文件变化或完成状态；不得为每条内容重复“Agent”标签或品牌头像。
 

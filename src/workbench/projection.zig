@@ -5886,7 +5886,7 @@ pub const Workbench = struct {
             .tool_start => |tool| {
                 const view = try self.findOrCreateTool(run, tool.id, tool.name, tool.input);
                 view.state = .running;
-                _ = try self.replaceTrackedProjected(&run.status_text, tool.name, self.limits.max_tool_field_bytes, run.redaction_secret);
+                _ = try self.replaceTrackedProjected(&run.status_text, "Executing tools", self.limits.max_tool_field_bytes, run.redaction_secret);
             },
             .tool_progress => |progress| {
                 const tool = findTool(run.tools, progress.id) orelse return error.ToolCapacity;
@@ -5894,7 +5894,7 @@ pub const Workbench = struct {
                 tool.progress_truncated = projected.truncated;
                 tool.redacted = tool.redacted or projected.redacted;
             },
-            .progress => |progress| _ = try self.replaceTrackedProjected(&run.status_text, progress.tool_name, self.limits.max_tool_field_bytes, run.redaction_secret),
+            .progress => _ = try self.replaceTrackedProjected(&run.status_text, "Executing tools", self.limits.max_tool_field_bytes, run.redaction_secret),
             .tool_result => |result| {
                 const tool = try self.findOrCreateTool(run, result.id, result.name, result.input);
                 const input = try self.replaceTrackedProjected(&tool.input, result.input, self.limits.max_tool_field_bytes, run.redaction_secret);
