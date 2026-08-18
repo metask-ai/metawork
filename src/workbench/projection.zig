@@ -4240,7 +4240,7 @@ pub const Workbench = struct {
         ) catch unreachable;
         const route = self.agent_runtime.createSessionRoute(.{
             .provider = agentProvider(accountProvider(task_execution_input.target.provider_kind)),
-            .permission_mode = .default,
+            .permission_mode = .accept_edits,
             .shell_policy = .unrestricted,
             .credential = task_execution_input.api_key,
             .model = self.admissionModel(),
