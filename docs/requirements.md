@@ -92,7 +92,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - 普通用户通过 Metask OAuth 登录，不需要手工填写 Provider、model、base URL 或 API Key；
 - Metask managed connection 继续遵循 OAuth、API Key catalog 和 fixed provider/base URL 合同；用户管理的 Model Connection 不要求 Metask 登录，但必须先显式创建、验证并安装到 Host-owned execution registry；
 - `AccountView` 只发布 Metask 的 `state`、`catalogState`、脱敏 identity/catalog/selection、generation、`canCancel`、`canCreateTask` 和稳定错误；Model Connection 以独立的脱敏 connection projection 发布，不把 custom connection 状态塞进 Metask OAuth 状态机；不得发布 saved-account、readiness、primary action、operation、execution state、mismatch 或 reauthenticate 状态机；
-- `checking` 与 `authorizing` 可以暂时占用登录表面；`signed_out` 在没有 ready user-managed Model Connection 时禁止新 Task admission，但不隐藏 Workspace、durable Task、历史记录或模型连接设置。已有 live Task 仍必须可查看和停止；
+- `checking` 与 `authorizing` 可以暂时占用登录表面；`signed_out` 在没有 ready user-managed Model Connection 时禁止新 Task admission，但不隐藏 Workspace、durable Task 或历史记录。Model Connection 设置入口在 management、secure capture、连接测试等产品能力形成完整 gate 前整体隐藏；已有 live Task 仍必须可查看和停止；
 - 登录无效即进入 `signed_out`。Renderer 只提供统一的 `beginLogin`，不保留“重新认证”“重新打开登录页”“匹配上次账号”等分支；
 - OAuth 浏览器授权、identity 提交和执行目录准备不得暴露内部 C1/C2、operation、generation 或凭据存储步骤；
 - OAuth 成功提交 token rotation 并以 `/me` 验证 authenticated identity 后，Host 必须以独立、有界的 continuation 自动加载 API Key 和模型目录。仍有效的历史选择优先恢复；没有历史选择时，唯一候选自动采用；只有多个候选且没有合同明确的默认项时才请求用户选择；
@@ -100,12 +100,12 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - 没有可用 API Key 或模型时必须保持已登录状态，说明缺少什么并提供 `重试`；只有 Host 拥有固定、安全的 Metask 管理入口时才显示 `在 Metask 中管理`，Renderer 不拼接外部 URL；
 - 登录、目录加载、模型加载和持久化是 Host-owned 操作。Renderer 只渲染 Host 发布的状态和脱敏候选，不通过 `useEffect`、隐藏点击或本地定时器推进产品状态；
 - 账号入口固定显示在左栏底部：已登录时只显示当前 OAuth `/me` 严格验证的用户名，未登录时显示登录动作。接口不可用、账号不匹配或响应不可信时不得回退 token `account_id` 或旧 identity；不得由 Renderer 推断，也不得在普通 catalog refresh 或后台定时路径主动更新；
-- Metask API Key 切换属于 `账号` 设置；Renderer 只显示 Metask 返回的脱敏名称、Provider 与尾号，API 创建、秘密查看和管理仍由 Metask 完成。用户管理的连接进入独立的 `模型连接` 设置，不复用 Metask API catalog 表单；
+- Metask API Key 切换属于 `账号` 设置；Renderer 只显示 Metask 返回的脱敏名称、Provider 与尾号，API 创建、秘密查看和管理仍由 Metask 完成。用户管理连接的底层对象不复用 Metask API catalog；当前独立 `模型连接` 设置入口保持关闭，不能以不可完成的表单提前暴露；
 - Model Connection 的最小产品对象是 `connection_id + display_name + provider_kind + normalized_base_url + credential_status + generation_readiness + latest_test_status + model_catalog + connection_generation`。generation readiness 与 `untested | testing | connected | failed` 最新测试状态必须分开；已验证 generation 的失败重测不能撤销正在使用的默认 execution。当前开放的 provider 只有 OpenAI Chat Completions 和 Gemini Native；Anthropic Messages 在 AgentCore 原生 `x-api-key` 合同通过前保持不可创建、不可恢复和不可选择。provider 由用户创建时明确选择，不能根据模型名猜测；
 - 用户管理连接的 API credential 只由 Host 写入系统安全存储，metadata 以独立、无 secret 的 registry 原子持久化。Renderer 只能提交 connection mutation 和 opaque connection identifier，不能提交完整 credential、Authorization header 或把 arbitrary URL 直接注入 Run；
 - 连接测试通过 AgentCore 发起一个有界的流式请求，不由 MetaWork 自己实现 provider HTTP/SSE parser；测试不创建产品 Task、Run history 或持久 Conversation。第一版由用户明确提交 bounded model id，Host 保存其模型 metadata；自动模型发现不在当前范围；
 - 当前模型必须显示在 New task Composer 附近，并显示为 `连接 · 模型`。默认连接/模型只影响后续新 Task；已有 Task 显示当前 binding epoch 的 provider、opaque execution generation 和模型，历史按 epoch 保留原事实，不提供虚假的 live Session 热切换；
-- 进入 `账号` 设置时，显式导航动作自动请求 Host 同步 Metask catalog；进入 `模型连接` 时读取 Account-owned registry，connection health 只由用户显式执行 `测试连接` 更新。已有默认配置必须直接投影，不能要求用户先重新选择或切换；
+- 进入 `账号` 设置时，显式导航动作自动请求 Host 同步 Metask catalog；未来重新开放 `模型连接` 设置时才读取 Account-owned registry，connection health 只由用户显式执行 `测试连接` 更新。已有默认配置必须直接投影，不能要求用户先重新选择或切换；
 - 登录后无已存偏好时，Host 自动选择目录中的第一个 API Key 完成默认配置；选择 API 后模型按 当前已选（若仍在目录）→ 已存偏好 → 目录首项 自动回退，用户随后可在设置中调整。重配置中已选 API Key 从账号消失时不自动切换凭证，停在选择态由用户显式决定。离开设置页视为放弃未完成的重配置：Host 取消停驻事务并恢复原有执行配置；首次配置无可回退项时保持设置页驻留 API 才能修改默认模型。页面直接使用 Host 已发布的脱敏目录和提交态，手动重新同步只作为网络失败、页面持续打开期间 Metask 外部目录变化等恢复动作。设置页同时提供可独立修改的默认 API、默认模型和与错误语义匹配的恢复动作；后续通用、通知、外观和高级设置共享同一设置框架，Workspace 生命周期仍由 New task 路径控件负责；
 - OAuth token 只访问 Metask 账号 API；选定 API Key 才作为 AgentCore 模型调用凭据；
 - Renderer 只能看到脱敏账号、Key 尾号、模型、稳定错误码和状态，不得接触 OAuth token、完整 API Key、Authorization header、临时 OAuth URL 或凭据存储 locator；

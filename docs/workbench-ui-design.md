@@ -905,9 +905,9 @@ MetaWork
 [ 使用 Metask 登录 ]
 ```
 
-首次启动不显示四步进度条，不要求用户点击“加载 API Key”，不出现 C1/C2、Provider target、generation 或 Keychain 等技术术语。`checking` 只显示稳定的品牌与检查状态；`authorizing` 只显示等待和取消，不提供“重新打开登录页”。OAuth 已成功而目录准备失败时保持当前 identity，在设置中提供重试。登录无效直接成为 `signed_out`，进入 Workbench shell 后左下角账号入口显示统一登录动作，模型连接设置仍可进入；不显示已保存账号、重新认证、账号不匹配或上一次登录信息。
+首次启动不显示四步进度条，不要求用户点击“加载 API Key”，不出现 C1/C2、Provider target、generation 或 Keychain 等技术术语。`checking` 只显示稳定的品牌与检查状态；`authorizing` 只显示等待和取消，不提供“重新打开登录页”。OAuth 已成功而目录准备失败时保持当前 identity，在设置中提供重试。登录无效直接成为 `signed_out`，进入 Workbench shell 后左下角账号入口显示统一登录动作；当前模型连接设置入口保持隐藏，不显示已保存账号、重新认证、账号不匹配或上一次登录信息。
 
-冷启动检查或 OAuth 授权期间使用稳定的品牌状态。确认 `signed_out` 后进入 Workbench shell 并保留本地历史；如果没有 ready Model Connection，只关闭 New task admission，模型连接设置仍可进入。确认 `authenticated` 后继续目录准备。任何 live Task 若仍在运行，必须继续可查看和停止。
+冷启动检查或 OAuth 授权期间使用稳定的品牌状态。确认 `signed_out` 后进入 Workbench shell 并保留本地历史；如果没有 ready Model Connection，只关闭 New task admission，不暴露尚未形成完整 capability gate 的模型连接设置。确认 `authenticated` 后继续目录准备。任何 live Task 若仍在运行，必须继续可查看和停止。
 
 ### 14.2 设置结构
 
@@ -921,15 +921,13 @@ Account
 ├── Refresh or sign in
 └── Sign out and clear this device
 
-Model connections
-├── Connections
-├── Add connection
-└── Default connection and model
 ```
 
 设置是覆盖整个 Workbench 内容区的正式全局 surface，不用狭窄 popover 承载目录选择、错误恢复和危险退出。它保留窗口壳层，底层 Workbench 继续挂载但不可操作；进入后不重复显示或操作 Task 左栏，也不改变离开前的 Task、草稿、滚动和焦点状态。窗口标题栏保持一致，页面内 `返回工作台` 是返回入口；左下角用户菜单只负责打开该 surface 和少量直接动作。
 
 设置树只列当前阶段已经完整设计并通过 capability gate 的项目。显示密度不作为设置；`Appearance` 只有在第二套主题完成设计、可访问性和平台验收后才能加入，首个浅色版本不显示空入口。
+
+`Model connections` 当前不进入设置树，也不出现在左下角账号菜单。只有 management、Host-owned secure capture、provider connection test、默认 execution transaction 和已开放 provider admission 共同通过产品 gate 后才能整体恢复入口；不能只显示不可完成的空壳或“能力不可用”页面。
 
 Workspace 生命周期不属于 Settings surface。New task 路径控件负责选择、添加和重新授权 Manual Workspace；Automatic Workspace 只随 owning Task 导航。Renderer 只在当前 draft 内保存 Manual Workspace identity，不维护 `activeWorkspaceId` 或其他全局活动 Workspace 镜像。
 
@@ -971,6 +969,8 @@ Account 状态在设置中的投影只遵循公开合同：
 - Renderer 不从这些状态恢复内部 operation，也不区分或展示 credential persistence 子步骤。
 
 `Model connections` 规则：
+
+> 当前入口关闭。以下规则保留为重新开放时必须同时满足的产品合同，不代表 Renderer 现在可以导航到该页面。
 
 - Renderer 分别消费 `modelConnectionManagement`、`modelConnectionSecretCapture` 与 `modelConnectionTest` 三个 Host capability；management 不代表可以采集 secret。当前 Native SDK 缺少 trusted secure text-input 时，连接列表、测试和默认选择可以继续工作，但 Add/替换 credential 动作必须隐藏并显示能力不可用说明，不得回退到 DOM 密码框；
 - 页面显示连接名称、Provider、脱敏服务地址、credential 状态、模型目录状态和可用动作；不显示完整 API Key，不回填秘密字段；

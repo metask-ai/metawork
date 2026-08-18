@@ -626,9 +626,6 @@ test("Settings keeps section navigation fixed while content scrolls independentl
   const page = document.querySelector(".settings-page");
   const content = document.querySelector(".settings-content");
   const accountSection = document.querySelector("#settings-account");
-  const modelConnectionsSection = document.querySelector(
-    "#settings-model-connections",
-  );
   Object.defineProperty(content, "clientHeight", {
     configurable: true,
     value: 680,
@@ -636,9 +633,6 @@ test("Settings keeps section navigation fixed while content scrolls independentl
   content.getBoundingClientRect = () => ({ top: 100 });
   accountSection.getBoundingClientRect = () => ({
     top: 520 - content.scrollTop,
-  });
-  modelConnectionsSection.getBoundingClientRect = () => ({
-    top: 920 - content.scrollTop,
   });
 
   page.scrollTop = 300;
@@ -665,9 +659,7 @@ test("Settings keeps section navigation fixed while content scrolls independentl
   content.scrollTop = 720;
   fireEvent.scroll(content);
   assert.equal(
-    screen
-      .getByRole("link", { name: "Model connections" })
-      .getAttribute("aria-current"),
+    screen.getByRole("link", { name: "Account" }).getAttribute("aria-current"),
     "location",
   );
 });

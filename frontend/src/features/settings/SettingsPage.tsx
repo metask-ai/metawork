@@ -12,6 +12,9 @@ import {
 } from "../../components/ui/SelectionMenu.tsx";
 import { useI18n, type Locale } from "../../i18n/context.ts";
 import { accountErrorText } from "../../i18n/account-error.ts";
+
+const MODEL_CONNECTION_SETTINGS_ENABLED: boolean = false;
+
 export type SettingsFocusTarget =
   "title" | "account" | "model_connections" | "signout";
 type SettingsSection = "general" | "account" | "model_connections";
@@ -156,6 +159,11 @@ export function SettingsPage({
   onLogout: () => void;
 }) {
   const { locale, setLocale, t } = useI18n();
+  const modelConnectionSettingsAvailable =
+    MODEL_CONNECTION_SETTINGS_ENABLED &&
+    modelConnectionCapabilities.management &&
+    modelConnectionCapabilities.secretCapture &&
+    modelConnectionCapabilities.connectionTest;
   const [confirmSignOut, setConfirmSignOut] = useState(false);
   const [activeSection, setActiveSection] =
     useState<SettingsSection>("general");
@@ -395,7 +403,10 @@ export function SettingsPage({
         accountHeading.current?.focus();
         return;
       }
-      if (focusTarget === "model_connections") {
+      if (
+        focusTarget === "model_connections" &&
+        modelConnectionSettingsAvailable
+      ) {
         setActiveSection("model_connections");
         if (content.current && modelConnectionsSection.current) {
           content.current.scrollTo({
@@ -409,7 +420,7 @@ export function SettingsPage({
       (focusTarget === "signout" ? signOut.current : title.current)?.focus();
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [focusTarget]);
+  }, [focusTarget, modelConnectionSettingsAvailable]);
 
   useEffect(() => {
     if (!confirmSignOut) return;
@@ -539,7 +550,10 @@ export function SettingsPage({
     const readingLine =
       content.current.scrollTop +
       Math.min(160, content.current.clientHeight * 0.3);
-    if (contentTop(modelConnectionsSection.current) <= readingLine)
+    if (
+      modelConnectionSettingsAvailable &&
+      contentTop(modelConnectionsSection.current) <= readingLine
+    )
       setActiveSection("model_connections");
     else if (contentTop(accountSection.current) <= readingLine)
       setActiveSection("account");
@@ -612,6 +626,7 @@ export function SettingsPage({
             aria-current={
               activeSection === "model_connections" ? "location" : undefined
             }
+            hidden={!modelConnectionSettingsAvailable}
             onClick={(event) => {
               event.preventDefault();
               setActiveSection("model_connections");
@@ -993,6 +1008,7 @@ export function SettingsPage({
             id="settings-model-connections"
             className="settings-section settings-model-connections"
             aria-labelledby="settings-model-connections-title"
+            hidden={!modelConnectionSettingsAvailable}
           >
             <div className="settings-execution-header">
               <div>

@@ -253,6 +253,7 @@ test("authenticated settings project current catalog defaults", () => {
   assert.match(markup, /Primary/);
   assert.match(markup, /Model One/);
   assert.match(markup, /Sign out on this device/);
+  assert.match(markup, /id="settings-model-connections"[^>]*hidden=""/);
 });
 
 test("catalog failure remains an authenticated retryable settings state", () => {

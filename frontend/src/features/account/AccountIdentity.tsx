@@ -63,15 +63,6 @@ export function AccountIdentity({
                 <Icon name="settings" />
                 {t("settings.account")}
               </Menu.Item>
-              <Menu.Item
-                className="account-menu-item focus-ring"
-                onClick={() =>
-                  choose(() => onOpenSettings("model_connections"))
-                }
-              >
-                <Icon name="model" />
-                {t("settings.model_connections")}
-              </Menu.Item>
               {authenticated && (
                 <Menu.Item
                   className="account-menu-item is-danger focus-ring"
