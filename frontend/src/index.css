@@ -653,6 +653,7 @@ summary::-webkit-details-marker {
 
 /* Long-lived Settings surface */
 .settings-page {
+  --settings-navigation-track: calc(var(--left-column-width) - 64px);
   --settings-frost: var(--ui-surface-canvas);
   --settings-paper: var(--ui-surface-panel);
   --settings-ink: var(--ui-content-primary);
@@ -679,7 +680,7 @@ summary::-webkit-details-marker {
 
 .settings-header {
   display: grid;
-  grid-template-columns: 184px minmax(0, 1fr);
+  grid-template-columns: var(--settings-navigation-track) minmax(0, 1fr);
   min-height: 64px;
   padding: 10px 32px;
   align-items: center;
@@ -738,7 +739,7 @@ summary::-webkit-details-marker {
 
 .settings-layout {
   display: grid;
-  grid-template-columns: 184px minmax(0, 1fr);
+  grid-template-columns: var(--settings-navigation-track) minmax(0, 1fr);
   min-height: 0;
   padding-top: 22px;
   gap: 32px;
@@ -2111,7 +2112,9 @@ summary::-webkit-details-marker {
 
 .app-window {
   --left-column: 0px;
+  --left-column-width: 248px;
   --right-column: 0px;
+  --workbench-content-surface: var(--ui-surface-panel);
   display: grid;
   grid-template-rows: var(--window-bar-height) minmax(0, 1fr);
   width: 100%;
@@ -2123,7 +2126,7 @@ summary::-webkit-details-marker {
 }
 
 .app-window[data-left-open="true"] {
-  --left-column: 248px;
+  --left-column: var(--left-column-width);
 }
 
 .app-window[data-inspector-open="true"] {
@@ -2363,10 +2366,51 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .app-columns {
+  position: relative;
   display: grid;
   grid-template-columns: var(--left-column) minmax(0, 1fr) var(--right-column);
   min-height: 0;
   transition: grid-template-columns 160ms ease;
+}
+
+.workspace-resize-handle {
+  position: absolute;
+  z-index: 30;
+  top: 0;
+  bottom: 0;
+  left: calc(var(--left-column) - 5px);
+  width: 10px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.workspace-resize-handle::after {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 4px;
+  width: 2px;
+  background: transparent;
+  content: "";
+}
+
+.workspace-resize-handle:hover::after,
+.workspace-resize-handle:focus-visible::after,
+.workspace-resize-handle:active::after {
+  background: var(--ui-action-primary);
+}
+
+.workspace-resize-handle:focus-visible {
+  outline: none;
+}
+
+.app-window[data-resizing-left="true"] .app-columns {
+  transition: none;
+  cursor: col-resize;
+  user-select: none;
 }
 
 .app-overlay-layer {
@@ -2413,7 +2457,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   min-width: 0;
   min-height: 0;
   flex-direction: column;
-  background: var(--ui-surface-canvas);
+  border-top: 1px solid var(--ui-border);
+  background: var(--workbench-content-surface);
 }
 
 .workbench-view {
@@ -2423,7 +2468,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   min-height: 0;
   flex: 1;
   flex-direction: column;
-  background: var(--ui-surface-canvas);
+  background: var(--workbench-content-surface);
 }
 
 .skills-page {
@@ -6143,7 +6188,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .composer-bar {
   padding: 10px 24px 18px;
-  background: color-mix(in srgb, var(--ui-surface-canvas) 98%, transparent);
+  background: var(--workbench-content-surface);
 }
 
 .workbench-view[data-view="task"] > .composer-bar {
@@ -7196,6 +7241,10 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
     transform: translateX(-100%);
     box-shadow: 16px 0 40px rgba(24, 50, 71, 0.12);
     transition: transform 160ms ease;
+  }
+
+  .workspace-resize-handle {
+    display: none;
   }
 
   .app-window[data-left-open="true"] .workspace-sidebar {

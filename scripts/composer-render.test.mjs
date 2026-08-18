@@ -559,9 +559,13 @@ test("new Task places the Composer after the outcome prompt", () => {
 });
 
 test("Workbench foundation uses a stable 760px new Task Composer stage", async () => {
-  const [app, shell, css, tokens] = await Promise.all([
+  const [app, shell, resizableSeparator, css, tokens] = await Promise.all([
     readFile(join(process.cwd(), "frontend/src/app/App.tsx"), "utf8"),
     readFile(join(process.cwd(), "frontend/src/app/AppShell.tsx"), "utf8"),
+    readFile(
+      join(process.cwd(), "frontend/src/components/ui/ResizableSeparator.tsx"),
+      "utf8",
+    ),
     readFile(join(process.cwd(), "frontend/src/index.css"), "utf8"),
     readFile(
       join(process.cwd(), "frontend/src/styles/metask-tokens.css"),
@@ -571,7 +575,11 @@ test("Workbench foundation uses a stable 760px new Task Composer stage", async (
   assert.match(css, /@import "\.\/styles\/metask-tokens\.css"/);
   assert.match(tokens, /--metask-primary:\s*#8a4ed1/);
   assert.match(tokens, /--ui-action-primary:\s*var\(--metask-primary\)/);
-  assert.match(css, /--left-column:\s*248px/);
+  assert.match(css, /--left-column-width:\s*248px/);
+  assert.match(
+    css,
+    /\.app-window\[data-left-open="true"\]\s*\{[\s\S]*?--left-column:\s*var\(--left-column-width\)/,
+  );
   assert.match(
     css,
     /\.app-window\[data-left-open="true"\] \.workbench-commandbar::before\s*\{[\s\S]*?width:\s*var\(--left-column\);[\s\S]*?border-right:\s*1px solid var\(--ui-border\);[\s\S]*?background:\s*var\(--ui-surface-panel-2\)/,
@@ -579,6 +587,22 @@ test("Workbench foundation uses a stable 760px new Task Composer stage", async (
   assert.match(
     css,
     /\.workbench-commandbar\s*\{[\s\S]*?background:\s*var\(--ui-surface-canvas\)/,
+  );
+  assert.match(
+    css,
+    /\.app-window\s*\{[\s\S]*?--workbench-content-surface:\s*var\(--ui-surface-panel\)/,
+  );
+  assert.match(
+    css,
+    /\.task-stage\s*\{[\s\S]*?border-top:\s*1px solid var\(--ui-border\);[\s\S]*?background:\s*var\(--workbench-content-surface\)/,
+  );
+  assert.match(
+    css,
+    /\.workbench-view\s*\{[\s\S]*?background:\s*var\(--workbench-content-surface\)/,
+  );
+  assert.match(
+    css,
+    /\.composer-bar\s*\{[\s\S]*?background:\s*var\(--workbench-content-surface\)/,
   );
   assert.doesNotMatch(
     css.match(/\.workbench-commandbar\s*\{[\s\S]*?\n\}/)?.[0] ?? "",
@@ -614,6 +638,19 @@ test("Workbench foundation uses a stable 760px new Task Composer stage", async (
     /contextVisible=\{\s*!settingsOpen && route === "workbench" && activeTask !== null\s*\}/,
   );
   assert.doesNotMatch(shell, /commandbar-workspace|commandbar-separator/);
+  assert.match(shell, /leftWidthPreference/);
+  assert.match(shell, /<ResizableSeparator/);
+  assert.match(resizableSeparator, /setPointerCapture/);
+  assert.match(resizableSeparator, /role="separator"/);
+  assert.match(resizableSeparator, /aria-valuemin=\{minimum\}/);
+  assert.match(
+    css,
+    /\.workspace-resize-handle\s*\{[\s\S]*?cursor:\s*col-resize;[\s\S]*?touch-action:\s*none/,
+  );
+  assert.match(
+    css,
+    /@media \(max-width: 819px\)[\s\S]*?\.workspace-resize-handle\s*\{[\s\S]*?display:\s*none/,
+  );
   assert.match(shell, /commandbar-task/);
 });
 

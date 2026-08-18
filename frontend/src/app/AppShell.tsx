@@ -1,6 +1,13 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 
 import { Icon } from "../components/ui/Icon.tsx";
+import { ResizableSeparator } from "../components/ui/ResizableSeparator.tsx";
 import { WindowControls } from "../components/ui/WindowControls.tsx";
 import { WindowTitlebar } from "../components/ui/WindowTitlebar.tsx";
 import { shouldDismissInspectorForEscape } from "../features/inspector/inspector-interaction.ts";
@@ -11,6 +18,23 @@ import {
 } from "../platform/local-preferences.ts";
 
 const leftPreference = "metawork.panel.workspaces";
+const leftWidthPreference = "metawork.panel.workspaces.width";
+const defaultLeftWidth = 248;
+const minimumLeftWidth = 208;
+const maximumLeftWidth = 360;
+const leftWidthStep = 16;
+
+function clampLeftWidth(value: number) {
+  return Math.min(maximumLeftWidth, Math.max(minimumLeftWidth, value));
+}
+
+function initialLeftWidth() {
+  const stored = readLocalPreference(leftWidthPreference);
+  if (stored === null) return defaultLeftWidth;
+  const parsed = Number(stored);
+  return Number.isFinite(parsed) ? clampLeftWidth(parsed) : defaultLeftWidth;
+}
+
 function initialPanel(key: string, minimumWidth: number) {
   if (typeof window === "undefined") return true;
   const stored = readLocalPreference(key);
@@ -48,6 +72,8 @@ export function AppShell({
   const [leftOpen, setLeftOpen] = useState(() =>
     initialPanel(leftPreference, 820),
   );
+  const [leftWidth, setLeftWidth] = useState(initialLeftWidth);
+  const [resizingLeft, setResizingLeft] = useState(false);
   const leftAvailable = left !== null;
   const effectiveLeftOpen = leftAvailable && leftOpen;
   const inspectorAvailable = inspector !== null;
@@ -86,6 +112,8 @@ export function AppShell({
       className="app-window"
       data-left-open={effectiveLeftOpen}
       data-inspector-open={effectiveInspectorOpen}
+      data-resizing-left={resizingLeft}
+      style={{ "--left-column-width": `${leftWidth}px` } as CSSProperties}
       onKeyDown={(event) => {
         const target = event.target as HTMLElement;
         if (
@@ -183,6 +211,22 @@ export function AppShell({
           >
             {left}
           </aside>
+        )}
+        {effectiveLeftOpen && (
+          <ResizableSeparator
+            className="workspace-resize-handle"
+            label={t("app.resize_sidebar")}
+            value={leftWidth}
+            minimum={minimumLeftWidth}
+            maximum={maximumLeftWidth}
+            step={leftWidthStep}
+            onChange={setLeftWidth}
+            onCommit={(width) =>
+              writeLocalPreference(leftWidthPreference, String(width))
+            }
+            onResizeStart={() => setResizingLeft(true)}
+            onResizeEnd={() => setResizingLeft(false)}
+          />
         )}
         <section className="task-stage">{children}</section>
         {inspectorAvailable && (
