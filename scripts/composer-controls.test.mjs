@@ -288,6 +288,7 @@ test("SelectionMenu exposes a visible busy state without a false chevron", () =>
 const readySettingsAccount = {
   state: "authenticated",
   catalogState: "ready",
+  executionSource: "metask",
   canCancel: false,
   accountId: "account-1",
   displayName: "Metask User",
@@ -314,10 +315,13 @@ const readySettingsAccount = {
   candidateApiKeySelectionId: "",
   candidateModelSelectionId: "",
   modelCatalogApiKeySelectionId: "key-1",
+  modelConnections: [],
+  selectedModelConnectionId: "",
   canCreateTask: true,
   errorCode: "none",
   safeDiagnostic: "",
   catalogGeneration: "1",
+  metaskExecutionGeneration: "1",
   executionGeneration: "1",
 };
 
@@ -333,6 +337,11 @@ function settingsElement(account, overrides = {}) {
     },
     createElement(SettingsPage, {
       account,
+      modelConnectionCapabilities: {
+        management: true,
+        secretCapture: false,
+        connectionTest: true,
+      },
       focusTarget: "title",
       disabled: false,
       cancelDisabled: false,
@@ -341,6 +350,18 @@ function settingsElement(account, overrides = {}) {
       onCancel() {},
       onSelectApiKey() {},
       onSelectModel() {},
+      onCreateModelConnection() {
+        return Promise.resolve(false);
+      },
+      onUpdateModelConnection() {
+        return Promise.resolve(false);
+      },
+      onRemoveModelConnection() {
+        return Promise.resolve(false);
+      },
+      onTestModelConnection() {},
+      onSelectModelConnection() {},
+      onActivateMetask() {},
       onBeginLogin() {},
       onLogout() {},
       ...overrides,
@@ -395,7 +416,7 @@ test("Settings completes the API transaction before replacing committed defaults
     /current default stays active/i,
   );
   assert.match(
-    screen.getByRole("combobox", { name: "Default model" }).textContent,
+    dom.window.document.getElementById("settings-model")?.textContent ?? "",
     /Model One/,
   );
 
@@ -487,6 +508,48 @@ test("Settings keeps a model choice visibly pending without declaring it committ
   assert.equal(readySettingsAccount.selectedModelSelectionId, "model-1");
 });
 
+test("Settings keeps Metask available while a model connection is the default", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  let activations = 0;
+  renderSettings(
+    {
+      ...readySettingsAccount,
+      executionSource: "model_connection",
+      modelConnections: [
+        {
+          id: "connection-1",
+          displayName: "Team OpenAI",
+          protocol: "openai_chat_completions",
+          normalizedBaseUrl: "https://api.openai.com/v1/chat/completions",
+          state: "ready",
+          testStatus: "connected",
+          credentialStatus: "ready",
+          enabled: true,
+          models: [{ id: "gpt-5", displayName: "GPT-5" }],
+          selectedModel: "gpt-5",
+          connectionGeneration: "1",
+        },
+      ],
+      selectedModelConnectionId: "connection-1",
+      executionGeneration: "9",
+    },
+    {
+      onActivateMetask() {
+        activations += 1;
+      },
+    },
+  );
+
+  assert.match(
+    screen.getByRole("combobox", { name: "Default model" }).textContent,
+    /Model One/,
+  );
+  await user.click(
+    screen.getByRole("button", { name: "Use Metask for new tasks" }),
+  );
+  assert.equal(activations, 1);
+});
+
 test("Settings limits API transaction locking and keeps a real cancel path", async () => {
   const user = userEvent.setup({ document: dom.window.document });
   let cancellations = 0;
@@ -524,9 +587,7 @@ test("Settings limits API transaction locking and keeps a real cancel path", asy
     false,
   );
   assert.equal(
-    screen
-      .getByRole("link", { name: "Account & models" })
-      .hasAttribute("aria-disabled"),
+    screen.getByRole("link", { name: "Account" }).hasAttribute("aria-disabled"),
     false,
   );
 
@@ -565,6 +626,9 @@ test("Settings keeps section navigation fixed while content scrolls independentl
   const page = document.querySelector(".settings-page");
   const content = document.querySelector(".settings-content");
   const accountSection = document.querySelector("#settings-account");
+  const modelConnectionsSection = document.querySelector(
+    "#settings-model-connections",
+  );
   Object.defineProperty(content, "clientHeight", {
     configurable: true,
     value: 680,
@@ -572,6 +636,9 @@ test("Settings keeps section navigation fixed while content scrolls independentl
   content.getBoundingClientRect = () => ({ top: 100 });
   accountSection.getBoundingClientRect = () => ({
     top: 520 - content.scrollTop,
+  });
+  modelConnectionsSection.getBoundingClientRect = () => ({
+    top: 920 - content.scrollTop,
   });
 
   page.scrollTop = 300;
@@ -591,8 +658,15 @@ test("Settings keeps section navigation fixed while content scrolls independentl
   content.scrollTop = 300;
   fireEvent.scroll(content);
   assert.equal(
+    screen.getByRole("link", { name: "Account" }).getAttribute("aria-current"),
+    "location",
+  );
+
+  content.scrollTop = 720;
+  fireEvent.scroll(content);
+  assert.equal(
     screen
-      .getByRole("link", { name: "Account & models" })
+      .getByRole("link", { name: "Model connections" })
       .getAttribute("aria-current"),
     "location",
   );

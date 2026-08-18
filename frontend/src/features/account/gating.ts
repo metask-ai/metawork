@@ -1,9 +1,12 @@
 import type { AccountView } from "../../bridge/contracts.ts";
 
 export function requiresAccountGate(
-  account: Pick<AccountView, "state">,
+  account: Pick<AccountView, "state" | "executionSource">,
 ): boolean {
-  return account.state === "checking" || account.state === "authorizing";
+  return (
+    account.executionSource === "metask" &&
+    (account.state === "checking" || account.state === "authorizing")
+  );
 }
 
 /**

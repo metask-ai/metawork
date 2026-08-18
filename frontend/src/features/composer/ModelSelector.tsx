@@ -13,7 +13,11 @@ export function ModelSelector({
   onSelect,
 }: {
   label: string;
-  options: { selectionId: string; displayName: string }[];
+  options: {
+    selectionId: string;
+    displayName: string;
+    triggerLabel?: string;
+  }[];
   selectedId: string;
   editable: boolean;
   disabled: boolean;
@@ -38,6 +42,7 @@ export function ModelSelector({
         value: model.selectionId,
         label:
           model.displayName || model.selectionId || t("account.model_fallback"),
+        triggerLabel: model.triggerLabel,
       }))}
       placeholder={t("account.choose_model")}
       ariaLabel={t("settings.default_model")}

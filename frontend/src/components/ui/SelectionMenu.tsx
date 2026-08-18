@@ -6,6 +6,7 @@ import { Select } from "./select.tsx";
 export type SelectionMenuOption = {
   value: string;
   label: string;
+  triggerLabel?: string;
   description?: string;
   descriptionKind?: "text" | "code";
   disabled?: boolean;
@@ -75,7 +76,7 @@ export function SelectionMenu({
           >
             <span className="selection-trigger-copy">
               <span className="selection-trigger-value">
-                {selected?.label || placeholder}
+                {selected?.triggerLabel || selected?.label || placeholder}
               </span>
               {valueLayout === "detailed" && selected?.description && (
                 <small
