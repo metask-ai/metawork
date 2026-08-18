@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef } from "react";
 
-import type { RunView, TaskView, ToolView } from "../../bridge/contracts.ts";
-import { formatInteger, formatMilliseconds } from "../../i18n/formatters.ts";
+import type { RunView, TaskView } from "../../bridge/contracts.ts";
+import { formatInteger } from "../../i18n/formatters.ts";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
 import type { InspectorSection } from "./inspector-state.ts";
 
@@ -55,14 +55,6 @@ function runLabel(run: RunView): MessageId {
   }
 }
 
-function toolLabel(tool: ToolView): MessageId {
-  return tool.state === "running"
-    ? "task.phase.running"
-    : tool.state === "failed"
-      ? "outcome.failed"
-      : "outcome.completed";
-}
-
 function wireInteger(value: string): bigint {
   try {
     return BigInt(value);
@@ -71,7 +63,7 @@ function wireInteger(value: string): bigint {
   }
 }
 
-export function TaskInspector({
+export function TaskOverview({
   task,
   focusRequest,
   onFocusPending,
@@ -159,39 +151,6 @@ export function TaskInspector({
                 {run.cause && <small>{t(`cause.${run.cause}`)}</small>}
               </div>
             </div>
-          </section>
-        )}
-
-        {run && run.tools.length > 0 && (
-          <section
-            ref={(node) => {
-              sectionRefs.current.tools = node ?? undefined;
-            }}
-            className="inspector-section"
-            tabIndex={-1}
-          >
-            <p className="section-label">{t("inspector.tools")}</p>
-            <ul className="inspector-tool-list">
-              {run.tools.map((tool) => {
-                const duration = wireInteger(tool.elapsedMs);
-                return (
-                  <li key={tool.id} data-state={tool.state}>
-                    <span className="inspector-tool-state" aria-hidden="true" />
-                    <span>
-                      <strong>{tool.name}</strong>
-                      <small>{t(toolLabel(tool))}</small>
-                    </span>
-                    {duration > 0n && (
-                      <time>
-                        {t("tool.duration_ms", {
-                          count: formatMilliseconds(locale, duration),
-                        })}
-                      </time>
-                    )}
-                  </li>
-                );
-              })}
-            </ul>
           </section>
         )}
 

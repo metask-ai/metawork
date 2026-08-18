@@ -23,8 +23,8 @@ const vite = await createServer({
   logLevel: "silent",
   server: { middlewareMode: true },
 });
-const { TaskInspector } = await vite.ssrLoadModule(
-  "/src/features/inspector/TaskInspector.tsx",
+const { TaskOverview } = await vite.ssrLoadModule(
+  "/src/features/inspector/TaskOverview.tsx",
 );
 const { ApprovalPanel } = await vite.ssrLoadModule(
   "/src/features/approvals/ApprovalPanel.tsx",
@@ -87,7 +87,7 @@ function renderInspector(value) {
           t: (id, values) => translate("en-US", id, values),
         },
       },
-      createElement(TaskInspector, {
+      createElement(TaskOverview, {
         task: value,
         focusRequest: null,
         onClose() {},
@@ -218,10 +218,10 @@ test("Inspector shows latest canonical run facts without copying raw output", ()
       lastRunOutcome: "completed",
     }),
   );
-  assert.match(markup, />Inspector</);
+  assert.match(markup, />Task overview</);
   assert.match(markup, />Last run</);
   assert.match(markup, />17</);
-  assert.match(markup, />Bash</);
+  assert.doesNotMatch(markup, />Bash</);
   assert.doesNotMatch(
     markup,
     /1,000|private raw output|private input|INTERNAL_PROVIDER_RETRY/,
@@ -258,7 +258,7 @@ test("approval cards never expose internal Run identity", () => {
     ),
   );
   assert.match(markup, />Response required</);
-  assert.match(markup, /class="ai-tool-field-label">Arguments<\/p>/);
+  assert.match(markup, /class="detail-field-label">Arguments<\/p>/);
   assert.match(markup, /class="code-block-preview"/);
   assert.doesNotMatch(markup, /8472|work item/i);
 });
@@ -322,15 +322,12 @@ test("Escape dismissal and focus return preserve the real Inspector opener", () 
   );
 });
 
-test("Inspector has one controlled panel and the central narrative is not chat", async () => {
+test("Task overview has one controlled panel and Task content has no Agent surface", async () => {
   const [app, shell, surface, css] = await Promise.all([
     readFile(join(process.cwd(), "frontend/src/app/App.tsx"), "utf8"),
     readFile(join(process.cwd(), "frontend/src/app/AppShell.tsx"), "utf8"),
     readFile(
-      join(
-        process.cwd(),
-        "frontend/src/features/agent-surface/AgentWorkSurface.tsx",
-      ),
+      join(process.cwd(), "frontend/src/features/tasks/TaskContent.tsx"),
       "utf8",
     ),
     readFile(join(process.cwd(), "frontend/src/index.css"), "utf8"),
@@ -342,10 +339,11 @@ test("Inspector has one controlled panel and the central narrative is not chat",
   assert.match(app, /inspectorFocusReturnTarget/);
   assert.match(shell, /id="task-inspector"/);
   assert.doesNotMatch(shell, /rightPreference|setRightOpen|aria-modal/);
-  assert.doesNotMatch(surface, /run\.label|Work item/);
-  const userMessageRule = css.match(
-    /\.ai-message\.agent-user-message\s*\{([^}]*)\}/,
-  )?.[1];
+  assert.doesNotMatch(
+    surface,
+    /run\.tools|run\.usage|ToolCard|AgentWorkSurface/,
+  );
+  const userMessageRule = css.match(/\.task-input\s*\{([^}]*)\}/)?.[1];
   assert.ok(userMessageRule);
   assert.match(userMessageRule, /width:\s*fit-content/);
   assert.match(userMessageRule, /max-width:\s*min\(78%, 660px\)/);
@@ -353,18 +351,15 @@ test("Inspector has one controlled panel and the central narrative is not chat",
   assert.match(userMessageRule, /border-radius:\s*14px 14px 4px 14px/);
   assert.doesNotMatch(surface, /message\.(?:you|agent)/);
   assert.doesNotMatch(surface, /message-role/);
-  const runOutcomeRule = css.match(/\.agent-run-outcome\s*\{([^}]*)\}/)?.[1];
-  assert.ok(runOutcomeRule);
-  assert.match(runOutcomeRule, /border-top:\s*1px solid var\(--ui-border\)/);
-  assert.doesNotMatch(runOutcomeRule, /border-radius|background:/);
   assert.match(
     css,
-    /@media \(max-width: 560px\)[\s\S]*?\.ai-message\.agent-user-message\s*\{[^}]*max-width:\s*88%/,
+    /\.task-outcome\s*\{[\s\S]*?border-top:\s*1px solid var\(--ui-border\)/,
   );
-  assert.doesNotMatch(
+  assert.match(
     css,
-    /\.ai-message\.agent-user-message::(?:before|after)/,
+    /@media \(max-width: 560px\)[\s\S]*?\.task-input\s*\{[^}]*max-width:\s*88%/,
   );
+  assert.doesNotMatch(css, /\.task-input::(?:before|after)/);
 });
 
 test("Inspector breakpoint changes presentation without creating a modal or second state owner", async () => {

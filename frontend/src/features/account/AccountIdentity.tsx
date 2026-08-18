@@ -5,7 +5,7 @@ import { Icon } from "../../components/ui/Icon.tsx";
 import { Menu } from "../../components/ui/menu.tsx";
 import { useI18n } from "../../i18n/context.ts";
 
-type SettingsTarget = "account" | "model_connections" | "signout";
+type SettingsTarget = "title" | "signout";
 
 export function AccountIdentity({
   account,
@@ -58,10 +58,10 @@ export function AccountIdentity({
               )}
               <Menu.Item
                 className="account-menu-item focus-ring"
-                onClick={() => choose(() => onOpenSettings("account"))}
+                onClick={() => choose(() => onOpenSettings("title"))}
               >
                 <Icon name="settings" />
-                {t("settings.account")}
+                {t("settings.title")}
               </Menu.Item>
               {authenticated && (
                 <Menu.Item

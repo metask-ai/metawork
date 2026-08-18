@@ -3,6 +3,7 @@ import type { MessageId } from "./en-US.ts";
 export const zhCN: Record<MessageId, string> = {
   "app.name": "MetaWork",
   "app.toggle_sidebar": "切换任务侧栏",
+  "app.resize_sidebar": "调整任务侧栏宽度",
   "app.dismiss_panels": "收起面板",
   "app.language": "语言",
   "app.language.en-US": "English",
@@ -518,7 +519,7 @@ export const zhCN: Record<MessageId, string> = {
   "file_preview.state.restricted": "文件预览受限",
   "file_preview.state.unsupported": "无法预览此文件",
   "file_preview.state.error": "文件预览失败",
-  "timeline.jump_latest": "跳到最新内容",
+  "task.jump_latest": "跳到最新内容",
   "inspector.title": "任务概览",
   "inspector.open": "打开任务概览",
   "inspector.close": "关闭任务概览",

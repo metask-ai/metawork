@@ -262,6 +262,18 @@ test("Settings is a full content overlay that preserves the Workbench mount", as
     css,
     /\.settings-header,\s*\.settings-layout\s*\{[\s\S]*width: 100%;/,
   );
+  assert.match(
+    css,
+    /\.settings-page\s*\{[\s\S]*--settings-navigation-track: calc\(var\(--left-column-width\) - 64px\);/,
+  );
+  assert.match(
+    css,
+    /\.settings-header\s*\{[\s\S]*grid-template-columns: var\(--settings-navigation-track\) minmax\(0, 1fr\);/,
+  );
+  assert.match(
+    css,
+    /\.settings-layout\s*\{[\s\S]*grid-template-columns: var\(--settings-navigation-track\) minmax\(0, 1fr\);/,
+  );
   const settings = await readFile(
     resolve(sourceRoot, "features", "settings", "SettingsPage.tsx"),
     "utf8",

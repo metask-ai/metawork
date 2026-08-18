@@ -1,6 +1,7 @@
 export const enUS = {
   "app.name": "MetaWork",
   "app.toggle_sidebar": "Toggle task sidebar",
+  "app.resize_sidebar": "Resize task sidebar",
   "app.dismiss_panels": "Dismiss panels",
   "app.language": "Language",
   "app.language.en-US": "English",
@@ -564,7 +565,7 @@ export const enUS = {
   "file_preview.state.restricted": "File preview is restricted",
   "file_preview.state.unsupported": "This file cannot be previewed",
   "file_preview.state.error": "File preview failed",
-  "timeline.jump_latest": "Jump to latest",
+  "task.jump_latest": "Jump to latest",
   "inspector.title": "Task overview",
   "inspector.open": "Open task overview",
   "inspector.close": "Close task overview",
