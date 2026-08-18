@@ -55,16 +55,19 @@ Desired `enabled` 只表达用户意图，不重复承担 connection approval、
 
 ### 2.1 Account 与 ExecutionConfig
 
-Account 和 Workbench 是同级 owner，彼此不导入 runtime。Account Runtime 独占 OAuth token、PKCE、当前 `/me` 验证的 identity、完整 API Key、平台凭据 locator、catalog attempt、mailbox/effect queue、当前默认选择和 credential generation；Workbench 独占已安装的默认 runtime ExecutionConfig、live Session/Run/job/worker 所需的 owned config、Task admission、Workspace/Task/Run history与 replacement gate。Bridge 只提交无 secret 的 catalog selection identifier、严格解码后的 expected catalog/execution generation 或其他 `AccountCommand`；Renderer 不能提交 provider、base URL、完整 credential 或未被 Account catalog 验证的模型配置。
+Account 和 Workbench 是同级 owner，彼此不导入 runtime。Account Runtime 独占 OAuth token、PKCE、当前 `/me` 验证的 identity、Metask 完整 API Key、用户 Model Connection registry、平台凭据 locator、catalog attempt、mailbox/effect queue、当前默认选择和 credential generation；Workbench 独占已安装的默认 runtime ExecutionConfig、live Session/Run/job/worker 所需的 owned config、Task admission、Workspace/Task/Run history与 replacement gate。Bridge 只提交无 secret 的 catalog/connection selection identifier、严格解码后的 expected catalog/execution generation 或 typed `ModelConnectionCommand`；Renderer 不能把 provider、base URL、完整 credential 或未被 Host 验证的执行配置直接注入 AgentCore。
 
 公开 `AccountView` 只包含四态 `checking | signed_out | authorizing | authenticated` 和独立目录状态 `unavailable | loading | choosing | ready | failed`。`canCancel` 与 `canCreateTask` 是 Host 判定的能力事实，不再由 Renderer 从 operation/readiness 推导。saved account、reauth required、account mismatch、primary action 和公开 execution state 均不存在；登录无效直接变为 `signed_out`，统一通过 `beginLogin` 建立新 identity。
+
+Model Connection projection 不扩展 Metask OAuth 状态机：每条连接发布稳定的非 secret `connection_id`、display name、provider、脱敏 normalized endpoint、credential status、bounded model metadata、generation readiness、latest test status 和 connection generation。Connection registry metadata 使用独立原子 store；API credential 只存在系统安全存储和当前运行时的 bounded owned copy。新增连接在 Account 内先 durable 提交 credential cleanup tombstone，再写系统 credential，最后原子地用完整连接替换 tombstone；Application 的 trusted capture continuation 只能同步借用 secret 并接收最终 typed result，Bridge 永远看不到中间 slot 或 secret。连接测试通过 AgentCore 的一次性流式 Session/Run 完成，测试 candidate 不进入 Workbench Task、Run history 或 durable attachment。
 
 `execution replacement gate` 区分两类操作：
 
 - 默认 API/模型切换可以安装新 generation，既有 Task 继续引用旧 generation，且其 admission 不被无关的默认切换冻结；默认安装只在新配置无法安全安装、目标 catalog 已失效或同一 generation 提交仍未收口时拒绝；
+- Model Connection 的新增、编辑、验证、启用、禁用和删除使用独立的 connection transaction；它可以在 Metask `signed_out` 时继续管理，但安装为默认执行配置前必须通过同一 generation/replacement gate。endpoint、provider 或 credential 替换生成新的 connection generation，不能原地改变 live Session；
 - 账号 identity 切换、退出登录和设备 credential 清理必须等待所有 credential、Session、Run、job 与 worker reference 归零，不能借默认切换绕过 secret lifetime。durable Task、历史记录和 `closed` 产品状态不持有 credential，因而不参与 gate；无运行时 attachment 的恢复 Task 必须直接放行。
 
-冷启动恢复不是运行中的 identity 切换：新进程尚未持有可被替换的 Account credential，因而启动事务使用 default-execution transaction boundary 安装或清空当前默认执行配置，并保留已恢复的 Task history；不得让未关闭但无运行时 attachment 的 Task 触发 identity replacement rejection。运行中的显式重新登录或 logout 必须经过 identity gate。该 gate 从命令 admission 覆盖到唯一 identity terminal boundary：token 提交前取消或失败保留旧默认配置，verified identity、token 已提交后的失败或成功退出清空旧默认配置；边界提交后立即释放 gate，后续 catalog/default generation 使用独立 default transaction。后台 refresh 判定凭据无效时只用短 default transaction 清除新 admission 的默认配置，live Task/Run 已拥有的 ExecutionConfig 按原生命周期收口。
+冷启动恢复不是运行中的 identity 切换：新进程先从独立 registry/credential store 恢复 durable Model Connection default，再并行恢复 Metask identity/catalog；Metask execution completion 只更新其自身状态，不能覆盖已恢复的 custom default。没有 custom default 时，Metask execution 才通过 default-execution transaction 安装。运行中的显式重新登录或 logout 必须经过 identity gate；该 gate 只清理 Metask-owned credential/default，不撤销独立的 custom default。显式切回 Metask 先重建当前 Metask execution，成功后原子清除 durable custom default并安装 Metask execution；任一步失败都继续保留 custom default。live Task/Run 已拥有的 ExecutionConfig 按原生命周期收口。
 
 唯一 committed-state 写路径为：
 
@@ -85,11 +88,11 @@ verified identity commit 是 C1 完成边界，不是 Workbench 可见性门槛�
 
 每个 Account attempt 都有 Host-owned deadline、attempt identity 和唯一 terminal completion。浏览器未回调、网络悬挂、effect 启动失败和取消都必须收口到可恢复 committed state。幂等 catalog read 可以有限重试；OAuth code exchange、凭据持久化和结果不确定 mutation 不得自动重放。进入 credential persistence 前允许取消；持久化 effect 开始后撤销 cancel admission，直到 main thread 原子消费 completion，避免磁盘已提交而内存被取消回滚。Renderer command timeout 只释放本地交互并触发 snapshot resync，不能代表 Host mutation 失败。
 
-production 网络接入受 [Metask Account API 合同](metask-account-contract.md)约束。C1 OAuth/login 先独立提交 token rotation，再严格提交 `/me` identity；C2 使用无 Profile header 的 OAuth API Key catalog 与直接 API Key model catalog，从精确 `group.platform` 生成固定 Metask AgentCore target。持久化只允许 secure store 中的 refresh token，以及原子、无 secret 的 `selection_owner_account_id + api_key_id + model_id + execution_generation` preference；其中 generation 是没有顺序语义的随机不透明 binding nonce。access token、Provider API Key、display name、saved identity 和 execution config 不跨进程。冷启动先刷新 OAuth、提交 rotation，再以当前 token `/me` 结果建立 identity，最后决定是否复用 preference；owner 不匹配只清空旧选择，绝不形成登录 mismatch。
+Metask managed 网络接入受 [Metask Account API 合同](metask-account-contract.md)约束。C1 OAuth/login 先独立提交 token rotation，再严格提交 `/me` identity；C2 使用无 Profile header 的 OAuth API Key catalog 与直接 API Key model catalog，从精确 `group.platform` 生成固定 Metask AgentCore target。用户 Model Connection 使用独立的 typed endpoint/credential/model 合同，只允许 Anthropic Messages、OpenAI Chat Completions 和 Gemini Native；不在本地实现 provider transport 或支持未登记协议。持久化只允许 secure store 中的 refresh token 和 Model Connection API credential，以及原子、无 secret 的 Metask selection/connection metadata；其中 generation 是没有顺序语义的随机不透明 binding nonce。access token、Provider API Key、custom credential、saved identity 和完整 execution config 不跨进程。冷启动先刷新 OAuth、提交 rotation，再以当前 token `/me` 结果建立 identity，最后决定是否复用 Metask preference 和可用 Model Connection。
 
-进入 Workbench 后的 API/模型切换仍由 Account owner 执行，不是 Renderer preference。每次 steady selection 都用当前 OAuth 重新加载 authenticated API catalog，不能复用已 secure-zero 的旧 private catalog。candidate private/public catalog 与 committed public catalog 分槽；Account projection 发布候选目录所属的脱敏 API selection identity，Renderer 只能从该 owned catalog 选择模型。加载、取消、选择或持久化期间继续保留已提交 execution，成功后才原子安装新的默认 generation 并提交候选目录；其他 terminal outcome 丢弃候选并回到旧默认配置。Workbench 只用新 generation 接纳之后创建的 Task，既有 Task 继续使用自身 binding epoch。
+进入 Workbench 后的 API/模型或连接切换仍由 Account owner 执行，不是 Renderer preference。Metask steady selection 用当前 OAuth 重新加载 authenticated API catalog，不能复用已 secure-zero 的旧 private catalog；Model Connection mutation 使用独立的 private/committed registry candidate。Account projection 发布候选目录或连接的脱敏 identity，Renderer 只能从 Host-owned projection 选择模型/连接。加载、取消、选择、验证或持久化期间继续保留已提交 execution，成功后才原子安装新的默认 generation；其他 terminal outcome 丢弃 candidate 并回到旧默认配置。Workbench 只用新 generation 接纳之后创建的 Task，既有 Task 继续使用自身 binding epoch。
 
-durable Task/Run 只保存 Workspace binding、Provider、model 和 generation 历史事实；不得保存 account identity、API Key metadata、credential locator 或可重建 secret 的信息。跨 Host 重启的 Task 先恢复成只读 projection，不创建 Session 或 Conversation。Schedule 在触发时如果保存的 generation 与当前默认不一致，进入 `needs_attention`；它不能阻止登录、替换 identity 或清除 credential。
+durable Task/Run 只保存 Workspace binding、Provider、model 和 opaque execution generation 等历史事实；不得保存 account identity、Model Connection identity、API Key metadata、custom credential、credential locator 或可重建 secret 的信息。跨 Host 重启的 Task 先恢复成只读 projection，不创建 Session 或 Conversation。Schedule 在触发时如果保存的 execution generation 与当前默认配置不一致，进入 `needs_attention`；它不能阻止登录、替换 identity 或清除 credential。
 
 因此 identity replacement、default execution replacement 与 durable history 是三个边界：前两者只处理真实运行时资源，后者只负责解释历史，不能反向成为 Account gate。
 
@@ -129,7 +132,7 @@ Skill management persistence 是 Workbench-owned、无 secret、原子 candidate
 
 ### 2.5 Identity 与 credential redaction
 
-Workbench 单独分配稳定的产品 Task identity，并在 Task owner 内保存 Agent Session route identity；AgentCore event 与 event-projection failure 都只按 route identity 回到 owner，Bridge snapshot 与 mutation 只使用产品 Task identity，二者不共享生成器也不依赖数值相等。durable Task binding descriptor 只包含 Workspace/binding epoch、Provider、model 与 execution generation；account identity、API Key identity/metadata 和完整 ExecutionConfig 只属于对应 owner 的当前进程运行时，不进入 Task store、Bridge 或 Renderer。
+Workbench 单独分配稳定的产品 Task identity，并在 Task owner 内保存 Agent Session route identity；AgentCore event 与 event-projection failure 都只按 route identity 回到 owner，Bridge snapshot 与 mutation 只使用产品 Task identity，二者不共享生成器也不依赖数值相等。durable Task binding descriptor 只包含 Workspace/binding epoch、Provider、model 与 opaque execution generation；account identity、Model Connection identity、API Key identity/metadata、connection credential locator 和完整 ExecutionConfig 只属于对应 owner 的当前进程运行时，不进入 Task store、Bridge 或 Renderer。
 credential redaction 是 owner 释放协议的一部分，而不是 snapshot 时的偶然过滤。安装新 credential 前先永久清洗所有既有产品投影；替换或清空默认 execution、释放 quiescent Task-owned execution 前再次使用即将释放的 credential 清洗 Workspace、Task、Run、tool 与 UI history，然后才 secure-zero。序列化仍扫描所有 live credential，并在前缀重叠时采用最长匹配，作为释放前的第二道防线。credential 是 opaque bytes；若匹配发生在 UTF-8 codepoint 内部，所有 ingestion、流式跨 chunk 清洗与序列化路径都必须扩大到完整 codepoint，禁止为了替换 secret 产生非法 UTF-8 产品事实或 JSON。
 
 ## 3. 并发与生命周期
@@ -159,7 +162,7 @@ CompactJob
 ```
 
 - 每个 Session 至多一个 in-flight operation；Run、manual compact、Session mutation 与 destroy 互斥；
-- 每个 Session 在创建时绑定一个 immutable ExecutionConfig generation；默认 Account 配置变化不热替换 live Session，显式 Task rebind 也必须创建新 Session；
+- 每个 Session 在创建时绑定一个 immutable ExecutionConfig generation；默认 Account/Model Connection 配置变化不热替换 live Session，显式 Task rebind 也必须创建新 Session；
 - Host 使用有上限的 Workbench executor；
 - 空闲 Session 不占 worker；同步 Run、同步 UI wait 和 manual compact 占用 execution slot；
 - Workbench 创建、排队、停止并销毁 bounded Executor；Agent Runtime 不接收 Scheduler capability，worker 从 Workbench queue 主动进入 Agent Run；

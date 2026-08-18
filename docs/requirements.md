@@ -57,9 +57,9 @@ Turn 是用户提交的一次交互；Run 是 AgentCore 为该交互进行的一
 
 代表 Agent 继续工作前需要用户作出的选择。当前 ABI v1 只提供工具 permission 和问题回答，并使用同步 request/response；等待期间 Run 仍占用 executor slot，不形成可持久化挂起点。计划审批和自定义结构化交互只有在 AgentCore 发布相应控制协议后才进入产品范围。
 
-### Account 与 ExecutionConfig
+### Account、模型连接与 ExecutionConfig
 
-Account 是 MetaWork 的 Metask 账号控制面，负责 OAuth 登录、当前已验证 identity、API Key/模型目录、凭据安全存储和默认执行配置代际。Account 对外只发布 `checking | signed_out | authorizing | authenticated`；目录状态独立为 `unavailable | loading | choosing | ready | failed`。Account 发布一个当前默认 `ExecutionConfig`，包含 typed `provider_kind + model + base_url`、API Key 和 `execution_generation`；Workbench 为实际运行取得 owned copy。durable Task 与历史记录不是 Account identity 或 credential 的副本，只保存解释历史所需的 Workspace、Provider、model 和 generation 事实。
+Account 是 MetaWork 的 Metask 账号控制面，负责 OAuth 登录、当前已验证 identity、Metask API Key/模型目录、凭据安全存储和默认执行配置代际。Account 同时拥有用户管理的 Model Connection registry；它与 Metask identity、OAuth 状态和 Metask catalog 独立，但使用同一条 Host-owned execution safety boundary。Account 发布一个当前默认 `ExecutionConfig`，来源可以是 Metask managed connection 或 user-managed Model Connection；配置包含 typed `provider_kind + model + base_url`、API credential 和 `execution_generation`，Workbench 为实际运行取得 owned copy。durable Task 与历史记录不是 Account identity、Model Connection identity 或 credential 的副本，只保存解释历史所需的 Workspace、provider、model、opaque execution generation 和 binding facts。
 
 ### Scheduled Task
 
@@ -87,11 +87,12 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - UI 能显示当前 Task 所属 Workspace；
 - strict Workspace security 未验证前，产品必须明确限制使用范围，不能制造虚假的安全承诺。
 
-### 5.2 Metask 账号与执行配置
+### 5.2 账号、模型连接与执行配置
 
 - 普通用户通过 Metask OAuth 登录，不需要手工填写 Provider、model、base URL 或 API Key；
-- `AccountView` 只发布 `state`、`catalogState`、脱敏 identity/catalog/selection、generation、`canCancel`、`canCreateTask` 和稳定错误；不得发布 saved-account、readiness、primary action、operation、execution state、mismatch 或 reauthenticate 状态机；
-- `checking` 与 `authorizing` 可以暂时占用登录表面；`signed_out` 只禁止新 Task admission，不隐藏 Workspace、durable Task 或历史记录。已有 live Task 仍必须可查看和停止；
+- Metask managed connection 继续遵循 OAuth、API Key catalog 和 fixed provider/base URL 合同；用户管理的 Model Connection 不要求 Metask 登录，但必须先显式创建、验证并安装到 Host-owned execution registry；
+- `AccountView` 只发布 Metask 的 `state`、`catalogState`、脱敏 identity/catalog/selection、generation、`canCancel`、`canCreateTask` 和稳定错误；Model Connection 以独立的脱敏 connection projection 发布，不把 custom connection 状态塞进 Metask OAuth 状态机；不得发布 saved-account、readiness、primary action、operation、execution state、mismatch 或 reauthenticate 状态机；
+- `checking` 与 `authorizing` 可以暂时占用登录表面；`signed_out` 在没有 ready user-managed Model Connection 时禁止新 Task admission，但不隐藏 Workspace、durable Task、历史记录或模型连接设置。已有 live Task 仍必须可查看和停止；
 - 登录无效即进入 `signed_out`。Renderer 只提供统一的 `beginLogin`，不保留“重新认证”“重新打开登录页”“匹配上次账号”等分支；
 - OAuth 浏览器授权、identity 提交和执行目录准备不得暴露内部 C1/C2、operation、generation 或凭据存储步骤；
 - OAuth 成功提交 token rotation 并以 `/me` 验证 authenticated identity 后，Host 必须以独立、有界的 continuation 自动加载 API Key 和模型目录。仍有效的历史选择优先恢复；没有历史选择时，唯一候选自动采用；只有多个候选且没有合同明确的默认项时才请求用户选择；
@@ -99,17 +100,20 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - 没有可用 API Key 或模型时必须保持已登录状态，说明缺少什么并提供 `重试`；只有 Host 拥有固定、安全的 Metask 管理入口时才显示 `在 Metask 中管理`，Renderer 不拼接外部 URL；
 - 登录、目录加载、模型加载和持久化是 Host-owned 操作。Renderer 只渲染 Host 发布的状态和脱敏候选，不通过 `useEffect`、隐藏点击或本地定时器推进产品状态；
 - 账号入口固定显示在左栏底部：已登录时只显示当前 OAuth `/me` 严格验证的用户名，未登录时显示登录动作。接口不可用、账号不匹配或响应不可信时不得回退 token `account_id` 或旧 identity；不得由 Renderer 推断，也不得在普通 catalog refresh 或后台定时路径主动更新；
-- API Key 切换属于 `账号与模型` 设置。Renderer 只显示 Metask 返回的脱敏名称、Provider 与尾号；API 创建、秘密查看和管理仍由 Metask 完成；
-- 当前模型必须显示在 New task Composer 附近，并可从当前 API 的已验证模型目录快速选择。该选择更新后续新 Task 的默认执行配置；已有 Task 显示当前 binding epoch 的模型，历史按 epoch 保留原事实，不提供虚假的 live Session 热切换；
-- 进入账号与模型设置时，显式导航动作自动请求 Host 同步一次最新 API/模型目录；已有默认配置时 Host 必须优先复用并验证当前 API，再自动加载它的模型目录，不能要求用户先重新选择或切换
+- Metask API Key 切换属于 `账号` 设置；Renderer 只显示 Metask 返回的脱敏名称、Provider 与尾号，API 创建、秘密查看和管理仍由 Metask 完成。用户管理的连接进入独立的 `模型连接` 设置，不复用 Metask API catalog 表单；
+- Model Connection 的最小产品对象是 `connection_id + display_name + provider_kind + normalized_base_url + credential_status + generation_readiness + latest_test_status + model_catalog + connection_generation`。generation readiness 与 `untested | testing | connected | failed` 最新测试状态必须分开；已验证 generation 的失败重测不能撤销正在使用的默认 execution。允许的 provider 只有 Anthropic Messages、OpenAI Chat Completions 和 Gemini Native；provider 由用户创建时明确选择，不能根据模型名猜测；
+- 用户管理连接的 API credential 只由 Host 写入系统安全存储，metadata 以独立、无 secret 的 registry 原子持久化。Renderer 只能提交 connection mutation 和 opaque connection identifier，不能提交完整 credential、Authorization header 或把 arbitrary URL 直接注入 Run；
+- 连接测试通过 AgentCore 发起一个有界的流式请求，不由 MetaWork 自己实现 provider HTTP/SSE parser；测试不创建产品 Task、Run history 或持久 Conversation。第一版由用户明确提交 bounded model id，Host 保存其模型 metadata；自动模型发现不在当前范围；
+- 当前模型必须显示在 New task Composer 附近，并显示为 `连接 · 模型`。默认连接/模型只影响后续新 Task；已有 Task 显示当前 binding epoch 的 provider、opaque execution generation 和模型，历史按 epoch 保留原事实，不提供虚假的 live Session 热切换；
+- 进入 `账号` 设置时，显式导航动作自动请求 Host 同步 Metask catalog；进入 `模型连接` 时读取 Account-owned registry，connection health 只由用户显式执行 `测试连接` 更新。已有默认配置必须直接投影，不能要求用户先重新选择或切换；
 - 登录后无已存偏好时，Host 自动选择目录中的第一个 API Key 完成默认配置；选择 API 后模型按 当前已选（若仍在目录）→ 已存偏好 → 目录首项 自动回退，用户随后可在设置中调整。重配置中已选 API Key 从账号消失时不自动切换凭证，停在选择态由用户显式决定。离开设置页视为放弃未完成的重配置：Host 取消停驻事务并恢复原有执行配置；首次配置无可回退项时保持设置页驻留 API 才能修改默认模型。页面直接使用 Host 已发布的脱敏目录和提交态，手动重新同步只作为网络失败、页面持续打开期间 Metask 外部目录变化等恢复动作。设置页同时提供可独立修改的默认 API、默认模型和与错误语义匹配的恢复动作；后续通用、通知、外观和高级设置共享同一设置框架，Workspace 生命周期仍由 New task 路径控件负责；
 - OAuth token 只访问 Metask 账号 API；选定 API Key 才作为 AgentCore 模型调用凭据；
 - Renderer 只能看到脱敏账号、Key 尾号、模型、稳定错误码和状态，不得接触 OAuth token、完整 API Key、Authorization header、临时 OAuth URL 或凭据存储 locator；
-- Account 只维护一个当前默认 ExecutionConfig；Workbench 可以在 live Session、Run、job 或 worker 中保留必要的 owned copy。切换默认 API 或模型不得篡改或停止既有运行；最后一个真实运行时引用释放后必须 secure-zero；
-- durable Task 和 Run 不保存 account id、display name、API Key id/name/suffix 或 credential locator。恢复记录只保存 Workspace binding、Provider、model 和 generation 等历史事实，且不得伪造 Session、secret 或可继续执行能力；
-- 显式重新登录、切换账号、退出登录或清除设备凭据必须取得 Workbench identity replacement gate，并证明所有 credential、Agent Session、Run、executor job 与真实 worker reference 已安全终止；durable Task、历史记录及 `closed = false` 本身不参与 gate，没有运行时引用的恢复 Task 不得阻止操作。identity gate 覆盖完整异步身份尝试：token 提交前取消或失败保留旧默认 ExecutionConfig，verified identity、已提交 token 后的 terminal failure 或成功退出清除旧默认 ExecutionConfig；随后立即结束 identity gate。API/model catalog 与新默认 ExecutionConfig 使用独立的 default replacement transaction，不延长 identity gate。OAuth 成功后以本次 token 返回的 `account_id` 替换本机账号，旧缓存 identity 不得否决显式登录；
+- Account 只维护一个当前默认 ExecutionConfig，来源可以是 Metask managed connection 或 user-managed Model Connection；Workbench 可以在 live Session、Run、job 或 worker 中保留必要的 owned copy。切换默认连接、API 或模型不得篡改或停止既有运行；最后一个真实运行时引用释放后必须 secure-zero；
+- durable Task 和 Run 不保存 account id、Metask API Key id/name/suffix、完整 custom credential、credential locator 或 Model Connection identity。恢复记录只保存 Workspace binding、provider、model、opaque execution generation 和其他无 secret binding facts；运行时配置不可恢复时必须显式进入 `runtime_detached`/恢复路径，不得伪造 Session、secret 或可继续执行能力；
+- 显式重新登录、切换账号、退出登录或清除设备凭据必须取得 Workbench identity replacement gate，并证明所有 Metask credential、Agent Session、Run、executor job 与真实 worker reference 已安全终止；durable Task、历史记录及 `closed = false` 本身不参与 gate，没有运行时引用的恢复 Task 不得阻止操作。identity gate 覆盖完整异步身份尝试：token 提交前取消或失败保留旧 Metask 默认；verified identity、已提交 token 后的 terminal failure 或成功退出只清除 Metask-owned 默认，不得撤销独立的 user-managed Model Connection 默认。随后立即结束 identity gate。API/model catalog 与新默认 ExecutionConfig 使用独立的 default replacement transaction，不延长 identity gate。OAuth 成功后以本次 token 返回的 `account_id` 替换本机账号，旧缓存 identity 不得否决显式登录；
 - refresh token 成功轮换后必须先原子提交新 token，后续 catalog 失败不得回滚到已作废的旧 token；明确鉴权无效关闭新的执行 admission，但已被 live Run 拥有的配置按其生命周期正常收口；
-- New Task admission 必须同时满足 Account `authenticated + catalogState=ready`、Workbench 已安装所选默认 generation、Workspace intent 可解析且 replacement gate 未开启。Automatic intent 要求 automatic root capability；Manual intent 要求目标 Manual Workspace grant 与 epoch 有效；
+- New Task admission 必须满足以下任一执行来源：Metask Account `authenticated + catalogState=ready` 且 Workbench 已安装所选默认 generation，或 user-managed Model Connection `ready` 且 Workbench 已安装所选 connection generation；两者都要求 Workspace intent 可解析且 replacement gate 未开启。Automatic intent 要求 automatic root capability；Manual intent 要求目标 Manual Workspace grant 与 epoch 有效；
 - production Account 接入必须符合 [Metask Account API 合同](metask-account-contract.md)。C1 OAuth/login 先独立提交 token rotation，再以严格 `/me` 交付 authenticated identity；C2 使用无 Profile header 的 OAuth API Key catalog 与直接 API Key model catalog，并从精确 `group.platform` 形成 fixed ExecutionTarget。Account 提交 `execution_ready` 且 Workbench 安装同一默认 generation 前禁止创建新 Task，但不能隐藏 durable history；既有 live Task 的后续 Run 服从其已拥有的运行时配置，不与当前默认 generation 做错误等值比较。
 
 ### 5.3 Task
@@ -247,7 +251,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - Renderer 按不可信调用方处理；
 - Host 命令默认拒绝，只开放白名单；
 - 校验来源、payload、Workspace、Task/Run 归属和权限；
-- production 执行配置只由 Account 生成并由 Application coordinator 在主线程一致性提交链中安装到 Workbench；禁止环境默认值、Renderer 字段或 Bridge payload 注入 provider/base URL/credential。Renderer 只可提交 Account 当前脱敏 catalog 中的稳定 API/model selection identifier，Account 必须重新校验并从锁定合同生成配置；
+- production 执行配置只由 Account 生成并由 Application coordinator 在主线程一致性提交链中安装到 Workbench；禁止环境默认值、Renderer 字段或 Bridge payload 直接注入 provider/base URL/credential。Renderer 只可提交 Account 当前脱敏 catalog 或 Model Connection projection 中的稳定 API/model/connection identifier，Account 必须重新校验并从对应锁定合同生成配置；
 - Provider credential 不得进入 Renderer、Bridge、日志、事件或视图 snapshot；
 - OAuth token、PKCE verifier、authorization code、完整 API Key 和 Authorization header 必须使用单 owner secret buffer，所有失败、取消、过期 completion、replacement 和 shutdown 路径都先不可消除地清零再释放；
 - Host 必须在形成产品 projection 前移除已知 Host-held credential 和 schema 标记的 secret 字段，并对命令与工具输出设置明确上限和 truncation 状态；不得把秘密过滤责任推给 Renderer；
@@ -293,18 +297,18 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 
 它不包含进程恢复、async suspend/resume、strict Workspace security 或产品 Host tools。
 
-### 7.2 Account-integrated macOS 目标
+### 7.2 Account- and connection-integrated macOS 目标
 
 下一阶段在不改写既有 baseline 证据的前提下增加：
 
 ```text
-Metask 登录 → Host 后台恢复或加载 API Key/模型
-→ 仅在真实歧义时请求默认 API/模型 → ready ExecutionConfig
+Metask 登录或配置用户模型连接 → Host 后台恢复/验证 API、credential 与模型
+→ 仅在真实歧义时请求默认连接/模型 → ready ExecutionConfig
 → 进入 Workbench → 选择 Workspace / 编辑 New task 草稿
 → Composer 确认模型 → Task admission → 既有同步 macOS baseline
 ```
 
-Metask C1 OAuth/login 已按 `metawork-app` / `metawork:use` 发布合同锁定；C2 使用已通过 production 复核的无 Profile-ID 通用路径。登录先提交 token rotation，再严格验证并提交 `/me` identity，随后直接启动 API Key/model catalog continuation；C2 失败不得抹除已完成登录。Workbench 的新 Task admission 仍以完整 `execution_ready` 为条件，不能把仅有 authenticated identity 误报成已经可以执行。
+Metask C1 OAuth/login 已按 `metawork-app` / `metawork:use` 发布合同锁定；C2 使用已通过 production 复核的无 Profile-ID 通用路径。登录先提交 token rotation，再严格验证并提交 `/me` identity，随后直接启动 API Key/model catalog continuation；C2 失败不得抹除已完成登录。用户连接使用独立的 typed provider/endpoint/credential 流程，不依赖 OAuth，但必须通过 Host/AgentCore streaming test。Workbench 的新 Task admission 以完整 `execution_ready` 或 ready Model Connection 为条件，不能把仅有 authenticated identity 或未验证的连接误报成已经可以执行。
 
 ### 7.3 Fault-domain 结论
 

@@ -122,7 +122,7 @@ metawork/
 
 `conversation-projection.ts` 将 Workbench 的 Task/Run/Tool/UI/Compact projection 整理为保留输入类型、redaction、活动数量和稳定顺序的可渲染模型；它不创建新的 Bridge 合同或事实来源。`AgentWorkSurface.tsx` 负责工作面布局、流式回复、滚动跟随、Tool/Attention/Compact 组合和现有 Composer 的布局，不拥有输入草稿、Run admission、retry policy 或 AgentCore 语义。旧 Timeline 路径不得与该 feature 并存为第二条 active rendering path。
 
-`features/settings/SettingsPage.tsx` 是覆盖 Workbench 内容区的长期 Settings surface，消费 Account projection 并通过 App action controller 提交账号与模型设置；它不拥有 Workspace registry、authority、Task 导航或 Host lifecycle。已有 Task 的 Workspace 只从 Task projection 推导，New task 只持有 `draftWorkspaceId`，Renderer 不保存 `activeWorkspaceId` 镜像。
+`features/settings/SettingsPage.tsx` 是覆盖 Workbench 内容区的长期 Settings surface，消费 Account projection，并通过 App action controller 分别提交 Metask 账号默认配置与用户管理的模型连接操作；它不拥有 Workspace registry、authority、Task 导航或 Host lifecycle。已有 Task 的 Workspace 只从 Task projection 推导，New task 只持有 `draftWorkspaceId`，Renderer 不保存 `activeWorkspaceId` 镜像。
 
 `workbench/task-visibility.ts` 定义一个跨 Store、左栏与搜索复用的纯 projection 不变量：只有 owning Workspace 同时存在于 canonical snapshot 的 Task 才参与活动导航。它不拥有 Task 历史或 Workspace lifecycle；被移除 Workspace 的 Task 仍由 Host 保存。
 
