@@ -3,6 +3,11 @@ import {
   runCauses,
   type AccountCommandResult,
   type AccountView,
+  type ExecutionSource,
+  type ModelConnectionCredentialStatus,
+  type ModelConnectionProtocol,
+  type ModelConnectionState,
+  type ModelConnectionTestStatus,
   type AskOption,
   type AskQuestion,
   type HostSignal,
@@ -167,12 +172,36 @@ const accountErrorCodes = [
   "recovery_state_invalid",
   "local_resource_exhausted",
   "dependency_contract_invalid",
+  "model_connection_invalid",
+  "model_connection_not_found",
+  "model_connection_capture_unavailable",
+  "model_connection_persistence_unavailable",
+  "model_connection_test_unavailable",
 ] as const;
 const rendererBridgeConnectErrors = [
   "identity_mismatch",
   "revision_mismatch",
 ] as const;
 const providers = ["anthropic", "openai", "gemini"] as const;
+const executionSources = ["metask", "model_connection"] as const;
+const modelConnectionProtocols = [
+  "anthropic_messages",
+  "openai_chat_completions",
+  "gemini_native",
+] as const;
+const modelConnectionStates = ["configuring", "ready", "disabled"] as const;
+const modelConnectionTestStatuses = [
+  "untested",
+  "testing",
+  "connected",
+  "failed",
+] as const;
+const modelConnectionCredentialStatuses = [
+  "missing",
+  "ready",
+  "invalid",
+  "capture_unavailable",
+] as const;
 const workspaceAuthorizations = [
   "available",
   "removing",
@@ -651,9 +680,11 @@ function decodeSkillManagement(
 }
 
 function decodeAccount(value: unknown, path: string): AccountView {
-  const item = object(value, path, [
+  const raw = record(value, path);
+  const item = object(raw, path, [
     "state",
     "catalogState",
+    "executionSource",
     "canCancel",
     "accountId",
     "displayName",
@@ -664,10 +695,13 @@ function decodeAccount(value: unknown, path: string): AccountView {
     "candidateApiKeySelectionId",
     "candidateModelSelectionId",
     "modelCatalogApiKeySelectionId",
+    "modelConnections",
+    "selectedModelConnectionId",
     "canCreateTask",
     "errorCode",
     "safeDiagnostic",
     "catalogGeneration",
+    "metaskExecutionGeneration",
     "executionGeneration",
   ]);
   const apiKeys = arrayValue(
@@ -699,16 +733,124 @@ function decodeAccount(value: unknown, path: string): AccountView {
       };
     },
   );
+  const modelConnections = arrayValue(
+    item.modelConnections,
+    `${path}.modelConnections`,
+    (value, itemPath) => {
+      const connection = object(value, itemPath, [
+        "id",
+        "displayName",
+        "protocol",
+        "normalizedBaseUrl",
+        "state",
+        "testStatus",
+        "credentialStatus",
+        "enabled",
+        "connectionGeneration",
+        "selectedModel",
+        "models",
+      ]);
+      const connectionModels = arrayValue(
+        connection.models,
+        `${itemPath}.models`,
+        (modelValue, modelPath) => {
+          const model = object(modelValue, modelPath, ["id", "displayName"]);
+          return {
+            id: stringValue(model.id, `${modelPath}.id`),
+            displayName: stringValue(
+              model.displayName,
+              `${modelPath}.displayName`,
+            ),
+          };
+        },
+      );
+      return {
+        id: stringValue(connection.id, `${itemPath}.id`),
+        displayName: stringValue(
+          connection.displayName,
+          `${itemPath}.displayName`,
+        ),
+        protocol: enumValue(
+          connection.protocol,
+          `${itemPath}.protocol`,
+          modelConnectionProtocols,
+        ) as ModelConnectionProtocol,
+        normalizedBaseUrl: stringValue(
+          connection.normalizedBaseUrl,
+          `${itemPath}.normalizedBaseUrl`,
+        ),
+        state: enumValue(
+          connection.state,
+          `${itemPath}.state`,
+          modelConnectionStates,
+        ) as ModelConnectionState,
+        testStatus: enumValue(
+          connection.testStatus,
+          `${itemPath}.testStatus`,
+          modelConnectionTestStatuses,
+        ) as ModelConnectionTestStatus,
+        credentialStatus: enumValue(
+          connection.credentialStatus,
+          `${itemPath}.credentialStatus`,
+          modelConnectionCredentialStatuses,
+        ) as ModelConnectionCredentialStatus,
+        enabled: booleanValue(connection.enabled, `${itemPath}.enabled`),
+        connectionGeneration: wireId(
+          connection.connectionGeneration,
+          `${itemPath}.connectionGeneration`,
+        ),
+        selectedModel: stringValue(
+          connection.selectedModel,
+          `${itemPath}.selectedModel`,
+        ),
+        models: connectionModels,
+      };
+    },
+  );
   if (new Set(apiKeys.map((key) => key.selectionId)).size !== apiKeys.length)
     fail(`${path}.apiKeys`, "API Key identities must be unique");
   if (new Set(models.map((model) => model.selectionId)).size !== models.length)
     fail(`${path}.models`, "model identities must be unique");
+  if (
+    new Set(modelConnections.map((connection) => connection.id)).size !==
+    modelConnections.length
+  )
+    fail(`${path}.modelConnections`, "connection identities must be unique");
+  for (const [index, connection] of modelConnections.entries()) {
+    const connectionPath = `${path}.modelConnections[${index}]`;
+    if (
+      new Set(connection.models.map((model) => model.id)).size !==
+      connection.models.length
+    )
+      fail(`${connectionPath}.models`, "model identities must be unique");
+    if (
+      connection.selectedModel.length > 0 &&
+      connection.models.filter((model) => model.id === connection.selectedModel)
+        .length !== 1
+    )
+      fail(connectionPath, "the selected model must belong to the connection");
+    if (
+      connection.state === "ready" &&
+      (connection.credentialStatus !== "ready" ||
+        !connection.enabled ||
+        connection.selectedModel.length === 0 ||
+        connection.testStatus === "untested")
+    )
+      fail(connectionPath, "a ready connection must be verified and usable");
+    if (connection.state !== "ready" && connection.testStatus === "connected")
+      fail(connectionPath, "only a ready connection can have a connected test");
+  }
   const state = enumValue(item.state, `${path}.state`, accountStates);
   const catalogState = enumValue(
     item.catalogState,
     `${path}.catalogState`,
     catalogStates,
   );
+  const executionSource = enumValue(
+    item.executionSource,
+    `${path}.executionSource`,
+    executionSources,
+  ) as ExecutionSource;
   const canCancel = booleanValue(item.canCancel, `${path}.canCancel`);
   const accountId = stringValue(item.accountId, `${path}.accountId`);
   const displayName = stringValue(item.displayName, `${path}.displayName`);
@@ -732,6 +874,10 @@ function decodeAccount(value: unknown, path: string): AccountView {
     item.modelCatalogApiKeySelectionId,
     `${path}.modelCatalogApiKeySelectionId`,
   );
+  const selectedModelConnectionId = stringValue(
+    item.selectedModelConnectionId,
+    `${path}.selectedModelConnectionId`,
+  );
   const canCreateTask = booleanValue(
     item.canCreateTask,
     `${path}.canCreateTask`,
@@ -744,14 +890,41 @@ function decodeAccount(value: unknown, path: string): AccountView {
     item.executionGeneration,
     `${path}.executionGeneration`,
   );
-  if (catalogState !== "ready" && canCreateTask)
+  const metaskExecutionGeneration = wireId(
+    item.metaskExecutionGeneration,
+    `${path}.metaskExecutionGeneration`,
+  );
+  if (executionSource === "model_connection") {
+    if (
+      canCreateTask &&
+      (executionGeneration === "0" || selectedModelConnectionId.length === 0)
+    )
+      fail(
+        path,
+        "a model connection execution requires a selected model and generation",
+      );
+    if (
+      canCreateTask &&
+      !modelConnections.some(
+        (connection) =>
+          connection.id === selectedModelConnectionId &&
+          connection.state === "ready" &&
+          connection.credentialStatus === "ready" &&
+          connection.selectedModel.length > 0,
+      )
+    )
+      fail(path, "the selected model must belong to a ready model connection");
+  }
+  if (executionSource === "metask" && selectedModelConnectionId.length > 0)
+    fail(path, "a Metask execution cannot name a model connection");
+  if (executionSource === "metask" && catalogState !== "ready" && canCreateTask)
     fail(path, "a non-ready catalog cannot admit Tasks");
   if (
     catalogState === "ready" &&
     (accountId.length === 0 ||
       selectedApiKeySelectionId.length === 0 ||
       selectedModelSelectionId.length === 0 ||
-      executionGeneration === "0")
+      metaskExecutionGeneration === "0")
   )
     fail(path, "a ready catalog requires selected identities and generation");
   const candidateAllowed =
@@ -811,8 +984,9 @@ function decodeAccount(value: unknown, path: string): AccountView {
       candidateApiKeySelectionId.length !== 0 ||
       candidateModelSelectionId.length !== 0 ||
       modelCatalogApiKeySelectionId.length !== 0 ||
-      executionGeneration !== "0" ||
-      canCreateTask)
+      metaskExecutionGeneration !== "0" ||
+      (executionSource === "metask" &&
+        (executionGeneration !== "0" || canCreateTask)))
   )
     fail(path, "a non-authenticated Account must hide identity and catalog");
   if (state === "authenticated" && accountId.length === 0)
@@ -828,9 +1002,15 @@ function decodeAccount(value: unknown, path: string): AccountView {
     fail(path, "cancellation requires active authorization or catalog work");
   if (catalogState === "choosing" && apiKeys.length === 0)
     fail(path, "catalog choice requires at least one API");
+  if (
+    executionSource === "metask" &&
+    metaskExecutionGeneration !== executionGeneration
+  )
+    fail(path, "a Metask execution must publish its committed generation");
   return {
     state,
     catalogState,
+    executionSource,
     canCancel,
     accountId,
     displayName,
@@ -841,6 +1021,8 @@ function decodeAccount(value: unknown, path: string): AccountView {
     candidateApiKeySelectionId,
     candidateModelSelectionId,
     modelCatalogApiKeySelectionId,
+    modelConnections,
+    selectedModelConnectionId,
     canCreateTask,
     errorCode: enumValue(
       item.errorCode,
@@ -849,6 +1031,7 @@ function decodeAccount(value: unknown, path: string): AccountView {
     ),
     safeDiagnostic: stringValue(item.safeDiagnostic, `${path}.safeDiagnostic`),
     catalogGeneration,
+    metaskExecutionGeneration,
     executionGeneration,
   };
 }
@@ -2327,6 +2510,9 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     "backgroundScheduleWake",
     "localSkillManagement",
     "skillManagementHealth",
+    "modelConnectionManagement",
+    "modelConnectionSecretCapture",
+    "modelConnectionTest",
     "mcpManagement",
     "mcpConnectionApproval",
     "mcpSecretCapture",
@@ -2417,6 +2603,18 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
         "write_failed",
         "outcome_unknown",
       ] as const,
+    ),
+    modelConnectionManagement: booleanValue(
+      capabilityItem.modelConnectionManagement,
+      "$.capabilities.modelConnectionManagement",
+    ),
+    modelConnectionSecretCapture: booleanValue(
+      capabilityItem.modelConnectionSecretCapture,
+      "$.capabilities.modelConnectionSecretCapture",
+    ),
+    modelConnectionTest: booleanValue(
+      capabilityItem.modelConnectionTest,
+      "$.capabilities.modelConnectionTest",
     ),
     mcpManagement: booleanValue(
       capabilityItem.mcpManagement,

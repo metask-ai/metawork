@@ -184,6 +184,7 @@ const CommittedState = struct {
             .error_code = self.error_code,
             .safe_diagnostic = self.safe_diagnostic.view(),
             .catalog_generation = self.catalog_generation,
+            .metask_execution_generation = if (publish_account) self.execution_generation else 0,
             .execution_generation = if (publish_account) self.execution_generation else 0,
         };
     }
@@ -285,6 +286,7 @@ pub const Account = struct {
             .select_model => |selection| self.prepareSelectModel(
                 selection.selection_id,
             ),
+            .model_connection => .{ .rejected = .invalid_state },
             .logout => self.prepareLogout(),
         };
     }

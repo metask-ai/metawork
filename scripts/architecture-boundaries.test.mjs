@@ -23,6 +23,10 @@ function filesWithExtensions(directory, extensions) {
 const zigFiles = (directory) => filesWithExtensions(directory, [".zig"]);
 const applicationFiles = () => ["src/app.zig", ...zigFiles("src/app/")];
 const applicationSource = () => applicationFiles().map(read).join("\n");
+const productionApplicationSource = () =>
+  applicationFiles()
+    .map((file) => read(file).split('\ntest "', 1)[0])
+    .join("\n");
 const boundaryDocs = [
   "README.md",
   "AGENTS.md",
@@ -432,6 +436,7 @@ test("only Agent implementation imports the AgentCore SDK", () => {
       "agent_mcp_connector",
       "agent_mcp_catalog",
       "agent_mcp_runtime",
+      "agent_provider_probe",
       "event_pump",
       "event_sink",
       "fixture",
@@ -1348,9 +1353,12 @@ test("Workbench owns Task lifecycle, continuation, and canonical redaction", () 
     workbench.indexOf("const DurableTaskRecord = struct"),
     workbench.indexOf("fn FixedText"),
   );
+  const durableTaskRecordStart = taskRecord.indexOf(
+    "const DurableTaskRecord = struct",
+  );
   const durableTaskRecord = taskRecord.slice(
-    taskRecord.indexOf("const DurableTaskRecord = struct"),
-    taskRecord.indexOf("const CheckpointHealth = enum"),
+    durableTaskRecordStart,
+    taskRecord.indexOf("};", durableTaskRecordStart) + 2,
   );
   assert.doesNotMatch(durableTaskRecord, /lifecycle: TaskLifecycle/);
   assert.doesNotMatch(
@@ -1489,7 +1497,7 @@ test("Bridge owns ingress, Account owns validation, and Application coordinates 
     /return \.\{ \.rejected = \.generation_mismatch \}/,
   );
   assert.doesNotMatch(
-    applicationSource(),
+    productionApplicationSource(),
     /expected_catalog_generation|generation_mismatch/,
   );
   assert.match(
@@ -1597,8 +1605,12 @@ test("Renderer Bridge fixed revision 1 owns the exact product wire catalog", () 
   assert.match(handlers, /toolNames/);
   assert.match(handlers, /parseTaskRunInput/);
   assert.doesNotMatch(handlers, /\bprompt\s*:/);
+  const taskCreationHandlers = handlers.slice(
+    handlers.indexOf("pub const TaskWorkspaceIntent"),
+    handlers.indexOf("pub const TaskModelSelection"),
+  );
   assert.doesNotMatch(
-    handlers,
+    taskCreationHandlers,
     /workspaceGrant|workspaceRoot|apiKeyId|modelId/,
   );
 

@@ -9,11 +9,34 @@ const login_attempt = @import("account_login_attempt");
 const catalog_impl = @import("account_catalog");
 const credentials_impl = @import("account_credentials_runtime");
 const network_attempt = @import("account_network_attempt");
+const model_connections_impl = @import("account_model_connections");
 
 const refresh_timer_id: u64 = 0x4d57_4143_4354_5246;
 const refresh_skew_seconds: i64 = 60;
 const refresh_retry_ns: u64 = 30 * std.time.ns_per_s;
 const account_path_capacity = 4096;
+
+fn modelConnectionErrorCode(err: anyerror) contract.ErrorCode {
+    return switch (err) {
+        error.ConnectionNotFound => .model_connection_not_found,
+        error.GenerationMismatch => .generation_mismatch,
+        error.ModelNotFound => .no_models,
+        error.Capacity => .local_resource_exhausted,
+        error.InvalidConnection => .model_connection_invalid,
+        error.OutOfMemory => .local_resource_exhausted,
+        else => .model_connection_invalid,
+    };
+}
+
+fn modelConnectionResolutionErrorCode(err: anyerror) contract.ErrorCode {
+    return switch (err) {
+        error.ConnectionNotFound => .model_connection_not_found,
+        error.GenerationMismatch => .generation_mismatch,
+        error.ModelNotFound => .no_models,
+        error.OutOfMemory => .local_resource_exhausted,
+        else => .model_connection_capture_unavailable,
+    };
+}
 
 pub const WakeSink = struct {
     context: *anyopaque,
@@ -479,6 +502,11 @@ pub const Prepared = struct {
         return self.transition.operationComplete();
     }
 
+    pub fn requiresDefaultExecutionReplacement(self: *const Prepared) bool {
+        const effect = self.transition.effect orelse return false;
+        return effect == .prepare_execution;
+    }
+
     pub fn identityReplacementBoundary(
         self: *const Prepared,
     ) state_impl.IdentityReplacementBoundary {
@@ -497,6 +525,11 @@ pub const Prepared = struct {
         self.schedule_refresh_after_commit = false;
         self.retry_refresh_after_commit = false;
     }
+};
+
+pub const ModelConnectionExecutionPreparation = union(enum) {
+    ready: contract.OwnedExecutionConfig,
+    rejected: contract.ErrorCode,
 };
 
 pub const PrepareResult = union(enum) {
@@ -521,6 +554,9 @@ pub const Runtime = struct {
     platform: ?platform_impl.NativeBackend = null,
     credentials: credentials_impl.CredentialOwner = .{},
     saved_preference: ?credential_store.Preference = null,
+    model_connections: model_connections_impl.Registry,
+    model_connection_store: ?model_connections_impl.FileStore = null,
+    model_connection_store_healthy: bool = false,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -539,6 +575,7 @@ pub const Runtime = struct {
             .main_thread_id = main_thread_id,
             .account_path_len = account_path.len,
             .effects = .init(allocator, io, wake),
+            .model_connections = model_connections_impl.Registry.init(allocator),
         };
         @memcpy(runtime.account_path_storage[0..account_path.len], account_path);
         return runtime;
@@ -547,8 +584,11 @@ pub const Runtime = struct {
     pub fn deinit(self: *Runtime) void {
         self.assertMainThread();
         std.debug.assert(self.platform == null);
+        if (self.model_connection_store) |*store| store.deinit();
+        self.model_connection_store = null;
         self.effects.deinit();
         self.credentials.deinit();
+        self.model_connections.deinit();
         self.saved_preference = null;
         self.candidate_public_catalog.clear();
         self.* = undefined;
@@ -568,6 +608,7 @@ pub const Runtime = struct {
         ) catch |err| return self.preparedSignedOutRestoreFailure(
             accountRestoreError(err),
         );
+        self.restoreModelConnections();
         return self.prepareRestore();
     }
 
@@ -755,7 +796,296 @@ pub const Runtime = struct {
         self.assertMainThread();
         var result = self.account.view();
         self.decorateView(&result);
+        result.model_connections = self.model_connections.views();
         return result;
+    }
+
+    /// Synchronous metadata mutation port for the Account-owned user model
+    /// registry. Secret capture and execution installation remain separate
+    /// Host/Workbench operations; this port accepts only an opaque slot.
+    pub fn submitModelConnectionCommand(
+        self: *Runtime,
+        command: contract.ModelConnectionCommand,
+    ) contract.AccountCommandResult {
+        return self.submitModelConnectionCommandWithExecutionGeneration(
+            command,
+            null,
+        );
+    }
+
+    pub fn submitModelConnectionCommandWithExecutionGeneration(
+        self: *Runtime,
+        command: contract.ModelConnectionCommand,
+        execution_generation: ?u64,
+    ) contract.AccountCommandResult {
+        self.assertMainThread();
+        contract.validateModelConnectionCommand(command) catch
+            return .rejected(.model_connection_invalid);
+        if (!self.model_connection_store_healthy)
+            return .rejected(.model_connection_persistence_unavailable);
+        var candidate = self.model_connections.clone() catch |err|
+            return .rejected(modelConnectionErrorCode(err));
+        defer candidate.deinit();
+        switch (command) {
+            .create => |value| candidate.create(value) catch |err|
+                return .rejected(modelConnectionErrorCode(err)),
+            .update => |value| candidate.update(value) catch |err|
+                return .rejected(modelConnectionErrorCode(err)),
+            .remove => |value| candidate.remove(value) catch |err|
+                return .rejected(modelConnectionErrorCode(err)),
+            .test_connection => |value| candidate.markTesting(
+                value.selection,
+                value.model_id,
+            ) catch |err| return .rejected(modelConnectionErrorCode(err)),
+            .select_default => |value| candidate.selectDefault(
+                value.selection,
+                value.model_id,
+                execution_generation orelse return .rejected(.model_connection_invalid),
+            ) catch |err| return .rejected(modelConnectionErrorCode(err)),
+        }
+        const encoded = model_connections_impl.encodeAlloc(
+            self.allocator,
+            &candidate,
+        ) catch |err| return .rejected(modelConnectionErrorCode(err));
+        defer self.allocator.free(encoded);
+        const store = if (self.model_connection_store) |*value| value else return .rejected(.model_connection_persistence_unavailable);
+        store.commit(encoded) catch |err| {
+            if (err == error.PersistenceOutcomeUnknown)
+                self.model_connection_store_healthy = false;
+            return .rejected(.model_connection_persistence_unavailable);
+        };
+        self.model_connections.replace(&candidate);
+        self.drainModelConnectionCredentialCleanup();
+        return .acceptedAttempt(null);
+    }
+
+    pub fn completeModelConnectionTest(
+        self: *Runtime,
+        command: contract.ModelConnectionTestCommand,
+        succeeded: bool,
+    ) contract.AccountCommandResult {
+        self.assertMainThread();
+        if (!self.model_connection_store_healthy)
+            return .rejected(.model_connection_persistence_unavailable);
+        var candidate = self.model_connections.clone() catch |err|
+            return .rejected(modelConnectionErrorCode(err));
+        defer candidate.deinit();
+        candidate.completeTest(
+            command.selection,
+            command.model_id,
+            succeeded,
+        ) catch |err| return .rejected(modelConnectionErrorCode(err));
+        const encoded = model_connections_impl.encodeAlloc(
+            self.allocator,
+            &candidate,
+        ) catch |err| return .rejected(modelConnectionErrorCode(err));
+        defer self.allocator.free(encoded);
+        const store = if (self.model_connection_store) |*value| value else return .rejected(.model_connection_persistence_unavailable);
+        store.commit(encoded) catch |err| {
+            if (err == error.PersistenceOutcomeUnknown)
+                self.model_connection_store_healthy = false;
+            return .rejected(.model_connection_persistence_unavailable);
+        };
+        self.model_connections.replace(&candidate);
+        return .acceptedAttempt(null);
+    }
+
+    pub fn modelConnectionDefaultBinding(
+        self: *const Runtime,
+    ) ?model_connections_impl.Registry.DefaultBinding {
+        self.assertMainThread();
+        return self.model_connections.defaultBinding();
+    }
+
+    /// Creates a connection across the non-secret registry and platform
+    /// credential store without exposing an intermediate slot. A persisted
+    /// deletion tombstone precedes the credential write and is removed in the
+    /// same registry commit that publishes the connection. Definite failures
+    /// drain the tombstone immediately; outcome-unknown failures recover on
+    /// restart and never install a new default execution.
+    pub fn createModelConnectionWithCredential(
+        self: *Runtime,
+        secret: []const u8,
+        spec: contract.ModelConnectionSpec,
+        model_id: []const u8,
+        model_display_name: []const u8,
+    ) contract.AccountCommandResult {
+        self.assertMainThread();
+        if (!self.model_connection_store_healthy)
+            return .rejected(.model_connection_persistence_unavailable);
+        contract.validateModelConnectionSpec(spec) catch
+            return .rejected(.model_connection_invalid);
+        if (model_id.len == 0 or model_id.len > contract.Limits.model_id_bytes or
+            model_display_name.len > contract.Limits.model_display_name_bytes or
+            secret.len == 0 or secret.len > contract.Limits.api_key_bytes or
+            !std.unicode.utf8ValidateSlice(model_id) or
+            !std.unicode.utf8ValidateSlice(model_display_name))
+            return .rejected(.model_connection_invalid);
+        const platform = if (self.platform) |*value| value else return .rejected(.model_connection_capture_unavailable);
+        var slot_storage: [platform_impl.model_connection_slot_bytes]u8 = undefined;
+        const slot_id = platform.generateModelConnectionCredentialSlot(
+            &slot_storage,
+        ) catch return .rejected(.credential_store_write_failed);
+
+        var reserved = self.model_connections.clone() catch |err|
+            return .rejected(modelConnectionErrorCode(err));
+        defer reserved.deinit();
+        reserved.reserveCredentialDeletion(slot_id) catch |err|
+            return .rejected(modelConnectionErrorCode(err));
+        const reserved_bytes = model_connections_impl.encodeAlloc(
+            self.allocator,
+            &reserved,
+        ) catch |err| return .rejected(modelConnectionErrorCode(err));
+        defer self.allocator.free(reserved_bytes);
+        const store = if (self.model_connection_store) |*value| value else return .rejected(.model_connection_persistence_unavailable);
+        store.commit(reserved_bytes) catch |err| {
+            if (err == error.PersistenceOutcomeUnknown)
+                self.model_connection_store_healthy = false;
+            return .rejected(.model_connection_persistence_unavailable);
+        };
+        self.model_connections.replace(&reserved);
+
+        platform.storeModelConnectionCredentialAtSlot(slot_id, secret) catch {
+            self.drainModelConnectionCredentialCleanup();
+            return .rejected(.credential_store_write_failed);
+        };
+
+        var committed = self.model_connections.clone() catch |err| {
+            self.drainModelConnectionCredentialCleanup();
+            return .rejected(modelConnectionErrorCode(err));
+        };
+        defer committed.deinit();
+        committed.create(.{
+            .connection_id = slot_id,
+            .spec = spec,
+            .credential_slot = .{ .id = slot_id },
+            .model_id = model_id,
+            .model_display_name = model_display_name,
+        }) catch |err| {
+            self.drainModelConnectionCredentialCleanup();
+            return .rejected(modelConnectionErrorCode(err));
+        };
+        committed.completeCredentialDeletion(slot_id) catch {
+            self.drainModelConnectionCredentialCleanup();
+            return .rejected(.model_connection_invalid);
+        };
+        const committed_bytes = model_connections_impl.encodeAlloc(
+            self.allocator,
+            &committed,
+        ) catch |err| {
+            self.drainModelConnectionCredentialCleanup();
+            return .rejected(modelConnectionErrorCode(err));
+        };
+        defer self.allocator.free(committed_bytes);
+        store.commit(committed_bytes) catch |err| {
+            if (err == error.PersistenceOutcomeUnknown) {
+                self.model_connection_store_healthy = false;
+            } else {
+                self.drainModelConnectionCredentialCleanup();
+            }
+            return .rejected(.model_connection_persistence_unavailable);
+        };
+        self.model_connections.replace(&committed);
+        return .acceptedAttempt(null);
+    }
+
+    pub fn resolveModelConnectionExecution(
+        self: *Runtime,
+        selection: contract.ModelConnectionSelectionCommand,
+        model_id: []const u8,
+        execution_generation: u64,
+    ) !contract.OwnedExecutionConfig {
+        self.assertMainThread();
+        const binding = try self.model_connections.executionBinding(
+            selection,
+            model_id,
+            execution_generation,
+        );
+        return self.resolveModelConnectionBinding(binding);
+    }
+
+    pub fn nextExecutionGeneration(
+        self: *Runtime,
+        current_generation: u64,
+    ) !u64 {
+        self.assertMainThread();
+        return generateExecutionGeneration(self.io, current_generation);
+    }
+
+    pub fn prepareModelConnectionExecution(
+        self: *Runtime,
+        selection: contract.ModelConnectionSelectionCommand,
+        model_id: []const u8,
+        execution_generation: u64,
+    ) ModelConnectionExecutionPreparation {
+        return .{ .ready = self.resolveModelConnectionExecution(
+            selection,
+            model_id,
+            execution_generation,
+        ) catch |err| return .{
+            .rejected = modelConnectionResolutionErrorCode(err),
+        } };
+    }
+
+    pub fn resolveModelConnectionProbeExecution(
+        self: *Runtime,
+        selection: contract.ModelConnectionSelectionCommand,
+        model_id: []const u8,
+        execution_generation: u64,
+    ) !contract.OwnedExecutionConfig {
+        self.assertMainThread();
+        const binding = try self.model_connections.probeBinding(
+            selection,
+            model_id,
+            execution_generation,
+        );
+        return self.resolveModelConnectionBinding(binding);
+    }
+
+    fn resolveModelConnectionBinding(
+        self: *Runtime,
+        binding: model_connections_impl.Registry.DefaultBinding,
+    ) !contract.OwnedExecutionConfig {
+        const platform = if (self.platform) |*value| value else return error.CredentialStoreUnavailable;
+        var secret_storage: [contract.Limits.api_key_bytes]u8 = undefined;
+        defer std.crypto.secureZero(u8, &secret_storage);
+        const secret = (try platform.getModelConnectionCredential(
+            binding.connection_id,
+            &secret_storage,
+        )) orelse return error.CredentialNotFound;
+        return try contract.OwnedExecutionConfig.initModelConnectionOwned(
+            self.allocator,
+            contract.providerKindForProtocol(binding.protocol),
+            try self.allocator.dupe(u8, binding.model_id),
+            try self.allocator.dupe(u8, binding.normalized_base_url),
+            binding.execution_generation,
+            try self.allocator.dupe(u8, secret),
+        );
+    }
+
+    pub fn resolveDefaultModelConnectionExecution(
+        self: *Runtime,
+    ) !?contract.OwnedExecutionConfig {
+        self.assertMainThread();
+        const binding = self.model_connections.defaultBinding() orelse return null;
+        const platform = if (self.platform) |*value| value else return error.CredentialStoreUnavailable;
+        var secret_storage: [contract.Limits.api_key_bytes]u8 = undefined;
+        defer std.crypto.secureZero(u8, &secret_storage);
+        const secret = (try platform.getModelConnectionCredential(
+            binding.connection_id,
+            &secret_storage,
+        )) orelse {
+            self.markModelConnectionCredentialMissing(binding);
+            return null;
+        };
+        return try contract.OwnedExecutionConfig.initModelConnectionOwned(
+            self.allocator,
+            contract.providerKindForProtocol(binding.protocol),
+            try self.allocator.dupe(u8, binding.model_id),
+            try self.allocator.dupe(u8, binding.normalized_base_url),
+            binding.execution_generation,
+            try self.allocator.dupe(u8, secret),
+        );
     }
 
     pub fn preparedFact(
@@ -1096,6 +1426,9 @@ pub const Runtime = struct {
             .shutdown => {
                 self.cancelRefreshTimer();
                 self.effects.cancelJoinAndDiscard();
+                if (self.model_connection_store) |*store| store.deinit();
+                self.model_connection_store = null;
+                self.model_connection_store_healthy = false;
                 if (self.platform) |*platform| platform.deinit();
                 self.platform = null;
             },
@@ -1182,6 +1515,96 @@ pub const Runtime = struct {
                 argument orelse
                     @panic("execution effect has no model"),
             ),
+        }
+    }
+
+    fn restoreModelConnections(self: *Runtime) void {
+        std.debug.assert(self.model_connection_store == null);
+        self.model_connection_store = model_connections_impl.FileStore.init(
+            self.io,
+            self.account_path_storage[0..self.account_path_len],
+        ) catch return;
+        self.model_connection_store_healthy = true;
+        const bytes_optional = self.model_connection_store.?.loadAlloc(
+            self.allocator,
+        ) catch {
+            self.model_connection_store_healthy = false;
+            return;
+        };
+        const bytes = bytes_optional orelse return;
+        defer self.allocator.free(bytes);
+        var restored = model_connections_impl.decode(
+            self.allocator,
+            bytes,
+        ) catch {
+            self.model_connection_store_healthy = false;
+            return;
+        };
+        if (restored.reconcileInterruptedTests()) {
+            const reconciled = model_connections_impl.encodeAlloc(
+                self.allocator,
+                &restored,
+            ) catch {
+                self.model_connection_store_healthy = false;
+                self.model_connections.replace(&restored);
+                restored.deinit();
+                return;
+            };
+            defer self.allocator.free(reconciled);
+            self.model_connection_store.?.commit(reconciled) catch {
+                self.model_connection_store_healthy = false;
+            };
+        }
+        self.model_connections.replace(&restored);
+        restored.deinit();
+        self.drainModelConnectionCredentialCleanup();
+    }
+
+    fn markModelConnectionCredentialMissing(
+        self: *Runtime,
+        binding: model_connections_impl.Registry.DefaultBinding,
+    ) void {
+        self.model_connections.markCredentialMissing(.{
+            .connection_id = binding.connection_id,
+            .expected_connection_generation = binding.connection_generation,
+        }) catch return;
+        const encoded = model_connections_impl.encodeAlloc(
+            self.allocator,
+            &self.model_connections,
+        ) catch {
+            self.model_connection_store_healthy = false;
+            return;
+        };
+        defer self.allocator.free(encoded);
+        const store = if (self.model_connection_store) |*value| value else {
+            self.model_connection_store_healthy = false;
+            return;
+        };
+        store.commit(encoded) catch {
+            self.model_connection_store_healthy = false;
+        };
+    }
+
+    fn drainModelConnectionCredentialCleanup(self: *Runtime) void {
+        if (!self.model_connection_store_healthy) return;
+        const platform = if (self.platform) |*value| value else return;
+        while (self.model_connections.nextCredentialDeletion()) |connection_id| {
+            platform.deleteModelConnectionCredential(connection_id) catch return;
+            var candidate = self.model_connections.clone() catch return;
+            defer candidate.deinit();
+            candidate.completeCredentialDeletion(connection_id) catch return;
+            const encoded = model_connections_impl.encodeAlloc(
+                self.allocator,
+                &candidate,
+            ) catch return;
+            defer self.allocator.free(encoded);
+            const store = if (self.model_connection_store) |*value| value else return;
+            store.commit(encoded) catch |err| {
+                if (err == error.PersistenceOutcomeUnknown)
+                    self.model_connection_store_healthy = false;
+                return;
+            };
+            self.model_connections.replace(&candidate);
         }
     }
 
@@ -1856,6 +2279,215 @@ test "Account Runtime persists a nonzero nonce for a new execution" {
         generation,
         runtime.saved_preference.?.execution_generation,
     );
+}
+
+test "Account Runtime persists and restores a secure model connection default" {
+    const FakeCredentials = struct {
+        service: [128]u8 = undefined,
+        service_len: usize = 0,
+        account: [128]u8 = undefined,
+        account_len: usize = 0,
+        secret: [contract.Limits.api_key_bytes]u8 = undefined,
+        secret_len: usize = 0,
+        present: bool = false,
+
+        fn services(self: *@This()) platform_impl.Services {
+            return .{
+                .context = self,
+                .set_credential_fn = set,
+                .get_credential_fn = get,
+                .delete_credential_fn = delete,
+            };
+        }
+
+        fn set(
+            context: ?*anyopaque,
+            value: platform_impl.Credential,
+        ) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            if (value.service.len > self.service.len or
+                value.account.len > self.account.len or
+                value.secret.len > self.secret.len)
+                return error.CredentialFieldTooLarge;
+            @memcpy(self.service[0..value.service.len], value.service);
+            @memcpy(self.account[0..value.account.len], value.account);
+            @memcpy(self.secret[0..value.secret.len], value.secret);
+            self.service_len = value.service.len;
+            self.account_len = value.account.len;
+            self.secret_len = value.secret.len;
+            self.present = true;
+        }
+
+        fn get(
+            context: ?*anyopaque,
+            key: platform_impl.CredentialKey,
+            output: []u8,
+        ) anyerror![]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            if (!self.present or
+                !std.mem.eql(u8, key.service, self.service[0..self.service_len]) or
+                !std.mem.eql(u8, key.account, self.account[0..self.account_len]))
+                return error.CredentialNotFound;
+            if (self.secret_len > output.len) return error.CredentialFieldTooLarge;
+            @memcpy(output[0..self.secret_len], self.secret[0..self.secret_len]);
+            return output[0..self.secret_len];
+        }
+
+        fn delete(
+            context: ?*anyopaque,
+            key: platform_impl.CredentialKey,
+        ) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            if (!self.present or
+                !std.mem.eql(u8, key.service, self.service[0..self.service_len]) or
+                !std.mem.eql(u8, key.account, self.account[0..self.account_len]))
+                return error.CredentialNotFound;
+            self.present = false;
+        }
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var account_path_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const account_path_len = try tmp.dir.realPath(
+        std.testing.io,
+        &account_path_storage,
+    );
+    const account_path = account_path_storage[0..account_path_len];
+    var wake_context: u8 = 0;
+    var fake = FakeCredentials{};
+
+    {
+        var runtime = try Runtime.init(
+            std.testing.allocator,
+            std.testing.io,
+            std.Thread.getCurrentId(),
+            account_path,
+            .{ .context = &wake_context, .notify_fn = testingWake },
+        );
+        defer runtime.deinit();
+        defer if (runtime.platform) |*platform| {
+            platform.deinit();
+            runtime.platform = null;
+        };
+        var startup = runtime.prepareStart(fake.services());
+        defer startup.deinit();
+        const created = runtime.createModelConnectionWithCredential(
+            "provider-secret",
+            .{
+                .display_name = "OpenAI",
+                .protocol = .openai_chat_completions,
+                .normalized_base_url = "https://api.openai.com/v1/chat/completions",
+            },
+            "gpt-5",
+            "GPT-5",
+        );
+        try std.testing.expect(created.accepted);
+        const created_connection_id = runtime.view().model_connections[0].id;
+        var connection_id_storage: [platform_impl.model_connection_slot_bytes]u8 = undefined;
+        @memcpy(
+            connection_id_storage[0..created_connection_id.len],
+            created_connection_id,
+        );
+        const connection_id = connection_id_storage[0..created_connection_id.len];
+        const testing_started = runtime.submitModelConnectionCommand(.{
+            .test_connection = .{
+                .selection = .{
+                    .connection_id = connection_id,
+                    .expected_connection_generation = 1,
+                },
+                .model_id = "gpt-5",
+            },
+        });
+        try std.testing.expect(testing_started.accepted);
+        const tested = runtime.completeModelConnectionTest(.{
+            .selection = .{
+                .connection_id = connection_id,
+                .expected_connection_generation = 1,
+            },
+            .model_id = "gpt-5",
+        }, true);
+        try std.testing.expect(tested.accepted);
+        const selected = runtime.submitModelConnectionCommandWithExecutionGeneration(
+            .{ .select_default = .{
+                .selection = .{
+                    .connection_id = connection_id,
+                    .expected_connection_generation = 1,
+                },
+                .model_id = "gpt-5",
+            } },
+            17,
+        );
+        try std.testing.expect(selected.accepted);
+        var execution = (try runtime.resolveDefaultModelConnectionExecution()) orelse
+            return error.TestUnexpectedResult;
+        defer execution.deinit();
+        try std.testing.expectEqualStrings("provider-secret", execution.input().api_key);
+        try std.testing.expectEqual(contract.ProviderKind.openai, execution.input().target.provider_kind);
+        try std.testing.expectEqual(@as(u64, 17), execution.input().execution_generation);
+    }
+
+    {
+        var runtime = try Runtime.init(
+            std.testing.allocator,
+            std.testing.io,
+            std.Thread.getCurrentId(),
+            account_path,
+            .{ .context = &wake_context, .notify_fn = testingWake },
+        );
+        defer runtime.deinit();
+        defer if (runtime.platform) |*platform| {
+            platform.deinit();
+            runtime.platform = null;
+        };
+        var startup = runtime.prepareStart(fake.services());
+        defer startup.deinit();
+        try std.testing.expectEqual(@as(usize, 1), runtime.view().model_connections.len);
+        var execution = (try runtime.resolveDefaultModelConnectionExecution()) orelse
+            return error.TestUnexpectedResult;
+        defer execution.deinit();
+        try std.testing.expectEqualStrings("provider-secret", execution.input().api_key);
+        try std.testing.expectEqualStrings("gpt-5", execution.input().target.model);
+        try std.testing.expectEqual(@as(u64, 17), execution.input().execution_generation);
+    }
+
+    fake.present = false;
+
+    {
+        var runtime = try Runtime.init(
+            std.testing.allocator,
+            std.testing.io,
+            std.Thread.getCurrentId(),
+            account_path,
+            .{ .context = &wake_context, .notify_fn = testingWake },
+        );
+        defer runtime.deinit();
+        defer if (runtime.platform) |*platform| {
+            platform.deinit();
+            runtime.platform = null;
+        };
+        var startup = runtime.prepareStart(fake.services());
+        defer startup.deinit();
+        try std.testing.expect((try runtime.resolveDefaultModelConnectionExecution()) == null);
+        const missing = runtime.view().model_connections[0];
+        try std.testing.expectEqual(
+            contract.ModelConnectionCredentialStatus.missing,
+            missing.credential_status,
+        );
+        try std.testing.expectEqual(
+            contract.ModelConnectionState.configuring,
+            missing.state,
+        );
+        try std.testing.expect(runtime.modelConnectionDefaultBinding() == null);
+        const connection = runtime.view().model_connections[0];
+        const removed = runtime.submitModelConnectionCommand(.{ .remove = .{
+            .connection_id = connection.id,
+            .expected_connection_generation = connection.connection_generation,
+        } });
+        try std.testing.expect(removed.accepted);
+        try std.testing.expectEqual(@as(usize, 0), runtime.view().model_connections.len);
+        try std.testing.expect(!fake.present);
+    }
 }
 
 test "Account Runtime publishes the candidate catalog with first execution" {

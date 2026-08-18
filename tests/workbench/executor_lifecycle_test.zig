@@ -92,6 +92,7 @@ fn installTwoModelCatalog(workbench: *workbench_api.Workbench) void {
             .model_catalog_api_key_id = "key-1",
             .can_create_task = true,
             .catalog_generation = 2,
+            .metask_execution_generation = 1,
             .execution_generation = 1,
         },
     });

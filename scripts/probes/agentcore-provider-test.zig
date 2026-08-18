@@ -126,6 +126,10 @@ pub fn main() !void {
     if (result.struct_size != @sizeOf(wire.RunResultV1)) return error.InvalidRunResult;
     if (provider_test.callback_decode_failed or provider_test.event_count == 0)
         return error.InvalidEventObservation;
+    const stop_reason = agentcore.StopReason.fromCode(result.stop_reason_code) catch
+        return error.InvalidRunResult;
+    if (stop_reason != .end_turn or result.turns != 1 or result.tool_calls != 0)
+        return error.ProviderRunFailed;
     std.debug.print(
         "provider_test events={d} stop_reason={d} turns={d} tool_calls={d}\n",
         .{ provider_test.event_count, result.stop_reason_code, result.turns, result.tool_calls },
