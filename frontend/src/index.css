@@ -1813,6 +1813,8 @@ summary::-webkit-details-marker {
     var(--ui-action-primary) 9%,
     var(--ui-surface-panel)
   );
+  font-size: var(--text-body);
+  line-height: 1.72;
 }
 
 .task-input-copy {
