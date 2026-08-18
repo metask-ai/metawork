@@ -4,6 +4,7 @@
 //! connection-test Runtimes around the Workbench transaction seams.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const agent = @import("metawork_agent");
 const workbench = @import("metawork_workbench");
 const mcp_oauth = @import("metawork_mcp_oauth");
@@ -69,14 +70,11 @@ pub fn platformHost(platform: *app_platform.Adapter) Host {
     return .{
         .context = platform,
         .confirmation_available = platform.supportsMcpConnectionApproval(),
-        // TODO(mcp-secret-capture, TinyKG 403): decide and approve the final
-        // secret-input trust boundary, then replace this fail-closed binding
-        // with the chosen Host capability. Do not introduce a Renderer/Bridge
-        // secret payload as an interim implementation.
-        .capture_available = false,
+        .capture_available = builtin.os.tag == .windows and
+            platform.supportsSecureInput(),
         .oauth_available = platform.supportsMcpExternalAuthorization(),
         .confirm_fn = platformConfirm,
-        .capture_fn = captureUnavailable,
+        .capture_fn = platformCapture,
         .open_url_fn = platformOpenUrl,
         .now_unix_ms_fn = platformNowUnixMs,
         .notify_fn = platformNotify,
@@ -95,13 +93,28 @@ fn platformConfirm(
     return if (result) .approved else .cancelled;
 }
 
-fn captureUnavailable(
-    _: *anyopaque,
-    _: []const u8,
-    _: []const u8,
-    _: []u8,
+fn platformCapture(
+    context: *anyopaque,
+    title: []const u8,
+    prompt: []const u8,
+    output: []u8,
 ) CaptureResult {
-    return .unavailable;
+    const platform: *app_platform.Adapter = @ptrCast(@alignCast(context));
+    const result = platform.captureSecureInput(
+        title,
+        prompt,
+        "Save",
+        "Cancel",
+        output,
+    ) orelse return .unavailable;
+    return mapPlatformCapture(result);
+}
+
+fn mapPlatformCapture(result: app_platform.SecureInputResult) CaptureResult {
+    return switch (result) {
+        .submitted => |length| .{ .captured = length },
+        .cancelled => .cancelled,
+    };
 }
 
 fn platformOpenUrl(context: *anyopaque, url: []const u8) bool {
@@ -1415,6 +1428,17 @@ test "MCP durable request cleanup distinguishes pre-send cancellation" {
     try std.testing.expect(!durableFailureRequiresRecovery(.definitive));
     try std.testing.expect(durableFailureRequiresRecovery(.invalid_grant));
     try std.testing.expect(durableFailureRequiresRecovery(.outcome_unknown));
+}
+
+test "MCP secure input preserves submit and cancel outcomes" {
+    try std.testing.expectEqualDeep(
+        CaptureResult{ .captured = 17 },
+        mapPlatformCapture(.{ .submitted = 17 }),
+    );
+    try std.testing.expectEqualDeep(
+        CaptureResult.cancelled,
+        mapPlatformCapture(.cancelled),
+    );
 }
 
 test "MCP Application coordinator completes dynamic registration and OAuth loopback" {

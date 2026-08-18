@@ -130,7 +130,9 @@ Runtime API 已提供且可用时，绕过它调用低层函数属于架构违�
 - 写明 capability identity、对应 SDK 缺口、允许的低层调用、目标平台、调用者、验证方式和删除条件；优先推动 Native SDK 补齐 Runtime API，正式 API 经目标平台验收可用后原位替换并删除兼容 seam；
 - 多条 seam 只有共享同一资源、线程或生命周期不变量时才可共处一个窄 Application 文件，并且仍须独立登记、allowlist、验证和删除；禁止文件级或目录级宽泛放行，新增无直接关联的 capability 默认使用新的窄文件。
 
-当前 System WebView window chrome 按 SDK 缺口独立登记：`system_webview_drag_region` 只补 drag-region；按钮兼容文件因共享同一 startup HWND 生命周期而共置 maximize/restore、maximized state 与 user-close 三项能力，但使用明确入口、逐项 allowlist 和独立删除条件，不提供内部任意 action facade。Windows startup identity 不是 capability：Application 只建立一条创建期 hook、产出一个经校验的 opaque root binding，再注入 drag 与 controls 两条 seam，消费者不得各自复制捕获机器。`minimize` 已由 Runtime API 提供，必须保持正常 Runtime 路径，不得进入兼容 seam。这些能力可以在 Bridge 的同一个固定 window-chrome command 边界内组合结果，但不得互相持有职责或扩展为统一窗口 facade。
+当前 System WebView window chrome 按 SDK 缺口独立登记：`system_webview_drag_region` 只补 drag-region；按钮兼容文件因共享同一 startup HWND 生命周期而共置 maximize/restore、maximized state 与 user-close 三项能力，但使用明确入口、逐项 allowlist 和独立删除条件，不提供内部任意 action facade。Windows startup identity 不是 capability：Application 只建立一条创建期 hook、产出一个经校验的 opaque root binding，再注入需要该 HWND 的 seam，消费者不得各自复制捕获机器。`minimize` 已由 Runtime API 提供，必须保持正常 Runtime 路径，不得进入兼容 seam。这些能力可以在 Bridge 的同一个固定 window-chrome command 边界内组合结果，但不得互相持有职责或扩展为统一窗口 facade。
+
+`secure_input` 是与具体产品用途无关的二级兼容 seam，只补 Native SDK 0.9.2 缺失的原生安全文本输入 Runtime capability。公共 contract 只接受有界 UTF-8 标题、说明和确认/取消文案，以及调用方拥有的可清零输出缓冲区；只返回提交长度或取消，不接受产品对象、credential slot、Bridge DTO 或系统 handle。Windows 平台实现消费共享 startup HWND 作为 modal owner，macOS 平台实现使用 `NSSecureTextField`；两端都只允许绑定线程调用、拒绝自身重入、禁止截断，并在取消和失败路径清零 MetaWork-owned plaintext storage。平台控件和 OS framework 的内部副本不属于 MetaWork 可证明清零的内存。同步 capture 会运行平台 modal loop 并允许该线程继续派发应用事件，因此任何正式调用路径都必须通过“prompt 打开期间后台事件持续处理且不发生未声明状态机重入”的真实平台 gate；在证据完成前不得把编译成功写成平台可用结论。Native SDK 正式安全输入 API 经 Windows/macOS 分别验收后，原位替换并删除对应平台实现、低层 allowlist 和专用验证。
 
 获准兼容 seam 的当前文件、SDK 缺口、目标平台与删除条件由 [工程结构与所有权](project-structure.md)映射，合规状态和平台证据由 [验证规范](validation.md)维护；与 Renderer 交换的精确 wire 仍只由 [Renderer Bridge 合同](renderer-bridge-contract.md)定义。未登记的低层调用一律不构成兼容能力。
 
@@ -177,7 +179,7 @@ Renderer 按不可信调用方处理：
 - trusted Workspace 只能由 Host 原生目录选择与原生确认生成一次性 grant；Renderer 不能提交路径加 boolean 自行授信；
 - Provider credential 不进入 Bridge、事件、日志或 snapshot；
 - OAuth token、PKCE verifier、authorization code、完整 API Key 和 Authorization header 只能存在于对应 Product secret transaction、系统凭据存储和受控 runtime copy；所有 owner 在释放前 secure-zero；
-- MCP credential 使用与 Metask Account 分离的 `<bundle-id>.mcp` 系统 credential service，只存在于系统凭据存储、Workbench mutation/OAuth operation 的线性临时 copy 和 Application-owned transport auth snapshot；`mcp/registry.json`、Bridge、Renderer、日志、产品历史和 raw diagnostic 均不得保存 credential 原文。Renderer 不得提交 secret；static credential 与 OAuth client secret 采集必须通过独立 `mcp_secret_capture` 窄 Host capability 直接写入系统 credential service，能力不可用时 fail closed；
+- MCP credential 使用与 Metask Account 分离的 `<bundle-id>.mcp` 系统 credential service，只存在于系统凭据存储、Workbench mutation/OAuth operation 的线性临时 copy 和 Application-owned transport auth snapshot；`mcp/registry.json`、Bridge、Renderer、日志、产品历史和 raw diagnostic 均不得保存 credential 原文。Renderer 不得提交 secret；static credential 与 OAuth client secret 采集必须通过消费 Application-owned 通用 `secure_input` 的独立 `mcp_secret_capture` 窄 Host capability 直接写入系统 credential service，能力不可用时 fail closed；
 - production provider/base URL/API Key 不从环境变量或 Renderer 注入，只能来自 Account 已锁定并验证的 Metask contract，或用户显式创建并验证的 Model Connection contract；Renderer 只能提交 Host 当前脱敏 catalog 中的稳定 API/model/connection identifier，Host 必须重新校验 ownership、active 状态、connection→model 归属、endpoint 合同和 generation，再推导 typed provider/base URL；
 - Host 在形成产品 projection 前移除已知 Host-held credential 和 schema 标记的 secret 字段，并对命令与工具输出设置 byte 上限和 truncation 状态；Renderer 不是秘密过滤边界；
 - 当前不暴露通用 Host tool 或任意执行接口；
