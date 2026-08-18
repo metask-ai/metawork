@@ -481,6 +481,18 @@ export class BridgeClient {
     );
   }
 
+  async activateMetask(
+    expectedCatalogGeneration: string,
+    expectedExecutionGeneration: string,
+  ) {
+    return decodeAccountCommandResult(
+      await this.invoke(commands.accountActivateMetask, {
+        expectedCatalogGeneration,
+        expectedExecutionGeneration,
+      }),
+    );
+  }
+
   async createModelConnection(input: {
     displayName: string;
     protocol:

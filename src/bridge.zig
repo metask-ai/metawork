@@ -54,6 +54,7 @@ pub const commands = struct {
     pub const account_refresh_catalog = commands_impl.account_refresh_catalog;
     pub const account_select_api_key = commands_impl.account_select_api_key;
     pub const account_select_model = commands_impl.account_select_model;
+    pub const account_activate_metask = commands_impl.account_activate_metask;
     pub const model_connection_create = commands_impl.model_connection_create;
     pub const model_connection_update = commands_impl.model_connection_update;
     pub const model_connection_remove = commands_impl.model_connection_remove;

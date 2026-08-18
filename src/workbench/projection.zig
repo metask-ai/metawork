@@ -3662,6 +3662,10 @@ pub const Workbench = struct {
         return std.mem.eql(u8, binding.connection_id, connection_id);
     }
 
+    pub fn modelConnectionExecutionSelected(self: *const Workbench) bool {
+        return self.custom_execution_binding != null;
+    }
+
     /// The AgentCore vertical fixture keeps its local provider outside the production Account
     /// contract. This path is compiled only into `-Dautomation=true` builds;
     /// release builds reject it before observing any input.

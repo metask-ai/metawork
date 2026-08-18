@@ -350,6 +350,14 @@ pub const Registry = struct {
         return error.ModelNotFound;
     }
 
+    pub fn clearDefault(self: *Registry) bool {
+        if (self.default_connection_id.len == 0) return false;
+        self.allocator.free(self.default_connection_id);
+        self.default_connection_id = &.{};
+        self.default_execution_generation = 0;
+        return true;
+    }
+
     /// Reconciles a credential that the platform store no longer contains.
     /// The public registry must stop advertising the generation as runnable,
     /// and a previously installed durable default must not survive restart.

@@ -46,6 +46,10 @@ pub const AccountSelection = struct {
     expectedCatalogGeneration: []const u8,
     expectedExecutionGeneration: []const u8,
 };
+pub const AccountActivation = struct {
+    expectedCatalogGeneration: []const u8,
+    expectedExecutionGeneration: []const u8,
+};
 pub const ModelConnectionCreate = struct {
     displayName: []const u8,
     protocol: []const u8,

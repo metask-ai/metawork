@@ -272,12 +272,18 @@ pub const AccountSelectionCommand = struct {
     expected_execution_generation: u64,
 };
 
+pub const AccountActivationCommand = struct {
+    expected_catalog_generation: u64,
+    expected_execution_generation: u64,
+};
+
 pub const AccountCommand = union(enum) {
     begin_login,
     cancel_operation,
     refresh_catalog,
     select_api_key: AccountSelectionCommand,
     select_model: AccountSelectionCommand,
+    activate_metask: AccountActivationCommand,
     model_connection: ModelConnectionCommand,
     logout,
 };
@@ -696,6 +702,11 @@ pub fn validateCommand(command: AccountCommand) ValidationError!void {
             selection.selection_id,
             Limits.model_id_bytes,
         ),
+        .activate_metask => |activation| {
+            if (activation.expected_catalog_generation == 0 or
+                activation.expected_execution_generation == 0)
+                return error.InvalidGeneration;
+        },
         .model_connection => |connection_command| try validateModelConnectionCommand(connection_command),
         else => {},
     }

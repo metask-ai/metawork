@@ -116,6 +116,7 @@ pub const Coordinator = struct {
     main_thread_id: std.Thread.Id,
     model_connection_probe_notifier: ?ModelConnectionProbeNotifier = null,
     model_connection_probe_job: ?*ModelConnectionProbeJob = null,
+    metask_activation_attempt_id: ?u64 = null,
 
     pub fn init(
         runtime: *account_api.Runtime,
@@ -177,27 +178,36 @@ pub const Coordinator = struct {
         self.assertMainThread();
         if (command == .model_connection)
             return self.submitModelConnection(command.model_connection);
+        if (command == .activate_metask and
+            !self.workbench.modelConnectionExecutionSelected())
+            return .rejected(.invalid_state);
         const current = self.runtime.view();
         return switch (self.runtime.prepareCommand(command)) {
-            .prepared => |prepared| self.commitPrepared(prepared, replacement: {
-                // The replacement window must follow the prepared transition,
-                // not the command name: select_model on a ready execution is a
-                // model-only default change, but the same command inside a
-                // parked reconfiguration still rebuilds the execution config
-                // and therefore still needs the Workbench replacement window.
-                if (prepared.requiresDefaultExecutionReplacement())
-                    break :replacement .default;
-                const kind: ExecutionReplacement = switch (command) {
-                    .select_model => .none,
-                    .begin_login => if (current.state == .authenticated)
-                        .identity
-                    else
-                        .none,
-                    .logout => .identity,
-                    else => .none,
-                };
-                break :replacement kind;
-            }),
+            .prepared => |prepared| result: {
+                const result = self.commitPrepared(prepared, replacement: {
+                    // The replacement window must follow the prepared transition,
+                    // not the command name: select_model on a ready execution is a
+                    // model-only default change, but the same command inside a
+                    // parked reconfiguration still rebuilds the execution config
+                    // and therefore still needs the Workbench replacement window.
+                    if (command != .activate_metask and
+                        prepared.requiresDefaultExecutionReplacement())
+                        break :replacement .default;
+                    const kind: ExecutionReplacement = switch (command) {
+                        .select_model => .none,
+                        .begin_login => if (current.state == .authenticated)
+                            .identity
+                        else
+                            .none,
+                        .logout => .identity,
+                        else => .none,
+                    };
+                    break :replacement kind;
+                });
+                if (command == .activate_metask and result.accepted)
+                    self.metask_activation_attempt_id = result.attempt_id;
+                break :result result;
+            },
             .rejected => |error_code| .rejected(error_code),
             .ignored_stale => unreachable,
         };
@@ -334,7 +344,7 @@ pub const Coordinator = struct {
         self.assertMainThread();
         const result = self.commitPrepared(
             self.runtime.prepareStart(services),
-            .startup,
+            .none,
         );
         std.debug.assert(result.accepted);
         self.restoreModelConnectionDefaultNoFail();
@@ -483,20 +493,35 @@ pub const Coordinator = struct {
 
         const fact = self.runtime.preparedFact(&prepared);
         const identity_boundary = prepared.identityReplacementBoundary();
+        const prepared_attempt_id = prepared.attemptId();
+        const activates_metask = prepared_attempt_id != null and
+            prepared_attempt_id == self.metask_activation_attempt_id;
         self.workbench.commitAccountFactNoFail(fact);
         if (prepared.takeExecution()) |execution_value| {
             var execution = execution_value;
-            if (!self.workbench.executionReplacementPending()) {
-                self.workbench.beginDefaultExecutionReplacement() catch
-                    unreachable;
+            if (self.workbench.modelConnectionExecutionSelected() and
+                !activates_metask)
+            {
+                execution.deinit();
+            } else if (activates_metask and
+                !self.runtime.clearModelConnectionDefault().accepted)
+            {
+                execution.deinit();
+            } else {
+                if (!self.workbench.executionReplacementPending()) {
+                    self.workbench.beginDefaultExecutionReplacement() catch
+                        unreachable;
+                }
+                self.workbench.installExecutionNoFail(&execution);
             }
-            self.workbench.installExecutionNoFail(&execution);
         } else if (prepared.clearsDefaultExecution()) {
-            if (!self.workbench.executionReplacementPending()) {
-                self.workbench.beginDefaultExecutionReplacement() catch
-                    unreachable;
+            if (!self.workbench.modelConnectionExecutionSelected()) {
+                if (!self.workbench.executionReplacementPending()) {
+                    self.workbench.beginDefaultExecutionReplacement() catch
+                        unreachable;
+                }
+                self.workbench.clearExecutionNoFail();
             }
-            self.workbench.clearExecutionNoFail();
         }
         self.runtime.commit(&prepared);
 
@@ -514,6 +539,8 @@ pub const Coordinator = struct {
         const refresh_after_commit = self.runtime.takeRefreshAfterCommit(&prepared);
         const follow_up = self.runtime.takeFollowUpCommand(&prepared);
         self.runtime.dispatchCommitted(&prepared);
+        if (activates_metask and prepared.operationComplete())
+            self.metask_activation_attempt_id = null;
         if (self.workbench.identityReplacementPending()) {
             if (identity_boundary != .none)
                 self.endActiveReplacementNoFail();

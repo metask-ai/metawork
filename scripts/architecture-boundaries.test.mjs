@@ -623,7 +623,11 @@ test("cold Account restore preserves Task history without impersonating an ident
   );
   assert.match(
     app,
-    /prepareStart\(services\),\s*\.startup[\s\S]*prepareAutomationStart\(\),\s*\.startup[\s\S]*prepareStartUnavailable\(\),\s*\.startup/,
+    /prepareStart\(services\),\s*\.none[\s\S]*restoreModelConnectionDefaultNoFail\(\)[\s\S]*prepareAutomationStart\(\),\s*\.startup[\s\S]*prepareStartUnavailable\(\),\s*\.startup/,
+  );
+  assert.match(
+    app,
+    /modelConnectionExecutionSelected\(\) and\s*!activates_metask[\s\S]*execution\.deinit\(\)/,
   );
   assert.match(
     app,

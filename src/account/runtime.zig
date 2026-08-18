@@ -674,6 +674,15 @@ pub const Runtime = struct {
                 } else false;
                 if (!member) return .{ .rejected = .invalid_command };
             },
+            .activate_metask => |activation| {
+                if (activation.expected_catalog_generation !=
+                    account_view.catalog_generation or
+                    activation.expected_execution_generation !=
+                        account_view.metask_execution_generation or
+                    account_view.state != .authenticated or
+                    account_view.catalog_state != .ready)
+                    return .{ .rejected = .generation_mismatch };
+            },
             else => {},
         }
         return wrapPrepareResult(self.account.prepareCommand(command));
@@ -895,6 +904,29 @@ pub const Runtime = struct {
     ) ?model_connections_impl.Registry.DefaultBinding {
         self.assertMainThread();
         return self.model_connections.defaultBinding();
+    }
+
+    pub fn clearModelConnectionDefault(self: *Runtime) contract.AccountCommandResult {
+        self.assertMainThread();
+        if (!self.model_connection_store_healthy)
+            return .rejected(.model_connection_persistence_unavailable);
+        var candidate = self.model_connections.clone() catch |err|
+            return .rejected(modelConnectionErrorCode(err));
+        defer candidate.deinit();
+        if (!candidate.clearDefault()) return .acceptedAttempt(null);
+        const encoded = model_connections_impl.encodeAlloc(
+            self.allocator,
+            &candidate,
+        ) catch |err| return .rejected(modelConnectionErrorCode(err));
+        defer self.allocator.free(encoded);
+        const store = if (self.model_connection_store) |*value| value else return .rejected(.model_connection_persistence_unavailable);
+        store.commit(encoded) catch |err| {
+            if (err == error.PersistenceOutcomeUnknown)
+                self.model_connection_store_healthy = false;
+            return .rejected(.model_connection_persistence_unavailable);
+        };
+        self.model_connections.replace(&candidate);
+        return .acceptedAttempt(null);
     }
 
     /// Creates a connection across the non-secret registry and platform

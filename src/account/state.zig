@@ -286,6 +286,7 @@ pub const Account = struct {
             .select_model => |selection| self.prepareSelectModel(
                 selection.selection_id,
             ),
+            .activate_metask => self.prepareActivateMetask(),
             .model_connection => .{ .rejected = .invalid_state },
             .logout => self.prepareLogout(),
         };
@@ -709,6 +710,12 @@ pub const Account = struct {
             next.active_attempt_id.?,
             .{ .prepare_execution = effect_model },
         );
+    }
+
+    fn prepareActivateMetask(self: *const Account) PrepareResult {
+        if (self.state.selected_api_key_id.len == 0)
+            return .{ .rejected = .invalid_state };
+        return self.prepareSelectApiKey(self.state.selected_api_key_id.view());
     }
 
     fn prepareLogout(self: *const Account) PrepareResult {

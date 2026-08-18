@@ -281,6 +281,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.account_refresh_catalog, .function = accountRefreshCatalog },
             .{ .name = commands.account_select_api_key, .function = accountSelectApiKey },
             .{ .name = commands.account_select_model, .function = accountSelectModel },
+            .{ .name = commands.account_activate_metask, .function = accountActivateMetask },
             .{ .name = commands.model_connection_create, .function = modelConnectionCreate },
             .{ .name = commands.model_connection_update, .function = modelConnectionUpdate },
             .{ .name = commands.model_connection_remove, .function = modelConnectionRemove },
@@ -893,6 +894,33 @@ pub const Dispatcher = struct {
                     ),
                 },
             }),
+        );
+    }
+
+    fn accountActivateMetask(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireAccountAuthority(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(
+            handlers.AccountActivation,
+            invocation.request.payload,
+        );
+        defer parsed.deinit();
+        return encodeAccountResult(
+            output,
+            self.account_commands.submit(.{ .activate_metask = .{
+                .expected_catalog_generation = try handlers.parseWireId(
+                    parsed.value.expectedCatalogGeneration,
+                ),
+                .expected_execution_generation = try handlers.parseWireId(
+                    parsed.value.expectedExecutionGeneration,
+                ),
+            } }),
         );
     }
 
@@ -3679,6 +3707,12 @@ test "Dispatcher validates authority before domain calls and preserves committed
                         selection.expected_catalog_generation;
                     self.last_execution_generation =
                         selection.expected_execution_generation;
+                },
+                .activate_metask => |activation| {
+                    self.last_catalog_generation =
+                        activation.expected_catalog_generation;
+                    self.last_execution_generation =
+                        activation.expected_execution_generation;
                 },
                 .model_connection => {},
             }
