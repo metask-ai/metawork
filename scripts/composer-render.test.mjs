@@ -18,8 +18,8 @@ const { ComposerFooter } = await vite.ssrLoadModule(
   "/src/features/composer/ComposerFooter.tsx",
 );
 const { AppShell } = await vite.ssrLoadModule("/src/app/AppShell.tsx");
-const { AgentWorkSurface } = await vite.ssrLoadModule(
-  "/src/features/agent-surface/AgentWorkSurface.tsx",
+const { TaskContent } = await vite.ssrLoadModule(
+  "/src/features/tasks/TaskContent.tsx",
 );
 const { NewTaskView } = await vite.ssrLoadModule(
   "/src/features/tasks/NewTaskView.tsx",
@@ -243,20 +243,16 @@ function renderCompletedSurface(
           t: (id, values) => translate("en-US", id, values),
         },
       },
-      createElement(AgentWorkSurface, {
+      createElement(TaskContent, {
         task,
         revision: "1",
         composerHasDraft: false,
         retryAvailable: true,
         responseDisabled: false,
         onPrepareRetry() {},
-        onInspect() {},
         onRespond() {},
         renderPendingUi() {
           return createElement("div", null, "Pending decision");
-        },
-        renderUiRecord() {
-          return createElement("div", null, "Resolved decision");
         },
       }),
     ),
@@ -433,16 +429,14 @@ test("Settings uses the global stage without retaining the Task sidebar", () => 
   assert.match(markup, /data-left-open="false"/);
 });
 
-test("terminal delivery follows tool activity and precedes the outcome", () => {
+test("Assistant reply is primary and completed does not add a redundant outcome", () => {
   const markup = renderCompletedSurface();
-  assert.ok(markup.indexOf("Read") < markup.indexOf("Release is ready"));
-  assert.ok(
-    markup.indexOf("Release is ready") < markup.indexOf("Work completed"),
-  );
-  assert.match(renderCompletedSurface(""), /did not return a final response/);
+  assert.match(markup, /Release is ready/);
+  assert.doesNotMatch(markup, /Read|Work completed/);
+  assert.match(renderCompletedSurface(""), /Work completed/);
 });
 
-test("pending UI follows the Assistant reading position while resolved UI stays chronological", () => {
+test("pending UI follows the Assistant reply without rendering resolved history", () => {
   const markup = renderCompletedSurface(
     "Review this before continuing",
     undefined,
@@ -475,24 +469,17 @@ test("pending UI follows the Assistant reading position while resolved UI stays 
       },
     },
   );
-  const tool = markup.indexOf("Read");
-  const resolved = markup.indexOf("Resolved decision");
   const assistant = markup.indexOf("Review this before continuing");
   const pending = markup.indexOf("Pending decision");
-  assert.ok(tool >= 0 && tool < resolved);
-  assert.ok(resolved < assistant);
   assert.ok(assistant < pending);
+  assert.doesNotMatch(markup, /Read|Resolved decision/);
 });
 
-test("each typed Tool stays an independent bounded detail card", async () => {
-  const [markup, css, timeline, approval] = await Promise.all([
+test("Task content keeps Tool and Run metadata out of the reading flow", async () => {
+  const [markup, source, approval] = await Promise.all([
     Promise.resolve(renderCompletedSurface()),
-    readFile(join(process.cwd(), "frontend/src/index.css"), "utf8"),
     readFile(
-      join(
-        process.cwd(),
-        "frontend/src/features/agent-surface/AgentWorkSurface.tsx",
-      ),
+      join(process.cwd(), "frontend/src/features/tasks/TaskContent.tsx"),
       "utf8",
     ),
     readFile(
@@ -500,28 +487,15 @@ test("each typed Tool stays an independent bounded detail card", async () => {
       "utf8",
     ),
   ]);
-  assert.equal(markup.match(/class="ai-tool agent-tool"/g)?.length, 1);
-  assert.match(markup, /class="ai-tool agent-tool" data-state="completed"/);
-  assert.doesNotMatch(markup, /class="ai-tool agent-tool"[^>]*open/);
-  assert.equal(
-    markup.match(/class="ai-tool-field-label">Input<\/p>/g)?.length,
-    1,
-  );
-  assert.equal(
-    markup.match(/class="ai-tool-field-label">Result<\/p>/g)?.length,
-    1,
-  );
-  assert.doesNotMatch(markup, /class="mb-1[^\"]*">Input<\/p>/);
-  assert.match(css, /\.code-block-preview\s*\{[\s\S]*?max-height:\s*240px/);
-  assert.match(timeline, /key=\{`tool:\$\{activity\.id\}`\}/);
-  assert.match(timeline, /state=\{tool\.state\}/);
-  assert.doesNotMatch(timeline, /<CodeBlock[^>]+label=/);
+  assert.match(markup, /Inspect the release/);
+  assert.match(markup, /Release is ready/);
+  assert.doesNotMatch(markup, /Read|fixture\.txt|tokens|runId/);
+  assert.doesNotMatch(source, /run\.tools|run\.usage|runId|ToolCard/);
   assert.doesNotMatch(approval, /<CodeBlock[^>]+label=/);
-  assert.doesNotMatch(timeline, /bg-cobalt/);
   assert.doesNotMatch(approval, /accent-cobalt/);
 });
 
-test("Agent Work Surface preserves typed Skill identity and positional arguments", () => {
+test("Task content preserves typed Skill identity and positional arguments", () => {
   const markup = renderCompletedSurface("Review complete", {
     kind: "skill",
     skillId: "builtin.review",
@@ -531,12 +505,32 @@ test("Agent Work Surface preserves typed Skill identity and positional arguments
     argumentValues: ["src/main.zig"],
     redacted: false,
   });
-  assert.match(markup, /agent-skill-token/);
+  assert.match(markup, /task-skill-token/);
   assert.match(markup, />\/review/);
   assert.match(markup, />src\/main\.zig</);
 });
 
-test("Agent Work Surface projects manual Compact as a lightweight system event", () => {
+test("Task content marks redacted Text and Skill inputs consistently", () => {
+  const text = renderCompletedSurface("Review complete", {
+    kind: "text",
+    text: "Inspect [redacted]",
+    redacted: true,
+  });
+  const skill = renderCompletedSurface("Review complete", {
+    kind: "skill",
+    skillId: "builtin.review",
+    catalogRevision: "8",
+    invocationName: "review",
+    displayName: "Review",
+    argumentValues: ["[redacted]"],
+    redacted: true,
+  });
+
+  assert.match(text, /Sensitive values were hidden/);
+  assert.match(skill, /Sensitive values were hidden/);
+});
+
+test("Task content does not project manual Compact history", () => {
   const markup = renderCompletedSurface("Release is ready", undefined, [
     {
       operationId: "11",
@@ -548,10 +542,10 @@ test("Agent Work Surface projects manual Compact as a lightweight system event",
       usage: { input: "5", output: "2", cacheRead: "0", cacheCreation: "0" },
     },
   ]);
-  assert.match(markup, /conversation-compaction/);
-  assert.match(markup, /Context compacted/);
-  assert.match(markup, /100/);
-  assert.match(markup, /40/);
+  assert.doesNotMatch(
+    markup,
+    /conversation-compaction|Context compacted|100|40/,
+  );
 });
 
 test("new Task places the Composer after the outcome prompt", () => {

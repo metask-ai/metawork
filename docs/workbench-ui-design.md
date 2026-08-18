@@ -9,7 +9,7 @@
 
 - 用户可见的信息架构与术语；
 - Workspace、Task 和一次执行在界面中的关系；
-- Agent 工作面、工具活动、审批、权限、结果文件和错误状态；
+- Task 内容、当前状态、审批、权限、结果与错误状态；
 - 左、中、右三栏及输入区的职责；
 - 国际化、视觉、响应式、平台适配和验收矩阵。
 
@@ -41,7 +41,7 @@ Metask 登录和 ready ExecutionConfig 是进入 Workbench 的真实前置条件
 
 MetaWork 的视觉记忆点不是装饰性的暖色、通用衬线大标题、品牌吉祥物或大面积卡片，而是：
 
-> Task 启动前，Composer 清楚表达 Workspace 与模型；Task 启动后，中间区域沿一条可追溯的“工作轨迹”组织指令、可见活动、决策和交付。
+> Task 启动前，Composer 清楚表达 Workspace 与模型；Task 启动后，中间区域优先显示用户输入、Assistant 回复与当前需要处理的状态，不展示 Agent 执行流水。
 
 首个正式视觉版本使用明亮中性工作面和公司紫色品牌系统。紫色只标记品牌、主动作、当前选择、键盘焦点和当前活动轨迹；成功、等待、失败与中断继续使用独立语义色并配合文字或图标。界面不能退化为暗色原型的亮色翻版，也不能只是把既有青绿色字面量替换成紫色。
 
@@ -55,7 +55,7 @@ Windows 与 macOS 当前锁定的 development ABI v1 revision 8 已为以下既�
 - Run 状态、六种终止原因，以及 Session 是否仍可继续。
 - revision 8 的 `run_state` 阶段观察；Workbench 将其投影为 Current activity 文案，并按 transition sequence 丢弃过期观察。
 
-因此当前产品只显示 Agent 工作面、工具活动、问题/权限卡片、Current activity 和真实 usage。Plan、plan approval、Outputs、Files changed、持久权限管理和 custom UI 均保持隐藏；它们在本文档中的设计是后续 capability 到位后的产品规范，不是当前实现承诺。Renderer 不解析工具参数、stdout 或普通文本来猜测这些状态；Current activity 的细粒度文案只来自 Host 对 AgentCore `run_state` 的受序列保护投影。当前 Renderer 合同已提供独立 Workspace projection、Task-bound ExecutionConfig facts、正式设置 route，以及设置与 New task 共享的默认 API/模型选择；跨重启 rebind 等仍须等对应 capability 落地后才能宣称可用，差距由 [验证规范](validation.md)明确记录。
+因此当前产品只在 Task 内容区显示用户输入、Assistant 回复、问题/权限卡片、唯一当前状态和必要的终止结果；真实 usage 仅进入按需 Task overview。工具开始、进度和结果继续作为 Host 事实存在，但不作为面向用户的主叙事。Plan、plan approval、Outputs、Files changed、持久权限管理和 custom UI 均保持隐藏；它们在本文档中的设计是后续 capability 到位后的产品规范，不是当前实现承诺。Renderer 不解析工具参数、stdout 或普通文本来猜测这些状态；Current activity 的细粒度文案只来自 Host 对 AgentCore `run_state` 的受序列保护投影。当前 Renderer 合同已提供独立 Workspace projection、Task-bound ExecutionConfig facts、正式设置 route，以及设置与 New task 共享的默认 API/模型选择；跨重启 rebind 等仍须等对应 capability 落地后才能宣称可用，差距由 [验证规范](validation.md)明确记录。
 
 ### 2.2 Capability 标记
 
@@ -129,7 +129,7 @@ Workspace
 
 ## 4. 主窗口信息架构
 
-> Capability：**当前**。登录优先 gate、独立 Workspace projection、左栏、New task、Settings overlay、工作轨迹与按需 Task overview 已进入当前 shell；未通过 capability gate 的 Task overview 模块仍必须隐藏。
+> Capability：**当前**。登录优先 gate、独立 Workspace projection、左栏、New task、Settings overlay、Task 内容与按需 Task overview 已进入当前 shell；未通过 capability gate 的 Task overview 模块仍必须隐藏。
 
 ### 4.1 总体布局
 
@@ -496,21 +496,13 @@ Execution binding availability 是下一次 admission 的独立前置事实，�
 
 恢复要求 checkpoint record 与 Task execution binding 共同证明 provider、execution generation、Task binding epoch 与当前可用 execution authority 精确匹配；checkpoint 的 model 只用于满足 AgentCore restore expectation，并与其 terminal Run 的历史 model 自洽校验。candidate 提交前由 Host 以 Task 当前 model binding 调用 `session_set_model`，不能把 checkpoint 的旧 model 或 Account 当前默认 model 静默写回 Task。durable Task 不保存 account、API Key 或 Model Connection identity，恢复不能从当前 Account projection 反推或补写这些字段；Task 当前 pinned model 不在当前 execution catalog 时，恢复 gate 保持 unavailable。若未来交付 rebind，必须由用户明确发起，重新校验 Workspace 和当前 catalog ownership，创建新 binding epoch/Session，并以不可改写的配置边界保留旧 Run、usage 与模型归属；失败不得回退到静默默认值。
 
-## 7. 中间区域：工作叙事
+## 7. 中间区域：Task 内容
 
-> Capability：**混合**。文本、工具活动、问题/permission、Run 状态和真实 usage 属于当前 ABI；Plan、plan approval、typed Outputs 与 FileChange 属于未来 capability，并在对应小节保持隐藏。
+> Capability：**当前**。用户输入、Assistant 回复、问题/permission 与 Run 状态属于当前合同；typed Delivery、Outputs、FileChange 与 Plan 属于未来 capability，当前不得从 Assistant 文本或 Tool 记录推断。
 
 ### 7.1 内容模型
 
-中间区域是单列、可阅读、可追溯的 Agent 工作面，不采用双方头像聊天布局。内容类型固定为：
-
-1. 用户指令；
-2. Agent 回复；
-3. 工作活动；
-4. 计划变化；
-5. 需要用户处理；
-6. 结果与文件；
-7. 少量系统状态。
+中间区域按 Task 中 Run 的稳定顺序只显示用户输入与 Assistant 回复，不按 Run、Tool 或 AgentCore event 结构组织页面。当前执行状态、待处理请求和 terminal notice 是独立的临时或行动组件，不伪装成历史节点。
 
 ### 7.2 用户指令
 
@@ -526,61 +518,24 @@ Execution binding availability 是下一次 admission 的独立前置事实，�
 - 支持 Markdown、表格、代码、引用和链接；
 - 流式生成只显示克制的末尾活动指示；
 - 不展示原始 chain-of-thought；
-- 只显示用户可验证的活动，如 Scanning files、Comparing totals、Creating workbook；
-- 无法确定具体活动时显示 `Working…`，不得编造步骤或百分比。
-- Assistant 正文、活动和最终交付共享同一工作轨迹，但通过排版角色区分；不得为每条内容重复“Agent”标签或品牌头像。
+- `assistant` 只表示回复内容，不标记为 Delivery、Output 或最终成果；
+- 不从回复文本解析活动、计划、文件变化或完成状态；不得为每条内容重复“Agent”标签或品牌头像。
 
-### 7.4 工具活动
+### 7.4 当前状态、请求与结果
 
-所有 typed 工具调用必须可见。V1 中一个 Tool Call 对应一张 Tool Card，不按“低信息量”、连续次数或工具名称自动归并：
+- active Run 只显示一个来自 canonical phase/status 的紧凑临时状态；不得把 Tool 名称、输入、输出、usage 或 Run ID 带入主阅读流；
+- pending UI 位于当前 Assistant 回复之后、Composer 之前，并提供唯一可操作控件；
+- `completed` 且已有 Assistant 回复时不追加重复的完成条；空回复完成、停止、失败、中断或 dependency failure 只显示准确状态、原因与真实可用的恢复动作；
+- Renderer reload、成功同步、Tool completion 与 Compact history 不生成主区记录；只有同步失败、当前 maintenance 或内容可能不完整时显示相应状态。
 
-```text
-Bash · Running
-npm run test
-```
-
-默认展开规则：
-
-- 运行中：展示当前步骤和真实进度；
-- 成功：折叠为摘要；
-- 失败：自动展开错误；
-- 被拒绝：展示拒绝结果；
-- 命中持久权限：展示对应规则；
-- 输出过长：时间线只展示 projection 已提供的有界预览，展开区域最大约 240 px 并独立滚动；只有 Inspector projection 提供真实结构化详情时才显示 `查看详情`。
-
-Read 详情显示真实文件范围；Bash 详情显示实际执行命令、工作目录、有界 stdout/stderr、exit code 和耗时；Edit 详情显示新增、修改、删除和 diff；MCP/连接器主标题使用用户可理解的动作，原始 operation 名称进入技术详情。
-
-“实际执行”不等于把秘密原样塞进 snapshot。Provider credential、Host-held token 和 schema 标记的 secret 字段永远不得进入工具详情；Host 在形成产品 projection 前完成过滤，并对命令与 stdout/stderr 提供明确的 byte 上限和 truncation 标记。任意工具输出可能包含 Host 无法可靠识别的用户数据，因此普通搜索、Task 导出和系统通知默认不索引原始详情；Renderer 不保存另一份未过滤副本，也不建立 raw log viewer 或从普通输出文本猜测详情。
-
-### 7.5 计划
-
-- 完整计划主要显示在 Inspector；
-- 时间线只保留 `Plan created`、`Plan updated` 等关键变化；
-- 点击后可以查看当时的计划版本；
-- 旧计划不能被新计划静默覆盖；
-- 没有结构化计划时不显示虚假的 `2 / 5`。
-
-### 7.6 系统状态
-
-系统状态使用低权重的全宽分隔行，不伪装成 Agent 消息：
-
-```text
-──────── Task stopped by you · 14:32 ────────
-──────── Task interrupted unexpectedly ──────
-──────── Context compacted · 18.4k → 6.2k ───
-```
-
-正常 Renderer reload 和成功同步不进入时间线；只有同步失败或内容可能不完整时才提示。
-
-### 7.7 滚动与密度
+### 7.5 滚动与密度
 
 - 用户位于底部时自动跟随最新内容；
 - 用户向上查看历史时停止自动滚动；
 - 出现 `Jump to latest`，不能强制抢回滚动位置；
 - 流式更新不能破坏文本选择、输入焦点或当前阅读位置；
-- 选择另一个 Task 时默认定位到其最新内容并重新开启自动跟随；V1 不保存每个 Task 的像素滚动位置；
-- 长 Task 按日期使用轻量分隔；
-- 详细工具输入、stdout/stderr 和 diff 使用按需展开；若未来提供 `标准 / 详细` 显示密度，只能改变信息展开程度，不改变 Agent 行为。当前没有足够必要性时不提前增加模式开关。
+- 每个 Task 独立保存当前 Renderer 会话内的阅读位置和 following-latest 状态，切换 Task 不得继承另一个 Task 的位置；
+- `Jump to latest` 是普通长内容阅读能力，不使用 Timeline 命名；不增加改变底层信息可见性的密度模式。
 
 ## 8. Composer 与执行控制
 
@@ -681,7 +636,7 @@ Skill draft 与 Text draft 一样按 Task/New-task scope 保存在 Renderer sess
 | Run accepted                | 切换到真实 Task | typed command accepted 后清除 | 等待 snapshot 发布 queued、running 或 terminal                                  |
 | command timeout             | 先刷新 snapshot | 对账完成前保留                | 由 snapshot 决定留在 New task、进入空 Task 或进入 active Task，禁止自动重复提交 |
 
-只有 Host 已确认创建真实 Task 后，New task 才切换成 Task 工作面：行动标题淡出，Task Header 和工作轨迹出现，Composer 在约 220 ms 内落到底部，左栏出现真实 Task，焦点留在工作面。`prefers-reduced-motion` 下直接切换。Task 已创建但 Run 未成功启动时仍进入真实 Task，恢复 Task 草稿，不伪造 queued / running。
+只有 Host 已确认创建真实 Task 后，New task 才切换成 Task 内容：行动标题淡出，Task Header 和已确认的用户输入出现，Composer 在约 220 ms 内落到底部，左栏出现真实 Task，焦点留在内容区。`prefers-reduced-motion` 下直接切换。Task 已创建但 Run 未成功启动时仍进入真实 Task，恢复 Task 草稿，不伪造 queued / running。
 
 ## 9. 审批、问题与计划确认
 
@@ -696,7 +651,7 @@ Skill draft 与 Text draft 一样按 Task/New-task scope 保存在 Renderer sess
 - Plan approval：`Request changes / Start work`；
 - 应用级危险操作：使用原生确认窗口或应用级 sheet。
 
-普通请求使用工作轨迹内联卡片。待处理请求是当前 wait state，不是历史：它显示在当前 Assistant 正文之后的阅读位置；响应完成后，resolved record 再按稳定 activity order 留在历史时间线。左栏和 Inspector 只负责提醒，点击后跳转到原请求，不在多个位置重复生成可操作按钮。
+待处理请求是当前 wait state，不是历史：它显示在当前 Assistant 回复之后、Composer 之前；响应完成后从主内容移除。左栏和 Task overview 只负责提醒，点击后跳转到原请求，不在多个位置重复生成可操作按钮。
 
 ### 9.2 请求状态
 
@@ -781,20 +736,17 @@ Full access
 
 ## 11. 按需 Task overview
 
-> Capability：**混合**。按需 Task overview shell，以及 Needs your attention、Current activity / Last run、Tools and connections 与真实 usage 已进入当前实现；Plan 与 Outputs 仍是未来项。
+> Capability：**当前**。按需 Task overview 只承载 Needs your attention、Current activity / Last run 与真实 usage，不提供历史 Run 或 Tool 浏览。
 
-Task overview 是当前 Task 的按需结构化摘要与详情面板，不是固定存在的第三栏、第二份聊天记录或日志面板。New task、无 Task 和没有有效模块的普通 idle Task 默认不占用右侧列宽。模块变为可用不等于自动打开面板：普通 Current activity、usage 和工具活动只更新入口或已打开面板，不能在 Run 开始时挤压正文。
+Task overview 是当前 Task 的按需结构化摘要，不是固定存在的第三栏、第二份回复记录、日志面板或执行审计器。New task、无 Task 和没有有效模块的普通 idle Task 默认不占用右侧列宽。
 
-用户通过顶部命令栏右侧的 Task overview 按钮稳定打开或关闭面板；工具卡、diff、结果和 usage 的 `查看详情` 是直接打开并定位具体模块的上下文入口。两类入口控制同一个 Task overview 状态，不建立第二套详情面板。
+用户通过顶部命令栏右侧的 Task overview 按钮稳定打开或关闭面板；主内容不提供 Tool、diff 或 usage 详情跳转。
 
 出现内容时模块优先级为：
 
 1. Needs your attention；
 2. Current activity / Last run summary；
-3. Plan；
-4. Outputs；
-5. Tools and connections；
-6. Context and usage。
+3. Context and usage。
 
 规则：
 
@@ -802,17 +754,14 @@ Task overview 是当前 Task 的按需结构化摘要与详情面板，不是固
 - 需要用户处理始终置顶；
 - Current activity 显示此刻可观察动作，不复制完整工具输出；
 - Run terminal 后，已经打开的 Inspector 用真实 outcome、状态和 usage 转为 Last run summary；只有 Host 发布 typed Run duration 时才显示总耗时，当前不得从 Renderer 时钟猜测；不得因为 Current activity 消失而清空内容；
-- Plan 只消费真实结构化计划；
-- Outputs 只显示用户关心的交付结果；
-- Tools and connections 只显示本次实际使用的能力；
 - Context and usage 显示真实 usage、预算、压缩或警告，不显示伪百分比；
-- 用户从工具卡、diff、结果或 usage 主动打开详情后，Inspector 在当前 Task 内保持打开，直到用户主动关闭；切换 Task 时显示目标 Task 自己的会话内状态，返回原 Task 时恢复其状态；Run 进入 terminal 不自动收起，也不回收 304 px 列宽；
-- 只有新的 `Needs your attention` 请求可以对当前 Task 自动打开 Inspector 一次，且不能抢走时间线审批卡的键盘焦点；普通运行开始、usage 更新、工具开始或 terminal 都不得自动切换显隐；
+- 用户打开 overview 后在当前 Task 内保持打开，直到主动关闭；切换 Task 时显示目标 Task 自己的会话内状态；
+- 只有新的 `Needs your attention` 请求可以对当前 Task 自动打开 overview 一次，且不能抢走主区请求的键盘焦点；普通运行开始、usage 更新或 terminal 都不得自动切换显隐；
 - 切换 Task 是允许重新决定布局的显式边界：新 Task 使用自己的会话内显隐状态和内容，绝不能短暂显示前一个 Task 的详情；窄窗口自动打开时使用覆盖层，不触发中栏重排；
 - Inspector 折叠不影响通知、审批或 Task 状态；
-- 同一可操作审批只在时间线卡片中提供按钮，Inspector 只能提醒并定位，不能复制第二套操作。
+- 同一可操作审批只在主区请求中提供按钮，overview 只能提醒并定位，不能复制第二套操作。
 
-当前 ABI v1 下只有 Needs your attention、Current activity、Tools and connections、Context and usage 在有真实数据时可出现。Plan 和 Outputs 不渲染空壳、占位符或“即将推出”模块；不能为了维持三栏布局而常驻 `当前没有打开的任务`。
+当前只显示 Needs your attention、Current activity / Last run 和 Context and usage；Tool、Plan 和 Outputs 不渲染空壳、占位符或“即将推出”模块。
 
 ## 12. 文件变更与结果文件
 
@@ -1024,7 +973,7 @@ Host/Core 传递状态 code 和结构化参数，Renderer 负责本地化。用�
 
 ### 16.1 视觉方向
 
-MetaWork 采用“明亮工作台 + 紫色任务流”的桌面工具方向。视觉个性来自紫色工作轨迹、信息密度转换和本地执行语义，而不是暗色全局背景、暖米色加通用衬线、巨大品牌空态、吉祥物、渐变或每块内容一张圆角卡片。外部参考只用于判断主次关系，不能复制品牌字形、导航结构、输入框比例、图标或配色。
+MetaWork 采用“明亮工作台 + 紫色任务流”的桌面工具方向。视觉个性来自克制的紫色交互信号、信息密度转换和本地执行语义，而不是暗色全局背景、暖米色加通用衬线、巨大品牌空态、吉祥物、渐变或每块内容一张圆角卡片。外部参考只用于判断主次关系，不能复制品牌字形、导航结构、输入框比例、图标或配色。
 
 核心色板如下；公司发布正式品牌色时，`brand-*` 必须整体校准并重新验证，而不是只替换单个按钮：
 
@@ -1073,14 +1022,14 @@ MetaWork 采用“明亮工作台 + 紫色任务流”的桌面工具方向。�
 ### 16.3 形态与动效
 
 - 间距使用 4 / 8 / 12 / 16 / 24 / 32 px；小控件圆角约 7 px，导航与普通交互组约 9 px，Composer 16 px，Popover / Modal 约 14 px；
-- 工作轨迹是唯一允许形成强识别度的结构元素：它连接用户指令、Agent 可见活动、决策和交付，但不装饰无真实顺序的内容；
+- Task 输入、回复与行动状态通过排版和间距形成清晰关系，不用装饰线、节点或卡片伪造底层时序；
 - 圆角服务于交互分组，不让每条信息都变成浮动卡片；
 - 阴影只用于 Composer、浮层和真正需要抬升的元素；
 - 只让当前运行节点旋转，避免全屏多个 spinner；
 - Hover / Press 只在约 100–120 ms 内改变颜色或背景，不做位移；Popover / Slash menu 使用约 120–150 ms 淡入和最多 4 px 位移；
 - 左栏与 Inspector 的平移或列宽变化约 160–180 ms；不能使用内容状态驱动高频开合；
 - capability 到位后的新 Output 只使用约 160 ms 轻微淡入；
-- 从 New task 到运行 Task 的布局变化使用一次约 220 ms 的克制过渡：Composer 从中央主视觉落到底部，工作轨迹获得空间；不散布无意义入场动画；
+- 从 New task 到运行 Task 的布局变化使用一次约 220 ms 的克制过渡：Composer 从中央主视觉落到底部，Task 内容获得空间；不散布无意义入场动画；
 - Inspector 不随普通 Run 开始或 terminal 自动改变列宽；显隐只在用户动作、切换 Task 或新的待处理请求边界改变，避免正文高频重排；
 - 完成状态不使用庆祝动画；
 - 尊重 `prefers-reduced-motion`。

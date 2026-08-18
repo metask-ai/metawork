@@ -1,8 +1,9 @@
 import { useState } from "react";
 
-import { CodeBlock, ToolField } from "../../components/ai/index.ts";
+import { CodeBlock } from "../../components/ai/index.ts";
 import { Checkbox } from "../../components/ui/checkbox.tsx";
 import { Button } from "../../components/ui/button.tsx";
+import { DetailField } from "../../components/ui/detail-field.tsx";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { Input } from "../../components/ui/input.tsx";
 import { Select } from "../../components/ui/select.tsx";
@@ -70,9 +71,9 @@ export function ApprovalPanel({
           <h3 className="font-semibold">
             {t("approval.allow_tool", { tool: pending.tool })}
           </h3>
-          <ToolField label={t("approval.arguments")}>
+          <DetailField label={t("approval.arguments")}>
             <CodeBlock value={pending.args} />
-          </ToolField>
+          </DetailField>
           <div className="mt-4 grid grid-cols-2 gap-2">
             {(pending.availableChoices ?? ["deny_once", "allow_once"]).map(
               (choice) => (

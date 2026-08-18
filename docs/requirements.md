@@ -7,7 +7,7 @@
 
 MetaWork 是一款桌面端 **Agent Workbench**。它帮助用户在本地工作区中创建和管理 Task，观察 Agent 推理后的可见工作过程，处理工具审批，并查看最终结果。
 
-MetaWork 的核心不是模拟终端，而是把 Agent 工作表达为结构化的产品界面：消息、工具卡片、审批、任务状态、文件变更、错误和工作产物。
+MetaWork 的核心不是模拟终端或展示 Agent 执行流水，而是让用户围绕 Task 提交要求、在必要时介入并读取回复与结果。底层 Run、Tool、usage 和恢复事实只在其产品用途需要时进入界面。
 
 ## 2. 产品目标
 
@@ -191,7 +191,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - 未登录只禁止创建和发送新 Task；Workbench 仍展示 Workspace、durable Task 与执行历史，并允许查看和停止真实 live Run；默认执行配置 ready 后才开放 Composer admission；
 - Workbench 左栏承担稳定 New task、已接通的全局能力入口、全局 Task 列表与左下角账号入口；`新建任务`、`技能`、`MCP` 与 `定时任务` 使用同一紧凑一级菜单的相同行高、缩进和 active 语义，不用额外留白或独立大按钮制造虚假层级；只有真实接通的 capability 才显示对应入口，Task 按 `需要处理 / 正在运行 / 最近` 等行动优先级组织；
 - New task 中央区域始终以 Composer 为主，当前模型和 Workspace 在发送前可见；API 管理不进入 Composer，模型与 Workspace 也不得混成不透明的单一“模式”；
-- Task 启动后中央区域转为可追溯工作轨迹，Composer 固定在底部；审批、当前活动、工具详情、usage 或真实结果只决定 Inspector 模块是否可用，不因普通 Run 开始或结束自动开合。只有新的待处理请求可以自动打开一次；打开后保持到用户关闭或切换 Task；
+- Task 启动后中央区域显示该 Task 的用户输入与 Assistant 回复，Composer 固定在底部；当前 Run 只追加一个临时 canonical 状态，待处理请求在回复之后、Composer 之前提供唯一操作面，terminal outcome 只在影响理解或恢复动作时出现。工具详情和 usage 不进入主阅读流，只决定按需 Task overview 是否有对应内容；普通 Run 开始或结束不自动开合 overview，只有新的待处理请求可以自动打开一次；
 - `queued / running / waiting_user` 的停止入口位于 Composer 的发送位置，并替换发送按钮；标题栏不重复提供 Task Stop。Composer 仍只保存本地草稿，停止请求必须等待 canonical terminal，transport acknowledgement 或 UI 状态变化都不能伪造 `Stopped`；
 - 标题栏只承载 Renderer 绘制的窗口按钮、当前 Task 名称、搜索与异常状态等全局入口；不重复说明 Task 的 Workspace，正常连接状态、语言选择和工程诊断也不长期占据主视觉；
 - 界面在任一时刻只突出一个与当前阶段一致的主动作；独立的导航和设置入口可以持续可见，但不得与主动作竞争；
@@ -199,9 +199,9 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - Renderer reload、断开连接以及 Bridge revision/snapshot failure 默认只影响视图同步和重连，不得终止后台 Agent Run；只有 Workbench 根据 canonical 产品状态作出的显式 termination 决策才能请求结束 Run；
 - 左栏直接列出 canonical snapshot 中 owning Workspace 仍被投影的全部 Task，不提供全局 Workspace 切换器；每个 Task 的路径由自身上下文决定，后台请求不能因路径不同而从导航中消失。已移除 Workspace 的历史 Task 仍由 Workbench 保存，但随 Workspace 退出活动导航，重新授权恢复同一稳定 Workspace identity 后才重新出现；
 - Task 是可持续补充、归档和删除的产品对象；Task lifecycle、当前 Run phase 和最近一次 Run outcome 是三类独立状态，Renderer 只能从 Workbench projection 派生展示标签；
-- 中间区域以用户指令、Agent 回复、工具活动、可用审批和结果构成可追溯工作轨迹，不展示 raw AgentCore event 或 chain-of-thought；
+- 中间区域不按 Run/Tool 结构组织内容，不展示 Tool 调用、usage、Run ID、raw AgentCore event 或 chain-of-thought。`assistant` 只表示 Assistant 回复，Renderer 不把它提升为 Delivery、Output 或最终成果；完成、失败、中断与恢复动作只依据独立 canonical outcome/cause；
 - Run 执行期间的新输入不得暗示可以修改当前 Run；首版只保存 Renderer 草稿，等待当前 Run terminal 后由用户明确发送，不自动创建或启动下一次 Run；
-- Composer 以 `/` 作为 context-aware 发现手势，统一显示 Renderer 注册的产品 Command 与当前 Workspace/Task catalog 投影的 Skill；Slash 文本本身不是 Agent 输入协议，Command 必须在 Renderer 消费且不得进入 Bridge、Timeline 或 AgentCore；
+- Composer 以 `/` 作为 context-aware 发现手势，统一显示 Renderer 注册的产品 Command 与当前 Workspace/Task catalog 投影的 Skill；Slash 文本本身不是 Agent 输入协议，Command 必须在 Renderer 消费且不得进入 Bridge、Task 历史或 AgentCore；
 - Command 只复用已有产品动作，不迁移 CLI/TUI 的会话控制语义；V1 只注册 `/new` 与 `/compact`，前者打开既有 New task draft action，后者触发 Workbench-owned typed maintenance action；不注册 `/model`、`/status`、`/goal`、`/resume`、`/continue` 或其他已有正式界面、与桌面产品对象冲突、缺少 typed capability 的 identifier；
 - Skill 选择形成单一、可移除的 typed Composer draft，保留稳定 Skill identity、catalog revision 和 positional arguments；New task 使用 Workspace current catalog，已有 Task 使用其 pinned catalog。过期或不可用 token 保留参数但禁止发送，必须显式刷新并重新选择，Renderer 不读取 Skill body、不猜测目录或权限；
 - Skill 中心是 MetaWork 级的本地 Skill 管理 route，不跟随当前 Task 的路径上下文。它按个人与已注册 Manual Workspace 的项目范围展示 Skill 资产，并把需要处理的定义错误、资源错误和冲突置于正常 Skill 之前；用户可以搜索、查看说明/参数/资源/健康状态，从本地 `.skill`、`.zip` 或目录导入，导出 `.skill`，重新导入，卸载并显式刷新 catalog。当前不提供在线市场、远程更新、Skill 创建/编辑器、启用/禁用、Preset、标签、排序、中央仓库或多 Agent 同步；

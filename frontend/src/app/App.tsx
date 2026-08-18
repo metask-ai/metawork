@@ -39,7 +39,6 @@ import {
 } from "../features/settings/SettingsPage.tsx";
 import { ComposerFooter } from "../features/composer/ComposerFooter.tsx";
 import { ApprovalPanel } from "../features/approvals/ApprovalPanel.tsx";
-import { UiRecordCard } from "../features/approvals/UiRecordCard.tsx";
 import {
   uiRequestIdentity,
   uiResponsePhase,
@@ -50,15 +49,15 @@ import { SkillsPage } from "../features/skills/SkillsPage.tsx";
 import { McpPage } from "../features/mcp/McpPage.tsx";
 import { ScheduledTasksPage } from "../features/scheduled-tasks/ScheduledTasksPage.tsx";
 import {
-  TaskInspector,
+  TaskOverview,
   type InspectorFocusRequest,
-} from "../features/inspector/TaskInspector.tsx";
+} from "../features/inspector/TaskOverview.tsx";
 import { inspectorFocusReturnTarget } from "../features/inspector/inspector-interaction.ts";
 import type { InspectorSection } from "../features/inspector/inspector-state.ts";
 import { useInspectorSession } from "../features/inspector/useInspectorSession.ts";
-import { AgentWorkSurface } from "../features/agent-surface/AgentWorkSurface.tsx";
 import { TaskList, type TaskMenuAction } from "../features/tasks/TaskList.tsx";
 import { NewTaskView } from "../features/tasks/NewTaskView.tsx";
+import { TaskContent } from "../features/tasks/TaskContent.tsx";
 import {
   useNewTaskDrafts,
   useTaskDrafts,
@@ -2416,7 +2415,7 @@ export default function App() {
         !settingsOpen &&
         activeTask &&
         inspector.available ? (
-          <TaskInspector
+          <TaskOverview
             task={activeTask}
             focusRequest={inspectorFocusRequest}
             onFocusPending={focusPendingFromInspector}
@@ -2700,14 +2699,13 @@ export default function App() {
             />
           ) : (
             <>
-              <AgentWorkSurface
+              <TaskContent
                 task={activeTask}
                 revision={snapshot.revision}
                 composerHasDraft={composerDraftHasContent(composerDraft)}
                 retryAvailable={taskCanCompose && !taskOperationInFlight}
                 responseDisabled={bridgeUnavailable}
                 onPrepareRetry={prepareRetry}
-                onInspect={openInspectorSection}
                 onRespond={(payload) => void respondUi(payload)}
                 renderPendingUi={(props) => {
                   const { taskId, ...panelProps } = props;
@@ -2722,10 +2720,6 @@ export default function App() {
                     />
                   );
                 }}
-                renderUiRecord={(record) => <UiRecordCard record={record} />}
-                previewFile={(fileReferenceId) =>
-                  client.previewFile(fileReferenceId)
-                }
               />
               {composerFooter}
             </>

@@ -1,13 +1,13 @@
 import type { TaskView } from "../../bridge/contracts.ts";
 
-export type InspectorSection = "attention" | "summary" | "tools" | "usage";
+export type InspectorSection = "attention" | "summary" | "usage";
 
-type TaskInspectorMemory = {
+type TaskOverviewMemory = {
   open: boolean;
   handledAttentionIds: Readonly<Record<string, true>>;
 };
 
-export type InspectorSessionState = Record<string, TaskInspectorMemory>;
+export type InspectorSessionState = Record<string, TaskOverviewMemory>;
 
 export type InspectorSessionAction =
   | {
@@ -18,7 +18,7 @@ export type InspectorSessionAction =
   | { type: "panel.opened"; taskId: string }
   | { type: "panel.closed"; taskId: string };
 
-const emptyMemory: TaskInspectorMemory = {
+const emptyMemory: TaskOverviewMemory = {
   open: false,
   handledAttentionIds: {},
 };
