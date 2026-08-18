@@ -49,6 +49,10 @@ metawork/
 │   │   └── window.zig                # window/tray/dialog/notification 与 compat capability
 │   ├── product_identity.zig # 从 app.zon 派生 development identity 与 macOS namespace
 │   ├── native_sdk_compat/ # 按已登记 capability 隔离的 Application 兼容实现
+│   │   ├── secure_input.zig # 有界安全文本输入 contract、线程与清零纪律
+│   │   ├── secure_input/
+│   │       ├── windows.zig # startup HWND-owned 密码对话框与严格 UTF-16 转换
+│   │       └── macos.zig   # NSSecureTextField modal prompt
 │   │   ├── system_webview_drag_region.zig # 有界 System WebView drag-region contract/state
 │   │   ├── system_webview_drag_region/
 │   │       ├── windows.zig # 创建期 HWND 捕获与 root/WebView hit-test subclass
@@ -144,7 +148,9 @@ metawork/
 
 `native_sdk_compat/system_webview_window_controls.zig` 是 Application-owned 的窄共置边界：maximize/restore、maximized state 与 user-close 是三项独立登记、独立删除的 Native SDK 0.8.0 缺口，只因共享同一 startup HWND 生命周期而留在一个文件中，并分别暴露 `toggleMaximize`、`state` 与 `userClose`，不提供内部 action enum/facade。Windows 平台子文件消费共享 startup root binding，并独占 `IsZoomed`、`ShowWindow` 与 `PostMessageW(WM_CLOSE)`；它不安装第二条创建 hook。非 Windows 不发布 Renderer controls。`minimize` 已有正式 Runtime API，必须由 `app/window.zig` 直接调用 `Runtime.minimizeWindow`，不得进入兼容层。Bridge 的 document generation 校验仍由既有 window-chrome command 边界完成，按钮兼容能力不持有 Bridge DTO 或 generation。
 
-Windows startup identity 不是独立 capability。`system_webview_startup_window` 是私有共享 lifecycle plumbing：Application 在进入 Native SDK runner 前只为当前 UI 线程武装一条 CBT 创建 hook，并在 `App.start` 入口立即收口；该区间必须恰好产生一个无 parent 的 top-level HWND，随后还要通过 root、owner、thread 与 process 校验，零个或多个候选一律 fail closed。结果是一个由 `app/window.zig` 注入 drag 与 controls seam 的 opaque binding；两条 seam 不得各自捕获或发现窗口。该机制不读取标题、焦点、前台窗口、`GWLP_USERDATA` 或 `PlatformServices.context`，也不解释 Native SDK 私有类型。显式退出不属于兼容层：确认对话框与主窗口关闭使用 Native SDK Runtime API，由 Runtime 维护窗口/View 状态并驱动正常 shutdown。
+`native_sdk_compat/secure_input.zig` 是 Application-owned、与具体产品用途无关的安全文本输入 capability seam。它只拥有有界 UTF-8 options、调用线程、单一 active prompt、caller-owned 输出缓冲区和清零纪律；不导入 Product 或 Bridge，不解释输入用途，也不持有 credential store。Windows 子文件独占 startup HWND-owned modal 窗口、`ES_PASSWORD`、字符上限和带 `WC_ERR_INVALID_CHARS` 的 UTF-16→UTF-8 转换；非法 Unicode 或 UTF-8 字节超限保留对话框重试。macOS 子文件独占 `NSAlert`/`NSSecureTextField`。同步 modal loop 会继续派发当前 UI 线程事件，正式调用方必须另行证明其调用栈允许该事件纪律；该平台 gate 未通过时不能宣称 capability 可用。只有 `app/window.zig` 可以组装该 seam；Native SDK 正式 API 经对应平台验收后删除相应平台文件、allowlist 和验证。
+
+Windows startup identity 不是独立 capability。`system_webview_startup_window` 是私有共享 lifecycle plumbing：Application 在进入 Native SDK runner 前只为当前 UI 线程武装一条 CBT 创建 hook，并在 `App.start` 入口立即收口；该区间必须恰好产生一个无 parent 的 top-level HWND，随后还要通过 root、owner、thread 与 process 校验，零个或多个候选一律 fail closed。结果是一个由 `app/window.zig` 注入 drag、controls 与 secure-input seam 的 opaque binding；各 seam 不得自行捕获或发现窗口。该机制不读取标题、焦点、前台窗口、`GWLP_USERDATA` 或 `PlatformServices.context`，也不解释 Native SDK 私有类型。显式退出不属于兼容层：确认对话框与主窗口关闭使用 Native SDK Runtime API，由 Runtime 维护窗口/View 状态并驱动正常 shutdown。
 
 整个 Host command 边界只接受绑定当前 document generation 的 `minimize | toggle_maximize | close` 固定 enum，不接受任意 action、window id、platform、活动窗口猜测或独立 state query；按钮 seam 只发布按钮呈现所需的 `rendererControls` 与 `maximized` 真值，不形成通用 Desktop Interface、Native SDK adapter、第二窗口 owner 或任意 action facade。Native SDK Runtime 对应能力经目标平台验收可用后，必须逐项原位替换：先移除对应按钮兼容 action/state，再删除不再需要的 HWND 绑定、低层调用、allowlist 与专用验证。
 

@@ -1836,6 +1836,10 @@ test("Renderer declares window chrome UI while Application owns native behavior"
     "src/native_sdk_compat/system_webview_startup_window.zig";
   const startupWindowWindowsPath =
     "src/native_sdk_compat/system_webview_startup_window/windows.zig";
+  const secureInputPath = "src/native_sdk_compat/secure_input.zig";
+  const secureInputWindowsPath =
+    "src/native_sdk_compat/secure_input/windows.zig";
+  const secureInputMacosPath = "src/native_sdk_compat/secure_input/macos.zig";
   const seam = read(seamPath);
   const windows = read(windowsPath);
   const macos = read(macosPath);
@@ -1843,6 +1847,9 @@ test("Renderer declares window chrome UI while Application owns native behavior"
   const controlsWindows = read(controlsWindowsPath);
   const startupWindow = read(startupWindowPath);
   const startupWindowWindows = read(startupWindowWindowsPath);
+  const secureInput = read(secureInputPath);
+  const secureInputWindows = read(secureInputWindowsPath);
+  const secureInputMacos = read(secureInputMacosPath);
   const compatFiles = zigFiles("src/native_sdk_compat/");
   const compatSource = compatFiles.map(read).join("\n");
   assert.match(app, /\.js_window_api = false/);
@@ -1864,7 +1871,7 @@ test("Renderer declares window chrome UI while Application owns native behavior"
   );
   assert.match(
     window,
-    /startup_window_capture\.take\(main_window_id\)[\s\S]*drag_region_capability\.captureStartupWindow\(startup_binding\)[\s\S]*window_controls_capability\.captureStartupWindow\(startup_binding\)[\s\S]*bindRoot\(\)/,
+    /startup_window_capture\.take\(main_window_id\)[\s\S]*drag_region_capability\.captureStartupWindow\(startup_binding\)[\s\S]*secure_input_capability\.captureStartupWindow\(startup_binding\)[\s\S]*window_controls_capability\.captureStartupWindow\(startup_binding\)[\s\S]*bindRoot\(\)/,
   );
   assert.doesNotMatch(
     seam.match(/pub fn sync[\s\S]*?pub fn beginLivePointerDrag/)?.[0] ?? "",
@@ -1899,6 +1906,12 @@ test("Renderer declares window chrome UI while Application owns native behavior"
     ["src/app/window.zig"],
   );
   assert.deepEqual(
+    zigFiles("src/").filter((file) =>
+      read(file).includes('native_sdk_compat/secure_input.zig")'),
+    ),
+    ["src/app/window.zig"],
+  );
+  assert.deepEqual(
     compatFiles.filter((file) =>
       read(file).includes('@import("system_webview_drag_region/windows.zig")'),
     ),
@@ -1918,6 +1931,52 @@ test("Renderer declares window chrome UI while Application owns native behavior"
     ),
     [controlsSeamPath],
   );
+  assert.deepEqual(
+    compatFiles.filter((file) =>
+      read(file).includes('@import("secure_input/windows.zig")'),
+    ),
+    [secureInputPath],
+  );
+  assert.deepEqual(
+    compatFiles.filter((file) =>
+      read(file).includes('@import("secure_input/macos.zig")'),
+    ),
+    [secureInputPath],
+  );
+  assert.doesNotMatch(secureInput, /@import\("native_sdk"\)/);
+  assert.doesNotMatch(
+    secureInput + secureInputWindows + secureInputMacos,
+    /@import\("metawork_(?:bridge|workbench)|Mcp|MCP/,
+  );
+  assert.match(
+    secureInput,
+    /accept_label: \[\]const u8,[\s\S]*cancel_label: \[\]const u8/,
+  );
+  assert.match(
+    secureInput,
+    /secureZero\(u8, output\)[\s\S]*owner_thread_id[\s\S]*active/,
+  );
+  assert.doesNotMatch(
+    secureInputWindows,
+    /GetForegroundWindow|GetActiveWindow|FindWindow|EnumWindows|PlatformServices/,
+  );
+  assert.match(
+    secureInputWindows,
+    /ES_PASSWORD|es_password[\s\S]*em_setlimittext[\s\S]*wc_err_invalid_chars/,
+  );
+  assert.match(
+    secureInputWindows,
+    /fn cleanupModal[\s\S]*EnableWindow\(root, 1\)[\s\S]*DestroyWindow/,
+  );
+  assert.doesNotMatch(
+    secureInputWindows.match(
+      /fn finishSubmitted[\s\S]*?fn cleanupModal/,
+    )?.[0] ?? "",
+    /DestroyWindow/,
+    "modal completion records an outcome; unified cleanup re-enables the owner before destroying the dialog",
+  );
+  assert.match(secureInputMacos, /NSSecureTextField[\s\S]*runModal/);
+  assert.match(secureInputMacos, /objc_msgSend_stret[\s\S]*x86_64/);
   assert.doesNotMatch(
     zigFiles("src/").map(read).join("\n"),
     /(?:services|platform_services)\.context\b|native_sdk\.platform\.windows|GWLP_USERDATA|GetWindowLongPtrW/,
@@ -1999,6 +2058,53 @@ test("Renderer declares window chrome UI while Application owns native behavior"
       .map((match) => match[1])
       .sort(),
     allowedControlWindowsSymbols.sort(),
+  );
+  const allowedSecureInputWindowsSymbols = [
+    "AdjustWindowRectEx",
+    "CreateWindowExW",
+    "DefWindowProcW",
+    "DestroyWindow",
+    "DispatchMessageW",
+    "EnableWindow",
+    "GetDpiForWindow",
+    "GetLastError",
+    "GetMessageW",
+    "GetModuleHandleW",
+    "GetStockObject",
+    "GetWindowRect",
+    "GetWindowTextLengthW",
+    "GetWindowTextW",
+    "IsDialogMessageW",
+    "IsWindow",
+    "IsWindowEnabled",
+    "LoadCursorW",
+    "PostQuitMessage",
+    "RegisterClassExW",
+    "SendMessageW",
+    "SetActiveWindow",
+    "SetFocus",
+    "SetLastError",
+    "SetWindowTextW",
+    "ShowWindow",
+    "TranslateMessage",
+    "UpdateWindow",
+    "WideCharToMultiByte",
+  ];
+  assert.deepEqual(
+    [
+      ...secureInputWindows.matchAll(
+        /extern "(?:user32|kernel32|gdi32)" fn (\w+)/g,
+      ),
+    ]
+      .map((match) => match[1])
+      .sort(),
+    allowedSecureInputWindowsSymbols.sort(),
+  );
+  assert.deepEqual(
+    [...secureInputMacos.matchAll(/extern "objc" fn (\w+)/g)]
+      .map((match) => match[1])
+      .sort(),
+    ["objc_getClass", "objc_msgSend", "sel_registerName"].sort(),
   );
   const allowedStartupWindowSymbols = [
     "CallNextHookEx",
