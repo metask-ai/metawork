@@ -481,7 +481,7 @@ pub const Runtime = struct {
     /// Runtime mutex across the synchronous ABI call prevents a catalog
     /// refresh, shutdown, or Session release from changing the validated
     /// Runtime generation while AgentCore copies the selection.
-    fn updateSessionMcpSelection(
+    pub fn updateSessionMcpSelection(
         self: *Runtime,
         session: *Session,
         selection: ?*const McpSelection,
