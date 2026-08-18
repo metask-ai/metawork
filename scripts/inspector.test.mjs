@@ -289,6 +289,32 @@ test("thinking and response activity use safe localized status labels", () => {
   });
   assert.match(renderTaskContent(writingTask, "zh-CN"), />正在撰写回复</);
 
+  for (const [status, expected] of [
+    ["Queued", "正在启动"],
+    ["Starting", "正在启动"],
+    ["Generating response", "正在生成回复"],
+    ["Executing tools", "正在执行工具"],
+    ["Retrying provider", "正在重试模型请求"],
+    ["Compacting context", "正在压缩上下文"],
+    ["Finishing", "正在整理结果"],
+  ]) {
+    const activityTask = task({
+      currentRunId: "9",
+      currentRunPhase: "running",
+      runs: [run({ phase: "running", status, outcome: null })],
+    });
+    assert.match(renderTaskContent(activityTask, "zh-CN"), new RegExp(`>${expected}<`));
+    assert.match(renderInspector(activityTask, "zh-CN"), new RegExp(`>${expected}<`));
+  }
+
+  const waitingModel = task({
+    currentRunId: "9",
+    currentRunPhase: "running",
+    runs: [run({ phase: "running", status: "private-provider-status", outcome: null })],
+  });
+  assert.match(renderTaskContent(waitingModel, "zh-CN"), />正在等待模型响应</);
+  assert.match(renderInspector(waitingModel, "zh-CN"), />正在等待模型响应</);
+
   const stoppingTask = task({
     currentRunId: "9",
     currentRunPhase: "stopping",

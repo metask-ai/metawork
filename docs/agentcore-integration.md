@@ -489,7 +489,7 @@ Agent sink 同时累计 total bytes、chunk count 与实际 streamed bytes 的 S
 
 - Runtime catalog 与 Session allowlist 共同限制可发布工具；
 - Provider 伪造未发布工具名必须 dispatch 失败；
-- Write/Edit/Bash 等危险操作执行前经过同步 permission；
+- 正式 Session 使用 `accept_edits`：当前 Workspace 范围内的 Write/Edit 由 AgentCore 自动允许，范围外编辑与 Bash 等其他危险操作仍经过同步 permission；
 - 默认 Bash 是非交互 shell，不使用 PTY；
 - stdout/stderr/exit code 有界或通过后续对象引用展示。
 

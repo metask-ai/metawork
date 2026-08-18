@@ -28,22 +28,30 @@ function isActiveRun(run: RunView): boolean {
   );
 }
 
-const safeRunStatusLabels = new Set([
-  "Queued",
-  "Starting",
-  "Generating response",
-  "Executing tools",
-  "Waiting for your input",
-  "Retrying provider",
-  "Compacting context",
-  "Finishing",
-]);
-
 function runActivityMessage(run: RunView): MessageId | null {
   if (run.phase !== "running") return null;
-  if (run.status === "Thinking") return "run.activity.thinking";
-  if (run.status === "Writing response") return "run.activity.writing_response";
-  return null;
+  switch (run.status) {
+    case "Queued":
+    case "Starting":
+      return "run.activity.starting";
+    case "Generating response":
+      return "run.activity.generating_response";
+    case "Thinking":
+      return "run.activity.thinking";
+    case "Writing response":
+      return "run.activity.writing_response";
+    case "Executing tools":
+      return "run.activity.executing_tools";
+    case "Retrying provider":
+      return "run.activity.retrying_provider";
+    case "Compacting context":
+    case "Context compacted":
+      return "run.activity.compacting_context";
+    case "Finishing":
+      return "run.activity.finishing";
+    default:
+      return "run.activity.waiting_model";
+  }
 }
 
 function runLabel(run: RunView): MessageId {
@@ -153,13 +161,8 @@ export function TaskOverview({
               <span className="inspector-state-line" aria-hidden="true" />
               <div>
                 <strong>{t(runLabel(run))}</strong>
-                {isActiveRun(run) && activityMessage ? (
+                {isActiveRun(run) && activityMessage && (
                   <span>{t(activityMessage)}</span>
-                ) : (
-                  isActiveRun(run) &&
-                  safeRunStatusLabels.has(run.status) && (
-                    <span>{run.status}</span>
-                  )
                 )}
                 {run.cause && <small>{t(`cause.${run.cause}`)}</small>}
               </div>

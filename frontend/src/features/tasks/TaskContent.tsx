@@ -18,9 +18,27 @@ function activeRun(run: RunView): boolean {
 
 function activeRunMessage(run: RunView): MessageId {
   if (run.phase === "running") {
-    if (run.status === "Thinking") return "run.activity.thinking";
-    if (run.status === "Writing response")
-      return "run.activity.writing_response";
+    switch (run.status) {
+      case "Queued":
+      case "Starting":
+        return "run.activity.starting";
+      case "Generating response":
+        return "run.activity.generating_response";
+      case "Thinking":
+        return "run.activity.thinking";
+      case "Writing response":
+        return "run.activity.writing_response";
+      case "Executing tools":
+        return "run.activity.executing_tools";
+      case "Retrying provider":
+        return "run.activity.retrying_provider";
+      case "Compacting context":
+      case "Context compacted":
+        return "run.activity.compacting_context";
+      case "Finishing":
+        return "run.activity.finishing";
+    }
+    return "run.activity.waiting_model";
   }
   return `task.phase.${run.phase}`;
 }

@@ -148,7 +148,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 
 ### 5.5 审批与输入
 
-- 工具 permission 默认拒绝，只有明确授权才允许执行；
+- Agent Session 默认使用 `accept_edits`：只读操作与当前 Workspace 范围内的 Write/Edit 自动允许，Workspace 范围外的编辑及 Bash 等其他危险操作仍须明确授权；显式 ask/deny 规则继续优先且不得被该默认模式绕过；
 - 用户可以回答 Agent 问题；计划批准或拒绝只有在 AgentCore 发布 typed control capability 后才显示；
 - 审批和回答必须绑定 Task、Run 和请求标识，拒绝过期或重复响应；
 - 同步等待必须支持 deadline、用户取消、Task close 和 Application shutdown 唤醒；

@@ -1,13 +1,13 @@
 # MetaWork AgentCore ABI v1 消费合同
 
-> 状态：Windows x86_64 GNU 已 hard cut 到 AgentCore `df554537aea9`；macOS arm64 仍锁定既有 revision 8 baseline，本分支不以 macOS 作为 Windows 升级阻塞；不声明 stable support policy
+> 状态：Windows x86_64 GNU 与 macOS arm64 均已 hard cut 到 AgentCore `df554537aea9` revision 8 target artifact；不声明 stable support policy
 > 所有者：Metask AgentCore 负责 facade、bindings、bundle 和 ABI 政策；MetaWork 负责 exact artifact 消费、Host 生命周期和产品 capability gate
 
 本文定义 MetaWork 对 Metask AgentCore binary ABI version 1 的 target-specific 消费边界。线程、事件泵和 Host 生命周期见 [AgentCore 集成契约](agentcore-integration.md)，验证入口见 [验证规范](validation.md)。
 
 ## 1. Target-specific baseline
 
-Windows 锁定新的 clean source artifact，commit `df554537aea946776946238b657ad29b20f0c852`、package version `0.1.0-dev+df554537aea9`；macOS arm64 继续锁定既有 `78fe89e47d56df8fd3e76f8b289a0017bf2ff783` baseline。两者均使用 Zig 0.16.0、strip=true、requires C runtime；target artifact、lock 和验证结果彼此独立：
+Windows 与 macOS arm64 均锁定 clean source commit `df554537aea946776946238b657ad29b20f0c852`、package version `0.1.0-dev+df554537aea9` 的各自 target artifact。两者均使用 Zig 0.16.0、strip=true、requires C runtime；target artifact、lock 和验证结果彼此独立：
 
 | Target                       | Build        | Link input                  | Repository lock                                    |
 | ---------------------------- | ------------ | --------------------------- | -------------------------------------------------- |
@@ -17,7 +17,7 @@ Windows 锁定新的 clean source artifact，commit `df554537aea946776946238b657
 固定合同按 target 为：
 
 - `binary_abi_version = 1`；
-- Windows 新 bundle 与 macOS baseline 均为 `binary_abi_revision = 8`，`capabilities = 1048575`（`0xfffff`）；
+- Windows 与 macOS bundle 均为 `binary_abi_revision = 8`，`capabilities = 1048575`（`0xfffff`）；
 - 两者的 `binary_abi_table_size` 都是 `216`；
 - 唯一 discovery symbol 为 `metask_agentcore_get_api`；
 - struct size 必须精确匹配，Host 提供的 reserved 字段必须全部为零；

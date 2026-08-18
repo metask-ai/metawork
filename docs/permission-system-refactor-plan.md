@@ -186,11 +186,11 @@ Session 关闭后，Workbench 不向新 Session 注入旧 grant。是否在 rest
 
 沿用 `SessionHostConfigV1.permission_mode_code`，不创建新的 Workbench mode 状态：
 
-- 当前正式使用 `default`；
-- `accept_edits`、`auto` 只有在 AgentCore 提供确切行为语义/安全边界，并完成对应 capability gate 和安全验收后接入；
+- 当前正式使用 `accept_edits`；AgentCore 将只读与当前 Workspace 范围内的 Write/Edit 自动允许，其余未决操作保持 ask，显式 ask/deny 规则继续优先；
+- `auto` 只有在 AgentCore 提供确切行为语义/安全边界，并完成对应 capability gate 和安全验收后接入；
 - `dont_ask`、`full_access` 当前保持隐藏。
 
-当前 bundle 只声明五个 `permission_mode_code` 常量，没有定义各 mode 的自动放行范围、工具适用性、与 `shell_policy`/Workspace 边界的关系或 provenance 语义。因此高级 mode 的阻塞点不仅是产品安全 gate，也包括 AgentCore 的正式语义合同。
+当前锁定的 AgentCore revision 8 bundle 已提供 `accept_edits` 的 Workspace 编辑边界和显式规则优先语义；其他高级 mode 仍须分别完成产品安全 gate 与正式语义验收。
 
 mode 变化不通过 Renderer 直接修改活动 Session；如 AgentCore 没有明确的安全更新入口，则使用新 Session。
 
