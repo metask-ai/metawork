@@ -136,6 +136,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 
 - 用户可以提交文本输入并启动真实 Agent Run；
 - UI 流式显示 assistant 文本；
+- `thinking_chunk` 正文不进入 Assistant、Snapshot、持久历史或搜索；其事件类型只把当前安全状态细化为“正在思考”，`text_chunk` 到达后状态切换为“正在撰写回复”；
 - UI 展示工具开始、进度、结果、错误和耗时；
 - UI 展示 token usage、上下文警告、重试和压缩等可见状态；
 - 用户可以在已有 finalized Run 且 Task 可继续时显式压缩当前 Conversation；manual compact 是 Workbench-owned Task maintenance operation，不创建 Turn/Run，不产生用户消息，也不把 `/compact` 原文送入 Bridge 或模型；

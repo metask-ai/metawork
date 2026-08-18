@@ -414,6 +414,8 @@ export const enUS = {
   "task.phase.cancelled": "Stopped",
   "task.phase.interrupted": "Interrupted",
   "task.phase.failed": "Failed",
+  "run.activity.thinking": "Thinking",
+  "run.activity.writing_response": "Writing response",
   "task.signal.running": "Working",
   "task.signal.attention": "Attention",
   "task.signal.failed": "Failed",
