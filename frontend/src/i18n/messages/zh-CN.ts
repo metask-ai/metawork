@@ -387,6 +387,8 @@ export const zhCN: Record<MessageId, string> = {
   "task.phase.cancelled": "已停止",
   "task.phase.interrupted": "意外中断",
   "task.phase.failed": "失败",
+  "run.activity.thinking": "正在思考",
+  "run.activity.writing_response": "正在撰写回复",
   "task.signal.running": "工作中",
   "task.signal.attention": "待处理",
   "task.signal.failed": "失败",

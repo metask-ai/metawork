@@ -16,6 +16,15 @@ function activeRun(run: RunView): boolean {
   return ["queued", "running", "waiting_ui", "stopping"].includes(run.phase);
 }
 
+function activeRunMessage(run: RunView): MessageId {
+  if (run.phase === "running") {
+    if (run.status === "Thinking") return "run.activity.thinking";
+    if (run.status === "Writing response")
+      return "run.activity.writing_response";
+  }
+  return `task.phase.${run.phase}`;
+}
+
 function outcomeMessage(outcome: NonNullable<RunView["outcome"]>): MessageId {
   switch (outcome) {
     case "completed":
@@ -187,7 +196,7 @@ export function TaskContent({
                 )}
                 {isCurrent && activeRun(run) && (
                   <p className="task-active-status" role="status">
-                    {t(`task.phase.${run.phase}`)}
+                    {t(activeRunMessage(run))}
                   </p>
                 )}
                 {isCurrent && task.pendingUi && (

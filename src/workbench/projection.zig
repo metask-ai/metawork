@@ -5859,11 +5859,29 @@ pub const Workbench = struct {
         };
         var durable_boundary = false;
         switch (event) {
-            .thinking_chunk => return,
+            .thinking_chunk => {
+                // AgentCore owns the private reasoning bytes. Workbench only
+                // projects the safe activity distinction and never appends the
+                // payload to Assistant history.
+                if (std.mem.eql(u8, run.status_text, "Thinking")) return;
+                _ = try self.replaceTrackedProjected(
+                    &run.status_text,
+                    "Thinking",
+                    self.limits.max_tool_field_bytes,
+                    run.redaction_secret,
+                );
+            },
             .text_chunk => |text| {
                 try self.appendTrackedText(&run.assistant, text, self.limits.max_assistant_message_bytes);
                 if (self.redactTrackedText(&run.assistant, run.redaction_secret))
                     run.assistant_redacted = true;
+                if (!std.mem.eql(u8, run.status_text, "Writing response"))
+                    _ = try self.replaceTrackedProjected(
+                        &run.status_text,
+                        "Writing response",
+                        self.limits.max_tool_field_bytes,
+                        run.redaction_secret,
+                    );
             },
             .tool_start => |tool| {
                 const view = try self.findOrCreateTool(run, tool.id, tool.name, tool.input);
@@ -16718,6 +16736,52 @@ test "streaming Run events do not reorder Task navigation" {
     defer usage.deinit();
     try workbench.applyEvent(&usage);
     try std.testing.expectEqual(before, workbench.tasks[0].?.durable.recent_order);
+}
+
+test "thinking and assistant chunks update distinct safe projections" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    const task = &workbench.tasks[0].?;
+    const run = &task.durable.runs[0].?;
+    const route = task.runtime.routeId();
+
+    const revision_before_thinking = workbench.revision;
+    var thinking = try testEnvelope(
+        route,
+        7,
+        "{\"thinking_chunk\":\"private-reasoning-marker\"}",
+    );
+    defer thinking.deinit();
+    try workbench.applyEvent(&thinking);
+    try std.testing.expectEqualStrings("", run.assistant.list.items);
+    try std.testing.expectEqualStrings("Thinking", run.status_text);
+    try std.testing.expectEqual(revision_before_thinking + 1, workbench.revision);
+
+    const revision_before_duplicate = workbench.revision;
+    var duplicate = try testEnvelope(
+        route,
+        7,
+        "{\"thinking_chunk\":\"more-private-reasoning\"}",
+    );
+    defer duplicate.deinit();
+    try workbench.applyEvent(&duplicate);
+    try std.testing.expectEqual(revision_before_duplicate, workbench.revision);
+
+    var assistant = try testEnvelope(
+        route,
+        7,
+        "{\"text_chunk\":\"public response\"}",
+    );
+    defer assistant.deinit();
+    try workbench.applyEvent(&assistant);
+    try std.testing.expectEqualStrings("public response", run.assistant.list.items);
+    try std.testing.expectEqualStrings("Writing response", run.status_text);
+
+    var snapshot_storage: [96 * 1024]u8 = undefined;
+    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "private-reasoning-marker") == null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "more-private-reasoning") == null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "public response") != null);
 }
 
 test "AgentCore RunState refines status without owning RunPhase and rejects stale transitions" {

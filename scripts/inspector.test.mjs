@@ -26,6 +26,9 @@ const vite = await createServer({
 const { TaskOverview } = await vite.ssrLoadModule(
   "/src/features/inspector/TaskOverview.tsx",
 );
+const { TaskContent } = await vite.ssrLoadModule(
+  "/src/features/tasks/TaskContent.tsx",
+);
 const { ApprovalPanel } = await vite.ssrLoadModule(
   "/src/features/approvals/ApprovalPanel.tsx",
 );
@@ -76,15 +79,15 @@ function task(overrides = {}) {
   };
 }
 
-function renderInspector(value) {
+function renderInspector(value, locale = "en-US") {
   return renderToStaticMarkup(
     createElement(
       I18nContext.Provider,
       {
         value: {
-          locale: "en-US",
+          locale,
           setLocale() {},
-          t: (id, values) => translate("en-US", id, values),
+          t: (id, values) => translate(locale, id, values),
         },
       },
       createElement(TaskOverview, {
@@ -92,6 +95,33 @@ function renderInspector(value) {
         focusRequest: null,
         onClose() {},
         onFocusPending() {},
+      }),
+    ),
+  );
+}
+
+function renderTaskContent(value, locale = "en-US") {
+  return renderToStaticMarkup(
+    createElement(
+      I18nContext.Provider,
+      {
+        value: {
+          locale,
+          setLocale() {},
+          t: (id, values) => translate(locale, id, values),
+        },
+      },
+      createElement(TaskContent, {
+        task: value,
+        revision: "1",
+        composerHasDraft: false,
+        retryAvailable: false,
+        responseDisabled: false,
+        onPrepareRetry() {},
+        onRespond() {},
+        renderPendingUi() {
+          return null;
+        },
       }),
     ),
   );
@@ -227,6 +257,65 @@ test("Inspector shows latest canonical run facts without copying raw output", ()
     /1,000|private raw output|private input|INTERNAL_PROVIDER_RETRY/,
   );
   assert.doesNotMatch(markup, />Plan<|>Outputs<|>Files changed</);
+});
+
+test("thinking and response activity use safe localized status labels", () => {
+  const thinkingRun = run({
+    phase: "running",
+    status: "Thinking",
+    outcome: null,
+    assistant: "",
+  });
+  const thinkingTask = task({
+    currentRunId: "9",
+    currentRunPhase: "running",
+    runs: [thinkingRun],
+  });
+  const thinkingContent = renderTaskContent(thinkingTask, "zh-CN");
+  const thinkingInspector = renderInspector(thinkingTask, "zh-CN");
+  assert.match(thinkingContent, />正在思考</);
+  assert.match(thinkingInspector, />正在思考</);
+
+  const writingTask = task({
+    currentRunId: "9",
+    currentRunPhase: "running",
+    runs: [
+      run({
+        phase: "running",
+        status: "Writing response",
+        outcome: null,
+      }),
+    ],
+  });
+  assert.match(renderTaskContent(writingTask, "zh-CN"), />正在撰写回复</);
+
+  const stoppingTask = task({
+    currentRunId: "9",
+    currentRunPhase: "stopping",
+    runs: [
+      run({
+        phase: "stopping",
+        status: "Thinking",
+        outcome: null,
+      }),
+    ],
+  });
+  const stoppingContent = renderTaskContent(stoppingTask, "zh-CN");
+  assert.match(stoppingContent, />正在停止</);
+  assert.doesNotMatch(stoppingContent, />正在思考</);
+
+  const unsafeStatus = task({
+    currentRunId: "9",
+    currentRunPhase: "running",
+    runs: [
+      run({
+        phase: "running",
+        status: "private-provider-status",
+        outcome: null,
+      }),
+    ],
+  });
+  assert.doesNotMatch(renderInspector(unsafeStatus), /private-provider-status/);
 });
 
 test("approval cards never expose internal Run identity", () => {

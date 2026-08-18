@@ -39,6 +39,13 @@ const safeRunStatusLabels = new Set([
   "Finishing",
 ]);
 
+function runActivityMessage(run: RunView): MessageId | null {
+  if (run.phase !== "running") return null;
+  if (run.status === "Thinking") return "run.activity.thinking";
+  if (run.status === "Writing response") return "run.activity.writing_response";
+  return null;
+}
+
 function runLabel(run: RunView): MessageId {
   switch (run.phase) {
     case "queued":
@@ -77,6 +84,7 @@ export function TaskOverview({
     {},
   );
   const run = selectedRun(task);
+  const activityMessage = run ? runActivityMessage(run) : null;
   const usage = useMemo(() => {
     if (!run) return null;
     const input = wireInteger(run.usage.input);
@@ -145,8 +153,13 @@ export function TaskOverview({
               <span className="inspector-state-line" aria-hidden="true" />
               <div>
                 <strong>{t(runLabel(run))}</strong>
-                {isActiveRun(run) && safeRunStatusLabels.has(run.status) && (
-                  <span>{run.status}</span>
+                {isActiveRun(run) && activityMessage ? (
+                  <span>{t(activityMessage)}</span>
+                ) : (
+                  isActiveRun(run) &&
+                  safeRunStatusLabels.has(run.status) && (
+                    <span>{run.status}</span>
+                  )
                 )}
                 {run.cause && <small>{t(`cause.${run.cause}`)}</small>}
               </div>
