@@ -2668,6 +2668,20 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   background: #8a4ed1;
 }
 
+.skill-enablement-inherit {
+  border: 0;
+  padding: 0;
+  color: var(--ui-content-accent);
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+
+.skill-enablement-inherit:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .skill-enablement-error {
   padding: 10px 12px;
   margin: 0 0 12px;

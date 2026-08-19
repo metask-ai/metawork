@@ -79,10 +79,11 @@ pub const WorkspaceIdentity = struct {
 };
 pub const SkillImportChoice = struct { kind: []const u8 };
 pub const SkillSetEnabled = struct {
-    workspaceId: []const u8,
-    expectedWorkspaceEpoch: []const u8,
+    scope: []const u8,
+    workspaceId: ?[]const u8,
+    expectedWorkspaceEpoch: ?[]const u8,
     skillId: []const u8,
-    enabled: bool,
+    state: []const u8,
     expectedCatalogRevision: []const u8,
     expectedSelectionRevision: []const u8,
 };

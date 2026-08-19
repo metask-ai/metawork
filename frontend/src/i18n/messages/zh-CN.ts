@@ -315,6 +315,8 @@ export const zhCN: Record<MessageId, string> = {
   "skills.status.issue": "需要处理",
   "skills.enablement.enabled": "已启用",
   "skills.enablement.disabled": "已禁用",
+  "skills.enablement.inherit": "跟随用户设置",
+  "skills.enablement.follow_user": "恢复跟随用户",
   "skills.enablement.label": "切换 {skill} 的启用状态",
   "skills.import.eyebrow": "本地导入",
   "skills.detail.eyebrow": "Skill 详情",

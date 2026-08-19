@@ -604,6 +604,7 @@ export type SkillManagementView = {
     canUninstall: boolean;
     canRetry: boolean;
     enabled: boolean | null;
+    enablementState: "inherit" | "enabled" | "disabled" | null;
     canSetEnabled: boolean;
     selectionRevision: string | null;
     issueCodes: SkillCatalogView["issues"][number]["code"][];

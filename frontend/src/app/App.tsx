@@ -1596,18 +1596,22 @@ export default function App() {
   }
 
   async function setSkillEnabled(
-    workspaceId: string,
-    expectedWorkspaceEpoch: string,
+    target:
+      | { scope: "personal" }
+      | {
+          scope: "project";
+          workspaceId: string;
+          expectedWorkspaceEpoch: string;
+        },
     skillId: string,
-    enabled: boolean,
+    state: "inherit" | "enabled" | "disabled",
     expectedCatalogRevision: string,
     expectedSelectionRevision: string,
   ): Promise<SkillEnablementResult> {
     const result = await client.setSkillEnabled(
-      workspaceId,
-      expectedWorkspaceEpoch,
+      target,
       skillId,
-      enabled,
+      state,
       expectedCatalogRevision,
       expectedSelectionRevision,
     );
@@ -2530,6 +2534,7 @@ export default function App() {
       {route === "skills" ? (
         <SkillsPage
           management={snapshot.skillManagement}
+          personalCatalog={snapshot.skillCatalog}
           workspaces={snapshot.workspaces}
           query={skillsQuery}
           refreshing={

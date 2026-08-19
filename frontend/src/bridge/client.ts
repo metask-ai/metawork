@@ -278,19 +278,26 @@ export class BridgeClient {
   }
 
   async setSkillEnabled(
-    workspaceId: string,
-    expectedWorkspaceEpoch: string,
+    target:
+      | { scope: "personal" }
+      | {
+          scope: "project";
+          workspaceId: string;
+          expectedWorkspaceEpoch: string;
+        },
     skillId: string,
-    enabled: boolean,
+    state: "inherit" | "enabled" | "disabled",
     expectedCatalogRevision: string,
     expectedSelectionRevision: string,
   ) {
     return decodeSkillEnablementResult(
       await this.invoke(commands.setSkillEnabled, {
-        workspaceId,
-        expectedWorkspaceEpoch,
+        scope: target.scope,
+        workspaceId: target.scope === "project" ? target.workspaceId : null,
+        expectedWorkspaceEpoch:
+          target.scope === "project" ? target.expectedWorkspaceEpoch : null,
         skillId,
-        enabled,
+        state,
         expectedCatalogRevision,
         expectedSelectionRevision,
       }),

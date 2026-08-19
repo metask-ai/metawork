@@ -619,6 +619,7 @@ function decodeSkillManagement(
         "canUninstall",
         "canRetry",
         "enabled",
+        "enablementState",
         "canSetEnabled",
         "selectionRevision",
         "issueCodes",
@@ -702,6 +703,14 @@ function decodeSkillManagement(
           asset.enabled === null
             ? null
             : booleanValue(asset.enabled, `${itemPath}.enabled`),
+        enablementState:
+          asset.enablementState === null
+            ? null
+            : enumValue(asset.enablementState, `${itemPath}.enablementState`, [
+                "inherit",
+                "enabled",
+                "disabled",
+              ] as const),
         canSetEnabled: booleanValue(
           asset.canSetEnabled,
           `${itemPath}.canSetEnabled`,
@@ -723,12 +732,19 @@ function decodeSkillManagement(
     },
   );
   for (const asset of assets) {
-    const hasEnablement =
-      asset.enabled !== null && asset.selectionRevision !== null;
+    const enablementFields = [
+      asset.enabled,
+      asset.enablementState,
+      asset.selectionRevision,
+    ];
+    const hasAnyEnablement = enablementFields.some((value) => value !== null);
+    const hasEnablement = enablementFields.every((value) => value !== null);
+    if (hasAnyEnablement !== hasEnablement)
+      fail(path, "enablement state and revision must be published together");
     if (asset.canSetEnabled !== hasEnablement)
       fail(path, "settable assets require enablement state and revision");
-    if (asset.canSetEnabled && asset.scope.kind !== "project")
-      fail(path, "only project assets can be enabled or disabled");
+    if (asset.scope.kind === "personal" && asset.enablementState === "inherit")
+      fail(path, "personal assets cannot inherit enablement");
   }
   return {
     availability,

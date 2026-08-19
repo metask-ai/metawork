@@ -400,10 +400,13 @@ test("the fixed revision 1 contract carries Host-owned Workspace and generation 
   });
   assert.deepEqual(
     await client.setSkillEnabled(
-      "7",
-      "29",
+      {
+        scope: "project",
+        workspaceId: "7",
+        expectedWorkspaceEpoch: "29",
+      },
       "builtin.review",
-      false,
+      "disabled",
       "catalog-revision",
       "31",
     ),
@@ -473,10 +476,11 @@ test("the fixed revision 1 contract carries Host-owned Workspace and generation 
     {
       command: "metawork.skills.setEnabled",
       payload: {
+        scope: "project",
         workspaceId: "7",
         expectedWorkspaceEpoch: "29",
         skillId: "builtin.review",
-        enabled: false,
+        state: "disabled",
         expectedCatalogRevision: "catalog-revision",
         expectedSelectionRevision: "31",
       },

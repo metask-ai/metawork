@@ -5,6 +5,7 @@ import type {
   SkillExportResult,
   SkillEnablementResult,
   SkillImportPreview,
+  SkillCatalogView,
   SkillManagementView,
   SkillMutationResult,
   WorkspaceView,
@@ -62,13 +63,13 @@ function SkillCard({
   asset,
   workspaces,
   onOpen,
-  onSetEnabled,
+  onSetState,
   enablementBusy,
 }: {
   asset: Asset;
   workspaces: WorkspaceView[];
   onOpen: (asset: Asset, trigger: HTMLElement) => void;
-  onSetEnabled: (asset: Asset, enabled: boolean) => void;
+  onSetState: (asset: Asset, state: "inherit" | "enabled" | "disabled") => void;
   enablementBusy: boolean;
 }) {
   const { t } = useI18n();
@@ -108,17 +109,32 @@ function SkillCard({
       {asset.enabled !== null && (
         <span className="skill-card-enablement">
           <span>
-            {asset.enabled
-              ? t("skills.enablement.enabled")
-              : t("skills.enablement.disabled")}
+            {asset.scope.kind === "project" &&
+            asset.enablementState === "inherit"
+              ? t("skills.enablement.inherit")
+              : asset.enabled
+                ? t("skills.enablement.enabled")
+                : t("skills.enablement.disabled")}
           </span>
+          {asset.scope.kind === "project" &&
+            asset.enablementState !== "inherit" && (
+              <button
+                className="skill-enablement-inherit focus-ring"
+                disabled={!asset.canSetEnabled || enablementBusy}
+                onClick={() => onSetState(asset, "inherit")}
+              >
+                {t("skills.enablement.follow_user")}
+              </button>
+            )}
           <Switch.Root
             checked={asset.enabled}
             disabled={!asset.canSetEnabled || enablementBusy}
             aria-label={t("skills.enablement.label", {
               skill: asset.displayName || asset.invocationName,
             })}
-            onCheckedChange={(checked) => onSetEnabled(asset, checked)}
+            onCheckedChange={(checked) =>
+              onSetState(asset, checked ? "enabled" : "disabled")
+            }
           >
             <Switch.Thumb />
           </Switch.Root>
@@ -130,6 +146,7 @@ function SkillCard({
 
 export function SkillsPage({
   management,
+  personalCatalog,
   workspaces,
   query,
   refreshing,
@@ -146,6 +163,7 @@ export function SkillsPage({
   onDetail,
 }: {
   management: SkillManagementView;
+  personalCatalog: SkillCatalogView;
   workspaces: WorkspaceView[];
   query: string;
   refreshing: boolean;
@@ -153,10 +171,15 @@ export function SkillsPage({
   onQuery: (query: string) => void;
   onRefresh: () => void;
   onSetEnabled: (
-    workspaceId: string,
-    expectedWorkspaceEpoch: string,
+    target:
+      | { scope: "personal" }
+      | {
+          scope: "project";
+          workspaceId: string;
+          expectedWorkspaceEpoch: string;
+        },
     skillId: string,
-    enabled: boolean,
+    state: "inherit" | "enabled" | "disabled",
     expectedCatalogRevision: string,
     expectedSelectionRevision: string,
   ) => Promise<SkillEnablementResult>;
@@ -216,30 +239,41 @@ export function SkillsPage({
   );
   const drawerOpen = selected !== null || importOpen;
 
-  async function toggleEnabled(asset: Asset, enabled: boolean) {
-    if (
-      !asset.canSetEnabled ||
-      asset.scope.kind !== "project" ||
-      !asset.skillId ||
-      !asset.selectionRevision
-    )
+  async function setEnablementState(
+    asset: Asset,
+    state: "inherit" | "enabled" | "disabled",
+  ) {
+    if (!asset.canSetEnabled || !asset.skillId || !asset.selectionRevision)
       return;
-    const workspace = workspaces.find(
-      (candidate) =>
-        candidate.id === asset.scope.workspaceId &&
-        candidate.epoch === asset.scope.workspaceEpoch,
-    );
-    if (!workspace?.skillCatalog.revision) return;
-    const identity = `${workspace.id}:${asset.skillId}`;
+    const target =
+      asset.scope.kind === "project"
+        ? {
+            scope: "project" as const,
+            workspaceId: asset.scope.workspaceId,
+            expectedWorkspaceEpoch: asset.scope.workspaceEpoch,
+          }
+        : asset.scope.kind === "personal"
+          ? { scope: "personal" as const }
+          : null;
+    if (!target || (target.scope === "personal" && state === "inherit")) return;
+    const catalog =
+      target.scope === "personal"
+        ? personalCatalog
+        : workspaces.find(
+            (candidate) =>
+              candidate.id === target.workspaceId &&
+              candidate.epoch === target.expectedWorkspaceEpoch,
+          )?.skillCatalog;
+    if (!catalog?.revision) return;
+    const identity = `${target.scope}:${target.scope === "project" ? target.workspaceId : "user"}:${asset.skillId}`;
     setEnablementBusy(identity);
     setEnablementError(null);
     try {
       const result = await onSetEnabled(
-        workspace.id,
-        workspace.epoch,
+        target,
         asset.skillId,
-        enabled,
-        workspace.skillCatalog.revision,
+        state,
+        catalog.revision,
         asset.selectionRevision,
       );
       if (!result.applied) setEnablementError(t("skills.error.enablement"));
@@ -462,12 +496,10 @@ export function SkillsPage({
               asset={asset}
               workspaces={workspaces}
               onOpen={(item, trigger) => void openDetail(item, trigger)}
-              onSetEnabled={(item, enabled) =>
-                void toggleEnabled(item, enabled)
-              }
+              onSetState={(item, state) => void setEnablementState(item, state)}
               enablementBusy={
                 enablementBusy ===
-                `${asset.scope.kind === "project" ? asset.scope.workspaceId : ""}:${asset.skillId ?? ""}`
+                `${asset.scope.kind}:${asset.scope.kind === "project" ? asset.scope.workspaceId : "user"}:${asset.skillId ?? ""}`
               }
             />
           ))}

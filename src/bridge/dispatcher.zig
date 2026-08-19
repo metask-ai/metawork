@@ -1511,13 +1511,36 @@ pub const Dispatcher = struct {
         if (parsed.value.skillId.len == 0 or
             parsed.value.expectedCatalogRevision.len == 0)
             return error.InvalidBridgePayload;
+        const state: workbench_api.SkillEnablementState =
+            if (std.mem.eql(u8, parsed.value.state, "enabled"))
+                .enabled
+            else if (std.mem.eql(u8, parsed.value.state, "disabled"))
+                .disabled
+            else if (std.mem.eql(u8, parsed.value.state, "inherit"))
+                .inherit
+            else
+                return error.InvalidBridgePayload;
+        const scope: workbench_api.SkillEnablementScope =
+            if (std.mem.eql(u8, parsed.value.scope, "personal")) personal: {
+                if (parsed.value.workspaceId != null or
+                    parsed.value.expectedWorkspaceEpoch != null or
+                    state == .inherit)
+                    return error.InvalidBridgePayload;
+                break :personal .personal;
+            } else if (std.mem.eql(u8, parsed.value.scope, "project")) project: {
+                const workspace_id = parsed.value.workspaceId orelse
+                    return error.InvalidBridgePayload;
+                const workspace_epoch = parsed.value.expectedWorkspaceEpoch orelse
+                    return error.InvalidBridgePayload;
+                break :project .{ .project = .{
+                    .workspace_id = try handlers.parseWireId(workspace_id),
+                    .expected_workspace_epoch = try handlers.parseWireId(workspace_epoch),
+                } };
+            } else return error.InvalidBridgePayload;
         const next_revision = (try self.requireWorkbench()).setSkillEnabled(.{
-            .workspace_id = try handlers.parseWireId(parsed.value.workspaceId),
-            .expected_workspace_epoch = try handlers.parseWireId(
-                parsed.value.expectedWorkspaceEpoch,
-            ),
+            .scope = scope,
             .skill_id = parsed.value.skillId,
-            .enabled = parsed.value.enabled,
+            .state = state,
             .expected_catalog_revision = parsed.value.expectedCatalogRevision,
             .expected_selection_revision = try handlers.parseWireId(
                 parsed.value.expectedSelectionRevision,

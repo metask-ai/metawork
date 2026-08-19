@@ -41,9 +41,10 @@ const assets = [
     canReimport: true,
     canUninstall: true,
     canRetry: false,
-    enabled: null,
-    canSetEnabled: false,
-    selectionRevision: null,
+    enabled: true,
+    enablementState: "enabled",
+    canSetEnabled: true,
+    selectionRevision: "3",
     issueCodes: [],
   },
   {
@@ -62,6 +63,7 @@ const assets = [
     canUninstall: false,
     canRetry: true,
     enabled: false,
+    enablementState: "inherit",
     canSetEnabled: true,
     selectionRevision: "3",
     issueCodes: [],
@@ -82,6 +84,7 @@ const assets = [
     canUninstall: false,
     canRetry: false,
     enabled: null,
+    enablementState: null,
     canSetEnabled: false,
     selectionRevision: null,
     issueCodes: ["invalid_resource"],
@@ -117,6 +120,7 @@ function render(props = {}) {
       },
       createElement(SkillsPage, {
         management: readyManagement,
+        personalCatalog: { revision: "personal-catalog-1" },
         workspaces,
         query: "",
         refreshing: false,
@@ -196,7 +200,7 @@ test("Skills center renders a compact local management surface", () => {
   assert.match(markup, /User/);
   assert.match(markup, /MetaWork/);
   assert.match(markup, /role="switch"/);
-  assert.match(markup, /Disabled/);
+  assert.match(markup, /Following user setting/);
   assert.doesNotMatch(markup, />\/<|installed/i);
 });
 
@@ -281,6 +285,7 @@ test("Skills route uses canonical management and Workspace enablement commands",
   );
   assert.match(page, /<Switch\.Root/);
   assert.match(page, /expectedSelectionRevision/);
+  assert.match(page, /skills\.enablement\.follow_user/);
   assert.match(
     css,
     /\.skill-header-actions > button \{[\s\S]*?display: inline-flex;[\s\S]*?width: auto;[\s\S]*?margin-top: 0;[\s\S]*?gap: 6px;/,

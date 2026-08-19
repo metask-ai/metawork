@@ -337,6 +337,8 @@ export const enUS = {
   "skills.status.issue": "Needs attention",
   "skills.enablement.enabled": "Enabled",
   "skills.enablement.disabled": "Disabled",
+  "skills.enablement.inherit": "Following user setting",
+  "skills.enablement.follow_user": "Follow user setting",
   "skills.enablement.label": "Toggle {skill}",
   "skills.import.eyebrow": "Local import",
   "skills.detail.eyebrow": "Skill details",
