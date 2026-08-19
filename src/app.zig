@@ -507,6 +507,7 @@ pub fn run(init: std.process.Init) !void {
         .app_name = "MetaWork",
         .window_title = "MetaWork",
         .bundle_id = product_identity.bundle_id,
+        .icon_path = "assets/icon.png",
         .bridge = app.bridge(mode),
         .builtin_bridge = app.automation.builtinPolicy(bridge_api.policy.builtin(mode)),
         .js_window_api = false,
