@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
-test("MCP detail becomes a full-width page at the narrow breakpoint", async () => {
+test("MCP master-detail workspace stacks at the narrow breakpoint", async () => {
   const css = await readFile(
     join(process.cwd(), "frontend/src/index.css"),
     "utf8",
@@ -12,14 +12,17 @@ test("MCP detail becomes a full-width page at the narrow breakpoint", async () =
     join(process.cwd(), "frontend/src/features/mcp/McpPage.tsx"),
     "utf8",
   );
-  assert.match(page, /max-\[620px\]:w-full max-\[620px\]:border-l-0/);
+  assert.match(
+    page,
+    /className="mcp-workspace"[\s\S]*?className="mcp-detail-pane"/,
+  );
   assert.match(
     css,
-    /@media \(max-width: 620px\) \{[\s\S]*?\.mcp-access-rail \{[\s\S]*?grid-template-columns: 1fr;/,
+    /@media \(max-width: 1100px\) \{[\s\S]*?\.mcp-workspace \{[\s\S]*?grid-template-columns: minmax\(0, 1fr\);/,
   );
 });
 
-test("MCP facts rail replaces the fake setup pipeline", async () => {
+test("MCP connection trace exposes real connection, handshake, and tool stages", async () => {
   const css = await readFile(
     join(process.cwd(), "frontend/src/index.css"),
     "utf8",
@@ -29,16 +32,13 @@ test("MCP facts rail replaces the fake setup pipeline", async () => {
     "utf8",
   );
 
-  assert.match(page, /className="mcp-access-rail"/);
-  assert.match(page, /mcp\.detail\.new_tasks/);
-  assert.match(page, /mcp\.detail\.tool_permissions/);
-  assert.match(page, /mcp\.detail\.connection_test/);
+  assert.match(page, /className="mcp-connection-trace"/);
+  assert.match(page, /"connection"/);
+  assert.match(page, /"handshake"/);
+  assert.match(page, /"tools"/);
   assert.doesNotMatch(page, /mcp-pipeline|mcp\.pipeline\./);
-  assert.match(css, /\.mcp-access-rail \{[\s\S]*?repeat\(3,/);
-  assert.match(
-    css,
-    /@media \(prefers-reduced-motion: reduce\) \{[\s\S]*?\.mcp-drawer-backdrop \{[\s\S]*?animation: none;/,
-  );
+  assert.match(css, /\.mcp-connection-trace \{[\s\S]*?repeat\(3,/);
+  assert.doesNotMatch(page, /<Drawer\.Backdrop/);
 });
 
 test("MCP tool permissions use a visible foundation checkbox", async () => {
@@ -76,7 +76,7 @@ test("MCP confirmations use the modal foundation alert dialog", async () => {
   assert.doesNotMatch(css, /\.mcp-confirm-panel/);
 });
 
-test("MCP connection form keeps row groups in the drawer content column", async () => {
+test("MCP connection form keeps row groups in the detail pane", async () => {
   const css = await readFile(
     join(process.cwd(), "frontend/src/index.css"),
     "utf8",

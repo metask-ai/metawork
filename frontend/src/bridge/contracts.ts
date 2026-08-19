@@ -615,6 +615,11 @@ export const mcpRuntimeAlignmentValues = [
   "restart_required",
   "unknown",
 ] as const;
+export const mcpConfigurationApplyValues = [
+  "idle",
+  "applying",
+  "failed",
+] as const;
 export const mcpRuntimeStatusValues = [
   "not_loaded",
   "ready",
@@ -686,6 +691,7 @@ export type McpManagementView = {
   availability: (typeof mcpAvailabilities)[number];
   managementHealth: (typeof mcpManagementHealthValues)[number];
   operation: "idle" | "saving" | "refreshing";
+  configurationApply: (typeof mcpConfigurationApplyValues)[number];
   authorizationOperation:
     | { kind: "idle" }
     | {
@@ -779,6 +785,10 @@ export type McpAuthorizationCancelResult = {
 
 export type McpRefreshResult = {
   outcome: "started" | "busy" | "unavailable" | "shutting_down" | "rejected";
+};
+
+export type McpConfigurationApplyResult = {
+  outcome: "started" | "busy" | "unavailable" | "rejected";
 };
 
 export type McpConnectionTestResult = {

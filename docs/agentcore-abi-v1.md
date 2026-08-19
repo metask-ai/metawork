@@ -55,7 +55,7 @@ MetaWork 不复制 header、raw enum、event tag、Permission/Skill/MCP JSON sch
 - checkpoint export；
 - owned buffer release。
 
-必需 entry 不等于 MetaWork 产品自动开放对应能力。`runtime_apply_mcp_configuration` 在 revision 8 table 中必须存在，但当前产品保持 immutable Runtime Manifest 与 `restart_required` 语义，不调用该 entry；测试 fake 必须提供签名正确、明确失败的 stub，确保 function-table 校验真实覆盖 revision 8。
+必需 entry 不等于 MetaWork 产品自动开放对应能力。`runtime_apply_mcp_configuration` 在 revision 8 table 中必须存在，MetaWork 使用它提交完整 declarative MCP server replacement。Host 为每次 apply 生成非零 desired revision，严格校验 status、report size、disposition、desired/active revision 与 reserved fields；只有 `APPLIED` 才转移 replacement ownership并推进正式 registry generation，`SUPERSEDED`/`REJECTED` 保留旧配置，malformed report fail closed。测试 fake 必须覆盖 applied/rejected 与签名/报告校验。
 
 ## 4. Runtime 与 Session create
 

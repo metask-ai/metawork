@@ -146,13 +146,28 @@ export const enUS = {
   "mcp.transport.stdio": "Local · STDIO",
   "mcp.transport.streamable_http": "Remote · HTTP",
   "mcp.tool_access_summary": "{available} of {total} for new tasks",
+  "mcp.trace.label": "Connection progress",
+  "mcp.trace.connection": "Connection",
+  "mcp.trace.handshake": "MCP handshake",
+  "mcp.trace.tools": "Tools",
   "mcp.access.available": "Available to new tasks",
   "mcp.access.not_allowed": "Not allowed",
-  "mcp.access.restart_required": "Restart required",
+  "mcp.access.restart_required": "Connecting",
   "mcp.access.unavailable": "Unavailable to new tasks",
-  "mcp.banner.restart.title": "Restart MetaWork to apply connection changes",
+  "mcp.banner.restart.title": "Applying connection changes",
   "mcp.banner.restart.body":
-    "New tasks will not use MCP until restart. Open tasks keep their current access.",
+    "MetaWork is connecting and discovering tools. Open tasks keep their current access.",
+  "mcp.banner.applying.title": "Connecting MCP services",
+  "mcp.banner.applying.body":
+    "Launching connections, checking the MCP handshake, and discovering tools.",
+  "mcp.banner.apply_failed.title": "Connection changes were not applied",
+  "mcp.banner.apply_failed.body":
+    "Your settings are saved. Retry the connection without restarting MetaWork.",
+  "mcp.apply.action": "Retry connection",
+  "mcp.apply.started": "Connecting with the saved settings.",
+  "mcp.apply.busy": "Another MCP operation is still running.",
+  "mcp.apply.unavailable": "The MCP runtime is unavailable right now.",
+  "mcp.apply.rejected": "The saved settings cannot be applied.",
   "mcp.banner.alignment_unknown.title":
     "The active connection state cannot be verified",
   "mcp.banner.alignment_unknown.body":
@@ -162,7 +177,7 @@ export const enUS = {
     "The last known configuration is shown, but changes are paused until recovery completes.",
   "mcp.banner.outcome_unknown.title": "The last save result is unknown",
   "mcp.banner.outcome_unknown.body":
-    "MetaWork has hidden the unconfirmed configuration and blocked MCP access for new tasks. Restart to recover safely.",
+    "MetaWork has hidden the unconfirmed configuration and blocked MCP access for new tasks until it can be recovered safely.",
   "mcp.banner.runtime_unavailable.title": "MCP tools are currently unavailable",
   "mcp.banner.runtime_unavailable.body":
     "You can still review saved settings. Ordinary tasks remain available without MCP.",
@@ -209,9 +224,9 @@ export const enUS = {
   "mcp.add.http_help": "Connect to a remote Streamable HTTP endpoint.",
   "mcp.add.protocol": "Protocol policy",
   "mcp.add.timeout": "Timeout (ms)",
-  "mcp.add.command": "Executable",
-  "mcp.add.arguments": "Ordered arguments",
-  "mcp.add.argument": "Add argument",
+  "mcp.add.command": "Launch command",
+  "mcp.add.command_help":
+    "Paste the command you would normally run. Shell operators and substitutions are not executed.",
   "mcp.add.cwd": "Working directory (optional)",
   "mcp.add.environment": "Environment variable names",
   "mcp.add.environment_name": "Add environment name",
@@ -303,15 +318,15 @@ export const enUS = {
     "Secret-based methods require secure secret capture. An existing selection can be preserved.",
   "mcp.confirm.enable.title": "Enable this server?",
   "mcp.confirm.enable.body":
-    "Connection changes may require restart. Open tasks keep their current access.",
+    "The connection is applied after saving. Open tasks keep their current access.",
   "mcp.confirm.enable.action": "Enable server",
   "mcp.confirm.disable.title": "Disable this server?",
   "mcp.confirm.disable.body":
-    "New tasks may require restart before access is removed. Open tasks are not changed.",
+    "Access is removed from new tasks after saving. Open tasks are not changed.",
   "mcp.confirm.disable.action": "Disable server",
   "mcp.confirm.delete.title": "Delete this server?",
   "mcp.confirm.delete.body":
-    "This removes the desired configuration. Open tasks keep their current access, and loaded connections may require restart.",
+    "This removes the configuration and updates access for new tasks. Open tasks keep their current access.",
   "mcp.confirm.delete.action": "Delete server",
   "skills.subtitle": "Manage local Skills available to MetaWork.",
   "skills.import": "Import Skill",

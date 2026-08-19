@@ -97,6 +97,7 @@ import type {
   RunInputView,
   McpMutationResult,
   McpRefreshResult,
+  McpConfigurationApplyResult,
   McpConnectionTestResult,
   SkillMutationResult,
   TaskRunReason,
@@ -1603,6 +1604,17 @@ export default function App() {
     }
   }
 
+  async function applyMcpConfiguration(): Promise<McpConfigurationApplyResult> {
+    try {
+      const result = await client.applyMcpConfiguration();
+      await refreshSnapshot();
+      return result;
+    } catch (error) {
+      await refreshSnapshot().catch(() => undefined);
+      throw error;
+    }
+  }
+
   async function testMcpConnection(
     expectedGeneration: string,
     serverId: string,
@@ -2588,6 +2600,7 @@ export default function App() {
             )
           }
           onTest={testMcpConnection}
+          onApply={applyMcpConfiguration}
           onRefresh={refreshMcpCatalog}
         />
       ) : route === "scheduled-tasks" ? (

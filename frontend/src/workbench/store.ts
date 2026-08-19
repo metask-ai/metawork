@@ -79,6 +79,7 @@ export const initialWorkbenchState: WorkbenchState = {
       availability: "unavailable",
       managementHealth: "unavailable",
       operation: "idle",
+      configurationApply: "idle",
       authorizationOperation: { kind: "idle" },
       desiredGeneration: null,
       runtimeAlignment: "unknown",

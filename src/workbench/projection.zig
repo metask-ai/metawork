@@ -499,6 +499,12 @@ pub const McpConnectionTestOutcome = enum {
     failed,
 };
 
+pub const McpConfigurationApplyState = enum {
+    idle,
+    applying,
+    failed,
+};
+
 const McpConnectionTest = struct {
     server_id_storage: [64]u8 = undefined,
     server_id_len: usize = 0,
@@ -649,6 +655,7 @@ const McpProductState = struct {
     refresh_request_generation: u64 = 0,
     refresh_job: ?*McpRefreshJob = null,
     connection_test: ?McpConnectionTest = null,
+    configuration_apply_state: McpConfigurationApplyState = .idle,
     authorization_operation: ?McpAuthorizationOperation = null,
     pending_reauthorizations: std.ArrayList(McpPendingReauthorization) = .empty,
     runtime_auth_failure_blocked: bool = false,
@@ -6052,6 +6059,8 @@ pub const Workbench = struct {
     ) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         const mcp = if (self.mcp) |*value| value else return error.McpManagementUnavailable;
+        if (mcp.configuration_apply_state == .applying)
+            return error.CatalogLoading;
         if (mcp.connection_test) |test_state|
             if (test_state.state == .testing) return error.CatalogLoading;
         const management = if (mcp.management) |*value| value else return error.McpManagementUnavailable;
@@ -6061,6 +6070,85 @@ pub const Workbench = struct {
             return error.McpManagementUnavailable;
         mcp.connection_test = McpConnectionTest.init(server_id) orelse
             return error.McpManagementUnavailable;
+        self.bumpRevision();
+    }
+
+    pub fn beginMcpConfigurationApply(
+        self: *Workbench,
+        expected_generation: u64,
+    ) Error!void {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        const mcp = if (self.mcp) |*value| value else return error.McpManagementUnavailable;
+        if (mcp.configuration_apply_state == .applying or
+            mcp.refresh_job != null or
+            mcp.authorization_operation != null)
+            return error.CatalogLoading;
+        const management = if (mcp.management) |*value| value else return error.McpManagementUnavailable;
+        const inspection = management.inspect();
+        if (inspection.health != .ready or
+            inspection.desired_generation != expected_generation)
+            return error.McpManagementUnavailable;
+        mcp.configuration_apply_state = .applying;
+        self.blockMcpAdmission(mcp, .refreshing);
+        self.bumpRevision();
+    }
+
+    /// Installs the exact Runtime preparation and authority produced by one
+    /// successful declarative AgentCore apply. Every pointer remains owned by
+    /// the caller when the generation no longer matches.
+    pub fn completeMcpConfigurationApply(
+        self: *Workbench,
+        expected_generation: u64,
+        preparation: *mcp_configuration.Preparation,
+        manifest: *mcp_configuration.RuntimeManifest,
+        activation: ?*lifecycle.McpActivation,
+        selection: ?*lifecycle.McpSelection,
+        activation_failed: bool,
+    ) bool {
+        const mcp = if (self.mcp) |*value| value else return false;
+        if (mcp.configuration_apply_state != .applying) return false;
+        const management = if (mcp.management) |*value| value else return false;
+        const inspection = management.inspect();
+        if (inspection.health != .ready or
+            inspection.desired_generation != expected_generation or
+            preparation.generation() != expected_generation)
+            return false;
+
+        if (mcp.activation) |old| old.deinit();
+        mcp.activation = activation;
+        mcp.activation_failed = activation_failed;
+        mcp.preparation.deinit();
+        mcp.preparation = preparation.take();
+        management.installRuntimeManifest(manifest);
+        mcp.configuration_apply_state = .idle;
+        if (activation_failed) {
+            if (selection) |value| value.deinit();
+            self.blockMcpAdmission(mcp, .activation_unavailable);
+        } else {
+            self.replaceMcpAdmission(mcp, .{ .ready = .{
+                .selection = selection,
+                .catalog_generation = if (activation) |value|
+                    value.catalogGeneration()
+                else
+                    null,
+            } });
+        }
+        mcp.connection_test = null;
+        self.bumpRevision();
+        return true;
+    }
+
+    pub fn failMcpConfigurationApply(
+        self: *Workbench,
+        expected_generation: u64,
+    ) void {
+        const mcp = if (self.mcp) |*value| value else return;
+        if (mcp.configuration_apply_state != .applying) return;
+        const management = if (mcp.management) |*value| value else return;
+        if (management.inspect().desired_generation != expected_generation)
+            return;
+        mcp.configuration_apply_state = .failed;
+        self.blockMcpAdmissionForCurrentState(mcp);
         self.bumpRevision();
     }
 
@@ -7125,6 +7213,7 @@ pub const Workbench = struct {
         mcp: *McpProductState,
         preparation: *mcp_configuration.MutationPreparation,
     ) Error!mcp_configuration.ManagementOutcome {
+        if (mcp.configuration_apply_state == .applying) return .rejected;
         switch (preparation.*) {
             .unchanged => return .unchanged,
             .rejected => return .rejected,
@@ -7738,12 +7827,12 @@ pub const Workbench = struct {
         writer: *std.Io.Writer,
     ) Error!void {
         const mcp = if (self.mcp) |*value| value else {
-            writer.writeAll("{\"availability\":\"unavailable\",\"managementHealth\":\"unavailable\",\"operation\":\"idle\",\"authorizationOperation\":{\"kind\":\"idle\"},\"desiredGeneration\":null,\"runtimeAlignment\":\"unknown\",\"redacted\":false,\"servers\":[]}") catch
+            writer.writeAll("{\"availability\":\"unavailable\",\"managementHealth\":\"unavailable\",\"operation\":\"idle\",\"configurationApply\":\"idle\",\"authorizationOperation\":{\"kind\":\"idle\"},\"desiredGeneration\":null,\"runtimeAlignment\":\"unknown\",\"redacted\":false,\"servers\":[]}") catch
                 return error.SnapshotTooLarge;
             return;
         };
         const management = if (mcp.management) |*value| value else {
-            writer.writeAll("{\"availability\":\"unavailable\",\"managementHealth\":\"unavailable\",\"operation\":\"idle\",\"authorizationOperation\":{\"kind\":\"idle\"},\"desiredGeneration\":null,\"runtimeAlignment\":\"unknown\",\"redacted\":false,\"servers\":[]}") catch
+            writer.writeAll("{\"availability\":\"unavailable\",\"managementHealth\":\"unavailable\",\"operation\":\"idle\",\"configurationApply\":\"idle\",\"authorizationOperation\":{\"kind\":\"idle\"},\"desiredGeneration\":null,\"runtimeAlignment\":\"unknown\",\"redacted\":false,\"servers\":[]}") catch
                 return error.SnapshotTooLarge;
             return;
         };
@@ -7752,10 +7841,11 @@ pub const Workbench = struct {
             (inspection.desired_generation != null or inspection.health == .ready);
         const registry = if (trusted) management.desiredRegistry() else null;
         const projection_redacted = self.mcpProjectionRedacted(mcp, registry);
-        writer.print("{{\"availability\":\"{s}\",\"managementHealth\":\"{s}\",\"operation\":\"{s}\",\"authorizationOperation\":", .{
+        writer.print("{{\"availability\":\"{s}\",\"managementHealth\":\"{s}\",\"operation\":\"{s}\",\"configurationApply\":\"{s}\",\"authorizationOperation\":", .{
             @tagName(self.mcpAvailability()),
             @tagName(inspection.health),
             if (mcp.refresh_job != null) "refreshing" else "idle",
+            @tagName(mcp.configuration_apply_state),
         }) catch return error.SnapshotTooLarge;
         try writeMcpAuthorizationOperation(writer, mcp, registry);
         writer.writeAll(",\"desiredGeneration\":") catch return error.SnapshotTooLarge;
@@ -18547,7 +18637,7 @@ test "empty MCP startup commits a proven manageable runtime" {
     try std.testing.expect(std.mem.indexOf(
         u8,
         empty_snapshot,
-        "\"availability\":\"ready\",\"managementHealth\":\"ready\",\"operation\":\"idle\",\"authorizationOperation\":{\"kind\":\"idle\"},\"desiredGeneration\":\"0\",\"runtimeAlignment\":\"current\",\"redacted\":false,\"servers\":[]",
+        "\"availability\":\"ready\",\"managementHealth\":\"ready\",\"operation\":\"idle\",\"configurationApply\":\"idle\",\"authorizationOperation\":{\"kind\":\"idle\"},\"desiredGeneration\":\"0\",\"runtimeAlignment\":\"current\",\"redacted\":false,\"servers\":[]",
     ) != null);
     try std.testing.expectEqual(
         mcp_configuration.ManagementOutcome.saved,
@@ -18592,6 +18682,28 @@ test "empty MCP startup commits a proven manageable runtime" {
         connected_snapshot,
         "\"connectionTest\":{\"status\":\"connected\",\"toolCount\":3,\"issueCount\":1}",
     ) != null);
+    try workbench.beginMcpConfigurationApply(1);
+    const applying_snapshot = try workbench.writeSnapshot(&output);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        applying_snapshot,
+        "\"configurationApply\":\"applying\"",
+    ) != null);
+    try std.testing.expectEqual(
+        McpAdmissionBlockReason.refreshing,
+        workbench.mcp.?.admission.blocked,
+    );
+    workbench.failMcpConfigurationApply(1);
+    const failed_apply_snapshot = try workbench.writeSnapshot(&output);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        failed_apply_snapshot,
+        "\"configurationApply\":\"failed\"",
+    ) != null);
+    try std.testing.expectEqual(
+        McpAdmissionBlockReason.pending_restart,
+        workbench.mcp.?.admission.blocked,
+    );
 }
 
 test "MCP authorization operation owns product phase and durable token boundary" {
@@ -18838,7 +18950,7 @@ test "MCP startup health commits a safe degraded Workbench projection" {
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
-        "\"availability\":\"degraded\",\"managementHealth\":\"ready\",\"operation\":\"idle\",\"authorizationOperation\":{\"kind\":\"idle\"},\"desiredGeneration\":\"9\",\"runtimeAlignment\":\"current\",\"redacted\":true",
+        "\"availability\":\"degraded\",\"managementHealth\":\"ready\",\"operation\":\"idle\",\"configurationApply\":\"idle\",\"authorizationOperation\":{\"kind\":\"idle\"},\"desiredGeneration\":\"9\",\"runtimeAlignment\":\"current\",\"redacted\":true",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
@@ -18976,7 +19088,7 @@ test "MCP startup health commits a safe degraded Workbench projection" {
     try std.testing.expect(std.mem.indexOf(
         u8,
         effective_snapshot,
-        "\"managementHealth\":\"outcome_unknown\",\"operation\":\"idle\",\"authorizationOperation\":{\"kind\":\"idle\"},\"desiredGeneration\":null,\"runtimeAlignment\":\"unknown\",\"redacted\":false,\"servers\":[]",
+        "\"managementHealth\":\"outcome_unknown\",\"operation\":\"idle\",\"configurationApply\":\"idle\",\"authorizationOperation\":{\"kind\":\"idle\"},\"desiredGeneration\":null,\"runtimeAlignment\":\"unknown\",\"redacted\":false,\"servers\":[]",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,

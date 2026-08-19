@@ -26,9 +26,11 @@ import {
   type McpAuthorizationResult,
   type McpAuthorizationCancelResult,
   type McpRefreshResult,
+  type McpConfigurationApplyResult,
   type McpConnectionTestResult,
   mcpAvailabilities,
   mcpManagementHealthValues,
+  mcpConfigurationApplyValues,
   mcpRuntimeAlignmentValues,
   mcpRuntimeStatusValues,
   mcpNewTaskAccessValues,
@@ -2054,6 +2056,7 @@ function decodeMcpManagement(value: unknown, path: string): McpManagementView {
     "availability",
     "managementHealth",
     "operation",
+    "configurationApply",
     "authorizationOperation",
     "desiredGeneration",
     "runtimeAlignment",
@@ -2075,6 +2078,11 @@ function decodeMcpManagement(value: unknown, path: string): McpManagementView {
     "saving",
     "refreshing",
   ] as const);
+  const configurationApply = enumValue(
+    item.configurationApply,
+    `${path}.configurationApply`,
+    mcpConfigurationApplyValues,
+  );
   const authorizationItem = record(
     item.authorizationOperation,
     `${path}.authorizationOperation`,
@@ -2420,6 +2428,7 @@ function decodeMcpManagement(value: unknown, path: string): McpManagementView {
     desiredGeneration === null &&
     (runtimeAlignment !== "unknown" ||
       servers.length !== 0 ||
+      configurationApply !== "idle" ||
       authorizationOperation.kind !== "idle")
   )
     fail(path, "unknown desired state must hide alignment and servers");
@@ -2428,6 +2437,7 @@ function decodeMcpManagement(value: unknown, path: string): McpManagementView {
     (desiredGeneration !== null ||
       runtimeAlignment !== "unknown" ||
       servers.length !== 0 ||
+      configurationApply !== "idle" ||
       authorizationOperation.kind !== "idle")
   )
     fail(path, "outcome-unknown management cannot claim desired state");
@@ -2474,6 +2484,7 @@ function decodeMcpManagement(value: unknown, path: string): McpManagementView {
     availability,
     managementHealth,
     operation,
+    configurationApply,
     authorizationOperation,
     desiredGeneration,
     runtimeAlignment,
@@ -2656,6 +2667,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
       mcp.availability !== "unavailable" ||
       mcp.managementHealth !== "unavailable" ||
       mcp.operation !== "idle" ||
+      mcp.configurationApply !== "idle" ||
       mcp.authorizationOperation.kind !== "idle" ||
       mcp.desiredGeneration !== null ||
       mcp.runtimeAlignment !== "unknown" ||
@@ -2970,6 +2982,20 @@ export function decodeMcpRefreshResult(value: unknown): McpRefreshResult {
       "busy",
       "unavailable",
       "shutting_down",
+      "rejected",
+    ] as const),
+  };
+}
+
+export function decodeMcpConfigurationApplyResult(
+  value: unknown,
+): McpConfigurationApplyResult {
+  const item = object(value, "$", ["outcome"]);
+  return {
+    outcome: enumValue(item.outcome, "$.outcome", [
+      "started",
+      "busy",
+      "unavailable",
       "rejected",
     ] as const),
   };

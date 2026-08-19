@@ -13,6 +13,19 @@ pub fn host(coordinator: *mcp_management_coordinator.Coordinator) bridge_api.Mcp
         .capture_fn = captureSecret,
         .authorize_fn = authorizeOauth,
         .cancel_fn = cancelAuthorization,
+        .apply_fn = applyConfiguration,
+    };
+}
+
+fn applyConfiguration(
+    context: *anyopaque,
+) anyerror!bridge_api.McpConfigurationApplyStartOutcome {
+    const coordinator: *mcp_management_coordinator.Coordinator = @ptrCast(@alignCast(context));
+    return switch (try coordinator.applyConfiguration()) {
+        .started => .started,
+        .busy => .busy,
+        .rejected => .rejected,
+        .unavailable => .unavailable,
     };
 }
 

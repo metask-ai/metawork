@@ -43,7 +43,7 @@ const vite = await createServer({
   logLevel: "silent",
   server: { middlewareMode: true },
 });
-const { McpPage, filterMcpServers, validMcpHttpEndpoint } =
+const { McpPage, filterMcpServers, parseMcpCommandLine, validMcpHttpEndpoint } =
   await vite.ssrLoadModule("/src/features/mcp/McpPage.tsx");
 const { I18nContext } = await vite.ssrLoadModule("/src/i18n/context.ts");
 const { translate } = await vite.ssrLoadModule("/src/i18n/runtime.ts");
@@ -175,6 +175,7 @@ function pageElement(management, query = "", overrides = {}) {
     createElement(McpPage, {
       management: {
         authorizationOperation: { kind: "idle" },
+        configurationApply: "idle",
         ...management,
       },
       capabilities: {
@@ -198,6 +199,7 @@ function pageElement(management, query = "", overrides = {}) {
       onSetAllowedTools: unchangedMutation,
       onRemove: unchangedMutation,
       onTest: async () => ({ outcome: "started" }),
+      onApply: async () => ({ outcome: "started" }),
       onRefresh: refreshStarted,
       ...overrides,
     }),
@@ -221,7 +223,7 @@ test("MCP page groups verified server state without presenting a marketplace", (
   assert.ok(screen.getByText("Needs attention"));
   assert.ok(screen.getByText("Available servers"));
   assert.ok(screen.getByRole("heading", { level: 2, name: "Disabled" }));
-  assert.ok(screen.getByText("GitHub"));
+  assert.ok(screen.getAllByText("GitHub").length >= 1);
   assert.ok(screen.getByText("Notion"));
   assert.ok(screen.getByText("Filesystem"));
   assert.equal(screen.queryByText(/marketplace|install/i), null);
@@ -286,7 +288,7 @@ test("MCP keeps intentionally disabled servers out of the attention group", () =
   });
   assert.ok(within(row).getByText("Disabled"));
   fireEvent.click(row);
-  const dialog = screen.getByRole("dialog", { name: "Filesystem" });
+  const dialog = screen.getByRole("complementary", { name: "Filesystem" });
   assert.ok(within(dialog).getByRole("button", { name: "Enable" }));
   assert.equal(
     within(dialog).queryByRole("heading", { name: "Enable this service" }),
@@ -294,7 +296,7 @@ test("MCP keeps intentionally disabled servers out of the attention group", () =
   );
 });
 
-test("MCP keeps disabled desired state separate from the global restart barrier", () => {
+test("MCP keeps disabled desired state separate from connection apply recovery", () => {
   render(
     pageElement({
       availability: "degraded",
@@ -312,16 +314,14 @@ test("MCP keeps disabled desired state separate from the global restart barrier"
     }),
   );
 
-  assert.ok(screen.getByText("Restart MetaWork to apply connection changes"));
+  assert.ok(screen.getByText("Connection changes were not applied"));
   assert.equal(screen.queryByText("Needs attention"), null);
   const row = screen.getByRole("button", { name: /Filesystem/ });
   assert.ok(within(row).getByText("Disabled"));
   fireEvent.click(row);
-  const dialog = screen.getByRole("dialog", { name: "Filesystem" });
-  const newTasks = within(dialog).getByText("New tasks").closest("div");
-  assert.ok(within(newTasks).getByText("Disabled"));
+  const dialog = screen.getByRole("complementary", { name: "Filesystem" });
   assert.equal(
-    within(dialog).queryByText("Restart MetaWork to apply connection changes"),
+    within(dialog).queryByText("Connection changes were not applied"),
     null,
   );
 });
@@ -340,14 +340,13 @@ test("MCP detail exposes complete non-secret configuration and the tool catalog"
   );
 
   fireEvent.click(screen.getByRole("button", { name: /GitHub/ }));
-  const dialog = screen.getByRole("dialog", { name: "GitHub" });
+  const dialog = screen.getByRole("complementary", { name: "GitHub" });
   assert.ok(dialog.textContent.includes("Remote · HTTP"));
   assert.ok(dialog.textContent.includes("https://github.example/mcp"));
   assert.ok(dialog.textContent.includes("search_repositories"));
   assert.ok(dialog.textContent.includes("create_issue"));
   assert.equal(dialog.textContent.includes("Authorization"), true);
-  fireEvent.click(screen.getByRole("button", { name: "Close" }));
-  assert.equal(screen.queryByRole("dialog"), null);
+  assert.ok(screen.getByRole("complementary", { name: "GitHub" }));
 });
 
 test("MCP keeps a missing connection read-only instead of guessing repair data", () => {
@@ -377,7 +376,7 @@ test("MCP keeps a missing connection read-only instead of guessing repair data",
   );
 
   fireEvent.click(screen.getByRole("button", { name: /GitHub/ }));
-  const dialog = screen.getByRole("dialog", { name: "GitHub" });
+  const dialog = screen.getByRole("complementary", { name: "GitHub" });
   assert.ok(dialog.textContent.includes("Connection settings unavailable"));
   assert.equal(
     within(dialog).getByRole("button", { name: "Edit connection" }).disabled,
@@ -413,7 +412,7 @@ test("MCP STDIO detail and edit preserve command, ordered arguments, and cwd", (
   );
 
   fireEvent.click(screen.getByRole("button", { name: /Filesystem/ }));
-  let dialog = screen.getByRole("dialog", { name: "Filesystem" });
+  let dialog = screen.getByRole("complementary", { name: "Filesystem" });
   assert.ok(dialog.textContent.includes("/usr/local/bin/filesystem-server"));
   assert.ok(dialog.textContent.includes("--root"));
   assert.ok(dialog.textContent.includes("/workspace"));
@@ -421,18 +420,12 @@ test("MCP STDIO detail and edit preserve command, ordered arguments, and cwd", (
   fireEvent.click(
     within(dialog).getByRole("button", { name: "Edit connection" }),
   );
-  dialog = screen.getByRole("dialog", { name: "Edit connection settings" });
+  dialog = screen.getByRole("complementary", {
+    name: "Edit connection settings",
+  });
   assert.equal(
-    within(dialog).getByRole("textbox", { name: "Executable" }).value,
-    "/usr/local/bin/filesystem-server",
-  );
-  assert.equal(
-    within(dialog).getByLabelText("Ordered arguments 1").value,
-    "--root",
-  );
-  assert.equal(
-    within(dialog).getByLabelText("Ordered arguments 2").value,
-    "/workspace",
+    within(dialog).getByRole("textbox", { name: /Launch command/ }).value,
+    "/usr/local/bin/filesystem-server --root /workspace",
   );
   assert.equal(
     within(dialog).getByRole("textbox", {
@@ -559,7 +552,9 @@ test("MCP add selects Streamable HTTP and preserves its typed public input", asy
   );
 
   fireEvent.click(screen.getAllByRole("button", { name: "Add server" })[0]);
-  const dialog = screen.getByRole("dialog", { name: "Add an MCP server" });
+  const dialog = screen.getByRole("complementary", {
+    name: "Add an MCP server",
+  });
   assert.ok(
     dialog.textContent.includes(
       "Credentials are collected separately and never enter this form.",
@@ -602,7 +597,7 @@ test("MCP add selects Streamable HTTP and preserves its typed public input", asy
   assert.equal(tests.length, 0);
   // The form stays open until the refreshed canonical projection surfaces the
   // saved server; the Renderer does not guess its new identity.
-  assert.ok(screen.getByRole("dialog"));
+  assert.ok(screen.getByRole("complementary"));
   view.rerender(
     pageElement(
       {
@@ -638,7 +633,7 @@ test("MCP add selects Streamable HTTP and preserves its typed public input", asy
     ),
   );
   await waitFor(() =>
-    assert.ok(screen.getByRole("dialog", { name: "Local Search" })),
+    assert.ok(screen.getByRole("complementary", { name: "Local Search" })),
   );
   assert.equal(tests.length, 0);
 });
@@ -667,7 +662,9 @@ test("MCP STDIO add preserves ordered argv and names without secret values", asy
   );
 
   fireEvent.click(screen.getAllByRole("button", { name: "Add server" })[0]);
-  const dialog = screen.getByRole("dialog", { name: "Add an MCP server" });
+  const dialog = screen.getByRole("complementary", {
+    name: "Add an MCP server",
+  });
   fireEvent.change(
     within(dialog).getByRole("textbox", { name: "Display name" }),
     {
@@ -675,16 +672,9 @@ test("MCP STDIO add preserves ordered argv and names without secret values", asy
     },
   );
   fireEvent.change(
-    within(dialog).getByRole("textbox", { name: "Executable" }),
+    within(dialog).getByRole("textbox", { name: /Launch command/ }),
     {
-      target: { value: "/usr/local/bin/files-mcp" },
-    },
-  );
-  fireEvent.click(within(dialog).getByRole("button", { name: "Add argument" }));
-  fireEvent.change(
-    within(dialog).getByRole("textbox", { name: "Ordered arguments 1" }),
-    {
-      target: { value: "--readonly" },
+      target: { value: "/usr/local/bin/files-mcp --readonly" },
     },
   );
   fireEvent.click(
@@ -739,7 +729,9 @@ test("MCP OAuth add carries an explicit client auth method and no secret", async
   );
 
   fireEvent.click(screen.getAllByRole("button", { name: "Add server" })[0]);
-  const dialog = screen.getByRole("dialog", { name: "Add an MCP server" });
+  const dialog = screen.getByRole("complementary", {
+    name: "Add an MCP server",
+  });
   fireEvent.click(
     within(dialog).getByRole("button", { name: /Streamable HTTP/ }),
   );
@@ -838,7 +830,7 @@ test("MCP gates OAuth client secret recovery and configuration on secure capture
   );
 
   fireEvent.click(screen.getByRole("button", { name: /GitHub/ }));
-  const detail = screen.getByRole("dialog", { name: "GitHub" });
+  const detail = screen.getByRole("complementary", { name: "GitHub" });
   assert.ok(
     within(detail).getAllByText(
       "Secure secret capture is unavailable on this device.",
@@ -852,7 +844,7 @@ test("MCP gates OAuth client secret recovery and configuration on secure capture
   fireEvent.click(
     within(detail).getByRole("button", { name: "Edit connection" }),
   );
-  const form = screen.getByRole("dialog", {
+  const form = screen.getByRole("complementary", {
     name: "Edit connection settings",
   });
   fireEvent.click(
@@ -880,6 +872,23 @@ test("MCP endpoint validation matches the Host authority contract", () => {
     assert.equal(validMcpHttpEndpoint(endpoint), true, endpoint);
   for (const endpoint of endpointContract.rejected)
     assert.equal(validMcpHttpEndpoint(endpoint), false, endpoint);
+});
+
+test("MCP launch command is tokenized without invoking shell syntax", () => {
+  assert.deepEqual(
+    parseMcpCommandLine(
+      'npx -y "@modelcontextprotocol/server-filesystem" "/workspace files"',
+    ),
+    [
+      "npx",
+      "-y",
+      "@modelcontextprotocol/server-filesystem",
+      "/workspace files",
+    ],
+  );
+  assert.equal(parseMcpCommandLine("npx server | tee output"), null);
+  assert.equal(parseMcpCommandLine("npx $(whoami)"), null);
+  assert.equal(parseMcpCommandLine('npx "unterminated'), null);
 });
 
 test("MCP tool allowlist mutation sends exact desired tools and generation", async () => {
@@ -938,7 +947,7 @@ test("MCP edit preloads and preserves the complete public destination", async ()
 
   fireEvent.click(screen.getByRole("button", { name: /GitHub/ }));
   fireEvent.click(screen.getByRole("button", { name: "Edit connection" }));
-  const dialog = screen.getByRole("dialog", {
+  const dialog = screen.getByRole("complementary", {
     name: "Edit connection settings",
   });
   assert.ok(
@@ -1058,8 +1067,6 @@ test("MCP approval and OAuth operation actions stay Host-owned and typed", async
   await waitFor(() =>
     assert.deepEqual(approvals, [["13", "filesystem-binding"]]),
   );
-  fireEvent.click(screen.getByRole("button", { name: "Close" }));
-
   view.rerender(
     pageElement(
       {
@@ -1143,7 +1150,7 @@ test("MCP destructive changes require an explicit confirmation", async () => {
   assert.deepEqual(calls[0], ["7", "github-binding"]);
 });
 
-test("MCP freezes unconfirmed desired state and explains restart semantics", () => {
+test("MCP freezes unconfirmed desired state and offers in-place apply recovery", () => {
   const view = render(
     pageElement({
       availability: "unavailable",
@@ -1175,12 +1182,13 @@ test("MCP freezes unconfirmed desired state and explains restart semantics", () 
       ],
     }),
   );
-  assert.ok(screen.getByText("Restart MetaWork to apply connection changes"));
+  assert.ok(screen.getByText("Connection changes were not applied"));
   assert.ok(
     screen.getByText(
-      "New tasks will not use MCP until restart. Open tasks keep their current access.",
+      "Your settings are saved. Retry the connection without restarting MetaWork.",
     ),
   );
+  assert.ok(screen.getByRole("button", { name: "Retry connection" }));
 });
 
 test("MCP page stays inside the safe Renderer projection", async () => {
@@ -1188,7 +1196,8 @@ test("MCP page stays inside the safe Renderer projection", async () => {
     join(process.cwd(), "frontend/src/features/mcp/McpPage.tsx"),
     "utf8",
   );
-  assert.match(page, /<Drawer\.Root[\s\S]*?<Drawer\.Popup/);
+  assert.match(page, /className="mcp-workspace"[\s\S]*?<aside/);
+  assert.doesNotMatch(page, /<Drawer\.Root|<Drawer\.Backdrop/);
   assert.doesNotMatch(
     page,
     /window\.zero|localStorage|apiKey|marketplace|accessToken|refreshToken|clientSecretValue/i,

@@ -303,9 +303,9 @@ Skills                                                              10
 
 > Capability：**目标合同**。Renderer 通过 revision 1 strict snapshot 与 transport-discriminated typed command 管理 Workbench-owned Desired Registry；Runtime/catalog availability、secure secret capture、OAuth operation 和 Admission Authority 是彼此独立的 Host capability/state。任一能力不可用时页面保持可达并只呈现真实可用动作。
 
-MCP 页面沿用 Skill 中心约 944 px 的内容宽度、24–28 px 标题尺度、搜索和行动优先分组，但对象密度不同：Skill 是需要辨识内容的资产卡片，MCP server 是需要快速扫描连接状态的单列连续行。
+MCP 页面使用稳定 master-detail 工作区：左侧连接列表负责扫描、搜索和选择，右侧详情持续显示当前服务；桌面端不使用遮罩 drawer 隐藏列表，低于窄窗断点后按列表、详情顺序堆叠。整体沿用 Workbench 的标题尺度和克制中性色，只用紫色表示进行中的连接、绿色表示成功、琥珀色表示需要处理。
 
-页面不建立固定接入流水线。保存、认证、连接测试、工具授权与重启是由 canonical 状态决定的条件动作，不是每个服务都必须依次完成的步骤。详情顶部只呈现当前事实和至多一个主要下一步；用户主动停用的服务没有警告式“下一步”，Enable 只是详情底部的普通管理动作。连接测试是独立诊断事实，不能覆盖服务是否可供新任务使用的主状态。secret capture capability 缺失时，static 认证在新建/切换入口即禁用并说明原因；编辑既有 static server 不受拦截。
+用户模型只有两层：连接服务、选择工具。Add/Edit 保存后，Host 自动完成 preparation、认证条件动作、正式 Runtime apply、MCP activation 和工具发现；普通成功路径不要求先点 Test，也不要求重启 MetaWork。连接测试保留为次级诊断事实，不能覆盖服务主状态。详情顶部的 `Connection → MCP handshake → Tools` 轨迹只呈现 Host 能证明的阶段，不伪造进程日志或协议细节。
 
 ```text
 MCP                                                        [ Add server ]
@@ -313,26 +313,26 @@ Connect external tools and choose what new tasks can use.
 
 [ Search servers and tools                              ] [ Refresh ]
 
-Restart to make connection changes available to new tasks. Open tasks keep their current access.
-
 Needs attention
-┃ Search             HTTP · OAuth    Tools unavailable   Sign in
-┃ Filesystem         Local · stdio   Tools undiscovered  Test connection
+┃ Search             HTTP · OAuth    Sign in
 
 Available servers
-┃ GitHub             HTTP · OAuth    2 of 5 tools        Available / Test passed
+┃ GitHub             HTTP · OAuth    Connected
 
 Disabled
-┃ Local database     stdio · static  Not open to tasks   Disabled
+┃ Local database     stdio · static  Disabled
+
+                                           GitHub
+                      Connection  →  MCP handshake  →  Tools
+                      Connected      Complete          2 allowed
 ```
 
-- Header 只有 `Add server` 主动作与 `Refresh tools` 次级动作。Add drawer 第一步必须显式选择 `STDIO` 或 `Streamable HTTP`，随后使用不同表单，不能在同一字段组里用 URL/command 的可空组合猜 transport。两种表单先展示 name 与 transport-specific 必填字段，把协议策略（Automatic / 2026-07-28 / 2025-11-25）和 timeout 收入默认折叠的 Advanced settings；STDIO 额外提供 executable、ordered arguments、可选 cwd，以及显式 `None / Static` 认证选择与 environment rows，Streamable HTTP 额外提供 endpoint、`None / Static / OAuth` auth mode 与 header names。OAuth 的 `Client registration` 提供 `Automatic` 与 `Existing client`：Automatic 只在 discovery metadata 明确支持 DCR 时继续；Existing client 接受公开 client id，并显式选择 `none | client_secret_basic | client_secret_post` token endpoint auth method；需要的 client secret 在保存后走 Host secure capture。`mcpSecretCapture = false` 时新建或切换不得选择需要 client secret 的方式，编辑既有 OAuth 配置只能原样保留当前 secret auth method。没有 stable HTTPS client metadata capability 时不显示 CIMD。OAuth 不出现在 STDIO；不提供 legacy SSE、JSON import 或 generic advanced blob。
+- Header 只有 `Add server` 主动作与 `Refresh tools` 次级动作。Add 在右侧详情区显式选择 `STDIO` 或 `Streamable HTTP`。STDIO 普通路径提供 display name 与一条 launch command；Renderer 以不执行 shell 的 tokenizer 将引号/转义解析为 command + ordered argv，并拒绝 pipe、重定向、变量或命令替换。cwd、额外 argv、environment slot、auth、协议策略和 timeout 收入 Advanced settings。HTTP 普通路径提供 display name 与 endpoint，auth/registration/header 等高级设置保持 typed。OAuth 不出现在 STDIO；不提供 legacy SSE、JSON import 或 generic advanced blob。
 - Add/Edit 的提交按钮分别使用 `Add and enable` / `Save connection`，其显式提交本身授权完整 typed connection，并在同一个 transaction 中保存 connection fingerprint；不再让用户重复 `Review connection`。Add 默认 enabled 且 tool allowlist 为空，Edit 在底层仍提交完整 replacement，并对新目标重新生成 approval；提交前不产生 child/network/credential/browser effect。schema 1 迁移留下的 unapproved 配置才显示一次 `Connect and enable` legacy action，Renderer 不自行比较 fingerprint。
 - Connection approval 后按 auth mode 收敛：None 进入 ready-to-enable；Static 对每个 secret slot 只显示 `Set / Replace / Missing` 和 Host secure-capture 动作，secret 从不进入 DOM、Bridge payload 或 snapshot，`mcpSecretCapture = false` 只使采集动作隐藏并明确显示 Host capability unavailable，不隐藏 Static 配置，也不清除用户的 enabled intent。OAuth 先显示 discovery progress，再由 Host-owned consent 展示 canonical resource、exact issuer、requested scopes、redirect 与 registration plan，用户确认后才打开系统浏览器。缺少 DCR 与 pre-registered client 时回到可操作的 `Existing client required`，不泛化成 unreachable。OAuth operation 全局占用时，其他 OAuth action 显示 busy，目标 server 的替换/删除/授权动作禁用；其他 server 管理和普通 Task 不被冻结。
-- 分组顺序固定为 `Needs attention / Available servers / Disabled`，空分组不渲染；状态同时使用细色轨、文字和语义图标。`connection = null / unapproved / missing_static_secret / missing_oauth_client_secret / oauth_consent_required / oauth_in_progress / reauth_required / unreachable / invalid_catalog / management recovery` 进入 attention；`runtimeAlignment = restart_required` 是页面级屏障，只有 desired-enabled 服务把对应 `newTaskAccess = restart_required` 呈现为行级 attention，desired-disabled 服务仍归入 `Disabled`，不得因为另一服务触发的全局屏障而伪装成待处理。每行以 display name 为主标题，下一行显示 transport + auth，中部显示新任务工具摘要，右侧先显示服务主状态，再按需显示最近连接测试作为次级事实。测试成功或失败不得覆盖服务主状态。desired enabled、approval/auth、Runtime health 与 new Task access 必须分开。
-- 点击行打开右侧详情 drawer，窄窗为整页。详情依次为三列事实栏（`New tasks / Tool permissions / Connection test`）、至多一个当前主要动作、`Tool permissions`、`Connection and authentication`、默认折叠的 `Advanced settings` 和危险操作。Tools 是首要管理内容，显示 discovered、desired allowed 与 available to new tasks 三个事实并提供真实可见的逐项 Checkbox；新发现工具默认关闭，配置中保留但当前未发现的工具明确标记 unavailable。Connection 显示可执行文件或完整 endpoint 和授权状态并提供 Edit；ordered arguments、cwd、slot name、registration plan、公开 client id、Rename、协议策略与 timeout 收入 Advanced settings，但仍必须可核对。秘密值只显示 `Set / Replace / Missing`，从不回填。`Test connection` 建立隔离连接并显示 testing、connected 或 failed；保存 Add/Replace 后只进入 canonical 服务详情，不自动启动测试。`Refresh tools` 仍只刷新正式当前 Runtime catalog。
-- `runtimeAlignment = current` 时，Rename 和 tool-only mutation 可以在 Host 成功提交后立即影响页面与后续新 Task；loaded server 的启停、删除或连接配置变化进入 `restart_required`。新增/删除 disabled server 或删除仍 invalid/missing-auth 的未加载 server 不得错误关闭其他 MCP。配置完整恢复到当前 Runtime Manifest 可证明的状态时，restart banner 必须消失；
-- `restart_required` banner 必须把两个事实分开：重启后新任务才使用 pending connection，已打开任务保持当前权限；页面没有正式 relaunch capability 时不得伪造一键重启按钮。Enable/Disable/Delete 与批量放行使用 modal confirmation，确认打开时焦点和交互必须限制在对话框内，Escape/取消后回到触发动作；文案不得暗示既有 Task 已撤权。已批准但尚缺 credential 的服务仍显示 enabled badge + needs authentication，不能进入正式 Runtime 或 new Task access。Header 不使用即时 enable switch；Enable/Disable 位于详情底部，避免把需要重启的配置 mutation 表达成实时连接开关。本期没有既有 Session 热更新或紧急撤权能力。`runtimeAlignment = unknown` 或 management outcome unknown 时禁用普通编辑，隐藏未经确认的 desired 列表并提供重启/恢复说明；
+- 分组顺序固定为 `Needs attention / Available servers / Disabled`，空分组不渲染；状态同时使用细色轨、文字和语义图标。正常产品状态收敛为 `Connecting / Connected / Needs attention / Disabled`。`configurationApply = applying` 显示 Connecting 并冻结冲突动作；`failed` 或 desired 与 Runtime 尚未对齐时显示“配置已保存，重试连接”，调用 `metawork.mcp.applyConfiguration`，不得出现重启要求。desired-disabled 服务始终归入 Disabled。
+- 详情依次为连接轨迹、至多一个主要处理动作、Tool permissions、Connection and authentication、默认折叠的 Advanced settings 和危险操作。Tools 显示 discovered、desired allowed 与 available to new tasks 三个事实并提供真实 Checkbox；新发现工具默认关闭。Connection 显示完整 executable/endpoint 与授权状态；秘密值只显示 `Set / Replace / Missing`。`Test connection` 始终是可选诊断，不是正式 apply gate；`Refresh tools` 只刷新当前正式 Runtime catalog。
+- Add/Edit/Enable/Disable/Delete 成功保存后自动 apply；Rename 与 tool-only mutation直接更新对应产品事实。apply 成功才原子安装新 Manifest/Activation/Admission，失败保留已保存 desired 并允许重试。已打开 Task 保持创建时 authority；UI 不暗示即时撤权。Enable/Disable/Delete 与批量放行仍使用 modal confirmation。`runtimeAlignment = unknown` 或 management outcome unknown 时禁用普通编辑并隐藏未经确认的 desired 列表，但恢复文案也不得要求重启。
 - Refresh 只刷新当前 Runtime catalog，不应用 pending connection configuration，也不隐式发起 OAuth。refreshing 时禁用会与 catalog/authority 冲突的动作；失败保持 fail-closed new Task access，不恢复旧 catalog selection。OAuth success/refresh 只有同一 consent epoch 的 token revision 可以原子替换 Runtime HTTP auth snapshot；已开始的请求完成后才释放旧 snapshot，既有 Session 的 tool selection 不变。`reauth_required` 禁止新 Task 获得该 server，但不宣称已撤销既有 Session authority。401/403 scope challenge 进入 `Sign in again`，consent 显示原 scopes 与新 challenge scopes 的 union，不自动循环重试失败 tool call。
 - Host projection 发布完整非敏感 typed connection：STDIO 的 command/ordered argv/cwd/environment name，Streamable HTTP 的完整 endpoint/header name，以及用户选择的 OAuth registration plan、公开 client id 和 token endpoint auth method。environment/header value、credential locator、client secret、token、code、PKCE、动态注册所得内部材料、raw OAuth document、schema、fingerprint 和 AgentCore handle 仍不进入 Renderer。`redacted = true` 时明确说明 Host 移除了敏感文本，对应 `connection = null`；该状态优先于 approval/auth/desired presentation，进入只读恢复面，禁用 Connect、Enable、Edit、Test、Rename 与 tool mutation，只保留 Delete 后重新添加，不以摘要或空表单冒充旧配置。
 - 所有 mutation 使用当前 `expectedDesiredGeneration`，长 OAuth 流程额外使用 opaque server-bound operation id；无关 server mutation 不使 operation stale，Renderer 不参与 rebase。outcome unknown 由顶层 management health 接管，不能盲目重试；启动发现遗留 OAuth operation 时只提供 `Sign in again`，不提供 Resume。Cancel 若发生在 DCR/token request 可能发送之后，结果必须显示 `Sign in again` 而不是 `Cancelled`。DCR outcome unknown 的说明必须明确再次尝试可能在远端创建另一个 client，不能暗示 MetaWork 已撤销或复用了未知 registration。

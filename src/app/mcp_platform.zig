@@ -681,8 +681,18 @@ pub fn buildRuntime(
     for (preparation.server_states) |state| {
         if (state == .eligible) eligible_count += 1;
     }
-    if (eligible_count == 0)
-        return .{ .authorizations = .{ .allocator = allocator } };
+    if (eligible_count == 0) {
+        if (registry.generation == 0)
+            return .{ .authorizations = .{ .allocator = allocator } };
+        return .{
+            .input = try agent.McpRuntimeInput.init(
+                allocator,
+                registry.generation,
+                &.{},
+            ),
+            .authorizations = .{ .allocator = allocator },
+        };
+    }
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -2155,12 +2165,14 @@ test "MCP platform creates no owner and reads no credential before approval" {
     defer preparation.deinit();
     try std.testing.expectEqual(workbench.McpServerPreparationState.unapproved, preparation.server_states[0]);
     try std.testing.expectEqual(@as(usize, 0), resolver.calls);
-    try std.testing.expect((try buildRuntimeInput(
+    var input = (try buildRuntimeInput(
         std.testing.io,
         std.testing.allocator,
         &preparation,
         testHostEnvironment(),
-    )) == null);
+    )).?;
+    defer input.deinit();
+    try std.testing.expectEqual(@as(u64, 1), input.generation);
 }
 
 fn testHostEnvironment() HostEnvironment {

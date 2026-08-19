@@ -76,6 +76,7 @@ pub const McpActivationTool = session_impl.McpActivationTool;
 pub const McpActivationServerState = session_impl.McpActivationServerState;
 pub const McpActivationUnavailableReason = session_impl.McpActivationUnavailableReason;
 pub const McpActivationOutcome = session_impl.McpActivationOutcome;
+pub const McpConfigurationApplyOutcome = session_impl.McpConfigurationApplyOutcome;
 pub const McpRuntimeInput = session_impl.McpRuntimeInput;
 pub const McpServerInput = session_impl.McpServerInput;
 pub const McpTransportKind = session_impl.McpTransportKind;

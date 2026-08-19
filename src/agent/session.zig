@@ -110,6 +110,12 @@ pub const McpActivationOutcome = union(enum) {
     unavailable: McpActivationUnavailableReason,
 };
 
+pub const McpConfigurationApplyOutcome = enum {
+    applied,
+    superseded,
+    rejected,
+};
+
 pub const CheckpointLimits = checkpoint.Limits;
 pub const CheckpointSink = checkpoint.Sink;
 pub const CheckpointSinkWriteResult = checkpoint.SinkWriteResult;
@@ -399,6 +405,8 @@ pub const Error = error{
     InvalidMcpSelection,
     StaleMcpSelection,
     McpRefreshInProgress,
+    McpConfigurationApplyFailed,
+    McpConfigurationApplyLimit,
     McpNotRefreshed,
     McpCheckpointBudgetRequired,
     McpSelectionUpdateFailed,
