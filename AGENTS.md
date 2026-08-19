@@ -11,12 +11,12 @@
 | 产品对象、行为与范围                                          | [docs/requirements.md](docs/requirements.md)                         |
 | UI 信息架构、交互与 capability gate                           | [docs/workbench-ui-design.md](docs/workbench-ui-design.md)           |
 | 技术选型、系统 owner 与安全边界                               | [docs/architecture.md](docs/architecture.md)                         |
-| Product owner、事务、并发、恢复及其与 Agent 的协作       | [docs/product-architecture.md](docs/product-architecture.md) |
+| Product owner、事务、并发、恢复及其与 Agent 的协作            | [docs/product-architecture.md](docs/product-architecture.md)         |
 | Renderer Bridge command、event、Snapshot 与运输合同           | [docs/renderer-bridge-contract.md](docs/renderer-bridge-contract.md) |
 | active tree、目录 owner 与依赖方向                            | [docs/project-structure.md](docs/project-structure.md)               |
 | AgentCore 线程、事件、所有权和生命周期                        | [docs/agentcore-integration.md](docs/agentcore-integration.md)       |
 | AgentCore bundle、ABI 与 required capability                  | [docs/agentcore-abi-v1.md](docs/agentcore-abi-v1.md)                 |
-| AgentCore 工具目标范围、探针、profile 与 capability Gate       | [docs/tool-integration-plan.md](docs/tool-integration-plan.md)       |
+| AgentCore 工具目标范围、探针、profile 与 capability Gate      | [docs/tool-integration-plan.md](docs/tool-integration-plan.md)       |
 | Metask OAuth、catalog、ExecutionTarget 与 Account persistence | [docs/metask-account-contract.md](docs/metask-account-contract.md)   |
 | 验证状态、证据和持续回归入口                                  | [docs/validation.md](docs/validation.md)                             |
 
@@ -27,6 +27,7 @@
 - 开始修改前检查工作树，保留用户已有改动，不清理或覆盖无关文件。
 - 同一个根因涉及的代码、测试、allowlist 和文档一次收完整；不要拆成只改名字、只搬文件或留半套兼容层的连续小变更。
 - 删除已经失去职责的实现、fixture 和阶段文档；Git 历史负责恢复，不建立 active archive、第二份规范或“以防万一”的平行路径。
+- 已批准或挂起决策引用的文档路径是稳定身份，即使文件尚未提交也不得被其他议题同名覆盖；新议题必须使用独立文件名。只有显式 supersede 决策才能替换原路径语义，并须同步修正所有引用。
 - 只有形成独立 owner 或可测试不变量时才拆模块；不为行数、目标目录树或未来 capability 创建空层。
 - 机器 identifier、外部路径、symbol 和 wire name 保持精确；产品与说明文字使用 MetaWork、Metask 和 Metask AgentCore。
 - `app.zon` 是 MetaWork release version 真源；根 npm、Renderer 和 Zig package 版本必须精确镜像。Bridge、persistence、AgentCore ABI 与 bundle schema 不随产品版本联动。任何合同类版本标识的变更都必须先得到用户显式同意。

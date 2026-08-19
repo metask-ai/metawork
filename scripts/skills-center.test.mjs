@@ -13,9 +13,14 @@ const vite = await createServer({
   logLevel: "silent",
   server: { middlewareMode: true },
 });
-const { SkillsPage, filterSkills } = await vite.ssrLoadModule(
-  "/src/features/skills/SkillsPage.tsx",
-);
+const {
+  SkillsPage,
+  availableSkillWorkspaces,
+  filterSkills,
+  resolveSkillWorkspace,
+  rowsForSkillContext,
+  skillWorkspaceKey,
+} = await vite.ssrLoadModule("/src/features/skills/SkillsPage.tsx");
 const { statusVisibleInCommandBar } = await vite.ssrLoadModule(
   "/src/app/command-bar-status.ts",
 );
@@ -193,15 +198,74 @@ test("Skills center renders a compact local management surface", () => {
   assert.match(markup, /Manage local Skills available to MetaWork/);
   assert.match(markup, /type="search"/);
   assert.match(markup, /Import Skill/);
-  assert.match(markup, /Needs attention/);
   assert.match(markup, /Review code changes/);
-  assert.match(markup, /Check before release/);
-  assert.match(markup, /Release notes/);
-  assert.match(markup, /User/);
-  assert.match(markup, /MetaWork/);
+  assert.match(markup, /User defaults/);
+  assert.match(markup, /Project settings/);
   assert.match(markup, /role="switch"/);
-  assert.match(markup, /Following user setting/);
+  assert.doesNotMatch(markup, /Check before release/);
+  assert.doesNotMatch(markup, /Release notes/);
+  assert.doesNotMatch(markup, />All</);
   assert.doesNotMatch(markup, />\/<|installed/i);
+});
+
+test("Skills center derives one exact policy context without cross-Workspace aggregation", () => {
+  const secondWorkspace = {
+    ...workspaces[0],
+    id: "2",
+    epoch: "4",
+    displayName: "Second project",
+  };
+  const automaticWorkspace = {
+    ...workspaces[0],
+    id: "3",
+    kind: "automatic",
+    displayName: "Automatic",
+  };
+  const projectOne = assets[1];
+  const projectTwo = {
+    ...assets[1],
+    installId: null,
+    scope: { kind: "project", workspaceId: "2", workspaceEpoch: "4" },
+  };
+  const staleProjectTwo = {
+    ...projectTwo,
+    scope: { kind: "project", workspaceId: "2", workspaceEpoch: "3" },
+  };
+  const rows = [assets[0], projectOne, projectTwo, staleProjectTwo, assets[2]];
+
+  assert.deepEqual(
+    rowsForSkillContext(rows, "personal", null).map((asset) => asset.skillId),
+    ["skill-review"],
+  );
+  assert.deepEqual(
+    rowsForSkillContext(rows, "project", workspaces[0]).map(
+      (asset) => `${asset.scope.workspaceId}:${asset.scope.workspaceEpoch}`,
+    ),
+    ["1:1"],
+  );
+  assert.deepEqual(
+    rowsForSkillContext(rows, "project", secondWorkspace).map(
+      (asset) => `${asset.scope.workspaceId}:${asset.scope.workspaceEpoch}`,
+    ),
+    ["2:4"],
+  );
+  assert.equal(rowsForSkillContext(rows, "project", null).length, 0);
+
+  const candidates = availableSkillWorkspaces([
+    workspaces[0],
+    secondWorkspace,
+    automaticWorkspace,
+  ]);
+  assert.deepEqual(
+    candidates.map((workspace) => workspace.id),
+    ["1", "2"],
+  );
+  assert.equal(resolveSkillWorkspace(candidates, null)?.id, "1");
+  assert.equal(
+    resolveSkillWorkspace(candidates, skillWorkspaceKey(secondWorkspace))?.id,
+    "2",
+  );
+  assert.equal(resolveSkillWorkspace(candidates, "2:3")?.id, "1");
 });
 
 test("Skills search covers invocation, display name, description, and arguments", () => {
@@ -286,6 +350,8 @@ test("Skills route uses canonical management and Workspace enablement commands",
   assert.match(page, /<Switch\.Root/);
   assert.match(page, /expectedSelectionRevision/);
   assert.match(page, /skills\.enablement\.follow_user/);
+  assert.doesNotMatch(page, /ScopeFilter|\["all", "personal", "project"\]/);
+  assert.match(page, /asset\.scope\.workspaceEpoch === workspace\.epoch/);
   assert.match(
     css,
     /\.skill-header-actions > button \{[\s\S]*?display: inline-flex;[\s\S]*?width: auto;[\s\S]*?margin-top: 0;[\s\S]*?gap: 6px;/,

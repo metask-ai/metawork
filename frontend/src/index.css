@@ -2574,6 +2574,18 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   box-shadow: 0 1px 3px rgba(37, 34, 45, 0.09);
 }
 
+.skill-context-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.skill-workspace-select {
+  width: 220px;
+  min-width: 180px;
+}
+
 .skill-groups {
   display: grid;
   margin-top: 28px;
@@ -5175,6 +5187,15 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
   .skill-scope-filter {
     align-self: flex-start;
+  }
+
+  .skill-context-controls {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .skill-workspace-select {
+    width: min(100%, 280px);
   }
 
   .skill-grid {
