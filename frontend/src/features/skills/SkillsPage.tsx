@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   SkillDetailResult,
   SkillExportResult,
+  SkillEnablementResult,
   SkillImportPreview,
   SkillManagementView,
   SkillMutationResult,
@@ -14,6 +15,7 @@ import { Drawer } from "../../components/ui/drawer.tsx";
 import { Input } from "../../components/ui/input.tsx";
 import { SearchField } from "../../components/ui/search-field.tsx";
 import { SelectField } from "../../components/ui/select.tsx";
+import { Switch } from "../../components/ui/switch.tsx";
 import { useI18n } from "../../i18n/context.ts";
 
 type Asset = SkillManagementView["assets"][number];
@@ -60,20 +62,23 @@ function SkillCard({
   asset,
   workspaces,
   onOpen,
+  onSetEnabled,
+  enablementBusy,
 }: {
   asset: Asset;
   workspaces: WorkspaceView[];
   onOpen: (asset: Asset, trigger: HTMLElement) => void;
+  onSetEnabled: (asset: Asset, enabled: boolean) => void;
+  enablementBusy: boolean;
 }) {
   const { t } = useI18n();
   const attention =
     asset.managementState === "pending_verification" ||
     asset.issueCodes.length > 0;
   return (
-    <li>
+    <li className="skill-card" data-attention={attention}>
       <button
-        className="skill-card focus-ring"
-        data-attention={attention}
+        className="skill-card-open focus-ring"
         onClick={(event) => onOpen(asset, event.currentTarget)}
       >
         <span className="skill-card-icon" aria-hidden="true">
@@ -100,6 +105,25 @@ function SkillCard({
           </span>
         </span>
       </button>
+      {asset.enabled !== null && (
+        <span className="skill-card-enablement">
+          <span>
+            {asset.enabled
+              ? t("skills.enablement.enabled")
+              : t("skills.enablement.disabled")}
+          </span>
+          <Switch.Root
+            checked={asset.enabled}
+            disabled={!asset.canSetEnabled || enablementBusy}
+            aria-label={t("skills.enablement.label", {
+              skill: asset.displayName || asset.invocationName,
+            })}
+            onCheckedChange={(checked) => onSetEnabled(asset, checked)}
+          >
+            <Switch.Thumb />
+          </Switch.Root>
+        </span>
+      )}
     </li>
   );
 }
@@ -112,6 +136,7 @@ export function SkillsPage({
   disabled,
   onQuery,
   onRefresh,
+  onSetEnabled,
   onChooseImport,
   onInstall,
   onReimport,
@@ -127,6 +152,14 @@ export function SkillsPage({
   disabled: boolean;
   onQuery: (query: string) => void;
   onRefresh: () => void;
+  onSetEnabled: (
+    workspaceId: string,
+    expectedWorkspaceEpoch: string,
+    skillId: string,
+    enabled: boolean,
+    expectedCatalogRevision: string,
+    expectedSelectionRevision: string,
+  ) => Promise<SkillEnablementResult>;
   onChooseImport: (kind: ImportKind) => Promise<SkillImportPreview>;
   onInstall: (
     previewId: string,
@@ -160,6 +193,8 @@ export function SkillsPage({
   const [confirmUninstall, setConfirmUninstall] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [enablementBusy, setEnablementBusy] = useState<string | null>(null);
+  const [enablementError, setEnablementError] = useState<string | null>(null);
 
   const visibleAssets = useMemo(() => {
     const filtered = filterSkills(management.assets, query);
@@ -180,6 +215,40 @@ export function SkillsPage({
       workspace.kind === "manual" && workspace.authorization === "available",
   );
   const drawerOpen = selected !== null || importOpen;
+
+  async function toggleEnabled(asset: Asset, enabled: boolean) {
+    if (
+      !asset.canSetEnabled ||
+      asset.scope.kind !== "project" ||
+      !asset.skillId ||
+      !asset.selectionRevision
+    )
+      return;
+    const workspace = workspaces.find(
+      (candidate) =>
+        candidate.id === asset.scope.workspaceId &&
+        candidate.epoch === asset.scope.workspaceEpoch,
+    );
+    if (!workspace?.skillCatalog.revision) return;
+    const identity = `${workspace.id}:${asset.skillId}`;
+    setEnablementBusy(identity);
+    setEnablementError(null);
+    try {
+      const result = await onSetEnabled(
+        workspace.id,
+        workspace.epoch,
+        asset.skillId,
+        enabled,
+        workspace.skillCatalog.revision,
+        asset.selectionRevision,
+      );
+      if (!result.applied) setEnablementError(t("skills.error.enablement"));
+    } catch {
+      setEnablementError(t("skills.error.enablement"));
+    } finally {
+      setEnablementBusy(null);
+    }
+  }
 
   useEffect(() => title.current?.focus(), []);
 
@@ -393,6 +462,13 @@ export function SkillsPage({
               asset={asset}
               workspaces={workspaces}
               onOpen={(item, trigger) => void openDetail(item, trigger)}
+              onSetEnabled={(item, enabled) =>
+                void toggleEnabled(item, enabled)
+              }
+              enablementBusy={
+                enablementBusy ===
+                `${asset.scope.kind === "project" ? asset.scope.workspaceId : ""}:${asset.skillId ?? ""}`
+              }
             />
           ))}
         </ul>
@@ -460,6 +536,12 @@ export function SkillsPage({
             ))}
           </div>
         </div>
+
+        {enablementError && (
+          <p className="skill-enablement-error" role="alert">
+            {enablementError}
+          </p>
+        )}
 
         {unavailable ? (
           <div className="skill-empty-state">

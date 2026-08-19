@@ -99,6 +99,7 @@ import type {
   McpRefreshResult,
   McpConnectionTestResult,
   SkillMutationResult,
+  SkillEnablementResult,
   TaskRunReason,
   TaskModelSelectionReason,
   TaskView,
@@ -1594,6 +1595,26 @@ export default function App() {
     return result;
   }
 
+  async function setSkillEnabled(
+    workspaceId: string,
+    expectedWorkspaceEpoch: string,
+    skillId: string,
+    enabled: boolean,
+    expectedCatalogRevision: string,
+    expectedSelectionRevision: string,
+  ): Promise<SkillEnablementResult> {
+    const result = await client.setSkillEnabled(
+      workspaceId,
+      expectedWorkspaceEpoch,
+      skillId,
+      enabled,
+      expectedCatalogRevision,
+      expectedSelectionRevision,
+    );
+    await refreshSnapshot();
+    return result;
+  }
+
   async function commitMcpMutation(
     mutation: () => Promise<McpMutationResult>,
   ): Promise<McpMutationResult> {
@@ -2517,6 +2538,7 @@ export default function App() {
           disabled={bridgeUnavailable}
           onQuery={setSkillsQuery}
           onRefresh={() => void refreshSkillsPageCatalog()}
+          onSetEnabled={setSkillEnabled}
           onChooseImport={(kind) => client.chooseSkillImport(kind)}
           onInstall={(previewId, scope, allowReplace) =>
             commitSkillMutation(() =>

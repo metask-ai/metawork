@@ -191,7 +191,7 @@ Bridge handler 不能绕过 Workbench 操作 AgentCore handle。automation 只�
 
 ### `frontend/src/features/skills/`
 
-`SkillsPage.tsx` 是 MetaWork 用户 Skill catalog 的只读一级视图，拥有搜索、catalog 状态、bounded issue 与空状态展示。它只消费 Bridge 已解码的 Workbench 顶层 canonical projection，并由 `app/App.tsx` 发起 `skills.refreshCatalog`；不得读取目录或 Skill body、依赖 selected Workspace、推断 source、持有 policy，或增加安装、编辑、启用/禁用路径。
+`SkillsPage.tsx` 是 MetaWork 用户 Skill catalog 的一级管理视图，拥有搜索、catalog 状态、bounded issue、空状态和 Manual Workspace 启用开关。它只消费 Bridge 已解码的 Workbench 顶层 canonical projection，并由 `app/App.tsx` 发起 `skills.refreshCatalog` 与 `skills.setEnabled`；不得读取目录或 Skill body、依赖 selected Workspace、推断 source，或持有 enablement policy。安装、编辑及 Personal/external 全局开关不属于该页面。
 
 ### `frontend/src/features/mcp/`
 

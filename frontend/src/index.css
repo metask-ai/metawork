@@ -2616,7 +2616,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   width: 100%;
   min-height: 94px;
   padding: 13px 14px;
-  grid-template-columns: 38px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: flex-start;
   gap: 12px;
   border: 1px solid var(--ui-border);
@@ -2625,17 +2625,58 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   background: var(--skill-surface);
   box-shadow: 0 1px 2px rgba(37, 34, 45, 0.025);
   text-align: left;
-  cursor: pointer;
   transition:
     border-color 130ms ease,
     box-shadow 130ms ease,
     transform 130ms ease;
 }
 
-.skill-card:hover {
+.skill-card:hover,
+.skill-card:focus-within {
   border-color: var(--ui-border);
   box-shadow: 0 5px 18px rgba(37, 34, 45, 0.065);
   transform: translateY(-1px);
+}
+
+.skill-card-open {
+  display: grid;
+  min-width: 0;
+  padding: 0;
+  grid-template-columns: 38px minmax(0, 1fr);
+  align-items: flex-start;
+  gap: 12px;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.skill-card-enablement {
+  display: grid;
+  min-width: 74px;
+  min-height: 44px;
+  align-content: center;
+  justify-items: end;
+  gap: 5px;
+  color: var(--ui-content-muted);
+  font-size: var(--text-micro);
+  font-weight: 650;
+}
+
+.skill-card-enablement > button[data-checked] {
+  background: #8a4ed1;
+}
+
+.skill-enablement-error {
+  padding: 10px 12px;
+  margin: 0 0 12px;
+  border: 1px solid
+    color-mix(in srgb, var(--metask-state-danger) 22%, transparent);
+  border-radius: 8px;
+  color: var(--ui-content-danger);
+  background: color-mix(in srgb, var(--metask-state-danger) 7%, transparent);
+  font-size: var(--text-label);
 }
 
 .skill-card[data-attention="true"] {

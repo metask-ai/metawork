@@ -236,9 +236,9 @@ Tasks
 
 ### 5.3 Skill 中心
 
-> Capability：**目标合同**。页面在现有 revision 8 catalog/health projection 之上增加 Workbench-owned 本地 package、inventory 与管理 mutation；不要求 AgentCore 增加安装 API，也不把管理 projection 当作 Session execution binding。
+> Capability：**当前合同**。页面在 revision 8 catalog/health projection 之上消费 Workbench-owned 本地 package、inventory、管理 mutation 与 Manual Workspace enablement policy；不要求 AgentCore 增加安装 API，也不把管理 projection 当作 Session execution binding。
 
-Skill 中心只有一个工作：管理 MetaWork 已知的本地 Skill 资产。创建和修改仍属于普通 Task；在线市场、远程更新、启用开关、Preset、标签、排序、中央仓库和多 Agent 同步当前不存在，也不显示占位入口。
+Skill 中心只有一个工作：管理 MetaWork 已知的本地 Skill 资产及项目范围启用状态。创建和修改仍属于普通 Task；在线市场、远程更新、Personal 全局开关、Preset、标签、排序、中央仓库和多 Agent 同步当前不存在，也不显示占位入口。
 
 中央工作面沿用定时任务页的最大宽度、标题节奏、按钮和行动优先分组，使用与 Workbench 一致的紧凑卡片，而不是管理表格或外部市场视觉：
 
@@ -271,9 +271,9 @@ Skills                                                              10
 - 搜索过滤已提交管理 projection 的 display name、description、invocation 和 argument name。`All / Personal / Project` 是范围筛选；选择 Project 后显示已注册 Manual Workspace selector，不借用左栏 current Workspace，也不列出 Automatic Workspace；
 - 异常、冲突和 `pending_verification` 进入 `Needs attention`，正常资产进入 `Skills`；空分组不渲染，同一 Skill 不在两个分组重复；
 - 常规桌面使用两列卡片，中等与窄窗降为一列。卡片使用 `canvas/paper`、`rule`、约 12 px 圆角和无常驻阴影；hover/focus 只增加极浅 brand 背景、边框和最多 1 px 位移；
-- 卡片显示统一的线性 Skill 文档图标、display name、单行 description、范围、可选 monospace invocation 和带文字的状态。删除原 `/` 装饰；不显示安装量、`Installed`、来源品牌徽章或启用 switch；
+- 卡片显示统一的线性 Skill 文档图标、display name、单行 description、范围、可选 monospace invocation 和带文字的状态。删除原 `/` 装饰；不显示安装量、`Installed` 或来源品牌徽章。能够精确映射到当前 Manual Workspace runtime identity 的 project Skill 在卡片尾部显示独立 switch 与 `已启用/已禁用` 文字；Personal、external、catalog/selection 不可用或 identity 不可证明时不显示可操作开关；
 - 状态颜色只复用 `live / amber / danger`，且必须同时显示文字或图标。来源、revision、资源数量和物理管理细节留在 drawer；
-- 卡片是带标题的 `article/listitem`，打开详情的按钮与 `···` menu button 为并列元素，禁止嵌套 interactive element。只在 hover 或 keyboard focus 时增强菜单可见度；
+- 卡片是带标题的 `article/listitem`，打开详情的按钮、启用 switch 与可能存在的 `···` menu button 为并列元素，禁止嵌套 interactive element。开关最小命中区 44 px，checked 使用 `#8A4ED1`/主动作 token，off 使用中性边框色，并始终有文字、键盘焦点与 disabled 状态；
 - Skill invocation、display name、description、argument name、文件名和用户内容不翻译；页面标题、范围、状态、动作、错误和空状态进入完整 locale catalog。
 
 详情 drawer：

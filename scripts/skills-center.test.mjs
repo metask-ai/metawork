@@ -41,6 +41,9 @@ const assets = [
     canReimport: true,
     canUninstall: true,
     canRetry: false,
+    enabled: null,
+    canSetEnabled: false,
+    selectionRevision: null,
     issueCodes: [],
   },
   {
@@ -48,7 +51,7 @@ const assets = [
     sourceKind: "local_directory",
     scope: { kind: "project", workspaceId: "1", workspaceEpoch: "1" },
     managementState: "pending_verification",
-    skillId: null,
+    skillId: "skill-release",
     invocationName: "release-check",
     displayName: "Check before release",
     description: "Check versions, tests, and build state before release.",
@@ -58,6 +61,9 @@ const assets = [
     canReimport: false,
     canUninstall: false,
     canRetry: true,
+    enabled: false,
+    canSetEnabled: true,
+    selectionRevision: "3",
     issueCodes: [],
   },
   {
@@ -75,11 +81,18 @@ const assets = [
     canReimport: false,
     canUninstall: false,
     canRetry: false,
+    enabled: null,
+    canSetEnabled: false,
+    selectionRevision: null,
     issueCodes: ["invalid_resource"],
   },
 ];
 
-const readyManagement = { availability: "ready", assets };
+const readyManagement = {
+  availability: "ready",
+  enablementAvailability: "ready",
+  assets,
+};
 const workspaces = [
   {
     id: "1",
@@ -87,6 +100,7 @@ const workspaces = [
     kind: "manual",
     displayName: "MetaWork",
     authorization: "available",
+    skillCatalog: { revision: "catalog-1" },
   },
 ];
 
@@ -109,6 +123,9 @@ function render(props = {}) {
         disabled: false,
         onQuery() {},
         onRefresh() {},
+        async onSetEnabled() {
+          return { applied: true, selectionRevision: "4", reason: null };
+        },
         async onChooseImport() {
           return { selected: false };
         },
@@ -178,7 +195,9 @@ test("Skills center renders a compact local management surface", () => {
   assert.match(markup, /Release notes/);
   assert.match(markup, /User/);
   assert.match(markup, /MetaWork/);
-  assert.doesNotMatch(markup, />\/<|installed|checkbox|switch/i);
+  assert.match(markup, /role="switch"/);
+  assert.match(markup, /Disabled/);
+  assert.doesNotMatch(markup, />\/<|installed/i);
 });
 
 test("Skills search covers invocation, display name, description, and arguments", () => {
@@ -192,7 +211,7 @@ test("Skills search covers invocation, display name, description, and arguments"
   );
   assert.deepEqual(
     filterSkills(assets, "before release").map((skill) => skill.skillId),
-    [null],
+    ["skill-release"],
   );
   assert.equal(filterSkills(assets, "missing").length, 0);
   assert.equal(filterSkills(assets, "  ").length, 3);
@@ -200,17 +219,29 @@ test("Skills search covers invocation, display name, description, and arguments"
 
 test("Skills center distinguishes unavailable, empty, and filtered states", () => {
   assert.match(
-    render({ management: { availability: "unavailable", assets: [] } }),
+    render({
+      management: {
+        availability: "unavailable",
+        enablementAvailability: "unavailable",
+        assets: [],
+      },
+    }),
     /Skill management is unavailable/,
   );
   assert.match(
-    render({ management: { availability: "ready", assets: [] } }),
+    render({
+      management: {
+        availability: "ready",
+        enablementAvailability: "ready",
+        assets: [],
+      },
+    }),
     /No local Skills yet/,
   );
   assert.match(render({ query: "not-here" }), /No matching Skills/);
 });
 
-test("Skills route uses the canonical management commands and no policy path", async () => {
+test("Skills route uses canonical management and Workspace enablement commands", async () => {
   const app = await readFile(
     join(process.cwd(), "frontend/src/app/App.tsx"),
     "utf8",
@@ -238,6 +269,7 @@ test("Skills route uses the canonical management commands and no policy path", a
     "export",
     "detail",
     "refreshCatalog",
+    "setEnabled",
   ]) {
     assert.match(commands, new RegExp(`skills\\.${command}`));
   }
@@ -245,8 +277,10 @@ test("Skills route uses the canonical management commands and no policy path", a
   assert.match(page, /<Drawer\.Root[\s\S]*?<Drawer\.Popup/);
   assert.doesNotMatch(
     page,
-    /window\.zero|window\.confirm|localStorage|FileSystem|toggle|switch/i,
+    /window\.zero|window\.confirm|localStorage|FileSystem/i,
   );
+  assert.match(page, /<Switch\.Root/);
+  assert.match(page, /expectedSelectionRevision/);
   assert.match(
     css,
     /\.skill-header-actions > button \{[\s\S]*?display: inline-flex;[\s\S]*?width: auto;[\s\S]*?margin-top: 0;[\s\S]*?gap: 6px;/,
