@@ -180,6 +180,14 @@ test("Task persistence failure disables mutations without hiding Task history", 
   assert.match(taskList, /disabled=\{taskMutationDisabled/);
 });
 
+test("degraded Task history does not create a permanent sidebar alert", async () => {
+  const app = await readFile(resolve(sourceRoot, "app", "App.tsx"), "utf8");
+  assert.match(
+    app,
+    /taskHistoryPersistenceHealth !==\s*"degraded"[\s\S]*?task-persistence-error/,
+  );
+});
+
 test("draft Workspace selection stays local until Task creation", async () => {
   const app = await readFile(resolve(sourceRoot, "app", "App.tsx"), "utf8");
   assert.match(

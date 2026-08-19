@@ -2406,6 +2406,8 @@ export default function App() {
             <div className="sidebar-navigation">
               {snapshot.capabilities.taskHistoryPersistenceHealth !== "ready" &&
                 snapshot.capabilities.taskHistoryPersistenceHealth !==
+                  "degraded" &&
+                snapshot.capabilities.taskHistoryPersistenceHealth !==
                   "unavailable" && (
                   <div className="task-persistence-error" role="alert">
                     <Icon name="warning" />

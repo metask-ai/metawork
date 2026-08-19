@@ -957,8 +957,6 @@ export const enUS = {
     "MetaWork cannot confirm whether the latest change was saved. Automatic runs are stopped to prevent duplicates.",
   "scheduled.persistence.ready": "Schedule storage is ready.",
   "task.persistence.read_failed": "Saved task history could not be read.",
-  "task.persistence.degraded":
-    "Some saved tasks could not be restored. Other tasks remain available.",
   "task.persistence.corrupt":
     "Saved task history is invalid. MetaWork kept the original file and disabled task changes.",
   "task.persistence.write_failed":

@@ -207,7 +207,7 @@ Workspace
 - Composer 的工作目录控件只选择、添加或重新授权 New task 路径；设置页不提供 Workspace 生命周期管理。设置作为覆盖整个 Workbench 内容区的长期 surface 打开，保留窗口壳层和底层 Workbench 挂载，拥有自己的分区导航与内容滚动，关闭后恢复原工作面；
 - 再次打开历史 Task 只保证可浏览记录；需要访问原目录时重新选择或授权，能否继续执行还必须服从 §6.4 的 Conversation 与 execution binding 规则；
 - MetaWork 重启后，左栏直接使用 Workbench 恢复的 Task 列表和顺序；点击 Task 打开其已保存时间线，不自动创建新 Task、不重放最后一次输入，也不把恢复的 `interrupted` 显示成仍在运行；
-- `taskHistoryPersistenceHealth = degraded` 时，左栏在 Task 列表前显示一条紧凑、可读的部分恢复提示，但新 Task 和其他有效历史仍可用；只有 `read_failed / corrupt / write_failed / outcome_unknown` 这类 canonical store 或提交状态不可相信时才禁用 mutation。历史读取失败或整体损坏不得伪装成空列表，`outcome_unknown` 明确要求重启，Renderer 不提供盲目重试同一命令的入口；
+- `taskHistoryPersistenceHealth = degraded` 只表示少数已保存 Task 无法恢复；由于新 Task 和其他有效历史仍可用且没有用户可执行的恢复动作，左栏不为它显示常驻提示。`read_failed / corrupt / write_failed / outcome_unknown` 这类 canonical store 或提交状态不可相信时继续显示提示并禁用 mutation。历史读取失败或整体损坏不得伪装成空列表，`outcome_unknown` 明确要求重启，Renderer 不提供盲目重试同一命令的入口；
 - Task 行不保留可见的文字状态标签。运行中使用紫色旋转 loading 图标，需要处理或失败使用对应语义图标；完成使用醒目的实心提示点作为一次性未读提醒，颜色沿用主操作色。提醒身份绑定到最新完成 Run，后台完成时显示，用户打开该 Task 且其工作面可见后视为已读并隐藏；Task 再次完成新的 Run 时重新显示。
 - Task 的重命名、归档/恢复、结束和删除从内容区标题栏移除，统一通过左侧 Task 行的右键菜单访问。停止当前运行仍保留在内容区作为即时运行控制。
 
