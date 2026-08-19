@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { join } from "node:path";
 import test from "node:test";
 
 import { JSDOM } from "jsdom";
@@ -32,9 +33,8 @@ HTMLElement.prototype.releasePointerCapture = () => undefined;
 const { cleanup, fireEvent, render, screen } =
   await import("@testing-library/react");
 const vite = await createServer({
-  configFile: false,
-  root: new URL("../frontend", import.meta.url).pathname,
-  plugins: [(await import("@vitejs/plugin-react")).default()],
+  root: join(process.cwd(), "frontend"),
+  appType: "custom",
   server: { middlewareMode: true },
   logLevel: "silent",
 });

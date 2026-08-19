@@ -766,6 +766,7 @@ pub const FileStore = struct {
             error.FileNotFound => return null,
             else => return error.ReadFailed,
         };
+        if (builtin.os.tag == .windows) file.flags.nonblocking = true;
         defer file.close(self.io);
         const length = file.length(self.io) catch return error.ReadFailed;
         if (length == 0 or length > max_store_bytes) return error.ReadFailed;
