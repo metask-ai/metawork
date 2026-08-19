@@ -3925,10 +3925,10 @@ pub const Workbench = struct {
             .workspace_id = workspace.id,
             .workspace_epoch = workspace.epoch,
         };
-        const next_revision = try candidate.apply(.{
+        const next_revision = try candidate.applyWorkspace(.{
             .identity = identity,
             .skill_id = mutation.skill_id,
-            .enabled = mutation.enabled,
+            .state = if (mutation.enabled) .enabled else .disabled,
             .expected_revision = mutation.expected_selection_revision,
         });
         self.commitSkillEnablementCandidate(&candidate) catch |err| {
@@ -3936,10 +3936,8 @@ pub const Workbench = struct {
             return err;
         };
         candidate_owned = false;
-        catalog.applyEnablement(
-            next_revision,
-            self.skill_enablement.disabledSkillIds(identity),
-        );
+        if (!self.applyWorkspaceSkillEnablement(workspace, catalog))
+            unreachable;
         self.bumpRevision();
         return next_revision;
     }
@@ -4568,10 +4566,17 @@ pub const Workbench = struct {
             .workspace_id = workspace.id,
             .workspace_epoch = workspace.epoch,
         };
+        const current_catalog = workspace.catalog orelse
+            return error.RecoveryUnavailable;
+        var disabled_skill_ids: std.ArrayList([]const u8) = .empty;
+        defer disabled_skill_ids.deinit(self.allocator);
+        for (current_catalog.skills) |skill|
+            if (!self.skill_enablement.isEnabled(skill_identity, skill.skill_id))
+                try disabled_skill_ids.append(self.allocator, skill.skill_id);
         var skill_selection = try task_recovery_job.OwnedSkillSelection.init(
             self.allocator,
             self.skill_enablement.revision(skill_identity),
-            self.skill_enablement.disabledSkillIds(skill_identity),
+            disabled_skill_ids.items,
         );
         var skill_selection_live = true;
         errdefer if (skill_selection_live) skill_selection.deinit();
@@ -11361,10 +11366,9 @@ pub const Workbench = struct {
             .workspace_id = workspace.id,
             .workspace_epoch = workspace.epoch,
         };
-        snapshot.applyEnablement(
-            self.skill_enablement.revision(identity),
-            self.skill_enablement.disabledSkillIds(identity),
-        );
+        snapshot.selection_revision = self.skill_enablement.revision(identity);
+        for (snapshot.skills) |*skill|
+            skill.enabled = self.skill_enablement.isEnabled(identity, skill.skill_id);
         return true;
     }
 
