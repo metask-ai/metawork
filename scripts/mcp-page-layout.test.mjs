@@ -8,17 +8,18 @@ test("MCP detail becomes a full-width page at the narrow breakpoint", async () =
     join(process.cwd(), "frontend/src/index.css"),
     "utf8",
   );
-  assert.match(
-    css,
-    /@media \(max-width: 620px\) \{[\s\S]*?\.mcp-drawer \{[\s\S]*?width: 100%;[\s\S]*?border-left: 0;/,
+  const page = await readFile(
+    join(process.cwd(), "frontend/src/features/mcp/McpPage.tsx"),
+    "utf8",
   );
+  assert.match(page, /max-\[620px\]:w-full max-\[620px\]:border-l-0/);
   assert.match(
     css,
-    /@media \(max-width: 620px\) \{[\s\S]*?\.mcp-authority-strip \{[\s\S]*?grid-template-columns: 1fr;/,
+    /@media \(max-width: 620px\) \{[\s\S]*?\.mcp-access-rail \{[\s\S]*?grid-template-columns: 1fr;/,
   );
 });
 
-test("MCP authority layers remain one deliberate visual system", async () => {
+test("MCP facts rail replaces the fake setup pipeline", async () => {
   const css = await readFile(
     join(process.cwd(), "frontend/src/index.css"),
     "utf8",
@@ -28,15 +29,33 @@ test("MCP authority layers remain one deliberate visual system", async () => {
     "utf8",
   );
 
-  assert.match(page, /className="mcp-authority-strip"/);
-  assert.match(page, /mcp\.detail\.desired/);
-  assert.match(page, /mcp\.detail\.runtime/);
+  assert.match(page, /className="mcp-access-rail"/);
   assert.match(page, /mcp\.detail\.new_tasks/);
-  assert.match(css, /\.mcp-authority-strip \{[\s\S]*?repeat\(3,/);
+  assert.match(page, /mcp\.detail\.tool_permissions/);
+  assert.match(page, /mcp\.detail\.connection_test/);
+  assert.doesNotMatch(page, /mcp-pipeline|mcp\.pipeline\./);
+  assert.match(css, /\.mcp-access-rail \{[\s\S]*?repeat\(3,/);
   assert.match(
     css,
-    /@media \(prefers-reduced-motion: reduce\) \{[\s\S]*?\.mcp-drawer-backdrop,[\s\S]*?animation: none;/,
+    /@media \(prefers-reduced-motion: reduce\) \{[\s\S]*?\.mcp-drawer-backdrop \{[\s\S]*?animation: none;/,
   );
+});
+
+test("MCP tool permissions use a visible foundation checkbox", async () => {
+  const css = await readFile(
+    join(process.cwd(), "frontend/src/index.css"),
+    "utf8",
+  );
+  const page = await readFile(
+    join(process.cwd(), "frontend/src/features/mcp/McpPage.tsx"),
+    "utf8",
+  );
+
+  assert.match(
+    page,
+    /className="mcp-tool-toggle"[\s\S]*?<Checkbox\.Root[\s\S]*?className="size-\[18px\] rounded-\[5px\]"/,
+  );
+  assert.doesNotMatch(css, /\.mcp-tool-toggle > button/);
 });
 
 test("MCP connection form keeps row groups in the drawer content column", async () => {
@@ -57,4 +76,5 @@ test("MCP connection form keeps row groups in the drawer content column", async 
   );
   assert.match(css, /\.mcp-text-rows \{[\s\S]*?width: 100%;/);
   assert.match(css, /\.mcp-add-form select \{[\s\S]*?appearance: none;/);
+  assert.match(page, /className="mcp-advanced mcp-form-advanced"/);
 });

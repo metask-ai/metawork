@@ -222,6 +222,66 @@ test("MCP page groups verified server state without presenting a marketplace", (
   assert.equal(screen.queryByText(/marketplace|install/i), null);
 });
 
+test("MCP row keeps service availability separate from the last connection test", () => {
+  render(
+    pageElement({
+      availability: "ready",
+      managementHealth: "ready",
+      operation: "idle",
+      desiredGeneration: "7",
+      runtimeAlignment: "current",
+      redacted: false,
+      servers: [
+        {
+          ...servers[0],
+          connectionTest: { status: "failed", toolCount: 0, issueCount: 2 },
+        },
+      ],
+    }),
+  );
+
+  const row = screen.getByRole("button", { name: /GitHub/ });
+  assert.ok(within(row).getByText("Available to new tasks"));
+  assert.ok(within(row).getByText("Failed · 2 issues"));
+});
+
+test("MCP keeps intentionally disabled servers out of the attention group", () => {
+  const disabledAwaitingSecret = {
+    ...servers[2],
+    authMode: "static",
+    connection: {
+      ...servers[2].connection,
+      environment: [{ name: "TOKEN", status: "missing" }],
+    },
+    authorizationStatus: "missing_static_secret",
+    runtimeStatus: "needs_authentication",
+    newTaskAccess: "unavailable",
+  };
+  render(
+    pageElement({
+      availability: "degraded",
+      managementHealth: "ready",
+      operation: "idle",
+      desiredGeneration: "7",
+      runtimeAlignment: "current",
+      redacted: false,
+      servers: [disabledAwaitingSecret],
+    }),
+  );
+
+  assert.equal(screen.queryByText("Needs attention"), null);
+  const disabledGroup = screen
+    .getByRole("heading", {
+      level: 2,
+      name: "Disabled",
+    })
+    .closest("section");
+  const row = within(disabledGroup).getByRole("button", {
+    name: /Filesystem/,
+  });
+  assert.ok(within(row).getByText("Disabled"));
+});
+
 test("MCP detail exposes complete non-secret configuration and the tool catalog", () => {
   render(
     pageElement({
@@ -244,6 +304,39 @@ test("MCP detail exposes complete non-secret configuration and the tool catalog"
   assert.equal(dialog.textContent.includes("Authorization"), true);
   fireEvent.click(screen.getByRole("button", { name: "Close" }));
   assert.equal(screen.queryByRole("dialog"), null);
+});
+
+test("MCP keeps a missing connection read-only instead of guessing repair data", () => {
+  render(
+    pageElement({
+      availability: "degraded",
+      managementHealth: "ready",
+      operation: "idle",
+      desiredGeneration: "7",
+      runtimeAlignment: "current",
+      redacted: true,
+      servers: [
+        {
+          ...servers[0],
+          connection: null,
+          runtimeStatus: "invalid_catalog",
+          newTaskAccess: "unavailable",
+        },
+      ],
+    }),
+  );
+
+  fireEvent.click(screen.getByRole("button", { name: /GitHub/ }));
+  const dialog = screen.getByRole("dialog", { name: "GitHub" });
+  assert.ok(dialog.textContent.includes("Connection settings unavailable"));
+  assert.equal(
+    within(dialog).getByRole("button", { name: "Edit connection" }).disabled,
+    true,
+  );
+  assert.equal(
+    within(dialog).queryByRole("button", { name: "Test connection" }),
+    null,
+  );
 });
 
 test("MCP STDIO detail and edit preserve command, ordered arguments, and cwd", () => {
@@ -379,7 +472,8 @@ test("MCP search covers server identity, transport, and tool name", () => {
 
 test("MCP add selects Streamable HTTP and preserves its typed public input", async () => {
   const calls = [];
-  render(
+  const tests = [];
+  const view = render(
     pageElement(
       {
         availability: "ready",
@@ -396,6 +490,10 @@ test("MCP add selects Streamable HTTP and preserves its typed public input", asy
           calls.push(args);
           return { outcome: "saved" };
         },
+        onTest: async (...args) => {
+          tests.push(args);
+          return { outcome: "started" };
+        },
       },
     ),
   );
@@ -404,7 +502,7 @@ test("MCP add selects Streamable HTTP and preserves its typed public input", asy
   const dialog = screen.getByRole("dialog", { name: "Add an MCP server" });
   assert.ok(
     dialog.textContent.includes(
-      "Non-secret settings stay visible and editable. The Host captures secrets securely, and you can test immediately after saving.",
+      "Credentials are collected separately and never enter this form.",
     ),
   );
   fireEvent.click(
@@ -441,9 +539,48 @@ test("MCP add selects Streamable HTTP and preserves its typed public input", asy
       registration: null,
     },
   ]);
-  // Save-and-test keeps the drawer open while waiting for the refreshed
-  // projection to surface the saved server (mcp-page-experience-plan §2.2).
+  assert.equal(tests.length, 0);
+  // The form stays open until the refreshed canonical projection surfaces the
+  // saved server; the Renderer does not guess its new identity.
   assert.ok(screen.getByRole("dialog"));
+  view.rerender(
+    pageElement(
+      {
+        availability: "ready",
+        managementHealth: "ready",
+        operation: "idle",
+        desiredGeneration: "generation-10",
+        runtimeAlignment: "restart_required",
+        redacted: false,
+        servers: [
+          {
+            ...servers[0],
+            id: "local-search-binding",
+            displayName: "Local Search",
+            namespace: "mcp_local_search",
+            authMode: "none",
+            authorizationStatus: "not_required",
+            connectionTest: {
+              status: "untested",
+              toolCount: 0,
+              issueCount: 0,
+            },
+          },
+        ],
+      },
+      "",
+      {
+        onTest: async (...args) => {
+          tests.push(args);
+          return { outcome: "started" };
+        },
+      },
+    ),
+  );
+  await waitFor(() =>
+    assert.ok(screen.getByRole("dialog", { name: "Local Search" })),
+  );
+  assert.equal(tests.length, 0);
 });
 
 test("MCP STDIO add preserves ordered argv and names without secret values", async () => {
@@ -491,7 +628,7 @@ test("MCP STDIO add preserves ordered argv and names without secret values", asy
     },
   );
   fireEvent.click(
-    within(dialog).getByRole("button", { name: "Add environment name" }),
+    within(dialog).getByRole("radio", { name: "Static secrets" }),
   );
   fireEvent.change(
     within(dialog).getByRole("textbox", {

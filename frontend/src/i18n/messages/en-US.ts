@@ -131,8 +131,7 @@ export const enUS = {
   "skills.title": "Skills",
   "skills.navigation_label": "Workbench tools",
   "mcp.title": "MCP",
-  "mcp.subtitle":
-    "Review trusted servers and the tools they make available to MetaWork.",
+  "mcp.subtitle": "Connect external tools and choose what new tasks can use.",
   "mcp.search_label": "Search MCP servers and tools",
   "mcp.search_placeholder": "Search servers and tools",
   "mcp.section.attention": "Needs attention",
@@ -144,7 +143,7 @@ export const enUS = {
   "mcp.status.needs_authentication": "Sign-in required",
   "mcp.status.unreachable": "Cannot connect",
   "mcp.status.invalid_catalog": "Invalid tool catalog",
-  "mcp.transport.stdio": "Local · stdio",
+  "mcp.transport.stdio": "Local · STDIO",
   "mcp.transport.streamable_http": "Remote · HTTP",
   "mcp.tool_access_summary": "{available} of {total} for new tasks",
   "mcp.access.available": "Available to new tasks",
@@ -154,48 +153,43 @@ export const enUS = {
   "mcp.banner.restart.title": "Restart MetaWork to apply connection changes",
   "mcp.banner.restart.body":
     "New tasks will not use MCP until restart. Open tasks keep their current access.",
-  "mcp.banner.alignment_unknown.title": "Runtime alignment cannot be verified",
+  "mcp.banner.alignment_unknown.title":
+    "The active connection state cannot be verified",
   "mcp.banner.alignment_unknown.body":
-    "Editing is paused because MetaWork cannot prove which configuration this Runtime loaded.",
+    "Editing is paused because MetaWork cannot confirm which saved connection settings are active.",
   "mcp.banner.recovery.title": "MCP management needs recovery",
   "mcp.banner.recovery.body":
     "The last known configuration is shown, but changes are paused until recovery completes.",
   "mcp.banner.outcome_unknown.title": "The last save result is unknown",
   "mcp.banner.outcome_unknown.body":
     "MetaWork has hidden the unconfirmed configuration and blocked MCP access for new tasks. Restart to recover safely.",
-  "mcp.banner.runtime_unavailable.title":
-    "The current MCP Runtime is unavailable",
+  "mcp.banner.runtime_unavailable.title": "MCP tools are currently unavailable",
   "mcp.banner.runtime_unavailable.body":
-    "You can still review desired settings. Ordinary tasks remain available without MCP.",
+    "You can still review saved settings. Ordinary tasks remain available without MCP.",
   "mcp.unavailable_title": "MCP management is unavailable",
   "mcp.unavailable_body":
-    "MetaWork has not opened the MCP product path, so no servers or tools are shown.",
+    "MetaWork cannot load MCP management right now. Reopen the app to recover the server list.",
   "mcp.empty_title": "No MCP servers yet",
   "mcp.empty_body":
     "Add a trusted STDIO or Streamable HTTP server. The connection starts enabled, while tools stay unavailable to tasks by default.",
   "mcp.no_results_title": "No matching servers or tools",
   "mcp.no_results_body": "Nothing matches “{query}”.",
   "mcp.detail.eyebrow": "MCP server",
-  "mcp.detail.status": "Status",
-  "mcp.detail.desired": "Desired",
-  "mcp.detail.runtime": "Runtime",
   "mcp.detail.new_tasks": "New tasks",
-  "mcp.detail.configuration": "Configuration",
+  "mcp.detail.tool_permissions": "Tool permissions",
+  "mcp.detail.connection_test": "Connection test",
+  "mcp.detail.tools_available": "{count} tools available",
+  "mcp.detail.allowed_count": "Allowed {allowed}/{total}",
+  "mcp.detail.connection_and_auth": "Connection and authentication",
+  "mcp.detail.advanced": "Advanced settings",
   "mcp.detail.display_name": "Display name",
-  "mcp.detail.transport": "Connection",
-  "mcp.detail.tools": "Tools",
   "mcp.detail.diagnostic": "Needs attention",
-  "mcp.detail.tool_catalog": "Tool catalog",
   "mcp.detail.tool_help":
     "Choose the exact tools copied into new tasks. Newly discovered tools stay off.",
   "mcp.detail.no_tools": "This server has not published any usable tools.",
-  "mcp.redacted": "Sensitive catalog text was removed by the Host.",
+  "mcp.redacted": "MetaWork removed sensitive text from this catalog.",
   "mcp.desired.enabled": "Enabled",
   "mcp.desired.disabled": "Disabled",
-  "mcp.alignment.current": "Desired settings match the current Runtime.",
-  "mcp.alignment.restart_required":
-    "You can test this connection now. Restart to make the change available to new tasks.",
-  "mcp.alignment.unknown": "Runtime alignment is unknown.",
   "mcp.existing_tasks_note":
     "Open tasks keep the MCP access they received when they were created.",
   "mcp.add.action": "Add server",
@@ -237,22 +231,22 @@ export const enUS = {
   "mcp.add.endpoint_help":
     "Use HTTPS, or HTTP only for localhost, 127.0.0.1, or ::1. User info, query strings, and fragments are not accepted.",
   "mcp.add.defaults":
-    "Non-secret settings stay visible and editable. The Host captures secrets securely, and you can test immediately after saving.",
+    "Credentials are collected separately and never enter this form. After saving, MetaWork shows the one next action this connection needs.",
   "mcp.add.submit": "Add and enable",
   "mcp.add.adding": "Adding…",
   "mcp.rename.action": "Save name",
   "mcp.enable.action": "Enable",
   "mcp.disable.action": "Disable",
   "mcp.delete.action": "Delete server",
-  "mcp.refresh.action": "Refresh",
+  "mcp.refresh.action": "Refresh tools",
   "mcp.refresh.refreshing": "Refreshing…",
-  "mcp.refresh.started": "Refreshing the current Runtime catalog.",
-  "mcp.refresh.busy": "A catalog refresh is already running.",
-  "mcp.refresh.unavailable": "The current Runtime catalog is unavailable.",
+  "mcp.refresh.started": "Refreshing tools from available MCP services.",
+  "mcp.refresh.busy": "A tool refresh is already running.",
+  "mcp.refresh.unavailable": "MCP tools are currently unavailable.",
   "mcp.refresh.shutting_down": "MetaWork is shutting down.",
   "mcp.refresh.rejected": "The catalog refresh was rejected.",
   "mcp.refresh.failed":
-    "The catalog could not be refreshed. Host state was not guessed.",
+    "The tools could not be refreshed. The last confirmed state is unchanged.",
   "mcp.test.action": "Test connection",
   "mcp.test.testing": "Testing…",
   "mcp.test.started": "Opening an isolated test connection.",
@@ -267,31 +261,41 @@ export const enUS = {
     "Connection failed. Check the endpoint, authentication, and server status.",
   "mcp.test.connected":
     "Connected. Found {tools} tools and {issues} catalog issues.",
+  "mcp.test.summary.untested": "Not tested",
+  "mcp.test.summary.testing": "Testing…",
+  "mcp.test.summary.connected": "Succeeded · {tools} found",
+  "mcp.test.summary.failed": "Failed · {issues} issues",
+  "mcp.next.enable.title": "Enable this service",
+  "mcp.next.enable.body":
+    "Enable the saved connection before making it available to new tasks.",
+  "mcp.next.authorization.title": "Complete sign-in",
+  "mcp.next.authorization.body":
+    "Sign in before testing the connection and loading its tools.",
+  "mcp.next.credentials.body":
+    "Add the required credential before testing the connection and loading its tools.",
+  "mcp.next.configure_credentials": "Set credentials",
+  "mcp.next.test.title": "Test this connection",
+  "mcp.next.test.body":
+    "Verify the saved connection and discover how many tools it provides.",
+  "mcp.next.retry_test.title": "Connection test failed",
+  "mcp.next.retry_test.action": "Retry test",
   "mcp.mutation.unchanged": "No configuration change was needed.",
   "mcp.mutation.saved": "MCP settings saved.",
   "mcp.mutation.saved_recovery_required":
     "Settings saved, but management is paused until recovery completes.",
   "mcp.mutation.stale_generation":
-    "The configuration changed elsewhere. The latest Host state was reloaded.",
-  "mcp.mutation.rejected": "The Host rejected this change.",
+    "The configuration changed elsewhere. The latest saved state was reloaded.",
+  "mcp.mutation.rejected": "MetaWork could not apply this change.",
   "mcp.mutation.indeterminate":
     "The save result is unknown. MetaWork blocked MCP access for new tasks.",
   "mcp.mutation.failed":
-    "The change could not be completed. Host state was not guessed.",
+    "The change could not be completed. The last confirmed state is unchanged.",
   "mcp.tool.not_discovered":
     "Configured, but not present in the current catalog",
   "mcp.tool.available_to_new_tasks": "Allowed and available to new tasks",
-  "mcp.tool.allowed_not_available":
-    "Allowed, but unavailable in the current Runtime",
+  "mcp.tool.allowed_not_available": "Allowed, but currently unavailable",
   "mcp.tool.not_allowed": "Discovered, but not allowed",
   "mcp.tool.toggle": "Allow {name} for new tasks",
-  "mcp.pipeline.label": "Setup progress",
-  "mcp.pipeline.test_pending": "Test connection",
-  "mcp.pipeline.test_connected": "Connected · {tools} tools",
-  "mcp.pipeline.test_failed": "Connection failed · {issues} issues",
-  "mcp.pipeline.tools": "{allowed}/{total} tools allowed",
-  "mcp.pipeline.restart_hint":
-    "After restarting, new tasks can use this connection; existing tasks are unaffected",
   "mcp.detail.allow_all": "Allow all {count}",
   "mcp.confirm.allow_all.title": "Allow every discovered tool?",
   "mcp.confirm.allow_all.body":
@@ -936,8 +940,9 @@ export const enUS = {
     "MetaWork could not confirm whether the latest task change was saved. Restart before making more changes.",
   "mcp.mutation.busy":
     "This server has an authorization operation in progress.",
-  "mcp.mutation.cancelled": "The Host prompt was cancelled.",
-  "mcp.mutation.capability_unavailable": "This Host capability is unavailable.",
+  "mcp.mutation.cancelled": "The confirmation was cancelled.",
+  "mcp.mutation.capability_unavailable":
+    "This action is unavailable on this device.",
   "mcp.auth.none": "None",
   "mcp.auth.static": "Static secrets",
   "mcp.auth.oauth": "OAuth",
@@ -967,10 +972,10 @@ export const enUS = {
     "This setting was saved by an older version. Connect it once to continue.",
   "mcp.approval.action": "Connect and enable",
   "mcp.capability.approval_unavailable":
-    "Native connection review is unavailable.",
+    "Connection review is unavailable on this device.",
   "mcp.capability.capture_unavailable":
-    "Secure secret capture is unavailable on this Host.",
-  "mcp.capability.oauth_unavailable": "OAuth is unavailable on this Host.",
+    "Secure secret capture is unavailable on this device.",
+  "mcp.capability.oauth_unavailable": "OAuth is unavailable on this device.",
   "mcp.authorization_status.not_required": "No authorization required",
   "mcp.authorization_status.missing_static_secret":
     "One or more secrets are missing",
@@ -983,13 +988,13 @@ export const enUS = {
   "mcp.authorization_status.ready": "Authorization ready",
   "mcp.authorization_status.reauth_required": "Sign in again required",
   "mcp.authorization_status.capability_unavailable":
-    "Required Host capability unavailable",
+    "Required device capability unavailable",
   "mcp.secret.missing": "Missing",
   "mcp.secret.set": "Set",
   "mcp.secret.not_required": "Not required",
   "mcp.secret.replace": "Replace",
   "mcp.authorization_phase.discovering": "Discovering OAuth metadata…",
-  "mcp.authorization_phase.awaiting_consent": "Waiting for Host consent…",
+  "mcp.authorization_phase.awaiting_consent": "Waiting for confirmation…",
   "mcp.authorization_phase.registering": "Registering client…",
   "mcp.authorization_phase.awaiting_browser": "Waiting for browser sign-in…",
   "mcp.authorization_phase.exchanging": "Completing sign-in…",
@@ -1004,7 +1009,7 @@ export const enUS = {
   "mcp.authorization.stale_generation":
     "Configuration changed; review the latest state.",
   "mcp.authorization.capability_unavailable":
-    "OAuth is unavailable on this Host.",
+    "OAuth is unavailable on this device.",
   "mcp.cancel.cancelled": "Local authorization wait cancelled.",
   "mcp.cancel.saved": "Authorization state was safely updated.",
   "mcp.cancel.saved_recovery_required":
