@@ -204,9 +204,10 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - Run 执行期间的新输入不得暗示可以修改当前 Run；首版只保存 Renderer 草稿，等待当前 Run terminal 后由用户明确发送，不自动创建或启动下一次 Run；
 - Composer 以 `/` 作为 context-aware 发现手势，统一显示 Renderer 注册的产品 Command 与当前 Workspace/Task catalog 投影的 Skill；Slash 文本本身不是 Agent 输入协议，Command 必须在 Renderer 消费且不得进入 Bridge、Task 历史或 AgentCore；
 - Command 只复用已有产品动作，不迁移 CLI/TUI 的会话控制语义；V1 只注册 `/new` 与 `/compact`，前者打开既有 New task draft action，后者触发 Workbench-owned typed maintenance action；不注册 `/model`、`/status`、`/goal`、`/resume`、`/continue` 或其他已有正式界面、与桌面产品对象冲突、缺少 typed capability 的 identifier；
-- Skill 选择形成单一、可移除的 typed Composer draft，保留稳定 Skill identity、catalog revision 和 positional arguments；New task 使用 Workspace current catalog，已有 Task 使用其 pinned catalog。过期或不可用 token 保留参数但禁止发送，必须显式刷新并重新选择，Renderer 不读取 Skill body、不猜测目录或权限；
-- Skill 中心是 MetaWork 级的本地 Skill 管理 route，不跟随当前 Task 的路径上下文。它按个人与已注册 Manual Workspace 的项目范围展示 Skill 资产，并把需要处理的定义错误、资源错误和冲突置于正常 Skill 之前；用户可以搜索、查看说明/参数/资源/健康状态，从本地 `.skill`、`.zip` 或目录导入，导出 `.skill`，重新导入，卸载并显式刷新 catalog。当前不提供在线市场、远程更新、Skill 创建/编辑器、启用/禁用、Preset、标签、排序、中央仓库或多 Agent 同步；
+- Skill 选择形成单一、可移除的 typed Composer draft，同时保留稳定 Skill identity、catalog revision、selection revision 和 positional arguments；New task 使用 Workspace current catalog 与 current committed selection，已有 Task 使用其 pinned catalog 与 pinned selection。任一 revision 过期、Skill 已禁用或不可用时保留参数但禁止发送，必须显式刷新并重新选择，Renderer 不读取 Skill body、不猜测目录或权限；
+- Skill 中心是 MetaWork 级的本地 Skill 管理 route，不跟随当前 Task 的路径上下文。它按个人与已注册 Manual Workspace 的项目范围展示 Skill 资产，并把需要处理的定义错误、资源错误和冲突置于正常 Skill 之前；用户可以搜索、查看说明/参数/资源/健康状态，从本地 `.skill`、`.zip` 或目录导入，导出 `.skill`，重新导入，卸载并显式刷新 catalog。Personal 列表的开关定义所有项目继承的用户默认值；Manual Workspace 项目列表以 `inherit | enabled | disabled` 三态覆盖该默认值，清除覆盖后重新跟随用户。当前 AgentCore `skill_id` 被视为逻辑调用身份，同 invocation 的 Personal/Project Skill 共用策略键，invocation 改名后策略不跟随；MetaWork 不猜测未公开的来源身份。当前不提供在线市场、远程更新、Skill 创建/编辑器、Preset、标签、排序、中央仓库或多 Agent 同步；
 - Skill 管理资产与运行时 catalog 是两份不同真相。Workbench 拥有本地 package/inventory、安装 provenance、目标范围、安全文件事务和管理状态；AgentCore 继续独占 runtime discovery、canonical priority、winner/conflict、health 与 catalog revision。MetaWork 使用独立 `install_id` 管理资产，运行时身份仍是 `catalog_scope_id + skill_id`；Renderer 不从名称、路径或 invocation 猜测来源、范围、优先级或身份。MetaWork 未能在已授权 canonical Skill root 中解析并取得精确管理 authority 的现有 Skill 仍可按 AgentCore projection 展示，但必须标记为外部管理，隐藏导出、重新导入和卸载；
+- Skill 启用状态是 Workbench-owned 的 Manual Workspace policy，默认启用，只持久化 disabled `skill_id` exception 与单调 `selection_revision`；持久键精确使用 `workspace_id + workspace_epoch + skill_id`，不从名称推导跨 scope identity。mutation 同时校验 Workspace epoch、catalog revision 和 selection revision，成功后只影响 Workspace current selection；已经创建的 Task/Session 不热替换，只有 idle Task 显式刷新才采用新 selection。Host 重启后恢复 Task 是该 pinned 规则的显式例外：恢复时隐式重绑到 Workspace 当前 catalog 与当前 committed selection，Run admission 使用同一对 revision；
 - 本地导入必须由 Host 原生文件/目录选择产生的一次性、window-bound staged capability 发起；Renderer 不提交任意物理路径。导入在目标范围外完成有界解压、路径/类型/容量检查和只读预览，经用户确认后原子发布到个人或指定 Manual Workspace 的 `.agents/skills`。明确属于候选 Skill 的 AgentCore definition/resource/conflict failure 必须回滚；catalog 暂时无法完成验证时保留已发布资产并进入 `pending_verification`，不能伪装成可用。替换或卸载不得与可能消费该范围的 active operation 并发，不得静默覆盖现有目录，并必须保留可恢复的事务前副本直到提交完成；
 - 用户创建或修改 Skill 仍通过普通 Text Run 与 AgentCore built-in Read/Edit 完成，不在 Skill 中心建立第二个创作或文件编辑器。Workspace 内的 `.agents/skills` 服从现有 Workspace authority；用户级目录只有在用户明确将目标 Skill 目录作为 trusted Workspace 授权后才能修改。Skill 中心可以导航到预填的普通 Text draft；项目 Skill 创建完成后通过显式 catalog refresh 出现，个人 Skill 通过受控本地导入发布。一次 Run 使用已绑定 snapshot，不热替换正在执行的 Skill；文件变化只在显式 catalog refresh 后影响后续选择与 Run；
 - Host 重启后恢复的历史 Task 当前只读；用户选择左栏 Task 时必须显示其已保存产品历史和明确的 Session 恢复限制。即使 revision 8 已提供 checkpoint 原语，也只有 execution binding、checkpoint ownership、Conversation 和 terminal state 均可安全恢复后才允许继续；rebind 或从历史创建新 Task 属于后续显式产品能力，当前实现不得用它们冒充恢复；
@@ -321,7 +322,7 @@ Windows x86_64 GNU 当前提供与 macOS 同一产品语义的开发可执行 ba
 
 ### 7.5 后续产品能力
 
-async pending、持久化恢复、Skill 启用/禁用 policy、strict Workspace security、正式 Host tools、远程 artifact 发布、Windows 分发交付和 Linux 接入按独立 capability 与阶段推进，不能反向伪装成当前 v1 已具备。
+async pending、更完整的跨重启 execution rebind、Personal Skill 全局启用 policy、strict Workspace security、正式 Host tools、远程 artifact 发布、Windows 分发交付和 Linux 接入按独立 capability 与阶段推进，不能反向伪装成当前 v1 已具备。
 
 具体验证矩阵见 [当前验证规范](validation.md)。
 

@@ -83,6 +83,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-scheduled-task-persistence", .root_module = test_modules.workbench_scheduled_persistence },
         .{ .name = "metawork-skill-package", .root_module = test_modules.workbench_skill_package },
         .{ .name = "metawork-skill-management", .root_module = test_modules.workbench_skill_management },
+        .{ .name = "metawork-skill-enablement", .root_module = test_modules.workbench_skill_enablement },
         .{ .name = "metawork-mcp-configuration", .root_module = test_modules.workbench_mcp_configuration },
         .{ .name = "metawork-mcp-platform", .root_module = test_modules.mcp_platform },
         .{ .name = "metawork-mcp-oauth", .root_module = test_modules.mcp_oauth },
@@ -186,6 +187,7 @@ const WiredModules = struct {
     workbench_scheduled_persistence: *std.Build.Module,
     workbench_skill_package: *std.Build.Module,
     workbench_skill_management: *std.Build.Module,
+    workbench_skill_enablement: *std.Build.Module,
     workbench_mcp_configuration: *std.Build.Module,
     workbench_task_persistence: *std.Build.Module,
     workbench_checkpoint_store: *std.Build.Module,
@@ -700,6 +702,11 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .optimize = root_module.optimize,
     });
     skill_management.addImport("workbench_skill_package", skill_package);
+    const skill_enablement = b.createModule(.{
+        .root_source_file = b.path("src/workbench/skill_enablement.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
     const task_persistence = b.createModule(.{
         .root_source_file = b.path("src/workbench/task_persistence.zig"),
         .target = target,
@@ -772,6 +779,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         scheduled_task_persistence,
     );
     projection.addImport("workbench_skill_management", skill_management);
+    projection.addImport("workbench_skill_enablement", skill_enablement);
     projection.addImport("workbench_skill_package", skill_package);
     projection.addImport("workbench_task_persistence", task_persistence);
     projection.addImport("workbench_checkpoint_store", checkpoint_store);
@@ -809,6 +817,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     );
     workbench.addImport("workbench_skill_package", skill_package);
     workbench.addImport("workbench_skill_management", skill_management);
+    workbench.addImport("workbench_skill_enablement", skill_enablement);
     workbench.addImport("workbench_mcp_configuration", mcp_configuration);
     workbench.addImport("workbench_task_persistence", task_persistence);
     workbench.addImport("workbench_checkpoint_store", checkpoint_store);
@@ -926,6 +935,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .workbench_scheduled_persistence = scheduled_task_persistence,
         .workbench_skill_package = skill_package,
         .workbench_skill_management = skill_management,
+        .workbench_skill_enablement = skill_enablement,
         .workbench_mcp_configuration = mcp_configuration,
         .workbench_task_persistence = task_persistence,
         .workbench_checkpoint_store = checkpoint_store,

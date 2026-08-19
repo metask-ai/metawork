@@ -701,6 +701,7 @@ function renderComposer(overrides = {}) {
         availability: "ready",
         redacted: false,
         revision: "4",
+        selectionRevision: "1",
         skills: [],
         issues: [],
       },
@@ -867,6 +868,7 @@ test("keyboard Skill selection moves focus into the structured draft", async () 
       availability: "ready",
       redacted: false,
       revision: "17",
+      selectionRevision: "3",
       skills: [
         {
           skillId: "builtin.review",
@@ -875,6 +877,7 @@ test("keyboard Skill selection moves focus into the structured draft", async () 
           description: "Review a target",
           argumentNames: ["target"],
           maxValues: 1,
+          enabled: true,
         },
       ],
       issues: [],
@@ -899,6 +902,7 @@ test("a no-argument Skill moves keyboard focus to the real Send action", async (
       availability: "ready",
       redacted: false,
       revision: "17",
+      selectionRevision: "3",
       skills: [
         {
           skillId: "builtin.review",
@@ -907,6 +911,7 @@ test("a no-argument Skill moves keyboard focus to the real Send action", async (
           description: "Review the current task",
           argumentNames: [],
           maxValues: 0,
+          enabled: true,
         },
       ],
       issues: [],
@@ -952,6 +957,7 @@ test("a positional Skill tail remains visible even without a named label", () =>
       invocationName: "review",
       displayName: "Review",
       catalogRevision: "17",
+      selectionRevision: "3",
       argumentNames: [],
       argumentValues: ["src/main.zig"],
       maxValues: 1,
@@ -960,6 +966,7 @@ test("a positional Skill tail remains visible even without a named label", () =>
       availability: "ready",
       redacted: false,
       revision: "17",
+      selectionRevision: "3",
       skills: [
         {
           skillId: "builtin.review",
@@ -968,6 +975,7 @@ test("a positional Skill tail remains visible even without a named label", () =>
           description: "",
           argumentNames: [],
           maxValues: 1,
+          enabled: true,
         },
       ],
       issues: [],
@@ -988,6 +996,7 @@ test("variadic Skills expose unnamed argument slots up to maxValues", () => {
       invocationName: "review",
       displayName: "Review",
       catalogRevision: "17",
+      selectionRevision: "3",
       argumentNames: [],
       argumentValues: [],
       maxValues: 3,
@@ -996,6 +1005,7 @@ test("variadic Skills expose unnamed argument slots up to maxValues", () => {
       availability: "ready",
       redacted: false,
       revision: "17",
+      selectionRevision: "3",
       skills: [
         {
           skillId: "builtin.review",
@@ -1004,6 +1014,7 @@ test("variadic Skills expose unnamed argument slots up to maxValues", () => {
           description: "",
           argumentNames: [],
           maxValues: 3,
+          enabled: true,
         },
       ],
       issues: [],
@@ -1019,6 +1030,7 @@ test("variadic Skills expose unnamed argument slots up to maxValues", () => {
       invocationName: "review",
       displayName: "Review",
       catalogRevision: "17",
+      selectionRevision: "3",
       argumentNames: [],
       argumentValues: ["", ""],
       maxValues: 3,

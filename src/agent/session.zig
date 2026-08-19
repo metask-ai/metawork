@@ -89,7 +89,6 @@ pub const builtinToolsForProfile = session_wire.builtinToolsForProfile;
 const providerKindCode = session_wire.providerKindCode;
 const permissionModeCode = session_wire.permissionModeCode;
 const shellPolicyCode = session_wire.shellPolicyCode;
-const allSkillsEnabledSelection = session_wire.allSkillsEnabledSelection;
 pub const RunControl = session_binding.RunControl;
 pub const RunControlLease = session_binding.RunControlLease;
 const SessionControlBlock = session_binding.SessionControlBlock;
@@ -314,8 +313,13 @@ pub const SessionOpenOptions = struct {
     canonical_user_home: []const u8 = "",
     workspace_epoch: []const u8 = "",
     skill_catalog: ?*CatalogLease = null,
+    skill_selection: ?SkillSelectionInput = null,
     mcp_selection: ?*const McpSelection = null,
     allowed_tools: []const []const u8 = &desktop_builtin_tools,
+};
+
+pub const SkillSelectionInput = struct {
+    disabled_skill_ids: []const []const u8 = &.{},
 };
 
 pub const SessionRestoreOptions = struct {
@@ -390,6 +394,7 @@ pub const Error = error{
     CatalogReleaseFailed,
     CatalogLeasesOutstanding,
     CatalogBindingMismatch,
+    InvalidSkillSelection,
     CatalogRefreshFailed,
     McpRefreshFailed,
     InvalidMcpCatalogDescriptor,
@@ -829,7 +834,8 @@ pub const Session = struct {
     pub fn refreshSkillCatalog(
         self: *Session,
         lease: *CatalogLease,
-    ) Error!void {
+        skill_selection: SkillSelectionInput,
+    ) (Error || std.mem.Allocator.Error)!void {
         if (!catalog.belongsTo(lease, self.agent_runtime) or
             !catalog.matches(
                 lease,
@@ -838,6 +844,15 @@ pub const Session = struct {
                 self.workspace_epoch,
             ))
             return error.CatalogBindingMismatch;
+        const selection_views = try self.agent_runtime.allocator.alloc(
+            wire.BytesViewV1,
+            skill_selection.disabled_skill_ids.len,
+        );
+        defer self.agent_runtime.allocator.free(selection_views);
+        const selection = session_wire.skillSelection(
+            skill_selection.disabled_skill_ids,
+            selection_views,
+        ) catch return error.InvalidSkillSelection;
         self.lock();
         defer self.unlock();
         if (self.agent_runtime.shutting_down.load(.acquire))
@@ -848,7 +863,6 @@ pub const Session = struct {
             .poisoned => return error.SessionPoisoned,
             .closing, .closed => return error.SessionClosing,
         }
-        const selection = allSkillsEnabledSelection();
         var diagnostic = emptyOwnedBytes();
         const status_code = self.agent_runtime.api.sessionUpdateSkills()(
             self.raw,

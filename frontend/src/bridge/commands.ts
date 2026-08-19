@@ -14,6 +14,7 @@ export const commands = {
   chooseWorkspace: "metawork.workspaces.choose",
   refreshWorkspaceSkillCatalog: "metawork.workspaces.refreshSkillCatalog",
   refreshSkillCatalog: "metawork.skills.refreshCatalog",
+  setSkillEnabled: "metawork.skills.setEnabled",
   chooseSkillImport: "metawork.skills.chooseImport",
   installSkill: "metawork.skills.install",
   reimportSkill: "metawork.skills.reimport",

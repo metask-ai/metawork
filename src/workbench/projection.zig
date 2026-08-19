@@ -7,6 +7,7 @@ const automatic_workspace_allocator = @import("workbench_automatic_workspace_all
 const scheduled_tasks_impl = @import("workbench_scheduled_tasks");
 const scheduled_task_persistence = @import("workbench_scheduled_task_persistence");
 const skill_management_impl = @import("workbench_skill_management");
+const skill_enablement_impl = @import("workbench_skill_enablement");
 const skill_package_impl = @import("workbench_skill_package");
 const task_persistence = @import("workbench_task_persistence");
 const checkpoint_store = @import("workbench_checkpoint_store");
@@ -20,7 +21,7 @@ const mcp_configuration = @import("workbench_mcp_configuration");
 const contract_fixture = @import("workbench_contract_fixture");
 const build_options = @import("build_options");
 
-pub const Error = lifecycle.Error || scheduled_tasks_impl.Error || scheduled_task_persistence.Error || skill_management_impl.Error || skill_package_impl.Error || task_persistence.Error || std.mem.Allocator.Error || std.Thread.SpawnError || error{
+pub const Error = lifecycle.Error || scheduled_tasks_impl.Error || scheduled_task_persistence.Error || skill_management_impl.Error || skill_enablement_impl.Error || skill_enablement_impl.FileStoreError || skill_package_impl.Error || task_persistence.Error || std.mem.Allocator.Error || std.Thread.SpawnError || error{
     ProjectionCapacity,
     RunCapacity,
     CompactCapacity,
@@ -69,6 +70,7 @@ pub const Error = lifecycle.Error || scheduled_tasks_impl.Error || scheduled_tas
     CatalogRequestGenerationExhausted,
     StaleCatalog,
     SkillNotFound,
+    SkillUnavailable,
     InvalidSkillArguments,
     RecoveryUnavailable,
     RestoreAttemptExhausted,
@@ -161,6 +163,7 @@ pub const TaskRunInput = union(enum) {
     skill: struct {
         skill_id: []const u8,
         catalog_revision: []const u8,
+        selection_revision: u64,
         argument_values: []const []const u8,
     },
 };
@@ -271,6 +274,39 @@ pub const SkillManagementConfiguration = struct {
     restore_failed: bool = false,
 };
 
+pub const SkillEnablementHealth = enum {
+    unavailable,
+    ready,
+    read_failed,
+    corrupt,
+    write_failed,
+    outcome_unknown,
+};
+
+pub const SkillEnablementConfiguration = struct {
+    file_store: ?*skill_enablement_impl.FileStore = null,
+    restored_bytes: ?[]const u8 = null,
+    restore_failed: bool = false,
+};
+
+pub const SkillEnablementScope = union(enum) {
+    personal,
+    project: struct {
+        workspace_id: u64,
+        expected_workspace_epoch: u64,
+    },
+};
+
+pub const SkillEnablementState = skill_enablement_impl.OverrideState;
+
+pub const SkillEnablementMutation = struct {
+    scope: SkillEnablementScope,
+    skill_id: []const u8,
+    state: SkillEnablementState,
+    expected_catalog_revision: []const u8,
+    expected_selection_revision: u64,
+};
+
 pub const SkillInstallInput = struct {
     source_kind: skill_management_impl.SourceKind,
     scope: skill_management_impl.Scope,
@@ -315,6 +351,7 @@ pub const Configuration = struct {
     checkpoint_store: CheckpointStoreConfiguration = .{},
     schedule_notifier: ScheduleNotifier = .{},
     skill_management: SkillManagementConfiguration = .{},
+    skill_enablement: SkillEnablementConfiguration = .{},
     model_connections: ModelConnectionCapabilities = .{},
     mcp: McpStartupConfiguration = .{},
 };
@@ -2449,6 +2486,9 @@ pub const Workbench = struct {
     skill_inventory: ?skill_management_impl.Inventory,
     skill_transactions: ?skill_management_impl.Transactions,
     skill_management_health: SkillManagementHealth,
+    skill_enablement: skill_enablement_impl.Store,
+    skill_enablement_file_store: ?*skill_enablement_impl.FileStore,
+    skill_enablement_health: SkillEnablementHealth,
     skill_staging_root: ?[]u8,
     skill_reconciliation: ?SkillReconciliation = null,
     schedule_timer: ScheduleTimer,
@@ -2648,6 +2688,38 @@ pub const Workbench = struct {
             break :root try allocator.dupe(u8, canonical_storage[0..canonical_len]);
         } else null;
         errdefer if (skill_staging_root) |root| allocator.free(root);
+        const skill_enablement_limits: skill_enablement_impl.Limits = .{
+            .max_workspaces = limits.max_workspaces,
+            .max_disabled_skill_ids = limits.max_catalog_skills,
+            .max_skill_id_bytes = limits.max_tool_field_bytes,
+        };
+        var skill_enablement_health: SkillEnablementHealth =
+            if (configuration.skill_enablement.file_store != null)
+                .ready
+            else
+                .unavailable;
+        if (configuration.skill_enablement.restore_failed)
+            skill_enablement_health = .read_failed;
+        var skill_enablement = if (skill_enablement_health == .ready and
+            configuration.skill_enablement.restored_bytes != null)
+            skill_enablement_impl.decode(
+                allocator,
+                configuration.skill_enablement.restored_bytes.?,
+                skill_enablement_limits,
+            ) catch restore: {
+                skill_enablement_health = .corrupt;
+                break :restore try skill_enablement_impl.Store.init(
+                    allocator,
+                    skill_enablement_limits,
+                );
+            }
+        else
+            try skill_enablement_impl.Store.init(
+                allocator,
+                skill_enablement_limits,
+            );
+        var skill_enablement_owned = true;
+        errdefer if (skill_enablement_owned) skill_enablement.deinit();
         var mcp_management: ?mcp_configuration.ManagementPort =
             if (configuration.mcp.preparation) |preparation|
                 if (configuration.mcp.management) |management|
@@ -2687,6 +2759,9 @@ pub const Workbench = struct {
                 null,
             .skill_transactions = skill_transactions,
             .skill_management_health = skill_management_health,
+            .skill_enablement = skill_enablement,
+            .skill_enablement_file_store = configuration.skill_enablement.file_store,
+            .skill_enablement_health = skill_enablement_health,
             .skill_staging_root = skill_staging_root,
             .schedule_timer = configuration.schedule_timer,
             .schedule_persistence = configuration.schedule_persistence,
@@ -2702,6 +2777,7 @@ pub const Workbench = struct {
             .builtin_tool_profile = configuration.builtin_tool_profile,
         };
         if (workbench.skill_inventory != null) skill_inventory_owned = false;
+        skill_enablement_owned = false;
         skill_transactions = null;
         if ((workbench.task_persistence_health == .ready or
             workbench.task_persistence_health == .degraded) and
@@ -2718,6 +2794,7 @@ pub const Workbench = struct {
             };
         }
         workbench.reconcileCheckpointStoreNoFail();
+        workbench.reconcileSkillEnablementNoFail();
         if (workbench.schedule_persistence_health == .ready) {
             var recovered = workbench.scheduled_tasks.clone(allocator) catch null;
             if (recovered) |*candidate| {
@@ -3776,6 +3853,7 @@ pub const Workbench = struct {
             return err;
         };
         self.finishWorkspaceUpsert(upsert);
+        self.reconcileSkillEnablementNoFail();
         self.recoverSkillTransactionsForScopeNoFail(.{ .project = .{
             .workspace_id = workspace.id,
             .workspace_epoch = workspace.epoch,
@@ -3820,6 +3898,100 @@ pub const Workbench = struct {
         if (self.skill_catalog_job != null) return error.CatalogLoading;
         try self.scheduleSkillCatalogQuery();
         self.bumpRevision();
+    }
+
+    pub fn setSkillEnabled(
+        self: *Workbench,
+        mutation: SkillEnablementMutation,
+    ) Error!u64 {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        self.syncLifecycle();
+        if (self.skill_enablement_health != .ready or
+            self.skill_enablement_file_store == null)
+            return error.PersistenceFailed;
+        const catalog: *CatalogSnapshot = switch (mutation.scope) {
+            .personal => personal: {
+                if (mutation.state == .inherit) return error.InvalidSkillId;
+                if (self.skill_catalog_availability != .ready and
+                    self.skill_catalog_availability != .degraded)
+                    return error.CatalogUnavailable;
+                break :personal if (self.skill_catalog) |*value| value else return error.CatalogUnavailable;
+            },
+            .project => |project| project_catalog: {
+                const workspace = self.findWorkspace(project.workspace_id) orelse
+                    return error.UnknownWorkspace;
+                if (workspace.kind != .manual or !workspace.visible or
+                    workspace.authorization != .available)
+                    return error.WorkspaceUnavailable;
+                if (project.expected_workspace_epoch == 0 or
+                    project.expected_workspace_epoch != workspace.epoch)
+                    return error.WorkspaceEpochMismatch;
+                if (workspace.catalog_availability != .ready and
+                    workspace.catalog_availability != .degraded)
+                    return error.CatalogUnavailable;
+                break :project_catalog if (workspace.catalog) |*value| value else return error.CatalogUnavailable;
+            },
+        };
+        if (!std.mem.eql(u8, mutation.expected_catalog_revision, catalog.revision))
+            return error.StaleCatalog;
+        if (catalog.selection_revision == null or
+            mutation.expected_selection_revision != catalog.selection_revision.?)
+            return error.StaleCatalog;
+        _ = catalog.findSkill(mutation.skill_id) orelse return error.SkillNotFound;
+        var candidate = try self.skill_enablement.clone();
+        var candidate_owned = true;
+        defer if (candidate_owned) candidate.deinit();
+        const next_revision = switch (mutation.scope) {
+            .personal => blk: {
+                const enabled = mutation.state == .enabled;
+                if (candidate.isUserEnabled(mutation.skill_id) == enabled)
+                    return mutation.expected_selection_revision;
+                break :blk try candidate.applyUser(.{
+                    .skill_id = mutation.skill_id,
+                    .enabled = enabled,
+                    .expected_revision = mutation.expected_selection_revision,
+                });
+            },
+            .project => |project| blk: {
+                const identity: skill_enablement_impl.WorkspaceIdentity = .{
+                    .workspace_id = project.workspace_id,
+                    .workspace_epoch = project.expected_workspace_epoch,
+                };
+                if (candidate.workspaceOverride(identity, mutation.skill_id) == mutation.state)
+                    return mutation.expected_selection_revision;
+                break :blk try candidate.applyWorkspace(.{
+                    .identity = identity,
+                    .skill_id = mutation.skill_id,
+                    .state = mutation.state,
+                    .expected_revision = mutation.expected_selection_revision,
+                });
+            },
+        };
+        self.commitSkillEnablementCandidate(&candidate) catch |err| {
+            self.noteSkillEnablementPersistenceFailure(err);
+            return err;
+        };
+        candidate_owned = false;
+        switch (mutation.scope) {
+            .personal => {
+                self.applyPersonalSkillEnablement(&self.skill_catalog.?) catch
+                    @panic("committed Personal Skill policy became invalid");
+                for (self.workspaces) |*entry| {
+                    const workspace = &(entry.* orelse continue);
+                    if (workspace.catalog) |*snapshot|
+                        self.applyWorkspaceSkillEnablement(workspace, snapshot) catch
+                            @panic("committed Workspace Skill policy became invalid");
+                }
+            },
+            .project => |project| {
+                const workspace = self.findWorkspace(project.workspace_id) orelse
+                    unreachable;
+                self.applyWorkspaceSkillEnablement(workspace, &workspace.catalog.?) catch
+                    @panic("committed Workspace Skill policy became invalid");
+            },
+        }
+        self.bumpRevision();
+        return next_revision;
     }
 
     pub fn refreshMcpCatalog(self: *Workbench) Error!void {
@@ -3912,6 +4084,8 @@ pub const Workbench = struct {
             return error.TaskBusy;
         const workspace = self.findWorkspace(task.durable.workspace_id) orelse
             return error.WorkspaceUnavailable;
+        if (self.skill_enablement_health != .ready)
+            return error.RecoveryUnavailable;
         if (workspace.kind != .manual) return error.CatalogUnavailable;
         if (workspace.epoch != task.durable.workspace_epoch)
             return error.WorkspaceEpochMismatch;
@@ -3931,8 +4105,17 @@ pub const Workbench = struct {
             self.limits.max_projection_bytes - self.projection_bytes,
         );
         errdefer replacement.deinit();
+        var disabled_skill_ids: std.ArrayList([]const u8) = .empty;
+        defer disabled_skill_ids.deinit(self.allocator);
+        for (replacement.skills) |skill|
+            if (!skill.enabled) try disabled_skill_ids.append(
+                self.allocator,
+                skill.skill_id,
+            );
         const session = task.runtime.session() orelse return error.TaskClosing;
-        try session.refreshSkillCatalog(lease);
+        try session.refreshSkillCatalog(lease, .{
+            .disabled_skill_ids = disabled_skill_ids.items,
+        });
         if (task.runtime.pinnedCatalog()) |old| {
             self.projection_bytes -= old.projected_bytes;
             old.deinit();
@@ -4047,6 +4230,7 @@ pub const Workbench = struct {
             workspace.last_removal_failure = previous_failure;
             return err;
         };
+        self.reconcileSkillEnablementNoFail();
         self.markWorkspaceCatalogUnavailable(workspace);
         self.bumpRevision();
         for (self.tasks) |*entry| {
@@ -4086,6 +4270,7 @@ pub const Workbench = struct {
             (self.findWorkspace(workspace_id) orelse return error.UnknownWorkspace).epoch,
             self.execution.generation,
             null,
+            null,
         );
     }
 
@@ -4095,12 +4280,14 @@ pub const Workbench = struct {
         expected_workspace_epoch: u64,
         expected_execution_generation: u64,
         expected_skill_catalog_revision: ?[]const u8,
+        expected_skill_selection_revision: ?u64,
     ) Error!u64 {
         return self.createTaskInWorkspaceInternal(
             workspace_id,
             expected_workspace_epoch,
             expected_execution_generation,
             expected_skill_catalog_revision,
+            expected_skill_selection_revision,
             false,
         );
     }
@@ -4110,6 +4297,7 @@ pub const Workbench = struct {
         request: TaskWorkspaceRequest,
         expected_execution_generation: u64,
         expected_skill_catalog_revision: ?[]const u8,
+        expected_skill_selection_revision: ?u64,
     ) Error!u64 {
         return switch (request) {
             .manual => |manual| self.createTaskInWorkspace(
@@ -4117,10 +4305,12 @@ pub const Workbench = struct {
                 manual.expected_epoch,
                 expected_execution_generation,
                 expected_skill_catalog_revision,
+                expected_skill_selection_revision,
             ),
             .automatic => self.createAutomaticTask(
                 expected_execution_generation,
                 expected_skill_catalog_revision,
+                expected_skill_selection_revision,
             ),
         };
     }
@@ -4131,6 +4321,7 @@ pub const Workbench = struct {
         expected_workspace_epoch: u64,
         expected_execution_generation: u64,
         expected_skill_catalog_revision: ?[]const u8,
+        expected_skill_selection_revision: ?u64,
         allow_unowned_automatic: bool,
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
@@ -4171,6 +4362,13 @@ pub const Workbench = struct {
                 if (expected_skill_catalog_revision) |expected|
                     if (!std.mem.eql(u8, expected, current.revision))
                         return error.StaleCatalog;
+                if ((expected_skill_catalog_revision == null) !=
+                    (expected_skill_selection_revision == null))
+                    return error.StaleCatalog;
+                if (expected_skill_selection_revision) |expected|
+                    if (current.selection_revision == null or
+                        expected != current.selection_revision.?)
+                        return error.StaleCatalog;
                 pinned_catalog = try current.clone(
                     self.allocator,
                     catalogSnapshotLimits(self.limits),
@@ -4185,6 +4383,16 @@ pub const Workbench = struct {
             .uninitialized, .unavailable => if (expected_skill_catalog_revision != null)
                 return error.CatalogUnavailable,
         }
+        if (expected_skill_catalog_revision == null and
+            expected_skill_selection_revision != null)
+            return error.StaleCatalog;
+        var disabled_skill_ids: std.ArrayList([]const u8) = .empty;
+        defer disabled_skill_ids.deinit(self.allocator);
+        if (pinned_catalog) |*snapshot| for (snapshot.skills) |skill|
+            if (!skill.enabled) try disabled_skill_ids.append(
+                self.allocator,
+                skill.skill_id,
+            );
         var task_execution = try self.execution.cloneOwned(self.allocator);
         errdefer task_execution.deinit();
         const task_execution_input = task_execution.input();
@@ -4255,6 +4463,9 @@ pub const Workbench = struct {
             else
                 "",
             .skill_catalog = catalog_lease,
+            .skill_selection = if (catalog_lease != null) .{
+                .disabled_skill_ids = disabled_skill_ids.items,
+            } else null,
             .mcp_selection = self.mcpSelectionForNewTask(),
             .allowed_tools = if (self.builtin_tool_profile) |profile|
                 lifecycle.builtinToolsForProfile(profile)
@@ -4316,6 +4527,7 @@ pub const Workbench = struct {
         self: *Workbench,
         expected_execution_generation: u64,
         expected_skill_catalog_revision: ?[]const u8,
+        expected_skill_selection_revision: ?u64,
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
@@ -4325,7 +4537,8 @@ pub const Workbench = struct {
             return error.ExecutionUnavailable;
         if (!self.validExecutionGeneration(expected_execution_generation))
             return error.ExecutionGenerationMismatch;
-        if (expected_skill_catalog_revision != null)
+        if (expected_skill_catalog_revision != null or
+            expected_skill_selection_revision != null)
             return error.CatalogUnavailable;
         if (findEmpty(TaskView, self.tasks) == null) return error.TaskCapacity;
         if (self.workspaceCount(.automatic) >= self.limits.max_tasks)
@@ -4343,6 +4556,7 @@ pub const Workbench = struct {
             workspace.id,
             workspace.epoch,
             expected_execution_generation,
+            null,
             null,
             true,
         );
@@ -4371,6 +4585,8 @@ pub const Workbench = struct {
             return error.RecoveryUnavailable;
         const workspace = self.findWorkspace(task.durable.workspace_id) orelse
             return error.WorkspaceUnavailable;
+        if (workspace.kind == .manual and self.skill_enablement_health != .ready)
+            return error.RecoveryUnavailable;
         const canonical_user_home = self.canonical_user_home orelse
             return error.WorkspaceUnavailable;
         if (self.next_restore_attempt_id == 0)
@@ -4398,6 +4614,24 @@ pub const Workbench = struct {
         );
         var workspace_copy_live = true;
         errdefer if (workspace_copy_live) workspace_copy.deinit();
+        const skill_identity: skill_enablement_impl.WorkspaceIdentity = .{
+            .workspace_id = workspace.id,
+            .workspace_epoch = workspace.epoch,
+        };
+        const current_catalog = workspace.catalog orelse
+            return error.RecoveryUnavailable;
+        var disabled_skill_ids: std.ArrayList([]const u8) = .empty;
+        defer disabled_skill_ids.deinit(self.allocator);
+        for (current_catalog.skills) |skill|
+            if (!self.skill_enablement.isEnabled(skill_identity, skill.skill_id))
+                try disabled_skill_ids.append(self.allocator, skill.skill_id);
+        var skill_selection = try task_recovery_job.OwnedSkillSelection.init(
+            self.allocator,
+            self.skill_enablement.revision(skill_identity),
+            disabled_skill_ids.items,
+        );
+        var skill_selection_live = true;
+        errdefer if (skill_selection_live) skill_selection.deinit();
         var execution = try self.execution.cloneOwned(self.allocator);
         errdefer execution.deinit();
         const target_model = try self.allocator.dupe(
@@ -4426,6 +4660,7 @@ pub const Workbench = struct {
                 .binding_epoch = expected_binding_epoch,
                 .checkpoint = checkpoint_copy,
                 .workspace = workspace_copy,
+                .skill_selection = skill_selection,
                 .execution = execution.take(),
                 .model = target_model,
                 .provider = agentProvider(task.durable.execution_provider),
@@ -4436,6 +4671,7 @@ pub const Workbench = struct {
         };
         checkpoint_copy_live = false;
         workspace_copy_live = false;
+        skill_selection_live = false;
         mcp.selection = null;
         task.runtime.active_operation = .{ .restore = .{ .id = attempt_id } };
         task.runtime.restore_job = job;
@@ -4590,8 +4826,12 @@ pub const Workbench = struct {
                     pinned.revision,
                 ))
                     return error.StaleCatalog;
+                if (pinned.selection_revision == null or
+                    skill_input.selection_revision != pinned.selection_revision.?)
+                    return error.StaleCatalog;
                 const skill = pinned.findSkill(skill_input.skill_id) orelse
                     return error.SkillNotFound;
+                if (!skill.enabled) return error.SkillUnavailable;
                 if (skill_input.argument_values.len >
                     @min(
                         @as(usize, @intCast(skill.max_values)),
@@ -8258,6 +8498,7 @@ pub const Workbench = struct {
         self.scheduled_tasks.deinit();
         if (self.skill_transactions) |*transactions| transactions.deinit();
         if (self.skill_inventory) |*inventory| inventory.deinit();
+        self.skill_enablement.deinit();
         if (self.automatic_workspaces) |*store| store.deinit();
         if (self.skill_staging_root) |root| self.allocator.free(root);
         if (self.canonical_user_home) |home| self.allocator.free(home);
@@ -8514,6 +8755,9 @@ pub const Workbench = struct {
         writer: *std.Io.Writer,
         catalog: CatalogProjection,
     ) Error!void {
+        const available = catalog.availability == .ready or
+            catalog.availability == .degraded;
+        std.debug.assert(available == (catalog.selection_revision != null));
         writer.print("{{\"availability\":\"{s}\",\"redacted\":{},\"revision\":", .{
             @tagName(catalog.availability),
             catalog.redacted or self.catalogContainsKnownCredential(catalog),
@@ -8525,6 +8769,14 @@ pub const Workbench = struct {
             ),
             .uninitialized, .loading, .unavailable => writer.writeAll("null") catch
                 return error.SnapshotTooLarge,
+        }
+        writer.writeAll(",\"selectionRevision\":") catch return error.SnapshotTooLarge;
+        switch (catalog.availability) {
+            .ready, .degraded => writer.print(
+                "\"{d}\"",
+                .{catalog.selection_revision.?},
+            ) catch return error.SnapshotTooLarge,
+            .uninitialized, .loading, .unavailable => writer.writeAll("null") catch return error.SnapshotTooLarge,
         }
         writer.writeAll(",\"skills\":[") catch return error.SnapshotTooLarge;
         for (catalog.skills, 0..) |skill, index| {
@@ -8560,7 +8812,10 @@ pub const Workbench = struct {
                     return error.SnapshotTooLarge;
                 try self.projectedJsonValueWithKnownCredentials(writer, name);
             }
-            writer.print("],\"maxValues\":{d}}}", .{skill.max_values}) catch
+            writer.print("],\"maxValues\":{d},\"enabled\":{}}}", .{
+                skill.max_values,
+                skill.enabled,
+            }) catch
                 return error.SnapshotTooLarge;
         }
         writer.writeAll("],\"issues\":[") catch return error.SnapshotTooLarge;
@@ -8583,8 +8838,9 @@ pub const Workbench = struct {
         self: *Workbench,
         writer: *std.Io.Writer,
     ) Error!void {
-        writer.print("{{\"availability\":\"{s}\",\"assets\":[", .{
+        writer.print("{{\"availability\":\"{s}\",\"enablementAvailability\":\"{s}\",\"assets\":[", .{
             @tagName(self.skill_management_health),
+            @tagName(self.skill_enablement_health),
         }) catch return error.SnapshotTooLarge;
         const inventory = self.skillInventory();
         var count: usize = 0;
@@ -8724,13 +8980,65 @@ pub const Workbench = struct {
                 return error.SnapshotTooLarge;
             try self.projectedJsonValueWithKnownCredentials(writer, name);
         }
-        writer.print("],\"maxValues\":{d},\"canExport\":{},\"canReimport\":{},\"canUninstall\":{},\"canRetry\":{},\"issueCodes\":[", .{
+        const runtime_skill = self.findCatalogSkillForScope(scope, invocation_name);
+        const catalog_available = switch (scope) {
+            .personal => self.skill_catalog_availability == .ready or
+                self.skill_catalog_availability == .degraded,
+            .project => |project| available: {
+                const workspace = self.findWorkspace(project.workspace_id) orelse
+                    break :available false;
+                break :available workspace.epoch == project.workspace_epoch and
+                    (workspace.catalog_availability == .ready or
+                        workspace.catalog_availability == .degraded);
+            },
+        };
+        const enablement_available = self.skill_enablement_health == .ready and
+            catalog_available;
+        const selection_revision = if (enablement_available)
+            if (self.catalogForSkillScope(scope)) |snapshot|
+                snapshot.selection_revision
+            else
+                null
+        else
+            null;
+        const can_set_enabled = enablement_available and
+            runtime_skill != null and selection_revision != null;
+        writer.print("],\"maxValues\":{d},\"canExport\":{},\"canReimport\":{},\"canUninstall\":{},\"canRetry\":{},\"enabled\":", .{
             max_values,
             manageable,
             manageable,
             manageable or pending,
             pending,
         }) catch return error.SnapshotTooLarge;
+        if (runtime_skill) |skill| {
+            if (enablement_available)
+                writer.print("{}", .{skill.enabled}) catch return error.SnapshotTooLarge
+            else
+                writer.writeAll("null") catch return error.SnapshotTooLarge;
+        } else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeAll(",\"enablementState\":") catch return error.SnapshotTooLarge;
+        if (runtime_skill) |skill| {
+            if (enablement_available) switch (scope) {
+                .personal => jsonValue(
+                    writer,
+                    if (skill.enabled) "enabled" else "disabled",
+                ) catch return error.SnapshotTooLarge,
+                .project => |project| jsonValue(
+                    writer,
+                    @tagName(self.skill_enablement.workspaceOverride(.{
+                        .workspace_id = project.workspace_id,
+                        .workspace_epoch = project.workspace_epoch,
+                    }, skill.skill_id)),
+                ) catch return error.SnapshotTooLarge,
+            } else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        } else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.print(",\"canSetEnabled\":{},\"selectionRevision\":", .{can_set_enabled}) catch
+            return error.SnapshotTooLarge;
+        if (selection_revision) |revision|
+            writer.print("\"{d}\"", .{revision}) catch return error.SnapshotTooLarge
+        else
+            writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeAll(",\"issueCodes\":[") catch return error.SnapshotTooLarge;
         if (self.catalogForSkillScope(scope)) |snapshot| {
             var issue_count: usize = 0;
             for (snapshot.issues) |issue| {
@@ -9227,6 +9535,7 @@ pub const Workbench = struct {
         const task_id = self.createTaskForWorkspace(
             .automatic,
             claimed_item.execution_generation,
+            null,
             null,
         ) catch |err| {
             self.finalizeScheduledTaskClaimRejected(
@@ -11070,6 +11379,91 @@ pub const Workbench = struct {
         };
     }
 
+    fn noteSkillEnablementPersistenceFailure(self: *Workbench, err: anyerror) void {
+        self.skill_enablement_health = switch (err) {
+            error.PersistenceOutcomeUnknown => .outcome_unknown,
+            else => .write_failed,
+        };
+        self.skill_catalog_availability = .unavailable;
+        for (self.workspaces) |*entry| {
+            const workspace = &(entry.* orelse continue);
+            if (workspace.kind == .manual)
+                workspace.catalog_availability = .unavailable;
+        }
+    }
+
+    fn commitSkillEnablementCandidate(
+        self: *Workbench,
+        candidate: *skill_enablement_impl.Store,
+    ) Error!void {
+        const file_store = self.skill_enablement_file_store orelse
+            return error.PersistenceFailed;
+        const output = try self.allocator.alloc(u8, skill_enablement_impl.max_store_bytes);
+        defer self.allocator.free(output);
+        const bytes = try skill_enablement_impl.encode(output, candidate);
+        try file_store.commit(bytes);
+        self.skill_enablement.deinit();
+        self.skill_enablement = candidate.*;
+        candidate.* = undefined;
+    }
+
+    fn reconcileSkillEnablementNoFail(self: *Workbench) void {
+        if (self.skill_enablement_health != .ready or
+            self.skill_enablement_file_store == null)
+            return;
+        var active: std.ArrayList(skill_enablement_impl.WorkspaceIdentity) = .empty;
+        defer active.deinit(self.allocator);
+        for (self.workspaces) |entry| if (entry) |workspace| {
+            if (workspace.kind == .manual and workspace.visible)
+                active.append(self.allocator, .{
+                    .workspace_id = workspace.id,
+                    .workspace_epoch = workspace.epoch,
+                }) catch {
+                    self.skill_enablement_health = .write_failed;
+                    return;
+                };
+        };
+        var candidate = self.skill_enablement.clone() catch {
+            self.skill_enablement_health = .write_failed;
+            return;
+        };
+        var candidate_owned = true;
+        defer if (candidate_owned) candidate.deinit();
+        if (!candidate.reconcile(active.items)) return;
+        self.commitSkillEnablementCandidate(&candidate) catch |err| {
+            self.noteSkillEnablementPersistenceFailure(err);
+            return;
+        };
+        candidate_owned = false;
+    }
+
+    fn applyPersonalSkillEnablement(
+        self: *Workbench,
+        snapshot: *CatalogSnapshot,
+    ) Error!void {
+        if (self.skill_enablement_health != .ready)
+            return error.PersistenceFailed;
+        snapshot.selection_revision = self.skill_enablement.userRevision();
+        for (snapshot.skills) |*skill|
+            skill.enabled = self.skill_enablement.isUserEnabled(skill.skill_id);
+    }
+
+    fn applyWorkspaceSkillEnablement(
+        self: *Workbench,
+        workspace: *const WorkspaceView,
+        snapshot: *CatalogSnapshot,
+    ) Error!void {
+        if (self.skill_enablement_health != .ready)
+            return error.PersistenceFailed;
+        const identity: skill_enablement_impl.WorkspaceIdentity = .{
+            .workspace_id = workspace.id,
+            .workspace_epoch = workspace.epoch,
+        };
+        snapshot.selection_revision = self.skill_enablement.revision(identity);
+        for (snapshot.skills) |*skill|
+            skill.enabled = self.skill_enablement.isEnabled(identity, skill.skill_id);
+    }
+
     fn recoverSkillTransactionsForScopeNoFail(
         self: *Workbench,
         scope: skill_management_impl.Scope,
@@ -11182,10 +11576,12 @@ pub const Workbench = struct {
                                 self.projection_bytes += snapshot.projected_bytes;
                                 self.skill_catalog = snapshot;
                                 self.skill_catalog_lease = acquisition.lease;
-                                self.skill_catalog_availability = switch (snapshot.health) {
+                                self.skill_catalog_availability = if (self.applyPersonalSkillEnablement(
+                                    &self.skill_catalog.?,
+                                )) |_| switch (snapshot.health) {
                                     .healthy => .ready,
                                     .degraded => .degraded,
-                                };
+                                } else |_| .unavailable;
                                 self.reconcileSkillCatalogResultNoFail(
                                     .personal,
                                     &self.skill_catalog.?,
@@ -11277,10 +11673,13 @@ pub const Workbench = struct {
                             self.projection_bytes += snapshot.projected_bytes;
                             workspace.catalog = snapshot;
                             workspace.catalog_lease = acquisition.lease;
-                            workspace.catalog_availability = switch (snapshot.health) {
+                            workspace.catalog_availability = if (self.applyWorkspaceSkillEnablement(
+                                workspace,
+                                &workspace.catalog.?,
+                            )) |_| switch (snapshot.health) {
                                 .healthy => .ready,
                                 .degraded => .degraded,
-                            };
+                            } else |_| .unavailable;
                             self.reconcileSkillCatalogResultNoFail(
                                 .{ .project = .{
                                     .workspace_id = workspace.id,
@@ -11808,8 +12207,12 @@ pub const Workbench = struct {
                     pinned.revision,
                 ))
                     return error.StaleCatalog;
+                if (pinned.selection_revision == null or
+                    skill_input.selection_revision != pinned.selection_revision.?)
+                    return error.StaleCatalog;
                 const skill = pinned.findSkill(skill_input.skill_id) orelse
                     return error.SkillNotFound;
+                if (!skill.enabled) return error.SkillUnavailable;
                 const skill_id = try self.copyBounded(
                     skill.skill_id,
                     self.limits.max_catalog_projection_bytes,
@@ -14980,7 +15383,7 @@ test "automatic Workspace root is optional and reserved from user registration" 
     try installTestExecution(&unavailable);
     try std.testing.expectError(
         error.WorkspaceUnavailable,
-        unavailable.createTaskForWorkspace(.automatic, 1, null),
+        unavailable.createTaskForWorkspace(.automatic, 1, null, null),
     );
     unavailable.deinit();
 
@@ -15793,6 +16196,7 @@ test "Skill catalog snapshot reports redaction without exposing credential bytes
     try workbench.writeCatalogProjection(&writer, .{
         .availability = .ready,
         .revision = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        .selection_revision = 1,
         .skills = &skills,
     });
     const encoded = writer.buffered();
@@ -15802,6 +16206,215 @@ test "Skill catalog snapshot reports redaction without exposing credential bytes
     try std.testing.expect(
         std.mem.indexOf(u8, encoded, "SECRET-KEY") == null,
     );
+}
+
+test "Workspace Skill enablement uses double revision CAS and leaves pinned catalogs unchanged" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
+    var file_store = try skill_enablement_impl.FileStore.init(
+        std.testing.io,
+        directory_storage[0..directory_len],
+    );
+    defer file_store.deinit();
+
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    workbench.skill_enablement_file_store = &file_store;
+    workbench.skill_enablement_health = .ready;
+    const source_skills = [_]lifecycle.CatalogSkill{.{
+        .skill_id = "builtin.review",
+        .invocation_name = "review",
+        .display_name = "Review",
+        .description = "Review changes",
+        .argument_names = &.{"target"},
+        .max_values = 1,
+    }};
+    var workspace_catalog = try CatalogSnapshot.init(
+        workbench.allocator,
+        .{
+            .revision = "catalog-1",
+            .health = .healthy,
+            .skills = &source_skills,
+            .issues = &.{},
+            .storage = undefined,
+        },
+        catalogSnapshotLimits(workbench.limits),
+        workbench.limits.max_projection_bytes - workbench.projection_bytes,
+    );
+    workspace_catalog.applyEnablement(1, &.{});
+    var pinned = try workspace_catalog.clone(
+        workbench.allocator,
+        catalogSnapshotLimits(workbench.limits),
+        workbench.limits.max_projection_bytes -
+            workbench.projection_bytes -
+            workspace_catalog.projected_bytes,
+    );
+    defer pinned.deinit();
+    workbench.projection_bytes += workspace_catalog.projected_bytes;
+    workbench.workspaces[0].?.catalog = workspace_catalog;
+    workbench.workspaces[0].?.catalog_availability = .ready;
+
+    const next_revision = try workbench.setSkillEnabled(.{
+        .scope = .{ .project = .{
+            .workspace_id = 1,
+            .expected_workspace_epoch = 1,
+        } },
+        .skill_id = "builtin.review",
+        .state = .disabled,
+        .expected_catalog_revision = "catalog-1",
+        .expected_selection_revision = 1,
+    });
+    try std.testing.expectEqual(@as(u64, 2), next_revision);
+    try std.testing.expectEqual(@as(?u64, 2), workbench.workspaces[0].?.catalog.?.selection_revision);
+    try std.testing.expect(!workbench.workspaces[0].?.catalog.?.skills[0].enabled);
+    try std.testing.expectEqual(@as(?u64, 1), pinned.selection_revision);
+    try std.testing.expect(pinned.skills[0].enabled);
+    try std.testing.expectError(
+        error.StaleCatalog,
+        workbench.setSkillEnabled(.{
+            .scope = .{ .project = .{
+                .workspace_id = 1,
+                .expected_workspace_epoch = 1,
+            } },
+            .skill_id = "builtin.review",
+            .state = .enabled,
+            .expected_catalog_revision = "catalog-1",
+            .expected_selection_revision = 1,
+        }),
+    );
+}
+
+test "User Skill defaults stamp Personal and Workspace catalogs while project overrides stay local" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
+    var file_store = try skill_enablement_impl.FileStore.init(
+        std.testing.io,
+        directory_storage[0..directory_len],
+    );
+    defer file_store.deinit();
+
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    workbench.skill_enablement_file_store = &file_store;
+    workbench.skill_enablement_health = .ready;
+    const source_skills = [_]lifecycle.CatalogSkill{.{
+        .skill_id = "builtin.review",
+        .invocation_name = "review",
+        .display_name = "Review",
+        .description = "Review changes",
+        .argument_names = &.{"target"},
+        .max_values = 1,
+    }};
+    var personal_catalog = try CatalogSnapshot.init(
+        workbench.allocator,
+        .{
+            .revision = "personal-1",
+            .health = .healthy,
+            .skills = &source_skills,
+            .issues = &.{},
+            .storage = undefined,
+        },
+        catalogSnapshotLimits(workbench.limits),
+        workbench.limits.max_projection_bytes - workbench.projection_bytes,
+    );
+    personal_catalog.applyEnablement(1, &.{});
+    workbench.projection_bytes += personal_catalog.projected_bytes;
+    workbench.skill_catalog = personal_catalog;
+    workbench.skill_catalog_availability = .ready;
+
+    var workspace_catalog = try CatalogSnapshot.init(
+        workbench.allocator,
+        .{
+            .revision = "workspace-1",
+            .health = .healthy,
+            .skills = &source_skills,
+            .issues = &.{},
+            .storage = undefined,
+        },
+        catalogSnapshotLimits(workbench.limits),
+        workbench.limits.max_projection_bytes - workbench.projection_bytes,
+    );
+    workspace_catalog.applyEnablement(1, &.{});
+    workbench.projection_bytes += workspace_catalog.projected_bytes;
+    workbench.workspaces[0].?.catalog = workspace_catalog;
+    workbench.workspaces[0].?.catalog_availability = .ready;
+
+    try std.testing.expectEqual(@as(u64, 2), try workbench.setSkillEnabled(.{
+        .scope = .personal,
+        .skill_id = "builtin.review",
+        .state = .disabled,
+        .expected_catalog_revision = "personal-1",
+        .expected_selection_revision = 1,
+    }));
+    try std.testing.expectEqual(@as(?u64, 2), workbench.skill_catalog.?.selection_revision);
+    try std.testing.expectEqual(@as(?u64, 2), workbench.workspaces[0].?.catalog.?.selection_revision);
+    try std.testing.expect(!workbench.skill_catalog.?.skills[0].enabled);
+    try std.testing.expect(!workbench.workspaces[0].?.catalog.?.skills[0].enabled);
+
+    try std.testing.expectEqual(@as(u64, 3), try workbench.setSkillEnabled(.{
+        .scope = .{ .project = .{
+            .workspace_id = 1,
+            .expected_workspace_epoch = 1,
+        } },
+        .skill_id = "builtin.review",
+        .state = .enabled,
+        .expected_catalog_revision = "workspace-1",
+        .expected_selection_revision = 2,
+    }));
+    try std.testing.expect(!workbench.skill_catalog.?.skills[0].enabled);
+    try std.testing.expect(workbench.workspaces[0].?.catalog.?.skills[0].enabled);
+    try std.testing.expectEqual(@as(?u64, 2), workbench.skill_catalog.?.selection_revision);
+    try std.testing.expectEqual(@as(?u64, 3), workbench.workspaces[0].?.catalog.?.selection_revision);
+
+    try std.testing.expectEqual(@as(u64, 4), try workbench.setSkillEnabled(.{
+        .scope = .{ .project = .{
+            .workspace_id = 1,
+            .expected_workspace_epoch = 1,
+        } },
+        .skill_id = "builtin.review",
+        .state = .inherit,
+        .expected_catalog_revision = "workspace-1",
+        .expected_selection_revision = 3,
+    }));
+    try std.testing.expect(!workbench.workspaces[0].?.catalog.?.skills[0].enabled);
+
+    var personal_storage: [1024]u8 = undefined;
+    var personal_writer = std.Io.Writer.fixed(&personal_storage);
+    try workbench.writeSkillAssetTail(
+        &personal_writer,
+        &.{"target"},
+        1,
+        false,
+        false,
+        .personal,
+        "review",
+    );
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        personal_writer.buffered(),
+        "\"enabled\":false,\"enablementState\":\"disabled\",\"canSetEnabled\":true",
+    ) != null);
+
+    var project_storage: [1024]u8 = undefined;
+    var project_writer = std.Io.Writer.fixed(&project_storage);
+    try workbench.writeSkillAssetTail(
+        &project_writer,
+        &.{"target"},
+        1,
+        false,
+        false,
+        .{ .project = .{ .workspace_id = 1, .workspace_epoch = 1 } },
+        "review",
+    );
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        project_writer.buffered(),
+        "\"enabled\":false,\"enablementState\":\"inherit\",\"canSetEnabled\":true",
+    ) != null);
 }
 
 test "credential release permanently scrubs catalog and every Skill history field" {
@@ -15815,7 +16428,7 @@ test "credential release permanently scrubs catalog and every Skill history fiel
         .argument_names = &.{"SECRET-KEY target"},
         .max_values = 1,
     }};
-    const workspace_catalog = try CatalogSnapshot.init(
+    var workspace_catalog = try CatalogSnapshot.init(
         workbench.allocator,
         .{
             .revision = "safe-revision",
@@ -15827,6 +16440,7 @@ test "credential release permanently scrubs catalog and every Skill history fiel
         catalogSnapshotLimits(workbench.limits),
         workbench.limits.max_projection_bytes - workbench.projection_bytes,
     );
+    workspace_catalog.applyEnablement(1, &.{});
     const task_catalog = try workspace_catalog.clone(
         workbench.allocator,
         catalogSnapshotLimits(workbench.limits),
@@ -15909,15 +16523,15 @@ test "mutation admission rejects stale execution and binding facts" {
 
     try std.testing.expectError(
         error.ExecutionGenerationMismatch,
-        workbench.createTaskInWorkspace(1, 1, 0, null),
+        workbench.createTaskInWorkspace(1, 1, 0, null, null),
     );
     try std.testing.expectError(
         error.ExecutionGenerationMismatch,
-        workbench.createTaskInWorkspace(1, 1, 2, null),
+        workbench.createTaskInWorkspace(1, 1, 2, null, null),
     );
     try std.testing.expectError(
         error.WorkspaceEpochMismatch,
-        workbench.createTaskInWorkspace(1, 2, 1, null),
+        workbench.createTaskInWorkspace(1, 2, 1, null, null),
     );
     try std.testing.expectError(
         error.BindingEpochMismatch,
@@ -18998,7 +19612,7 @@ test "MCP startup health commits a safe degraded Workbench projection" {
     workbench.mcp.?.refresh_job = blocked_job;
     try std.testing.expectError(
         error.CatalogLoading,
-        workbench.createTaskInWorkspace(1, 1, 1, null),
+        workbench.createTaskInWorkspace(1, 1, 1, null, null),
     );
     workbench.mcp.?.activation_failed = false;
     blocked_job.outcome = .unavailable;

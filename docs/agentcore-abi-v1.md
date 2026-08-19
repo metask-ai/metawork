@@ -64,7 +64,7 @@ fresh Session 只使用 `SessionHostConfigV1` 与 `SessionCreateConfigV1`：
 - Host config 持有 provider、permission mode、shell policy、credential、base URL、Workspace root/home、built-in allowlist、Skill binding、Permission rules、MCP selection 和 durable budget；
 - create config 持有 Host config 与 model；
 - credential、root/home、model 和 allowlist 在同步 create 边界内借用，AgentCore 按合同复制；
-- Skill catalog 与显式 all-enabled selection 成对传入；无 catalog 时 selection 必须为 null；
+- Skill catalog 与显式 `SkillSelectionV1` 成对传入；selection 由 Workbench committed policy 构造 enabled/disabled exceptions，无 catalog 时必须为 null；
 - MCP authority 是完整 replacement：create config 的 `mcp_selection = null` 表示 empty view；`sessionUpdateMcp` 的 selection pointer 必须非 null，合法的零 selector descriptor 表示清空当前 view；
 - 每个 `McpServerV1` 必须携带非零、非 secret 的 `configuration_fingerprint`；`McpConnectorV1` 必须提供成对的 `retain_connector` / `release_connector`，Host owner 只有在全部 Core retain 与 active connection 都释放后才可销毁；
 - Host transport 支持 `2026-07-28`、`2025-11-25` 与 `2025-06-18` 三个 exact era；`automatic` 可以由 AgentCore 协商并 exact reopen，MetaWork 不把 MCP era 当作 ABI revision 兼容；

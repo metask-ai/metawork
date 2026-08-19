@@ -330,6 +330,8 @@ test("the fixed revision 1 contract carries Host-owned Workspace and generation 
         return { accepted: true, workspaceId: "7", reason: null };
       if (command === "metawork.skills.refreshCatalog")
         return { accepted: true, reason: null };
+      if (command === "metawork.skills.setEnabled")
+        return { applied: true, selectionRevision: "37", reason: null };
       if (command === "metawork.tasks.refreshSkillCatalog")
         return {
           accepted: false,
@@ -350,6 +352,7 @@ test("the fixed revision 1 contract carries Host-owned Workspace and generation 
       },
       "23",
       null,
+      null,
     ),
     {
       accepted: true,
@@ -363,6 +366,7 @@ test("the fixed revision 1 contract carries Host-owned Workspace and generation 
       kind: "skill",
       skillId: "builtin.review",
       catalogRevision: "catalog-revision",
+      selectionRevision: "31",
       argumentValues: ["src/main.zig"],
     }),
     {
@@ -394,6 +398,20 @@ test("the fixed revision 1 contract carries Host-owned Workspace and generation 
     accepted: true,
     reason: null,
   });
+  assert.deepEqual(
+    await client.setSkillEnabled(
+      {
+        scope: "project",
+        workspaceId: "7",
+        expectedWorkspaceEpoch: "29",
+      },
+      "builtin.review",
+      "disabled",
+      "catalog-revision",
+      "31",
+    ),
+    { applied: true, selectionRevision: "37", reason: null },
+  );
   assert.deepEqual(await client.refreshTaskSkillCatalog("11", "13"), {
     accepted: false,
     taskId: "11",
@@ -418,6 +436,7 @@ test("the fixed revision 1 contract carries Host-owned Workspace and generation 
         },
         expectedExecutionGeneration: "23",
         expectedSkillCatalogRevision: null,
+        expectedSkillSelectionRevision: null,
       },
     },
     {
@@ -429,6 +448,7 @@ test("the fixed revision 1 contract carries Host-owned Workspace and generation 
           kind: "skill",
           skillId: "builtin.review",
           catalogRevision: "catalog-revision",
+          selectionRevision: "31",
           argumentValues: ["src/main.zig"],
         },
       },
@@ -452,6 +472,18 @@ test("the fixed revision 1 contract carries Host-owned Workspace and generation 
     {
       command: "metawork.skills.refreshCatalog",
       payload: {},
+    },
+    {
+      command: "metawork.skills.setEnabled",
+      payload: {
+        scope: "project",
+        workspaceId: "7",
+        expectedWorkspaceEpoch: "29",
+        skillId: "builtin.review",
+        state: "disabled",
+        expectedCatalogRevision: "catalog-revision",
+        expectedSelectionRevision: "31",
+      },
     },
     {
       command: "metawork.tasks.refreshSkillCatalog",

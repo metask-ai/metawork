@@ -320,14 +320,15 @@ export const enUS = {
   "skills.retry": "Retry verification",
   "skills.working": "Working…",
   "skills.no_description": "No description provided.",
-  "skills.filter.label": "Filter Skills by scope",
-  "skills.filter.all": "All",
-  "skills.filter.personal": "User",
-  "skills.filter.project": "Project",
+  "skills.filter.label": "Choose Skill settings context",
+  "skills.filter.personal": "User defaults",
+  "skills.filter.project": "Project settings",
+  "skills.project_workspace": "Project to configure",
   "skills.section.attention": "Needs attention",
   "skills.section.skills": "Skills",
-  "skills.scope.personal": "User",
-  "skills.scope.project": "Project",
+  "skills.scope.personal": "User defaults",
+  "skills.scope.project": "Project settings",
+  "skills.scope.project_context": "Project settings · {workspace}",
   "skills.scope.external": "Other location",
   "skills.source.package": "Package",
   "skills.source.directory": "Local folder",
@@ -335,6 +336,11 @@ export const enUS = {
   "skills.status.ready": "Ready",
   "skills.status.pending": "Pending verification",
   "skills.status.issue": "Needs attention",
+  "skills.enablement.enabled": "Enabled",
+  "skills.enablement.disabled": "Disabled",
+  "skills.enablement.inherit": "Following user setting",
+  "skills.enablement.follow_user": "Follow user setting",
+  "skills.enablement.label": "Toggle {skill}",
   "skills.import.eyebrow": "Local import",
   "skills.detail.eyebrow": "Skill details",
   "skills.choose_package": "Choose .skill or .zip",
@@ -368,6 +374,8 @@ export const enUS = {
   "skills.error.mutation": "The Skill change could not be completed.",
   "skills.error.detail": "The local definition could not be loaded.",
   "skills.error.export": "The Skill could not be exported.",
+  "skills.error.enablement":
+    "The Skill could not be updated. Refresh and try again.",
   "skills.refresh": "Refresh",
   "skills.refreshing": "Refreshing…",
   "skills.search_label": "Search skills",
@@ -378,6 +386,9 @@ export const enUS = {
   "skills.empty_title": "No local Skills yet",
   "skills.empty_body":
     "Import a .skill or .zip package, or choose a folder containing SKILL.md.",
+  "skills.no_project_title": "No configurable projects",
+  "skills.no_project_body":
+    "Add or reauthorize a project before changing its Skill settings.",
   "skills.no_results_title": "No matching Skills",
   "skills.no_results_body": "Nothing matches “{query}”.",
   "skills.catalog_refresh_started": "Refreshing the Skill catalog…",
@@ -823,6 +834,8 @@ export const enUS = {
     "The skill catalog changed. Refresh it and choose the skill again.",
   "mutation.reason.skill_not_found":
     "The selected skill is no longer in this task's catalog.",
+  "mutation.reason.skill_unavailable":
+    "The selected skill is disabled for this task.",
   "mutation.reason.invalid_skill_arguments":
     "Review the skill arguments and try again.",
   "mutation.reason.capacity_reached":

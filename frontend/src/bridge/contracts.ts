@@ -184,6 +184,7 @@ export type TaskRunInput =
       kind: "skill";
       skillId: string;
       catalogRevision: string;
+      selectionRevision: string;
       argumentValues: string[];
     };
 
@@ -557,6 +558,7 @@ export type SkillCatalogView = {
   availability: SkillCatalogAvailability;
   redacted: boolean;
   revision: string | null;
+  selectionRevision: string | null;
   skills: {
     skillId: string;
     invocationName: string;
@@ -564,6 +566,7 @@ export type SkillCatalogView = {
     description: string;
     argumentNames: string[];
     maxValues: number;
+    enabled: boolean;
   }[];
   issues: {
     code:
@@ -577,6 +580,7 @@ export type SkillCatalogView = {
 
 export type SkillManagementView = {
   availability: WorkbenchSnapshot["capabilities"]["skillManagementHealth"];
+  enablementAvailability: WorkbenchSnapshot["capabilities"]["skillManagementHealth"];
   assets: {
     installId: string | null;
     sourceKind: "local_package" | "local_directory" | "external";
@@ -599,6 +603,10 @@ export type SkillManagementView = {
     canReimport: boolean;
     canUninstall: boolean;
     canRetry: boolean;
+    enabled: boolean | null;
+    enablementState: "inherit" | "enabled" | "disabled" | null;
+    canSetEnabled: boolean;
+    selectionRevision: string | null;
     issueCodes: SkillCatalogView["issues"][number]["code"][];
   }[];
 };
@@ -836,6 +844,7 @@ export type TaskRunReason =
   | "catalog_unavailable"
   | "stale_catalog"
   | "skill_not_found"
+  | "skill_unavailable"
   | "invalid_skill_arguments"
   | "capacity_reached"
   | "shutting_down";
@@ -988,6 +997,14 @@ export type SkillMutationResult =
       accepted: false;
       installId: null;
       verificationPending: false;
+      reason: SkillMutationReason;
+    };
+
+export type SkillEnablementResult =
+  | { applied: true; selectionRevision: string; reason: null }
+  | {
+      applied: false;
+      selectionRevision: null;
       reason: SkillMutationReason;
     };
 

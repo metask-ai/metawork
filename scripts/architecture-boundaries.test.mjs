@@ -1691,6 +1691,7 @@ test("Renderer Bridge fixed revision 1 owns the exact product wire catalog", () 
   assert.match(handlers, /expectedWorkspaceEpoch/);
   assert.match(handlers, /expectedExecutionGeneration/);
   assert.match(handlers, /expectedSkillCatalogRevision/);
+  assert.match(handlers, /expectedSkillSelectionRevision/);
   assert.match(handlers, /expectedBindingEpoch/);
   assert.match(handlers, /expectedDesiredGeneration/);
   assert.match(handlers, /toolNames/);

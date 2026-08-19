@@ -11,6 +11,7 @@ export type ComposerSkillDraft = {
   invocationName: string;
   displayName: string;
   catalogRevision: string;
+  selectionRevision: string;
   argumentNames: string[];
   argumentValues: string[];
   maxValues: number;
@@ -47,7 +48,9 @@ export function composerDraftWithinLimits(draft: ComposerDraft) {
   )
     return false;
   let bytes =
-    utf8ByteLength(draft.skillId) + utf8ByteLength(draft.catalogRevision);
+    utf8ByteLength(draft.skillId) +
+    utf8ByteLength(draft.catalogRevision) +
+    utf8ByteLength(draft.selectionRevision);
   for (const value of draft.argumentValues) {
     bytes += utf8ByteLength(value);
     if (bytes > maxSkillRunInputBytes) return false;
@@ -66,6 +69,7 @@ export function composerDraftToRunInput(
     kind: "skill",
     skillId: draft.skillId,
     catalogRevision: draft.catalogRevision,
+    selectionRevision: draft.selectionRevision,
     argumentValues: draft.argumentValues,
   };
 }
@@ -82,7 +86,9 @@ export function isSkillDraftCurrent(
     draft.kind === "skill" &&
     (catalog.availability === "ready" || catalog.availability === "degraded") &&
     catalog.revision === draft.catalogRevision &&
+    catalog.selectionRevision === draft.selectionRevision &&
     descriptor != null &&
+    descriptor.enabled &&
     Math.min(descriptor.maxValues, maxSkillArguments) === draft.maxValues
   );
 }
@@ -201,6 +207,7 @@ export type SlashCandidate =
       argumentNames: string[];
       maxValues: number;
       catalogRevision: string;
+      selectionRevision: string;
       tail: string;
       enabled: boolean;
       disabledReason: string | null;
@@ -269,9 +276,10 @@ export function resolveSlashCandidates({
 
   if (catalog.availability !== "ready" && catalog.availability !== "degraded")
     return candidates;
-  if (!catalog.revision) return candidates;
+  if (!catalog.revision || !catalog.selectionRevision) return candidates;
 
   for (const skill of catalog.skills) {
+    if (!skill.enabled) continue;
     if (!matches(input.query, skill.invocationName)) continue;
     const collides = commandNames.has(skill.invocationName as SlashCommandName);
     if (!input.explicitSkill && collides) continue;
@@ -290,6 +298,7 @@ export function resolveSlashCandidates({
       argumentNames: skill.argumentNames,
       maxValues: skill.maxValues,
       catalogRevision: catalog.revision,
+      selectionRevision: catalog.selectionRevision,
       tail: input.tail,
       enabled: true,
       disabledReason: null,
@@ -312,6 +321,7 @@ export function skillDraftFromCandidate(
     invocationName: candidate.invocationName,
     displayName: candidate.displayName,
     catalogRevision: candidate.catalogRevision,
+    selectionRevision: candidate.selectionRevision,
     argumentNames: candidate.argumentNames.slice(0, maxValues),
     argumentValues: Array.from({ length: valueCount }, (_, index) =>
       index === 0 ? candidate.tail : "",

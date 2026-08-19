@@ -741,6 +741,7 @@ test "Skill input is deep-copied and encoded only for the typed Core call" {
         .canonical_user_home = root,
         .workspace_epoch = "workspace-1",
         .skill_catalog = acquisition.lease,
+        .skill_selection = .{ .disabled_skill_ids = &.{} },
     });
     try runtime.releaseSkillCatalog(acquisition.lease);
 
@@ -832,6 +833,7 @@ test "Skill rejection statuses leave the Session reusable" {
             .canonical_user_home = root,
             .workspace_epoch = "workspace-1",
             .skill_catalog = acquisition.lease,
+            .skill_selection = .{ .disabled_skill_ids = &.{} },
         });
         try runtime.releaseSkillCatalog(acquisition.lease);
         acquisition.projection.deinit();
@@ -856,7 +858,7 @@ test "Skill rejection statuses leave the Session reusable" {
     }
 }
 
-test "Session catalog refresh is idle-only and rejects another Workspace epoch" {
+test "Session catalog refresh binds explicit selection only while idle and rejects another Workspace epoch" {
     fake_core.reset();
     const runtime = try createTestRuntime(.{ .max_sessions = 1 });
     defer {
@@ -893,10 +895,12 @@ test "Session catalog refresh is idle-only and rejects another Workspace epoch" 
     const queued = try session.prepareRun(.{ .text = "queued" });
     try std.testing.expectError(
         error.SessionNotIdle,
-        session.refreshSkillCatalog(current.lease),
+        session.refreshSkillCatalog(current.lease, .{ .disabled_skill_ids = &.{} }),
     );
     try session.cancelPreparedRun(queued);
-    try session.refreshSkillCatalog(current.lease);
+    try session.refreshSkillCatalog(current.lease, .{
+        .disabled_skill_ids = &.{fixture.fixture_skill_id},
+    });
 
     var other = try runtime.querySkillCatalog(.{
         .workspace_root = root,
@@ -907,7 +911,7 @@ test "Session catalog refresh is idle-only and rejects another Workspace epoch" 
     defer runtime.releaseSkillCatalog(other.lease) catch unreachable;
     try std.testing.expectError(
         error.CatalogBindingMismatch,
-        session.refreshSkillCatalog(other.lease),
+        session.refreshSkillCatalog(other.lease, .{ .disabled_skill_ids = &.{} }),
     );
     for ([_]u32{
         wire.STATUS_RESOURCE_LIMIT,
@@ -916,7 +920,7 @@ test "Session catalog refresh is idle-only and rejects another Workspace epoch" 
         fake_core.forceNextSkillUpdateStatus(recoverable_status);
         try std.testing.expectError(
             error.CatalogRefreshFailed,
-            session.refreshSkillCatalog(current.lease),
+            session.refreshSkillCatalog(current.lease, .{ .disabled_skill_ids = &.{} }),
         );
         try std.testing.expectEqual(lifecycle.SessionState.idle, session.snapshot().state);
         const reusable = try session.prepareRun(.{ .text = "still reusable" });
@@ -925,7 +929,7 @@ test "Session catalog refresh is idle-only and rejects another Workspace epoch" 
     fake_core.forceNextSkillUpdateStatus(wire.STATUS_STALE_COMPACT);
     try std.testing.expectError(
         error.CatalogRefreshFailed,
-        session.refreshSkillCatalog(current.lease),
+        session.refreshSkillCatalog(current.lease, .{ .disabled_skill_ids = &.{} }),
     );
     try std.testing.expectEqual(lifecycle.SessionState.poisoned, session.snapshot().state);
     try std.testing.expectError(

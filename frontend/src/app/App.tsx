@@ -99,6 +99,7 @@ import type {
   McpRefreshResult,
   McpConnectionTestResult,
   SkillMutationResult,
+  SkillEnablementResult,
   TaskRunReason,
   TaskModelSelectionReason,
   TaskView,
@@ -342,6 +343,7 @@ export default function App() {
         availability: "unavailable" as const,
         redacted: false,
         revision: null,
+        selectionRevision: null,
         skills: [],
         issues: [],
       })
@@ -349,6 +351,7 @@ export default function App() {
         availability: "unavailable" as const,
         redacted: false,
         revision: null,
+        selectionRevision: null,
         skills: [],
         issues: [],
       });
@@ -1477,7 +1480,12 @@ export default function App() {
     const descriptor = skillCatalog.skills.find(
       (skill) => skill.skillId === input.skillId,
     );
-    if (!descriptor || skillCatalog.revision !== input.catalogRevision)
+    if (
+      !descriptor ||
+      !descriptor.enabled ||
+      skillCatalog.revision !== input.catalogRevision ||
+      skillCatalog.selectionRevision === null
+    )
       return null;
     return {
       kind: "skill",
@@ -1485,6 +1493,7 @@ export default function App() {
       invocationName: input.invocationName,
       displayName: input.displayName,
       catalogRevision: input.catalogRevision,
+      selectionRevision: skillCatalog.selectionRevision,
       argumentNames: descriptor.argumentNames,
       argumentValues: input.argumentValues,
       maxValues: Math.min(descriptor.maxValues, maxSkillArguments),
@@ -1583,6 +1592,30 @@ export default function App() {
   ): Promise<SkillMutationResult> {
     const result = await mutation();
     if (result.accepted) await refreshSnapshot();
+    return result;
+  }
+
+  async function setSkillEnabled(
+    target:
+      | { scope: "personal" }
+      | {
+          scope: "project";
+          workspaceId: string;
+          expectedWorkspaceEpoch: string;
+        },
+    skillId: string,
+    state: "inherit" | "enabled" | "disabled",
+    expectedCatalogRevision: string,
+    expectedSelectionRevision: string,
+  ): Promise<SkillEnablementResult> {
+    const result = await client.setSkillEnabled(
+      target,
+      skillId,
+      state,
+      expectedCatalogRevision,
+      expectedSelectionRevision,
+    );
+    await refreshSnapshot();
     return result;
   }
 
@@ -2501,6 +2534,7 @@ export default function App() {
       {route === "skills" ? (
         <SkillsPage
           management={snapshot.skillManagement}
+          personalCatalog={snapshot.skillCatalog}
           workspaces={snapshot.workspaces}
           query={skillsQuery}
           refreshing={
@@ -2509,6 +2543,7 @@ export default function App() {
           disabled={bridgeUnavailable}
           onQuery={setSkillsQuery}
           onRefresh={() => void refreshSkillsPageCatalog()}
+          onSetEnabled={setSkillEnabled}
           onChooseImport={(kind) => client.chooseSkillImport(kind)}
           onInstall={(previewId, scope, allowReplace) =>
             commitSkillMutation(() =>

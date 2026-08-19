@@ -154,6 +154,7 @@ test("Skill catalogs and typed Skill history decode without exposing loader inte
     availability: "degraded",
     redacted: false,
     revision: "catalog-revision",
+    selectionRevision: "5",
     skills: [
       {
         skillId: "builtin.review",
@@ -162,6 +163,7 @@ test("Skill catalogs and typed Skill history decode without exposing loader inte
         description: "Review a target",
         argumentNames: ["target", "focus"],
         maxValues: 2,
+        enabled: true,
       },
     ],
     issues: [
