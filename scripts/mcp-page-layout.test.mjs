@@ -58,6 +58,24 @@ test("MCP tool permissions use a visible foundation checkbox", async () => {
   assert.doesNotMatch(css, /\.mcp-tool-toggle > button/);
 });
 
+test("MCP confirmations use the modal foundation alert dialog", async () => {
+  const css = await readFile(
+    join(process.cwd(), "frontend/src/index.css"),
+    "utf8",
+  );
+  const page = await readFile(
+    join(process.cwd(), "frontend/src/features/mcp/McpPage.tsx"),
+    "utf8",
+  );
+
+  assert.match(
+    page,
+    /<AlertDialog\.Root[\s\S]*?<AlertDialog\.Backdrop \/>[\s\S]*?<AlertDialog\.Popup>/,
+  );
+  assert.doesNotMatch(page, /role="alertdialog"|mcp-confirm-panel/);
+  assert.doesNotMatch(css, /\.mcp-confirm-panel/);
+});
+
 test("MCP connection form keeps row groups in the drawer content column", async () => {
   const css = await readFile(
     join(process.cwd(), "frontend/src/index.css"),

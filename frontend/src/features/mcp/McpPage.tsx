@@ -20,6 +20,7 @@ import type {
 } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { Alert } from "../../components/ui/alert.tsx";
+import { AlertDialog } from "../../components/ui/alert-dialog.tsx";
 import { Button } from "../../components/ui/button.tsx";
 import { Drawer } from "../../components/ui/drawer.tsx";
 import { Checkbox } from "../../components/ui/checkbox.tsx";
@@ -169,6 +170,7 @@ function validMcpNames(values: string[]): boolean {
 }
 
 function serverNeedsAttention(server: McpServer) {
+  if (server.connection === null) return true;
   if (server.approvalStatus === "unapproved") return true;
   if (!server.desiredEnabled) return false;
   return (
@@ -180,6 +182,8 @@ function serverNeedsAttention(server: McpServer) {
 }
 
 function serverStateKey(server: McpServer) {
+  if (server.connection === null)
+    return "mcp.detail.connection_unavailable" as const;
   if (server.approvalStatus === "unapproved")
     return "mcp.approval.required" as const;
   if (!server.desiredEnabled) return "mcp.desired.disabled" as const;
@@ -190,6 +194,15 @@ function serverStateKey(server: McpServer) {
   if (server.runtimeStatus !== "ready")
     return `mcp.status.${server.runtimeStatus}` as const;
   return `mcp.access.${server.newTaskAccess}` as const;
+}
+
+function serverVisualStatus(server: McpServer) {
+  if (server.connection === null) return "invalid_catalog" as const;
+  if (server.approvalStatus === "unapproved") return "not_loaded" as const;
+  if (!server.desiredEnabled) return "disabled" as const;
+  if (server.newTaskAccess === "restart_required")
+    return "restart_required" as const;
+  return server.runtimeStatus;
 }
 
 function serverStateIcon(server: McpServer) {
@@ -225,11 +238,7 @@ function McpServerRow({
     <li>
       <button
         className="mcp-server-row focus-ring"
-        data-status={
-          server.newTaskAccess === "restart_required"
-            ? "restart_required"
-            : server.runtimeStatus
-        }
+        data-status={serverVisualStatus(server)}
         onClick={(event) => onOpen(server, event.currentTarget)}
       >
         <span className="mcp-status-rail" aria-hidden="true" />
@@ -420,8 +429,6 @@ export function McpPage({
   const { t } = useI18n();
   const title = useRef<HTMLHeadingElement>(null);
   const drawerHeading = useRef<HTMLHeadingElement>(null);
-  const confirmPanel = useRef<HTMLDivElement>(null);
-  const confirmHeading = useRef<HTMLHeadingElement>(null);
   const confirmTrigger = useRef<HTMLElement | null>(null);
   const drawerTrigger = useRef<HTMLElement | null>(null);
   const connectionSection = useRef<HTMLElement>(null);
@@ -498,6 +505,12 @@ export function McpPage({
     ((management.authorizationOperation.kind !== "idle" &&
       management.authorizationOperation.serverId === selected.id) ||
       selected.connectionTest.status === "testing");
+  const existingOAuthClientAuthMethod =
+    drawerState?.kind === "replace" &&
+    selected?.authMode === "oauth" &&
+    selected.connection?.kind === "streamable_http"
+      ? selected.connection.tokenEndpointAuthMethod
+      : null;
   const addValid =
     validMcpDisplayName(displayName) &&
     /^(?:[1-9][0-9]{0,8})$/.test(timeoutMs) &&
@@ -535,27 +548,6 @@ export function McpPage({
   useEffect(() => {
     if (selected) setRenameDraft(selected.displayName);
   }, [selected?.id, selected?.displayName]);
-
-  useEffect(() => {
-    if (!confirmAction) return;
-    const frame = window.requestAnimationFrame(() =>
-      confirmHeading.current?.focus(),
-    );
-    return () => window.cancelAnimationFrame(frame);
-  }, [confirmAction]);
-
-  useEffect(() => {
-    if (!confirmAction) return;
-    function keydown(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        event.stopPropagation();
-        closeConfirmation();
-      }
-    }
-    window.addEventListener("keydown", keydown);
-    return () => window.removeEventListener("keydown", keydown);
-  }, [confirmAction]);
 
   function openServer(server: McpServer, trigger: HTMLElement) {
     drawerTrigger.current = trigger;
@@ -954,6 +946,12 @@ export function McpPage({
   function renderNextAction(server: McpServer) {
     const serverBusy =
       mutationLocked || pendingServerId === server.id || selectedOperationBusy;
+    if (server.connection === null)
+      return nextActionCard(
+        t("mcp.detail.connection_unavailable"),
+        t("mcp.detail.connection_unavailable_help"),
+      );
+
     if (server.approvalStatus === "unapproved")
       return nextActionCard(
         t("mcp.approval.required"),
@@ -974,19 +972,7 @@ export function McpPage({
         ) : undefined,
       );
 
-    if (!server.desiredEnabled)
-      return nextActionCard(
-        t("mcp.next.enable.title"),
-        t("mcp.next.enable.body"),
-        <Button
-          variant="primary"
-          size="sm"
-          disabled={serverBusy}
-          onClick={(event) => openConfirmation("enable", event.currentTarget)}
-        >
-          {t("mcp.enable.action")}
-        </Button>,
-      );
+    if (!server.desiredEnabled) return null;
 
     if (!["not_required", "ready"].includes(server.authorizationStatus)) {
       const operation = management.authorizationOperation;
@@ -1013,7 +999,11 @@ export function McpPage({
           t(`mcp.authorization_status.${server.authorizationStatus}`),
           operation.kind !== "idle"
             ? t("mcp.authorization.busy")
-            : t("mcp.next.authorization.body"),
+            : clientSecretMissing &&
+                (!capabilities.secretCapture ||
+                  server.authorizationStatus === "capability_unavailable")
+              ? t("mcp.capability.capture_unavailable")
+              : t("mcp.next.authorization.body"),
           operation.kind === "idle" &&
             capabilities.oauth &&
             server.authorizationStatus !== "capability_unavailable" &&
@@ -1028,7 +1018,9 @@ export function McpPage({
                 ? t("mcp.authorization.again")
                 : t("mcp.authorization.action")}
             </Button>
-          ) : clientSecretMissing ? (
+          ) : clientSecretMissing &&
+            capabilities.secretCapture &&
+            server.authorizationStatus !== "capability_unavailable" ? (
             <Button
               variant="primary"
               size="sm"
@@ -1060,12 +1052,6 @@ export function McpPage({
         ) : undefined,
       );
     }
-
-    if (server.connection === null)
-      return nextActionCard(
-        t("mcp.detail.connection_unavailable"),
-        t("mcp.detail.connection_unavailable_help"),
-      );
 
     if (server.newTaskAccess === "restart_required")
       return nextActionCard(
@@ -1510,16 +1496,29 @@ export function McpPage({
                                       label: t(
                                         "mcp.client_auth.client_secret_basic",
                                       ),
+                                      disabled:
+                                        !capabilities.secretCapture &&
+                                        existingOAuthClientAuthMethod !==
+                                          "client_secret_basic",
                                     },
                                     {
                                       value: "client_secret_post",
                                       label: t(
                                         "mcp.client_auth.client_secret_post",
                                       ),
+                                      disabled:
+                                        !capabilities.secretCapture &&
+                                        existingOAuthClientAuthMethod !==
+                                          "client_secret_post",
                                     },
                                   ]}
                                   aria-label={t("mcp.add.client_auth_method")}
                                 />
+                                {!capabilities.secretCapture && (
+                                  <small>
+                                    {t("mcp.auth.oauth_secret_locked")}
+                                  </small>
+                                )}
                               </label>
                             </>
                           )}
@@ -1591,14 +1590,22 @@ export function McpPage({
                 <dl className="mcp-access-rail">
                   <div>
                     <dt>{t("mcp.detail.new_tasks")}</dt>
-                    <dd data-access={selected.newTaskAccess}>
-                      {selected.newTaskAccess === "available"
-                        ? t("mcp.detail.tools_available", {
-                            count: selected.tools.filter(
-                              (tool) => tool.availableToNewTasks,
-                            ).length,
-                          })
-                        : t(`mcp.access.${selected.newTaskAccess}`)}
+                    <dd
+                      data-access={
+                        selected.desiredEnabled
+                          ? selected.newTaskAccess
+                          : "not_allowed"
+                      }
+                    >
+                      {!selected.desiredEnabled
+                        ? t("mcp.desired.disabled")
+                        : selected.newTaskAccess === "available"
+                          ? t("mcp.detail.tools_available", {
+                              count: selected.tools.filter(
+                                (tool) => tool.availableToNewTasks,
+                              ).length,
+                            })
+                          : t(`mcp.access.${selected.newTaskAccess}`)}
                     </dd>
                   </div>
                   <div>
@@ -1680,7 +1687,8 @@ export function McpPage({
                               disabled={
                                 mutationLocked ||
                                 pendingServerId === selected.id ||
-                                selectedOperationBusy
+                                selectedOperationBusy ||
+                                selected.connection === null
                               }
                               onCheckedChange={() => {
                                 const names = selected.tools
@@ -1716,7 +1724,8 @@ export function McpPage({
                         disabled={
                           mutationLocked ||
                           pendingServerId === selected.id ||
-                          selectedOperationBusy
+                          selectedOperationBusy ||
+                          selected.connection === null
                         }
                         onClick={(event) =>
                           openConfirmation("allow_all", event.currentTarget)
@@ -1742,20 +1751,21 @@ export function McpPage({
                       </p>
                     </div>
                     <div className="mcp-connection-actions">
-                      {selected.connectionTest.status === "connected" && (
-                        <Button
-                          variant="secondary"
-                          size="sm"
-                          disabled={
-                            mutationLocked ||
-                            pendingServerId === selected.id ||
-                            selectedOperationBusy
-                          }
-                          onClick={() => void testConnection(selected)}
-                        >
-                          {t("mcp.test.action")}
-                        </Button>
-                      )}
+                      {selected.connection !== null &&
+                        selected.connectionTest.status === "connected" && (
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            disabled={
+                              mutationLocked ||
+                              pendingServerId === selected.id ||
+                              selectedOperationBusy
+                            }
+                            onClick={() => void testConnection(selected)}
+                          >
+                            {t("mcp.test.action")}
+                          </Button>
+                        )}
                       <Button
                         variant="secondary"
                         size="sm"
@@ -1949,7 +1959,8 @@ export function McpPage({
                             disabled={
                               mutationLocked ||
                               pendingServerId === selected.id ||
-                              selectedOperationBusy
+                              selectedOperationBusy ||
+                              selected.connection === null
                             }
                             onChange={(event) =>
                               setRenameDraft(event.target.value)
@@ -1964,6 +1975,7 @@ export function McpPage({
                             mutationLocked ||
                             pendingServerId === selected.id ||
                             selectedOperationBusy ||
+                            selected.connection === null ||
                             !validMcpDisplayName(renameDraft) ||
                             renameDraft.trim() === selected.displayName
                           }
@@ -2065,8 +2077,26 @@ export function McpPage({
                   </p>
                 </section>
 
-                <section className="mcp-danger-zone">
-                  {selected.desiredEnabled && (
+                <section className="mcp-server-controls">
+                  {!selected.desiredEnabled &&
+                    selected.approvalStatus === "approved" &&
+                    selected.connection !== null && (
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        disabled={
+                          mutationLocked ||
+                          pendingServerId === selected.id ||
+                          selectedOperationBusy
+                        }
+                        onClick={(event) =>
+                          openConfirmation("enable", event.currentTarget)
+                        }
+                      >
+                        {t("mcp.enable.action")}
+                      </Button>
+                    )}
+                  {selected.desiredEnabled && selected.connection !== null && (
                     <Button
                       variant="secondary"
                       size="sm"
@@ -2098,81 +2128,78 @@ export function McpPage({
                     {t("mcp.delete.action")}
                   </Button>
                 </section>
-
-                {confirmAction && (
-                  <div
-                    ref={confirmPanel}
-                    className="mcp-confirm-panel"
-                    role="alertdialog"
-                    aria-labelledby="mcp-confirm-title"
-                    aria-describedby="mcp-confirm-body"
-                  >
-                    <h3
-                      id="mcp-confirm-title"
-                      ref={confirmHeading}
-                      tabIndex={-1}
-                    >
-                      {t(`mcp.confirm.${confirmAction}.title`)}
-                    </h3>
-                    <p id="mcp-confirm-body">
-                      {t(`mcp.confirm.${confirmAction}.body`)}
-                    </p>
-                    <div>
-                      <Button
-                        variant="secondary"
-                        size="sm"
-                        onClick={closeConfirmation}
-                      >
-                        {t("common.cancel")}
-                      </Button>
-                      <Button
-                        variant={
-                          confirmAction === "delete" ? "danger" : "primary"
-                        }
-                        size="sm"
-                        onClick={() => {
-                          const action = confirmAction;
-                          acceptConfirmation();
-                          void mutateServer(selected, (generation) =>
-                            action === "delete"
-                              ? onRemove(generation, selected.id)
-                              : action === "allow_all"
-                                ? onSetAllowedTools(
-                                    generation,
-                                    selected.id,
-                                    selected.tools
-                                      .filter(
-                                        (tool) =>
-                                          tool.desiredAllowed ||
-                                          tool.discovered,
-                                      )
-                                      .map((tool) => tool.name),
-                                  )
-                                : onSetEnabled(
-                                    generation,
-                                    selected.id,
-                                    action === "enable",
-                                  ),
-                          ).then((result) => {
-                            if (
-                              action === "delete" &&
-                              (result?.outcome === "saved" ||
-                                result?.outcome === "saved_recovery_required")
-                            )
-                              closeDrawer();
-                          });
-                        }}
-                      >
-                        {t(`mcp.confirm.${confirmAction}.action`)}
-                      </Button>
-                    </div>
-                  </div>
-                )}
               </div>
             ) : null}
           </Drawer.Popup>
         </Drawer.Portal>
       </Drawer.Root>
+      {selected && confirmAction && (
+        <AlertDialog.Root
+          open
+          onOpenChange={(open) => {
+            if (!open) closeConfirmation();
+          }}
+        >
+          <AlertDialog.Portal>
+            <AlertDialog.Backdrop />
+            <AlertDialog.Popup>
+              <AlertDialog.Title>
+                {t(`mcp.confirm.${confirmAction}.title`)}
+              </AlertDialog.Title>
+              <AlertDialog.Description>
+                {t(`mcp.confirm.${confirmAction}.body`)}
+              </AlertDialog.Description>
+              <div className="mcp-confirm-actions">
+                <Button
+                  autoFocus
+                  variant="secondary"
+                  size="sm"
+                  onClick={closeConfirmation}
+                >
+                  {t("common.cancel")}
+                </Button>
+                <Button
+                  variant={confirmAction === "delete" ? "danger" : "primary"}
+                  size="sm"
+                  onClick={() => {
+                    const action = confirmAction;
+                    acceptConfirmation();
+                    void mutateServer(selected, (generation) =>
+                      action === "delete"
+                        ? onRemove(generation, selected.id)
+                        : action === "allow_all"
+                          ? onSetAllowedTools(
+                              generation,
+                              selected.id,
+                              selected.tools
+                                .filter(
+                                  (tool) =>
+                                    tool.desiredAllowed || tool.discovered,
+                                )
+                                .map((tool) => tool.name),
+                            )
+                          : onSetEnabled(
+                              generation,
+                              selected.id,
+                              action === "enable",
+                            ),
+                    ).then((result) => {
+                      if (
+                        action === "delete" &&
+                        (result?.outcome === "saved" ||
+                          result?.outcome === "saved_recovery_required")
+                      )
+                        closeDrawer();
+                    });
+                  }}
+                >
+                  {t(`mcp.confirm.${confirmAction}.action`)}
+                </Button>
+              </div>
+            </AlertDialog.Popup>
+          </AlertDialog.Portal>
+        </AlertDialog.Root>
+      )}
     </section>
   );
 }

@@ -247,8 +247,6 @@ export const zhCN: Record<MessageId, string> = {
   "mcp.test.summary.testing": "正在测试…",
   "mcp.test.summary.connected": "成功 · 发现 {tools} 个",
   "mcp.test.summary.failed": "失败 · {issues} 个问题",
-  "mcp.next.enable.title": "启用这个服务",
-  "mcp.next.enable.body": "先启用已保存的连接，之后才能向新任务开放。",
   "mcp.next.authorization.title": "完成登录",
   "mcp.next.authorization.body": "登录后才能测试连接并加载可用工具。",
   "mcp.next.credentials.body": "设置所需凭证后才能测试连接并加载可用工具。",
@@ -278,6 +276,8 @@ export const zhCN: Record<MessageId, string> = {
     "将放行当前已发现的全部工具；此后新发现的工具仍默认不放行。",
   "mcp.confirm.allow_all.action": "全部放行",
   "mcp.auth.static_locked": "（暂不可用：需要安全输入能力）",
+  "mcp.auth.oauth_secret_locked":
+    "需要 Client Secret 的方式依赖安全密钥采集；既有选择可以原样保留。",
   "mcp.confirm.enable.title": "启用这个服务？",
   "mcp.confirm.enable.body":
     "连接变更可能需要重启；已打开的任务保持现有访问权限。",

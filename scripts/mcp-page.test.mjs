@@ -18,7 +18,12 @@ Object.assign(globalThis, {
   Node: dom.window.Node,
   DocumentFragment: dom.window.DocumentFragment,
   Element: dom.window.Element,
+  Event: dom.window.Event,
+  FocusEvent: dom.window.FocusEvent,
   HTMLElement: dom.window.HTMLElement,
+  HTMLInputElement: dom.window.HTMLInputElement,
+  KeyboardEvent: dom.window.KeyboardEvent,
+  MouseEvent: dom.window.MouseEvent,
   MutationObserver: dom.window.MutationObserver,
   requestAnimationFrame: dom.window.requestAnimationFrame.bind(dom.window),
   cancelAnimationFrame: dom.window.cancelAnimationFrame.bind(dom.window),
@@ -29,7 +34,7 @@ Object.defineProperty(globalThis, "navigator", {
   value: dom.window.navigator,
 });
 
-const { act, cleanup, fireEvent, render, screen, waitFor, within } =
+const { cleanup, fireEvent, render, screen, waitFor, within } =
   await import("@testing-library/react");
 
 const vite = await createServer({
@@ -280,6 +285,45 @@ test("MCP keeps intentionally disabled servers out of the attention group", () =
     name: /Filesystem/,
   });
   assert.ok(within(row).getByText("Disabled"));
+  fireEvent.click(row);
+  const dialog = screen.getByRole("dialog", { name: "Filesystem" });
+  assert.ok(within(dialog).getByRole("button", { name: "Enable" }));
+  assert.equal(
+    within(dialog).queryByRole("heading", { name: "Enable this service" }),
+    null,
+  );
+});
+
+test("MCP keeps disabled desired state separate from the global restart barrier", () => {
+  render(
+    pageElement({
+      availability: "degraded",
+      managementHealth: "ready",
+      operation: "idle",
+      desiredGeneration: "8",
+      runtimeAlignment: "restart_required",
+      redacted: false,
+      servers: [
+        {
+          ...servers[2],
+          newTaskAccess: "restart_required",
+        },
+      ],
+    }),
+  );
+
+  assert.ok(screen.getByText("Restart MetaWork to apply connection changes"));
+  assert.equal(screen.queryByText("Needs attention"), null);
+  const row = screen.getByRole("button", { name: /Filesystem/ });
+  assert.ok(within(row).getByText("Disabled"));
+  fireEvent.click(row);
+  const dialog = screen.getByRole("dialog", { name: "Filesystem" });
+  const newTasks = within(dialog).getByText("New tasks").closest("div");
+  assert.ok(within(newTasks).getByText("Disabled"));
+  assert.equal(
+    within(dialog).queryByText("Restart MetaWork to apply connection changes"),
+    null,
+  );
 });
 
 test("MCP detail exposes complete non-secret configuration and the tool catalog", () => {
@@ -318,9 +362,15 @@ test("MCP keeps a missing connection read-only instead of guessing repair data",
       servers: [
         {
           ...servers[0],
+          authMode: "none",
+          negotiation: "automatic",
+          timeoutMs: 1,
           connection: null,
+          approvalStatus: "unapproved",
+          authorizationStatus: "not_required",
           runtimeStatus: "invalid_catalog",
           newTaskAccess: "unavailable",
+          tools: [],
         },
       ],
     }),
@@ -337,6 +387,16 @@ test("MCP keeps a missing connection read-only instead of guessing repair data",
     within(dialog).queryByRole("button", { name: "Test connection" }),
     null,
   );
+  assert.equal(
+    within(dialog).queryByRole("button", { name: "Connect and enable" }),
+    null,
+  );
+  assert.equal(within(dialog).queryByRole("button", { name: "Enable" }), null);
+  assert.equal(
+    within(dialog).getByRole("textbox", { name: "Display name" }).disabled,
+    true,
+  );
+  assert.ok(within(dialog).getByRole("button", { name: "Delete server" }));
 });
 
 test("MCP STDIO detail and edit preserve command, ordered arguments, and cwd", () => {
@@ -741,6 +801,80 @@ test("MCP OAuth add carries an explicit client auth method and no secret", async
   assert.equal(JSON.stringify(calls).includes("clientSecret"), false);
 });
 
+test("MCP gates OAuth client secret recovery and configuration on secure capture", async () => {
+  const oauthAwaitingSecret = {
+    ...servers[0],
+    connection: {
+      ...servers[0].connection,
+      registrationKind: "pre_registered",
+      clientId: "desktop-client",
+      tokenEndpointAuthMethod: "client_secret_basic",
+      clientSecretStatus: "missing",
+    },
+    authorizationStatus: "capability_unavailable",
+    runtimeStatus: "needs_authentication",
+    newTaskAccess: "unavailable",
+  };
+  render(
+    pageElement(
+      {
+        availability: "degraded",
+        managementHealth: "ready",
+        operation: "idle",
+        desiredGeneration: "oauth-generation",
+        runtimeAlignment: "current",
+        redacted: false,
+        servers: [oauthAwaitingSecret],
+      },
+      "",
+      {
+        capabilities: {
+          connectionApproval: true,
+          secretCapture: false,
+          oauth: true,
+        },
+      },
+    ),
+  );
+
+  fireEvent.click(screen.getByRole("button", { name: /GitHub/ }));
+  const detail = screen.getByRole("dialog", { name: "GitHub" });
+  assert.ok(
+    within(detail).getAllByText(
+      "Secure secret capture is unavailable on this device.",
+    ).length >= 1,
+  );
+  assert.equal(
+    within(detail).queryByRole("button", { name: "Set credentials" }),
+    null,
+  );
+
+  fireEvent.click(
+    within(detail).getByRole("button", { name: "Edit connection" }),
+  );
+  const form = screen.getByRole("dialog", {
+    name: "Edit connection settings",
+  });
+  fireEvent.click(
+    within(form).getByRole("combobox", {
+      name: "Token endpoint client authentication",
+    }),
+  );
+  const basic = await screen.findByRole("option", {
+    name: "Client secret (HTTP Basic)",
+  });
+  const post = screen.getByRole("option", {
+    name: "Client secret (request body)",
+  });
+  assert.notEqual(basic.getAttribute("aria-disabled"), "true");
+  assert.equal(post.getAttribute("aria-disabled"), "true");
+  assert.ok(
+    within(form).getByText(
+      "Secret-based methods require secure secret capture. An existing selection can be preserved.",
+    ),
+  );
+});
+
 test("MCP endpoint validation matches the Host authority contract", () => {
   for (const endpoint of endpointContract.accepted)
     assert.equal(validMcpHttpEndpoint(endpoint), true, endpoint);
@@ -989,21 +1123,12 @@ test("MCP destructive changes require an explicit confirmation", async () => {
   let confirmation = screen.getByRole("alertdialog", {
     name: "Delete this server?",
   });
-  await act(
-    () =>
-      new Promise((resolve) => window.requestAnimationFrame(() => resolve())),
-  );
-  assert.equal(
-    document.activeElement,
-    within(confirmation).getByRole("heading", {
-      name: "Delete this server?",
-    }),
-  );
-  fireEvent.click(within(confirmation).getByRole("button", { name: "Cancel" }));
-  await act(
-    () =>
-      new Promise((resolve) => window.requestAnimationFrame(() => resolve())),
-  );
+  const cancel = within(confirmation).getByRole("button", { name: "Cancel" });
+  assert.equal(document.activeElement, cancel);
+
+  fireEvent.keyDown(document.activeElement, { key: "Escape" });
+  await waitFor(() => assert.equal(screen.queryByRole("alertdialog"), null));
+  await new Promise((resolve) => window.requestAnimationFrame(resolve));
   assert.equal(document.activeElement, deleteButton);
 
   fireEvent.click(deleteButton);

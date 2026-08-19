@@ -265,9 +265,6 @@ export const enUS = {
   "mcp.test.summary.testing": "Testing…",
   "mcp.test.summary.connected": "Succeeded · {tools} found",
   "mcp.test.summary.failed": "Failed · {issues} issues",
-  "mcp.next.enable.title": "Enable this service",
-  "mcp.next.enable.body":
-    "Enable the saved connection before making it available to new tasks.",
   "mcp.next.authorization.title": "Complete sign-in",
   "mcp.next.authorization.body":
     "Sign in before testing the connection and loading its tools.",
@@ -302,6 +299,8 @@ export const enUS = {
     "All currently discovered tools will be allowed; tools discovered later stay excluded by default.",
   "mcp.confirm.allow_all.action": "Allow all",
   "mcp.auth.static_locked": " (unavailable: secure input required)",
+  "mcp.auth.oauth_secret_locked":
+    "Secret-based methods require secure secret capture. An existing selection can be preserved.",
   "mcp.confirm.enable.title": "Enable this server?",
   "mcp.confirm.enable.body":
     "Connection changes may require restart. Open tasks keep their current access.",

@@ -3120,10 +3120,10 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .mcp-header-actions,
 .mcp-toolbar,
 .mcp-connection-actions,
-.mcp-danger-zone,
+.mcp-server-controls,
 .mcp-tool-actions,
 .mcp-add-form > footer,
-.mcp-confirm-panel > div {
+.mcp-confirm-actions {
   display: flex;
   align-items: center;
 }
@@ -3872,7 +3872,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   margin-top: 14px;
 }
 
-.mcp-danger-zone {
+.mcp-server-controls {
   padding-top: 20px;
   margin-top: 22px;
   justify-content: space-between;
@@ -4159,33 +4159,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   background: var(--ui-surface-canvas);
 }
 
-.mcp-confirm-panel {
-  position: sticky;
-  bottom: -1px;
-  padding: 15px;
-  margin: 20px -4px -1px;
-  border: 1px solid
-    color-mix(in srgb, var(--metask-state-error) 25%, transparent);
-  border-radius: 10px;
-  background: var(--ui-surface-canvas);
-  box-shadow: 0 -8px 28px rgba(37, 34, 45, 0.08);
-}
-
-.mcp-confirm-panel h3 {
-  margin: 0;
-  color: var(--metask-state-error);
-  font-size: var(--text-body);
-}
-
-.mcp-confirm-panel p {
-  margin: 6px 0 0;
-  color: var(--ui-content-muted);
-  font-size: var(--text-label);
-  line-height: 1.5;
-}
-
-.mcp-confirm-panel > div {
-  margin-top: 13px;
+.mcp-confirm-actions {
   justify-content: flex-end;
   gap: 8px;
 }
