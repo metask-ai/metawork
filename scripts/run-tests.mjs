@@ -52,11 +52,24 @@ export async function runNativeTests(root = repositoryRoot) {
   });
 }
 
+export async function runTestPhases(phases) {
+  const failures = [];
+  for (const run of phases) {
+    try {
+      await run();
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  if (failures.length !== 0) {
+    throw new AggregateError(failures, "repository test phases failed");
+  }
+}
+
 export async function runRepositoryTests(root = repositoryRoot) {
   await verifyStagedAgentCoreBundle(root);
   await typecheckRenderer(root);
-  await runNodeTests(root);
-  await runNativeTests(root);
+  await runTestPhases([() => runNodeTests(root), () => runNativeTests(root)]);
 }
 
 const isMain =

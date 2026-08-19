@@ -30,7 +30,13 @@ pub fn build(b: *std.Build) void {
     const lifecycle_fixture = createLifecycleFixture(b, test_modules, bundle.link_libc);
     test_modules.app.addImport("lifecycle_fixture", lifecycle_fixture);
     test_modules.bridge.addImport("lifecycle_fixture", lifecycle_fixture);
-    addLifecycleTests(b, test_modules, lifecycle_fixture, bundle.link_libc);
+    addLifecycleTests(
+        b,
+        test_modules,
+        lifecycle_fixture,
+        bundle.link_libc,
+        &artifacts.tests.step,
+    );
     addMcpConnectorTests(b, test_modules, bundle.link_libc);
     addMcpStdioTests(b, test_modules, bundle.link_libc);
     addMcpHttpTests(b, test_modules, bundle.link_libc);
@@ -106,6 +112,7 @@ fn addLifecycleTests(
     modules: WiredModules,
     fixture: *std.Build.Module,
     link_libc: bool,
+    default_step: *std.Build.Step,
 ) void {
     const test_filter = b.option([]const u8, "tfilter", "Lifecycle test name filter");
     const step = b.step("test-lifecycle", "Run invariant-grouped lifecycle tests");
@@ -133,6 +140,7 @@ fn addLifecycleTests(
         });
         const run = b.addRunArtifact(artifact);
         step.dependOn(&run.step);
+        default_step.dependOn(&run.step);
         if (std.mem.eql(u8, root, "tests/agent/lifecycle_test.zig"))
             agent_step.dependOn(&run.step);
     }

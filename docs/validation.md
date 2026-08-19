@@ -34,6 +34,20 @@ Task history recovery additionally requires record isolation: a malformed Worksp
 
 ## 3. 持续回归入口
 
+持续回归按失败模式归属，不按文件类型堆叠覆盖：
+
+| 层级 | 唯一职责 |
+| --- | --- |
+| Zig inline test | 单模块的纯状态转换、codec、容量和资源所有权不变量 |
+| `tests/agent/` | Session、callback、ABI、Agent Runtime 生命周期与并发 |
+| `tests/workbench/` | executor、产品事务、持久化、恢复和产品并发 |
+| `tests/integration/` | 必须跨两个以上 owner 才能出现的组合失败 |
+| Renderer/Node | 通过函数调用、DOM 或 SSR 观察的 Renderer 行为，以及跨语言 fixture |
+| architecture guard | owner 依赖方向、禁止依赖、精确 allowlist、catalog 一致性和 test graph 接线 |
+| probe / platform acceptance | candidate artifact、尚无确定性复现的依赖问题，或真实平台能力 |
+
+同一不变量只保留一个权威失败点。源码扫描不得代替产品行为、响应式布局、CSS、文案或函数内部顺序测试；架构守卫也不得断言测试数量。删除疑似重复的并发/lifecycle 测试前，应临时破坏对应不变量并确认保留侧会失败；若两侧分别覆盖纯状态与竞态，它们不是重复。probe 的结论进入合同和持续回归后，active tree 删除一次性脚本，并在对应合同保留可定位取证出处。
+
 ### 平台无关与当前开发环境
 
 ```bash
@@ -44,6 +58,8 @@ npm test
 ```
 
 `npm test` 必须覆盖 Renderer runtime、Zig serializer 与 TypeScript decoder 共用的投影 fixture、架构边界、AgentCore bundle 校验、child-process wrapper 和正式 Zig test graph。缺少 canonical staged bundle 时必须明确失败，不能跳过 AgentCore 相关用例后继续报告成功。
+
+Node 与 Native 两个测试阶段顺序执行并在末尾汇总失败；其中一侧失败不得遮蔽另一侧结果。candidate probe 与真实平台验收不混入普通确定性回归。
 
 Task 内容 Renderer 回归必须覆盖 Text/Skill 输入、redaction、Assistant Markdown 的 GFM/代码块/raw HTML 禁止/危险链接过滤、pending UI 阅读位置、terminal outcome 与每 Task 滚动隔离；主内容不得渲染 Tool、usage、Run ID、Compact history、resolved UI 或恢复 Agent surface/Timeline/conversation projection。
 

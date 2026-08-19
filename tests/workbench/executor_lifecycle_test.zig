@@ -515,10 +515,12 @@ test "restart restores a Task attachment and continues the same Conversation" {
     const workspace_id = try first.openWorkspace(workbenchTaskInput());
     var catalog = try waitCatalogReady(&first, workspace_id);
     _ = try first.setSkillEnabled(.{
-        .workspace_id = workspace_id,
-        .expected_workspace_epoch = try first.workspaceEpoch(workspace_id),
+        .scope = .{ .project = .{
+            .workspace_id = workspace_id,
+            .expected_workspace_epoch = try first.workspaceEpoch(workspace_id),
+        } },
         .skill_id = fixture.fixture_skill_id,
-        .enabled = false,
+        .state = .disabled,
         .expected_catalog_revision = catalog.revision,
         .expected_selection_revision = catalog.selection_revision.?,
     });
