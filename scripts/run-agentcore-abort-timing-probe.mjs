@@ -147,7 +147,7 @@ pub fn build(b: *std.Build) void {
     consumer.addImport("metask_agentcore", agentcore);
     const executable = b.addExecutable(.{ .name = "metawork-agentcore-abort-timing-probe", .root_module = consumer });
     const run = b.addRunArtifact(executable);
-    b.step("run", "Probe AgentCore model mutation boundaries").dependOn(&run.step);
+    b.step("run", "Probe AgentCore abort callback timing").dependOn(&run.step);
 }
 `,
   );
@@ -176,7 +176,7 @@ pub fn build(b: *std.Build) void {
       `-Dtarget=${bundle.target}`,
       "-Doptimize=Debug",
     ],
-    { cwd: consumerRoot, label: "isolated AgentCore model mutation probe" },
+    { cwd: consumerRoot, label: "isolated AgentCore abort timing probe" },
   );
   console.log(
     `AgentCore abort timing probe completed: ${bundle.manifest.version} ABI ${bundle.manifest.contract.binary_abi_version} revision ${bundle.manifest.contract.binary_abi_revision}`,

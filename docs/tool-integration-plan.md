@@ -114,7 +114,8 @@ WebSearch / WebFetch
 
 ## Verification note
 
-Phase 0 implementation evidence (Windows and macOS staged bundles, 2026-08-14): `node scripts/run-agentcore-probe.mjs --staged` verifies the locked bundle and creates a Session for each of the 11 names on the current target. The probe uses `shell_policy=unrestricted` because AgentCore correctly rejects shell names when shell policy is disabled. This proves name admission under the required shell condition; it does not replace per-tool execution evidence.
+Phase 0 implementation evidence (Windows and macOS staged bundles, 2026-08-14): the target-specific tool-name probe verified the locked bundle and created a Session for each of the 11 names on the current target. It used `shell_policy=unrestricted` because AgentCore correctly rejects shell names when shell policy is disabled. This proves name admission under the required shell condition; it does not replace per-tool execution evidence. The one-time name probe was removed after its conclusion entered this contract and the ordinary Task profile regression.
+
 - The desktop Application selects `full` for ordinary production Workbench Tasks, so the 11 verified built-ins are exposed to the model on both supported targets. `local` and `network` remain explicit restricted profile options.
 - The desktop restore path carries the same profile as fresh Task creation, so restart cannot silently fall back to a smaller default set.
 - The real vertical exercises the local built-ins in one AgentCore Run; `WebSearch` and `WebFetch` are exposed by the ordinary `full` profile as AgentCore built-in names, without a second executor or provider-specific MetaWork implementation.

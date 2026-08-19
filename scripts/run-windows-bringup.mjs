@@ -16,7 +16,7 @@ const steps = [
   ["run-tests.mjs", []],
   ["run-lifecycle-tests.mjs", []],
   ["build.mjs", ["debug"]],
-  ["run-agentcore-probe.mjs", ["--staged"]],
+  ["run-agentcore-restore-probe.mjs", ["--staged"]],
   ["run-agentcore-vertical-windows.mjs", []],
   ["build.mjs", ["release"]],
 ];
