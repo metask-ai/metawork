@@ -636,10 +636,13 @@ pub const RuntimeBuild = struct {
 };
 
 pub const HostEnvironment = struct {
+    executable_search_path: ?[]const u8 = null,
     windows_system_root: ?[]const u8 = null,
 
     pub fn fromProcess(environ_map: *const std.process.Environ.Map) HostEnvironment {
         return .{
+            .executable_search_path = environ_map.get("PATH") orelse
+                if (builtin.os.tag == .windows) environ_map.get("Path") else null,
             .windows_system_root = if (builtin.os.tag == .windows)
                 environ_map.get("SystemRoot")
             else
@@ -678,8 +681,18 @@ pub fn buildRuntime(
     for (preparation.server_states) |state| {
         if (state == .eligible) eligible_count += 1;
     }
-    if (eligible_count == 0)
-        return .{ .authorizations = .{ .allocator = allocator } };
+    if (eligible_count == 0) {
+        if (registry.generation == 0)
+            return .{ .authorizations = .{ .allocator = allocator } };
+        return .{
+            .input = try agent.McpRuntimeInput.init(
+                allocator,
+                registry.generation,
+                &.{},
+            ),
+            .authorizations = .{ .allocator = allocator },
+        };
+    }
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -881,11 +894,16 @@ fn createStdioOwner(
     };
     errdefer context.arena.deinit();
     errdefer secureEnvironmentDeinit(&context.environment);
-    try installStdioHostEnvironment(&context.environment, host_environment);
     const owned = context.arena.allocator();
     const argv = try owned.alloc([]const u8, server.transport.arguments.len + 1);
     argv[0] = try owned.dupe(u8, server.transport.command orelse
         return error.InvalidConfig);
+    try installStdioHostEnvironment(
+        &context.environment,
+        allocator,
+        host_environment,
+        argv[0],
+    );
     for (server.transport.arguments, argv[1..]) |argument, *target|
         target.* = try owned.dupe(u8, argument.literal orelse
             return error.InvalidConfig);
@@ -914,19 +932,55 @@ fn createStdioOwner(
 
 fn installStdioHostEnvironment(
     environment: *std.process.Environ.Map,
+    allocator: std.mem.Allocator,
     host_environment: HostEnvironment,
+    command: []const u8,
 ) BuildError!void {
-    if (builtin.os.tag != .windows) return;
-    const system_root = host_environment.windows_system_root orelse
+    const inherited_path = host_environment.executable_search_path orelse
         return error.InvalidConfig;
-    if (system_root.len == 0 or std.mem.indexOfScalar(u8, system_root, 0) != null)
+    if (inherited_path.len == 0 or
+        std.mem.indexOfScalar(u8, inherited_path, 0) != null)
         return error.InvalidConfig;
-    try environment.put("SystemRoot", system_root);
+    const command_directory = std.fs.path.dirname(command);
+    if (command_directory != null and std.fs.path.isAbsolute(command) and
+        command_directory.?.len != 0)
+    {
+        const value = try std.fmt.allocPrint(
+            allocator,
+            "{s}{c}{s}",
+            .{
+                command_directory.?,
+                if (builtin.os.tag == .windows) ';' else ':',
+                inherited_path,
+            },
+        );
+        defer allocator.free(value);
+        try environment.put(
+            if (builtin.os.tag == .windows) "Path" else "PATH",
+            value,
+        );
+    } else {
+        try environment.put(
+            if (builtin.os.tag == .windows) "Path" else "PATH",
+            inherited_path,
+        );
+    }
+
+    if (builtin.os.tag == .windows) {
+        const system_root = host_environment.windows_system_root orelse
+            return error.InvalidConfig;
+        if (system_root.len == 0 or
+            std.mem.indexOfScalar(u8, system_root, 0) != null)
+            return error.InvalidConfig;
+        try environment.put("SystemRoot", system_root);
+    }
 }
 
 fn reservedStdioEnvironmentName(name: []const u8) bool {
-    return builtin.os.tag == .windows and
-        std.ascii.eqlIgnoreCase(name, "SystemRoot");
+    if (builtin.os.tag == .windows)
+        return std.ascii.eqlIgnoreCase(name, "SystemRoot") or
+            std.ascii.eqlIgnoreCase(name, "Path");
+    return std.mem.eql(u8, name, "PATH");
 }
 
 const HttpContext = struct {
@@ -1532,27 +1586,53 @@ fn secureEnvironmentDeinit(environment: *std.process.Environ.Map) void {
     environment.deinit();
 }
 
-test "Windows STDIO receives only the required host process baseline" {
+test "STDIO receives only the required host process baseline" {
     var environment = std.process.Environ.Map.init(std.testing.allocator);
     defer secureEnvironmentDeinit(&environment);
+    try std.testing.expectError(
+        error.InvalidConfig,
+        installStdioHostEnvironment(
+            &environment,
+            std.testing.allocator,
+            .{},
+            if (builtin.os.tag == .windows) "C:\\Tools\\npx.cmd" else "/opt/tools/npx",
+        ),
+    );
     if (builtin.os.tag == .windows) {
-        try std.testing.expectError(
-            error.InvalidConfig,
-            installStdioHostEnvironment(&environment, .{}),
+        try installStdioHostEnvironment(
+            &environment,
+            std.testing.allocator,
+            .{
+                .executable_search_path = "C:\\Windows\\System32",
+                .windows_system_root = "C:\\Windows",
+            },
+            "C:\\Tools\\npx.cmd",
         );
-        try installStdioHostEnvironment(&environment, .{
-            .windows_system_root = "C:\\Windows",
-        });
-        try std.testing.expectEqual(@as(usize, 1), environment.count());
+        try std.testing.expectEqual(@as(usize, 2), environment.count());
         try std.testing.expectEqualStrings(
             "C:\\Windows",
             environment.get("SystemRoot").?,
         );
+        try std.testing.expectEqualStrings(
+            "C:\\Tools;C:\\Windows\\System32",
+            environment.get("Path").?,
+        );
         try std.testing.expect(reservedStdioEnvironmentName("SYSTEMROOT"));
+        try std.testing.expect(reservedStdioEnvironmentName("PATH"));
     } else {
-        try installStdioHostEnvironment(&environment, .{});
-        try std.testing.expectEqual(@as(usize, 0), environment.count());
+        try installStdioHostEnvironment(
+            &environment,
+            std.testing.allocator,
+            .{ .executable_search_path = "/usr/bin:/bin" },
+            "/opt/tools/npx",
+        );
+        try std.testing.expectEqual(@as(usize, 1), environment.count());
+        try std.testing.expectEqualStrings(
+            "/opt/tools:/usr/bin:/bin",
+            environment.get("PATH").?,
+        );
         try std.testing.expect(!reservedStdioEnvironmentName("SystemRoot"));
+        try std.testing.expect(reservedStdioEnvironmentName("PATH"));
     }
 }
 
@@ -2085,16 +2165,22 @@ test "MCP platform creates no owner and reads no credential before approval" {
     defer preparation.deinit();
     try std.testing.expectEqual(workbench.McpServerPreparationState.unapproved, preparation.server_states[0]);
     try std.testing.expectEqual(@as(usize, 0), resolver.calls);
-    try std.testing.expect((try buildRuntimeInput(
+    var input = (try buildRuntimeInput(
         std.testing.io,
         std.testing.allocator,
         &preparation,
         testHostEnvironment(),
-    )) == null);
+    )).?;
+    defer input.deinit();
+    try std.testing.expectEqual(@as(u64, 1), input.generation);
 }
 
 fn testHostEnvironment() HostEnvironment {
     return .{
+        .executable_search_path = if (builtin.os.tag == .windows)
+            "C:\\Windows\\System32"
+        else
+            "/usr/bin:/bin",
         .windows_system_root = if (builtin.os.tag == .windows)
             "C:\\Windows"
         else

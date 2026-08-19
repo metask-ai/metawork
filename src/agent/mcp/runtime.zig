@@ -25,8 +25,9 @@ pub const ServerInput = struct {
     client_name: []const u8,
     client_version: []const u8,
     timeout_ms: u32,
-    /// Non-secret Workbench Runtime Manifest identity. It is scoped to the
-    /// current immutable Runtime; live configuration apply remains disabled.
+    /// Non-secret Workbench Runtime Manifest identity. A changed value causes
+    /// AgentCore to replace the corresponding ServerInstance during a
+    /// declarative Runtime configuration apply.
     configuration_fingerprint: [32]u8,
     allowed_tools: []const []const u8 = &.{},
 };
@@ -132,8 +133,29 @@ pub const Servers = struct {
         config.mcp_catalog_limits = null;
     }
 
+    pub fn configuration(
+        self: *const Servers,
+        desired_revision: u64,
+    ) wire.McpConfigurationV1 {
+        std.debug.assert(desired_revision != 0);
+        return .{
+            .struct_size = @sizeOf(wire.McpConfigurationV1),
+            .reserved0 = 0,
+            .desired_revision = desired_revision,
+            .servers = if (self.descriptors.len == 0) null else self.descriptors.ptr,
+            .server_count = self.descriptors.len,
+            .reserved = [_]u64{0} ** 4,
+        };
+    }
+
     pub fn expectedServers(self: *const Servers) []const ExpectedServer {
         return self.expected;
+    }
+
+    pub fn isQuiescent(self: *const Servers) bool {
+        for (self.adapters[0..self.initialized_adapters]) |*adapter|
+            if (!adapter.isQuiescent()) return false;
+        return true;
     }
 
     pub fn deinit(self: *Servers) void {
@@ -281,6 +303,9 @@ test "Runtime input derives authority and consumes transport ownership linearly"
     runtime_config.struct_size = @sizeOf(wire.RuntimeConfigV1);
     servers.attach(&runtime_config);
     try std.testing.expectEqual(@as(u64, 1), runtime_config.mcp_server_count);
+    const configuration = servers.configuration(9);
+    try std.testing.expectEqual(@as(u64, 9), configuration.desired_revision);
+    try std.testing.expectEqual(@as(u64, 1), configuration.server_count);
     try std.testing.expectEqualStrings("files", try sdk.borrowedBytes(servers.descriptors[0].namespace));
     try std.testing.expectEqual(@as(usize, 1), servers.expectedServers().len);
     try std.testing.expectEqualStrings("local-files", servers.expectedServers()[0].id);

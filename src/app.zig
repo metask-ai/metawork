@@ -195,7 +195,9 @@ const App = struct {
             std.heap.c_allocator,
             self.io,
             workbench_storage,
+            agent_runtime,
             &self.mcp_credential_store.?,
+            &self.mcp_authorizations.?,
             mcp_management_host,
             mcp_host_environment,
         );

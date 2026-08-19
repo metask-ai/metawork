@@ -34,6 +34,7 @@ const OwnedCoreEvent = event_pump.OwnedCoreEvent;
 const McpActivation = root.McpActivation;
 const McpActivationOutcome = root.McpActivationOutcome;
 const McpActivationUnavailableReason = root.McpActivationUnavailableReason;
+const McpConfigurationApplyOutcome = root.McpConfigurationApplyOutcome;
 const McpSelection = root.McpSelection;
 const McpSelector = root.McpSelector;
 const McpServerAllowlist = root.McpServerAllowlist;
@@ -55,6 +56,8 @@ const McpRefreshLease = struct {
     expected_servers: []const mcp_runtime.ExpectedServer,
     registry_generation: ?u64,
 };
+
+const max_mcp_configuration_applies: usize = 128;
 
 pub const Runtime = struct {
     io: std.Io,
@@ -88,6 +91,8 @@ pub const Runtime = struct {
     mcp_registry_generation: ?u64,
     mcp_owner_id: u64,
     mcp_servers: mcp_runtime.Servers,
+    retired_mcp_servers: std.ArrayList(mcp_runtime.Servers) = .empty,
+    mcp_apply_revision: u64 = 0,
     next_session_id: u64 = 0,
 
     pub fn init(
@@ -313,6 +318,135 @@ pub const Runtime = struct {
             return err;
         };
         return projection;
+    }
+
+    /// Applies one complete MCP server set to the shared AgentCore Runtime.
+    /// The input is consumed only when AgentCore reports `applied`. Removed or
+    /// replaced connector owners remain alive until Runtime destruction so
+    /// existing Sessions can safely retain their creation-time authority.
+    pub fn applyMcpConfiguration(
+        self: *Runtime,
+        input: *root.McpRuntimeInput,
+    ) (Error || std.mem.Allocator.Error)!McpConfigurationApplyOutcome {
+        var reaped: [max_mcp_configuration_applies]mcp_runtime.Servers = undefined;
+        self.sessions_mutex.lockUncancelable(self.io);
+        if (self.shutting_down.load(.acquire)) {
+            self.sessions_mutex.unlock(self.io);
+            return error.RuntimeShuttingDown;
+        }
+        if (self.mcp_refresh_running) {
+            self.sessions_mutex.unlock(self.io);
+            return error.McpRefreshInProgress;
+        }
+        self.mcp_refresh_running = true;
+        self.active_mcp_calls += 1;
+        var reap_count: usize = 0;
+        var retired_index: usize = 0;
+        while (retired_index < self.retired_mcp_servers.items.len) {
+            if (!self.retired_mcp_servers.items[retired_index].isQuiescent()) {
+                retired_index += 1;
+                continue;
+            }
+            reaped[reap_count] = self.retired_mcp_servers.swapRemove(retired_index);
+            reap_count += 1;
+        }
+        self.sessions_mutex.unlock(self.io);
+        for (reaped[0..reap_count]) |*servers| servers.deinit();
+
+        self.sessions_mutex.lockUncancelable(self.io);
+        if (self.shutting_down.load(.acquire) or self.runtime == null) {
+            self.sessions_mutex.unlock(self.io);
+            self.finishMcpCall();
+            return error.RuntimeShuttingDown;
+        }
+        if (self.retired_mcp_servers.items.len >= max_mcp_configuration_applies or
+            self.mcp_apply_revision == std.math.maxInt(u64))
+        {
+            self.sessions_mutex.unlock(self.io);
+            self.finishMcpCall();
+            return error.McpConfigurationApplyLimit;
+        }
+        self.retired_mcp_servers.ensureUnusedCapacity(self.allocator, 1) catch |err| {
+            self.sessions_mutex.unlock(self.io);
+            self.finishMcpCall();
+            return err;
+        };
+        const raw_runtime = self.runtime orelse {
+            self.sessions_mutex.unlock(self.io);
+            self.finishMcpCall();
+            return error.RuntimeShuttingDown;
+        };
+        const desired_revision = self.mcp_apply_revision + 1;
+        const desired_generation = input.generation;
+        self.mcp_catalog_generation = null;
+        self.sessions_mutex.unlock(self.io);
+
+        var replacement = input.take() catch {
+            self.finishMcpCall();
+            return error.McpConfigurationApplyFailed;
+        };
+        var replacement_owned = true;
+        defer if (replacement_owned) replacement.deinit();
+        const configuration = replacement.configuration(desired_revision);
+        var report = std.mem.zeroes(wire.McpApplyReportV1);
+        report.struct_size = @sizeOf(wire.McpApplyReportV1);
+        var diagnostic = emptyOwnedBytes();
+        const status_code = self.api.runtimeApplyMcpConfiguration()(
+            raw_runtime,
+            &configuration,
+            &report,
+            &diagnostic,
+        );
+        releaseOwned(self.api, &diagnostic);
+        const status = sdk.Status.fromCode(status_code) catch {
+            self.finishMcpCall();
+            return error.McpConfigurationApplyFailed;
+        };
+        const disposition: McpConfigurationApplyOutcome = if (status == .ok)
+            switch (report.disposition_code) {
+                wire.MCP_APPLY_APPLIED => .applied,
+                wire.MCP_APPLY_SUPERSEDED => .superseded,
+                wire.MCP_APPLY_REJECTED => .rejected,
+                else => {
+                    self.finishMcpCall();
+                    return error.McpConfigurationApplyFailed;
+                },
+            }
+        else {
+            self.finishMcpCall();
+            return switch (status) {
+                .busy => error.McpRefreshInProgress,
+                .resource_limit => error.McpConfigurationApplyLimit,
+                else => error.McpConfigurationApplyFailed,
+            };
+        };
+        if (report.struct_size != @sizeOf(wire.McpApplyReportV1) or
+            report.desired_revision != desired_revision or
+            !std.mem.allEqual(u64, &report.reserved, 0) or
+            (disposition == .applied and report.active_revision != desired_revision))
+        {
+            self.finishMcpCall();
+            return error.McpConfigurationApplyFailed;
+        }
+
+        self.sessions_mutex.lockUncancelable(self.io);
+        std.debug.assert(self.active_mcp_calls > 0);
+        std.debug.assert(self.mcp_refresh_running);
+        if (disposition == .applied) {
+            const previous = self.mcp_servers;
+            self.mcp_servers = replacement;
+            replacement_owned = false;
+            self.retired_mcp_servers.appendAssumeCapacity(previous);
+            self.mcp_registry_generation = desired_generation;
+            self.mcp_apply_revision = desired_revision;
+        }
+        self.active_mcp_calls -= 1;
+        self.mcp_refresh_running = false;
+        const reject = self.shutting_down.load(.acquire);
+        self.shutdown_condition.broadcast(self.io);
+        self.sessions_mutex.unlock(self.io);
+        if (reject) return error.RuntimeShuttingDown;
+        return disposition;
     }
 
     fn beginMcpRefresh(self: *Runtime) Error!McpRefreshLease {
@@ -1181,6 +1315,8 @@ pub const Runtime = struct {
         }
         self.events.deinit();
         self.mcp_servers.deinit();
+        for (self.retired_mcp_servers.items) |*servers| servers.deinit();
+        self.retired_mcp_servers.deinit(self.allocator);
         self.allocator.free(self.session_reservations);
         self.allocator.free(self.sessions);
         const allocator = self.allocator;

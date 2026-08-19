@@ -430,7 +430,7 @@ pub const Backend = struct {
                 connection.backend.config.io,
                 &.{&buffer},
             ) catch return;
-            if (count == 0) continue;
+            if (count == 0) return;
             // Diagnostics are intentionally not published. Draining through a
             // fixed buffer prevents child blockage without creating a secret-
             // bearing log or a second product data plane.
@@ -525,6 +525,58 @@ test "stdio round trip owns one process and releases every pipe" {
     };
     defer std.testing.allocator.free(response);
     try std.testing.expectEqualStrings(request_bytes, response);
+    transport.close_fn(connection);
+    connection_open = false;
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        backend.active_connections.load(.acquire),
+    );
+}
+
+test "stdio close joins stderr drain after the child exits normally" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var environment = std.process.Environ.Map.init(std.testing.allocator);
+    defer environment.deinit();
+    var backend = try Backend.init(.{
+        .io = std.testing.io,
+        .allocator = std.testing.allocator,
+        .argv = &.{
+            "/bin/sh",
+            "-c",
+            "IFS= read -r line; printf '%s\\n' \"$line\"; exit 0",
+        },
+        .cwd = .inherit,
+        .environ_map = &environment,
+    });
+    defer backend.deinit() catch unreachable;
+    const transport = backend.transport();
+    const connection = switch (transport.open_fn(
+        transport.context,
+        .actual,
+        .modern_2026_07_28,
+        1000,
+    )) {
+        .connection => |value| value,
+        .failure => return error.TestUnexpectedResult,
+    };
+    var connection_open = true;
+    defer if (connection_open) transport.close_fn(connection);
+    const response = switch (transport.request_fn(
+        connection,
+        std.testing.allocator,
+        "{}",
+        1000,
+        .{},
+    )) {
+        .response => |value| value,
+        .failure => return error.TestUnexpectedResult,
+    };
+    defer std.testing.allocator.free(response);
+    try std.testing.expectEqualStrings("{}", response);
+    std.Io.Timeout.sleep(.{ .duration = .{
+        .raw = std.Io.Duration.fromMilliseconds(20),
+        .clock = .awake,
+    } }, std.testing.io) catch {};
     transport.close_fn(connection);
     connection_open = false;
     try std.testing.expectEqual(

@@ -97,6 +97,7 @@ import type {
   RunInputView,
   McpMutationResult,
   McpRefreshResult,
+  McpConfigurationApplyResult,
   McpConnectionTestResult,
   SkillMutationResult,
   SkillEnablementResult,
@@ -143,13 +144,6 @@ function mutationReasonMessageId(reason: MutationReason): MessageId {
 
 const automaticWorkspaceOptionId = "automatic";
 const continuationWaitTimeoutMs = 10_000;
-// MCP is gated off for 0.1.0: both transports currently have blocking
-// defects outside this page — AgentCore serializes notifications with
-// "params":[] (strict servers reject with 400), and the sanitized stdio
-// child environment (SystemRoot only) breaks npm-ecosystem servers on
-// Windows. The page, commands, and Host surface stay intact behind this
-// gate; flip it once the transports are fixed.
-const mcpPageEnabled = false;
 
 type ContinuationWaitResult =
   | { kind: "ready" }
@@ -1643,6 +1637,17 @@ export default function App() {
     }
   }
 
+  async function applyMcpConfiguration(): Promise<McpConfigurationApplyResult> {
+    try {
+      const result = await client.applyMcpConfiguration();
+      await refreshSnapshot();
+      return result;
+    } catch (error) {
+      await refreshSnapshot().catch(() => undefined);
+      throw error;
+    }
+  }
+
   async function testMcpConnection(
     expectedGeneration: string,
     serverId: string,
@@ -2363,22 +2368,20 @@ export default function App() {
                 </span>
                 <span>{t("skills.title")}</span>
               </button>
-              {mcpPageEnabled && (
-                <button
-                  className="sidebar-capability focus-ring"
-                  data-active={route === "mcp"}
-                  aria-current={route === "mcp" ? "page" : undefined}
-                  onClick={() => {
-                    pendingTaskSelection.current = null;
-                    setRoute("mcp");
-                  }}
-                >
-                  <span className="sidebar-capability-mark" aria-hidden="true">
-                    <Icon name="mcp" />
-                  </span>
-                  <span>{t("mcp.title")}</span>
-                </button>
-              )}
+              <button
+                className="sidebar-capability focus-ring"
+                data-active={route === "mcp"}
+                aria-current={route === "mcp" ? "page" : undefined}
+                onClick={() => {
+                  pendingTaskSelection.current = null;
+                  setRoute("mcp");
+                }}
+              >
+                <span className="sidebar-capability-mark" aria-hidden="true">
+                  <Icon name="mcp" />
+                </span>
+                <span>{t("mcp.title")}</span>
+              </button>
               {snapshot.capabilities.scheduledTaskPersistenceHealth !==
                 "unavailable" && (
                 <button
@@ -2632,6 +2635,7 @@ export default function App() {
             )
           }
           onTest={testMcpConnection}
+          onApply={applyMcpConfiguration}
           onRefresh={refreshMcpCatalog}
         />
       ) : route === "scheduled-tasks" ? (

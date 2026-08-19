@@ -208,6 +208,8 @@ pub const FakeCore = struct {
     mcp_refreshes: usize = 0,
     mcp_descriptions: usize = 0,
     mcp_updates: usize = 0,
+    mcp_configuration_applies: usize = 0,
+    last_mcp_apply_server_count: usize = 0,
     mcp_server_count: usize = 0,
     mcp_descriptor_valid: bool = false,
     last_mcp_update_selector_count: ?u64 = null,
@@ -242,6 +244,8 @@ pub const FakeCore = struct {
     forced_skill_update_status: ?u32 = null,
     forced_mcp_update_status: ?u32 = null,
     forced_mcp_refresh_status: ?u32 = null,
+    forced_mcp_apply_status: ?u32 = null,
+    forced_mcp_apply_disposition: ?u32 = null,
     forced_abort_status: ?u32 = null,
     forced_compact_status: ?u32 = null,
     forced_compact_abort_status: ?u32 = null,
@@ -377,6 +381,18 @@ pub const FakeCore = struct {
     pub fn forceNextMcpRefreshStatus(self: *FakeCore, status: u32) void {
         self.lock();
         self.forced_mcp_refresh_status = status;
+        self.unlock();
+    }
+
+    pub fn forceNextMcpApplyStatus(self: *FakeCore, status: u32) void {
+        self.lock();
+        self.forced_mcp_apply_status = status;
+        self.unlock();
+    }
+
+    pub fn forceNextMcpApplyDisposition(self: *FakeCore, disposition: u32) void {
+        self.lock();
+        self.forced_mcp_apply_disposition = disposition;
         self.unlock();
     }
 
@@ -1057,13 +1073,51 @@ pub fn runtimeDescribeMcp(
 }
 
 pub fn runtimeApplyMcpConfiguration(
-    _: ?*wire.RuntimeHandle,
-    _: ?*const wire.McpConfigurationV1,
-    _: ?*wire.McpApplyReportV1,
+    runtime: ?*wire.RuntimeHandle,
+    configuration: ?*const wire.McpConfigurationV1,
+    out_report: ?*wire.McpApplyReportV1,
     out_error: ?*wire.OwnedBytesV1,
 ) callconv(.c) u32 {
-    diagnostic(out_error);
-    return wire.STATUS_INVALID_ARGUMENT;
+    if (out_error) |out| out.* = .{ .ptr = null, .len = 0 };
+    const input = configuration orelse {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    };
+    const report = out_report orelse {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    };
+    if (runtime == null or input.struct_size != @sizeOf(wire.McpConfigurationV1) or
+        input.desired_revision == 0 or
+        (input.server_count == 0) != (input.servers == null))
+    {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    }
+    fake_core.lock();
+    defer fake_core.unlock();
+    fake_core.mcp_configuration_applies += 1;
+    fake_core.last_mcp_apply_server_count = @intCast(input.server_count);
+    if (fake_core.forced_mcp_apply_status) |status| {
+        fake_core.forced_mcp_apply_status = null;
+        diagnostic(out_error);
+        return status;
+    }
+    const disposition = fake_core.forced_mcp_apply_disposition orelse
+        wire.MCP_APPLY_APPLIED;
+    fake_core.forced_mcp_apply_disposition = null;
+    report.* = .{
+        .struct_size = @sizeOf(wire.McpApplyReportV1),
+        .disposition_code = disposition,
+        .desired_revision = input.desired_revision,
+        .active_revision = if (disposition == wire.MCP_APPLY_APPLIED)
+            input.desired_revision
+        else
+            input.desired_revision - 1,
+        .catalog_generation = 0,
+        .reserved = [_]u64{0} ** 4,
+    };
+    return wire.STATUS_OK;
 }
 
 pub fn sessionRestore(

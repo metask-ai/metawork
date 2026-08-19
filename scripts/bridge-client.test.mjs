@@ -155,6 +155,8 @@ test("MCP management uses only typed revision 1 commands", async () => {
   const client = new BridgeClient({
     bridge: bridgeWith(async (command, payload) => {
       calls.push({ command, payload });
+      if (command === "metawork.mcp.applyConfiguration")
+        return { outcome: "started" };
       if (command === "metawork.mcp.refreshCatalog")
         return { outcome: "started" };
       if (command === "metawork.mcp.testConnection")
@@ -198,6 +200,7 @@ test("MCP management uses only typed revision 1 commands", async () => {
   await client.setMcpAllowedTools("7", "server-1", ["search", "fetch"]);
   await client.removeMcpServer("7", "server-1");
   await client.testMcpConnection("7", "server-1");
+  await client.applyMcpConfiguration();
   await client.refreshMcpCatalog();
 
   assert.deepEqual(calls, [
@@ -281,6 +284,7 @@ test("MCP management uses only typed revision 1 commands", async () => {
       command: "metawork.mcp.testConnection",
       payload: { expectedDesiredGeneration: "7", serverId: "server-1" },
     },
+    { command: "metawork.mcp.applyConfiguration", payload: {} },
     { command: "metawork.mcp.refreshCatalog", payload: {} },
   ]);
 });

@@ -50,6 +50,7 @@ import {
   decodeSkillDetailResult,
   decodeMcpMutationResult,
   decodeMcpRefreshResult,
+  decodeMcpConfigurationApplyResult,
   decodeMcpConnectionTestResult,
   decodeMcpAuthorizationResult,
   decodeMcpAuthorizationCancelResult,
@@ -451,6 +452,12 @@ export class BridgeClient {
   async refreshMcpCatalog() {
     return decodeMcpRefreshResult(
       await this.invoke(commands.mcpRefreshCatalog, {}),
+    );
+  }
+
+  async applyMcpConfiguration() {
+    return decodeMcpConfigurationApplyResult(
+      await this.invoke(commands.mcpApplyConfiguration, {}),
     );
   }
 

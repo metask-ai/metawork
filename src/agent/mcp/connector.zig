@@ -167,6 +167,11 @@ pub const Adapter = struct {
         self.* = undefined;
     }
 
+    pub fn isQuiescent(self: *const Adapter) bool {
+        return self.active_connections.load(.acquire) == 0 and
+            self.connector_references.load(.acquire) == 1;
+    }
+
     pub fn descriptor(self: *Adapter) wire.McpConnectorV1 {
         return .{
             .struct_size = @sizeOf(wire.McpConnectorV1),

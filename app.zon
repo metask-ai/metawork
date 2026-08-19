@@ -45,6 +45,7 @@
             .{ .name = "metawork.mcp.setAllowedTools", .origins = .{"zero://app"} },
             .{ .name = "metawork.mcp.removeServer", .origins = .{"zero://app"} },
             .{ .name = "metawork.mcp.testConnection", .origins = .{"zero://app"} },
+            .{ .name = "metawork.mcp.applyConfiguration", .origins = .{"zero://app"} },
             .{ .name = "metawork.mcp.refreshCatalog", .origins = .{"zero://app"} },
             .{ .name = "metawork.workbench.snapshot", .origins = .{"zero://app"} },
             .{ .name = "metawork.workbench.snapshot.chunk", .origins = .{"zero://app"} },

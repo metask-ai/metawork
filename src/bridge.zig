@@ -18,6 +18,7 @@ pub const McpManagementHost = dispatcher_impl.McpManagementHost;
 pub const McpHostOutcome = dispatcher_impl.McpHostOutcome;
 pub const McpAuthorizationStartOutcome = dispatcher_impl.McpAuthorizationStartOutcome;
 pub const McpConnectionTestStartOutcome = dispatcher_impl.McpConnectionTestStartOutcome;
+pub const McpConfigurationApplyStartOutcome = dispatcher_impl.McpConfigurationApplyStartOutcome;
 pub const McpSecretSlot = dispatcher_impl.McpSecretSlot;
 pub const ModelConnectionHost = dispatcher_impl.ModelConnectionHost;
 pub const ModelConnectionCaptureOutcome = dispatcher_impl.ModelConnectionCaptureOutcome;

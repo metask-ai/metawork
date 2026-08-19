@@ -312,6 +312,7 @@ test("MCP management is capability-gated and identity checked", () => {
     availability: "degraded",
     managementHealth: "ready",
     operation: "idle",
+    configurationApply: "idle",
     authorizationOperation: { kind: "idle" },
     desiredGeneration: "1",
     runtimeAlignment: "current",

@@ -158,6 +158,13 @@ pub const ConnectionTestStartOutcome = enum {
     unavailable,
 };
 
+pub const ConfigurationApplyStartOutcome = enum {
+    started,
+    busy,
+    rejected,
+    unavailable,
+};
+
 pub const SecretSlot = workbench.McpSecretCaptureTarget;
 
 const oauth_timeout: std.Io.Clock.Duration = .{
@@ -498,16 +505,145 @@ const ConnectionTestJob = struct {
     }
 };
 
+const ConfigurationApplyResult = union(enum) {
+    pending,
+    applied: struct {
+        activation: ?*agent.McpActivation,
+        selection: ?*agent.McpSelection,
+        activation_failed: bool,
+    },
+    rejected,
+    failed,
+};
+
+const ConfigurationApplyJob = struct {
+    allocator: std.mem.Allocator,
+    host: Host,
+    generation: u64,
+    runtime: *agent.Runtime,
+    preparation: workbench.McpPreparedConfiguration,
+    manifest: workbench.McpRuntimeManifest,
+    input: ?agent.McpRuntimeInput,
+    authorizations: mcp_platform.HttpAuthorizations,
+    allowlists: []agent.McpServerAllowlist,
+    product_state_installed: bool = false,
+    result: ConfigurationApplyResult = .pending,
+    finished: std.atomic.Value(bool) = .init(false),
+    thread: ?std.Thread = null,
+
+    fn start(self: *ConfigurationApplyJob) std.Thread.SpawnError!void {
+        self.thread = try std.Thread.spawn(.{}, run, .{self});
+    }
+
+    fn run(self: *ConfigurationApplyJob) void {
+        const input = if (self.input) |*value| value else {
+            self.publish(.failed);
+            return;
+        };
+        const apply = self.runtime.applyMcpConfiguration(input) catch {
+            self.publish(.failed);
+            return;
+        };
+        if (apply != .applied) {
+            self.publish(.rejected);
+            return;
+        }
+        const activation_outcome = self.runtime.activateMcp() catch {
+            self.publish(.{ .applied = .{
+                .activation = null,
+                .selection = null,
+                .activation_failed = true,
+            } });
+            return;
+        };
+        switch (activation_outcome) {
+            .empty => self.publish(.{ .applied = .{
+                .activation = null,
+                .selection = null,
+                .activation_failed = false,
+            } }),
+            .unavailable => self.publish(.{ .applied = .{
+                .activation = null,
+                .selection = null,
+                .activation_failed = true,
+            } }),
+            .activated => |activation| {
+                if (activation.takeSelection()) |startup_selection|
+                    startup_selection.deinit();
+                const selection = self.runtime.createMcpAdmissionSelection(
+                    activation,
+                    self.allowlists,
+                ) catch {
+                    activation.deinit();
+                    self.publish(.{ .applied = .{
+                        .activation = null,
+                        .selection = null,
+                        .activation_failed = true,
+                    } });
+                    return;
+                };
+                self.publish(.{ .applied = .{
+                    .activation = activation,
+                    .selection = selection,
+                    .activation_failed = false,
+                } });
+            },
+        }
+    }
+
+    fn publish(self: *ConfigurationApplyJob, result: ConfigurationApplyResult) void {
+        self.result = result;
+        self.finished.store(true, .release);
+        self.host.notify();
+    }
+
+    fn join(self: *ConfigurationApplyJob) void {
+        const thread = self.thread orelse return;
+        thread.join();
+        self.thread = null;
+    }
+
+    fn takeAuthorizations(self: *ConfigurationApplyJob) mcp_platform.HttpAuthorizations {
+        const moved = self.authorizations;
+        self.authorizations = .{ .allocator = moved.allocator };
+        return moved;
+    }
+
+    fn deinit(self: *ConfigurationApplyJob) void {
+        std.debug.assert(self.thread == null);
+        switch (self.result) {
+            .applied => |applied| {
+                if (applied.selection) |selection| selection.deinit();
+                if (applied.activation) |activation| activation.deinit();
+            },
+            .pending, .rejected, .failed => {},
+        }
+        if (self.input) |*input| input.deinit();
+        self.authorizations.deinit();
+        if (!self.product_state_installed) {
+            self.manifest.deinit();
+            self.preparation.deinit();
+        }
+        if (self.allowlists.len != 0) self.allocator.free(self.allowlists);
+        const allocator = self.allocator;
+        self.* = undefined;
+        allocator.destroy(self);
+    }
+};
+
 pub const Coordinator = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     workbench_owner: *workbench.Workbench,
+    agent_runtime: *agent.Runtime,
     credential_store: *mcp_platform.CredentialStore,
+    active_authorizations: *mcp_platform.HttpAuthorizations,
     host: Host,
     host_environment: mcp_platform.HostEnvironment,
     transport_override: ?mcp_oauth.Transport = null,
     flow: ?*Flow = null,
     connection_test_job: ?*ConnectionTestJob = null,
+    configuration_apply_job: ?*ConfigurationApplyJob = null,
     last_cancel_outcome: ?Outcome = null,
     stopping: bool = false,
 
@@ -515,7 +651,9 @@ pub const Coordinator = struct {
         allocator: std.mem.Allocator,
         io: std.Io,
         workbench_owner: *workbench.Workbench,
+        agent_runtime: *agent.Runtime,
         credential_store: *mcp_platform.CredentialStore,
+        active_authorizations: *mcp_platform.HttpAuthorizations,
         host: Host,
         host_environment: mcp_platform.HostEnvironment,
     ) Coordinator {
@@ -523,7 +661,9 @@ pub const Coordinator = struct {
             .allocator = allocator,
             .io = io,
             .workbench_owner = workbench_owner,
+            .agent_runtime = agent_runtime,
             .credential_store = credential_store,
+            .active_authorizations = active_authorizations,
             .host = host,
             .host_environment = host_environment,
         };
@@ -546,7 +686,8 @@ pub const Coordinator = struct {
         expected_generation: u64,
         server_id: []const u8,
     ) !AuthorizationStartOutcome {
-        if (self.stopping or self.flow != null or self.connection_test_job != null)
+        if (self.stopping or self.flow != null or self.connection_test_job != null or
+            self.configuration_apply_job != null)
             return .rejected;
         self.last_cancel_outcome = null;
         if (!self.oauthAvailable()) return .capability_unavailable;
@@ -612,7 +753,8 @@ pub const Coordinator = struct {
         server_id: []const u8,
     ) !ConnectionTestStartOutcome {
         if (self.stopping) return .unavailable;
-        if (self.connection_test_job != null or self.flow != null) return .busy;
+        if (self.connection_test_job != null or self.configuration_apply_job != null or
+            self.flow != null) return .busy;
         const inspection = self.workbench_owner.inspectMcpDesiredConfiguration() orelse
             return .unavailable;
         if (inspection.desired_generation != expected_generation)
@@ -700,8 +842,134 @@ pub const Coordinator = struct {
         return .started;
     }
 
+    pub fn applyConfiguration(self: *Coordinator) !ConfigurationApplyStartOutcome {
+        if (self.stopping) return .unavailable;
+        if (self.configuration_apply_job != null or self.connection_test_job != null or
+            self.flow != null) return .busy;
+        const inspection = self.workbench_owner.inspectMcpDesiredConfiguration() orelse
+            return .unavailable;
+        if (inspection.health != .ready) return .unavailable;
+        const generation = inspection.desired_generation orelse return .rejected;
+        if (generation == 0) return .rejected;
+
+        const registry_storage = try self.allocator.alloc(
+            u8,
+            workbench.mcp_registry_max_bytes,
+        );
+        defer self.allocator.free(registry_storage);
+        const registry_bytes = self.workbench_owner.writeMcpDesiredConfiguration(
+            generation,
+            registry_storage,
+        ) catch return .unavailable;
+        var preparation = try workbench.prepareMcpConfiguration(
+            self.allocator,
+            registry_bytes,
+            true,
+            false,
+            self.credential_store.resolver(),
+            mcp_startup.configuration_limits,
+        );
+        var preparation_owned = true;
+        defer if (preparation_owned) preparation.deinit();
+        const manifest_optional = try workbench.McpRuntimeManifest.candidate(
+            self.allocator,
+            &preparation,
+        );
+        var manifest = manifest_optional orelse return .unavailable;
+        var manifest_owned = true;
+        defer if (manifest_owned) manifest.deinit();
+        var runtime_build = mcp_platform.buildRuntime(
+            self.io,
+            self.allocator,
+            &preparation,
+            self.host_environment,
+        ) catch return .unavailable;
+        var build_owned = true;
+        defer if (build_owned) runtime_build.deinit();
+        preparation.releaseCredentials();
+        if (runtime_build.input == null) return .rejected;
+
+        const registry = preparation.registry orelse return .unavailable;
+        var eligible_count: usize = 0;
+        for (preparation.server_states) |state| {
+            if (state == .eligible) eligible_count += 1;
+        }
+        const allowlists = try self.allocator.alloc(
+            agent.McpServerAllowlist,
+            eligible_count,
+        );
+        errdefer if (allowlists.len != 0) self.allocator.free(allowlists);
+        var write: usize = 0;
+        for (registry.value.servers, preparation.server_states) |server, state| {
+            if (state != .eligible) continue;
+            allowlists[write] = .{ .id = server.id, .tools = server.tools };
+            write += 1;
+        }
+        const job = try self.allocator.create(ConfigurationApplyJob);
+        errdefer self.allocator.destroy(job);
+        job.* = .{
+            .allocator = self.allocator,
+            .host = self.host,
+            .generation = generation,
+            .runtime = self.agent_runtime,
+            .preparation = preparation,
+            .manifest = manifest,
+            .input = runtime_build.input,
+            .authorizations = runtime_build.takeAuthorizations(),
+            .allowlists = allowlists,
+        };
+        runtime_build.input = null;
+        build_owned = false;
+        runtime_build.deinit();
+        preparation_owned = false;
+        manifest_owned = false;
+        self.workbench_owner.beginMcpConfigurationApply(generation) catch {
+            job.deinit();
+            return .busy;
+        };
+        job.start() catch {
+            self.workbench_owner.failMcpConfigurationApply(generation);
+            job.deinit();
+            return .unavailable;
+        };
+        self.configuration_apply_job = job;
+        return .started;
+    }
+
     pub fn drain(self: *Coordinator) bool {
         var changed = false;
+        if (self.configuration_apply_job) |apply_job| {
+            if (apply_job.finished.load(.acquire)) {
+                apply_job.join();
+                switch (apply_job.result) {
+                    .applied => |applied| {
+                        self.active_authorizations.deinit();
+                        self.active_authorizations.* = apply_job.takeAuthorizations();
+                        const installed = self.workbench_owner.completeMcpConfigurationApply(
+                            apply_job.generation,
+                            &apply_job.preparation,
+                            &apply_job.manifest,
+                            applied.activation,
+                            applied.selection,
+                            applied.activation_failed,
+                        );
+                        if (installed) {
+                            apply_job.product_state_installed = true;
+                            apply_job.result = .pending;
+                        } else self.workbench_owner.failMcpConfigurationApply(
+                            apply_job.generation,
+                        );
+                    },
+                    .rejected, .failed => self.workbench_owner.failMcpConfigurationApply(
+                        apply_job.generation,
+                    ),
+                    .pending => unreachable,
+                }
+                self.configuration_apply_job = null;
+                apply_job.deinit();
+                changed = true;
+            }
+        }
         if (self.connection_test_job) |test_job| {
             if (test_job.finished.load(.acquire)) {
                 test_job.join();
@@ -732,6 +1000,10 @@ pub const Coordinator = struct {
     pub fn shutdown(self: *Coordinator) void {
         if (self.stopping) return;
         self.stopping = true;
+        if (self.configuration_apply_job) |apply_job| {
+            apply_job.join();
+            _ = self.drain();
+        }
         if (self.connection_test_job) |test_job| {
             test_job.join();
             _ = self.drain();
@@ -765,7 +1037,8 @@ pub const Coordinator = struct {
         expected_generation: u64,
         server_id: []const u8,
     ) !Outcome {
-        if (self.stopping) return .rejected;
+        if (self.stopping or self.configuration_apply_job != null or
+            self.connection_test_job != null or self.flow != null) return .rejected;
         if (!self.connectionApprovalAvailable()) return .capability_unavailable;
         const inspection = self.workbench_owner.inspectMcpDesiredConfiguration() orelse
             return .rejected;
@@ -801,7 +1074,8 @@ pub const Coordinator = struct {
         server_id: []const u8,
         slot: SecretSlot,
     ) !Outcome {
-        if (self.stopping) return .rejected;
+        if (self.stopping or self.configuration_apply_job != null or
+            self.connection_test_job != null or self.flow != null) return .rejected;
         if (!self.secretCaptureAvailable()) return .capability_unavailable;
         const inspection = self.workbench_owner.inspectMcpDesiredConfiguration() orelse
             return .rejected;
@@ -1213,11 +1487,14 @@ pub const Coordinator = struct {
                     self.finishFlow(flow);
                     return;
                 };
+                const apply_after_finish = outcome == .saved or
+                    outcome == .saved_recovery_required;
                 switch (outcome) {
                     .saved, .saved_recovery_required, .indeterminate => self.releaseDurableId(flow),
                     .unchanged, .stale_generation, .rejected => _ = self.recoverDurable(flow),
                 }
                 self.finishFlow(flow);
+                if (apply_after_finish) _ = self.applyConfiguration() catch {};
             },
             .failed => |failure| {
                 if (durableFailureRequiresRecovery(failure))
@@ -1628,13 +1905,19 @@ test "MCP Application coordinator completes dynamic registration and OAuth loopb
     );
     const canonical_server_id = "mcp-7c7c7c7c7c7c7c7c7c7c";
     var credential_store: mcp_platform.CredentialStore = undefined;
+    var active_authorizations: mcp_platform.HttpAuthorizations = .{
+        .allocator = std.testing.allocator,
+    };
+    defer active_authorizations.deinit();
     var host_context: FakeHost = .{};
     var fake_http: FakeHttp = .{};
     var coordinator = Coordinator.init(
         std.testing.allocator,
         std.testing.io,
         &workbench_owner,
+        &agent_runtime,
         &credential_store,
+        &active_authorizations,
         .{
             .context = &host_context,
             .confirmation_available = true,

@@ -275,6 +275,84 @@ test "MCP Runtime takes one complete input and activation publishes unavailable 
     try std.testing.expect(valid);
 }
 
+test "MCP Runtime declaratively applies a replacement configuration" {
+    fake_core.reset();
+    var first_transport: McpFixtureTransport = .{};
+    var first_owner = lifecycle.McpTransportOwner.init(
+        first_transport.descriptor(),
+        McpFixtureTransport.deinit,
+    );
+    var initial = try lifecycle.McpRuntimeInput.init(std.testing.allocator, 1, &.{.{
+        .id = "first",
+        .transport_owner = &first_owner,
+        .transport = .stdio,
+        .namespace = "first",
+        .client_name = "MetaWork",
+        .client_version = "test",
+        .timeout_ms = 100,
+        .configuration_fingerprint = [_]u8{1} ** 32,
+    }});
+    defer initial.deinit();
+    const runtime = try lifecycle.Runtime.initWithApi(
+        std.testing.io,
+        std.testing.allocator,
+        &fake_api,
+        .{
+            .max_sessions = 1,
+            .mcp_input = &initial,
+        },
+    );
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+
+    var second_transport: McpFixtureTransport = .{};
+    var second_owner = lifecycle.McpTransportOwner.init(
+        second_transport.descriptor(),
+        McpFixtureTransport.deinit,
+    );
+    var replacement = try lifecycle.McpRuntimeInput.init(std.testing.allocator, 2, &.{.{
+        .id = "second",
+        .transport_owner = &second_owner,
+        .transport = .stdio,
+        .namespace = "second",
+        .client_name = "MetaWork",
+        .client_version = "test",
+        .timeout_ms = 100,
+        .configuration_fingerprint = [_]u8{2} ** 32,
+    }});
+    defer replacement.deinit();
+    try std.testing.expectEqual(
+        lifecycle.McpConfigurationApplyOutcome.applied,
+        try runtime.applyMcpConfiguration(&replacement),
+    );
+    try std.testing.expectEqual(@as(usize, 1), fake_core.mcp_configuration_applies);
+    try std.testing.expectEqual(@as(usize, 1), fake_core.last_mcp_apply_server_count);
+
+    var rejected_transport: McpFixtureTransport = .{};
+    var rejected_owner = lifecycle.McpTransportOwner.init(
+        rejected_transport.descriptor(),
+        McpFixtureTransport.deinit,
+    );
+    var rejected = try lifecycle.McpRuntimeInput.init(std.testing.allocator, 3, &.{.{
+        .id = "rejected",
+        .transport_owner = &rejected_owner,
+        .transport = .stdio,
+        .namespace = "rejected",
+        .client_name = "MetaWork",
+        .client_version = "test",
+        .timeout_ms = 100,
+        .configuration_fingerprint = [_]u8{3} ** 32,
+    }});
+    defer rejected.deinit();
+    fake_core.forceNextMcpApplyDisposition(wire.MCP_APPLY_REJECTED);
+    try std.testing.expectEqual(
+        lifecycle.McpConfigurationApplyOutcome.rejected,
+        try runtime.applyMcpConfiguration(&rejected),
+    );
+}
+
 test "MCP refresh failure immediately invalidates the previous selection generation" {
     fake_core.reset();
     const runtime = try createTestRuntime(.{ .max_sessions = 1 });

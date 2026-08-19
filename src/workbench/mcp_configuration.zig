@@ -821,6 +821,17 @@ pub const ManagementPort = struct {
             .unknown;
     }
 
+    /// Installs the proof for a Runtime configuration that AgentCore has
+    /// already accepted. The caller retains transaction authority and only
+    /// invokes this after the apply result is known.
+    pub fn installRuntimeManifest(
+        self: *ManagementPort,
+        replacement: *RuntimeManifest,
+    ) void {
+        if (self.runtime_manifest) |*manifest| manifest.deinit();
+        self.runtime_manifest = replacement.take();
+    }
+
     pub fn desiredRegistry(self: *const ManagementPort) ?RegistryWire {
         return if (self.desired) |registry| registry.value else null;
     }
@@ -5480,7 +5491,7 @@ test "file store mutation persistence commits target and clears the journal" {
     try std.testing.expect((try store.loadTransactionAlloc(std.testing.allocator)) == null);
 }
 
-test "management port owns fresh locators and keeps restart pending" {
+test "management port owns fresh locators and keeps Runtime replacement pending" {
     const Fake = struct {
         created: bool = false,
         retired: bool = false,
@@ -5698,7 +5709,7 @@ test "typed management creates approved enabled servers with an empty allowlist"
     try std.testing.expectEqual(@as(?u64, 1), management.inspect().desired_generation);
 }
 
-test "static secret rotation preserves approval and requires runtime restart" {
+test "static secret rotation preserves approval and requires Runtime replacement" {
     const Resolver = struct {
         fn resolve(
             _: ?*anyopaque,

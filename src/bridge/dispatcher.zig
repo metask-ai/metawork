@@ -135,6 +135,13 @@ pub const McpConnectionTestStartOutcome = enum {
     unavailable,
 };
 
+pub const McpConfigurationApplyStartOutcome = enum {
+    started,
+    busy,
+    rejected,
+    unavailable,
+};
+
 pub const McpSecretSlot = union(enum) {
     stdio_environment: []const u8,
     http_header: []const u8,
@@ -170,6 +177,7 @@ pub const McpManagementHost = struct {
     capture_fn: *const fn (*anyopaque, u64, []const u8, McpSecretSlot) anyerror!McpHostOutcome,
     authorize_fn: *const fn (*anyopaque, u64, []const u8) anyerror!McpAuthorizationStartOutcome,
     cancel_fn: *const fn (*anyopaque, []const u8) McpHostOutcome,
+    apply_fn: *const fn (*anyopaque) anyerror!McpConfigurationApplyStartOutcome,
 };
 
 pub const Dispatcher = struct {
@@ -273,6 +281,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.mcp_set_allowed_tools, .function = setMcpAllowedTools },
             .{ .name = commands.mcp_remove_server, .function = removeMcpServer },
             .{ .name = commands.mcp_test_connection, .function = testMcpConnection },
+            .{ .name = commands.mcp_apply_configuration, .function = applyMcpConfiguration },
             .{ .name = commands.mcp_refresh_catalog, .function = refreshMcpCatalog },
             .{ .name = commands.snapshot, .function = beginSnapshot },
             .{ .name = commands.snapshot_chunk, .function = fetchSnapshotChunk },
@@ -2401,12 +2410,32 @@ pub const Dispatcher = struct {
         return std.fmt.bufPrint(output, "{{\"outcome\":\"{s}\"}}", .{@tagName(outcome)});
     }
 
+    fn applyMcpConfiguration(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(handlers.Empty, invocation.request.payload);
+        defer parsed.deinit();
+        const host = self.mcp_management_host orelse
+            return std.fmt.bufPrint(output, "{{\"outcome\":\"unavailable\"}}", .{});
+        const outcome = try host.apply_fn(host.context);
+        if (outcome == .started) self.notifyCommitted();
+        return std.fmt.bufPrint(output, "{{\"outcome\":\"{s}\"}}", .{@tagName(outcome)});
+    }
+
     fn finishMcpMutation(
         self: *Dispatcher,
         workbench: *workbench_api.Workbench,
         output: []u8,
         outcome: workbench_api.McpManagementOutcome,
     ) ![]const u8 {
+        if (outcome == .saved or outcome == .saved_recovery_required)
+            self.startMcpConfigurationApplyIfNeeded(workbench);
         if (outcome != .unchanged and outcome != .stale_generation)
             self.notifyCommitted();
         const inspection = workbench.inspectMcpDesiredConfiguration();
@@ -2441,6 +2470,8 @@ pub const Dispatcher = struct {
         output: []u8,
         outcome: McpHostOutcome,
     ) ![]const u8 {
+        if (outcome == .saved or outcome == .saved_recovery_required)
+            self.startMcpConfigurationApplyIfNeeded(workbench);
         if (outcome == .saved or outcome == .saved_recovery_required or
             outcome == .indeterminate)
             self.notifyCommitted();
@@ -2455,6 +2486,18 @@ pub const Dispatcher = struct {
         else
             null;
         return encodeMcpTypedOutcome(output, @tagName(outcome), generation);
+    }
+
+    fn startMcpConfigurationApplyIfNeeded(
+        self: *Dispatcher,
+        workbench: *workbench_api.Workbench,
+    ) void {
+        const inspection = workbench.inspectMcpDesiredConfiguration() orelse return;
+        if (inspection.health != .ready or
+            inspection.runtime_alignment != .restart_required)
+            return;
+        const host = self.mcp_management_host orelse return;
+        _ = host.apply_fn(host.context) catch return;
     }
 
     fn encodeMcpTypedOutcome(
