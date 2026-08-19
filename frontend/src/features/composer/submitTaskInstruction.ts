@@ -13,6 +13,7 @@ export type TaskSubmissionClient = {
     workspace: TaskWorkspaceIntent,
     expectedExecutionGeneration: string,
     expectedSkillCatalogRevision: string | null,
+    expectedSkillSelectionRevision: string | null,
   ) => Promise<TaskCreateResult>;
   run: (
     taskId: string,
@@ -83,6 +84,7 @@ export async function submitTaskInstruction({
         workspace,
         expectedExecutionGeneration,
         input.kind === "skill" ? input.catalogRevision : null,
+        input.kind === "skill" ? input.selectionRevision : null,
       );
       if (!createdTask.accepted)
         return { kind: "create_rejected", reason: createdTask.reason };

@@ -47,7 +47,6 @@ const SessionControlBlock = session_binding.SessionControlBlock;
 const providerKindCode = session_wire.providerKindCode;
 const permissionModeCode = session_wire.permissionModeCode;
 const shellPolicyCode = session_wire.shellPolicyCode;
-const allSkillsEnabledSelection = session_wire.allSkillsEnabledSelection;
 const registered_builtin_tools = session_wire.registered_builtin_tools;
 const mcpUpdateStatusDisposition = root.mcpUpdateStatusDisposition;
 
@@ -602,6 +601,23 @@ pub const Runtime = struct {
                 ))
                 return error.CatalogBindingMismatch;
         }
+        if ((options.skill_catalog == null) != (options.skill_selection == null))
+            return error.InvalidSkillSelection;
+        const skill_selection_views = try self.allocator.alloc(
+            wire.BytesViewV1,
+            if (options.skill_selection) |selection|
+                selection.disabled_skill_ids.len
+            else
+                0,
+        );
+        defer self.allocator.free(skill_selection_views);
+        const skill_selection = if (options.skill_selection) |selection|
+            session_wire.skillSelection(
+                selection.disabled_skill_ids,
+                skill_selection_views,
+            ) catch return error.InvalidSkillSelection
+        else
+            undefined;
 
         self.sessions_mutex.lockUncancelable(self.io);
         defer self.sessions_mutex.unlock(self.io);
@@ -672,12 +688,11 @@ pub const Runtime = struct {
         host_config.base_url = sdk.bytesView(options.base_url);
         host_config.workspace_root = sdk.bytesView(workspace_root);
         host_config.workspace_home = sdk.bytesView(workspace_home);
-        const skill_selection = allSkillsEnabledSelection();
         host_config.skill_catalog = if (options.skill_catalog) |lease|
             catalog.rawHandle(lease)
         else
             null;
-        host_config.skill_selection = if (options.skill_catalog != null)
+        host_config.skill_selection = if (options.skill_selection != null)
             &skill_selection
         else
             null;
@@ -755,6 +770,24 @@ pub const Runtime = struct {
                 ))
                 return error.CatalogBindingMismatch;
         }
+        if ((session_options.skill_catalog == null) !=
+            (session_options.skill_selection == null))
+            return error.InvalidSkillSelection;
+        const skill_selection_views = try self.allocator.alloc(
+            wire.BytesViewV1,
+            if (session_options.skill_selection) |selection|
+                selection.disabled_skill_ids.len
+            else
+                0,
+        );
+        defer self.allocator.free(skill_selection_views);
+        const skill_selection = if (session_options.skill_selection) |selection|
+            session_wire.skillSelection(
+                selection.disabled_skill_ids,
+                skill_selection_views,
+            ) catch return error.InvalidSkillSelection
+        else
+            undefined;
 
         const session = try self.allocator.create(Session);
         var session_installed = false;
@@ -875,12 +908,11 @@ pub const Runtime = struct {
         host_config.base_url = sdk.bytesView(session_options.base_url);
         host_config.workspace_root = sdk.bytesView(workspace_root);
         host_config.workspace_home = sdk.bytesView(workspace_home);
-        const skill_selection = allSkillsEnabledSelection();
         host_config.skill_catalog = if (session_options.skill_catalog) |lease|
             catalog.rawHandle(lease)
         else
             null;
-        host_config.skill_selection = if (session_options.skill_catalog != null)
+        host_config.skill_selection = if (session_options.skill_selection != null)
             &skill_selection
         else
             null;

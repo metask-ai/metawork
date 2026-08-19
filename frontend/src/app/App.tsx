@@ -342,6 +342,7 @@ export default function App() {
         availability: "unavailable" as const,
         redacted: false,
         revision: null,
+        selectionRevision: null,
         skills: [],
         issues: [],
       })
@@ -349,6 +350,7 @@ export default function App() {
         availability: "unavailable" as const,
         redacted: false,
         revision: null,
+        selectionRevision: null,
         skills: [],
         issues: [],
       });
@@ -1477,7 +1479,12 @@ export default function App() {
     const descriptor = skillCatalog.skills.find(
       (skill) => skill.skillId === input.skillId,
     );
-    if (!descriptor || skillCatalog.revision !== input.catalogRevision)
+    if (
+      !descriptor ||
+      !descriptor.enabled ||
+      skillCatalog.revision !== input.catalogRevision ||
+      skillCatalog.selectionRevision === null
+    )
       return null;
     return {
       kind: "skill",
@@ -1485,6 +1492,7 @@ export default function App() {
       invocationName: input.invocationName,
       displayName: input.displayName,
       catalogRevision: input.catalogRevision,
+      selectionRevision: skillCatalog.selectionRevision,
       argumentNames: descriptor.argumentNames,
       argumentValues: input.argumentValues,
       maxValues: Math.min(descriptor.maxValues, maxSkillArguments),

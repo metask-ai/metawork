@@ -17,6 +17,9 @@ pub const Stores = struct {
     skill_management: ?workbench_api.SkillManagementFileStore = null,
     skill_management_restore_failed: bool = true,
     skill_management_restored_bytes: ?[]u8 = null,
+    skill_enablement: ?workbench_api.SkillEnablementFileStore = null,
+    skill_enablement_restore_failed: bool = true,
+    skill_enablement_restored_bytes: ?[]u8 = null,
 
     pub fn init(
         self: *Stores,
@@ -80,10 +83,25 @@ pub const Stores = struct {
             }
         else
             null;
+
+        self.skill_enablement = workbench_api.SkillEnablementFileStore.init(
+            io,
+            paths.workbenchDir(),
+        ) catch null;
+        self.skill_enablement_restore_failed = self.skill_enablement == null;
+        self.skill_enablement_restored_bytes = if (self.skill_enablement) |*store|
+            store.loadAlloc(allocator) catch failed: {
+                self.skill_enablement_restore_failed = true;
+                break :failed null;
+            }
+        else
+            null;
     }
 
     pub fn deinit(self: *Stores) void {
         const allocator = self.allocator;
+        if (self.skill_enablement_restored_bytes) |bytes| self.allocator.free(bytes);
+        if (self.skill_enablement) |*store| store.deinit();
         if (self.skill_management_restored_bytes) |bytes| self.allocator.free(bytes);
         if (self.skill_management) |*store| store.deinit();
         if (self.scheduled_task_restored_bytes) |bytes| self.allocator.free(bytes);

@@ -439,6 +439,11 @@ pub fn run(init: std.process.Init) !void {
             .restored_bytes = stores_state.skill_management_restored_bytes,
             .restore_failed = stores_state.skill_management_restore_failed,
         },
+        .skill_enablement = .{
+            .file_store = if (stores_state.skill_enablement) |*store| store else null,
+            .restored_bytes = stores_state.skill_enablement_restored_bytes,
+            .restore_failed = stores_state.skill_enablement_restore_failed,
+        },
     };
     defer {
         if (app.mcp_management) |*coordinator| {

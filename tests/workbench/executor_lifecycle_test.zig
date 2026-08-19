@@ -460,6 +460,18 @@ test "restart restores a Task attachment and continues the same Conversation" {
         root_storage[0..root_len],
     );
     defer checkpoint_store.deinit();
+    var skill_enablement_tmp = std.testing.tmpDir(.{});
+    defer skill_enablement_tmp.cleanup();
+    var skill_enablement_root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const skill_enablement_root_len = try skill_enablement_tmp.dir.realPath(
+        std.testing.io,
+        &skill_enablement_root_storage,
+    );
+    var skill_enablement_store = try workbench_api.SkillEnablementFileStore.init(
+        std.testing.io,
+        skill_enablement_root_storage[0..skill_enablement_root_len],
+    );
+    defer skill_enablement_store.deinit();
     const persistence_storage = try std.testing.allocator.alloc(
         u8,
         workbench_api.task_store_max_bytes,
@@ -482,6 +494,7 @@ test "restart restores a Task attachment and continues the same Conversation" {
         first_configuration.builtin_tool_profile = .local;
     first_configuration.task_persistence = persistence.capability();
     first_configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
+    first_configuration.skill_enablement = .{ .file_store = &skill_enablement_store };
     var first = try workbench_api.Workbench.init(
         std.testing.allocator,
         std.testing.io,
@@ -500,12 +513,22 @@ test "restart restores a Task attachment and continues the same Conversation" {
     defer if (first_workbench_live) first.deinit();
     try installWorkbenchExecution(&first);
     const workspace_id = try first.openWorkspace(workbenchTaskInput());
-    const catalog = try waitCatalogReady(&first, workspace_id);
+    var catalog = try waitCatalogReady(&first, workspace_id);
+    _ = try first.setSkillEnabled(.{
+        .workspace_id = workspace_id,
+        .expected_workspace_epoch = try first.workspaceEpoch(workspace_id),
+        .skill_id = fixture.fixture_skill_id,
+        .enabled = false,
+        .expected_catalog_revision = catalog.revision,
+        .expected_selection_revision = catalog.selection_revision.?,
+    });
+    catalog = try first.workspaceCatalog(workspace_id);
     const task_id = try first.createTaskInWorkspace(
         workspace_id,
         try first.workspaceEpoch(workspace_id),
         1,
         catalog.revision,
+        catalog.selection_revision,
     );
     _ = try first.runTask(task_id, .{ .text = "remember restart nonce" });
     try waitCheckpointRecord(&first, &persistence);
@@ -527,12 +550,20 @@ test "restart restores a Task attachment and continues the same Conversation" {
     fake_core.restore_last_run_id = 1;
     fake_core.restore_last_compact_id = 0;
     fake_core.unlock();
+    const restored_enablement = (try skill_enablement_store.loadAlloc(
+        std.testing.allocator,
+    )) orelse return error.TestExpectedEqual;
+    defer std.testing.allocator.free(restored_enablement);
     var second_configuration = workbenchConfiguration();
     second_configuration.directories.canonical_user_home = home;
     if (builtin.os.tag == .windows)
         second_configuration.builtin_tool_profile = .local;
     second_configuration.task_persistence = persistence.capabilityRestored(restart_history);
     second_configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
+    second_configuration.skill_enablement = .{
+        .file_store = &skill_enablement_store,
+        .restored_bytes = restored_enablement,
+    };
     var restored = try workbench_api.Workbench.init(
         std.testing.allocator,
         std.testing.io,
@@ -603,6 +634,18 @@ test "restart restores a Task attachment and continues the same Conversation" {
         "\"id\":\"1\"",
         "\"continuationAvailable\":true",
     );
+    const restored_catalog = try restored.taskCatalog(task_id);
+    try std.testing.expectEqual(@as(?u64, 2), restored_catalog.selection_revision);
+    try std.testing.expect(!restored_catalog.skills[0].enabled);
+    try std.testing.expectError(
+        error.SkillUnavailable,
+        restored.runTask(task_id, .{ .skill = .{
+            .skill_id = fixture.fixture_skill_id,
+            .catalog_revision = restored_catalog.revision,
+            .selection_revision = restored_catalog.selection_revision.?,
+            .argument_values = &.{},
+        } }),
+    );
     if (builtin.os.tag == .windows) {
         try std.testing.expectEqual(
             lifecycle.local_builtin_tools.len,
@@ -641,6 +684,10 @@ test "restart restores a Task attachment and continues the same Conversation" {
     third_configuration.directories.canonical_user_home = home;
     third_configuration.task_persistence = persistence.capabilityRestored(restart_history);
     third_configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
+    third_configuration.skill_enablement = .{
+        .file_store = &skill_enablement_store,
+        .restored_bytes = restored_enablement,
+    };
     var shutdown_restore = try workbench_api.Workbench.init(
         std.testing.allocator,
         std.testing.io,
@@ -1204,6 +1251,11 @@ test "Workbench pins an async catalog and admits typed Skill through the existin
         std.testing.allocator,
     );
     defer std.testing.allocator.free(home);
+    var skill_enablement_store = try workbench_api.SkillEnablementFileStore.init(
+        std.testing.io,
+        home,
+    );
+    defer skill_enablement_store.deinit();
     var workbench = try workbench_api.Workbench.init(
         std.testing.allocator,
         std.testing.io,
@@ -1216,7 +1268,10 @@ test "Workbench pins an async catalog and admits typed Skill through the existin
             .max_runs_per_task = 1,
             .max_tools_per_run = 1,
         },
-        .{ .directories = .{ .canonical_user_home = home } },
+        .{
+            .directories = .{ .canonical_user_home = home },
+            .skill_enablement = .{ .file_store = &skill_enablement_store },
+        },
     );
     defer workbench.deinit();
     try installWorkbenchExecution(&workbench);
@@ -1236,12 +1291,14 @@ test "Workbench pins an async catalog and admits typed Skill through the existin
         try workbench.workspaceEpoch(workspace_id),
         1,
         catalog.revision,
+        catalog.selection_revision,
     );
     const task_catalog = try workbench.taskCatalog(task_id);
     try std.testing.expectEqualStrings(catalog.revision, task_catalog.revision);
     _ = try workbench.runTask(task_id, .{ .skill = .{
         .skill_id = fixture.fixture_skill_id,
         .catalog_revision = catalog.revision,
+        .selection_revision = catalog.selection_revision.?,
         .argument_values = &.{ "src/main.zig", "correctness" },
     } });
     try waitWorkbenchSnapshot(
@@ -1314,6 +1371,7 @@ test "Manual Task persistence failure rolls back Workspace recent order" {
                 .expected_epoch = epoch,
             } },
             1,
+            null,
             null,
         ),
     );
@@ -1469,6 +1527,7 @@ test "automatic Workspace admission is Task-owned and Text-only" {
         .automatic,
         1,
         null,
+        null,
     );
     const first_workspace = try workbench.taskWorkspaceId(first_task);
     try std.testing.expectEqual(
@@ -1511,6 +1570,7 @@ test "automatic Workspace admission is Task-owned and Text-only" {
             try workbench.workspaceEpoch(first_workspace),
             1,
             null,
+            null,
         ),
     );
     try std.testing.expectError(
@@ -1518,6 +1578,7 @@ test "automatic Workspace admission is Task-owned and Text-only" {
         workbench.runTask(first_task, .{ .skill = .{
             .skill_id = fixture.fixture_skill_id,
             .catalog_revision = fixture.fixture_catalog_revision,
+            .selection_revision = 1,
             .argument_values = &.{},
         } }),
     );
@@ -1525,6 +1586,7 @@ test "automatic Workspace admission is Task-owned and Text-only" {
     const second_task = try workbench.createTaskForWorkspace(
         .automatic,
         1,
+        null,
         null,
     );
     const second_workspace = try workbench.taskWorkspaceId(second_task);
@@ -1607,7 +1669,7 @@ test "automatic Workspace creation rolls back record and empty directory on Sess
 
     try std.testing.expectError(
         error.TaskCapacity,
-        workbench.createTaskForWorkspace(.automatic, 1, null),
+        workbench.createTaskForWorkspace(.automatic, 1, null, null),
     );
     try std.testing.expectEqual(revision, workbench.currentRevision());
     try std.testing.expectEqual(@as(usize, 0), try directoryEntryCount(tmp.dir));
@@ -1764,8 +1826,8 @@ test "schedule rejection retains the automatic Task created before a full Run qu
     });
     fake_core.setNextPlan(.controlled);
     defer fake_core.releaseControlled();
-    const running_task = try workbench.createTaskForWorkspace(.automatic, 1, null);
-    const queued_task = try workbench.createTaskForWorkspace(.automatic, 1, null);
+    const running_task = try workbench.createTaskForWorkspace(.automatic, 1, null, null);
+    const queued_task = try workbench.createTaskForWorkspace(.automatic, 1, null, null);
     _ = try workbench.runTask(running_task, .{ .text = "hold worker" });
     try waitWorkbenchSnapshot(
         &workbench,
@@ -1805,6 +1867,11 @@ test "Workspace reauthorization reschedules the latest catalog query" {
         std.testing.allocator,
     );
     defer std.testing.allocator.free(home);
+    var skill_enablement_store = try workbench_api.SkillEnablementFileStore.init(
+        std.testing.io,
+        home,
+    );
+    defer skill_enablement_store.deinit();
     var workbench = try workbench_api.Workbench.init(
         std.testing.allocator,
         std.testing.io,
@@ -1817,7 +1884,10 @@ test "Workspace reauthorization reschedules the latest catalog query" {
             .max_runs_per_task = 1,
             .max_tools_per_run = 1,
         },
-        .{ .directories = .{ .canonical_user_home = home } },
+        .{
+            .directories = .{ .canonical_user_home = home },
+            .skill_enablement = .{ .file_store = &skill_enablement_store },
+        },
     );
     defer workbench.deinit();
     defer fake_core.releaseCatalogQuery();
@@ -1861,6 +1931,11 @@ test "Workbench rejects stale Skill identity before Session or Run mutation and 
         std.testing.allocator,
     );
     defer std.testing.allocator.free(home);
+    var skill_enablement_store = try workbench_api.SkillEnablementFileStore.init(
+        std.testing.io,
+        home,
+    );
+    defer skill_enablement_store.deinit();
     var workbench = try workbench_api.Workbench.init(
         std.testing.allocator,
         std.testing.io,
@@ -1873,7 +1948,10 @@ test "Workbench rejects stale Skill identity before Session or Run mutation and 
             .max_runs_per_task = 1,
             .max_tools_per_run = 1,
         },
-        .{ .directories = .{ .canonical_user_home = home } },
+        .{
+            .directories = .{ .canonical_user_home = home },
+            .skill_enablement = .{ .file_store = &skill_enablement_store },
+        },
     );
     defer workbench.deinit();
     try installWorkbenchExecution(&workbench);
@@ -1887,6 +1965,7 @@ test "Workbench rejects stale Skill identity before Session or Run mutation and 
             try workbench.workspaceEpoch(workspace_id),
             1,
             "stale-revision",
+            catalog.selection_revision,
         ),
     );
     fake_core.lock();
@@ -1900,12 +1979,14 @@ test "Workbench rejects stale Skill identity before Session or Run mutation and 
         try workbench.workspaceEpoch(workspace_id),
         1,
         catalog.revision,
+        catalog.selection_revision,
     );
     try std.testing.expectError(
         error.StaleCatalog,
         workbench.runTask(task_id, .{ .skill = .{
             .skill_id = fixture.fixture_skill_id,
             .catalog_revision = "stale-revision",
+            .selection_revision = catalog.selection_revision.?,
             .argument_values = &.{},
         } }),
     );
@@ -1917,6 +1998,7 @@ test "Workbench rejects stale Skill identity before Session or Run mutation and 
     _ = try workbench.runTask(task_id, .{ .skill = .{
         .skill_id = fixture.fixture_skill_id,
         .catalog_revision = catalog.revision,
+        .selection_revision = catalog.selection_revision.?,
         .argument_values = &.{},
     } });
     try waitWorkbenchSnapshot(
@@ -1950,6 +2032,11 @@ test "Workbench refreshes a Task only from the committed Workspace catalog while
         std.testing.allocator,
     );
     defer std.testing.allocator.free(home);
+    var skill_enablement_store = try workbench_api.SkillEnablementFileStore.init(
+        std.testing.io,
+        home,
+    );
+    defer skill_enablement_store.deinit();
     var workbench = try workbench_api.Workbench.init(
         std.testing.allocator,
         std.testing.io,
@@ -1962,7 +2049,10 @@ test "Workbench refreshes a Task only from the committed Workspace catalog while
             .max_runs_per_task = 1,
             .max_tools_per_run = 1,
         },
-        .{ .directories = .{ .canonical_user_home = home } },
+        .{
+            .directories = .{ .canonical_user_home = home },
+            .skill_enablement = .{ .file_store = &skill_enablement_store },
+        },
     );
     defer workbench.deinit();
     try installWorkbenchExecution(&workbench);
@@ -1974,6 +2064,7 @@ test "Workbench refreshes a Task only from the committed Workspace catalog while
         workspace_id,
         try workbench.workspaceEpoch(workspace_id),
         1,
+        null,
         null,
     );
     _ = try workbench.runTask(task_id, .{ .text = "hold refresh" });

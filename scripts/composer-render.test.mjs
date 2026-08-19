@@ -49,6 +49,7 @@ const base = {
     availability: "ready",
     redacted: false,
     revision: "4",
+    selectionRevision: "1",
     skills: [],
     issues: [],
   },

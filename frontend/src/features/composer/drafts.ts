@@ -82,6 +82,7 @@ function skillDraftPersistable(draft: ComposerSkillDraft) {
     !boundedNonEmptyString(draft.invocationName) ||
     !boundedNonEmptyString(draft.displayName) ||
     !boundedNonEmptyString(draft.catalogRevision) ||
+    !boundedNonEmptyString(draft.selectionRevision) ||
     !Number.isInteger(draft.maxValues) ||
     draft.maxValues < 0 ||
     draft.maxValues > maxSkillArguments ||
@@ -118,6 +119,7 @@ function decodeSkillDraft(
       "invocationName",
       "displayName",
       "catalogRevision",
+      "selectionRevision",
       "argumentNames",
       "argumentValues",
       "maxValues",
@@ -127,6 +129,7 @@ function decodeSkillDraft(
     !boundedNonEmptyString(draft.invocationName) ||
     !boundedNonEmptyString(draft.displayName) ||
     !boundedNonEmptyString(draft.catalogRevision) ||
+    !boundedNonEmptyString(draft.selectionRevision) ||
     !Number.isInteger(draft.maxValues) ||
     (draft.maxValues as number) < 0 ||
     (draft.maxValues as number) > maxSkillArguments ||
@@ -151,6 +154,7 @@ function decodeSkillDraft(
     invocationName: draft.invocationName,
     displayName: draft.displayName,
     catalogRevision: draft.catalogRevision,
+    selectionRevision: draft.selectionRevision,
     argumentNames: draft.argumentNames,
     argumentValues: draft.argumentValues,
     maxValues,

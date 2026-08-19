@@ -114,6 +114,7 @@ pub const builtinToolsForProfile = session_impl.builtinToolsForProfile;
 pub const EventReadyNotification = session_impl.EventReadyNotification;
 pub const EventReadyNotifier = session_impl.EventReadyNotifier;
 pub const SessionOpenOptions = session_impl.SessionOpenOptions;
+pub const SkillSelectionInput = session_impl.SkillSelectionInput;
 pub const SessionRestoreOptions = session_impl.SessionRestoreOptions;
 pub const SessionRestoreRoute = session_impl.SessionRestoreRoute;
 pub const Limits = session_impl.Limits;

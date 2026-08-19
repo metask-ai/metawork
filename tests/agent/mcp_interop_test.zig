@@ -735,6 +735,7 @@ test "MCP product chain reaches new Task authority after add restart refresh and
         try restarted_workbench.workspaceEpoch(workspace_id),
         1,
         null,
+        null,
     );
     try std.testing.expect(task_id != 0);
     var snapshot_storage: [512 * 1024]u8 = undefined;

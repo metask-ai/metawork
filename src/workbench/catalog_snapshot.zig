@@ -12,6 +12,7 @@ pub const SkillProjection = struct {
     description: []const u8,
     argument_names: []const []const u8,
     max_values: u32,
+    enabled: bool = true,
 };
 
 pub const CatalogIssueProjection = struct {
@@ -23,6 +24,7 @@ pub const CatalogProjection = struct {
     availability: CatalogAvailability,
     redacted: bool = false,
     revision: []const u8 = "",
+    selection_revision: ?u64 = null,
     skills: []const SkillProjection = &.{},
     issues: []const CatalogIssueProjection = &.{},
 };
@@ -40,10 +42,11 @@ pub const Snapshot = struct {
     arena: std.heap.ArenaAllocator,
     revision: []const u8,
     health: lifecycle.CatalogHealth,
-    skills: []const SkillProjection,
+    skills: []SkillProjection,
     issues: []const CatalogIssueProjection,
     projected_bytes: usize,
     redacted: bool = false,
+    selection_revision: ?u64 = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -110,6 +113,7 @@ pub const Snapshot = struct {
                 .description = try owned.dupe(u8, skill.description),
                 .argument_names = argument_names,
                 .max_values = skill.max_values,
+                .enabled = true,
             };
         }
         const issues = try owned.alloc(
@@ -160,6 +164,7 @@ pub const Snapshot = struct {
                 .description = try owned.dupe(u8, skill.description),
                 .argument_names = argument_names,
                 .max_values = skill.max_values,
+                .enabled = skill.enabled,
             };
         }
         const issues = try owned.alloc(CatalogIssueProjection, self.issues.len);
@@ -178,6 +183,7 @@ pub const Snapshot = struct {
             .issues = issues,
             .projected_bytes = self.projected_bytes,
             .redacted = self.redacted,
+            .selection_revision = self.selection_revision,
         };
     }
 
@@ -189,6 +195,7 @@ pub const Snapshot = struct {
             },
             .redacted = self.redacted,
             .revision = self.revision,
+            .selection_revision = self.selection_revision,
             .skills = self.skills,
             .issues = self.issues,
         };
@@ -201,6 +208,24 @@ pub const Snapshot = struct {
         for (self.skills) |*skill|
             if (std.mem.eql(u8, skill.skill_id, skill_id)) return skill;
         return null;
+    }
+
+    pub fn applyEnablement(
+        self: *Snapshot,
+        selection_revision: u64,
+        disabled_skill_ids: anytype,
+    ) void {
+        std.debug.assert(selection_revision != 0);
+        self.selection_revision = selection_revision;
+        for (self.skills) |*skill| {
+            skill.enabled = true;
+            for (disabled_skill_ids) |disabled| {
+                if (std.mem.eql(u8, skill.skill_id, disabled)) {
+                    skill.enabled = false;
+                    break;
+                }
+            }
+        }
     }
 
     pub fn identityContainsCredential(

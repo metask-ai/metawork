@@ -45,6 +45,7 @@ import {
   decodeWorkspaceChoice,
   decodeSkillImportPreview,
   decodeSkillMutationResult,
+  decodeSkillEnablementResult,
   decodeSkillExportResult,
   decodeSkillDetailResult,
   decodeMcpMutationResult,
@@ -273,6 +274,26 @@ export class BridgeClient {
   async skillDetail(installId: string) {
     return decodeSkillDetailResult(
       await this.invoke(commands.skillDetail, { installId }),
+    );
+  }
+
+  async setSkillEnabled(
+    workspaceId: string,
+    expectedWorkspaceEpoch: string,
+    skillId: string,
+    enabled: boolean,
+    expectedCatalogRevision: string,
+    expectedSelectionRevision: string,
+  ) {
+    return decodeSkillEnablementResult(
+      await this.invoke(commands.setSkillEnabled, {
+        workspaceId,
+        expectedWorkspaceEpoch,
+        skillId,
+        enabled,
+        expectedCatalogRevision,
+        expectedSelectionRevision,
+      }),
     );
   }
 
@@ -569,12 +590,14 @@ export class BridgeClient {
     workspace: TaskWorkspaceIntent,
     expectedExecutionGeneration: string,
     expectedSkillCatalogRevision: string | null,
+    expectedSkillSelectionRevision: string | null,
   ) {
     return decodeTaskCreateResult(
       await this.invoke(commands.createTask, {
         workspace,
         expectedExecutionGeneration,
         expectedSkillCatalogRevision,
+        expectedSkillSelectionRevision,
       }),
     );
   }

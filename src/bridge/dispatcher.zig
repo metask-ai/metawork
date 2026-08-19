@@ -252,6 +252,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.choose_workspace, .function = chooseWorkspace },
             .{ .name = commands.refresh_workspace_skill_catalog, .function = refreshWorkspaceSkillCatalog },
             .{ .name = commands.refresh_skill_catalog, .function = refreshSkillCatalog },
+            .{ .name = commands.set_skill_enabled, .function = setSkillEnabled },
             .{ .name = commands.choose_skill_import, .function = chooseSkillImport },
             .{ .name = commands.install_skill, .function = installSkill },
             .{ .name = commands.reimport_skill, .function = reimportSkill },
@@ -1188,11 +1189,19 @@ pub const Dispatcher = struct {
         );
         if (parsed.value.expectedSkillCatalogRevision) |revision|
             if (revision.len == 0) return error.InvalidBridgePayload;
+        if ((parsed.value.expectedSkillCatalogRevision == null) !=
+            (parsed.value.expectedSkillSelectionRevision == null))
+            return error.InvalidBridgePayload;
+        const skill_selection_revision = if (parsed.value.expectedSkillSelectionRevision) |revision|
+            try handlers.parseWireId(revision)
+        else
+            null;
         const workbench = try self.requireWorkbench();
         const task_id = workbench.createTaskForWorkspace(
             workspace_request,
             execution_generation,
             parsed.value.expectedSkillCatalogRevision,
+            skill_selection_revision,
         ) catch |err| {
             if (taskCreateRejection(err)) |reason|
                 return encodeTaskCreateResult(output, false, null, null, reason);
@@ -1235,6 +1244,7 @@ pub const Dispatcher = struct {
                 break :skill_input .{ .skill = .{
                     .skill_id = skill.skill_id,
                     .catalog_revision = skill.catalog_revision,
+                    .selection_revision = skill.selection_revision,
                     .argument_values = skill.argument_values,
                 } };
             },
@@ -1482,6 +1492,50 @@ pub const Dispatcher = struct {
         };
         self.notifyCommitted();
         return encodeSkillCatalogRefreshResult(output, true, null);
+    }
+
+    fn setSkillEnabled(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(
+            handlers.SkillSetEnabled,
+            invocation.request.payload,
+        );
+        defer parsed.deinit();
+        if (parsed.value.skillId.len == 0 or
+            parsed.value.expectedCatalogRevision.len == 0)
+            return error.InvalidBridgePayload;
+        const next_revision = (try self.requireWorkbench()).setSkillEnabled(.{
+            .workspace_id = try handlers.parseWireId(parsed.value.workspaceId),
+            .expected_workspace_epoch = try handlers.parseWireId(
+                parsed.value.expectedWorkspaceEpoch,
+            ),
+            .skill_id = parsed.value.skillId,
+            .enabled = parsed.value.enabled,
+            .expected_catalog_revision = parsed.value.expectedCatalogRevision,
+            .expected_selection_revision = try handlers.parseWireId(
+                parsed.value.expectedSelectionRevision,
+            ),
+        }) catch |err| {
+            const reason = skillMutationRejection(err) orelse return err;
+            return std.fmt.bufPrint(
+                output,
+                "{{\"applied\":false,\"selectionRevision\":null,\"reason\":\"{s}\"}}",
+                .{reason},
+            );
+        };
+        self.notifyCommitted();
+        return std.fmt.bufPrint(
+            output,
+            "{{\"applied\":true,\"selectionRevision\":\"{d}\",\"reason\":null}}",
+            .{next_revision},
+        );
     }
 
     fn chooseSkillImport(
@@ -2901,6 +2955,7 @@ fn taskRunRejection(err: anyerror) ?[]const u8 {
         error.CatalogUnavailable => "catalog_unavailable",
         error.StaleCatalog => "stale_catalog",
         error.SkillNotFound => "skill_not_found",
+        error.SkillUnavailable => "skill_unavailable",
         error.InvalidSkillArguments => "invalid_skill_arguments",
         error.RunCapacity, error.QueueFull, error.ProjectionCapacity => "capacity_reached",
         error.ExecutorShuttingDown => "shutting_down",
@@ -3006,21 +3061,32 @@ fn skillMutationRejection(err: anyerror) ?[]const u8 {
         error.SkillDefinitionMissing,
         error.SourceUnavailable,
         error.ArchiveCorrupt,
+        error.InvalidSkillId,
         => "source_changed",
-        error.AssetNotFound => "asset_unavailable",
+        error.AssetNotFound, error.SkillNotFound => "asset_unavailable",
         error.TransactionAlreadyActive,
         error.TransactionMissing,
         error.InvalidTransaction,
+        error.RevisionMismatch,
+        error.StaleCatalog,
         => "state_changed",
         error.TargetAlreadyExists, error.DuplicateTarget => "target_exists",
         error.TaskBusy => "busy",
         error.CatalogLoading => "catalog_loading",
         error.WorkspaceEpochMismatch => "workspace_changed",
         error.UnknownWorkspace, error.WorkspaceUnavailable => "workspace_unavailable",
-        error.ProjectionCapacity, error.QueueFull => "capacity_reached",
+        error.ProjectionCapacity,
+        error.QueueFull,
+        error.WorkspaceCapacity,
+        error.SkillCapacity,
+        error.RevisionExhausted,
+        error.StoreTooLarge,
+        error.StoreEncodeFailed,
+        => "capacity_reached",
         error.ExecutorShuttingDown => "shutting_down",
         error.PersistenceFailed,
         error.PersistenceOutcomeUnknown,
+        error.WriteFailed,
         error.FileTransactionFailed,
         error.CandidateUnavailable,
         error.TargetUnavailable,
@@ -4038,7 +4104,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
 
     const stale_create = try std.fmt.bufPrint(
         &workspace_request_storage,
-        "{{\"id\":\"stale-create\",\"command\":\"metawork.tasks.create\",\"payload\":{{\"workspace\":{{\"kind\":\"manual\",\"workspaceId\":\"{d}\",\"expectedWorkspaceEpoch\":\"1\"}},\"expectedExecutionGeneration\":\"99\",\"expectedSkillCatalogRevision\":null}}}}",
+        "{{\"id\":\"stale-create\",\"command\":\"metawork.tasks.create\",\"payload\":{{\"workspace\":{{\"kind\":\"manual\",\"workspaceId\":\"{d}\",\"expectedWorkspaceEpoch\":\"1\"}},\"expectedExecutionGeneration\":\"99\",\"expectedSkillCatalogRevision\":null,\"expectedSkillSelectionRevision\":null}}}}",
         .{workspace_id},
     );
     const rejected_create = native_dispatcher.dispatch(
@@ -4053,7 +4119,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
     ) != null);
 
     const automatic_create = native_dispatcher.dispatch(
-        "{\"id\":\"automatic-create\",\"command\":\"metawork.tasks.create\",\"payload\":{\"workspace\":{\"kind\":\"automatic\"},\"expectedExecutionGeneration\":\"1\",\"expectedSkillCatalogRevision\":null}}",
+        "{\"id\":\"automatic-create\",\"command\":\"metawork.tasks.create\",\"payload\":{\"workspace\":{\"kind\":\"automatic\"},\"expectedExecutionGeneration\":\"1\",\"expectedSkillCatalogRevision\":null,\"expectedSkillSelectionRevision\":null}}",
         source,
         &response,
     );
@@ -4066,7 +4132,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
     var request_storage: [256]u8 = undefined;
     const request = try std.fmt.bufPrint(
         &request_storage,
-        "{{\"id\":\"create\",\"command\":\"metawork.tasks.create\",\"payload\":{{\"workspace\":{{\"kind\":\"manual\",\"workspaceId\":\"{d}\",\"expectedWorkspaceEpoch\":\"1\"}},\"expectedExecutionGeneration\":\"1\",\"expectedSkillCatalogRevision\":null}}}}",
+        "{{\"id\":\"create\",\"command\":\"metawork.tasks.create\",\"payload\":{{\"workspace\":{{\"kind\":\"manual\",\"workspaceId\":\"{d}\",\"expectedWorkspaceEpoch\":\"1\"}},\"expectedExecutionGeneration\":\"1\",\"expectedSkillCatalogRevision\":null,\"expectedSkillSelectionRevision\":null}}}}",
         .{workspace_id},
     );
     var lost_response: [32]u8 = undefined;

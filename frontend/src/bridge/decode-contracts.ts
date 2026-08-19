@@ -21,6 +21,7 @@ import {
   type ScheduledTaskView,
   type SkillCatalogView,
   type SkillManagementView,
+  type SkillEnablementResult,
   type McpManagementView,
   type McpMutationResult,
   type McpAuthorizationResult,
@@ -262,6 +263,7 @@ const taskRunReasons = [
   "catalog_unavailable",
   "stale_catalog",
   "skill_not_found",
+  "skill_unavailable",
   "invalid_skill_arguments",
   "capacity_reached",
   "shutting_down",
@@ -467,6 +469,7 @@ function decodeSkillCatalog(value: unknown, path: string): SkillCatalogView {
     "availability",
     "redacted",
     "revision",
+    "selectionRevision",
     "skills",
     "issues",
   ]);
@@ -479,6 +482,10 @@ function decodeSkillCatalog(value: unknown, path: string): SkillCatalogView {
     item.revision === null
       ? null
       : nonEmptyString(item.revision, `${path}.revision`);
+  const selectionRevision =
+    item.selectionRevision === null
+      ? null
+      : positiveWireId(item.selectionRevision, `${path}.selectionRevision`);
   const skills = arrayValue(
     item.skills,
     `${path}.skills`,
@@ -490,6 +497,7 @@ function decodeSkillCatalog(value: unknown, path: string): SkillCatalogView {
         "description",
         "argumentNames",
         "maxValues",
+        "enabled",
       ]);
       const argumentNames = arrayValue(
         skill.argumentNames,
@@ -515,6 +523,7 @@ function decodeSkillCatalog(value: unknown, path: string): SkillCatalogView {
         description: stringValue(skill.description, `${itemPath}.description`),
         argumentNames,
         maxValues,
+        enabled: booleanValue(skill.enabled, `${itemPath}.enabled`),
       };
     },
   );
@@ -538,6 +547,8 @@ function decodeSkillCatalog(value: unknown, path: string): SkillCatalogView {
   const available = availability === "ready" || availability === "degraded";
   if (available !== (revision !== null))
     fail(path, "availability and revision must agree");
+  if (available !== (selectionRevision !== null))
+    fail(path, "availability and selection revision must agree");
   if (!available && (skills.length !== 0 || issues.length !== 0))
     fail(path, "an unavailable catalog cannot expose descriptors");
   if (
@@ -553,6 +564,7 @@ function decodeSkillCatalog(value: unknown, path: string): SkillCatalogView {
     availability,
     redacted: booleanValue(item.redacted, `${path}.redacted`),
     revision,
+    selectionRevision,
     skills,
     issues,
   };
@@ -562,7 +574,11 @@ function decodeSkillManagement(
   value: unknown,
   path: string,
 ): SkillManagementView {
-  const item = object(value, path, ["availability", "assets"]);
+  const item = object(value, path, [
+    "availability",
+    "enablementAvailability",
+    "assets",
+  ]);
   const availability = enumValue(item.availability, `${path}.availability`, [
     "unavailable",
     "ready",
@@ -571,6 +587,18 @@ function decodeSkillManagement(
     "write_failed",
     "outcome_unknown",
   ] as const);
+  const enablementAvailability = enumValue(
+    item.enablementAvailability,
+    `${path}.enablementAvailability`,
+    [
+      "unavailable",
+      "ready",
+      "read_failed",
+      "corrupt",
+      "write_failed",
+      "outcome_unknown",
+    ] as const,
+  );
   const assets = arrayValue(
     item.assets,
     `${path}.assets`,
@@ -590,6 +618,9 @@ function decodeSkillManagement(
         "canReimport",
         "canUninstall",
         "canRetry",
+        "enabled",
+        "canSetEnabled",
+        "selectionRevision",
         "issueCodes",
       ]);
       const scopeValue = object(asset.scope, `${itemPath}.scope`, [
@@ -667,6 +698,21 @@ function decodeSkillManagement(
           `${itemPath}.canUninstall`,
         ),
         canRetry: booleanValue(asset.canRetry, `${itemPath}.canRetry`),
+        enabled:
+          asset.enabled === null
+            ? null
+            : booleanValue(asset.enabled, `${itemPath}.enabled`),
+        canSetEnabled: booleanValue(
+          asset.canSetEnabled,
+          `${itemPath}.canSetEnabled`,
+        ),
+        selectionRevision:
+          asset.selectionRevision === null
+            ? null
+            : positiveWireId(
+                asset.selectionRevision,
+                `${itemPath}.selectionRevision`,
+              ),
         issueCodes: arrayValue(
           asset.issueCodes,
           `${itemPath}.issueCodes`,
@@ -676,7 +722,19 @@ function decodeSkillManagement(
       };
     },
   );
-  return { availability, assets } as SkillManagementView;
+  for (const asset of assets) {
+    const hasEnablement =
+      asset.enabled !== null && asset.selectionRevision !== null;
+    if (asset.canSetEnabled !== hasEnablement)
+      fail(path, "settable assets require enablement state and revision");
+    if (asset.canSetEnabled && asset.scope.kind !== "project")
+      fail(path, "only project assets can be enabled or disabled");
+  }
+  return {
+    availability,
+    enablementAvailability,
+    assets,
+  } as SkillManagementView;
 }
 
 function decodeAccount(value: unknown, path: string): AccountView {
@@ -3054,6 +3112,45 @@ export function decodeSkillMutationResult(value: unknown): SkillMutationResult {
     accepted: false,
     installId: null,
     verificationPending: false,
+    reason: enumValue(item.reason, "$.reason", [
+      "invalid_scope",
+      "invalid_preview",
+      "source_changed",
+      "asset_unavailable",
+      "state_changed",
+      "target_exists",
+      "busy",
+      "catalog_loading",
+      "workspace_changed",
+      "workspace_unavailable",
+      "capacity_reached",
+      "shutting_down",
+      "local_storage_failed",
+    ] as const),
+  };
+}
+
+export function decodeSkillEnablementResult(
+  value: unknown,
+): SkillEnablementResult {
+  const item = object(value, "$", ["applied", "selectionRevision", "reason"]);
+  const applied = booleanValue(item.applied, "$.applied");
+  if (applied) {
+    if (item.reason !== null) fail("$.reason", "expected null");
+    return {
+      applied: true,
+      selectionRevision: positiveWireId(
+        item.selectionRevision,
+        "$.selectionRevision",
+      ),
+      reason: null,
+    };
+  }
+  if (item.selectionRevision !== null)
+    fail("$.selectionRevision", "expected null");
+  return {
+    applied: false,
+    selectionRevision: null,
     reason: enumValue(item.reason, "$.reason", [
       "invalid_scope",
       "invalid_preview",

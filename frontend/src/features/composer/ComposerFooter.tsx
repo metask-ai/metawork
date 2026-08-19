@@ -151,7 +151,7 @@ export function ComposerFooter({
   const text = draft.kind === "text" ? draft.text : "";
   const draftFocusIdentity =
     draft.kind === "skill"
-      ? `skill:${draft.skillId}:${draft.catalogRevision}`
+      ? `skill:${draft.skillId}:${draft.catalogRevision}:${draft.selectionRevision}`
       : "text";
   const previousDraftFocusIdentity = useRef(draftFocusIdentity);
   const slashInput = useMemo(

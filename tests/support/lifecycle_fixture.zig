@@ -710,7 +710,7 @@ pub fn sessionCreate(
     else
         null;
     const selection_valid = if (host.skill_selection) |selection|
-        allSkillsEnabled(selection)
+        validSkillSelection(selection)
     else
         false;
     const mcp_selection_valid = if (host.mcp_selection) |selection|
@@ -970,7 +970,7 @@ pub fn sessionUpdateSkills(
         diagnostic(out_error);
         return wire.STATUS_INVALID_ARGUMENT;
     };
-    if (!allSkillsEnabled(selected)) {
+    if (!validSkillSelection(selected)) {
         diagnostic(out_error);
         return wire.STATUS_INVALID_ARGUMENT;
     }
@@ -1918,12 +1918,22 @@ pub const fake_api = wire.ApiV1{
     .reserved = [_]u64{0} ** 3,
 };
 
-fn allSkillsEnabled(selection: *const wire.SkillSelectionV1) bool {
+fn validSkillSelection(selection: *const wire.SkillSelectionV1) bool {
     if (selection.struct_size != @sizeOf(wire.SkillSelectionV1) or
         selection.default_state_code != wire.SKILL_SELECTION_ENABLED or
-        selection.exception_skill_ids != null or
-        selection.exception_skill_id_count != 0)
+        (selection.exception_skill_ids == null) !=
+            (selection.exception_skill_id_count == 0))
         return false;
+    if (selection.exception_skill_ids) |exceptions| {
+        for (exceptions[0..selection.exception_skill_id_count], 0..) |exception, index| {
+            const skill_id = sdk.borrowedBytes(exception) catch return false;
+            if (skill_id.len == 0) return false;
+            for (exceptions[0..index]) |previous| {
+                const previous_id = sdk.borrowedBytes(previous) catch return false;
+                if (std.mem.eql(u8, skill_id, previous_id)) return false;
+            }
+        }
+    }
     for (selection.reserved) |value| {
         if (value != 0) return false;
     }

@@ -57,12 +57,14 @@ test("the first send uses Host generations and creates one Task before its Run",
         workspace,
         expectedExecutionGeneration,
         expectedSkillCatalogRevision,
+        expectedSkillSelectionRevision,
       ) {
         calls.push([
           "create",
           workspace,
           expectedExecutionGeneration,
           expectedSkillCatalogRevision,
+          expectedSkillSelectionRevision,
         ]);
         return {
           accepted: true,
@@ -93,6 +95,7 @@ test("the first send uses Host generations and creates one Task before its Run",
       { kind: "manual", workspaceId: "7", expectedWorkspaceEpoch: "5" },
       "19",
       null,
+      null,
     ],
     ["run", "41", "8", { kind: "text", text: "Ship a working product" }],
   ]);
@@ -106,6 +109,7 @@ test("the first Skill send pins its selected catalog before typed execution", as
     kind: "skill",
     skillId: "builtin.review",
     catalogRevision: "17",
+    selectionRevision: "23",
     argumentValues: ["src/main.zig"],
   };
   const result = await submitTaskInstruction({
@@ -141,6 +145,7 @@ test("the first Skill send pins its selected catalog before typed execution", as
       { kind: "manual", workspaceId: "7", expectedWorkspaceEpoch: "5" },
       "19",
       "17",
+      "23",
     ],
     ["run", "41", "8", input],
   ]);
@@ -223,7 +228,7 @@ test("the first send can request an Automatic Workspace without a prior identity
     onTaskCreated: (taskId) => calls.push(["created", taskId]),
   });
   assert.deepEqual(calls, [
-    ["create", { kind: "automatic" }, "19", null],
+    ["create", { kind: "automatic" }, "19", null, null],
     ["created", "1"],
     ["run", "1", "1", { kind: "text", text: "Do not bypass trust" }],
   ]);

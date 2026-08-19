@@ -78,6 +78,14 @@ pub const WorkspaceIdentity = struct {
     expectedWorkspaceEpoch: []const u8,
 };
 pub const SkillImportChoice = struct { kind: []const u8 };
+pub const SkillSetEnabled = struct {
+    workspaceId: []const u8,
+    expectedWorkspaceEpoch: []const u8,
+    skillId: []const u8,
+    enabled: bool,
+    expectedCatalogRevision: []const u8,
+    expectedSelectionRevision: []const u8,
+};
 pub const SkillInstall = struct {
     previewId: []const u8,
     scope: []const u8,
@@ -177,6 +185,7 @@ pub const TaskCreate = struct {
     workspace: TaskWorkspaceIntent,
     expectedExecutionGeneration: []const u8,
     expectedSkillCatalogRevision: ?[]const u8,
+    expectedSkillSelectionRevision: ?[]const u8,
 };
 pub const TaskRun = struct {
     taskId: []const u8,
@@ -206,6 +215,7 @@ pub const TaskRunInput = union(enum) {
     skill: struct {
         skill_id: []const u8,
         catalog_revision: []const u8,
+        selection_revision: u64,
         argument_values: []const []const u8,
     },
 };
@@ -298,7 +308,7 @@ pub fn parseTaskRunInput(value: std.json.Value) !ParsedTaskRunInput {
         };
         return .{ .value = .{ .text = text } };
     }
-    if (!std.mem.eql(u8, kind_text, "skill") or object.count() != 4)
+    if (!std.mem.eql(u8, kind_text, "skill") or object.count() != 5)
         return error.InvalidBridgePayload;
     const skill_id = switch (object.get("skillId") orelse
         return error.InvalidBridgePayload) {
@@ -308,6 +318,11 @@ pub fn parseTaskRunInput(value: std.json.Value) !ParsedTaskRunInput {
     const catalog_revision = switch (object.get("catalogRevision") orelse
         return error.InvalidBridgePayload) {
         .string => |text| text,
+        else => return error.InvalidBridgePayload,
+    };
+    const selection_revision = switch (object.get("selectionRevision") orelse
+        return error.InvalidBridgePayload) {
+        .string => |text| try parseWireId(text),
         else => return error.InvalidBridgePayload,
     };
     const argument_array = switch (object.get("argumentValues") orelse
@@ -331,6 +346,7 @@ pub fn parseTaskRunInput(value: std.json.Value) !ParsedTaskRunInput {
         .value = .{ .skill = .{
             .skill_id = skill_id,
             .catalog_revision = catalog_revision,
+            .selection_revision = selection_revision,
             .argument_values = argument_values,
         } },
         .owned_argument_values = argument_values,
@@ -421,7 +437,7 @@ test "Task Run input is an exact text or skill tagged object" {
     try std.testing.expectEqualStrings("inspect", text_input.value.text);
 
     var skill_payload = try parsePayload(TaskRun,
-        \\{"taskId":"1","expectedBindingEpoch":"2","input":{"kind":"skill","skillId":"builtin.review","catalogRevision":"revision","argumentValues":["src/main.zig","correctness"]}}
+        \\{"taskId":"1","expectedBindingEpoch":"2","input":{"kind":"skill","skillId":"builtin.review","catalogRevision":"revision","selectionRevision":"1","argumentValues":["src/main.zig","correctness"]}}
     );
     defer skill_payload.deinit();
     var skill_input = try parseTaskRunInput(skill_payload.value.input);
@@ -453,10 +469,11 @@ test "Task Run input is an exact text or skill tagged object" {
 
 test "Task creation requires an explicit nullable catalog revision" {
     var text = try parsePayload(TaskCreate,
-        \\{"workspace":{"kind":"manual","workspaceId":"1","expectedWorkspaceEpoch":"2"},"expectedExecutionGeneration":"3","expectedSkillCatalogRevision":null}
+        \\{"workspace":{"kind":"manual","workspaceId":"1","expectedWorkspaceEpoch":"2"},"expectedExecutionGeneration":"3","expectedSkillCatalogRevision":null,"expectedSkillSelectionRevision":null}
     );
     defer text.deinit();
     try std.testing.expect(text.value.expectedSkillCatalogRevision == null);
+    try std.testing.expect(text.value.expectedSkillSelectionRevision == null);
     try std.testing.expectError(
         error.InvalidBridgePayload,
         parsePayload(TaskCreate,

@@ -16,6 +16,7 @@ const catalog = {
   availability: "ready",
   redacted: false,
   revision: "17",
+  selectionRevision: "3",
   skills: [
     {
       skillId: "workspace.new",
@@ -24,6 +25,7 @@ const catalog = {
       description: "Prepare files for a new change",
       argumentNames: [],
       maxValues: 0,
+      enabled: true,
     },
     {
       skillId: "builtin.review",
@@ -32,6 +34,7 @@ const catalog = {
       description: "Review a target",
       argumentNames: ["target"],
       maxValues: 1,
+      enabled: true,
     },
   ],
   issues: [],
@@ -66,6 +69,7 @@ test("Slash resolver keeps Commands authoritative over colliding Skill names", (
     invocationName: "review",
     displayName: "Review",
     catalogRevision: "17",
+    selectionRevision: "3",
     argumentNames: ["target"],
     argumentValues: ["src/main.zig"],
     maxValues: 1,
@@ -100,6 +104,7 @@ test("Run input conversion rejects unresolved Slash outside the UI layer", () =>
       invocationName: "review",
       displayName: "Review",
       catalogRevision: "17",
+      selectionRevision: "3",
       argumentNames: ["target"],
       argumentValues: ["src/main.zig"],
       maxValues: 1,
@@ -108,6 +113,7 @@ test("Run input conversion rejects unresolved Slash outside the UI layer", () =>
       kind: "skill",
       skillId: "builtin.review",
       catalogRevision: "17",
+      selectionRevision: "3",
       argumentValues: ["src/main.zig"],
     },
   );
@@ -184,6 +190,7 @@ test("stale Skill drafts retain values but cannot be treated as current", () => 
     invocationName: "review",
     displayName: "Review",
     catalogRevision: "16",
+    selectionRevision: "3",
     argumentNames: ["target"],
     argumentValues: ["src/main.zig"],
     maxValues: 1,
@@ -197,6 +204,7 @@ test("Skill refresh repairs Workspace discovery before binding an existing Task"
     availability,
     redacted: false,
     revision: null,
+    selectionRevision: null,
     skills: [],
     issues: [],
   });

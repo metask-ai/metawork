@@ -335,6 +335,9 @@ export const enUS = {
   "skills.status.ready": "Ready",
   "skills.status.pending": "Pending verification",
   "skills.status.issue": "Needs attention",
+  "skills.enablement.enabled": "Enabled",
+  "skills.enablement.disabled": "Disabled",
+  "skills.enablement.label": "Toggle {skill}",
   "skills.import.eyebrow": "Local import",
   "skills.detail.eyebrow": "Skill details",
   "skills.choose_package": "Choose .skill or .zip",
@@ -368,6 +371,8 @@ export const enUS = {
   "skills.error.mutation": "The Skill change could not be completed.",
   "skills.error.detail": "The local definition could not be loaded.",
   "skills.error.export": "The Skill could not be exported.",
+  "skills.error.enablement":
+    "The Skill could not be updated. Refresh and try again.",
   "skills.refresh": "Refresh",
   "skills.refreshing": "Refreshing…",
   "skills.search_label": "Search skills",
@@ -823,6 +828,8 @@ export const enUS = {
     "The skill catalog changed. Refresh it and choose the skill again.",
   "mutation.reason.skill_not_found":
     "The selected skill is no longer in this task's catalog.",
+  "mutation.reason.skill_unavailable":
+    "The selected skill is disabled for this task.",
   "mutation.reason.invalid_skill_arguments":
     "Review the skill arguments and try again.",
   "mutation.reason.capacity_reached":

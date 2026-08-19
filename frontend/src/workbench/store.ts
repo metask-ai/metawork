@@ -68,11 +68,13 @@ export const initialWorkbenchState: WorkbenchState = {
       availability: "uninitialized",
       redacted: false,
       revision: null,
+      selectionRevision: null,
       skills: [],
       issues: [],
     },
     skillManagement: {
       availability: "unavailable",
+      enablementAvailability: "unavailable",
       assets: [],
     },
     mcp: {
