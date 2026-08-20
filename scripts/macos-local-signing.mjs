@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import {
   existsSync,
   lstatSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -651,8 +652,55 @@ function verifyDeveloperIdDiskImageSignature(targetPath, identity) {
   return { authorities, report, teamId };
 }
 
+function appleScriptString(value) {
+  if (value.includes("\0")) throw new Error("AppleScript string contains NUL");
+  return value.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
+}
+
+export function buildDmgFinderLayoutScript(mountPoint) {
+  const target = appleScriptString(mountPoint);
+  const appName = appleScriptString(`${localPackageMetadata.displayName}.app`);
+  return `
+tell application "Finder"
+  set targetFolder to folder (POSIX file "${target}" as alias)
+  open targetFolder
+  delay 1
+  set targetWindow to front window
+  set current view of targetWindow to icon view
+  set toolbar visible of targetWindow to false
+  set statusbar visible of targetWindow to false
+  set pathbar visible of targetWindow to false
+  set bounds of targetWindow to {100, 100, 760, 500}
+  set viewOptions to icon view options of targetWindow
+  set arrangement of viewOptions to not arranged
+  set icon size of viewOptions to 112
+  set text size of viewOptions to 13
+  set position of item "${appName}" of targetFolder to {170, 190}
+  set position of item "Applications" of targetFolder to {490, 190}
+  close targetWindow
+  open targetFolder
+  set targetWindow to front window
+  delay 1
+  set statusbar visible of targetWindow to false
+  set bounds of targetWindow to {100, 100, 750, 490}
+  delay 1
+  set bounds of targetWindow to {100, 100, 760, 500}
+  update targetFolder without registering applications
+  delay 1
+  close targetWindow
+  delay 2
+end tell
+`;
+}
+
 function createDistributionDiskImage(identity) {
-  const stagingRoot = mkdtempSync(path.join(tmpdir(), "metawork-dmg-stage-"));
+  const workRoot = mkdtempSync(path.join(tmpdir(), "metawork-dmg-build-"));
+  const stagingRoot = path.join(workRoot, "source");
+  const mountPoint = path.join(workRoot, "mount");
+  const writableDiskImagePath = path.join(workRoot, "layout.dmg");
+  mkdirSync(stagingRoot);
+  mkdirSync(mountPoint);
+  let attached = false;
   try {
     const stagedAppPath = path.join(
       stagingRoot,
@@ -667,12 +715,58 @@ function createDistributionDiskImage(identity) {
       "-srcfolder",
       stagingRoot,
       "-format",
+      "UDRW",
+      "-fs",
+      "HFS+",
+      "-ov",
+      writableDiskImagePath,
+    ]);
+    run(
+      "/usr/bin/hdiutil",
+      [
+        "attach",
+        "-readwrite",
+        "-noverify",
+        "-noautoopen",
+        "-mountpoint",
+        mountPoint,
+        writableDiskImagePath,
+      ],
+      { capture: true },
+    );
+    attached = true;
+    run("/usr/bin/osascript", ["-e", buildDmgFinderLayoutScript(mountPoint)]);
+    run("/bin/sync", []);
+    if (!existsSync(path.join(mountPoint, ".DS_Store"))) {
+      throw new Error("Finder did not persist the DMG layout to .DS_Store");
+    }
+    for (const runtimeMetadata of [
+      ".fseventsd",
+      ".Spotlight-V100",
+      ".Trashes",
+    ]) {
+      rmSync(path.join(mountPoint, runtimeMetadata), {
+        recursive: true,
+        force: true,
+      });
+    }
+    run("/bin/sync", []);
+    run("/usr/bin/hdiutil", ["detach", mountPoint], { capture: true });
+    attached = false;
+    run("/usr/bin/hdiutil", [
+      "convert",
+      writableDiskImagePath,
+      "-format",
       "UDZO",
       "-ov",
+      "-o",
       distributionDiskImagePath,
     ]);
   } finally {
-    rmSync(stagingRoot, { recursive: true, force: true });
+    if (attached) {
+      run("/usr/bin/hdiutil", ["detach", mountPoint], { capture: true });
+    }
+    rmSync(workRoot, { recursive: true, force: true });
   }
   run("/usr/bin/codesign", [
     "--force",
@@ -705,12 +799,10 @@ function verifyDistributionDiskImage(identity) {
     );
     attached = true;
     const expectedAppName = `${localPackageMetadata.displayName}.app`;
-    const entries = readdirSync(mountPoint).filter(
-      (entry) => entry !== ".DS_Store",
-    );
+    const entries = readdirSync(mountPoint);
     if (
       entries.sort().join("\n") !==
-      ["Applications", expectedAppName].sort().join("\n")
+      [".DS_Store", "Applications", expectedAppName].sort().join("\n")
     ) {
       throw new Error(`DMG has unexpected root entries: ${entries.join(", ")}`);
     }

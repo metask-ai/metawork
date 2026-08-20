@@ -5,6 +5,7 @@ import {
   buildAppleDevelopmentRequirement,
   buildCanonicalDesignatedRequirement,
   buildDeveloperIdRequirement,
+  buildDmgFinderLayoutScript,
   isAppleDevelopmentIdentityName,
   isDeveloperIdApplicationIdentityName,
   localDistributionDiskImageName,
@@ -71,6 +72,23 @@ test("distribution DMG metadata comes from the Native product manifest", () => {
         `.{\n.display_name = "bad name",\n.version = "latest",\n}`,
       ),
     /invalid native package metadata/u,
+  );
+});
+
+test("distribution DMG Finder layout presents left-to-right installation", () => {
+  const script = buildDmgFinderLayoutScript('/tmp/layout "target"');
+  assert.match(script, /set targetWindow to front window/u);
+  assert.equal(
+    script.match(/bounds of targetWindow to \{100, 100, 760, 500\}/gu)?.length,
+    2,
+  );
+  assert.match(script, /bounds of targetWindow to \{100, 100, 760, 500\}/u);
+  assert.match(script, /position of item "MetaWork\.app".*\{170, 190\}/u);
+  assert.match(script, /position of item "Applications".*\{490, 190\}/u);
+  assert.match(script, /POSIX file "\/tmp\/layout \\"target\\""/u);
+  assert.throws(
+    () => buildDmgFinderLayoutScript("/tmp/invalid\0path"),
+    /contains NUL/u,
   );
 });
 
