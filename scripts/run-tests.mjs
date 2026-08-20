@@ -44,12 +44,17 @@ export async function runNodeTests(root = repositoryRoot) {
   );
 }
 
-export async function runNativeTests(root = repositoryRoot) {
-  await runChild(process.execPath, [nativeCli, "test", ".", "--yes"], {
-    cwd: root,
-    label: "Native test graph",
-    timeoutMs: null,
-  });
+export async function runNativeTests(root = repositoryRoot, target) {
+  if (!target) throw new Error("Native tests require a verified target");
+  await runChild(
+    process.execPath,
+    [nativeCli, "test", ".", "--yes", `-Dtarget=${target}`],
+    {
+      cwd: root,
+      label: "Native test graph",
+      timeoutMs: null,
+    },
+  );
 }
 
 export async function runTestPhases(phases) {
@@ -67,9 +72,12 @@ export async function runTestPhases(phases) {
 }
 
 export async function runRepositoryTests(root = repositoryRoot) {
-  await verifyStagedAgentCoreBundle(root);
+  const bundle = await verifyStagedAgentCoreBundle(root);
   await typecheckRenderer(root);
-  await runTestPhases([() => runNodeTests(root), () => runNativeTests(root)]);
+  await runTestPhases([
+    () => runNodeTests(root),
+    () => runNativeTests(root, bundle.target),
+  ]);
 }
 
 const isMain =

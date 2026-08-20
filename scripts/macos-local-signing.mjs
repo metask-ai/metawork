@@ -632,6 +632,21 @@ function runNode(script, args = []) {
   run(process.execPath, [path.join(repositoryRoot, script), ...args]);
 }
 
+function verifiedAgentCoreTarget() {
+  runNode("scripts/verify-staged-agentcore-bundle.mjs");
+  const manifest = JSON.parse(
+    readFileSync(
+      path.join(repositoryRoot, ".agentcore", "bundle", "manifest.json"),
+      "utf8",
+    ),
+  );
+  const target = manifest?.target?.zig_target;
+  if (typeof target !== "string" || target.length === 0) {
+    throw new Error("verified AgentCore bundle has no Zig target");
+  }
+  return target;
+}
+
 function verifyDeveloperIdDiskImageSignature(targetPath, identity) {
   run(
     "/usr/bin/codesign",
@@ -890,12 +905,13 @@ function notarizeDiskImage(identity) {
 }
 
 function runDevelopment() {
+  const target = verifiedAgentCoreTarget();
   if (process.platform !== "darwin") {
-    runNative(["dev", ".", "--yes"]);
+    runNative(["dev", ".", "--yes", `-Dtarget=${target}`]);
     return;
   }
   const identity = resolveIdentity();
-  runNative(["build", ".", "--yes", "-Doptimize=Debug"]);
+  runNative(["build", ".", "--yes", `-Dtarget=${target}`, "-Doptimize=Debug"]);
   const signature = signExecutable(identity);
   console.log(
     `verified local development signature ${identity.fingerprint} (${signature.requirement})`,

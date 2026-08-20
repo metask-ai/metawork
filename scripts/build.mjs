@@ -40,9 +40,17 @@ export async function buildFrontend(root = repositoryRoot) {
 
 export async function buildNative(
   root = repositoryRoot,
-  { optimize, automation = false } = {},
+  { optimize, target, automation = false } = {},
 ) {
-  const args = [nativeCli, "build", ".", "--yes", `-Doptimize=${optimize}`];
+  if (!target) throw new Error("Native build requires a verified target");
+  const args = [
+    nativeCli,
+    "build",
+    ".",
+    "--yes",
+    `-Dtarget=${target}`,
+    `-Doptimize=${optimize}`,
+  ];
   if (automation) args.push("-Dautomation=true");
   await runChild(process.execPath, args, {
     cwd: root,
@@ -53,9 +61,13 @@ export async function buildNative(
 
 // The automation-enabled Debug artifact every real desktop harness runs against.
 export async function buildAutomationDebugArtifact(root = repositoryRoot) {
-  await verifyStagedAgentCoreBundle(root);
+  const bundle = await verifyStagedAgentCoreBundle(root);
   await buildFrontend(root);
-  await buildNative(root, { optimize: "Debug", automation: true });
+  await buildNative(root, {
+    optimize: "Debug",
+    target: bundle.target,
+    automation: true,
+  });
 }
 
 const isMain =
@@ -66,12 +78,18 @@ if (isMain) {
   if (process.argv.length !== 3 || (mode !== "debug" && mode !== "release"))
     throw new Error("usage: node scripts/build.mjs debug|release");
 
-  await verifyStagedAgentCoreBundle(repositoryRoot);
+  const bundle = await verifyStagedAgentCoreBundle(repositoryRoot);
   await buildFrontend(repositoryRoot);
   if (mode === "debug") {
-    await buildNative(repositoryRoot, { optimize: "Debug" });
+    await buildNative(repositoryRoot, {
+      optimize: "Debug",
+      target: bundle.target,
+    });
   } else {
-    await buildNative(repositoryRoot, { optimize: "ReleaseFast" });
+    await buildNative(repositoryRoot, {
+      optimize: "ReleaseFast",
+      target: bundle.target,
+    });
     await verifyNativeAutomationIsolation();
   }
 }
