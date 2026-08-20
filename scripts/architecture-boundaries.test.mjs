@@ -100,6 +100,7 @@ test("named module roots exist and lower owners cannot import composition", () =
     "src/agent.zig",
     "src/workbench.zig",
     "src/bridge.zig",
+    "src/storage.zig",
   ]) {
     assert.equal(existsSync(new URL(path, root)), true, `${path} must exist`);
   }
@@ -161,6 +162,55 @@ test("named module roots exist and lower owners cannot import composition", () =
       `${file} exposes an implementation module`,
     );
   }
+});
+
+test("Storage owns SQLite without entering the Product or Application graph", () => {
+  const storageFiles = ["src/storage.zig", ...zigFiles("src/storage/")];
+  const storageContract = read("src/storage/sql.zig");
+  const build = read("build.zig");
+  const packageManifest = read("build.zig.zon");
+  const appManifest = read("app.zon");
+  const nonStorageFiles = zigFiles("src/").filter(
+    (file) => file !== "src/storage.zig" && !file.startsWith("src/storage/"),
+  );
+
+  assertNoImports(storageFiles, [
+    "metawork_app",
+    "metawork_account",
+    "metawork_agent",
+    "metawork_workbench",
+    "metawork_bridge",
+    "metask_agentcore",
+    "native_sdk",
+  ]);
+  assert.doesNotMatch(storageContract, /@cImport|sqlite3|storage\/sqlite\.zig/);
+  assert.deepEqual(
+    storageFiles.filter((file) => /@cImport|sqlite3/.test(read(file))),
+    ["src/storage/sqlite.zig"],
+  );
+  for (const file of nonStorageFiles) {
+    assert.doesNotMatch(
+      read(file),
+      /@import\("(?:metawork[_-]storage|storage\/sqlite\.zig)"\)|@cInclude\("sqlite3\.h"\)|\bsqlite3_/,
+      `${file} bypasses the Storage SQL contract`,
+    );
+  }
+
+  assert.match(build, /const sqlite = b\.dependency\("sqlite", \.\{\}\);/);
+  assert.match(build, /storage\.addIncludePath\(sqlite\.path\("\."\)\);/);
+  assert.match(build, /storage\.addCSourceFile\(/);
+  assert.doesNotMatch(
+    build,
+    /(?:app|account|agent|workbench|bridge)\.add(?:IncludePath|CSourceFile)\([\s\S]{0,120}sqlite/,
+  );
+  assert.doesNotMatch(build, /\.addImport\(\s*"metawork[_-]storage"/);
+  assert.match(build, /"test-storage"/);
+  assert.match(
+    packageManifest,
+    /\.sqlite = \.\{[\s\S]*?\.url = "https:\/\/www\.sqlite\.org\/\d{4}\/sqlite-amalgamation-\d+\.zip",[\s\S]*?\.hash = "[^"]+",[\s\S]*?\}/,
+  );
+  assert.doesNotMatch(packageManifest, /latest/i);
+  assert.doesNotMatch(appManifest, /"sqlite"/);
 });
 
 test("AgentCore SDK access is restricted to Agent modules and the test fixture", () => {

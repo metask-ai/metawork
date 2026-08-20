@@ -70,6 +70,8 @@ metawork/
 │   ├── agent/             # catalog、Session/Runtime、event pump、callback 与 MCP ownership
 │   │   ├── mcp/           # connector、stdio/http transport、runtime 与 catalog
 │   │   └── session/       # Session composition、Runtime lifecycle、binding、wire 与纯控制值
+│   ├── storage.zig        # backend-independent Storage module entrypoint
+│   ├── storage/           # SQL contract、direct SQLite backend 与共享 conformance tests
 │   ├── automation.zig     # compile-time automation selection
 │   └── automation/        # enabled/disabled authority capability
 ├── tests/
@@ -94,6 +96,7 @@ metawork/
 | Account         | Runtime、OAuth/catalog 状态、credential、attempt/effect/mailbox、恢复、脱敏 Account view、ExecutionConfig transfer            | Workbench Task、Renderer 状态、AgentCore Runtime                                |
 | Workbench       | Workspace/Task/Run 产品状态、Executor、admission、terminal product record、snapshot projection                                | AgentCore raw protocol、Native WebView、Account secret                          |
 | Agent           | AgentCore integration、MetaWork Runtime/Session/Conversation、callback、event pump、Run terminal facts                        | 产品队列、Task 历史、Bridge transport、AgentCore 内部实现                       |
+| Storage         | 无业务 SQL contract、limits、migration mechanism、direct SQLite backend、engine profile 与 conformance                        | Product schema/health/recovery、产品路径、Application lifecycle、Native SDK policy |
 | Bridge          | command authority、payload decode、Workspace grant、ProductDelivery connection/revision/snapshot transport                    | 产品策略真相、AgentCore handle、Account runtime                                 |
 | Renderer        | snapshot 消费、产品 WebUI 交互、纯 UI 状态与本地草稿、`frontend/src/bridge/` 合同实现层（transport 适配与 runtime decode）    | 原生窗口 owner、平台真实状态、安全决策、secret、AgentCore raw event、产品状态机 |
 
@@ -156,7 +159,13 @@ Windows startup identity 不是独立 capability。`system_webview_startup_windo
 
 Renderer 的 `components/ui/WindowTitlebar.tsx` 绘制产品 header，并通过 portal 在 document root 只声明一个 `data-metawork-window-drag` marker；`components/ui/WindowControls.tsx` 绘制带固定 `data-metawork-window-control` 语义的按钮，不注册 native handler 或调用 transport。`frontend/src/bridge/window-chrome.ts` 是 browser-side Bridge boundary：它有界镜像 candidate/交互排除区、转换 control intent、runtime decode Host geometry/capability/state，并写入 CSS variables/document dataset；document attach 只 `connect` 一次，Native SDK `window.zero.on("resize")` 与 DOM observer 通过 latest-only scheduler 同步当前 generation，失败不清除仍有效的 controls/session。产品 React 代码不得直接调用 `window.zero`，不得维护平台名或窗口真实状态。已删除的 `app/useWindowChrome.ts` 与 `platform/window-chrome.ts` 不得恢复。
 
-`account.zig`、`bridge.zig`、`workbench.zig` 和 `agent.zig` 是小型公开入口，只显式暴露实际消费者需要的类型、函数或窄 namespace。内部文件不通过 `usingnamespace` 或无边界 barrel 重新泄漏。
+`account.zig`、`bridge.zig`、`workbench.zig`、`agent.zig` 和 `storage.zig` 是小型公开入口，只显式暴露实际消费者需要的类型、函数或窄 namespace。内部文件不通过 `usingnamespace` 或无边界 barrel 重新泄漏。
+
+### `storage/`
+
+`storage/sql.zig` 是稳定、backend-independent 的基础合同，只定义 SQL values、statement batches、row receiver、limits、migration 和 typed outcomes；它不导入 Product、Application、Native SDK 或 SQLite C 类型。`storage/sqlite.zig` 是当前唯一 concrete backend，独占 SQLite C API、连接资源、`WAL + synchronous=NORMAL` profile、migration transaction 和错误映射；`storage/conformance.zig` 以同一合同验证 fake 与真实 SQLite 后端。官方 SQLite amalgamation 以固定版本和 hash 进入 `build.zig.zon`，C source/include 只接到 Storage module。
+
+Storage 当前只接入正式 Native test graph 和定向 `zig build test-storage`，没有注入 Application、Workbench、Account、Agent 或 Bridge，也不会解析产品路径或创建 production `app.db`。未来 Product owner 只能依赖 `storage/sql.zig` 发布的能力并继续拥有自己的 schema 与恢复语义；只有 Application composition 可以创建 concrete backend，业务模块不得导入 `storage/sqlite.zig` 或直接调用 SQLite。
 
 ### `account/`
 
@@ -230,9 +239,10 @@ workbench -> agent, account contract
 agent -> Metask AgentCore bundle SDK
 account -> account contract
 automation -> bridge, account contract, Native SDK
+storage -> SQLite amalgamation
 ```
 
-`bridge -> Native SDK` 只允许消费正式 Bridge transport contract，以及 transport authority 和窄 Application capability 调用所需的 data-only DTO/opaque identifier；它不允许 Bridge 持有 `PlatformServices`、具体平台实现、OS handle 或直接系统调用权。`automation -> bridge` 只消费 policy 类型；`automation -> Native SDK` 只消费同级 Bridge policy contract 类型，同样不得持有 `PlatformServices`、平台实现或系统调用权。当前 `account/platform.zig -> Native SDK` 是验证规范登记的非合规例外，不属于允许依赖图，也不能作为新增依赖的先例。禁止 `agent -> workbench/bridge/app`、`workbench -> bridge`、`bridge -> Account runtime` 和任何产品模块反向依赖 Renderer。
+`storage -> SQLite amalgamation` 只存在于 direct backend；Storage contract 不依赖 SQLite 或 Native SDK，当前没有任何 `app/product -> storage` 正式运行时边。`bridge -> Native SDK` 只允许消费正式 Bridge transport contract，以及 transport authority 和窄 Application capability 调用所需的 data-only DTO/opaque identifier；它不允许 Bridge 持有 `PlatformServices`、具体平台实现、OS handle 或直接系统调用权。`automation -> bridge` 只消费 policy 类型；`automation -> Native SDK` 只消费同级 Bridge policy contract 类型，同样不得持有 `PlatformServices`、平台实现或系统调用权。当前 `account/platform.zig -> Native SDK` 是验证规范登记的非合规例外，不属于允许依赖图，也不能作为新增依赖的先例。禁止 `agent -> workbench/bridge/app`、`workbench -> bridge`、`bridge -> Account runtime` 和任何产品模块反向依赖 Renderer。
 
 ## 6. 测试与构建资产
 
@@ -240,6 +250,7 @@ automation -> bridge, account contract, Native SDK
 
 - 产品 module 的 inline test 与实现共置并使用相同依赖边界；正式 external Zig test root 置于 `tests/`，由 `build.zig` 注册；
 - `tests/agent/`、`tests/workbench/` 分别归对应 owner，`tests/integration/` 只容纳无法归属于单一 owner 的跨边界失败，`tests/support/` 只提供 test-only fake 和 fixture，不形成产品 owner；
+- Storage contract、conformance 与 direct backend test 与 `src/storage/` 共置；`zig build test-storage` 是其定向入口，正式 Native test graph 仍是提交前的完整入口；
 - `scripts/*.test.mjs` 是默认 Node/Renderer 回归资产，由 `npm test` 自动发现；其他 `scripts/` 可以编排真实应用、平台验收和 artifact 工具，但不能建立测试专用产品协议；
 - 根 `package.json` 只保留 `dev`、`check`、`test`、`format`、`format:check`、`build:debug`、`build:release` 与 `package:macos` 八个工程入口，不登记内部步骤、单项测试、probe 或平台验收 harness；macOS `dev` 只使用显式选择的 Apple Development identity，`package:macos` 只使用唯一有效的 Developer ID Application identity 和钥匙串 `metawork-notary` profile，并要求 notarization `Accepted`、staple、Gatekeeper 与最终 ZIP 完整性全部通过；
 - `build_support/agentcore_bundle.zig` 与 target lock 是正式信任边界；candidate probe 只使用临时 source-free SDK consumer；

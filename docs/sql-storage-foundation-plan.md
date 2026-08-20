@@ -1,11 +1,11 @@
 # MetaWork SQL 基础存储能力方案
 
-> 状态：提案，尚未实施
+> 状态：Storage foundation 已实施；Application 与 Product 接入未实施
 > 日期：2026-08-20
 
 本文定义 MetaWork 自有的 SQLite 基础存储能力。SQLite 是产品必须具备的长期基础设施，不以 Native SDK relational capability 是否完整为前提；Native SDK 后续可以替换数据库访问适配层，但不接管产品 schema、数据所有权或恢复策略。
 
-在本方案落实到现行 source of truth 前，[高层架构](architecture.md)、[Product 内部架构](product-architecture.md)和[工程结构与所有权](project-structure.md)仍是当前有效规范。本文件不授权迁移、删除或重写任何现有持久化数据。
+本方案的基础能力边界已落实到[高层架构](architecture.md)、[工程结构与所有权](project-structure.md)和[验证规范](validation.md)。[Product 内部架构](product-architecture.md)仍定义现有持久化行为；本文件不授权迁移、删除或重写任何现有持久化数据。
 
 ## 1. 决策
 
@@ -258,7 +258,7 @@ open/migration 使用独立的 typed error/outcome，至少区分路径或权限
 - 禁止 loadable extensions；
 - 依赖升级必须运行文件兼容、migration、事务和故障映射测试。
 
-具体 SQLite 版本在实施时以官方稳定版本、Native SDK 所用最低兼容版本和目标平台构建验证共同锁定；版本与 hash 必须进入 `build.zig.zon`，不得使用 `latest` 或浮动下载地址。
+当前锁定 SQLite 3.53.4 官方 amalgamation；固定 URL 与 hash 进入 `build.zig.zon`，不使用 `latest`、系统 SQLite 或浮动下载地址。后续升级仍须同时满足 Native SDK SQLite 兼容性和目标平台构建验证。
 
 ### 7.2 Engine profile
 
@@ -341,7 +341,7 @@ release N+1: Native SDK backend opens the same app.db
 
 ## 10. 实施 DAG 与提交边界
 
-### A. Contract 与 conformance harness
+### A. Contract 与 conformance harness（已完成）
 
 - 添加 `storage` module、SQL types、limits、borrowed lifetime 和 outcomes；
 - 建立后端共享 conformance harness；
@@ -349,7 +349,7 @@ release N+1: Native SDK backend opens the same app.db
 
 完成后评估一次提交：合同、测试和 build graph 必须共同形成可编译、可评审的边界，不为单个类型或文件拆微提交。
 
-### B. Direct SQLite backend
+### B. Direct SQLite backend（已完成）
 
 - 锁定官方 SQLite dependency；
 - 实现 open/migrate/query/exec/close 与 engine profile；
@@ -357,7 +357,7 @@ release N+1: Native SDK backend opens the same app.db
 
 完成后评估一次提交：dependency、backend 和命中其失败模式的测试应在同一提交，不留下只有依赖或只有半个 backend 的状态。
 
-### C. Storage module 收口
+### C. Storage module 收口（已完成）
 
 - 把直接 backend 和 SQLite C API 限定在 `src/storage/sqlite.zig`；
 - 更新 project tree、validation 与 architecture guard，禁止上层直接导入 concrete backend 或 SQLite；
@@ -365,12 +365,12 @@ release N+1: Native SDK backend opens the same app.db
 
 完成后评估一次提交：模块边界、source of truth 和 guard 作为一个 owner slice 收口；如果与 B 高度耦合则合并进 B，不制造纯文档碎片提交。
 
-### D. Storage foundation verification
+### D. Storage foundation verification（已完成当前平台自动化）
 
 - 正式 Native test graph；
 - architecture guard、format 和 `git diff --check`；
 - Windows 当前平台 temporary file database 验证；
-- macOS 至少完成 SQLite backend build；存在独立平台失败模式时运行真实平台测试；
+- macOS 构建与真实平台测试在出现独立平台失败模式或进入正式 Product 接入前执行；Windows 结果不替代目标平台证据；
 - 确认 Workbench persistence 与现有 lock 未改变。
 
 验证修正并入引入问题的最近一个 coherent commit；不创建“修测试”碎片提交。只有独立根因才新增提交。

@@ -32,6 +32,7 @@
 | 层级                        | 唯一职责                                                                                       |
 | --------------------------- | ---------------------------------------------------------------------------------------------- |
 | Zig inline test             | 单模块的纯状态转换、codec、容量和资源所有权不变量                                              |
+| Storage conformance         | backend-independent SQL contract 与 concrete backend 的事务、profile、文件和错误映射           |
 | `tests/agent/`              | Session、callback、ABI、Agent Runtime 生命周期与并发                                           |
 | `tests/workbench/`          | Executor、产品事务、持久化、恢复和产品并发                                                     |
 | `tests/integration/`        | 必须跨两个以上 owner 才能出现的组合失败                                                        |
@@ -61,11 +62,14 @@ candidate probe、真实桌面验收、签名、公证和发布验证不进入 `
 | 单个 Node/Renderer suite  | `node --experimental-strip-types --test scripts/<suite>.test.mjs` | Renderer、Bridge client、fixture 或工程脚本的单一失败模式                             |
 | Agent/Workbench lifecycle | `node scripts/run-lifecycle-tests.mjs`                            | Session、Executor、恢复、并发或 shutdown                                              |
 | 单个 lifecycle 不变量     | 设置 `LIFECYCLE_TEST_FILTER` 后运行 lifecycle 入口                | 只缩小开发反馈；提交前仍运行完整关联 root                                             |
+| Storage foundation        | `zig build test-storage`                                          | SQL contract、conformance、direct SQLite backend、migration、文件恢复与 engine profile |
 | MCP owner                 | `build.zig` 中对应的 `test-mcp-*` step                            | configuration、OAuth、transport、Runtime、catalog、interop 或 Application composition |
 | AgentCore candidate       | staged verifier 与对应 `run-agentcore-*-probe.mjs`                | 新 artifact 或尚未进入合同的外部行为                                                  |
 | 平台能力                  | 本文后续 Windows/macOS 入口                                       | 真实窗口、系统 credential、签名、公证或平台生命周期                                   |
 
 `build.zig` 是正式 Zig test graph 的注册真源；architecture guard 必须证明所有 active external test root 已接线。`scripts/*.test.mjs` 由总入口自动发现，不维护文件数量或手工清单。
+
+Storage foundation 的自动化必须同时覆盖内存 target 与测试显式提供的 temporary file path，并在 Debug、ReleaseSafe 至少各运行一次定向入口。共享 conformance 负责 backend-independent 行为；direct backend tests 负责 `WAL + synchronous=NORMAL` profile、单连接内存可见性、migration 原子性与版本拒绝、完整 batch rollback、reopen、busy/corrupt/invalid output 和结果上限。architecture guard 负责证明 SQLite C API 与 amalgamation 只进入 Storage concrete backend、上层尚未导入 Storage/SQLite、`app.zon` 尚未声明 Native SDK `sqlite` capability。上述结果只证明基础能力，不证明 production `app.db`、Product schema、业务迁移、单实例或断电 durable policy 已接入。
 
 ## 长期证据账本
 
