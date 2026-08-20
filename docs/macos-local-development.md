@@ -68,6 +68,14 @@ macOS `dev` 会读取 `app.zon` 的现有 identifier，确认本机已选择的 
 
 ## 正式 DMG
 
+只检查正式 DMG 的内容、签名和 Finder 拖拽布局而不提交 Apple 公证时，运行：
+
+```sh
+node scripts/macos-local-signing.mjs preview
+```
+
+该命令与正式打包共用同一 `.app` 构建、Developer ID 签名、HFS+ 布局写入、UDZO 转换和只读挂载验证路径，仅跳过 `notarytool`、staple 与 Gatekeeper 公证验收。产物为 `zig-out/package/metawork-<version>-macos-arm64-preview.dmg`，只用于本地检查，不得作为正式发布包。禁止使用 Native SDK 的默认 archive DMG 代替此预览，因为它不受项目定义的 Finder 布局约束。
+
 先在 Xcode 的 Team `Manage Certificates` 中创建 `Developer ID Application`，并确认登录钥匙串同时持有证书和 private key：
 
 ```bash

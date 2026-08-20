@@ -72,6 +72,7 @@ const packagedAppPath = path.join(
 );
 const packageArtifactStem = `${localProductIdentity.executableName}-${localPackageMetadata.version}-macos-arm64`;
 export const localDistributionDiskImageName = `${packageArtifactStem}.dmg`;
+export const localPreviewDiskImageName = `${packageArtifactStem}-preview.dmg`;
 const legacyPackageArtifactStem = `${localPackageMetadata.displayName}-${localPackageMetadata.version}-macos-arm64`;
 const legacyDistributionArchivePath = path.join(
   repositoryRoot,
@@ -90,6 +91,12 @@ const distributionDiskImagePath = path.join(
   "zig-out",
   "package",
   localDistributionDiskImageName,
+);
+const previewDiskImagePath = path.join(
+  repositoryRoot,
+  "zig-out",
+  "package",
+  localPreviewDiskImageName,
 );
 const notarizationProfile = "metawork-notary";
 const nativeDispatcher = path.join(
@@ -670,21 +677,21 @@ tell application "Finder"
   set toolbar visible of targetWindow to false
   set statusbar visible of targetWindow to false
   set pathbar visible of targetWindow to false
-  set bounds of targetWindow to {100, 100, 760, 500}
+  set bounds of targetWindow to {100, 100, 700, 440}
   set viewOptions to icon view options of targetWindow
   set arrangement of viewOptions to not arranged
   set icon size of viewOptions to 112
   set text size of viewOptions to 13
-  set position of item "${appName}" of targetFolder to {170, 190}
-  set position of item "Applications" of targetFolder to {490, 190}
+  set position of item "${appName}" of targetFolder to {165, 135}
+  set position of item "Applications" of targetFolder to {435, 135}
   close targetWindow
   open targetFolder
   set targetWindow to front window
   delay 1
   set statusbar visible of targetWindow to false
-  set bounds of targetWindow to {100, 100, 750, 490}
+  set bounds of targetWindow to {100, 100, 690, 430}
   delay 1
-  set bounds of targetWindow to {100, 100, 760, 500}
+  set bounds of targetWindow to {100, 100, 700, 440}
   update targetFolder without registering applications
   delay 1
   close targetWindow
@@ -693,7 +700,7 @@ end tell
 `;
 }
 
-function createDistributionDiskImage(identity) {
+function createDistributionDiskImage(identity, targetPath) {
   const workRoot = mkdtempSync(path.join(tmpdir(), "metawork-dmg-build-"));
   const stagingRoot = path.join(workRoot, "source");
   const mountPoint = path.join(workRoot, "mount");
@@ -760,7 +767,7 @@ function createDistributionDiskImage(identity) {
       "UDZO",
       "-ov",
       "-o",
-      distributionDiskImagePath,
+      targetPath,
     ]);
   } finally {
     if (attached) {
@@ -773,15 +780,15 @@ function createDistributionDiskImage(identity) {
     "--sign",
     identity.fingerprint,
     "--timestamp",
-    distributionDiskImagePath,
+    targetPath,
   ]);
-  verifyDeveloperIdDiskImageSignature(distributionDiskImagePath, identity);
-  run("/usr/bin/hdiutil", ["verify", distributionDiskImagePath], {
+  verifyDeveloperIdDiskImageSignature(targetPath, identity);
+  run("/usr/bin/hdiutil", ["verify", targetPath], {
     capture: true,
   });
 }
 
-function verifyDistributionDiskImage(identity) {
+function verifyDistributionDiskImage(identity, targetPath) {
   const mountPoint = mkdtempSync(path.join(tmpdir(), "metawork-dmg-mount-"));
   let attached = false;
   try {
@@ -793,7 +800,7 @@ function verifyDistributionDiskImage(identity) {
         "-nobrowse",
         "-mountpoint",
         mountPoint,
-        distributionDiskImagePath,
+        targetPath,
       ],
       { capture: true },
     );
@@ -874,7 +881,7 @@ function notarizeDiskImage(identity) {
     capture: true,
   });
   verifyDeveloperIdDiskImageSignature(distributionDiskImagePath, identity);
-  verifyDistributionDiskImage(identity);
+  verifyDistributionDiskImage(identity, distributionDiskImagePath);
 
   const digest = createHash("sha256")
     .update(readFileSync(distributionDiskImagePath))
@@ -896,12 +903,7 @@ function runDevelopment() {
   runNative(["dev", "--manifest", "app.zon", "--binary", executablePath]);
 }
 
-function packageMacos() {
-  requireMacos();
-  const identity = resolveDistributionIdentity();
-  rmSync(distributionDiskImagePath, { force: true });
-  rmSync(legacyDistributionDiskImagePath, { force: true });
-  rmSync(legacyDistributionArchivePath, { force: true });
+function buildPackagedMacosApp(identity) {
   runNode("scripts/build.mjs", ["release"]);
   runNode("scripts/clean-macos-package.mjs");
   runNative([
@@ -922,7 +924,17 @@ function packageMacos() {
     preserveEntitlements: true,
   });
   runNode("scripts/verify-macos-package.mjs");
-  createDistributionDiskImage(identity);
+  return signature;
+}
+
+function packageMacos() {
+  requireMacos();
+  const identity = resolveDistributionIdentity();
+  rmSync(distributionDiskImagePath, { force: true });
+  rmSync(legacyDistributionDiskImagePath, { force: true });
+  rmSync(legacyDistributionArchivePath, { force: true });
+  const signature = buildPackagedMacosApp(identity);
+  createDistributionDiskImage(identity, distributionDiskImagePath);
   const notarized = notarizeDiskImage(identity);
   verifyDeveloperIdSignature(packagedAppPath, identity, undefined, {
     deep: true,
@@ -935,6 +947,21 @@ function packageMacos() {
   );
 }
 
+function previewMacosPackage() {
+  requireMacos();
+  const identity = resolveDistributionIdentity();
+  rmSync(previewDiskImagePath, { force: true });
+  buildPackagedMacosApp(identity);
+  createDistributionDiskImage(identity, previewDiskImagePath);
+  verifyDistributionDiskImage(identity, previewDiskImagePath);
+  const digest = createHash("sha256")
+    .update(readFileSync(previewDiskImagePath))
+    .digest("hex");
+  console.log(
+    `built Developer ID signed, non-notarized preview DMG ${previewDiskImagePath} (sha256=${digest})`,
+  );
+}
+
 function main() {
   const command = process.argv[2];
   switch (command) {
@@ -944,9 +971,12 @@ function main() {
     case "package":
       packageMacos();
       break;
+    case "preview":
+      previewMacosPackage();
+      break;
     default:
       throw new Error(
-        "usage: node scripts/macos-local-signing.mjs dev|package",
+        "usage: node scripts/macos-local-signing.mjs dev|package|preview",
       );
   }
 }
