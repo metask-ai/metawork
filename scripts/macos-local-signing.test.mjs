@@ -5,8 +5,11 @@ import {
   buildAppleDevelopmentRequirement,
   buildCanonicalDesignatedRequirement,
   buildDeveloperIdRequirement,
+  buildDmgFinderLayoutScript,
   isAppleDevelopmentIdentityName,
   isDeveloperIdApplicationIdentityName,
+  localDistributionDiskImageName,
+  localPreviewDiskImageName,
   localPackageMetadata,
   localProductIdentity,
   parseCodeDirectoryIdentifier,
@@ -49,11 +52,19 @@ test("local signing reads the existing Native product identity", () => {
   );
 });
 
-test("distribution archive metadata comes from the Native product manifest", () => {
+test("distribution DMG metadata comes from the Native product manifest", () => {
   assert.deepEqual(localPackageMetadata, {
     displayName: "MetaWork",
     version: "0.1.1",
   });
+  assert.equal(
+    localDistributionDiskImageName,
+    "metawork-0.1.1-macos-arm64.dmg",
+  );
+  assert.equal(
+    localPreviewDiskImageName,
+    "metawork-0.1.1-macos-arm64-preview.dmg",
+  );
   assert.deepEqual(
     parseNativePackageMetadata(
       `.{\n.display_name = "ExampleApp",\n.version = "1.2.3-beta.1",\n}`,
@@ -66,6 +77,23 @@ test("distribution archive metadata comes from the Native product manifest", () 
         `.{\n.display_name = "bad name",\n.version = "latest",\n}`,
       ),
     /invalid native package metadata/u,
+  );
+});
+
+test("distribution DMG Finder layout presents left-to-right installation", () => {
+  const script = buildDmgFinderLayoutScript('/tmp/layout "target"');
+  assert.match(script, /set targetWindow to front window/u);
+  assert.equal(
+    script.match(/bounds of targetWindow to \{100, 100, 700, 440\}/gu)?.length,
+    2,
+  );
+  assert.match(script, /bounds of targetWindow to \{100, 100, 700, 440\}/u);
+  assert.match(script, /position of item "MetaWork\.app".*\{165, 135\}/u);
+  assert.match(script, /position of item "Applications".*\{435, 135\}/u);
+  assert.match(script, /POSIX file "\/tmp\/layout \\"target\\""/u);
+  assert.throws(
+    () => buildDmgFinderLayoutScript("/tmp/invalid\0path"),
+    /contains NUL/u,
   );
 });
 

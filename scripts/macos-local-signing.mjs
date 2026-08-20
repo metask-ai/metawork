@@ -1,7 +1,17 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, rmSync } from "node:fs";
-import { homedir } from "node:os";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  readlinkSync,
+  rmSync,
+  symlinkSync,
+} from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import path from "node:path";
 
@@ -60,18 +70,33 @@ const packagedAppPath = path.join(
   "package",
   `${localProductIdentity.executableName}.app`,
 );
-const packageArtifactStem = `${localPackageMetadata.displayName}-${localPackageMetadata.version}-macos-arm64`;
-const notarizationArchivePath = path.join(
-  repositoryRoot,
-  "zig-out",
-  "package",
-  `${packageArtifactStem}-notary.zip`,
-);
-const distributionArchivePath = path.join(
+const packageArtifactStem = `${localProductIdentity.executableName}-${localPackageMetadata.version}-macos-arm64`;
+export const localDistributionDiskImageName = `${packageArtifactStem}.dmg`;
+export const localPreviewDiskImageName = `${packageArtifactStem}-preview.dmg`;
+const legacyPackageArtifactStem = `${localPackageMetadata.displayName}-${localPackageMetadata.version}-macos-arm64`;
+const legacyDistributionArchivePath = path.join(
   repositoryRoot,
   "zig-out",
   "package",
   `${packageArtifactStem}.zip`,
+);
+const legacyDistributionDiskImagePath = path.join(
+  repositoryRoot,
+  "zig-out",
+  "package",
+  `${legacyPackageArtifactStem}.dmg`,
+);
+const distributionDiskImagePath = path.join(
+  repositoryRoot,
+  "zig-out",
+  "package",
+  localDistributionDiskImageName,
+);
+const previewDiskImagePath = path.join(
+  repositoryRoot,
+  "zig-out",
+  "package",
+  localPreviewDiskImageName,
 );
 const notarizationProfile = "metawork-notary";
 const nativeDispatcher = path.join(
@@ -607,27 +632,217 @@ function runNode(script, args = []) {
   run(process.execPath, [path.join(repositoryRoot, script), ...args]);
 }
 
-function createAppArchive(targetPath) {
-  rmSync(targetPath, { force: true });
-  run("/usr/bin/ditto", [
-    "-c",
-    "-k",
-    "--sequesterRsrc",
-    "--keepParent",
-    packagedAppPath,
-    targetPath,
-  ]);
-  run("/usr/bin/unzip", ["-tq", targetPath], { capture: true });
+function verifyDeveloperIdDiskImageSignature(targetPath, identity) {
+  run(
+    "/usr/bin/codesign",
+    ["--verify", "--strict", "--verbose=2", targetPath],
+    {
+      capture: true,
+    },
+  );
+  const report = signatureReport(targetPath);
+  const teamId = parseTeamIdentifier(report);
+  if (teamId !== identity.teamId) {
+    throw new Error(
+      `DMG TeamIdentifier is ${teamId}, expected ${identity.teamId}`,
+    );
+  }
+  const authorities = parseSigningAuthorities(report);
+  if (authorities[0] !== identity.name) {
+    throw new Error(
+      `DMG code signature leaf authority is ${authorities[0] ?? "missing"}, expected ${identity.name}`,
+    );
+  }
+  if (!/^Timestamp=.+$/mu.test(report)) {
+    throw new Error("Developer ID DMG code signature has no trusted timestamp");
+  }
+  return { authorities, report, teamId };
 }
 
-function notarizePackage() {
-  createAppArchive(notarizationArchivePath);
+function appleScriptString(value) {
+  if (value.includes("\0")) throw new Error("AppleScript string contains NUL");
+  return value.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
+}
+
+export function buildDmgFinderLayoutScript(mountPoint) {
+  const target = appleScriptString(mountPoint);
+  const appName = appleScriptString(`${localPackageMetadata.displayName}.app`);
+  return `
+tell application "Finder"
+  set targetFolder to folder (POSIX file "${target}" as alias)
+  open targetFolder
+  delay 1
+  set targetWindow to front window
+  set current view of targetWindow to icon view
+  set toolbar visible of targetWindow to false
+  set statusbar visible of targetWindow to false
+  set pathbar visible of targetWindow to false
+  set bounds of targetWindow to {100, 100, 700, 440}
+  set viewOptions to icon view options of targetWindow
+  set arrangement of viewOptions to not arranged
+  set icon size of viewOptions to 112
+  set text size of viewOptions to 13
+  set position of item "${appName}" of targetFolder to {165, 135}
+  set position of item "Applications" of targetFolder to {435, 135}
+  close targetWindow
+  open targetFolder
+  set targetWindow to front window
+  delay 1
+  set statusbar visible of targetWindow to false
+  set bounds of targetWindow to {100, 100, 690, 430}
+  delay 1
+  set bounds of targetWindow to {100, 100, 700, 440}
+  update targetFolder without registering applications
+  delay 1
+  close targetWindow
+  delay 2
+end tell
+`;
+}
+
+function createDistributionDiskImage(identity, targetPath) {
+  const workRoot = mkdtempSync(path.join(tmpdir(), "metawork-dmg-build-"));
+  const stagingRoot = path.join(workRoot, "source");
+  const mountPoint = path.join(workRoot, "mount");
+  const writableDiskImagePath = path.join(workRoot, "layout.dmg");
+  mkdirSync(stagingRoot);
+  mkdirSync(mountPoint);
+  let attached = false;
+  try {
+    const stagedAppPath = path.join(
+      stagingRoot,
+      `${localPackageMetadata.displayName}.app`,
+    );
+    run("/usr/bin/ditto", [packagedAppPath, stagedAppPath]);
+    symlinkSync("/Applications", path.join(stagingRoot, "Applications"));
+    run("/usr/bin/hdiutil", [
+      "create",
+      "-volname",
+      localPackageMetadata.displayName,
+      "-srcfolder",
+      stagingRoot,
+      "-format",
+      "UDRW",
+      "-fs",
+      "HFS+",
+      "-ov",
+      writableDiskImagePath,
+    ]);
+    run(
+      "/usr/bin/hdiutil",
+      [
+        "attach",
+        "-readwrite",
+        "-noverify",
+        "-noautoopen",
+        "-mountpoint",
+        mountPoint,
+        writableDiskImagePath,
+      ],
+      { capture: true },
+    );
+    attached = true;
+    run("/usr/bin/osascript", ["-e", buildDmgFinderLayoutScript(mountPoint)]);
+    run("/bin/sync", []);
+    if (!existsSync(path.join(mountPoint, ".DS_Store"))) {
+      throw new Error("Finder did not persist the DMG layout to .DS_Store");
+    }
+    for (const runtimeMetadata of [
+      ".fseventsd",
+      ".Spotlight-V100",
+      ".Trashes",
+    ]) {
+      rmSync(path.join(mountPoint, runtimeMetadata), {
+        recursive: true,
+        force: true,
+      });
+    }
+    run("/bin/sync", []);
+    run("/usr/bin/hdiutil", ["detach", mountPoint], { capture: true });
+    attached = false;
+    run("/usr/bin/hdiutil", [
+      "convert",
+      writableDiskImagePath,
+      "-format",
+      "UDZO",
+      "-ov",
+      "-o",
+      targetPath,
+    ]);
+  } finally {
+    if (attached) {
+      run("/usr/bin/hdiutil", ["detach", mountPoint], { capture: true });
+    }
+    rmSync(workRoot, { recursive: true, force: true });
+  }
+  run("/usr/bin/codesign", [
+    "--force",
+    "--sign",
+    identity.fingerprint,
+    "--timestamp",
+    targetPath,
+  ]);
+  verifyDeveloperIdDiskImageSignature(targetPath, identity);
+  run("/usr/bin/hdiutil", ["verify", targetPath], {
+    capture: true,
+  });
+}
+
+function verifyDistributionDiskImage(identity, targetPath) {
+  const mountPoint = mkdtempSync(path.join(tmpdir(), "metawork-dmg-mount-"));
+  let attached = false;
+  try {
+    run(
+      "/usr/bin/hdiutil",
+      [
+        "attach",
+        "-readonly",
+        "-nobrowse",
+        "-mountpoint",
+        mountPoint,
+        targetPath,
+      ],
+      { capture: true },
+    );
+    attached = true;
+    const expectedAppName = `${localPackageMetadata.displayName}.app`;
+    const entries = readdirSync(mountPoint);
+    if (
+      entries.sort().join("\n") !==
+      [".DS_Store", "Applications", expectedAppName].sort().join("\n")
+    ) {
+      throw new Error(`DMG has unexpected root entries: ${entries.join(", ")}`);
+    }
+    const applicationsLink = path.join(mountPoint, "Applications");
+    if (
+      !lstatSync(applicationsLink).isSymbolicLink() ||
+      readlinkSync(applicationsLink) !== "/Applications"
+    ) {
+      throw new Error(
+        "DMG Applications entry is not an exact /Applications symlink",
+      );
+    }
+    verifyDeveloperIdSignature(
+      path.join(mountPoint, expectedAppName),
+      identity,
+      undefined,
+      { deep: true },
+    );
+  } finally {
+    if (attached) {
+      run("/usr/bin/hdiutil", ["detach", mountPoint], { capture: true });
+    }
+    rmSync(mountPoint, { recursive: true, force: true });
+  }
+}
+
+function notarizeDiskImage(identity) {
   const result = run(
     "/usr/bin/xcrun",
     [
       "notarytool",
       "submit",
-      notarizationArchivePath,
+      distributionDiskImagePath,
       "--keychain-profile",
       notarizationProfile,
       "--wait",
@@ -646,22 +861,32 @@ function notarizePackage() {
     );
   }
 
-  run("/usr/bin/xcrun", ["stapler", "staple", "-v", packagedAppPath]);
-  run("/usr/bin/xcrun", ["stapler", "validate", "-v", packagedAppPath]);
+  run("/usr/bin/xcrun", ["stapler", "staple", "-v", distributionDiskImagePath]);
+  run("/usr/bin/xcrun", [
+    "stapler",
+    "validate",
+    "-v",
+    distributionDiskImagePath,
+  ]);
   run("/usr/sbin/spctl", [
     "--assess",
     "--type",
-    "execute",
+    "open",
+    "--context",
+    "context:primary-signature",
     "--verbose=4",
-    packagedAppPath,
+    distributionDiskImagePath,
   ]);
-  createAppArchive(distributionArchivePath);
-  rmSync(notarizationArchivePath, { force: true });
+  run("/usr/bin/hdiutil", ["verify", distributionDiskImagePath], {
+    capture: true,
+  });
+  verifyDeveloperIdDiskImageSignature(distributionDiskImagePath, identity);
+  verifyDistributionDiskImage(identity, distributionDiskImagePath);
 
   const digest = createHash("sha256")
-    .update(readFileSync(distributionArchivePath))
+    .update(readFileSync(distributionDiskImagePath))
     .digest("hex");
-  return { archivePath: distributionArchivePath, digest, submission };
+  return { artifactPath: distributionDiskImagePath, digest, submission };
 }
 
 function runDevelopment() {
@@ -678,11 +903,7 @@ function runDevelopment() {
   runNative(["dev", "--manifest", "app.zon", "--binary", executablePath]);
 }
 
-function packageMacos() {
-  requireMacos();
-  const identity = resolveDistributionIdentity();
-  rmSync(distributionArchivePath, { force: true });
-  rmSync(notarizationArchivePath, { force: true });
+function buildPackagedMacosApp(identity) {
   runNode("scripts/build.mjs", ["release"]);
   runNode("scripts/clean-macos-package.mjs");
   runNative([
@@ -703,7 +924,18 @@ function packageMacos() {
     preserveEntitlements: true,
   });
   runNode("scripts/verify-macos-package.mjs");
-  const notarized = notarizePackage();
+  return signature;
+}
+
+function packageMacos() {
+  requireMacos();
+  const identity = resolveDistributionIdentity();
+  rmSync(distributionDiskImagePath, { force: true });
+  rmSync(legacyDistributionDiskImagePath, { force: true });
+  rmSync(legacyDistributionArchivePath, { force: true });
+  const signature = buildPackagedMacosApp(identity);
+  createDistributionDiskImage(identity, distributionDiskImagePath);
+  const notarized = notarizeDiskImage(identity);
   verifyDeveloperIdSignature(packagedAppPath, identity, undefined, {
     deep: true,
   });
@@ -711,7 +943,22 @@ function packageMacos() {
     `built Developer ID signed and notarized package ${packagedAppPath} (${signature.policy})`,
   );
   console.log(
-    `Apple notarization ${notarized.submission.id} accepted; final archive ${notarized.archivePath} (sha256=${notarized.digest})`,
+    `Apple notarization ${notarized.submission.id} accepted; final DMG ${notarized.artifactPath} (sha256=${notarized.digest})`,
+  );
+}
+
+function previewMacosPackage() {
+  requireMacos();
+  const identity = resolveDistributionIdentity();
+  rmSync(previewDiskImagePath, { force: true });
+  buildPackagedMacosApp(identity);
+  createDistributionDiskImage(identity, previewDiskImagePath);
+  verifyDistributionDiskImage(identity, previewDiskImagePath);
+  const digest = createHash("sha256")
+    .update(readFileSync(previewDiskImagePath))
+    .digest("hex");
+  console.log(
+    `built Developer ID signed, non-notarized preview DMG ${previewDiskImagePath} (sha256=${digest})`,
   );
 }
 
@@ -724,9 +971,12 @@ function main() {
     case "package":
       packageMacos();
       break;
+    case "preview":
+      previewMacosPackage();
+      break;
     default:
       throw new Error(
-        "usage: node scripts/macos-local-signing.mjs dev|package",
+        "usage: node scripts/macos-local-signing.mjs dev|package|preview",
       );
   }
 }
