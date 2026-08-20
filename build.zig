@@ -70,6 +70,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-account-state", .root_module = test_modules.account_state },
         .{ .name = "metawork-account-runtime", .root_module = test_modules.account_runtime },
         .{ .name = "metawork-account", .root_module = test_modules.account },
+        .{ .name = "metawork-storage", .root_module = test_modules.storage },
         .{ .name = "metawork-app", .root_module = test_modules.app },
         .{ .name = "metawork-automation-enabled", .root_module = test_modules.automation_enabled },
         .{ .name = "metawork-bridge", .root_module = test_modules.bridge },
@@ -156,6 +157,7 @@ fn addLifecycleTests(
 }
 
 const WiredModules = struct {
+    storage: *std.Build.Module,
     account: *std.Build.Module,
     account_runtime: *std.Build.Module,
     account_catalog: *std.Build.Module,
@@ -445,6 +447,11 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     const runner = existingImport(root_module, "runner");
     const product_identity = b.createModule(.{
         .root_source_file = b.path("src/product_identity.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    const storage = b.createModule(.{
+        .root_source_file = b.path("src/storage.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
@@ -904,6 +911,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     root_module.addImport("metawork_app", app);
     root_module.link_libc = bundle.link_libc;
     return .{
+        .storage = storage,
         .account = account,
         .account_runtime = account_runtime,
         .account_catalog = account_catalog,
