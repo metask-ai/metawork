@@ -59,31 +59,31 @@ pub const OwnedWorkspaceBinding = struct {
     }
 };
 
-pub const OwnedSkillSelection = struct {
+pub const OwnedSkillPolicy = struct {
     arena: std.heap.ArenaAllocator,
-    selection_revision: u64,
-    disabled_skill_ids: []const []const u8,
+    policy_revision: u64,
+    disabled_skill_policy_keys: []const []const u8,
 
     pub fn init(
         allocator: std.mem.Allocator,
-        selection_revision: u64,
-        disabled_skill_ids: anytype,
-    ) std.mem.Allocator.Error!OwnedSkillSelection {
-        std.debug.assert(selection_revision != 0);
+        policy_revision: u64,
+        disabled_skill_policy_keys: anytype,
+    ) std.mem.Allocator.Error!OwnedSkillPolicy {
+        std.debug.assert(policy_revision != 0);
         var arena = std.heap.ArenaAllocator.init(allocator);
         errdefer arena.deinit();
         const owned = arena.allocator();
-        const ids = try owned.alloc([]const u8, disabled_skill_ids.len);
-        for (disabled_skill_ids, ids) |skill_id, *target|
-            target.* = try owned.dupe(u8, skill_id);
+        const keys = try owned.alloc([]const u8, disabled_skill_policy_keys.len);
+        for (disabled_skill_policy_keys, keys) |key, *target|
+            target.* = try owned.dupe(u8, key);
         return .{
             .arena = arena,
-            .selection_revision = selection_revision,
-            .disabled_skill_ids = ids,
+            .policy_revision = policy_revision,
+            .disabled_skill_policy_keys = keys,
         };
     }
 
-    pub fn deinit(self: *OwnedSkillSelection) void {
+    pub fn deinit(self: *OwnedSkillPolicy) void {
         self.arena.deinit();
         self.* = undefined;
     }
@@ -95,7 +95,7 @@ pub const PreparedAttempt = struct {
     binding_epoch: u64,
     checkpoint: checkpoint_record.Record,
     workspace: OwnedWorkspaceBinding,
-    skill_selection: OwnedSkillSelection,
+    skill_policy: OwnedSkillPolicy,
     execution: owned_execution.OwnedTaskExecution,
     model: []u8,
     provider: agent.ProviderKind,
@@ -244,7 +244,7 @@ pub const Job = struct {
         if (self.attempt.mcp_selection) |selection| selection.deinit();
         self.allocator.free(self.attempt.model);
         self.attempt.execution.deinit();
-        self.attempt.skill_selection.deinit();
+        self.attempt.skill_policy.deinit();
         self.attempt.workspace.deinit();
         self.attempt.checkpoint.deinit(self.allocator);
         const allocator = self.allocator;
@@ -277,13 +277,13 @@ pub const Job = struct {
         var snapshot_live = true;
         defer if (snapshot_live) snapshot.deinit();
         snapshot.applyEnablement(
-            self.attempt.skill_selection.selection_revision,
-            self.attempt.skill_selection.disabled_skill_ids,
+            self.attempt.skill_policy.policy_revision,
+            self.attempt.skill_policy.disabled_skill_policy_keys,
         );
-        var active_disabled_skill_ids: std.ArrayList([]const u8) = .empty;
-        defer active_disabled_skill_ids.deinit(self.allocator);
+        var granted_skill_ids: std.ArrayList([]const u8) = .empty;
+        defer granted_skill_ids.deinit(self.allocator);
         for (snapshot.skills) |skill|
-            if (!skill.enabled) active_disabled_skill_ids.append(
+            if (skill.enabled) granted_skill_ids.append(
                 self.allocator,
                 skill.skill_id,
             ) catch return .{ .failure = .catalog_projection_unavailable };
@@ -324,8 +324,8 @@ pub const Job = struct {
                 else
                     &agent.desktop_builtin_tools,
                 .skill_catalog = acquisition.lease,
-                .skill_selection = .{
-                    .disabled_skill_ids = active_disabled_skill_ids.items,
+                .skill_policy = .{
+                    .granted_skill_ids = granted_skill_ids.items,
                 },
                 .mcp_selection = self.attempt.mcp_selection,
             },

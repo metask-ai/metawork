@@ -367,6 +367,8 @@ fn exportCheckpoint(
         .stale_compact,
         .mcp_not_refreshed,
         .invalid_mcp_selection,
+        .completion_unsupported_response,
+        .skill_catalog_incomplete,
         .ok,
         => dependencyFailure(.checkpoint_export),
     } };
@@ -427,6 +429,8 @@ pub fn describe(
             .logical_session_conflict,
             .mcp_not_refreshed,
             .invalid_mcp_selection,
+            .completion_unsupported_response,
+            .skill_catalog_incomplete,
             => dependencyFailure(.describe),
         } };
     }

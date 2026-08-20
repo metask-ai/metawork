@@ -735,21 +735,21 @@ pub const Runtime = struct {
                 ))
                 return error.CatalogBindingMismatch;
         }
-        if ((options.skill_catalog == null) != (options.skill_selection == null))
-            return error.InvalidSkillSelection;
-        const skill_selection_views = try self.allocator.alloc(
+        if ((options.skill_catalog == null) != (options.skill_policy == null))
+            return error.InvalidSkillPolicy;
+        const skill_policy_views = try self.allocator.alloc(
             wire.BytesViewV1,
-            if (options.skill_selection) |selection|
-                selection.disabled_skill_ids.len
+            if (options.skill_policy) |policy|
+                policy.granted_skill_ids.len
             else
                 0,
         );
-        defer self.allocator.free(skill_selection_views);
-        const skill_selection = if (options.skill_selection) |selection|
-            session_wire.skillSelection(
-                selection.disabled_skill_ids,
-                skill_selection_views,
-            ) catch return error.InvalidSkillSelection
+        defer self.allocator.free(skill_policy_views);
+        const skill_policy = if (options.skill_policy) |policy|
+            session_wire.skillPolicy(
+                policy.granted_skill_ids,
+                skill_policy_views,
+            ) catch return error.InvalidSkillPolicy
         else
             undefined;
 
@@ -826,8 +826,8 @@ pub const Runtime = struct {
             catalog.rawHandle(lease)
         else
             null;
-        host_config.skill_selection = if (options.skill_selection != null)
-            &skill_selection
+        host_config.skill_policy = if (options.skill_policy != null)
+            &skill_policy
         else
             null;
         host_config.permission_rules = null;
@@ -905,21 +905,21 @@ pub const Runtime = struct {
                 return error.CatalogBindingMismatch;
         }
         if ((session_options.skill_catalog == null) !=
-            (session_options.skill_selection == null))
-            return error.InvalidSkillSelection;
-        const skill_selection_views = try self.allocator.alloc(
+            (session_options.skill_policy == null))
+            return error.InvalidSkillPolicy;
+        const skill_policy_views = try self.allocator.alloc(
             wire.BytesViewV1,
-            if (session_options.skill_selection) |selection|
-                selection.disabled_skill_ids.len
+            if (session_options.skill_policy) |policy|
+                policy.granted_skill_ids.len
             else
                 0,
         );
-        defer self.allocator.free(skill_selection_views);
-        const skill_selection = if (session_options.skill_selection) |selection|
-            session_wire.skillSelection(
-                selection.disabled_skill_ids,
-                skill_selection_views,
-            ) catch return error.InvalidSkillSelection
+        defer self.allocator.free(skill_policy_views);
+        const skill_policy = if (session_options.skill_policy) |policy|
+            session_wire.skillPolicy(
+                policy.granted_skill_ids,
+                skill_policy_views,
+            ) catch return error.InvalidSkillPolicy
         else
             undefined;
 
@@ -1046,8 +1046,8 @@ pub const Runtime = struct {
             catalog.rawHandle(lease)
         else
             null;
-        host_config.skill_selection = if (session_options.skill_selection != null)
-            &skill_selection
+        host_config.skill_policy = if (session_options.skill_policy != null)
+            &skill_policy
         else
             null;
         host_config.permission_rules = null;

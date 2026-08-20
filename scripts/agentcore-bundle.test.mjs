@@ -83,9 +83,9 @@ async function fixture(t, mutateManifest = () => {}) {
     contract: {
       binary_abi_status: "experimental",
       binary_abi_version: 1,
-      binary_abi_revision: 8,
-      binary_abi_table_size: 216,
-      capabilities: 0xfffff,
+      binary_abi_revision: 9,
+      binary_abi_table_size: 280,
+      capabilities: 0x3fffff,
     },
     files,
   };
@@ -126,7 +126,7 @@ async function seedCanonicalBundle(repositoryRoot) {
   return { storageRoot, target };
 }
 
-test("accepts a complete pinned Windows x64 GNU revision 8 bundle", async (t) => {
+test("accepts a complete pinned Windows x64 GNU revision 9 bundle", async (t) => {
   const { root, manifest } = await fixture(t);
   const result = await validateAgentCoreBundle(root, {
     ...injectedChecks,
@@ -136,7 +136,7 @@ test("accepts a complete pinned Windows x64 GNU revision 8 bundle", async (t) =>
   assert.deepEqual(result.payloadFiles, fixtureFiles);
 });
 
-test("accepts a complete pinned macOS arm64 revision 8 bundle", async (t) => {
+test("accepts a complete pinned macOS arm64 revision 9 bundle", async (t) => {
   const candidate = await fixture(t, (manifest) => {
     manifest.target = {
       id: "aarch64-macos",

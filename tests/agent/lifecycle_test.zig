@@ -644,7 +644,7 @@ test "malformed compact result poisons Session and queued compact can be cancell
     try closeSession(session, .session_close);
 }
 
-test "Runtime rejects tables missing required revision 8 capabilities" {
+test "Runtime rejects tables missing required revision 9 capabilities" {
     var api = fake_api;
     api.capabilities &= ~wire.CAP_SKILL_CATALOG;
     try std.testing.expectError(
@@ -769,11 +769,7 @@ test "invalid and duplicate catalog descriptors release every AgentCore owner" {
             std.testing.allocator,
         );
         defer std.testing.allocator.free(root);
-        const expected = if (plan == .malformed)
-            error.InvalidCatalogDescriptor
-        else
-            error.DuplicateCatalogIdentity;
-        try std.testing.expectError(expected, runtime.querySkillCatalog(.{
+        try std.testing.expectError(error.InvalidCatalogDescriptor, runtime.querySkillCatalog(.{
             .workspace_root = root,
             .canonical_user_home = root,
             .workspace_epoch = "workspace-1",
@@ -819,7 +815,7 @@ test "Skill input is deep-copied and encoded only for the typed Core call" {
         .canonical_user_home = root,
         .workspace_epoch = "workspace-1",
         .skill_catalog = acquisition.lease,
-        .skill_selection = .{ .disabled_skill_ids = &.{} },
+        .skill_policy = .{ .granted_skill_ids = &.{fixture.fixture_skill_id} },
     });
     try runtime.releaseSkillCatalog(acquisition.lease);
 
@@ -856,14 +852,14 @@ test "Skill input is deep-copied and encoded only for the typed Core call" {
     const input_matches = fake_core.skill_input_matches;
     const home_seen = fake_core.workspace_home_seen;
     const bound = fake_core.skill_session_bound;
-    const selection_seen = fake_core.skill_selection_seen;
+    const policy_seen = fake_core.skill_policy_seen;
     const permission_rules_absent = fake_core.permission_rules_absent;
     fake_core.unlock();
     try std.testing.expect(saw_skill);
     try std.testing.expect(input_matches);
     try std.testing.expect(home_seen);
     try std.testing.expect(bound);
-    try std.testing.expect(selection_seen);
+    try std.testing.expect(policy_seen);
     try std.testing.expect(permission_rules_absent);
     try session.close(.session_close);
 }
@@ -911,7 +907,7 @@ test "Skill rejection statuses leave the Session reusable" {
             .canonical_user_home = root,
             .workspace_epoch = "workspace-1",
             .skill_catalog = acquisition.lease,
-            .skill_selection = .{ .disabled_skill_ids = &.{} },
+            .skill_policy = .{ .granted_skill_ids = &.{fixture.fixture_skill_id} },
         });
         try runtime.releaseSkillCatalog(acquisition.lease);
         acquisition.projection.deinit();
@@ -973,11 +969,11 @@ test "Session catalog refresh binds explicit selection only while idle and rejec
     const queued = try session.prepareRun(.{ .text = "queued" });
     try std.testing.expectError(
         error.SessionNotIdle,
-        session.refreshSkillCatalog(current.lease, .{ .disabled_skill_ids = &.{} }),
+        session.refreshSkillCatalog(current.lease, .{ .granted_skill_ids = &.{} }),
     );
     try session.cancelPreparedRun(queued);
     try session.refreshSkillCatalog(current.lease, .{
-        .disabled_skill_ids = &.{fixture.fixture_skill_id},
+        .granted_skill_ids = &.{fixture.fixture_skill_id},
     });
 
     var other = try runtime.querySkillCatalog(.{
@@ -989,7 +985,7 @@ test "Session catalog refresh binds explicit selection only while idle and rejec
     defer runtime.releaseSkillCatalog(other.lease) catch unreachable;
     try std.testing.expectError(
         error.CatalogBindingMismatch,
-        session.refreshSkillCatalog(other.lease, .{ .disabled_skill_ids = &.{} }),
+        session.refreshSkillCatalog(other.lease, .{ .granted_skill_ids = &.{} }),
     );
     for ([_]u32{
         wire.STATUS_RESOURCE_LIMIT,
@@ -998,7 +994,7 @@ test "Session catalog refresh binds explicit selection only while idle and rejec
         fake_core.forceNextSkillUpdateStatus(recoverable_status);
         try std.testing.expectError(
             error.CatalogRefreshFailed,
-            session.refreshSkillCatalog(current.lease, .{ .disabled_skill_ids = &.{} }),
+            session.refreshSkillCatalog(current.lease, .{ .granted_skill_ids = &.{} }),
         );
         try std.testing.expectEqual(lifecycle.SessionState.idle, session.snapshot().state);
         const reusable = try session.prepareRun(.{ .text = "still reusable" });
@@ -1007,7 +1003,7 @@ test "Session catalog refresh binds explicit selection only while idle and rejec
     fake_core.forceNextSkillUpdateStatus(wire.STATUS_STALE_COMPACT);
     try std.testing.expectError(
         error.CatalogRefreshFailed,
-        session.refreshSkillCatalog(current.lease, .{ .disabled_skill_ids = &.{} }),
+        session.refreshSkillCatalog(current.lease, .{ .granted_skill_ids = &.{} }),
     );
     try std.testing.expectEqual(lifecycle.SessionState.poisoned, session.snapshot().state);
     try std.testing.expectError(
@@ -1016,10 +1012,10 @@ test "Session catalog refresh binds explicit selection only while idle and rejec
     );
     fake_core.lock();
     const refreshes = fake_core.catalog_refreshes;
-    const selection_seen = fake_core.skill_selection_seen;
+    const policy_seen = fake_core.skill_policy_seen;
     fake_core.unlock();
     try std.testing.expectEqual(@as(usize, 1), refreshes);
-    try std.testing.expect(selection_seen);
+    try std.testing.expect(policy_seen);
     try session.close(.session_close);
 }
 
@@ -1988,7 +1984,7 @@ test "status is validated before RunResult and invalid results poison the Sessio
     }
 }
 
-test "revision 8 checkpoint outcomes are typed and budget admission remains retryable" {
+test "revision 9 checkpoint outcomes are typed and budget admission remains retryable" {
     fake_core.reset();
     const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 3 });
     defer {

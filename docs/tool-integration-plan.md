@@ -26,7 +26,7 @@ WebSearch / WebFetch
 ## 2. 本次不处理的内容
 
 - 尚未通过对应 bundle verifier 和 Session 探针的其他平台工具可用性；本 hard cut 不建立第三交付面；
-- AgentCore catalog、binding identity 或 ABI revision 变更；当前 revision 8 名称数组已足够完成本次名称接入；
+- AgentCore catalog、binding identity 或 ABI revision 变更；当前 revision 9 名称数组已足够完成本次名称接入；
 - ABI Host tools、MCP 工具合并、第二套 ToolManager 或 MetaWork 自建进程/网络执行器；
 - permission contract 重构；沿用 [会话权限系统重构方案](permission-system-refactor-plan.md)；
 - WebSearch 的 provider 差异、网络策略和外部服务可用性；这些不是工具名称 admission 的身份问题；
@@ -42,7 +42,7 @@ WebSearch / WebFetch
 - `src/workbench/projection.zig` 创建正式 Task Session 时没有传入新的工具选择，因此此前始终依赖四工具默认值；
 - Runtime 级集合必须是当前 target 已验证工具的并集，Session 级 `allowed_tools` 只能在其内收窄；只改 Session 名称而不扩充 Runtime 集合不会完成接入。
 
-当前 Windows 与 macOS bundle 分别使用其 target-specific 静态库，对应 lock source 均为 `df554537aea946776946238b657ad29b20f0c852`（ABI v1 revision 8）。该证据不替代真实 Session 运行证据。
+当前 Windows 与 macOS bundle 分别使用其 target-specific 静态库，对应 lock source 均为 `d82e608e4e1481671de4235186f96a36d25446cb`（ABI v1 revision 9）。该证据不替代真实 Session 运行证据。
 
 ## 4. 最小架构
 

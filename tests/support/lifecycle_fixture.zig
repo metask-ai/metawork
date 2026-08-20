@@ -234,7 +234,7 @@ pub const FakeCore = struct {
     workspace_home_seen: bool = false,
     workspace_epoch_seen: bool = false,
     skill_session_bound: bool = false,
-    skill_selection_seen: bool = false,
+    skill_policy_seen: bool = false,
     permission_rules_absent: bool = false,
     skill_run_seen: bool = false,
     skill_input_matches: bool = false,
@@ -586,7 +586,11 @@ const healthy_catalog_json =
     fixture_catalog_revision ++
     "\",\"health\":\"healthy\",\"skills\":[{\"skill_id\":\"" ++
     fixture_skill_id ++
-    "\",\"invocation_name\":\"review\",\"display_name\":\"Review\",\"description\":\"Review one target\",\"argument_schema\":{\"schema\":\"metask.skill-arguments/v1\",\"max_values\":64,\"names\":[\"target\",\"focus\"]}}],\"issues\":[]}";
+    "\",\"skill_policy_key\":\"review\",\"invocation_name\":\"review\",\"source\":{\"provider_id\":\"agents.directory\",\"source_scope\":\"workspace\",\"source_instance_id\":\"agents.workspace.default\",\"contribution_id\":\"" ++
+    fixture_catalog_scope ++
+    "\"},\"content_revision\":\"" ++
+    fixture_catalog_revision ++
+    "\",\"display_name\":\"Review\",\"description\":\"Review one target\",\"argument_schema\":{\"schema\":\"metask.skill-arguments/v1\",\"max_values\":64,\"names\":[\"target\",\"focus\"]}}],\"issues\":[]}";
 const duplicate_catalog_json =
     "{\"schema\":\"metask.skill-catalog/v1\",\"catalog_scope_id\":\"" ++
     fixture_catalog_scope ++
@@ -594,9 +598,17 @@ const duplicate_catalog_json =
     fixture_catalog_revision ++
     "\",\"health\":\"healthy\",\"skills\":[{\"skill_id\":\"" ++
     fixture_skill_id ++
-    "\",\"invocation_name\":\"review\",\"display_name\":\"Review\",\"description\":\"First\",\"argument_schema\":{\"schema\":\"metask.skill-arguments/v1\",\"max_values\":64,\"names\":[]}},{\"skill_id\":\"" ++
+    "\",\"skill_policy_key\":\"review\",\"invocation_name\":\"review\",\"source\":{\"provider_id\":\"agents.directory\",\"source_scope\":\"workspace\",\"source_instance_id\":\"agents.workspace.default\",\"contribution_id\":\"" ++
+    fixture_catalog_scope ++
+    "\"},\"content_revision\":\"" ++
+    fixture_catalog_revision ++
+    "\",\"display_name\":\"Review\",\"description\":\"First\",\"argument_schema\":{\"schema\":\"metask.skill-arguments/v1\",\"max_values\":64,\"names\":[]}},{\"skill_id\":\"" ++
     fixture_skill_id ++
-    "\",\"invocation_name\":\"audit\",\"display_name\":\"Audit\",\"description\":\"Duplicate id\",\"argument_schema\":{\"schema\":\"metask.skill-arguments/v1\",\"max_values\":64,\"names\":[]}}],\"issues\":[]}";
+    "\",\"skill_policy_key\":\"audit\",\"invocation_name\":\"audit\",\"source\":{\"provider_id\":\"agents.directory\",\"source_scope\":\"workspace\",\"source_instance_id\":\"agents.workspace.default\",\"contribution_id\":\"" ++
+    fixture_catalog_scope ++
+    "\"},\"content_revision\":\"" ++
+    fixture_catalog_revision ++
+    "\",\"display_name\":\"Audit\",\"description\":\"Duplicate id\",\"argument_schema\":{\"schema\":\"metask.skill-arguments/v1\",\"max_values\":64,\"names\":[]}}],\"issues\":[]}";
 
 const empty_mcp_catalog_json =
     "{\"schema\":\"agentcore.mcp-catalog/v1\",\"catalog_generation\":7," ++
@@ -725,16 +737,16 @@ pub fn sessionCreate(
         @ptrCast(@alignCast(handle))
     else
         null;
-    const selection_valid = if (host.skill_selection) |selection|
-        validSkillSelection(selection)
+    const policy_valid = if (host.skill_policy) |policy|
+        validSkillPolicy(policy)
     else
         false;
     const mcp_selection_valid = if (host.mcp_selection) |selection|
         validMcpSelection(selection)
     else
         true;
-    if ((bound_catalog != null and !selection_valid) or
-        (bound_catalog == null and host.skill_selection != null) or
+    if ((bound_catalog != null and !policy_valid) or
+        (bound_catalog == null and host.skill_policy != null) or
         host.permission_rules != null or
         !mcp_selection_valid or
         host.durable_budget != null)
@@ -788,7 +800,7 @@ pub fn sessionCreate(
             );
             fake_core.workspace_home_seen = workspace_home.len != 0;
             fake_core.skill_session_bound = bound_catalog != null;
-            fake_core.skill_selection_seen = bound_catalog != null and selection_valid;
+            fake_core.skill_policy_seen = bound_catalog != null and policy_valid;
             fake_core.permission_rules_absent = host.permission_rules == null;
             out_session.?.* = @ptrCast(session);
             return wire.STATUS_OK;
@@ -967,10 +979,10 @@ pub fn sessionSetModel(
     return wire.STATUS_OK;
 }
 
-pub fn sessionUpdateSkills(
+pub fn sessionBindSkillPolicy(
     session_handle: ?*wire.SessionHandle,
     catalog_handle: ?*wire.SkillCatalogHandle,
-    selection: ?*const wire.SkillSelectionV1,
+    policy: ?*const wire.SkillPolicyV1,
     out_error: ?*wire.OwnedBytesV1,
 ) callconv(.c) u32 {
     if (out_error) |out| out.* = .{ .ptr = null, .len = 0 };
@@ -982,18 +994,18 @@ pub fn sessionUpdateSkills(
         diagnostic(out_error);
         return wire.STATUS_INVALID_ARGUMENT;
     }));
-    const selected = selection orelse {
+    const selected = policy orelse {
         diagnostic(out_error);
         return wire.STATUS_INVALID_ARGUMENT;
     };
-    if (!validSkillSelection(selected)) {
+    if (!validSkillPolicy(selected)) {
         diagnostic(out_error);
         return wire.STATUS_INVALID_ARGUMENT;
     }
     fake_core.lock();
     const forced_status = fake_core.forced_skill_update_status;
     fake_core.forced_skill_update_status = null;
-    fake_core.skill_selection_seen = true;
+    fake_core.skill_policy_seen = true;
     fake_core.unlock();
     if (forced_status) |status| {
         diagnostic(out_error);
@@ -1942,6 +1954,74 @@ pub fn bufferRelease(out: ?*wire.OwnedBytesV1) callconv(.c) void {
     fake_core.unlock();
 }
 
+fn completionCreate(
+    _: ?*const wire.CompletionConfigV1,
+    out_completion: ?*?*wire.CompletionHandle,
+    out_diagnostic: ?*wire.OwnedBytesV1,
+) callconv(.c) u32 {
+    if (out_completion) |out| out.* = null;
+    if (out_diagnostic) |out| out.* = .{ .ptr = null, .len = 0 };
+    return wire.STATUS_INVALID_ARGUMENT;
+}
+
+fn completionDestroy(_: ?*wire.CompletionHandle, out_diagnostic: ?*wire.OwnedBytesV1) callconv(.c) u32 {
+    if (out_diagnostic) |out| out.* = .{ .ptr = null, .len = 0 };
+    return wire.STATUS_INVALID_ARGUMENT;
+}
+
+fn completionDescribe(
+    _: ?*wire.CompletionHandle,
+    _: ?*wire.CompletionInfoV1,
+    out_diagnostic: ?*wire.OwnedBytesV1,
+) callconv(.c) u32 {
+    if (out_diagnostic) |out| out.* = .{ .ptr = null, .len = 0 };
+    return wire.STATUS_INVALID_ARGUMENT;
+}
+
+fn completionComplete(
+    _: ?*wire.CompletionHandle,
+    _: ?*const wire.CompletionRequestV1,
+    _: ?*wire.CompletionResultV1,
+    out_diagnostic: ?*wire.OwnedBytesV1,
+) callconv(.c) u32 {
+    if (out_diagnostic) |out| out.* = .{ .ptr = null, .len = 0 };
+    return wire.STATUS_INVALID_ARGUMENT;
+}
+
+fn completionStreamStart(
+    _: ?*wire.CompletionHandle,
+    _: ?*const wire.CompletionRequestV1,
+    out_stream: ?*?*wire.CompletionStreamHandle,
+    out_diagnostic: ?*wire.OwnedBytesV1,
+) callconv(.c) u32 {
+    if (out_stream) |out| out.* = null;
+    if (out_diagnostic) |out| out.* = .{ .ptr = null, .len = 0 };
+    return wire.STATUS_INVALID_ARGUMENT;
+}
+
+fn completionStreamNext(
+    _: ?*wire.CompletionStreamHandle,
+    _: ?*wire.CompletionEventV1,
+    out_diagnostic: ?*wire.OwnedBytesV1,
+) callconv(.c) u32 {
+    if (out_diagnostic) |out| out.* = .{ .ptr = null, .len = 0 };
+    return wire.STATUS_INVALID_ARGUMENT;
+}
+
+fn completionStreamAbort(
+    _: ?*wire.CompletionStreamHandle,
+    _: u32,
+    out_diagnostic: ?*wire.OwnedBytesV1,
+) callconv(.c) u32 {
+    if (out_diagnostic) |out| out.* = .{ .ptr = null, .len = 0 };
+    return wire.STATUS_INVALID_ARGUMENT;
+}
+
+fn completionStreamDestroy(_: ?*wire.CompletionStreamHandle, out_diagnostic: ?*wire.OwnedBytesV1) callconv(.c) u32 {
+    if (out_diagnostic) |out| out.* = .{ .ptr = null, .len = 0 };
+    return wire.STATUS_INVALID_ARGUMENT;
+}
+
 pub const fake_api = wire.ApiV1{
     .struct_size = @sizeOf(wire.ApiV1),
     .abi_version = wire.ABI_VERSION_V1,
@@ -1952,6 +2032,14 @@ pub const fake_api = wire.ApiV1{
     .runtime_destroy = runtimeDestroy,
     .runtime_query_skill_catalog = runtimeQuerySkillCatalog,
     .skill_catalog_release = skillCatalogRelease,
+    .completion_create = completionCreate,
+    .completion_destroy = completionDestroy,
+    .completion_describe = completionDescribe,
+    .completion_complete = completionComplete,
+    .completion_stream_start = completionStreamStart,
+    .completion_stream_next = completionStreamNext,
+    .completion_stream_abort = completionStreamAbort,
+    .completion_stream_destroy = completionStreamDestroy,
     .runtime_refresh_mcp = runtimeRefreshMcp,
     .runtime_describe_mcp = runtimeDescribeMcp,
     .runtime_apply_mcp_configuration = runtimeApplyMcpConfiguration,
@@ -1960,7 +2048,7 @@ pub const fake_api = wire.ApiV1{
     .session_destroy = sessionDestroy,
     .session_describe = sessionDescribe,
     .session_set_model = sessionSetModel,
-    .session_update_skills = sessionUpdateSkills,
+    .session_update_skills = sessionBindSkillPolicy,
     .session_update_permission_rules = sessionUpdatePermissionRules,
     .session_update_mcp = sessionUpdateMcp,
     .session_run_input = sessionRunInput,
@@ -1972,23 +2060,23 @@ pub const fake_api = wire.ApiV1{
     .reserved = [_]u64{0} ** 3,
 };
 
-fn validSkillSelection(selection: *const wire.SkillSelectionV1) bool {
-    if (selection.struct_size != @sizeOf(wire.SkillSelectionV1) or
-        selection.default_state_code != wire.SKILL_SELECTION_ENABLED or
-        (selection.exception_skill_ids == null) !=
-            (selection.exception_skill_id_count == 0))
+fn validSkillPolicy(policy: *const wire.SkillPolicyV1) bool {
+    if (policy.struct_size != @sizeOf(wire.SkillPolicyV1) or
+        policy.reserved0 != 0 or
+        (policy.granted_skill_ids == null) !=
+            (policy.granted_skill_id_count == 0))
         return false;
-    if (selection.exception_skill_ids) |exceptions| {
-        for (exceptions[0..selection.exception_skill_id_count], 0..) |exception, index| {
-            const skill_id = sdk.borrowedBytes(exception) catch return false;
+    if (policy.granted_skill_ids) |grants| {
+        for (grants[0..policy.granted_skill_id_count], 0..) |grant, index| {
+            const skill_id = sdk.borrowedBytes(grant) catch return false;
             if (skill_id.len == 0) return false;
-            for (exceptions[0..index]) |previous| {
+            for (grants[0..index]) |previous| {
                 const previous_id = sdk.borrowedBytes(previous) catch return false;
                 if (std.mem.eql(u8, skill_id, previous_id)) return false;
             }
         }
     }
-    for (selection.reserved) |value| {
+    for (policy.reserved) |value| {
         if (value != 0) return false;
     }
     return true;

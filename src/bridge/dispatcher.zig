@@ -1516,7 +1516,7 @@ pub const Dispatcher = struct {
             invocation.request.payload,
         );
         defer parsed.deinit();
-        if (parsed.value.skillId.len == 0 or
+        if (parsed.value.skillPolicyKey.len == 0 or
             parsed.value.expectedCatalogRevision.len == 0)
             return error.InvalidBridgePayload;
         const state: workbench_api.SkillEnablementState =
@@ -1547,7 +1547,7 @@ pub const Dispatcher = struct {
             } else return error.InvalidBridgePayload;
         const next_revision = (try self.requireWorkbench()).setSkillEnabled(.{
             .scope = scope,
-            .skill_id = parsed.value.skillId,
+            .skill_policy_key = parsed.value.skillPolicyKey,
             .state = state,
             .expected_catalog_revision = parsed.value.expectedCatalogRevision,
             .expected_selection_revision = try handlers.parseWireId(
