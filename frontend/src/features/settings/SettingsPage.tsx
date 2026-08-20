@@ -578,10 +578,12 @@ export function SettingsPage({
       }}
     >
       <header className="settings-header">
-        <button className="settings-back focus-ring" onClick={onBack}>
-          <Icon name="arrow-left" />
-          {t("settings.back")}
-        </button>
+        <div className="settings-back-slot">
+          <button className="settings-back focus-ring" onClick={onBack}>
+            <Icon name="arrow-left" />
+            {t("settings.back")}
+          </button>
+        </div>
         <div className="settings-header-copy">
           <h1 id="settings-page-title" ref={title} tabIndex={-1}>
             {t("settings.title")}
@@ -602,7 +604,10 @@ export function SettingsPage({
               content.current?.scrollTo({ top: 0, behavior: "smooth" });
             }}
           >
-            {t("settings.general")}
+            <span className="settings-nav-icon" aria-hidden="true">
+              <Icon name="settings" />
+            </span>
+            <span>{t("settings.general")}</span>
           </a>
           <a
             className="focus-ring"
@@ -618,7 +623,10 @@ export function SettingsPage({
               });
             }}
           >
-            {t("settings.account")}
+            <span className="settings-nav-icon" aria-hidden="true">
+              <Icon name="account" />
+            </span>
+            <span>{t("settings.account")}</span>
           </a>
           <a
             className="focus-ring"
@@ -637,7 +645,10 @@ export function SettingsPage({
               });
             }}
           >
-            {t("settings.model_connections")}
+            <span className="settings-nav-icon" aria-hidden="true">
+              <Icon name="model" />
+            </span>
+            <span>{t("settings.model_connections")}</span>
           </a>
         </nav>
 

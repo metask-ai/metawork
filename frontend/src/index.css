@@ -653,7 +653,7 @@ summary::-webkit-details-marker {
 
 /* Long-lived Settings surface */
 .settings-page {
-  --settings-navigation-track: calc(var(--left-column-width) - 64px);
+  --settings-navigation-track: var(--left-column-width);
   --settings-frost: var(--ui-surface-canvas);
   --settings-paper: var(--ui-surface-panel);
   --settings-ink: var(--ui-content-primary);
@@ -675,17 +675,26 @@ summary::-webkit-details-marker {
 .settings-header,
 .settings-layout {
   width: 100%;
-  padding-inline: 32px;
 }
 
 .settings-header {
   display: grid;
   grid-template-columns: var(--settings-navigation-track) minmax(0, 1fr);
   min-height: 64px;
-  padding: 10px 32px;
+  padding: 0;
   align-items: center;
-  gap: 32px;
+  gap: 0;
   border-bottom: 1px solid var(--settings-line);
+}
+
+.settings-back-slot {
+  display: flex;
+  height: 100%;
+  min-width: 0;
+  padding: 10px 14px;
+  align-items: center;
+  border-right: 1px solid var(--settings-line);
+  background: var(--ui-surface-panel-2);
 }
 
 .settings-back {
@@ -711,7 +720,9 @@ summary::-webkit-details-marker {
 
 .settings-header-copy {
   display: flex;
+  min-height: 64px;
   min-width: 0;
+  padding: 10px 32px;
   align-items: baseline;
   gap: 18px;
 }
@@ -741,25 +752,31 @@ summary::-webkit-details-marker {
   display: grid;
   grid-template-columns: var(--settings-navigation-track) minmax(0, 1fr);
   min-height: 0;
-  padding-top: 22px;
-  gap: 32px;
+  gap: 0;
 }
 
 .settings-nav {
   display: grid;
-  height: fit-content;
-  padding: 4px 0;
-  align-self: start;
-  gap: 4px;
+  min-height: 0;
+  padding: 26px 14px 72px;
+  align-content: start;
+  gap: 1px;
+  border-right: 1px solid var(--settings-line);
+  background: var(--ui-surface-panel-2);
 }
 
 .settings-nav a {
   position: relative;
-  padding: 10px 12px;
-  border-radius: 10px;
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  min-height: 36px;
+  padding: 0 10px 0 8px;
+  align-items: center;
+  gap: 7px;
+  border-radius: 7px;
   color: var(--settings-muted);
-  font-size: var(--text-body);
-  font-weight: 610;
+  font-size: var(--text-control);
+  font-weight: 650;
   text-decoration: none;
   transition:
     color 120ms ease,
@@ -769,30 +786,45 @@ summary::-webkit-details-marker {
 .settings-nav a:hover,
 .settings-nav a:focus-visible {
   color: var(--settings-ink);
-  background: var(--metask-primary-soft);
+  background: color-mix(
+    in srgb,
+    var(--ui-action-primary-hover) 6%,
+    transparent
+  );
 }
 
 .settings-nav a[aria-current="location"] {
   color: var(--settings-brand-strong);
   background: var(--settings-brand-mist);
-  font-weight: 700;
 }
 
 .settings-nav a[aria-current="location"]::before {
   position: absolute;
-  top: 10px;
-  bottom: 10px;
-  left: 0;
+  top: 8px;
+  bottom: 8px;
+  left: -4px;
   width: 2px;
-  border-radius: 0 3px 3px 0;
+  border-radius: 2px;
   background: var(--settings-brand);
   content: "";
+}
+
+.settings-nav-icon {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  color: currentColor;
+}
+
+.settings-nav-icon svg {
+  font-size: var(--text-lead);
 }
 
 .settings-content {
   min-width: 0;
   min-height: 0;
-  padding: 0 12px 72px 0;
+  padding: 22px 32px 72px;
   overflow: hidden auto;
   scroll-behavior: smooth;
   scrollbar-gutter: stable;
@@ -1924,21 +1956,29 @@ summary::-webkit-details-marker {
 @media (max-width: 760px) {
   .settings-header {
     grid-template-columns: 150px minmax(0, 1fr);
-    gap: 20px;
+  }
+
+  .settings-header-copy {
+    padding-inline: 20px;
   }
 
   .settings-layout {
     grid-template-columns: 1fr;
     grid-template-rows: auto minmax(0, 1fr);
-    padding-top: 14px;
-    gap: 14px;
   }
 
   .settings-nav {
     display: flex;
-    padding: 0 0 10px;
+    min-height: auto;
+    padding: 14px 20px 10px;
     gap: 4px;
+    border-right: 0;
     border-bottom: 1px solid var(--settings-line);
+    background: var(--settings-frost);
+  }
+
+  .settings-content {
+    padding: 14px 20px 72px;
   }
 
   .settings-nav a[aria-current="location"]::before {
@@ -1991,16 +2031,15 @@ summary::-webkit-details-marker {
 }
 
 @media (max-width: 620px) {
-  .settings-header,
-  .settings-layout {
-    padding-inline: 14px;
-  }
-
   .settings-header {
     grid-template-columns: 1fr;
     min-height: 0;
-    padding: 10px 14px 12px;
-    gap: 4px;
+  }
+
+  .settings-back-slot {
+    padding: 10px 14px 0;
+    border-right: 0;
+    background: var(--settings-frost);
   }
 
   .settings-back {
@@ -2012,6 +2051,8 @@ summary::-webkit-details-marker {
   }
 
   .settings-header-copy {
+    min-height: 0;
+    padding: 4px 14px 12px;
     align-items: baseline;
     gap: 12px;
   }
