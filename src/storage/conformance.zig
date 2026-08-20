@@ -4,6 +4,112 @@
 const std = @import("std");
 const sql = @import("sql.zig");
 
+/// Exercise behavior that every concrete backend must preserve. The fixture
+/// migration must create the table used below before this function runs.
+pub fn expectBackendContract(database: sql.Database) !void {
+    try std.testing.expectEqual(
+        sql.ExecOutcome.ok,
+        database.exec(&.{.{ .sql = "DELETE FROM storage_conformance" }}),
+    );
+    try std.testing.expectEqual(
+        sql.ExecOutcome.ok,
+        database.exec(&.{.{
+            .sql =
+            \\INSERT INTO storage_conformance(
+            \\  id, integer_value, real_value, text_value, blob_value, nullable
+            \\) VALUES (?, ?, ?, ?, ?, ?)
+            ,
+            .params = &.{
+                .{ .integer = 1 },
+                .{ .integer = -7 },
+                .{ .real = 2.5 },
+                .{ .text = "ready" },
+                .{ .blob = "\x00\xff" },
+                .null_value,
+            },
+        }}),
+    );
+
+    var observed = BackendObservation{};
+    const receiver: sql.RowReceiver = .{
+        .context = &observed,
+        .receive_fn = BackendObservation.receive,
+    };
+    try std.testing.expectEqual(
+        sql.QueryOutcome.ok,
+        database.query(
+            \\SELECT id, integer_value, real_value, text_value, blob_value, nullable
+            \\FROM storage_conformance ORDER BY id
+        , &.{}, receiver),
+    );
+    try std.testing.expect(observed.valid);
+    try std.testing.expectEqual(@as(usize, 1), observed.rows);
+
+    try std.testing.expectEqual(
+        sql.ExecOutcome.constraint,
+        database.exec(&.{.{
+            .sql = "INSERT INTO storage_conformance(id) VALUES (?)",
+            .params = &.{.{ .integer = 1 }},
+        }}),
+    );
+
+    try std.testing.expectEqual(
+        sql.ExecOutcome.misuse,
+        database.exec(&.{
+            .{
+                .sql = "INSERT INTO storage_conformance(id) VALUES (?)",
+                .params = &.{.{ .integer = 2 }},
+            },
+            .{ .sql = "SELECT id FROM storage_conformance" },
+        }),
+    );
+    var count = IntegerObservation{};
+    try std.testing.expectEqual(
+        sql.QueryOutcome.ok,
+        database.query(
+            "SELECT COUNT(*) FROM storage_conformance WHERE id = ?",
+            &.{.{ .integer = 2 }},
+            .{ .context = &count, .receive_fn = IntegerObservation.receive },
+        ),
+    );
+    try std.testing.expectEqual(@as(i64, 0), count.value);
+
+    try std.testing.expectEqual(
+        sql.QueryOutcome.misuse,
+        database.query(
+            "SELECT 1; SELECT 2",
+            &.{},
+            .{ .context = &count, .receive_fn = IntegerObservation.receive },
+        ),
+    );
+}
+
+const BackendObservation = struct {
+    rows: usize = 0,
+    valid: bool = true,
+
+    fn receive(context: *anyopaque, row: sql.Row) void {
+        const self: *BackendObservation = @ptrCast(@alignCast(context));
+        self.rows += 1;
+        self.valid = self.valid and row.columnCount() == 6;
+        self.valid = self.valid and row.value(0).integer == 1;
+        self.valid = self.valid and row.value(1).integer == -7;
+        self.valid = self.valid and row.value(2).real == 2.5;
+        self.valid = self.valid and std.mem.eql(u8, row.value(3).text, "ready");
+        self.valid = self.valid and std.mem.eql(u8, row.value(4).blob, "\x00\xff");
+        self.valid = self.valid and row.value(5) == .null_value;
+    }
+};
+
+const IntegerObservation = struct {
+    value: i64 = -1,
+
+    fn receive(context: *anyopaque, row: sql.Row) void {
+        const self: *IntegerObservation = @ptrCast(@alignCast(context));
+        self.value = row.value(0).integer;
+    }
+};
+
 const FakeBackend = struct {
     query_calls: usize = 0,
     exec_calls: usize = 0,

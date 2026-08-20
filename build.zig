@@ -106,6 +106,14 @@ pub fn build(b: *std.Build) void {
         const tests = b.addTest(.{ .name = spec.name, .root_module = spec.root_module });
         artifacts.tests.step.dependOn(&b.addRunArtifact(tests).step);
     }
+    const storage_tests = b.addTest(.{
+        .name = "metawork-storage",
+        .root_module = test_modules.storage,
+    });
+    b.step(
+        "test-storage",
+        "Run the backend-independent Storage contract and SQLite backend tests",
+    ).dependOn(&b.addRunArtifact(storage_tests).step);
 }
 
 fn addLifecycleTests(
@@ -455,6 +463,19 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .target = target,
         .optimize = root_module.optimize,
     });
+    const sqlite = b.dependency("sqlite", .{});
+    storage.addIncludePath(sqlite.path("."));
+    storage.addCSourceFile(.{
+        .file = sqlite.path("sqlite3.c"),
+        .flags = &.{
+            "-DSQLITE_THREADSAFE=2",
+            "-DSQLITE_OMIT_LOAD_EXTENSION",
+            "-DSQLITE_DQS=0",
+            "-DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1",
+            "-DSQLITE_DEFAULT_MEMSTATUS=0",
+        },
+    });
+    storage.link_libc = true;
     product_identity.addImport(
         "app_manifest_zon",
         existingImport(runner, "app_manifest_zon"),
