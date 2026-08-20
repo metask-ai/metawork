@@ -1,10 +1,10 @@
 # MetaWork 验证规范
 
-> 状态：初始技术验证已经收口；本文维护当前验证状态、可复现入口、长期证据和覆盖缺口
+> 状态：初始技术验证已经收口；本文维护持续回归归属、当前验证状态、可复现入口、长期证据和覆盖缺口
 
-本文是验证控制面，不是产品或技术设计文档。它只回答四个问题：验证什么、依据哪份规范、证据在哪里、还缺什么。产品行为以[产品需求](requirements.md)为准，系统边界以[高层架构](architecture.md)和[Product 内部架构](product-architecture.md)为准，Renderer、AgentCore 与外部合同分别由对应 source of truth 定义。
+本文是验证控制面，不是产品或技术设计文档。它只回答四个问题：依据哪份规范验证什么、由哪个测试层负责、证据在哪里、还缺什么。产品行为以[产品需求](requirements.md)为准，系统边界以[高层架构](architecture.md)和[Product 内部架构](product-architecture.md)为准，Renderer、AgentCore 与外部合同分别由对应 source of truth 定义。
 
-普通测试名称、实现位置和逐项断言由当前 test graph 与测试源码负责，不在本文建立第二份目录。只有验证入口、长期证据、平台状态或覆盖缺口变化时才更新本文。
+普通测试名称、实现位置和逐项断言由当前 test graph 与测试源码负责，不在本文建立第二份目录。只有测试层或归属规则、验证入口、长期证据、平台状态或覆盖缺口变化时才更新本文。
 
 ## 状态与证据纪律
 
@@ -23,17 +23,23 @@
 
 持续回归按失败模式归属，不按文件类型堆叠覆盖：
 
-| 层级                        | 唯一职责                                                                   |
-| --------------------------- | -------------------------------------------------------------------------- |
-| Zig inline test             | 单模块的纯状态转换、codec、容量和资源所有权不变量                          |
-| `tests/agent/`              | Session、callback、ABI、Agent Runtime 生命周期与并发                       |
-| `tests/workbench/`          | Executor、产品事务、持久化、恢复和产品并发                                 |
-| `tests/integration/`        | 必须跨两个以上 owner 才能出现的组合失败                                    |
-| Renderer/Node               | 通过函数调用、DOM 或 SSR 观察的 Renderer 行为，以及跨语言 fixture          |
-| architecture guard          | owner 依赖方向、禁止依赖、精确 allowlist、catalog 一致性和 test graph 接线 |
-| probe / platform acceptance | candidate artifact、尚无确定性复现的依赖问题，或真实平台能力               |
+### 测试归属
 
-同一不变量只保留一个权威失败点。源码扫描不得代替产品行为、响应式布局、CSS、文案或函数内部顺序测试；architecture guard 不断言测试数量。删除疑似重复的并发或 lifecycle 测试前，必须临时破坏对应不变量并确认保留侧会失败。probe 的结论进入合同和持续回归后，从 active tree 删除一次性资产，并在对应合同保留可定位出处。
+新增或修改测试前，必须能确定四件事：它保护哪份 source of truth 中的哪条可观察不变量、该不变量属于哪个 owner、测试变红时唯一指向什么失败模式，以及哪个测试层能以最小充分成本观察该失败。owner 按行为责任而不是当前调用路径或文件位置判断；只有失败必须跨越两个以上 owner 才能出现时，才进入 integration 层。
+
+一个测试可以用多条断言证明同一个失败模式，但不能把彼此独立的失败模式塞进同一场景。同一合同允许在不同观察边界保留测试，例如纯状态转换与线程 quiescence；若 owner、失败模式和观察边界都相同，则只保留一个权威失败点。答不出上述四项的测试不进入长期回归。
+
+| 层级                        | 唯一职责                                                                                       |
+| --------------------------- | ---------------------------------------------------------------------------------------------- |
+| Zig inline test             | 单模块的纯状态转换、codec、容量和资源所有权不变量                                              |
+| `tests/agent/`              | Session、callback、ABI、Agent Runtime 生命周期与并发                                           |
+| `tests/workbench/`          | Executor、产品事务、持久化、恢复和产品并发                                                     |
+| `tests/integration/`        | 必须跨两个以上 owner 才能出现的组合失败                                                        |
+| Renderer/Node               | 通过函数调用、DOM 或 SSR 观察的 Renderer 行为，以及跨语言 fixture                              |
+| architecture guard          | owner 依赖方向、禁止依赖、精确 allowlist、catalog 一致性、release isolation 和 test graph 接线 |
+| probe / platform acceptance | candidate artifact、尚无确定性复现的依赖问题，或真实平台能力                                   |
+
+源码扫描不得代替产品行为、响应式布局、CSS、文案或函数内部顺序测试；architecture guard 不断言测试数量。删除疑似重复的并发或 lifecycle 测试前，必须临时破坏对应不变量并确认保留侧会失败。probe 的结论进入合同和持续回归后，从 active tree 删除一次性资产，并在对应合同保留可定位出处。
 
 ### 默认入口
 
@@ -172,5 +178,5 @@ revision 8 不继承旧 artifact 的 checkpoint 样本或通过结论。Windows 
 - 同一事实只在一份 source of truth 定义；本文链接规范，不复制产品或技术合同。
 - 普通可重现测试不进入长期证据账本；提交是否通过由该 commit 的真实执行结果负责。
 - 只有具备长期审计价值的稳定 artifact、平台或外部服务事实保留独立证据；阶段叙事在结论进入合同、测试或账本后删除。
-- 新增普通测试、测试改名或测试文件移动不要求更新本文；验证入口、平台状态、长期证据或覆盖缺口变化时才更新。
+- 新增普通测试、测试改名或测试文件移动不要求更新本文；测试层或归属规则、验证入口、平台状态、长期证据或覆盖缺口变化时才更新。
 - `rg`、格式检查、文件存在性和源码关键词检查只属于卫生或结构验证，不能替代合同、运行时和平台行为测试。
