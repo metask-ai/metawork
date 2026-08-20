@@ -164,7 +164,7 @@ Renderer 的 `components/ui/WindowTitlebar.tsx` 绘制产品 header，并通过 
 - `state.zig` 拥有 Account 状态机、attempt/generation 与 prepare/admit/commit；
 - `oauth.zig`、`loopback.zig`、`login_attempt.zig` 和 `network_attempt.zig` 拥有登录网络链路；
 - `metask_client.zig` 与 `catalog.zig` 消费锁定的 Metask production contract；
-- `app.zon` 单一拥有 development 产品 Bundle ID；`product_identity.zig` 派生该值及 macOS 数据目录；
+- `app.zon` 单一拥有 development 产品 Bundle ID；`product_identity.zig` 派生该值、macOS 数据目录和仅供 `-Dautomation=true` artifact 使用的 `.automation` Native SDK runner identity。正式 artifact 始终把 manifest identity 传给 runner；automation identity 只隔离 Native SDK 的 data/window/log namespace，不改写产品 identity、签名或 credential 合同；
 - `credential_store.zig` 独立拥有跨平台 Account persistence 合同：secure store 中唯一的 refresh token，以及原子、无 secret 的 `preferences.json`；production 与 automation service 在编译期隔离；
 - `platform.zig` 是当前 Account 平台实现中唯一导入 Native SDK 的过渡边界，以同一 backend 适配各平台 credential、URL、timer 与 preference 持久化能力；它仍让 Product owner 持有原始 `PlatformServices`，属于 [验证规范](validation.md#native-sdk-能力路径)登记的架构缺口，不是获准兼容 seam，也不得增加新的底层能力或消费者；
 - `credentials.zig` 管理 execution credential ownership/rotation。

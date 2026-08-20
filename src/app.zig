@@ -1,4 +1,5 @@
 const std = @import("std");
+const build_options = @import("build_options");
 const runner = @import("runner");
 const native_sdk = @import("native_sdk");
 const bridge_api = @import("metawork_bridge");
@@ -506,7 +507,7 @@ pub fn run(init: std.process.Init) !void {
     try runner.runWithOptions(app.app(), .{
         .app_name = "MetaWork",
         .window_title = "MetaWork",
-        .bundle_id = product_identity.bundle_id,
+        .bundle_id = product_identity.runnerBundleId(build_options.automation),
         .bridge = app.bridge(mode),
         .builtin_bridge = app.automation.builtinPolicy(bridge_api.policy.builtin(mode)),
         .js_window_api = false,

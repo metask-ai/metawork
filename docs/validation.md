@@ -116,6 +116,8 @@ architecture guard 必须保持 `PlatformServices.context` 零 allowlist。原�
 
 ## 平台与 artifact 验收
 
+`-Dautomation=true` artifact 必须把从 `app.zon` identity 派生的 `.automation` identity 传给 Native SDK runner，使 SDK-owned data/window/log namespace 即使脱离 harness 启动也不命中 production；正式 artifact 必须继续精确使用 `app.zon` identity。架构 guard 与 Native test graph共同验证派生关系，真实 automation harness 仍使用隔离的 `HOME`/`APPDATA`/`LOCALAPPDATA`，两层隔离不能互相替代。
+
 ### macOS
 
 首次使用真实 Account 前，按[macOS 开发与内部测试签名](macos-local-development.md)选择 Apple Development identity：

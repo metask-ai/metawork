@@ -61,6 +61,29 @@ test("release version has one manifest owner and exact package mirrors", () => {
   assert.equal(lock.packages.frontend.version, appVersion);
 });
 
+test("automation derives a runner namespace without replacing the product identity", () => {
+  const identity = read("src/product_identity.zig");
+  const app = read("src/app.zig");
+
+  assert.match(identity, /pub const bundle_id = app_manifest\.id;/);
+  assert.match(
+    identity,
+    /automation_runner_bundle_id = bundle_id \+\+ "\.automation"/,
+  );
+  assert.match(
+    identity,
+    /return if \(automation\) automation_runner_bundle_id else bundle_id;/,
+  );
+  assert.match(
+    app,
+    /\.bundle_id = product_identity\.runnerBundleId\(build_options\.automation\)/,
+  );
+  assert.doesNotMatch(
+    app,
+    /\.bundle_id = product_identity\.automation_runner_bundle_id/,
+  );
+});
+
 test("the root test entry discovers Node tests and reaches the Native graph", () => {
   const packageJson = JSON.parse(read("package.json"));
   const runner = read("scripts/run-tests.mjs");
