@@ -45,7 +45,6 @@ export function ComposerFooter({
   textareaRef,
   archived,
   closing,
-  closed,
   unavailable,
   unavailableReason,
   recoveryAvailable,
@@ -87,7 +86,6 @@ export function ComposerFooter({
   textareaRef: RefObject<HTMLTextAreaElement | null>;
   archived: boolean;
   closing: boolean;
-  closed: boolean;
   unavailable: boolean;
   unavailableReason: TaskView["continuationUnavailableReason"];
   recoveryAvailable: boolean;
@@ -384,9 +382,7 @@ export function ComposerFooter({
                   : undefined
               }
               placeholder={
-                closed
-                  ? t("run.placeholder_closed")
-                  : closing
+                closing
                     ? t("run.placeholder_closing")
                     : unavailable
                       ? t(

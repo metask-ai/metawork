@@ -44,7 +44,6 @@ test("command bar product copy never interpolates raw diagnostics", () => {
   const attentionMessages = [
     "workspace.selection_failed",
     "task.create_failed",
-    "task.close_failed",
     "task.rename_failed",
     "task.archive_failed",
     "task.restore_failed",

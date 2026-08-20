@@ -1676,50 +1676,6 @@ export default function App() {
     }
   }
 
-  async function closeTask(task = activeTask) {
-    if (
-      viewSyncFailed ||
-      !bridgeReady ||
-      !task ||
-      workbenchMutationDisabled ||
-      task.id in taskPending ||
-      (task.lifecycle === "closing" && !task.closeFailed) ||
-      task.lifecycle === "closed"
-    )
-      return;
-    const taskId = task.id;
-    const scope = `task:${taskId}`;
-    if (!beginTaskPendingOperation(scope, "close")) return;
-    try {
-      try {
-        await client.closeTask(task.id);
-      } catch (error) {
-        if (
-          await reconcileCommandTimeout(error, "operation.task_close", {
-            scope: "task",
-            taskId,
-          })
-        )
-          return;
-        await refreshSnapshot().catch(() => undefined);
-        setStatus(
-          attentionStatus(
-            "task.close_failed",
-            { scope: "task", taskId },
-            { diagnostic: errorText(error) },
-          ),
-        );
-        return;
-      }
-      await refreshAfterCommit("task.close_requested", "operation.task_close", {
-        scope: "task",
-        taskId,
-      });
-    } finally {
-      endTaskPendingOperation(scope);
-    }
-  }
-
   async function renameTask(task = activeTask) {
     if (
       !task ||
@@ -1811,7 +1767,9 @@ export default function App() {
       !task ||
       workbenchMutationDisabled ||
       task.id in taskPending ||
-      task.lifecycle !== "closed"
+      !task.archived ||
+      task.deletionStatus === "deleting" ||
+      (task.lifecycle === "closing" && task.deletionStatus !== "failed")
     )
       return;
     const taskId = task.id;
@@ -1838,9 +1796,8 @@ export default function App() {
         );
         return;
       }
-      taskDrafts.clearDraft(task.id);
       setConfirmDelete(false);
-      await refreshAfterCommit("task.deleted", "operation.task_delete", {
+      await refreshAfterCommit("task.delete_requested", "operation.task_delete", {
         scope: "task",
         taskId,
       });
@@ -1864,10 +1821,6 @@ export default function App() {
     }
     if (action === "archive") {
       void setArchived(!task.archived, task);
-      return;
-    }
-    if (action === "close") {
-      void closeTask(task);
       return;
     }
     window.requestAnimationFrame(() => setConfirmDelete(true));
@@ -2088,7 +2041,6 @@ export default function App() {
       textareaRef={composer}
       archived={Boolean(activeTask?.archived)}
       closing={activeTask?.lifecycle === "closing"}
-      closed={activeTask?.lifecycle === "closed"}
       unavailable={Boolean(
         activeTask &&
         activeTask.lifecycle === "open" &&

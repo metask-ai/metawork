@@ -13,7 +13,7 @@ import {
   workspaceDirectoryLabel,
 } from "../../workbench/selectors.ts";
 
-export type TaskMenuAction = "rename" | "archive" | "close" | "delete";
+export type TaskMenuAction = "rename" | "archive" | "delete";
 
 export function TaskList({
   tasks,
@@ -186,7 +186,10 @@ export function TaskList({
                 <>
                   <Menu.Item
                     className="task-menu-item"
-                    disabled={taskMutationDisabled}
+                    disabled={
+                      taskMutationDisabled ||
+                      menuTask.deletionStatus === "deleting"
+                    }
                     onClick={() => onTaskAction(menuTask, "rename")}
                   >
                     {t("task.rename")}
@@ -203,29 +206,21 @@ export function TaskList({
                     {menuTask.archived ? t("task.restore") : t("task.archive")}
                   </Menu.Item>
                   <Menu.Item
-                    className="task-menu-item"
-                    disabled={
-                      taskMutationDisabled ||
-                      menuTask.lifecycle === "closed" ||
-                      (menuTask.lifecycle === "closing" &&
-                        !menuTask.closeFailed)
-                    }
-                    onClick={() => onTaskAction(menuTask, "close")}
-                  >
-                    {menuTask.closeFailed
-                      ? t("task.end_retry")
-                      : menuTask.lifecycle === "closing"
-                        ? t("task.ending")
-                        : t("task.end")}
-                  </Menu.Item>
-                  <Menu.Item
                     className="task-menu-item is-danger"
                     disabled={
-                      taskMutationDisabled || menuTask.lifecycle !== "closed"
+                      taskMutationDisabled ||
+                      !menuTask.archived ||
+                      menuTask.deletionStatus === "deleting" ||
+                      (menuTask.lifecycle === "closing" &&
+                        menuTask.deletionStatus !== "failed")
                     }
                     onClick={() => onTaskAction(menuTask, "delete")}
                   >
-                    {t("task.delete")}
+                    {t(
+                      menuTask.deletionStatus === "failed"
+                        ? "task.delete_retry"
+                        : "task.delete",
+                    )}
                   </Menu.Item>
                 </>
               )}

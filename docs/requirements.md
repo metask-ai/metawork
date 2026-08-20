@@ -111,7 +111,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - Renderer 只能看到脱敏账号、Key 尾号、模型、稳定错误码和状态，不得接触 OAuth token、完整 API Key、Authorization header、临时 OAuth URL 或凭据存储 locator；
 - Account 只维护一个当前默认 ExecutionConfig，来源可以是 Metask managed connection 或 user-managed Model Connection；Workbench 可以在 live Session、Run、job 或 worker 中保留必要的 owned copy。切换默认连接、API 或模型不得篡改或停止既有运行；最后一个真实运行时引用释放后必须 secure-zero；
 - durable Task 和 Run 不保存 account id、Metask API Key id/name/suffix、完整 custom credential、credential locator 或 Model Connection identity。恢复记录只保存 Workspace binding、provider、model、opaque execution generation 和其他无 secret binding facts；运行时配置不可恢复时必须显式进入 `runtime_detached`/恢复路径，不得伪造 Session、secret 或可继续执行能力；
-- 显式重新登录、切换账号、退出登录或清除设备凭据必须取得 Workbench identity replacement gate，并证明所有 Metask credential、Agent Session、Run、executor job 与真实 worker reference 已安全终止；durable Task、历史记录及 `closed = false` 本身不参与 gate，没有运行时引用的恢复 Task 不得阻止操作。identity gate 覆盖完整异步身份尝试：token 提交前取消或失败保留旧 Metask 默认；verified identity、已提交 token 后的 terminal failure 或成功退出只清除 Metask-owned 默认，不得撤销独立的 user-managed Model Connection 默认。随后立即结束 identity gate。API/model catalog 与新默认 ExecutionConfig 使用独立的 default replacement transaction，不延长 identity gate。OAuth 成功后以本次 token 返回的 `account_id` 替换本机账号，旧缓存 identity 不得否决显式登录；
+- 显式重新登录、切换账号、退出登录或清除设备凭据必须取得 Workbench identity replacement gate，并证明所有 Metask credential、Agent Session、Run、executor job 与真实 worker reference 已安全终止；durable Task 和历史记录本身不参与 gate，没有运行时引用的恢复 Task 不得阻止操作。identity gate 覆盖完整异步身份尝试：token 提交前取消或失败保留旧 Metask 默认；verified identity、已提交 token 后的 terminal failure 或成功退出只清除 Metask-owned 默认，不得撤销独立的 user-managed Model Connection 默认。随后立即结束 identity gate。API/model catalog 与新默认 ExecutionConfig 使用独立的 default replacement transaction，不延长 identity gate。OAuth 成功后以本次 token 返回的 `account_id` 替换本机账号，旧缓存 identity 不得否决显式登录；
 - refresh token 成功轮换后必须先原子提交新 token，后续 catalog 失败不得回滚到已作废的旧 token；明确鉴权无效关闭新的执行 admission，但已被 live Run 拥有的配置按其生命周期正常收口；
 - New Task admission 必须满足以下任一执行来源：Metask Account `authenticated + catalogState=ready` 且 Workbench 已安装所选默认 generation，或 user-managed Model Connection `ready` 且 Workbench 已安装所选 connection generation；两者都要求 Workspace intent 可解析且 replacement gate 未开启。Automatic intent 要求 automatic root capability；Manual intent 要求目标 Manual Workspace grant 与 epoch 有效；
 - production Account 接入必须符合 [Metask Account API 合同](metask-account-contract.md)。C1 OAuth/login 先独立提交 token rotation，再以严格 `/me` 交付 authenticated identity；C2 使用无 Profile header 的 OAuth API Key catalog 与直接 API Key model catalog，并从精确 `group.platform` 形成 fixed ExecutionTarget。Account 提交 `execution_ready` 且 Workbench 安装同一默认 generation 前禁止创建新 Task，但不能隐藏 durable history；既有 live Task 的后续 Run 服从其已拥有的运行时配置，不与当前默认 generation 做错误等值比较。
@@ -120,7 +120,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 
 - New task 草稿始终属于 Workbench，但只有登录和执行准备完成后才能发送；Renderer 按 Workspace intent 隔离并可恢复。默认 intent 为 Automatic，界面显示“默认”，首次发送时才由 Host 创建 Automatic Workspace。用户可以在发送前切换到已授权或新选择的 Manual Workspace；
 - New task 首次发送依次创建真实 Task 并启动第一个 Run，两步不能在界面中伪装成一个不可分失败状态：Task 创建失败或拒绝时留在 New task 并恢复原草稿；Task 已创建但 Run 启动失败或拒绝时进入该真实 Task、把输入恢复为 Task 草稿且不伪造已提交指令或 Running；命令 timeout 必须先刷新 canonical snapshot 决定实际页面和草稿 scope，不能自动重放可能有副作用的提交；
-- 用户可以在 Workspace 中创建、切换和关闭 Task；
+- 用户可以在 Workspace 中创建、切换、继续、归档和删除 Task；不存在独立的 Task `closed` 产品终态；
 - 多个 Task 可以同时存在；
 - 后台 Task 的运行状态不能因 UI 切换而丢失；
 - 每条事件、审批和工具结果必须路由到正确 Task/Run；
@@ -212,7 +212,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - 用户创建或修改 Skill 仍通过普通 Text Run 与 AgentCore built-in Read/Edit 完成，不在 Skill 中心建立第二个创作或文件编辑器。Workspace 内的 `.agents/skills` 服从现有 Workspace authority；用户级目录只有在用户明确将目标 Skill 目录作为 trusted Workspace 授权后才能修改。Skill 中心可以导航到预填的普通 Text draft；项目 Skill 创建完成后通过显式 catalog refresh 出现，个人 Skill 通过受控本地导入发布。一次 Run 使用已绑定 snapshot，不热替换正在执行的 Skill；文件变化只在显式 catalog refresh 后影响后续选择与 Run；
 - Host 重启后恢复的历史 Task 当前只读；用户选择左栏 Task 时必须显示其已保存产品历史和明确的 Session 恢复限制。即使 revision 8 已提供 checkpoint 原语，也只有 execution binding、checkpoint ownership、Conversation 和 terminal state 均可安全恢复后才允许继续；rebind 或从历史创建新 Task 属于后续显式产品能力，当前实现不得用它们冒充恢复；
 - `Files changed` 表示实际文件变更集合，`Outputs` 表示用户关心的交付结果，两者不得用“新建文件”自动等同；当前 ABI v1 未提供这两类 typed event 时，相关模块必须隐藏；
-- Task 归档只隐藏日常列表；归档、删除 Task 或移除 Workspace 前必须先终止其 queued/running/waiting/stopping Run；删除已关闭 Task 时若 executor worker 仍持有该 Task 的 stable Run record reference，只能标记 `delete_pending`，待引用归零后物理释放；删除 Task 记录不删除 Workspace 中的真实文件；移除 Workspace 先原子进入 `removing` 并推进 Workspace epoch、拒绝新 admission，全部 Task 收口后撤销当前 Host authorization 并退出活动导航；异步失败必须恢复可用状态并发布 Workspace 级失败事实，不能静默回弹；
+- Task 归档只隐藏日常列表且可恢复；归档、删除 Task 或移除 Workspace 前必须先终止其 queued/running/waiting/stopping Run。删除只允许已归档 Task；Workbench 接受一次删除意图后负责收口仍存活的 Session，并在 executor stable record reference、checkpoint 与全部资源 quiescent 后原子提交和物理释放，不要求用户为正常推进重复提交。删除进度以 runtime-only 的 `idle | deleting | failed` 产品事实发布，不持久化、不混入 Task lifecycle 或 Agent Session 状态；明确失败必须保留归档 Task 并等待用户显式重试，不能伪造成功、静默回弹或自动形成重试循环。若失败后 attachment 已恢复到可用状态，用户显式恢复归档表示放弃该次删除，Workbench 必须把删除状态原子重置为 `idle`；仍在 closing 的 Task 不开放恢复归档。删除 Task 记录不删除 Workspace 中的真实文件；移除 Workspace 先原子进入 `removing` 并推进 Workspace epoch、拒绝新 admission，全部 Task 收口后撤销当前 Host authorization 并退出活动导航；
 - 全局搜索覆盖 Task、用户指令、完成消息和 Output 文件名；Workspace 只作为 Task 与 New task 的路径上下文，不作为独立导航结果；工具原始日志默认不进入普通搜索；
 - `en-US` 是规范产品文案和回退语言，`zh-CN` 是首个完整 locale；Host 传递 structured code 与参数，Renderer 负责本地化。
 

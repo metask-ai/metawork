@@ -784,18 +784,6 @@ try {
 
   const transport = await automate("snapshot");
   assertTransport(transport.stdout);
-  await invokeBridge("metawork.tasks.close", { taskId });
-  await poll(
-    async () => {
-      const current = await snapshot();
-      return current.tasks.find((item) => item.id === taskId)?.lifecycle ===
-        "closed"
-        ? current
-        : null;
-    },
-    commandTimeoutMs,
-    "Task close",
-  );
   await stopApplication("checkpoint restart stop");
   await rm(compactCheckpoint.blobPath, { force: true });
   await rm(automationDir, { recursive: true, force: true });
@@ -807,7 +795,7 @@ try {
   );
   if (
     restoredSnapshot.capabilities?.conversationRecovery !== true ||
-    restoredTask?.lifecycle !== "closed" ||
+    restoredTask?.lifecycle !== "open" ||
     restoredTask.runs.length !== 2 ||
     restoredTask.compacts.length !== 1
   )

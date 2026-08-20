@@ -38,7 +38,6 @@ const base = {
   textareaRef: { current: null },
   archived: false,
   closing: false,
-  closed: false,
   unavailable: false,
   unavailableReason: null,
   recoveryAvailable: false,
@@ -819,14 +818,6 @@ test("terminal state takes precedence over archive state in Composer guidance", 
     }),
     /This task is ending/,
   );
-  assert.match(
-    render({
-      archived: true,
-      closed: true,
-      composeDisabled: true,
-    }),
-    /This task has ended/,
-  );
 });
 
 test("Task list shows tasks from different workspaces without workspace controls", () => {
@@ -835,9 +826,9 @@ test("Task list shows tasks from different workspaces without workspace controls
     title,
     workspaceId,
     lifecycle: "open",
+    deletionStatus: "idle",
     continuationAvailable: true,
     archived: false,
-    closeFailed: false,
     currentRunId: "0",
     currentRunPhase: null,
     activeOperation: null,
@@ -865,9 +856,9 @@ test("Task list disambiguates duplicate titles with their own paths", () => {
     title: "Review changes",
     workspaceId,
     lifecycle: "open",
+    deletionStatus: "idle",
     continuationAvailable: true,
     archived: false,
-    closeFailed: false,
     currentRunId: "0",
     currentRunPhase: null,
     activeOperation: null,

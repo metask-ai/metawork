@@ -145,6 +145,7 @@ export function taskSignals(task: TaskView): TaskSignals {
       task.activeOperation?.kind === "restore",
     attention: task.currentRunPhase === "waiting_ui",
     failed:
+      task.deletionStatus === "failed" ||
       task.lastRunOutcome === "failed" ||
       task.lastRunOutcome === "dependency_contract_failure" ||
       task.lastRunOutcome === "interrupted" ||

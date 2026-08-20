@@ -15,6 +15,7 @@ const checkpoint_record = @import("workbench_checkpoint_record");
 const catalog_snapshot = @import("workbench_catalog_snapshot");
 const owned_task_execution = @import("workbench_owned_task_execution");
 const task_runtime = @import("workbench_task_runtime");
+const task_deletion = @import("task_deletion.zig");
 const task_recovery = @import("workbench_task_recovery");
 const task_recovery_job = @import("workbench_task_recovery_job");
 const mcp_configuration = @import("workbench_mcp_configuration");
@@ -29,7 +30,7 @@ pub const Error = lifecycle.Error || scheduled_tasks_impl.Error || scheduled_tas
     SnapshotTooLarge,
     CloseInProgress,
     TaskBusy,
-    TaskNotClosed,
+    TaskNotArchived,
     InvalidTaskTitle,
     InvalidScheduledTaskInput,
     ScheduleTimerUnavailable,
@@ -1260,7 +1261,7 @@ const RunCause = enum {
     dependency_contract_failure,
 };
 
-const TaskLifecycle = enum { open, closing, closed };
+const TaskLifecycle = enum { open, closing };
 
 const ContinuationUnavailableReason = task_recovery.UnavailableReason;
 const ContinuationCapability = task_recovery.Capability;
@@ -1714,10 +1715,10 @@ const UiRecord = struct {
     }
 };
 
-/// Task-owned product history. Direct Task lifecycle and Session ownership
-/// live in `RuntimeAttachment`. Nested Run and Compact records retain live
-/// control fields until quiescent; the persistence codec explicitly allowlists
-/// only durable, secret-free product facts.
+/// Task-owned product history. Session ownership lives in `RuntimeAttachment`;
+/// the destructive product use case lives in the sibling deletion state.
+/// Nested Run and Compact records retain live control fields until quiescent;
+/// the persistence codec explicitly allowlists only durable, secret-free facts.
 const DurableTaskRecord = struct {
     id: u64,
     recent_order: u64,
@@ -1731,7 +1732,6 @@ const DurableTaskRecord = struct {
     title: []u8,
     title_redacted: bool = false,
     archived: bool = false,
-    closed: bool = false,
     runs: []?RunRecord,
     compacts: []?CompactRecord,
     next_run_generation: u64 = 0,
@@ -1801,6 +1801,7 @@ const RuntimeAttachment = task_runtime.State;
 const TaskView = struct {
     durable: DurableTaskRecord,
     runtime: RuntimeAttachment,
+    deletion: task_deletion.State = .idle,
 };
 
 const TaskFailureRecord = struct {
@@ -1839,6 +1840,7 @@ const TaskStateWireScratch = struct {
 test "Task aggregate separates Task runtime ownership from product history" {
     try std.testing.expect(@hasField(TaskView, "durable"));
     try std.testing.expect(@hasField(TaskView, "runtime"));
+    try std.testing.expect(@hasField(TaskView, "deletion"));
     inline for (&.{
         "attachment",
         "worker_references",
@@ -1860,6 +1862,8 @@ test "Task aggregate separates Task runtime ownership from product history" {
     }
     try std.testing.expect(!@hasField(RuntimeAttachment, "lifecycle"));
     try std.testing.expect(!@hasField(RuntimeAttachment, "continuation"));
+    try std.testing.expect(!@hasField(RuntimeAttachment, "deletion"));
+    try std.testing.expect(!@hasField(DurableTaskRecord, "deletion"));
     inline for (&.{
         "id",
         "workspace_id",
@@ -4243,7 +4247,7 @@ pub const Workbench = struct {
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
             if (task.durable.workspace_id != workspace_id or task.runtime.session() == null) continue;
-            self.closeTask(task.durable.id) catch |err| switch (err) {
+            self.detachTaskSession(task.durable.id) catch |err| switch (err) {
                 error.CloseInProgress => {},
                 else => {
                     workspace.authorization = .available;
@@ -5353,9 +5357,16 @@ pub const Workbench = struct {
         self.bumpRevision();
     }
 
-    pub fn closeTask(self: *Workbench, task_id: u64) Error!void {
+    fn detachTaskSession(self: *Workbench, task_id: u64) Error!void {
         self.syncLifecycle();
         const view = self.findTask(task_id) orelse return error.UnknownTask;
+        if (try self.beginTaskSessionDetach(view)) self.bumpRevision();
+    }
+
+    /// Starts or retries the attachment-owned Session release without
+    /// recursively synchronizing Workbench lifecycle. Callers that publish
+    /// outside `syncLifecycle` are responsible for bumping the revision.
+    fn beginTaskSessionDetach(self: *Workbench, view: *TaskView) Error!bool {
         if (!hasActiveOperation(view) and self.checkpointMutationPending(view)) {
             cancelTaskCheckpoints(view);
             return error.TaskBusy;
@@ -5365,26 +5376,10 @@ pub const Workbench = struct {
             view.runtime.closingSession() != null;
         const session = view.runtime.session() orelse
             view.runtime.closingSession() orelse {
-            if (view.durable.closed) return;
             switch (view.runtime.attachment) {
-                .detached => {},
-                .attached, .closing => return,
+                .detached => return false,
+                .attached, .closing => return false,
             }
-            try self.requireTaskPersistenceMutation();
-            const previous_recent_order = view.durable.recent_order;
-            const previous_next_recent_order = self.next_task_recent_order;
-            view.durable.closed = true;
-            view.runtime.attachment = .{ .detached = .closed };
-            self.touchTask(view);
-            self.commitTaskStateIfConfigured() catch |err| {
-                view.durable.closed = false;
-                view.runtime.attachment = .{ .detached = .cold_start };
-                view.durable.recent_order = previous_recent_order;
-                self.next_task_recent_order = previous_next_recent_order;
-                return err;
-            };
-            self.bumpRevision();
-            return;
         };
         const prior_health = if (view.runtime.attached()) |attached|
             attached.health
@@ -5462,13 +5457,14 @@ pub const Workbench = struct {
             self.pushUiRecord(view, record);
         self.touchTask(view);
         self.commitTaskStateNoFail();
-        self.bumpRevision();
+        return true;
     }
 
     pub fn renameTask(self: *Workbench, task_id: u64, title: []const u8) Error!void {
         self.syncLifecycle();
         try self.requireTaskPersistenceMutation();
         const view = self.findTask(task_id) orelse return error.UnknownTask;
+        if (view.deletion == .deleting) return error.TaskBusy;
         const trimmed = std.mem.trim(u8, title, " \t\r\n");
         if (trimmed.len == 0 or trimmed.len > self.limits.max_task_title_bytes or
             !std.unicode.utf8ValidateSlice(trimmed))
@@ -5643,14 +5639,18 @@ pub const Workbench = struct {
         self.syncLifecycle();
         try self.requireTaskPersistenceMutation();
         const view = self.findTask(task_id) orelse return error.UnknownTask;
-        if (taskLifecycle(view) == .closing or hasActiveOperation(view)) return error.TaskBusy;
+        if (view.deletion == .deleting or taskLifecycle(view) == .closing or
+            hasActiveOperation(view)) return error.TaskBusy;
         if (view.durable.archived == archived) return;
         const previous_recent_order = view.durable.recent_order;
         const previous_next_recent_order = self.next_task_recent_order;
+        const previous_deletion = view.deletion;
         view.durable.archived = archived;
+        if (!archived and view.deletion == .failed) view.deletion = .idle;
         self.touchTask(view);
         self.commitTaskStateIfConfigured() catch |err| {
             view.durable.archived = !archived;
+            view.deletion = previous_deletion;
             view.durable.recent_order = previous_recent_order;
             self.next_task_recent_order = previous_next_recent_order;
             return err;
@@ -5659,25 +5659,65 @@ pub const Workbench = struct {
     }
 
     pub fn deleteTask(self: *Workbench, task_id: u64) Error!void {
-        const pending = self.findTask(task_id) orelse return error.UnknownTask;
-        if (self.checkpointMutationPending(pending)) {
-            cancelTaskCheckpoints(pending);
-            return error.TaskBusy;
-        }
         self.syncLifecycle();
         try self.requireTaskPersistenceMutation();
         const index = self.findTaskIndex(task_id) orelse return error.UnknownTask;
         const view = &(self.tasks[index] orelse unreachable);
-        if (taskLifecycle(view) != .closed or view.runtime.close_thread != null or
-            view.runtime.session() != null)
-            return error.TaskNotClosed;
-        // A closed Task must not release Run storage while the composition
-        // root still owes that Run its final event-pump drain. This is
-        // normally implied by close publication in `syncLifecycle`; keep the
-        // explicit guard here because deletion is the destructive boundary.
-        if (hasUnfinalizedTerminalEvents(view)) return error.TaskBusy;
-        if (view.runtime.worker_references.load(.acquire) != 0)
-            return error.TaskBusy;
+        if (!view.durable.archived) return error.TaskNotArchived;
+        if (view.deletion == .deleting) return;
+        view.deletion = .deleting;
+        _ = self.advanceTaskDeletion(index) catch |err| {
+            if (self.tasks[index]) |*retained|
+                retained.deletion = .failed;
+            self.bumpRevision();
+            return err;
+        };
+        self.bumpRevision();
+    }
+
+    /// Advances one accepted deletion intent as far as current owner facts
+    /// permit. Waiting is not an error: later lifecycle synchronization calls
+    /// this function again after checkpoint, worker, event, or Session state
+    /// changes. Only an explicit retry changes `.failed` back to `.deleting`.
+    fn advanceTaskDeletion(self: *Workbench, index: usize) Error!bool {
+        const view = &(self.tasks[index] orelse return error.UnknownTask);
+        if (view.deletion == .deleting) std.debug.assert(view.durable.archived);
+        const session: task_deletion.Session = if (view.runtime.session() != null)
+            .attached
+        else if (view.runtime.closingSession() != null)
+            if (view.runtime.close_failed) .retryable_close_failure else .closing
+        else
+            .detached;
+        return switch (task_deletion.decide(view.deletion, .{
+            .checkpoint_pending = self.checkpointMutationPending(view),
+            .close_operation_running = view.runtime.close_completion.load(.acquire) == .running or
+                view.runtime.close_thread != null,
+            .unfinalized_terminal_events = hasUnfinalizedTerminalEvents(view),
+            .session = session,
+            .worker_references = view.runtime.worker_references.load(.acquire),
+        })) {
+            .wait => false,
+            .cancel_checkpoint => cancel: {
+                cancelTaskCheckpoints(view);
+                break :cancel false;
+            },
+            .release_session => try self.beginTaskSessionDetach(view),
+            .commit_record_deletion => commit: {
+                try self.finalizeTaskDeletion(index);
+                break :commit true;
+            },
+        };
+    }
+
+    fn finalizeTaskDeletion(self: *Workbench, index: usize) Error!void {
+        const view = &(self.tasks[index] orelse return error.UnknownTask);
+        std.debug.assert(view.durable.archived);
+        std.debug.assert(view.deletion == .deleting);
+        std.debug.assert(view.runtime.session() == null);
+        std.debug.assert(view.runtime.closingSession() == null);
+        std.debug.assert(view.runtime.worker_references.load(.acquire) == 0);
+        std.debug.assert(!hasUnfinalizedTerminalEvents(view));
+        std.debug.assert(!self.checkpointMutationPending(view));
         const workspace_id = view.durable.workspace_id;
         const release_automatic_workspace = if (self.findWorkspace(workspace_id)) |workspace|
             workspace.kind == .automatic
@@ -5703,11 +5743,29 @@ pub const Workbench = struct {
                 self.workspaces[workspace_index] = removed_workspace;
             return err;
         };
-        if (self.checkpoint_store) |store| store.deleteTask(task_id);
+        if (self.checkpoint_store) |store| store.deleteTask(removed_task.durable.id);
         self.deinitTaskView(&removed_task);
         if (removed_workspace_index != null)
             self.deinitWorkspaceView(&removed_workspace);
-        self.bumpRevision();
+    }
+
+    fn advanceRequestedTaskDeletionsNoFail(self: *Workbench) bool {
+        var changed = false;
+        for (self.tasks, 0..) |*entry, index| {
+            const view = &(entry.* orelse continue);
+            if (view.deletion != .deleting) continue;
+            const advanced = self.advanceTaskDeletion(index) catch {
+                // The accepted deletion intent cannot manufacture a durable
+                // success. Leave the archived Task intact and allow an
+                // explicit retry after persistence recovers.
+                if (self.tasks[index]) |*retained|
+                    retained.deletion = .failed;
+                changed = true;
+                continue;
+            };
+            changed = advanced or changed;
+        }
+        return changed;
     }
 
     pub fn currentRevision(self: *Workbench) u64 {
@@ -5746,20 +5804,18 @@ pub const Workbench = struct {
                 view.runtime.close_completion.store(.none, .release);
                 switch (close_completion) {
                     .closed => {
-                        var live = view.runtime.detach(.closed);
+                        var live = view.runtime.detach(.released);
                         self.releaseExecutionValueNoFail(view, &live.execution);
                         if (live.pinned_catalog) |*snapshot| {
                             self.projection_bytes -= snapshot.projected_bytes;
                             snapshot.deinit();
                         }
                         view.runtime.close_failed = false;
-                        if (!view.durable.closed) {
-                            view.durable.closed = true;
-                            durable_changed = true;
-                        }
                     },
                     .failed_reusable, .failed_poisoned, .failed_closing => {
                         view.runtime.close_failed = true;
+                        if (view.deletion == .deleting)
+                            view.deletion = .failed;
                         switch (close_completion) {
                             .failed_reusable => view.runtime.restoreCloseFailure(.available),
                             .failed_poisoned => view.runtime.restoreCloseFailure(.session_poisoned),
@@ -5861,6 +5917,7 @@ pub const Workbench = struct {
             const view = &(entry.* orelse continue);
             if (self.commitCheckpointPostprocessesNoFail(view)) changed = true;
         }
+        if (self.advanceRequestedTaskDeletionsNoFail()) changed = true;
         if (changed) self.bumpRevision();
     }
 
@@ -5889,7 +5946,6 @@ pub const Workbench = struct {
                 false;
             const commit_allowed = operation_matches and
                 !self.shutting_down and
-                !task.durable.closed and
                 !task.durable.archived and
                 task.runtime.attachment == .detached and
                 task.durable.binding_epoch == job.attempt.binding_epoch and
@@ -8729,8 +8785,9 @@ pub const Workbench = struct {
             taskCatalogProjection(view),
         );
         const recovery = self.taskRecoveryProjection(view);
-        writer.print(",\"lifecycle\":\"{s}\",\"continuationAvailable\":{},\"continuationUnavailableReason\":", .{
+        writer.print(",\"lifecycle\":\"{s}\",\"deletionStatus\":\"{s}\",\"continuationAvailable\":{},\"continuationUnavailableReason\":", .{
             @tagName(taskLifecycle(view)),
+            @tagName(view.deletion),
             !self.shutting_down and taskLifecycle(view) == .open and
                 continuationAvailable(recovery.continuation),
         }) catch return error.SnapshotTooLarge;
@@ -8739,10 +8796,9 @@ pub const Workbench = struct {
             .unavailable => |reason| jsonValue(writer, @tagName(reason)) catch
                 return error.SnapshotTooLarge,
         }
-        writer.print(",\"continuationRecoveryAvailable\":{},\"archived\":{},\"closeFailed\":{}", .{
+        writer.print(",\"continuationRecoveryAvailable\":{},\"archived\":{}", .{
             recovery.recovery_available,
             view.durable.archived,
-            view.runtime.close_failed,
         }) catch return error.SnapshotTooLarge;
         writer.writeAll(",\"restorePermission\":") catch return error.SnapshotTooLarge;
         if (view.runtime.last_restore_permission) |summary| {
@@ -9442,9 +9498,11 @@ pub const Workbench = struct {
         else
             false;
         return task_recovery.project(.{
-            .closed = task.durable.closed,
             .archived = task.durable.archived,
-            .attachment = recoveryAttachment(task.runtime.attachment),
+            .attachment = if (task.deletion == .deleting)
+                .closing
+            else
+                recoveryAttachment(task.runtime.attachment),
             .operation = recoveryOperation(task.runtime.active_operation),
             .task_persistence_ready = taskPersistenceOperational(self.task_persistence_health),
             .checkpoint_store_ready = self.checkpoint_store != null and
@@ -10070,7 +10128,6 @@ pub const Workbench = struct {
                 .title = title,
                 .title_redacted = wire.title_redacted,
                 .archived = wire.archived,
-                .closed = wire.closed,
                 .runs = runs,
                 .compacts = compacts,
                 .next_run_generation = wire.next_run_generation,
@@ -10081,9 +10138,7 @@ pub const Workbench = struct {
                 .checkpoint_anchor = checkpoint_anchor,
                 .checkpoint_attempt = checkpoint_attempt,
             },
-            .runtime = .{
-                .attachment = .{ .detached = if (wire.closed) .closed else .cold_start },
-            },
+            .runtime = .{},
         };
     }
 
@@ -10669,7 +10724,6 @@ pub const Workbench = struct {
             .title = task.durable.title,
             .title_redacted = task.durable.title_redacted,
             .archived = task.durable.archived,
-            .closed = task.durable.closed,
             .binding = .{
                 .epoch = task.durable.binding_epoch,
                 .execution_generation = task.durable.execution_generation,
@@ -12661,7 +12715,7 @@ pub const Workbench = struct {
     fn deinitTaskView(self: *Workbench, task: *TaskView) void {
         std.debug.assert(task.runtime.worker_references.load(.acquire) == 0);
         std.debug.assert(task.runtime.restore_job == null);
-        self.releaseTaskAttachmentNoFail(task, if (task.durable.closed) .closed else .cold_start);
+        self.releaseTaskAttachmentNoFail(task, .cold_start);
         for (task.durable.runs) |*run_entry| {
             const run = &(run_entry.* orelse continue);
             self.deinitRunRecord(run);
@@ -14473,7 +14527,7 @@ fn continuationAvailable(capability: ContinuationCapability) bool {
 }
 
 fn taskLifecycle(task: *const TaskView) TaskLifecycle {
-    if (task.durable.closed) return .closed;
+    if (task.deletion == .deleting) return .closing;
     return switch (task.runtime.attachment) {
         .closing => .closing,
         .detached, .attached => .open,
@@ -15824,31 +15878,8 @@ test "Task state round trip restores product history without fabricating a Sessi
         std.mem.indexOf(u8, snapshot, "\"continuationUnavailableReason\":\"checkpoint_unavailable\"") != null,
     );
 
-    try restored.closeTask(3);
-    try std.testing.expectEqual(TaskLifecycle.closed, taskLifecycle(restored.findTask(3).?));
-    try std.testing.expect(restored.findTask(3).?.durable.closed);
-
-    var closed_restore = try Workbench.init(
-        std.testing.allocator,
-        std.testing.io,
-        &test_agent_runtime,
-        testLimits(),
-        .{
-            .task_persistence = persistence.capability(
-                persistence.storage[0..persistence.len],
-            ),
-        },
-    );
-    defer closed_restore.deinit();
-    const closed_task = closed_restore.findTask(3) orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(TaskLifecycle.closed, taskLifecycle(closed_task));
-    try std.testing.expectEqual(
-        ContinuationUnavailableReason.closed,
-        closed_restore.taskContinuation(closed_task).unavailable,
-    );
-
-    try closed_restore.deleteTask(3);
+    try restored.setTaskArchived(3, true);
+    try restored.deleteTask(3);
     var deleted_restore = try Workbench.init(
         std.testing.allocator,
         std.testing.io,
@@ -16032,8 +16063,8 @@ test "Task persistence failure rolls back deletion before physical release" {
     const completed = &task.durable.runs[0].?;
     _ = commitTerminal(completed, .completed, .completed, null, .reusable, "", false);
     finalizeTestTerminalEvents(&workbench);
-    task.durable.closed = true;
-    workbench.releaseTaskAttachmentNoFail(task, .closed);
+    task.durable.archived = true;
+    workbench.releaseTaskAttachmentNoFail(task, .cold_start);
     workbench.task_persistence = persistence.capability(null);
     workbench.task_persistence_health = .ready;
     const tracked_before_delete = workbench.projection_bytes;
@@ -16042,6 +16073,13 @@ test "Task persistence failure rolls back deletion before physical release" {
     try std.testing.expect(workbench.findTask(3) != null);
     try std.testing.expectEqual(tracked_before_delete, workbench.projection_bytes);
     try std.testing.expectEqual(TaskPersistenceHealth.write_failed, workbench.task_persistence_health);
+    var snapshot_storage: [128 * 1024]u8 = undefined;
+    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"deletionStatus\":\"failed\"",
+    ) != null);
 }
 
 test "Task persistence failure rolls back Workspace upsert candidates" {
@@ -16634,7 +16672,7 @@ test "Task metadata mutations preserve lifecycle guards and projection accountin
     defer workbench.deinit();
 
     try std.testing.expectError(error.TaskBusy, workbench.setTaskArchived(3, true));
-    try std.testing.expectError(error.TaskNotClosed, workbench.deleteTask(3));
+    try std.testing.expectError(error.TaskNotArchived, workbench.deleteTask(3));
     try std.testing.expectError(error.InvalidTaskTitle, workbench.renameTask(3, "  \n  "));
     try std.testing.expectError(error.InvalidTaskTitle, workbench.renameTask(3, "bad\ttitle"));
     try std.testing.expectError(error.InvalidTaskTitle, workbench.renameTask(3, &.{0xff}));
@@ -16652,14 +16690,18 @@ test "Task metadata mutations preserve lifecycle guards and projection accountin
     workbench.tasks[0].?.runtime.active_operation = .{ .restore = .{ .id = 1 } };
     try std.testing.expectError(error.TaskBusy, workbench.setTaskArchived(3, false));
     workbench.tasks[0].?.runtime.active_operation = .none;
-    workbench.tasks[0].?.durable.closed = true;
-    workbench.releaseTaskAttachmentNoFail(&workbench.tasks[0].?, .closed);
+    workbench.tasks[0].?.deletion = .failed;
+    try workbench.setTaskArchived(3, false);
+    try std.testing.expectEqual(task_deletion.State.idle, workbench.tasks[0].?.deletion);
+    try workbench.setTaskArchived(3, true);
+    workbench.releaseTaskAttachmentNoFail(&workbench.tasks[0].?, .cold_start);
     workbench.tasks[0].?.runtime.worker_references.store(1, .release);
-    try std.testing.expectError(error.TaskBusy, workbench.deleteTask(3));
+    try workbench.deleteTask(3);
     try std.testing.expect(workbench.tasks[0] != null);
+    try std.testing.expectError(error.TaskBusy, workbench.renameTask(3, "too late"));
     workbench.tasks[0].?.runtime.worker_references.store(0, .release);
     const tracked_before_delete = workbench.projection_bytes;
-    try workbench.deleteTask(3);
+    _ = workbench.currentRevision();
     try std.testing.expect(workbench.tasks[0] == null);
     try std.testing.expect(workbench.projection_bytes < tracked_before_delete);
     try std.testing.expectError(error.UnknownTask, workbench.renameTask(3, "gone"));
@@ -16922,7 +16964,6 @@ test "execution replacement gate rejects runtime references and admits durable h
     try std.testing.expect(workbench.executionReplacementPending());
     try std.testing.expect(task.runtime.executionConst() == null);
     try std.testing.expectEqual(TaskLifecycle.open, taskLifecycle(task));
-    try std.testing.expect(!task.durable.closed);
     try std.testing.expectEqualStrings("fixture-model", task.durable.execution_model);
     try std.testing.expect(!workbench.accountView().can_create_task);
     workbench.endExecutionReplacementNoFail();
@@ -17232,8 +17273,7 @@ test "released Task credential is permanently scrubbed from every product projec
     );
 
     run.active_phase = .completed;
-    task.durable.closed = true;
-    workbench.releaseTaskAttachmentNoFail(task, .closed);
+    workbench.releaseTaskAttachmentNoFail(task, .cold_start);
     task.runtime.active_run_id = 0;
     try workbench.beginExecutionReplacement();
     try std.testing.expect(task.runtime.executionConst() == null);
@@ -17745,14 +17785,6 @@ test "terminal disposition folds exactly once without reopening a closing Task" 
         ContinuationUnavailableReason.closing,
         workbench.taskContinuation(task).unavailable,
     );
-
-    task.durable.closed = true;
-    foldTerminalDisposition(task, .reusable);
-    try std.testing.expectEqual(TaskLifecycle.closed, taskLifecycle(task));
-    try std.testing.expectEqual(
-        ContinuationUnavailableReason.closed,
-        workbench.taskContinuation(task).unavailable,
-    );
 }
 
 test "canonical prompt title and terminal diagnostic never retain the registered credential" {
@@ -17899,8 +17931,8 @@ test "Task deletion scrubs retained projections before releasing its credential"
     @memcpy(workspace.projected_root_storage[0.."SECRET-KEY".len], "SECRET-KEY");
     workspace.projected_root_len = "SECRET-KEY".len;
     workspace.projection_redacted = false;
-    task.durable.closed = true;
-    workbench.releaseTaskAttachmentNoFail(task, .closed);
+    task.durable.archived = true;
+    workbench.releaseTaskAttachmentNoFail(task, .cold_start);
     task.runtime.active_run_id = 0;
     _ = commitTerminal(
         &task.durable.runs[0].?,
@@ -18727,6 +18759,7 @@ test "close and delete wait for terminal event drain" {
     const task = &workbench.tasks[0].?;
     const run = &task.durable.runs[0].?;
     try std.testing.expect(task.runtime.beginClosing());
+    task.durable.archived = true;
     task.runtime.close_thread = try std.Thread.spawn(.{}, Harness.complete, .{});
     task.runtime.close_completion.store(.closed, .release);
     try std.testing.expect(commitTerminal(
@@ -18742,21 +18775,18 @@ test "close and delete wait for terminal event drain" {
     workbench.syncLifecycle();
     try std.testing.expectEqual(TaskLifecycle.closing, taskLifecycle(task));
     try std.testing.expect(task.runtime.close_thread != null);
-    try std.testing.expectError(error.TaskNotClosed, workbench.deleteTask(3));
+    try workbench.deleteTask(3);
 
     var queued_event = try testEnvelope(3, 7, "{\"text_chunk\":\"queued before terminal\"}");
     defer queued_event.deinit();
     try workbench.applyEvent(&queued_event);
 
     finalizeTestTerminalEvents(&workbench);
-    try std.testing.expectEqual(TaskLifecycle.closed, taskLifecycle(task));
-    try std.testing.expect(task.runtime.close_thread == null);
+    try std.testing.expect(workbench.tasks[0] == null);
 
     var late_event = try testEnvelope(3, 7, "{\"text_chunk\":\"late\"}");
     defer late_event.deinit();
     try std.testing.expectError(error.UnknownTask, workbench.applyEvent(&late_event));
-    try workbench.deleteTask(3);
-    try std.testing.expect(workbench.tasks[0] == null);
 }
 
 test "streaming projection escaping is allocation-free JSON with redaction" {

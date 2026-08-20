@@ -62,7 +62,6 @@ pub const cancel_compact = "metawork.tasks.cancelCompact";
 pub const refresh_task_skill_catalog = "metawork.tasks.refreshSkillCatalog";
 pub const cancel = "metawork.tasks.cancel";
 pub const respond_ui = "metawork.tasks.respondUi";
-pub const close_task = "metawork.tasks.close";
 pub const rename_task = "metawork.tasks.rename";
 pub const archive_task = "metawork.tasks.archive";
 pub const delete_task = "metawork.tasks.delete";
@@ -132,7 +131,6 @@ pub const product = [_][]const u8{
     refresh_task_skill_catalog,
     cancel,
     respond_ui,
-    close_task,
     rename_task,
     archive_task,
     delete_task,

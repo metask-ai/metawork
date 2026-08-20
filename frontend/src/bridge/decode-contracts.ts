@@ -60,7 +60,7 @@ import {
 
 type JsonObject = Record<string, unknown>;
 
-const taskLifecycles = ["open", "closing", "closed"] as const;
+const taskLifecycles = ["open", "closing"] as const;
 const runPhases = [
   "queued",
   "running",
@@ -1549,11 +1549,11 @@ function decodeTask(value: unknown, path: string): TaskView {
     "binding",
     "skillCatalog",
     "lifecycle",
+    "deletionStatus",
     "continuationAvailable",
     "continuationUnavailableReason",
     "continuationRecoveryAvailable",
     "archived",
-    "closeFailed",
     "restorePermission",
     "activeOperation",
     "currentRunId",
@@ -1610,6 +1610,11 @@ function decodeTask(value: unknown, path: string): TaskView {
     `${path}.lifecycle`,
     taskLifecycles,
   );
+  const deletionStatus = enumValue(
+    item.deletionStatus,
+    `${path}.deletionStatus`,
+    ["idle", "deleting", "failed"] as const,
+  );
   const continuationAvailable = booleanValue(
     item.continuationAvailable,
     `${path}.continuationAvailable`,
@@ -1620,7 +1625,6 @@ function decodeTask(value: unknown, path: string): TaskView {
     [
       "session_poisoned",
       "closing",
-      "closed",
       "task_archived",
       "session_recovery_required",
       "session_recovery_in_progress",
@@ -1636,6 +1640,10 @@ function decodeTask(value: unknown, path: string): TaskView {
   if (continuationAvailable !== (continuationUnavailableReason === null))
     fail(path, "continuation availability and unavailable reason must agree");
   const archived = booleanValue(item.archived, `${path}.archived`);
+  if (!archived && deletionStatus !== "idle")
+    fail(path, "only an archived Task can have deletion state");
+  if (deletionStatus === "deleting" && lifecycle !== "closing")
+    fail(path, "an in-progress deletion must have closing lifecycle");
   const restorePermission =
     item.restorePermission === null
       ? null
@@ -1691,8 +1699,6 @@ function decodeTask(value: unknown, path: string): TaskView {
     if (!current || current.phase !== currentRunPhase)
       fail(path, "current Run must reference a matching projected Run");
     if (archived) fail(path, "an archived Task cannot have a current Run");
-    if (lifecycle === "closed")
-      fail(path, "a closed Task cannot have a current Run");
   }
   const activeRuns = runs.filter((run) =>
     nonTerminalRunPhases.includes(run.phase as never),
@@ -1735,8 +1741,6 @@ function decodeTask(value: unknown, path: string): TaskView {
       fail(path, "Run and Compact cannot be active together");
   } else if (activeOperation?.kind === "compact") {
     if (archived) fail(path, "an archived Task cannot have an active Compact");
-    if (lifecycle === "closed")
-      fail(path, "a closed Task cannot have an active Compact");
     if (
       activeCompacts.length !== 1 ||
       activeCompacts[0]!.operationId !== activeOperation.id ||
@@ -1822,11 +1826,11 @@ function decodeTask(value: unknown, path: string): TaskView {
     binding,
     skillCatalog: decodeSkillCatalog(item.skillCatalog, `${path}.skillCatalog`),
     lifecycle,
+    deletionStatus,
     continuationAvailable,
     continuationUnavailableReason,
     continuationRecoveryAvailable,
     archived,
-    closeFailed: booleanValue(item.closeFailed, `${path}.closeFailed`),
     restorePermission,
     activeOperation,
     currentRunId,
@@ -3554,19 +3558,10 @@ export function assertUiResponseAccepted(
     fail("$", "UI response identity mismatch");
 }
 
-export function assertCloseAccepted(value: unknown, taskId: string) {
-  const item = object(value, "$", ["taskId", "closing"]);
-  if (
-    positiveWireId(item.taskId, "$.taskId") !== taskId ||
-    booleanValue(item.closing, "$.closing") !== true
-  )
-    fail("$", "close response mismatch");
-}
-
 export function assertTaskFlag(
   value: unknown,
   taskId: string,
-  flag: "renamed" | "deleted",
+  flag: "renamed" | "deleting",
 ) {
   const item = object(value, "$", ["taskId", flag]);
   if (

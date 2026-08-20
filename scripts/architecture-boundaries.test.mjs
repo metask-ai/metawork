@@ -1440,6 +1440,7 @@ test("Agent terminal facts have one immutable handoff and no legacy history latc
 test("Workbench owns Task lifecycle, continuation, and canonical redaction", () => {
   const workbench = read("src/workbench/projection.zig");
   const taskRuntime = read("src/workbench/task_runtime.zig");
+  const taskDeletion = read("src/workbench/task_deletion.zig");
   const taskRecord = workbench.slice(
     workbench.indexOf("const DurableTaskRecord = struct"),
     workbench.indexOf("fn FixedText"),
@@ -1458,10 +1459,16 @@ test("Workbench owns Task lifecycle, continuation, and canonical redaction", () 
   );
   assert.match(taskRuntime, /pub const Attachment = union\(enum\)/);
   assert.match(taskRuntime, /pub const ActiveOperation = union\(enum\)/);
-  assert.match(workbench, /fn taskLifecycle[\s\S]*task\.durable\.closed/);
+  assert.doesNotMatch(taskRuntime, /DeletionState|deletion_state/);
+  assert.doesNotMatch(durableTaskRecord, /closed/);
+  assert.doesNotMatch(durableTaskRecord, /deletion/);
+  assert.match(taskDeletion, /pub const State = enum/);
+  assert.match(taskDeletion, /pub fn decide/);
+  assert.match(workbench, /fn taskLifecycle[\s\S]*task\.runtime\.attachment/);
   assert.match(workbench, /fn taskRecoveryProjection/);
   assert.match(taskRecord, /durable: DurableTaskRecord/);
   assert.match(taskRecord, /runtime: RuntimeAttachment/);
+  assert.match(taskRecord, /deletion: task_deletion\.State/);
   assert.doesNotMatch(
     durableTaskRecord,
     /account_id|account_name|api_key|selection_id|display_name/,
@@ -1600,7 +1607,7 @@ test("Bridge owns ingress, Account owns validation, and Application coordinates 
   assert.match(app, /\.register\(/);
   assert.doesNotMatch(
     application,
-    /fn (?:createTask|runTask|cancelTask|respondUi|closeTask|renameTask|archiveTask|deleteTask)\(/,
+    /fn (?:createTask|runTask|cancelTask|respondUi|renameTask|archiveTask|deleteTask)\(/,
   );
   assert.doesNotMatch(application, /parsePayload|parseWireId|workspaceGrant/);
 });

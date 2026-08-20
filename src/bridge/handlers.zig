@@ -236,7 +236,6 @@ pub const TaskCatalogRefresh = struct {
 };
 pub const TaskIdentity = struct { taskId: []const u8, runId: []const u8 };
 pub const FilePreviewRequest = struct { fileReferenceId: []const u8 };
-pub const TaskClose = struct { taskId: []const u8 };
 pub const TaskRename = struct { taskId: []const u8, title: []const u8 };
 pub const TaskArchive = struct { taskId: []const u8, archived: bool };
 pub const TaskDelete = struct { taskId: []const u8 };

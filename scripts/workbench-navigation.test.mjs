@@ -74,9 +74,9 @@ function task(overrides) {
     title: "Release audit",
     workspaceId: "1",
     lifecycle: "open",
+    deletionStatus: "idle",
     continuationAvailable: true,
     archived: false,
-    closeFailed: false,
     currentRunId: "0",
     currentRunPhase: null,
     recentOrder: "1",
@@ -151,6 +151,10 @@ test("Task signals and Workspace path labels preserve their independent semantic
   });
   assert.deepEqual(
     taskSignals(task({ lastRunOutcome: "interrupted", cause: "app_shutdown" })),
+    { running: false, attention: false, failed: true },
+  );
+  assert.deepEqual(
+    taskSignals(task({ archived: true, deletionStatus: "failed" })),
     { running: false, attention: false, failed: true },
   );
   assert.equal(

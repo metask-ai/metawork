@@ -20,7 +20,6 @@ import type {
 import {
   assertCancelAccepted,
   assertCompactCancelAccepted,
-  assertCloseAccepted,
   assertDisconnected,
   assertSignalAcknowledged,
   assertTaskArchived,
@@ -720,13 +719,6 @@ export class BridgeClient {
     );
   }
 
-  async closeTask(taskId: string) {
-    assertCloseAccepted(
-      await this.invoke(commands.closeTask, { taskId }),
-      taskId,
-    );
-  }
-
   async renameTask(taskId: string, title: string) {
     assertTaskFlag(
       await this.invoke(commands.renameTask, { taskId, title }),
@@ -750,7 +742,7 @@ export class BridgeClient {
     assertTaskFlag(
       await this.invoke(commands.deleteTask, { taskId }),
       taskId,
-      "deleted",
+      "deleting",
     );
   }
 

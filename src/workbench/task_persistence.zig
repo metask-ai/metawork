@@ -265,7 +265,6 @@ pub const TaskWire = struct {
     title: []const u8,
     title_redacted: bool,
     archived: bool,
-    closed: bool,
     binding: BindingWire,
     next_run_generation: u64,
     active_operation: ?OperationWire,
@@ -1117,7 +1116,7 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
         }
     }
     if (active_count > 1 or ((task.active_operation == null) != (active_count == 0)) or
-        ((task.closed or task.archived) and active_count != 0))
+        (task.archived and active_count != 0))
         return error.Invalid;
     if (task.active_operation) |operation| {
         if (operation.id == 0 or !oneOf(operation.kind, &.{ "run", "compact" }))
@@ -1273,7 +1272,6 @@ test "task store preserves history bound to an older Workspace epoch" {
         .title = "",
         .title_redacted = false,
         .archived = false,
-        .closed = false,
         .binding = .{ .epoch = 1, .execution_generation = 1, .provider = "openai", .model = "m" },
         .next_run_generation = 0,
         .active_operation = null,
@@ -1315,7 +1313,6 @@ test "damaged metadata does not block valid Task recovery" {
         .title = "task",
         .title_redacted = false,
         .archived = false,
-        .closed = false,
         .binding = .{ .epoch = 1, .execution_generation = 1, .provider = "openai", .model = "m" },
         .next_run_generation = 0,
         .active_operation = null,
@@ -1362,7 +1359,6 @@ test "damaged current-format frames recover an empty projection" {
         .title = "task",
         .title_redacted = false,
         .archived = false,
-        .closed = false,
         .binding = .{ .epoch = 1, .execution_generation = 1, .provider = "openai", .model = "m" },
         .next_run_generation = 0,
         .active_operation = null,
@@ -1421,7 +1417,6 @@ test "one damaged Task frame does not poison surviving history" {
             .title = "first",
             .title_redacted = false,
             .archived = false,
-            .closed = false,
             .binding = .{ .epoch = 1, .execution_generation = 1, .provider = "openai", .model = "m" },
             .next_run_generation = 0,
             .active_operation = null,
@@ -1438,7 +1433,6 @@ test "one damaged Task frame does not poison surviving history" {
             .title = "second",
             .title_redacted = false,
             .archived = false,
-            .closed = false,
             .binding = .{ .epoch = 1, .execution_generation = 1, .provider = "openai", .model = "m" },
             .next_run_generation = 0,
             .active_operation = null,
@@ -1508,7 +1502,6 @@ test "corrupt Task identity cannot manufacture a global failure" {
         .title = "first",
         .title_redacted = false,
         .archived = false,
-        .closed = false,
         .binding = .{ .epoch = 1, .execution_generation = 1, .provider = "openai", .model = "m" },
         .next_run_generation = 0,
         .active_operation = null,
@@ -1656,7 +1649,6 @@ test "task store rejects states that would violate the Renderer contract" {
         .title = "task",
         .title_redacted = false,
         .archived = false,
-        .closed = false,
         .binding = .{
             .epoch = 1,
             .execution_generation = 1,

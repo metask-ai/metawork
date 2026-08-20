@@ -61,7 +61,6 @@ export const commands = {
   refreshTaskSkillCatalog: "metawork.tasks.refreshSkillCatalog",
   cancel: "metawork.tasks.cancel",
   respondUi: "metawork.tasks.respondUi",
-  closeTask: "metawork.tasks.close",
   renameTask: "metawork.tasks.rename",
   archiveTask: "metawork.tasks.archive",
   deleteTask: "metawork.tasks.delete",

@@ -22,7 +22,6 @@ pub const Operation = enum {
 pub const UnavailableReason = enum {
     session_poisoned,
     closing,
-    closed,
     task_archived,
     session_recovery_required,
     session_recovery_in_progress,
@@ -46,7 +45,6 @@ pub const Projection = struct {
 };
 
 pub const Facts = struct {
-    closed: bool = false,
     archived: bool = false,
     attachment: Attachment = .detached,
     operation: Operation = .none,
@@ -63,7 +61,6 @@ pub const Facts = struct {
 };
 
 pub fn project(facts: Facts) Projection {
-    if (facts.closed) return unavailable(.closed);
     return switch (facts.attachment) {
         .closing => unavailable(.closing),
         .attached_available => .{ .continuation = .available },
