@@ -45,7 +45,6 @@ export function ComposerFooter({
   textareaRef,
   archived,
   closing,
-  closed,
   unavailable,
   unavailableReason,
   recoveryAvailable,
@@ -87,7 +86,6 @@ export function ComposerFooter({
   textareaRef: RefObject<HTMLTextAreaElement | null>;
   archived: boolean;
   closing: boolean;
-  closed: boolean;
   unavailable: boolean;
   unavailableReason: TaskView["continuationUnavailableReason"];
   recoveryAvailable: boolean;
@@ -384,22 +382,20 @@ export function ComposerFooter({
                   : undefined
               }
               placeholder={
-                closed
-                  ? t("run.placeholder_closed")
-                  : closing
-                    ? t("run.placeholder_closing")
-                    : unavailable
-                      ? t(
-                          unavailableReason === "session_recovery_required" ||
-                            unavailableReason ===
-                              "session_recovery_in_progress" ||
-                            unavailableReason === "session_recovery_failed"
-                            ? "run.placeholder_recovery_required"
-                            : "run.placeholder_unavailable",
-                        )
-                      : archived
-                        ? t("run.placeholder_archived")
-                        : t("run.placeholder")
+                closing
+                  ? t("run.placeholder_closing")
+                  : unavailable
+                    ? t(
+                        unavailableReason === "session_recovery_required" ||
+                          unavailableReason ===
+                            "session_recovery_in_progress" ||
+                          unavailableReason === "session_recovery_failed"
+                          ? "run.placeholder_recovery_required"
+                          : "run.placeholder_unavailable",
+                      )
+                    : archived
+                      ? t("run.placeholder_archived")
+                      : t("run.placeholder")
               }
               onCompositionStart={() => setComposing(true)}
               onCompositionEnd={(event) => {

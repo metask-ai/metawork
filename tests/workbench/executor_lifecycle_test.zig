@@ -134,6 +134,33 @@ fn waitTaskSnapshot(
     return error.TestUnexpectedResult;
 }
 
+fn waitSetTaskArchived(workbench: *workbench_api.Workbench, task_id: u64) !void {
+    for (0..10_000) |_| {
+        workbench.setTaskArchived(task_id, true) catch |err| switch (err) {
+            error.TaskBusy => {
+                try workbench.drainAgentEvents();
+                std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
+                continue;
+            },
+            else => return err,
+        };
+        return;
+    }
+    return error.TestUnexpectedResult;
+}
+
+fn waitTaskDeleted(workbench: *workbench_api.Workbench, task_id: u64) !void {
+    for (0..10_000) |_| {
+        try workbench.drainAgentEvents();
+        _ = workbench.taskBindingEpoch(task_id) catch |err| switch (err) {
+            error.UnknownTask => return,
+            else => return err,
+        };
+        std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
+    }
+    return error.TestUnexpectedResult;
+}
+
 fn waitCheckpointRecord(
     workbench: *workbench_api.Workbench,
     persistence: *TaskPersistenceProbe,
@@ -479,15 +506,16 @@ test "restart restores a Task attachment and continues the same Conversation" {
     defer std.testing.allocator.free(persistence_storage);
     var persistence = TaskPersistenceProbe{ .storage = persistence_storage };
 
-    const runtime = try createTestComposition(.{
+    var runtime = try createTestComposition(.{
         .worker_count = 1,
         .queue_capacity = 2,
         .max_sessions = 1,
     });
-    defer {
+    var runtime_live = true;
+    defer if (runtime_live) {
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
-    }
+    };
     var first_configuration = workbenchConfiguration();
     first_configuration.directories.canonical_user_home = home;
     if (builtin.os.tag == .windows)
@@ -539,11 +567,12 @@ test "restart restores a Task attachment and continues the same Conversation" {
         persistence_storage[0..persistence.len],
     );
     defer std.testing.allocator.free(restart_history);
-    try first.closeTask(task_id);
-    try waitTaskSnapshot(&first, "\"id\":\"1\"", "\"lifecycle\":\"closed\"");
     first.shutdownExecutor();
     first.deinit();
     first_workbench_live = false;
+    try shutdownTestComposition(runtime);
+    deinitTestComposition(runtime);
+    runtime_live = false;
     fake_core.lock();
     fake_core.session_created = 0;
     fake_core.checkpoint_restores = 0;
@@ -556,6 +585,12 @@ test "restart restores a Task attachment and continues the same Conversation" {
         std.testing.allocator,
     )) orelse return error.TestExpectedEqual;
     defer std.testing.allocator.free(restored_enablement);
+    runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_sessions = 1,
+    });
+    runtime_live = true;
     var second_configuration = workbenchConfiguration();
     second_configuration.directories.canonical_user_home = home;
     if (builtin.os.tag == .windows)
@@ -676,11 +711,19 @@ test "restart restores a Task attachment and continues the same Conversation" {
     try std.testing.expectEqual(@as(usize, 1), run_calls);
     try std.testing.expect(credential_seen);
 
-    try restored.closeTask(task_id);
-    try waitTaskSnapshot(&restored, "\"id\":\"1\"", "\"lifecycle\":\"closed\"");
     restored.shutdownExecutor();
     restored.deinit();
     restored_live = false;
+    try shutdownTestComposition(runtime);
+    deinitTestComposition(runtime);
+    runtime_live = false;
+
+    runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_sessions = 1,
+    });
+    runtime_live = true;
 
     var third_configuration = workbenchConfiguration();
     third_configuration.directories.canonical_user_home = home;
@@ -758,7 +801,7 @@ test "restart restores a Task attachment and continues the same Conversation" {
     );
 }
 
-test "Task deletion is busy during checkpoint export and candidate publication" {
+test "accepted Task deletion advances after checkpoint quiescence without a second command" {
     fake_core.reset();
     fake_core.controlNextCheckpointExport();
     const runtime = try createTestComposition(.{
@@ -806,36 +849,12 @@ test "Task deletion is busy during checkpoint export and candidate publication" 
     const task_id = try workbench.createTask(workbenchTaskInput());
     _ = try workbench.runTask(task_id, .{ .text = "cancel checkpoint export" });
     fake_core.waitCheckpointExportEntered();
-    try std.testing.expectError(error.TaskBusy, workbench.deleteTask(task_id));
-    fake_core.releaseCheckpointExport();
-    try waitHistoryNeedle(&workbench, &persistence, "\"checkpoint_attempt\":\"cancelled\"");
-
-    fake_core.setCheckpointGeneration(1);
-    _ = try workbench.runTask(task_id, .{ .text = "publish checkpoint candidate" });
-    var digest: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash("fixture-checkpoint", &digest, .{});
-    const identity: workbench_api.CheckpointBlobIdentity = .{
-        .task_id = task_id,
-        .generation = 1,
-        .digest = digest,
-        .byte_size = "fixture-checkpoint".len,
-    };
-    var blob_ready = false;
-    for (0..10_000) |_| {
-        checkpoint_store.verify(identity) catch {
-            std.Thread.yield() catch {};
-            continue;
-        };
-        blob_ready = true;
-        break;
-    }
-    try std.testing.expect(blob_ready);
-    try std.testing.expectError(error.TaskBusy, workbench.deleteTask(task_id));
-    try waitCheckpointRecord(&workbench, &persistence);
-    try workbench.closeTask(task_id);
-    try waitWorkbenchSnapshot(&workbench, "\"lifecycle\":\"closed\"");
+    try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
+    try workbench.setTaskArchived(task_id, true);
     try workbench.deleteTask(task_id);
-    try std.testing.expectError(error.BlobMissing, checkpoint_store.verify(identity));
+    try waitWorkbenchSnapshot(&workbench, "\"deletionStatus\":\"deleting\"");
+    fake_core.releaseCheckpointExport();
+    try waitTaskDeleted(&workbench, task_id);
 }
 
 test "definite descriptor failure preserves terminal history and leaves a recoverable orphan" {
@@ -1016,7 +1035,7 @@ test "unknown descriptor commit freezes checkpoint transaction until shutdown" {
     }
     try std.testing.expect(transaction_frozen);
     try checkpoint_store.verify(identity);
-    try std.testing.expectError(error.TaskBusy, workbench.deleteTask(task_id));
+    try std.testing.expectError(error.TaskPersistenceOutcomeUnknown, workbench.deleteTask(task_id));
     try std.testing.expectError(
         error.TaskPersistenceOutcomeUnknown,
         workbench.setTaskArchived(task_id, true),
@@ -1611,9 +1630,9 @@ test "automatic Workspace admission is Task-owned and Text-only" {
     try std.testing.expect(
         std.mem.indexOf(u8, title_snapshot_bytes, "\"title\":\"automatic text run\"") != null,
     );
-    try workbench.closeTask(first_task);
-    try waitWorkbenchSnapshot(&workbench, "\"lifecycle\":\"closed\"");
+    try waitSetTaskArchived(&workbench, first_task);
     try workbench.deleteTask(first_task);
+    try waitTaskDeleted(&workbench, first_task);
     try std.testing.expectError(
         error.UnknownWorkspace,
         workbench.workspaceEpoch(first_workspace),
@@ -2101,7 +2120,7 @@ test "Workbench refreshes a Task only from the committed Workspace catalog while
     try std.testing.expectEqual(@as(usize, 1), refreshes);
 }
 
-test "Workbench closes off-thread and exposes retryable close failure" {
+test "Task deletion retries an off-thread Session release failure" {
     fake_core.reset();
     const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 2 });
     defer {
@@ -2117,19 +2136,62 @@ test "Workbench closes off-thread and exposes retryable close failure" {
     try installWorkbenchExecution(&workbench);
 
     const task_id = try workbench.createTask(workbenchTaskInput());
+    try workbench.setTaskArchived(task_id, true);
     fake_core.failNextSessionDestroy();
-    try workbench.closeTask(task_id);
-    try waitWorkbenchSnapshot(&workbench, "\"closeFailed\":true");
+    try workbench.deleteTask(task_id);
+    try waitWorkbenchSnapshot(&workbench, "\"deletionStatus\":\"failed\"");
 
-    try workbench.closeTask(task_id);
-    try waitWorkbenchSnapshot(&workbench, "\"lifecycle\":\"closed\"");
+    try workbench.deleteTask(task_id);
+    try waitTaskDeleted(&workbench, task_id);
     fake_core.lock();
     const destroyed = fake_core.session_destroyed;
     fake_core.unlock();
     try std.testing.expectEqual(@as(usize, 1), destroyed);
 }
 
-test "Workbench close cancels a queued Run without blocking the caller" {
+test "asynchronous Task deletion commit failure retains a retryable archived record" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    const persistence_storage = try std.testing.allocator.alloc(
+        u8,
+        workbench_api.task_store_max_bytes,
+    );
+    defer std.testing.allocator.free(persistence_storage);
+    var persistence = TaskPersistenceProbe{ .storage = persistence_storage };
+    var configuration = workbenchConfiguration();
+    configuration.task_persistence = persistence.capability();
+    var workbench = try workbench_api.Workbench.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 1,
+            .max_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        configuration,
+    );
+    defer workbench.deinit();
+    try installWorkbenchExecution(&workbench);
+
+    const task_id = try workbench.createTask(workbenchTaskInput());
+    try workbench.setTaskArchived(task_id, true);
+    persistence.result = .failed;
+    try workbench.deleteTask(task_id);
+    try waitWorkbenchSnapshot(&workbench, "\"deletionStatus\":\"failed\"");
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        try workbench.taskBindingEpoch(task_id),
+    );
+}
+
+test "Task deletion releases an idle Session without blocking the caller" {
     fake_core.reset();
     fake_core.setNextPlan(.controlled);
     const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 1 });
@@ -2146,9 +2208,12 @@ test "Workbench close cancels a queued Run without blocking the caller" {
     try installWorkbenchExecution(&workbench);
 
     const task_id = try workbench.createTask(workbenchTaskInput());
-    _ = try workbench.runTask(task_id, .{ .text = "close this run" });
-    try workbench.closeTask(task_id);
-    try waitWorkbenchSnapshot(&workbench, "\"lifecycle\":\"closed\"");
+    const run_id = try workbench.runTask(task_id, .{ .text = "finish before deletion" });
+    try workbench.cancel(task_id, run_id);
+    try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"cancelled\"");
+    try workbench.setTaskArchived(task_id, true);
+    try workbench.deleteTask(task_id);
+    try waitTaskDeleted(&workbench, task_id);
     fake_core.lock();
     const abort_calls = fake_core.abort_calls;
     const destroyed = fake_core.session_destroyed;
@@ -2186,7 +2251,7 @@ test "Workspace removal interrupts live Runs without deleting Task history" {
 
     try workbench.removeWorkspace(workspace_id);
     try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"interrupted\"");
-    try waitWorkbenchSnapshot(&workbench, "\"lifecycle\":\"closed\"");
+    try waitWorkbenchSnapshot(&workbench, "\"lifecycle\":\"open\"");
 
     var snapshot_storage: [128 * 1024]u8 = undefined;
     const snapshot = try workbench.writeSnapshot(&snapshot_storage);
@@ -2260,9 +2325,6 @@ test "Workbench cancel of a completed Run is an idempotent no-op" {
     try workbench.cancel(task_id, run_id);
     try std.testing.expectEqual(revision, workbench.currentRevision());
     try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
-
-    try workbench.closeTask(task_id);
-    try waitWorkbenchSnapshot(&workbench, "\"lifecycle\":\"closed\"");
 }
 
 test "Workbench manual compact uses the active operation lane and appends history" {
@@ -2304,7 +2366,11 @@ test "Workbench manual compact uses the active operation lane and appends histor
     _ = try workbench.compactTaskAtBinding(task_id, 1);
     try waitWorkbenchSnapshot(&workbench, "\"phase\":\"compacted\"");
     _ = try workbench.compactTaskAtBinding(task_id, 1);
-    try waitWorkbenchSnapshot(&workbench, "\"operationId\":\"2\"");
+    try waitTaskSnapshot(
+        &workbench,
+        "\"operationId\":\"2\"",
+        "\"phase\":\"compacted\"",
+    );
     try std.testing.expectError(
         error.CompactCapacity,
         workbench.compactTaskAtBinding(task_id, 1),
@@ -2326,12 +2392,9 @@ test "Workbench manual compact uses the active operation lane and appends histor
         snapshot,
         "\"beforeContextTokens\":\"100\",\"afterContextTokens\":\"40\"",
     ) != null);
-
-    try workbench.closeTask(task_id);
-    try waitWorkbenchSnapshot(&workbench, "\"lifecycle\":\"closed\"");
 }
 
-test "Workbench compact cancellation and close wait for the Agent terminal result" {
+test "Workbench compact cancellation and Task deletion wait for the Agent terminal result" {
     fake_core.reset();
     const runtime = try createTestComposition(.{
         .worker_count = 1,
@@ -2374,15 +2437,13 @@ test "Workbench compact cancellation and close wait for the Agent terminal resul
     try waitWorkbenchSnapshot(&workbench, "\"phase\":\"aborted\"");
     try waitWorkbenchSnapshot(&workbench, "\"activeOperation\":null");
 
-    fake_core.rearmControlled();
-    _ = try workbench.compactTaskAtBinding(task_id, 1);
-    try waitWorkbenchSnapshot(&workbench, "\"phase\":\"compacting\"");
-    try workbench.closeTask(task_id);
-    try waitWorkbenchSnapshot(&workbench, "\"lifecycle\":\"closed\"");
+    try workbench.setTaskArchived(task_id, true);
+    try workbench.deleteTask(task_id);
+    try waitTaskDeleted(&workbench, task_id);
     fake_core.lock();
     const abort_calls = fake_core.compact_abort_calls;
     fake_core.unlock();
-    try std.testing.expectEqual(@as(usize, 2), abort_calls);
+    try std.testing.expectEqual(@as(usize, 1), abort_calls);
 }
 
 test "Workbench terminal compact result wins a too-late cancellation race" {
@@ -2430,9 +2491,6 @@ test "Workbench terminal compact result wins a too-late cancellation race" {
         error.NoSuchCompact,
         workbench.cancelCompact(task_id, operation_id),
     );
-
-    try workbench.closeTask(task_id);
-    try waitWorkbenchSnapshot(&workbench, "\"lifecycle\":\"closed\"");
 }
 
 test "Workbench cancels a queued compact without entering AgentCore" {
@@ -2500,18 +2558,6 @@ test "Workbench cancels a queued compact without entering AgentCore" {
 
     try workbench.cancel(blocking_task_id, blocking_run_id);
     try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"cancelled\"");
-    try workbench.closeTask(blocking_task_id);
-    try workbench.closeTask(compact_task_id);
-    try waitTaskSnapshot(
-        &workbench,
-        "\"title\":\"blocking target\"",
-        "\"lifecycle\":\"closed\"",
-    );
-    try waitTaskSnapshot(
-        &workbench,
-        "\"title\":\"compact target\"",
-        "\"lifecycle\":\"closed\"",
-    );
 }
 
 test "Workbench shutdown terminates a waiting UI Run before joining workers" {

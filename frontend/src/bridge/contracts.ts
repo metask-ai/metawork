@@ -444,12 +444,12 @@ export type TaskView = {
     unavailableReason: "runtime_detached" | null;
   };
   skillCatalog: SkillCatalogView;
-  lifecycle: "open" | "closing" | "closed";
+  lifecycle: "open" | "closing";
+  deletionStatus: "idle" | "deleting" | "failed";
   continuationAvailable: boolean;
   continuationUnavailableReason:
     | "session_poisoned"
     | "closing"
-    | "closed"
     | "task_archived"
     | "session_recovery_required"
     | "session_recovery_in_progress"
@@ -463,7 +463,6 @@ export type TaskView = {
     | null;
   continuationRecoveryAvailable: boolean;
   archived: boolean;
-  closeFailed: boolean;
   restorePermission: {
     restoredRules: string;
     invalidatedRules: string;

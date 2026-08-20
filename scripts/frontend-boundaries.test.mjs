@@ -177,7 +177,15 @@ test("Task persistence failure disables mutations without hiding Task history", 
   );
   assert.match(app, /<TaskList[\s\S]*tasks=\{navigableTaskItems\}/);
   assert.match(taskList, /className="task-list-item focus-ring"/);
-  assert.match(taskList, /disabled=\{taskMutationDisabled/);
+  assert.match(taskList, /disabled=\{\s*taskMutationDisabled/);
+});
+
+test("degraded Task history does not create a permanent sidebar alert", async () => {
+  const app = await readFile(resolve(sourceRoot, "app", "App.tsx"), "utf8");
+  assert.match(
+    app,
+    /taskHistoryPersistenceHealth !==\s*"degraded"[\s\S]*?task-persistence-error/,
+  );
 });
 
 test("draft Workspace selection stays local until Task creation", async () => {
@@ -264,8 +272,17 @@ test("Settings is a full content overlay that preserves the Workbench mount", as
   );
   assert.match(
     css,
-    /\.settings-page\s*\{[\s\S]*--settings-navigation-track: calc\(var\(--left-column-width\) - 64px\);/,
+    /\.settings-page\s*\{[\s\S]*--settings-navigation-track: var\(--left-column-width\);/,
   );
+  assert.match(
+    css,
+    /\.settings-back-slot\s*\{[\s\S]*border-right: 1px solid var\(--settings-line\);[\s\S]*background: var\(--ui-surface-panel-2\);/,
+  );
+  assert.match(
+    css,
+    /\.settings-nav\s*\{[\s\S]*border-right: 1px solid var\(--settings-line\);[\s\S]*background: var\(--ui-surface-panel-2\);/,
+  );
+  assert.doesNotMatch(css, /\.settings-page::before/);
   assert.match(
     css,
     /\.settings-header\s*\{[\s\S]*grid-template-columns: var\(--settings-navigation-track\) minmax\(0, 1fr\);/,
@@ -274,12 +291,24 @@ test("Settings is a full content overlay that preserves the Workbench mount", as
     css,
     /\.settings-layout\s*\{[\s\S]*grid-template-columns: var\(--settings-navigation-track\) minmax\(0, 1fr\);/,
   );
+  assert.match(
+    css,
+    /\.settings-nav a\s*\{[\s\S]*grid-template-columns: 22px minmax\(0, 1fr\);[\s\S]*min-height: 36px;/,
+  );
   const settings = await readFile(
     resolve(sourceRoot, "features", "settings", "SettingsPage.tsx"),
     "utf8",
   );
   assert.match(settings, /role="dialog"/);
   assert.match(settings, /aria-modal="true"/);
+  assert.match(
+    settings,
+    /className="settings-back-slot"[\s\S]*className="settings-back focus-ring"/,
+  );
+  assert.match(
+    settings,
+    /<Icon name="settings" \/>[\s\S]*<Icon name="account" \/>[\s\S]*<Icon name="model" \/>/,
+  );
   assert.doesNotMatch(settings, /settings-workspaces|WorkspaceSettings/);
 });
 

@@ -70,6 +70,7 @@ function runningTask() {
     id: "2",
     workspaceId: "1",
     lifecycle: "open",
+    deletionStatus: "idle",
     currentRunId: "7",
     currentRunPhase: "running",
     activeOperation: { kind: "run", id: "7" },

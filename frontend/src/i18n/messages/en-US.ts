@@ -433,7 +433,6 @@ export const enUS = {
   "task.last_result": "Last result: {result}",
   "task.lifecycle.open": "Open",
   "task.lifecycle.closing": "Ending",
-  "task.lifecycle.closed": "Ended",
   "task.phase.queued": "Queued",
   "task.phase.running": "Working",
   "task.phase.waiting_ui": "Needs attention",
@@ -460,10 +459,8 @@ export const enUS = {
   "task.rename": "Rename",
   "task.archive": "Archive",
   "task.restore": "Restore",
-  "task.end": "End task",
-  "task.end_retry": "Retry ending task",
-  "task.ending": "Ending…",
   "task.delete": "Delete record",
+  "task.delete_retry": "Retry deletion",
   "task.delete_confirm_title": "Delete this task record?",
   "task.delete_confirm_body":
     "The conversation and activity will be removed from MetaWork. Files in the workspace stay untouched.",
@@ -507,8 +504,6 @@ export const enUS = {
   "task.create_failed":
     "The task could not be created. Check your connection and try again.",
   "task.created": "Task created.",
-  "task.close_failed": "The task could not be ended. Refresh and try again.",
-  "task.close_requested": "Task is ending.",
   "task.rename_failed": "The task could not be renamed. Try again.",
   "task.archive_failed": "The task could not be archived. Try again.",
   "task.restore_failed": "The task could not be restored. Try again.",
@@ -516,7 +511,7 @@ export const enUS = {
   "task.renamed": "Task renamed.",
   "task.archived_status": "Task archived.",
   "task.restored": "Task restored.",
-  "task.deleted": "Task record deleted.",
+  "task.delete_requested": "Task deletion started.",
   "run.tokens": "{count} tokens",
   "run.preparing": "Preparing the work…",
   "run.submit": "Send",
@@ -525,7 +520,6 @@ export const enUS = {
   "run.placeholder_no_task": "Start a task first",
   "run.placeholder_archived": "Restore this task to continue",
   "run.placeholder_closing": "This task is ending",
-  "run.placeholder_closed": "This task has ended",
   "run.placeholder_unavailable":
     "End this task and start a new one to continue",
   "run.placeholder_recovery_required":
@@ -654,7 +648,6 @@ export const enUS = {
   "operation.compact_stop": "Stopping context compaction",
   "operation.restore": "Restoring the conversation",
   "operation.ui_response": "Sending the response",
-  "operation.task_close": "Ending the task",
   "operation.task_rename": "Renaming the task",
   "operation.task_archive": "Archiving the task",
   "operation.task_restore": "Restoring the task",
@@ -797,7 +790,7 @@ export const enUS = {
   "outcome.dependency_contract_failure": "Task runtime failed",
   "cause.user_cancel": "Stopped by you",
   "cause.timeout": "Timed out",
-  "cause.session_close": "Task closed",
+  "cause.session_close": "Session released",
   "cause.app_shutdown": "Workbench closed",
   "cause.event_pipeline_failure": "Activity delivery failed",
   "cause.queue_capacity_failure": "Workbench capacity reached",
@@ -957,8 +950,6 @@ export const enUS = {
     "MetaWork cannot confirm whether the latest change was saved. Automatic runs are stopped to prevent duplicates.",
   "scheduled.persistence.ready": "Schedule storage is ready.",
   "task.persistence.read_failed": "Saved task history could not be read.",
-  "task.persistence.degraded":
-    "Some saved tasks could not be restored. Other tasks remain available.",
   "task.persistence.corrupt":
     "Saved task history is invalid. MetaWork kept the original file and disabled task changes.",
   "task.persistence.write_failed":

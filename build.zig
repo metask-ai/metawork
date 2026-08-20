@@ -27,6 +27,12 @@ pub fn build(b: *std.Build) void {
         wireAgentCore(b, artifacts.tests.root_module, bundle)
     else
         modules;
+    if (test_modules.app.resolved_target.?.result.os.tag == .macos) {
+        if (b.sysroot) |sysroot| test_modules.app.addFrameworkPath(.{
+            .cwd_relative = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" }),
+        });
+        test_modules.app.linkFramework("AppKit", .{});
+    }
     const lifecycle_fixture = createLifecycleFixture(b, test_modules, bundle.link_libc);
     test_modules.app.addImport("lifecycle_fixture", lifecycle_fixture);
     test_modules.bridge.addImport("lifecycle_fixture", lifecycle_fixture);

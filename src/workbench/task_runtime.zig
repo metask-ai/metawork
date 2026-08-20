@@ -8,7 +8,7 @@ const recovery_job = @import("workbench_task_recovery_job");
 
 pub const DetachmentCause = enum {
     cold_start,
-    closed,
+    released,
     session_poisoned,
 };
 

@@ -590,7 +590,7 @@ test("Task metadata mutation acknowledgements are identity-checked and exact", (
     assertTaskFlag({ taskId: "3", renamed: true }, "3", "renamed"),
   );
   assert.doesNotThrow(() =>
-    assertTaskFlag({ taskId: "3", deleted: true }, "3", "deleted"),
+    assertTaskFlag({ taskId: "3", deleting: true }, "3", "deleting"),
   );
   assert.doesNotThrow(() =>
     assertTaskArchived({ taskId: "3", archived: false }, "3", false),
@@ -710,6 +710,33 @@ test("Conversation recovery projection is one coherent continuation state", () =
   );
 });
 
+test("Task deletion exposes one product-level progress and retry fact", () => {
+  const deleting = clone(fixture);
+  deleting.tasks[0].archived = true;
+  deleting.tasks[0].lifecycle = "closing";
+  deleting.tasks[0].deletionStatus = "deleting";
+  deleting.tasks[0].activeOperation = null;
+  deleting.tasks[0].currentRunId = "0";
+  deleting.tasks[0].currentRunPhase = null;
+  deleting.tasks[0].runs[0].phase = "completed";
+  deleting.tasks[0].runs[0].outcome = "completed";
+  deleting.tasks[0].lastRunOutcome = "completed";
+  deleting.tasks[0].continuationAvailable = false;
+  deleting.tasks[0].continuationUnavailableReason = "closing";
+  assert.deepEqual(decodeWorkbenchSnapshot(deleting), deleting);
+
+  const retryable = clone(deleting);
+  retryable.tasks[0].deletionStatus = "failed";
+  assert.deepEqual(decodeWorkbenchSnapshot(retryable), retryable);
+
+  const unarchived = clone(retryable);
+  unarchived.tasks[0].archived = false;
+  assert.throws(
+    () => decodeWorkbenchSnapshot(unarchived),
+    /only an archived Task can have deletion state/,
+  );
+});
+
 test("Compact projection is append-only and mutually exclusive with Run work", () => {
   const compacted = clone(fixture);
   const task = compacted.tasks[0];
@@ -742,15 +769,6 @@ test("Compact projection is append-only and mutually exclusive with Run work", (
   assert.throws(
     () => decodeWorkbenchSnapshot(archivedActive),
     /archived Task cannot have an active Compact/,
-  );
-
-  const closedActive = clone(active);
-  closedActive.tasks[0].lifecycle = "closed";
-  closedActive.tasks[0].continuationAvailable = false;
-  closedActive.tasks[0].continuationUnavailableReason = "closed";
-  assert.throws(
-    () => decodeWorkbenchSnapshot(closedActive),
-    /closed Task cannot have an active Compact/,
   );
 
   const closingActive = clone(active);

@@ -307,7 +307,6 @@ pub const Dispatcher = struct {
             .{ .name = commands.refresh_task_skill_catalog, .function = refreshTaskSkillCatalog },
             .{ .name = commands.cancel, .function = cancelTask },
             .{ .name = commands.respond_ui, .function = respondUi },
-            .{ .name = commands.close_task, .function = closeTask },
             .{ .name = commands.rename_task, .function = renameTask },
             .{ .name = commands.archive_task, .function = archiveTask },
             .{ .name = commands.delete_task, .function = deleteTask },
@@ -2677,19 +2676,6 @@ pub const Dispatcher = struct {
         );
     }
 
-    fn closeTask(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
-        const self: *Dispatcher = @ptrCast(@alignCast(context));
-        var callback = try self.callbacks.enter();
-        defer callback.deinit();
-        try self.requireWindow(invocation.source.window_id);
-        var parsed = try handlers.parsePayload(handlers.TaskClose, invocation.request.payload);
-        defer parsed.deinit();
-        const task_id = try handlers.parseWireId(parsed.value.taskId);
-        try (try self.requireWorkbench()).closeTask(task_id);
-        self.notifyCommitted();
-        return std.fmt.bufPrint(output, "{{\"taskId\":\"{d}\",\"closing\":true}}", .{task_id});
-    }
-
     fn renameTask(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
         var callback = try self.callbacks.enter();
@@ -2730,7 +2716,7 @@ pub const Dispatcher = struct {
         const task_id = try handlers.parseWireId(parsed.value.taskId);
         try (try self.requireWorkbench()).deleteTask(task_id);
         self.notifyCommitted();
-        return std.fmt.bufPrint(output, "{{\"taskId\":\"{d}\",\"deleted\":true}}", .{task_id});
+        return std.fmt.bufPrint(output, "{{\"taskId\":\"{d}\",\"deleting\":true}}", .{task_id});
     }
 
     fn createScheduledTask(

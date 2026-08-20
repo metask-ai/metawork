@@ -10,6 +10,7 @@ function filesWithExtensions(directory, extensions) {
   return readdirSync(new URL(directory, root), { withFileTypes: true }).flatMap(
     (entry) => {
       const path = join(directory, entry.name).replaceAll("\\", "/");
+      if (entry.isDirectory() && entry.name.startsWith(".")) return [];
       if (entry.isDirectory())
         return filesWithExtensions(`${path}/`, extensions);
       return entry.isFile() && extensions.some((ext) => path.endsWith(ext))

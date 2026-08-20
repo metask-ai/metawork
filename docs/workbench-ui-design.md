@@ -207,9 +207,9 @@ Workspace
 - Composer 的工作目录控件只选择、添加或重新授权 New task 路径；设置页不提供 Workspace 生命周期管理。设置作为覆盖整个 Workbench 内容区的长期 surface 打开，保留窗口壳层和底层 Workbench 挂载，拥有自己的分区导航与内容滚动，关闭后恢复原工作面；
 - 再次打开历史 Task 只保证可浏览记录；需要访问原目录时重新选择或授权，能否继续执行还必须服从 §6.4 的 Conversation 与 execution binding 规则；
 - MetaWork 重启后，左栏直接使用 Workbench 恢复的 Task 列表和顺序；点击 Task 打开其已保存时间线，不自动创建新 Task、不重放最后一次输入，也不把恢复的 `interrupted` 显示成仍在运行；
-- `taskHistoryPersistenceHealth = degraded` 时，左栏在 Task 列表前显示一条紧凑、可读的部分恢复提示，但新 Task 和其他有效历史仍可用；只有 `read_failed / corrupt / write_failed / outcome_unknown` 这类 canonical store 或提交状态不可相信时才禁用 mutation。历史读取失败或整体损坏不得伪装成空列表，`outcome_unknown` 明确要求重启，Renderer 不提供盲目重试同一命令的入口；
+- `taskHistoryPersistenceHealth = degraded` 只表示少数已保存 Task 无法恢复；由于新 Task 和其他有效历史仍可用且没有用户可执行的恢复动作，左栏不为它显示常驻提示。`read_failed / corrupt / write_failed / outcome_unknown` 这类 canonical store 或提交状态不可相信时继续显示提示并禁用 mutation。历史读取失败或整体损坏不得伪装成空列表，`outcome_unknown` 明确要求重启，Renderer 不提供盲目重试同一命令的入口；
 - Task 行不保留可见的文字状态标签。运行中使用紫色旋转 loading 图标，需要处理或失败使用对应语义图标；完成使用醒目的实心提示点作为一次性未读提醒，颜色沿用主操作色。提醒身份绑定到最新完成 Run，后台完成时显示，用户打开该 Task 且其工作面可见后视为已读并隐藏；Task 再次完成新的 Run 时重新显示。
-- Task 的重命名、归档/恢复、结束和删除从内容区标题栏移除，统一通过左侧 Task 行的右键菜单访问。停止当前运行仍保留在内容区作为即时运行控制。
+- Task 的重命名、归档/恢复和删除从内容区标题栏移除，统一通过左侧 Task 行的右键菜单访问。停止当前运行仍保留在内容区作为即时运行控制；不存在独立的“结束任务”动作。
 
 ### 5.2 全局能力入口
 
@@ -401,7 +401,8 @@ Recent
 - 点击 `New task` 只打开空白任务页；第一次发送后才创建真实 Task，避免空记录；
 - 标题根据首条用户指令自动生成，用户可以重命名；
 - 归档从日常列表隐藏，但保留记录和引用；
-- 删除移除 Task 记录，不自动删除 Workspace 中生成或修改的文件；
+- 只有已归档 Task 提供删除；删除会先收口仍存活的 Session，再移除 Task 记录，不自动删除 Workspace 中生成或修改的文件；
+- 删除进入 `deleting` 后禁用该 Task 的重命名、恢复归档和重复删除，等待 Host 自行推进；进入 `failed` 时保留归档 Task、显示失败信号并重新开放同一删除动作，Renderer 不显示或编排 checkpoint、Session release 等内部阶段。若此时 Task 已回到 `open`，用户也可以恢复归档并由 Host 原子清除失败的删除用例；仍为 `closing` 时只开放删除重试；
 - 删除确认必须明确说明文件不会被删除；
 - queued、running、waiting_user 或 stopping 的 Task 不能归档或删除；必须先停止或明确取消并等待真实 terminal 结果。
 
@@ -446,8 +447,10 @@ Metask 已连接
 
 | 状态轴               | 值                                                    | 含义                                            |
 | -------------------- | ----------------------------------------------------- | ----------------------------------------------- |
-| Task lifecycle       | `active / archived / deleting`                        | Task 记录本身是否参与日常工作                   |
-| Active operation     | `none / run / compact`                                | 当前占用唯一 Session operation 槽的操作种类     |
+| Task lifecycle       | `open / closing`                                      | 当前 attachment 是否正在收口                    |
+| Archived             | `false / true`                                        | Task 是否参与日常列表                           |
+| Deletion status      | `idle / deleting / failed`                            | 删除用例的等待、进行中与显式重试事实            |
+| Active operation     | `none / run / compact / restore`                      | 当前占用唯一 Session operation 槽的操作种类     |
 | Active Run phase     | `none / queued / running / waiting_user / stopping`   | `run` operation 的调度、工作或等待状态          |
 | Active compact phase | `none / queued / compacting / stopping`               | `compact` operation 的调度、工作或取消状态      |
 | Last Run outcome     | `none / completed / cancelled / failed / interrupted` | 最近一次 terminal Run 的结果，不关闭 Task       |
@@ -486,12 +489,12 @@ Execution binding availability 是下一次 admission 的独立前置事实，�
 
 1. Host 从 bounded Workbench store 恢复 Workspace/Task、消息、Run/tool/UI 决策、compact 历史、无 secret execution binding 与 checkpoint record；不得把当前默认配置静默写入历史 Task；
 2. 没有 live owner 的 non-terminal Run 或 compact 显示为 `Interrupted`，不显示 Running/Stopping，不自动重放输入、工具或 permission；
-3. 点击左栏 Task 始终只是导航。满足资格的 detached open Task 在 Composer 上方显示历史已准备提示；用户发送第一条新消息时，Renderer 才提交现有 restore，并等待 Host snapshot 确认 attachment 后继续提交该条 Run；选择、reload 或 timeout 不会自动触发 restore；
+3. 点击左栏 Task 始终只是导航。满足资格的 detached Task 在 Composer 上方显示历史已准备提示；用户发送第一条新消息时，Renderer 才提交现有 restore，并等待 Host snapshot 确认 attachment 后继续提交该条 Run；选择、reload 或 timeout 不会自动触发 restore；
 4. restore 期间显示 `Restoring conversation / 正在恢复对话`，禁用发送、compact 和重复 restore。左栏把该 Task 归入正在运行分组，但不能伪造 Agent Run 或 Stop 按钮；
 5. restore 失败时保留可阅读历史、用户草稿与稳定原因；Host 仍发布 `continuationRecoveryAvailable = true` 时显示 `Try again / 重试`。timeout 只触发 canonical snapshot resync，绝不重放 restore 或 Run；
 6. 成功后 Host 原子发布 attachment 与 `continuationAvailable = true`，Renderer 只在这一状态确认后提交一次 Run。`continuationAvailable`、`continuationUnavailableReason` 和 `continuationRecoveryAvailable` 是同一 continuation 模型；不得建立第二个 `recovery.state` 或由 Renderer 猜测资格；
 7. checkpoint、Workspace、execution、catalog/MCP authority、Runtime 或持久化任一 gate 不满足时只显示对应 unavailable 说明，不显示恢复按钮。Task store read/corrupt/write/outcome-unknown health 由 Host 发布；Renderer 不自行清空、修复、迁移或重试持久数据；
-8. open 的 detached Task 仍可执行真实的 Host-owned 结束动作；成功后 `lifecycle = closed` 必须写入同一 store，删除入口随 canonical snapshot 开放，再次重启不得复活。
+8. `closed` 不是 Task 产品状态。非归档 Task 只要 Host gate 允许，就应恢复 attachment 并继续；归档只控制日常列表可见性，删除才永久移除记录。
 
 恢复要求 checkpoint record 与 Task execution binding 共同证明 provider、execution generation、Task binding epoch 与当前可用 execution authority 精确匹配；checkpoint 的 model 只用于满足 AgentCore restore expectation，并与其 terminal Run 的历史 model 自洽校验。candidate 提交前由 Host 以 Task 当前 model binding 调用 `session_set_model`，不能把 checkpoint 的旧 model 或 Account 当前默认 model 静默写回 Task。durable Task 不保存 account、API Key 或 Model Connection identity，恢复不能从当前 Account projection 反推或补写这些字段；Task 当前 pinned model 不在当前 execution catalog 时，恢复 gate 保持 unavailable。若未来交付 rebind，必须由用户明确发起，重新校验 Workspace 和当前 catalog ownership，创建新 binding epoch/Session，并以不可改写的配置边界保留旧 Run、usage 与模型归属；失败不得回退到静默默认值。
 
@@ -888,7 +891,7 @@ Workspace 生命周期不属于 Settings surface。New task 路径控件负责�
 - 既有 Task 只显示解释历史所需的 Provider、模型与 generation；不显示或保存 Account identity 与 API Key 元数据；
 - 跨重启历史 Task 保持只读；设置变化不能使其静默采用当前默认值或伪造 Session；
 - `在 Metask 中管理` 只有在 Host 发布固定安全入口后才显示；当前没有该 capability 时不放置链接或假入口；
-- 只有 Task 仍持有 Session、Run、job、worker 或 credential 等真实运行时引用时，重新登录或退出登录才显示“任务仍在运行”；durable Task、只读历史和 `closed = false` 不得触发该提示。退出登录必须说明设备凭据清理和历史保留语义。
+- 只有 Task 仍持有 Session、Run、job、worker 或 credential 等真实运行时引用时，重新登录或退出登录才显示“任务仍在运行”；durable Task 和只读历史不得触发该提示。退出登录必须说明设备凭据清理和历史保留语义。
 
 设置页保留左侧分区导航与右侧内容的双栏布局。桌面双栏直接消费应用左侧导航轨的已保存宽度，使设置内容起点与 Workbench 分界线保持一致；设置页不建立第二份宽度状态或第二个拖动器。它是桌面控制面，不使用营销页式 Hero，也不为视觉饱满度增加无产品语义的卡片、渐变、玻璃材质或装饰性图表。顶部只保留与双栏网格对齐的紧凑上下文栏：返回入口、单一页面标题和一句短说明；不重复产品眉题，不让标题区形成独立大块留白。标准窗口下当前分区和第一组设置必须在首屏形成紧凑、稳定的阅读起点；窄窗口可把分区导航收成横向行，但不得改变设置 owner 或复制页面状态。
 
