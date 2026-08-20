@@ -241,7 +241,7 @@ automation -> bridge, account contract, Native SDK
 - 产品 module 的 inline test 与实现共置并使用相同依赖边界；正式 external Zig test root 置于 `tests/`，由 `build.zig` 注册；
 - `tests/agent/`、`tests/workbench/` 分别归对应 owner，`tests/integration/` 只容纳无法归属于单一 owner 的跨边界失败，`tests/support/` 只提供 test-only fake 和 fixture，不形成产品 owner；
 - `scripts/*.test.mjs` 是默认 Node/Renderer 回归资产，由 `npm test` 自动发现；其他 `scripts/` 可以编排真实应用、平台验收和 artifact 工具，但不能建立测试专用产品协议；
-- 根 `package.json` 只保留 `dev`、`check`、`test`、`format`、`format:check`、`build:debug`、`build:release` 与 `package:macos` 八个工程入口，不登记内部步骤、单项测试、probe 或平台验收 harness；macOS `dev` 只使用显式选择的 Apple Development identity，`package:macos` 只使用唯一有效的 Developer ID Application identity 和钥匙串 `metawork-notary` profile，并要求 notarization `Accepted`、staple、Gatekeeper 与最终 ZIP 完整性全部通过；
+- 根 `package.json` 只保留 `dev`、`check`、`test`、`format`、`format:check`、`build:debug`、`build:release` 与 `package:macos` 八个工程入口，不登记内部步骤、单项测试、probe 或平台验收 harness；macOS `dev` 只使用显式选择的 Apple Development identity，`package:macos` 只使用唯一有效的 Developer ID Application identity 和钥匙串 `metawork-notary` profile，并要求应用与 DMG 签名、notarization `Accepted`、DMG staple、Gatekeeper、磁盘映像及挂载内容完整性全部通过，只输出版本化 arm64 DMG；
 - `build_support/agentcore_bundle.zig` 与 target lock 是正式信任边界；candidate probe 只使用临时 source-free SDK consumer；
 
 ## 7. 结构变更规则

@@ -118,7 +118,7 @@ architecture guard 必须保持 `PlatformServices.context` 零 allowlist。原�
 
 ### macOS
 
-首次使用真实 Account 前，按[macOS 开发与内部测试签名](macos-local-development.md)选择 Apple Development identity：
+首次使用真实 Account 前，按[macOS 开发与分发签名](macos-local-development.md)选择 Apple Development identity：
 
 ```bash
 node scripts/setup-macos-local-signing.mjs setup
@@ -127,7 +127,7 @@ npm run build:release
 npm run package:macos
 ```
 
-签名、公证、staple、Gatekeeper 和分发 ZIP 的身份与完整性规则由 macOS 签名文档及对应脚本负责。普通 check/test/build 不得访问个人证书或 notary profile；`package:macos` 成功也不等于安装器或更新能力完成。
+应用与 DMG 签名、公证、staple、Gatekeeper、磁盘映像及挂载内容的身份与完整性规则由 macOS 签名文档及对应脚本负责。`package:macos` 只产出小写 `metawork-<version>-macos-arm64.dmg`，不生成分发 ZIP。普通 check/test/build 不得访问个人证书或 notary profile；`package:macos` 成功证明可分发磁盘映像，不等于更新能力完成。
 
 Keychain 跨重建授权稳定性当前为 **人工验收待完成**：在同一精确 commit 上让 Debug app 写入并读取 Account credential，完全退出并重新构建，再次恢复 Account，确认没有出现新的 Account Keychain 授权框。首次选择签名私钥产生的系统授权不属于 Account Keychain 失败。
 

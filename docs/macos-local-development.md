@@ -1,8 +1,8 @@
-# MetaWork macOS 开发与内部测试签名
+# MetaWork macOS 开发与分发签名
 
 MetaWork 的真实 Account 开发流程使用 Apple 签发、带稳定 `TeamIdentifier` 的 `Apple Development` Code Signing identity。它只解决同一台开发机上重新构建后的 macOS Keychain 身份稳定性，不是 `Developer ID`，也不用于向测试人员或用户分发应用。
 
-内部跨机器测试包使用 Apple 签发的 `Developer ID Application` identity。开发和打包签名彼此独立：`npm run dev` 只接受项目显式选择的 Apple Development identity；`npm run package:macos` 只接受登录钥匙串中唯一有效的 Developer ID Application identity，不能在缺失或歧义时回退到开发证书、自签名或 ad-hoc 签名。
+正式 DMG 使用 Apple 签发的 `Developer ID Application` identity。开发和打包签名彼此独立：`npm run dev` 只接受项目显式选择的 Apple Development identity；`npm run package:macos` 只接受登录钥匙串中唯一有效的 Developer ID Application identity，不能在缺失或歧义时回退到开发证书、自签名或 ad-hoc 签名。
 
 签名流程直接读取 `app.zon` 中现有的 Bundle ID 与 executable name；当前分别是 `com.metask.metawork.dev` 和 `metawork`。`app.zon` 是跨平台 development 产品 Bundle ID 唯一真源，Application 通过 `src/product_identity.zig` 消费同一个 Native SDK manifest module。Account 在所有平台使用同一 persistence 合同：`com.metask.metawork.dev.account` secure service 只保存 refresh token，`preferences.json` 只保存无 secret 的当前选择；旧开发命名空间不迁移、不 fallback。
 
@@ -66,7 +66,7 @@ npm run dev
 
 macOS `dev` 会读取 `app.zon` 的现有 identifier，确认本机已选择的 identity 仍然有效，再构建并为 Debug executable 写入 canonical designated requirement；验证阶段必须精确读回该 requirement，并由系统 requirement engine 独立复核 identifier、Apple anchor、Team 与所选 Apple Development certificate，最后启动 Native SDK development shell。
 
-## 内部测试包
+## 正式 DMG
 
 先在 Xcode 的 Team `Manage Certificates` 中创建 `Developer ID Application`，并确认登录钥匙串同时持有证书和 private key：
 
@@ -91,8 +91,10 @@ npm run package:macos
 
 打包流程从 `security find-identity` 精确筛选唯一 Developer ID Application identity，再从所选证书的 subject `OU` 读取 Team ID 并复核 SHA-1 fingerprint。它构建 ReleaseFast、调用 Native SDK 生成 `.app`，最后以 `--options runtime --timestamp` 重签外层 bundle。验证必须覆盖 Bundle ID、产品版本、Renderer 资源、Developer ID leaf authority、Team ID、Apple anchor、hardened runtime 和可信时间戳。
 
-签名验证通过后，入口使用 `ditto --sequesterRsrc --keepParent` 创建临时提交 ZIP，只从钥匙串 `metawork-notary` profile 认证 `notarytool`，并等待最多 2 小时。只有 typed terminal status 精确为 `Accepted` 才继续 staple/validate 原 `.app` 和 Gatekeeper assessment；之后重新生成 `zig-out/package/MetaWork-<version>-macos-arm64.zip`、检查 ZIP 完整性并输出 SHA-256。入口启动时先删除精确命名的旧分发 ZIP，临时 notary ZIP 在成功后删除，所以失败时不会留下可误发的旧最终产物。等待超时不会取消 Apple 已接收的 submission；必须以原 submission ID 继续查询，不能盲目重传同一构建。
+签名验证通过后，入口把 `.app` 与指向 `/Applications` 的精确符号链接放入临时 staging root，使用系统 `hdiutil` 生成 UDZO 磁盘映像，再以同一 Developer ID Application identity 和可信时间戳签名 DMG。最终 `zig-out/package/metawork-<version>-macos-arm64.dmg` 直接通过钥匙串 `metawork-notary` profile 提交 `notarytool`，并等待最多 2 小时。只有 typed terminal status 精确为 `Accepted` 才继续 staple/validate DMG、执行 Gatekeeper assessment、`hdiutil verify`，并只读挂载检查根目录恰好包含 `MetaWork.app` 和精确 `/Applications` 符号链接，同时复核内含应用的 Developer ID 签名。全部通过后输出 SHA-256。
 
-现有 development Bundle ID `com.metask.metawork.dev` 及其数据和 credential namespace 保持不变；该入口不生成安装器或更新器，也不将 `.dev` identity 宣称为正式 production channel。
+入口启动时先删除精确命名的旧 DMG 和旧版同名分发 ZIP，所以失败时不会留下可误发的旧最终产物；本流程不再创建任何 ZIP。等待超时不会取消 Apple 已接收的 submission，必须以原 submission ID 继续查询，不能盲目重传同一构建。
+
+现有 development Bundle ID `com.metask.metawork.dev` 及其数据和 credential namespace 保持不变；DMG 是只读拖拽分发容器，不是带安装逻辑的 PKG，也不提供更新能力。`.dev` identity 仍是当前产品 Bundle ID，不因产物改为 DMG 而自动升级成独立 production channel。
 
 普通 `check`、`test`、Debug/Release build、Windows baseline 和 automation 不依赖个人证书或 notary credential，也不访问真实 Keychain。

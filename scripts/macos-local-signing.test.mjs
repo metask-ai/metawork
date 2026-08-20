@@ -7,6 +7,7 @@ import {
   buildDeveloperIdRequirement,
   isAppleDevelopmentIdentityName,
   isDeveloperIdApplicationIdentityName,
+  localDistributionDiskImageName,
   localPackageMetadata,
   localProductIdentity,
   parseCodeDirectoryIdentifier,
@@ -49,11 +50,15 @@ test("local signing reads the existing Native product identity", () => {
   );
 });
 
-test("distribution archive metadata comes from the Native product manifest", () => {
+test("distribution DMG metadata comes from the Native product manifest", () => {
   assert.deepEqual(localPackageMetadata, {
     displayName: "MetaWork",
     version: "0.1.1",
   });
+  assert.equal(
+    localDistributionDiskImageName,
+    "metawork-0.1.1-macos-arm64.dmg",
+  );
   assert.deepEqual(
     parseNativePackageMetadata(
       `.{\n.display_name = "ExampleApp",\n.version = "1.2.3-beta.1",\n}`,

@@ -1,7 +1,16 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, rmSync } from "node:fs";
-import { homedir } from "node:os";
+import {
+  existsSync,
+  lstatSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  readlinkSync,
+  rmSync,
+  symlinkSync,
+} from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import path from "node:path";
 
@@ -60,18 +69,26 @@ const packagedAppPath = path.join(
   "package",
   `${localProductIdentity.executableName}.app`,
 );
-const packageArtifactStem = `${localPackageMetadata.displayName}-${localPackageMetadata.version}-macos-arm64`;
-const notarizationArchivePath = path.join(
-  repositoryRoot,
-  "zig-out",
-  "package",
-  `${packageArtifactStem}-notary.zip`,
-);
-const distributionArchivePath = path.join(
+const packageArtifactStem = `${localProductIdentity.executableName}-${localPackageMetadata.version}-macos-arm64`;
+export const localDistributionDiskImageName = `${packageArtifactStem}.dmg`;
+const legacyPackageArtifactStem = `${localPackageMetadata.displayName}-${localPackageMetadata.version}-macos-arm64`;
+const legacyDistributionArchivePath = path.join(
   repositoryRoot,
   "zig-out",
   "package",
   `${packageArtifactStem}.zip`,
+);
+const legacyDistributionDiskImagePath = path.join(
+  repositoryRoot,
+  "zig-out",
+  "package",
+  `${legacyPackageArtifactStem}.dmg`,
+);
+const distributionDiskImagePath = path.join(
+  repositoryRoot,
+  "zig-out",
+  "package",
+  localDistributionDiskImageName,
 );
 const notarizationProfile = "metawork-notary";
 const nativeDispatcher = path.join(
@@ -607,27 +624,126 @@ function runNode(script, args = []) {
   run(process.execPath, [path.join(repositoryRoot, script), ...args]);
 }
 
-function createAppArchive(targetPath) {
-  rmSync(targetPath, { force: true });
-  run("/usr/bin/ditto", [
-    "-c",
-    "-k",
-    "--sequesterRsrc",
-    "--keepParent",
-    packagedAppPath,
-    targetPath,
-  ]);
-  run("/usr/bin/unzip", ["-tq", targetPath], { capture: true });
+function verifyDeveloperIdDiskImageSignature(targetPath, identity) {
+  run(
+    "/usr/bin/codesign",
+    ["--verify", "--strict", "--verbose=2", targetPath],
+    {
+      capture: true,
+    },
+  );
+  const report = signatureReport(targetPath);
+  const teamId = parseTeamIdentifier(report);
+  if (teamId !== identity.teamId) {
+    throw new Error(
+      `DMG TeamIdentifier is ${teamId}, expected ${identity.teamId}`,
+    );
+  }
+  const authorities = parseSigningAuthorities(report);
+  if (authorities[0] !== identity.name) {
+    throw new Error(
+      `DMG code signature leaf authority is ${authorities[0] ?? "missing"}, expected ${identity.name}`,
+    );
+  }
+  if (!/^Timestamp=.+$/mu.test(report)) {
+    throw new Error("Developer ID DMG code signature has no trusted timestamp");
+  }
+  return { authorities, report, teamId };
 }
 
-function notarizePackage() {
-  createAppArchive(notarizationArchivePath);
+function createDistributionDiskImage(identity) {
+  const stagingRoot = mkdtempSync(path.join(tmpdir(), "metawork-dmg-stage-"));
+  try {
+    const stagedAppPath = path.join(
+      stagingRoot,
+      `${localPackageMetadata.displayName}.app`,
+    );
+    run("/usr/bin/ditto", [packagedAppPath, stagedAppPath]);
+    symlinkSync("/Applications", path.join(stagingRoot, "Applications"));
+    run("/usr/bin/hdiutil", [
+      "create",
+      "-volname",
+      localPackageMetadata.displayName,
+      "-srcfolder",
+      stagingRoot,
+      "-format",
+      "UDZO",
+      "-ov",
+      distributionDiskImagePath,
+    ]);
+  } finally {
+    rmSync(stagingRoot, { recursive: true, force: true });
+  }
+  run("/usr/bin/codesign", [
+    "--force",
+    "--sign",
+    identity.fingerprint,
+    "--timestamp",
+    distributionDiskImagePath,
+  ]);
+  verifyDeveloperIdDiskImageSignature(distributionDiskImagePath, identity);
+  run("/usr/bin/hdiutil", ["verify", distributionDiskImagePath], {
+    capture: true,
+  });
+}
+
+function verifyDistributionDiskImage(identity) {
+  const mountPoint = mkdtempSync(path.join(tmpdir(), "metawork-dmg-mount-"));
+  let attached = false;
+  try {
+    run(
+      "/usr/bin/hdiutil",
+      [
+        "attach",
+        "-readonly",
+        "-nobrowse",
+        "-mountpoint",
+        mountPoint,
+        distributionDiskImagePath,
+      ],
+      { capture: true },
+    );
+    attached = true;
+    const expectedAppName = `${localPackageMetadata.displayName}.app`;
+    const entries = readdirSync(mountPoint).filter(
+      (entry) => entry !== ".DS_Store",
+    );
+    if (
+      entries.sort().join("\n") !==
+      ["Applications", expectedAppName].sort().join("\n")
+    ) {
+      throw new Error(`DMG has unexpected root entries: ${entries.join(", ")}`);
+    }
+    const applicationsLink = path.join(mountPoint, "Applications");
+    if (
+      !lstatSync(applicationsLink).isSymbolicLink() ||
+      readlinkSync(applicationsLink) !== "/Applications"
+    ) {
+      throw new Error(
+        "DMG Applications entry is not an exact /Applications symlink",
+      );
+    }
+    verifyDeveloperIdSignature(
+      path.join(mountPoint, expectedAppName),
+      identity,
+      undefined,
+      { deep: true },
+    );
+  } finally {
+    if (attached) {
+      run("/usr/bin/hdiutil", ["detach", mountPoint], { capture: true });
+    }
+    rmSync(mountPoint, { recursive: true, force: true });
+  }
+}
+
+function notarizeDiskImage(identity) {
   const result = run(
     "/usr/bin/xcrun",
     [
       "notarytool",
       "submit",
-      notarizationArchivePath,
+      distributionDiskImagePath,
       "--keychain-profile",
       notarizationProfile,
       "--wait",
@@ -646,22 +762,32 @@ function notarizePackage() {
     );
   }
 
-  run("/usr/bin/xcrun", ["stapler", "staple", "-v", packagedAppPath]);
-  run("/usr/bin/xcrun", ["stapler", "validate", "-v", packagedAppPath]);
+  run("/usr/bin/xcrun", ["stapler", "staple", "-v", distributionDiskImagePath]);
+  run("/usr/bin/xcrun", [
+    "stapler",
+    "validate",
+    "-v",
+    distributionDiskImagePath,
+  ]);
   run("/usr/sbin/spctl", [
     "--assess",
     "--type",
-    "execute",
+    "open",
+    "--context",
+    "context:primary-signature",
     "--verbose=4",
-    packagedAppPath,
+    distributionDiskImagePath,
   ]);
-  createAppArchive(distributionArchivePath);
-  rmSync(notarizationArchivePath, { force: true });
+  run("/usr/bin/hdiutil", ["verify", distributionDiskImagePath], {
+    capture: true,
+  });
+  verifyDeveloperIdDiskImageSignature(distributionDiskImagePath, identity);
+  verifyDistributionDiskImage(identity);
 
   const digest = createHash("sha256")
-    .update(readFileSync(distributionArchivePath))
+    .update(readFileSync(distributionDiskImagePath))
     .digest("hex");
-  return { archivePath: distributionArchivePath, digest, submission };
+  return { artifactPath: distributionDiskImagePath, digest, submission };
 }
 
 function runDevelopment() {
@@ -681,8 +807,9 @@ function runDevelopment() {
 function packageMacos() {
   requireMacos();
   const identity = resolveDistributionIdentity();
-  rmSync(distributionArchivePath, { force: true });
-  rmSync(notarizationArchivePath, { force: true });
+  rmSync(distributionDiskImagePath, { force: true });
+  rmSync(legacyDistributionDiskImagePath, { force: true });
+  rmSync(legacyDistributionArchivePath, { force: true });
   runNode("scripts/build.mjs", ["release"]);
   runNode("scripts/clean-macos-package.mjs");
   runNative([
@@ -703,7 +830,8 @@ function packageMacos() {
     preserveEntitlements: true,
   });
   runNode("scripts/verify-macos-package.mjs");
-  const notarized = notarizePackage();
+  createDistributionDiskImage(identity);
+  const notarized = notarizeDiskImage(identity);
   verifyDeveloperIdSignature(packagedAppPath, identity, undefined, {
     deep: true,
   });
@@ -711,7 +839,7 @@ function packageMacos() {
     `built Developer ID signed and notarized package ${packagedAppPath} (${signature.policy})`,
   );
   console.log(
-    `Apple notarization ${notarized.submission.id} accepted; final archive ${notarized.archivePath} (sha256=${notarized.digest})`,
+    `Apple notarization ${notarized.submission.id} accepted; final DMG ${notarized.artifactPath} (sha256=${notarized.digest})`,
   );
 }
 
