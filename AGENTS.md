@@ -18,7 +18,7 @@
 | AgentCore bundle、ABI 与 required capability                  | [docs/agentcore-abi-v1.md](docs/agentcore-abi-v1.md)                 |
 | AgentCore 工具目标范围、探针、profile 与 capability Gate      | [docs/tool-integration-plan.md](docs/tool-integration-plan.md)       |
 | Metask OAuth、catalog、ExecutionTarget 与 Account persistence | [docs/metask-account-contract.md](docs/metask-account-contract.md)   |
-| 验证状态、证据和持续回归入口                                  | [docs/validation.md](docs/validation.md)                             |
+| 测试归属、验证状态、证据和持续回归入口                        | [docs/validation.md](docs/validation.md)                             |
 
 `README.md` 只负责项目入口与快速开始，不是规范。
 
@@ -84,12 +84,12 @@
 - AgentCore ABI、bundle、required capability 或兼容门槛变化更新 `docs/agentcore-abi-v1.md`。
 - AgentCore 工具目标范围、名称探针、profile/admission 或工具 capability Gate 变化更新 `docs/tool-integration-plan.md`。
 - Metask Account 外部合同或 persistence revision 策略变化更新 `docs/metask-account-contract.md`。
-- 验收矩阵、长期证据、持续回归入口和能力缺口变化更新 `docs/validation.md`。
+- 测试层与归属、验收矩阵、长期证据、持续回归入口和能力缺口变化更新 `docs/validation.md`。
 - 同一事实只在一份规范中定义；其他文档链接或做不产生新语义的摘要。
 
 ## 验证规则
 
-按实际失败模式选择最小充分验证，不按“碰过某类文件”机械扩大平台矩阵：
+新增或修改测试时，先按[验证规范的测试归属规则](docs/validation.md#测试归属)确定 source of truth、不变量 owner、唯一失败模式和最小充分测试层；测试文件位置不能反向决定 owner。执行验证时按实际失败模式选择最小充分范围，不按“碰过某类文件”机械扩大平台矩阵：
 
 - 纯文档删除或改写：检查链接、锚点、残留引用和 `git diff --check`；不运行 runtime 测试。
 - Renderer/TypeScript：运行 typecheck 与受影响的 Renderer suite；合同变化同时运行跨语言 fixture 和 Bridge tests。

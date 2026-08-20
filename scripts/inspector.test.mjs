@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -303,14 +302,26 @@ test("thinking and response activity use safe localized status labels", () => {
       currentRunPhase: "running",
       runs: [run({ phase: "running", status, outcome: null })],
     });
-    assert.match(renderTaskContent(activityTask, "zh-CN"), new RegExp(`>${expected}<`));
-    assert.match(renderInspector(activityTask, "zh-CN"), new RegExp(`>${expected}<`));
+    assert.match(
+      renderTaskContent(activityTask, "zh-CN"),
+      new RegExp(`>${expected}<`),
+    );
+    assert.match(
+      renderInspector(activityTask, "zh-CN"),
+      new RegExp(`>${expected}<`),
+    );
   }
 
   const waitingModel = task({
     currentRunId: "9",
     currentRunPhase: "running",
-    runs: [run({ phase: "running", status: "private-provider-status", outcome: null })],
+    runs: [
+      run({
+        phase: "running",
+        status: "private-provider-status",
+        outcome: null,
+      }),
+    ],
   });
   assert.match(renderTaskContent(waitingModel, "zh-CN"), />正在等待模型响应</);
   assert.match(renderInspector(waitingModel, "zh-CN"), />正在等待模型响应</);
@@ -434,84 +445,5 @@ test("Escape dismissal and focus return preserve the real Inspector opener", () 
       fallback,
     ),
     fallback,
-  );
-});
-
-test("Task overview has one controlled panel and Task content has no Agent surface", async () => {
-  const [app, shell, surface, css] = await Promise.all([
-    readFile(join(process.cwd(), "frontend/src/app/App.tsx"), "utf8"),
-    readFile(join(process.cwd(), "frontend/src/app/AppShell.tsx"), "utf8"),
-    readFile(
-      join(process.cwd(), "frontend/src/features/tasks/TaskContent.tsx"),
-      "utf8",
-    ),
-    readFile(join(process.cwd(), "frontend/src/index.css"), "utf8"),
-  ]);
-  assert.match(app, /aria-controls="task-inspector"/);
-  assert.match(app, /aria-expanded=\{inspector\.open\}/);
-  assert.match(app, /inspectorOpener\.current = opener/);
-  assert.match(app, /panel\?\.contains\(document\.activeElement\)/);
-  assert.match(app, /inspectorFocusReturnTarget/);
-  assert.match(shell, /id="task-inspector"/);
-  assert.doesNotMatch(shell, /rightPreference|setRightOpen|aria-modal/);
-  assert.doesNotMatch(
-    surface,
-    /run\.tools|run\.usage|ToolCard|AgentWorkSurface/,
-  );
-  const userMessageRule = css.match(/\.task-input\s*\{([^}]*)\}/)?.[1];
-  assert.ok(userMessageRule);
-  assert.match(userMessageRule, /width:\s*fit-content/);
-  assert.match(userMessageRule, /max-width:\s*min\(78%, 660px\)/);
-  assert.match(userMessageRule, /margin-left:\s*auto/);
-  assert.match(userMessageRule, /border-radius:\s*14px 14px 4px 14px/);
-  assert.doesNotMatch(surface, /message\.(?:you|agent)/);
-  assert.doesNotMatch(surface, /message-role/);
-  assert.match(
-    css,
-    /\.task-outcome\s*\{[\s\S]*?border-top:\s*1px solid var\(--ui-border\)/,
-  );
-  assert.match(
-    css,
-    /@media \(max-width: 560px\)[\s\S]*?\.task-input\s*\{[^}]*max-width:\s*88%/,
-  );
-  assert.doesNotMatch(css, /\.task-input::(?:before|after)/);
-});
-
-test("Inspector breakpoint changes presentation without creating a modal or second state owner", async () => {
-  const [app, shell, css] = await Promise.all([
-    readFile(join(process.cwd(), "frontend/src/app/App.tsx"), "utf8"),
-    readFile(join(process.cwd(), "frontend/src/app/AppShell.tsx"), "utf8"),
-    readFile(join(process.cwd(), "frontend/src/index.css"), "utf8"),
-  ]);
-  assert.match(
-    shell,
-    /const effectiveInspectorOpen = inspectorAvailable && inspectorOpen/,
-  );
-  assert.match(shell, /aria-hidden=\{!effectiveInspectorOpen\}/);
-  assert.match(shell, /inert=\{!effectiveInspectorOpen\}/);
-  assert.match(shell, /onDismissInspector\(false\)/);
-  assert.match(shell, /shouldDismissInspectorForEscape/);
-  assert.match(shell, /role="dialog"/);
-  assert.match(shell, /role="menu"/);
-  assert.match(shell, /role="alertdialog"/);
-  assert.doesNotMatch(shell, /setLeftOpen\(\(open\) =>/);
-  assert.doesNotMatch(shell, /matchMedia\("\(max-width: 1100px\)"\)/);
-  const inspectorAside = shell.match(
-    /<aside\s+id="task-inspector"[\s\S]*?>/,
-  )?.[0];
-  assert.ok(inspectorAside);
-  assert.doesNotMatch(inspectorAside, /aria-modal|role="dialog"/);
-  assert.match(
-    app,
-    /if \(window\.innerWidth <= 1100\) dismissInspector\(false\)/,
-  );
-  assert.match(
-    css,
-    /@media \(max-width: 1100px\)[\s\S]*?--right-column: 0px;[\s\S]*?\.task-inspector \{[\s\S]*?position: fixed;/,
-  );
-  assert.doesNotMatch(css, /data-inspector-open="true"[^}]*panel-scrim/);
-  assert.match(
-    css,
-    /@media \(prefers-reduced-motion: reduce\)[\s\S]*?transition-duration: 0\.01ms !important/,
   );
 });

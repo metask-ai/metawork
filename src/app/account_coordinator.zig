@@ -967,19 +967,11 @@ const FakeMetask = struct {
         response_buffer: []u8,
     ) account_api.TransportError!account_api.TransportResponse {
         const self: *FakeMetask = @ptrCast(@alignCast(context));
-        const index = self.requests.fetchAdd(1, .acq_rel);
-        std.debug.print(
-            "fake-metask[{d}]: kind={s} bearer='{s}'\n",
-            .{ index, @tagName(request.kind), request.bearer orelse "" },
-        );
+        _ = self.requests.fetchAdd(1, .acq_rel);
         if (request.kind == .models) {
             if (self.fail_models_bearer_suffix) |suffix| {
                 const bearer = request.bearer orelse "";
                 if (std.mem.endsWith(u8, bearer, suffix)) {
-                    std.debug.print(
-                        "fake-metask[{d}]: forced models failure\n",
-                        .{index},
-                    );
                     const failure = "{\"error\":\"quota\"}";
                     @memcpy(response_buffer[0..failure.len], failure);
                     return .{
@@ -1002,42 +994,15 @@ const FakeMetask = struct {
     }
 };
 
-fn dumpView(label: []const u8, view: account_contract.AccountView) void {
-    std.debug.print(
-        "view[{s}]: state={s} catalog={s} keys={d} models={d} selected_key='{s}' selected_model='{s}' candidate_key='{s}' candidate_model='{s}' can_create={} err={s} diag='{s}'\n",
-        .{
-            label,
-            @tagName(view.state),
-            @tagName(view.catalog_state),
-            view.api_keys.len,
-            view.models.len,
-            view.selected_api_key_id,
-            view.selected_model,
-            view.candidate_api_key_id,
-            view.candidate_model,
-            view.can_create_task,
-            @tagName(view.error_code),
-            view.safe_diagnostic,
-        },
-    );
-}
-
 fn pumpUntilReady(
     coordinator: *Coordinator,
     account_runtime: *account_api.Runtime,
-    label: []const u8,
+    _: []const u8,
 ) account_contract.AccountView {
-    var last_state: ?account_contract.AccountState = null;
-    var last_catalog: ?account_contract.CatalogState = null;
     var iterations: usize = 0;
     while (iterations < 600) : (iterations += 1) {
         coordinator.drain();
         const view = account_runtime.view();
-        if (last_state != view.state or last_catalog != view.catalog_state) {
-            dumpView(label, view);
-            last_state = view.state;
-            last_catalog = view.catalog_state;
-        }
         if (view.state == .authenticated and view.catalog_state == .ready)
             return view;
         if (view.state == .authenticated and view.catalog_state == .failed)
@@ -1053,7 +1018,6 @@ fn pumpUntilReady(
             .clock = .awake,
         } }, std.testing.io) catch {};
     }
-    dumpView("stalled", account_runtime.view());
     return account_runtime.view();
 }
 
@@ -1108,12 +1072,10 @@ test "restored login drives automatic key and model defaults end to end" {
     var fake_platform: FakePlatform = .{};
     fake_platform.seed("stored-refresh-token");
     coordinator.start(fake_platform.services());
-    dumpView("after-start", account_runtime.view());
 
     // Phase 1: the automatic continuation must land the first key and the
     // first model without any user action.
     const settled = pumpUntilReady(&coordinator, &account_runtime, "auto");
-    dumpView("auto-settled", settled);
     try std.testing.expectEqual(
         account_contract.AccountState.authenticated,
         settled.state,
@@ -1136,10 +1098,8 @@ test "restored login drives automatic key and model defaults end to end" {
         .expected_catalog_generation = settled.catalog_generation,
         .expected_execution_generation = settled.execution_generation,
     } });
-    std.debug.print("manual select accepted={}\n", .{manual.accepted});
     try std.testing.expect(manual.accepted);
     const switched = pumpUntilReady(&coordinator, &account_runtime, "manual");
-    dumpView("manual-settled", switched);
     try std.testing.expectEqual(
         account_contract.CatalogState.ready,
         switched.catalog_state,
@@ -1248,7 +1208,6 @@ test "relaunch with persisted selection restores the saved execution" {
         );
         coordinator.start(fake_platform.services());
         const settled = pumpUntilReady(&coordinator, &account_runtime, "boot2");
-        dumpView("boot2-settled", settled);
         try std.testing.expectEqual(
             account_contract.AccountState.authenticated,
             settled.state,
@@ -1269,13 +1228,8 @@ test "relaunch with persisted selection restores the saved execution" {
                 .expected_execution_generation = settled.execution_generation,
             },
         });
-        std.debug.print(
-            "boot2 manual select accepted={} err={s}\n",
-            .{ manual.accepted, @tagName(manual.error_code) },
-        );
         try std.testing.expect(manual.accepted);
         const switched = pumpUntilReady(&coordinator, &account_runtime, "boot2-manual");
-        dumpView("boot2-manual-settled", switched);
         try std.testing.expectEqual(
             account_contract.CatalogState.ready,
             switched.catalog_state,
@@ -1339,7 +1293,6 @@ test "broken first key parks the catalog and a manual switch recovers" {
 
     // The automatic continuation picks key 1 whose model catalog fails.
     const parked = pumpUntilReady(&coordinator, &account_runtime, "broken");
-    dumpView("broken-settled", parked);
     try std.testing.expectEqual(
         account_contract.AccountState.authenticated,
         parked.state,
@@ -1352,13 +1305,8 @@ test "broken first key parks the catalog and a manual switch recovers" {
         .expected_catalog_generation = parked.catalog_generation,
         .expected_execution_generation = parked.execution_generation,
     } });
-    std.debug.print(
-        "broken manual select accepted={} err={s}\n",
-        .{ manual.accepted, @tagName(manual.error_code) },
-    );
     try std.testing.expect(manual.accepted);
     const recovered = pumpUntilReady(&coordinator, &account_runtime, "recover");
-    dumpView("recover-settled", recovered);
     try std.testing.expectEqual(
         account_contract.CatalogState.ready,
         recovered.catalog_state,

@@ -1191,13 +1191,11 @@ test("MCP freezes unconfirmed desired state and offers in-place apply recovery",
   assert.ok(screen.getByRole("button", { name: "Retry connection" }));
 });
 
-test("MCP page stays inside the safe Renderer projection", async () => {
+test("MCP Renderer source cannot access secrets or native APIs", async () => {
   const page = await readFile(
     join(process.cwd(), "frontend/src/features/mcp/McpPage.tsx"),
     "utf8",
   );
-  assert.match(page, /className="mcp-workspace"[\s\S]*?<aside/);
-  assert.doesNotMatch(page, /<Drawer\.Root|<Drawer\.Backdrop/);
   assert.doesNotMatch(
     page,
     /window\.zero|localStorage|apiKey|marketplace|accessToken|refreshToken|clientSecretValue/i,

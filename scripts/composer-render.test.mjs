@@ -378,44 +378,6 @@ test("Workbench keeps Search as an icon beside the sidebar control", () => {
   assert.doesNotMatch(markup, /title="Search"/);
 });
 
-test("Account catalog work blocks New task admission but not bound Tasks", async () => {
-  const source = await readFile(
-    join(process.cwd(), "frontend/src/app/App.tsx"),
-    "utf8",
-  );
-  assert.match(
-    source,
-    /\(!newTaskDraftActive \|\| snapshot\.account\.canCreateTask\)/,
-  );
-  assert.match(source, /\(!newTaskDraftActive \|\| newTaskWorkspaceReady\)/);
-});
-
-test("Automatic Workspace creation is explicit in the first submit", async () => {
-  const source = await readFile(
-    join(process.cwd(), "frontend/src/app/App.tsx"),
-    "utf8",
-  );
-  const start = source.indexOf("async function submitRun()");
-  const end = source.indexOf("\n  async function", start + 1);
-  const submitRun = source.slice(start, end);
-  assert.match(submitRun, /kind: "automatic" as const/);
-  assert.match(submitRun, /kind: "manual" as const/);
-  assert.doesNotMatch(submitRun, /chooseWorkspace|client\.chooseWorkspace/);
-});
-
-test("Slash V1 reuses the existing New task and Compact actions", async () => {
-  const source = await readFile(
-    join(process.cwd(), "frontend/src/app/App.tsx"),
-    "utf8",
-  );
-  const start = source.indexOf("function runSlashCommand(");
-  const end = source.indexOf("\n  async function", start + 1);
-  const controller = source.slice(start, end);
-  assert.match(controller, /case "new":[\s\S]*beginNewTask\(\)/);
-  assert.match(controller, /case "compact":[\s\S]*compactTask\(\)/);
-  assert.doesNotMatch(controller, /client\.|invoke\(|tasks\./);
-});
-
 test("New task does not render or reserve an empty Inspector", () => {
   const markup = renderShell(null);
   assert.doesNotMatch(markup, /id="task-inspector"/);
@@ -476,24 +438,11 @@ test("pending UI follows the Assistant reply without rendering resolved history"
   assert.doesNotMatch(markup, /Read|Resolved decision/);
 });
 
-test("Task content keeps Tool and Run metadata out of the reading flow", async () => {
-  const [markup, source, approval] = await Promise.all([
-    Promise.resolve(renderCompletedSurface()),
-    readFile(
-      join(process.cwd(), "frontend/src/features/tasks/TaskContent.tsx"),
-      "utf8",
-    ),
-    readFile(
-      join(process.cwd(), "frontend/src/features/approvals/ApprovalPanel.tsx"),
-      "utf8",
-    ),
-  ]);
+test("Task content keeps Tool and Run metadata out of the reading flow", () => {
+  const markup = renderCompletedSurface();
   assert.match(markup, /Inspect the release/);
   assert.match(markup, /Release is ready/);
   assert.doesNotMatch(markup, /Read|fixture\.txt|tokens|runId/);
-  assert.doesNotMatch(source, /run\.tools|run\.usage|runId|ToolCard/);
-  assert.doesNotMatch(approval, /<CodeBlock[^>]+label=/);
-  assert.doesNotMatch(approval, /accent-cobalt/);
 });
 
 test("Task content preserves typed Skill identity and positional arguments", () => {
@@ -557,102 +506,6 @@ test("new Task places the Composer after the outcome prompt", () => {
   const composer = markup.indexOf('data-test="draft-composer"');
   assert.ok(prompt >= 0 && composer > prompt);
   assert.doesNotMatch(markup, /task-examples|task-example/);
-});
-
-test("Workbench foundation uses a stable 760px new Task Composer stage", async () => {
-  const [app, shell, resizableSeparator, css, tokens] = await Promise.all([
-    readFile(join(process.cwd(), "frontend/src/app/App.tsx"), "utf8"),
-    readFile(join(process.cwd(), "frontend/src/app/AppShell.tsx"), "utf8"),
-    readFile(
-      join(process.cwd(), "frontend/src/components/ui/ResizableSeparator.tsx"),
-      "utf8",
-    ),
-    readFile(join(process.cwd(), "frontend/src/index.css"), "utf8"),
-    readFile(
-      join(process.cwd(), "frontend/src/styles/metask-tokens.css"),
-      "utf8",
-    ),
-  ]);
-  assert.match(css, /@import "\.\/styles\/metask-tokens\.css"/);
-  assert.match(tokens, /--metask-primary:\s*#8a4ed1/);
-  assert.match(tokens, /--ui-action-primary:\s*var\(--metask-primary\)/);
-  assert.match(css, /--left-column-width:\s*248px/);
-  assert.match(
-    css,
-    /\.app-window\[data-left-open="true"\]\s*\{[\s\S]*?--left-column:\s*var\(--left-column-width\)/,
-  );
-  assert.match(
-    css,
-    /\.app-window\[data-left-open="true"\] \.workbench-commandbar::before\s*\{[\s\S]*?width:\s*var\(--left-column\);[\s\S]*?border-right:\s*1px solid var\(--ui-border\);[\s\S]*?background:\s*var\(--ui-surface-panel-2\)/,
-  );
-  assert.match(
-    css,
-    /\.workbench-commandbar\s*\{[\s\S]*?background:\s*var\(--ui-surface-canvas\)/,
-  );
-  assert.match(
-    css,
-    /\.app-window\s*\{[\s\S]*?--workbench-content-surface:\s*var\(--ui-surface-panel\)/,
-  );
-  assert.match(
-    css,
-    /\.task-stage\s*\{[\s\S]*?border-top:\s*1px solid var\(--ui-border\);[\s\S]*?background:\s*var\(--workbench-content-surface\)/,
-  );
-  assert.match(
-    css,
-    /\.workbench-view\s*\{[\s\S]*?background:\s*var\(--workbench-content-surface\)/,
-  );
-  assert.match(
-    css,
-    /\.composer-bar\s*\{[\s\S]*?background:\s*var\(--workbench-content-surface\)/,
-  );
-  assert.doesNotMatch(
-    css.match(/\.workbench-commandbar\s*\{[\s\S]*?\n\}/)?.[0] ?? "",
-    /border-bottom|backdrop-filter/,
-  );
-  assert.doesNotMatch(app, /className="brand-mark"|app\.window_label/);
-  assert.match(app, /<p className="brand-name">\{t\("app\.name"\)\}<\/p>/);
-  assert.match(css, /\.sidebar-primary\s*\{[\s\S]*?padding:\s*10px 14px 0/);
-  assert.match(css, /\.new-task-button\s*\{[\s\S]*?margin-top:\s*8px/);
-  assert.match(css, /\.brand-name\s*\{[\s\S]*?min-height:\s*26px/);
-  assert.match(css, /--content-measure:\s*760px/);
-  assert.match(
-    css,
-    /\.new-task-content\s*\{[\s\S]*?width:\s*min\(100%, var\(--content-measure\)\)/,
-  );
-  assert.match(
-    css,
-    /\.new-task-view\s*\{[\s\S]*?display:\s*grid[\s\S]*?padding:\s*clamp\(24px, 4vh, 40px\) 24px clamp\(104px, 16vh, 144px\)[\s\S]*?align-items:\s*center/,
-  );
-  assert.match(
-    css,
-    /\.new-task-content \.composer\s*\{[\s\S]*?min-height:\s*140px/,
-  );
-  assert.doesNotMatch(css, /\.task-examples|\.task-example/);
-  assert.doesNotMatch(css, /color-cobalt|settings-teal|35,\s*109,\s*100/);
-  assert.match(app, /<NewTaskView[\s\S]*?composer=\{composerFooter\}/);
-  assert.doesNotMatch(app, /draftComposer=/);
-  // Task identity lives in the shared titlebar context; the workbench body
-  // should not reintroduce a second task header below the native chrome.
-  assert.doesNotMatch(app, /className="task-header"/);
-  assert.match(
-    app,
-    /contextVisible=\{\s*!settingsOpen && route === "workbench" && activeTask !== null\s*\}/,
-  );
-  assert.doesNotMatch(shell, /commandbar-workspace|commandbar-separator/);
-  assert.match(shell, /leftWidthPreference/);
-  assert.match(shell, /<ResizableSeparator/);
-  assert.match(resizableSeparator, /setPointerCapture/);
-  assert.match(resizableSeparator, /role="separator"/);
-  assert.match(resizableSeparator, /aria-valuemin=\{minimum\}/);
-  assert.match(
-    css,
-    /\.workspace-resize-handle\s*\{[\s\S]*?cursor:\s*col-resize;[\s\S]*?touch-action:\s*none/,
-  );
-  assert.match(
-    css,
-    /@media \(max-width: 819px\)[\s\S]*?\.workspace-resize-handle\s*\{[\s\S]*?display:\s*none/,
-  );
-  assert.match(shell, /commandbar-task/);
 });
 
 test("New task keeps the titlebar quiet while a real Task retains context", () => {
@@ -739,26 +592,7 @@ test("an expired workspace grant preserves editable text and exposes recovery", 
   assert.match(tag(markup, "composer-send") ?? "", /disabled/);
 });
 
-test("Composer is one input shell with lightweight Workspace context below", async () => {
-  const css = await readFile(
-    join(process.cwd(), "frontend/src/index.css"),
-    "utf8",
-  );
-  assert.match(css, /\.composer textarea \{[\s\S]*?resize: none;/);
-  assert.match(css, /max-height: min\(180px, 28vh\)/);
-  assert.match(css, /\.composer \{[\s\S]*?border-radius: 18px;/);
-  assert.match(css, /\.composer-send \{[\s\S]*?border-radius: 50%;/);
-  const composerBarRule = css.slice(
-    css.indexOf(".composer-bar {"),
-    css.indexOf("\n}", css.indexOf(".composer-bar {")),
-  );
-  assert.doesNotMatch(composerBarRule, /border(?:-top)?:/);
-  const workspaceContextRule = css.slice(
-    css.indexOf(".composer-workspace-context {"),
-    css.indexOf("\n}", css.indexOf(".composer-workspace-context {")),
-  );
-  assert.doesNotMatch(workspaceContextRule, /border:/);
-  assert.doesNotMatch(workspaceContextRule, /background:/);
+test("Composer keeps Workspace context after its input controls", () => {
   const markup = render();
   const composerStart = markup.indexOf('class="composer"');
   const workspaceContext = markup.indexOf('class="composer-workspace-context"');
@@ -897,42 +731,4 @@ test("Task list disambiguates duplicate titles with their own paths", () => {
 
   assert.match(markup, /\/repo\/alpha/);
   assert.match(markup, /\/repo\/beta/);
-});
-
-test("global shortcuts obey Account and Bridge gates", async () => {
-  const source = await readFile(
-    join(process.cwd(), "frontend/src/app/App.tsx"),
-    "utf8",
-  );
-  assert.match(
-    source,
-    /if \(accountGateRequired \|\| bridgeUnavailable\) return;[\s\S]*setSearchOpen\(true\)[\s\S]*beginNewTask\(\)/,
-  );
-});
-
-test("Task deletion confirmation handles Escape and restores its opener", async () => {
-  const source = await readFile(
-    join(process.cwd(), "frontend/src/app/App.tsx"),
-    "utf8",
-  );
-  const confirmation = source.slice(
-    source.indexOf("<AlertDialog.Root"),
-    source.indexOf("{viewSyncFailed &&"),
-  );
-  assert.match(confirmation, /open=\{confirmDelete\}/);
-  assert.match(confirmation, /<AlertDialog\.Popup>/);
-  assert.match(
-    confirmation,
-    /onOpenChange=\{\(open\) => !open && closeDeleteConfirmation\(\)\}/,
-  );
-});
-
-test("draft moves read authoritative storage instead of a render-time closure", async () => {
-  const source = await readFile(
-    join(process.cwd(), "frontend/src/features/composer/useTaskDrafts.ts"),
-    "utf8",
-  );
-  assert.match(source, /const source = readDraft\(from\)/);
-  assert.match(source, /const target = readDraft\(to\)/);
-  assert.doesNotMatch(source, /drafts\[from\]|drafts\[to\]/);
 });

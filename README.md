@@ -70,7 +70,7 @@ macOS 的 Apple Development identity 只需在每台开发机选择一次；`npm
 需要验证未 staged candidate 时，可运行：
 
 ```bash
-AGENTCORE_BUNDLE_ROOT=/absolute/path/to/bundle node scripts/run-agentcore-probe.mjs
+AGENTCORE_BUNDLE_ROOT=/absolute/path/to/bundle node scripts/run-agentcore-restore-probe.mjs
 ```
 
 probe 使用临时 source-free SDK consumer，不进入正式产品 build graph。详细规则见 [AgentCore ABI 消费合同](docs/agentcore-abi-v1.md)和 [AgentCore 集成契约](docs/agentcore-integration.md)。

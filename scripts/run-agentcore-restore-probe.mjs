@@ -23,7 +23,9 @@ const repositoryRoot = path.resolve(
 );
 const [mode] = process.argv.slice(2);
 if (process.argv.length > 3 || (mode !== undefined && mode !== "--staged"))
-  throw new Error("usage: node scripts/run-agentcore-probe.mjs [--staged]");
+  throw new Error(
+    "usage: node scripts/run-agentcore-restore-probe.mjs [--staged]",
+  );
 const bundleRoot =
   mode === "--staged"
     ? path.join(repositoryRoot, ".agentcore", "bundle")
@@ -41,7 +43,9 @@ console.log(
   `verified AgentCore ${bundle.manifest.version} ABI ${bundle.manifest.contract.binary_abi_version} revision ${bundle.manifest.contract.binary_abi_revision}`,
 );
 
-const scratch = await mkdtemp(path.join(tmpdir(), "metawork-agentcore-probe-"));
+const scratch = await mkdtemp(
+  path.join(tmpdir(), "metawork-agentcore-restore-probe-"),
+);
 try {
   const zigConsumerRoot = path.join(scratch, "zig-consumer");
   await mkdir(zigConsumerRoot);
@@ -53,7 +57,7 @@ try {
   await writeFile(
     path.join(zigConsumerRoot, "build.zig.zon"),
     `.{
-    .name = .agentcore_candidate_probe,
+    .name = .agentcore_restore_probe,
     .fingerprint = 0x1c95480a301cfef9,
     .version = "0.0.0",
     .minimum_zig_version = "0.16.0",
@@ -82,11 +86,11 @@ pub fn build(b: *std.Build) void {
     });
     consumer.addImport("metask_agentcore", agentcore);
     const executable = b.addExecutable(.{
-        .name = "metawork-agentcore-candidate-probe",
+        .name = "metawork-agentcore-restore-probe",
         .root_module = consumer,
     });
     const run = b.addRunArtifact(executable);
-    b.step("run", "Discover AgentCore through its official Zig package").dependOn(&run.step);
+    b.step("run", "Probe AgentCore checkpoint restore").dependOn(&run.step);
 }
 `,
   );
@@ -116,7 +120,7 @@ pub fn build(b: *std.Build) void {
     ],
     {
       cwd: zigConsumerRoot,
-      label: "source-free AgentCore Zig package consumer",
+      label: "isolated AgentCore restore probe",
     },
   );
   await validateAgentCoreBundle(bundle.root, {

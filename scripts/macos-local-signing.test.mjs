@@ -52,7 +52,7 @@ test("local signing reads the existing Native product identity", () => {
 test("distribution archive metadata comes from the Native product manifest", () => {
   assert.deepEqual(localPackageMetadata, {
     displayName: "MetaWork",
-    version: "0.1.0",
+    version: "0.1.1",
   });
   assert.deepEqual(
     parseNativePackageMetadata(

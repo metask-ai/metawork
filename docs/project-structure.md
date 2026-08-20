@@ -12,7 +12,7 @@
 - Renderer Bridge wire 与运输语义以 [Renderer Bridge 合同](renderer-bridge-contract.md) 为准；
 - AgentCore 生命周期以 [AgentCore 集成契约](agentcore-integration.md) 为准；
 - UI 行为以 [Workbench UI 设计](workbench-ui-design.md) 为准；
-- 验证状态与入口以 [验证规范](validation.md) 为准。
+- 测试归属、验证状态与入口以 [验证规范](validation.md) 为准。
 
 本文不预测尚不存在的文件，不为未来 capability 预建空目录，也不记录已经完成的迁移步骤。结构变化只有在真实职责或不变量形成后才进入本文。
 
@@ -236,16 +236,13 @@ automation -> bridge, account contract, Native SDK
 
 ## 6. 测试与构建资产
 
-- 正式 Zig test graph 由 `build.zig` 注册，产品 module 与其测试使用相同依赖边界；
-- `tests/agent/` 验证 Session/callback/quiescence，`tests/workbench/` 验证 Executor/admission/shutdown，`tests/integration/` 只保留跨边界竞态；
-- `tests/support/` 的 fake 和 fixture 不得升级为产品 owner；
-- `scripts/` 可以编排真实应用、Renderer runtime 和 artifact 校验，但不能建立测试专用产品协议；
+本节只定义测试与构建资产的目录归属；测试层、失败模式、默认入口、probe 生命周期和证据纪律由[验证规范](validation.md#持续回归)定义，变更时实际执行哪些检查由[仓库执行规则](../AGENTS.md#验证规则)定义。
+
+- 产品 module 的 inline test 与实现共置并使用相同依赖边界；正式 external Zig test root 置于 `tests/`，由 `build.zig` 注册；
+- `tests/agent/`、`tests/workbench/` 分别归对应 owner，`tests/integration/` 只容纳无法归属于单一 owner 的跨边界失败，`tests/support/` 只提供 test-only fake 和 fixture，不形成产品 owner；
+- `scripts/*.test.mjs` 是默认 Node/Renderer 回归资产，由 `npm test` 自动发现；其他 `scripts/` 可以编排真实应用、平台验收和 artifact 工具，但不能建立测试专用产品协议；
 - 根 `package.json` 只保留 `dev`、`check`、`test`、`format`、`format:check`、`build:debug`、`build:release` 与 `package:macos` 八个工程入口，不登记内部步骤、单项测试、probe 或平台验收 harness；macOS `dev` 只使用显式选择的 Apple Development identity，`package:macos` 只使用唯一有效的 Developer ID Application identity 和钥匙串 `metawork-notary` profile，并要求 notarization `Accepted`、staple、Gatekeeper 与最终 ZIP 完整性全部通过；
-- `scripts/*.test.mjs` 是默认 `npm test` 自动发现的长期回归；新增文件必须绑定当前可观察不变量，不得用该后缀保存一次性诊断；
-- 平台验收 harness 只有在绑定当前能力缺口、真实失败模式和明确删除条件时才进入 active tree，并由验证规范直接引用；一次性 audit、仅为单次证据服务的截图生成器和问题定位 probe 在完成验收后删除，Git 历史负责保存一次性事实；
 - `build_support/agentcore_bundle.zig` 与 target lock 是正式信任边界；candidate probe 只使用临时 source-free SDK consumer；
-- `app.zon`、Zig commands 和 TypeScript commands 的完整目录必须由集合等式测试保持一致；
-- release artifact 必须继续证明 automation credential、origin 和证据 token 被裁掉。
 
 ## 7. 结构变更规则
 
@@ -253,5 +250,5 @@ automation -> bridge, account contract, Native SDK
 - 类型跟随拥有其不变量的模块，不建立 `models`、`common`、`helpers`、`services` 或 `managers` 垃圾桶；
 - 同一事实只在一个 source of truth 定义，目录文档不复制完整产品或生命周期论证；
 - 删除 owner 时同步删除 build graph、allowlist、测试入口和文档引用，不把废弃实现移动到归档目录；
-- 目录调整必须保持 Bridge contract、lifecycle、event pump、snapshot、release isolation 和真实 vertical path 的对应验证；
+- 目录调整不得以搬迁为由改变 source of truth、不变量或 test graph 接线；确需改变时按对应 owner 合同和验证规则一并收口；
 - 不增加 Native SDK adapter、AgentCore facade、平行 Renderer、平行协议或 source dependency fallback。
