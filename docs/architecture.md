@@ -13,12 +13,13 @@
 | Renderer    | React + Tailwind                | 唯一正式 UI；运行于 Application 通过 Native SDK 托管的 System WebView |
 | Bridge      | Zig                             | Renderer Bridge revision 1 的协议、验证和 ProductDelivery 边界        |
 | Product     | Zig                             | MetaWork 产品事实、产品行为和恢复语义的唯一边界                       |
+| Storage     | Zig + SQLite                    | MetaWork-owned、无业务语义的 SQL 基础能力与直接 SQLite 后端            |
 | AgentCore   | Metask AgentCore library bundle | 外部执行依赖；独立构建和发布，MetaWork 只消费 canonical bundle        |
 | Native SDK  | Native SDK                      | 外部桌面依赖；由 Application 消费                                     |
 
 正式主路径不采用 Tauri + Rust，不建立第二套 Renderer，不以 PTY、xterm、终端字节流或 Provider SSE 作为 Agent UI 协议，不复制 AgentCore ABI 或实现源码，也不建立 Native SDK Adapter、通用 Desktop Interface 或可替换框架抽象。
 
-Application、Renderer、Bridge、Product 与 Agent 是 MetaWork-owned 并列逻辑边界；Metask AgentCore 与 Native SDK 是外部依赖。Application 由 `src/app.zig` 和 `src/app/` 实现：代码组合类型名为 `App`，`app.zig` 是 composition root，具名适配、resolver、store 生命周期和跨 owner 用例编排位于 `app/`。Application 组装 Bridge、Product 与 Agent，消费 Native SDK 的原生应用生命周期、窗口和 System WebView 能力，并托管 React Renderer；它不是业务 owner，也不形成统一 facade。
+Application、Renderer、Bridge、Product、Agent 与 Storage 是 MetaWork-owned 并列逻辑边界；Metask AgentCore 与 Native SDK 是外部依赖。Application 由 `src/app.zig` 和 `src/app/` 实现：代码组合类型名为 `App`，`app.zig` 是 composition root，具名适配、resolver、store 生命周期和跨 owner 用例编排位于 `app/`。Application 组装 Bridge、Product 与 Agent，消费 Native SDK 的原生应用生命周期、窗口和 System WebView 能力，并托管 React Renderer；它不是业务 owner，也不形成统一 facade。Storage 当前只进入独立测试图，尚未由 Application 或任何 Product owner 消费。
 
 原生窗口机制由 Application 通过 Native SDK 执行；React 只负责 WebUI。涉及产品语义的校验和决策归对应 owner；Application coordinator 只执行 owner 已定义的跨 owner 提交与生命周期顺序，不复制 policy 或持有领域状态。Renderer 可以呈现一体化标题/命令栏，但原生窗口行为、系统资源和真实状态始终属于 Application。菜单、托盘、全局快捷键或其他平台 capability 位于同一边界，不代表当前版本已经开放；实际可用性仍以能力合同与验证状态为准。
 
@@ -135,6 +136,12 @@ Runtime API 已提供且可用时，绕过它调用低层函数属于架构违�
 `secure_input` 是与具体产品用途无关的二级兼容 seam，只补 Native SDK 0.9.2 缺失的原生安全文本输入 Runtime capability。公共 contract 只接受有界 UTF-8 标题、说明和确认/取消文案，以及调用方拥有的可清零输出缓冲区；只返回提交长度或取消，不接受产品对象、credential slot、Bridge DTO 或系统 handle。Windows 平台实现消费共享 startup HWND 作为 modal owner，macOS 平台实现使用 `NSSecureTextField`；两端都只允许绑定线程调用、拒绝自身重入、禁止截断，并在取消和失败路径清零 MetaWork-owned plaintext storage。平台控件和 OS framework 的内部副本不属于 MetaWork 可证明清零的内存。同步 capture 会运行平台 modal loop 并允许该线程继续派发应用事件，因此任何正式调用路径都必须通过“prompt 打开期间后台事件持续处理且不发生未声明状态机重入”的真实平台 gate；在证据完成前不得把编译成功写成平台可用结论。Native SDK 正式安全输入 API 经 Windows/macOS 分别验收后，原位替换并删除对应平台实现、低层 allowlist 和专用验证。
 
 获准兼容 seam 的当前文件、SDK 缺口、目标平台与删除条件由 [工程结构与所有权](project-structure.md)映射，合规状态和平台证据由 [验证规范](validation.md)维护；与 Renderer 交换的精确 wire 仍只由 [Renderer Bridge 合同](renderer-bridge-contract.md)定义。未登记的低层调用一律不构成兼容能力。
+
+### 3.6 Storage
+
+Storage 是 MetaWork-owned、无业务语义的基础设施边界，拥有后端无关的 SQL value、statement、query/exec outcome、limits、migration mechanism，以及当前直接 SQLite 后端的连接、事务、错误映射和 engine profile。SQLite C API 只存在于 concrete backend；公共 SQL contract 不依赖 Product、Application、Native SDK 或 SQLite 类型。
+
+Product owner 仍独占自己的 schema、migration 内容、health、恢复、并发和 durable boundary 决策；Application 未来只负责创建 concrete backend、借出 capability 和安排 shutdown。当前 Storage foundation 不解析产品数据目录、不创建 production `app.db`、不接入任何现有 persistence，也不改变 Workbench 单实例锁或恢复合同。直接 SQLite 是正式基础后端而非 Native SDK compatibility seam；未来只有在 Native SDK relational surface 满足同一 conformance contract 时，才可原位替换访问后端，并继续使用同一个 SQLite 文件。
 
 ## 4. 跨模块合同
 

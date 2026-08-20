@@ -5,6 +5,7 @@ node_modules/
 frontend/dist/
 zig-cache/
 .zig-cache/
+zig-pkg/
 zig-out/
 .DS_Store
 *.log
