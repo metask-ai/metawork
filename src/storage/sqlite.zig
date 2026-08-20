@@ -80,6 +80,31 @@ const Connection = struct {
     }
 };
 
+const ReceiverDispatch = struct {
+    mutex: std.atomic.Mutex = .unlocked,
+    thread_id: ?std.Thread.Id = null,
+
+    fn activeOnThread(self: *ReceiverDispatch, thread_id: std.Thread.Id) bool {
+        lock(&self.mutex);
+        defer self.mutex.unlock();
+        return self.thread_id == thread_id;
+    }
+
+    fn enter(self: *ReceiverDispatch, thread_id: std.Thread.Id) void {
+        lock(&self.mutex);
+        defer self.mutex.unlock();
+        std.debug.assert(self.thread_id == null);
+        self.thread_id = thread_id;
+    }
+
+    fn leave(self: *ReceiverDispatch, thread_id: std.Thread.Id) void {
+        lock(&self.mutex);
+        defer self.mutex.unlock();
+        std.debug.assert(self.thread_id == thread_id);
+        self.thread_id = null;
+    }
+};
+
 /// Concrete owner. Keep this value at one stable address after open; a
 /// capability returned by capability() borrows this address.
 pub const Database = struct {
@@ -88,6 +113,7 @@ pub const Database = struct {
     reader: ?Connection = null,
     writer_mutex: std.atomic.Mutex = .unlocked,
     reader_mutex: std.atomic.Mutex = .unlocked,
+    receiver_dispatch: ReceiverDispatch = .{},
     schema_version: u32 = 0,
 
     pub fn open(
@@ -161,6 +187,8 @@ pub const Database = struct {
         params: []const sql.Value,
         receiver: sql.RowReceiver,
     ) sql.QueryOutcome {
+        if (self.receiver_dispatch.activeOnThread(std.Thread.getCurrentId()))
+            return .misuse;
         const connection, const mutex = if (self.reader) |*reader|
             .{ reader, &self.reader_mutex }
         else
@@ -198,7 +226,12 @@ pub const Database = struct {
                     .statement = statement,
                     .column_count = column_count,
                 };
-                receiver.receive(row_context.row());
+                const receiver_thread_id = std.Thread.getCurrentId();
+                self.receiver_dispatch.enter(receiver_thread_id);
+                {
+                    defer self.receiver_dispatch.leave(receiver_thread_id);
+                    receiver.receive(row_context.row());
+                }
                 row_count += 1;
             },
             else => |result| return queryFailure(sqlFailure(result)),
@@ -209,6 +242,8 @@ pub const Database = struct {
         self: *Database,
         statements: []const sql.Statement,
     ) sql.ExecOutcome {
+        if (self.receiver_dispatch.activeOnThread(std.Thread.getCurrentId()))
+            return .misuse;
         lock(&self.writer_mutex);
         defer self.writer_mutex.unlock();
 
@@ -688,6 +723,33 @@ const test_migrations = [_]sql.Migration{.{
     ,
 }};
 
+const CrossDatabaseObservation = struct {
+    primary: sql.Database,
+    secondary: sql.Database,
+    secondary_outcome: sql.QueryOutcome = .misuse,
+    indirect_primary_outcome: sql.QueryOutcome = .ok,
+
+    fn receivePrimary(context: *anyopaque, _: sql.Row) void {
+        const self: *CrossDatabaseObservation = @ptrCast(@alignCast(context));
+        self.secondary_outcome = self.secondary.query(
+            "SELECT 1",
+            &.{},
+            .{ .context = self, .receive_fn = receiveSecondary },
+        );
+    }
+
+    fn receiveSecondary(context: *anyopaque, _: sql.Row) void {
+        const self: *CrossDatabaseObservation = @ptrCast(@alignCast(context));
+        self.indirect_primary_outcome = self.primary.query(
+            "SELECT 1",
+            &.{},
+            .{ .context = self, .receive_fn = ignore },
+        );
+    }
+
+    fn ignore(_: *anyopaque, _: sql.Row) void {}
+};
+
 test "memory database uses one connection and passes backend conformance" {
     var database = try Database.open(
         std.testing.allocator,
@@ -697,6 +759,54 @@ test "memory database uses one connection and passes backend conformance" {
     defer database.deinit();
     try std.testing.expectEqual(@as(u32, 1), database.schemaVersion());
     try conformance.expectBackendContract(database.capability());
+}
+
+test "receiver may call another database but cannot indirectly reenter its own" {
+    var primary = try Database.open(
+        std.testing.allocator,
+        .memory,
+        &test_migrations,
+    );
+    defer primary.deinit();
+    var secondary = try Database.open(std.testing.allocator, .memory, &.{});
+    defer secondary.deinit();
+
+    var observed: CrossDatabaseObservation = .{
+        .primary = primary.capability(),
+        .secondary = secondary.capability(),
+    };
+    try std.testing.expectEqual(
+        sql.QueryOutcome.ok,
+        observed.primary.query(
+            "SELECT 1",
+            &.{},
+            .{ .context = &observed, .receive_fn = CrossDatabaseObservation.receivePrimary },
+        ),
+    );
+    try std.testing.expectEqual(sql.QueryOutcome.ok, observed.secondary_outcome);
+    try std.testing.expectEqual(
+        sql.QueryOutcome.misuse,
+        observed.indirect_primary_outcome,
+    );
+}
+
+test "receiver dispatch identity distinguishes other threads" {
+    var dispatch: ReceiverDispatch = .{};
+    const current = std.Thread.getCurrentId();
+    dispatch.enter(current);
+    try std.testing.expect(dispatch.activeOnThread(current));
+
+    var active_on_other_thread = true;
+    const thread = try std.Thread.spawn(.{}, struct {
+        fn run(receiver_dispatch: *ReceiverDispatch, active: *bool) void {
+            active.* = receiver_dispatch.activeOnThread(std.Thread.getCurrentId());
+        }
+    }.run, .{ &dispatch, &active_on_other_thread });
+    thread.join();
+    try std.testing.expect(!active_on_other_thread);
+
+    dispatch.leave(current);
+    try std.testing.expect(!dispatch.activeOnThread(current));
 }
 
 test "file database persists rows and migration version across reopen" {
@@ -788,6 +898,29 @@ test "failed migration rolls back schema and user version" {
     );
     defer database.deinit();
     try std.testing.expectEqual(@as(u32, 1), database.schemaVersion());
+}
+
+test "user version outside the Storage namespace is corrupt metadata" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var directory_storage: [std.fs.max_path_bytes]u8 = undefined;
+    const directory_len = try temporary.dir.realPath(
+        std.testing.io,
+        &directory_storage,
+    );
+    const high_path = try std.fs.path.join(
+        std.testing.allocator,
+        &.{ directory_storage[0..directory_len], "high-version.db" },
+    );
+    defer std.testing.allocator.free(high_path);
+    const negative_path = try std.fs.path.join(
+        std.testing.allocator,
+        &.{ directory_storage[0..directory_len], "negative-version.db" },
+    );
+    defer std.testing.allocator.free(negative_path);
+
+    try expectCorruptUserVersion(high_path, "PRAGMA user_version=10000;");
+    try expectCorruptUserVersion(negative_path, "PRAGMA user_version=-1;");
 }
 
 test "file engine profile is observable and protected" {
@@ -998,4 +1131,18 @@ fn expectIntegerPragma(
     try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(statement));
     try std.testing.expectEqual(expected, c.sqlite3_column_int64(statement, 0));
     try std.testing.expectEqual(c.SQLITE_DONE, c.sqlite3_step(statement));
+}
+
+fn expectCorruptUserVersion(path: []const u8, pragma: [*:0]const u8) !void {
+    const path_z = try std.testing.allocator.dupeZ(u8, path);
+    defer std.testing.allocator.free(path_z);
+    {
+        var connection = try Connection.open(path_z);
+        defer connection.close();
+        try connection.execRaw(pragma);
+    }
+    try std.testing.expectError(
+        error.Corrupt,
+        Database.open(std.testing.allocator, .{ .file = path }, &.{}),
+    );
 }

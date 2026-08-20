@@ -12,6 +12,8 @@ pub const Limits = struct {
     pub const exec_parameter_bytes: usize = 8 * 1024 * 1024;
     pub const result_rows: usize = 8 * 1024;
     pub const result_bytes: usize = 8 * 1024 * 1024;
+    /// Largest version in the Storage-owned schema metadata namespace.
+    /// A persisted user_version outside 0...migrations is corrupt metadata.
     pub const migrations: usize = 9999;
     pub const migration_bytes: usize = 1024 * 1024;
 };
@@ -89,6 +91,12 @@ pub const ExecOutcome = enum {
 
 /// Borrowed capability. The concrete backend instance and every resource it
 /// owns must outlive this value and all synchronous calls made through it.
+///
+/// A RowReceiver may call another Database, but must not directly or
+/// indirectly call query or exec on the Database currently dispatching it.
+/// An otherwise valid nested call returns misuse. Calls from other threads are
+/// coordinated by the backend without reporting local contention as busy; the
+/// contract does not promise whether those calls wait or run concurrently.
 pub const Database = struct {
     context: *anyopaque,
     query_fn: *const fn (

@@ -198,6 +198,8 @@ pub const Row = struct {
 - `Row`、column name、`TEXT` 和 `BLOB` 只在同步 receiver 调用内有效；
 - receiver 外需要保留的数据由调用方深拷贝；
 - receiver 不得保存 row、slice 或 backend context；
+- receiver 可以调用其他 `Database`，但不得直接或间接调用当前正在派发它的同一个 `Database`；通过正常参数校验的 nested `query`/`exec` 返回 `misuse`，外层 query 继续按自身结果完成；
+- 同一 `Database` 的异线程调用由 backend 安全协调，但合同不承诺等待或并行；进程内协调不映射为 `busy`，file/memory 的连接拓扑不形成不同的公开再入语义；
 - callback 不跨线程异步派发；
 - 结果超过合同上限时整个 query 返回 `rejected`，不得截断后伪装成功；
 - 大结果由调用方显式使用 `LIMIT` 与 keyset pagination，Storage 不隐式分页或缓存。
@@ -228,6 +230,8 @@ pub const ExecOutcome = enum {
 ```
 
 open/migration 使用独立的 typed error/outcome，至少区分路径或权限失败、busy、corrupt、migration failed 和 newer schema version。
+
+`user_version` 的 Storage metadata namespace 固定为 `0...9999`：范围内高于调用方 migration target 的值是合法但当前未知的 `VersionUnknown`；负数或超出 namespace 的值违反 Storage metadata invariant，返回 `Corrupt`。
 
 后端不把错误折叠为 bool，不自动重试，不把失败 query 解释为空结果，也不把失败 exec 解释为成功。`corrupt` 是数据库级事实；Storage 不承诺旧 frame store 的“单记录损坏隔离”，具体 health 与 mutation fence 由使用该 schema 的 Product owner 定义。
 

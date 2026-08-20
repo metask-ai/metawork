@@ -74,6 +74,19 @@ pub fn expectBackendContract(database: sql.Database) !void {
     );
     try std.testing.expectEqual(@as(i64, 0), count.value);
 
+    var reentry = ReentryObservation{ .database = database };
+    try std.testing.expectEqual(
+        sql.QueryOutcome.ok,
+        database.query(
+            "SELECT id FROM storage_conformance LIMIT 1",
+            &.{},
+            .{ .context = &reentry, .receive_fn = ReentryObservation.receive },
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), reentry.rows);
+    try std.testing.expectEqual(sql.QueryOutcome.misuse, reentry.query_outcome);
+    try std.testing.expectEqual(sql.ExecOutcome.misuse, reentry.exec_outcome);
+
     try std.testing.expectEqual(
         sql.QueryOutcome.misuse,
         database.query(
@@ -98,6 +111,27 @@ const BackendObservation = struct {
         self.valid = self.valid and std.mem.eql(u8, row.value(3).text, "ready");
         self.valid = self.valid and std.mem.eql(u8, row.value(4).blob, "\x00\xff");
         self.valid = self.valid and row.value(5) == .null_value;
+    }
+};
+
+const ReentryObservation = struct {
+    database: sql.Database,
+    rows: usize = 0,
+    query_outcome: sql.QueryOutcome = .ok,
+    exec_outcome: sql.ExecOutcome = .ok,
+
+    fn receive(context: *anyopaque, _: sql.Row) void {
+        const self: *ReentryObservation = @ptrCast(@alignCast(context));
+        self.rows += 1;
+        var ignored = IntegerObservation{};
+        self.query_outcome = self.database.query(
+            "SELECT 1",
+            &.{},
+            .{ .context = &ignored, .receive_fn = IntegerObservation.receive },
+        );
+        self.exec_outcome = self.database.exec(&.{.{
+            .sql = "DELETE FROM storage_conformance",
+        }});
     }
 };
 
