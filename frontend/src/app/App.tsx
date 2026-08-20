@@ -1797,10 +1797,14 @@ export default function App() {
         return;
       }
       setConfirmDelete(false);
-      await refreshAfterCommit("task.delete_requested", "operation.task_delete", {
-        scope: "task",
-        taskId,
-      });
+      await refreshAfterCommit(
+        "task.delete_requested",
+        "operation.task_delete",
+        {
+          scope: "task",
+          taskId,
+        },
+      );
     } finally {
       endTaskPendingOperation(scope);
     }

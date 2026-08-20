@@ -303,14 +303,26 @@ test("thinking and response activity use safe localized status labels", () => {
       currentRunPhase: "running",
       runs: [run({ phase: "running", status, outcome: null })],
     });
-    assert.match(renderTaskContent(activityTask, "zh-CN"), new RegExp(`>${expected}<`));
-    assert.match(renderInspector(activityTask, "zh-CN"), new RegExp(`>${expected}<`));
+    assert.match(
+      renderTaskContent(activityTask, "zh-CN"),
+      new RegExp(`>${expected}<`),
+    );
+    assert.match(
+      renderInspector(activityTask, "zh-CN"),
+      new RegExp(`>${expected}<`),
+    );
   }
 
   const waitingModel = task({
     currentRunId: "9",
     currentRunPhase: "running",
-    runs: [run({ phase: "running", status: "private-provider-status", outcome: null })],
+    runs: [
+      run({
+        phase: "running",
+        status: "private-provider-status",
+        outcome: null,
+      }),
+    ],
   });
   assert.match(renderTaskContent(waitingModel, "zh-CN"), />正在等待模型响应</);
   assert.match(renderInspector(waitingModel, "zh-CN"), />正在等待模型响应</);

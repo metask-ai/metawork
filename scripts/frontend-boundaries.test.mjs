@@ -177,7 +177,7 @@ test("Task persistence failure disables mutations without hiding Task history", 
   );
   assert.match(app, /<TaskList[\s\S]*tasks=\{navigableTaskItems\}/);
   assert.match(taskList, /className="task-list-item focus-ring"/);
-  assert.match(taskList, /disabled=\{taskMutationDisabled/);
+  assert.match(taskList, /disabled=\{\s*taskMutationDisabled/);
 });
 
 test("degraded Task history does not create a permanent sidebar alert", async () => {

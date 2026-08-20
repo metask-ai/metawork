@@ -383,19 +383,19 @@ export function ComposerFooter({
               }
               placeholder={
                 closing
-                    ? t("run.placeholder_closing")
-                    : unavailable
-                      ? t(
-                          unavailableReason === "session_recovery_required" ||
-                            unavailableReason ===
-                              "session_recovery_in_progress" ||
-                            unavailableReason === "session_recovery_failed"
-                            ? "run.placeholder_recovery_required"
-                            : "run.placeholder_unavailable",
-                        )
-                      : archived
-                        ? t("run.placeholder_archived")
-                        : t("run.placeholder")
+                  ? t("run.placeholder_closing")
+                  : unavailable
+                    ? t(
+                        unavailableReason === "session_recovery_required" ||
+                          unavailableReason ===
+                            "session_recovery_in_progress" ||
+                          unavailableReason === "session_recovery_failed"
+                          ? "run.placeholder_recovery_required"
+                          : "run.placeholder_unavailable",
+                      )
+                    : archived
+                      ? t("run.placeholder_archived")
+                      : t("run.placeholder")
               }
               onCompositionStart={() => setComposing(true)}
               onCompositionEnd={(event) => {
