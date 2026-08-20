@@ -461,6 +461,8 @@ checkpoint export 与 Session describe 各自维护独立 disposition。export �
 
 Agent sink 同时累计 total bytes、chunk count 与实际 streamed bytes 的 SHA-256。前两者必须与 export result 精确一致；revision 8 未定义 result `digest` 的算法，且真实 canonical bundle 输出与 byte SHA-256 不同，因此产品 content hash 只使用本地 sink 观测值，raw digest 不离开 Agent。该差异记录为上游合同缺口，而不是在 Workbench 复制或猜测算法。
 
+当前产品 checkpoint 上限为总量 64 MiB、单 section 16 MiB、单 string 1 MiB、chunk 256 KiB、message 4096 条和 block 256 个。命中任一上限只使本次 export 以可再生失败收口，不 poison Session；长会话分布仍需持续采样，但不得以放大上限替代证据。
+
 `stream_done` 只表示一次模型流结束，不等于整个 Run 完成。只有 ABI status 与 RunResult 映射完成后才能发布 terminal product state。
 
 ## 12. Credential、Workspace 与工具安全
