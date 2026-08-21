@@ -248,6 +248,29 @@ test("AgentCore SDK access is restricted to Agent modules and the test fixture",
   assert.doesNotMatch(build, /\.addObjectFile\(/);
 });
 
+test("MetaWork Agent capability shaping stays private to Agent", () => {
+  const agentRoot = read("src/agent.zig");
+  const sessionApi = read("src/agent/session.zig");
+  const capabilities = read("src/agent/capabilities.zig");
+  const applicationAndWorkbench = [
+    "src/app.zig",
+    ...zigFiles("src/app/"),
+    "src/workbench.zig",
+    ...zigFiles("src/workbench/"),
+  ]
+    .map(read)
+    .join("\n");
+
+  assert.match(capabilities, /pub const Builtin = enum/);
+  assert.match(capabilities, /\.ask_question => false/);
+  assert.doesNotMatch(agentRoot, /capabilities|builtins|allowed_tools/);
+  assert.doesNotMatch(sessionApi, /allowed_tools|respondAnswers/);
+  assert.doesNotMatch(
+    applicationAndWorkbench,
+    /BuiltinToolProfile|builtin_tool_profile|builtinToolsForProfile|AskUserQuestion/,
+  );
+});
+
 test("all active test roots are connected without test-count assertions", () => {
   const build = read("build.zig");
   const externalTests = zigFiles("tests/").filter(

@@ -249,8 +249,7 @@ pub const PermissionChoice = enum {
     deny_session,
 };
 
-pub const UiResponse = union(enum) {
-    answers: []const []const []const u8,
+pub const UiResponse = struct {
     permission: PermissionChoice,
 };
 
@@ -344,7 +343,6 @@ const SkillReconciliation = struct {
 
 pub const Configuration = struct {
     change_notifier: ChangeNotifier = .{},
-    builtin_tool_profile: ?lifecycle.BuiltinToolProfile = null,
     directories: AppDirectories = .{},
     schedule_timer: ScheduleTimer = .{},
     schedule_persistence: SchedulePersistence = .{},
@@ -1682,10 +1680,9 @@ const CompactRecord = struct {
     checkpoint: CheckpointPostprocess = .{},
 };
 
-const UiRecordKind = enum { ask_question, permission };
+const UiRecordKind = enum { permission };
 
 const UiRecordState = enum {
-    answered,
     allowed_once,
     // Persisted history wire name is retained for existing Task records; the
     // request/response choice exposed to users is now `allow_session`.
@@ -2526,7 +2523,6 @@ pub const Workbench = struct {
     custom_execution_binding: ?CustomExecutionBinding = null,
     model_connection_capabilities: ModelConnectionCapabilities,
     mcp: ?McpProductState = null,
-    builtin_tool_profile: ?lifecycle.BuiltinToolProfile,
     next_workspace_id: u64 = 1,
     next_workspace_recent_order: u64 = 1,
     next_task_id: u64 = 1,
@@ -2785,7 +2781,6 @@ pub const Workbench = struct {
             .canonical_user_home = canonical_user_home,
             .automatic_workspaces = automatic_workspaces,
             .model_connection_capabilities = configuration.model_connections,
-            .builtin_tool_profile = configuration.builtin_tool_profile,
         };
         if (workbench.skill_inventory != null) skill_inventory_owned = false;
         skill_enablement_owned = false;
@@ -4478,10 +4473,6 @@ pub const Workbench = struct {
                 .disabled_skill_ids = disabled_skill_ids.items,
             } else null,
             .mcp_selection = self.mcpSelectionForNewTask(),
-            .allowed_tools = if (self.builtin_tool_profile) |profile|
-                lifecycle.builtinToolsForProfile(profile)
-            else
-                &lifecycle.desktop_builtin_tools,
         }) catch |err| switch (err) {
             error.SessionCapacity => return error.TaskCapacity,
             else => return err,
@@ -4675,7 +4666,6 @@ pub const Workbench = struct {
                 .execution = execution.take(),
                 .model = target_model,
                 .provider = agentProvider(task.durable.execution_provider),
-                .builtin_tool_profile = self.builtin_tool_profile,
                 .mcp_selection = mcp.selection,
                 .mcp_catalog_generation = mcp.catalog_generation,
             },
@@ -5295,12 +5285,6 @@ pub const Workbench = struct {
         const run = findRun(view.durable.runs, run_id) orelse return error.NoSuchRun;
         const session = view.runtime.session() orelse
             return error.TaskClosing;
-        const answer_count = switch (response) {
-            .answers => |answers| answers.len,
-            .permission => 0,
-        };
-        const answer_buffer = try self.allocator.alloc(lifecycle.Answer, answer_count);
-        defer self.allocator.free(answer_buffer);
         const record = self.prepareUiRecord(
             session,
             run_id,
@@ -5330,18 +5314,11 @@ pub const Workbench = struct {
             self.next_task_recent_order = previous_next_task_recent_order;
             return err;
         };
-        const response_result = switch (response) {
-            .answers => |answers| session.respondAnswers(
-                run_id,
-                request_id,
-                agentAnswers(answers, answer_buffer),
-            ),
-            .permission => |choice| session.respondPermission(
-                run_id,
-                request_id,
-                agentPermissionChoice(choice),
-            ),
-        };
+        const response_result = session.respondPermission(
+            run_id,
+            request_id,
+            agentPermissionChoice(response.permission),
+        );
         response_result catch |err| {
             view.durable.ui_history[history_slot] = previous_history_record;
             view.durable.ui_history_next = previous_history_next;
@@ -9273,7 +9250,7 @@ pub const Workbench = struct {
             else => return err,
         };
         defer pending.deinit();
-        var parsed = lifecycle.decodeUiRequest(self.allocator, pending.json) catch return error.InvalidUiResponse;
+        var parsed = lifecycle.decodePermissionRequest(self.allocator, pending.json) catch return error.InvalidUiResponse;
         defer parsed.deinit();
         // The synchronous callback may publish between lifecycle reconciliation
         // and serialization. Omit that just-arrived request from this snapshot;
@@ -9290,7 +9267,7 @@ pub const Workbench = struct {
             pending.request_id,
             pending.run_id,
             view.runtime.pending_ui_order,
-            parsed.value,
+            parsed.value(),
         );
     }
 
@@ -13054,76 +13031,35 @@ pub const Workbench = struct {
         request_id: u64,
         run_id: u64,
         order: u64,
-        request: lifecycle.UiRequest,
+        permission: lifecycle.PermissionRequest,
     ) Error!void {
         writer.print("{{\"requestId\":\"{d}\",\"runId\":\"{d}\",\"order\":\"{d}\",\"redacted\":{},", .{
             request_id,
             run_id,
             order,
-            self.requestContainsKnownCredential(request),
+            self.requestContainsKnownCredential(permission),
         }) catch return error.SnapshotTooLarge;
-        switch (request) {
-            .ask_question => |questions| {
-                writer.writeAll("\"kind\":\"ask_question\",\"questions\":[") catch return error.SnapshotTooLarge;
-                for (questions, 0..) |question, question_index| {
-                    if (question_index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
-                    writer.writeAll("{\"question\":") catch return error.SnapshotTooLarge;
-                    try self.projectedJsonValueWithKnownCredentials(writer, question.question);
-                    writer.writeAll(",\"header\":") catch return error.SnapshotTooLarge;
-                    try self.projectedJsonValueWithKnownCredentials(writer, question.header);
-                    writer.print(",\"multi\":{},\"options\":[", .{question.multi}) catch return error.SnapshotTooLarge;
-                    for (question.options, 0..) |option, option_index| {
-                        if (option_index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
-                        writer.writeAll("{\"label\":") catch return error.SnapshotTooLarge;
-                        try self.projectedJsonValueWithKnownCredentials(writer, option.label);
-                        writer.writeAll(",\"description\":") catch return error.SnapshotTooLarge;
-                        try self.projectedJsonValueWithKnownCredentials(writer, option.description);
-                        writer.writeAll(",\"preview\":") catch return error.SnapshotTooLarge;
-                        try self.projectedJsonValueWithKnownCredentials(writer, option.preview);
-                        writer.writeByte('}') catch return error.SnapshotTooLarge;
-                    }
-                    writer.writeAll("]}") catch return error.SnapshotTooLarge;
-                }
-                writer.writeByte(']') catch return error.SnapshotTooLarge;
-            },
-            .permission => |permission| {
-                writer.writeAll("\"kind\":\"permission\",\"tool\":") catch return error.SnapshotTooLarge;
-                try self.projectedJsonValueWithKnownCredentials(writer, permission.tool.name);
-                writer.writeAll(",\"args\":") catch return error.SnapshotTooLarge;
-                try self.projectedJsonValueWithKnownCredentials(writer, permission.arguments_json);
-                writer.writeAll(",\"availableChoices\":[") catch return error.SnapshotTooLarge;
-                var wrote_choice = false;
-                for (permission.responses) |choice| {
-                    if (choice == .allow_session or choice == .deny_session) {
-                        if (permission.candidate == null) continue;
-                    }
-                    if (wrote_choice) writer.writeByte(',') catch return error.SnapshotTooLarge;
-                    jsonValue(writer, @tagName(choice)) catch return error.SnapshotTooLarge;
-                    wrote_choice = true;
-                }
-                writer.writeByte(']') catch return error.SnapshotTooLarge;
-            },
+        writer.writeAll("\"kind\":\"permission\",\"tool\":") catch return error.SnapshotTooLarge;
+        try self.projectedJsonValueWithKnownCredentials(writer, permission.tool.name);
+        writer.writeAll(",\"args\":") catch return error.SnapshotTooLarge;
+        try self.projectedJsonValueWithKnownCredentials(writer, permission.arguments_json);
+        writer.writeAll(",\"availableChoices\":[") catch return error.SnapshotTooLarge;
+        var wrote_choice = false;
+        for (permission.responses) |choice| {
+            if (choice == .allow_session or choice == .deny_session) {
+                if (permission.candidate == null) continue;
+            }
+            if (wrote_choice) writer.writeByte(',') catch return error.SnapshotTooLarge;
+            jsonValue(writer, @tagName(choice)) catch return error.SnapshotTooLarge;
+            wrote_choice = true;
         }
+        writer.writeByte(']') catch return error.SnapshotTooLarge;
         writer.writeByte('}') catch return error.SnapshotTooLarge;
     }
 
-    fn requestContainsKnownCredential(self: *const Workbench, request: lifecycle.UiRequest) bool {
-        return switch (request) {
-            .ask_question => |questions| questions_block: {
-                for (questions) |question| {
-                    if (self.containsKnownCredential(question.question) or self.containsKnownCredential(question.header))
-                        break :questions_block true;
-                    for (question.options) |option|
-                        if (self.containsKnownCredential(option.label) or
-                            self.containsKnownCredential(option.description) or
-                            self.containsKnownCredential(option.preview))
-                            break :questions_block true;
-                }
-                break :questions_block false;
-            },
-            .permission => |permission| self.containsKnownCredential(permission.tool.name) or
-                self.containsKnownCredential(permission.arguments_json),
-        };
+    fn requestContainsKnownCredential(self: *const Workbench, permission: lifecycle.PermissionRequest) bool {
+        return self.containsKnownCredential(permission.tool.name) or
+            self.containsKnownCredential(permission.arguments_json);
     }
 
     fn containsKnownSecret(value: []const u8, credential: []const u8) bool {
@@ -13277,10 +13213,9 @@ pub const Workbench = struct {
         var pending = session.copyPendingUiRequest(self.allocator) catch return record;
         defer pending.deinit();
         if (pending.run_id != run_id or pending.request_id != request_id) return record;
-        var parsed = lifecycle.decodeUiRequest(self.allocator, pending.json) catch return record;
+        var parsed = lifecycle.decodePermissionRequest(self.allocator, pending.json) catch return record;
         defer parsed.deinit();
-        record.kind = kindForRequest(parsed.value);
-        self.fillUiRecord(&record, parsed.value, credential);
+        self.fillUiRecord(&record, parsed.value(), credential);
         return record;
     }
 
@@ -13294,43 +13229,31 @@ pub const Workbench = struct {
         var pending = session.copyPendingUiRequest(self.allocator) catch return null;
         defer pending.deinit();
         if (pending.run_id != run_id) return null;
-        var parsed = lifecycle.decodeUiRequest(self.allocator, pending.json) catch return null;
+        var parsed = lifecycle.decodePermissionRequest(self.allocator, pending.json) catch return null;
         defer parsed.deinit();
         var record = UiRecord{
             .request_id = pending.request_id,
             .run_id = run_id,
-            .kind = kindForRequest(parsed.value),
+            .kind = .permission,
             .state = .cancelled,
         };
-        self.fillUiRecord(&record, parsed.value, credential);
+        self.fillUiRecord(&record, parsed.value(), credential);
         return record;
     }
 
     fn fillUiRecord(
         _: *Workbench,
         record: *UiRecord,
-        request: lifecycle.UiRequest,
+        permission: lifecycle.PermissionRequest,
         credential: []const u8,
     ) void {
-        const value = switch (request) {
-            .ask_question => |questions| value: {
-                record.item_count = @intCast(@min(questions.len, std.math.maxInt(u32)));
-                break :value if (questions.len == 0) "" else questions[0].question;
-            },
-            .permission => |permission| permission.arguments_json,
-        };
-        switch (request) {
-            .permission => |permission| {
-                if (permission.request_id.len <= permission_summary_field_capacity) {
-                    @memcpy(record.agent_request_id[0..permission.request_id.len], permission.request_id);
-                    record.agent_request_id_len = permission.request_id.len;
-                }
-            },
-            .ask_question => {},
+        if (permission.request_id.len <= permission_summary_field_capacity) {
+            @memcpy(record.agent_request_id[0..permission.request_id.len], permission.request_id);
+            record.agent_request_id_len = permission.request_id.len;
         }
         const result = sanitizeInto(
             &record.detail,
-            value,
+            permission.arguments_json,
             credential,
         );
         record.detail_len = result.len;
@@ -14129,16 +14052,6 @@ fn scheduledFailure(err: anyerror) scheduled_tasks_impl.FailureReason {
     };
 }
 
-fn agentAnswers(
-    answers: []const []const []const u8,
-    answer_buffer: []lifecycle.Answer,
-) []const lifecycle.Answer {
-    std.debug.assert(answer_buffer.len == answers.len);
-    for (answers, answer_buffer) |values, *answer|
-        answer.* = .{ .values = values };
-    return answer_buffer;
-}
-
 fn agentPermissionChoice(choice: PermissionChoice) lifecycle.PermissionChoice {
     return switch (choice) {
         .allow_once => .allow_once,
@@ -14757,29 +14670,17 @@ fn credentialMayContinueAtCodepoint(
     return false;
 }
 
-fn kindForRequest(request: lifecycle.UiRequest) UiRecordKind {
-    return switch (request) {
-        .ask_question => .ask_question,
-        .permission => .permission,
-    };
-}
-
 fn kindForResponse(response: UiResponse) UiRecordKind {
-    return switch (response) {
-        .answers => .ask_question,
-        .permission => .permission,
-    };
+    _ = response;
+    return .permission;
 }
 
 fn stateForResponse(response: UiResponse) UiRecordState {
-    return switch (response) {
-        .answers => .answered,
-        .permission => |permission| switch (permission) {
-            .allow_once => .allowed_once,
-            .allow_session => .allowed_always,
-            .deny_once => .denied,
-            .deny_session => .denied_session,
-        },
+    return switch (response.permission) {
+        .allow_once => .allowed_once,
+        .allow_session => .allowed_always,
+        .deny_once => .denied,
+        .deny_session => .denied_session,
     };
 }
 
@@ -15477,8 +15378,8 @@ fn testEnvelope(session_id: u64, run_id: u64, encoded: []const u8) !lifecycle.Ow
     };
 }
 
-fn testPermissionRequest(tool_name: []const u8, arguments_json: []const u8) lifecycle.UiRequest {
-    return .{ .permission = .{
+fn testPermissionRequest(tool_name: []const u8, arguments_json: []const u8) lifecycle.PermissionRequest {
+    return .{
         .type = "permission",
         .request_id = "1111111111111111111111111111111111111111111111111111111111111111",
         .session_id = "000000000000000000000001",
@@ -15494,7 +15395,7 @@ fn testPermissionRequest(tool_name: []const u8, arguments_json: []const u8) life
         .arguments_json = arguments_json,
         .responses = &.{ .deny_once, .allow_once },
         .candidate = null,
-    } };
+    };
 }
 
 fn finalizeTestTerminalEvents(workbench: *Workbench) void {
@@ -18318,18 +18219,25 @@ test "default snapshot budget contains the maximum structural projection" {
     decoded.deinit();
 }
 
-test "pending UI re-encoding remains inside its concurrent snapshot allowance" {
+test "permission UI re-encoding remains inside its concurrent snapshot allowance" {
     const limits = Limits{};
-    const payload_len = (limits.max_pending_ui_json_bytes - 256) / json_string_expansion;
+    const payload_len = (limits.max_pending_ui_json_bytes - 1024) / json_string_expansion;
     const payload = try std.testing.allocator.alloc(u8, payload_len);
     defer std.testing.allocator.free(payload);
     @memset(payload, 1);
-    const request = lifecycle.UiRequest{ .ask_question = &.{.{
-        .question = payload,
-        .header = "Large request",
-        .multi = false,
-        .options = &.{},
-    }} };
+    const request = lifecycle.PermissionRequest{
+        .type = "permission",
+        .request_id = "request-1",
+        .session_id = "000000000000000000000001",
+        .run_id = 1,
+        .tool_call_id = "tool-1",
+        .tool = .{ .namespace = .builtin, .name = "Bash", .binding = "binding-1" },
+        .canonical_arguments_digest = "digest-1",
+        .policy_generation = 1,
+        .arguments_json = payload,
+        .responses = &.{ .deny_once, .allow_once },
+        .candidate = null,
+    };
     const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, request, .{});
     defer std.testing.allocator.free(encoded);
     try std.testing.expect(encoded.len <= limits.max_pending_ui_json_bytes);
@@ -18353,7 +18261,7 @@ test "pending UI re-encoding remains inside its concurrent snapshot allowance" {
 test "permission pending projection follows responses and candidate scope" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
-    const with_candidate = lifecycle.UiRequest{ .permission = .{
+    const with_candidate = lifecycle.PermissionRequest{
         .type = "permission",
         .request_id = "1111111111111111111111111111111111111111111111111111111111111111",
         .session_id = "000000000000000000000001",
@@ -18372,7 +18280,7 @@ test "permission pending projection follows responses and candidate scope" {
             .rule_id = "2222222222222222222222222222222222222222222222222222222222222222",
             .scope = .exact_arguments,
         },
-    } };
+    };
     var candidate_storage: [4096]u8 = undefined;
     var candidate_writer = std.Io.Writer.fixed(&candidate_storage);
     try workbench.writePendingUiProjection(
@@ -18823,8 +18731,8 @@ test "tool projection truncates on UTF-8 boundaries and records bounded UI histo
         var record = UiRecord{
             .request_id = request_id,
             .run_id = 7,
-            .kind = .ask_question,
-            .state = .answered,
+            .kind = .permission,
+            .state = .allowed_once,
         };
         const detail = sanitizeInto(&record.detail, "Continue?", "");
         record.detail_len = detail.len;

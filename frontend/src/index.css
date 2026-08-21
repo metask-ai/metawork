@@ -5715,13 +5715,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   margin-left: 0;
 }
 
-.approval-shortcut {
-  margin: -12px 0 0;
-  color: var(--ui-content-muted);
-  font-family: var(--font-mono);
-  font-size: var(--text-micro);
-}
-
 .decision-button {
   min-height: 38px;
   padding: 8px 12px;
@@ -5746,32 +5739,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .decision-button:disabled {
   opacity: 0.4;
-}
-
-.approval-option-preview,
-.approval-option-detail {
-  overflow-wrap: anywhere;
-}
-
-.approval-option-detail {
-  margin-top: 7px;
-  padding: 8px 10px;
-  border-radius: 7px;
-  color: var(--ui-content-muted);
-  background: color-mix(in srgb, var(--ui-action-primary) 6%, transparent);
-  font-size: var(--text-micro);
-  line-height: 1.55;
-}
-
-.approval-option-detail p {
-  margin: 0;
-}
-
-.approval-option-detail code {
-  display: block;
-  margin-top: 4px;
-  font-family: var(--font-mono);
-  font-size: var(--text-micro);
 }
 
 .request-response-status {

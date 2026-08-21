@@ -51,6 +51,7 @@ pub const Plan = enum {
     controlled,
     ui_wait,
     ui_wait_twice,
+    ask_question,
     callback_failed,
     controlled_callback_failed,
     event_callback,
@@ -639,7 +640,7 @@ pub fn runtimeCreate(
     fake_core.zero_host_tools_seen = config.?.host_tools == null and
         config.?.host_tool_count == 0 and
         config.?.builtin_tools != null and
-        config.?.builtin_tool_count == lifecycle.registered_builtin_tools.len;
+        config.?.builtin_tool_count == 10;
     fake_core.mcp_server_count = @intCast(config.?.mcp_server_count);
     fake_core.mcp_descriptor_valid = if (config.?.mcp_server_count == 0)
         config.?.mcp_servers == null
@@ -780,7 +781,7 @@ pub fn sessionCreate(
             fake_core.session_created += 1;
             fake_core.credential_seen = std.mem.eql(u8, key, "fixture-secret");
             fake_core.builtin_allowlist_seen = host.allowed_tools != null and
-                host.allowed_tool_count == lifecycle.desktop_builtin_tools.len;
+                host.allowed_tool_count == 10;
             recordAllowedTools(
                 host,
                 &fake_core.last_allowed_tool_count,
@@ -1701,7 +1702,8 @@ pub fn sessionRunInput(
     if ((plan == .ui_wait or plan == .ui_wait_twice) and
         !(plan == .ui_wait_twice and session.permission_session_granted) or
         plan == .malformed_ui_callback or
-        plan == .wrong_ui_request_run_id or plan == .wrong_ui_request_session_id)
+        plan == .wrong_ui_request_run_id or plan == .wrong_ui_request_session_id or
+        plan == .ask_question)
     {
         var response = wire.OwnedBytesV1{ .ptr = null, .len = 0 };
         const callback = session.callbacks.on_ui_request orelse {
@@ -1709,7 +1711,9 @@ pub fn sessionRunInput(
             return wire.STATUS_CALLBACK_FAILED;
         };
         var request_storage: [2048]u8 = undefined;
-        const request_json = if (plan != .malformed_ui_callback)
+        const request_json = if (plan == .ask_question)
+            "{\"ask_question\":[{\"question\":\"Choose?\",\"header\":\"Choice\",\"multi\":false,\"options\":[]}]}"
+        else if (plan != .malformed_ui_callback)
             permissionRequestJson(
                 &request_storage,
                 if (plan == .wrong_ui_request_session_id)

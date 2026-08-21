@@ -8,8 +8,6 @@ import {
   type ModelConnectionProtocol,
   type ModelConnectionState,
   type ModelConnectionTestStatus,
-  type AskOption,
-  type AskQuestion,
   type HostSignal,
   type PendingUi,
   type PermissionHistory,
@@ -97,9 +95,8 @@ const runOutcomes = [
   "failed",
   "dependency_contract_failure",
 ] as const;
-const uiRecordKinds = ["ask_question", "permission"] as const;
+const uiRecordKinds = ["permission"] as const;
 const uiRecordStates = [
-  "answered",
   "allowed_once",
   "allowed_always",
   "denied",
@@ -1432,11 +1429,6 @@ function decodeUiRecord(value: unknown, path: string): UiRecord {
     item.permission === null
       ? null
       : decodePermissionHistory(item.permission, `${path}.permission`);
-  if (kind === "ask_question" && permission !== null)
-    fail(
-      `${path}.permission`,
-      "ask_question record cannot contain permission provenance",
-    );
   if (permission !== null && permission.requestId !== agentRequestId)
     fail(`${path}.permission`, "permission request identity must match record");
   return {
@@ -1457,52 +1449,11 @@ function decodeUiRecord(value: unknown, path: string): UiRecord {
   };
 }
 
-function decodeAskOption(value: unknown, path: string): AskOption {
-  const item = object(value, path, ["label", "description", "preview"]);
-  return {
-    label: stringValue(item.label, `${path}.label`),
-    description: stringValue(item.description, `${path}.description`),
-    preview: stringValue(item.preview, `${path}.preview`),
-  };
-}
-
-function decodeAskQuestion(value: unknown, path: string): AskQuestion {
-  const item = object(value, path, ["question", "header", "multi", "options"]);
-  return {
-    question: stringValue(item.question, `${path}.question`),
-    header: stringValue(item.header, `${path}.header`),
-    multi: booleanValue(item.multi, `${path}.multi`),
-    options: arrayValue(item.options, `${path}.options`, decodeAskOption),
-  };
-}
-
 function decodePendingUi(value: unknown, path: string): PendingUi | null {
   if (value === null) return null;
   if (typeof value !== "object" || Array.isArray(value))
     fail(path, "expected request object or null");
   const kind = stringValue((value as JsonObject).kind, `${path}.kind`);
-  if (kind === "ask_question") {
-    const item = object(value, path, [
-      "requestId",
-      "runId",
-      "order",
-      "redacted",
-      "kind",
-      "questions",
-    ]);
-    return {
-      requestId: positiveWireId(item.requestId, `${path}.requestId`),
-      runId: positiveWireId(item.runId, `${path}.runId`),
-      order: positiveWireId(item.order, `${path}.order`),
-      redacted: booleanValue(item.redacted, `${path}.redacted`),
-      kind,
-      questions: arrayValue(
-        item.questions,
-        `${path}.questions`,
-        decodeAskQuestion,
-      ),
-    };
-  }
   if (kind === "permission") {
     const item = object(value, path, [
       "requestId",

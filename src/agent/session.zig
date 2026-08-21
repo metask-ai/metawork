@@ -14,6 +14,7 @@ const checkpoint = @import("agent_checkpoint");
 const checkpoint_restore = @import("agent_checkpoint_restore");
 const session_control = @import("session/control.zig");
 const session_wire = @import("session/wire.zig");
+const capabilities = @import("capabilities.zig");
 const session_binding = @import("session/binding.zig");
 // Intentional same-module cycle: Runtime owns the runtime lifecycle while
 // Session remains the composition root for the Session-bound domain object.
@@ -22,8 +23,7 @@ const session_runtime = @import("session/runtime.zig");
 pub const OwnedCoreEvent = event_pump.OwnedCoreEvent;
 pub const Status = sdk.Status;
 pub const StopReason = sdk.StopReason;
-pub const UiRequest = sdk.UiRequest;
-pub const Answer = sdk.protocol.Answer;
+const UiRequest = sdk.UiRequest;
 pub const PermissionChoice = sdk.protocol.PermissionChoice;
 pub const PermissionDecision = sdk.protocol.PermissionDecision;
 pub const PermissionDecisionSource = sdk.protocol.PermissionDecisionSource;
@@ -77,15 +77,11 @@ pub const ProviderKind = session_control.ProviderKind;
 pub const PermissionMode = session_control.PermissionMode;
 pub const ShellPolicy = session_control.ShellPolicy;
 
-pub const ParsedUiRequest = sdk.ParsedUiRequest;
-pub const BuiltinToolProfile = session_wire.BuiltinToolProfile;
-pub const desktop_builtin_tools = session_wire.desktop_builtin_tools;
-pub const local_builtin_tools = session_wire.local_builtin_tools;
-pub const network_builtin_tools = session_wire.network_builtin_tools;
-pub const registered_builtin_tools = session_wire.registered_builtin_tools;
-pub const decodeUiRequest = session_wire.decodeUiRequest;
+pub const PermissionRequest = sdk.PermissionRequest;
+pub const ParsedPermissionRequest = session_wire.ParsedPermissionRequest;
+pub const decodePermissionRequest = session_wire.decodePermissionRequest;
+const decodeUiRequest = session_wire.decodeUiRequest;
 pub const decodeCoreEvent = session_wire.decodeCoreEvent;
-pub const builtinToolsForProfile = session_wire.builtinToolsForProfile;
 const providerKindCode = session_wire.providerKindCode;
 const permissionModeCode = session_wire.permissionModeCode;
 const shellPolicyCode = session_wire.shellPolicyCode;
@@ -321,7 +317,6 @@ pub const SessionOpenOptions = struct {
     skill_catalog: ?*CatalogLease = null,
     skill_selection: ?SkillSelectionInput = null,
     mcp_selection: ?*const McpSelection = null,
-    allowed_tools: []const []const u8 = &desktop_builtin_tools,
 };
 
 pub const SkillSelectionInput = struct {
@@ -1029,18 +1024,6 @@ pub const Session = struct {
         self.unlock();
         if (should_abort) self.abortRun(run_id, signal);
         return .requested;
-    }
-
-    pub fn respondAnswers(
-        self: *Session,
-        run_id: u64,
-        request_id: u64,
-        answers: []const Answer,
-    ) (Error || std.mem.Allocator.Error)!void {
-        self.lock();
-        defer self.unlock();
-        const request = try self.pendingUiRequestLocked(run_id, request_id);
-        try self.encodeUiResponseLocked(request, .{ .answers = answers });
     }
 
     pub fn respondPermission(
@@ -1897,6 +1880,10 @@ pub const Session = struct {
             return wire.UI_FATAL;
         };
         defer parsed.deinit();
+        if (!capabilities.allowsUiRequest(parsed.value)) {
+            self.recordTerminationSignal(.{ .callback_failure = .ui });
+            return wire.UI_FATAL;
+        }
         const owned_request = self.agent_runtime.allocator.dupe(u8, encoded_request) catch {
             self.recordTerminationSignal(.{ .event_pump_failure = .allocation });
             return wire.UI_FATAL;
@@ -2067,7 +2054,7 @@ pub const Session = struct {
         run_id: u64,
     ) bool {
         return switch (request) {
-            .ask_question => true,
+            .ask_question => false,
             .permission => |permission| permission.run_id == run_id and
                 switch (self.core_session_identity) {
                     .bound => |binding| std.mem.eql(

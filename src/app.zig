@@ -393,7 +393,6 @@ pub fn run(init: std.process.Init) !void {
     var workbench: workbench_api.Workbench = undefined;
     app.workbench_storage = &workbench;
     app.workbench_configuration = .{
-        .builtin_tool_profile = .full,
         .change_notifier = .{
             .context = &app.platform,
             .wake = app_platform.Adapter.notifyMainLoop,

@@ -389,43 +389,6 @@ test("approval cards never expose internal Run identity", () => {
   assert.doesNotMatch(markup, /8472|work item/i);
 });
 
-test("question controls keep their projected question as an accessible label", () => {
-  const markup = renderToStaticMarkup(
-    createElement(
-      I18nContext.Provider,
-      {
-        value: {
-          locale: "en-US",
-          setLocale() {},
-          t: (id, values) => translate("en-US", id, values),
-        },
-      },
-      createElement(ApprovalPanel, {
-        pending: {
-          requestId: "request-question",
-          runId: "9",
-          order: "1",
-          redacted: false,
-          kind: "ask_question",
-          questions: [
-            {
-              header: "Continue",
-              question: "Continue the run?",
-              multi: false,
-              options: [],
-            },
-          ],
-        },
-        busy: false,
-        responsePhase: "idle",
-        respond() {},
-      }),
-    ),
-  );
-  assert.match(markup, /id="ui-question-request-question-0"/);
-  assert.match(markup, /aria-labelledby="ui-question-request-question-0"/);
-});
-
 test("Escape dismissal and focus return preserve the real Inspector opener", () => {
   assert.equal(shouldDismissInspectorForEscape(true, "Escape", false), true);
   assert.equal(shouldDismissInspectorForEscape(false, "Escape", false), false);

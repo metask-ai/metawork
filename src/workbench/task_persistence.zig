@@ -1132,13 +1132,11 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
     }
     for (task.ui_history, 0..) |record, index| {
         if (record.request_id == 0 or record.run_id == 0 or record.order == 0 or
-            !oneOf(record.kind, &.{ "ask_question", "permission" }) or
-            !oneOf(record.state, &.{ "answered", "allowed_once", "allowed_always", "denied", "denied_session", "cancelled" }) or
+            !oneOf(record.kind, &.{"permission"}) or
+            !oneOf(record.state, &.{ "allowed_once", "allowed_always", "denied", "denied_session", "cancelled" }) or
             !validText(record.detail, 512, true) or findRun(task.runs, record.run_id) == null)
             return error.Invalid;
         if (!validText(record.agent_request_id, 128, true)) return error.Invalid;
-        if (std.mem.eql(u8, record.kind, "ask_question") and record.permission != null)
-            return error.Invalid;
         if (record.permission) |permission| {
             if (!std.mem.eql(u8, record.kind, "permission") or
                 !std.mem.eql(u8, record.agent_request_id, permission.request_id) or

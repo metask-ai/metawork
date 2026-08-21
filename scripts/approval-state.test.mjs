@@ -2,13 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  optionAnswerSelected,
-  selectedOptionIndex,
-  serializeAnswerDrafts,
-  updateOptionAnswer,
-  updateTextAnswer,
-} from "../frontend/src/features/approvals/answer-drafts.ts";
-import {
   acceptUiResponse,
   beginUiResponse,
   failUiResponse,
@@ -161,45 +154,4 @@ test("a rejected response is retryable without weakening accepted-response locki
   assert.equal(uiResponsePhase(failed, requestA), "failed");
   const retrying = beginUiResponse(failed, requestA);
   assert.equal(uiResponsePhase(retrying, requestA), "sending");
-});
-
-test("question drafts keep option identity instead of parsing display labels", () => {
-  const questions = [
-    {
-      question: "Choose targets",
-      header: "Targets",
-      multi: true,
-      options: [
-        { label: "Alpha, Beta", description: "", preview: "" },
-        { label: "Gamma", description: "", preview: "" },
-      ],
-    },
-    {
-      question: "Why?",
-      header: "Reason",
-      multi: false,
-      options: [],
-    },
-  ];
-  let drafts = updateOptionAnswer([], 0, 0, true, true);
-  drafts = updateOptionAnswer(drafts, 0, 1, true, true);
-  drafts = updateTextAnswer(drafts, 1, "Ship both");
-  assert.equal(optionAnswerSelected(drafts, 0, 0), true);
-  assert.equal(selectedOptionIndex(drafts, 0), 0);
-  assert.deepEqual(serializeAnswerDrafts(questions, drafts), [
-    ["Alpha, Beta", "Gamma"],
-    ["Ship both"],
-  ]);
-
-  drafts = updateOptionAnswer(drafts, 0, 0, true, false);
-  assert.equal(optionAnswerSelected(drafts, 0, 0), false);
-  assert.equal(optionAnswerSelected(drafts, 0, 1), true);
-  assert.deepEqual(serializeAnswerDrafts(questions, drafts), [
-    ["Gamma"],
-    ["Ship both"],
-  ]);
-  assert.equal(
-    serializeAnswerDrafts(questions, updateTextAnswer(drafts, 1, "   ")),
-    null,
-  );
 });
