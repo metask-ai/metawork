@@ -13,7 +13,7 @@
 | Renderer    | React + Tailwind                | 唯一正式 UI；运行于 Application 通过 Native SDK 托管的 System WebView |
 | Bridge      | Zig                             | Renderer Bridge revision 1 的协议、验证和 ProductDelivery 边界        |
 | Product     | Zig                             | MetaWork 产品事实、产品行为和恢复语义的唯一边界                       |
-| Storage     | Zig + SQLite                    | MetaWork-owned、无业务语义的 SQL 基础能力与直接 SQLite 后端            |
+| Storage     | Zig + SQLite                    | MetaWork-owned、无业务语义的 SQL 基础能力与直接 SQLite 后端           |
 | AgentCore   | Metask AgentCore library bundle | 外部执行依赖；独立构建和发布，MetaWork 只消费 canonical bundle        |
 | Native SDK  | Native SDK                      | 外部桌面依赖；由 Application 消费                                     |
 
@@ -67,6 +67,8 @@ flowchart TB
 | Renderer    | 产品 WebUI 模块                                   | RENDERER    | Renderer           | `frontend/`（含 `bridge/` 合同实现层）                              |
 
 用法约定：文档中的架构边界统一称为 Application，代码中的组合类型保持 `App`；不再另设 Desktop Host 或 Host infrastructure。`Product 边界/Product 模块`指本节逻辑边界，`桌面产品`指整个交付物。`product_identity.zig`（交付物 Bundle ID）与 Bridge 的 `ProductDelivery`（产品数据运输）维持原名，词根含义不同，不指 Product 边界。
+
+Agent 是 MetaWork 对通用 AgentCore 的产品化边界，不是透明转发层。它可以在不修改 canonical bundle 或 ABI 的前提下收窄、组合或补充 Agent 能力，并独占 MetaWork built-in 工具集合及其 Runtime/Session 配置。Workbench 只消费形成后的 Agent 执行能力，不选择 AgentCore built-in 名称或 profile；MCP 的用户配置、授权和 Task admission 仍归 Workbench，Agent 只消费其解析后的窄 selection。
 
 ## 3. 模块职责
 
@@ -203,17 +205,17 @@ Renderer Bridge revision、Account persistence layout、AgentCore artifact versi
 
 ## 9. 主要风险
 
-| 风险                                   | 当前控制方式                                                           |
-| -------------------------------------- | ---------------------------------------------------------------------- |
-| Native SDK Zig → React 路径不符合预期  | 真实 dev/prod smoke                                                    |
-| typed SDK 与真实 producer wire 漂移    | source-free corpus + 真实 Host link/run 回归                           |
-| callback 数据返回后失效                | callback 内验证并深拷贝                                                |
-| callback/close race 造成 UAF           | abort、join、callback quiescence 后 destroy                            |
-| callback identity race 泄漏 permission | UI request publication 与 response extraction 均在 Session lock 下复检 |
+| 风险                                   | 当前控制方式                                                                                                 |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| Native SDK Zig → React 路径不符合预期  | 真实 dev/prod smoke                                                                                          |
+| typed SDK 与真实 producer wire 漂移    | source-free corpus + 真实 Host link/run 回归                                                                 |
+| callback 数据返回后失效                | callback 内验证并深拷贝                                                                                      |
+| callback/close race 造成 UAF           | abort、join、callback quiescence 后 destroy                                                                  |
+| callback identity race 泄漏 permission | UI request publication 与 response extraction 均在 Session lock 下复检                                       |
 | 同步 UI 耗尽 executor                  | 16 个 bounded slots、同界 pending 容量、cancel/close/shutdown 唤醒和压力测试；Host 不为人类决策设置 deadline |
-| Bridge/event 造成无限内存              | count/byte/time 多维上限和公平调度                                     |
-| Run failure 被误报用户取消             | active first-writer cause 与 Product write-once terminal history 分层  |
-| Renderer 掉线杀死后台 Run              | typed transport policy 不向 Agent termination 反向泄漏                 |
-| v1 Workspace 被误报安全                | 只允许临时/trusted 验证并显式标注限制                                  |
-| 同进程 native crash 带走全部状态       | fault-domain 验证已选后续单 Worker；当前同进程应用仍是 prototype       |
-| 过早建设发布系统                       | baseline 通过后再做 cache 与 remote                                    |
+| Bridge/event 造成无限内存              | count/byte/time 多维上限和公平调度                                                                           |
+| Run failure 被误报用户取消             | active first-writer cause 与 Product write-once terminal history 分层                                        |
+| Renderer 掉线杀死后台 Run              | typed transport policy 不向 Agent termination 反向泄漏                                                       |
+| v1 Workspace 被误报安全                | 只允许临时/trusted 验证并显式标注限制                                                                        |
+| 同进程 native crash 带走全部状态       | fault-domain 验证已选后续单 Worker；当前同进程应用仍是 prototype                                             |
+| 过早建设发布系统                       | baseline 通过后再做 cache 与 remote                                                                          |

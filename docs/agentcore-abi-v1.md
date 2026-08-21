@@ -9,10 +9,10 @@
 
 Windows 锁定 clean source commit `e0d29bcfd926b02bffdb165731839bf368210093`、package version `0.1.0-dev+e0d29bcfd926`；macOS arm64 锁定 clean source commit `d82e608e4e1481671de4235186f96a36d25446cb`、package version `0.1.0-dev+d82e608e4e14`。两者均使用 Zig 0.16.0、strip=true、requires C runtime；target artifact、lock 和验证结果彼此独立：
 
-| Target                       | Build        | Link input                  | Repository lock                                    |
-| ---------------------------- | ------------ | --------------------------- | -------------------------------------------------- |
-| Windows x86_64 GNU           | ReleaseSafe  | `advapi32`、`crypt32`       | `build_support/agentcore-bundle.windows.lock.json` |
-| macOS arm64                  | ReleaseSafe  | 无                          | `build_support/agentcore-bundle.macos.lock.json`   |
+| Target             | Build       | Link input            | Repository lock                                    |
+| ------------------ | ----------- | --------------------- | -------------------------------------------------- |
+| Windows x86_64 GNU | ReleaseSafe | `advapi32`、`crypt32` | `build_support/agentcore-bundle.windows.lock.json` |
+| macOS arm64        | ReleaseSafe | 无                    | `build_support/agentcore-bundle.macos.lock.json`   |
 
 固定合同按 target 为：
 
@@ -84,11 +84,11 @@ fresh Session 只使用 `SessionHostConfigV1` 与 `SessionCreateConfigV1`：
 - immutable Skill catalog query/lease；
 - fresh Session create/destroy；
 - typed Text/Skill Run 与 abort；
-- built-in Read/Bash/Edit/AskUserQuestion；
+- AgentCore bundle 支持的 built-in Read/Bash/Edit/AskUserQuestion；其中 MetaWork Agent 的产品集合不开放 AskUserQuestion；
 - manual compact；
 - post-terminal checkpoint export 与 Session description；
 - verified checkpoint source 驱动的 Session restore 与 restore report/description 对账；
-- synchronous AskUserQuestion 与 Permission；
+- ABI 提供 synchronous AskUserQuestion 与 Permission；当前 MetaWork Agent 只开放 Permission 产品路径；
 - typed Core event 和 Permission provenance。
 
 以下 revision 9 ABI 能力仍关闭，直到各自完成产品 owner、安全、持久化和恢复验收：

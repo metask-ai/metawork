@@ -1,5 +1,4 @@
 const fixture = @import("lifecycle_fixture");
-const builtin = @import("builtin");
 const std = fixture.std;
 const lifecycle = fixture.lifecycle;
 const workbench_api = fixture.workbench_api;
@@ -194,7 +193,7 @@ fn waitHistoryNeedle(
     return error.TestUnexpectedResult;
 }
 
-test "Workbench Task admission forwards the configured built-in profile" {
+test "Workbench Task admission consumes the fixed MetaWork Agent tool surface" {
     fake_core.reset();
     const runtime = try createTestComposition(.{
         .worker_count = 1,
@@ -205,8 +204,6 @@ test "Workbench Task admission forwards the configured built-in profile" {
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
     }
-    var configuration = workbenchConfiguration();
-    configuration.builtin_tool_profile = .local;
     var workbench = try workbench_api.Workbench.init(
         std.testing.allocator,
         std.testing.io,
@@ -219,65 +216,13 @@ test "Workbench Task admission forwards the configured built-in profile" {
             .max_runs_per_task = 1,
             .max_tools_per_run = 1,
         },
-        configuration,
+        workbenchConfiguration(),
     );
     defer workbench.deinit();
     try installWorkbenchExecution(&workbench);
     _ = try workbench.createTask(workbenchTaskInput());
 
-    try std.testing.expectEqual(
-        lifecycle.local_builtin_tools.len,
-        fake_core.last_allowed_tool_count,
-    );
-    for (lifecycle.local_builtin_tools, 0..) |name, index| {
-        try std.testing.expectEqualStrings(
-            name,
-            fake_core.last_allowed_tool_names[index][0..name.len],
-        );
-    }
-}
-
-test "Workbench accepts the full built-in profile on desktop targets" {
-    fake_core.reset();
-    const runtime = try createTestComposition(.{
-        .worker_count = 1,
-        .queue_capacity = 1,
-        .max_sessions = 1,
-    });
-    defer {
-        shutdownTestComposition(runtime) catch unreachable;
-        deinitTestComposition(runtime);
-    }
-    var configuration = workbenchConfiguration();
-    configuration.builtin_tool_profile = .full;
-    var workbench = try workbench_api.Workbench.init(
-        std.testing.allocator,
-        std.testing.io,
-        runtime,
-        .{
-            .worker_count = 1,
-            .queue_capacity = 1,
-            .max_tasks = 1,
-            .max_workspaces = 1,
-            .max_runs_per_task = 1,
-            .max_tools_per_run = 1,
-        },
-        configuration,
-    );
-    defer workbench.deinit();
-    try installWorkbenchExecution(&workbench);
-    _ = try workbench.createTask(workbenchTaskInput());
-
-    try std.testing.expectEqual(
-        lifecycle.desktop_builtin_tools.len,
-        fake_core.last_allowed_tool_count,
-    );
-    for (lifecycle.desktop_builtin_tools, 0..) |name, index| {
-        try std.testing.expectEqualStrings(
-            name,
-            fake_core.last_allowed_tool_names[index][0..name.len],
-        );
-    }
+    try std.testing.expect(fake_core.builtin_allowlist_seen);
 }
 
 test "Run checkpoint commits immutable blob before durable descriptor" {
@@ -518,8 +463,6 @@ test "restart restores a Task attachment and continues the same Conversation" {
     };
     var first_configuration = workbenchConfiguration();
     first_configuration.directories.canonical_user_home = home;
-    if (builtin.os.tag == .windows)
-        first_configuration.builtin_tool_profile = .local;
     first_configuration.task_persistence = persistence.capability();
     first_configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
     first_configuration.skill_enablement = .{ .file_store = &skill_enablement_store };
@@ -593,8 +536,6 @@ test "restart restores a Task attachment and continues the same Conversation" {
     runtime_live = true;
     var second_configuration = workbenchConfiguration();
     second_configuration.directories.canonical_user_home = home;
-    if (builtin.os.tag == .windows)
-        second_configuration.builtin_tool_profile = .local;
     second_configuration.task_persistence = persistence.capabilityRestored(restart_history);
     second_configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
     second_configuration.skill_enablement = .{
@@ -683,18 +624,7 @@ test "restart restores a Task attachment and continues the same Conversation" {
             .argument_values = &.{},
         } }),
     );
-    if (builtin.os.tag == .windows) {
-        try std.testing.expectEqual(
-            lifecycle.local_builtin_tools.len,
-            fake_core.last_restored_allowed_tool_count,
-        );
-        for (lifecycle.local_builtin_tools, 0..) |name, index| {
-            try std.testing.expectEqualStrings(
-                name,
-                fake_core.last_restored_allowed_tool_names[index][0..name.len],
-            );
-        }
-    }
+    try std.testing.expectEqual(@as(usize, 10), fake_core.last_restored_allowed_tool_count);
 
     _ = try restored.runTask(task_id, .{ .text = "continue after restart" });
     try waitTaskSnapshot(

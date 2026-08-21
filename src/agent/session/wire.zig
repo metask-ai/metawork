@@ -20,6 +20,34 @@ pub fn decodeUiRequest(
     return parsed;
 }
 
+pub const ParsedPermissionRequest = struct {
+    parsed: sdk.ParsedUiRequest,
+
+    pub fn value(self: *const ParsedPermissionRequest) sdk.PermissionRequest {
+        return switch (self.parsed.value) {
+            .permission => |permission| permission,
+            .ask_question => unreachable,
+        };
+    }
+
+    pub fn deinit(self: *ParsedPermissionRequest) void {
+        self.parsed.deinit();
+        self.* = undefined;
+    }
+};
+
+pub fn decodePermissionRequest(
+    allocator: std.mem.Allocator,
+    encoded: []const u8,
+) (sdk.DecodeError || error{UnsupportedUiRequest})!ParsedPermissionRequest {
+    var parsed = try decodeUiRequest(allocator, encoded);
+    errdefer parsed.deinit();
+    switch (parsed.value) {
+        .permission => return .{ .parsed = parsed },
+        .ask_question => return error.UnsupportedUiRequest,
+    }
+}
+
 pub fn decodeCoreEvent(
     allocator: std.mem.Allocator,
     encoded: []const u8,
@@ -109,48 +137,6 @@ fn validUtf8(values: []const []const u8) bool {
     return true;
 }
 
-pub const BuiltinToolProfile = enum {
-    full,
-    local,
-    network,
-};
-
-pub const desktop_builtin_tools = [_][]const u8{
-    "Read",
-    "Write",
-    "Edit",
-    "Glob",
-    "Grep",
-    "Bash",
-    "BashOutput",
-    "KillShell",
-    "AskUserQuestion",
-    "WebSearch",
-    "WebFetch",
-};
-pub const local_builtin_tools = [_][]const u8{
-    "Read",
-    "Write",
-    "Edit",
-    "Glob",
-    "Grep",
-    "Bash",
-    "BashOutput",
-    "KillShell",
-    "AskUserQuestion",
-};
-pub const network_builtin_tools = [_][]const u8{ "WebSearch", "WebFetch" };
-
-pub const registered_builtin_tools = desktop_builtin_tools;
-
-pub fn builtinToolsForProfile(profile: BuiltinToolProfile) []const []const u8 {
-    return switch (profile) {
-        .full => &desktop_builtin_tools,
-        .local => &local_builtin_tools,
-        .network => &network_builtin_tools,
-    };
-}
-
 pub fn providerKindCode(value: control.ProviderKind) u32 {
     return switch (value) {
         .anthropic => wire.PROVIDER_ANTHROPIC,
@@ -212,23 +198,4 @@ test "AgentCore JSON callbacks reject invalid UTF-8 at the ownership boundary" {
         error.InvalidPayload,
         decodeUiRequest(std.testing.allocator, invalid_ui),
     );
-}
-
-test "Desktop built-in profiles cover the verified name set without overlap" {
-    const local = builtinToolsForProfile(.local);
-    const network = builtinToolsForProfile(.network);
-    try std.testing.expectEqual(desktop_builtin_tools.len, local.len + network.len);
-    for (local) |name| {
-        for (network) |other| try std.testing.expect(!std.mem.eql(u8, name, other));
-    }
-    for (desktop_builtin_tools) |name| {
-        var found = false;
-        for (local) |candidate| {
-            if (std.mem.eql(u8, name, candidate)) found = true;
-        }
-        for (network) |candidate| {
-            if (std.mem.eql(u8, name, candidate)) found = true;
-        }
-        try std.testing.expect(found);
-    }
 }

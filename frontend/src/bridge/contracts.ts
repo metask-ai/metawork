@@ -350,38 +350,16 @@ export type ActiveOperation =
   | { kind: "compact"; id: string }
   | { kind: "restore"; id: string };
 
-export type AskOption = {
-  label: string;
-  description: string;
-  preview: string;
+export type PendingUi = {
+  requestId: string;
+  runId: string;
+  order: string;
+  redacted: boolean;
+  kind: "permission";
+  tool: string;
+  args: string;
+  availableChoices: PermissionChoice[];
 };
-
-export type AskQuestion = {
-  question: string;
-  header: string;
-  multi: boolean;
-  options: AskOption[];
-};
-
-export type PendingUi =
-  | {
-      requestId: string;
-      runId: string;
-      order: string;
-      redacted: boolean;
-      kind: "ask_question";
-      questions: AskQuestion[];
-    }
-  | {
-      requestId: string;
-      runId: string;
-      order: string;
-      redacted: boolean;
-      kind: "permission";
-      tool: string;
-      args: string;
-      availableChoices: PermissionChoice[];
-    };
 
 export type PermissionChoice =
   "deny_once" | "deny_session" | "allow_once" | "allow_session";
@@ -390,9 +368,8 @@ export type UiRecord = {
   requestId: string;
   runId: string;
   order: string;
-  kind: "ask_question" | "permission";
+  kind: "permission";
   state:
-    | "answered"
     | "allowed_once"
     | "allowed_always"
     | "denied"
@@ -1038,6 +1015,7 @@ export type SkillDetailResult =
       reason: string;
     };
 
-export type UiResponsePayload =
-  | { kind: "permission"; permission: PermissionChoice }
-  | { kind: "answers"; answers: string[][] };
+export type UiResponsePayload = {
+  kind: "permission";
+  permission: PermissionChoice;
+};

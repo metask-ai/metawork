@@ -1,24 +1,27 @@
 # AI UI Components
 
-This directory is MetaWork's AI UI layer. It sits on top of the existing
-Foundation UI (`components/ui`) and is consumed by product features; it does
-not own Task, Run, Workspace, Bridge, capability, or AgentCore semantics.
+This directory defines MetaWork's shared rendering language for the central AI
+conversation surface. Every visible conversation path composes the same seven
+primitives:
 
-This layer contains only leaf renderers and Composer primitives. It is not a
-conversation framework, work-surface abstraction, or second product design
-system. The AI SDK runtime, provider transport, `useChat`, Streamdown, and
-scrolling helpers are intentionally not dependencies of this layer.
+- `Conversation` owns the reading surface, viewport, content measure, and jump
+  to latest affordance.
+- `Message` renders user and assistant speech without inventing system, tool,
+  or reasoning speakers.
+- `Activity` renders the one current activity or a necessary terminal state at
+  lower visual priority than speech.
+- `Intervention` renders the temporary surface for permission and other genuine
+  user decisions; settled decisions do not remain as full forms.
+- `Composer` is the shared input surface for new and existing conversations.
+- `Markdown` renders assistant rich text through a safe CommonMark/GFM boundary.
+- `CodeBlock` renders bounded code content.
 
-`Markdown.tsx` is the product-owned assistant response renderer. It supports
-CommonMark and GFM through `react-markdown` and `remark-gfm`, disables raw HTML,
-and passes links through a safe protocol boundary. It does not add an AI SDK
-transport or provider runtime.
+The set is deliberately small. A protocol event, tool name, or hypothetical
+future capability does not justify a component. New primitives require a real
+visible semantic that cannot be expressed by the existing composition.
 
-`CodeBlock.tsx` is a leaf presentation primitive: it renders bounded code or
-tool output and never owns product visibility policy. Product features decide
-whether bounded content is relevant to a user action; the existence of a Host
-Tool record never makes it default-visible Renderer content.
-
-`index.ts` is the only public import surface for feature code. Foundation UI
-remains the lower-level dependency and product semantics remain in
-`features/`.
+These components own rendering semantics only. Product features supply copy,
+choices, actions, and already-decoded state. Foundation controls remain in
+`components/ui`; provider transports, AI SDK runtimes, Task state, and Host
+contracts are not dependencies of this layer. `index.ts` is the only public
+import surface for feature code.

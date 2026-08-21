@@ -7,7 +7,12 @@ import type {
   TaskView,
   UiResponsePayload,
 } from "../../bridge/contracts.ts";
-import { Markdown } from "../../components/ai/index.ts";
+import {
+  Activity,
+  Conversation,
+  Markdown,
+  Message,
+} from "../../components/ai/index.ts";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
 
 type ReadingState = { scrollTop: number; followingLatest: boolean };
@@ -62,6 +67,23 @@ function retryable(outcome: NonNullable<RunView["outcome"]>): boolean {
   return ["failed", "interrupted", "dependency_contract_failure"].includes(
     outcome,
   );
+}
+
+function outcomeState(
+  outcome: NonNullable<RunView["outcome"]>,
+): "completed" | "stopped" | "failed" | "interrupted" {
+  switch (outcome) {
+    case "completed":
+      return "completed";
+    case "stopped":
+    case "cancelled":
+      return "stopped";
+    case "interrupted":
+      return "interrupted";
+    case "failed":
+    case "dependency_contract_failure":
+      return "failed";
+  }
 }
 
 function TaskInput({ input }: { input: RunInputView }) {
@@ -182,90 +204,83 @@ export function TaskContent({
   }
 
   return (
-    <section className="task-content" aria-label={task?.title}>
-      <div
-        ref={viewport}
-        className="task-content-scroll"
-        onScroll={updateReadingState}
-      >
-        <div className="task-content-body">
-          {task?.runs.map((run) => {
-            const isCurrent = run.id === currentRun?.id;
-            const showOutcome =
-              run.outcome !== null &&
-              (run.outcome !== "completed" || run.assistant.length === 0);
-            return (
-              <section className="task-turn" key={run.id}>
-                <div className="task-input">
-                  <TaskInput input={run.input} />
-                </div>
-                {run.assistant.length > 0 && (
-                  <div
-                    className="assistant-response"
-                    data-streaming={activeRun(run)}
-                  >
-                    <Markdown>{run.assistant}</Markdown>
-                    {run.assistantRedacted && (
-                      <p className="projection-note">
-                        {t("privacy.sensitive_hidden")}
-                      </p>
-                    )}
-                  </div>
-                )}
-                {isCurrent && activeRun(run) && (
-                  <p className="task-active-status" role="status">
-                    {t(activeRunMessage(run))}
+    <Conversation
+      aria-label={task?.title}
+      viewportRef={viewport}
+      onViewportScroll={updateReadingState}
+      jumpToLatest={
+        showJumpLatest
+          ? { label: t("task.jump_latest"), onClick: jumpToLatest }
+          : undefined
+      }
+    >
+      {task?.runs.map((run) => {
+        const isCurrent = run.id === currentRun?.id;
+        const showOutcome =
+          run.outcome !== null &&
+          (run.outcome !== "completed" || run.assistant.length === 0);
+        return (
+          <section className="ai-exchange" key={run.id}>
+            <Message role="user">
+              <TaskInput input={run.input} />
+            </Message>
+            {run.assistant.length > 0 && (
+              <Message role="assistant" streaming={activeRun(run)}>
+                <Markdown>{run.assistant}</Markdown>
+                {run.assistantRedacted && (
+                  <p className="projection-note">
+                    {t("privacy.sensitive_hidden")}
                   </p>
                 )}
-                {isCurrent && task.pendingUi && (
-                  <div className="task-attention">
-                    {renderPendingUi({
-                      taskId: task.id,
-                      pending: task.pendingUi,
-                      busy: responseDisabled,
-                      respond: onRespond,
-                    })}
-                  </div>
-                )}
-                {showOutcome && run.outcome && (
-                  <section className="task-outcome" data-phase={run.phase}>
-                    <div role={isCurrent ? "status" : undefined}>
-                      <p>{t(outcomeMessage(run.outcome))}</p>
-                      {run.cause && <span>{t(`cause.${run.cause}`)}</span>}
-                    </div>
-                    {isCurrent && retryAvailable && retryable(run.outcome) && (
-                      <button
-                        className="task-outcome-action focus-ring"
-                        title={
-                          composerHasDraft
-                            ? t("run.review_draft_help")
-                            : t("run.retry_help")
-                        }
-                        onClick={() => onPrepareRetry(run.input)}
-                      >
-                        {composerHasDraft
-                          ? t("run.review_draft")
-                          : t("run.prepare_retry")}
-                      </button>
-                    )}
-                  </section>
-                )}
-              </section>
-            );
-          })}
-          {task && task.runs.length === 0 && (
-            <div className="task-empty-state">
-              <h2>{t("task.empty_title")}</h2>
-              <p>{t("task.created_empty_body")}</p>
-            </div>
-          )}
+              </Message>
+            )}
+            {isCurrent && activeRun(run) && (
+              <Activity state="live" label={t(activeRunMessage(run))} />
+            )}
+            {isCurrent && task.pendingUi && (
+              <div className="ai-exchange-intervention">
+                {renderPendingUi({
+                  taskId: task.id,
+                  pending: task.pendingUi,
+                  busy: responseDisabled,
+                  respond: onRespond,
+                })}
+              </div>
+            )}
+            {showOutcome && run.outcome && (
+              <Activity
+                state={outcomeState(run.outcome)}
+                label={t(outcomeMessage(run.outcome))}
+                detail={run.cause ? t(`cause.${run.cause}`) : undefined}
+                announce={isCurrent}
+                action={
+                  isCurrent && retryAvailable && retryable(run.outcome) ? (
+                    <button
+                      className="ai-activity-retry focus-ring"
+                      title={
+                        composerHasDraft
+                          ? t("run.review_draft_help")
+                          : t("run.retry_help")
+                      }
+                      onClick={() => onPrepareRetry(run.input)}
+                    >
+                      {composerHasDraft
+                        ? t("run.review_draft")
+                        : t("run.prepare_retry")}
+                    </button>
+                  ) : undefined
+                }
+              />
+            )}
+          </section>
+        );
+      })}
+      {task && task.runs.length === 0 && (
+        <div className="ai-conversation-empty">
+          <h2>{t("task.empty_title")}</h2>
+          <p>{t("task.created_empty_body")}</p>
         </div>
-      </div>
-      {showJumpLatest && (
-        <button className="jump-latest focus-ring" onClick={jumpToLatest}>
-          {t("task.jump_latest")}
-        </button>
       )}
-    </section>
+    </Conversation>
   );
 }

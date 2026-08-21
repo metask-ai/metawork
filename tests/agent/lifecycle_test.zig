@@ -208,7 +208,7 @@ test "canonical AgentCore accepts an empty complete MCP Session replacement" {
     const session = try runtime.createSession(.{
         .provider = .anthropic,
         .permission_mode = .default,
-        .shell_policy = .disabled,
+        .shell_policy = .unrestricted,
         .credential = "fixture-secret",
         .model = "fixture-model",
         .workspace = .{
@@ -217,7 +217,6 @@ test "canonical AgentCore accepts an empty complete MCP Session replacement" {
         },
         .canonical_user_home = workspace_root,
         .workspace_epoch = "canonical-mcp-empty-replacement",
-        .allowed_tools = &.{"Read"},
     });
     try session.updateMcpSelection(null);
     try std.testing.expectEqual(lifecycle.SessionState.idle, session.snapshot().state);
@@ -1189,7 +1188,7 @@ test "Agent Runtime creates and destroys an idle Session" {
     try std.testing.expectEqual(@as(usize, 1), fake_core.session_destroyed);
 }
 
-test "Agent Runtime passes the selected desktop built-in profile to Session" {
+test "Agent Runtime applies the fixed MetaWork built-in surface to Session" {
     fake_core.reset();
     const runtime = try createTestComposition(.{
         .worker_count = 1,
@@ -1216,21 +1215,22 @@ test "Agent Runtime passes the selected desktop built-in profile to Session" {
             .trust = .{ .temporary = workspace_root },
         },
         .canonical_user_home = workspace_root,
-        .workspace_epoch = "profile-test",
-        .allowed_tools = lifecycle.builtinToolsForProfile(.local),
+        .workspace_epoch = "metawork-agent-tools",
     });
     defer closeSession(session, .session_close) catch {};
 
-    try std.testing.expectEqual(
-        lifecycle.local_builtin_tools.len,
-        fake_core.last_allowed_tool_count,
-    );
-    for (lifecycle.local_builtin_tools, 0..) |name, index| {
+    const expected = [_][]const u8{
+        "Read", "Write", "Edit", "Glob", "Grep", "Bash", "BashOutput", "KillShell", "WebSearch", "WebFetch",
+    };
+    try std.testing.expectEqual(expected.len, fake_core.last_allowed_tool_count);
+    for (expected, 0..) |name, index| {
         try std.testing.expectEqualStrings(
             name,
             fake_core.last_allowed_tool_names[index][0..name.len],
         );
     }
+    for (fake_core.last_allowed_tool_names[0..fake_core.last_allowed_tool_count]) |storage|
+        try std.testing.expect(std.mem.indexOf(u8, &storage, "AskUserQuestion") == null);
 }
 
 test "Workspace requires an absolute temporary or explicit trusted root" {
@@ -1630,10 +1630,6 @@ test "UI request validates identity and close wakes a suspended callback" {
     try std.testing.expectEqual(std.meta.Tag(sdk.UiRequest).permission, std.meta.activeTag(decoded.value));
     try std.testing.expectError(error.StaleUiResponse, answered.respondPermission(run_id + 1, request_id, .allow_once));
     try std.testing.expectError(error.StaleUiResponse, answered.respondPermission(run_id, request_id + 1, .allow_once));
-    try std.testing.expectError(
-        error.InvalidUiResponse,
-        answered.respondAnswers(run_id, request_id, &.{.{ .values = &.{"Yes"} }}),
-    );
     try answered.respondPermission(run_id, request_id, .allow_session);
     try std.testing.expectError(error.StaleUiResponse, answered.respondPermission(run_id, request_id, .allow_once));
     fake_core.releaseControlled();
@@ -1672,6 +1668,35 @@ test "UI request validates identity and close wakes a suspended callback" {
         cancelled_terminal.termination_signal.?,
     );
     try closeSession(cancelled, .session_close);
+}
+
+test "MetaWork Agent rejects structured questions before product projection" {
+    fake_core.reset();
+    fake_core.setNextPlan(.ask_question);
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 1,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    const session = try openSession(runtime);
+    const run_id = try submitSession(session, "attempt structured question");
+    try session.waitRun(run_id);
+    var terminal = takeTestTerminal(session, run_id);
+    defer terminal.deinit();
+    try std.testing.expectEqual(
+        lifecycle.TerminationSignal{ .callback_failure = .ui },
+        terminal.termination_signal.?,
+    );
+    try std.testing.expect(session.pendingUiRequest() == null);
+    fake_core.lock();
+    const fatal_callbacks = fake_core.ui_fatal_callbacks;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 1), fatal_callbacks);
+    try closeSession(session, .session_close);
 }
 
 test "Session permission grants are reused only by AgentCore within that Session" {

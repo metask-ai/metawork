@@ -99,7 +99,6 @@ pub const PreparedAttempt = struct {
     execution: owned_execution.OwnedTaskExecution,
     model: []u8,
     provider: agent.ProviderKind,
-    builtin_tool_profile: ?agent.BuiltinToolProfile,
     mcp_selection: ?*agent.McpSelection,
     mcp_catalog_generation: ?u64,
 };
@@ -317,10 +316,6 @@ pub const Job = struct {
                 },
                 .canonical_user_home = self.attempt.workspace.canonical_user_home,
                 .workspace_epoch = self.attempt.workspace.epoch_token,
-                .allowed_tools = if (self.attempt.builtin_tool_profile) |profile|
-                    agent.builtinToolsForProfile(profile)
-                else
-                    &agent.desktop_builtin_tools,
                 .skill_catalog = acquisition.lease,
                 .skill_policy = .{
                     .granted_skill_ids = granted_skill_ids.items,

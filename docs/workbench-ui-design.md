@@ -50,12 +50,12 @@ MetaWork 的视觉记忆点不是装饰性的暖色、通用衬线大标题、�
 Windows 与 macOS 当前锁定的 development ABI v1 revision 9 已为以下既有界面提供可验证数据；Skill catalog、typed Skill Run 与 Composer Slash 使用同一 Workspace/Task snapshot 和 Run product path：
 
 - 文本流、工具开始/进度/结果、Run progress、usage、context warning、auto compact、retry 和 stream done；
-- Ask question 与 permission 两类同步用户请求；
+- tool permission 同步用户请求；AgentCore ABI 虽保留 Ask question，但 MetaWork Agent 不开放对应 built-in；
 - Workspace current / Task pinned Skill catalog、typed Skill Run 与独立 Skill rejection；
 - Run 状态、六种终止原因，以及 Session 是否仍可继续。
 - revision 8 的 `run_state` 阶段观察；Workbench 将其投影为 Current activity 文案，并按 transition sequence 丢弃过期观察。
 
-因此当前产品只在 Task 内容区显示用户输入、Assistant 回复、问题/权限卡片、唯一当前状态和必要的终止结果；真实 usage 仅进入按需 Task overview。工具开始、进度和结果继续作为 Host 事实存在，但不作为面向用户的主叙事。Plan、plan approval、Outputs、Files changed、持久权限管理和 custom UI 均保持隐藏；它们在本文档中的设计是后续 capability 到位后的产品规范，不是当前实现承诺。Renderer 不解析工具参数、stdout 或普通文本来猜测这些状态；Current activity 的细粒度文案只来自 Host 对 AgentCore `run_state` 的受序列保护投影。当前 Renderer 合同已提供独立 Workspace projection、Task-bound ExecutionConfig facts、正式设置 route，以及设置与 New task 共享的默认 API/模型选择；跨重启 rebind 等仍须等对应 capability 落地后才能宣称可用，差距由 [验证规范](validation.md)明确记录。
+因此当前产品只在 Task 内容区显示用户输入、Assistant 回复、权限决策面、唯一当前状态和必要的终止结果；真实 usage 仅进入按需 Task overview。普通信息不足时，Agent 通过 Assistant 回复说明问题并结束当前 Run，用户从 Composer 继续，不进入结构化 Question wait。工具开始、进度和结果继续作为 Host 事实存在，但不作为面向用户的主叙事。Plan、plan approval、Outputs、Files changed、持久权限管理和 custom UI 均保持隐藏；它们在本文档中的设计是后续 capability 到位后的产品规范，不是当前实现承诺。Renderer 不解析工具参数、stdout 或普通文本来猜测这些状态；Current activity 的细粒度文案只来自 Host 对 AgentCore `run_state` 的受序列保护投影。当前 Renderer 合同已提供独立 Workspace projection、Task-bound ExecutionConfig facts、正式设置 route，以及设置与 New task 共享的默认 API/模型选择；跨重启 rebind 等仍须等对应 capability 落地后才能宣称可用，差距由 [验证规范](validation.md)明确记录。
 
 ### 2.2 Capability 标记
 
@@ -119,7 +119,7 @@ Workspace
 | Plan                 | 计划         | 只在有真实结构化计划时显示          |
 | Outputs              | 结果文件     | 用户关心的最终交付，不称 Artifacts  |
 | Files changed        | 文件变更     | Agent 实际修改过的文件集合          |
-| Needs your attention | 需要你处理   | 审批、问题回答或计划确认            |
+| Needs your attention | 需要你处理   | 权限审批或计划确认                  |
 | Allow once           | 允许一次     | 仅批准当前请求                      |
 | Always allow         | 始终允许     | 创建可撤销的持久权限规则            |
 | Stop task            | 停止任务     | 停止当前执行，不删除任务            |
@@ -374,7 +374,7 @@ Disabled
 - 新建、保存、暂停/恢复、立即运行和删除使用 Host typed result 与 optimistic `scheduledTaskEpoch`。命令 timeout 后先刷新 canonical snapshot，不自动重放；
 - 点击计划打开 detail drawer：上半部是定义与下一次运行，下半部是有界运行历史。每个 occurrence 链接到其真实 Task，并显示完成、失败、已跳过、延迟或等待处理；结果历史不复制 Task timeline；
 - 删除计划不停止或删除已经创建的真实 Task；`立即运行` 也通过同一 occurrence 与 Task admission，不能建立测试/手动专用路径；上一次真实 Task 仍 non-terminal 时显示 `已跳过：上一次仍在运行`；
-- 执行配置或 Workspace authority 变化时显示 `需要处理`，并要求用户编辑确认；需要 Agent permission/question 的 occurrence 链接到真实请求并发出系统通知，不把等待伪装成 schedule failure；
+- 执行配置或 Workspace authority 变化时显示 `需要处理`，并要求用户编辑确认；需要 Agent permission 的 occurrence 链接到真实请求并发出系统通知，不把等待伪装成 schedule failure；
 - 每次 default occurrence 创建新的真实 Task 与 Automatic Workspace；同一 occurrence 所属 Task 的后续 Run 复用该目录。运行历史链接 Task，不展示 automatic `workspace-key`；目录保留不等于 Host 重启后恢复 Task。
 - 页面不再显示“仅在 MetaWork 运行时触发”限制条。窗口关闭时 MetaWork 留在系统后台并继续计划；显式退出通过托盘动作完成并在确认中说明影响，重启后定义与触发游标从 Host store 恢复；
 - 已有定义时的搜索使用 `type="search"`；分区是带可访问名称的 region/list；模板行、任务行和 overflow 动作都有明确 button 语义。drawer 打开后焦点进入标题/说明，`Escape` 或关闭动作回到原触发行；运行历史更新不抢焦点。
@@ -500,7 +500,9 @@ Execution binding availability 是下一次 admission 的独立前置事实，�
 
 ## 7. 中间区域：Task 内容
 
-> Capability：**当前**。用户输入、Assistant 回复、问题/permission 与 Run 状态属于当前合同；typed Delivery、Outputs、FileChange 与 Plan 属于未来 capability，当前不得从 Assistant 文本或 Tool 记录推断。
+> Capability：**当前**。用户输入、Assistant 回复、permission 与 Run 状态属于当前产品路径；typed Delivery、Outputs、FileChange 与 Plan 属于未来 capability，当前不得从 Assistant 文本或 Tool 记录推断。
+
+中间区域使用同一套 MetaWork AI UI 基础语义：`Conversation` 组织阅读面，`Message` 表达用户与 Assistant 发言，`Activity` 表达当前过程与必要终止状态，`Intervention` 表达真正需要用户介入的决定，`Composer` 控制下一步输入，`Markdown` 与 `CodeBlock` 呈现回复内容。它们是 Renderer 视觉语法，不把 Bridge 或 AgentCore 对象直接变成组件。当前不存在第二套 Task 专用消息、状态、请求或输入表面，也不以 Tool、Reasoning、Question 或 Approval Card 建立平行组件分类。
 
 ### 7.1 内容模型
 
@@ -640,16 +642,15 @@ Skill draft 与 Text draft 一样按 Task/New-task scope 保存在 Renderer sess
 
 只有 Host 已确认创建真实 Task 后，New task 才切换成 Task 内容：行动标题淡出，Task Header 和已确认的用户输入出现，Composer 在约 220 ms 内落到底部，左栏出现真实 Task，焦点留在内容区。`prefers-reduced-motion` 下直接切换。Task 已创建但 Run 未成功启动时仍进入真实 Task，恢复 Task 草稿，不伪造 queued / running。
 
-## 9. 审批、问题与计划确认
+## 9. 审批与计划确认
 
-> Capability：**混合**。Question 与 tool permission 属于当前 ABI；Plan approval 和其他 typed request 必须等 AgentCore 发布对应 capability。
+> Capability：**混合**。tool permission 属于当前产品路径；Question 虽属于当前 AgentCore ABI，但未进入 MetaWork Agent 能力集合；Plan approval 和其他 typed request 必须等 AgentCore 发布对应 capability。
 
 ### 9.1 请求类型
 
 以下请求使用不同语义和组件：
 
 - Tool permission：由 AgentCore request 的 `responses[]` 驱动，当前可取 `Deny once / Deny for this session / Allow once / Allow for this session`；
-- Question：选项或文本回答，使用 `Continue`；
 - Plan approval：`Request changes / Start work`；
 - 应用级危险操作：使用原生确认窗口或应用级 sheet。
 
@@ -669,7 +670,7 @@ Skill draft 与 Text draft 一样按 Task/New-task scope 保存在 Renderer sess
 
 用户点击后立即禁用重复操作，但只有 Host 确认接受后才能显示最终决定。UI wait 没有 Host deadline，只由 answered、cancel、close 或 shutdown 结束；Renderer reload 后必须从 Host 状态恢复，已取消或不再可用的请求不能重新变成可操作状态。
 
-危险批准不能由裸 Enter 触发；开放问题可以使用 `Cmd/Ctrl + Enter` 提交。
+危险批准不能由裸 Enter 触发。
 
 ## 10. 持久权限
 
@@ -1157,7 +1158,7 @@ Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成
 - Bash 失败和长 stdout/stderr 使用有界预览；没有真实 Inspector projection 时不显示假详情入口；
 - Read 大量文件；
 - Edit diff；
-- 问题回答和 one-time permission；
+- one-time permission；
 - capability 未验收时 Plan、plan approval、Always allow、Output 与 FileChange 完全不出现；
 - 对应 capability 未来验收后，Plan 创建/更新、计划确认、持久规则与 Output 的目标状态按各章节启用；
 - 后台 Task 通知；

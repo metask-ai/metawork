@@ -393,6 +393,9 @@ test("Settings uses the global stage without retaining the Task sidebar", () => 
 
 test("Assistant reply is primary and completed does not add a redundant outcome", () => {
   const markup = renderCompletedSurface();
+  assert.match(markup, /class="ai-conversation"/);
+  assert.match(markup, /class="ai-message" data-role="user"/);
+  assert.match(markup, /class="ai-message" data-role="assistant"/);
   assert.match(markup, /Release is ready/);
   assert.doesNotMatch(markup, /Read|Work completed/);
   assert.match(renderCompletedSurface(""), /Work completed/);
@@ -593,7 +596,7 @@ test("an expired workspace grant preserves editable text and exposes recovery", 
 
 test("Composer keeps Workspace context after its input controls", () => {
   const markup = render();
-  const composerStart = markup.indexOf('class="composer"');
+  const composerStart = markup.indexOf('class="ai-composer"');
   const workspaceContext = markup.indexOf('class="composer-workspace-context"');
   assert.ok(composerStart >= 0 && workspaceContext > composerStart);
   assert.ok(

@@ -267,7 +267,6 @@ pub const UiResponseRequest = struct {
     runId: []const u8,
     requestId: []const u8,
     kind: []const u8,
-    answers: ?[]const []const []const u8 = null,
     permission: ?[]const u8 = null,
 };
 

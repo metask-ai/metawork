@@ -11,6 +11,7 @@ const checkpoint = @import("agent_checkpoint");
 const checkpoint_restore = @import("agent_checkpoint_restore");
 const session_control = @import("control.zig");
 const session_wire = @import("wire.zig");
+const capabilities = @import("../capabilities.zig");
 const session_binding = @import("binding.zig");
 // Intentional same-module cycle with session.zig; Runtime and Session retain
 // direct typed references without introducing a speculative context layer.
@@ -48,7 +49,6 @@ const SessionControlBlock = session_binding.SessionControlBlock;
 const providerKindCode = session_wire.providerKindCode;
 const permissionModeCode = session_wire.permissionModeCode;
 const shellPolicyCode = session_wire.shellPolicyCode;
-const registered_builtin_tools = session_wire.registered_builtin_tools;
 const mcpUpdateStatusDisposition = root.mcpUpdateStatusDisposition;
 
 const McpRefreshLease = struct {
@@ -160,9 +160,9 @@ pub const Runtime = struct {
 
         var runtime_config = std.mem.zeroes(wire.RuntimeConfigV1);
         runtime_config.struct_size = @sizeOf(wire.RuntimeConfigV1);
-        var builtin_views: [registered_builtin_tools.len]wire.BytesViewV1 = undefined;
-        for (registered_builtin_tools, 0..) |name, index|
-            builtin_views[index] = sdk.bytesView(name);
+        var builtin_views: [capabilities.builtins.len]wire.BytesViewV1 = undefined;
+        for (capabilities.builtins, 0..) |builtin, index|
+            builtin_views[index] = sdk.bytesView(capabilities.wireName(builtin));
         runtime_config.builtin_tools = &builtin_views;
         runtime_config.builtin_tool_count = builtin_views.len;
         runtime_config.host_tools = null;
@@ -840,10 +840,10 @@ pub const Runtime = struct {
         else
             null;
         host_config.durable_budget = null;
-        const allowed_views = try self.allocator.alloc(wire.BytesViewV1, options.allowed_tools.len);
+        const allowed_views = try self.allocator.alloc(wire.BytesViewV1, capabilities.builtins.len);
         defer self.allocator.free(allowed_views);
-        for (options.allowed_tools, 0..) |name, index|
-            allowed_views[index] = sdk.bytesView(name);
+        for (capabilities.builtins, 0..) |builtin, index|
+            allowed_views[index] = sdk.bytesView(capabilities.wireName(builtin));
         host_config.allowed_tools = if (allowed_views.len == 0) null else allowed_views.ptr;
         host_config.allowed_tool_count = allowed_views.len;
         var config = std.mem.zeroes(wire.SessionCreateConfigV1);
@@ -954,11 +954,11 @@ pub const Runtime = struct {
         }
         const allowed_views = try self.allocator.alloc(
             wire.BytesViewV1,
-            session_options.allowed_tools.len,
+            capabilities.builtins.len,
         );
         defer self.allocator.free(allowed_views);
-        for (session_options.allowed_tools, 0..) |name, index|
-            allowed_views[index] = sdk.bytesView(name);
+        for (capabilities.builtins, 0..) |builtin, index|
+            allowed_views[index] = sdk.bytesView(capabilities.wireName(builtin));
 
         self.sessions_mutex.lockUncancelable(self.io);
         if (self.shutting_down.load(.acquire)) {

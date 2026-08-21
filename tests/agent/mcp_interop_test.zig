@@ -512,7 +512,7 @@ test "canonical AgentCore executes a selected Streamable HTTP tool" {
     const session = try runtime.createSession(.{
         .provider = .anthropic,
         .permission_mode = .full_access,
-        .shell_policy = .disabled,
+        .shell_policy = .unrestricted,
         .credential = "fixture-credential",
         .model = "fixture-model",
         .base_url = fixture.provider_endpoint,
@@ -521,7 +521,6 @@ test "canonical AgentCore executes a selected Streamable HTTP tool" {
             .trust = .explicitly_trusted,
         },
         .mcp_selection = selection,
-        .allowed_tools = &.{},
     });
     const run_id = try session.prepareRun(.{ .text = "Call the selected echo tool." });
     var run = try session.beginRun(run_id);

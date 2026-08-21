@@ -9,6 +9,7 @@ import {
 } from "react";
 
 import type { SkillCatalogView, TaskView } from "../../bridge/contracts.ts";
+import { Composer } from "../../components/ai/index.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { Button } from "../../components/ui/button.tsx";
 import { Input } from "../../components/ui/input.tsx";
@@ -365,7 +366,15 @@ export function ComposerFooter({
             onRefresh={onRefreshSkillCatalog}
           />
         )}
-        <div className="composer">
+        <Composer
+          state={
+            unavailable || archived || closing
+              ? "unavailable"
+              : runInFlight
+                ? "running"
+                : "normal"
+          }
+        >
           {draft.kind === "text" ? (
             <Textarea
               ref={textareaRef}
@@ -522,7 +531,7 @@ export function ComposerFooter({
             </div>
           )}
           <div
-            className="composer-toolbar"
+            className="ai-composer-toolbar"
             role="group"
             aria-label={t("run.context")}
           >
@@ -575,7 +584,7 @@ export function ComposerFooter({
               </Button>
             )}
           </div>
-        </div>
+        </Composer>
         <WorkspaceContextSelector
           accessRequired={accessRequired}
           missing={workspaceMissing}

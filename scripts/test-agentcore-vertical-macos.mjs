@@ -112,8 +112,8 @@ await writeFile(
     "---",
     "METAWORK_TYPED_SKILL_VERTICAL",
     process.platform === "win32"
-      ? "Review $target. Exercise Read, Write, Glob, Grep, Bash, Edit, BashOutput, KillShell, and AskUserQuestion, then finish."
-      : "Review $target. Exercise Read, Bash, Edit, and AskUserQuestion, then finish.",
+      ? "Review $target. Exercise Read, Write, Glob, Grep, Bash, Edit, BashOutput, and KillShell, then finish."
+      : "Review $target. Exercise Read, Bash, and Edit, then finish.",
     "",
   ].join("\n"),
   { mode: 0o600 },
@@ -155,29 +155,12 @@ const responses = [
         toolSseFromBackgroundJob("m9", "kill-shell-1", "KillShell"),
       ]
     : []),
-  toolSse(
-    process.platform === "win32" ? "m10" : "m4",
-    "ask-1",
-    "AskUserQuestion",
-    {
-      questions: [
-        {
-          question: "Continue the AgentCore vertical run?",
-          header: "Continue",
-          options: [
-            { label: "Yes", description: "Finish the run" },
-            { label: "No", description: "Stop here" },
-          ],
-        },
-      ],
-    },
-  ),
   textSse(
-    process.platform === "win32" ? "m11" : "m5",
+    process.platform === "win32" ? "m10" : "m4",
     "metawork agentcore vertical complete",
   ),
   textSse(
-    process.platform === "win32" ? "m12" : "m6",
+    process.platform === "win32" ? "m11" : "m5",
     "metawork text checkpoint complete",
   ),
   textSse(
@@ -376,8 +359,6 @@ try {
       `Run history lost its typed Skill input: ${JSON.stringify(submittedRun.input)}`,
     );
   await captureVisual("running", 1320, 812);
-  let reloadedRequest = null;
-  let deliveryEmitsBeforeReload = null;
   let visualAttentionCaptured = false;
   const answered = new Set();
   const terminal = new Set([
@@ -416,31 +397,6 @@ try {
             requestId: pending.requestId,
             kind: "permission",
             permission: "allow_once",
-          };
-        } else if (pending.kind === "ask_question") {
-          if (reloadedRequest === null) {
-            reloadedRequest = pending.requestId;
-            deliveryEmitsBeforeReload = productDeliveryEmitCount();
-            await automate("reload");
-            await waitForBridge();
-            const restored = await snapshot();
-            const restoredTask = restored.tasks.find(
-              (item) => item.id === taskId,
-            );
-            if (
-              restoredTask?.pendingUi?.requestId !== pending.requestId ||
-              restoredTask.pendingUi.runId !== runId
-            )
-              throw new Error(
-                "Renderer reload lost or rerouted the pending UI request",
-              );
-          }
-          responsePayload = {
-            taskId,
-            runId,
-            requestId: pending.requestId,
-            kind: "answers",
-            answers: [["Yes"]],
           };
         } else {
           throw new Error(
@@ -544,15 +500,6 @@ try {
     (await readFile(writtenPath, "utf8")) !== "agentcore-vertical-write\n"
   )
     throw new Error("Write did not materialize the expected file");
-  if (reloadedRequest === null)
-    throw new Error("AskUserQuestion did not exercise reload-safe resume");
-  if (
-    deliveryEmitsBeforeReload === null ||
-    productDeliveryEmitCount() <= deliveryEmitsBeforeReload
-  )
-    throw new Error(
-      "the real ProductDelivery path did not publish a revision after Renderer reload",
-    );
   if (/metawork\.product_delivery\.emit.*main_thread=false/.test(output))
     throw new Error(
       "ProductDelivery emitted a Renderer revision off the main thread",
@@ -577,14 +524,6 @@ try {
     )
   )
     throw new Error("permission decision was not retained in Task history");
-  const restoredAnswer = task.uiHistory.find(
-    (item) => item.requestId === reloadedRequest,
-  );
-  if (
-    restoredAnswer?.kind !== "ask_question" ||
-    restoredAnswer.state !== "answered"
-  )
-    throw new Error("reload-safe question did not resolve into UI history");
   const edited = await readFile(fixturePath, "utf8");
   if (edited !== "agentcore-vertical-after\n")
     throw new Error(
@@ -823,7 +762,7 @@ try {
   process.stdout.write(
     process.platform === "win32"
       ? "AgentCore Windows desktop vertical passed: real Skill/Text/compact checkpoints, hash/descriptor verification, missing-blob restart reconciliation, main-thread ProductDelivery, Runtime-owned tray routing, and clean shutdown; Windows Shell chrome/tray remain separate non-blocking gates.\n"
-      : "AgentCore macOS desktop vertical passed: real Skill/Text/compact checkpoints, hash/descriptor verification, missing-blob restart reconciliation, materialized arguments without raw slash, main-thread ProductDelivery, Read/Bash/Edit, permission UI, duplicate UI-response rejection, reload-safe AskUserQuestion resume, Task metadata lifecycle, Runtime-owned tray routing, and clean shutdown.\n",
+      : "AgentCore macOS desktop vertical passed: real Skill/Text/compact checkpoints, hash/descriptor verification, missing-blob restart reconciliation, materialized arguments without raw slash, main-thread ProductDelivery, Read/Bash/Edit, permission UI, duplicate UI-response rejection, Task metadata lifecycle, Runtime-owned tray routing, and clean shutdown.\n",
   );
 } catch (error) {
   process.stderr.write(`${output}\n`);

@@ -3437,14 +3437,8 @@ fn encodeSkillDetailUnavailable(output: []u8, reason: []const u8) ![]const u8 {
 }
 
 fn decodeUiResponse(request: handlers.UiResponseRequest) !workbench_api.UiResponse {
-    if (std.mem.eql(u8, request.kind, "answers")) {
-        if (request.answers == null or request.permission != null)
-            return error.InvalidUiResponse;
-        return .{ .answers = request.answers.? };
-    }
     if (std.mem.eql(u8, request.kind, "permission")) {
-        if (request.answers != null or request.permission == null)
-            return error.InvalidUiResponse;
+        if (request.permission == null) return error.InvalidUiResponse;
         const choice = handlers.permissionChoice(request.permission.?) orelse
             return error.InvalidUiResponse;
         return .{ .permission = switch (choice) {
