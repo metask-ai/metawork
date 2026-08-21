@@ -369,6 +369,8 @@ fn failureForStatus(status: sdk.Status, local: LocalSourceFailure) Failure {
         .stale_compact,
         .mcp_not_refreshed,
         .invalid_mcp_selection,
+        .completion_unsupported_response,
+        .skill_catalog_incomplete,
         .ok,
         => dependencyFailure(.restore),
     };

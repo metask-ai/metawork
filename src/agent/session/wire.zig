@@ -177,23 +177,23 @@ pub fn shellPolicyCode(value: control.ShellPolicy) u32 {
     };
 }
 
-pub fn skillSelection(
-    disabled_skill_ids: []const []const u8,
+pub fn skillPolicy(
+    granted_skill_ids: []const []const u8,
     views: []wire.BytesViewV1,
-) error{InvalidSkillSelection}!wire.SkillSelectionV1 {
-    if (views.len != disabled_skill_ids.len) return error.InvalidSkillSelection;
-    for (disabled_skill_ids, 0..) |skill_id, index| {
+) error{InvalidSkillPolicy}!wire.SkillPolicyV1 {
+    if (views.len != granted_skill_ids.len) return error.InvalidSkillPolicy;
+    for (granted_skill_ids, 0..) |skill_id, index| {
         if (skill_id.len == 0 or !std.unicode.utf8ValidateSlice(skill_id))
-            return error.InvalidSkillSelection;
-        for (disabled_skill_ids[0..index]) |prior|
-            if (std.mem.eql(u8, prior, skill_id)) return error.InvalidSkillSelection;
+            return error.InvalidSkillPolicy;
+        for (granted_skill_ids[0..index]) |prior|
+            if (std.mem.eql(u8, prior, skill_id)) return error.InvalidSkillPolicy;
         views[index] = sdk.bytesView(skill_id);
     }
     return .{
-        .struct_size = @sizeOf(wire.SkillSelectionV1),
-        .default_state_code = wire.SKILL_SELECTION_ENABLED,
-        .exception_skill_ids = if (views.len == 0) null else views.ptr,
-        .exception_skill_id_count = views.len,
+        .struct_size = @sizeOf(wire.SkillPolicyV1),
+        .reserved0 = 0,
+        .granted_skill_ids = if (views.len == 0) null else views.ptr,
+        .granted_skill_id_count = views.len,
         .reserved = [_]u64{0} ** 4,
     };
 }

@@ -1597,14 +1597,14 @@ export default function App() {
           workspaceId: string;
           expectedWorkspaceEpoch: string;
         },
-    skillId: string,
+    skillPolicyKey: string,
     state: "inherit" | "enabled" | "disabled",
     expectedCatalogRevision: string,
     expectedSelectionRevision: string,
   ): Promise<SkillEnablementResult> {
     const result = await client.setSkillEnabled(
       target,
-      skillId,
+      skillPolicyKey,
       state,
       expectedCatalogRevision,
       expectedSelectionRevision,

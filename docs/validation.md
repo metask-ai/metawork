@@ -82,8 +82,8 @@ Storage foundation 的自动化必须同时覆盖内存 target 与测试显式�
 ### AgentCore target baseline
 
 - **规范**：[高层架构](architecture.md)、[ABI v1 消费合同](agentcore-abi-v1.md)。
-- **证据**：Windows x86_64 GNU 与 macOS arm64 分别锁定 clean source commit `df554537aea946776946238b657ad29b20f0c852` 的 target artifact；repository lock、staged verifier、restore/provider/model-mutation probe 和平台 vertical 分别验证各自 artifact。
-- **结论**：两平台均为 ABI v1 revision 8、216-byte table、required capabilities `0xfffff`。两份 lock、artifact 和平台结果不能互相替代。
+- **证据**：Windows x86_64 GNU 锁定 clean source commit `e0d29bcfd926b02bffdb165731839bf368210093`，macOS arm64 锁定 `d82e608e4e1481671de4235186f96a36d25446cb` 的 target artifact；repository lock 与 bundle tests 验证 manifest/target/ABI identity。各平台 vertical 结果以本节对应平台记录为准。
+- **结论**：两平台 artifact 均为 ABI v1 revision 9、280-byte table、required capabilities `0x3fffff`。两份 lock、artifact 和平台结果不能互相替代。
 
 2026-08-13 的 Windows staged run-state probe 可由 Git object `51e0fcc847e7b832b628f6c64183525dd8300710` 定位：Host Run ID `7` 的 callback identity 与 `run_state.run_id` 一致，首序号为 `1`，并观察到 `starting → generating → finalizing → completed`。结论已进入 ABI 合同和 Workbench 回归，因此 active tree 不再保留该一次性 probe。
 
@@ -157,7 +157,7 @@ node scripts/test-window-chrome-windows.mjs --resize-session-only
 node scripts/test-window-chrome-windows.mjs
 ```
 
-`run-windows-bringup.mjs` 必须覆盖 staged verifier、restore probe、bundle/lifecycle tests、正式 test graph、Debug/Release build 和真实 Windows vertical，并明确报告 revision 8。window-chrome 的 resize/session gate 与 pointer/controls gate 分开报告：程序化 resize 只能证明 Native window、最小尺寸和同一 Renderer session，不能替代真实鼠标 edge resize、work-area clamp 或 WebView 焦点验收。
+`run-windows-bringup.mjs` 必须覆盖 staged verifier、restore probe、bundle/lifecycle tests、正式 test graph、Debug/Release build 和真实 Windows vertical，并明确报告 revision 9。window-chrome 的 resize/session gate 与 pointer/controls gate 分开报告：程序化 resize 只能证明 Native window、最小尺寸和同一 Renderer session，不能替代真实鼠标 edge resize、work-area clamp 或 WebView 焦点验收。
 
 当前已验收普通拖动、最大化拖动恢复、Renderer controls、close-policy hide/reopen 与 clean shutdown。top/bottom/四角 resize、edge snap、双击标题栏、系统菜单、touch/pen 和完整 UIA 焦点仍需独立证据。
 
@@ -165,7 +165,7 @@ node scripts/test-window-chrome-windows.mjs
 
 ### Checkpoint artifact boundary
 
-revision 8 不继承旧 artifact 的 checkpoint 样本或通过结论。Windows 与 macOS 必须分别使用各自锁定 artifact 重新采集平台 vertical；旧版本结果不能替代。checkpoint digest 与产品预算的规范性语义见[AgentCore 集成契约](agentcore-integration.md)和[ABI v1 消费合同](agentcore-abi-v1.md)。
+revision 9 不继承旧 artifact 的 checkpoint 样本或通过结论。Windows 与 macOS 必须分别使用各自锁定 artifact 重新采集平台 vertical；旧版本结果不能替代。checkpoint digest 与产品预算的规范性语义见[AgentCore 集成契约](agentcore-integration.md)和[ABI v1 消费合同](agentcore-abi-v1.md)。
 
 ## 尚未验证的能力
 
@@ -177,7 +177,7 @@ revision 8 不继承旧 artifact 的 checkpoint 样本或通过结论。Windows 
 - Task 当前进程内 execution binding 和模型切换已有自动化；显式 execution rebind 的跨重启 epoch/history 与竞态尚未实现。
 - MCP 的真实第三方 server、平台 credential/network、secure capture、browser/callback 和 issuer 行为尚未完成跨平台验收；marketplace 不在当前范围。
 - 系统关机或用户显式退出 MetaWork 期间的准点执行、登录前系统服务和远端云调度尚未实现。当前只保证窗口关闭而 Host 仍运行时继续调度，并在下次启动协调至多一个 missed occurrence。
-- Windows 仅有 development baseline；Windows distribution 与 Linux target 尚未完成。
+- Windows revision 9 development baseline、Windows distribution 与 Linux target 尚未完成。
 
 ## 维护规则
 

@@ -82,7 +82,7 @@ pub const SkillSetEnabled = struct {
     scope: []const u8,
     workspaceId: ?[]const u8,
     expectedWorkspaceEpoch: ?[]const u8,
-    skillId: []const u8,
+    skillPolicyKey: []const u8,
     state: []const u8,
     expectedCatalogRevision: []const u8,
     expectedSelectionRevision: []const u8,

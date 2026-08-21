@@ -285,7 +285,7 @@ export class BridgeClient {
           workspaceId: string;
           expectedWorkspaceEpoch: string;
         },
-    skillId: string,
+    skillPolicyKey: string,
     state: "inherit" | "enabled" | "disabled",
     expectedCatalogRevision: string,
     expectedSelectionRevision: string,
@@ -296,7 +296,7 @@ export class BridgeClient {
         workspaceId: target.scope === "project" ? target.workspaceId : null,
         expectedWorkspaceEpoch:
           target.scope === "project" ? target.expectedWorkspaceEpoch : null,
-        skillId,
+        skillPolicyKey,
         state,
         expectedCatalogRevision,
         expectedSelectionRevision,

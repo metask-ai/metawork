@@ -58,7 +58,7 @@ try {
     path.join(zigConsumerRoot, "build.zig.zon"),
     `.{
     .name = .agentcore_restore_probe,
-    .fingerprint = 0x1c95480a301cfef9,
+    .fingerprint = 0xcad095463de5d8dd,
     .version = "0.0.0",
     .minimum_zig_version = "0.16.0",
     .dependencies = .{

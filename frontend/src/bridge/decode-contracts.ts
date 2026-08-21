@@ -611,6 +611,7 @@ function decodeSkillManagement(
         "scope",
         "managementState",
         "skillId",
+        "skillPolicyKey",
         "invocationName",
         "displayName",
         "description",
@@ -679,6 +680,13 @@ function decodeSkillManagement(
           asset.skillId === null
             ? null
             : nonEmptyString(asset.skillId, `${itemPath}.skillId`),
+        skillPolicyKey:
+          asset.skillPolicyKey === null
+            ? null
+            : nonEmptyString(
+                asset.skillPolicyKey,
+                `${itemPath}.skillPolicyKey`,
+              ),
         invocationName: nonEmptyString(
           asset.invocationName,
           `${itemPath}.invocationName`,

@@ -9,7 +9,7 @@ const maxManifestBytes = 1024 * 1024;
 const maxPayloadBytes = 128 * 1024 * 1024;
 const maxPayloadFiles = 256;
 const supportedAbiVersion = 1;
-const supportedAbiTableSize = 216;
+const supportedAbiTableSize = 280;
 
 const targetPolicies = [
   {
@@ -24,8 +24,8 @@ const targetPolicies = [
     library: "lib/metask_agentcore.lib",
     optimize: "ReleaseSafe",
     systemLibraries: ["advapi32", "crypt32"],
-    abiRevision: 8,
-    capabilities: 0xfffff,
+    abiRevision: 9,
+    capabilities: 0x3fffff,
     lock: path.join("build_support", "agentcore-bundle.windows.lock.json"),
   },
   {
@@ -40,8 +40,8 @@ const targetPolicies = [
     library: "lib/libmetask_agentcore.a",
     optimize: "ReleaseSafe",
     systemLibraries: [],
-    abiRevision: 8,
-    capabilities: 0xfffff,
+    abiRevision: 9,
+    capabilities: 0x3fffff,
     lock: path.join("build_support", "agentcore-bundle.macos.lock.json"),
   },
 ];

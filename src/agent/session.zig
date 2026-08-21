@@ -34,6 +34,9 @@ pub const RunState = sdk.protocol.RunState;
 pub const RunStatePhase = sdk.protocol.RunStatePhase;
 pub const CatalogHealth = catalog.Health;
 pub const CatalogIssueCode = catalog.IssueCode;
+pub const CatalogIssueKind = catalog.IssueKind;
+pub const CatalogResourceReason = catalog.ResourceReason;
+pub const CatalogSourceScope = catalog.SourceScope;
 pub const CatalogIssue = catalog.Issue;
 pub const CatalogSkill = catalog.Skill;
 pub const CatalogProjection = catalog.Projection;
@@ -319,13 +322,13 @@ pub const SessionOpenOptions = struct {
     canonical_user_home: []const u8 = "",
     workspace_epoch: []const u8 = "",
     skill_catalog: ?*CatalogLease = null,
-    skill_selection: ?SkillSelectionInput = null,
+    skill_policy: ?SkillPolicyInput = null,
     mcp_selection: ?*const McpSelection = null,
     allowed_tools: []const []const u8 = &desktop_builtin_tools,
 };
 
-pub const SkillSelectionInput = struct {
-    disabled_skill_ids: []const []const u8 = &.{},
+pub const SkillPolicyInput = struct {
+    granted_skill_ids: []const []const u8 = &.{},
 };
 
 pub const SessionRestoreOptions = struct {
@@ -396,11 +399,12 @@ pub const Error = error{
     InvalidCatalogDescriptor,
     DuplicateCatalogIdentity,
     SkillCatalogInvalid,
+    SkillCatalogIncomplete,
     CatalogResourceLimit,
     CatalogReleaseFailed,
     CatalogLeasesOutstanding,
     CatalogBindingMismatch,
-    InvalidSkillSelection,
+    InvalidSkillPolicy,
     CatalogRefreshFailed,
     McpRefreshFailed,
     InvalidMcpCatalogDescriptor,
@@ -842,7 +846,7 @@ pub const Session = struct {
     pub fn refreshSkillCatalog(
         self: *Session,
         lease: *CatalogLease,
-        skill_selection: SkillSelectionInput,
+        skill_policy: SkillPolicyInput,
     ) (Error || std.mem.Allocator.Error)!void {
         if (!catalog.belongsTo(lease, self.agent_runtime) or
             !catalog.matches(
@@ -852,15 +856,15 @@ pub const Session = struct {
                 self.workspace_epoch,
             ))
             return error.CatalogBindingMismatch;
-        const selection_views = try self.agent_runtime.allocator.alloc(
+        const policy_views = try self.agent_runtime.allocator.alloc(
             wire.BytesViewV1,
-            skill_selection.disabled_skill_ids.len,
+            skill_policy.granted_skill_ids.len,
         );
-        defer self.agent_runtime.allocator.free(selection_views);
-        const selection = session_wire.skillSelection(
-            skill_selection.disabled_skill_ids,
-            selection_views,
-        ) catch return error.InvalidSkillSelection;
+        defer self.agent_runtime.allocator.free(policy_views);
+        const policy = session_wire.skillPolicy(
+            skill_policy.granted_skill_ids,
+            policy_views,
+        ) catch return error.InvalidSkillPolicy;
         self.lock();
         defer self.unlock();
         if (self.agent_runtime.shutting_down.load(.acquire))
@@ -872,10 +876,10 @@ pub const Session = struct {
             .closing, .closed => return error.SessionClosing,
         }
         var diagnostic = emptyOwnedBytes();
-        const status_code = self.agent_runtime.api.sessionUpdateSkills()(
+        const status_code = self.agent_runtime.api.sessionBindSkillPolicy()(
             self.raw,
             catalog.rawHandle(lease),
-            &selection,
+            &policy,
             &diagnostic,
         );
         releaseOwned(self.agent_runtime.api, &diagnostic);
@@ -2163,6 +2167,8 @@ fn compactStatusDisposition(status: sdk.Status) ?SessionStatusDisposition {
         .logical_session_conflict,
         .mcp_not_refreshed,
         .invalid_mcp_selection,
+        .completion_unsupported_response,
+        .skill_catalog_incomplete,
         => null,
     };
 }
@@ -2191,6 +2197,8 @@ fn isCompactAbortStatus(status: sdk.Status) bool {
         .logical_session_conflict,
         .mcp_not_refreshed,
         .invalid_mcp_selection,
+        .completion_unsupported_response,
+        .skill_catalog_incomplete,
         => false,
     };
 }
@@ -2224,6 +2232,8 @@ fn skillUpdateStatusDisposition(status: sdk.Status) ?SessionStatusDisposition {
         .logical_session_conflict,
         .mcp_not_refreshed,
         .invalid_mcp_selection,
+        .completion_unsupported_response,
+        .skill_catalog_incomplete,
         => null,
     };
 }
@@ -2258,6 +2268,8 @@ fn runStatusDisposition(status: sdk.Status) ?SessionStatusDisposition {
         .logical_session_conflict,
         .mcp_not_refreshed,
         .invalid_mcp_selection,
+        .completion_unsupported_response,
+        .skill_catalog_incomplete,
         => null,
     };
 }
@@ -2312,6 +2324,8 @@ fn isAbortStatus(status: sdk.Status) bool {
         .logical_session_conflict,
         .mcp_not_refreshed,
         .invalid_mcp_selection,
+        .completion_unsupported_response,
+        .skill_catalog_incomplete,
         => false,
     };
 }
@@ -2345,6 +2359,8 @@ fn isSessionDestroyStatus(status: sdk.Status) bool {
         .logical_session_conflict,
         .mcp_not_refreshed,
         .invalid_mcp_selection,
+        .completion_unsupported_response,
+        .skill_catalog_incomplete,
         => false,
     };
 }
@@ -2378,6 +2394,8 @@ pub fn mcpUpdateStatusDisposition(status: sdk.Status) ?SessionStatusDisposition 
         .checkpoint_incompatible,
         .checkpoint_io,
         .logical_session_conflict,
+        .completion_unsupported_response,
+        .skill_catalog_incomplete,
         => null,
     };
 }

@@ -18,14 +18,41 @@ pub const IssueCode = enum {
     invalid_invocation_name,
 };
 
+pub const IssueKind = enum { invalid, unavailable, conflict };
+
+pub const ResourceReason = enum {
+    file_too_large,
+    skill_too_large,
+    too_many_files,
+    too_many_entries,
+    directory_too_deep,
+    path_too_long,
+    unsupported_entry,
+    resource_unavailable,
+    resource_changed,
+};
+
+pub const SourceScope = enum { user, workspace };
+
 pub const Issue = struct {
+    kind: IssueKind,
     code: IssueCode,
-    invocation_name: ?[]const u8,
+    reason: ?ResourceReason,
+    skill_policy_key: ?[]const u8,
+    provider_id: []const u8,
+    source_scope: SourceScope,
+    source_instance_id: []const u8,
 };
 
 pub const Skill = struct {
     skill_id: []const u8,
+    skill_policy_key: []const u8,
     invocation_name: []const u8,
+    provider_id: []const u8,
+    source_scope: SourceScope,
+    source_instance_id: []const u8,
+    contribution_id: []const u8,
+    content_revision: []const u8,
     display_name: []const u8,
     description: []const u8,
     argument_names: []const []const u8,
@@ -73,6 +100,7 @@ pub const Error = error{
     InvalidCatalogDescriptor,
     DuplicateCatalogIdentity,
     SkillCatalogInvalid,
+    SkillCatalogIncomplete,
     CatalogResourceLimit,
     CatalogReleaseFailed,
     CoreCallFailed,
@@ -111,7 +139,7 @@ pub fn query(
     var raw: ?*wire.SkillCatalogHandle = null;
     var descriptor = emptyOwnedBytes();
     var diagnostic = emptyOwnedBytes();
-    const status_code = api.runtimeQuerySkillCatalog()(
+    const status_code = api.resolveWorkspaceSkillCatalog()(
         runtime,
         &query_input,
         &raw,
@@ -213,11 +241,14 @@ fn copyProjection(
     const arena = storage.arena.allocator();
 
     var skill_ids = std.StringHashMap(void).init(arena);
+    var skill_policy_keys = std.StringHashMap(void).init(arena);
     var invocation_names = std.StringHashMap(void).init(arena);
     const skills = try arena.alloc(Skill, catalog.skills.len);
     for (catalog.skills, skills) |source, *target| {
         const id_result = try skill_ids.getOrPut(source.skill_id);
         if (id_result.found_existing) return error.DuplicateCatalogIdentity;
+        const policy_result = try skill_policy_keys.getOrPut(source.skill_policy_key);
+        if (policy_result.found_existing) return error.DuplicateCatalogIdentity;
         const name_result = try invocation_names.getOrPut(source.invocation_name);
         if (name_result.found_existing) return error.DuplicateCatalogIdentity;
         const argument_names = try arena.alloc(
@@ -228,7 +259,16 @@ fn copyProjection(
             copy.* = try arena.dupe(u8, name);
         target.* = .{
             .skill_id = try arena.dupe(u8, source.skill_id),
+            .skill_policy_key = try arena.dupe(u8, source.skill_policy_key),
             .invocation_name = try arena.dupe(u8, source.invocation_name),
+            .provider_id = try arena.dupe(u8, source.source.provider_id),
+            .source_scope = switch (source.source.source_scope) {
+                .user => .user,
+                .workspace => .workspace,
+            },
+            .source_instance_id = try arena.dupe(u8, source.source.source_instance_id),
+            .contribution_id = try arena.dupe(u8, source.source.contribution_id),
+            .content_revision = try arena.dupe(u8, source.content_revision),
             .display_name = try arena.dupe(u8, source.display_name),
             .description = try arena.dupe(u8, source.description),
             .argument_names = argument_names,
@@ -239,16 +279,38 @@ fn copyProjection(
     const issues = try arena.alloc(Issue, catalog.issues.len);
     for (catalog.issues, issues) |source, *target| {
         target.* = .{
+            .kind = switch (source.kind) {
+                .invalid => .invalid,
+                .unavailable => .unavailable,
+                .conflict => .conflict,
+            },
             .code = switch (source.code) {
                 .invalid_definition => .invalid_definition,
                 .source_conflict => .source_conflict,
                 .invalid_resource => .invalid_resource,
                 .invalid_invocation_name => .invalid_invocation_name,
             },
-            .invocation_name = if (source.invocation_name) |name|
-                try arena.dupe(u8, name)
+            .reason = if (source.reason) |reason| switch (reason) {
+                .file_too_large => .file_too_large,
+                .skill_too_large => .skill_too_large,
+                .too_many_files => .too_many_files,
+                .too_many_entries => .too_many_entries,
+                .directory_too_deep => .directory_too_deep,
+                .path_too_long => .path_too_long,
+                .unsupported_entry => .unsupported_entry,
+                .resource_unavailable => .resource_unavailable,
+                .resource_changed => .resource_changed,
+            } else null,
+            .skill_policy_key = if (source.skill_policy_key) |key|
+                try arena.dupe(u8, key)
             else
                 null,
+            .provider_id = try arena.dupe(u8, source.provider_id),
+            .source_scope = switch (source.source_scope) {
+                .user => .user,
+                .workspace => .workspace,
+            },
+            .source_instance_id = try arena.dupe(u8, source.source_instance_id),
         };
     }
 
@@ -307,6 +369,7 @@ fn catalogStatusError(status: sdk.Status) Error {
         .invalid_argument => error.InvalidCatalogQuery,
         .resource_limit => error.CatalogResourceLimit,
         .skill_catalog_invalid => error.SkillCatalogInvalid,
+        .skill_catalog_incomplete => error.SkillCatalogIncomplete,
         else => error.CoreCallFailed,
     };
 }

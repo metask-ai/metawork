@@ -103,6 +103,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-task-persistence", .root_module = test_modules.workbench_task_persistence },
         .{ .name = "metawork-checkpoint-store", .root_module = test_modules.workbench_checkpoint_store },
         .{ .name = "metawork-checkpoint-record", .root_module = test_modules.workbench_checkpoint_record },
+        .{ .name = "metawork-catalog-snapshot", .root_module = test_modules.workbench_catalog_snapshot },
         .{ .name = "metawork-task-runtime", .root_module = test_modules.workbench_task_runtime },
         .{ .name = "metawork-task-recovery", .root_module = test_modules.workbench_task_recovery },
         .{ .name = "metawork-task-recovery-job", .root_module = test_modules.workbench_task_recovery_job },

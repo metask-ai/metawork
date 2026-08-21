@@ -547,7 +547,7 @@ test "restart restores a Task attachment and continues the same Conversation" {
             .workspace_id = workspace_id,
             .expected_workspace_epoch = try first.workspaceEpoch(workspace_id),
         } },
-        .skill_id = fixture.fixture_skill_id,
+        .skill_policy_key = "review",
         .state = .disabled,
         .expected_catalog_revision = catalog.revision,
         .expected_selection_revision = catalog.selection_revision.?,
@@ -1257,6 +1257,7 @@ test "bounded executor rejects overflow and close cancels a queued Run" {
 
 test "Workbench pins an async catalog and admits typed Skill through the existing executor" {
     fake_core.reset();
+    fake_core.setCatalogPlan(.degraded);
     const runtime = try createTestComposition(.{
         .worker_count = 1,
         .queue_capacity = 2,
@@ -1299,6 +1300,8 @@ test "Workbench pins an async catalog and admits typed Skill through the existin
 
     const workspace_id = try workbench.openWorkspace(workbenchTaskInput());
     const catalog = try waitCatalogReady(&workbench, workspace_id);
+    try std.testing.expectEqual(workbench_api.CatalogAvailability.degraded, catalog.availability);
+    try std.testing.expectEqual(@as(usize, 1), catalog.issues.len);
     try std.testing.expectEqualStrings(
         fixture.fixture_catalog_revision,
         catalog.revision,
@@ -1328,7 +1331,7 @@ test "Workbench pins an async catalog and admits typed Skill through the existin
     );
     try waitWorkbenchSnapshot(
         &workbench,
-        "\"skillCatalog\":{\"availability\":\"ready\"",
+        "\"skillCatalog\":{\"availability\":\"degraded\"",
     );
     try waitWorkbenchSnapshot(
         &workbench,
@@ -1345,6 +1348,76 @@ test "Workbench pins an async catalog and admits typed Skill through the existin
     fake_core.unlock();
     try std.testing.expect(skill_seen);
     try std.testing.expect(input_matches);
+}
+
+test "Workspace incomplete catalog refresh preserves the committed last-good authority" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_sessions = 1,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    const home = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        ".",
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(home);
+    var skill_enablement_store = try workbench_api.SkillEnablementFileStore.init(
+        std.testing.io,
+        home,
+    );
+    defer skill_enablement_store.deinit();
+    var workbench = try workbench_api.Workbench.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 2,
+            .max_workspaces = 1,
+            .max_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        .{
+            .directories = .{ .canonical_user_home = home },
+            .skill_enablement = .{ .file_store = &skill_enablement_store },
+        },
+    );
+    defer workbench.deinit();
+    try installWorkbenchExecution(&workbench);
+
+    const workspace_id = try workbench.openWorkspace(workbenchTaskInput());
+    const before = try waitCatalogReady(&workbench, workspace_id);
+    fake_core.setCatalogPlan(.controlled);
+    defer fake_core.releaseCatalogQuery();
+    const workspace_epoch = try workbench.workspaceEpoch(workspace_id);
+    try workbench.refreshWorkspaceCatalog(workspace_id, workspace_epoch);
+    fake_core.waitCatalogQueryEntered();
+    const refresh_revision = workbench.currentRevision();
+    const refreshing = try workbench.workspaceCatalog(workspace_id);
+    try std.testing.expectEqual(workbench_api.CatalogAvailability.ready, refreshing.availability);
+    try std.testing.expectEqualStrings(before.revision, refreshing.revision);
+    try std.testing.expectEqual(before.selection_revision, refreshing.selection_revision);
+
+    fake_core.setCatalogPlan(.query_incomplete);
+    fake_core.releaseCatalogQuery();
+    for (0..10_000) |_| {
+        if (workbench.currentRevision() > refresh_revision) break;
+        std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
+    } else return error.TestUnexpectedResult;
+
+    const after = try workbench.workspaceCatalog(workspace_id);
+    try std.testing.expectEqual(workbench_api.CatalogAvailability.ready, after.availability);
+    try std.testing.expectEqualStrings(before.revision, after.revision);
+    try std.testing.expectEqual(before.selection_revision, after.selection_revision);
+    try std.testing.expectEqual(before.skills.len, after.skills.len);
+    try std.testing.expectEqualStrings(before.skills[0].skill_id, after.skills[0].skill_id);
 }
 
 test "Manual Task persistence failure rolls back Workspace recent order" {
@@ -1872,7 +1945,6 @@ test "schedule rejection retains the automatic Task created before a full Run qu
 
 test "Workspace reauthorization reschedules the latest catalog query" {
     fake_core.reset();
-    fake_core.setCatalogPlan(.controlled);
     const runtime = try createTestComposition(.{
         .worker_count = 1,
         .queue_capacity = 2,
@@ -1914,6 +1986,14 @@ test "Workspace reauthorization reschedules the latest catalog query" {
     defer fake_core.releaseCatalogQuery();
     try installWorkbenchExecution(&workbench);
 
+    for (0..10_000) |_| {
+        const personal = workbench.skillCatalog();
+        if (personal.availability == .ready or personal.availability == .degraded)
+            break;
+        std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
+    } else return error.TestUnexpectedResult;
+    fake_core.setCatalogPlan(.controlled);
+
     const workspace_id = try workbench.openWorkspace(workbenchTaskInput());
     fake_core.waitCatalogQueryEntered();
     try workbench.removeWorkspace(workspace_id);
@@ -1931,7 +2011,7 @@ test "Workspace reauthorization reschedules the latest catalog query" {
     const catalog_queries = fake_core.catalog_queries;
     const catalog_releases = fake_core.catalog_releases;
     fake_core.unlock();
-    try std.testing.expectEqual(@as(usize, 2), catalog_queries);
+    try std.testing.expectEqual(@as(usize, 3), catalog_queries);
     try std.testing.expectEqual(@as(usize, 1), catalog_releases);
 }
 
@@ -2032,7 +2112,7 @@ test "Workbench rejects stale Skill identity before Session or Run mutation and 
     fake_core.lock();
     const catalog_releases = fake_core.catalog_releases;
     fake_core.unlock();
-    try std.testing.expectEqual(@as(usize, 1), catalog_releases);
+    try std.testing.expectEqual(@as(usize, 2), catalog_releases);
 }
 
 test "Workbench refreshes a Task only from the committed Workspace catalog while idle" {

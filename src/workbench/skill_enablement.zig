@@ -9,16 +9,16 @@ pub const max_store_bytes: usize = 512 * 1024;
 
 pub const Limits = struct {
     max_workspaces: usize,
-    max_disabled_skill_ids: usize,
-    max_skill_id_bytes: usize,
+    max_policy_keys: usize,
+    max_policy_key_bytes: usize,
 };
 
 pub const Error = std.mem.Allocator.Error || error{
     InvalidLimits,
     InvalidWorkspace,
-    InvalidSkillId,
+    InvalidPolicyKey,
     DuplicateWorkspace,
-    DuplicateSkillId,
+    DuplicatePolicyKey,
     WorkspaceCapacity,
     SkillCapacity,
     RevisionMismatch,
@@ -53,37 +53,37 @@ pub const OverrideState = enum {
 };
 
 pub const UserMutation = struct {
-    skill_id: []const u8,
+    skill_policy_key: []const u8,
     enabled: bool,
     expected_revision: u64,
 };
 
 pub const WorkspaceMutation = struct {
     identity: WorkspaceIdentity,
-    skill_id: []const u8,
+    skill_policy_key: []const u8,
     state: OverrideState,
     expected_revision: u64,
 };
 
 pub const UserPolicy = struct {
-    selection_revision: u64 = 1,
-    disabled_skill_ids: std.ArrayList([]u8) = .empty,
+    policy_revision: u64 = 1,
+    disabled_skill_policy_keys: std.ArrayList([]u8) = .empty,
 
     fn deinit(self: *UserPolicy, allocator: std.mem.Allocator) void {
-        deinitSkillIds(allocator, &self.disabled_skill_ids);
+        deinitPolicyKeys(allocator, &self.disabled_skill_policy_keys);
         self.* = undefined;
     }
 };
 
 pub const WorkspacePolicy = struct {
     identity: WorkspaceIdentity,
-    selection_revision: u64,
-    enabled_override_skill_ids: std.ArrayList([]u8) = .empty,
-    disabled_override_skill_ids: std.ArrayList([]u8) = .empty,
+    policy_revision: u64,
+    enabled_override_skill_policy_keys: std.ArrayList([]u8) = .empty,
+    disabled_override_skill_policy_keys: std.ArrayList([]u8) = .empty,
 
     fn deinit(self: *WorkspacePolicy, allocator: std.mem.Allocator) void {
-        deinitSkillIds(allocator, &self.enabled_override_skill_ids);
-        deinitSkillIds(allocator, &self.disabled_override_skill_ids);
+        deinitPolicyKeys(allocator, &self.enabled_override_skill_policy_keys);
+        deinitPolicyKeys(allocator, &self.disabled_override_skill_policy_keys);
         self.* = undefined;
     }
 };
@@ -111,59 +111,59 @@ pub const Store = struct {
         var result = try Store.init(self.allocator, self.limits);
         errdefer result.deinit();
         result.last_revision = self.last_revision;
-        result.user.selection_revision = self.user.selection_revision;
-        try cloneSkillIds(
+        result.user.policy_revision = self.user.policy_revision;
+        try clonePolicyKeys(
             self.allocator,
-            &result.user.disabled_skill_ids,
-            self.user.disabled_skill_ids.items,
+            &result.user.disabled_skill_policy_keys,
+            self.user.disabled_skill_policy_keys.items,
         );
         for (self.policies.items) |policy| {
             try result.policies.append(self.allocator, .{
                 .identity = policy.identity,
-                .selection_revision = policy.selection_revision,
+                .policy_revision = policy.policy_revision,
             });
             const copy = &result.policies.items[result.policies.items.len - 1];
             errdefer {
                 copy.deinit(self.allocator);
                 _ = result.policies.pop();
             }
-            try cloneSkillIds(
+            try clonePolicyKeys(
                 self.allocator,
-                &copy.enabled_override_skill_ids,
-                policy.enabled_override_skill_ids.items,
+                &copy.enabled_override_skill_policy_keys,
+                policy.enabled_override_skill_policy_keys.items,
             );
-            try cloneSkillIds(
+            try clonePolicyKeys(
                 self.allocator,
-                &copy.disabled_override_skill_ids,
-                policy.disabled_override_skill_ids.items,
+                &copy.disabled_override_skill_policy_keys,
+                policy.disabled_override_skill_policy_keys.items,
             );
         }
         return result;
     }
 
     pub fn userRevision(self: *const Store) u64 {
-        return self.user.selection_revision;
+        return self.user.policy_revision;
     }
 
     pub fn revision(self: *const Store, identity: WorkspaceIdentity) u64 {
         const policy = self.findConst(identity) orelse
-            return self.user.selection_revision;
-        return policy.selection_revision;
+            return self.user.policy_revision;
+        return policy.policy_revision;
     }
 
-    pub fn isUserEnabled(self: *const Store, skill_id: []const u8) bool {
-        return findSkill(self.user.disabled_skill_ids.items, skill_id) == null;
+    pub fn isUserEnabled(self: *const Store, skill_policy_key: []const u8) bool {
+        return findPolicyKey(self.user.disabled_skill_policy_keys.items, skill_policy_key) == null;
     }
 
     pub fn workspaceOverride(
         self: *const Store,
         identity: WorkspaceIdentity,
-        skill_id: []const u8,
+        skill_policy_key: []const u8,
     ) OverrideState {
         const policy = self.findConst(identity) orelse return .inherit;
-        if (findSkill(policy.enabled_override_skill_ids.items, skill_id) != null)
+        if (findPolicyKey(policy.enabled_override_skill_policy_keys.items, skill_policy_key) != null)
             return .enabled;
-        if (findSkill(policy.disabled_override_skill_ids.items, skill_id) != null)
+        if (findPolicyKey(policy.disabled_override_skill_policy_keys.items, skill_policy_key) != null)
             return .disabled;
         return .inherit;
     }
@@ -171,43 +171,43 @@ pub const Store = struct {
     pub fn isEnabled(
         self: *const Store,
         identity: WorkspaceIdentity,
-        skill_id: []const u8,
+        skill_policy_key: []const u8,
     ) bool {
-        return switch (self.workspaceOverride(identity, skill_id)) {
+        return switch (self.workspaceOverride(identity, skill_policy_key)) {
             .enabled => true,
             .disabled => false,
-            .inherit => self.isUserEnabled(skill_id),
+            .inherit => self.isUserEnabled(skill_policy_key),
         };
     }
 
     pub fn applyUser(self: *Store, mutation: UserMutation) Error!u64 {
-        if (!validSkillId(mutation.skill_id, self.limits.max_skill_id_bytes))
-            return error.InvalidSkillId;
-        if (mutation.expected_revision != self.user.selection_revision)
+        if (!validPolicyKey(mutation.skill_policy_key, self.limits.max_policy_key_bytes))
+            return error.InvalidPolicyKey;
+        if (mutation.expected_revision != self.user.policy_revision)
             return error.RevisionMismatch;
-        const currently_enabled = self.isUserEnabled(mutation.skill_id);
+        const currently_enabled = self.isUserEnabled(mutation.skill_policy_key);
         if (currently_enabled == mutation.enabled)
-            return self.user.selection_revision;
+            return self.user.policy_revision;
         const next_revision = try self.nextRevision();
         if (mutation.enabled) {
-            const index = findSkill(
-                self.user.disabled_skill_ids.items,
-                mutation.skill_id,
+            const index = findPolicyKey(
+                self.user.disabled_skill_policy_keys.items,
+                mutation.skill_policy_key,
             ) orelse unreachable;
-            self.allocator.free(self.user.disabled_skill_ids.items[index]);
-            _ = self.user.disabled_skill_ids.orderedRemove(index);
+            self.allocator.free(self.user.disabled_skill_policy_keys.items[index]);
+            _ = self.user.disabled_skill_policy_keys.orderedRemove(index);
         } else {
-            if (self.user.disabled_skill_ids.items.len == self.limits.max_disabled_skill_ids)
+            if (self.user.disabled_skill_policy_keys.items.len == self.limits.max_policy_keys)
                 return error.SkillCapacity;
-            const copy = try self.allocator.dupe(u8, mutation.skill_id);
+            const copy = try self.allocator.dupe(u8, mutation.skill_policy_key);
             errdefer self.allocator.free(copy);
-            try self.user.disabled_skill_ids.append(self.allocator, copy);
-            sortSkillIds(self.user.disabled_skill_ids.items);
+            try self.user.disabled_skill_policy_keys.append(self.allocator, copy);
+            sortPolicyKeys(self.user.disabled_skill_policy_keys.items);
         }
         self.last_revision = next_revision;
-        self.user.selection_revision = next_revision;
+        self.user.policy_revision = next_revision;
         for (self.policies.items) |*policy|
-            policy.selection_revision = next_revision;
+            policy.policy_revision = next_revision;
         return next_revision;
     }
 
@@ -216,24 +216,24 @@ pub const Store = struct {
         mutation: WorkspaceMutation,
     ) Error!u64 {
         if (!validIdentity(mutation.identity)) return error.InvalidWorkspace;
-        if (!validSkillId(mutation.skill_id, self.limits.max_skill_id_bytes))
-            return error.InvalidSkillId;
+        if (!validPolicyKey(mutation.skill_policy_key, self.limits.max_policy_key_bytes))
+            return error.InvalidPolicyKey;
         const current_revision = self.revision(mutation.identity);
         if (mutation.expected_revision != current_revision)
             return error.RevisionMismatch;
-        if (self.workspaceOverride(mutation.identity, mutation.skill_id) == mutation.state)
+        if (self.workspaceOverride(mutation.identity, mutation.skill_policy_key) == mutation.state)
             return current_revision;
         const next_revision = try self.nextRevision();
         const policy = try self.ensureWorkspace(mutation.identity);
         try setOverride(
             self.allocator,
             policy,
-            mutation.skill_id,
+            mutation.skill_policy_key,
             mutation.state,
-            self.limits.max_disabled_skill_ids,
+            self.limits.max_policy_keys,
         );
         self.last_revision = next_revision;
-        policy.selection_revision = next_revision;
+        policy.policy_revision = next_revision;
         return next_revision;
     }
 
@@ -247,7 +247,7 @@ pub const Store = struct {
             return error.WorkspaceCapacity;
         try self.policies.append(self.allocator, .{
             .identity = identity,
-            .selection_revision = self.user.selection_revision,
+            .policy_revision = self.user.policy_revision,
         });
         return &self.policies.items[self.policies.items.len - 1];
     }
@@ -398,52 +398,52 @@ const StoreWire = struct {
 };
 
 const UserWire = struct {
-    selection_revision: u64,
-    disabled_skill_ids: []const []const u8,
+    policy_revision: u64,
+    disabled_skill_policy_keys: []const []const u8,
 };
 
 const WorkspaceWire = struct {
     workspace_id: u64,
     workspace_epoch: u64,
-    selection_revision: u64,
-    enabled_override_skill_ids: []const []const u8,
-    disabled_override_skill_ids: []const []const u8,
+    policy_revision: u64,
+    enabled_override_skill_policy_keys: []const []const u8,
+    disabled_override_skill_policy_keys: []const []const u8,
 };
 
 pub fn encode(output: []u8, store: *const Store) Error![]const u8 {
     if (output.len == 0) return error.StoreEncodeFailed;
     var writer = std.Io.Writer.fixed(output);
     writer.print(
-        "{{\"schema\":{d},\"last_revision\":{d},\"user\":{{\"selection_revision\":{d},\"disabled_skill_ids\":[",
-        .{ schema_version, store.last_revision, store.user.selection_revision },
+        "{{\"schema\":{d},\"last_revision\":{d},\"user\":{{\"policy_revision\":{d},\"disabled_skill_policy_keys\":[",
+        .{ schema_version, store.last_revision, store.user.policy_revision },
     ) catch
         return error.StoreEncodeFailed;
-    for (store.user.disabled_skill_ids.items, 0..) |skill_id, index| {
+    for (store.user.disabled_skill_policy_keys.items, 0..) |key, index| {
         if (index != 0) writer.writeByte(',') catch return error.StoreEncodeFailed;
-        jsonString(&writer, skill_id) catch return error.StoreEncodeFailed;
+        jsonString(&writer, key) catch return error.StoreEncodeFailed;
     }
     writer.writeAll("]},\"workspaces\":[") catch return error.StoreEncodeFailed;
     for (store.policies.items, 0..) |policy, index| {
         if (index != 0) writer.writeByte(',') catch return error.StoreEncodeFailed;
         writer.print(
-            "{{\"workspace_id\":{d},\"workspace_epoch\":{d},\"selection_revision\":{d},\"enabled_override_skill_ids\":[",
+            "{{\"workspace_id\":{d},\"workspace_epoch\":{d},\"policy_revision\":{d},\"enabled_override_skill_policy_keys\":[",
             .{
                 policy.identity.workspace_id,
                 policy.identity.workspace_epoch,
-                policy.selection_revision,
+                policy.policy_revision,
             },
         ) catch return error.StoreEncodeFailed;
-        for (policy.enabled_override_skill_ids.items, 0..) |skill_id, skill_index| {
+        for (policy.enabled_override_skill_policy_keys.items, 0..) |key, skill_index| {
             if (skill_index != 0) writer.writeByte(',') catch
                 return error.StoreEncodeFailed;
-            jsonString(&writer, skill_id) catch return error.StoreEncodeFailed;
+            jsonString(&writer, key) catch return error.StoreEncodeFailed;
         }
-        writer.writeAll("],\"disabled_override_skill_ids\":[") catch
+        writer.writeAll("],\"disabled_override_skill_policy_keys\":[") catch
             return error.StoreEncodeFailed;
-        for (policy.disabled_override_skill_ids.items, 0..) |skill_id, skill_index| {
+        for (policy.disabled_override_skill_policy_keys.items, 0..) |key, skill_index| {
             if (skill_index != 0) writer.writeByte(',') catch
                 return error.StoreEncodeFailed;
-            jsonString(&writer, skill_id) catch return error.StoreEncodeFailed;
+            jsonString(&writer, key) catch return error.StoreEncodeFailed;
         }
         writer.writeAll("]}") catch return error.StoreEncodeFailed;
     }
@@ -467,19 +467,19 @@ pub fn decode(
     defer parsed.deinit();
     if (parsed.value.schema != schema_version or
         parsed.value.last_revision == 0 or
-        parsed.value.user.selection_revision == 0 or
-        parsed.value.user.selection_revision > parsed.value.last_revision or
-        parsed.value.user.disabled_skill_ids.len > limits.max_disabled_skill_ids or
+        parsed.value.user.policy_revision == 0 or
+        parsed.value.user.policy_revision > parsed.value.last_revision or
+        parsed.value.user.disabled_skill_policy_keys.len > limits.max_policy_keys or
         parsed.value.workspaces.len > limits.max_workspaces)
         return error.StoreCorrupt;
     var result = try Store.init(allocator, limits);
     errdefer result.deinit();
     result.last_revision = parsed.value.last_revision;
-    result.user.selection_revision = parsed.value.user.selection_revision;
-    try decodeSkillIds(
+    result.user.policy_revision = parsed.value.user.policy_revision;
+    try decodePolicyKeys(
         allocator,
-        &result.user.disabled_skill_ids,
-        parsed.value.user.disabled_skill_ids,
+        &result.user.disabled_skill_policy_keys,
+        parsed.value.user.disabled_skill_policy_keys,
         limits,
     );
     for (parsed.value.workspaces) |wire| {
@@ -487,31 +487,31 @@ pub fn decode(
             .workspace_id = wire.workspace_id,
             .workspace_epoch = wire.workspace_epoch,
         };
-        if (!validIdentity(identity) or wire.selection_revision == 0 or
-            wire.selection_revision > parsed.value.last_revision or
-            wire.enabled_override_skill_ids.len > limits.max_disabled_skill_ids or
-            wire.disabled_override_skill_ids.len > limits.max_disabled_skill_ids or
+        if (!validIdentity(identity) or wire.policy_revision == 0 or
+            wire.policy_revision > parsed.value.last_revision or
+            wire.enabled_override_skill_policy_keys.len > limits.max_policy_keys or
+            wire.disabled_override_skill_policy_keys.len > limits.max_policy_keys or
             result.findConst(identity) != null)
             return error.StoreCorrupt;
         try result.policies.append(allocator, .{
             .identity = identity,
-            .selection_revision = wire.selection_revision,
+            .policy_revision = wire.policy_revision,
         });
         const policy = &result.policies.items[result.policies.items.len - 1];
-        try decodeSkillIds(
+        try decodePolicyKeys(
             allocator,
-            &policy.enabled_override_skill_ids,
-            wire.enabled_override_skill_ids,
+            &policy.enabled_override_skill_policy_keys,
+            wire.enabled_override_skill_policy_keys,
             limits,
         );
-        try decodeSkillIds(
+        try decodePolicyKeys(
             allocator,
-            &policy.disabled_override_skill_ids,
-            wire.disabled_override_skill_ids,
+            &policy.disabled_override_skill_policy_keys,
+            wire.disabled_override_skill_policy_keys,
             limits,
         );
-        for (policy.enabled_override_skill_ids.items) |skill_id|
-            if (findSkill(policy.disabled_override_skill_ids.items, skill_id) != null)
+        for (policy.enabled_override_skill_policy_keys.items) |key|
+            if (findPolicyKey(policy.disabled_override_skill_policy_keys.items, key) != null)
                 return error.StoreCorrupt;
     }
     return result;
@@ -520,33 +520,33 @@ pub fn decode(
 fn setOverride(
     allocator: std.mem.Allocator,
     policy: *WorkspacePolicy,
-    skill_id: []const u8,
+    skill_policy_key: []const u8,
     state: OverrideState,
-    max_skill_ids: usize,
+    max_policy_keys: usize,
 ) Error!void {
-    const enabled_index = findSkill(policy.enabled_override_skill_ids.items, skill_id);
-    const disabled_index = findSkill(policy.disabled_override_skill_ids.items, skill_id);
+    const enabled_index = findPolicyKey(policy.enabled_override_skill_policy_keys.items, skill_policy_key);
+    const disabled_index = findPolicyKey(policy.disabled_override_skill_policy_keys.items, skill_policy_key);
     const target: ?*std.ArrayList([]u8) = switch (state) {
         .inherit => null,
-        .enabled => &policy.enabled_override_skill_ids,
-        .disabled => &policy.disabled_override_skill_ids,
+        .enabled => &policy.enabled_override_skill_policy_keys,
+        .disabled => &policy.disabled_override_skill_policy_keys,
     };
     if (target) |list| {
-        if (list.items.len == max_skill_ids) return error.SkillCapacity;
+        if (list.items.len == max_policy_keys) return error.SkillCapacity;
         try list.ensureUnusedCapacity(allocator, 1);
-        const copy = try allocator.dupe(u8, skill_id);
+        const copy = try allocator.dupe(u8, skill_policy_key);
         errdefer allocator.free(copy);
-        removeSkillId(allocator, &policy.enabled_override_skill_ids, enabled_index);
-        removeSkillId(allocator, &policy.disabled_override_skill_ids, disabled_index);
+        removePolicyKey(allocator, &policy.enabled_override_skill_policy_keys, enabled_index);
+        removePolicyKey(allocator, &policy.disabled_override_skill_policy_keys, disabled_index);
         list.appendAssumeCapacity(copy);
-        sortSkillIds(list.items);
+        sortPolicyKeys(list.items);
     } else {
-        removeSkillId(allocator, &policy.enabled_override_skill_ids, enabled_index);
-        removeSkillId(allocator, &policy.disabled_override_skill_ids, disabled_index);
+        removePolicyKey(allocator, &policy.enabled_override_skill_policy_keys, enabled_index);
+        removePolicyKey(allocator, &policy.disabled_override_skill_policy_keys, disabled_index);
     }
 }
 
-fn removeSkillId(
+fn removePolicyKey(
     allocator: std.mem.Allocator,
     items: *std.ArrayList([]u8),
     index: ?usize,
@@ -556,63 +556,63 @@ fn removeSkillId(
     _ = items.orderedRemove(found);
 }
 
-fn cloneSkillIds(
+fn clonePolicyKeys(
     allocator: std.mem.Allocator,
     target: *std.ArrayList([]u8),
     source: []const []u8,
 ) std.mem.Allocator.Error!void {
     try target.ensureTotalCapacity(allocator, source.len);
-    for (source) |skill_id|
-        target.appendAssumeCapacity(try allocator.dupe(u8, skill_id));
+    for (source) |key|
+        target.appendAssumeCapacity(try allocator.dupe(u8, key));
 }
 
-fn decodeSkillIds(
+fn decodePolicyKeys(
     allocator: std.mem.Allocator,
     target: *std.ArrayList([]u8),
     source: []const []const u8,
     limits: Limits,
 ) Error!void {
-    for (source) |skill_id| {
-        if (!validSkillId(skill_id, limits.max_skill_id_bytes) or
-            findSkill(target.items, skill_id) != null)
+    for (source) |key| {
+        if (!validPolicyKey(key, limits.max_policy_key_bytes) or
+            findPolicyKey(target.items, key) != null)
             return error.StoreCorrupt;
-        const copy = try allocator.dupe(u8, skill_id);
+        const copy = try allocator.dupe(u8, key);
         errdefer allocator.free(copy);
         try target.append(allocator, copy);
     }
-    sortSkillIds(target.items);
+    sortPolicyKeys(target.items);
 }
 
-fn deinitSkillIds(
+fn deinitPolicyKeys(
     allocator: std.mem.Allocator,
     items: *std.ArrayList([]u8),
 ) void {
-    for (items.items) |skill_id| allocator.free(skill_id);
+    for (items.items) |key| allocator.free(key);
     items.deinit(allocator);
 }
 
 fn validLimits(limits: Limits) bool {
     return limits.max_workspaces > 0 and
-        limits.max_disabled_skill_ids > 0 and
-        limits.max_skill_id_bytes > 0;
+        limits.max_policy_keys > 0 and
+        limits.max_policy_key_bytes > 0;
 }
 
 fn validIdentity(identity: WorkspaceIdentity) bool {
     return identity.workspace_id != 0 and identity.workspace_epoch != 0;
 }
 
-fn validSkillId(value: []const u8, max: usize) bool {
+fn validPolicyKey(value: []const u8, max: usize) bool {
     return value.len != 0 and value.len <= max and
         std.unicode.utf8ValidateSlice(value);
 }
 
-fn findSkill(items: []const []u8, skill_id: []const u8) ?usize {
+fn findPolicyKey(items: []const []u8, skill_policy_key: []const u8) ?usize {
     for (items, 0..) |item, index|
-        if (std.mem.eql(u8, item, skill_id)) return index;
+        if (std.mem.eql(u8, item, skill_policy_key)) return index;
     return null;
 }
 
-fn sortSkillIds(items: [][]u8) void {
+fn sortPolicyKeys(items: [][]u8) void {
     std.mem.sort([]u8, items, {}, struct {
         fn lessThan(_: void, left: []u8, right: []u8) bool {
             return std.mem.order(u8, left, right) == .lt;
@@ -635,8 +635,8 @@ fn privateFilePermissions() std.Io.File.Permissions {
 test "User defaults stamp every Workspace with one global revision" {
     var store = try Store.init(std.testing.allocator, .{
         .max_workspaces = 4,
-        .max_disabled_skill_ids = 8,
-        .max_skill_id_bytes = 64,
+        .max_policy_keys = 8,
+        .max_policy_key_bytes = 64,
     });
     defer store.deinit();
     const identity: WorkspaceIdentity = .{ .workspace_id = 7, .workspace_epoch = 3 };
@@ -645,7 +645,7 @@ test "User defaults stamp every Workspace with one global revision" {
     _ = try store.ensureWorkspace(other_identity);
     try std.testing.expectEqual(@as(u64, 1), store.revision(identity));
     try std.testing.expectEqual(@as(u64, 2), try store.applyUser(.{
-        .skill_id = "review",
+        .skill_policy_key = "review",
         .enabled = false,
         .expected_revision = 1,
     }));
@@ -654,7 +654,7 @@ test "User defaults stamp every Workspace with one global revision" {
     try std.testing.expectEqual(@as(u64, 2), store.revision(other_identity));
     try std.testing.expectEqual(@as(u64, 2), store.last_revision);
     try std.testing.expectEqual(@as(u64, 2), try store.applyUser(.{
-        .skill_id = "review",
+        .skill_policy_key = "review",
         .enabled = false,
         .expected_revision = 2,
     }));
@@ -662,7 +662,7 @@ test "User defaults stamp every Workspace with one global revision" {
     try std.testing.expect(!store.isEnabled(identity, "review"));
     try std.testing.expectEqual(@as(u64, 3), try store.applyWorkspace(.{
         .identity = identity,
-        .skill_id = "review",
+        .skill_policy_key = "review",
         .state = .enabled,
         .expected_revision = 2,
     }));
@@ -673,32 +673,32 @@ test "User defaults stamp every Workspace with one global revision" {
     ));
     try std.testing.expectEqual(@as(u64, 4), try store.applyWorkspace(.{
         .identity = identity,
-        .skill_id = "review",
+        .skill_policy_key = "review",
         .state = .inherit,
         .expected_revision = 3,
     }));
     try std.testing.expect(!store.isEnabled(identity, "review"));
     try std.testing.expectEqual(@as(usize, 2), store.items().len);
-    try std.testing.expectEqual(@as(usize, 0), store.items()[0].enabled_override_skill_ids.items.len);
-    try std.testing.expectEqual(@as(usize, 0), store.items()[0].disabled_override_skill_ids.items.len);
+    try std.testing.expectEqual(@as(usize, 0), store.items()[0].enabled_override_skill_policy_keys.items.len);
+    try std.testing.expectEqual(@as(usize, 0), store.items()[0].disabled_override_skill_policy_keys.items.len);
 }
 
 test "Skill enablement codec is strict and reconciliation removes stale epochs" {
     const limits: Limits = .{
         .max_workspaces = 4,
-        .max_disabled_skill_ids = 8,
-        .max_skill_id_bytes = 64,
+        .max_policy_keys = 8,
+        .max_policy_key_bytes = 64,
     };
     var store = try Store.init(std.testing.allocator, limits);
     defer store.deinit();
     _ = try store.applyUser(.{
-        .skill_id = "review",
+        .skill_policy_key = "review",
         .enabled = false,
         .expected_revision = 1,
     });
     _ = try store.applyWorkspace(.{
         .identity = .{ .workspace_id = 7, .workspace_epoch = 3 },
-        .skill_id = "review",
+        .skill_policy_key = "review",
         .state = .enabled,
         .expected_revision = 2,
     });
@@ -731,15 +731,15 @@ test "Skill enablement codec is strict and reconciliation removes stale epochs" 
 test "Skill enablement clone isolates failed candidates" {
     var store = try Store.init(std.testing.allocator, .{
         .max_workspaces = 2,
-        .max_disabled_skill_ids = 2,
-        .max_skill_id_bytes = 64,
+        .max_policy_keys = 2,
+        .max_policy_key_bytes = 64,
     });
     defer store.deinit();
     var candidate = try store.clone();
     defer candidate.deinit();
     _ = try candidate.applyWorkspace(.{
         .identity = .{ .workspace_id = 1, .workspace_epoch = 1 },
-        .skill_id = "review",
+        .skill_policy_key = "review",
         .state = .disabled,
         .expected_revision = 1,
     });
@@ -765,7 +765,7 @@ test "Skill enablement file store atomically restores committed bytes" {
     var file_store = try FileStore.init(std.testing.io, absolute);
     defer file_store.deinit();
     const expected =
-        "{\"schema\":1,\"last_revision\":2,\"user\":{\"selection_revision\":2,\"disabled_skill_ids\":[\"review\"]},\"workspaces\":[{\"workspace_id\":7,\"workspace_epoch\":3,\"selection_revision\":2,\"enabled_override_skill_ids\":[],\"disabled_override_skill_ids\":[]}]}";
+        "{\"schema\":1,\"last_revision\":2,\"user\":{\"policy_revision\":2,\"disabled_skill_policy_keys\":[\"review\"]},\"workspaces\":[{\"workspace_id\":7,\"workspace_epoch\":3,\"policy_revision\":2,\"enabled_override_skill_policy_keys\":[],\"disabled_override_skill_policy_keys\":[]}]}";
     try file_store.commit(expected);
     const restored = (try file_store.loadAlloc(std.testing.allocator)) orelse
         return error.TestExpectedEqual;

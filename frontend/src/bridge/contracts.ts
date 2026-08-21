@@ -593,6 +593,7 @@ export type SkillManagementView = {
       | { kind: "external"; workspaceId: null; workspaceEpoch: null };
     managementState: "ready" | "pending_verification" | "externally_managed";
     skillId: string | null;
+    skillPolicyKey: string | null;
     invocationName: string;
     displayName: string;
     description: string;

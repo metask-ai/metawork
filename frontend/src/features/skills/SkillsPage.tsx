@@ -235,7 +235,7 @@ export function SkillsPage({
           workspaceId: string;
           expectedWorkspaceEpoch: string;
         },
-    skillId: string,
+    skillPolicyKey: string,
     state: "inherit" | "enabled" | "disabled",
     expectedCatalogRevision: string,
     expectedSelectionRevision: string,
@@ -310,7 +310,11 @@ export function SkillsPage({
     asset: Asset,
     state: "inherit" | "enabled" | "disabled",
   ) {
-    if (!asset.canSetEnabled || !asset.skillId || !asset.selectionRevision)
+    if (
+      !asset.canSetEnabled ||
+      !asset.skillPolicyKey ||
+      !asset.selectionRevision
+    )
       return;
     const target =
       asset.scope.kind === "project"
@@ -332,13 +336,13 @@ export function SkillsPage({
               candidate.epoch === target.expectedWorkspaceEpoch,
           )?.skillCatalog;
     if (!catalog?.revision) return;
-    const identity = `${target.scope}:${target.scope === "project" ? target.workspaceId : "user"}:${asset.skillId}`;
+    const identity = `${target.scope}:${target.scope === "project" ? target.workspaceId : "user"}:${asset.skillPolicyKey}`;
     setEnablementBusy(identity);
     setEnablementError(null);
     try {
       const result = await onSetEnabled(
         target,
-        asset.skillId,
+        asset.skillPolicyKey,
         state,
         catalog.revision,
         asset.selectionRevision,
@@ -570,7 +574,7 @@ export function SkillsPage({
               onSetState={(item, state) => void setEnablementState(item, state)}
               enablementBusy={
                 enablementBusy ===
-                `${asset.scope.kind}:${asset.scope.kind === "project" ? asset.scope.workspaceId : "user"}:${asset.skillId ?? ""}`
+                `${asset.scope.kind}:${asset.scope.kind === "project" ? asset.scope.workspaceId : "user"}:${asset.skillPolicyKey ?? ""}`
               }
             />
           ))}
