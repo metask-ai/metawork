@@ -42,7 +42,7 @@ WebSearch / WebFetch
 - `src/workbench/projection.zig` 创建正式 Task Session 时没有传入新的工具选择，因此此前始终依赖四工具默认值；
 - Runtime 级集合必须是当前 target 已验证工具的并集，Session 级 `allowed_tools` 只能在其内收窄；只改 Session 名称而不扩充 Runtime 集合不会完成接入。
 
-当前 Windows 与 macOS bundle 分别使用其 target-specific 静态库，对应 lock source 均为 `d82e608e4e1481671de4235186f96a36d25446cb`（ABI v1 revision 9）。该证据不替代真实 Session 运行证据。
+当前 Windows 与 macOS bundle 分别使用其 target-specific 静态库；Windows lock source 为 `e0d29bcfd926b02bffdb165731839bf368210093`，macOS lock source 为 `d82e608e4e1481671de4235186f96a36d25446cb`（均为 ABI v1 revision 9）。该证据不替代真实 Session 运行证据。
 
 ## 4. 最小架构
 
