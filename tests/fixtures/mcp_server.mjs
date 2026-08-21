@@ -195,6 +195,7 @@ async function handle(message, send) {
   if (message?.jsonrpc !== "2.0" || typeof message.method !== "string")
     process.exit(72);
   if (message.method === "notifications/initialized") {
+    if (Array.isArray(message.params)) process.exit(77);
     send(null);
     return;
   }
@@ -239,6 +240,7 @@ async function handle(message, send) {
       return;
     }
     case "tools/list": {
+      if (Array.isArray(message.params)) process.exit(77);
       if (options.protocolVersion === "2026-07-28")
         requireModernMetadata(message);
       if (options.invalidCatalog) {
@@ -268,6 +270,7 @@ async function handle(message, send) {
               name: "echo",
               description: "Return one bounded text value",
               inputSchema: {
+                $schema: "http://json-schema.org/draft-07/schema#",
                 type: "object",
                 properties: { text: { type: "string", maxLength: 256 } },
                 required: ["text"],
