@@ -83,6 +83,8 @@ metawork/
 │   ├── integration/       # 跨 owner 竞态
 │   └── support/           # deterministic fake 与共享 fixture
 ├── scripts/               # Node 回归、真实应用编排与 artifact 工具
+├── packaging/
+│   └── windows/           # 单 EXE 安装器定义；只消费 Native SDK runtime stage
 ├── build_support/         # 正式 AgentCore bundle verifier 与 target locks
 ├── build.zig              # Zig/Native SDK module graph
 ├── app.zon                # Native window、origin 与 command allowlist
@@ -256,7 +258,7 @@ storage -> SQLite amalgamation
 - Storage contract、conformance 与 direct backend test 与 `src/storage/` 共置；`zig build test-storage` 是其定向入口，正式 Native test graph 仍是提交前的完整入口；
 - `scripts/*.test.mjs` 是默认 Node/Renderer 回归资产，由 `npm test` 自动发现；其他 `scripts/` 可以编排真实应用、平台验收和 artifact 工具，但不能建立测试专用产品协议；
 - `assets/brand/logo-mark.svg` 是标志几何真源；`assets/icons/` 保存从该真源导出的应用与托盘用途母版及平台交付资产，仓库不维护图标格式转换工具链；
-- 根 `package.json` 只保留 `dev`、`check`、`test`、`format`、`format:check`、`build:debug`、`build:release` 与 `package:macos` 八个工程入口，不登记内部步骤、单项测试、probe 或平台验收 harness；macOS `dev` 只使用显式选择的 Apple Development identity，`package:macos` 只在当前图形用户会话中使用 Finder 写入左到右拖拽布局，只使用唯一有效的 Developer ID Application identity 和钥匙串 `metawork-notary` profile，并要求应用与 DMG 签名、notarization `Accepted`、DMG staple、Gatekeeper、磁盘映像及挂载内容完整性全部通过，只输出版本化 arm64 DMG；
+- 根 `package.json` 只保留 `dev`、`check`、`test`、`format`、`format:check`、`build:debug`、`build:release`、`package:macos` 与 `package:windows` 九个工程入口，不登记内部步骤、单项测试、probe 或平台验收 harness；macOS `dev` 只使用显式选择的 Apple Development identity，`package:macos` 只在当前图形用户会话中使用 Finder 写入左到右拖拽布局，只使用唯一有效的 Developer ID Application identity 和钥匙串 `metawork-notary` profile，并要求应用与 DMG 签名、notarization `Accepted`、DMG staple、Gatekeeper、磁盘映像及挂载内容完整性全部通过，只输出版本化 arm64 DMG；Windows `package:windows` 只消费 Release build 与 Native SDK Windows runtime stage，要求 x64 GUI subsystem 和完整 runtime 结构，再由 Inno Setup 输出版本化单 EXE，未完成 Authenticode Gate 前不得声明可信外部分发；
 - `build_support/agentcore_bundle.zig` 与 target lock 是正式信任边界；candidate probe 只使用临时 source-free SDK consumer；
 
 ## 7. 结构变更规则

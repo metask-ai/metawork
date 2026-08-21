@@ -16,7 +16,8 @@
     "build:release": "node scripts/build.mjs release",
     "format": "zig fmt build.zig build_support src tests app.zon && prettier --write frontend scripts package.json",
     "format:check": "zig fmt --check build.zig build_support src tests app.zon && prettier --check frontend scripts package.json",
-    "package:macos": "node scripts/macos-local-signing.mjs package"
+    "package:macos": "node scripts/macos-local-signing.mjs package",
+    "package:windows": "node scripts/package-windows.mjs"
   },
   "devDependencies": {
     "@native-sdk/cli": "0.9.2",

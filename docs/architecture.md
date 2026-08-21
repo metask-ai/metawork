@@ -172,7 +172,7 @@ Bridge transport、Product 产品状态和 Agent execution terminal cause 是不
 
 当前正式 AgentCore baseline 支持 Windows x86_64 GNU 与 macOS arm64 ABI v1 revision 9。MetaWork 只消费经 verifier 接收并 stage 到 `.agentcore/bundle` 的 canonical bundle；缺失、identity、checksum、target、ABI 或 symbol 校验失败必须明确失败，不允许旧 revision、`latest`、可变 tag、implementation source fallback 或静默降级。精确 bundle 规则见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。
 
-当前 baseline 已包含同一桌面 Application 正常重启后、由 durable checkpoint 驱动的显式 Conversation 恢复，但不包含 async pending、suspend/resume、独立 AgentCore Worker crash recovery、跨进程 in-flight Run 恢复、strict Workspace security、正式 Host tools、typed Output/FileChange、plan progress/approval、custom UI 或 Windows 安装签名更新。当前仍是同进程 prototype；存在 ABI entry 不代表更宽的进程隔离或恢复能力已经开放，能力状态只以 [验证规范](validation.md)为准。
+当前 baseline 已包含同一桌面 Application 正常重启后、由 durable checkpoint 驱动的显式 Conversation 恢复，但不包含 async pending、suspend/resume、独立 AgentCore Worker crash recovery、跨进程 in-flight Run 恢复、strict Workspace security、正式 Host tools、typed Output/FileChange、plan progress/approval、custom UI 或 Windows Authenticode 签名与更新。当前仍是同进程 prototype；存在 ABI entry 不代表更宽的进程隔离或恢复能力已经开放，能力状态只以 [验证规范](validation.md)为准。
 
 Native SDK 的平台支持矩阵、真实 WebView 路径、构建与分发证据只在 [验证规范](validation.md)维护。架构不预设未经验证的 push、poll 或自制 `events.drain` 协议，也不从一个平台的结果推断另一个平台已经可用。
 
@@ -198,6 +198,8 @@ Renderer 按不可信调用方处理：
 ## 8. Release 与合同 identity
 
 MetaWork 桌面产品、根 npm workspace、Renderer workspace 和 Zig package 随同一仓库原子发布，共用一个 release version。`app.zon` 是产品版本与 Bundle ID 真源；根 npm、Renderer 与 Zig manifest 必须精确镜像，派生 lock 只保存工具生成结果。实际源码 owner 见 [工程结构与所有权](project-structure.md)。
+
+Windows 分发先由 Native SDK 生成完整 runtime stage，再由仓库的安装器定义生成单 EXE；安装器层只拥有文件安装、快捷方式和卸载语义，不成为 Application runtime owner，也不能重写 Native SDK artifact。具体能力与签名边界见 [Windows 安装包](windows-distribution.md)。
 
 Renderer Bridge revision、Account persistence layout、AgentCore artifact version、AgentCore ABI version/revision 和 bundle manifest schema 各自保护不同合同，不得随 MetaWork release version 自动升降。Account persistence 采用无版本 hard cut，精确账号存储身份见 [Metask Account API 合同](metask-account-contract.md)；macOS 签名规则见 [macOS 开发与内部测试签名](macos-local-development.md)。任何合同类版本标识的变更都必须先得到用户显式同意。
 

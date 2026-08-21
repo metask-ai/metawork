@@ -19,12 +19,15 @@ Foundation UI 的 token 和组件实现，不替代具体产品的页面布局�
 
 - `assets/brand/logo-mark.svg` 是唯一手工维护的 MetaWork 标志几何；其贴合内容的
   `viewBox` 用于品牌排版，不包含某个平台的背景或外框。
-- `assets/icons/app-icon.svg` 是 1024 × 1024 应用图标母版，使用白色背景；品牌标志以画布中心
+- `assets/icons/app-icon.svg` 是 1024 × 1024 应用图标用途母版，使用白色背景；品牌标志以画布中心
   缩放至 88%，使可见主体约占画布宽度 70%，并保留应用图标所需的安全区。
-  它是 `app.zon.icons` 声明的单一打包真源，由 Native SDK 官方图标管线生成 macOS ICNS 和
-  Windows 多尺寸 ICO；`assets/icons/app-icon.png` 只供当前未打包运行时的 `icon_path` 消费。
-- 应用图标 SVG 和 PNG 是从品牌真源导出的设计资产；MetaWork 仓库只保存应用需要的交付文件，
-  不拥有 SVG 栅格化工具链。
+- `assets/icons/app-icon.png` 是该用途母版的 1024 × 1024 无损栅格交付文件，供当前未打包运行时的
+  `icon_path` 和需要方形栅格源的平台消费；`assets/icons/app-icon.icns` 与
+  `assets/icons/app-icon.ico` 是预先生成并检查的 macOS、Windows 平台交付文件。`app.zon.icons`
+  同时声明三者，由 Native SDK 按平台优先使用对应的预制容器，不在正式打包时临时转换。
+- 应用图标 SVG、PNG、ICNS 和 ICO 都从品牌真源导出；SVG 保留可编辑设计语义，其他格式是平台交付
+  资产。不能把应用 SVG 直接交给当前 SDK 的窄 SVG rasterizer，因为品牌复合 path 依赖的
+  even-odd 镂空不在其支持范围内。MetaWork 仓库不拥有 SVG 栅格化工具链。
 - `assets/icons/tray-icon.svg` 是透明背景的托盘用途母版，主体约占画布宽度 88%；macOS/Linux
   消费 64 × 64 PNG，Windows 消费包含 16、20、24、32、48 和 64 px 的 ICO。macOS 将该图像
   作为 template image 使用，Windows 保留品牌色。

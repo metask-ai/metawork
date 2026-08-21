@@ -33,7 +33,7 @@ flowchart LR
 
 当前应用是一条真实的同进程同步垂直链路，已经覆盖 Account、Task、typed Text/Skill Run、built-in Read/Bash/Edit、question/permission、取消、Renderer reload、bounded event delivery 和生命周期收口。正式 build 只消费 staged `.agentcore/bundle` 中的官方 Zig package。Windows 与 macOS arm64 均锁定 AgentCore ABI v1 revision 9；未完成独立产品验收的能力保持关闭。
 
-Windows x86_64 GNU 与 macOS arm64 revision 9 development bundle 已分别独立锁定。当前仍是同进程 prototype，不具备 AgentCore 进程隔离、crash recovery、跨进程 Conversation 恢复、strict Workspace security 或正式安装/更新能力。精确证据与尚未验证的能力见 [验证规范](docs/validation.md)。
+Windows x86_64 GNU 与 macOS arm64 revision 9 development bundle 已分别独立锁定。当前仍是同进程 prototype，不具备 AgentCore 进程隔离、crash recovery、跨进程 Conversation 恢复、strict Workspace security 或正式更新能力。Windows 已有按用户安装/卸载的单 EXE 生成路径，但 Authenticode 签名与真实安装验收仍是独立分发 Gate。精确证据与尚未验证的能力见 [验证规范](docs/validation.md)。
 
 ## 快速开始
 
@@ -57,11 +57,12 @@ npm run check
 npm test
 npm run build:debug
 npm run build:release
+npm run package:windows
 ```
 
-`package.json` 只保留八个工程入口：`dev`、`check`、`test`、`format`、`format:check`、`build:debug`、`build:release` 与 `package:macos`。一次性平台准备、平台验收 harness 和 probe 不是入口，直接以 `node scripts/<name>.mjs` 调用。
+`package.json` 只保留九个工程入口：`dev`、`check`、`test`、`format`、`format:check`、`build:debug`、`build:release`、`package:macos` 与 `package:windows`。一次性平台准备、平台验收 harness 和 probe 不是入口，直接以 `node scripts/<name>.mjs` 调用。
 
-macOS 的 Apple Development identity 只需在每台开发机选择一次；`npm run dev` 使用该本地身份，`npm run package:macos` 则要求唯一有效的 Developer ID Application identity 和钥匙串 `metawork-notary` profile，自动完成 hardened runtime、可信时间戳、DMG 签名、Apple notarization、staple、Gatekeeper、磁盘映像与挂载内容验证，并输出版本化 arm64 DMG。具体要求见 [macOS 开发与分发签名](docs/macos-local-development.md)。Windows development baseline 使用 `node scripts/run-windows-bringup.mjs`。完整验证范围与按变更选择的命令见 [验证规范](docs/validation.md)。
+macOS 的 Apple Development identity 只需在每台开发机选择一次；`npm run dev` 使用该本地身份，`npm run package:macos` 则要求唯一有效的 Developer ID Application identity 和钥匙串 `metawork-notary` profile，自动完成 hardened runtime、可信时间戳、DMG 签名、Apple notarization、staple、Gatekeeper、磁盘映像与挂载内容验证，并输出版本化 arm64 DMG。具体要求见 [macOS 开发与分发签名](docs/macos-local-development.md)。Windows development baseline 使用 `node scripts/run-windows-bringup.mjs`；`npm run package:windows` 使用 Native SDK runtime staging 与 Inno Setup 生成版本化 x64 单 EXE，具体要求见 [Windows 安装包](docs/windows-distribution.md)。完整验证范围与按变更选择的命令见 [验证规范](docs/validation.md)。
 
 ## AgentCore 输入边界
 
