@@ -94,9 +94,11 @@ pub const FakeCatalog = struct {
 
 pub const CatalogPlan = enum {
     healthy,
+    degraded,
     controlled,
     duplicate_skill_id,
     malformed,
+    query_incomplete,
     query_failure,
 };
 
@@ -591,6 +593,18 @@ const healthy_catalog_json =
     "\"},\"content_revision\":\"" ++
     fixture_catalog_revision ++
     "\",\"display_name\":\"Review\",\"description\":\"Review one target\",\"argument_schema\":{\"schema\":\"metask.skill-arguments/v1\",\"max_values\":64,\"names\":[\"target\",\"focus\"]}}],\"issues\":[]}";
+const degraded_catalog_json =
+    "{\"schema\":\"metask.skill-catalog/v1\",\"catalog_scope_id\":\"" ++
+    fixture_catalog_scope ++
+    "\",\"catalog_revision\":\"" ++
+    fixture_catalog_revision ++
+    "\",\"health\":\"degraded\",\"skills\":[{\"skill_id\":\"" ++
+    fixture_skill_id ++
+    "\",\"skill_policy_key\":\"review\",\"invocation_name\":\"review\",\"source\":{\"provider_id\":\"agents.directory\",\"source_scope\":\"workspace\",\"source_instance_id\":\"agents.workspace.default\",\"contribution_id\":\"" ++
+    fixture_catalog_scope ++
+    "\"},\"content_revision\":\"" ++
+    fixture_catalog_revision ++
+    "\",\"display_name\":\"Review\",\"description\":\"Review one target\",\"argument_schema\":{\"schema\":\"metask.skill-arguments/v1\",\"max_values\":64,\"names\":[\"target\",\"focus\"]}}],\"issues\":[{\"kind\":\"invalid\",\"code\":\"invalid_definition\",\"reason\":null,\"skill_policy_key\":\"broken\",\"provider_id\":\"agents.directory\",\"source_scope\":\"workspace\",\"source_instance_id\":\"agents.workspace.default\"}]}";
 const duplicate_catalog_json =
     "{\"schema\":\"metask.skill-catalog/v1\",\"catalog_scope_id\":\"" ++
     fixture_catalog_scope ++
@@ -842,7 +856,7 @@ pub fn runtimeQuerySkillCatalog(
         diagnostic(out_error);
         return wire.STATUS_INVALID_ARGUMENT;
     };
-    if (root.len == 0 or home.len == 0 or epoch.len == 0) {
+    if (root.len == 0 or home.len == 0) {
         diagnostic(out_error);
         return wire.STATUS_INVALID_ARGUMENT;
     }
@@ -851,7 +865,7 @@ pub fn runtimeQuerySkillCatalog(
     defer fake_core.unlock();
     fake_core.catalog_queries += 1;
     fake_core.workspace_home_seen = true;
-    fake_core.workspace_epoch_seen = true;
+    fake_core.workspace_epoch_seen = epoch.len != 0;
     if (fake_core.catalog_plan == .controlled) {
         fake_core.catalog_query_entered = true;
         fake_core.catalog_condition.broadcast(std.testing.io);
@@ -865,15 +879,21 @@ pub fn runtimeQuerySkillCatalog(
         diagnostic(out_error);
         return wire.STATUS_SKILL_CATALOG_INVALID;
     }
+    if (fake_core.catalog_plan == .query_incomplete) {
+        diagnostic(out_error);
+        return wire.STATUS_SKILL_CATALOG_INCOMPLETE;
+    }
     for (&fake_core.catalogs) |*catalog_entry| {
         if (catalog_entry.in_use and !catalog_entry.released) continue;
         catalog_entry.* = .{ .in_use = true };
         out_catalog.?.* = @ptrCast(catalog_entry);
         const descriptor: []const u8 = switch (fake_core.catalog_plan) {
             .healthy => healthy_catalog_json,
+            .degraded => degraded_catalog_json,
             .controlled => healthy_catalog_json,
             .duplicate_skill_id => duplicate_catalog_json,
             .malformed => "{}",
+            .query_incomplete => unreachable,
             .query_failure => unreachable,
         };
         out_descriptor.?.* = .{

@@ -229,7 +229,7 @@ Compact 的 `Queued / Compacting / Stopping` 不是由 Worker 直接覆盖同一
 
 ### Skill catalog ownership
 
-Agent Runtime 的 catalog resolve 是同步 Core 调用；调用在哪条受界线程运行由 Workbench 决定。输入必须使用 Application 解析并注入的 canonical user home，以及 Workbench canonicalize 并按 Workspace identity、authority 和 epoch 校验的 Workspace root；受控兼容目录只能作为 typed `additional_sources` 交给 `resolveWorkspaceSkillCatalog`，MetaWork 不扫描候选或决定 winner。顶层管理 catalog 使用无外部 generation 形式：root 与 home 都绑定 canonical user home，epoch 为空；该 lease 只由 Workbench 持有和释放，禁止借给 Session。AgentCore descriptor 由官方 SDK 校验后立即释放，Agent 只向上层返回两份彼此独立的线性值：
+Agent Runtime 的 catalog resolve 是同步 Core 调用；调用在哪条受界线程运行由 Workbench 决定。输入必须使用 Application 解析并注入的 canonical user home，以及 Workbench canonicalize 并按 Workspace identity、authority 和 epoch 校验的 Workspace root。当前 MetaWork 只消费 AgentCore 默认的 user/workspace `.agents/skills` discovery，`additional_sources` 保持空值；其他 Skill 路径及其配置不属于当前产品范围。MetaWork 不扫描候选或决定 winner。顶层管理 catalog 使用无外部 generation 形式：root 与 home 都绑定 canonical user home，epoch 为空；该 lease 只由 Workbench 持有和释放，禁止借给 Session。AgentCore descriptor 由官方 SDK 校验后立即释放，Agent 只向上层返回两份彼此独立的线性值：
 
 - MetaWork-owned catalog projection：只包含 revision、health、可调用 Skill 的产品字段与 bounded issue；不包含 raw JSON、catalog scope、物理路径、Skill body 或内部 policy；
 - opaque catalog lease：内部持有 AgentCore handle 及 root/home/epoch/Runtime owner 绑定，只能同步借给 Session create 或 idle refresh，并由原 Runtime 精确 release 一次。

@@ -1,4 +1,4 @@
-//! Workbench-owned immutable Skill catalog snapshot.
+//! Workbench-owned immutable compiled Skill authority projection.
 
 const std = @import("std");
 const lifecycle = @import("metawork_agent");
@@ -48,6 +48,7 @@ pub const Limits = struct {
 };
 
 pub const Error = std.mem.Allocator.Error || error{ProjectionCapacity};
+pub const InitError = Error || error{InvalidSelectionRevision};
 
 pub const Snapshot = struct {
     arena: std.heap.ArenaAllocator,
@@ -57,14 +58,17 @@ pub const Snapshot = struct {
     issues: []const CatalogIssueProjection,
     projected_bytes: usize,
     redacted: bool = false,
-    selection_revision: ?u64 = null,
+    selection_revision: u64,
 
     pub fn init(
         allocator: std.mem.Allocator,
         source: lifecycle.CatalogProjection,
+        selection_revision: u64,
+        disabled_skill_policy_keys: []const []const u8,
         limits: Limits,
         available_projection_bytes: usize,
-    ) Error!Snapshot {
+    ) InitError!Snapshot {
+        if (selection_revision == 0) return error.InvalidSelectionRevision;
         if (source.skills.len > limits.max_catalog_skills or
             source.issues.len > limits.max_catalog_issues)
             return error.ProjectionCapacity;
@@ -142,7 +146,10 @@ pub const Snapshot = struct {
                 .description = try owned.dupe(u8, skill.description),
                 .argument_names = argument_names,
                 .max_values = skill.max_values,
-                .enabled = true,
+                .enabled = !policyKeyDisabled(
+                    skill.skill_policy_key,
+                    disabled_skill_policy_keys,
+                ),
             };
         }
         const issues = try owned.alloc(
@@ -168,6 +175,7 @@ pub const Snapshot = struct {
             .skills = skills,
             .issues = issues,
             .projected_bytes = projected_bytes,
+            .selection_revision = selection_revision,
         };
     }
 
@@ -232,6 +240,29 @@ pub const Snapshot = struct {
         };
     }
 
+    pub fn recompile(
+        self: *const Snapshot,
+        allocator: std.mem.Allocator,
+        selection_revision: u64,
+        disabled_skill_policy_keys: []const []const u8,
+        limits: Limits,
+        available_projection_bytes: usize,
+    ) InitError!Snapshot {
+        if (selection_revision == 0) return error.InvalidSelectionRevision;
+        var result = try self.clone(
+            allocator,
+            limits,
+            available_projection_bytes,
+        );
+        result.selection_revision = selection_revision;
+        for (result.skills) |*skill|
+            skill.enabled = !policyKeyDisabled(
+                skill.skill_policy_key,
+                disabled_skill_policy_keys,
+            );
+        return result;
+    }
+
     pub fn view(self: *const Snapshot) CatalogProjection {
         return .{
             .availability = switch (self.health) {
@@ -262,24 +293,6 @@ pub const Snapshot = struct {
         for (self.skills) |*skill|
             if (std.mem.eql(u8, skill.skill_policy_key, skill_policy_key)) return skill;
         return null;
-    }
-
-    pub fn applyEnablement(
-        self: *Snapshot,
-        selection_revision: u64,
-        disabled_skill_policy_keys: anytype,
-    ) void {
-        std.debug.assert(selection_revision != 0);
-        self.selection_revision = selection_revision;
-        for (self.skills) |*skill| {
-            skill.enabled = true;
-            for (disabled_skill_policy_keys) |disabled| {
-                if (std.mem.eql(u8, skill.skill_policy_key, disabled)) {
-                    skill.enabled = false;
-                    break;
-                }
-            }
-        }
     }
 
     pub fn identityContainsCredential(
@@ -336,6 +349,15 @@ pub const Snapshot = struct {
     }
 };
 
+fn policyKeyDisabled(
+    skill_policy_key: []const u8,
+    disabled_skill_policy_keys: []const []const u8,
+) bool {
+    for (disabled_skill_policy_keys) |disabled|
+        if (std.mem.eql(u8, skill_policy_key, disabled)) return true;
+    return false;
+}
+
 fn addCatalogProjectionBytes(
     current: usize,
     added: usize,
@@ -373,4 +395,75 @@ fn utf8RedactionBounds(value: []const u8, match_start: usize, match_len: usize) 
     var bounds_end = @min(value.len, match_start + match_len);
     while (bounds_end < value.len and value[bounds_end] & 0xc0 == 0x80) bounds_end += 1;
     return .{ .start = bounds_start, .end = bounds_end };
+}
+
+const test_limits: Limits = .{
+    .max_catalog_skills = 4,
+    .max_catalog_issues = 4,
+    .max_skill_arguments = 4,
+    .max_catalog_projection_bytes = 4096,
+};
+
+const test_skills = [_]lifecycle.CatalogSkill{.{
+    .skill_id = "review-id",
+    .skill_policy_key = "review",
+    .invocation_name = "review",
+    .provider_id = "agents.directory",
+    .source_scope = .workspace,
+    .source_instance_id = "agents.workspace.default",
+    .contribution_id = "review",
+    .content_revision = "review-v1",
+    .display_name = "Review",
+    .description = "Review changes",
+    .argument_names = &.{"target"},
+    .max_values = 1,
+}};
+
+fn testProjection() lifecycle.CatalogProjection {
+    return .{
+        .revision = "catalog-1",
+        .health = .healthy,
+        .skills = &test_skills,
+        .issues = &.{},
+        .storage = undefined,
+    };
+}
+
+test "compiled catalog authority requires a nonzero product revision" {
+    try std.testing.expectError(
+        error.InvalidSelectionRevision,
+        Snapshot.init(
+            std.testing.allocator,
+            testProjection(),
+            0,
+            &.{},
+            test_limits,
+            test_limits.max_catalog_projection_bytes,
+        ),
+    );
+}
+
+test "policy recompilation creates an isolated immutable authority candidate" {
+    var original = try Snapshot.init(
+        std.testing.allocator,
+        testProjection(),
+        1,
+        &.{},
+        test_limits,
+        test_limits.max_catalog_projection_bytes,
+    );
+    defer original.deinit();
+    var candidate = try original.recompile(
+        std.testing.allocator,
+        2,
+        &.{"review"},
+        test_limits,
+        test_limits.max_catalog_projection_bytes,
+    );
+    defer candidate.deinit();
+
+    try std.testing.expectEqual(@as(u64, 1), original.selection_revision);
+    try std.testing.expect(original.skills[0].enabled);
+    try std.testing.expectEqual(@as(u64, 2), candidate.selection_revision);
+    try std.testing.expect(!candidate.skills[0].enabled);
 }

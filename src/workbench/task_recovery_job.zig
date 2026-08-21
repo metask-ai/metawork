@@ -271,15 +271,13 @@ pub const Job = struct {
         var snapshot = catalog_snapshot.Snapshot.init(
             self.allocator,
             acquisition.projection,
+            self.attempt.skill_policy.policy_revision,
+            self.attempt.skill_policy.disabled_skill_policy_keys,
             self.catalog_limits,
             self.available_projection_bytes,
         ) catch return .{ .failure = .catalog_projection_unavailable };
         var snapshot_live = true;
         defer if (snapshot_live) snapshot.deinit();
-        snapshot.applyEnablement(
-            self.attempt.skill_policy.policy_revision,
-            self.attempt.skill_policy.disabled_skill_policy_keys,
-        );
         var granted_skill_ids: std.ArrayList([]const u8) = .empty;
         defer granted_skill_ids.deinit(self.allocator);
         for (snapshot.skills) |skill|
