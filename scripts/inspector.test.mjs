@@ -355,7 +355,7 @@ test("thinking and response activity use safe localized status labels", () => {
   assert.doesNotMatch(renderInspector(unsafeStatus), /private-provider-status/);
 });
 
-test("approval cards never expose internal Run identity", () => {
+test("permission intervention never exposes internal Run identity", () => {
   const markup = renderToStaticMarkup(
     createElement(
       I18nContext.Provider,
@@ -383,6 +383,8 @@ test("approval cards never expose internal Run identity", () => {
       }),
     ),
   );
+  assert.match(markup, /class="ai-intervention"/);
+  assert.match(markup, /data-kind="permission"/);
   assert.match(markup, />Response required</);
   assert.match(markup, /class="detail-field-label">Arguments<\/p>/);
   assert.match(markup, /class="code-block-preview"/);

@@ -123,13 +123,13 @@ metawork/
 
 `workbench/` 只保存 canonical Host snapshot、selector 和无副作用派生状态。Workspace/Task 生命周期仍由 Host 决定；Renderer 只持有选择、折叠、输入草稿等纯 UI 状态。
 
-`features/` 按用户可见能力分区。feature 通过 `workbench/` selector 消费产品状态，不读取其他 feature 的内部文件。Task list、Task 内容、Approval、Composer、Workspace path selection、Search 与 Task overview 各自保留明确语义；不存在统一的 Agent surface、Timeline 或 Conversation projection owner。真正无业务语义的 Foundation primitive 进入 `components/ui/`；Markdown、CodeBlock 等确有消费者的内容 primitive 可以进入 `components/ai/`，但该目录不得拥有 Task/Run/Workspace、Bridge command、capability gate、AgentCore 或产品 visibility 语义。
+`features/` 按用户可见能力分区。feature 通过 `workbench/` selector 消费产品状态，不读取其他 feature 的内部文件。Task list、Task 内容、Approval、Composer、Workspace path selection、Search 与 Task overview 各自保留明确语义；不存在统一的 Agent surface、Timeline 或 Conversation projection owner。真正无业务语义的 Foundation primitive 进入 `components/ui/`；`components/ai/` 以 `Conversation`、`Message`、`Activity`、`Intervention`、`Composer`、`Markdown` 与 `CodeBlock` 七个最小组件统一中间 AI 对话的 Renderer 视觉语法，但不得拥有 Task/Run/Workspace、Bridge command、capability gate、AgentCore 或产品 visibility 语义。
 
 `components/ai/` 只能向下依赖 `components/ui/`、共享 renderer 工具和已锁定的通用前端依赖；AI 组件必须复用 Foundation UI 的交互原语与 Design Tokens，不得在自身目录重建 Button、Input、Popover 等基础控件，也不得反向导入 `features/`、`bridge/`、`workbench/` 或 `app/`。
 
 ### `frontend/src/features/tasks/`
 
-Task 内容 presentation 只按 canonical Run 顺序显示用户输入和 Assistant 回复；active 状态、terminal notice、Approval 和 Composer 由各自组件组合，不建立统一 surface facade。Tool、usage、Compact 和 UI history 不因存在于 Workbench snapshot 就进入主阅读流。长内容滚动可以保存每个 Task 的会话内阅读位置，但不得拥有输入草稿、Run admission、retry policy 或 AgentCore 语义。
+Task 内容 presentation 只按 canonical Run 顺序把用户输入、Assistant 回复、active 状态、必要 terminal 状态和 permission 适配到共享 AI UI 组件；`Conversation` 只是统一阅读面的 Renderer component，不成为新的 projection owner 或产品 facade。Tool、usage、Compact 和 UI history 不因存在于 Workbench snapshot 就进入主阅读流。长内容滚动可以保存每个 Task 的会话内阅读位置，但不得拥有输入草稿、Run admission、retry policy 或 AgentCore 语义。
 
 `features/settings/SettingsPage.tsx` 是覆盖 Workbench 内容区的长期 Settings surface，消费 Account projection，并通过 App action controller 分别提交 Metask 账号默认配置与用户管理的模型连接操作；它不拥有 Workspace registry、authority、Task 导航或 Host lifecycle。已有 Task 的 Workspace 只从 Task projection 推导，New task 只持有 `draftWorkspaceId`，Renderer 不保存 `activeWorkspaceId` 镜像。
 

@@ -502,6 +502,8 @@ Execution binding availability 是下一次 admission 的独立前置事实，�
 
 > Capability：**当前**。用户输入、Assistant 回复、permission 与 Run 状态属于当前产品路径；typed Delivery、Outputs、FileChange 与 Plan 属于未来 capability，当前不得从 Assistant 文本或 Tool 记录推断。
 
+中间区域使用同一套 MetaWork AI UI 基础语义：`Conversation` 组织阅读面，`Message` 表达用户与 Assistant 发言，`Activity` 表达当前过程与必要终止状态，`Intervention` 表达真正需要用户介入的决定，`Composer` 控制下一步输入，`Markdown` 与 `CodeBlock` 呈现回复内容。它们是 Renderer 视觉语法，不把 Bridge 或 AgentCore 对象直接变成组件。当前不存在第二套 Task 专用消息、状态、请求或输入表面，也不以 Tool、Reasoning、Question 或 Approval Card 建立平行组件分类。
+
 ### 7.1 内容模型
 
 中间区域按 Task 中 Run 的稳定顺序只显示用户输入与 Assistant 回复，不按 Run、Tool 或 AgentCore event 结构组织页面。当前执行状态、待处理请求和 terminal notice 是独立的临时或行动组件，不伪装成历史节点。

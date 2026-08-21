@@ -100,6 +100,20 @@ test("Renderer modules preserve the approved dependency direction", async () => 
 test("AI UI stays above Foundation UI and below product features", async () => {
   const aiRoot = resolve(sourceRoot, "components", "ai");
   const files = await sourceFiles(aiRoot);
+  assert.deepEqual(
+    files.map((file) => relative(aiRoot, file)).sort(),
+    [
+      "Activity.tsx",
+      "CodeBlock.tsx",
+      "Composer.tsx",
+      "Conversation.tsx",
+      "Intervention.tsx",
+      "Markdown.tsx",
+      "Message.tsx",
+      "index.ts",
+    ],
+    "AI UI keeps one minimal public rendering vocabulary",
+  );
 
   for (const file of files) {
     const source = await readFile(file, "utf8");
@@ -126,6 +140,36 @@ test("AI UI stays above Foundation UI and below product features", async () => {
       }
     }
   }
+});
+
+test("central conversation paths use only the shared AI UI vocabulary", async () => {
+  const [taskContent, approval, composer] = await Promise.all([
+    readFile(
+      resolve(sourceRoot, "features", "tasks", "TaskContent.tsx"),
+      "utf8",
+    ),
+    readFile(
+      resolve(sourceRoot, "features", "approvals", "ApprovalPanel.tsx"),
+      "utf8",
+    ),
+    readFile(
+      resolve(sourceRoot, "features", "composer", "ComposerFooter.tsx"),
+      "utf8",
+    ),
+  ]);
+
+  assert.match(taskContent, /<Conversation/);
+  assert.match(taskContent, /<Message role="user"/);
+  assert.match(taskContent, /<Message role="assistant"/);
+  assert.match(taskContent, /<Activity/);
+  assert.match(approval, /<Intervention/);
+  assert.match(composer, /<Composer/);
+
+  const legacy =
+    /task-content|task-turn|task-input"|assistant-response|task-active-status|task-outcome|inline-request|className="composer"/;
+  assert.doesNotMatch(taskContent, legacy);
+  assert.doesNotMatch(approval, legacy);
+  assert.doesNotMatch(composer, legacy);
 });
 
 test("transitional Account states never turn signed-out history into a security gate", async () => {
