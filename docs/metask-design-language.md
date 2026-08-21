@@ -21,7 +21,8 @@ Foundation UI 的 token 和组件实现，不替代具体产品的页面布局�
   `viewBox` 用于品牌排版，不包含某个平台的背景或外框。
 - `assets/icons/app-icon.svg` 是 1024 × 1024 应用图标母版，使用白色背景；品牌标志以画布中心
   缩放至 88%，使可见主体约占画布宽度 70%，并保留应用图标所需的安全区。
-  `assets/icons/app-icon.png` 是 Native SDK 当前消费的栅格产物。
+  它是 `app.zon.icons` 声明的单一打包真源，由 Native SDK 官方图标管线生成 macOS ICNS 和
+  Windows 多尺寸 ICO；`assets/icons/app-icon.png` 只供当前未打包运行时的 `icon_path` 消费。
 - 应用图标 SVG 和 PNG 是从品牌真源导出的设计资产；MetaWork 仓库只保存应用需要的交付文件，
   不拥有 SVG 栅格化工具链。
 - `assets/icons/tray-icon.svg` 是透明背景的托盘用途母版，主体约占画布宽度 88%；macOS/Linux

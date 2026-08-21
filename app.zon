@@ -4,8 +4,8 @@
     .display_name = "MetaWork",
     .description = "A native workbench for structured agent sessions.",
     .version = "0.1.1",
-    .icons = .{"assets/icons/app-icon.png"},
-    .platforms = .{"macos"},
+    .icons = .{"assets/icons/app-icon.svg"},
+    .platforms = .{ "macos", "windows" },
     .permissions = .{ "window", "notifications" },
     .capabilities = .{ "webview", "js_bridge", "tray", "notifications" },
     .shortcuts = .{
