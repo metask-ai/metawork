@@ -16521,7 +16521,7 @@ test "Skill catalog snapshot reports redaction without exposing credential bytes
     );
 }
 
-test "Skill catalog refresh state preserves committed last-good authority" {
+test "Skill catalog slot preserves committed last-good authority" {
     const source_skills = [_]lifecycle.CatalogSkill{.{
         .skill_id = "builtin.review",
         .skill_policy_key = "review",
@@ -16564,6 +16564,101 @@ test "Skill catalog refresh state preserves committed last-good authority" {
     const unavailable: CatalogSlot = .unavailable;
     try std.testing.expectEqual(CatalogAvailability.unavailable, unavailable.availability(false));
     try std.testing.expectEqual(CatalogAvailability.loading, unavailable.availability(true));
+}
+
+fn installTestCommittedSkillAuthorities(workbench: *Workbench) !void {
+    const source_skills = [_]lifecycle.CatalogSkill{.{
+        .skill_id = "builtin.review",
+        .skill_policy_key = "review",
+        .invocation_name = "review",
+        .provider_id = "agents.directory",
+        .source_scope = .user,
+        .source_instance_id = "agents.user.default",
+        .contribution_id = "review",
+        .content_revision = "review-v1",
+        .display_name = "Review",
+        .description = "Review changes",
+        .argument_names = &.{"target"},
+        .max_values = 1,
+    }};
+    var personal_catalog = try CatalogSnapshot.init(
+        workbench.allocator,
+        .{
+            .revision = "catalog-1",
+            .health = .healthy,
+            .skills = &source_skills,
+            .issues = &.{},
+            .storage = undefined,
+        },
+        1,
+        &.{},
+        catalogSnapshotLimits(workbench.limits),
+        workbench.limits.max_projection_bytes - workbench.projection_bytes,
+    );
+    errdefer personal_catalog.deinit();
+    var workspace_catalog = try personal_catalog.clone(
+        workbench.allocator,
+        catalogSnapshotLimits(workbench.limits),
+        workbench.limits.max_projection_bytes -
+            workbench.projection_bytes -
+            personal_catalog.projected_bytes,
+    );
+    errdefer workspace_catalog.deinit();
+
+    workbench.projection_bytes += personal_catalog.projected_bytes;
+    workbench.skill_catalog_slot = .{ .committed = .{
+        .lease = .fixture(),
+        .snapshot = personal_catalog,
+    } };
+    workbench.projection_bytes += workspace_catalog.projected_bytes;
+    workbench.workspaces[0].?.catalog_slot = .{ .committed = .{
+        .lease = .fixture(),
+        .snapshot = workspace_catalog,
+    } };
+}
+
+test "definite Skill enablement persistence failure preserves committed authorities" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    workbench.skill_enablement_health = .ready;
+    try installTestCommittedSkillAuthorities(&workbench);
+
+    workbench.noteSkillEnablementPersistenceFailure(error.WriteFailed);
+
+    try std.testing.expectEqual(SkillEnablementHealth.write_failed, workbench.skill_enablement_health);
+    try std.testing.expect(workbench.skill_catalog_slot == .committed);
+    try std.testing.expect(workbench.workspaces[0].?.catalog_slot == .committed);
+    try std.testing.expectEqualStrings(
+        "catalog-1",
+        workbench.skill_catalog_slot.snapshotConst().?.revision,
+    );
+    try std.testing.expectEqualStrings(
+        "catalog-1",
+        workbench.workspaces[0].?.catalog_slot.snapshotConst().?.revision,
+    );
+}
+
+test "unknown Skill enablement persistence outcome freezes authorities" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    workbench.skill_enablement_health = .ready;
+    try installTestCommittedSkillAuthorities(&workbench);
+
+    workbench.noteSkillEnablementPersistenceFailure(error.PersistenceOutcomeUnknown);
+
+    try std.testing.expectEqual(SkillEnablementHealth.outcome_unknown, workbench.skill_enablement_health);
+    try std.testing.expect(workbench.skill_catalog_slot == .unavailable);
+    try std.testing.expect(workbench.workspaces[0].?.catalog_slot == .unavailable);
+    try std.testing.expectError(
+        error.PersistenceFailed,
+        workbench.setSkillEnabled(.{
+            .scope = .personal,
+            .skill_policy_key = "review",
+            .state = .disabled,
+            .expected_catalog_revision = "catalog-1",
+            .expected_selection_revision = 1,
+        }),
+    );
 }
 
 test "Workspace Skill enablement uses double revision CAS and leaves pinned catalogs unchanged" {

@@ -281,19 +281,16 @@ Workbench 应使用 tagged state：
 
 ```text
 CatalogSlot =
-  | unavailable {
-      reason,
-      refresh_state
-    }
+  | uninitialized
+  | unavailable
   | committed {
       acquisition,
       catalog_revision,
-      health,
-      refresh_state
+      health
     }
 ```
 
-其中 `acquisition` 同时拥有 opaque lease 与独立 projection。`refresh_state` 只描述正在进行或最近一次 refresh，不替代 committed catalog。
+其中 `acquisition` 同时拥有 opaque lease 与独立 projection。独立 catalog job 只表达正在进行的 refresh，不进入 `CatalogSlot`，也不替代 committed catalog。当前阶段不保留或投影最近一次 refresh 失败事实。
 
 必须保持：
 
@@ -565,7 +562,7 @@ R9 不提供 shadowed candidate 列表，因此 UI 不得承诺 loser 详情。�
 
 | 故障 | 必须行为 | 不得发生 |
 | --- | --- | --- |
-| R9 catalog incomplete | 保留 last-good，标记 refresh failed/stale | 清空 catalog |
+| R9 catalog incomplete | 保留 last-good；最近一次失败状态投影延后 | 清空 catalog |
 | degraded catalog | 提交有效 winners 与 typed issues | 关闭整个 Workbench |
 | 首次 query 无 complete 结果 | Skill unavailable，Text 可用 | 默认全启用 |
 | descriptor malformed | 丢弃 acquisition candidate | 安装部分解析结果 |
@@ -597,7 +594,7 @@ R9 不提供 shadowed candidate 列表，因此 UI 不得承诺 loser 详情。�
 ### 18.2 Phase 1 已完成
 
 - Workbench current catalog 已收敛为 tagged `CatalogSlot`；生产 committed 分支不可分地持有 AgentCore lease 与 immutable compiled snapshot；
-- catalog job 独立表达 refresh，refresh 期间继续服务 last-good，incomplete、查询失败、编译失败和 stale completion 不再清空 committed authority；
+- catalog job 独立表达进行中的 refresh，refresh 期间继续服务 last-good，incomplete、查询失败、编译失败和 stale completion 不再清空 committed authority；当前不宣称保存或投影最近一次失败状态；
 - `CatalogSnapshot` 在构造或 recompile candidate 时一次应用 policy 与非零 `selection_revision`，mutable `applyEnablement` 已移除；
 - policy mutation 先预编译所有具有 committed authority 的受影响 context，持久化明确成功后再 no-fail swap；
 - Task/Session 继续使用 pinned authority，idle refresh 继续通过 `sessionBindSkillPolicy` 一次更新；
@@ -616,6 +613,7 @@ R9 不提供 shadowed candidate 列表，因此 UI 不得承诺 loser 详情。�
 - 全候选、shadowed candidate 和完整 resolution trace UI；
 - user-configurable provider precedence；
 - 自动 watcher/invalidation；
+- 最近一次 catalog refresh 失败状态的保存与产品投影；
 - Task authority 跨 Host 重启持久化；
 - 未经批准的 schema、Bridge revision、ABI revision 或版本变更。
 
@@ -633,7 +631,7 @@ R9 不提供 shadowed candidate 列表，因此 UI 不得承诺 loser 详情。�
 ### Phase 1：Workbench authority 收敛（已完成）
 
 - 引入 immutable committed catalog slot；
-- 引入独立 refresh state；
+- 以独立 catalog job 表达进行中的 refresh；
 - 引入 compiled `SkillAuthority` tagged state；
 - 将 policy mutation、catalog refresh 和 Session bind 放入明确事务；
 - 移除 mutable projection 上的 enablement authority；
