@@ -18,12 +18,10 @@ const SessionState = enum {
     shutting_down,
 };
 
-const ExecutionState = enum {
+const ExecutionAuthority = enum {
     none,
-    preparing,
     ready,
-    reconfiguring,
-    invalid,
+    recovery,
 };
 
 const OperationKind = enum {
@@ -102,6 +100,14 @@ const AttemptKind = enum {
 
 const IdentityAttemptKind = enum { login, refresh_token };
 const ModelPreferenceSource = enum { catalog, preference };
+const PendingFacts = struct {
+    api_key_id: ApiKeyId = .{},
+    model: ModelId = .{},
+};
+const CatalogAttempt = struct {
+    attempt_id: u64,
+    pending: PendingFacts = .{},
+};
 
 /// The single closed representation of an in-flight Account transaction.
 /// Attempt ownership and operation phase cannot drift independently because
@@ -114,14 +120,16 @@ const Transaction = union(enum) {
         attempt_id: u64,
         kind: IdentityAttemptKind,
     },
-    loading_keys: u64,
-    selecting_key: u64,
-    loading_models: u64,
-    selecting_model: u64,
-    persisting_execution: u64,
+    loading_keys: CatalogAttempt,
+    selecting_key: CatalogAttempt,
+    loading_models: CatalogAttempt,
+    reloading_models: CatalogAttempt,
+    selecting_model: CatalogAttempt,
+    persisting_execution: CatalogAttempt,
     persisting_model: struct {
         attempt_id: u64,
         source: ModelPreferenceSource,
+        pending: PendingFacts,
     },
     logging_out: u64,
 
@@ -134,6 +142,7 @@ const Transaction = union(enum) {
             .loading_keys => .loading_keys,
             .selecting_key => .selecting_key,
             .loading_models => .loading_models,
+            .reloading_models => .loading_models,
             .selecting_model => .selecting_model,
             .persisting_execution => .persisting,
             .persisting_model => .persisting_model,
@@ -153,6 +162,7 @@ const Transaction = union(enum) {
             .loading_keys,
             .selecting_key,
             .loading_models,
+            .reloading_models,
             .selecting_model,
             .persisting_execution,
             => .catalog,
@@ -169,15 +179,45 @@ const Transaction = union(enum) {
             .none => null,
             .loading_identity => |value| value.attempt_id,
             .persisting_model => |value| value.attempt_id,
-            .oauth_callback,
-            .token_exchange,
             .loading_keys,
             .selecting_key,
             .loading_models,
+            .reloading_models,
             .selecting_model,
             .persisting_execution,
+            => |value| value.attempt_id,
+            .oauth_callback,
+            .token_exchange,
             .logging_out,
             => |attempt_id| attempt_id,
+        };
+    }
+
+    fn pending(self: *const Transaction) ?*const PendingFacts {
+        return switch (self.*) {
+            .loading_keys,
+            .selecting_key,
+            .loading_models,
+            .reloading_models,
+            .selecting_model,
+            .persisting_execution,
+            => |*value| &value.pending,
+            .persisting_model => |*value| &value.pending,
+            else => null,
+        };
+    }
+
+    fn pendingMut(self: *Transaction) ?*PendingFacts {
+        return switch (self.*) {
+            .loading_keys,
+            .selecting_key,
+            .loading_models,
+            .reloading_models,
+            .selecting_model,
+            .persisting_execution,
+            => |*value| &value.pending,
+            .persisting_model => |*value| &value.pending,
+            else => null,
         };
     }
 };
@@ -197,18 +237,12 @@ pub const EffectSink = struct {
 
 const CommittedState = struct {
     session_state: SessionState = .restoring,
-    execution_state: ExecutionState = .none,
+    execution_authority: ExecutionAuthority = .none,
     transaction: Transaction = .none,
     account_id: AccountId = .{},
     display_name: DisplayName = .{},
     selected_api_key_id: ApiKeyId = .{},
     selected_model: ModelId = .{},
-    pending_api_key_id: ApiKeyId = .{},
-    pending_model: ModelId = .{},
-    /// A manual API selection arrived while a catalog load was in flight.
-    /// The next completion boundary reloads models for the queued key
-    /// instead of consuming the stale result; user intent beats automation.
-    pending_catalog_reload: bool = false,
     error_code: contract.ErrorCode = .none,
     safe_diagnostic: SafeDiagnostic = .{},
     catalog_generation: u64 = 0,
@@ -231,6 +265,57 @@ const CommittedState = struct {
         self.transaction = .none;
     }
 
+    fn pendingApiKeyId(self: *const CommittedState) []const u8 {
+        const pending = self.transaction.pending() orelse return "";
+        return pending.api_key_id.view();
+    }
+
+    fn pendingModel(self: *const CommittedState) []const u8 {
+        const pending = self.transaction.pending() orelse return "";
+        return pending.model.view();
+    }
+
+    fn setPendingApiKeyId(
+        self: *CommittedState,
+        value: []const u8,
+    ) contract.ValidationError!void {
+        const pending = self.transaction.pendingMut() orelse
+            return error.InconsistentState;
+        try pending.api_key_id.set(value);
+    }
+
+    fn setPendingModel(
+        self: *CommittedState,
+        value: []const u8,
+    ) contract.ValidationError!void {
+        const pending = self.transaction.pendingMut() orelse
+            return error.InconsistentState;
+        try pending.model.set(value);
+    }
+
+    fn clearPendingApiKeyId(self: *CommittedState) void {
+        const pending = self.transaction.pendingMut() orelse return;
+        pending.api_key_id.clear();
+    }
+
+    fn clearPendingModel(self: *CommittedState) void {
+        const pending = self.transaction.pendingMut() orelse return;
+        pending.model.clear();
+    }
+
+    fn markReloadingModels(self: *CommittedState) void {
+        const value = switch (self.transaction) {
+            .loading_models => |catalog| catalog,
+            .reloading_models => |catalog| catalog,
+            else => unreachable,
+        };
+        self.transaction = .{ .reloading_models = value };
+    }
+
+    fn reloadingModels(self: *const CommittedState) bool {
+        return self.transaction == .reloading_models;
+    }
+
     fn setTransaction(
         self: *CommittedState,
         operation_kind: OperationKind,
@@ -238,6 +323,10 @@ const CommittedState = struct {
         attempt_id: u64,
     ) void {
         std.debug.assert(attempt_id != 0);
+        const pending: PendingFacts = if (self.transaction.pending()) |value|
+            value.*
+        else
+            .{};
         self.transaction = switch (operation_kind) {
             .none => unreachable,
             .oauth_callback => if (attempt_kind == .login)
@@ -257,23 +346,23 @@ const CommittedState = struct {
                 },
             } },
             .loading_keys => if (attempt_kind == .catalog)
-                .{ .loading_keys = attempt_id }
+                .{ .loading_keys = .{ .attempt_id = attempt_id, .pending = pending } }
             else
                 unreachable,
             .selecting_key => if (attempt_kind == .catalog)
-                .{ .selecting_key = attempt_id }
+                .{ .selecting_key = .{ .attempt_id = attempt_id, .pending = pending } }
             else
                 unreachable,
             .loading_models => if (attempt_kind == .catalog)
-                .{ .loading_models = attempt_id }
+                .{ .loading_models = .{ .attempt_id = attempt_id, .pending = pending } }
             else
                 unreachable,
             .selecting_model => if (attempt_kind == .catalog)
-                .{ .selecting_model = attempt_id }
+                .{ .selecting_model = .{ .attempt_id = attempt_id, .pending = pending } }
             else
                 unreachable,
             .persisting => if (attempt_kind == .catalog)
-                .{ .persisting_execution = attempt_id }
+                .{ .persisting_execution = .{ .attempt_id = attempt_id, .pending = pending } }
             else
                 unreachable,
             .persisting_model => .{ .persisting_model = .{
@@ -283,6 +372,7 @@ const CommittedState = struct {
                     .model_preference => .preference,
                     else => unreachable,
                 },
+                .pending = pending,
             } },
             .logging_out => if (attempt_kind == .logout)
                 .{ .logging_out = attempt_id }
@@ -307,7 +397,7 @@ const CommittedState = struct {
         else switch (self.operation()) {
             .selecting_key, .selecting_model => .choosing,
             .loading_keys, .loading_models, .persisting, .persisting_model => .loading,
-            .none, .token_exchange, .loading_identity => if (self.execution_state == .ready)
+            .none, .token_exchange, .loading_identity => if (self.execution_authority == .ready)
                 .ready
             else if (self.error_code != .none)
                 .failed
@@ -324,12 +414,12 @@ const CommittedState = struct {
             .display_name = if (publish_account) self.display_name.view() else "",
             .selected_api_key_id = if (publish_account) self.selected_api_key_id.view() else "",
             .selected_model = if (publish_account) self.selected_model.view() else "",
-            .candidate_api_key_id = if (publish_account) self.pending_api_key_id.view() else "",
-            .candidate_model = if (publish_account) self.pending_model.view() else "",
+            .candidate_api_key_id = if (publish_account) self.pendingApiKeyId() else "",
+            .candidate_model = if (publish_account) self.pendingModel() else "",
             .model_catalog_api_key_id = if (!publish_account) "" else switch (self.operation()) {
-                .selecting_model, .persisting, .persisting_model => self.pending_api_key_id.view(),
-                .loading_models => self.pending_api_key_id.view(),
-                .loading_keys => if (self.execution_state == .ready)
+                .selecting_model, .persisting, .persisting_model => self.pendingApiKeyId(),
+                .loading_models => self.pendingApiKeyId(),
+                .loading_keys => if (self.execution_authority == .ready)
                     self.selected_api_key_id.view()
                 else
                     "",
@@ -338,7 +428,7 @@ const CommittedState = struct {
                 else => self.selected_api_key_id.view(),
             },
             .can_create_task = state == .authenticated and
-                catalog_state == .ready and self.execution_state == .ready and
+                catalog_state == .ready and self.execution_authority == .ready and
                 self.attemptKind() != .catalog and
                 self.operation() != .logging_out,
             .error_code = self.error_code,
@@ -492,17 +582,14 @@ pub const Account = struct {
         if (self.state.attemptKind() != .catalog or
             self.state.operation() != .persisting or
             self.state.activeAttempt() == null or
-            (self.state.execution_state != .preparing and
-                self.state.execution_state != .reconfiguring))
+            self.state.execution_authority == .recovery)
             return .{ .rejected = .invalid_state };
         const attempt_id = self.state.activeAttempt().?;
         var next = self.state;
         next.session_state = .shutting_down;
-        next.execution_state = .none;
+        next.execution_authority = .none;
         next.selected_api_key_id.clear();
         next.selected_model.clear();
-        next.pending_api_key_id.clear();
-        next.pending_model.clear();
         next.execution_generation = 0;
         next.clearTransaction();
         next.error_code = .recovery_state_invalid;
@@ -520,8 +607,8 @@ pub const Account = struct {
 
     /// The preference store was re-observed after an indeterminate write and
     /// contained neither the committed value nor the candidate value. Keep
-    /// the last committed selection visible for recovery, but revoke its live
-    /// execution authority until a later catalog transaction repairs it.
+    /// the last committed selection and in-process credential owner intact,
+    /// but revoke new Task admission until a later transaction repairs it.
     pub fn prepareDefaultModelPersistenceInvalid(
         self: *const Account,
     ) PrepareResult {
@@ -532,10 +619,7 @@ pub const Account = struct {
             return .{ .rejected = .invalid_state };
         const attempt_id = self.state.activeAttempt().?;
         var next = self.state;
-        next.execution_state = .invalid;
-        next.pending_api_key_id.clear();
-        next.pending_model.clear();
-        next.pending_catalog_reload = false;
+        next.execution_authority = .recovery;
         next.clearTransaction();
         next.error_code = .recovery_state_invalid;
         next.safe_diagnostic.clear();
@@ -544,8 +628,6 @@ pub const Account = struct {
             .discard_candidate
         else
             .committed;
-        result.transition.execution_intent = .clear;
-        result.transition.replacement_intent = .finish;
         return result;
     }
 
@@ -625,11 +707,9 @@ pub const Account = struct {
     pub fn prepareShutdown(self: *const Account) PreparedTransition {
         var next = self.state;
         next.session_state = .shutting_down;
-        next.execution_state = .none;
+        next.execution_authority = .none;
         next.selected_api_key_id.clear();
         next.selected_model.clear();
-        next.pending_api_key_id.clear();
-        next.pending_model.clear();
         next.execution_generation = 0;
         next.clearError();
         const active_attempt = next.activeAttempt();
@@ -654,7 +734,7 @@ pub const Account = struct {
     ) PrepareResult {
         if (error_code == .none or
             self.state.session_state != .authenticated or
-            self.state.execution_state != .none or
+            self.state.execution_authority != .none or
             self.state.operation() != .none or
             self.state.activeAttempt() != null)
             return .{ .rejected = .invalid_state };
@@ -694,14 +774,7 @@ pub const Account = struct {
             .catalog, .model_preference => .authenticated,
             .logout, .none => next.session_state,
         };
-        if (next.execution_state == .preparing)
-            next.execution_state = .none;
-        if (next.execution_state == .reconfiguring)
-            next.execution_state = .ready;
         next.clearTransaction();
-        next.pending_api_key_id.clear();
-        next.pending_model.clear();
-        next.pending_catalog_reload = false;
         next.error_code = .user_cancelled;
         next.safe_diagnostic.clear();
         var result = transition(
@@ -733,15 +806,15 @@ pub const Account = struct {
         if (self.state.session_state != .authenticated)
             return .{ .rejected = .invalid_state };
         if (self.state.operation() == .none and
-            self.state.execution_state == .ready)
+            self.state.execution_authority == .ready)
         {
             const attempt = nextAttempt(self.state.next_attempt_id) orelse
                 return .{ .rejected = .generation_mismatch };
             var next = self.state;
-            next.pending_api_key_id.set(id) catch
-                return .{ .rejected = .invalid_command };
-            next.pending_model.clear();
             next.setTransaction(.loading_keys, .catalog, attempt.current);
+            next.setPendingApiKeyId(id) catch
+                return .{ .rejected = .invalid_command };
+            next.clearPendingModel();
             next.next_attempt_id = attempt.next;
             next.clearError();
             return transition(
@@ -761,14 +834,13 @@ pub const Account = struct {
             // the key and reload its models at the next completion boundary
             // instead of discarding the click as invalid_state.
             var next = self.state;
-            next.pending_api_key_id.set(id) catch
+            next.setPendingApiKeyId(id) catch
                 return .{ .rejected = .invalid_command };
-            next.pending_model.clear();
+            next.clearPendingModel();
             next.clearError();
             if (self.state.operation() == .selecting_model) {
                 // Parked: no worker in flight, reload immediately.
                 next.setTransaction(.loading_models, .catalog, next.activeAttempt().?);
-                next.pending_catalog_reload = false;
                 const effect_id = ApiKeyId.init(id) catch
                     return .{ .rejected = .invalid_command };
                 var result = transition(
@@ -780,7 +852,7 @@ pub const Account = struct {
                 result.transition.catalog_intent = .candidate;
                 return result;
             }
-            next.pending_catalog_reload = true;
+            next.markReloadingModels();
             var result = transitionNoEffect(
                 next,
                 .session_changed,
@@ -793,7 +865,7 @@ pub const Account = struct {
             self.state.activeAttempt() == null)
             return .{ .rejected = .invalid_state };
         var next = self.state;
-        next.pending_api_key_id.set(id) catch
+        next.setPendingApiKeyId(id) catch
             return .{ .rejected = .invalid_command };
         next.setTransaction(.loading_models, .catalog, next.activeAttempt().?);
         next.clearError();
@@ -813,21 +885,22 @@ pub const Account = struct {
         if (self.state.session_state != .authenticated)
             return .{ .rejected = .invalid_state };
         if (self.state.operation() == .none and
-            self.state.execution_state == .ready)
+            self.state.execution_authority == .ready)
         {
             if (std.mem.eql(u8, model, self.state.selected_model.view()))
                 return transitionNoAttempt(self.state, .default_changed);
             const attempt = nextAttempt(self.state.next_attempt_id) orelse
                 return .{ .rejected = .generation_mismatch };
             var next = self.state;
-            next.pending_api_key_id = next.selected_api_key_id;
-            next.pending_model.set(model) catch
-                return .{ .rejected = .invalid_command };
             next.setTransaction(
                 .persisting_model,
                 .model_preference,
                 attempt.current,
             );
+            next.setPendingApiKeyId(next.selected_api_key_id.view()) catch
+                return .{ .rejected = .invalid_command };
+            next.setPendingModel(model) catch
+                return .{ .rejected = .invalid_command };
             next.next_attempt_id = attempt.next;
             next.clearError();
             return transition(
@@ -842,17 +915,15 @@ pub const Account = struct {
             self.state.activeAttempt() == null)
             return .{ .rejected = .invalid_state };
         var next = self.state;
-        if (next.execution_state == .ready and
+        if (next.execution_authority == .ready and
             std.mem.eql(
                 u8,
-                next.pending_api_key_id.view(),
+                next.pendingApiKeyId(),
                 next.selected_api_key_id.view(),
             ) and
             std.mem.eql(u8, model, next.selected_model.view()))
         {
             next.clearTransaction();
-            next.pending_api_key_id.clear();
-            next.pending_model.clear();
             next.clearError();
             var result = transitionNoEffect(
                 next,
@@ -865,14 +936,14 @@ pub const Account = struct {
         // A model-only change updates the Account default for future Tasks.
         // It must not create a new credential execution generation or replace
         // the Workbench's live credential owner.
-        if (next.execution_state == .ready and
+        if (next.execution_authority == .ready and
             std.mem.eql(
                 u8,
-                next.pending_api_key_id.view(),
+                next.pendingApiKeyId(),
                 next.selected_api_key_id.view(),
             ))
         {
-            next.pending_model.set(model) catch
+            next.setPendingModel(model) catch
                 return .{ .rejected = .invalid_command };
             next.setTransaction(
                 .persisting_model,
@@ -890,12 +961,8 @@ pub const Account = struct {
             result.transition.catalog_intent = .candidate;
             return result;
         }
-        next.pending_model.set(model) catch
+        next.setPendingModel(model) catch
             return .{ .rejected = .invalid_command };
-        next.execution_state = if (next.execution_state == .ready)
-            .reconfiguring
-        else
-            .preparing;
         next.setTransaction(.persisting, .catalog, next.activeAttempt().?);
         next.clearError();
         const effect_model = ModelId.init(model) catch
@@ -954,7 +1021,7 @@ pub const Account = struct {
         var next = self.state;
         next.session_state = .authenticated;
         if (next.attemptKind() == .login) {
-            next.execution_state = .none;
+            next.execution_authority = .none;
             next.selected_api_key_id.clear();
             next.selected_model.clear();
             next.execution_generation = 0;
@@ -962,8 +1029,6 @@ pub const Account = struct {
         next.clearTransaction();
         next.account_id = identity.account_id;
         next.display_name = identity.display_name;
-        next.pending_api_key_id.clear();
-        next.pending_model.clear();
         next.clearError();
         var result = transitionNoEffect(
             next,
@@ -1017,10 +1082,10 @@ pub const Account = struct {
             return .{ .rejected = .generation_mismatch };
         var next = self.state;
         next.catalog_generation = generation;
-        if (next.pending_api_key_id.len != 0) {
+        if (next.pendingApiKeyId().len != 0) {
             next.setTransaction(.loading_models, .catalog, next.activeAttempt().?);
             next.clearError();
-            const effect_id = ApiKeyId.init(next.pending_api_key_id.view()) catch
+            const effect_id = ApiKeyId.init(next.pendingApiKeyId()) catch
                 return .{ .rejected = .invalid_command };
             var result = transition(
                 next,
@@ -1046,14 +1111,13 @@ pub const Account = struct {
             return .{ .rejected = .generation_mismatch };
         var next = self.state;
         next.catalog_generation = generation;
-        if (next.pending_catalog_reload) {
+        if (next.reloadingModels()) {
             // The loaded models belong to a key the user superseded while the
             // load was in flight. Drop the stale result and reload for the
             // queued key.
-            next.pending_catalog_reload = false;
             next.setTransaction(.loading_models, .catalog, next.activeAttempt().?);
             next.clearError();
-            const effect_id = ApiKeyId.init(next.pending_api_key_id.view()) catch
+            const effect_id = ApiKeyId.init(next.pendingApiKeyId()) catch
                 return .{ .rejected = .invalid_command };
             var result = transition(
                 next,
@@ -1064,14 +1128,10 @@ pub const Account = struct {
             result.transition.catalog_intent = .candidate;
             return result;
         }
-        if (next.pending_model.len != 0) {
-            next.execution_state = if (next.execution_generation == 0)
-                .preparing
-            else
-                .reconfiguring;
+        if (next.pendingModel().len != 0) {
             next.setTransaction(.persisting, .catalog, next.activeAttempt().?);
             next.clearError();
-            const effect_model = ModelId.init(next.pending_model.view()) catch
+            const effect_model = ModelId.init(next.pendingModel()) catch
                 return .{ .rejected = .invalid_command };
             var result = transition(
                 next,
@@ -1103,8 +1163,8 @@ pub const Account = struct {
         };
         const input = execution.input();
         if (input.execution_generation == 0 or
-            !std.mem.eql(u8, input.target.model, self.state.pending_model.view()) or
-            self.state.pending_api_key_id.len == 0)
+            !std.mem.eql(u8, input.target.model, self.state.pendingModel()) or
+            self.state.pendingApiKeyId().len == 0)
         {
             execution.deinit();
             completion.payload = dependencyFailure();
@@ -1112,12 +1172,10 @@ pub const Account = struct {
         }
 
         var next = self.state;
-        next.execution_state = .ready;
+        next.execution_authority = .ready;
         next.execution_generation = input.execution_generation;
-        next.selected_api_key_id = next.pending_api_key_id;
-        next.selected_model = next.pending_model;
-        next.pending_api_key_id.clear();
-        next.pending_model.clear();
+        next.selected_api_key_id.set(next.pendingApiKeyId()) catch unreachable;
+        next.selected_model.set(next.pendingModel()) catch unreachable;
         next.clearTransaction();
         next.clearError();
         completion.payload = dependencyFailure();
@@ -1137,19 +1195,17 @@ pub const Account = struct {
             (self.state.attemptKind() != .model_preference and
                 self.state.attemptKind() != .catalog) or
             self.state.activeAttempt() == null or
-            self.state.pending_api_key_id.len == 0 or
-            self.state.pending_model.len == 0 or
+            self.state.pendingApiKeyId().len == 0 or
+            self.state.pendingModel().len == 0 or
             !std.mem.eql(
                 u8,
-                self.state.pending_api_key_id.view(),
+                self.state.pendingApiKeyId(),
                 self.state.selected_api_key_id.view(),
             ))
             return .{ .rejected = .invalid_state };
         var next = self.state;
-        next.selected_model = next.pending_model;
+        next.selected_model.set(next.pendingModel()) catch unreachable;
         next.clearTransaction();
-        next.pending_api_key_id.clear();
-        next.pending_model.clear();
         next.clearError();
         var result = transitionNoEffect(
             next,
@@ -1169,13 +1225,11 @@ pub const Account = struct {
             return .{ .rejected = .invalid_state };
         var next = self.state;
         next.session_state = .signed_out;
-        next.execution_state = .none;
+        next.execution_authority = .none;
         next.account_id.clear();
         next.display_name.clear();
         next.selected_api_key_id.clear();
         next.selected_model.clear();
-        next.pending_api_key_id.clear();
-        next.pending_model.clear();
         next.catalog_generation = 0;
         next.execution_generation = 0;
         next.clearTransaction();
@@ -1212,11 +1266,8 @@ pub const Account = struct {
             self.state.operation() == .loading_models)
         {
             var parked = self.state;
-            parked.pending_api_key_id.clear();
-            parked.pending_model.clear();
-            parked.pending_catalog_reload = false;
-            if (parked.execution_state == .reconfiguring)
-                parked.execution_state = .ready;
+            parked.clearPendingApiKeyId();
+            parked.clearPendingModel();
             parked.setTransaction(
                 .selecting_key,
                 .catalog,
@@ -1254,7 +1305,7 @@ pub const Account = struct {
                 self.state.account_id.len == 0))
         {
             next.session_state = .signed_out;
-            next.execution_state = .none;
+            next.execution_authority = .none;
             next.account_id.clear();
             next.display_name.clear();
             next.selected_api_key_id.clear();
@@ -1262,13 +1313,6 @@ pub const Account = struct {
             next.catalog_generation = 0;
             next.execution_generation = 0;
         }
-        if (next.execution_state == .preparing)
-            next.execution_state = .none;
-        if (next.execution_state == .reconfiguring)
-            next.execution_state = .ready;
-        next.pending_api_key_id.clear();
-        next.pending_model.clear();
-        next.pending_catalog_reload = false;
         next.clearTransaction();
         next.error_code = normalized_failure.error_code;
         next.safe_diagnostic = normalized_failure.safe_diagnostic;
@@ -1385,28 +1429,11 @@ fn stateIsValid(state: *const CommittedState) bool {
         .authenticated => {},
     }
 
-    switch (state.execution_state) {
+    switch (state.execution_authority) {
         .none => {
             if (state.execution_generation != 0 or
                 state.selected_api_key_id.len != 0 or
                 state.selected_model.len != 0)
-                return false;
-        },
-        .preparing => {
-            if (state.operation() != .persisting) return false;
-            if (state.pending_api_key_id.len == 0 or
-                state.pending_model.len == 0)
-                return false;
-            if (state.execution_generation != 0) return false;
-        },
-        .reconfiguring => {
-            if (state.operation() != .persisting) return false;
-            if (state.pending_api_key_id.len == 0 or
-                state.pending_model.len == 0)
-                return false;
-            if (state.execution_generation == 0 or
-                state.selected_api_key_id.len == 0 or
-                state.selected_model.len == 0)
                 return false;
         },
         .ready => {
@@ -1415,8 +1442,12 @@ fn stateIsValid(state: *const CommittedState) bool {
                 state.selected_model.len == 0)
                 return false;
         },
-        .invalid => {
+        .recovery => {
             if (state.operation() != .none) return false;
+            if (state.execution_generation == 0 or
+                state.selected_api_key_id.len == 0 or
+                state.selected_model.len == 0)
+                return false;
         },
     }
     return true;
@@ -1460,11 +1491,12 @@ pub const PreparedTransition = struct {
     replacement_intent: ReplacementIntent = .none,
     committed: bool = false,
 
-    pub fn fact(self: *const PreparedTransition) contract.AccountFact {
-        return .{
-            .kind = self.fact_kind,
-            .view = self.next.view(),
-        };
+    pub fn view(self: *const PreparedTransition) contract.AccountView {
+        return self.next.view();
+    }
+
+    pub fn factKind(self: *const PreparedTransition) contract.AccountFactKind {
+        return self.fact_kind;
     }
 
     pub fn catalogIntent(self: *const PreparedTransition) CatalogIntent {
@@ -1526,7 +1558,7 @@ pub const TestSupport = if (builtin.is_test) struct {
         if (input.execution_generation == 0) return error.InvalidGeneration;
         var next = account.state;
         next.session_state = .authenticated;
-        next.execution_state = .ready;
+        next.execution_authority = .ready;
         next.account_id = identity.account_id;
         next.display_name = identity.display_name;
         next.selected_api_key_id = try ApiKeyId.init(api_key_id);
@@ -1549,15 +1581,15 @@ pub const TestSupport = if (builtin.is_test) struct {
     ) void {
         var next: CommittedState = .{
             .session_state = .authenticated,
-            .execution_state = .preparing,
-            .transaction = .{ .persisting_execution = 1 },
+            .execution_authority = .none,
+            .transaction = .{ .persisting_execution = .{ .attempt_id = 1 } },
             .catalog_generation = 1,
             .next_attempt_id = 2,
         };
         next.account_id.set("account-1") catch unreachable;
         next.display_name.set("Metask User") catch unreachable;
-        next.pending_api_key_id.set(api_key_id) catch unreachable;
-        next.pending_model.set(model_id) catch unreachable;
+        next.setPendingApiKeyId(api_key_id) catch unreachable;
+        next.setPendingModel(model_id) catch unreachable;
         std.debug.assert(stateIsValid(&next));
         account.state = next;
     }
@@ -1673,7 +1705,7 @@ test "command prepare does not mutate committed state before commit" {
     defer prepared.deinit();
 
     try std.testing.expectEqual(contract.AccountState.signed_out, account.view().state);
-    try std.testing.expectEqual(contract.AccountState.authorizing, prepared.fact().view.state);
+    try std.testing.expectEqual(contract.AccountState.authorizing, prepared.view().state);
     try std.testing.expectEqual(@as(?u64, null), account.activeAttempt());
     _ = prepared.takeEffect();
     prepared.commit(&account);
@@ -2402,7 +2434,7 @@ test "failed reconfiguration preserves the committed selection" {
 test "ready execution model selection updates the default without reconfiguration" {
     var account: Account = .{ .state = .{
         .session_state = .authenticated,
-        .execution_state = .ready,
+        .execution_authority = .ready,
         .account_id = try .init("account-1"),
         .display_name = try .init("Metask User"),
         .selected_api_key_id = try .init("key-old"),
@@ -2497,7 +2529,7 @@ test "shutdown invalidates active attempt and requires effect consumption" {
 test "shutdown revokes ready execution before publishing the terminal view" {
     var account = Account{ .state = .{
         .session_state = .authenticated,
-        .execution_state = .ready,
+        .execution_authority = .ready,
         .account_id = try .init("account-1"),
         .display_name = try .init("Metask User"),
         .selected_api_key_id = try .init("key-1"),
@@ -2545,7 +2577,7 @@ test "restore failure returns to sign-in without restart semantics" {
 test "unknown execution persistence outcome clears old runtime identity" {
     var account = Account{ .state = .{
         .session_state = .authenticated,
-        .execution_state = .ready,
+        .execution_authority = .ready,
         .account_id = try .init("account-1"),
         .display_name = try .init("Metask User"),
         .selected_api_key_id = try .init("key-old"),

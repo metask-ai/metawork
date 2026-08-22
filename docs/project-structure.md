@@ -179,8 +179,8 @@ Storage 当前只接入正式 Native test graph 和定向 `zig build test-storag
 
 ### `product/account/`
 
-- `runtime.zig` 是 Account 长生命周期 owner，拥有状态机实例、private/public candidate catalog、credential、attempt、mailbox/effect queue、平台恢复状态、自动选择与 continuation；它不导入 Workbench，跨 owner 提交仍由 Application coordinator 协调；
-- `state.zig` 拥有 Account 状态机、attempt/generation 与 prepare/admit/commit；
+- `runtime.zig` 是 Account 长生命周期 aggregate，拥有状态机实例、private catalog session、committed/candidate public catalog slot 及 candidate attempt identity、credential、mailbox/effect queue、preference shadow/恢复、自动选择与 continuation；effect driver 不拥有 committed 产品目录。它不导入 Workbench，跨 owner 提交仍由 Application coordinator 协调；
+- `state.zig` 拥有封闭 `Transaction` sum type、attempt/generation、bounded pending facts 与 prepare/commit decision；每个 prepared change 显式给出 catalog/execution/replacement intent，不保存可独立漂移的 operation/attempt 组合状态；
 - `oauth.zig` 与 `loopback.zig` 拥有 OAuth material、callback/state/code/error/issuer 校验、无效请求预算和 response policy；`login_attempt.zig`、`network_attempt.zig` 拥有 Account worker、token/identity 链路与取消编排，只经注入的 endpoint/sink 使用 Application loopback transport；
 - `metask_client.zig` 与 `catalog.zig` 消费锁定的 Metask production contract；`metask_client.zig` 只发布协议、状态分类与 transport port，不持有 concrete HTTP client；
 - `app.zon` 单一拥有 development 产品 Bundle ID；`product_identity.zig` 派生该值、macOS 数据目录和仅供 `-Dautomation=true` artifact 使用的 `.automation` Native SDK runner identity。正式 artifact 始终把 manifest identity 传给 runner；automation identity 只隔离 Native SDK 的 data/window/log namespace，不改写产品 identity、签名或 credential 合同；

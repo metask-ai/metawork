@@ -2,7 +2,7 @@
 
 > 状态：Account Product owner 的内部架构 source of truth。
 >
-> 当前实现仍有历史组合状态与隐式 catalog 提交判断，须按本文的事务模型硬切收口；未完成的差距不改变本文定义的 owner 和不变量。
+> 当前实现已按本文完成 Account transaction kernel 硬切；后续变更必须继续满足本文不变量，不得恢复历史组合状态或隐式提交判断。
 
 ## 1. 文档职责
 
@@ -109,6 +109,8 @@ Transaction =
 - 当前阶段和该阶段唯一合法的 pending facts；
 - 是否存在 worker/effect、是否仍允许取消；
 - 成功、明确失败、取消、deadline 和 outcome unknown 的 terminal 规则。
+
+当前 Zig 实现将 transaction kind 与阶段扁平为一个封闭 tagged union；catalog/default-model variant 直接携带 attempt identity 与 bounded pending facts，`reloading_models` 是独立 variant。`OperationKind`/`AttemptKind` 只是在纯 projection helper 中返回的派生标签，不是可独立写入的状态。committed execution authority 只表达 `none | ready | recovery`；准备或替换阶段只由 transaction variant 表达。
 
 Catalog transaction 使用封闭阶段：
 
@@ -241,7 +243,7 @@ credential-bearing execution persistence outcome unknown 风险更高：在重�
 
 ## 8. Projection 与安全
 
-`AccountView` 是 Account aggregate 一次生成的 canonical projection。禁止先由 State 生成不含 catalog 的半成品，再由 Runtime 根据公开 fact 选择 slot 并补齐。
+`AccountView` 是 Account aggregate 一次生成的 canonical projection。State transition 只提供无 catalog 的内部 base view；只有 Runtime 可以结合显式 `CatalogIntent`/当前 slot 生成公开 `AccountFact`，并在返回 prepared 或 committed view 前强制执行 `validateView()`。禁止公开 State 半成品，也禁止根据公开 fact 反推 slot 后再补齐。
 
 每个 prepared 和 committed view 都必须满足 `contract.validateView()`：
 
@@ -277,4 +279,4 @@ Account inline tests 覆盖纯 transaction transition、intent、projection、co
 - identity replacement、effect admission failure、deadline 和 shutdown 在所有终止路径平衡 gate、attempt、secret 和 catalog；
 - 每个 prepared/committed `AccountView` 都通过 runtime decode 等价的合同校验。
 
-当前实现中基于 `fact.kind` 判断 catalog completion、把 committed public catalog 放入 effect driver、ready 模型选择不持久化、Coordinator 从 command/effect 推断 replacement 等路径均不符合本文目标模型；重构完成时必须删除这些旧路径，不保留兼容层或并行状态机。
+实现收口基线：`Transaction` 是唯一可写事务状态；Runtime 直接拥有 committed/candidate public catalog 与 candidate attempt identity；默认模型使用独立 durable preference transaction；Coordinator 只消费显式 execution/replacement intent。`fact.kind` catalog completion、effect-driver committed catalog、ready 模型直接 mutation、command/effect gate 推断、`candidateCatalogActive` 和组合 operation/attempt 字段均已删除，后续不得以兼容或 fallback 名义恢复。

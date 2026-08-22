@@ -499,8 +499,8 @@ pub const Prepared = struct {
     schedule_refresh_after_commit: bool = false,
     retry_refresh_after_commit: bool = false,
 
-    pub fn fact(self: *const Prepared) contract.AccountFact {
-        return self.transition.fact();
+    pub fn factKind(self: *const Prepared) contract.AccountFactKind {
+        return self.transition.factKind();
     }
 
     pub fn takeExecution(
@@ -556,6 +556,7 @@ pub const Runtime = struct {
     effects: Effects,
     committed_public_catalog: catalog_impl.PublicCatalog = .{},
     candidate_public_catalog: catalog_impl.PublicCatalog = .{},
+    candidate_catalog_attempt_id: ?u64 = null,
     view_catalog_slot: enum { committed, candidate } = .committed,
     platform: ?ports_impl.Platform = null,
     credentials: credentials_impl.CredentialOwner = .{},
@@ -611,6 +612,7 @@ pub const Runtime = struct {
         self.pending_default_preference = null;
         self.committed_public_catalog.clear();
         self.candidate_public_catalog.clear();
+        self.candidate_catalog_attempt_id = null;
         self.* = undefined;
     }
 
@@ -819,6 +821,8 @@ pub const Runtime = struct {
         var result = self.account.view();
         self.decorateView(&result);
         result.model_connections = self.model_connections.views();
+        contract.validateView(result) catch
+            @panic("Account Runtime produced an invalid canonical AccountView");
         return result;
     }
 
@@ -1138,15 +1142,21 @@ pub const Runtime = struct {
         prepared: *const Prepared,
     ) contract.AccountFact {
         self.assertMainThread();
-        var fact = prepared.fact();
-        if (fact.view.state != .authenticated or
-            fact.view.catalog_state == .unavailable)
-            return fact;
-        const catalog = switch (prepared.transition.catalogIntent()) {
-            .candidate, .promote_candidate => &self.candidate_public_catalog,
-            .committed, .discard_candidate, .clear_all => &self.committed_public_catalog,
+        var fact: contract.AccountFact = .{
+            .kind = prepared.factKind(),
+            .view = prepared.transition.view(),
         };
-        catalog.decorate(&fact.view);
+        if (fact.view.state == .authenticated and
+            fact.view.catalog_state != .unavailable)
+        {
+            const catalog = switch (prepared.transition.catalogIntent()) {
+                .candidate, .promote_candidate => &self.candidate_public_catalog,
+                .committed, .discard_candidate, .clear_all => &self.committed_public_catalog,
+            };
+            catalog.decorate(&fact.view);
+        }
+        contract.validateView(fact.view) catch
+            @panic("Account Runtime prepared an invalid canonical AccountView");
         return fact;
     }
 
@@ -1169,25 +1179,31 @@ pub const Runtime = struct {
             .committed => self.view_catalog_slot = .committed,
             .candidate => self.view_catalog_slot = .candidate,
             .promote_candidate => {
+                std.debug.assert(
+                    self.candidate_catalog_attempt_id == prepared.attemptId(),
+                );
                 self.committed_public_catalog.replaceFromPublic(
                     &self.candidate_public_catalog,
                 );
                 self.candidate_public_catalog.clear();
+                self.candidate_catalog_attempt_id = null;
                 self.view_catalog_slot = .committed;
             },
             .discard_candidate => {
                 self.candidate_public_catalog.clear();
+                self.candidate_catalog_attempt_id = null;
                 self.view_catalog_slot = .committed;
             },
             .clear_all => {
                 self.committed_public_catalog.clear();
                 self.candidate_public_catalog.clear();
+                self.candidate_catalog_attempt_id = null;
                 self.view_catalog_slot = .committed;
             },
         }
         if (self.pending_default_preference) |pending| {
             if (prepared.attemptId() == pending.attempt_id) {
-                if (prepared.fact().kind == .default_changed)
+                if (prepared.factKind() == .default_changed)
                     self.saved_preference = pending.value;
                 self.pending_default_preference = null;
             }
@@ -1314,9 +1330,12 @@ pub const Runtime = struct {
         };
         if (self.account.activeAttempt() == completion.attempt_id) {
             switch (completion.payload) {
-                .api_keys_loaded, .models_loaded => self.candidate_public_catalog.replaceFromSession(
-                    &self.effects.catalog,
-                ),
+                .api_keys_loaded, .models_loaded => {
+                    self.candidate_public_catalog.replaceFromSession(
+                        &self.effects.catalog,
+                    );
+                    self.candidate_catalog_attempt_id = completion.attempt_id;
+                },
                 else => {},
             }
         }
@@ -1347,6 +1366,7 @@ pub const Runtime = struct {
         self.cancelRefreshTimer();
         self.effects.clearCatalog();
         self.candidate_public_catalog.clear();
+        self.candidate_catalog_attempt_id = null;
         return result;
     }
 
@@ -1696,6 +1716,7 @@ pub const Runtime = struct {
         self.cancelRefreshTimer();
         self.effects.clearCatalog();
         self.candidate_public_catalog.clear();
+        self.candidate_catalog_attempt_id = null;
         self.effects.publishCompletion(.{
             .attempt_id = attempt_id,
             .payload = .logged_out,
@@ -1774,6 +1795,7 @@ pub const Runtime = struct {
                 if (err == error.PersistenceOutcomeUnknown) {
                     self.committed_public_catalog.clear();
                     self.candidate_public_catalog.clear();
+                    self.candidate_catalog_attempt_id = null;
                     self.effects.publishPersistenceUnknown(
                         attempt_id,
                     );
@@ -1996,6 +2018,9 @@ pub const Runtime = struct {
         self: *Runtime,
         account_view: *contract.AccountView,
     ) void {
+        if (account_view.state != .authenticated or
+            account_view.catalog_state == .unavailable)
+            return;
         const catalog = switch (self.view_catalog_slot) {
             .committed => &self.committed_public_catalog,
             .candidate => &self.candidate_public_catalog,
@@ -2796,6 +2821,7 @@ test "Account Runtime publishes the candidate catalog with first execution" {
         }},
         &.{.{ .id = "model-1", .display_name = "Model 1" }},
     );
+    runtime.candidate_catalog_attempt_id = 1;
 
     var execution = try contract.OwnedExecutionConfig.initOwned(
         std.testing.allocator,
@@ -2969,12 +2995,7 @@ fn commitReadyRestoreForTest(runtime: *Runtime) !void {
         1,
         try std.testing.allocator.dupe(u8, "secret-key"),
     );
-    var prepared: Prepared = .{ .transition = try state_impl.TestSupport.prepareReady(
-        &runtime.account,
-        try .init("account-1", "Metask User"),
-        "key-1",
-        &execution,
-    ) };
+    var prepared = try TestSupport.prepareReadyRestore(runtime, &execution);
     execution.deinit();
     defer prepared.deinit();
     try std.testing.expect(runtime.admitEffect(&prepared));
@@ -3053,7 +3074,7 @@ test "default-model outcome unknown commits the re-observed candidate" {
     defer prepared.deinit();
     try std.testing.expectEqual(
         contract.AccountFactKind.default_changed,
-        prepared.fact().kind,
+        prepared.factKind(),
     );
     runtime.commit(&prepared);
     try std.testing.expectEqualStrings("model-2", runtime.view().selected_model);
@@ -3111,7 +3132,7 @@ test "default-model outcome unknown revokes execution on a third disk state" {
     };
     defer prepared.deinit();
     try std.testing.expectEqual(
-        state_impl.ExecutionIntent.clear,
+        state_impl.ExecutionIntent.unchanged,
         prepared.executionIntent(),
     );
     runtime.commit(&prepared);

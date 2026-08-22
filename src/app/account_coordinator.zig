@@ -1229,6 +1229,7 @@ test "relaunch with persisted selection restores the saved execution" {
     var fake_metask: FakeMetask = .{};
     var fake_platform: FakePlatform = .{};
     fake_platform.seed("stored-refresh-token");
+    var persisted_generation: u64 = 0;
 
     // First boot: land the automatic defaults and persist the preference.
     {
@@ -1344,6 +1345,67 @@ test "relaunch with persisted selection restores the saved execution" {
             switched.catalog_state,
         );
         try std.testing.expectEqualStrings("2", switched.selected_api_key_id);
+        const model_change = coordinator.commandSink().submit(.{
+            .select_model = .{
+                .selection_id = "gpt-5.6-sol",
+                .expected_catalog_generation = switched.catalog_generation,
+                .expected_execution_generation = switched.execution_generation,
+            },
+        });
+        try std.testing.expect(model_change.accepted);
+        const changed = pumpUntilReady(&coordinator, &account_runtime, "boot2-model");
+        try std.testing.expectEqualStrings("gpt-5.6-sol", changed.selected_model);
+        try std.testing.expectEqual(
+            switched.execution_generation,
+            changed.execution_generation,
+        );
+        persisted_generation = changed.execution_generation;
+        coordinator.shutdown();
+    }
+
+    // Third boot proves that a model-only preference transaction survives a
+    // process boundary without minting a replacement credential generation.
+    {
+        var account_runtime = try account_api.Runtime.init(
+            std.testing.allocator,
+            std.testing.io,
+            std.Thread.getCurrentId(),
+            account_dir,
+            testingTransport(),
+            account_api.TestSupport.loopbackEndpoint(),
+            .{ .context = &wake_context, .notify_fn = TestWake.notify },
+        );
+        defer account_runtime.deinit();
+        account_api.TestSupport.overrideTransport(
+            &account_runtime,
+            fake_metask.transport(),
+        );
+        var agent_runtime: agent.Runtime = undefined;
+        var workbench = try workbench_api.Workbench.init(
+            std.testing.allocator,
+            std.testing.io,
+            &agent_runtime,
+            .{
+                .worker_count = 1,
+                .queue_capacity = 1,
+                .max_tasks = 1,
+                .max_runs_per_task = 1,
+                .max_tools_per_run = 1,
+            },
+            .{},
+        );
+        defer workbench.deinit();
+        var coordinator = Coordinator.init(
+            &account_runtime,
+            &workbench,
+            std.Thread.getCurrentId(),
+            std.testing.io,
+        );
+        coordinator.start(fake_platform.ports());
+        const restored = pumpUntilReady(&coordinator, &account_runtime, "boot3");
+        try std.testing.expectEqualStrings("2", restored.selected_api_key_id);
+        try std.testing.expectEqualStrings("gpt-5.6-sol", restored.selected_model);
+        try std.testing.expectEqual(persisted_generation, restored.execution_generation);
         coordinator.shutdown();
     }
 }
