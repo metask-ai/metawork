@@ -1721,9 +1721,18 @@ export function McpPage({
                             setNegotiation(value as typeof negotiation)
                           }
                           options={[
-                            { value: "automatic", label: "Automatic" },
-                            { value: "modern_only", label: "2026-07-28" },
-                            { value: "compat_only", label: "2025-11-25" },
+                            {
+                              value: "automatic",
+                              label: t("mcp.negotiation.automatic"),
+                            },
+                            {
+                              value: "modern_only",
+                              label: t("mcp.negotiation.modern_only"),
+                            },
+                            {
+                              value: "compat_only",
+                              label: t("mcp.negotiation.compat_only"),
+                            },
                           ]}
                           aria-label={t("mcp.add.protocol")}
                         />

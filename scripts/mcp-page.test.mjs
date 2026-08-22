@@ -264,6 +264,8 @@ test("MCP shares the centered management-page frame and foundation Drawer", asyn
   ]);
 
   assert.match(page, /<Drawer\.Root[\s\S]*?<Drawer\.Popup/);
+  assert.match(page, /label: t\("mcp\.negotiation\.automatic"\)/);
+  assert.doesNotMatch(page, /label: "Automatic"/);
   assert.match(
     css,
     /\.mcp-page-inner \{[\s\S]*?width: min\(100%, 944px\);[\s\S]*?margin: 0 auto;/,
