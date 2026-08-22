@@ -940,6 +940,8 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     app.addImport("metawork_automation", automation);
     app.addImport("metawork_account_contract", account_contract);
     app.addImport("metawork_account", account);
+    app.addImport("account_oauth", account_oauth);
+    app.addImport("metask_client", metask_client);
     app.addImport("metawork_product_identity", product_identity);
     app.addImport("metawork_mcp_platform", mcp_platform);
     app.addImport("metawork_mcp_oauth", mcp_oauth);

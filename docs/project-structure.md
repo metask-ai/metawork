@@ -148,7 +148,7 @@ Task 内容 presentation 只按 canonical Run 顺序把用户输入、Assistant 
 
 `app/` 只接纳四类实现：平台适配、一次性 bootstrap resolver、Application 创建资源的生命周期，以及跨 owner 用例编排。适配按稳定资源类别分文件，编排按用例分文件；编排只安排 owner 调用顺序，不读取领域状态自行形成 policy。`agent/`、`workbench/`、`account/` 与 `bridge/` 不得反向导入 `app/`。
 
-`app/platform.zig` 是唯一 `DispatcherPlatform` vtable 实现并持有 Native SDK runtime/services 引用；窗口系统行为委托给 `app/window.zig`。`app/window.zig` 拥有窗口、tray、notification、dialog 与两个已登记 compat capability，但不拥有 Bridge authority 或 Product policy。`app/paths.zig` 的 `Paths` 原位持有所有路径 buffer，只能按指针传递并由 `run()` 保持稳定地址。`app/stores.zig` 拥有 Application 创建的 store、单写锁与 restored bytes 生命周期。
+`app/platform.zig` 是唯一 `DispatcherPlatform` vtable 实现并持有 Native SDK runtime/services 引用；窗口系统行为委托给 `app/window.zig`。`app/window.zig` 拥有窗口、tray、notification、dialog 与两个已登记 compat capability，但不拥有 Bridge authority 或 Product policy。`app/metask_http_transport.zig` 实现 Account 定义的窄 Metask HTTP transport port，拥有 `std.http.Client`、请求 deadline/cancellation race 与 bounded response 写入；Metask request kind、响应状态分类、JSON codec 和 credential 生命周期仍归 Account。`app/paths.zig` 的 `Paths` 原位持有所有路径 buffer，只能按指针传递并由 `run()` 保持稳定地址。`app/stores.zig` 拥有 Application 创建的 store、单写锁与 restored bytes 生命周期。
 
 `app/mcp_startup.zig` 负责启动期 registry load、credential transaction recovery 与 Workbench preparation 的线性编排；`app/mcp_platform.zig` 只适配 MCP 系统 credential、stdio process/pipe 与 Streamable HTTP connection/raw-byte effect，不解析 MCP JSON-RPC、STDIO/HTTP framing 或复制协商，也不形成新的产品 owner。`app/mcp_management_coordinator.zig` 把 Workbench transaction seam 与原生确认、Application-owned secure-input capability、系统浏览器、loopback、有界 OAuth worker，以及单一候选 Runtime 测试 worker 串成用例；测试 worker 只消费 canonical prepared target 并回写安全结果，不拥有正式 Runtime authority。coordinator 不拥有 registry、持久 operation、credential 或 OAuth policy。MCP secret capture 只在对应平台通过真实 modal 事件 gate 后开放；未验收平台保持 unavailable，不能扩展 Renderer credential bridge。
 
@@ -177,7 +177,7 @@ Storage 当前只接入正式 Native test graph 和定向 `zig build test-storag
 - `runtime.zig` 是 Account 长生命周期 owner，拥有状态机实例、private/public candidate catalog、credential、attempt、mailbox/effect queue、平台恢复状态、自动选择与 continuation；它不导入 Workbench，跨 owner 提交仍由 Application coordinator 协调；
 - `state.zig` 拥有 Account 状态机、attempt/generation 与 prepare/admit/commit；
 - `oauth.zig`、`loopback.zig`、`login_attempt.zig` 和 `network_attempt.zig` 拥有登录网络链路；
-- `metask_client.zig` 与 `catalog.zig` 消费锁定的 Metask production contract；
+- `metask_client.zig` 与 `catalog.zig` 消费锁定的 Metask production contract；`metask_client.zig` 只发布协议、状态分类与 transport port，不持有 concrete HTTP client；
 - `app.zon` 单一拥有 development 产品 Bundle ID；`product_identity.zig` 派生该值、macOS 数据目录和仅供 `-Dautomation=true` artifact 使用的 `.automation` Native SDK runner identity。正式 artifact 始终把 manifest identity 传给 runner；automation identity 只隔离 Native SDK 的 data/window/log namespace，不改写产品 identity、签名或 credential 合同；
 - `credential_store.zig` 独立拥有跨平台 Account persistence 合同：secure store 中唯一的 refresh token，以及原子、无 secret 的 `preferences.json`；production 与 automation service 在编译期隔离；
 - `platform.zig` 是当前 Account 平台实现中唯一导入 Native SDK 的过渡边界，以同一 backend 适配各平台 credential、URL、timer 与 preference 持久化能力；它仍让 Product owner 持有原始 `PlatformServices`，属于 [验证规范](validation.md#native-sdk-能力路径)登记的架构缺口，不是获准兼容 seam，也不得增加新的底层能力或消费者；

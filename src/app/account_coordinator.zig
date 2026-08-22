@@ -611,6 +611,23 @@ fn replacementErrorCode(err: anyerror) account_contract.ErrorCode {
     };
 }
 
+var testing_transport_context: u8 = 0;
+
+fn testingTransport() account_api.Transport {
+    return .{
+        .context = &testing_transport_context,
+        .perform_fn = testingPerform,
+    };
+}
+
+fn testingPerform(
+    _: *anyopaque,
+    _: account_api.TransportRequest,
+    _: []u8,
+) account_api.TransportError!account_api.TransportResponse {
+    return error.NetworkFailed;
+}
+
 test "Application maps identity replacement blockers precisely" {
     try std.testing.expectEqual(
         account_contract.ErrorCode.execution_in_use,
@@ -639,6 +656,7 @@ test "Application coordinator commits Account Runtime facts into Workbench" {
             "C:\\metawork-account-coordinator-test"
         else
             "/tmp/metawork-account-coordinator-test",
+        testingTransport(),
         .{ .context = &wake_context, .notify_fn = TestWake.notify },
     );
     defer account_runtime.deinit();
@@ -768,6 +786,7 @@ test "Application coordinator balances Workbench gate when Account effect admiss
             "C:\\metawork-account-admission-test"
         else
             "/tmp/metawork-account-admission-test",
+        testingTransport(),
         .{ .context = &wake_context, .notify_fn = TestWake.notify },
     );
     defer account_runtime.deinit();
@@ -1037,6 +1056,7 @@ test "restored login drives automatic key and model defaults end to end" {
         std.testing.io,
         std.Thread.getCurrentId(),
         account_dir,
+        testingTransport(),
         .{ .context = &wake_context, .notify_fn = TestWake.notify },
     );
     defer account_runtime.deinit();
@@ -1132,6 +1152,7 @@ test "relaunch with persisted selection restores the saved execution" {
             std.testing.io,
             std.Thread.getCurrentId(),
             account_dir,
+            testingTransport(),
             .{ .context = &wake_context, .notify_fn = TestWake.notify },
         );
         defer account_runtime.deinit();
@@ -1178,6 +1199,7 @@ test "relaunch with persisted selection restores the saved execution" {
             std.testing.io,
             std.Thread.getCurrentId(),
             account_dir,
+            testingTransport(),
             .{ .context = &wake_context, .notify_fn = TestWake.notify },
         );
         defer account_runtime.deinit();
@@ -1261,6 +1283,7 @@ test "broken first key parks the catalog and a manual switch recovers" {
         std.testing.io,
         std.Thread.getCurrentId(),
         account_dir,
+        testingTransport(),
         .{ .context = &wake_context, .notify_fn = TestWake.notify },
     );
     defer account_runtime.deinit();

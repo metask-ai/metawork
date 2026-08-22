@@ -10,6 +10,7 @@ const product_identity = @import("metawork_product_identity");
 const mcp_platform = @import("metawork_mcp_platform");
 const mcp_oauth = @import("metawork_mcp_oauth");
 const account_coordinator = @import("app/account_coordinator.zig");
+const metask_http_transport = @import("app/metask_http_transport.zig");
 const agent_event_coordinator = @import("app/agent_event_coordinator.zig");
 const app_automation = @import("app/automation.zig");
 const frontend = @import("app/frontend.zig");
@@ -467,11 +468,16 @@ pub fn run(init: std.process.Init) !void {
             runtime.deinit();
         }
     }
+    var account_http = metask_http_transport.Adapter{
+        .allocator = std.heap.c_allocator,
+        .io = init.io,
+    };
     var account_runtime = try account_api.Runtime.init(
         std.heap.c_allocator,
         init.io,
         app.main_thread_id,
         paths_state.accountDir(),
+        account_http.transport(),
         .{
             .context = &app.platform,
             .notify_fn = app_platform.Adapter.notifyRequired,

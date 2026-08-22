@@ -114,11 +114,7 @@ const Effects = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     wake: WakeSink,
-    transport: metask_client.StdHttpTransport,
-    /// Test-only network seam: reproduction tests script Metask responses
-    /// through the same single-flight worker path production uses.
-    test_transport: if (builtin.is_test) ?metask_client.Transport else void =
-        if (builtin.is_test) null else {},
+    transport: metask_client.Transport,
     queue: EffectQueue = .{},
     catalog: catalog_impl.CatalogSession,
     public_catalog: catalog_impl.PublicCatalog = .{},
@@ -132,22 +128,20 @@ const Effects = struct {
     fn init(
         allocator: std.mem.Allocator,
         io: std.Io,
+        transport: metask_client.Transport,
         wake: WakeSink,
     ) Effects {
         return .{
             .allocator = allocator,
             .io = io,
+            .transport = transport,
             .wake = wake,
-            .transport = .{ .allocator = allocator, .io = io },
             .catalog = .init(allocator),
         };
     }
 
     fn clientTransport(self: *Effects) metask_client.Transport {
-        if (builtin.is_test) {
-            if (self.test_transport) |value| return value;
-        }
-        return self.transport.transport();
+        return self.transport;
     }
 
     fn loginSink(self: *Effects) login_attempt.ResultSink {
@@ -273,7 +267,7 @@ const Effects = struct {
             self.allocator,
             self.io,
             attempt_id,
-            self.transport.transport(),
+            self.transport,
             self.loginSink(),
             now_unix_seconds,
         ) catch |err| {
@@ -563,6 +557,7 @@ pub const Runtime = struct {
         io: std.Io,
         main_thread_id: std.Thread.Id,
         account_path: []const u8,
+        transport: metask_client.Transport,
         wake: WakeSink,
     ) InitError!Runtime {
         if (!std.fs.path.isAbsolute(account_path) or
@@ -574,7 +569,7 @@ pub const Runtime = struct {
             .io = io,
             .main_thread_id = main_thread_id,
             .account_path_len = account_path.len,
-            .effects = .init(allocator, io, wake),
+            .effects = .init(allocator, io, transport, wake),
             .model_connections = model_connections_impl.Registry.init(allocator),
         };
         @memcpy(runtime.account_path_storage[0..account_path.len], account_path);
@@ -1966,7 +1961,7 @@ pub const TestSupport = if (builtin.is_test) struct {
         runtime: *Runtime,
         transport: metask_client.Transport,
     ) void {
-        runtime.effects.test_transport = transport;
+        runtime.effects.transport = transport;
     }
 
     pub fn occupyEffectQueue(runtime: *Runtime) void {
@@ -2106,6 +2101,23 @@ fn wallUnixSeconds(io: std.Io) ?i64 {
 
 fn testingWake(_: *anyopaque) void {}
 
+var testing_transport_context: u8 = 0;
+
+fn testingTransport() metask_client.Transport {
+    return .{
+        .context = &testing_transport_context,
+        .perform_fn = testingPerform,
+    };
+}
+
+fn testingPerform(
+    _: *anyopaque,
+    _: metask_client.Request,
+    _: []u8,
+) metask_client.TransportError!metask_client.Response {
+    return error.NetworkFailed;
+}
+
 test "Account Runtime owns automatic catalog selection policy" {
     var wake_context: u8 = 0;
     var runtime = try Runtime.init(
@@ -2116,6 +2128,7 @@ test "Account Runtime owns automatic catalog selection policy" {
             "C:\\metawork-account-runtime-test"
         else
             "/tmp/metawork-account-runtime-test",
+        testingTransport(),
         .{ .context = &wake_context, .notify_fn = testingWake },
     );
     defer runtime.deinit();
@@ -2284,6 +2297,7 @@ test "Account Runtime persists a nonzero nonce for a new execution" {
         std.testing.io,
         std.Thread.getCurrentId(),
         account_path_storage[0..account_path_len],
+        testingTransport(),
         .{ .context = &wake_context, .notify_fn = testingWake },
     );
     defer runtime.deinit();
@@ -2395,6 +2409,7 @@ test "Account Runtime persists and restores a secure model connection default" {
             std.testing.io,
             std.Thread.getCurrentId(),
             account_path,
+            testingTransport(),
             .{ .context = &wake_context, .notify_fn = testingWake },
         );
         defer runtime.deinit();
@@ -2465,6 +2480,7 @@ test "Account Runtime persists and restores a secure model connection default" {
             std.testing.io,
             std.Thread.getCurrentId(),
             account_path,
+            testingTransport(),
             .{ .context = &wake_context, .notify_fn = testingWake },
         );
         defer runtime.deinit();
@@ -2491,6 +2507,7 @@ test "Account Runtime persists and restores a secure model connection default" {
             std.testing.io,
             std.Thread.getCurrentId(),
             account_path,
+            testingTransport(),
             .{ .context = &wake_context, .notify_fn = testingWake },
         );
         defer runtime.deinit();
@@ -2599,6 +2616,7 @@ test "Account Runtime mailbox transfers ownership and reports collision" {
     var effects = Effects.init(
         std.testing.allocator,
         std.testing.io,
+        testingTransport(),
         .{ .context = &wake, .notify_fn = TestWake.notify },
     );
     defer effects.deinit();
@@ -2739,6 +2757,7 @@ fn initRuntimeForTest(wake_context: *u8) !Runtime {
             "C:\\metawork-account-runtime-test"
         else
             "/tmp/metawork-account-runtime-test",
+        testingTransport(),
         .{ .context = wake_context, .notify_fn = testingWake },
     );
 }

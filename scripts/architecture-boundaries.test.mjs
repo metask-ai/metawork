@@ -165,6 +165,19 @@ test("named module roots exist and lower owners cannot import composition", () =
   }
 });
 
+test("Account owns Metask protocol without a concrete HTTP client", () => {
+  const accountSource = ["src/account.zig", ...zigFiles("src/account/")]
+    .map(read)
+    .join("\n");
+  const adapter = read("src/app/metask_http_transport.zig");
+  const app = read("src/app.zig");
+
+  assert.doesNotMatch(accountSource, /std\.http\.Client|StdHttpTransport/);
+  assert.match(adapter, /std\.http\.Client/);
+  assert.match(adapter, /pub const Adapter = struct/);
+  assert.match(app, /account_http\.transport\(\)/);
+});
+
 test("Storage owns SQLite without entering the Product or Application graph", () => {
   const storageFiles = ["src/storage.zig", ...zigFiles("src/storage/")];
   const storageContract = read("src/storage/sql.zig");
