@@ -24,6 +24,7 @@ import { Alert } from "../../components/ui/alert.tsx";
 import { AlertDialog } from "../../components/ui/alert-dialog.tsx";
 import { Button } from "../../components/ui/button.tsx";
 import { Checkbox } from "../../components/ui/checkbox.tsx";
+import { Drawer } from "../../components/ui/drawer.tsx";
 import { Input } from "../../components/ui/input.tsx";
 import { SearchField } from "../../components/ui/search-field.tsx";
 import { SelectField } from "../../components/ui/select.tsx";
@@ -318,6 +319,8 @@ function McpServerRow({
         data-status={applying ? "connecting" : serverVisualStatus(server)}
         data-selected={selected}
         aria-current={selected ? "true" : undefined}
+        aria-haspopup="dialog"
+        aria-expanded={selected}
         onClick={(event) => onOpen(server, event.currentTarget)}
       >
         <span className="mcp-status-rail" aria-hidden="true" />
@@ -344,6 +347,35 @@ function McpServerRow({
         <Icon name="chevron-right" />
       </button>
     </li>
+  );
+}
+
+function McpDetailDrawer({
+  closeLocked,
+  onClose,
+  children,
+}: {
+  closeLocked: boolean;
+  onClose: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <Drawer.Root
+      open
+      onOpenChange={(open) => {
+        if (!open && !closeLocked) onClose();
+      }}
+    >
+      <Drawer.Portal>
+        <Drawer.Backdrop />
+        <Drawer.Popup
+          className="mcp-detail-pane w-[min(620px,calc(100vw-28px))] max-[620px]:w-full bg-(--ui-surface-canvas) shadow-[-18px_0_54px_rgba(37,34,45,0.13)]"
+          aria-labelledby="mcp-detail-title"
+        >
+          {children}
+        </Drawer.Popup>
+      </Drawer.Portal>
+    </Drawer.Root>
   );
 }
 
@@ -513,11 +545,7 @@ export function McpPage({
   const confirmTrigger = useRef<HTMLElement | null>(null);
   const paneTrigger = useRef<HTMLElement | null>(null);
   const connectionSection = useRef<HTMLElement>(null);
-  const [paneState, setPaneState] = useState<PaneState>(() =>
-    management.servers[0]
-      ? { kind: "server", id: management.servers[0].id }
-      : null,
-  );
+  const [paneState, setPaneState] = useState<PaneState>(null);
   const [confirmAction, setConfirmAction] = useState<ConfirmAction>(null);
   const [pendingServerId, setPendingServerId] = useState<string | null>(null);
   const [createPending, setCreatePending] = useState(false);
@@ -592,6 +620,8 @@ export function McpPage({
     ((management.authorizationOperation.kind !== "idle" &&
       management.authorizationOperation.serverId === selected.id) ||
       selected.connectionTest.status === "testing");
+  const paneCloseLocked =
+    createPending || pendingServerId !== null || selectedOperationBusy;
   const existingOAuthClientAuthMethod =
     paneState?.kind === "replace" &&
     selected?.authMode === "oauth" &&
@@ -627,13 +657,11 @@ export function McpPage({
   }, [paneState?.kind, selected?.id]);
 
   useEffect(() => {
-    if (paneState && paneState.kind !== "add" && !selected) setPaneState(null);
+    if (paneState && paneState.kind !== "add" && !selected) closePane();
+    // closePane restores focus to the surviving list context when the
+    // authoritative projection removes the open server.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [paneState, selected]);
-
-  useEffect(() => {
-    if (!paneState && management.servers[0])
-      setPaneState({ kind: "server", id: management.servers[0].id });
-  }, [paneState, management.servers]);
 
   useEffect(() => {
     if (selected) setRenameDraft(selected.displayName);
@@ -746,6 +774,11 @@ export function McpPage({
     confirmTrigger.current = null;
     window.requestAnimationFrame(() => {
       if (trigger?.isConnected) trigger.focus();
+      else
+        (
+          document.querySelector<HTMLElement>(".mcp-server-row") ??
+          title.current
+        )?.focus();
     });
   }
 
@@ -1254,7 +1287,7 @@ export function McpPage({
 
   return (
     <section className="mcp-page" aria-labelledby="mcp-title">
-      <div className="mcp-workspace">
+      <>
         <div className="mcp-page-inner">
           <header className="mcp-header">
             <div>
@@ -1265,15 +1298,28 @@ export function McpPage({
             </div>
             <div className="mcp-header-actions">
               {!empty && (
-                <Button
-                  variant="primary"
-                  size="sm"
-                  disabled={mutationLocked}
-                  onClick={(event) => openAdd(event.currentTarget)}
-                >
-                  <Icon name="plus" />
-                  {t("mcp.add.action")}
-                </Button>
+                <>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    disabled={refreshLocked}
+                    onClick={() => void refreshCatalog()}
+                  >
+                    <Icon name="refresh" />
+                    {refreshPending || management.operation === "refreshing"
+                      ? t("mcp.refresh.refreshing")
+                      : t("mcp.refresh.action")}
+                  </Button>
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    disabled={mutationLocked}
+                    onClick={(event) => openAdd(event.currentTarget)}
+                  >
+                    <Icon name="plus" />
+                    {t("mcp.add.action")}
+                  </Button>
+                </>
               )}
             </div>
           </header>
@@ -1299,17 +1345,6 @@ export function McpPage({
                 placeholder={t("mcp.search_placeholder")}
                 onChange={(event) => onQuery(event.target.value)}
               />
-              <Button
-                variant="secondary"
-                size="sm"
-                disabled={refreshLocked}
-                onClick={() => void refreshCatalog()}
-              >
-                <Icon name="refresh" />
-                {refreshPending || management.operation === "refreshing"
-                  ? t("mcp.refresh.refreshing")
-                  : t("mcp.refresh.action")}
-              </Button>
             </div>
           )}
 
@@ -1356,7 +1391,7 @@ export function McpPage({
         </div>
 
         {paneState !== null && (
-          <aside className="mcp-detail-pane" aria-labelledby="mcp-detail-title">
+          <McpDetailDrawer closeLocked={paneCloseLocked} onClose={closePane}>
             <header>
               <div>
                 <small>
@@ -1386,15 +1421,14 @@ export function McpPage({
                       : t("mcp.desired.disabled")}
                   </span>
                 )}
-                {paneState.kind !== "server" && (
-                  <button
-                    className="icon-button focus-ring"
-                    aria-label={t("common.close")}
-                    onClick={closePane}
-                  >
-                    <Icon name="close" />
-                  </button>
-                )}
+                <button
+                  className="icon-button focus-ring"
+                  aria-label={t("common.close")}
+                  disabled={paneCloseLocked}
+                  onClick={closePane}
+                >
+                  <Icon name="close" />
+                </button>
               </div>
             </header>
 
@@ -2288,9 +2322,9 @@ export function McpPage({
                 </section>
               </div>
             ) : null}
-          </aside>
+          </McpDetailDrawer>
         )}
-      </div>
+      </>
       {selected && confirmAction && (
         <AlertDialog.Root
           open

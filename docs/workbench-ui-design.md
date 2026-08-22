@@ -303,7 +303,7 @@ Skills                                                              10
 
 > Capability：**目标合同**。Renderer 通过 revision 1 strict snapshot 与 transport-discriminated typed command 管理 Workbench-owned Desired Registry；Runtime/catalog availability、secure secret capture、OAuth operation 和 Admission Authority 是彼此独立的 Host capability/state。任一能力不可用时页面保持可达并只呈现真实可用动作。
 
-MCP 页面使用稳定 master-detail 工作区：左侧连接列表负责扫描、搜索和选择，右侧详情持续显示当前服务；桌面端不使用遮罩 drawer 隐藏列表，低于窄窗断点后按列表、详情顺序堆叠。整体沿用 Workbench 的标题尺度和克制中性色，只用紫色表示进行中的连接、绿色表示成功、琥珀色表示需要处理。
+MCP 页面与 Skill、Scheduled tasks 使用同一个全局管理页骨架：居中的有界内容区负责标题、搜索、状态分组和连接列表，详情与 Add/Edit 只在用户明确选择后进入可关闭的右侧 drawer。页面不得自动选择第一个服务，也不得在空 registry、无选择或 drawer 关闭时预留第二列。drawer 使用统一的遮罩、焦点陷阱、Escape、关闭按钮和触发点焦点恢复；窄窗占满可用宽度。整体沿用 Workbench 的标题尺度和克制中性色，只用紫色表示进行中的连接、绿色表示成功、琥珀色表示需要处理。
 
 用户模型只有两层：连接服务、选择工具。Add/Edit 保存后，Host 自动完成 preparation、认证条件动作、正式 Runtime apply、MCP activation 和工具发现；普通成功路径不要求先点 Test，也不要求重启 MetaWork。连接测试保留为次级诊断事实，不能覆盖服务主状态。详情顶部的 `Connection → MCP handshake → Tools` 轨迹只呈现 Host 能证明的阶段，不伪造进程日志或协议细节。
 
@@ -322,12 +322,16 @@ Available servers
 Disabled
 ┃ Local database     stdio · static  Disabled
 
-                                           GitHub
-                      Connection  →  MCP handshake  →  Tools
-                      Connected      Complete          2 allowed
+点击 GitHub 后：
+                                           ┌ GitHub                  × ┐
+                                           │ Connection → MCP → Tools │
+                                           │ Connected    Ready  2/8  │
+                                           │ Tool permissions         │
+                                           │ Connection and auth      │
+                                           └──────────────────────────┘
 ```
 
-- Header 只有 `Add server` 主动作与 `Refresh tools` 次级动作。Add 在右侧详情区显式选择 `STDIO` 或 `Streamable HTTP`。STDIO 普通路径提供 display name 与一条 launch command；Renderer 以不执行 shell 的 tokenizer 将引号/转义解析为 command + ordered argv，并拒绝 pipe、重定向、变量或命令替换。cwd、额外 argv、environment slot、auth、协议策略和 timeout 收入 Advanced settings。HTTP 普通路径提供 display name 与 endpoint，auth/registration/header 等高级设置保持 typed。OAuth 不出现在 STDIO；不提供 legacy SSE、JSON import 或 generic advanced blob。
+- Header 只有 `Add server` 主动作与 `Refresh tools` 次级动作。列表占据完整管理页宽度，点击连接才打开 detail drawer；Add/Edit 与详情复用同一个 drawer surface，但保持各自清晰标题和提交动作。drawer 可关闭，关闭时保留列表滚动与筛选并把焦点还给原触发点；目标服务从 authoritative projection 消失时同样关闭并恢复到相邻列表上下文。操作仍在进行时不得因 backdrop 或 Escape 丢失未完成状态。Add 在 drawer 中显式选择 `STDIO` 或 `Streamable HTTP`。STDIO 普通路径提供 display name 与一条 launch command；Renderer 以不执行 shell 的 tokenizer 将引号/转义解析为 command + ordered argv，并拒绝 pipe、重定向、变量或命令替换。cwd、额外 argv、environment slot、auth、协议策略和 timeout 收入 Advanced settings。HTTP 普通路径提供 display name 与 endpoint，auth/registration/header 等高级设置保持 typed。OAuth 不出现在 STDIO；不提供 legacy SSE、JSON import 或 generic advanced blob。
 - Add/Edit 的提交按钮分别使用 `Add and enable` / `Save connection`，其显式提交本身授权完整 typed connection，并在同一个 transaction 中保存 connection fingerprint；不再让用户重复 `Review connection`。Add 默认 enabled 且 tool allowlist 为空，Edit 在底层仍提交完整 replacement，并对新目标重新生成 approval；提交前不产生 child/network/credential/browser effect。schema 1 迁移留下的 unapproved 配置才显示一次 `Connect and enable` legacy action，Renderer 不自行比较 fingerprint。
 - Connection approval 后按 auth mode 收敛：None 进入 ready-to-enable；Static 对每个 secret slot 只显示 `Set / Replace / Missing` 和 Host secure-capture 动作，secret 从不进入 DOM、Bridge payload 或 snapshot，`mcpSecretCapture = false` 只使采集动作隐藏并明确显示 Host capability unavailable，不隐藏 Static 配置，也不清除用户的 enabled intent。OAuth 先显示 discovery progress，再由 Host-owned consent 展示 canonical resource、exact issuer、requested scopes、redirect 与 registration plan，用户确认后才打开系统浏览器。缺少 DCR 与 pre-registered client 时回到可操作的 `Existing client required`，不泛化成 unreachable。OAuth operation 全局占用时，其他 OAuth action 显示 busy，目标 server 的替换/删除/授权动作禁用；其他 server 管理和普通 Task 不被冻结。
 - 分组顺序固定为 `Needs attention / Available servers / Disabled`，空分组不渲染；状态同时使用细色轨、文字和语义图标。正常产品状态收敛为 `Connecting / Connected / Needs attention / Disabled`。`configurationApply = applying` 显示 Connecting 并冻结冲突动作；`failed` 或 desired 与 Runtime 尚未对齐时显示“配置已保存，重试连接”，调用 `metawork.mcp.applyConfiguration`，不得出现重启要求。desired-disabled 服务始终归入 Disabled。
