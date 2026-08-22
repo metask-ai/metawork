@@ -22,7 +22,7 @@ import {
   selectLocalCodeSigningIdentity,
   signWithStableRequirement,
   verifyAppleSignature,
-} from "./macos-local-signing.mjs";
+} from "./package-macos.mjs";
 
 const setupProbeIdentifier = `${localProductIdentity.bundleId}.setup`;
 const repositoryRoot = path.resolve(

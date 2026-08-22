@@ -13,7 +13,6 @@ import {
   isAppleDevelopmentIdentityName,
   isDeveloperIdApplicationIdentityName,
   localDistributionDiskImageName,
-  localPreviewDiskImageName,
   localPackageMetadata,
   localProductIdentity,
   parseCodeDirectoryIdentifier,
@@ -29,7 +28,7 @@ import {
   selectLocalCodeSigningIdentity,
   stageMacosTrayIcon,
   validateCanonicalDesignatedRequirement,
-} from "./macos-local-signing.mjs";
+} from "./package-macos.mjs";
 import { xcodeContentsForDeveloperDirectory } from "./setup-macos-local-signing.mjs";
 
 const fingerprint = "0123456789ABCDEF0123456789ABCDEF01234567";
@@ -66,10 +65,6 @@ test("distribution DMG metadata comes from the Native product manifest", () => {
     localDistributionDiskImageName,
     "metawork-0.1.1-macos-arm64.dmg",
   );
-  assert.equal(
-    localPreviewDiskImageName,
-    "metawork-0.1.1-macos-arm64-preview.dmg",
-  );
   assert.deepEqual(
     parseNativePackageMetadata(
       `.{\n.display_name = "ExampleApp",\n.version = "1.2.3-beta.1",\n}`,
@@ -103,6 +98,26 @@ test("macOS packaging stages the tray icon at its runtime-relative bundle path",
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("macOS packaging has one public owner and signs only after resource staging", () => {
+  const packageScript = readFileSync(
+    new URL("./package-macos.mjs", import.meta.url),
+    "utf8",
+  );
+  const packageJson = JSON.parse(
+    readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+  );
+  assert.equal(
+    packageJson.scripts["package:macos"],
+    "node scripts/package-macos.mjs",
+  );
+  assert.match(packageScript, /"--signing",\s*\n\s*"none"/u);
+  assert.ok(
+    packageScript.indexOf("stageMacosTrayIcon();") <
+      packageScript.indexOf("signWithDeveloperId(packagedAppPath"),
+  );
+  assert.doesNotMatch(packageScript, /previewMacosPackage|legacyPackage/u);
 });
 
 test("distribution DMG Finder layout presents left-to-right installation", () => {

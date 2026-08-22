@@ -458,10 +458,13 @@ test("ordinary build and test entries stay isolated from macOS signing", () => {
   for (const script of ["check", "test", "build:debug", "build:release"]) {
     assert.doesNotMatch(
       packageJson.scripts[script],
-      /codesign|macos-local-signing/u,
+      /codesign|package-macos|macos-local-development/u,
     );
   }
   for (const entry of ["scripts/build.mjs", "scripts/run-tests.mjs"]) {
-    assert.doesNotMatch(read(entry), /codesign|macos-local-signing/u);
+    assert.doesNotMatch(
+      read(entry),
+      /codesign|package-macos|macos-local-development/u,
+    );
   }
 });
