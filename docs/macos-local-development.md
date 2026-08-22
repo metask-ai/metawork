@@ -2,7 +2,7 @@
 
 MetaWork 的真实 Account 开发流程使用 Apple 签发、带稳定 `TeamIdentifier` 的 `Apple Development` Code Signing identity。它只解决同一台开发机上重新构建后的 macOS Keychain 身份稳定性，不是 `Developer ID`，也不用于向测试人员或用户分发应用。
 
-正式 DMG 使用 Apple 签发的 `Developer ID Application` identity。开发和打包签名彼此独立：`npm run dev` 只接受项目显式选择的 Apple Development identity；`npm run package:macos` 只接受登录钥匙串中唯一有效的 Developer ID Application identity，不能在缺失或歧义时回退到开发证书、自签名或 ad-hoc 签名。
+正式 DMG 使用 Apple 签发的 `Developer ID Application` identity。开发和打包签名彼此独立：跨平台 `scripts/dev.mjs` 入口独占 Apple Development 本地签名策略，setup 只复用该 owner；`scripts/package-macos.mjs` 只拥有 Developer ID、DMG、公证和发布验证。`npm run dev` 只接受项目显式选择的 Apple Development identity；`npm run package:macos` 只接受登录钥匙串中唯一有效的 Developer ID Application identity，不能在缺失或歧义时回退到开发证书、自签名或 ad-hoc 签名。
 
 签名流程直接读取 `app.zon` 中现有的 Bundle ID 与 executable name；当前分别是 `com.metask.metawork.dev` 和 `metawork`。`app.zon` 是跨平台 development 产品 Bundle ID 唯一真源，Application 通过 `src/product_identity.zig` 消费同一个 Native SDK manifest module。Account 在所有平台使用同一 persistence 合同：`com.metask.metawork.dev.account` secure service 只保存 refresh token，`preferences.json` 只保存无 secret 的当前选择；旧开发命名空间不迁移、不 fallback。
 

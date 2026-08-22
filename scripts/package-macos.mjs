@@ -33,16 +33,6 @@ const packageManifest = readNativePackageManifest(repositoryRoot);
 export const localProductIdentity = packageManifest.identity;
 export const localPackageMetadata = packageManifest.metadata;
 
-export const localSigningConfigPath = path.join(
-  repositoryRoot,
-  ".metawork-local-signing.json",
-);
-const executablePath = path.join(
-  repositoryRoot,
-  "zig-out",
-  "bin",
-  localProductIdentity.executableName,
-);
 const packagedAppPath = path.join(
   repositoryRoot,
   "zig-out",
@@ -81,7 +71,7 @@ const nativeDispatcher = path.join(
   "native.js",
 );
 
-export function localSigningKeychainPath() {
+function distributionSigningKeychainPath() {
   const keychainPath = path.join(
     homedir(),
     "Library",
@@ -126,36 +116,8 @@ export function parseCodeSigningIdentities(output) {
   return identities;
 }
 
-export function isAppleDevelopmentIdentityName(name) {
-  return /^Apple Development: .+$/u.test(name);
-}
-
 export function isDeveloperIdApplicationIdentityName(name) {
   return /^Developer ID Application: .+ \([A-Z0-9]{10}\)$/u.test(name);
-}
-
-export function selectLocalCodeSigningIdentity(
-  output,
-  configuredFingerprint = null,
-) {
-  const candidates = parseCodeSigningIdentities(output).filter(({ name }) =>
-    isAppleDevelopmentIdentityName(name),
-  );
-  const matching = configuredFingerprint
-    ? candidates.filter(
-        ({ fingerprint }) =>
-          fingerprint === configuredFingerprint.toUpperCase(),
-      )
-    : candidates;
-  if (matching.length !== 1) {
-    const qualifier = configuredFingerprint
-      ? ` matching configured fingerprint ${configuredFingerprint.toUpperCase()}`
-      : "";
-    throw new Error(
-      `Expected exactly one valid Apple Development Code Signing identity${qualifier}, found ${matching.length}. See docs/macos-local-development.md.`,
-    );
-  }
-  return matching[0];
 }
 
 export function selectDistributionCodeSigningIdentity(
@@ -220,37 +182,6 @@ export function parseNotarySubmission(output) {
   return Object.freeze({ id: value.id, status: value.status });
 }
 
-export function parseLocalSigningConfig(bytes) {
-  let value;
-  try {
-    value = JSON.parse(bytes);
-  } catch {
-    throw new Error("local signing selection is not valid JSON");
-  }
-  if (
-    !value ||
-    typeof value !== "object" ||
-    Array.isArray(value) ||
-    Object.keys(value).sort().join(",") !==
-      "fingerprint,name,schemaVersion,teamId" ||
-    value.schemaVersion !== 1 ||
-    typeof value.fingerprint !== "string" ||
-    !/^[0-9A-F]{40}$/u.test(value.fingerprint) ||
-    typeof value.name !== "string" ||
-    !isAppleDevelopmentIdentityName(value.name) ||
-    typeof value.teamId !== "string" ||
-    !/^[A-Z0-9]{10}$/u.test(value.teamId)
-  ) {
-    throw new Error("local signing selection has an invalid schema");
-  }
-  return Object.freeze({
-    schemaVersion: 1,
-    fingerprint: value.fingerprint,
-    name: value.name,
-    teamId: value.teamId,
-  });
-}
-
 export function parseCodeDirectoryIdentifier(output) {
   const match = output.match(/^Identifier=(.+)$/mu);
   if (!match) throw new Error("codesign output did not contain Identifier");
@@ -275,32 +206,6 @@ export function parseSigningAuthorities(output) {
   );
 }
 
-export function buildAppleDevelopmentRequirement(
-  identifier,
-  teamId,
-  identityName,
-) {
-  if (
-    !/^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/u.test(identifier) ||
-    !/^[A-Z0-9]{10}$/u.test(teamId) ||
-    !isAppleDevelopmentIdentityName(identityName) ||
-    /["\\]/u.test(identityName)
-  ) {
-    throw new Error(
-      "cannot build an Apple Development requirement from invalid identity metadata",
-    );
-  }
-  return `identifier "${identifier}" and anchor apple generic and certificate leaf[subject.OU] = ${teamId} and certificate leaf[subject.CN] = "${identityName}"`;
-}
-
-export function buildCanonicalDesignatedRequirement(
-  identifier,
-  teamId,
-  identityName,
-) {
-  return `designated => ${buildAppleDevelopmentRequirement(identifier, teamId, identityName)}`;
-}
-
 export function buildDeveloperIdRequirement(identifier, teamId, identityName) {
   if (
     !/^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/u.test(identifier) ||
@@ -315,73 +220,23 @@ export function buildDeveloperIdRequirement(identifier, teamId, identityName) {
   return `identifier "${identifier}" and anchor apple generic and certificate leaf[subject.OU] = ${teamId} and certificate leaf[subject.CN] = "${identityName}"`;
 }
 
-export function parseDesignatedRequirement(output) {
-  const requirements = output
-    .split(/\r?\n/u)
-    .filter((line) => line.startsWith("designated =>"));
-  if (requirements.length !== 1) {
-    throw new Error(
-      `codesign output contained ${requirements.length} designated requirements, expected 1`,
-    );
-  }
-  const [requirement] = requirements;
-  if (/\bcdhash\b/iu.test(requirement)) {
-    throw new Error("designated requirement is tied to an unstable CDHash");
-  }
-  return requirement;
-}
-
-export function validateCanonicalDesignatedRequirement(
-  output,
-  expectedRequirement,
-) {
-  const actual = parseDesignatedRequirement(output);
-  if (actual !== expectedRequirement) {
-    throw new Error(
-      `designated requirement is not the canonical MetaWork requirement\nactual: ${actual}\nexpected: ${expectedRequirement}`,
-    );
-  }
-  return actual;
-}
-
 function requireMacos() {
   if (process.platform !== "darwin") {
     throw new Error("local MetaWork code signing is only available on macOS");
   }
 }
 
-export function resolveIdentity() {
-  requireMacos();
-  if (!existsSync(localSigningConfigPath)) {
-    throw new Error(
-      `local signing selection is missing: ${localSigningConfigPath}. Run node scripts/setup-macos-local-signing.mjs setup.`,
-    );
-  }
-  const config = parseLocalSigningConfig(
-    readFileSync(localSigningConfigPath, "utf8"),
-  );
-  const result = run(
-    "/usr/bin/security",
-    ["find-identity", "-v", "-p", "codesigning", localSigningKeychainPath()],
-    { capture: true },
-  );
-  const identity = selectLocalCodeSigningIdentity(
-    combinedOutput(result),
-    config.fingerprint,
-  );
-  if (identity.name !== config.name) {
-    throw new Error(
-      "configured Apple Development identity metadata changed; rerun node scripts/setup-macos-local-signing.mjs setup",
-    );
-  }
-  return { ...identity, teamId: config.teamId };
-}
-
 export function resolveDistributionIdentity() {
   requireMacos();
   const identities = run(
     "/usr/bin/security",
-    ["find-identity", "-v", "-p", "codesigning", localSigningKeychainPath()],
+    [
+      "find-identity",
+      "-v",
+      "-p",
+      "codesigning",
+      distributionSigningKeychainPath(),
+    ],
     { capture: true },
   );
   const identity = selectDistributionCodeSigningIdentity(
@@ -389,7 +244,13 @@ export function resolveDistributionIdentity() {
   );
   const certificate = run(
     "/usr/bin/security",
-    ["find-certificate", "-c", identity.name, "-p", localSigningKeychainPath()],
+    [
+      "find-certificate",
+      "-c",
+      identity.name,
+      "-p",
+      distributionSigningKeychainPath(),
+    ],
     { capture: true },
   );
   const report = run(
@@ -427,98 +288,6 @@ function signatureReport(targetPath) {
     { capture: true },
   );
   return combinedOutput(result);
-}
-
-export function verifyAppleSignature(
-  targetPath,
-  expectedIdentifier = localProductIdentity.bundleId,
-  options = {},
-) {
-  requireMacos();
-  requireTarget(targetPath);
-  const verifyArgs = ["--verify", "--strict", "--verbose=2"];
-  if (options.deep) verifyArgs.push("--deep");
-  run("/usr/bin/codesign", [...verifyArgs, targetPath], { capture: true });
-  const report = signatureReport(targetPath);
-  const identifier = parseCodeDirectoryIdentifier(report);
-  if (identifier !== expectedIdentifier) {
-    throw new Error(
-      `CodeDirectory identifier is ${identifier}, expected ${expectedIdentifier}`,
-    );
-  }
-  const teamId = parseTeamIdentifier(report);
-  if (options.expectedTeamId && teamId !== options.expectedTeamId) {
-    throw new Error(
-      `TeamIdentifier is ${teamId}, expected ${options.expectedTeamId}`,
-    );
-  }
-  if (!options.expectedIdentityName) {
-    throw new Error(
-      "signature verification requires the selected Apple Development identity name",
-    );
-  }
-  const policy = buildAppleDevelopmentRequirement(
-    expectedIdentifier,
-    teamId,
-    options.expectedIdentityName,
-  );
-  run("/usr/bin/codesign", [...verifyArgs, `-R=${policy}`, targetPath], {
-    capture: true,
-  });
-  return { identifier, policy, report, teamId };
-}
-
-export function verifyStableSignature(
-  targetPath,
-  expectedIdentifier = localProductIdentity.bundleId,
-  options = {},
-) {
-  const signature = verifyAppleSignature(
-    targetPath,
-    expectedIdentifier,
-    options,
-  );
-  const expectedRequirement = buildCanonicalDesignatedRequirement(
-    expectedIdentifier,
-    signature.teamId,
-    options.expectedIdentityName,
-  );
-  const requirement = validateCanonicalDesignatedRequirement(
-    signature.report,
-    expectedRequirement,
-  );
-  return { ...signature, requirement };
-}
-
-export function signWithStableRequirement(targetPath, identity, options = {}) {
-  requireMacos();
-  requireTarget(targetPath);
-  const identifier = options.identifier ?? localProductIdentity.bundleId;
-  const requirement = buildCanonicalDesignatedRequirement(
-    identifier,
-    identity.teamId,
-    identity.name,
-  );
-  const args = [
-    "--force",
-    "--sign",
-    identity.fingerprint,
-    "--identifier",
-    identifier,
-    "--requirements",
-    `=${requirement}`,
-    "--timestamp=none",
-  ];
-  if (options.preserveMetadata) {
-    args.push("--preserve-metadata=entitlements,flags");
-  }
-  args.push(targetPath);
-  run("/usr/bin/codesign", args);
-  return verifyStableSignature(targetPath, identifier, {
-    deep: options.deep,
-    expectedIdentityName: identity.name,
-    expectedTeamId: identity.teamId,
-  });
 }
 
 export function verifyDeveloperIdSignature(
@@ -587,10 +356,6 @@ export function signWithDeveloperId(targetPath, identity, options = {}) {
   }
   args.push(targetPath);
   run("/usr/bin/codesign", args);
-}
-
-function signExecutable(identity) {
-  return signWithStableRequirement(executablePath, identity);
 }
 
 function runNative(args) {
@@ -700,21 +465,6 @@ function verifyPackagedMacosApp(identity) {
     localProductIdentity.bundleId,
     { deep: true },
   );
-}
-
-function verifiedAgentCoreTarget() {
-  runNode("scripts/verify-staged-agentcore-bundle.mjs");
-  const manifest = JSON.parse(
-    readFileSync(
-      path.join(repositoryRoot, ".agentcore", "bundle", "manifest.json"),
-      "utf8",
-    ),
-  );
-  const target = manifest?.target?.zig_target;
-  if (typeof target !== "string" || target.length === 0) {
-    throw new Error("verified AgentCore bundle has no Zig target");
-  }
-  return target;
 }
 
 function verifyDeveloperIdDiskImageSignature(targetPath, identity) {
@@ -972,21 +722,6 @@ function notarizeDiskImage(identity) {
     .update(readFileSync(distributionDiskImagePath))
     .digest("hex");
   return { artifactPath: distributionDiskImagePath, digest, submission };
-}
-
-export function runDevelopment() {
-  const target = verifiedAgentCoreTarget();
-  if (process.platform !== "darwin") {
-    runNative(["dev", ".", "--yes", `-Dtarget=${target}`]);
-    return;
-  }
-  const identity = resolveIdentity();
-  runNative(["build", ".", "--yes", `-Dtarget=${target}`, "-Doptimize=Debug"]);
-  const signature = signExecutable(identity);
-  console.log(
-    `verified local development signature ${identity.fingerprint} (${signature.requirement})`,
-  );
-  runNative(["dev", "--manifest", "app.zon", "--binary", executablePath]);
 }
 
 function buildPackagedMacosApp(identity) {
