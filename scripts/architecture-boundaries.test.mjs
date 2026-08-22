@@ -97,7 +97,7 @@ test("the root test entry discovers Node tests and reaches the Native graph", ()
 test("named module roots exist and lower owners cannot import composition", () => {
   for (const path of [
     "src/app.zig",
-    "src/account.zig",
+    "src/product/account.zig",
     "src/agent.zig",
     "src/workbench.zig",
     "src/bridge.zig",
@@ -107,6 +107,17 @@ test("named module roots exist and lower owners cannot import composition", () =
   }
   assert.equal(existsSync(new URL("src/agentcore.zig", root)), false);
   assert.equal(existsSync(new URL("src/agentcore/", root)), false);
+  assert.equal(existsSync(new URL("src/account.zig", root)), false);
+  assert.equal(existsSync(new URL("src/account/", root)), false);
+  const buildSource = read("build.zig");
+  assert.match(buildSource, /src\/product\/account\.zig/);
+  assert.match(buildSource, /src\/product\/account\/contract\.zig/);
+  assert.doesNotMatch(buildSource, /src\/account(?:\.zig|\/)/);
+  assert.match(buildSource, /addImport\("metawork_account", account\)/);
+  assert.match(
+    buildSource,
+    /addImport\("metawork_account_contract", account_contract\)/,
+  );
 
   const main = read("src/main.zig");
   assert.match(main, /@import\("metawork_app"\)/);
@@ -139,7 +150,7 @@ test("named module roots exist and lower owners cannot import composition", () =
     "metawork_account",
     "metask_agentcore",
   ]);
-  assertNoImports(zigFiles("src/account/"), [
+  assertNoImports(zigFiles("src/product/account/"), [
     "metawork_app",
     "metawork_workbench",
     "metawork_bridge",
@@ -152,7 +163,7 @@ test("named module roots exist and lower owners cannot import composition", () =
   ]);
 
   for (const file of [
-    "src/account.zig",
+    "src/product/account.zig",
     "src/agent.zig",
     "src/workbench.zig",
     "src/bridge.zig",
@@ -165,8 +176,11 @@ test("named module roots exist and lower owners cannot import composition", () =
   }
 });
 
-test("Account owns Metask protocol without a concrete HTTP client", () => {
-  const accountSource = ["src/account.zig", ...zigFiles("src/account/")]
+test("Product Account owns Metask protocol without a concrete HTTP client", () => {
+  const accountSource = [
+    "src/product/account.zig",
+    ...zigFiles("src/product/account/"),
+  ]
     .map(read)
     .join("\n");
   const adapter = read("src/app/metask_http_transport.zig");
@@ -179,11 +193,14 @@ test("Account owns Metask protocol without a concrete HTTP client", () => {
 });
 
 test("Account owns platform ports while Application binds Native SDK effects", () => {
-  const accountSource = ["src/account.zig", ...zigFiles("src/account/")]
+  const accountSource = [
+    "src/product/account.zig",
+    ...zigFiles("src/product/account/"),
+  ]
     .map(read)
     .join("\n");
-  const ports = read("src/account/ports.zig");
-  const runtime = read("src/account/runtime.zig");
+  const ports = read("src/product/account/ports.zig");
+  const runtime = read("src/product/account/runtime.zig");
   const binding = read("src/app/account_platform_binding.zig");
   const app = read("src/app.zig");
 
@@ -211,12 +228,15 @@ test("Account owns platform ports while Application binds Native SDK effects", (
 });
 
 test("Account owns OAuth callback policy while Application owns loopback sockets", () => {
-  const accountSource = ["src/account.zig", ...zigFiles("src/account/")]
+  const accountSource = [
+    "src/product/account.zig",
+    ...zigFiles("src/product/account/"),
+  ]
     .map(read)
     .join("\n");
-  const policy = read("src/account/loopback.zig");
+  const policy = read("src/product/account/loopback.zig");
   const transport = read("src/app/oauth_loopback_transport.zig");
-  const loginAttempt = read("src/account/login_attempt.zig");
+  const loginAttempt = read("src/product/account/login_attempt.zig");
   const mcpOauth = read("src/app/mcp_oauth.zig");
 
   assert.doesNotMatch(

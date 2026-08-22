@@ -1,3 +1,4 @@
+//! Product Account OAuth policy and value types.
 const std = @import("std");
 const contract = @import("metawork_account_contract");
 

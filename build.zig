@@ -593,24 +593,24 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     agent_provider_probe.addImport("metask_agentcore", sdk);
     agent.addImport("agent_provider_probe", agent_provider_probe);
     const account_contract = b.createModule(.{
-        .root_source_file = b.path("src/account/contract.zig"),
+        .root_source_file = b.path("src/product/account/contract.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     const account_state = b.createModule(.{
-        .root_source_file = b.path("src/account/state.zig"),
+        .root_source_file = b.path("src/product/account/state.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     account_state.addImport("metawork_account_contract", account_contract);
     const account_oauth = b.createModule(.{
-        .root_source_file = b.path("src/account/oauth.zig"),
+        .root_source_file = b.path("src/product/account/oauth.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     account_oauth.addImport("metawork_account_contract", account_contract);
     const account_loopback = b.createModule(.{
-        .root_source_file = b.path("src/account/loopback.zig"),
+        .root_source_file = b.path("src/product/account/loopback.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
@@ -623,7 +623,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     oauth_loopback_transport.addImport("account_oauth", account_oauth);
     oauth_loopback_transport.addImport("account_loopback", account_loopback);
     const metask_client = b.createModule(.{
-        .root_source_file = b.path("src/account/metask_client.zig"),
+        .root_source_file = b.path("src/product/account/metask_client.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
@@ -631,7 +631,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     metask_client.addImport("account_state", account_state);
     metask_client.addImport("account_oauth", account_oauth);
     const account_login_attempt = b.createModule(.{
-        .root_source_file = b.path("src/account/login_attempt.zig"),
+        .root_source_file = b.path("src/product/account/login_attempt.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
@@ -641,14 +641,14 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     account_login_attempt.addImport("account_loopback", account_loopback);
     account_login_attempt.addImport("metask_client", metask_client);
     const account_catalog = b.createModule(.{
-        .root_source_file = b.path("src/account/catalog.zig"),
+        .root_source_file = b.path("src/product/account/catalog.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     account_catalog.addImport("metawork_account_contract", account_contract);
     account_catalog.addImport("metask_client", metask_client);
     const account_credentials_runtime = b.createModule(.{
-        .root_source_file = b.path("src/account/credentials.zig"),
+        .root_source_file = b.path("src/product/account/credentials.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
@@ -658,13 +658,13 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     account_credentials_runtime.addImport("metask_client", metask_client);
     account_credentials_runtime.addImport("account_catalog", account_catalog);
     const account_model_connections = b.createModule(.{
-        .root_source_file = b.path("src/account/model_connections.zig"),
+        .root_source_file = b.path("src/product/account/model_connections.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     account_model_connections.addImport("metawork_account_contract", account_contract);
     const account_network_attempt = b.createModule(.{
-        .root_source_file = b.path("src/account/network_attempt.zig"),
+        .root_source_file = b.path("src/product/account/network_attempt.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
@@ -675,7 +675,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     account_network_attempt.addImport("account_catalog", account_catalog);
     account_network_attempt.addImport("account_credentials_runtime", account_credentials_runtime);
     const account_credential_store = b.createModule(.{
-        .root_source_file = b.path("src/account/credential_store.zig"),
+        .root_source_file = b.path("src/product/account/credential_store.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
@@ -687,14 +687,14 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         existingImport(runner, "build_options"),
     );
     const account_ports = b.createModule(.{
-        .root_source_file = b.path("src/account/ports.zig"),
+        .root_source_file = b.path("src/product/account/ports.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     account_ports.addImport("account_oauth", account_oauth);
     account_ports.addImport("account_credential_store", account_credential_store);
     const account_runtime = b.createModule(.{
-        .root_source_file = b.path("src/account/runtime.zig"),
+        .root_source_file = b.path("src/product/account/runtime.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
@@ -710,7 +710,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     account_runtime.addImport("account_network_attempt", account_network_attempt);
     account_runtime.addImport("account_model_connections", account_model_connections);
     const account = b.createModule(.{
-        .root_source_file = b.path("src/account.zig"),
+        .root_source_file = b.path("src/product/account.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });

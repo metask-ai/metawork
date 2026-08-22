@@ -1,3 +1,4 @@
+//! Product Account network-attempt lifecycle.
 const std = @import("std");
 const contract = @import("metawork_account_contract");
 const state = @import("account_state");

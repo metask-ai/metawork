@@ -1,3 +1,4 @@
+//! Product Account effect ports.
 const std = @import("std");
 const oauth = @import("account_oauth");
 const credential_store = @import("account_credential_store");

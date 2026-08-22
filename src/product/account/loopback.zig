@@ -1,3 +1,4 @@
+//! Product Account OAuth callback policy and loopback endpoint contract.
 const std = @import("std");
 const oauth = @import("account_oauth");
 

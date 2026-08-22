@@ -1,3 +1,4 @@
+//! Product Account credential and preference persistence policy.
 const std = @import("std");
 const build_options = @import("build_options");
 const contract = @import("metawork_account_contract");

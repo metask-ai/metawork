@@ -66,8 +66,9 @@ metawork/
 │   │   ├── system_webview_window_controls.zig # SDK 缺失按钮能力的窄 contract/state
 │   │   └── system_webview_window_controls/
 │   │       └── windows.zig # 最大化/还原、用户关闭与最大化状态
-│   ├── account.zig        # Account module entrypoint
-│   ├── account/           # Account Runtime、OAuth、catalog、credential 与状态机
+│   ├── product/           # Product 顶层 owner；当前先收拢 Account，其他 owner 后续独立迁移
+│   │   ├── account.zig    # Account module entrypoint；公开模块名仍为 metawork_account
+│   │   └── account/       # Account Runtime、OAuth、catalog、credential 与状态机
 │   ├── bridge.zig         # Renderer Bridge module entrypoint
 │   ├── bridge/            # command policy、Dispatcher 与 ProductDelivery
 │   ├── workbench.zig      # Workbench module entrypoint
@@ -108,7 +109,7 @@ metawork/
 | Bridge          | command authority、payload decode、Workspace grant、ProductDelivery connection/revision/snapshot transport                    | 产品策略真相、AgentCore handle、Account runtime                                    |
 | Renderer        | snapshot 消费、产品 WebUI 交互、纯 UI 状态与本地草稿、`frontend/src/bridge/` 合同实现层（transport 适配与 runtime decode）    | 原生窗口 owner、平台真实状态、安全决策、secret、AgentCore raw event、产品状态机    |
 
-`account/contract.zig` 是 Account owner 发布的纯合同，不是第六个产品 owner。`automation/` 只提供受控账号、origin 和临时 Workspace authority，不注册额外协议，也不拥有产品 transport state。
+`product/account/contract.zig` 是 Account owner 发布的纯合同，不是新的产品 owner。`product/` 是产品 owner 的目录归属，不增加统一 Product facade；`automation/` 只提供受控账号、origin 和临时 Workspace authority，不注册额外协议，也不拥有产品 transport state。
 
 ## 4. Renderer 结构
 
@@ -149,7 +150,7 @@ Task 内容 presentation 只按 canonical Run 顺序把用户输入、Assistant 
 
 `main.zig` 只调用 `metawork_app`。架构边界统一称为 Application，代码组合类型保持 `App`。`app.zig` 是 composition root，只保留 Native SDK `App` vtable、装配顺序、`run()` 与唯一的顶层启动/关闭顺序；Application 拥有的具体实现进入 `app/`，不得把实现重新堆回 root。
 
-`app/` 只接纳四类实现：平台适配、一次性 bootstrap resolver、Application 创建资源的生命周期，以及跨 owner 用例编排。适配按稳定资源类别分文件，编排按用例分文件；编排只安排 owner 调用顺序，不读取领域状态自行形成 policy。`agent/`、`workbench/`、`account/` 与 `bridge/` 不得反向导入 `app/`。
+`app/` 只接纳四类实现：平台适配、一次性 bootstrap resolver、Application 创建资源的生命周期，以及跨 owner 用例编排。适配按稳定资源类别分文件，编排按用例分文件；编排只安排 owner 调用顺序，不读取领域状态自行形成 policy。`agent/`、`workbench/`、`product/account/` 与 `bridge/` 不得反向导入 `app/`。
 
 `app/platform.zig` 是唯一 `DispatcherPlatform` vtable 实现并持有 Native SDK runtime/services 引用；窗口系统行为委托给 `app/window.zig`。`app/window.zig` 拥有窗口、tray、notification、dialog 与两个已登记 compat capability，但不拥有 Bridge authority 或 Product policy。`app/account_platform_binding.zig` 把 Account 定义的 credential/preference、authorization URL、timer 与 Model Connection credential vault ports 绑定到 Native SDK 和有界文件 I/O；它只拥有系统资源与机械 effect，不拥有 Account transaction、codec、恢复或 Model Connection registry policy。`app/metask_http_transport.zig` 实现 Account 定义的窄 Metask HTTP transport port，拥有 `std.http.Client`、请求 deadline/cancellation race 与 bounded response 写入；Metask request kind、响应状态分类、JSON codec 和 credential 生命周期仍归 Account。`app/oauth_loopback_transport.zig` 独占 OAuth loopback listener、connection、accept/receive deadline、跨线程 cancel 与 HTTP response byte pump；它只向 Account-owned callback sink 传递 callback-scoped request metadata，不解释 state、code、error 或 issuer。`app/paths.zig` 的 `Paths` 原位持有所有路径 buffer，只能按指针传递并由 `run()` 保持稳定地址。`app/stores.zig` 拥有 Application 创建的 store、单写锁与 restored bytes 生命周期。
 
@@ -175,7 +176,7 @@ Renderer 的 `components/ui/WindowTitlebar.tsx` 绘制产品 header，并通过 
 
 Storage 当前只接入正式 Native test graph 和定向 `zig build test-storage`，没有注入 Application、Workbench、Account、Agent 或 Bridge，也不会解析产品路径或创建 production `app.db`。未来 Product owner 只能依赖 `storage/sql.zig` 发布的能力并继续拥有自己的 schema 与恢复语义；只有 Application composition 可以创建 concrete backend，业务模块不得导入 `storage/sqlite.zig` 或直接调用 SQLite。
 
-### `account/`
+### `product/account/`
 
 - `runtime.zig` 是 Account 长生命周期 owner，拥有状态机实例、private/public candidate catalog、credential、attempt、mailbox/effect queue、平台恢复状态、自动选择与 continuation；它不导入 Workbench，跨 owner 提交仍由 Application coordinator 协调；
 - `state.zig` 拥有 Account 状态机、attempt/generation 与 prepare/admit/commit；
@@ -186,7 +187,7 @@ Storage 当前只接入正式 Native test graph 和定向 `zig build test-storag
 - `ports.zig` 定义 Account 对内需要的五族 effect surface：refresh-token credential、preference load/commit/delete、authorization URL、timer 与 Model Connection credential vault；它复用 `credential_store.Backend` 表达前两族，不为每个函数制造独立抽象，也不导入 Native SDK 或 Application；
 - `credentials.zig` 管理 execution credential ownership/rotation。
 
-Account 与 Workbench 是同级 owner，只通过纯 `account/contract.zig` 和 Application coordinator 主线程提交链协作。Bridge 只消费脱敏 view/command contract，不导入 Account Runtime。Application coordinator 可以持有两个 owner 的实例引用以协调提交，但不得持有 Account catalog、credential、attempt、mailbox 或 continuation 状态。
+Account 与 Workbench 是同级 owner，只通过纯 `product/account/contract.zig` 和 Application coordinator 主线程提交链协作。源码位置不改变公开 Zig module identity：构建仍导出 `metawork_account` 与 `metawork_account_contract`。Bridge 只消费脱敏 view/command contract，不导入 Account Runtime。Application coordinator 可以持有两个 owner 的实例引用以协调提交，但不得持有 Account catalog、credential、attempt、mailbox 或 continuation 状态。
 
 ### `bridge/`
 

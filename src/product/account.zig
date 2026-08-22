@@ -1,3 +1,4 @@
+//! Product Account module entrypoint.
 const std = @import("std");
 const state_impl = @import("account_state");
 const oauth_impl = @import("account_oauth");
