@@ -237,14 +237,21 @@ fn performRequest(
     }
     if (collector.failure) |failure|
         return poisonExchange(connection, failure);
-    if (!collector.complete or collector.output_len == 0 or
-        !acceptSessionToken(connection, collector.sessionToken()))
+    if (!collector.complete or
+        (!collector.error_status and
+            !acceptSessionToken(connection, collector.sessionToken())))
         return poisonExchange(connection, .fatal);
-    const body = allocator.dupe(
-        u8,
-        collector.output[0..collector.output_len],
-    ) catch return poisonExchange(connection, .fatal);
-    return .{ .response = body };
+    const body = if (collector.output_len == 0)
+        @constCast(&[_]u8{})
+    else
+        allocator.dupe(
+            u8,
+            collector.output[0..collector.output_len],
+        ) catch return poisonExchange(connection, .fatal);
+    return .{ .response = .{
+        .http_status = collector.status,
+        .body = body,
+    } };
 }
 
 fn performNotification(
@@ -355,6 +362,8 @@ const ResponseCollector = struct {
     sse: ?SseDecoder = null,
     failure: ?PortFailure = null,
     complete: bool = false,
+    status: u16 = 0,
+    error_status: bool = false,
 
     fn init(
         allocator: std.mem.Allocator,
@@ -393,8 +402,10 @@ const ResponseCollector = struct {
 
     fn begin(raw: *anyopaque, status: u16) SinkFlow {
         const self: *ResponseCollector = @ptrCast(@alignCast(raw));
+        self.status = status;
         switch (self.kind) {
-            .request, .close => if (status < 200 or status >= 300)
+            .request => self.error_status = status < 200 or status >= 300,
+            .close => if (status < 200 or status >= 300)
                 return self.fail(.server),
             .notification => if (status != 202)
                 return self.fail(.server),
@@ -419,7 +430,8 @@ const ResponseCollector = struct {
             return .continue_reading;
         }
         if (std.ascii.eqlIgnoreCase(name, HeaderName.session_id)) {
-            if (self.kind == .close) return .continue_reading;
+            if (self.kind == .close or self.error_status)
+                return .continue_reading;
             self.session_token_count += 1;
             if (self.session_token_count != 1 or value.len == 0 or
                 value.len > self.max_session_token_bytes or
@@ -433,8 +445,8 @@ const ResponseCollector = struct {
     fn endHeaders(raw: *anyopaque) SinkFlow {
         const self: *ResponseCollector = @ptrCast(@alignCast(raw));
         if (self.failure != null or self.complete) return .stop;
-        if (self.kind != .request) return .continue_reading;
-        const media_type = self.media_type orelse return self.fail(.fatal);
+        if (self.kind != .request or self.error_status) return .continue_reading;
+        const media_type = self.media_type orelse return .continue_reading;
         if (media_type == .event_stream) {
             const max_wire_bytes = std.math.add(
                 usize,
@@ -468,6 +480,19 @@ const ResponseCollector = struct {
                 return .{ .consumed = bytes.len, .flow = .continue_reading };
             },
             .request => {},
+        }
+        if (self.error_status) {
+            const remaining = self.output.len - self.output_len;
+            if (bytes.len > remaining) {
+                if (remaining != 0)
+                    @memcpy(self.output[self.output_len..], bytes[0..remaining]);
+                self.output_len = self.output.len;
+                _ = self.fail(.fatal);
+                return .{ .consumed = remaining, .flow = .stop };
+            }
+            @memcpy(self.output[self.output_len..][0..bytes.len], bytes);
+            self.output_len += bytes.len;
+            return .{ .consumed = bytes.len, .flow = .continue_reading };
         }
         switch (self.media_type orelse {
             _ = self.fail(.fatal);
@@ -511,9 +536,13 @@ const ResponseCollector = struct {
         const self: *ResponseCollector = @ptrCast(@alignCast(raw));
         if (self.failure != null or self.complete) return .stop;
         switch (self.kind) {
-            .request => switch (self.media_type orelse return self.fail(.fatal)) {
-                .json => if (self.output_len == 0) return self.fail(.fatal),
-                .event_stream => return self.fail(.fatal),
+            .request => if (!self.error_status) {
+                if (self.media_type) |media_type| switch (media_type) {
+                    .json => {},
+                    .event_stream => if ((self.sse orelse
+                        return self.fail(.fatal)).wire_bytes != 0)
+                        return self.fail(.fatal),
+                } else if (self.output_len != 0) return self.fail(.fatal);
             },
             .notification, .close => {},
         }
@@ -965,8 +994,6 @@ const FakeEndpoint = struct {
         }
         const notification = std.mem.eql(u8, request_value.body, "opaque-notify");
         self.saw_notification = notification;
-        if (self.status == 401 or self.status == 403)
-            return .{ .failure = .auth };
         if (sink.begin_fn(
             sink.context,
             if (notification) 202 else self.status,
@@ -1101,8 +1128,9 @@ test "HTTP owns protocol headers, opaque bytes, and session token" {
         .response => |value| value,
         .failure => return error.TestUnexpectedResult,
     };
-    defer std.testing.allocator.free(response);
-    try std.testing.expectEqualStrings("opaque-request", response);
+    defer std.testing.allocator.free(response.body);
+    try std.testing.expectEqual(@as(u32, 200), response.http_status);
+    try std.testing.expectEqualStrings("opaque-request", response.body);
     try std.testing.expectEqual(
         @as(?connector.Failure, null),
         transport.notify_fn(connection, "opaque-notify", 1000, .{}),
@@ -1145,7 +1173,7 @@ test "HTTP failures map exactly and poison an indeterminate connection" {
             failure,
         ),
         .response => |response| {
-            std.testing.allocator.free(response);
+            if (response.body.len != 0) std.testing.allocator.free(response.body);
             return error.TestUnexpectedResult;
         },
     }
@@ -1156,7 +1184,7 @@ test "HTTP failures map exactly and poison an indeterminate connection" {
     try std.testing.expectEqual(@as(usize, 1), endpoint.calls);
 }
 
-test "HTTP empty authorization failure preserves auth status" {
+test "HTTP complete authorization response preserves status for AgentCore" {
     var endpoint: FakeEndpoint = .{ .status = 401, .empty_body = true };
     var backend = try Backend.init(.{
         .io = std.testing.io,
@@ -1182,13 +1210,77 @@ test "HTTP empty authorization failure preserves auth status" {
         1000,
         .{},
     )) {
-        .failure => |failure| try std.testing.expectEqual(
-            connector.Failure.auth,
-            failure,
-        ),
+        .failure => return error.TestUnexpectedResult,
         .response => |response| {
-            std.testing.allocator.free(response);
-            return error.TestUnexpectedResult;
+            try std.testing.expectEqual(@as(u32, 401), response.http_status);
+            try std.testing.expectEqual(@as(usize, 0), response.body.len);
         },
     }
+}
+
+test "HTTP complete protocol rejection preserves raw status and body" {
+    var endpoint: FakeEndpoint = .{ .status = 400 };
+    var backend = try Backend.init(.{
+        .io = std.testing.io,
+        .allocator = std.testing.allocator,
+        .endpoint = endpoint.capability(),
+    });
+    defer backend.deinit() catch unreachable;
+    const transport = backend.transport();
+    const connection = switch (transport.open_fn(
+        transport.context,
+        .disposable_probe,
+        .modern_2026_07_28,
+        1000,
+    )) {
+        .connection => |value| value,
+        .failure => return error.TestUnexpectedResult,
+    };
+    defer transport.close_fn(connection);
+    const response = switch (transport.request_fn(
+        connection,
+        std.testing.allocator,
+        "legacy evidence",
+        1000,
+        .{},
+    )) {
+        .failure => return error.TestUnexpectedResult,
+        .response => |value| value,
+    };
+    defer std.testing.allocator.free(response.body);
+    try std.testing.expectEqual(@as(u32, 400), response.http_status);
+    try std.testing.expectEqualStrings("legacy evidence", response.body);
+}
+
+test "HTTP complete successful response may have an empty body" {
+    var endpoint: FakeEndpoint = .{ .status = 204, .empty_body = true };
+    var backend = try Backend.init(.{
+        .io = std.testing.io,
+        .allocator = std.testing.allocator,
+        .endpoint = endpoint.capability(),
+    });
+    defer backend.deinit() catch unreachable;
+    const transport = backend.transport();
+    const connection = switch (transport.open_fn(
+        transport.context,
+        .actual,
+        .modern_2026_07_28,
+        1000,
+    )) {
+        .connection => |value| value,
+        .failure => return error.TestUnexpectedResult,
+    };
+    defer transport.close_fn(connection);
+    const response = switch (transport.request_fn(
+        connection,
+        std.testing.allocator,
+        "opaque",
+        1000,
+        .{},
+    )) {
+        .failure => return error.TestUnexpectedResult,
+        .response => |value| value,
+    };
+    try std.testing.expectEqual(@as(u32, 204), response.http_status);
+    try std.testing.expectEqual(@as(usize, 0), response.body.len);
 }

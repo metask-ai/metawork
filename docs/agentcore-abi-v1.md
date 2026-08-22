@@ -1,13 +1,13 @@
 # MetaWork AgentCore ABI v1 消费合同
 
-> 状态：Windows x86_64 GNU 与 macOS arm64 均已 hard cut 到 AgentCore `e0d29bcfd926` 的 revision 9 target artifact；不声明 stable support policy
+> 状态：Windows x86_64 GNU 与 macOS arm64 均已 hard cut 到 AgentCore `1183550f15b4` 的 revision 9 target artifact；不声明 stable support policy
 > 所有者：Metask AgentCore 负责 facade、bindings、bundle 和 ABI 政策；MetaWork 负责 exact artifact 消费、Host 生命周期和产品 capability gate
 
 本文定义 MetaWork 对 Metask AgentCore binary ABI version 1 的 target-specific 消费边界。线程、事件泵和 Host 生命周期见 [AgentCore 集成契约](agentcore-integration.md)，验证入口见 [验证规范](validation.md)。
 
 ## 1. Target-specific baseline
 
-Windows 与 macOS arm64 均锁定 clean source commit `e0d29bcfd926b02bffdb165731839bf368210093`、package version `0.1.0-dev+e0d29bcfd926`。两者均使用 Zig 0.16.0、strip=true、requires C runtime；target artifact、lock 和验证结果彼此独立：
+Windows 与 macOS arm64 均锁定 clean source commit `1183550f15b4eef27799076ee0908e9667d849a0`、package version `0.1.0-dev+1183550f15b4`。两者均使用 Zig 0.16.0、strip=true、requires C runtime；target artifact、lock 和验证结果彼此独立：
 
 | Target             | Build       | Link input            | Repository lock                                    |
 | ------------------ | ----------- | --------------------- | -------------------------------------------------- |
@@ -24,6 +24,8 @@ Windows 与 macOS arm64 均锁定 clean source commit `e0d29bcfd926b02bffdb16573
 - 每个平台按完整 manifest bytes 和 payload checksum 独立锁定，不能用 source commit 推断 artifact bytes 可互换。
 
 MetaWork 不接受目标 policy 之外的 ABI revision，不保留 function-table 分流、旧类型别名、shim、兼容 parser、双 bundle 或静默 fallback。需要回退时只能回退整个 MetaWork 变更和对应 exact artifact，运行时没有降级路径。
+
+当前 revision 9 尚处 experimental 状态，`1183550f15b4` 在同一 revision 内 hard cut 了 MCP request callback：输出由 `OwnedBytesV1` 改为包含 `struct_size + http_status + body + reserved` 的 `McpResponseV1`，notification 只保留 `OK | FAILED`。因此 revision number 与 table size 本身不足以证明 callback source contract 相同；repository lock 的 exact manifest/header/bindings checksum 是禁止旧 revision-9 artifact 与新 Host 混用的必要边界。MetaWork 不为旧 callback 保留条件编译或运行时 shim。
 
 ### revision 8 的执行状态事件
 
@@ -69,6 +71,8 @@ fresh Session 只使用 `SessionHostConfigV1` 与 `SessionCreateConfigV1`：
 - MCP authority 是完整 replacement：create config 的 `mcp_selection = null` 表示 empty view；`sessionUpdateMcp` 的 selection pointer 必须非 null，合法的零 selector descriptor 表示清空当前 view；
 - 每个 `McpServerV1` 必须携带非零、非 secret 的 `configuration_fingerprint`；`McpConnectorV1` 必须提供成对的 `retain_connector` / `release_connector`，Host owner 只有在全部 Core retain 与 active connection 都释放后才可销毁；
 - Host transport 支持 `2026-07-28`、`2025-11-25` 与 `2025-06-18` 三个 exact era；`automatic` 可以由 AgentCore 协商并 exact reopen，MetaWork 不把 MCP era 当作 ABI revision 兼容；
+- `McpRequestFnV1` 的非 response 结果必须留下 `http_status = 0` 与 canonical empty body；stdio response 必须使用 status 0 且 body 非空；Streamable HTTP 收到任何完整最终响应时必须返回 `MCP_EXCHANGE_RESPONSE` 并保留真实 status，body 可以为空；非空 body 继续执行上限、secret guard 与 exactly-once release；
+- HTTP Host 只报告 transport observation，不把完整 400 折叠成 `MCP_EXCHANGE_SERVER_ERROR`，也不解析 `-32022`、`-32601` 或 JSON-RPC identity。只有 AgentCore 可以在 `automatic + disposable modern probe` 上把 HTTP 400 判为 legacy evidence，并关闭 probe 后以 exact classic connection 重新验证；401/403、其它 4xx/5xx、timeout/network 和 actual request 都不借该路径降级；
 - 当前正式 Application 仍使用 `permission_rules = null` 与 `durable_budget = null`；新 Session 的 `mcp_selection` 来自 Workbench 当前 committed opaque activation 或为 null，既有 Session 不因启动期产品状态变化被替换；null durable budget 使用 AgentCore canonical defaults；
 - 每个 Session 至多一个 in-flight Run/compact/mutation；Runtime 必须活得比全部 Session 和 catalog lease 长。
 
@@ -196,7 +200,7 @@ staged Host gate：
 
 - staged verifier 与 bundle guard；
 - mandatory function-table discovery；
-- mandatory Runtime MCP apply entry、connector retain/release、非零 configuration fingerprint 与三个 exact MCP era 的 interop；
+- mandatory Runtime MCP apply entry、connector retain/release、非零 configuration fingerprint、MCP response status/body ownership、三个 exact MCP era，以及 `automatic` 收到裸 HTTP 400 后 exact reopen 的 interop；
 - Session create config、Permission identity/response echo/provenance 测试；
 - status-before-result、checkpoint partial-result、八个 StopReason 与 unknown/mismatch fail-closed 测试；
 - Run、manual compact 与 Session Skill mutation 的 operation-specific status disposition，以及 budget rejection 后 Session reuse 测试；

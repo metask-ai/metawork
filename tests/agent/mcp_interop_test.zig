@@ -263,6 +263,13 @@ fn prepareHttpFixture(
         "modern_only"
     else
         "compat_only";
+    return prepareHttpFixtureWithNegotiation(endpoint, negotiation);
+}
+
+fn prepareHttpFixtureWithNegotiation(
+    endpoint: []const u8,
+    negotiation: []const u8,
+) !workbench.McpPreparedConfiguration {
     const registry_json = try std.fmt.allocPrint(
         std.testing.allocator,
         "{{\"schema_version\":2,\"generation\":1,\"oauth_operation\":null,\"servers\":[{{\"id\":\"deterministic-http\",\"namespace\":\"fixture\",\"display_name\":\"Deterministic HTTP\",\"enabled\":true,\"negotiation\":\"{s}\",\"timeout_ms\":2000,\"transport\":{{\"kind\":\"streamable_http\",\"url\":\"{s}\",\"headers\":[]}},\"auth\":{{\"kind\":\"none\",\"oauth\":null}},\"connection_approval\":{{\"fingerprint\":\"fixture\"}},\"tools\":[\"echo\"]}}]}}",
@@ -458,6 +465,66 @@ test "canonical AgentCore negotiates 2026 Streamable HTTP JSON framing" {
 
 test "canonical AgentCore negotiates 2025 Streamable HTTP SSE framing" {
     try activateHttpFixture("2025-11-25", "sse");
+}
+
+test "canonical AgentCore AUTO downgrades a bare HTTP 400 probe" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_storage: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
+    var trace_storage: [std.fs.max_path_bytes]u8 = undefined;
+    const trace_path = try std.fmt.bufPrint(
+        &trace_storage,
+        "{s}/http-auto-trace.jsonl",
+        .{root_storage[0..root_len]},
+    );
+    var fixture = try HttpFixture.start("2025-11-25", "json", trace_path);
+    defer fixture.deinit();
+    var preparation = try prepareHttpFixtureWithNegotiation(
+        fixture.endpoint,
+        "automatic",
+    );
+    defer preparation.deinit();
+    var runtime_build = try mcp_platform.buildRuntime(
+        std.testing.io,
+        std.testing.allocator,
+        &preparation,
+        .{},
+    );
+    defer runtime_build.deinit();
+    const runtime = try agent.Runtime.init(std.testing.io, std.testing.allocator, .{
+        .max_sessions = 1,
+        .mcp_input = &runtime_build.input.?,
+    });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const activation = switch (try runtime.activateMcp()) {
+        .activated => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer activation.deinit();
+    try std.testing.expectEqual(agent.McpActivationState.ready, activation.state());
+    try std.testing.expectEqual(@as(usize, 1), activation.catalogTools().len);
+    try std.testing.expectEqualStrings("echo", activation.catalogTools()[0].name);
+
+    const trace = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "http-auto-trace.jsonl",
+        std.testing.allocator,
+        .limited(1024 * 1024),
+    );
+    defer std.testing.allocator.free(trace);
+    const modern_rejection = std.mem.indexOf(
+        u8,
+        trace,
+        "\"direction\":\"error\",\"error\":\"unexpected MCP protocol header\"",
+    );
+    const classic = initializeRequestOffset(trace, "2025-11-25");
+    try std.testing.expect(modern_rejection != null);
+    try std.testing.expect(classic != null);
+    try std.testing.expect(modern_rejection.? < classic.?);
 }
 
 test "canonical AgentCore executes a selected Streamable HTTP tool" {
@@ -817,7 +884,7 @@ test "stdio real-server timeout and cancellation terminate the child" {
     switch (timeout) {
         .failure => |failure| try std.testing.expectEqual(agent.McpTransportFailure.timeout, failure),
         .response => |response| {
-            std.testing.allocator.free(response);
+            if (response.body.len != 0) std.testing.allocator.free(response.body);
             return error.TestUnexpectedResult;
         },
     }
@@ -847,7 +914,7 @@ test "stdio real-server timeout and cancellation terminate the child" {
     switch (cancelled) {
         .failure => |failure| try std.testing.expectEqual(agent.McpTransportFailure.cancelled, failure),
         .response => |response| {
-            std.testing.allocator.free(response);
+            if (response.body.len != 0) std.testing.allocator.free(response.body);
             return error.TestUnexpectedResult;
         },
     }

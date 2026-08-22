@@ -2,9 +2,9 @@
   "schema_version": 1,
   "vendor": "metask",
   "name": "agentcore",
-  "version": "0.1.0-dev+e0d29bcfd926",
+  "version": "0.1.0-dev+1183550f15b4",
   "source": {
-    "commit": "e0d29bcfd926b02bffdb165731839bf368210093",
+    "commit": "1183550f15b4eef27799076ee0908e9667d849a0",
     "dirty": false
   },
   "toolchain": {
@@ -40,11 +40,11 @@
   "files": [
     {
       "path": "lib/metask_agentcore.lib",
-      "sha256": "d2cbe7d3758f6f9a814174c4b1f18e84266cff6ad57fb9fb5beebbd06311dcc2"
+      "sha256": "69f6451f79ae991fc560d4589cfa0f99ea6d3371e3374e5d68ba9dbfb7640179"
     },
     {
       "path": "include/metask/agentcore.h",
-      "sha256": "596db4a3aa9d5c70869cc606a18841f8c2b82d19f67c5b603b63b1d914200ed6"
+      "sha256": "77f1037c01277582df56794f369aaf8f264b100f8427fb50df5b685047d02a4b"
     },
     {
       "path": "bindings/zig/build.zig",
@@ -52,7 +52,7 @@
     },
     {
       "path": "bindings/zig/build.zig.zon",
-      "sha256": "a805832f099602217e172601d8343a983076698b24ef575ced47da0b84899a0e"
+      "sha256": "76681c1bc84adfb751fcbb8f066ea677c31f5e598205f40e80b2289da64a0ee4"
     },
     {
       "path": "bindings/zig/src/root.zig",
@@ -64,15 +64,15 @@
     },
     {
       "path": "bindings/zig/src/types.zig",
-      "sha256": "3db34b5477264b0f3fe1022d3b90fc6e4555be3945e5ee98d1e4e185924cc87c"
+      "sha256": "f4141faa48aa96b23c43fc72c10cdf4eec96e7bb579e3a0a8ec49ebdb34ce962"
     },
     {
       "path": "bindings/rust/Cargo.toml",
-      "sha256": "4c28d66e1ab98905b545f7680ea26a2d56a47e63760d14ea18d1f7acabc904a5"
+      "sha256": "7703b93bcaf5252264fea6ba3356a49e9486d230c569dbfa8508b1a723d17e6f"
     },
     {
       "path": "bindings/rust/Cargo.lock",
-      "sha256": "358ce84973e2bdeac66c120e1849ed223782a34e5bb1de347a867ca0c0fb7d1c"
+      "sha256": "9ca45dba240b8e41c3883013d7135d77aabeeea4673632499b9cc5a4dcb0701c"
     },
     {
       "path": "bindings/rust/link.cfg",
@@ -88,7 +88,7 @@
     },
     {
       "path": "bindings/rust/src/raw.rs",
-      "sha256": "847f900b4dd87382a5f5d65dfec6cc1f41c4d8b477523bcf1ca29c0f91233277"
+      "sha256": "967ef2e30418c0daf3a8889d230f848c92ee1a92f1b023cec82501101f447550"
     },
     {
       "path": "bindings/rust/examples/link_probe.rs",
@@ -96,7 +96,7 @@
     },
     {
       "path": "README.md",
-      "sha256": "f8f9f76209fcfcf357061317948564949e0521113275902f2002465d928c0548"
+      "sha256": "bfc94034db2773e484f0361394e8cd0c4392406864324e68cb588d076fa46f4a"
     }
   ]
 }
