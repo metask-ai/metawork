@@ -69,6 +69,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-account-model-connections", .root_module = test_modules.account_model_connections },
         .{ .name = "metawork-account-ports", .root_module = test_modules.account_ports },
         .{ .name = "metawork-account-loopback", .root_module = test_modules.account_loopback },
+        .{ .name = "metawork-oauth-loopback-transport", .root_module = test_modules.oauth_loopback_transport },
         .{ .name = "metawork-account-login-attempt", .root_module = test_modules.account_login_attempt },
         .{ .name = "metawork-account-catalog", .root_module = test_modules.account_catalog },
         .{ .name = "metawork-account-credentials-runtime", .root_module = test_modules.account_credentials_runtime },
@@ -181,6 +182,7 @@ const WiredModules = struct {
     account_contract: *std.Build.Module,
     account_credential_store: *std.Build.Module,
     account_loopback: *std.Build.Module,
+    oauth_loopback_transport: *std.Build.Module,
     account_login_attempt: *std.Build.Module,
     account_network_attempt: *std.Build.Module,
     account_oauth: *std.Build.Module,
@@ -613,6 +615,13 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .optimize = root_module.optimize,
     });
     account_loopback.addImport("account_oauth", account_oauth);
+    const oauth_loopback_transport = b.createModule(.{
+        .root_source_file = b.path("src/app/oauth_loopback_transport.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    oauth_loopback_transport.addImport("account_oauth", account_oauth);
+    oauth_loopback_transport.addImport("account_loopback", account_loopback);
     const metask_client = b.createModule(.{
         .root_source_file = b.path("src/account/metask_client.zig"),
         .target = target,
@@ -694,6 +703,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     account_runtime.addImport("metask_client", metask_client);
     account_runtime.addImport("account_credential_store", account_credential_store);
     account_runtime.addImport("account_ports", account_ports);
+    account_runtime.addImport("account_loopback", account_loopback);
     account_runtime.addImport("account_login_attempt", account_login_attempt);
     account_runtime.addImport("account_catalog", account_catalog);
     account_runtime.addImport("account_credentials_runtime", account_credentials_runtime);
@@ -922,6 +932,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     });
     mcp_oauth.addImport("account_oauth", account_oauth);
     mcp_oauth.addImport("account_loopback", account_loopback);
+    mcp_oauth.addImport("oauth_loopback_transport", oauth_loopback_transport);
     mcp_platform.addImport("metawork_mcp_oauth", mcp_oauth);
 
     const app = b.createModule(.{
@@ -939,6 +950,8 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     app.addImport("metawork_account_contract", account_contract);
     app.addImport("metawork_account", account);
     app.addImport("account_oauth", account_oauth);
+    app.addImport("account_loopback", account_loopback);
+    app.addImport("oauth_loopback_transport", oauth_loopback_transport);
     app.addImport("account_ports", account_ports);
     app.addImport("account_credential_store", account_credential_store);
     app.addImport("metask_client", metask_client);
@@ -958,6 +971,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .account_contract = account_contract,
         .account_credential_store = account_credential_store,
         .account_loopback = account_loopback,
+        .oauth_loopback_transport = oauth_loopback_transport,
         .account_login_attempt = account_login_attempt,
         .account_network_attempt = account_network_attempt,
         .account_oauth = account_oauth,

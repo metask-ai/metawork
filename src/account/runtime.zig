@@ -5,6 +5,7 @@ const state_impl = @import("account_state");
 const metask_client = @import("metask_client");
 const credential_store = @import("account_credential_store");
 const ports_impl = @import("account_ports");
+const loopback_impl = @import("account_loopback");
 const login_attempt = @import("account_login_attempt");
 const catalog_impl = @import("account_catalog");
 const credentials_impl = @import("account_credentials_runtime");
@@ -115,6 +116,7 @@ const Effects = struct {
     io: std.Io,
     wake: WakeSink,
     transport: metask_client.Transport,
+    loopback_endpoint: loopback_impl.Endpoint,
     queue: EffectQueue = .{},
     catalog: catalog_impl.CatalogSession,
     public_catalog: catalog_impl.PublicCatalog = .{},
@@ -129,12 +131,14 @@ const Effects = struct {
         allocator: std.mem.Allocator,
         io: std.Io,
         transport: metask_client.Transport,
+        loopback_endpoint: loopback_impl.Endpoint,
         wake: WakeSink,
     ) Effects {
         return .{
             .allocator = allocator,
             .io = io,
             .transport = transport,
+            .loopback_endpoint = loopback_endpoint,
             .wake = wake,
             .catalog = .init(allocator),
         };
@@ -266,6 +270,7 @@ const Effects = struct {
         self.login_attempt.start(
             self.allocator,
             self.io,
+            self.loopback_endpoint,
             attempt_id,
             self.transport,
             self.loginSink(),
@@ -558,6 +563,7 @@ pub const Runtime = struct {
         main_thread_id: std.Thread.Id,
         account_path: []const u8,
         transport: metask_client.Transport,
+        loopback_endpoint: loopback_impl.Endpoint,
         wake: WakeSink,
     ) InitError!Runtime {
         if (!std.fs.path.isAbsolute(account_path) or
@@ -569,7 +575,13 @@ pub const Runtime = struct {
             .io = io,
             .main_thread_id = main_thread_id,
             .account_path_len = account_path.len,
-            .effects = .init(allocator, io, transport, wake),
+            .effects = .init(
+                allocator,
+                io,
+                transport,
+                loopback_endpoint,
+                wake,
+            ),
             .model_connections = model_connections_impl.Registry.init(allocator),
         };
         @memcpy(runtime.account_path_storage[0..account_path.len], account_path);
@@ -1932,6 +1944,33 @@ fn completesCatalogTransaction(fact: contract.AccountFact) bool {
 }
 
 pub const TestSupport = if (builtin.is_test) struct {
+    var loopback_context: u8 = 0;
+
+    pub fn loopbackEndpoint() loopback_impl.Endpoint {
+        return .{
+            .context = &loopback_context,
+            .open_fn = testLoopbackOpen,
+            .wait_fn = testLoopbackWait,
+            .cancel_fn = testLoopbackCancel,
+            .close_fn = testLoopbackClose,
+        };
+    }
+
+    fn testLoopbackOpen(_: *anyopaque) loopback_impl.ServerError!u16 {
+        return 49152;
+    }
+
+    fn testLoopbackWait(
+        _: *anyopaque,
+        _: loopback_impl.RequestSink,
+        _: std.Io.Clock.Timestamp,
+    ) loopback_impl.ServerError!void {
+        return error.Cancelled;
+    }
+
+    fn testLoopbackCancel(_: *anyopaque) void {}
+    fn testLoopbackClose(_: *anyopaque) void {}
+
     pub fn prepareReadyRestore(
         runtime: *Runtime,
         execution: *contract.OwnedExecutionConfig,
@@ -2253,6 +2292,7 @@ test "Account Runtime owns automatic catalog selection policy" {
         else
             "/tmp/metawork-account-runtime-test",
         testingTransport(),
+        TestSupport.loopbackEndpoint(),
         .{ .context = &wake_context, .notify_fn = testingWake },
     );
     defer runtime.deinit();
@@ -2422,6 +2462,7 @@ test "Account Runtime persists a nonzero nonce for a new execution" {
         std.Thread.getCurrentId(),
         account_path_storage[0..account_path_len],
         testingTransport(),
+        TestSupport.loopbackEndpoint(),
         .{ .context = &wake_context, .notify_fn = testingWake },
     );
     defer runtime.deinit();
@@ -2468,6 +2509,7 @@ test "Account Runtime persists and restores a secure model connection default" {
             std.Thread.getCurrentId(),
             account_path,
             testingTransport(),
+            TestSupport.loopbackEndpoint(),
             .{ .context = &wake_context, .notify_fn = testingWake },
         );
         defer runtime.deinit();
@@ -2536,6 +2578,7 @@ test "Account Runtime persists and restores a secure model connection default" {
             std.Thread.getCurrentId(),
             account_path,
             testingTransport(),
+            TestSupport.loopbackEndpoint(),
             .{ .context = &wake_context, .notify_fn = testingWake },
         );
         defer runtime.deinit();
@@ -2560,6 +2603,7 @@ test "Account Runtime persists and restores a secure model connection default" {
             std.Thread.getCurrentId(),
             account_path,
             testingTransport(),
+            TestSupport.loopbackEndpoint(),
             .{ .context = &wake_context, .notify_fn = testingWake },
         );
         defer runtime.deinit();
@@ -2666,6 +2710,7 @@ test "Account Runtime mailbox transfers ownership and reports collision" {
         std.testing.allocator,
         std.testing.io,
         testingTransport(),
+        TestSupport.loopbackEndpoint(),
         .{ .context = &wake, .notify_fn = TestWake.notify },
     );
     defer effects.deinit();
@@ -2807,6 +2852,7 @@ fn initRuntimeForTest(wake_context: *u8) !Runtime {
         else
             "/tmp/metawork-account-runtime-test",
         testingTransport(),
+        TestSupport.loopbackEndpoint(),
         .{ .context = wake_context, .notify_fn = testingWake },
     );
 }

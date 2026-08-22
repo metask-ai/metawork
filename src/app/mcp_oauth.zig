@@ -5,6 +5,7 @@
 const std = @import("std");
 const account_oauth = @import("account_oauth");
 const account_loopback = @import("account_loopback");
+const oauth_loopback_transport = @import("oauth_loopback_transport");
 
 pub const AuthorizationCode = account_oauth.Secret;
 
@@ -463,7 +464,7 @@ pub const AuthorizationCallback = struct {
 /// and must cancel/join any wait thread before deinit.
 pub const AuthorizationAttempt = struct {
     attempt_id: u64 = 0,
-    server: account_loopback.Server = undefined,
+    server: oauth_loopback_transport.Server = undefined,
     material: account_oauth.AttemptMaterial = undefined,
     redirect_storage: [128]u8 = undefined,
     redirect_len: usize = 0,
@@ -483,7 +484,7 @@ pub const AuthorizationAttempt = struct {
         account_oauth.AttemptMaterial.generate(io, &self.material) catch
             return error.InvalidAuthorizationRequest;
         errdefer self.material.deinit();
-        self.server = account_loopback.Server.init(io) catch |err| return err;
+        self.server = oauth_loopback_transport.Server.init(io) catch |err| return err;
         errdefer self.server.deinit();
         var writer = std.Io.Writer.fixed(&self.redirect_storage);
         account_oauth.writeRedirectUri(&writer, self.server.port()) catch
@@ -567,17 +568,20 @@ pub const AuthorizationAttempt = struct {
         deadline: std.Io.Clock.Timestamp,
     ) account_loopback.ServerError!AuthorizationCallback {
         std.debug.assert(self.active);
+        var callback_policy = account_loopback.CallbackPolicy.init(
+            allocator,
+            &self.material.state,
+            .{
+                .expected_issuer = self.issuer_storage[0..self.issuer_len],
+                .issuer_required = self.issuer_required,
+            },
+        );
+        defer callback_policy.deinit();
+        try self.server.wait(callback_policy.sink(), deadline);
         return .{
             .attempt_id = self.attempt_id,
-            .callback = try self.server.waitValidated(
-                allocator,
-                &self.material.state,
-                .{
-                    .expected_issuer = self.issuer_storage[0..self.issuer_len],
-                    .issuer_required = self.issuer_required,
-                },
-                deadline,
-            ),
+            .callback = callback_policy.take() orelse
+                return error.RequestInvalid,
         };
     }
 

@@ -63,6 +63,7 @@ candidate probe、真实桌面验收、签名、公证和发布验证不进入 `
 | Agent/Workbench lifecycle | `node scripts/run-lifecycle-tests.mjs`                            | Session、Executor、恢复、并发或 shutdown                                              |
 | 单个 lifecycle 不变量     | 设置 `LIFECYCLE_TEST_FILTER` 后运行 lifecycle 入口                | 只缩小开发反馈；提交前仍运行完整关联 root                                             |
 | Storage foundation        | `zig build test-storage`                                          | SQL contract、conformance、direct SQLite backend、migration、文件恢复与 engine profile |
+| Account OAuth loopback    | `metawork-account-loopback` 与 `metawork-oauth-loopback-transport` module tests | Account callback policy/invalid budget，以及 Application listener/cancel/deadline/sink 组合 |
 | MCP owner                 | `build.zig` 中对应的 `test-mcp-*` step                            | configuration、OAuth、transport、Runtime、catalog、interop 或 Application composition |
 | AgentCore candidate       | staged verifier 与对应 `run-agentcore-*-probe.mjs`                | 新 artifact 或尚未进入合同的外部行为                                                  |
 | 平台能力                  | 本文后续 Windows/macOS 入口                                       | 真实窗口、系统 credential、签名、公证或平台生命周期                                   |

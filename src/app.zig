@@ -12,6 +12,7 @@ const mcp_oauth = @import("metawork_mcp_oauth");
 const account_coordinator = @import("app/account_coordinator.zig");
 const account_platform_binding = @import("app/account_platform_binding.zig");
 const metask_http_transport = @import("app/metask_http_transport.zig");
+const oauth_loopback_transport = @import("oauth_loopback_transport");
 const agent_event_coordinator = @import("app/agent_event_coordinator.zig");
 const app_automation = @import("app/automation.zig");
 const frontend = @import("app/frontend.zig");
@@ -488,12 +489,15 @@ pub fn run(init: std.process.Init) !void {
         .allocator = std.heap.c_allocator,
         .io = init.io,
     };
+    var account_loopback = oauth_loopback_transport.Adapter.init(init.io);
+    defer account_loopback.deinit();
     var account_runtime = try account_api.Runtime.init(
         std.heap.c_allocator,
         init.io,
         app.main_thread_id,
         paths_state.accountDir(),
         account_http.transport(),
+        account_loopback.endpoint(),
         .{
             .context = &app.platform,
             .notify_fn = app_platform.Adapter.notifyRequired,

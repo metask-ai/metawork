@@ -659,6 +659,7 @@ test "Application coordinator commits Account Runtime facts into Workbench" {
         else
             "/tmp/metawork-account-coordinator-test",
         testingTransport(),
+        account_api.TestSupport.loopbackEndpoint(),
         .{ .context = &wake_context, .notify_fn = TestWake.notify },
     );
     defer account_runtime.deinit();
@@ -789,6 +790,7 @@ test "Application coordinator balances Workbench gate when Account effect admiss
         else
             "/tmp/metawork-account-admission-test",
         testingTransport(),
+        account_api.TestSupport.loopbackEndpoint(),
         .{ .context = &wake_context, .notify_fn = TestWake.notify },
     );
     defer account_runtime.deinit();
@@ -1116,6 +1118,7 @@ test "restored login drives automatic key and model defaults end to end" {
         std.Thread.getCurrentId(),
         account_dir,
         testingTransport(),
+        account_api.TestSupport.loopbackEndpoint(),
         .{ .context = &wake_context, .notify_fn = TestWake.notify },
     );
     defer account_runtime.deinit();
@@ -1212,6 +1215,7 @@ test "relaunch with persisted selection restores the saved execution" {
             std.Thread.getCurrentId(),
             account_dir,
             testingTransport(),
+            account_api.TestSupport.loopbackEndpoint(),
             .{ .context = &wake_context, .notify_fn = TestWake.notify },
         );
         defer account_runtime.deinit();
@@ -1259,6 +1263,7 @@ test "relaunch with persisted selection restores the saved execution" {
             std.Thread.getCurrentId(),
             account_dir,
             testingTransport(),
+            account_api.TestSupport.loopbackEndpoint(),
             .{ .context = &wake_context, .notify_fn = TestWake.notify },
         );
         defer account_runtime.deinit();
@@ -1343,6 +1348,7 @@ test "broken first key parks the catalog and a manual switch recovers" {
         std.Thread.getCurrentId(),
         account_dir,
         testingTransport(),
+        account_api.TestSupport.loopbackEndpoint(),
         .{ .context = &wake_context, .notify_fn = TestWake.notify },
     );
     defer account_runtime.deinit();

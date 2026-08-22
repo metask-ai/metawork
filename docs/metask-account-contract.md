@@ -55,7 +55,7 @@ Metask 产品 owner 已确认 MetaWork 作为 Metask 第一方客户端复用当
 - refresh 或 `/me` 明确返回 `401/403` 时删除无效 refresh token 并进入 `signed_out`；网络、deadline、`429` 或 `5xx` 保留当前 refresh token 和明确重试入口，冷启动不得因此发布旧 identity；
 - 默认选择在候选 execution preparation 期间生成新 nonce，并使用同目录临时文件、文件 sync、原子 rename 和提交确认；只有 catalog ownership 校验与 preference 持久化全部成功后才安装 execution；熵源失败或结果不确定时 fail closed，不发布未确认 execution；
 - logout 先删除 refresh token，再删除无 secret preference。后续选择生成的新 nonce 不会复用旧 binding；durable Task、Run 和 Schedule 不参与 credential 删除 gate，旧 Schedule 仅因 nonce 不匹配进入 `needs_attention`；
-- credential/open-browser effect 只在 Native SDK 主线程执行；网络与 loopback wait 在有界 Account worker 上执行；cancel、deadline、superseding attempt 和 shutdown 必须收口并 join；
+- credential/open-browser effect 只在 Native SDK 主线程执行；网络与 OAuth loopback wait 在有界 Account worker 上执行，但 listener/socket/deadline/cancellation/HTTP byte pump 由 Application endpoint 实现，Account 只持有 callback policy/sink；cancel、deadline、superseding attempt 和 shutdown 必须收口并 join；
 - 不读取、迁移、清理或兼容旧 manifest、slot、`account.json` 或旧 credential family；旧开发数据由 hard-cut 开发流程在运行新构建前直接移除。
 
 ## 4. C2 现有兼容目录路径

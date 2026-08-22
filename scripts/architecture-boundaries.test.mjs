@@ -210,6 +210,29 @@ test("Account owns platform ports while Application binds Native SDK effects", (
   );
 });
 
+test("Account owns OAuth callback policy while Application owns loopback sockets", () => {
+  const accountSource = ["src/account.zig", ...zigFiles("src/account/")]
+    .map(read)
+    .join("\n");
+  const policy = read("src/account/loopback.zig");
+  const transport = read("src/app/oauth_loopback_transport.zig");
+  const loginAttempt = read("src/account/login_attempt.zig");
+  const mcpOauth = read("src/app/mcp_oauth.zig");
+
+  assert.doesNotMatch(
+    accountSource,
+    /std\.Io\.net\.Server|\.listen\(|\.accept\(|std\.http\.Server/,
+  );
+  assert.match(policy, /pub const RequestSink = struct/);
+  assert.match(policy, /pub const CallbackPolicy = struct/);
+  assert.match(policy, /oauth\.parseCallbackTargetValidated/);
+  assert.match(transport, /listener: std\.Io\.net\.Server/);
+  assert.match(transport, /pub const Adapter = struct/);
+  assert.match(transport, /sink\.handle/);
+  assert.match(loginAttempt, /loopback_endpoint: loopback\.Endpoint/);
+  assert.match(mcpOauth, /oauth_loopback_transport\.Server/);
+});
+
 test("Storage owns SQLite without entering the Product or Application graph", () => {
   const storageFiles = ["src/storage.zig", ...zigFiles("src/storage/")];
   const storageContract = read("src/storage/sql.zig");
