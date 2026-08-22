@@ -60,7 +60,7 @@
 
 ### Owner、并发与生命周期
 
-- Application 只做 composition、平台 capability 注入、平台生命周期驱动和跨 owner 用例编排；编排实现不得持有领域状态或复制 owner policy。Account 拥有 credential 与 ExecutionConfig；Workbench 拥有 Workspace/Task/Run、Executor 和产品历史；Agent 拥有 Runtime/Session/Conversation；Bridge 拥有 Renderer transport。`src/agent/`、`src/workbench/`、`src/account/` 与 `src/bridge/` 不得反向导入 `src/app/` 实现。
+- Application 只做 composition、平台 capability 注入、平台生命周期驱动和跨 owner 用例编排；编排实现不得持有领域状态或复制 owner policy。Account 拥有 credential 与 ExecutionConfig；Workbench 拥有 Workspace/Task/Run、Executor 和产品历史；Agent 拥有 Runtime/Session/Conversation；Bridge 拥有 Renderer transport。`src/agent/`、`src/workbench/`、`src/product/account/` 与 `src/bridge/` 不得反向导入 `src/app/` 实现。
 - Workbench 独占 executor、queue、workers、admission 和 shutdown。Agent Runtime 不接收 Scheduler capability，不反向 enqueue 或销毁 Workbench 资源。
 - 每个 Session 至多一个 in-flight Run；队列和 worker 数量必须有界。Conversation 与跨 Run 状态属于 Session，不能引用 run-scoped arena。
 - AgentCore/tool 线程不得调用 WebView。跨 callback 保留的 borrowed bytes 必须在返回前深拷贝；control event 不得静默丢弃。

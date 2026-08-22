@@ -1,3 +1,4 @@
+//! Product Account credential and preference persistence policy.
 const std = @import("std");
 const build_options = @import("build_options");
 const contract = @import("metawork_account_contract");
@@ -10,6 +11,7 @@ else
     product_identity.bundle_id ++ ".account";
 pub const refresh_token_account = "metask-refresh-token";
 pub const preference_name = "preferences.json";
+pub const preference_bytes = 8 * 1024;
 
 pub const StoreError = error{
     ReadFailed,
@@ -81,6 +83,49 @@ pub const Preference = struct {
         return self.model_id.view();
     }
 };
+
+const PreferenceWire = struct {
+    selection_owner_account_id: []const u8,
+    api_key_id: []const u8,
+    model_id: []const u8,
+    execution_generation: u64,
+};
+
+pub fn encodePreference(
+    output: []u8,
+    preference: Preference,
+) ![]const u8 {
+    try preference.validate();
+    const wire: PreferenceWire = .{
+        .selection_owner_account_id = preference.ownerAccountId(),
+        .api_key_id = preference.apiKeyId(),
+        .model_id = preference.modelId(),
+        .execution_generation = preference.execution_generation,
+    };
+    var writer = std.Io.Writer.fixed(output);
+    try std.json.Stringify.value(wire, .{}, &writer);
+    return writer.buffered();
+}
+
+pub fn decodePreference(input: []const u8) StoreError!Preference {
+    if (input.len == 0 or input.len > preference_bytes)
+        return error.InvalidData;
+    var scratch: [preference_bytes * 2]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&scratch);
+    var parsed = std.json.parseFromSlice(
+        PreferenceWire,
+        fba.allocator(),
+        input,
+        .{ .ignore_unknown_fields = false },
+    ) catch return error.InvalidData;
+    defer parsed.deinit();
+    return Preference.init(
+        parsed.value.selection_owner_account_id,
+        parsed.value.api_key_id,
+        parsed.value.model_id,
+        parsed.value.execution_generation,
+    );
+}
 
 pub const Backend = struct {
     context: *anyopaque,
@@ -337,4 +382,38 @@ test "automation credential namespace is compile-time isolated" {
             service,
         );
     }
+}
+
+test "preference codec is strict, unversioned, and secret-free" {
+    const value = try Preference.init(
+        "account-1",
+        "api-1",
+        "model-1",
+        9,
+    );
+    var bytes: [preference_bytes]u8 = undefined;
+    const encoded = try encodePreference(&bytes, value);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "account-1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "refresh") == null);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "schema") == null);
+    const decoded = try decodePreference(encoded);
+    try std.testing.expectEqualStrings("account-1", decoded.ownerAccountId());
+    try std.testing.expectEqualStrings("api-1", decoded.apiKeyId());
+    try std.testing.expectEqualStrings("model-1", decoded.modelId());
+    try std.testing.expectEqual(@as(u64, 9), decoded.execution_generation);
+}
+
+test "preference codec rejects unknown fields and zero generation" {
+    try std.testing.expectError(
+        error.InvalidData,
+        decodePreference(
+            "{\"selection_owner_account_id\":\"account-1\",\"api_key_id\":\"api-1\",\"model_id\":\"model-1\",\"execution_generation\":1,\"schema\":1}",
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidData,
+        decodePreference(
+            "{\"selection_owner_account_id\":\"account-1\",\"api_key_id\":\"api-1\",\"model_id\":\"model-1\",\"execution_generation\":0}",
+        ),
+    );
 }

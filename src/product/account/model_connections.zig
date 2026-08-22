@@ -1,4 +1,4 @@
-//! Account-owned registry for user-managed model services.
+//! Product Account-owned registry for user-managed model services.
 //!
 //! This module stores only public connection metadata. The platform credential
 //! account is derived from the public connection identity; neither credential

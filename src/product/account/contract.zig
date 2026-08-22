@@ -1,3 +1,4 @@
+//! Product Account public contract.
 const std = @import("std");
 
 /// Compile-time bounds shared by Account, Workbench, and Bridge. Network

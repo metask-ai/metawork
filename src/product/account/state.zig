@@ -1,3 +1,4 @@
+//! Product Account state machine.
 const std = @import("std");
 const builtin = @import("builtin");
 const contract = @import("metawork_account_contract");

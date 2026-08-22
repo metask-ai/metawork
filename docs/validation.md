@@ -63,11 +63,14 @@ candidate probe、真实桌面验收、签名、公证和发布验证不进入 `
 | Agent/Workbench lifecycle | `node scripts/run-lifecycle-tests.mjs`                            | Session、Executor、恢复、并发或 shutdown                                              |
 | 单个 lifecycle 不变量     | 设置 `LIFECYCLE_TEST_FILTER` 后运行 lifecycle 入口                | 只缩小开发反馈；提交前仍运行完整关联 root                                             |
 | Storage foundation        | `zig build test-storage`                                          | SQL contract、conformance、direct SQLite backend、migration、文件恢复与 engine profile |
+| Account OAuth loopback    | `metawork-account-loopback` 与 `metawork-oauth-loopback-transport` module tests | Account callback policy/invalid budget，以及 Application listener/cancel/deadline/sink 组合 |
 | MCP owner                 | `build.zig` 中对应的 `test-mcp-*` step                            | configuration、OAuth、transport、Runtime、catalog、interop 或 Application composition |
 | AgentCore candidate       | staged verifier 与对应 `run-agentcore-*-probe.mjs`                | 新 artifact 或尚未进入合同的外部行为                                                  |
 | 平台能力                  | 本文后续 Windows/macOS 入口                                       | 真实窗口、系统 credential、签名、公证或平台生命周期                                   |
 
 `build.zig` 是正式 Zig test graph 的注册真源；architecture guard 必须证明所有 active external test root 已接线。`scripts/*.test.mjs` 由总入口自动发现，不维护文件数量或手工清单。
+
+Product Account 的目录身份固定为 `src/product/account.zig` 与 `src/product/account/`；architecture guard 必须证明旧 `src/account.zig`、`src/account/` 不存在，全部 build root 指向新路径，同时公开 module identity 仍为 `metawork_account` 与 `metawork_account_contract`。
 
 Storage foundation 的自动化必须同时覆盖内存 target 与测试显式提供的 temporary file path，并在 Debug、ReleaseSafe 至少各运行一次定向入口。共享 conformance 负责 backend-independent 行为，包括 receiver 对同一 Database 的直接再入拒绝；direct backend tests 负责 `WAL + synchronous=NORMAL` profile、单连接内存可见性、Database 级间接再入与异 Database 调用、migration 原子性与版本 namespace、完整 batch rollback、reopen、busy/corrupt/invalid output 和结果上限。architecture guard 负责证明 SQLite C API 与 amalgamation 只进入 Storage concrete backend、上层尚未导入 Storage/SQLite、`app.zon` 尚未声明 Native SDK `sqlite` capability。上述结果只证明基础能力，不证明 production `app.db`、Product schema、业务迁移、单实例或断电 durable policy 已接入。
 
@@ -112,9 +115,8 @@ architecture guard 必须保持 `PlatformServices.context` 零 allowlist。原�
 
 ### 已登记架构缺口
 
-- `src/app/platform.zig` 与 `src/app/window.zig` 仍有 Runtime 已覆盖能力的直接低层调用，Application adapter 仍长期持有原始 `PlatformServices`。后续按独立 routing DAG 收口，不扩大为兼容 allowlist。
+- `src/app/platform.zig`、`src/app/window.zig` 与 `src/app/account_platform_binding.zig` 仍有 Runtime 已覆盖能力的直接低层调用，Application adapter 仍长期持有原始 `PlatformServices`。后续按独立 routing DAG 收口，不扩大为兼容 allowlist；Account Product owner 已只消费 MetaWork-owned ports，这一剩余缺口不再反向传播 Native SDK authority。
 - `src/app/platform.zig` 的 main-loop `wake` 尚未形成单项兼容 seam；先确认 SDK 缺口，再隔离并验证线程与 shutdown。
-- `src/account/platform.zig` 仍由 Product owner 持有原始 `PlatformServices` 并适配 credential、URL、timer 和 persistence。四族 owner-defined port 的 binding 应移回 Application，再随 SDK Runtime 能力逐项删除直接适配。
 
 因此，单个 window-chrome seam 通过不等于全仓 Native SDK 能力路径合规；上述缺口未收口前，全仓 gate 保持打开。
 

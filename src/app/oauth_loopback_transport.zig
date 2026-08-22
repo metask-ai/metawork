@@ -1,25 +1,13 @@
 const std = @import("std");
+const policy = @import("account_loopback");
 const oauth = @import("account_oauth");
 
-pub const Limits = struct {
-    pub const request_head_bytes: usize = 16 * 1024;
-    pub const response_bytes: usize = 4096;
-    pub const invalid_requests: usize = 4;
-};
+const request_head_bytes: usize = 16 * 1024;
+const response_bytes: usize = 4096;
 
-pub const ServerError = error{
-    BindFailed,
-    PortUnavailable,
-    Cancelled,
-    DeadlineExceeded,
-    RequestInvalid,
-    TooManyInvalidRequests,
-    IoFailed,
-};
-
-/// One OAuth attempt owns one loopback listener. `cancel` may be called from
-/// another thread; the owner must join the thread running `wait` before
-/// destroying this value.
+/// Application-owned OAuth loopback server. Listener and connection handles,
+/// cancellation/deadline races and HTTP byte mechanics never cross into the
+/// Account policy sink.
 pub const Server = struct {
     io: std.Io,
     listener: std.Io.net.Server,
@@ -27,7 +15,7 @@ pub const Server = struct {
     stop_requested: std.atomic.Value(u32) = .init(0),
     listener_closed: std.atomic.Value(bool) = .init(false),
 
-    pub fn init(io: std.Io) ServerError!Server {
+    pub fn init(io: std.Io) policy.ServerError!Server {
         const address: std.Io.net.IpAddress = .{
             .ip4 = .loopback(0),
         };
@@ -54,35 +42,16 @@ pub const Server = struct {
 
     pub fn wait(
         self: *Server,
-        allocator: std.mem.Allocator,
-        expected_state: []const u8,
+        sink: policy.RequestSink,
         deadline: std.Io.Clock.Timestamp,
-    ) ServerError!oauth.Callback {
-        return self.waitValidated(
-            allocator,
-            expected_state,
-            .{},
-            deadline,
-        );
-    }
-
-    /// Shares the same single-use loopback listener with MCP while allowing
-    /// RFC 9207 issuer validation derived from validated AS metadata.
-    pub fn waitValidated(
-        self: *Server,
-        allocator: std.mem.Allocator,
-        expected_state: []const u8,
-        validation: oauth.CallbackValidation,
-        deadline: std.Io.Clock.Timestamp,
-    ) ServerError!oauth.Callback {
-        var invalid_count: usize = 0;
-        while (invalid_count < Limits.invalid_requests) {
+    ) policy.ServerError!void {
+        errdefer self.finish();
+        while (true) {
             if (self.isStopRequested()) return error.Cancelled;
-            const stream = try self.acceptUntil(deadline);
-            var connection = stream;
+            var connection = try self.acceptUntil(deadline);
             defer connection.close(self.io);
-            var read_buffer: [Limits.request_head_bytes]u8 = undefined;
-            var write_buffer: [Limits.response_bytes]u8 = undefined;
+            var read_buffer: [request_head_bytes]u8 = undefined;
+            var write_buffer: [response_bytes]u8 = undefined;
             var reader = connection.reader(self.io, &read_buffer);
             var writer = connection.writer(self.io, &write_buffer);
             var http_server: std.http.Server = .init(
@@ -94,60 +63,23 @@ pub const Server = struct {
                 deadline,
             ) catch |err| switch (err) {
                 error.RequestInvalid => {
-                    invalid_count += 1;
+                    try sink.invalid();
                     continue;
                 },
                 else => return err,
             };
-            if (request.head.method != .GET or
-                request.head.content_length != null or
-                request.head.transfer_encoding != .none)
-            {
-                respond(&request, .bad_request, "Invalid OAuth callback.") catch {};
-                invalid_count += 1;
-                continue;
+            const response = try sink.handle(.{
+                .method = if (request.head.method == .GET) .get else .other,
+                .target = request.head.target,
+                .has_content_length = request.head.content_length != null,
+                .has_transfer_encoding = request.head.transfer_encoding != .none,
+            });
+            respond(&request, response) catch return error.IoFailed;
+            if (response.complete) {
+                self.finish();
+                return;
             }
-            var callback = (if (validation.expected_issuer == null and
-                !validation.issuer_required)
-                oauth.parseCallbackTarget(
-                    allocator,
-                    request.head.target,
-                    expected_state,
-                )
-            else
-                oauth.parseCallbackTargetValidated(
-                    allocator,
-                    request.head.target,
-                    expected_state,
-                    validation,
-                )) catch {
-                respond(&request, .bad_request, "Invalid OAuth callback.") catch {};
-                invalid_count += 1;
-                continue;
-            };
-            switch (callback) {
-                .code => respond(
-                    &request,
-                    .ok,
-                    "Authorization returned to MetaWork. You may close this window and wait for MetaWork to finish signing in.",
-                ) catch {
-                    callback.deinit();
-                    return error.IoFailed;
-                },
-                .rejected => respond(
-                    &request,
-                    .bad_request,
-                    "Authentication was not completed. You may close this window and return to MetaWork.",
-                ) catch {
-                    callback.deinit();
-                    return error.IoFailed;
-                },
-            }
-            self.finish();
-            return callback;
         }
-        self.finish();
-        return error.TooManyInvalidRequests;
     }
 
     pub fn cancel(self: *Server) void {
@@ -198,33 +130,17 @@ pub const Server = struct {
     fn acceptUntil(
         self: *Server,
         deadline: std.Io.Clock.Timestamp,
-    ) ServerError!std.Io.net.Stream {
+    ) policy.ServerError!std.Io.net.Stream {
         var outcome_storage: [3]AcceptOutcome = undefined;
         var selection = std.Io.Select(AcceptOutcome).init(
             self.io,
             &outcome_storage,
         );
         selection.async(.accepted, acceptOne, .{self});
-        selection.async(
-            .deadline,
-            waitDeadline,
-            .{ self.io, deadline },
-        );
-        selection.async(
-            .cancelled,
-            waitStop,
-            .{self},
-        );
+        selection.async(.deadline, waitDeadline, .{ self.io, deadline });
+        selection.async(.cancelled, waitStop, .{self});
         const outcome = selection.await() catch {
-            while (selection.cancel()) |remaining| {
-                switch (remaining) {
-                    .accepted => |accepted| switch (accepted) {
-                        .stream => |stream| stream.close(self.io),
-                        .cancelled, .failed => {},
-                    },
-                    .deadline, .cancelled => {},
-                }
-            }
+            while (selection.cancel()) |remaining| closeAccepted(self.io, remaining);
             if (self.isStopRequested()) {
                 self.closeListener();
                 return error.Cancelled;
@@ -235,10 +151,7 @@ pub const Server = struct {
             .accepted => |accepted| blk: {
                 selection.cancelDiscard();
                 if (self.isStopRequested()) {
-                    switch (accepted) {
-                        .stream => |stream| stream.close(self.io),
-                        .cancelled, .failed => {},
-                    }
+                    closeAcceptResult(self.io, accepted);
                     self.closeListener();
                     return error.Cancelled;
                 }
@@ -249,28 +162,12 @@ pub const Server = struct {
                 };
             },
             .deadline => {
-                while (selection.cancel()) |remaining| {
-                    switch (remaining) {
-                        .accepted => |accepted| switch (accepted) {
-                            .stream => |stream| stream.close(self.io),
-                            .cancelled, .failed => {},
-                        },
-                        .deadline, .cancelled => {},
-                    }
-                }
+                while (selection.cancel()) |remaining| closeAccepted(self.io, remaining);
                 self.finish();
                 return error.DeadlineExceeded;
             },
             .cancelled => {
-                while (selection.cancel()) |remaining| {
-                    switch (remaining) {
-                        .accepted => |accepted| switch (accepted) {
-                            .stream => |stream| stream.close(self.io),
-                            .cancelled, .failed => {},
-                        },
-                        .deadline, .cancelled => {},
-                    }
-                }
+                while (selection.cancel()) |remaining| closeAccepted(self.io, remaining);
                 self.closeListener();
                 return error.Cancelled;
             },
@@ -285,10 +182,21 @@ pub const Server = struct {
         return .{ .stream = stream };
     }
 
-    fn waitDeadline(
-        io: std.Io,
-        deadline: std.Io.Clock.Timestamp,
-    ) void {
+    fn closeAcceptResult(io: std.Io, result: AcceptResult) void {
+        switch (result) {
+            .stream => |stream| stream.close(io),
+            .cancelled, .failed => {},
+        }
+    }
+
+    fn closeAccepted(io: std.Io, outcome: AcceptOutcome) void {
+        switch (outcome) {
+            .accepted => |accepted| closeAcceptResult(io, accepted),
+            .deadline, .cancelled => {},
+        }
+    }
+
+    fn waitDeadline(io: std.Io, deadline: std.Io.Clock.Timestamp) void {
         deadline.wait(io) catch {};
     }
 
@@ -307,27 +215,15 @@ pub const Server = struct {
         self: *Server,
         http_server: *std.http.Server,
         deadline: std.Io.Clock.Timestamp,
-    ) ServerError!std.http.Server.Request {
+    ) policy.ServerError!std.http.Server.Request {
         var outcome_storage: [3]ReceiveOutcome = undefined;
         var selection = std.Io.Select(ReceiveOutcome).init(
             self.io,
             &outcome_storage,
         );
-        selection.async(
-            .received,
-            receiveHead,
-            .{http_server},
-        );
-        selection.async(
-            .deadline,
-            waitDeadline,
-            .{ self.io, deadline },
-        );
-        selection.async(
-            .cancelled,
-            waitStop,
-            .{self},
-        );
+        selection.async(.received, receiveHead, .{http_server});
+        selection.async(.deadline, waitDeadline, .{ self.io, deadline });
+        selection.async(.cancelled, waitStop, .{self});
         const outcome = selection.await() catch {
             selection.cancelDiscard();
             return error.IoFailed;
@@ -369,13 +265,69 @@ pub const Server = struct {
     }
 };
 
+/// Stable Application storage exposed to Account only through its endpoint
+/// vtable. Exactly one Account login may own the adapter at a time.
+pub const Adapter = struct {
+    io: std.Io,
+    server: ?Server = null,
+
+    pub fn init(io: std.Io) Adapter {
+        return .{ .io = io };
+    }
+
+    pub fn deinit(self: *Adapter) void {
+        std.debug.assert(self.server == null);
+        self.* = undefined;
+    }
+
+    pub fn endpoint(self: *Adapter) policy.Endpoint {
+        return .{
+            .context = self,
+            .open_fn = open,
+            .wait_fn = waitForCallback,
+            .cancel_fn = cancel,
+            .close_fn = close,
+        };
+    }
+
+    fn open(context: *anyopaque) policy.ServerError!u16 {
+        const self: *Adapter = @ptrCast(@alignCast(context));
+        if (self.server != null) return error.BindFailed;
+        self.server = try Server.init(self.io);
+        return self.server.?.port();
+    }
+
+    fn waitForCallback(
+        context: *anyopaque,
+        sink: policy.RequestSink,
+        deadline: std.Io.Clock.Timestamp,
+    ) policy.ServerError!void {
+        const self: *Adapter = @ptrCast(@alignCast(context));
+        const server = if (self.server) |*value| value else return error.BindFailed;
+        return server.wait(sink, deadline);
+    }
+
+    fn cancel(context: *anyopaque) void {
+        const self: *Adapter = @ptrCast(@alignCast(context));
+        if (self.server) |*server| server.cancel();
+    }
+
+    fn close(context: *anyopaque) void {
+        const self: *Adapter = @ptrCast(@alignCast(context));
+        if (self.server) |*server| server.deinit();
+        self.server = null;
+    }
+};
+
 fn respond(
     request: *std.http.Server.Request,
-    status: std.http.Status,
-    body: []const u8,
+    response: policy.Response,
 ) !void {
-    try request.respond(body, .{
-        .status = status,
+    try request.respond(response.body, .{
+        .status = switch (response.status) {
+            .ok => .ok,
+            .bad_request => .bad_request,
+        },
         .keep_alive = false,
         .extra_headers = &.{
             .{ .name = "Content-Type", .value = "text/plain; charset=utf-8" },
@@ -388,77 +340,30 @@ fn respond(
 
 const WaitContext = struct {
     server: *Server,
-    allocator: std.mem.Allocator,
-    state: []const u8,
+    sink: policy.RequestSink,
     deadline: std.Io.Clock.Timestamp,
-    callback: ?oauth.Callback = null,
-    failure: ?ServerError = null,
+    failure: ?policy.ServerError = null,
 
     fn run(self: *WaitContext) void {
-        self.callback = self.server.wait(
-            self.allocator,
-            self.state,
-            self.deadline,
-        ) catch |err| {
+        self.server.wait(self.sink, self.deadline) catch |err| {
             self.failure = err;
-            return;
         };
     }
 };
 
-const ReceiveContext = struct {
-    server: *Server,
-    connection: std.Io.net.Stream,
-    deadline: std.Io.Clock.Timestamp,
-    started: std.atomic.Value(u32) = .init(0),
-    failure: ?ServerError = null,
-    unexpected_success: bool = false,
-
-    fn run(self: *ReceiveContext) void {
-        defer self.connection.close(self.server.io);
-        var read_buffer: [Limits.request_head_bytes]u8 = undefined;
-        var write_buffer: [Limits.response_bytes]u8 = undefined;
-        var reader = self.connection.reader(self.server.io, &read_buffer);
-        var writer = self.connection.writer(self.server.io, &write_buffer);
-        var http_server: std.http.Server = .init(
-            &reader.interface,
-            &writer.interface,
-        );
-        self.started.store(1, .release);
-        self.server.io.futexWake(
-            u32,
-            &self.started.raw,
-            std.math.maxInt(u32),
-        );
-        _ = self.server.receiveHeadUntil(
-            &http_server,
-            self.deadline,
-        ) catch |err| {
-            self.failure = err;
-            return;
-        };
-        self.unexpected_success = true;
-    }
-
-    fn waitStarted(self: *ReceiveContext) void {
-        while (self.started.load(.acquire) == 0) {
-            self.server.io.futexWait(
-                u32,
-                &self.started.raw,
-                0,
-            ) catch {};
-        }
-    }
-};
-
-test "loopback listener binds dynamic IPv4 and accepts one exact callback" {
+test "Application loopback pump and Account callback policy compose" {
     var server = try Server.init(std.testing.io);
     defer server.deinit();
     const expected_state = "0123456789012345678901234567890123456789012";
+    var callback_policy = policy.CallbackPolicy.init(
+        std.testing.allocator,
+        expected_state,
+        .{},
+    );
+    defer callback_policy.deinit();
     var context: WaitContext = .{
         .server = &server,
-        .allocator = std.testing.allocator,
-        .state = expected_state,
+        .sink = callback_policy.sink(),
         .deadline = std.Io.Clock.Timestamp.fromNow(
             std.testing.io,
             .{ .raw = .fromSeconds(30), .clock = .boot },
@@ -466,9 +371,7 @@ test "loopback listener binds dynamic IPv4 and accepts one exact callback" {
     };
     const thread = try std.Thread.spawn(.{}, WaitContext.run, .{&context});
 
-    const address: std.Io.net.IpAddress = .{
-        .ip4 = .loopback(server.port()),
-    };
+    const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(server.port()) };
     var stream = try address.connect(std.testing.io, .{
         .mode = .stream,
         .protocol = .tcp,
@@ -479,29 +382,29 @@ test "loopback listener binds dynamic IPv4 and accepts one exact callback" {
     try writer.interface.print(
         "GET " ++ oauth.callback_path ++
             "?code=authorization-code&state={s} HTTP/1.1\r\n" ++
-            "Host: 127.0.0.1:{d}\r\n" ++
-            "Connection: close\r\n\r\n",
+            "Host: 127.0.0.1:{d}\r\nConnection: close\r\n\r\n",
         .{ expected_state, server.port() },
     );
     try writer.interface.flush();
     thread.join();
-    try std.testing.expectEqual(@as(?ServerError, null), context.failure);
-    var callback = context.callback orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(?policy.ServerError, null), context.failure);
+    var callback = callback_policy.take() orelse return error.TestUnexpectedResult;
     defer callback.deinit();
-    try std.testing.expectEqualStrings(
-        "authorization-code",
-        callback.code.view(),
-    );
+    try std.testing.expectEqualStrings("authorization-code", callback.code.view());
 }
 
-test "cancel closes the listener and wakes a blocked accept" {
+test "cancel closes the Application listener and wakes blocked accept" {
     var server = try Server.init(std.testing.io);
     defer server.deinit();
-    const expected_state = "0123456789012345678901234567890123456789012";
+    var callback_policy = policy.CallbackPolicy.init(
+        std.testing.allocator,
+        "0123456789012345678901234567890123456789012",
+        .{},
+    );
+    defer callback_policy.deinit();
     var context: WaitContext = .{
         .server = &server,
-        .allocator = std.testing.allocator,
-        .state = expected_state,
+        .sink = callback_policy.sink(),
         .deadline = std.Io.Clock.Timestamp.fromNow(
             std.testing.io,
             .{ .raw = .fromSeconds(30), .clock = .boot },
@@ -513,15 +416,19 @@ test "cancel closes the listener and wakes a blocked accept" {
     try std.testing.expectEqual(error.Cancelled, context.failure.?);
 }
 
-test "attempt deadline closes the listener and wakes a blocked accept" {
+test "deadline closes the Application listener" {
     var server = try Server.init(std.testing.io);
     defer server.deinit();
-    const expected_state = "0123456789012345678901234567890123456789012";
+    var callback_policy = policy.CallbackPolicy.init(
+        std.testing.allocator,
+        "0123456789012345678901234567890123456789012",
+        .{},
+    );
+    defer callback_policy.deinit();
     try std.testing.expectError(
         error.DeadlineExceeded,
         server.wait(
-            std.testing.allocator,
-            expected_state,
+            callback_policy.sink(),
             std.Io.Clock.Timestamp.fromNow(
                 std.testing.io,
                 .{ .raw = .zero, .clock = .boot },
@@ -530,44 +437,25 @@ test "attempt deadline closes the listener and wakes a blocked accept" {
     );
 }
 
-test "cancel interrupts receiveHeadUntil on an accepted partial request" {
+test "cancel interrupts an accepted partial callback request" {
     var server = try Server.init(std.testing.io);
     defer server.deinit();
-    const address: std.Io.net.IpAddress = .{
-        .ip4 = .loopback(server.port()),
-    };
-    var stream = try address.connect(std.testing.io, .{
-        .mode = .stream,
-        .protocol = .tcp,
-    });
-    defer stream.close(std.testing.io);
-    var write_buffer: [128]u8 = undefined;
-    var writer = stream.writer(std.testing.io, &write_buffer);
-    try writer.interface.writeAll("GET /auth/callback HTTP/1.1\r\n");
-    try writer.interface.flush();
-
-    var context: ReceiveContext = .{
+    var callback_policy = policy.CallbackPolicy.init(
+        std.testing.allocator,
+        "0123456789012345678901234567890123456789012",
+        .{},
+    );
+    defer callback_policy.deinit();
+    var context: WaitContext = .{
         .server = &server,
-        .connection = try server.listener.accept(std.testing.io),
+        .sink = callback_policy.sink(),
         .deadline = std.Io.Clock.Timestamp.fromNow(
             std.testing.io,
             .{ .raw = .fromSeconds(30), .clock = .boot },
         ),
     };
-    const thread = try std.Thread.spawn(.{}, ReceiveContext.run, .{&context});
-    context.waitStarted();
-    server.cancel();
-    thread.join();
-    try std.testing.expect(!context.unexpected_success);
-    try std.testing.expectEqual(error.Cancelled, context.failure.?);
-}
-
-test "deadline interrupts receiveHeadUntil on an accepted partial request" {
-    var server = try Server.init(std.testing.io);
-    defer server.deinit();
-    const address: std.Io.net.IpAddress = .{
-        .ip4 = .loopback(server.port()),
-    };
+    const thread = try std.Thread.spawn(.{}, WaitContext.run, .{&context});
+    const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(server.port()) };
     var stream = try address.connect(std.testing.io, .{
         .mode = .stream,
         .protocol = .tcp,
@@ -577,18 +465,39 @@ test "deadline interrupts receiveHeadUntil on an accepted partial request" {
     var writer = stream.writer(std.testing.io, &write_buffer);
     try writer.interface.writeAll("GET /auth/callback HTTP/1.1\r\n");
     try writer.interface.flush();
+    server.cancel();
+    thread.join();
+    try std.testing.expectEqual(error.Cancelled, context.failure.?);
+}
 
-    var context: ReceiveContext = .{
+test "deadline interrupts an accepted partial callback request" {
+    var server = try Server.init(std.testing.io);
+    defer server.deinit();
+    var callback_policy = policy.CallbackPolicy.init(
+        std.testing.allocator,
+        "0123456789012345678901234567890123456789012",
+        .{},
+    );
+    defer callback_policy.deinit();
+    var context: WaitContext = .{
         .server = &server,
-        .connection = try server.listener.accept(std.testing.io),
+        .sink = callback_policy.sink(),
         .deadline = std.Io.Clock.Timestamp.fromNow(
             std.testing.io,
             .{ .raw = .fromMilliseconds(100), .clock = .boot },
         ),
     };
-    const thread = try std.Thread.spawn(.{}, ReceiveContext.run, .{&context});
-    context.waitStarted();
+    const thread = try std.Thread.spawn(.{}, WaitContext.run, .{&context});
+    const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(server.port()) };
+    var stream = try address.connect(std.testing.io, .{
+        .mode = .stream,
+        .protocol = .tcp,
+    });
+    defer stream.close(std.testing.io);
+    var write_buffer: [128]u8 = undefined;
+    var writer = stream.writer(std.testing.io, &write_buffer);
+    try writer.interface.writeAll("GET /auth/callback HTTP/1.1\r\n");
+    try writer.interface.flush();
     thread.join();
-    try std.testing.expect(!context.unexpected_success);
     try std.testing.expectEqual(error.DeadlineExceeded, context.failure.?);
 }

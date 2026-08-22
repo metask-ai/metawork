@@ -1,3 +1,4 @@
+//! Product Account runtime credential ownership.
 const std = @import("std");
 const state = @import("account_state");
 const oauth = @import("account_oauth");

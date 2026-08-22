@@ -1,3 +1,4 @@
+//! Product Account login-attempt lifecycle.
 const std = @import("std");
 const contract = @import("metawork_account_contract");
 const state = @import("account_state");
@@ -77,7 +78,8 @@ pub const LoginAttempt = struct {
     sink: ResultSink = undefined,
     cancellation: metask.Cancellation = undefined,
     deadline: std.Io.Clock.Timestamp = undefined,
-    server: loopback.Server = undefined,
+    loopback_endpoint: loopback.Endpoint = undefined,
+    callback_port: u16 = 0,
     material: oauth.AttemptMaterial = undefined,
     authorization_url_storage: [oauth.Limits.authorization_url_bytes]u8 =
         undefined,
@@ -93,6 +95,7 @@ pub const LoginAttempt = struct {
         self: *LoginAttempt,
         allocator: std.mem.Allocator,
         io: std.Io,
+        loopback_endpoint: loopback.Endpoint,
         attempt_id: u64,
         transport: metask.Transport,
         sink: ResultSink,
@@ -104,6 +107,7 @@ pub const LoginAttempt = struct {
         self.* = .{
             .allocator = allocator,
             .io = io,
+            .loopback_endpoint = loopback_endpoint,
             .attempt_id = attempt_id,
             .now_unix_seconds = now_unix_seconds,
             .transport = transport,
@@ -123,12 +127,12 @@ pub const LoginAttempt = struct {
             &self.material,
         ) catch return error.RandomFailed;
         errdefer self.material.deinit();
-        self.server = loopback.Server.init(io) catch
+        self.callback_port = self.loopback_endpoint.open() catch
             return error.BindFailed;
-        errdefer self.server.deinit();
+        errdefer self.loopback_endpoint.close();
         const url = oauth.buildAuthorizeUrl(
             &self.authorization_url_storage,
-            self.server.port(),
+            self.callback_port,
             &self.material,
         ) catch return error.AuthorizationUrlFailed;
         self.authorization_url_len = url.len;
@@ -150,13 +154,13 @@ pub const LoginAttempt = struct {
 
     pub fn callbackPort(self: *const LoginAttempt) u16 {
         std.debug.assert(self.started);
-        return self.server.port();
+        return self.callback_port;
     }
 
     pub fn cancel(self: *LoginAttempt) void {
         if (!self.started or self.joined) return;
         self.cancellation.cancel();
-        self.server.cancel();
+        self.loopback_endpoint.cancel();
     }
 
     pub fn join(self: *LoginAttempt) void {
@@ -173,16 +177,21 @@ pub const LoginAttempt = struct {
             return;
         }
         std.debug.assert(self.joined);
-        self.server.deinit();
+        self.loopback_endpoint.close();
         self.material.deinit();
         std.crypto.secureZero(u8, &self.authorization_url_storage);
         self.* = .{};
     }
 
     fn workerMain(self: *LoginAttempt) void {
-        var callback = self.server.wait(
+        var callback_policy = loopback.CallbackPolicy.init(
             self.allocator,
             &self.material.state,
+            .{},
+        );
+        defer callback_policy.deinit();
+        self.loopback_endpoint.wait(
+            callback_policy.sink(),
             self.deadline,
         ) catch |err| {
             var failure: WorkerResult = .{
@@ -192,6 +201,13 @@ pub const LoginAttempt = struct {
                 self.attempt_id,
                 &failure,
             );
+            return;
+        };
+        var callback = callback_policy.take() orelse {
+            var failure: WorkerResult = .{
+                .failed = .fromCode(.oauth_callback_rejected),
+            };
+            self.sink.publish(self.attempt_id, &failure);
             return;
         };
         defer callback.deinit();
@@ -208,7 +224,7 @@ pub const LoginAttempt = struct {
                     self.transport,
                     code,
                     &self.material.verifier,
-                    self.server.port(),
+                    self.callback_port,
                     self.now_unix_seconds,
                     .{
                         .cancellation = &self.cancellation,
@@ -340,13 +356,74 @@ const BlockingTransport = struct {
     }
 };
 
+const FakeLoopback = struct {
+    io: std.Io,
+    state: std.atomic.Value(u32) = .init(0),
+    target: [oauth.Limits.callback_target_bytes]u8 = undefined,
+    target_len: usize = 0,
+
+    fn endpoint(self: *FakeLoopback) loopback.Endpoint {
+        return .{
+            .context = self,
+            .open_fn = open,
+            .wait_fn = wait,
+            .cancel_fn = cancel,
+            .close_fn = close,
+        };
+    }
+
+    fn provideCode(self: *FakeLoopback, expected_state: []const u8) !void {
+        var writer = std.Io.Writer.fixed(&self.target);
+        try writer.print(
+            oauth.callback_path ++ "?code=code&state={s}",
+            .{expected_state},
+        );
+        self.target_len = writer.buffered().len;
+        self.state.store(1, .release);
+        self.io.futexWake(u32, &self.state.raw, std.math.maxInt(u32));
+    }
+
+    fn open(_: *anyopaque) loopback.ServerError!u16 {
+        return 49152;
+    }
+
+    fn wait(
+        context: *anyopaque,
+        sink: loopback.RequestSink,
+        _: std.Io.Clock.Timestamp,
+    ) loopback.ServerError!void {
+        const self: *FakeLoopback = @ptrCast(@alignCast(context));
+        while (self.state.load(.acquire) == 0) {
+            self.io.futexWait(u32, &self.state.raw, 0) catch {};
+        }
+        if (self.state.load(.acquire) == 2) return error.Cancelled;
+        const response = try sink.handle(.{
+            .method = .get,
+            .target = self.target[0..self.target_len],
+            .has_content_length = false,
+            .has_transfer_encoding = false,
+        });
+        if (!response.complete) return error.RequestInvalid;
+    }
+
+    fn cancel(context: *anyopaque) void {
+        const self: *FakeLoopback = @ptrCast(@alignCast(context));
+        self.state.store(2, .release);
+        self.io.futexWake(u32, &self.state.raw, std.math.maxInt(u32));
+    }
+
+    fn close(_: *anyopaque) void {}
+};
+
 test "login attempt publishes exchanged tokens before identity lookup" {
     var fake_transport: FakeTransport = .{};
+    var fake_loopback: FakeLoopback = .{ .io = std.testing.io };
     var capture: CaptureSink = .{};
     var attempt: LoginAttempt = .{};
     try attempt.start(
         std.testing.allocator,
         std.testing.io,
+        fake_loopback.endpoint(),
         7,
         fake_transport.transport(),
         capture.sink(),
@@ -358,23 +435,7 @@ test "login attempt publishes exchanged tokens before identity lookup" {
         attempt.authorizationUrl(),
         oauth.authorize_url,
     ));
-    const address: std.Io.net.IpAddress = .{
-        .ip4 = .loopback(attempt.callbackPort()),
-    };
-    var stream = try address.connect(std.testing.io, .{
-        .mode = .stream,
-        .protocol = .tcp,
-    });
-    defer stream.close(std.testing.io);
-    var buffer: [2048]u8 = undefined;
-    var writer = stream.writer(std.testing.io, &buffer);
-    try writer.interface.print(
-        "GET " ++ oauth.callback_path ++
-            "?code=code&state={s} HTTP/1.1\r\n" ++
-            "Host: 127.0.0.1:{d}\r\nConnection: close\r\n\r\n",
-        .{ attempt.material.state, attempt.callbackPort() },
-    );
-    try writer.interface.flush();
+    try fake_loopback.provideCode(&attempt.material.state);
     attempt.join();
     try std.testing.expectEqual(@as(u64, 7), capture.attempt_id);
     var result = capture.result orelse return error.TestUnexpectedResult;
@@ -388,11 +449,13 @@ test "login attempt publishes exchanged tokens before identity lookup" {
 
 test "cancel plus join publishes one typed cancellation" {
     var fake_transport: FakeTransport = .{};
+    var fake_loopback: FakeLoopback = .{ .io = std.testing.io };
     var capture: CaptureSink = .{};
     var attempt: LoginAttempt = .{};
     try attempt.start(
         std.testing.allocator,
         std.testing.io,
+        fake_loopback.endpoint(),
         8,
         fake_transport.transport(),
         capture.sink(),
@@ -409,34 +472,20 @@ test "cancel plus join publishes one typed cancellation" {
 
 test "cancel interrupts token exchange and join does not wait for network" {
     var blocking_transport: BlockingTransport = .{};
+    var fake_loopback: FakeLoopback = .{ .io = std.testing.io };
     var capture: CaptureSink = .{};
     var attempt: LoginAttempt = .{};
     try attempt.start(
         std.testing.allocator,
         std.testing.io,
+        fake_loopback.endpoint(),
         9,
         blocking_transport.transport(),
         capture.sink(),
         100,
     );
     defer attempt.deinit();
-    const address: std.Io.net.IpAddress = .{
-        .ip4 = .loopback(attempt.callbackPort()),
-    };
-    var stream = try address.connect(std.testing.io, .{
-        .mode = .stream,
-        .protocol = .tcp,
-    });
-    defer stream.close(std.testing.io);
-    var buffer: [2048]u8 = undefined;
-    var writer = stream.writer(std.testing.io, &buffer);
-    try writer.interface.print(
-        "GET " ++ oauth.callback_path ++
-            "?code=code&state={s} HTTP/1.1\r\n" ++
-            "Host: 127.0.0.1:{d}\r\nConnection: close\r\n\r\n",
-        .{ attempt.material.state, attempt.callbackPort() },
-    );
-    try writer.interface.flush();
+    try fake_loopback.provideCode(&attempt.material.state);
     blocking_transport.waitUntilStarted(std.testing.io);
     attempt.cancel();
     attempt.join();

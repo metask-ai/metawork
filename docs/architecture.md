@@ -61,7 +61,7 @@ flowchart TB
 | 词          | 含义                                              | 图节点      | 所有权表行         | 源码                                                                |
 | ----------- | ------------------------------------------------- | ----------- | ------------------ | ------------------------------------------------------------------- |
 | Application | 组合、用例编排、平台能力适配与生命周期边界        | APPLICATION | Application        | `src/main.zig`、`src/app.zig`、`src/app/`、`src/native_sdk_compat/` |
-| Product     | 产品逻辑边界；不是统一源码 module                 | PRODUCT     | Account、Workbench | `src/account*`、`src/workbench*`                                    |
+| Product     | 产品逻辑边界；不是统一源码 module 或 facade       | PRODUCT     | Account、Workbench | `src/product/account*`、`src/workbench*`                            |
 | Agent       | AgentCore 执行、Session/Conversation 与事件泵边界 | AGENT       | Agent              | `src/agent.zig`、`src/agent/`                                       |
 | Bridge      | Renderer 与 MetaWork 本地边界之间的唯一通信边界   | BRIDGE      | Bridge             | `src/bridge*`                                                       |
 | Renderer    | 产品 WebUI 模块                                   | RENDERER    | Renderer           | `frontend/`（含 `bridge/` 合同实现层）                              |
@@ -118,6 +118,10 @@ Native SDK Bridge API 是独立的正式 transport surface，不属于系统能�
 | `PlatformServices.context`        | 无                          | Native SDK 私有 opaque 数据，MetaWork 永不访问、解释或强转                              |
 
 产品需要系统能力时，正常依赖链是 `Product owner → MetaWork-owned capability → Application adapter → Native SDK Runtime API → SDK internals → OS`；Bridge 需要受限系统 effect 时经窄 Application capability 进入同一 Runtime 路径；Application 自身的生命周期和窗口行为直接进入 Runtime API。系统能力按以下三级调用路径消费：
+
+Account 是该依赖链的具体实例：Account-owned `ports.zig` 定义 credential/preference、authorization URL、timer 与 Model Connection credential vault 需求，Application-owned `account_platform_binding.zig` 负责绑定和资源生命周期。Account 不导入 Native SDK 或 Application 实现；binding 不拥有 Account codec、事务、恢复、registry 或 persistence health。
+
+OAuth loopback 同样按 policy/effect 切割：Account 拥有 callback/state/code/error/issuer、无效请求预算与 response policy，并向 Application 注入 callback-scoped request sink；Application 独占 listener、socket、accept/receive deadline、cancellation 与 HTTP byte pump。任何 socket、reader、request handle 或连接生命周期都不得跨入 Product owner。
 
 | 路径     | 调用链                                                             | 适用条件                                                                         |
 | -------- | ------------------------------------------------------------------ | -------------------------------------------------------------------------------- |
