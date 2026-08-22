@@ -137,6 +137,7 @@ canonical AccountFact
 optional effect
 CatalogIntent
 ExecutionIntent
+PreferenceIntent
 ReplacementIntent
 ```
 
@@ -152,6 +153,8 @@ CatalogIntent =
 
 ExecutionIntent = unchanged | install | clear
 
+PreferenceIntent = unchanged | commit_pending | clear
+
 ReplacementIntent =
   none
   | begin_default
@@ -165,6 +168,8 @@ ReplacementIntent =
 - Runtime 不从 `AccountFactKind`、公开 `CatalogState`、operation 名称或 effect tag 反推 catalog commit；
 - Coordinator 不从 Renderer command 名称或 Account effect tag 反推 Workbench replacement；
 - `AccountFactKind` 只描述已观察事实，不控制 slot、persistence 或 execution 提交；
+- preference shadow 只按显式 `PreferenceIntent` 提交或清除，不得从 fact kind、effect tag 或 pending 值存在性推断；
+- `CatalogIntent.candidate` 保留当前 attempt 的私有 catalog session；`promote_candidate`、`discard_candidate` 和 `clear_all` 都是 terminal intent，Runtime 必须在已接纳的 terminal effect 完成 dispatch、cancel/join 达到 quiescence 后销毁其中的 API Key secret，并在本次 Account commit handoff 返回前完成；
 - prepared transition 被拒绝或 effect admission 失败时不得修改 committed aggregate；
 - completion 产生的下一 effect admission 失败时，先提交已经观察到的外部结果，再从该 committed phase 产生唯一 terminal failure。
 
@@ -239,7 +244,7 @@ Metask 与 ready Model Connection 之间切换必须产生显式 `ExecutionInten
 
 credential-bearing execution persistence outcome unknown 风险更高：在重新观察并精确证明唯一 generation 前，不得发布或安装 candidate execution。不得自动重放非幂等 persistence。
 
-`saved_preference` 只能是已观察持久化真相的 Account-owned shadow，不能与 committed selection 分别更新。恢复成功、提交成功和明确清除必须在同一个 Account commit 中同步两者。
+`saved_preference` 只能是已观察持久化真相的 Account-owned shadow，不能与 committed selection 分别更新。恢复成功、提交成功和明确清除必须由 prepared transition 的显式 `PreferenceIntent` 在同一个 Account commit 中同步两者；进入 preference recovery 时必须清除不再受磁盘观察证明的旧 shadow，后续同 owner 登录不得复用该值。
 
 ## 8. Projection 与安全
 
@@ -273,10 +278,12 @@ Account inline tests 覆盖纯 transaction transition、intent、projection、co
 - 登录后自动完成首个可用默认配置；
 - GLM 默认 → GPT API → 自动模型 → 同 API 下选择另一 GPT 模型不 crash；
 - 模型 preference 成功、明确失败、outcome unknown 三类结果；
+- preference recovery 清除旧 shadow，避免同 owner 重新登录恢复出未经磁盘证明的默认值；
 - 纯模型变化不改变 credential generation、不安装 Workbench execution，重启后恢复新模型；
 - API/provider/credential 变化生成新 generation，并只在完整成功后提升 candidate；
 - catalog refresh、取消、park/reload 和 stale completion 的 slot 行为；
 - identity replacement、effect admission failure、deadline 和 shutdown 在所有终止路径平衡 gate、attempt、secret 和 catalog；
+- catalog promote/discard/clear terminal handoff 在 effect quiescence 后清除私有 secret session，catalog cancel 同步丢弃 candidate slot 与 attempt identity；
 - 每个 prepared/committed `AccountView` 都通过 runtime decode 等价的合同校验。
 
 实现收口基线：`Transaction` 是唯一可写事务状态；Runtime 直接拥有 committed/candidate public catalog 与 candidate attempt identity；默认模型使用独立 durable preference transaction；Coordinator 只消费显式 execution/replacement intent。`fact.kind` catalog completion、effect-driver committed catalog、ready 模型直接 mutation、command/effect gate 推断、`candidateCatalogActive` 和组合 operation/attempt 字段均已删除，后续不得以兼容或 fallback 名义恢复。

@@ -521,6 +521,10 @@ pub const Prepared = struct {
         return self.transition.executionIntent();
     }
 
+    pub fn preferenceIntent(self: *const Prepared) state_impl.PreferenceIntent {
+        return self.transition.preferenceIntent();
+    }
+
     pub fn deinit(self: *Prepared) void {
         self.transition.deinit();
         self.follow_up = null;
@@ -1201,12 +1205,19 @@ pub const Runtime = struct {
                 self.view_catalog_slot = .committed;
             },
         }
+        switch (prepared.preferenceIntent()) {
+            .unchanged => {},
+            .commit_pending => {
+                const pending = self.pending_default_preference orelse
+                    @panic("Account preference commit has no pending value");
+                std.debug.assert(prepared.attemptId() == pending.attempt_id);
+                self.saved_preference = pending.value;
+            },
+            .clear => self.saved_preference = null,
+        }
         if (self.pending_default_preference) |pending| {
-            if (prepared.attemptId() == pending.attempt_id) {
-                if (prepared.factKind() == .default_changed)
-                    self.saved_preference = pending.value;
+            if (prepared.attemptId() == pending.attempt_id)
                 self.pending_default_preference = null;
-            }
         }
         prepared.transition.commit(&self.account);
     }
@@ -1258,8 +1269,12 @@ pub const Runtime = struct {
                     false,
                 ) catch {};
         }
-        const entry = self.effects.queue.take() orelse return;
-        self.dispatchEffect(entry);
+        if (self.effects.queue.take()) |entry|
+            self.dispatchEffect(entry);
+        switch (prepared.transition.catalogIntent()) {
+            .committed, .candidate => {},
+            .promote_candidate, .discard_candidate, .clear_all => self.effects.clearCatalog(),
+        }
     }
 
     pub fn cancelRefreshTimer(self: *Runtime) void {
@@ -2811,6 +2826,18 @@ test "Account Runtime publishes the candidate catalog with first execution" {
         "key-1",
         "model-1",
     );
+    try catalog_impl.TestSupport.replaceOwnedSelection(
+        &runtime.effects.catalog,
+        "account-1",
+        .{
+            .id = "key-1",
+            .name = "Primary",
+            .suffix = "1234",
+            .provider_kind = .anthropic,
+        },
+        "secret-key",
+        &.{.{ .id = "model-1", .display_name = "Model 1" }},
+    );
     catalog_impl.TestSupport.replacePublic(
         &runtime.candidate_public_catalog,
         &.{.{
@@ -2853,6 +2880,8 @@ test "Account Runtime publishes the candidate catalog with first execution" {
         committed_execution.deinit();
     }
     runtime.commit(&prepared);
+    try std.testing.expect(runtime.effects.catalog.firstApiKeyId() != null);
+    runtime.dispatchCommitted(&prepared);
 
     const committed_view = runtime.view();
     try contract.validateView(committed_view);
@@ -2863,6 +2892,64 @@ test "Account Runtime publishes the candidate catalog with first execution" {
     try std.testing.expectEqualStrings("model-1", committed_view.selected_model);
     try std.testing.expectEqual(@as(usize, 1), committed_view.api_keys.len);
     try std.testing.expectEqual(@as(usize, 1), committed_view.models.len);
+    try std.testing.expect(runtime.effects.catalog.firstApiKeyId() == null);
+    try std.testing.expectEqualStrings(
+        "",
+        runtime.effects.catalog.ownerAccountId(),
+    );
+}
+
+test "Account Runtime catalog cancel discards candidate identity and secrets" {
+    var wake_context: u8 = 0;
+    var runtime = try initRuntimeForTest(&wake_context);
+    defer runtime.deinit();
+    try commitReadyRestoreForTest(&runtime);
+
+    var refresh = switch (runtime.prepareCommand(.refresh_catalog)) {
+        .prepared => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer refresh.deinit();
+    _ = refresh.transition.takeEffect();
+    runtime.commit(&refresh);
+
+    try catalog_impl.TestSupport.replaceOwnedSelection(
+        &runtime.effects.catalog,
+        "account-1",
+        .{
+            .id = "key-1",
+            .name = "Primary",
+            .suffix = "1234",
+            .provider_kind = .anthropic,
+        },
+        "secret-key",
+        &.{.{ .id = "model-1", .display_name = "Model 1" }},
+    );
+    runtime.candidate_public_catalog.replaceRestoredSelection(
+        "key-1",
+        .anthropic,
+        "model-1",
+    );
+    runtime.candidate_catalog_attempt_id = refresh.attemptId();
+
+    var cancel = switch (runtime.prepareCommand(.cancel_operation)) {
+        .prepared => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer cancel.deinit();
+    try std.testing.expect(runtime.admitEffect(&cancel));
+    try std.testing.expectEqual(
+        state_impl.CatalogIntent.discard_candidate,
+        cancel.transition.catalogIntent(),
+    );
+    runtime.commit(&cancel);
+    try std.testing.expect(runtime.candidate_catalog_attempt_id == null);
+    try std.testing.expect(runtime.effects.catalog.firstApiKeyId() != null);
+    runtime.dispatchCommitted(&cancel);
+
+    try std.testing.expect(!runtime.candidate_public_catalog.hasApiKey("key-1"));
+    try std.testing.expect(runtime.effects.catalog.firstApiKeyId() == null);
+    try contract.validateView(runtime.view());
 }
 
 test "Account Runtime mailbox transfers ownership and reports collision" {
@@ -3135,6 +3222,10 @@ test "default-model outcome unknown revokes execution on a third disk state" {
         state_impl.ExecutionIntent.unchanged,
         prepared.executionIntent(),
     );
+    try std.testing.expectEqual(
+        state_impl.PreferenceIntent.clear,
+        prepared.preferenceIntent(),
+    );
     runtime.commit(&prepared);
     const account_view = runtime.view();
     try std.testing.expectEqualStrings("model-1", account_view.selected_model);
@@ -3143,6 +3234,13 @@ test "default-model outcome unknown revokes execution on a third disk state" {
         account_view.error_code,
     );
     try std.testing.expect(!account_view.can_create_task);
+    try std.testing.expect(runtime.saved_preference == null);
+    try std.testing.expect(runtime.savedExecutionGenerationFor(
+        "account-1",
+        "key-1",
+        "model-1",
+        0,
+    ) == null);
 }
 
 fn initRuntimeForTest(wake_context: *u8) !Runtime {

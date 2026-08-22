@@ -628,6 +628,7 @@ pub const Account = struct {
             .discard_candidate
         else
             .committed;
+        result.transition.preference_intent = .clear;
         return result;
     }
 
@@ -786,6 +787,8 @@ pub const Account = struct {
         if (self.state.attemptKind() == .login or
             self.state.attemptKind() == .logout)
             result.transition.replacement_intent = .finish;
+        if (self.state.attemptKind() == .catalog)
+            result.transition.catalog_intent = .discard_candidate;
         return result;
     }
 
@@ -1216,6 +1219,7 @@ pub const Account = struct {
             .promote_candidate
         else
             .committed;
+        result.transition.preference_intent = .commit_pending;
         return result;
     }
 
@@ -1473,6 +1477,12 @@ pub const ExecutionIntent = enum {
     clear,
 };
 
+pub const PreferenceIntent = enum {
+    unchanged,
+    commit_pending,
+    clear,
+};
+
 pub const ReplacementIntent = enum {
     none,
     begin_default,
@@ -1488,6 +1498,7 @@ pub const PreparedTransition = struct {
     execution: ?contract.OwnedExecutionConfig = null,
     catalog_intent: CatalogIntent = .committed,
     execution_intent: ExecutionIntent = .unchanged,
+    preference_intent: PreferenceIntent = .unchanged,
     replacement_intent: ReplacementIntent = .none,
     committed: bool = false,
 
@@ -1505,6 +1516,10 @@ pub const PreparedTransition = struct {
 
     pub fn executionIntent(self: *const PreparedTransition) ExecutionIntent {
         return self.execution_intent;
+    }
+
+    pub fn preferenceIntent(self: *const PreparedTransition) PreferenceIntent {
+        return self.preference_intent;
     }
 
     pub fn replacementIntent(self: *const PreparedTransition) ReplacementIntent {
@@ -2466,6 +2481,10 @@ test "ready execution model selection updates the default without reconfiguratio
         .transition => |value| value,
         else => return error.TestUnexpectedResult,
     };
+    try std.testing.expectEqual(
+        CatalogIntent.discard_candidate,
+        cancel.catalogIntent(),
+    );
     _ = cancel.takeEffect();
     commitPrepared(&account, &cancel);
 
@@ -2494,6 +2513,10 @@ test "ready execution model selection updates the default without reconfiguratio
         .transition => |value| value,
         else => return error.TestUnexpectedResult,
     };
+    try std.testing.expectEqual(
+        PreferenceIntent.commit_pending,
+        completed.preferenceIntent(),
+    );
     commitPrepared(&account, &completed);
     view = account.view();
     try std.testing.expectEqual(OperationKind.none, account.state.operation());
