@@ -1,3 +1,4 @@
+const builtin = @import("builtin");
 const native_sdk = @import("native_sdk");
 const bridge_api = @import("metawork_bridge");
 const workbench_api = @import("metawork_workbench");
@@ -14,6 +15,11 @@ const tray_items = [_]native_sdk.platform.TrayMenuItem{
     .{ .id = tray_open_id, .label = "Open MetaWork", .command = "metawork.tray.open" },
     .{ .separator = true },
     .{ .id = tray_quit_id, .label = "Quit MetaWork", .command = "metawork.tray.quit" },
+};
+
+const tray_icon_path = switch (builtin.os.tag) {
+    .windows => "assets/icons/tray-icon.ico",
+    else => "assets/icons/tray-icon.png",
 };
 
 pub const State = struct {
@@ -66,6 +72,7 @@ pub const State = struct {
         workbench: *workbench_api.Workbench,
     ) !void {
         try runtime.createTray(.{
+            .icon_path = tray_icon_path,
             .tooltip = "MetaWork",
             .items = &tray_items,
         });

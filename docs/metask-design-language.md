@@ -6,11 +6,33 @@ Foundation UI 的 token 和组件实现，不替代具体产品的页面布局�
 ## Source of truth
 
 - 设计师提供的 Metask 基础设定是不可修改的品牌 source of truth。
+- MetaWork 标志的几何真源是
+  [`assets/brand/logo-mark.svg`](../assets/brand/logo-mark.svg)。不同用途不得直接修改该路径，
+  而应以独立画布、安全区、背景和必要的小尺寸调整形成用途母版。
 - 基础颜色、状态色、Light / Dark 表面和字体的实现真源是
   [`frontend/src/styles/metask-tokens.css`](../frontend/src/styles/metask-tokens.css)。
 - 不在产品 CSS、组件文件或其他文档中复制一套品牌色值。
 - 现有产品 CSS 和组件表现只是迁移时的 consumer inventory，不是需要保留的视觉真源；
   重建设计语言时可以调整现有 hover、selected、danger 等表现。
+
+## Brand assets
+
+- `assets/brand/logo-mark.svg` 是唯一手工维护的 MetaWork 标志几何；其贴合内容的
+  `viewBox` 用于品牌排版，不包含某个平台的背景或外框。
+- `assets/icons/app-icon.svg` 是 1024 × 1024 应用图标用途母版，使用白色背景；品牌标志以画布中心
+  缩放至 88%，使可见主体约占画布宽度 70%，并保留应用图标所需的安全区。
+- `assets/icons/app-icon.png` 是该用途母版的 1024 × 1024 无损栅格交付文件，供当前未打包运行时的
+  `icon_path` 和需要方形栅格源的平台消费；`assets/icons/app-icon.icns` 与
+  `assets/icons/app-icon.ico` 是预先生成并检查的 macOS、Windows 平台交付文件。`app.zon.icons`
+  同时声明三者，由 Native SDK 按平台优先使用对应的预制容器，不在正式打包时临时转换。
+- 应用图标 SVG、PNG、ICNS 和 ICO 都从品牌真源导出；SVG 保留可编辑设计语义，其他格式是平台交付
+  资产。不能把应用 SVG 直接交给当前 SDK 的窄 SVG rasterizer，因为品牌复合 path 依赖的
+  even-odd 镂空不在其支持范围内。MetaWork 仓库不拥有 SVG 栅格化工具链。
+- `assets/icons/tray-icon.svg` 是透明背景的托盘用途母版，主体约占画布宽度 88%；macOS/Linux
+  消费 64 × 64 PNG，Windows 消费包含 16、20、24、32、48 和 64 px 的 ICO。macOS 将该图像
+  作为 template image 使用，Windows 保留品牌色。
+- favicon 和其他平台图标只有出现真实 consumer 时才新增各自的用途资产；不同用途可以
+  调整内容占比、视觉居中、背景和小尺寸细节，但继续复用品牌真源的基础几何。
 
 ## Token layers
 
