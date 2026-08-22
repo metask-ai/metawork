@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const mcp_http_protocol = @import("agent_mcp_http_protocol");
 
 pub const schema_version: u8 = 2;
 pub const transaction_schema_version: u8 = 1;
@@ -4187,15 +4188,11 @@ fn validateTransport(transport: TransportWire, limits: Limits) ?ServerProblem {
 
 fn reservedHttpHeader(name: []const u8) bool {
     inline for (.{
-        "Accept",
         "Accept-Encoding",
         "Content-Length",
-        "Content-Type",
         "Host",
-        "MCP-Protocol-Version",
-        "Mcp-Session-Id",
     }) |reserved| if (std.ascii.eqlIgnoreCase(name, reserved)) return true;
-    return false;
+    return mcp_http_protocol.isReservedRequestHeader(name);
 }
 
 fn validateValueSource(value: ValueSourceWire, limits: Limits) ?[]const u8 {
@@ -4732,7 +4729,7 @@ test "registry never treats argv env or headers as secret-capable literals" {
     }
 }
 
-test "registry reserves Host-owned Streamable HTTP mechanics headers" {
+test "registry reserves transport and Agent protocol HTTP headers" {
     inline for (.{
         "Accept",
         "accept-encoding",

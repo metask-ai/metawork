@@ -15,8 +15,9 @@ pub const max_credential_secret_bytes = native_sdk.platform.max_credential_secre
 const client_name = "MetaWork";
 const client_version = product_identity.version;
 const max_custom_headers: usize = 128;
-const max_session_token_bytes: usize = 1024;
-const max_sse_framing_bytes: usize = 64 * 1024;
+const stdio_io_buffer_bytes: usize = 4096;
+const max_stdio_argv_count: usize = 129;
+const max_stdio_argv_bytes: usize = 64 * 1024;
 
 pub const CredentialStore = struct {
     io: std.Io,
@@ -862,9 +863,302 @@ fn containsSecret(values: []const []const u8, candidate: []const u8) bool {
 
 const StdioContext = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     arena: std.heap.ArenaAllocator,
     environment: std.process.Environ.Map,
+    argv: []const []const u8,
+    cwd: std.process.Child.Cwd,
     backend: agent.McpStdioBackend,
+
+    fn endpoint(self: *StdioContext) agent.McpStdioProcessEndpoint {
+        return .{
+            .context = self,
+            .validate_fn = validateEndpoint,
+            .open_fn = open,
+            .exchange_fn = exchange,
+            .notify_fn = notify,
+            .close_fn = close,
+        };
+    }
+
+    fn validateEndpoint(raw: *anyopaque) bool {
+        const self: *StdioContext = @ptrCast(@alignCast(raw));
+        if (self.argv.len == 0 or self.argv.len > max_stdio_argv_count or
+            self.argv[0].len == 0) return false;
+        var total: usize = 0;
+        for (self.argv) |argument| {
+            if (std.mem.indexOfScalar(u8, argument, 0) != null) return false;
+            total = std.math.add(usize, total, argument.len) catch return false;
+        }
+        if (total > max_stdio_argv_bytes) return false;
+        return switch (self.cwd) {
+            .path => |path| path.len != 0 and
+                std.mem.indexOfScalar(u8, path, 0) == null,
+            .inherit, .dir => true,
+        };
+    }
+
+    const Connection = struct {
+        context: *StdioContext,
+        child: std.process.Child,
+        stdin: std.Io.File,
+        stdout: std.Io.File,
+        stderr: std.Io.File,
+        stdout_buffer: []u8,
+        stdout_reader: std.Io.File.Reader,
+        stderr_thread: std.Thread,
+        dead: std.atomic.Value(bool) = .init(false),
+
+        fn terminate(self: *Connection) void {
+            if (self.dead.swap(true, .acq_rel)) return;
+            if (builtin.os.tag == .windows) {
+                self.child.kill(self.context.io);
+                return;
+            }
+            if (self.child.id) |pid| {
+                std.posix.kill(-pid, .KILL) catch {};
+                _ = self.child.wait(self.context.io) catch {};
+            }
+        }
+
+        fn deinit(self: *Connection) void {
+            self.terminate();
+            self.stderr_thread.join();
+            self.stdin.close(self.context.io);
+            self.stdout.close(self.context.io);
+            std.crypto.secureZero(u8, self.stdout_buffer);
+            const context = self.context;
+            context.allocator.free(self.stdout_buffer);
+            context.allocator.destroy(self);
+        }
+    };
+
+    fn open(raw: *anyopaque, _: u32) agent.McpStdioOpenOutcome {
+        const self: *StdioContext = @ptrCast(@alignCast(raw));
+        const connection = self.openConnection() catch |err| return .{
+            .failure = switch (err) {
+                error.SpawnFailed => .child_exit,
+                error.ResourceUnavailable => .fatal,
+            },
+        };
+        return .{ .connection = connection };
+    }
+
+    const OpenError = error{ SpawnFailed, ResourceUnavailable };
+
+    fn openConnection(self: *StdioContext) OpenError!*Connection {
+        var child = std.process.spawn(self.io, .{
+            .argv = self.argv,
+            .cwd = self.cwd,
+            .environ_map = &self.environment,
+            .stdin = .pipe,
+            .stdout = .pipe,
+            .stderr = .pipe,
+            .pgid = if (builtin.os.tag == .windows) null else 0,
+            .create_no_window = true,
+        }) catch return error.SpawnFailed;
+        errdefer child.kill(self.io);
+        const stdin = child.stdin.?;
+        const stdout = child.stdout.?;
+        const stderr = child.stderr.?;
+        child.stdin = null;
+        child.stdout = null;
+        child.stderr = null;
+        errdefer stdin.close(self.io);
+        errdefer stdout.close(self.io);
+        errdefer stderr.close(self.io);
+        const stdout_buffer = self.allocator.alloc(u8, stdio_io_buffer_bytes) catch
+            return error.ResourceUnavailable;
+        errdefer {
+            std.crypto.secureZero(u8, stdout_buffer);
+            self.allocator.free(stdout_buffer);
+        }
+        const connection = self.allocator.create(Connection) catch
+            return error.ResourceUnavailable;
+        errdefer self.allocator.destroy(connection);
+        connection.* = .{
+            .context = self,
+            .child = child,
+            .stdin = stdin,
+            .stdout = stdout,
+            .stderr = stderr,
+            .stdout_buffer = stdout_buffer,
+            .stdout_reader = stdout.readerStreaming(self.io, stdout_buffer),
+            .stderr_thread = undefined,
+        };
+        connection.stderr_thread = std.Thread.spawn(
+            .{},
+            drainStderr,
+            .{connection},
+        ) catch return error.ResourceUnavailable;
+        return connection;
+    }
+
+    const WaitResult = enum { expired, cancelled };
+    const ExchangeEvent = union(enum) {
+        exchange: agent.McpStdioPerformOutcome,
+        timeout: WaitResult,
+        cancellation: WaitResult,
+    };
+
+    fn exchange(
+        _: *anyopaque,
+        raw_connection: *anyopaque,
+        write: agent.McpStdioWrite,
+        sink: *const agent.McpStdioResponseSink,
+    ) agent.McpStdioPerformOutcome {
+        const connection: *Connection = @ptrCast(@alignCast(raw_connection));
+        if (connection.dead.load(.acquire)) return .{ .failure = .child_exit };
+        if (write.cancellation.isCancelled()) return .{ .failure = .cancelled };
+        var events: [3]ExchangeEvent = undefined;
+        var select = std.Io.Select(ExchangeEvent).init(connection.context.io, &events);
+        select.async(.exchange, pumpExchange, .{ connection, write.fragments, sink });
+        select.async(.timeout, waitTimeout, .{ connection.context.io, write.timeout_ms });
+        select.async(.cancellation, waitCancellation, .{
+            connection.context.io,
+            write.cancellation,
+        });
+        const first = select.await() catch {
+            connection.terminate();
+            select.cancelDiscard();
+            return .{ .failure = .cancelled };
+        };
+        const result: agent.McpStdioPerformOutcome = switch (first) {
+            .exchange => |value| value,
+            .timeout => |wait| switch (wait) {
+                .expired => .{ .failure = .timeout },
+                .cancelled => .{ .failure = .fatal },
+            },
+            .cancellation => |wait| switch (wait) {
+                .expired => .{ .failure = .cancelled },
+                .cancelled => .{ .failure = .fatal },
+            },
+        };
+        switch (result) {
+            .completed => {},
+            .failure => connection.terminate(),
+        }
+        select.cancelDiscard();
+        return result;
+    }
+
+    fn pumpExchange(
+        connection: *Connection,
+        fragments: []const []const u8,
+        sink: *const agent.McpStdioResponseSink,
+    ) agent.McpStdioPerformOutcome {
+        for (fragments) |fragment|
+            connection.stdin.writeStreamingAll(
+                connection.context.io,
+                fragment,
+            ) catch return .{ .failure = .child_exit };
+        while (true) {
+            const chunk = connection.stdout_reader.interface.peekGreedy(1) catch |err|
+                switch (err) {
+                    error.EndOfStream => {
+                        _ = sink.finish_fn(sink.context);
+                        return .completed;
+                    },
+                    else => return .{ .failure = .child_exit },
+                };
+            const fed = sink.feed_fn(sink.context, chunk);
+            if (fed.consumed > chunk.len) return .{ .failure = .fatal };
+            connection.stdout_reader.interface.toss(fed.consumed);
+            if (fed.flow == .stop) return .completed;
+            if (fed.consumed != chunk.len) return .{ .failure = .fatal };
+        }
+    }
+
+    const NotifyEvent = union(enum) {
+        write: ?agent.McpStdioPortFailure,
+        timeout: WaitResult,
+        cancellation: WaitResult,
+    };
+
+    fn notify(
+        _: *anyopaque,
+        raw_connection: *anyopaque,
+        write: agent.McpStdioWrite,
+    ) ?agent.McpStdioPortFailure {
+        const connection: *Connection = @ptrCast(@alignCast(raw_connection));
+        if (connection.dead.load(.acquire)) return .child_exit;
+        if (write.cancellation.isCancelled()) return .cancelled;
+        var events: [3]NotifyEvent = undefined;
+        var select = std.Io.Select(NotifyEvent).init(connection.context.io, &events);
+        select.async(.write, writeNotification, .{ connection, write.fragments });
+        select.async(.timeout, waitTimeout, .{ connection.context.io, write.timeout_ms });
+        select.async(.cancellation, waitCancellation, .{
+            connection.context.io,
+            write.cancellation,
+        });
+        const first = select.await() catch {
+            connection.terminate();
+            select.cancelDiscard();
+            return .cancelled;
+        };
+        const result: ?agent.McpStdioPortFailure = switch (first) {
+            .write => |value| value,
+            .timeout => |wait| switch (wait) {
+                .expired => .timeout,
+                .cancelled => .fatal,
+            },
+            .cancellation => |wait| switch (wait) {
+                .expired => .cancelled,
+                .cancelled => .fatal,
+            },
+        };
+        if (result != null) connection.terminate();
+        select.cancelDiscard();
+        return result;
+    }
+
+    fn writeNotification(
+        connection: *Connection,
+        fragments: []const []const u8,
+    ) ?agent.McpStdioPortFailure {
+        for (fragments) |fragment|
+            connection.stdin.writeStreamingAll(
+                connection.context.io,
+                fragment,
+            ) catch return .child_exit;
+        return null;
+    }
+
+    fn close(_: *anyopaque, raw_connection: *anyopaque) void {
+        const connection: *Connection = @ptrCast(@alignCast(raw_connection));
+        connection.deinit();
+    }
+
+    fn waitTimeout(io: std.Io, timeout_ms: u32) WaitResult {
+        std.Io.Timeout.sleep(.{ .duration = .{
+            .raw = std.Io.Duration.fromMilliseconds(timeout_ms),
+            .clock = .awake,
+        } }, io) catch return .cancelled;
+        return .expired;
+    }
+
+    fn waitCancellation(io: std.Io, cancellation: agent.McpCancellation) WaitResult {
+        while (!cancellation.isCancelled())
+            std.Io.Timeout.sleep(.{ .duration = .{
+                .raw = std.Io.Duration.fromMilliseconds(5),
+                .clock = .awake,
+            } }, io) catch return .cancelled;
+        return .expired;
+    }
+
+    fn drainStderr(connection: *Connection) void {
+        defer connection.stderr.close(connection.context.io);
+        var buffer: [stdio_io_buffer_bytes]u8 = undefined;
+        defer std.crypto.secureZero(u8, &buffer);
+        while (true) {
+            const count = connection.stderr.readStreaming(
+                connection.context.io,
+                &.{&buffer},
+            ) catch return;
+            if (count == 0) return;
+            std.crypto.secureZero(u8, buffer[0..count]);
+        }
+    }
 
     fn destroy(raw: *anyopaque) void {
         const backend: *agent.McpStdioBackend = @ptrCast(@alignCast(raw));
@@ -877,6 +1171,50 @@ const StdioContext = struct {
     }
 };
 
+/// Builds an App-owned process/pipe effect and wraps it with the Agent-owned
+/// stdio protocol backend. Launch data is deep-copied; directory handles, when
+/// supplied, remain borrowed until the returned owner is released.
+pub fn createStdioTransportOwner(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    argv: []const []const u8,
+    cwd: std.process.Child.Cwd,
+    environment: *const std.process.Environ.Map,
+) BuildError!agent.McpTransportOwner {
+    const context = try allocator.create(StdioContext);
+    errdefer allocator.destroy(context);
+    context.* = .{
+        .allocator = allocator,
+        .io = io,
+        .arena = std.heap.ArenaAllocator.init(allocator),
+        .environment = std.process.Environ.Map.init(allocator),
+        .argv = &.{},
+        .cwd = .inherit,
+        .backend = undefined,
+    };
+    errdefer context.arena.deinit();
+    errdefer secureEnvironmentDeinit(&context.environment);
+    const owned = context.arena.allocator();
+    const owned_argv = try owned.alloc([]const u8, argv.len);
+    for (argv, owned_argv) |argument, *target|
+        target.* = try owned.dupe(u8, argument);
+    var iterator = environment.iterator();
+    while (iterator.next()) |entry|
+        try context.environment.put(entry.key_ptr.*, entry.value_ptr.*);
+    context.argv = owned_argv;
+    context.cwd = switch (cwd) {
+        .path => |path| .{ .path = try owned.dupe(u8, path) },
+        .inherit => .inherit,
+        .dir => |dir| .{ .dir = dir },
+    };
+    context.backend = agent.McpStdioBackend.init(.{
+        .io = io,
+        .allocator = allocator,
+        .endpoint = context.endpoint(),
+    }) catch return error.InvalidConfig;
+    return agent.McpTransportOwner.init(context.backend.transport(), StdioContext.destroy);
+}
+
 fn createStdioOwner(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -888,8 +1226,11 @@ fn createStdioOwner(
     errdefer allocator.destroy(context);
     context.* = .{
         .allocator = allocator,
+        .io = io,
         .arena = std.heap.ArenaAllocator.init(allocator),
         .environment = std.process.Environ.Map.init(allocator),
+        .argv = &.{},
+        .cwd = .inherit,
         .backend = undefined,
     };
     errdefer context.arena.deinit();
@@ -920,12 +1261,12 @@ fn createStdioOwner(
         .{ .path = try owned.dupe(u8, path) }
     else
         .inherit;
+    context.argv = argv;
+    context.cwd = cwd;
     context.backend = agent.McpStdioBackend.init(.{
         .io = io,
         .allocator = allocator,
-        .argv = argv,
-        .cwd = cwd,
-        .environ_map = &context.environment,
+        .endpoint = context.endpoint(),
     }) catch return error.InvalidConfig;
     return agent.McpTransportOwner.init(context.backend.transport(), StdioContext.destroy);
 }
@@ -1009,7 +1350,6 @@ const HttpContext = struct {
             .context = self,
             .validate_fn = validateEndpoint,
             .perform_fn = perform,
-            .close_fn = close,
         };
     }
 
@@ -1020,26 +1360,14 @@ const HttpContext = struct {
 
     fn perform(
         raw: *anyopaque,
-        allocator: std.mem.Allocator,
         request: agent.McpHttpRequest,
+        sink: *const agent.McpHttpResponseSink,
     ) agent.McpHttpPerformOutcome {
         const self: *HttpContext = @ptrCast(@alignCast(raw));
         if (request.cancellation.isCancelled()) return .{ .failure = .cancelled };
-        const scratch = allocator.alloc(u8, request.max_response_bytes) catch
-            return .{ .failure = .fatal };
-        defer {
-            std.crypto.secureZero(u8, scratch);
-            allocator.free(scratch);
-        }
-        const fetched = self.fetch(
-            .POST,
-            if (request.notification) .notification else .request,
-            request.era,
-            request.session_token,
-            request.body,
-            request.timeout_ms,
-            request.cancellation,
-            scratch,
+        self.fetch(
+            request,
+            sink,
         ) catch |failure| return .{ .failure = switch (failure) {
             error.Timeout => .timeout,
             error.Cancelled => .cancelled,
@@ -1048,83 +1376,30 @@ const HttpContext = struct {
             error.Network => .network,
             error.InvalidResponse => .fatal,
         } };
-        const body = allocator.dupe(u8, fetched.body) catch
-            return .{ .failure = .fatal };
-        const session_token = if (fetched.sessionToken().len == 0)
-            null
-        else
-            allocator.dupe(u8, fetched.sessionToken()) catch {
-                std.crypto.secureZero(u8, body);
-                allocator.free(body);
-                return .{ .failure = .fatal };
-            };
-        return .{ .response = .{
-            .body = body,
-            .status = fetched.status,
-            .session_token = session_token orelse &.{},
-            .owned_session_token = session_token,
-        } };
-    }
-
-    fn close(raw: *anyopaque, era: agent.McpEra, session_token: []const u8) void {
-        if (session_token.len == 0) return;
-        const self: *HttpContext = @ptrCast(@alignCast(raw));
-        var scratch: [1024]u8 = undefined;
-        _ = self.fetch(
-            .DELETE,
-            .close,
-            era,
-            session_token,
-            "",
-            1000,
-            .{},
-            &scratch,
-        ) catch {};
-        std.crypto.secureZero(u8, &scratch);
+        return .completed;
     }
 
     const FetchFailure = error{ Timeout, Cancelled, Auth, Server, Network, InvalidResponse };
-    const ExchangeKind = enum { request, notification, close };
-    const FetchResult = struct {
-        status: u16,
-        body: []const u8,
-        session_token: [max_session_token_bytes]u8 = undefined,
-        session_token_len: usize = 0,
-
-        fn sessionToken(self: *const FetchResult) []const u8 {
-            return self.session_token[0..self.session_token_len];
-        }
-    };
     const Event = union(enum) {
-        response: FetchFailure!FetchResult,
+        response: FetchFailure!void,
         timeout,
         cancelled,
     };
 
     fn fetch(
         self: *HttpContext,
-        method: std.http.Method,
-        kind: ExchangeKind,
-        era: agent.McpEra,
-        session_token: []const u8,
-        body: []const u8,
-        timeout_ms: u32,
-        cancellation: agent.McpCancellation,
-        response_buffer: []u8,
-    ) FetchFailure!FetchResult {
+        request: agent.McpHttpRequest,
+        sink: *const agent.McpHttpResponseSink,
+    ) FetchFailure!void {
         var events: [3]Event = undefined;
         var select = std.Io.Select(Event).init(self.io, &events);
         select.async(.response, fetchOne, .{
             self,
-            method,
-            kind,
-            era,
-            session_token,
-            body,
-            response_buffer,
+            request,
+            sink,
         });
-        select.async(.timeout, waitTimeout, .{ self.io, timeout_ms });
-        select.async(.cancelled, waitCancellation, .{ self.io, cancellation });
+        select.async(.timeout, waitTimeout, .{ self.io, request.timeout_ms });
+        select.async(.cancelled, waitCancellation, .{ self.io, request.cancellation });
         const first = select.await() catch {
             select.cancelDiscard();
             return error.Cancelled;
@@ -1139,13 +1414,9 @@ const HttpContext = struct {
 
     fn fetchOne(
         self: *HttpContext,
-        method: std.http.Method,
-        kind: ExchangeKind,
-        era: agent.McpEra,
-        session_token: []const u8,
-        body: []const u8,
-        response_buffer: []u8,
-    ) FetchFailure!FetchResult {
+        request_value: agent.McpHttpRequest,
+        sink: *const agent.McpHttpResponseSink,
+    ) FetchFailure!void {
         var client: std.http.Client = .{ .allocator = self.allocator, .io = self.io };
         defer client.deinit();
         const uri = std.Uri.parse(self.url) catch return error.InvalidResponse;
@@ -1165,24 +1436,22 @@ const HttpContext = struct {
             std.crypto.secureZero(u8, value);
             self.allocator.free(value);
         };
-        var headers: [max_custom_headers + 5]std.http.Header = undefined;
+        var headers: [max_custom_headers + 8]std.http.Header = undefined;
         var count: usize = 0;
-        headers[count] = .{ .name = "Accept", .value = "application/json, text/event-stream" };
-        count += 1;
-        headers[count] = .{ .name = "MCP-Protocol-Version", .value = protocolVersion(era) };
-        count += 1;
-        if (method == .POST) {
-            headers[count] = .{ .name = "Content-Type", .value = "application/json" };
-            count += 1;
-        }
-        if (session_token.len != 0) {
-            headers[count] = .{ .name = "Mcp-Session-Id", .value = session_token };
+        for (request_value.headers) |header| {
+            if (count == headers.len) return error.InvalidResponse;
+            headers[count] = .{ .name = header.name, .value = header.value };
             count += 1;
         }
         for (self.custom_headers) |header| {
+            if (count == headers.len) return error.InvalidResponse;
             headers[count] = header;
             count += 1;
         }
+        const method: std.http.Method = switch (request_value.method) {
+            .post => .POST,
+            .delete => .DELETE,
+        };
         var request = client.request(method, uri, .{
             .redirect_behavior = .unhandled,
             .headers = .{
@@ -1195,27 +1464,23 @@ const HttpContext = struct {
             .extra_headers = headers[0..count],
         }) catch return error.Network;
         defer request.deinit();
-        if (method == .POST) {
-            request.transfer_encoding = .{ .content_length = body.len };
+        if (request_value.method == .post) {
+            request.transfer_encoding = .{ .content_length = request_value.body.len };
             var request_body = request.sendBodyUnflushed(&.{}) catch return error.Network;
-            request_body.writer.writeAll(body) catch return error.Network;
+            request_body.writer.writeAll(request_value.body) catch return error.Network;
             request_body.end() catch return error.Network;
             request.connection.?.flush() catch return error.Network;
         } else request.sendBodiless() catch return error.Network;
         var response = request.receiveHead(&.{}) catch return error.Network;
         if (response.head.content_encoding != .identity) return error.InvalidResponse;
-        var result: FetchResult = .{
-            .status = @intFromEnum(response.head.status),
-            .body = &.{},
-        };
-        var media_type: ?ResponseMediaType = null;
+        const status: u16 = @intFromEnum(response.head.status);
         var authenticate_storage: [mcp_oauth.Limits.header_bytes]u8 = undefined;
         var authenticate_writer = std.Io.Writer.fixed(&authenticate_storage);
         var authenticate_invalid = false;
         var iterator = response.head.iterateHeaders();
         while (iterator.next()) |header| {
-            if (result.status < 200 or result.status >= 300) {
-                if ((result.status == 401 or result.status == 403) and
+            if (status < 200 or status >= 300) {
+                if ((status == 401 or status == 403) and
                     std.ascii.eqlIgnoreCase(header.name, "WWW-Authenticate") and
                     !authenticate_invalid)
                 {
@@ -1229,26 +1494,9 @@ const HttpContext = struct {
                         continue;
                     };
                 }
-                continue;
-            }
-            if (std.ascii.eqlIgnoreCase(header.name, "Mcp-Session-Id")) {
-                if (result.session_token_len != 0 or header.value.len == 0 or
-                    header.value.len > result.session_token.len)
-                    return error.InvalidResponse;
-                @memcpy(result.session_token[0..header.value.len], header.value);
-                result.session_token_len = header.value.len;
-                continue;
-            }
-            if (std.ascii.eqlIgnoreCase(header.name, "Content-Type")) {
-                if (kind != .request) continue;
-                if (media_type != null) return error.InvalidResponse;
-                media_type = responseMediaType(header.value) orelse
-                    return error.InvalidResponse;
             }
         }
-        var transfer_buffer: [4096]u8 = undefined;
-        const reader = response.reader(&transfer_buffer);
-        if (result.status == 401 or result.status == 403) {
+        if (status == 401 or status == 403) {
             if (self.authorization) |authorization| if (authorization_lease) |*lease| {
                 var challenge = if (!authenticate_invalid and
                     authenticate_writer.buffered().len != 0)
@@ -1264,21 +1512,30 @@ const HttpContext = struct {
             };
             return error.Auth;
         }
-        if (result.status < 200 or result.status >= 300) return error.Server;
-        result.body = switch (kind) {
-            .request => switch (media_type orelse return error.InvalidResponse) {
-                .json => try readBoundedBody(reader, response_buffer),
-                .event_stream => try readSseResponse(reader, response_buffer),
-            },
-            .notification => body: {
-                if (result.status != 202) return error.Server;
-                const bytes = try readBoundedBody(reader, response_buffer);
-                if (bytes.len != 0) return error.InvalidResponse;
-                break :body bytes;
-            },
-            .close => try readBoundedBody(reader, response_buffer),
-        };
-        return result;
+        if (sink.begin_fn(sink.context, status) == .stop) return;
+        iterator = response.head.iterateHeaders();
+        while (iterator.next()) |header| if (sink.header_fn(
+            sink.context,
+            header.name,
+            header.value,
+        ) == .stop) return;
+        if (sink.end_headers_fn(sink.context) == .stop) return;
+        var transfer_buffer: [4096]u8 = undefined;
+        const reader = response.reader(&transfer_buffer);
+        while (true) {
+            const chunk = reader.peekGreedy(1) catch |err| switch (err) {
+                error.EndOfStream => {
+                    _ = sink.finish_fn(sink.context);
+                    return;
+                },
+                else => return error.InvalidResponse,
+            };
+            const fed = sink.feed_fn(sink.context, chunk);
+            if (fed.consumed > chunk.len) return error.InvalidResponse;
+            reader.toss(fed.consumed);
+            if (fed.flow == .stop) return;
+            if (fed.consumed != chunk.len) return error.InvalidResponse;
+        }
     }
 
     fn waitTimeout(io: std.Io, timeout_ms: u32) void {
@@ -1296,220 +1553,6 @@ const HttpContext = struct {
             } }, io) catch return;
     }
 };
-
-const ResponseMediaType = enum { json, event_stream };
-
-fn responseMediaType(value: []const u8) ?ResponseMediaType {
-    const separator = std.mem.indexOfScalar(u8, value, ';') orelse value.len;
-    const essence = std.mem.trim(u8, value[0..separator], " \t");
-    if (std.ascii.eqlIgnoreCase(essence, "application/json")) return .json;
-    if (std.ascii.eqlIgnoreCase(essence, "text/event-stream")) return .event_stream;
-    return null;
-}
-
-fn readBoundedBody(
-    reader: *std.Io.Reader,
-    response_buffer: []u8,
-) error{InvalidResponse}![]const u8 {
-    var writer = std.Io.Writer.fixed(response_buffer);
-    _ = reader.streamRemaining(&writer) catch return error.InvalidResponse;
-    return writer.buffered();
-}
-
-const SseDecoder = struct {
-    const FeedResult = enum { pending, complete };
-    const LineKind = enum { pending, data, event, other, comment };
-
-    output: []u8,
-    output_len: usize = 0,
-    max_wire_bytes: usize,
-    wire_bytes: usize = 0,
-    stream_start: bool = true,
-    bom_len: u2 = 0,
-    saw_data: bool = false,
-    saw_data_bytes: bool = false,
-    event_is_message: bool = true,
-    ignore_lf_after_cr: bool = false,
-    line_kind: LineKind = .pending,
-    line_has_bytes: bool = false,
-    in_value: bool = false,
-    skip_value_space: bool = false,
-    field_storage: [16]u8 = undefined,
-    field_len: usize = 0,
-    field_overflow: bool = false,
-    event_value_len: usize = 0,
-    event_value_matches: bool = true,
-
-    fn init(output: []u8, max_wire_bytes: usize) SseDecoder {
-        return .{ .output = output, .max_wire_bytes = max_wire_bytes };
-    }
-
-    fn message(self: *const SseDecoder) []const u8 {
-        return self.output[0..self.output_len];
-    }
-
-    fn feedByte(self: *SseDecoder, byte: u8) error{InvalidResponse}!FeedResult {
-        if (self.wire_bytes == self.max_wire_bytes) return error.InvalidResponse;
-        self.wire_bytes += 1;
-        if (self.stream_start) {
-            const bom = "\xef\xbb\xbf";
-            if (self.bom_len != 0) {
-                if (byte != bom[self.bom_len]) return error.InvalidResponse;
-                self.bom_len += 1;
-                if (self.bom_len == bom.len) self.stream_start = false;
-                return .pending;
-            }
-            if (byte == bom[0]) {
-                self.bom_len = 1;
-                return .pending;
-            }
-            self.stream_start = false;
-        }
-        if (byte == '\n' and self.ignore_lf_after_cr) {
-            self.ignore_lf_after_cr = false;
-            return .pending;
-        }
-        self.ignore_lf_after_cr = false;
-        if (byte == '\r') {
-            self.ignore_lf_after_cr = true;
-            return self.finishLine();
-        }
-        if (byte == '\n') return self.finishLine();
-
-        self.line_has_bytes = true;
-        if (self.line_kind == .comment) return .pending;
-        if (!self.in_value) {
-            if (self.field_len == 0 and byte == ':') {
-                self.line_kind = .comment;
-                self.in_value = true;
-                return .pending;
-            }
-            if (byte == ':') {
-                self.in_value = true;
-                self.classifyField();
-                self.beginValue() catch return error.InvalidResponse;
-                self.skip_value_space = true;
-                return .pending;
-            }
-            if (self.field_len < self.field_storage.len) {
-                self.field_storage[self.field_len] = byte;
-                self.field_len += 1;
-            } else self.field_overflow = true;
-            return .pending;
-        }
-
-        if (self.skip_value_space) {
-            self.skip_value_space = false;
-            if (byte == ' ') return .pending;
-        }
-        switch (self.line_kind) {
-            .data => {
-                try self.appendDataByte(byte);
-                self.saw_data_bytes = true;
-            },
-            .event => {
-                const expected = "message";
-                if (self.event_value_len >= expected.len or
-                    byte != expected[self.event_value_len])
-                    self.event_value_matches = false;
-                self.event_value_len += 1;
-            },
-            else => {},
-        }
-        return .pending;
-    }
-
-    fn finishLine(self: *SseDecoder) error{InvalidResponse}!FeedResult {
-        if (!self.line_has_bytes) {
-            const complete = self.saw_data and
-                self.saw_data_bytes and
-                self.event_is_message;
-            if (!complete) {
-                self.output_len = 0;
-                self.saw_data = false;
-                self.saw_data_bytes = false;
-                self.event_is_message = true;
-            }
-            self.resetLine();
-            return if (complete) .complete else .pending;
-        }
-        if (!self.in_value) {
-            self.classifyField();
-            try self.beginValue();
-        }
-        if (self.line_kind == .event) {
-            self.event_is_message = self.event_value_len == 0 or
-                (self.event_value_matches and self.event_value_len == "message".len);
-        }
-        self.resetLine();
-        return .pending;
-    }
-
-    fn classifyField(self: *SseDecoder) void {
-        if (self.field_overflow) {
-            self.line_kind = .other;
-        } else if (std.mem.eql(u8, self.field_storage[0..self.field_len], "data")) {
-            self.line_kind = .data;
-        } else if (std.mem.eql(u8, self.field_storage[0..self.field_len], "event")) {
-            self.line_kind = .event;
-        } else {
-            self.line_kind = .other;
-        }
-    }
-
-    fn beginValue(self: *SseDecoder) error{InvalidResponse}!void {
-        switch (self.line_kind) {
-            .data => {
-                if (self.saw_data) try self.appendDataByte('\n');
-                self.saw_data = true;
-            },
-            .event => {
-                self.event_value_len = 0;
-                self.event_value_matches = true;
-            },
-            else => {},
-        }
-    }
-
-    fn appendDataByte(self: *SseDecoder, byte: u8) error{InvalidResponse}!void {
-        if (self.output_len == self.output.len) return error.InvalidResponse;
-        self.output[self.output_len] = byte;
-        self.output_len += 1;
-    }
-
-    fn resetLine(self: *SseDecoder) void {
-        self.line_kind = .pending;
-        self.line_has_bytes = false;
-        self.in_value = false;
-        self.skip_value_space = false;
-        self.field_len = 0;
-        self.field_overflow = false;
-        self.event_value_len = 0;
-        self.event_value_matches = true;
-    }
-};
-
-fn readSseResponse(
-    reader: *std.Io.Reader,
-    response_buffer: []u8,
-) error{InvalidResponse}![]const u8 {
-    const max_wire_bytes = std.math.add(
-        usize,
-        response_buffer.len,
-        max_sse_framing_bytes,
-    ) catch return error.InvalidResponse;
-    var decoder = SseDecoder.init(response_buffer, max_wire_bytes);
-    while (true) {
-        const chunk = reader.peekGreedy(1) catch return error.InvalidResponse;
-        for (chunk, 0..) |byte, index| {
-            if (try decoder.feedByte(byte) == .complete) {
-                reader.toss(index + 1);
-                return decoder.message();
-            }
-        }
-        reader.toss(chunk.len);
-    }
-}
 
 fn createHttpOwner(
     io: std.Io,
@@ -1579,14 +1622,6 @@ fn createHttpOwner(
     return agent.McpTransportOwner.init(context.backend.transport(), HttpContext.destroy);
 }
 
-fn protocolVersion(era: agent.McpEra) []const u8 {
-    return switch (era) {
-        .modern_2026_07_28 => "2026-07-28",
-        .compat_2025_11_25 => "2025-11-25",
-        .compat_2025_06_18 => "2025-06-18",
-    };
-}
-
 fn secureEnvironmentDeinit(environment: *std.process.Environ.Map) void {
     for (environment.values()) |value|
         std.crypto.secureZero(u8, @constCast(value));
@@ -1641,12 +1676,6 @@ test "STDIO receives only the required host process baseline" {
         try std.testing.expect(!reservedStdioEnvironmentName("SystemRoot"));
         try std.testing.expect(reservedStdioEnvironmentName("PATH"));
     }
-}
-
-test "MCP platform protocol versions remain AgentCore era facts" {
-    try std.testing.expectEqualStrings("2026-07-28", protocolVersion(.modern_2026_07_28));
-    try std.testing.expectEqualStrings("2025-11-25", protocolVersion(.compat_2025_11_25));
-    try std.testing.expectEqualStrings("2025-06-18", protocolVersion(.compat_2025_06_18));
 }
 
 test "OAuth HTTP authorization rotates only by same-epoch revision CAS" {
@@ -1745,68 +1774,97 @@ test "OAuth HTTP authorization publishes the exact rejected snapshot fact" {
     try std.testing.expectEqualStrings("files.write", failure.challenge_scopes[1]);
 }
 
-test "MCP platform classifies JSON and event-stream response media types" {
-    try std.testing.expectEqual(
-        ResponseMediaType.json,
-        responseMediaType(" Application/JSON ; charset=utf-8").?,
+test "MCP platform owns stdio process pipes and stderr drain" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const script =
+        \\printf 'discarded-secret' >&2
+        \\while IFS= read -r line; do printf '%s\n' "$line"; done
+    ;
+    var environment = std.process.Environ.Map.init(std.testing.allocator);
+    defer environment.deinit();
+    var owner = try createStdioTransportOwner(
+        std.testing.io,
+        std.testing.allocator,
+        &.{ "/bin/sh", "-c", script },
+        .inherit,
+        &environment,
     );
-    try std.testing.expectEqual(
-        ResponseMediaType.event_stream,
-        responseMediaType("text/event-stream; charset=utf-8").?,
-    );
-    try std.testing.expectEqual(
-        @as(?ResponseMediaType, null),
-        responseMediaType("text/plain"),
-    );
+    defer owner.deinit();
+    const transport = owner.transport;
+    const connection = switch (transport.open_fn(
+        transport.context,
+        .actual,
+        .modern_2026_07_28,
+        1000,
+    )) {
+        .connection => |value| value,
+        .failure => return error.TestUnexpectedResult,
+    };
+    var connection_open = true;
+    defer if (connection_open) transport.close_fn(connection);
+    const request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":1}";
+    const response = switch (transport.request_fn(
+        connection,
+        std.testing.allocator,
+        request_bytes,
+        1000,
+        .{},
+    )) {
+        .response => |value| value,
+        .failure => return error.TestUnexpectedResult,
+    };
+    defer std.testing.allocator.free(response);
+    try std.testing.expectEqualStrings(request_bytes, response);
+    transport.close_fn(connection);
+    connection_open = false;
 }
 
-test "MCP platform normalizes one bounded SSE message without waiting for EOF" {
-    const input =
-        "\xef\xbb\xbf: heartbeat\r\n" ++
-        "event: ping\r\n" ++
-        "data: ignored\r\n\r\n" ++
-        "event: message\r\n" ++
-        "data: {\"jsonrpc\":\"2.0\",\r\n" ++
-        "data: \"id\":1}\r\n\r\n" ++
-        "data: trailing-must-not-be-read\r\n\r\n";
-    var reader = std.Io.Reader.fixed(input);
-    var output: [128]u8 = undefined;
-    const message = try readSseResponse(&reader, &output);
-    try std.testing.expectEqualStrings(
-        "{\"jsonrpc\":\"2.0\",\n\"id\":1}",
-        message,
+test "MCP platform closes stdio after a normal child exit" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var environment = std.process.Environ.Map.init(std.testing.allocator);
+    defer environment.deinit();
+    var owner = try createStdioTransportOwner(
+        std.testing.io,
+        std.testing.allocator,
+        &.{
+            "/bin/sh",
+            "-c",
+            "IFS= read -r line; printf '%s\\n' \"$line\"; exit 0",
+        },
+        .inherit,
+        &environment,
     );
-    try std.testing.expect(reader.seek < input.len);
-}
-
-test "MCP platform skips empty SSE events before one bounded message" {
-    const input =
-        "id: empty-event\n" ++
-        "data:\n\n" ++
-        "event: message\n" ++
-        "id: response-event\n" ++
-        "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n";
-    var reader = std.Io.Reader.fixed(input);
-    var output: [128]u8 = undefined;
-    const message = try readSseResponse(&reader, &output);
-    try std.testing.expectEqualStrings(
-        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}",
-        message,
-    );
-}
-
-test "MCP platform skips SSE events containing only empty data lines" {
-    const input =
-        "data:\n" ++
-        "data:\n\n" ++
-        "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n";
-    var reader = std.Io.Reader.fixed(input);
-    var output: [128]u8 = undefined;
-    const message = try readSseResponse(&reader, &output);
-    try std.testing.expectEqualStrings(
-        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}",
-        message,
-    );
+    defer owner.deinit();
+    const transport = owner.transport;
+    const connection = switch (transport.open_fn(
+        transport.context,
+        .actual,
+        .modern_2026_07_28,
+        1000,
+    )) {
+        .connection => |value| value,
+        .failure => return error.TestUnexpectedResult,
+    };
+    var connection_open = true;
+    defer if (connection_open) transport.close_fn(connection);
+    const response = switch (transport.request_fn(
+        connection,
+        std.testing.allocator,
+        "{}",
+        1000,
+        .{},
+    )) {
+        .response => |value| value,
+        .failure => return error.TestUnexpectedResult,
+    };
+    defer std.testing.allocator.free(response);
+    try std.testing.expectEqualStrings("{}", response);
+    std.Io.Timeout.sleep(.{ .duration = .{
+        .raw = std.Io.Duration.fromMilliseconds(20),
+        .clock = .awake,
+    } }, std.testing.io) catch {};
+    transport.close_fn(connection);
+    connection_open = false;
 }
 
 test "MCP platform returns a loopback SSE response before the stream closes" {
@@ -1897,25 +1955,40 @@ test "MCP platform returns a loopback SSE response before the stream closes" {
         .authorization = authorization,
         .backend = undefined,
     };
-    var output: [1024]u8 = undefined;
-    const thread = try std.Thread.spawn(.{}, TestServer.run, .{&server});
-    const result = context.fetch(
-        .POST,
-        .request,
+    context.backend = try agent.McpHttpBackend.init(.{
+        .io = std.testing.io,
+        .allocator = std.testing.allocator,
+        .endpoint = context.endpoint(),
+    });
+    defer context.backend.deinit() catch unreachable;
+    const transport = context.backend.transport();
+    const connection = switch (transport.open_fn(
+        transport.context,
+        .actual,
         .modern_2026_07_28,
-        "",
+        1000,
+    )) {
+        .connection => |value| value,
+        .failure => return error.TestUnexpectedResult,
+    };
+    defer transport.close_fn(connection);
+    const thread = try std.Thread.spawn(.{}, TestServer.run, .{&server});
+    const result = transport.request_fn(
+        connection,
+        std.testing.allocator,
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}",
         1000,
         .{},
-        &output,
     );
     thread.join();
     try std.testing.expectEqual(@as(?anyerror, null), server.failure);
     try std.testing.expect(server.authorization_seen);
-    try std.testing.expectEqualStrings(
-        "{\"jsonrpc\":\"2.0\",\"id\":1}",
-        (try result).body,
-    );
+    const response = switch (result) {
+        .response => |value| value,
+        .failure => return error.TestUnexpectedResult,
+    };
+    defer std.testing.allocator.free(response);
+    try std.testing.expectEqualStrings("{\"jsonrpc\":\"2.0\",\"id\":1}", response);
 }
 
 test "MCP platform publishes only a valid HTTP Bearer challenge" {
@@ -1994,18 +2067,40 @@ test "MCP platform publishes only a valid HTTP Bearer challenge" {
         .authorization = authorization,
         .backend = undefined,
     };
-    var output: [1024]u8 = undefined;
+    context.backend = try agent.McpHttpBackend.init(.{
+        .io = std.testing.io,
+        .allocator = std.testing.allocator,
+        .endpoint = context.endpoint(),
+    });
+    defer context.backend.deinit() catch unreachable;
+    const transport = context.backend.transport();
     const thread = try std.Thread.spawn(.{}, TestServer.run, .{&server});
-    try std.testing.expectError(error.Auth, context.fetch(
-        .POST,
-        .request,
+    const first = switch (transport.open_fn(
+        transport.context,
+        .actual,
         .modern_2026_07_28,
-        "",
+        1000,
+    )) {
+        .connection => |value| value,
+        .failure => return error.TestUnexpectedResult,
+    };
+    switch (transport.request_fn(
+        first,
+        std.testing.allocator,
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}",
         1000,
         .{},
-        &output,
-    ));
+    )) {
+        .failure => |failure| try std.testing.expectEqual(
+            agent.McpTransportFailure.auth,
+            failure,
+        ),
+        .response => |response| {
+            std.testing.allocator.free(response);
+            return error.TestUnexpectedResult;
+        },
+    }
+    transport.close_fn(first);
     {
         var failure = authorization.takeRuntimeAuthFailure().?;
         defer failure.deinit();
@@ -2015,44 +2110,28 @@ test "MCP platform publishes only a valid HTTP Bearer challenge" {
         try std.testing.expectEqualStrings("files.read", failure.challenge_scopes[0]);
         try std.testing.expectEqualStrings("files.write", failure.challenge_scopes[1]);
     }
-    try std.testing.expectError(error.Auth, context.fetch(
-        .POST,
-        .notification,
+    const second = switch (transport.open_fn(
+        transport.context,
+        .actual,
         .modern_2026_07_28,
-        "",
-        "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}",
         1000,
-        .{},
-        &output,
-    ));
+    )) {
+        .connection => |value| value,
+        .failure => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(
+        @as(?agent.McpTransportFailure, .auth),
+        transport.notify_fn(
+            second,
+            "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}",
+            1000,
+            .{},
+        ),
+    );
+    transport.close_fn(second);
     thread.join();
     try std.testing.expectEqual(@as(?anyerror, null), server.failure);
     try std.testing.expect(authorization.takeRuntimeAuthFailure() == null);
-}
-
-test "MCP platform rejects an SSE payload beyond the response bound" {
-    var reader = std.Io.Reader.fixed("data: 12345\n\n");
-    var output: [4]u8 = undefined;
-    try std.testing.expectError(
-        error.InvalidResponse,
-        readSseResponse(&reader, &output),
-    );
-}
-
-test "MCP platform bounds ignored SSE framing bytes" {
-    var output: [4]u8 = undefined;
-    const input = try std.testing.allocator.alloc(
-        u8,
-        output.len + max_sse_framing_bytes + 1,
-    );
-    defer std.testing.allocator.free(input);
-    @memset(input, 'x');
-    input[0] = ':';
-    var reader = std.Io.Reader.fixed(input);
-    try std.testing.expectError(
-        error.InvalidResponse,
-        readSseResponse(&reader, &output),
-    );
 }
 
 test "MCP platform builds lazy stdio and HTTP transport owners without opening them" {

@@ -197,6 +197,7 @@ const WiredModules = struct {
     agent_provider_probe: *std.Build.Module,
     agent_mcp_connector: *std.Build.Module,
     agent_mcp_catalog: *std.Build.Module,
+    agent_mcp_http_protocol: *std.Build.Module,
     agent_mcp_http: *std.Build.Module,
     agent_mcp_runtime: *std.Build.Module,
     agent_mcp_stdio: *std.Build.Module,
@@ -516,12 +517,18 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .optimize = root_module.optimize,
     });
     agent_mcp_connector.addImport("metask_agentcore", sdk);
+    const agent_mcp_http_protocol = b.createModule(.{
+        .root_source_file = b.path("src/agent/mcp/http_protocol.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
     const agent_mcp_http = b.createModule(.{
         .root_source_file = b.path("src/agent/mcp/http.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     agent_mcp_http.addImport("agent_mcp_connector", agent_mcp_connector);
+    agent_mcp_http.addImport("agent_mcp_http_protocol", agent_mcp_http_protocol);
     const agent_mcp_runtime = b.createModule(.{
         .root_source_file = b.path("src/agent/mcp/runtime.zig"),
         .target = target,
@@ -807,6 +814,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .target = target,
         .optimize = root_module.optimize,
     });
+    mcp_configuration.addImport("agent_mcp_http_protocol", agent_mcp_http_protocol);
     const projection = b.createModule(.{
         .root_source_file = b.path("src/workbench/projection.zig"),
         .target = target,
@@ -964,6 +972,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .agent_provider_probe = agent_provider_probe,
         .agent_mcp_connector = agent_mcp_connector,
         .agent_mcp_catalog = agent_mcp_catalog,
+        .agent_mcp_http_protocol = agent_mcp_http_protocol,
         .agent_mcp_http = agent_mcp_http,
         .agent_mcp_runtime = agent_mcp_runtime,
         .agent_mcp_stdio = agent_mcp_stdio,

@@ -6,41 +6,36 @@ const options = @import("mcp_interop_options");
 const workbench = @import("metawork_workbench");
 
 const Fixture = struct {
-    environment: std.process.Environ.Map,
-    backend: agent.McpStdioBackend,
-    released: bool = false,
+    transport_owner: agent.McpTransportOwner = undefined,
+    bound: bool = false,
 
     fn init() !Fixture {
-        var environment = std.process.Environ.Map.init(std.testing.allocator);
-        errdefer environment.deinit();
-        if (options.windows_system_root) |system_root|
-            try environment.put("SystemRoot", system_root);
-        return .{
-            .environment = environment,
-            .backend = undefined,
-        };
+        return .{};
     }
 
     fn bind(self: *Fixture, arguments: []const []const u8) !void {
-        self.backend = try agent.McpStdioBackend.init(.{
-            .io = std.testing.io,
-            .allocator = std.testing.allocator,
-            .argv = arguments,
-            .cwd = .inherit,
-            .environ_map = &self.environment,
-        });
+        var environment = std.process.Environ.Map.init(std.testing.allocator);
+        defer environment.deinit();
+        if (options.windows_system_root) |system_root|
+            try environment.put("SystemRoot", system_root);
+        self.transport_owner = try mcp_platform.createStdioTransportOwner(
+            std.testing.io,
+            std.testing.allocator,
+            arguments,
+            .inherit,
+            &environment,
+        );
+        self.bound = true;
     }
 
     fn owner(self: *Fixture) agent.McpTransportOwner {
-        return agent.McpTransportOwner.init(self.backend.transport(), release);
+        self.bound = false;
+        return self.transport_owner.take();
     }
 
-    fn release(raw: *anyopaque) void {
-        const backend: *agent.McpStdioBackend = @ptrCast(@alignCast(raw));
-        const self: *Fixture = @fieldParentPtr("backend", backend);
-        self.backend.deinit() catch @panic("MCP fixture released with live connections");
-        self.environment.deinit();
-        self.released = true;
+    fn deinit(self: *Fixture) void {
+        if (self.bound) self.transport_owner.deinit();
+        self.* = undefined;
     }
 };
 
@@ -800,11 +795,8 @@ test "stdio real-server timeout and cancellation terminate the child" {
     };
     var fixture = try Fixture.init();
     try fixture.bind(&arguments);
-    defer if (!fixture.released) {
-        fixture.backend.deinit() catch unreachable;
-        fixture.environment.deinit();
-    };
-    const transport = fixture.backend.transport();
+    defer fixture.deinit();
+    const transport = fixture.transport_owner.transport;
 
     const timeout_connection = switch (transport.open_fn(
         transport.context,
