@@ -1510,9 +1510,15 @@ const HttpContext = struct {
                 if (challenge) |*value|
                     authorization.recordRuntimeAuthFailure(lease, value.scopes);
             };
-            return error.Auth;
         }
-        if (sink.begin_fn(sink.context, status) == .stop) return;
+        if (sink.begin_fn(sink.context, status) == .stop) {
+            // Request callbacks preserve a complete 401/403 response for
+            // AgentCore. Notifications have no response descriptor, so keep
+            // their transport-level auth classification after recording the
+            // OAuth challenge above.
+            if (status == 401 or status == 403) return error.Auth;
+            return;
+        }
         iterator = response.head.iterateHeaders();
         while (iterator.next()) |header| if (sink.header_fn(
             sink.context,
@@ -1813,8 +1819,9 @@ test "MCP platform owns stdio process pipes and stderr drain" {
         .response => |value| value,
         .failure => return error.TestUnexpectedResult,
     };
-    defer std.testing.allocator.free(response);
-    try std.testing.expectEqualStrings(request_bytes, response);
+    defer std.testing.allocator.free(response.body);
+    try std.testing.expectEqual(@as(u32, 0), response.http_status);
+    try std.testing.expectEqualStrings(request_bytes, response.body);
     transport.close_fn(connection);
     connection_open = false;
 }
@@ -1857,8 +1864,9 @@ test "MCP platform closes stdio after a normal child exit" {
         .response => |value| value,
         .failure => return error.TestUnexpectedResult,
     };
-    defer std.testing.allocator.free(response);
-    try std.testing.expectEqualStrings("{}", response);
+    defer std.testing.allocator.free(response.body);
+    try std.testing.expectEqual(@as(u32, 0), response.http_status);
+    try std.testing.expectEqualStrings("{}", response.body);
     std.Io.Timeout.sleep(.{ .duration = .{
         .raw = std.Io.Duration.fromMilliseconds(20),
         .clock = .awake,
@@ -1987,8 +1995,9 @@ test "MCP platform returns a loopback SSE response before the stream closes" {
         .response => |value| value,
         .failure => return error.TestUnexpectedResult,
     };
-    defer std.testing.allocator.free(response);
-    try std.testing.expectEqualStrings("{\"jsonrpc\":\"2.0\",\"id\":1}", response);
+    defer std.testing.allocator.free(response.body);
+    try std.testing.expectEqual(@as(u32, 200), response.http_status);
+    try std.testing.expectEqualStrings("{\"jsonrpc\":\"2.0\",\"id\":1}", response.body);
 }
 
 test "MCP platform publishes only a valid HTTP Bearer challenge" {
@@ -2091,13 +2100,10 @@ test "MCP platform publishes only a valid HTTP Bearer challenge" {
         1000,
         .{},
     )) {
-        .failure => |failure| try std.testing.expectEqual(
-            agent.McpTransportFailure.auth,
-            failure,
-        ),
+        .failure => return error.TestUnexpectedResult,
         .response => |response| {
-            std.testing.allocator.free(response);
-            return error.TestUnexpectedResult;
+            try std.testing.expectEqual(@as(u32, 401), response.http_status);
+            try std.testing.expectEqual(@as(usize, 0), response.body.len);
         },
     }
     transport.close_fn(first);

@@ -153,7 +153,7 @@ pub const Backend = struct {
             return poisonExchange(connection, .fatal);
         const response = allocator.dupe(u8, collector.output[0..collector.output_len]) catch
             return poisonExchange(connection, .fatal);
-        return .{ .response = response };
+        return .{ .response = .{ .http_status = 0, .body = response } };
     }
 
     fn notify(
@@ -405,8 +405,9 @@ test "stdio owns newline framing and consumes exactly one response" {
         .response => |value| value,
         .failure => return error.TestUnexpectedResult,
     };
-    defer std.testing.allocator.free(response);
-    try std.testing.expectEqualStrings("opaque-response", response);
+    defer std.testing.allocator.free(response.body);
+    try std.testing.expectEqual(@as(u32, 0), response.http_status);
+    try std.testing.expectEqualStrings("opaque-response", response.body);
     try std.testing.expectEqual(
         @as(?connector.Failure, null),
         transport.notify_fn(connection, "opaque-notify", 1000, .{}),
@@ -439,7 +440,7 @@ test "stdio protocol failure poisons the connection" {
             failure,
         ),
         .response => |response| {
-            std.testing.allocator.free(response);
+            if (response.body.len != 0) std.testing.allocator.free(response.body);
             return error.TestUnexpectedResult;
         },
     }

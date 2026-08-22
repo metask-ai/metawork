@@ -46,10 +46,19 @@ pub const OpenOutcome = union(enum) {
     failure: Failure,
 };
 
-/// A successful response must be allocated with the allocator passed to the
-/// transport callback. Ownership transfers to Adapter and then to AgentCore.
+pub const ExchangeResponse = struct {
+    /// Stdio uses zero. Streamable HTTP reports the complete final response
+    /// status so AgentCore can own protocol negotiation and classification.
+    http_status: u32,
+    /// Non-empty bytes must be allocated with the allocator passed to the
+    /// transport callback. HTTP responses may use the canonical empty slice.
+    body: []u8,
+};
+
+/// A successful response transfers any non-empty body allocation to Adapter
+/// and then to AgentCore.
 pub const ExchangeOutcome = union(enum) {
-    response: []u8,
+    response: ExchangeResponse,
     failure: Failure,
 };
 
@@ -277,10 +286,10 @@ pub const Adapter = struct {
         request_json: wire.BytesViewV1,
         timeout_ms: u32,
         raw_cancellation: ?*const wire.McpCancellationV1,
-        out_response: ?*wire.OwnedBytesV1,
+        out_response: ?*wire.McpResponseV1,
     ) callconv(.c) u32 {
         const output = out_response orelse return wire.MCP_EXCHANGE_FATAL;
-        output.* = emptyOwnedBytes();
+        output.* = emptyMcpResponse();
         const self: *Adapter = @ptrCast(@alignCast(
             context orelse return wire.MCP_EXCHANGE_FATAL,
         ));
@@ -304,14 +313,19 @@ pub const Adapter = struct {
             cancellation,
         )) {
             .failure => |failure| mapExchangeFailure(failure),
-            .response => |owned| result: {
-                if (owned.len == 0 or owned.len > self.max_response_bytes or
-                    self.containsSecret(owned))
-                {
-                    self.discardResponse(owned);
+            .response => |response| result: {
+                const body = response.body;
+                const valid_status = response.http_status == 0 or
+                    (response.http_status >= 100 and response.http_status <= 599);
+                const valid_body = body.len <= self.max_response_bytes and
+                    (response.http_status != 0 or body.len != 0);
+                if (!valid_status or !valid_body or self.containsSecret(body)) {
+                    if (body.len != 0) self.discardResponse(body);
                     break :result wire.MCP_EXCHANGE_FATAL;
                 }
-                output.* = .{ .ptr = owned.ptr, .len = owned.len };
+                output.http_status = response.http_status;
+                if (body.len != 0)
+                    output.body = .{ .ptr = body.ptr, .len = body.len };
                 break :result wire.MCP_EXCHANGE_RESPONSE;
             },
         };
@@ -325,20 +339,20 @@ pub const Adapter = struct {
         raw_cancellation: ?*const wire.McpCancellationV1,
     ) callconv(.c) u32 {
         const self: *Adapter = @ptrCast(@alignCast(
-            context orelse return wire.MCP_NOTIFY_FATAL,
+            context orelse return wire.MCP_NOTIFY_FAILED,
         ));
         const connection: *Connection = @ptrCast(@alignCast(
-            connection_context orelse return wire.MCP_NOTIFY_FATAL,
+            connection_context orelse return wire.MCP_NOTIFY_FAILED,
         ));
         if (connection.adapter != self or timeout_ms == 0)
-            return wire.MCP_NOTIFY_FATAL;
+            return wire.MCP_NOTIFY_FAILED;
         const encoded = borrowedBytes(notification_json) orelse
-            return wire.MCP_NOTIFY_FATAL;
-        if (self.containsSecret(encoded)) return wire.MCP_NOTIFY_FATAL;
+            return wire.MCP_NOTIFY_FAILED;
+        if (self.containsSecret(encoded)) return wire.MCP_NOTIFY_FAILED;
         var bridge: CancellationBridge = undefined;
         const cancellation = makeCancellation(raw_cancellation, &bridge) catch
-            return wire.MCP_NOTIFY_FATAL;
-        if (cancellation.isCancelled()) return wire.MCP_NOTIFY_CANCELLED;
+            return wire.MCP_NOTIFY_FAILED;
+        if (cancellation.isCancelled()) return wire.MCP_NOTIFY_FAILED;
         if (self.transport.notify_fn(
             connection.backend,
             encoded,
@@ -437,6 +451,15 @@ fn emptyOwnedBytes() wire.OwnedBytesV1 {
     return .{ .ptr = null, .len = 0 };
 }
 
+fn emptyMcpResponse() wire.McpResponseV1 {
+    return .{
+        .struct_size = @sizeOf(wire.McpResponseV1),
+        .http_status = 0,
+        .body = emptyOwnedBytes(),
+        .reserved = [_]u64{0} ** 2,
+    };
+}
+
 fn mapOpenFailure(failure: Failure) u32 {
     return switch (failure) {
         .timeout => wire.MCP_OPEN_TIMEOUT,
@@ -462,15 +485,8 @@ fn mapExchangeFailure(failure: Failure) u32 {
 }
 
 fn mapNotifyFailure(failure: Failure) u32 {
-    return switch (failure) {
-        .timeout => wire.MCP_NOTIFY_TIMEOUT,
-        .network => wire.MCP_NOTIFY_NETWORK_ERROR,
-        .auth => wire.MCP_NOTIFY_AUTH_ERROR,
-        .server => wire.MCP_NOTIFY_SERVER_ERROR,
-        .child_exit => wire.MCP_NOTIFY_CHILD_EXIT,
-        .cancelled => wire.MCP_NOTIFY_CANCELLED,
-        .indeterminate, .fatal => wire.MCP_NOTIFY_FATAL,
-    };
+    _ = failure;
+    return wire.MCP_NOTIFY_FAILED;
 }
 
 fn retainConnection(counter: *std.atomic.Value(usize)) bool {
@@ -500,6 +516,7 @@ fn allZero(values: []const u64) bool {
 
 const FakeTransport = struct {
     response: []const u8 = "{\"ok\":true}",
+    http_status: u32 = 0,
     open_failure: ?Failure = null,
     request_failure: ?Failure = null,
     notify_failure: ?Failure = null,
@@ -540,9 +557,15 @@ const FakeTransport = struct {
         const self: *FakeTransport = @ptrCast(@alignCast(context));
         self.requests += 1;
         if (self.request_failure) |failure| return .{ .failure = failure };
-        const response = allocator.dupe(u8, self.response) catch
-            return .{ .failure = .fatal };
-        return .{ .response = response };
+        const response = if (self.response.len == 0)
+            @constCast(&[_]u8{})
+        else
+            allocator.dupe(u8, self.response) catch
+                return .{ .failure = .fatal };
+        return .{ .response = .{
+            .http_status = self.http_status,
+            .body = response,
+        } };
     }
 
     fn notify(
@@ -604,7 +627,7 @@ test "response ownership transfers once and release clears the descriptor" {
     });
     const descriptor = adapter.descriptor();
     const connection = try openTestConnection(descriptor);
-    var response = emptyOwnedBytes();
+    var response = emptyMcpResponse();
     try std.testing.expectEqual(
         wire.MCP_EXCHANGE_RESPONSE,
         descriptor.request.?(
@@ -616,16 +639,45 @@ test "response ownership transfers once and release clears the descriptor" {
             &response,
         ),
     );
-    const response_len: usize = @intCast(response.len);
-    try std.testing.expectEqualStrings(fake.response, response.ptr.?[0..response_len]);
-    descriptor.release_response.?(descriptor.ctx, connection, &response);
-    try std.testing.expect(response.ptr == null);
-    try std.testing.expectEqual(@as(u64, 0), response.len);
-    descriptor.release_response.?(descriptor.ctx, connection, &response);
+    const response_len: usize = @intCast(response.body.len);
+    try std.testing.expectEqual(@as(u32, 0), response.http_status);
+    try std.testing.expectEqual(@as(u32, @sizeOf(wire.McpResponseV1)), response.struct_size);
+    try std.testing.expectEqual([_]u64{0} ** 2, response.reserved);
+    try std.testing.expectEqualStrings(fake.response, response.body.ptr.?[0..response_len]);
+    descriptor.release_response.?(descriptor.ctx, connection, &response.body);
+    try std.testing.expect(response.body.ptr == null);
+    try std.testing.expectEqual(@as(u64, 0), response.body.len);
+    descriptor.release_response.?(descriptor.ctx, connection, &response.body);
     descriptor.close.?(descriptor.ctx, connection);
     try adapter.deinit();
     try std.testing.expectEqual(@as(usize, 1), fake.requests);
     try std.testing.expectEqual(@as(usize, 1), fake.closes);
+}
+
+test "complete HTTP response preserves status and permits an empty body" {
+    var fake = FakeTransport{ .response = "", .http_status = 400 };
+    var adapter = try Adapter.init(std.testing.allocator, .{
+        .transport = fake.capability(),
+    });
+    const descriptor = adapter.descriptor();
+    const connection = try openTestConnection(descriptor);
+    var response = emptyMcpResponse();
+    try std.testing.expectEqual(
+        wire.MCP_EXCHANGE_RESPONSE,
+        descriptor.request.?(
+            descriptor.ctx,
+            connection,
+            sdk.bytesView("{}"),
+            1000,
+            null,
+            &response,
+        ),
+    );
+    try std.testing.expectEqual(@as(u32, 400), response.http_status);
+    try std.testing.expect(response.body.ptr == null);
+    try std.testing.expectEqual(@as(u64, 0), response.body.len);
+    descriptor.close.?(descriptor.ctx, connection);
+    try adapter.deinit();
 }
 
 test "secret guard rejects outbound and inbound protocol bytes" {
@@ -637,7 +689,7 @@ test "secret guard rejects outbound and inbound protocol bytes" {
     });
     const descriptor = adapter.descriptor();
     const connection = try openTestConnection(descriptor);
-    var response = emptyOwnedBytes();
+    var response = emptyMcpResponse();
     try std.testing.expectEqual(
         wire.MCP_EXCHANGE_FATAL,
         descriptor.request.?(
@@ -651,7 +703,7 @@ test "secret guard rejects outbound and inbound protocol bytes" {
     );
     try std.testing.expectEqual(@as(usize, 0), fake.requests);
     try std.testing.expectEqual(
-        wire.MCP_NOTIFY_FATAL,
+        wire.MCP_NOTIFY_FAILED,
         descriptor.notify.?(
             descriptor.ctx,
             connection,
@@ -674,7 +726,7 @@ test "secret guard rejects outbound and inbound protocol bytes" {
             &response,
         ),
     );
-    try std.testing.expect(response.ptr == null);
+    try std.testing.expect(response.body.ptr == null);
     descriptor.close.?(descriptor.ctx, connection);
     try adapter.deinit();
 }
@@ -687,7 +739,7 @@ test "empty and oversized responses fail closed without leaking ownership" {
     });
     const descriptor = adapter.descriptor();
     const connection = try openTestConnection(descriptor);
-    var response = emptyOwnedBytes();
+    var response = emptyMcpResponse();
     try std.testing.expectEqual(
         wire.MCP_EXCHANGE_FATAL,
         descriptor.request.?(
@@ -699,7 +751,7 @@ test "empty and oversized responses fail closed without leaking ownership" {
             &response,
         ),
     );
-    try std.testing.expect(response.ptr == null);
+    try std.testing.expect(response.body.ptr == null);
     fake.response = "12345";
     try std.testing.expectEqual(
         wire.MCP_EXCHANGE_FATAL,
@@ -712,7 +764,7 @@ test "empty and oversized responses fail closed without leaking ownership" {
             &response,
         ),
     );
-    try std.testing.expect(response.ptr == null);
+    try std.testing.expect(response.body.ptr == null);
     descriptor.close.?(descriptor.ctx, connection);
     try adapter.deinit();
 }
@@ -737,7 +789,7 @@ test "official failure and cancellation statuses are preserved" {
     fake.open_failure = null;
     const connection = try openTestConnection(descriptor);
     fake.request_failure = .indeterminate;
-    var response = emptyOwnedBytes();
+    var response = emptyMcpResponse();
     try std.testing.expectEqual(
         wire.MCP_EXCHANGE_INDETERMINATE,
         descriptor.request.?(
@@ -751,7 +803,7 @@ test "official failure and cancellation statuses are preserved" {
     );
     fake.notify_failure = .network;
     try std.testing.expectEqual(
-        wire.MCP_NOTIFY_NETWORK_ERROR,
+        wire.MCP_NOTIFY_FAILED,
         descriptor.notify.?(
             descriptor.ctx,
             connection,
@@ -803,7 +855,7 @@ test "cancelled request never reaches the backend" {
     var cancellation = std.mem.zeroes(wire.McpCancellationV1);
     cancellation.struct_size = @sizeOf(wire.McpCancellationV1);
     cancellation.is_cancelled = Cancelled.yes;
-    var response = emptyOwnedBytes();
+    var response = emptyMcpResponse();
     try std.testing.expectEqual(
         wire.MCP_EXCHANGE_CANCELLED,
         descriptor.request.?(

@@ -40,7 +40,7 @@ AgentCore bundle 仍是面向所有消费者的通用能力全集，并继续支
 - Workbench 不持有 built-in profile、wire name 或 `allowed_tools`，只消费 Agent 形成后的执行能力；
 - bundle 已验证能力是外部上限，MetaWork Agent 集合是产品化子集；bundle 支持但产品未开放不是 admission failure。
 
-当前 Windows 与 macOS bundle 分别使用其 target-specific 静态库，两份 lock source 均为 `e0d29bcfd926b02bffdb165731839bf368210093`（ABI v1 revision 9）。该证据不替代真实 Session 运行证据。
+当前 Windows 与 macOS bundle 分别使用其 target-specific 静态库，两份 lock source 均为 `1183550f15b4eef27799076ee0908e9667d849a0`（ABI v1 revision 9）。该证据不替代真实 Session 运行证据。
 
 ## 4. 最小架构
 
