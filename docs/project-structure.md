@@ -9,6 +9,7 @@
 - 产品行为以 [产品需求](requirements.md) 为准；
 - 系统职责与安全边界以 [高层架构](architecture.md) 为准；
 - Product 内部 owner、事务与恢复以 [Product 内部架构](product-architecture.md) 为准；
+- Account 内部状态、事务、提交与恢复以 [Account 内部架构](account-architecture.md) 为准；
 - Renderer Bridge wire 与运输语义以 [Renderer Bridge 合同](renderer-bridge-contract.md) 为准；
 - AgentCore 生命周期以 [AgentCore 集成契约](agentcore-integration.md) 为准；
 - UI 行为以 [Workbench UI 设计](workbench-ui-design.md) 为准；

@@ -78,7 +78,7 @@ Storage foundation 的自动化必须同时覆盖内存 target 与测试显式�
 
 ### Metask Account 与真实 AgentCore Run
 
-- **规范**：[产品需求](requirements.md)、[Metask Account 合同](metask-account-contract.md)。
+- **规范**：[产品需求](requirements.md)、[Account 内部架构](account-architecture.md)、[Metask Account 合同](metask-account-contract.md)。
 - **证据**：`git show dbaaf81b0217d4016944960ee8621e9a23274f05:docs/phase-0-validation.md` 中 2026-07-20 的真实链路记录。
 - **结论**：打包 `.app` 完成 OAuth、profile、API Key/model catalog、execution persistence，以及 `gpt-5.5`、`deepseek-v4-pro` AgentCore Run。该证据不证明后续 Renderer、设置、模型选择或平台交互仍然通过。
 
