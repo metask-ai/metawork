@@ -236,7 +236,8 @@ try {
       if (
         (catalog?.availability !== "ready" &&
           catalog?.availability !== "degraded") ||
-        !isOpaqueRevision(catalog.revision)
+        !isOpaqueRevision(catalog.revision) ||
+        !isWireId(catalog.selectionRevision)
       )
         throw new Error(
           `Workspace Skill catalog is not ready: ${JSON.stringify(catalog)}`,
@@ -269,6 +270,7 @@ try {
     },
     expectedExecutionGeneration,
     expectedSkillCatalogRevision: catalogSnapshot.catalog.revision,
+    expectedSkillSelectionRevision: catalogSnapshot.catalog.selectionRevision,
   });
   if (
     createResult !== null &&
@@ -312,6 +314,7 @@ try {
       kind: "skill",
       skillId: catalogSnapshot.skill.skillId,
       catalogRevision: catalogSnapshot.catalog.revision,
+      selectionRevision: catalogSnapshot.catalog.selectionRevision,
       argumentValues: ["fixture.txt"],
     },
   });
