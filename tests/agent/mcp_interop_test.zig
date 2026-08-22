@@ -449,7 +449,7 @@ test "canonical AgentCore negotiates the 2026-07-28 stdio fixture" {
     try runCatalogInterop(.modern_only, "2026-07-28");
 }
 
-test "canonical AgentCore negotiates the 2025-11-25 stdio fixture" {
+test "canonical AgentCore negotiates 2025-11-25 and accepts draft-07 tools" {
     try runCatalogInterop(.compat_only, "2025-11-25");
 }
 

@@ -82,7 +82,7 @@ Storage foundation 的自动化必须同时覆盖内存 target 与测试显式�
 ### AgentCore target baseline
 
 - **规范**：[高层架构](architecture.md)、[ABI v1 消费合同](agentcore-abi-v1.md)。
-- **证据**：Windows x86_64 GNU 锁定 clean source commit `e0d29bcfd926b02bffdb165731839bf368210093`，macOS arm64 锁定 `d82e608e4e1481671de4235186f96a36d25446cb` 的 target artifact；repository lock 与 bundle tests 验证 manifest/target/ABI identity。各平台 vertical 结果以本节对应平台记录为准。
+- **证据**：Windows x86_64 GNU 与 macOS arm64 均锁定 clean source commit `e0d29bcfd926b02bffdb165731839bf368210093` 的 target artifact；repository lock 与 bundle tests 验证 manifest/target/ABI identity。各平台 vertical 结果以本节对应平台记录为准。
 - **结论**：两平台 artifact 均为 ABI v1 revision 9、280-byte table、required capabilities `0x3fffff`。两份 lock、artifact 和平台结果不能互相替代。
 
 2026-08-13 的 Windows staged run-state probe 可由 Git object `51e0fcc847e7b832b628f6c64183525dd8300710` 定位：Host Run ID `7` 的 callback identity 与 `run_state.run_id` 一致，首序号为 `1`，并观察到 `starting → generating → finalizing → completed`。结论已进入 ABI 合同和 Workbench 回归，因此 active tree 不再保留该一次性 probe。

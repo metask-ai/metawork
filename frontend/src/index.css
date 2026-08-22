@@ -2023,32 +2023,6 @@ summary::-webkit-details-marker {
   }
 }
 
-@media (max-width: 1100px) {
-  .mcp-page {
-    overflow: hidden auto;
-  }
-
-  .mcp-workspace {
-    height: auto;
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .mcp-page-inner {
-    overflow: visible;
-    border-right: 0;
-    border-bottom: 1px solid var(--ui-border);
-  }
-
-  .mcp-detail-pane {
-    min-height: 620px;
-  }
-
-  .mcp-detail-body,
-  .mcp-add-fields {
-    overflow: visible;
-  }
-}
-
 @media (max-width: 620px) {
   .settings-header {
     grid-template-columns: 1fr;
@@ -3235,22 +3209,14 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   min-width: 0;
   min-height: 0;
   flex: 1;
-  overflow: hidden;
+  overflow: hidden auto;
   background: var(--ui-surface-canvas);
 }
 
-.mcp-workspace {
-  display: grid;
-  width: 100%;
-  height: 100%;
-  grid-template-columns: minmax(420px, 0.86fr) minmax(500px, 1.14fr);
-}
-
 .mcp-page-inner {
-  min-width: 0;
-  padding: 34px 28px 64px;
-  overflow: hidden auto;
-  border-right: 1px solid var(--ui-border);
+  width: min(100%, 944px);
+  padding: 42px 32px 64px;
+  margin: 0 auto;
 }
 
 .mcp-header {
@@ -3350,7 +3316,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .mcp-toolbar {
   margin-top: 28px;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 12px;
 }
 
@@ -3406,7 +3372,9 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   width: 100%;
   min-height: 62px;
   padding: 10px 13px 10px 17px;
-  grid-template-columns: 22px minmax(150px, 1fr) minmax(104px, auto) 14px;
+  grid-template-columns:
+    22px minmax(180px, 1fr) minmax(104px, auto) minmax(120px, auto)
+    14px;
   align-items: center;
   gap: 12px;
   border: 0;
@@ -3507,7 +3475,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .mcp-server-tools {
-  display: none;
+  display: block;
+  justify-self: end;
 }
 
 .mcp-server-state {
@@ -3591,18 +3560,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .mcp-empty-state > button {
   margin-top: 18px;
-}
-
-.mcp-detail-pane {
-  display: flex;
-  min-width: 0;
-  min-height: 0;
-  flex-direction: column;
-  background: color-mix(
-    in srgb,
-    var(--ui-surface-panel) 48%,
-    var(--ui-surface-canvas)
-  );
 }
 
 .mcp-detail-pane > header {

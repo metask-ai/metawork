@@ -1,13 +1,13 @@
 # MetaWork AgentCore ABI v1 消费合同
 
-> 状态：Windows x86_64 GNU 已 hard cut 到 AgentCore `e0d29bcfd926`、macOS arm64 已 hard cut 到 `d82e608e4e14` 的 revision 9 target artifact；不声明 stable support policy
+> 状态：Windows x86_64 GNU 与 macOS arm64 均已 hard cut 到 AgentCore `e0d29bcfd926` 的 revision 9 target artifact；不声明 stable support policy
 > 所有者：Metask AgentCore 负责 facade、bindings、bundle 和 ABI 政策；MetaWork 负责 exact artifact 消费、Host 生命周期和产品 capability gate
 
 本文定义 MetaWork 对 Metask AgentCore binary ABI version 1 的 target-specific 消费边界。线程、事件泵和 Host 生命周期见 [AgentCore 集成契约](agentcore-integration.md)，验证入口见 [验证规范](validation.md)。
 
 ## 1. Target-specific baseline
 
-Windows 锁定 clean source commit `e0d29bcfd926b02bffdb165731839bf368210093`、package version `0.1.0-dev+e0d29bcfd926`；macOS arm64 锁定 clean source commit `d82e608e4e1481671de4235186f96a36d25446cb`、package version `0.1.0-dev+d82e608e4e14`。两者均使用 Zig 0.16.0、strip=true、requires C runtime；target artifact、lock 和验证结果彼此独立：
+Windows 与 macOS arm64 均锁定 clean source commit `e0d29bcfd926b02bffdb165731839bf368210093`、package version `0.1.0-dev+e0d29bcfd926`。两者均使用 Zig 0.16.0、strip=true、requires C runtime；target artifact、lock 和验证结果彼此独立：
 
 | Target             | Build       | Link input            | Repository lock                                    |
 | ------------------ | ----------- | --------------------- | -------------------------------------------------- |

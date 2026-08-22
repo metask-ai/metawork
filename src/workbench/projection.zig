@@ -3862,6 +3862,7 @@ pub const Workbench = struct {
                 .model_catalog_api_key_id = "automation-key",
                 .can_create_task = true,
                 .execution_generation = 1,
+                .metask_execution_generation = 1,
             },
         });
         self.redactAllProductProjectionsNoFail(self.execution.credential());

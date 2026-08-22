@@ -1327,6 +1327,7 @@ const SseDecoder = struct {
     stream_start: bool = true,
     bom_len: u2 = 0,
     saw_data: bool = false,
+    saw_data_bytes: bool = false,
     event_is_message: bool = true,
     ignore_lf_after_cr: bool = false,
     line_kind: LineKind = .pending,
@@ -1402,7 +1403,10 @@ const SseDecoder = struct {
             if (byte == ' ') return .pending;
         }
         switch (self.line_kind) {
-            .data => try self.appendDataByte(byte),
+            .data => {
+                try self.appendDataByte(byte);
+                self.saw_data_bytes = true;
+            },
             .event => {
                 const expected = "message";
                 if (self.event_value_len >= expected.len or
@@ -1417,10 +1421,13 @@ const SseDecoder = struct {
 
     fn finishLine(self: *SseDecoder) error{InvalidResponse}!FeedResult {
         if (!self.line_has_bytes) {
-            const complete = self.saw_data and self.event_is_message;
+            const complete = self.saw_data and
+                self.saw_data_bytes and
+                self.event_is_message;
             if (!complete) {
                 self.output_len = 0;
                 self.saw_data = false;
+                self.saw_data_bytes = false;
                 self.event_is_message = true;
             }
             self.resetLine();
@@ -1770,6 +1777,36 @@ test "MCP platform normalizes one bounded SSE message without waiting for EOF" {
         message,
     );
     try std.testing.expect(reader.seek < input.len);
+}
+
+test "MCP platform skips empty SSE events before one bounded message" {
+    const input =
+        "id: empty-event\n" ++
+        "data:\n\n" ++
+        "event: message\n" ++
+        "id: response-event\n" ++
+        "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n";
+    var reader = std.Io.Reader.fixed(input);
+    var output: [128]u8 = undefined;
+    const message = try readSseResponse(&reader, &output);
+    try std.testing.expectEqualStrings(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}",
+        message,
+    );
+}
+
+test "MCP platform skips SSE events containing only empty data lines" {
+    const input =
+        "data:\n" ++
+        "data:\n\n" ++
+        "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n";
+    var reader = std.Io.Reader.fixed(input);
+    var output: [128]u8 = undefined;
+    const message = try readSseResponse(&reader, &output);
+    try std.testing.expectEqualStrings(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}",
+        message,
+    );
 }
 
 test "MCP platform returns a loopback SSE response before the stream closes" {
