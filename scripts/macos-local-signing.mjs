@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  copyFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -46,6 +47,20 @@ const packagedAppPath = path.join(
   "zig-out",
   "package",
   `${localProductIdentity.executableName}.app`,
+);
+const trayIconSourcePath = path.join(
+  repositoryRoot,
+  "assets",
+  "icons",
+  "tray-icon.png",
+);
+const packagedTrayIconPath = path.join(
+  packagedAppPath,
+  "Contents",
+  "Resources",
+  "assets",
+  "icons",
+  "tray-icon.png",
 );
 const packageArtifactStem = `${localProductIdentity.executableName}-${localPackageMetadata.version}-macos-arm64`;
 export const localDistributionDiskImageName = `${packageArtifactStem}.dmg`;
@@ -609,6 +624,21 @@ function runNode(script, args = []) {
   run(process.execPath, [path.join(repositoryRoot, script), ...args]);
 }
 
+export function stageMacosTrayIcon(
+  sourcePath = trayIconSourcePath,
+  targetPath = packagedTrayIconPath,
+) {
+  if (!existsSync(sourcePath)) {
+    throw new Error(`macOS tray icon is missing: ${sourcePath}`);
+  }
+  mkdirSync(path.dirname(targetPath), { recursive: true });
+  copyFileSync(sourcePath, targetPath);
+  if (!existsSync(targetPath)) {
+    throw new Error(`macOS tray icon was not staged: ${targetPath}`);
+  }
+  return targetPath;
+}
+
 function verifiedAgentCoreTarget() {
   runNode("scripts/verify-staged-agentcore-bundle.mjs");
   const manifest = JSON.parse(
@@ -912,6 +942,7 @@ function buildPackagedMacosApp(identity) {
     "--team-id",
     identity.teamId,
   ]);
+  stageMacosTrayIcon();
   const signature = signWithDeveloperId(packagedAppPath, identity, {
     deep: true,
     preserveEntitlements: true,

@@ -1,4 +1,8 @@
 import assert from "node:assert/strict";
+import { readFileSync, rmSync } from "node:fs";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import {
@@ -23,6 +27,7 @@ import {
   parseTeamIdentifier,
   selectDistributionCodeSigningIdentity,
   selectLocalCodeSigningIdentity,
+  stageMacosTrayIcon,
   validateCanonicalDesignatedRequirement,
 } from "./macos-local-signing.mjs";
 import { xcodeContentsForDeveloperDirectory } from "./setup-macos-local-signing.mjs";
@@ -78,6 +83,26 @@ test("distribution DMG metadata comes from the Native product manifest", () => {
       ),
     /invalid native package metadata/u,
   );
+});
+
+test("macOS packaging stages the tray icon at its runtime-relative bundle path", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "metawork-tray-icon-"));
+  try {
+    const source = new URL("../assets/icons/tray-icon.png", import.meta.url);
+    const target = path.join(
+      root,
+      "MetaWork.app",
+      "Contents",
+      "Resources",
+      "assets",
+      "icons",
+      "tray-icon.png",
+    );
+    assert.equal(stageMacosTrayIcon(source, target), target);
+    assert.deepEqual(readFileSync(target), readFileSync(source));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("distribution DMG Finder layout presents left-to-right installation", () => {

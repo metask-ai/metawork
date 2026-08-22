@@ -24,6 +24,20 @@ const packagedAssets = path.join(
   "frontend",
   "dist",
 );
+const sourceTrayIconPath = path.join(
+  repositoryRoot,
+  "assets",
+  "icons",
+  "tray-icon.png",
+);
+const packagedTrayIconPath = path.join(
+  appRoot,
+  "Contents",
+  "Resources",
+  "assets",
+  "icons",
+  "tray-icon.png",
+);
 
 async function regularFiles(root, directory = root) {
   const entries = await readdir(directory, { withFileTypes: true });
@@ -45,6 +59,21 @@ async function digest(filePath) {
     .digest("hex");
 }
 
+function pngDimensions(bytes) {
+  const signature = "89504e470d0a1a0a";
+  if (
+    bytes.length < 24 ||
+    bytes.subarray(0, 8).toString("hex") !== signature ||
+    bytes.subarray(12, 16).toString("ascii") !== "IHDR"
+  ) {
+    throw new Error("macOS tray icon is not a valid PNG header");
+  }
+  return {
+    width: bytes.readUInt32BE(16),
+    height: bytes.readUInt32BE(20),
+  };
+}
+
 const sourceFiles = await regularFiles(sourceAssets);
 const packagedFiles = (await regularFiles(packagedAssets)).filter(
   (file) => file !== "asset-manifest.zon",
@@ -62,6 +91,21 @@ for (const relativePath of sourceFiles) {
   if (sourceDigest !== packageDigest) {
     throw new Error(`packaged Renderer asset differs: ${relativePath}`);
   }
+}
+
+const sourceTrayIcon = await readFile(sourceTrayIconPath);
+const packagedTrayIcon = await readFile(packagedTrayIconPath);
+const trayDimensions = pngDimensions(packagedTrayIcon);
+if (trayDimensions.width !== 64 || trayDimensions.height !== 64) {
+  throw new Error(
+    `packaged macOS tray icon is ${trayDimensions.width}x${trayDimensions.height}, expected 64x64`,
+  );
+}
+if (
+  createHash("sha256").update(sourceTrayIcon).digest("hex") !==
+  createHash("sha256").update(packagedTrayIcon).digest("hex")
+) {
+  throw new Error("packaged macOS tray icon differs from its source asset");
 }
 
 const executablePath = path.join(appRoot, "Contents", "MacOS", "metawork");
@@ -108,5 +152,5 @@ const signature = verifyDeveloperIdSignature(
 );
 
 console.log(
-  `verified macOS package executable, metadata, Developer ID signature, trusted timestamp, hardened runtime, and ${sourceFiles.length} exact Renderer assets (${signature.policy})`,
+  `verified macOS package executable, metadata, tray icon, Developer ID signature, trusted timestamp, hardened runtime, and ${sourceFiles.length} exact Renderer assets (${signature.policy})`,
 );
