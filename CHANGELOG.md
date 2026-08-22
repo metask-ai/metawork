@@ -6,6 +6,36 @@
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-08-22
+
+### Added
+
+- 启用并重设计 MCP 管理页，覆盖 server 配置、授权、测试、启停、工具 allowlist 与恢复交互。
+- 新增 Workbench-owned 持久化分层 Skill 启用策略，支持用户默认值、项目 override，并端到端接入 Workspace 与 Run admission。
+- 新增 SDK-independent SQL foundation contract、直连 SQLite backend 及对应 migration、transaction 和 conformance tests。
+- 建立统一的应用与托盘图标资产管线。
+- 新增签名的 Windows x64 安装包，以及带 Applications 拖拽布局、签名和公证的 macOS DMG 发布流程。
+
+### Changed
+
+- AgentCore hard cut 到 ABI v1 revision 9 skill policy contract；Skill authority 改为不可变、事务化的 Run 输入，并停止注册 `AskUserQuestion`。
+- MCP 配置现在可在不重启应用的情况下应用；管理页统一布局，并 hard cut 到当前 AgentCore HTTP response contract。
+- Renderer conversation surfaces 迁移到统一 AI UI primitives，收口重复的消息、活动状态和交互实现。
+- Account hard move 到 `src/product/account/`；Application 通过 Account-owned ports 绑定 HTTP、OAuth loopback、credential persistence 和其他平台 effect。
+- 收紧 Agent 与 Application 的 MCP transport boundary，减少跨 owner 的具体 transport 依赖。
+- 更新 Windows/macOS AgentCore staged artifacts，纳入 Conversation restore、Skill policy 与 MCP 修复。
+- 重新明确验证 owner、失败模式与最小充分测试层，并将 lifecycle roots 和真实架构边界接入默认测试守卫。
+- 隔离 automation runner identity，并更新 vertical fixtures 以匹配当前产品合同。
+
+### Fixed
+
+- 修复 Skill 管理与 Run admission 共享可变 policy context，以及 enablement 持久化失败后的状态一致性问题。
+- 修复 MCP stdio executable `PATH`、stderr EOF teardown 和 SSE 空事件处理问题。
+- 修复 MCP 恢复交互与管理页重构后的残留状态、组件和样式路径。
+- 修复关闭 Task 后的删除协调流程，以及不适用的降级历史提示仍被显示的问题。
+- 明确定义并修复 Storage receiver callback 的 reentrancy 行为。
+- 修复 macOS package 缺少托盘图标资源及 Settings sidebar 样式不一致的问题。
+
 ## [0.1.1] - 2026-08-18
 
 ### Added
@@ -44,6 +74,7 @@
 - 定时任务：本地进程内 cron 调度；窗口关闭后继续运行；下次启动执行单次 missed-run reconciliation。
 - 界面：中英双语；统一的 Metask 设计语言字号阶梯与组件体系。
 
-[unreleased]: https://github.com/metask-ai/metawork/compare/v0.1.1...HEAD
+[unreleased]: https://github.com/metask-ai/metawork/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/metask-ai/metawork/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/metask-ai/metawork/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/metask-ai/metawork/releases/tag/v0.1.0
