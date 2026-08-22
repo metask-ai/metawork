@@ -91,6 +91,7 @@ const Effects = struct {
         },
         completion: state_impl.WorkerCompletion,
         execution_persistence_unknown: u64,
+        default_model_persistence_unknown: u64,
 
         fn deinit(self: *MailboxResult) void {
             switch (self.*) {
@@ -98,6 +99,7 @@ const Effects = struct {
                 .refresh => |*entry| entry.rotation.deinit(),
                 .completion => |*completion| completion.deinit(),
                 .execution_persistence_unknown,
+                .default_model_persistence_unknown,
                 => {},
             }
         }
@@ -108,6 +110,7 @@ const Effects = struct {
                 .refresh => |entry| entry.attempt_id,
                 .completion => |completion| completion.attempt_id,
                 .execution_persistence_unknown,
+                .default_model_persistence_unknown,
                 => |attempt_id| attempt_id,
             };
         }
@@ -120,7 +123,6 @@ const Effects = struct {
     loopback_endpoint: loopback_impl.Endpoint,
     queue: EffectQueue = .{},
     catalog: catalog_impl.CatalogSession,
-    public_catalog: catalog_impl.PublicCatalog = .{},
     mailbox_mutex: std.Io.Mutex = .init,
     mailbox: ?MailboxResult = null,
     login_attempt: login_attempt.LoginAttempt = .{},
@@ -202,6 +204,21 @@ const Effects = struct {
             return;
         }
         self.mailbox = .{ .execution_persistence_unknown = attempt_id };
+        self.unlockMailbox();
+        self.notify();
+    }
+
+    fn publishDefaultModelPersistenceUnknown(
+        self: *Effects,
+        attempt_id: u64,
+    ) void {
+        self.lockMailbox();
+        if (self.mailbox != null) {
+            self.mailbox_collision = true;
+            self.unlockMailbox();
+            return;
+        }
+        self.mailbox = .{ .default_model_persistence_unknown = attempt_id };
         self.unlockMailbox();
         self.notify();
     }
@@ -434,7 +451,6 @@ const Effects = struct {
         }
         _ = self.takeCollision();
         self.catalog.reset();
-        self.public_catalog.clear();
     }
 
     fn deinit(self: *Effects) void {
@@ -446,7 +462,6 @@ const Effects = struct {
 
     fn clearCatalog(self: *Effects) void {
         self.catalog.reset();
-        self.public_catalog.clear();
     }
 
     fn notify(self: *Effects) void {
@@ -498,23 +513,12 @@ pub const Prepared = struct {
         return self.transition.attempt_id;
     }
 
-    pub fn operationComplete(self: *const Prepared) bool {
-        return self.transition.operationComplete();
+    pub fn replacementIntent(self: *const Prepared) state_impl.ReplacementIntent {
+        return self.transition.replacementIntent();
     }
 
-    pub fn requiresDefaultExecutionReplacement(self: *const Prepared) bool {
-        const effect = self.transition.effect orelse return false;
-        return effect == .prepare_execution;
-    }
-
-    pub fn identityReplacementBoundary(
-        self: *const Prepared,
-    ) state_impl.IdentityReplacementBoundary {
-        return self.transition.identityReplacementBoundary();
-    }
-
-    pub fn clearsDefaultExecution(self: *const Prepared) bool {
-        return self.transition.clearsDefaultExecution();
+    pub fn executionIntent(self: *const Prepared) state_impl.ExecutionIntent {
+        return self.transition.executionIntent();
     }
 
     pub fn deinit(self: *Prepared) void {
@@ -550,10 +554,16 @@ pub const Runtime = struct {
     account_path_len: usize,
     account: state_impl.Account = .initRestoring(),
     effects: Effects,
+    committed_public_catalog: catalog_impl.PublicCatalog = .{},
     candidate_public_catalog: catalog_impl.PublicCatalog = .{},
+    view_catalog_slot: enum { committed, candidate } = .committed,
     platform: ?ports_impl.Platform = null,
     credentials: credentials_impl.CredentialOwner = .{},
     saved_preference: ?credential_store.Preference = null,
+    pending_default_preference: ?struct {
+        attempt_id: u64,
+        value: credential_store.Preference,
+    } = null,
     model_connections: model_connections_impl.Registry,
     model_connection_store: ?model_connections_impl.FileStore = null,
     model_connection_store_healthy: bool = false,
@@ -598,6 +608,8 @@ pub const Runtime = struct {
         self.credentials.deinit();
         self.model_connections.deinit();
         self.saved_preference = null;
+        self.pending_default_preference = null;
+        self.committed_public_catalog.clear();
         self.candidate_public_catalog.clear();
         self.* = undefined;
     }
@@ -798,6 +810,7 @@ pub const Runtime = struct {
             .execution_persistence_unknown => wrapPrepareResult(
                 self.account.prepareExecutionPersistenceUnknown(),
             ),
+            .default_model_persistence_unknown => |attempt_id| self.prepareDefaultModelPersistenceUnknown(attempt_id),
         };
     }
 
@@ -1129,12 +1142,10 @@ pub const Runtime = struct {
         if (fact.view.state != .authenticated or
             fact.view.catalog_state == .unavailable)
             return fact;
-        const catalog = if (completesCatalogTransaction(fact))
-            &self.candidate_public_catalog
-        else if (prepared.transition.candidateCatalogActive())
-            &self.candidate_public_catalog
-        else
-            &self.effects.public_catalog;
+        const catalog = switch (prepared.transition.catalogIntent()) {
+            .candidate, .promote_candidate => &self.candidate_public_catalog,
+            .committed, .discard_candidate, .clear_all => &self.committed_public_catalog,
+        };
         catalog.decorate(&fact.view);
         return fact;
     }
@@ -1154,20 +1165,34 @@ pub const Runtime = struct {
 
     pub fn commit(self: *Runtime, prepared: *Prepared) void {
         self.assertMainThread();
-        const fact = prepared.transition.fact();
-        if (completesCatalogTransaction(fact)) {
-            self.effects.public_catalog.replaceFromPublic(
-                &self.candidate_public_catalog,
-            );
-            self.candidate_public_catalog.clear();
+        switch (prepared.transition.catalogIntent()) {
+            .committed => self.view_catalog_slot = .committed,
+            .candidate => self.view_catalog_slot = .candidate,
+            .promote_candidate => {
+                self.committed_public_catalog.replaceFromPublic(
+                    &self.candidate_public_catalog,
+                );
+                self.candidate_public_catalog.clear();
+                self.view_catalog_slot = .committed;
+            },
+            .discard_candidate => {
+                self.candidate_public_catalog.clear();
+                self.view_catalog_slot = .committed;
+            },
+            .clear_all => {
+                self.committed_public_catalog.clear();
+                self.candidate_public_catalog.clear();
+                self.view_catalog_slot = .committed;
+            },
         }
-        if (prepared.clearsDefaultExecution()) {
-            self.effects.public_catalog.clear();
-            self.candidate_public_catalog.clear();
+        if (self.pending_default_preference) |pending| {
+            if (prepared.attemptId() == pending.attempt_id) {
+                if (prepared.fact().kind == .default_changed)
+                    self.saved_preference = pending.value;
+                self.pending_default_preference = null;
+            }
         }
         prepared.transition.commit(&self.account);
-        if (fact.kind == .operation_failed)
-            self.candidate_public_catalog.clear();
     }
 
     pub fn takeFollowUpCommand(
@@ -1458,6 +1483,11 @@ pub const Runtime = struct {
                 entry.attempt_id orelse
                     @panic("logout effect has no attempt"),
             ),
+            .persist_default_model => self.persistDefaultModel(
+                entry.attempt_id orelse
+                    @panic("default-model persistence effect has no attempt"),
+                argument orelse unreachable,
+            ),
             .shutdown => {
                 self.cancelRefreshTimer();
                 self.effects.cancelJoinAndDiscard();
@@ -1742,7 +1772,7 @@ pub const Runtime = struct {
                 execution_generation,
             ) catch |err| {
                 if (err == error.PersistenceOutcomeUnknown) {
-                    self.effects.public_catalog.clear();
+                    self.committed_public_catalog.clear();
                     self.candidate_public_catalog.clear();
                     self.effects.publishPersistenceUnknown(
                         attempt_id,
@@ -1762,6 +1792,110 @@ pub const Runtime = struct {
             .attempt_id = attempt_id,
             .payload = .{ .execution_ready = execution.take() },
         });
+    }
+
+    fn persistDefaultModel(
+        self: *Runtime,
+        attempt_id: u64,
+        model: []const u8,
+    ) void {
+        const identity = self.account.currentIdentity() orelse {
+            self.effects.publishCompletion(.{
+                .attempt_id = attempt_id,
+                .payload = .{ .failed = .fromCode(
+                    .dependency_contract_invalid,
+                ) },
+            });
+            return;
+        };
+        const platform = self.platform orelse {
+            self.effects.publishCompletion(.{
+                .attempt_id = attempt_id,
+                .payload = .{ .failed = .fromCode(
+                    .credential_store_write_failed,
+                ) },
+            });
+            return;
+        };
+        const account_view = self.account.view();
+        const preference = credential_store.commitPreference(
+            platform.credentials,
+            identity.accountId(),
+            account_view.selected_api_key_id,
+            model,
+            account_view.execution_generation,
+        ) catch |err| {
+            if (err == error.PersistenceOutcomeUnknown) {
+                self.effects.publishDefaultModelPersistenceUnknown(attempt_id);
+                return;
+            }
+            self.effects.publishCompletion(.{
+                .attempt_id = attempt_id,
+                .payload = .{ .failed = .fromCode(accountStoreError(err)) },
+            });
+            return;
+        };
+        self.pending_default_preference = .{
+            .attempt_id = attempt_id,
+            .value = preference,
+        };
+        self.effects.publishCompletion(.{
+            .attempt_id = attempt_id,
+            .payload = .default_model_persisted,
+        });
+    }
+
+    fn prepareDefaultModelPersistenceUnknown(
+        self: *Runtime,
+        attempt_id: u64,
+    ) PrepareResult {
+        if (self.account.activeAttempt() != attempt_id)
+            return .ignored_stale;
+        const account_view = self.account.view();
+        const platform = self.platform orelse
+            return wrapPrepareResult(
+                self.account.prepareDefaultModelPersistenceInvalid(),
+            );
+        const observed = platform.credentials.loadPreference() catch
+            return wrapPrepareResult(
+                self.account.prepareDefaultModelPersistenceInvalid(),
+            );
+        const preference = observed orelse
+            return wrapPrepareResult(
+                self.account.prepareDefaultModelPersistenceInvalid(),
+            );
+        const same_tuple = std.mem.eql(
+            u8,
+            preference.ownerAccountId(),
+            account_view.account_id,
+        ) and std.mem.eql(
+            u8,
+            preference.apiKeyId(),
+            account_view.selected_api_key_id,
+        ) and preference.execution_generation == account_view.execution_generation;
+        if (!same_tuple)
+            return wrapPrepareResult(
+                self.account.prepareDefaultModelPersistenceInvalid(),
+            );
+        if (std.mem.eql(u8, preference.modelId(), account_view.candidate_model)) {
+            self.pending_default_preference = .{
+                .attempt_id = attempt_id,
+                .value = preference,
+            };
+            var completion: state_impl.WorkerCompletion = .{
+                .attempt_id = attempt_id,
+                .payload = .default_model_persisted,
+            };
+            return wrapPrepareResult(self.account.prepareCompletion(&completion));
+        }
+        if (std.mem.eql(u8, preference.modelId(), account_view.selected_model))
+            return self.prepareFailure(
+                attempt_id,
+                .credential_store_write_failed,
+            );
+        return wrapPrepareResult(
+            self.account.prepareDefaultModelPersistenceInvalid(),
+        );
     }
 
     fn automaticApiSelection(
@@ -1862,10 +1996,10 @@ pub const Runtime = struct {
         self: *Runtime,
         account_view: *contract.AccountView,
     ) void {
-        const catalog = if (self.account.candidateCatalogActive())
-            &self.candidate_public_catalog
-        else
-            &self.effects.public_catalog;
+        const catalog = switch (self.view_catalog_slot) {
+            .committed => &self.committed_public_catalog,
+            .candidate => &self.candidate_public_catalog,
+        };
         catalog.decorate(account_view);
     }
 
@@ -1938,12 +2072,6 @@ fn generateExecutionGeneration(
     }
 }
 
-fn completesCatalogTransaction(fact: contract.AccountFact) bool {
-    if (fact.view.catalog_state != .ready)
-        return false;
-    return fact.kind == .catalog_changed or fact.kind == .execution_changed;
-}
-
 pub const TestSupport = if (builtin.is_test) struct {
     var loopback_context: u8 = 0;
 
@@ -1977,7 +2105,7 @@ pub const TestSupport = if (builtin.is_test) struct {
         execution: *contract.OwnedExecutionConfig,
     ) !Prepared {
         const input = execution.input();
-        runtime.effects.public_catalog.replaceRestoredSelection(
+        runtime.committed_public_catalog.replaceRestoredSelection(
             "key-1",
             input.target.provider_kind,
             input.target.model,
@@ -2144,8 +2272,15 @@ fn testingTransport() metask_client.Transport {
 }
 
 const TestPlatform = struct {
+    const PreferenceCommitMode = enum {
+        normal,
+        unknown_after_write,
+        unknown_without_write,
+    };
+
     refresh_token: ?[]const u8 = null,
     preference: ?credential_store.Preference = null,
+    preference_commit_mode: PreferenceCommitMode = .normal,
     model_slot: [ports_impl.model_connection_slot_bytes]u8 = undefined,
     model_slot_len: usize = 0,
     model_secret: [contract.Limits.api_key_bytes]u8 = undefined,
@@ -2213,7 +2348,15 @@ const TestPlatform = struct {
         value: credential_store.Preference,
     ) credential_store.StoreError!void {
         const self: *TestPlatform = @ptrCast(@alignCast(context));
+        if (self.preference_commit_mode == .unknown_without_write) {
+            self.preference_commit_mode = .normal;
+            return error.PersistenceOutcomeUnknown;
+        }
         self.preference = value;
+        if (self.preference_commit_mode == .unknown_after_write) {
+            self.preference_commit_mode = .normal;
+            return error.PersistenceOutcomeUnknown;
+        }
     }
 
     fn deletePreference(context: *anyopaque) credential_store.StoreError!void {
@@ -2841,6 +2984,144 @@ fn commitReadyRestoreForTest(runtime: *Runtime) !void {
     }
     runtime.commit(&prepared);
     runtime.dispatchCommitted(&prepared);
+}
+
+fn beginDefaultModelChangeForTest(
+    runtime: *Runtime,
+    model_id: []const u8,
+) !void {
+    const account_view = runtime.view();
+    var prepared = switch (runtime.prepareCommand(.{
+        .select_model = .{
+            .selection_id = model_id,
+            .expected_catalog_generation = account_view.catalog_generation,
+            .expected_execution_generation = account_view.execution_generation,
+        },
+    })) {
+        .prepared => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer prepared.deinit();
+    try std.testing.expect(runtime.admitEffect(&prepared));
+    runtime.commit(&prepared);
+    runtime.dispatchCommitted(&prepared);
+}
+
+fn prepareDefaultModelTest(
+    runtime: *Runtime,
+    platform: *TestPlatform,
+) !void {
+    runtime.platform = platform.platform();
+    try commitReadyRestoreForTest(runtime);
+    catalog_impl.TestSupport.replacePublic(
+        &runtime.committed_public_catalog,
+        &.{.{
+            .id = "key-1",
+            .name = "Primary",
+            .suffix = "1234",
+            .provider_kind = .anthropic,
+        }},
+        &.{
+            .{ .id = "model-1", .display_name = "Model 1" },
+            .{ .id = "model-2", .display_name = "Model 2" },
+            .{ .id = "model-third", .display_name = "Third" },
+        },
+    );
+    platform.preference = try .init(
+        "account-1",
+        "key-1",
+        "model-1",
+        1,
+    );
+    runtime.saved_preference = platform.preference;
+}
+
+test "default-model outcome unknown commits the re-observed candidate" {
+    var wake_context: u8 = 0;
+    var runtime = try initRuntimeForTest(&wake_context);
+    defer runtime.deinit();
+    defer runtime.platform = null;
+    var platform: TestPlatform = .{};
+    try prepareDefaultModelTest(&runtime, &platform);
+    platform.preference_commit_mode = .unknown_after_write;
+
+    try beginDefaultModelChangeForTest(&runtime, "model-2");
+    var prepared = switch (runtime.prepareNextCompletion().?) {
+        .prepared => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer prepared.deinit();
+    try std.testing.expectEqual(
+        contract.AccountFactKind.default_changed,
+        prepared.fact().kind,
+    );
+    runtime.commit(&prepared);
+    try std.testing.expectEqualStrings("model-2", runtime.view().selected_model);
+    try std.testing.expectEqual(@as(u64, 1), runtime.view().execution_generation);
+    try std.testing.expectEqualStrings(
+        "model-2",
+        runtime.saved_preference.?.modelId(),
+    );
+}
+
+test "default-model outcome unknown rolls back when disk kept the old value" {
+    var wake_context: u8 = 0;
+    var runtime = try initRuntimeForTest(&wake_context);
+    defer runtime.deinit();
+    defer runtime.platform = null;
+    var platform: TestPlatform = .{};
+    try prepareDefaultModelTest(&runtime, &platform);
+    platform.preference_commit_mode = .unknown_without_write;
+
+    try beginDefaultModelChangeForTest(&runtime, "model-2");
+    var prepared = switch (runtime.prepareNextCompletion().?) {
+        .prepared => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer prepared.deinit();
+    runtime.commit(&prepared);
+    const account_view = runtime.view();
+    try std.testing.expectEqualStrings("model-1", account_view.selected_model);
+    try std.testing.expectEqual(
+        contract.ErrorCode.credential_store_write_failed,
+        account_view.error_code,
+    );
+    try std.testing.expect(account_view.can_create_task);
+}
+
+test "default-model outcome unknown revokes execution on a third disk state" {
+    var wake_context: u8 = 0;
+    var runtime = try initRuntimeForTest(&wake_context);
+    defer runtime.deinit();
+    defer runtime.platform = null;
+    var platform: TestPlatform = .{};
+    try prepareDefaultModelTest(&runtime, &platform);
+    platform.preference_commit_mode = .unknown_without_write;
+
+    try beginDefaultModelChangeForTest(&runtime, "model-2");
+    platform.preference = try .init(
+        "account-1",
+        "key-1",
+        "model-third",
+        1,
+    );
+    var prepared = switch (runtime.prepareNextCompletion().?) {
+        .prepared => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer prepared.deinit();
+    try std.testing.expectEqual(
+        state_impl.ExecutionIntent.clear,
+        prepared.executionIntent(),
+    );
+    runtime.commit(&prepared);
+    const account_view = runtime.view();
+    try std.testing.expectEqualStrings("model-1", account_view.selected_model);
+    try std.testing.expectEqual(
+        contract.ErrorCode.recovery_state_invalid,
+        account_view.error_code,
+    );
+    try std.testing.expect(!account_view.can_create_task);
 }
 
 fn initRuntimeForTest(wake_context: *u8) !Runtime {
