@@ -1,21 +1,48 @@
-//! Bounded MCP stdio transport. Each open owns one child process and serialized
-//! pipe exchange. MCP messages remain opaque bytes; protocol handling belongs
-//! to AgentCore through `mcp_connector`.
+//! Bounded MCP stdio protocol transport over an injected process effect.
+//! This module owns newline framing, response bounds, serialization, and
+//! connector failure policy. The injected endpoint owns child processes,
+//! pipes, stderr draining, timeout, and cancellation.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const connector = @import("agent_mcp_connector");
 
+pub const PortFailure = enum { timeout, child_exit, cancelled, indeterminate, fatal };
+pub const SinkFlow = enum { continue_reading, stop };
+pub const FeedOutcome = struct { consumed: usize, flow: SinkFlow };
+
+/// Callback-scoped raw stdout consumer. The effect must retain any suffix
+/// beyond `consumed`; it may stop pumping as soon as `flow` is `.stop`.
+pub const ResponseSink = struct {
+    context: *anyopaque,
+    feed_fn: *const fn (*anyopaque, []const u8) FeedOutcome,
+    finish_fn: *const fn (*anyopaque) SinkFlow,
+};
+
+pub const Write = struct {
+    fragments: []const []const u8,
+    timeout_ms: u32,
+    cancellation: connector.Cancellation,
+};
+pub const OpenOutcome = union(enum) { connection: *anyopaque, failure: PortFailure };
+pub const PerformOutcome = union(enum) { completed, failure: PortFailure };
+
+/// Narrow process/pipe capability. Launch configuration and every returned
+/// connection remain effect-owned. Arguments, fragments, cancellation, and
+/// sink callbacks are borrowed only for the duration of their callback.
+pub const ProcessEndpoint = struct {
+    context: *anyopaque,
+    validate_fn: *const fn (*anyopaque) bool,
+    open_fn: *const fn (*anyopaque, u32) OpenOutcome,
+    exchange_fn: *const fn (*anyopaque, *anyopaque, Write, *const ResponseSink) PerformOutcome,
+    notify_fn: *const fn (*anyopaque, *anyopaque, Write) ?PortFailure,
+    close_fn: *const fn (*anyopaque, *anyopaque) void,
+};
+
 pub const Config = struct {
-    /// All borrowed launch data must remain immutable until Backend.deinit.
     io: std.Io,
     allocator: std.mem.Allocator,
-    argv: []const []const u8,
-    cwd: std.process.Child.Cwd,
-    /// Explicit environment capability. An empty map means no inherited
-    /// variables; null/inherited process environment is not representable.
-    environ_map: *const std.process.Environ.Map,
-    max_frame_bytes: usize = 1024 * 1024,
+    endpoint: ProcessEndpoint,
+    max_frame_bytes: usize = (connector.Limits{}).max_response_bytes,
     max_connections: usize = 8,
 };
 
@@ -26,25 +53,11 @@ pub const Backend = struct {
     active_connections: std.atomic.Value(usize) = .init(0),
 
     pub fn init(config: Config) Error!Backend {
-        if (config.argv.len == 0 or config.argv.len > max_argv_count or
-            config.argv[0].len == 0 or config.max_frame_bytes == 0 or
-            config.max_frame_bytes > max_frame_bytes or
-            config.max_connections == 0)
+        if (config.max_frame_bytes == 0 or
+            config.max_frame_bytes > (connector.Limits{}).max_response_bytes or
+            config.max_connections == 0 or
+            !config.endpoint.validate_fn(config.endpoint.context))
             return error.InvalidConfig;
-        var total: usize = 0;
-        for (config.argv) |argument| {
-            if (std.mem.indexOfScalar(u8, argument, 0) != null)
-                return error.InvalidConfig;
-            total = std.math.add(usize, total, argument.len) catch
-                return error.InvalidConfig;
-        }
-        if (total > max_argv_bytes) return error.InvalidConfig;
-        switch (config.cwd) {
-            .path => |path| if (path.len == 0 or
-                std.mem.indexOfScalar(u8, path, 0) != null)
-                return error.InvalidConfig,
-            .inherit, .dir => {},
-        }
         return .{ .config = config };
     }
 
@@ -66,393 +79,191 @@ pub const Backend = struct {
 
     const Connection = struct {
         backend: *Backend,
-        child: std.process.Child,
-        stdin: std.Io.File,
-        stdout: std.Io.File,
-        stderr: std.Io.File,
-        stdout_buffer: []u8,
-        stdout_reader: std.Io.File.Reader,
-        stderr_thread: std.Thread,
+        effect_connection: *anyopaque,
         mutex: std.Io.Mutex = .init,
-        dead: std.atomic.Value(bool) = .init(false),
-
-        fn terminate(self: *Connection) void {
-            if (self.dead.swap(true, .acq_rel)) return;
-            const io = self.backend.config.io;
-            if (builtin.os.tag == .windows) {
-                self.child.kill(io);
-                return;
-            }
-            if (self.child.id) |pid| {
-                // The child is its process-group leader. A hard group kill
-                // prevents close/timeout from hanging on inherited pipe ends.
-                std.posix.kill(-pid, .KILL) catch {};
-                _ = self.child.wait(io) catch {};
-            }
-        }
+        poisoned: bool = false,
 
         fn deinit(self: *Connection) void {
-            const config = self.backend.config;
-            self.mutex.lockUncancelable(config.io);
-            self.terminate();
-            self.mutex.unlock(config.io);
-            self.stderr_thread.join();
-            self.stdin.close(config.io);
-            self.stdout.close(config.io);
-            std.crypto.secureZero(u8, self.stdout_buffer);
-            config.allocator.free(self.stdout_buffer);
             const backend = self.backend;
-            config.allocator.destroy(self);
+            const endpoint = backend.config.endpoint;
+            endpoint.close_fn(endpoint.context, self.effect_connection);
+            backend.config.allocator.destroy(self);
             releaseCounter(&backend.active_connections);
         }
     };
 
     fn open(
-        context: *anyopaque,
+        raw: *anyopaque,
         _: connector.Purpose,
         _: connector.Era,
         timeout_ms: u32,
     ) connector.OpenOutcome {
-        const self: *Backend = @ptrCast(@alignCast(context));
+        const self: *Backend = @ptrCast(@alignCast(raw));
         if (timeout_ms == 0 or !incrementBounded(
             &self.active_connections,
             self.config.max_connections,
         )) return .{ .failure = .fatal };
-        const connection = self.openConnection() catch |err| {
-            releaseCounter(&self.active_connections);
-            return .{ .failure = switch (err) {
-                error.SpawnFailed => .child_exit,
-                error.ResourceUnavailable => .fatal,
-            } };
+        const endpoint = self.config.endpoint;
+        const effect_connection = switch (endpoint.open_fn(endpoint.context, timeout_ms)) {
+            .connection => |value| value,
+            .failure => |failure| {
+                releaseCounter(&self.active_connections);
+                return .{ .failure = mapFailure(failure) };
+            },
         };
+        const connection = self.config.allocator.create(Connection) catch {
+            endpoint.close_fn(endpoint.context, effect_connection);
+            releaseCounter(&self.active_connections);
+            return .{ .failure = .fatal };
+        };
+        connection.* = .{ .backend = self, .effect_connection = effect_connection };
         return .{ .connection = connection };
     }
 
-    const OpenConnectionError = error{ SpawnFailed, ResourceUnavailable };
-
-    fn openConnection(self: *Backend) OpenConnectionError!*Connection {
-        var child = std.process.spawn(self.config.io, .{
-            .argv = self.config.argv,
-            .cwd = self.config.cwd,
-            .environ_map = self.config.environ_map,
-            .stdin = .pipe,
-            .stdout = .pipe,
-            .stderr = .pipe,
-            .pgid = if (builtin.os.tag == .windows) null else 0,
-            .create_no_window = true,
-        }) catch return error.SpawnFailed;
-        errdefer child.kill(self.config.io);
-        const stdin = child.stdin.?;
-        const stdout = child.stdout.?;
-        const stderr = child.stderr.?;
-        child.stdin = null;
-        child.stdout = null;
-        child.stderr = null;
-        errdefer stdin.close(self.config.io);
-        errdefer stdout.close(self.config.io);
-        errdefer stderr.close(self.config.io);
-        const stdout_buffer = self.config.allocator.alloc(u8, io_buffer_bytes) catch
-            return error.ResourceUnavailable;
-        errdefer {
-            std.crypto.secureZero(u8, stdout_buffer);
-            self.config.allocator.free(stdout_buffer);
-        }
-        const connection = self.config.allocator.create(Connection) catch
-            return error.ResourceUnavailable;
-        errdefer self.config.allocator.destroy(connection);
-        connection.* = .{
-            .backend = self,
-            .child = child,
-            .stdin = stdin,
-            .stdout = stdout,
-            .stderr = stderr,
-            .stdout_buffer = stdout_buffer,
-            .stdout_reader = stdout.readerStreaming(
-                self.config.io,
-                stdout_buffer,
-            ),
-            .stderr_thread = undefined,
-        };
-        connection.stderr_thread = std.Thread.spawn(
-            .{},
-            drainStderr,
-            .{connection},
-        ) catch return error.ResourceUnavailable;
-        return connection;
-    }
-
     fn request(
-        raw_connection: *anyopaque,
+        raw: *anyopaque,
         allocator: std.mem.Allocator,
         bytes: []const u8,
         timeout_ms: u32,
         cancellation: connector.Cancellation,
     ) connector.ExchangeOutcome {
-        const connection: *Connection = @ptrCast(@alignCast(raw_connection));
-        connection.mutex.lockUncancelable(connection.backend.config.io);
-        defer connection.mutex.unlock(connection.backend.config.io);
-        if (connection.dead.load(.acquire))
-            return .{ .failure = .child_exit };
-        return runExchange(
-            connection,
-            allocator,
-            bytes,
-            timeout_ms,
-            cancellation,
-        );
-    }
-
-    fn notify(
-        raw_connection: *anyopaque,
-        bytes: []const u8,
-        timeout_ms: u32,
-        cancellation: connector.Cancellation,
-    ) ?connector.Failure {
-        const connection: *Connection = @ptrCast(@alignCast(raw_connection));
-        connection.mutex.lockUncancelable(connection.backend.config.io);
-        defer connection.mutex.unlock(connection.backend.config.io);
-        if (connection.dead.load(.acquire)) return .child_exit;
-        return runNotification(connection, bytes, timeout_ms, cancellation);
-    }
-
-    fn close(raw_connection: *anyopaque) void {
-        const connection: *Connection = @ptrCast(@alignCast(raw_connection));
-        connection.deinit();
-    }
-
-    const ReadResult = union(enum) {
-        response: []u8,
-        child_exit,
-        fatal,
-    };
-    const WaitResult = enum { expired, cancelled };
-    const ExchangeEvent = union(enum) {
-        exchange: ReadResult,
-        timeout: WaitResult,
-        cancellation: WaitResult,
-    };
-
-    fn runExchange(
-        connection: *Connection,
-        allocator: std.mem.Allocator,
-        bytes: []const u8,
-        timeout_ms: u32,
-        cancellation: connector.Cancellation,
-    ) connector.ExchangeOutcome {
-        if (timeout_ms == 0) return .{ .failure = .fatal };
+        const connection: *Connection = @ptrCast(@alignCast(raw));
+        const config = connection.backend.config;
+        connection.mutex.lockUncancelable(config.io);
+        defer connection.mutex.unlock(config.io);
+        if (connection.poisoned or timeout_ms == 0) return .{ .failure = .fatal };
         if (cancellation.isCancelled()) return .{ .failure = .cancelled };
-        var events: [3]ExchangeEvent = undefined;
-        var select = std.Io.Select(ExchangeEvent).init(
-            connection.backend.config.io,
-            &events,
-        );
-        select.async(.exchange, exchange, .{ connection, allocator, bytes });
-        select.async(.timeout, waitTimeout, .{
-            connection.backend.config.io,
-            timeout_ms,
-        });
-        select.async(.cancellation, waitCancellation, .{
-            connection.backend.config.io,
-            cancellation,
-        });
-        const first = select.await() catch {
-            connection.terminate();
-            drainExchangeSelect(&select, allocator);
-            return .{ .failure = .cancelled };
-        };
-        const result: connector.ExchangeOutcome = switch (first) {
-            .exchange => |exchange_result| switch (exchange_result) {
-                .response => |response| .{ .response = response },
-                .child_exit => .{ .failure = .child_exit },
-                .fatal => .{ .failure = .fatal },
-            },
-            .timeout => |wait| switch (wait) {
-                .expired => .{ .failure = .timeout },
-                .cancelled => .{ .failure = .fatal },
-            },
-            .cancellation => |wait| switch (wait) {
-                .expired => .{ .failure = .cancelled },
-                .cancelled => .{ .failure = .fatal },
-            },
-        };
-        switch (result) {
-            .response => {},
-            .failure => connection.terminate(),
+        var collector = ResponseCollector.init(allocator, config.max_frame_bytes) catch
+            return poisonExchange(connection, .fatal);
+        defer collector.deinit();
+        const sink = collector.sink();
+        const fragments = [_][]const u8{ bytes, "\n" };
+        const endpoint = config.endpoint;
+        switch (endpoint.exchange_fn(
+            endpoint.context,
+            connection.effect_connection,
+            .{ .fragments = &fragments, .timeout_ms = timeout_ms, .cancellation = cancellation },
+            &sink,
+        )) {
+            .failure => |failure| return poisonExchange(connection, failure),
+            .completed => {},
         }
-        drainExchangeSelect(&select, allocator);
-        return result;
-    }
-
-    fn exchange(
-        connection: *Connection,
-        allocator: std.mem.Allocator,
-        bytes: []const u8,
-    ) ReadResult {
-        connection.stdin.writeStreamingAll(
-            connection.backend.config.io,
-            bytes,
-        ) catch return .child_exit;
-        connection.stdin.writeStreamingAll(
-            connection.backend.config.io,
-            "\n",
-        ) catch return .child_exit;
-        var output: std.Io.Writer.Allocating = .init(allocator);
-        defer output.deinit();
-        _ = connection.stdout_reader.interface.streamDelimiterLimit(
-            &output.writer,
-            '\n',
-            .limited(connection.backend.config.max_frame_bytes),
-        ) catch |err| return switch (err) {
-            error.ReadFailed => .child_exit,
-            error.WriteFailed, error.StreamTooLong => .fatal,
-        };
-        const delimiter = connection.stdout_reader.interface.takeByte() catch
-            return .child_exit;
-        if (delimiter != '\n') return .fatal;
-        const response = output.toOwnedSlice() catch return .fatal;
-        if (response.len == 0) {
-            allocator.free(response);
-            return .fatal;
-        }
+        if (collector.failure) |failure| return poisonExchange(connection, failure);
+        if (!collector.complete or collector.output_len == 0)
+            return poisonExchange(connection, .fatal);
+        const response = allocator.dupe(u8, collector.output[0..collector.output_len]) catch
+            return poisonExchange(connection, .fatal);
         return .{ .response = response };
     }
 
-    fn drainExchangeSelect(
-        select: *std.Io.Select(ExchangeEvent),
-        allocator: std.mem.Allocator,
-    ) void {
-        while (select.cancel()) |late| switch (late) {
-            .exchange => |result| switch (result) {
-                .response => |response| {
-                    std.crypto.secureZero(u8, response);
-                    allocator.free(response);
-                },
-                .child_exit, .fatal => {},
-            },
-            .timeout, .cancellation => {},
-        };
-    }
-
-    const WriteResult = enum { ok, child_exit };
-    const NotifyEvent = union(enum) {
-        write: WriteResult,
-        timeout: WaitResult,
-        cancellation: WaitResult,
-    };
-
-    fn runNotification(
-        connection: *Connection,
+    fn notify(
+        raw: *anyopaque,
         bytes: []const u8,
         timeout_ms: u32,
         cancellation: connector.Cancellation,
     ) ?connector.Failure {
-        if (timeout_ms == 0) return .fatal;
+        const connection: *Connection = @ptrCast(@alignCast(raw));
+        const config = connection.backend.config;
+        connection.mutex.lockUncancelable(config.io);
+        defer connection.mutex.unlock(config.io);
+        if (connection.poisoned or timeout_ms == 0) return .fatal;
         if (cancellation.isCancelled()) return .cancelled;
-        var events: [3]NotifyEvent = undefined;
-        var select = std.Io.Select(NotifyEvent).init(
-            connection.backend.config.io,
-            &events,
-        );
-        select.async(.write, writeNotification, .{ connection, bytes });
-        select.async(.timeout, waitTimeout, .{
-            connection.backend.config.io,
-            timeout_ms,
-        });
-        select.async(.cancellation, waitCancellation, .{
-            connection.backend.config.io,
-            cancellation,
-        });
-        const first = select.await() catch {
-            connection.terminate();
-            select.cancelDiscard();
-            return .cancelled;
-        };
-        const result: ?connector.Failure = switch (first) {
-            .write => |write| switch (write) {
-                .ok => null,
-                .child_exit => .child_exit,
-            },
-            .timeout => |wait| switch (wait) {
-                .expired => .timeout,
-                .cancelled => .fatal,
-            },
-            .cancellation => |wait| switch (wait) {
-                .expired => .cancelled,
-                .cancelled => .fatal,
-            },
-        };
-        if (result != null) connection.terminate();
-        select.cancelDiscard();
-        return result;
+        const fragments = [_][]const u8{ bytes, "\n" };
+        const endpoint = config.endpoint;
+        if (endpoint.notify_fn(
+            endpoint.context,
+            connection.effect_connection,
+            .{ .fragments = &fragments, .timeout_ms = timeout_ms, .cancellation = cancellation },
+        )) |failure| return poisonNotification(connection, failure);
+        return null;
     }
 
-    fn writeNotification(
-        connection: *Connection,
-        bytes: []const u8,
-    ) WriteResult {
-        connection.stdin.writeStreamingAll(
-            connection.backend.config.io,
-            bytes,
-        ) catch return .child_exit;
-        connection.stdin.writeStreamingAll(
-            connection.backend.config.io,
-            "\n",
-        ) catch return .child_exit;
-        return .ok;
-    }
-
-    fn waitTimeout(io: std.Io, timeout_ms: u32) WaitResult {
-        std.Io.Timeout.sleep(.{ .duration = .{
-            .raw = std.Io.Duration.fromMilliseconds(timeout_ms),
-            .clock = .awake,
-        } }, io) catch return .cancelled;
-        return .expired;
-    }
-
-    fn waitCancellation(
-        io: std.Io,
-        cancellation: connector.Cancellation,
-    ) WaitResult {
-        while (!cancellation.isCancelled())
-            std.Io.Timeout.sleep(.{ .duration = .{
-                .raw = std.Io.Duration.fromMilliseconds(5),
-                .clock = .awake,
-            } }, io) catch return .cancelled;
-        return .expired;
-    }
-
-    fn drainStderr(connection: *Connection) void {
-        defer connection.stderr.close(connection.backend.config.io);
-        var buffer: [io_buffer_bytes]u8 = undefined;
-        defer std.crypto.secureZero(u8, &buffer);
-        while (true) {
-            const count = connection.stderr.readStreaming(
-                connection.backend.config.io,
-                &.{&buffer},
-            ) catch return;
-            if (count == 0) return;
-            // Diagnostics are intentionally not published. Draining through a
-            // fixed buffer prevents child blockage without creating a secret-
-            // bearing log or a second product data plane.
-            std.crypto.secureZero(u8, buffer[0..count]);
-        }
+    fn close(raw: *anyopaque) void {
+        const connection: *Connection = @ptrCast(@alignCast(raw));
+        const io = connection.backend.config.io;
+        connection.mutex.lockUncancelable(io);
+        connection.poisoned = true;
+        connection.mutex.unlock(io);
+        connection.deinit();
     }
 };
 
-const io_buffer_bytes: usize = 4096;
-const max_argv_count: usize = 129;
-const max_argv_bytes: usize = 64 * 1024;
-const max_frame_bytes: usize = (connector.Limits{}).max_response_bytes;
+const ResponseCollector = struct {
+    allocator: std.mem.Allocator,
+    output: []u8,
+    output_len: usize = 0,
+    complete: bool = false,
+    failure: ?PortFailure = null,
+
+    fn init(allocator: std.mem.Allocator, max_frame_bytes: usize) std.mem.Allocator.Error!ResponseCollector {
+        return .{ .allocator = allocator, .output = try allocator.alloc(u8, max_frame_bytes) };
+    }
+
+    fn deinit(self: *ResponseCollector) void {
+        std.crypto.secureZero(u8, self.output);
+        self.allocator.free(self.output);
+        self.* = undefined;
+    }
+
+    fn sink(self: *ResponseCollector) ResponseSink {
+        return .{ .context = self, .feed_fn = feed, .finish_fn = finish };
+    }
+
+    fn feed(raw: *anyopaque, bytes: []const u8) FeedOutcome {
+        const self: *ResponseCollector = @ptrCast(@alignCast(raw));
+        if (self.failure != null or self.complete)
+            return .{ .consumed = 0, .flow = .stop };
+        const delimiter = std.mem.indexOfScalar(u8, bytes, '\n');
+        const payload_len = delimiter orelse bytes.len;
+        const remaining = self.output.len - self.output_len;
+        if (payload_len > remaining) {
+            if (remaining != 0)
+                @memcpy(self.output[self.output_len..], bytes[0..remaining]);
+            self.output_len = self.output.len;
+            self.failure = .fatal;
+            return .{ .consumed = remaining, .flow = .stop };
+        }
+        if (payload_len != 0)
+            @memcpy(self.output[self.output_len..][0..payload_len], bytes[0..payload_len]);
+        self.output_len += payload_len;
+        if (delimiter) |index| {
+            if (self.output_len == 0) self.failure = .fatal else self.complete = true;
+            return .{ .consumed = index + 1, .flow = .stop };
+        }
+        return .{ .consumed = bytes.len, .flow = .continue_reading };
+    }
+
+    fn finish(raw: *anyopaque) SinkFlow {
+        const self: *ResponseCollector = @ptrCast(@alignCast(raw));
+        if (!self.complete and self.failure == null) self.failure = .fatal;
+        return .stop;
+    }
+};
+
+fn poisonExchange(connection: *Backend.Connection, failure: PortFailure) connector.ExchangeOutcome {
+    connection.poisoned = true;
+    return .{ .failure = mapFailure(failure) };
+}
+
+fn poisonNotification(connection: *Backend.Connection, failure: PortFailure) connector.Failure {
+    connection.poisoned = true;
+    return mapFailure(failure);
+}
+
+fn mapFailure(failure: PortFailure) connector.Failure {
+    return switch (failure) {
+        .timeout => .timeout,
+        .child_exit => .child_exit,
+        .cancelled => .cancelled,
+        .indeterminate => .indeterminate,
+        .fatal => .fatal,
+    };
+}
 
 fn incrementBounded(counter: *std.atomic.Value(usize), limit: usize) bool {
     var current = counter.load(.acquire);
     while (current < limit) {
-        if (counter.cmpxchgWeak(
-            current,
-            current + 1,
-            .acq_rel,
-            .acquire,
-        )) |observed| {
+        if (counter.cmpxchgWeak(current, current + 1, .acq_rel, .acquire)) |observed| {
             current = observed;
         } else return true;
     }
@@ -464,208 +275,99 @@ fn releaseCounter(counter: *std.atomic.Value(usize)) void {
     if (previous == 0) @panic("MCP stdio connection reference underflow");
 }
 
-test "stdio config and connection count are bounded" {
-    var environment = std.process.Environ.Map.init(std.testing.allocator);
-    defer environment.deinit();
-    try std.testing.expectError(error.InvalidConfig, Backend.init(.{
-        .io = std.testing.io,
-        .allocator = std.testing.allocator,
-        .argv = &.{"bad\x00command"},
-        .cwd = .inherit,
-        .environ_map = &environment,
-    }));
-    try std.testing.expectError(error.InvalidConfig, Backend.init(.{
-        .io = std.testing.io,
-        .allocator = std.testing.allocator,
-        .argv = &.{"command"},
-        .cwd = .inherit,
-        .environ_map = &environment,
-        .max_connections = 0,
-    }));
-}
+const FakeEndpoint = struct {
+    valid: bool = true,
+    perform_failure: ?PortFailure = null,
+    response: []const u8 = "opaque-response\ntrailing",
+    closes: usize = 0,
+    notifications: usize = 0,
+    framing_valid: bool = true,
 
-test "stdio round trip owns one process and releases every pipe" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
-    const script =
-        \\printf 'discarded-secret' >&2
-        \\while IFS= read -r line; do printf '%s\n' "$line"; done
-    ;
-    var environment = std.process.Environ.Map.init(std.testing.allocator);
-    defer environment.deinit();
-    var backend = try Backend.init(.{
-        .io = std.testing.io,
-        .allocator = std.testing.allocator,
-        .argv = &.{ "/bin/sh", "-c", script },
-        .cwd = .inherit,
-        .environ_map = &environment,
-    });
-    defer backend.deinit() catch unreachable;
-    const transport = backend.transport();
-    const connection = switch (transport.open_fn(
-        transport.context,
-        .actual,
-        .modern_2026_07_28,
-        1000,
-    )) {
-        .connection => |value| value,
-        .failure => return error.TestUnexpectedResult,
-    };
-    var connection_open = true;
-    defer if (connection_open) transport.close_fn(connection);
-    const request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":1}";
-    const response = switch (transport.request_fn(
-        connection,
-        std.testing.allocator,
-        request_bytes,
-        1000,
-        .{},
-    )) {
-        .response => |value| value,
-        .failure => return error.TestUnexpectedResult,
-    };
-    defer std.testing.allocator.free(response);
-    try std.testing.expectEqualStrings(request_bytes, response);
-    transport.close_fn(connection);
-    connection_open = false;
-    try std.testing.expectEqual(
-        @as(usize, 0),
-        backend.active_connections.load(.acquire),
-    );
-}
-
-test "stdio close joins stderr drain after the child exits normally" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
-    var environment = std.process.Environ.Map.init(std.testing.allocator);
-    defer environment.deinit();
-    var backend = try Backend.init(.{
-        .io = std.testing.io,
-        .allocator = std.testing.allocator,
-        .argv = &.{
-            "/bin/sh",
-            "-c",
-            "IFS= read -r line; printf '%s\\n' \"$line\"; exit 0",
-        },
-        .cwd = .inherit,
-        .environ_map = &environment,
-    });
-    defer backend.deinit() catch unreachable;
-    const transport = backend.transport();
-    const connection = switch (transport.open_fn(
-        transport.context,
-        .actual,
-        .modern_2026_07_28,
-        1000,
-    )) {
-        .connection => |value| value,
-        .failure => return error.TestUnexpectedResult,
-    };
-    var connection_open = true;
-    defer if (connection_open) transport.close_fn(connection);
-    const response = switch (transport.request_fn(
-        connection,
-        std.testing.allocator,
-        "{}",
-        1000,
-        .{},
-    )) {
-        .response => |value| value,
-        .failure => return error.TestUnexpectedResult,
-    };
-    defer std.testing.allocator.free(response);
-    try std.testing.expectEqualStrings("{}", response);
-    std.Io.Timeout.sleep(.{ .duration = .{
-        .raw = std.Io.Duration.fromMilliseconds(20),
-        .clock = .awake,
-    } }, std.testing.io) catch {};
-    transport.close_fn(connection);
-    connection_open = false;
-    try std.testing.expectEqual(
-        @as(usize, 0),
-        backend.active_connections.load(.acquire),
-    );
-}
-
-test "stdio timeout poisons and closes an indeterminate connection" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
-    var environment = std.process.Environ.Map.init(std.testing.allocator);
-    defer environment.deinit();
-    var backend = try Backend.init(.{
-        .io = std.testing.io,
-        .allocator = std.testing.allocator,
-        .argv = &.{
-            "/bin/sh",
-            "-c",
-            "while IFS= read -r line; do sleep 5; done",
-        },
-        .cwd = .inherit,
-        .environ_map = &environment,
-    });
-    defer backend.deinit() catch unreachable;
-    const transport = backend.transport();
-    const connection = switch (transport.open_fn(
-        transport.context,
-        .actual,
-        .compat_2025_11_25,
-        1000,
-    )) {
-        .connection => |value| value,
-        .failure => return error.TestUnexpectedResult,
-    };
-    var connection_open = true;
-    defer if (connection_open) transport.close_fn(connection);
-    const result = transport.request_fn(
-        connection,
-        std.testing.allocator,
-        "{}",
-        20,
-        .{},
-    );
-    switch (result) {
-        .failure => |failure| try std.testing.expectEqual(
-            connector.Failure.timeout,
-            failure,
-        ),
-        .response => |response| {
-            std.testing.allocator.free(response);
-            return error.TestUnexpectedResult;
-        },
+    fn capability(self: *FakeEndpoint) ProcessEndpoint {
+        return .{
+            .context = self,
+            .validate_fn = validate,
+            .open_fn = open,
+            .exchange_fn = exchange,
+            .notify_fn = notify,
+            .close_fn = close,
+        };
     }
-    transport.close_fn(connection);
-    connection_open = false;
+
+    fn validate(raw: *anyopaque) bool {
+        const self: *FakeEndpoint = @ptrCast(@alignCast(raw));
+        return self.valid;
+    }
+
+    fn open(raw: *anyopaque, _: u32) OpenOutcome {
+        return .{ .connection = raw };
+    }
+
+    fn exchange(
+        raw: *anyopaque,
+        _: *anyopaque,
+        write: Write,
+        sink: *const ResponseSink,
+    ) PerformOutcome {
+        const self: *FakeEndpoint = @ptrCast(@alignCast(raw));
+        self.checkFraming(write);
+        if (self.perform_failure) |failure| return .{ .failure = failure };
+        const fed = sink.feed_fn(sink.context, self.response);
+        if (fed.flow == .continue_reading) _ = sink.finish_fn(sink.context);
+        return .completed;
+    }
+
+    fn notify(raw: *anyopaque, _: *anyopaque, write: Write) ?PortFailure {
+        const self: *FakeEndpoint = @ptrCast(@alignCast(raw));
+        self.checkFraming(write);
+        self.notifications += 1;
+        return self.perform_failure;
+    }
+
+    fn close(raw: *anyopaque, _: *anyopaque) void {
+        const self: *FakeEndpoint = @ptrCast(@alignCast(raw));
+        self.closes += 1;
+    }
+
+    fn checkFraming(self: *FakeEndpoint, write: Write) void {
+        self.framing_valid = self.framing_valid and
+            write.fragments.len == 2 and
+            std.mem.eql(u8, write.fragments[1], "\n");
+    }
+};
+
+fn openTestConnection(transport: connector.Transport) !*anyopaque {
+    return switch (transport.open_fn(
+        transport.context,
+        .actual,
+        .modern_2026_07_28,
+        1000,
+    )) {
+        .connection => |value| value,
+        .failure => error.TestUnexpectedResult,
+    };
 }
 
-test "stdio cancellation poisons the connection and bounded open rejects overflow" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
-    var environment = std.process.Environ.Map.init(std.testing.allocator);
-    defer environment.deinit();
+test "stdio endpoint capability and connection count are bounded" {
+    var invalid: FakeEndpoint = .{ .valid = false };
+    try std.testing.expectError(error.InvalidConfig, Backend.init(.{
+        .io = std.testing.io,
+        .allocator = std.testing.allocator,
+        .endpoint = invalid.capability(),
+    }));
+    var endpoint: FakeEndpoint = .{};
     var backend = try Backend.init(.{
         .io = std.testing.io,
         .allocator = std.testing.allocator,
-        .argv = &.{
-            "/bin/sh",
-            "-c",
-            "while IFS= read -r line; do sleep 5; done",
-        },
-        .cwd = .inherit,
-        .environ_map = &environment,
+        .endpoint = endpoint.capability(),
         .max_connections = 1,
     });
     defer backend.deinit() catch unreachable;
     const transport = backend.transport();
-    const connection = switch (transport.open_fn(
-        transport.context,
-        .actual,
-        .modern_2026_07_28,
-        1000,
-    )) {
-        .connection => |value| value,
-        .failure => return error.TestUnexpectedResult,
-    };
-    var connection_open = true;
-    defer if (connection_open) transport.close_fn(connection);
+    const connection = try openTestConnection(transport);
     switch (transport.open_fn(
         transport.context,
-        .disposable_probe,
+        .actual,
         .modern_2026_07_28,
         1000,
     )) {
@@ -678,92 +380,25 @@ test "stdio cancellation poisons the connection and bounded open rejects overflo
             return error.TestUnexpectedResult;
         },
     }
-
-    const CancellationState = struct {
-        requested: std.atomic.Value(bool) = .init(false),
-
-        fn isCancelled(context: ?*const anyopaque) bool {
-            const self: *const @This() = @ptrCast(@alignCast(context.?));
-            return self.requested.load(.acquire);
-        }
-
-        fn trigger(self: *@This()) void {
-            std.Io.Timeout.sleep(.{ .duration = .{
-                .raw = std.Io.Duration.fromMilliseconds(20),
-                .clock = .awake,
-            } }, std.testing.io) catch {};
-            self.requested.store(true, .release);
-        }
-    };
-    var cancellation: CancellationState = .{};
-    const trigger = try std.Thread.spawn(
-        .{},
-        CancellationState.trigger,
-        .{&cancellation},
-    );
-    const result = transport.request_fn(
-        connection,
-        std.testing.allocator,
-        "{}",
-        1000,
-        .{
-            .context = &cancellation,
-            .is_cancelled_fn = CancellationState.isCancelled,
-        },
-    );
-    trigger.join();
-    switch (result) {
-        .failure => |failure| try std.testing.expectEqual(
-            connector.Failure.cancelled,
-            failure,
-        ),
-        .response => |response| {
-            std.testing.allocator.free(response);
-            return error.TestUnexpectedResult;
-        },
-    }
     transport.close_fn(connection);
-    connection_open = false;
+    try std.testing.expectEqual(@as(usize, 1), endpoint.closes);
 }
 
-test "stdio notification is written without consuming a response" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
-    var environment = std.process.Environ.Map.init(std.testing.allocator);
-    defer environment.deinit();
-    const script =
-        \\IFS= read -r notification
-        \\IFS= read -r request
-        \\printf '%s\n' "$request"
-    ;
+test "stdio owns newline framing and consumes exactly one response" {
+    var endpoint: FakeEndpoint = .{};
     var backend = try Backend.init(.{
         .io = std.testing.io,
         .allocator = std.testing.allocator,
-        .argv = &.{ "/bin/sh", "-c", script },
-        .cwd = .inherit,
-        .environ_map = &environment,
+        .endpoint = endpoint.capability(),
     });
     defer backend.deinit() catch unreachable;
     const transport = backend.transport();
-    const connection = switch (transport.open_fn(
-        transport.context,
-        .actual,
-        .modern_2026_07_28,
-        1000,
-    )) {
-        .connection => |value| value,
-        .failure => return error.TestUnexpectedResult,
-    };
-    var connection_open = true;
-    defer if (connection_open) transport.close_fn(connection);
-    try std.testing.expectEqual(
-        @as(?connector.Failure, null),
-        transport.notify_fn(connection, "{\"method\":\"ready\"}", 1000, .{}),
-    );
-    const request_bytes = "{\"id\":2}";
+    const connection = try openTestConnection(transport);
+    defer transport.close_fn(connection);
     const response = switch (transport.request_fn(
         connection,
         std.testing.allocator,
-        request_bytes,
+        "opaque-request",
         1000,
         .{},
     )) {
@@ -771,7 +406,45 @@ test "stdio notification is written without consuming a response" {
         .failure => return error.TestUnexpectedResult,
     };
     defer std.testing.allocator.free(response);
-    try std.testing.expectEqualStrings(request_bytes, response);
-    transport.close_fn(connection);
-    connection_open = false;
+    try std.testing.expectEqualStrings("opaque-response", response);
+    try std.testing.expectEqual(
+        @as(?connector.Failure, null),
+        transport.notify_fn(connection, "opaque-notify", 1000, .{}),
+    );
+    try std.testing.expect(endpoint.framing_valid);
+    try std.testing.expectEqual(@as(usize, 1), endpoint.notifications);
+}
+
+test "stdio protocol failure poisons the connection" {
+    var endpoint: FakeEndpoint = .{ .response = "toolong\n" };
+    var backend = try Backend.init(.{
+        .io = std.testing.io,
+        .allocator = std.testing.allocator,
+        .endpoint = endpoint.capability(),
+        .max_frame_bytes = 4,
+    });
+    defer backend.deinit() catch unreachable;
+    const transport = backend.transport();
+    const connection = try openTestConnection(transport);
+    defer transport.close_fn(connection);
+    switch (transport.request_fn(
+        connection,
+        std.testing.allocator,
+        "request",
+        1000,
+        .{},
+    )) {
+        .failure => |failure| try std.testing.expectEqual(
+            connector.Failure.fatal,
+            failure,
+        ),
+        .response => |response| {
+            std.testing.allocator.free(response);
+            return error.TestUnexpectedResult;
+        },
+    }
+    try std.testing.expectEqual(
+        @as(?connector.Failure, .fatal),
+        transport.notify_fn(connection, "notify", 1000, .{}),
+    );
 }
