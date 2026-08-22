@@ -171,7 +171,9 @@ npm run package:windows
 
 该入口必须先完成正式 Release build，再使用 Native SDK `package --target windows` 生成独立 runtime stage；stage gate 精确验证 app.zon version/App ID、ReleaseFast、Windows GUI subsystem、主程序、WebView2 loader、应用图标与 Renderer assets，随后才允许 Inno Setup 6.7.3 或兼容的 7.x 生成小写 `metawork-<version>-windows-x64-setup.exe`。最终 gate 要求精确文件存在、具有 PE identity 且输出 SHA-256。安装器按用户安装、注册开始菜单与卸载入口，不要求管理员权限。
 
-当前自动化覆盖 metadata、工具发现/capability gate、Native runtime stage 结构、GUI subsystem 和单 EXE identity；当前 Windows artifact 已完成一次隔离目录 silent install/uninstall smoke，验证主程序、WebView2 loader、Renderer assets、图标、uninstaller、安装目录与卸载注册表清理。交互式 wizard、开始菜单启动、托盘驻留下升级替换和 Windows 10/11 平台矩阵仍是人工验收待完成。当前 artifact 未配置 Authenticode 签名，不能作为可信外部分发通过结论；签名落地时必须独立验证应用、DLL、安装器、签名卸载器、SHA-256 RFC 3161 时间戳和 Windows Authenticode policy。普通 check/test/build 与未签名 package 不得访问签名凭据。安装器能力不证明自动更新、channel、回滚或迁移能力。
+`npm run package:windows -- --signing required` 是同一入口的正式 Authenticode 模式。它必须从 Windows SDK 发现 x64 SignTool，以精确 SHA-1 thumbprint 选择当前用户证书库身份，使用 SHA-256 文件摘要和 RFC 3161 SHA-256 时间戳；MetaWork-owned EXE、Inno signed uninstaller 与最终安装器必须由同一 SignTool definition 签署，Microsoft-owned DLL 保留并验证原厂签名。每个可直接验证的 PE 都必须通过 `signtool verify /pa /all /v`，任何缺失配置、签名、时间戳或验证失败必须 fail closed。普通 unsigned mode 不读取签名身份，不能满足该 Gate。
+
+当前自动化覆盖 metadata、Inno/SignTool 发现与 capability gate、Native runtime stage 结构、GUI subsystem、精确签名参数、单 EXE identity 和直接 PE 的 Authenticode verification；当前 signed Windows artifact 已完成一次隔离目录 silent install/uninstall smoke，直接验证安装器、实际落盘主程序与 `unins000.exe` 的 `/pa /all /v` Authenticode policy、Certum EV signer、RFC 3161 时间戳和零 warning，并确认 WebView2 loader 原厂签名、Renderer assets、图标、安装目录与卸载注册表清理。该 smoke 只能在没有同 App ID 正式安装的干净环境执行，避免覆盖真实用户安装状态，因此不内嵌进普通 package 命令。交互式 wizard、开始菜单启动、托盘驻留下升级替换和 Windows 10/11 平台矩阵仍是人工验收待完成。普通 check/test/build 与未签名 package 不得访问签名身份。安装器能力不证明自动更新、channel、回滚或迁移能力。
 
 ### Checkpoint artifact boundary
 
@@ -187,7 +189,7 @@ revision 9 不继承旧 artifact 的 checkpoint 样本或通过结论。Windows 
 - Task 当前进程内 execution binding 和模型切换已有自动化；显式 execution rebind 的跨重启 epoch/history 与竞态尚未实现。
 - MCP 的真实第三方 server、平台 credential/network、secure capture、browser/callback 和 issuer 行为尚未完成跨平台验收；marketplace 不在当前范围。
 - 系统关机或用户显式退出 MetaWork 期间的准点执行、登录前系统服务和远端云调度尚未实现。当前只保证窗口关闭而 Host 仍运行时继续调度，并在下次启动协调至多一个 missed occurrence。
-- Windows revision 9 development baseline、Windows 安装/卸载真实平台验收、Authenticode 分发 Gate 与 Linux target 尚未完成。
+- Windows signed Inno artifact 已完成隔离目录静默安装/卸载与 Authenticode 验收；交互式 wizard、开始菜单启动、托盘驻留下升级替换、Windows 10/11 平台矩阵、更新和 Linux target 尚未完成。
 
 ## 维护规则
 

@@ -11,15 +11,23 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  defaultWindowsTimestampUrl,
+  innoSignToolCompilerArgument,
   innoSetupCompilerCandidates,
   parseInnoSetupCompilerMajor,
   parseInnoSetupRegistryInstallLocation,
+  parseWindowsPackageArguments,
   readPortableExecutableSubsystem,
   resolveInnoSetupCompiler,
+  resolveWindowsSignTool,
   verifyWindowsInstaller,
   verifyWindowsRuntimeStage,
   windowsFileVersion,
   windowsInstallerArtifactName,
+  windowsSignArguments,
+  windowsSigningConfiguration,
+  windowsSignToolCandidates,
+  windowsVerifyArguments,
 } from "./package-windows.mjs";
 
 function guiExecutableBytes(size = 512) {
@@ -106,6 +114,121 @@ test("Inno Setup compiler gate accepts the supported 6 and 7 families", () => {
     () => parseInnoSetupCompilerMajor("unknown compiler"),
     /supported Inno Setup/u,
   );
+});
+
+test("signed packaging is explicit and fail closed", () => {
+  assert.deepEqual(parseWindowsPackageArguments([]), { signing: "none" });
+  assert.deepEqual(parseWindowsPackageArguments(["--signing", "required"]), {
+    signing: "required",
+  });
+  assert.deepEqual(parseWindowsPackageArguments(["--signing=required"]), {
+    signing: "required",
+  });
+  assert.throws(
+    () => parseWindowsPackageArguments(["--signing", "auto"]),
+    /none or required/u,
+  );
+  assert.throws(
+    () => parseWindowsPackageArguments(["--certificate", "subject"]),
+    /unknown/u,
+  );
+  assert.throws(
+    () =>
+      parseWindowsPackageArguments(["--signing=none", "--signing=required"]),
+    /only be specified once/u,
+  );
+});
+
+test("Windows SDK SignTool discovery prefers an explicit path then the newest x64 kit", () => {
+  const explicit = path.resolve("C:/Tools/Windows SDK/signtool.exe");
+  const environment = {
+    "ProgramFiles(x86)": path.resolve("C:/Program Files (x86)"),
+    METAWORK_WINDOWS_SIGNTOOL: explicit,
+  };
+  const candidates = windowsSignToolCandidates(environment, () => [
+    { name: "10.0.22621.0", isDirectory: () => true },
+    { name: "10.0.26100.0", isDirectory: () => true },
+    { name: "not-a-version", isDirectory: () => true },
+  ]);
+  assert.equal(candidates[0], explicit);
+  assert.match(candidates[1], /10\.0\.26100\.0[\\/]x64[\\/]signtool\.exe$/u);
+  assert.equal(
+    resolveWindowsSignTool(
+      environment,
+      (candidate) => candidate === candidates[1],
+      candidates,
+    ),
+    candidates[1],
+  );
+  assert.throws(
+    () =>
+      windowsSignToolCandidates({ METAWORK_WINDOWS_SIGNTOOL: "relative.exe" }),
+    /absolute path/u,
+  );
+});
+
+test("modern SignTool arguments pin identity, SHA-256, RFC 3161, and verification policy", () => {
+  const signTool = path.resolve("C:/Windows Kits/10/x64/signtool.exe");
+  const certificateSha1 = "0123456789abcdef0123456789abcdef01234567";
+  const configuration = windowsSigningConfiguration(
+    { signing: "required" },
+    {
+      METAWORK_WINDOWS_SIGNING_CERTIFICATE_SHA1: certificateSha1,
+    },
+    signTool,
+  );
+  assert.deepEqual(configuration, {
+    certificateSha1: certificateSha1.toUpperCase(),
+    signTool,
+    timestampUrl: `${defaultWindowsTimestampUrl}/`,
+  });
+  assert.deepEqual(windowsSignArguments(configuration, "MetaWork.exe"), [
+    "sign",
+    "/sha1",
+    certificateSha1.toUpperCase(),
+    "/fd",
+    "SHA256",
+    "/tr",
+    `${defaultWindowsTimestampUrl}/`,
+    "/td",
+    "SHA256",
+    "/d",
+    "MetaWork",
+    "/v",
+    "MetaWork.exe",
+  ]);
+  assert.deepEqual(windowsVerifyArguments("MetaWork.exe"), [
+    "verify",
+    "/pa",
+    "/all",
+    "/v",
+    "MetaWork.exe",
+  ]);
+  assert.match(
+    innoSignToolCompilerArgument(7, configuration),
+    /^--signtool=metawork=\$q.*signtool\.exe\$q sign \/sha1 .*\/fd SHA256 .*\/tr \$q.*\$q .*\/td SHA256 .*\$f$/u,
+  );
+  assert.match(
+    innoSignToolCompilerArgument(6, configuration),
+    /^\/Smetawork=/u,
+  );
+  const innoScript = readFileSync(
+    new URL("../packaging/windows/metawork.iss", import.meta.url),
+    "utf8",
+  );
+  assert.match(innoScript, /#ifdef AppSignTool/u);
+  assert.match(innoScript, /^SignTool=\{#AppSignTool\}$/mu);
+  assert.match(innoScript, /^SignedUninstaller=yes$/mu);
+  assert.throws(
+    () =>
+      windowsSigningConfiguration(
+        { signing: "required" },
+        { METAWORK_WINDOWS_SIGNING_CERTIFICATE_SHA1: "not-a-thumbprint" },
+        signTool,
+      ),
+    /40-digit/u,
+  );
+  assert.equal(windowsSigningConfiguration({ signing: "none" }, {}), null);
 });
 
 test("Inno Setup registry discovery reads a nonstandard install drive", () => {

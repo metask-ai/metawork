@@ -281,7 +281,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - macOS 是当前优先真实验证平台；
 - macOS 真实 Account 本地开发必须使用 Apple 签发、带稳定 `TeamIdentifier` 的 `Apple Development` identity；自签名或 ad-hoc 签名不能作为 Keychain 跨构建授权稳定性的验收结果；
 - Windows development baseline 已完成独立 artifact、Native SDK、Bridge、AgentCore 和桌面自动化验证，不能用 macOS 结果替代；
-- Windows MSI/签名/更新和完整安全矩阵仍是后续分发交付；
+- Windows 已提供按用户安装的 Inno Setup 单 EXE、显式 Authenticode 签名与静默安装/卸载验收路径；MSI、自动更新、交互式 Windows 10/11 和完整安全矩阵仍是后续分发交付；
 - Linux 是后续目标平台；当前 bundle target-policy 和系统链接输入按 target 隔离，但不宣称已完成 Linux 构建或验收；
 - 对进入验证范围的平台形成可复现的开发构建与可运行产物路径；进入分发阶段后再要求可分发包路径。
 

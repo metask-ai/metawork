@@ -17,13 +17,37 @@ winget install --id JRSoftware.InnoSetup.7 -e -s winget -i
 npm run package:windows
 ```
 
-脚本依次执行隔离 prefix 的 Release build、Native SDK Windows package、runtime stage 校验和 Inno Setup 编译；正在运行的普通 `zig-out/bin/metawork.exe` 不会阻塞 package build。runtime gate 要求版本、App ID、x64 GUI subsystem、WebView2 loader、Renderer assets 与应用图标全部匹配；最终 gate 要求精确命名的单一非空 PE 安装器并输出 SHA-256。编译器按显式环境变量、标准安装目录、`PATH` 和 Windows 卸载注册表顺序发现，因此支持安装到其他磁盘；仍无法定位时，可将 `METAWORK_INNO_SETUP_COMPILER` 指向绝对 `ISCC.exe` 路径。
+Inno 编译器按显式环境变量、标准安装目录、`PATH` 和 Windows 卸载注册表顺序发现，因此支持安装到其他磁盘；仍无法定位时，可将 `METAWORK_INNO_SETUP_COMPILER` 指向绝对 `ISCC.exe` 路径。正在运行的普通 `zig-out/bin/metawork.exe` 不会阻塞 package build。
 
 Inno Setup 只负责把 Native SDK runtime stage 安装和卸载为一个 Windows 应用，不成为应用 runtime owner，也不替代 Native SDK package。
 
+## 固定流程
+
+同一个 `package:windows` 入口按以下顺序执行：
+
+1. 在开始构建前解析参数并检查 Inno；signed mode 还必须先发现 Windows SDK SignTool、校验证书 thumbprint 和时间戳 URL，缺失时立即失败。
+2. 构建 Renderer，再以隔离 prefix 生成 Windows x64 `ReleaseFast` 主程序并检查 release automation isolation。
+3. 调用 Native SDK 生成完整 runtime stage，验证版本、App ID、GUI subsystem、主程序、WebView2 loader、Renderer assets 与应用图标。
+4. signed mode 签署 MetaWork 主程序并立即验证，同时验证 WebView2 loader 的微软原厂签名；unsigned mode 完整跳过签名身份读取。
+5. Inno Setup 将 runtime stage 编译为单 EXE；signed mode 由同一个 SignTool definition 签署卸载器模板和最终安装器。
+6. signed mode 验证最终安装器；随后统一检查安装器 PE identity、精确文件名与非空内容，并输出最终文件 SHA-256。
+
+任一步失败都不会报告 package 成功，也不会从 signed mode 静默降级为 unsigned mode。
+
 ## 签名边界
 
-当前入口生成未签名安装器，因此只证明单 EXE 的构建与结构，不证明可信外部分发。正式对外发布还必须用公司 Authenticode 证书签署应用二进制、运行时 DLL、安装器和卸载器，使用 SHA-256 与 RFC 3161 时间戳，并对最终 artifact 执行 Windows Authenticode policy 验证。证书、私钥、时间戳服务和签名选择尚未配置前，普通 build 与 `package:windows` 不读取或猜测凭据，也不得宣称通过该 Gate。
+普通 `npm run package:windows` 继续生成不读取签名身份的本地未签名安装器。正式签名构建必须显式要求 signing，并通过环境传入当前证书的精确 SHA-1 thumbprint：
+
+```powershell
+$env:METAWORK_WINDOWS_SIGNING_CERTIFICATE_SHA1 = "<40 位证书指纹>"
+npm run package:windows -- --signing required
+```
+
+签名入口只发现当前 Windows SDK 中版本最高的 x64 `signtool.exe`，不搜索 `PATH`，也不读取供应商附带的旧工具目录。非标准 SDK 位置可通过 `METAWORK_WINDOWS_SIGNTOOL` 显式指定绝对路径；RFC 3161 服务默认使用 `http://time.certum.pl`，需要切换供应商时通过 `METAWORK_WINDOWS_TIMESTAMP_URL` 显式替换。证书 thumbprint 和工具路径不是私钥；PIN、token、PFX 密码及云签名 credential 不得进入仓库、命令参数、日志或持久配置。
+
+signed path 使用 `/sha1` 在默认的当前用户个人证书库中精确选择由 SimplySign CSP 暴露的证书，固定 `/fd SHA256 /tr <URL> /td SHA256`。Native runtime stage 完成结构校验后只签署 MetaWork-owned `metawork.exe`，不覆盖 Microsoft 已签名的 `WebView2Loader.dll`；后者保留原厂签名并通过相同 Authenticode policy 验证。Inno Setup 使用同一 SignTool definition 生成签名卸载器并签署最终安装器。每个 MetaWork-owned 可执行文件签名后都必须运行 `signtool verify /pa /all /v`；任何签名、时间戳或验证失败都会终止 package，不允许退回未签名 artifact。最终 SHA-256 只在所有签名和验证完成后输出。
+
+该入口只调用现有 Windows certificate provider，不安装、升级、登录或修改 SimplySign，不导入导出证书，也不改变 CSP/KSP、证书库或 PIN 设置。是否弹出 SimplySign 授权由现有 provider 和证书策略决定。
 
 安装器生成不等于自动更新能力；更新协议、channel、回滚和旧版本迁移不在当前入口范围内。
 

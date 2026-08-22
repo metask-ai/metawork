@@ -38,6 +38,10 @@ VersionInfoDescription={#AppDisplayName} Installer
 VersionInfoProductName={#AppDisplayName}
 VersionInfoProductVersion={#AppVersion}
 VersionInfoVersion={#AppFileVersion}
+#ifdef AppSignTool
+SignTool={#AppSignTool}
+SignedUninstaller=yes
+#endif
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"

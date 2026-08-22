@@ -1,6 +1,12 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
+import {
+  existsSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+} from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
@@ -32,6 +38,31 @@ export const windowsInstallerArtifactPath = path.join(
   "package",
   windowsInstallerArtifactName,
 );
+export const defaultWindowsTimestampUrl = "http://time.certum.pl";
+
+export function parseWindowsPackageArguments(arguments_) {
+  let signing = "none";
+  let signingSeen = false;
+  for (let index = 0; index < arguments_.length; index += 1) {
+    const argument = arguments_[index];
+    let value;
+    if (argument === "--signing") {
+      value = arguments_[index + 1];
+      index += 1;
+    } else if (argument.startsWith("--signing=")) {
+      value = argument.slice("--signing=".length);
+    } else {
+      throw new Error(`unknown package:windows argument ${argument}`);
+    }
+    if (signingSeen) throw new Error("--signing may only be specified once");
+    signingSeen = true;
+    if (value !== "none" && value !== "required") {
+      throw new Error("--signing must be none or required");
+    }
+    signing = value;
+  }
+  return Object.freeze({ signing });
+}
 
 export function windowsFileVersion(version) {
   const match = version.match(/^(\d+)\.(\d+)\.(\d+)/u);
@@ -139,6 +170,127 @@ export function resolveInnoSetupCompiler(
     );
   }
   return compiler;
+}
+
+export function windowsSignToolCandidates(
+  environment = process.env,
+  readDirectory = readdirSync,
+) {
+  const explicit = environment.METAWORK_WINDOWS_SIGNTOOL;
+  if (explicit && !path.isAbsolute(explicit)) {
+    throw new Error("METAWORK_WINDOWS_SIGNTOOL must be an absolute path");
+  }
+  const installed = [];
+  const programFilesX86 = environment["ProgramFiles(x86)"];
+  if (programFilesX86) {
+    const kitsBin = path.join(programFilesX86, "Windows Kits", "10", "bin");
+    let entries = [];
+    try {
+      entries = readDirectory(kitsBin, { withFileTypes: true });
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    const versions = entries
+      .filter(
+        (entry) =>
+          entry.isDirectory() && /^\d+(?:\.\d+){2,3}$/u.test(entry.name),
+      )
+      .map((entry) => entry.name)
+      .sort((left, right) =>
+        right.localeCompare(left, "en", { numeric: true }),
+      );
+    for (const version of versions) {
+      installed.push(path.join(kitsBin, version, "x64", "signtool.exe"));
+    }
+  }
+  return uniquePaths([explicit, ...installed]);
+}
+
+export function resolveWindowsSignTool(
+  environment = process.env,
+  isFile = (candidate) => {
+    try {
+      return existsSync(candidate) && statSync(candidate).isFile();
+    } catch {
+      return false;
+    }
+  },
+  candidates = windowsSignToolCandidates(environment),
+) {
+  const signTool = candidates.find(isFile);
+  if (!signTool) {
+    throw new Error(
+      "Windows SDK x64 signtool.exe is required for signed packaging. Install the Windows SDK or set METAWORK_WINDOWS_SIGNTOOL to its absolute path.",
+    );
+  }
+  return signTool;
+}
+
+export function windowsSigningConfiguration(
+  options,
+  environment = process.env,
+  signTool = options.signing === "required"
+    ? resolveWindowsSignTool(environment)
+    : null,
+) {
+  if (options.signing === "none") return null;
+  const certificateSha1 = (
+    environment.METAWORK_WINDOWS_SIGNING_CERTIFICATE_SHA1 ?? ""
+  )
+    .replaceAll(" ", "")
+    .toUpperCase();
+  if (!/^[0-9A-F]{40}$/u.test(certificateSha1)) {
+    throw new Error(
+      "METAWORK_WINDOWS_SIGNING_CERTIFICATE_SHA1 must be the exact 40-digit certificate thumbprint",
+    );
+  }
+  const timestampUrl =
+    environment.METAWORK_WINDOWS_TIMESTAMP_URL ?? defaultWindowsTimestampUrl;
+  let parsedTimestamp;
+  try {
+    parsedTimestamp = new URL(timestampUrl);
+  } catch {
+    throw new Error("METAWORK_WINDOWS_TIMESTAMP_URL must be an absolute URL");
+  }
+  if (!["http:", "https:"].includes(parsedTimestamp.protocol)) {
+    throw new Error("METAWORK_WINDOWS_TIMESTAMP_URL must use HTTP or HTTPS");
+  }
+  return Object.freeze({
+    certificateSha1,
+    signTool,
+    timestampUrl: parsedTimestamp.href,
+  });
+}
+
+export function windowsSignArguments(configuration, filePath) {
+  return [
+    "sign",
+    "/sha1",
+    configuration.certificateSha1,
+    "/fd",
+    "SHA256",
+    "/tr",
+    configuration.timestampUrl,
+    "/td",
+    "SHA256",
+    "/d",
+    packageManifest.metadata.displayName,
+    "/v",
+    filePath,
+  ];
+}
+
+export function windowsVerifyArguments(filePath) {
+  return ["verify", "/pa", "/all", "/v", filePath];
+}
+
+export function innoSignToolDefinition(configuration) {
+  return `$q${configuration.signTool}$q sign /sha1 ${configuration.certificateSha1} /fd SHA256 /tr $q${configuration.timestampUrl}$q /td SHA256 /d $q${packageManifest.metadata.displayName}$q /v $f`;
+}
+
+export function innoSignToolCompilerArgument(compilerMajor, configuration) {
+  const definition = `metawork=${innoSignToolDefinition(configuration)}`;
+  return compilerMajor === 7 ? `--signtool=${definition}` : `/S${definition}`;
 }
 
 export function parseInnoSetupCompilerMajor(output) {
@@ -264,10 +416,33 @@ export function verifyWindowsInstaller(installerPath) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+async function signWindowsFile(configuration, filePath, label) {
+  await runChild(
+    configuration.signTool,
+    windowsSignArguments(configuration, filePath),
+    { cwd: repositoryRoot, label, timeoutMs: null },
+  );
+  await verifyWindowsSignature(
+    configuration,
+    filePath,
+    `${label} verification`,
+  );
+}
+
+async function verifyWindowsSignature(configuration, filePath, label) {
+  await runChild(configuration.signTool, windowsVerifyArguments(filePath), {
+    cwd: repositoryRoot,
+    label,
+    timeoutMs: null,
+  });
+}
+
 async function packageWindows() {
   if (process.platform !== "win32") {
     throw new Error("package:windows must run on Windows");
   }
+  const options = parseWindowsPackageArguments(process.argv.slice(2));
+  const signing = windowsSigningConfiguration(options);
   const compiler = resolveInnoSetupCompiler();
   const compilerMajor = verifyInnoSetupCompiler(compiler);
 
@@ -319,6 +494,22 @@ async function packageWindows() {
     },
   );
   verifyWindowsRuntimeStage();
+  if (signing) {
+    await signWindowsFile(
+      signing,
+      path.join(
+        windowsRuntimeStagePath,
+        "bin",
+        `${packageManifest.identity.executableName}.exe`,
+      ),
+      "MetaWork executable signing",
+    );
+    await verifyWindowsSignature(
+      signing,
+      path.join(windowsRuntimeStagePath, "bin", "WebView2Loader.dll"),
+      "Microsoft WebView2Loader signature verification",
+    );
+  }
 
   const installerStem = windowsInstallerArtifactName.slice(0, -".exe".length);
   const definitions = [
@@ -327,18 +518,24 @@ async function packageWindows() {
     `AppExecutableName=${packageManifest.identity.executableName}`,
     `AppFileVersion=${windowsFileVersion(packageManifest.metadata.version)}`,
   ];
+  if (signing) definitions.push("AppSignTool=metawork");
+  const signingCompilerArgument = signing
+    ? [innoSignToolCompilerArgument(compilerMajor, signing)]
+    : [];
   const compilerArguments =
     compilerMajor === 7
       ? [
           "--quiet-progress",
           `--output-dir=${path.dirname(windowsInstallerArtifactPath)}`,
           `--output-filename=${installerStem}`,
+          ...signingCompilerArgument,
           ...definitions.map((definition) => `--define=${definition}`),
         ]
       : [
           "/Qp",
           `/O${path.dirname(windowsInstallerArtifactPath)}`,
           `/F${installerStem}`,
+          ...signingCompilerArgument,
           ...definitions.map((definition) => `/D${definition}`),
         ];
   await runChild(
@@ -353,9 +550,16 @@ async function packageWindows() {
       timeoutMs: null,
     },
   );
+  if (signing) {
+    await verifyWindowsSignature(
+      signing,
+      windowsInstallerArtifactPath,
+      "Windows installer signature verification",
+    );
+  }
   const digest = verifyWindowsInstaller(windowsInstallerArtifactPath);
   console.log(
-    `built unsigned Windows installer with Inno Setup ${compilerMajor}: ${windowsInstallerArtifactPath} (sha256=${digest})`,
+    `built ${signing ? "signed" : "unsigned"} Windows installer with Inno Setup ${compilerMajor}: ${windowsInstallerArtifactPath} (sha256=${digest})`,
   );
 }
 
