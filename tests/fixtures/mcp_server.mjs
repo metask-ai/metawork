@@ -101,7 +101,10 @@ function startHttp() {
           });
           if (options.framing === "sse") {
             response.writeHead(200, { "content-type": "text/event-stream" });
-            response.end(`event: message\ndata: ${json}\n\n`);
+            response.end(
+              `id: fixture-empty-event\ndata:\n\n` +
+                `event: message\ndata: ${json}\n\n`,
+            );
           } else {
             response.writeHead(200, { "content-type": "application/json" });
             response.end(json);
