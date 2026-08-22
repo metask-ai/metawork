@@ -39,6 +39,7 @@ metawork/
 │   ├── app.zig            # Application composition root；App vtable、装配、run 与顶层生命周期
 │   ├── app/               # Application 的具名适配、resolver、store 与用例编排实现
 │   │   ├── account_coordinator.zig   # Account/Workbench 跨 owner 提交编排
+│   │   ├── account_platform_binding.zig # Account ports 的 Native SDK/文件系统绑定
 │   │   ├── agent_event_coordinator.zig # Agent event-ready wake 合并与主线程 drain 触发
 │   │   ├── automation.zig            # automation authority 与启动覆盖适配
 │   │   ├── frontend.zig              # frontend source 与 asset root resolver
@@ -46,6 +47,7 @@ metawork/
 │   │   ├── mcp_bridge_adapter.zig    # Renderer Bridge MCP typed port 到 Application coordinator 的窄适配
 │   │   ├── mcp_management_coordinator.zig # MCP 测试连接、legacy 审批、首次 OAuth 与安全采集编排
 │   │   ├── mcp_startup.zig           # MCP 启动恢复与 preparation 编排
+│   │   ├── metask_http_transport.zig # Account Metask transport 的 concrete HTTP effect
 │   │   ├── paths.zig                 # data directory 与 canonical home resolver
 │   │   ├── platform.zig              # DispatcherPlatform vtable 与 Native SDK 引用
 │   │   ├── stores.zig                # Application-created stores 与 restored bytes 生命周期
@@ -148,7 +150,7 @@ Task 内容 presentation 只按 canonical Run 顺序把用户输入、Assistant 
 
 `app/` 只接纳四类实现：平台适配、一次性 bootstrap resolver、Application 创建资源的生命周期，以及跨 owner 用例编排。适配按稳定资源类别分文件，编排按用例分文件；编排只安排 owner 调用顺序，不读取领域状态自行形成 policy。`agent/`、`workbench/`、`account/` 与 `bridge/` 不得反向导入 `app/`。
 
-`app/platform.zig` 是唯一 `DispatcherPlatform` vtable 实现并持有 Native SDK runtime/services 引用；窗口系统行为委托给 `app/window.zig`。`app/window.zig` 拥有窗口、tray、notification、dialog 与两个已登记 compat capability，但不拥有 Bridge authority 或 Product policy。`app/metask_http_transport.zig` 实现 Account 定义的窄 Metask HTTP transport port，拥有 `std.http.Client`、请求 deadline/cancellation race 与 bounded response 写入；Metask request kind、响应状态分类、JSON codec 和 credential 生命周期仍归 Account。`app/paths.zig` 的 `Paths` 原位持有所有路径 buffer，只能按指针传递并由 `run()` 保持稳定地址。`app/stores.zig` 拥有 Application 创建的 store、单写锁与 restored bytes 生命周期。
+`app/platform.zig` 是唯一 `DispatcherPlatform` vtable 实现并持有 Native SDK runtime/services 引用；窗口系统行为委托给 `app/window.zig`。`app/window.zig` 拥有窗口、tray、notification、dialog 与两个已登记 compat capability，但不拥有 Bridge authority 或 Product policy。`app/account_platform_binding.zig` 把 Account 定义的 credential/preference、authorization URL、timer 与 Model Connection credential vault ports 绑定到 Native SDK 和有界文件 I/O；它只拥有系统资源与机械 effect，不拥有 Account transaction、codec、恢复或 Model Connection registry policy。`app/metask_http_transport.zig` 实现 Account 定义的窄 Metask HTTP transport port，拥有 `std.http.Client`、请求 deadline/cancellation race 与 bounded response 写入；Metask request kind、响应状态分类、JSON codec 和 credential 生命周期仍归 Account。`app/paths.zig` 的 `Paths` 原位持有所有路径 buffer，只能按指针传递并由 `run()` 保持稳定地址。`app/stores.zig` 拥有 Application 创建的 store、单写锁与 restored bytes 生命周期。
 
 `app/mcp_startup.zig` 负责启动期 registry load、credential transaction recovery 与 Workbench preparation 的线性编排；`app/mcp_platform.zig` 只适配 MCP 系统 credential、stdio process/pipe 与 Streamable HTTP connection/raw-byte effect，不解析 MCP JSON-RPC、STDIO/HTTP framing 或复制协商，也不形成新的产品 owner。`app/mcp_management_coordinator.zig` 把 Workbench transaction seam 与原生确认、Application-owned secure-input capability、系统浏览器、loopback、有界 OAuth worker，以及单一候选 Runtime 测试 worker 串成用例；测试 worker 只消费 canonical prepared target 并回写安全结果，不拥有正式 Runtime authority。coordinator 不拥有 registry、持久 operation、credential 或 OAuth policy。MCP secret capture 只在对应平台通过真实 modal 事件 gate 后开放；未验收平台保持 unavailable，不能扩展 Renderer credential bridge。
 
@@ -179,8 +181,8 @@ Storage 当前只接入正式 Native test graph 和定向 `zig build test-storag
 - `oauth.zig`、`loopback.zig`、`login_attempt.zig` 和 `network_attempt.zig` 拥有登录网络链路；
 - `metask_client.zig` 与 `catalog.zig` 消费锁定的 Metask production contract；`metask_client.zig` 只发布协议、状态分类与 transport port，不持有 concrete HTTP client；
 - `app.zon` 单一拥有 development 产品 Bundle ID；`product_identity.zig` 派生该值、macOS 数据目录和仅供 `-Dautomation=true` artifact 使用的 `.automation` Native SDK runner identity。正式 artifact 始终把 manifest identity 传给 runner；automation identity 只隔离 Native SDK 的 data/window/log namespace，不改写产品 identity、签名或 credential 合同；
-- `credential_store.zig` 独立拥有跨平台 Account persistence 合同：secure store 中唯一的 refresh token，以及原子、无 secret 的 `preferences.json`；production 与 automation service 在编译期隔离；
-- `platform.zig` 是当前 Account 平台实现中唯一导入 Native SDK 的过渡边界，以同一 backend 适配各平台 credential、URL、timer 与 preference 持久化能力；它仍让 Product owner 持有原始 `PlatformServices`，属于 [验证规范](validation.md#native-sdk-能力路径)登记的架构缺口，不是获准兼容 seam，也不得增加新的底层能力或消费者；
+- `credential_store.zig` 独立拥有跨平台 Account persistence 合同、preference codec 与事务：secure store 中唯一的 refresh token，以及原子、无 secret 的 `preferences.json`；production 与 automation service 在编译期隔离；
+- `ports.zig` 定义 Account 对内需要的五族 effect surface：refresh-token credential、preference load/commit/delete、authorization URL、timer 与 Model Connection credential vault；它复用 `credential_store.Backend` 表达前两族，不为每个函数制造独立抽象，也不导入 Native SDK 或 Application；
 - `credentials.zig` 管理 execution credential ownership/rotation。
 
 Account 与 Workbench 是同级 owner，只通过纯 `account/contract.zig` 和 Application coordinator 主线程提交链协作。Bridge 只消费脱敏 view/command contract，不导入 Account Runtime。Application coordinator 可以持有两个 owner 的实例引用以协调提交，但不得持有 Account catalog、credential、attempt、mailbox 或 continuation 状态。
@@ -247,7 +249,7 @@ automation -> bridge, account contract, Native SDK
 storage -> SQLite amalgamation
 ```
 
-`storage -> SQLite amalgamation` 只存在于 direct backend；Storage contract 不依赖 SQLite 或 Native SDK，当前没有任何 `app/product -> storage` 正式运行时边。`bridge -> Native SDK` 只允许消费正式 Bridge transport contract，以及 transport authority 和窄 Application capability 调用所需的 data-only DTO/opaque identifier；它不允许 Bridge 持有 `PlatformServices`、具体平台实现、OS handle 或直接系统调用权。`automation -> bridge` 只消费 policy 类型；`automation -> Native SDK` 只消费同级 Bridge policy contract 类型，同样不得持有 `PlatformServices`、平台实现或系统调用权。当前 `account/platform.zig -> Native SDK` 是验证规范登记的非合规例外，不属于允许依赖图，也不能作为新增依赖的先例。禁止 `agent -> workbench/bridge/app`、`workbench -> bridge`、`bridge -> Account runtime` 和任何产品模块反向依赖 Renderer。
+`storage -> SQLite amalgamation` 只存在于 direct backend；Storage contract 不依赖 SQLite 或 Native SDK，当前没有任何 `app/product -> storage` 正式运行时边。`bridge -> Native SDK` 只允许消费正式 Bridge transport contract，以及 transport authority 和窄 Application capability 调用所需的 data-only DTO/opaque identifier；它不允许 Bridge 持有 `PlatformServices`、具体平台实现、OS handle 或直接系统调用权。`automation -> bridge` 只消费 policy 类型；`automation -> Native SDK` 只消费同级 Bridge policy contract 类型，同样不得持有 `PlatformServices`、平台实现或系统调用权。Account 只依赖自身 `ports.zig`；`app/account_platform_binding.zig` 在 Application 生命周期内持有并绑定对应系统 effect，shutdown 必须先让 Account 清空 port 引用，再释放 binding。禁止 `agent -> workbench/bridge/app`、`workbench -> bridge`、`bridge -> Account runtime` 和任何产品模块反向依赖 Renderer。
 
 ## 6. 测试与构建资产
 

@@ -4,7 +4,7 @@ const contract = @import("metawork_account_contract");
 const state_impl = @import("account_state");
 const metask_client = @import("metask_client");
 const credential_store = @import("account_credential_store");
-const platform_impl = @import("account_platform");
+const ports_impl = @import("account_ports");
 const login_attempt = @import("account_login_attempt");
 const catalog_impl = @import("account_catalog");
 const credentials_impl = @import("account_credentials_runtime");
@@ -259,7 +259,7 @@ const Effects = struct {
     fn startLogin(
         self: *Effects,
         attempt_id: u64,
-        platform: *platform_impl.NativeBackend,
+        authorization_url: ports_impl.AuthorizationUrl,
         now_unix_seconds: i64,
     ) void {
         std.debug.assert(!self.login_active);
@@ -278,7 +278,7 @@ const Effects = struct {
             return;
         };
         self.login_active = true;
-        platform.openAuthorizationUrl(
+        authorization_url.open(
             self.login_attempt.authorizationUrl(),
         ) catch self.failLoginAttempt(
             attempt_id,
@@ -545,7 +545,7 @@ pub const Runtime = struct {
     account: state_impl.Account = .initRestoring(),
     effects: Effects,
     candidate_public_catalog: catalog_impl.PublicCatalog = .{},
-    platform: ?platform_impl.NativeBackend = null,
+    platform: ?ports_impl.Platform = null,
     credentials: credentials_impl.CredentialOwner = .{},
     saved_preference: ?credential_store.Preference = null,
     model_connections: model_connections_impl.Registry,
@@ -591,18 +591,11 @@ pub const Runtime = struct {
 
     pub fn prepareStart(
         self: *Runtime,
-        services: platform_impl.Services,
+        platform: ports_impl.Platform,
     ) Prepared {
         self.assertMainThread();
         std.debug.assert(self.platform == null);
-        self.platform = platform_impl.NativeBackend.init(
-            services,
-            self.io,
-            self.main_thread_id,
-            self.account_path_storage[0..self.account_path_len],
-        ) catch |err| return self.preparedSignedOutRestoreFailure(
-            accountRestoreError(err),
-        );
+        self.platform = platform;
         self.restoreModelConnections();
         return self.prepareRestore();
     }
@@ -698,9 +691,8 @@ pub const Runtime = struct {
         switch (result) {
             .prepared => {},
             .rejected, .ignored_stale => if (self.credentials.available()) {
-                const platform = if (self.platform) |*value| value else return result;
-                platform_impl.startTimer(
-                    platform,
+                const platform = self.platform orelse return result;
+                platform.timer.start(
                     refresh_timer_id,
                     refresh_retry_ns,
                     false,
@@ -948,9 +940,9 @@ pub const Runtime = struct {
             !std.unicode.utf8ValidateSlice(model_id) or
             !std.unicode.utf8ValidateSlice(model_display_name))
             return .rejected(.model_connection_invalid);
-        const platform = if (self.platform) |*value| value else return .rejected(.model_connection_capture_unavailable);
-        var slot_storage: [platform_impl.model_connection_slot_bytes]u8 = undefined;
-        const slot_id = platform.generateModelConnectionCredentialSlot(
+        const platform = self.platform orelse return .rejected(.model_connection_capture_unavailable);
+        var slot_storage: [ports_impl.model_connection_slot_bytes]u8 = undefined;
+        const slot_id = platform.model_credentials.generateSlot(
             &slot_storage,
         ) catch return .rejected(.credential_store_write_failed);
 
@@ -972,7 +964,7 @@ pub const Runtime = struct {
         };
         self.model_connections.replace(&reserved);
 
-        platform.storeModelConnectionCredentialAtSlot(slot_id, secret) catch {
+        platform.model_credentials.store(slot_id, secret) catch {
             self.drainModelConnectionCredentialCleanup();
             return .rejected(.credential_store_write_failed);
         };
@@ -1073,10 +1065,10 @@ pub const Runtime = struct {
         self: *Runtime,
         binding: model_connections_impl.Registry.DefaultBinding,
     ) !contract.OwnedExecutionConfig {
-        const platform = if (self.platform) |*value| value else return error.CredentialStoreUnavailable;
+        const platform = self.platform orelse return error.CredentialStoreUnavailable;
         var secret_storage: [contract.Limits.api_key_bytes]u8 = undefined;
         defer std.crypto.secureZero(u8, &secret_storage);
-        const secret = (try platform.getModelConnectionCredential(
+        const secret = (try platform.model_credentials.get(
             binding.connection_id,
             &secret_storage,
         )) orelse return error.CredentialNotFound;
@@ -1095,10 +1087,10 @@ pub const Runtime = struct {
     ) !?contract.OwnedExecutionConfig {
         self.assertMainThread();
         const binding = self.model_connections.defaultBinding() orelse return null;
-        const platform = if (self.platform) |*value| value else return error.CredentialStoreUnavailable;
+        const platform = self.platform orelse return error.CredentialStoreUnavailable;
         var secret_storage: [contract.Limits.api_key_bytes]u8 = undefined;
         defer std.crypto.secureZero(u8, &secret_storage);
-        const secret = (try platform.getModelConnectionCredential(
+        const secret = (try platform.model_credentials.get(
             binding.connection_id,
             &secret_storage,
         )) orelse {
@@ -1205,9 +1197,8 @@ pub const Runtime = struct {
         if (prepared.schedule_refresh_after_commit)
             self.scheduleRefresh();
         if (prepared.retry_refresh_after_commit) {
-            if (self.platform) |*platform|
-                platform_impl.startTimer(
-                    platform,
+            if (self.platform) |platform|
+                platform.timer.start(
                     refresh_timer_id,
                     refresh_retry_ns,
                     false,
@@ -1219,8 +1210,8 @@ pub const Runtime = struct {
 
     pub fn cancelRefreshTimer(self: *Runtime) void {
         self.assertMainThread();
-        const platform = if (self.platform) |*value| value else return;
-        platform_impl.cancelTimer(platform, refresh_timer_id) catch {};
+        const platform = self.platform orelse return;
+        platform.timer.cancel(refresh_timer_id) catch {};
     }
 
     fn prepareWorkerCompletion(
@@ -1267,7 +1258,7 @@ pub const Runtime = struct {
             completion.payload.failed.error_code != .credential_store_delete_failed and
             self.account.currentIdentity() != null;
         if (loaded_identity) |identity| {
-            if (self.platform) |*platform|
+            if (self.platform) |platform|
                 self.discardForeignPreference(platform, identity.accountId());
         }
 
@@ -1308,8 +1299,8 @@ pub const Runtime = struct {
     }
 
     fn deleteInvalidCredential(self: *Runtime) contract.ErrorCode {
-        const result: contract.ErrorCode = if (self.platform) |*platform| blk: {
-            credential_store.commitSignedOut(platform.backend()) catch |err|
+        const result: contract.ErrorCode = if (self.platform) |platform| blk: {
+            credential_store.commitSignedOut(platform.credentials) catch |err|
                 break :blk accountStoreError(err);
             break :blk .metask_unauthorized;
         } else .credential_store_delete_failed;
@@ -1326,12 +1317,12 @@ pub const Runtime = struct {
         attempt_id: u64,
         tokens: *metask_client.AuthorizationResult,
     ) PrepareResult {
-        const platform = if (self.platform) |*value| value else return self.prepareFailure(
+        const platform = self.platform orelse return self.prepareFailure(
             attempt_id,
             .credential_store_write_failed,
         );
         credential_store.commitRefresh(
-            platform.backend(),
+            platform.credentials,
             &tokens.refresh_token,
         ) catch |err| return self.prepareFailure(
             attempt_id,
@@ -1362,12 +1353,12 @@ pub const Runtime = struct {
             rotation.belongsToAccount(current.accountId())
         else
             true;
-        const platform = if (self.platform) |*value| value else return self.prepareFailure(
+        const platform = self.platform orelse return self.prepareFailure(
             attempt_id,
             .credential_store_write_failed,
         );
         credential_store.commitRefresh(
-            platform.backend(),
+            platform.credentials,
             &rotation.persistenceInput().refresh_token,
         ) catch |err| return self.prepareFailure(
             attempt_id,
@@ -1423,7 +1414,7 @@ pub const Runtime = struct {
             .begin_oauth => {
                 const attempt_id = entry.attempt_id orelse
                     @panic("OAuth effect has no attempt");
-                const platform = if (self.platform) |*value| value else {
+                const platform = self.platform orelse {
                     self.effects.publishCompletion(.{
                         .attempt_id = attempt_id,
                         .payload = .{ .failed = .fromCode(
@@ -1441,7 +1432,11 @@ pub const Runtime = struct {
                     });
                     return;
                 };
-                self.effects.startLogin(attempt_id, platform, now);
+                self.effects.startLogin(
+                    attempt_id,
+                    platform.authorization_url,
+                    now,
+                );
             },
             .cancel_attempt => |attempt_id| self.effects.cancelAttemptAndDiscard(
                 attempt_id,
@@ -1456,7 +1451,6 @@ pub const Runtime = struct {
                 if (self.model_connection_store) |*store| store.deinit();
                 self.model_connection_store = null;
                 self.model_connection_store_healthy = false;
-                if (self.platform) |*platform| platform.deinit();
                 self.platform = null;
             },
             .refresh_token => {
@@ -1614,9 +1608,9 @@ pub const Runtime = struct {
 
     fn drainModelConnectionCredentialCleanup(self: *Runtime) void {
         if (!self.model_connection_store_healthy) return;
-        const platform = if (self.platform) |*value| value else return;
+        const platform = self.platform orelse return;
         while (self.model_connections.nextCredentialDeletion()) |connection_id| {
-            platform.deleteModelConnectionCredential(connection_id) catch return;
+            platform.model_credentials.delete(connection_id) catch return;
             var candidate = self.model_connections.clone() catch return;
             defer candidate.deinit();
             candidate.completeCredentialDeletion(connection_id) catch return;
@@ -1636,7 +1630,7 @@ pub const Runtime = struct {
     }
 
     fn persistSignedOut(self: *Runtime, attempt_id: u64) void {
-        const platform = if (self.platform) |*value| value else {
+        const platform = self.platform orelse {
             self.effects.publishCompletion(.{
                 .attempt_id = attempt_id,
                 .payload = .{ .failed = .fromCode(
@@ -1645,7 +1639,7 @@ pub const Runtime = struct {
             });
             return;
         };
-        credential_store.commitSignedOut(platform.backend()) catch |err| {
+        credential_store.commitSignedOut(platform.credentials) catch |err| {
             self.effects.publishCompletion(.{
                 .attempt_id = attempt_id,
                 .payload = .{ .failed = .fromCode(
@@ -1718,7 +1712,7 @@ pub const Runtime = struct {
         };
         defer execution.deinit();
         if (restored_generation == null) {
-            const platform = if (self.platform) |*value| value else {
+            const platform = self.platform orelse {
                 self.effects.publishCompletion(.{
                     .attempt_id = attempt_id,
                     .payload = .{ .failed = .fromCode(
@@ -1728,7 +1722,7 @@ pub const Runtime = struct {
                 return;
             };
             self.saved_preference = credential_store.commitPreference(
-                platform.backend(),
+                platform.credentials,
                 identity.accountId(),
                 self.effects.catalog.selectedApiKeyId(),
                 model,
@@ -1795,9 +1789,9 @@ pub const Runtime = struct {
     }
 
     fn scheduleRefresh(self: *Runtime) void {
-        const platform = if (self.platform) |*value| value else return;
+        const platform = self.platform orelse return;
         const expires_at = self.credentials.expiresAt() orelse {
-            platform_impl.cancelTimer(platform, refresh_timer_id) catch {};
+            platform.timer.cancel(refresh_timer_id) catch {};
             return;
         };
         const now = wallUnixSeconds(self.io) orelse return;
@@ -1810,8 +1804,7 @@ pub const Runtime = struct {
                 @intCast(refresh_at - now),
                 std.time.ns_per_s,
             ) catch std.math.maxInt(u64);
-        platform_impl.startTimer(
-            platform,
+        platform.timer.start(
             refresh_timer_id,
             @max(interval_ns, 1),
             false,
@@ -1843,13 +1836,13 @@ pub const Runtime = struct {
 
     fn discardForeignPreference(
         self: *Runtime,
-        platform: *platform_impl.NativeBackend,
+        platform: ports_impl.Platform,
         account_id: []const u8,
     ) void {
         const saved = self.saved_preference orelse return;
         if (std.mem.eql(u8, saved.ownerAccountId(), account_id)) return;
         self.saved_preference = null;
-        credential_store.clearPreference(platform.backend()) catch {};
+        credential_store.clearPreference(platform.credentials) catch {};
     }
 
     fn decorateView(
@@ -1870,7 +1863,7 @@ pub const Runtime = struct {
     fn prepareRestore(self: *Runtime) Prepared {
         var restored = credential_store.restore(
             self.allocator,
-            self.platform.?.backend(),
+            self.platform.?.credentials,
         ) catch |err| {
             self.credentials.clear();
             self.saved_preference = null;
@@ -2110,6 +2103,137 @@ fn testingTransport() metask_client.Transport {
     };
 }
 
+const TestPlatform = struct {
+    refresh_token: ?[]const u8 = null,
+    preference: ?credential_store.Preference = null,
+    model_slot: [ports_impl.model_connection_slot_bytes]u8 = undefined,
+    model_slot_len: usize = 0,
+    model_secret: [contract.Limits.api_key_bytes]u8 = undefined,
+    model_secret_len: usize = 0,
+    model_present: bool = false,
+
+    fn platform(self: *TestPlatform) ports_impl.Platform {
+        return .{
+            .credentials = .{
+                .context = self,
+                .set_refresh_token_fn = setRefresh,
+                .get_refresh_token_fn = getRefresh,
+                .delete_refresh_token_fn = deleteRefresh,
+                .load_preference_fn = loadPreference,
+                .commit_preference_fn = commitPreference,
+                .delete_preference_fn = deletePreference,
+            },
+            .authorization_url = .{
+                .context = self,
+                .open_fn = openAuthorizationUrl,
+            },
+            .timer = .{
+                .context = self,
+                .start_fn = startTimer,
+                .cancel_fn = cancelTimer,
+            },
+            .model_credentials = .{
+                .context = self,
+                .generate_slot_fn = generateModelSlot,
+                .store_fn = storeModelCredential,
+                .get_fn = getModelCredential,
+                .delete_fn = deleteModelCredential,
+            },
+        };
+    }
+
+    fn setRefresh(context: *anyopaque, value: []const u8) credential_store.StoreError!void {
+        const self: *TestPlatform = @ptrCast(@alignCast(context));
+        self.refresh_token = value;
+    }
+
+    fn getRefresh(
+        context: *anyopaque,
+        output: []u8,
+    ) credential_store.StoreError!?[]const u8 {
+        const self: *TestPlatform = @ptrCast(@alignCast(context));
+        const value = self.refresh_token orelse return null;
+        if (value.len > output.len) return error.ReadFailed;
+        @memcpy(output[0..value.len], value);
+        return output[0..value.len];
+    }
+
+    fn deleteRefresh(context: *anyopaque) credential_store.StoreError!void {
+        const self: *TestPlatform = @ptrCast(@alignCast(context));
+        self.refresh_token = null;
+    }
+
+    fn loadPreference(context: *anyopaque) credential_store.StoreError!?credential_store.Preference {
+        const self: *TestPlatform = @ptrCast(@alignCast(context));
+        return self.preference;
+    }
+
+    fn commitPreference(
+        context: *anyopaque,
+        value: credential_store.Preference,
+    ) credential_store.StoreError!void {
+        const self: *TestPlatform = @ptrCast(@alignCast(context));
+        self.preference = value;
+    }
+
+    fn deletePreference(context: *anyopaque) credential_store.StoreError!void {
+        const self: *TestPlatform = @ptrCast(@alignCast(context));
+        self.preference = null;
+    }
+
+    fn openAuthorizationUrl(_: *anyopaque, _: []const u8) !void {}
+    fn startTimer(_: *anyopaque, _: u64, _: u64, _: bool) !void {}
+    fn cancelTimer(_: *anyopaque, _: u64) !void {}
+
+    fn generateModelSlot(
+        _: *anyopaque,
+        output: *[ports_impl.model_connection_slot_bytes]u8,
+    ) credential_store.StoreError!void {
+        const slot = ports_impl.model_connection_slot_prefix ++
+            "00000000000000000000000000000001";
+        @memcpy(output, slot);
+    }
+
+    fn storeModelCredential(
+        context: *anyopaque,
+        slot: []const u8,
+        secret: []const u8,
+    ) credential_store.StoreError!void {
+        const self: *TestPlatform = @ptrCast(@alignCast(context));
+        if (slot.len > self.model_slot.len or secret.len > self.model_secret.len)
+            return error.WriteFailed;
+        @memcpy(self.model_slot[0..slot.len], slot);
+        @memcpy(self.model_secret[0..secret.len], secret);
+        self.model_slot_len = slot.len;
+        self.model_secret_len = secret.len;
+        self.model_present = true;
+    }
+
+    fn getModelCredential(
+        context: *anyopaque,
+        slot: []const u8,
+        output: []u8,
+    ) credential_store.StoreError!?[]const u8 {
+        const self: *TestPlatform = @ptrCast(@alignCast(context));
+        if (!self.model_present or
+            !std.mem.eql(u8, slot, self.model_slot[0..self.model_slot_len]))
+            return null;
+        if (self.model_secret_len > output.len) return error.ReadFailed;
+        @memcpy(output[0..self.model_secret_len], self.model_secret[0..self.model_secret_len]);
+        return output[0..self.model_secret_len];
+    }
+
+    fn deleteModelCredential(
+        context: *anyopaque,
+        slot: []const u8,
+    ) credential_store.StoreError!void {
+        const self: *TestPlatform = @ptrCast(@alignCast(context));
+        if (self.model_present and
+            std.mem.eql(u8, slot, self.model_slot[0..self.model_slot_len]))
+            self.model_present = false;
+    }
+};
+
 fn testingPerform(
     _: *anyopaque,
     _: metask_client.Request,
@@ -2301,11 +2425,9 @@ test "Account Runtime persists a nonzero nonce for a new execution" {
         .{ .context = &wake_context, .notify_fn = testingWake },
     );
     defer runtime.deinit();
-    defer if (runtime.platform) |*platform| {
-        platform.deinit();
-        runtime.platform = null;
-    };
-    var startup = runtime.prepareStart(.{});
+    defer runtime.platform = null;
+    var fake: TestPlatform = .{};
+    var startup = runtime.prepareStart(fake.platform());
     defer startup.deinit();
     try installExecutionPreparationForTest(&runtime);
 
@@ -2328,70 +2450,6 @@ test "Account Runtime persists a nonzero nonce for a new execution" {
 }
 
 test "Account Runtime persists and restores a secure model connection default" {
-    const FakeCredentials = struct {
-        service: [128]u8 = undefined,
-        service_len: usize = 0,
-        account: [128]u8 = undefined,
-        account_len: usize = 0,
-        secret: [contract.Limits.api_key_bytes]u8 = undefined,
-        secret_len: usize = 0,
-        present: bool = false,
-
-        fn services(self: *@This()) platform_impl.Services {
-            return .{
-                .context = self,
-                .set_credential_fn = set,
-                .get_credential_fn = get,
-                .delete_credential_fn = delete,
-            };
-        }
-
-        fn set(
-            context: ?*anyopaque,
-            value: platform_impl.Credential,
-        ) anyerror!void {
-            const self: *@This() = @ptrCast(@alignCast(context.?));
-            if (value.service.len > self.service.len or
-                value.account.len > self.account.len or
-                value.secret.len > self.secret.len)
-                return error.CredentialFieldTooLarge;
-            @memcpy(self.service[0..value.service.len], value.service);
-            @memcpy(self.account[0..value.account.len], value.account);
-            @memcpy(self.secret[0..value.secret.len], value.secret);
-            self.service_len = value.service.len;
-            self.account_len = value.account.len;
-            self.secret_len = value.secret.len;
-            self.present = true;
-        }
-
-        fn get(
-            context: ?*anyopaque,
-            key: platform_impl.CredentialKey,
-            output: []u8,
-        ) anyerror![]const u8 {
-            const self: *@This() = @ptrCast(@alignCast(context.?));
-            if (!self.present or
-                !std.mem.eql(u8, key.service, self.service[0..self.service_len]) or
-                !std.mem.eql(u8, key.account, self.account[0..self.account_len]))
-                return error.CredentialNotFound;
-            if (self.secret_len > output.len) return error.CredentialFieldTooLarge;
-            @memcpy(output[0..self.secret_len], self.secret[0..self.secret_len]);
-            return output[0..self.secret_len];
-        }
-
-        fn delete(
-            context: ?*anyopaque,
-            key: platform_impl.CredentialKey,
-        ) anyerror!void {
-            const self: *@This() = @ptrCast(@alignCast(context.?));
-            if (!self.present or
-                !std.mem.eql(u8, key.service, self.service[0..self.service_len]) or
-                !std.mem.eql(u8, key.account, self.account[0..self.account_len]))
-                return error.CredentialNotFound;
-            self.present = false;
-        }
-    };
-
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var account_path_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -2401,7 +2459,7 @@ test "Account Runtime persists and restores a secure model connection default" {
     );
     const account_path = account_path_storage[0..account_path_len];
     var wake_context: u8 = 0;
-    var fake = FakeCredentials{};
+    var fake: TestPlatform = .{};
 
     {
         var runtime = try Runtime.init(
@@ -2413,11 +2471,8 @@ test "Account Runtime persists and restores a secure model connection default" {
             .{ .context = &wake_context, .notify_fn = testingWake },
         );
         defer runtime.deinit();
-        defer if (runtime.platform) |*platform| {
-            platform.deinit();
-            runtime.platform = null;
-        };
-        var startup = runtime.prepareStart(fake.services());
+        defer runtime.platform = null;
+        var startup = runtime.prepareStart(fake.platform());
         defer startup.deinit();
         const created = runtime.createModelConnectionWithCredential(
             "provider-secret",
@@ -2431,7 +2486,7 @@ test "Account Runtime persists and restores a secure model connection default" {
         );
         try std.testing.expect(created.accepted);
         const created_connection_id = runtime.view().model_connections[0].id;
-        var connection_id_storage: [platform_impl.model_connection_slot_bytes]u8 = undefined;
+        var connection_id_storage: [ports_impl.model_connection_slot_bytes]u8 = undefined;
         @memcpy(
             connection_id_storage[0..created_connection_id.len],
             created_connection_id,
@@ -2484,11 +2539,8 @@ test "Account Runtime persists and restores a secure model connection default" {
             .{ .context = &wake_context, .notify_fn = testingWake },
         );
         defer runtime.deinit();
-        defer if (runtime.platform) |*platform| {
-            platform.deinit();
-            runtime.platform = null;
-        };
-        var startup = runtime.prepareStart(fake.services());
+        defer runtime.platform = null;
+        var startup = runtime.prepareStart(fake.platform());
         defer startup.deinit();
         try std.testing.expectEqual(@as(usize, 1), runtime.view().model_connections.len);
         var execution = (try runtime.resolveDefaultModelConnectionExecution()) orelse
@@ -2499,7 +2551,7 @@ test "Account Runtime persists and restores a secure model connection default" {
         try std.testing.expectEqual(@as(u64, 17), execution.input().execution_generation);
     }
 
-    fake.present = false;
+    fake.model_present = false;
 
     {
         var runtime = try Runtime.init(
@@ -2511,11 +2563,8 @@ test "Account Runtime persists and restores a secure model connection default" {
             .{ .context = &wake_context, .notify_fn = testingWake },
         );
         defer runtime.deinit();
-        defer if (runtime.platform) |*platform| {
-            platform.deinit();
-            runtime.platform = null;
-        };
-        var startup = runtime.prepareStart(fake.services());
+        defer runtime.platform = null;
+        var startup = runtime.prepareStart(fake.platform());
         defer startup.deinit();
         try std.testing.expect((try runtime.resolveDefaultModelConnectionExecution()) == null);
         const missing = runtime.view().model_connections[0];
@@ -2535,7 +2584,7 @@ test "Account Runtime persists and restores a secure model connection default" {
         } });
         try std.testing.expect(removed.accepted);
         try std.testing.expectEqual(@as(usize, 0), runtime.view().model_connections.len);
-        try std.testing.expect(!fake.present);
+        try std.testing.expect(!fake.model_present);
     }
 }
 

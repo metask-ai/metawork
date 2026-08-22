@@ -112,9 +112,8 @@ architecture guard 必须保持 `PlatformServices.context` 零 allowlist。原�
 
 ### 已登记架构缺口
 
-- `src/app/platform.zig` 与 `src/app/window.zig` 仍有 Runtime 已覆盖能力的直接低层调用，Application adapter 仍长期持有原始 `PlatformServices`。后续按独立 routing DAG 收口，不扩大为兼容 allowlist。
+- `src/app/platform.zig`、`src/app/window.zig` 与 `src/app/account_platform_binding.zig` 仍有 Runtime 已覆盖能力的直接低层调用，Application adapter 仍长期持有原始 `PlatformServices`。后续按独立 routing DAG 收口，不扩大为兼容 allowlist；Account Product owner 已只消费 MetaWork-owned ports，这一剩余缺口不再反向传播 Native SDK authority。
 - `src/app/platform.zig` 的 main-loop `wake` 尚未形成单项兼容 seam；先确认 SDK 缺口，再隔离并验证线程与 shutdown。
-- `src/account/platform.zig` 仍由 Product owner 持有原始 `PlatformServices` 并适配 credential、URL、timer 和 persistence。四族 owner-defined port 的 binding 应移回 Application，再随 SDK Runtime 能力逐项删除直接适配。
 
 因此，单个 window-chrome seam 通过不等于全仓 Native SDK 能力路径合规；上述缺口未收口前，全仓 gate 保持打开。
 

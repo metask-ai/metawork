@@ -119,6 +119,8 @@ Native SDK Bridge API 是独立的正式 transport surface，不属于系统能�
 
 产品需要系统能力时，正常依赖链是 `Product owner → MetaWork-owned capability → Application adapter → Native SDK Runtime API → SDK internals → OS`；Bridge 需要受限系统 effect 时经窄 Application capability 进入同一 Runtime 路径；Application 自身的生命周期和窗口行为直接进入 Runtime API。系统能力按以下三级调用路径消费：
 
+Account 是该依赖链的具体实例：Account-owned `ports.zig` 定义 credential/preference、authorization URL、timer 与 Model Connection credential vault 需求，Application-owned `account_platform_binding.zig` 负责绑定和资源生命周期。Account 不导入 Native SDK 或 Application 实现；binding 不拥有 Account codec、事务、恢复、registry 或 persistence health。
+
 | 路径     | 调用链                                                             | 适用条件                                                                         |
 | -------- | ------------------------------------------------------------------ | -------------------------------------------------------------------------------- |
 | 正常路径 | Application → Native SDK Runtime API → SDK `PlatformServices` → OS | Runtime API 已提供完整能力；MetaWork 只调用 Runtime API，后两段属于 SDK 内部实现 |

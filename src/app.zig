@@ -10,6 +10,7 @@ const product_identity = @import("metawork_product_identity");
 const mcp_platform = @import("metawork_mcp_platform");
 const mcp_oauth = @import("metawork_mcp_oauth");
 const account_coordinator = @import("app/account_coordinator.zig");
+const account_platform_binding = @import("app/account_platform_binding.zig");
 const metask_http_transport = @import("app/metask_http_transport.zig");
 const agent_event_coordinator = @import("app/agent_event_coordinator.zig");
 const app_automation = @import("app/automation.zig");
@@ -42,6 +43,8 @@ const App = struct {
     main_thread_id: std.Thread.Id,
     automation: app_automation.Adapter,
     platform: app_platform.Adapter,
+    account_path: []const u8 = "",
+    account_platform_binding: ?account_platform_binding.Adapter = null,
     dispatcher: ?*bridge_api.Dispatcher = null,
     agent_runtime: ?*agent.Runtime = null,
     workbench: ?*workbench_api.Workbench = null,
@@ -236,7 +239,17 @@ const App = struct {
                 );
             }
         } else if (self.platform.services()) |services| {
-            coordinator.start(services);
+            self.account_platform_binding = account_platform_binding.Adapter.init(
+                services,
+                self.io,
+                self.main_thread_id,
+                self.account_path,
+            ) catch null;
+            if (self.account_platform_binding) |*binding| {
+                coordinator.start(binding.ports());
+            } else {
+                coordinator.startUnavailable();
+            }
         } else {
             coordinator.startUnavailable();
         }
@@ -261,6 +274,8 @@ const App = struct {
             coordinator.shutdown();
             coordinator.drain();
         };
+        if (self.account_platform_binding) |*binding| binding.deinit();
+        self.account_platform_binding = null;
         if (self.workbench) |workbench| workbench.shutdownExecutor();
         if (self.agent_runtime) |agent_runtime| {
             try agent_runtime.shutdown();
@@ -382,6 +397,7 @@ pub fn run(init: std.process.Init) !void {
         app.automation.canonicalUserHome(),
     );
     defer paths_state.deinit();
+    app.account_path = paths_state.accountDir();
     var stores_state: app_stores.Stores = undefined;
     stores_state.init(init.io, std.heap.c_allocator, &paths_state);
     defer stores_state.deinit();

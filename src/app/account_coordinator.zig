@@ -3,6 +3,8 @@ const builtin = @import("builtin");
 const agent = @import("metawork_agent");
 const account_contract = @import("metawork_account_contract");
 const account_api = @import("metawork_account");
+const account_ports = @import("account_ports");
+const account_store = @import("account_credential_store");
 const workbench_api = @import("metawork_workbench");
 
 const ExecutionReplacement = enum { none, startup, default, identity };
@@ -339,11 +341,11 @@ pub const Coordinator = struct {
 
     pub fn start(
         self: *Coordinator,
-        services: account_api.PlatformServices,
+        platform: account_api.PlatformPorts,
     ) void {
         self.assertMainThread();
         const result = self.commitPrepared(
-            self.runtime.prepareStart(services),
+            self.runtime.prepareStart(platform),
             .none,
         );
         std.debug.assert(result.accepted);
@@ -878,12 +880,11 @@ test "Application coordinator balances Workbench gate when Account effect admiss
 // first-model selection -> execution persistence, then a manual key switch.
 // Every network step answers through the production single-flight worker via
 // a scripted Metask transport; only the OS keychain and timers are faked.
-const native_sdk = @import("native_sdk");
-
 const FakePlatform = struct {
     secret: [256]u8 = undefined,
     secret_len: usize = 0,
     stored: bool = false,
+    preference: ?account_store.Preference = null,
 
     fn seed(self: *FakePlatform, refresh_token: []const u8) void {
         @memcpy(self.secret[0..refresh_token.len], refresh_token);
@@ -891,61 +892,119 @@ const FakePlatform = struct {
         self.stored = true;
     }
 
-    fn services(self: *FakePlatform) account_api.PlatformServices {
+    fn ports(self: *FakePlatform) account_api.PlatformPorts {
         return .{
-            .context = self,
-            .set_credential_fn = setCredential,
-            .get_credential_fn = getCredential,
-            .delete_credential_fn = deleteCredential,
-            .start_timer_fn = startTimer,
-            .cancel_timer_fn = cancelTimer,
-            .open_external_url_fn = openExternalUrl,
+            .credentials = .{
+                .context = self,
+                .set_refresh_token_fn = setCredential,
+                .get_refresh_token_fn = getCredential,
+                .delete_refresh_token_fn = deleteCredential,
+                .load_preference_fn = loadPreference,
+                .commit_preference_fn = commitPreference,
+                .delete_preference_fn = deletePreference,
+            },
+            .authorization_url = .{
+                .context = self,
+                .open_fn = openExternalUrl,
+            },
+            .timer = .{
+                .context = self,
+                .start_fn = startTimer,
+                .cancel_fn = cancelTimer,
+            },
+            .model_credentials = .{
+                .context = self,
+                .generate_slot_fn = generateModelSlot,
+                .store_fn = storeModelCredential,
+                .get_fn = getModelCredential,
+                .delete_fn = deleteModelCredential,
+            },
         };
     }
 
     fn setCredential(
-        context: ?*anyopaque,
-        credential: native_sdk.platform.Credential,
-    ) anyerror!void {
-        const self: *FakePlatform = @ptrCast(@alignCast(context.?));
-        if (credential.secret.len > self.secret.len) return error.WriteFailed;
-        @memcpy(self.secret[0..credential.secret.len], credential.secret);
-        self.secret_len = credential.secret.len;
+        context: *anyopaque,
+        secret: []const u8,
+    ) account_store.StoreError!void {
+        const self: *FakePlatform = @ptrCast(@alignCast(context));
+        if (secret.len > self.secret.len) return error.WriteFailed;
+        @memcpy(self.secret[0..secret.len], secret);
+        self.secret_len = secret.len;
         self.stored = true;
     }
 
     fn getCredential(
-        context: ?*anyopaque,
-        key: native_sdk.platform.CredentialKey,
+        context: *anyopaque,
         buffer: []u8,
-    ) anyerror![]const u8 {
-        _ = key;
-        const self: *FakePlatform = @ptrCast(@alignCast(context.?));
-        if (!self.stored) return error.CredentialNotFound;
+    ) account_store.StoreError!?[]const u8 {
+        const self: *FakePlatform = @ptrCast(@alignCast(context));
+        if (!self.stored) return null;
         if (self.secret_len > buffer.len) return error.ReadFailed;
         @memcpy(buffer[0..self.secret_len], self.secret[0..self.secret_len]);
         return buffer[0..self.secret_len];
     }
 
-    fn deleteCredential(
-        context: ?*anyopaque,
-        key: native_sdk.platform.CredentialKey,
-    ) anyerror!void {
-        _ = key;
-        const self: *FakePlatform = @ptrCast(@alignCast(context.?));
+    fn deleteCredential(context: *anyopaque) account_store.StoreError!void {
+        const self: *FakePlatform = @ptrCast(@alignCast(context));
         self.stored = false;
     }
 
+    fn loadPreference(context: *anyopaque) account_store.StoreError!?account_store.Preference {
+        const self: *FakePlatform = @ptrCast(@alignCast(context));
+        return self.preference;
+    }
+
+    fn commitPreference(
+        context: *anyopaque,
+        value: account_store.Preference,
+    ) account_store.StoreError!void {
+        const self: *FakePlatform = @ptrCast(@alignCast(context));
+        self.preference = value;
+    }
+
+    fn deletePreference(context: *anyopaque) account_store.StoreError!void {
+        const self: *FakePlatform = @ptrCast(@alignCast(context));
+        self.preference = null;
+    }
+
     fn startTimer(
-        _: ?*anyopaque,
+        _: *anyopaque,
         _: u64,
         _: u64,
         _: bool,
     ) anyerror!void {}
 
-    fn cancelTimer(_: ?*anyopaque, _: u64) anyerror!void {}
+    fn cancelTimer(_: *anyopaque, _: u64) anyerror!void {}
 
-    fn openExternalUrl(_: ?*anyopaque, _: []const u8) anyerror!void {}
+    fn openExternalUrl(_: *anyopaque, _: []const u8) anyerror!void {}
+
+    fn generateModelSlot(
+        _: *anyopaque,
+        _: *[account_ports.model_connection_slot_bytes]u8,
+    ) account_store.StoreError!void {
+        return error.WriteFailed;
+    }
+
+    fn storeModelCredential(
+        _: *anyopaque,
+        _: []const u8,
+        _: []const u8,
+    ) account_store.StoreError!void {
+        return error.WriteFailed;
+    }
+
+    fn getModelCredential(
+        _: *anyopaque,
+        _: []const u8,
+        _: []u8,
+    ) account_store.StoreError!?[]const u8 {
+        return null;
+    }
+
+    fn deleteModelCredential(
+        _: *anyopaque,
+        _: []const u8,
+    ) account_store.StoreError!void {}
 };
 
 const FakeMetask = struct {
@@ -1091,7 +1150,7 @@ test "restored login drives automatic key and model defaults end to end" {
 
     var fake_platform: FakePlatform = .{};
     fake_platform.seed("stored-refresh-token");
-    coordinator.start(fake_platform.services());
+    coordinator.start(fake_platform.ports());
 
     // Phase 1: the automatic continuation must land the first key and the
     // first model without any user action.
@@ -1181,7 +1240,7 @@ test "relaunch with persisted selection restores the saved execution" {
             std.Thread.getCurrentId(),
             std.testing.io,
         );
-        coordinator.start(fake_platform.services());
+        coordinator.start(fake_platform.ports());
         const settled = pumpUntilReady(&coordinator, &account_runtime, "boot1");
         try std.testing.expectEqual(
             account_contract.CatalogState.ready,
@@ -1228,7 +1287,7 @@ test "relaunch with persisted selection restores the saved execution" {
             std.Thread.getCurrentId(),
             std.testing.io,
         );
-        coordinator.start(fake_platform.services());
+        coordinator.start(fake_platform.ports());
         const settled = pumpUntilReady(&coordinator, &account_runtime, "boot2");
         try std.testing.expectEqual(
             account_contract.AccountState.authenticated,
@@ -1312,7 +1371,7 @@ test "broken first key parks the catalog and a manual switch recovers" {
         std.Thread.getCurrentId(),
         std.testing.io,
     );
-    coordinator.start(fake_platform.services());
+    coordinator.start(fake_platform.ports());
 
     // The automatic continuation picks key 1 whose model catalog fails.
     const parked = pumpUntilReady(&coordinator, &account_runtime, "broken");

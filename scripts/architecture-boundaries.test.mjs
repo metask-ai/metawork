@@ -178,6 +178,38 @@ test("Account owns Metask protocol without a concrete HTTP client", () => {
   assert.match(app, /account_http\.transport\(\)/);
 });
 
+test("Account owns platform ports while Application binds Native SDK effects", () => {
+  const accountSource = ["src/account.zig", ...zigFiles("src/account/")]
+    .map(read)
+    .join("\n");
+  const ports = read("src/account/ports.zig");
+  const runtime = read("src/account/runtime.zig");
+  const binding = read("src/app/account_platform_binding.zig");
+  const app = read("src/app.zig");
+
+  assert.doesNotMatch(
+    accountSource,
+    /@import\("native_sdk"\)|PlatformServices/,
+  );
+  assert.doesNotMatch(accountSource, /account_platform_binding|src\/app\//);
+  assert.match(ports, /pub const Platform = struct/);
+  assert.match(ports, /credentials: credential_store\.Backend/);
+  assert.match(ports, /authorization_url: AuthorizationUrl/);
+  assert.match(ports, /timer: Timer/);
+  assert.match(ports, /model_credentials: ModelCredentialVault/);
+  assert.match(runtime, /@import\("account_ports"\)/);
+  assert.match(binding, /native_sdk\.platform\.PlatformServices/);
+  assert.match(binding, /pub fn ports\(self: \*Adapter\) ports_api\.Platform/);
+  assert.match(binding, /\.load_preference_fn = loadPreference/);
+  assert.match(binding, /\.commit_preference_fn = commitPreference/);
+  assert.match(binding, /\.delete_preference_fn = deletePreference/);
+  assert.match(app, /account_platform_binding\.Adapter\.init/);
+  assert.match(
+    app,
+    /coordinator\.shutdown\(\);[\s\S]*coordinator\.drain\(\);[\s\S]*binding\.deinit\(\)/,
+  );
+});
+
 test("Storage owns SQLite without entering the Product or Application graph", () => {
   const storageFiles = ["src/storage.zig", ...zigFiles("src/storage/")];
   const storageContract = read("src/storage/sql.zig");
