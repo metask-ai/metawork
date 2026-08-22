@@ -133,7 +133,7 @@ npm run build:release
 npm run package:macos
 ```
 
-应用与 DMG 签名、公证、staple、Gatekeeper、Finder 左到右拖拽布局、磁盘映像及挂载内容的身份与完整性规则由 macOS 签名文档及对应脚本负责。`package:macos` 只产出小写 `metawork-<version>-macos-arm64.dmg`，不生成分发 ZIP。普通 check/test/build 不得访问个人证书、Finder 或 notary profile；`package:macos` 成功证明当前图形用户会话生成的可分发磁盘映像，不等于更新能力完成。
+跨平台开发入口与 Apple Development 签名规则由 `dev.mjs` 负责，setup 只复用该开发 owner；Developer ID、应用与 DMG 签名、公证、staple、Gatekeeper、Finder 左到右拖拽布局、磁盘映像及挂载内容的身份与完整性规则由 `package-macos.mjs` 负责。两个 owner 必须保持双向隔离。Native SDK 必须先生成未签名 `.app`；应用签名前必须把 64 × 64 托盘 PNG stage 到与运行时相对路径一致的 `Contents/Resources/assets/icons/tray-icon.png`，随后只执行一次 Developer ID 应用签名，并在同一入口检查格式、尺寸、源资产一致性、Renderer、metadata 与签名 policy。`package:macos` 只产出小写 `metawork-<version>-macos-arm64.dmg`，不生成 preview 或 ZIP。普通 check/test/build 不得访问个人证书、Finder 或 notary profile；`package:macos` 成功证明当前图形用户会话生成的可分发磁盘映像，不等于更新能力完成。
 
 Keychain 跨重建授权稳定性当前为 **人工验收待完成**：在同一精确 commit 上让 Debug app 写入并读取 Account credential，完全退出并重新构建，再次恢复 Account，确认没有出现新的 Account Keychain 授权框。首次选择签名私钥产生的系统授权不属于 Account Keychain 失败。
 

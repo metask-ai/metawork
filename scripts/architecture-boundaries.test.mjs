@@ -458,10 +458,30 @@ test("ordinary build and test entries stay isolated from macOS signing", () => {
   for (const script of ["check", "test", "build:debug", "build:release"]) {
     assert.doesNotMatch(
       packageJson.scripts[script],
-      /codesign|macos-local-signing/u,
+      /codesign|package-macos|macos-local-development|scripts\/dev\.mjs/u,
     );
   }
   for (const entry of ["scripts/build.mjs", "scripts/run-tests.mjs"]) {
-    assert.doesNotMatch(read(entry), /codesign|macos-local-signing/u);
+    assert.doesNotMatch(
+      read(entry),
+      /codesign|package-macos|macos-local-development|scripts\/dev\.mjs/u,
+    );
   }
+});
+
+test("development and macOS distribution signing owners stay isolated", () => {
+  const development = read("scripts/dev.mjs");
+  const setup = read("scripts/setup-macos-local-signing.mjs");
+  const distribution = read("scripts/package-macos.mjs");
+
+  assert.match(setup, /from "\.\/dev\.mjs"/u);
+  assert.doesNotMatch(setup, /package-macos\.mjs/u);
+  assert.doesNotMatch(
+    development,
+    /package-macos\.mjs|Developer ID Application|notarytool|hdiutil|distributionDiskImage/u,
+  );
+  assert.doesNotMatch(
+    distribution,
+    /from "\.\/dev\.mjs"|setup-macos-local-signing|Apple Development|\.metawork-local-signing|runDevelopment|signWithStableRequirement/u,
+  );
 });

@@ -9,14 +9,14 @@
     "frontend"
   ],
   "scripts": {
-    "dev": "node scripts/macos-local-signing.mjs dev",
+    "dev": "node scripts/dev.mjs",
     "check": "node scripts/verify-staged-agentcore-bundle.mjs && npm --workspace @metawork/renderer run check && native check . --strict",
     "test": "node scripts/run-tests.mjs",
     "build:debug": "node scripts/build.mjs debug",
     "build:release": "node scripts/build.mjs release",
     "format": "zig fmt build.zig build_support src tests app.zon && prettier --write frontend scripts package.json",
     "format:check": "zig fmt --check build.zig build_support src tests app.zon && prettier --check frontend scripts package.json",
-    "package:macos": "node scripts/macos-local-signing.mjs package",
+    "package:macos": "node scripts/package-macos.mjs",
     "package:windows": "node scripts/package-windows.mjs"
   },
   "devDependencies": {

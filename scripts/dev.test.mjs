@@ -1,30 +1,21 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
   buildAppleDevelopmentRequirement,
   buildCanonicalDesignatedRequirement,
-  buildDeveloperIdRequirement,
-  buildDmgFinderLayoutScript,
   isAppleDevelopmentIdentityName,
-  isDeveloperIdApplicationIdentityName,
-  localDistributionDiskImageName,
-  localPreviewDiskImageName,
-  localPackageMetadata,
   localProductIdentity,
   parseCodeDirectoryIdentifier,
   parseCodeSigningIdentities,
-  parseDeveloperIdCertificateReport,
   parseDesignatedRequirement,
   parseLocalSigningConfig,
   parseNativeProductIdentity,
-  parseNativePackageMetadata,
-  parseNotarySubmission,
   parseTeamIdentifier,
-  selectDistributionCodeSigningIdentity,
   selectLocalCodeSigningIdentity,
   validateCanonicalDesignatedRequirement,
-} from "./macos-local-signing.mjs";
+} from "./dev.mjs";
 import { xcodeContentsForDeveloperDirectory } from "./setup-macos-local-signing.mjs";
 
 const fingerprint = "0123456789ABCDEF0123456789ABCDEF01234567";
@@ -32,9 +23,8 @@ const secondFingerprint = "FEDCBA9876543210FEDCBA9876543210FEDCBA98";
 const certificateSuffix = "6L6UHLW8L7";
 const teamId = "Z4T2BLNJ8X";
 const identityName = `Apple Development: developer@example.com (${certificateSuffix})`;
-const distributionIdentityName = `Developer ID Application: Developer Name (${teamId})`;
 
-test("local signing reads the existing Native product identity", () => {
+test("development signing reads the existing Native product identity", () => {
   assert.deepEqual(localProductIdentity, {
     bundleId: "com.metask.metawork.dev",
     executableName: "metawork",
@@ -52,49 +42,11 @@ test("local signing reads the existing Native product identity", () => {
   );
 });
 
-test("distribution DMG metadata comes from the Native product manifest", () => {
-  assert.deepEqual(localPackageMetadata, {
-    displayName: "MetaWork",
-    version: "0.1.1",
-  });
-  assert.equal(
-    localDistributionDiskImageName,
-    "metawork-0.1.1-macos-arm64.dmg",
+test("development has one cross-platform public entry", () => {
+  const packageJson = JSON.parse(
+    readFileSync(new URL("../package.json", import.meta.url), "utf8"),
   );
-  assert.equal(
-    localPreviewDiskImageName,
-    "metawork-0.1.1-macos-arm64-preview.dmg",
-  );
-  assert.deepEqual(
-    parseNativePackageMetadata(
-      `.{\n.display_name = "ExampleApp",\n.version = "1.2.3-beta.1",\n}`,
-    ),
-    { displayName: "ExampleApp", version: "1.2.3-beta.1" },
-  );
-  assert.throws(
-    () =>
-      parseNativePackageMetadata(
-        `.{\n.display_name = "bad name",\n.version = "latest",\n}`,
-      ),
-    /invalid native package metadata/u,
-  );
-});
-
-test("distribution DMG Finder layout presents left-to-right installation", () => {
-  const script = buildDmgFinderLayoutScript('/tmp/layout "target"');
-  assert.match(script, /set targetWindow to front window/u);
-  assert.equal(
-    script.match(/bounds of targetWindow to \{100, 100, 700, 440\}/gu)?.length,
-    2,
-  );
-  assert.match(script, /bounds of targetWindow to \{100, 100, 700, 440\}/u);
-  assert.match(script, /position of item "MetaWork\.app".*\{165, 135\}/u);
-  assert.match(script, /position of item "Applications".*\{435, 135\}/u);
-  assert.match(script, /POSIX file "\/tmp\/layout \\"target\\""/u);
-  assert.throws(
-    () => buildDmgFinderLayoutScript("/tmp/invalid\0path"),
-    /contains NUL/u,
-  );
+  assert.equal(packageJson.scripts.dev, "node scripts/dev.mjs");
 });
 
 test("local signing identity selection accepts one Apple Development identity", () => {
@@ -145,77 +97,6 @@ test("local signing identity selection rejects self-signed, missing, and ambiguo
   });
 });
 
-test("distribution signing selects only one Developer ID Application identity", () => {
-  const output = `
-  1) ${fingerprint} "${identityName}"
-  2) ${secondFingerprint} "${distributionIdentityName}"
-     2 valid identities found
-`;
-  assert.equal(
-    isDeveloperIdApplicationIdentityName(distributionIdentityName),
-    true,
-  );
-  assert.deepEqual(selectDistributionCodeSigningIdentity(output), {
-    fingerprint: secondFingerprint,
-    name: distributionIdentityName,
-  });
-  assert.throws(
-    () =>
-      selectDistributionCodeSigningIdentity(
-        `1) ${fingerprint} "${identityName}"`,
-      ),
-    /Developer ID Application.*found 0/u,
-  );
-  assert.throws(
-    () =>
-      selectDistributionCodeSigningIdentity(
-        `${output}\n3) ${fingerprint} "Developer ID Application: Second Developer (${teamId})"`,
-      ),
-    /found 2/u,
-  );
-});
-
-test("Developer ID certificate metadata binds the selected fingerprint and Team ID", () => {
-  assert.deepEqual(
-    parseDeveloperIdCertificateReport(
-      `sha1 Fingerprint=01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67\nsubject=CN=${distributionIdentityName},OU=${teamId},O=Developer Name,C=US\n`,
-    ),
-    { fingerprint, teamId },
-  );
-  assert.throws(
-    () => parseDeveloperIdCertificateReport("subject=CN=missing metadata"),
-    /did not contain/u,
-  );
-});
-
-test("notary submission parser accepts only a typed terminal result", () => {
-  const id = "12345678-1234-4abc-8def-1234567890ab";
-  assert.deepEqual(
-    parseNotarySubmission(
-      JSON.stringify({
-        id,
-        message: "Processing complete",
-        status: "Accepted",
-      }),
-    ),
-    { id, status: "Accepted" },
-  );
-  assert.deepEqual(
-    parseNotarySubmission(JSON.stringify({ id, status: "Invalid" })),
-    { id, status: "Invalid" },
-  );
-  assert.throws(() => parseNotarySubmission("not json"), /not valid JSON/u);
-  assert.throws(
-    () =>
-      parseNotarySubmission(JSON.stringify({ id: "bad", status: "Accepted" })),
-    /invalid shape/u,
-  );
-  assert.throws(
-    () => parseNotarySubmission(JSON.stringify({ id, status: "Unknown" })),
-    /invalid shape/u,
-  );
-});
-
 test("local signing selection config has one strict schema", () => {
   const config = {
     schemaVersion: 1,
@@ -243,7 +124,7 @@ test("local signing selection config has one strict schema", () => {
   );
 });
 
-test("signature report requires an Apple-issued TeamIdentifier", () => {
+test("development signature requires an Apple-issued TeamIdentifier", () => {
   assert.equal(parseTeamIdentifier(`TeamIdentifier=${teamId}\n`), teamId);
   assert.throws(
     () => parseTeamIdentifier("TeamIdentifier=not set\n"),
@@ -344,26 +225,6 @@ test("Apple Development verification policy binds identifier, Apple anchor, Team
       identityName,
     ),
     `designated => identifier "${localProductIdentity.bundleId}" and anchor apple generic and certificate leaf[subject.OU] = ${teamId} and certificate leaf[subject.CN] = "${identityName}"`,
-  );
-});
-
-test("Developer ID verification policy binds identifier, Apple anchor, Team, and certificate", () => {
-  assert.equal(
-    buildDeveloperIdRequirement(
-      localProductIdentity.bundleId,
-      teamId,
-      distributionIdentityName,
-    ),
-    `identifier "${localProductIdentity.bundleId}" and anchor apple generic and certificate leaf[subject.OU] = ${teamId} and certificate leaf[subject.CN] = "${distributionIdentityName}"`,
-  );
-  assert.throws(
-    () =>
-      buildDeveloperIdRequirement(
-        localProductIdentity.bundleId,
-        teamId,
-        identityName,
-      ),
-    /invalid identity metadata/u,
   );
 });
 
