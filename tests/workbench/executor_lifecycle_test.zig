@@ -1631,7 +1631,21 @@ test "automatic Workspace admission is Task-owned and Text-only" {
     );
 
     fake_core.setCompletionTitle("Generated task title");
+    fake_core.setSessionPlan(.controlled);
     _ = try workbench.runTask(first_task, .{ .text = "automatic text run" });
+    try waitWorkbenchSnapshot(&workbench, "\"currentRunPhase\":\"running\"");
+    var provisional_title_snapshot: [128 * 1024]u8 = undefined;
+    const provisional_title_snapshot_bytes = try workbench.writeSnapshot(
+        &provisional_title_snapshot,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            provisional_title_snapshot_bytes,
+            "\"title\":\"automatic text run\"",
+        ) != null,
+    );
+    fake_core.releaseControlled();
     try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
     try waitWorkbenchSnapshot(&workbench, "\"title\":\"Generated task title\"");
     var title_snapshot: [128 * 1024]u8 = undefined;

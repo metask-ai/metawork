@@ -224,7 +224,7 @@ Bridge handler 不能绕过 Workbench 操作 AgentCore handle。automation 只�
 
 ### `workbench/` 与 `agent/`
 
-Task 标题生成不新增模块或 owner：`workbench/projection.zig` 在首个 Run worker 内消费现有独立 Completion，并在主线程完成候选校验、用户标题优先、本地回退、脱敏和持久化；它不扩展 Agent surface，也不建立标题专用 executor 或 Session 路径。
+Task 标题生成不新增模块或 owner：`workbench/projection.zig` 在首个 Run admission 先提交旧规则生成的临时标题，再由同一 Run worker 消费现有独立 Completion，并在主线程完成候选校验、用户标题优先、替换、脱敏和持久化；它不扩展 Agent surface，也不建立标题专用 executor 或 Session 路径。
 
 `workbench/task_persistence.zig` 的当前 hard-cut store 是 `workbench-history.store`：固定 frame header、header/payload checksum、record type、bounded JSON payload 与 Task failure record 组成唯一 canonical history；不读取、不迁移、不双写任何旧 envelope，也不引入迁移版本层。Workspace/Task frame 可独立恢复，无法信任 Task identity 时只进入 `degraded`，可确认的坏 Task 以同一 store 的 failure record 留痕，不关闭新 Task admission；Automatic Workspace 仅在唯一 Task 恢复后占用容量。
 

@@ -1700,6 +1700,8 @@ const AutomaticTitleState = enum(u8) {
 const AutomaticTitle = struct {
     state: std.atomic.Value(AutomaticTitleState) = .init(.none),
     cancel_requested: std.atomic.Value(bool) = .init(false),
+    provisional_applied: bool = false,
+    user_overrode: bool = false,
     generated: bool = false,
     result_len: usize = 0,
     result: [automatic_title_result_capacity]u8 = undefined,
@@ -5055,6 +5057,10 @@ pub const Workbench = struct {
             .last_compact_id = latestCompactId(view),
             .model = run.execution_model,
         };
+        const previous_title = view.durable.title;
+        const previous_title_redacted = view.durable.title_redacted;
+        const provisional_title_applied = self.applyProvisionalTaskTitle(view, run);
+        run.automatic_title.provisional_applied = provisional_title_applied;
         const previous_active_run_id = view.runtime.active_run_id;
         const previous_active_operation = view.runtime.active_operation;
         const previous_task_recent_order = view.durable.recent_order;
@@ -5075,8 +5081,15 @@ pub const Workbench = struct {
                 self.next_workspace_recent_order = recent_order;
             }
             view.durable.next_run_generation -= 1;
+            if (provisional_title_applied)
+                self.rollbackProvisionalTaskTitle(
+                    view,
+                    previous_title,
+                    previous_title_redacted,
+                );
             return err;
         };
+        if (provisional_title_applied) self.allocator.free(previous_title);
         _ = view.runtime.worker_references.fetchAdd(1, .acq_rel);
         run.worker_reference_held.store(true, .release);
         self.executor.enqueue(.{
@@ -5631,6 +5644,7 @@ pub const Workbench = struct {
             return err;
         };
         self.allocator.free(previous_title);
+        self.markAutomaticTitleUserOverride(view);
         self.bumpRevision();
     }
 
@@ -12711,6 +12725,53 @@ pub const Workbench = struct {
             std.mem.eql(u8, codepoint, "、");
     }
 
+    fn applyProvisionalTaskTitle(
+        self: *Workbench,
+        task: *TaskView,
+        run: *const RunRecord,
+    ) bool {
+        if (task.durable.title.len != 0 or run.generation != 1) return false;
+        const candidate = automaticTitleCandidate(&run.input) orelse return false;
+        const execution = taskExecutionInput(task) catch return false;
+        const projected = self.copyProjected(
+            boundAutomaticTitle(candidate),
+            self.limits.max_task_title_bytes,
+            execution.api_key,
+        ) catch return false;
+        if (projected.value.len == 0) {
+            self.freeTracked(projected.value);
+            return false;
+        }
+        const previous_title = task.durable.title;
+        self.projection_bytes -= previous_title.len;
+        task.durable.title = projected.value;
+        task.durable.title_redacted = projected.redacted;
+        return true;
+    }
+
+    fn rollbackProvisionalTaskTitle(
+        self: *Workbench,
+        task: *TaskView,
+        previous_title: []u8,
+        previous_redacted: bool,
+    ) void {
+        self.freeTracked(task.durable.title);
+        task.durable.title = previous_title;
+        self.projection_bytes += previous_title.len;
+        task.durable.title_redacted = previous_redacted;
+    }
+
+    fn markAutomaticTitleUserOverride(_: *Workbench, task: *TaskView) void {
+        for (task.durable.runs) |*entry| {
+            const run = &(entry.* orelse continue);
+            if (!run.automatic_title.provisional_applied) continue;
+            switch (run.automatic_title.state.load(.acquire)) {
+                .pending, .running, .ready => run.automatic_title.user_overrode = true,
+                .none, .settled => {},
+            }
+        }
+    }
+
     fn commitAutomaticTitlesNoFail(
         self: *Workbench,
         task: *TaskView,
@@ -12730,7 +12791,12 @@ pub const Workbench = struct {
             else
                 null;
             const selected = candidate orelse automaticTitleCandidate(&run.input);
-            if (task.durable.title.len == 0 and run.generation == 1) {
+            const may_replace = run.generation == 1 and
+                !run.automatic_title.user_overrode and
+                (task.durable.title.len == 0 or run.automatic_title.provisional_applied);
+            const keep_provisional = run.automatic_title.provisional_applied and
+                candidate == null;
+            if (may_replace and !keep_provisional) {
                 if (selected) |value| {
                     const bounded = boundAutomaticTitle(value);
                     const projected = self.copyProjected(
@@ -12740,6 +12806,10 @@ pub const Workbench = struct {
                     ) catch null;
                     if (projected) |title| {
                         if (title.value.len == 0) {
+                            self.freeTracked(title.value);
+                        } else if (std.mem.eql(u8, title.value, task.durable.title) and
+                            title.redacted == task.durable.title_redacted)
+                        {
                             self.freeTracked(title.value);
                         } else {
                             self.freeTracked(task.durable.title);
@@ -12860,12 +12930,20 @@ pub const Workbench = struct {
         defer workbench.deinit();
 
         const task = &workbench.tasks[0].?;
+        const run = &task.durable.runs[0].?;
+        try workbench.replaceTracked(
+            &task.durable.title,
+            "Provisional title",
+            workbench.limits.max_task_title_bytes,
+        );
+        run.automatic_title.provisional_applied = true;
+        run.automatic_title.state.store(.pending, .release);
         try workbench.replaceTracked(
             &task.durable.title,
             "User title",
             workbench.limits.max_task_title_bytes,
         );
-        const run = &task.durable.runs[0].?;
+        workbench.markAutomaticTitleUserOverride(task);
         const generated = "Generated title";
         @memcpy(run.automatic_title.result[0..generated.len], generated);
         run.automatic_title.result_len = generated.len;
@@ -12874,6 +12952,7 @@ pub const Workbench = struct {
 
         try std.testing.expect(!workbench.commitAutomaticTitlesNoFail(task));
         try std.testing.expectEqualStrings("User title", task.durable.title);
+        try std.testing.expect(run.automatic_title.user_overrode);
         try std.testing.expectEqual(
             AutomaticTitleState.settled,
             run.automatic_title.state.load(.acquire),
