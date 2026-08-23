@@ -183,29 +183,9 @@ pub const Coordinator = struct {
         if (command == .activate_metask and
             !self.workbench.modelConnectionExecutionSelected())
             return .rejected(.invalid_state);
-        const current = self.runtime.view();
         return switch (self.runtime.prepareCommand(command)) {
             .prepared => |prepared| result: {
-                const result = self.commitPrepared(prepared, replacement: {
-                    // The replacement window must follow the prepared transition,
-                    // not the command name: select_model on a ready execution is a
-                    // model-only default change, but the same command inside a
-                    // parked reconfiguration still rebuilds the execution config
-                    // and therefore still needs the Workbench replacement window.
-                    if (command != .activate_metask and
-                        prepared.requiresDefaultExecutionReplacement())
-                        break :replacement .default;
-                    const kind: ExecutionReplacement = switch (command) {
-                        .select_model => .none,
-                        .begin_login => if (current.state == .authenticated)
-                            .identity
-                        else
-                            .none,
-                        .logout => .identity,
-                        else => .none,
-                    };
-                    break :replacement kind;
-                });
+                const result = self.commitPrepared(prepared, .none);
                 if (command == .activate_metask and result.accepted)
                     self.metask_activation_attempt_id = result.attempt_id;
                 break :result result;
@@ -462,7 +442,12 @@ pub const Coordinator = struct {
         defer prepared.deinit();
 
         var started_replacement = false;
-        switch (replacement) {
+        const prepared_replacement: ExecutionReplacement = switch (prepared.replacementIntent()) {
+            .none, .finish => .none,
+            .begin_default => .default,
+            .begin_identity => .identity,
+        };
+        switch (if (replacement == .none) prepared_replacement else replacement) {
             .none => {},
             // A cold process has no live Account-owned identity or credential
             // to replace. Restored Task history must not be mistaken for an
@@ -494,7 +479,6 @@ pub const Coordinator = struct {
         }
 
         const fact = self.runtime.preparedFact(&prepared);
-        const identity_boundary = prepared.identityReplacementBoundary();
         const prepared_attempt_id = prepared.attemptId();
         const activates_metask = prepared_attempt_id != null and
             prepared_attempt_id == self.metask_activation_attempt_id;
@@ -516,7 +500,7 @@ pub const Coordinator = struct {
                 }
                 self.workbench.installExecutionNoFail(&execution);
             }
-        } else if (prepared.clearsDefaultExecution()) {
+        } else if (prepared.executionIntent() == .clear) {
             if (!self.workbench.modelConnectionExecutionSelected()) {
                 if (!self.workbench.executionReplacementPending()) {
                     self.workbench.beginDefaultExecutionReplacement() catch
@@ -541,16 +525,12 @@ pub const Coordinator = struct {
         const refresh_after_commit = self.runtime.takeRefreshAfterCommit(&prepared);
         const follow_up = self.runtime.takeFollowUpCommand(&prepared);
         self.runtime.dispatchCommitted(&prepared);
-        if (activates_metask and prepared.operationComplete())
+        if (activates_metask and prepared.replacementIntent() == .finish)
             self.metask_activation_attempt_id = null;
-        if (self.workbench.identityReplacementPending()) {
-            if (identity_boundary != .none)
-                self.endActiveReplacementNoFail();
-        } else if (self.workbench.defaultExecutionReplacementPending() and
-            prepared.operationComplete())
-        {
+        if ((prepared.replacementIntent() == .finish or
+            replacement == .startup) and
+            self.workbench.executionReplacementPending())
             self.endActiveReplacementNoFail();
-        }
         self.workbench.finishAccountCommitNoFail();
 
         if (refresh_after_commit) {
@@ -1020,14 +1000,20 @@ const FakeMetask = struct {
         \\{"code":0,"message":"success","data":{"items":[
         \\{"id":1,"key":"sk-fake-key-0001","name":"First Key","group_id":10,
         \\"status":"active","group":{"id":10,"platform":"anthropic","status":"active"}},
-        \\{"id":2,"key":"sk-fake-key-0002","name":"Second Key","group_id":10,
-        \\"status":"active","group":{"id":10,"platform":"anthropic","status":"active"}}
+        \\{"id":2,"key":"sk-fake-key-0002","name":"GPT Key","group_id":20,
+        \\"status":"active","group":{"id":20,"platform":"openai","status":"active"}}
         \\],"total":2,"page":1,"page_size":100,"pages":1}}
     ;
     const models_body =
         \\{"object":"list","data":[
         \\{"id":"claude-sonnet-4-5","object":"model","type":"model","display_name":"Sonnet"},
         \\{"id":"claude-opus-4-6","object":"model","type":"model","display_name":"Opus"}
+        \\],"has_more":false}
+    ;
+    const gpt_models_body =
+        \\{"object":"list","data":[
+        \\{"id":"gpt-5.1","object":"model","type":"model","display_name":"GPT-5.1"},
+        \\{"id":"gpt-5.6-sol","object":"model","type":"model","display_name":"GPT-5.6 SOL"}
         \\],"has_more":false}
     ;
     const token_body =
@@ -1065,7 +1051,11 @@ const FakeMetask = struct {
             .refresh_token => token_body,
             .current_user => user_body,
             .keys => keys_body,
-            .models => models_body,
+            .models => if (std.mem.endsWith(
+                u8,
+                request.bearer orelse "",
+                "0002",
+            )) gpt_models_body else models_body,
             .exchange_code => return error.ProtocolFailed,
         };
         if (body.len > response_buffer.len) return error.ResponseTooLarge;
@@ -1187,7 +1177,40 @@ test "restored login drives automatic key and model defaults end to end" {
         switched.catalog_state,
     );
     try std.testing.expectEqualStrings("2", switched.selected_api_key_id);
+    try std.testing.expectEqualStrings("gpt-5.1", switched.selected_model);
     try std.testing.expect(switched.can_create_task);
+
+    // Phase 3: changing only the default model on the committed GPT API is a
+    // preference transaction. It must retain the committed catalog and the
+    // credential generation, and the new default must be durable.
+    const switched_generation = switched.execution_generation;
+    const select_gpt_model = coordinator.commandSink().submit(.{
+        .select_model = .{
+            .selection_id = "gpt-5.6-sol",
+            .expected_catalog_generation = switched.catalog_generation,
+            .expected_execution_generation = switched.execution_generation,
+        },
+    });
+    try std.testing.expect(select_gpt_model.accepted);
+    const model_changed = pumpUntilReady(
+        &coordinator,
+        &account_runtime,
+        "model-only",
+    );
+    try account_contract.validateView(model_changed);
+    try std.testing.expectEqualStrings("2", model_changed.selected_api_key_id);
+    try std.testing.expectEqualStrings("gpt-5.6-sol", model_changed.selected_model);
+    try std.testing.expectEqual(switched_generation, model_changed.execution_generation);
+    try std.testing.expectEqual(@as(usize, 2), model_changed.api_keys.len);
+    try std.testing.expectEqual(@as(usize, 2), model_changed.models.len);
+    try std.testing.expectEqualStrings(
+        "gpt-5.6-sol",
+        fake_platform.preference.?.modelId(),
+    );
+    try std.testing.expectEqual(
+        switched_generation,
+        fake_platform.preference.?.execution_generation,
+    );
 
     coordinator.shutdown();
 }
@@ -1206,6 +1229,7 @@ test "relaunch with persisted selection restores the saved execution" {
     var fake_metask: FakeMetask = .{};
     var fake_platform: FakePlatform = .{};
     fake_platform.seed("stored-refresh-token");
+    var persisted_generation: u64 = 0;
 
     // First boot: land the automatic defaults and persist the preference.
     {
@@ -1321,6 +1345,67 @@ test "relaunch with persisted selection restores the saved execution" {
             switched.catalog_state,
         );
         try std.testing.expectEqualStrings("2", switched.selected_api_key_id);
+        const model_change = coordinator.commandSink().submit(.{
+            .select_model = .{
+                .selection_id = "gpt-5.6-sol",
+                .expected_catalog_generation = switched.catalog_generation,
+                .expected_execution_generation = switched.execution_generation,
+            },
+        });
+        try std.testing.expect(model_change.accepted);
+        const changed = pumpUntilReady(&coordinator, &account_runtime, "boot2-model");
+        try std.testing.expectEqualStrings("gpt-5.6-sol", changed.selected_model);
+        try std.testing.expectEqual(
+            switched.execution_generation,
+            changed.execution_generation,
+        );
+        persisted_generation = changed.execution_generation;
+        coordinator.shutdown();
+    }
+
+    // Third boot proves that a model-only preference transaction survives a
+    // process boundary without minting a replacement credential generation.
+    {
+        var account_runtime = try account_api.Runtime.init(
+            std.testing.allocator,
+            std.testing.io,
+            std.Thread.getCurrentId(),
+            account_dir,
+            testingTransport(),
+            account_api.TestSupport.loopbackEndpoint(),
+            .{ .context = &wake_context, .notify_fn = TestWake.notify },
+        );
+        defer account_runtime.deinit();
+        account_api.TestSupport.overrideTransport(
+            &account_runtime,
+            fake_metask.transport(),
+        );
+        var agent_runtime: agent.Runtime = undefined;
+        var workbench = try workbench_api.Workbench.init(
+            std.testing.allocator,
+            std.testing.io,
+            &agent_runtime,
+            .{
+                .worker_count = 1,
+                .queue_capacity = 1,
+                .max_tasks = 1,
+                .max_runs_per_task = 1,
+                .max_tools_per_run = 1,
+            },
+            .{},
+        );
+        defer workbench.deinit();
+        var coordinator = Coordinator.init(
+            &account_runtime,
+            &workbench,
+            std.Thread.getCurrentId(),
+            std.testing.io,
+        );
+        coordinator.start(fake_platform.ports());
+        const restored = pumpUntilReady(&coordinator, &account_runtime, "boot3");
+        try std.testing.expectEqualStrings("2", restored.selected_api_key_id);
+        try std.testing.expectEqualStrings("gpt-5.6-sol", restored.selected_model);
+        try std.testing.expectEqual(persisted_generation, restored.execution_generation);
         coordinator.shutdown();
     }
 }

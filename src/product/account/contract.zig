@@ -254,6 +254,7 @@ pub const AccountFactKind = enum {
     restored,
     session_changed,
     execution_changed,
+    default_changed,
     catalog_changed,
     model_connections_changed,
     operation_failed,

@@ -566,7 +566,7 @@ New task 页面以 Composer 为绝对主视觉。其上方使用直接的行动�
 
 - New task 始终显示当前默认连接与模型；点击后只列出当前连接的 Host-validated 模型目录；
 - 弹层顶部显示当前连接的脱敏名称与 Provider，并提供 `模型连接设置…`；不得显示完整 secret；
-- 模型连接或模型选择更新 Account 当前默认 execution generation，默认只影响之后创建的 Task，不自动修改已有 Task；历史 Task 只有 §6.4 的显式 rebind 可以采用该默认值；
+- 默认连接、Metask API/provider/credential authority 或 ready Model Connection 的模型变化更新 Account 当前默认 execution generation；只有同一已提交 Metask API 下修改默认模型时才只更新 Account preference、保持 generation 不变。两类默认变化都只影响之后创建的 Task，不自动修改已有 Task；历史 Task 只有 §6.4 的显式 rebind 可以采用该默认值；
 - 已有 Task 的 Composer 显示当前 binding epoch 的模型事实，历史按 epoch 保留原模型；第一版不提供 live Session 热切换；
 - 正在更新默认模型时只禁用相关选择和发送 admission，不冻结导航、历史阅读或其他 Task；
 - 模型不可用时说明原因并给出刷新或设置入口，不能留下永久 disabled selector。
@@ -908,7 +908,7 @@ Workspace 生命周期不属于 Settings surface。New task 路径控件负责�
 - compact 选择器只显示一个短值；API 使用 detailed 选择器，以 API 名称为主信息，以 Provider 为次级说明，以脱敏尾号为尾部数据。Provider 和尾号不得表现成可编辑字段；
 - API 与模型控件在同一个“执行默认配置”工作面中以带步骤标记和连接线的连续配置链呈现，明确表达 `API → 该 API 的模型目录 → 默认模型`，不能退化为两个互不相关的普通表单行；
 - API 切换开始后只冻结相关配置组；模型目录加载、选择和持久化不得冻结语言、导航、历史阅读或取消仍被 Host 接受的操作；
-- 设置页把默认配置切换表现为一笔 Host-owned 事务：已提交 API/模型始终是当前真值，候选 API/模型只显示为“待应用更改”或“正在保存”。Renderer 可在命令 acknowledgement 前短暂回显用户刚发出的请求，但收到 snapshot 后必须以 Host 的 candidate projection 为准；页面重建、取消、失败和成功都不得依赖 Renderer 临时状态恢复事务；
+- 设置页把每次默认配置 mutation 表现为一笔 Host-owned 事务：API/credential 变化使用候选 API/模型并在完整验证后原子替换 execution；同一已提交 API 下的默认模型变化只持久化模型 preference。已提交 API/模型始终是当前真值，进行中的值只显示为“待应用更改”或“正在保存”。Renderer 可在 command acknowledgement 前短暂回显用户刚发出的请求，但收到 snapshot 后必须以 Host projection 为准；页面重建、取消、失败和成功都不得依赖 Renderer 临时状态恢复事务；
 - 常规桌面宽度下只让右侧设置内容列滚动，页面标题和左侧分区导航保持稳定；分区高亮跟随右侧内容的阅读位置。窄窗口改为顶部横向分区导航，但仍不让导航与内容共享滚动层；
 - 浮层只在打开时使用克制的透明度与位置过渡；loading 指示只出现在真实运行的配置项，`prefers-reduced-motion` 下移除非必要动画；
 - 当前分区导航必须有持续可见的选中态和 `aria-current`，不能只在 hover 时出现；focus ring、菜单选中勾选、状态色和文字共同表达状态。

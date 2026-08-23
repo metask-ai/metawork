@@ -88,7 +88,7 @@ Bridge 是 Renderer 与 MetaWork 本地边界之间的唯一通信边界，承�
 
 Product 是 MetaWork 产品事实与行为的逻辑边界。它不是统一源码 module 或 facade；Bridge 把 typed 产品命令 dispatch 给内部对应 owner，由这些 owner 执行 admission，协调账号、Workspace、Task、Run、持久化与恢复，并由 Workbench 直接调用相邻 Agent 边界完成执行，共同生成 canonical 产品 projection。
 
-Product 内部如何拆分 owner 不属于本图，见 [Product 内部架构](product-architecture.md)。Product 的产品 policy 不依赖 DOM、React tab、Toast、JSX state 或 WebView URL。
+Product 内部如何拆分 owner 不属于本图，见 [Product 内部架构](product-architecture.md)；Account owner 的内部状态、事务、提交与恢复见 [Account 内部架构](account-architecture.md)。Product 的产品 policy 不依赖 DOM、React tab、Toast、JSX state 或 WebView URL。
 
 MCP 不形成第五个 Product owner。Workbench 拥有 schema 2 Desired Registry、connection approval、OAuth consent 产品状态、credential locator/恢复、`oauth_operation`、与当前 Agent Runtime 同寿命的 Runtime Manifest、configuration-apply 状态、工具 policy、Admission Authority、Task binding 与安全 projection；Agent 继续拥有运行期 connector/backend 生命周期、AgentCore descriptor/catalog/selection、declarative Runtime apply、Activation 与 typed MCP health。Application 注入 bounded child/network effect，并拥有系统 credential、HTTP auth snapshot、OAuth effect，以及把 canonical desired preparation、Agent Runtime apply、activation 与 Workbench完成事务串起来的窄 coordinator；它不拥有 transport 产品状态或 MCP JSON-RPC。STDIO child 只获得 Application 构造的显式 environment：受控 executable search path、Windows 必需的 `SystemRoot` 与用户逐名安全采集的 secret slot，不继承其余 Host 环境。隔离 connection test 仍不替换正式 Runtime。Runtime Manifest 记录正式 Runtime 已接管的 descriptor fingerprint 或安全 absence proof；`restart_required` alignment 只表示一次 apply 尚未完成，产品不要求重启 Application。新 Task 只消费 Workbench 原子提交的 Admission Authority，既有 Session 保持创建时 authority。Account 不参与 MCP；Bridge 与 Renderer只运输 typed intent/状态；AgentCore 继续唯一拥有 MCP JSON-RPC、版本协商、catalog 与 tool binding。
 
