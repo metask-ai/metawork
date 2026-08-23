@@ -98,6 +98,7 @@ fresh Session 只使用 `SessionHostConfigV1` 与 `SessionCreateConfigV1`：
 
 当前正式产品消费：
 
+- Model Connection 测试使用独立 Completion streaming；它不创建 Runtime、Session、Task、Run history 或 durable Conversation；
 - shared Runtime；
 - Runtime-owned MCP server descriptors、connector 生命周期与 catalog refresh/describe；
 - 新 Session 的 MCP selection 与经 AgentCore Run 执行的 MCP tools；

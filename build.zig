@@ -610,8 +610,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .target = target,
         .optimize = root_module.optimize,
     });
-    agent_provider_probe.addImport("metask_agentcore", sdk);
-    agent_provider_probe.addImport("agent_provider", agent_provider);
+    agent_provider_probe.addImport("agent_completion", agent_completion);
     agent.addImport("agent_provider_probe", agent_provider_probe);
     const account_contract = b.createModule(.{
         .root_source_file = b.path("src/product/account/contract.zig"),
