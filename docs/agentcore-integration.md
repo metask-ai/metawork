@@ -94,6 +94,8 @@ MetaWork MCP Host 工程接线不得改变上述协议 owner。Workbench prepara
 
 Canonical bundle revision 9 提供 `2026-07-28`、`2025-11-25` 与 `2025-06-18` negotiation policy、typed MCP auth/transport health、catalog/selection 与 tool execution，但不提供 OAuth discovery、PKCE、registration、browser/callback 或 token API。`automatic` 可以协商并 exact reopen 到三个 era 之一；这不构成对旧 AgentCore ABI revision 的兼容。Modern disposable probe 收到完整 HTTP 400 时，MetaWork 保留 status/body，AgentCore 才能判定是否进入 Classic；probe connection 永不升格或与 actual connection 共享 session。OAuth 缺口不要求 AgentCore ABI 扩展：OAuth 是 Streamable HTTP 在产生 preauthorized capability 前的 Host transport authorization，由 Workbench 持有产品状态、Application 执行标准 effect。Workbench 只有在目标 transport 的 approval/auth facts 完整且 secret 满足 Application-owned runtime limits 时才发布 `eligible`；Agent-owned HTTP backend 按成功 response 的 media type 严格分流 JSON 与 event-stream，对非 2xx body 只做有界原样收集，并把 response observation 交给 AgentCore，不解析 JSON-RPC identity 或 MCP 语义。
 
+Workbench 首个 Run 后的 Task 标题生成也只消费公共 Completion surface：它复用 Task admission 已固定的 ExecutionConfig，创建短寿命 Completion/Stream，并遵守同一 next/abort quiescence 与 Stream → Completion 销毁顺序；该元数据请求不创建新的 Agent Session、Run history 或 Conversation，失败只由 Workbench 执行本地标题回退。
+
 ## 4. Agent binding
 
 Agent binding 是 Metask AgentCore 的 ABI 消费者，不是 Native SDK Adapter。它直接持有 bundle SDK API table 和 opaque handles。

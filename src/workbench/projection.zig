@@ -131,9 +131,15 @@ const checkpoint_export_limits: lifecycle.CheckpointLimits = .{
 };
 
 // Automatic titles are intentionally shorter than the durable Task title
-// limit. This is a local fallback only; model-generated metadata will have a
-// separate contract when AgentCore exposes that capability.
+// limit. Completion is best-effort metadata generation; the local candidate
+// remains the deterministic fallback when it cannot produce a usable title.
 const automatic_title_max_codepoints: usize = 32;
+const automatic_title_result_capacity: usize = 512;
+const automatic_title_timeout_ms: u32 = 15_000;
+const automatic_title_watchdog_poll_ms: u32 = 10;
+const automatic_title_system_prompt =
+    "Generate a concise title for this task. Return only one plain-text title " ++
+    "in the user's language, without quotes or Markdown. Use at most 32 Unicode characters.";
 
 pub const Provider = enum {
     anthropic,
@@ -353,6 +359,27 @@ pub const Configuration = struct {
     skill_enablement: SkillEnablementConfiguration = .{},
     model_connections: ModelConnectionCapabilities = .{},
     mcp: McpStartupConfiguration = .{},
+    completion_factory: CompletionFactory = .{},
+};
+
+pub const CompletionFactory = struct {
+    context: ?*anyopaque = null,
+    create_fn: ?*const fn (
+        ?*anyopaque,
+        std.mem.Allocator,
+        lifecycle.CompletionConfig,
+    ) anyerror!*lifecycle.Completion = null,
+
+    fn create(
+        self: CompletionFactory,
+        allocator: std.mem.Allocator,
+        config: lifecycle.CompletionConfig,
+    ) anyerror!*lifecycle.Completion {
+        if (self.create_fn) |create_fn|
+            return create_fn(self.context, allocator, config);
+        if (builtin.is_test) return error.CompletionUnavailable;
+        return lifecycle.Completion.init(allocator, config);
+    }
 };
 
 pub const ModelConnectionCapabilities = struct {
@@ -1659,6 +1686,24 @@ const RunRecord = struct {
     run_control: lifecycle.RunControl = undefined,
     checkpoint_export_context: CheckpointExportContext = undefined,
     checkpoint: CheckpointPostprocess = .{},
+    automatic_title: AutomaticTitle = .{},
+};
+
+const AutomaticTitleState = enum(u8) {
+    none,
+    pending,
+    running,
+    ready,
+    settled,
+};
+
+const AutomaticTitle = struct {
+    state: std.atomic.Value(AutomaticTitleState) = .init(.none),
+    cancel_requested: std.atomic.Value(bool) = .init(false),
+    generated: bool = false,
+    result_len: usize = 0,
+    result: [automatic_title_result_capacity]u8 = undefined,
+    execution: ?OwnedTaskExecution = null,
 };
 
 const CompactRecord = struct {
@@ -2590,6 +2635,7 @@ pub const Workbench = struct {
     execution_replacement: ExecutionReplacementKind = .none,
     custom_execution_binding: ?CustomExecutionBinding = null,
     model_connection_capabilities: ModelConnectionCapabilities,
+    completion_factory: CompletionFactory,
     mcp: ?McpProductState = null,
     next_workspace_id: u64 = 1,
     next_workspace_recent_order: u64 = 1,
@@ -2849,6 +2895,7 @@ pub const Workbench = struct {
             .canonical_user_home = canonical_user_home,
             .automatic_workspaces = automatic_workspaces,
             .model_connection_capabilities = configuration.model_connections,
+            .completion_factory = configuration.completion_factory,
         };
         if (workbench.skill_inventory != null) skill_inventory_owned = false;
         skill_enablement_owned = false;
@@ -5008,9 +5055,6 @@ pub const Workbench = struct {
             .last_compact_id = latestCompactId(view),
             .model = run.execution_model,
         };
-        const previous_title = view.durable.title;
-        const previous_title_redacted = view.durable.title_redacted;
-        const automatic_title_applied = self.applyAutomaticTaskTitle(view, run);
         const previous_active_run_id = view.runtime.active_run_id;
         const previous_active_operation = view.runtime.active_operation;
         const previous_task_recent_order = view.durable.recent_order;
@@ -5031,15 +5075,8 @@ pub const Workbench = struct {
                 self.next_workspace_recent_order = recent_order;
             }
             view.durable.next_run_generation -= 1;
-            if (automatic_title_applied)
-                self.rollbackAutomaticTaskTitle(
-                    view,
-                    previous_title,
-                    previous_title_redacted,
-                );
             return err;
         };
-        if (automatic_title_applied) self.allocator.free(previous_title);
         _ = view.runtime.worker_references.fetchAdd(1, .acq_rel);
         run.worker_reference_held.store(true, .release);
         self.executor.enqueue(.{
@@ -5047,6 +5084,7 @@ pub const Workbench = struct {
             .execute_fn = executeRunJob,
             .cancel_fn = cancelRunJobForShutdown,
         }) catch |err| {
+            publishAutomaticTitleFallback(run);
             releaseWorkerReference(run);
             cancelPreparedRunOrPanic(session, run_id);
             prepared = false;
@@ -5887,6 +5925,10 @@ pub const Workbench = struct {
             const recovery_commit = self.commitRecoveryJobNoFail(view);
             changed = recovery_commit.changed or changed;
             durable_changed = recovery_commit.durable_changed or durable_changed;
+            if (self.commitAutomaticTitlesNoFail(view)) {
+                changed = true;
+                durable_changed = true;
+            }
             const close_completion = view.runtime.close_completion.load(.acquire);
             // Session close may finish after Agent execution but before the
             // main thread has drained callbacks already enqueued for the Run.
@@ -8767,6 +8809,7 @@ pub const Workbench = struct {
         for (self.tasks) |*entry| {
             const view = &(entry.* orelse continue);
             cancelTaskCheckpoints(view);
+            cancelTaskAutomaticTitles(view);
             if (view.runtime.worker_references.load(.acquire) == 0) continue;
             if (view.runtime.active_operation == .restore) {
                 const job = view.runtime.restore_job orelse continue;
@@ -8792,6 +8835,7 @@ pub const Workbench = struct {
                     if (isTerminalPhase(runPhase(run))) continue;
                     if (self.executor.cancel(run)) {
                         cancelPreparedRunOrPanic(session, run.id);
+                        publishAutomaticTitleFallback(run);
                         releaseWorkerReference(run);
                         _ = commitTerminal(
                             run,
@@ -12579,6 +12623,16 @@ pub const Workbench = struct {
         };
     }
 
+    fn automaticTitleCompletionInput(input: *const RunInputRecord) ?[]const u8 {
+        const value = switch (input.*) {
+            .text => |text| text.value,
+            .skill => |skill| skill.display_name,
+        };
+        const trimmed = std.mem.trim(u8, value, " \t\r\n");
+        if (trimmed.len == 0 or !std.unicode.utf8ValidateSlice(trimmed)) return null;
+        return trimmed;
+    }
+
     fn firstAutomaticTitleLine(value: []const u8) ?[]const u8 {
         if (value.len == 0 or !std.unicode.utf8ValidateSlice(value)) return null;
         var cursor: usize = 0;
@@ -12609,6 +12663,16 @@ pub const Workbench = struct {
         if (value.len == 0) return false;
         for (value) |byte| if (byte < 0x20) return false;
         return true;
+    }
+
+    fn generatedAutomaticTitleCandidate(value: []const u8) ?[]const u8 {
+        const trimmed = std.mem.trim(u8, value, " \t\r\n");
+        if (!std.unicode.utf8ValidateSlice(trimmed) or
+            !validAutomaticTitleText(trimmed) or
+            std.mem.indexOfAny(u8, trimmed, "\r\n") != null)
+            return null;
+        const bounded = boundAutomaticTitle(trimmed);
+        return if (bounded.len == 0) null else bounded;
     }
 
     fn boundAutomaticTitle(value: []const u8) []const u8 {
@@ -12647,44 +12711,85 @@ pub const Workbench = struct {
             std.mem.eql(u8, codepoint, "、");
     }
 
-    fn applyAutomaticTaskTitle(
+    fn commitAutomaticTitlesNoFail(
         self: *Workbench,
         task: *TaskView,
-        run: *const RunRecord,
     ) bool {
-        // This gate must run before writing the fallback. Existing Task and
-        // scheduled-task titles are product facts, not candidates for auto naming.
-        if (task.durable.title.len != 0 or run.generation != 1) return false;
-        const candidate = automaticTitleCandidate(&run.input) orelse return false;
-        const bounded_candidate = boundAutomaticTitle(candidate);
-        const execution = taskExecutionInput(task) catch return false;
-        const projected = self.copyProjected(
-            bounded_candidate,
-            self.limits.max_task_title_bytes,
-            execution.api_key,
-        ) catch return false;
-        if (projected.value.len == 0) {
-            self.freeTracked(projected.value);
-            return false;
+        var durable_changed = false;
+        for (task.durable.runs) |*entry| {
+            const run = &(entry.* orelse continue);
+            if (run.automatic_title.state.load(.acquire) != .ready) continue;
+            const credential = if (run.automatic_title.execution) |*execution|
+                execution.input().api_key
+            else
+                run.redaction_secret;
+            const candidate = if (run.automatic_title.generated)
+                generatedAutomaticTitleCandidate(
+                    run.automatic_title.result[0..run.automatic_title.result_len],
+                )
+            else
+                null;
+            const selected = candidate orelse automaticTitleCandidate(&run.input);
+            if (task.durable.title.len == 0 and run.generation == 1) {
+                if (selected) |value| {
+                    const bounded = boundAutomaticTitle(value);
+                    const projected = self.copyProjected(
+                        bounded,
+                        self.limits.max_task_title_bytes,
+                        credential,
+                    ) catch null;
+                    if (projected) |title| {
+                        if (title.value.len == 0) {
+                            self.freeTracked(title.value);
+                        } else {
+                            self.freeTracked(task.durable.title);
+                            task.durable.title = title.value;
+                            task.durable.title_redacted = title.redacted;
+                            durable_changed = true;
+                        }
+                    }
+                }
+            }
+            std.crypto.secureZero(u8, &run.automatic_title.result);
+            run.automatic_title.result_len = 0;
+            run.automatic_title.generated = false;
+            if (run.automatic_title.execution) |*execution| execution.deinit();
+            run.automatic_title.execution = null;
+            run.automatic_title.state.store(.settled, .release);
         }
-        const previous_title = task.durable.title;
-        self.projection_bytes -= previous_title.len;
-        task.durable.title = projected.value;
-        task.durable.title_redacted = projected.redacted;
-        return true;
+        return durable_changed;
     }
 
-    fn rollbackAutomaticTaskTitle(
+    fn prepareAutomaticTitle(
         self: *Workbench,
-        task: *TaskView,
-        previous_title: []u8,
-        previous_redacted: bool,
-    ) void {
-        const current_title = task.durable.title;
-        self.freeTracked(current_title);
-        task.durable.title = previous_title;
-        self.projection_bytes += previous_title.len;
-        task.durable.title_redacted = previous_redacted;
+        task: *const TaskView,
+        generation: u64,
+        execution: account_contract.ExecutionConfigInput,
+    ) AutomaticTitle {
+        if (generation != 1 or task.durable.title.len != 0) return .{};
+        var result = AutomaticTitle{};
+        result.execution = OwnedTaskExecution.clone(
+            self.allocator,
+            execution.target.provider_kind,
+            execution.target.model,
+            execution.target.base_url,
+            execution.execution_generation,
+            execution.api_key,
+        ) catch {
+            result.state.store(.ready, .release);
+            return result;
+        };
+        result.state.store(.pending, .release);
+        return result;
+    }
+
+    fn releaseAutomaticTitle(self: *Workbench, title: *AutomaticTitle) void {
+        std.debug.assert(title.state.load(.acquire) != .running);
+        std.crypto.secureZero(u8, &title.result);
+        if (title.execution) |*execution| execution.deinit();
+        title.execution = null;
+        title.state.store(.settled, .release);
+        _ = self;
     }
 
     test "automatic title fallback extracts text and skill display names" {
@@ -12728,6 +12833,11 @@ pub const Workbench = struct {
             .argument_values = &.{},
         } };
         try std.testing.expect(automaticTitleCandidate(&empty_skill) == null);
+        try std.testing.expectEqualStrings(
+            "AgentCore title",
+            generatedAutomaticTitleCandidate("  AgentCore title  ").?,
+        );
+        try std.testing.expect(generatedAutomaticTitleCandidate("line one\nline two") == null);
     }
 
     test "automatic title allocation failure does not escape the fallback" {
@@ -12740,8 +12850,34 @@ pub const Workbench = struct {
 
         const task = &workbench.tasks[0].?;
         const run = &task.durable.runs[0].?;
-        try std.testing.expect(!workbench.applyAutomaticTaskTitle(task, run));
+        run.automatic_title.state.store(.ready, .release);
+        try std.testing.expect(!workbench.commitAutomaticTitlesNoFail(task));
         try std.testing.expectEqualStrings("", task.durable.title);
+    }
+
+    test "automatic title settlement never overwrites a user title" {
+        var workbench = try testWorkbench();
+        defer workbench.deinit();
+
+        const task = &workbench.tasks[0].?;
+        try workbench.replaceTracked(
+            &task.durable.title,
+            "User title",
+            workbench.limits.max_task_title_bytes,
+        );
+        const run = &task.durable.runs[0].?;
+        const generated = "Generated title";
+        @memcpy(run.automatic_title.result[0..generated.len], generated);
+        run.automatic_title.result_len = generated.len;
+        run.automatic_title.generated = true;
+        run.automatic_title.state.store(.ready, .release);
+
+        try std.testing.expect(!workbench.commitAutomaticTitlesNoFail(task));
+        try std.testing.expectEqualStrings("User title", task.durable.title);
+        try std.testing.expectEqual(
+            AutomaticTitleState.settled,
+            run.automatic_title.state.load(.acquire),
+        );
     }
 
     fn deinitRunInputRecord(
@@ -12789,6 +12925,12 @@ pub const Workbench = struct {
         );
         errdefer self.freeTracked(execution_model);
         task.durable.next_run_generation += 1;
+        var automatic_title = self.prepareAutomaticTitle(
+            task,
+            task.durable.next_run_generation,
+            execution,
+        );
+        errdefer self.releaseAutomaticTitle(&automatic_title);
         task.durable.runs[slot] = .{
             .id = 0,
             .generation = task.durable.next_run_generation,
@@ -12804,6 +12946,7 @@ pub const Workbench = struct {
             .workbench = undefined,
             .task = undefined,
             .session = undefined,
+            .automatic_title = automatic_title,
         };
         return slot;
     }
@@ -12855,6 +12998,8 @@ pub const Workbench = struct {
     }
 
     fn deinitRunRecord(self: *Workbench, run: *RunRecord) void {
+        std.debug.assert(run.automatic_title.state.load(.acquire) != .running);
+        self.releaseAutomaticTitle(&run.automatic_title);
         for (run.tools) |*tool_entry| {
             const tool = &(tool_entry.* orelse continue);
             self.deinitToolView(tool);
@@ -13585,6 +13730,141 @@ fn agentRunStateStatus(phase: lifecycle.RunStatePhase) []const u8 {
     };
 }
 
+const AutomaticTitleWatchdog = struct {
+    io: std.Io,
+    title: *AutomaticTitle,
+    stream: *lifecycle.CompletionStream,
+    finished: std.atomic.Value(bool) = .init(false),
+    timed_out: std.atomic.Value(bool) = .init(false),
+
+    fn run(self: *AutomaticTitleWatchdog) void {
+        var elapsed_ms: u32 = 0;
+        while (elapsed_ms < automatic_title_timeout_ms) : (elapsed_ms += automatic_title_watchdog_poll_ms) {
+            if (self.finished.load(.acquire)) return;
+            if (self.title.cancel_requested.load(.acquire)) {
+                _ = self.stream.abort(.user_request) catch return;
+                return;
+            }
+            std.Io.Timeout.sleep(.{ .duration = .{
+                .raw = std.Io.Duration.fromMilliseconds(
+                    automatic_title_watchdog_poll_ms,
+                ),
+                .clock = .awake,
+            } }, self.io) catch break;
+        }
+        if (self.finished.load(.acquire)) return;
+        if (self.title.cancel_requested.load(.acquire)) {
+            _ = self.stream.abort(.user_request) catch return;
+            return;
+        }
+        self.timed_out.store(true, .release);
+        _ = self.stream.abort(.timeout) catch return;
+    }
+};
+
+fn generateAutomaticTitle(run: *RunRecord) void {
+    const claimed = run.automatic_title.state.cmpxchgStrong(
+        .pending,
+        .running,
+        .acq_rel,
+        .acquire,
+    );
+    if (claimed != null) return;
+    defer run.automatic_title.state.store(.ready, .release);
+    if (run.automatic_title.cancel_requested.load(.acquire)) return;
+    const source = Workbench.automaticTitleCompletionInput(&run.input) orelse return;
+    const execution = &(run.automatic_title.execution orelse return);
+    const config = execution.input();
+    const owner = run.workbench.completion_factory.create(std.heap.c_allocator, .{
+        .provider = agentProvider(run.execution_provider),
+        .credential = config.api_key,
+        .base_url = config.target.base_url,
+        .model = config.target.model,
+    }) catch return;
+    const messages = [_]lifecycle.CompletionMessage{.{
+        .role = .user,
+        .text = source,
+    }};
+    const stream = owner.startStream(.{
+        .system = automatic_title_system_prompt,
+        .messages = &messages,
+    }) catch {
+        _ = destroyAutomaticTitleCompletion(owner);
+        return;
+    };
+    var watchdog = AutomaticTitleWatchdog{
+        .io = run.workbench.io,
+        .title = &run.automatic_title,
+        .stream = stream,
+    };
+    const watchdog_thread = std.Thread.spawn(.{}, AutomaticTitleWatchdog.run, .{&watchdog}) catch {
+        _ = destroyAutomaticTitleStream(stream, owner);
+        return;
+    };
+
+    var output_len: usize = 0;
+    var overflow = false;
+    var terminal_reason: ?lifecycle.CompletionStopReason = null;
+    var stream_failed = false;
+    while (terminal_reason == null and !stream_failed) {
+        var event = stream.next() catch {
+            stream_failed = true;
+            break;
+        };
+        const kind = event.kind;
+        const stop_reason = event.stop_reason;
+        const payload = event.payload;
+        switch (kind) {
+            .text => {
+                if (payload.len > automatic_title_result_capacity - output_len) {
+                    overflow = true;
+                } else if (!overflow) {
+                    @memcpy(
+                        run.automatic_title.result[output_len..][0..payload.len],
+                        payload,
+                    );
+                    output_len += payload.len;
+                }
+            },
+            .done => terminal_reason = stop_reason,
+            .thinking, .usage => {},
+        }
+        event.deinit();
+    }
+    watchdog.finished.store(true, .release);
+    watchdog_thread.join();
+    const destroyed = destroyAutomaticTitleStream(stream, owner);
+    if (!destroyed or stream_failed or overflow or
+        watchdog.timed_out.load(.acquire) or
+        run.automatic_title.cancel_requested.load(.acquire) or
+        terminal_reason != .end_turn)
+        return;
+    run.automatic_title.result_len = output_len;
+    run.automatic_title.generated = true;
+}
+
+fn destroyAutomaticTitleCompletion(owner: *lifecycle.Completion) bool {
+    owner.deinit() catch return false;
+    return true;
+}
+
+fn destroyAutomaticTitleStream(
+    stream: *lifecycle.CompletionStream,
+    owner: *lifecycle.Completion,
+) bool {
+    stream.deinit() catch return false;
+    return destroyAutomaticTitleCompletion(owner);
+}
+
+fn publishAutomaticTitleFallback(run: *RunRecord) void {
+    _ = run.automatic_title.state.cmpxchgStrong(
+        .pending,
+        .ready,
+        .acq_rel,
+        .acquire,
+    );
+}
+
 fn executeRunJob(context: *anyopaque) void {
     const run: *RunRecord = @ptrCast(@alignCast(context));
     const claimed = run.agent_handoff.cmpxchgStrong(
@@ -13599,6 +13879,7 @@ fn executeRunJob(context: *anyopaque) void {
         .failure => |failure| {
             run.agent_handoff.store(.finishing, .release);
             commitBeginFailure(run, failure);
+            publishAutomaticTitleFallback(run);
             const notifier = run.workbench.change_notifier;
             releaseWorkerReference(run);
             _ = notifier.notify();
@@ -13626,6 +13907,9 @@ fn executeRunJob(context: *anyopaque) void {
     terminal.deinit();
     agent_run.deinit();
     const notifier = run.workbench.change_notifier;
+    _ = notifier.notify();
+    generateAutomaticTitle(run);
+    _ = notifier.notify();
     if (!checkpoint_eligible or !postprocessCheckpoint(
         run.workbench,
         run.session,
@@ -14102,6 +14386,7 @@ fn cancelRunJobForShutdown(context: *anyopaque) void {
         "",
         false,
     );
+    publishAutomaticTitleFallback(run);
     const notifier = run.workbench.change_notifier;
     releaseWorkerReference(run);
     _ = notifier.notify();
@@ -14562,6 +14847,14 @@ fn cancelTaskCheckpoints(task: *TaskView) void {
             .none, .exporting => compact.checkpoint.cancelled.store(true, .release),
             else => {},
         }
+    }
+}
+
+fn cancelTaskAutomaticTitles(task: *TaskView) void {
+    for (task.durable.runs) |*entry| {
+        const run = &(entry.* orelse continue);
+        run.automatic_title.cancel_requested.store(true, .release);
+        publishAutomaticTitleFallback(run);
     }
 }
 
