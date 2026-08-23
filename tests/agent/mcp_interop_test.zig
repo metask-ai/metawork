@@ -901,15 +901,8 @@ test "MCP product chain reaches new Task authority after add restart refresh and
         restarted_runtime,
     );
     try installExecution(&restarted_workbench);
-    try std.testing.expect(refresh_timer.armed_after_ms != null);
-    try std.testing.expect(refresh_timer.armed_after_ms.? < 2_000);
-    restarted_workbench.onMcpRefreshTimer();
-    try waitForMcpSnapshot(
-        &restarted_workbench,
-        "\"managementHealth\":\"ready\",\"operation\":\"idle\"",
-    );
-    try std.testing.expect(refresh_timer.arm_count >= 2);
-    try std.testing.expect(refresh_timer.armed_after_ms != null);
+    try std.testing.expectEqual(@as(?u64, null), refresh_timer.armed_after_ms);
+    try std.testing.expectEqual(@as(usize, 0), refresh_timer.arm_count);
     try std.testing.expectEqual(
         workbench.McpManagementOutcome.saved,
         try restarted_workbench.setMcpAllowedTools(1, .{
@@ -966,6 +959,7 @@ test "MCP product chain reaches new Task authority after add restart refresh and
         } }, std.testing.io) catch return error.TestUnexpectedResult;
     }
     try std.testing.expect(task_id != null);
+    try std.testing.expectEqual(@as(usize, 0), refresh_timer.arm_count);
     var snapshot_storage: [512 * 1024]u8 = undefined;
     const snapshot = try restarted_workbench.writeSnapshot(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(
