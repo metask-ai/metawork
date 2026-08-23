@@ -5,6 +5,7 @@ const session_impl = @import("agent_session");
 const mcp_connector = @import("agent_mcp_connector");
 const mcp_stdio = @import("agent_mcp_stdio");
 const mcp_http = @import("agent_mcp_http");
+const provider = @import("agent_provider");
 const provider_probe = @import("agent_provider_probe");
 
 pub const OwnedCoreEvent = session_impl.OwnedCoreEvent;
@@ -115,7 +116,7 @@ pub const McpHttpFeedOutcome = mcp_http.FeedOutcome;
 pub const McpHttpPerformOutcome = mcp_http.PerformOutcome;
 pub const McpHttpHeaderName = mcp_http.HeaderName;
 pub const mcpHttpReservedRequestHeaderNames = mcp_http.reserved_request_header_names;
-pub const ProviderKind = session_impl.ProviderKind;
+pub const ProviderKind = provider.ProviderKind;
 pub const ProviderProbeInput = provider_probe.Input;
 pub const ProviderProbeFailure = provider_probe.Failure;
 pub const ProviderProbeOutcome = provider_probe.Outcome;

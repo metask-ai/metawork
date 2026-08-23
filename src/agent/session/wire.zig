@@ -8,6 +8,7 @@ const std = @import("std");
 const sdk = @import("metask_agentcore");
 const wire = sdk.types;
 const control = @import("control.zig");
+const provider = @import("agent_provider");
 
 pub fn decodeUiRequest(
     allocator: std.mem.Allocator,
@@ -137,12 +138,8 @@ fn validUtf8(values: []const []const u8) bool {
     return true;
 }
 
-pub fn providerKindCode(value: control.ProviderKind) u32 {
-    return switch (value) {
-        .anthropic => wire.PROVIDER_ANTHROPIC,
-        .openai => wire.PROVIDER_OPENAI,
-        .gemini => wire.PROVIDER_GEMINI,
-    };
+pub fn providerKindCode(value: provider.ProviderKind) u32 {
+    return provider.wireCode(value);
 }
 
 pub fn permissionModeCode(value: control.PermissionMode) u32 {

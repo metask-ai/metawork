@@ -76,6 +76,7 @@ metawork/
 │   ├── workbench/         # 产品 projection 与 bounded executor
 │   ├── agent.zig          # Agent execution module entrypoint
 │   ├── agent/             # catalog、Session/Runtime、event pump、callback 与 MCP ownership
+│   │   ├── provider.zig   # Agent 共享 ProviderKind 与 AgentCore wire 映射
 │   │   ├── mcp/           # connector、stdio/http transport、runtime 与 catalog
 │   │   └── session/       # Session composition、Runtime lifecycle、binding、wire 与纯控制值
 │   ├── storage.zig        # backend-independent Storage module entrypoint

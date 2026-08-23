@@ -8,12 +8,9 @@ const std = @import("std");
 const builtin = @import("builtin");
 const sdk = @import("metask_agentcore");
 const wire = sdk.types;
+const provider = @import("agent_provider");
 
-pub const ProviderKind = enum {
-    anthropic,
-    openai,
-    gemini,
-};
+pub const ProviderKind = provider.ProviderKind;
 
 pub const Input = struct {
     provider: ProviderKind,
@@ -151,7 +148,7 @@ pub fn run(io: std.Io, input: Input) Outcome {
     const workspace = if (builtin.os.tag == .windows) "C:\\" else "/";
     var host = std.mem.zeroes(wire.SessionHostConfigV1);
     host.struct_size = @sizeOf(wire.SessionHostConfigV1);
-    host.provider_kind_code = providerCode(input.provider);
+    host.provider_kind_code = provider.wireCode(input.provider);
     host.permission_mode_code = wire.PERMISSION_DEFAULT;
     host.shell_policy_code = wire.SHELL_DISABLED;
     host.api_key = sdk.bytesView(secret_storage[0..input.credential.len]);
@@ -219,14 +216,6 @@ pub fn run(io: std.Io, input: Input) Outcome {
     if (!statusOk(session_status) or !statusOk(runtime_status))
         return .{ .failed = .cleanup_failed };
     return .connected;
-}
-
-fn providerCode(provider: ProviderKind) u32 {
-    return switch (provider) {
-        .anthropic => wire.PROVIDER_ANTHROPIC,
-        .openai => wire.PROVIDER_OPENAI,
-        .gemini => wire.PROVIDER_GEMINI,
-    };
 }
 
 fn statusOk(raw: u32) bool {
