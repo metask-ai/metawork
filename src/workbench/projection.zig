@@ -345,6 +345,7 @@ pub const Configuration = struct {
     change_notifier: ChangeNotifier = .{},
     directories: AppDirectories = .{},
     schedule_timer: ScheduleTimer = .{},
+    mcp_refresh_timer: McpRefreshTimer = .{},
     schedule_persistence: SchedulePersistence = .{},
     task_persistence: TaskPersistence = .{},
     checkpoint_store: CheckpointStoreConfiguration = .{},
@@ -1296,6 +1297,23 @@ pub const ScheduleTimer = struct {
     }
 };
 
+/// One-shot monotonic timer used only to refresh AgentCore MCP authority
+/// before its earliest advertised catalog TTL expires.
+pub const McpRefreshTimer = struct {
+    context: ?*anyopaque = null,
+    enabled: bool = false,
+    arm: *const fn (?*anyopaque, u64) bool = noMcpRefreshArm,
+    cancel: *const fn (?*anyopaque) void = noMcpRefreshCancel,
+
+    fn armAfter(self: McpRefreshTimer, delay_ms: u64) bool {
+        return self.enabled and self.arm(self.context, delay_ms);
+    }
+
+    fn cancelCurrent(self: McpRefreshTimer) void {
+        if (self.enabled) self.cancel(self.context);
+    }
+};
+
 fn noScheduleClock(_: ?*anyopaque) ?u64 {
     return null;
 }
@@ -1305,6 +1323,12 @@ fn noScheduleArm(_: ?*anyopaque, _: u64) bool {
 }
 
 fn noScheduleCancel(_: ?*anyopaque) void {}
+
+fn noMcpRefreshArm(_: ?*anyopaque, _: u64) bool {
+    return false;
+}
+
+fn noMcpRefreshCancel(_: ?*anyopaque) void {}
 
 pub const TransportFailureStage = enum {
     ingress_validation,
@@ -2570,6 +2594,7 @@ pub const Workbench = struct {
     skill_staging_root: ?[]u8,
     skill_reconciliation: ?SkillReconciliation = null,
     schedule_timer: ScheduleTimer,
+    mcp_refresh_timer: McpRefreshTimer,
     schedule_persistence: SchedulePersistence,
     schedule_persistence_health: SchedulePersistenceHealth,
     schedule_notifier: ScheduleNotifier,
@@ -2839,6 +2864,7 @@ pub const Workbench = struct {
             .skill_enablement_health = skill_enablement_health,
             .skill_staging_root = skill_staging_root,
             .schedule_timer = configuration.schedule_timer,
+            .mcp_refresh_timer = configuration.mcp_refresh_timer,
             .schedule_persistence = configuration.schedule_persistence,
             .schedule_persistence_health = schedule_persistence_health,
             .schedule_notifier = configuration.schedule_notifier,
@@ -2905,6 +2931,7 @@ pub const Workbench = struct {
             };
             mcp_management = null;
             _ = workbench.syncMcpHealthNoFail();
+            workbench.rearmMcpRefreshTimerNoFail();
         }
         return workbench;
     }
@@ -4140,6 +4167,7 @@ pub const Workbench = struct {
         if (inspection.health != .ready) return error.McpManagementUnavailable;
         if (mcp.refresh_request_generation == std.math.maxInt(u64))
             return error.CatalogRequestGenerationExhausted;
+        self.mcp_refresh_timer.cancelCurrent();
         const generation = mcp.refresh_request_generation + 1;
         var refresh_arena = std.heap.ArenaAllocator.init(self.allocator);
         errdefer refresh_arena.deinit();
@@ -4171,6 +4199,22 @@ pub const Workbench = struct {
         mcp.refresh_request_generation = generation;
         mcp.refresh_job = job;
         self.bumpRevision();
+    }
+
+    /// Native one-shot timer ingress. Refresh work is always enqueued on the
+    /// bounded Workbench executor; the main thread never performs catalog I/O.
+    pub fn onMcpRefreshTimer(self: *Workbench) void {
+        if (self.shutting_down) return;
+        self.syncLifecycle();
+        self.refreshMcpCatalog() catch |err| switch (err) {
+            error.CatalogLoading => {},
+            else => {
+                if (self.mcp) |*mcp| {
+                    self.blockMcpAdmissionForCurrentState(mcp);
+                    self.bumpRevision();
+                }
+            },
+        };
     }
 
     pub fn taskCatalog(
@@ -4596,6 +4640,10 @@ pub const Workbench = struct {
             .mcp_selection = self.mcpSelectionForNewTask(),
         }) catch |err| switch (err) {
             error.SessionCapacity => return error.TaskCapacity,
+            error.McpNotRefreshed => {
+                self.recoverExpiredMcpCatalogNoFail();
+                return error.CatalogLoading;
+            },
             else => return err,
         };
         self.next_task_id +%= 1;
@@ -6481,6 +6529,7 @@ pub const Workbench = struct {
         if (inspection.health != .ready or
             inspection.desired_generation != expected_generation)
             return error.McpManagementUnavailable;
+        self.mcp_refresh_timer.cancelCurrent();
         mcp.configuration_apply_state = .applying;
         self.blockMcpAdmission(mcp, .refreshing);
         self.bumpRevision();
@@ -6527,6 +6576,7 @@ pub const Workbench = struct {
             } });
         }
         mcp.connection_test = null;
+        self.rearmMcpRefreshTimerNoFail();
         self.bumpRevision();
         return true;
     }
@@ -7747,6 +7797,28 @@ pub const Workbench = struct {
         };
     }
 
+    fn recoverExpiredMcpCatalogNoFail(self: *Workbench) void {
+        const mcp = if (self.mcp) |*value| value else return;
+        self.mcp_refresh_timer.cancelCurrent();
+        self.blockMcpAdmission(mcp, .refreshing);
+        self.refreshMcpCatalog() catch {
+            if (mcp.refresh_job == null)
+                self.blockMcpAdmissionForCurrentState(mcp);
+            self.bumpRevision();
+        };
+    }
+
+    fn rearmMcpRefreshTimerNoFail(self: *Workbench) void {
+        self.mcp_refresh_timer.cancelCurrent();
+        if (self.shutting_down or !self.mcp_refresh_timer.enabled) return;
+        const mcp = if (self.mcp) |*value| value else return;
+        if (!mcp.committed or mcp.refresh_job != null or mcp.activation_failed)
+            return;
+        const activation = mcp.activation orelse return;
+        const delay_ms = mcpRefreshDelayMs(activation.catalogServers()) orelse return;
+        _ = self.mcp_refresh_timer.armAfter(delay_ms);
+    }
+
     fn createRecoveryMcpAuthority(self: *Workbench) Error!RecoveryMcpAuthority {
         const mcp = if (self.mcp) |*value| value else return .{
             .selection = null,
@@ -8723,6 +8795,7 @@ pub const Workbench = struct {
     pub fn deinit(self: *Workbench) void {
         self.shutdownExecutor();
         self.schedule_timer.cancelCurrent();
+        self.mcp_refresh_timer.cancelCurrent();
         self.markSkillCatalogUnavailable();
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
@@ -8764,6 +8837,7 @@ pub const Workbench = struct {
             mcp.activation_failed = true;
         }
         self.schedule_timer.cancelCurrent();
+        self.mcp_refresh_timer.cancelCurrent();
         for (self.tasks) |*entry| {
             const view = &(entry.* orelse continue);
             cancelTaskCheckpoints(view);
@@ -12076,6 +12150,7 @@ pub const Workbench = struct {
             .queued, .running => unreachable,
         }
         job.deinit();
+        self.rearmMcpRefreshTimerNoFail();
         return true;
     }
 
@@ -15062,6 +15137,56 @@ fn taskCatalogProjection(task: *const TaskView) CatalogProjection {
         snapshot.view()
     else
         .{ .availability = .uninitialized };
+}
+
+fn mcpRefreshDelayMs(servers: []const lifecycle.McpCatalogServer) ?u64 {
+    const minimum_refresh_interval_ms: u64 = 1_000;
+    var earliest_ttl_ms: ?u64 = null;
+    for (servers) |server| {
+        if (!server.fresh or server.ttl_remaining_ms <= minimum_refresh_interval_ms)
+            continue;
+        earliest_ttl_ms = if (earliest_ttl_ms) |current|
+            @min(current, server.ttl_remaining_ms)
+        else
+            server.ttl_remaining_ms;
+    }
+    const ttl_ms = earliest_ttl_ms orelse return null;
+    const lead_ms = @min(ttl_ms / 4, 5_000);
+    return @max(minimum_refresh_interval_ms, ttl_ms - lead_ms);
+}
+
+test "MCP refresh timer uses earliest safe fresh catalog TTL" {
+    const servers = [_]lifecycle.McpCatalogServer{
+        .{
+            .binding_identity = [_]u8{1} ** 32,
+            .namespace = "slow",
+            .fresh = true,
+            .ttl_remaining_ms = 60_000,
+            .tool_offset = 0,
+            .tool_count = 1,
+        },
+        .{
+            .binding_identity = [_]u8{2} ** 32,
+            .namespace = "fast",
+            .fresh = true,
+            .ttl_remaining_ms = 10_000,
+            .tool_offset = 1,
+            .tool_count = 1,
+        },
+        .{
+            .binding_identity = [_]u8{3} ** 32,
+            .namespace = "stale",
+            .fresh = false,
+            .ttl_remaining_ms = 1,
+            .tool_offset = 2,
+            .tool_count = 0,
+        },
+    };
+    try std.testing.expectEqual(@as(?u64, 7_500), mcpRefreshDelayMs(&servers));
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        mcpRefreshDelayMs(&.{servers[2]}),
+    );
 }
 
 fn takeActivityOrder(run: *RunRecord) u64 {

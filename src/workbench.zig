@@ -34,6 +34,7 @@ pub const Configuration = projection_impl.Configuration;
 pub const Workbench = projection_impl.Workbench;
 pub const ChangeNotifier = projection_impl.ChangeNotifier;
 pub const ScheduleTimer = projection_impl.ScheduleTimer;
+pub const McpRefreshTimer = projection_impl.McpRefreshTimer;
 pub const SchedulePersistence = projection_impl.SchedulePersistence;
 pub const SchedulePersistenceCommit = projection_impl.SchedulePersistenceCommit;
 pub const SchedulePersistenceHealth = projection_impl.SchedulePersistenceHealth;

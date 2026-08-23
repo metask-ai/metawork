@@ -45,6 +45,17 @@ const HttpFixture = struct {
     provider_endpoint: []u8,
 
     fn start(protocol_version: []const u8, framing: []const u8, trace_path: []const u8) !HttpFixture {
+        return startWithTtl(protocol_version, framing, trace_path, 60_000);
+    }
+
+    fn startWithTtl(
+        protocol_version: []const u8,
+        framing: []const u8,
+        trace_path: []const u8,
+        ttl_ms: u64,
+    ) !HttpFixture {
+        var ttl_storage: [32]u8 = undefined;
+        const ttl = try std.fmt.bufPrint(&ttl_storage, "{d}", .{ttl_ms});
         const arguments = [_][]const u8{
             options.node_path,
             options.fixture_path,
@@ -56,6 +67,8 @@ const HttpFixture = struct {
             framing,
             "--trace",
             trace_path,
+            "--ttl-ms",
+            ttl,
         };
         var child = try std.process.spawn(std.testing.io, .{
             .argv = &arguments,
@@ -93,6 +106,34 @@ const HttpFixture = struct {
         std.testing.allocator.free(self.endpoint);
         std.testing.allocator.free(self.provider_endpoint);
         self.* = undefined;
+    }
+};
+
+const McpRefreshTimerProbe = struct {
+    armed_after_ms: ?u64 = null,
+    arm_count: usize = 0,
+    cancel_count: usize = 0,
+
+    fn arm(context: ?*anyopaque, delay_ms: u64) bool {
+        const self: *@This() = @ptrCast(@alignCast(context orelse return false));
+        self.armed_after_ms = delay_ms;
+        self.arm_count += 1;
+        return true;
+    }
+
+    fn cancel(context: ?*anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(context orelse return));
+        self.armed_after_ms = null;
+        self.cancel_count += 1;
+    }
+
+    fn capability(self: *@This()) workbench.McpRefreshTimer {
+        return .{
+            .context = self,
+            .enabled = true,
+            .arm = arm,
+            .cancel = cancel,
+        };
     }
 };
 
@@ -605,6 +646,92 @@ test "canonical AgentCore executes a selected Streamable HTTP tool" {
     try std.testing.expect(std.mem.indexOf(u8, trace, "echo-from-agentcore") != null);
 }
 
+test "expired MCP authority is typed and the same model succeeds after refresh" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_storage: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
+    var trace_storage: [std.fs.max_path_bytes]u8 = undefined;
+    const trace_path = try std.fmt.bufPrint(
+        &trace_storage,
+        "{s}/ttl-trace.jsonl",
+        .{root_storage[0..root_len]},
+    );
+    var fixture = try HttpFixture.startWithTtl(
+        "2026-07-28",
+        "json",
+        trace_path,
+        100,
+    );
+    defer fixture.deinit();
+    var preparation = try prepareHttpFixture(fixture.endpoint, "2026-07-28");
+    defer preparation.deinit();
+    var runtime_build = try mcp_platform.buildRuntime(
+        std.testing.io,
+        std.testing.allocator,
+        &preparation,
+        .{},
+    );
+    defer runtime_build.deinit();
+    const runtime = try agent.Runtime.init(std.testing.io, std.testing.allocator, .{
+        .max_sessions = 1,
+        .mcp_input = &runtime_build.input.?,
+    });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const first_activation = switch (try runtime.activateMcp()) {
+        .activated => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer first_activation.deinit();
+    const expired_selection = first_activation.takeSelection() orelse
+        return error.TestUnexpectedResult;
+    defer expired_selection.deinit();
+    const workspace_root = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        ".",
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(workspace_root);
+    const open_options: agent.SessionOpenOptions = .{
+        .provider = .anthropic,
+        .permission_mode = .full_access,
+        .shell_policy = .unrestricted,
+        .credential = "fixture-credential",
+        .model = "fixture-model",
+        .base_url = fixture.provider_endpoint,
+        .workspace = .{
+            .canonical_root = workspace_root,
+            .trust = .explicitly_trusted,
+        },
+        .mcp_selection = expired_selection,
+    };
+    std.Io.Timeout.sleep(.{ .duration = .{
+        .raw = std.Io.Duration.fromMilliseconds(250),
+        .clock = .awake,
+    } }, std.testing.io) catch return error.TestUnexpectedResult;
+    try std.testing.expectError(
+        error.McpNotRefreshed,
+        runtime.createSession(open_options),
+    );
+
+    const refreshed_activation = switch (try runtime.activateMcp()) {
+        .activated => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer refreshed_activation.deinit();
+    const refreshed_selection = refreshed_activation.takeSelection() orelse
+        return error.TestUnexpectedResult;
+    defer refreshed_selection.deinit();
+    var refreshed_options = open_options;
+    refreshed_options.mcp_selection = refreshed_selection;
+    const session = try runtime.createSession(refreshed_options);
+    try session.close(.session_close);
+    try runtime.releaseClosedSession(session);
+}
+
 test "MCP product chain reaches new Task authority after add restart refresh and allowlist" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -616,7 +743,12 @@ test "MCP product chain reaches new Task authority after add restart refresh and
         "{s}/product-trace.jsonl",
         .{root_storage[0..root_len]},
     );
-    var fixture = try HttpFixture.start("2026-07-28", "json", trace_path);
+    var fixture = try HttpFixture.startWithTtl(
+        "2026-07-28",
+        "json",
+        trace_path,
+        2_000,
+    );
     defer fixture.deinit();
     const registry_storage = try std.testing.allocator.alloc(
         u8,
@@ -740,20 +872,24 @@ test "MCP product chain reaches new Task authority after add restart refresh and
     var restarted_activation_owned = true;
     errdefer if (restarted_activation_owned) restarted_activation.deinit();
     try std.testing.expectEqual(agent.McpActivationState.ready, restarted_activation.state());
+    var refresh_timer: McpRefreshTimerProbe = .{};
     var restarted_workbench = try workbench.Workbench.init(
         std.testing.allocator,
         std.testing.io,
         restarted_runtime,
         .{ .worker_count = 1, .queue_capacity = 4 },
-        .{ .mcp = .{
-            .preparation = &restarted_preparation,
-            .activation = restarted_activation,
-            .management = managementConfiguration(
-                &durable_registry,
-                &restarted_manifest,
-            ),
-            .host_capabilities = .{ .connection_approval = true },
-        } },
+        .{
+            .mcp_refresh_timer = refresh_timer.capability(),
+            .mcp = .{
+                .preparation = &restarted_preparation,
+                .activation = restarted_activation,
+                .management = managementConfiguration(
+                    &durable_registry,
+                    &restarted_manifest,
+                ),
+                .host_capabilities = .{ .connection_approval = true },
+            },
+        },
     );
     restarted_runtime_owned = false;
     restarted_activation_owned = false;
@@ -765,11 +901,15 @@ test "MCP product chain reaches new Task authority after add restart refresh and
         restarted_runtime,
     );
     try installExecution(&restarted_workbench);
-    try restarted_workbench.refreshMcpCatalog();
+    try std.testing.expect(refresh_timer.armed_after_ms != null);
+    try std.testing.expect(refresh_timer.armed_after_ms.? < 2_000);
+    restarted_workbench.onMcpRefreshTimer();
     try waitForMcpSnapshot(
         &restarted_workbench,
         "\"managementHealth\":\"ready\",\"operation\":\"idle\"",
     );
+    try std.testing.expect(refresh_timer.arm_count >= 2);
+    try std.testing.expect(refresh_timer.armed_after_ms != null);
     try std.testing.expectEqual(
         workbench.McpManagementOutcome.saved,
         try restarted_workbench.setMcpAllowedTools(1, .{
@@ -791,14 +931,41 @@ test "MCP product chain reaches new Task authority after add restart refresh and
         .workspace_root = workspace_root,
         .trust = .explicitly_trusted,
     });
-    const task_id = try restarted_workbench.createTaskInWorkspace(
-        workspace_id,
-        try restarted_workbench.workspaceEpoch(workspace_id),
-        1,
-        null,
-        null,
+    const workspace_epoch = try restarted_workbench.workspaceEpoch(workspace_id);
+    std.Io.Timeout.sleep(.{ .duration = .{
+        .raw = std.Io.Duration.fromMilliseconds(2_500),
+        .clock = .awake,
+    } }, std.testing.io) catch return error.TestUnexpectedResult;
+    try std.testing.expectError(
+        error.CatalogLoading,
+        restarted_workbench.createTaskInWorkspace(
+            workspace_id,
+            workspace_epoch,
+            1,
+            null,
+            null,
+        ),
     );
-    try std.testing.expect(task_id != 0);
+    var task_id: ?u64 = null;
+    for (0..400) |_| {
+        restarted_workbench.syncLifecycle();
+        task_id = restarted_workbench.createTaskInWorkspace(
+            workspace_id,
+            workspace_epoch,
+            1,
+            null,
+            null,
+        ) catch |err| switch (err) {
+            error.CatalogLoading => null,
+            else => return err,
+        };
+        if (task_id != null) break;
+        std.Io.Timeout.sleep(.{ .duration = .{
+            .raw = std.Io.Duration.fromMilliseconds(5),
+            .clock = .awake,
+        } }, std.testing.io) catch return error.TestUnexpectedResult;
+    }
+    try std.testing.expect(task_id != null);
     var snapshot_storage: [512 * 1024]u8 = undefined;
     const snapshot = try restarted_workbench.writeSnapshot(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(
