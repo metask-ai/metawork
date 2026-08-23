@@ -75,7 +75,9 @@ metawork/
 │   ├── workbench.zig      # Workbench module entrypoint
 │   ├── workbench/         # 产品 projection 与 bounded executor
 │   ├── agent.zig          # Agent execution module entrypoint
-│   ├── agent/             # catalog、Session/Runtime、event pump、callback 与 MCP ownership
+│   ├── agent/             # catalog、Completion、Session/Runtime、event pump、callback 与 MCP ownership
+│   │   ├── provider.zig   # Agent 共享 ProviderKind 与 AgentCore wire 映射
+│   │   ├── completion.zig # 独立 Completion owner、typed request/result 与 streaming lifecycle
 │   │   ├── mcp/           # connector、stdio/http transport、runtime 与 catalog
 │   │   └── session/       # Session composition、Runtime lifecycle、binding、wire 与纯控制值
 │   ├── storage.zig        # backend-independent Storage module entrypoint
@@ -222,6 +224,8 @@ Bridge handler 不能绕过 Workbench 操作 AgentCore handle。automation 只�
 
 ### `workbench/` 与 `agent/`
 
+Task 标题生成不新增模块或 owner：`workbench/projection.zig` 在首个 Run admission 先提交旧规则生成的临时标题，再由同一 Run worker 消费现有独立 Completion，并在主线程完成候选校验、用户标题优先、替换、脱敏和持久化；它不扩展 Agent surface，也不建立标题专用 executor 或 Session 路径。
+
 `workbench/task_persistence.zig` 的当前 hard-cut store 是 `workbench-history.store`：固定 frame header、header/payload checksum、record type、bounded JSON payload 与 Task failure record 组成唯一 canonical history；不读取、不迁移、不双写任何旧 envelope，也不引入迁移版本层。Workspace/Task frame 可独立恢复，无法信任 Task identity 时只进入 `degraded`，可确认的坏 Task 以同一 store 的 failure record 留痕，不关闭新 Task admission；Automatic Workspace 仅在唯一 Task 恢复后占用容量。
 
 `workbench/mcp_configuration.zig` 的 static locator 只在 Replace 前后 command + ordered argv + cwd 或 endpoint 与 auth mode 相同时按同名 slot 沿用；其余 locator 仍由既有全 registry 引用差分和 credential journal 退休。Desired enabled 可独立于 credential readiness 保存，Runtime preparation 与 Admission 继续负责 fail-closed eligibility。
@@ -230,7 +234,7 @@ Bridge handler 不能绕过 Workbench 操作 AgentCore handle。automation 只�
 
 `workbench/skill_enablement.zig` 是同一 Workbench owner 下的独立 policy persistence 模块：它拥有 `skill-enablement.json` schema 1、全局 revision 分配器、用户 disabled defaults、Manual Workspace identity 与 enabled/disabled/inherit overrides、严格 codec、原子替换与 stale-record reconciliation。它不解析 Skill definition、不决定 catalog winner，也不向 Task history增加 wire 字段。`workbench/catalog_snapshot.zig` 是 immutable authority compiler：它把 AgentCore projection、非零 selection revision 和当前 disabled policy keys 一次编译成有界 snapshot，并提供 clone/recompile candidate，不提供 mutable enablement 补写。`projection.zig` 负责按 `Workspace override > user default > enabled` 形成候选 authorities，以 persist-then-no-fail-swap 事务提交 Personal/Workspace current authority，并应用到 Task create/refresh/restore 与 Run admission。当前 catalog query 只使用 AgentCore 默认的 user/workspace `.agents/skills` discovery，不拥有其他路径配置。
 
-`agent/checkpoint.zig` 是 checkpoint export、Session description、官方 limit ceiling 和 operation-specific status disposition 的唯一 AgentCore SDK 边界；`agent/checkpoint_restore.zig` 独占 verified source adapter、restore expectation/report 对账和 restore-specific status disposition。`agent/session/runtime.zig` 在锁内预留 Session slot、维护 restore in-flight fence，并拥有流式 ABI 调用的 Runtime 生命周期；`agent/session.zig` 保留 Session 对象与锁内状态转换；`agent/session/wire.zig` 独占 AgentCore payload 解码、UTF-8 校验、builtin profile 与 wire code 映射，`agent/session/control.zig` 只保存不持有 Session/Runtime 指针的状态、终态结果和 notifier 值。两者不解析或复制 AgentCore 私有 blob 格式。
+`agent/completion.zig` 独占不借用 Runtime/Session 的 Completion owner、typed request/result/event 校验、operation-specific status disposition、owned buffer 和 Stream → Completion 销毁顺序；`agent/provider_probe.zig` 只组合该能力完成有界 Model Connection 测试。`agent/checkpoint.zig` 是 checkpoint export、Session description、官方 limit ceiling 和 operation-specific status disposition 的唯一 AgentCore SDK 边界；`agent/checkpoint_restore.zig` 独占 verified source adapter、restore expectation/report 对账和 restore-specific status disposition。`agent/session/runtime.zig` 在锁内预留 Session slot、维护 restore in-flight fence，并拥有流式 ABI 调用的 Runtime 生命周期；`agent/session.zig` 保留 Session 对象与锁内状态转换；`agent/session/wire.zig` 独占 AgentCore payload 解码、UTF-8 校验、builtin profile 与 wire code 映射，`agent/session/control.zig` 只保存不持有 Session/Runtime 指针的状态、终态结果和 notifier 值。两者不解析或复制 AgentCore 私有 blob 格式。
 
 `workbench/checkpoint_record.zig` 定义 durable `Record = blob + session + anchor`，严格分离 blob identity、最小 Session binding 与 Workbench terminal/binding 锚点；`workbench/checkpoint_store.zig` 拥有不可变 per-Task blob 布局、进程级单写锁、bounded no-follow scan、hash/size 校验、原子提交和可信启动孤儿清理；`task_persistence.zig` 只逐字段白名单编码嵌套 record。`workbench/task_runtime.zig` 独占 `attached | detached | closing` runtime resource union；`workbench/task_deletion.zig` 独占 runtime-only 删除用例状态，并以纯决策函数按 checkpoint → terminal event → Session → worker reference → durable commit 的 owner 顺序选择唯一下一 effect；`workbench/task_recovery.zig` 是 continuation/eligibility 的纯策略；`workbench/task_recovery_job.zig` 拥有 immutable prepared attempt、bounded executor job、verified source、Skill/MCP authority acquisition 与 typed completion。`workbench/projection.zig` 只读取各 owner fact、执行删除决策产生的 effect、完成主线程 prepare/commit、optimistic revalidation、candidate attachment 安装和 snapshot projection，不在 snapshot 路径读取 checkpoint 文件。Application 只按既有 store 生命周期打开 `<MetaWork data dir>/workbench/checkpoints` 并注入 capability；Bridge、Renderer 与 Account 不依赖 checkpoint 模块。
 

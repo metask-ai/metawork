@@ -18,6 +18,7 @@ Windows 与 macOS arm64 均锁定 clean source commit `1183550f15b4eef27799076ee
 
 - `binary_abi_version = 1`；
 - Windows 与 macOS bundle 均为 `binary_abi_revision = 9`，`capabilities = 4194303`（`0x3fffff`）；
+- `CAP_TEXT_COMPLETION = 1 << 21` 已包含在 `REQUIRED_CAPABILITIES_V1`，Completion 不建立独立的可选 discovery 或降级路径；
 - 两者的 `binary_abi_table_size` 都是 `280`；
 - 唯一 discovery symbol 为 `metask_agentcore_get_api`；
 - struct size 必须精确匹配，Host 提供的 reserved 字段必须全部为零；
@@ -42,7 +43,7 @@ revision 8 新增 `CAP_RUN_STATE_OBSERVATION` 和 `CoreEvent.run_state`。事件
 - 禁止 Git/path implementation dependency、源码复制、archive 直链、`latest`、可变 tag 和 source fallback；
 - `agent/` 只通过 bundle 官方 `bindings/zig` package 获取 ABI types、typed protocol、module 和 link graph。
 
-MetaWork 不复制 header、raw enum、event tag、Permission/Skill/MCP JSON schema、facade code 或 SDK validation。官方 SDK 是 `Status`、`StopReason`、`CoreEvent`、`UiRequest`、`UiResponse`、Permission、Skill、MCP、Session description 与 restore report 的唯一协议来源。
+MetaWork 不复制 header、raw enum、event tag、Permission/Skill/MCP JSON schema、facade code 或 SDK validation。官方 SDK 是 `Status`、`StopReason`、Completion event/stop reason、`CoreEvent`、`UiRequest`、`UiResponse`、Permission、Skill、MCP、Session description 与 restore report 的唯一协议来源。
 
 ## 3. Target function table
 
@@ -55,9 +56,24 @@ MetaWork 不复制 header、raw enum、event tag、Permission/Skill/MCP JSON sch
 - typed Text/Skill Run、Run abort；
 - manual compact、compact abort；
 - checkpoint export；
+- independent Completion create/destroy/describe/complete；
+- Completion stream start/next/abort/destroy；
 - owned buffer release。
 
 必需 entry 不等于 MetaWork 产品自动开放对应能力。`runtime_apply_mcp_configuration` 在 revision 9 table 中必须存在，MetaWork 使用它提交完整 declarative MCP server replacement。Host 为每次 apply 生成非零 desired revision，严格校验 status、report size、disposition、desired/active revision 与 reserved fields；只有 `APPLIED` 才转移 replacement ownership并推进正式 registry generation，`SUPERSEDED`/`REJECTED` 保留旧配置，malformed report fail closed。测试 fake 必须覆盖 applied/rejected 与签名/报告校验。
+
+### Completion 合同
+
+Completion 是独立于 Runtime、Session 和 AgentLoop 的 provider-bound text-completion owner。MetaWork 对锁定 revision 9 固定四项上游限额：
+
+- `MAX_COMPLETION_CONFIG_BYTES_V1 = 1 MiB`；
+- `MAX_COMPLETION_MESSAGES_V1 = 4096`；
+- `MAX_COMPLETION_REQUEST_BYTES_V1 = 16 MiB`；
+- `MAX_COMPLETION_RESULT_BYTES_V1 = 16 MiB`。
+
+Host 在 ABI 调用前校验 config、message count、累计 request bytes 与 UTF-8；所有 Host struct 的 `struct_size` 必须精确，reserved 必须为零。成功返回后先校验 struct、reserved、typed event/stop reason、pointer/length 和上限，再深拷贝 payload；AgentCore owned bytes 无论成功或失败都由同一 API 的 `buffer_release` 恰好释放一次。
+
+Completion 与 Stream 都是唯一 owner。Stream 从属创建它的 Completion，全部 Stream 必须先于 Completion 销毁。`completion_stream_next` 可以与另一线程的 `completion_stream_abort` 并发，但两者都返回后才允许销毁 Stream；其他 direct FFI call 也必须在对应 owner 销毁前 quiescent。该并发与所有权依据来自锁定 bundle `1183550f15b4` 的官方 `bindings/rust/src/lib.rs`：`Completion` 的说明明确其不借用 Runtime/Session，`CompletionStream` 的说明明确允许另一线程通过 raw API abort，并禁止在 next 活跃时 drop。
 
 ## 4. Runtime 与 Session create
 
@@ -82,6 +98,8 @@ fresh Session 只使用 `SessionHostConfigV1` 与 `SessionCreateConfigV1`：
 
 当前正式产品消费：
 
+- Model Connection 测试使用独立 Completion streaming；它不创建 Runtime、Session、Task、Run history 或 durable Conversation；
+- Workbench Task 标题生成使用首个 Run 已固定 ExecutionConfig 的独立 Completion streaming；它不创建新的 Runtime、Session、Run history 或 durable Conversation，失败只触发 Workbench 本地回退；
 - shared Runtime；
 - Runtime-owned MCP server descriptors、connector 生命周期与 catalog refresh/describe；
 - 新 Session 的 MCP selection 与经 AgentCore Run 执行的 MCP tools；
@@ -138,6 +156,15 @@ Host 先校验 function `Status`，再按 operation-specific status set 决定�
 
 Run、manual compact 与 Session Skill mutation 分别维护 operation-specific status disposition，不能从“SDK 已知 status”推断某个 entry 接受该 status，也不能用一份全局 allowlist 代替。revision 9 的 `checkpoint_budget_required` 对这三条当前消费路径都是合法、可恢复的非 OK 结果：操作向上失败收口，但 Session 保持 reusable；只有不属于该 operation 的 known status 才按 dependency contract failure 处理。
 
+Completion 同样维护逐操作 disposition；下列集合是 MetaWork 对锁定 artifact 的 fail-closed 消费分类，不把 SDK 全局 `Status` 枚举冒充所有 entry 的共同返回合同：
+
+- create：`ok | invalid_argument | out_of_memory | core_error | internal_error | resource_limit`；
+- destroy、describe、stream destroy：`ok | invalid_argument | busy | invalid_state | core_error | internal_error | resource_limit`；
+- complete、stream start、stream next：`ok | invalid_argument | out_of_memory | busy | invalid_state | core_error | internal_error | resource_limit | completion_unsupported_response`；
+- stream abort：`ok | invalid_argument | too_late | invalid_state | core_error | internal_error`。
+
+`too_late` 只在 stream abort 上映射为 typed outcome；`completion_unsupported_response` 只在产生 completion 响应的路径映射为 typed error。unknown status 或出现在错误 operation 上的 known status 都是 dependency contract failure；非 OK 时不读取 result/event/info 字段，只释放 diagnostic。
+
 checkpoint export 与 Session describe 是另外两条 operation-specific 消费路径。export 中经本地 sink 原因验证的 `checkpoint_io` 不污染 Session；restore 侧 checkpoint status 不是 export 合法结果。`out_of_memory`、`core_error`、malformed OK 或 callback/dependency contract failure 保守关闭 Session admission。describe 的 resource/busy/argument failure 可重试，内部 fatal 与 malformed result 同样关闭 admission。`checkpoint_budget_required` 对这两个 entry 都不是合法结果，必须显式按 dependency contract failure 收口。export 的 generation 只按 opaque `u64` 保存，ABI 未定义非零或单调性，Host 不得自行断言。
 
 checkpoint restore 是第三条独立 disposition。`checkpoint_corrupt`、`checkpoint_unsupported`、`checkpoint_incompatible`、`logical_session_conflict` 与 verified source 的 I/O failure 只失败本次 candidate；unknown/malformed OK、restore report 与持久 expectation 不一致或依赖合同失败必须 fail closed 并销毁 candidate。source `read_fn` 允许短读；canonical revision 9 probe 已确认 Core 持续读取到 EOF。启动 size/hash verify 是 eligibility 事实，job 内同一 source handle 的再校验是 commit 前的权威检查，流式 digest 只作为完整消费时的额外交叉验证。
@@ -164,6 +191,7 @@ checkpoint restore 是第三条独立 disposition。`checkpoint_corrupt`、`chec
 - owned diagnostic、UI response、catalog descriptor 与 SDK parse owner 各自 release 恰好一次；
 - catalog handle 只由创建它的 Runtime release；Session 只同步借用 catalog；
 - callback response ownership 只有在返回 answered 时转移给 Core；最终 identity 复检失败时 Host 释放已编码 bytes；
+- Completion 不借用 Runtime 或 Session；Stream 先于其 Completion 销毁，stream next/abort quiescent 后才可销毁 Stream；
 - Run 返回后仍须等待 active callback 和 abort call quiescence；
 - shutdown 顺序固定为停止 ingress、取消 queue、唤醒 UI wait、abort/join、等待 callback/control ref、destroy Session、release catalog、destroy Runtime、最后释放 transport。
 
@@ -200,6 +228,7 @@ staged Host gate：
 
 - staged verifier 与 bundle guard；
 - mandatory function-table discovery；
+- Completion 八个 entry、四项上限、operation-specific status、owned buffer、typed result/event 与 stream-before-completion teardown 测试；
 - mandatory Runtime MCP apply entry、connector retain/release、非零 configuration fingerprint、MCP response status/body ownership、三个 exact MCP era，以及 `automatic` 收到裸 HTTP 400 后 exact reopen 的 interop；
 - Session create config、Permission identity/response echo/provenance 测试；
 - status-before-result、checkpoint partial-result、八个 StopReason 与 unknown/mismatch fail-closed 测试；

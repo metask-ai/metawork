@@ -279,6 +279,13 @@ pub const FakeCore = struct {
     ui_fatal_callbacks: usize = 0,
     permission_response_valid: bool = false,
     callback_signal: ?*CallbackSignal = null,
+    completion_enabled: bool = false,
+    completion_handle: u8 = 0,
+    completion_stream_handle: u8 = 0,
+    completion_title: [512]u8 = [_]u8{0} ** 512,
+    completion_title_len: usize = 0,
+    completion_next_index: usize = 0,
+    completion_requests: usize = 0,
 
     pub fn lock(self: *FakeCore) void {
         self.mutex.lockUncancelable(std.testing.io);
@@ -295,6 +302,17 @@ pub const FakeCore = struct {
     pub fn setNextPlan(self: *FakeCore, plan: Plan) void {
         self.lock();
         self.next_plan = plan;
+        self.unlock();
+    }
+
+    pub fn setCompletionTitle(self: *FakeCore, title: []const u8) void {
+        std.debug.assert(title.len != 0 and title.len <= self.completion_title.len);
+        self.lock();
+        @memset(&self.completion_title, 0);
+        @memcpy(self.completion_title[0..title.len], title);
+        self.completion_title_len = title.len;
+        self.completion_next_index = 0;
+        self.completion_enabled = true;
         self.unlock();
     }
 
@@ -1979,18 +1997,27 @@ pub fn bufferRelease(out: ?*wire.OwnedBytesV1) callconv(.c) void {
 }
 
 fn completionCreate(
-    _: ?*const wire.CompletionConfigV1,
+    config: ?*const wire.CompletionConfigV1,
     out_completion: ?*?*wire.CompletionHandle,
     out_diagnostic: ?*wire.OwnedBytesV1,
 ) callconv(.c) u32 {
-    if (out_completion) |out| out.* = null;
     if (out_diagnostic) |out| out.* = .{ .ptr = null, .len = 0 };
-    return wire.STATUS_INVALID_ARGUMENT;
+    fake_core.lock();
+    defer fake_core.unlock();
+    if (!fake_core.completion_enabled or config == null or out_completion == null) {
+        if (out_completion) |out| out.* = null;
+        return wire.STATUS_INVALID_ARGUMENT;
+    }
+    out_completion.?.* = @ptrCast(&fake_core.completion_handle);
+    return wire.STATUS_OK;
 }
 
-fn completionDestroy(_: ?*wire.CompletionHandle, out_diagnostic: ?*wire.OwnedBytesV1) callconv(.c) u32 {
+fn completionDestroy(completion: ?*wire.CompletionHandle, out_diagnostic: ?*wire.OwnedBytesV1) callconv(.c) u32 {
     if (out_diagnostic) |out| out.* = .{ .ptr = null, .len = 0 };
-    return wire.STATUS_INVALID_ARGUMENT;
+    return if (completion == @as(?*wire.CompletionHandle, @ptrCast(&fake_core.completion_handle)))
+        wire.STATUS_OK
+    else
+        wire.STATUS_INVALID_ARGUMENT;
 }
 
 fn completionDescribe(
@@ -2013,23 +2040,54 @@ fn completionComplete(
 }
 
 fn completionStreamStart(
-    _: ?*wire.CompletionHandle,
-    _: ?*const wire.CompletionRequestV1,
+    completion: ?*wire.CompletionHandle,
+    request: ?*const wire.CompletionRequestV1,
     out_stream: ?*?*wire.CompletionStreamHandle,
     out_diagnostic: ?*wire.OwnedBytesV1,
 ) callconv(.c) u32 {
-    if (out_stream) |out| out.* = null;
     if (out_diagnostic) |out| out.* = .{ .ptr = null, .len = 0 };
-    return wire.STATUS_INVALID_ARGUMENT;
+    fake_core.lock();
+    defer fake_core.unlock();
+    if (!fake_core.completion_enabled or
+        completion != @as(?*wire.CompletionHandle, @ptrCast(&fake_core.completion_handle)) or
+        request == null or out_stream == null)
+    {
+        if (out_stream) |out| out.* = null;
+        return wire.STATUS_INVALID_ARGUMENT;
+    }
+    fake_core.completion_next_index = 0;
+    fake_core.completion_requests += 1;
+    out_stream.?.* = @ptrCast(&fake_core.completion_stream_handle);
+    return wire.STATUS_OK;
 }
 
 fn completionStreamNext(
-    _: ?*wire.CompletionStreamHandle,
-    _: ?*wire.CompletionEventV1,
+    stream: ?*wire.CompletionStreamHandle,
+    out_event: ?*wire.CompletionEventV1,
     out_diagnostic: ?*wire.OwnedBytesV1,
 ) callconv(.c) u32 {
     if (out_diagnostic) |out| out.* = .{ .ptr = null, .len = 0 };
-    return wire.STATUS_INVALID_ARGUMENT;
+    fake_core.lock();
+    defer fake_core.unlock();
+    if (stream != @as(?*wire.CompletionStreamHandle, @ptrCast(&fake_core.completion_stream_handle)) or
+        out_event == null)
+        return wire.STATUS_INVALID_ARGUMENT;
+    const event = out_event.?;
+    event.* = std.mem.zeroes(wire.CompletionEventV1);
+    event.struct_size = @sizeOf(wire.CompletionEventV1);
+    if (fake_core.completion_next_index == 0) {
+        event.kind_code = wire.COMPLETION_EVENT_TEXT;
+        event.stop_reason_code = wire.COMPLETION_STOP_UNKNOWN;
+        event.payload = .{
+            .ptr = @ptrCast(&fake_core.completion_title),
+            .len = fake_core.completion_title_len,
+        };
+    } else {
+        event.kind_code = wire.COMPLETION_EVENT_DONE;
+        event.stop_reason_code = wire.COMPLETION_STOP_END_TURN;
+    }
+    fake_core.completion_next_index += 1;
+    return wire.STATUS_OK;
 }
 
 fn completionStreamAbort(
@@ -2041,9 +2099,12 @@ fn completionStreamAbort(
     return wire.STATUS_INVALID_ARGUMENT;
 }
 
-fn completionStreamDestroy(_: ?*wire.CompletionStreamHandle, out_diagnostic: ?*wire.OwnedBytesV1) callconv(.c) u32 {
+fn completionStreamDestroy(stream: ?*wire.CompletionStreamHandle, out_diagnostic: ?*wire.OwnedBytesV1) callconv(.c) u32 {
     if (out_diagnostic) |out| out.* = .{ .ptr = null, .len = 0 };
-    return wire.STATUS_INVALID_ARGUMENT;
+    return if (stream == @as(?*wire.CompletionStreamHandle, @ptrCast(&fake_core.completion_stream_handle)))
+        wire.STATUS_OK
+    else
+        wire.STATUS_INVALID_ARGUMENT;
 }
 
 pub const fake_api = wire.ApiV1{
@@ -2083,6 +2144,14 @@ pub const fake_api = wire.ApiV1{
     .buffer_release = bufferRelease,
     .reserved = [_]u64{0} ** 3,
 };
+
+pub fn createCompletion(
+    _: ?*anyopaque,
+    allocator: std.mem.Allocator,
+    config: lifecycle.CompletionConfig,
+) anyerror!*lifecycle.Completion {
+    return lifecycle.Completion.initWithApi(allocator, &fake_api, config);
+}
 
 fn validSkillPolicy(policy: *const wire.SkillPolicyV1) bool {
     if (policy.struct_size != @sizeOf(wire.SkillPolicyV1) or

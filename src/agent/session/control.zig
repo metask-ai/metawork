@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const sdk = @import("metask_agentcore");
+const provider = @import("agent_provider");
 
 pub const SessionState = enum {
     idle,
@@ -180,11 +181,7 @@ pub const EventReadyNotifier = struct {
     }
 };
 
-pub const ProviderKind = enum {
-    anthropic,
-    openai,
-    gemini,
-};
+pub const ProviderKind = provider.ProviderKind;
 
 pub const PermissionMode = enum {
     default,

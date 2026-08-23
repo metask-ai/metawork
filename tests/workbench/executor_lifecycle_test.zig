@@ -1267,6 +1267,7 @@ test "Workbench pins an async catalog and admits typed Skill through the existin
         &workbench,
         "\"input\":{\"kind\":\"skill\"",
     );
+    try waitWorkbenchSnapshot(&workbench, "\"title\":\"Review\"");
     var skill_title_snapshot: [128 * 1024]u8 = undefined;
     const skill_title_snapshot_bytes = try workbench.writeSnapshot(&skill_title_snapshot);
     try std.testing.expect(
@@ -1537,7 +1538,10 @@ test "automatic Workspace admission is Task-owned and Text-only" {
             .max_runs_per_task = 2,
             .max_tools_per_run = 1,
         },
-        .{ .directories = .{ .automatic_workspace_root = &automatic_root } },
+        .{
+            .directories = .{ .automatic_workspace_root = &automatic_root },
+            .completion_factory = .{ .create_fn = fixture.createCompletion },
+        },
     );
     defer workbench.deinit();
     try installWorkbenchExecution(&workbench);
@@ -1626,13 +1630,33 @@ test "automatic Workspace admission is Task-owned and Text-only" {
         std.mem.indexOf(u8, preset_title_snapshot_bytes, "\"title\":\"Preset title\"") != null,
     );
 
+    fake_core.setCompletionTitle("Generated task title");
+    fake_core.setSessionPlan(.controlled);
     _ = try workbench.runTask(first_task, .{ .text = "automatic text run" });
+    try waitWorkbenchSnapshot(&workbench, "\"currentRunPhase\":\"running\"");
+    var provisional_title_snapshot: [128 * 1024]u8 = undefined;
+    const provisional_title_snapshot_bytes = try workbench.writeSnapshot(
+        &provisional_title_snapshot,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            provisional_title_snapshot_bytes,
+            "\"title\":\"automatic text run\"",
+        ) != null,
+    );
+    fake_core.releaseControlled();
     try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
+    try waitWorkbenchSnapshot(&workbench, "\"title\":\"Generated task title\"");
     var title_snapshot: [128 * 1024]u8 = undefined;
     const title_snapshot_bytes = try workbench.writeSnapshot(&title_snapshot);
     try std.testing.expect(
-        std.mem.indexOf(u8, title_snapshot_bytes, "\"title\":\"automatic text run\"") != null,
+        std.mem.indexOf(u8, title_snapshot_bytes, "\"title\":\"Generated task title\"") != null,
     );
+    fake_core.lock();
+    const completion_requests = fake_core.completion_requests;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 1), completion_requests);
     try waitSetTaskArchived(&workbench, first_task);
     try workbench.deleteTask(first_task);
     try waitTaskDeleted(&workbench, first_task);
