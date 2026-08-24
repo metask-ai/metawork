@@ -70,7 +70,7 @@ candidate probe、真实桌面验收、签名、公证和发布验证不进入 `
 
 `build.zig` 是正式 Zig test graph 的注册真源；architecture guard 必须证明所有 active external test root 已接线。`scripts/*.test.mjs` 由总入口自动发现，不维护文件数量或手工清单。
 
-MCP catalog freshness 的真实边界回归属于 `test-mcp-interop`：fixture 给 modern catalog 注入短 TTL，并覆盖同一 model/selection 到期时的 typed `McpNotRefreshed`、refresh 后成功，以及短 TTL 不启动高频后台 timer、过期后按需重建 Admission。纯 Workbench 测试验证 earliest safe TTL、主动刷新下限，以及 OAuth/refresh 串行边界内 pending request 不丢失；它不伪造 AgentCore freshness 状态。
+MCP catalog freshness 的真实边界回归属于 `test-mcp-interop`：fixture 给 modern catalog 注入短 TTL，并覆盖同一 model/selection 到期时的 typed `McpNotRefreshed`、refresh 后成功，以及短 TTL 不启动高频后台 timer、过期后按需重建 Admission。纯 Workbench 测试验证 earliest safe TTL 到绝对 monotonic deadline 的单次转换、主动刷新下限，以及 OAuth/refresh 串行边界内 pending request 不丢失；它不伪造 AgentCore freshness 状态。
 
 Product Account 的目录身份固定为 `src/product/account.zig` 与 `src/product/account/`；architecture guard 必须证明旧 `src/account.zig`、`src/account/` 不存在，全部 build root 指向新路径，同时公开 module identity 仍为 `metawork_account` 与 `metawork_account_contract`。
 

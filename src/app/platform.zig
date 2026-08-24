@@ -188,8 +188,14 @@ pub const Adapter = struct {
             services_value.cancelTimer(mcp_oauth_timer_id) catch {};
     }
 
-    pub fn armMcpCatalogTimer(context: ?*anyopaque, delay_ms: u64) bool {
+    pub fn mcpCatalogNowMonotonicMs(_: ?*anyopaque) ?u64 {
+        return native_sdk.monotonicNanoseconds() / std.time.ns_per_ms;
+    }
+
+    pub fn armMcpCatalogTimer(context: ?*anyopaque, deadline_ms: u64) bool {
         const self: *Adapter = @ptrCast(@alignCast(context orelse return false));
+        const current = mcpCatalogNowMonotonicMs(context) orelse return false;
+        const delay_ms = if (deadline_ms > current) deadline_ms - current else 1;
         const delay_ns = std.math.mul(u64, delay_ms, std.time.ns_per_ms) catch
             return false;
         (self.platform_services orelse return false).startTimer(

@@ -440,7 +440,8 @@ pub fn run(init: std.process.Init) !void {
         .mcp_refresh_timer = .{
             .context = &app.platform,
             .enabled = true,
-            .arm = app_platform.Adapter.armMcpCatalogTimer,
+            .now_monotonic_ms = app_platform.Adapter.mcpCatalogNowMonotonicMs,
+            .arm_at = app_platform.Adapter.armMcpCatalogTimer,
             .cancel = app_platform.Adapter.cancelMcpCatalogTimer,
         },
         .schedule_persistence = .{

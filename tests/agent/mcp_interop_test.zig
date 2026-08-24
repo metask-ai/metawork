@@ -110,20 +110,26 @@ const HttpFixture = struct {
 };
 
 const McpRefreshTimerProbe = struct {
-    armed_after_ms: ?u64 = null,
+    now_ms: u64 = 100_000,
+    armed_at_ms: ?u64 = null,
     arm_count: usize = 0,
     cancel_count: usize = 0,
 
-    fn arm(context: ?*anyopaque, delay_ms: u64) bool {
+    fn now(context: ?*anyopaque) ?u64 {
+        const self: *@This() = @ptrCast(@alignCast(context orelse return null));
+        return self.now_ms;
+    }
+
+    fn arm(context: ?*anyopaque, deadline_ms: u64) bool {
         const self: *@This() = @ptrCast(@alignCast(context orelse return false));
-        self.armed_after_ms = delay_ms;
+        self.armed_at_ms = deadline_ms;
         self.arm_count += 1;
         return true;
     }
 
     fn cancel(context: ?*anyopaque) void {
         const self: *@This() = @ptrCast(@alignCast(context orelse return));
-        self.armed_after_ms = null;
+        self.armed_at_ms = null;
         self.cancel_count += 1;
     }
 
@@ -131,7 +137,8 @@ const McpRefreshTimerProbe = struct {
         return .{
             .context = self,
             .enabled = true,
-            .arm = arm,
+            .now_monotonic_ms = now,
+            .arm_at = arm,
             .cancel = cancel,
         };
     }
@@ -901,7 +908,7 @@ test "MCP product chain reaches new Task authority after add restart refresh and
         restarted_runtime,
     );
     try installExecution(&restarted_workbench);
-    try std.testing.expectEqual(@as(?u64, null), refresh_timer.armed_after_ms);
+    try std.testing.expectEqual(@as(?u64, null), refresh_timer.armed_at_ms);
     try std.testing.expectEqual(@as(usize, 0), refresh_timer.arm_count);
     try std.testing.expectEqual(
         workbench.McpManagementOutcome.saved,

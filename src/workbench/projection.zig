@@ -692,6 +692,7 @@ const McpProductState = struct {
     refresh_request_generation: u64 = 0,
     refresh_pending: bool = false,
     refresh_pending_blocks_admission: bool = false,
+    refresh_deadline_ms: ?u64 = null,
     refresh_job: ?*McpRefreshJob = null,
     connection_test: ?McpConnectionTest = null,
     configuration_apply_state: McpConfigurationApplyState = .idle,
@@ -1309,11 +1310,17 @@ pub const ScheduleTimer = struct {
 pub const McpRefreshTimer = struct {
     context: ?*anyopaque = null,
     enabled: bool = false,
-    arm: *const fn (?*anyopaque, u64) bool = noMcpRefreshArm,
+    now_monotonic_ms: *const fn (?*anyopaque) ?u64 = noMcpRefreshClock,
+    arm_at: *const fn (?*anyopaque, u64) bool = noMcpRefreshArm,
     cancel: *const fn (?*anyopaque) void = noMcpRefreshCancel,
 
-    fn armAfter(self: McpRefreshTimer, delay_ms: u64) bool {
-        return self.enabled and self.arm(self.context, delay_ms);
+    fn now(self: McpRefreshTimer) ?u64 {
+        if (!self.enabled) return null;
+        return self.now_monotonic_ms(self.context);
+    }
+
+    fn armAt(self: McpRefreshTimer, deadline_ms: u64) bool {
+        return self.enabled and self.arm_at(self.context, deadline_ms);
     }
 
     fn cancelCurrent(self: McpRefreshTimer) void {
@@ -1330,6 +1337,10 @@ fn noScheduleArm(_: ?*anyopaque, _: u64) bool {
 }
 
 fn noScheduleCancel(_: ?*anyopaque) void {}
+
+fn noMcpRefreshClock(_: ?*anyopaque) ?u64 {
+    return null;
+}
 
 fn noMcpRefreshArm(_: ?*anyopaque, _: u64) bool {
     return false;
@@ -2043,6 +2054,7 @@ const McpRefreshJob = struct {
     runtime: *lifecycle.Runtime,
     notifier: ChangeNotifier,
     request_generation: u64,
+    requested_at_ms: ?u64,
     arena: std.heap.ArenaAllocator,
     allowlists: []const lifecycle.McpServerAllowlist,
     build_admission: bool,
@@ -2938,6 +2950,7 @@ pub const Workbench = struct {
             };
             mcp_management = null;
             _ = workbench.syncMcpHealthNoFail();
+            workbench.updateMcpRefreshDeadlineNoFail();
             workbench.rearmMcpRefreshTimerNoFail();
         }
         return workbench;
@@ -4229,6 +4242,7 @@ pub const Workbench = struct {
             .runtime = self.agent_runtime,
             .notifier = self.change_notifier,
             .request_generation = generation,
+            .requested_at_ms = self.mcp_refresh_timer.now(),
             .arena = refresh_arena,
             .allowlists = allowlists,
             .build_admission = alignment == .current,
@@ -6642,6 +6656,7 @@ pub const Workbench = struct {
             } });
         }
         mcp.connection_test = null;
+        self.updateMcpRefreshDeadlineNoFail();
         self.rearmMcpRefreshTimerNoFail();
         self.bumpRevision();
         return true;
@@ -7903,6 +7918,16 @@ pub const Workbench = struct {
         };
     }
 
+    fn updateMcpRefreshDeadlineNoFail(self: *Workbench) void {
+        const mcp = if (self.mcp) |*value| value else return;
+        mcp.refresh_deadline_ms = null;
+        const activation = mcp.activation orelse return;
+        mcp.refresh_deadline_ms = mcpRefreshDeadlineMs(
+            activation.catalogServers(),
+            self.mcp_refresh_timer.now(),
+        );
+    }
+
     fn rearmMcpRefreshTimerNoFail(self: *Workbench) void {
         self.mcp_refresh_timer.cancelCurrent();
         if (self.shutting_down) return;
@@ -7913,23 +7938,29 @@ pub const Workbench = struct {
             if (self.mcp) |*mcp| if (mcp.refresh_pending) return;
         }
         if (!self.mcp_refresh_timer.enabled) return;
-        const mcp = if (self.mcp) |*value| value else return;
-        if (!mcp.committed or
-            mcp.refresh_job != null or
-            mcp.configuration_apply_state == .applying or
-            mcp.authorization_operation != null or
-            mcp.runtime_auth_failure_blocked or
-            mcp.activation_failed)
+        const deadline_ms = deadline: {
+            const mcp = if (self.mcp) |*value| value else return;
+            if (!mcp.committed or
+                mcp.refresh_job != null or
+                mcp.configuration_apply_state == .applying or
+                mcp.authorization_operation != null or
+                mcp.runtime_auth_failure_blocked or
+                mcp.activation_failed)
+                return;
+            const management = if (mcp.management) |*value| value else return;
+            const inspection = management.inspect();
+            if (inspection.health != .ready or inspection.runtime_alignment != .current)
+                return;
+            const desired = management.desiredRegistry() orelse return;
+            if (desired.oauth_operation != null) return;
+            break :deadline mcp.refresh_deadline_ms orelse return;
+        };
+        const now_ms = self.mcp_refresh_timer.now() orelse return;
+        if (deadline_ms <= now_ms) {
+            _ = self.requestMcpCatalogRefresh(true) catch {};
             return;
-        const management = if (mcp.management) |*value| value else return;
-        const inspection = management.inspect();
-        if (inspection.health != .ready or inspection.runtime_alignment != .current)
-            return;
-        const desired = management.desiredRegistry() orelse return;
-        if (desired.oauth_operation != null) return;
-        const activation = mcp.activation orelse return;
-        const delay_ms = mcpRefreshDelayMs(activation.catalogServers()) orelse return;
-        _ = self.mcp_refresh_timer.armAfter(delay_ms);
+        }
+        _ = self.mcp_refresh_timer.armAt(deadline_ms);
     }
 
     fn createRecoveryMcpAuthority(self: *Workbench) Error!RecoveryMcpAuthority {
@@ -12232,6 +12263,10 @@ pub const Workbench = struct {
                         if (mcp.activation) |old| old.deinit();
                         mcp.activation = activated.activation;
                         mcp.activation_failed = false;
+                        mcp.refresh_deadline_ms = mcpRefreshDeadlineMs(
+                            activated.activation.catalogServers(),
+                            job.requested_at_ms,
+                        );
                         if (job.build_admission) {
                             self.replaceMcpAdmission(mcp, .{ .ready = .{
                                 .selection = activated.selection,
@@ -12247,6 +12282,7 @@ pub const Workbench = struct {
                     if (mcp.activation) |old| old.deinit();
                     mcp.activation = null;
                     mcp.activation_failed = false;
+                    mcp.refresh_deadline_ms = null;
                     if (job.build_admission)
                         self.replaceMcpAdmission(mcp, .{ .ready = .{
                             .selection = null,
@@ -12259,6 +12295,7 @@ pub const Workbench = struct {
                     if (mcp.activation) |old| old.deinit();
                     mcp.activation = null;
                     mcp.activation_failed = true;
+                    mcp.refresh_deadline_ms = null;
                     self.blockMcpAdmission(mcp, .activation_unavailable);
                 },
             },
@@ -15271,6 +15308,15 @@ fn mcpRefreshDelayMs(servers: []const lifecycle.McpCatalogServer) ?u64 {
     return ttl_ms - lead_ms;
 }
 
+fn mcpRefreshDeadlineMs(
+    servers: []const lifecycle.McpCatalogServer,
+    observed_at_ms: ?u64,
+) ?u64 {
+    const observed = observed_at_ms orelse return null;
+    const delay = mcpRefreshDelayMs(servers) orelse return null;
+    return std.math.add(u64, observed, delay) catch null;
+}
+
 test "MCP refresh timer uses earliest safe fresh catalog TTL" {
     const servers = [_]lifecycle.McpCatalogServer{
         .{
@@ -15307,6 +15353,10 @@ test "MCP refresh timer uses earliest safe fresh catalog TTL" {
         },
     };
     try std.testing.expectEqual(@as(?u64, 35_000), mcpRefreshDelayMs(&servers));
+    try std.testing.expectEqual(
+        @as(?u64, 135_000),
+        mcpRefreshDeadlineMs(&servers, 100_000),
+    );
     try std.testing.expectEqual(
         @as(?u64, null),
         mcpRefreshDelayMs(&.{ servers[2], servers[3] }),
@@ -15707,18 +15757,24 @@ const TestScheduleClock = struct {
 };
 
 const TestMcpRefreshTimer = struct {
-    armed_after_ms: ?u64 = null,
+    now_ms: u64 = 100_000,
+    armed_at_ms: ?u64 = null,
     cancel_count: usize = 0,
 
-    fn arm(context: ?*anyopaque, delay_ms: u64) bool {
+    fn now(context: ?*anyopaque) ?u64 {
         const self: *@This() = @ptrCast(@alignCast(context.?));
-        self.armed_after_ms = delay_ms;
+        return self.now_ms;
+    }
+
+    fn arm(context: ?*anyopaque, deadline_ms: u64) bool {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        self.armed_at_ms = deadline_ms;
         return true;
     }
 
     fn cancel(context: ?*anyopaque) void {
         const self: *@This() = @ptrCast(@alignCast(context.?));
-        self.armed_after_ms = null;
+        self.armed_at_ms = null;
         self.cancel_count += 1;
     }
 
@@ -15726,11 +15782,23 @@ const TestMcpRefreshTimer = struct {
         return .{
             .context = self,
             .enabled = true,
-            .arm = arm,
+            .now_monotonic_ms = now,
+            .arm_at = arm,
             .cancel = cancel,
         };
     }
 };
+
+test "MCP refresh timer rearm preserves the absolute deadline" {
+    var timer_probe: TestMcpRefreshTimer = .{};
+    const timer = timer_probe.timer();
+    try std.testing.expectEqual(@as(?u64, 100_000), timer.now());
+    try std.testing.expect(timer.armAt(135_000));
+    timer_probe.now_ms = 120_000;
+    timer.cancelCurrent();
+    try std.testing.expect(timer.armAt(135_000));
+    try std.testing.expectEqual(@as(?u64, 135_000), timer_probe.armed_at_ms);
+}
 
 const TestSchedulePersistence = struct {
     commits: usize = 0,
@@ -20389,6 +20457,7 @@ test "MCP startup health commits a safe degraded Workbench projection" {
         .runtime = workbench.agent_runtime,
         .notifier = .{},
         .request_generation = 1,
+        .requested_at_ms = null,
         .arena = std.heap.ArenaAllocator.init(workbench.allocator),
         .allowlists = &.{},
         .build_admission = false,
@@ -20416,6 +20485,7 @@ test "MCP startup health commits a safe degraded Workbench projection" {
         .runtime = workbench.agent_runtime,
         .notifier = .{},
         .request_generation = 2,
+        .requested_at_ms = null,
         .arena = std.heap.ArenaAllocator.init(workbench.allocator),
         .allowlists = &.{},
         .build_admission = false,
@@ -20434,6 +20504,7 @@ test "MCP startup health commits a safe degraded Workbench projection" {
         .runtime = workbench.agent_runtime,
         .notifier = .{},
         .request_generation = 4,
+        .requested_at_ms = null,
         .arena = std.heap.ArenaAllocator.init(workbench.allocator),
         .allowlists = &.{},
         .build_admission = false,
