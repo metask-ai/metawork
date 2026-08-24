@@ -28,11 +28,11 @@ const distributionIdentityName = `Developer ID Application: Developer Name (${te
 test("distribution DMG metadata comes from the Native product manifest", () => {
   assert.deepEqual(localPackageMetadata, {
     displayName: "MetaWork",
-    version: "0.1.1",
+    version: "0.1.3",
   });
   assert.equal(
     localDistributionDiskImageName,
-    "metawork-0.1.1-macos-arm64.dmg",
+    "metawork-0.1.3-macos-arm64.dmg",
   );
   assert.deepEqual(
     parseNativePackageMetadata(
