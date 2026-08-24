@@ -1,4 +1,4 @@
-//! Workbench-held Product Task kernels.
+//! Product Task state and supporting kernels.
 //! Physical Product placement does not create an independent owner.
 
 pub const persistence = @import("product_task_persistence");
@@ -9,3 +9,4 @@ pub const runtime = @import("product_task_runtime");
 pub const deletion = @import("product_task_deletion");
 pub const recovery = @import("product_task_recovery");
 pub const recovery_job = @import("product_task_recovery_job");
+pub const state = @import("product_task_state");

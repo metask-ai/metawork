@@ -24,7 +24,7 @@ Product 内部负责：
 - 由 Account Runtime 在 committed transition 之后产生有界 continuation，由 Application coordinator 将其重新送入同一提交链；登录后的确定性目录准备留在后台，并只把真实歧义投影成用户动作；
 - 由 Application coordinator 在同一主线程 turn 内协调 Account prepare、Workbench no-fail install 和 Account commit；
 - 由 Workbench 管理持久 Scheduled Task、触发游标、有界 occurrence history、Task、Run/maintenance record、唯一 active operation 槽、队列、取消协调和产品历史；
-- 由 Workbench 调用相邻 Agent 管理的 AgentCore Session、active Run/manual compact、callback binding 和有界事件泵，并在主线程消费 Agent event 形成产品事实；
+- 由 Workbench 调用相邻 Agent 管理的 AgentCore Session、active Run/manual compact、callback binding 和有界事件泵，在主线程泵出 Agent event，并由 Product Task state 将事件应用为产品事实；
 - 管理跨会话产品状态，并向 Bridge 提供 canonical 产品 projection。
 
 Application 只向上述 Product owner 与相邻 Agent 注入其职责所需的能力：
@@ -63,7 +63,7 @@ Account 和 Workbench 是同级 owner，彼此不导入 runtime。Account Runtim
 
 `src/product/account.zig` 与 `src/product/account/` 共同构成 Account Product owner；源码迁移不改变 `metawork_account` / `metawork_account_contract` 模块 identity，也不创建统一 Product facade。Account 通过自身 `ports.zig` 只声明并消费 refresh-token credential、preference persistence、authorization URL、timer 与 Model Connection credential vault；Application 在 `account_platform_binding.zig` 中绑定 Native SDK、主线程和有界文件 I/O，并在 Account shutdown 清空 port 引用后释放 binding。Preference codec、commit/recovery transaction、Model Connection registry、FileStore、原子提交与 persistence health 仍归 Account；Application 不因执行系统 effect 而取得这些产品 policy。
 
-`src/product/task.zig` 与 `src/product/task/` 是同一 Product owner 持有的 Task kernel 物理边界。当前收拢 persistence、checkpoint record/store、owned execution binding、runtime attachment、deletion policy、recovery policy 与 recovery job；它们可以消费 Account contract、Product Skill catalog 与 Agent 公共类型，但不得依赖 Application、Bridge、Native SDK、AgentCore 或产品组合实现。该归位不转移 executor、Task/Run/Compact aggregate、跨 owner admission、Agent event drain、revision 与完整 snapshot 编排。
+`src/product/task.zig` 与 `src/product/task/` 是同一 Product owner 持有的 Task kernel 物理边界。`state.zig` 拥有 Task aggregate、Run/Compact record、Agent event 的产品状态转换、终态可见性与 final event-drain gate；其余子模块拥有 persistence、checkpoint record/store、owned execution binding、runtime attachment、deletion policy、recovery policy 与 recovery job。它们可以消费 Account contract、Product Skill catalog 与 Agent 公共类型，但不得依赖 Application、Bridge、Native SDK、AgentCore 或产品组合实现。Workbench 仍独占 executor、Agent event pump、跨 owner admission、durable commit、revision 与完整 snapshot 编排；事件文本所需的全局投影预算和 credential 清洗只以 callback-scoped capability 借给 state，不转移 allocator、credential 或组合对象所有权。
 
 Run 与 Compact 的产品记录只保存稳定状态、终态发布与取消 identity，不保存指回组合对象的 `Workbench`、`TaskView` 或 Agent `Session` 指针。executor 为每次入队持有独立且短寿命的 Run/Compact job context，其中借用执行所需的 Task、Session 与组合 capability；queued cancel 以产品记录地址匹配 identity，并同步调用 context 的取消回调，worker 执行或 queued cancel 负责精确一次销毁 context。checkpoint postprocess 可以继续延长 Task worker reference，但不延长 job context：worker 完成后，主线程只凭当前 Task 遍历及记录内的 checkpoint 状态结算该引用。
 

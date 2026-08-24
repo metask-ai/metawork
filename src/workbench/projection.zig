@@ -19,6 +19,7 @@ const task_runtime = product_task.runtime;
 const task_deletion = product_task.deletion;
 const task_recovery = product_task.recovery;
 const task_recovery_job = product_task.recovery_job;
+const task_model = product_task.state;
 const product_mcp = @import("metawork_product_mcp");
 const mcp_configuration = product_mcp.configuration;
 const mcp_state = product_mcp.state;
@@ -137,18 +138,14 @@ const checkpoint_export_limits: lifecycle.CheckpointLimits = .{
 // limit. Completion is best-effort metadata generation; the local candidate
 // remains the deterministic fallback when it cannot produce a usable title.
 const automatic_title_max_codepoints: usize = 32;
-const automatic_title_result_capacity: usize = 512;
+const automatic_title_result_capacity = task_model.automatic_title_result_capacity;
 const automatic_title_timeout_ms: u32 = 15_000;
 const automatic_title_watchdog_poll_ms: u32 = 10;
 const automatic_title_system_prompt =
     "Generate a concise title for this task. Return only one plain-text title " ++
     "in the user's language, without quotes or Markdown. Use at most 32 Unicode characters.";
 
-pub const Provider = enum {
-    anthropic,
-    openai,
-    gemini,
-};
+pub const Provider = task_model.Provider;
 
 pub const TaskWorkspaceTrust = union(enum) {
     explicitly_trusted,
@@ -605,88 +602,22 @@ const catalog_argument_snapshot_overhead: usize = 16;
 const catalog_issue_snapshot_overhead: usize = 128;
 const tool_snapshot_overhead: usize = 512;
 const pending_ui_snapshot_overhead: usize = 8 * 1024;
-const ui_record_detail_capacity: usize = 512;
+const ui_record_detail_capacity = task_model.ui_record_detail_capacity;
 const ui_record_snapshot_overhead: usize = 1024;
-const tool_route_digest_bytes = std.crypto.hash.sha2.Sha256.digest_length;
-const tool_product_id_capacity = "tool-".len + 20;
-const ToolState = enum { running, completed, failed };
-const RunPhase = enum {
-    queued,
-    running,
-    waiting_ui,
-    stopping,
-    completed,
-    stopped,
-    cancelled,
-    interrupted,
-    failed,
-};
-
-const RunOutcome = enum {
-    completed,
-    stopped,
-    cancelled,
-    interrupted,
-    failed,
-    dependency_contract_failure,
-};
-
-const CompactPhase = enum(u8) {
-    queued,
-    compacting,
-    stopping,
-    compacted,
-    no_change,
-    degraded,
-    aborted,
-    interrupted,
-    failed,
-};
-
-const CompactCause = enum {
-    user_cancel,
-    session_close,
-    app_shutdown,
-    resource_limit,
-    agent_failure,
-    dependency_contract_failure,
-};
-
-const CompactTerminationDispatch = enum {
-    queued_aborted,
-    requested,
-    already_requested,
-    already_terminal,
-    session_closing,
-};
-
-const ActiveOperation = task_runtime.ActiveOperation;
-
-/// Workbench-owned durable product cause.
-const RunCause = enum {
-    user_cancel,
-    timeout,
-    session_close,
-    app_shutdown,
-    event_pipeline_failure,
-    queue_capacity_failure,
-    ui_pipeline_failure,
-    agent_failure,
-    stale_catalog,
-    skill_not_found,
-    invalid_skill_arguments,
-    skill_policy_violation,
-    skill_unavailable,
-    resource_limit,
-    dependency_contract_failure,
-};
-
-const TaskLifecycle = enum { open, closing };
-
-const ContinuationUnavailableReason = task_recovery.UnavailableReason;
-const ContinuationCapability = task_recovery.Capability;
-
-const CloseCompletion = task_runtime.CloseCompletion;
+const tool_route_digest_bytes = task_model.tool_route_digest_bytes;
+const tool_product_id_capacity = task_model.tool_product_id_capacity;
+const ToolState = task_model.ToolState;
+const RunPhase = task_model.RunPhase;
+const RunOutcome = task_model.RunOutcome;
+const CompactPhase = task_model.CompactPhase;
+const CompactCause = task_model.CompactCause;
+const CompactTerminationDispatch = task_model.CompactTerminationDispatch;
+const ActiveOperation = task_model.ActiveOperation;
+const RunCause = task_model.RunCause;
+const TaskLifecycle = task_model.TaskLifecycle;
+const ContinuationUnavailableReason = task_model.ContinuationUnavailableReason;
+const ContinuationCapability = task_model.ContinuationCapability;
+const CloseCompletion = task_model.CloseCompletion;
 
 pub const ChangeNotifier = struct {
     context: ?*anyopaque = null,
@@ -761,50 +692,9 @@ pub fn decideTransportFailure(report: TransportFailureReport) TransportFailureDe
     };
 }
 
-const TrackedText = struct {
-    list: std.ArrayList(u8) = .empty,
-    /// Bytes before this offset are final sanitized output. Bytes at and after
-    /// it are the only suffix that can still become a cross-chunk credential.
-    committed_len: usize = 0,
-};
-
-const permission_summary_field_capacity: usize = 128;
-
-/// A bounded, redaction-safe permission decision summary. It is copied from
-/// AgentCore provenance and may be attached to both the live Run and the
-/// existing UI occurrence history. It contains no raw arguments or response.
-const PermissionSummary = struct {
-    decision: lifecycle.PermissionDecision,
-    source: lifecycle.PermissionDecisionSource,
-    policy_generation: u64,
-    used_session_rule: bool,
-    callback_outcome: ?lifecycle.PermissionCallbackOutcome,
-    tool_namespace: lifecycle.PermissionToolNamespace,
-    request_id: [permission_summary_field_capacity]u8 = undefined,
-    request_id_len: usize = 0,
-    matched_rule_id: [permission_summary_field_capacity]u8 = undefined,
-    matched_rule_id_len: usize = 0,
-    tool_name: [permission_summary_field_capacity]u8 = undefined,
-    tool_name_len: usize = 0,
-    tool_binding: [permission_summary_field_capacity]u8 = undefined,
-    tool_binding_len: usize = 0,
-
-    fn toolName(self: *const PermissionSummary) []const u8 {
-        return self.tool_name[0..self.tool_name_len];
-    }
-
-    fn toolBinding(self: *const PermissionSummary) []const u8 {
-        return self.tool_binding[0..self.tool_binding_len];
-    }
-
-    fn requestId(self: *const PermissionSummary) []const u8 {
-        return self.request_id[0..self.request_id_len];
-    }
-
-    fn matchedRuleId(self: *const PermissionSummary) []const u8 {
-        return self.matched_rule_id[0..self.matched_rule_id_len];
-    }
-};
+const TrackedText = task_model.TrackedText;
+const permission_summary_field_capacity = task_model.permission_summary_field_capacity;
+const PermissionSummary = task_model.PermissionSummary;
 
 fn permissionSummaryWire(
     permission: *const PermissionSummary,
@@ -823,35 +713,9 @@ fn permissionSummaryWire(
     };
 }
 
-const ToolView = struct {
-    /// One-way correlation key for SDK tool events. The raw AgentCore tool ID
-    /// is not retained in Workbench product history.
-    route_digest: [tool_route_digest_bytes]u8,
-    id: []u8,
-    order: u64,
-    name: []u8,
-    input: []u8,
-    progress: []u8,
-    content: []u8,
-    state: ToolState,
-    is_error: bool = false,
-    elapsed_ms: u64 = 0,
-    input_truncated: bool = false,
-    progress_truncated: bool = false,
-    content_truncated: bool = false,
-    redacted: bool = false,
-    file_refs: ?[]?FileReferenceView = null,
-};
-
-pub const FileReferencePositionView = struct {
-    line: u32,
-    column: u32,
-};
-
-pub const FileReferenceRangeView = struct {
-    start: FileReferencePositionView,
-    end: FileReferencePositionView,
-};
+const ToolView = task_model.ToolView;
+pub const FileReferencePositionView = task_model.FileReferencePositionView;
+pub const FileReferenceRangeView = task_model.FileReferenceRangeView;
 
 fn formatFileReferenceId(
     storage: []u8,
@@ -867,7 +731,7 @@ fn formatFileReferenceId(
     ) catch unreachable;
 }
 
-const FileReferenceLocatorKind = enum { workspace_path, absolute_path, uri };
+const FileReferenceLocatorKind = task_model.FileReferenceLocatorKind;
 
 fn absoluteReferenceRelativePath(
     root: []const u8,
@@ -928,15 +792,7 @@ fn trimIncompleteUtf8Tail(bytes: []u8) []u8 {
 /// Workbench-owned projection of AgentCore's typed file reference. The raw
 /// locator is retained only on the Host side; snapshot serialization uses the
 /// safe display path and opaque product id below.
-const FileReferenceView = struct {
-    id: []u8,
-    title: []u8,
-    display_path: []u8,
-    kind: []u8,
-    locator_kind: FileReferenceLocatorKind,
-    locator: []u8,
-    range: ?FileReferenceRangeView = null,
-};
+const FileReferenceView = task_model.FileReferenceView;
 
 pub const FilePreviewState = enum { ready, truncated, missing, restricted, unsupported, failed };
 
@@ -961,160 +817,20 @@ pub const FilePreview = struct {
     }
 };
 
-const UsageView = struct {
-    input_tokens: u64 = 0,
-    output_tokens: u64 = 0,
-    cache_read_input_tokens: u64 = 0,
-    cache_creation_input_tokens: u64 = 0,
-};
-
-const TerminalPublication = enum(u8) { open, publishing, published };
-const EventProjectionFailure = enum { consumer_rejected };
-const AgentHandoffState = enum(u8) { queued, starting, running, finishing };
-const RunTerminationDispatch = enum {
-    pending,
-    requested,
-    already_requested,
-    already_finishing,
-    already_terminal,
-    stale_run,
-    session_closing,
-};
-
-const PendingInterruption = enum(u8) {
-    none,
-    user_cancel,
-    timeout,
-    session_close,
-    app_shutdown,
-};
-
-const TerminalPayload = struct {
-    phase: RunPhase,
-    outcome: RunOutcome,
-    cause: ?RunCause,
-    session_disposition_at_completion: lifecycle.SessionDisposition,
-    diagnostic_len: usize = 0,
-    diagnostic_truncated: bool = false,
-    diagnostic_redacted: bool = false,
-};
-
-const CompactTerminalPayload = struct {
-    phase: CompactPhase,
-    cause: ?CompactCause,
-    before_context_tokens: u64,
-    after_context_tokens: u64,
-    usage: UsageView,
-    session_disposition_at_completion: lifecycle.SessionDisposition,
-    diagnostic_len: usize = 0,
-    diagnostic_truncated: bool = false,
-    diagnostic_redacted: bool = false,
-};
-
-const RunInputRecord = union(enum) {
-    text: struct {
-        value: []u8,
-        redacted: bool = false,
-    },
-    skill: struct {
-        skill_id: []u8,
-        catalog_revision: []u8,
-        invocation_name: []u8,
-        display_name: []u8,
-        argument_values: [][]u8,
-        redacted: bool = false,
-    },
-};
-
-/// Immutable checkpoint description facts captured by the main thread before
-/// the operation is enqueued. Executor workers must not derive these values by
-/// traversing Task-owned durable records after terminal publication: once the
-/// active operation clears, the main thread may admit the next Run or compact.
-const CheckpointExportContext = struct {
-    task_id: u64,
-    binding_epoch: u64,
-    terminal_kind: std.meta.Tag(checkpoint_record.Terminal),
-    terminal_id: u64,
-    last_run_id: u64,
-    last_compact_id: u64,
-    model: []const u8,
-};
-
-const RunRecord = struct {
-    id: u64,
-    generation: u64,
-    execution_generation: u64,
-    execution_provider: Provider,
-    execution_model: []const u8,
-    execution_model_owned: bool = false,
-    input: RunInputRecord,
-    assistant: TrackedText = .{},
-    assistant_redacted: bool = false,
-    active_phase: RunPhase = .queued,
-    tools: []?ToolView,
-    usage: UsageView = .{},
-    status_text: []u8,
-    /// Latest monotonic AgentCore execution observation. These fields are
-    /// runtime-only: an interrupted process never persists in-flight state.
-    agent_phase: ?lifecycle.RunStatePhase = null,
-    agent_transition_seq: ?u64 = null,
-    agent_turn: u32 = 0,
-    agent_tool_calls: u32 = 0,
-    agent_in_flight_tools: u32 = 0,
-    agent_observation_degraded: bool = false,
-    permission_provenance: ?PermissionSummary = null,
-    terminal_publication: std.atomic.Value(TerminalPublication) = .init(.open),
-    terminal_payload: TerminalPayload = undefined,
-    terminal_observed: bool = false,
-    terminal_event_drain_marked: bool = false,
-    event_stream_finalized: bool = false,
-    event_projection_failure: ?EventProjectionFailure = null,
-    terminal_diagnostic: []u8,
-    redaction_secret: []const u8 = &.{},
-    next_activity_order: u64 = 1,
-    worker_reference_held: std.atomic.Value(bool) = .init(false),
-    agent_handoff: std.atomic.Value(AgentHandoffState) = .init(.queued),
-    pending_termination: std.atomic.Value(PendingInterruption) = .init(.none),
-    run_control: lifecycle.RunControl = undefined,
-    checkpoint_export_context: CheckpointExportContext = undefined,
-    checkpoint: CheckpointPostprocess = .{},
-    automatic_title: AutomaticTitle = .{},
-};
-
-const AutomaticTitleState = enum(u8) {
-    none,
-    pending,
-    running,
-    ready,
-    settled,
-};
-
-const AutomaticTitle = struct {
-    state: std.atomic.Value(AutomaticTitleState) = .init(.none),
-    cancel_requested: std.atomic.Value(bool) = .init(false),
-    provisional_applied: bool = false,
-    user_overrode: bool = false,
-    generated: bool = false,
-    result_len: usize = 0,
-    result: [automatic_title_result_capacity]u8 = undefined,
-    execution: ?OwnedTaskExecution = null,
-};
-
-const CompactRecord = struct {
-    id: u64,
-    after_run_id: u64,
-    agent_handoff: std.atomic.Value(AgentHandoffState) = .init(.queued),
-    pending_interruption: std.atomic.Value(PendingInterruption) = .init(.none),
-    terminal_publication: std.atomic.Value(TerminalPublication) = .init(.open),
-    terminal_payload: CompactTerminalPayload = undefined,
-    terminal_observed: bool = false,
-    terminal_diagnostic: []u8,
-    redaction_secret: []const u8 = &.{},
-    worker_reference_held: std.atomic.Value(bool) = .init(false),
-    session_reference_held: std.atomic.Value(bool) = .init(false),
-    checkpoint_export_context: CheckpointExportContext = undefined,
-    checkpoint: CheckpointPostprocess = .{},
-};
+const UsageView = task_model.UsageView;
+const TerminalPublication = task_model.TerminalPublication;
+const EventProjectionFailure = task_model.EventProjectionFailure;
+const AgentHandoffState = task_model.AgentHandoffState;
+const RunTerminationDispatch = task_model.RunTerminationDispatch;
+const PendingInterruption = task_model.PendingInterruption;
+const TerminalPayload = task_model.TerminalPayload;
+const CompactTerminalPayload = task_model.CompactTerminalPayload;
+const RunInputRecord = task_model.RunInputRecord;
+const CheckpointExportContext = task_model.CheckpointExportContext;
+const RunRecord = task_model.RunRecord;
+const AutomaticTitleState = task_model.AutomaticTitleState;
+const AutomaticTitle = task_model.AutomaticTitle;
+const CompactRecord = task_model.CompactRecord;
 
 /// Executor-only resources for one queued or running Run. Product records keep
 /// stable state and cancellation identity; this sidecar owns the composition
@@ -1142,126 +858,31 @@ const CompactJobContext = struct {
     }
 };
 
-const UiRecordKind = enum { permission };
-
-const UiRecordState = enum {
-    allowed_once,
-    // Persisted history wire name is retained for existing Task records; the
-    // request/response choice exposed to users is now `allow_session`.
-    allowed_always,
-    denied,
-    denied_session,
-    cancelled,
-};
-
-const UiRecord = struct {
-    request_id: u64,
-    run_id: u64,
-    order: u64 = 0,
-    kind: UiRecordKind,
-    state: UiRecordState,
-    agent_request_id: [permission_summary_field_capacity]u8 = undefined,
-    agent_request_id_len: usize = 0,
-    permission: ?PermissionSummary = null,
-    detail: [ui_record_detail_capacity]u8 = undefined,
-    detail_len: usize = 0,
-    item_count: u32 = 0,
-    detail_truncated: bool = false,
-    redacted: bool = false,
-
-    fn detailSlice(self: *const UiRecord) []const u8 {
-        return self.detail[0..self.detail_len];
-    }
-};
-
-/// Task-owned product history. Session ownership lives in `RuntimeAttachment`;
-/// the destructive product use case lives in the sibling deletion state.
-/// Nested Run and Compact records retain live control fields until quiescent;
-/// the persistence codec explicitly allowlists only durable, secret-free facts.
-const DurableTaskRecord = struct {
-    id: u64,
-    recent_order: u64,
-    execution_generation: u64,
-    execution_provider: Provider,
-    execution_model: []u8,
-    binding_epoch: u64 = 1,
-    workspace_id: u64,
-    workspace_epoch: u64 = 1,
-    workspace_root: []u8,
-    title: []u8,
-    title_redacted: bool = false,
-    archived: bool = false,
-    runs: []?RunRecord,
-    compacts: []?CompactRecord,
-    next_run_generation: u64 = 0,
-    ui_history: []?UiRecord,
-    ui_history_count: usize = 0,
-    ui_history_next: usize = 0,
-    checkpoint: ?checkpoint_record.Record = null,
-    checkpoint_anchor: CheckpointAnchor = .none,
-    checkpoint_attempt: CheckpointAttempt = .none,
-};
-
-/// Validity of the durable recovery anchor itself. Only facts about the
-/// stored record/blob may invalidate it; a failed later export attempt must
-/// never demote an existing valid anchor.
-const CheckpointAnchor = enum {
-    none,
-    available,
-    blob_missing,
-    blob_mismatch,
-};
-
-/// Outcome of the most recent checkpoint export/describe/store attempt.
-/// This is diagnostic state about the attempt, not about the anchor.
-const CheckpointAttempt = enum {
-    none,
-    export_failed,
-    describe_failed,
-    cancelled,
-    resource_limit,
-    io_failed,
-    outcome_unknown,
-    dependency_contract,
-};
-
-const CheckpointPostprocessState = enum(u8) {
-    none,
-    exporting,
-    failure_ready,
-    candidate_ready,
-    store_outcome_unknown,
-    settled,
-};
-
-const CheckpointCandidate = struct {
-    record: checkpoint_record.Record,
-    metrics: struct {
-        chunk_count: u64,
-        export_duration_ns: i128,
-    },
-};
-
-const CheckpointPostprocessPayload = union(enum) {
-    none,
-    failure: CheckpointAttempt,
-    candidate: CheckpointCandidate,
-    store_outcome_unknown: CheckpointCandidate,
-};
-
-const CheckpointPostprocess = struct {
-    state: std.atomic.Value(CheckpointPostprocessState) = .init(.none),
-    cancelled: std.atomic.Value(bool) = .init(false),
-    payload: CheckpointPostprocessPayload = .none,
-};
-
-const RuntimeAttachment = task_runtime.State;
-
-const TaskView = struct {
-    durable: DurableTaskRecord,
-    runtime: RuntimeAttachment,
-    deletion: task_deletion.State = .idle,
-};
+const UiRecordKind = task_model.UiRecordKind;
+const UiRecordState = task_model.UiRecordState;
+const UiRecord = task_model.UiRecord;
+const DurableTaskRecord = task_model.DurableTaskRecord;
+const CheckpointAnchor = task_model.CheckpointAnchor;
+const CheckpointAttempt = task_model.CheckpointAttempt;
+const CheckpointPostprocessState = task_model.CheckpointPostprocessState;
+const CheckpointCandidate = task_model.CheckpointCandidate;
+const CheckpointPostprocessPayload = task_model.CheckpointPostprocessPayload;
+const CheckpointPostprocess = task_model.CheckpointPostprocess;
+const RuntimeAttachment = task_model.RuntimeAttachment;
+const TaskView = task_model.Task;
+const ProductTerminalFacts = task_model.ProductTerminalFacts;
+const terminalPayload = task_model.terminalPayload;
+const productTerminalPayload = task_model.productTerminalPayload;
+const productTerminalFacts = task_model.productTerminalFacts;
+const runPhase = task_model.runPhase;
+const setActivePhase = task_model.setActivePhase;
+const compactTerminalPayload = task_model.compactTerminalPayload;
+const activeCompactPhase = task_model.activeCompactPhase;
+const isTerminalPhase = task_model.isTerminalPhase;
+const isTerminalCompactPhase = task_model.isTerminalCompactPhase;
+const findRun = task_model.findRun;
+const findCompact = task_model.findCompact;
+const hasUnfinalizedTerminalEvents = task_model.hasUnfinalizedTerminalEvents;
 
 const TaskFailureRecord = struct {
     task_id: u64,
@@ -5775,140 +5396,27 @@ pub const Workbench = struct {
 
     pub fn applyEvent(self: *Workbench, envelope: *const lifecycle.OwnedCoreEvent) Error!void {
         const task = self.findTaskByRouteId(envelope.session_id) orelse return error.UnknownTask;
-        const run = findRun(task.durable.runs, envelope.run_id) orelse return error.NoSuchRun;
-        if (run.event_stream_finalized) {
-            // A late event cannot change a published product terminal, and it
-            // is not by itself proof of an AgentCore contract violation. Drop
-            // it and keep a bounded runtime-only count as diagnostic evidence;
-            // Session poisoning stays owned by the real Session disposition.
-            self.late_terminal_event_count +|= 1;
-            if (builtin.mode == .Debug) std.log.warn(
-                "workbench.late_terminal_event task_id={d} run_id={d} count={d}",
-                .{ task.durable.id, envelope.run_id, self.late_terminal_event_count },
-            );
-            return;
+        const outcome = task_model.applyEvent(
+            task,
+            envelope,
+            self.taskEventProjection(),
+        ) catch |err| return @errorCast(err);
+        switch (outcome) {
+            .unknown, .unchanged => {},
+            .late_terminal => {
+                // A late event cannot change a published product terminal, and
+                // is not by itself proof of an AgentCore contract violation.
+                self.late_terminal_event_count +|= 1;
+                if (builtin.mode == .Debug) std.log.warn(
+                    "workbench.late_terminal_event task_id={d} run_id={d} count={d}",
+                    .{ task.durable.id, envelope.run_id, self.late_terminal_event_count },
+                );
+            },
+            .applied => |application| {
+                if (application.durable_boundary) self.commitTaskStateNoFail();
+                self.bumpRevision();
+            },
         }
-        const event = switch (envelope.event.value) {
-            .unknown => return,
-            .known => |known| known,
-        };
-        var durable_boundary = false;
-        switch (event) {
-            .thinking_chunk => {
-                // AgentCore owns the private reasoning bytes. Workbench only
-                // projects the safe activity distinction and never appends the
-                // payload to Assistant history.
-                if (std.mem.eql(u8, run.status_text, "Thinking")) return;
-                _ = try self.replaceTrackedProjected(
-                    &run.status_text,
-                    "Thinking",
-                    self.limits.max_tool_field_bytes,
-                    run.redaction_secret,
-                );
-            },
-            .text_chunk => |text| {
-                try self.appendTrackedText(&run.assistant, text, self.limits.max_assistant_message_bytes);
-                if (self.redactTrackedText(&run.assistant, run.redaction_secret))
-                    run.assistant_redacted = true;
-                if (!std.mem.eql(u8, run.status_text, "Writing response"))
-                    _ = try self.replaceTrackedProjected(
-                        &run.status_text,
-                        "Writing response",
-                        self.limits.max_tool_field_bytes,
-                        run.redaction_secret,
-                    );
-            },
-            .tool_start => |tool| {
-                const view = try self.findOrCreateTool(run, tool.id, tool.name, tool.input);
-                view.state = .running;
-                _ = try self.replaceTrackedProjected(&run.status_text, "Executing tools", self.limits.max_tool_field_bytes, run.redaction_secret);
-            },
-            .tool_progress => |progress| {
-                const tool = findTool(run.tools, progress.id) orelse return error.ToolCapacity;
-                const projected = try self.replaceTrackedProjected(&tool.progress, progress.text, self.limits.max_tool_field_bytes, run.redaction_secret);
-                tool.progress_truncated = projected.truncated;
-                tool.redacted = tool.redacted or projected.redacted;
-            },
-            .progress => _ = try self.replaceTrackedProjected(&run.status_text, "Executing tools", self.limits.max_tool_field_bytes, run.redaction_secret),
-            .tool_result => |result| {
-                const tool = try self.findOrCreateTool(run, result.id, result.name, result.input);
-                const input = try self.replaceTrackedProjected(&tool.input, result.input, self.limits.max_tool_field_bytes, run.redaction_secret);
-                const content = try self.replaceTrackedProjected(&tool.content, result.content, self.limits.max_tool_field_bytes, run.redaction_secret);
-                tool.input_truncated = input.truncated;
-                tool.content_truncated = content.truncated;
-                tool.redacted = tool.redacted or input.redacted or content.redacted;
-                tool.is_error = result.is_error;
-                tool.elapsed_ms = result.elapsed_ms;
-                tool.state = if (result.is_error) .failed else .completed;
-                const file_refs = if (comptime @hasField(@TypeOf(result), "file_refs"))
-                    result.file_refs
-                else
-                    null;
-                try self.replaceFileReferences(
-                    tool,
-                    file_refs,
-                    run.redaction_secret,
-                    task.durable.id,
-                    run.generation,
-                );
-                durable_boundary = true;
-            },
-            .usage => |usage| {
-                run.usage.input_tokens = try addU64(run.usage.input_tokens, usage.input_tokens);
-                run.usage.output_tokens = try addU64(run.usage.output_tokens, usage.output_tokens);
-                run.usage.cache_read_input_tokens = try addU64(run.usage.cache_read_input_tokens, usage.cache_read_input_tokens);
-                run.usage.cache_creation_input_tokens = try addU64(run.usage.cache_creation_input_tokens, usage.cache_creation_input_tokens);
-            },
-            .context_warning => |warning| _ = try self.replaceTrackedProjected(&run.status_text, warning.level, self.limits.max_tool_field_bytes, run.redaction_secret),
-            .auto_compact => _ = try self.replaceTrackedProjected(&run.status_text, "Context compacted", self.limits.max_tool_field_bytes, run.redaction_secret),
-            .retry_notice => _ = try self.replaceTrackedProjected(&run.status_text, "Retrying provider", self.limits.max_tool_field_bytes, run.redaction_secret),
-            .run_state => |state| {
-                if (state.run_id != run.id) {
-                    run.agent_observation_degraded = true;
-                    return;
-                }
-                if (run.agent_transition_seq) |last| {
-                    if (state.transition_seq <= last) return;
-                }
-                run.agent_transition_seq = state.transition_seq;
-                run.agent_phase = state.phase;
-                run.agent_turn = state.turn;
-                run.agent_tool_calls = state.tool_calls;
-                run.agent_in_flight_tools = std.math.cast(u32, state.in_flight_tools.len) orelse {
-                    run.agent_observation_degraded = true;
-                    return;
-                };
-                _ = try self.replaceTrackedProjected(
-                    &run.status_text,
-                    agentRunStateStatus(state.phase),
-                    self.limits.max_tool_field_bytes,
-                    run.redaction_secret,
-                );
-            },
-            .permission_provenance => |provenance| {
-                const summary = try permissionSummary(provenance);
-                run.permission_provenance = summary;
-                if (provenance.request_id) |request_id|
-                    if (findUiRecordByAgentRequestId(task.durable.ui_history, request_id, run.id)) |record| {
-                        record.permission = summary;
-                        self.commitTaskStateNoFail();
-                    };
-                const status = switch (provenance.decision) {
-                    .allow => "Permission allowed",
-                    .ask => "Permission requested",
-                    .deny => "Permission denied",
-                };
-                _ = try self.replaceTrackedProjected(
-                    &run.status_text,
-                    status,
-                    self.limits.max_tool_field_bytes,
-                    run.redaction_secret,
-                );
-            },
-            .stream_done => _ = try self.replaceTrackedProjected(&run.status_text, "Finishing", self.limits.max_tool_field_bytes, run.redaction_secret),
-        }
-        if (durable_boundary) self.commitTaskStateNoFail();
-        self.bumpRevision();
     }
 
     /// Records canonical event loss independently of Agent execution state.
@@ -5921,8 +5429,7 @@ pub const Workbench = struct {
     ) void {
         const task = self.findTaskByRouteId(route_id) orelse return;
         const run = findRun(task.durable.runs, run_id) orelse return;
-        if (run.event_projection_failure != null) return;
-        run.event_projection_failure = .consumer_rejected;
+        if (!task_model.recordEventProjectionFailure(run)) return;
         self.touchTask(task);
         self.commitTaskStateNoFail();
         self.bumpRevision();
@@ -5934,13 +5441,7 @@ pub const Workbench = struct {
     fn markTerminalRunsBeforeEventDrain(self: *Workbench) void {
         for (self.tasks) |*task_entry| {
             const task = &(task_entry.* orelse continue);
-            for (task.durable.runs) |*run_entry| {
-                const run = &(run_entry.* orelse continue);
-                if (run.event_stream_finalized or run.terminal_event_drain_marked)
-                    continue;
-                if (terminalPayload(run) != null)
-                    run.terminal_event_drain_marked = true;
-            }
+            _ = task_model.markTerminalRunsBeforeEventDrain(task);
         }
     }
 
@@ -7385,20 +6886,9 @@ pub const Workbench = struct {
         var changed = false;
         for (self.tasks) |*task_entry| {
             const task = &(task_entry.* orelse continue);
-            for (task.durable.runs) |*run_entry| {
-                const run = &(run_entry.* orelse continue);
-                if (!run.terminal_event_drain_marked) continue;
-                std.debug.assert(terminalPayload(run) != null);
-                run.terminal_event_drain_marked = false;
-                run.event_stream_finalized = true;
-                // Product terminal visibility changes even when the assistant
-                // has no withheld suffix.
-                changed = true;
-                self.touchTask(task);
-                if (run.assistant.committed_len != run.assistant.list.items.len) {
-                    run.assistant.committed_len = run.assistant.list.items.len;
-                }
-            }
+            if (!task_model.finalizeMarkedTerminalRunsAfterEventDrain(task)) continue;
+            changed = true;
+            self.touchTask(task);
         }
         if (changed) {
             self.commitTaskStateNoFail();
@@ -8408,6 +7898,90 @@ pub const Workbench = struct {
         self.freeTracked(reference.kind);
         self.freeTracked(reference.locator);
         reference.* = undefined;
+    }
+
+    fn taskEventProjection(self: *Workbench) task_model.EventProjection {
+        return .{
+            .context = self,
+            .max_assistant_message_bytes = self.limits.max_assistant_message_bytes,
+            .max_tool_field_bytes = self.limits.max_tool_field_bytes,
+            .append_assistant_fn = appendTaskEventAssistant,
+            .replace_text_fn = replaceTaskEventText,
+            .find_or_create_tool_fn = findOrCreateTaskEventTool,
+            .replace_file_references_fn = replaceTaskEventFileReferences,
+        };
+    }
+
+    fn appendTaskEventAssistant(
+        context: *anyopaque,
+        target: *TrackedText,
+        suffix: []const u8,
+        max: usize,
+        credential: []const u8,
+    ) task_model.EventProjectionError!bool {
+        const self: *Workbench = @ptrCast(@alignCast(context));
+        self.appendTrackedText(target, suffix, max) catch |err|
+            return @errorCast(err);
+        return self.redactTrackedText(target, credential);
+    }
+
+    fn replaceTaskEventText(
+        context: *anyopaque,
+        target: *[]u8,
+        value: []const u8,
+        max: usize,
+        credential: []const u8,
+    ) task_model.EventProjectionError!task_model.TextProjectionResult {
+        const self: *Workbench = @ptrCast(@alignCast(context));
+        const result = self.replaceTrackedProjected(
+            target,
+            value,
+            max,
+            credential,
+        ) catch |err| return @errorCast(err);
+        return .{ .truncated = result.truncated, .redacted = result.redacted };
+    }
+
+    fn findOrCreateTaskEventTool(
+        context: *anyopaque,
+        run: *RunRecord,
+        id: []const u8,
+        name: []const u8,
+        input: []const u8,
+    ) task_model.EventProjectionError!*ToolView {
+        const self: *Workbench = @ptrCast(@alignCast(context));
+        return self.findOrCreateTool(run, id, name, input) catch |err|
+            return @errorCast(err);
+    }
+
+    fn replaceTaskEventFileReferences(
+        context: *anyopaque,
+        tool: *ToolView,
+        envelope: *const lifecycle.OwnedCoreEvent,
+        credential: []const u8,
+        task_id: u64,
+        run_generation: u64,
+    ) task_model.EventProjectionError!void {
+        const self: *Workbench = @ptrCast(@alignCast(context));
+        const event = switch (envelope.event.value) {
+            .unknown => unreachable,
+            .known => |known| known,
+        };
+        const result = switch (event) {
+            .tool_result => |value| value,
+            else => unreachable,
+        };
+        const file_refs = if (comptime @hasField(@TypeOf(result), "file_refs"))
+            result.file_refs
+        else
+            null;
+        self.replaceFileReferences(
+            tool,
+            file_refs,
+            credential,
+            task_id,
+            run_generation,
+        ) catch |err| return @errorCast(err);
     }
 
     fn clearFileReferences(self: *Workbench, tool: *ToolView) void {
@@ -12064,35 +11638,6 @@ pub const Workbench = struct {
         return self.allocator.dupe(u8, value);
     }
 
-    fn permissionSummary(value: lifecycle.PermissionProvenance) Error!PermissionSummary {
-        if (value.tool.name.len > permission_summary_field_capacity or
-            value.tool.binding.len > permission_summary_field_capacity or
-            (if (value.request_id) |request_id| request_id.len else 0) > permission_summary_field_capacity or
-            (if (value.matched_rule_id) |rule_id| rule_id.len else 0) > permission_summary_field_capacity)
-            return error.ProjectionCapacity;
-        var summary = PermissionSummary{
-            .decision = value.decision,
-            .source = value.source,
-            .policy_generation = value.policy_generation,
-            .used_session_rule = value.used_session_rule,
-            .callback_outcome = value.callback_outcome,
-            .tool_namespace = value.tool.namespace,
-        };
-        if (value.request_id) |request_id| {
-            @memcpy(summary.request_id[0..request_id.len], request_id);
-            summary.request_id_len = request_id.len;
-        }
-        if (value.matched_rule_id) |rule_id| {
-            @memcpy(summary.matched_rule_id[0..rule_id.len], rule_id);
-            summary.matched_rule_id_len = rule_id.len;
-        }
-        @memcpy(summary.tool_name[0..value.tool.name.len], value.tool.name);
-        summary.tool_name_len = value.tool.name.len;
-        @memcpy(summary.tool_binding[0..value.tool.binding.len], value.tool.binding);
-        summary.tool_binding_len = value.tool.binding.len;
-        return summary;
-    }
-
     fn allocTrackedCapacity(self: *Workbench, capacity: usize) Error![]u8 {
         if (capacity > self.limits.max_projection_bytes - self.projection_bytes)
             return error.ProjectionCapacity;
@@ -12704,22 +12249,6 @@ fn closeWorker(
     };
     view.runtime.close_completion.store(completion, .release);
     _ = notifier.notify();
-}
-
-fn agentRunStateStatus(phase: lifecycle.RunStatePhase) []const u8 {
-    return switch (phase) {
-        .starting => "Starting",
-        .generating => "Generating response",
-        .executing_tools => "Executing tools",
-        .waiting_ui => "Waiting for your input",
-        .retrying => "Retrying provider",
-        .compacting => "Compacting context",
-        .finalizing => "Finishing",
-        .completed => "Completed",
-        .failed => "Failed",
-        .aborted => "Stopped",
-        .poisoned => "Session unavailable",
-    };
 }
 
 const AutomaticTitleWatchdog = struct {
@@ -13738,60 +13267,6 @@ fn commitBeginFailure(run: *RunRecord, failure: lifecycle.BeginRunFailure) void 
     );
 }
 
-fn terminalPayload(run: *const RunRecord) ?*const TerminalPayload {
-    while (true) switch (run.terminal_publication.load(.acquire)) {
-        .open => return null,
-        .publishing => std.atomic.spinLoopHint(),
-        .published => return &run.terminal_payload,
-    };
-}
-
-/// Returns the terminal result only after the composition root has drained all
-/// Agent events that happened-before terminal publication. `terminalPayload`
-/// is the worker-to-main-thread fact; this is the product visibility gate.
-fn productTerminalPayload(run: *const RunRecord) ?*const TerminalPayload {
-    if (!run.event_stream_finalized) return null;
-    return terminalPayload(run);
-}
-
-const ProductTerminalFacts = struct {
-    phase: RunPhase,
-    outcome: RunOutcome,
-    cause: ?RunCause,
-    session_disposition_at_completion: lifecycle.SessionDisposition,
-};
-
-fn productTerminalFacts(run: *const RunRecord) ?ProductTerminalFacts {
-    const terminal = productTerminalPayload(run) orelse return null;
-    if (run.event_projection_failure != null) return .{
-        .phase = .failed,
-        .outcome = .failed,
-        .cause = .event_pipeline_failure,
-        .session_disposition_at_completion = terminal.session_disposition_at_completion,
-    };
-    return .{
-        .phase = terminal.phase,
-        .outcome = terminal.outcome,
-        .cause = terminal.cause,
-        .session_disposition_at_completion = terminal.session_disposition_at_completion,
-    };
-}
-
-fn runPhase(run: *const RunRecord) RunPhase {
-    return if (productTerminalFacts(run)) |terminal| terminal.phase else run.active_phase;
-}
-
-fn setActivePhase(run: *RunRecord, phase: RunPhase) bool {
-    std.debug.assert(!isTerminalPhase(phase));
-    // Terminal publication is owned by a worker and may win after the caller's
-    // observation. `active_phase` is irrelevant once the write-once terminal
-    // payload is published, so a late phase write is harmless; an assertion
-    // here would turn a legal completion race into a process crash.
-    if (run.terminal_publication.load(.acquire) != .open) return false;
-    run.active_phase = phase;
-    return run.terminal_publication.load(.acquire) == .open;
-}
-
 fn lastTerminalFacts(runs: []?RunRecord) ?ProductTerminalFacts {
     var latest: ?*const RunRecord = null;
     for (runs) |*entry| {
@@ -13879,31 +13354,6 @@ fn cancelTaskAutomaticTitles(task: *TaskView) void {
         run.automatic_title.cancel_requested.store(true, .release);
         publishAutomaticTitleFallback(run);
     }
-}
-
-fn isTerminalCompactPhase(phase: CompactPhase) bool {
-    return switch (phase) {
-        .queued, .compacting, .stopping => false,
-        .compacted, .no_change, .degraded, .aborted, .interrupted, .failed => true,
-    };
-}
-
-fn compactTerminalPayload(
-    compact: *const CompactRecord,
-) ?*const CompactTerminalPayload {
-    while (true) switch (compact.terminal_publication.load(.acquire)) {
-        .open => return null,
-        .publishing => std.atomic.spinLoopHint(),
-        .published => return &compact.terminal_payload,
-    };
-}
-
-fn activeCompactPhase(compact: *const CompactRecord) CompactPhase {
-    if (compact.pending_interruption.load(.acquire) != .none) return .stopping;
-    return switch (compact.agent_handoff.load(.acquire)) {
-        .queued, .starting => .queued,
-        .running, .finishing => .compacting,
-    };
 }
 
 fn pendingExternalInterruption(
@@ -14001,22 +13451,6 @@ fn foldTerminalDisposition(
         .poisoned => attached.health = .session_poisoned,
         .closing => std.debug.assert(task.runtime.beginClosing()),
     }
-}
-
-fn hasUnfinalizedTerminalEvents(view: *const TaskView) bool {
-    for (view.durable.runs) |*entry| {
-        const run = &(entry.* orelse continue);
-        if (!run.event_stream_finalized and terminalPayload(run) != null)
-            return true;
-    }
-    return false;
-}
-
-fn isTerminalPhase(phase: RunPhase) bool {
-    return switch (phase) {
-        .queued, .running, .waiting_ui, .stopping => false,
-        .completed, .stopped, .cancelled, .interrupted, .failed => true,
-    };
 }
 
 fn workspacePathWithin(parent: []const u8, child: []const u8) bool {
@@ -14269,45 +13703,10 @@ fn persistedTerminalCompactPhase(value: []const u8) bool {
     return isTerminalCompactPhase(phase);
 }
 
-fn findRun(entries: []?RunRecord, run_id: u64) ?*RunRecord {
-    if (run_id == 0) return null;
-    for (entries) |*entry| if (entry.*) |*run| if (run.id == run_id) return run;
-    return null;
-}
-
-fn findUiRecordByAgentRequestId(
-    entries: []?UiRecord,
-    request_id: []const u8,
-    run_id: u64,
-) ?*UiRecord {
-    for (entries) |*entry| {
-        const record = &(entry.* orelse continue);
-        if (record.run_id == run_id and
-            std.mem.eql(u8, record.agent_request_id[0..record.agent_request_id_len], request_id))
-            return record;
-    }
-    return null;
-}
-
-fn findCompact(
-    entries: []?CompactRecord,
-    operation_id: u64,
-) ?*CompactRecord {
-    for (entries) |*entry| {
-        const compact = &(entry.* orelse continue);
-        if (compact.id == operation_id) return compact;
-    }
-    return null;
-}
-
 fn toolRouteDigest(id: []const u8) [tool_route_digest_bytes]u8 {
     var digest: [tool_route_digest_bytes]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(id, &digest, .{});
     return digest;
-}
-
-fn findTool(entries: []?ToolView, id: []const u8) ?*ToolView {
-    return findToolByRouteDigest(entries, toolRouteDigest(id));
 }
 
 fn findToolByRouteDigest(
@@ -14317,10 +13716,6 @@ fn findToolByRouteDigest(
     for (entries) |*entry| if (entry.*) |*tool|
         if (std.mem.eql(u8, &tool.route_digest, &route_digest)) return tool;
     return null;
-}
-
-fn addU64(left: u64, right: u64) error{ProjectionCapacity}!u64 {
-    return std.math.add(u64, left, right) catch error.ProjectionCapacity;
 }
 
 fn catalogSnapshotLimits(limits: Limits) catalog_snapshot.Limits {
@@ -18103,7 +17498,7 @@ test "permission provenance projection keeps typed fields bounded and non-persis
         .callback_outcome = .answered,
         .response = .allow_session,
     };
-    const projected = try Workbench.permissionSummary(value);
+    const projected = try task_model.permissionSummary(value);
     try std.testing.expectEqual(lifecycle.PermissionDecision.allow, projected.decision);
     try std.testing.expectEqual(lifecycle.PermissionDecisionSource.session_allow, projected.source);
     try std.testing.expectEqual(@as(u64, 7), projected.policy_generation);

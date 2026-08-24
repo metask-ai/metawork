@@ -270,6 +270,7 @@ test("Product Skill catalog has one physical home and remains a shared value ker
 test("Product Task kernels have one physical home without taking the executor", () => {
   const build = read("build.zig");
   const productTask = read("src/product/task.zig");
+  const taskState = read("src/product/task/state.zig");
   const projection = read("src/workbench/projection.zig");
   const executor = read("src/workbench/executor.zig");
   const workbenchRoot = read("src/workbench.zig");
@@ -285,6 +286,7 @@ test("Product Task kernels have one physical home without taking the executor", 
     "deletion",
     "recovery",
     "recovery_job",
+    "state",
   ]) {
     assert.match(
       productTask,
@@ -305,22 +307,40 @@ test("Product Task kernels have one physical home without taking the executor", 
   assert.match(appStores, /product_task\.checkpoint_store\.FileStore/);
   assert.doesNotMatch(recoveryJob, /workbench_executor|@import\("metawork_workbench"\)/);
   assert.match(build, /src\/product\/task\/recovery_job\.zig/);
+  assert.match(build, /src\/product\/task\/state\.zig/);
   assert.match(build, /projection\.addImport\("metawork_product_task", product_task\)/);
   assert.match(build, /app\.addImport\("metawork_product_task", product_task\)/);
 
-  const runRecord = projection.match(
-    /const RunRecord = struct \{[\s\S]*?\n\};/,
+  const runRecord = taskState.match(
+    /pub const RunRecord = struct \{[\s\S]*?\n\};/,
   )?.[0];
-  const compactRecord = projection.match(
-    /const CompactRecord = struct \{[\s\S]*?\n\};/,
+  const compactRecord = taskState.match(
+    /pub const CompactRecord = struct \{[\s\S]*?\n\};/,
   )?.[0];
-  assert.ok(runRecord, "RunRecord must remain a concrete product record");
-  assert.ok(compactRecord, "CompactRecord must remain a concrete product record");
+  assert.ok(runRecord, "Task state must own the concrete RunRecord");
+  assert.ok(compactRecord, "Task state must own the concrete CompactRecord");
   for (const record of [runRecord, compactRecord]) {
     assert.doesNotMatch(record, /\b(?:workbench|task|session):\s*\*/);
   }
+  assert.match(taskState, /pub const Task = struct/);
+  assert.match(taskState, /pub fn applyEvent\(/);
+  assert.match(taskState, /pub fn markTerminalRunsBeforeEventDrain\(/);
+  assert.match(taskState, /pub fn finalizeMarkedTerminalRunsAfterEventDrain\(/);
+  assert.match(taskState, /@import\("metawork_agent"\)/);
+  assert.doesNotMatch(
+    taskState,
+    /Workbench|workbench_executor|std\.Thread|@import\("(?:metawork_app|metawork_bridge|native_sdk|metask_agentcore)"\)/,
+  );
+  assert.match(projection, /const RunRecord = task_model\.RunRecord;/);
+  assert.match(projection, /const CompactRecord = task_model\.CompactRecord;/);
+  assert.doesNotMatch(projection, /const RunRecord = struct/);
+  assert.doesNotMatch(projection, /const CompactRecord = struct/);
   assert.match(projection, /const RunJobContext = struct/);
   assert.match(projection, /const CompactJobContext = struct/);
+  assert.match(projection, /fn drainAgentEventPass\(/);
+  assert.match(projection, /agent_runtime\.takeEvent\(\)/);
+  assert.match(projection, /task_model\.applyEvent\(/);
+  assert.match(projection, /fn taskEventProjection\(/);
   assert.match(executor, /identity: \*anyopaque,[\s\S]*context: \*anyopaque,/);
   assert.match(executor, /if \(item\.identity != identity\) continue;/);
 });
