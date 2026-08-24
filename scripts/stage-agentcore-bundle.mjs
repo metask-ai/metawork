@@ -13,6 +13,7 @@ import process from "node:process";
 import {
   loadLockedAgentCoreManifest,
   readAgentCoreBundleTargetId,
+  stagedAgentCoreBundleRoot,
   validateAgentCoreBundle,
 } from "./agentcore-bundle.mjs";
 
@@ -33,13 +34,18 @@ async function loadLock(repositoryRoot, source) {
 
 const defaultFileOperations = { copyFile, rename, rm };
 
-async function recoverStagingResidues(storageRoot, target, fileOperations) {
+async function recoverStagingResidues(
+  storageRoot,
+  target,
+  residueName,
+  fileOperations,
+) {
   const entries = await readdir(storageRoot, { withFileTypes: true });
   const stagingPaths = entries
-    .filter((entry) => entry.name.startsWith(".bundle-staging-"))
+    .filter((entry) => entry.name.startsWith(`.${residueName}-staging-`))
     .map((entry) => path.join(storageRoot, entry.name));
   const backupPaths = entries
-    .filter((entry) => entry.name.startsWith(".bundle-backup-"))
+    .filter((entry) => entry.name.startsWith(`.${residueName}-backup-`))
     .map((entry) => path.join(storageRoot, entry.name));
   await Promise.all(
     stagingPaths.map((entry) =>
@@ -61,52 +67,40 @@ async function recoverStagingResidues(storageRoot, target, fileOperations) {
   return backupPaths;
 }
 
-export async function stageAgentCoreBundle({
-  repositoryRoot,
+async function installPayload({
   source,
-  validationOptions = {},
-  fileOperations = defaultFileOperations,
+  storageRoot,
+  targetName,
+  files,
+  validate,
+  fileOperations,
 }) {
-  if (!path.isAbsolute(source))
-    throw new Error("AgentCore candidate path must be absolute");
-  const lock = await loadLock(repositoryRoot, source);
-  const validated = await validateAgentCoreBundle(source, {
-    ...validationOptions,
-    expectedManifest: lock.manifest,
-    expectedManifestBytes: lock.bytes,
-  });
-
-  const storageRoot = path.join(repositoryRoot, ".agentcore");
-  const target = path.join(storageRoot, "bundle");
   await mkdir(storageRoot, { recursive: true });
+  const target = path.join(storageRoot, targetName);
   const staleBackups = await recoverStagingResidues(
     storageRoot,
     target,
+    targetName,
     fileOperations,
   );
 
-  const staging = await mkdtemp(path.join(storageRoot, ".bundle-staging-"));
+  const staging = await mkdtemp(
+    path.join(storageRoot, `.${targetName}-staging-`),
+  );
   const backup = path.join(
     storageRoot,
-    `.bundle-backup-${process.pid}-${Date.now()}`,
+    `.${targetName}-backup-${process.pid}-${Date.now()}`,
   );
   let movedTarget = false;
   let operationError;
 
   try {
-    for (const relativePath of ["manifest.json", ...validated.payloadFiles]) {
-      const destination = path.join(staging, relativePath);
+    for (const file of files) {
+      const destination = path.join(staging, file.destination);
       await mkdir(path.dirname(destination), { recursive: true });
-      await fileOperations.copyFile(
-        path.join(validated.root, relativePath),
-        destination,
-      );
+      await fileOperations.copyFile(path.join(source, file.path), destination);
     }
-    await validateAgentCoreBundle(staging, {
-      ...validationOptions,
-      expectedManifest: lock.manifest,
-      expectedManifestBytes: lock.bytes,
-    });
+    await validate(staging);
 
     try {
       await fileOperations.rename(target, backup);
@@ -157,7 +151,43 @@ export async function stageAgentCoreBundle({
     throw cleanupError;
   }
   if (operationError) throw operationError;
+  return target;
+}
 
+export async function stageAgentCoreBundle({
+  repositoryRoot,
+  source,
+  validationOptions = {},
+  fileOperations = defaultFileOperations,
+}) {
+  if (!path.isAbsolute(source))
+    throw new Error("AgentCore candidate path must be absolute");
+  const lock = await loadLock(repositoryRoot, source);
+  const validated = await validateAgentCoreBundle(source, {
+    ...validationOptions,
+    expectedManifest: lock.manifest,
+    expectedManifestBytes: lock.bytes,
+  });
+  const targetId = lock.manifest.target.id;
+  const target = await installPayload({
+    source: validated.root,
+    storageRoot: path.join(repositoryRoot, ".agentcore", "bundles"),
+    targetName: targetId,
+    files: ["manifest.json", ...validated.payloadFiles].map((relativePath) => ({
+      destination: relativePath,
+      path: relativePath,
+    })),
+    validate: (root) =>
+      validateAgentCoreBundle(root, {
+        ...validationOptions,
+        expectedManifest: lock.manifest,
+        expectedManifestBytes: lock.bytes,
+      }),
+    fileOperations,
+  });
+
+  if (target !== stagedAgentCoreBundleRoot(repositoryRoot, targetId))
+    throw new Error("AgentCore target store path invariant failed");
   return { target, manifest: lock.manifest };
 }
 

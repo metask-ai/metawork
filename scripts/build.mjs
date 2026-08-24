@@ -74,11 +74,19 @@ const isMain =
   process.argv[1] !== undefined &&
   pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;
 if (isMain) {
-  const [mode] = process.argv.slice(2);
-  if (process.argv.length !== 3 || (mode !== "debug" && mode !== "release"))
-    throw new Error("usage: node scripts/build.mjs debug|release");
+  const [mode, targetId] = process.argv.slice(2);
+  if (
+    (process.argv.length !== 3 && process.argv.length !== 4) ||
+    (mode !== "debug" && mode !== "release")
+  )
+    throw new Error(
+      "usage: node scripts/build.mjs debug|release [agentcore-target-id]",
+    );
 
-  const bundle = await verifyStagedAgentCoreBundle(repositoryRoot);
+  const bundle = await verifyStagedAgentCoreBundle(
+    repositoryRoot,
+    targetId ? { targetId } : undefined,
+  );
   await buildFrontend(repositoryRoot);
   if (mode === "debug") {
     await buildNative(repositoryRoot, {

@@ -94,16 +94,43 @@ async function fixture(t, mutateManifest = () => {}) {
   return { root, manifest };
 }
 
+async function macosFixture(t, targetId) {
+  const x64 = targetId === "x86_64-macos";
+  const candidate = await fixture(t, (manifest) => {
+    manifest.target = {
+      id: targetId,
+      architecture: x64 ? "x86_64" : "aarch64",
+      os: "macos",
+      abi: "none",
+      zig_target: `${x64 ? "x86_64" : "aarch64"}-macos.13.0...15.6-none`,
+      rust_target: `${x64 ? "x86_64" : "aarch64"}-apple-darwin`,
+    };
+    manifest.link.system_libraries = [];
+    manifest.files[0].path = "lib/libmetask_agentcore.a";
+  });
+  await rename(
+    path.join(candidate.root, "lib", "metask_agentcore.lib"),
+    path.join(candidate.root, "lib", "libmetask_agentcore.a"),
+  );
+  await writeFile(
+    path.join(candidate.root, "manifest.json"),
+    JSON.stringify(candidate.manifest),
+  );
+  return candidate;
+}
+
 async function repository(t, manifest) {
   const root = await mkdtemp(path.join(tmpdir(), "metawork-repository-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const lockPath = path.join(
-    root,
-    "build_support",
+  const lockRoot = path.join(root, "build_support");
+  await mkdir(lockRoot, { recursive: true });
+  for (const lockName of [
     "agentcore-bundle.windows.lock.json",
-  );
-  await mkdir(path.dirname(lockPath), { recursive: true });
-  await writeFile(lockPath, JSON.stringify(manifest));
+    "agentcore-bundle.macos.lock.json",
+    "agentcore-bundle.macos-x86_64.lock.json",
+  ]) {
+    await writeFile(path.join(lockRoot, lockName), JSON.stringify(manifest));
+  }
   return root;
 }
 
@@ -113,14 +140,18 @@ const injectedChecks = {
   zigVersion: "0.16.0",
   symbols: "00000000 T metask_agentcore_get_api\n",
 };
+const injectedVerification = {
+  targetId: "x86_64-windows-gnu",
+  validationOptions: injectedChecks,
+};
 
 function injectedFileOperations(overrides = {}) {
   return { copyFile, rename, rm, ...overrides };
 }
 
 async function seedCanonicalBundle(repositoryRoot) {
-  const storageRoot = path.join(repositoryRoot, ".agentcore");
-  const target = path.join(storageRoot, "bundle");
+  const storageRoot = path.join(repositoryRoot, ".agentcore", "bundles");
+  const target = path.join(storageRoot, "x86_64-windows-gnu");
   await mkdir(target, { recursive: true });
   await writeFile(path.join(target, "old"), "old-canonical");
   return { storageRoot, target };
@@ -455,7 +486,7 @@ test("stages and verifies only the locked manifest payload", async (t) => {
   });
   assert.equal(
     result.target,
-    path.join(repositoryRoot, ".agentcore", "bundle"),
+    path.join(repositoryRoot, ".agentcore", "bundles", "x86_64-windows-gnu"),
   );
   assert.deepEqual(
     JSON.parse(await readFile(path.join(result.target, "manifest.json"))),
@@ -463,12 +494,60 @@ test("stages and verifies only the locked manifest payload", async (t) => {
   );
   const verified = await verifyStagedAgentCoreBundle(
     repositoryRoot,
-    injectedChecks,
+    injectedVerification,
   );
   assert.equal(verified.manifest.version, manifest.version);
   assert.deepEqual(await readdir(path.join(repositoryRoot, ".agentcore")), [
-    "bundle",
+    "bundles",
   ]);
+  assert.deepEqual(
+    await readdir(path.join(repositoryRoot, ".agentcore", "bundles")),
+    ["x86_64-windows-gnu"],
+  );
+});
+
+test("stages macOS arm64 and x64 bundles without replacing either target", async (t) => {
+  const arm64 = await macosFixture(t, "aarch64-macos");
+  const x64 = await macosFixture(t, "x86_64-macos");
+  const repositoryRoot = await repository(t, arm64.manifest);
+  await writeFile(
+    path.join(
+      repositoryRoot,
+      "build_support",
+      "agentcore-bundle.macos-x86_64.lock.json",
+    ),
+    JSON.stringify(x64.manifest),
+  );
+  const validationOptions = {
+    platform: "darwin",
+    architecture: "arm64",
+    zigVersion: "0.16.0",
+    symbols: "00000000 T metask_agentcore_get_api\n",
+  };
+
+  await stageAgentCoreBundle({
+    repositoryRoot,
+    source: arm64.root,
+    validationOptions,
+  });
+  await stageAgentCoreBundle({
+    repositoryRoot,
+    source: x64.root,
+    validationOptions,
+  });
+
+  assert.deepEqual(
+    (await readdir(path.join(repositoryRoot, ".agentcore", "bundles"))).sort(),
+    ["aarch64-macos", "x86_64-macos"],
+  );
+  await verifyStagedAgentCoreBundle(repositoryRoot, {
+    targetId: "aarch64-macos",
+    validationOptions,
+  });
+  await verifyStagedAgentCoreBundle(repositoryRoot, {
+    targetId: "x86_64-macos",
+    validationOptions,
+  });
 });
 
 test("copy failure preserves the canonical bundle", async (t) => {
@@ -493,7 +572,7 @@ test("copy failure preserves the canonical bundle", async (t) => {
     await readFile(path.join(target, "old"), "utf8"),
     "old-canonical",
   );
-  assert.deepEqual(await readdir(storageRoot), ["bundle"]);
+  assert.deepEqual(await readdir(storageRoot), ["x86_64-windows-gnu"]);
 });
 
 test("target rename failure preserves the canonical bundle", async (t) => {
@@ -520,7 +599,7 @@ test("target rename failure preserves the canonical bundle", async (t) => {
     await readFile(path.join(target, "old"), "utf8"),
     "old-canonical",
   );
-  assert.deepEqual(await readdir(storageRoot), ["bundle"]);
+  assert.deepEqual(await readdir(storageRoot), ["x86_64-windows-gnu"]);
 });
 
 test("install rename failure restores the previous canonical bundle", async (t) => {
@@ -536,7 +615,7 @@ test("install rename failure restores the previous canonical bundle", async (t) 
       fileOperations: injectedFileOperations({
         rename: async (from, to) => {
           if (
-            path.basename(from).startsWith(".bundle-staging-") &&
+            path.basename(from).startsWith(".x86_64-windows-gnu-staging-") &&
             to === target
           )
             throw new Error("injected install rename failure");
@@ -550,7 +629,7 @@ test("install rename failure restores the previous canonical bundle", async (t) 
     await readFile(path.join(target, "old"), "utf8"),
     "old-canonical",
   );
-  assert.deepEqual(await readdir(storageRoot), ["bundle"]);
+  assert.deepEqual(await readdir(storageRoot), ["x86_64-windows-gnu"]);
 });
 
 test("failed install and restore leave one recoverable backup", async (t) => {
@@ -575,15 +654,15 @@ test("failed install and restore leave one recoverable backup", async (t) => {
   );
   const residues = await readdir(storageRoot);
   assert.equal(residues.length, 1);
-  assert.match(residues[0], /^\.bundle-backup-/);
+  assert.match(residues[0], /^\.x86_64-windows-gnu-backup-/);
 
   await stageAgentCoreBundle({
     repositoryRoot,
     source,
     validationOptions: injectedChecks,
   });
-  assert.deepEqual(await readdir(storageRoot), ["bundle"]);
-  await verifyStagedAgentCoreBundle(repositoryRoot, injectedChecks);
+  assert.deepEqual(await readdir(storageRoot), ["x86_64-windows-gnu"]);
+  await verifyStagedAgentCoreBundle(repositoryRoot, injectedVerification);
 });
 
 test("backup cleanup failure reports installed state and is recovered next run", async (t) => {
@@ -601,7 +680,7 @@ test("backup cleanup failure reports installed state and is recovered next run",
         rm: async (target, options) => {
           if (
             !injected &&
-            path.basename(target).startsWith(".bundle-backup-")
+            path.basename(target).startsWith(".x86_64-windows-gnu-backup-")
           ) {
             injected = true;
             throw new Error("injected backup cleanup failure");
@@ -612,10 +691,10 @@ test("backup cleanup failure reports installed state and is recovered next run",
     }),
     /installed but backup cleanup failed/,
   );
-  await verifyStagedAgentCoreBundle(repositoryRoot, injectedChecks);
+  await verifyStagedAgentCoreBundle(repositoryRoot, injectedVerification);
   assert.equal(
     (await readdir(storageRoot)).filter((entry) =>
-      entry.startsWith(".bundle-backup-"),
+      entry.startsWith(".x86_64-windows-gnu-backup-"),
     ).length,
     1,
   );
@@ -625,17 +704,17 @@ test("backup cleanup failure reports installed state and is recovered next run",
     source,
     validationOptions: injectedChecks,
   });
-  assert.deepEqual(await readdir(storageRoot), ["bundle"]);
+  assert.deepEqual(await readdir(storageRoot), ["x86_64-windows-gnu"]);
 });
 
 test("cleans stale staging and backup residues when canonical exists", async (t) => {
   const { root: source, manifest } = await fixture(t);
   const repositoryRoot = await repository(t, manifest);
-  const storageRoot = path.join(repositoryRoot, ".agentcore");
+  const storageRoot = path.join(repositoryRoot, ".agentcore", "bundles");
   for (const relativePath of [
-    "bundle/old",
-    ".bundle-staging-stale/junk",
-    ".bundle-backup-stale/old",
+    "x86_64-windows-gnu/old",
+    ".x86_64-windows-gnu-staging-stale/junk",
+    ".x86_64-windows-gnu-backup-stale/old",
   ]) {
     await mkdir(path.dirname(path.join(storageRoot, relativePath)), {
       recursive: true,
@@ -648,31 +727,38 @@ test("cleans stale staging and backup residues when canonical exists", async (t)
     source,
     validationOptions: injectedChecks,
   });
-  assert.deepEqual(await readdir(storageRoot), ["bundle"]);
+  assert.deepEqual(await readdir(storageRoot), ["x86_64-windows-gnu"]);
 });
 
 test("recovers one backup before staging and rejects ambiguous backups", async (t) => {
   const single = await fixture(t);
   const singleRepository = await repository(t, single.manifest);
-  const singleStorage = path.join(singleRepository, ".agentcore");
-  await mkdir(path.join(singleStorage, ".bundle-backup-one"), {
+  const singleStorage = path.join(singleRepository, ".agentcore", "bundles");
+  await mkdir(path.join(singleStorage, ".x86_64-windows-gnu-backup-one"), {
     recursive: true,
   });
-  await writeFile(path.join(singleStorage, ".bundle-backup-one", "old"), "old");
+  await writeFile(
+    path.join(singleStorage, ".x86_64-windows-gnu-backup-one", "old"),
+    "old",
+  );
   await stageAgentCoreBundle({
     repositoryRoot: singleRepository,
     source: single.root,
     validationOptions: injectedChecks,
   });
-  assert.deepEqual(await readdir(singleStorage), ["bundle"]);
+  assert.deepEqual(await readdir(singleStorage), ["x86_64-windows-gnu"]);
 
   const multiple = await fixture(t);
   const multipleRepository = await repository(t, multiple.manifest);
-  const multipleStorage = path.join(multipleRepository, ".agentcore");
-  await mkdir(path.join(multipleStorage, ".bundle-backup-one"), {
+  const multipleStorage = path.join(
+    multipleRepository,
+    ".agentcore",
+    "bundles",
+  );
+  await mkdir(path.join(multipleStorage, ".x86_64-windows-gnu-backup-one"), {
     recursive: true,
   });
-  await mkdir(path.join(multipleStorage, ".bundle-backup-two"), {
+  await mkdir(path.join(multipleStorage, ".x86_64-windows-gnu-backup-two"), {
     recursive: true,
   });
   await assert.rejects(
@@ -689,7 +775,7 @@ test("verify-staged reports a missing canonical bundle", async (t) => {
   const { manifest } = await fixture(t);
   const repositoryRoot = await repository(t, manifest);
   await assert.rejects(
-    verifyStagedAgentCoreBundle(repositoryRoot, injectedChecks),
-    /staged AgentCore bundle is missing/,
+    verifyStagedAgentCoreBundle(repositoryRoot, injectedVerification),
+    /staged AgentCore bundle x86_64-windows-gnu is missing/,
   );
 });

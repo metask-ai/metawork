@@ -24,7 +24,7 @@ MetaWork 的依赖输入是一个完整 bundle，而不是 AgentCore 实现源�
 ### target-specific 开发期 bootstrap
 
 - Metask AgentCore 独立构建并测试 target-specific bundle，candidate 直接取自本机精确路径 `metacodes/zig-out/agentcore/<target>`；
-- candidate probe 与 `stage-agentcore-bundle.mjs` 使用显式绝对 bundle root；正式 build/test/package 只消费 `.agentcore/bundle`；
+- candidate probe 与 `stage-agentcore-bundle.mjs` 使用显式绝对 bundle root；正式 build/test/package 只消费 resolved target 对应的 `.agentcore/bundles/<target-id>` 及其中的官方 Zig package；
 - repository lock 按 target 保存完整 manifest，锁定 package/source、target、toolchain、ABI version/revision、table size、required capabilities、link inputs 和所有 payload checksum；缺少对应 artifact 必须失败；
 - stager 只复制 manifest whitelist；捕获到的复制/rename 错误必须恢复旧 canonical bundle。当前内部开发不承诺跨进程 crash transaction 或并发 build/stage，强制中断后的残留由再次执行 stage 清理；
 - staged bundle 在正式 build 前由 MetaWork verifier 再校验；官方 Zig package 只负责 module/link graph，不承担 repository lock 和 checksum 信任政策；

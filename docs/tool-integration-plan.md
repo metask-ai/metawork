@@ -60,7 +60,7 @@ AgentCore bundle 仍是面向所有消费者的通用能力全集，并继续支
 
 ### Phase 0：各桌面 bundle 与名称探针
 
-1. 使用对应 target lock 校验 `.agentcore/bundle`；
+1. 使用对应 target lock 校验 `.agentcore/bundles/<target-id>`；
 2. 运行现有 verifier、API discovery、Runtime/Session create 和 lifecycle probe；
 3. 对 bundle 声明的名称逐个运行受控 Session probe，记录名称是否被接受、对应 CoreEvent/tool result、终态和错误；
 4. 只有同时通过 target probe 与 MetaWork 产品验收的名称才加入 Agent 固定集合。

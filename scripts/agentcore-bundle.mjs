@@ -141,11 +141,37 @@ function requireSupportedHost(policy, platform, architecture) {
     );
 }
 
-function policyForTargetId(targetId) {
+export function policyForTargetId(targetId) {
   const policy = targetPolicies.find((candidate) => candidate.id === targetId);
   if (!policy)
     throw new Error(`unsupported AgentCore bundle target: ${targetId}`);
   return policy;
+}
+
+export function defaultAgentCoreTargetId(
+  platform = process.platform,
+  architecture = process.arch,
+) {
+  const matches = targetPolicies.filter((policy) =>
+    policy.supportedHosts.some(
+      (host) =>
+        host.platform === platform &&
+        host.architectures.includes(architecture) &&
+        policy.architecture ===
+          (architecture === "arm64" ? "aarch64" : "x86_64"),
+    ),
+  );
+  if (matches.length !== 1) {
+    throw new Error(
+      `unsupported AgentCore host target: ${architecture}-${platform}`,
+    );
+  }
+  return matches[0].id;
+}
+
+export function stagedAgentCoreBundleRoot(repositoryRoot, targetId) {
+  policyForTargetId(targetId);
+  return path.join(repositoryRoot, ".agentcore", "bundles", targetId);
 }
 
 export async function loadLockedAgentCoreManifest(repositoryRoot, targetId) {

@@ -26,7 +26,7 @@
 - [Workbench product architecture](product-architecture.md)
 - [Renderer Bridge contract](renderer-bridge-contract.md)
 - [Product requirements](requirements.md)
-- canonical `.agentcore/bundle/bindings/zig/src/protocol.zig`、`types.zig` 和 `include/metask/agentcore.h`
+- canonical `.agentcore/bundles/<target-id>/bindings/zig/src/protocol.zig`、`types.zig` 和 `include/metask/agentcore.h`
 
 当前 revision 9 的事实包括：
 

@@ -35,10 +35,11 @@ revision 8 新增 `CAP_RUN_STATE_OBSERVATION` 和 `CoreEvent.run_state`。事件
 
 ## 2. Bundle 与 SDK 边界
 
-正式应用只消费 canonical `.agentcore/bundle`：
+正式应用只消费 canonical `.agentcore/bundles/<target-id>`：
 
 - candidate root 只用于 probe 和 stage；
-- stage 只复制 manifest whitelist，正式 build/test/package 不访问 AgentCore 实现源码或外部 build tree；
+- stage 只复制 manifest whitelist 到 target-specific store；正式 build/test/package 从 resolved target 对应 bundle 消费官方 `bindings/zig` package，不访问 AgentCore 实现源码或外部 build tree；
+- resolved build target 必须精确选择同名 bundle；不存在“当前 bundle”、last-stage selection、target fallback 或跨 target library 复用；
 - verifier 精确校验 schema、target、toolchain、build、link、ABI、payload whitelist/checksum、唯一 discovery symbol 和 repository lock；
 - artifact 缺失、source dirty、unknown target、extra file、symlink、checksum、identity 或 ABI 不匹配都必须失败；
 - 禁止 Git/path implementation dependency、源码复制、archive 直链、`latest`、可变 tag 和 source fallback；

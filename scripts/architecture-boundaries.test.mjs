@@ -335,7 +335,16 @@ test("AgentCore SDK access is restricted to Agent modules and the test fixture",
       "session",
     ].sort(),
   );
-  assert.match(read("build.zig.zon"), /\.agentcore\/bundle\/bindings\/zig/);
+  const buildManifest = read("build.zig.zon");
+  for (const target of [
+    "aarch64-macos",
+    "x86_64-macos",
+    "x86_64-windows-gnu",
+  ]) {
+    assert.match(buildManifest, new RegExp(`\\.agentcore/bundles/${target}`));
+  }
+  assert.match(build, /\.agentcore\/bundles/);
+  assert.doesNotMatch(build, /\.agentcore\/bundle(?:["/])/);
   assert.doesNotMatch(build, /\.addObjectFile\(/);
   for (const [target, lock] of [
     ["x86_64-windows-gnu", "agentcore-bundle.windows.lock.json"],

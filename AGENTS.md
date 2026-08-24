@@ -54,7 +54,7 @@
 
 ### AgentCore 依赖
 
-- 正式应用只消费 canonical `.agentcore/bundle` 与官方 `bindings/zig` package。外部 bundle root 只用于 candidate probe/stage；禁止源码依赖、源码复制、Git/path implementation dependency、`latest`、可变 tag 和静默 fallback。
+- 正式应用只消费 canonical `.agentcore/bundles/<target-id>` 及其中的官方 `bindings/zig` package。外部 bundle root 只用于 candidate probe/stage；禁止源码依赖、源码复制、Git/path implementation dependency、`latest`、可变 tag 和静默 fallback。
 - Metask AgentCore 是 binary ABI facade 和 Agent 结构化协议的唯一 owner。MetaWork 不复制 ABI code、event tag、UI JSON schema，不维护上游 facade/SDK 的平行测试套件，也不建立 `AgentEvent` / `WorkbenchEvent` 镜像协议。
 - 正式 Host 只使用 bundle SDK 校验后的 typed `Status`、`StopReason`、`CoreEvent`、`UiRequest` 和 `UiResponse`。unknown、malformed、ownership 或 notification failure 必须 fail closed；详细处理以 AgentCore 两份 source of truth 为准。
 - 当前产品不注册 ABI v1 Host tools；Read/Bash/Edit/AskUserQuestion 使用 AgentCore built-in tools。MetaWork 不解析 Provider SSE，也不以 PTY/xterm/终端字节流作为 Agent 协议。
