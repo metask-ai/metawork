@@ -100,6 +100,7 @@ test("named module roots exist and lower owners cannot import composition", () =
     "src/product/account.zig",
     "src/product/mcp.zig",
     "src/product/skill.zig",
+    "src/product/task.zig",
     "src/agent.zig",
     "src/workbench.zig",
     "src/bridge.zig",
@@ -120,6 +121,18 @@ test("named module roots exist and lower owners cannot import composition", () =
     existsSync(new URL("src/workbench/catalog_snapshot.zig", root)),
     false,
   );
+  for (const path of [
+    "src/workbench/task_persistence.zig",
+    "src/workbench/checkpoint_record.zig",
+    "src/workbench/checkpoint_store.zig",
+    "src/workbench/owned_task_execution.zig",
+    "src/workbench/task_runtime.zig",
+    "src/workbench/task_deletion.zig",
+    "src/workbench/task_recovery.zig",
+    "src/workbench/task_recovery_job.zig",
+  ]) {
+    assert.equal(existsSync(new URL(path, root)), false, `${path} is obsolete`);
+  }
   const buildSource = read("build.zig");
   assert.match(buildSource, /src\/product\/account\.zig/);
   assert.match(buildSource, /src\/product\/account\/contract\.zig/);
@@ -128,9 +141,16 @@ test("named module roots exist and lower owners cannot import composition", () =
   assert.match(buildSource, /src\/product\/mcp\/state\.zig/);
   assert.match(buildSource, /src\/product\/skill\.zig/);
   assert.match(buildSource, /src\/product\/skill\/catalog\.zig/);
+  assert.match(buildSource, /src\/product\/task\.zig/);
+  assert.match(buildSource, /src\/product\/task\/persistence\.zig/);
+  assert.match(buildSource, /src\/product\/task\/runtime\.zig/);
   assert.doesNotMatch(buildSource, /src\/account(?:\.zig|\/)/);
   assert.doesNotMatch(buildSource, /src\/workbench\/mcp_configuration\.zig/);
   assert.doesNotMatch(buildSource, /src\/workbench\/catalog_snapshot\.zig/);
+  assert.doesNotMatch(
+    buildSource,
+    /src\/workbench\/(?:task_persistence|checkpoint_record|checkpoint_store|owned_task_execution|task_runtime|task_deletion|task_recovery|task_recovery_job)\.zig/,
+  );
   assert.match(buildSource, /addImport\("metawork_account", account\)/);
   assert.match(
     buildSource,
@@ -191,6 +211,14 @@ test("named module roots exist and lower owners cannot import composition", () =
     "metask_agentcore",
     "native_sdk",
   ]);
+  assertNoImports(zigFiles("src/product/task/"), [
+    "metawork_app",
+    "metawork_workbench",
+    "metawork_bridge",
+    "metawork_account",
+    "metask_agentcore",
+    "native_sdk",
+  ]);
   assertNoImports(zigFiles("src/bridge/"), [
     "metawork_app",
     "metask_agentcore",
@@ -215,8 +243,8 @@ test("Product Skill catalog has one physical home and remains a shared value ker
   const productSkill = read("src/product/skill.zig");
   const catalog = read("src/product/skill/catalog.zig");
   const projection = read("src/workbench/projection.zig");
-  const taskRuntime = read("src/workbench/task_runtime.zig");
-  const recoveryJob = read("src/workbench/task_recovery_job.zig");
+  const taskRuntime = read("src/product/task/runtime.zig");
+  const recoveryJob = read("src/product/task/recovery_job.zig");
 
   assert.match(productSkill, /@import\("product_skill_catalog"\)/);
   assert.match(catalog, /@import\("metawork_agent"\)/);
@@ -237,6 +265,47 @@ test("Product Skill catalog has one physical home and remains a shared value ker
     build,
     /addImport\("metawork_product_skill", product_skill\)/,
   );
+});
+
+test("Product Task kernels have one physical home without taking the executor", () => {
+  const build = read("build.zig");
+  const productTask = read("src/product/task.zig");
+  const projection = read("src/workbench/projection.zig");
+  const workbenchRoot = read("src/workbench.zig");
+  const appStores = read("src/app/stores.zig");
+  const recoveryJob = read("src/product/task/recovery_job.zig");
+
+  for (const moduleName of [
+    "persistence",
+    "checkpoint_record",
+    "checkpoint_store",
+    "execution_binding",
+    "runtime",
+    "deletion",
+    "recovery",
+    "recovery_job",
+  ]) {
+    assert.match(
+      productTask,
+      new RegExp(`pub const ${moduleName} = @import\\(\"product_task_`),
+    );
+  }
+  assert.match(projection, /@import\("metawork_product_task"\)/);
+  assert.doesNotMatch(
+    projection,
+    /@import\("(?:workbench_task_|workbench_checkpoint_|workbench_owned_task_execution)/,
+  );
+  assert.doesNotMatch(
+    workbenchRoot,
+    /\b(?:TaskFileStore|CheckpointFileStore|CheckpointStoreHealth|CheckpointBlobIdentity|task_store_max_bytes)\b/,
+  );
+  assert.match(appStores, /@import\("metawork_product_task"\)/);
+  assert.match(appStores, /product_task\.persistence\.FileStore/);
+  assert.match(appStores, /product_task\.checkpoint_store\.FileStore/);
+  assert.doesNotMatch(recoveryJob, /workbench_executor|@import\("metawork_workbench"\)/);
+  assert.match(build, /src\/product\/task\/recovery_job\.zig/);
+  assert.match(build, /projection\.addImport\("metawork_product_task", product_task\)/);
+  assert.match(build, /app\.addImport\("metawork_product_task", product_task\)/);
 });
 
 test("Product MCP kernels have one physical home and remain Workbench-held", () => {

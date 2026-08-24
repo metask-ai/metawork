@@ -3,8 +3,8 @@
 const std = @import("std");
 const agent = @import("metawork_agent");
 const catalog_snapshot = @import("metawork_product_skill").catalog;
-const owned_execution = @import("workbench_owned_task_execution");
-const recovery_job = @import("workbench_task_recovery_job");
+const owned_execution = @import("product_task_execution_binding");
+const recovery_job = @import("product_task_recovery_job");
 
 pub const DetachmentCause = enum {
     cold_start,

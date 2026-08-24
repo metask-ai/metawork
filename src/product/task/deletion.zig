@@ -1,6 +1,6 @@
 const std = @import("std");
 
-/// Workbench-owned, runtime-only state of the destructive Task use case.
+/// Product Task runtime-only state of the destructive deletion use case.
 /// Archive remains the only durable Task fact; Agent Session lifecycle is a
 /// separate participant and never becomes a Task product state.
 pub const State = enum(u8) {

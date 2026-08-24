@@ -1,16 +1,17 @@
 const std = @import("std");
 const workbench_api = @import("metawork_workbench");
 const mcp_configuration = @import("metawork_product_mcp").configuration;
+const product_task = @import("metawork_product_task");
 const app_paths = @import("paths.zig");
 
 pub const Stores = struct {
     allocator: std.mem.Allocator = undefined,
     automatic_workspace_root: ?workbench_api.AutomaticWorkspaceRoot = null,
     mcp_configuration: ?mcp_configuration.FileStore = null,
-    task: ?workbench_api.TaskFileStore = null,
+    task: ?product_task.persistence.FileStore = null,
     task_restore_failed: bool = true,
     task_restored_bytes: ?[]u8 = null,
-    checkpoint: ?workbench_api.CheckpointFileStore = null,
+    checkpoint: ?product_task.checkpoint_store.FileStore = null,
     checkpoint_open_failed: bool = true,
     scheduled_task: ?workbench_api.ScheduledTaskFileStore = null,
     scheduled_task_restore_failed: bool = true,
@@ -42,7 +43,7 @@ pub const Stores = struct {
             paths.mcpDir(),
         ) catch null;
 
-        self.task = workbench_api.TaskFileStore.init(io, paths.workbenchDir()) catch null;
+        self.task = product_task.persistence.FileStore.init(io, paths.workbenchDir()) catch null;
         self.task_restore_failed = self.task == null;
         self.task_restored_bytes = if (self.task) |*store|
             store.loadAlloc(allocator) catch failed: {
@@ -53,7 +54,7 @@ pub const Stores = struct {
             null;
 
         // Lock order is Task history first, checkpoint store second.
-        self.checkpoint = workbench_api.CheckpointFileStore.init(
+        self.checkpoint = product_task.checkpoint_store.FileStore.init(
             io,
             paths.checkpointsDir(),
         ) catch null;
@@ -134,7 +135,7 @@ pub fn commitTaskStore(
     context: ?*anyopaque,
     bytes: []const u8,
 ) workbench_api.TaskPersistenceCommit {
-    const store: *workbench_api.TaskFileStore = @ptrCast(
+    const store: *product_task.persistence.FileStore = @ptrCast(
         @alignCast(context orelse return .failed),
     );
     store.commit(bytes) catch |err| return switch (err) {

@@ -5,10 +5,10 @@
 
 const std = @import("std");
 const agent = @import("metawork_agent");
-const checkpoint_record = @import("workbench_checkpoint_record");
-const checkpoint_store = @import("workbench_checkpoint_store");
+const checkpoint_record = @import("product_task_checkpoint_record");
+const checkpoint_store = @import("product_task_checkpoint_store");
 const catalog_snapshot = @import("metawork_product_skill").catalog;
-const owned_execution = @import("workbench_owned_task_execution");
+const owned_execution = @import("product_task_execution_binding");
 
 pub const Notifier = struct {
     context: ?*anyopaque = null,
