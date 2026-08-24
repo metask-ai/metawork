@@ -539,10 +539,12 @@ summary::-webkit-details-marker {
   text-align: left;
 }
 
-.account-identity-trigger:hover,
+.account-identity-trigger:hover {
+  background: color-mix(in srgb, var(--ui-surface-panel) 65%, transparent);
+}
+
 .account-identity-trigger[data-active="true"] {
-  border-color: var(--ui-action-primary-border);
-  background: color-mix(in srgb, var(--ui-surface-panel) 76%, transparent);
+  background: var(--ui-surface-panel);
 }
 
 .account-avatar,
@@ -602,8 +604,7 @@ summary::-webkit-details-marker {
   border-bottom: 1px solid var(--ui-border);
 }
 
-.account-menu-heading strong,
-.account-menu-heading span {
+.account-menu-heading strong {
   display: block;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -612,12 +613,6 @@ summary::-webkit-details-marker {
 
 .account-menu-heading strong {
   font-size: var(--text-label);
-}
-
-.account-menu-heading span {
-  margin-top: 3px;
-  color: var(--ui-content-muted);
-  font-size: var(--text-micro);
 }
 
 .account-menu-item {

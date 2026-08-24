@@ -41,7 +41,9 @@ export const zhCN: Record<MessageId, string> = {
   "connection.source.host_signal": "Host 信号",
   "connection.refresh_failed": "无法加载最新的工作台视图。",
   "account.label": "Metask 账号",
+  "account.provider": "Metask",
   "account.signed_in": "已登录",
+  "account.signed_out": "未登录",
   "account.ready": "可执行",
   "account.gate.path": "Metask\n本地工作台",
   "account.gate.eyebrow": "Metask 访问",
@@ -71,7 +73,7 @@ export const zhCN: Record<MessageId, string> = {
   "account.cancelled": "账号操作已取消。",
   "account.operation.loading_keys": "正在加载 API Key",
   "account.operation.selecting_key": "请选择 API Key",
-  "account.login": "使用 Metask 登录",
+  "account.login": "登录 Metask",
   "account.api_key": "API Key",
   "account.model": "模型",
   "account.choose_key": "选择 API Key",
@@ -79,7 +81,8 @@ export const zhCN: Record<MessageId, string> = {
   "account.cancel": "取消当前操作",
   "account.refresh_catalog": "重新同步",
   "account.logout": "退出并清除这台设备上的信息",
-  "account.logout_confirm": "MetaWork 将请求 Host 清理这台设备，是否继续？",
+  "account.logout_confirm":
+    "这会清除这台设备上的 Metask 登录凭据，本地任务和历史记录会保留。是否继续？",
   "account.command_rejected":
     "该账号操作已不可用，MetaWork 已保留最新账号状态。",
   "account.task_running":

@@ -52,8 +52,6 @@ pub const Error = lifecycle.Error || scheduled_tasks_impl.Error || scheduled_tas
     TaskClosing,
     ExecutionUnavailable,
     ExecutionInUse,
-    TaskRunning,
-    TaskSessionInUse,
     ExecutionGenerationMismatch,
     TaskModelMismatch,
     InvalidTaskModel,
@@ -3973,11 +3971,9 @@ pub const Workbench = struct {
         self.syncLifecycle();
         if (self.execution_replacement != .none)
             return error.ExecutionInUse;
-        if (self.identityReplacementBlocker()) |blocker|
-            return switch (blocker) {
-                .running => error.TaskRunning,
-                .session => error.TaskSessionInUse,
-            };
+        // Identity replacement changes only Account-owned admission defaults.
+        // Live Tasks keep their owned ExecutionConfig until their own runtime
+        // lifecycle releases it, so their references cannot block this gate.
         self.execution_replacement = .identity;
     }
 
@@ -11382,25 +11378,6 @@ pub const Workbench = struct {
         candidate.* = undefined;
     }
 
-    const IdentityReplacementBlocker = enum { running, session };
-
-    fn identityReplacementBlocker(
-        self: *const Workbench,
-    ) ?IdentityReplacementBlocker {
-        for (self.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
-            if (hasActiveOperation(task) or
-                task.runtime.worker_references.load(.acquire) != 0)
-                return .running;
-            if (task.runtime.session() != null or
-                task.runtime.closingSession() != null or
-                task.runtime.close_thread != null or
-                task.runtime.executionConst() != null)
-                return .session;
-        }
-        return null;
-    }
-
     /// Product projections may contain a credential that became known only
     /// after those facts were recorded. Every Task-owned secret release must
     /// pass through this function so the final live copy scrubs all retained
@@ -17974,41 +17951,36 @@ test "Account projection and execution install use preallocated no-fail storage"
     try std.testing.expectEqual(@as(u64, 1), workbench.currentRevision());
 }
 
-test "execution replacement gate rejects runtime references and admits durable history" {
+test "identity replacement does not disturb live Task runtime references" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
     try workbench.beginDefaultExecutionReplacement();
     try std.testing.expect(workbench.executionReplacementPending());
     try std.testing.expect(!workbench.accountView().can_create_task);
     workbench.endExecutionReplacementNoFail();
-    try std.testing.expectError(
-        error.TaskRunning,
-        workbench.beginExecutionReplacement(),
-    );
-    try std.testing.expect(!workbench.executionReplacementPending());
     const task = &workbench.tasks[0].?;
+    const session = task.runtime.session().?;
+    const execution = task.runtime.executionConst().?;
+    try workbench.beginExecutionReplacement();
+    try std.testing.expect(workbench.executionReplacementPending());
+    try std.testing.expectEqual(session, task.runtime.session().?);
+    try std.testing.expectEqual(execution, task.runtime.executionConst().?);
+    workbench.endExecutionReplacementNoFail();
+
     task.durable.runs[0].?.active_phase = .completed;
     task.runtime.active_run_id = 0;
     task.runtime.worker_references.store(1, .release);
-    try std.testing.expectError(
-        error.TaskRunning,
-        workbench.beginExecutionReplacement(),
-    );
-    task.runtime.worker_references.store(0, .release);
-    try std.testing.expectEqual(
-        Workbench.IdentityReplacementBlocker.session,
-        workbench.identityReplacementBlocker().?,
-    );
-    var detached = task.runtime.detach(.cold_start);
-    detached.execution.deinit();
     try workbench.beginExecutionReplacement();
     try std.testing.expect(workbench.executionReplacementPending());
-    try std.testing.expect(task.runtime.executionConst() == null);
+    try std.testing.expectEqual(@as(usize, 1), task.runtime.worker_references.load(.acquire));
+    try std.testing.expectEqual(session, task.runtime.session().?);
+    try std.testing.expectEqual(execution, task.runtime.executionConst().?);
     try std.testing.expectEqual(TaskLifecycle.open, taskLifecycle(task));
     try std.testing.expectEqualStrings("fixture-model", task.durable.execution_model);
     try std.testing.expect(!workbench.accountView().can_create_task);
     workbench.endExecutionReplacementNoFail();
     try std.testing.expect(workbench.accountView().can_create_task);
+    task.runtime.worker_references.store(0, .release);
 }
 
 test "default replacement preserves Task generation and installs the next admission default" {
