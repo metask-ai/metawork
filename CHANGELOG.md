@@ -6,6 +6,24 @@
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-08-24
+
+### Added
+
+- 新增 Agent Completion capability；Workbench 在首个 Run admission 时显示 provisional title，并在 Run 收口后通过独立 Completion 生成不超过 32 个 Unicode 字符的 Task 标题。
+
+### Changed
+
+- 统一 Agent provider identity，并将 Account provider probe 迁移到 Completion capability。
+- 定义 Account transaction architecture，收口 transaction kernel 状态模型，并 hard cut model preference transaction 路径。
+
+### Fixed
+
+- 修复 MCP catalog freshness 生命周期，覆盖 refresh operation 串行化、deadline 保留、Workbench pending request 和 Conversation restore。
+- 修复 Account identity 切换或退出被 live Task 阻止的问题；既有 Task 继续使用已取得的 ExecutionConfig 收口，不被中止或改写。
+- 修复账号菜单退出必须先打开设置页，以及 signed-out identity 与菜单状态不清晰的问题。
+- 修复 Account terminal transaction 在 preference recovery 与 catalog terminal handoff 后遗留 shadow、candidate 或 secret session 的问题。
+
 ## [0.1.2] - 2026-08-22
 
 ### Added
@@ -74,7 +92,8 @@
 - 定时任务：本地进程内 cron 调度；窗口关闭后继续运行；下次启动执行单次 missed-run reconciliation。
 - 界面：中英双语；统一的 Metask 设计语言字号阶梯与组件体系。
 
-[unreleased]: https://github.com/metask-ai/metawork/compare/v0.1.2...HEAD
+[unreleased]: https://github.com/metask-ai/metawork/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/metask-ai/metawork/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/metask-ai/metawork/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/metask-ai/metawork/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/metask-ai/metawork/releases/tag/v0.1.0
