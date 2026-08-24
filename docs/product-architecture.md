@@ -65,6 +65,8 @@ Account 和 Workbench 是同级 owner，彼此不导入 runtime。Account Runtim
 
 `src/product/task.zig` 与 `src/product/task/` 是同一 Product owner 持有的 Task kernel 物理边界。当前收拢 persistence、checkpoint record/store、owned execution binding、runtime attachment、deletion policy、recovery policy 与 recovery job；它们可以消费 Account contract、Product Skill catalog 与 Agent 公共类型，但不得依赖 Application、Bridge、Native SDK、AgentCore 或产品组合实现。该归位不转移 executor、Task/Run/Compact aggregate、跨 owner admission、Agent event drain、revision 与完整 snapshot 编排。
 
+Run 与 Compact 的产品记录只保存稳定状态、终态发布与取消 identity，不保存指回组合对象的 `Workbench`、`TaskView` 或 Agent `Session` 指针。executor 为每次入队持有独立且短寿命的 Run/Compact job context，其中借用执行所需的 Task、Session 与组合 capability；queued cancel 以产品记录地址匹配 identity，并同步调用 context 的取消回调，worker 执行或 queued cancel 负责精确一次销毁 context。checkpoint postprocess 可以继续延长 Task worker reference，但不延长 job context：worker 完成后，主线程只凭当前 Task 遍历及记录内的 checkpoint 状态结算该引用。
+
 OAuth loopback 采用同一切割纪律：Account `loopback.zig` 定义 endpoint/sink，并拥有 callback path、state、code/error、issuer、无效请求预算与 response policy；Application `oauth_loopback_transport.zig` 拥有 listener、connection、accept/receive deadline、跨线程 cancellation 与 HTTP byte pump。Account LoginAttempt worker 只借稳定 endpoint capability，MCP OAuth 在 Application 内直接复用 concrete transport；两条路径都不转移 socket、reader 或 request handle，sink 只在 callback 期间借用 request metadata。
 
 公开 `AccountView` 只包含四态 `checking | signed_out | authorizing | authenticated` 和独立目录状态 `unavailable | loading | choosing | ready | failed`。`canCancel` 与 `canCreateTask` 是 Host 判定的能力事实，不再由 Renderer 从 operation/readiness 推导。saved account、reauth required、account mismatch、primary action 和公开 execution state 均不存在；登录无效直接变为 `signed_out`，统一通过 `beginLogin` 建立新 identity。

@@ -271,6 +271,7 @@ test("Product Task kernels have one physical home without taking the executor", 
   const build = read("build.zig");
   const productTask = read("src/product/task.zig");
   const projection = read("src/workbench/projection.zig");
+  const executor = read("src/workbench/executor.zig");
   const workbenchRoot = read("src/workbench.zig");
   const appStores = read("src/app/stores.zig");
   const recoveryJob = read("src/product/task/recovery_job.zig");
@@ -306,6 +307,22 @@ test("Product Task kernels have one physical home without taking the executor", 
   assert.match(build, /src\/product\/task\/recovery_job\.zig/);
   assert.match(build, /projection\.addImport\("metawork_product_task", product_task\)/);
   assert.match(build, /app\.addImport\("metawork_product_task", product_task\)/);
+
+  const runRecord = projection.match(
+    /const RunRecord = struct \{[\s\S]*?\n\};/,
+  )?.[0];
+  const compactRecord = projection.match(
+    /const CompactRecord = struct \{[\s\S]*?\n\};/,
+  )?.[0];
+  assert.ok(runRecord, "RunRecord must remain a concrete product record");
+  assert.ok(compactRecord, "CompactRecord must remain a concrete product record");
+  for (const record of [runRecord, compactRecord]) {
+    assert.doesNotMatch(record, /\b(?:workbench|task|session):\s*\*/);
+  }
+  assert.match(projection, /const RunJobContext = struct/);
+  assert.match(projection, /const CompactJobContext = struct/);
+  assert.match(executor, /identity: \*anyopaque,[\s\S]*context: \*anyopaque,/);
+  assert.match(executor, /if \(item\.identity != identity\) continue;/);
 });
 
 test("Product MCP kernels have one physical home and remain Workbench-held", () => {

@@ -1072,9 +1072,6 @@ const RunRecord = struct {
     terminal_diagnostic: []u8,
     redaction_secret: []const u8 = &.{},
     next_activity_order: u64 = 1,
-    workbench: *Workbench = undefined,
-    task: *TaskView = undefined,
-    session: *lifecycle.Session = undefined,
     worker_reference_held: std.atomic.Value(bool) = .init(false),
     agent_handoff: std.atomic.Value(AgentHandoffState) = .init(.queued),
     pending_termination: std.atomic.Value(PendingInterruption) = .init(.none),
@@ -1113,13 +1110,36 @@ const CompactRecord = struct {
     terminal_observed: bool = false,
     terminal_diagnostic: []u8,
     redaction_secret: []const u8 = &.{},
-    workbench: *Workbench = undefined,
-    task: *TaskView = undefined,
-    session: *lifecycle.Session = undefined,
     worker_reference_held: std.atomic.Value(bool) = .init(false),
     session_reference_held: std.atomic.Value(bool) = .init(false),
     checkpoint_export_context: CheckpointExportContext = undefined,
     checkpoint: CheckpointPostprocess = .{},
+};
+
+/// Executor-only resources for one queued or running Run. Product records keep
+/// stable state and cancellation identity; this sidecar owns the composition
+/// references needed only while the executor has the job.
+const RunJobContext = struct {
+    workbench: *Workbench,
+    task: *TaskView,
+    run: *RunRecord,
+    session: *lifecycle.Session,
+
+    fn destroy(self: *@This()) void {
+        std.heap.c_allocator.destroy(self);
+    }
+};
+
+/// Executor-only resources for one queued or running compact operation.
+const CompactJobContext = struct {
+    workbench: *Workbench,
+    task: *TaskView,
+    compact: *CompactRecord,
+    session: *lifecycle.Session,
+
+    fn destroy(self: *@This()) void {
+        std.heap.c_allocator.destroy(self);
+    }
 };
 
 const UiRecordKind = enum { permission };
@@ -3649,6 +3669,7 @@ pub const Workbench = struct {
             .build_admission = alignment == .current,
         };
         try self.executor.enqueue(.{
+            .identity = job,
             .context = job,
             .execute_fn = executeMcpRefreshJob,
             .cancel_fn = cancelMcpRefreshJob,
@@ -4307,6 +4328,7 @@ pub const Workbench = struct {
         task.runtime.last_restore_failure = null;
         _ = task.runtime.worker_references.fetchAdd(1, .acq_rel);
         self.executor.enqueue(.{
+            .identity = job,
             .context = job,
             .execute_fn = task_recovery_job.Job.execute,
             .cancel_fn = task_recovery_job.Job.cancelQueued,
@@ -4503,9 +4525,15 @@ pub const Workbench = struct {
         errdefer if (record_owned) self.discardRunRecord(view, slot);
         const run = &view.durable.runs[slot].?;
         run.id = run_id;
-        run.workbench = self;
-        run.task = view;
-        run.session = session;
+        const job_context = try std.heap.c_allocator.create(RunJobContext);
+        var job_context_owned = true;
+        errdefer if (job_context_owned) job_context.destroy();
+        job_context.* = .{
+            .workbench = self,
+            .task = view,
+            .run = run,
+            .session = session,
+        };
         run.checkpoint_export_context = .{
             .task_id = view.durable.id,
             .binding_epoch = view.durable.binding_epoch,
@@ -4551,12 +4579,15 @@ pub const Workbench = struct {
         _ = view.runtime.worker_references.fetchAdd(1, .acq_rel);
         run.worker_reference_held.store(true, .release);
         self.executor.enqueue(.{
-            .context = run,
+            .identity = run,
+            .context = job_context,
             .execute_fn = executeRunJob,
-            .cancel_fn = cancelRunJobForShutdown,
+            .cancel_fn = cancelRunJob,
         }) catch |err| {
+            job_context.destroy();
+            job_context_owned = false;
             publishAutomaticTitleFallback(run);
-            releaseWorkerReference(run);
+            releaseWorkerReference(view, run);
             cancelPreparedRunOrPanic(session, run_id);
             prepared = false;
             _ = commitTerminal(
@@ -4576,6 +4607,7 @@ pub const Workbench = struct {
             self.bumpRevision();
             return err;
         };
+        job_context_owned = false;
         prepared = false;
         record_owned = false;
         self.bumpRevision();
@@ -4660,9 +4692,15 @@ pub const Workbench = struct {
         var record_owned = true;
         errdefer if (record_owned) self.discardCompactRecord(view, slot);
         const compact = &view.durable.compacts[slot].?;
-        compact.workbench = self;
-        compact.task = view;
-        compact.session = session;
+        const job_context = try std.heap.c_allocator.create(CompactJobContext);
+        var job_context_owned = true;
+        errdefer if (job_context_owned) job_context.destroy();
+        job_context.* = .{
+            .workbench = self,
+            .task = view,
+            .compact = compact,
+            .session = session,
+        };
         compact.checkpoint_export_context = .{
             .task_id = view.durable.id,
             .binding_epoch = view.durable.binding_epoch,
@@ -4708,11 +4746,14 @@ pub const Workbench = struct {
         _ = view.runtime.worker_references.fetchAdd(1, .acq_rel);
         compact.worker_reference_held.store(true, .release);
         self.executor.enqueue(.{
-            .context = compact,
+            .identity = compact,
+            .context = job_context,
             .execute_fn = executeCompactJob,
-            .cancel_fn = cancelCompactJobForShutdown,
+            .cancel_fn = cancelCompactJob,
         }) catch |err| {
-            releaseCompactReferences(compact);
+            job_context.destroy();
+            job_context_owned = false;
+            releaseCompactReferences(view, compact, session);
             cancelPreparedCompactOrPanic(session, operation_id);
             prepared = false;
             _ = commitCompactProductTerminal(
@@ -4733,6 +4774,7 @@ pub const Workbench = struct {
             self.bumpRevision();
             return err;
         };
+        job_context_owned = false;
         prepared = false;
         record_owned = false;
         self.bumpRevision();
@@ -4779,28 +4821,17 @@ pub const Workbench = struct {
             return .already_terminal;
         }
         if (self.executor.cancel(compact)) {
-            cancelPreparedCompactOrPanic(compact.session, compact.id);
-            _ = commitCompactProductTerminal(
-                compact,
-                .aborted,
-                compactCauseForInterruption(pendingExternalInterruption(compact)),
-                if (pendingExternalInterruption(compact) == .user_cancel)
-                    .reusable
-                else
-                    .closing,
-                .{},
-                0,
-                0,
-                "",
-                false,
-            );
-            releaseCompactReferences(compact);
             self.touchTask(view);
             self.syncLifecycle();
             self.commitTaskStateNoFail();
             return .queued_aborted;
         } else {
-            compact.session.requestCompactCancellation(
+            const session = view.runtime.session() orelse
+                view.runtime.closingSession() orelse {
+                self.syncLifecycle();
+                return .session_closing;
+            };
+            session.requestCompactCancellation(
                 compact.id,
                 pendingExternalInterruption(compact),
             ) catch |err| switch (err) {
@@ -4864,18 +4895,8 @@ pub const Workbench = struct {
             run_id,
             run.redaction_secret,
         );
+        const dispatch = requestRunTermination(run, .user_cancel);
         if (self.executor.cancel(run)) {
-            cancelPreparedRunOrPanic(session, run_id);
-            releaseWorkerReference(run);
-            _ = commitTerminal(
-                run,
-                .cancelled,
-                .cancelled,
-                .user_cancel,
-                .reusable,
-                "",
-                false,
-            );
             run.terminal_observed = true;
             if (record) |value| self.pushUiRecord(view, value);
             view.runtime.cancel_requested = false;
@@ -4884,7 +4905,6 @@ pub const Workbench = struct {
             self.bumpRevision();
             return;
         }
-        const dispatch = requestRunTermination(run, .user_cancel);
         const stopping = switch (dispatch) {
             .pending, .requested, .already_requested => true,
             .already_finishing, .already_terminal, .stale_run, .session_closing => false,
@@ -5017,23 +5037,10 @@ pub const Workbench = struct {
         else
             null;
         if (findRun(view.durable.runs, view.runtime.active_run_id)) |run| {
+            const dispatch = requestRunTermination(run, .session_close);
             if (self.executor.cancel(run)) {
-                cancelPreparedRunOrPanic(session, view.runtime.active_run_id);
-                releaseWorkerReference(run);
-                _ = commitTerminal(
-                    run,
-                    .interrupted,
-                    .interrupted,
-                    .session_close,
-                    .closing,
-                    "",
-                    false,
-                );
                 run.terminal_observed = true;
-            } else consumeLifecycleTermination(
-                requestRunTermination(run, .session_close),
-                run.id,
-            );
+            } else consumeLifecycleTermination(dispatch, run.id);
         }
         if (!retrying_closing_session)
             std.debug.assert(view.runtime.beginClosing());
@@ -5640,7 +5647,7 @@ pub const Workbench = struct {
             if (!self.commitCheckpointPostprocessNoFail(task, &run.checkpoint)) continue;
             if (run.checkpoint.state.load(.acquire) == .settled and
                 run.worker_reference_held.load(.acquire))
-                releaseWorkerReference(run);
+                releaseWorkerReference(task, run);
             changed = true;
         }
         for (task.durable.compacts) |*entry| {
@@ -5648,7 +5655,7 @@ pub const Workbench = struct {
             if (!compact.terminal_observed) continue;
             if (!self.commitCheckpointPostprocessNoFail(task, &compact.checkpoint)) continue;
             if (compact.checkpoint.state.load(.acquire) == .settled)
-                releaseCompactWorkerReference(compact);
+                releaseCompactWorkerReference(task, compact);
             changed = true;
         }
         return changed;
@@ -7789,7 +7796,6 @@ pub const Workbench = struct {
                 _ = self.executor.cancel(job);
                 continue;
             }
-            const session = view.runtime.session() orelse continue;
             switch (view.runtime.active_operation) {
                 .none => {},
                 .restore => unreachable,
@@ -7805,25 +7811,11 @@ pub const Workbench = struct {
                 .run => |run_id| {
                     const run = findRun(view.durable.runs, run_id) orelse continue;
                     if (isTerminalPhase(runPhase(run))) continue;
+                    const dispatch = requestRunTermination(run, .app_shutdown);
                     if (self.executor.cancel(run)) {
-                        cancelPreparedRunOrPanic(session, run.id);
-                        publishAutomaticTitleFallback(run);
-                        releaseWorkerReference(run);
-                        _ = commitTerminal(
-                            run,
-                            .interrupted,
-                            .interrupted,
-                            .app_shutdown,
-                            .closing,
-                            "",
-                            false,
-                        );
                         run.terminal_observed = true;
                     } else {
-                        consumeLifecycleTermination(
-                            requestRunTermination(run, .app_shutdown),
-                            run.id,
-                        );
+                        consumeLifecycleTermination(dispatch, run.id);
                     }
                 },
             }
@@ -7848,12 +7840,13 @@ pub const Workbench = struct {
                 const run = &(run_entry.* orelse continue);
                 self.settleCheckpointPostprocessForShutdown(&run.checkpoint);
                 if (run.worker_reference_held.load(.acquire))
-                    releaseWorkerReference(run);
+                    releaseWorkerReference(task, run);
             }
             for (task.durable.compacts) |*compact_entry| {
                 const compact = &(compact_entry.* orelse continue);
                 self.settleCheckpointPostprocessForShutdown(&compact.checkpoint);
-                releaseCompactReferences(compact);
+                std.debug.assert(!compact.session_reference_held.load(.acquire));
+                releaseCompactWorkerReference(task, compact);
             }
         }
     }
@@ -10517,6 +10510,7 @@ pub const Workbench = struct {
             .epoch_token = epoch_token,
         };
         try self.executor.enqueue(.{
+            .identity = job,
             .context = job,
             .execute_fn = executeCatalogJob,
             .cancel_fn = cancelCatalogJob,
@@ -10823,6 +10817,7 @@ pub const Workbench = struct {
             .epoch_token = epoch_token,
         };
         try self.executor.enqueue(.{
+            .identity = job,
             .context = job,
             .execute_fn = executeCatalogJob,
             .cancel_fn = cancelCatalogJob,
@@ -11943,9 +11938,6 @@ pub const Workbench = struct {
             .status_text = status_text,
             .terminal_diagnostic = terminal_diagnostic,
             .redaction_secret = execution.api_key,
-            .workbench = undefined,
-            .task = undefined,
-            .session = undefined,
             .automatic_title = automatic_title,
         };
         return slot;
@@ -12762,7 +12754,7 @@ const AutomaticTitleWatchdog = struct {
     }
 };
 
-fn generateAutomaticTitle(run: *RunRecord) void {
+fn generateAutomaticTitle(workbench: *Workbench, run: *RunRecord) void {
     const claimed = run.automatic_title.state.cmpxchgStrong(
         .pending,
         .running,
@@ -12775,7 +12767,7 @@ fn generateAutomaticTitle(run: *RunRecord) void {
     const source = Workbench.automaticTitleCompletionInput(&run.input) orelse return;
     const execution = &(run.automatic_title.execution orelse return);
     const config = execution.input();
-    const owner = run.workbench.completion_factory.create(std.heap.c_allocator, .{
+    const owner = workbench.completion_factory.create(std.heap.c_allocator, .{
         .provider = agentProvider(run.execution_provider),
         .credential = config.api_key,
         .base_url = config.target.base_url,
@@ -12793,7 +12785,7 @@ fn generateAutomaticTitle(run: *RunRecord) void {
         return;
     };
     var watchdog = AutomaticTitleWatchdog{
-        .io = run.workbench.io,
+        .io = workbench.io,
         .title = &run.automatic_title,
         .stream = stream,
     };
@@ -12866,7 +12858,9 @@ fn publishAutomaticTitleFallback(run: *RunRecord) void {
 }
 
 fn executeRunJob(context: *anyopaque) void {
-    const run: *RunRecord = @ptrCast(@alignCast(context));
+    const job: *RunJobContext = @ptrCast(@alignCast(context));
+    defer job.destroy();
+    const run = job.run;
     const claimed = run.agent_handoff.cmpxchgStrong(
         .queued,
         .starting,
@@ -12874,14 +12868,14 @@ fn executeRunJob(context: *anyopaque) void {
         .acquire,
     );
     std.debug.assert(claimed == null);
-    var agent_run = switch (run.session.beginRunOutcome(run.id)) {
+    var agent_run = switch (job.session.beginRunOutcome(run.id)) {
         .run => |agent_run| agent_run,
         .failure => |failure| {
             run.agent_handoff.store(.finishing, .release);
             commitBeginFailure(run, failure);
             publishAutomaticTitleFallback(run);
-            const notifier = run.workbench.change_notifier;
-            releaseWorkerReference(run);
+            const notifier = job.workbench.change_notifier;
+            releaseWorkerReference(job.task, run);
             _ = notifier.notify();
             return;
         },
@@ -12906,25 +12900,27 @@ fn executeRunJob(context: *anyopaque) void {
         terminal.session_disposition_at_completion == .reusable;
     terminal.deinit();
     agent_run.deinit();
-    const notifier = run.workbench.change_notifier;
+    const notifier = job.workbench.change_notifier;
     _ = notifier.notify();
-    generateAutomaticTitle(run);
+    generateAutomaticTitle(job.workbench, run);
     _ = notifier.notify();
     if (!checkpoint_eligible or !postprocessCheckpoint(
-        run.workbench,
-        run.session,
+        job.workbench,
+        job.session,
         &run.checkpoint,
         run.checkpoint_export_context,
-    )) releaseWorkerReference(run);
+    )) releaseWorkerReference(job.task, run);
     _ = notifier.notify();
 }
 
 fn executeCompactJob(context: *anyopaque) void {
-    const compact: *CompactRecord = @ptrCast(@alignCast(context));
+    const job: *CompactJobContext = @ptrCast(@alignCast(context));
+    defer job.destroy();
+    const compact = job.compact;
     compact.agent_handoff.store(.starting, .release);
-    _ = compact.workbench.change_notifier.notify();
+    _ = job.workbench.change_notifier.notify();
     compact.agent_handoff.store(.running, .release);
-    var terminal = compact.session.executePreparedCompact(compact.id) catch |err| {
+    var terminal = job.session.executePreparedCompact(compact.id) catch |err| {
         compact.agent_handoff.store(.finishing, .release);
         _ = commitCompactProductTerminal(
             compact,
@@ -12943,8 +12939,8 @@ fn executeCompactJob(context: *anyopaque) void {
             "",
             false,
         );
-        const notifier = compact.workbench.change_notifier;
-        releaseCompactReferences(compact);
+        const notifier = job.workbench.change_notifier;
+        releaseCompactReferences(job.task, compact, job.session);
         _ = notifier.notify();
         return;
     };
@@ -12953,14 +12949,14 @@ fn executeCompactJob(context: *anyopaque) void {
     const checkpoint_eligible = terminal.raw_status_code != null and
         terminal.session_disposition_at_completion == .reusable;
     terminal.deinit();
-    const notifier = compact.workbench.change_notifier;
-    releaseCompactSessionReference(compact);
+    const notifier = job.workbench.change_notifier;
+    releaseCompactSessionReference(compact, job.session);
     if (!checkpoint_eligible or !postprocessCheckpoint(
-        compact.workbench,
-        compact.session,
+        job.workbench,
+        job.session,
         &compact.checkpoint,
         compact.checkpoint_export_context,
-    )) releaseCompactWorkerReference(compact);
+    )) releaseCompactWorkerReference(job.task, compact);
     _ = notifier.notify();
 }
 
@@ -13120,28 +13116,31 @@ fn takeCheckpointRecord(
     return result;
 }
 
-fn cancelCompactJobForShutdown(context: *anyopaque) void {
-    const compact: *CompactRecord = @ptrCast(@alignCast(context));
+fn cancelCompactJob(context: *anyopaque) void {
+    const job: *CompactJobContext = @ptrCast(@alignCast(context));
+    defer job.destroy();
+    const compact = job.compact;
     _ = compact.pending_interruption.cmpxchgStrong(
         .none,
         .app_shutdown,
         .acq_rel,
         .acquire,
     );
-    cancelPreparedCompactOrPanic(compact.session, compact.id);
+    const interruption = pendingExternalInterruption(compact);
+    cancelPreparedCompactOrPanic(job.session, compact.id);
     _ = commitCompactProductTerminal(
         compact,
         .aborted,
-        compactCauseForInterruption(pendingExternalInterruption(compact)),
-        .closing,
+        compactCauseForInterruption(interruption),
+        if (interruption == .user_cancel) .reusable else .closing,
         .{},
         0,
         0,
         "",
         false,
     );
-    const notifier = compact.workbench.change_notifier;
-    releaseCompactReferences(compact);
+    const notifier = job.workbench.change_notifier;
+    releaseCompactReferences(job.task, compact, job.session);
     _ = notifier.notify();
 }
 
@@ -13374,21 +13373,38 @@ fn pendingTerminationSignal(run: *const RunRecord) lifecycle.TerminationSignal {
     } };
 }
 
-fn cancelRunJobForShutdown(context: *anyopaque) void {
-    const run: *RunRecord = @ptrCast(@alignCast(context));
-    cancelPreparedRunOrPanic(run.session, run.id);
+fn cancelRunJob(context: *anyopaque) void {
+    const job: *RunJobContext = @ptrCast(@alignCast(context));
+    defer job.destroy();
+    const run = job.run;
+    _ = run.pending_termination.cmpxchgStrong(
+        .none,
+        .app_shutdown,
+        .acq_rel,
+        .acquire,
+    );
+    const signal = pendingTerminationSignal(run);
+    const decision = decisionForSignal(signal);
+    const interruption = switch (signal) {
+        .interrupted => |value| value,
+        else => unreachable,
+    };
+    cancelPreparedRunOrPanic(job.session, run.id);
     _ = commitTerminal(
         run,
-        .interrupted,
-        .interrupted,
-        .app_shutdown,
-        .closing,
+        decision.phase,
+        decision.outcome,
+        decision.cause,
+        switch (interruption) {
+            .user_cancel, .timeout => .reusable,
+            .session_close, .app_shutdown => .closing,
+        },
         "",
         false,
     );
     publishAutomaticTitleFallback(run);
-    const notifier = run.workbench.change_notifier;
-    releaseWorkerReference(run);
+    const notifier = job.workbench.change_notifier;
+    releaseWorkerReference(job.task, run);
     _ = notifier.notify();
 }
 
@@ -13412,26 +13428,33 @@ fn cancelPreparedCompactOrPanic(
     );
 }
 
-fn releaseWorkerReference(run: *RunRecord) void {
+fn releaseWorkerReference(task: *TaskView, run: *RunRecord) void {
     std.debug.assert(run.worker_reference_held.swap(false, .acq_rel));
-    const references = &run.task.runtime.worker_references;
+    const references = &task.runtime.worker_references;
     const previous = references.fetchSub(1, .release);
     std.debug.assert(previous != 0);
 }
 
-fn releaseCompactReferences(compact: *CompactRecord) void {
-    releaseCompactSessionReference(compact);
-    releaseCompactWorkerReference(compact);
+fn releaseCompactReferences(
+    task: *TaskView,
+    compact: *CompactRecord,
+    session: *lifecycle.Session,
+) void {
+    releaseCompactSessionReference(compact, session);
+    releaseCompactWorkerReference(task, compact);
 }
 
-fn releaseCompactSessionReference(compact: *CompactRecord) void {
+fn releaseCompactSessionReference(
+    compact: *CompactRecord,
+    session: *lifecycle.Session,
+) void {
     if (compact.session_reference_held.swap(false, .acq_rel))
-        compact.session.releaseReference();
+        session.releaseReference();
 }
 
-fn releaseCompactWorkerReference(compact: *CompactRecord) void {
+fn releaseCompactWorkerReference(task: *TaskView, compact: *CompactRecord) void {
     if (!compact.worker_reference_held.swap(false, .acq_rel)) return;
-    const previous = compact.task.runtime.worker_references.fetchSub(1, .release);
+    const previous = task.runtime.worker_references.fetchSub(1, .release);
     std.debug.assert(previous != 0);
 }
 

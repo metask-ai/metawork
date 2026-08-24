@@ -1167,6 +1167,13 @@ test "bounded executor rejects overflow and close cancels a queued Run" {
 
     const running_id = try submitSession(running, "hold worker");
     try running.waitForState(.running);
+    while (true) {
+        fake_core.lock();
+        const entered_agent = fake_core.run_calls == 1;
+        fake_core.unlock();
+        if (entered_agent) break;
+        std.Thread.yield() catch {};
+    }
     _ = try submitSession(queued, "stay queued");
     try std.testing.expectError(error.SessionNotIdle, submitSession(queued, "second in-flight"));
     try std.testing.expectError(error.QueueFull, submitSession(rejected, "overflow"));

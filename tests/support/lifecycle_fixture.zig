@@ -2435,6 +2435,7 @@ pub fn cancelTestRunForShutdown(context: *anyopaque) void {
 pub fn submitSession(session: *lifecycle.Session, prompt: []const u8) !u64 {
     const run_id = try session.prepareRun(.{ .text = prompt });
     testExecutor(session.agent_runtime).enqueue(.{
+        .identity = session,
         .context = session,
         .execute_fn = executeTestRun,
         .cancel_fn = cancelTestRunForShutdown,
@@ -2450,15 +2451,13 @@ pub fn cancelSession(
     run_id: u64,
     interruption: lifecycle.ExternalInterruption,
 ) !void {
-    if (testExecutor(session.agent_runtime).cancel(session))
-        return session.cancelPreparedRun(run_id);
+    if (testExecutor(session.agent_runtime).cancel(session)) return;
     return session.requestTermination(run_id, .{ .interrupted = interruption });
 }
 
 pub fn closeSession(session: *lifecycle.Session, interruption: lifecycle.ExternalInterruption) !void {
     const snapshot = session.snapshot();
-    if (snapshot.state == .queued and testExecutor(session.agent_runtime).cancel(session))
-        try session.cancelPreparedRun(snapshot.active_run_id);
+    if (snapshot.state == .queued) _ = testExecutor(session.agent_runtime).cancel(session);
     return session.close(interruption);
 }
 
