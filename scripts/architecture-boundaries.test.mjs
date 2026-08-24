@@ -194,11 +194,12 @@ test("named module roots exist and lower owners cannot import composition", () =
   }
 });
 
-test("Product MCP configuration has one physical module and remains Workbench-held", () => {
+test("Product MCP kernels have one physical home and remain Workbench-held", () => {
   const build = read("build.zig");
   const productMcp = read("src/product/mcp.zig");
   const configuration = read("src/product/mcp/configuration.zig");
   const state = read("src/product/mcp/state.zig");
+  const view = read("src/product/mcp/view.zig");
   const workbenchRoot = read("src/workbench.zig");
   const workbenchProjection = read("src/workbench/projection.zig");
 
@@ -210,6 +211,7 @@ test("Product MCP configuration has one physical module and remains Workbench-he
   );
   assert.match(productMcp, /@import\("product_mcp_configuration"\)/);
   assert.match(productMcp, /@import\("product_mcp_state"\)/);
+  assert.match(productMcp, /@import\("product_mcp_view"\)/);
   assert.match(configuration, /@import\("agent_mcp_http_protocol"\)/);
   assert.doesNotMatch(configuration, /@import\("metawork_agent"\)/);
   // Product MCP state intentionally consumes MetaWork Agent's public
@@ -227,12 +229,40 @@ test("Product MCP configuration has one physical module and remains Workbench-he
   }
   assert.match(state, /pub fn mcpRefreshDelayMs/);
   assert.match(state, /pub fn mcpRefreshDeadlineMs/);
+  assert.match(view, /@import\("product_mcp_configuration"\)/);
+  assert.match(view, /@import\("product_mcp_state"\)/);
+  assert.doesNotMatch(view, /@import\("metawork_agent"\)/);
+  assert.match(view, /pub fn writeProjection/);
+  assert.match(view, /pub const TextProjection/);
+  assert.match(view, /refresh_job_active: bool/);
+  assert.doesNotMatch(view, /mcp_refresh_job/);
+  assert.doesNotMatch(
+    view,
+    /McpRefreshJob|workbench_executor|std\.Thread|pub const McpProductState/,
+  );
   assert.match(build, /addImport\("metawork_product_mcp", product_mcp\)/);
+  assert.match(build, /src\/product\/mcp\/view\.zig/);
+  assert.match(
+    build,
+    /product_mcp_view\.addImport\("product_mcp_configuration", mcp_configuration\)/,
+  );
+  assert.match(
+    build,
+    /product_mcp_view\.addImport\("product_mcp_state", product_mcp_state\)/,
+  );
+  assert.match(build, /"test-product-mcp-view"/);
+  assert.match(build, /"Workbench snapshot serializer"/);
   assert.match(
     workbenchProjection,
     /const product_mcp = @import\("metawork_product_mcp"\)/,
   );
   assert.match(workbenchProjection, /const mcp_state = product_mcp\.state/);
+  assert.match(workbenchProjection, /const mcp_view = product_mcp\.view/);
+  assert.match(workbenchProjection, /mcp_view\.writeProjection/);
+  assert.doesNotMatch(
+    workbenchProjection,
+    /fn mcpAvailability|fn mcpRuntimeServerStatus|fn mcpProjectionRedacted|fn mcpAuthorizationStatus|fn mcpNewTaskAccess/,
+  );
   assert.doesNotMatch(workbenchRoot, /workbench_mcp_configuration/);
   assert.doesNotMatch(workbenchRoot, /pub const McpConfigurationFileStore/);
   assert.doesNotMatch(workbenchRoot, /pub const McpManagementOutcome/);

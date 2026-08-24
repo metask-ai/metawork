@@ -3,3 +3,4 @@
 
 pub const configuration = @import("product_mcp_configuration");
 pub const state = @import("product_mcp_state");
+pub const view = @import("product_mcp_view");
