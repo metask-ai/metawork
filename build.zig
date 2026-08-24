@@ -50,6 +50,7 @@ pub fn build(b: *std.Build) void {
     addMcpCatalogTests(b, test_modules, bundle.link_libc);
     addMcpConfigurationTests(b, test_modules, bundle.link_libc);
     addProductMcpStateTests(b, test_modules, bundle.link_libc);
+    addProductMcpPolicyTests(b, test_modules, bundle.link_libc);
     addProductMcpViewTests(b, test_modules, bundle.link_libc);
     addMcpPlatformTests(b, test_modules, bundle.link_libc);
     addMcpOauthTests(b, test_modules, bundle.link_libc);
@@ -104,6 +105,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-skill-enablement", .root_module = test_modules.workbench_skill_enablement },
         .{ .name = "metawork-product-mcp-configuration", .root_module = test_modules.product_mcp_configuration },
         .{ .name = "metawork-product-mcp-state", .root_module = test_modules.product_mcp_state },
+        .{ .name = "metawork-product-mcp-policy", .root_module = test_modules.product_mcp_policy },
         .{ .name = "metawork-product-mcp-view", .root_module = test_modules.product_mcp_view },
         .{ .name = "metawork-mcp-platform", .root_module = test_modules.mcp_platform },
         .{ .name = "metawork-mcp-oauth", .root_module = test_modules.mcp_oauth },
@@ -227,6 +229,7 @@ const WiredModules = struct {
     product_mcp: *std.Build.Module,
     product_mcp_configuration: *std.Build.Module,
     product_mcp_state: *std.Build.Module,
+    product_mcp_policy: *std.Build.Module,
     product_mcp_view: *std.Build.Module,
     workbench_task_persistence: *std.Build.Module,
     workbench_checkpoint_store: *std.Build.Module,
@@ -367,6 +370,23 @@ fn addProductMcpStateTests(
     const tests = b.addTest(.{
         .name = "metawork-product-mcp-state",
         .root_module = modules.product_mcp_state,
+    });
+    step.dependOn(&b.addRunArtifact(tests).step);
+}
+
+fn addProductMcpPolicyTests(
+    b: *std.Build,
+    modules: WiredModules,
+    link_libc: bool,
+) void {
+    const step = b.step(
+        "test-product-mcp-policy",
+        "Run Product MCP policy and state-transition tests",
+    );
+    modules.product_mcp_policy.link_libc = link_libc;
+    const tests = b.addTest(.{
+        .name = "metawork-product-mcp-policy",
+        .root_module = modules.product_mcp_policy,
     });
     step.dependOn(&b.addRunArtifact(tests).step);
 }
@@ -899,6 +919,15 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     product_mcp_state.addImport("metawork_agent", agent);
     product_mcp_state.addImport("product_mcp_configuration", mcp_configuration);
     product_mcp.addImport("product_mcp_state", product_mcp_state);
+    const product_mcp_policy = b.createModule(.{
+        .root_source_file = b.path("src/product/mcp/policy.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    product_mcp_policy.addImport("metawork_agent", agent);
+    product_mcp_policy.addImport("product_mcp_configuration", mcp_configuration);
+    product_mcp_policy.addImport("product_mcp_state", product_mcp_state);
+    product_mcp.addImport("product_mcp_policy", product_mcp_policy);
     const product_mcp_view = b.createModule(.{
         .root_source_file = b.path("src/product/mcp/view.zig"),
         .target = target,
@@ -1095,6 +1124,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .product_mcp = product_mcp,
         .product_mcp_configuration = mcp_configuration,
         .product_mcp_state = product_mcp_state,
+        .product_mcp_policy = product_mcp_policy,
         .product_mcp_view = product_mcp_view,
         .workbench_task_persistence = task_persistence,
         .workbench_checkpoint_store = checkpoint_store,

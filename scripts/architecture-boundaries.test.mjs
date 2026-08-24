@@ -199,6 +199,7 @@ test("Product MCP kernels have one physical home and remain Workbench-held", () 
   const productMcp = read("src/product/mcp.zig");
   const configuration = read("src/product/mcp/configuration.zig");
   const state = read("src/product/mcp/state.zig");
+  const policy = read("src/product/mcp/policy.zig");
   const view = read("src/product/mcp/view.zig");
   const workbenchRoot = read("src/workbench.zig");
   const workbenchProjection = read("src/workbench/projection.zig");
@@ -211,6 +212,7 @@ test("Product MCP kernels have one physical home and remain Workbench-held", () 
   );
   assert.match(productMcp, /@import\("product_mcp_configuration"\)/);
   assert.match(productMcp, /@import\("product_mcp_state"\)/);
+  assert.match(productMcp, /@import\("product_mcp_policy"\)/);
   assert.match(productMcp, /@import\("product_mcp_view"\)/);
   assert.match(configuration, /@import\("agent_mcp_http_protocol"\)/);
   assert.doesNotMatch(configuration, /@import\("metawork_agent"\)/);
@@ -229,6 +231,30 @@ test("Product MCP kernels have one physical home and remain Workbench-held", () 
   }
   assert.match(state, /pub fn mcpRefreshDelayMs/);
   assert.match(state, /pub fn mcpRefreshDeadlineMs/);
+  // Product MCP policy prepares Agent-owned allowlist values and returns
+  // borrowed Selection facts, but never owns an Agent runtime or worker.
+  assert.match(policy, /@import\("metawork_agent"\)/);
+  assert.match(policy, /@import\("product_mcp_configuration"\)/);
+  assert.match(policy, /@import\("product_mcp_state"\)/);
+  assert.doesNotMatch(
+    policy,
+    /McpRefreshJob|workbench_executor|std\.Thread|pub const Workbench|createMcpAdmissionSelection|commitPrepared|bumpRevision|mcp_refresh_timer/,
+  );
+  for (const name of [
+    "validAuthorizationTransition",
+    "serverMutationBusy",
+    "preparePendingReauthorization",
+    "serverToolsForAdmission",
+    "buildOauthRefreshBinding",
+    "buildRefreshAllowlists",
+    "replaceAdmission",
+    "blockAdmissionForCurrentState",
+    "nextOauthExpiry",
+    "selectionForNewTask",
+    "recoveryGeneration",
+  ]) {
+    assert.match(policy, new RegExp(`pub fn ${name}\\b`));
+  }
   assert.match(view, /@import\("product_mcp_configuration"\)/);
   assert.match(view, /@import\("product_mcp_state"\)/);
   assert.doesNotMatch(view, /@import\("metawork_agent"\)/);
@@ -242,6 +268,19 @@ test("Product MCP kernels have one physical home and remain Workbench-held", () 
   );
   assert.match(build, /addImport\("metawork_product_mcp", product_mcp\)/);
   assert.match(build, /src\/product\/mcp\/view\.zig/);
+  assert.match(build, /src\/product\/mcp\/policy\.zig/);
+  assert.match(
+    build,
+    /product_mcp_policy\.addImport\("metawork_agent", agent\)/,
+  );
+  assert.match(
+    build,
+    /product_mcp_policy\.addImport\("product_mcp_configuration", mcp_configuration\)/,
+  );
+  assert.match(
+    build,
+    /product_mcp_policy\.addImport\("product_mcp_state", product_mcp_state\)/,
+  );
   assert.match(
     build,
     /product_mcp_view\.addImport\("product_mcp_configuration", mcp_configuration\)/,
@@ -251,17 +290,37 @@ test("Product MCP kernels have one physical home and remain Workbench-held", () 
     /product_mcp_view\.addImport\("product_mcp_state", product_mcp_state\)/,
   );
   assert.match(build, /"test-product-mcp-view"/);
+  assert.match(build, /"test-product-mcp-policy"/);
   assert.match(build, /"Workbench snapshot serializer"/);
   assert.match(
     workbenchProjection,
     /const product_mcp = @import\("metawork_product_mcp"\)/,
   );
   assert.match(workbenchProjection, /const mcp_state = product_mcp\.state/);
+  assert.match(workbenchProjection, /const mcp_policy = product_mcp\.policy/);
   assert.match(workbenchProjection, /const mcp_view = product_mcp\.view/);
   assert.match(workbenchProjection, /mcp_view\.writeProjection/);
   assert.doesNotMatch(
     workbenchProjection,
     /fn mcpAvailability|fn mcpRuntimeServerStatus|fn mcpProjectionRedacted|fn mcpAuthorizationStatus|fn mcpNewTaskAccess/,
+  );
+  assert.doesNotMatch(
+    workbenchProjection,
+    /fn validMcpAuthorizationTransition|fn mcpServerMutationBusy|fn mcpPendingReauthorization|fn mcpScopeSetAddsRequirement|fn prepareMcpPendingReauthorization|fn installMcpPendingReauthorization|fn mcpServerToolsForAdmission|fn buildMcpOauthRefreshBinding|fn buildMcpRefreshAllowlists|fn mcpExpectedGenerationMatches|fn replaceMcpAdmission|fn blockMcpAdmissionForCurrentState|fn recoveryMcpGeneration/,
+  );
+  for (const name of [
+    "commitMcpMutation",
+    "mcpAdmissionForTarget",
+    "rearmMcpRefreshTimerNoFail",
+    "commitMcpRefreshJobNoFail",
+    "executeMcpRefreshJob",
+    "cancelMcpRefreshJob",
+  ]) {
+    assert.match(workbenchProjection, new RegExp(`fn ${name}\\b`));
+  }
+  assert.match(
+    workbenchProjection,
+    /agent_runtime\.createMcpAdmissionSelection/,
   );
   assert.doesNotMatch(workbenchRoot, /workbench_mcp_configuration/);
   assert.doesNotMatch(workbenchRoot, /pub const McpConfigurationFileStore/);
