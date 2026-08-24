@@ -271,6 +271,7 @@ test("Product Task kernels have one physical home without taking the executor", 
   const build = read("build.zig");
   const productTask = read("src/product/task.zig");
   const taskState = read("src/product/task/state.zig");
+  const taskPolicy = read("src/product/task/policy.zig");
   const projection = read("src/workbench/projection.zig");
   const executor = read("src/workbench/executor.zig");
   const workbenchRoot = read("src/workbench.zig");
@@ -287,6 +288,7 @@ test("Product Task kernels have one physical home without taking the executor", 
     "recovery",
     "recovery_job",
     "state",
+    "policy",
   ]) {
     assert.match(
       productTask,
@@ -308,6 +310,7 @@ test("Product Task kernels have one physical home without taking the executor", 
   assert.doesNotMatch(recoveryJob, /workbench_executor|@import\("metawork_workbench"\)/);
   assert.match(build, /src\/product\/task\/recovery_job\.zig/);
   assert.match(build, /src\/product\/task\/state\.zig/);
+  assert.match(build, /src\/product\/task\/policy\.zig/);
   assert.match(build, /projection\.addImport\("metawork_product_task", product_task\)/);
   assert.match(build, /app\.addImport\("metawork_product_task", product_task\)/);
 
@@ -341,6 +344,28 @@ test("Product Task kernels have one physical home without taking the executor", 
   assert.match(projection, /agent_runtime\.takeEvent\(\)/);
   assert.match(projection, /task_model\.applyEvent\(/);
   assert.match(projection, /fn taskEventProjection\(/);
+  for (const policyFn of [
+    "classifyAgentTerminal",
+    "classifyCompactTerminal",
+    "classifyBeginFailure",
+    "decisionForSignal",
+    "checkpointFailureAttempt",
+    "hasActiveOperation",
+    "checkpointMatchesCurrentHistory",
+    "foldTerminalDisposition",
+  ]) {
+    assert.match(taskPolicy, new RegExp(`pub fn ${policyFn}\\(`));
+    assert.doesNotMatch(projection, new RegExp(`fn ${policyFn}\\(`));
+  }
+  assert.match(taskPolicy, /@import\("product_task_state"\)/);
+  assert.match(taskPolicy, /@import\("metawork_agent"\)/);
+  assert.doesNotMatch(
+    taskPolicy,
+    /Workbench|workbench_executor|std\.Thread|commitTaskState|bumpRevision|agent_runtime\.takeEvent|@import\("(?:metawork_app|metawork_bridge|native_sdk|metask_agentcore)"\)/,
+  );
+  assert.match(projection, /fn requestRunTermination\(/);
+  assert.match(projection, /fn commitTerminal\(/);
+  assert.match(projection, /fn commitCompactProductTerminal\(/);
   assert.match(executor, /identity: \*anyopaque,[\s\S]*context: \*anyopaque,/);
   assert.match(executor, /if \(item\.identity != identity\) continue;/);
 });

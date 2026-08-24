@@ -94,7 +94,7 @@ MCP 不形成第五个 Product owner。`src/product/mcp*` 只是 Workbench 持�
 
 `src/product/skill/catalog.zig` 是 Workbench 持有的共享 Product Skill value kernel：它把 Agent 公共 catalog projection、非零 selection revision 与有效 enablement policy 一次编译成 immutable bounded snapshot，供 Workspace current authority 与 Task pinned authority 共同消费。该源码归位不创建 Skill owner、线程或生命周期，也不把 catalog acquisition、policy mutation、Task admission 或 executor 迁入该模块。
 
-`src/product/task*` 拥有 Task aggregate、Run/Compact record、Agent event 的产品状态转换与 terminal event-drain gate，以及 persistence、checkpoint、execution binding、runtime attachment、deletion 与 recovery kernels。该物理子模块不取得 executor、Agent event pump、跨 Workspace/Account/MCP admission、durable commit、revision 或完整 snapshot 编排；组合对象只通过 callback-scoped projection capability 借出全局有界内存与 credential 清洗机制，不向 Task state 暴露自身或执行资源。
+`src/product/task*` 拥有 Task aggregate、Run/Compact record、Agent event 的产品状态转换与 terminal event-drain gate、terminal/interruption/lifecycle/recovery policy，以及 persistence、checkpoint、execution binding、runtime attachment、deletion 与 recovery kernels。该物理子模块不取得 executor、Agent event pump、跨 Workspace/Account/MCP admission、durable commit、revision 或完整 snapshot 编排；组合对象只通过 callback-scoped projection capability 借出全局有界内存与 credential 清洗机制，不向 Task state/policy 暴露自身或执行资源。
 
 ### 3.4 Agent 与 AgentCore
 

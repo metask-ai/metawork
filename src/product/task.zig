@@ -10,3 +10,4 @@ pub const deletion = @import("product_task_deletion");
 pub const recovery = @import("product_task_recovery");
 pub const recovery_job = @import("product_task_recovery_job");
 pub const state = @import("product_task_state");
+pub const policy = @import("product_task_policy");

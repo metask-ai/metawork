@@ -20,6 +20,7 @@ const task_deletion = product_task.deletion;
 const task_recovery = product_task.recovery;
 const task_recovery_job = product_task.recovery_job;
 const task_model = product_task.state;
+const task_policy = product_task.policy;
 const product_mcp = @import("metawork_product_mcp");
 const mcp_configuration = product_mcp.configuration;
 const mcp_state = product_mcp.state;
@@ -883,6 +884,25 @@ const isTerminalCompactPhase = task_model.isTerminalCompactPhase;
 const findRun = task_model.findRun;
 const findCompact = task_model.findCompact;
 const hasUnfinalizedTerminalEvents = task_model.hasUnfinalizedTerminalEvents;
+const pendingInterruption = task_policy.pendingInterruption;
+const pendingTerminationSignal = task_policy.pendingTerminationSignal;
+const pendingExternalInterruption = task_policy.pendingExternalInterruption;
+const compactCauseForInterruption = task_policy.compactCauseForInterruption;
+const closeFailureCompletion = task_policy.closeFailureCompletion;
+const classifyAgentTerminal = task_policy.classifyAgentTerminal;
+const decisionForSignal = task_policy.decisionForSignal;
+const lastTerminalFacts = task_policy.lastTerminalFacts;
+const currentRunPhase = task_policy.currentRunPhase;
+const hasActiveOperation = task_policy.hasActiveOperation;
+const lastFinalizedRunId = task_policy.lastFinalizedRunId;
+const latestCompactId = task_policy.latestCompactId;
+const continuationAvailable = task_policy.continuationAvailable;
+const taskLifecycle = task_policy.taskLifecycle;
+const recoveryAttachment = task_policy.recoveryAttachment;
+const recoveryOperation = task_policy.recoveryOperation;
+const checkpointMatchesCurrentHistory = task_policy.checkpointMatchesCurrentHistory;
+const foldTerminalDisposition = task_policy.foldTerminalDisposition;
+const checkpointFailureAttempt = task_policy.checkpointFailureAttempt;
 
 const TaskFailureRecord = struct {
     task_id: u64,
@@ -12599,16 +12619,6 @@ fn publishCheckpointFailure(
     postprocess.state.store(.failure_ready, .release);
 }
 
-fn checkpointFailureAttempt(failure: lifecycle.CheckpointFailure) CheckpointAttempt {
-    return switch (failure.reason) {
-        .cancelled => .cancelled,
-        .resource_limit => .resource_limit,
-        .io_failed => .io_failed,
-        .dependency_contract => .dependency_contract,
-        else => if (failure.stage == .describe) .describe_failed else .export_failed,
-    };
-}
-
 fn takeCheckpointRecord(
     success: *lifecycle.CheckpointSuccess,
     task_id: u64,
@@ -12677,35 +12687,11 @@ fn commitCompactTerminal(
     compact: *CompactRecord,
     result: *const lifecycle.CompactTerminalResult,
 ) void {
-    var cause: ?CompactCause = null;
-    const phase: CompactPhase = if (result.failure == .dependency_contract) failure: {
-        cause = .dependency_contract_failure;
-        break :failure .failed;
-    } else if (result.failure == .abi_status) failure: {
-        cause = if (result.abi_status == .resource_limit)
-            .resource_limit
-        else
-            .agent_failure;
-        break :failure .failed;
-    } else if (result.outcome) |outcome| switch (outcome) {
-        .compacted => .compacted,
-        .no_change => .no_change,
-        .degraded => .degraded,
-        .aborted => aborted: {
-            cause = if (result.interruption) |interruption|
-                compactCauseForInterruption(interruption)
-            else
-                .agent_failure;
-            break :aborted .aborted;
-        },
-    } else missing: {
-        cause = .dependency_contract_failure;
-        break :missing .failed;
-    };
+    const decision = task_policy.classifyCompactTerminal(result);
     _ = commitCompactProductTerminal(
         compact,
-        phase,
-        cause,
+        decision.phase,
+        decision.cause,
         result.session_disposition_at_completion,
         .{
             .input_tokens = result.input_tokens,
@@ -12883,25 +12869,6 @@ fn consumeLifecycleTermination(dispatch: RunTerminationDispatch, run_id: u64) vo
     }
 }
 
-fn pendingInterruption(interruption: lifecycle.ExternalInterruption) PendingInterruption {
-    return switch (interruption) {
-        .user_cancel => .user_cancel,
-        .session_close => .session_close,
-        .app_shutdown => .app_shutdown,
-        .timeout => .timeout,
-    };
-}
-
-fn pendingTerminationSignal(run: *const RunRecord) lifecycle.TerminationSignal {
-    return .{ .interrupted = switch (run.pending_termination.load(.acquire)) {
-        .none => unreachable,
-        .user_cancel => .user_cancel,
-        .timeout => .timeout,
-        .session_close => .session_close,
-        .app_shutdown => .app_shutdown,
-    } };
-}
-
 fn cancelRunJob(context: *anyopaque) void {
     const job: *RunJobContext = @ptrCast(@alignCast(context));
     defer job.destroy();
@@ -12991,16 +12958,6 @@ fn noChangeNotification(_: ?*anyopaque) bool {
     return true;
 }
 
-fn closeFailureCompletion(
-    disposition: lifecycle.SessionDisposition,
-) CloseCompletion {
-    return switch (disposition) {
-        .reusable => .failed_reusable,
-        .poisoned => .failed_poisoned,
-        .closing => .failed_closing,
-    };
-}
-
 fn agentProvider(provider: Provider) lifecycle.ProviderKind {
     return switch (provider) {
         .anthropic => .anthropic,
@@ -13078,16 +13035,6 @@ fn agentPermissionChoice(choice: PermissionChoice) lifecycle.PermissionChoice {
     };
 }
 
-fn phaseForOutcome(outcome: RunOutcome) RunPhase {
-    return switch (outcome) {
-        .completed => .completed,
-        .stopped => .stopped,
-        .cancelled => .cancelled,
-        .interrupted => .interrupted,
-        .failed, .dependency_contract_failure => .failed,
-    };
-}
-
 fn commitTerminal(
     run: *RunRecord,
     phase: RunPhase,
@@ -13120,12 +13067,6 @@ fn commitTerminal(
     return false;
 }
 
-const TerminalDecision = struct {
-    phase: RunPhase,
-    outcome: RunOutcome,
-    cause: ?RunCause,
-};
-
 fn commitAgentTerminal(run: *RunRecord, result: *const lifecycle.TerminalResult) bool {
     const decision = classifyAgentTerminal(result);
     return commitTerminal(
@@ -13139,162 +13080,17 @@ fn commitAgentTerminal(run: *RunRecord, result: *const lifecycle.TerminalResult)
     );
 }
 
-fn classifyAgentTerminal(result: *const lifecycle.TerminalResult) TerminalDecision {
-    if (result.failure == .dependency_contract) return .{
-        .phase = .failed,
-        .outcome = .dependency_contract_failure,
-        .cause = .dependency_contract_failure,
-    };
-    if (result.failure == .abi_status) return .{
-        .phase = .failed,
-        .outcome = .failed,
-        .cause = if (result.termination_signal) |signal|
-            causeForSignal(signal)
-        else if (result.abi_status) |status|
-            switch (status) {
-                .stale_catalog => .stale_catalog,
-                .skill_not_found => .skill_not_found,
-                .invalid_skill_arguments => .invalid_skill_arguments,
-                .skill_policy_violation => .skill_policy_violation,
-                .skill_unavailable => .skill_unavailable,
-                .resource_limit, .checkpoint_budget_required => .resource_limit,
-                else => null,
-            }
-        else
-            null,
-    };
-    if (result.stop_reason) |reason| return switch (reason) {
-        .end_turn => .{ .phase = .completed, .outcome = .completed, .cause = null },
-        .max_turns, .tool_loop => .{ .phase = .stopped, .outcome = .stopped, .cause = null },
-        .aborted => decisionForSignal(result.termination_signal),
-        .tool_error, .api_error => .{
-            .phase = .failed,
-            .outcome = .failed,
-            .cause = if (result.termination_signal) |signal| causeForSignal(signal) else .agent_failure,
-        },
-        .checkpoint_budget_exhausted, .checkpoint_resource_limit => .{
-            .phase = .stopped,
-            .outcome = .stopped,
-            .cause = .resource_limit,
-        },
-    };
-    if (result.termination_signal != null and result.raw_status_code == null)
-        return decisionForSignal(result.termination_signal);
-    return .{
-        .phase = .failed,
-        .outcome = .dependency_contract_failure,
-        .cause = .dependency_contract_failure,
-    };
-}
-
-fn decisionForSignal(signal: ?lifecycle.TerminationSignal) TerminalDecision {
-    const value = signal orelse return .{ .phase = .failed, .outcome = .failed, .cause = null };
-    return switch (value) {
-        .interrupted => |interruption| switch (interruption) {
-            .user_cancel, .timeout => .{
-                .phase = .cancelled,
-                .outcome = .cancelled,
-                .cause = causeForSignal(value),
-            },
-            .session_close, .app_shutdown => .{
-                .phase = .interrupted,
-                .outcome = .interrupted,
-                .cause = causeForSignal(value),
-            },
-        },
-        .callback_failure,
-        .event_pump_failure,
-        .event_consumer_notification_failure,
-        => .{ .phase = .failed, .outcome = .failed, .cause = causeForSignal(value) },
-    };
-}
-
-fn causeForSignal(signal: lifecycle.TerminationSignal) RunCause {
-    return switch (signal) {
-        .interrupted => |interruption| switch (interruption) {
-            .user_cancel => .user_cancel,
-            .timeout => .timeout,
-            .session_close => .session_close,
-            .app_shutdown => .app_shutdown,
-        },
-        .callback_failure => |failure| switch (failure) {
-            .event => .event_pipeline_failure,
-            .ui => .ui_pipeline_failure,
-        },
-        .event_pump_failure => |failure| switch (failure) {
-            .event_too_large, .capacity => .queue_capacity_failure,
-            .invalid_event, .allocation, .consumer_rejected => .event_pipeline_failure,
-        },
-        .event_consumer_notification_failure => .event_pipeline_failure,
-    };
-}
-
 fn commitBeginFailure(run: *RunRecord, failure: lifecycle.BeginRunFailure) void {
-    const pending = run.pending_termination.load(.acquire);
-    if (pending != .none) {
-        const decision = decisionForSignal(pendingTerminationSignal(run));
-        _ = commitTerminal(
-            run,
-            decision.phase,
-            decision.outcome,
-            decision.cause,
-            failure.session_disposition,
-            "",
-            false,
-        );
-        return;
-    }
-    if (failure.err == error.SessionClosing) {
-        _ = commitTerminal(
-            run,
-            .interrupted,
-            .interrupted,
-            .session_close,
-            failure.session_disposition,
-            "",
-            false,
-        );
-        return;
-    }
+    const decision = task_policy.classifyBeginFailure(run, failure);
     _ = commitTerminal(
         run,
-        .failed,
-        .dependency_contract_failure,
-        .dependency_contract_failure,
+        decision.phase,
+        decision.outcome,
+        decision.cause,
         failure.session_disposition,
         "",
         false,
     );
-}
-
-fn lastTerminalFacts(runs: []?RunRecord) ?ProductTerminalFacts {
-    var latest: ?*const RunRecord = null;
-    for (runs) |*entry| {
-        const run = &(entry.* orelse continue);
-        if (latest == null or run.id > latest.?.id) latest = run;
-    }
-    return if (latest) |run| productTerminalFacts(run) else null;
-}
-
-fn currentRunPhase(view: *const TaskView) ?RunPhase {
-    const run = findRun(view.durable.runs, view.runtime.active_run_id) orelse return null;
-    const phase = runPhase(run);
-    return if (isTerminalPhase(phase)) null else phase;
-}
-
-fn hasActiveOperation(view: *const TaskView) bool {
-    return switch (view.runtime.active_operation) {
-        .none => false,
-        .run => |id| if (findRun(view.durable.runs, id)) |run|
-            !isTerminalPhase(runPhase(run))
-        else
-            false,
-        .compact => |id| if (findCompact(view.durable.compacts, id)) |compact|
-            compactTerminalPayload(compact) == null
-        else
-            false,
-        .restore => true,
-    };
 }
 
 fn hasSkillArchiveExtension(path: []const u8) bool {
@@ -13309,26 +13105,6 @@ fn privateDirectoryPermissions() std.Io.File.Permissions {
 
 fn privateFilePermissions() std.Io.File.Permissions {
     return if (builtin.os.tag == .windows) .default_file else .fromMode(0o600);
-}
-
-fn lastFinalizedRunId(view: *const TaskView) ?u64 {
-    var latest: u64 = 0;
-    for (view.durable.runs) |*entry| {
-        const run = &(entry.* orelse continue);
-        if (!run.event_stream_finalized or productTerminalFacts(run) == null) continue;
-        latest = @max(latest, run.id);
-    }
-    return if (latest == 0) null else latest;
-}
-
-fn latestCompactId(view: *const TaskView) u64 {
-    var latest: u64 = 0;
-    for (view.durable.compacts) |*entry| {
-        const compact = &(entry.* orelse continue);
-        if (compactTerminalPayload(compact) == null) continue;
-        latest = @max(latest, compact.id);
-    }
-    return latest;
 }
 
 fn cancelTaskCheckpoints(task: *TaskView) void {
@@ -13356,76 +13132,6 @@ fn cancelTaskAutomaticTitles(task: *TaskView) void {
     }
 }
 
-fn pendingExternalInterruption(
-    compact: *const CompactRecord,
-) lifecycle.ExternalInterruption {
-    return switch (compact.pending_interruption.load(.acquire)) {
-        .none => unreachable,
-        .user_cancel => .user_cancel,
-        .timeout => .timeout,
-        .session_close => .session_close,
-        .app_shutdown => .app_shutdown,
-    };
-}
-
-fn compactCauseForInterruption(
-    interruption: lifecycle.ExternalInterruption,
-) CompactCause {
-    return switch (interruption) {
-        .user_cancel, .timeout => .user_cancel,
-        .session_close => .session_close,
-        .app_shutdown => .app_shutdown,
-    };
-}
-
-fn continuationAvailable(capability: ContinuationCapability) bool {
-    return switch (capability) {
-        .available => true,
-        .unavailable => false,
-    };
-}
-
-fn taskLifecycle(task: *const TaskView) TaskLifecycle {
-    if (task.deletion == .deleting) return .closing;
-    return switch (task.runtime.attachment) {
-        .closing => .closing,
-        .detached, .attached => .open,
-    };
-}
-
-fn recoveryAttachment(attachment: task_runtime.Attachment) task_recovery.Attachment {
-    return switch (attachment) {
-        .detached => .detached,
-        .closing => .closing,
-        .attached => |attached| switch (attached.health) {
-            .available => .attached_available,
-            .session_poisoned => .attached_session_poisoned,
-        },
-    };
-}
-
-fn recoveryOperation(operation: ActiveOperation) task_recovery.Operation {
-    return switch (operation) {
-        .none => .none,
-        .run => .run,
-        .compact => .compact,
-        .restore => .restore,
-    };
-}
-
-fn checkpointMatchesCurrentHistory(
-    task: *const TaskView,
-    record: checkpoint_record.Record,
-) bool {
-    if (record.session.last_run_id != (lastFinalizedRunId(task) orelse 0) or
-        record.session.last_compact_id != latestCompactId(task))
-        return false;
-    return switch (record.anchor.terminal) {
-        .run => |id| id == record.session.last_run_id,
-        .compact => |id| id == record.session.last_compact_id,
-    };
-}
-
 fn checkpointIdentityEqual(
     left: checkpoint_store.Identity,
     right: checkpoint_store.Identity,
@@ -13439,18 +13145,6 @@ fn checkpointIdentityEqual(
 fn optionalU64Equal(left: ?u64, right: ?u64) bool {
     if (left == null or right == null) return left == null and right == null;
     return left.? == right.?;
-}
-
-fn foldTerminalDisposition(
-    task: *TaskView,
-    disposition: lifecycle.SessionDisposition,
-) void {
-    const attached = task.runtime.attached() orelse return;
-    switch (disposition) {
-        .reusable => attached.health = .available,
-        .poisoned => attached.health = .session_poisoned,
-        .closing => std.debug.assert(task.runtime.beginClosing()),
-    }
 }
 
 fn workspacePathWithin(parent: []const u8, child: []const u8) bool {
@@ -16901,85 +16595,6 @@ test "canonical prompt title and terminal diagnostic never retain the registered
     );
 }
 
-test "Agent terminal facts map once into Workbench product outcomes" {
-    var terminal = lifecycle.TerminalResult{
-        .allocator = std.testing.allocator,
-        .diagnostic_storage = &.{},
-        .diagnostic_len = 0,
-        .diagnostic_truncated = false,
-        .abi_status = .ok,
-        .raw_status_code = @intFromEnum(lifecycle.Status.ok),
-        .stop_reason = .end_turn,
-        .raw_stop_reason_code = @intFromEnum(lifecycle.StopReason.end_turn),
-        .abort_status = null,
-        .raw_abort_status_code = null,
-        .termination_signal = null,
-        .failure = null,
-        .session_disposition_at_completion = .reusable,
-    };
-    try std.testing.expectEqual(
-        TerminalDecision{ .phase = .completed, .outcome = .completed, .cause = null },
-        classifyAgentTerminal(&terminal),
-    );
-
-    terminal.abi_status = .checkpoint_budget_required;
-    terminal.raw_status_code = @intFromEnum(lifecycle.Status.checkpoint_budget_required);
-    terminal.stop_reason = null;
-    terminal.raw_stop_reason_code = null;
-    terminal.failure = .abi_status;
-    try std.testing.expectEqual(
-        TerminalDecision{ .phase = .failed, .outcome = .failed, .cause = .resource_limit },
-        classifyAgentTerminal(&terminal),
-    );
-
-    terminal.abi_status = .ok;
-    terminal.raw_status_code = @intFromEnum(lifecycle.Status.ok);
-    terminal.stop_reason = .checkpoint_budget_exhausted;
-    terminal.raw_stop_reason_code = @intFromEnum(lifecycle.StopReason.checkpoint_budget_exhausted);
-    terminal.failure = null;
-    try std.testing.expectEqual(
-        TerminalDecision{ .phase = .stopped, .outcome = .stopped, .cause = .resource_limit },
-        classifyAgentTerminal(&terminal),
-    );
-
-    terminal.abi_status = null;
-    terminal.raw_status_code = null;
-    terminal.stop_reason = null;
-    terminal.raw_stop_reason_code = null;
-    terminal.termination_signal = .{ .interrupted = .user_cancel };
-    try std.testing.expectEqual(
-        TerminalDecision{ .phase = .cancelled, .outcome = .cancelled, .cause = .user_cancel },
-        classifyAgentTerminal(&terminal),
-    );
-
-    terminal.raw_status_code = @intFromEnum(lifecycle.Status.callback_failed);
-    terminal.failure = .abi_status;
-    terminal.termination_signal = .{ .callback_failure = .ui };
-    try std.testing.expectEqual(
-        TerminalDecision{ .phase = .failed, .outcome = .failed, .cause = .ui_pipeline_failure },
-        classifyAgentTerminal(&terminal),
-    );
-
-    terminal.failure = .dependency_contract;
-    try std.testing.expectEqual(
-        TerminalDecision{
-            .phase = .failed,
-            .outcome = .dependency_contract_failure,
-            .cause = .dependency_contract_failure,
-        },
-        classifyAgentTerminal(&terminal),
-    );
-
-    terminal.failure = null;
-    terminal.stop_reason = .api_error;
-    terminal.raw_stop_reason_code = @intFromEnum(lifecycle.StopReason.api_error);
-    terminal.termination_signal = null;
-    try std.testing.expectEqual(
-        TerminalDecision{ .phase = .failed, .outcome = .failed, .cause = .agent_failure },
-        classifyAgentTerminal(&terminal),
-    );
-}
-
 test "Renderer transport failures never own Agent Run termination" {
     const cases = [_]struct {
         stage: TransportFailureStage,
@@ -17939,14 +17554,6 @@ test "Workbench rejects cross-session routes and usage overflow" {
     var overflow = try testEnvelope(3, 7, "{\"usage\":{\"input_tokens\":1}}");
     defer overflow.deinit();
     try std.testing.expectError(error.ProjectionCapacity, workbench.applyEvent(&overflow));
-}
-
-test "Workbench outcomes map to truthful terminal product phases" {
-    try std.testing.expectEqual(RunPhase.completed, phaseForOutcome(.completed));
-    try std.testing.expectEqual(RunPhase.stopped, phaseForOutcome(.stopped));
-    try std.testing.expectEqual(RunPhase.cancelled, phaseForOutcome(.cancelled));
-    try std.testing.expectEqual(RunPhase.interrupted, phaseForOutcome(.interrupted));
-    try std.testing.expectEqual(RunPhase.failed, phaseForOutcome(.dependency_contract_failure));
 }
 
 test "MCP runtime OAuth failure durably reauthorizes and preserves scope step-up" {
