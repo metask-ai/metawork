@@ -48,6 +48,7 @@ pub const FailureReason = enum {
     checkpoint_unsupported,
     checkpoint_incompatible,
     logical_session_conflict,
+    mcp_not_refreshed,
     cancelled,
     io_failed,
     host_out_of_memory,
@@ -350,6 +351,7 @@ fn failureForStatus(status: sdk.Status, local: LocalSourceFailure) Failure {
         .checkpoint_unsupported => reusableFailure(.restore, .checkpoint_unsupported),
         .checkpoint_incompatible => reusableFailure(.restore, .checkpoint_incompatible),
         .logical_session_conflict => reusableFailure(.restore, .logical_session_conflict),
+        .mcp_not_refreshed => reusableFailure(.restore, .mcp_not_refreshed),
         .checkpoint_io => switch (local) {
             .cancelled => reusableFailure(.restore, .cancelled),
             .io_failed => reusableFailure(.restore, .io_failed),
@@ -367,7 +369,6 @@ fn failureForStatus(status: sdk.Status, local: LocalSourceFailure) Failure {
         .skill_policy_violation,
         .skill_unavailable,
         .stale_compact,
-        .mcp_not_refreshed,
         .invalid_mcp_selection,
         .completion_unsupported_response,
         .skill_catalog_incomplete,
@@ -479,6 +480,7 @@ test "restore status mapping keeps checkpoint failures retryable" {
         .{ .status = .checkpoint_unsupported, .reason = .checkpoint_unsupported },
         .{ .status = .checkpoint_incompatible, .reason = .checkpoint_incompatible },
         .{ .status = .logical_session_conflict, .reason = .logical_session_conflict },
+        .{ .status = .mcp_not_refreshed, .reason = .mcp_not_refreshed },
     };
     for (cases) |case| {
         const failure = failureForStatus(case.status, .none);

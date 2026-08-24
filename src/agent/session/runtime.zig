@@ -1391,6 +1391,7 @@ fn mapRestoreFailure(failure: checkpoint_restore.Failure) Error {
         .checkpoint_unsupported => error.CheckpointUnsupported,
         .checkpoint_incompatible => error.CheckpointIncompatible,
         .logical_session_conflict => error.LogicalSessionConflict,
+        .mcp_not_refreshed => error.McpNotRefreshed,
         .cancelled => error.RestoreCancelled,
         .io_failed => error.RestoreIoFailed,
         .dependency_contract => error.RestoreContractFailed,
@@ -1401,6 +1402,16 @@ fn mapRestoreFailure(failure: checkpoint_restore.Failure) Error {
         .host_out_of_memory,
         => error.RestoreFailed,
     };
+}
+
+test "restore preserves typed MCP freshness rejection" {
+    try std.testing.expectEqual(
+        error.McpNotRefreshed,
+        mapRestoreFailure(.{
+            .stage = .restore,
+            .reason = .mcp_not_refreshed,
+        }),
+    );
 }
 
 fn mapMcpCatalogError(err: anyerror) Error {
