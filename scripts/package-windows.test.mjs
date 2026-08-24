@@ -44,7 +44,7 @@ function guiExecutableBytes(size = 512) {
 test("Windows installer name is derived from app.zon", () => {
   assert.equal(
     windowsInstallerArtifactName,
-    "metawork-0.1.1-windows-x64-setup.exe",
+    "metawork-0.1.3-windows-x64-setup.exe",
   );
   assert.equal(windowsFileVersion("0.1.1"), "0.1.1.0");
   assert.equal(windowsFileVersion("1.2.3-beta.1"), "1.2.3.0");

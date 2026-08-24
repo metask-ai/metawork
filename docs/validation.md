@@ -57,16 +57,16 @@ candidate probe、真实桌面验收、签名、公证和发布验证不进入 `
 
 ### 定向入口
 
-| 范围                      | 入口                                                              | 使用条件                                                                              |
-| ------------------------- | ----------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| 单个 Node/Renderer suite  | `node --experimental-strip-types --test scripts/<suite>.test.mjs` | Renderer、Bridge client、fixture 或工程脚本的单一失败模式                             |
-| Agent/Workbench lifecycle | `node scripts/run-lifecycle-tests.mjs`                            | Session、Executor、恢复、并发或 shutdown                                              |
-| 单个 lifecycle 不变量     | 设置 `LIFECYCLE_TEST_FILTER` 后运行 lifecycle 入口                | 只缩小开发反馈；提交前仍运行完整关联 root                                             |
-| Storage foundation        | `zig build test-storage`                                          | SQL contract、conformance、direct SQLite backend、migration、文件恢复与 engine profile |
+| 范围                      | 入口                                                                            | 使用条件                                                                                    |
+| ------------------------- | ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| 单个 Node/Renderer suite  | `node --experimental-strip-types --test scripts/<suite>.test.mjs`               | Renderer、Bridge client、fixture 或工程脚本的单一失败模式                                   |
+| Agent/Workbench lifecycle | `node scripts/run-lifecycle-tests.mjs`                                          | Session、Executor、恢复、并发或 shutdown                                                    |
+| 单个 lifecycle 不变量     | 设置 `LIFECYCLE_TEST_FILTER` 后运行 lifecycle 入口                              | 只缩小开发反馈；提交前仍运行完整关联 root                                                   |
+| Storage foundation        | `zig build test-storage`                                                        | SQL contract、conformance、direct SQLite backend、migration、文件恢复与 engine profile      |
 | Account OAuth loopback    | `metawork-account-loopback` 与 `metawork-oauth-loopback-transport` module tests | Account callback policy/invalid budget，以及 Application listener/cancel/deadline/sink 组合 |
-| MCP owner                 | `build.zig` 中对应的 `test-mcp-*` step                            | configuration、OAuth、transport、Runtime、catalog、interop 或 Application composition |
-| AgentCore candidate       | staged verifier 与对应 `run-agentcore-*-probe.mjs`                | 新 artifact 或尚未进入合同的外部行为                                                  |
-| 平台能力                  | 本文后续 Windows/macOS 入口                                       | 真实窗口、系统 credential、签名、公证或平台生命周期                                   |
+| MCP owner                 | `build.zig` 中对应的 `test-mcp-*` step                                          | configuration、OAuth、transport、Runtime、catalog、interop 或 Application composition       |
+| AgentCore candidate       | staged verifier 与对应 `run-agentcore-*-probe.mjs`                              | 新 artifact 或尚未进入合同的外部行为                                                        |
+| 平台能力                  | 本文后续 Windows/macOS 入口                                                     | 真实窗口、系统 credential、签名、公证或平台生命周期                                         |
 
 `build.zig` 是正式 Zig test graph 的注册真源；architecture guard 必须证明所有 active external test root 已接线。`scripts/*.test.mjs` 由总入口自动发现，不维护文件数量或手工清单。
 
@@ -89,8 +89,8 @@ Storage foundation 的自动化必须同时覆盖内存 target 与测试显式�
 ### AgentCore target baseline
 
 - **规范**：[高层架构](architecture.md)、[ABI v1 消费合同](agentcore-abi-v1.md)。
-- **证据**：Windows x86_64 GNU 与 macOS arm64 均锁定 clean source commit `1183550f15b4eef27799076ee0908e9667d849a0` 的 target artifact；repository lock 与 bundle tests 验证 manifest/target/ABI identity。各平台 vertical 结果以本节对应平台记录为准。
-- **结论**：两平台 artifact 均为 ABI v1 revision 9、280-byte table、required capabilities `0x3fffff`。两份 lock、artifact 和平台结果不能互相替代。
+- **证据**：Windows x86_64 GNU、macOS arm64 与 macOS x86_64 均锁定 clean source commit `1183550f15b4eef27799076ee0908e9667d849a0` 的 target artifact；repository lock 与 bundle tests 验证 manifest/target/ABI identity。各 target vertical 结果以本节对应平台记录为准。
+- **结论**：三个 target artifact 均为 ABI v1 revision 9、280-byte table、required capabilities `0x3fffff`。三份 lock、artifact 和 target 结果不能互相替代。
 
 2026-08-13 的 Windows staged run-state probe 可由 Git object `51e0fcc847e7b832b628f6c64183525dd8300710` 定位：Host Run ID `7` 的 callback identity 与 `run_state.run_id` 一致，首序号为 `1`，并观察到 `starting → generating → finalizing → completed`。结论已进入 ABI 合同和 Workbench 回归，因此 active tree 不再保留该一次性 probe。
 
@@ -134,12 +134,14 @@ architecture guard 必须保持 `PlatformServices.context` 零 allowlist。原�
 
 ```bash
 node scripts/setup-macos-local-signing.mjs setup
+node scripts/stage-agentcore-bundle.mjs /absolute/path/to/aarch64-macos-bundle
+node scripts/stage-agentcore-bundle.mjs /absolute/path/to/x86_64-macos-bundle
 npm run build:debug
 npm run build:release
 npm run package:macos
 ```
 
-跨平台开发入口与 Apple Development 签名规则由 `dev.mjs` 负责，setup 只复用该开发 owner；Developer ID、应用与 DMG 签名、公证、staple、Gatekeeper、Finder 左到右拖拽布局、磁盘映像及挂载内容的身份与完整性规则由 `package-macos.mjs` 负责。两个 owner 必须保持双向隔离。Native SDK 必须先生成未签名 `.app`；应用签名前必须把 64 × 64 托盘 PNG stage 到与运行时相对路径一致的 `Contents/Resources/assets/icons/tray-icon.png`，随后只执行一次 Developer ID 应用签名，并在同一入口检查格式、尺寸、源资产一致性、Renderer、metadata 与签名 policy。`package:macos` 只产出小写 `metawork-<version>-macos-arm64.dmg`，不生成 preview 或 ZIP。普通 check/test/build 不得访问个人证书、Finder 或 notary profile；`package:macos` 成功证明当前图形用户会话生成的可分发磁盘映像，不等于更新能力完成。
+跨平台开发入口与 Apple Development 签名规则由 `dev.mjs` 负责，setup 只复用该开发 owner；Developer ID、应用与 DMG 签名、公证、staple、Gatekeeper、Finder 左到右拖拽布局、磁盘映像及挂载内容的身份与完整性规则由 `package-macos.mjs` 负责。两个 owner 必须保持双向隔离。Native SDK 必须先按 resolved build target 从 `.agentcore/bundles/<target-id>` 生成未签名 `.app`；应用签名前必须把 64 × 64 托盘 PNG stage 到与运行时相对路径一致的 `Contents/Resources/assets/icons/tray-icon.png`，并以 `lipo` 确认主程序恰好为该 target 的单一架构，随后只执行一次 Developer ID 应用签名，并在同一入口检查格式、尺寸、源资产一致性、Renderer、metadata 与签名 policy。`package:macos` 默认 `all`，依次产出小写 `metawork-<version>-macos-arm64.dmg` 与 `metawork-<version>-macos-x64.dmg`；`npm run package:macos -- arm64` 或 `-- x64` 只产出所选单一架构。入口不得根据 last-stage state 推断架构，也不生成 Universal、preview 或 ZIP。普通 check/test/build 不得访问个人证书、Finder 或 notary profile；`package:macos` 成功证明当前图形用户会话生成的可分发磁盘映像，不等于更新能力完成。
 
 Keychain 跨重建授权稳定性当前为 **人工验收待完成**：在同一精确 commit 上让 Debug app 写入并读取 Account credential，完全退出并重新构建，再次恢复 Account，确认没有出现新的 Account Keychain 授权框。首次选择签名私钥产生的系统授权不属于 Account Keychain 失败。
 

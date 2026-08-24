@@ -86,14 +86,28 @@ xcrun notarytool store-credentials "metawork-notary" \
 不提供 `--password` 时 `notarytool` 才会使用安全提示。profile 验证成功后执行：
 
 ```bash
+node scripts/stage-agentcore-bundle.mjs /absolute/path/to/aarch64-macos-bundle
+node scripts/stage-agentcore-bundle.mjs /absolute/path/to/x86_64-macos-bundle
 npm run package:macos
 ```
 
+stage 入口按 manifest target 将两份 bundle 分别安装到 `.agentcore/bundles/aarch64-macos` 与 `.agentcore/bundles/x86_64-macos`；后一次 stage 不覆盖前一 target。构建从 resolved target 对应 bundle 直接消费其官方 `bindings/zig` package。AgentCore 发布物为压缩包时，先将其完整解压到仓库外的绝对目录，再把该目录交给 stage 入口。
+
+不带参数的 `package:macos` 等价于 `all`，按 arm64、x64 的固定顺序分别完成完整签名与公证，并输出两个 DMG。只构建一个架构时显式执行：
+
+```bash
+npm run package:macos -- arm64
+npm run package:macos -- x64
+npm run package:macos -- all
+```
+
+`arm64`、`x64` 与 `all` 是唯一有效选择；缺少所选 target 的 canonical bundle 时在访问签名 identity 前明确失败。发布架构不由最后一次 stage、Host 默认架构或环境变量决定。
+
 打包流程从 `security find-identity` 精确筛选唯一 Developer ID Application identity，再从所选证书的 subject `OU` 读取 Team ID 并复核 SHA-1 fingerprint。它构建 ReleaseFast、调用 Native SDK 生成未签名 `.app`、stage 完整原生资源，再以 `--options runtime --timestamp` 执行唯一一次应用签名。验证必须覆盖 Bundle ID、产品版本、Renderer 与托盘资源、Developer ID leaf authority、Team ID、Apple anchor、hardened runtime 和可信时间戳。
 
-签名验证通过后，入口把 `.app` 与指向 `/Applications` 的精确符号链接放入临时 staging root，使用系统 `hdiutil` 生成可写磁盘映像，并在当前 macOS 图形用户会话中通过 Finder 写入固定图标视图：`MetaWork.app` 位于左侧、`Applications` 位于右侧，使用固定窗口和图标尺寸并隐藏工具栏与状态栏。布局写入 `.DS_Store` 后，入口卸载临时映像并转换成最终 UDZO，再以同一 Developer ID Application identity 和可信时间戳签名 DMG。最终 `zig-out/package/metawork-<version>-macos-arm64.dmg` 直接通过钥匙串 `metawork-notary` profile 提交 `notarytool`，并等待最多 2 小时。只有 typed terminal status 精确为 `Accepted` 才继续 staple/validate DMG、执行 Gatekeeper assessment、`hdiutil verify`，并只读挂载检查根目录恰好包含布局 `.DS_Store`、`MetaWork.app` 和精确 `/Applications` 符号链接，同时复核内含应用的 Developer ID 签名。全部通过后输出 SHA-256。
+签名验证通过后，入口把 `.app` 与指向 `/Applications` 的精确符号链接放入临时 staging root，使用系统 `hdiutil` 生成可写磁盘映像，并在当前 macOS 图形用户会话中通过 Finder 写入固定图标视图：`MetaWork.app` 位于左侧、`Applications` 位于右侧，使用固定窗口和图标尺寸并隐藏工具栏与状态栏。布局写入 `.DS_Store` 后，入口卸载临时映像并转换成最终 UDZO，再以同一 Developer ID Application identity 和可信时间戳签名 DMG。入口按显式 package selection 生成 `zig-out/package/metawork-<version>-macos-arm64.dmg`、`zig-out/package/metawork-<version>-macos-x64.dmg` 或两者，并在应用签名前确认主程序恰好为对应单一 Mach-O 架构；当前不生成 Universal 包。每份最终 DMG 都直接通过钥匙串 `metawork-notary` profile 提交 `notarytool`，并等待最多 2 小时。只有 typed terminal status 精确为 `Accepted` 才继续 staple/validate DMG、执行 Gatekeeper assessment、`hdiutil verify`，并只读挂载检查根目录恰好包含布局 `.DS_Store`、`MetaWork.app` 和精确 `/Applications` 符号链接，同时复核内含应用的 Developer ID 签名。全部通过后输出 SHA-256。
 
-入口启动时先删除精确命名的当前 `.app` 与最终 DMG，所以失败时不会留下可误发的旧最终产物；本流程不创建 preview 或 ZIP。等待超时不会取消 Apple 已接收的 submission，必须以原 submission ID 继续查询，不能盲目重传同一构建。
+入口先验证全部所选 canonical bundles，每轮构建替换当前 `.app`，并由 `hdiutil convert -ov` 写入对应最终 DMG。本流程不创建 preview 或 ZIP。`all` 中任一架构失败即使整个命令失败，已经完成签名、公证和验证的前序架构 DMG 仍是独立有效产物。等待超时不会取消 Apple 已接收的 submission，必须以原 submission ID 继续查询，不能盲目重传同一构建。
 
 现有 development Bundle ID `com.metask.metawork.dev` 及其数据和 credential namespace 保持不变；DMG 是只读拖拽分发容器，不是带安装逻辑的 PKG，也不提供更新能力。`.dev` identity 仍是当前产品 Bundle ID，不因产物改为 DMG 而自动升级成独立 production channel。
 

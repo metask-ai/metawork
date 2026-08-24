@@ -40,7 +40,7 @@ AgentCore bundle 仍是面向所有消费者的通用能力全集，并继续支
 - Workbench 不持有 built-in profile、wire name 或 `allowed_tools`，只消费 Agent 形成后的执行能力；
 - bundle 已验证能力是外部上限，MetaWork Agent 集合是产品化子集；bundle 支持但产品未开放不是 admission failure。
 
-当前 Windows 与 macOS bundle 分别使用其 target-specific 静态库，两份 lock source 均为 `1183550f15b4eef27799076ee0908e9667d849a0`（ABI v1 revision 9）。该证据不替代真实 Session 运行证据。
+当前 Windows x86_64 GNU、macOS arm64 与 macOS x86_64 bundle 分别使用其 target-specific 静态库，三份 lock source 均为 `1183550f15b4eef27799076ee0908e9667d849a0`（ABI v1 revision 9）。该证据不替代真实 Session 运行证据。
 
 ## 4. 最小架构
 
@@ -60,7 +60,7 @@ AgentCore bundle 仍是面向所有消费者的通用能力全集，并继续支
 
 ### Phase 0：各桌面 bundle 与名称探针
 
-1. 使用对应 target lock 校验 `.agentcore/bundle`；
+1. 使用对应 target lock 校验 `.agentcore/bundles/<target-id>`；
 2. 运行现有 verifier、API discovery、Runtime/Session create 和 lifecycle probe；
 3. 对 bundle 声明的名称逐个运行受控 Session probe，记录名称是否被接受、对应 CoreEvent/tool result、终态和错误；
 4. 只有同时通过 target probe 与 MetaWork 产品验收的名称才加入 Agent 固定集合。
@@ -82,7 +82,7 @@ AgentCore bundle 仍是面向所有消费者的通用能力全集，并继续支
 - `WebSearch` 在 MetaWork wire 层仍只有一个工具名，不产生 provider-specific identity；
 - unknown name、未验证名称和空选择 fail closed；
 - `host_tool_count` 保持 0，MCP、permission、shutdown 和 AgentCore 协议继续使用各自 source of truth；
-- 验证分别声明 Windows x86_64 GNU 与 macOS arm64 的可用性；不推断其他平台可用性；
+- 验证分别声明 Windows x86_64 GNU、macOS arm64 与 macOS x86_64 的可用性；不推断其他平台可用性；
 - Renderer/Bridge 只显示当前 target verified set 中的真实 capability。
 
 ## 7. 依赖文档

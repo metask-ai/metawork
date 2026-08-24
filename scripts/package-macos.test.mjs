@@ -9,13 +9,15 @@ import {
   buildDeveloperIdRequirement,
   buildDmgFinderLayoutScript,
   isDeveloperIdApplicationIdentityName,
-  localDistributionDiskImageName,
   localPackageMetadata,
   localProductIdentity,
+  macosDistributionForAgentCoreTarget,
+  macosPackageTargetIds,
   parseDeveloperIdCertificateReport,
   parseNativePackageMetadata,
   parseNotarySubmission,
   parseTeamIdentifier,
+  requireSingleMacosExecutableArchitecture,
   selectDistributionCodeSigningIdentity,
   stageMacosTrayIcon,
 } from "./package-macos.mjs";
@@ -28,11 +30,27 @@ const distributionIdentityName = `Developer ID Application: Developer Name (${te
 test("distribution DMG metadata comes from the Native product manifest", () => {
   assert.deepEqual(localPackageMetadata, {
     displayName: "MetaWork",
-    version: "0.1.1",
+    version: "0.1.3",
+  });
+  assert.deepEqual(macosDistributionForAgentCoreTarget("aarch64-macos"), {
+    artifact: "arm64",
+    diskImageName: "metawork-0.1.3-macos-arm64.dmg",
+    diskImagePath: path.resolve(
+      new URL(
+        "../zig-out/package/metawork-0.1.3-macos-arm64.dmg",
+        import.meta.url,
+      ).pathname,
+    ),
+    executable: "arm64",
+    targetId: "aarch64-macos",
   });
   assert.equal(
-    localDistributionDiskImageName,
-    "metawork-0.1.1-macos-arm64.dmg",
+    macosDistributionForAgentCoreTarget("x86_64-macos").diskImageName,
+    "metawork-0.1.3-macos-x64.dmg",
+  );
+  assert.throws(
+    () => macosDistributionForAgentCoreTarget("x86_64-windows-gnu"),
+    /unsupported macOS package target/u,
   );
   assert.deepEqual(
     parseNativePackageMetadata(
@@ -46,6 +64,53 @@ test("distribution DMG metadata comes from the Native product manifest", () => {
         `.{\n.display_name = "bad name",\n.version = "latest",\n}`,
       ),
     /invalid native package metadata/u,
+  );
+});
+
+test("macOS package selection is explicit and defaults to both architectures", () => {
+  assert.deepEqual(macosPackageTargetIds(), ["aarch64-macos", "x86_64-macos"]);
+  assert.deepEqual(macosPackageTargetIds("all"), [
+    "aarch64-macos",
+    "x86_64-macos",
+  ]);
+  assert.deepEqual(macosPackageTargetIds("arm64"), ["aarch64-macos"]);
+  assert.deepEqual(macosPackageTargetIds("x64"), ["x86_64-macos"]);
+  assert.throws(
+    () => macosPackageTargetIds("universal"),
+    /expected arm64, x64, or all/u,
+  );
+});
+
+test("macOS package architecture gate rejects mislabeled and universal executables", () => {
+  assert.equal(
+    requireSingleMacosExecutableArchitecture(
+      "Non-fat file: metawork is architecture: x86_64\n",
+      "x86_64",
+    ),
+    "x86_64",
+  );
+  assert.equal(
+    requireSingleMacosExecutableArchitecture(
+      "Non-fat file: metawork is architecture: arm64\n",
+      "arm64",
+    ),
+    "arm64",
+  );
+  assert.throws(
+    () =>
+      requireSingleMacosExecutableArchitecture(
+        "Non-fat file: metawork is architecture: arm64\n",
+        "x86_64",
+      ),
+    /expected only x86_64/u,
+  );
+  assert.throws(
+    () =>
+      requireSingleMacosExecutableArchitecture(
+        "Architectures in the fat file: metawork are: x86_64 arm64\n",
+        "x86_64",
+      ),
+    /expected only x86_64/u,
   );
 });
 
@@ -81,14 +146,24 @@ test("macOS packaging has one public owner and signs only after resource staging
     packageJson.scripts["package:macos"],
     "node scripts/package-macos.mjs",
   );
+  assert.match(
+    packageScript,
+    /runNode\("scripts\/build\.mjs", \["release", distribution\.targetId\]\)/u,
+  );
   assert.match(packageScript, /"--signing",\s*\n\s*"none"/u);
   const stagingIndex = packageScript.indexOf("stageMacosTrayIcon();");
+  const architectureIndex = packageScript.indexOf(
+    "verifyPackagedMacosExecutableArchitecture(distribution.executable);",
+  );
   const signingIndex = packageScript.indexOf(
     "signWithDeveloperId(packagedAppPath",
   );
   assert.notEqual(stagingIndex, -1);
+  assert.notEqual(architectureIndex, -1);
   assert.notEqual(signingIndex, -1);
   assert.ok(stagingIndex < signingIndex);
+  assert.ok(stagingIndex < architectureIndex);
+  assert.ok(architectureIndex < signingIndex);
   assert.doesNotMatch(packageScript, /previewMacosPackage|legacyPackage/u);
 });
 

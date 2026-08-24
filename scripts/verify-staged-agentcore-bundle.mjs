@@ -2,19 +2,28 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import path from "node:path";
 import process from "node:process";
 import {
+  defaultAgentCoreTargetId,
   loadLockedAgentCoreManifest,
   readAgentCoreBundleTargetId,
+  stagedAgentCoreBundleRoot,
   validateAgentCoreBundle,
 } from "./agentcore-bundle.mjs";
 
 export async function verifyStagedAgentCoreBundle(
   repositoryRoot,
-  validationOptions = {},
+  { targetId = defaultAgentCoreTargetId(), validationOptions = {} } = {},
 ) {
-  const stagedRoot = path.join(repositoryRoot, ".agentcore", "bundle");
+  const stagedRoot = stagedAgentCoreBundleRoot(repositoryRoot, targetId);
   try {
-    const targetId = await readAgentCoreBundleTargetId(stagedRoot);
-    const lock = await loadLockedAgentCoreManifest(repositoryRoot, targetId);
+    const actualTargetId = await readAgentCoreBundleTargetId(stagedRoot);
+    if (actualTargetId !== targetId)
+      throw new Error(
+        `staged AgentCore target is ${actualTargetId}, expected ${targetId}`,
+      );
+    const lock = await loadLockedAgentCoreManifest(
+      repositoryRoot,
+      actualTargetId,
+    );
     return await validateAgentCoreBundle(stagedRoot, {
       ...validationOptions,
       expectedManifest: lock.manifest,
@@ -23,7 +32,7 @@ export async function verifyStagedAgentCoreBundle(
   } catch (error) {
     if (error?.code === "ENOENT")
       throw new Error(
-        "staged AgentCore bundle is missing; run node scripts/stage-agentcore-bundle.mjs <absolute-bundle-path> first",
+        `staged AgentCore bundle ${targetId} is missing; run node scripts/stage-agentcore-bundle.mjs <absolute-bundle-path> first`,
         { cause: error },
       );
     throw error;

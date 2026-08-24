@@ -13,8 +13,7 @@ const supportedAbiTableSize = 280;
 
 const targetPolicies = [
   {
-    hostPlatform: "win32",
-    hostArchitecture: "x64",
+    supportedHosts: [{ platform: "win32", architectures: ["x64"] }],
     id: "x86_64-windows-gnu",
     architecture: "x86_64",
     os: "windows",
@@ -29,8 +28,7 @@ const targetPolicies = [
     lock: path.join("build_support", "agentcore-bundle.windows.lock.json"),
   },
   {
-    hostPlatform: "darwin",
-    hostArchitecture: "arm64",
+    supportedHosts: [{ platform: "darwin", architectures: ["arm64"] }],
     id: "aarch64-macos",
     architecture: "aarch64",
     os: "macos",
@@ -43,6 +41,21 @@ const targetPolicies = [
     abiRevision: 9,
     capabilities: 0x3fffff,
     lock: path.join("build_support", "agentcore-bundle.macos.lock.json"),
+  },
+  {
+    supportedHosts: [{ platform: "darwin", architectures: ["arm64", "x64"] }],
+    id: "x86_64-macos",
+    architecture: "x86_64",
+    os: "macos",
+    abi: "none",
+    rustTarget: "x86_64-apple-darwin",
+    zigTarget: /^x86_64-macos\.([0-9]+\.[0-9]+)\.\.\.[0-9]+\.[0-9]+-none$/,
+    library: "lib/libmetask_agentcore.a",
+    optimize: "ReleaseSafe",
+    systemLibraries: [],
+    abiRevision: 9,
+    capabilities: 0x3fffff,
+    lock: path.join("build_support", "agentcore-bundle.macos-x86_64.lock.json"),
   },
 ];
 
@@ -117,24 +130,48 @@ function expectedBundleEntries(payloadPaths) {
   return [...entries].sort();
 }
 
-function policyForHost(platform, architecture) {
-  const policy = targetPolicies.find(
-    (candidate) =>
-      candidate.hostPlatform === platform &&
-      candidate.hostArchitecture === architecture,
+function requireSupportedHost(policy, platform, architecture) {
+  const supported = policy.supportedHosts.some(
+    (host) =>
+      host.platform === platform && host.architectures.includes(architecture),
   );
-  if (!policy)
+  if (!supported)
     throw new Error(
-      `unsupported AgentCore host target: ${architecture}-${platform}`,
+      `unsupported AgentCore host target: ${architecture}-${platform} cannot consume ${policy.id}`,
     );
-  return policy;
 }
 
-function policyForTargetId(targetId) {
+export function policyForTargetId(targetId) {
   const policy = targetPolicies.find((candidate) => candidate.id === targetId);
   if (!policy)
     throw new Error(`unsupported AgentCore bundle target: ${targetId}`);
   return policy;
+}
+
+export function defaultAgentCoreTargetId(
+  platform = process.platform,
+  architecture = process.arch,
+) {
+  const matches = targetPolicies.filter((policy) =>
+    policy.supportedHosts.some(
+      (host) =>
+        host.platform === platform &&
+        host.architectures.includes(architecture) &&
+        policy.architecture ===
+          (architecture === "arm64" ? "aarch64" : "x86_64"),
+    ),
+  );
+  if (matches.length !== 1) {
+    throw new Error(
+      `unsupported AgentCore host target: ${architecture}-${platform}`,
+    );
+  }
+  return matches[0].id;
+}
+
+export function stagedAgentCoreBundleRoot(repositoryRoot, targetId) {
+  policyForTargetId(targetId);
+  return path.join(repositoryRoot, ".agentcore", "bundles", targetId);
 }
 
 export async function loadLockedAgentCoreManifest(repositoryRoot, targetId) {
@@ -302,7 +339,9 @@ export async function validateAgentCoreBundle(bundleRoot, options = {}) {
     manifest.toolchain.zig_version,
     "toolchain.zig_version",
   );
-  const policy = policyForHost(
+  const policy = policyForTargetId(manifest.target.id);
+  requireSupportedHost(
+    policy,
     options.platform ?? process.platform,
     options.architecture ?? process.arch,
   );

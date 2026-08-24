@@ -20,7 +20,9 @@ pub fn build(b: *std.Build) void {
         .install_subdir = "frontend/dist",
     });
     b.getInstallStep().dependOn(&frontend_assets.step);
-    const root = b.pathFromRoot(".agentcore/bundle");
+    const app_target = (artifacts.exe.root_module.resolved_target orelse @panic("Native SDK app target is unresolved")).result;
+    const target_id = agentCoreTargetId(app_target);
+    const root = b.pathFromRoot(b.pathJoin(&.{ ".agentcore/bundles", target_id }));
     const bundle = agentcore_bundle.verify(b, root);
     const modules = wireAgentCore(b, artifacts.exe.root_module, bundle);
     const test_modules = if (artifacts.tests.root_module != artifacts.exe.root_module)
@@ -130,6 +132,21 @@ pub fn build(b: *std.Build) void {
         "test-storage",
         "Run the backend-independent Storage contract and SQLite backend tests",
     ).dependOn(&b.addRunArtifact(storage_tests).step);
+}
+
+fn agentCoreTargetId(target: std.Target) []const u8 {
+    return switch (target.os.tag) {
+        .macos => switch (target.cpu.arch) {
+            .aarch64 => "aarch64-macos",
+            .x86_64 => "x86_64-macos",
+            else => @panic("unsupported macOS AgentCore architecture"),
+        },
+        .windows => switch (target.cpu.arch) {
+            .x86_64 => "x86_64-windows-gnu",
+            else => @panic("unsupported Windows AgentCore architecture"),
+        },
+        else => @panic("unsupported AgentCore operating system"),
+    };
 }
 
 fn addLifecycleTests(
@@ -556,10 +573,15 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         "app_manifest_zon",
         existingImport(runner, "app_manifest_zon"),
     );
-    const sdk = b.dependency("agentcore", .{
+    const dependency_options = .{
         .target = target,
         .optimize = root_module.optimize,
-    }).module("metask_agentcore");
+    };
+    const sdk = switch (bundle.sdk_dependency) {
+        .macos_arm64 => b.dependency("agentcore_macos_arm64", dependency_options),
+        .macos_x64 => b.dependency("agentcore_macos_x64", dependency_options),
+        .windows_x64 => b.dependency("agentcore_windows_x64", dependency_options),
+    }.module("metask_agentcore");
     const agent_provider = b.createModule(.{
         .root_source_file = b.path("src/agent/provider.zig"),
         .target = target,

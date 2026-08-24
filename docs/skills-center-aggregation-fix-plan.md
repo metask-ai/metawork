@@ -177,7 +177,7 @@ management.assets
 - `src/agent/`；
 - `src/workbench/`；
 - `src/bridge/`；
-- `.agentcore/bundle`；
+- `.agentcore/bundles/<target-id>`；
 - `docs/renderer-bridge-contract.md`；
 - Skill management/enablement persistence；
 - schema、Bridge revision、ABI revision 和产品版本。

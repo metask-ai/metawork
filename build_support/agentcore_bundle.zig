@@ -45,6 +45,13 @@ const Manifest = struct {
 pub const Bundle = struct {
     deployment_target: ?std.SemanticVersion,
     link_libc: bool,
+    sdk_dependency: SdkDependency,
+};
+
+pub const SdkDependency = enum {
+    macos_arm64,
+    macos_x64,
+    windows_x64,
 };
 
 pub fn verify(b: *std.Build, root: []const u8) Bundle {
@@ -56,6 +63,8 @@ pub fn verify(b: *std.Build, root: []const u8) Bundle {
         "build_support/agentcore-bundle.windows.lock.json"
     else if (std.mem.eql(u8, manifest.target.id, "aarch64-macos"))
         "build_support/agentcore-bundle.macos.lock.json"
+    else if (std.mem.eql(u8, manifest.target.id, "x86_64-macos"))
+        "build_support/agentcore-bundle.macos-x86_64.lock.json"
     else
         @panic("unsupported AgentCore bundle target");
     const lock_bytes = readFile(b, lock_path, 1024 * 1024, "cannot read AgentCore bundle lock");
@@ -77,7 +86,7 @@ pub fn verify(b: *std.Build, root: []const u8) Bundle {
         @panic("unsupported locked AgentCore bundle contract");
     if (!std.mem.eql(u8, lock.build.optimize, "ReleaseSafe") or !lock.build.strip)
         @panic("unsupported locked AgentCore build identity");
-    const deployment_target = validateTarget(lock);
+    const target = validateTarget(lock);
     if (lock.files.len == 0 or lock.files.len > 256)
         @panic("AgentCore manifest file count is out of bounds");
 
@@ -87,12 +96,16 @@ pub fn verify(b: *std.Build, root: []const u8) Bundle {
     }
 
     return .{
-        .deployment_target = deployment_target,
+        .deployment_target = target.deployment_target,
         .link_libc = lock.link.requires_c_runtime,
+        .sdk_dependency = target.sdk_dependency,
     };
 }
 
-fn validateTarget(manifest: Manifest) ?std.SemanticVersion {
+fn validateTarget(manifest: Manifest) struct {
+    deployment_target: ?std.SemanticVersion,
+    sdk_dependency: SdkDependency,
+} {
     if (!manifest.link.requires_c_runtime or manifest.link.system_frameworks.len != 0)
         @panic("unsupported AgentCore system link inputs");
     if (std.mem.eql(u8, manifest.target.id, "x86_64-windows-gnu") and
@@ -103,7 +116,7 @@ fn validateTarget(manifest: Manifest) ?std.SemanticVersion {
         std.mem.eql(u8, manifest.target.zig_target, "x86_64-windows.win10...win11_dt-gnu") and
         stringListsEqual(manifest.link.system_libraries, &.{ "advapi32", "crypt32" }))
     {
-        return null;
+        return .{ .deployment_target = null, .sdk_dependency = .windows_x64 };
     }
     if (std.mem.eql(u8, manifest.target.id, "aarch64-macos") and
         std.mem.eql(u8, manifest.target.os, "macos") and
@@ -113,7 +126,23 @@ fn validateTarget(manifest: Manifest) ?std.SemanticVersion {
         std.mem.eql(u8, manifest.target.zig_target, "aarch64-macos.13.0...15.6-none") and
         stringListsEqual(manifest.link.system_libraries, &.{}))
     {
-        return std.SemanticVersion.parse("13.0.0") catch unreachable;
+        return .{
+            .deployment_target = std.SemanticVersion.parse("13.0.0") catch unreachable,
+            .sdk_dependency = .macos_arm64,
+        };
+    }
+    if (std.mem.eql(u8, manifest.target.id, "x86_64-macos") and
+        std.mem.eql(u8, manifest.target.os, "macos") and
+        std.mem.eql(u8, manifest.target.architecture, "x86_64") and
+        std.mem.eql(u8, manifest.target.abi, "none") and
+        std.mem.eql(u8, manifest.target.rust_target, "x86_64-apple-darwin") and
+        std.mem.eql(u8, manifest.target.zig_target, "x86_64-macos.13.0...15.6-none") and
+        stringListsEqual(manifest.link.system_libraries, &.{}))
+    {
+        return .{
+            .deployment_target = std.SemanticVersion.parse("13.0.0") catch unreachable,
+            .sdk_dependency = .macos_x64,
+        };
     }
     @panic("unsupported locked AgentCore target identity");
 }
