@@ -1,23 +1,24 @@
 # MetaWork AgentCore ABI v1 消费合同
 
-> 状态：Windows x86_64 GNU 与 macOS arm64 均已 hard cut 到 AgentCore `1183550f15b4` 的 revision 9 target artifact；不声明 stable support policy
+> 状态：Windows x86_64 GNU、macOS arm64 与 macOS x86_64 均已 hard cut 到 AgentCore `1183550f15b4` 的 revision 9 target artifact；不声明 stable support policy
 > 所有者：Metask AgentCore 负责 facade、bindings、bundle 和 ABI 政策；MetaWork 负责 exact artifact 消费、Host 生命周期和产品 capability gate
 
 本文定义 MetaWork 对 Metask AgentCore binary ABI version 1 的 target-specific 消费边界。线程、事件泵和 Host 生命周期见 [AgentCore 集成契约](agentcore-integration.md)，验证入口见 [验证规范](validation.md)。
 
 ## 1. Target-specific baseline
 
-Windows 与 macOS arm64 均锁定 clean source commit `1183550f15b4eef27799076ee0908e9667d849a0`、package version `0.1.0-dev+1183550f15b4`。两者均使用 Zig 0.16.0、strip=true、requires C runtime；target artifact、lock 和验证结果彼此独立：
+三个 target 均锁定 clean source commit `1183550f15b4eef27799076ee0908e9667d849a0`、package version `0.1.0-dev+1183550f15b4`，并使用 Zig 0.16.0、strip=true、requires C runtime；target artifact、lock 和验证结果彼此独立：
 
-| Target             | Build       | Link input            | Repository lock                                    |
-| ------------------ | ----------- | --------------------- | -------------------------------------------------- |
-| Windows x86_64 GNU | ReleaseSafe | `advapi32`、`crypt32` | `build_support/agentcore-bundle.windows.lock.json` |
-| macOS arm64        | ReleaseSafe | 无                    | `build_support/agentcore-bundle.macos.lock.json`   |
+| Target             | Build       | Link input            | Repository lock                                         |
+| ------------------ | ----------- | --------------------- | ------------------------------------------------------- |
+| Windows x86_64 GNU | ReleaseSafe | `advapi32`、`crypt32` | `build_support/agentcore-bundle.windows.lock.json`      |
+| macOS arm64        | ReleaseSafe | 无                    | `build_support/agentcore-bundle.macos.lock.json`        |
+| macOS x86_64       | ReleaseSafe | 无                    | `build_support/agentcore-bundle.macos-x86_64.lock.json` |
 
 固定合同按 target 为：
 
 - `binary_abi_version = 1`；
-- Windows 与 macOS bundle 均为 `binary_abi_revision = 9`，`capabilities = 4194303`（`0x3fffff`）；
+- 三个 target bundle 均为 `binary_abi_revision = 9`，`capabilities = 4194303`（`0x3fffff`）；
 - `CAP_TEXT_COMPLETION = 1 << 21` 已包含在 `REQUIRED_CAPABILITIES_V1`，Completion 不建立独立的可选 discovery 或降级路径；
 - 两者的 `binary_abi_table_size` 都是 `280`；
 - 唯一 discovery symbol 为 `metask_agentcore_get_api`；
@@ -222,7 +223,7 @@ candidate acceptance：
 - exact manifest bytes、payload checksum、target、toolchain、ABI 和 filesystem whitelist 校验；
 - 官方 Zig package source-free discover/link/run；
 - candidate probe 前后内容不变；
-- Windows 与 macOS artifact/lock 独立，结果不能互相替代。
+- 每个 target 的 artifact/lock 独立，结果不能互相替代。
 
 staged Host gate：
 

@@ -309,6 +309,8 @@ test("AgentCore SDK access is restricted to Agent modules and the test fixture",
   assertNoImports(nonAgentFiles, ["metask_agentcore"]);
 
   const build = read("build.zig");
+  const bundleVerifier = read("build_support/agentcore_bundle.zig");
+  const bundlePolicy = read("scripts/agentcore-bundle.mjs");
   const receivers = [
     ...build.matchAll(
       /\b([A-Za-z_]\w*)\s*\.\s*addImport\s*\(\s*"metask_agentcore"\s*,/g,
@@ -335,6 +337,16 @@ test("AgentCore SDK access is restricted to Agent modules and the test fixture",
   );
   assert.match(read("build.zig.zon"), /\.agentcore\/bundle\/bindings\/zig/);
   assert.doesNotMatch(build, /\.addObjectFile\(/);
+  for (const [target, lock] of [
+    ["x86_64-windows-gnu", "agentcore-bundle.windows.lock.json"],
+    ["aarch64-macos", "agentcore-bundle.macos.lock.json"],
+    ["x86_64-macos", "agentcore-bundle.macos-x86_64.lock.json"],
+  ]) {
+    assert.ok(bundleVerifier.includes(target));
+    assert.ok(bundleVerifier.includes(lock));
+    assert.ok(bundlePolicy.includes(target));
+    assert.ok(bundlePolicy.includes(lock));
+  }
 });
 
 test("MetaWork Agent capability shaping stays private to Agent", () => {

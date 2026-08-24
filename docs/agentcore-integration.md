@@ -1,6 +1,6 @@
 # MetaWork AgentCore 集成契约
 
-> 状态：Windows x86_64 GNU 与 macOS arm64 使用 AgentCore ABI v1 revision 9；当前分支的真实 vertical 结果以验证规范为准
+> 状态：Windows x86_64 GNU、macOS arm64 与 macOS x86_64 使用 AgentCore ABI v1 revision 9；当前分支的真实 vertical 结果以验证规范为准
 > 目标依赖：Metask AgentCore ABI v1（target-specific revision）；精确 artifact identity 见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)
 
 本文定义 MetaWork Agent 执行边界与 Metask AgentCore 之间的规范合同。Agent 与 Product 并列，Application 管理其生命周期，Workbench 直接消费其公共执行表面。顶层模块与故障域见 [高层架构](architecture.md)，Product owner 及其与 Agent 的协作见 [Product 内部架构](product-architecture.md)，Bridge transport 见 [Renderer Bridge 合同](renderer-bridge-contract.md)，target-specific ABI 能力见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。
@@ -63,19 +63,19 @@ candidate probe 只用于证明锁定 artifact 与官方 Zig package 可以 sour
 
 ## 3. 当前协议表面
 
-| 类型              | 方向        | 当前 ABI v1 语义                                                                   |
-| ----------------- | ----------- | ---------------------------------------------------------------------------------- |
-| `RunContext`      | Core → Host | callback-scoped borrowed identity；包含 Session handle、run ID 和稳定 session ID   |
-| `CoreEvent` JSON  | Core → Host | callback-scoped borrowed bytes；与同次 callback 的 `RunContext` 绑定               |
-| `UiRequest` JSON  | Core → Host | 同步 callback 请求；与同次 callback 的 `RunContext` 绑定                           |
-| `UiResponse` JSON | Host → Core | 同一 callback 内 answered response；或 unavailable/fatal                           |
-| ABI status        | Core → Host | function 调用层错误，独立于有效 Run 结果                                           |
-| `RunResult`       | Core → Host | status OK 时完整有效；checkpoint budget pre-admission status 只定义 budget 字段    |
-| abort             | Host → Core | 按 Session/Run 的 user/timeout 中断机制                                            |
-| manual compact    | 双向        | Host 分配严格递增 operation ID；Core 返回 typed compact result                     |
-| compact abort     | Host → Core | 只按 active compact operation ID 请求取消，不等待 provider I/O response            |
-| Skill descriptor  | Core → Host | query-scoped owned bytes；由 SDK 解码后立即释放                                    |
-| Skill catalog     | 双向借用    | Runtime query 返回 opaque handle；Session create/idle update 同步借用              |
+| 类型              | 方向        | 当前 ABI v1 语义                                                                                                                    |
+| ----------------- | ----------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `RunContext`      | Core → Host | callback-scoped borrowed identity；包含 Session handle、run ID 和稳定 session ID                                                    |
+| `CoreEvent` JSON  | Core → Host | callback-scoped borrowed bytes；与同次 callback 的 `RunContext` 绑定                                                                |
+| `UiRequest` JSON  | Core → Host | 同步 callback 请求；与同次 callback 的 `RunContext` 绑定                                                                            |
+| `UiResponse` JSON | Host → Core | 同一 callback 内 answered response；或 unavailable/fatal                                                                            |
+| ABI status        | Core → Host | function 调用层错误，独立于有效 Run 结果                                                                                            |
+| `RunResult`       | Core → Host | status OK 时完整有效；checkpoint budget pre-admission status 只定义 budget 字段                                                     |
+| abort             | Host → Core | 按 Session/Run 的 user/timeout 中断机制                                                                                             |
+| manual compact    | 双向        | Host 分配严格递增 operation ID；Core 返回 typed compact result                                                                      |
+| compact abort     | Host → Core | 只按 active compact operation ID 请求取消，不等待 provider I/O response                                                             |
+| Skill descriptor  | Core → Host | query-scoped owned bytes；由 SDK 解码后立即释放                                                                                     |
+| Skill catalog     | 双向借用    | Runtime query 返回 opaque handle；Session create/idle update 同步借用                                                               |
 | Skill policy      | Host → Core | Session create/restore/idle update 显式传入完整 replacement；由 Workbench committed policy 编译当前 catalog 的 granted concrete IDs |
 
 `UiEvent` / `UiBackend.poll()` 虽然存在于 Metask AgentCore native 协议中，但当前生产 agent loop 未证明消费。MetaWork 不依赖它完成 stop、生成期 queue message 或 steering。

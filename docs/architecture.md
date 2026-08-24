@@ -176,7 +176,7 @@ Bridge transport、Product 产品状态和 Agent execution terminal cause 是不
 
 ## 6. 当前能力边界
 
-当前正式 AgentCore baseline 支持 Windows x86_64 GNU 与 macOS arm64 ABI v1 revision 9。MetaWork 只消费经 verifier 接收并 stage 到 `.agentcore/bundle` 的 canonical bundle；缺失、identity、checksum、target、ABI 或 symbol 校验失败必须明确失败，不允许旧 revision、`latest`、可变 tag、implementation source fallback 或静默降级。精确 bundle 规则见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。
+当前正式 AgentCore baseline 支持 Windows x86_64 GNU、macOS arm64 与 macOS x86_64 ABI v1 revision 9。MetaWork 只消费经 verifier 接收并 stage 到 `.agentcore/bundle` 的 canonical target-specific bundle；缺失、identity、checksum、target、ABI 或 symbol 校验失败必须明确失败，不允许旧 revision、`latest`、可变 tag、implementation source fallback 或静默降级。精确 bundle 规则见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。
 
 当前 baseline 已包含同一桌面 Application 正常重启后、由 durable checkpoint 驱动的显式 Conversation 恢复，但不包含 async pending、suspend/resume、独立 AgentCore Worker crash recovery、跨进程 in-flight Run 恢复、strict Workspace security、正式 Host tools、typed Output/FileChange、plan progress/approval、custom UI 或 Windows 更新。当前仍是同进程 prototype；存在 ABI entry 不代表更宽的进程隔离或恢复能力已经开放，能力状态只以 [验证规范](validation.md)为准。
 

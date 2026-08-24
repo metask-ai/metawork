@@ -86,12 +86,15 @@ xcrun notarytool store-credentials "metawork-notary" \
 不提供 `--password` 时 `notarytool` 才会使用安全提示。profile 验证成功后执行：
 
 ```bash
+node scripts/stage-agentcore-bundle.mjs /absolute/path/to/target-specific-bundle
 npm run package:macos
 ```
 
+`package:macos` 不接收独立架构参数；canonical staged bundle 是构建与包架构的唯一输入。AgentCore 发布物为压缩包时，先将其完整解压到仓库外的绝对目录，再把该目录交给 stage 入口。
+
 打包流程从 `security find-identity` 精确筛选唯一 Developer ID Application identity，再从所选证书的 subject `OU` 读取 Team ID 并复核 SHA-1 fingerprint。它构建 ReleaseFast、调用 Native SDK 生成未签名 `.app`、stage 完整原生资源，再以 `--options runtime --timestamp` 执行唯一一次应用签名。验证必须覆盖 Bundle ID、产品版本、Renderer 与托盘资源、Developer ID leaf authority、Team ID、Apple anchor、hardened runtime 和可信时间戳。
 
-签名验证通过后，入口把 `.app` 与指向 `/Applications` 的精确符号链接放入临时 staging root，使用系统 `hdiutil` 生成可写磁盘映像，并在当前 macOS 图形用户会话中通过 Finder 写入固定图标视图：`MetaWork.app` 位于左侧、`Applications` 位于右侧，使用固定窗口和图标尺寸并隐藏工具栏与状态栏。布局写入 `.DS_Store` 后，入口卸载临时映像并转换成最终 UDZO，再以同一 Developer ID Application identity 和可信时间戳签名 DMG。最终 `zig-out/package/metawork-<version>-macos-arm64.dmg` 直接通过钥匙串 `metawork-notary` profile 提交 `notarytool`，并等待最多 2 小时。只有 typed terminal status 精确为 `Accepted` 才继续 staple/validate DMG、执行 Gatekeeper assessment、`hdiutil verify`，并只读挂载检查根目录恰好包含布局 `.DS_Store`、`MetaWork.app` 和精确 `/Applications` 符号链接，同时复核内含应用的 Developer ID 签名。全部通过后输出 SHA-256。
+签名验证通过后，入口把 `.app` 与指向 `/Applications` 的精确符号链接放入临时 staging root，使用系统 `hdiutil` 生成可写磁盘映像，并在当前 macOS 图形用户会话中通过 Finder 写入固定图标视图：`MetaWork.app` 位于左侧、`Applications` 位于右侧，使用固定窗口和图标尺寸并隐藏工具栏与状态栏。布局写入 `.DS_Store` 后，入口卸载临时映像并转换成最终 UDZO，再以同一 Developer ID Application identity 和可信时间戳签名 DMG。入口根据 canonical staged AgentCore target 生成 `zig-out/package/metawork-<version>-macos-arm64.dmg` 或 `zig-out/package/metawork-<version>-macos-x64.dmg`，并在应用签名前确认主程序恰好为对应单一 Mach-O 架构；当前不生成 Universal 包。最终 DMG 直接通过钥匙串 `metawork-notary` profile 提交 `notarytool`，并等待最多 2 小时。只有 typed terminal status 精确为 `Accepted` 才继续 staple/validate DMG、执行 Gatekeeper assessment、`hdiutil verify`，并只读挂载检查根目录恰好包含布局 `.DS_Store`、`MetaWork.app` 和精确 `/Applications` 符号链接，同时复核内含应用的 Developer ID 签名。全部通过后输出 SHA-256。
 
 入口启动时先删除精确命名的当前 `.app` 与最终 DMG，所以失败时不会留下可误发的旧最终产物；本流程不创建 preview 或 ZIP。等待超时不会取消 Apple 已接收的 submission，必须以原 submission ID 继续查询，不能盲目重传同一构建。
 

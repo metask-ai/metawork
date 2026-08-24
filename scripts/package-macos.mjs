@@ -21,6 +21,7 @@ import {
   parseNativeProductIdentity,
   readNativePackageManifest,
 } from "./package-metadata.mjs";
+import { verifyStagedAgentCoreBundle } from "./verify-staged-agentcore-bundle.mjs";
 
 const repositoryRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -53,14 +54,6 @@ const packagedTrayIconPath = path.join(
   "icons",
   "tray-icon.png",
 );
-const packageArtifactStem = `${localProductIdentity.executableName}-${localPackageMetadata.version}-macos-arm64`;
-export const localDistributionDiskImageName = `${packageArtifactStem}.dmg`;
-const distributionDiskImagePath = path.join(
-  repositoryRoot,
-  "zig-out",
-  "package",
-  localDistributionDiskImageName,
-);
 const notarizationProfile = "metawork-notary";
 const nativeDispatcher = path.join(
   repositoryRoot,
@@ -86,6 +79,46 @@ function distributionSigningKeychainPath() {
 
 function combinedOutput(result) {
   return `${result.stdout ?? ""}${result.stderr ?? ""}`;
+}
+
+export function macosDistributionForAgentCoreTarget(targetId) {
+  const architecture =
+    targetId === "aarch64-macos"
+      ? { artifact: "arm64", executable: "arm64" }
+      : targetId === "x86_64-macos"
+        ? { artifact: "x64", executable: "x86_64" }
+        : null;
+  if (!architecture) {
+    throw new Error(`unsupported macOS package target: ${targetId}`);
+  }
+  const diskImageName = `${localProductIdentity.executableName}-${localPackageMetadata.version}-macos-${architecture.artifact}.dmg`;
+  return Object.freeze({
+    ...architecture,
+    diskImageName,
+    diskImagePath: path.join(
+      repositoryRoot,
+      "zig-out",
+      "package",
+      diskImageName,
+    ),
+    targetId,
+  });
+}
+
+export function requireSingleMacosExecutableArchitecture(output, expected) {
+  const nonFat = output.match(/\bis architecture:\s*([A-Za-z0-9_]+)\s*$/mu);
+  const fat = output.match(/\bare:\s*([A-Za-z0-9_ ]+)\s*$/mu);
+  const architectures = nonFat
+    ? [nonFat[1]]
+    : fat
+      ? fat[1].trim().split(/\s+/u)
+      : [];
+  if (architectures.length !== 1 || architectures[0] !== expected) {
+    throw new Error(
+      `packaged macOS executable architectures are ${architectures.join(", ") || "unknown"}, expected only ${expected}`,
+    );
+  }
+  return architectures[0];
 }
 
 function run(command, args, options = {}) {
@@ -399,6 +432,25 @@ function fileDigest(filePath) {
   return createHash("sha256").update(readFileSync(filePath)).digest("hex");
 }
 
+function verifyPackagedMacosExecutableArchitecture(expectedArchitecture) {
+  const executable = path.join(
+    packagedAppPath,
+    "Contents",
+    "MacOS",
+    localProductIdentity.executableName,
+  );
+  if (statSync(executable).size === 0) {
+    throw new Error(`packaged executable is empty: ${executable}`);
+  }
+  const report = run("/usr/bin/lipo", ["-info", executable], {
+    capture: true,
+  });
+  return requireSingleMacosExecutableArchitecture(
+    combinedOutput(report),
+    expectedArchitecture,
+  );
+}
+
 function verifyPackagedMacosApp(identity) {
   const sourceAssets = path.join(repositoryRoot, "frontend", "dist");
   const packagedAssets = path.join(
@@ -433,15 +485,6 @@ function verifyPackagedMacosApp(identity) {
     fileDigest(trayIconSourcePath) !== fileDigest(packagedTrayIconPath)
   ) {
     throw new Error("packaged macOS tray icon is not the exact 64x64 PNG");
-  }
-  const executable = path.join(
-    packagedAppPath,
-    "Contents",
-    "MacOS",
-    localProductIdentity.executableName,
-  );
-  if (statSync(executable).size === 0) {
-    throw new Error(`packaged executable is empty: ${executable}`);
   }
   const plist = path.join(packagedAppPath, "Contents", "Info.plist");
   for (const [key, expected] of [
@@ -671,7 +714,7 @@ function verifyDistributionDiskImage(identity, targetPath) {
   }
 }
 
-function notarizeDiskImage(identity) {
+function notarizeDiskImage(identity, distributionDiskImagePath) {
   const result = run(
     "/usr/bin/xcrun",
     [
@@ -724,7 +767,7 @@ function notarizeDiskImage(identity) {
   return { artifactPath: distributionDiskImagePath, digest, submission };
 }
 
-function buildPackagedMacosApp(identity) {
+function buildPackagedMacosApp(identity, expectedArchitecture) {
   runNode("scripts/build.mjs", ["release"]);
   rmSync(packagedAppPath, { recursive: true, force: true });
   runNative([
@@ -737,19 +780,24 @@ function buildPackagedMacosApp(identity) {
     "none",
   ]);
   stageMacosTrayIcon();
+  verifyPackagedMacosExecutableArchitecture(expectedArchitecture);
   signWithDeveloperId(packagedAppPath, identity, {
     preserveEntitlements: true,
   });
   return verifyPackagedMacosApp(identity);
 }
 
-function packageMacos() {
+async function packageMacos() {
   requireMacos();
+  const bundle = await verifyStagedAgentCoreBundle(repositoryRoot);
+  const distribution = macosDistributionForAgentCoreTarget(
+    bundle.manifest.target.id,
+  );
   const identity = resolveDistributionIdentity();
-  rmSync(distributionDiskImagePath, { force: true });
-  const signature = buildPackagedMacosApp(identity);
-  createDistributionDiskImage(identity, distributionDiskImagePath);
-  const notarized = notarizeDiskImage(identity);
+  rmSync(distribution.diskImagePath, { force: true });
+  const signature = buildPackagedMacosApp(identity, distribution.executable);
+  createDistributionDiskImage(identity, distribution.diskImagePath);
+  const notarized = notarizeDiskImage(identity, distribution.diskImagePath);
   console.log(
     `built Developer ID signed and notarized package ${packagedAppPath} (${signature.policy})`,
   );
@@ -758,11 +806,11 @@ function packageMacos() {
   );
 }
 
-function main() {
+async function main() {
   if (process.argv.length !== 2) {
     throw new Error("package:macos does not accept arguments");
   }
-  packageMacos();
+  await packageMacos();
 }
 
 const invokedPath = process.argv[1]
@@ -770,7 +818,7 @@ const invokedPath = process.argv[1]
   : null;
 if (invokedPath === import.meta.url) {
   try {
-    main();
+    await main();
   } catch (error) {
     console.error(`error: ${error instanceof Error ? error.message : error}`);
     process.exitCode = 1;

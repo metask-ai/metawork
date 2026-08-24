@@ -56,6 +56,8 @@ pub fn verify(b: *std.Build, root: []const u8) Bundle {
         "build_support/agentcore-bundle.windows.lock.json"
     else if (std.mem.eql(u8, manifest.target.id, "aarch64-macos"))
         "build_support/agentcore-bundle.macos.lock.json"
+    else if (std.mem.eql(u8, manifest.target.id, "x86_64-macos"))
+        "build_support/agentcore-bundle.macos-x86_64.lock.json"
     else
         @panic("unsupported AgentCore bundle target");
     const lock_bytes = readFile(b, lock_path, 1024 * 1024, "cannot read AgentCore bundle lock");
@@ -111,6 +113,16 @@ fn validateTarget(manifest: Manifest) ?std.SemanticVersion {
         std.mem.eql(u8, manifest.target.abi, "none") and
         std.mem.eql(u8, manifest.target.rust_target, "aarch64-apple-darwin") and
         std.mem.eql(u8, manifest.target.zig_target, "aarch64-macos.13.0...15.6-none") and
+        stringListsEqual(manifest.link.system_libraries, &.{}))
+    {
+        return std.SemanticVersion.parse("13.0.0") catch unreachable;
+    }
+    if (std.mem.eql(u8, manifest.target.id, "x86_64-macos") and
+        std.mem.eql(u8, manifest.target.os, "macos") and
+        std.mem.eql(u8, manifest.target.architecture, "x86_64") and
+        std.mem.eql(u8, manifest.target.abi, "none") and
+        std.mem.eql(u8, manifest.target.rust_target, "x86_64-apple-darwin") and
+        std.mem.eql(u8, manifest.target.zig_target, "x86_64-macos.13.0...15.6-none") and
         stringListsEqual(manifest.link.system_libraries, &.{}))
     {
         return std.SemanticVersion.parse("13.0.0") catch unreachable;

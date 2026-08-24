@@ -169,6 +169,39 @@ test("accepts a complete pinned macOS arm64 revision 9 bundle", async (t) => {
   assert.equal(path.basename(result.libraryPath), "libmetask_agentcore.a");
 });
 
+test("accepts a pinned macOS x64 bundle when cross-building on arm64 macOS", async (t) => {
+  const candidate = await fixture(t, (manifest) => {
+    manifest.target = {
+      id: "x86_64-macos",
+      architecture: "x86_64",
+      os: "macos",
+      abi: "none",
+      zig_target: "x86_64-macos.13.0...15.6-none",
+      rust_target: "x86_64-apple-darwin",
+    };
+    manifest.link.system_libraries = [];
+    manifest.files[0].path = "lib/libmetask_agentcore.a";
+  });
+  await mkdir(path.join(candidate.root, "lib"), { recursive: true });
+  await rename(
+    path.join(candidate.root, "lib", "metask_agentcore.lib"),
+    path.join(candidate.root, "lib", "libmetask_agentcore.a"),
+  );
+  await writeFile(
+    path.join(candidate.root, "manifest.json"),
+    JSON.stringify(candidate.manifest),
+  );
+  const result = await validateAgentCoreBundle(candidate.root, {
+    platform: "darwin",
+    architecture: "arm64",
+    zigVersion: "0.16.0",
+    symbols: "00000000 T metask_agentcore_get_api\n",
+    expectedManifest: candidate.manifest,
+  });
+  assert.equal(result.target, "x86_64-macos.13.0...15.6-none");
+  assert.equal(path.basename(result.libraryPath), "libmetask_agentcore.a");
+});
+
 test("rejects a checksum mismatch", async (t) => {
   const { root } = await fixture(t);
   await writeFile(path.join(root, fixtureFiles[0]), "corrupt");
