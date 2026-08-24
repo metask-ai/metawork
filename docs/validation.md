@@ -74,6 +74,8 @@ MCP catalog freshness 的真实边界回归属于 `test-mcp-interop`：fixture �
 
 Product Account 的目录身份固定为 `src/product/account.zig` 与 `src/product/account/`；architecture guard 必须证明旧 `src/account.zig`、`src/account/` 不存在，全部 build root 指向新路径，同时公开 module identity 仍为 `metawork_account` 与 `metawork_account_contract`。
 
+Product MCP configuration 的目录身份固定为 `src/product/mcp.zig`、`src/product/mcp/configuration.zig` 与其 owner-defined testdata；architecture guard 必须证明旧 `src/workbench/mcp_configuration.zig`、`src/workbench/testdata/` 不存在，Workbench projection 显式消费 `metawork_product_mcp` 且 `workbench.zig` 不再转发 configuration API。该目录迁移不改变 owner：Workbench 仍拥有产品 MCP 状态、事务与 admission；Product MCP configuration 只允许依赖 Agent-owned `agent_mcp_http_protocol` 窄叶子，不得依赖 Application、Bridge、Account、Native SDK 或 AgentCore。
+
 Storage foundation 的自动化必须同时覆盖内存 target 与测试显式提供的 temporary file path，并在 Debug、ReleaseSafe 至少各运行一次定向入口。共享 conformance 负责 backend-independent 行为，包括 receiver 对同一 Database 的直接再入拒绝；direct backend tests 负责 `WAL + synchronous=NORMAL` profile、单连接内存可见性、Database 级间接再入与异 Database 调用、migration 原子性与版本 namespace、完整 batch rollback、reopen、busy/corrupt/invalid output 和结果上限。architecture guard 负责证明 SQLite C API 与 amalgamation 只进入 Storage concrete backend、上层尚未导入 Storage/SQLite、`app.zon` 尚未声明 Native SDK `sqlite` capability。上述结果只证明基础能力，不证明 production `app.db`、Product schema、业务迁移、单实例或断电 durable policy 已接入。
 
 ## 长期证据账本

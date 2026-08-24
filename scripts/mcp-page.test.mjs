@@ -49,7 +49,7 @@ const { I18nContext } = await vite.ssrLoadModule("/src/i18n/context.ts");
 const { translate } = await vite.ssrLoadModule("/src/i18n/runtime.ts");
 const endpointContract = JSON.parse(
   await readFile(
-    join(process.cwd(), "src/workbench/testdata/mcp-http-endpoints.json"),
+    join(process.cwd(), "src/product/mcp/testdata/mcp-http-endpoints.json"),
     "utf8",
   ),
 );

@@ -1,11 +1,12 @@
 const std = @import("std");
 const workbench_api = @import("metawork_workbench");
+const mcp_configuration = @import("metawork_product_mcp").configuration;
 const app_paths = @import("paths.zig");
 
 pub const Stores = struct {
     allocator: std.mem.Allocator = undefined,
     automatic_workspace_root: ?workbench_api.AutomaticWorkspaceRoot = null,
-    mcp_configuration: ?workbench_api.McpConfigurationFileStore = null,
+    mcp_configuration: ?mcp_configuration.FileStore = null,
     task: ?workbench_api.TaskFileStore = null,
     task_restore_failed: bool = true,
     task_restored_bytes: ?[]u8 = null,
@@ -36,7 +37,7 @@ pub const Stores = struct {
                 directory,
             ) catch null;
         }
-        self.mcp_configuration = workbench_api.McpConfigurationFileStore.init(
+        self.mcp_configuration = mcp_configuration.FileStore.init(
             io,
             paths.mcpDir(),
         ) catch null;

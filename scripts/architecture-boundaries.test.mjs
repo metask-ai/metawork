@@ -98,6 +98,7 @@ test("named module roots exist and lower owners cannot import composition", () =
   for (const path of [
     "src/app.zig",
     "src/product/account.zig",
+    "src/product/mcp.zig",
     "src/agent.zig",
     "src/workbench.zig",
     "src/bridge.zig",
@@ -109,10 +110,18 @@ test("named module roots exist and lower owners cannot import composition", () =
   assert.equal(existsSync(new URL("src/agentcore/", root)), false);
   assert.equal(existsSync(new URL("src/account.zig", root)), false);
   assert.equal(existsSync(new URL("src/account/", root)), false);
+  assert.equal(
+    existsSync(new URL("src/workbench/mcp_configuration.zig", root)),
+    false,
+  );
+  assert.equal(existsSync(new URL("src/workbench/testdata/", root)), false);
   const buildSource = read("build.zig");
   assert.match(buildSource, /src\/product\/account\.zig/);
   assert.match(buildSource, /src\/product\/account\/contract\.zig/);
+  assert.match(buildSource, /src\/product\/mcp\.zig/);
+  assert.match(buildSource, /src\/product\/mcp\/configuration\.zig/);
   assert.doesNotMatch(buildSource, /src\/account(?:\.zig|\/)/);
+  assert.doesNotMatch(buildSource, /src\/workbench\/mcp_configuration\.zig/);
   assert.match(buildSource, /addImport\("metawork_account", account\)/);
   assert.match(
     buildSource,
@@ -157,6 +166,14 @@ test("named module roots exist and lower owners cannot import composition", () =
     "metawork_agent",
     "metask_agentcore",
   ]);
+  assertNoImports(zigFiles("src/product/mcp/"), [
+    "metawork_app",
+    "metawork_workbench",
+    "metawork_bridge",
+    "metawork_account",
+    "metask_agentcore",
+    "native_sdk",
+  ]);
   assertNoImports(zigFiles("src/bridge/"), [
     "metawork_app",
     "metask_agentcore",
@@ -174,6 +191,32 @@ test("named module roots exist and lower owners cannot import composition", () =
       `${file} exposes an implementation module`,
     );
   }
+});
+
+test("Product MCP configuration has one physical module and remains Workbench-held", () => {
+  const build = read("build.zig");
+  const productMcp = read("src/product/mcp.zig");
+  const configuration = read("src/product/mcp/configuration.zig");
+  const workbenchRoot = read("src/workbench.zig");
+  const workbenchProjection = read("src/workbench/projection.zig");
+
+  assert.equal(
+    existsSync(
+      new URL("src/product/mcp/testdata/mcp-http-endpoints.json", root),
+    ),
+    true,
+  );
+  assert.match(productMcp, /@import\("product_mcp_configuration"\)/);
+  assert.match(configuration, /@import\("agent_mcp_http_protocol"\)/);
+  assert.doesNotMatch(configuration, /@import\("metawork_agent"\)/);
+  assert.match(build, /addImport\("metawork_product_mcp", product_mcp\)/);
+  assert.match(
+    workbenchProjection,
+    /@import\("metawork_product_mcp"\)\.configuration/,
+  );
+  assert.doesNotMatch(workbenchRoot, /workbench_mcp_configuration/);
+  assert.doesNotMatch(workbenchRoot, /pub const McpConfigurationFileStore/);
+  assert.doesNotMatch(workbenchRoot, /pub const McpManagementOutcome/);
 });
 
 test("Product Account owns Metask protocol without a concrete HTTP client", () => {

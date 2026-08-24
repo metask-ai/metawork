@@ -6,6 +6,7 @@ const std = @import("std");
 const native_sdk = @import("native_sdk");
 const account_contract = @import("metawork_account_contract");
 const workbench_api = @import("metawork_workbench");
+const mcp_configuration = @import("metawork_product_mcp").configuration;
 const commands = @import("commands.zig");
 const handlers = @import("handlers.zig");
 const callback_gate = @import("callback_gate.zig");
@@ -2431,7 +2432,7 @@ pub const Dispatcher = struct {
         self: *Dispatcher,
         workbench: *workbench_api.Workbench,
         output: []u8,
-        outcome: workbench_api.McpManagementOutcome,
+        outcome: mcp_configuration.ManagementOutcome,
     ) ![]const u8 {
         if (outcome == .saved or outcome == .saved_recovery_required)
             self.startMcpConfigurationApplyIfNeeded(workbench);
@@ -2520,7 +2521,7 @@ pub const Dispatcher = struct {
         value: []const u8,
         registration: ?handlers.McpOauthRegistration,
         slot_names: []const []const u8,
-    ) !workbench_api.McpStaticAuthMode {
+    ) !mcp_configuration.StaticAuthMode {
         if (registration != null) return error.InvalidBridgePayload;
         if (std.mem.eql(u8, value, "none")) {
             if (slot_names.len != 0) return error.InvalidBridgePayload;
@@ -2535,7 +2536,7 @@ pub const Dispatcher = struct {
 
     fn mcpOauthClientPlan(
         registration: ?handlers.McpOauthRegistration,
-    ) !workbench_api.McpOauthClientPlan {
+    ) !mcp_configuration.OauthClientPlan {
         const value = registration orelse return error.InvalidBridgePayload;
         if (std.mem.eql(u8, value.kind, "automatic")) {
             if (value.clientId != null or value.tokenEndpointAuthMethod != null)

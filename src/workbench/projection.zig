@@ -18,7 +18,7 @@ const task_runtime = @import("workbench_task_runtime");
 const task_deletion = @import("task_deletion.zig");
 const task_recovery = @import("workbench_task_recovery");
 const task_recovery_job = @import("workbench_task_recovery_job");
-const mcp_configuration = @import("workbench_mcp_configuration");
+const mcp_configuration = @import("metawork_product_mcp").configuration;
 const contract_fixture = @import("workbench_contract_fixture");
 const build_options = @import("build_options");
 

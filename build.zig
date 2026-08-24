@@ -100,7 +100,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-skill-package", .root_module = test_modules.workbench_skill_package },
         .{ .name = "metawork-skill-management", .root_module = test_modules.workbench_skill_management },
         .{ .name = "metawork-skill-enablement", .root_module = test_modules.workbench_skill_enablement },
-        .{ .name = "metawork-mcp-configuration", .root_module = test_modules.workbench_mcp_configuration },
+        .{ .name = "metawork-product-mcp-configuration", .root_module = test_modules.product_mcp_configuration },
         .{ .name = "metawork-mcp-platform", .root_module = test_modules.mcp_platform },
         .{ .name = "metawork-mcp-oauth", .root_module = test_modules.mcp_oauth },
         .{ .name = "metawork-task-persistence", .root_module = test_modules.workbench_task_persistence },
@@ -220,7 +220,8 @@ const WiredModules = struct {
     workbench_skill_package: *std.Build.Module,
     workbench_skill_management: *std.Build.Module,
     workbench_skill_enablement: *std.Build.Module,
-    workbench_mcp_configuration: *std.Build.Module,
+    product_mcp: *std.Build.Module,
+    product_mcp_configuration: *std.Build.Module,
     workbench_task_persistence: *std.Build.Module,
     workbench_checkpoint_store: *std.Build.Module,
     workbench_checkpoint_record: *std.Build.Module,
@@ -337,12 +338,12 @@ fn addMcpConfigurationTests(
 ) void {
     const step = b.step(
         "test-mcp-configuration",
-        "Run Workbench-owned MCP registry and preparation tests",
+        "Run Product MCP registry and preparation tests",
     );
-    modules.workbench_mcp_configuration.link_libc = link_libc;
+    modules.product_mcp_configuration.link_libc = link_libc;
     const tests = b.addTest(.{
-        .name = "metawork-mcp-configuration",
-        .root_module = modules.workbench_mcp_configuration,
+        .name = "metawork-product-mcp-configuration",
+        .root_module = modules.product_mcp_configuration,
     });
     step.dependOn(&b.addRunArtifact(tests).step);
 }
@@ -446,6 +447,7 @@ fn addMcpInteropTests(
     cases.addImport("metawork_account_contract", modules.account_contract);
     cases.addImport("metawork_mcp_platform", modules.mcp_platform);
     cases.addImport("metawork_workbench", modules.workbench);
+    cases.addImport("metawork_product_mcp", modules.product_mcp);
     cases.addOptions("mcp_interop_options", fixture_options);
     const tests = b.addTest(.{
         .name = "metawork-mcp-interop",
@@ -838,11 +840,17 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     task_recovery_job.addImport("workbench_owned_task_execution", owned_task_execution);
     task_runtime.addImport("workbench_task_recovery_job", task_recovery_job);
     const mcp_configuration = b.createModule(.{
-        .root_source_file = b.path("src/workbench/mcp_configuration.zig"),
+        .root_source_file = b.path("src/product/mcp/configuration.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     mcp_configuration.addImport("agent_mcp_http_protocol", agent_mcp_http_protocol);
+    const product_mcp = b.createModule(.{
+        .root_source_file = b.path("src/product/mcp.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    product_mcp.addImport("product_mcp_configuration", mcp_configuration);
     const projection = b.createModule(.{
         .root_source_file = b.path("src/workbench/projection.zig"),
         .target = target,
@@ -868,7 +876,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     projection.addImport("workbench_task_runtime", task_runtime);
     projection.addImport("workbench_task_recovery", task_recovery);
     projection.addImport("workbench_task_recovery_job", task_recovery_job);
-    projection.addImport("workbench_mcp_configuration", mcp_configuration);
+    projection.addImport("metawork_product_mcp", product_mcp);
     projection.addImport(
         "build_options",
         existingImport(
@@ -897,7 +905,6 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     workbench.addImport("workbench_skill_package", skill_package);
     workbench.addImport("workbench_skill_management", skill_management);
     workbench.addImport("workbench_skill_enablement", skill_enablement);
-    workbench.addImport("workbench_mcp_configuration", mcp_configuration);
     workbench.addImport("workbench_task_persistence", task_persistence);
     workbench.addImport("workbench_checkpoint_store", checkpoint_store);
     workbench.addImport("workbench_checkpoint_record", checkpoint_record);
@@ -910,6 +917,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     bridge.addImport("native_sdk", existingImport(root_module, "native_sdk"));
     bridge.addImport("metawork_account_contract", account_contract);
     bridge.addImport("metawork_workbench", workbench);
+    bridge.addImport("metawork_product_mcp", product_mcp);
 
     const automation_disabled = b.createModule(.{
         .root_source_file = b.path("src/automation/disabled.zig"),
@@ -943,7 +951,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     });
     mcp_platform.addImport("native_sdk", existingImport(root_module, "native_sdk"));
     mcp_platform.addImport("metawork_agent", agent);
-    mcp_platform.addImport("metawork_workbench", workbench);
+    mcp_platform.addImport("metawork_product_mcp", product_mcp);
     mcp_platform.addImport("metawork_product_identity", product_identity);
     const mcp_oauth = b.createModule(.{
         .root_source_file = b.path("src/app/mcp_oauth.zig"),
@@ -965,6 +973,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     app.addImport("native_sdk", existingImport(root_module, "native_sdk"));
     app.addImport("metawork_agent", agent);
     app.addImport("metawork_workbench", workbench);
+    app.addImport("metawork_product_mcp", product_mcp);
     app.addImport("metawork_bridge", bridge);
     app.addImport("metawork_automation", automation);
     app.addImport("metawork_account_contract", account_contract);
@@ -1027,7 +1036,8 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .workbench_skill_package = skill_package,
         .workbench_skill_management = skill_management,
         .workbench_skill_enablement = skill_enablement,
-        .workbench_mcp_configuration = mcp_configuration,
+        .product_mcp = product_mcp,
+        .product_mcp_configuration = mcp_configuration,
         .workbench_task_persistence = task_persistence,
         .workbench_checkpoint_store = checkpoint_store,
         .workbench_checkpoint_record = checkpoint_record,
