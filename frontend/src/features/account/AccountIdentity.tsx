@@ -26,10 +26,14 @@ export function AccountIdentity({
   const [open, setOpen] = useState(false);
   const [confirmSignOut, setConfirmSignOut] = useState(false);
   const authenticated = account.state === "authenticated";
-  const displayName = authenticated
+  const identityName = authenticated
     ? account.displayName || t("account.signed_in")
-    : t("account.login");
-  const initial = [...displayName.trim()][0]?.toLocaleUpperCase() || "M";
+    : t("account.provider");
+  const identityStatus = authenticated
+    ? t("account.connected")
+    : t("account.signed_out");
+  const menuTitle = authenticated ? identityName : t("account.label");
+  const initial = [...identityName.trim()][0]?.toLocaleUpperCase() || "M";
 
   useEffect(() => {
     if (!authenticated) setConfirmSignOut(false);
@@ -51,19 +55,16 @@ export function AccountIdentity({
                 aria-label={t("account.menu")}
               >
                 <div className="account-menu-heading">
-                  <strong title={displayName}>{displayName}</strong>
-                  <span>
-                    {authenticated
-                      ? t("account.connected")
-                      : t("account.sign_in_required.title")}
-                  </span>
+                  <strong title={menuTitle}>{menuTitle}</strong>
+                  <span>{identityStatus}</span>
                 </div>
                 {!authenticated && (
                   <Menu.Item
-                    className="account-menu-item is-attention focus-ring"
+                    className="account-menu-item focus-ring"
                     disabled={disabled}
                     onClick={() => choose(onBeginLogin)}
                   >
+                    <Icon name="account" />
                     {t("account.login")}
                   </Menu.Item>
                 )}
@@ -95,10 +96,8 @@ export function AccountIdentity({
               {initial}
             </span>
             <span className="account-identity-copy">
-              <strong title={displayName}>{displayName}</strong>
-              <small>
-                {authenticated ? t("account.connected") : t("account.login")}
-              </small>
+              <strong title={identityName}>{identityName}</strong>
+              <small>{identityStatus}</small>
             </span>
             <Icon name="chevron" />
           </Menu.Trigger>

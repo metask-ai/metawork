@@ -66,7 +66,7 @@ const account = {
   displayName: "Metask User",
 };
 
-function renderIdentity(callbacks) {
+function renderIdentity(callbacks, accountView = account) {
   return render(
     createElement(
       I18nContext.Provider,
@@ -78,7 +78,7 @@ function renderIdentity(callbacks) {
         },
       },
       createElement(AccountIdentity, {
-        account,
+        account: accountView,
         active: false,
         disabled: false,
         onBeginLogin() {},
@@ -87,6 +87,43 @@ function renderIdentity(callbacks) {
     ),
   );
 }
+
+test("signed-out account identity separates account, status, and login action", async () => {
+  let loginCalls = 0;
+  const user = userEvent.setup({ document: dom.window.document });
+  const { container } = renderIdentity(
+    {
+      onBeginLogin() {
+        loginCalls += 1;
+      },
+      onOpenSettings() {},
+      onLogout() {},
+    },
+    { state: "signed_out", displayName: "" },
+  );
+
+  const trigger = screen.getByRole("button", {
+    name: "Metask account menu",
+  });
+  assert.match(trigger.textContent, /Metask/);
+  assert.match(trigger.textContent, /Not signed in/);
+  assert.equal(container.querySelector(".account-avatar")?.textContent, "M");
+  assert.doesNotMatch(trigger.textContent, /Sign in with Metask/);
+
+  await user.click(trigger);
+
+  const menu = await screen.findByRole("menu", {
+    name: "Metask account menu",
+  });
+  assert.match(menu.textContent, /Metask account/);
+  assert.match(menu.textContent, /Not signed in/);
+  assert.doesNotMatch(menu.textContent, /Sign in to MetaWork/);
+
+  await user.click(
+    screen.getByRole("menuitem", { name: "Sign in with Metask" }),
+  );
+  assert.equal(loginCalls, 1);
+});
 
 test("account-menu sign out confirms in place without opening settings", async () => {
   const calls = { settings: 0, logout: 0 };
