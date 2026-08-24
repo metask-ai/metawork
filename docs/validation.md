@@ -132,13 +132,14 @@ architecture guard 必须保持 `PlatformServices.context` 零 allowlist。原�
 
 ```bash
 node scripts/setup-macos-local-signing.mjs setup
-node scripts/stage-agentcore-bundle.mjs /absolute/path/to/target-specific-bundle
+node scripts/stage-agentcore-bundle.mjs /absolute/path/to/aarch64-macos-bundle
+node scripts/stage-agentcore-bundle.mjs /absolute/path/to/x86_64-macos-bundle
 npm run build:debug
 npm run build:release
 npm run package:macos
 ```
 
-跨平台开发入口与 Apple Development 签名规则由 `dev.mjs` 负责，setup 只复用该开发 owner；Developer ID、应用与 DMG 签名、公证、staple、Gatekeeper、Finder 左到右拖拽布局、磁盘映像及挂载内容的身份与完整性规则由 `package-macos.mjs` 负责。两个 owner 必须保持双向隔离。Native SDK 必须先按 canonical staged bundle target 生成未签名 `.app`；应用签名前必须把 64 × 64 托盘 PNG stage 到与运行时相对路径一致的 `Contents/Resources/assets/icons/tray-icon.png`，并以 `lipo` 确认主程序恰好为该 target 的单一架构，随后只执行一次 Developer ID 应用签名，并在同一入口检查格式、尺寸、源资产一致性、Renderer、metadata 与签名 policy。`package:macos` 对 arm64 与 x86_64 staged bundle 分别只产出小写 `metawork-<version>-macos-arm64.dmg` 与 `metawork-<version>-macos-x64.dmg`，不生成 Universal、preview 或 ZIP。普通 check/test/build 不得访问个人证书、Finder 或 notary profile；`package:macos` 成功证明当前图形用户会话生成的可分发磁盘映像，不等于更新能力完成。
+跨平台开发入口与 Apple Development 签名规则由 `dev.mjs` 负责，setup 只复用该开发 owner；Developer ID、应用与 DMG 签名、公证、staple、Gatekeeper、Finder 左到右拖拽布局、磁盘映像及挂载内容的身份与完整性规则由 `package-macos.mjs` 负责。两个 owner 必须保持双向隔离。Native SDK 必须先按 resolved build target 从 `.agentcore/bundles/<target-id>` 生成未签名 `.app`；应用签名前必须把 64 × 64 托盘 PNG stage 到与运行时相对路径一致的 `Contents/Resources/assets/icons/tray-icon.png`，并以 `lipo` 确认主程序恰好为该 target 的单一架构，随后只执行一次 Developer ID 应用签名，并在同一入口检查格式、尺寸、源资产一致性、Renderer、metadata 与签名 policy。`package:macos` 默认 `all`，依次产出小写 `metawork-<version>-macos-arm64.dmg` 与 `metawork-<version>-macos-x64.dmg`；`npm run package:macos -- arm64` 或 `-- x64` 只产出所选单一架构。入口不得根据 last-stage state 推断架构，也不生成 Universal、preview 或 ZIP。普通 check/test/build 不得访问个人证书、Finder 或 notary profile；`package:macos` 成功证明当前图形用户会话生成的可分发磁盘映像，不等于更新能力完成。
 
 Keychain 跨重建授权稳定性当前为 **人工验收待完成**：在同一精确 commit 上让 Debug app 写入并读取 Account credential，完全退出并重新构建，再次恢复 Account，确认没有出现新的 Account Keychain 授权框。首次选择签名私钥产生的系统授权不属于 Account Keychain 失败。
 

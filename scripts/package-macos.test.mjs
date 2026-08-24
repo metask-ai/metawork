@@ -12,6 +12,7 @@ import {
   localPackageMetadata,
   localProductIdentity,
   macosDistributionForAgentCoreTarget,
+  macosPackageTargetIds,
   parseDeveloperIdCertificateReport,
   parseNativePackageMetadata,
   parseNotarySubmission,
@@ -63,6 +64,20 @@ test("distribution DMG metadata comes from the Native product manifest", () => {
         `.{\n.display_name = "bad name",\n.version = "latest",\n}`,
       ),
     /invalid native package metadata/u,
+  );
+});
+
+test("macOS package selection is explicit and defaults to both architectures", () => {
+  assert.deepEqual(macosPackageTargetIds(), ["aarch64-macos", "x86_64-macos"]);
+  assert.deepEqual(macosPackageTargetIds("all"), [
+    "aarch64-macos",
+    "x86_64-macos",
+  ]);
+  assert.deepEqual(macosPackageTargetIds("arm64"), ["aarch64-macos"]);
+  assert.deepEqual(macosPackageTargetIds("x64"), ["x86_64-macos"]);
+  assert.throws(
+    () => macosPackageTargetIds("universal"),
+    /expected arm64, x64, or all/u,
   );
 });
 
@@ -131,10 +146,14 @@ test("macOS packaging has one public owner and signs only after resource staging
     packageJson.scripts["package:macos"],
     "node scripts/package-macos.mjs",
   );
+  assert.match(
+    packageScript,
+    /runNode\("scripts\/build\.mjs", \["release", distribution\.targetId\]\)/u,
+  );
   assert.match(packageScript, /"--signing",\s*\n\s*"none"/u);
   const stagingIndex = packageScript.indexOf("stageMacosTrayIcon();");
   const architectureIndex = packageScript.indexOf(
-    "verifyPackagedMacosExecutableArchitecture(expectedArchitecture);",
+    "verifyPackagedMacosExecutableArchitecture(distribution.executable);",
   );
   const signingIndex = packageScript.indexOf(
     "signWithDeveloperId(packagedAppPath",

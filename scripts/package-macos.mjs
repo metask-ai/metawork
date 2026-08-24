@@ -105,6 +105,15 @@ export function macosDistributionForAgentCoreTarget(targetId) {
   });
 }
 
+export function macosPackageTargetIds(selection = "all") {
+  if (selection === "all") return ["aarch64-macos", "x86_64-macos"];
+  if (selection === "arm64") return ["aarch64-macos"];
+  if (selection === "x64") return ["x86_64-macos"];
+  throw new Error(
+    `unsupported macOS package architecture: ${selection}; expected arm64, x64, or all`,
+  );
+}
+
 export function requireSingleMacosExecutableArchitecture(output, expected) {
   const nonFat = output.match(/\bis architecture:\s*([A-Za-z0-9_]+)\s*$/mu);
   const fat = output.match(/\bare:\s*([A-Za-z0-9_ ]+)\s*$/mu);
@@ -767,8 +776,8 @@ function notarizeDiskImage(identity, distributionDiskImagePath) {
   return { artifactPath: distributionDiskImagePath, digest, submission };
 }
 
-function buildPackagedMacosApp(identity, expectedArchitecture) {
-  runNode("scripts/build.mjs", ["release"]);
+function buildPackagedMacosApp(identity, distribution) {
+  runNode("scripts/build.mjs", ["release", distribution.targetId]);
   rmSync(packagedAppPath, { recursive: true, force: true });
   runNative([
     "package",
@@ -780,37 +789,45 @@ function buildPackagedMacosApp(identity, expectedArchitecture) {
     "none",
   ]);
   stageMacosTrayIcon();
-  verifyPackagedMacosExecutableArchitecture(expectedArchitecture);
+  verifyPackagedMacosExecutableArchitecture(distribution.executable);
   signWithDeveloperId(packagedAppPath, identity, {
     preserveEntitlements: true,
   });
   return verifyPackagedMacosApp(identity);
 }
 
-async function packageMacos() {
+async function packageMacos(selection) {
   requireMacos();
-  const bundle = await verifyStagedAgentCoreBundle(repositoryRoot);
-  const distribution = macosDistributionForAgentCoreTarget(
-    bundle.manifest.target.id,
+  const distributions = macosPackageTargetIds(selection).map(
+    macosDistributionForAgentCoreTarget,
   );
+  for (const distribution of distributions) {
+    await verifyStagedAgentCoreBundle(repositoryRoot, {
+      targetId: distribution.targetId,
+    });
+  }
+  for (const distribution of distributions) {
+    rmSync(distribution.diskImagePath, { force: true });
+  }
   const identity = resolveDistributionIdentity();
-  rmSync(distribution.diskImagePath, { force: true });
-  const signature = buildPackagedMacosApp(identity, distribution.executable);
-  createDistributionDiskImage(identity, distribution.diskImagePath);
-  const notarized = notarizeDiskImage(identity, distribution.diskImagePath);
-  console.log(
-    `built Developer ID signed and notarized package ${packagedAppPath} (${signature.policy})`,
-  );
-  console.log(
-    `Apple notarization ${notarized.submission.id} accepted; final DMG ${notarized.artifactPath} (sha256=${notarized.digest})`,
-  );
+  for (const distribution of distributions) {
+    const signature = buildPackagedMacosApp(identity, distribution);
+    createDistributionDiskImage(identity, distribution.diskImagePath);
+    const notarized = notarizeDiskImage(identity, distribution.diskImagePath);
+    console.log(
+      `built Developer ID signed and notarized ${distribution.artifact} package ${packagedAppPath} (${signature.policy})`,
+    );
+    console.log(
+      `Apple notarization ${notarized.submission.id} accepted; final DMG ${notarized.artifactPath} (sha256=${notarized.digest})`,
+    );
+  }
 }
 
 async function main() {
-  if (process.argv.length !== 2) {
-    throw new Error("package:macos does not accept arguments");
+  if (process.argv.length > 3) {
+    throw new Error("usage: npm run package:macos -- [arm64|x64|all]");
   }
-  await packageMacos();
+  await packageMacos(process.argv[2] ?? "all");
 }
 
 const invokedPath = process.argv[1]
