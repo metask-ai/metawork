@@ -862,9 +862,16 @@ pub const Runtime = struct {
         );
         defer releaseOwned(self.api, &diagnostic);
         const typed_status = sdk.Status.fromCode(status) catch return error.CoreCallFailed;
-        if (typed_status != .ok or raw_session == null) {
+        if (typed_status != .ok) {
+            // AgentCore must not return a live handle for a rejected create.
+            // Preserve the typed freshness signal only for a well-formed
+            // rejection so Workbench can rebuild MCP authority.
+            if (raw_session != null) return error.CoreCallFailed;
+            if (typed_status == .mcp_not_refreshed)
+                return error.McpNotRefreshed;
             return error.CoreCallFailed;
         }
+        if (raw_session == null) return error.CoreCallFailed;
         session.raw = raw_session;
         self.sessions[session_slot] = session;
         return .{ .id = session_id, .session = session };
@@ -1384,6 +1391,7 @@ fn mapRestoreFailure(failure: checkpoint_restore.Failure) Error {
         .checkpoint_unsupported => error.CheckpointUnsupported,
         .checkpoint_incompatible => error.CheckpointIncompatible,
         .logical_session_conflict => error.LogicalSessionConflict,
+        .mcp_not_refreshed => error.McpNotRefreshed,
         .cancelled => error.RestoreCancelled,
         .io_failed => error.RestoreIoFailed,
         .dependency_contract => error.RestoreContractFailed,
@@ -1394,6 +1402,16 @@ fn mapRestoreFailure(failure: checkpoint_restore.Failure) Error {
         .host_out_of_memory,
         => error.RestoreFailed,
     };
+}
+
+test "restore preserves typed MCP freshness rejection" {
+    try std.testing.expectEqual(
+        error.McpNotRefreshed,
+        mapRestoreFailure(.{
+            .stage = .restore,
+            .reason = .mcp_not_refreshed,
+        }),
+    );
 }
 
 fn mapMcpCatalogError(err: anyerror) Error {

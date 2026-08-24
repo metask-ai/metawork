@@ -833,7 +833,7 @@ export const enUS = {
   "mutation.reason.task_busy": "This task is already working.",
   "mutation.reason.no_history": "Run this task once before compacting context.",
   "mutation.reason.catalog_loading":
-    "Skills are still loading. You can send text or wait and try again.",
+    "Capabilities are refreshing. Please wait a moment and try again.",
   "mutation.reason.catalog_unavailable":
     "Skills are unavailable for this workspace or task.",
   "mutation.reason.stale_catalog":

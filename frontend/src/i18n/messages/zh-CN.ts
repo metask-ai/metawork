@@ -754,8 +754,7 @@ export const zhCN: Record<MessageId, string> = {
   "mutation.reason.recovery_unavailable": "当前保存状态已无法恢复此会话。",
   "mutation.reason.task_busy": "该任务正在执行中。",
   "mutation.reason.no_history": "请先运行一次任务，再压缩上下文。",
-  "mutation.reason.catalog_loading":
-    "Skill 仍在加载；你可以先发送文本，或稍后重试。",
+  "mutation.reason.catalog_loading": "相关能力目录正在刷新，请稍后重试。",
   "mutation.reason.catalog_unavailable": "当前工作区或任务无法使用 Skill。",
   "mutation.reason.stale_catalog": "Skill 目录已变化，请刷新后重新选择。",
   "mutation.reason.skill_not_found": "所选 Skill 已不在当前任务目录中。",

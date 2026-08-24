@@ -351,6 +351,7 @@ pub const Configuration = struct {
     change_notifier: ChangeNotifier = .{},
     directories: AppDirectories = .{},
     schedule_timer: ScheduleTimer = .{},
+    mcp_refresh_timer: McpRefreshTimer = .{},
     schedule_persistence: SchedulePersistence = .{},
     task_persistence: TaskPersistence = .{},
     checkpoint_store: CheckpointStoreConfiguration = .{},
@@ -716,6 +717,9 @@ const McpProductState = struct {
     management: ?mcp_configuration.ManagementPort,
     admission: McpAdmissionAuthority,
     refresh_request_generation: u64 = 0,
+    refresh_pending: bool = false,
+    refresh_pending_blocks_admission: bool = false,
+    refresh_deadline_ms: ?u64 = null,
     refresh_job: ?*McpRefreshJob = null,
     connection_test: ?McpConnectionTest = null,
     configuration_apply_state: McpConfigurationApplyState = .idle,
@@ -1034,11 +1038,7 @@ fn buildMcpRefreshAllowlists(
     var write: usize = 0;
     for (startup.servers, mcp.preparation.server_states) |server, state| {
         if (state != .eligible) continue;
-        const target = if (desired) |registry|
-            findMcpServer(registry.servers, server.id)
-        else
-            null;
-        const tools = if (target) |value| if (value.enabled) value.tools else &.{} else &.{};
+        const tools = mcpRefreshToolsForServer(desired, server.id);
         const owned_tools = try allocator.alloc([]const u8, tools.len);
         for (tools, owned_tools) |tool, *owned|
             owned.* = try allocator.dupe(u8, tool);
@@ -1049,6 +1049,15 @@ fn buildMcpRefreshAllowlists(
         write += 1;
     }
     return allowlists;
+}
+
+fn mcpRefreshToolsForServer(
+    desired: ?mcp_configuration.RegistryWire,
+    server_id: []const u8,
+) []const []const u8 {
+    const registry = desired orelse return &.{};
+    const server = findMcpServer(registry.servers, server_id) orelse return &.{};
+    return mcpServerToolsForAdmission(registry, server);
 }
 
 pub const TaskPersistenceCommit = enum {
@@ -1323,6 +1332,29 @@ pub const ScheduleTimer = struct {
     }
 };
 
+/// One-shot monotonic timer used only to refresh AgentCore MCP authority
+/// before its earliest advertised catalog TTL expires.
+pub const McpRefreshTimer = struct {
+    context: ?*anyopaque = null,
+    enabled: bool = false,
+    now_monotonic_ms: *const fn (?*anyopaque) ?u64 = noMcpRefreshClock,
+    arm_at: *const fn (?*anyopaque, u64) bool = noMcpRefreshArm,
+    cancel: *const fn (?*anyopaque) void = noMcpRefreshCancel,
+
+    fn now(self: McpRefreshTimer) ?u64 {
+        if (!self.enabled) return null;
+        return self.now_monotonic_ms(self.context);
+    }
+
+    fn armAt(self: McpRefreshTimer, deadline_ms: u64) bool {
+        return self.enabled and self.arm_at(self.context, deadline_ms);
+    }
+
+    fn cancelCurrent(self: McpRefreshTimer) void {
+        if (self.enabled) self.cancel(self.context);
+    }
+};
+
 fn noScheduleClock(_: ?*anyopaque) ?u64 {
     return null;
 }
@@ -1332,6 +1364,16 @@ fn noScheduleArm(_: ?*anyopaque, _: u64) bool {
 }
 
 fn noScheduleCancel(_: ?*anyopaque) void {}
+
+fn noMcpRefreshClock(_: ?*anyopaque) ?u64 {
+    return null;
+}
+
+fn noMcpRefreshArm(_: ?*anyopaque, _: u64) bool {
+    return false;
+}
+
+fn noMcpRefreshCancel(_: ?*anyopaque) void {}
 
 pub const TransportFailureStage = enum {
     ingress_validation,
@@ -2059,6 +2101,7 @@ const McpRefreshJob = struct {
     runtime: *lifecycle.Runtime,
     notifier: ChangeNotifier,
     request_generation: u64,
+    requested_at_ms: ?u64,
     arena: std.heap.ArenaAllocator,
     allowlists: []const lifecycle.McpServerAllowlist,
     build_admission: bool,
@@ -2617,6 +2660,7 @@ pub const Workbench = struct {
     skill_staging_root: ?[]u8,
     skill_reconciliation: ?SkillReconciliation = null,
     schedule_timer: ScheduleTimer,
+    mcp_refresh_timer: McpRefreshTimer,
     schedule_persistence: SchedulePersistence,
     schedule_persistence_health: SchedulePersistenceHealth,
     schedule_notifier: ScheduleNotifier,
@@ -2887,6 +2931,7 @@ pub const Workbench = struct {
             .skill_enablement_health = skill_enablement_health,
             .skill_staging_root = skill_staging_root,
             .schedule_timer = configuration.schedule_timer,
+            .mcp_refresh_timer = configuration.mcp_refresh_timer,
             .schedule_persistence = configuration.schedule_persistence,
             .schedule_persistence_health = schedule_persistence_health,
             .schedule_notifier = configuration.schedule_notifier,
@@ -2954,6 +2999,8 @@ pub const Workbench = struct {
             };
             mcp_management = null;
             _ = workbench.syncMcpHealthNoFail();
+            workbench.updateMcpRefreshDeadlineNoFail();
+            workbench.rearmMcpRefreshTimerNoFail();
         }
         return workbench;
     }
@@ -4177,22 +4224,60 @@ pub const Workbench = struct {
     pub fn refreshMcpCatalog(self: *Workbench) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
+        if (!try self.requestMcpCatalogRefresh(false)) return error.CatalogLoading;
+    }
+
+    /// Records every refresh trigger before attempting to enqueue work. A
+    /// request that arrives while refresh, apply, or OAuth owns the Runtime is
+    /// retained and consumed after that operation reaches its main-thread
+    /// completion boundary.
+    fn requestMcpCatalogRefresh(
+        self: *Workbench,
+        invalidate_admission: bool,
+    ) Error!bool {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
         const mcp = if (self.mcp) |*value| value else return error.CatalogUnavailable;
         if (!mcp.committed) return error.CatalogUnavailable;
         switch (mcp.preparation.state) {
             .empty, .available => {},
             .unavailable => return error.CatalogUnavailable,
         }
-        if (mcp.refresh_job != null) return error.CatalogLoading;
         const management = if (mcp.management) |*value| value else return error.CatalogUnavailable;
         const inspection = management.inspect();
         if (inspection.health != .ready) return error.McpManagementUnavailable;
+        _ = management.desiredRegistry() orelse
+            return error.McpManagementUnavailable;
         if (mcp.refresh_request_generation == std.math.maxInt(u64))
             return error.CatalogRequestGenerationExhausted;
-        const generation = mcp.refresh_request_generation + 1;
+        self.mcp_refresh_timer.cancelCurrent();
+        mcp.refresh_request_generation += 1;
+        mcp.refresh_pending = true;
+        mcp.refresh_pending_blocks_admission =
+            mcp.refresh_pending_blocks_admission or invalidate_admission;
+        if (invalidate_admission) self.blockMcpAdmission(mcp, .refreshing);
+        const started = try self.startPendingMcpCatalogRefresh();
+        if (!started) self.bumpRevision();
+        return started;
+    }
+
+    fn startPendingMcpCatalogRefresh(self: *Workbench) Error!bool {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        const mcp = if (self.mcp) |*value| value else return error.CatalogUnavailable;
+        if (!mcp.refresh_pending) return false;
+        if (mcp.refresh_job != null or
+            mcp.configuration_apply_state == .applying or
+            mcp.authorization_operation != null)
+            return false;
+        const management = if (mcp.management) |*value| value else return error.CatalogUnavailable;
+        const inspection = management.inspect();
+        if (inspection.health != .ready) return error.McpManagementUnavailable;
+        const desired = management.desiredRegistry() orelse
+            return error.McpManagementUnavailable;
+        if (desired.oauth_operation != null) return false;
+        const generation = mcp.refresh_request_generation;
+        std.debug.assert(generation != 0);
         var refresh_arena = std.heap.ArenaAllocator.init(self.allocator);
         errdefer refresh_arena.deinit();
-        const desired = management.desiredRegistry();
         const alignment = inspection.runtime_alignment;
         const allowlists = try buildMcpRefreshAllowlists(
             refresh_arena.allocator(),
@@ -4206,20 +4291,36 @@ pub const Workbench = struct {
             .runtime = self.agent_runtime,
             .notifier = self.change_notifier,
             .request_generation = generation,
+            .requested_at_ms = self.mcp_refresh_timer.now(),
             .arena = refresh_arena,
             .allowlists = allowlists,
             .build_admission = alignment == .current,
         };
-        self.blockMcpAdmission(mcp, .refreshing);
-        errdefer self.blockMcpAdmission(mcp, .activation_unavailable);
         try self.executor.enqueue(.{
             .context = job,
             .execute_fn = executeMcpRefreshJob,
             .cancel_fn = cancelMcpRefreshJob,
         });
-        mcp.refresh_request_generation = generation;
+        self.blockMcpAdmission(mcp, .refreshing);
+        mcp.refresh_pending = false;
+        mcp.refresh_pending_blocks_admission = false;
         mcp.refresh_job = job;
         self.bumpRevision();
+        return true;
+    }
+
+    /// Native one-shot timer ingress. Refresh work is always enqueued on the
+    /// bounded Workbench executor; the main thread never performs catalog I/O.
+    pub fn onMcpRefreshTimer(self: *Workbench) void {
+        if (self.shutting_down) return;
+        self.syncLifecycle();
+        _ = self.requestMcpCatalogRefresh(true) catch {
+            if (self.mcp) |*mcp| {
+                if (mcp.refresh_job == null and !mcp.refresh_pending)
+                    self.blockMcpAdmissionForCurrentState(mcp);
+                self.bumpRevision();
+            }
+        };
     }
 
     pub fn taskCatalog(
@@ -4504,7 +4605,8 @@ pub const Workbench = struct {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
         if (self.mcp) |*mcp|
-            if (mcp.refresh_job != null) return error.CatalogLoading;
+            if (mcp.refresh_job != null or mcp.refresh_pending_blocks_admission)
+                return error.CatalogLoading;
         try self.requireTaskPersistenceMutation();
         if (self.execution_replacement != .none)
             return error.ExecutionInUse;
@@ -4645,6 +4747,10 @@ pub const Workbench = struct {
             .mcp_selection = self.mcpSelectionForNewTask(),
         }) catch |err| switch (err) {
             error.SessionCapacity => return error.TaskCapacity,
+            error.McpNotRefreshed => {
+                self.recoverExpiredMcpCatalogNoFail();
+                return error.CatalogLoading;
+            },
             else => return err,
         };
         self.next_task_id +%= 1;
@@ -5934,6 +6040,7 @@ pub const Workbench = struct {
         changed = self.commitMcpRefreshJobNoFail() or changed;
         changed = self.syncMcpHealthNoFail() or changed;
         var durable_changed = false;
+        var mcp_refresh_needed = false;
         for (self.tasks) |*entry| {
             const view = &(entry.* orelse continue);
             const recovery_commit = self.commitRecoveryJobNoFail(view);
@@ -5943,6 +6050,7 @@ pub const Workbench = struct {
                 changed = true;
                 durable_changed = true;
             }
+            mcp_refresh_needed = recovery_commit.mcp_refresh_needed or mcp_refresh_needed;
             const close_completion = view.runtime.close_completion.load(.acquire);
             // Session close may finish after Agent execution but before the
             // main thread has drained callbacks already enqueued for the Run.
@@ -6072,11 +6180,13 @@ pub const Workbench = struct {
         }
         if (self.advanceRequestedTaskDeletionsNoFail()) changed = true;
         if (changed) self.bumpRevision();
+        if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
     }
 
     const RecoveryCommit = struct {
         changed: bool = false,
         durable_changed: bool = false,
+        mcp_refresh_needed: bool = false,
     };
 
     fn commitRecoveryJobNoFail(
@@ -6090,6 +6200,7 @@ pub const Workbench = struct {
             .none, .run, .compact => false,
         };
         var durable_changed = false;
+        var mcp_refresh_needed = false;
         if (job.takeCandidate()) |candidate_value| {
             var candidate = candidate_value;
             const workspace = self.findWorkspace(task.durable.workspace_id);
@@ -6130,6 +6241,11 @@ pub const Workbench = struct {
             }
         } else if (job.failure()) |failure| {
             task.runtime.last_restore_failure = failure;
+            mcp_refresh_needed = failure == .mcp_not_refreshed and
+                optionalU64Equal(
+                    self.recoveryMcpGeneration(),
+                    job.attempt.mcp_catalog_generation,
+                );
             switch (failure) {
                 .checkpoint_missing => {
                     task.durable.checkpoint_anchor = .blob_missing;
@@ -6154,7 +6270,11 @@ pub const Workbench = struct {
         const references = task.runtime.worker_references.fetchSub(1, .release);
         std.debug.assert(references != 0);
         job.deinit();
-        return .{ .changed = true, .durable_changed = durable_changed };
+        return .{
+            .changed = true,
+            .durable_changed = durable_changed,
+            .mcp_refresh_needed = mcp_refresh_needed,
+        };
     }
 
     fn commitCheckpointPostprocessesNoFail(
@@ -6537,6 +6657,10 @@ pub const Workbench = struct {
         if (inspection.health != .ready or
             inspection.desired_generation != expected_generation)
             return error.McpManagementUnavailable;
+        const registry = management.desiredRegistry() orelse
+            return error.McpManagementUnavailable;
+        if (registry.oauth_operation != null) return error.CatalogLoading;
+        self.mcp_refresh_timer.cancelCurrent();
         mcp.configuration_apply_state = .applying;
         self.blockMcpAdmission(mcp, .refreshing);
         self.bumpRevision();
@@ -6570,6 +6694,11 @@ pub const Workbench = struct {
         mcp.preparation = preparation.take();
         management.installRuntimeManifest(manifest);
         mcp.configuration_apply_state = .idle;
+        // A successful apply already performs official activation/catalog
+        // discovery, so it satisfies refresh requests accumulated while the
+        // apply operation owned the Runtime.
+        mcp.refresh_pending = false;
+        mcp.refresh_pending_blocks_admission = false;
         if (activation_failed) {
             if (selection) |value| value.deinit();
             self.blockMcpAdmission(mcp, .activation_unavailable);
@@ -6583,6 +6712,8 @@ pub const Workbench = struct {
             } });
         }
         mcp.connection_test = null;
+        self.updateMcpRefreshDeadlineNoFail();
+        self.rearmMcpRefreshTimerNoFail();
         self.bumpRevision();
         return true;
     }
@@ -6598,6 +6729,7 @@ pub const Workbench = struct {
             return;
         mcp.configuration_apply_state = .failed;
         self.blockMcpAdmissionForCurrentState(mcp);
+        self.rearmMcpRefreshTimerNoFail();
         self.bumpRevision();
     }
 
@@ -6754,7 +6886,9 @@ pub const Workbench = struct {
     ) Error!?McpAuthorizationStart {
         if (self.shutting_down) return null;
         const mcp = if (self.mcp) |*value| value else return null;
-        if (mcp.refresh_job != null or mcp.authorization_operation != null)
+        if (mcp.refresh_job != null or
+            mcp.authorization_operation != null or
+            mcp.configuration_apply_state == .applying)
             return null;
         const management = if (mcp.management) |*value| value else return null;
         if (!mcpExpectedGenerationMatches(management, expected_generation) or
@@ -6837,6 +6971,7 @@ pub const Workbench = struct {
             .server_id = operation_server_id,
             .operation_id = operation_identity,
         };
+        self.mcp_refresh_timer.cancelCurrent();
         mcp.authorization_operation = operation;
         self.bumpRevision();
         return result;
@@ -6867,6 +7002,7 @@ pub const Workbench = struct {
         if (!std.mem.eql(u8, operation.operation_id, operation_id)) return false;
         operation.deinit(self.allocator);
         mcp.authorization_operation = null;
+        self.rearmMcpRefreshTimerNoFail();
         self.bumpRevision();
         return true;
     }
@@ -7012,7 +7148,8 @@ pub const Workbench = struct {
     ) Error!McpOauthAuthorizationOutcome {
         if (self.shutting_down or plan.attempt_id == 0) return .rejected;
         const mcp = if (self.mcp) |*value| value else return .rejected;
-        if (mcp.refresh_job != null) return .rejected;
+        if (mcp.refresh_job != null or mcp.configuration_apply_state == .applying)
+            return .rejected;
         if (!mcpAuthorizationAt(
             mcp,
             plan.server_id,
@@ -7125,7 +7262,12 @@ pub const Workbench = struct {
             return .rejected;
         };
         var preparation = try management.prepareCompleteDynamicRegistration(input);
-        return self.commitMcpMutation(mcp, &preparation);
+        const outcome = try self.commitMcpMutation(mcp, &preparation);
+        switch (outcome) {
+            .saved, .saved_recovery_required => self.rearmMcpRefreshTimerNoFail(),
+            else => {},
+        }
+        return outcome;
     }
 
     pub fn beginMcpOauthCodeExchange(
@@ -7134,7 +7276,8 @@ pub const Workbench = struct {
     ) Error!McpOauthCodeExchangeBeginOutcome {
         if (self.shutting_down) return .rejected;
         const mcp = if (self.mcp) |*value| value else return .rejected;
-        if (mcp.refresh_job != null) return .rejected;
+        if (mcp.refresh_job != null or mcp.configuration_apply_state == .applying)
+            return .rejected;
         if (!mcpAuthorizationAt(mcp, server_id, &.{.awaiting_browser}))
             return .rejected;
         const management = if (mcp.management) |*value| value else return .rejected;
@@ -7198,7 +7341,12 @@ pub const Workbench = struct {
             return .rejected;
         };
         var preparation = try management.prepareCompleteCodeExchange(input);
-        return self.commitMcpMutation(mcp, &preparation);
+        const outcome = try self.commitMcpMutation(mcp, &preparation);
+        switch (outcome) {
+            .saved, .saved_recovery_required => self.rearmMcpRefreshTimerNoFail(),
+            else => {},
+        }
+        return outcome;
     }
 
     fn commitMcpOauthOperationBegin(
@@ -7215,6 +7363,7 @@ pub const Workbench = struct {
         const outcome = try management.commitPreparedOauthOperationState(preparation);
         switch (outcome) {
             .saved => {
+                self.mcp_refresh_timer.cancelCurrent();
                 self.installMcpCommittedDesiredState(mcp, management, reduced);
                 reduced_owned = false;
                 self.bumpRevision();
@@ -7226,6 +7375,7 @@ pub const Workbench = struct {
                 } };
             },
             .indeterminate => {
+                self.mcp_refresh_timer.cancelCurrent();
                 self.blockMcpAdmission(mcp, .persistence_outcome_unknown);
                 self.bumpRevision();
                 return .persistence_outcome_unknown;
@@ -7274,6 +7424,7 @@ pub const Workbench = struct {
         self.syncLifecycle();
         const mcp = if (self.mcp) |*value| value else return .rejected;
         if (!mcp.committed or mcp.refresh_job != null or
+            mcp.configuration_apply_state == .applying or
             mcp.authorization_operation != null)
             return .rejected;
         const management = if (mcp.management) |*value| value else return .rejected;
@@ -7311,6 +7462,7 @@ pub const Workbench = struct {
         const outcome = try management.commitPreparedOauthOperationState(&preparation);
         switch (outcome) {
             .saved => {
+                self.mcp_refresh_timer.cancelCurrent();
                 self.installMcpCommittedDesiredState(mcp, management, reduced);
                 reduced_owned = false;
                 binding_owned = false;
@@ -7318,6 +7470,7 @@ pub const Workbench = struct {
                 return .{ .started = binding };
             },
             .indeterminate => {
+                self.mcp_refresh_timer.cancelCurrent();
                 self.blockMcpAdmission(mcp, .persistence_outcome_unknown);
                 self.bumpRevision();
                 return .persistence_outcome_unknown;
@@ -7372,6 +7525,7 @@ pub const Workbench = struct {
                         runtime_commit.commit();
                         self.installMcpCommittedDesiredState(mcp, management, candidate);
                         candidate_owned = false;
+                        self.rearmMcpRefreshTimerNoFail();
                         self.bumpRevision();
                     },
                     .indeterminate => {
@@ -7410,6 +7564,7 @@ pub const Workbench = struct {
             .saved => {
                 self.installMcpCommittedDesiredState(mcp, management, candidate);
                 candidate_owned = false;
+                self.rearmMcpRefreshTimerNoFail();
                 self.bumpRevision();
             },
             .indeterminate => {
@@ -7431,7 +7586,12 @@ pub const Workbench = struct {
         if (mcp.refresh_job != null) return .rejected;
         const management = if (mcp.management) |*value| value else return .rejected;
         var preparation = try management.prepareOauthOperationRecovery(operation_id);
-        return try self.commitMcpMutation(mcp, &preparation);
+        const outcome = try self.commitMcpMutation(mcp, &preparation);
+        switch (outcome) {
+            .saved, .saved_recovery_required => self.rearmMcpRefreshTimerNoFail(),
+            else => {},
+        }
+        return outcome;
     }
 
     pub fn createMcpHttpServer(
@@ -7803,12 +7963,69 @@ pub const Workbench = struct {
         };
     }
 
+    fn recoverExpiredMcpCatalogNoFail(self: *Workbench) void {
+        if (self.shutting_down) return;
+        _ = self.requestMcpCatalogRefresh(true) catch {
+            if (self.mcp) |*mcp| {
+                if (mcp.refresh_job == null and !mcp.refresh_pending)
+                    self.blockMcpAdmissionForCurrentState(mcp);
+                self.bumpRevision();
+            }
+        };
+    }
+
+    fn updateMcpRefreshDeadlineNoFail(self: *Workbench) void {
+        const mcp = if (self.mcp) |*value| value else return;
+        mcp.refresh_deadline_ms = null;
+        const activation = mcp.activation orelse return;
+        mcp.refresh_deadline_ms = mcpRefreshDeadlineMs(
+            activation.catalogServers(),
+            self.mcp_refresh_timer.now(),
+        );
+    }
+
+    fn rearmMcpRefreshTimerNoFail(self: *Workbench) void {
+        self.mcp_refresh_timer.cancelCurrent();
+        if (self.shutting_down) return;
+        const pending = if (self.mcp) |*mcp| mcp.refresh_pending else false;
+        if (pending) {
+            const started = self.startPendingMcpCatalogRefresh() catch return;
+            if (started) return;
+            if (self.mcp) |*mcp| if (mcp.refresh_pending) return;
+        }
+        if (!self.mcp_refresh_timer.enabled) return;
+        const deadline_ms = deadline: {
+            const mcp = if (self.mcp) |*value| value else return;
+            if (!mcp.committed or
+                mcp.refresh_job != null or
+                mcp.configuration_apply_state == .applying or
+                mcp.authorization_operation != null or
+                mcp.runtime_auth_failure_blocked or
+                mcp.activation_failed)
+                return;
+            const management = if (mcp.management) |*value| value else return;
+            const inspection = management.inspect();
+            if (inspection.health != .ready or inspection.runtime_alignment != .current)
+                return;
+            const desired = management.desiredRegistry() orelse return;
+            if (desired.oauth_operation != null) return;
+            break :deadline mcp.refresh_deadline_ms orelse return;
+        };
+        const now_ms = self.mcp_refresh_timer.now() orelse return;
+        if (deadline_ms <= now_ms) {
+            _ = self.requestMcpCatalogRefresh(true) catch {};
+            return;
+        }
+        _ = self.mcp_refresh_timer.armAt(deadline_ms);
+    }
+
     fn createRecoveryMcpAuthority(self: *Workbench) Error!RecoveryMcpAuthority {
         const mcp = if (self.mcp) |*value| value else return .{
             .selection = null,
             .catalog_generation = null,
         };
         if (!mcp.committed or mcp.refresh_job != null or
+            mcp.refresh_pending_blocks_admission or
             mcp.authorization_operation != null or
             mcp.runtime_auth_failure_blocked)
             return error.RecoveryUnavailable;
@@ -7858,6 +8075,7 @@ pub const Workbench = struct {
     fn recoveryMcpGeneration(self: *const Workbench) ?u64 {
         const mcp = if (self.mcp) |*value| value else return null;
         if (!mcp.committed or mcp.refresh_job != null or
+            mcp.refresh_pending_blocks_admission or
             mcp.authorization_operation != null or
             mcp.runtime_auth_failure_blocked)
             return null;
@@ -8293,7 +8511,7 @@ pub const Workbench = struct {
         writer.print("{{\"availability\":\"{s}\",\"managementHealth\":\"{s}\",\"operation\":\"{s}\",\"configurationApply\":\"{s}\",\"authorizationOperation\":", .{
             @tagName(self.mcpAvailability()),
             @tagName(inspection.health),
-            if (mcp.refresh_job != null) "refreshing" else "idle",
+            if (mcp.refresh_job != null or mcp.refresh_pending) "refreshing" else "idle",
             @tagName(mcp.configuration_apply_state),
         }) catch return error.SnapshotTooLarge;
         try writeMcpAuthorizationOperation(writer, mcp, registry);
@@ -8779,6 +8997,7 @@ pub const Workbench = struct {
     pub fn deinit(self: *Workbench) void {
         self.shutdownExecutor();
         self.schedule_timer.cancelCurrent();
+        self.mcp_refresh_timer.cancelCurrent();
         self.markSkillCatalogUnavailable();
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
@@ -8820,6 +9039,7 @@ pub const Workbench = struct {
             mcp.activation_failed = true;
         }
         self.schedule_timer.cancelCurrent();
+        self.mcp_refresh_timer.cancelCurrent();
         for (self.tasks) |*entry| {
             const view = &(entry.* orelse continue);
             cancelTaskCheckpoints(view);
@@ -9709,6 +9929,7 @@ pub const Workbench = struct {
             return false;
         const mcp = if (self.mcp) |*state| state else return true;
         if (!mcp.committed or mcp.refresh_job != null or
+            mcp.refresh_pending_blocks_admission or
             mcp.authorization_operation != null or
             mcp.runtime_auth_failure_blocked)
             return false;
@@ -12100,6 +12321,10 @@ pub const Workbench = struct {
                         if (mcp.activation) |old| old.deinit();
                         mcp.activation = activated.activation;
                         mcp.activation_failed = false;
+                        mcp.refresh_deadline_ms = mcpRefreshDeadlineMs(
+                            activated.activation.catalogServers(),
+                            job.requested_at_ms,
+                        );
                         if (job.build_admission) {
                             self.replaceMcpAdmission(mcp, .{ .ready = .{
                                 .selection = activated.selection,
@@ -12115,6 +12340,7 @@ pub const Workbench = struct {
                     if (mcp.activation) |old| old.deinit();
                     mcp.activation = null;
                     mcp.activation_failed = false;
+                    mcp.refresh_deadline_ms = null;
                     if (job.build_admission)
                         self.replaceMcpAdmission(mcp, .{ .ready = .{
                             .selection = null,
@@ -12127,6 +12353,7 @@ pub const Workbench = struct {
                     if (mcp.activation) |old| old.deinit();
                     mcp.activation = null;
                     mcp.activation_failed = true;
+                    mcp.refresh_deadline_ms = null;
                     self.blockMcpAdmission(mcp, .activation_unavailable);
                 },
             },
@@ -12134,6 +12361,7 @@ pub const Workbench = struct {
             .queued, .running => unreachable,
         }
         job.deinit();
+        self.rearmMcpRefreshTimerNoFail();
         return true;
     }
 
@@ -15436,6 +15664,77 @@ fn taskCatalogProjection(task: *const TaskView) CatalogProjection {
         .{ .availability = .uninitialized };
 }
 
+fn mcpRefreshDelayMs(servers: []const lifecycle.McpCatalogServer) ?u64 {
+    const minimum_proactive_ttl_ms: u64 = 30_000;
+    var earliest_ttl_ms: ?u64 = null;
+    for (servers) |server| {
+        if (!server.fresh or server.ttl_remaining_ms <= minimum_proactive_ttl_ms)
+            continue;
+        earliest_ttl_ms = if (earliest_ttl_ms) |current|
+            @min(current, server.ttl_remaining_ms)
+        else
+            server.ttl_remaining_ms;
+    }
+    const ttl_ms = earliest_ttl_ms orelse return null;
+    const lead_ms = @min(ttl_ms / 4, 5_000);
+    return ttl_ms - lead_ms;
+}
+
+fn mcpRefreshDeadlineMs(
+    servers: []const lifecycle.McpCatalogServer,
+    observed_at_ms: ?u64,
+) ?u64 {
+    const observed = observed_at_ms orelse return null;
+    const delay = mcpRefreshDelayMs(servers) orelse return null;
+    return std.math.add(u64, observed, delay) catch null;
+}
+
+test "MCP refresh timer uses earliest safe fresh catalog TTL" {
+    const servers = [_]lifecycle.McpCatalogServer{
+        .{
+            .binding_identity = [_]u8{1} ** 32,
+            .namespace = "slow",
+            .fresh = true,
+            .ttl_remaining_ms = 60_000,
+            .tool_offset = 0,
+            .tool_count = 1,
+        },
+        .{
+            .binding_identity = [_]u8{2} ** 32,
+            .namespace = "fast",
+            .fresh = true,
+            .ttl_remaining_ms = 40_000,
+            .tool_offset = 1,
+            .tool_count = 1,
+        },
+        .{
+            .binding_identity = [_]u8{3} ** 32,
+            .namespace = "short",
+            .fresh = true,
+            .ttl_remaining_ms = 30_000,
+            .tool_offset = 2,
+            .tool_count = 1,
+        },
+        .{
+            .binding_identity = [_]u8{4} ** 32,
+            .namespace = "stale",
+            .fresh = false,
+            .ttl_remaining_ms = 1,
+            .tool_offset = 3,
+            .tool_count = 0,
+        },
+    };
+    try std.testing.expectEqual(@as(?u64, 35_000), mcpRefreshDelayMs(&servers));
+    try std.testing.expectEqual(
+        @as(?u64, 135_000),
+        mcpRefreshDeadlineMs(&servers, 100_000),
+    );
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        mcpRefreshDelayMs(&.{ servers[2], servers[3] }),
+    );
+}
+
 fn takeActivityOrder(run: *RunRecord) u64 {
     const result = run.next_activity_order;
     std.debug.assert(result != std.math.maxInt(u64));
@@ -15828,6 +16127,50 @@ const TestScheduleClock = struct {
         };
     }
 };
+
+const TestMcpRefreshTimer = struct {
+    now_ms: u64 = 100_000,
+    armed_at_ms: ?u64 = null,
+    cancel_count: usize = 0,
+
+    fn now(context: ?*anyopaque) ?u64 {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        return self.now_ms;
+    }
+
+    fn arm(context: ?*anyopaque, deadline_ms: u64) bool {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        self.armed_at_ms = deadline_ms;
+        return true;
+    }
+
+    fn cancel(context: ?*anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        self.armed_at_ms = null;
+        self.cancel_count += 1;
+    }
+
+    fn timer(self: *@This()) McpRefreshTimer {
+        return .{
+            .context = self,
+            .enabled = true,
+            .now_monotonic_ms = now,
+            .arm_at = arm,
+            .cancel = cancel,
+        };
+    }
+};
+
+test "MCP refresh timer rearm preserves the absolute deadline" {
+    var timer_probe: TestMcpRefreshTimer = .{};
+    const timer = timer_probe.timer();
+    try std.testing.expectEqual(@as(?u64, 100_000), timer.now());
+    try std.testing.expect(timer.armAt(135_000));
+    timer_probe.now_ms = 120_000;
+    timer.cancelCurrent();
+    try std.testing.expect(timer.armAt(135_000));
+    try std.testing.expectEqual(@as(?u64, 135_000), timer_probe.armed_at_ms);
+}
 
 const TestSchedulePersistence = struct {
     commits: usize = 0,
@@ -19637,13 +19980,25 @@ test "OAuth operation remains excluded from every rebuilt Admission target" {
         mcpServerToolsForAdmission(registry, oauth_server).len,
     );
     try std.testing.expectEqual(
+        @as(usize, 0),
+        mcpRefreshToolsForServer(registry, "oauth").len,
+    );
+    try std.testing.expectEqual(
         @as(usize, 1),
         mcpServerToolsForAdmission(registry, other).len,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        mcpRefreshToolsForServer(registry, "other").len,
     );
     registry.oauth_operation = null;
     try std.testing.expectEqual(
         @as(usize, 2),
         mcpServerToolsForAdmission(registry, oauth_server).len,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        mcpRefreshToolsForServer(registry, "oauth").len,
     );
     var oauth = oauth_server.auth.oauth.?;
     oauth.status = "reauth_required";
@@ -20032,6 +20387,9 @@ test "empty MCP startup commits a proven manageable runtime" {
         "\"connectionTest\":{\"status\":\"connected\",\"toolCount\":3,\"issueCount\":1}",
     ) != null);
     try workbench.beginMcpConfigurationApply(1);
+    try std.testing.expectError(error.CatalogLoading, workbench.refreshMcpCatalog());
+    try std.testing.expect(workbench.mcp.?.refresh_pending);
+    try std.testing.expect(workbench.mcp.?.refresh_job == null);
     const applying_snapshot = try workbench.writeSnapshot(&output);
     try std.testing.expect(std.mem.indexOf(
         u8,
@@ -20050,9 +20408,11 @@ test "empty MCP startup commits a proven manageable runtime" {
         "\"configurationApply\":\"failed\"",
     ) != null);
     try std.testing.expectEqual(
-        McpAdmissionBlockReason.pending_restart,
+        McpAdmissionBlockReason.refreshing,
         workbench.mcp.?.admission.blocked,
     );
+    try std.testing.expect(!workbench.mcp.?.refresh_pending);
+    try std.testing.expect(workbench.mcp.?.refresh_job != null);
 }
 
 test "MCP authorization operation owns product phase and durable token boundary" {
@@ -20101,13 +20461,14 @@ test "MCP authorization operation owns product phase and durable token boundary"
     )).?;
     var manifest_owned = true;
     defer if (manifest_owned) manifest.deinit();
+    var refresh_timer: TestMcpRefreshTimer = .{};
     test_agent_runtime.io = std.testing.io;
     var workbench = try Workbench.init(
         std.testing.allocator,
         std.testing.io,
         &test_agent_runtime,
         testLimits(),
-        .{ .mcp = .{
+        .{ .mcp_refresh_timer = refresh_timer.timer(), .mcp = .{
             .preparation = &preparation,
             .management = .{
                 .persistence = .{
@@ -20144,6 +20505,12 @@ test "MCP authorization operation owns product phase and durable token boundary"
     const server_id = workbench.mcp.?.management.?.desiredRegistry().?.servers[0].id;
     var start = (try workbench.beginMcpAuthorization(1, server_id)).?;
     defer start.deinit();
+    try std.testing.expectError(error.CatalogLoading, workbench.refreshMcpCatalog());
+    try std.testing.expect(workbench.mcp.?.refresh_pending);
+    try std.testing.expect(!workbench.mcp.?.refresh_pending_blocks_admission);
+    try std.testing.expect(workbench.mcp.?.admission == .ready);
+    try std.testing.expectEqual(@as(u64, 1), workbench.mcp.?.refresh_request_generation);
+    try std.testing.expect(workbench.mcp.?.refresh_job == null);
     try std.testing.expectEqual(
         McpAuthorizationPhase.discovering,
         workbench.mcpAuthorizationOperation().?.phase,
@@ -20188,14 +20555,25 @@ test "MCP authorization operation owns product phase and durable token boundary"
     const exchange = try workbench.beginMcpOauthCodeExchange(server_id);
     try std.testing.expect(exchange == .started);
     const durable_id = exchange.started.operation.id;
+    try std.testing.expect(workbench.finishMcpAuthorization(start.operation_id));
+    try std.testing.expect(workbench.mcpAuthorizationOperation() == null);
+    try std.testing.expect(workbench.mcp.?.refresh_pending);
+    try std.testing.expect(!workbench.mcp.?.refresh_pending_blocks_admission);
+    try std.testing.expect(workbench.mcp.?.refresh_job == null);
+    try std.testing.expectError(error.CatalogLoading, workbench.refreshMcpCatalog());
+    try std.testing.expectEqual(@as(u64, 2), workbench.mcp.?.refresh_request_generation);
     try std.testing.expectEqual(
         mcp_configuration.ManagementOutcome.saved,
         try workbench.recoverMcpOauthOperation(durable_id),
     );
+    try std.testing.expect(!workbench.mcp.?.refresh_pending);
+    try std.testing.expect(workbench.mcp.?.refresh_job != null);
+    try std.testing.expectEqual(
+        @as(u64, 2),
+        workbench.mcp.?.refresh_job.?.request_generation,
+    );
     const oauth = workbench.mcp.?.management.?.desiredRegistry().?.servers[0].auth.oauth.?;
     try std.testing.expectEqualStrings("reauth_required", oauth.status);
-    try std.testing.expect(workbench.finishMcpAuthorization(start.operation_id));
-    try std.testing.expect(workbench.mcpAuthorizationOperation() == null);
 }
 
 test "MCP startup health commits a safe degraded Workbench projection" {
@@ -20451,6 +20829,7 @@ test "MCP startup health commits a safe degraded Workbench projection" {
         .runtime = workbench.agent_runtime,
         .notifier = .{},
         .request_generation = 1,
+        .requested_at_ms = null,
         .arena = std.heap.ArenaAllocator.init(workbench.allocator),
         .allowlists = &.{},
         .build_admission = false,
@@ -20478,6 +20857,7 @@ test "MCP startup health commits a safe degraded Workbench projection" {
         .runtime = workbench.agent_runtime,
         .notifier = .{},
         .request_generation = 2,
+        .requested_at_ms = null,
         .arena = std.heap.ArenaAllocator.init(workbench.allocator),
         .allowlists = &.{},
         .build_admission = false,
@@ -20496,6 +20876,7 @@ test "MCP startup health commits a safe degraded Workbench projection" {
         .runtime = workbench.agent_runtime,
         .notifier = .{},
         .request_generation = 4,
+        .requested_at_ms = null,
         .arena = std.heap.ArenaAllocator.init(workbench.allocator),
         .allowlists = &.{},
         .build_admission = false,

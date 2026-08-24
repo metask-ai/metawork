@@ -323,6 +323,14 @@ const App = struct {
                     }
                     return;
                 }
+                if (timer.id == app_platform.mcp_catalog_timer_id) {
+                    if (self.workbench) |workbench| {
+                        workbench.onMcpRefreshTimer();
+                        if (self.dispatcher) |dispatcher|
+                            try dispatcher.emitWorkbenchChanged();
+                    }
+                    return;
+                }
                 if (timer.id == app_platform.mcp_oauth_timer_id) {
                     if (self.mcp_oauth_refresh) |*coordinator|
                         _ = coordinator.onTimer();
@@ -428,6 +436,13 @@ pub fn run(init: std.process.Init) !void {
             .now_unix_seconds = app_platform.Adapter.scheduledTaskNow,
             .arm = app_platform.Adapter.armScheduledTaskTimer,
             .cancel = app_platform.Adapter.cancelScheduledTaskTimer,
+        },
+        .mcp_refresh_timer = .{
+            .context = &app.platform,
+            .enabled = true,
+            .now_monotonic_ms = app_platform.Adapter.mcpCatalogNowMonotonicMs,
+            .arm_at = app_platform.Adapter.armMcpCatalogTimer,
+            .cancel = app_platform.Adapter.cancelMcpCatalogTimer,
         },
         .schedule_persistence = .{
             .context = if (stores_state.scheduled_task) |*store| store else null,

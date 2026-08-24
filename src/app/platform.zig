@@ -12,6 +12,7 @@ pub const SecureInputResult = union(enum) {
 
 pub const scheduled_task_timer_id: u64 = 0x4d57_5343_4844_544b;
 pub const mcp_oauth_timer_id: u64 = 0x4d57_4d43_504f_4155;
+pub const mcp_catalog_timer_id: u64 = 0x4d57_4d43_5043_4154;
 
 // This is the single DispatcherPlatform vtable implementation. It owns the
 // Native SDK runtime/services references required by that vtable and delegates
@@ -185,6 +186,30 @@ pub const Adapter = struct {
     pub fn cancelMcpOauthTimer(self: *Adapter) void {
         if (self.platform_services) |services_value|
             services_value.cancelTimer(mcp_oauth_timer_id) catch {};
+    }
+
+    pub fn mcpCatalogNowMonotonicMs(_: ?*anyopaque) ?u64 {
+        return native_sdk.monotonicNanoseconds() / std.time.ns_per_ms;
+    }
+
+    pub fn armMcpCatalogTimer(context: ?*anyopaque, deadline_ms: u64) bool {
+        const self: *Adapter = @ptrCast(@alignCast(context orelse return false));
+        const current = mcpCatalogNowMonotonicMs(context) orelse return false;
+        const delay_ms = if (deadline_ms > current) deadline_ms - current else 1;
+        const delay_ns = std.math.mul(u64, delay_ms, std.time.ns_per_ms) catch
+            return false;
+        (self.platform_services orelse return false).startTimer(
+            mcp_catalog_timer_id,
+            delay_ns,
+            false,
+        ) catch return false;
+        return true;
+    }
+
+    pub fn cancelMcpCatalogTimer(context: ?*anyopaque) void {
+        const self: *Adapter = @ptrCast(@alignCast(context orelse return));
+        if (self.platform_services) |services_value|
+            services_value.cancelTimer(mcp_catalog_timer_id) catch {};
     }
 
     /// Shows every byte of a Host-only MCP trust or OAuth consent document in

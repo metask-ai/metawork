@@ -110,6 +110,7 @@ pub const Failure = enum {
     checkpoint_io,
     skill_catalog_unavailable,
     catalog_projection_unavailable,
+    mcp_not_refreshed,
     mcp_authority_stale,
     runtime_unavailable,
     session_capacity,
@@ -377,9 +378,9 @@ fn readCheckpoint(context: ?*anyopaque, destination: []u8) agent.CheckpointSourc
 
 fn mapRestoreError(err: anyerror) Failure {
     return switch (err) {
+        error.McpNotRefreshed => .mcp_not_refreshed,
         error.StaleMcpSelection,
         error.McpRefreshInProgress,
-        error.McpNotRefreshed,
         error.InvalidMcpSelection,
         error.McpCatalogBindingMismatch,
         => .mcp_authority_stale,
@@ -399,6 +400,10 @@ fn discardRoute(runtime: *agent.Runtime, route: agent.SessionRestoreRoute) bool 
 }
 
 test "restore authority failures remain retryable job outcomes" {
+    try std.testing.expectEqual(
+        Failure.mcp_not_refreshed,
+        mapRestoreError(error.McpNotRefreshed),
+    );
     try std.testing.expectEqual(
         Failure.mcp_authority_stale,
         mapRestoreError(error.StaleMcpSelection),

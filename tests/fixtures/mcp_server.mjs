@@ -317,7 +317,7 @@ function result(value) {
 
 function cacheHints() {
   return options.protocolVersion === "2026-07-28"
-    ? { ttlMs: 60_000, cacheScope: "private" }
+    ? { ttlMs: options.ttlMs, cacheScope: "private" }
     : {};
 }
 
@@ -365,6 +365,7 @@ function parseOptions(args) {
   let tracePath = null;
   let transport = "stdio";
   let framing = "json";
+  let ttlMs = 60_000;
   for (let index = 0; index < args.length; index += 1) {
     switch (args[index]) {
       case "--protocol":
@@ -385,6 +386,9 @@ function parseOptions(args) {
       case "--framing":
         framing = args[(index += 1)] ?? null;
         break;
+      case "--ttl-ms":
+        ttlMs = Number(args[(index += 1)] ?? "");
+        break;
       default:
         throw new Error(`unknown MCP fixture option: ${args[index]}`);
     }
@@ -395,7 +399,10 @@ function parseOptions(args) {
     !["json", "sse"].includes(framing) ||
     !Number.isSafeInteger(delayMs) ||
     delayMs < 0 ||
-    delayMs > 10_000
+    delayMs > 10_000 ||
+    !Number.isSafeInteger(ttlMs) ||
+    ttlMs < 1 ||
+    ttlMs > 60_000
   )
     throw new Error("invalid MCP fixture configuration");
   return {
@@ -405,5 +412,6 @@ function parseOptions(args) {
     tracePath,
     transport,
     framing,
+    ttlMs,
   };
 }
