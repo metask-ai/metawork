@@ -32,7 +32,6 @@ export function AccountIdentity({
   const identityStatus = authenticated
     ? t("account.connected")
     : t("account.signed_out");
-  const menuTitle = authenticated ? identityName : t("account.label");
   const initial = [...identityName.trim()][0]?.toLocaleUpperCase() || "M";
 
   useEffect(() => {
@@ -54,10 +53,11 @@ export function AccountIdentity({
                 className="account-menu"
                 aria-label={t("account.menu")}
               >
-                <div className="account-menu-heading">
-                  <strong title={menuTitle}>{menuTitle}</strong>
-                  <span>{identityStatus}</span>
-                </div>
+                {authenticated && (
+                  <div className="account-menu-heading">
+                    <strong title={identityName}>{identityName}</strong>
+                  </div>
+                )}
                 {!authenticated && (
                   <Menu.Item
                     className="account-menu-item focus-ring"

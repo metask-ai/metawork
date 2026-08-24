@@ -115,8 +115,8 @@ test("signed-out account identity separates account, status, and login action", 
   const menu = await screen.findByRole("menu", {
     name: "Metask account menu",
   });
-  assert.match(menu.textContent, /Metask account/);
-  assert.match(menu.textContent, /Not signed in/);
+  assert.doesNotMatch(menu.textContent, /Metask account/);
+  assert.doesNotMatch(menu.textContent, /Not signed in/);
   assert.doesNotMatch(menu.textContent, /Sign in to MetaWork/);
 
   await user.click(
