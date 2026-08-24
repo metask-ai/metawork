@@ -5,6 +5,7 @@ const native_sdk = @import("native_sdk");
 const bridge_api = @import("metawork_bridge");
 const agent = @import("metawork_agent");
 const workbench_api = @import("metawork_workbench");
+const mcp_configuration = @import("metawork_product_mcp").configuration;
 const account_api = @import("metawork_account");
 const product_identity = @import("metawork_product_identity");
 const mcp_platform = @import("metawork_mcp_platform");
@@ -56,7 +57,7 @@ const App = struct {
     workbench_storage: ?*workbench_api.Workbench = null,
     workbench_configuration: workbench_api.Configuration = .{},
     workbench_initialized: bool = false,
-    mcp_configuration_store: ?*workbench_api.McpConfigurationFileStore = null,
+    mcp_configuration_store: ?*mcp_configuration.FileStore = null,
     mcp_credential_store: ?mcp_platform.CredentialStore = null,
     mcp_authorizations: ?mcp_platform.HttpAuthorizations = null,
     mcp_management: ?mcp_management_coordinator.Coordinator = null,
@@ -102,7 +103,7 @@ const App = struct {
         var mcp_build: mcp_platform.RuntimeBuild = undefined;
         var mcp_build_initialized = false;
         defer if (mcp_build_initialized) mcp_build.deinit();
-        var runtime_manifest: ?workbench_api.McpRuntimeManifest = null;
+        var runtime_manifest: ?mcp_configuration.RuntimeManifest = null;
         var runtime_manifest_owned = false;
         defer if (runtime_manifest_owned) runtime_manifest.?.deinit();
         var activation_failed = false;
@@ -124,7 +125,7 @@ const App = struct {
         };
         mcp_build_initialized = true;
         if (input_construction_succeeded) {
-            runtime_manifest = try workbench_api.McpRuntimeManifest.candidate(
+            runtime_manifest = try mcp_configuration.RuntimeManifest.candidate(
                 std.heap.c_allocator,
                 &preparation,
             );

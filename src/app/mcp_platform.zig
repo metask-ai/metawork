@@ -6,7 +6,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const native_sdk = @import("native_sdk");
 const agent = @import("metawork_agent");
-const workbench = @import("metawork_workbench");
+const mcp_configuration = @import("metawork_product_mcp").configuration;
 const mcp_oauth = @import("metawork_mcp_oauth");
 const product_identity = @import("metawork_product_identity");
 
@@ -24,7 +24,7 @@ pub const CredentialStore = struct {
     services: native_sdk.platform.PlatformServices,
     main_thread_id: std.Thread.Id,
 
-    pub fn resolver(self: *CredentialStore) workbench.McpCredentialResolver {
+    pub fn resolver(self: *CredentialStore) mcp_configuration.CredentialResolver {
         return .{
             .context = self,
             .available = self.services.get_credential_fn != null,
@@ -36,11 +36,11 @@ pub const CredentialStore = struct {
         self: *CredentialStore,
         allocator: std.mem.Allocator,
         locator: []const u8,
-    ) workbench.McpCredentialResolution {
+    ) mcp_configuration.CredentialResolution {
         return resolve(self, allocator, locator);
     }
 
-    pub fn cleanup(self: *CredentialStore) workbench.McpCredentialCleanup {
+    pub fn cleanup(self: *CredentialStore) mcp_configuration.CredentialCleanup {
         return .{
             .context = self,
             .available = self.services.delete_credential_fn != null,
@@ -48,7 +48,7 @@ pub const CredentialStore = struct {
         };
     }
 
-    pub fn effects(self: *CredentialStore) workbench.McpCredentialEffects {
+    pub fn effects(self: *CredentialStore) mcp_configuration.CredentialEffects {
         return .{
             .context = self,
             .available = self.services.get_credential_fn != null and
@@ -60,7 +60,7 @@ pub const CredentialStore = struct {
         };
     }
 
-    pub fn locatorGenerator(self: *CredentialStore) workbench.McpFreshLocatorGenerator {
+    pub fn locatorGenerator(self: *CredentialStore) mcp_configuration.FreshLocatorGenerator {
         return .{
             .context = self,
             .available = true,
@@ -68,7 +68,7 @@ pub const CredentialStore = struct {
         };
     }
 
-    pub fn serverIdentityGenerator(self: *CredentialStore) workbench.McpFreshServerIdentityGenerator {
+    pub fn serverIdentityGenerator(self: *CredentialStore) mcp_configuration.FreshServerIdentityGenerator {
         return .{
             .context = self,
             .available = true,
@@ -87,7 +87,7 @@ pub const CredentialStore = struct {
         context: ?*anyopaque,
         allocator: std.mem.Allocator,
         locator: []const u8,
-    ) workbench.McpCredentialResolution {
+    ) mcp_configuration.CredentialResolution {
         const self: *CredentialStore = @ptrCast(@alignCast(context orelse return .unavailable));
         if (std.Thread.getCurrentId() != self.main_thread_id)
             return .unavailable;
@@ -106,7 +106,7 @@ pub const CredentialStore = struct {
     fn probe(
         context: ?*anyopaque,
         locator: []const u8,
-    ) workbench.McpCredentialPresence {
+    ) mcp_configuration.CredentialPresence {
         const self: *CredentialStore = @ptrCast(@alignCast(context orelse return .unavailable));
         if (std.Thread.getCurrentId() != self.main_thread_id)
             return .unavailable;
@@ -598,7 +598,7 @@ pub const HttpAuthorizations = struct {
         expected_token_revision: u64,
         access_token: []const u8,
     ) std.mem.Allocator.Error!?PendingHttpAuthRotation {
-        if (!workbench.validMcpHttpHeaderCredential(access_token)) return null;
+        if (!mcp_configuration.validHttpHeaderCredential(access_token)) return null;
         const slot = for (self.slots) |candidate| {
             if (std.mem.eql(u8, candidate.server_id, server_id)) break candidate;
         } else return null;
@@ -658,7 +658,7 @@ pub const HostEnvironment = struct {
 pub fn buildRuntimeInput(
     io: std.Io,
     allocator: std.mem.Allocator,
-    preparation: *const workbench.McpPreparedConfiguration,
+    preparation: *const mcp_configuration.Preparation,
     host_environment: HostEnvironment,
 ) BuildError!?agent.McpRuntimeInput {
     var build = try buildRuntime(io, allocator, preparation, host_environment);
@@ -669,7 +669,7 @@ pub fn buildRuntimeInput(
 pub fn buildRuntime(
     io: std.Io,
     allocator: std.mem.Allocator,
-    preparation: *const workbench.McpPreparedConfiguration,
+    preparation: *const mcp_configuration.Preparation,
     host_environment: HostEnvironment,
 ) BuildError!RuntimeBuild {
     var authorization_list: std.ArrayList(*HttpAuthSlot) = .empty;
@@ -745,7 +745,7 @@ pub fn buildRuntime(
             .client_name = client_name,
             .client_version = client_version,
             .timeout_ms = server.timeout_ms,
-            .configuration_fingerprint = workbench.runtimeMcpDescriptorFingerprint(server),
+            .configuration_fingerprint = mcp_configuration.runtimeDescriptorFingerprint(server),
             .allowed_tools = server.tools,
         };
         write += 1;
@@ -783,7 +783,7 @@ fn negotiation(value: []const u8) ?agent.McpNegotiationPolicy {
 }
 
 fn resolvedCredential(
-    preparation: *const workbench.McpPreparedConfiguration,
+    preparation: *const mcp_configuration.Preparation,
     locator: []const u8,
 ) ?[]const u8 {
     for (preparation.credentials) |credential|
@@ -793,8 +793,8 @@ fn resolvedCredential(
 
 fn serverSecrets(
     allocator: std.mem.Allocator,
-    server: workbench.McpServerConfigurationWire,
-    preparation: *const workbench.McpPreparedConfiguration,
+    server: mcp_configuration.ServerWire,
+    preparation: *const mcp_configuration.Preparation,
 ) BuildError![]const []const u8 {
     const oauth_extra: usize = if (server.auth.oauth) |oauth|
         @as(usize, @intFromBool(oauth.registration.client_secret_ref != null)) +
@@ -1218,8 +1218,8 @@ pub fn createStdioTransportOwner(
 fn createStdioOwner(
     io: std.Io,
     allocator: std.mem.Allocator,
-    server: workbench.McpServerConfigurationWire,
-    preparation: *const workbench.McpPreparedConfiguration,
+    server: mcp_configuration.ServerWire,
+    preparation: *const mcp_configuration.Preparation,
     host_environment: HostEnvironment,
 ) BuildError!agent.McpTransportOwner {
     const context = try allocator.create(StdioContext);
@@ -1253,7 +1253,7 @@ fn createStdioOwner(
         const locator = entry.credential_ref orelse return error.InvalidConfig;
         const secret = resolvedCredential(preparation, locator) orelse
             return error.InvalidConfig;
-        if (!workbench.validMcpEnvironmentCredential(secret))
+        if (!mcp_configuration.validEnvironmentCredential(secret))
             return error.InvalidConfig;
         try context.environment.put(entry.name, secret);
     }
@@ -1563,8 +1563,8 @@ const HttpContext = struct {
 fn createHttpOwner(
     io: std.Io,
     allocator: std.mem.Allocator,
-    server: workbench.McpServerConfigurationWire,
-    preparation: *const workbench.McpPreparedConfiguration,
+    server: mcp_configuration.ServerWire,
+    preparation: *const mcp_configuration.Preparation,
     authorization_output: *?*HttpAuthSlot,
 ) BuildError!agent.McpTransportOwner {
     authorization_output.* = null;
@@ -1594,7 +1594,7 @@ fn createHttpOwner(
         const locator = source.credential_ref orelse return error.InvalidConfig;
         const secret = resolvedCredential(preparation, locator) orelse
             return error.InvalidConfig;
-        if (!workbench.validMcpHttpHeaderCredential(secret))
+        if (!mcp_configuration.validHttpHeaderCredential(secret))
             return error.InvalidConfig;
         secret_value.* = try owned.dupe(u8, secret);
         header.* = .{
@@ -1608,7 +1608,7 @@ fn createHttpOwner(
             preparation,
             grant.access_token_ref,
         ) orelse return error.InvalidConfig;
-        if (!workbench.validMcpHttpHeaderCredential(access_token))
+        if (!mcp_configuration.validHttpHeaderCredential(access_token))
             return error.InvalidConfig;
         context.authorization = try HttpAuthSlot.create(
             allocator,
@@ -2141,7 +2141,7 @@ test "MCP platform publishes only a valid HTTP Bearer challenge" {
 }
 
 test "MCP platform builds lazy stdio and HTTP transport owners without opening them" {
-    var servers = [_]workbench.McpServerConfigurationWire{
+    var servers = [_]mcp_configuration.ServerWire{
         .{
             .id = "stdio",
             .namespace = "local",
@@ -2172,11 +2172,11 @@ test "MCP platform builds lazy stdio and HTTP transport owners without opening t
     };
     var approvals: [servers.len][64]u8 = undefined;
     for (&servers, 0..) |*server, index| {
-        approvals[index] = workbench.mcpConnectionFingerprint(server.*);
+        approvals[index] = mcp_configuration.connectionFingerprint(server.*);
         server.connection_approval = .{ .fingerprint = &approvals[index] };
     }
-    var registry_buffer: [workbench.mcp_registry_max_bytes]u8 = undefined;
-    const registry = try workbench.encodeMcpRegistry(
+    var registry_buffer: [mcp_configuration.max_store_bytes]u8 = undefined;
+    const registry = try mcp_configuration.encode(
         &registry_buffer,
         .{
             .schema_version = 2,
@@ -2193,7 +2193,7 @@ test "MCP platform builds lazy stdio and HTTP transport owners without opening t
             .max_runtime_secret_bytes_per_server = (agent.McpRuntimeLimits{}).max_secret_bytes,
         },
     );
-    var preparation = try workbench.prepareMcpConfiguration(
+    var preparation = try mcp_configuration.prepare(
         std.testing.allocator,
         registry,
         true,
@@ -2226,17 +2226,17 @@ test "MCP platform creates no owner and reads no credential before approval" {
             context: ?*anyopaque,
             _: std.mem.Allocator,
             _: []const u8,
-        ) workbench.McpCredentialResolution {
+        ) mcp_configuration.CredentialResolution {
             const self: *@This() = @ptrCast(@alignCast(context.?));
             self.calls += 1;
             return .unavailable;
         }
     };
-    var server_environment = [_]workbench.McpSecretSlotWire{.{
+    var server_environment = [_]mcp_configuration.SecretSlotWire{.{
         .name = "MCP_TOKEN",
         .credential_ref = null,
     }};
-    var servers = [_]workbench.McpServerConfigurationWire{.{
+    var servers = [_]mcp_configuration.ServerWire{.{
         .id = "unapproved",
         .namespace = "unapproved",
         .display_name = "Unapproved",
@@ -2252,8 +2252,8 @@ test "MCP platform creates no owner and reads no credential before approval" {
         .connection_approval = null,
         .tools = &.{},
     }};
-    var registry_buffer: [workbench.mcp_registry_max_bytes]u8 = undefined;
-    const limits: workbench.McpConfigurationLimits = .{
+    var registry_buffer: [mcp_configuration.max_store_bytes]u8 = undefined;
+    const limits: mcp_configuration.Limits = .{
         .max_servers = 8,
         .max_tools_per_server = 32,
         .max_namespace_bytes = 128,
@@ -2261,7 +2261,7 @@ test "MCP platform creates no owner and reads no credential before approval" {
         .max_runtime_secrets_per_server = (agent.McpRuntimeLimits{}).max_secrets,
         .max_runtime_secret_bytes_per_server = (agent.McpRuntimeLimits{}).max_secret_bytes,
     };
-    const registry = try workbench.encodeMcpRegistry(
+    const registry = try mcp_configuration.encode(
         &registry_buffer,
         .{
             .schema_version = 2,
@@ -2272,7 +2272,7 @@ test "MCP platform creates no owner and reads no credential before approval" {
         limits,
     );
     var resolver: Resolver = .{};
-    var preparation = try workbench.prepareMcpConfiguration(
+    var preparation = try mcp_configuration.prepare(
         std.testing.allocator,
         registry,
         true,
@@ -2285,7 +2285,7 @@ test "MCP platform creates no owner and reads no credential before approval" {
         limits,
     );
     defer preparation.deinit();
-    try std.testing.expectEqual(workbench.McpServerPreparationState.unapproved, preparation.server_states[0]);
+    try std.testing.expectEqual(mcp_configuration.ServerPreparationState.unapproved, preparation.server_states[0]);
     try std.testing.expectEqual(@as(usize, 0), resolver.calls);
     var input = (try buildRuntimeInput(
         std.testing.io,

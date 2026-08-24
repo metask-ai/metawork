@@ -1,12 +1,12 @@
 const std = @import("std");
 const native_sdk = @import("native_sdk");
 const agent = @import("metawork_agent");
-const workbench_api = @import("metawork_workbench");
+const mcp_configuration = @import("metawork_product_mcp").configuration;
 const mcp_platform = @import("metawork_mcp_platform");
 
 const runtime_limits: agent.McpRuntimeLimits = .{};
 
-pub const configuration_limits: workbench_api.McpConfigurationLimits = .{
+pub const configuration_limits: mcp_configuration.Limits = .{
     .max_servers = 64,
     .max_tools_per_server = 1024,
     .max_namespace_bytes = 24,
@@ -17,17 +17,17 @@ pub const configuration_limits: workbench_api.McpConfigurationLimits = .{
 };
 
 pub const Preparation = struct {
-    preparation: workbench_api.McpPreparedConfiguration,
-    management_health: workbench_api.McpStoreHealth,
+    preparation: mcp_configuration.Preparation,
+    management_health: mcp_configuration.StoreHealth,
 };
 
 pub fn prepare(
-    store: ?*workbench_api.McpConfigurationFileStore,
+    store: ?*mcp_configuration.FileStore,
     credential_store_optional: ?*mcp_platform.CredentialStore,
 ) !Preparation {
     const configuration_store = store orelse
         return .{
-            .preparation = try workbench_api.prepareMcpConfiguration(
+            .preparation = try mcp_configuration.prepare(
                 std.heap.c_allocator,
                 null,
                 false,
@@ -40,7 +40,7 @@ pub fn prepare(
     var restored_bytes = configuration_store.loadAlloc(std.heap.c_allocator) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return .{
-            .preparation = try workbench_api.prepareMcpConfiguration(
+            .preparation = try mcp_configuration.prepare(
                 std.heap.c_allocator,
                 null,
                 true,
@@ -55,7 +55,7 @@ pub fn prepare(
     var registry_corrupt = false;
     var source_schema_version: ?u8 = null;
     const generation: u64 = if (restored_bytes) |bytes| generation: {
-        source_schema_version = workbench_api.mcpRegistrySourceSchemaVersion(
+        source_schema_version = mcp_configuration.registrySourceSchemaVersion(
             std.heap.c_allocator,
             bytes,
         ) catch |err| switch (err) {
@@ -65,7 +65,7 @@ pub fn prepare(
                 break :generation 0;
             },
         };
-        var decoded = workbench_api.decodeMcpRegistry(
+        var decoded = mcp_configuration.decode(
             std.heap.c_allocator,
             bytes,
             configuration_limits,
@@ -81,7 +81,7 @@ pub fn prepare(
     } else 0;
     const credential_store = if (credential_store_optional) |value| value else return error.RuntimeUnavailable;
     var recovery_failed = registry_corrupt;
-    var management_health: workbench_api.McpStoreHealth =
+    var management_health: mcp_configuration.StoreHealth =
         if (registry_corrupt) .recovery_required else .ready;
     if (!registry_corrupt) {
         _ = configuration_store.recoverPendingCredentialTransaction(
@@ -102,7 +102,7 @@ pub fn prepare(
         };
     }
     if (!recovery_failed and restored_bytes != null and source_schema_version == 1) {
-        var migrated = workbench_api.decodeMcpRegistry(
+        var migrated = mcp_configuration.decode(
             std.heap.c_allocator,
             restored_bytes.?,
             configuration_limits,
@@ -113,10 +113,10 @@ pub fn prepare(
         defer migrated.deinit();
         const buffer = try std.heap.c_allocator.alloc(
             u8,
-            workbench_api.mcp_registry_max_bytes,
+            mcp_configuration.max_store_bytes,
         );
         defer std.heap.c_allocator.free(buffer);
-        const migrated_bytes = workbench_api.encodeMcpRegistry(
+        const migrated_bytes = mcp_configuration.encode(
             buffer,
             migrated.value,
             configuration_limits,
@@ -130,7 +130,7 @@ pub fn prepare(
         try replaceRestoredBytes(&restored_bytes, migrated_bytes);
     }
     if (!recovery_failed and restored_bytes != null) {
-        var current = workbench_api.decodeMcpRegistry(
+        var current = mcp_configuration.decode(
             std.heap.c_allocator,
             restored_bytes.?,
             configuration_limits,
@@ -140,13 +140,13 @@ pub fn prepare(
         };
         defer current.deinit();
         if (current.value.oauth_operation != null) {
-            var plan = try workbench_api.planMcpOauthOperationRecovery(
+            var plan = try mcp_configuration.planOauthOperationRecovery(
                 std.heap.c_allocator,
                 current.value,
                 configuration_limits,
             );
             defer plan.deinit();
-            var coordinator: workbench_api.McpTransactionCoordinator = .{};
+            var coordinator: mcp_configuration.TransactionCoordinator = .{};
             const commit = try coordinator.commit(
                 std.heap.c_allocator,
                 configuration_store.mutationPersistence(),
@@ -159,10 +159,10 @@ pub fn prepare(
                 .saved, .saved_recovery_required => {
                     const buffer = try std.heap.c_allocator.alloc(
                         u8,
-                        workbench_api.mcp_registry_max_bytes,
+                        mcp_configuration.max_store_bytes,
                     );
                     defer std.heap.c_allocator.free(buffer);
-                    const recovered_bytes = workbench_api.encodeMcpRegistry(
+                    const recovered_bytes = mcp_configuration.encode(
                         buffer,
                         try plan.targetRegistry(),
                         configuration_limits,
@@ -184,7 +184,7 @@ pub fn prepare(
             }
         }
     }
-    const preparation = try workbench_api.prepareMcpConfiguration(
+    const preparation = try mcp_configuration.prepare(
         std.heap.c_allocator,
         restored_bytes,
         true,
@@ -208,9 +208,9 @@ fn replaceRestoredBytes(slot: *?[]u8, bytes: []const u8) std.mem.Allocator.Error
 }
 
 fn managementHealthAfterPreparation(
-    state: workbench_api.McpPreparationState,
-    recovery_health: workbench_api.McpStoreHealth,
-) workbench_api.McpStoreHealth {
+    state: mcp_configuration.PreparationState,
+    recovery_health: mcp_configuration.StoreHealth,
+) mcp_configuration.StoreHealth {
     return switch (state) {
         .empty, .available => recovery_health,
         .unavailable => if (recovery_health == .outcome_unknown)
@@ -225,14 +225,14 @@ test "MCP startup keeps registry limits within AgentCore authority bounds" {
     try std.testing.expectEqual(@as(usize, 1024), configuration_limits.max_tools_per_server);
     try std.testing.expectEqual(@as(usize, 24), configuration_limits.max_namespace_bytes);
     try std.testing.expectEqual(
-        workbench_api.McpStoreHealth.recovery_required,
+        mcp_configuration.StoreHealth.recovery_required,
         managementHealthAfterPreparation(
             .{ .unavailable = .credential_store_unavailable },
             .ready,
         ),
     );
     try std.testing.expectEqual(
-        workbench_api.McpStoreHealth.outcome_unknown,
+        mcp_configuration.StoreHealth.outcome_unknown,
         managementHealthAfterPreparation(
             .{ .unavailable = .read_failed },
             .outcome_unknown,

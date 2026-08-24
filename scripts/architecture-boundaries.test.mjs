@@ -98,6 +98,7 @@ test("named module roots exist and lower owners cannot import composition", () =
   for (const path of [
     "src/app.zig",
     "src/product/account.zig",
+    "src/product/mcp.zig",
     "src/agent.zig",
     "src/workbench.zig",
     "src/bridge.zig",
@@ -109,10 +110,19 @@ test("named module roots exist and lower owners cannot import composition", () =
   assert.equal(existsSync(new URL("src/agentcore/", root)), false);
   assert.equal(existsSync(new URL("src/account.zig", root)), false);
   assert.equal(existsSync(new URL("src/account/", root)), false);
+  assert.equal(
+    existsSync(new URL("src/workbench/mcp_configuration.zig", root)),
+    false,
+  );
+  assert.equal(existsSync(new URL("src/workbench/testdata/", root)), false);
   const buildSource = read("build.zig");
   assert.match(buildSource, /src\/product\/account\.zig/);
   assert.match(buildSource, /src\/product\/account\/contract\.zig/);
+  assert.match(buildSource, /src\/product\/mcp\.zig/);
+  assert.match(buildSource, /src\/product\/mcp\/configuration\.zig/);
+  assert.match(buildSource, /src\/product\/mcp\/state\.zig/);
   assert.doesNotMatch(buildSource, /src\/account(?:\.zig|\/)/);
+  assert.doesNotMatch(buildSource, /src\/workbench\/mcp_configuration\.zig/);
   assert.match(buildSource, /addImport\("metawork_account", account\)/);
   assert.match(
     buildSource,
@@ -157,6 +167,14 @@ test("named module roots exist and lower owners cannot import composition", () =
     "metawork_agent",
     "metask_agentcore",
   ]);
+  assertNoImports(zigFiles("src/product/mcp/"), [
+    "metawork_app",
+    "metawork_workbench",
+    "metawork_bridge",
+    "metawork_account",
+    "metask_agentcore",
+    "native_sdk",
+  ]);
   assertNoImports(zigFiles("src/bridge/"), [
     "metawork_app",
     "metask_agentcore",
@@ -174,6 +192,142 @@ test("named module roots exist and lower owners cannot import composition", () =
       `${file} exposes an implementation module`,
     );
   }
+});
+
+test("Product MCP kernels have one physical home and remain Workbench-held", () => {
+  const build = read("build.zig");
+  const productMcp = read("src/product/mcp.zig");
+  const configuration = read("src/product/mcp/configuration.zig");
+  const state = read("src/product/mcp/state.zig");
+  const policy = read("src/product/mcp/policy.zig");
+  const view = read("src/product/mcp/view.zig");
+  const workbenchRoot = read("src/workbench.zig");
+  const workbenchProjection = read("src/workbench/projection.zig");
+
+  assert.equal(
+    existsSync(
+      new URL("src/product/mcp/testdata/mcp-http-endpoints.json", root),
+    ),
+    true,
+  );
+  assert.match(productMcp, /@import\("product_mcp_configuration"\)/);
+  assert.match(productMcp, /@import\("product_mcp_state"\)/);
+  assert.match(productMcp, /@import\("product_mcp_policy"\)/);
+  assert.match(productMcp, /@import\("product_mcp_view"\)/);
+  assert.match(configuration, /@import\("agent_mcp_http_protocol"\)/);
+  assert.doesNotMatch(configuration, /@import\("metawork_agent"\)/);
+  // Product MCP state intentionally consumes MetaWork Agent's public
+  // Activation/Selection surface; the AgentCore SDK remains forbidden here.
+  assert.match(state, /@import\("metawork_agent"\)/);
+  assert.match(state, /@import\("product_mcp_configuration"\)/);
+  assert.doesNotMatch(state, /McpRefreshJob|workbench_executor|std\.Thread/);
+  for (const field of [
+    "refresh_request_generation",
+    "refresh_pending",
+    "refresh_pending_blocks_admission",
+    "refresh_deadline_ms",
+  ]) {
+    assert.match(state, new RegExp(`\\b${field}\\b`));
+  }
+  assert.match(state, /pub fn mcpRefreshDelayMs/);
+  assert.match(state, /pub fn mcpRefreshDeadlineMs/);
+  // Product MCP policy prepares Agent-owned allowlist values and returns
+  // borrowed Selection facts, but never owns an Agent runtime or worker.
+  assert.match(policy, /@import\("metawork_agent"\)/);
+  assert.match(policy, /@import\("product_mcp_configuration"\)/);
+  assert.match(policy, /@import\("product_mcp_state"\)/);
+  assert.doesNotMatch(
+    policy,
+    /McpRefreshJob|workbench_executor|std\.Thread|pub const Workbench|createMcpAdmissionSelection|commitPrepared|bumpRevision|mcp_refresh_timer/,
+  );
+  for (const name of [
+    "validAuthorizationTransition",
+    "serverMutationBusy",
+    "preparePendingReauthorization",
+    "serverToolsForAdmission",
+    "buildOauthRefreshBinding",
+    "buildRefreshAllowlists",
+    "replaceAdmission",
+    "blockAdmissionForCurrentState",
+    "nextOauthExpiry",
+    "selectionForNewTask",
+    "recoveryGeneration",
+  ]) {
+    assert.match(policy, new RegExp(`pub fn ${name}\\b`));
+  }
+  assert.match(view, /@import\("product_mcp_configuration"\)/);
+  assert.match(view, /@import\("product_mcp_state"\)/);
+  assert.doesNotMatch(view, /@import\("metawork_agent"\)/);
+  assert.match(view, /pub fn writeProjection/);
+  assert.match(view, /pub const TextProjection/);
+  assert.match(view, /refresh_job_active: bool/);
+  assert.doesNotMatch(view, /mcp_refresh_job/);
+  assert.doesNotMatch(
+    view,
+    /McpRefreshJob|workbench_executor|std\.Thread|pub const McpProductState/,
+  );
+  assert.match(build, /addImport\("metawork_product_mcp", product_mcp\)/);
+  assert.match(build, /src\/product\/mcp\/view\.zig/);
+  assert.match(build, /src\/product\/mcp\/policy\.zig/);
+  assert.match(
+    build,
+    /product_mcp_policy\.addImport\("metawork_agent", agent\)/,
+  );
+  assert.match(
+    build,
+    /product_mcp_policy\.addImport\("product_mcp_configuration", mcp_configuration\)/,
+  );
+  assert.match(
+    build,
+    /product_mcp_policy\.addImport\("product_mcp_state", product_mcp_state\)/,
+  );
+  assert.match(
+    build,
+    /product_mcp_view\.addImport\("product_mcp_configuration", mcp_configuration\)/,
+  );
+  assert.match(
+    build,
+    /product_mcp_view\.addImport\("product_mcp_state", product_mcp_state\)/,
+  );
+  assert.match(build, /"test-product-mcp-view"/);
+  assert.match(build, /"test-product-mcp-policy"/);
+  assert.match(build, /"Workbench snapshot serializer"/);
+  assert.match(
+    workbenchProjection,
+    /const product_mcp = @import\("metawork_product_mcp"\)/,
+  );
+  assert.match(workbenchProjection, /const mcp_state = product_mcp\.state/);
+  assert.match(workbenchProjection, /const mcp_policy = product_mcp\.policy/);
+  assert.match(workbenchProjection, /const mcp_view = product_mcp\.view/);
+  assert.match(workbenchProjection, /mcp_view\.writeProjection/);
+  assert.doesNotMatch(
+    workbenchProjection,
+    /fn mcpAvailability|fn mcpRuntimeServerStatus|fn mcpProjectionRedacted|fn mcpAuthorizationStatus|fn mcpNewTaskAccess/,
+  );
+  assert.doesNotMatch(
+    workbenchProjection,
+    /fn validMcpAuthorizationTransition|fn mcpServerMutationBusy|fn mcpPendingReauthorization|fn mcpScopeSetAddsRequirement|fn prepareMcpPendingReauthorization|fn installMcpPendingReauthorization|fn mcpServerToolsForAdmission|fn buildMcpOauthRefreshBinding|fn buildMcpRefreshAllowlists|fn mcpExpectedGenerationMatches|fn replaceMcpAdmission|fn blockMcpAdmissionForCurrentState|fn recoveryMcpGeneration/,
+  );
+  for (const name of [
+    "commitMcpMutation",
+    "mcpAdmissionForTarget",
+    "rearmMcpRefreshTimerNoFail",
+    "commitMcpRefreshJobNoFail",
+    "executeMcpRefreshJob",
+    "cancelMcpRefreshJob",
+  ]) {
+    assert.match(workbenchProjection, new RegExp(`fn ${name}\\b`));
+  }
+  assert.match(
+    workbenchProjection,
+    /agent_runtime\.createMcpAdmissionSelection/,
+  );
+  assert.doesNotMatch(workbenchRoot, /workbench_mcp_configuration/);
+  assert.doesNotMatch(workbenchRoot, /pub const McpConfigurationFileStore/);
+  assert.doesNotMatch(workbenchRoot, /pub const McpManagementOutcome/);
+  assert.doesNotMatch(workbenchRoot, /pub const McpRefreshTimer/);
+  assert.doesNotMatch(workbenchRoot, /pub const McpOauthRefreshBinding/);
+  assert.match(workbenchProjection, /mcp_refresh_job: \?\*McpRefreshJob/);
 });
 
 test("Product Account owns Metask protocol without a concrete HTTP client", () => {

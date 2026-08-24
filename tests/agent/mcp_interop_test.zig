@@ -4,6 +4,8 @@ const agent = @import("metawork_agent");
 const mcp_platform = @import("metawork_mcp_platform");
 const options = @import("mcp_interop_options");
 const workbench = @import("metawork_workbench");
+const mcp_configuration = @import("metawork_product_mcp").configuration;
+const mcp_state = @import("metawork_product_mcp").state;
 
 const Fixture = struct {
     transport_owner: agent.McpTransportOwner = undefined,
@@ -133,7 +135,7 @@ const McpRefreshTimerProbe = struct {
         self.cancel_count += 1;
     }
 
-    fn capability(self: *@This()) workbench.McpRefreshTimer {
+    fn capability(self: *@This()) mcp_state.McpRefreshTimer {
         return .{
             .context = self,
             .enabled = true,
@@ -149,7 +151,7 @@ const DurableRegistry = struct {
     len: usize = 0,
     identity_counter: u8 = 0,
 
-    fn persistence(self: *DurableRegistry) workbench.McpMutationPersistence {
+    fn persistence(self: *DurableRegistry) mcp_configuration.MutationPersistence {
         return .{
             .context = self,
             .available = true,
@@ -159,7 +161,7 @@ const DurableRegistry = struct {
         };
     }
 
-    fn credentials(self: *DurableRegistry) workbench.McpCredentialEffects {
+    fn credentials(self: *DurableRegistry) mcp_configuration.CredentialEffects {
         return .{
             .context = self,
             .available = true,
@@ -169,7 +171,7 @@ const DurableRegistry = struct {
         };
     }
 
-    fn identityGenerator(self: *DurableRegistry) workbench.McpFreshServerIdentityGenerator {
+    fn identityGenerator(self: *DurableRegistry) mcp_configuration.FreshServerIdentityGenerator {
         return .{
             .context = self,
             .available = true,
@@ -177,11 +179,11 @@ const DurableRegistry = struct {
         };
     }
 
-    fn commitJournal(_: ?*anyopaque, _: []const u8) workbench.McpPersistenceEffect {
+    fn commitJournal(_: ?*anyopaque, _: []const u8) mcp_configuration.PersistenceEffect {
         return .committed;
     }
 
-    fn commitRegistry(context: ?*anyopaque, bytes: []const u8) workbench.McpPersistenceEffect {
+    fn commitRegistry(context: ?*anyopaque, bytes: []const u8) mcp_configuration.PersistenceEffect {
         const self: *DurableRegistry = @ptrCast(@alignCast(context orelse return .failed));
         if (bytes.len > self.storage.len) return .failed;
         @memcpy(self.storage[0..bytes.len], bytes);
@@ -189,11 +191,11 @@ const DurableRegistry = struct {
         return .committed;
     }
 
-    fn clearJournal(_: ?*anyopaque) workbench.McpPersistenceEffect {
+    fn clearJournal(_: ?*anyopaque) mcp_configuration.PersistenceEffect {
         return .committed;
     }
 
-    fn probeCredential(_: ?*anyopaque, _: []const u8) workbench.McpCredentialPresence {
+    fn probeCredential(_: ?*anyopaque, _: []const u8) mcp_configuration.CredentialPresence {
         return .missing;
     }
 
@@ -213,7 +215,7 @@ const DurableRegistry = struct {
     }
 };
 
-const product_mcp_limits: workbench.McpConfigurationLimits = .{
+const product_mcp_limits: mcp_configuration.Limits = .{
     .max_servers = 8,
     .max_tools_per_server = 32,
     .max_namespace_bytes = 128,
@@ -224,8 +226,8 @@ const product_mcp_limits: workbench.McpConfigurationLimits = .{
 
 fn managementConfiguration(
     store: *DurableRegistry,
-    manifest: *workbench.McpRuntimeManifest,
-) workbench.McpManagementConfiguration {
+    manifest: *mcp_configuration.RuntimeManifest,
+) mcp_configuration.ManagementConfiguration {
     return .{
         .persistence = store.persistence(),
         .credentials = store.credentials(),
@@ -306,7 +308,7 @@ fn waitForMcpSnapshot(workbench_value: *workbench.Workbench, expected: []const u
 fn prepareHttpFixture(
     endpoint: []const u8,
     protocol_version: []const u8,
-) !workbench.McpPreparedConfiguration {
+) !mcp_configuration.Preparation {
     const negotiation = if (std.mem.eql(u8, protocol_version, "2026-07-28"))
         "modern_only"
     else
@@ -317,7 +319,7 @@ fn prepareHttpFixture(
 fn prepareHttpFixtureWithNegotiation(
     endpoint: []const u8,
     negotiation: []const u8,
-) !workbench.McpPreparedConfiguration {
+) !mcp_configuration.Preparation {
     const registry_json = try std.fmt.allocPrint(
         std.testing.allocator,
         "{{\"schema_version\":2,\"generation\":1,\"oauth_operation\":null,\"servers\":[{{\"id\":\"deterministic-http\",\"namespace\":\"fixture\",\"display_name\":\"Deterministic HTTP\",\"enabled\":true,\"negotiation\":\"{s}\",\"timeout_ms\":2000,\"transport\":{{\"kind\":\"streamable_http\",\"url\":\"{s}\",\"headers\":[]}},\"auth\":{{\"kind\":\"none\",\"oauth\":null}},\"connection_approval\":{{\"fingerprint\":\"fixture\"}},\"tools\":[\"echo\"]}}]}}",
@@ -325,13 +327,13 @@ fn prepareHttpFixtureWithNegotiation(
     );
     defer std.testing.allocator.free(registry_json);
     const parsed = try std.json.parseFromSlice(
-        workbench.McpRegistryWire,
+        mcp_configuration.RegistryWire,
         std.testing.allocator,
         registry_json,
         .{ .allocate = .alloc_always },
     );
     errdefer parsed.deinit();
-    const states = try std.testing.allocator.alloc(workbench.McpServerPreparationState, 1);
+    const states = try std.testing.allocator.alloc(mcp_configuration.ServerPreparationState, 1);
     states[0] = .eligible;
     return .{
         .allocator = std.testing.allocator,
@@ -759,7 +761,7 @@ test "MCP product chain reaches new Task authority after add restart refresh and
     defer fixture.deinit();
     const registry_storage = try std.testing.allocator.alloc(
         u8,
-        workbench.mcp_registry_max_bytes,
+        mcp_configuration.max_store_bytes,
     );
     defer std.testing.allocator.free(registry_storage);
     var durable_registry: DurableRegistry = .{ .storage = registry_storage };
@@ -774,7 +776,7 @@ test "MCP product chain reaches new Task authority after add restart refresh and
         initial_runtime.shutdown() catch unreachable;
         initial_runtime.deinit();
     };
-    var initial_preparation = try workbench.prepareMcpConfiguration(
+    var initial_preparation = try mcp_configuration.prepare(
         std.testing.allocator,
         null,
         true,
@@ -784,7 +786,7 @@ test "MCP product chain reaches new Task authority after add restart refresh and
     );
     var initial_preparation_owned = true;
     errdefer if (initial_preparation_owned) initial_preparation.deinit();
-    var initial_manifest = (try workbench.McpRuntimeManifest.candidate(
+    var initial_manifest = (try mcp_configuration.RuntimeManifest.candidate(
         std.testing.allocator,
         &initial_preparation,
     )).?;
@@ -813,7 +815,7 @@ test "MCP product chain reaches new Task authority after add restart refresh and
         initial_runtime,
     );
     try std.testing.expectEqual(
-        workbench.McpManagementOutcome.saved,
+        mcp_configuration.ManagementOutcome.saved,
         try initial_workbench.createMcpHttpServer(0, .{
             .display_name = "Deterministic HTTP",
             .negotiation = "modern_only",
@@ -821,7 +823,7 @@ test "MCP product chain reaches new Task authority after add restart refresh and
             .url = fixture.endpoint,
         }),
     );
-    var created = try workbench.decodeMcpRegistry(
+    var created = try mcp_configuration.decode(
         std.testing.allocator,
         durable_registry.storage[0..durable_registry.len],
         product_mcp_limits,
@@ -830,13 +832,13 @@ test "MCP product chain reaches new Task authority after add restart refresh and
     created.deinit();
     defer std.testing.allocator.free(server_id);
     try std.testing.expectEqual(
-        workbench.McpRuntimeAlignment.restart_required,
+        mcp_configuration.RuntimeAlignment.restart_required,
         initial_workbench.inspectMcpDesiredConfiguration().?.runtime_alignment,
     );
     shutdownProduct(&initial_workbench, initial_runtime);
     initial_product_live = false;
 
-    var restarted_preparation = try workbench.prepareMcpConfiguration(
+    var restarted_preparation = try mcp_configuration.prepare(
         std.testing.allocator,
         durable_registry.storage[0..durable_registry.len],
         true,
@@ -853,7 +855,7 @@ test "MCP product chain reaches new Task authority after add restart refresh and
         .{},
     );
     defer runtime_build.deinit();
-    var restarted_manifest = (try workbench.McpRuntimeManifest.candidate(
+    var restarted_manifest = (try mcp_configuration.RuntimeManifest.candidate(
         std.testing.allocator,
         &restarted_preparation,
     )).?;
@@ -911,7 +913,7 @@ test "MCP product chain reaches new Task authority after add restart refresh and
     try std.testing.expectEqual(@as(?u64, null), refresh_timer.armed_at_ms);
     try std.testing.expectEqual(@as(usize, 0), refresh_timer.arm_count);
     try std.testing.expectEqual(
-        workbench.McpManagementOutcome.saved,
+        mcp_configuration.ManagementOutcome.saved,
         try restarted_workbench.setMcpAllowedTools(1, .{
             .server_id = server_id,
             .tools = &.{"echo"},

@@ -1,0 +1,503 @@
+//! Workbench-owned Product MCP policy and state-transition kernel.
+//! This module derives decisions from Product MCP configuration/state and may
+//! prepare owned Agent allowlists, but owns no Workbench, worker, timer, or effect.
+
+const std = @import("std");
+const lifecycle = @import("metawork_agent");
+const mcp_configuration = @import("product_mcp_configuration");
+const mcp_state = @import("product_mcp_state");
+
+pub fn validAuthorizationTransition(
+    from: mcp_state.McpAuthorizationPhase,
+    to: mcp_state.McpAuthorizationPhase,
+) bool {
+    if (to == .cancelling) return from != .cancelling;
+    return switch (from) {
+        .discovering => to == .awaiting_consent,
+        .awaiting_consent => to == .registering or to == .awaiting_browser,
+        .registering => to == .awaiting_browser,
+        .awaiting_browser => to == .exchanging,
+        .exchanging, .cancelling => false,
+    };
+}
+
+pub fn serverMutationBusy(
+    mcp: *const mcp_state.McpProductState,
+    server_id: []const u8,
+) bool {
+    if (mcp.connection_test) |test_state|
+        if (test_state.state == .testing and
+            std.mem.eql(u8, test_state.serverId(), server_id)) return true;
+    const operation = mcp.authorization_operation orelse return false;
+    return std.mem.eql(u8, operation.server_id, server_id);
+}
+
+pub fn authorizationAt(
+    mcp: *const mcp_state.McpProductState,
+    server_id: []const u8,
+    phases: []const mcp_state.McpAuthorizationPhase,
+) bool {
+    const operation = mcp.authorization_operation orelse return false;
+    if (!std.mem.eql(u8, operation.server_id, server_id)) return false;
+    for (phases) |phase| if (operation.phase == phase) return true;
+    return false;
+}
+
+fn pendingReauthorizationIndex(
+    mcp: *const mcp_state.McpProductState,
+    server_id: []const u8,
+) ?usize {
+    for (mcp.pending_reauthorizations.items, 0..) |pending, index|
+        if (std.mem.eql(u8, pending.server_id, server_id)) return index;
+    return null;
+}
+
+pub fn pendingReauthorizationScopes(
+    mcp: *const mcp_state.McpProductState,
+    server_id: []const u8,
+    consent_epoch: u64,
+) []const []const u8 {
+    const index = pendingReauthorizationIndex(mcp, server_id) orelse
+        return &.{};
+    const pending = mcp.pending_reauthorizations.items[index];
+    return if (pending.consent_epoch == consent_epoch) pending.scopes else &.{};
+}
+
+pub fn scopeSetAddsRequirement(
+    approved: []const []const u8,
+    challenge: []const []const u8,
+) bool {
+    for (challenge) |required| {
+        var found = false;
+        for (approved) |scope| if (std.mem.eql(u8, required, scope)) {
+            found = true;
+            break;
+        };
+        if (!found) return true;
+    }
+    return false;
+}
+
+pub fn preparePendingReauthorization(
+    allocator: std.mem.Allocator,
+    mcp: *mcp_state.McpProductState,
+    server_id: []const u8,
+    consent_epoch: u64,
+    scopes: []const []const u8,
+    max_scopes: usize,
+) (std.mem.Allocator.Error || error{McpOauthScopeCapacity})!?mcp_state.McpPendingReauthorization {
+    const existing_index = pendingReauthorizationIndex(mcp, server_id);
+    const existing_scopes = if (existing_index) |index|
+        if (mcp.pending_reauthorizations.items[index].consent_epoch == consent_epoch)
+            mcp.pending_reauthorizations.items[index].scopes
+        else
+            &.{}
+    else
+        &.{};
+    if (existing_index != null and
+        mcp.pending_reauthorizations.items[existing_index.?].consent_epoch == consent_epoch and
+        !scopeSetAddsRequirement(existing_scopes, scopes))
+        return null;
+    if (existing_index == null)
+        try mcp.pending_reauthorizations.ensureUnusedCapacity(allocator, 1);
+    return try mcp_state.McpPendingReauthorization.init(
+        allocator,
+        server_id,
+        consent_epoch,
+        existing_scopes,
+        scopes,
+        max_scopes,
+    );
+}
+
+pub fn installPendingReauthorization(
+    mcp: *mcp_state.McpProductState,
+    replacement: *mcp_state.McpPendingReauthorization,
+) void {
+    if (pendingReauthorizationIndex(mcp, replacement.server_id)) |index| {
+        mcp.pending_reauthorizations.items[index].deinit();
+        mcp.pending_reauthorizations.items[index] = replacement.*;
+    } else {
+        mcp.pending_reauthorizations.appendAssumeCapacity(replacement.*);
+    }
+    replacement.* = undefined;
+}
+
+fn reconcilePendingReauthorizations(
+    mcp: *mcp_state.McpProductState,
+    target: mcp_configuration.RegistryWire,
+) void {
+    var index: usize = 0;
+    while (index < mcp.pending_reauthorizations.items.len) {
+        const pending = mcp.pending_reauthorizations.items[index];
+        const keep = if (mcp_state.findMcpServer(target.servers, pending.server_id)) |server|
+            if (server.auth.oauth) |oauth|
+                std.mem.eql(u8, oauth.status, "reauth_required") and
+                    if (oauth.consent) |consent|
+                        consent.epoch == pending.consent_epoch
+                    else
+                        false
+            else
+                false
+        else
+            false;
+        if (keep) {
+            index += 1;
+            continue;
+        }
+        var removed = mcp.pending_reauthorizations.swapRemove(index);
+        removed.deinit();
+    }
+}
+
+fn serverAdmittedByDesiredState(server: mcp_configuration.ServerWire) bool {
+    if (!server.enabled or server.connection_approval == null) return false;
+    if (std.mem.eql(u8, server.auth.kind, "oauth")) {
+        const oauth = server.auth.oauth orelse return false;
+        return std.mem.eql(u8, oauth.status, "ready") and oauth.grant != null;
+    }
+    return true;
+}
+
+pub fn serverToolsForAdmission(
+    registry: mcp_configuration.RegistryWire,
+    server: mcp_configuration.ServerWire,
+) []const []const u8 {
+    if (registry.oauth_operation) |operation|
+        if (std.mem.eql(u8, operation.server_id, server.id)) return &.{};
+    if (!serverAdmittedByDesiredState(server)) return &.{};
+    return server.tools;
+}
+
+pub fn buildOauthRefreshBinding(
+    allocator: std.mem.Allocator,
+    registry: mcp_configuration.RegistryWire,
+) std.mem.Allocator.Error!mcp_state.McpOauthRefreshBinding {
+    const operation = registry.oauth_operation.?;
+    const server = mcp_state.findMcpServer(registry.servers, operation.server_id).?;
+    const oauth = server.auth.oauth.?;
+    const consent = oauth.consent.?;
+    const grant = oauth.grant.?;
+    const registration = oauth.registration;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const owned = arena.allocator();
+    const scopes = try owned.alloc([]const u8, consent.scopes.len);
+    for (consent.scopes, scopes) |scope, *owned_scope|
+        owned_scope.* = try owned.dupe(u8, scope);
+    return .{
+        .arena = arena,
+        .operation_id = try owned.dupe(u8, operation.id),
+        .server_id = try owned.dupe(u8, operation.server_id),
+        .endpoint = try owned.dupe(u8, server.transport.url.?),
+        .resource = try owned.dupe(u8, consent.resource),
+        .issuer = try owned.dupe(u8, consent.issuer),
+        .scopes = scopes,
+        .client_id = try owned.dupe(u8, registration.client_id.?),
+        .token_endpoint_auth_method = try owned.dupe(
+            u8,
+            registration.token_endpoint_auth_method.?,
+        ),
+        .client_secret_ref = if (registration.client_secret_ref) |locator|
+            try owned.dupe(u8, locator)
+        else
+            null,
+        .refresh_token_ref = try owned.dupe(u8, grant.refresh_token_ref.?),
+        .consent_epoch = operation.consent_epoch,
+        .token_revision = operation.token_revision.?,
+    };
+}
+
+fn refreshToolsForServer(
+    desired: ?mcp_configuration.RegistryWire,
+    server_id: []const u8,
+) []const []const u8 {
+    const registry = desired orelse return &.{};
+    const server = mcp_state.findMcpServer(registry.servers, server_id) orelse return &.{};
+    return serverToolsForAdmission(registry, server);
+}
+
+pub fn buildRefreshAllowlists(
+    allocator: std.mem.Allocator,
+    mcp: *const mcp_state.McpProductState,
+    desired: ?mcp_configuration.RegistryWire,
+) std.mem.Allocator.Error![]const lifecycle.McpServerAllowlist {
+    const startup = if (mcp.preparation.registry) |registry|
+        registry.value
+    else
+        return allocator.alloc(lifecycle.McpServerAllowlist, 0);
+    var count: usize = 0;
+    for (mcp.preparation.server_states) |server_state| {
+        if (server_state == .eligible) count += 1;
+    }
+    const allowlists = try allocator.alloc(lifecycle.McpServerAllowlist, count);
+    var write: usize = 0;
+    for (startup.servers, mcp.preparation.server_states) |server, server_state| {
+        if (server_state != .eligible) continue;
+        const tools = refreshToolsForServer(desired, server.id);
+        const owned_tools = try allocator.alloc([]const u8, tools.len);
+        for (tools, owned_tools) |tool, *owned|
+            owned.* = try allocator.dupe(u8, tool);
+        allowlists[write] = .{
+            .id = try allocator.dupe(u8, server.id),
+            .tools = owned_tools,
+        };
+        write += 1;
+    }
+    return allowlists;
+}
+
+pub fn expectedGenerationMatches(
+    management: *const mcp_configuration.ManagementPort,
+    expected_generation: u64,
+) bool {
+    const inspection = management.inspect();
+    if (inspection.health == .outcome_unknown) return true;
+    if (inspection.desired_generation) |generation|
+        return expected_generation == generation;
+    if (inspection.health == .ready) return expected_generation == 0;
+    return true;
+}
+
+pub fn replaceAdmission(
+    mcp: *mcp_state.McpProductState,
+    replacement: mcp_state.McpAdmissionAuthority,
+) void {
+    var installed = replacement;
+    if (mcp.runtime_auth_failure_blocked and installed == .ready) {
+        installed.deinit();
+        installed = .{ .blocked = .runtime_authorization_failure };
+    }
+    mcp.admission.deinit();
+    mcp.admission = installed;
+}
+
+pub fn installCommittedDesiredState(
+    mcp: *mcp_state.McpProductState,
+    management: *const mcp_configuration.ManagementPort,
+    admission: mcp_state.McpAdmissionAuthority,
+) void {
+    reconcilePendingReauthorizations(
+        mcp,
+        management.desiredRegistry() orelse unreachable,
+    );
+    replaceAdmission(mcp, admission);
+}
+
+pub fn blockAdmission(
+    mcp: *mcp_state.McpProductState,
+    reason: mcp_state.McpAdmissionBlockReason,
+) void {
+    replaceAdmission(mcp, .{ .blocked = reason });
+}
+
+pub fn blockAdmissionForCurrentState(mcp: *mcp_state.McpProductState) void {
+    const inspection = if (mcp.management) |*management| management.inspect() else null;
+    if (inspection) |value| {
+        if (value.health == .outcome_unknown) {
+            blockAdmission(mcp, .persistence_outcome_unknown);
+            return;
+        }
+        if (value.health != .ready) {
+            blockAdmission(mcp, .management_recovery_required);
+            return;
+        }
+    }
+    const alignment = if (inspection) |value|
+        value.runtime_alignment
+    else
+        mcp_configuration.RuntimeAlignment.unknown;
+    blockAdmission(mcp, switch (alignment) {
+        .current => .activation_unavailable,
+        .restart_required => .pending_restart,
+        .unknown => .alignment_unknown,
+    });
+}
+
+pub fn authorizationOperation(
+    mcp: ?*const mcp_state.McpProductState,
+) ?mcp_state.McpAuthorizationOperationView {
+    const current = mcp orelse return null;
+    const operation = current.authorization_operation orelse return null;
+    return .{
+        .phase = operation.phase,
+        .server_id = operation.server_id,
+        .operation_id = operation.operation_id,
+    };
+}
+
+pub fn serverOperationBusy(
+    mcp: *const mcp_state.McpProductState,
+    server_id: []const u8,
+) bool {
+    if (serverMutationBusy(mcp, server_id)) return true;
+    const management = if (mcp.management) |*value| value else return false;
+    const registry = management.desiredRegistry() orelse return false;
+    const operation = registry.oauth_operation orelse return false;
+    return std.mem.eql(u8, operation.server_id, server_id);
+}
+
+pub fn nextOauthExpiry(
+    mcp: *const mcp_state.McpProductState,
+) ?mcp_state.McpOauthExpiry {
+    if (mcp.authorization_operation != null) return null;
+    const management = if (mcp.management) |*value| value else return null;
+    if (management.inspect().health != .ready) return null;
+    const registry = management.desiredRegistry() orelse return null;
+    if (registry.oauth_operation != null) return null;
+    var earliest: ?mcp_state.McpOauthExpiry = null;
+    for (registry.servers) |server| {
+        if (!serverAdmittedByDesiredState(server)) continue;
+        const oauth = server.auth.oauth orelse continue;
+        const grant = oauth.grant orelse continue;
+        if (grant.refresh_token_ref == null) continue;
+        const expires_at = grant.expires_at_unix_ms orelse continue;
+        if (earliest == null or expires_at < earliest.?.expires_at_unix_ms)
+            earliest = .{
+                .server_id = server.id,
+                .expires_at_unix_ms = expires_at,
+            };
+    }
+    return earliest;
+}
+
+pub fn selectionForNewTask(
+    mcp: ?*const mcp_state.McpProductState,
+) ?*const lifecycle.McpSelection {
+    const current = mcp orelse return null;
+    if (!current.committed) return null;
+    return switch (current.admission) {
+        .ready => |ready| ready.selection,
+        .blocked => null,
+    };
+}
+
+pub fn recoveryGeneration(
+    mcp: ?*const mcp_state.McpProductState,
+    refresh_job_active: bool,
+) ?u64 {
+    const current = mcp orelse return null;
+    if (!current.committed or refresh_job_active or
+        current.refresh_pending_blocks_admission or
+        current.authorization_operation != null or
+        current.runtime_auth_failure_blocked)
+        return null;
+    return switch (current.admission) {
+        .ready => |ready| ready.catalog_generation,
+        .blocked => null,
+    };
+}
+
+test "Product MCP authorization phases only advance along the approved graph" {
+    try std.testing.expect(validAuthorizationTransition(.discovering, .awaiting_consent));
+    try std.testing.expect(validAuthorizationTransition(.awaiting_consent, .registering));
+    try std.testing.expect(validAuthorizationTransition(.awaiting_consent, .awaiting_browser));
+    try std.testing.expect(validAuthorizationTransition(.registering, .awaiting_browser));
+    try std.testing.expect(validAuthorizationTransition(.awaiting_browser, .exchanging));
+    try std.testing.expect(validAuthorizationTransition(.exchanging, .cancelling));
+    try std.testing.expect(!validAuthorizationTransition(.discovering, .exchanging));
+    try std.testing.expect(!validAuthorizationTransition(.cancelling, .cancelling));
+}
+
+test "Product MCP scope policy detects only new requirements" {
+    const approved = [_][]const u8{ "files.read", "files.write" };
+    try std.testing.expect(!scopeSetAddsRequirement(&approved, &.{"files.read"}));
+    try std.testing.expect(!scopeSetAddsRequirement(&approved, &.{ "files.write", "files.read" }));
+    try std.testing.expect(scopeSetAddsRequirement(&approved, &.{"files.delete"}));
+}
+
+test "OAuth operation remains excluded from every rebuilt Admission target" {
+    var oauth_server: mcp_configuration.ServerWire = .{
+        .id = "oauth",
+        .namespace = "oauth",
+        .display_name = "OAuth",
+        .enabled = true,
+        .negotiation = "automatic",
+        .timeout_ms = 1000,
+        .transport = .{
+            .kind = "streamable_http",
+            .url = "https://mcp.example.test/mcp",
+        },
+        .auth = .{ .kind = "oauth", .oauth = .{
+            .status = "ready",
+            .registration = .{
+                .kind = "pre_registered",
+                .issuer = "https://auth.example.test",
+                .client_id = "client",
+                .token_endpoint_auth_method = "none",
+                .client_credential_revision = 1,
+                .client_secret_ref = null,
+            },
+            .consent = null,
+            .grant = .{
+                .consent_epoch = 3,
+                .token_revision = 8,
+                .access_token_ref = "oauth/access-8",
+                .refresh_token_ref = "oauth/refresh-8",
+                .expires_at_unix_ms = 1000,
+            },
+        } },
+        .connection_approval = .{ .fingerprint = "approved" },
+        .tools = &.{ "read", "write" },
+    };
+    const other: mcp_configuration.ServerWire = .{
+        .id = "other",
+        .namespace = "other",
+        .display_name = "Other",
+        .enabled = true,
+        .negotiation = "automatic",
+        .timeout_ms = 1000,
+        .transport = .{ .kind = "stdio", .command = "tool" },
+        .auth = .{ .kind = "none", .oauth = null },
+        .connection_approval = .{ .fingerprint = "approved" },
+        .tools = &.{"other.read"},
+    };
+    var servers = [_]mcp_configuration.ServerWire{ oauth_server, other };
+    var registry: mcp_configuration.RegistryWire = .{
+        .schema_version = 2,
+        .generation = 7,
+        .oauth_operation = .{
+            .id = "refresh-1",
+            .kind = "refresh",
+            .server_id = "oauth",
+            .connection_fingerprint = "approved",
+            .consent_fingerprint = "consent",
+            .consent_epoch = 3,
+            .token_revision = 8,
+        },
+        .servers = &servers,
+    };
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        serverToolsForAdmission(registry, oauth_server).len,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        refreshToolsForServer(registry, "oauth").len,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        serverToolsForAdmission(registry, other).len,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        refreshToolsForServer(registry, "other").len,
+    );
+    registry.oauth_operation = null;
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        serverToolsForAdmission(registry, oauth_server).len,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        refreshToolsForServer(registry, "oauth").len,
+    );
+    var oauth = oauth_server.auth.oauth.?;
+    oauth.status = "reauth_required";
+    oauth.grant = null;
+    oauth_server.auth.oauth = oauth;
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        serverToolsForAdmission(registry, oauth_server).len,
+    );
+}

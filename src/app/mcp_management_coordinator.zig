@@ -7,12 +7,15 @@ const std = @import("std");
 const builtin = @import("builtin");
 const agent = @import("metawork_agent");
 const workbench = @import("metawork_workbench");
+const product_mcp = @import("metawork_product_mcp");
+const mcp_configuration = product_mcp.configuration;
+const mcp_state = product_mcp.state;
 const mcp_oauth = @import("metawork_mcp_oauth");
 const mcp_platform = @import("metawork_mcp_platform");
 const mcp_startup = @import("mcp_startup.zig");
 const app_platform = @import("platform.zig");
 
-const connection_approval_details_bytes: usize = workbench.mcp_registry_max_bytes * 6 + 4096;
+const connection_approval_details_bytes: usize = mcp_configuration.max_store_bytes * 6 + 4096;
 const oauth_consent_details_bytes: usize = mcp_oauth.Limits.metadata_body_bytes * 6 + 4096;
 const secret_capture_prompt_bytes: usize = 32 * 1024;
 
@@ -165,7 +168,7 @@ pub const ConfigurationApplyStartOutcome = enum {
     unavailable,
 };
 
-pub const SecretSlot = workbench.McpSecretCaptureTarget;
+pub const SecretSlot = mcp_state.McpSecretCaptureTarget;
 
 const oauth_timeout: std.Io.Clock.Duration = .{
     .raw = .fromSeconds(5 * 60),
@@ -419,7 +422,7 @@ fn deinitJobInput(allocator: std.mem.Allocator, input: *JobInput) void {
 }
 
 const Flow = struct {
-    start: workbench.McpAuthorizationStart,
+    start: mcp_state.McpAuthorizationStart,
     deadline: std.Io.Clock.Timestamp,
     discovery: ?DiscoveryResult = null,
     attempt: ?*mcp_oauth.AuthorizationAttempt = null,
@@ -442,7 +445,7 @@ const Flow = struct {
 };
 
 const ConnectionTestResult = struct {
-    outcome: workbench.McpConnectionTestOutcome = .failed,
+    outcome: mcp_state.McpConnectionTestOutcome = .failed,
     tool_count: u32 = 0,
     issue_count: u32 = 0,
 };
@@ -521,8 +524,8 @@ const ConfigurationApplyJob = struct {
     host: Host,
     generation: u64,
     runtime: *agent.Runtime,
-    preparation: workbench.McpPreparedConfiguration,
-    manifest: workbench.McpRuntimeManifest,
+    preparation: mcp_configuration.Preparation,
+    manifest: mcp_configuration.RuntimeManifest,
     input: ?agent.McpRuntimeInput,
     authorizations: mcp_platform.HttpAuthorizations,
     allowlists: []agent.McpServerAllowlist,
@@ -762,14 +765,14 @@ pub const Coordinator = struct {
 
         const registry_storage = try self.allocator.alloc(
             u8,
-            workbench.mcp_registry_max_bytes,
+            mcp_configuration.max_store_bytes,
         );
         defer self.allocator.free(registry_storage);
         const registry_bytes = self.workbench_owner.writeMcpDesiredConfiguration(
             expected_generation,
             registry_storage,
         ) catch return .unavailable;
-        var preparation = try workbench.prepareMcpConfiguration(
+        var preparation = try mcp_configuration.prepare(
             self.allocator,
             registry_bytes,
             true,
@@ -854,14 +857,14 @@ pub const Coordinator = struct {
 
         const registry_storage = try self.allocator.alloc(
             u8,
-            workbench.mcp_registry_max_bytes,
+            mcp_configuration.max_store_bytes,
         );
         defer self.allocator.free(registry_storage);
         const registry_bytes = self.workbench_owner.writeMcpDesiredConfiguration(
             generation,
             registry_storage,
         ) catch return .unavailable;
-        var preparation = try workbench.prepareMcpConfiguration(
+        var preparation = try mcp_configuration.prepare(
             self.allocator,
             registry_bytes,
             true,
@@ -871,7 +874,7 @@ pub const Coordinator = struct {
         );
         var preparation_owned = true;
         defer if (preparation_owned) preparation.deinit();
-        const manifest_optional = try workbench.McpRuntimeManifest.candidate(
+        const manifest_optional = try mcp_configuration.RuntimeManifest.candidate(
             self.allocator,
             &preparation,
         );
@@ -1675,7 +1678,7 @@ fn durableFailureRequiresRecovery(failure: JobFailure) bool {
     return failure == .invalid_grant or failure == .outcome_unknown;
 }
 
-fn mapManagementOutcome(value: workbench.McpManagementOutcome) Outcome {
+fn mapManagementOutcome(value: mcp_configuration.ManagementOutcome) Outcome {
     return switch (value) {
         .saved => .saved,
         .saved_recovery_required => .saved_recovery_required,
@@ -1730,13 +1733,13 @@ test "MCP Application coordinator completes dynamic registration and OAuth loopb
         }
     };
     const Effects = struct {
-        fn commit(_: ?*anyopaque, _: []const u8) workbench.McpPersistenceEffect {
+        fn commit(_: ?*anyopaque, _: []const u8) mcp_configuration.PersistenceEffect {
             return .committed;
         }
-        fn clear(_: ?*anyopaque) workbench.McpPersistenceEffect {
+        fn clear(_: ?*anyopaque) mcp_configuration.PersistenceEffect {
             return .committed;
         }
-        fn probe(_: ?*anyopaque, _: []const u8) workbench.McpCredentialPresence {
+        fn probe(_: ?*anyopaque, _: []const u8) mcp_configuration.CredentialPresence {
             return .missing;
         }
         fn create(_: ?*anyopaque, _: []const u8, _: []const u8) bool {
@@ -1829,7 +1832,7 @@ test "MCP Application coordinator completes dynamic registration and OAuth loopb
         }
         fn notify(_: *anyopaque) void {}
     };
-    const limits: workbench.McpConfigurationLimits = .{
+    const limits: mcp_configuration.Limits = .{
         .max_servers = 8,
         .max_tools_per_server = 32,
         .max_namespace_bytes = 128,
@@ -1837,7 +1840,7 @@ test "MCP Application coordinator completes dynamic registration and OAuth loopb
         .max_runtime_secrets_per_server = 128,
         .max_runtime_secret_bytes_per_server = 16 * 1024,
     };
-    var preparation = try workbench.prepareMcpConfiguration(
+    var preparation = try mcp_configuration.prepare(
         std.testing.allocator,
         null,
         true,
@@ -1847,7 +1850,7 @@ test "MCP Application coordinator completes dynamic registration and OAuth loopb
     );
     var preparation_owned = true;
     defer if (preparation_owned) preparation.deinit();
-    var manifest = (try workbench.McpRuntimeManifest.candidate(
+    var manifest = (try mcp_configuration.RuntimeManifest.candidate(
         std.testing.allocator,
         &preparation,
     )).?;
@@ -1896,7 +1899,7 @@ test "MCP Application coordinator completes dynamic registration and OAuth loopb
     manifest_owned = false;
     defer workbench_owner.deinit();
     try std.testing.expectEqual(
-        workbench.McpManagementOutcome.saved,
+        mcp_configuration.ManagementOutcome.saved,
         try workbench_owner.createMcpOauthHttpServer(0, .{
             .display_name = "Remote",
             .url = "https://mcp.example.test/mcp",
@@ -1933,7 +1936,7 @@ test "MCP Application coordinator completes dynamic registration and OAuth loopb
     coordinator.transport_override = .{ .context = &fake_http, .fetch_fn = FakeHttp.fetch };
     defer coordinator.deinit();
     try std.testing.expectEqual(
-        workbench.McpManagementOutcome.saved,
+        mcp_configuration.ManagementOutcome.saved,
         try workbench_owner.createMcpOauthHttpServer(1, .{
             .display_name = "Remote to cancel",
             .url = "https://mcp.example.test/mcp",
@@ -1942,7 +1945,7 @@ test "MCP Application coordinator completes dynamic registration and OAuth loopb
     );
     const cancelled_server_id = "mcp-7d7d7d7d7d7d7d7d7d7d";
     try std.testing.expectEqual(
-        workbench.McpManagementOutcome.saved,
+        mcp_configuration.ManagementOutcome.saved,
         try workbench_owner.createMcpOauthHttpServer(2, .{
             .display_name = "Remote with uncertain cancel",
             .url = "https://mcp.example.test/mcp",

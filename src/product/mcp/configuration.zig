@@ -1,4 +1,4 @@
-//! Workbench-owned MCP registry codec and single-writer file capability.
+//! Workbench-owned Product MCP configuration, persistence, preparation, and transaction kernel.
 //! The registry contains product configuration and credential locators only;
 //! credential material is resolved by a separate Host capability.
 
