@@ -254,6 +254,46 @@ test("MCP opens details only on request and restores the list trigger on close",
   await waitFor(() => assert.equal(document.activeElement, row));
 });
 
+test("MCP toggles a server from the list without opening details", async () => {
+  const calls = [];
+  render(
+    pageElement(
+      {
+        availability: "ready",
+        managementHealth: "ready",
+        operation: "idle",
+        desiredGeneration: "list-generation",
+        runtimeAlignment: "current",
+        redacted: false,
+        servers: [servers[0]],
+      },
+      "",
+      {
+        onSetEnabled: async (...args) => {
+          calls.push(args);
+          return { outcome: "saved" };
+        },
+      },
+    ),
+  );
+
+  const toggle = screen.getByRole("switch", { name: "GitHub enabled" });
+  assert.equal(toggle.getAttribute("aria-checked"), "true");
+  fireEvent.click(toggle);
+
+  assert.equal(screen.queryByRole("dialog", { name: "GitHub" }), null);
+  const confirmation = screen.getByRole("alertdialog", {
+    name: "Disable this server?",
+  });
+  fireEvent.click(
+    within(confirmation).getByRole("button", { name: "Disable server" }),
+  );
+
+  await waitFor(() =>
+    assert.deepEqual(calls, [["list-generation", "github-binding", false]]),
+  );
+});
+
 test("MCP shares the centered management-page frame and foundation Drawer", async () => {
   const [page, css] = await Promise.all([
     readFile(

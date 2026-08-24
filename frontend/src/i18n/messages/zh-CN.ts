@@ -303,6 +303,7 @@ export const zhCN: Record<MessageId, string> = {
   "mcp.confirm.disable.body":
     "保存后会停止向新任务开放；已打开的任务不会改变。",
   "mcp.confirm.disable.action": "停用服务",
+  "mcp.enablement.label": "{server} 启用状态",
   "mcp.confirm.delete.title": "删除这个服务？",
   "mcp.confirm.delete.body":
     "这会移除配置并更新新任务的访问权限；已打开的任务保持现有访问权限。",

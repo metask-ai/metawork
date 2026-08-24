@@ -326,6 +326,7 @@ export const enUS = {
   "mcp.confirm.disable.body":
     "Access is removed from new tasks after saving. Open tasks are not changed.",
   "mcp.confirm.disable.action": "Disable server",
+  "mcp.enablement.label": "{server} enabled",
   "mcp.confirm.delete.title": "Delete this server?",
   "mcp.confirm.delete.body":
     "This removes the configuration and updates access for new tasks. Open tasks keep their current access.",
