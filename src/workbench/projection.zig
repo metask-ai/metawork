@@ -11,6 +11,9 @@ const skill_enablement_impl = @import("workbench_skill_enablement");
 const skill_package_impl = @import("workbench_skill_package");
 const product_task = @import("metawork_product_task");
 const task_persistence = product_task.persistence;
+const TaskPersistenceCommit = task_persistence.Commit;
+const TaskPersistence = task_persistence.Capability;
+const TaskPersistenceHealth = task_persistence.Health;
 const checkpoint_store = product_task.checkpoint_store;
 const checkpoint_record = product_task.checkpoint_record;
 const catalog_snapshot = @import("metawork_product_skill").catalog;
@@ -444,45 +447,6 @@ fn writeQuotedListItem(writer: *std.Io.Writer, value: []const u8) !void {
     try writer.writeByte('\n');
 }
 
-pub const TaskPersistenceCommit = enum {
-    committed,
-    failed,
-    outcome_unknown,
-};
-
-pub const TaskPersistence = struct {
-    context: ?*anyopaque = null,
-    enabled: bool = false,
-    restored_bytes: ?[]const u8 = null,
-    restore_failed: bool = false,
-    commit_fn: *const fn (
-        context: ?*anyopaque,
-        bytes: []const u8,
-    ) TaskPersistenceCommit = unsupportedTaskCommit,
-
-    fn commit(self: TaskPersistence, bytes: []const u8) TaskPersistenceCommit {
-        if (!self.enabled) return .failed;
-        return self.commit_fn(self.context, bytes);
-    }
-
-    fn unsupportedTaskCommit(
-        _: ?*anyopaque,
-        _: []const u8,
-    ) TaskPersistenceCommit {
-        return .failed;
-    }
-};
-
-pub const TaskPersistenceHealth = enum {
-    unavailable,
-    ready,
-    degraded,
-    read_failed,
-    corrupt,
-    write_failed,
-    outcome_unknown,
-};
-
 pub const SchedulePersistenceCommit = enum {
     committed,
     failed,
@@ -697,23 +661,6 @@ const TrackedText = task_model.TrackedText;
 const permission_summary_field_capacity = task_model.permission_summary_field_capacity;
 const PermissionSummary = task_model.PermissionSummary;
 
-fn permissionSummaryWire(
-    permission: *const PermissionSummary,
-) task_persistence.PermissionSummaryWire {
-    return .{
-        .request_id = permission.requestId(),
-        .matched_rule_id = permission.matchedRuleId(),
-        .tool_namespace = @tagName(permission.tool_namespace),
-        .tool_name = permission.toolName(),
-        .tool_binding = permission.toolBinding(),
-        .decision = @tagName(permission.decision),
-        .source = @tagName(permission.source),
-        .policy_generation = permission.policy_generation,
-        .used_session_rule = permission.used_session_rule,
-        .callback_outcome = if (permission.callback_outcome) |outcome| @tagName(outcome) else null,
-    };
-}
-
 const ToolView = task_model.ToolView;
 pub const FileReferencePositionView = task_model.FileReferencePositionView;
 pub const FileReferenceRangeView = task_model.FileReferenceRangeView;
@@ -908,33 +855,6 @@ const TaskFailureRecord = struct {
     task_id: u64,
     recent_order: u64,
     reason: []u8,
-};
-
-const TaskStateWireScratch = struct {
-    allocator: std.mem.Allocator,
-    state: task_persistence.StateWire,
-    allocated_workspaces: []task_persistence.WorkspaceWire,
-    allocated_tasks: []task_persistence.TaskWire,
-    allocated_failures: []task_persistence.TaskFailureWire,
-
-    fn deinit(self: *TaskStateWireScratch) void {
-        for (self.state.tasks) |task| {
-            for (task.runs) |run| {
-                if (run.input.argument_values) |values| self.allocator.free(values);
-                for (run.tools) |tool| if (tool.file_refs) |references| self.allocator.free(references);
-                self.allocator.free(run.tools);
-            }
-            self.allocator.free(task.runs);
-            self.allocator.free(task.compacts);
-            self.allocator.free(task.ui_history);
-            if (task.checkpoint) |checkpoint|
-                self.allocator.free(@constCast(checkpoint.blob.digest));
-        }
-        self.allocator.free(self.allocated_tasks);
-        self.allocator.free(self.allocated_workspaces);
-        self.allocator.free(self.allocated_failures);
-        self.* = undefined;
-    }
 };
 
 test "Task aggregate separates Task runtime ownership from product history" {
@@ -6921,7 +6841,7 @@ pub const Workbench = struct {
         var writer = std.Io.Writer.fixed(output);
         const schedule_persistence_ready =
             self.schedule_persistence_health == .ready;
-        const task_persistence_ready = taskPersistenceOperational(self.task_persistence_health);
+        const task_persistence_ready = self.task_persistence_health.operational();
         const background_schedule_wake = self.schedule_background_available;
         const mcp_management = if (self.mcp) |*mcp|
             mcp.committed and mcp.management != null
@@ -8205,7 +8125,7 @@ pub const Workbench = struct {
             else
                 recoveryAttachment(task.runtime.attachment),
             .operation = recoveryOperation(task.runtime.active_operation),
-            .task_persistence_ready = taskPersistenceOperational(self.task_persistence_health),
+            .task_persistence_ready = self.task_persistence_health.operational(),
             .checkpoint_store_ready = self.checkpoint_store != null and
                 self.checkpoint_store_health.load(.acquire) == .ready,
             .checkpoint_available = checkpoint != null and
@@ -8590,6 +8510,7 @@ pub const Workbench = struct {
             .max_runs_per_task = self.limits.max_runs_per_task,
             .max_compacts_per_task = self.limits.max_compacts_per_task,
             .max_tools_per_run = self.limits.max_tools_per_run,
+            .max_file_refs_per_tool = self.limits.max_file_refs_per_tool,
             .max_ui_history_per_task = self.limits.max_ui_history_per_task,
             .max_workspace_bytes = self.limits.max_workspace_bytes,
             .max_task_title_bytes = self.limits.max_task_title_bytes,
@@ -8597,8 +8518,60 @@ pub const Workbench = struct {
             .max_assistant_message_bytes = self.limits.max_assistant_message_bytes,
             .max_tool_field_bytes = self.limits.max_tool_field_bytes,
             .max_file_ref_field_bytes = self.limits.max_file_ref_field_bytes,
+            .max_execution_model_bytes = account_contract.Limits.model_id_bytes,
             .max_terminal_diagnostic_bytes = self.limits.max_terminal_diagnostic_bytes,
         };
+    }
+
+    fn taskRestoreProjection(self: *Workbench) task_persistence.RestoreProjection {
+        return .{
+            .context = self,
+            .allocator = self.allocator,
+            .limits = self.taskPersistenceLimits(),
+            .copy_fn = copyRestoredTaskText,
+            .alloc_fn = allocRestoredTaskText,
+            .append_text_fn = appendRestoredTaskText,
+            .free_fn = freeRestoredTaskText,
+            .free_text_fn = freeRestoredTrackedText,
+        };
+    }
+
+    fn copyRestoredTaskText(
+        context: *anyopaque,
+        value: []const u8,
+        max: usize,
+    ) task_persistence.ProjectionError![]u8 {
+        const self: *Workbench = @ptrCast(@alignCast(context));
+        return self.copyBounded(value, max) catch |err| return @errorCast(err);
+    }
+
+    fn allocRestoredTaskText(
+        context: *anyopaque,
+        capacity: usize,
+    ) task_persistence.ProjectionError![]u8 {
+        const self: *Workbench = @ptrCast(@alignCast(context));
+        return self.allocTrackedCapacity(capacity) catch |err| return @errorCast(err);
+    }
+
+    fn appendRestoredTaskText(
+        context: *anyopaque,
+        target: *TrackedText,
+        suffix: []const u8,
+        max: usize,
+    ) task_persistence.ProjectionError!void {
+        const self: *Workbench = @ptrCast(@alignCast(context));
+        self.appendTrackedText(target, suffix, max) catch |err|
+            return @errorCast(err);
+    }
+
+    fn freeRestoredTaskText(context: *anyopaque, value: []u8) void {
+        const self: *Workbench = @ptrCast(@alignCast(context));
+        self.freeTracked(value);
+    }
+
+    fn freeRestoredTrackedText(context: *anyopaque, target: *TrackedText) void {
+        const self: *Workbench = @ptrCast(@alignCast(context));
+        self.freeTrackedText(target);
     }
 
     fn restoreTaskState(self: *Workbench, bytes: []const u8) Error!void {
@@ -8626,7 +8599,10 @@ pub const Workbench = struct {
         }
         var restored_task_count: usize = 0;
         for (recovered.value.tasks) |task| {
-            const restored = self.restoreTask(task) catch |err| switch (err) {
+            const restored = task_persistence.restoreTask(
+                self.taskRestoreProjection(),
+                task,
+            ) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => {
                     recovered.dropped_tasks += 1;
@@ -8707,7 +8683,7 @@ pub const Workbench = struct {
             self.limits.max_workspace_bytes,
         );
         errdefer self.freeTracked(trust_root);
-        const kind = parsePersistedEnum(WorkspaceKind, wire.kind) orelse
+        const kind = task_persistence.parseEnum(WorkspaceKind, wire.kind) orelse
             return error.InvalidWorkspace;
         return .{
             .id = wire.id,
@@ -8722,179 +8698,6 @@ pub const Workbench = struct {
             .authorization = if (kind == .automatic) .available else .reauthorization_required,
             .visible = wire.visible,
             .recent_order = wire.recent_order,
-        };
-    }
-
-    fn restoreTask(self: *Workbench, wire: task_persistence.TaskWire) Error!TaskView {
-        const checkpoint_anchor = parsePersistedEnum(CheckpointAnchor, wire.checkpoint_anchor) orelse
-            return error.TaskStoreCorrupt;
-        const checkpoint_attempt = parsePersistedEnum(CheckpointAttempt, wire.checkpoint_attempt) orelse
-            return error.TaskStoreCorrupt;
-        var checkpoint = if (wire.checkpoint) |value|
-            try self.restoreCheckpointRecord(wire.id, value)
-        else
-            null;
-        errdefer if (checkpoint) |*value| value.deinit(self.allocator);
-        if ((checkpoint == null and checkpoint_anchor == .available) or
-            (checkpoint != null and checkpoint_anchor == .none))
-            return error.TaskStoreCorrupt;
-        if (checkpoint) |value| {
-            value.validateBinding(wire.id, wire.binding.epoch) catch
-                return error.TaskStoreCorrupt;
-            const terminal_found = switch (value.anchor.terminal) {
-                .run => |terminal_id| blk: {
-                    for (wire.runs) |run| {
-                        if (run.id != terminal_id) continue;
-                        // A checkpoint records the model used to create its
-                        // historical Session state. Keep that fact coherent
-                        // with the terminal Run, while deliberately not
-                        // comparing either value with the Task's current
-                        // model binding.
-                        break :blk persistedTerminalRunPhase(run.phase) and
-                            std.mem.eql(u8, run.execution_model, value.session.model);
-                    }
-                    break :blk false;
-                },
-                .compact => |terminal_id| blk: {
-                    for (wire.compacts) |compact| if (compact.id == terminal_id)
-                        break :blk persistedTerminalCompactPhase(compact.phase);
-                    break :blk false;
-                },
-            };
-            if (!terminal_found) return error.TaskStoreCorrupt;
-        }
-        const execution_provider = parsePersistedEnum(Provider, wire.binding.provider) orelse
-            return error.TaskStoreCorrupt;
-        const execution_model = try self.copyBounded(
-            wire.binding.model,
-            account_contract.Limits.model_id_bytes,
-        );
-        errdefer self.freeTracked(execution_model);
-        const workspace_root = try self.copyBounded(
-            wire.workspace_root,
-            self.limits.max_workspace_bytes,
-        );
-        errdefer self.freeTracked(workspace_root);
-        const title = try self.copyBounded(wire.title, self.limits.max_task_title_bytes);
-        errdefer self.freeTracked(title);
-
-        const runs = try self.allocator.alloc(?RunRecord, self.limits.max_runs_per_task);
-        errdefer self.allocator.free(runs);
-        @memset(runs, null);
-        var restored_runs: usize = 0;
-        errdefer for (runs[0..restored_runs]) |*entry| {
-            const run = &(entry.* orelse continue);
-            self.deinitRunRecord(run);
-        };
-        for (wire.runs, 0..) |run, index| {
-            runs[index] = try self.restoreRun(run);
-            restored_runs += 1;
-        }
-
-        const compacts = try self.allocator.alloc(
-            ?CompactRecord,
-            self.limits.max_compacts_per_task,
-        );
-        errdefer self.allocator.free(compacts);
-        @memset(compacts, null);
-        var restored_compacts: usize = 0;
-        errdefer for (compacts[0..restored_compacts]) |*entry| {
-            const compact = &(entry.* orelse continue);
-            self.deinitCompactRecord(compact);
-        };
-        for (wire.compacts, 0..) |compact, index| {
-            compacts[index] = try self.restoreCompact(compact);
-            restored_compacts += 1;
-        }
-
-        const ui_history = try self.allocator.alloc(
-            ?UiRecord,
-            self.limits.max_ui_history_per_task,
-        );
-        errdefer self.allocator.free(ui_history);
-        @memset(ui_history, null);
-        for (wire.ui_history, 0..) |record, index|
-            ui_history[index] = restoreUiRecord(record);
-        return .{
-            .durable = .{
-                .id = wire.id,
-                .recent_order = wire.recent_order,
-                .execution_generation = wire.binding.execution_generation,
-                .execution_provider = execution_provider,
-                .execution_model = execution_model,
-                .binding_epoch = wire.binding.epoch,
-                .workspace_id = wire.workspace_id,
-                .workspace_epoch = wire.workspace_epoch,
-                .workspace_root = workspace_root,
-                .title = title,
-                .title_redacted = wire.title_redacted,
-                .archived = wire.archived,
-                .runs = runs,
-                .compacts = compacts,
-                .next_run_generation = wire.next_run_generation,
-                .ui_history = ui_history,
-                .ui_history_count = wire.ui_history.len,
-                .ui_history_next = wire.ui_history.len % ui_history.len,
-                .checkpoint = checkpoint,
-                .checkpoint_anchor = checkpoint_anchor,
-                .checkpoint_attempt = checkpoint_attempt,
-            },
-            .runtime = .{},
-        };
-    }
-
-    fn restoreCheckpointRecord(
-        self: *Workbench,
-        task_id: u64,
-        wire: task_persistence.CheckpointWire,
-    ) Error!checkpoint_record.Record {
-        var digest: [checkpoint_store.digest_bytes]u8 = undefined;
-        if (wire.blob.digest.len != digest.len * 2) return error.TaskStoreCorrupt;
-        _ = std.fmt.hexToBytes(&digest, wire.blob.digest) catch return error.TaskStoreCorrupt;
-        const canonical_digest = std.fmt.bytesToHex(digest, .lower);
-        if (!std.mem.eql(u8, &canonical_digest, wire.blob.digest)) return error.TaskStoreCorrupt;
-        if (wire.blob.byte_size == 0 or
-            wire.session.logical_session_id.len == 0 or
-            wire.session.logical_session_id.len > 4096 or
-            wire.session.model.len == 0 or
-            wire.session.model.len > account_contract.Limits.model_id_bytes or
-            wire.anchor.binding_epoch == 0 or
-            wire.anchor.terminal.id == 0)
-            return error.TaskStoreCorrupt;
-        const logical_session_id = try self.allocator.dupe(
-            u8,
-            wire.session.logical_session_id,
-        );
-        errdefer self.allocator.free(logical_session_id);
-        const model = try self.allocator.dupe(u8, wire.session.model);
-        errdefer self.allocator.free(model);
-        const terminal: checkpoint_record.Terminal = if (std.mem.eql(
-            u8,
-            wire.anchor.terminal.kind,
-            "run",
-        ))
-            .{ .run = wire.anchor.terminal.id }
-        else if (std.mem.eql(u8, wire.anchor.terminal.kind, "compact"))
-            .{ .compact = wire.anchor.terminal.id }
-        else
-            return error.TaskStoreCorrupt;
-        return .{
-            .blob = .{
-                .task_id = task_id,
-                .generation = wire.blob.generation,
-                .byte_size = wire.blob.byte_size,
-                .digest = digest,
-            },
-            .session = .{
-                .logical_session_id = logical_session_id,
-                .last_run_id = wire.session.last_run_id,
-                .last_compact_id = wire.session.last_compact_id,
-                .model = model,
-            },
-            .anchor = .{
-                .terminal = terminal,
-                .binding_epoch = wire.anchor.binding_epoch,
-            },
         };
     }
 
@@ -8957,260 +8760,6 @@ pub const Workbench = struct {
         };
     }
 
-    fn restoreRun(
-        self: *Workbench,
-        wire: task_persistence.RunWire,
-    ) Error!RunRecord {
-        var input = try self.restoreRunInput(wire.input);
-        errdefer self.deinitRunInputRecord(&input);
-        var assistant: TrackedText = .{};
-        errdefer if (assistant.list.capacity != 0) self.freeTrackedText(&assistant);
-        try self.appendTrackedText(
-            &assistant,
-            wire.assistant,
-            self.limits.max_assistant_message_bytes,
-        );
-        assistant.committed_len = assistant.list.items.len;
-        const interrupted = !persistedTerminalRunPhase(wire.phase);
-        const status_text = try self.copyBounded(
-            if (interrupted) "Interrupted" else wire.status,
-            self.limits.max_tool_field_bytes,
-        );
-        errdefer self.freeTracked(status_text);
-        const diagnostic = try self.allocTrackedCapacity(
-            self.limits.max_terminal_diagnostic_bytes,
-        );
-        errdefer self.freeTracked(diagnostic);
-        @memcpy(diagnostic[0..wire.diagnostic.len], wire.diagnostic);
-        const tools = try self.allocator.alloc(?ToolView, self.limits.max_tools_per_run);
-        errdefer self.allocator.free(tools);
-        @memset(tools, null);
-        var restored_tools: usize = 0;
-        errdefer for (tools[0..restored_tools]) |*entry| {
-            const tool = &(entry.* orelse continue);
-            self.deinitToolView(tool);
-        };
-        for (wire.tools) |tool| {
-            if (std.mem.eql(u8, tool.state, "running"))
-                continue;
-            tools[restored_tools] = try self.restoreTool(tool);
-            restored_tools += 1;
-        }
-        const phase: RunPhase = if (interrupted)
-            .interrupted
-        else
-            parsePersistedEnum(RunPhase, wire.phase) orelse return error.TaskStoreCorrupt;
-        const outcome: RunOutcome = if (interrupted)
-            .interrupted
-        else
-            parsePersistedEnum(RunOutcome, wire.outcome orelse return error.TaskStoreCorrupt) orelse
-                return error.TaskStoreCorrupt;
-        const cause: ?RunCause = if (interrupted or wire.cause == null)
-            null
-        else
-            parsePersistedEnum(RunCause, wire.cause.?) orelse return error.TaskStoreCorrupt;
-        const execution_model = try self.copyBounded(
-            wire.execution_model,
-            account_contract.Limits.model_id_bytes,
-        );
-        errdefer self.freeTracked(execution_model);
-        return .{
-            .id = wire.id,
-            .generation = wire.generation,
-            .execution_generation = wire.execution_generation,
-            .execution_provider = parsePersistedEnum(Provider, wire.execution_provider) orelse
-                return error.TaskStoreCorrupt,
-            .execution_model = execution_model,
-            .execution_model_owned = true,
-            .input = input,
-            .assistant = assistant,
-            .assistant_redacted = wire.assistant_redacted,
-            .active_phase = .queued,
-            .tools = tools,
-            .usage = usageFromWire(wire.usage),
-            .status_text = status_text,
-            .terminal_publication = .init(.published),
-            .terminal_payload = .{
-                .phase = phase,
-                .outcome = outcome,
-                .cause = cause,
-                .session_disposition_at_completion = .reusable,
-                .diagnostic_len = wire.diagnostic.len,
-                .diagnostic_truncated = wire.diagnostic_truncated,
-                .diagnostic_redacted = wire.diagnostic_redacted,
-            },
-            .terminal_observed = true,
-            .event_stream_finalized = true,
-            .event_projection_failure = if (wire.event_projection_failure)
-                .consumer_rejected
-            else
-                null,
-            .terminal_diagnostic = diagnostic,
-            .next_activity_order = wire.next_activity_order,
-        };
-    }
-
-    fn restoreRunInput(
-        self: *Workbench,
-        wire: task_persistence.RunInputWire,
-    ) Error!RunInputRecord {
-        if (std.mem.eql(u8, wire.kind, "text")) return .{ .text = .{
-            .value = try self.copyBounded(
-                wire.text orelse return error.TaskStoreCorrupt,
-                self.limits.max_user_message_bytes,
-            ),
-            .redacted = wire.redacted,
-        } };
-        const values_wire = wire.argument_values orelse return error.TaskStoreCorrupt;
-        const values = try self.allocator.alloc([]u8, values_wire.len);
-        errdefer self.allocator.free(values);
-        var initialized: usize = 0;
-        errdefer for (values[0..initialized]) |value| self.freeTracked(value);
-        for (values_wire, values) |value, *target| {
-            target.* = try self.copyBounded(value, self.limits.max_user_message_bytes);
-            initialized += 1;
-        }
-        const skill_id = try self.copyBounded(
-            wire.skill_id orelse return error.TaskStoreCorrupt,
-            self.limits.max_tool_field_bytes,
-        );
-        errdefer self.freeTracked(skill_id);
-        const catalog_revision = try self.copyBounded(
-            wire.catalog_revision orelse return error.TaskStoreCorrupt,
-            self.limits.max_tool_field_bytes,
-        );
-        errdefer self.freeTracked(catalog_revision);
-        const invocation_name = try self.copyBounded(
-            wire.invocation_name orelse return error.TaskStoreCorrupt,
-            self.limits.max_tool_field_bytes,
-        );
-        errdefer self.freeTracked(invocation_name);
-        const display_name = try self.copyBounded(
-            wire.display_name orelse return error.TaskStoreCorrupt,
-            self.limits.max_tool_field_bytes,
-        );
-        errdefer self.freeTracked(display_name);
-        return .{ .skill = .{
-            .skill_id = skill_id,
-            .catalog_revision = catalog_revision,
-            .invocation_name = invocation_name,
-            .display_name = display_name,
-            .argument_values = values,
-            .redacted = wire.redacted,
-        } };
-    }
-
-    fn restoreTool(self: *Workbench, wire: task_persistence.ToolWire) Error!ToolView {
-        const id = try self.copyBounded(wire.id, self.limits.max_tool_field_bytes);
-        errdefer self.freeTracked(id);
-        const name = try self.copyBounded(wire.name, self.limits.max_tool_field_bytes);
-        errdefer self.freeTracked(name);
-        const input = try self.copyBounded(wire.input, self.limits.max_tool_field_bytes);
-        errdefer self.freeTracked(input);
-        const progress = try self.copyBounded(wire.progress, self.limits.max_tool_field_bytes);
-        errdefer self.freeTracked(progress);
-        const content = try self.copyBounded(wire.content, self.limits.max_tool_field_bytes);
-        errdefer self.freeTracked(content);
-        const state = parsePersistedEnum(ToolState, wire.state) orelse return error.TaskStoreCorrupt;
-        const file_refs = try self.allocator.alloc(?FileReferenceView, self.limits.max_file_refs_per_tool);
-        errdefer {
-            for (file_refs) |*entry| if (entry.*) |*reference| self.deinitFileReference(reference);
-            self.allocator.free(file_refs);
-        }
-        @memset(file_refs, null);
-        if (wire.file_refs) |references| {
-            if (references.len > self.limits.max_file_refs_per_tool) return error.TaskStoreCorrupt;
-            for (references, 0..) |reference, index| {
-                file_refs[index] = try self.restoreFileReference(reference);
-            }
-        }
-        return .{
-            .route_digest = [_]u8{0} ** tool_route_digest_bytes,
-            .id = id,
-            .order = wire.order,
-            .name = name,
-            .input = input,
-            .progress = progress,
-            .content = content,
-            .file_refs = file_refs,
-            .state = state,
-            .is_error = wire.is_error,
-            .elapsed_ms = wire.elapsed_ms,
-            .input_truncated = wire.input_truncated,
-            .progress_truncated = wire.progress_truncated,
-            .content_truncated = wire.content_truncated,
-            .redacted = wire.redacted,
-        };
-    }
-
-    fn restoreFileReference(
-        self: *Workbench,
-        wire: task_persistence.FileReferenceWire,
-    ) Error!FileReferenceView {
-        const locator_kind = parsePersistedEnum(FileReferenceLocatorKind, wire.locator_kind) orelse
-            return error.TaskStoreCorrupt;
-        var reference = FileReferenceView{
-            .id = undefined,
-            .title = undefined,
-            .display_path = undefined,
-            .kind = undefined,
-            .locator_kind = locator_kind,
-            .locator = undefined,
-            .range = if (wire.range) |range| .{
-                .start = .{ .line = range.start.line, .column = range.start.column },
-                .end = .{ .line = range.end.line, .column = range.end.column },
-            } else null,
-        };
-        reference.id = try self.copyBounded(wire.id, self.limits.max_file_ref_field_bytes);
-        errdefer self.freeTracked(reference.id);
-        reference.title = try self.copyBounded(wire.title, self.limits.max_file_ref_field_bytes);
-        errdefer self.freeTracked(reference.title);
-        reference.display_path = try self.copyBounded(wire.display_path, self.limits.max_file_ref_field_bytes);
-        errdefer self.freeTracked(reference.display_path);
-        reference.kind = try self.copyBounded(wire.kind, self.limits.max_file_ref_field_bytes);
-        errdefer self.freeTracked(reference.kind);
-        reference.locator = try self.copyBounded(wire.locator, self.limits.max_file_ref_field_bytes);
-        return reference;
-    }
-
-    fn restoreCompact(
-        self: *Workbench,
-        wire: task_persistence.CompactWire,
-    ) Error!CompactRecord {
-        const interrupted = !persistedTerminalCompactPhase(wire.phase);
-        const diagnostic = try self.allocTrackedCapacity(
-            self.limits.max_terminal_diagnostic_bytes,
-        );
-        errdefer self.freeTracked(diagnostic);
-        @memcpy(diagnostic[0..wire.diagnostic.len], wire.diagnostic);
-        return .{
-            .id = wire.id,
-            .after_run_id = wire.after_run_id,
-            .terminal_publication = .init(.published),
-            .terminal_payload = .{
-                .phase = if (interrupted)
-                    .interrupted
-                else
-                    parsePersistedEnum(CompactPhase, wire.phase) orelse
-                        return error.TaskStoreCorrupt,
-                .cause = if (interrupted or wire.cause == null)
-                    null
-                else
-                    parsePersistedEnum(CompactCause, wire.cause.?) orelse
-                        return error.TaskStoreCorrupt,
-                .before_context_tokens = wire.before_context_tokens,
-                .after_context_tokens = wire.after_context_tokens,
-                .usage = usageFromWire(wire.usage),
-                .session_disposition_at_completion = .reusable,
-                .diagnostic_len = wire.diagnostic.len,
-                .diagnostic_truncated = wire.diagnostic_truncated,
-                .diagnostic_redacted = wire.diagnostic_redacted,
-            },
-            .terminal_observed = true,
-            .terminal_diagnostic = diagnostic,
-        };
-    }
-
     fn clearRestoredTaskStateNoFail(self: *Workbench) void {
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
@@ -9228,20 +8777,16 @@ pub const Workbench = struct {
         self.next_task_recent_order = 1;
     }
 
-    const CheckpointPersistenceOverride = struct {
-        task_id: u64,
-        record: *const checkpoint_record.Record,
-        anchor: CheckpointAnchor,
-    };
+    const CheckpointPersistenceOverride = task_persistence.CheckpointPersistenceOverride;
 
-    fn buildTaskStateWire(self: *Workbench) Error!TaskStateWireScratch {
+    fn buildTaskStateWire(self: *Workbench) Error!task_persistence.TaskStateWireScratch {
         return self.buildTaskStateWireWithCheckpoint(null);
     }
 
     fn buildTaskStateWireWithCheckpoint(
         self: *Workbench,
         checkpoint_override: ?CheckpointPersistenceOverride,
-    ) Error!TaskStateWireScratch {
+    ) Error!task_persistence.TaskStateWireScratch {
         const workspace_count = countPresent(WorkspaceView, self.workspaces);
         const task_count = countPresent(TaskView, self.tasks);
         const workspaces = try self.allocator.alloc(
@@ -9267,23 +8812,14 @@ pub const Workbench = struct {
         const tasks = try self.allocator.alloc(task_persistence.TaskWire, task_count);
         errdefer self.allocator.free(tasks);
         var task_index: usize = 0;
-        errdefer {
-            for (tasks[0..task_index]) |task| {
-                for (task.runs) |run| {
-                    if (run.input.argument_values) |values| self.allocator.free(values);
-                    for (run.tools) |tool| if (tool.file_refs) |references| self.allocator.free(references);
-                    self.allocator.free(run.tools);
-                }
-                self.allocator.free(task.runs);
-                self.allocator.free(task.compacts);
-                self.allocator.free(task.ui_history);
-                if (task.checkpoint) |checkpoint|
-                    self.allocator.free(@constCast(checkpoint.blob.digest));
-            }
-        }
+        errdefer task_persistence.deinitTaskWires(self.allocator, tasks[0..task_index]);
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
-            tasks[task_index] = try self.taskWireWithCheckpoint(task, checkpoint_override);
+            tasks[task_index] = try task_persistence.projectTask(
+                self.allocator,
+                task,
+                checkpoint_override,
+            );
             task_index += 1;
         }
         const failures = try self.allocator.alloc(
@@ -9313,266 +8849,6 @@ pub const Workbench = struct {
         };
     }
 
-    fn taskWireWithCheckpoint(
-        self: *Workbench,
-        task: *TaskView,
-        checkpoint_override: ?CheckpointPersistenceOverride,
-    ) Error!task_persistence.TaskWire {
-        const checkpoint: ?*const checkpoint_record.Record = if (checkpoint_override) |override|
-            if (override.task_id == task.durable.id)
-                override.record
-            else if (task.durable.checkpoint) |*value| value else null
-        else if (task.durable.checkpoint) |*value| value else null;
-        const override_applies = if (checkpoint_override) |override|
-            override.task_id == task.durable.id
-        else
-            false;
-        const checkpoint_anchor = if (override_applies)
-            checkpoint_override.?.anchor
-        else
-            task.durable.checkpoint_anchor;
-        const checkpoint_attempt = if (override_applies)
-            CheckpointAttempt.none
-        else
-            task.durable.checkpoint_attempt;
-        const checkpoint_digest = if (checkpoint) |value| blk: {
-            const digest = try self.allocator.alloc(u8, checkpoint_store.digest_bytes * 2);
-            const encoded = std.fmt.bytesToHex(value.blob.digest, .lower);
-            @memcpy(digest, &encoded);
-            break :blk digest;
-        } else null;
-        errdefer if (checkpoint_digest) |digest| self.allocator.free(digest);
-        const run_count = countPresent(RunRecord, task.durable.runs);
-        const runs = try self.allocator.alloc(task_persistence.RunWire, run_count);
-        errdefer self.allocator.free(runs);
-        var run_index: usize = 0;
-        errdefer for (runs[0..run_index]) |run| {
-            if (run.input.argument_values) |values| self.allocator.free(values);
-            for (run.tools) |tool| if (tool.file_refs) |references| self.allocator.free(references);
-            self.allocator.free(run.tools);
-        };
-        for (task.durable.runs) |*entry| {
-            const run = &(entry.* orelse continue);
-            runs[run_index] = try self.runWire(run);
-            run_index += 1;
-        }
-
-        const compact_count = countPresent(CompactRecord, task.durable.compacts);
-        const compacts = try self.allocator.alloc(
-            task_persistence.CompactWire,
-            compact_count,
-        );
-        errdefer self.allocator.free(compacts);
-        var compact_index: usize = 0;
-        for (task.durable.compacts) |*entry| {
-            const compact = &(entry.* orelse continue);
-            const terminal = compactTerminalPayload(compact);
-            const phase = if (terminal) |payload| payload.phase else activeCompactPhase(compact);
-            const diagnostic = if (terminal) |payload|
-                compact.terminal_diagnostic[0..payload.diagnostic_len]
-            else
-                "";
-            compacts[compact_index] = .{
-                .id = compact.id,
-                .after_run_id = compact.after_run_id,
-                .phase = @tagName(phase),
-                .cause = if (terminal) |payload|
-                    if (payload.cause) |cause| @tagName(cause) else null
-                else
-                    null,
-                .before_context_tokens = if (terminal) |payload| payload.before_context_tokens else 0,
-                .after_context_tokens = if (terminal) |payload| payload.after_context_tokens else 0,
-                .usage = usageWire(if (terminal) |payload| payload.usage else .{}),
-                .diagnostic = diagnostic,
-                .diagnostic_truncated = if (terminal) |payload| payload.diagnostic_truncated else false,
-                .diagnostic_redacted = if (terminal) |payload| payload.diagnostic_redacted else false,
-            };
-            compact_index += 1;
-        }
-
-        const ui_history = try self.allocator.alloc(
-            task_persistence.UiRecordWire,
-            task.durable.ui_history_count,
-        );
-        errdefer self.allocator.free(ui_history);
-        const ui_start = if (task.durable.ui_history_count == task.durable.ui_history.len)
-            task.durable.ui_history_next
-        else
-            0;
-        for (ui_history, 0..) |*target, offset| {
-            const index = (ui_start + offset) % task.durable.ui_history.len;
-            const record = &(task.durable.ui_history[index] orelse unreachable);
-            target.* = .{
-                .request_id = record.request_id,
-                .run_id = record.run_id,
-                .order = record.order,
-                .kind = @tagName(record.kind),
-                .state = @tagName(record.state),
-                .detail = record.detailSlice(),
-                .item_count = record.item_count,
-                .detail_truncated = record.detail_truncated,
-                .redacted = record.redacted,
-                .agent_request_id = record.agent_request_id[0..record.agent_request_id_len],
-                .permission = if (record.permission) |*permission| permissionSummaryWire(permission) else null,
-            };
-        }
-        return .{
-            .id = task.durable.id,
-            .recent_order = task.durable.recent_order,
-            .workspace_id = task.durable.workspace_id,
-            .workspace_epoch = task.durable.workspace_epoch,
-            .workspace_root = task.durable.workspace_root,
-            .title = task.durable.title,
-            .title_redacted = task.durable.title_redacted,
-            .archived = task.durable.archived,
-            .binding = .{
-                .epoch = task.durable.binding_epoch,
-                .execution_generation = task.durable.execution_generation,
-                .provider = @tagName(task.durable.execution_provider),
-                .model = task.durable.execution_model,
-            },
-            .next_run_generation = task.durable.next_run_generation,
-            .active_operation = switch (task.runtime.active_operation) {
-                .none => null,
-                .run => |id| .{ .kind = "run", .id = id },
-                .compact => |id| .{ .kind = "compact", .id = id },
-                .restore => null,
-            },
-            .runs = runs,
-            .compacts = compacts,
-            .ui_history = ui_history,
-            .checkpoint = if (checkpoint) |value| .{
-                .blob = .{
-                    .generation = value.blob.generation,
-                    .byte_size = value.blob.byte_size,
-                    .digest = checkpoint_digest.?,
-                },
-                .session = .{
-                    .logical_session_id = value.session.logical_session_id,
-                    .last_run_id = value.session.last_run_id,
-                    .last_compact_id = value.session.last_compact_id,
-                    .model = value.session.model,
-                },
-                .anchor = .{
-                    .terminal = .{
-                        .kind = @tagName(value.anchor.terminal),
-                        .id = value.anchor.terminal.id(),
-                    },
-                    .binding_epoch = value.anchor.binding_epoch,
-                },
-            } else null,
-            .checkpoint_anchor = @tagName(checkpoint_anchor),
-            .checkpoint_attempt = @tagName(checkpoint_attempt),
-        };
-    }
-
-    fn runWire(self: *Workbench, run: *RunRecord) Error!task_persistence.RunWire {
-        const tool_count = countPresent(ToolView, run.tools);
-        const tools = try self.allocator.alloc(task_persistence.ToolWire, tool_count);
-        errdefer self.allocator.free(tools);
-        var tool_index: usize = 0;
-        for (run.tools) |entry| {
-            const tool = entry orelse continue;
-            const file_ref_count = if (tool.file_refs) |references| countPresent(FileReferenceView, references) else 0;
-            const file_refs = if (file_ref_count != 0) try self.allocator.alloc(task_persistence.FileReferenceWire, file_ref_count) else null;
-            errdefer if (file_refs) |references| self.allocator.free(references);
-            if (file_refs) |references| {
-                var file_ref_index: usize = 0;
-                for (tool.file_refs.?) |reference_entry| {
-                    const reference = reference_entry orelse continue;
-                    references[file_ref_index] = .{
-                        .id = reference.id,
-                        .title = reference.title,
-                        .display_path = reference.display_path,
-                        .kind = reference.kind,
-                        .locator_kind = @tagName(reference.locator_kind),
-                        .locator = reference.locator,
-                        .range = if (reference.range) |range| .{
-                            .start = .{ .line = range.start.line, .column = range.start.column },
-                            .end = .{ .line = range.end.line, .column = range.end.column },
-                        } else null,
-                    };
-                    file_ref_index += 1;
-                }
-            }
-            tools[tool_index] = .{
-                .id = tool.id,
-                .order = tool.order,
-                .name = tool.name,
-                .input = tool.input,
-                .progress = tool.progress,
-                .content = tool.content,
-                .state = @tagName(tool.state),
-                .is_error = tool.is_error,
-                .elapsed_ms = tool.elapsed_ms,
-                .input_truncated = tool.input_truncated,
-                .progress_truncated = tool.progress_truncated,
-                .content_truncated = tool.content_truncated,
-                .redacted = tool.redacted,
-                .file_refs = file_refs,
-            };
-            tool_index += 1;
-        }
-        var argument_values: ?[][]const u8 = null;
-        errdefer if (argument_values) |values| self.allocator.free(values);
-        const input: task_persistence.RunInputWire = switch (run.input) {
-            .text => |text| .{
-                .kind = "text",
-                .text = text.value,
-                .skill_id = null,
-                .catalog_revision = null,
-                .invocation_name = null,
-                .display_name = null,
-                .argument_values = null,
-                .redacted = text.redacted,
-            },
-            .skill => |skill| input: {
-                const values = try self.allocator.alloc([]const u8, skill.argument_values.len);
-                for (values, skill.argument_values) |*target, value| target.* = value;
-                argument_values = values;
-                break :input .{
-                    .kind = "skill",
-                    .text = null,
-                    .skill_id = skill.skill_id,
-                    .catalog_revision = skill.catalog_revision,
-                    .invocation_name = skill.invocation_name,
-                    .display_name = skill.display_name,
-                    .argument_values = values,
-                    .redacted = skill.redacted,
-                };
-            },
-        };
-        const terminal = productTerminalFacts(run);
-        const terminal_payload = if (terminal != null) terminalPayload(run) else null;
-        return .{
-            .id = run.id,
-            .generation = run.generation,
-            .execution_generation = run.execution_generation,
-            .execution_provider = @tagName(run.execution_provider),
-            .execution_model = run.execution_model,
-            .input = input,
-            .assistant = run.assistant.list.items[0..run.assistant.committed_len],
-            .assistant_redacted = run.assistant_redacted,
-            .phase = @tagName(runPhase(run)),
-            .outcome = if (terminal) |value| @tagName(value.outcome) else null,
-            .cause = if (terminal) |value|
-                if (value.cause) |cause| @tagName(cause) else null
-            else
-                null,
-            .status = run.status_text,
-            .usage = usageWire(run.usage),
-            .tools = tools,
-            .diagnostic = if (terminal_payload) |payload|
-                run.terminal_diagnostic[0..payload.diagnostic_len]
-            else
-                "",
-            .diagnostic_truncated = if (terminal_payload) |payload| payload.diagnostic_truncated else false,
-            .diagnostic_redacted = if (terminal_payload) |payload| payload.diagnostic_redacted else false,
-            .event_projection_failure = run.event_projection_failure != null,
-            .next_activity_order = run.next_activity_order,
-        };
-    }
-
     fn requireTaskPersistenceMutation(self: *const Workbench) Error!void {
         return switch (self.task_persistence_health) {
             .ready => {},
@@ -9586,10 +8862,6 @@ pub const Workbench = struct {
             .outcome_unknown => error.TaskPersistenceOutcomeUnknown,
             .read_failed, .corrupt, .write_failed => error.TaskPersistenceUnavailable,
         };
-    }
-
-    fn taskPersistenceOperational(health: TaskPersistenceHealth) bool {
-        return health == .ready or health == .degraded;
     }
 
     fn commitTaskStateIfConfigured(self: *Workbench) Error!void {
@@ -9607,7 +8879,7 @@ pub const Workbench = struct {
             error.TaskPersistenceFailed,
             => {},
             else => {
-                if (taskPersistenceOperational(self.task_persistence_health)) {
+                if (self.task_persistence_health.operational()) {
                     self.task_persistence_health = .write_failed;
                     self.bumpRevision();
                 }
@@ -13323,78 +12595,6 @@ fn countPresent(comptime T: type, entries: []const ?T) usize {
         count += 1;
     };
     return count;
-}
-
-fn usageWire(usage: UsageView) task_persistence.UsageWire {
-    return .{
-        .input_tokens = usage.input_tokens,
-        .output_tokens = usage.output_tokens,
-        .cache_read_input_tokens = usage.cache_read_input_tokens,
-        .cache_creation_input_tokens = usage.cache_creation_input_tokens,
-    };
-}
-
-fn usageFromWire(usage: task_persistence.UsageWire) UsageView {
-    return .{
-        .input_tokens = usage.input_tokens,
-        .output_tokens = usage.output_tokens,
-        .cache_read_input_tokens = usage.cache_read_input_tokens,
-        .cache_creation_input_tokens = usage.cache_creation_input_tokens,
-    };
-}
-
-fn restoreUiRecord(wire: task_persistence.UiRecordWire) UiRecord {
-    var result: UiRecord = .{
-        .request_id = wire.request_id,
-        .run_id = wire.run_id,
-        .order = wire.order,
-        .kind = parsePersistedEnum(UiRecordKind, wire.kind) orelse unreachable,
-        .state = parsePersistedEnum(UiRecordState, wire.state) orelse unreachable,
-        .item_count = wire.item_count,
-        .detail_truncated = wire.detail_truncated,
-        .redacted = wire.redacted,
-    };
-    @memcpy(result.agent_request_id[0..wire.agent_request_id.len], wire.agent_request_id);
-    result.agent_request_id_len = wire.agent_request_id.len;
-    if (wire.permission) |permission| {
-        var summary = PermissionSummary{
-            .decision = parsePersistedEnum(lifecycle.PermissionDecision, permission.decision) orelse unreachable,
-            .source = parsePersistedEnum(lifecycle.PermissionDecisionSource, permission.source) orelse unreachable,
-            .policy_generation = permission.policy_generation,
-            .used_session_rule = permission.used_session_rule,
-            .callback_outcome = if (permission.callback_outcome) |outcome|
-                parsePersistedEnum(lifecycle.PermissionCallbackOutcome, outcome) orelse unreachable
-            else
-                null,
-            .tool_namespace = parsePersistedEnum(lifecycle.PermissionToolNamespace, permission.tool_namespace) orelse unreachable,
-        };
-        @memcpy(summary.request_id[0..permission.request_id.len], permission.request_id);
-        summary.request_id_len = permission.request_id.len;
-        @memcpy(summary.matched_rule_id[0..permission.matched_rule_id.len], permission.matched_rule_id);
-        summary.matched_rule_id_len = permission.matched_rule_id.len;
-        @memcpy(summary.tool_name[0..permission.tool_name.len], permission.tool_name);
-        summary.tool_name_len = permission.tool_name.len;
-        @memcpy(summary.tool_binding[0..permission.tool_binding.len], permission.tool_binding);
-        summary.tool_binding_len = permission.tool_binding.len;
-        result.permission = summary;
-    }
-    @memcpy(result.detail[0..wire.detail.len], wire.detail);
-    result.detail_len = wire.detail.len;
-    return result;
-}
-
-fn parsePersistedEnum(comptime T: type, value: []const u8) ?T {
-    return std.meta.stringToEnum(T, value);
-}
-
-fn persistedTerminalRunPhase(value: []const u8) bool {
-    const phase = parsePersistedEnum(RunPhase, value) orelse return false;
-    return isTerminalPhase(phase);
-}
-
-fn persistedTerminalCompactPhase(value: []const u8) bool {
-    const phase = parsePersistedEnum(CompactPhase, value) orelse return false;
-    return isTerminalCompactPhase(phase);
 }
 
 fn toolRouteDigest(id: []const u8) [tool_route_digest_bytes]u8 {

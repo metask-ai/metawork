@@ -1,5 +1,13 @@
+//! Product Task history capability, wire projection, strict codec, and restore.
+//! Workspace-frame assembly, global projection accounting, durable commit
+//! orchestration, revision publication, and snapshot encoding remain outside.
+
 const std = @import("std");
 const builtin = @import("builtin");
+const agent = @import("metawork_agent");
+const checkpoint_record = @import("product_task_checkpoint_record");
+const checkpoint_store = @import("product_task_checkpoint_store");
+const task_state = @import("product_task_state");
 
 // Hard-cut persistence format. This deliberately has no migration/version
 // contract: the fixed frame layout and magic identify the sole active format.
@@ -31,6 +39,49 @@ pub const FileStoreError = std.mem.Allocator.Error || error{
     ReadFailed,
     WriteFailed,
     PersistenceOutcomeUnknown,
+};
+
+pub const Commit = enum {
+    committed,
+    failed,
+    outcome_unknown,
+};
+
+/// Application-bound durable effect and startup restore facts. The Product
+/// Task persistence kernel owns the requirement; the concrete file resource
+/// and commit execution remain outside this module.
+pub const Capability = struct {
+    context: ?*anyopaque = null,
+    enabled: bool = false,
+    restored_bytes: ?[]const u8 = null,
+    restore_failed: bool = false,
+    commit_fn: *const fn (
+        context: ?*anyopaque,
+        bytes: []const u8,
+    ) Commit = unsupportedCommit,
+
+    pub fn commit(self: Capability, bytes: []const u8) Commit {
+        if (!self.enabled) return .failed;
+        return self.commit_fn(self.context, bytes);
+    }
+
+    fn unsupportedCommit(_: ?*anyopaque, _: []const u8) Commit {
+        return .failed;
+    }
+};
+
+pub const Health = enum {
+    unavailable,
+    ready,
+    degraded,
+    read_failed,
+    corrupt,
+    write_failed,
+    outcome_unknown,
+
+    pub fn operational(self: Health) bool {
+        return self == .ready or self == .degraded;
+    }
 };
 
 /// Owns the data-root writer lock from before restore until Host shutdown.
@@ -205,6 +256,7 @@ pub const Limits = struct {
     max_runs_per_task: usize,
     max_compacts_per_task: usize,
     max_tools_per_run: usize,
+    max_file_refs_per_tool: usize,
     max_ui_history_per_task: usize,
     max_workspace_bytes: usize,
     max_task_title_bytes: usize,
@@ -212,6 +264,7 @@ pub const Limits = struct {
     max_assistant_message_bytes: usize,
     max_tool_field_bytes: usize,
     max_file_ref_field_bytes: usize,
+    max_execution_model_bytes: usize,
     max_terminal_diagnostic_bytes: usize,
 };
 
@@ -445,6 +498,981 @@ pub const PermissionSummaryWire = struct {
     used_session_rule: bool,
     callback_outcome: ?[]const u8,
 };
+
+pub const CheckpointPersistenceOverride = struct {
+    task_id: u64,
+    record: *const checkpoint_record.Record,
+    anchor: task_state.CheckpointAnchor,
+};
+
+/// Owns every temporary allocation needed to encode one canonical history
+/// snapshot. Root Workspace frames are assembled by the composition owner and
+/// transferred into this scratch together with Product Task projections.
+pub const TaskStateWireScratch = struct {
+    allocator: std.mem.Allocator,
+    state: StateWire,
+    allocated_workspaces: []WorkspaceWire,
+    allocated_tasks: []TaskWire,
+    allocated_failures: []TaskFailureWire,
+
+    pub fn deinit(self: *TaskStateWireScratch) void {
+        deinitTaskWires(self.allocator, self.state.tasks);
+        self.allocator.free(self.allocated_tasks);
+        self.allocator.free(self.allocated_workspaces);
+        self.allocator.free(self.allocated_failures);
+        self.* = undefined;
+    }
+};
+
+pub fn deinitTaskWires(allocator: std.mem.Allocator, tasks: []TaskWire) void {
+    for (tasks) |task| {
+        for (task.runs) |run| {
+            if (run.input.argument_values) |values| allocator.free(values);
+            for (run.tools) |tool|
+                if (tool.file_refs) |references| allocator.free(references);
+            allocator.free(run.tools);
+        }
+        allocator.free(task.runs);
+        allocator.free(task.compacts);
+        allocator.free(task.ui_history);
+        if (task.checkpoint) |checkpoint|
+            allocator.free(@constCast(checkpoint.blob.digest));
+    }
+}
+
+pub fn projectTask(
+    allocator: std.mem.Allocator,
+    task: *task_state.Task,
+    checkpoint_override: ?CheckpointPersistenceOverride,
+) std.mem.Allocator.Error!TaskWire {
+    const checkpoint: ?*const checkpoint_record.Record = if (checkpoint_override) |override|
+        if (override.task_id == task.durable.id)
+            override.record
+        else if (task.durable.checkpoint) |*value| value else null
+    else if (task.durable.checkpoint) |*value| value else null;
+    const override_applies = if (checkpoint_override) |override|
+        override.task_id == task.durable.id
+    else
+        false;
+    const checkpoint_anchor = if (override_applies)
+        checkpoint_override.?.anchor
+    else
+        task.durable.checkpoint_anchor;
+    const checkpoint_attempt = if (override_applies)
+        task_state.CheckpointAttempt.none
+    else
+        task.durable.checkpoint_attempt;
+    const checkpoint_digest = if (checkpoint) |value| blk: {
+        const digest = try allocator.alloc(u8, checkpoint_store.digest_bytes * 2);
+        const encoded = std.fmt.bytesToHex(value.blob.digest, .lower);
+        @memcpy(digest, &encoded);
+        break :blk digest;
+    } else null;
+    errdefer if (checkpoint_digest) |digest| allocator.free(digest);
+
+    const run_count = countPresent(task_state.RunRecord, task.durable.runs);
+    const runs = try allocator.alloc(RunWire, run_count);
+    errdefer allocator.free(runs);
+    var run_index: usize = 0;
+    errdefer for (runs[0..run_index]) |run| {
+        if (run.input.argument_values) |values| allocator.free(values);
+        for (run.tools) |tool|
+            if (tool.file_refs) |references| allocator.free(references);
+        allocator.free(run.tools);
+    };
+    for (task.durable.runs) |*entry| {
+        const run = &(entry.* orelse continue);
+        runs[run_index] = try projectRun(allocator, run);
+        run_index += 1;
+    }
+
+    const compact_count = countPresent(task_state.CompactRecord, task.durable.compacts);
+    const compacts = try allocator.alloc(CompactWire, compact_count);
+    errdefer allocator.free(compacts);
+    var compact_index: usize = 0;
+    for (task.durable.compacts) |*entry| {
+        const compact = &(entry.* orelse continue);
+        const terminal = task_state.compactTerminalPayload(compact);
+        const phase = if (terminal) |payload|
+            payload.phase
+        else
+            task_state.activeCompactPhase(compact);
+        const diagnostic = if (terminal) |payload|
+            compact.terminal_diagnostic[0..payload.diagnostic_len]
+        else
+            "";
+        compacts[compact_index] = .{
+            .id = compact.id,
+            .after_run_id = compact.after_run_id,
+            .phase = @tagName(phase),
+            .cause = if (terminal) |payload|
+                if (payload.cause) |cause| @tagName(cause) else null
+            else
+                null,
+            .before_context_tokens = if (terminal) |payload| payload.before_context_tokens else 0,
+            .after_context_tokens = if (terminal) |payload| payload.after_context_tokens else 0,
+            .usage = usageWire(if (terminal) |payload| payload.usage else .{}),
+            .diagnostic = diagnostic,
+            .diagnostic_truncated = if (terminal) |payload| payload.diagnostic_truncated else false,
+            .diagnostic_redacted = if (terminal) |payload| payload.diagnostic_redacted else false,
+        };
+        compact_index += 1;
+    }
+
+    const ui_history = try allocator.alloc(UiRecordWire, task.durable.ui_history_count);
+    errdefer allocator.free(ui_history);
+    const ui_start = if (task.durable.ui_history_count == task.durable.ui_history.len)
+        task.durable.ui_history_next
+    else
+        0;
+    for (ui_history, 0..) |*target, offset| {
+        const index = (ui_start + offset) % task.durable.ui_history.len;
+        const record = &(task.durable.ui_history[index] orelse unreachable);
+        target.* = .{
+            .request_id = record.request_id,
+            .run_id = record.run_id,
+            .order = record.order,
+            .kind = @tagName(record.kind),
+            .state = @tagName(record.state),
+            .detail = record.detailSlice(),
+            .item_count = record.item_count,
+            .detail_truncated = record.detail_truncated,
+            .redacted = record.redacted,
+            .agent_request_id = record.agent_request_id[0..record.agent_request_id_len],
+            .permission = if (record.permission) |*permission|
+                permissionSummaryWire(permission)
+            else
+                null,
+        };
+    }
+
+    return .{
+        .id = task.durable.id,
+        .recent_order = task.durable.recent_order,
+        .workspace_id = task.durable.workspace_id,
+        .workspace_epoch = task.durable.workspace_epoch,
+        .workspace_root = task.durable.workspace_root,
+        .title = task.durable.title,
+        .title_redacted = task.durable.title_redacted,
+        .archived = task.durable.archived,
+        .binding = .{
+            .epoch = task.durable.binding_epoch,
+            .execution_generation = task.durable.execution_generation,
+            .provider = @tagName(task.durable.execution_provider),
+            .model = task.durable.execution_model,
+        },
+        .next_run_generation = task.durable.next_run_generation,
+        .active_operation = switch (task.runtime.active_operation) {
+            .none => null,
+            .run => |id| .{ .kind = "run", .id = id },
+            .compact => |id| .{ .kind = "compact", .id = id },
+            .restore => null,
+        },
+        .runs = runs,
+        .compacts = compacts,
+        .ui_history = ui_history,
+        .checkpoint = if (checkpoint) |value| .{
+            .blob = .{
+                .generation = value.blob.generation,
+                .byte_size = value.blob.byte_size,
+                .digest = checkpoint_digest.?,
+            },
+            .session = .{
+                .logical_session_id = value.session.logical_session_id,
+                .last_run_id = value.session.last_run_id,
+                .last_compact_id = value.session.last_compact_id,
+                .model = value.session.model,
+            },
+            .anchor = .{
+                .terminal = .{
+                    .kind = @tagName(value.anchor.terminal),
+                    .id = value.anchor.terminal.id(),
+                },
+                .binding_epoch = value.anchor.binding_epoch,
+            },
+        } else null,
+        .checkpoint_anchor = @tagName(checkpoint_anchor),
+        .checkpoint_attempt = @tagName(checkpoint_attempt),
+    };
+}
+
+fn projectRun(
+    allocator: std.mem.Allocator,
+    run: *task_state.RunRecord,
+) std.mem.Allocator.Error!RunWire {
+    const tool_count = countPresent(task_state.ToolView, run.tools);
+    const tools = try allocator.alloc(ToolWire, tool_count);
+    errdefer allocator.free(tools);
+    var tool_index: usize = 0;
+    errdefer for (tools[0..tool_index]) |tool|
+        if (tool.file_refs) |references| allocator.free(references);
+    for (run.tools) |entry| {
+        const tool = entry orelse continue;
+        const file_ref_count = if (tool.file_refs) |references|
+            countPresent(task_state.FileReferenceView, references)
+        else
+            0;
+        const file_refs = if (file_ref_count != 0)
+            try allocator.alloc(FileReferenceWire, file_ref_count)
+        else
+            null;
+        errdefer if (file_refs) |references| allocator.free(references);
+        if (file_refs) |references| {
+            var file_ref_index: usize = 0;
+            for (tool.file_refs.?) |reference_entry| {
+                const reference = reference_entry orelse continue;
+                references[file_ref_index] = .{
+                    .id = reference.id,
+                    .title = reference.title,
+                    .display_path = reference.display_path,
+                    .kind = reference.kind,
+                    .locator_kind = @tagName(reference.locator_kind),
+                    .locator = reference.locator,
+                    .range = if (reference.range) |range| .{
+                        .start = .{ .line = range.start.line, .column = range.start.column },
+                        .end = .{ .line = range.end.line, .column = range.end.column },
+                    } else null,
+                };
+                file_ref_index += 1;
+            }
+        }
+        tools[tool_index] = .{
+            .id = tool.id,
+            .order = tool.order,
+            .name = tool.name,
+            .input = tool.input,
+            .progress = tool.progress,
+            .content = tool.content,
+            .state = @tagName(tool.state),
+            .is_error = tool.is_error,
+            .elapsed_ms = tool.elapsed_ms,
+            .input_truncated = tool.input_truncated,
+            .progress_truncated = tool.progress_truncated,
+            .content_truncated = tool.content_truncated,
+            .redacted = tool.redacted,
+            .file_refs = file_refs,
+        };
+        tool_index += 1;
+    }
+
+    var argument_values: ?[][]const u8 = null;
+    errdefer if (argument_values) |values| allocator.free(values);
+    const input: RunInputWire = switch (run.input) {
+        .text => |text| .{
+            .kind = "text",
+            .text = text.value,
+            .skill_id = null,
+            .catalog_revision = null,
+            .invocation_name = null,
+            .display_name = null,
+            .argument_values = null,
+            .redacted = text.redacted,
+        },
+        .skill => |skill| input: {
+            const values = try allocator.alloc([]const u8, skill.argument_values.len);
+            for (values, skill.argument_values) |*target, value| target.* = value;
+            argument_values = values;
+            break :input .{
+                .kind = "skill",
+                .text = null,
+                .skill_id = skill.skill_id,
+                .catalog_revision = skill.catalog_revision,
+                .invocation_name = skill.invocation_name,
+                .display_name = skill.display_name,
+                .argument_values = values,
+                .redacted = skill.redacted,
+            };
+        },
+    };
+    const terminal = task_state.productTerminalFacts(run);
+    const terminal_payload = if (terminal != null) task_state.terminalPayload(run) else null;
+    return .{
+        .id = run.id,
+        .generation = run.generation,
+        .execution_generation = run.execution_generation,
+        .execution_provider = @tagName(run.execution_provider),
+        .execution_model = run.execution_model,
+        .input = input,
+        .assistant = run.assistant.list.items[0..run.assistant.committed_len],
+        .assistant_redacted = run.assistant_redacted,
+        .phase = @tagName(task_state.runPhase(run)),
+        .outcome = if (terminal) |value| @tagName(value.outcome) else null,
+        .cause = if (terminal) |value|
+            if (value.cause) |cause| @tagName(cause) else null
+        else
+            null,
+        .status = run.status_text,
+        .usage = usageWire(run.usage),
+        .tools = tools,
+        .diagnostic = if (terminal_payload) |payload|
+            run.terminal_diagnostic[0..payload.diagnostic_len]
+        else
+            "",
+        .diagnostic_truncated = if (terminal_payload) |payload| payload.diagnostic_truncated else false,
+        .diagnostic_redacted = if (terminal_payload) |payload| payload.diagnostic_redacted else false,
+        .event_projection_failure = run.event_projection_failure != null,
+        .next_activity_order = run.next_activity_order,
+    };
+}
+
+fn permissionSummaryWire(permission: *const task_state.PermissionSummary) PermissionSummaryWire {
+    return .{
+        .request_id = permission.requestId(),
+        .matched_rule_id = permission.matchedRuleId(),
+        .tool_namespace = @tagName(permission.tool_namespace),
+        .tool_name = permission.toolName(),
+        .tool_binding = permission.toolBinding(),
+        .decision = @tagName(permission.decision),
+        .source = @tagName(permission.source),
+        .policy_generation = permission.policy_generation,
+        .used_session_rule = permission.used_session_rule,
+        .callback_outcome = if (permission.callback_outcome) |outcome| @tagName(outcome) else null,
+    };
+}
+
+fn usageWire(usage: task_state.UsageView) UsageWire {
+    return .{
+        .input_tokens = usage.input_tokens,
+        .output_tokens = usage.output_tokens,
+        .cache_read_input_tokens = usage.cache_read_input_tokens,
+        .cache_creation_input_tokens = usage.cache_creation_input_tokens,
+    };
+}
+
+fn countPresent(comptime T: type, entries: []const ?T) usize {
+    var count: usize = 0;
+    for (entries) |entry| {
+        if (entry != null) count += 1;
+    }
+    return count;
+}
+
+pub const ProjectionError = std.mem.Allocator.Error || error{ProjectionCapacity};
+pub const RestoreError = Error || ProjectionError;
+
+/// Callback-scoped access to the composition-owned bounded projection arena.
+/// Persistence owns Task reconstruction semantics, while the caller retains
+/// the global byte budget and all allocation accounting.
+pub const RestoreProjection = struct {
+    context: *anyopaque,
+    allocator: std.mem.Allocator,
+    limits: Limits,
+    copy_fn: *const fn (
+        context: *anyopaque,
+        value: []const u8,
+        max: usize,
+    ) ProjectionError![]u8,
+    alloc_fn: *const fn (
+        context: *anyopaque,
+        capacity: usize,
+    ) ProjectionError![]u8,
+    append_text_fn: *const fn (
+        context: *anyopaque,
+        target: *task_state.TrackedText,
+        suffix: []const u8,
+        max: usize,
+    ) ProjectionError!void,
+    free_fn: *const fn (context: *anyopaque, value: []u8) void,
+    free_text_fn: *const fn (
+        context: *anyopaque,
+        target: *task_state.TrackedText,
+    ) void,
+
+    fn copy(self: RestoreProjection, value: []const u8, max: usize) ProjectionError![]u8 {
+        return self.copy_fn(self.context, value, max);
+    }
+
+    fn alloc(self: RestoreProjection, capacity: usize) ProjectionError![]u8 {
+        return self.alloc_fn(self.context, capacity);
+    }
+
+    fn appendText(
+        self: RestoreProjection,
+        target: *task_state.TrackedText,
+        suffix: []const u8,
+        max: usize,
+    ) ProjectionError!void {
+        return self.append_text_fn(self.context, target, suffix, max);
+    }
+
+    fn free(self: RestoreProjection, value: []u8) void {
+        self.free_fn(self.context, value);
+    }
+
+    fn freeText(self: RestoreProjection, target: *task_state.TrackedText) void {
+        self.free_text_fn(self.context, target);
+    }
+};
+
+pub fn restoreTask(
+    projection: RestoreProjection,
+    wire: TaskWire,
+) RestoreError!task_state.Task {
+    const checkpoint_anchor = parseEnum(task_state.CheckpointAnchor, wire.checkpoint_anchor) orelse
+        return error.TaskStoreCorrupt;
+    const checkpoint_attempt = parseEnum(task_state.CheckpointAttempt, wire.checkpoint_attempt) orelse
+        return error.TaskStoreCorrupt;
+    var checkpoint = if (wire.checkpoint) |value|
+        try restoreCheckpointRecord(projection.allocator, wire.id, value, projection.limits)
+    else
+        null;
+    errdefer if (checkpoint) |*value| value.deinit(projection.allocator);
+    if ((checkpoint == null and checkpoint_anchor == .available) or
+        (checkpoint != null and checkpoint_anchor == .none))
+        return error.TaskStoreCorrupt;
+    if (checkpoint) |value| {
+        value.validateBinding(wire.id, wire.binding.epoch) catch
+            return error.TaskStoreCorrupt;
+        const terminal_found = switch (value.anchor.terminal) {
+            .run => |terminal_id| blk: {
+                for (wire.runs) |run| {
+                    if (run.id != terminal_id) continue;
+                    break :blk persistedTerminalRunPhase(run.phase) and
+                        std.mem.eql(u8, run.execution_model, value.session.model);
+                }
+                break :blk false;
+            },
+            .compact => |terminal_id| blk: {
+                for (wire.compacts) |compact| if (compact.id == terminal_id)
+                    break :blk persistedTerminalCompactPhase(compact.phase);
+                break :blk false;
+            },
+        };
+        if (!terminal_found) return error.TaskStoreCorrupt;
+    }
+
+    const execution_provider = parseEnum(task_state.Provider, wire.binding.provider) orelse
+        return error.TaskStoreCorrupt;
+    const execution_model = try projection.copy(
+        wire.binding.model,
+        projection.limits.max_execution_model_bytes,
+    );
+    errdefer projection.free(execution_model);
+    const workspace_root = try projection.copy(
+        wire.workspace_root,
+        projection.limits.max_workspace_bytes,
+    );
+    errdefer projection.free(workspace_root);
+    const title = try projection.copy(wire.title, projection.limits.max_task_title_bytes);
+    errdefer projection.free(title);
+
+    const runs = try projection.allocator.alloc(
+        ?task_state.RunRecord,
+        projection.limits.max_runs_per_task,
+    );
+    errdefer projection.allocator.free(runs);
+    @memset(runs, null);
+    var restored_runs: usize = 0;
+    errdefer for (runs[0..restored_runs]) |*entry| {
+        const run = &(entry.* orelse continue);
+        deinitRestoredRun(projection, run);
+    };
+    for (wire.runs, 0..) |run, index| {
+        runs[index] = try restoreRun(projection, run);
+        restored_runs += 1;
+    }
+
+    const compacts = try projection.allocator.alloc(
+        ?task_state.CompactRecord,
+        projection.limits.max_compacts_per_task,
+    );
+    errdefer projection.allocator.free(compacts);
+    @memset(compacts, null);
+    var restored_compacts: usize = 0;
+    errdefer for (compacts[0..restored_compacts]) |*entry| {
+        const compact = &(entry.* orelse continue);
+        deinitRestoredCompact(projection, compact);
+    };
+    for (wire.compacts, 0..) |compact, index| {
+        compacts[index] = try restoreCompact(projection, compact);
+        restored_compacts += 1;
+    }
+
+    const ui_history = try projection.allocator.alloc(
+        ?task_state.UiRecord,
+        projection.limits.max_ui_history_per_task,
+    );
+    errdefer projection.allocator.free(ui_history);
+    @memset(ui_history, null);
+    for (wire.ui_history, 0..) |record, index|
+        ui_history[index] = restoreUiRecord(record);
+    return .{
+        .durable = .{
+            .id = wire.id,
+            .recent_order = wire.recent_order,
+            .execution_generation = wire.binding.execution_generation,
+            .execution_provider = execution_provider,
+            .execution_model = execution_model,
+            .binding_epoch = wire.binding.epoch,
+            .workspace_id = wire.workspace_id,
+            .workspace_epoch = wire.workspace_epoch,
+            .workspace_root = workspace_root,
+            .title = title,
+            .title_redacted = wire.title_redacted,
+            .archived = wire.archived,
+            .runs = runs,
+            .compacts = compacts,
+            .next_run_generation = wire.next_run_generation,
+            .ui_history = ui_history,
+            .ui_history_count = wire.ui_history.len,
+            .ui_history_next = wire.ui_history.len % ui_history.len,
+            .checkpoint = checkpoint,
+            .checkpoint_anchor = checkpoint_anchor,
+            .checkpoint_attempt = checkpoint_attempt,
+        },
+        .runtime = .{},
+    };
+}
+
+fn restoreCheckpointRecord(
+    allocator: std.mem.Allocator,
+    task_id: u64,
+    wire: CheckpointWire,
+    limits: Limits,
+) RestoreError!checkpoint_record.Record {
+    var digest: [checkpoint_store.digest_bytes]u8 = undefined;
+    if (wire.blob.digest.len != digest.len * 2) return error.TaskStoreCorrupt;
+    _ = std.fmt.hexToBytes(&digest, wire.blob.digest) catch return error.TaskStoreCorrupt;
+    const canonical_digest = std.fmt.bytesToHex(digest, .lower);
+    if (!std.mem.eql(u8, &canonical_digest, wire.blob.digest))
+        return error.TaskStoreCorrupt;
+    if (wire.blob.byte_size == 0 or
+        wire.session.logical_session_id.len == 0 or
+        wire.session.logical_session_id.len > 4096 or
+        wire.session.model.len == 0 or
+        wire.session.model.len > limits.max_execution_model_bytes or
+        wire.anchor.binding_epoch == 0 or
+        wire.anchor.terminal.id == 0)
+        return error.TaskStoreCorrupt;
+    const logical_session_id = try allocator.dupe(u8, wire.session.logical_session_id);
+    errdefer allocator.free(logical_session_id);
+    const model = try allocator.dupe(u8, wire.session.model);
+    errdefer allocator.free(model);
+    const terminal: checkpoint_record.Terminal = if (std.mem.eql(
+        u8,
+        wire.anchor.terminal.kind,
+        "run",
+    ))
+        .{ .run = wire.anchor.terminal.id }
+    else if (std.mem.eql(u8, wire.anchor.terminal.kind, "compact"))
+        .{ .compact = wire.anchor.terminal.id }
+    else
+        return error.TaskStoreCorrupt;
+    return .{
+        .blob = .{
+            .task_id = task_id,
+            .generation = wire.blob.generation,
+            .byte_size = wire.blob.byte_size,
+            .digest = digest,
+        },
+        .session = .{
+            .logical_session_id = logical_session_id,
+            .last_run_id = wire.session.last_run_id,
+            .last_compact_id = wire.session.last_compact_id,
+            .model = model,
+        },
+        .anchor = .{
+            .terminal = terminal,
+            .binding_epoch = wire.anchor.binding_epoch,
+        },
+    };
+}
+
+fn restoreRun(projection: RestoreProjection, wire: RunWire) RestoreError!task_state.RunRecord {
+    var input = try restoreRunInput(projection, wire.input);
+    errdefer deinitRestoredRunInput(projection, &input);
+    var assistant: task_state.TrackedText = .{};
+    errdefer if (assistant.list.capacity != 0) projection.freeText(&assistant);
+    try projection.appendText(
+        &assistant,
+        wire.assistant,
+        projection.limits.max_assistant_message_bytes,
+    );
+    assistant.committed_len = assistant.list.items.len;
+    const interrupted = !persistedTerminalRunPhase(wire.phase);
+    const status_text = try projection.copy(
+        if (interrupted) "Interrupted" else wire.status,
+        projection.limits.max_tool_field_bytes,
+    );
+    errdefer projection.free(status_text);
+    const diagnostic = try projection.alloc(projection.limits.max_terminal_diagnostic_bytes);
+    errdefer projection.free(diagnostic);
+    @memcpy(diagnostic[0..wire.diagnostic.len], wire.diagnostic);
+    const tools = try projection.allocator.alloc(
+        ?task_state.ToolView,
+        projection.limits.max_tools_per_run,
+    );
+    errdefer projection.allocator.free(tools);
+    @memset(tools, null);
+    var restored_tools: usize = 0;
+    errdefer for (tools[0..restored_tools]) |*entry| {
+        const tool = &(entry.* orelse continue);
+        deinitRestoredTool(projection, tool);
+    };
+    for (wire.tools) |tool| {
+        if (std.mem.eql(u8, tool.state, "running")) continue;
+        tools[restored_tools] = try restoreTool(projection, tool);
+        restored_tools += 1;
+    }
+    const phase: task_state.RunPhase = if (interrupted)
+        .interrupted
+    else
+        parseEnum(task_state.RunPhase, wire.phase) orelse return error.TaskStoreCorrupt;
+    const outcome: task_state.RunOutcome = if (interrupted)
+        .interrupted
+    else
+        parseEnum(
+            task_state.RunOutcome,
+            wire.outcome orelse return error.TaskStoreCorrupt,
+        ) orelse return error.TaskStoreCorrupt;
+    const cause: ?task_state.RunCause = if (interrupted or wire.cause == null)
+        null
+    else
+        parseEnum(task_state.RunCause, wire.cause.?) orelse return error.TaskStoreCorrupt;
+    const execution_model = try projection.copy(
+        wire.execution_model,
+        projection.limits.max_execution_model_bytes,
+    );
+    errdefer projection.free(execution_model);
+    return .{
+        .id = wire.id,
+        .generation = wire.generation,
+        .execution_generation = wire.execution_generation,
+        .execution_provider = parseEnum(task_state.Provider, wire.execution_provider) orelse
+            return error.TaskStoreCorrupt,
+        .execution_model = execution_model,
+        .execution_model_owned = true,
+        .input = input,
+        .assistant = assistant,
+        .assistant_redacted = wire.assistant_redacted,
+        .active_phase = .queued,
+        .tools = tools,
+        .usage = usageFromWire(wire.usage),
+        .status_text = status_text,
+        .terminal_publication = .init(.published),
+        .terminal_payload = .{
+            .phase = phase,
+            .outcome = outcome,
+            .cause = cause,
+            .session_disposition_at_completion = .reusable,
+            .diagnostic_len = wire.diagnostic.len,
+            .diagnostic_truncated = wire.diagnostic_truncated,
+            .diagnostic_redacted = wire.diagnostic_redacted,
+        },
+        .terminal_observed = true,
+        .event_stream_finalized = true,
+        .event_projection_failure = if (wire.event_projection_failure)
+            .consumer_rejected
+        else
+            null,
+        .terminal_diagnostic = diagnostic,
+        .next_activity_order = wire.next_activity_order,
+    };
+}
+
+fn restoreRunInput(
+    projection: RestoreProjection,
+    wire: RunInputWire,
+) RestoreError!task_state.RunInputRecord {
+    if (std.mem.eql(u8, wire.kind, "text")) return .{ .text = .{
+        .value = try projection.copy(
+            wire.text orelse return error.TaskStoreCorrupt,
+            projection.limits.max_user_message_bytes,
+        ),
+        .redacted = wire.redacted,
+    } };
+    const values_wire = wire.argument_values orelse return error.TaskStoreCorrupt;
+    const values = try projection.allocator.alloc([]u8, values_wire.len);
+    errdefer projection.allocator.free(values);
+    var initialized: usize = 0;
+    errdefer for (values[0..initialized]) |value| projection.free(value);
+    for (values_wire, values) |value, *target| {
+        target.* = try projection.copy(value, projection.limits.max_user_message_bytes);
+        initialized += 1;
+    }
+    const skill_id = try projection.copy(
+        wire.skill_id orelse return error.TaskStoreCorrupt,
+        projection.limits.max_tool_field_bytes,
+    );
+    errdefer projection.free(skill_id);
+    const catalog_revision = try projection.copy(
+        wire.catalog_revision orelse return error.TaskStoreCorrupt,
+        projection.limits.max_tool_field_bytes,
+    );
+    errdefer projection.free(catalog_revision);
+    const invocation_name = try projection.copy(
+        wire.invocation_name orelse return error.TaskStoreCorrupt,
+        projection.limits.max_tool_field_bytes,
+    );
+    errdefer projection.free(invocation_name);
+    const display_name = try projection.copy(
+        wire.display_name orelse return error.TaskStoreCorrupt,
+        projection.limits.max_tool_field_bytes,
+    );
+    errdefer projection.free(display_name);
+    return .{ .skill = .{
+        .skill_id = skill_id,
+        .catalog_revision = catalog_revision,
+        .invocation_name = invocation_name,
+        .display_name = display_name,
+        .argument_values = values,
+        .redacted = wire.redacted,
+    } };
+}
+
+fn restoreTool(projection: RestoreProjection, wire: ToolWire) RestoreError!task_state.ToolView {
+    const id = try projection.copy(wire.id, projection.limits.max_tool_field_bytes);
+    errdefer projection.free(id);
+    const name = try projection.copy(wire.name, projection.limits.max_tool_field_bytes);
+    errdefer projection.free(name);
+    const input = try projection.copy(wire.input, projection.limits.max_tool_field_bytes);
+    errdefer projection.free(input);
+    const progress = try projection.copy(wire.progress, projection.limits.max_tool_field_bytes);
+    errdefer projection.free(progress);
+    const content = try projection.copy(wire.content, projection.limits.max_tool_field_bytes);
+    errdefer projection.free(content);
+    const state = parseEnum(task_state.ToolState, wire.state) orelse
+        return error.TaskStoreCorrupt;
+    const file_refs = try projection.allocator.alloc(
+        ?task_state.FileReferenceView,
+        projection.limits.max_file_refs_per_tool,
+    );
+    errdefer {
+        for (file_refs) |*entry|
+            if (entry.*) |*reference| deinitRestoredFileReference(projection, reference);
+        projection.allocator.free(file_refs);
+    }
+    @memset(file_refs, null);
+    if (wire.file_refs) |references| {
+        if (references.len > projection.limits.max_file_refs_per_tool)
+            return error.TaskStoreCorrupt;
+        for (references, 0..) |reference, index|
+            file_refs[index] = try restoreFileReference(projection, reference);
+    }
+    return .{
+        .route_digest = [_]u8{0} ** task_state.tool_route_digest_bytes,
+        .id = id,
+        .order = wire.order,
+        .name = name,
+        .input = input,
+        .progress = progress,
+        .content = content,
+        .file_refs = file_refs,
+        .state = state,
+        .is_error = wire.is_error,
+        .elapsed_ms = wire.elapsed_ms,
+        .input_truncated = wire.input_truncated,
+        .progress_truncated = wire.progress_truncated,
+        .content_truncated = wire.content_truncated,
+        .redacted = wire.redacted,
+    };
+}
+
+fn restoreFileReference(
+    projection: RestoreProjection,
+    wire: FileReferenceWire,
+) RestoreError!task_state.FileReferenceView {
+    const locator_kind = parseEnum(task_state.FileReferenceLocatorKind, wire.locator_kind) orelse
+        return error.TaskStoreCorrupt;
+    var reference = task_state.FileReferenceView{
+        .id = undefined,
+        .title = undefined,
+        .display_path = undefined,
+        .kind = undefined,
+        .locator_kind = locator_kind,
+        .locator = undefined,
+        .range = if (wire.range) |range| .{
+            .start = .{ .line = range.start.line, .column = range.start.column },
+            .end = .{ .line = range.end.line, .column = range.end.column },
+        } else null,
+    };
+    reference.id = try projection.copy(wire.id, projection.limits.max_file_ref_field_bytes);
+    errdefer projection.free(reference.id);
+    reference.title = try projection.copy(wire.title, projection.limits.max_file_ref_field_bytes);
+    errdefer projection.free(reference.title);
+    reference.display_path = try projection.copy(
+        wire.display_path,
+        projection.limits.max_file_ref_field_bytes,
+    );
+    errdefer projection.free(reference.display_path);
+    reference.kind = try projection.copy(wire.kind, projection.limits.max_file_ref_field_bytes);
+    errdefer projection.free(reference.kind);
+    reference.locator = try projection.copy(
+        wire.locator,
+        projection.limits.max_file_ref_field_bytes,
+    );
+    return reference;
+}
+
+fn restoreCompact(
+    projection: RestoreProjection,
+    wire: CompactWire,
+) RestoreError!task_state.CompactRecord {
+    const interrupted = !persistedTerminalCompactPhase(wire.phase);
+    const diagnostic = try projection.alloc(projection.limits.max_terminal_diagnostic_bytes);
+    errdefer projection.free(diagnostic);
+    @memcpy(diagnostic[0..wire.diagnostic.len], wire.diagnostic);
+    return .{
+        .id = wire.id,
+        .after_run_id = wire.after_run_id,
+        .terminal_publication = .init(.published),
+        .terminal_payload = .{
+            .phase = if (interrupted)
+                .interrupted
+            else
+                parseEnum(task_state.CompactPhase, wire.phase) orelse
+                    return error.TaskStoreCorrupt,
+            .cause = if (interrupted or wire.cause == null)
+                null
+            else
+                parseEnum(task_state.CompactCause, wire.cause.?) orelse
+                    return error.TaskStoreCorrupt,
+            .before_context_tokens = wire.before_context_tokens,
+            .after_context_tokens = wire.after_context_tokens,
+            .usage = usageFromWire(wire.usage),
+            .session_disposition_at_completion = .reusable,
+            .diagnostic_len = wire.diagnostic.len,
+            .diagnostic_truncated = wire.diagnostic_truncated,
+            .diagnostic_redacted = wire.diagnostic_redacted,
+        },
+        .terminal_observed = true,
+        .terminal_diagnostic = diagnostic,
+    };
+}
+
+fn restoreUiRecord(wire: UiRecordWire) task_state.UiRecord {
+    var result: task_state.UiRecord = .{
+        .request_id = wire.request_id,
+        .run_id = wire.run_id,
+        .order = wire.order,
+        .kind = parseEnum(task_state.UiRecordKind, wire.kind) orelse unreachable,
+        .state = parseEnum(task_state.UiRecordState, wire.state) orelse unreachable,
+        .item_count = wire.item_count,
+        .detail_truncated = wire.detail_truncated,
+        .redacted = wire.redacted,
+    };
+    @memcpy(result.agent_request_id[0..wire.agent_request_id.len], wire.agent_request_id);
+    result.agent_request_id_len = wire.agent_request_id.len;
+    if (wire.permission) |permission| {
+        var summary = task_state.PermissionSummary{
+            .decision = parseEnum(agent.PermissionDecision, permission.decision) orelse unreachable,
+            .source = parseEnum(agent.PermissionDecisionSource, permission.source) orelse unreachable,
+            .policy_generation = permission.policy_generation,
+            .used_session_rule = permission.used_session_rule,
+            .callback_outcome = if (permission.callback_outcome) |outcome|
+                parseEnum(agent.PermissionCallbackOutcome, outcome) orelse unreachable
+            else
+                null,
+            .tool_namespace = parseEnum(agent.PermissionToolNamespace, permission.tool_namespace) orelse unreachable,
+        };
+        @memcpy(summary.request_id[0..permission.request_id.len], permission.request_id);
+        summary.request_id_len = permission.request_id.len;
+        @memcpy(summary.matched_rule_id[0..permission.matched_rule_id.len], permission.matched_rule_id);
+        summary.matched_rule_id_len = permission.matched_rule_id.len;
+        @memcpy(summary.tool_name[0..permission.tool_name.len], permission.tool_name);
+        summary.tool_name_len = permission.tool_name.len;
+        @memcpy(summary.tool_binding[0..permission.tool_binding.len], permission.tool_binding);
+        summary.tool_binding_len = permission.tool_binding.len;
+        result.permission = summary;
+    }
+    @memcpy(result.detail[0..wire.detail.len], wire.detail);
+    result.detail_len = wire.detail.len;
+    return result;
+}
+
+fn usageFromWire(usage: UsageWire) task_state.UsageView {
+    return .{
+        .input_tokens = usage.input_tokens,
+        .output_tokens = usage.output_tokens,
+        .cache_read_input_tokens = usage.cache_read_input_tokens,
+        .cache_creation_input_tokens = usage.cache_creation_input_tokens,
+    };
+}
+
+pub fn parseEnum(comptime T: type, value: []const u8) ?T {
+    return std.meta.stringToEnum(T, value);
+}
+
+fn persistedTerminalRunPhase(value: []const u8) bool {
+    const phase = parseEnum(task_state.RunPhase, value) orelse return false;
+    return task_state.isTerminalPhase(phase);
+}
+
+fn persistedTerminalCompactPhase(value: []const u8) bool {
+    const phase = parseEnum(task_state.CompactPhase, value) orelse return false;
+    return task_state.isTerminalCompactPhase(phase);
+}
+
+fn deinitRestoredFileReference(
+    projection: RestoreProjection,
+    reference: *task_state.FileReferenceView,
+) void {
+    projection.free(reference.id);
+    projection.free(reference.title);
+    projection.free(reference.display_path);
+    projection.free(reference.kind);
+    projection.free(reference.locator);
+    reference.* = undefined;
+}
+
+fn deinitRestoredTool(projection: RestoreProjection, tool: *task_state.ToolView) void {
+    projection.free(tool.id);
+    projection.free(tool.name);
+    projection.free(tool.input);
+    projection.free(tool.progress);
+    projection.free(tool.content);
+    if (tool.file_refs) |references| {
+        for (references) |*entry|
+            if (entry.*) |*reference| deinitRestoredFileReference(projection, reference);
+        projection.allocator.free(references);
+    }
+    tool.* = undefined;
+}
+
+fn deinitRestoredRunInput(
+    projection: RestoreProjection,
+    input: *task_state.RunInputRecord,
+) void {
+    switch (input.*) {
+        .text => |text| projection.free(text.value),
+        .skill => |skill| {
+            projection.free(skill.skill_id);
+            projection.free(skill.catalog_revision);
+            projection.free(skill.invocation_name);
+            projection.free(skill.display_name);
+            for (skill.argument_values) |value| projection.free(value);
+            projection.allocator.free(skill.argument_values);
+        },
+    }
+    input.* = undefined;
+}
+
+fn deinitRestoredRun(projection: RestoreProjection, run: *task_state.RunRecord) void {
+    std.debug.assert(run.automatic_title.state.load(.acquire) != .running);
+    std.debug.assert(run.automatic_title.execution == null);
+    for (run.tools) |*entry| {
+        const tool = &(entry.* orelse continue);
+        deinitRestoredTool(projection, tool);
+    }
+    projection.allocator.free(run.tools);
+    deinitRestoredRunInput(projection, &run.input);
+    if (run.assistant.list.capacity != 0) projection.freeText(&run.assistant);
+    if (run.execution_model_owned)
+        projection.free(@constCast(run.execution_model));
+    projection.free(run.status_text);
+    projection.free(run.terminal_diagnostic);
+    run.* = undefined;
+}
+
+fn deinitRestoredCompact(
+    projection: RestoreProjection,
+    compact: *task_state.CompactRecord,
+) void {
+    std.debug.assert(!compact.worker_reference_held.load(.acquire));
+    std.debug.assert(!compact.session_reference_held.load(.acquire));
+    projection.free(compact.terminal_diagnostic);
+    compact.* = undefined;
+}
 
 const MetaWire = struct {
     next_workspace_id: u64,
@@ -980,7 +2008,7 @@ fn validate(state: *const StateWire, limits: Limits) !void {
             !validText(task.title, limits.max_task_title_bytes, true) or
             task.binding.epoch == 0 or task.binding.execution_generation == 0 or
             !oneOf(task.binding.provider, &.{ "anthropic", "openai", "gemini" }) or
-            !validBinding(task.binding, limits.max_tool_field_bytes) or
+            !validBinding(task.binding, limits.max_execution_model_bytes) or
             task.runs.len > limits.max_runs_per_task or
             task.compacts.len > limits.max_compacts_per_task or
             task.ui_history.len > limits.max_ui_history_per_task)
@@ -1017,7 +2045,7 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
     for (task.runs, 0..) |run, index| {
         if (run.id == 0 or run.generation == 0 or run.execution_generation == 0 or
             !oneOf(run.execution_provider, &.{ "anthropic", "openai", "gemini" }) or
-            !validText(run.execution_model, limits.max_tool_field_bytes, false) or
+            !validText(run.execution_model, limits.max_execution_model_bytes, false) or
             run.execution_generation != task.binding.execution_generation or
             !std.mem.eql(u8, run.execution_provider, task.binding.provider) or
             !validText(run.assistant, limits.max_assistant_message_bytes, true) or
@@ -1040,7 +2068,7 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
                 (std.mem.eql(u8, tool.state, "failed") != tool.is_error))
                 return error.Invalid;
             if (tool.file_refs) |references| {
-                if (references.len > 32) return error.Invalid;
+                if (references.len > limits.max_file_refs_per_tool) return error.Invalid;
                 for (references) |reference| {
                     if (!validText(reference.id, limits.max_file_ref_field_bytes, false) or
                         !validText(reference.title, limits.max_file_ref_field_bytes, true) or
@@ -1756,6 +2784,7 @@ fn testLimits() Limits {
         .max_runs_per_task = 4,
         .max_compacts_per_task = 4,
         .max_tools_per_run = 4,
+        .max_file_refs_per_tool = 4,
         .max_ui_history_per_task = 4,
         .max_workspace_bytes = 1024,
         .max_task_title_bytes = 512,
@@ -1763,6 +2792,7 @@ fn testLimits() Limits {
         .max_assistant_message_bytes = 4096,
         .max_tool_field_bytes = 4096,
         .max_file_ref_field_bytes = 1024,
+        .max_execution_model_bytes = 512,
         .max_terminal_diagnostic_bytes = 512,
     };
 }

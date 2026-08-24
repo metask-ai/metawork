@@ -261,15 +261,13 @@ test("Product Skill catalog has one physical home and remains a shared value ker
     build,
     /product_skill\.addImport\("product_skill_catalog", catalog_snapshot\)/,
   );
-  assert.match(
-    build,
-    /addImport\("metawork_product_skill", product_skill\)/,
-  );
+  assert.match(build, /addImport\("metawork_product_skill", product_skill\)/);
 });
 
 test("Product Task kernels have one physical home without taking the executor", () => {
   const build = read("build.zig");
   const productTask = read("src/product/task.zig");
+  const taskPersistence = read("src/product/task/persistence.zig");
   const taskState = read("src/product/task/state.zig");
   const taskPolicy = read("src/product/task/policy.zig");
   const projection = read("src/workbench/projection.zig");
@@ -307,12 +305,25 @@ test("Product Task kernels have one physical home without taking the executor", 
   assert.match(appStores, /@import\("metawork_product_task"\)/);
   assert.match(appStores, /product_task\.persistence\.FileStore/);
   assert.match(appStores, /product_task\.checkpoint_store\.FileStore/);
-  assert.doesNotMatch(recoveryJob, /workbench_executor|@import\("metawork_workbench"\)/);
+  assert.doesNotMatch(
+    recoveryJob,
+    /workbench_executor|@import\("metawork_workbench"\)/,
+  );
   assert.match(build, /src\/product\/task\/recovery_job\.zig/);
   assert.match(build, /src\/product\/task\/state\.zig/);
   assert.match(build, /src\/product\/task\/policy\.zig/);
-  assert.match(build, /projection\.addImport\("metawork_product_task", product_task\)/);
-  assert.match(build, /app\.addImport\("metawork_product_task", product_task\)/);
+  assert.match(
+    build,
+    /task_persistence\.addImport\("product_task_state", task_state\)/,
+  );
+  assert.match(
+    build,
+    /projection\.addImport\("metawork_product_task", product_task\)/,
+  );
+  assert.match(
+    build,
+    /app\.addImport\("metawork_product_task", product_task\)/,
+  );
 
   const runRecord = taskState.match(
     /pub const RunRecord = struct \{[\s\S]*?\n\};/,
@@ -366,6 +377,50 @@ test("Product Task kernels have one physical home without taking the executor", 
   assert.match(projection, /fn requestRunTermination\(/);
   assert.match(projection, /fn commitTerminal\(/);
   assert.match(projection, /fn commitCompactProductTerminal\(/);
+  for (const persistenceType of [
+    "Commit",
+    "Capability",
+    "Health",
+    "TaskStateWireScratch",
+    "RestoreProjection",
+  ]) {
+    assert.match(taskPersistence, new RegExp(`pub const ${persistenceType} =`));
+  }
+  for (const persistenceFn of ["projectTask", "restoreTask", "parseEnum"]) {
+    assert.match(taskPersistence, new RegExp(`pub fn ${persistenceFn}\\(`));
+  }
+  for (const retiredProjectionFn of [
+    "restoreTask",
+    "restoreCheckpointRecord",
+    "restoreRun",
+    "restoreRunInput",
+    "restoreTool",
+    "restoreFileReference",
+    "restoreCompact",
+    "taskWireWithCheckpoint",
+    "runWire",
+    "restoreUiRecord",
+    "parsePersistedEnum",
+  ]) {
+    assert.doesNotMatch(
+      projection,
+      new RegExp(`(?:^|\\n)\\s*fn ${retiredProjectionFn}\\(`),
+    );
+  }
+  assert.match(projection, /task_persistence\.restoreTask\(/);
+  assert.match(projection, /task_persistence\.projectTask\(/);
+  assert.match(projection, /fn taskRestoreProjection\(/);
+  assert.match(projection, /fn buildTaskStateWireWithCheckpoint\(/);
+  assert.match(projection, /fn commitTaskStateWithCheckpoint\(/);
+  assert.doesNotMatch(
+    taskPersistence,
+    /Workbench|workbench_executor|std\.Thread|commitTaskState|bumpRevision|writeSnapshot|@import\("(?:metawork_app|metawork_bridge|native_sdk|metask_agentcore)"\)/,
+  );
+  assert.doesNotMatch(
+    workbenchRoot,
+    /pub const TaskPersistence(?:Commit|Health)?\b/,
+  );
+  assert.match(appStores, /product_task\.persistence\.Commit/);
   assert.match(executor, /identity: \*anyopaque,[\s\S]*context: \*anyopaque,/);
   assert.match(executor, /if \(item\.identity != identity\) continue;/);
 });

@@ -134,7 +134,7 @@ pub fn commitScheduledTaskStore(
 pub fn commitTaskStore(
     context: ?*anyopaque,
     bytes: []const u8,
-) workbench_api.TaskPersistenceCommit {
+) product_task.persistence.Commit {
     const store: *product_task.persistence.FileStore = @ptrCast(
         @alignCast(context orelse return .failed),
     );

@@ -26,12 +26,12 @@ const ShutdownContext = struct {
 };
 
 const TaskPersistenceProbe = struct {
-    result: workbench_api.TaskPersistenceCommit = .committed,
+    result: product_task.persistence.Commit = .committed,
     storage: ?[]u8 = null,
     len: usize = 0,
     commits: usize = 0,
 
-    fn commit(context: ?*anyopaque, bytes: []const u8) workbench_api.TaskPersistenceCommit {
+    fn commit(context: ?*anyopaque, bytes: []const u8) product_task.persistence.Commit {
         const self: *@This() = @ptrCast(@alignCast(context.?));
         self.commits += 1;
         if (self.result == .committed) if (self.storage) |storage| {
@@ -42,7 +42,7 @@ const TaskPersistenceProbe = struct {
         return self.result;
     }
 
-    fn capability(self: *@This()) workbench_api.TaskPersistence {
+    fn capability(self: *@This()) product_task.persistence.Capability {
         return .{
             .context = self,
             .enabled = true,
@@ -53,7 +53,7 @@ const TaskPersistenceProbe = struct {
     fn capabilityRestored(
         self: *@This(),
         restored_bytes: []const u8,
-    ) workbench_api.TaskPersistence {
+    ) product_task.persistence.Capability {
         var result = self.capability();
         result.restored_bytes = restored_bytes;
         return result;

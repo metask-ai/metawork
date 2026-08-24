@@ -930,6 +930,10 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     task_state.addImport("product_task_runtime", task_runtime);
     task_state.addImport("product_task_deletion", task_deletion);
     task_state.addImport("product_task_recovery", task_recovery);
+    task_persistence.addImport("metawork_agent", agent);
+    task_persistence.addImport("product_task_checkpoint_record", checkpoint_record);
+    task_persistence.addImport("product_task_checkpoint_store", checkpoint_store);
+    task_persistence.addImport("product_task_state", task_state);
     const task_policy = b.createModule(.{
         .root_source_file = b.path("src/product/task/policy.zig"),
         .target = target,
