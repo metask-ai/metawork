@@ -7,7 +7,7 @@ const std = @import("std");
 const agent = @import("metawork_agent");
 const checkpoint_record = @import("workbench_checkpoint_record");
 const checkpoint_store = @import("workbench_checkpoint_store");
-const catalog_snapshot = @import("workbench_catalog_snapshot");
+const catalog_snapshot = @import("metawork_product_skill").catalog;
 const owned_execution = @import("workbench_owned_task_execution");
 
 pub const Notifier = struct {

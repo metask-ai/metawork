@@ -99,6 +99,7 @@ test("named module roots exist and lower owners cannot import composition", () =
     "src/app.zig",
     "src/product/account.zig",
     "src/product/mcp.zig",
+    "src/product/skill.zig",
     "src/agent.zig",
     "src/workbench.zig",
     "src/bridge.zig",
@@ -115,14 +116,21 @@ test("named module roots exist and lower owners cannot import composition", () =
     false,
   );
   assert.equal(existsSync(new URL("src/workbench/testdata/", root)), false);
+  assert.equal(
+    existsSync(new URL("src/workbench/catalog_snapshot.zig", root)),
+    false,
+  );
   const buildSource = read("build.zig");
   assert.match(buildSource, /src\/product\/account\.zig/);
   assert.match(buildSource, /src\/product\/account\/contract\.zig/);
   assert.match(buildSource, /src\/product\/mcp\.zig/);
   assert.match(buildSource, /src\/product\/mcp\/configuration\.zig/);
   assert.match(buildSource, /src\/product\/mcp\/state\.zig/);
+  assert.match(buildSource, /src\/product\/skill\.zig/);
+  assert.match(buildSource, /src\/product\/skill\/catalog\.zig/);
   assert.doesNotMatch(buildSource, /src\/account(?:\.zig|\/)/);
   assert.doesNotMatch(buildSource, /src\/workbench\/mcp_configuration\.zig/);
+  assert.doesNotMatch(buildSource, /src\/workbench\/catalog_snapshot\.zig/);
   assert.match(buildSource, /addImport\("metawork_account", account\)/);
   assert.match(
     buildSource,
@@ -175,6 +183,14 @@ test("named module roots exist and lower owners cannot import composition", () =
     "metask_agentcore",
     "native_sdk",
   ]);
+  assertNoImports(zigFiles("src/product/skill/"), [
+    "metawork_app",
+    "metawork_workbench",
+    "metawork_bridge",
+    "metawork_account",
+    "metask_agentcore",
+    "native_sdk",
+  ]);
   assertNoImports(zigFiles("src/bridge/"), [
     "metawork_app",
     "metask_agentcore",
@@ -192,6 +208,35 @@ test("named module roots exist and lower owners cannot import composition", () =
       `${file} exposes an implementation module`,
     );
   }
+});
+
+test("Product Skill catalog has one physical home and remains a shared value kernel", () => {
+  const build = read("build.zig");
+  const productSkill = read("src/product/skill.zig");
+  const catalog = read("src/product/skill/catalog.zig");
+  const projection = read("src/workbench/projection.zig");
+  const taskRuntime = read("src/workbench/task_runtime.zig");
+  const recoveryJob = read("src/workbench/task_recovery_job.zig");
+
+  assert.match(productSkill, /@import\("product_skill_catalog"\)/);
+  assert.match(catalog, /@import\("metawork_agent"\)/);
+  assert.doesNotMatch(
+    catalog,
+    /Workbench|Task|Workspace|workbench_executor|std\.Thread|\*agent\.Runtime|\*agent\.Session/,
+  );
+  for (const source of [projection, taskRuntime, recoveryJob]) {
+    assert.match(source, /@import\("metawork_product_skill"\)\.catalog/);
+    assert.doesNotMatch(source, /@import\("workbench_catalog_snapshot"\)/);
+  }
+  assert.match(build, /src\/product\/skill\/catalog\.zig/);
+  assert.match(
+    build,
+    /product_skill\.addImport\("product_skill_catalog", catalog_snapshot\)/,
+  );
+  assert.match(
+    build,
+    /addImport\("metawork_product_skill", product_skill\)/,
+  );
 });
 
 test("Product MCP kernels have one physical home and remain Workbench-held", () => {
