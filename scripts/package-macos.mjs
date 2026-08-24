@@ -806,9 +806,6 @@ async function packageMacos(selection) {
       targetId: distribution.targetId,
     });
   }
-  for (const distribution of distributions) {
-    rmSync(distribution.diskImagePath, { force: true });
-  }
   const identity = resolveDistributionIdentity();
   for (const distribution of distributions) {
     const signature = buildPackagedMacosApp(identity, distribution);
