@@ -69,7 +69,7 @@ Model Connection projection 不扩展 Metask OAuth 状态机：每条连接发�
 
 - 默认 API、provider 或 credential 变化可以安装新 generation，既有 Task 继续引用旧 generation；同一已提交 API 下的默认模型变化只持久化 Account preference，不改变 credential generation、不安装 Workbench execution。两类操作都只暂停相关的新 Task admission，不冻结既有 Task、导航或历史；
 - Model Connection 的新增、编辑、验证、启用、禁用和删除使用独立的 connection transaction；它可以在 Metask `signed_out` 时继续管理，但安装为默认执行配置前必须通过同一 generation/replacement gate。endpoint、provider 或 credential 替换生成新的 connection generation，不能原地改变 live Session；
-- 账号 identity 切换、退出登录和设备 credential 清理必须等待所有 credential、Session、Run、job 与 worker reference 归零，不能借默认切换绕过 secret lifetime。durable Task 和历史记录不持有 credential，因而不参与 gate；无运行时 attachment 的恢复 Task 必须直接放行。
+- 账号 identity 切换、退出登录和设备 credential 清理只替换 Account 当前身份与 Metask-owned 默认执行配置，不等待、终止或改写既有 Task、Session、Run、job 与 worker reference。Workbench identity gate 只串行化这次 Account replacement；live Task/Session 已经取得的 owned ExecutionConfig 按原生命周期收口，退出登录不宣称对其热撤权。durable Task 和历史记录不持有 credential，也不参与 gate。
 
 冷启动恢复不是运行中的 identity 切换：新进程先从独立 registry/credential store 恢复 durable Model Connection default，再并行恢复 Metask identity/catalog；Metask execution completion 只更新其自身状态，不能覆盖已恢复的 custom default。没有 custom default 时，Metask execution 才通过 default-execution transaction 安装。运行中的显式重新登录或 logout 必须经过 identity gate；该 gate 只清理 Metask-owned credential/default，不撤销独立的 custom default。显式切回 Metask 先重建当前 Metask execution，成功后原子清除 durable custom default并安装 Metask execution；任一步失败都继续保留 custom default。live Task/Run 已拥有的 ExecutionConfig 按原生命周期收口。
 

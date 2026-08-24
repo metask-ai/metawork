@@ -896,7 +896,7 @@ Workspace 生命周期不属于 Settings surface。New task 路径控件负责�
 - 既有 Task 只显示解释历史所需的 Provider、模型与 generation；不显示或保存 Account identity 与 API Key 元数据；
 - 跨重启历史 Task 保持只读；设置变化不能使其静默采用当前默认值或伪造 Session；
 - `在 Metask 中管理` 只有在 Host 发布固定安全入口后才显示；当前没有该 capability 时不放置链接或假入口；
-- 只有 Task 仍持有 Session、Run、job、worker 或 credential 等真实运行时引用时，重新登录或退出登录才显示“任务仍在运行”；durable Task 和只读历史不得触发该提示。退出登录必须说明设备凭据清理和历史保留语义。
+- 重新登录或退出登录不得因 Task、Session、Run、job、worker 或 Task-owned credential 的运行时引用而被阻止，也不得静默终止或改写这些引用；既有 Task 按创建时取得的 ExecutionConfig 继续收口。退出登录必须说明 Account 设备凭据清理和历史保留语义，但不能把它描述成对 live Task 的热撤权。
 
 设置页保留左侧分区导航与右侧内容的双栏布局。桌面双栏直接消费应用左侧导航轨的已保存宽度，使设置内容起点与 Workbench 分界线保持一致；设置页不建立第二份宽度状态或第二个拖动器。它是桌面控制面，不使用营销页式 Hero，也不为视觉饱满度增加无产品语义的卡片、渐变、玻璃材质或装饰性图表。顶部只保留与双栏网格对齐的紧凑上下文栏：返回入口、单一页面标题和一句短说明；不重复产品眉题，不让标题区形成独立大块留白。标准窗口下当前分区和第一组设置必须在首屏形成紧凑、稳定的阅读起点；窄窗口可把分区导航收成横向行，但不得改变设置 owner 或复制页面状态。
 
