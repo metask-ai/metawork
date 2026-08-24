@@ -499,6 +499,15 @@ test("AgentCore SDK access is restricted to Agent modules and the test fixture",
   }
   assert.match(build, /\.agentcore\/bundles/);
   assert.doesNotMatch(build, /\.agentcore\/bundle(?:["/])/);
+  for (const file of filesWithExtensions("scripts/", [".mjs"]).filter(
+    (path) => !path.endsWith(".test.mjs"),
+  )) {
+    assert.doesNotMatch(
+      read(file),
+      /\.agentcore(?:\/|["'],\s*["'])bundle(?:\/|["'])/u,
+      `${file} references the retired single-bundle path`,
+    );
+  }
   assert.doesNotMatch(build, /\.addObjectFile\(/);
   for (const [target, lock] of [
     ["x86_64-windows-gnu", "agentcore-bundle.windows.lock.json"],

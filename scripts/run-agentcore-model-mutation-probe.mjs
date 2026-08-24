@@ -12,8 +12,10 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import process from "node:process";
 import {
+  defaultAgentCoreTargetId,
   loadLockedAgentCoreManifest,
   readAgentCoreBundleTargetId,
+  stagedAgentCoreBundleRoot,
   validateAgentCoreBundle,
 } from "./agentcore-bundle.mjs";
 import { runChild } from "./run-child-process.mjs";
@@ -29,7 +31,7 @@ if (process.argv.length > 3 || (mode !== undefined && mode !== "--staged"))
   );
 const bundleRoot =
   mode === "--staged"
-    ? path.join(repositoryRoot, ".agentcore", "bundle")
+    ? stagedAgentCoreBundleRoot(repositoryRoot, defaultAgentCoreTargetId())
     : process.env.AGENTCORE_BUNDLE_ROOT;
 if (!bundleRoot)
   throw new Error("AGENTCORE_BUNDLE_ROOT is required for the candidate probe");

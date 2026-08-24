@@ -7,6 +7,7 @@ import {
   parseNativeProductIdentity,
   readNativePackageManifest,
 } from "./package-metadata.mjs";
+import { verifyStagedAgentCoreBundle } from "./verify-staged-agentcore-bundle.mjs";
 
 const repositoryRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -358,27 +359,20 @@ function runNative(args) {
   run(process.execPath, [nativeDispatcher, ...args]);
 }
 
-function runNode(script, args = []) {
-  run(process.execPath, [path.join(repositoryRoot, script), ...args]);
-}
-
-function verifiedAgentCoreTarget() {
-  runNode("scripts/verify-staged-agentcore-bundle.mjs");
-  const manifest = JSON.parse(
-    readFileSync(
-      path.join(repositoryRoot, ".agentcore", "bundle", "manifest.json"),
-      "utf8",
-    ),
+async function verifiedAgentCoreTarget() {
+  const bundle = await verifyStagedAgentCoreBundle(repositoryRoot);
+  console.log(
+    `verified staged AgentCore ${bundle.manifest.version} ABI ${bundle.manifest.contract.binary_abi_version} revision ${bundle.manifest.contract.binary_abi_revision}`,
   );
-  const target = manifest?.target?.zig_target;
+  const target = bundle.target;
   if (typeof target !== "string" || target.length === 0) {
     throw new Error("verified AgentCore bundle has no Zig target");
   }
   return target;
 }
 
-export function runDevelopment() {
-  const target = verifiedAgentCoreTarget();
+export async function runDevelopment() {
+  const target = await verifiedAgentCoreTarget();
   if (process.platform !== "darwin") {
     runNative(["dev", ".", "--yes", `-Dtarget=${target}`]);
     return;
@@ -397,7 +391,7 @@ const invokedPath = process.argv[1]
   : null;
 if (invokedPath === import.meta.url) {
   try {
-    runDevelopment();
+    await runDevelopment();
   } catch (error) {
     console.error(`error: ${error instanceof Error ? error.message : error}`);
     process.exitCode = 1;
