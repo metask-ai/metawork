@@ -274,6 +274,47 @@ test "MCP Runtime takes one complete input and activation publishes unavailable 
     try std.testing.expect(valid);
 }
 
+test "MCP empty Runtime accepts the initial declarative configuration apply" {
+    fake_core.reset();
+    const runtime = try lifecycle.Runtime.initWithApi(
+        std.testing.io,
+        std.testing.allocator,
+        &fake_api,
+        .{ .max_sessions = 1 },
+    );
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    var transport: McpFixtureTransport = .{};
+    var owner = lifecycle.McpTransportOwner.init(
+        transport.descriptor(),
+        McpFixtureTransport.deinit,
+    );
+    var replacement = try lifecycle.McpRuntimeInput.init(std.testing.allocator, 1, &.{.{
+        .id = "initial",
+        .transport_owner = &owner,
+        .transport = .stdio,
+        .namespace = "initial",
+        .client_name = "MetaWork",
+        .client_version = "test",
+        .timeout_ms = 100,
+        .configuration_fingerprint = [_]u8{1} ** 32,
+    }});
+    defer replacement.deinit();
+    try std.testing.expectEqual(
+        lifecycle.McpConfigurationApplyOutcome.applied,
+        try runtime.applyMcpConfiguration(&replacement),
+    );
+    try std.testing.expectEqual(@as(usize, 1), fake_core.mcp_configuration_applies);
+    try std.testing.expectEqual(@as(usize, 1), fake_core.last_mcp_apply_server_count);
+    const activation = switch (try runtime.activateMcp()) {
+        .activated => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    activation.deinit();
+}
+
 test "MCP Runtime declaratively applies a replacement configuration" {
     fake_core.reset();
     var first_transport: McpFixtureTransport = .{};

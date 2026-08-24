@@ -855,6 +855,12 @@ pub const Coordinator = struct {
         const generation = inspection.desired_generation orelse return .rejected;
         if (generation == 0) return .rejected;
 
+        self.workbench_owner.beginMcpConfigurationApply(generation) catch
+            return .busy;
+        var apply_state_owned = true;
+        defer if (apply_state_owned)
+            self.workbench_owner.failMcpConfigurationApply(generation);
+
         const registry_storage = try self.allocator.alloc(
             u8,
             mcp_configuration.max_store_bytes,
@@ -926,16 +932,12 @@ pub const Coordinator = struct {
         runtime_build.deinit();
         preparation_owned = false;
         manifest_owned = false;
-        self.workbench_owner.beginMcpConfigurationApply(generation) catch {
-            job.deinit();
-            return .busy;
-        };
         job.start() catch {
-            self.workbench_owner.failMcpConfigurationApply(generation);
             job.deinit();
             return .unavailable;
         };
         self.configuration_apply_job = job;
+        apply_state_owned = false;
         return .started;
     }
 
@@ -1718,6 +1720,145 @@ test "MCP secure input preserves submit and cancel outcomes" {
     try std.testing.expectEqualDeep(
         CaptureResult.cancelled,
         mapPlatformCapture(.cancelled),
+    );
+}
+
+test "MCP configuration apply publishes failed when preparation cannot start" {
+    const Effects = struct {
+        fn commit(_: ?*anyopaque, _: []const u8) mcp_configuration.PersistenceEffect {
+            return .committed;
+        }
+        fn clear(_: ?*anyopaque) mcp_configuration.PersistenceEffect {
+            return .committed;
+        }
+        fn probe(_: ?*anyopaque, _: []const u8) mcp_configuration.CredentialPresence {
+            return .missing;
+        }
+        fn create(_: ?*anyopaque, _: []const u8, _: []const u8) bool {
+            return true;
+        }
+        fn delete(_: ?*anyopaque, _: []const u8) bool {
+            return true;
+        }
+        fn fill(_: ?*anyopaque, output: *[16]u8) bool {
+            @memset(output, 0x5a);
+            return true;
+        }
+    };
+    const TestHost = struct {
+        fn confirm(_: *anyopaque, _: []const u8, _: []const u8, _: []const u8) Confirmation {
+            return .unavailable;
+        }
+        fn capture(_: *anyopaque, _: []const u8, _: []const u8, _: []u8) CaptureResult {
+            return .unavailable;
+        }
+        fn open(_: *anyopaque, _: []const u8) bool {
+            return false;
+        }
+        fn now(_: *anyopaque) ?u64 {
+            return null;
+        }
+        fn notify(_: *anyopaque) void {}
+    };
+    const limits: mcp_configuration.Limits = .{
+        .max_servers = 8,
+        .max_tools_per_server = 32,
+        .max_namespace_bytes = 128,
+        .max_credential_locators = 64,
+        .max_runtime_secrets_per_server = 128,
+        .max_runtime_secret_bytes_per_server = 16 * 1024,
+    };
+    var preparation = try mcp_configuration.prepare(
+        std.testing.allocator,
+        null,
+        true,
+        false,
+        .{},
+        limits,
+    );
+    var preparation_owned = true;
+    defer if (preparation_owned) preparation.deinit();
+    var manifest = (try mcp_configuration.RuntimeManifest.candidate(
+        std.testing.allocator,
+        &preparation,
+    )).?;
+    var manifest_owned = true;
+    defer if (manifest_owned) manifest.deinit();
+    var agent_runtime: agent.Runtime = undefined;
+    var workbench_owner = try workbench.Workbench.init(
+        std.testing.allocator,
+        std.testing.io,
+        &agent_runtime,
+        .{ .worker_count = 1, .queue_capacity = 1 },
+        .{ .mcp = .{
+            .preparation = &preparation,
+            .management = .{
+                .persistence = .{
+                    .available = true,
+                    .commit_journal_fn = Effects.commit,
+                    .commit_registry_fn = Effects.commit,
+                    .clear_journal_fn = Effects.clear,
+                },
+                .credentials = .{
+                    .available = true,
+                    .probe_fn = Effects.probe,
+                    .create_fn = Effects.create,
+                    .delete_fn = Effects.delete,
+                },
+                .identity_generator = .{ .available = true, .fill_fn = Effects.fill },
+                .limits = limits,
+                .runtime_manifest = &manifest,
+            },
+        } },
+    );
+    preparation_owned = false;
+    manifest_owned = false;
+    defer workbench_owner.deinit();
+    try std.testing.expectEqual(
+        mcp_configuration.ManagementOutcome.saved,
+        try workbench_owner.createMcpHttpServer(0, .{
+            .display_name = "Remote",
+            .url = "https://mcp.example.test/mcp",
+        }),
+    );
+
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    var credential_store: mcp_platform.CredentialStore = undefined;
+    var authorizations: mcp_platform.HttpAuthorizations = .{
+        .allocator = std.testing.allocator,
+    };
+    defer authorizations.deinit();
+    var host_context: u8 = 0;
+    var coordinator = Coordinator.init(
+        failing.allocator(),
+        std.testing.io,
+        &workbench_owner,
+        &agent_runtime,
+        &credential_store,
+        &authorizations,
+        .{
+            .context = &host_context,
+            .confirm_fn = TestHost.confirm,
+            .capture_fn = TestHost.capture,
+            .open_url_fn = TestHost.open,
+            .now_unix_ms_fn = TestHost.now,
+            .notify_fn = TestHost.notify,
+        },
+        .{},
+    );
+    defer coordinator.deinit();
+
+    try std.testing.expectError(error.OutOfMemory, coordinator.applyConfiguration());
+    try std.testing.expectEqual(
+        mcp_state.McpConfigurationApplyState.failed,
+        workbench_owner.mcp.?.configuration_apply_state,
+    );
+    try std.testing.expectEqual(
+        mcp_state.McpAdmissionBlockReason.pending_restart,
+        workbench_owner.mcp.?.admission.blocked,
     );
 }
 
