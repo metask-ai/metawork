@@ -120,6 +120,7 @@ test("named module roots exist and lower owners cannot import composition", () =
   assert.match(buildSource, /src\/product\/account\/contract\.zig/);
   assert.match(buildSource, /src\/product\/mcp\.zig/);
   assert.match(buildSource, /src\/product\/mcp\/configuration\.zig/);
+  assert.match(buildSource, /src\/product\/mcp\/state\.zig/);
   assert.doesNotMatch(buildSource, /src\/account(?:\.zig|\/)/);
   assert.doesNotMatch(buildSource, /src\/workbench\/mcp_configuration\.zig/);
   assert.match(buildSource, /addImport\("metawork_account", account\)/);
@@ -197,6 +198,7 @@ test("Product MCP configuration has one physical module and remains Workbench-he
   const build = read("build.zig");
   const productMcp = read("src/product/mcp.zig");
   const configuration = read("src/product/mcp/configuration.zig");
+  const state = read("src/product/mcp/state.zig");
   const workbenchRoot = read("src/workbench.zig");
   const workbenchProjection = read("src/workbench/projection.zig");
 
@@ -207,16 +209,36 @@ test("Product MCP configuration has one physical module and remains Workbench-he
     true,
   );
   assert.match(productMcp, /@import\("product_mcp_configuration"\)/);
+  assert.match(productMcp, /@import\("product_mcp_state"\)/);
   assert.match(configuration, /@import\("agent_mcp_http_protocol"\)/);
   assert.doesNotMatch(configuration, /@import\("metawork_agent"\)/);
+  // Product MCP state intentionally consumes MetaWork Agent's public
+  // Activation/Selection surface; the AgentCore SDK remains forbidden here.
+  assert.match(state, /@import\("metawork_agent"\)/);
+  assert.match(state, /@import\("product_mcp_configuration"\)/);
+  assert.doesNotMatch(state, /McpRefreshJob|workbench_executor|std\.Thread/);
+  for (const field of [
+    "refresh_request_generation",
+    "refresh_pending",
+    "refresh_pending_blocks_admission",
+    "refresh_deadline_ms",
+  ]) {
+    assert.match(state, new RegExp(`\\b${field}\\b`));
+  }
+  assert.match(state, /pub fn mcpRefreshDelayMs/);
+  assert.match(state, /pub fn mcpRefreshDeadlineMs/);
   assert.match(build, /addImport\("metawork_product_mcp", product_mcp\)/);
   assert.match(
     workbenchProjection,
-    /@import\("metawork_product_mcp"\)\.configuration/,
+    /const product_mcp = @import\("metawork_product_mcp"\)/,
   );
+  assert.match(workbenchProjection, /const mcp_state = product_mcp\.state/);
   assert.doesNotMatch(workbenchRoot, /workbench_mcp_configuration/);
   assert.doesNotMatch(workbenchRoot, /pub const McpConfigurationFileStore/);
   assert.doesNotMatch(workbenchRoot, /pub const McpManagementOutcome/);
+  assert.doesNotMatch(workbenchRoot, /pub const McpRefreshTimer/);
+  assert.doesNotMatch(workbenchRoot, /pub const McpOauthRefreshBinding/);
+  assert.match(workbenchProjection, /mcp_refresh_job: \?\*McpRefreshJob/);
 });
 
 test("Product Account owns Metask protocol without a concrete HTTP client", () => {

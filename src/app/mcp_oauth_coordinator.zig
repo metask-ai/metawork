@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const workbench = @import("metawork_workbench");
+const mcp_state = @import("metawork_product_mcp").state;
 const mcp_oauth = @import("metawork_mcp_oauth");
 const mcp_platform = @import("metawork_mcp_platform");
 const app_platform = @import("platform.zig");
@@ -89,7 +90,7 @@ const RefreshJob = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     host: Host,
-    binding: workbench.McpOauthRefreshBinding,
+    binding: mcp_state.McpOauthRefreshBinding,
     client_secret: ?[]u8,
     refresh_token: []u8,
     now_unix_ms: u64,
@@ -505,7 +506,7 @@ fn secureFree(allocator: std.mem.Allocator, secret: []u8) void {
 }
 
 fn refreshDiscoveryCoveredByConsent(
-    binding: *const workbench.McpOauthRefreshBinding,
+    binding: *const mcp_state.McpOauthRefreshBinding,
     resource: []const u8,
     requested_scopes: []const []const u8,
 ) bool {
@@ -518,7 +519,7 @@ fn refreshDiscoveryCoveredByConsent(
 }
 
 test "MCP OAuth refresh reuses consent only for the same resource and covered scopes" {
-    const binding: workbench.McpOauthRefreshBinding = .{
+    const binding: mcp_state.McpOauthRefreshBinding = .{
         .arena = undefined,
         .operation_id = "refresh-1",
         .server_id = "server",
