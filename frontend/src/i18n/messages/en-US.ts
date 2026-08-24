@@ -86,7 +86,7 @@ export const enUS = {
   "account.refresh_catalog": "Sync again",
   "account.logout": "Sign out and clear this device",
   "account.logout_confirm":
-    "MetaWork will ask the Host to clear this device. Continue?",
+    "This removes the Metask sign-in credentials from this device. Your local tasks and history will remain. Continue?",
   "account.command_rejected":
     "That account action is no longer available. MetaWork kept the latest account state.",
   "account.task_running":

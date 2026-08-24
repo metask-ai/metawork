@@ -15,8 +15,7 @@ import { accountErrorText } from "../../i18n/account-error.ts";
 
 const MODEL_CONNECTION_SETTINGS_ENABLED: boolean = false;
 
-export type SettingsFocusTarget =
-  "title" | "account" | "model_connections" | "signout";
+export type SettingsFocusTarget = "title" | "account" | "model_connections";
 type SettingsSection = "general" | "account" | "model_connections";
 type RequestedSelection = {
   selectionId: string;
@@ -417,7 +416,7 @@ export function SettingsPage({
         modelConnectionsHeading.current?.focus();
         return;
       }
-      (focusTarget === "signout" ? signOut.current : title.current)?.focus();
+      title.current?.focus();
     });
     return () => window.cancelAnimationFrame(frame);
   }, [focusTarget, modelConnectionSettingsAvailable]);

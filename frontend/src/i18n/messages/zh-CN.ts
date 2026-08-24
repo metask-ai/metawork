@@ -79,7 +79,8 @@ export const zhCN: Record<MessageId, string> = {
   "account.cancel": "取消当前操作",
   "account.refresh_catalog": "重新同步",
   "account.logout": "退出并清除这台设备上的信息",
-  "account.logout_confirm": "MetaWork 将请求 Host 清理这台设备，是否继续？",
+  "account.logout_confirm":
+    "这会清除这台设备上的 Metask 登录凭据，本地任务和历史记录会保留。是否继续？",
   "account.command_rejected":
     "该账号操作已不可用，MetaWork 已保留最新账号状态。",
   "account.task_running":

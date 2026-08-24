@@ -425,7 +425,7 @@ Metask 已连接
 退出登录
 ```
 
-- 退出登录受 Host execution replacement gate 约束，不能只清 Renderer 状态；
+- 账号菜单中的退出登录在当前 Workbench 上直接打开危险操作确认框，不先导航到设置；确认文案说明本机凭据会被清除、本地 Task 与历史记录会保留，确认后仍走 Host execution replacement gate，不能只清 Renderer 状态。账号设置可以保留同一 Host 命令的独立退出入口，但不是账号菜单退出的必经路径；
 - 账号菜单只负责身份和导航；Metask API 目录进入账号设置，用户管理的服务进入模型连接设置；
 - 未登录时保留本地 Workbench 历史，并把左栏账号入口切换成登录动作。
 

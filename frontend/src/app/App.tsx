@@ -1043,7 +1043,7 @@ export default function App() {
     }
     setSettingsFocus(target);
     setSettingsOpen(true);
-    const refreshesMetaskAccount = target === "account" || target === "signout";
+    const refreshesMetaskAccount = target === "account";
     if (
       !refreshesMetaskAccount ||
       bridgeUnavailable ||
@@ -2399,6 +2399,7 @@ export default function App() {
             onBeginLogin={() =>
               void runAccountCommand(() => client.beginLogin())
             }
+            onLogout={() => void runAccountCommand(() => client.logout())}
           />
         </div>
       }
