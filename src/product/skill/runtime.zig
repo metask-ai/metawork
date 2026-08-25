@@ -13,6 +13,33 @@ const package = @import("product_skill_package");
 const policy = @import("product_skill_policy");
 const ports = @import("product_skill_ports");
 const state = @import("product_skill_state");
+const view = @import("product_skill_view");
+
+pub const ManagementHealth = state.ManagementHealth;
+pub const ManagementConfiguration = state.ManagementConfiguration;
+pub const EnablementHealth = state.EnablementHealth;
+pub const EnablementConfiguration = state.EnablementConfiguration;
+pub const EnablementScope = state.EnablementScope;
+pub const EnablementState = state.EnablementState;
+pub const EnablementMutation = state.EnablementMutation;
+pub const EnablementFileStore = enablement.FileStore;
+pub const EnablementFileStoreError = enablement.FileStoreError;
+pub const EnablementWorkspaceIdentity = enablement.WorkspaceIdentity;
+pub const InstallInput = state.InstallInput;
+pub const MutationResult = state.MutationResult;
+pub const ExportResult = state.ExportResult;
+pub const CatalogSlot = state.CatalogSlot;
+pub const CatalogControl = state.CatalogControl;
+pub const ManagementScope = management.Scope;
+pub const SourceKind = management.SourceKind;
+pub const InstallId = management.InstallId;
+pub const ContentHash = management.ContentHash;
+pub const CanonicalRoot = management.CanonicalRoot;
+pub const Preview = package.Preview;
+pub const TextProjection = view.TextProjection;
+pub const ScopedCatalog = view.ScopedCatalog;
+pub const WorkspaceCatalogs = view.WorkspaceCatalogs;
+pub const ViewError = view.Error;
 
 pub const Error = std.mem.Allocator.Error || error{
     CatalogLoading,
@@ -443,6 +470,77 @@ pub const Runtime = struct {
 
     pub fn enablementHealth(self: *const Runtime) state.EnablementHealth {
         return self.state.enablement_health;
+    }
+
+    pub fn managementHealth(self: *const Runtime) state.ManagementHealth {
+        return self.state.management_health;
+    }
+
+    pub fn reconciliationPending(self: *const Runtime) bool {
+        return self.state.reconciliation != null;
+    }
+
+    pub fn personalCatalogProjection(self: *const Runtime) catalog.CatalogProjection {
+        return view.catalogProjection(
+            self.state.catalog.slot.availability(self.personal_job != null),
+            self.state.catalog.slot.snapshotConst(),
+        );
+    }
+
+    pub fn workspaceCatalogProjection(
+        self: *const Runtime,
+        id: u64,
+        epoch: u64,
+    ) Error!catalog.CatalogProjection {
+        const workspace = self.findWorkspaceConst(id) orelse return error.UnknownWorkspace;
+        if (workspace.epoch != epoch) return error.WorkspaceEpochMismatch;
+        return view.catalogProjection(
+            workspace.control.slot.availability(workspace.job != null),
+            workspace.control.slot.snapshotConst(),
+        );
+    }
+
+    pub fn scopedWorkspaceCatalog(
+        self: *const Runtime,
+        id: u64,
+        epoch: u64,
+    ) ?view.ScopedCatalog {
+        const workspace = self.findWorkspaceConst(id) orelse return null;
+        if (workspace.epoch != epoch) return null;
+        return .{
+            .scope = .{ .project = .{
+                .workspace_id = id,
+                .workspace_epoch = epoch,
+            } },
+            .snapshot = workspace.control.slot.snapshotConst() orelse return null,
+        };
+    }
+
+    pub fn workspaceAuthorityStable(self: *const Runtime, id: u64, epoch: u64) bool {
+        const workspace = self.findWorkspaceConst(id) orelse return false;
+        return workspace.epoch == epoch and workspace.job == null and
+            workspace.control.slot.snapshotConst() != null;
+    }
+
+    pub fn writeCatalogProjection(
+        writer: *std.Io.Writer,
+        text: view.TextProjection,
+        projection: catalog.CatalogProjection,
+    ) view.Error!void {
+        return view.writeCatalogProjection(writer, text, projection);
+    }
+
+    pub fn writeManagementProjection(
+        self: *const Runtime,
+        writer: *std.Io.Writer,
+        text: view.TextProjection,
+        workspaces: view.WorkspaceCatalogs,
+    ) view.Error!void {
+        return view.writeManagementProjection(writer, .{
+            .state = &self.state,
+            .workspaces = workspaces,
+            .text = text,
+        });
     }
 
     pub fn mutationScope(

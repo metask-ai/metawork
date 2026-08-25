@@ -72,8 +72,8 @@ metawork/
 │   │   ├── account/       # Account Runtime、OAuth、catalog、credential 与状态机
 │   │   ├── mcp.zig        # Workbench-held Product MCP module entrypoint
 │   │   ├── mcp/           # MCP configuration、runtime state/freshness 与 owner-defined testdata
-│   │   ├── skill.zig      # Live Product Skill aggregate entrypoint
-│   │   ├── skill/         # live runtime/ports、state/policy/view、catalog、enablement、management 与 package kernels
+│   │   ├── skill.zig      # Live Product Skill 的窄公开入口
+│   │   ├── skill/         # runtime/ports 与内部 state/policy/view/management-runtime 等 kernels
 │   │   ├── task.zig       # Product Task state 与 kernel entrypoint
 │   │   └── task/          # aggregate state/policy、persistence、checkpoint、binding、runtime 与 recovery kernels
 │   ├── bridge.zig         # Renderer Bridge module entrypoint
@@ -119,6 +119,8 @@ metawork/
 | Renderer        | snapshot 消费、产品 WebUI 交互、纯 UI 状态与本地草稿、`frontend/src/bridge/` 合同实现层（transport 适配与 runtime decode）    | 原生窗口 owner、平台真实状态、安全决策、secret、AgentCore raw event、产品状态机    |
 
 `product/account/contract.zig` 是 Account owner 发布的纯合同，不是新的产品 owner。`product/mcp.zig` 与 `product/mcp/` 是 Workbench 持有的产品 MCP 子模块；`product/skill.zig` 与 `product/skill/` 收拢 live aggregate state、Workspace/Task 共用的 immutable catalog compiler、enablement policy/store、本地 Skill management transaction，以及 package 的有界检查、staging 和导入导出 kernel；`product/task.zig` 与 `product/task/` 拥有 Task aggregate state 及已形成独立不变量的 policy、persistence、view、checkpoint、binding、runtime 与 recovery kernels。三者都不增加新的 Product owner。`product/` 是产品 owner 及具名产品子模块的目录归属，不增加统一 Product facade。`automation/` 只提供受控账号、origin 和临时 Workspace authority，不注册额外协议，也不拥有产品 transport state。
+
+Product Skill 的公开 module 只发布 runtime、ports、catalog、enablement 与 management。package、policy、state、view、management-runtime 只在 Runtime 的内部 module graph 中装配；Workbench projection 不得直接 import 这些 kernel、拼装其状态或读取 `.skill.state`。
 
 ## 4. Renderer 结构
 

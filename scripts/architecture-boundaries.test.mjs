@@ -273,12 +273,12 @@ test("Product Skill has one live owner behind narrow composition ports", () => {
   assert.match(productSkill, /@import\("product_skill_catalog"\)/);
   assert.match(productSkill, /@import\("product_skill_enablement"\)/);
   assert.match(productSkill, /@import\("product_skill_management"\)/);
-  assert.match(productSkill, /@import\("product_skill_package"\)/);
-  assert.match(productSkill, /@import\("product_skill_policy"\)/);
   assert.match(productSkill, /@import\("product_skill_ports"\)/);
   assert.match(productSkill, /@import\("product_skill_runtime"\)/);
-  assert.match(productSkill, /@import\("product_skill_state"\)/);
-  assert.match(productSkill, /@import\("product_skill_view"\)/);
+  assert.doesNotMatch(
+    productSkill,
+    /@import\("product_skill_(?:package|policy|state|view|management_runtime)"\)/,
+  );
   assert.match(catalog, /@import\("metawork_agent"\)/);
   assert.doesNotMatch(
     catalog,
@@ -363,9 +363,12 @@ test("Product Skill has one live owner behind narrow composition ports", () => {
     /@import\("(?:metawork_workbench|workbench_executor|metawork_app|native_sdk|metask_agentcore)"\)|\*agent\.(?:Runtime|Session)|std\.Thread/,
   );
   assert.match(projection, /skill: skill_runtime\.Runtime/);
-  assert.match(projection, /@import\("metawork_product_skill"\)\.policy/);
   assert.match(projection, /@import\("metawork_product_skill"\)\.ports/);
   assert.match(projection, /@import\("metawork_product_skill"\)\.runtime/);
+  assert.doesNotMatch(
+    projection,
+    /@import\("metawork_product_skill"\)\.(?:enablement|management|package|policy|state|view)/,
+  );
   assert.doesNotMatch(
     projection,
     /fn compileCatalogSnapshot|fn recompileCatalogSnapshot|fn inventoryHasInvocationInScope/,
@@ -398,9 +401,8 @@ test("Product Skill has one live owner behind narrow composition ports", () => {
     view,
     /Workbench|WorkspaceView|TaskView|workbench_executor|std\.Thread|CatalogJob|Agent Runtime|Session|FileStore|credential|bumpRevision|projection_bytes/,
   );
-  assert.match(projection, /@import\("metawork_product_skill"\)\.view/);
-  assert.match(projection, /fn skillManagementInput/);
   assert.match(projection, /fn skillWorkspaceCatalog/);
+  assert.doesNotMatch(projection, /fn skillManagementInput|\.skill\.state/);
   assert.doesNotMatch(
     projection,
     /fn writeCatalogProjection|fn writeManagedSkillAsset|fn writeExternalSkillAsset|fn writeSkillAssetTail|fn writeSkillScope|fn catalogProjection|fn catalogContainsKnownCredential/,
@@ -414,7 +416,6 @@ test("Product Skill has one live owner behind narrow composition ports", () => {
     projection,
     /\n\s+skill_(?:inventory|transactions|management_health|enablement_file_store|enablement_health|staging_root|reconciliation|catalog_slot|catalog_request_generation):/,
   );
-  assert.match(projection, /@import\("metawork_product_skill"\)\.enablement/);
   assert.doesNotMatch(projection, /@import\("workbench_skill_enablement"\)/);
   assert.match(appStores, /@import\("metawork_product_skill"\)\.enablement/);
   assert.doesNotMatch(appStores, /workbench_api\.SkillEnablementFileStore/);
@@ -422,7 +423,6 @@ test("Product Skill has one live owner behind narrow composition ports", () => {
     workbenchRoot,
     /SkillEnablementFileStore|skill_enablement_store_max_bytes|workbench_skill_enablement/,
   );
-  assert.match(projection, /@import\("metawork_product_skill"\)\.management/);
   assert.doesNotMatch(projection, /@import\("workbench_skill_management"\)/);
   assert.match(appStores, /@import\("metawork_product_skill"\)\.management/);
   assert.doesNotMatch(appStores, /workbench_api\.SkillManagementFileStore/);
@@ -438,10 +438,11 @@ test("Product Skill has one live owner behind narrow composition ports", () => {
     workbenchRoot,
     /SkillManagementFileStore|skill_management_store_max_bytes|SkillSourceKind|SkillScope|SkillInstallId|workbench_skill_management/,
   );
-  for (const source of [projection, workbenchRoot]) {
-    assert.match(source, /@import\("metawork_product_skill"\)\.package/);
-    assert.doesNotMatch(source, /@import\("workbench_skill_package"\)/);
-  }
+  for (const source of [projection, workbenchRoot])
+    assert.doesNotMatch(
+      source,
+      /@import\("metawork_product_skill"\)\.package|@import\("workbench_skill_package"\)/,
+    );
   assert.match(build, /src\/product\/skill\/catalog\.zig/);
   assert.match(build, /src\/product\/skill\/enablement\.zig/);
   assert.match(build, /src\/product\/skill\/management\.zig/);
@@ -459,19 +460,11 @@ test("Product Skill has one live owner behind narrow composition ports", () => {
   assert.match(build, /addImport\("metawork_product_skill", product_skill\)/);
   assert.match(
     build,
-    /product_skill\.addImport\("product_skill_package", skill_package\)/,
-  );
-  assert.match(
-    build,
     /product_skill\.addImport\("product_skill_enablement", skill_enablement\)/,
   );
   assert.match(
     build,
     /product_skill\.addImport\("product_skill_management", skill_management\)/,
-  );
-  assert.match(
-    build,
-    /product_skill\.addImport\("product_skill_policy", product_skill_policy\)/,
   );
   assert.match(
     build,
@@ -493,15 +486,15 @@ test("Product Skill has one live owner behind narrow composition ports", () => {
     build,
     /product_skill_runtime\.addImport\("product_skill_package", skill_package\)/,
   );
-  assert.match(
+  assert.doesNotMatch(
     build,
-    /product_skill\.addImport\("product_skill_state", product_skill_state\)/,
+    /product_skill\.addImport\("product_skill_(?:package|policy|state|view)"/,
   );
   assert.match(build, /name = "metawork-product-skill-policy"/);
   assert.match(build, /name = "metawork-product-skill-runtime"/);
   assert.match(
     build,
-    /product_skill\.addImport\("product_skill_view", product_skill_view\)/,
+    /product_skill_runtime\.addImport\("product_skill_view", product_skill_view\)/,
   );
   assert.match(build, /name = "metawork-product-skill-view"/);
   assert.match(build, /name = "metawork-product-skill-state"/);
