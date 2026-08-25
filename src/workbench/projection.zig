@@ -18,6 +18,7 @@ const checkpoint_store = product_task.checkpoint_store;
 const checkpoint_record = product_task.checkpoint_record;
 const catalog_snapshot = @import("metawork_product_skill").catalog;
 const owned_task_execution = product_task.execution_binding;
+const task_agent_session = product_task.agent_session;
 const task_runtime = product_task.runtime;
 const task_deletion = product_task.deletion;
 const task_recovery = product_task.recovery;
@@ -788,9 +789,19 @@ const RunJobContext = struct {
     workbench: *Workbench,
     task: *TaskView,
     run: *RunRecord,
-    session: *lifecycle.Session,
+    access: ?task_agent_session.Access = null,
+
+    fn sessionAccess(self: *@This()) *task_agent_session.Access {
+        return if (self.access) |*value| value else unreachable;
+    }
+
+    fn releaseSessionAccess(self: *@This()) void {
+        if (self.access) |*access| access.deinit();
+        self.access = null;
+    }
 
     fn destroy(self: *@This()) void {
+        self.releaseSessionAccess();
         std.heap.c_allocator.destroy(self);
     }
 };
@@ -800,9 +811,14 @@ const CompactJobContext = struct {
     workbench: *Workbench,
     task: *TaskView,
     compact: *CompactRecord,
-    session: *lifecycle.Session,
+    access: ?task_agent_session.Access = null,
+
+    fn sessionAccess(self: *@This()) *task_agent_session.Access {
+        return if (self.access) |*value| value else unreachable;
+    }
 
     fn destroy(self: *@This()) void {
+        if (self.access) |*access| access.deinit();
         std.heap.c_allocator.destroy(self);
     }
 };
@@ -872,15 +888,18 @@ test "Task aggregate separates Task runtime ownership from product history" {
         try std.testing.expect(!@hasField(DurableTaskRecord, field_name));
     }
     inline for (&.{
-        "session",
+        "binding",
         "execution",
-        "route_id",
         "pinned_catalog",
     }) |field_name| {
         try std.testing.expect(@hasField(task_runtime.LiveAttachment, field_name));
         try std.testing.expect(!@hasField(RuntimeAttachment, field_name));
         try std.testing.expect(!@hasField(DurableTaskRecord, field_name));
     }
+    try std.testing.expect(!@hasField(task_runtime.LiveAttachment, "session"));
+    try std.testing.expect(!@hasField(task_runtime.LiveAttachment, "route_id"));
+    try std.testing.expect(@hasField(task_runtime.ClosingAttachment, "route_id"));
+    try std.testing.expect(@hasField(task_runtime.ClosingAttachment, "worker_binding"));
     try std.testing.expect(!@hasField(RuntimeAttachment, "lifecycle"));
     try std.testing.expect(!@hasField(RuntimeAttachment, "continuation"));
     try std.testing.expect(!@hasField(RuntimeAttachment, "deletion"));
@@ -1625,6 +1644,7 @@ pub const Workbench = struct {
     next_task_recent_order: u64 = 1,
     next_restore_attempt_id: u64 = 1,
     recovery_poisoned: bool = false,
+    agent_runtime_shutdown_complete: bool = false,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -3325,8 +3345,9 @@ pub const Workbench = struct {
                 self.allocator,
                 skill.skill_id,
             );
-        const session = task.runtime.session() orelse return error.TaskClosing;
-        try session.refreshSkillCatalog(lease, .{
+        var access = task.runtime.acquireAccess() catch return error.TaskClosing;
+        defer access.deinit();
+        try access.refreshSkillCatalog(lease, .{
             .granted_skill_ids = granted_skill_ids.items,
         });
         if (task.runtime.pinnedCatalog()) |old| {
@@ -3448,7 +3469,8 @@ pub const Workbench = struct {
         self.bumpRevision();
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
-            if (task.durable.workspace_id != workspace_id or task.runtime.session() == null) continue;
+            if (task.durable.workspace_id != workspace_id or
+                !task.runtime.hasAttachedSession()) continue;
             self.detachTaskSession(task.durable.id) catch |err| switch (err) {
                 error.CloseInProgress => {},
                 else => {
@@ -3659,7 +3681,7 @@ pub const Workbench = struct {
             "{d}",
             .{workspace_view.epoch},
         ) catch unreachable;
-        const route = self.agent_runtime.createSessionRoute(.{
+        var binding = task_agent_session.Binding.open(self.agent_runtime, .{
             .provider = agentProvider(accountProvider(task_execution_input.target.provider_kind)),
             .permission_mode = .accept_edits,
             .shell_policy = .unrestricted,
@@ -3706,9 +3728,8 @@ pub const Workbench = struct {
             },
             .runtime = .{
                 .attachment = .{ .attached = .{
-                    .session = route.session,
+                    .binding = binding.take(),
                     .execution = task_execution.take(),
-                    .route_id = route.id,
                     .pinned_catalog = pinned_catalog,
                 } },
             },
@@ -3722,8 +3743,8 @@ pub const Workbench = struct {
         self.commitTaskStateIfConfigured() catch |err| {
             const inserted = &self.tasks[slot].?;
             var live = inserted.runtime.detach(.cold_start);
-            switch (live.session.closeOutcome(.session_close)) {
-                .closed => self.agent_runtime.releaseClosedSession(route.session) catch
+            switch (live.binding.closeOutcome(.session_close)) {
+                .closed => live.binding.releaseClosed() catch
                     @panic("fresh Task Session release failed during persistence rollback"),
                 .failure => @panic("fresh Task Session close failed during persistence rollback"),
             }
@@ -3968,13 +3989,19 @@ pub const Workbench = struct {
             return;
         }
         if (self.checkpointMutationPending(task)) return error.TaskBusy;
-        const session = task.runtime.session() orelse return error.TaskClosing;
-        try session.setModel(model);
+        var access = task.runtime.acquireAccess() catch return error.TaskClosing;
+        var access_live = true;
+        defer if (access_live) access.deinit();
+        try access.setModel(model);
         const replacement = self.copyBounded(
             model,
             account_contract.Limits.model_id_bytes,
         ) catch |err| {
-            _ = self.restoreTaskModelOrDetach(task, session, expected_model);
+            if (!restoreTaskModel(&access, expected_model)) {
+                access.deinit();
+                access_live = false;
+                self.beginTaskSessionDetachAfterModelFailureNoFail(task);
+            }
             return err;
         };
         const previous = task.durable.execution_model;
@@ -3982,10 +4009,13 @@ pub const Workbench = struct {
         self.commitTaskStateIfConfigured() catch |err| {
             // Keep the durable binding and live Session coherent if the
             // persistence commit fails after AgentCore accepted the change.
-            if (err == error.TaskPersistenceOutcomeUnknown)
-                self.releaseTaskAttachmentNoFail(task, .cold_start)
-            else
-                _ = self.restoreTaskModelOrDetach(task, session, expected_model);
+            const must_close = err == error.TaskPersistenceOutcomeUnknown or
+                !restoreTaskModel(&access, expected_model);
+            if (must_close) {
+                access.deinit();
+                access_live = false;
+                self.beginTaskSessionDetachAfterModelFailureNoFail(task);
+            }
             self.freeTracked(task.durable.execution_model);
             task.durable.execution_model = previous;
             return err;
@@ -4025,8 +4055,17 @@ pub const Workbench = struct {
         _ = try taskExecutionInput(view);
         if (hasActiveOperation(view)) return error.TaskBusy;
         if (self.checkpointMutationPending(view)) return error.TaskBusy;
-        const session = view.runtime.session() orelse return error.TaskClosing;
-        try self.applyPendingTaskModel(view, session);
+        var access = view.runtime.acquireAccess() catch return error.TaskClosing;
+        var access_live = true;
+        errdefer if (access_live) access.deinit();
+        self.applyPendingTaskModel(view, &access) catch |err| {
+            access.deinit();
+            access_live = false;
+            if (err == error.TaskPersistenceOutcomeUnknown or
+                err == error.TaskClosing)
+                self.beginTaskSessionDetachAfterModelFailureNoFail(view);
+            return err;
+        };
         _ = try taskExecutionInput(view);
         const agent_input: lifecycle.RunInput = switch (input) {
             .text => |text| .{ .text = text },
@@ -4079,9 +4118,9 @@ pub const Workbench = struct {
             try self.takeWorkspaceRecentOrder()
         else
             0;
-        const run_id = try session.prepareRun(agent_input);
+        const run_id = try access.prepareRun(agent_input);
         var prepared = true;
-        errdefer if (prepared) cancelPreparedRunOrPanic(session, run_id);
+        errdefer if (prepared) cancelPreparedRunOrPanic(&access, run_id);
         const slot = try self.reserveRunRecord(view, input);
         var record_owned = true;
         errdefer if (record_owned) self.discardRunRecord(view, slot);
@@ -4094,7 +4133,6 @@ pub const Workbench = struct {
             .workbench = self,
             .task = view,
             .run = run,
-            .session = session,
         };
         run.checkpoint_export_context = .{
             .task_id = view.durable.id,
@@ -4138,6 +4176,8 @@ pub const Workbench = struct {
             return err;
         };
         if (provisional_title_applied) self.allocator.free(previous_title);
+        job_context.access = access.take();
+        access_live = false;
         _ = view.runtime.worker_references.fetchAdd(1, .acq_rel);
         run.worker_reference_held.store(true, .release);
         self.executor.enqueue(.{
@@ -4146,12 +4186,12 @@ pub const Workbench = struct {
             .execute_fn = executeRunJob,
             .cancel_fn = cancelRunJob,
         }) catch |err| {
-            job_context.destroy();
-            job_context_owned = false;
             publishAutomaticTitleFallback(run);
             releaseWorkerReference(view, run);
-            cancelPreparedRunOrPanic(session, run_id);
+            cancelPreparedRunOrPanic(job_context.sessionAccess(), run_id);
             prepared = false;
+            job_context.destroy();
+            job_context_owned = false;
             _ = commitTerminal(
                 run,
                 .interrupted,
@@ -4179,27 +4219,28 @@ pub const Workbench = struct {
     fn applyPendingTaskModel(
         self: *Workbench,
         task: *TaskView,
-        session: *lifecycle.Session,
+        access: *task_agent_session.Access,
     ) Error!void {
         const pending = task.runtime.pending_model orelse return;
         const previous = task.durable.execution_model;
-        try session.setModel(pending);
+        try access.setModel(pending);
         const replacement = self.copyBounded(
             pending,
             account_contract.Limits.model_id_bytes,
         ) catch |err| {
-            _ = self.restoreTaskModelOrDetach(task, session, previous);
+            if (!restoreTaskModel(access, previous)) return error.TaskClosing;
             return err;
         };
         task.durable.execution_model = replacement;
         self.commitTaskStateIfConfigured() catch |err| {
             const coherent = if (err == error.TaskPersistenceOutcomeUnknown) blk: {
-                self.releaseTaskAttachmentNoFail(task, .cold_start);
                 break :blk false;
-            } else self.restoreTaskModelOrDetach(task, session, previous);
+            } else restoreTaskModel(access, previous);
             self.freeTracked(task.durable.execution_model);
             task.durable.execution_model = previous;
             if (coherent) task.runtime.pending_model = pending;
+            if (!coherent and err != error.TaskPersistenceOutcomeUnknown)
+                return error.TaskClosing;
             return err;
         };
         task.runtime.pending_model = null;
@@ -4207,21 +4248,29 @@ pub const Workbench = struct {
         self.allocator.free(pending);
     }
 
-    /// If AgentCore cannot return to the durable model after a failed model
-    /// mutation, detach the Session so no caller can continue with an
-    /// ambiguous model binding. The Task remains recoverable only through its
-    /// normal persisted checkpoint path.
-    fn restoreTaskModelOrDetach(
-        self: *Workbench,
-        task: *TaskView,
-        session: *lifecycle.Session,
+    /// Attempts to restore the durable model after a failed Product mutation.
+    /// The caller closes the Binding if Agent rejects this repair.
+    fn restoreTaskModel(
+        access: *task_agent_session.Access,
         model: []const u8,
     ) bool {
-        session.setModel(model) catch {
-            self.releaseTaskAttachmentNoFail(task, .cold_start);
+        access.setModel(model) catch {
             return false;
         };
         return true;
+    }
+
+    fn beginTaskSessionDetachAfterModelFailureNoFail(
+        self: *Workbench,
+        task: *TaskView,
+    ) void {
+        _ = self.beginTaskSessionDetach(task) catch {
+            // A model mutation whose rollback failed must never remain
+            // admissible merely because the close worker could not start.
+            if (task.runtime.attached()) |attached|
+                attached.health = .session_poisoned;
+            self.bumpRevision();
+        };
     }
 
     pub fn compactTaskAtBinding(
@@ -4245,11 +4294,13 @@ pub const Workbench = struct {
         const after_run_id = lastFinalizedRunId(view) orelse
             return error.NoSuchRun;
         _ = try taskExecutionInput(view);
-        const session = view.runtime.session() orelse return error.TaskClosing;
-        const operation_id = try session.prepareCompact();
+        var access = view.runtime.acquireAccess() catch return error.TaskClosing;
+        var access_live = true;
+        errdefer if (access_live) access.deinit();
+        const operation_id = try access.prepareCompact();
         var prepared = true;
         errdefer if (prepared)
-            cancelPreparedCompactOrPanic(session, operation_id);
+            cancelPreparedCompactOrPanic(&access, operation_id);
         const slot = try self.reserveCompactRecord(view, operation_id, after_run_id);
         var record_owned = true;
         errdefer if (record_owned) self.discardCompactRecord(view, slot);
@@ -4261,7 +4312,6 @@ pub const Workbench = struct {
             .workbench = self,
             .task = view,
             .compact = compact,
-            .session = session,
         };
         compact.checkpoint_export_context = .{
             .task_id = view.durable.id,
@@ -4283,28 +4333,8 @@ pub const Workbench = struct {
             self.next_task_recent_order = previous_next_task_recent_order;
             return err;
         };
-        if (!session.retainReference()) {
-            cancelPreparedCompactOrPanic(session, operation_id);
-            prepared = false;
-            _ = commitCompactProductTerminal(
-                compact,
-                .interrupted,
-                .session_close,
-                .closing,
-                .{},
-                0,
-                0,
-                "",
-                false,
-            );
-            compact.terminal_observed = true;
-            view.runtime.active_operation = .none;
-            self.commitTaskStateNoFail();
-            record_owned = false;
-            self.bumpRevision();
-            return error.TaskClosing;
-        }
-        compact.session_reference_held.store(true, .release);
+        job_context.access = access.take();
+        access_live = false;
         _ = view.runtime.worker_references.fetchAdd(1, .acq_rel);
         compact.worker_reference_held.store(true, .release);
         self.executor.enqueue(.{
@@ -4313,11 +4343,11 @@ pub const Workbench = struct {
             .execute_fn = executeCompactJob,
             .cancel_fn = cancelCompactJob,
         }) catch |err| {
+            releaseCompactWorkerReference(view, compact);
+            cancelPreparedCompactOrPanic(job_context.sessionAccess(), operation_id);
+            prepared = false;
             job_context.destroy();
             job_context_owned = false;
-            releaseCompactReferences(view, compact, session);
-            cancelPreparedCompactOrPanic(session, operation_id);
-            prepared = false;
             _ = commitCompactProductTerminal(
                 compact,
                 .interrupted,
@@ -4388,12 +4418,12 @@ pub const Workbench = struct {
             self.commitTaskStateNoFail();
             return .queued_aborted;
         } else {
-            const session = view.runtime.session() orelse
-                view.runtime.closingSession() orelse {
+            var access = view.runtime.acquireAccess() catch {
                 self.syncLifecycle();
                 return .session_closing;
             };
-            session.requestCompactCancellation(
+            defer access.deinit();
+            access.requestCompactCancellation(
                 compact.id,
                 pendingExternalInterruption(compact),
             ) catch |err| switch (err) {
@@ -4450,10 +4480,10 @@ pub const Workbench = struct {
         const view = self.findTask(task_id) orelse return error.UnknownTask;
         const run = findRun(view.durable.runs, run_id) orelse return error.NoSuchRun;
         if (terminalPayload(run) != null) return;
-        const session = view.runtime.session() orelse
-            return error.TaskClosing;
+        var access = view.runtime.acquireAccess() catch return error.TaskClosing;
+        defer access.deinit();
         const record = self.prepareCancelledUiRecord(
-            session,
+            &access,
             run_id,
             run.redaction_secret,
         );
@@ -4494,10 +4524,10 @@ pub const Workbench = struct {
         try self.requireTaskPersistenceMutation();
         const view = self.findTask(task_id) orelse return error.UnknownTask;
         const run = findRun(view.durable.runs, run_id) orelse return error.NoSuchRun;
-        const session = view.runtime.session() orelse
-            return error.TaskClosing;
+        var access = view.runtime.acquireAccess() catch return error.TaskClosing;
+        defer access.deinit();
         const record = self.prepareUiRecord(
-            session,
+            &access,
             run_id,
             request_id,
             response,
@@ -4525,7 +4555,7 @@ pub const Workbench = struct {
             self.next_task_recent_order = previous_next_task_recent_order;
             return err;
         };
-        const response_result = session.respondPermission(
+        const response_result = access.respondPermission(
             run_id,
             request_id,
             agentPermissionChoice(response.permission),
@@ -4559,16 +4589,10 @@ pub const Workbench = struct {
             cancelTaskCheckpoints(view);
             return error.TaskBusy;
         }
-        if (view.runtime.close_completion.load(.acquire) == .running) return error.CloseInProgress;
+        if (view.runtime.close_thread != null) return error.CloseInProgress;
         const retrying_closing_session = view.runtime.close_failed and
-            view.runtime.closingSession() != null;
-        const session = view.runtime.session() orelse
-            view.runtime.closingSession() orelse {
-            switch (view.runtime.attachment) {
-                .detached => return false,
-                .attached, .closing => return false,
-            }
-        };
+            view.runtime.hasClosingSession();
+        if (view.runtime.live() == null) return false;
         const prior_health = if (view.runtime.attached()) |attached|
             attached.health
         else
@@ -4585,9 +4609,12 @@ pub const Workbench = struct {
                 return error.NoSuchCompact;
             _ = self.cancelCompactRecord(view, compact, .session_close);
         }
-        const cancelled_ui = if (view.runtime.pending_ui_request_id != 0)
+        var observation_access = view.runtime.acquireAccess() catch null;
+        defer if (observation_access) |*access| access.deinit();
+        const cancelled_ui = if (view.runtime.pending_ui_request_id != 0 and
+            observation_access != null)
             self.prepareCancelledUiRecord(
-                session,
+                &observation_access.?,
                 view.runtime.active_run_id,
                 if (findRun(view.durable.runs, view.runtime.active_run_id)) |run|
                     run.redaction_secret
@@ -4606,6 +4633,7 @@ pub const Workbench = struct {
         }
         if (!retrying_closing_session)
             std.debug.assert(view.runtime.beginClosing());
+        const binding = view.runtime.closingWorkerBinding() orelse unreachable;
         view.runtime.cancel_requested = switch (view.runtime.active_operation) {
             .run => true,
             .none, .compact, .restore => false,
@@ -4616,9 +4644,8 @@ pub const Workbench = struct {
         view.runtime.close_failed = false;
         view.runtime.close_completion.store(.running, .release);
         view.runtime.close_thread = std.Thread.spawn(.{}, closeWorker, .{
-            self.agent_runtime,
-            view,
-            session,
+            &view.runtime.close_completion,
+            binding,
             self.change_notifier,
         }) catch |err| {
             view.runtime.close_completion.store(.none, .release);
@@ -4858,9 +4885,9 @@ pub const Workbench = struct {
     fn advanceTaskDeletion(self: *Workbench, index: usize) Error!bool {
         const view = &(self.tasks[index] orelse return error.UnknownTask);
         if (view.deletion == .deleting) std.debug.assert(view.durable.archived);
-        const session: task_deletion.Session = if (view.runtime.session() != null)
+        const session: task_deletion.Session = if (view.runtime.hasAttachedSession())
             .attached
-        else if (view.runtime.closingSession() != null)
+        else if (view.runtime.hasClosingSession())
             if (view.runtime.close_failed) .retryable_close_failure else .closing
         else
             .detached;
@@ -4889,8 +4916,8 @@ pub const Workbench = struct {
         const view = &(self.tasks[index] orelse return error.UnknownTask);
         std.debug.assert(view.durable.archived);
         std.debug.assert(view.deletion == .deleting);
-        std.debug.assert(view.runtime.session() == null);
-        std.debug.assert(view.runtime.closingSession() == null);
+        std.debug.assert(!view.runtime.hasAttachedSession());
+        std.debug.assert(!view.runtime.hasClosingSession());
         std.debug.assert(view.runtime.worker_references.load(.acquire) == 0);
         std.debug.assert(!hasUnfinalizedTerminalEvents(view));
         std.debug.assert(!self.checkpointMutationPending(view));
@@ -4982,10 +5009,13 @@ pub const Workbench = struct {
             {
                 view.runtime.close_thread.?.join();
                 view.runtime.close_thread = null;
-                std.debug.assert(view.runtime.closingSession() != null);
+                std.debug.assert(view.runtime.hasClosingSession());
                 view.runtime.close_completion.store(.none, .release);
                 switch (close_completion) {
                     .closed => {
+                        std.debug.assert(
+                            view.runtime.closingWorkerBinding().?.state() == .released,
+                        );
                         var live = view.runtime.detach(.released);
                         self.releaseExecutionValueNoFail(view, &live.execution);
                         if (live.pinned_catalog) |*snapshot| {
@@ -5013,12 +5043,16 @@ pub const Workbench = struct {
             // A pending UI request can only exist while a Run worker still
             // owns its Task reference. Avoid touching an idle attachment when
             // there is no Agent-to-Workbench handoff to observe.
-            const session = if (view.runtime.worker_references.load(.acquire) != 0 and
+            var observation_access = if (view.runtime.worker_references.load(.acquire) != 0 and
                 view.runtime.active_run_id != 0)
-                view.runtime.session()
+                view.runtime.acquireAccess() catch null
             else
                 null;
-            const pending = if (session) |value| value.pendingUiObservation() else null;
+            defer if (observation_access) |*access| access.deinit();
+            const pending = if (observation_access) |*access|
+                access.pendingUiObservation()
+            else
+                null;
             const pending_request_id = if (pending) |value| value.request_id else 0;
             if (view.runtime.pending_ui_request_id != pending_request_id) {
                 view.runtime.pending_ui_request_id = pending_request_id;
@@ -5146,13 +5180,12 @@ pub const Workbench = struct {
             if (commit_allowed) {
                 self.projection_bytes += candidate.pinned_catalog.projected_bytes;
                 task.runtime.last_restore_permission = .{
-                    .restored_rules = candidate.route.report.restored_permission_rules,
-                    .invalidated_rules = candidate.route.report.invalidated_permission_rules,
+                    .restored_rules = candidate.report.restored_permission_rules,
+                    .invalidated_rules = candidate.report.invalidated_permission_rules,
                 };
                 task.runtime.attachment = .{ .attached = .{
-                    .session = candidate.route.session,
+                    .binding = candidate.takeBinding(),
                     .execution = candidate.takeExecution(),
-                    .route_id = candidate.route.id,
                     .pinned_catalog = candidate.takeCatalog(),
                 } };
                 task.runtime.last_restore_failure = null;
@@ -7177,7 +7210,10 @@ pub const Workbench = struct {
         self.markSkillCatalogUnavailable();
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
-            if (task.runtime.close_thread) |thread| thread.join();
+            if (task.runtime.close_thread) |thread| {
+                thread.join();
+                task.runtime.close_thread = null;
+            }
             self.deinitTaskView(task);
             entry.* = null;
         }
@@ -7264,6 +7300,45 @@ pub const Workbench = struct {
         self.commitTaskStateNoFail();
     }
 
+    /// Records the Application-owned Runtime shutdown fact and permanently
+    /// invalidates every remaining Task Session Binding. Application calls
+    /// this only after Runtime.shutdown succeeds and the final lifecycle sync.
+    pub fn relinquishAgentSessionsAfterRuntimeShutdown(self: *Workbench) void {
+        std.debug.assert(self.executor_shutdown);
+        for (self.tasks) |*entry| {
+            const task = &(entry.* orelse continue);
+            if (task.runtime.close_thread) |thread| {
+                thread.join();
+                task.runtime.close_thread = null;
+            }
+            const binding = task.runtime.bindingAfterCloseJoin() orelse continue;
+            switch (binding.state()) {
+                .owned, .closed => binding.relinquishAfterRuntimeShutdown(),
+                .released, .relinquished, .moved, .fixture, .abandoned => {},
+            }
+            task.runtime.clearClosingRouteAfterRuntimeShutdown();
+        }
+        self.agent_runtime_shutdown_complete = true;
+    }
+
+    pub fn abandonAgentSessionsForRuntimeDeinit(self: *Workbench) void {
+        std.debug.assert(self.executor_shutdown);
+        for (self.tasks) |*entry| {
+            const task = &(entry.* orelse continue);
+            if (task.runtime.close_thread) |thread| {
+                thread.join();
+                task.runtime.close_thread = null;
+            }
+            const binding = task.runtime.bindingAfterCloseJoin() orelse continue;
+            switch (binding.state()) {
+                .owned, .closed => binding.abandonForRuntimeDeinit(),
+                .released, .relinquished, .moved, .fixture, .abandoned => {},
+            }
+            task.runtime.clearClosingRouteAfterRuntimeShutdown();
+        }
+        self.agent_runtime_shutdown_complete = true;
+    }
+
     fn settleCheckpointTransactionsForShutdown(self: *Workbench) void {
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
@@ -7276,7 +7351,6 @@ pub const Workbench = struct {
             for (task.durable.compacts) |*compact_entry| {
                 const compact = &(compact_entry.* orelse continue);
                 self.settleCheckpointPostprocessForShutdown(&compact.checkpoint);
-                std.debug.assert(!compact.session_reference_held.load(.acquire));
                 releaseCompactWorkerReference(task, compact);
             }
         }
@@ -7730,11 +7804,12 @@ pub const Workbench = struct {
             writer.writeAll("null") catch return error.SnapshotTooLarge;
             return;
         }
-        const session = @constCast(&view.runtime).session() orelse {
+        var access = @constCast(&view.runtime).acquireAccess() catch {
             writer.writeAll("null") catch return error.SnapshotTooLarge;
             return;
         };
-        var pending = session.copyPendingUiRequest(self.allocator) catch |err| switch (err) {
+        defer access.deinit();
+        var pending = access.copyPendingUiRequest(self.allocator) catch |err| switch (err) {
             error.NoPendingUiRequest, error.StaleUiResponse => {
                 writer.writeAll("null") catch return error.SnapshotTooLarge;
                 return;
@@ -9991,7 +10066,8 @@ pub const Workbench = struct {
                     failed = true;
                     break;
                 }
-                if (task.runtime.session() != null or task.runtime.closingSession() != null or
+                if (task.runtime.hasAttachedSession() or
+                    task.runtime.hasClosingSession() or
                     task.runtime.close_thread != null or
                     task.runtime.worker_references.load(.acquire) != 0 or
                     hasActiveOperation(task))
@@ -10776,7 +10852,6 @@ pub const Workbench = struct {
 
     fn deinitCompactRecord(self: *Workbench, compact: *CompactRecord) void {
         std.debug.assert(!compact.worker_reference_held.load(.acquire));
-        std.debug.assert(!compact.session_reference_held.load(.acquire));
         std.debug.assert(compact.terminal_publication.load(.acquire) != .publishing);
         self.freeTracked(compact.terminal_diagnostic);
         compact.* = undefined;
@@ -10843,6 +10918,31 @@ pub const Workbench = struct {
             return;
         }
         var live = task.runtime.detach(cause);
+        switch (live.binding.state()) {
+            .owned => {
+                switch (live.binding.closeOutcome(.session_close)) {
+                    .closed => {},
+                    .failure => @panic("Task Session close failed during attachment release"),
+                }
+                live.binding.releaseClosed() catch |err| {
+                    if (err == error.RuntimeShuttingDown) {
+                        if (self.agent_runtime_shutdown_complete)
+                            live.binding.relinquishAfterRuntimeShutdown()
+                        else
+                            live.binding.abandonForRuntimeDeinit();
+                    } else @panic("Task Session slot release failed during attachment release");
+                };
+            },
+            .closed => live.binding.releaseClosed() catch |err| {
+                if (err == error.RuntimeShuttingDown) {
+                    if (self.agent_runtime_shutdown_complete)
+                        live.binding.relinquishAfterRuntimeShutdown()
+                    else
+                        live.binding.abandonForRuntimeDeinit();
+                } else @panic("closed Task Session slot release failed during attachment release");
+            },
+            .released, .relinquished, .moved, .fixture, .abandoned => {},
+        }
         self.releaseExecutionValueNoFail(task, &live.execution);
         if (live.pinned_catalog) |*snapshot| {
             self.projection_bytes -= snapshot.projected_bytes;
@@ -11119,7 +11219,7 @@ pub const Workbench = struct {
 
     fn prepareUiRecord(
         self: *Workbench,
-        session: *lifecycle.Session,
+        access: *task_agent_session.Access,
         run_id: u64,
         request_id: u64,
         response: UiResponse,
@@ -11131,7 +11231,7 @@ pub const Workbench = struct {
             .kind = kindForResponse(response),
             .state = stateForResponse(response),
         };
-        var pending = session.copyPendingUiRequest(self.allocator) catch return record;
+        var pending = access.copyPendingUiRequest(self.allocator) catch return record;
         defer pending.deinit();
         if (pending.run_id != run_id or pending.request_id != request_id) return record;
         var parsed = lifecycle.decodePermissionRequest(self.allocator, pending.json) catch return record;
@@ -11142,12 +11242,12 @@ pub const Workbench = struct {
 
     fn prepareCancelledUiRecord(
         self: *Workbench,
-        session: *lifecycle.Session,
+        access: *task_agent_session.Access,
         run_id: u64,
         credential: []const u8,
     ) ?UiRecord {
         if (run_id == 0) return null;
-        var pending = session.copyPendingUiRequest(self.allocator) catch return null;
+        var pending = access.copyPendingUiRequest(self.allocator) catch return null;
         defer pending.deinit();
         if (pending.run_id != run_id) return null;
         var parsed = lifecycle.decodePermissionRequest(self.allocator, pending.json) catch return null;
@@ -11233,23 +11333,28 @@ pub const Workbench = struct {
 };
 
 fn closeWorker(
-    agent_runtime: *lifecycle.Runtime,
-    view: *TaskView,
-    session: *lifecycle.Session,
+    completion_out: *std.atomic.Value(CloseCompletion),
+    binding: *task_agent_session.Binding,
     notifier: ChangeNotifier,
 ) void {
     const completion: CloseCompletion = close: {
-        switch (session.closeOutcome(.session_close)) {
+        switch (binding.state()) {
+            .owned => switch (binding.closeOutcome(.session_close)) {
+                .closed => {},
+                .failure => |failure| break :close closeFailureCompletion(
+                    failure.session_disposition,
+                ),
+            },
+            // A previous close succeeded but Runtime slot release failed.
+            // Retry only that remaining linear obligation.
             .closed => {},
-            .failure => |failure| break :close closeFailureCompletion(
-                failure.session_disposition,
-            ),
+            .released, .relinquished, .moved, .fixture, .abandoned => unreachable,
         }
-        agent_runtime.releaseClosedSession(session) catch
+        binding.releaseClosed() catch
             break :close .failed_closing;
         break :close .closed;
     };
-    view.runtime.close_completion.store(completion, .release);
+    completion_out.store(completion, .release);
     _ = notifier.notify();
 }
 
@@ -11399,7 +11504,7 @@ fn executeRunJob(context: *anyopaque) void {
         .acquire,
     );
     std.debug.assert(claimed == null);
-    var agent_run = switch (job.session.beginRunOutcome(run.id)) {
+    var agent_run = switch (job.sessionAccess().beginRunOutcome(run.id)) {
         .run => |agent_run| agent_run,
         .failure => |failure| {
             run.agent_handoff.store(.finishing, .release);
@@ -11431,16 +11536,28 @@ fn executeRunJob(context: *anyopaque) void {
         terminal.session_disposition_at_completion == .reusable;
     terminal.deinit();
     agent_run.deinit();
+    // The Run capability has finished its Agent operation. Do not retain the
+    // Session across best-effort title generation: Task close may start as
+    // soon as the terminal fact is visible. Checkpoint export below acquires
+    // its own scoped lease, so close either waits for that real Session use or
+    // prevents it from starting.
+    job.releaseSessionAccess();
     const notifier = job.workbench.change_notifier;
     _ = notifier.notify();
     generateAutomaticTitle(job.workbench, run);
     _ = notifier.notify();
-    if (!checkpoint_eligible or !postprocessCheckpoint(
-        job.workbench,
-        job.session,
-        &run.checkpoint,
-        run.checkpoint_export_context,
-    )) releaseWorkerReference(job.task, run);
+    var checkpoint_access: ?task_agent_session.Access = if (checkpoint_eligible)
+        job.task.runtime.acquireAccess() catch null
+    else
+        null;
+    defer if (checkpoint_access) |*access| access.deinit();
+    if (!checkpoint_eligible or checkpoint_access == null or
+        !postprocessCheckpoint(
+            job.workbench,
+            &checkpoint_access.?,
+            &run.checkpoint,
+            run.checkpoint_export_context,
+        )) releaseWorkerReference(job.task, run);
     _ = notifier.notify();
 }
 
@@ -11451,7 +11568,7 @@ fn executeCompactJob(context: *anyopaque) void {
     compact.agent_handoff.store(.starting, .release);
     _ = job.workbench.change_notifier.notify();
     compact.agent_handoff.store(.running, .release);
-    var terminal = job.session.executePreparedCompact(compact.id) catch |err| {
+    var terminal = job.sessionAccess().executePreparedCompact(compact.id) catch |err| {
         compact.agent_handoff.store(.finishing, .release);
         _ = commitCompactProductTerminal(
             compact,
@@ -11471,7 +11588,7 @@ fn executeCompactJob(context: *anyopaque) void {
             false,
         );
         const notifier = job.workbench.change_notifier;
-        releaseCompactReferences(job.task, compact, job.session);
+        releaseCompactWorkerReference(job.task, compact);
         _ = notifier.notify();
         return;
     };
@@ -11481,10 +11598,9 @@ fn executeCompactJob(context: *anyopaque) void {
         terminal.session_disposition_at_completion == .reusable;
     terminal.deinit();
     const notifier = job.workbench.change_notifier;
-    releaseCompactSessionReference(compact, job.session);
     if (!checkpoint_eligible or !postprocessCheckpoint(
         job.workbench,
-        job.session,
+        job.sessionAccess(),
         &compact.checkpoint,
         compact.checkpoint_export_context,
     )) releaseCompactWorkerReference(job.task, compact);
@@ -11513,7 +11629,7 @@ const CheckpointSinkContext = struct {
 
 fn postprocessCheckpoint(
     workbench: *Workbench,
-    session: *lifecycle.Session,
+    access: *task_agent_session.Access,
     postprocess: *CheckpointPostprocess,
     context: CheckpointExportContext,
 ) bool {
@@ -11535,7 +11651,7 @@ fn postprocessCheckpoint(
         .cancelled = &postprocess.cancelled,
     };
     const started = std.Io.Timestamp.now(workbench.io, .awake);
-    var outcome = session.exportCheckpoint(
+    var outcome = access.exportCheckpoint(
         checkpoint_export_limits,
         .{ .context = &sink_context, .write_fn = CheckpointSinkContext.write },
         context.last_run_id,
@@ -11648,7 +11764,7 @@ fn cancelCompactJob(context: *anyopaque) void {
         .acquire,
     );
     const interruption = pendingExternalInterruption(compact);
-    cancelPreparedCompactOrPanic(job.session, compact.id);
+    cancelPreparedCompactOrPanic(job.sessionAccess(), compact.id);
     _ = commitCompactProductTerminal(
         compact,
         .aborted,
@@ -11661,7 +11777,7 @@ fn cancelCompactJob(context: *anyopaque) void {
         false,
     );
     const notifier = job.workbench.change_notifier;
-    releaseCompactReferences(job.task, compact, job.session);
+    releaseCompactWorkerReference(job.task, compact);
     _ = notifier.notify();
 }
 
@@ -11867,7 +11983,7 @@ fn cancelRunJob(context: *anyopaque) void {
         .interrupted => |value| value,
         else => unreachable,
     };
-    cancelPreparedRunOrPanic(job.session, run.id);
+    cancelPreparedRunOrPanic(job.sessionAccess(), run.id);
     _ = commitTerminal(
         run,
         decision.phase,
@@ -11887,20 +12003,20 @@ fn cancelRunJob(context: *anyopaque) void {
 }
 
 fn cancelPreparedRunOrPanic(
-    session: *lifecycle.Session,
+    access: *task_agent_session.Access,
     run_id: u64,
 ) void {
-    session.cancelPreparedRun(run_id) catch |err| std.debug.panic(
+    access.cancelPreparedRun(run_id) catch |err| std.debug.panic(
         "Executor removed queued Run {d}, but Agent rejected prepared cancellation: {s}",
         .{ run_id, @errorName(err) },
     );
 }
 
 fn cancelPreparedCompactOrPanic(
-    session: *lifecycle.Session,
+    access: *task_agent_session.Access,
     operation_id: u64,
 ) void {
-    session.cancelPreparedCompact(operation_id) catch |err| std.debug.panic(
+    access.cancelPreparedCompact(operation_id) catch |err| std.debug.panic(
         "Executor removed queued compact {d}, but Agent rejected prepared cancellation: {s}",
         .{ operation_id, @errorName(err) },
     );
@@ -11911,23 +12027,6 @@ fn releaseWorkerReference(task: *TaskView, run: *RunRecord) void {
     const references = &task.runtime.worker_references;
     const previous = references.fetchSub(1, .release);
     std.debug.assert(previous != 0);
-}
-
-fn releaseCompactReferences(
-    task: *TaskView,
-    compact: *CompactRecord,
-    session: *lifecycle.Session,
-) void {
-    releaseCompactSessionReference(compact, session);
-    releaseCompactWorkerReference(task, compact);
-}
-
-fn releaseCompactSessionReference(
-    compact: *CompactRecord,
-    session: *lifecycle.Session,
-) void {
-    if (compact.session_reference_held.swap(false, .acq_rel))
-        session.releaseReference();
 }
 
 fn releaseCompactWorkerReference(task: *TaskView, compact: *CompactRecord) void {
@@ -12560,8 +12659,6 @@ fn worstCaseSnapshotBytes(limits: Limits) ?usize {
 }
 
 var test_agent_runtime: lifecycle.Runtime = undefined;
-var test_task_session: lifecycle.Session = undefined;
-
 fn testLimits() Limits {
     return .{
         .max_tasks = 2,
@@ -12720,9 +12817,8 @@ fn testWorkbench() !Workbench {
         },
         .runtime = .{
             .attachment = .{ .attached = .{
-                .session = &test_task_session,
+                .binding = task_agent_session.Binding.testFixture(3),
                 .execution = task_execution.take(),
-                .route_id = 3,
                 .pinned_catalog = null,
             } },
             .active_run_id = 7,
@@ -13273,7 +13369,7 @@ test "Task state round trip restores product history without fabricating a Sessi
     );
     defer restored.deinit();
     const task = restored.findTask(3) orelse return error.TestUnexpectedResult;
-    try std.testing.expect(task.runtime.session() == null);
+    try std.testing.expect(!task.runtime.hasAttachedSession());
     try std.testing.expect(task.runtime.executionConst() == null);
     try std.testing.expectEqual(ActiveOperation.none, task.runtime.active_operation);
     try std.testing.expectEqual(
@@ -14619,11 +14715,11 @@ test "identity replacement does not disturb live Task runtime references" {
     try std.testing.expect(!workbench.accountView().can_create_task);
     workbench.endExecutionReplacementNoFail();
     const task = &workbench.tasks[0].?;
-    const session = task.runtime.session().?;
+    const route_id = task.runtime.routeId();
     const execution = task.runtime.executionConst().?;
     try workbench.beginExecutionReplacement();
     try std.testing.expect(workbench.executionReplacementPending());
-    try std.testing.expectEqual(session, task.runtime.session().?);
+    try std.testing.expectEqual(route_id, task.runtime.routeId());
     try std.testing.expectEqual(execution, task.runtime.executionConst().?);
     workbench.endExecutionReplacementNoFail();
 
@@ -14633,7 +14729,7 @@ test "identity replacement does not disturb live Task runtime references" {
     try workbench.beginExecutionReplacement();
     try std.testing.expect(workbench.executionReplacementPending());
     try std.testing.expectEqual(@as(usize, 1), task.runtime.worker_references.load(.acquire));
-    try std.testing.expectEqual(session, task.runtime.session().?);
+    try std.testing.expectEqual(route_id, task.runtime.routeId());
     try std.testing.expectEqual(execution, task.runtime.executionConst().?);
     try std.testing.expectEqual(TaskLifecycle.open, taskLifecycle(task));
     try std.testing.expectEqualStrings("fixture-model", task.durable.execution_model);
@@ -15123,7 +15219,7 @@ test "product Task identity is independent from Agent Session route identity" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
     const task = &workbench.tasks[0].?;
-    task.runtime.attached().?.route_id = 99;
+    task.runtime.attached().?.binding = task_agent_session.Binding.testFixture(99);
 
     var routed = try testEnvelope(99, 7, "{\"text_chunk\":\"routed\"}");
     defer routed.deinit();
@@ -15285,7 +15381,7 @@ test "event projection failure routes by Agent Session identity not product Task
     var workbench = try testWorkbench();
     defer workbench.deinit();
     const task = &workbench.tasks[0].?;
-    task.runtime.attached().?.route_id = 99;
+    task.runtime.attached().?.binding = task_agent_session.Binding.testFixture(99);
 
     workbench.recordEventProjectionFailure(task.durable.id, 7);
     try std.testing.expect(task.durable.runs[0].?.event_projection_failure == null);
@@ -16369,17 +16465,27 @@ test "event drain barrier atomically publishes terminal product state" {
 
 test "close and delete wait for terminal event drain" {
     const Harness = struct {
-        fn complete() void {}
+        fn complete(
+            binding: *task_agent_session.Binding,
+            completion: *std.atomic.Value(CloseCompletion),
+        ) void {
+            binding.markReleasedForTest();
+            completion.store(.closed, .release);
+        }
     };
 
     var workbench = try testWorkbench();
     defer workbench.deinit();
     const task = &workbench.tasks[0].?;
     const run = &task.durable.runs[0].?;
+    const route_id = task.runtime.routeId();
     try std.testing.expect(task.runtime.beginClosing());
     task.durable.archived = true;
-    task.runtime.close_thread = try std.Thread.spawn(.{}, Harness.complete, .{});
-    task.runtime.close_completion.store(.closed, .release);
+    task.runtime.close_completion.store(.running, .release);
+    task.runtime.close_thread = try std.Thread.spawn(.{}, Harness.complete, .{
+        task.runtime.closingWorkerBinding().?,
+        &task.runtime.close_completion,
+    });
     try std.testing.expect(commitTerminal(
         run,
         .interrupted,
@@ -16390,9 +16496,19 @@ test "close and delete wait for terminal event drain" {
         false,
     ));
 
+    for (0..10_000) |_| {
+        if (task.runtime.close_completion.load(.acquire) == .closed) break;
+        std.Thread.yield() catch {};
+    }
+    try std.testing.expectEqual(
+        CloseCompletion.closed,
+        task.runtime.close_completion.load(.acquire),
+    );
+
     workbench.syncLifecycle();
     try std.testing.expectEqual(TaskLifecycle.closing, taskLifecycle(task));
     try std.testing.expect(task.runtime.close_thread != null);
+    try std.testing.expectEqual(route_id, task.runtime.routeId());
     try workbench.deleteTask(3);
 
     var queued_event = try testEnvelope(3, 7, "{\"text_chunk\":\"queued before terminal\"}");
@@ -16405,6 +16521,45 @@ test "close and delete wait for terminal event drain" {
     var late_event = try testEnvelope(3, 7, "{\"text_chunk\":\"late\"}");
     defer late_event.deinit();
     try std.testing.expectError(error.UnknownTask, workbench.applyEvent(&late_event));
+}
+
+test "Runtime shutdown joins a flying close owner before relinquish" {
+    const Harness = struct {
+        fn close(
+            binding: *task_agent_session.Binding,
+            completion: *std.atomic.Value(CloseCompletion),
+        ) void {
+            for (0..128) |_| std.Thread.yield() catch {};
+            binding.markClosedForTest();
+            completion.store(.failed_closing, .release);
+        }
+    };
+
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    const task = &workbench.tasks[0].?;
+    const route_id = task.runtime.routeId();
+    try std.testing.expect(task.runtime.beginClosing());
+    task.runtime.close_completion.store(.running, .release);
+    task.runtime.close_thread = try std.Thread.spawn(.{}, Harness.close, .{
+        task.runtime.closingWorkerBinding().?,
+        &task.runtime.close_completion,
+    });
+    workbench.executor_shutdown = true;
+
+    workbench.relinquishAgentSessionsAfterRuntimeShutdown();
+
+    try std.testing.expect(task.runtime.close_thread == null);
+    try std.testing.expect(route_id != 0);
+    try std.testing.expectEqual(@as(u64, 0), task.runtime.routeId());
+    try std.testing.expectEqual(
+        task_agent_session.BindingState.relinquished,
+        task.runtime.bindingAfterCloseJoin().?.state(),
+    );
+    try std.testing.expectError(
+        error.SessionClosing,
+        task.runtime.acquireAccess(),
+    );
 }
 
 test "streaming projection escaping is allocation-free JSON with redaction" {

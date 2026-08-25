@@ -284,7 +284,10 @@ const App = struct {
             self.agent_shutdown = true;
         }
         self.drainAgentEvents();
-        if (self.workbench) |workbench| workbench.syncLifecycle();
+        if (self.workbench) |workbench| {
+            workbench.syncLifecycle();
+            workbench.relinquishAgentSessionsAfterRuntimeShutdown();
+        }
         self.platform.stop(native_runtime);
         self.workbench = null;
         self.account_started = false;
@@ -492,8 +495,21 @@ pub fn run(init: std.process.Init) !void {
         }
         if (app.workbench_initialized) workbench.shutdownExecutor();
         if (app.agent_runtime) |runtime| {
-            if (!app.agent_shutdown) runtime.shutdown() catch {};
-            if (app.workbench_initialized) workbench.deinit();
+            const shutdown_complete = if (app.agent_shutdown)
+                true
+            else shutdown: {
+                runtime.shutdown() catch break :shutdown false;
+                app.agent_shutdown = true;
+                break :shutdown true;
+            };
+            if (app.workbench_initialized) {
+                workbench.syncLifecycle();
+                if (shutdown_complete)
+                    workbench.relinquishAgentSessionsAfterRuntimeShutdown()
+                else
+                    workbench.abandonAgentSessionsForRuntimeDeinit();
+                workbench.deinit();
+            }
             if (app.mcp_authorizations) |*authorizations| {
                 authorizations.deinit();
                 app.mcp_authorizations = null;
