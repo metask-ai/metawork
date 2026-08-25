@@ -349,6 +349,10 @@ test("Product Skill has one live owner behind narrow composition ports", () => {
   assert.match(runtime, /pub fn refreshPersonal/);
   assert.match(runtime, /pub fn refreshWorkspace/);
   assert.match(runtime, /pub fn setEnabled/);
+  assert.match(runtime, /pub const CatalogAuthority = union\(enum\)/);
+  assert.match(runtime, /pub fn workspaceCatalogAuthority/);
+  assert.match(runtime, /pub fn ensureWorkspaceCatalog/);
+  assert.match(runtime, /pub fn redactCatalogsNoFail/);
   assert.match(runtime, /fn commitEnablementCandidate/);
   assert.match(runtime, /pub fn reconcileEnablementNoFail/);
   assert.match(runtime, /@import\("product_skill_management_runtime"\)/);
@@ -361,6 +365,10 @@ test("Product Skill has one live owner behind narrow composition ports", () => {
   assert.doesNotMatch(
     runtime,
     /@import\("(?:metawork_workbench|workbench_executor|metawork_app|native_sdk|metask_agentcore)"\)|\*agent\.(?:Runtime|Session)|std\.Thread/,
+  );
+  assert.doesNotMatch(
+    runtime,
+    /pub const Catalog(?:Slot|Control)|pub fn (?:personal|workspace)Control(?:Const)?/,
   );
   assert.match(projection, /skill: skill_runtime\.Runtime/);
   assert.match(projection, /@import\("metawork_product_skill"\)\.ports/);
@@ -403,6 +411,10 @@ test("Product Skill has one live owner behind narrow composition ports", () => {
   );
   assert.match(projection, /fn skillWorkspaceCatalog/);
   assert.doesNotMatch(projection, /fn skillManagementInput|\.skill\.state/);
+  assert.doesNotMatch(
+    projection,
+    /\.skill\.(?:personal|workspace)Control(?:Const)?\(|skill_runtime\.Catalog(?:Slot|Control)/,
+  );
   assert.doesNotMatch(
     projection,
     /fn writeCatalogProjection|fn writeManagedSkillAsset|fn writeExternalSkillAsset|fn writeSkillAssetTail|fn writeSkillScope|fn catalogProjection|fn catalogContainsKnownCredential/,

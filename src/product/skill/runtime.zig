@@ -28,8 +28,6 @@ pub const EnablementWorkspaceIdentity = enablement.WorkspaceIdentity;
 pub const InstallInput = state.InstallInput;
 pub const MutationResult = state.MutationResult;
 pub const ExportResult = state.ExportResult;
-pub const CatalogSlot = state.CatalogSlot;
-pub const CatalogControl = state.CatalogControl;
 pub const ManagementScope = management.Scope;
 pub const SourceKind = management.SourceKind;
 pub const InstallId = management.InstallId;
@@ -40,6 +38,19 @@ pub const TextProjection = view.TextProjection;
 pub const ScopedCatalog = view.ScopedCatalog;
 pub const WorkspaceCatalogs = view.WorkspaceCatalogs;
 pub const ViewError = view.Error;
+
+pub const BorrowedCatalogAuthority = struct {
+    snapshot: *const catalog.Snapshot,
+    lease: *agent.CatalogLease,
+};
+
+pub const CatalogAuthority = union(enum) {
+    uninitialized,
+    loading,
+    ready: BorrowedCatalogAuthority,
+    degraded: BorrowedCatalogAuthority,
+    unavailable,
+};
 
 pub const Error = std.mem.Allocator.Error || error{
     CatalogLoading,
@@ -302,32 +313,29 @@ pub const Runtime = struct {
         return workspace.job != null;
     }
 
-    pub fn personalJobActive(self: *const Runtime) bool {
-        return self.personal_job != null;
-    }
-
-    pub fn personalControl(self: *Runtime) *state.CatalogControl {
-        return &self.state.catalog;
-    }
-
-    pub fn personalControlConst(self: *const Runtime) *const state.CatalogControl {
-        return &self.state.catalog;
-    }
-
-    pub fn workspaceControl(self: *Runtime, id: u64, epoch: u64) Error!*state.CatalogControl {
-        const workspace = self.findWorkspace(id) orelse return error.UnknownWorkspace;
-        if (workspace.epoch != epoch) return error.WorkspaceEpochMismatch;
-        return &workspace.control;
-    }
-
-    pub fn workspaceControlConst(
+    pub fn workspaceCatalogAuthority(
         self: *const Runtime,
         id: u64,
         epoch: u64,
-    ) Error!*const state.CatalogControl {
+    ) Error!CatalogAuthority {
         const workspace = self.findWorkspaceConst(id) orelse return error.UnknownWorkspace;
         if (workspace.epoch != epoch) return error.WorkspaceEpochMismatch;
-        return &workspace.control;
+        return catalogAuthority(&workspace.control, workspace.job != null);
+    }
+
+    pub fn ensureWorkspaceCatalog(
+        self: *Runtime,
+        id: u64,
+        epoch: u64,
+        budget: ProjectionBudget,
+    ) Error!void {
+        const workspace = self.findWorkspace(id) orelse return error.UnknownWorkspace;
+        if (workspace.epoch != epoch) return error.WorkspaceEpochMismatch;
+        if (workspace.control.slot != .uninitialized) return;
+        self.requestWorkspaceReschedule(id, epoch) catch {
+            workspace.reschedule_pending = false;
+            self.invalidateControlWithBudget(&workspace.control, budget);
+        };
     }
 
     pub fn refreshPersonal(self: *Runtime) Error!void {
@@ -344,6 +352,11 @@ pub const Runtime = struct {
         try self.enqueue(job);
         self.state.catalog.request_generation = generation;
         self.personal_job = job;
+    }
+
+    pub fn ensurePersonalCatalog(self: *Runtime, budget: ProjectionBudget) void {
+        self.refreshPersonal() catch
+            self.invalidateControlWithBudget(&self.state.catalog, budget);
     }
 
     pub fn refreshWorkspace(self: *Runtime, id: u64, epoch: u64) Error!void {
@@ -459,14 +472,34 @@ pub const Runtime = struct {
             self.invalidateControlWithBudget(&workspace.control, budget);
     }
 
-    pub fn invalidatePersonal(self: *Runtime, budget: ProjectionBudget) void {
-        self.invalidateControlWithBudget(&self.state.catalog, budget);
-    }
-
     pub fn invalidateWorkspace(self: *Runtime, id: u64, budget: ProjectionBudget) void {
         const workspace = self.findWorkspace(id) orelse return;
         workspace.reschedule_pending = false;
         self.invalidateControlWithBudget(&workspace.control, budget);
+    }
+
+    pub fn redactCatalogsNoFail(
+        self: *Runtime,
+        credential: []const u8,
+        budget: ProjectionBudget,
+    ) void {
+        if (credential.len == 0) return;
+        redactControlNoFail(
+            self,
+            &self.state.catalog,
+            credential,
+            budget,
+        );
+        for (self.workspaces) |*entry| {
+            const workspace = &(entry.* orelse continue);
+            const snapshot = workspace.control.slot.snapshot() orelse continue;
+            if (snapshot.identityContainsCredential(credential)) {
+                workspace.reschedule_pending = false;
+                self.invalidateControlWithBudget(&workspace.control, budget);
+            } else {
+                snapshot.redactPresentationNoFail(credential);
+            }
+        }
     }
 
     pub fn enablementHealth(self: *const Runtime) state.EnablementHealth {
@@ -934,6 +967,47 @@ pub const Runtime = struct {
         self.noteEnablementPersistenceFailure(err, budget);
     }
 
+    pub fn testInstallPersonalSnapshot(
+        self: *Runtime,
+        snapshot: catalog.Snapshot,
+        budget: ProjectionBudget,
+    ) void {
+        comptime std.debug.assert(builtin.is_test);
+        self.testInstallSnapshot(&self.state.catalog, snapshot, budget);
+    }
+
+    pub fn testInstallWorkspaceSnapshot(
+        self: *Runtime,
+        id: u64,
+        epoch: u64,
+        snapshot: catalog.Snapshot,
+        budget: ProjectionBudget,
+    ) Error!void {
+        comptime std.debug.assert(builtin.is_test);
+        const workspace = self.findWorkspace(id) orelse return error.UnknownWorkspace;
+        if (workspace.epoch != epoch) return error.WorkspaceEpochMismatch;
+        self.testInstallSnapshot(&workspace.control, snapshot, budget);
+    }
+
+    fn testInstallSnapshot(
+        self: *Runtime,
+        control: *state.CatalogControl,
+        snapshot: catalog.Snapshot,
+        budget: ProjectionBudget,
+    ) void {
+        comptime std.debug.assert(builtin.is_test);
+        const old_bytes = if (control.slot.snapshotConst()) |old|
+            old.projected_bytes
+        else
+            0;
+        control.slot.deinit(catalogReleaser(&self.ports.catalog));
+        budget.replace(old_bytes, snapshot.projected_bytes);
+        control.slot = .{ .committed = .{
+            .lease = .fixture(),
+            .snapshot = snapshot,
+        } };
+    }
+
     fn finishJob(
         self: *Runtime,
         job: *CatalogJob,
@@ -1248,6 +1322,38 @@ fn catalogReleaser(catalog_port: *const ports.Catalog) state.CatalogLeaseRelease
     };
 }
 
+fn catalogAuthority(
+    control: *const state.CatalogControl,
+    refreshing: bool,
+) CatalogAuthority {
+    return switch (control.slot.availability(refreshing)) {
+        .uninitialized => .uninitialized,
+        .loading => .loading,
+        .unavailable => .unavailable,
+        .ready => .{ .ready = .{
+            .snapshot = control.slot.snapshotConst() orelse unreachable,
+            .lease = control.slot.lease() orelse unreachable,
+        } },
+        .degraded => .{ .degraded = .{
+            .snapshot = control.slot.snapshotConst() orelse unreachable,
+            .lease = control.slot.lease() orelse unreachable,
+        } },
+    };
+}
+
+fn redactControlNoFail(
+    self: *Runtime,
+    control: *state.CatalogControl,
+    credential: []const u8,
+    budget: ProjectionBudget,
+) void {
+    const snapshot = control.slot.snapshot() orelse return;
+    if (snapshot.identityContainsCredential(credential))
+        self.invalidateControlWithBudget(control, budget)
+    else
+        snapshot.redactPresentationNoFail(credential);
+}
+
 fn nextGeneration(current: u64) ?u64 {
     if (current == std.math.maxInt(u64)) return null;
     return current + 1;
@@ -1462,7 +1568,7 @@ test "management mutation and failed catalog reconciliation stay inside Runtime"
     );
     try std.testing.expect(installed.verification_pending);
     try std.testing.expect(runtime.state.reconciliation != null);
-    try std.testing.expect(runtime.personalJobActive());
+    try std.testing.expect(runtime.personal_job != null);
     try std.testing.expect(runtime.state.inventoryConst().findConst(installed.install_id) != null);
 
     harness.runQueued();
@@ -1496,7 +1602,7 @@ test "catalog job failure is committed by the Product Skill owner" {
     try std.testing.expect(runtime.hasWorkspaceJob(7));
     try std.testing.expectEqual(
         catalog.CatalogAvailability.loading,
-        (try runtime.workspaceControlConst(7, 3)).slot.availability(true),
+        (try runtime.workspaceCatalogProjection(7, 3)).availability,
     );
     harness.runQueued();
     try std.testing.expect(runtime.sync(
@@ -1510,7 +1616,10 @@ test "catalog job failure is committed by the Product Skill owner" {
     try std.testing.expectEqual(@as(usize, 1), harness.notify_count);
     try std.testing.expectEqualStrings("/workspace/a", harness.last_root[0..harness.last_root_len]);
     try std.testing.expectEqualStrings("3", harness.last_epoch[0..harness.last_epoch_len]);
-    try std.testing.expect((try runtime.workspaceControlConst(7, 3)).slot == .unavailable);
+    try std.testing.expectEqual(
+        catalog.CatalogAvailability.unavailable,
+        (try runtime.workspaceCatalogProjection(7, 3)).availability,
+    );
 }
 
 test "workspace identity replacement discards stale completion and reschedules" {
@@ -1546,7 +1655,10 @@ test "workspace identity replacement discards stale completion and reschedules" 
     try std.testing.expectEqual(@as(usize, 2), harness.query_count);
     try std.testing.expectEqualStrings("/workspace/new", harness.last_root[0..harness.last_root_len]);
     try std.testing.expectEqualStrings("2", harness.last_epoch[0..harness.last_epoch_len]);
-    try std.testing.expect((try runtime.workspaceControlConst(9, 2)).slot == .unavailable);
+    try std.testing.expectEqual(
+        catalog.CatalogAvailability.unavailable,
+        (try runtime.workspaceCatalogProjection(9, 2)).availability,
+    );
 }
 
 test "Workspace invalidation cancels replacement reschedule after stale completion" {
@@ -1576,7 +1688,10 @@ test "Workspace invalidation cancels replacement reschedule after stale completi
     try std.testing.expectEqual(@as(usize, 1), harness.query_count);
     try std.testing.expect(harness.queued == null);
     try std.testing.expect(!runtime.hasWorkspaceJob(9));
-    try std.testing.expect((try runtime.workspaceControlConst(9, 2)).slot == .unavailable);
+    try std.testing.expectEqual(
+        catalog.CatalogAvailability.unavailable,
+        (try runtime.workspaceCatalogProjection(9, 2)).availability,
+    );
 }
 
 test "shutdown cancels queued catalog ownership before Runtime teardown" {
@@ -1593,7 +1708,10 @@ test "shutdown cancels queued catalog ownership before Runtime teardown" {
         test_snapshot_limits,
     );
 
-    try std.testing.expect(!runtime.personalJobActive());
-    try std.testing.expect(runtime.personalControlConst().slot == .unavailable);
+    try std.testing.expect(runtime.personal_job == null);
+    try std.testing.expectEqual(
+        catalog.CatalogAvailability.unavailable,
+        runtime.personalCatalogProjection().availability,
+    );
     try std.testing.expectError(error.ExecutorShuttingDown, runtime.refreshPersonal());
 }

@@ -88,7 +88,7 @@ Storage foundation 的自动化必须同时覆盖内存 target 与测试显式�
 
 Product Skill 的 local-asset guard 必须正向证明总 Runtime 只经内部 `management_runtime.zig` 闭合目录/归档 preview、已安装 definition 读取、canonical `.skill` 导出、install/reimport/uninstall/retry、staging、恢复与 catalog reconciliation；该内部 owner 可以依赖唯一 package/management/policy/state kernels，但不得取得 Workbench、Task/Workspace view、具体 Executor、Agent Runtime/Session 或线程。Workbench 对应公开方法只能做 Workspace authority/Task quiescence gate、时间事实与 revision publication；projection 不得直接调用 package 实现、Transactions、staging root、persistence failure mapping 或 catalog reconciliation。
 
-Product Skill 的公开表面 guard 必须证明 `product/skill.zig` 只导出 runtime、ports、catalog、enablement 与 management；package、policy、state、view、management_runtime 不得从聚合入口导出。Workbench projection 只允许直接消费 Runtime/ports 和 Task 所需的 catalog 叶面，不得直接 import 内部 kernel、重新拼装 View 输入或访问 `.skill.state`；Runtime 必须是内部 View 派生与 management runtime 的唯一 live aggregate 入口。
+Product Skill 的公开表面 guard 必须证明 `product/skill.zig` 只导出 runtime、ports、catalog、enablement 与 management；package、policy、state、view、management_runtime 不得从聚合入口导出。Workbench projection 只允许直接消费 Runtime/ports 和 Task 所需的 catalog 叶面，不得直接 import 内部 kernel、重新拼装 View 输入、访问 `.skill.state`，或取得 `CatalogSlot`/`CatalogControl` 可变指针；Task admission/refresh/recovery 只能消费 immutable typed authority，catalog redaction 与 uninitialized refresh 判断必须经 Runtime operation。Runtime 必须是内部 View 派生与 management runtime 的唯一 live aggregate 入口。
 
 ## 长期证据账本
 

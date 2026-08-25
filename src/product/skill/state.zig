@@ -349,4 +349,52 @@ test "catalog slot keeps product availability separate from release effect" {
         catalog.CatalogAvailability.loading,
         slot.availability(true),
     );
+
+    const source_skills = [_]agent.CatalogSkill{.{
+        .skill_id = "builtin.review",
+        .skill_policy_key = "review",
+        .invocation_name = "review",
+        .provider_id = "agents.directory",
+        .source_scope = .workspace,
+        .source_instance_id = "agents.workspace.default",
+        .contribution_id = "review",
+        .content_revision = "review-v1",
+        .display_name = "Review",
+        .description = "Review changes",
+        .argument_names = &.{"target"},
+        .max_values = 1,
+    }};
+    var snapshot = try catalog.Snapshot.init(
+        std.testing.allocator,
+        .{
+            .revision = "catalog-1",
+            .health = .healthy,
+            .skills = &source_skills,
+            .issues = &.{},
+            .storage = undefined,
+        },
+        1,
+        &.{},
+        .{
+            .max_catalog_skills = 1,
+            .max_catalog_issues = 1,
+            .max_skill_arguments = 1,
+            .max_catalog_projection_bytes = 4096,
+        },
+        4096,
+    );
+    var committed: CatalogSlot = .{ .committed = .{
+        .lease = .fixture(),
+        .snapshot = snapshot,
+    } };
+    snapshot = undefined;
+    defer committed.committed.snapshot.deinit();
+    try std.testing.expectEqual(
+        catalog.CatalogAvailability.ready,
+        committed.availability(false),
+    );
+    try std.testing.expectEqual(
+        catalog.CatalogAvailability.ready,
+        committed.availability(true),
+    );
 }

@@ -909,7 +909,6 @@ const WorkspaceTrust = union(enum) {
 };
 
 const CatalogSnapshot = catalog_snapshot.Snapshot;
-const CatalogSlot = skill_runtime.CatalogSlot;
 
 const CatalogJobState = enum(u8) {
     queued,
@@ -1710,8 +1709,7 @@ pub const Workbench = struct {
             }
         }
         workbench.recoverSkillTransactionsForScopeNoFail(.personal);
-        workbench.skill.refreshPersonal() catch
-            workbench.skill.invalidatePersonal(workbench.skillProjectionBudget());
+        workbench.skill.ensurePersonalCatalog(workbench.skillProjectionBudget());
         // This is the last ownership move in init: no later operation may fail.
         // The first health observation is committed before App exposes Bridge
         // ingress or loads the Renderer window.
@@ -2248,10 +2246,11 @@ pub const Workbench = struct {
             .workspace_id = workspace.id,
             .workspace_epoch = workspace.epoch,
         } });
-        const control = self.skill.workspaceControl(workspace.id, workspace.epoch) catch unreachable;
-        if (control.slot == .uninitialized)
-            self.skill.requestWorkspaceReschedule(workspace.id, workspace.epoch) catch
-                self.skill.invalidateWorkspace(workspace.id, self.skillProjectionBudget());
+        self.skill.ensureWorkspaceCatalog(
+            workspace.id,
+            workspace.epoch,
+            self.skillProjectionBudget(),
+        ) catch unreachable;
         self.bumpRevision();
         return workspace.id;
     }
@@ -2486,14 +2485,16 @@ pub const Workbench = struct {
         if (workspace.kind != .manual) return error.CatalogUnavailable;
         if (workspace.epoch != task.durable.workspace_epoch)
             return error.WorkspaceEpochMismatch;
-        const control = try self.skill.workspaceControl(workspace.id, workspace.epoch);
-        const current = control.slot.snapshot() orelse
-            return switch (control.slot.availability(self.skill.hasWorkspaceJob(workspace.id))) {
-                .loading => error.CatalogLoading,
-                else => error.CatalogUnavailable,
-            };
-        const lease = control.slot.lease() orelse
-            return error.CatalogUnavailable;
+        const authority = switch (try self.skill.workspaceCatalogAuthority(
+            workspace.id,
+            workspace.epoch,
+        )) {
+            .ready, .degraded => |value| value,
+            .loading => return error.CatalogLoading,
+            .uninitialized, .unavailable => return error.CatalogUnavailable,
+        };
+        const current = authority.snapshot;
+        const lease = authority.lease;
         var replacement = try current.clone(
             self.allocator,
             catalogSnapshotLimits(self.limits),
@@ -2762,14 +2763,12 @@ pub const Workbench = struct {
             snapshot.deinit();
         };
         var catalog_lease: ?*lifecycle.CatalogLease = null;
-        const skill_control = try self.skill.workspaceControl(
+        switch (try self.skill.workspaceCatalogAuthority(
             workspace_view.id,
             workspace_view.epoch,
-        );
-        switch (skill_control.slot.availability(self.skill.hasWorkspaceJob(workspace_view.id))) {
-            .ready, .degraded => {
-                const current = skill_control.slot.snapshot() orelse
-                    return error.CatalogUnavailable;
+        )) {
+            .ready, .degraded => |authority| {
+                const current = authority.snapshot;
                 if (expected_skill_catalog_revision) |expected|
                     if (!std.mem.eql(u8, expected, current.revision))
                         return error.StaleCatalog;
@@ -2785,8 +2784,7 @@ pub const Workbench = struct {
                     self.limits.max_projection_bytes - self.projection_bytes,
                 );
                 self.projection_bytes += pinned_catalog.?.projected_bytes;
-                catalog_lease = skill_control.slot.lease() orelse
-                    return error.CatalogUnavailable;
+                catalog_lease = authority.lease;
             },
             .loading => if (expected_skill_catalog_revision != null)
                 return error.CatalogLoading,
@@ -3027,11 +3025,13 @@ pub const Workbench = struct {
             .workspace_id = workspace.id,
             .workspace_epoch = workspace.epoch,
         } };
-        const current_catalog = (try self.skill.workspaceControl(
+        const current_catalog = switch (try self.skill.workspaceCatalogAuthority(
             workspace.id,
             workspace.epoch,
-        )).slot.snapshot() orelse
-            return error.RecoveryUnavailable;
+        )) {
+            .ready, .degraded => |authority| authority.snapshot,
+            .uninitialized, .loading, .unavailable => return error.RecoveryUnavailable,
+        };
         var disabled_skill_policy_keys: std.ArrayList([]const u8) = .empty;
         defer disabled_skill_policy_keys.deinit(self.allocator);
         for (current_catalog.skills) |skill|
@@ -8516,26 +8516,10 @@ pub const Workbench = struct {
         self: *Workbench,
         credential: []const u8,
     ) void {
-        if (self.skill.personalControl().slot.snapshot()) |snapshot| {
-            if (snapshot.identityContainsCredential(credential)) {
-                self.skill.invalidatePersonal(self.skillProjectionBudget());
-            } else {
-                snapshot.redactPresentationNoFail(credential);
-            }
-        }
-        for (self.workspaces) |*entry| {
-            const workspace = &(entry.* orelse continue);
-            const control = self.skill.workspaceControl(
-                workspace.id,
-                workspace.epoch,
-            ) catch continue;
-            const snapshot = control.slot.snapshot() orelse continue;
-            if (snapshot.identityContainsCredential(credential)) {
-                self.skill.invalidateWorkspace(workspace.id, self.skillProjectionBudget());
-            } else {
-                snapshot.redactPresentationNoFail(credential);
-            }
-        }
+        self.skill.redactCatalogsNoFail(
+            credential,
+            self.skillProjectionBudget(),
+        );
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
             const snapshot = task.runtime.pinnedCatalog() orelse continue;
@@ -12126,51 +12110,6 @@ test "Skill catalog snapshot reports redaction without exposing credential bytes
     );
 }
 
-test "Skill catalog slot preserves committed last-good authority" {
-    const source_skills = [_]lifecycle.CatalogSkill{.{
-        .skill_id = "builtin.review",
-        .skill_policy_key = "review",
-        .invocation_name = "review",
-        .provider_id = "agents.directory",
-        .source_scope = .workspace,
-        .source_instance_id = "agents.workspace.default",
-        .contribution_id = "review",
-        .content_revision = "review-v1",
-        .display_name = "Review",
-        .description = "Review changes",
-        .argument_names = &.{"target"},
-        .max_values = 1,
-    }};
-    var snapshot = try CatalogSnapshot.init(
-        std.testing.allocator,
-        .{
-            .revision = "catalog-1",
-            .health = .healthy,
-            .skills = &source_skills,
-            .issues = &.{},
-            .storage = undefined,
-        },
-        1,
-        &.{},
-        catalogSnapshotLimits(testLimits()),
-        testLimits().max_projection_bytes,
-    );
-    var slot: CatalogSlot = .{ .committed = .{
-        .lease = .fixture(),
-        .snapshot = snapshot,
-    } };
-    snapshot = undefined;
-    defer slot.committed.snapshot.deinit();
-
-    try std.testing.expectEqual(CatalogAvailability.ready, slot.availability(false));
-    try std.testing.expectEqual(CatalogAvailability.ready, slot.availability(true));
-    try std.testing.expect(slot.snapshotConst() != null);
-
-    const unavailable: CatalogSlot = .unavailable;
-    try std.testing.expectEqual(CatalogAvailability.unavailable, unavailable.availability(false));
-    try std.testing.expectEqual(CatalogAvailability.loading, unavailable.availability(true));
-}
-
 fn installTestCommittedSkillAuthorities(workbench: *Workbench) !void {
     const source_skills = [_]lifecycle.CatalogSkill{.{
         .skill_id = "builtin.review",
@@ -12210,20 +12149,22 @@ fn installTestCommittedSkillAuthorities(workbench: *Workbench) !void {
     );
     errdefer workspace_catalog.deinit();
 
-    workbench.projection_bytes += personal_catalog.projected_bytes;
-    workbench.skill.personalControl().slot = .{ .committed = .{
-        .lease = .fixture(),
-        .snapshot = personal_catalog,
-    } };
-    workbench.projection_bytes += workspace_catalog.projected_bytes;
-    testWorkspaceSkillControl(workbench).slot = .{ .committed = .{
-        .lease = .fixture(),
-        .snapshot = workspace_catalog,
-    } };
+    workbench.skill.testInstallPersonalSnapshot(
+        personal_catalog,
+        workbench.skillProjectionBudget(),
+    );
+    personal_catalog = undefined;
+    try workbench.skill.testInstallWorkspaceSnapshot(
+        1,
+        1,
+        workspace_catalog,
+        workbench.skillProjectionBudget(),
+    );
+    workspace_catalog = undefined;
 }
 
-fn testWorkspaceSkillControl(workbench: *Workbench) *skill_runtime.CatalogControl {
-    return workbench.skill.workspaceControl(1, 1) catch unreachable;
+fn testWorkspaceSkillProjection(workbench: *Workbench) CatalogProjection {
+    return workbench.skill.workspaceCatalogProjection(1, 1) catch unreachable;
 }
 
 test "definite Skill enablement persistence failure preserves committed authorities" {
@@ -12237,15 +12178,21 @@ test "definite Skill enablement persistence failure preserves committed authorit
     );
 
     try std.testing.expectEqual(SkillEnablementHealth.write_failed, workbench.skill.enablementHealth());
-    try std.testing.expect(workbench.skill.personalControl().slot == .committed);
-    try std.testing.expect(testWorkspaceSkillControl(&workbench).slot == .committed);
-    try std.testing.expectEqualStrings(
-        "catalog-1",
-        workbench.skill.personalControl().slot.snapshotConst().?.revision,
+    try std.testing.expectEqual(
+        CatalogAvailability.ready,
+        workbench.skill.personalCatalogProjection().availability,
+    );
+    try std.testing.expectEqual(
+        CatalogAvailability.ready,
+        testWorkspaceSkillProjection(&workbench).availability,
     );
     try std.testing.expectEqualStrings(
         "catalog-1",
-        testWorkspaceSkillControl(&workbench).slot.snapshotConst().?.revision,
+        workbench.skill.personalCatalogProjection().revision,
+    );
+    try std.testing.expectEqualStrings(
+        "catalog-1",
+        testWorkspaceSkillProjection(&workbench).revision,
     );
 }
 
@@ -12260,8 +12207,14 @@ test "unknown Skill enablement persistence outcome freezes authorities" {
     );
 
     try std.testing.expectEqual(SkillEnablementHealth.outcome_unknown, workbench.skill.enablementHealth());
-    try std.testing.expect(workbench.skill.personalControl().slot == .unavailable);
-    try std.testing.expect(testWorkspaceSkillControl(&workbench).slot == .unavailable);
+    try std.testing.expectEqual(
+        CatalogAvailability.unavailable,
+        workbench.skill.personalCatalogProjection().availability,
+    );
+    try std.testing.expectEqual(
+        CatalogAvailability.unavailable,
+        testWorkspaceSkillProjection(&workbench).availability,
+    );
     try std.testing.expectError(
         error.PersistenceFailed,
         workbench.setSkillEnabled(.{
@@ -12302,7 +12255,7 @@ test "Workspace Skill enablement uses double revision CAS and leaves pinned cata
         .argument_names = &.{"target"},
         .max_values = 1,
     }};
-    const workspace_catalog = try CatalogSnapshot.init(
+    var workspace_catalog = try CatalogSnapshot.init(
         workbench.allocator,
         .{
             .revision = "catalog-1",
@@ -12324,11 +12277,13 @@ test "Workspace Skill enablement uses double revision CAS and leaves pinned cata
             workspace_catalog.projected_bytes,
     );
     defer pinned.deinit();
-    workbench.projection_bytes += workspace_catalog.projected_bytes;
-    testWorkspaceSkillControl(&workbench).slot = .{ .committed = .{
-        .lease = .fixture(),
-        .snapshot = workspace_catalog,
-    } };
+    try workbench.skill.testInstallWorkspaceSnapshot(
+        1,
+        1,
+        workspace_catalog,
+        workbench.skillProjectionBudget(),
+    );
+    workspace_catalog = undefined;
 
     const next_revision = try workbench.setSkillEnabled(.{
         .scope = .{ .project = .{
@@ -12343,9 +12298,9 @@ test "Workspace Skill enablement uses double revision CAS and leaves pinned cata
     try std.testing.expectEqual(@as(u64, 2), next_revision);
     try std.testing.expectEqual(
         @as(u64, 2),
-        testWorkspaceSkillControl(&workbench).slot.snapshotConst().?.selection_revision,
+        testWorkspaceSkillProjection(&workbench).selection_revision.?,
     );
-    try std.testing.expect(!testWorkspaceSkillControl(&workbench).slot.snapshotConst().?.skills[0].enabled);
+    try std.testing.expect(!testWorkspaceSkillProjection(&workbench).skills[0].enabled);
     try std.testing.expectEqual(@as(u64, 1), pinned.selection_revision);
     try std.testing.expect(pinned.skills[0].enabled);
     try std.testing.expectError(
@@ -12391,7 +12346,7 @@ test "User Skill defaults stamp Personal and Workspace catalogs while project ov
         .argument_names = &.{"target"},
         .max_values = 1,
     }};
-    const personal_catalog = try CatalogSnapshot.init(
+    var personal_catalog = try CatalogSnapshot.init(
         workbench.allocator,
         .{
             .revision = "personal-1",
@@ -12405,13 +12360,13 @@ test "User Skill defaults stamp Personal and Workspace catalogs while project ov
         catalogSnapshotLimits(workbench.limits),
         workbench.limits.max_projection_bytes - workbench.projection_bytes,
     );
-    workbench.projection_bytes += personal_catalog.projected_bytes;
-    workbench.skill.personalControl().slot = .{ .committed = .{
-        .lease = .fixture(),
-        .snapshot = personal_catalog,
-    } };
+    workbench.skill.testInstallPersonalSnapshot(
+        personal_catalog,
+        workbench.skillProjectionBudget(),
+    );
+    personal_catalog = undefined;
 
-    const workspace_catalog = try CatalogSnapshot.init(
+    var workspace_catalog = try CatalogSnapshot.init(
         workbench.allocator,
         .{
             .revision = "workspace-1",
@@ -12425,11 +12380,13 @@ test "User Skill defaults stamp Personal and Workspace catalogs while project ov
         catalogSnapshotLimits(workbench.limits),
         workbench.limits.max_projection_bytes - workbench.projection_bytes,
     );
-    workbench.projection_bytes += workspace_catalog.projected_bytes;
-    testWorkspaceSkillControl(&workbench).slot = .{ .committed = .{
-        .lease = .fixture(),
-        .snapshot = workspace_catalog,
-    } };
+    try workbench.skill.testInstallWorkspaceSnapshot(
+        1,
+        1,
+        workspace_catalog,
+        workbench.skillProjectionBudget(),
+    );
+    workspace_catalog = undefined;
 
     try std.testing.expectEqual(@as(u64, 2), try workbench.setSkillEnabled(.{
         .scope = .personal,
@@ -12438,10 +12395,10 @@ test "User Skill defaults stamp Personal and Workspace catalogs while project ov
         .expected_catalog_revision = "personal-1",
         .expected_selection_revision = 1,
     }));
-    try std.testing.expectEqual(@as(u64, 2), workbench.skill.personalControl().slot.snapshotConst().?.selection_revision);
-    try std.testing.expectEqual(@as(u64, 2), testWorkspaceSkillControl(&workbench).slot.snapshotConst().?.selection_revision);
-    try std.testing.expect(!workbench.skill.personalControl().slot.snapshotConst().?.skills[0].enabled);
-    try std.testing.expect(!testWorkspaceSkillControl(&workbench).slot.snapshotConst().?.skills[0].enabled);
+    try std.testing.expectEqual(@as(u64, 2), workbench.skill.personalCatalogProjection().selection_revision.?);
+    try std.testing.expectEqual(@as(u64, 2), testWorkspaceSkillProjection(&workbench).selection_revision.?);
+    try std.testing.expect(!workbench.skill.personalCatalogProjection().skills[0].enabled);
+    try std.testing.expect(!testWorkspaceSkillProjection(&workbench).skills[0].enabled);
 
     try std.testing.expectEqual(@as(u64, 3), try workbench.setSkillEnabled(.{
         .scope = .{ .project = .{
@@ -12453,10 +12410,10 @@ test "User Skill defaults stamp Personal and Workspace catalogs while project ov
         .expected_catalog_revision = "workspace-1",
         .expected_selection_revision = 2,
     }));
-    try std.testing.expect(!workbench.skill.personalControl().slot.snapshotConst().?.skills[0].enabled);
-    try std.testing.expect(testWorkspaceSkillControl(&workbench).slot.snapshotConst().?.skills[0].enabled);
-    try std.testing.expectEqual(@as(u64, 2), workbench.skill.personalControl().slot.snapshotConst().?.selection_revision);
-    try std.testing.expectEqual(@as(u64, 3), testWorkspaceSkillControl(&workbench).slot.snapshotConst().?.selection_revision);
+    try std.testing.expect(!workbench.skill.personalCatalogProjection().skills[0].enabled);
+    try std.testing.expect(testWorkspaceSkillProjection(&workbench).skills[0].enabled);
+    try std.testing.expectEqual(@as(u64, 2), workbench.skill.personalCatalogProjection().selection_revision.?);
+    try std.testing.expectEqual(@as(u64, 3), testWorkspaceSkillProjection(&workbench).selection_revision.?);
 
     try std.testing.expectEqual(@as(u64, 4), try workbench.setSkillEnabled(.{
         .scope = .{ .project = .{
@@ -12468,7 +12425,7 @@ test "User Skill defaults stamp Personal and Workspace catalogs while project ov
         .expected_catalog_revision = "workspace-1",
         .expected_selection_revision = 3,
     }));
-    try std.testing.expect(!testWorkspaceSkillControl(&workbench).slot.snapshotConst().?.skills[0].enabled);
+    try std.testing.expect(!testWorkspaceSkillProjection(&workbench).skills[0].enabled);
 
     var management_storage: [8192]u8 = undefined;
     var management_writer = std.Io.Writer.fixed(&management_storage);
@@ -12514,7 +12471,7 @@ test "User Skill mutation does not require every Workspace to have committed aut
         .argument_names = &.{"target"},
         .max_values = 1,
     }};
-    const personal_catalog = try CatalogSnapshot.init(
+    var personal_catalog = try CatalogSnapshot.init(
         workbench.allocator,
         .{
             .revision = "personal-1",
@@ -12528,11 +12485,11 @@ test "User Skill mutation does not require every Workspace to have committed aut
         catalogSnapshotLimits(workbench.limits),
         workbench.limits.max_projection_bytes - workbench.projection_bytes,
     );
-    workbench.projection_bytes += personal_catalog.projected_bytes;
-    workbench.skill.personalControl().slot = .{ .committed = .{
-        .lease = .fixture(),
-        .snapshot = personal_catalog,
-    } };
+    workbench.skill.testInstallPersonalSnapshot(
+        personal_catalog,
+        workbench.skillProjectionBudget(),
+    );
+    personal_catalog = undefined;
 
     try std.testing.expectEqual(@as(u64, 2), try workbench.setSkillEnabled(.{
         .scope = .personal,
@@ -12548,7 +12505,10 @@ test "User Skill mutation does not require every Workspace to have committed aut
             .workspace_epoch = 1,
         } }),
     );
-    try std.testing.expect(testWorkspaceSkillControl(&workbench).slot == .uninitialized);
+    try std.testing.expectEqual(
+        CatalogAvailability.uninitialized,
+        testWorkspaceSkillProjection(&workbench).availability,
+    );
 }
 
 test "credential release permanently scrubs catalog and every Skill history field" {
@@ -12568,7 +12528,7 @@ test "credential release permanently scrubs catalog and every Skill history fiel
         .argument_names = &.{"SECRET-KEY target"},
         .max_values = 1,
     }};
-    const workspace_catalog = try CatalogSnapshot.init(
+    var workspace_catalog = try CatalogSnapshot.init(
         workbench.allocator,
         .{
             .revision = "safe-revision",
@@ -12589,11 +12549,13 @@ test "credential release permanently scrubs catalog and every Skill history fiel
             workbench.projection_bytes -
             workspace_catalog.projected_bytes,
     );
-    workbench.projection_bytes += workspace_catalog.projected_bytes;
-    testWorkspaceSkillControl(&workbench).slot = .{ .committed = .{
-        .lease = .fixture(),
-        .snapshot = workspace_catalog,
-    } };
+    try workbench.skill.testInstallWorkspaceSnapshot(
+        1,
+        1,
+        workspace_catalog,
+        workbench.skillProjectionBudget(),
+    );
+    workspace_catalog = undefined;
     workbench.projection_bytes += task_catalog.projected_bytes;
     const task = &workbench.tasks[0].?;
     task.runtime.attached().?.pinned_catalog = task_catalog;
@@ -12656,7 +12618,7 @@ test "credential release permanently scrubs catalog and every Skill history fiel
     try std.testing.expect(
         std.mem.indexOf(u8, snapshot, "\"redacted\":true") != null,
     );
-    try std.testing.expect(testWorkspaceSkillControl(&workbench).slot.snapshotConst().?.redacted);
+    try std.testing.expect(testWorkspaceSkillProjection(&workbench).redacted);
     try std.testing.expect(task.runtime.pinnedCatalogConst() == null);
 }
 

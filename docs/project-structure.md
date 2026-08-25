@@ -120,7 +120,7 @@ metawork/
 
 `product/account/contract.zig` 是 Account owner 发布的纯合同，不是新的产品 owner。`product/mcp.zig` 与 `product/mcp/` 是 Workbench 持有的产品 MCP 子模块；`product/skill.zig` 与 `product/skill/` 收拢 live aggregate state、Workspace/Task 共用的 immutable catalog compiler、enablement policy/store、本地 Skill management transaction，以及 package 的有界检查、staging 和导入导出 kernel；`product/task.zig` 与 `product/task/` 拥有 Task aggregate state 及已形成独立不变量的 policy、persistence、view、checkpoint、binding、runtime 与 recovery kernels。三者都不增加新的 Product owner。`product/` 是产品 owner 及具名产品子模块的目录归属，不增加统一 Product facade。`automation/` 只提供受控账号、origin 和临时 Workspace authority，不注册额外协议，也不拥有产品 transport state。
 
-Product Skill 的公开 module 只发布 runtime、ports、catalog、enablement 与 management。package、policy、state、view、management-runtime 只在 Runtime 的内部 module graph 中装配；Workbench projection 不得直接 import 这些 kernel、拼装其状态或读取 `.skill.state`。
+Product Skill 的公开 module 只发布 runtime、ports、catalog、enablement 与 management。package、policy、state、view、management-runtime 只在 Runtime 的内部 module graph 中装配；Workbench projection 不得直接 import 这些 kernel、拼装其状态、读取 `.skill.state`，也不得取得 `CatalogSlot`/`CatalogControl` 可变指针。Task/Session 组合只消费 Runtime 发布的 immutable catalog authority；catalog redaction、invalidation、generation 与 reschedule 不离开 Runtime。
 
 ## 4. Renderer 结构
 
