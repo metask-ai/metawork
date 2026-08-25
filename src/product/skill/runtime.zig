@@ -76,7 +76,7 @@ pub const AssetError = PackageError || Error;
 
 pub const MutationError = AssetError || error{TaskBusy};
 
-pub const Scope = union(enum) {
+const Scope = union(enum) {
     personal,
     workspace: struct {
         id: u64,
@@ -387,7 +387,7 @@ pub const Runtime = struct {
         workspace.reschedule_pending = false;
     }
 
-    pub fn requestWorkspaceReschedule(self: *Runtime, id: u64, epoch: u64) Error!void {
+    fn requestWorkspaceReschedule(self: *Runtime, id: u64, epoch: u64) Error!void {
         const workspace = self.findWorkspace(id) orelse return error.UnknownWorkspace;
         if (workspace.epoch != epoch) return error.WorkspaceEpochMismatch;
         if (workspace.job != null) {

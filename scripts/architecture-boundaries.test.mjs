@@ -368,7 +368,7 @@ test("Product Skill has one live owner behind narrow composition ports", () => {
   );
   assert.doesNotMatch(
     runtime,
-    /pub const Catalog(?:Slot|Control)|pub fn (?:personal|workspace)Control(?:Const)?/,
+    /pub const Catalog(?:Slot|Control)|pub const Scope =|pub fn (?:personal|workspace)Control(?:Const)?|pub fn requestWorkspaceReschedule/,
   );
   assert.match(projection, /skill: skill_runtime\.Runtime/);
   assert.match(projection, /@import\("metawork_product_skill"\)\.ports/);
