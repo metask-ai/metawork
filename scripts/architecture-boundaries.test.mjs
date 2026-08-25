@@ -335,6 +335,9 @@ test("Product Skill has one live owner behind narrow composition ports", () => {
   assert.match(runtime, /pub fn registerWorkspaceOwned/);
   assert.match(runtime, /pub fn refreshPersonal/);
   assert.match(runtime, /pub fn refreshWorkspace/);
+  assert.match(runtime, /pub fn setEnabled/);
+  assert.match(runtime, /fn commitEnablementCandidate/);
+  assert.match(runtime, /pub fn reconcileEnablementNoFail/);
   assert.match(runtime, /pub fn beginShutdown/);
   assert.doesNotMatch(
     runtime,
@@ -348,12 +351,11 @@ test("Product Skill has one live owner behind narrow composition ports", () => {
     projection,
     /fn compileCatalogSnapshot|fn recompileCatalogSnapshot|fn inventoryHasInvocationInScope/,
   );
-  assert.match(projection, /fn commitSkillEnablementCandidate/);
   assert.match(projection, /fn productSkillPorts/);
   assert.match(projection, /fn syncSkillCatalogsNoFail/);
   assert.doesNotMatch(
     projection,
-    /const CatalogJob = struct|fn scheduleCatalogQuery|fn scheduleSkillCatalogQuery|fn commitCatalogJobsNoFail/,
+    /const CatalogJob = struct|fn scheduleCatalogQuery|fn scheduleSkillCatalogQuery|fn commitCatalogJobsNoFail|fn commitSkillEnablementCandidate|fn noteSkillEnablementPersistenceFailure|\.skill\.state\.enablement_(?:store|health|file_store)/,
   );
   assert.match(projection, /fn requireSkillMutationAvailable/);
   assert.match(view, /@import\("product_skill_catalog"\)/);
@@ -450,6 +452,10 @@ test("Product Skill has one live owner behind narrow composition ports", () => {
   assert.match(
     build,
     /product_skill\.addImport\("product_skill_runtime", product_skill_runtime\)/,
+  );
+  assert.match(
+    build,
+    /product_skill_runtime\.addImport\("product_skill_enablement", skill_enablement\)/,
   );
   assert.match(
     build,

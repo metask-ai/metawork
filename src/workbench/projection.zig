@@ -2860,16 +2860,9 @@ pub const Workbench = struct {
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
-        if (self.skill.state.enablement_health != .ready or
-            self.skill.state.enablement_file_store == null)
-            return error.PersistenceFailed;
-        const catalog: *CatalogSnapshot = switch (mutation.scope) {
-            .personal => personal: {
-                if (mutation.state == .inherit) return error.InvalidPolicyKey;
-                break :personal self.skill.state.catalog.slot.snapshot() orelse
-                    return error.CatalogUnavailable;
-            },
-            .project => |project| project_catalog: {
+        switch (mutation.scope) {
+            .personal => {},
+            .project => |project| {
                 const workspace = self.findWorkspace(project.workspace_id) orelse
                     return error.UnknownWorkspace;
                 if (workspace.kind != .manual or !workspace.visible or
@@ -2878,156 +2871,17 @@ pub const Workbench = struct {
                 if (project.expected_workspace_epoch == 0 or
                     project.expected_workspace_epoch != workspace.epoch)
                     return error.WorkspaceEpochMismatch;
-                break :project_catalog (try self.skill.workspaceControl(
-                    workspace.id,
-                    workspace.epoch,
-                )).slot.snapshot() orelse
-                    return error.CatalogUnavailable;
-            },
-        };
-        if (!std.mem.eql(u8, mutation.expected_catalog_revision, catalog.revision))
-            return error.StaleCatalog;
-        if (mutation.expected_selection_revision != catalog.selection_revision)
-            return error.StaleCatalog;
-        _ = catalog.findSkillByPolicyKey(mutation.skill_policy_key) orelse
-            return error.SkillNotFound;
-        var candidate = try self.skill.state.enablement_store.clone();
-        var candidate_owned = true;
-        defer if (candidate_owned) candidate.deinit();
-        const next_revision = switch (mutation.scope) {
-            .personal => blk: {
-                const enabled = mutation.state == .enabled;
-                if (candidate.isUserEnabled(mutation.skill_policy_key) == enabled)
-                    return mutation.expected_selection_revision;
-                break :blk try candidate.applyUser(.{
-                    .skill_policy_key = mutation.skill_policy_key,
-                    .enabled = enabled,
-                    .expected_revision = mutation.expected_selection_revision,
-                });
-            },
-            .project => |project| blk: {
-                const identity: skill_enablement_impl.WorkspaceIdentity = .{
-                    .workspace_id = project.workspace_id,
-                    .workspace_epoch = project.expected_workspace_epoch,
-                };
-                if (candidate.workspaceOverride(identity, mutation.skill_policy_key) == mutation.state)
-                    return mutation.expected_selection_revision;
-                break :blk try candidate.applyWorkspace(.{
-                    .identity = identity,
-                    .skill_policy_key = mutation.skill_policy_key,
-                    .state = mutation.state,
-                    .expected_revision = mutation.expected_selection_revision,
-                });
-            },
-        };
-        const WorkspaceCatalogCandidate = struct {
-            index: usize,
-            workspace_id: u64,
-            workspace_epoch: u64,
-            snapshot: CatalogSnapshot,
-        };
-        var personal_catalog_candidate: ?CatalogSnapshot = null;
-        var workspace_catalog_candidates: std.ArrayList(WorkspaceCatalogCandidate) = .empty;
-        defer workspace_catalog_candidates.deinit(self.allocator);
-        var catalog_candidates_owned = true;
-        defer if (catalog_candidates_owned) {
-            if (personal_catalog_candidate) |*snapshot| snapshot.deinit();
-            for (workspace_catalog_candidates.items) |*item| item.snapshot.deinit();
-        };
-        switch (mutation.scope) {
-            .personal => {
-                const current = self.skill.state.catalog.slot.snapshot().?;
-                personal_catalog_candidate = try skill_policy_impl.recompileCatalogSnapshot(
-                    self.allocator,
-                    current,
-                    &candidate,
-                    .personal,
-                    catalogSnapshotLimits(self.limits),
-                    current.projected_bytes,
-                );
-                for (self.workspaces, 0..) |*entry, index| {
-                    const workspace = &(entry.* orelse continue);
-                    const snapshot = (self.skill.workspaceControl(
-                        workspace.id,
-                        workspace.epoch,
-                    ) catch continue).slot.snapshot() orelse continue;
-                    var replacement = try skill_policy_impl.recompileCatalogSnapshot(
-                        self.allocator,
-                        snapshot,
-                        &candidate,
-                        .{ .project = .{
-                            .workspace_id = workspace.id,
-                            .workspace_epoch = workspace.epoch,
-                        } },
-                        catalogSnapshotLimits(self.limits),
-                        snapshot.projected_bytes,
-                    );
-                    errdefer replacement.deinit();
-                    try workspace_catalog_candidates.append(self.allocator, .{
-                        .index = index,
-                        .workspace_id = workspace.id,
-                        .workspace_epoch = workspace.epoch,
-                        .snapshot = replacement,
-                    });
-                }
-            },
-            .project => |project| {
-                const workspace = self.findWorkspace(project.workspace_id) orelse
-                    unreachable;
-                const current = (try self.skill.workspaceControl(
-                    workspace.id,
-                    workspace.epoch,
-                )).slot.snapshot().?;
-                var replacement = try skill_policy_impl.recompileCatalogSnapshot(
-                    self.allocator,
-                    current,
-                    &candidate,
-                    .{ .project = .{
-                        .workspace_id = workspace.id,
-                        .workspace_epoch = workspace.epoch,
-                    } },
-                    catalogSnapshotLimits(self.limits),
-                    current.projected_bytes,
-                );
-                errdefer replacement.deinit();
-                const index = for (self.workspaces, 0..) |entry, candidate_index| {
-                    const value = entry orelse continue;
-                    if (value.id == project.workspace_id) break candidate_index;
-                } else unreachable;
-                try workspace_catalog_candidates.append(self.allocator, .{
-                    .index = index,
-                    .workspace_id = workspace.id,
-                    .workspace_epoch = workspace.epoch,
-                    .snapshot = replacement,
-                });
             },
         }
-        self.commitSkillEnablementCandidate(&candidate) catch |err| {
-            self.noteSkillEnablementPersistenceFailure(err);
-            return err;
-        };
-        candidate_owned = false;
-        if (personal_catalog_candidate) |replacement| {
-            const authority = &self.skill.state.catalog.slot.committed;
-            authority.snapshot.deinit();
-            authority.snapshot = replacement;
-        }
-        for (workspace_catalog_candidates.items) |item| {
-            const workspace = &self.workspaces[item.index].?;
-            std.debug.assert(workspace.id == item.workspace_id);
-            std.debug.assert(workspace.epoch == item.workspace_epoch);
-            const authority = &(self.skill.workspaceControl(
-                workspace.id,
-                workspace.epoch,
-            ) catch unreachable).slot.committed;
-            authority.snapshot.deinit();
-            authority.snapshot = item.snapshot;
-        }
-        catalog_candidates_owned = false;
-        self.bumpRevision();
+        const next_revision = try self.skill.setEnabled(
+            mutation,
+            self.skillProjectionBudget(),
+            catalogSnapshotLimits(self.limits),
+        );
+        if (next_revision != mutation.expected_selection_revision)
+            self.bumpRevision();
         return next_revision;
     }
-
     pub fn refreshMcpCatalog(self: *Workbench) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
@@ -3172,7 +3026,7 @@ pub const Workbench = struct {
             return error.TaskBusy;
         const workspace = self.findWorkspace(task.durable.workspace_id) orelse
             return error.WorkspaceUnavailable;
-        if (self.skill.state.enablement_health != .ready)
+        if (self.skill.enablementHealth() != .ready)
             return error.RecoveryUnavailable;
         if (workspace.kind != .manual) return error.CatalogUnavailable;
         if (workspace.epoch != task.durable.workspace_epoch)
@@ -3685,7 +3539,7 @@ pub const Workbench = struct {
             return error.RecoveryUnavailable;
         const workspace = self.findWorkspace(task.durable.workspace_id) orelse
             return error.WorkspaceUnavailable;
-        if (workspace.kind == .manual and self.skill.state.enablement_health != .ready)
+        if (workspace.kind == .manual and self.skill.enablementHealth() != .ready)
             return error.RecoveryUnavailable;
         const canonical_user_home = self.canonical_user_home orelse
             return error.WorkspaceUnavailable;
@@ -3714,10 +3568,10 @@ pub const Workbench = struct {
         );
         var workspace_copy_live = true;
         errdefer if (workspace_copy_live) workspace_copy.deinit();
-        const skill_identity: skill_enablement_impl.WorkspaceIdentity = .{
+        const skill_scope: skill_management_impl.Scope = .{ .project = .{
             .workspace_id = workspace.id,
             .workspace_epoch = workspace.epoch,
-        };
+        } };
         const current_catalog = (try self.skill.workspaceControl(
             workspace.id,
             workspace.epoch,
@@ -3726,11 +3580,11 @@ pub const Workbench = struct {
         var disabled_skill_policy_keys: std.ArrayList([]const u8) = .empty;
         defer disabled_skill_policy_keys.deinit(self.allocator);
         for (current_catalog.skills) |skill|
-            if (!self.skill.state.enablement_store.isEnabled(skill_identity, skill.skill_policy_key))
+            if (!self.skill.isSkillEnabled(skill_scope, skill.skill_policy_key))
                 try disabled_skill_policy_keys.append(self.allocator, skill.skill_policy_key);
         var skill_policy = try task_recovery_job.OwnedSkillPolicy.init(
             self.allocator,
-            self.skill.state.enablement_store.revision(skill_identity),
+            self.skill.enablementRevision(skill_scope),
             disabled_skill_policy_keys.items,
         );
         var skill_policy_live = true;
@@ -9044,65 +8898,25 @@ pub const Workbench = struct {
             skill_policy_impl.managementHealthAfterPersistenceFailure(err);
     }
 
-    fn noteSkillEnablementPersistenceFailure(self: *Workbench, err: anyerror) void {
-        const decision = skill_policy_impl.enablementPersistenceFailure(err);
-        self.skill.state.enablement_health = decision.health;
-        if (decision.invalidate_authorities) {
-            self.skill.invalidatePersonal(self.skillProjectionBudget());
-            for (self.workspaces) |*entry| {
-                const workspace = &(entry.* orelse continue);
-                if (workspace.kind == .manual)
-                    self.skill.invalidateWorkspace(
-                        workspace.id,
-                        self.skillProjectionBudget(),
-                    );
-            }
-        }
-    }
-
-    fn commitSkillEnablementCandidate(
-        self: *Workbench,
-        candidate: *skill_enablement_impl.Store,
-    ) Error!void {
-        const file_store = self.skill.state.enablement_file_store orelse
-            return error.PersistenceFailed;
-        const output = try self.allocator.alloc(u8, skill_enablement_impl.max_store_bytes);
-        defer self.allocator.free(output);
-        const bytes = try skill_enablement_impl.encode(output, candidate);
-        try file_store.commit(bytes);
-        self.skill.state.enablement_store.deinit();
-        self.skill.state.enablement_store = candidate.*;
-        candidate.* = undefined;
+    fn skillEnablementWorkspace(
+        context: *const anyopaque,
+        index: usize,
+    ) ?skill_enablement_impl.WorkspaceIdentity {
+        const self: *const Workbench = @ptrCast(@alignCast(context));
+        const workspace = self.workspaces[index] orelse return null;
+        if (workspace.kind != .manual or !workspace.visible) return null;
+        return .{
+            .workspace_id = workspace.id,
+            .workspace_epoch = workspace.epoch,
+        };
     }
 
     fn reconcileSkillEnablementNoFail(self: *Workbench) void {
-        if (self.skill.state.enablement_health != .ready or
-            self.skill.state.enablement_file_store == null)
-            return;
-        var active: std.ArrayList(skill_enablement_impl.WorkspaceIdentity) = .empty;
-        defer active.deinit(self.allocator);
-        for (self.workspaces) |entry| if (entry) |workspace| {
-            if (workspace.kind == .manual and workspace.visible)
-                active.append(self.allocator, .{
-                    .workspace_id = workspace.id,
-                    .workspace_epoch = workspace.epoch,
-                }) catch {
-                    self.skill.state.enablement_health = .write_failed;
-                    return;
-                };
-        };
-        var candidate = self.skill.state.enablement_store.clone() catch {
-            self.skill.state.enablement_health = .write_failed;
-            return;
-        };
-        var candidate_owned = true;
-        defer if (candidate_owned) candidate.deinit();
-        if (!candidate.reconcile(active.items)) return;
-        self.commitSkillEnablementCandidate(&candidate) catch |err| {
-            self.noteSkillEnablementPersistenceFailure(err);
-            return;
-        };
-        candidate_owned = false;
+        self.skill.reconcileEnablementNoFail(.{
+            .context = self,
+            .slot_count = self.workspaces.len,
+            .get_fn = skillEnablementWorkspace,
+        }, self.skillProjectionBudget());
     }
 
     fn recoverSkillTransactionsForScopeNoFail(
@@ -13117,12 +12931,14 @@ fn testWorkspaceSkillControl(workbench: *Workbench) *skill_state.CatalogControl 
 test "definite Skill enablement persistence failure preserves committed authorities" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
-    workbench.skill.state.enablement_health = .ready;
     try installTestCommittedSkillAuthorities(&workbench);
 
-    workbench.noteSkillEnablementPersistenceFailure(error.WriteFailed);
+    workbench.skill.testNoteEnablementPersistenceFailure(
+        error.WriteFailed,
+        workbench.skillProjectionBudget(),
+    );
 
-    try std.testing.expectEqual(SkillEnablementHealth.write_failed, workbench.skill.state.enablement_health);
+    try std.testing.expectEqual(SkillEnablementHealth.write_failed, workbench.skill.enablementHealth());
     try std.testing.expect(workbench.skill.state.catalog.slot == .committed);
     try std.testing.expect(testWorkspaceSkillControl(&workbench).slot == .committed);
     try std.testing.expectEqualStrings(
@@ -13138,12 +12954,14 @@ test "definite Skill enablement persistence failure preserves committed authorit
 test "unknown Skill enablement persistence outcome freezes authorities" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
-    workbench.skill.state.enablement_health = .ready;
     try installTestCommittedSkillAuthorities(&workbench);
 
-    workbench.noteSkillEnablementPersistenceFailure(error.PersistenceOutcomeUnknown);
+    workbench.skill.testNoteEnablementPersistenceFailure(
+        error.PersistenceOutcomeUnknown,
+        workbench.skillProjectionBudget(),
+    );
 
-    try std.testing.expectEqual(SkillEnablementHealth.outcome_unknown, workbench.skill.state.enablement_health);
+    try std.testing.expectEqual(SkillEnablementHealth.outcome_unknown, workbench.skill.enablementHealth());
     try std.testing.expect(workbench.skill.state.catalog.slot == .unavailable);
     try std.testing.expect(testWorkspaceSkillControl(&workbench).slot == .unavailable);
     try std.testing.expectError(
@@ -13171,8 +12989,7 @@ test "Workspace Skill enablement uses double revision CAS and leaves pinned cata
 
     var workbench = try testWorkbench();
     defer workbench.deinit();
-    workbench.skill.state.enablement_file_store = &file_store;
-    workbench.skill.state.enablement_health = .ready;
+    workbench.skill.testSetEnablementPersistence(&file_store);
     const source_skills = [_]lifecycle.CatalogSkill{.{
         .skill_id = "builtin.review",
         .skill_policy_key = "review",
@@ -13261,8 +13078,7 @@ test "User Skill defaults stamp Personal and Workspace catalogs while project ov
 
     var workbench = try testWorkbench();
     defer workbench.deinit();
-    workbench.skill.state.enablement_file_store = &file_store;
-    workbench.skill.state.enablement_health = .ready;
+    workbench.skill.testSetEnablementPersistence(&file_store);
     const source_skills = [_]lifecycle.CatalogSkill{.{
         .skill_id = "builtin.review",
         .skill_policy_key = "review",
@@ -13385,8 +13201,7 @@ test "User Skill mutation does not require every Workspace to have committed aut
 
     var workbench = try testWorkbench();
     defer workbench.deinit();
-    workbench.skill.state.enablement_file_store = &file_store;
-    workbench.skill.state.enablement_health = .ready;
+    workbench.skill.testSetEnablementPersistence(&file_store);
     const source_skills = [_]lifecycle.CatalogSkill{.{
         .skill_id = "builtin.review",
         .skill_policy_key = "review",
@@ -13430,10 +13245,10 @@ test "User Skill mutation does not require every Workspace to have committed aut
     }));
     try std.testing.expectEqual(
         @as(u64, 2),
-        workbench.skill.state.enablement_store.revision(.{
+        workbench.skill.enablementRevision(.{ .project = .{
             .workspace_id = 1,
             .workspace_epoch = 1,
-        }),
+        } }),
     );
     try std.testing.expect(testWorkspaceSkillControl(&workbench).slot == .uninitialized);
 }

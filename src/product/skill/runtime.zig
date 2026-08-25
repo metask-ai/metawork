@@ -3,8 +3,10 @@
 //! consuming only narrow external effect ports.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const agent = @import("metawork_agent");
 const catalog = @import("product_skill_catalog");
+const enablement = @import("product_skill_enablement");
 const management = @import("product_skill_management");
 const policy = @import("product_skill_policy");
 const ports = @import("product_skill_ports");
@@ -16,6 +18,15 @@ pub const Error = std.mem.Allocator.Error || error{
     CatalogRequestGenerationExhausted,
     ExecutorShuttingDown,
     QueueFull,
+    UnknownWorkspace,
+    WorkspaceEpochMismatch,
+};
+
+pub const EnablementError = enablement.Error || enablement.FileStoreError || catalog.Error || error{
+    CatalogUnavailable,
+    PersistenceFailed,
+    StaleCatalog,
+    SkillNotFound,
     UnknownWorkspace,
     WorkspaceEpochMismatch,
 };
@@ -69,6 +80,17 @@ pub const CatalogObserver = struct {
         snapshot: ?*const catalog.Snapshot,
     ) void {
         self.changed_fn(self.context, scope, snapshot);
+    }
+};
+
+pub const EnablementWorkspaces = struct {
+    context: *const anyopaque,
+    slot_count: usize,
+    get_fn: *const fn (*const anyopaque, usize) ?enablement.WorkspaceIdentity,
+
+    fn get(self: EnablementWorkspaces, index: usize) ?enablement.WorkspaceIdentity {
+        std.debug.assert(index < self.slot_count);
+        return self.get_fn(self.context, index);
     }
 };
 
@@ -148,6 +170,11 @@ const WorkspaceCatalog = struct {
         allocator.free(self.canonical_root);
         self.* = undefined;
     }
+};
+
+const EnablementAuthorityCandidate = struct {
+    control: *state.CatalogControl,
+    snapshot: catalog.Snapshot,
 };
 
 pub const Configuration = struct {
@@ -406,6 +433,203 @@ pub const Runtime = struct {
         self.invalidateControlWithBudget(&workspace.control, budget);
     }
 
+    pub fn enablementHealth(self: *const Runtime) state.EnablementHealth {
+        return self.state.enablement_health;
+    }
+
+    pub fn isSkillEnabled(
+        self: *const Runtime,
+        scope: management.Scope,
+        skill_policy_key: []const u8,
+    ) bool {
+        return switch (scope) {
+            .personal => self.state.enablement_store.isUserEnabled(skill_policy_key),
+            .project => |project| self.state.enablement_store.isEnabled(.{
+                .workspace_id = project.workspace_id,
+                .workspace_epoch = project.workspace_epoch,
+            }, skill_policy_key),
+        };
+    }
+
+    pub fn enablementRevision(
+        self: *const Runtime,
+        scope: management.Scope,
+    ) u64 {
+        return switch (scope) {
+            .personal => self.state.enablement_store.userRevision(),
+            .project => |project| self.state.enablement_store.revision(.{
+                .workspace_id = project.workspace_id,
+                .workspace_epoch = project.workspace_epoch,
+            }),
+        };
+    }
+
+    pub fn setEnabled(
+        self: *Runtime,
+        mutation: state.EnablementMutation,
+        budget: ProjectionBudget,
+        snapshot_limits: catalog.Limits,
+    ) EnablementError!u64 {
+        if (self.state.enablement_health != .ready or
+            self.state.enablement_file_store == null)
+            return error.PersistenceFailed;
+        const control: *state.CatalogControl = switch (mutation.scope) {
+            .personal => personal: {
+                if (mutation.state == .inherit) return error.InvalidPolicyKey;
+                break :personal &self.state.catalog;
+            },
+            .project => |project| project_control: {
+                const workspace = self.findWorkspace(project.workspace_id) orelse
+                    return error.UnknownWorkspace;
+                if (project.expected_workspace_epoch == 0 or
+                    workspace.epoch != project.expected_workspace_epoch)
+                    return error.WorkspaceEpochMismatch;
+                break :project_control &workspace.control;
+            },
+        };
+        const current = control.slot.snapshot() orelse
+            return error.CatalogUnavailable;
+        if (!std.mem.eql(u8, mutation.expected_catalog_revision, current.revision) or
+            mutation.expected_selection_revision != current.selection_revision)
+            return error.StaleCatalog;
+        _ = current.findSkillByPolicyKey(mutation.skill_policy_key) orelse
+            return error.SkillNotFound;
+
+        var store_candidate = try self.state.enablement_store.clone();
+        var store_candidate_owned = true;
+        defer if (store_candidate_owned) store_candidate.deinit();
+        const next_revision = switch (mutation.scope) {
+            .personal => blk: {
+                const enabled = mutation.state == .enabled;
+                if (store_candidate.isUserEnabled(mutation.skill_policy_key) == enabled)
+                    return mutation.expected_selection_revision;
+                break :blk try store_candidate.applyUser(.{
+                    .skill_policy_key = mutation.skill_policy_key,
+                    .enabled = enabled,
+                    .expected_revision = mutation.expected_selection_revision,
+                });
+            },
+            .project => |project| blk: {
+                const identity: enablement.WorkspaceIdentity = .{
+                    .workspace_id = project.workspace_id,
+                    .workspace_epoch = project.expected_workspace_epoch,
+                };
+                if (store_candidate.workspaceOverride(identity, mutation.skill_policy_key) == mutation.state)
+                    return mutation.expected_selection_revision;
+                break :blk try store_candidate.applyWorkspace(.{
+                    .identity = identity,
+                    .skill_policy_key = mutation.skill_policy_key,
+                    .state = mutation.state,
+                    .expected_revision = mutation.expected_selection_revision,
+                });
+            },
+        };
+
+        var authority_candidates: std.ArrayList(EnablementAuthorityCandidate) = .empty;
+        defer authority_candidates.deinit(self.allocator);
+        var authority_candidates_owned = true;
+        defer if (authority_candidates_owned)
+            for (authority_candidates.items) |*item| item.snapshot.deinit();
+        switch (mutation.scope) {
+            .personal => {
+                try self.appendEnablementAuthorityCandidate(
+                    &authority_candidates,
+                    &self.state.catalog,
+                    &store_candidate,
+                    .personal,
+                    snapshot_limits,
+                );
+                for (self.workspaces) |*entry| {
+                    const workspace = &(entry.* orelse continue);
+                    if (workspace.control.slot.snapshotConst() == null) continue;
+                    try self.appendEnablementAuthorityCandidate(
+                        &authority_candidates,
+                        &workspace.control,
+                        &store_candidate,
+                        .{ .project = .{
+                            .workspace_id = workspace.id,
+                            .workspace_epoch = workspace.epoch,
+                        } },
+                        snapshot_limits,
+                    );
+                }
+            },
+            .project => |project| try self.appendEnablementAuthorityCandidate(
+                &authority_candidates,
+                control,
+                &store_candidate,
+                .{ .project = .{
+                    .workspace_id = project.workspace_id,
+                    .workspace_epoch = project.expected_workspace_epoch,
+                } },
+                snapshot_limits,
+            ),
+        }
+
+        self.commitEnablementCandidate(&store_candidate) catch |err| {
+            self.noteEnablementPersistenceFailure(err, budget);
+            return err;
+        };
+        store_candidate_owned = false;
+        for (authority_candidates.items) |*item| {
+            const authority = &item.control.slot.committed;
+            const old_bytes = authority.snapshot.projected_bytes;
+            authority.snapshot.deinit();
+            authority.snapshot = item.snapshot;
+            budget.replace(old_bytes, authority.snapshot.projected_bytes);
+        }
+        authority_candidates_owned = false;
+        return next_revision;
+    }
+
+    pub fn reconcileEnablementNoFail(
+        self: *Runtime,
+        workspaces: EnablementWorkspaces,
+        budget: ProjectionBudget,
+    ) void {
+        if (self.state.enablement_health != .ready or
+            self.state.enablement_file_store == null)
+            return;
+        var active_workspaces: std.ArrayList(enablement.WorkspaceIdentity) = .empty;
+        defer active_workspaces.deinit(self.allocator);
+        for (0..workspaces.slot_count) |index|
+            if (workspaces.get(index)) |identity|
+                active_workspaces.append(self.allocator, identity) catch {
+                    self.state.enablement_health = .write_failed;
+                    return;
+                };
+        var candidate = self.state.enablement_store.clone() catch {
+            self.state.enablement_health = .write_failed;
+            return;
+        };
+        var candidate_owned = true;
+        defer if (candidate_owned) candidate.deinit();
+        if (!candidate.reconcile(active_workspaces.items)) return;
+        self.commitEnablementCandidate(&candidate) catch |err| {
+            self.noteEnablementPersistenceFailure(err, budget);
+            return;
+        };
+        candidate_owned = false;
+    }
+
+    pub fn testSetEnablementPersistence(
+        self: *Runtime,
+        file_store: *enablement.FileStore,
+    ) void {
+        comptime std.debug.assert(builtin.is_test);
+        self.state.enablement_file_store = file_store;
+        self.state.enablement_health = .ready;
+    }
+
+    pub fn testNoteEnablementPersistenceFailure(
+        self: *Runtime,
+        err: anyerror,
+        budget: ProjectionBudget,
+    ) void {
+        comptime std.debug.assert(builtin.is_test);
+        self.noteEnablementPersistenceFailure(err, budget);
+    }
+
     fn finishJob(
         self: *Runtime,
         job: *CatalogJob,
@@ -468,6 +692,58 @@ pub const Runtime = struct {
             },
             .queued, .running => unreachable,
         }
+    }
+
+    fn appendEnablementAuthorityCandidate(
+        self: *Runtime,
+        candidates: *std.ArrayList(EnablementAuthorityCandidate),
+        control: *state.CatalogControl,
+        store_candidate: *const enablement.Store,
+        scope: management.Scope,
+        snapshot_limits: catalog.Limits,
+    ) (catalog.Error || std.mem.Allocator.Error)!void {
+        const current = control.slot.snapshotConst() orelse return;
+        var replacement = try policy.recompileCatalogSnapshot(
+            self.allocator,
+            current,
+            store_candidate,
+            scope,
+            snapshot_limits,
+            current.projected_bytes,
+        );
+        errdefer replacement.deinit();
+        try candidates.append(self.allocator, .{
+            .control = control,
+            .snapshot = replacement,
+        });
+    }
+
+    fn commitEnablementCandidate(
+        self: *Runtime,
+        candidate: *enablement.Store,
+    ) (enablement.Error || enablement.FileStoreError)!void {
+        const file_store = self.state.enablement_file_store orelse
+            return error.WriteFailed;
+        const output = try self.allocator.alloc(u8, enablement.max_store_bytes);
+        defer self.allocator.free(output);
+        const bytes = try enablement.encode(output, candidate);
+        try file_store.commit(bytes);
+        self.state.enablement_store.deinit();
+        self.state.enablement_store = candidate.*;
+        candidate.* = undefined;
+    }
+
+    fn noteEnablementPersistenceFailure(
+        self: *Runtime,
+        err: anyerror,
+        budget: ProjectionBudget,
+    ) void {
+        const decision = policy.enablementPersistenceFailure(err);
+        self.state.enablement_health = decision.health;
+        if (!decision.invalidate_authorities) return;
+        self.invalidateControlWithBudget(&self.state.catalog, budget);
+        for (self.workspaces) |*entry| if (entry.*) |*workspace|
+            self.invalidateControlWithBudget(&workspace.control, budget);
     }
 
     fn createJob(
