@@ -582,7 +582,7 @@ R9 不提供 shadowed candidate 列表，因此 UI 不得承诺 loser 详情。�
 ### 18.1 已落地并保留
 
 - `src/agent/catalog.zig` 的 R9 catalog query、source/policy/content projection 与 opaque lease ownership；
-- `src/workbench/skill_enablement.zig` 的 `skill_policy_key` persistence、用户默认、Workspace override、全局 revision、strict codec、CAS 和 atomic store；
+- `src/product/skill/enablement.zig` 的 `skill_policy_key` persistence、用户默认、Workspace override、全局 revision、strict codec、CAS 和 atomic store；
 - Workbench 将有效 policy 编译为 concrete `granted_skill_ids`；
 - Session create/restore 与 idle refresh 的 R9 catalog+policy binding；
 - catalog revision + selection revision 双校验；

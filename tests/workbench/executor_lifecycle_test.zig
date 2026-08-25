@@ -2,6 +2,7 @@ const fixture = @import("lifecycle_fixture");
 const std = fixture.std;
 const lifecycle = fixture.lifecycle;
 const workbench_api = fixture.workbench_api;
+const product_skill = fixture.product_skill;
 const product_task = fixture.product_task;
 const account_contract = fixture.account_contract;
 const wire = fixture.wire;
@@ -564,7 +565,7 @@ test "restart restores a Task attachment and continues the same Conversation" {
         std.testing.io,
         &skill_enablement_root_storage,
     );
-    var skill_enablement_store = try workbench_api.SkillEnablementFileStore.init(
+    var skill_enablement_store = try product_skill.enablement.FileStore.init(
         std.testing.io,
         skill_enablement_root_storage[0..skill_enablement_root_len],
     );
@@ -1335,7 +1336,7 @@ test "Workbench pins an async catalog and admits typed Skill through the existin
         std.testing.allocator,
     );
     defer std.testing.allocator.free(home);
-    var skill_enablement_store = try workbench_api.SkillEnablementFileStore.init(
+    var skill_enablement_store = try product_skill.enablement.FileStore.init(
         std.testing.io,
         home,
     );
@@ -1430,7 +1431,7 @@ test "Workspace incomplete catalog refresh preserves the committed last-good aut
         std.testing.allocator,
     );
     defer std.testing.allocator.free(home);
-    var skill_enablement_store = try workbench_api.SkillEnablementFileStore.init(
+    var skill_enablement_store = try product_skill.enablement.FileStore.init(
         std.testing.io,
         home,
     );
@@ -2043,7 +2044,7 @@ test "Workspace reauthorization reschedules the latest catalog query" {
         std.testing.allocator,
     );
     defer std.testing.allocator.free(home);
-    var skill_enablement_store = try workbench_api.SkillEnablementFileStore.init(
+    var skill_enablement_store = try product_skill.enablement.FileStore.init(
         std.testing.io,
         home,
     );
@@ -2115,7 +2116,7 @@ test "Workbench rejects stale Skill identity before Session or Run mutation and 
         std.testing.allocator,
     );
     defer std.testing.allocator.free(home);
-    var skill_enablement_store = try workbench_api.SkillEnablementFileStore.init(
+    var skill_enablement_store = try product_skill.enablement.FileStore.init(
         std.testing.io,
         home,
     );
@@ -2216,7 +2217,7 @@ test "Workbench refreshes a Task only from the committed Workspace catalog while
         std.testing.allocator,
     );
     defer std.testing.allocator.free(home);
-    var skill_enablement_store = try workbench_api.SkillEnablementFileStore.init(
+    var skill_enablement_store = try product_skill.enablement.FileStore.init(
         std.testing.io,
         home,
     );

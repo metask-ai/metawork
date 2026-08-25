@@ -5,7 +5,6 @@ const automatic_workspace_allocator = @import("workbench_automatic_workspace_all
 const scheduled_task_persistence = @import("workbench_scheduled_task_persistence");
 const skill_package = @import("metawork_product_skill").package;
 const skill_management = @import("workbench_skill_management");
-const skill_enablement = @import("workbench_skill_enablement");
 
 pub const Error = projection_impl.Error;
 pub const Limits = projection_impl.Limits;
@@ -42,8 +41,6 @@ pub const scheduled_task_store_max_bytes = scheduled_task_persistence.max_store_
 pub const SkillManagementFileStore = skill_management.FileStore;
 pub const skill_management_store_max_bytes = skill_management.max_store_bytes;
 pub const SkillManagementHealth = projection_impl.SkillManagementHealth;
-pub const SkillEnablementFileStore = skill_enablement.FileStore;
-pub const skill_enablement_store_max_bytes = skill_enablement.max_store_bytes;
 pub const SkillEnablementHealth = projection_impl.SkillEnablementHealth;
 pub const SkillImportPreview = skill_package.Preview;
 pub const SkillSourceKind = skill_management.SourceKind;

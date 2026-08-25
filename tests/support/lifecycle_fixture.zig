@@ -1,6 +1,7 @@
 pub const std = @import("std");
 pub const lifecycle = @import("metawork_agent");
 pub const workbench_api = @import("metawork_workbench");
+pub const product_skill = @import("metawork_product_skill");
 pub const product_task = @import("metawork_product_task");
 pub const account_contract = @import("metawork_account_contract");
 pub const event_pump = @import("event_pump");

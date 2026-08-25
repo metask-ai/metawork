@@ -104,7 +104,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-scheduled-task-persistence", .root_module = test_modules.workbench_scheduled_persistence },
         .{ .name = "metawork-product-skill-package", .root_module = test_modules.product_skill_package },
         .{ .name = "metawork-skill-management", .root_module = test_modules.workbench_skill_management },
-        .{ .name = "metawork-skill-enablement", .root_module = test_modules.workbench_skill_enablement },
+        .{ .name = "metawork-product-skill-enablement", .root_module = test_modules.product_skill_enablement },
         .{ .name = "metawork-product-mcp-configuration", .root_module = test_modules.product_mcp_configuration },
         .{ .name = "metawork-product-mcp-state", .root_module = test_modules.product_mcp_state },
         .{ .name = "metawork-product-mcp-policy", .root_module = test_modules.product_mcp_policy },
@@ -247,7 +247,7 @@ const WiredModules = struct {
     workbench_scheduled_persistence: *std.Build.Module,
     product_skill_package: *std.Build.Module,
     workbench_skill_management: *std.Build.Module,
-    workbench_skill_enablement: *std.Build.Module,
+    product_skill_enablement: *std.Build.Module,
     product_mcp: *std.Build.Module,
     product_mcp_configuration: *std.Build.Module,
     product_mcp_state: *std.Build.Module,
@@ -283,6 +283,7 @@ fn createLifecycleFixture(
     });
     fixture.addImport("metawork_agent", modules.agent);
     fixture.addImport("metawork_workbench", modules.workbench);
+    fixture.addImport("metawork_product_skill", modules.product_skill);
     fixture.addImport("metawork_product_task", modules.product_task);
     fixture.addImport("metawork_account_contract", modules.account_contract);
     fixture.addImport("event_pump", modules.event_pump);
@@ -878,7 +879,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     });
     skill_management.addImport("product_skill_package", skill_package);
     const skill_enablement = b.createModule(.{
-        .root_source_file = b.path("src/workbench/skill_enablement.zig"),
+        .root_source_file = b.path("src/product/skill/enablement.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
@@ -910,6 +911,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .optimize = root_module.optimize,
     });
     product_skill.addImport("product_skill_catalog", catalog_snapshot);
+    product_skill.addImport("product_skill_enablement", skill_enablement);
     product_skill.addImport("product_skill_package", skill_package);
     const owned_task_execution = b.createModule(.{
         .root_source_file = b.path("src/product/task/execution_binding.zig"),
@@ -1057,7 +1059,6 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         scheduled_task_persistence,
     );
     projection.addImport("workbench_skill_management", skill_management);
-    projection.addImport("workbench_skill_enablement", skill_enablement);
     projection.addImport("metawork_product_task", product_task);
     projection.addImport("metawork_product_skill", product_skill);
     projection.addImport("metawork_product_mcp", product_mcp);
@@ -1088,7 +1089,6 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     );
     workbench.addImport("metawork_product_skill", product_skill);
     workbench.addImport("workbench_skill_management", skill_management);
-    workbench.addImport("workbench_skill_enablement", skill_enablement);
 
     const bridge = b.createModule(.{
         .root_source_file = b.path("src/bridge.zig"),
@@ -1155,6 +1155,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     app.addImport("metawork_agent", agent);
     app.addImport("metawork_workbench", workbench);
     app.addImport("metawork_product_mcp", product_mcp);
+    app.addImport("metawork_product_skill", product_skill);
     app.addImport("metawork_product_task", product_task);
     app.addImport("metawork_bridge", bridge);
     app.addImport("metawork_automation", automation);
@@ -1217,7 +1218,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .workbench_scheduled_persistence = scheduled_task_persistence,
         .product_skill_package = skill_package,
         .workbench_skill_management = skill_management,
-        .workbench_skill_enablement = skill_enablement,
+        .product_skill_enablement = skill_enablement,
         .product_mcp = product_mcp,
         .product_mcp_configuration = mcp_configuration,
         .product_mcp_state = product_mcp_state,
