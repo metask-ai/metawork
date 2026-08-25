@@ -7,6 +7,7 @@ const native_sdk = @import("native_sdk");
 const account_contract = @import("metawork_account_contract");
 const workbench_api = @import("metawork_workbench");
 const mcp_configuration = @import("metawork_product_mcp").configuration;
+const skill_management = @import("metawork_product_skill").management;
 const commands = @import("commands.zig");
 const handlers = @import("handlers.zig");
 const callback_gate = @import("callback_gate.zig");
@@ -1700,7 +1701,7 @@ pub const Dispatcher = struct {
             false,
             "invalid_preview",
         );
-        const source_kind: workbench_api.SkillSourceKind = switch (consumed.source_kind) {
+        const source_kind: skill_management.SourceKind = switch (consumed.source_kind) {
             .local_package => .local_package,
             .local_directory => .local_directory,
         };
@@ -3083,7 +3084,7 @@ fn parseSkillScope(
     kind: []const u8,
     workspace_id: ?[]const u8,
     workspace_epoch: ?[]const u8,
-) !workbench_api.SkillScope {
+) !skill_management.Scope {
     if (std.mem.eql(u8, kind, "personal")) {
         if (workspace_id != null or workspace_epoch != null)
             return error.InvalidBridgePayload;
@@ -3098,10 +3099,10 @@ fn parseSkillScope(
     } };
 }
 
-fn parseSkillInstallId(value: []const u8) !workbench_api.SkillInstallId {
-    if (value.len != @sizeOf(workbench_api.SkillInstallId) * 2)
+fn parseSkillInstallId(value: []const u8) !skill_management.InstallId {
+    if (value.len != @sizeOf(skill_management.InstallId) * 2)
         return error.InvalidBridgePayload;
-    var result: workbench_api.SkillInstallId = undefined;
+    var result: skill_management.InstallId = undefined;
     _ = std.fmt.hexToBytes(&result, value) catch
         return error.InvalidBridgePayload;
     return result;
@@ -3377,7 +3378,7 @@ fn encodeSkillCatalogRefreshResult(
 fn encodeSkillMutationResult(
     output: []u8,
     accepted: bool,
-    install_id: ?workbench_api.SkillInstallId,
+    install_id: ?skill_management.InstallId,
     verification_pending: bool,
     reason: ?[]const u8,
 ) ![]const u8 {

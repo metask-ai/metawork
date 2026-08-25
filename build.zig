@@ -103,7 +103,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-automatic-workspace-allocator", .root_module = test_modules.workbench_automatic_workspace_allocator },
         .{ .name = "metawork-scheduled-task-persistence", .root_module = test_modules.workbench_scheduled_persistence },
         .{ .name = "metawork-product-skill-package", .root_module = test_modules.product_skill_package },
-        .{ .name = "metawork-skill-management", .root_module = test_modules.workbench_skill_management },
+        .{ .name = "metawork-product-skill-management", .root_module = test_modules.product_skill_management },
         .{ .name = "metawork-product-skill-enablement", .root_module = test_modules.product_skill_enablement },
         .{ .name = "metawork-product-mcp-configuration", .root_module = test_modules.product_mcp_configuration },
         .{ .name = "metawork-product-mcp-state", .root_module = test_modules.product_mcp_state },
@@ -246,7 +246,7 @@ const WiredModules = struct {
     workbench_automatic_workspace_allocator: *std.Build.Module,
     workbench_scheduled_persistence: *std.Build.Module,
     product_skill_package: *std.Build.Module,
-    workbench_skill_management: *std.Build.Module,
+    product_skill_management: *std.Build.Module,
     product_skill_enablement: *std.Build.Module,
     product_mcp: *std.Build.Module,
     product_mcp_configuration: *std.Build.Module,
@@ -873,7 +873,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .optimize = root_module.optimize,
     });
     const skill_management = b.createModule(.{
-        .root_source_file = b.path("src/workbench/skill_management.zig"),
+        .root_source_file = b.path("src/product/skill/management.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
@@ -912,6 +912,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     });
     product_skill.addImport("product_skill_catalog", catalog_snapshot);
     product_skill.addImport("product_skill_enablement", skill_enablement);
+    product_skill.addImport("product_skill_management", skill_management);
     product_skill.addImport("product_skill_package", skill_package);
     const owned_task_execution = b.createModule(.{
         .root_source_file = b.path("src/product/task/execution_binding.zig"),
@@ -1058,7 +1059,6 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         "workbench_scheduled_task_persistence",
         scheduled_task_persistence,
     );
-    projection.addImport("workbench_skill_management", skill_management);
     projection.addImport("metawork_product_task", product_task);
     projection.addImport("metawork_product_skill", product_skill);
     projection.addImport("metawork_product_mcp", product_mcp);
@@ -1088,7 +1088,6 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         scheduled_task_persistence,
     );
     workbench.addImport("metawork_product_skill", product_skill);
-    workbench.addImport("workbench_skill_management", skill_management);
 
     const bridge = b.createModule(.{
         .root_source_file = b.path("src/bridge.zig"),
@@ -1099,6 +1098,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     bridge.addImport("metawork_account_contract", account_contract);
     bridge.addImport("metawork_workbench", workbench);
     bridge.addImport("metawork_product_mcp", product_mcp);
+    bridge.addImport("metawork_product_skill", product_skill);
 
     const automation_disabled = b.createModule(.{
         .root_source_file = b.path("src/automation/disabled.zig"),
@@ -1217,7 +1217,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .workbench_automatic_workspace_allocator = automatic_workspace_allocator,
         .workbench_scheduled_persistence = scheduled_task_persistence,
         .product_skill_package = skill_package,
-        .workbench_skill_management = skill_management,
+        .product_skill_management = skill_management,
         .product_skill_enablement = skill_enablement,
         .product_mcp = product_mcp,
         .product_mcp_configuration = mcp_configuration,

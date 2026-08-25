@@ -587,7 +587,7 @@ R9 不提供 shadowed candidate 列表，因此 UI 不得承诺 loser 详情。�
 - Session create/restore 与 idle refresh 的 R9 catalog+policy binding；
 - catalog revision + selection revision 双校验；
 - Task pinned projection、idle refresh 与 restart rebind 例外；
-- `src/workbench/skill_management.zig` 的 `install_id`、provenance、文件事务和 recovery；
+- `src/product/skill/management.zig` 的 `install_id`、provenance、文件事务和 recovery；
 - Renderer 不读文件、不解析 Skill、不 optimistic toggle；
 - Skill 中心按单一 context 展示，不跨 Workspace 聚合 policy rows。
 

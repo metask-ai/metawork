@@ -3,4 +3,5 @@
 
 pub const catalog = @import("product_skill_catalog");
 pub const enablement = @import("product_skill_enablement");
+pub const management = @import("product_skill_management");
 pub const package = @import("product_skill_package");

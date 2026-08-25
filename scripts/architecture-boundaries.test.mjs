@@ -129,6 +129,10 @@ test("named module roots exist and lower owners cannot import composition", () =
     existsSync(new URL("src/workbench/skill_enablement.zig", root)),
     false,
   );
+  assert.equal(
+    existsSync(new URL("src/workbench/skill_management.zig", root)),
+    false,
+  );
   for (const path of [
     "src/workbench/task_persistence.zig",
     "src/workbench/checkpoint_record.zig",
@@ -252,8 +256,9 @@ test("Product Skill kernels have one physical home without taking composition", 
   const catalog = read("src/product/skill/catalog.zig");
   const enablement = read("src/product/skill/enablement.zig");
   const packageKernel = read("src/product/skill/package.zig");
-  const management = read("src/workbench/skill_management.zig");
+  const management = read("src/product/skill/management.zig");
   const appStores = read("src/app/stores.zig");
+  const bridgeDispatcher = read("src/bridge/dispatcher.zig");
   const workbenchRoot = read("src/workbench.zig");
   const projection = read("src/workbench/projection.zig");
   const taskRuntime = read("src/product/task/runtime.zig");
@@ -261,6 +266,7 @@ test("Product Skill kernels have one physical home without taking composition", 
 
   assert.match(productSkill, /@import\("product_skill_catalog"\)/);
   assert.match(productSkill, /@import\("product_skill_enablement"\)/);
+  assert.match(productSkill, /@import\("product_skill_management"\)/);
   assert.match(productSkill, /@import\("product_skill_package"\)/);
   assert.match(catalog, /@import\("metawork_agent"\)/);
   assert.doesNotMatch(
@@ -279,6 +285,11 @@ test("Product Skill kernels have one physical home without taking composition", 
     enablement,
     /Workbench|workbench_executor|std\.Thread|@import\("metawork_agent"\)/,
   );
+  assert.match(management, /@import\("product_skill_package"\)/);
+  assert.doesNotMatch(
+    management,
+    /Workbench|workbench_executor|std\.Thread|@import\("metawork_agent"\)/,
+  );
   assert.match(projection, /@import\("metawork_product_skill"\)\.enablement/);
   assert.doesNotMatch(projection, /@import\("workbench_skill_enablement"\)/);
   assert.match(appStores, /@import\("metawork_product_skill"\)\.enablement/);
@@ -287,13 +298,29 @@ test("Product Skill kernels have one physical home without taking composition", 
     workbenchRoot,
     /SkillEnablementFileStore|skill_enablement_store_max_bytes|workbench_skill_enablement/,
   );
-  assert.match(management, /@import\("product_skill_package"\)/);
+  assert.match(projection, /@import\("metawork_product_skill"\)\.management/);
+  assert.doesNotMatch(projection, /@import\("workbench_skill_management"\)/);
+  assert.match(appStores, /@import\("metawork_product_skill"\)\.management/);
+  assert.doesNotMatch(appStores, /workbench_api\.SkillManagementFileStore/);
+  assert.match(
+    bridgeDispatcher,
+    /@import\("metawork_product_skill"\)\.management/,
+  );
+  assert.doesNotMatch(
+    bridgeDispatcher,
+    /workbench_api\.Skill(?:SourceKind|Scope|InstallId)/,
+  );
+  assert.doesNotMatch(
+    workbenchRoot,
+    /SkillManagementFileStore|skill_management_store_max_bytes|SkillSourceKind|SkillScope|SkillInstallId|workbench_skill_management/,
+  );
   for (const source of [projection, workbenchRoot]) {
     assert.match(source, /@import\("metawork_product_skill"\)\.package/);
     assert.doesNotMatch(source, /@import\("workbench_skill_package"\)/);
   }
   assert.match(build, /src\/product\/skill\/catalog\.zig/);
   assert.match(build, /src\/product\/skill\/enablement\.zig/);
+  assert.match(build, /src\/product\/skill\/management\.zig/);
   assert.match(build, /src\/product\/skill\/package\.zig/);
   assert.match(
     build,
@@ -308,9 +335,13 @@ test("Product Skill kernels have one physical home without taking composition", 
     build,
     /product_skill\.addImport\("product_skill_enablement", skill_enablement\)/,
   );
+  assert.match(
+    build,
+    /product_skill\.addImport\("product_skill_management", skill_management\)/,
+  );
   assert.doesNotMatch(
     build,
-    /src\/workbench\/skill_(?:package|enablement)\.zig|workbench_skill_(?:package|enablement)|metawork-skill-(?:package|enablement)/,
+    /src\/workbench\/skill_(?:package|enablement|management)\.zig|workbench_skill_(?:package|enablement|management)|metawork-skill-(?:package|enablement|management)/,
   );
 });
 
