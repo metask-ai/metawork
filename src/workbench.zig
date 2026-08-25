@@ -3,7 +3,7 @@
 const projection_impl = @import("workbench_projection");
 const automatic_workspace_allocator = @import("workbench_automatic_workspace_allocator");
 const scheduled_task_persistence = @import("workbench_scheduled_task_persistence");
-const skill_package = @import("workbench_skill_package");
+const skill_package = @import("metawork_product_skill").package;
 const skill_management = @import("workbench_skill_management");
 const skill_enablement = @import("workbench_skill_enablement");
 

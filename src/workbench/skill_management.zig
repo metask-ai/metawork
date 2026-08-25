@@ -1,6 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const skill_package = @import("workbench_skill_package");
+const skill_package = @import("product_skill_package");
 
 pub const schema_version: u8 = 1;
 pub const file_name = "skill-management.json";

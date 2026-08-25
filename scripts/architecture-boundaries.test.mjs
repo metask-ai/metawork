@@ -121,6 +121,10 @@ test("named module roots exist and lower owners cannot import composition", () =
     existsSync(new URL("src/workbench/catalog_snapshot.zig", root)),
     false,
   );
+  assert.equal(
+    existsSync(new URL("src/workbench/skill_package.zig", root)),
+    false,
+  );
   for (const path of [
     "src/workbench/task_persistence.zig",
     "src/workbench/checkpoint_record.zig",
@@ -238,15 +242,19 @@ test("named module roots exist and lower owners cannot import composition", () =
   }
 });
 
-test("Product Skill catalog has one physical home and remains a shared value kernel", () => {
+test("Product Skill kernels have one physical home without taking composition", () => {
   const build = read("build.zig");
   const productSkill = read("src/product/skill.zig");
   const catalog = read("src/product/skill/catalog.zig");
+  const packageKernel = read("src/product/skill/package.zig");
+  const management = read("src/workbench/skill_management.zig");
+  const workbenchRoot = read("src/workbench.zig");
   const projection = read("src/workbench/projection.zig");
   const taskRuntime = read("src/product/task/runtime.zig");
   const recoveryJob = read("src/product/task/recovery_job.zig");
 
   assert.match(productSkill, /@import\("product_skill_catalog"\)/);
+  assert.match(productSkill, /@import\("product_skill_package"\)/);
   assert.match(catalog, /@import\("metawork_agent"\)/);
   assert.doesNotMatch(
     catalog,
@@ -256,12 +264,30 @@ test("Product Skill catalog has one physical home and remains a shared value ker
     assert.match(source, /@import\("metawork_product_skill"\)\.catalog/);
     assert.doesNotMatch(source, /@import\("workbench_catalog_snapshot"\)/);
   }
+  assert.doesNotMatch(
+    packageKernel,
+    /Workbench|Workspace|Task|workbench_executor|std\.Thread|@import\("metawork_agent"\)/,
+  );
+  assert.match(management, /@import\("product_skill_package"\)/);
+  for (const source of [projection, workbenchRoot]) {
+    assert.match(source, /@import\("metawork_product_skill"\)\.package/);
+    assert.doesNotMatch(source, /@import\("workbench_skill_package"\)/);
+  }
   assert.match(build, /src\/product\/skill\/catalog\.zig/);
+  assert.match(build, /src\/product\/skill\/package\.zig/);
   assert.match(
     build,
     /product_skill\.addImport\("product_skill_catalog", catalog_snapshot\)/,
   );
   assert.match(build, /addImport\("metawork_product_skill", product_skill\)/);
+  assert.match(
+    build,
+    /product_skill\.addImport\("product_skill_package", skill_package\)/,
+  );
+  assert.doesNotMatch(
+    build,
+    /src\/workbench\/skill_package\.zig|workbench_skill_package|metawork-skill-package/,
+  );
 });
 
 test("Product Task kernels have one physical home without taking the executor", () => {
