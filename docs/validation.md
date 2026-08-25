@@ -128,6 +128,7 @@ architecture guard 必须保持 `PlatformServices.context` 零 allowlist。原�
 - `src/native_sdk_compat/secure_input/macos.zig` — `secure_input` 二级兼容。macOS 编译、modal 行为、VoiceOver 明文检查和 shutdown 尚未取得目标平台证据。Runtime secure-input API 经 macOS 验收后删除实现、allowlist 和专用测试。
 - `src/native_sdk_compat/system_webview_drag_region/windows.zig` — `system_webview_drag_region` 二级兼容。普通拖动和最大化拖动恢复已验收；edge snap、双击标题栏、系统菜单、touch/pen 尚未验收。Runtime drag-region API 经 Windows 验收后删除实现、allowlist 和 pointer probe。
 - `src/native_sdk_compat/system_webview_window_controls/windows.zig` — `system_webview_maximize_restore`、`system_webview_maximized_state` 与 `system_webview_user_close` 二级兼容。controls、maximize/restore、close-policy hide/reopen 与 clean shutdown 已验收。Runtime 对应能力逐项验收后删除相应 action/state；三项全部替换后删除共置文件、HWND binding、allowlist 和 probe。
+- `scripts/native-sdk-compat/macos-icon-composer.mjs` — `macos_icon_composer_package` 打包期兼容，不属于 Application Runtime 一级/二级路径。当前只允许 Xcode `actool` 26.6（bundle 24765）把单一无 glass/effect 的 `assets/icons/MetaWork.icon` 编译为 `Assets.car` 与 fallback ICNS，在未签名 `.app` 中替换 Native SDK 临时 ICNS 并写入标准 icon metadata。源结构、PNG 字节一致性、编译参数、工具版本、输出集合、resource digest、plist identity 和签名前顺序已有 Node test 与本机真实 `actool` compile 证据；Developer ID/DMG/notarization 和 macOS 26 Finder/Dock 明暗模式视觉验收尚未执行。Native SDK 正式提供同等 `.icon` artifact 能力并通过全部验收后删除 seam、测试和 allowlist。
 
 `src/app/window.zig` 的显式退出使用 `Runtime.showMessageDialog` 与 `Runtime.closeWindow`，属于正常 Runtime 路径，不进入兼容 allowlist。
 
@@ -155,7 +156,7 @@ npm run build:release
 npm run package:macos
 ```
 
-跨平台开发入口与 Apple Development 签名规则由 `dev.mjs` 负责，setup 只复用该开发 owner；Developer ID、应用与 DMG 签名、公证、staple、Gatekeeper、Finder 左到右拖拽布局、磁盘映像及挂载内容的身份与完整性规则由 `package-macos.mjs` 负责。两个 owner 必须保持双向隔离。Native SDK 必须先按 resolved build target 从 `.agentcore/bundles/<target-id>` 生成未签名 `.app`；应用签名前必须把 64 × 64 托盘 PNG stage 到与运行时相对路径一致的 `Contents/Resources/assets/icons/tray-icon.png`，并以 `lipo` 确认主程序恰好为该 target 的单一架构，随后只执行一次 Developer ID 应用签名，并在同一入口检查格式、尺寸、源资产一致性、Renderer、metadata 与签名 policy。`package:macos` 默认 `all`，依次产出小写 `metawork-<version>-macos-arm64.dmg` 与 `metawork-<version>-macos-x64.dmg`；`npm run package:macos -- arm64` 或 `-- x64` 只产出所选单一架构。入口不得根据 last-stage state 推断架构，也不生成 Universal、preview 或 ZIP。普通 check/test/build 不得访问个人证书、Finder 或 notary profile；`package:macos` 成功证明当前图形用户会话生成的可分发磁盘映像，不等于更新能力完成。
+跨平台开发入口与 Apple Development 签名规则由 `dev.mjs` 负责，setup 只复用该开发 owner；Developer ID、应用与 DMG 签名、公证、staple、Gatekeeper、Finder 左到右拖拽布局、磁盘映像及挂载内容的身份与完整性规则由 `package-macos.mjs` 负责。两个 owner 必须保持双向隔离。`package-macos.mjs` 必须先验证 canonical bundle，再以版本 allowlist 内的 Xcode `actool` 编译一次 `assets/icons/MetaWork.icon`，随后按 resolved build target 让 Native SDK 从 `.agentcore/bundles/<target-id>` 生成未签名 `.app`。应用签名前必须把编译所得 `Assets.car` 与 `MetaWork.icns` 逐字节 stage 到 `Contents/Resources`，删除 SDK 的 `AppIcon.icns`，把 `CFBundleIconFile` 与 `CFBundleIconName` 精确设为 `MetaWork`，同时把 64 × 64 托盘 PNG stage 到运行时相对路径 `Contents/Resources/assets/icons/tray-icon.png`；任一资源、metadata 或工具链变化都 fail closed。完成资源 gate 后以 `lipo` 确认主程序恰好为该 target 的单一架构，随后只执行一次 Developer ID 应用签名，并在签名后再次检查 Icon Composer resource digest、Renderer、托盘资源、metadata 与签名 policy。`package:macos` 默认 `all`，两种架构必须复用同一次 actool 输出并依次产出小写 `metawork-<version>-macos-arm64.dmg` 与 `metawork-<version>-macos-x64.dmg`；`npm run package:macos -- arm64` 或 `-- x64` 只产出所选单一架构。入口不得根据 last-stage state 推断架构，也不生成 Universal、preview 或 ZIP。普通 check/test/build 不得访问 Icon Composer compiler、个人证书、Finder 或 notary profile；`package:macos` 成功证明当前图形用户会话生成的可分发磁盘映像，不等于更新能力完成。macOS 26 的 Finder、Dock 与运行中已打包应用须在 Light/Dark 下独立确认没有非设计渐变；至少一套 macOS 26 以前的系统须确认 fallback ICNS，未取得这些视觉证据前不得报告图标最终验收完成。
 
 Keychain 跨重建授权稳定性当前为 **人工验收待完成**：在同一精确 commit 上让 Debug app 写入并读取 Account credential，完全退出并重新构建，再次恢复 Account，确认没有出现新的 Account Keychain 授权框。首次选择签名私钥产生的系统授权不属于 Account Keychain 失败。
 
@@ -191,7 +192,7 @@ node scripts/test-window-chrome-windows.mjs
 npm run package:windows
 ```
 
-该入口必须先完成正式 Release build，再使用 Native SDK `package --target windows` 生成独立 runtime stage；stage gate 精确验证 app.zon version/App ID、ReleaseFast、Windows GUI subsystem、主程序、WebView2 loader、应用图标与 Renderer assets，随后才允许 Inno Setup 6.7.3 或兼容的 7.x 生成小写 `metawork-<version>-windows-x64-setup.exe`。最终 gate 要求精确文件存在、具有 PE identity 且输出 SHA-256。安装器按用户安装、注册开始菜单与卸载入口，不要求管理员权限。
+该入口必须先完成正式 Release build；Windows build graph 把 `assets/icons/app-icon.ico` 编译为主程序的 PE 图标资源，再由 Native SDK `package --target windows` 生成独立 runtime stage 并保留同一 ICO 的外部副本。stage gate 精确验证 app.zon version/App ID、ReleaseFast、Windows GUI subsystem、主程序、WebView2 loader、应用图标与 Renderer assets，随后才允许 Inno Setup 6.7.3 或兼容的 7.x 生成小写 `metawork-<version>-windows-x64-setup.exe`。安装器、卸载项、开始菜单和可选桌面快捷方式统一消费该 ICO，最终 gate 要求精确文件存在、具有 PE identity 且输出 SHA-256。安装器按用户安装、注册开始菜单与卸载入口，不要求管理员权限。
 
 `npm run package:windows -- --signing required` 是同一入口的正式 Authenticode 模式。它必须从 Windows SDK 发现 x64 SignTool，以精确 SHA-1 thumbprint 选择当前用户证书库身份，使用 SHA-256 文件摘要和 RFC 3161 SHA-256 时间戳；MetaWork-owned EXE、Inno signed uninstaller 与最终安装器必须由同一 SignTool definition 签署，Microsoft-owned DLL 保留并验证原厂签名。每个可直接验证的 PE 都必须通过 `signtool verify /pa /all /v`，任何缺失配置、签名、时间戳或验证失败必须 fail closed。普通 unsigned mode 不读取签名身份，不能满足该 Gate。
 

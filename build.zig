@@ -14,6 +14,10 @@ const agentcore_bundle = @import("build_support/agentcore_bundle.zig");
 
 pub fn build(b: *std.Build) void {
     const artifacts = native_sdk.addAppArtifacts(b, b.dependency("native_sdk", .{}), .{ .name = "metawork" });
+    artifacts.exe.root_module.addWin32ResourceFile(.{
+        .file = b.path("packaging/windows/metawork.rc"),
+        .include_paths = &.{b.path("assets/icons")},
+    });
     const frontend_assets = b.addInstallDirectory(.{
         .source_dir = b.path("frontend/dist"),
         .install_dir = .bin,

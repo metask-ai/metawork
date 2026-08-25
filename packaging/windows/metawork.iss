@@ -54,8 +54,8 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Source: "{#RuntimeStage}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{autoprograms}\{#AppDisplayName}"; Filename: "{app}\bin\{#AppExecutableName}.exe"; WorkingDir: "{app}"
-Name: "{autodesktop}\{#AppDisplayName}"; Filename: "{app}\bin\{#AppExecutableName}.exe"; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{autoprograms}\{#AppDisplayName}"; Filename: "{app}\bin\{#AppExecutableName}.exe"; WorkingDir: "{app}"; IconFilename: "{app}\app-icon.ico"
+Name: "{autodesktop}\{#AppDisplayName}"; Filename: "{app}\bin\{#AppExecutableName}.exe"; WorkingDir: "{app}"; IconFilename: "{app}\app-icon.ico"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\bin\{#AppExecutableName}.exe"; Description: "{cm:LaunchProgram,{#StringChange(AppDisplayName, '&', '&&')}}"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent

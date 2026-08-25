@@ -21,6 +21,12 @@ import {
   parseNativeProductIdentity,
   readNativePackageManifest,
 } from "./package-metadata.mjs";
+import {
+  compileMacosAppIcon,
+  removeCompiledMacosAppIcon,
+  stageMacosAppIcon,
+  verifyStagedMacosAppIcon,
+} from "./native-sdk-compat/macos-icon-composer.mjs";
 import { verifyStagedAgentCoreBundle } from "./verify-staged-agentcore-bundle.mjs";
 
 const repositoryRoot = path.resolve(
@@ -45,6 +51,18 @@ const trayIconSourcePath = path.join(
   "assets",
   "icons",
   "tray-icon.png",
+);
+const appIconPngSourcePath = path.join(
+  repositoryRoot,
+  "assets",
+  "icons",
+  "app-icon.png",
+);
+const macosIconComposerSourcePath = path.join(
+  repositoryRoot,
+  "assets",
+  "icons",
+  "MetaWork.icon",
 );
 const packagedTrayIconPath = path.join(
   packagedAppPath,
@@ -460,7 +478,7 @@ function verifyPackagedMacosExecutableArchitecture(expectedArchitecture) {
   );
 }
 
-function verifyPackagedMacosApp(identity) {
+function verifyPackagedMacosApp(identity, appIconArtifact) {
   const sourceAssets = path.join(repositoryRoot, "frontend", "dist");
   const packagedAssets = path.join(
     packagedAppPath,
@@ -511,6 +529,7 @@ function verifyPackagedMacosApp(identity) {
       throw new Error(`Info.plist ${key} is ${actual}, expected ${expected}`);
     }
   }
+  verifyStagedMacosAppIcon(appIconArtifact, packagedAppPath);
   return verifyDeveloperIdSignature(
     packagedAppPath,
     identity,
@@ -776,7 +795,7 @@ function notarizeDiskImage(identity, distributionDiskImagePath) {
   return { artifactPath: distributionDiskImagePath, digest, submission };
 }
 
-function buildPackagedMacosApp(identity, distribution) {
+function buildPackagedMacosApp(identity, distribution, appIconArtifact) {
   runNode("scripts/build.mjs", ["release", distribution.targetId]);
   rmSync(packagedAppPath, { recursive: true, force: true });
   runNative([
@@ -788,12 +807,13 @@ function buildPackagedMacosApp(identity, distribution) {
     "--signing",
     "none",
   ]);
+  stageMacosAppIcon(appIconArtifact, packagedAppPath);
   stageMacosTrayIcon();
   verifyPackagedMacosExecutableArchitecture(distribution.executable);
   signWithDeveloperId(packagedAppPath, identity, {
     preserveEntitlements: true,
   });
-  return verifyPackagedMacosApp(identity);
+  return verifyPackagedMacosApp(identity, appIconArtifact);
 }
 
 async function packageMacos(selection) {
@@ -806,17 +826,29 @@ async function packageMacos(selection) {
       targetId: distribution.targetId,
     });
   }
-  const identity = resolveDistributionIdentity();
-  for (const distribution of distributions) {
-    const signature = buildPackagedMacosApp(identity, distribution);
-    createDistributionDiskImage(identity, distribution.diskImagePath);
-    const notarized = notarizeDiskImage(identity, distribution.diskImagePath);
-    console.log(
-      `built Developer ID signed and notarized ${distribution.artifact} package ${packagedAppPath} (${signature.policy})`,
-    );
-    console.log(
-      `Apple notarization ${notarized.submission.id} accepted; final DMG ${notarized.artifactPath} (sha256=${notarized.digest})`,
-    );
+  const appIconArtifact = compileMacosAppIcon(
+    macosIconComposerSourcePath,
+    appIconPngSourcePath,
+  );
+  try {
+    const identity = resolveDistributionIdentity();
+    for (const distribution of distributions) {
+      const signature = buildPackagedMacosApp(
+        identity,
+        distribution,
+        appIconArtifact,
+      );
+      createDistributionDiskImage(identity, distribution.diskImagePath);
+      const notarized = notarizeDiskImage(identity, distribution.diskImagePath);
+      console.log(
+        `built Developer ID signed and notarized ${distribution.artifact} package ${packagedAppPath} (${signature.policy})`,
+      );
+      console.log(
+        `Apple notarization ${notarized.submission.id} accepted; final DMG ${notarized.artifactPath} (sha256=${notarized.digest})`,
+      );
+    }
+  } finally {
+    removeCompiledMacosAppIcon(appIconArtifact);
   }
 }
 
