@@ -86,6 +86,8 @@ Product Task Session gateway 的结构验收固定为：`product/task/agent_sess
 
 Storage foundation 的自动化必须同时覆盖内存 target 与测试显式提供的 temporary file path，并在 Debug、ReleaseSafe 至少各运行一次定向入口。共享 conformance 负责 backend-independent 行为，包括 receiver 对同一 Database 的直接再入拒绝；direct backend tests 负责 `WAL + synchronous=NORMAL` profile、单连接内存可见性、Database 级间接再入与异 Database 调用、migration 原子性与版本 namespace、完整 batch rollback、reopen、busy/corrupt/invalid output 和结果上限。architecture guard 负责证明 SQLite C API 与 amalgamation 只进入 Storage concrete backend、上层尚未导入 Storage/SQLite、`app.zon` 尚未声明 Native SDK `sqlite` capability。上述结果只证明基础能力，不证明 production `app.db`、Product schema、业务迁移、单实例或断电 durable policy 已接入。
 
+Product Skill 的 read-only package guard 必须正向证明 Runtime 直接依赖唯一 `product_skill_package`，并拥有目录/归档 preview、已安装 definition 读取和 canonical `.skill` 导出入口；Workbench 对应公开方法只能解析授权 canonical root 后委托 Runtime。全局 package 依赖约束应按 read-only 与 management mutation 两类用例分别验收，不能用模糊的 import 计数代替职责检查。
+
 ## 长期证据账本
 
 ### Metask Account 与真实 AgentCore Run

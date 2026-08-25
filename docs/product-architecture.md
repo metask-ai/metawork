@@ -148,6 +148,8 @@ Personal mutation 在任一可能消费 personal catalog 的 Task 存在 active 
 
 Skill management persistence 是 Workbench-owned、无 secret、原子 candidate commit 的独立 schema 1 store。记录仅保存 `install_id`、source kind、目标 scope/workspace identity、Host-only target entry、content hash、安装/重新导入时间、management state 与未完成 transaction recovery facts；不保存 Skill body、raw path 到 Renderer、catalog handle、credential 或 Task binding。当前仍处于 pre-release，schema 原地 hard cut，不解析、双写或迁移被替代的开发 shape。对应 wire 与 transport 只由 [Renderer Bridge 合同](renderer-bridge-contract.md)定义。
 
+Product Skill Runtime 同时拥有本地 package 的 read-only 用例：对任意选取路径执行有界目录/归档 preview，并对 inventory 中已安装资产执行 definition 读取与 canonical `.skill` 导出。Workbench 只根据 scope 解析并打开已经授权的 canonical root；资产身份、健康门槛、目标 entry、package 资源约束、字节读取和导出格式都由 Runtime 与唯一 package kernel 决定。平台 picker 仍只返回用户选择，不取得产品判断权。
+
 ### 2.5 Identity 与 credential redaction
 
 Workbench 单独分配稳定的产品 Task identity，并在 Task owner 内保存 Agent Session route identity；AgentCore event 与 event-projection failure 都只按 route identity 回到 owner，Bridge snapshot 与 mutation 只使用产品 Task identity，二者不共享生成器也不依赖数值相等。durable Task binding descriptor 只包含 Workspace/binding epoch、Provider、model 与 opaque execution generation；account identity、Model Connection identity、API Key identity/metadata、connection credential locator 和完整 ExecutionConfig 只属于对应 owner 的当前进程运行时，不进入 Task store、Bridge 或 Renderer。

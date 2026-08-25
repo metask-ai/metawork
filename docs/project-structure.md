@@ -274,6 +274,8 @@ storage -> SQLite amalgamation
 
 `storage -> SQLite amalgamation` 只存在于 direct backend；Storage contract 不依赖 SQLite 或 Native SDK，当前没有任何 `app/product -> storage` 正式运行时边。`bridge -> Native SDK` 只允许消费正式 Bridge transport contract，以及 transport authority 和窄 Application capability 调用所需的 data-only DTO/opaque identifier；它不允许 Bridge 持有 `PlatformServices`、具体平台实现、OS handle 或直接系统调用权。`automation -> bridge` 只消费 policy 类型；`automation -> Native SDK` 只消费同级 Bridge policy contract 类型，同样不得持有 `PlatformServices`、平台实现或系统调用权。Account 只依赖自身 `ports.zig`；`app/account_platform_binding.zig` 在 Application 生命周期内持有并绑定对应系统 effect，shutdown 必须先让 Account 清空 port 引用，再释放 binding。禁止 `agent -> workbench/bridge/app`、`workbench -> bridge`、`bridge -> Account runtime` 和任何产品模块反向依赖 Renderer。
 
+Product Skill 的目录/归档 preview、已安装 definition 读取和 canonical `.skill` 导出由 `product/skill/runtime.zig` 调用唯一 package kernel 完成；`projection.zig` 只解析已经授权 scope 对应的 canonical root。
+
 ## 6. 测试与构建资产
 
 本节只定义测试与构建资产的目录归属；测试层、失败模式、默认入口、probe 生命周期和证据纪律由[验证规范](validation.md#持续回归)定义，变更时实际执行哪些检查由[仓库执行规则](../AGENTS.md#验证规则)定义。

@@ -338,6 +338,11 @@ test("Product Skill has one live owner behind narrow composition ports", () => {
   assert.match(runtime, /pub fn setEnabled/);
   assert.match(runtime, /fn commitEnablementCandidate/);
   assert.match(runtime, /pub fn reconcileEnablementNoFail/);
+  assert.match(runtime, /@import\("product_skill_package"\)/);
+  assert.match(runtime, /pub fn previewDirectory/);
+  assert.match(runtime, /pub fn previewArchive/);
+  assert.match(runtime, /pub fn readDefinition/);
+  assert.match(runtime, /pub fn exportPackage/);
   assert.match(runtime, /pub fn beginShutdown/);
   assert.doesNotMatch(
     runtime,
@@ -353,6 +358,14 @@ test("Product Skill has one live owner behind narrow composition ports", () => {
   );
   assert.match(projection, /fn productSkillPorts/);
   assert.match(projection, /fn syncSkillCatalogsNoFail/);
+  assert.match(
+    projection,
+    /pub fn previewSkillDirectory[\s\S]*?return self\.skill\.previewDirectory\(absolute_path\);[\s\S]*?pub fn previewSkillArchive[\s\S]*?return self\.skill\.previewArchive\(absolute_path\);/,
+  );
+  assert.match(
+    projection,
+    /pub fn readSkillDefinition[\s\S]*?self\.skill\.definitionScope\(install_id\)[\s\S]*?return self\.skill\.readDefinition\(install_id, &root\);[\s\S]*?pub fn exportSkill[\s\S]*?self\.skill\.exportScope\(install_id\)[\s\S]*?return self\.skill\.exportPackage\(install_id, &root, absolute_destination\);/,
+  );
   assert.doesNotMatch(
     projection,
     /const CatalogJob = struct|fn scheduleCatalogQuery|fn scheduleSkillCatalogQuery|fn commitCatalogJobsNoFail|fn commitSkillEnablementCandidate|fn noteSkillEnablementPersistenceFailure|\.skill\.state\.enablement_(?:store|health|file_store)/,
@@ -456,6 +469,10 @@ test("Product Skill has one live owner behind narrow composition ports", () => {
   assert.match(
     build,
     /product_skill_runtime\.addImport\("product_skill_enablement", skill_enablement\)/,
+  );
+  assert.match(
+    build,
+    /product_skill_runtime\.addImport\("product_skill_package", skill_package\)/,
   );
   assert.match(
     build,

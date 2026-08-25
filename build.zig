@@ -947,6 +947,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     product_skill_runtime.addImport("product_skill_catalog", catalog_snapshot);
     product_skill_runtime.addImport("product_skill_enablement", skill_enablement);
     product_skill_runtime.addImport("product_skill_management", skill_management);
+    product_skill_runtime.addImport("product_skill_package", skill_package);
     product_skill_runtime.addImport("product_skill_policy", product_skill_policy);
     product_skill_runtime.addImport("product_skill_ports", product_skill_ports);
     product_skill_runtime.addImport("product_skill_state", product_skill_state);

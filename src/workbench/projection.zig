@@ -1905,93 +1905,14 @@ pub const Workbench = struct {
         self: *Workbench,
         absolute_path: []const u8,
     ) Error!skill_package_impl.Preview {
-        if (self.skill.state.management_health != .ready or self.shutting_down)
-            return error.PersistenceFailed;
-        if (!std.fs.path.isAbsolute(absolute_path) or
-            !std.unicode.utf8ValidateSlice(absolute_path))
-            return error.InvalidAsset;
-        const source = std.Io.Dir.openDirAbsolute(
-            self.io,
-            absolute_path,
-            .{ .follow_symlinks = false, .iterate = true },
-        ) catch return error.InvalidAsset;
-        defer source.close(self.io);
-        return skill_package_impl.previewDirectory(
-            self.io,
-            self.allocator,
-            source,
-            .{},
-        );
+        return self.skill.previewDirectory(absolute_path);
     }
-
     pub fn previewSkillArchive(
         self: *Workbench,
         absolute_path: []const u8,
     ) Error!skill_package_impl.Preview {
-        if (self.skill.state.management_health != .ready or self.shutting_down)
-            return error.PersistenceFailed;
-        if (!std.fs.path.isAbsolute(absolute_path) or
-            !std.unicode.utf8ValidateSlice(absolute_path) or
-            !hasSkillArchiveExtension(absolute_path))
-            return error.InvalidAsset;
-        const archive = std.Io.Dir.openFileAbsolute(
-            self.io,
-            absolute_path,
-            .{ .follow_symlinks = false },
-        ) catch return error.InvalidAsset;
-        defer archive.close(self.io);
-        const inspection = skill_package_impl.inspectArchive(
-            self.io,
-            self.allocator,
-            archive,
-            .{},
-        ) catch return error.InvalidAsset;
-        const staging_path = self.skill.state.staging_root orelse
-            return error.PersistenceFailed;
-        const staging = std.Io.Dir.openDirAbsolute(
-            self.io,
-            staging_path,
-            .{ .follow_symlinks = false },
-        ) catch return error.PersistenceFailed;
-        defer staging.close(self.io);
-        var random: [16]u8 = undefined;
-        std.Io.randomSecure(self.io, &random) catch
-            return error.PersistenceFailed;
-        const hex = std.fmt.bytesToHex(random, .lower);
-        var scratch_name: [47]u8 = undefined;
-        @memcpy(scratch_name[0..15], ".skill-preview-");
-        @memcpy(scratch_name[15..], &hex);
-        staging.createDir(
-            self.io,
-            &scratch_name,
-            privateDirectoryPermissions(),
-        ) catch return error.PersistenceFailed;
-        defer staging.deleteTree(self.io, &scratch_name) catch {};
-        const scratch = staging.openDir(self.io, &scratch_name, .{
-            .follow_symlinks = false,
-        }) catch return error.PersistenceFailed;
-        defer scratch.close(self.io);
-        skill_package_impl.extractArchive(
-            self.io,
-            archive,
-            scratch,
-        ) catch return error.InvalidAsset;
-        const source = if (inspection.wrapperName()) |wrapper|
-            scratch.openDir(self.io, wrapper, .{
-                .follow_symlinks = false,
-            }) catch return error.InvalidAsset
-        else
-            scratch;
-        defer if (inspection.wrapperName() != null)
-            source.close(self.io);
-        return skill_package_impl.previewDirectory(
-            self.io,
-            self.allocator,
-            source,
-            .{},
-        ) catch return error.InvalidAsset;
+        return self.skill.previewArchive(absolute_path);
     }
-
     pub fn installSkillDirectory(
         self: *Workbench,
         absolute_path: []const u8,
@@ -2406,108 +2327,21 @@ pub const Workbench = struct {
         self: *Workbench,
         install_id: skill_management_impl.InstallId,
     ) Error!skill_package_impl.Preview {
-        if (self.skill.state.management_health != .ready or self.shutting_down)
-            return error.PersistenceFailed;
-        const current = self.skillInventory().findConst(install_id) orelse
-            return error.AssetNotFound;
-        if (current.recovery != null) return error.InvalidAsset;
-        const scope = current.scope;
-        const target_entry = try self.allocator.dupe(u8, current.target_entry);
-        defer self.allocator.free(target_entry);
+        const scope = try self.skill.definitionScope(install_id);
         var root = try self.openSkillRoot(scope);
         defer root.deinit();
-        const source = root.dir.openDir(
-            self.io,
-            target_entry,
-            .{ .follow_symlinks = false, .iterate = true },
-        ) catch return error.TargetUnavailable;
-        defer source.close(self.io);
-        return skill_package_impl.previewDirectory(
-            self.io,
-            self.allocator,
-            source,
-            .{},
-        );
+        return self.skill.readDefinition(install_id, &root);
     }
-
     pub fn exportSkill(
         self: *Workbench,
         install_id: skill_management_impl.InstallId,
         absolute_destination: []const u8,
     ) Error!SkillExportResult {
-        if (self.skill.state.management_health != .ready or self.shutting_down or
-            !std.fs.path.isAbsolute(absolute_destination) or
-            !std.unicode.utf8ValidateSlice(absolute_destination))
-            return error.InvalidAsset;
-        const current = self.skillInventory().findConst(install_id) orelse
-            return error.AssetNotFound;
-        if (current.state != .ready or current.recovery != null)
-            return error.InvalidAsset;
-        const scope = current.scope;
-        const target_entry = try self.allocator.dupe(u8, current.target_entry);
-        defer self.allocator.free(target_entry);
+        const scope = try self.skill.exportScope(install_id);
         var root = try self.openSkillRoot(scope);
         defer root.deinit();
-        const source = root.dir.openDir(
-            self.io,
-            target_entry,
-            .{ .follow_symlinks = false, .iterate = true },
-        ) catch return error.TargetUnavailable;
-        defer source.close(self.io);
-        var manifest = try skill_package_impl.inspectDirectory(
-            self.io,
-            self.allocator,
-            source,
-            .{},
-        );
-        defer manifest.deinit();
-        const destination = std.Io.Dir.openDirAbsolute(
-            self.io,
-            absolute_destination,
-            .{ .follow_symlinks = false },
-        ) catch return error.DestinationUnavailable;
-        defer destination.close(self.io);
-        var result: SkillExportResult = .{
-            .file_name = undefined,
-            .file_name_len = target_entry.len + ".skill".len,
-        };
-        @memcpy(result.file_name[0..target_entry.len], target_entry);
-        @memcpy(
-            result.file_name[target_entry.len..result.file_name_len],
-            ".skill",
-        );
-        const output = destination.createFile(
-            self.io,
-            result.fileName(),
-            .{
-                .exclusive = true,
-                .permissions = privateFilePermissions(),
-                .resolve_beneath = true,
-            },
-        ) catch |err| return switch (err) {
-            error.PathAlreadyExists => error.TargetAlreadyExists,
-            else => error.DestinationUnavailable,
-        };
-        var output_open = true;
-        var output_exists = true;
-        defer {
-            if (output_open) output.close(self.io);
-            if (output_exists)
-                destination.deleteFile(self.io, result.fileName()) catch {};
-        }
-        skill_package_impl.exportArchive(
-            self.io,
-            source,
-            output,
-            &manifest,
-        ) catch return error.WriteFailed;
-        output.sync(self.io) catch return error.WriteFailed;
-        output.close(self.io);
-        output_open = false;
-        output_exists = false;
-        return result;
+        return self.skill.exportPackage(install_id, &root, absolute_destination);
     }
-
     fn openSkillStagingRoot(self: *Workbench) Error!std.Io.Dir {
         const path = self.skill.state.staging_root orelse return error.PersistenceFailed;
         return std.Io.Dir.openDirAbsolute(

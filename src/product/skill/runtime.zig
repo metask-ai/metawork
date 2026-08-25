@@ -8,6 +8,7 @@ const agent = @import("metawork_agent");
 const catalog = @import("product_skill_catalog");
 const enablement = @import("product_skill_enablement");
 const management = @import("product_skill_management");
+const package = @import("product_skill_package");
 const policy = @import("product_skill_policy");
 const ports = @import("product_skill_ports");
 const state = @import("product_skill_state");
@@ -29,6 +30,16 @@ pub const EnablementError = enablement.Error || enablement.FileStoreError || cat
     SkillNotFound,
     UnknownWorkspace,
     WorkspaceEpochMismatch,
+};
+
+pub const PackageError = package.Error || management.Error || error{
+    PersistenceFailed,
+    InvalidAsset,
+    AssetNotFound,
+    TargetUnavailable,
+    DestinationUnavailable,
+    TargetAlreadyExists,
+    WriteFailed,
 };
 
 pub const Scope = union(enum) {
@@ -185,6 +196,7 @@ pub const Configuration = struct {
 
 pub const Runtime = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     ports: ports.Ports,
     state: state.State,
     canonical_user_home: ?[]u8,
@@ -210,6 +222,7 @@ pub const Runtime = struct {
         @memset(workspaces, null);
         return .{
             .allocator = allocator,
+            .io = io,
             .ports = effect_ports,
             .state = product_state,
             .canonical_user_home = home,
@@ -435,6 +448,197 @@ pub const Runtime = struct {
 
     pub fn enablementHealth(self: *const Runtime) state.EnablementHealth {
         return self.state.enablement_health;
+    }
+
+    pub fn previewDirectory(
+        self: *Runtime,
+        absolute_path: []const u8,
+    ) PackageError!package.Preview {
+        if (self.state.management_health != .ready or self.shutting_down)
+            return error.PersistenceFailed;
+        if (!std.fs.path.isAbsolute(absolute_path) or
+            !std.unicode.utf8ValidateSlice(absolute_path))
+            return error.InvalidAsset;
+        const source = std.Io.Dir.openDirAbsolute(
+            self.io,
+            absolute_path,
+            .{ .follow_symlinks = false, .iterate = true },
+        ) catch return error.InvalidAsset;
+        defer source.close(self.io);
+        return package.previewDirectory(self.io, self.allocator, source, .{});
+    }
+
+    pub fn previewArchive(
+        self: *Runtime,
+        absolute_path: []const u8,
+    ) PackageError!package.Preview {
+        if (self.state.management_health != .ready or self.shutting_down)
+            return error.PersistenceFailed;
+        if (!std.fs.path.isAbsolute(absolute_path) or
+            !std.unicode.utf8ValidateSlice(absolute_path) or
+            !hasArchiveExtension(absolute_path))
+            return error.InvalidAsset;
+        const archive = std.Io.Dir.openFileAbsolute(
+            self.io,
+            absolute_path,
+            .{ .follow_symlinks = false },
+        ) catch return error.InvalidAsset;
+        defer archive.close(self.io);
+        const inspection = package.inspectArchive(
+            self.io,
+            self.allocator,
+            archive,
+            .{},
+        ) catch return error.InvalidAsset;
+        const staging = try self.openStagingRoot();
+        defer staging.close(self.io);
+        var random: [16]u8 = undefined;
+        std.Io.randomSecure(self.io, &random) catch return error.PersistenceFailed;
+        const hex = std.fmt.bytesToHex(random, .lower);
+        var scratch_name: [47]u8 = undefined;
+        @memcpy(scratch_name[0..15], ".skill-preview-");
+        @memcpy(scratch_name[15..], &hex);
+        staging.createDir(
+            self.io,
+            &scratch_name,
+            privateDirectoryPermissions(),
+        ) catch return error.PersistenceFailed;
+        defer staging.deleteTree(self.io, &scratch_name) catch {};
+        const scratch = staging.openDir(self.io, &scratch_name, .{
+            .follow_symlinks = false,
+        }) catch return error.PersistenceFailed;
+        defer scratch.close(self.io);
+        package.extractArchive(self.io, archive, scratch) catch
+            return error.InvalidAsset;
+        const source = if (inspection.wrapperName()) |wrapper|
+            scratch.openDir(self.io, wrapper, .{
+                .follow_symlinks = false,
+            }) catch return error.InvalidAsset
+        else
+            scratch;
+        defer if (inspection.wrapperName() != null) source.close(self.io);
+        return package.previewDirectory(
+            self.io,
+            self.allocator,
+            source,
+            .{},
+        ) catch return error.InvalidAsset;
+    }
+
+    pub fn readDefinition(
+        self: *Runtime,
+        install_id: management.InstallId,
+        root: *const management.CanonicalRoot,
+    ) PackageError!package.Preview {
+        if (self.state.management_health != .ready or self.shutting_down)
+            return error.PersistenceFailed;
+        const current = self.state.inventoryConst().findConst(install_id) orelse
+            return error.AssetNotFound;
+        if (current.recovery != null or !current.scope.eql(root.scope))
+            return error.InvalidAsset;
+        const source = root.dir.openDir(
+            self.io,
+            current.target_entry,
+            .{ .follow_symlinks = false, .iterate = true },
+        ) catch return error.TargetUnavailable;
+        defer source.close(self.io);
+        return package.previewDirectory(self.io, self.allocator, source, .{});
+    }
+
+    pub fn definitionScope(
+        self: *const Runtime,
+        install_id: management.InstallId,
+    ) PackageError!management.Scope {
+        if (self.state.management_health != .ready or self.shutting_down)
+            return error.PersistenceFailed;
+        const current = self.state.inventoryConst().findConst(install_id) orelse
+            return error.AssetNotFound;
+        if (current.recovery != null) return error.InvalidAsset;
+        return current.scope;
+    }
+
+    pub fn exportScope(
+        self: *const Runtime,
+        install_id: management.InstallId,
+    ) PackageError!management.Scope {
+        if (self.state.management_health != .ready or self.shutting_down)
+            return error.PersistenceFailed;
+        const current = self.state.inventoryConst().findConst(install_id) orelse
+            return error.AssetNotFound;
+        if (current.state != .ready or current.recovery != null)
+            return error.InvalidAsset;
+        return current.scope;
+    }
+
+    pub fn exportPackage(
+        self: *Runtime,
+        install_id: management.InstallId,
+        root: *const management.CanonicalRoot,
+        absolute_destination: []const u8,
+    ) PackageError!state.ExportResult {
+        if (self.state.management_health != .ready or self.shutting_down or
+            !std.fs.path.isAbsolute(absolute_destination) or
+            !std.unicode.utf8ValidateSlice(absolute_destination))
+            return error.InvalidAsset;
+        const current = self.state.inventoryConst().findConst(install_id) orelse
+            return error.AssetNotFound;
+        if (current.state != .ready or current.recovery != null or
+            !current.scope.eql(root.scope))
+            return error.InvalidAsset;
+        const source = root.dir.openDir(
+            self.io,
+            current.target_entry,
+            .{ .follow_symlinks = false, .iterate = true },
+        ) catch return error.TargetUnavailable;
+        defer source.close(self.io);
+        var manifest = try package.inspectDirectory(
+            self.io,
+            self.allocator,
+            source,
+            .{},
+        );
+        defer manifest.deinit();
+        const destination = std.Io.Dir.openDirAbsolute(
+            self.io,
+            absolute_destination,
+            .{ .follow_symlinks = false },
+        ) catch return error.DestinationUnavailable;
+        defer destination.close(self.io);
+        var result: state.ExportResult = .{
+            .file_name = undefined,
+            .file_name_len = current.target_entry.len + ".skill".len,
+        };
+        @memcpy(result.file_name[0..current.target_entry.len], current.target_entry);
+        @memcpy(
+            result.file_name[current.target_entry.len..result.file_name_len],
+            ".skill",
+        );
+        const output = destination.createFile(
+            self.io,
+            result.fileName(),
+            .{
+                .exclusive = true,
+                .permissions = privateFilePermissions(),
+                .resolve_beneath = true,
+            },
+        ) catch |err| return switch (err) {
+            error.PathAlreadyExists => error.TargetAlreadyExists,
+            else => error.DestinationUnavailable,
+        };
+        var output_open = true;
+        var output_exists = true;
+        defer {
+            if (output_open) output.close(self.io);
+            if (output_exists)
+                destination.deleteFile(self.io, result.fileName()) catch {};
+        }
+        package.exportArchive(self.io, source, output, &manifest) catch
+            return error.WriteFailed;
+        output.sync(self.io) catch return error.WriteFailed;
+        output.close(self.io);
+        output_open = false;
+        output_exists = false;
+        return result;
     }
 
     pub fn isSkillEnabled(
@@ -733,6 +937,15 @@ pub const Runtime = struct {
         candidate.* = undefined;
     }
 
+    fn openStagingRoot(self: *Runtime) PackageError!std.Io.Dir {
+        const path = self.state.staging_root orelse return error.PersistenceFailed;
+        return std.Io.Dir.openDirAbsolute(
+            self.io,
+            path,
+            .{ .follow_symlinks = false },
+        ) catch error.PersistenceFailed;
+    }
+
     fn noteEnablementPersistenceFailure(
         self: *Runtime,
         err: anyerror,
@@ -850,6 +1063,20 @@ fn discardOutcome(catalog_port: ports.Catalog, outcome: *JobOutcome) void {
         },
         .failure => {},
     }
+}
+
+fn hasArchiveExtension(path: []const u8) bool {
+    const extension = std.fs.path.extension(path);
+    return std.ascii.eqlIgnoreCase(extension, ".skill") or
+        std.ascii.eqlIgnoreCase(extension, ".zip");
+}
+
+fn privateDirectoryPermissions() std.Io.File.Permissions {
+    return if (builtin.os.tag == .windows) .default_dir else .fromMode(0o700);
+}
+
+fn privateFilePermissions() std.Io.File.Permissions {
+    return if (builtin.os.tag == .windows) .default_file else .fromMode(0o600);
 }
 
 const TestHarness = struct {

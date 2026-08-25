@@ -96,6 +96,8 @@ MCP 不形成第五个 Product owner。`src/product/mcp*` 只是 Workbench 持�
 
 `src/product/task*` 拥有 Task aggregate、Run/Compact record、Agent event 的产品状态转换与 terminal event-drain gate、terminal/interruption/lifecycle/recovery policy，以及 persistence、view、checkpoint、execution binding、runtime attachment、deletion 与 recovery kernels。Task persistence 独占 capability/health 类型、逐字段 wire projection、恢复重建与跨记录校验；Task view 无状态地派生并编码 revision 1 snapshot 的 Task/Run/Compact/UI 子树。canonical history 顶层的 Workspace frame 组装和 durable commit effect 仍由组合层执行；完整 snapshot 的根字段、姊妹子树、容量 buffer、revision 与交付也不进入 Task。该物理子模块不取得 executor、Agent event pump、跨 Workspace/Account/MCP admission、durable commit 或完整 snapshot 编排；组合对象只通过 callback-scoped projection capability 借出全局有界内存、credential 清洗、Skill catalog 写入与 pending-UI 观察，不向 Task kernel 暴露自身或执行资源。
 
+Product Skill 的 read-only package 用例也属于该 live aggregate：目录/归档 preview、已安装 definition 读取和 canonical `.skill` 导出只能由 Runtime 调用 package kernel；Workbench 仅解析已经授权 scope 的 canonical root，不解释 package bytes 或复制其限制与错误映射。
+
 ### 3.4 Agent 与 AgentCore
 
 Agent 是 MetaWork-owned 独立执行边界，也是 MetaWork 对 AgentCore 的 integration owner，拥有 Agent Runtime/Session/Conversation 的集成生命周期、callback、event pump 与 AgentCore terminal facts。Application 创建并关闭 Agent、注入其运行所需能力并把 event-ready wake 安排到主线程；Product Task 通过唯一 `agent_session` capability gateway 消费 Agent 公共 Session/Run 操作，组合层只持有 Task `Binding`/`Access`，不保存裸 Session/restore route、不管理 Agent Runtime 生命周期、不读取 Runtime 内部字段，也不借 Agent 获取通用 I/O。Agent 不拥有 Workspace、Task、产品 Run、Executor、持久化或 Bridge transport。
