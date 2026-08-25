@@ -8,6 +8,7 @@ const agent = @import("metawork_agent");
 const catalog = @import("product_skill_catalog");
 const enablement = @import("product_skill_enablement");
 const management = @import("product_skill_management");
+const management_runtime = @import("product_skill_management_runtime");
 const package = @import("product_skill_package");
 const policy = @import("product_skill_policy");
 const ports = @import("product_skill_ports");
@@ -32,15 +33,9 @@ pub const EnablementError = enablement.Error || enablement.FileStoreError || cat
     WorkspaceEpochMismatch,
 };
 
-pub const PackageError = package.Error || management.Error || error{
-    PersistenceFailed,
-    InvalidAsset,
-    AssetNotFound,
-    TargetUnavailable,
-    DestinationUnavailable,
-    TargetAlreadyExists,
-    WriteFailed,
-};
+pub const PackageError = management_runtime.Error;
+
+pub const MutationError = PackageError || Error || error{TaskBusy};
 
 pub const Scope = union(enum) {
     personal,
@@ -78,19 +73,6 @@ pub const ProjectionBudget = struct {
 
     fn replace(self: ProjectionBudget, old: usize, new: usize) void {
         self.replace_fn(self.context, old, new);
-    }
-};
-
-pub const CatalogObserver = struct {
-    context: *anyopaque,
-    changed_fn: *const fn (*anyopaque, management.Scope, ?*const catalog.Snapshot) void,
-
-    fn changed(
-        self: CatalogObserver,
-        scope: management.Scope,
-        snapshot: ?*const catalog.Snapshot,
-    ) void {
-        self.changed_fn(self.context, scope, snapshot);
     }
 };
 
@@ -377,13 +359,20 @@ pub const Runtime = struct {
     pub fn sync(
         self: *Runtime,
         budget: ProjectionBudget,
-        observer: CatalogObserver,
         snapshot_limits: catalog.Limits,
+        now_unix_seconds: ?u64,
     ) bool {
         var changed = false;
         if (self.personal_job) |job| if (jobFinished(job)) {
             self.personal_job = null;
-            self.finishJob(job, &self.state.catalog, .personal, budget, observer, snapshot_limits);
+            self.finishJob(
+                job,
+                &self.state.catalog,
+                .personal,
+                budget,
+                snapshot_limits,
+                now_unix_seconds,
+            );
             changed = true;
         };
         for (self.workspaces) |*entry| {
@@ -398,7 +387,14 @@ pub const Runtime = struct {
                 .personal => false,
             };
             if (current and !self.shutting_down)
-                self.finishJob(job, &workspace.control, job.scope, budget, observer, snapshot_limits)
+                self.finishJob(
+                    job,
+                    &workspace.control,
+                    job.scope,
+                    budget,
+                    snapshot_limits,
+                    now_unix_seconds,
+                )
             else {
                 discardOutcome(self.ports.catalog, &job.outcome);
                 job.deinit();
@@ -427,11 +423,10 @@ pub const Runtime = struct {
     pub fn finishShutdownAfterExecutorJoin(
         self: *Runtime,
         budget: ProjectionBudget,
-        observer: CatalogObserver,
         snapshot_limits: catalog.Limits,
     ) void {
         std.debug.assert(self.shutting_down);
-        _ = self.sync(budget, observer, snapshot_limits);
+        _ = self.sync(budget, snapshot_limits, null);
         self.invalidateControlWithBudget(&self.state.catalog, budget);
         for (self.workspaces) |*entry| if (entry.*) |*workspace|
             self.invalidateControlWithBudget(&workspace.control, budget);
@@ -450,79 +445,29 @@ pub const Runtime = struct {
         return self.state.enablement_health;
     }
 
+    pub fn mutationScope(
+        self: *const Runtime,
+        install_id: management.InstallId,
+    ) MutationError!management.Scope {
+        const current = self.state.inventoryConst().findConst(install_id) orelse
+            return error.AssetNotFound;
+        return current.scope;
+    }
+
     pub fn previewDirectory(
         self: *Runtime,
         absolute_path: []const u8,
     ) PackageError!package.Preview {
-        if (self.state.management_health != .ready or self.shutting_down)
-            return error.PersistenceFailed;
-        if (!std.fs.path.isAbsolute(absolute_path) or
-            !std.unicode.utf8ValidateSlice(absolute_path))
-            return error.InvalidAsset;
-        const source = std.Io.Dir.openDirAbsolute(
-            self.io,
-            absolute_path,
-            .{ .follow_symlinks = false, .iterate = true },
-        ) catch return error.InvalidAsset;
-        defer source.close(self.io);
-        return package.previewDirectory(self.io, self.allocator, source, .{});
+        try self.requireManagementReady();
+        return management_runtime.previewDirectory(self.managementContext(), absolute_path);
     }
 
     pub fn previewArchive(
         self: *Runtime,
         absolute_path: []const u8,
     ) PackageError!package.Preview {
-        if (self.state.management_health != .ready or self.shutting_down)
-            return error.PersistenceFailed;
-        if (!std.fs.path.isAbsolute(absolute_path) or
-            !std.unicode.utf8ValidateSlice(absolute_path) or
-            !hasArchiveExtension(absolute_path))
-            return error.InvalidAsset;
-        const archive = std.Io.Dir.openFileAbsolute(
-            self.io,
-            absolute_path,
-            .{ .follow_symlinks = false },
-        ) catch return error.InvalidAsset;
-        defer archive.close(self.io);
-        const inspection = package.inspectArchive(
-            self.io,
-            self.allocator,
-            archive,
-            .{},
-        ) catch return error.InvalidAsset;
-        const staging = try self.openStagingRoot();
-        defer staging.close(self.io);
-        var random: [16]u8 = undefined;
-        std.Io.randomSecure(self.io, &random) catch return error.PersistenceFailed;
-        const hex = std.fmt.bytesToHex(random, .lower);
-        var scratch_name: [47]u8 = undefined;
-        @memcpy(scratch_name[0..15], ".skill-preview-");
-        @memcpy(scratch_name[15..], &hex);
-        staging.createDir(
-            self.io,
-            &scratch_name,
-            privateDirectoryPermissions(),
-        ) catch return error.PersistenceFailed;
-        defer staging.deleteTree(self.io, &scratch_name) catch {};
-        const scratch = staging.openDir(self.io, &scratch_name, .{
-            .follow_symlinks = false,
-        }) catch return error.PersistenceFailed;
-        defer scratch.close(self.io);
-        package.extractArchive(self.io, archive, scratch) catch
-            return error.InvalidAsset;
-        const source = if (inspection.wrapperName()) |wrapper|
-            scratch.openDir(self.io, wrapper, .{
-                .follow_symlinks = false,
-            }) catch return error.InvalidAsset
-        else
-            scratch;
-        defer if (inspection.wrapperName() != null) source.close(self.io);
-        return package.previewDirectory(
-            self.io,
-            self.allocator,
-            source,
-            .{},
-        ) catch return error.InvalidAsset;
+        try self.requireManagementReady();
+        return management_runtime.previewArchive(self.managementContext(), absolute_path);
     }
 
     pub fn readDefinition(
@@ -530,27 +475,19 @@ pub const Runtime = struct {
         install_id: management.InstallId,
         root: *const management.CanonicalRoot,
     ) PackageError!package.Preview {
-        if (self.state.management_health != .ready or self.shutting_down)
-            return error.PersistenceFailed;
-        const current = self.state.inventoryConst().findConst(install_id) orelse
-            return error.AssetNotFound;
-        if (current.recovery != null or !current.scope.eql(root.scope))
-            return error.InvalidAsset;
-        const source = root.dir.openDir(
-            self.io,
-            current.target_entry,
-            .{ .follow_symlinks = false, .iterate = true },
-        ) catch return error.TargetUnavailable;
-        defer source.close(self.io);
-        return package.previewDirectory(self.io, self.allocator, source, .{});
+        try self.requireManagementReady();
+        return management_runtime.readDefinition(
+            self.managementContext(),
+            install_id,
+            root,
+        );
     }
 
     pub fn definitionScope(
         self: *const Runtime,
         install_id: management.InstallId,
     ) PackageError!management.Scope {
-        if (self.state.management_health != .ready or self.shutting_down)
-            return error.PersistenceFailed;
+        try self.requireManagementReady();
         const current = self.state.inventoryConst().findConst(install_id) orelse
             return error.AssetNotFound;
         if (current.recovery != null) return error.InvalidAsset;
@@ -561,8 +498,7 @@ pub const Runtime = struct {
         self: *const Runtime,
         install_id: management.InstallId,
     ) PackageError!management.Scope {
-        if (self.state.management_health != .ready or self.shutting_down)
-            return error.PersistenceFailed;
+        try self.requireManagementReady();
         const current = self.state.inventoryConst().findConst(install_id) orelse
             return error.AssetNotFound;
         if (current.state != .ready or current.recovery != null)
@@ -576,71 +512,136 @@ pub const Runtime = struct {
         root: *const management.CanonicalRoot,
         absolute_destination: []const u8,
     ) PackageError!state.ExportResult {
-        if (self.state.management_health != .ready or self.shutting_down or
-            !std.fs.path.isAbsolute(absolute_destination) or
-            !std.unicode.utf8ValidateSlice(absolute_destination))
-            return error.InvalidAsset;
-        const current = self.state.inventoryConst().findConst(install_id) orelse
-            return error.AssetNotFound;
-        if (current.state != .ready or current.recovery != null or
-            !current.scope.eql(root.scope))
-            return error.InvalidAsset;
-        const source = root.dir.openDir(
-            self.io,
-            current.target_entry,
-            .{ .follow_symlinks = false, .iterate = true },
-        ) catch return error.TargetUnavailable;
-        defer source.close(self.io);
-        var manifest = try package.inspectDirectory(
-            self.io,
-            self.allocator,
-            source,
-            .{},
-        );
-        defer manifest.deinit();
-        const destination = std.Io.Dir.openDirAbsolute(
-            self.io,
+        try self.requireManagementReady();
+        return management_runtime.exportPackage(
+            self.managementContext(),
+            install_id,
+            root,
             absolute_destination,
-            .{ .follow_symlinks = false },
-        ) catch return error.DestinationUnavailable;
-        defer destination.close(self.io);
-        var result: state.ExportResult = .{
-            .file_name = undefined,
-            .file_name_len = current.target_entry.len + ".skill".len,
-        };
-        @memcpy(result.file_name[0..current.target_entry.len], current.target_entry);
-        @memcpy(
-            result.file_name[current.target_entry.len..result.file_name_len],
-            ".skill",
         );
-        const output = destination.createFile(
-            self.io,
-            result.fileName(),
-            .{
-                .exclusive = true,
-                .permissions = privateFilePermissions(),
-                .resolve_beneath = true,
-            },
-        ) catch |err| return switch (err) {
-            error.PathAlreadyExists => error.TargetAlreadyExists,
-            else => error.DestinationUnavailable,
+    }
+
+    pub fn installDirectory(
+        self: *Runtime,
+        absolute_path: []const u8,
+        input: state.InstallInput,
+        now_unix_seconds: ?u64,
+    ) MutationError!state.MutationResult {
+        try self.requireMutationAvailable(input.scope);
+        const result = try management_runtime.installDirectory(
+            self.managementContext(),
+            try self.canonicalBase(input.scope),
+            absolute_path,
+            input,
+            now_unix_seconds,
+        );
+        self.scheduleReconciliation(input.scope) catch {
+            self.state.reconciliation = null;
         };
-        var output_open = true;
-        var output_exists = true;
-        defer {
-            if (output_open) output.close(self.io);
-            if (output_exists)
-                destination.deleteFile(self.io, result.fileName()) catch {};
-        }
-        package.exportArchive(self.io, source, output, &manifest) catch
-            return error.WriteFailed;
-        output.sync(self.io) catch return error.WriteFailed;
-        output.close(self.io);
-        output_open = false;
-        output_exists = false;
         return result;
     }
 
+    pub fn installArchive(
+        self: *Runtime,
+        absolute_path: []const u8,
+        input: state.InstallInput,
+        now_unix_seconds: ?u64,
+    ) MutationError!state.MutationResult {
+        try self.requireMutationAvailable(input.scope);
+        const result = try management_runtime.installArchive(
+            self.managementContext(),
+            try self.canonicalBase(input.scope),
+            absolute_path,
+            input,
+            now_unix_seconds,
+        );
+        self.scheduleReconciliation(input.scope) catch {
+            self.state.reconciliation = null;
+        };
+        return result;
+    }
+
+    pub fn reimportDirectory(
+        self: *Runtime,
+        install_id: management.InstallId,
+        absolute_path: []const u8,
+        expected_invocation_name: []const u8,
+        expected_content_hash: management.ContentHash,
+    ) MutationError!state.MutationResult {
+        const scope = try self.mutationScope(install_id);
+        try self.requireMutationAvailable(scope);
+        const result = try management_runtime.reimportDirectory(
+            self.managementContext(),
+            try self.canonicalBase(scope),
+            install_id,
+            absolute_path,
+            expected_invocation_name,
+            expected_content_hash,
+        );
+        self.scheduleReconciliation(scope) catch {
+            self.state.reconciliation = null;
+        };
+        return result;
+    }
+
+    pub fn reimportArchive(
+        self: *Runtime,
+        install_id: management.InstallId,
+        absolute_path: []const u8,
+        expected_invocation_name: []const u8,
+        expected_content_hash: management.ContentHash,
+    ) MutationError!state.MutationResult {
+        const scope = try self.mutationScope(install_id);
+        try self.requireMutationAvailable(scope);
+        const result = try management_runtime.reimportArchive(
+            self.managementContext(),
+            try self.canonicalBase(scope),
+            install_id,
+            absolute_path,
+            expected_invocation_name,
+            expected_content_hash,
+        );
+        self.scheduleReconciliation(scope) catch {
+            self.state.reconciliation = null;
+        };
+        return result;
+    }
+
+    pub fn uninstall(
+        self: *Runtime,
+        install_id: management.InstallId,
+        now_unix_seconds: ?u64,
+    ) MutationError!state.MutationResult {
+        const scope = try self.mutationScope(install_id);
+        try self.requireMutationAvailable(scope);
+        const result = try management_runtime.uninstall(
+            self.managementContext(),
+            try self.canonicalBase(scope),
+            install_id,
+            now_unix_seconds,
+        );
+        self.scheduleReconciliation(scope) catch {
+            self.state.reconciliation = null;
+        };
+        return result;
+    }
+
+    pub fn retryVerification(
+        self: *Runtime,
+        install_id: management.InstallId,
+    ) MutationError!state.MutationResult {
+        const scope = try self.mutationScope(install_id);
+        try self.requireMutationAvailable(scope);
+        const result = try management_runtime.retryVerification(
+            self.managementContext(),
+            install_id,
+        );
+        self.scheduleReconciliation(scope) catch |err| {
+            self.state.reconciliation = null;
+            return err;
+        };
+        return result;
+    }
     pub fn isSkillEnabled(
         self: *const Runtime,
         scope: management.Scope,
@@ -840,8 +841,8 @@ pub const Runtime = struct {
         control: *state.CatalogControl,
         scope: Scope,
         budget: ProjectionBudget,
-        observer: CatalogObserver,
         snapshot_limits: catalog.Limits,
+        now_unix_seconds: ?u64,
     ) void {
         defer job.deinit();
         const current = job.request_generation == control.request_generation and
@@ -865,7 +866,11 @@ pub const Runtime = struct {
                         acquisition.projection.deinit();
                         self.ports.catalog.release(acquisition.lease);
                         if (control.slot.snapshotConst() == null) control.slot = .unavailable;
-                        observer.changed(scope.managementScope(), null);
+                        self.reconcileCatalogResultNoFail(
+                            scope.managementScope(),
+                            null,
+                            now_unix_seconds,
+                        );
                         job.outcome = .failure;
                         return;
                     };
@@ -876,7 +881,11 @@ pub const Runtime = struct {
                         .snapshot = snapshot,
                     } };
                     budget.replace(old_bytes, snapshot.projected_bytes);
-                    observer.changed(scope.managementScope(), control.slot.snapshotConst());
+                    self.reconcileCatalogResultNoFail(
+                        scope.managementScope(),
+                        control.slot.snapshotConst(),
+                        now_unix_seconds,
+                    );
                     if (old_slot == .committed)
                         old_slot.committed.deinit(catalogReleaser(&self.ports.catalog));
                     job.outcome = .failure;
@@ -887,7 +896,11 @@ pub const Runtime = struct {
                 },
                 .failure => if (current) {
                     if (control.slot.snapshotConst() == null) control.slot = .unavailable;
-                    observer.changed(scope.managementScope(), null);
+                    self.reconcileCatalogResultNoFail(
+                        scope.managementScope(),
+                        null,
+                        now_unix_seconds,
+                    );
                 },
             },
             .cancelled => {
@@ -937,15 +950,109 @@ pub const Runtime = struct {
         candidate.* = undefined;
     }
 
-    fn openStagingRoot(self: *Runtime) PackageError!std.Io.Dir {
-        const path = self.state.staging_root orelse return error.PersistenceFailed;
-        return std.Io.Dir.openDirAbsolute(
-            self.io,
-            path,
-            .{ .follow_symlinks = false },
-        ) catch error.PersistenceFailed;
+    fn managementContext(self: *Runtime) management_runtime.Context {
+        return .{
+            .allocator = self.allocator,
+            .io = self.io,
+            .state = &self.state,
+        };
     }
 
+    fn requireManagementReady(self: *const Runtime) PackageError!void {
+        if (self.state.management_health != .ready or self.shutting_down)
+            return error.PersistenceFailed;
+    }
+
+    fn requireMutationAvailable(
+        self: *Runtime,
+        scope: management.Scope,
+    ) MutationError!void {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        if (self.state.management_health != .ready or
+            self.state.transactions == null)
+            return error.PersistenceFailed;
+        if (self.state.reconciliation != null) return error.TaskBusy;
+        switch (scope) {
+            .personal => if (self.personal_job != null) return error.CatalogLoading,
+            .project => |project| {
+                const workspace = self.findWorkspace(project.workspace_id) orelse
+                    return error.UnknownWorkspace;
+                if (workspace.epoch != project.workspace_epoch)
+                    return error.WorkspaceEpochMismatch;
+                if (workspace.job != null) return error.CatalogLoading;
+            },
+        }
+    }
+
+    fn canonicalBase(
+        self: *const Runtime,
+        scope: management.Scope,
+    ) MutationError![]const u8 {
+        return switch (scope) {
+            .personal => self.canonical_user_home orelse error.CatalogUnavailable,
+            .project => |project| root: {
+                const workspace = self.findWorkspaceConst(project.workspace_id) orelse
+                    return error.UnknownWorkspace;
+                if (workspace.epoch != project.workspace_epoch)
+                    return error.WorkspaceEpochMismatch;
+                break :root workspace.canonical_root;
+            },
+        };
+    }
+
+    fn scheduleReconciliation(
+        self: *Runtime,
+        scope: management.Scope,
+    ) MutationError!void {
+        switch (scope) {
+            .personal => try self.refreshPersonal(),
+            .project => |project| try self.refreshWorkspace(
+                project.workspace_id,
+                project.workspace_epoch,
+            ),
+        }
+    }
+
+    pub fn recoverTransactionsForScopeNoFail(
+        self: *Runtime,
+        scope: management.Scope,
+        now_unix_seconds: ?u64,
+    ) void {
+        if (self.state.management_health != .ready or
+            self.state.transactions == null)
+            return;
+        const base = self.canonicalBase(scope) catch {
+            self.state.management_health = .read_failed;
+            return;
+        };
+        management_runtime.recoverNoFail(
+            self.managementContext(),
+            scope,
+            base,
+            now_unix_seconds,
+        );
+    }
+
+    fn reconcileCatalogResultNoFail(
+        self: *Runtime,
+        scope: management.Scope,
+        snapshot: ?*const catalog.Snapshot,
+        now_unix_seconds: ?u64,
+    ) void {
+        const reconciliation = self.state.reconciliation orelse return;
+        if (!reconciliation.scope.eql(scope)) return;
+        const base = self.canonicalBase(scope) catch {
+            self.state.reconciliation = null;
+            return;
+        };
+        management_runtime.reconcileNoFail(
+            self.managementContext(),
+            scope,
+            base,
+            snapshot,
+            now_unix_seconds,
+        );
+    }
     fn noteEnablementPersistenceFailure(
         self: *Runtime,
         err: anyerror,
@@ -1065,26 +1172,11 @@ fn discardOutcome(catalog_port: ports.Catalog, outcome: *JobOutcome) void {
     }
 }
 
-fn hasArchiveExtension(path: []const u8) bool {
-    const extension = std.fs.path.extension(path);
-    return std.ascii.eqlIgnoreCase(extension, ".skill") or
-        std.ascii.eqlIgnoreCase(extension, ".zip");
-}
-
-fn privateDirectoryPermissions() std.Io.File.Permissions {
-    return if (builtin.os.tag == .windows) .default_dir else .fromMode(0o700);
-}
-
-fn privateFilePermissions() std.Io.File.Permissions {
-    return if (builtin.os.tag == .windows) .default_file else .fromMode(0o600);
-}
-
 const TestHarness = struct {
     queued: ?ports.Job = null,
     query_count: usize = 0,
     cancel_count: usize = 0,
     notify_count: usize = 0,
-    observer_count: usize = 0,
     projected_bytes: usize = 0,
     last_root: [128]u8 = undefined,
     last_root_len: usize = 0,
@@ -1115,13 +1207,6 @@ const TestHarness = struct {
             .context = self,
             .available_fn = available,
             .replace_fn = replace,
-        };
-    }
-
-    fn observer(self: *TestHarness) CatalogObserver {
-        return .{
-            .context = self,
-            .changed_fn = changed,
         };
     }
 
@@ -1183,15 +1268,6 @@ const TestHarness = struct {
         std.debug.assert(old <= self.projected_bytes);
         self.projected_bytes = self.projected_bytes - old + new;
     }
-
-    fn changed(
-        context: *anyopaque,
-        _: management.Scope,
-        _: ?*const catalog.Snapshot,
-    ) void {
-        const self: *TestHarness = @ptrCast(@alignCast(context));
-        self.observer_count += 1;
-    }
 };
 
 const test_snapshot_limits: catalog.Limits = .{
@@ -1220,6 +1296,93 @@ fn testRuntime(harness: *TestHarness) !Runtime {
     );
 }
 
+test "management mutation and failed catalog reconciliation stay inside Runtime" {
+    var harness: TestHarness = .{};
+    var home = std.testing.tmpDir(.{});
+    defer home.cleanup();
+    var source = std.testing.tmpDir(.{ .iterate = true });
+    defer source.cleanup();
+    try source.dir.writeFile(std.testing.io, .{
+        .sub_path = "SKILL.md",
+        .data = "---\nname: demo\ndescription: Demo\n---\n",
+    });
+    var staging = std.testing.tmpDir(.{});
+    defer staging.cleanup();
+    var persistence_dir = std.testing.tmpDir(.{});
+    defer persistence_dir.cleanup();
+    var persistence: management.FileStore = .{
+        .io = std.testing.io,
+        .dir = persistence_dir.dir,
+    };
+    var home_path_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home_path_len = try home.dir.realPath(std.testing.io, &home_path_storage);
+    const home_path = home_path_storage[0..home_path_len];
+    var source_path_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const source_path_len = try source.dir.realPath(std.testing.io, &source_path_storage);
+    const source_path = source_path_storage[0..source_path_len];
+    var staging_path_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const staging_path_len = try staging.dir.realPath(std.testing.io, &staging_path_storage);
+    const staging_path = staging_path_storage[0..staging_path_len];
+    var preview = try package.previewDirectory(
+        std.testing.io,
+        std.testing.allocator,
+        source.dir,
+        .{},
+    );
+    defer preview.deinit();
+    var runtime = try Runtime.init(
+        std.testing.io,
+        std.testing.allocator,
+        harness.effectPorts(),
+        .{
+            .state = .{ .management = .{
+                .file_store = &persistence,
+                .staging_root = staging_path,
+            } },
+            .max_workspaces = 1,
+            .canonical_user_home = home_path,
+        },
+        .{
+            .max_assets = 4,
+            .max_workspaces = 1,
+            .max_policy_keys = 4,
+            .max_policy_key_bytes = 64,
+        },
+    );
+    defer runtime.deinit();
+
+    const installed = try runtime.installDirectory(
+        source_path,
+        .{
+            .source_kind = .local_directory,
+            .scope = .personal,
+            .expected_invocation_name = preview.invocation_name,
+            .expected_content_hash = preview.content_hash,
+        },
+        100,
+    );
+    try std.testing.expect(installed.verification_pending);
+    try std.testing.expect(runtime.state.reconciliation != null);
+    try std.testing.expect(runtime.personalJobActive());
+    try std.testing.expect(runtime.state.inventoryConst().findConst(installed.install_id) != null);
+
+    harness.runQueued();
+    try std.testing.expect(runtime.sync(
+        harness.budget(),
+        test_snapshot_limits,
+        101,
+    ));
+    try std.testing.expect(runtime.state.reconciliation == null);
+    try std.testing.expect(runtime.state.inventoryConst().findConst(installed.install_id).?.recovery != null);
+
+    runtime.recoverTransactionsForScopeNoFail(.personal, 102);
+    const removed = try runtime.uninstall(installed.install_id, 103);
+    try std.testing.expect(!removed.verification_pending);
+    try std.testing.expect(runtime.state.inventoryConst().findConst(installed.install_id) == null);
+    harness.runQueued();
+    _ = runtime.sync(harness.budget(), test_snapshot_limits, 104);
+}
+
 test "catalog job failure is committed by the Product Skill owner" {
     var harness: TestHarness = .{};
     var runtime = try testRuntime(&harness);
@@ -1239,14 +1402,13 @@ test "catalog job failure is committed by the Product Skill owner" {
     harness.runQueued();
     try std.testing.expect(runtime.sync(
         harness.budget(),
-        harness.observer(),
         test_snapshot_limits,
+        null,
     ));
 
     try std.testing.expect(!runtime.hasWorkspaceJob(7));
     try std.testing.expectEqual(@as(usize, 1), harness.query_count);
     try std.testing.expectEqual(@as(usize, 1), harness.notify_count);
-    try std.testing.expectEqual(@as(usize, 1), harness.observer_count);
     try std.testing.expectEqualStrings("/workspace/a", harness.last_root[0..harness.last_root_len]);
     try std.testing.expectEqualStrings("3", harness.last_epoch[0..harness.last_epoch_len]);
     try std.testing.expect((try runtime.workspaceControlConst(7, 3)).slot == .unavailable);
@@ -1271,17 +1433,16 @@ test "workspace identity replacement discards stale completion and reschedules" 
     harness.runQueued();
     try std.testing.expect(runtime.sync(
         harness.budget(),
-        harness.observer(),
         test_snapshot_limits,
+        null,
     ));
     try std.testing.expect(runtime.hasWorkspaceJob(9));
-    try std.testing.expectEqual(@as(usize, 0), harness.observer_count);
 
     harness.runQueued();
     try std.testing.expect(runtime.sync(
         harness.budget(),
-        harness.observer(),
         test_snapshot_limits,
+        null,
     ));
     try std.testing.expectEqual(@as(usize, 2), harness.query_count);
     try std.testing.expectEqualStrings("/workspace/new", harness.last_root[0..harness.last_root_len]);
@@ -1300,7 +1461,6 @@ test "shutdown cancels queued catalog ownership before Runtime teardown" {
     try std.testing.expectEqual(@as(usize, 1), harness.notify_count);
     runtime.finishShutdownAfterExecutorJoin(
         harness.budget(),
-        harness.observer(),
         test_snapshot_limits,
     );
 

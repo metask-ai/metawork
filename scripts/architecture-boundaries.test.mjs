@@ -257,6 +257,7 @@ test("Product Skill has one live owner behind narrow composition ports", () => {
   const enablement = read("src/product/skill/enablement.zig");
   const packageKernel = read("src/product/skill/package.zig");
   const management = read("src/product/skill/management.zig");
+  const managementRuntime = read("src/product/skill/management_runtime.zig");
   const policy = read("src/product/skill/policy.zig");
   const ports = read("src/product/skill/ports.zig");
   const runtime = read("src/product/skill/runtime.zig");
@@ -300,6 +301,18 @@ test("Product Skill has one live owner behind narrow composition ports", () => {
     management,
     /Workbench|workbench_executor|std\.Thread|@import\("metawork_agent"\)/,
   );
+  assert.match(managementRuntime, /@import\("product_skill_management"\)/);
+  assert.match(managementRuntime, /@import\("product_skill_package"\)/);
+  assert.match(managementRuntime, /pub fn installDirectory/);
+  assert.match(managementRuntime, /pub fn reimportDirectory/);
+  assert.match(managementRuntime, /pub fn uninstall/);
+  assert.match(managementRuntime, /pub fn retryVerification/);
+  assert.match(managementRuntime, /pub fn recoverNoFail/);
+  assert.match(managementRuntime, /pub fn reconcileNoFail/);
+  assert.doesNotMatch(
+    managementRuntime,
+    /Workbench|WorkspaceView|TaskView|workbench_executor|std\.Thread|@import\("metawork_agent"\)|\*agent\.(?:Runtime|Session)/,
+  );
   assert.match(state, /@import\("metawork_agent"\)/);
   assert.match(state, /@import\("product_skill_catalog"\)/);
   assert.match(state, /@import\("product_skill_enablement"\)/);
@@ -338,6 +351,7 @@ test("Product Skill has one live owner behind narrow composition ports", () => {
   assert.match(runtime, /pub fn setEnabled/);
   assert.match(runtime, /fn commitEnablementCandidate/);
   assert.match(runtime, /pub fn reconcileEnablementNoFail/);
+  assert.match(runtime, /@import\("product_skill_management_runtime"\)/);
   assert.match(runtime, /@import\("product_skill_package"\)/);
   assert.match(runtime, /pub fn previewDirectory/);
   assert.match(runtime, /pub fn previewArchive/);
@@ -368,9 +382,9 @@ test("Product Skill has one live owner behind narrow composition ports", () => {
   );
   assert.doesNotMatch(
     projection,
-    /const CatalogJob = struct|fn scheduleCatalogQuery|fn scheduleSkillCatalogQuery|fn commitCatalogJobsNoFail|fn commitSkillEnablementCandidate|fn noteSkillEnablementPersistenceFailure|\.skill\.state\.enablement_(?:store|health|file_store)/,
+    /const CatalogJob = struct|fn scheduleCatalogQuery|fn scheduleSkillCatalogQuery|fn commitCatalogJobsNoFail|fn commitSkillEnablementCandidate|fn noteSkillEnablementPersistenceFailure|fn installSkillSource|fn reimportSkillSource|fn scheduleSkillReconciliation|fn noteSkillPersistenceFailure|fn reconcileSkillCatalogResultNoFail|skill_package_impl\.(?:previewDirectory|inspectDirectory|inspectArchive|extractArchive|exportArchive)|\.skill\.state\.(?:transactions|staging_root)|\.skill\.state\.enablement_(?:store|health|file_store)/,
   );
-  assert.match(projection, /fn requireSkillMutationAvailable/);
+  assert.match(projection, /fn requireSkillMutationAuthority/);
   assert.match(view, /@import\("product_skill_catalog"\)/);
   assert.match(view, /@import\("product_skill_management"\)/);
   assert.match(view, /@import\("product_skill_policy"\)/);
@@ -431,6 +445,7 @@ test("Product Skill has one live owner behind narrow composition ports", () => {
   assert.match(build, /src\/product\/skill\/catalog\.zig/);
   assert.match(build, /src\/product\/skill\/enablement\.zig/);
   assert.match(build, /src\/product\/skill\/management\.zig/);
+  assert.match(build, /src\/product\/skill\/management_runtime\.zig/);
   assert.match(build, /src\/product\/skill\/package\.zig/);
   assert.match(build, /src\/product\/skill\/policy\.zig/);
   assert.match(build, /src\/product\/skill\/ports\.zig/);
@@ -469,6 +484,10 @@ test("Product Skill has one live owner behind narrow composition ports", () => {
   assert.match(
     build,
     /product_skill_runtime\.addImport\("product_skill_enablement", skill_enablement\)/,
+  );
+  assert.match(
+    build,
+    /product_skill_runtime\.addImport\([\s\S]*?"product_skill_management_runtime"[\s\S]*?product_skill_management_runtime[\s\S]*?\)/,
   );
   assert.match(
     build,

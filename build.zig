@@ -932,6 +932,16 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     product_skill_policy.addImport("product_skill_enablement", skill_enablement);
     product_skill_policy.addImport("product_skill_management", skill_management);
     product_skill_policy.addImport("product_skill_state", product_skill_state);
+    const product_skill_management_runtime = b.createModule(.{
+        .root_source_file = b.path("src/product/skill/management_runtime.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    product_skill_management_runtime.addImport("product_skill_catalog", catalog_snapshot);
+    product_skill_management_runtime.addImport("product_skill_management", skill_management);
+    product_skill_management_runtime.addImport("product_skill_package", skill_package);
+    product_skill_management_runtime.addImport("product_skill_policy", product_skill_policy);
+    product_skill_management_runtime.addImport("product_skill_state", product_skill_state);
     const product_skill_ports = b.createModule(.{
         .root_source_file = b.path("src/product/skill/ports.zig"),
         .target = target,
@@ -947,6 +957,10 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     product_skill_runtime.addImport("product_skill_catalog", catalog_snapshot);
     product_skill_runtime.addImport("product_skill_enablement", skill_enablement);
     product_skill_runtime.addImport("product_skill_management", skill_management);
+    product_skill_runtime.addImport(
+        "product_skill_management_runtime",
+        product_skill_management_runtime,
+    );
     product_skill_runtime.addImport("product_skill_package", skill_package);
     product_skill_runtime.addImport("product_skill_policy", product_skill_policy);
     product_skill_runtime.addImport("product_skill_ports", product_skill_ports);

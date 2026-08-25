@@ -275,7 +275,6 @@ pub const SkillEnablementMutation = skill_state.EnablementMutation;
 pub const SkillInstallInput = skill_state.InstallInput;
 pub const SkillMutationResult = skill_state.MutationResult;
 pub const SkillExportResult = skill_state.ExportResult;
-const SkillReconciliation = skill_state.Reconciliation;
 
 pub const Configuration = struct {
     change_notifier: ChangeNotifier = .{},
@@ -1918,17 +1917,14 @@ pub const Workbench = struct {
         absolute_path: []const u8,
         input: SkillInstallInput,
     ) Error!SkillMutationResult {
-        if (input.source_kind != .local_directory) return error.InvalidAsset;
-        if (!std.fs.path.isAbsolute(absolute_path) or
-            !std.unicode.utf8ValidateSlice(absolute_path))
-            return error.InvalidAsset;
-        const source = std.Io.Dir.openDirAbsolute(
-            self.io,
+        try self.requireSkillMutationAuthority(input.scope);
+        const result = try self.skill.installDirectory(
             absolute_path,
-            .{ .follow_symlinks = false, .iterate = true },
-        ) catch return error.InvalidAsset;
-        defer source.close(self.io);
-        return self.installSkillSource(source, input);
+            input,
+            self.schedule_timer.now(),
+        );
+        self.bumpRevision();
+        return result;
     }
 
     pub fn installSkillArchive(
@@ -1936,152 +1932,14 @@ pub const Workbench = struct {
         absolute_path: []const u8,
         input: SkillInstallInput,
     ) Error!SkillMutationResult {
-        if (input.source_kind != .local_package or
-            !std.fs.path.isAbsolute(absolute_path) or
-            !std.unicode.utf8ValidateSlice(absolute_path) or
-            !hasSkillArchiveExtension(absolute_path))
-            return error.InvalidAsset;
-        const archive = std.Io.Dir.openFileAbsolute(
-            self.io,
+        try self.requireSkillMutationAuthority(input.scope);
+        const result = try self.skill.installArchive(
             absolute_path,
-            .{ .follow_symlinks = false },
-        ) catch return error.InvalidAsset;
-        defer archive.close(self.io);
-        const inspection = skill_package_impl.inspectArchive(
-            self.io,
-            self.allocator,
-            archive,
-            .{},
-        ) catch return error.InvalidAsset;
-        const staging_path = self.skill.state.staging_root orelse
-            return error.PersistenceFailed;
-        const staging = std.Io.Dir.openDirAbsolute(
-            self.io,
-            staging_path,
-            .{ .follow_symlinks = false },
-        ) catch return error.PersistenceFailed;
-        defer staging.close(self.io);
-        var random: [16]u8 = undefined;
-        std.Io.randomSecure(self.io, &random) catch
-            return error.PersistenceFailed;
-        const hex = std.fmt.bytesToHex(random, .lower);
-        var scratch_name: [46]u8 = undefined;
-        @memcpy(scratch_name[0..14], ".skill-import-");
-        @memcpy(scratch_name[14..], &hex);
-        staging.createDir(
-            self.io,
-            &scratch_name,
-            privateDirectoryPermissions(),
-        ) catch return error.PersistenceFailed;
-        defer staging.deleteTree(self.io, &scratch_name) catch {};
-        const scratch = staging.openDir(self.io, &scratch_name, .{
-            .follow_symlinks = false,
-        }) catch return error.PersistenceFailed;
-        defer scratch.close(self.io);
-        skill_package_impl.extractArchive(
-            self.io,
-            archive,
-            scratch,
-        ) catch return error.InvalidAsset;
-        const source = if (inspection.wrapperName()) |wrapper|
-            scratch.openDir(self.io, wrapper, .{
-                .follow_symlinks = false,
-            }) catch return error.InvalidAsset
-        else
-            scratch;
-        defer if (inspection.wrapperName() != null)
-            source.close(self.io);
-        return self.installSkillSource(source, input);
-    }
-
-    fn installSkillSource(
-        self: *Workbench,
-        source: std.Io.Dir,
-        input: SkillInstallInput,
-    ) Error!SkillMutationResult {
-        try self.requireSkillMutationAvailable(input.scope);
-        var preview = try skill_package_impl.previewDirectory(
-            self.io,
-            self.allocator,
-            source,
-            .{},
+            input,
+            self.schedule_timer.now(),
         );
-        defer preview.deinit();
-        if (!std.mem.eql(u8, preview.invocation_name, input.expected_invocation_name) or
-            !std.mem.eql(
-                u8,
-                &preview.content_hash,
-                &input.expected_content_hash,
-            ))
-            return error.InvalidAsset;
-        var manifest = try skill_package_impl.inspectDirectory(
-            self.io,
-            self.allocator,
-            source,
-            .{},
-        );
-        defer manifest.deinit();
-        if (!std.mem.eql(
-            u8,
-            &manifest.content_hash,
-            &input.expected_content_hash,
-        )) return error.InvalidAsset;
-        var root = try self.openSkillRoot(input.scope);
-        defer root.deinit();
-        const now = self.schedule_timer.now() orelse return error.PersistenceFailed;
-        if (now == 0) return error.PersistenceFailed;
-        const install_id = skill_management_impl.generateInstallId(
-            self.io,
-        ) catch |err| return switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-            else => error.PersistenceFailed,
-        };
-        const transactions = if (self.skill.state.transactions) |*value| value else return error.PersistenceFailed;
-        const published = try transactions.publish(
-            &root,
-            source,
-            &manifest,
-            .{
-                .asset = .{
-                    .install_id = install_id,
-                    .source_kind = input.source_kind,
-                    .scope = input.scope,
-                    .target_entry = preview.invocation_name,
-                    .content_hash = manifest.content_hash,
-                    .installed_at_unix_seconds = now,
-                },
-                .allow_replace = input.allow_replace,
-            },
-        );
-        transactions.markReconciliationUnavailable(install_id) catch |err| {
-            self.noteSkillPersistenceFailure(err);
-            return err;
-        };
-        var reconciliation: SkillReconciliation = .{
-            .install_id = install_id,
-            .scope = input.scope,
-            .invocation_name = undefined,
-            .invocation_name_len = preview.invocation_name.len,
-            .operation = if (published.replaced_existing) .replace else .install,
-        };
-        @memcpy(
-            reconciliation.invocation_name[0..preview.invocation_name.len],
-            preview.invocation_name,
-        );
-        self.skill.state.reconciliation = reconciliation;
-        self.scheduleSkillReconciliation(input.scope) catch {
-            self.skill.state.reconciliation = null;
-            self.bumpRevision();
-            return .{
-                .install_id = install_id,
-                .verification_pending = true,
-            };
-        };
         self.bumpRevision();
-        return .{
-            .install_id = install_id,
-            .verification_pending = true,
-        };
+        return result;
     }
 
     pub fn reimportSkillDirectory(
@@ -2091,21 +1949,16 @@ pub const Workbench = struct {
         expected_invocation_name: []const u8,
         expected_content_hash: skill_management_impl.ContentHash,
     ) Error!SkillMutationResult {
-        if (!std.fs.path.isAbsolute(absolute_path) or
-            !std.unicode.utf8ValidateSlice(absolute_path))
-            return error.InvalidAsset;
-        const source = std.Io.Dir.openDirAbsolute(
-            self.io,
-            absolute_path,
-            .{ .follow_symlinks = false, .iterate = true },
-        ) catch return error.InvalidAsset;
-        defer source.close(self.io);
-        return self.reimportSkillSource(
+        const scope = try self.skill.mutationScope(install_id);
+        try self.requireSkillMutationAuthority(scope);
+        const result = try self.skill.reimportDirectory(
             install_id,
-            source,
+            absolute_path,
             expected_invocation_name,
             expected_content_hash,
         );
+        self.bumpRevision();
+        return result;
     }
 
     pub fn reimportSkillArchive(
@@ -2115,214 +1968,42 @@ pub const Workbench = struct {
         expected_invocation_name: []const u8,
         expected_content_hash: skill_management_impl.ContentHash,
     ) Error!SkillMutationResult {
-        if (!std.fs.path.isAbsolute(absolute_path) or
-            !std.unicode.utf8ValidateSlice(absolute_path) or
-            !hasSkillArchiveExtension(absolute_path))
-            return error.InvalidAsset;
-        const archive = std.Io.Dir.openFileAbsolute(
-            self.io,
-            absolute_path,
-            .{ .follow_symlinks = false },
-        ) catch return error.InvalidAsset;
-        defer archive.close(self.io);
-        const inspection = skill_package_impl.inspectArchive(
-            self.io,
-            self.allocator,
-            archive,
-            .{},
-        ) catch return error.InvalidAsset;
-        const staging = try self.openSkillStagingRoot();
-        defer staging.close(self.io);
-        var random: [16]u8 = undefined;
-        std.Io.randomSecure(self.io, &random) catch
-            return error.PersistenceFailed;
-        const hex = std.fmt.bytesToHex(random, .lower);
-        var scratch_name: [48]u8 = undefined;
-        @memcpy(scratch_name[0..16], ".skill-reimport-");
-        @memcpy(scratch_name[16..], &hex);
-        staging.createDir(
-            self.io,
-            &scratch_name,
-            privateDirectoryPermissions(),
-        ) catch return error.PersistenceFailed;
-        defer staging.deleteTree(self.io, &scratch_name) catch {};
-        const scratch = staging.openDir(self.io, &scratch_name, .{
-            .follow_symlinks = false,
-        }) catch return error.PersistenceFailed;
-        defer scratch.close(self.io);
-        skill_package_impl.extractArchive(
-            self.io,
-            archive,
-            scratch,
-        ) catch return error.InvalidAsset;
-        const source = if (inspection.wrapperName()) |wrapper|
-            scratch.openDir(self.io, wrapper, .{
-                .follow_symlinks = false,
-            }) catch return error.InvalidAsset
-        else
-            scratch;
-        defer if (inspection.wrapperName() != null)
-            source.close(self.io);
-        return self.reimportSkillSource(
+        const scope = try self.skill.mutationScope(install_id);
+        try self.requireSkillMutationAuthority(scope);
+        const result = try self.skill.reimportArchive(
             install_id,
-            source,
+            absolute_path,
             expected_invocation_name,
             expected_content_hash,
         );
-    }
-
-    fn reimportSkillSource(
-        self: *Workbench,
-        install_id: skill_management_impl.InstallId,
-        source: std.Io.Dir,
-        expected_invocation_name: []const u8,
-        expected_content_hash: skill_management_impl.ContentHash,
-    ) Error!SkillMutationResult {
-        const current = self.skillInventory().findConst(install_id) orelse
-            return error.AssetNotFound;
-        const scope = current.scope;
-        const target_entry = try self.allocator.dupe(u8, current.target_entry);
-        defer self.allocator.free(target_entry);
-        try self.requireSkillMutationAvailable(scope);
-        var preview = try skill_package_impl.previewDirectory(
-            self.io,
-            self.allocator,
-            source,
-            .{},
-        );
-        defer preview.deinit();
-        if (!std.mem.eql(u8, preview.invocation_name, expected_invocation_name) or
-            !std.mem.eql(u8, preview.invocation_name, target_entry) or
-            !std.mem.eql(u8, &preview.content_hash, &expected_content_hash))
-            return error.InvalidAsset;
-        var manifest = try skill_package_impl.inspectDirectory(
-            self.io,
-            self.allocator,
-            source,
-            .{},
-        );
-        defer manifest.deinit();
-        if (!std.mem.eql(u8, &manifest.content_hash, &expected_content_hash))
-            return error.InvalidAsset;
-        var root = try self.openSkillRoot(scope);
-        defer root.deinit();
-        const transactions = if (self.skill.state.transactions) |*value| value else return error.PersistenceFailed;
-        try transactions.reimport(&root, install_id, source, &manifest);
-        transactions.markReconciliationUnavailable(install_id) catch |err| {
-            self.noteSkillPersistenceFailure(err);
-            return err;
-        };
-        self.setSkillReconciliation(
-            install_id,
-            scope,
-            target_entry,
-            .replace,
-        );
-        self.scheduleSkillReconciliation(scope) catch {
-            self.skill.state.reconciliation = null;
-            self.bumpRevision();
-            return .{ .install_id = install_id, .verification_pending = true };
-        };
         self.bumpRevision();
-        return .{ .install_id = install_id, .verification_pending = true };
+        return result;
     }
 
     pub fn uninstallSkill(
         self: *Workbench,
         install_id: skill_management_impl.InstallId,
     ) Error!SkillMutationResult {
-        const current = self.skillInventory().findConst(install_id) orelse
-            return error.AssetNotFound;
-        const scope = current.scope;
-        const target_entry = try self.allocator.dupe(u8, current.target_entry);
-        defer self.allocator.free(target_entry);
-        const pending_operation = if (current.state == .pending_verification and
-            current.recovery != null)
-            current.recovery.?.operation
-        else
-            null;
-        try self.requireSkillMutationAvailable(scope);
-        var root = try self.openSkillRoot(scope);
-        defer root.deinit();
-        const transactions = if (self.skill.state.transactions) |*value| value else return error.PersistenceFailed;
-        if (pending_operation) |operation| switch (operation) {
-            .install => {
-                try transactions.rollbackReconciliation(&root, install_id);
-                self.scheduleSkillReconciliation(scope) catch {};
-                self.bumpRevision();
-                return .{
-                    .install_id = install_id,
-                    .verification_pending = false,
-                };
-            },
-            .uninstall => {
-                const now = self.schedule_timer.now() orelse
-                    return error.PersistenceFailed;
-                try transactions.commitReconciliation(
-                    &root,
-                    install_id,
-                    null,
-                    now,
-                );
-                self.scheduleSkillReconciliation(scope) catch {};
-                self.bumpRevision();
-                return .{
-                    .install_id = install_id,
-                    .verification_pending = false,
-                };
-            },
-            .replace => try transactions.rollbackReconciliation(
-                &root,
-                install_id,
-            ),
-        };
-        try transactions.uninstall(&root, install_id);
-        transactions.markReconciliationUnavailable(install_id) catch |err| {
-            self.noteSkillPersistenceFailure(err);
-            return err;
-        };
-        self.setSkillReconciliation(
+        const scope = try self.skill.mutationScope(install_id);
+        try self.requireSkillMutationAuthority(scope);
+        const result = try self.skill.uninstall(
             install_id,
-            scope,
-            target_entry,
-            .uninstall,
+            self.schedule_timer.now(),
         );
-        self.scheduleSkillReconciliation(scope) catch {
-            self.skill.state.reconciliation = null;
-            self.bumpRevision();
-            return .{ .install_id = install_id, .verification_pending = true };
-        };
         self.bumpRevision();
-        return .{ .install_id = install_id, .verification_pending = true };
+        return result;
     }
 
     pub fn retrySkillVerification(
         self: *Workbench,
         install_id: skill_management_impl.InstallId,
     ) Error!SkillMutationResult {
-        const current = self.skillInventory().findConst(install_id) orelse
-            return error.AssetNotFound;
-        if (current.state != .pending_verification or current.recovery == null)
-            return error.InvalidAsset;
-        const scope = current.scope;
-        const target_entry = try self.allocator.dupe(u8, current.target_entry);
-        defer self.allocator.free(target_entry);
-        const operation = current.recovery.?.operation;
-        try self.requireSkillMutationAvailable(scope);
-        self.setSkillReconciliation(
-            install_id,
-            scope,
-            target_entry,
-            operation,
-        );
-        self.scheduleSkillReconciliation(scope) catch |err| {
-            self.skill.state.reconciliation = null;
-            return err;
-        };
+        const scope = try self.skill.mutationScope(install_id);
+        try self.requireSkillMutationAuthority(scope);
+        const result = try self.skill.retryVerification(install_id);
         self.bumpRevision();
-        return .{ .install_id = install_id, .verification_pending = true };
+        return result;
     }
-
     pub fn readSkillDefinition(
         self: *Workbench,
         install_id: skill_management_impl.InstallId,
@@ -2342,37 +2023,6 @@ pub const Workbench = struct {
         defer root.deinit();
         return self.skill.exportPackage(install_id, &root, absolute_destination);
     }
-    fn openSkillStagingRoot(self: *Workbench) Error!std.Io.Dir {
-        const path = self.skill.state.staging_root orelse return error.PersistenceFailed;
-        return std.Io.Dir.openDirAbsolute(
-            self.io,
-            path,
-            .{ .follow_symlinks = false },
-        ) catch error.PersistenceFailed;
-    }
-
-    fn setSkillReconciliation(
-        self: *Workbench,
-        install_id: skill_management_impl.InstallId,
-        scope: skill_management_impl.Scope,
-        invocation_name: []const u8,
-        operation: skill_management_impl.Operation,
-    ) void {
-        std.debug.assert(invocation_name.len <= skill_management_impl.max_target_entry_bytes);
-        var reconciliation: SkillReconciliation = .{
-            .install_id = install_id,
-            .scope = scope,
-            .invocation_name = undefined,
-            .invocation_name_len = invocation_name.len,
-            .operation = operation,
-        };
-        @memcpy(
-            reconciliation.invocation_name[0..invocation_name.len],
-            invocation_name,
-        );
-        self.skill.state.reconciliation = reconciliation;
-    }
-
     pub fn automaticWorkspacesAvailable(self: *const Workbench) bool {
         return self.automatic_workspaces != null;
     }
@@ -2634,27 +2284,11 @@ pub const Workbench = struct {
         };
     }
 
-    fn observeSkillCatalog(
-        context: *anyopaque,
-        scope: skill_management_impl.Scope,
-        snapshot: ?*const CatalogSnapshot,
-    ) void {
-        const self: *Workbench = @ptrCast(@alignCast(context));
-        self.reconcileSkillCatalogResultNoFail(scope, snapshot);
-    }
-
-    fn skillCatalogObserver(self: *Workbench) skill_runtime.CatalogObserver {
-        return .{
-            .context = self,
-            .changed_fn = observeSkillCatalog,
-        };
-    }
-
     fn syncSkillCatalogsNoFail(self: *Workbench) bool {
         return self.skill.sync(
             self.skillProjectionBudget(),
-            self.skillCatalogObserver(),
             catalogSnapshotLimits(self.limits),
+            self.schedule_timer.now(),
         );
     }
 
@@ -6853,7 +6487,6 @@ pub const Workbench = struct {
         self.executor_shutdown = true;
         self.skill.finishShutdownAfterExecutorJoin(
             self.skillProjectionBudget(),
-            self.skillCatalogObserver(),
             catalogSnapshotLimits(self.limits),
         );
         self.syncLifecycle();
@@ -8643,19 +8276,14 @@ pub const Workbench = struct {
         return count;
     }
 
-    fn requireSkillMutationAvailable(
+    fn requireSkillMutationAuthority(
         self: *Workbench,
         scope: skill_management_impl.Scope,
     ) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
-        if (self.skill.state.management_health != .ready or
-            self.skill.state.transactions == null)
-            return error.PersistenceFailed;
-        if (self.skill.state.reconciliation != null) return error.TaskBusy;
         switch (scope) {
             .personal => {
-                if (self.skill.personalJobActive()) return error.CatalogLoading;
                 for (self.tasks) |*entry| {
                     const task = &(entry.* orelse continue);
                     if (hasActiveOperation(task)) return error.TaskBusy;
@@ -8669,7 +8297,6 @@ pub const Workbench = struct {
                 if (workspace.kind != .manual or !workspace.visible or
                     workspace.authorization != .available)
                     return error.WorkspaceUnavailable;
-                if (self.skill.hasWorkspaceJob(workspace.id)) return error.CatalogLoading;
                 for (self.tasks) |*entry| {
                     const task = &(entry.* orelse continue);
                     if (task.durable.workspace_id == project.workspace_id and
@@ -8711,27 +8338,6 @@ pub const Workbench = struct {
         );
     }
 
-    fn scheduleSkillReconciliation(
-        self: *Workbench,
-        scope: skill_management_impl.Scope,
-    ) Error!void {
-        switch (scope) {
-            .personal => try self.skill.refreshPersonal(),
-            .project => |project| {
-                const workspace = self.findWorkspace(project.workspace_id) orelse
-                    return error.UnknownWorkspace;
-                if (workspace.epoch != project.workspace_epoch)
-                    return error.WorkspaceEpochMismatch;
-                try self.skill.refreshWorkspace(workspace.id, workspace.epoch);
-            },
-        }
-    }
-
-    fn noteSkillPersistenceFailure(self: *Workbench, err: anyerror) void {
-        self.skill.state.management_health =
-            skill_policy_impl.managementHealthAfterPersistenceFailure(err);
-    }
-
     fn skillEnablementWorkspace(
         context: *const anyopaque,
         index: usize,
@@ -8757,34 +8363,10 @@ pub const Workbench = struct {
         self: *Workbench,
         scope: skill_management_impl.Scope,
     ) void {
-        if (self.skill.state.management_health != .ready or
-            self.skill.state.transactions == null)
-            return;
-        var pending: std.ArrayList(skill_management_impl.InstallId) = .empty;
-        defer pending.deinit(self.allocator);
-        for (self.skillInventory().items()) |asset| {
-            if (asset.scope.eql(scope) and asset.recovery != null)
-                pending.append(self.allocator, asset.install_id) catch {
-                    self.skill.state.management_health = .write_failed;
-                    return;
-                };
-        }
-        if (pending.items.len == 0) return;
-        var root = self.openSkillRoot(scope) catch {
-            self.skill.state.management_health = .read_failed;
-            return;
-        };
-        defer root.deinit();
-        const now = self.schedule_timer.now() orelse {
-            self.skill.state.management_health = .read_failed;
-            return;
-        };
-        const transactions = &self.skill.state.transactions.?;
-        for (pending.items) |install_id|
-            transactions.recover(&root, install_id, now) catch |err| {
-                self.noteSkillPersistenceFailure(err);
-                return;
-            };
+        self.skill.recoverTransactionsForScopeNoFail(
+            scope,
+            self.schedule_timer.now(),
+        );
     }
 
     fn commitMcpRefreshJobNoFail(self: *Workbench) bool {
@@ -8844,61 +8426,6 @@ pub const Workbench = struct {
         job.deinit();
         self.rearmMcpRefreshTimerNoFail();
         return true;
-    }
-
-    fn reconcileSkillCatalogResultNoFail(
-        self: *Workbench,
-        scope: skill_management_impl.Scope,
-        catalog: ?*const CatalogSnapshot,
-    ) void {
-        const reconciliation = self.skill.state.reconciliation orelse return;
-        if (!reconciliation.scope.eql(scope)) return;
-        self.skill.state.reconciliation = null;
-        const snapshot = catalog orelse return;
-        var found = false;
-        for (snapshot.skills) |skill| {
-            if (std.mem.eql(
-                u8,
-                skill.invocation_name,
-                reconciliation.invocationName(),
-            )) {
-                found = true;
-                break;
-            }
-        }
-        var has_matching_issue = false;
-        for (snapshot.issues) |issue| {
-            const issue_name = issue.skill_policy_key orelse continue;
-            if (std.mem.eql(
-                u8,
-                issue_name,
-                reconciliation.invocationName(),
-            )) {
-                has_matching_issue = true;
-                break;
-            }
-        }
-        const accepted = !has_matching_issue and switch (reconciliation.operation) {
-            .install, .replace => found,
-            .uninstall => !found,
-        };
-        var root = self.openSkillRoot(scope) catch return;
-        defer root.deinit();
-        const transactions = if (self.skill.state.transactions) |*value| value else return;
-        if (accepted) {
-            const now = self.schedule_timer.now() orelse return;
-            transactions.commitReconciliation(
-                &root,
-                reconciliation.install_id,
-                null,
-                now,
-            ) catch |err| self.noteSkillPersistenceFailure(err);
-        } else {
-            transactions.rollbackReconciliation(
-                &root,
-                reconciliation.install_id,
-            ) catch |err| self.noteSkillPersistenceFailure(err);
-        }
     }
 
     fn workspaceHasTasks(self: *const Workbench, workspace_id: u64) bool {
@@ -10999,20 +10526,6 @@ fn commitBeginFailure(run: *RunRecord, failure: lifecycle.BeginRunFailure) void 
         "",
         false,
     );
-}
-
-fn hasSkillArchiveExtension(path: []const u8) bool {
-    const extension = std.fs.path.extension(path);
-    return std.ascii.eqlIgnoreCase(extension, ".skill") or
-        std.ascii.eqlIgnoreCase(extension, ".zip");
-}
-
-fn privateDirectoryPermissions() std.Io.File.Permissions {
-    return if (builtin.os.tag == .windows) .default_dir else .fromMode(0o700);
-}
-
-fn privateFilePermissions() std.Io.File.Permissions {
-    return if (builtin.os.tag == .windows) .default_file else .fromMode(0o600);
 }
 
 fn cancelTaskCheckpoints(task: *TaskView) void {

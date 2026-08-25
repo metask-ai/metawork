@@ -96,7 +96,7 @@ MCP 不形成第五个 Product owner。`src/product/mcp*` 只是 Workbench 持�
 
 `src/product/task*` 拥有 Task aggregate、Run/Compact record、Agent event 的产品状态转换与 terminal event-drain gate、terminal/interruption/lifecycle/recovery policy，以及 persistence、view、checkpoint、execution binding、runtime attachment、deletion 与 recovery kernels。Task persistence 独占 capability/health 类型、逐字段 wire projection、恢复重建与跨记录校验；Task view 无状态地派生并编码 revision 1 snapshot 的 Task/Run/Compact/UI 子树。canonical history 顶层的 Workspace frame 组装和 durable commit effect 仍由组合层执行；完整 snapshot 的根字段、姊妹子树、容量 buffer、revision 与交付也不进入 Task。该物理子模块不取得 executor、Agent event pump、跨 Workspace/Account/MCP admission、durable commit 或完整 snapshot 编排；组合对象只通过 callback-scoped projection capability 借出全局有界内存、credential 清洗、Skill catalog 写入与 pending-UI 观察，不向 Task kernel 暴露自身或执行资源。
 
-Product Skill 的 read-only package 用例也属于该 live aggregate：目录/归档 preview、已安装 definition 读取和 canonical `.skill` 导出只能由 Runtime 调用 package kernel；Workbench 仅解析已经授权 scope 的 canonical root，不解释 package bytes 或复制其限制与错误映射。
+Product Skill 的本地资产用例也属于该 live aggregate：`management_runtime.zig` 在总 Runtime 内部独占目录/归档 preview、已安装 definition 读取、canonical `.skill` 导出、install/reimport/uninstall/retry、staging、恢复和 catalog reconciliation，并调用唯一 package/management kernels；总 Runtime 只协调 catalog refresh，Workbench 仅证明 Workspace authority 与 Task quiescence、传入时间事实并发布 revision，不解释 package bytes 或执行 Transactions。
 
 ### 3.4 Agent 与 AgentCore
 
