@@ -382,7 +382,6 @@ pub const CompactRecord = struct {
     terminal_diagnostic: []u8,
     redaction_secret: []const u8 = &.{},
     worker_reference_held: std.atomic.Value(bool) = .init(false),
-    session_reference_held: std.atomic.Value(bool) = .init(false),
     checkpoint_export_context: CheckpointExportContext = undefined,
     checkpoint: CheckpointPostprocess = .{},
 };

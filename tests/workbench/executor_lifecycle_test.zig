@@ -25,6 +25,130 @@ const ShutdownContext = struct {
     }
 };
 
+const BindingCloseContext = struct {
+    binding: *product_task.agent_session.Binding,
+    finished: std.atomic.Value(bool) = .init(false),
+
+    fn run(self: *@This()) void {
+        _ = self.binding.closeOutcome(.session_close);
+        self.finished.store(true, .release);
+    }
+};
+
+fn taskSessionOpenOptions() lifecycle.SessionOpenOptions {
+    const workspace_root = if (std.fs.path.sep == '\\')
+        "C:\\tmp\\metawork-task-session-gateway"
+    else
+        "/tmp/metawork-task-session-gateway";
+    const temporary_root = if (std.fs.path.sep == '\\') "C:\\tmp" else "/tmp";
+    return .{
+        .provider = .anthropic,
+        .permission_mode = .default,
+        .shell_policy = .disabled,
+        .credential = "fixture-secret",
+        .model = "fixture-model",
+        .workspace = .{
+            .canonical_root = workspace_root,
+            .trust = .{ .temporary = temporary_root },
+        },
+    };
+}
+
+test "Task Session Binding close waits for Access quiescence and returns its Runtime slot" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 1,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+
+    var binding = try product_task.agent_session.Binding.open(
+        runtime,
+        taskSessionOpenOptions(),
+    );
+    var access = try binding.acquireAccess();
+    var access_live = true;
+    defer if (access_live) access.deinit();
+
+    var context = BindingCloseContext{ .binding = &binding };
+    const close_thread = try std.Thread.spawn(.{}, BindingCloseContext.run, .{&context});
+    var close_thread_live = true;
+    defer if (close_thread_live) {
+        if (access_live) {
+            access.deinit();
+            access_live = false;
+        }
+        close_thread.join();
+    };
+
+    for (0..10_000) |_| {
+        if (binding.acquireAccess()) |probe_value| {
+            var probe = probe_value;
+            probe.deinit();
+            std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
+            continue;
+        } else |err| {
+            try std.testing.expectEqual(error.SessionClosing, err);
+            break;
+        }
+    } else return error.TestUnexpectedResult;
+    try std.testing.expect(!context.finished.load(.acquire));
+
+    access.deinit();
+    access_live = false;
+    close_thread.join();
+    close_thread_live = false;
+    try std.testing.expect(context.finished.load(.acquire));
+    try std.testing.expectEqual(
+        product_task.agent_session.BindingState.closed,
+        binding.state(),
+    );
+    try binding.releaseClosed();
+
+    var replacement = try product_task.agent_session.Binding.open(
+        runtime,
+        taskSessionOpenOptions(),
+    );
+    switch (replacement.closeOutcome(.session_close)) {
+        .closed => {},
+        .failure => return error.TestUnexpectedResult,
+    }
+    try replacement.releaseClosed();
+}
+
+test "Task Session Binding is terminal after Runtime shutdown relinquish" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 1,
+    });
+    var shutdown_complete = false;
+    defer {
+        if (!shutdown_complete) shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+
+    var binding = try product_task.agent_session.Binding.open(
+        runtime,
+        taskSessionOpenOptions(),
+    );
+    try shutdownTestComposition(runtime);
+    shutdown_complete = true;
+    binding.relinquishAfterRuntimeShutdown();
+
+    try std.testing.expectEqual(
+        product_task.agent_session.BindingState.relinquished,
+        binding.state(),
+    );
+    try std.testing.expectEqual(@as(u64, 0), binding.routeId());
+    try std.testing.expectError(error.RuntimeShuttingDown, binding.acquireAccess());
+}
+
 const TaskPersistenceProbe = struct {
     result: product_task.persistence.Commit = .committed,
     storage: ?[]u8 = null,
@@ -1420,7 +1544,7 @@ test "Idle Task model persistence failure restores Session and detaches on unkno
     const runtime = try createTestComposition(.{
         .worker_count = 1,
         .queue_capacity = 1,
-        .max_sessions = 2,
+        .max_sessions = 1,
     });
     defer {
         shutdownTestComposition(runtime) catch unreachable;
@@ -1443,7 +1567,7 @@ test "Idle Task model persistence failure restores Session and detaches on unkno
                 .worker_count = 1,
                 .queue_capacity = 1,
                 .max_workspaces = 1,
-                .max_tasks = 1,
+                .max_tasks = 2,
                 .max_runs_per_task = 1,
                 .max_tools_per_run = 1,
             },
@@ -1479,7 +1603,7 @@ test "Idle Task model persistence failure restores Session and detaches on unkno
                 .worker_count = 1,
                 .queue_capacity = 1,
                 .max_workspaces = 1,
-                .max_tasks = 1,
+                .max_tasks = 2,
                 .max_runs_per_task = 1,
                 .max_tools_per_run = 1,
             },
@@ -1499,17 +1623,14 @@ test "Idle Task model persistence failure restores Session and detaches on unkno
         const after = try workbench.taskExecutionIdentity(task_id);
         try std.testing.expectEqualStrings("fixture-model", after.model);
         try std.testing.expectEqual(projection_before, workbench.projectionBytesForTest());
-        var snapshot_storage: [128 * 1024]u8 = undefined;
-        const snapshot = try workbench.writeSnapshot(&snapshot_storage);
-        const task_start = std.mem.indexOf(u8, snapshot, "\"id\":\"1\"") orelse
-            return error.TestUnexpectedResult;
-        try std.testing.expect(
-            std.mem.indexOf(
-                u8,
-                snapshot[task_start..],
-                "\"unavailableReason\":\"runtime_detached\"",
-            ) != null,
+        try waitTaskSnapshot(
+            &workbench,
+            "\"id\":\"1\"",
+            "\"unavailableReason\":\"runtime_detached\"",
         );
+        const replacement = try openSession(runtime);
+        try closeSession(replacement, .session_close);
+        try runtime.releaseClosedSession(replacement);
     }
 }
 

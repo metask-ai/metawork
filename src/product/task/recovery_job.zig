@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const agent = @import("metawork_agent");
+const agent_session = @import("product_task_agent_session");
 const checkpoint_record = @import("product_task_checkpoint_record");
 const checkpoint_store = @import("product_task_checkpoint_store");
 const catalog_snapshot = @import("metawork_product_skill").catalog;
@@ -120,8 +121,8 @@ pub const Failure = enum {
 };
 
 pub const Candidate = struct {
-    runtime: *agent.Runtime,
-    route: agent.SessionRestoreRoute,
+    binding: agent_session.Binding,
+    report: agent.CheckpointRestoreReport,
     execution: owned_execution.OwnedTaskExecution,
     pinned_catalog: catalog_snapshot.Snapshot,
 
@@ -135,15 +136,19 @@ pub const Candidate = struct {
         return value;
     }
 
+    pub fn takeBinding(self: *Candidate) agent_session.Binding {
+        return self.binding.take();
+    }
+
     /// Releases every candidate-owned resource on all paths. A failed close or
     /// release leaves the Session owned by the Agent Runtime, but the execution
     /// secret and catalog projection must never survive that failure.
     pub fn discard(self: *Candidate) bool {
-        var released = switch (self.route.session.closeOutcome(.session_close)) {
+        var released = switch (self.binding.closeOutcome(.session_close)) {
             .closed => true,
             .failure => false,
         };
-        if (released) self.runtime.releaseClosedSession(self.route.session) catch {
+        if (released) self.binding.releaseClosed() catch {
             released = false;
         };
         self.execution.deinit();
@@ -300,7 +305,7 @@ pub const Job = struct {
         defer source.deinit();
 
         const execution = self.attempt.execution.input();
-        const route = self.runtime.restoreSessionRoute(.{
+        var restored = agent_session.restore(self.runtime, .{
             .session = .{
                 .provider = self.attempt.provider,
                 .permission_mode = .accept_edits,
@@ -335,29 +340,37 @@ pub const Job = struct {
         }) catch |err| return .{ .failure = mapRestoreError(err) };
         self.runtime.releaseSkillCatalog(acquisition.lease) catch {
             lease_live = false;
-            return .{ .failure = if (discardRoute(self.runtime, route))
+            return .{ .failure = if (discardBinding(&restored.binding))
                 .skill_catalog_unavailable
             else
                 .candidate_cleanup_failed };
         };
         lease_live = false;
-        if (route.report.health != .complete)
-            return .{ .failure = if (discardRoute(self.runtime, route))
+        if (restored.report.health != .complete)
+            return .{ .failure = if (discardBinding(&restored.binding))
                 .degraded
             else
                 .candidate_cleanup_failed };
 
-        route.session.setModel(self.attempt.model) catch {
-            return .{ .failure = if (discardRoute(self.runtime, route))
+        var access = restored.binding.acquireAccess() catch {
+            return .{ .failure = if (discardBinding(&restored.binding))
                 .restore_rejected
             else
                 .candidate_cleanup_failed };
         };
+        access.setModel(self.attempt.model) catch {
+            access.deinit();
+            return .{ .failure = if (discardBinding(&restored.binding))
+                .restore_rejected
+            else
+                .candidate_cleanup_failed };
+        };
+        access.deinit();
 
         snapshot_live = false;
         return .{ .candidate = .{
-            .runtime = self.runtime,
-            .route = route,
+            .binding = restored.takeBinding(),
+            .report = restored.report,
             .execution = self.attempt.execution.take(),
             .pinned_catalog = snapshot,
         } };
@@ -390,12 +403,12 @@ fn mapRestoreError(err: anyerror) Failure {
     };
 }
 
-fn discardRoute(runtime: *agent.Runtime, route: agent.SessionRestoreRoute) bool {
-    switch (route.session.closeOutcome(.session_close)) {
+fn discardBinding(binding: *agent_session.Binding) bool {
+    switch (binding.closeOutcome(.session_close)) {
         .closed => {},
         .failure => return false,
     }
-    runtime.releaseClosedSession(route.session) catch return false;
+    binding.releaseClosed() catch return false;
     return true;
 }
 

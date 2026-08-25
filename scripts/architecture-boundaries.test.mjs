@@ -271,6 +271,9 @@ test("Product Task kernels have one physical home without taking the executor", 
   const taskState = read("src/product/task/state.zig");
   const taskPolicy = read("src/product/task/policy.zig");
   const taskView = read("src/product/task/view.zig");
+  const taskAgentSession = read("src/product/task/agent_session.zig");
+  const taskRuntime = read("src/product/task/runtime.zig");
+  const taskKernelFiles = zigFiles("src/product/task/");
   const projection = read("src/workbench/projection.zig");
   const executor = read("src/workbench/executor.zig");
   const workbenchRoot = read("src/workbench.zig");
@@ -282,6 +285,7 @@ test("Product Task kernels have one physical home without taking the executor", 
     "checkpoint_record",
     "checkpoint_store",
     "execution_binding",
+    "agent_session",
     "runtime",
     "deletion",
     "recovery",
@@ -312,6 +316,7 @@ test("Product Task kernels have one physical home without taking the executor", 
     /workbench_executor|@import\("metawork_workbench"\)/,
   );
   assert.match(build, /src\/product\/task\/recovery_job\.zig/);
+  assert.match(build, /src\/product\/task\/agent_session\.zig/);
   assert.match(build, /src\/product\/task\/state\.zig/);
   assert.match(build, /src\/product\/task\/policy\.zig/);
   assert.match(build, /src\/product\/task\/view\.zig/);
@@ -452,7 +457,37 @@ test("Product Task kernels have one physical home without taking the executor", 
   }
   assert.match(projection, /task_view\.writeProjection\(/);
   assert.match(projection, /task_view\.writePendingUi\(/);
-  assert.match(projection, /session\.copyPendingUiRequest\(/);
+  assert.match(projection, /access\.copyPendingUiRequest\(/);
+  assert.match(taskAgentSession, /session: \?\*agent\.Session/);
+  assert.match(taskAgentSession, /pub const Binding = struct/);
+  assert.match(taskAgentSession, /pub const Access = struct/);
+  assert.match(taskAgentSession, /session\.retainReference\(\)/);
+  assert.match(taskAgentSession, /session\.releaseReference\(\)/);
+  assert.match(taskAgentSession, /releaseClosedSession\(value\.session\)/);
+  assert.doesNotMatch(taskAgentSession, /rawSession/);
+  assert.doesNotMatch(
+    projection,
+    /\*(?:lifecycle|agent)\.Session|createSessionRoute|restoreSessionRoute|releaseClosedSession|SessionRestoreRoute|SessionRoute|\.session\.(?:prepareRun|prepareCompact|copyPendingUiRequest|respondPermission|setModel|refreshSkillCatalog|closeOutcome)/,
+  );
+  for (const file of taskKernelFiles) {
+    if (file === "src/product/task/agent_session.zig") continue;
+    const source = read(file);
+    assert.doesNotMatch(
+      source,
+      /\*(?:agent|lifecycle)\.Session|(?:agent|lifecycle)\.SessionRoute|(?:agent|lifecycle)\.SessionRestoreRoute|createSessionRoute|restoreSessionRoute|releaseClosedSession/,
+      `${file} must consume Binding, Access, or typed Session facts only`,
+    );
+  }
+  assert.doesNotMatch(
+    productTask,
+    /\*(?:agent|lifecycle)\.Session|(?:agent|lifecycle)\.SessionRoute|(?:agent|lifecycle)\.SessionRestoreRoute/,
+  );
+  assert.match(taskRuntime, /binding: agent_session\.Binding/);
+  assert.doesNotMatch(taskRuntime, /session: \*agent\.Session|route_id: u64/);
+  assert.doesNotMatch(
+    recoveryJob,
+    /route: agent\.SessionRestoreRoute|candidate\.route/,
+  );
   assert.match(projection, /pub fn writeSnapshot\(/);
   assert.match(
     projection,

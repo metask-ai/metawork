@@ -98,7 +98,7 @@ MCP 不形成第五个 Product owner。`src/product/mcp*` 只是 Workbench 持�
 
 ### 3.4 Agent 与 AgentCore
 
-Agent 是 MetaWork-owned 独立执行边界，也是 MetaWork 对 AgentCore 的 integration owner，拥有 Agent Runtime/Session/Conversation 的集成生命周期、callback、event pump 与 AgentCore terminal facts。Application 创建并关闭 Agent、注入其运行所需能力并把 event-ready wake 安排到主线程；Workbench 直接消费 Agent 公共执行类型和操作，但不管理 Agent Runtime 生命周期、不读取 Runtime 内部字段，也不借 Agent 获取通用 I/O。Agent 不拥有 Workspace、Task、产品 Run、Executor、持久化或 Bridge transport。
+Agent 是 MetaWork-owned 独立执行边界，也是 MetaWork 对 AgentCore 的 integration owner，拥有 Agent Runtime/Session/Conversation 的集成生命周期、callback、event pump 与 AgentCore terminal facts。Application 创建并关闭 Agent、注入其运行所需能力并把 event-ready wake 安排到主线程；Product Task 通过唯一 `agent_session` capability gateway 消费 Agent 公共 Session/Run 操作，组合层只持有 Task `Binding`/`Access`，不保存裸 Session/restore route、不管理 Agent Runtime 生命周期、不读取 Runtime 内部字段，也不借 Agent 获取通用 I/O。Agent 不拥有 Workspace、Task、产品 Run、Executor、持久化或 Bridge transport。
 
 AgentCore 拥有 Provider 调用、agent loop、Conversation、built-in tools、Session、结构化 CoreEvent、同步 UI request 和 RunResult；这些是 AgentCore 内部的执行机制与协议状态。Agent 通过官方 SDK 集成并管理这些机制在 MetaWork 中的 Runtime/Session 生命周期、同步、所有权引用和执行 API，但不取得 AgentCore 实现的内部 ownership。AgentCore 不拥有 MetaWork 的 Workspace、Task、Run 产品历史、Renderer projection 或持久化 policy。
 

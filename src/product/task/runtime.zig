@@ -1,8 +1,8 @@
 //! Process-only Task resource ownership and legal operation state.
 
 const std = @import("std");
-const agent = @import("metawork_agent");
 const catalog_snapshot = @import("metawork_product_skill").catalog;
+const agent_session = @import("product_task_agent_session");
 const owned_execution = @import("product_task_execution_binding");
 const recovery_job = @import("product_task_recovery_job");
 
@@ -18,9 +18,8 @@ pub const AttachedHealth = enum {
 };
 
 pub const LiveAttachment = struct {
-    session: *agent.Session,
+    binding: agent_session.Binding,
     execution: owned_execution.OwnedTaskExecution,
-    route_id: u64,
     pinned_catalog: ?catalog_snapshot.Snapshot,
     health: AttachedHealth = .available,
 };
@@ -112,16 +111,22 @@ pub const State = struct {
         };
     }
 
-    pub fn session(self: *State) ?*agent.Session {
-        const value = self.attached() orelse return null;
-        return value.session;
+    pub fn acquireAccess(self: *State) !agent_session.Access {
+        const value = self.attached() orelse return error.SessionClosing;
+        return value.binding.acquireAccess();
     }
 
-    pub fn closingSession(self: *State) ?*agent.Session {
-        return switch (self.attachment) {
-            .closing => |*value| value.live.session,
-            .detached, .attached => null,
-        };
+    pub fn acquireLiveAccess(self: *State) !agent_session.Access {
+        const value = self.live() orelse return error.SessionClosing;
+        return value.binding.acquireAccess();
+    }
+
+    pub fn hasAttachedSession(self: *const State) bool {
+        return self.attachedConst() != null;
+    }
+
+    pub fn hasClosingSession(self: *const State) bool {
+        return self.attachment == .closing;
     }
 
     pub fn execution(self: *State) ?*owned_execution.OwnedTaskExecution {
@@ -136,7 +141,7 @@ pub const State = struct {
 
     pub fn routeId(self: *const State) u64 {
         const value = self.liveConst() orelse return 0;
-        return value.route_id;
+        return value.binding.routeId();
     }
 
     pub fn pinnedCatalog(self: *State) ?*catalog_snapshot.Snapshot {
@@ -182,7 +187,7 @@ test "attachment and operation states exclude partial resource tuples" {
     try std.testing.expectEqual(@as(usize, 3), std.meta.fields(Attachment).len);
     try std.testing.expectEqual(@as(usize, 4), std.meta.fields(ActiveOperation).len);
     var state = State{};
-    try std.testing.expect(state.session() == null);
+    try std.testing.expect(!state.hasAttachedSession());
     try std.testing.expect(state.execution() == null);
     try std.testing.expectEqual(@as(u64, 0), state.routeId());
 }
