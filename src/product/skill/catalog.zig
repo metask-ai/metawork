@@ -1,4 +1,4 @@
-//! Workbench-owned immutable compiled Skill authority projection.
+//! Product-owned immutable compiled Skill authority projection.
 
 const std = @import("std");
 const lifecycle = @import("metawork_agent");

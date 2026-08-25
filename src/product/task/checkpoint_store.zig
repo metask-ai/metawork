@@ -1,4 +1,4 @@
-//! Workbench-owned immutable checkpoint blob store.
+//! Product Task immutable checkpoint blob store.
 //!
 //! Application owns this value's process lifetime so the exclusive writer
 //! lock spans restore through shutdown. AgentCore bytes enter only through a

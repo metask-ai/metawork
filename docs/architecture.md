@@ -58,13 +58,13 @@ flowchart TB
 
 ### 词汇对账
 
-| 词          | 含义                                              | 图节点      | 所有权表行         | 源码                                                                |
-| ----------- | ------------------------------------------------- | ----------- | ------------------ | ------------------------------------------------------------------- |
-| Application | 组合、用例编排、平台能力适配与生命周期边界        | APPLICATION | Application        | `src/main.zig`、`src/app.zig`、`src/app/`、`src/native_sdk_compat/` |
-| Product     | 产品逻辑边界；不是统一源码 module 或 facade       | PRODUCT     | Account、Workbench | `src/product/account*`、`src/product/mcp*`、`src/workbench*`        |
-| Agent       | AgentCore 执行、Session/Conversation 与事件泵边界 | AGENT       | Agent              | `src/agent.zig`、`src/agent/`                                       |
-| Bridge      | Renderer 与 MetaWork 本地边界之间的唯一通信边界   | BRIDGE      | Bridge             | `src/bridge*`                                                       |
-| Renderer    | 产品 WebUI 模块                                   | RENDERER    | Renderer           | `frontend/`（含 `bridge/` 合同实现层）                              |
+| 词          | 含义                                              | 图节点      | 所有权表行         | 源码                                                                                                    |
+| ----------- | ------------------------------------------------- | ----------- | ------------------ | ------------------------------------------------------------------------------------------------------- |
+| Application | 组合、用例编排、平台能力适配与生命周期边界        | APPLICATION | Application        | `src/main.zig`、`src/app.zig`、`src/app/`、`src/native_sdk_compat/`                                     |
+| Product     | 产品逻辑边界；不是统一源码 module 或 facade       | PRODUCT     | Account、Workbench | `src/product/account*`、`src/product/mcp*`、`src/product/skill*`、`src/product/task*`、`src/workbench*` |
+| Agent       | AgentCore 执行、Session/Conversation 与事件泵边界 | AGENT       | Agent              | `src/agent.zig`、`src/agent/`                                                                           |
+| Bridge      | Renderer 与 MetaWork 本地边界之间的唯一通信边界   | BRIDGE      | Bridge             | `src/bridge*`                                                                                           |
+| Renderer    | 产品 WebUI 模块                                   | RENDERER    | Renderer           | `frontend/`（含 `bridge/` 合同实现层）                                                                  |
 
 用法约定：文档中的架构边界统一称为 Application，代码中的组合类型保持 `App`；不再另设 Desktop Host 或 Host infrastructure。`Product 边界/Product 模块`指本节逻辑边界，`桌面产品`指整个交付物。`product_identity.zig`（交付物 Bundle ID）与 Bridge 的 `ProductDelivery`（产品数据运输）维持原名，词根含义不同，不指 Product 边界。
 
@@ -91,6 +91,10 @@ Product 是 MetaWork 产品事实与行为的逻辑边界。它不是统一源�
 Product 内部如何拆分 owner 不属于本图，见 [Product 内部架构](product-architecture.md)；Account owner 的内部状态、事务、提交与恢复见 [Account 内部架构](account-architecture.md)。Product 的产品 policy 不依赖 DOM、React tab、Toast、JSX state 或 WebView URL。
 
 MCP 不形成第五个 Product owner。`src/product/mcp*` 只是 Workbench 持有的产品 MCP 子模块源码归属：configuration kernel 负责 schema 2 Desired Registry、connection approval、OAuth consent、credential locator/恢复、`oauth_operation`、Runtime preparation 与事务；state kernel 持有 Runtime Manifest、Agent Activation、Admission Authority、configuration-apply、OAuth/reauthorization、connection test，以及 request generation、pending、admission invalidation 与绝对 deadline 组成的 freshness 状态；policy kernel 负责 authorization transition、pending reauthorization、desired Admission allowlist、OAuth refresh binding、generation gate 与 Admission 状态转换，只构造 Agent 公共 allowlist/Selection 相关值而不持有 Runtime；view kernel 只借用 configuration/state、Workbench 的 refresh-job 在途事实与 callback-scoped 敏感文本投影器，派生 revision 1 snapshot 的 MCP 子树。该子模块不取得独立 owner、线程或生命周期；refresh job 指针仍由 Workbench 与其 Executor 共同持有，Agent selection 创建、durable commit、timer/job 编排、revision publication、完整 snapshot 编排和交付仍归 Workbench。Agent 继续拥有运行期 connector/backend 生命周期、AgentCore descriptor/catalog/selection、declarative Runtime apply、Activation 与 typed MCP health。Application 注入 bounded child/network effect，并拥有系统 credential、HTTP auth snapshot、OAuth effect，以及把 canonical desired preparation、Agent Runtime apply、activation 与 Workbench 完成事务串起来的窄 coordinator；它不拥有 transport 产品状态或 MCP JSON-RPC。STDIO child 只获得 Application 构造的显式 environment：受控 executable search path、Windows 必需的 `SystemRoot` 与用户逐名安全采集的 secret slot，不继承其余 Host 环境。隔离 connection test 仍不替换正式 Runtime。Runtime Manifest 记录正式 Runtime 已接管的 descriptor fingerprint 或安全 absence proof；`restart_required` alignment 只表示一次 apply 尚未完成，产品不要求重启 Application。新 Task 只消费 Workbench 原子提交的 Admission Authority，既有 Session 保持创建时 authority。Account 不参与 MCP；Bridge 与 Renderer 只运输 typed intent/状态；AgentCore 继续唯一拥有 MCP JSON-RPC、版本协商、catalog 与 tool binding。
+
+`src/product/skill/catalog.zig` 是 Workbench 持有的共享 Product Skill value kernel：它把 Agent 公共 catalog projection、非零 selection revision 与有效 enablement policy 一次编译成 immutable bounded snapshot，供 Workspace current authority 与 Task pinned authority 共同消费。该源码归位不创建 Skill owner、线程或生命周期，也不把 catalog acquisition、policy mutation、Task admission 或 executor 迁入该模块。
+
+`src/product/task*` 拥有 Task aggregate、Run/Compact record、Agent event 的产品状态转换与 terminal event-drain gate、terminal/interruption/lifecycle/recovery policy，以及 persistence、view、checkpoint、execution binding、runtime attachment、deletion 与 recovery kernels。Task persistence 独占 capability/health 类型、逐字段 wire projection、恢复重建与跨记录校验；Task view 无状态地派生并编码 revision 1 snapshot 的 Task/Run/Compact/UI 子树。canonical history 顶层的 Workspace frame 组装和 durable commit effect 仍由组合层执行；完整 snapshot 的根字段、姊妹子树、容量 buffer、revision 与交付也不进入 Task。该物理子模块不取得 executor、Agent event pump、跨 Workspace/Account/MCP admission、durable commit 或完整 snapshot 编排；组合对象只通过 callback-scoped projection capability 借出全局有界内存、credential 清洗、Skill catalog 写入与 pending-UI 观察，不向 Task kernel 暴露自身或执行资源。
 
 ### 3.4 Agent 与 AgentCore
 

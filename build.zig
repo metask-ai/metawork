@@ -111,13 +111,17 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-product-mcp-view", .root_module = test_modules.product_mcp_view },
         .{ .name = "metawork-mcp-platform", .root_module = test_modules.mcp_platform },
         .{ .name = "metawork-mcp-oauth", .root_module = test_modules.mcp_oauth },
-        .{ .name = "metawork-task-persistence", .root_module = test_modules.workbench_task_persistence },
-        .{ .name = "metawork-checkpoint-store", .root_module = test_modules.workbench_checkpoint_store },
-        .{ .name = "metawork-checkpoint-record", .root_module = test_modules.workbench_checkpoint_record },
-        .{ .name = "metawork-catalog-snapshot", .root_module = test_modules.workbench_catalog_snapshot },
-        .{ .name = "metawork-task-runtime", .root_module = test_modules.workbench_task_runtime },
-        .{ .name = "metawork-task-recovery", .root_module = test_modules.workbench_task_recovery },
-        .{ .name = "metawork-task-recovery-job", .root_module = test_modules.workbench_task_recovery_job },
+        .{ .name = "metawork-product-task-persistence", .root_module = test_modules.product_task_persistence },
+        .{ .name = "metawork-product-task-checkpoint-store", .root_module = test_modules.product_task_checkpoint_store },
+        .{ .name = "metawork-product-task-checkpoint-record", .root_module = test_modules.product_task_checkpoint_record },
+        .{ .name = "metawork-product-skill-catalog", .root_module = test_modules.product_skill_catalog },
+        .{ .name = "metawork-product-task-runtime", .root_module = test_modules.product_task_runtime },
+        .{ .name = "metawork-product-task-deletion", .root_module = test_modules.product_task_deletion },
+        .{ .name = "metawork-product-task-recovery", .root_module = test_modules.product_task_recovery },
+        .{ .name = "metawork-product-task-recovery-job", .root_module = test_modules.product_task_recovery_job },
+        .{ .name = "metawork-product-task-state", .root_module = test_modules.product_task_state },
+        .{ .name = "metawork-product-task-policy", .root_module = test_modules.product_task_policy },
+        .{ .name = "metawork-product-task-view", .root_module = test_modules.product_task_view },
     };
     for (module_tests) |spec| {
         spec.root_module.link_libc = bundle.link_libc;
@@ -248,14 +252,20 @@ const WiredModules = struct {
     product_mcp_state: *std.Build.Module,
     product_mcp_policy: *std.Build.Module,
     product_mcp_view: *std.Build.Module,
-    workbench_task_persistence: *std.Build.Module,
-    workbench_checkpoint_store: *std.Build.Module,
-    workbench_checkpoint_record: *std.Build.Module,
-    workbench_catalog_snapshot: *std.Build.Module,
-    workbench_owned_task_execution: *std.Build.Module,
-    workbench_task_runtime: *std.Build.Module,
-    workbench_task_recovery: *std.Build.Module,
-    workbench_task_recovery_job: *std.Build.Module,
+    product_skill: *std.Build.Module,
+    product_skill_catalog: *std.Build.Module,
+    product_task: *std.Build.Module,
+    product_task_persistence: *std.Build.Module,
+    product_task_checkpoint_store: *std.Build.Module,
+    product_task_checkpoint_record: *std.Build.Module,
+    product_task_execution_binding: *std.Build.Module,
+    product_task_runtime: *std.Build.Module,
+    product_task_deletion: *std.Build.Module,
+    product_task_recovery: *std.Build.Module,
+    product_task_recovery_job: *std.Build.Module,
+    product_task_state: *std.Build.Module,
+    product_task_policy: *std.Build.Module,
+    product_task_view: *std.Build.Module,
 };
 
 fn createLifecycleFixture(
@@ -271,6 +281,7 @@ fn createLifecycleFixture(
     });
     fixture.addImport("metawork_agent", modules.agent);
     fixture.addImport("metawork_workbench", modules.workbench);
+    fixture.addImport("metawork_product_task", modules.product_task);
     fixture.addImport("metawork_account_contract", modules.account_contract);
     fixture.addImport("event_pump", modules.event_pump);
     fixture.addImport("metask_agentcore", modules.sdk);
@@ -870,57 +881,119 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .optimize = root_module.optimize,
     });
     const task_persistence = b.createModule(.{
-        .root_source_file = b.path("src/workbench/task_persistence.zig"),
+        .root_source_file = b.path("src/product/task/persistence.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     const checkpoint_store = b.createModule(.{
-        .root_source_file = b.path("src/workbench/checkpoint_store.zig"),
+        .root_source_file = b.path("src/product/task/checkpoint_store.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     const checkpoint_record = b.createModule(.{
-        .root_source_file = b.path("src/workbench/checkpoint_record.zig"),
+        .root_source_file = b.path("src/product/task/checkpoint_record.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
-    checkpoint_record.addImport("workbench_checkpoint_store", checkpoint_store);
+    checkpoint_record.addImport("product_task_checkpoint_store", checkpoint_store);
     const catalog_snapshot = b.createModule(.{
-        .root_source_file = b.path("src/workbench/catalog_snapshot.zig"),
+        .root_source_file = b.path("src/product/skill/catalog.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     catalog_snapshot.addImport("metawork_agent", agent);
+    const product_skill = b.createModule(.{
+        .root_source_file = b.path("src/product/skill.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    product_skill.addImport("product_skill_catalog", catalog_snapshot);
     const owned_task_execution = b.createModule(.{
-        .root_source_file = b.path("src/workbench/owned_task_execution.zig"),
+        .root_source_file = b.path("src/product/task/execution_binding.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     owned_task_execution.addImport("metawork_account_contract", account_contract);
     const task_runtime = b.createModule(.{
-        .root_source_file = b.path("src/workbench/task_runtime.zig"),
+        .root_source_file = b.path("src/product/task/runtime.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     task_runtime.addImport("metawork_agent", agent);
-    task_runtime.addImport("workbench_catalog_snapshot", catalog_snapshot);
-    task_runtime.addImport("workbench_owned_task_execution", owned_task_execution);
+    task_runtime.addImport("metawork_product_skill", product_skill);
+    task_runtime.addImport("product_task_execution_binding", owned_task_execution);
+    const task_deletion = b.createModule(.{
+        .root_source_file = b.path("src/product/task/deletion.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
     const task_recovery = b.createModule(.{
-        .root_source_file = b.path("src/workbench/task_recovery.zig"),
+        .root_source_file = b.path("src/product/task/recovery.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     const task_recovery_job = b.createModule(.{
-        .root_source_file = b.path("src/workbench/task_recovery_job.zig"),
+        .root_source_file = b.path("src/product/task/recovery_job.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     task_recovery_job.addImport("metawork_agent", agent);
-    task_recovery_job.addImport("workbench_checkpoint_record", checkpoint_record);
-    task_recovery_job.addImport("workbench_checkpoint_store", checkpoint_store);
-    task_recovery_job.addImport("workbench_catalog_snapshot", catalog_snapshot);
-    task_recovery_job.addImport("workbench_owned_task_execution", owned_task_execution);
-    task_runtime.addImport("workbench_task_recovery_job", task_recovery_job);
+    task_recovery_job.addImport("product_task_checkpoint_record", checkpoint_record);
+    task_recovery_job.addImport("product_task_checkpoint_store", checkpoint_store);
+    task_recovery_job.addImport("metawork_product_skill", product_skill);
+    task_recovery_job.addImport("product_task_execution_binding", owned_task_execution);
+    task_runtime.addImport("product_task_recovery_job", task_recovery_job);
+    const task_state = b.createModule(.{
+        .root_source_file = b.path("src/product/task/state.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    task_state.addImport("metawork_agent", agent);
+    task_state.addImport("product_task_checkpoint_record", checkpoint_record);
+    task_state.addImport("product_task_execution_binding", owned_task_execution);
+    task_state.addImport("product_task_runtime", task_runtime);
+    task_state.addImport("product_task_deletion", task_deletion);
+    task_state.addImport("product_task_recovery", task_recovery);
+    task_persistence.addImport("metawork_agent", agent);
+    task_persistence.addImport("product_task_checkpoint_record", checkpoint_record);
+    task_persistence.addImport("product_task_checkpoint_store", checkpoint_store);
+    task_persistence.addImport("product_task_state", task_state);
+    const task_policy = b.createModule(.{
+        .root_source_file = b.path("src/product/task/policy.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    task_policy.addImport("metawork_agent", agent);
+    task_policy.addImport("product_task_state", task_state);
+    task_policy.addImport("product_task_runtime", task_runtime);
+    task_policy.addImport("product_task_recovery", task_recovery);
+    task_policy.addImport("product_task_checkpoint_record", checkpoint_record);
+    const task_view = b.createModule(.{
+        .root_source_file = b.path("src/product/task/view.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    task_view.addImport("metawork_agent", agent);
+    task_view.addImport("metawork_product_skill", product_skill);
+    task_view.addImport("product_task_state", task_state);
+    task_view.addImport("product_task_policy", task_policy);
+    task_view.addImport("product_task_recovery", task_recovery);
+    const product_task = b.createModule(.{
+        .root_source_file = b.path("src/product/task.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    product_task.addImport("product_task_persistence", task_persistence);
+    product_task.addImport("product_task_checkpoint_record", checkpoint_record);
+    product_task.addImport("product_task_checkpoint_store", checkpoint_store);
+    product_task.addImport("product_task_execution_binding", owned_task_execution);
+    product_task.addImport("product_task_runtime", task_runtime);
+    product_task.addImport("product_task_deletion", task_deletion);
+    product_task.addImport("product_task_recovery", task_recovery);
+    product_task.addImport("product_task_recovery_job", task_recovery_job);
+    product_task.addImport("product_task_state", task_state);
+    product_task.addImport("product_task_policy", task_policy);
+    product_task.addImport("product_task_view", task_view);
     const mcp_configuration = b.createModule(.{
         .root_source_file = b.path("src/product/mcp/configuration.zig"),
         .target = target,
@@ -975,14 +1048,8 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     projection.addImport("workbench_skill_management", skill_management);
     projection.addImport("workbench_skill_enablement", skill_enablement);
     projection.addImport("workbench_skill_package", skill_package);
-    projection.addImport("workbench_task_persistence", task_persistence);
-    projection.addImport("workbench_checkpoint_store", checkpoint_store);
-    projection.addImport("workbench_checkpoint_record", checkpoint_record);
-    projection.addImport("workbench_catalog_snapshot", catalog_snapshot);
-    projection.addImport("workbench_owned_task_execution", owned_task_execution);
-    projection.addImport("workbench_task_runtime", task_runtime);
-    projection.addImport("workbench_task_recovery", task_recovery);
-    projection.addImport("workbench_task_recovery_job", task_recovery_job);
+    projection.addImport("metawork_product_task", product_task);
+    projection.addImport("metawork_product_skill", product_skill);
     projection.addImport("metawork_product_mcp", product_mcp);
     projection.addImport(
         "build_options",
@@ -1012,9 +1079,6 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     workbench.addImport("workbench_skill_package", skill_package);
     workbench.addImport("workbench_skill_management", skill_management);
     workbench.addImport("workbench_skill_enablement", skill_enablement);
-    workbench.addImport("workbench_task_persistence", task_persistence);
-    workbench.addImport("workbench_checkpoint_store", checkpoint_store);
-    workbench.addImport("workbench_checkpoint_record", checkpoint_record);
 
     const bridge = b.createModule(.{
         .root_source_file = b.path("src/bridge.zig"),
@@ -1081,6 +1145,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     app.addImport("metawork_agent", agent);
     app.addImport("metawork_workbench", workbench);
     app.addImport("metawork_product_mcp", product_mcp);
+    app.addImport("metawork_product_task", product_task);
     app.addImport("metawork_bridge", bridge);
     app.addImport("metawork_automation", automation);
     app.addImport("metawork_account_contract", account_contract);
@@ -1148,14 +1213,20 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .product_mcp_state = product_mcp_state,
         .product_mcp_policy = product_mcp_policy,
         .product_mcp_view = product_mcp_view,
-        .workbench_task_persistence = task_persistence,
-        .workbench_checkpoint_store = checkpoint_store,
-        .workbench_checkpoint_record = checkpoint_record,
-        .workbench_catalog_snapshot = catalog_snapshot,
-        .workbench_owned_task_execution = owned_task_execution,
-        .workbench_task_runtime = task_runtime,
-        .workbench_task_recovery = task_recovery,
-        .workbench_task_recovery_job = task_recovery_job,
+        .product_skill = product_skill,
+        .product_skill_catalog = catalog_snapshot,
+        .product_task = product_task,
+        .product_task_persistence = task_persistence,
+        .product_task_checkpoint_store = checkpoint_store,
+        .product_task_checkpoint_record = checkpoint_record,
+        .product_task_execution_binding = owned_task_execution,
+        .product_task_runtime = task_runtime,
+        .product_task_deletion = task_deletion,
+        .product_task_recovery = task_recovery,
+        .product_task_recovery_job = task_recovery_job,
+        .product_task_state = task_state,
+        .product_task_policy = task_policy,
+        .product_task_view = task_view,
     };
 }
 

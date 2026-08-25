@@ -99,6 +99,8 @@ test("named module roots exist and lower owners cannot import composition", () =
     "src/app.zig",
     "src/product/account.zig",
     "src/product/mcp.zig",
+    "src/product/skill.zig",
+    "src/product/task.zig",
     "src/agent.zig",
     "src/workbench.zig",
     "src/bridge.zig",
@@ -115,14 +117,40 @@ test("named module roots exist and lower owners cannot import composition", () =
     false,
   );
   assert.equal(existsSync(new URL("src/workbench/testdata/", root)), false);
+  assert.equal(
+    existsSync(new URL("src/workbench/catalog_snapshot.zig", root)),
+    false,
+  );
+  for (const path of [
+    "src/workbench/task_persistence.zig",
+    "src/workbench/checkpoint_record.zig",
+    "src/workbench/checkpoint_store.zig",
+    "src/workbench/owned_task_execution.zig",
+    "src/workbench/task_runtime.zig",
+    "src/workbench/task_deletion.zig",
+    "src/workbench/task_recovery.zig",
+    "src/workbench/task_recovery_job.zig",
+  ]) {
+    assert.equal(existsSync(new URL(path, root)), false, `${path} is obsolete`);
+  }
   const buildSource = read("build.zig");
   assert.match(buildSource, /src\/product\/account\.zig/);
   assert.match(buildSource, /src\/product\/account\/contract\.zig/);
   assert.match(buildSource, /src\/product\/mcp\.zig/);
   assert.match(buildSource, /src\/product\/mcp\/configuration\.zig/);
   assert.match(buildSource, /src\/product\/mcp\/state\.zig/);
+  assert.match(buildSource, /src\/product\/skill\.zig/);
+  assert.match(buildSource, /src\/product\/skill\/catalog\.zig/);
+  assert.match(buildSource, /src\/product\/task\.zig/);
+  assert.match(buildSource, /src\/product\/task\/persistence\.zig/);
+  assert.match(buildSource, /src\/product\/task\/runtime\.zig/);
   assert.doesNotMatch(buildSource, /src\/account(?:\.zig|\/)/);
   assert.doesNotMatch(buildSource, /src\/workbench\/mcp_configuration\.zig/);
+  assert.doesNotMatch(buildSource, /src\/workbench\/catalog_snapshot\.zig/);
+  assert.doesNotMatch(
+    buildSource,
+    /src\/workbench\/(?:task_persistence|checkpoint_record|checkpoint_store|owned_task_execution|task_runtime|task_deletion|task_recovery|task_recovery_job)\.zig/,
+  );
   assert.match(buildSource, /addImport\("metawork_account", account\)/);
   assert.match(
     buildSource,
@@ -175,6 +203,22 @@ test("named module roots exist and lower owners cannot import composition", () =
     "metask_agentcore",
     "native_sdk",
   ]);
+  assertNoImports(zigFiles("src/product/skill/"), [
+    "metawork_app",
+    "metawork_workbench",
+    "metawork_bridge",
+    "metawork_account",
+    "metask_agentcore",
+    "native_sdk",
+  ]);
+  assertNoImports(zigFiles("src/product/task/"), [
+    "metawork_app",
+    "metawork_workbench",
+    "metawork_bridge",
+    "metawork_account",
+    "metask_agentcore",
+    "native_sdk",
+  ]);
   assertNoImports(zigFiles("src/bridge/"), [
     "metawork_app",
     "metask_agentcore",
@@ -192,6 +236,235 @@ test("named module roots exist and lower owners cannot import composition", () =
       `${file} exposes an implementation module`,
     );
   }
+});
+
+test("Product Skill catalog has one physical home and remains a shared value kernel", () => {
+  const build = read("build.zig");
+  const productSkill = read("src/product/skill.zig");
+  const catalog = read("src/product/skill/catalog.zig");
+  const projection = read("src/workbench/projection.zig");
+  const taskRuntime = read("src/product/task/runtime.zig");
+  const recoveryJob = read("src/product/task/recovery_job.zig");
+
+  assert.match(productSkill, /@import\("product_skill_catalog"\)/);
+  assert.match(catalog, /@import\("metawork_agent"\)/);
+  assert.doesNotMatch(
+    catalog,
+    /Workbench|Task|Workspace|workbench_executor|std\.Thread|\*agent\.Runtime|\*agent\.Session/,
+  );
+  for (const source of [projection, taskRuntime, recoveryJob]) {
+    assert.match(source, /@import\("metawork_product_skill"\)\.catalog/);
+    assert.doesNotMatch(source, /@import\("workbench_catalog_snapshot"\)/);
+  }
+  assert.match(build, /src\/product\/skill\/catalog\.zig/);
+  assert.match(
+    build,
+    /product_skill\.addImport\("product_skill_catalog", catalog_snapshot\)/,
+  );
+  assert.match(build, /addImport\("metawork_product_skill", product_skill\)/);
+});
+
+test("Product Task kernels have one physical home without taking the executor", () => {
+  const build = read("build.zig");
+  const productTask = read("src/product/task.zig");
+  const taskPersistence = read("src/product/task/persistence.zig");
+  const taskState = read("src/product/task/state.zig");
+  const taskPolicy = read("src/product/task/policy.zig");
+  const taskView = read("src/product/task/view.zig");
+  const projection = read("src/workbench/projection.zig");
+  const executor = read("src/workbench/executor.zig");
+  const workbenchRoot = read("src/workbench.zig");
+  const appStores = read("src/app/stores.zig");
+  const recoveryJob = read("src/product/task/recovery_job.zig");
+
+  for (const moduleName of [
+    "persistence",
+    "checkpoint_record",
+    "checkpoint_store",
+    "execution_binding",
+    "runtime",
+    "deletion",
+    "recovery",
+    "recovery_job",
+    "state",
+    "policy",
+    "view",
+  ]) {
+    assert.match(
+      productTask,
+      new RegExp(`pub const ${moduleName} = @import\\(\"product_task_`),
+    );
+  }
+  assert.match(projection, /@import\("metawork_product_task"\)/);
+  assert.doesNotMatch(
+    projection,
+    /@import\("(?:workbench_task_|workbench_checkpoint_|workbench_owned_task_execution)/,
+  );
+  assert.doesNotMatch(
+    workbenchRoot,
+    /\b(?:TaskFileStore|CheckpointFileStore|CheckpointStoreHealth|CheckpointBlobIdentity|task_store_max_bytes)\b/,
+  );
+  assert.match(appStores, /@import\("metawork_product_task"\)/);
+  assert.match(appStores, /product_task\.persistence\.FileStore/);
+  assert.match(appStores, /product_task\.checkpoint_store\.FileStore/);
+  assert.doesNotMatch(
+    recoveryJob,
+    /workbench_executor|@import\("metawork_workbench"\)/,
+  );
+  assert.match(build, /src\/product\/task\/recovery_job\.zig/);
+  assert.match(build, /src\/product\/task\/state\.zig/);
+  assert.match(build, /src\/product\/task\/policy\.zig/);
+  assert.match(build, /src\/product\/task\/view\.zig/);
+  assert.match(
+    build,
+    /task_persistence\.addImport\("product_task_state", task_state\)/,
+  );
+  assert.match(
+    build,
+    /projection\.addImport\("metawork_product_task", product_task\)/,
+  );
+  assert.match(
+    build,
+    /app\.addImport\("metawork_product_task", product_task\)/,
+  );
+
+  const runRecord = taskState.match(
+    /pub const RunRecord = struct \{[\s\S]*?\n\};/,
+  )?.[0];
+  const compactRecord = taskState.match(
+    /pub const CompactRecord = struct \{[\s\S]*?\n\};/,
+  )?.[0];
+  assert.ok(runRecord, "Task state must own the concrete RunRecord");
+  assert.ok(compactRecord, "Task state must own the concrete CompactRecord");
+  for (const record of [runRecord, compactRecord]) {
+    assert.doesNotMatch(record, /\b(?:workbench|task|session):\s*\*/);
+  }
+  assert.match(taskState, /pub const Task = struct/);
+  assert.match(taskState, /pub fn applyEvent\(/);
+  assert.match(taskState, /pub fn markTerminalRunsBeforeEventDrain\(/);
+  assert.match(taskState, /pub fn finalizeMarkedTerminalRunsAfterEventDrain\(/);
+  assert.match(taskState, /@import\("metawork_agent"\)/);
+  assert.doesNotMatch(
+    taskState,
+    /Workbench|workbench_executor|std\.Thread|@import\("(?:metawork_app|metawork_bridge|native_sdk|metask_agentcore)"\)/,
+  );
+  assert.match(projection, /const RunRecord = task_model\.RunRecord;/);
+  assert.match(projection, /const CompactRecord = task_model\.CompactRecord;/);
+  assert.doesNotMatch(projection, /const RunRecord = struct/);
+  assert.doesNotMatch(projection, /const CompactRecord = struct/);
+  assert.match(projection, /const RunJobContext = struct/);
+  assert.match(projection, /const CompactJobContext = struct/);
+  assert.match(projection, /fn drainAgentEventPass\(/);
+  assert.match(projection, /agent_runtime\.takeEvent\(\)/);
+  assert.match(projection, /task_model\.applyEvent\(/);
+  assert.match(projection, /fn taskEventProjection\(/);
+  for (const policyFn of [
+    "classifyAgentTerminal",
+    "classifyCompactTerminal",
+    "classifyBeginFailure",
+    "decisionForSignal",
+    "checkpointFailureAttempt",
+    "hasActiveOperation",
+    "checkpointMatchesCurrentHistory",
+    "foldTerminalDisposition",
+  ]) {
+    assert.match(taskPolicy, new RegExp(`pub fn ${policyFn}\\(`));
+    assert.doesNotMatch(projection, new RegExp(`fn ${policyFn}\\(`));
+  }
+  assert.match(taskPolicy, /@import\("product_task_state"\)/);
+  assert.match(taskPolicy, /@import\("metawork_agent"\)/);
+  assert.doesNotMatch(
+    taskPolicy,
+    /Workbench|workbench_executor|std\.Thread|commitTaskState|bumpRevision|agent_runtime\.takeEvent|@import\("(?:metawork_app|metawork_bridge|native_sdk|metask_agentcore)"\)/,
+  );
+  assert.match(projection, /fn requestRunTermination\(/);
+  assert.match(projection, /fn commitTerminal\(/);
+  assert.match(projection, /fn commitCompactProductTerminal\(/);
+  for (const persistenceType of [
+    "Commit",
+    "Capability",
+    "Health",
+    "TaskStateWireScratch",
+    "RestoreProjection",
+  ]) {
+    assert.match(taskPersistence, new RegExp(`pub const ${persistenceType} =`));
+  }
+  for (const persistenceFn of ["projectTask", "restoreTask", "parseEnum"]) {
+    assert.match(taskPersistence, new RegExp(`pub fn ${persistenceFn}\\(`));
+  }
+  for (const retiredProjectionFn of [
+    "restoreTask",
+    "restoreCheckpointRecord",
+    "restoreRun",
+    "restoreRunInput",
+    "restoreTool",
+    "restoreFileReference",
+    "restoreCompact",
+    "taskWireWithCheckpoint",
+    "runWire",
+    "restoreUiRecord",
+    "parsePersistedEnum",
+  ]) {
+    assert.doesNotMatch(
+      projection,
+      new RegExp(`(?:^|\\n)\\s*fn ${retiredProjectionFn}\\(`),
+    );
+  }
+  assert.match(projection, /task_persistence\.restoreTask\(/);
+  assert.match(projection, /task_persistence\.projectTask\(/);
+  assert.match(projection, /fn taskRestoreProjection\(/);
+  assert.match(projection, /fn buildTaskStateWireWithCheckpoint\(/);
+  assert.match(projection, /fn commitTaskStateWithCheckpoint\(/);
+  assert.doesNotMatch(
+    taskPersistence,
+    /Workbench|workbench_executor|std\.Thread|commitTaskState|bumpRevision|writeSnapshot|@import\("(?:metawork_app|metawork_bridge|native_sdk|metask_agentcore)"\)/,
+  );
+  for (const viewFn of [
+    "writeProjection",
+    "writePendingUi",
+    "catalogProjection",
+  ]) {
+    assert.match(taskView, new RegExp(`pub fn ${viewFn}\\(`));
+  }
+  assert.match(taskView, /pub const TextProjection = struct/);
+  assert.match(taskView, /pub const CatalogProjection = struct/);
+  assert.match(taskView, /pub const PendingUiProjection = struct/);
+  assert.match(taskView, /task: \*const task_state\.Task/);
+  assert.match(taskView, /@import\("product_task_state"\)/);
+  assert.match(taskView, /@import\("product_task_policy"\)/);
+  assert.match(taskView, /@import\("product_task_recovery"\)/);
+  assert.match(taskView, /@import\("metawork_product_skill"\)/);
+  assert.doesNotMatch(
+    taskView,
+    /\*Workbench|:\s*Workbench\b|workbench_executor|std\.Thread|\*agent\.Session|commitTaskState|bumpRevision|writeSnapshot|@import\("(?:metawork_workbench|metawork_app|metawork_bridge|native_sdk|metask_agentcore)"\)/,
+  );
+  for (const retiredViewFn of [
+    "writeCompact",
+    "writeRun",
+    "writeUiHistory",
+    "writePendingUiProjection",
+    "taskCatalogProjection",
+  ]) {
+    assert.doesNotMatch(
+      projection,
+      new RegExp(`(?:^|\\n)\\s*fn ${retiredViewFn}\\(`),
+    );
+  }
+  assert.match(projection, /task_view\.writeProjection\(/);
+  assert.match(projection, /task_view\.writePendingUi\(/);
+  assert.match(projection, /session\.copyPendingUiRequest\(/);
+  assert.match(projection, /pub fn writeSnapshot\(/);
+  assert.match(
+    projection,
+    /test "Workbench snapshot serializer matches the Renderer contract fixture"/,
+  );
+  assert.doesNotMatch(
+    workbenchRoot,
+    /pub const TaskPersistence(?:Commit|Health)?\b/,
+  );
+  assert.match(appStores, /product_task\.persistence\.Commit/);
+  assert.match(executor, /identity: \*anyopaque,[\s\S]*context: \*anyopaque,/);
+  assert.match(executor, /if \(item\.identity != identity\) continue;/);
 });
 
 test("Product MCP kernels have one physical home and remain Workbench-held", () => {

@@ -11,6 +11,9 @@ pub const Limits = struct {
 };
 
 pub const Job = struct {
+    /// Stable owner identity used to remove a queued job without exposing its
+    /// executor-only payload to product records.
+    identity: *anyopaque,
     context: *anyopaque,
     execute_fn: *const fn (*anyopaque) void,
     cancel_fn: *const fn (*anyopaque) void,
@@ -91,13 +94,14 @@ pub const Executor = struct {
         self.signal();
     }
 
-    pub fn cancel(self: *Executor, context: *anyopaque) bool {
+    /// Removes a queued job by owner identity and synchronously runs its queued
+    /// cancellation callback. A job already claimed by a worker is untouched.
+    pub fn cancel(self: *Executor, identity: *anyopaque) bool {
         self.lock();
-        defer self.unlock();
         for (0..self.queued) |offset| {
             const index = (self.head + offset) % self.queue.len;
             const item = self.queue[index].?;
-            if (item.context != context) continue;
+            if (item.identity != identity) continue;
             for (offset..self.queued - 1) |shift| {
                 const destination = (self.head + shift) % self.queue.len;
                 const source = (self.head + shift + 1) % self.queue.len;
@@ -106,8 +110,11 @@ pub const Executor = struct {
             self.tail = (self.tail + self.queue.len - 1) % self.queue.len;
             self.queue[self.tail] = null;
             self.queued -= 1;
+            self.unlock();
+            item.cancel();
             return true;
         }
+        self.unlock();
         return false;
     }
 
@@ -223,12 +230,14 @@ test "shutdown cancels queued jobs and joins the active worker" {
     });
     defer executor.deinit();
     try executor.enqueue(.{
+        .identity = &harness,
         .context = &harness,
         .execute_fn = Harness.execute,
         .cancel_fn = Harness.cancel,
     });
     while (!harness.started.load(.acquire)) std.Thread.yield() catch {};
     try executor.enqueue(.{
+        .identity = &harness,
         .context = &harness,
         .execute_fn = Harness.execute,
         .cancel_fn = Harness.cancel,
@@ -282,13 +291,70 @@ test "ring queue preserves FIFO when a freed head slot is reused" {
         .queue_capacity = 2,
     });
     defer executor.deinit();
-    try executor.enqueue(.{ .context = &first, .execute_fn = Item.execute, .cancel_fn = Item.cancel });
+    try executor.enqueue(.{ .identity = &first, .context = &first, .execute_fn = Item.execute, .cancel_fn = Item.cancel });
     while (!harness.first_started.load(.acquire)) std.Thread.yield() catch {};
-    try executor.enqueue(.{ .context = &second, .execute_fn = Item.execute, .cancel_fn = Item.cancel });
-    try executor.enqueue(.{ .context = &third, .execute_fn = Item.execute, .cancel_fn = Item.cancel });
+    try executor.enqueue(.{ .identity = &second, .context = &second, .execute_fn = Item.execute, .cancel_fn = Item.cancel });
+    try executor.enqueue(.{ .identity = &third, .context = &third, .execute_fn = Item.execute, .cancel_fn = Item.cancel });
     harness.release_first.store(true, .release);
     while (harness.count.load(.acquire) != 3) std.Thread.yield() catch {};
     executor.shutdown();
 
     try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3 }, &harness.order);
+}
+
+test "queued cancellation separates owner identity from executor payload" {
+    const Payload = struct {
+        cancelled: bool = false,
+
+        fn execute(_: *anyopaque) void {
+            unreachable;
+        }
+
+        fn cancel(context: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.cancelled = true;
+        }
+    };
+
+    var identity: u8 = 0;
+    var payload = Payload{};
+    const executor = try Executor.create(std.testing.io, std.testing.allocator, .{
+        .worker_count = 1,
+        .queue_capacity = 1,
+    });
+    defer executor.deinit();
+
+    // Keep the sole worker occupied so the payload remains queued.
+    const Blocker = struct {
+        started: std.atomic.Value(bool) = .init(false),
+        release: std.atomic.Value(bool) = .init(false),
+
+        fn execute(context: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.started.store(true, .release);
+            while (!self.release.load(.acquire)) std.Thread.yield() catch {};
+        }
+
+        fn cancel(_: *anyopaque) void {
+            unreachable;
+        }
+    };
+    var blocker = Blocker{};
+    try executor.enqueue(.{
+        .identity = &blocker,
+        .context = &blocker,
+        .execute_fn = Blocker.execute,
+        .cancel_fn = Blocker.cancel,
+    });
+    while (!blocker.started.load(.acquire)) std.Thread.yield() catch {};
+    try executor.enqueue(.{
+        .identity = &identity,
+        .context = &payload,
+        .execute_fn = Payload.execute,
+        .cancel_fn = Payload.cancel,
+    });
+
+    try std.testing.expect(executor.cancel(&identity));
+    try std.testing.expect(payload.cancelled);
+    blocker.release.store(true, .release);
 }

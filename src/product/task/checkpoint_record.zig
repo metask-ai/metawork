@@ -1,9 +1,9 @@
-//! Durable Workbench metadata for one immutable AgentCore checkpoint blob.
+//! Durable Product Task metadata for one immutable Agent checkpoint blob.
 //! The record owns product facts only; it has no file, Agent handle, or UI
 //! projection responsibilities.
 
 const std = @import("std");
-const checkpoint_store = @import("workbench_checkpoint_store");
+const checkpoint_store = @import("product_task_checkpoint_store");
 
 pub const SessionBinding = struct {
     logical_session_id: []u8,

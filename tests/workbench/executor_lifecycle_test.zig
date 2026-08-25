@@ -2,6 +2,7 @@ const fixture = @import("lifecycle_fixture");
 const std = fixture.std;
 const lifecycle = fixture.lifecycle;
 const workbench_api = fixture.workbench_api;
+const product_task = fixture.product_task;
 const account_contract = fixture.account_contract;
 const wire = fixture.wire;
 const fake_core = &fixture.fake_core;
@@ -25,12 +26,12 @@ const ShutdownContext = struct {
 };
 
 const TaskPersistenceProbe = struct {
-    result: workbench_api.TaskPersistenceCommit = .committed,
+    result: product_task.persistence.Commit = .committed,
     storage: ?[]u8 = null,
     len: usize = 0,
     commits: usize = 0,
 
-    fn commit(context: ?*anyopaque, bytes: []const u8) workbench_api.TaskPersistenceCommit {
+    fn commit(context: ?*anyopaque, bytes: []const u8) product_task.persistence.Commit {
         const self: *@This() = @ptrCast(@alignCast(context.?));
         self.commits += 1;
         if (self.result == .committed) if (self.storage) |storage| {
@@ -41,7 +42,7 @@ const TaskPersistenceProbe = struct {
         return self.result;
     }
 
-    fn capability(self: *@This()) workbench_api.TaskPersistence {
+    fn capability(self: *@This()) product_task.persistence.Capability {
         return .{
             .context = self,
             .enabled = true,
@@ -52,7 +53,7 @@ const TaskPersistenceProbe = struct {
     fn capabilityRestored(
         self: *@This(),
         restored_bytes: []const u8,
-    ) workbench_api.TaskPersistence {
+    ) product_task.persistence.Capability {
         var result = self.capability();
         result.restored_bytes = restored_bytes;
         return result;
@@ -240,14 +241,14 @@ test "Run checkpoint commits immutable blob before durable descriptor" {
     defer tmp.cleanup();
     var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
-    var checkpoint_store = try workbench_api.CheckpointFileStore.init(
+    var checkpoint_store = try product_task.checkpoint_store.FileStore.init(
         std.testing.io,
         root_storage[0..root_len],
     );
     defer checkpoint_store.deinit();
     const persistence_storage = try std.testing.allocator.alloc(
         u8,
-        workbench_api.task_store_max_bytes,
+        product_task.persistence.max_store_bytes,
     );
     defer std.testing.allocator.free(persistence_storage);
     var persistence = TaskPersistenceProbe{ .storage = persistence_storage };
@@ -276,7 +277,7 @@ test "Run checkpoint commits immutable blob before durable descriptor" {
 
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash("fixture-checkpoint", &digest, .{});
-    const identity: workbench_api.CheckpointBlobIdentity = .{
+    const identity: product_task.checkpoint_store.Identity = .{
         .task_id = task_id,
         .generation = 0,
         .digest = digest,
@@ -301,7 +302,7 @@ test "Run checkpoint commits immutable blob before durable descriptor" {
         &persistence,
         "\"terminal\":{\"kind\":\"compact\",\"id\":1}",
     );
-    const compact_identity: workbench_api.CheckpointBlobIdentity = .{
+    const compact_identity: product_task.checkpoint_store.Identity = .{
         .task_id = task_id,
         .generation = 1,
         .digest = digest,
@@ -317,7 +318,7 @@ test "Run checkpoint commits immutable blob before durable descriptor" {
         &persistence,
         "\"terminal\":{\"kind\":\"run\",\"id\":2}",
     );
-    const post_compact_run_identity: workbench_api.CheckpointBlobIdentity = .{
+    const post_compact_run_identity: product_task.checkpoint_store.Identity = .{
         .task_id = task_id,
         .generation = 2,
         .digest = digest,
@@ -427,7 +428,7 @@ test "restart restores a Task attachment and continues the same Conversation" {
     defer tmp.cleanup();
     var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
-    var checkpoint_store = try workbench_api.CheckpointFileStore.init(
+    var checkpoint_store = try product_task.checkpoint_store.FileStore.init(
         std.testing.io,
         root_storage[0..root_len],
     );
@@ -446,7 +447,7 @@ test "restart restores a Task attachment and continues the same Conversation" {
     defer skill_enablement_store.deinit();
     const persistence_storage = try std.testing.allocator.alloc(
         u8,
-        workbench_api.task_store_max_bytes,
+        product_task.persistence.max_store_bytes,
     );
     defer std.testing.allocator.free(persistence_storage);
     var persistence = TaskPersistenceProbe{ .storage = persistence_storage };
@@ -747,14 +748,14 @@ test "accepted Task deletion advances after checkpoint quiescence without a seco
     defer tmp.cleanup();
     var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
-    var checkpoint_store = try workbench_api.CheckpointFileStore.init(
+    var checkpoint_store = try product_task.checkpoint_store.FileStore.init(
         std.testing.io,
         root_storage[0..root_len],
     );
     defer checkpoint_store.deinit();
     const persistence_storage = try std.testing.allocator.alloc(
         u8,
-        workbench_api.task_store_max_bytes,
+        product_task.persistence.max_store_bytes,
     );
     defer std.testing.allocator.free(persistence_storage);
     var persistence = TaskPersistenceProbe{ .storage = persistence_storage };
@@ -803,14 +804,14 @@ test "definite descriptor failure preserves terminal history and leaves a recove
     defer tmp.cleanup();
     var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
-    var checkpoint_store = try workbench_api.CheckpointFileStore.init(
+    var checkpoint_store = try product_task.checkpoint_store.FileStore.init(
         std.testing.io,
         root_storage[0..root_len],
     );
     defer checkpoint_store.deinit();
     const persistence_storage = try std.testing.allocator.alloc(
         u8,
-        workbench_api.task_store_max_bytes,
+        product_task.persistence.max_store_bytes,
     );
     defer std.testing.allocator.free(persistence_storage);
     var persistence = TaskPersistenceProbe{ .storage = persistence_storage };
@@ -838,7 +839,7 @@ test "definite descriptor failure preserves terminal history and leaves a recove
     fake_core.releaseCheckpointExport();
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash("fixture-checkpoint", &digest, .{});
-    const identity: workbench_api.CheckpointBlobIdentity = .{
+    const identity: product_task.checkpoint_store.Identity = .{
         .task_id = task_id,
         .generation = 0,
         .digest = digest,
@@ -880,7 +881,7 @@ test "definite descriptor failure preserves terminal history and leaves a recove
     );
     defer restored.deinit();
     try std.testing.expectEqual(
-        workbench_api.CheckpointStoreHealth.ready,
+        product_task.checkpoint_store.Health.ready,
         restored.checkpointStoreHealth(),
     );
     var restored_snapshot: [128 * 1024]u8 = undefined;
@@ -909,14 +910,14 @@ test "unknown descriptor commit freezes checkpoint transaction until shutdown" {
     defer tmp.cleanup();
     var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
-    var checkpoint_store = try workbench_api.CheckpointFileStore.init(
+    var checkpoint_store = try product_task.checkpoint_store.FileStore.init(
         std.testing.io,
         root_storage[0..root_len],
     );
     defer checkpoint_store.deinit();
     const persistence_storage = try std.testing.allocator.alloc(
         u8,
-        workbench_api.task_store_max_bytes,
+        product_task.persistence.max_store_bytes,
     );
     defer std.testing.allocator.free(persistence_storage);
     var persistence = TaskPersistenceProbe{ .storage = persistence_storage };
@@ -944,7 +945,7 @@ test "unknown descriptor commit freezes checkpoint transaction until shutdown" {
 
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash("fixture-checkpoint", &digest, .{});
-    const identity: workbench_api.CheckpointBlobIdentity = .{
+    const identity: product_task.checkpoint_store.Identity = .{
         .task_id = task_id,
         .generation = 0,
         .digest = digest,
@@ -996,7 +997,7 @@ test "untrusted Task history never opens checkpoint orphan cleanup" {
     defer tmp.cleanup();
     var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
-    var checkpoint_store = try workbench_api.CheckpointFileStore.init(
+    var checkpoint_store = try product_task.checkpoint_store.FileStore.init(
         std.testing.io,
         root_storage[0..root_len],
     );
@@ -1069,7 +1070,7 @@ test "unavailable checkpoint store does not close Task admission" {
     );
     defer workbench.deinit();
     try std.testing.expectEqual(
-        workbench_api.CheckpointStoreHealth.unavailable,
+        product_task.checkpoint_store.Health.unavailable,
         workbench.checkpointStoreHealth(),
     );
     try installWorkbenchExecution(&workbench);
@@ -1166,6 +1167,13 @@ test "bounded executor rejects overflow and close cancels a queued Run" {
 
     const running_id = try submitSession(running, "hold worker");
     try running.waitForState(.running);
+    while (true) {
+        fake_core.lock();
+        const entered_agent = fake_core.run_calls == 1;
+        fake_core.unlock();
+        if (entered_agent) break;
+        std.Thread.yield() catch {};
+    }
     _ = try submitSession(queued, "stay queued");
     try std.testing.expectError(error.SessionNotIdle, submitSession(queued, "second in-flight"));
     try std.testing.expectError(error.QueueFull, submitSession(rejected, "overflow"));
@@ -1420,7 +1428,7 @@ test "Idle Task model persistence failure restores Session and detaches on unkno
     }
     const persistence_storage = try std.testing.allocator.alloc(
         u8,
-        workbench_api.task_store_max_bytes,
+        product_task.persistence.max_store_bytes,
     );
     defer std.testing.allocator.free(persistence_storage);
     var persistence = TaskPersistenceProbe{ .storage = persistence_storage };
@@ -2192,7 +2200,7 @@ test "asynchronous Task deletion commit failure retains a retryable archived rec
     }
     const persistence_storage = try std.testing.allocator.alloc(
         u8,
-        workbench_api.task_store_max_bytes,
+        product_task.persistence.max_store_bytes,
     );
     defer std.testing.allocator.free(persistence_storage);
     var persistence = TaskPersistenceProbe{ .storage = persistence_storage };
