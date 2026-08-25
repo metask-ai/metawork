@@ -293,7 +293,6 @@ function McpServerRow({
   server,
   applying,
   selected,
-  toggleAvailable,
   toggleDisabled,
   onOpen,
   onToggle,
@@ -301,15 +300,24 @@ function McpServerRow({
   server: McpServer;
   applying: boolean;
   selected: boolean;
-  toggleAvailable: boolean;
   toggleDisabled: boolean;
   onOpen: (server: McpServer, trigger: HTMLElement) => void;
   onToggle: (server: McpServer, enabled: boolean, trigger: HTMLElement) => void;
 }) {
   const { t } = useI18n();
+  const enablementDescriptionId = useId();
   const available = server.tools.filter(
     (tool) => tool.availableToNewTasks,
   ).length;
+  const enablementUnavailable =
+    server.connection === null ||
+    (!server.desiredEnabled && server.approvalStatus !== "approved");
+  const enablementDescription =
+    server.connection === null
+      ? t("mcp.enablement.connection_unavailable")
+      : server.approvalStatus !== "approved"
+        ? t("mcp.enablement.approval_required")
+        : null;
   return (
     <li
       className="mcp-server-row"
@@ -345,32 +353,39 @@ function McpServerRow({
         </span>
         <Icon name="chevron-right" />
       </button>
-      {toggleAvailable && (
-        <span className="mcp-server-enablement">
-          <span aria-hidden="true">
-            {server.desiredEnabled
-              ? t("mcp.desired.enabled")
-              : t("mcp.desired.disabled")}
-          </span>
-          <Switch.Root
-            checked={server.desiredEnabled}
-            disabled={toggleDisabled}
-            aria-label={t("mcp.enablement.label", {
-              server: server.displayName,
-            })}
-            title={t(
-              server.desiredEnabled
-                ? "mcp.disable.action"
-                : "mcp.enable.action",
-            )}
-            onClick={(event) =>
-              onToggle(server, !server.desiredEnabled, event.currentTarget)
-            }
-          >
-            <Switch.Thumb />
-          </Switch.Root>
+      <span
+        className="mcp-server-enablement"
+        data-enabled={server.desiredEnabled}
+      >
+        <span className="mcp-server-enablement-label" aria-hidden="true">
+          {server.desiredEnabled
+            ? t("mcp.desired.enabled")
+            : t("mcp.desired.disabled")}
         </span>
-      )}
+        <Switch.Root
+          checked={server.desiredEnabled}
+          disabled={toggleDisabled || enablementUnavailable}
+          aria-label={t("mcp.enablement.label", {
+            server: server.displayName,
+          })}
+          aria-describedby={
+            enablementDescription ? enablementDescriptionId : undefined
+          }
+          title={t(
+            server.desiredEnabled ? "mcp.disable.action" : "mcp.enable.action",
+          )}
+          onClick={(event) =>
+            onToggle(server, !server.desiredEnabled, event.currentTarget)
+          }
+        >
+          <Switch.Thumb />
+        </Switch.Root>
+        {enablementDescription && (
+          <span id={enablementDescriptionId} className="sr-only">
+            {enablementDescription}
+          </span>
+        )}
+      </span>
     </li>
   );
 }
@@ -1080,10 +1095,6 @@ export function McpPage({
                 serverCanApply(server)
               }
               selected={selected?.id === server.id}
-              toggleAvailable={
-                server.connection !== null &&
-                (server.desiredEnabled || server.approvalStatus === "approved")
-              }
               toggleDisabled={
                 mutationLocked ||
                 pendingServerId === server.id ||

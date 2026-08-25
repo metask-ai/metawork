@@ -3523,18 +3523,24 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .mcp-server-enablement {
   display: flex;
-  min-width: 104px;
-  padding-left: 10px;
+  min-width: 118px;
+  min-height: 38px;
+  padding: 0 8px 0 14px;
   align-items: center;
   justify-content: flex-end;
   gap: 9px;
+  border-left: 1px solid var(--ui-border);
 }
 
-.mcp-server-enablement > span {
+.mcp-server-enablement-label {
   color: var(--ui-content-muted);
   font-size: var(--text-micro);
   font-weight: 560;
   white-space: nowrap;
+}
+
+.mcp-server-enablement[data-enabled="true"] .mcp-server-enablement-label {
+  color: var(--ui-content-primary);
 }
 
 .mcp-server-enablement [role="switch"]::after {
@@ -5292,10 +5298,10 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
   .mcp-server-enablement {
     min-width: 44px;
-    padding-left: 4px;
+    padding: 0 4px 0 8px;
   }
 
-  .mcp-server-enablement > span {
+  .mcp-server-enablement-label {
     display: none;
   }
 

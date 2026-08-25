@@ -147,7 +147,7 @@ export const enUS = {
   "mcp.status.invalid_catalog": "Invalid tool catalog",
   "mcp.transport.stdio": "Local · STDIO",
   "mcp.transport.streamable_http": "Remote · HTTP",
-  "mcp.tool_access_summary": "{available} of {total} for new tasks",
+  "mcp.tool_access_summary": "{available}/{total} tools available",
   "mcp.trace.label": "Connection progress",
   "mcp.trace.connection": "Connection",
   "mcp.trace.handshake": "MCP handshake",
@@ -330,6 +330,10 @@ export const enUS = {
     "When the connection is ready, this restores the previous tool access ({count} selected) for new tasks. Open tasks keep their current access.",
   "mcp.confirm.enable.action": "Enable server",
   "mcp.enablement.label": "{server} enabled",
+  "mcp.enablement.connection_unavailable":
+    "Connection settings are unavailable. Open details to review recovery options.",
+  "mcp.enablement.approval_required":
+    "Open details and finish connecting this server first.",
   "mcp.confirm.delete.title": "Delete this server?",
   "mcp.confirm.delete.body":
     "This removes the configuration and updates access for new tasks. Open tasks keep their current access.",

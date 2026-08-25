@@ -138,7 +138,7 @@ export const zhCN: Record<MessageId, string> = {
   "mcp.status.invalid_catalog": "工具目录无效",
   "mcp.transport.stdio": "本地 · STDIO",
   "mcp.transport.streamable_http": "远程 · HTTP",
-  "mcp.tool_access_summary": "新任务可用 {available}/{total}",
+  "mcp.tool_access_summary": "可用工具 {available}/{total}",
   "mcp.trace.label": "连接进度",
   "mcp.trace.connection": "建立连接",
   "mcp.trace.handshake": "MCP 握手",
@@ -306,6 +306,9 @@ export const zhCN: Record<MessageId, string> = {
     "连接就绪后，这会向新任务开放之前已允许的 {count} 个工具；已打开的任务保持现有访问权限。",
   "mcp.confirm.enable.action": "启用服务",
   "mcp.enablement.label": "{server} 启用状态",
+  "mcp.enablement.connection_unavailable":
+    "连接配置不可用，请打开详情查看恢复方式。",
+  "mcp.enablement.approval_required": "请先打开详情并完成连接。",
   "mcp.confirm.delete.title": "删除这个服务？",
   "mcp.confirm.delete.body":
     "这会移除配置并更新新任务的访问权限；已打开的任务保持现有访问权限。",

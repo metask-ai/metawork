@@ -226,6 +226,7 @@ test("MCP page groups verified server state without presenting a marketplace", (
   assert.ok(screen.getAllByText("GitHub").length >= 1);
   assert.ok(screen.getByText("Notion"));
   assert.ok(screen.getByText("Filesystem"));
+  assert.equal(screen.getAllByRole("switch").length, 3);
   assert.equal(screen.queryByText(/marketplace|install/i), null);
   assert.equal(screen.queryByRole("dialog"), null);
   assert.equal(document.querySelector(".mcp-workspace"), null);
@@ -543,6 +544,13 @@ test("MCP keeps a missing connection read-only instead of guessing repair data",
     }),
   );
 
+  const enablement = screen.getByRole("switch", { name: "GitHub enabled" });
+  assert.equal(enablement.getAttribute("aria-disabled"), "true");
+  assert.ok(
+    document
+      .getElementById(enablement.getAttribute("aria-describedby"))
+      .textContent.includes("Connection settings are unavailable"),
+  );
   fireEvent.click(screen.getByRole("button", { name: /GitHub/ }));
   const dialog = screen.getByRole("dialog", { name: "GitHub" });
   assert.ok(dialog.textContent.includes("Connection settings unavailable"));
@@ -1269,6 +1277,15 @@ test("MCP approval and OAuth operation actions stay Host-owned and typed", async
         },
       },
     ),
+  );
+  const enablement = screen.getByRole("switch", {
+    name: "Filesystem enabled",
+  });
+  assert.equal(enablement.getAttribute("aria-disabled"), "true");
+  assert.ok(
+    document
+      .getElementById(enablement.getAttribute("aria-describedby"))
+      .textContent.includes("finish connecting this server"),
   );
   fireEvent.click(screen.getByRole("button", { name: /Filesystem/ }));
   fireEvent.click(screen.getByRole("button", { name: "Connect and enable" }));
