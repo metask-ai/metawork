@@ -119,6 +119,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-product-task-recovery-job", .root_module = test_modules.product_task_recovery_job },
         .{ .name = "metawork-product-task-state", .root_module = test_modules.product_task_state },
         .{ .name = "metawork-product-task-policy", .root_module = test_modules.product_task_policy },
+        .{ .name = "metawork-product-task-view", .root_module = test_modules.product_task_view },
     };
     for (module_tests) |spec| {
         spec.root_module.link_libc = bundle.link_libc;
@@ -247,6 +248,7 @@ const WiredModules = struct {
     product_task_recovery_job: *std.Build.Module,
     product_task_state: *std.Build.Module,
     product_task_policy: *std.Build.Module,
+    product_task_view: *std.Build.Module,
 };
 
 fn createLifecycleFixture(
@@ -944,6 +946,16 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     task_policy.addImport("product_task_runtime", task_runtime);
     task_policy.addImport("product_task_recovery", task_recovery);
     task_policy.addImport("product_task_checkpoint_record", checkpoint_record);
+    const task_view = b.createModule(.{
+        .root_source_file = b.path("src/product/task/view.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    task_view.addImport("metawork_agent", agent);
+    task_view.addImport("metawork_product_skill", product_skill);
+    task_view.addImport("product_task_state", task_state);
+    task_view.addImport("product_task_policy", task_policy);
+    task_view.addImport("product_task_recovery", task_recovery);
     const product_task = b.createModule(.{
         .root_source_file = b.path("src/product/task.zig"),
         .target = target,
@@ -959,6 +971,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     product_task.addImport("product_task_recovery_job", task_recovery_job);
     product_task.addImport("product_task_state", task_state);
     product_task.addImport("product_task_policy", task_policy);
+    product_task.addImport("product_task_view", task_view);
     const mcp_configuration = b.createModule(.{
         .root_source_file = b.path("src/product/mcp/configuration.zig"),
         .target = target,
@@ -1191,6 +1204,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .product_task_recovery_job = task_recovery_job,
         .product_task_state = task_state,
         .product_task_policy = task_policy,
+        .product_task_view = task_view,
     };
 }
 

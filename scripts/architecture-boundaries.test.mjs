@@ -270,6 +270,7 @@ test("Product Task kernels have one physical home without taking the executor", 
   const taskPersistence = read("src/product/task/persistence.zig");
   const taskState = read("src/product/task/state.zig");
   const taskPolicy = read("src/product/task/policy.zig");
+  const taskView = read("src/product/task/view.zig");
   const projection = read("src/workbench/projection.zig");
   const executor = read("src/workbench/executor.zig");
   const workbenchRoot = read("src/workbench.zig");
@@ -287,6 +288,7 @@ test("Product Task kernels have one physical home without taking the executor", 
     "recovery_job",
     "state",
     "policy",
+    "view",
   ]) {
     assert.match(
       productTask,
@@ -312,6 +314,7 @@ test("Product Task kernels have one physical home without taking the executor", 
   assert.match(build, /src\/product\/task\/recovery_job\.zig/);
   assert.match(build, /src\/product\/task\/state\.zig/);
   assert.match(build, /src\/product\/task\/policy\.zig/);
+  assert.match(build, /src\/product\/task\/view\.zig/);
   assert.match(
     build,
     /task_persistence\.addImport\("product_task_state", task_state\)/,
@@ -415,6 +418,45 @@ test("Product Task kernels have one physical home without taking the executor", 
   assert.doesNotMatch(
     taskPersistence,
     /Workbench|workbench_executor|std\.Thread|commitTaskState|bumpRevision|writeSnapshot|@import\("(?:metawork_app|metawork_bridge|native_sdk|metask_agentcore)"\)/,
+  );
+  for (const viewFn of [
+    "writeProjection",
+    "writePendingUi",
+    "catalogProjection",
+  ]) {
+    assert.match(taskView, new RegExp(`pub fn ${viewFn}\\(`));
+  }
+  assert.match(taskView, /pub const TextProjection = struct/);
+  assert.match(taskView, /pub const CatalogProjection = struct/);
+  assert.match(taskView, /pub const PendingUiProjection = struct/);
+  assert.match(taskView, /task: \*const task_state\.Task/);
+  assert.match(taskView, /@import\("product_task_state"\)/);
+  assert.match(taskView, /@import\("product_task_policy"\)/);
+  assert.match(taskView, /@import\("product_task_recovery"\)/);
+  assert.match(taskView, /@import\("metawork_product_skill"\)/);
+  assert.doesNotMatch(
+    taskView,
+    /\*Workbench|:\s*Workbench\b|workbench_executor|std\.Thread|\*agent\.Session|commitTaskState|bumpRevision|writeSnapshot|@import\("(?:metawork_workbench|metawork_app|metawork_bridge|native_sdk|metask_agentcore)"\)/,
+  );
+  for (const retiredViewFn of [
+    "writeCompact",
+    "writeRun",
+    "writeUiHistory",
+    "writePendingUiProjection",
+    "taskCatalogProjection",
+  ]) {
+    assert.doesNotMatch(
+      projection,
+      new RegExp(`(?:^|\\n)\\s*fn ${retiredViewFn}\\(`),
+    );
+  }
+  assert.match(projection, /task_view\.writeProjection\(/);
+  assert.match(projection, /task_view\.writePendingUi\(/);
+  assert.match(projection, /session\.copyPendingUiRequest\(/);
+  assert.match(projection, /pub fn writeSnapshot\(/);
+  assert.match(
+    projection,
+    /test "Workbench snapshot serializer matches the Renderer contract fixture"/,
   );
   assert.doesNotMatch(
     workbenchRoot,

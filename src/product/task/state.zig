@@ -1,6 +1,7 @@
 //! Task-owned aggregate state and product-visible Run/Compact lifecycle facts.
 //! Executor jobs, Agent event pumping, persistence effects, revision publication,
-//! and snapshot encoding remain composition responsibilities.
+//! and root snapshot orchestration remain composition responsibilities; Task
+//! subtree derivation and encoding belong to the sibling view kernel.
 
 const std = @import("std");
 const agent = @import("metawork_agent");

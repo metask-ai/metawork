@@ -24,6 +24,7 @@ const task_recovery = product_task.recovery;
 const task_recovery_job = product_task.recovery_job;
 const task_model = product_task.state;
 const task_policy = product_task.policy;
+const task_view = product_task.view;
 const product_mcp = @import("metawork_product_mcp");
 const mcp_configuration = product_mcp.configuration;
 const mcp_state = product_mcp.state;
@@ -3263,7 +3264,7 @@ pub const Workbench = struct {
     ) Error!CatalogProjection {
         self.syncLifecycle();
         const task = self.findTask(task_id) orelse return error.UnknownTask;
-        return taskCatalogProjection(task);
+        return task_view.catalogProjection(task);
     }
 
     pub fn refreshWorkspaceCatalog(
@@ -7294,142 +7295,68 @@ pub const Workbench = struct {
         postprocess.state.store(.settled, .release);
     }
 
-    fn writeTask(self: *Workbench, writer: *std.Io.Writer, view: *TaskView) Error!void {
-        writer.print("{{\"id\":\"{d}\",\"recentOrder\":\"{d}\",\"title\":", .{
-            view.durable.id,
-            view.durable.recent_order,
-        }) catch return error.SnapshotTooLarge;
-        try self.projectedJsonValueWithKnownCredentials(writer, view.durable.title);
-        writer.print(",\"workspaceId\":\"{d}\",\"binding\":{{\"epoch\":\"{d}\",\"availability\":\"{s}\",\"provider\":\"{s}\",\"model\":", .{
-            view.durable.workspace_id,
-            view.durable.binding_epoch,
-            if (view.runtime.executionConst() == null) "unavailable" else "available",
-            @tagName(view.durable.execution_provider),
-        }) catch return error.SnapshotTooLarge;
-        try self.projectedJsonValueWithKnownCredentials(writer, view.durable.execution_model);
-        writer.print(",\"executionGeneration\":\"{d}\",\"unavailableReason\":", .{view.durable.execution_generation}) catch
-            return error.SnapshotTooLarge;
-        if (view.runtime.executionConst() == null)
-            writer.writeAll("\"runtime_detached\"") catch return error.SnapshotTooLarge
-        else
-            writer.writeAll("null") catch return error.SnapshotTooLarge;
-        writer.writeByte('}') catch return error.SnapshotTooLarge;
-        writer.writeAll(",\"skillCatalog\":") catch
-            return error.SnapshotTooLarge;
-        try self.writeCatalogProjection(
-            writer,
-            taskCatalogProjection(view),
-        );
-        const recovery = self.taskRecoveryProjection(view);
-        writer.print(",\"lifecycle\":\"{s}\",\"deletionStatus\":\"{s}\",\"continuationAvailable\":{},\"continuationUnavailableReason\":", .{
-            @tagName(taskLifecycle(view)),
-            @tagName(view.deletion),
-            !self.shutting_down and taskLifecycle(view) == .open and
-                continuationAvailable(recovery.continuation),
-        }) catch return error.SnapshotTooLarge;
-        switch (recovery.continuation) {
-            .available => writer.writeAll("null") catch return error.SnapshotTooLarge,
-            .unavailable => |reason| jsonValue(writer, @tagName(reason)) catch
-                return error.SnapshotTooLarge,
-        }
-        writer.print(",\"continuationRecoveryAvailable\":{},\"archived\":{}", .{
-            recovery.recovery_available,
-            view.durable.archived,
-        }) catch return error.SnapshotTooLarge;
-        writer.writeAll(",\"restorePermission\":") catch return error.SnapshotTooLarge;
-        if (view.runtime.last_restore_permission) |summary| {
-            writer.print("{{\"restoredRules\":\"{d}\",\"invalidatedRules\":\"{d}\"}}", .{
-                summary.restored_rules,
-                summary.invalidated_rules,
-            }) catch return error.SnapshotTooLarge;
-        } else writer.writeAll("null") catch return error.SnapshotTooLarge;
-        writer.writeAll(",\"activeOperation\":") catch return error.SnapshotTooLarge;
-        switch (view.runtime.active_operation) {
-            .none => writer.writeAll("null") catch return error.SnapshotTooLarge,
-            .run => |id| writer.print("{{\"kind\":\"run\",\"id\":\"{d}\"}}", .{id}) catch
-                return error.SnapshotTooLarge,
-            .compact => |id| writer.print("{{\"kind\":\"compact\",\"id\":\"{d}\"}}", .{id}) catch
-                return error.SnapshotTooLarge,
-            .restore => |attempt| writer.print(
-                "{{\"kind\":\"restore\",\"id\":\"{d}\"}}",
-                .{attempt.id},
-            ) catch return error.SnapshotTooLarge,
-        }
-        writer.print(",\"currentRunId\":\"{d}\",\"currentRunPhase\":", .{
-            if (currentRunPhase(view) == null) 0 else view.runtime.active_run_id,
-        }) catch return error.SnapshotTooLarge;
-        if (currentRunPhase(view)) |phase| jsonValue(writer, @tagName(phase)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
-        const last_terminal = lastTerminalFacts(view.durable.runs);
-        writer.writeAll(",\"lastRunOutcome\":") catch return error.SnapshotTooLarge;
-        if (last_terminal) |terminal| jsonValue(writer, @tagName(terminal.outcome)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
-        writer.writeAll(",\"cause\":") catch return error.SnapshotTooLarge;
-        if (last_terminal) |terminal| {
-            if (terminal.cause) |cause| jsonValue(writer, @tagName(cause)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
-        } else writer.writeAll("null") catch return error.SnapshotTooLarge;
-        writer.writeAll(",\"runs\":[") catch return error.SnapshotTooLarge;
-        var run_count: usize = 0;
-        for (view.durable.runs) |*entry| {
-            const run = &(entry.* orelse continue);
-            if (run_count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
-            run_count += 1;
-            try self.writeRun(writer, run);
-        }
-        writer.writeAll("],\"compacts\":[") catch return error.SnapshotTooLarge;
-        var compact_count: usize = 0;
-        for (view.durable.compacts) |*entry| {
-            const compact = &(entry.* orelse continue);
-            if (compact_count != 0) writer.writeByte(',') catch
-                return error.SnapshotTooLarge;
-            compact_count += 1;
-            try self.writeCompact(writer, compact);
-        }
-        writer.writeAll("],\"pendingUi\":") catch return error.SnapshotTooLarge;
-        try self.writePendingUi(writer, view);
-        writer.writeAll(",\"uiHistory\":[") catch return error.SnapshotTooLarge;
-        try self.writeUiHistory(writer, view);
-        writer.writeByte(']') catch return error.SnapshotTooLarge;
-        writer.writeByte('}') catch return error.SnapshotTooLarge;
+    fn taskViewContainsSensitive(context: *const anyopaque, value: []const u8) bool {
+        const self: *const Workbench = @ptrCast(@alignCast(context));
+        return self.containsKnownCredential(value);
     }
 
-    fn writeCompact(
-        self: *Workbench,
+    fn writeTaskViewJson(
+        context: *const anyopaque,
         writer: *std.Io.Writer,
-        compact: *const CompactRecord,
-    ) Error!void {
-        _ = self;
-        const terminal = compactTerminalPayload(compact);
-        const phase = if (terminal) |payload|
-            payload.phase
-        else
-            activeCompactPhase(compact);
-        writer.print(
-            "{{\"operationId\":\"{d}\",\"afterRunId\":\"{d}\",\"phase\":\"{s}\",\"cause\":",
-            .{ compact.id, compact.after_run_id, @tagName(phase) },
-        ) catch return error.SnapshotTooLarge;
-        if (if (terminal) |payload| payload.cause else null) |cause|
-            jsonValue(writer, @tagName(cause)) catch return error.SnapshotTooLarge
-        else
-            writer.writeAll("null") catch return error.SnapshotTooLarge;
-        const before_context_tokens = if (terminal) |payload|
-            payload.before_context_tokens
-        else
-            0;
-        const after_context_tokens = if (terminal) |payload|
-            payload.after_context_tokens
-        else
-            0;
-        const usage = if (terminal) |payload| payload.usage else UsageView{};
-        writer.print(
-            ",\"beforeContextTokens\":\"{d}\",\"afterContextTokens\":\"{d}\",\"usage\":{{\"input\":\"{d}\",\"output\":\"{d}\",\"cacheRead\":\"{d}\",\"cacheCreation\":\"{d}\"}}}}",
-            .{
-                before_context_tokens,
-                after_context_tokens,
-                usage.input_tokens,
-                usage.output_tokens,
-                usage.cache_read_input_tokens,
-                usage.cache_creation_input_tokens,
+        value: []const u8,
+    ) task_view.Error!void {
+        const self: *const Workbench = @ptrCast(@alignCast(context));
+        self.projectedJsonValueWithKnownCredentials(writer, value) catch
+            return error.SnapshotTooLarge;
+    }
+
+    fn taskTextProjection(self: *const Workbench) task_view.TextProjection {
+        return .{
+            .context = self,
+            .contains_sensitive_fn = taskViewContainsSensitive,
+            .write_json_fn = writeTaskViewJson,
+        };
+    }
+
+    fn writeTaskCatalogProjection(
+        context: *const anyopaque,
+        writer: *std.Io.Writer,
+        catalog: CatalogProjection,
+    ) task_view.Error!void {
+        const self: *Workbench = @ptrCast(@alignCast(@constCast(context)));
+        self.writeCatalogProjection(writer, catalog) catch
+            return error.SnapshotTooLarge;
+    }
+
+    fn writeTaskPendingUiProjection(
+        context: *anyopaque,
+        writer: *std.Io.Writer,
+        task: *const TaskView,
+        text: task_view.TextProjection,
+    ) task_view.Error!void {
+        const self: *Workbench = @ptrCast(@alignCast(context));
+        self.writePendingUi(writer, task, text) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.SnapshotTooLarge => error.SnapshotTooLarge,
+            else => error.InvalidUiResponse,
+        };
+    }
+
+    fn writeTask(self: *Workbench, writer: *std.Io.Writer, task: *TaskView) Error!void {
+        task_view.writeProjection(writer, .{
+            .task = task,
+            .recovery = self.taskRecoveryProjection(task),
+            .shutting_down = self.shutting_down,
+            .text = self.taskTextProjection(),
+            .catalog = .{
+                .context = self,
+                .write_fn = writeTaskCatalogProjection,
             },
-        ) catch return error.SnapshotTooLarge;
+            .pending_ui = .{
+                .context = self,
+                .write_fn = writeTaskPendingUiProjection,
+            },
+        }) catch |err| return @errorCast(err);
     }
 
     fn writeCatalogProjection(
@@ -7793,12 +7720,17 @@ pub const Workbench = struct {
         return false;
     }
 
-    fn writePendingUi(self: *Workbench, writer: *std.Io.Writer, view: *TaskView) Error!void {
+    fn writePendingUi(
+        self: *Workbench,
+        writer: *std.Io.Writer,
+        view: *const TaskView,
+        text: task_view.TextProjection,
+    ) Error!void {
         if (view.runtime.pending_ui_request_id == 0) {
             writer.writeAll("null") catch return error.SnapshotTooLarge;
             return;
         }
-        const session = view.runtime.session() orelse {
+        const session = @constCast(&view.runtime).session() orelse {
             writer.writeAll("null") catch return error.SnapshotTooLarge;
             return;
         };
@@ -7822,13 +7754,14 @@ pub const Workbench = struct {
         }
         if (findRun(view.durable.runs, pending.run_id) == null)
             return error.InvalidUiResponse;
-        try self.writePendingUiProjection(
+        task_view.writePendingUi(
             writer,
+            text,
             pending.request_id,
             pending.run_id,
             view.runtime.pending_ui_order,
             parsed.value(),
-        );
+        ) catch |err| return @errorCast(err);
     }
 
     fn deinitFileReference(self: *Workbench, reference: *FileReferenceView) void {
@@ -11179,175 +11112,9 @@ pub const Workbench = struct {
         writer.writeByte('"') catch return error.SnapshotTooLarge;
     }
 
-    fn writePendingUiProjection(
-        self: *Workbench,
-        writer: *std.Io.Writer,
-        request_id: u64,
-        run_id: u64,
-        order: u64,
-        permission: lifecycle.PermissionRequest,
-    ) Error!void {
-        writer.print("{{\"requestId\":\"{d}\",\"runId\":\"{d}\",\"order\":\"{d}\",\"redacted\":{},", .{
-            request_id,
-            run_id,
-            order,
-            self.requestContainsKnownCredential(permission),
-        }) catch return error.SnapshotTooLarge;
-        writer.writeAll("\"kind\":\"permission\",\"tool\":") catch return error.SnapshotTooLarge;
-        try self.projectedJsonValueWithKnownCredentials(writer, permission.tool.name);
-        writer.writeAll(",\"args\":") catch return error.SnapshotTooLarge;
-        try self.projectedJsonValueWithKnownCredentials(writer, permission.arguments_json);
-        writer.writeAll(",\"availableChoices\":[") catch return error.SnapshotTooLarge;
-        var wrote_choice = false;
-        for (permission.responses) |choice| {
-            if (choice == .allow_session or choice == .deny_session) {
-                if (permission.candidate == null) continue;
-            }
-            if (wrote_choice) writer.writeByte(',') catch return error.SnapshotTooLarge;
-            jsonValue(writer, @tagName(choice)) catch return error.SnapshotTooLarge;
-            wrote_choice = true;
-        }
-        writer.writeByte(']') catch return error.SnapshotTooLarge;
-        writer.writeByte('}') catch return error.SnapshotTooLarge;
-    }
-
-    fn requestContainsKnownCredential(self: *const Workbench, permission: lifecycle.PermissionRequest) bool {
-        return self.containsKnownCredential(permission.tool.name) or
-            self.containsKnownCredential(permission.arguments_json);
-    }
-
     fn containsKnownSecret(value: []const u8, credential: []const u8) bool {
         return credential.len != 0 and
             std.mem.indexOf(u8, value, credential) != null;
-    }
-
-    fn writeRun(self: *Workbench, writer: *std.Io.Writer, run: *RunRecord) Error!void {
-        const terminal = productTerminalFacts(run);
-        writer.print("{{\"id\":\"{d}\",\"phase\":\"{s}\",\"input\":", .{
-            run.id,
-            @tagName(runPhase(run)),
-        }) catch return error.SnapshotTooLarge;
-        switch (run.input) {
-            .text => |text| {
-                writer.writeAll("{\"kind\":\"text\",\"text\":") catch
-                    return error.SnapshotTooLarge;
-                try self.projectedJsonValueWithKnownCredentials(
-                    writer,
-                    text.value,
-                );
-                writer.print(",\"redacted\":{}}}", .{text.redacted}) catch
-                    return error.SnapshotTooLarge;
-            },
-            .skill => |skill| {
-                writer.writeAll("{\"kind\":\"skill\",\"skillId\":") catch
-                    return error.SnapshotTooLarge;
-                try self.projectedJsonValueWithKnownCredentials(
-                    writer,
-                    skill.skill_id,
-                );
-                writer.writeAll(",\"catalogRevision\":") catch
-                    return error.SnapshotTooLarge;
-                try self.projectedJsonValueWithKnownCredentials(
-                    writer,
-                    skill.catalog_revision,
-                );
-                writer.writeAll(",\"invocationName\":") catch
-                    return error.SnapshotTooLarge;
-                try self.projectedJsonValueWithKnownCredentials(
-                    writer,
-                    skill.invocation_name,
-                );
-                writer.writeAll(",\"displayName\":") catch
-                    return error.SnapshotTooLarge;
-                try self.projectedJsonValueWithKnownCredentials(
-                    writer,
-                    skill.display_name,
-                );
-                writer.writeAll(",\"argumentValues\":[") catch
-                    return error.SnapshotTooLarge;
-                for (skill.argument_values, 0..) |value, index| {
-                    if (index != 0) writer.writeByte(',') catch
-                        return error.SnapshotTooLarge;
-                    try self.projectedJsonValueWithKnownCredentials(
-                        writer,
-                        value,
-                    );
-                }
-                writer.print("],\"redacted\":{}}}", .{skill.redacted}) catch
-                    return error.SnapshotTooLarge;
-            },
-        }
-        writer.writeAll(",\"assistant\":") catch return error.SnapshotTooLarge;
-        try self.projectedJsonValueWithKnownCredentials(
-            writer,
-            run.assistant.list.items[0..run.assistant.committed_len],
-        );
-        writer.print(",\"assistantRedacted\":{},\"status\":", .{run.assistant_redacted}) catch return error.SnapshotTooLarge;
-        try self.projectedJsonValueWithKnownCredentials(writer, run.status_text);
-        writer.writeAll(",\"outcome\":") catch return error.SnapshotTooLarge;
-        if (terminal) |value| jsonValue(writer, @tagName(value.outcome)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
-        writer.writeAll(",\"cause\":") catch return error.SnapshotTooLarge;
-        if (terminal) |value| {
-            if (value.cause) |cause| jsonValue(writer, @tagName(cause)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
-        } else writer.writeAll("null") catch return error.SnapshotTooLarge;
-        writer.print(",\"usage\":{{\"input\":\"{d}\",\"output\":\"{d}\",\"cacheRead\":\"{d}\",\"cacheCreation\":\"{d}\"}},\"tools\":[", .{
-            run.usage.input_tokens,
-            run.usage.output_tokens,
-            run.usage.cache_read_input_tokens,
-            run.usage.cache_creation_input_tokens,
-        }) catch return error.SnapshotTooLarge;
-        var tool_count: usize = 0;
-        for (run.tools) |*entry| {
-            const tool = &(entry.* orelse continue);
-            if (tool_count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
-            tool_count += 1;
-            writer.writeAll("{\"id\":") catch return error.SnapshotTooLarge;
-            try self.projectedJsonValueWithKnownCredentials(writer, tool.id);
-            writer.print(",\"order\":\"{d}\"", .{tool.order}) catch return error.SnapshotTooLarge;
-            writer.writeAll(",\"name\":") catch return error.SnapshotTooLarge;
-            try self.projectedJsonValueWithKnownCredentials(writer, tool.name);
-            writer.writeAll(",\"input\":") catch return error.SnapshotTooLarge;
-            try self.projectedJsonValueWithKnownCredentials(writer, tool.input);
-            writer.writeAll(",\"progress\":") catch return error.SnapshotTooLarge;
-            try self.projectedJsonValueWithKnownCredentials(writer, tool.progress);
-            writer.writeAll(",\"content\":") catch return error.SnapshotTooLarge;
-            try self.projectedJsonValueWithKnownCredentials(writer, tool.content);
-            writer.print(",\"state\":\"{s}\",\"isError\":{},\"elapsedMs\":\"{d}\",\"inputTruncated\":{},\"progressTruncated\":{},\"contentTruncated\":{},\"redacted\":{},\"fileRefs\":[", .{
-                @tagName(tool.state),
-                tool.is_error,
-                tool.elapsed_ms,
-                tool.input_truncated,
-                tool.progress_truncated,
-                tool.content_truncated,
-                tool.redacted,
-            }) catch return error.SnapshotTooLarge;
-            var file_ref_count: usize = 0;
-            if (tool.file_refs) |refs| for (refs) |*file_ref_entry| {
-                const reference = file_ref_entry.* orelse continue;
-                if (file_ref_count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
-                file_ref_count += 1;
-                writer.writeAll("{\"id\":") catch return error.SnapshotTooLarge;
-                try self.projectedJsonValueWithKnownCredentials(writer, reference.id);
-                writer.writeAll(",\"title\":") catch return error.SnapshotTooLarge;
-                try self.projectedJsonValueWithKnownCredentials(writer, reference.title);
-                writer.writeAll(",\"displayPath\":") catch return error.SnapshotTooLarge;
-                try self.projectedJsonValueWithKnownCredentials(writer, reference.display_path);
-                writer.writeAll(",\"kind\":") catch return error.SnapshotTooLarge;
-                try self.projectedJsonValueWithKnownCredentials(writer, reference.kind);
-                writer.writeAll(",\"range\":") catch return error.SnapshotTooLarge;
-                if (reference.range) |range| {
-                    writer.print("{{\"start\":{{\"line\":\"{d}\",\"column\":\"{d}\"}},\"end\":{{\"line\":\"{d}\",\"column\":\"{d}\"}}}}", .{
-                        range.start.line,
-                        range.start.column,
-                        range.end.line,
-                        range.end.column,
-                    }) catch return error.SnapshotTooLarge;
-                } else writer.writeAll("null") catch return error.SnapshotTooLarge;
-                writer.writeByte('}') catch return error.SnapshotTooLarge;
-            };
-            writer.writeAll("]}") catch return error.SnapshotTooLarge;
-        }
-        writer.writeAll("]}") catch return error.SnapshotTooLarge;
     }
 
     fn prepareUiRecord(
@@ -11413,63 +11180,6 @@ pub const Workbench = struct {
         record.detail_len = result.len;
         record.detail_truncated = result.truncated;
         record.redacted = result.redacted;
-    }
-
-    fn writeUiHistory(
-        self: *Workbench,
-        writer: *std.Io.Writer,
-        view: *const TaskView,
-    ) Error!void {
-        const start = if (view.durable.ui_history_count == view.durable.ui_history.len) view.durable.ui_history_next else 0;
-        for (0..view.durable.ui_history_count) |offset| {
-            if (offset != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
-            const index = (start + offset) % view.durable.ui_history.len;
-            const record = &(view.durable.ui_history[index] orelse unreachable);
-            writer.print("{{\"requestId\":\"{d}\",\"runId\":\"{d}\",\"order\":\"{d}\",\"kind\":\"{s}\",\"state\":\"{s}\",\"detail\":", .{
-                record.request_id,
-                record.run_id,
-                record.order,
-                @tagName(record.kind),
-                @tagName(record.state),
-            }) catch return error.SnapshotTooLarge;
-            try self.projectedJsonValueWithKnownCredentials(writer, record.detailSlice());
-            writer.print(",\"itemCount\":{d},\"detailTruncated\":{},\"redacted\":{},\"agentRequestId\":", .{
-                record.item_count,
-                record.detail_truncated,
-                record.redacted,
-            }) catch return error.SnapshotTooLarge;
-            try self.projectedJsonValueWithKnownCredentials(
-                writer,
-                record.agent_request_id[0..record.agent_request_id_len],
-            );
-            writer.writeAll(",\"permission\":") catch return error.SnapshotTooLarge;
-            if (record.permission) |permission| {
-                writer.writeAll("{\"requestId\":") catch return error.SnapshotTooLarge;
-                jsonValue(writer, permission.requestId()) catch return error.SnapshotTooLarge;
-                writer.writeAll(",\"matchedRuleId\":") catch return error.SnapshotTooLarge;
-                jsonValue(writer, permission.matchedRuleId()) catch return error.SnapshotTooLarge;
-                writer.writeAll(",\"toolNamespace\":") catch return error.SnapshotTooLarge;
-                jsonValue(writer, @tagName(permission.tool_namespace)) catch return error.SnapshotTooLarge;
-                writer.writeAll(",\"toolName\":") catch return error.SnapshotTooLarge;
-                jsonValue(writer, permission.toolName()) catch return error.SnapshotTooLarge;
-                writer.writeAll(",\"toolBinding\":") catch return error.SnapshotTooLarge;
-                jsonValue(writer, permission.toolBinding()) catch return error.SnapshotTooLarge;
-                writer.writeAll(",\"decision\":") catch return error.SnapshotTooLarge;
-                jsonValue(writer, @tagName(permission.decision)) catch return error.SnapshotTooLarge;
-                writer.writeAll(",\"source\":") catch return error.SnapshotTooLarge;
-                jsonValue(writer, @tagName(permission.source)) catch return error.SnapshotTooLarge;
-                writer.print(",\"policyGeneration\":\"{d}\",\"usedSessionRule\":{},\"callbackOutcome\":", .{
-                    permission.policy_generation,
-                    permission.used_session_rule,
-                }) catch return error.SnapshotTooLarge;
-                if (permission.callback_outcome) |outcome|
-                    jsonValue(writer, @tagName(outcome)) catch return error.SnapshotTooLarge
-                else
-                    writer.writeAll("null") catch return error.SnapshotTooLarge;
-                writer.writeByte('}') catch return error.SnapshotTooLarge;
-            } else writer.writeAll("null") catch return error.SnapshotTooLarge;
-            writer.writeByte('}') catch return error.SnapshotTooLarge;
-        }
     }
 
     fn pushUiRecord(_: *Workbench, view: *TaskView, record: UiRecord) void {
@@ -12660,13 +12370,6 @@ fn catalogProjection(
             .availability = availability,
         },
     };
-}
-
-fn taskCatalogProjection(task: *const TaskView) CatalogProjection {
-    return if (task.runtime.pinnedCatalogConst()) |snapshot|
-        snapshot.view()
-    else
-        .{ .availability = .uninitialized };
 }
 
 fn takeActivityOrder(run: *RunRecord) u64 {
@@ -15378,7 +15081,14 @@ test "opaque credential redaction is UTF-8 safe across product inputs and assist
     const request = testPermissionRequest("café", "café");
     var pending_storage: [4096]u8 = undefined;
     var pending_writer = std.Io.Writer.fixed(&pending_storage);
-    try workbench.writePendingUiProjection(&pending_writer, 9, 7, 1, request);
+    try task_view.writePendingUi(
+        &pending_writer,
+        workbench.taskTextProjection(),
+        9,
+        7,
+        1,
+        request,
+    );
     try std.testing.expect(std.unicode.utf8ValidateSlice(pending_writer.buffered()));
     try std.testing.expect(std.mem.indexOf(u8, pending_writer.buffered(), &.{0xa9}) == null);
 
@@ -16238,8 +15948,9 @@ test "permission UI re-encoding remains inside its concurrent snapshot allowance
     var writer = std.Io.Writer.fixed(storage);
     var workbench = try testWorkbench();
     defer workbench.deinit();
-    try workbench.writePendingUiProjection(
+    try task_view.writePendingUi(
         &writer,
+        workbench.taskTextProjection(),
         std.math.maxInt(u64),
         std.math.maxInt(u64),
         std.math.maxInt(u64),
@@ -16273,8 +15984,9 @@ test "permission pending projection follows responses and candidate scope" {
     };
     var candidate_storage: [4096]u8 = undefined;
     var candidate_writer = std.Io.Writer.fixed(&candidate_storage);
-    try workbench.writePendingUiProjection(
+    try task_view.writePendingUi(
         &candidate_writer,
+        workbench.taskTextProjection(),
         1,
         1,
         1,
@@ -16287,7 +15999,14 @@ test "permission pending projection follows responses and candidate scope" {
     const once_only = testPermissionRequest("Bash", "{}");
     var once_storage: [4096]u8 = undefined;
     var once_writer = std.Io.Writer.fixed(&once_storage);
-    try workbench.writePendingUiProjection(&once_writer, 1, 1, 1, once_only);
+    try task_view.writePendingUi(
+        &once_writer,
+        workbench.taskTextProjection(),
+        1,
+        1,
+        1,
+        once_only,
+    );
     const once_json = once_writer.buffered();
     try std.testing.expect(std.mem.indexOf(u8, once_json, "allow_session") == null);
     try std.testing.expect(std.mem.indexOf(u8, once_json, "deny_session") == null);
@@ -16446,8 +16165,9 @@ test "known Host credentials are removed from assistant, tool, and UI projection
     const request = testPermissionRequest("Bash", "token=SECRET-KEY");
     var pending_storage: [4096]u8 = undefined;
     var pending_writer = std.Io.Writer.fixed(&pending_storage);
-    try workbench.writePendingUiProjection(
+    try task_view.writePendingUi(
         &pending_writer,
+        workbench.taskTextProjection(),
         9,
         7,
         1,
