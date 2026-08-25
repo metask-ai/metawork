@@ -1,6 +1,8 @@
 const std = @import("std");
 const workbench_api = @import("metawork_workbench");
 const mcp_configuration = @import("metawork_product_mcp").configuration;
+const skill_enablement = @import("metawork_product_skill").enablement;
+const skill_management = @import("metawork_product_skill").management;
 const product_task = @import("metawork_product_task");
 const app_paths = @import("paths.zig");
 
@@ -16,10 +18,10 @@ pub const Stores = struct {
     scheduled_task: ?workbench_api.ScheduledTaskFileStore = null,
     scheduled_task_restore_failed: bool = true,
     scheduled_task_restored_bytes: ?[]u8 = null,
-    skill_management: ?workbench_api.SkillManagementFileStore = null,
+    skill_management: ?skill_management.FileStore = null,
     skill_management_restore_failed: bool = true,
     skill_management_restored_bytes: ?[]u8 = null,
-    skill_enablement: ?workbench_api.SkillEnablementFileStore = null,
+    skill_enablement: ?skill_enablement.FileStore = null,
     skill_enablement_restore_failed: bool = true,
     skill_enablement_restored_bytes: ?[]u8 = null,
 
@@ -73,7 +75,7 @@ pub const Stores = struct {
         else
             null;
 
-        self.skill_management = workbench_api.SkillManagementFileStore.init(
+        self.skill_management = skill_management.FileStore.init(
             io,
             paths.workbenchDir(),
         ) catch null;
@@ -86,7 +88,7 @@ pub const Stores = struct {
         else
             null;
 
-        self.skill_enablement = workbench_api.SkillEnablementFileStore.init(
+        self.skill_enablement = skill_enablement.FileStore.init(
             io,
             paths.workbenchDir(),
         ) catch null;

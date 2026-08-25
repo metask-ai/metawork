@@ -121,6 +121,18 @@ test("named module roots exist and lower owners cannot import composition", () =
     existsSync(new URL("src/workbench/catalog_snapshot.zig", root)),
     false,
   );
+  assert.equal(
+    existsSync(new URL("src/workbench/skill_package.zig", root)),
+    false,
+  );
+  assert.equal(
+    existsSync(new URL("src/workbench/skill_enablement.zig", root)),
+    false,
+  );
+  assert.equal(
+    existsSync(new URL("src/workbench/skill_management.zig", root)),
+    false,
+  );
   for (const path of [
     "src/workbench/task_persistence.zig",
     "src/workbench/checkpoint_record.zig",
@@ -238,15 +250,35 @@ test("named module roots exist and lower owners cannot import composition", () =
   }
 });
 
-test("Product Skill catalog has one physical home and remains a shared value kernel", () => {
+test("Product Skill has one live owner behind narrow composition ports", () => {
   const build = read("build.zig");
   const productSkill = read("src/product/skill.zig");
   const catalog = read("src/product/skill/catalog.zig");
+  const enablement = read("src/product/skill/enablement.zig");
+  const packageKernel = read("src/product/skill/package.zig");
+  const management = read("src/product/skill/management.zig");
+  const managementRuntime = read("src/product/skill/management_runtime.zig");
+  const policy = read("src/product/skill/policy.zig");
+  const ports = read("src/product/skill/ports.zig");
+  const runtime = read("src/product/skill/runtime.zig");
+  const state = read("src/product/skill/state.zig");
+  const view = read("src/product/skill/view.zig");
+  const appStores = read("src/app/stores.zig");
+  const bridgeDispatcher = read("src/bridge/dispatcher.zig");
+  const workbenchRoot = read("src/workbench.zig");
   const projection = read("src/workbench/projection.zig");
   const taskRuntime = read("src/product/task/runtime.zig");
   const recoveryJob = read("src/product/task/recovery_job.zig");
 
   assert.match(productSkill, /@import\("product_skill_catalog"\)/);
+  assert.match(productSkill, /@import\("product_skill_enablement"\)/);
+  assert.match(productSkill, /@import\("product_skill_management"\)/);
+  assert.match(productSkill, /@import\("product_skill_ports"\)/);
+  assert.match(productSkill, /@import\("product_skill_runtime"\)/);
+  assert.doesNotMatch(
+    productSkill,
+    /@import\("product_skill_(?:package|policy|state|view|management_runtime)"\)/,
+  );
   assert.match(catalog, /@import\("metawork_agent"\)/);
   assert.doesNotMatch(
     catalog,
@@ -256,12 +288,237 @@ test("Product Skill catalog has one physical home and remains a shared value ker
     assert.match(source, /@import\("metawork_product_skill"\)\.catalog/);
     assert.doesNotMatch(source, /@import\("workbench_catalog_snapshot"\)/);
   }
+  assert.doesNotMatch(
+    packageKernel,
+    /Workbench|Workspace|Task|workbench_executor|std\.Thread|@import\("metawork_agent"\)/,
+  );
+  assert.doesNotMatch(
+    enablement,
+    /Workbench|workbench_executor|std\.Thread|@import\("metawork_agent"\)/,
+  );
+  assert.match(management, /@import\("product_skill_package"\)/);
+  assert.doesNotMatch(
+    management,
+    /Workbench|workbench_executor|std\.Thread|@import\("metawork_agent"\)/,
+  );
+  assert.match(managementRuntime, /@import\("product_skill_management"\)/);
+  assert.match(managementRuntime, /@import\("product_skill_package"\)/);
+  assert.match(managementRuntime, /pub fn installDirectory/);
+  assert.match(managementRuntime, /pub fn reimportDirectory/);
+  assert.match(managementRuntime, /pub fn uninstall/);
+  assert.match(managementRuntime, /pub fn retryVerification/);
+  assert.match(managementRuntime, /pub fn recoverNoFail/);
+  assert.match(managementRuntime, /pub fn reconcileNoFail/);
+  assert.doesNotMatch(
+    managementRuntime,
+    /Workbench|WorkspaceView|TaskView|workbench_executor|std\.Thread|@import\("metawork_agent"\)|\*agent\.(?:Runtime|Session)/,
+  );
+  assert.match(state, /@import\("metawork_agent"\)/);
+  assert.match(state, /@import\("product_skill_catalog"\)/);
+  assert.match(state, /@import\("product_skill_enablement"\)/);
+  assert.match(state, /@import\("product_skill_management"\)/);
+  assert.doesNotMatch(
+    state,
+    /Workbench|workbench_executor|std\.Thread|CatalogJob|\*agent\.Runtime|\*agent\.Session/,
+  );
+  assert.match(state, /pub const State = struct/);
+  assert.match(state, /pub const CatalogControl = struct/);
+  assert.match(state, /pub const CatalogLeaseRelease = struct/);
+  assert.match(policy, /@import\("metawork_agent"\)/);
+  assert.match(policy, /@import\("product_skill_catalog"\)/);
+  assert.match(policy, /@import\("product_skill_enablement"\)/);
+  assert.match(policy, /@import\("product_skill_management"\)/);
+  assert.match(policy, /@import\("product_skill_state"\)/);
+  assert.match(policy, /pub fn compileCatalogSnapshot/);
+  assert.match(policy, /pub fn recompileCatalogSnapshot/);
+  assert.match(policy, /pub fn enablementPersistenceFailure/);
+  assert.doesNotMatch(
+    policy,
+    /Workbench|WorkspaceView|TaskView|workbench_executor|std\.Thread|CatalogJob|\*agent\.Runtime|\*agent\.Session|FileStore|\.commit\(|bumpRevision|scheduleSkill/,
+  );
+  assert.match(ports, /@import\("metawork_agent"\)/);
+  assert.match(ports, /pub const Ports = struct/);
+  assert.doesNotMatch(
+    ports,
+    /@import\("(?:metawork_workbench|workbench_executor|metawork_app|native_sdk|metask_agentcore)"\)|\*agent\.(?:Runtime|Session)/,
+  );
+  assert.match(runtime, /const CatalogJob = struct/);
+  assert.match(runtime, /workspaces: \[\]\?WorkspaceCatalog/);
+  assert.match(runtime, /personal_job: \?\*CatalogJob/);
+  assert.match(runtime, /pub fn registerWorkspaceOwned/);
+  assert.match(runtime, /pub fn refreshPersonal/);
+  assert.match(runtime, /pub fn refreshWorkspace/);
+  assert.match(runtime, /pub fn setEnabled/);
+  assert.match(runtime, /pub const CatalogAuthority = union\(enum\)/);
+  assert.match(runtime, /pub fn workspaceCatalogAuthority/);
+  assert.match(runtime, /pub fn ensureWorkspaceCatalog/);
+  assert.match(runtime, /pub fn redactCatalogsNoFail/);
+  assert.match(runtime, /fn commitEnablementCandidate/);
+  assert.match(runtime, /pub fn reconcileEnablementNoFail/);
+  assert.match(runtime, /@import\("product_skill_management_runtime"\)/);
+  assert.match(runtime, /@import\("product_skill_package"\)/);
+  assert.match(runtime, /pub fn previewDirectory/);
+  assert.match(runtime, /pub fn previewArchive/);
+  assert.match(runtime, /pub fn readDefinition/);
+  assert.match(runtime, /pub fn exportPackage/);
+  assert.match(runtime, /pub fn beginShutdown/);
+  assert.doesNotMatch(
+    runtime,
+    /@import\("(?:metawork_workbench|workbench_executor|metawork_app|native_sdk|metask_agentcore)"\)|\*agent\.(?:Runtime|Session)|std\.Thread/,
+  );
+  assert.doesNotMatch(
+    runtime,
+    /pub const Catalog(?:Slot|Control)|pub const Scope =|pub fn (?:personal|workspace)Control(?:Const)?|pub fn requestWorkspaceReschedule/,
+  );
+  assert.match(projection, /skill: skill_runtime\.Runtime/);
+  assert.match(projection, /@import\("metawork_product_skill"\)\.ports/);
+  assert.match(projection, /@import\("metawork_product_skill"\)\.runtime/);
+  assert.doesNotMatch(
+    projection,
+    /@import\("metawork_product_skill"\)\.(?:enablement|management|package|policy|state|view)/,
+  );
+  assert.doesNotMatch(
+    projection,
+    /fn compileCatalogSnapshot|fn recompileCatalogSnapshot|fn inventoryHasInvocationInScope/,
+  );
+  assert.match(projection, /fn productSkillPorts/);
+  assert.match(projection, /fn syncSkillCatalogsNoFail/);
+  assert.match(
+    projection,
+    /pub fn previewSkillDirectory[\s\S]*?return self\.skill\.previewDirectory\(absolute_path\);[\s\S]*?pub fn previewSkillArchive[\s\S]*?return self\.skill\.previewArchive\(absolute_path\);/,
+  );
+  assert.match(
+    projection,
+    /pub fn readSkillDefinition[\s\S]*?requireSkillAssetAuthority\(try self\.skill\.assetScope\(install_id\)\)[\s\S]*?return self\.skill\.readDefinition\(install_id\);[\s\S]*?pub fn exportSkill[\s\S]*?requireSkillAssetAuthority\(try self\.skill\.assetScope\(install_id\)\)[\s\S]*?return self\.skill\.exportPackage\(install_id, absolute_destination\);/,
+  );
+  assert.doesNotMatch(
+    projection,
+    /fn openSkillRoot|skill_runtime\.CanonicalRoot|\.skill\.(?:definitionScope|exportScope|mutationScope)\(/,
+  );
+  assert.doesNotMatch(runtime, /pub const CanonicalRoot/);
+  assert.doesNotMatch(
+    projection,
+    /const CatalogJob = struct|fn scheduleCatalogQuery|fn scheduleSkillCatalogQuery|fn commitCatalogJobsNoFail|fn commitSkillEnablementCandidate|fn noteSkillEnablementPersistenceFailure|fn installSkillSource|fn reimportSkillSource|fn scheduleSkillReconciliation|fn noteSkillPersistenceFailure|fn reconcileSkillCatalogResultNoFail|skill_package_impl\.(?:previewDirectory|inspectDirectory|inspectArchive|extractArchive|exportArchive)|\.skill\.state\.(?:transactions|staging_root)|\.skill\.state\.enablement_(?:store|health|file_store)/,
+  );
+  assert.match(projection, /fn requireSkillMutationAuthority/);
+  assert.match(view, /@import\("product_skill_catalog"\)/);
+  assert.match(view, /@import\("product_skill_management"\)/);
+  assert.match(view, /@import\("product_skill_policy"\)/);
+  assert.match(view, /@import\("product_skill_state"\)/);
+  assert.doesNotMatch(view, /@import\("metawork_agent"\)/);
+  assert.match(view, /pub const TextProjection = struct/);
+  assert.match(view, /pub const WorkspaceCatalogs = struct/);
+  assert.match(view, /pub fn writeCatalogProjection/);
+  assert.match(view, /pub fn writeManagementProjection/);
+  assert.doesNotMatch(
+    view,
+    /Workbench|WorkspaceView|TaskView|workbench_executor|std\.Thread|CatalogJob|Agent Runtime|Session|FileStore|credential|bumpRevision|projection_bytes/,
+  );
+  assert.match(projection, /fn skillWorkspaceCatalog/);
+  assert.doesNotMatch(projection, /fn skillManagementInput|\.skill\.state/);
+  assert.doesNotMatch(
+    projection,
+    /\.skill\.(?:personal|workspace)Control(?:Const)?\(|skill_runtime\.Catalog(?:Slot|Control)/,
+  );
+  assert.doesNotMatch(
+    projection,
+    /fn writeCatalogProjection|fn writeManagedSkillAsset|fn writeExternalSkillAsset|fn writeSkillAssetTail|fn writeSkillScope|fn catalogProjection|fn catalogContainsKnownCredential/,
+  );
+  assert.doesNotMatch(projection, /skill_catalog: skill_state\.CatalogControl/);
+  assert.doesNotMatch(
+    projection,
+    /const SkillManagementHealth = enum|const SkillEnablementHealth = enum|const SkillReconciliation = struct|const CatalogSlot = union/,
+  );
+  assert.doesNotMatch(
+    projection,
+    /\n\s+skill_(?:inventory|transactions|management_health|enablement_file_store|enablement_health|staging_root|reconciliation|catalog_slot|catalog_request_generation):/,
+  );
+  assert.doesNotMatch(projection, /@import\("workbench_skill_enablement"\)/);
+  assert.match(appStores, /@import\("metawork_product_skill"\)\.enablement/);
+  assert.doesNotMatch(appStores, /workbench_api\.SkillEnablementFileStore/);
+  assert.doesNotMatch(
+    workbenchRoot,
+    /SkillEnablementFileStore|skill_enablement_store_max_bytes|workbench_skill_enablement/,
+  );
+  assert.doesNotMatch(projection, /@import\("workbench_skill_management"\)/);
+  assert.match(appStores, /@import\("metawork_product_skill"\)\.management/);
+  assert.doesNotMatch(appStores, /workbench_api\.SkillManagementFileStore/);
+  assert.match(
+    bridgeDispatcher,
+    /@import\("metawork_product_skill"\)\.management/,
+  );
+  assert.doesNotMatch(
+    bridgeDispatcher,
+    /workbench_api\.Skill(?:SourceKind|Scope|InstallId)/,
+  );
+  assert.doesNotMatch(
+    workbenchRoot,
+    /SkillManagementFileStore|skill_management_store_max_bytes|SkillSourceKind|SkillScope|SkillInstallId|workbench_skill_management/,
+  );
+  for (const source of [projection, workbenchRoot])
+    assert.doesNotMatch(
+      source,
+      /@import\("metawork_product_skill"\)\.package|@import\("workbench_skill_package"\)/,
+    );
   assert.match(build, /src\/product\/skill\/catalog\.zig/);
+  assert.match(build, /src\/product\/skill\/enablement\.zig/);
+  assert.match(build, /src\/product\/skill\/management\.zig/);
+  assert.match(build, /src\/product\/skill\/management_runtime\.zig/);
+  assert.match(build, /src\/product\/skill\/package\.zig/);
+  assert.match(build, /src\/product\/skill\/policy\.zig/);
+  assert.match(build, /src\/product\/skill\/ports\.zig/);
+  assert.match(build, /src\/product\/skill\/runtime\.zig/);
+  assert.match(build, /src\/product\/skill\/state\.zig/);
+  assert.match(build, /src\/product\/skill\/view\.zig/);
   assert.match(
     build,
     /product_skill\.addImport\("product_skill_catalog", catalog_snapshot\)/,
   );
   assert.match(build, /addImport\("metawork_product_skill", product_skill\)/);
+  assert.match(
+    build,
+    /product_skill\.addImport\("product_skill_enablement", skill_enablement\)/,
+  );
+  assert.match(
+    build,
+    /product_skill\.addImport\("product_skill_management", skill_management\)/,
+  );
+  assert.match(
+    build,
+    /product_skill\.addImport\("product_skill_ports", product_skill_ports\)/,
+  );
+  assert.match(
+    build,
+    /product_skill\.addImport\("product_skill_runtime", product_skill_runtime\)/,
+  );
+  assert.match(
+    build,
+    /product_skill_runtime\.addImport\("product_skill_enablement", skill_enablement\)/,
+  );
+  assert.match(
+    build,
+    /product_skill_runtime\.addImport\([\s\S]*?"product_skill_management_runtime"[\s\S]*?product_skill_management_runtime[\s\S]*?\)/,
+  );
+  assert.match(
+    build,
+    /product_skill_runtime\.addImport\("product_skill_package", skill_package\)/,
+  );
+  assert.doesNotMatch(
+    build,
+    /product_skill\.addImport\("product_skill_(?:package|policy|state|view)"/,
+  );
+  assert.match(build, /name = "metawork-product-skill-policy"/);
+  assert.match(build, /name = "metawork-product-skill-runtime"/);
+  assert.match(
+    build,
+    /product_skill_runtime\.addImport\("product_skill_view", product_skill_view\)/,
+  );
+  assert.match(build, /name = "metawork-product-skill-view"/);
+  assert.match(build, /name = "metawork-product-skill-state"/);
+  assert.doesNotMatch(
+    build,
+    /src\/workbench\/skill_(?:package|enablement|management)\.zig|workbench_skill_(?:package|enablement|management)|metawork-skill-(?:package|enablement|management)/,
+  );
 });
 
 test("Product Task kernels have one physical home without taking the executor", () => {

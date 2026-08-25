@@ -1,6 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const skill_package = @import("workbench_skill_package");
+const skill_package = @import("product_skill_package");
 
 pub const schema_version: u8 = 1;
 pub const file_name = "skill-management.json";
@@ -431,9 +431,9 @@ pub const PublishResult = struct {
     replaced_existing: bool,
 };
 
-/// Owns the filesystem half of Skill management. AgentCore reconciliation is
-/// intentionally a separate completion step because catalog query runs on the
-/// Workbench executor. Every rename phase is durably recorded first or
+/// Owns the filesystem half of Skill management. Catalog reconciliation is an
+/// intentionally separate completion step because acquisition and scheduling
+/// remain outside this kernel. Every rename phase is durably recorded first or
 /// immediately after the corresponding atomic filesystem transition.
 pub const Transactions = struct {
     io: std.Io,

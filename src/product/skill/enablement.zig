@@ -1,4 +1,4 @@
-//! Workbench-owned durable user defaults and Manual Workspace Skill overrides.
+//! Product Skill enablement policy and durable user/Workspace overrides.
 
 const std = @import("std");
 const builtin = @import("builtin");

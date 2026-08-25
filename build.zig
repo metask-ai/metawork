@@ -102,9 +102,13 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-workbench-executor", .root_module = test_modules.workbench_executor },
         .{ .name = "metawork-automatic-workspace-allocator", .root_module = test_modules.workbench_automatic_workspace_allocator },
         .{ .name = "metawork-scheduled-task-persistence", .root_module = test_modules.workbench_scheduled_persistence },
-        .{ .name = "metawork-skill-package", .root_module = test_modules.workbench_skill_package },
-        .{ .name = "metawork-skill-management", .root_module = test_modules.workbench_skill_management },
-        .{ .name = "metawork-skill-enablement", .root_module = test_modules.workbench_skill_enablement },
+        .{ .name = "metawork-product-skill-package", .root_module = test_modules.product_skill_package },
+        .{ .name = "metawork-product-skill-management", .root_module = test_modules.product_skill_management },
+        .{ .name = "metawork-product-skill-enablement", .root_module = test_modules.product_skill_enablement },
+        .{ .name = "metawork-product-skill-state", .root_module = test_modules.product_skill_state },
+        .{ .name = "metawork-product-skill-policy", .root_module = test_modules.product_skill_policy },
+        .{ .name = "metawork-product-skill-runtime", .root_module = test_modules.product_skill_runtime },
+        .{ .name = "metawork-product-skill-view", .root_module = test_modules.product_skill_view },
         .{ .name = "metawork-product-mcp-configuration", .root_module = test_modules.product_mcp_configuration },
         .{ .name = "metawork-product-mcp-state", .root_module = test_modules.product_mcp_state },
         .{ .name = "metawork-product-mcp-policy", .root_module = test_modules.product_mcp_policy },
@@ -245,9 +249,13 @@ const WiredModules = struct {
     workbench_executor: *std.Build.Module,
     workbench_automatic_workspace_allocator: *std.Build.Module,
     workbench_scheduled_persistence: *std.Build.Module,
-    workbench_skill_package: *std.Build.Module,
-    workbench_skill_management: *std.Build.Module,
-    workbench_skill_enablement: *std.Build.Module,
+    product_skill_package: *std.Build.Module,
+    product_skill_management: *std.Build.Module,
+    product_skill_enablement: *std.Build.Module,
+    product_skill_state: *std.Build.Module,
+    product_skill_policy: *std.Build.Module,
+    product_skill_runtime: *std.Build.Module,
+    product_skill_view: *std.Build.Module,
     product_mcp: *std.Build.Module,
     product_mcp_configuration: *std.Build.Module,
     product_mcp_state: *std.Build.Module,
@@ -283,6 +291,7 @@ fn createLifecycleFixture(
     });
     fixture.addImport("metawork_agent", modules.agent);
     fixture.addImport("metawork_workbench", modules.workbench);
+    fixture.addImport("metawork_product_skill", modules.product_skill);
     fixture.addImport("metawork_product_task", modules.product_task);
     fixture.addImport("metawork_account_contract", modules.account_contract);
     fixture.addImport("event_pump", modules.event_pump);
@@ -867,18 +876,18 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         scheduled_tasks,
     );
     const skill_package = b.createModule(.{
-        .root_source_file = b.path("src/workbench/skill_package.zig"),
+        .root_source_file = b.path("src/product/skill/package.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     const skill_management = b.createModule(.{
-        .root_source_file = b.path("src/workbench/skill_management.zig"),
+        .root_source_file = b.path("src/product/skill/management.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
-    skill_management.addImport("workbench_skill_package", skill_package);
+    skill_management.addImport("product_skill_package", skill_package);
     const skill_enablement = b.createModule(.{
-        .root_source_file = b.path("src/workbench/skill_enablement.zig"),
+        .root_source_file = b.path("src/product/skill/enablement.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
@@ -904,12 +913,78 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .optimize = root_module.optimize,
     });
     catalog_snapshot.addImport("metawork_agent", agent);
+    const product_skill_state = b.createModule(.{
+        .root_source_file = b.path("src/product/skill/state.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    product_skill_state.addImport("metawork_agent", agent);
+    product_skill_state.addImport("product_skill_catalog", catalog_snapshot);
+    product_skill_state.addImport("product_skill_enablement", skill_enablement);
+    product_skill_state.addImport("product_skill_management", skill_management);
+    const product_skill_policy = b.createModule(.{
+        .root_source_file = b.path("src/product/skill/policy.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    product_skill_policy.addImport("metawork_agent", agent);
+    product_skill_policy.addImport("product_skill_catalog", catalog_snapshot);
+    product_skill_policy.addImport("product_skill_enablement", skill_enablement);
+    product_skill_policy.addImport("product_skill_management", skill_management);
+    product_skill_policy.addImport("product_skill_state", product_skill_state);
+    const product_skill_management_runtime = b.createModule(.{
+        .root_source_file = b.path("src/product/skill/management_runtime.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    product_skill_management_runtime.addImport("product_skill_catalog", catalog_snapshot);
+    product_skill_management_runtime.addImport("product_skill_management", skill_management);
+    product_skill_management_runtime.addImport("product_skill_package", skill_package);
+    product_skill_management_runtime.addImport("product_skill_policy", product_skill_policy);
+    product_skill_management_runtime.addImport("product_skill_state", product_skill_state);
+    const product_skill_ports = b.createModule(.{
+        .root_source_file = b.path("src/product/skill/ports.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    product_skill_ports.addImport("metawork_agent", agent);
+    const product_skill_runtime = b.createModule(.{
+        .root_source_file = b.path("src/product/skill/runtime.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    product_skill_runtime.addImport("metawork_agent", agent);
+    product_skill_runtime.addImport("product_skill_catalog", catalog_snapshot);
+    product_skill_runtime.addImport("product_skill_enablement", skill_enablement);
+    product_skill_runtime.addImport("product_skill_management", skill_management);
+    product_skill_runtime.addImport(
+        "product_skill_management_runtime",
+        product_skill_management_runtime,
+    );
+    product_skill_runtime.addImport("product_skill_package", skill_package);
+    product_skill_runtime.addImport("product_skill_policy", product_skill_policy);
+    product_skill_runtime.addImport("product_skill_ports", product_skill_ports);
+    product_skill_runtime.addImport("product_skill_state", product_skill_state);
+    const product_skill_view = b.createModule(.{
+        .root_source_file = b.path("src/product/skill/view.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    product_skill_view.addImport("product_skill_catalog", catalog_snapshot);
+    product_skill_view.addImport("product_skill_management", skill_management);
+    product_skill_view.addImport("product_skill_policy", product_skill_policy);
+    product_skill_view.addImport("product_skill_state", product_skill_state);
+    product_skill_runtime.addImport("product_skill_view", product_skill_view);
     const product_skill = b.createModule(.{
         .root_source_file = b.path("src/product/skill.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     product_skill.addImport("product_skill_catalog", catalog_snapshot);
+    product_skill.addImport("product_skill_enablement", skill_enablement);
+    product_skill.addImport("product_skill_management", skill_management);
+    product_skill.addImport("product_skill_ports", product_skill_ports);
+    product_skill.addImport("product_skill_runtime", product_skill_runtime);
     const owned_task_execution = b.createModule(.{
         .root_source_file = b.path("src/product/task/execution_binding.zig"),
         .target = target,
@@ -1055,9 +1130,6 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         "workbench_scheduled_task_persistence",
         scheduled_task_persistence,
     );
-    projection.addImport("workbench_skill_management", skill_management);
-    projection.addImport("workbench_skill_enablement", skill_enablement);
-    projection.addImport("workbench_skill_package", skill_package);
     projection.addImport("metawork_product_task", product_task);
     projection.addImport("metawork_product_skill", product_skill);
     projection.addImport("metawork_product_mcp", product_mcp);
@@ -1086,9 +1158,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         "workbench_scheduled_task_persistence",
         scheduled_task_persistence,
     );
-    workbench.addImport("workbench_skill_package", skill_package);
-    workbench.addImport("workbench_skill_management", skill_management);
-    workbench.addImport("workbench_skill_enablement", skill_enablement);
+    workbench.addImport("metawork_product_skill", product_skill);
 
     const bridge = b.createModule(.{
         .root_source_file = b.path("src/bridge.zig"),
@@ -1099,6 +1169,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     bridge.addImport("metawork_account_contract", account_contract);
     bridge.addImport("metawork_workbench", workbench);
     bridge.addImport("metawork_product_mcp", product_mcp);
+    bridge.addImport("metawork_product_skill", product_skill);
 
     const automation_disabled = b.createModule(.{
         .root_source_file = b.path("src/automation/disabled.zig"),
@@ -1155,6 +1226,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     app.addImport("metawork_agent", agent);
     app.addImport("metawork_workbench", workbench);
     app.addImport("metawork_product_mcp", product_mcp);
+    app.addImport("metawork_product_skill", product_skill);
     app.addImport("metawork_product_task", product_task);
     app.addImport("metawork_bridge", bridge);
     app.addImport("metawork_automation", automation);
@@ -1215,9 +1287,13 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .workbench_executor = executor,
         .workbench_automatic_workspace_allocator = automatic_workspace_allocator,
         .workbench_scheduled_persistence = scheduled_task_persistence,
-        .workbench_skill_package = skill_package,
-        .workbench_skill_management = skill_management,
-        .workbench_skill_enablement = skill_enablement,
+        .product_skill_package = skill_package,
+        .product_skill_management = skill_management,
+        .product_skill_enablement = skill_enablement,
+        .product_skill_state = product_skill_state,
+        .product_skill_policy = product_skill_policy,
+        .product_skill_runtime = product_skill_runtime,
+        .product_skill_view = product_skill_view,
         .product_mcp = product_mcp,
         .product_mcp_configuration = mcp_configuration,
         .product_mcp_state = product_mcp_state,
