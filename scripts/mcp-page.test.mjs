@@ -282,15 +282,15 @@ test("MCP toggles a server from the list without opening details", async () => {
   fireEvent.click(toggle);
 
   assert.equal(screen.queryByRole("dialog", { name: "GitHub" }), null);
-  const confirmation = screen.getByRole("alertdialog", {
-    name: "Disable this server?",
-  });
-  fireEvent.click(
-    within(confirmation).getByRole("button", { name: "Disable server" }),
-  );
+  assert.equal(screen.queryByRole("alertdialog"), null);
 
   await waitFor(() =>
     assert.deepEqual(calls, [["list-generation", "github-binding", false]]),
+  );
+  assert.ok(
+    screen.getByText(
+      "Server disabled for new tasks. Open tasks keep their current access.",
+    ),
   );
 });
 
@@ -313,7 +313,7 @@ test("MCP shares the centered management-page frame and foundation Drawer", asyn
   assert.doesNotMatch(css, /\.mcp-workspace\s*\{/);
 });
 
-test("MCP row keeps service availability separate from the last connection test", () => {
+test("MCP keeps isolated test results in connection details", () => {
   render(
     pageElement({
       availability: "ready",
@@ -333,7 +333,54 @@ test("MCP row keeps service availability separate from the last connection test"
 
   const row = screen.getByRole("button", { name: /GitHub/ });
   assert.ok(within(row).getByText("Available to new tasks"));
-  assert.ok(within(row).getByText("Failed · 2 issues"));
+  assert.equal(within(row).queryByText("Failed · 2 issues"), null);
+  fireEvent.click(row);
+  const dialog = screen.getByRole("dialog", { name: "GitHub" });
+  assert.ok(within(dialog).getByText("Failed · 2 issues"));
+  assert.equal(within(dialog).queryByText("Connection test failed"), null);
+});
+
+test("MCP retries the formal Runtime instead of promoting connection tests", async () => {
+  const refreshes = [];
+  render(
+    pageElement(
+      {
+        availability: "degraded",
+        managementHealth: "ready",
+        operation: "idle",
+        desiredGeneration: "runtime-retry-generation",
+        runtimeAlignment: "current",
+        redacted: false,
+        servers: [
+          {
+            ...servers[0],
+            runtimeStatus: "unreachable",
+            newTaskAccess: "unavailable",
+            connectionTest: {
+              status: "connected",
+              toolCount: 2,
+              issueCount: 0,
+            },
+          },
+        ],
+      },
+      "",
+      {
+        onRefresh: async () => {
+          refreshes.push("refresh");
+          return { outcome: "started" };
+        },
+      },
+    ),
+  );
+
+  fireEvent.click(screen.getByRole("button", { name: /GitHub/ }));
+  const dialog = screen.getByRole("dialog", { name: "GitHub" });
+  assert.ok(within(dialog).getByText("Succeeded · 2 found"));
+  fireEvent.click(
+    within(dialog).getByRole("button", { name: "Retry connection" }),
+  );
+  await waitFor(() => assert.deepEqual(refreshes, ["refresh"]));
 });
 
 test("MCP keeps intentionally disabled servers out of the attention group", () => {
@@ -431,6 +478,43 @@ test("MCP detail exposes complete non-secret configuration and the tool catalog"
   assert.ok(dialog.textContent.includes("create_issue"));
   assert.equal(dialog.textContent.includes("Authorization"), true);
   assert.ok(screen.getByRole("dialog", { name: "GitHub" }));
+});
+
+test("MCP keeps choosing tools as the final setup step", () => {
+  const toolsNotAllowed = {
+    ...servers[0],
+    newTaskAccess: "not_allowed",
+    tools: servers[0].tools.map((tool) => ({
+      ...tool,
+      desiredAllowed: false,
+      availableToNewTasks: false,
+    })),
+  };
+  render(
+    pageElement({
+      availability: "ready",
+      managementHealth: "ready",
+      operation: "idle",
+      desiredGeneration: "choose-tools-generation",
+      runtimeAlignment: "current",
+      redacted: false,
+      servers: [toolsNotAllowed],
+    }),
+  );
+
+  fireEvent.click(screen.getByRole("button", { name: /GitHub/ }));
+  const dialog = screen.getByRole("dialog", { name: "GitHub" });
+  assert.ok(within(dialog).getByRole("button", { name: "Choose tools" }));
+  assert.ok(
+    within(dialog).getByText(
+      "2 tools were discovered. Choose which ones new tasks may use.",
+    ),
+  );
+  assert.equal(
+    dialog.querySelector(".mcp-connection-trace > div:last-child")?.dataset
+      .state,
+    "active",
+  );
 });
 
 test("MCP keeps a missing connection read-only instead of guessing repair data", () => {
@@ -649,7 +733,7 @@ test("MCP add selects Streamable HTTP and preserves its typed public input", asy
   );
   const name = within(dialog).getByRole("textbox", { name: "Display name" });
   const endpoint = within(dialog).getByRole("textbox", { name: "Endpoint" });
-  const submit = within(dialog).getByRole("button", { name: "Add and enable" });
+  const submit = within(dialog).getByRole("button", { name: "Add server" });
 
   fireEvent.change(name, { target: { value: "Local Search" } });
   fireEvent.change(endpoint, {
@@ -770,9 +854,7 @@ test("MCP STDIO add preserves ordered argv and names without secret values", asy
     }),
     { target: { value: "FILES_TOKEN" } },
   );
-  fireEvent.click(
-    within(dialog).getByRole("button", { name: "Add and enable" }),
-  );
+  fireEvent.click(within(dialog).getByRole("button", { name: "Add server" }));
 
   await waitFor(() => assert.equal(calls.length, 1));
   assert.deepEqual(calls[0], [
@@ -853,9 +935,7 @@ test("MCP OAuth add carries an explicit client auth method and no secret", async
   });
   fireEvent.pointerDown(clientSecretBasicOption);
   fireEvent.click(clientSecretBasicOption);
-  fireEvent.click(
-    within(dialog).getByRole("button", { name: "Add and enable" }),
-  );
+  fireEvent.click(within(dialog).getByRole("button", { name: "Add server" }));
 
   await waitFor(() => assert.equal(calls.length, 1));
   assert.deepEqual(calls[0], [
@@ -1104,11 +1184,55 @@ test("MCP keeps approved enable intent separate from authentication readiness", 
   const confirmation = screen.getByRole("alertdialog", {
     name: "Enable this server?",
   });
+  assert.ok(
+    confirmation.textContent.includes(
+      "this restores the previous tool access (1 selected) for new tasks",
+    ),
+  );
   fireEvent.click(
     within(confirmation).getByRole("button", { name: "Enable server" }),
   );
   await waitFor(() =>
     assert.deepEqual(calls, [["auth-generation", "filesystem-binding", true]]),
+  );
+});
+
+test("MCP enables a server directly when no tool authority is restored", async () => {
+  const calls = [];
+  const noGrantedTools = {
+    ...servers[2],
+    tools: servers[2].tools.map((tool) => ({
+      ...tool,
+      desiredAllowed: false,
+    })),
+  };
+  render(
+    pageElement(
+      {
+        availability: "ready",
+        managementHealth: "ready",
+        operation: "idle",
+        desiredGeneration: "empty-authority-generation",
+        runtimeAlignment: "current",
+        redacted: false,
+        servers: [noGrantedTools],
+      },
+      "",
+      {
+        onSetEnabled: async (...args) => {
+          calls.push(args);
+          return { outcome: "saved" };
+        },
+      },
+    ),
+  );
+
+  fireEvent.click(screen.getByRole("switch", { name: "Filesystem enabled" }));
+  assert.equal(screen.queryByRole("alertdialog"), null);
+  await waitFor(() =>
+    assert.deepEqual(calls, [
+      ["empty-authority-generation", "filesystem-binding", true],
+    ]),
   );
 });
 
