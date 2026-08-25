@@ -465,6 +465,7 @@ pub const Runtime = struct {
 
     pub fn invalidateWorkspace(self: *Runtime, id: u64, budget: ProjectionBudget) void {
         const workspace = self.findWorkspace(id) orelse return;
+        workspace.reschedule_pending = false;
         self.invalidateControlWithBudget(&workspace.control, budget);
     }
 
@@ -1545,6 +1546,36 @@ test "workspace identity replacement discards stale completion and reschedules" 
     try std.testing.expectEqual(@as(usize, 2), harness.query_count);
     try std.testing.expectEqualStrings("/workspace/new", harness.last_root[0..harness.last_root_len]);
     try std.testing.expectEqualStrings("2", harness.last_epoch[0..harness.last_epoch_len]);
+    try std.testing.expect((try runtime.workspaceControlConst(9, 2)).slot == .unavailable);
+}
+
+test "Workspace invalidation cancels replacement reschedule after stale completion" {
+    var harness: TestHarness = .{};
+    var runtime = try testRuntime(&harness);
+    defer runtime.deinit();
+    runtime.registerWorkspaceOwned(.{
+        .id = 9,
+        .epoch = 1,
+        .canonical_root = try std.testing.allocator.dupe(u8, "/workspace/old"),
+    }, harness.budget());
+    try runtime.refreshWorkspace(9, 1);
+
+    runtime.registerWorkspaceOwned(.{
+        .id = 9,
+        .epoch = 2,
+        .canonical_root = try std.testing.allocator.dupe(u8, "/workspace/removed"),
+    }, harness.budget());
+    runtime.invalidateWorkspace(9, harness.budget());
+    harness.runQueued();
+    try std.testing.expect(runtime.sync(
+        harness.budget(),
+        test_snapshot_limits,
+        null,
+    ));
+
+    try std.testing.expectEqual(@as(usize, 1), harness.query_count);
+    try std.testing.expect(harness.queued == null);
+    try std.testing.expect(!runtime.hasWorkspaceJob(9));
     try std.testing.expect((try runtime.workspaceControlConst(9, 2)).slot == .unavailable);
 }
 
