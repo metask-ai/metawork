@@ -24,7 +24,9 @@ Foundation UI 的 token 和组件实现，不替代具体产品的页面布局�
 - `assets/icons/app-icon.png` 是该用途母版的 1024 × 1024 无损栅格交付文件，供当前未打包运行时的
   `icon_path` 和需要方形栅格源的平台消费；`assets/icons/app-icon.icns` 与
   `assets/icons/app-icon.ico` 是预先生成并检查的 macOS、Windows 平台交付文件。`app.zon.icons`
-  同时声明三者，由 Native SDK 按平台优先使用对应的预制容器，不在正式打包时临时转换。
+  同时声明三者，由 Native SDK 按平台优先使用对应的预制容器，不在正式打包时临时转换。Windows
+  build graph 还必须把同一 `app-icon.ico` 编译进主 EXE 的 PE 图标资源；runtime stage 保留的外部副本
+  供安装器、卸载项和已安装快捷方式消费，不能以其中一条路径替代另一条。
 - 应用图标 SVG、PNG、ICNS 和 ICO 都从品牌真源导出；SVG 保留可编辑设计语义，其他格式是平台交付
   资产。不能把应用 SVG 直接交给当前 SDK 的窄 SVG rasterizer，因为品牌复合 path 依赖的
   even-odd 镂空不在其支持范围内。MetaWork 仓库不拥有 SVG 栅格化工具链。

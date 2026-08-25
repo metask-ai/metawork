@@ -187,7 +187,7 @@ node scripts/test-window-chrome-windows.mjs
 npm run package:windows
 ```
 
-该入口必须先完成正式 Release build，再使用 Native SDK `package --target windows` 生成独立 runtime stage；stage gate 精确验证 app.zon version/App ID、ReleaseFast、Windows GUI subsystem、主程序、WebView2 loader、应用图标与 Renderer assets，随后才允许 Inno Setup 6.7.3 或兼容的 7.x 生成小写 `metawork-<version>-windows-x64-setup.exe`。最终 gate 要求精确文件存在、具有 PE identity 且输出 SHA-256。安装器按用户安装、注册开始菜单与卸载入口，不要求管理员权限。
+该入口必须先完成正式 Release build；Windows build graph 把 `assets/icons/app-icon.ico` 编译为主程序的 PE 图标资源，再由 Native SDK `package --target windows` 生成独立 runtime stage 并保留同一 ICO 的外部副本。stage gate 精确验证 app.zon version/App ID、ReleaseFast、Windows GUI subsystem、主程序、WebView2 loader、应用图标与 Renderer assets，随后才允许 Inno Setup 6.7.3 或兼容的 7.x 生成小写 `metawork-<version>-windows-x64-setup.exe`。安装器、卸载项、开始菜单和可选桌面快捷方式统一消费该 ICO，最终 gate 要求精确文件存在、具有 PE identity 且输出 SHA-256。安装器按用户安装、注册开始菜单与卸载入口，不要求管理员权限。
 
 `npm run package:windows -- --signing required` 是同一入口的正式 Authenticode 模式。它必须从 Windows SDK 发现 x64 SignTool，以精确 SHA-1 thumbprint 选择当前用户证书库身份，使用 SHA-256 文件摘要和 RFC 3161 SHA-256 时间戳；MetaWork-owned EXE、Inno signed uninstaller 与最终安装器必须由同一 SignTool definition 签署，Microsoft-owned DLL 保留并验证原厂签名。每个可直接验证的 PE 都必须通过 `signtool verify /pa /all /v`，任何缺失配置、签名、时间戳或验证失败必须 fail closed。普通 unsigned mode 不读取签名身份，不能满足该 Gate。
 

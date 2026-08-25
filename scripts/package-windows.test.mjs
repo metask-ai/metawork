@@ -75,6 +75,34 @@ test("Native package consumes prebuilt platform icons", () => {
   assert.equal(icns.subarray(0, 4).toString("ascii"), "icns");
 });
 
+test("Windows application icon is embedded and assigned to installed shortcuts", () => {
+  const build = readFileSync(new URL("../build.zig", import.meta.url), "utf8");
+  assert.match(build, /addWin32ResourceFile/u);
+  assert.match(build, /packaging\/windows\/metawork\.rc/u);
+  assert.match(build, /include_paths = &\.\{b\.path\("assets\/icons"\)\}/u);
+
+  const resource = readFileSync(
+    new URL("../packaging/windows/metawork.rc", import.meta.url),
+    "utf8",
+  );
+  assert.match(resource, /^#define IDI_METAWORK 1$/mu);
+  assert.match(resource, /^IDI_METAWORK ICON "app-icon\.ico"$/mu);
+
+  const installer = readFileSync(
+    new URL("../packaging/windows/metawork.iss", import.meta.url),
+    "utf8",
+  );
+  assert.match(installer, /^SetupIconFile=.*app-icon\.ico$/mu);
+  assert.match(installer, /^UninstallDisplayIcon=.*app-icon\.ico$/mu);
+  const shortcuts = installer
+    .split(/\r?\n/u)
+    .filter((line) => line.startsWith("Name: \"{auto"));
+  assert.equal(shortcuts.length, 2);
+  for (const shortcut of shortcuts) {
+    assert.match(shortcut, /IconFilename: "\{app\}\\app-icon\.ico"/u);
+  }
+});
+
 test("Inno Setup compiler discovery prefers an explicit absolute path", () => {
   const explicit = path.resolve("C:/toolchains/inno/ISCC.exe");
   const environment = {
