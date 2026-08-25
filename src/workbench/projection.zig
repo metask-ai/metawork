@@ -18,6 +18,7 @@ const checkpoint_record = product_task.checkpoint_record;
 const catalog_snapshot = @import("metawork_product_skill").catalog;
 const owned_task_execution = product_task.execution_binding;
 const task_agent_session = product_task.agent_session;
+const task_attachment = product_task.attachment;
 const task_runtime = product_task.runtime;
 const task_deletion = product_task.deletion;
 const task_recovery = product_task.recovery;
@@ -819,11 +820,7 @@ const checkpointMatchesCurrentHistory = task_policy.checkpointMatchesCurrentHist
 const foldTerminalDisposition = task_policy.foldTerminalDisposition;
 const checkpointFailureAttempt = task_policy.checkpointFailureAttempt;
 
-const TaskFailureRecord = struct {
-    task_id: u64,
-    recent_order: u64,
-    reason: []u8,
-};
+const TaskFailureRecord = task_runtime.FailureRecord;
 
 test "Task aggregate separates Task runtime ownership from product history" {
     try std.testing.expect(@hasField(TaskView, "durable"));
@@ -843,14 +840,14 @@ test "Task aggregate separates Task runtime ownership from product history" {
         "execution",
         "pinned_catalog",
     }) |field_name| {
-        try std.testing.expect(@hasField(task_runtime.LiveAttachment, field_name));
+        try std.testing.expect(@hasField(task_attachment.LiveAttachment, field_name));
         try std.testing.expect(!@hasField(RuntimeAttachment, field_name));
         try std.testing.expect(!@hasField(DurableTaskRecord, field_name));
     }
-    try std.testing.expect(!@hasField(task_runtime.LiveAttachment, "session"));
-    try std.testing.expect(!@hasField(task_runtime.LiveAttachment, "route_id"));
-    try std.testing.expect(@hasField(task_runtime.ClosingAttachment, "route_id"));
-    try std.testing.expect(@hasField(task_runtime.ClosingAttachment, "worker_binding"));
+    try std.testing.expect(!@hasField(task_attachment.LiveAttachment, "session"));
+    try std.testing.expect(!@hasField(task_attachment.LiveAttachment, "route_id"));
+    try std.testing.expect(@hasField(task_attachment.ClosingAttachment, "route_id"));
+    try std.testing.expect(@hasField(task_attachment.ClosingAttachment, "worker_binding"));
     try std.testing.expect(!@hasField(RuntimeAttachment, "lifecycle"));
     try std.testing.expect(!@hasField(RuntimeAttachment, "continuation"));
     try std.testing.expect(!@hasField(RuntimeAttachment, "deletion"));
@@ -1434,14 +1431,12 @@ pub const Workbench = struct {
     agent_runtime: *lifecycle.Runtime,
     limits: Limits,
     workspaces: []?WorkspaceView,
-    tasks: []?TaskView,
-    task_failures: std.ArrayList(TaskFailureRecord),
+    task_runtime: task_runtime.Runtime,
     task_persistence: TaskPersistence,
     task_persistence_health: TaskPersistenceHealth,
     /// Bounded diagnostic count of canonical Agent events that arrived after
     /// their Run's terminal drain was finalized. Runtime-only evidence for
     /// the Stop-barrier investigation; never persisted or published.
-    late_terminal_event_count: u64 = 0,
     checkpoint_store: ?*checkpoint_store.FileStore,
     checkpoint_store_health: std.atomic.Value(checkpoint_store.Health),
     scheduled_tasks: scheduled_tasks_impl.Store,
@@ -1470,11 +1465,6 @@ pub const Workbench = struct {
     mcp_refresh_job: ?*McpRefreshJob = null,
     next_workspace_id: u64 = 1,
     next_workspace_recent_order: u64 = 1,
-    next_task_id: u64 = 1,
-    next_task_recent_order: u64 = 1,
-    next_restore_attempt_id: u64 = 1,
-    recovery_poisoned: bool = false,
-    agent_runtime_shutdown_complete: bool = false,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -1533,9 +1523,8 @@ pub const Workbench = struct {
         const workspaces = try allocator.alloc(?WorkspaceView, workspace_capacity);
         errdefer allocator.free(workspaces);
         @memset(workspaces, null);
-        const tasks = try allocator.alloc(?TaskView, limits.max_tasks);
-        errdefer allocator.free(tasks);
-        @memset(tasks, null);
+        var product_tasks = try task_runtime.Runtime.init(allocator, limits.max_tasks);
+        errdefer product_tasks.deinitStorage();
         var task_persistence_health: TaskPersistenceHealth =
             if (configuration.task_persistence.enabled) .ready else .unavailable;
         if (configuration.task_persistence.restore_failed)
@@ -1622,8 +1611,7 @@ pub const Workbench = struct {
             .agent_runtime = agent_runtime,
             .limits = limits,
             .workspaces = workspaces,
-            .tasks = tasks,
-            .task_failures = .empty,
+            .task_runtime = product_tasks,
             .task_persistence = configuration.task_persistence,
             .task_persistence_health = task_persistence_health,
             .checkpoint_store = configuration.checkpoint_store.file_store,
@@ -1709,7 +1697,7 @@ pub const Workbench = struct {
     pub fn previewFileReference(self: *Workbench, reference_id: []const u8) Error!FilePreview {
         const Match = struct { reference: *const FileReferenceView, task: *const TaskView };
         var match: ?Match = null;
-        for (self.tasks) |*task_entry| {
+        for (self.task_runtime.tasks) |*task_entry| {
             const task = &(task_entry.* orelse continue);
             for (task.durable.runs) |*run_entry| {
                 const run = &(run_entry.* orelse continue);
@@ -2603,7 +2591,7 @@ pub const Workbench = struct {
         self.reconcileSkillEnablementNoFail();
         self.skill.invalidateWorkspace(workspace.id, self.skillProjectionBudget());
         self.bumpRevision();
-        for (self.tasks) |*entry| {
+        for (self.task_runtime.tasks) |*entry| {
             const task = &(entry.* orelse continue);
             if (task.durable.workspace_id != workspace_id or
                 !task.runtime.hasAttachedSession()) continue;
@@ -2634,7 +2622,7 @@ pub const Workbench = struct {
             return error.ExecutionInUse;
         if (!self.canCreateTask())
             return error.ExecutionUnavailable;
-        if (findEmpty(TaskView, self.tasks) == null) return error.TaskCapacity;
+        if (findEmpty(TaskView, self.task_runtime.tasks) == null) return error.TaskCapacity;
         const workspace_id = try self.openWorkspace(input);
         return self.createTaskInWorkspace(
             workspace_id,
@@ -2768,7 +2756,7 @@ pub const Workbench = struct {
         var task_execution = try self.execution.cloneOwned(self.allocator);
         errdefer task_execution.deinit();
         const task_execution_input = task_execution.input();
-        const slot = findEmpty(TaskView, self.tasks) orelse return error.TaskCapacity;
+        const slot = findEmpty(TaskView, self.task_runtime.tasks) orelse return error.TaskCapacity;
         const canonical = workspace_view.canonical_root;
         const workspace_trust: lifecycle.WorkspaceTrust = switch (workspace_view.trust) {
             .explicitly_trusted => .explicitly_trusted,
@@ -2810,8 +2798,8 @@ pub const Workbench = struct {
                 self.next_workspace_recent_order = workspace_recent_order;
         }
         const previous_workspace_recent_order = workspace_view.recent_order;
-        if (self.next_task_id == 0) return error.TaskIdentityExhausted;
-        const task_id = self.next_task_id;
+        if (self.task_runtime.next_task_id == 0) return error.TaskIdentityExhausted;
+        const task_id = self.task_runtime.next_task_id;
         var epoch_storage: [32]u8 = undefined;
         const epoch_token = std.fmt.bufPrint(
             &epoch_storage,
@@ -2847,8 +2835,8 @@ pub const Workbench = struct {
             },
             else => return err,
         };
-        self.next_task_id +%= 1;
-        self.tasks[slot] = .{
+        self.task_runtime.next_task_id +%= 1;
+        self.task_runtime.tasks[slot] = .{
             .durable = .{
                 .id = task_id,
                 .recent_order = self.takeTaskRecentOrder(),
@@ -2878,7 +2866,7 @@ pub const Workbench = struct {
                 workspace_view.recent_order = previous_workspace_recent_order;
         }
         self.commitTaskStateIfConfigured() catch |err| {
-            const inserted = &self.tasks[slot].?;
+            const inserted = &self.task_runtime.tasks[slot].?;
             var live = inserted.runtime.detach(.cold_start);
             switch (live.binding.closeOutcome(.session_close)) {
                 .closed => live.binding.releaseClosed() catch
@@ -2886,8 +2874,8 @@ pub const Workbench = struct {
                 .failure => @panic("fresh Task Session close failed during persistence rollback"),
             }
             live.execution.deinit();
-            self.tasks[slot] = null;
-            self.next_task_id = task_id;
+            self.task_runtime.tasks[slot] = null;
+            self.task_runtime.next_task_id = task_id;
             return err;
         };
         self.bumpRevision();
@@ -2911,7 +2899,7 @@ pub const Workbench = struct {
         if (expected_skill_catalog_revision != null or
             expected_skill_selection_revision != null)
             return error.CatalogUnavailable;
-        if (findEmpty(TaskView, self.tasks) == null) return error.TaskCapacity;
+        if (findEmpty(TaskView, self.task_runtime.tasks) == null) return error.TaskCapacity;
         if (self.workspaceCount(.automatic) >= self.limits.max_tasks)
             return error.WorkspaceCapacity;
         const store = if (self.automatic_workspaces) |*value| value else return error.WorkspaceUnavailable;
@@ -2960,9 +2948,9 @@ pub const Workbench = struct {
             return error.RecoveryUnavailable;
         const canonical_user_home = self.canonical_user_home orelse
             return error.WorkspaceUnavailable;
-        if (self.next_restore_attempt_id == 0)
+        if (self.task_runtime.next_restore_attempt_id == 0)
             return error.RestoreAttemptExhausted;
-        const attempt_id = self.next_restore_attempt_id;
+        const attempt_id = self.task_runtime.next_restore_attempt_id;
 
         var checkpoint_copy = try checkpoint.clone(self.allocator);
         var checkpoint_copy_live = true;
@@ -3034,10 +3022,13 @@ pub const Workbench = struct {
                 .attempt_id = attempt_id,
                 .task_id = task_id,
                 .binding_epoch = expected_binding_epoch,
+                .workspace_id = workspace.id,
+                .workspace_epoch = workspace.epoch,
                 .checkpoint = checkpoint_copy,
                 .workspace = workspace_copy,
                 .skill_policy = skill_policy,
                 .execution = execution.take(),
+                .execution_generation = self.execution.generation,
                 .model = target_model,
                 .provider = agentProvider(task.durable.execution_provider),
                 .mcp_selection = mcp.selection,
@@ -3067,7 +3058,7 @@ pub const Workbench = struct {
             job.deinit();
             return err;
         };
-        self.next_restore_attempt_id +%= 1;
+        self.task_runtime.next_restore_attempt_id +%= 1;
         self.bumpRevision();
         return attempt_id;
     }
@@ -3086,6 +3077,21 @@ pub const Workbench = struct {
     pub fn taskBindingEpoch(self: *Workbench, task_id: u64) Error!u64 {
         self.syncLifecycle();
         return (self.findTask(task_id) orelse return error.UnknownTask).durable.binding_epoch;
+    }
+
+    pub fn testRestoreCancellationRequested(
+        self: *Workbench,
+        task_id: u64,
+    ) bool {
+        std.debug.assert(builtin.is_test);
+        const task = self.findTask(task_id) orelse return false;
+        const job = task.runtime.restore_job orelse return false;
+        return job.cancellation.load(.acquire);
+    }
+
+    pub fn testLateTerminalEventCount(self: *const Workbench) u64 {
+        std.debug.assert(builtin.is_test);
+        return self.task_runtime.late_terminal_event_count;
     }
 
     /// Selects the model for one Task. Credentials and their execution
@@ -3319,7 +3325,7 @@ pub const Workbench = struct {
         const previous_active_run_id = view.runtime.active_run_id;
         const previous_active_operation = view.runtime.active_operation;
         const previous_task_recent_order = view.durable.recent_order;
-        const previous_next_task_recent_order = self.next_task_recent_order;
+        const previous_next_task_recent_order = self.task_runtime.next_recent_order;
         const previous_workspace_recent_order = workspace.recent_order;
         view.runtime.active_run_id = run_id;
         view.runtime.active_operation = .{ .run = run_id };
@@ -3330,7 +3336,7 @@ pub const Workbench = struct {
             view.runtime.active_run_id = previous_active_run_id;
             view.runtime.active_operation = previous_active_operation;
             view.durable.recent_order = previous_task_recent_order;
-            self.next_task_recent_order = previous_next_task_recent_order;
+            self.task_runtime.next_recent_order = previous_next_task_recent_order;
             if (workspace.kind == .manual) {
                 workspace.recent_order = previous_workspace_recent_order;
                 self.next_workspace_recent_order = recent_order;
@@ -3504,13 +3510,13 @@ pub const Workbench = struct {
         };
         const previous_active_operation = view.runtime.active_operation;
         const previous_task_recent_order = view.durable.recent_order;
-        const previous_next_task_recent_order = self.next_task_recent_order;
+        const previous_next_task_recent_order = self.task_runtime.next_recent_order;
         view.runtime.active_operation = .{ .compact = operation_id };
         self.touchTask(view);
         self.commitTaskStateIfConfigured() catch |err| {
             view.runtime.active_operation = previous_active_operation;
             view.durable.recent_order = previous_task_recent_order;
-            self.next_task_recent_order = previous_next_task_recent_order;
+            self.task_runtime.next_recent_order = previous_next_task_recent_order;
             return err;
         };
         job_context.access = access.take();
@@ -3721,7 +3727,7 @@ pub const Workbench = struct {
         const previous_pending_order = view.runtime.pending_ui_order;
         const previous_activity_order = run.next_activity_order;
         const previous_task_recent_order = view.durable.recent_order;
-        const previous_next_task_recent_order = self.next_task_recent_order;
+        const previous_next_task_recent_order = self.task_runtime.next_recent_order;
         self.pushUiRecord(view, record);
         self.touchTask(view);
         self.commitTaskStateIfConfigured() catch |err| {
@@ -3732,7 +3738,7 @@ pub const Workbench = struct {
             view.runtime.pending_ui_order = previous_pending_order;
             run.next_activity_order = previous_activity_order;
             view.durable.recent_order = previous_task_recent_order;
-            self.next_task_recent_order = previous_next_task_recent_order;
+            self.task_runtime.next_recent_order = previous_next_task_recent_order;
             return err;
         };
         const response_result = access.respondPermission(
@@ -3748,7 +3754,7 @@ pub const Workbench = struct {
             view.runtime.pending_ui_order = previous_pending_order;
             run.next_activity_order = previous_activity_order;
             view.durable.recent_order = previous_task_recent_order;
-            self.next_task_recent_order = previous_next_task_recent_order;
+            self.task_runtime.next_recent_order = previous_next_task_recent_order;
             self.commitTaskStateNoFail();
             return err;
         };
@@ -3776,7 +3782,7 @@ pub const Workbench = struct {
         const prior_health = if (view.runtime.attached()) |attached|
             attached.health
         else
-            task_runtime.AttachedHealth.available;
+            task_attachment.AttachedHealth.available;
         if (switch (view.runtime.active_operation) {
             .compact => true,
             .none, .run, .restore => false,
@@ -3855,7 +3861,7 @@ pub const Workbench = struct {
         const previous_title = view.durable.title;
         const previous_redacted = view.durable.title_redacted;
         const previous_recent_order = view.durable.recent_order;
-        const previous_next_recent_order = self.next_task_recent_order;
+        const previous_next_recent_order = self.task_runtime.next_recent_order;
         self.projection_bytes -= previous_title.len;
         const projected = self.copyProjected(
             trimmed,
@@ -3874,7 +3880,7 @@ pub const Workbench = struct {
             self.projection_bytes += previous_title.len;
             view.durable.title_redacted = previous_redacted;
             view.durable.recent_order = previous_recent_order;
-            self.next_task_recent_order = previous_next_recent_order;
+            self.task_runtime.next_recent_order = previous_next_recent_order;
             return err;
         };
         self.allocator.free(previous_title);
@@ -4026,7 +4032,7 @@ pub const Workbench = struct {
             hasActiveOperation(view)) return error.TaskBusy;
         if (view.durable.archived == archived) return;
         const previous_recent_order = view.durable.recent_order;
-        const previous_next_recent_order = self.next_task_recent_order;
+        const previous_next_recent_order = self.task_runtime.next_recent_order;
         const previous_deletion = view.deletion;
         view.durable.archived = archived;
         if (!archived and view.deletion == .failed) view.deletion = .idle;
@@ -4035,7 +4041,7 @@ pub const Workbench = struct {
             view.durable.archived = !archived;
             view.deletion = previous_deletion;
             view.durable.recent_order = previous_recent_order;
-            self.next_task_recent_order = previous_next_recent_order;
+            self.task_runtime.next_recent_order = previous_next_recent_order;
             return err;
         };
         self.bumpRevision();
@@ -4045,12 +4051,12 @@ pub const Workbench = struct {
         self.syncLifecycle();
         try self.requireTaskPersistenceMutation();
         const index = self.findTaskIndex(task_id) orelse return error.UnknownTask;
-        const view = &(self.tasks[index] orelse unreachable);
+        const view = &(self.task_runtime.tasks[index] orelse unreachable);
         if (!view.durable.archived) return error.TaskNotArchived;
         if (view.deletion == .deleting) return;
         view.deletion = .deleting;
         _ = self.advanceTaskDeletion(index) catch |err| {
-            if (self.tasks[index]) |*retained|
+            if (self.task_runtime.tasks[index]) |*retained|
                 retained.deletion = .failed;
             self.bumpRevision();
             return err;
@@ -4063,7 +4069,7 @@ pub const Workbench = struct {
     /// this function again after checkpoint, worker, event, or Session state
     /// changes. Only an explicit retry changes `.failed` back to `.deleting`.
     fn advanceTaskDeletion(self: *Workbench, index: usize) Error!bool {
-        const view = &(self.tasks[index] orelse return error.UnknownTask);
+        const view = &(self.task_runtime.tasks[index] orelse return error.UnknownTask);
         if (view.deletion == .deleting) std.debug.assert(view.durable.archived);
         const session: task_deletion.Session = if (view.runtime.hasAttachedSession())
             .attached
@@ -4093,7 +4099,7 @@ pub const Workbench = struct {
     }
 
     fn finalizeTaskDeletion(self: *Workbench, index: usize) Error!void {
-        const view = &(self.tasks[index] orelse return error.UnknownTask);
+        const view = &(self.task_runtime.tasks[index] orelse return error.UnknownTask);
         std.debug.assert(view.durable.archived);
         std.debug.assert(view.deletion == .deleting);
         std.debug.assert(!view.runtime.hasAttachedSession());
@@ -4107,7 +4113,7 @@ pub const Workbench = struct {
         else
             false;
         var removed_task = view.*;
-        self.tasks[index] = null;
+        self.task_runtime.tasks[index] = null;
         var removed_workspace_index: ?usize = null;
         var removed_workspace: WorkspaceView = undefined;
         if (release_automatic_workspace) {
@@ -4121,7 +4127,7 @@ pub const Workbench = struct {
             }
         }
         self.commitTaskStateIfConfigured() catch |err| {
-            self.tasks[index] = removed_task;
+            self.task_runtime.tasks[index] = removed_task;
             if (removed_workspace_index) |workspace_index|
                 self.workspaces[workspace_index] = removed_workspace;
             return err;
@@ -4134,14 +4140,14 @@ pub const Workbench = struct {
 
     fn advanceRequestedTaskDeletionsNoFail(self: *Workbench) bool {
         var changed = false;
-        for (self.tasks, 0..) |*entry, index| {
+        for (self.task_runtime.tasks, 0..) |*entry, index| {
             const view = &(entry.* orelse continue);
             if (view.deletion != .deleting) continue;
             const advanced = self.advanceTaskDeletion(index) catch {
                 // The accepted deletion intent cannot manufacture a durable
                 // success. Leave the archived Task intact and allow an
                 // explicit retry after persistence recovers.
-                if (self.tasks[index]) |*retained|
+                if (self.task_runtime.tasks[index]) |*retained|
                     retained.deletion = .failed;
                 changed = true;
                 continue;
@@ -4169,7 +4175,7 @@ pub const Workbench = struct {
         changed = self.syncMcpHealthNoFail() or changed;
         var durable_changed = false;
         var mcp_refresh_needed = false;
-        for (self.tasks) |*entry| {
+        for (self.task_runtime.tasks) |*entry| {
             const view = &(entry.* orelse continue);
             const recovery_commit = self.commitRecoveryJobNoFail(view);
             changed = recovery_commit.changed or changed;
@@ -4309,7 +4315,7 @@ pub const Workbench = struct {
         if (self.reconcileScheduledTaskBindingsNoFail()) changed = true;
         if (self.reconcileScheduledTaskCompletionsNoFail()) changed = true;
         if (durable_changed) self.commitTaskStateNoFail();
-        for (self.tasks) |*entry| {
+        for (self.task_runtime.tasks) |*entry| {
             const view = &(entry.* orelse continue);
             if (self.commitCheckpointPostprocessesNoFail(view)) changed = true;
         }
@@ -4330,9 +4336,9 @@ pub const Workbench = struct {
     ) RecoveryCommit {
         const job = task.runtime.restore_job orelse return .{};
         if (!job.completionReady()) return .{};
-        const operation_matches = switch (task.runtime.active_operation) {
-            .restore => |attempt| attempt.id == job.attempt.attempt_id,
-            .none, .run, .compact => false,
+        const active_attempt_id: ?u64 = switch (task.runtime.active_operation) {
+            .restore => |attempt| attempt.id,
+            .none, .run, .compact => null,
         };
         var durable_changed = false;
         var mcp_refresh_needed = false;
@@ -4343,20 +4349,40 @@ pub const Workbench = struct {
                 checkpointIdentityEqual(record.blob, job.attempt.checkpoint.blob)
             else
                 false;
-            const commit_allowed = operation_matches and
-                !self.shutting_down and
-                !task.durable.archived and
-                task.runtime.attachment == .detached and
-                task.durable.binding_epoch == job.attempt.binding_epoch and
-                record_matches and
-                self.recoveryExecutionExact(task) and
-                self.recoveryAuthorityStable(workspace) and
-                optionalU64Equal(
-                    mcp_policy.recoveryGeneration(if (self.mcp) |*mcp| mcp else null, self.mcp_refresh_job != null),
-                    job.attempt.mcp_catalog_generation,
-                ) and
-                candidate.pinned_catalog.projected_bytes <=
-                    self.limits.max_projection_bytes - self.projection_bytes;
+            const skill_policy_revision = if (workspace) |current_workspace|
+                self.skill.enablementRevision(.{ .project = .{
+                    .workspace_id = current_workspace.id,
+                    .workspace_epoch = current_workspace.epoch,
+                } })
+            else
+                0;
+            const commit_allowed = task_recovery_job.commitAllowed(
+                &job.attempt,
+                .{
+                    .task_id = task.durable.id,
+                    .binding_epoch = task.durable.binding_epoch,
+                    .workspace_id = task.durable.workspace_id,
+                    .workspace_epoch = task.durable.workspace_epoch,
+                    .workspace_root = if (workspace) |value| value.canonical_root else "",
+                    .skill_policy_revision = skill_policy_revision,
+                    .execution_generation = task.durable.execution_generation,
+                    .execution_model = task.durable.execution_model,
+                    .provider = agentProvider(task.durable.execution_provider),
+                    .mcp_catalog_generation = mcp_policy.recoveryGeneration(
+                        if (self.mcp) |*mcp| mcp else null,
+                        self.mcp_refresh_job != null,
+                    ),
+                    .active_attempt_id = active_attempt_id,
+                    .shutting_down = self.shutting_down,
+                    .archived = task.durable.archived,
+                    .attachment_detached = task.runtime.attachment == .detached,
+                    .checkpoint_matches = record_matches,
+                    .workspace_authority_stable = self.recoveryAuthorityStable(workspace),
+                    .execution_authority_stable = self.recoveryExecutionExact(task),
+                    .available_projection_bytes = self.limits.max_projection_bytes - self.projection_bytes,
+                },
+                candidate.pinned_catalog.projected_bytes,
+            );
             if (commit_allowed) {
                 self.projection_bytes += candidate.pinned_catalog.projected_bytes;
                 task.runtime.last_restore_permission = .{
@@ -4370,7 +4396,7 @@ pub const Workbench = struct {
                 } };
                 task.runtime.last_restore_failure = null;
             } else if (!candidate.discard()) {
-                self.recovery_poisoned = true;
+                self.task_runtime.recovery_poisoned = true;
                 task.runtime.last_restore_failure = .candidate_cleanup_failed;
             }
         } else if (job.failure()) |failure| {
@@ -4395,7 +4421,7 @@ pub const Workbench = struct {
                     task.durable.checkpoint_attempt = .io_failed;
                     durable_changed = true;
                 },
-                .candidate_cleanup_failed => self.recovery_poisoned = true,
+                .candidate_cleanup_failed => self.task_runtime.recovery_poisoned = true,
                 else => {},
             }
         }
@@ -4560,10 +4586,10 @@ pub const Workbench = struct {
             .late_terminal => {
                 // A late event cannot change a published product terminal, and
                 // is not by itself proof of an AgentCore contract violation.
-                self.late_terminal_event_count +|= 1;
+                self.task_runtime.late_terminal_event_count +|= 1;
                 if (builtin.mode == .Debug) std.log.warn(
                     "workbench.late_terminal_event task_id={d} run_id={d} count={d}",
-                    .{ task.durable.id, envelope.run_id, self.late_terminal_event_count },
+                    .{ task.durable.id, envelope.run_id, self.task_runtime.late_terminal_event_count },
                 );
             },
             .applied => |application| {
@@ -4593,7 +4619,7 @@ pub const Workbench = struct {
     /// event-pump drain. The acquire in `terminalPayload` observes every
     /// callback enqueue that happened before Run completion.
     fn markTerminalRunsBeforeEventDrain(self: *Workbench) void {
-        for (self.tasks) |*task_entry| {
+        for (self.task_runtime.tasks) |*task_entry| {
             const task = &(task_entry.* orelse continue);
             _ = task_model.markTerminalRunsBeforeEventDrain(task);
         }
@@ -6038,7 +6064,7 @@ pub const Workbench = struct {
     /// Any later event for the Run is rejected by `applyEvent`.
     pub fn finalizeMarkedTerminalRunsAfterEventDrain(self: *Workbench) void {
         var changed = false;
-        for (self.tasks) |*task_entry| {
+        for (self.task_runtime.tasks) |*task_entry| {
             const task = &(task_entry.* orelse continue);
             if (!task_model.finalizeMarkedTerminalRunsAfterEventDrain(task)) continue;
             changed = true;
@@ -6122,7 +6148,7 @@ pub const Workbench = struct {
         writer.writeAll("],\"tasks\":[") catch
             return error.SnapshotTooLarge;
         var task_count: usize = 0;
-        for (self.tasks) |*entry| {
+        for (self.task_runtime.tasks) |*entry| {
             const task = &(entry.* orelse continue);
             if (task_count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
             task_count += 1;
@@ -6384,7 +6410,7 @@ pub const Workbench = struct {
         self.shutdownExecutor();
         self.schedule_timer.cancelCurrent();
         self.mcp_refresh_timer.cancelCurrent();
-        for (self.tasks) |*entry| {
+        for (self.task_runtime.tasks) |*entry| {
             const task = &(entry.* orelse continue);
             if (task.runtime.close_thread) |thread| {
                 thread.join();
@@ -6393,9 +6419,7 @@ pub const Workbench = struct {
             self.deinitTaskView(task);
             entry.* = null;
         }
-        self.allocator.free(self.tasks);
-        for (self.task_failures.items) |failure| self.allocator.free(failure.reason);
-        self.task_failures.deinit(self.allocator);
+        self.task_runtime.deinitStorage();
         for (self.workspaces) |*entry| {
             const workspace = &(entry.* orelse continue);
             self.deinitWorkspaceView(workspace);
@@ -6426,7 +6450,7 @@ pub const Workbench = struct {
         self.schedule_timer.cancelCurrent();
         self.mcp_refresh_timer.cancelCurrent();
         self.skill.beginShutdown();
-        for (self.tasks) |*entry| {
+        for (self.task_runtime.tasks) |*entry| {
             const view = &(entry.* orelse continue);
             cancelTaskCheckpoints(view);
             cancelTaskAutomaticTitles(view);
@@ -6477,7 +6501,7 @@ pub const Workbench = struct {
     /// this only after Runtime.shutdown succeeds and the final lifecycle sync.
     pub fn relinquishAgentSessionsAfterRuntimeShutdown(self: *Workbench) void {
         std.debug.assert(self.executor_shutdown);
-        for (self.tasks) |*entry| {
+        for (self.task_runtime.tasks) |*entry| {
             const task = &(entry.* orelse continue);
             if (task.runtime.close_thread) |thread| {
                 thread.join();
@@ -6490,12 +6514,12 @@ pub const Workbench = struct {
             }
             task.runtime.clearClosingRouteAfterRuntimeShutdown();
         }
-        self.agent_runtime_shutdown_complete = true;
+        self.task_runtime.agent_runtime_shutdown_complete = true;
     }
 
     pub fn abandonAgentSessionsForRuntimeDeinit(self: *Workbench) void {
         std.debug.assert(self.executor_shutdown);
-        for (self.tasks) |*entry| {
+        for (self.task_runtime.tasks) |*entry| {
             const task = &(entry.* orelse continue);
             if (task.runtime.close_thread) |thread| {
                 thread.join();
@@ -6508,11 +6532,11 @@ pub const Workbench = struct {
             }
             task.runtime.clearClosingRouteAfterRuntimeShutdown();
         }
-        self.agent_runtime_shutdown_complete = true;
+        self.task_runtime.agent_runtime_shutdown_complete = true;
     }
 
     fn settleCheckpointTransactionsForShutdown(self: *Workbench) void {
-        for (self.tasks) |*entry| {
+        for (self.task_runtime.tasks) |*entry| {
             const task = &(entry.* orelse continue);
             for (task.durable.runs) |*run_entry| {
                 const run = &(run_entry.* orelse continue);
@@ -7009,7 +7033,7 @@ pub const Workbench = struct {
             .execution_exact = self.recoveryExecutionExact(task),
             .workspace_authorized = workspace_authorized,
             .runtime_admission_available = self.agent_runtime.restoreAdmissionAvailable(),
-            .authority_stable = !self.recovery_poisoned and
+            .authority_stable = !self.task_runtime.recovery_poisoned and
                 self.recoveryAuthorityStable(workspace),
             .recovery_failed = task.runtime.last_restore_failure != null,
         });
@@ -7450,7 +7474,7 @@ pub const Workbench = struct {
 
     fn restoreTaskState(self: *Workbench, bytes: []const u8) Error!void {
         std.debug.assert(countPresent(WorkspaceView, self.workspaces) == 0);
-        std.debug.assert(countPresent(TaskView, self.tasks) == 0);
+        std.debug.assert(countPresent(TaskView, self.task_runtime.tasks) == 0);
         var recovered = try task_persistence.decodeRecovering(
             self.allocator,
             bytes,
@@ -7493,7 +7517,7 @@ pub const Workbench = struct {
                     continue;
                 },
             };
-            self.tasks[restored_task_count] = restored;
+            self.task_runtime.tasks[restored_task_count] = restored;
             if (self.findWorkspace(task.workspace_id)) |workspace| {
                 if (workspace.kind == .automatic) workspace.automatic_task_id = task.id;
             }
@@ -7503,7 +7527,7 @@ pub const Workbench = struct {
             const workspace = &(entry.* orelse continue);
             if (workspace.kind != .automatic) continue;
             var owned_task_count: usize = 0;
-            for (self.tasks) |task_entry| {
+            for (self.task_runtime.tasks) |task_entry| {
                 if (task_entry) |task| {
                     if (task.durable.workspace_id == workspace.id) {
                         owned_task_count += 1;
@@ -7517,8 +7541,8 @@ pub const Workbench = struct {
         }
         self.next_workspace_id = recovered.value.next_workspace_id;
         self.next_workspace_recent_order = recovered.value.next_workspace_recent_order;
-        self.next_task_id = recovered.value.next_task_id;
-        self.next_task_recent_order = recovered.value.next_task_recent_order;
+        self.task_runtime.next_task_id = recovered.value.next_task_id;
+        self.task_runtime.next_recent_order = recovered.value.next_task_recent_order;
         if (recovered.degraded or recovered.dropped_workspaces != 0 or recovered.dropped_tasks != 0)
             self.task_persistence_health = .degraded;
     }
@@ -7531,11 +7555,11 @@ pub const Workbench = struct {
     ) Error!void {
         if (task_id == 0 or reason.len == 0 or reason.len > task_persistence.max_failure_reason_bytes)
             return error.TaskStoreCorrupt;
-        for (self.task_failures.items) |failure|
+        for (self.task_runtime.failures.items) |failure|
             if (failure.task_id == task_id and std.mem.eql(u8, failure.reason, reason)) return;
         const owned_reason = try self.allocator.dupe(u8, reason);
         errdefer self.allocator.free(owned_reason);
-        try self.task_failures.append(self.allocator, .{
+        try self.task_runtime.failures.append(self.allocator, .{
             .task_id = task_id,
             .recent_order = recent_order,
             .reason = owned_reason,
@@ -7589,7 +7613,7 @@ pub const Workbench = struct {
             self.checkpoint_store_health.load(.acquire) != .ready)
             return;
         const store = self.checkpoint_store orelse return;
-        for (self.tasks) |*entry| {
+        for (self.task_runtime.tasks) |*entry| {
             const task = &(entry.* orelse continue);
             const record = task.durable.checkpoint orelse continue;
             store.verify(record.blob) catch |err| {
@@ -7614,7 +7638,7 @@ pub const Workbench = struct {
             };
         }
         var reference_count: usize = 0;
-        for (self.tasks) |entry| if (entry) |task|
+        for (self.task_runtime.tasks) |entry| if (entry) |task|
             if (task.durable.checkpoint != null) {
                 reference_count += 1;
             };
@@ -7627,7 +7651,7 @@ pub const Workbench = struct {
         };
         defer self.allocator.free(references);
         var index: usize = 0;
-        for (self.tasks) |entry| if (entry) |task|
+        for (self.task_runtime.tasks) |entry| if (entry) |task|
             if (task.durable.checkpoint) |record| {
                 references[index] = record.blob;
                 index += 1;
@@ -7644,7 +7668,7 @@ pub const Workbench = struct {
     }
 
     fn clearRestoredTaskStateNoFail(self: *Workbench) void {
-        for (self.tasks) |*entry| {
+        for (self.task_runtime.tasks) |*entry| {
             const task = &(entry.* orelse continue);
             self.deinitTaskView(task);
             entry.* = null;
@@ -7656,8 +7680,8 @@ pub const Workbench = struct {
         }
         self.next_workspace_id = 1;
         self.next_workspace_recent_order = 1;
-        self.next_task_id = 1;
-        self.next_task_recent_order = 1;
+        self.task_runtime.next_task_id = 1;
+        self.task_runtime.next_recent_order = 1;
     }
 
     const CheckpointPersistenceOverride = task_persistence.CheckpointPersistenceOverride;
@@ -7671,7 +7695,7 @@ pub const Workbench = struct {
         checkpoint_override: ?CheckpointPersistenceOverride,
     ) Error!task_persistence.TaskStateWireScratch {
         const workspace_count = countPresent(WorkspaceView, self.workspaces);
-        const task_count = countPresent(TaskView, self.tasks);
+        const task_count = countPresent(TaskView, self.task_runtime.tasks);
         const workspaces = try self.allocator.alloc(
             task_persistence.WorkspaceWire,
             workspace_count,
@@ -7696,7 +7720,7 @@ pub const Workbench = struct {
         errdefer self.allocator.free(tasks);
         var task_index: usize = 0;
         errdefer task_persistence.deinitTaskWires(self.allocator, tasks[0..task_index]);
-        for (self.tasks) |*entry| {
+        for (self.task_runtime.tasks) |*entry| {
             const task = &(entry.* orelse continue);
             tasks[task_index] = try task_persistence.projectTask(
                 self.allocator,
@@ -7707,10 +7731,10 @@ pub const Workbench = struct {
         }
         const failures = try self.allocator.alloc(
             task_persistence.TaskFailureWire,
-            self.task_failures.items.len,
+            self.task_runtime.failures.items.len,
         );
         errdefer self.allocator.free(failures);
-        for (self.task_failures.items, failures) |failure, *target| target.* = .{
+        for (self.task_runtime.failures.items, failures) |failure, *target| target.* = .{
             .task_id = failure.task_id,
             .recent_order = failure.recent_order,
             .reason = failure.reason,
@@ -7723,8 +7747,8 @@ pub const Workbench = struct {
             .state = .{
                 .next_workspace_id = self.next_workspace_id,
                 .next_workspace_recent_order = self.next_workspace_recent_order,
-                .next_task_id = self.next_task_id,
-                .next_task_recent_order = self.next_task_recent_order,
+                .next_task_id = self.task_runtime.next_task_id,
+                .next_task_recent_order = self.task_runtime.next_recent_order,
                 .workspaces = workspaces[0..workspace_index],
                 .tasks = tasks[0..task_index],
                 .failures = failures,
@@ -7733,6 +7757,8 @@ pub const Workbench = struct {
     }
 
     fn requireTaskPersistenceMutation(self: *const Workbench) Error!void {
+        if (!self.task_runtime.durableMutationAvailable())
+            return error.TaskPersistenceOutcomeUnknown;
         return switch (self.task_persistence_health) {
             .ready => {},
             .degraded => {},
@@ -7810,12 +7836,14 @@ pub const Workbench = struct {
             return error.TaskPersistenceFailed;
         }
         switch (self.task_persistence.commit(bytes)) {
-            .committed => {},
+            .committed => self.task_runtime.observeDurableCommit(.committed),
             .failed => {
+                self.task_runtime.observeDurableCommit(.failed);
                 self.markTaskPersistenceWriteFailed();
                 return error.TaskPersistenceFailed;
             },
             .outcome_unknown => {
+                self.task_runtime.observeDurableCommit(.outcome_unknown);
                 self.task_persistence_health = .outcome_unknown;
                 self.bumpRevision();
                 return error.TaskPersistenceOutcomeUnknown;
@@ -8188,9 +8216,9 @@ pub const Workbench = struct {
     }
 
     fn takeTaskRecentOrder(self: *Workbench) u64 {
-        const recent_order = self.next_task_recent_order;
-        if (self.next_task_recent_order != std.math.maxInt(u64))
-            self.next_task_recent_order += 1;
+        const recent_order = self.task_runtime.next_recent_order;
+        if (self.task_runtime.next_recent_order != std.math.maxInt(u64))
+            self.task_runtime.next_recent_order += 1;
         return recent_order;
     }
 
@@ -8237,7 +8265,7 @@ pub const Workbench = struct {
         self.syncLifecycle();
         switch (scope) {
             .personal => {
-                for (self.tasks) |*entry| {
+                for (self.task_runtime.tasks) |*entry| {
                     const task = &(entry.* orelse continue);
                     if (hasActiveOperation(task)) return error.TaskBusy;
                 }
@@ -8250,7 +8278,7 @@ pub const Workbench = struct {
                 if (workspace.kind != .manual or !workspace.visible or
                     workspace.authorization != .available)
                     return error.WorkspaceUnavailable;
-                for (self.tasks) |*entry| {
+                for (self.task_runtime.tasks) |*entry| {
                     const task = &(entry.* orelse continue);
                     if (task.durable.workspace_id == project.workspace_id and
                         hasActiveOperation(task))
@@ -8372,7 +8400,7 @@ pub const Workbench = struct {
     }
 
     fn workspaceHasTasks(self: *const Workbench, workspace_id: u64) bool {
-        for (self.tasks) |entry| if (entry) |task|
+        for (self.task_runtime.tasks) |entry| if (entry) |task|
             if (task.durable.workspace_id == workspace_id) return true;
         return false;
     }
@@ -8387,7 +8415,7 @@ pub const Workbench = struct {
             if (!workspace.visible or workspace.authorization != .removing) continue;
             var pending = false;
             var failed = false;
-            for (self.tasks) |*task_entry| {
+            for (self.task_runtime.tasks) |*task_entry| {
                 const task = &(task_entry.* orelse continue);
                 if (task.durable.workspace_id != workspace.id) continue;
                 if (task.runtime.close_failed) {
@@ -8419,7 +8447,7 @@ pub const Workbench = struct {
 
     fn workspaceSignals(self: *const Workbench, workspace_id: u64) WorkspaceSignals {
         var signals: WorkspaceSignals = .{};
-        for (self.tasks) |*entry| {
+        for (self.task_runtime.tasks) |*entry| {
             const task = &(entry.* orelse continue);
             if (task.durable.workspace_id != workspace_id or task.durable.archived) continue;
             if (currentRunPhase(task)) |phase| {
@@ -8483,7 +8511,7 @@ pub const Workbench = struct {
             const item = &(entry.* orelse continue);
             self.redactScheduledTaskNoFail(item, credential);
         }
-        for (self.tasks) |*entry| {
+        for (self.task_runtime.tasks) |*entry| {
             const task = &(entry.* orelse continue);
             self.redactTaskProjectionNoFail(task, credential);
         }
@@ -8512,7 +8540,7 @@ pub const Workbench = struct {
             credential,
             self.skillProjectionBudget(),
         );
-        for (self.tasks) |*entry| {
+        for (self.task_runtime.tasks) |*entry| {
             const task = &(entry.* orelse continue);
             const snapshot = task.runtime.pinnedCatalog() orelse continue;
             if (snapshot.identityContainsCredential(credential)) {
@@ -8616,7 +8644,7 @@ pub const Workbench = struct {
 
     fn findTask(self: *Workbench, task_id: u64) ?*TaskView {
         if (task_id == 0) return null;
-        for (self.tasks) |*entry| if (entry.*) |*task|
+        for (self.task_runtime.tasks) |*entry| if (entry.*) |*task|
             if (task.durable.id == task_id) return task;
         return null;
     }
@@ -8631,14 +8659,14 @@ pub const Workbench = struct {
 
     fn findTaskByRouteId(self: *Workbench, route_id: u64) ?*TaskView {
         if (route_id == 0) return null;
-        for (self.tasks) |*entry| if (entry.*) |*task|
+        for (self.task_runtime.tasks) |*entry| if (entry.*) |*task|
             if (task.runtime.routeId() == route_id) return task;
         return null;
     }
 
     fn findTaskIndex(self: *Workbench, task_id: u64) ?usize {
         if (task_id == 0) return null;
-        for (self.tasks, 0..) |entry, index|
+        for (self.task_runtime.tasks, 0..) |entry, index|
             if (entry) |task| if (task.durable.id == task_id) return index;
         return null;
     }
@@ -9006,7 +9034,7 @@ pub const Workbench = struct {
         const reservation = try workbench.allocTrackedCapacity(remaining);
         defer workbench.freeTracked(reservation);
 
-        const task = &workbench.tasks[0].?;
+        const task = &workbench.task_runtime.tasks[0].?;
         const run = &task.durable.runs[0].?;
         run.automatic_title.state.store(.ready, .release);
         try std.testing.expect(!workbench.commitAutomaticTitlesNoFail(task));
@@ -9017,7 +9045,7 @@ pub const Workbench = struct {
         var workbench = try testWorkbench();
         defer workbench.deinit();
 
-        const task = &workbench.tasks[0].?;
+        const task = &workbench.task_runtime.tasks[0].?;
         const run = &task.durable.runs[0].?;
         try workbench.replaceTracked(
             &task.durable.title,
@@ -9203,7 +9231,7 @@ pub const Workbench = struct {
     fn releaseTaskAttachmentNoFail(
         self: *Workbench,
         task: *TaskView,
-        cause: task_runtime.DetachmentCause,
+        cause: task_attachment.DetachmentCause,
     ) void {
         if (task.runtime.pending_model) |model| {
             self.allocator.free(model);
@@ -9222,7 +9250,7 @@ pub const Workbench = struct {
                 }
                 live.binding.releaseClosed() catch |err| {
                     if (err == error.RuntimeShuttingDown) {
-                        if (self.agent_runtime_shutdown_complete)
+                        if (self.task_runtime.agent_runtime_shutdown_complete)
                             live.binding.relinquishAfterRuntimeShutdown()
                         else
                             live.binding.abandonForRuntimeDeinit();
@@ -9231,7 +9259,7 @@ pub const Workbench = struct {
             },
             .closed => live.binding.releaseClosed() catch |err| {
                 if (err == error.RuntimeShuttingDown) {
-                    if (self.agent_runtime_shutdown_complete)
+                    if (self.task_runtime.agent_runtime_shutdown_complete)
                         live.binding.relinquishAfterRuntimeShutdown()
                     else
                         live.binding.abandonForRuntimeDeinit();
@@ -9383,7 +9411,7 @@ pub const Workbench = struct {
     fn containsKnownCredential(self: *const Workbench, value: []const u8) bool {
         const current = self.execution.credential();
         if (containsKnownSecret(value, current)) return true;
-        for (self.tasks) |*entry| {
+        for (self.task_runtime.tasks) |*entry| {
             const task = &(entry.* orelse continue);
             if (task.runtime.execution()) |execution|
                 if (containsKnownSecret(value, execution.input().api_key)) return true;
@@ -9399,7 +9427,7 @@ pub const Workbench = struct {
         const current = self.execution.credential();
         if (current.len != 0 and std.mem.startsWith(u8, value, current))
             longest = current.len;
-        for (self.tasks) |*entry| {
+        for (self.task_runtime.tasks) |*entry| {
             const task = &(entry.* orelse continue);
             if (task.runtime.execution()) |execution| {
                 const credential = execution.input().api_key;
@@ -10487,7 +10515,7 @@ fn testWorkbench() !Workbench {
     }, workbench.skillProjectionBudget());
     workbench.next_workspace_id = 2;
     workbench.next_workspace_recent_order = 2;
-    workbench.next_task_id = 4;
+    workbench.task_runtime.next_task_id = 4;
     const execution_model = try workbench.copyBounded(
         workbench.execution.model(),
         account_contract.Limits.model_id_bytes,
@@ -10522,7 +10550,7 @@ fn testWorkbench() !Workbench {
         .terminal_diagnostic = try workbench.allocTrackedCapacity(workbench.limits.max_terminal_diagnostic_bytes),
         .redaction_secret = workbench.execution.credential(),
     };
-    workbench.tasks[0] = .{
+    workbench.task_runtime.tasks[0] = .{
         .durable = .{
             .id = 3,
             .recent_order = 1,
@@ -10869,7 +10897,7 @@ test "Workspace registry owns empty selection recent use authorization and capac
         .trust = .explicitly_trusted,
     });
     try std.testing.expect(root_id != 0);
-    try std.testing.expect(workbench.tasks[0] == null);
+    try std.testing.expect(workbench.task_runtime.tasks[0] == null);
 
     const source_id = try workbench.openWorkspace(.{
         .workspace_root = source_path,
@@ -10923,22 +10951,22 @@ test "Workspace projection derives aggregate Task signals and removal preserves 
     try std.testing.expectEqual(@as(u32, 1), running[0].signals.running);
     try std.testing.expectEqual(@as(u32, 0), running[0].signals.attention);
 
-    workbench.tasks[0].?.durable.runs[0].?.active_phase = .waiting_ui;
+    workbench.task_runtime.tasks[0].?.durable.runs[0].?.active_phase = .waiting_ui;
     const attention = workbench.workspaceSignals(1);
     try std.testing.expectEqual(@as(u32, 0), attention.running);
     try std.testing.expectEqual(@as(u32, 1), attention.attention);
 
-    const run = &workbench.tasks[0].?.durable.runs[0].?;
+    const run = &workbench.task_runtime.tasks[0].?.durable.runs[0].?;
     _ = commitTerminal(run, .failed, .failed, null, .reusable, "", false);
     finalizeTestTerminalEvents(&workbench);
     const failed = try workbench.copyWorkspaceProjections(&storage);
     try std.testing.expectEqual(@as(u32, 1), failed[0].signals.failed_or_interrupted);
 
-    const task_root = workbench.tasks[0].?.durable.workspace_root;
-    workbench.releaseTaskAttachmentNoFail(&workbench.tasks[0].?, .cold_start);
+    const task_root = workbench.task_runtime.tasks[0].?.durable.workspace_root;
+    workbench.releaseTaskAttachmentNoFail(&workbench.task_runtime.tasks[0].?, .cold_start);
     try workbench.removeWorkspace(1);
-    try std.testing.expect(workbench.tasks[0] != null);
-    try std.testing.expectEqualStrings(task_root, workbench.tasks[0].?.durable.workspace_root);
+    try std.testing.expect(workbench.task_runtime.tasks[0] != null);
+    try std.testing.expectEqualStrings(task_root, workbench.task_runtime.tasks[0].?.durable.workspace_root);
     const removed = try workbench.copyWorkspaceProjections(&storage);
     try std.testing.expectEqual(@as(usize, 0), removed.len);
     try std.testing.expectError(error.TaskClosing, workbench.runTask(3, .{ .text = "continue" }));
@@ -10974,7 +11002,7 @@ test "Workbench snapshot serializer matches the Renderer contract fixture" {
 test "Restore permission stats are projected as runtime health" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
-    workbench.tasks[0].?.runtime.last_restore_permission = .{
+    workbench.task_runtime.tasks[0].?.runtime.last_restore_permission = .{
         .restored_rules = 2,
         .invalidated_rules = 1,
     };
@@ -11006,11 +11034,11 @@ test "Task state round trip restores product history without fabricating a Sessi
         );
         source.workspaces[0].?.projected_root_len = "/tmp/metawork-test".len;
         try source.replaceTracked(
-            &source.tasks[0].?.durable.workspace_root,
+            &source.task_runtime.tasks[0].?.durable.workspace_root,
             "/tmp/metawork-test",
             source.limits.max_workspace_bytes,
         );
-        source.next_task_recent_order = 2;
+        source.task_runtime.next_recent_order = 2;
         source.task_persistence = persistence.capability(null);
         source.task_persistence_health = .ready;
         try source.commitTaskState();
@@ -11203,7 +11231,7 @@ test "Automatic Workspace history survives an unavailable allocator" {
         workspace.automatic_task_id = 3;
         workspace.visible = false;
         workspace.recent_order = 0;
-        source.next_task_recent_order = 2;
+        source.task_runtime.next_recent_order = 2;
         source.task_persistence = persistence.capability(null);
         source.task_persistence_health = .ready;
         try source.commitTaskState();
@@ -11279,19 +11307,19 @@ test "Task persistence failure rolls back metadata and closes mutation admission
     defer workbench.deinit();
     workbench.task_persistence = persistence.capability(null);
     workbench.task_persistence_health = .ready;
-    const previous_recent_order = workbench.tasks[0].?.durable.recent_order;
-    const previous_next_recent_order = workbench.next_task_recent_order;
+    const previous_recent_order = workbench.task_runtime.tasks[0].?.durable.recent_order;
+    const previous_next_recent_order = workbench.task_runtime.next_recent_order;
 
     try std.testing.expectError(
         error.TaskPersistenceFailed,
         workbench.renameTask(3, "must not publish"),
     );
-    try std.testing.expectEqualStrings("", workbench.tasks[0].?.durable.title);
+    try std.testing.expectEqualStrings("", workbench.task_runtime.tasks[0].?.durable.title);
     try std.testing.expectEqual(
         previous_recent_order,
-        workbench.tasks[0].?.durable.recent_order,
+        workbench.task_runtime.tasks[0].?.durable.recent_order,
     );
-    try std.testing.expectEqual(previous_next_recent_order, workbench.next_task_recent_order);
+    try std.testing.expectEqual(previous_next_recent_order, workbench.task_runtime.next_recent_order);
     try std.testing.expectEqual(TaskPersistenceHealth.write_failed, workbench.task_persistence_health);
     try std.testing.expectError(
         error.TaskPersistenceUnavailable,
@@ -11309,7 +11337,7 @@ test "Task persistence failure rolls back deletion before physical release" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
 
-    const task = &workbench.tasks[0].?;
+    const task = &workbench.task_runtime.tasks[0].?;
     task.runtime.active_run_id = 0;
     const completed = &task.durable.runs[0].?;
     _ = commitTerminal(completed, .completed, .completed, null, .reusable, "", false);
@@ -12040,7 +12068,7 @@ test "credential release permanently scrubs catalog and every Skill history fiel
     );
     workspace_catalog = undefined;
     workbench.projection_bytes += task_catalog.projected_bytes;
-    const task = &workbench.tasks[0].?;
+    const task = &workbench.task_runtime.tasks[0].?;
     task.runtime.attached().?.pinned_catalog = task_catalog;
     const run = &task.durable.runs[0].?;
     const history_input: RunInputRecord = history: {
@@ -12138,31 +12166,31 @@ test "Task metadata mutations preserve lifecycle guards and projection accountin
     try std.testing.expectError(error.InvalidTaskTitle, workbench.renameTask(3, &.{0xff}));
 
     try workbench.renameTask(3, "Review release readiness");
-    try std.testing.expectEqualStrings("Review release readiness", workbench.tasks[0].?.durable.title);
+    try std.testing.expectEqualStrings("Review release readiness", workbench.task_runtime.tasks[0].?.durable.title);
 
-    workbench.tasks[0].?.runtime.active_run_id = 0;
-    const completed = &workbench.tasks[0].?.durable.runs[0].?;
+    workbench.task_runtime.tasks[0].?.runtime.active_run_id = 0;
+    const completed = &workbench.task_runtime.tasks[0].?.durable.runs[0].?;
     _ = commitTerminal(completed, .completed, .completed, null, .reusable, "", false);
     finalizeTestTerminalEvents(&workbench);
     try workbench.setTaskArchived(3, true);
-    try std.testing.expect(workbench.tasks[0].?.durable.archived);
+    try std.testing.expect(workbench.task_runtime.tasks[0].?.durable.archived);
 
-    workbench.tasks[0].?.runtime.active_operation = .{ .restore = .{ .id = 1 } };
+    workbench.task_runtime.tasks[0].?.runtime.active_operation = .{ .restore = .{ .id = 1 } };
     try std.testing.expectError(error.TaskBusy, workbench.setTaskArchived(3, false));
-    workbench.tasks[0].?.runtime.active_operation = .none;
-    workbench.tasks[0].?.deletion = .failed;
+    workbench.task_runtime.tasks[0].?.runtime.active_operation = .none;
+    workbench.task_runtime.tasks[0].?.deletion = .failed;
     try workbench.setTaskArchived(3, false);
-    try std.testing.expectEqual(task_deletion.State.idle, workbench.tasks[0].?.deletion);
+    try std.testing.expectEqual(task_deletion.State.idle, workbench.task_runtime.tasks[0].?.deletion);
     try workbench.setTaskArchived(3, true);
-    workbench.releaseTaskAttachmentNoFail(&workbench.tasks[0].?, .cold_start);
-    workbench.tasks[0].?.runtime.worker_references.store(1, .release);
+    workbench.releaseTaskAttachmentNoFail(&workbench.task_runtime.tasks[0].?, .cold_start);
+    workbench.task_runtime.tasks[0].?.runtime.worker_references.store(1, .release);
     try workbench.deleteTask(3);
-    try std.testing.expect(workbench.tasks[0] != null);
+    try std.testing.expect(workbench.task_runtime.tasks[0] != null);
     try std.testing.expectError(error.TaskBusy, workbench.renameTask(3, "too late"));
-    workbench.tasks[0].?.runtime.worker_references.store(0, .release);
+    workbench.task_runtime.tasks[0].?.runtime.worker_references.store(0, .release);
     const tracked_before_delete = workbench.projection_bytes;
     _ = workbench.currentRevision();
-    try std.testing.expect(workbench.tasks[0] == null);
+    try std.testing.expect(workbench.task_runtime.tasks[0] == null);
     try std.testing.expect(workbench.projection_bytes < tracked_before_delete);
     try std.testing.expectError(error.UnknownTask, workbench.renameTask(3, "gone"));
 }
@@ -12170,7 +12198,7 @@ test "Task metadata mutations preserve lifecycle guards and projection accountin
 test "Run admission reserves a stable generation and rolls back every fallible allocation" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
-    const task = &workbench.tasks[0].?;
+    const task = &workbench.task_runtime.tasks[0].?;
     const tracked_before = workbench.projection_bytes;
     const generation_before = task.durable.next_run_generation;
     var oversized_prompt: [1025]u8 = undefined;
@@ -12400,7 +12428,7 @@ test "identity replacement does not disturb live Task runtime references" {
     try std.testing.expect(workbench.executionReplacementPending());
     try std.testing.expect(!workbench.accountView().can_create_task);
     workbench.endExecutionReplacementNoFail();
-    const task = &workbench.tasks[0].?;
+    const task = &workbench.task_runtime.tasks[0].?;
     const route_id = task.runtime.routeId();
     const execution = task.runtime.executionConst().?;
     try workbench.beginExecutionReplacement();
@@ -12429,7 +12457,7 @@ test "default replacement preserves Task generation and installs the next admiss
     var workbench = try testWorkbench();
     defer workbench.deinit();
 
-    const task = &workbench.tasks[0].?;
+    const task = &workbench.task_runtime.tasks[0].?;
     try workbench.replaceTracked(
         &task.durable.title,
         "review future metawork credential",
@@ -12623,7 +12651,7 @@ test "busy Task model selection keeps only the last runtime pending model" {
         },
     });
 
-    const task = &workbench.tasks[0].?;
+    const task = &workbench.task_runtime.tasks[0].?;
     const binding_epoch = task.durable.binding_epoch;
     try workbench.selectTaskModel(task.durable.id, "fixture-model", 2, "fixture-model-2");
     try std.testing.expectEqualStrings("fixture-model", task.durable.execution_model);
@@ -12644,7 +12672,7 @@ test "clearing the admission default preserves active Task execution" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
 
-    const task = &workbench.tasks[0].?;
+    const task = &workbench.task_runtime.tasks[0].?;
     const task_execution = try Workbench.taskExecutionInput(task);
     try std.testing.expectEqualStrings("SECRET-KEY", task_execution.api_key);
 
@@ -12673,7 +12701,7 @@ test "clearing the admission default preserves active Task execution" {
 test "released Task credential is permanently scrubbed from every product projection" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
-    const task = &workbench.tasks[0].?;
+    const task = &workbench.task_runtime.tasks[0].?;
     const run = &task.durable.runs[0].?;
 
     try workbench.replaceTracked(
@@ -12807,7 +12835,7 @@ test "known credential matching chooses the longest overlapping secret" {
         workbench.matchedKnownCredentialLen("SECRET-KEY suffix"),
     );
     try workbench.replaceTracked(
-        &workbench.tasks[0].?.durable.runs[0].?.status_text,
+        &workbench.task_runtime.tasks[0].?.durable.runs[0].?.status_text,
         "SECRET-KEY suffix",
         workbench.limits.max_tool_field_bytes,
     );
@@ -12839,7 +12867,7 @@ test "opaque credential redaction preserves UTF-8 projection validity" {
 test "opaque credential redaction is UTF-8 safe across product inputs and assistant chunks" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
-    const task = &workbench.tasks[0].?;
+    const task = &workbench.task_runtime.tasks[0].?;
     try replaceTaskCredentialForTest(task, &.{0xa9});
 
     const slot = try workbench.reserveRunRecord(task, .{ .text = "café" });
@@ -12909,16 +12937,16 @@ test "assistant redaction withholds a UTF-8 codepoint across credential chunks" 
 test "product Task identity is independent from Agent Session route identity" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
-    const task = &workbench.tasks[0].?;
+    const task = &workbench.task_runtime.tasks[0].?;
     task.runtime.attached().?.binding = task_agent_session.Binding.testFixture(99);
 
     var routed = try testEnvelope(99, 7, "{\"text_chunk\":\"routed\"}");
     defer routed.deinit();
     try workbench.applyEvent(&routed);
-    try std.testing.expectEqual(@as(u64, 3), workbench.tasks[0].?.durable.id);
+    try std.testing.expectEqual(@as(u64, 3), workbench.task_runtime.tasks[0].?.durable.id);
     try std.testing.expectEqualStrings(
         "routed",
-        workbench.tasks[0].?.durable.runs[0].?.assistant.list.items,
+        workbench.task_runtime.tasks[0].?.durable.runs[0].?.assistant.list.items,
     );
 
     var product_id_is_not_route = try testEnvelope(3, 7, "{\"text_chunk\":\"wrong\"}");
@@ -12932,12 +12960,12 @@ test "product Task identity is independent from Agent Session route identity" {
 test "streaming Run events do not reorder Task navigation" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
-    const before = workbench.tasks[0].?.durable.recent_order;
+    const before = workbench.task_runtime.tasks[0].?.durable.recent_order;
 
     var text = try testEnvelope(3, 7, "{\"text_chunk\":\"streaming\"}");
     defer text.deinit();
     try workbench.applyEvent(&text);
-    try std.testing.expectEqual(before, workbench.tasks[0].?.durable.recent_order);
+    try std.testing.expectEqual(before, workbench.task_runtime.tasks[0].?.durable.recent_order);
 
     var usage = try testEnvelope(
         3,
@@ -12946,13 +12974,13 @@ test "streaming Run events do not reorder Task navigation" {
     );
     defer usage.deinit();
     try workbench.applyEvent(&usage);
-    try std.testing.expectEqual(before, workbench.tasks[0].?.durable.recent_order);
+    try std.testing.expectEqual(before, workbench.task_runtime.tasks[0].?.durable.recent_order);
 }
 
 test "thinking and assistant chunks update distinct safe projections" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
-    const task = &workbench.tasks[0].?;
+    const task = &workbench.task_runtime.tasks[0].?;
     const run = &task.durable.runs[0].?;
     const route = task.runtime.routeId();
 
@@ -12998,7 +13026,7 @@ test "thinking and assistant chunks update distinct safe projections" {
 test "AgentCore RunState refines status without owning RunPhase and rejects stale transitions" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
-    const task = &workbench.tasks[0].?;
+    const task = &workbench.task_runtime.tasks[0].?;
     const route = task.runtime.routeId();
 
     var starting = try testEnvelope(
@@ -13054,7 +13082,7 @@ test "AgentCore RunState refines status without owning RunPhase and rejects stal
 test "AgentCore RunState accepts a zero first transition sequence" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
-    const task = &workbench.tasks[0].?;
+    const task = &workbench.task_runtime.tasks[0].?;
     const route = task.runtime.routeId();
     var first = try testEnvelope(
         route,
@@ -13071,7 +13099,7 @@ test "AgentCore RunState accepts a zero first transition sequence" {
 test "event projection failure routes by Agent Session identity not product Task identity" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
-    const task = &workbench.tasks[0].?;
+    const task = &workbench.task_runtime.tasks[0].?;
     task.runtime.attached().?.binding = task_agent_session.Binding.testFixture(99);
 
     workbench.recordEventProjectionFailure(task.durable.id, 7);
@@ -13138,7 +13166,7 @@ test "Workbench shutdown releases current and Task-owned execution generations" 
 test "terminal publication is allocation-free write-once bounded history" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
-    const run = &workbench.tasks[0].?.durable.runs[0].?;
+    const run = &workbench.task_runtime.tasks[0].?.durable.runs[0].?;
     const diagnostic = try std.testing.allocator.alloc(u8, run.terminal_diagnostic.len + 17);
     defer std.testing.allocator.free(diagnostic);
     @memset(diagnostic, 'x');
@@ -13235,7 +13263,7 @@ test "compact terminal publication is write-once and outranks late cancellation"
 test "terminal disposition folds exactly once without reopening a closing Task" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
-    const task = &workbench.tasks[0].?;
+    const task = &workbench.task_runtime.tasks[0].?;
     defer detachTaskForTest(&workbench, task);
 
     foldTerminalDisposition(task, .poisoned);
@@ -13257,7 +13285,7 @@ test "terminal disposition folds exactly once without reopening a closing Task" 
 test "canonical prompt title and terminal diagnostic never retain the registered credential" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
-    const task = &workbench.tasks[0].?;
+    const task = &workbench.task_runtime.tasks[0].?;
 
     try workbench.renameTask(task.durable.id, "Review SECRET-KEY usage");
     try std.testing.expect(std.mem.indexOf(u8, task.durable.title, "SECRET-KEY") == null);
@@ -13314,7 +13342,7 @@ test "Renderer transport failures never own Agent Run termination" {
 test "Task deletion scrubs retained projections before releasing its credential" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
-    const task = &workbench.tasks[0].?;
+    const task = &workbench.task_runtime.tasks[0].?;
     const workspace = &workbench.workspaces[0].?;
     @memcpy(workspace.projected_root_storage[0.."SECRET-KEY".len], "SECRET-KEY");
     workspace.projected_root_len = "SECRET-KEY".len;
@@ -13334,7 +13362,7 @@ test "Task deletion scrubs retained projections before releasing its credential"
     finalizeTestTerminalEvents(&workbench);
 
     try workbench.deleteTask(3);
-    try std.testing.expect(workbench.tasks[0] == null);
+    try std.testing.expect(workbench.task_runtime.tasks[0] == null);
     try std.testing.expect(workspace.projection_redacted);
     try std.testing.expect(
         std.mem.indexOf(
@@ -13355,7 +13383,7 @@ test "Workbench projection preserves text bytes with bounded geometric growth" {
         defer envelope.deinit();
         try workbench.applyEvent(&envelope);
     }
-    const run = findRun(workbench.tasks[0].?.durable.runs, 7).?;
+    const run = findRun(workbench.task_runtime.tasks[0].?.durable.runs, 7).?;
     try std.testing.expectEqual(@as(usize, chunk.len * 2048), run.assistant.list.items.len);
     for (0..2048) |index|
         try std.testing.expectEqualStrings(chunk, run.assistant.list.items[index * chunk.len ..][0..chunk.len]);
@@ -13378,7 +13406,7 @@ test "Workbench snapshot budget includes JSON escaping and structural overhead" 
 
     var workbench = try testWorkbench();
     defer workbench.deinit();
-    const run = findRun(workbench.tasks[0].?.durable.runs, 7).?;
+    const run = findRun(workbench.task_runtime.tasks[0].?.durable.runs, 7).?;
     const remaining = @min(
         workbench.limits.max_assistant_message_bytes,
         workbench.limits.max_projection_bytes - workbench.projection_bytes,
@@ -13599,7 +13627,7 @@ test "default snapshot budget contains the maximum structural projection" {
                 ),
             };
         }
-        workbench.tasks[task_index] = .{
+        workbench.task_runtime.tasks[task_index] = .{
             .durable = .{
                 .id = @intCast(task_index + 1),
                 .recent_order = @intCast(task_index + 1),
@@ -13627,26 +13655,26 @@ test "default snapshot budget contains the maximum structural projection" {
                 .detail_truncated = true,
             };
             @memset(record.detail[0..], 'x');
-            workbench.tasks[task_index].?.durable.ui_history[record_index] = record;
+            workbench.task_runtime.tasks[task_index].?.durable.ui_history[record_index] = record;
         }
-        workbench.tasks[task_index].?.durable.ui_history_count = limits.max_ui_history_per_task;
+        workbench.task_runtime.tasks[task_index].?.durable.ui_history_count = limits.max_ui_history_per_task;
     }
     workbench.next_workspace_id = @intCast(limits.max_tasks + 1);
     workbench.next_workspace_recent_order = @intCast(limits.max_tasks + 1);
-    workbench.next_task_id = @intCast(limits.max_tasks + 1);
-    workbench.next_task_recent_order = @intCast(limits.max_tasks + 1);
+    workbench.task_runtime.next_task_id = @intCast(limits.max_tasks + 1);
+    workbench.task_runtime.next_recent_order = @intCast(limits.max_tasks + 1);
 
     const escaped_assistant = try std.testing.allocator.alloc(u8, limits.max_assistant_message_bytes);
     defer std.testing.allocator.free(escaped_assistant);
     @memset(escaped_assistant, 1);
     try workbench.appendTrackedText(
-        &workbench.tasks[0].?.durable.runs[0].?.assistant,
+        &workbench.task_runtime.tasks[0].?.durable.runs[0].?.assistant,
         escaped_assistant,
         limits.max_assistant_message_bytes,
     );
     _ = workbench.redactTrackedText(
-        &workbench.tasks[0].?.durable.runs[0].?.assistant,
-        workbench.tasks[0].?.durable.runs[0].?.redaction_secret,
+        &workbench.task_runtime.tasks[0].?.durable.runs[0].?.assistant,
+        workbench.task_runtime.tasks[0].?.durable.runs[0].?.redaction_secret,
     );
     const remaining_projection = limits.max_projection_bytes - workbench.projection_bytes;
     const escaped_tool = try std.testing.allocator.alloc(
@@ -13656,7 +13684,7 @@ test "default snapshot budget contains the maximum structural projection" {
     defer std.testing.allocator.free(escaped_tool);
     @memset(escaped_tool, 2);
     try workbench.replaceTracked(
-        &workbench.tasks[0].?.durable.runs[0].?.tools[0].?.content,
+        &workbench.task_runtime.tasks[0].?.durable.runs[0].?.tools[0].?.content,
         escaped_tool,
         limits.max_tool_field_bytes,
     );
@@ -13942,7 +13970,7 @@ test "known Host credentials are removed from assistant, tool, and UI projection
         defer envelope.deinit();
         try workbench.applyEvent(&envelope);
     }
-    const tool = &workbench.tasks[0].?.durable.runs[0].?.tools[0].?;
+    const tool = &workbench.task_runtime.tasks[0].?.durable.runs[0].?.tools[0].?;
     for ([_][]const u8{
         tool.id,
         tool.name,
@@ -13993,8 +14021,8 @@ test "Workbench product tool identities remain unique after raw ID redaction" {
         try workbench.applyEvent(&envelope);
     }
 
-    const first = &workbench.tasks[0].?.durable.runs[0].?.tools[0].?;
-    const second = &workbench.tasks[0].?.durable.runs[0].?.tools[1].?;
+    const first = &workbench.task_runtime.tasks[0].?.durable.runs[0].?.tools[0].?;
+    const second = &workbench.task_runtime.tasks[0].?.durable.runs[0].?.tools[1].?;
     try std.testing.expectEqualStrings("tool-1", first.id);
     try std.testing.expectEqualStrings("tool-2", second.id);
     try std.testing.expectEqualStrings("first progress", first.progress);
@@ -14005,7 +14033,7 @@ test "Workbench product tool identities remain unique after raw ID redaction" {
 test "assistant credential redaction finalizes ordinary chunks without rescanning history" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
-    const assistant = &workbench.tasks[0].?.durable.runs[0].?.assistant;
+    const assistant = &workbench.task_runtime.tasks[0].?.durable.runs[0].?.assistant;
 
     for (0..4096) |_| {
         try workbench.appendTrackedText(assistant, "x", workbench.limits.max_assistant_message_bytes);
@@ -14029,7 +14057,7 @@ test "assistant credential redaction finalizes ordinary chunks without rescannin
 
     try workbench.appendTrackedText(assistant, " tail SECRET-", workbench.limits.max_assistant_message_bytes);
     try std.testing.expect(!workbench.redactTrackedText(assistant, workbench.execution.credential()));
-    const run = &workbench.tasks[0].?.durable.runs[0].?;
+    const run = &workbench.task_runtime.tasks[0].?.durable.runs[0].?;
     try std.testing.expect(commitTerminal(
         run,
         .completed,
@@ -14055,12 +14083,12 @@ test "assistant credential redaction finalizes ordinary chunks without rescannin
     var late_event = try testEnvelope(3, 7, "{\"text_chunk\":\"late\"}");
     defer late_event.deinit();
     const revision_before_late_event = workbench.revision;
-    const late_count_before = workbench.late_terminal_event_count;
+    const late_count_before = workbench.task_runtime.late_terminal_event_count;
     try workbench.applyEvent(&late_event);
-    try std.testing.expectEqual(late_count_before + 1, workbench.late_terminal_event_count);
+    try std.testing.expectEqual(late_count_before + 1, workbench.task_runtime.late_terminal_event_count);
     try std.testing.expectEqual(revision_before_late_event, workbench.revision);
     try std.testing.expect(
-        std.mem.indexOf(u8, workbench.tasks[0].?.durable.runs[0].?.assistant.list.items, "late") == null,
+        std.mem.indexOf(u8, workbench.task_runtime.tasks[0].?.durable.runs[0].?.assistant.list.items, "late") == null,
     );
 }
 
@@ -14077,7 +14105,7 @@ test "projection failure after Agent terminal becomes a product failure" {
         try workbench.applyEvent(&envelope);
     }
 
-    const run = &workbench.tasks[0].?.durable.runs[0].?;
+    const run = &workbench.task_runtime.tasks[0].?.durable.runs[0].?;
     try std.testing.expect(commitTerminal(
         run,
         .completed,
@@ -14105,7 +14133,7 @@ test "projection failure after Agent terminal becomes a product failure" {
     try std.testing.expectEqual(RunCause.event_pipeline_failure, product.cause.?);
     // Continuation stays with the Session disposition; the projection loss is
     // a Run-level product fact only.
-    try std.testing.expect(continuationAvailable(workbench.taskContinuation(&workbench.tasks[0].?)));
+    try std.testing.expect(continuationAvailable(workbench.taskContinuation(&workbench.task_runtime.tasks[0].?)));
 
     var snapshot_storage: [96 * 1024]u8 = undefined;
     const snapshot = try workbench.writeSnapshot(&snapshot_storage);
@@ -14118,7 +14146,7 @@ test "projection failure after Agent terminal becomes a product failure" {
 test "event drain barrier atomically publishes terminal product state" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
-    const run = &workbench.tasks[0].?.durable.runs[0].?;
+    const run = &workbench.task_runtime.tasks[0].?.durable.runs[0].?;
 
     try workbench.appendTrackedText(
         &run.assistant,
@@ -14172,7 +14200,7 @@ test "close and delete wait for terminal event drain" {
 
     var workbench = try testWorkbench();
     defer workbench.deinit();
-    const task = &workbench.tasks[0].?;
+    const task = &workbench.task_runtime.tasks[0].?;
     const run = &task.durable.runs[0].?;
     const route_id = task.runtime.routeId();
     try std.testing.expect(task.runtime.beginClosing());
@@ -14212,7 +14240,7 @@ test "close and delete wait for terminal event drain" {
     try workbench.applyEvent(&queued_event);
 
     finalizeTestTerminalEvents(&workbench);
-    try std.testing.expect(workbench.tasks[0] == null);
+    try std.testing.expect(workbench.task_runtime.tasks[0] == null);
 
     var late_event = try testEnvelope(3, 7, "{\"text_chunk\":\"late\"}");
     defer late_event.deinit();
@@ -14233,7 +14261,7 @@ test "Runtime shutdown joins a flying close owner before relinquish" {
 
     var workbench = try testWorkbench();
     defer workbench.deinit();
-    const task = &workbench.tasks[0].?;
+    const task = &workbench.task_runtime.tasks[0].?;
     const route_id = task.runtime.routeId();
     try std.testing.expect(task.runtime.beginClosing());
     task.runtime.close_completion.store(.running, .release);
@@ -14287,7 +14315,7 @@ test "tool projection truncates on UTF-8 boundaries and records bounded UI histo
     try std.testing.expect(projected.truncated);
     try std.testing.expect(std.unicode.utf8ValidateSlice(projected.value));
 
-    const view = &workbench.tasks[0].?;
+    const view = &workbench.task_runtime.tasks[0].?;
     for (1..11) |request_id| {
         var record = UiRecord{
             .request_id = request_id,

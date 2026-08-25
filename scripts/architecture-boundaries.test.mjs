@@ -267,7 +267,7 @@ test("Product Skill has one live owner behind narrow composition ports", () => {
   const bridgeDispatcher = read("src/bridge/dispatcher.zig");
   const workbenchRoot = read("src/workbench.zig");
   const projection = read("src/workbench/projection.zig");
-  const taskRuntime = read("src/product/task/runtime.zig");
+  const taskAttachment = read("src/product/task/attachment.zig");
   const recoveryJob = read("src/product/task/recovery_job.zig");
 
   assert.match(productSkill, /@import\("product_skill_catalog"\)/);
@@ -284,7 +284,7 @@ test("Product Skill has one live owner behind narrow composition ports", () => {
     catalog,
     /Workbench|Task|Workspace|workbench_executor|std\.Thread|\*agent\.Runtime|\*agent\.Session/,
   );
-  for (const source of [projection, taskRuntime, recoveryJob]) {
+  for (const source of [projection, taskAttachment, recoveryJob]) {
     assert.match(source, /@import\("metawork_product_skill"\)\.catalog/);
     assert.doesNotMatch(source, /@import\("workbench_catalog_snapshot"\)/);
   }
@@ -530,6 +530,7 @@ test("Product Task kernels have one physical home without taking the executor", 
   const taskExecution = read("src/product/task/execution.zig");
   const taskView = read("src/product/task/view.zig");
   const taskAgentSession = read("src/product/task/agent_session.zig");
+  const taskAttachment = read("src/product/task/attachment.zig");
   const taskRuntime = read("src/product/task/runtime.zig");
   const taskKernelFiles = zigFiles("src/product/task/");
   const projection = read("src/workbench/projection.zig");
@@ -544,6 +545,7 @@ test("Product Task kernels have one physical home without taking the executor", 
     "checkpoint_store",
     "execution_binding",
     "agent_session",
+    "attachment",
     "runtime",
     "deletion",
     "recovery",
@@ -576,6 +578,8 @@ test("Product Task kernels have one physical home without taking the executor", 
   );
   assert.match(build, /src\/product\/task\/recovery_job\.zig/);
   assert.match(build, /src\/product\/task\/agent_session\.zig/);
+  assert.match(build, /src\/product\/task\/attachment\.zig/);
+  assert.match(build, /src\/product\/task\/runtime\.zig/);
   assert.match(build, /src\/product\/task\/state\.zig/);
   assert.match(build, /src\/product\/task\/policy\.zig/);
   assert.match(build, /src\/product\/task\/execution\.zig/);
@@ -771,23 +775,43 @@ test("Product Task kernels have one physical home without taking the executor", 
     productTask,
     /\*(?:agent|lifecycle)\.Session|(?:agent|lifecycle)\.SessionRoute|(?:agent|lifecycle)\.SessionRestoreRoute/,
   );
-  assert.match(taskRuntime, /binding: agent_session\.Binding/);
-  assert.doesNotMatch(taskRuntime, /session: \*agent\.Session/);
-  const liveAttachment = taskRuntime.match(
+  assert.match(taskAttachment, /binding: agent_session\.Binding/);
+  assert.doesNotMatch(taskAttachment, /session: \*agent\.Session/);
+  const liveAttachment = taskAttachment.match(
     /pub const LiveAttachment = struct \{[\s\S]*?\n\};/,
   )?.[0];
   assert.ok(liveAttachment, "Task LiveAttachment must remain explicit");
   assert.doesNotMatch(liveAttachment, /route_id: u64/);
   assert.match(
-    taskRuntime,
+    taskAttachment,
     /pub const ClosingAttachment = struct \{[\s\S]*?route_id: u64,[\s\S]*?worker_binding: agent_session\.Binding,[\s\S]*?\n\};/,
   );
-  assert.match(taskRuntime, /const worker_binding = value\.binding\.take\(\);/);
-  assert.match(taskRuntime, /\.closing => \|\*value\| value\.route_id/);
+  assert.match(taskAttachment, /const worker_binding = value\.binding\.take\(\);/);
+  assert.match(taskAttachment, /\.closing => \|\*value\| value\.route_id/);
   assert.match(
-    taskRuntime,
+    taskAttachment,
     /\.closing => \|value\| closing: \{[\s\S]*?std\.debug\.assert\(self\.close_thread == null\);[\s\S]*?\.owned, \.closed, \.fixture => closing_value\.live\.binding =[\s\S]*?closing_value\.worker_binding\.take\(\)/,
   );
+  assert.match(taskRuntime, /pub const Runtime = struct/);
+  assert.match(taskRuntime, /tasks: \[\]\?task_state\.Task/);
+  assert.match(taskRuntime, /failures: std\.ArrayList\(FailureRecord\)/);
+  assert.match(taskRuntime, /next_task_id: u64/);
+  assert.match(taskRuntime, /next_restore_attempt_id: u64/);
+  assert.match(taskRuntime, /late_terminal_event_count: u64/);
+  assert.match(taskRuntime, /durable_mutation_state: DurableMutationState/);
+  assert.match(taskRuntime, /pub fn observeDurableCommit\(/);
+  assert.doesNotMatch(
+    taskRuntime,
+    /Workbench|workbench_executor|\*agent\.Runtime|std\.Thread|@import\("(?:metawork_app|metawork_bridge|native_sdk|metask_agentcore)"\)/,
+  );
+  assert.match(projection, /task_runtime: task_runtime\.Runtime/);
+  assert.doesNotMatch(
+    projection,
+    /\n\s+(?:tasks|task_failures|next_task_id|next_task_recent_order|next_restore_attempt_id|late_terminal_event_count|recovery_poisoned|agent_runtime_shutdown_complete):/,
+  );
+  assert.match(recoveryJob, /pub const CommitAuthority = struct/);
+  assert.match(recoveryJob, /pub fn commitAllowed\(/);
+  assert.match(projection, /task_recovery_job\.commitAllowed\(/);
   assert.doesNotMatch(
     recoveryJob,
     /route: agent\.SessionRestoreRoute|candidate\.route/,

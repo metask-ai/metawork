@@ -5,7 +5,7 @@
 const std = @import("std");
 const agent = @import("metawork_agent");
 const task_state = @import("product_task_state");
-const task_runtime = @import("product_task_runtime");
+const task_attachment = @import("product_task_attachment");
 const task_recovery = @import("product_task_recovery");
 const checkpoint_record = @import("product_task_checkpoint_record");
 
@@ -312,7 +312,7 @@ pub fn taskLifecycle(task: *const task_state.Task) task_state.TaskLifecycle {
 }
 
 pub fn recoveryAttachment(
-    attachment: task_runtime.Attachment,
+    attachment: task_attachment.Attachment,
 ) task_recovery.Attachment {
     return switch (attachment) {
         .detached => .detached,

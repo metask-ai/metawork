@@ -6,7 +6,7 @@
 const std = @import("std");
 const agent = @import("metawork_agent");
 const checkpoint_record = @import("product_task_checkpoint_record");
-const task_runtime = @import("product_task_runtime");
+const task_attachment = @import("product_task_attachment");
 const task_deletion = @import("product_task_deletion");
 const task_recovery = @import("product_task_recovery");
 
@@ -74,7 +74,7 @@ pub const CompactTerminationDispatch = enum {
     session_closing,
 };
 
-pub const ActiveOperation = task_runtime.ActiveOperation;
+pub const ActiveOperation = task_attachment.ActiveOperation;
 
 /// Task-owned durable product cause.
 pub const RunCause = enum {
@@ -98,7 +98,7 @@ pub const RunCause = enum {
 pub const TaskLifecycle = enum { open, closing };
 pub const ContinuationUnavailableReason = task_recovery.UnavailableReason;
 pub const ContinuationCapability = task_recovery.Capability;
-pub const CloseCompletion = task_runtime.CloseCompletion;
+pub const CloseCompletion = task_attachment.CloseCompletion;
 
 pub const TrackedText = struct {
     list: std.ArrayList(u8) = .empty,
@@ -441,7 +441,7 @@ pub const DurableTaskRecord = struct {
     checkpoint_attempt: CheckpointAttempt = .none,
 };
 
-pub const RuntimeAttachment = task_runtime.State;
+pub const RuntimeAttachment = task_attachment.State;
 
 pub const Task = struct {
     durable: DurableTaskRecord,

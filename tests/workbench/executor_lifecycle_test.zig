@@ -822,7 +822,6 @@ test "restart restores a Task attachment and continues the same Conversation" {
         try shutdown_restore.taskBindingEpoch(task_id),
     );
     fake_core.waitUntilRestoreEntered();
-    const restore_job = shutdown_restore.tasks[0].?.runtime.restore_job.?;
     var shutdown_context = ShutdownContext{ .workbench = &shutdown_restore };
     const shutdown_thread = try std.Thread.spawn(
         .{},
@@ -835,7 +834,7 @@ test "restart restores a Task attachment and continues the same Conversation" {
         shutdown_thread.join();
     };
     for (0..10_000) |_| {
-        if (restore_job.cancellation.load(.acquire)) break;
+        if (shutdown_restore.testRestoreCancellationRequested(task_id)) break;
         std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
     } else return error.TestUnexpectedResult;
     fake_core.releaseControlledRestore();
@@ -2820,7 +2819,7 @@ test "late event from a finalized Run is dropped and newer active work continues
     };
     defer late_event.deinit();
     try workbench.applyEvent(&late_event);
-    try std.testing.expectEqual(@as(u64, 1), workbench.late_terminal_event_count);
+    try std.testing.expectEqual(@as(u64, 1), workbench.testLateTerminalEventCount());
 
     var snapshot_storage: [128 * 1024]u8 = undefined;
     const open_snapshot = try workbench.writeSnapshot(&snapshot_storage);

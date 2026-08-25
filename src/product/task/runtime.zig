@@ -1,245 +1,119 @@
-//! Process-only Task resource ownership and legal operation state.
+//! Live Product Task aggregate.
+//! The Runtime owns Task collection identity, runtime-only failure evidence and
+//! process lifecycle facts. Cross-owner admission and shared history commit
+//! effects are supplied by composition; they are never retained here.
 
 const std = @import("std");
-const catalog_snapshot = @import("metawork_product_skill").catalog;
-const agent_session = @import("product_task_agent_session");
-const owned_execution = @import("product_task_execution_binding");
-const recovery_job = @import("product_task_recovery_job");
+const task_state = @import("product_task_state");
+const task_persistence = @import("product_task_persistence");
 
-pub const DetachmentCause = enum {
-    cold_start,
-    released,
-    session_poisoned,
-};
+pub const DurableCommit = task_persistence.Commit;
 
-pub const AttachedHealth = enum {
+pub const DurableMutationState = enum {
     available,
-    session_poisoned,
+    /// The backing store may or may not contain the candidate. Further Task
+    /// mutation is forbidden because neither rollback nor retry is sound.
+    outcome_unknown,
 };
 
-pub const LiveAttachment = struct {
-    binding: agent_session.Binding,
-    execution: owned_execution.OwnedTaskExecution,
-    pinned_catalog: ?catalog_snapshot.Snapshot,
-    health: AttachedHealth = .available,
+pub const FailureRecord = struct {
+    task_id: u64,
+    recent_order: u64,
+    reason: []u8,
 };
 
-pub const ClosingAttachment = struct {
-    live: LiveAttachment,
-    /// Immutable main-thread routing fact retained until the closing Task has
-    /// drained every event that was queued before Agent close completed.
-    route_id: u64,
-    /// `beginClosing` moves the linear Session owner here. Only the close
-    /// worker may touch it until the main thread joins that worker.
-    worker_binding: agent_session.Binding,
-};
+pub const Runtime = struct {
+    allocator: std.mem.Allocator,
+    tasks: []?task_state.Task,
+    failures: std.ArrayList(FailureRecord) = .empty,
+    next_task_id: u64 = 1,
+    next_recent_order: u64 = 1,
+    next_restore_attempt_id: u64 = 1,
+    late_terminal_event_count: u64 = 0,
+    recovery_poisoned: bool = false,
+    agent_runtime_shutdown_complete: bool = false,
+    durable_mutation_state: DurableMutationState = .available,
 
-pub const Attachment = union(enum) {
-    detached: DetachmentCause,
-    attached: LiveAttachment,
-    closing: ClosingAttachment,
-};
-
-pub const RestoreAttempt = struct {
-    id: u64,
-};
-
-/// Typed permission accounting returned by AgentCore checkpoint restore.
-/// This is runtime health state only: it is never persisted as a permission
-/// rule and cannot be used to recreate or replay a prior response.
-pub const RestorePermissionSummary = struct {
-    restored_rules: u32 = 0,
-    invalidated_rules: u32 = 0,
-};
-
-pub const ActiveOperation = union(enum) {
-    none,
-    run: u64,
-    compact: u64,
-    restore: RestoreAttempt,
-};
-
-pub const CloseCompletion = enum(u8) {
-    none,
-    running,
-    closed,
-    failed_reusable,
-    failed_poisoned,
-    failed_closing,
-};
-
-pub const State = struct {
-    attachment: Attachment = .{ .detached = .cold_start },
-    worker_references: std.atomic.Value(usize) = .init(0),
-    pending_ui_request_id: u64 = 0,
-    pending_ui_order: u64 = 0,
-    active_run_id: u64 = 0,
-    active_operation: ActiveOperation = .none,
-    restore_job: ?*recovery_job.Job = null,
-    last_restore_failure: ?recovery_job.Failure = null,
-    last_restore_permission: ?RestorePermissionSummary = null,
-    close_thread: ?std.Thread = null,
-    close_completion: std.atomic.Value(CloseCompletion) = .init(.none),
-    close_failed: bool = false,
-    cancel_requested: bool = false,
-    /// Runtime-only model selection requested while the Session is busy.
-    /// It is deliberately not part of task persistence and is dropped on
-    /// restart/detach.
-    pending_model: ?[]u8 = null,
-
-    pub fn attached(self: *State) ?*LiveAttachment {
-        return switch (self.attachment) {
-            .attached => |*value| value,
-            .detached, .closing => null,
-        };
+    pub fn init(
+        allocator: std.mem.Allocator,
+        capacity: usize,
+    ) std.mem.Allocator.Error!Runtime {
+        std.debug.assert(capacity != 0);
+        const tasks = try allocator.alloc(?task_state.Task, capacity);
+        @memset(tasks, null);
+        return .{ .allocator = allocator, .tasks = tasks };
     }
 
-    pub fn attachedConst(self: *const State) ?*const LiveAttachment {
-        return switch (self.attachment) {
-            .attached => |*value| value,
-            .detached, .closing => null,
-        };
+    /// Composition must first drain/deinitialize every Task record because
+    /// bounded projection allocations remain in the shared root budget.
+    pub fn deinitStorage(self: *Runtime) void {
+        for (self.tasks) |entry| std.debug.assert(entry == null);
+        self.allocator.free(self.tasks);
+        for (self.failures.items) |failure| self.allocator.free(failure.reason);
+        self.failures.deinit(self.allocator);
+        self.* = undefined;
     }
 
-    pub fn live(self: *State) ?*LiveAttachment {
-        return switch (self.attachment) {
-            .attached => |*value| value,
-            .closing => |*value| &value.live,
-            .detached => null,
-        };
+    pub fn find(self: *Runtime, task_id: u64) ?*task_state.Task {
+        if (task_id == 0) return null;
+        for (self.tasks) |*entry| {
+            const task = &(entry.* orelse continue);
+            if (task.durable.id == task_id) return task;
+        }
+        return null;
     }
 
-    pub fn liveConst(self: *const State) ?*const LiveAttachment {
-        return switch (self.attachment) {
-            .attached => |*value| value,
-            .closing => |*value| &value.live,
-            .detached => null,
-        };
+    pub fn findConst(self: *const Runtime, task_id: u64) ?*const task_state.Task {
+        if (task_id == 0) return null;
+        for (self.tasks) |*entry| {
+            const task = &(entry.* orelse continue);
+            if (task.durable.id == task_id) return task;
+        }
+        return null;
     }
 
-    pub fn acquireAccess(self: *State) !agent_session.Access {
-        const value = self.attached() orelse return error.SessionClosing;
-        return value.binding.acquireAccess();
+    pub fn emptyIndex(self: *const Runtime) ?usize {
+        for (self.tasks, 0..) |entry, index| if (entry == null) return index;
+        return null;
     }
 
-    pub fn hasAttachedSession(self: *const State) bool {
-        return self.attachedConst() != null;
+    pub fn takeRecentOrder(self: *Runtime) u64 {
+        const result = self.next_recent_order;
+        if (self.next_recent_order != std.math.maxInt(u64))
+            self.next_recent_order += 1;
+        return result;
     }
 
-    pub fn hasClosingSession(self: *const State) bool {
-        return self.attachment == .closing;
+    pub fn noteLateTerminal(self: *Runtime) u64 {
+        self.late_terminal_event_count +|= 1;
+        return self.late_terminal_event_count;
     }
 
-    pub fn execution(self: *State) ?*owned_execution.OwnedTaskExecution {
-        const value = self.live() orelse return null;
-        return &value.execution;
-    }
-
-    pub fn executionConst(self: *const State) ?*const owned_execution.OwnedTaskExecution {
-        const value = self.liveConst() orelse return null;
-        return &value.execution;
-    }
-
-    pub fn routeId(self: *const State) u64 {
-        return switch (self.attachment) {
-            .attached => |*value| value.binding.routeId(),
-            .closing => |*value| value.route_id,
-            .detached => 0,
-        };
-    }
-
-    pub fn pinnedCatalog(self: *State) ?*catalog_snapshot.Snapshot {
-        const value = self.live() orelse return null;
-        return if (value.pinned_catalog) |*snapshot| snapshot else null;
-    }
-
-    pub fn pinnedCatalogConst(self: *const State) ?*const catalog_snapshot.Snapshot {
-        const value = self.liveConst() orelse return null;
-        return if (value.pinned_catalog) |*snapshot| snapshot else null;
-    }
-
-    pub fn beginClosing(self: *State) bool {
-        var value = switch (self.attachment) {
-            .attached => |value| value,
-            .detached, .closing => return false,
-        };
-        const route_id = value.binding.routeId();
-        const worker_binding = value.binding.take();
-        self.attachment = .{ .closing = .{
-            .live = value,
-            .route_id = route_id,
-            .worker_binding = worker_binding,
-        } };
-        return true;
-    }
-
-    /// Returns the close worker's exclusive owner slot. The main thread may
-    /// select its address before spawn, but must not read or mutate it again
-    /// until the close thread has been joined.
-    pub fn closingWorkerBinding(self: *State) ?*agent_session.Binding {
-        return switch (self.attachment) {
-            .closing => |*value| &value.worker_binding,
-            .detached, .attached => null,
-        };
-    }
-
-    /// Returns the binding that remains after a close worker has been joined.
-    /// Calling this while `close_thread` is live violates the ownership
-    /// contract; the composition layer owns that join precondition.
-    pub fn bindingAfterCloseJoin(self: *State) ?*agent_session.Binding {
-        return switch (self.attachment) {
-            .attached => |*value| &value.binding,
-            .closing => |*value| &value.worker_binding,
-            .detached => null,
-        };
-    }
-
-    /// Runtime shutdown is a terminal fence: after the joined Binding has
-    /// relinquished or abandoned its Session owner, no routing identity may
-    /// continue to describe this closing attachment as live.
-    pub fn clearClosingRouteAfterRuntimeShutdown(self: *State) void {
-        switch (self.attachment) {
-            .closing => |*value| value.route_id = 0,
-            .detached, .attached => {},
+    /// Closes a Product Task durable transaction after composition has made
+    /// the one shared Workspace+Task history commit. A definite failure stays
+    /// retryable after caller rollback; an unknown outcome permanently freezes
+    /// this Runtime's mutation surface.
+    pub fn observeDurableCommit(self: *Runtime, outcome: DurableCommit) void {
+        switch (outcome) {
+            .committed, .failed => {},
+            .outcome_unknown => self.durable_mutation_state = .outcome_unknown,
         }
     }
 
-    pub fn restoreCloseFailure(self: *State, health: AttachedHealth) void {
-        var closing = switch (self.attachment) {
-            .closing => |value| value,
-            .detached, .attached => unreachable,
-        };
-        closing.live.binding = closing.worker_binding.take();
-        closing.live.health = health;
-        self.attachment = .{ .attached = closing.live };
-    }
-
-    pub fn detach(self: *State, cause: DetachmentCause) LiveAttachment {
-        const value = switch (self.attachment) {
-            .attached => |value| value,
-            .closing => |value| closing: {
-                std.debug.assert(self.close_thread == null);
-                var closing_value = value;
-                switch (closing_value.worker_binding.state()) {
-                    .owned, .closed, .fixture => closing_value.live.binding =
-                        closing_value.worker_binding.take(),
-                    .released, .relinquished, .abandoned => {},
-                    .moved => unreachable,
-                }
-                break :closing closing_value.live;
-            },
-            .detached => unreachable,
-        };
-        self.attachment = .{ .detached = cause };
-        return value;
+    pub fn durableMutationAvailable(self: *const Runtime) bool {
+        return self.durable_mutation_state == .available;
     }
 };
 
-test "attachment and operation states exclude partial resource tuples" {
-    try std.testing.expectEqual(@as(usize, 3), std.meta.fields(Attachment).len);
-    try std.testing.expectEqual(@as(usize, 4), std.meta.fields(ActiveOperation).len);
-    var state = State{};
-    try std.testing.expect(!state.hasAttachedSession());
-    try std.testing.expect(state.execution() == null);
-    try std.testing.expectEqual(@as(u64, 0), state.routeId());
+test "Runtime owns bounded Task collection and monotonic process facts" {
+    var runtime = try Runtime.init(std.testing.allocator, 2);
+    defer runtime.deinitStorage();
+    try std.testing.expectEqual(@as(?usize, 0), runtime.emptyIndex());
+    try std.testing.expectEqual(@as(u64, 1), runtime.takeRecentOrder());
+    try std.testing.expectEqual(@as(u64, 2), runtime.next_recent_order);
+    try std.testing.expectEqual(@as(u64, 1), runtime.noteLateTerminal());
+    runtime.observeDurableCommit(.failed);
+    try std.testing.expect(runtime.durableMutationAvailable());
+    runtime.observeDurableCommit(.outcome_unknown);
+    try std.testing.expect(!runtime.durableMutationAvailable());
 }
