@@ -210,6 +210,11 @@ pub const State = struct {
     reconciliation: ?Reconciliation = null,
     catalog: CatalogControl = .{},
 
+    pub fn inventoryConst(self: *const State) *const management.Inventory {
+        if (self.transactions) |*transactions| return &transactions.inventory;
+        return &(self.inventory orelse unreachable);
+    }
+
     pub fn init(
         io: std.Io,
         allocator: std.mem.Allocator,

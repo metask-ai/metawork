@@ -7,3 +7,4 @@ pub const management = @import("product_skill_management");
 pub const package = @import("product_skill_package");
 pub const policy = @import("product_skill_policy");
 pub const state = @import("product_skill_state");
+pub const view = @import("product_skill_view");

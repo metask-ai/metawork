@@ -11,6 +11,7 @@ const skill_enablement_impl = @import("metawork_product_skill").enablement;
 const skill_package_impl = @import("metawork_product_skill").package;
 const skill_policy_impl = @import("metawork_product_skill").policy;
 const skill_state = @import("metawork_product_skill").state;
+const skill_view = @import("metawork_product_skill").view;
 const product_task = @import("metawork_product_task");
 const task_persistence = product_task.persistence;
 const TaskPersistenceCommit = task_persistence.Commit;
@@ -2780,7 +2781,7 @@ pub const Workbench = struct {
         self.syncLifecycle();
         const workspace = self.findWorkspace(workspace_id) orelse
             return error.UnknownWorkspace;
-        return catalogProjection(
+        return skill_view.catalogProjection(
             workspace.skill_catalog.slot.availability(workspace.catalog_job != null),
             workspace.skill_catalog.slot.snapshotConst(),
         );
@@ -2788,7 +2789,7 @@ pub const Workbench = struct {
 
     pub fn skillCatalog(self: *Workbench) CatalogProjection {
         self.syncLifecycle();
-        return catalogProjection(
+        return skill_view.catalogProjection(
             self.skill.catalog.slot.availability(self.skill_catalog_job != null),
             self.skill.catalog.slot.snapshotConst(),
         );
@@ -6698,9 +6699,10 @@ pub const Workbench = struct {
         try self.writeAccount(&writer);
         writer.writeAll(",\"skillCatalog\":") catch
             return error.SnapshotTooLarge;
-        try self.writeCatalogProjection(
+        try skill_view.writeCatalogProjection(
             &writer,
-            catalogProjection(
+            self.skillTextProjection(),
+            skill_view.catalogProjection(
                 self.skill.catalog.slot.availability(self.skill_catalog_job != null),
                 self.skill.catalog.slot.snapshotConst(),
             ),
@@ -6977,9 +6979,10 @@ pub const Workbench = struct {
                 return error.SnapshotTooLarge;
         writer.writeAll(",\"skillCatalog\":") catch
             return error.SnapshotTooLarge;
-        try self.writeCatalogProjection(
+        try skill_view.writeCatalogProjection(
             writer,
-            catalogProjection(
+            self.skillTextProjection(),
+            skill_view.catalogProjection(
                 workspace.skill_catalog.slot.availability(workspace.catalog_job != null),
                 workspace.skill_catalog.slot.snapshotConst(),
             ),
@@ -7181,14 +7184,74 @@ pub const Workbench = struct {
         };
     }
 
+    fn skillViewContainsSensitive(
+        context: *const anyopaque,
+        value: []const u8,
+    ) bool {
+        const self: *const Workbench = @ptrCast(@alignCast(context));
+        return self.containsKnownCredential(value);
+    }
+
+    fn writeSkillViewJson(
+        context: *const anyopaque,
+        writer: *std.Io.Writer,
+        value: []const u8,
+    ) skill_view.Error!void {
+        const self: *const Workbench = @ptrCast(@alignCast(context));
+        self.projectedJsonValueWithKnownCredentials(writer, value) catch
+            return error.SnapshotTooLarge;
+    }
+
+    fn skillTextProjection(self: *const Workbench) skill_view.TextProjection {
+        return .{
+            .context = self,
+            .contains_sensitive_fn = skillViewContainsSensitive,
+            .write_json_fn = writeSkillViewJson,
+        };
+    }
+
+    fn skillWorkspaceCatalog(
+        context: *const anyopaque,
+        index: usize,
+    ) ?skill_view.ScopedCatalog {
+        const self: *const Workbench = @ptrCast(@alignCast(context));
+        const workspace = &(self.workspaces[index] orelse return null);
+        if (workspace.kind != .manual or !workspace.visible or
+            workspace.authorization != .available) return null;
+        const snapshot = workspace.skill_catalog.slot.snapshotConst() orelse
+            return null;
+        return .{
+            .scope = .{ .project = .{
+                .workspace_id = workspace.id,
+                .workspace_epoch = workspace.epoch,
+            } },
+            .snapshot = snapshot,
+        };
+    }
+
+    fn skillManagementInput(self: *const Workbench) skill_view.ManagementInput {
+        return .{
+            .state = &self.skill,
+            .workspaces = .{
+                .context = self,
+                .slot_count = self.workspaces.len,
+                .get_fn = skillWorkspaceCatalog,
+            },
+            .text = self.skillTextProjection(),
+        };
+    }
+
     fn writeTaskCatalogProjection(
         context: *const anyopaque,
         writer: *std.Io.Writer,
         catalog: CatalogProjection,
     ) task_view.Error!void {
         const self: *Workbench = @ptrCast(@alignCast(@constCast(context)));
-        self.writeCatalogProjection(writer, catalog) catch
-            return error.SnapshotTooLarge;
+        skill_view.writeCatalogProjection(
+            writer,
+            self.skillTextProjection(),
+            catalog,
+        ) catch return error.SnapshotTooLarge;
     }
 
     fn writeTaskPendingUiProjection(
@@ -7222,365 +7285,18 @@ pub const Workbench = struct {
         }) catch |err| return @errorCast(err);
     }
 
-    fn writeCatalogProjection(
-        self: *Workbench,
-        writer: *std.Io.Writer,
-        catalog: CatalogProjection,
-    ) Error!void {
-        const available = catalog.availability == .ready or
-            catalog.availability == .degraded;
-        std.debug.assert(available == (catalog.selection_revision != null));
-        writer.print("{{\"availability\":\"{s}\",\"redacted\":{},\"revision\":", .{
-            @tagName(catalog.availability),
-            catalog.redacted or self.catalogContainsKnownCredential(catalog),
-        }) catch return error.SnapshotTooLarge;
-        switch (catalog.availability) {
-            .ready, .degraded => try self.projectedJsonValueWithKnownCredentials(
-                writer,
-                catalog.revision,
-            ),
-            .uninitialized, .loading, .unavailable => writer.writeAll("null") catch
-                return error.SnapshotTooLarge,
-        }
-        writer.writeAll(",\"selectionRevision\":") catch return error.SnapshotTooLarge;
-        switch (catalog.availability) {
-            .ready, .degraded => writer.print(
-                "\"{d}\"",
-                .{catalog.selection_revision.?},
-            ) catch return error.SnapshotTooLarge,
-            .uninitialized, .loading, .unavailable => writer.writeAll("null") catch return error.SnapshotTooLarge,
-        }
-        writer.writeAll(",\"skills\":[") catch return error.SnapshotTooLarge;
-        for (catalog.skills, 0..) |skill, index| {
-            if (index != 0) writer.writeByte(',') catch
-                return error.SnapshotTooLarge;
-            writer.writeAll("{\"skillId\":") catch return error.SnapshotTooLarge;
-            try self.projectedJsonValueWithKnownCredentials(
-                writer,
-                skill.skill_id,
-            );
-            writer.writeAll(",\"invocationName\":") catch
-                return error.SnapshotTooLarge;
-            try self.projectedJsonValueWithKnownCredentials(
-                writer,
-                skill.invocation_name,
-            );
-            writer.writeAll(",\"displayName\":") catch
-                return error.SnapshotTooLarge;
-            try self.projectedJsonValueWithKnownCredentials(
-                writer,
-                skill.display_name,
-            );
-            writer.writeAll(",\"description\":") catch
-                return error.SnapshotTooLarge;
-            try self.projectedJsonValueWithKnownCredentials(
-                writer,
-                skill.description,
-            );
-            writer.writeAll(",\"argumentNames\":[") catch
-                return error.SnapshotTooLarge;
-            for (skill.argument_names, 0..) |name, argument_index| {
-                if (argument_index != 0) writer.writeByte(',') catch
-                    return error.SnapshotTooLarge;
-                try self.projectedJsonValueWithKnownCredentials(writer, name);
-            }
-            writer.print("],\"maxValues\":{d},\"enabled\":{}}}", .{
-                skill.max_values,
-                skill.enabled,
-            }) catch
-                return error.SnapshotTooLarge;
-        }
-        writer.writeAll("],\"issues\":[") catch return error.SnapshotTooLarge;
-        for (catalog.issues, 0..) |issue, index| {
-            if (index != 0) writer.writeByte(',') catch
-                return error.SnapshotTooLarge;
-            writer.print("{{\"code\":\"{s}\",\"invocationName\":", .{
-                @tagName(issue.code),
-            }) catch return error.SnapshotTooLarge;
-            if (issue.skill_policy_key) |name|
-                try self.projectedJsonValueWithKnownCredentials(writer, name)
-            else
-                writer.writeAll("null") catch return error.SnapshotTooLarge;
-            writer.writeByte('}') catch return error.SnapshotTooLarge;
-        }
-        writer.writeAll("]}") catch return error.SnapshotTooLarge;
-    }
-
     fn writeSkillManagement(
         self: *Workbench,
         writer: *std.Io.Writer,
     ) Error!void {
-        writer.print("{{\"availability\":\"{s}\",\"enablementAvailability\":\"{s}\",\"assets\":[", .{
-            @tagName(self.skill.management_health),
-            @tagName(self.skill.enablement_health),
-        }) catch return error.SnapshotTooLarge;
-        const inventory = self.skillInventory();
-        var count: usize = 0;
-        for (inventory.items()) |asset| {
-            if (count != 0) writer.writeByte(',') catch
-                return error.SnapshotTooLarge;
-            count += 1;
-            try self.writeManagedSkillAsset(writer, asset);
-        }
-        const catalog = self.skill.catalog.slot.snapshotConst();
-        if (catalog) |snapshot| for (snapshot.skills) |skill| {
-            if (skill_policy_impl.inventoryHasInvocationInScope(
-                inventory,
-                .personal,
-                skill.invocation_name,
-            )) continue;
-            if (count != 0) writer.writeByte(',') catch
-                return error.SnapshotTooLarge;
-            count += 1;
-            try self.writeExternalSkillAsset(writer, skill, .personal);
-        };
-        for (self.workspaces) |*entry| {
-            const workspace = &(entry.* orelse continue);
-            if (workspace.kind != .manual or !workspace.visible or
-                workspace.authorization != .available)
-                continue;
-            const workspace_catalog = workspace.skill_catalog.slot.snapshotConst() orelse
-                continue;
-            const scope: skill_management_impl.Scope = .{ .project = .{
-                .workspace_id = workspace.id,
-                .workspace_epoch = workspace.epoch,
-            } };
-            for (workspace_catalog.skills) |skill| {
-                if (skill_policy_impl.inventoryHasInvocationInScope(
-                    inventory,
-                    scope,
-                    skill.invocation_name,
-                )) continue;
-                if (count != 0) writer.writeByte(',') catch
-                    return error.SnapshotTooLarge;
-                count += 1;
-                try self.writeExternalSkillAsset(writer, skill, scope);
-            }
-        }
-        writer.writeAll("]}") catch return error.SnapshotTooLarge;
-    }
-
-    fn writeManagedSkillAsset(
-        self: *Workbench,
-        writer: *std.Io.Writer,
-        asset: skill_management_impl.Asset,
-    ) Error!void {
-        const id_hex = std.fmt.bytesToHex(asset.install_id, .lower);
-        const skill = self.findCatalogSkillForScope(asset.scope, asset.target_entry);
-        writer.writeAll("{\"installId\":") catch return error.SnapshotTooLarge;
-        jsonValue(writer, &id_hex) catch return error.SnapshotTooLarge;
-        writer.print(",\"sourceKind\":\"{s}\",\"scope\":", .{@tagName(asset.source_kind)}) catch
-            return error.SnapshotTooLarge;
-        try writeSkillScope(writer, asset.scope);
-        writer.print(",\"managementState\":\"{s}\",\"skillId\":", .{@tagName(asset.state)}) catch
-            return error.SnapshotTooLarge;
-        if (skill) |value|
-            try self.projectedJsonValueWithKnownCredentials(writer, value.skill_id)
-        else
-            writer.writeAll("null") catch return error.SnapshotTooLarge;
-        writer.writeAll(",\"invocationName\":") catch return error.SnapshotTooLarge;
-        try self.projectedJsonValueWithKnownCredentials(
+        skill_view.writeManagementProjection(
             writer,
-            if (skill) |value| value.invocation_name else asset.target_entry,
-        );
-        writer.writeAll(",\"displayName\":") catch return error.SnapshotTooLarge;
-        try self.projectedJsonValueWithKnownCredentials(
-            writer,
-            if (skill) |value| value.display_name else asset.target_entry,
-        );
-        writer.writeAll(",\"description\":") catch return error.SnapshotTooLarge;
-        try self.projectedJsonValueWithKnownCredentials(
-            writer,
-            if (skill) |value| value.description else "",
-        );
-        try self.writeSkillAssetTail(
-            writer,
-            if (skill) |value| value.argument_names else &.{},
-            if (skill) |value| value.max_values else 0,
-            asset.state != .externally_managed and asset.state == .ready and
-                asset.recovery == null,
-            asset.state == .pending_verification,
-            asset.scope,
-            asset.target_entry,
-        );
-    }
-
-    fn writeExternalSkillAsset(
-        self: *Workbench,
-        writer: *std.Io.Writer,
-        skill: SkillProjection,
-        scope: skill_management_impl.Scope,
-    ) Error!void {
-        writer.writeAll("{\"installId\":null,\"sourceKind\":\"external\",\"scope\":") catch
-            return error.SnapshotTooLarge;
-        try writeSkillScope(writer, scope);
-        writer.writeAll(",\"managementState\":\"externally_managed\",\"skillId\":") catch
-            return error.SnapshotTooLarge;
-        try self.projectedJsonValueWithKnownCredentials(writer, skill.skill_id);
-        writer.writeAll(",\"invocationName\":") catch return error.SnapshotTooLarge;
-        try self.projectedJsonValueWithKnownCredentials(writer, skill.invocation_name);
-        writer.writeAll(",\"displayName\":") catch return error.SnapshotTooLarge;
-        try self.projectedJsonValueWithKnownCredentials(writer, skill.display_name);
-        writer.writeAll(",\"description\":") catch return error.SnapshotTooLarge;
-        try self.projectedJsonValueWithKnownCredentials(writer, skill.description);
-        try self.writeSkillAssetTail(
-            writer,
-            skill.argument_names,
-            skill.max_values,
-            false,
-            false,
-            scope,
-            skill.invocation_name,
-        );
-    }
-
-    fn writeSkillAssetTail(
-        self: *Workbench,
-        writer: *std.Io.Writer,
-        argument_names: []const []const u8,
-        max_values: u32,
-        manageable: bool,
-        pending: bool,
-        scope: skill_management_impl.Scope,
-        invocation_name: []const u8,
-    ) Error!void {
-        const runtime_skill = self.findCatalogSkillForScope(scope, invocation_name);
-        writer.writeAll(",\"skillPolicyKey\":") catch return error.SnapshotTooLarge;
-        if (runtime_skill) |skill|
-            try self.projectedJsonValueWithKnownCredentials(writer, skill.skill_policy_key)
-        else
-            writer.writeAll("null") catch return error.SnapshotTooLarge;
-        writer.writeAll(",\"argumentNames\":[") catch return error.SnapshotTooLarge;
-        for (argument_names, 0..) |name, index| {
-            if (index != 0) writer.writeByte(',') catch
-                return error.SnapshotTooLarge;
-            try self.projectedJsonValueWithKnownCredentials(writer, name);
-        }
-        const catalog_available = switch (scope) {
-            .personal => self.skill.catalog.slot.snapshotConst() != null,
-            .project => |project| available: {
-                const workspace = self.findWorkspace(project.workspace_id) orelse
-                    break :available false;
-                break :available workspace.epoch == project.workspace_epoch and
-                    workspace.skill_catalog.slot.snapshotConst() != null;
-            },
-        };
-        const enablement_available = self.skill.enablement_health == .ready and
-            catalog_available;
-        const selection_revision = if (enablement_available)
-            if (self.catalogForSkillScope(scope)) |snapshot|
-                snapshot.selection_revision
-            else
-                null
-        else
-            null;
-        const can_set_enabled = enablement_available and
-            runtime_skill != null and selection_revision != null;
-        writer.print("],\"maxValues\":{d},\"canExport\":{},\"canReimport\":{},\"canUninstall\":{},\"canRetry\":{},\"enabled\":", .{
-            max_values,
-            manageable,
-            manageable,
-            manageable or pending,
-            pending,
-        }) catch return error.SnapshotTooLarge;
-        if (runtime_skill) |skill| {
-            if (enablement_available)
-                writer.print("{}", .{skill.enabled}) catch return error.SnapshotTooLarge
-            else
-                writer.writeAll("null") catch return error.SnapshotTooLarge;
-        } else writer.writeAll("null") catch return error.SnapshotTooLarge;
-        writer.writeAll(",\"enablementState\":") catch return error.SnapshotTooLarge;
-        if (runtime_skill) |skill| {
-            if (enablement_available) switch (scope) {
-                .personal => jsonValue(
-                    writer,
-                    if (skill.enabled) "enabled" else "disabled",
-                ) catch return error.SnapshotTooLarge,
-                .project => |project| jsonValue(
-                    writer,
-                    @tagName(self.skill.enablement_store.workspaceOverride(.{
-                        .workspace_id = project.workspace_id,
-                        .workspace_epoch = project.workspace_epoch,
-                    }, skill.skill_policy_key)),
-                ) catch return error.SnapshotTooLarge,
-            } else writer.writeAll("null") catch return error.SnapshotTooLarge;
-        } else writer.writeAll("null") catch return error.SnapshotTooLarge;
-        writer.print(",\"canSetEnabled\":{},\"selectionRevision\":", .{can_set_enabled}) catch
-            return error.SnapshotTooLarge;
-        if (selection_revision) |revision|
-            writer.print("\"{d}\"", .{revision}) catch return error.SnapshotTooLarge
-        else
-            writer.writeAll("null") catch return error.SnapshotTooLarge;
-        writer.writeAll(",\"issueCodes\":[") catch return error.SnapshotTooLarge;
-        if (self.catalogForSkillScope(scope)) |snapshot| {
-            var issue_count: usize = 0;
-            for (snapshot.issues) |issue| {
-                const issue_name = issue.skill_policy_key orelse continue;
-                if (!std.mem.eql(u8, issue_name, invocation_name)) continue;
-                if (issue_count != 0) writer.writeByte(',') catch
-                    return error.SnapshotTooLarge;
-                issue_count += 1;
-                jsonValue(writer, @tagName(issue.code)) catch
-                    return error.SnapshotTooLarge;
-            }
-        }
-        writer.writeAll("]}") catch return error.SnapshotTooLarge;
+            self.skillManagementInput(),
+        ) catch return error.SnapshotTooLarge;
     }
 
     fn skillInventory(self: *const Workbench) *const skill_management_impl.Inventory {
-        if (self.skill.transactions) |*transactions| return &transactions.inventory;
-        return &(self.skill.inventory orelse unreachable);
-    }
-
-    fn findCatalogSkillForScope(
-        self: *const Workbench,
-        scope: skill_management_impl.Scope,
-        invocation_name: []const u8,
-    ) ?SkillProjection {
-        const snapshot = self.catalogForSkillScope(scope) orelse return null;
-        for (snapshot.skills) |skill|
-            if (std.mem.eql(u8, skill.invocation_name, invocation_name)) return skill;
-        return null;
-    }
-
-    fn catalogForSkillScope(
-        self: *const Workbench,
-        scope: skill_management_impl.Scope,
-    ) ?*const CatalogSnapshot {
-        return switch (scope) {
-            .personal => self.skill.catalog.slot.snapshotConst(),
-            .project => |project| catalog: {
-                for (self.workspaces) |*entry| {
-                    const workspace = &(entry.* orelse continue);
-                    if (workspace.id == project.workspace_id and
-                        workspace.epoch == project.workspace_epoch)
-                        break :catalog workspace.skill_catalog.slot.snapshotConst();
-                }
-                break :catalog null;
-            },
-        };
-    }
-
-    fn catalogContainsKnownCredential(
-        self: *const Workbench,
-        catalog: CatalogProjection,
-    ) bool {
-        if (self.containsKnownCredential(catalog.revision)) return true;
-        for (catalog.skills) |skill| {
-            inline for (.{
-                skill.skill_id,
-                skill.invocation_name,
-                skill.display_name,
-                skill.description,
-            }) |field|
-                if (self.containsKnownCredential(field)) return true;
-            for (skill.argument_names) |name|
-                if (self.containsKnownCredential(name)) return true;
-        }
-        for (catalog.issues) |issue|
-            if (issue.skill_policy_key) |name|
-                if (self.containsKnownCredential(name)) return true;
-        return false;
+        return self.skill.inventoryConst();
     }
 
     fn writePendingUi(
@@ -12148,36 +11864,6 @@ fn catalogSnapshotLimits(limits: Limits) catalog_snapshot.Limits {
     };
 }
 
-fn writeSkillScope(
-    writer: *std.Io.Writer,
-    scope: skill_management_impl.Scope,
-) Error!void {
-    switch (scope) {
-        .personal => writer.writeAll(
-            "{\"kind\":\"personal\",\"workspaceId\":null,\"workspaceEpoch\":null}",
-        ) catch return error.SnapshotTooLarge,
-        .project => |project| writer.print(
-            "{{\"kind\":\"project\",\"workspaceId\":\"{d}\",\"workspaceEpoch\":\"{d}\"}}",
-            .{ project.workspace_id, project.workspace_epoch },
-        ) catch return error.SnapshotTooLarge,
-    }
-}
-
-fn catalogProjection(
-    availability: CatalogAvailability,
-    snapshot: ?*const CatalogSnapshot,
-) CatalogProjection {
-    return switch (availability) {
-        .ready, .degraded => if (snapshot) |value|
-            value.view()
-        else
-            .{ .availability = .unavailable },
-        .uninitialized, .loading, .unavailable => .{
-            .availability = availability,
-        },
-    };
-}
-
 fn takeActivityOrder(run: *RunRecord) u64 {
     const result = run.next_activity_order;
     std.debug.assert(result != std.math.maxInt(u64));
@@ -13563,7 +13249,7 @@ test "Skill catalog snapshot reports redaction without exposing credential bytes
     }};
     var storage: [2048]u8 = undefined;
     var writer = std.Io.Writer.fixed(&storage);
-    try workbench.writeCatalogProjection(&writer, .{
+    try skill_view.writeCatalogProjection(&writer, workbench.skillTextProjection(), .{
         .availability = .ready,
         .revision = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         .selection_revision = 1,
@@ -13916,37 +13602,18 @@ test "User Skill defaults stamp Personal and Workspace catalogs while project ov
     }));
     try std.testing.expect(!workbench.workspaces[0].?.skill_catalog.slot.snapshotConst().?.skills[0].enabled);
 
-    var personal_storage: [1024]u8 = undefined;
-    var personal_writer = std.Io.Writer.fixed(&personal_storage);
-    try workbench.writeSkillAssetTail(
-        &personal_writer,
-        &.{"target"},
-        1,
-        false,
-        false,
-        .personal,
-        "review",
-    );
+    var management_storage: [8192]u8 = undefined;
+    var management_writer = std.Io.Writer.fixed(&management_storage);
+    try workbench.writeSkillManagement(&management_writer);
+    const management_projection = management_writer.buffered();
     try std.testing.expect(std.mem.indexOf(
         u8,
-        personal_writer.buffered(),
+        management_projection,
         "\"enabled\":false,\"enablementState\":\"disabled\",\"canSetEnabled\":true",
     ) != null);
-
-    var project_storage: [1024]u8 = undefined;
-    var project_writer = std.Io.Writer.fixed(&project_storage);
-    try workbench.writeSkillAssetTail(
-        &project_writer,
-        &.{"target"},
-        1,
-        false,
-        false,
-        .{ .project = .{ .workspace_id = 1, .workspace_epoch = 1 } },
-        "review",
-    );
     try std.testing.expect(std.mem.indexOf(
         u8,
-        project_writer.buffered(),
+        management_projection,
         "\"enabled\":false,\"enablementState\":\"inherit\",\"canSetEnabled\":true",
     ) != null);
 }

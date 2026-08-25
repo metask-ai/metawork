@@ -107,6 +107,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-product-skill-enablement", .root_module = test_modules.product_skill_enablement },
         .{ .name = "metawork-product-skill-state", .root_module = test_modules.product_skill_state },
         .{ .name = "metawork-product-skill-policy", .root_module = test_modules.product_skill_policy },
+        .{ .name = "metawork-product-skill-view", .root_module = test_modules.product_skill_view },
         .{ .name = "metawork-product-mcp-configuration", .root_module = test_modules.product_mcp_configuration },
         .{ .name = "metawork-product-mcp-state", .root_module = test_modules.product_mcp_state },
         .{ .name = "metawork-product-mcp-policy", .root_module = test_modules.product_mcp_policy },
@@ -252,6 +253,7 @@ const WiredModules = struct {
     product_skill_enablement: *std.Build.Module,
     product_skill_state: *std.Build.Module,
     product_skill_policy: *std.Build.Module,
+    product_skill_view: *std.Build.Module,
     product_mcp: *std.Build.Module,
     product_mcp_configuration: *std.Build.Module,
     product_mcp_state: *std.Build.Module,
@@ -928,6 +930,15 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     product_skill_policy.addImport("product_skill_enablement", skill_enablement);
     product_skill_policy.addImport("product_skill_management", skill_management);
     product_skill_policy.addImport("product_skill_state", product_skill_state);
+    const product_skill_view = b.createModule(.{
+        .root_source_file = b.path("src/product/skill/view.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    product_skill_view.addImport("product_skill_catalog", catalog_snapshot);
+    product_skill_view.addImport("product_skill_management", skill_management);
+    product_skill_view.addImport("product_skill_policy", product_skill_policy);
+    product_skill_view.addImport("product_skill_state", product_skill_state);
     const product_skill = b.createModule(.{
         .root_source_file = b.path("src/product/skill.zig"),
         .target = target,
@@ -939,6 +950,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     product_skill.addImport("product_skill_package", skill_package);
     product_skill.addImport("product_skill_policy", product_skill_policy);
     product_skill.addImport("product_skill_state", product_skill_state);
+    product_skill.addImport("product_skill_view", product_skill_view);
     const owned_task_execution = b.createModule(.{
         .root_source_file = b.path("src/product/task/execution_binding.zig"),
         .target = target,
@@ -1246,6 +1258,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .product_skill_enablement = skill_enablement,
         .product_skill_state = product_skill_state,
         .product_skill_policy = product_skill_policy,
+        .product_skill_view = product_skill_view,
         .product_mcp = product_mcp,
         .product_mcp_configuration = mcp_configuration,
         .product_mcp_state = product_mcp_state,
