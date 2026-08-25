@@ -257,6 +257,7 @@ test("Product Skill kernels have one physical home without taking composition", 
   const enablement = read("src/product/skill/enablement.zig");
   const packageKernel = read("src/product/skill/package.zig");
   const management = read("src/product/skill/management.zig");
+  const policy = read("src/product/skill/policy.zig");
   const state = read("src/product/skill/state.zig");
   const appStores = read("src/app/stores.zig");
   const bridgeDispatcher = read("src/bridge/dispatcher.zig");
@@ -269,6 +270,7 @@ test("Product Skill kernels have one physical home without taking composition", 
   assert.match(productSkill, /@import\("product_skill_enablement"\)/);
   assert.match(productSkill, /@import\("product_skill_management"\)/);
   assert.match(productSkill, /@import\("product_skill_package"\)/);
+  assert.match(productSkill, /@import\("product_skill_policy"\)/);
   assert.match(productSkill, /@import\("product_skill_state"\)/);
   assert.match(catalog, /@import\("metawork_agent"\)/);
   assert.doesNotMatch(
@@ -303,7 +305,27 @@ test("Product Skill kernels have one physical home without taking composition", 
   assert.match(state, /pub const State = struct/);
   assert.match(state, /pub const CatalogControl = struct/);
   assert.match(state, /pub const CatalogLeaseRelease = struct/);
+  assert.match(policy, /@import\("metawork_agent"\)/);
+  assert.match(policy, /@import\("product_skill_catalog"\)/);
+  assert.match(policy, /@import\("product_skill_enablement"\)/);
+  assert.match(policy, /@import\("product_skill_management"\)/);
+  assert.match(policy, /@import\("product_skill_state"\)/);
+  assert.match(policy, /pub fn compileCatalogSnapshot/);
+  assert.match(policy, /pub fn recompileCatalogSnapshot/);
+  assert.match(policy, /pub fn enablementPersistenceFailure/);
+  assert.doesNotMatch(
+    policy,
+    /Workbench|WorkspaceView|TaskView|workbench_executor|std\.Thread|CatalogJob|\*agent\.Runtime|\*agent\.Session|FileStore|\.commit\(|bumpRevision|scheduleSkill/,
+  );
   assert.match(projection, /skill: skill_state\.State/);
+  assert.match(projection, /@import\("metawork_product_skill"\)\.policy/);
+  assert.doesNotMatch(
+    projection,
+    /fn compileCatalogSnapshot|fn recompileCatalogSnapshot|fn inventoryHasInvocationInScope/,
+  );
+  assert.match(projection, /fn commitSkillEnablementCandidate/);
+  assert.match(projection, /fn scheduleSkillCatalogQuery/);
+  assert.match(projection, /fn requireSkillMutationAvailable/);
   assert.match(
     projection,
     /skill_catalog: skill_state\.CatalogControl = \.\{\}/,
@@ -348,6 +370,7 @@ test("Product Skill kernels have one physical home without taking composition", 
   assert.match(build, /src\/product\/skill\/enablement\.zig/);
   assert.match(build, /src\/product\/skill\/management\.zig/);
   assert.match(build, /src\/product\/skill\/package\.zig/);
+  assert.match(build, /src\/product\/skill\/policy\.zig/);
   assert.match(build, /src\/product\/skill\/state\.zig/);
   assert.match(
     build,
@@ -368,8 +391,13 @@ test("Product Skill kernels have one physical home without taking composition", 
   );
   assert.match(
     build,
+    /product_skill\.addImport\("product_skill_policy", product_skill_policy\)/,
+  );
+  assert.match(
+    build,
     /product_skill\.addImport\("product_skill_state", product_skill_state\)/,
   );
+  assert.match(build, /name = "metawork-product-skill-policy"/);
   assert.match(build, /name = "metawork-product-skill-state"/);
   assert.doesNotMatch(
     build,

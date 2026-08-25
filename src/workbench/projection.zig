@@ -9,6 +9,7 @@ const scheduled_task_persistence = @import("workbench_scheduled_task_persistence
 const skill_management_impl = @import("metawork_product_skill").management;
 const skill_enablement_impl = @import("metawork_product_skill").enablement;
 const skill_package_impl = @import("metawork_product_skill").package;
+const skill_policy_impl = @import("metawork_product_skill").policy;
 const skill_state = @import("metawork_product_skill").state;
 const product_task = @import("metawork_product_task");
 const task_persistence = product_task.persistence;
@@ -2880,21 +2881,28 @@ pub const Workbench = struct {
         };
         switch (mutation.scope) {
             .personal => {
-                personal_catalog_candidate = try self.recompileCatalogSnapshot(
-                    self.skill.catalog.slot.snapshot().?,
+                const current = self.skill.catalog.slot.snapshot().?;
+                personal_catalog_candidate = try skill_policy_impl.recompileCatalogSnapshot(
+                    self.allocator,
+                    current,
                     &candidate,
                     .personal,
+                    catalogSnapshotLimits(self.limits),
+                    current.projected_bytes,
                 );
                 for (self.workspaces, 0..) |*entry, index| {
                     const workspace = &(entry.* orelse continue);
                     const snapshot = workspace.skill_catalog.slot.snapshot() orelse continue;
-                    var replacement = try self.recompileCatalogSnapshot(
+                    var replacement = try skill_policy_impl.recompileCatalogSnapshot(
+                        self.allocator,
                         snapshot,
                         &candidate,
                         .{ .project = .{
                             .workspace_id = workspace.id,
                             .workspace_epoch = workspace.epoch,
                         } },
+                        catalogSnapshotLimits(self.limits),
+                        snapshot.projected_bytes,
                     );
                     errdefer replacement.deinit();
                     try workspace_catalog_candidates.append(self.allocator, .{
@@ -2908,13 +2916,17 @@ pub const Workbench = struct {
             .project => |project| {
                 const workspace = self.findWorkspace(project.workspace_id) orelse
                     unreachable;
-                var replacement = try self.recompileCatalogSnapshot(
-                    workspace.skill_catalog.slot.snapshot().?,
+                const current = workspace.skill_catalog.slot.snapshot().?;
+                var replacement = try skill_policy_impl.recompileCatalogSnapshot(
+                    self.allocator,
+                    current,
                     &candidate,
                     .{ .project = .{
                         .workspace_id = workspace.id,
                         .workspace_epoch = workspace.epoch,
                     } },
+                    catalogSnapshotLimits(self.limits),
+                    current.projected_bytes,
                 );
                 errdefer replacement.deinit();
                 const index = for (self.workspaces, 0..) |entry, candidate_index| {
@@ -7312,7 +7324,7 @@ pub const Workbench = struct {
         }
         const catalog = self.skill.catalog.slot.snapshotConst();
         if (catalog) |snapshot| for (snapshot.skills) |skill| {
-            if (inventoryHasInvocationInScope(
+            if (skill_policy_impl.inventoryHasInvocationInScope(
                 inventory,
                 .personal,
                 skill.invocation_name,
@@ -7334,7 +7346,7 @@ pub const Workbench = struct {
                 .workspace_epoch = workspace.epoch,
             } };
             for (workspace_catalog.skills) |skill| {
-                if (inventoryHasInvocationInScope(
+                if (skill_policy_impl.inventoryHasInvocationInScope(
                     inventory,
                     scope,
                     skill.invocation_name,
@@ -9256,18 +9268,14 @@ pub const Workbench = struct {
     }
 
     fn noteSkillPersistenceFailure(self: *Workbench, err: anyerror) void {
-        self.skill.management_health = switch (err) {
-            error.PersistenceOutcomeUnknown => .outcome_unknown,
-            else => .write_failed,
-        };
+        self.skill.management_health =
+            skill_policy_impl.managementHealthAfterPersistenceFailure(err);
     }
 
     fn noteSkillEnablementPersistenceFailure(self: *Workbench, err: anyerror) void {
-        self.skill.enablement_health = switch (err) {
-            error.PersistenceOutcomeUnknown => .outcome_unknown,
-            else => .write_failed,
-        };
-        if (err == error.PersistenceOutcomeUnknown) {
+        const decision = skill_policy_impl.enablementPersistenceFailure(err);
+        self.skill.enablement_health = decision.health;
+        if (decision.invalidate_authorities) {
             self.markSkillCatalogUnavailable();
             for (self.workspaces) |*entry| {
                 const workspace = &(entry.* orelse continue);
@@ -9320,91 +9328,6 @@ pub const Workbench = struct {
             return;
         };
         candidate_owned = false;
-    }
-
-    fn compileCatalogSnapshot(
-        self: *Workbench,
-        source: lifecycle.CatalogProjection,
-        scope: skill_management_impl.Scope,
-        available_projection_bytes: usize,
-    ) Error!CatalogSnapshot {
-        if (self.skill.enablement_health != .ready)
-            return error.PersistenceFailed;
-        var disabled_skill_policy_keys: std.ArrayList([]const u8) = .empty;
-        defer disabled_skill_policy_keys.deinit(self.allocator);
-        const selection_revision = switch (scope) {
-            .personal => self.skill.enablement_store.userRevision(),
-            .project => |project| self.skill.enablement_store.revision(.{
-                .workspace_id = project.workspace_id,
-                .workspace_epoch = project.workspace_epoch,
-            }),
-        };
-        for (source.skills) |skill| {
-            const enabled = switch (scope) {
-                .personal => self.skill.enablement_store.isUserEnabled(
-                    skill.skill_policy_key,
-                ),
-                .project => |project| self.skill.enablement_store.isEnabled(.{
-                    .workspace_id = project.workspace_id,
-                    .workspace_epoch = project.workspace_epoch,
-                }, skill.skill_policy_key),
-            };
-            if (!enabled) try disabled_skill_policy_keys.append(
-                self.allocator,
-                skill.skill_policy_key,
-            );
-        }
-        return CatalogSnapshot.init(
-            self.allocator,
-            source,
-            selection_revision,
-            disabled_skill_policy_keys.items,
-            catalogSnapshotLimits(self.limits),
-            available_projection_bytes,
-        ) catch |err| switch (err) {
-            error.InvalidSelectionRevision => unreachable,
-            else => |other| return other,
-        };
-    }
-
-    fn recompileCatalogSnapshot(
-        self: *Workbench,
-        snapshot: *const CatalogSnapshot,
-        store: *const skill_enablement_impl.Store,
-        scope: skill_management_impl.Scope,
-    ) Error!CatalogSnapshot {
-        var disabled_skill_policy_keys: std.ArrayList([]const u8) = .empty;
-        defer disabled_skill_policy_keys.deinit(self.allocator);
-        const selection_revision = switch (scope) {
-            .personal => store.userRevision(),
-            .project => |project| store.revision(.{
-                .workspace_id = project.workspace_id,
-                .workspace_epoch = project.workspace_epoch,
-            }),
-        };
-        for (snapshot.skills) |skill| {
-            const enabled = switch (scope) {
-                .personal => store.isUserEnabled(skill.skill_policy_key),
-                .project => |project| store.isEnabled(.{
-                    .workspace_id = project.workspace_id,
-                    .workspace_epoch = project.workspace_epoch,
-                }, skill.skill_policy_key),
-            };
-            if (!enabled) try disabled_skill_policy_keys.append(
-                self.allocator,
-                skill.skill_policy_key,
-            );
-        }
-        return snapshot.recompile(
-            self.allocator,
-            selection_revision,
-            disabled_skill_policy_keys.items,
-            catalogSnapshotLimits(self.limits),
-            snapshot.projected_bytes,
-        ) catch |err| switch (err) {
-            error.InvalidSelectionRevision => unreachable,
-            else => |other| return other,
-        };
     }
 
     fn recoverSkillTransactionsForScopeNoFail(
@@ -9494,9 +9417,13 @@ pub const Workbench = struct {
                     .completed => switch (job.outcome) {
                         .success => |*acquisition| {
                             if (still_current) {
-                                const snapshot = self.compileCatalogSnapshot(
+                                const snapshot = skill_policy_impl.compileCatalogSnapshot(
+                                    self.allocator,
                                     acquisition.projection,
+                                    &self.skill.enablement_store,
+                                    self.skill.enablement_health,
                                     .personal,
+                                    catalogSnapshotLimits(self.limits),
                                     self.availableCatalogReplacementBytes(
                                         &self.skill.catalog.slot,
                                     ),
@@ -9589,12 +9516,16 @@ pub const Workbench = struct {
                 .completed => switch (job.outcome) {
                     .success => |*acquisition| {
                         if (still_current) {
-                            const snapshot = self.compileCatalogSnapshot(
+                            const snapshot = skill_policy_impl.compileCatalogSnapshot(
+                                self.allocator,
                                 acquisition.projection,
+                                &self.skill.enablement_store,
+                                self.skill.enablement_health,
                                 .{ .project = .{
                                     .workspace_id = workspace.id,
                                     .workspace_epoch = workspace.epoch,
                                 } },
+                                catalogSnapshotLimits(self.limits),
                                 self.availableCatalogReplacementBytes(
                                     &workspace.skill_catalog.slot,
                                 ),
@@ -12215,17 +12146,6 @@ fn catalogSnapshotLimits(limits: Limits) catalog_snapshot.Limits {
         .max_skill_arguments = limits.max_skill_arguments,
         .max_catalog_projection_bytes = limits.max_catalog_projection_bytes,
     };
-}
-
-fn inventoryHasInvocationInScope(
-    inventory: *const skill_management_impl.Inventory,
-    scope: skill_management_impl.Scope,
-    invocation_name: []const u8,
-) bool {
-    for (inventory.items()) |asset|
-        if (asset.scope.eql(scope) and
-            std.mem.eql(u8, asset.target_entry, invocation_name)) return true;
-    return false;
 }
 
 fn writeSkillScope(
