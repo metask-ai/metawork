@@ -22,13 +22,16 @@ Foundation UI 的 token 和组件实现，不替代具体产品的页面布局�
 - `assets/icons/app-icon.svg` 是 1024 × 1024 应用图标用途母版，使用白色背景；品牌标志以画布中心
   缩放至 88%，使可见主体约占画布宽度 70%，并保留应用图标所需的安全区。
 - `assets/icons/app-icon.png` 是该用途母版的 1024 × 1024 无损栅格交付文件，供当前未打包运行时的
-  `icon_path` 和需要方形栅格源的平台消费；`assets/icons/app-icon.icns` 与
-  `assets/icons/app-icon.ico` 是预先生成并检查的 macOS、Windows 平台交付文件。`app.zon.icons`
-  同时声明三者，由 Native SDK 按平台优先使用对应的预制容器，不在正式打包时临时转换。Windows
-  build graph 还必须把同一 `app-icon.ico` 编译进主 EXE 的 PE 图标资源；runtime stage 保留的外部副本
-  供安装器、卸载项和已安装快捷方式消费，不能以其中一条路径替代另一条。
-- 应用图标 SVG、PNG、ICNS 和 ICO 都从品牌真源导出；SVG 保留可编辑设计语义，其他格式是平台交付
-  资产。不能把应用 SVG 直接交给当前 SDK 的窄 SVG rasterizer，因为品牌复合 path 依赖的
+  `icon_path` 和需要方形栅格源的平台消费；`assets/icons/MetaWork.icon` 是 macOS 平台组合真源，内部
+  artwork 必须与该 PNG 字节一致，并固定使用纯白 solid fill、单一非 glass layer、无 shadow、specular
+  或 translucency。macOS 的 `Assets.car` 与 fallback ICNS 只允许由已验收 Xcode `actool` 在正式打包
+  期间生成，不提交到仓库；`assets/icons/app-icon.ico` 仍是预先生成并检查的 Windows 平台交付文件。
+  `app.zon.icons` 只声明 PNG 与 ICO，使 Native SDK 开发/runtime stage 继续消费支持的格式；macOS
+  package compatibility seam 在未签名 `.app` 中原位替换 SDK 生成的临时 ICNS。Windows build graph
+  还必须把同一 `app-icon.ico` 编译进主 EXE 的 PE 图标资源；runtime stage 保留的外部副本供安装器、
+  卸载项和已安装快捷方式消费，不能以其中一条路径替代另一条。
+- 应用图标 SVG、PNG、Icon Composer 源与 ICO 都从品牌真源导出；SVG 保留可编辑设计语义，其他格式
+  是用途或平台交付资产。不能把应用 SVG 直接交给当前 SDK 的窄 SVG rasterizer，因为品牌复合 path 依赖的
   even-odd 镂空不在其支持范围内。MetaWork 仓库不拥有 SVG 栅格化工具链。
 - `assets/icons/tray-icon.svg` 是透明背景的托盘用途母版，主体约占画布宽度 88%；macOS/Linux
   消费 64 × 64 PNG，Windows 消费包含 16、20、24、32、48 和 64 px 的 ICO。macOS 将该图像

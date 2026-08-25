@@ -151,6 +151,9 @@ test("macOS packaging has one public owner and signs only after resource staging
     /runNode\("scripts\/build\.mjs", \["release", distribution\.targetId\]\)/u,
   );
   assert.match(packageScript, /"--signing",\s*\n\s*"none"/u);
+  const appIconStagingIndex = packageScript.indexOf(
+    "stageMacosAppIcon(appIconArtifact, packagedAppPath);",
+  );
   const stagingIndex = packageScript.indexOf("stageMacosTrayIcon();");
   const architectureIndex = packageScript.indexOf(
     "verifyPackagedMacosExecutableArchitecture(distribution.executable);",
@@ -158,9 +161,13 @@ test("macOS packaging has one public owner and signs only after resource staging
   const signingIndex = packageScript.indexOf(
     "signWithDeveloperId(packagedAppPath",
   );
+  assert.notEqual(appIconStagingIndex, -1);
   assert.notEqual(stagingIndex, -1);
   assert.notEqual(architectureIndex, -1);
   assert.notEqual(signingIndex, -1);
+  assert.ok(appIconStagingIndex < stagingIndex);
+  assert.ok(appIconStagingIndex < architectureIndex);
+  assert.ok(appIconStagingIndex < signingIndex);
   assert.ok(stagingIndex < signingIndex);
   assert.ok(stagingIndex < architectureIndex);
   assert.ok(architectureIndex < signingIndex);

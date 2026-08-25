@@ -51,28 +51,22 @@ test("Windows installer name is derived from app.zon", () => {
   assert.throws(() => windowsFileVersion("1.70000.3"), /65535/u);
 });
 
-test("Native package consumes prebuilt platform icons", () => {
+test("Native package consumes only shared PNG and the prebuilt Windows icon", () => {
   const manifest = readFileSync(new URL("../app.zon", import.meta.url), "utf8");
   const iconDeclaration = manifest.match(
     /\.icons = \.\{(?<icons>[\s\S]*?)\n\s*\},/u,
   );
   assert.ok(iconDeclaration?.groups);
   assert.match(iconDeclaration.groups.icons, /"assets\/icons\/app-icon\.png"/u);
-  assert.match(
-    iconDeclaration.groups.icons,
-    /"assets\/icons\/app-icon\.icns"/u,
-  );
   assert.match(iconDeclaration.groups.icons, /"assets\/icons\/app-icon\.ico"/u);
   assert.doesNotMatch(iconDeclaration.groups.icons, /app-icon\.svg/u);
+  assert.doesNotMatch(iconDeclaration.groups.icons, /app-icon\.icns/u);
+  assert.doesNotMatch(iconDeclaration.groups.icons, /MetaWork\.icon/u);
 
   const ico = readFileSync(
     new URL("../assets/icons/app-icon.ico", import.meta.url),
   );
   assert.deepEqual(ico.subarray(0, 4), Buffer.from([0, 0, 1, 0]));
-  const icns = readFileSync(
-    new URL("../assets/icons/app-icon.icns", import.meta.url),
-  );
-  assert.equal(icns.subarray(0, 4).toString("ascii"), "icns");
 });
 
 test("Windows application icon is embedded and assigned to installed shortcuts", () => {
@@ -96,7 +90,7 @@ test("Windows application icon is embedded and assigned to installed shortcuts",
   assert.match(installer, /^UninstallDisplayIcon=.*app-icon\.ico$/mu);
   const shortcuts = installer
     .split(/\r?\n/u)
-    .filter((line) => line.startsWith("Name: \"{auto"));
+    .filter((line) => line.startsWith('Name: "{auto'));
   assert.equal(shortcuts.length, 2);
   for (const shortcut of shortcuts) {
     assert.match(shortcut, /IconFilename: "\{app\}\\app-icon\.ico"/u);
