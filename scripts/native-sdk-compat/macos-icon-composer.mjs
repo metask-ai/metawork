@@ -9,6 +9,7 @@ import {
   readdirSync,
   rmSync,
   statSync,
+  utimesSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -427,7 +428,10 @@ export function stageMacosAppIcon(artifact, appPath) {
   } catch {
     insertPlistString(plistPath, "CFBundleIconName", macosAppIconName);
   }
-  return verifyStagedMacosAppIcon(artifact, appPath);
+  const staged = verifyStagedMacosAppIcon(artifact, appPath);
+  const now = new Date();
+  utimesSync(appPath, now, now);
+  return staged;
 }
 
 export function verifyStagedMacosAppIcon(artifact, appPath) {

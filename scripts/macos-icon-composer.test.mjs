@@ -5,6 +5,8 @@ import {
   mkdirSync,
   readFileSync,
   rmSync,
+  statSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
@@ -158,10 +160,13 @@ test(
         outputPath: artifactRoot,
       };
 
+      const staleBundleTime = new Date("2000-01-01T00:00:00Z");
+      utimesSync(appPath, staleBundleTime, staleBundleTime);
       const staged = stageMacosAppIcon(artifact, appPath);
       assert.equal(path.basename(staged.assetCatalogPath), "Assets.car");
       assert.equal(path.basename(staged.fallbackIconPath), "MetaWork.icns");
       assert.equal(existsSync(path.join(resourcesPath, "AppIcon.icns")), false);
+      assert.ok(statSync(appPath).mtimeMs > staleBundleTime.getTime());
       assert.deepEqual(verifyStagedMacosAppIcon(artifact, appPath), staged);
       assert.equal(macosAppIconName, "MetaWork");
     } finally {
