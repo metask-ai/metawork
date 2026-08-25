@@ -26,6 +26,12 @@ pub const LiveAttachment = struct {
 
 pub const ClosingAttachment = struct {
     live: LiveAttachment,
+    /// Immutable main-thread routing fact retained until the closing Task has
+    /// drained every event that was queued before Agent close completed.
+    route_id: u64,
+    /// `beginClosing` moves the linear Session owner here. Only the close
+    /// worker may touch it until the main thread joins that worker.
+    worker_binding: agent_session.Binding,
 };
 
 pub const Attachment = union(enum) {
@@ -116,11 +122,6 @@ pub const State = struct {
         return value.binding.acquireAccess();
     }
 
-    pub fn acquireLiveAccess(self: *State) !agent_session.Access {
-        const value = self.live() orelse return error.SessionClosing;
-        return value.binding.acquireAccess();
-    }
-
     pub fn hasAttachedSession(self: *const State) bool {
         return self.attachedConst() != null;
     }
@@ -140,8 +141,11 @@ pub const State = struct {
     }
 
     pub fn routeId(self: *const State) u64 {
-        const value = self.liveConst() orelse return 0;
-        return value.binding.routeId();
+        return switch (self.attachment) {
+            .attached => |*value| value.binding.routeId(),
+            .closing => |*value| value.route_id,
+            .detached => 0,
+        };
     }
 
     pub fn pinnedCatalog(self: *State) ?*catalog_snapshot.Snapshot {
@@ -155,27 +159,75 @@ pub const State = struct {
     }
 
     pub fn beginClosing(self: *State) bool {
-        const value = switch (self.attachment) {
+        var value = switch (self.attachment) {
             .attached => |value| value,
             .detached, .closing => return false,
         };
-        self.attachment = .{ .closing = .{ .live = value } };
+        const route_id = value.binding.routeId();
+        const worker_binding = value.binding.take();
+        self.attachment = .{ .closing = .{
+            .live = value,
+            .route_id = route_id,
+            .worker_binding = worker_binding,
+        } };
         return true;
     }
 
+    /// Returns the close worker's exclusive owner slot. The main thread may
+    /// select its address before spawn, but must not read or mutate it again
+    /// until the close thread has been joined.
+    pub fn closingWorkerBinding(self: *State) ?*agent_session.Binding {
+        return switch (self.attachment) {
+            .closing => |*value| &value.worker_binding,
+            .detached, .attached => null,
+        };
+    }
+
+    /// Returns the binding that remains after a close worker has been joined.
+    /// Calling this while `close_thread` is live violates the ownership
+    /// contract; the composition layer owns that join precondition.
+    pub fn bindingAfterCloseJoin(self: *State) ?*agent_session.Binding {
+        return switch (self.attachment) {
+            .attached => |*value| &value.binding,
+            .closing => |*value| &value.worker_binding,
+            .detached => null,
+        };
+    }
+
+    /// Runtime shutdown is a terminal fence: after the joined Binding has
+    /// relinquished or abandoned its Session owner, no routing identity may
+    /// continue to describe this closing attachment as live.
+    pub fn clearClosingRouteAfterRuntimeShutdown(self: *State) void {
+        switch (self.attachment) {
+            .closing => |*value| value.route_id = 0,
+            .detached, .attached => {},
+        }
+    }
+
     pub fn restoreCloseFailure(self: *State, health: AttachedHealth) void {
-        var value = switch (self.attachment) {
-            .closing => |value| value.live,
+        var closing = switch (self.attachment) {
+            .closing => |value| value,
             .detached, .attached => unreachable,
         };
-        value.health = health;
-        self.attachment = .{ .attached = value };
+        closing.live.binding = closing.worker_binding.take();
+        closing.live.health = health;
+        self.attachment = .{ .attached = closing.live };
     }
 
     pub fn detach(self: *State, cause: DetachmentCause) LiveAttachment {
         const value = switch (self.attachment) {
             .attached => |value| value,
-            .closing => |value| value.live,
+            .closing => |value| closing: {
+                std.debug.assert(self.close_thread == null);
+                var closing_value = value;
+                switch (closing_value.worker_binding.state()) {
+                    .owned, .closed, .fixture => closing_value.live.binding =
+                        closing_value.worker_binding.take(),
+                    .released, .relinquished, .abandoned => {},
+                    .moved => unreachable,
+                }
+                break :closing closing_value.live;
+            },
             .detached => unreachable,
         };
         self.attachment = .{ .detached = cause };

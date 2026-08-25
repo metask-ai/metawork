@@ -898,6 +898,8 @@ test "Task aggregate separates Task runtime ownership from product history" {
     }
     try std.testing.expect(!@hasField(task_runtime.LiveAttachment, "session"));
     try std.testing.expect(!@hasField(task_runtime.LiveAttachment, "route_id"));
+    try std.testing.expect(@hasField(task_runtime.ClosingAttachment, "route_id"));
+    try std.testing.expect(@hasField(task_runtime.ClosingAttachment, "worker_binding"));
     try std.testing.expect(!@hasField(RuntimeAttachment, "lifecycle"));
     try std.testing.expect(!@hasField(RuntimeAttachment, "continuation"));
     try std.testing.expect(!@hasField(RuntimeAttachment, "deletion"));
@@ -4416,7 +4418,7 @@ pub const Workbench = struct {
             self.commitTaskStateNoFail();
             return .queued_aborted;
         } else {
-            var access = view.runtime.acquireLiveAccess() catch {
+            var access = view.runtime.acquireAccess() catch {
                 self.syncLifecycle();
                 return .session_closing;
             };
@@ -4587,7 +4589,7 @@ pub const Workbench = struct {
             cancelTaskCheckpoints(view);
             return error.TaskBusy;
         }
-        if (view.runtime.close_completion.load(.acquire) == .running) return error.CloseInProgress;
+        if (view.runtime.close_thread != null) return error.CloseInProgress;
         const retrying_closing_session = view.runtime.close_failed and
             view.runtime.hasClosingSession();
         if (view.runtime.live() == null) return false;
@@ -4607,7 +4609,7 @@ pub const Workbench = struct {
                 return error.NoSuchCompact;
             _ = self.cancelCompactRecord(view, compact, .session_close);
         }
-        var observation_access = view.runtime.acquireLiveAccess() catch null;
+        var observation_access = view.runtime.acquireAccess() catch null;
         defer if (observation_access) |*access| access.deinit();
         const cancelled_ui = if (view.runtime.pending_ui_request_id != 0 and
             observation_access != null)
@@ -4631,7 +4633,7 @@ pub const Workbench = struct {
         }
         if (!retrying_closing_session)
             std.debug.assert(view.runtime.beginClosing());
-        const binding = &view.runtime.live().?.binding;
+        const binding = view.runtime.closingWorkerBinding() orelse unreachable;
         view.runtime.cancel_requested = switch (view.runtime.active_operation) {
             .run => true,
             .none, .compact, .restore => false,
@@ -4642,7 +4644,7 @@ pub const Workbench = struct {
         view.runtime.close_failed = false;
         view.runtime.close_completion.store(.running, .release);
         view.runtime.close_thread = std.Thread.spawn(.{}, closeWorker, .{
-            view,
+            &view.runtime.close_completion,
             binding,
             self.change_notifier,
         }) catch |err| {
@@ -5011,6 +5013,9 @@ pub const Workbench = struct {
                 view.runtime.close_completion.store(.none, .release);
                 switch (close_completion) {
                     .closed => {
+                        std.debug.assert(
+                            view.runtime.closingWorkerBinding().?.state() == .released,
+                        );
                         var live = view.runtime.detach(.released);
                         self.releaseExecutionValueNoFail(view, &live.execution);
                         if (live.pinned_catalog) |*snapshot| {
@@ -7205,7 +7210,10 @@ pub const Workbench = struct {
         self.markSkillCatalogUnavailable();
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
-            if (task.runtime.close_thread) |thread| thread.join();
+            if (task.runtime.close_thread) |thread| {
+                thread.join();
+                task.runtime.close_thread = null;
+            }
             self.deinitTaskView(task);
             entry.* = null;
         }
@@ -7299,12 +7307,16 @@ pub const Workbench = struct {
         std.debug.assert(self.executor_shutdown);
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
-            std.debug.assert(task.runtime.close_thread == null);
-            const live = task.runtime.live() orelse continue;
-            switch (live.binding.state()) {
-                .owned, .closed => live.binding.relinquishAfterRuntimeShutdown(),
+            if (task.runtime.close_thread) |thread| {
+                thread.join();
+                task.runtime.close_thread = null;
+            }
+            const binding = task.runtime.bindingAfterCloseJoin() orelse continue;
+            switch (binding.state()) {
+                .owned, .closed => binding.relinquishAfterRuntimeShutdown(),
                 .released, .relinquished, .moved, .fixture, .abandoned => {},
             }
+            task.runtime.clearClosingRouteAfterRuntimeShutdown();
         }
         self.agent_runtime_shutdown_complete = true;
     }
@@ -7317,11 +7329,12 @@ pub const Workbench = struct {
                 thread.join();
                 task.runtime.close_thread = null;
             }
-            const live = task.runtime.live() orelse continue;
-            switch (live.binding.state()) {
-                .owned, .closed => live.binding.abandonForRuntimeDeinit(),
+            const binding = task.runtime.bindingAfterCloseJoin() orelse continue;
+            switch (binding.state()) {
+                .owned, .closed => binding.abandonForRuntimeDeinit(),
                 .released, .relinquished, .moved, .fixture, .abandoned => {},
             }
+            task.runtime.clearClosingRouteAfterRuntimeShutdown();
         }
         self.agent_runtime_shutdown_complete = true;
     }
@@ -11320,7 +11333,7 @@ pub const Workbench = struct {
 };
 
 fn closeWorker(
-    view: *TaskView,
+    completion_out: *std.atomic.Value(CloseCompletion),
     binding: *task_agent_session.Binding,
     notifier: ChangeNotifier,
 ) void {
@@ -11341,7 +11354,7 @@ fn closeWorker(
             break :close .failed_closing;
         break :close .closed;
     };
-    view.runtime.close_completion.store(completion, .release);
+    completion_out.store(completion, .release);
     _ = notifier.notify();
 }
 
@@ -16452,17 +16465,27 @@ test "event drain barrier atomically publishes terminal product state" {
 
 test "close and delete wait for terminal event drain" {
     const Harness = struct {
-        fn complete() void {}
+        fn complete(
+            binding: *task_agent_session.Binding,
+            completion: *std.atomic.Value(CloseCompletion),
+        ) void {
+            binding.markReleasedForTest();
+            completion.store(.closed, .release);
+        }
     };
 
     var workbench = try testWorkbench();
     defer workbench.deinit();
     const task = &workbench.tasks[0].?;
     const run = &task.durable.runs[0].?;
+    const route_id = task.runtime.routeId();
     try std.testing.expect(task.runtime.beginClosing());
     task.durable.archived = true;
-    task.runtime.close_thread = try std.Thread.spawn(.{}, Harness.complete, .{});
-    task.runtime.close_completion.store(.closed, .release);
+    task.runtime.close_completion.store(.running, .release);
+    task.runtime.close_thread = try std.Thread.spawn(.{}, Harness.complete, .{
+        task.runtime.closingWorkerBinding().?,
+        &task.runtime.close_completion,
+    });
     try std.testing.expect(commitTerminal(
         run,
         .interrupted,
@@ -16473,9 +16496,19 @@ test "close and delete wait for terminal event drain" {
         false,
     ));
 
+    for (0..10_000) |_| {
+        if (task.runtime.close_completion.load(.acquire) == .closed) break;
+        std.Thread.yield() catch {};
+    }
+    try std.testing.expectEqual(
+        CloseCompletion.closed,
+        task.runtime.close_completion.load(.acquire),
+    );
+
     workbench.syncLifecycle();
     try std.testing.expectEqual(TaskLifecycle.closing, taskLifecycle(task));
     try std.testing.expect(task.runtime.close_thread != null);
+    try std.testing.expectEqual(route_id, task.runtime.routeId());
     try workbench.deleteTask(3);
 
     var queued_event = try testEnvelope(3, 7, "{\"text_chunk\":\"queued before terminal\"}");
@@ -16488,6 +16521,45 @@ test "close and delete wait for terminal event drain" {
     var late_event = try testEnvelope(3, 7, "{\"text_chunk\":\"late\"}");
     defer late_event.deinit();
     try std.testing.expectError(error.UnknownTask, workbench.applyEvent(&late_event));
+}
+
+test "Runtime shutdown joins a flying close owner before relinquish" {
+    const Harness = struct {
+        fn close(
+            binding: *task_agent_session.Binding,
+            completion: *std.atomic.Value(CloseCompletion),
+        ) void {
+            for (0..128) |_| std.Thread.yield() catch {};
+            binding.markClosedForTest();
+            completion.store(.failed_closing, .release);
+        }
+    };
+
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    const task = &workbench.tasks[0].?;
+    const route_id = task.runtime.routeId();
+    try std.testing.expect(task.runtime.beginClosing());
+    task.runtime.close_completion.store(.running, .release);
+    task.runtime.close_thread = try std.Thread.spawn(.{}, Harness.close, .{
+        task.runtime.closingWorkerBinding().?,
+        &task.runtime.close_completion,
+    });
+    workbench.executor_shutdown = true;
+
+    workbench.relinquishAgentSessionsAfterRuntimeShutdown();
+
+    try std.testing.expect(task.runtime.close_thread == null);
+    try std.testing.expect(route_id != 0);
+    try std.testing.expectEqual(@as(u64, 0), task.runtime.routeId());
+    try std.testing.expectEqual(
+        task_agent_session.BindingState.relinquished,
+        task.runtime.bindingAfterCloseJoin().?.state(),
+    );
+    try std.testing.expectError(
+        error.SessionClosing,
+        task.runtime.acquireAccess(),
+    );
 }
 
 test "streaming projection escaping is allocation-free JSON with redaction" {

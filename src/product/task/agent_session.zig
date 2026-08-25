@@ -79,6 +79,19 @@ pub const Binding = struct {
         };
     }
 
+    pub fn markClosedForTest(self: *Binding) void {
+        std.debug.assert(@import("builtin").is_test);
+        std.debug.assert(self.binding_state == .fixture);
+        self.binding_state = .closed;
+    }
+
+    pub fn markReleasedForTest(self: *Binding) void {
+        std.debug.assert(@import("builtin").is_test);
+        std.debug.assert(self.binding_state == .fixture);
+        self.route_id = 0;
+        self.binding_state = .released;
+    }
+
     pub fn acquireAccess(self: *Binding) error{
         SessionClosing,
         RuntimeShuttingDown,

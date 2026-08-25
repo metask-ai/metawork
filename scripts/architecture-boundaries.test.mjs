@@ -483,7 +483,22 @@ test("Product Task kernels have one physical home without taking the executor", 
     /\*(?:agent|lifecycle)\.Session|(?:agent|lifecycle)\.SessionRoute|(?:agent|lifecycle)\.SessionRestoreRoute/,
   );
   assert.match(taskRuntime, /binding: agent_session\.Binding/);
-  assert.doesNotMatch(taskRuntime, /session: \*agent\.Session|route_id: u64/);
+  assert.doesNotMatch(taskRuntime, /session: \*agent\.Session/);
+  const liveAttachment = taskRuntime.match(
+    /pub const LiveAttachment = struct \{[\s\S]*?\n\};/,
+  )?.[0];
+  assert.ok(liveAttachment, "Task LiveAttachment must remain explicit");
+  assert.doesNotMatch(liveAttachment, /route_id: u64/);
+  assert.match(
+    taskRuntime,
+    /pub const ClosingAttachment = struct \{[\s\S]*?route_id: u64,[\s\S]*?worker_binding: agent_session\.Binding,[\s\S]*?\n\};/,
+  );
+  assert.match(taskRuntime, /const worker_binding = value\.binding\.take\(\);/);
+  assert.match(taskRuntime, /\.closing => \|\*value\| value\.route_id/);
+  assert.match(
+    taskRuntime,
+    /\.closing => \|value\| closing: \{[\s\S]*?std\.debug\.assert\(self\.close_thread == null\);[\s\S]*?\.owned, \.closed, \.fixture => closing_value\.live\.binding =[\s\S]*?closing_value\.worker_binding\.take\(\)/,
+  );
   assert.doesNotMatch(
     recoveryJob,
     /route: agent\.SessionRestoreRoute|candidate\.route/,
