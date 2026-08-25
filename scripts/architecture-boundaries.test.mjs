@@ -389,8 +389,13 @@ test("Product Skill has one live owner behind narrow composition ports", () => {
   );
   assert.match(
     projection,
-    /pub fn readSkillDefinition[\s\S]*?self\.skill\.definitionScope\(install_id\)[\s\S]*?return self\.skill\.readDefinition\(install_id, &root\);[\s\S]*?pub fn exportSkill[\s\S]*?self\.skill\.exportScope\(install_id\)[\s\S]*?return self\.skill\.exportPackage\(install_id, &root, absolute_destination\);/,
+    /pub fn readSkillDefinition[\s\S]*?requireSkillAssetAuthority\(try self\.skill\.assetScope\(install_id\)\)[\s\S]*?return self\.skill\.readDefinition\(install_id\);[\s\S]*?pub fn exportSkill[\s\S]*?requireSkillAssetAuthority\(try self\.skill\.assetScope\(install_id\)\)[\s\S]*?return self\.skill\.exportPackage\(install_id, absolute_destination\);/,
   );
+  assert.doesNotMatch(
+    projection,
+    /fn openSkillRoot|skill_runtime\.CanonicalRoot|\.skill\.(?:definitionScope|exportScope|mutationScope)\(/,
+  );
+  assert.doesNotMatch(runtime, /pub const CanonicalRoot/);
   assert.doesNotMatch(
     projection,
     /const CatalogJob = struct|fn scheduleCatalogQuery|fn scheduleSkillCatalogQuery|fn commitCatalogJobsNoFail|fn commitSkillEnablementCandidate|fn noteSkillEnablementPersistenceFailure|fn installSkillSource|fn reimportSkillSource|fn scheduleSkillReconciliation|fn noteSkillPersistenceFailure|fn reconcileSkillCatalogResultNoFail|skill_package_impl\.(?:previewDirectory|inspectDirectory|inspectArchive|extractArchive|exportArchive)|\.skill\.state\.(?:transactions|staging_root)|\.skill\.state\.enablement_(?:store|health|file_store)/,

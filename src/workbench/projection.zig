@@ -1942,7 +1942,7 @@ pub const Workbench = struct {
         expected_invocation_name: []const u8,
         expected_content_hash: skill_runtime.ContentHash,
     ) Error!SkillMutationResult {
-        const scope = try self.skill.mutationScope(install_id);
+        const scope = try self.skill.assetScope(install_id);
         try self.requireSkillMutationAuthority(scope);
         const result = try self.skill.reimportDirectory(
             install_id,
@@ -1961,7 +1961,7 @@ pub const Workbench = struct {
         expected_invocation_name: []const u8,
         expected_content_hash: skill_runtime.ContentHash,
     ) Error!SkillMutationResult {
-        const scope = try self.skill.mutationScope(install_id);
+        const scope = try self.skill.assetScope(install_id);
         try self.requireSkillMutationAuthority(scope);
         const result = try self.skill.reimportArchive(
             install_id,
@@ -1977,7 +1977,7 @@ pub const Workbench = struct {
         self: *Workbench,
         install_id: skill_runtime.InstallId,
     ) Error!SkillMutationResult {
-        const scope = try self.skill.mutationScope(install_id);
+        const scope = try self.skill.assetScope(install_id);
         try self.requireSkillMutationAuthority(scope);
         const result = try self.skill.uninstall(
             install_id,
@@ -1991,7 +1991,7 @@ pub const Workbench = struct {
         self: *Workbench,
         install_id: skill_runtime.InstallId,
     ) Error!SkillMutationResult {
-        const scope = try self.skill.mutationScope(install_id);
+        const scope = try self.skill.assetScope(install_id);
         try self.requireSkillMutationAuthority(scope);
         const result = try self.skill.retryVerification(install_id);
         self.bumpRevision();
@@ -2001,20 +2001,16 @@ pub const Workbench = struct {
         self: *Workbench,
         install_id: skill_runtime.InstallId,
     ) Error!skill_runtime.Preview {
-        const scope = try self.skill.definitionScope(install_id);
-        var root = try self.openSkillRoot(scope);
-        defer root.deinit();
-        return self.skill.readDefinition(install_id, &root);
+        try self.requireSkillAssetAuthority(try self.skill.assetScope(install_id));
+        return self.skill.readDefinition(install_id);
     }
     pub fn exportSkill(
         self: *Workbench,
         install_id: skill_runtime.InstallId,
         absolute_destination: []const u8,
     ) Error!SkillExportResult {
-        const scope = try self.skill.exportScope(install_id);
-        var root = try self.openSkillRoot(scope);
-        defer root.deinit();
-        return self.skill.exportPackage(install_id, &root, absolute_destination);
+        try self.requireSkillAssetAuthority(try self.skill.assetScope(install_id));
+        return self.skill.exportPackage(install_id, absolute_destination);
     }
     pub fn automaticWorkspacesAvailable(self: *const Workbench) bool {
         return self.automatic_workspaces != null;
@@ -8258,14 +8254,16 @@ pub const Workbench = struct {
         }
     }
 
-    fn openSkillRoot(
+    fn requireSkillAssetAuthority(
         self: *Workbench,
         scope: skill_runtime.ManagementScope,
-    ) Error!skill_runtime.CanonicalRoot {
-        const base = switch (scope) {
-            .personal => self.canonical_user_home orelse
+    ) Error!void {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        self.syncLifecycle();
+        switch (scope) {
+            .personal => if (self.canonical_user_home == null)
                 return error.WorkspaceUnavailable,
-            .project => |project| project_root: {
+            .project => |project| {
                 const workspace = self.findWorkspace(project.workspace_id) orelse
                     return error.UnknownWorkspace;
                 if (workspace.epoch != project.workspace_epoch)
@@ -8273,20 +8271,8 @@ pub const Workbench = struct {
                 if (workspace.kind != .manual or !workspace.visible or
                     workspace.authorization != .available)
                     return error.WorkspaceUnavailable;
-                break :project_root workspace.canonical_root;
             },
-        };
-        const root_path = try std.fs.path.join(
-            self.allocator,
-            &.{ base, ".agents", "skills" },
-        );
-        defer self.allocator.free(root_path);
-        return skill_runtime.CanonicalRoot.open(
-            self.io,
-            self.allocator,
-            scope,
-            root_path,
-        );
+        }
     }
 
     fn skillEnablementWorkspace(

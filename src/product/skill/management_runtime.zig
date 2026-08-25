@@ -92,12 +92,13 @@ pub fn previewArchive(
 pub fn readDefinition(
     context: Context,
     install_id: management.InstallId,
-    root: *const management.CanonicalRoot,
+    canonical_base: []const u8,
 ) Error!package.Preview {
     const current = context.state.inventoryConst().findConst(install_id) orelse
         return error.AssetNotFound;
-    if (current.recovery != null or !current.scope.eql(root.scope))
-        return error.InvalidAsset;
+    if (current.recovery != null) return error.InvalidAsset;
+    var root = try openManagedRoot(context, current.scope, canonical_base);
+    defer root.deinit();
     const source = root.dir.openDir(
         context.io,
         current.target_entry,
@@ -110,7 +111,7 @@ pub fn readDefinition(
 pub fn exportPackage(
     context: Context,
     install_id: management.InstallId,
-    root: *const management.CanonicalRoot,
+    canonical_base: []const u8,
     absolute_destination: []const u8,
 ) Error!state.ExportResult {
     if (!std.fs.path.isAbsolute(absolute_destination) or
@@ -118,9 +119,10 @@ pub fn exportPackage(
         return error.InvalidAsset;
     const current = context.state.inventoryConst().findConst(install_id) orelse
         return error.AssetNotFound;
-    if (current.state != .ready or current.recovery != null or
-        !current.scope.eql(root.scope))
+    if (current.state != .ready or current.recovery != null)
         return error.InvalidAsset;
+    var root = try openManagedRoot(context, current.scope, canonical_base);
+    defer root.deinit();
     const source = root.dir.openDir(
         context.io,
         current.target_entry,

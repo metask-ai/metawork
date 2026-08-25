@@ -32,7 +32,6 @@ pub const ManagementScope = management.Scope;
 pub const SourceKind = management.SourceKind;
 pub const InstallId = management.InstallId;
 pub const ContentHash = management.ContentHash;
-pub const CanonicalRoot = management.CanonicalRoot;
 pub const Preview = package.Preview;
 pub const TextProjection = view.TextProjection;
 pub const ScopedCatalog = view.ScopedCatalog;
@@ -73,7 +72,9 @@ pub const EnablementError = enablement.Error || enablement.FileStoreError || cat
 
 pub const PackageError = management_runtime.Error;
 
-pub const MutationError = PackageError || Error || error{TaskBusy};
+pub const AssetError = PackageError || Error;
+
+pub const MutationError = AssetError || error{TaskBusy};
 
 pub const Scope = union(enum) {
     personal,
@@ -577,10 +578,10 @@ pub const Runtime = struct {
         });
     }
 
-    pub fn mutationScope(
+    pub fn assetScope(
         self: *const Runtime,
         install_id: management.InstallId,
-    ) MutationError!management.Scope {
+    ) AssetError!management.Scope {
         const current = self.state.inventoryConst().findConst(install_id) orelse
             return error.AssetNotFound;
         return current.scope;
@@ -605,50 +606,27 @@ pub const Runtime = struct {
     pub fn readDefinition(
         self: *Runtime,
         install_id: management.InstallId,
-        root: *const management.CanonicalRoot,
-    ) PackageError!package.Preview {
+    ) AssetError!package.Preview {
         try self.requireManagementReady();
+        const scope = try self.assetScope(install_id);
         return management_runtime.readDefinition(
             self.managementContext(),
             install_id,
-            root,
+            try self.canonicalBase(scope),
         );
-    }
-
-    pub fn definitionScope(
-        self: *const Runtime,
-        install_id: management.InstallId,
-    ) PackageError!management.Scope {
-        try self.requireManagementReady();
-        const current = self.state.inventoryConst().findConst(install_id) orelse
-            return error.AssetNotFound;
-        if (current.recovery != null) return error.InvalidAsset;
-        return current.scope;
-    }
-
-    pub fn exportScope(
-        self: *const Runtime,
-        install_id: management.InstallId,
-    ) PackageError!management.Scope {
-        try self.requireManagementReady();
-        const current = self.state.inventoryConst().findConst(install_id) orelse
-            return error.AssetNotFound;
-        if (current.state != .ready or current.recovery != null)
-            return error.InvalidAsset;
-        return current.scope;
     }
 
     pub fn exportPackage(
         self: *Runtime,
         install_id: management.InstallId,
-        root: *const management.CanonicalRoot,
         absolute_destination: []const u8,
-    ) PackageError!state.ExportResult {
+    ) AssetError!state.ExportResult {
         try self.requireManagementReady();
+        const scope = try self.assetScope(install_id);
         return management_runtime.exportPackage(
             self.managementContext(),
             install_id,
-            root,
+            try self.canonicalBase(scope),
             absolute_destination,
         );
     }
@@ -700,7 +678,7 @@ pub const Runtime = struct {
         expected_invocation_name: []const u8,
         expected_content_hash: management.ContentHash,
     ) MutationError!state.MutationResult {
-        const scope = try self.mutationScope(install_id);
+        const scope = try self.assetScope(install_id);
         try self.requireMutationAvailable(scope);
         const result = try management_runtime.reimportDirectory(
             self.managementContext(),
@@ -723,7 +701,7 @@ pub const Runtime = struct {
         expected_invocation_name: []const u8,
         expected_content_hash: management.ContentHash,
     ) MutationError!state.MutationResult {
-        const scope = try self.mutationScope(install_id);
+        const scope = try self.assetScope(install_id);
         try self.requireMutationAvailable(scope);
         const result = try management_runtime.reimportArchive(
             self.managementContext(),
@@ -744,7 +722,7 @@ pub const Runtime = struct {
         install_id: management.InstallId,
         now_unix_seconds: ?u64,
     ) MutationError!state.MutationResult {
-        const scope = try self.mutationScope(install_id);
+        const scope = try self.assetScope(install_id);
         try self.requireMutationAvailable(scope);
         const result = try management_runtime.uninstall(
             self.managementContext(),
@@ -762,7 +740,7 @@ pub const Runtime = struct {
         self: *Runtime,
         install_id: management.InstallId,
     ) MutationError!state.MutationResult {
-        const scope = try self.mutationScope(install_id);
+        const scope = try self.assetScope(install_id);
         try self.requireMutationAvailable(scope);
         const result = try management_runtime.retryVerification(
             self.managementContext(),
@@ -1160,7 +1138,7 @@ pub const Runtime = struct {
     fn canonicalBase(
         self: *const Runtime,
         scope: management.Scope,
-    ) MutationError![]const u8 {
+    ) AssetError![]const u8 {
         return switch (scope) {
             .personal => self.canonical_user_home orelse error.CatalogUnavailable,
             .project => |project| root: {
@@ -1586,6 +1564,98 @@ test "management mutation and failed catalog reconciliation stay inside Runtime"
     try std.testing.expect(runtime.state.inventoryConst().findConst(installed.install_id) == null);
     harness.runQueued();
     _ = runtime.sync(harness.budget(), test_snapshot_limits, 104);
+}
+
+test "installed definition read and export resolve managed root inside Runtime" {
+    var harness: TestHarness = .{};
+    var home = std.testing.tmpDir(.{});
+    defer home.cleanup();
+    try home.dir.createDir(std.testing.io, ".agents", .default_dir);
+    const agents = try home.dir.openDir(std.testing.io, ".agents", .{});
+    defer agents.close(std.testing.io);
+    try agents.createDir(std.testing.io, "skills", .default_dir);
+    const skills = try agents.openDir(std.testing.io, "skills", .{});
+    defer skills.close(std.testing.io);
+    try skills.createDir(std.testing.io, "demo", .default_dir);
+    try skills.writeFile(std.testing.io, .{
+        .sub_path = "demo/SKILL.md",
+        .data = "---\nname: demo\ndescription: Demo\n---\n",
+    });
+
+    const install_id: management.InstallId = @splat(0x2a);
+    var inventory = management.Inventory.init(
+        std.testing.allocator,
+        .{ .max_assets = 4 },
+    );
+    defer inventory.deinit();
+    _ = try inventory.add(.{
+        .install_id = install_id,
+        .source_kind = .external,
+        .scope = .personal,
+        .target_entry = "demo",
+        .content_hash = @splat(0x17),
+        .installed_at_unix_seconds = 100,
+    });
+    const restored_storage = try std.testing.allocator.alloc(
+        u8,
+        management.max_store_bytes,
+    );
+    defer std.testing.allocator.free(restored_storage);
+    const restored = try management.encode(restored_storage, &inventory);
+
+    var persistence_dir = std.testing.tmpDir(.{});
+    defer persistence_dir.cleanup();
+    var persistence: management.FileStore = .{
+        .io = std.testing.io,
+        .dir = persistence_dir.dir,
+    };
+    var staging = std.testing.tmpDir(.{});
+    defer staging.cleanup();
+    var export_dir = std.testing.tmpDir(.{});
+    defer export_dir.cleanup();
+    var home_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home_len = try home.dir.realPath(std.testing.io, &home_storage);
+    var staging_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const staging_len = try staging.dir.realPath(std.testing.io, &staging_storage);
+    var export_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const export_len = try export_dir.dir.realPath(std.testing.io, &export_storage);
+
+    var runtime = try Runtime.init(
+        std.testing.io,
+        std.testing.allocator,
+        harness.effectPorts(),
+        .{
+            .state = .{ .management = .{
+                .file_store = &persistence,
+                .staging_root = staging_storage[0..staging_len],
+                .restored_bytes = restored,
+            } },
+            .max_workspaces = 1,
+            .canonical_user_home = home_storage[0..home_len],
+        },
+        .{
+            .max_assets = 4,
+            .max_workspaces = 1,
+            .max_policy_keys = 4,
+            .max_policy_key_bytes = 64,
+        },
+    );
+    defer runtime.deinit();
+
+    var preview = try runtime.readDefinition(install_id);
+    defer preview.deinit();
+    try std.testing.expectEqualStrings("demo", preview.invocation_name);
+    const exported = try runtime.exportPackage(
+        install_id,
+        export_storage[0..export_len],
+    );
+    try std.testing.expectEqualStrings("demo.skill", exported.fileName());
+    const exported_stat = try export_dir.dir.statFile(
+        std.testing.io,
+        exported.fileName(),
+        .{ .follow_symlinks = false },
+    );
+    try std.testing.expectEqual(std.Io.File.Kind.file, exported_stat.kind);
 }
 
 test "catalog job failure is committed by the Product Skill owner" {

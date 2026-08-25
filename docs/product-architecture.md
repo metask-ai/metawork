@@ -150,7 +150,7 @@ Personal mutation 在任一可能消费 personal catalog 的 Task 存在 active 
 
 Skill management persistence 是 Product Skill-owned、无 secret、原子 candidate commit 的独立 schema 1 store。记录仅保存 `install_id`、source kind、目标 scope/workspace identity、Host-only target entry、content hash、安装/重新导入时间、management state 与未完成 transaction recovery facts；不保存 Skill body、raw path 到 Renderer、catalog handle、credential 或 Task binding。当前仍处于 pre-release，schema 原地 hard cut，不解析、双写或迁移被替代的开发 shape。对应 wire 与 transport 只由 [Renderer Bridge 合同](renderer-bridge-contract.md)定义。
 
-Product Skill Runtime 同时拥有本地 package 与 management 用例。内部 `management_runtime.zig` 对任意选取路径执行有界目录/归档 preview，对 inventory 中已安装资产执行 definition 读取与 canonical `.skill` 导出，并闭合 install/reimport/uninstall/retry、staging、persistence failure、启动恢复和 catalog reconciliation。Workbench 只证明 scope 对应 Workspace authority 与相关 Task quiescence、提供当前时间事实并在成功后发布 revision；资产身份、健康门槛、canonical root、目标 entry、package 资源约束、文件事务与 reconciliation 决策都由 Product Skill 决定。平台 picker 仍只返回用户选择，不取得产品判断权。
+Product Skill Runtime 同时拥有本地 package 与 management 用例。内部 `management_runtime.zig` 对任意选取路径执行有界目录/归档 preview，对 inventory 中已安装资产执行 definition 读取与 canonical `.skill` 导出，并闭合 install/reimport/uninstall/retry、staging、persistence failure、启动恢复和 catalog reconciliation。Runtime 根据已注册的 Personal/Workspace canonical binding 自行拼接、验证和打开 `.agents/skills`，不把 `CanonicalRoot` 或目录布局暴露给 Workbench。Workbench 只证明 scope 对应 Workspace authority 与相关 Task quiescence、提供当前时间事实并在成功后发布 revision；资产身份、健康门槛、canonical root、目标 entry、package 资源约束、文件事务与 reconciliation 决策都由 Product Skill 决定。平台 picker 仍只返回用户选择，不取得产品判断权。
 
 ### 2.5 Identity 与 credential redaction
 

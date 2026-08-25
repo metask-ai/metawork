@@ -98,7 +98,7 @@ MCP 不形成第五个 Product owner。`src/product/mcp*` 只是 Workbench 持�
 
 `product/skill.zig` 只公开 live Runtime、ports、catalog 以及 Application/Bridge 需要直接消费的 enablement/management 持久化与 data-only 叶面。package、policy、state、view 与 management runtime 都是 Runtime 背后的内部实现，不允许 Workbench 直接拼装或读取内部 state。Catalog slot/control、generation 与可变 snapshot 不得越过 Runtime；Task admission、refresh 与 recovery 只能借用 Runtime 发布的 immutable typed authority，credential redaction 与 uninitialized refresh 判断也必须由 Runtime 原位执行。
 
-Product Skill 的本地资产用例也属于该 live aggregate：`management_runtime.zig` 在总 Runtime 内部独占目录/归档 preview、已安装 definition 读取、canonical `.skill` 导出、install/reimport/uninstall/retry、staging、恢复和 catalog reconciliation，并调用唯一 package/management kernels；总 Runtime 只协调 catalog refresh，Workbench 仅证明 Workspace authority 与 Task quiescence、传入时间事实并发布 revision，不解释 package bytes 或执行 Transactions。
+Product Skill 的本地资产用例也属于该 live aggregate：`management_runtime.zig` 在总 Runtime 内部独占目录/归档 preview、已安装 definition 读取、canonical `.skill` 导出、install/reimport/uninstall/retry、staging、恢复和 catalog reconciliation，并调用唯一 package/management kernels；总 Runtime 根据其持有的 canonical Personal/Workspace binding 解析并打开 `.agents/skills`，不向 Workbench 发布 `CanonicalRoot`。Workbench 仅证明 Workspace authority 与 Task quiescence、传入时间事实并发布 revision，不解释 package bytes、拼接 Skill 物理路径或执行 Transactions。
 
 ### 3.4 Agent 与 AgentCore
 
