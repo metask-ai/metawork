@@ -1062,6 +1062,17 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     });
     task_runtime.addImport("product_task_state", task_state);
     task_runtime.addImport("product_task_persistence", task_persistence);
+    task_runtime.addImport("metawork_agent", agent);
+    task_runtime.addImport("metawork_account_contract", account_contract);
+    task_runtime.addImport("product_task_policy", task_policy);
+    task_runtime.addImport("metawork_product_skill", product_skill);
+    task_runtime.addImport("product_task_recovery_job", task_recovery_job);
+    task_runtime.addImport("product_task_checkpoint_store", checkpoint_store);
+    task_runtime.addImport("product_task_attachment", task_attachment);
+    task_runtime.addImport("product_task_deletion", task_deletion);
+    task_runtime.addImport("product_task_recovery", task_recovery);
+    task_runtime.addImport("product_task_agent_session", task_agent_session);
+    task_runtime.addImport("product_task_execution_binding", owned_task_execution);
     const task_execution = b.createModule(.{
         .root_source_file = b.path("src/product/task/execution.zig"),
         .target = target,
@@ -1074,6 +1085,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     task_execution.addImport("product_task_agent_session", task_agent_session);
     task_execution.addImport("product_task_state", task_state);
     task_execution.addImport("product_task_policy", task_policy);
+    task_runtime.addImport("product_task_execution", task_execution);
     const task_view = b.createModule(.{
         .root_source_file = b.path("src/product/task/view.zig"),
         .target = target,
@@ -1084,21 +1096,19 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     task_view.addImport("product_task_state", task_state);
     task_view.addImport("product_task_policy", task_policy);
     task_view.addImport("product_task_recovery", task_recovery);
+    task_runtime.addImport("product_task_view", task_view);
     const product_task = b.createModule(.{
         .root_source_file = b.path("src/product/task.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     product_task.addImport("product_task_persistence", task_persistence);
-    product_task.addImport("product_task_checkpoint_record", checkpoint_record);
     product_task.addImport("product_task_checkpoint_store", checkpoint_store);
     product_task.addImport("product_task_execution_binding", owned_task_execution);
     product_task.addImport("product_task_agent_session", task_agent_session);
     product_task.addImport("product_task_attachment", task_attachment);
     product_task.addImport("product_task_runtime", task_runtime);
     product_task.addImport("product_task_deletion", task_deletion);
-    product_task.addImport("product_task_recovery", task_recovery);
-    product_task.addImport("product_task_recovery_job", task_recovery_job);
     product_task.addImport("product_task_state", task_state);
     product_task.addImport("product_task_policy", task_policy);
     product_task.addImport("product_task_execution", task_execution);

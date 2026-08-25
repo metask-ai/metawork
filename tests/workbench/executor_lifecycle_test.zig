@@ -27,7 +27,7 @@ const ShutdownContext = struct {
 };
 
 const BindingCloseContext = struct {
-    binding: *product_task.agent_session.Binding,
+    binding: *product_task.testing.SessionBinding,
     finished: std.atomic.Value(bool) = .init(false),
 
     fn run(self: *@This()) void {
@@ -67,7 +67,7 @@ test "Task Session Binding close waits for Access quiescence and returns its Run
         deinitTestComposition(runtime);
     }
 
-    var binding = try product_task.agent_session.Binding.open(
+    var binding = try product_task.testing.SessionBinding.open(
         runtime,
         taskSessionOpenOptions(),
     );
@@ -105,12 +105,12 @@ test "Task Session Binding close waits for Access quiescence and returns its Run
     close_thread_live = false;
     try std.testing.expect(context.finished.load(.acquire));
     try std.testing.expectEqual(
-        product_task.agent_session.BindingState.closed,
+        product_task.testing.SessionBindingState.closed,
         binding.state(),
     );
     try binding.releaseClosed();
 
-    var replacement = try product_task.agent_session.Binding.open(
+    var replacement = try product_task.testing.SessionBinding.open(
         runtime,
         taskSessionOpenOptions(),
     );
@@ -134,7 +134,7 @@ test "Task Session Binding is terminal after Runtime shutdown relinquish" {
         deinitTestComposition(runtime);
     }
 
-    var binding = try product_task.agent_session.Binding.open(
+    var binding = try product_task.testing.SessionBinding.open(
         runtime,
         taskSessionOpenOptions(),
     );
@@ -143,7 +143,7 @@ test "Task Session Binding is terminal after Runtime shutdown relinquish" {
     binding.relinquishAfterRuntimeShutdown();
 
     try std.testing.expectEqual(
-        product_task.agent_session.BindingState.relinquished,
+        product_task.testing.SessionBindingState.relinquished,
         binding.state(),
     );
     try std.testing.expectEqual(@as(u64, 0), binding.routeId());
@@ -151,12 +151,12 @@ test "Task Session Binding is terminal after Runtime shutdown relinquish" {
 }
 
 const TaskPersistenceProbe = struct {
-    result: product_task.persistence.Commit = .committed,
+    result: product_task.history.Commit = .committed,
     storage: ?[]u8 = null,
     len: usize = 0,
     commits: usize = 0,
 
-    fn commit(context: ?*anyopaque, bytes: []const u8) product_task.persistence.Commit {
+    fn commit(context: ?*anyopaque, bytes: []const u8) product_task.history.Commit {
         const self: *@This() = @ptrCast(@alignCast(context.?));
         self.commits += 1;
         if (self.result == .committed) if (self.storage) |storage| {
@@ -167,7 +167,7 @@ const TaskPersistenceProbe = struct {
         return self.result;
     }
 
-    fn capability(self: *@This()) product_task.persistence.Capability {
+    fn capability(self: *@This()) product_task.history.Capability {
         return .{
             .context = self,
             .enabled = true,
@@ -178,7 +178,7 @@ const TaskPersistenceProbe = struct {
     fn capabilityRestored(
         self: *@This(),
         restored_bytes: []const u8,
-    ) product_task.persistence.Capability {
+    ) product_task.history.Capability {
         var result = self.capability();
         result.restored_bytes = restored_bytes;
         return result;
@@ -373,7 +373,7 @@ test "Run checkpoint commits immutable blob before durable descriptor" {
     defer checkpoint_store.deinit();
     const persistence_storage = try std.testing.allocator.alloc(
         u8,
-        product_task.persistence.max_store_bytes,
+        product_task.history.max_store_bytes,
     );
     defer std.testing.allocator.free(persistence_storage);
     var persistence = TaskPersistenceProbe{ .storage = persistence_storage };
@@ -572,7 +572,7 @@ test "restart restores a Task attachment and continues the same Conversation" {
     defer skill_enablement_store.deinit();
     const persistence_storage = try std.testing.allocator.alloc(
         u8,
-        product_task.persistence.max_store_bytes,
+        product_task.history.max_store_bytes,
     );
     defer std.testing.allocator.free(persistence_storage);
     var persistence = TaskPersistenceProbe{ .storage = persistence_storage };
@@ -879,7 +879,7 @@ test "accepted Task deletion advances after checkpoint quiescence without a seco
     defer checkpoint_store.deinit();
     const persistence_storage = try std.testing.allocator.alloc(
         u8,
-        product_task.persistence.max_store_bytes,
+        product_task.history.max_store_bytes,
     );
     defer std.testing.allocator.free(persistence_storage);
     var persistence = TaskPersistenceProbe{ .storage = persistence_storage };
@@ -935,7 +935,7 @@ test "definite descriptor failure preserves terminal history and leaves a recove
     defer checkpoint_store.deinit();
     const persistence_storage = try std.testing.allocator.alloc(
         u8,
-        product_task.persistence.max_store_bytes,
+        product_task.history.max_store_bytes,
     );
     defer std.testing.allocator.free(persistence_storage);
     var persistence = TaskPersistenceProbe{ .storage = persistence_storage };
@@ -1041,7 +1041,7 @@ test "unknown descriptor commit freezes checkpoint transaction until shutdown" {
     defer checkpoint_store.deinit();
     const persistence_storage = try std.testing.allocator.alloc(
         u8,
-        product_task.persistence.max_store_bytes,
+        product_task.history.max_store_bytes,
     );
     defer std.testing.allocator.free(persistence_storage);
     var persistence = TaskPersistenceProbe{ .storage = persistence_storage };
@@ -1552,7 +1552,7 @@ test "Idle Task model persistence failure restores Session and detaches on unkno
     }
     const persistence_storage = try std.testing.allocator.alloc(
         u8,
-        product_task.persistence.max_store_bytes,
+        product_task.history.max_store_bytes,
     );
     defer std.testing.allocator.free(persistence_storage);
     var persistence = TaskPersistenceProbe{ .storage = persistence_storage };
@@ -2321,7 +2321,7 @@ test "asynchronous Task deletion commit failure retains a retryable archived rec
     }
     const persistence_storage = try std.testing.allocator.alloc(
         u8,
-        product_task.persistence.max_store_bytes,
+        product_task.history.max_store_bytes,
     );
     defer std.testing.allocator.free(persistence_storage);
     var persistence = TaskPersistenceProbe{ .storage = persistence_storage };

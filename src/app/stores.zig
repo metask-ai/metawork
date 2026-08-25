@@ -10,7 +10,7 @@ pub const Stores = struct {
     allocator: std.mem.Allocator = undefined,
     automatic_workspace_root: ?workbench_api.AutomaticWorkspaceRoot = null,
     mcp_configuration: ?mcp_configuration.FileStore = null,
-    task: ?product_task.persistence.FileStore = null,
+    task: ?product_task.history.FileStore = null,
     task_restore_failed: bool = true,
     task_restored_bytes: ?[]u8 = null,
     checkpoint: ?product_task.checkpoint_store.FileStore = null,
@@ -45,7 +45,7 @@ pub const Stores = struct {
             paths.mcpDir(),
         ) catch null;
 
-        self.task = product_task.persistence.FileStore.init(io, paths.workbenchDir()) catch null;
+        self.task = product_task.history.FileStore.init(io, paths.workbenchDir()) catch null;
         self.task_restore_failed = self.task == null;
         self.task_restored_bytes = if (self.task) |*store|
             store.loadAlloc(allocator) catch failed: {
@@ -136,8 +136,8 @@ pub fn commitScheduledTaskStore(
 pub fn commitTaskStore(
     context: ?*anyopaque,
     bytes: []const u8,
-) product_task.persistence.Commit {
-    const store: *product_task.persistence.FileStore = @ptrCast(
+) product_task.history.Commit {
+    const store: *product_task.history.FileStore = @ptrCast(
         @alignCast(context orelse return .failed),
     );
     store.commit(bytes) catch |err| return switch (err) {

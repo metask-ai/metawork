@@ -9,24 +9,22 @@ const scheduled_task_persistence = @import("workbench_scheduled_task_persistence
 const skill_ports = @import("metawork_product_skill").ports;
 const skill_runtime = @import("metawork_product_skill").runtime;
 const product_task = @import("metawork_product_task");
-const task_persistence = product_task.persistence;
+const task_persistence = product_task.history;
 const TaskPersistenceCommit = task_persistence.Commit;
 const TaskPersistence = task_persistence.Capability;
 const TaskPersistenceHealth = task_persistence.Health;
 const checkpoint_store = product_task.checkpoint_store;
-const checkpoint_record = product_task.checkpoint_record;
 const catalog_snapshot = @import("metawork_product_skill").catalog;
-const owned_task_execution = product_task.execution_binding;
-const task_agent_session = product_task.agent_session;
-const task_attachment = product_task.attachment;
-const task_runtime = product_task.runtime;
-const task_deletion = product_task.deletion;
-const task_recovery = product_task.recovery;
-const task_recovery_job = product_task.recovery_job;
-const task_model = product_task.state;
-const task_policy = product_task.policy;
-const task_worker = product_task.execution;
-const task_view = product_task.view;
+const task_runtime = product_task;
+const task_testing = product_task.testing;
+const task_test_execution_binding = if (builtin.is_test) task_testing.execution_binding_module else struct {};
+const task_test_agent_session = if (builtin.is_test) task_testing.agent_session_module else struct {};
+const task_test_attachment = if (builtin.is_test) task_testing.attachment_module else struct {};
+const task_test_deletion = if (builtin.is_test) task_testing.deletion_module else struct {};
+const task_test_state = if (builtin.is_test) task_testing.state_module else struct {};
+const task_test_policy = if (builtin.is_test) task_testing.policy_module else struct {};
+const task_test_execution = if (builtin.is_test) task_testing.execution_module else struct {};
+const task_test_view = if (builtin.is_test) task_testing.view_module else struct {};
 const product_mcp = @import("metawork_product_mcp");
 const mcp_configuration = product_mcp.configuration;
 const mcp_state = product_mcp.state;
@@ -141,18 +139,7 @@ const checkpoint_export_limits: lifecycle.CheckpointLimits = .{
     .chunk_bytes = 256 * 1024,
 };
 
-// Automatic titles are intentionally shorter than the durable Task title
-// limit. Completion is best-effort metadata generation; the local candidate
-// remains the deterministic fallback when it cannot produce a usable title.
-const automatic_title_max_codepoints: usize = 32;
-const automatic_title_result_capacity = task_model.automatic_title_result_capacity;
-const automatic_title_timeout_ms: u32 = 15_000;
-const automatic_title_watchdog_poll_ms: u32 = 10;
-const automatic_title_system_prompt =
-    "Generate a concise title for this task. Return only one plain-text title " ++
-    "in the user's language, without quotes or Markdown. Use at most 32 Unicode characters.";
-
-pub const Provider = task_model.Provider;
+pub const Provider = product_task.Provider;
 
 pub const TaskWorkspaceTrust = union(enum) {
     explicitly_trusted,
@@ -172,15 +159,7 @@ pub const TaskWorkspaceRequest = union(enum) {
     automatic,
 };
 
-pub const TaskRunInput = union(enum) {
-    text: []const u8,
-    skill: struct {
-        skill_id: []const u8,
-        catalog_revision: []const u8,
-        selection_revision: u64,
-        argument_values: []const []const u8,
-    },
-};
+pub const TaskRunInput = task_runtime.RunInput;
 
 pub const ScheduledTaskRecurrence = scheduled_tasks_impl.Recurrence;
 
@@ -245,16 +224,8 @@ pub const AutomationExecutionInput = struct {
     base_url: []const u8,
 };
 
-pub const PermissionChoice = enum {
-    allow_once,
-    allow_session,
-    deny_once,
-    deny_session,
-};
-
-pub const UiResponse = struct {
-    permission: PermissionChoice,
-};
+pub const PermissionChoice = task_runtime.PermissionChoice;
+pub const UiResponse = task_runtime.UiResponse;
 
 pub const AppDirectories = struct {
     canonical_user_home: ?[]const u8 = null,
@@ -499,22 +470,19 @@ const catalog_argument_snapshot_overhead: usize = 16;
 const catalog_issue_snapshot_overhead: usize = 128;
 const tool_snapshot_overhead: usize = 512;
 const pending_ui_snapshot_overhead: usize = 8 * 1024;
-const ui_record_detail_capacity = task_model.ui_record_detail_capacity;
+const ui_record_detail_capacity = if (builtin.is_test) task_test_state.ui_record_detail_capacity else 0;
 const ui_record_snapshot_overhead: usize = 1024;
-const tool_route_digest_bytes = task_model.tool_route_digest_bytes;
-const tool_product_id_capacity = task_model.tool_product_id_capacity;
-const ToolState = task_model.ToolState;
-const RunPhase = task_model.RunPhase;
-const RunOutcome = task_model.RunOutcome;
-const CompactPhase = task_model.CompactPhase;
-const CompactCause = task_model.CompactCause;
-const CompactTerminationDispatch = task_model.CompactTerminationDispatch;
-const ActiveOperation = task_model.ActiveOperation;
-const RunCause = task_model.RunCause;
-const TaskLifecycle = task_model.TaskLifecycle;
-const ContinuationUnavailableReason = task_model.ContinuationUnavailableReason;
-const ContinuationCapability = task_model.ContinuationCapability;
-const CloseCompletion = task_model.CloseCompletion;
+const tool_route_digest_bytes = if (builtin.is_test) task_test_state.tool_route_digest_bytes else 0;
+const ToolState = if (builtin.is_test) task_test_state.ToolState else void;
+const RunPhase = if (builtin.is_test) task_test_state.RunPhase else void;
+const RunOutcome = product_task.RunOutcome;
+const CompactPhase = if (builtin.is_test) task_test_state.CompactPhase else void;
+const CompactCause = if (builtin.is_test) task_test_state.CompactCause else void;
+const ActiveOperation = if (builtin.is_test) task_test_state.ActiveOperation else void;
+const RunCause = if (builtin.is_test) task_test_state.RunCause else void;
+const TaskLifecycle = if (builtin.is_test) task_test_state.TaskLifecycle else void;
+const ContinuationUnavailableReason = if (builtin.is_test) task_test_state.ContinuationUnavailableReason else void;
+const CloseCompletion = if (builtin.is_test) task_test_state.CloseCompletion else void;
 
 pub const ChangeNotifier = struct {
     context: ?*anyopaque = null,
@@ -523,6 +491,12 @@ pub const ChangeNotifier = struct {
     fn notify(self: ChangeNotifier) bool {
         return self.wake(self.context);
     }
+};
+
+const TaskWorkspaceOrderContext = struct {
+    workbench: *Workbench,
+    workspace: *WorkspaceView,
+    previous_order: u64,
 };
 
 fn enqueueSkillJob(
@@ -644,13 +618,11 @@ pub fn decideTransportFailure(report: TransportFailureReport) TransportFailureDe
     };
 }
 
-const TrackedText = task_model.TrackedText;
-const permission_summary_field_capacity = task_model.permission_summary_field_capacity;
-const PermissionSummary = task_model.PermissionSummary;
-
-const ToolView = task_model.ToolView;
-pub const FileReferencePositionView = task_model.FileReferencePositionView;
-pub const FileReferenceRangeView = task_model.FileReferenceRangeView;
+const TrackedText = if (builtin.is_test) task_test_state.TrackedText else void;
+const permission_summary_field_capacity = if (builtin.is_test) task_test_state.permission_summary_field_capacity else 0;
+const ToolView = if (builtin.is_test) task_test_state.ToolView else void;
+pub const FileReferencePositionView = product_task.FileReferencePosition;
+pub const FileReferenceRangeView = product_task.FileReferenceRange;
 
 fn formatFileReferenceId(
     storage: []u8,
@@ -665,8 +637,6 @@ fn formatFileReferenceId(
         .{ task_id, run_generation, tool_order, index },
     ) catch unreachable;
 }
-
-const FileReferenceLocatorKind = task_model.FileReferenceLocatorKind;
 
 fn absoluteReferenceRelativePath(
     root: []const u8,
@@ -727,8 +697,6 @@ fn trimIncompleteUtf8Tail(bytes: []u8) []u8 {
 /// Workbench-owned projection of AgentCore's typed file reference. The raw
 /// locator is retained only on the Host side; snapshot serialization uses the
 /// safe display path and opaque product id below.
-const FileReferenceView = task_model.FileReferenceView;
-
 pub const FilePreviewState = enum { ready, truncated, missing, restricted, unsupported, failed };
 
 pub const FilePreview = struct {
@@ -752,80 +720,46 @@ pub const FilePreview = struct {
     }
 };
 
-const UsageView = task_model.UsageView;
-const TerminalPublication = task_model.TerminalPublication;
-const EventProjectionFailure = task_model.EventProjectionFailure;
-const AgentHandoffState = task_model.AgentHandoffState;
-const RunTerminationDispatch = task_model.RunTerminationDispatch;
-const PendingInterruption = task_model.PendingInterruption;
-const TerminalPayload = task_model.TerminalPayload;
-const CompactTerminalPayload = task_model.CompactTerminalPayload;
-const RunInputRecord = task_model.RunInputRecord;
-const CheckpointExportContext = task_model.CheckpointExportContext;
-const RunRecord = task_model.RunRecord;
-const AutomaticTitleState = task_model.AutomaticTitleState;
-const AutomaticTitle = task_model.AutomaticTitle;
-const CompactRecord = task_model.CompactRecord;
+const UsageView = if (builtin.is_test) task_test_state.UsageView else void;
+const EventProjectionFailure = if (builtin.is_test) task_test_state.EventProjectionFailure else void;
+const RunTerminationDispatch = if (builtin.is_test) task_test_state.RunTerminationDispatch else void;
+const RunInputRecord = if (builtin.is_test) task_test_state.RunInputRecord else void;
+const TestRunRecord = if (builtin.is_test) task_test_state.RunRecord else void;
+const AutomaticTitleState = if (builtin.is_test) task_test_state.AutomaticTitleState else void;
+const TestCompactRecord = if (builtin.is_test) task_test_state.CompactRecord else void;
 
-/// Executor-only resources for one queued or running Run. Product records keep
-/// stable state and cancellation identity; this sidecar owns the composition
-/// references needed only while the executor has the job.
-const RunJobContext = task_worker.RunJob;
-
-/// Executor-only resources for one queued or running compact operation.
-const CompactJobContext = task_worker.CompactJob;
-
-const UiRecordKind = task_model.UiRecordKind;
-const UiRecordState = task_model.UiRecordState;
-const UiRecord = task_model.UiRecord;
-const DurableTaskRecord = task_model.DurableTaskRecord;
-const CheckpointAnchor = task_model.CheckpointAnchor;
-const CheckpointAttempt = task_model.CheckpointAttempt;
-const CheckpointPostprocessState = task_model.CheckpointPostprocessState;
-const CheckpointCandidate = task_model.CheckpointCandidate;
-const CheckpointPostprocessPayload = task_model.CheckpointPostprocessPayload;
-const CheckpointPostprocess = task_model.CheckpointPostprocess;
-const RuntimeAttachment = task_model.RuntimeAttachment;
-const TaskView = task_model.Task;
-const ProductTerminalFacts = task_model.ProductTerminalFacts;
-const terminalPayload = task_model.terminalPayload;
-const productTerminalPayload = task_model.productTerminalPayload;
-const productTerminalFacts = task_model.productTerminalFacts;
-const runPhase = task_model.runPhase;
-const setActivePhase = task_model.setActivePhase;
-const compactTerminalPayload = task_model.compactTerminalPayload;
-const activeCompactPhase = task_model.activeCompactPhase;
-const isTerminalPhase = task_model.isTerminalPhase;
-const isTerminalCompactPhase = task_model.isTerminalCompactPhase;
-const findRun = task_model.findRun;
-const findCompact = task_model.findCompact;
-const hasUnfinalizedTerminalEvents = task_model.hasUnfinalizedTerminalEvents;
-const pendingInterruption = task_policy.pendingInterruption;
-const pendingTerminationSignal = task_policy.pendingTerminationSignal;
-const pendingExternalInterruption = task_policy.pendingExternalInterruption;
-const compactCauseForInterruption = task_policy.compactCauseForInterruption;
-const closeFailureCompletion = task_policy.closeFailureCompletion;
-const classifyAgentTerminal = task_policy.classifyAgentTerminal;
-const decisionForSignal = task_policy.decisionForSignal;
-const lastTerminalFacts = task_policy.lastTerminalFacts;
-const currentRunPhase = task_policy.currentRunPhase;
-const hasActiveOperation = task_policy.hasActiveOperation;
-const lastFinalizedRunId = task_policy.lastFinalizedRunId;
-const latestCompactId = task_policy.latestCompactId;
-const continuationAvailable = task_policy.continuationAvailable;
-const taskLifecycle = task_policy.taskLifecycle;
-const recoveryAttachment = task_policy.recoveryAttachment;
-const recoveryOperation = task_policy.recoveryOperation;
-const checkpointMatchesCurrentHistory = task_policy.checkpointMatchesCurrentHistory;
-const foldTerminalDisposition = task_policy.foldTerminalDisposition;
-const checkpointFailureAttempt = task_policy.checkpointFailureAttempt;
+const UiRecordKind = if (builtin.is_test) task_test_state.UiRecordKind else void;
+const UiRecordState = if (builtin.is_test) task_test_state.UiRecordState else void;
+const UiRecord = if (builtin.is_test) task_test_state.UiRecord else void;
+const DurableTaskRecord = if (builtin.is_test) task_test_state.DurableTaskRecord else void;
+const RuntimeAttachment = if (builtin.is_test) task_test_state.RuntimeAttachment else void;
+const TestTask = if (builtin.is_test) task_test_state.Task else void;
+const terminalPayload = if (builtin.is_test) task_test_state.terminalPayload else void;
+const productTerminalFacts = if (builtin.is_test) task_test_state.productTerminalFacts else void;
+const runPhase = if (builtin.is_test) task_test_state.runPhase else void;
+const setActivePhase = if (builtin.is_test) task_test_state.setActivePhase else void;
+const compactTerminalPayload = if (builtin.is_test) task_test_state.compactTerminalPayload else void;
+const activeCompactPhase = if (builtin.is_test) task_test_state.activeCompactPhase else void;
+const isTerminalPhase = if (builtin.is_test) task_test_state.isTerminalPhase else void;
+const findRun = if (builtin.is_test) task_test_state.findRun else void;
+const pendingInterruption = if (builtin.is_test) task_test_policy.pendingInterruption else void;
+const pendingTerminationSignal = if (builtin.is_test) task_test_policy.pendingTerminationSignal else void;
+const closeFailureCompletion = if (builtin.is_test) task_test_policy.closeFailureCompletion else void;
+const classifyAgentTerminal = if (builtin.is_test) task_test_policy.classifyAgentTerminal else void;
+const hasActiveOperation = if (builtin.is_test) task_test_policy.hasActiveOperation else void;
+const continuationAvailable = if (builtin.is_test) task_test_policy.continuationAvailable else void;
+const automaticTitleCandidate = if (builtin.is_test) task_test_policy.automaticTitleCandidate else void;
+const generatedAutomaticTitleCandidate = if (builtin.is_test) task_test_policy.generatedAutomaticTitleCandidate else void;
+const boundAutomaticTitle = if (builtin.is_test) task_test_policy.boundAutomaticTitle else void;
+const taskLifecycle = if (builtin.is_test) task_test_policy.taskLifecycle else void;
+const foldTerminalDisposition = if (builtin.is_test) task_test_policy.foldTerminalDisposition else void;
 
 const TaskFailureRecord = task_runtime.FailureRecord;
 
 test "Task aggregate separates Task runtime ownership from product history" {
-    try std.testing.expect(@hasField(TaskView, "durable"));
-    try std.testing.expect(@hasField(TaskView, "runtime"));
-    try std.testing.expect(@hasField(TaskView, "deletion"));
+    try std.testing.expect(@hasField(TestTask, "durable"));
+    try std.testing.expect(@hasField(TestTask, "runtime"));
+    try std.testing.expect(@hasField(TestTask, "deletion"));
     inline for (&.{
         "attachment",
         "worker_references",
@@ -840,14 +774,14 @@ test "Task aggregate separates Task runtime ownership from product history" {
         "execution",
         "pinned_catalog",
     }) |field_name| {
-        try std.testing.expect(@hasField(task_attachment.LiveAttachment, field_name));
+        try std.testing.expect(@hasField(task_test_attachment.LiveAttachment, field_name));
         try std.testing.expect(!@hasField(RuntimeAttachment, field_name));
         try std.testing.expect(!@hasField(DurableTaskRecord, field_name));
     }
-    try std.testing.expect(!@hasField(task_attachment.LiveAttachment, "session"));
-    try std.testing.expect(!@hasField(task_attachment.LiveAttachment, "route_id"));
-    try std.testing.expect(@hasField(task_attachment.ClosingAttachment, "route_id"));
-    try std.testing.expect(@hasField(task_attachment.ClosingAttachment, "worker_binding"));
+    try std.testing.expect(!@hasField(task_test_attachment.LiveAttachment, "session"));
+    try std.testing.expect(!@hasField(task_test_attachment.LiveAttachment, "route_id"));
+    try std.testing.expect(@hasField(task_test_attachment.ClosingAttachment, "route_id"));
+    try std.testing.expect(@hasField(task_test_attachment.ClosingAttachment, "worker_binding"));
     try std.testing.expect(!@hasField(RuntimeAttachment, "lifecycle"));
     try std.testing.expect(!@hasField(RuntimeAttachment, "continuation"));
     try std.testing.expect(!@hasField(RuntimeAttachment, "deletion"));
@@ -866,7 +800,7 @@ test "Task aggregate separates Task runtime ownership from product history" {
     }
 }
 
-const OwnedTaskExecution = owned_task_execution.OwnedTaskExecution;
+const OwnedTaskExecution = if (builtin.is_test) task_test_execution_binding.OwnedTaskExecution else void;
 
 const WorkspaceTrust = union(enum) {
     explicitly_trusted,
@@ -1695,36 +1629,14 @@ pub const Workbench = struct {
     /// preview. Renderer callers only provide the opaque product id; locator
     /// and workspace ownership remain inside Workbench.
     pub fn previewFileReference(self: *Workbench, reference_id: []const u8) Error!FilePreview {
-        const Match = struct { reference: *const FileReferenceView, task: *const TaskView };
-        var match: ?Match = null;
-        for (self.task_runtime.tasks) |*task_entry| {
-            const task = &(task_entry.* orelse continue);
-            for (task.durable.runs) |*run_entry| {
-                const run = &(run_entry.* orelse continue);
-                for (run.tools) |*tool_entry| {
-                    const tool = &(tool_entry.* orelse continue);
-                    const references = tool.file_refs orelse continue;
-                    for (references) |*reference_entry| {
-                        if (reference_entry.*) |*reference|
-                            if (std.mem.eql(u8, reference.id, reference_id)) {
-                                match = .{ .reference = reference, .task = task };
-                                break;
-                            };
-                    }
-                    if (match != null) break;
-                }
-                if (match != null) break;
-            }
-            if (match != null) break;
-        }
-        const found = match orelse return error.FileReferenceNotFound;
-        const reference = found.reference;
+        const reference = self.task_runtime.fileReference(reference_id) orelse
+            return error.FileReferenceNotFound;
         var workspace_valid = false;
         for (self.workspaces) |*workspace_entry| {
             const workspace = workspace_entry.* orelse continue;
-            if (workspace.id == found.task.durable.workspace_id) {
-                workspace_valid = workspace.epoch == found.task.durable.workspace_epoch and
-                    std.mem.eql(u8, workspace.canonical_root, found.task.durable.workspace_root);
+            if (workspace.id == reference.workspace_id) {
+                workspace_valid = workspace.epoch == reference.workspace_epoch and
+                    std.mem.eql(u8, workspace.canonical_root, reference.workspace_root);
                 break;
             }
         }
@@ -1735,7 +1647,7 @@ pub const Workbench = struct {
         const relative = switch (reference.locator_kind) {
             .workspace_path => reference.locator,
             .absolute_path => absoluteReferenceRelativePath(
-                found.task.durable.workspace_root,
+                reference.workspace_root,
                 reference.locator,
                 &relative_storage,
             ) orelse return error.FilePreviewRestricted,
@@ -1744,7 +1656,7 @@ pub const Workbench = struct {
         if (relative.len == 0 or relative.len > relative_storage.len)
             return error.FilePreviewRestricted;
 
-        var root = std.Io.Dir.openDirAbsolute(self.io, found.task.durable.workspace_root, .{
+        var root = std.Io.Dir.openDirAbsolute(self.io, reference.workspace_root, .{
             .access_sub_paths = true,
             .follow_symlinks = false,
         }) catch return error.FilePreviewRestricted;
@@ -1786,7 +1698,7 @@ pub const Workbench = struct {
 
     fn finishFilePreview(
         self: *Workbench,
-        reference: *const FileReferenceView,
+        reference: task_runtime.FileReference,
         bytes: []u8,
         truncated: bool,
     ) Error!FilePreview {
@@ -1830,7 +1742,10 @@ pub const Workbench = struct {
             .language = language_copy,
             .content = content,
             .truncated = content_truncated,
-            .range = reference.range,
+            .range = if (reference.range) |range| .{
+                .start = .{ .line = @intCast(range.start.line), .column = @intCast(range.start.column) },
+                .end = .{ .line = @intCast(range.end.line), .column = @intCast(range.end.column) },
+            } else null,
             .state = if (content_truncated) .truncated else .ready,
             .allocator = self.allocator,
         };
@@ -2396,8 +2311,7 @@ pub const Workbench = struct {
         task_id: u64,
     ) Error!CatalogProjection {
         self.syncLifecycle();
-        const task = self.findTask(task_id) orelse return error.UnknownTask;
-        return task_view.catalogProjection(task);
+        return self.task_runtime.catalogProjection(task_id) orelse error.UnknownTask;
     }
 
     pub fn refreshWorkspaceCatalog(
@@ -2425,17 +2339,16 @@ pub const Workbench = struct {
     ) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
-        const task = self.findTask(task_id) orelse return error.UnknownTask;
-        if (task.durable.binding_epoch != expected_binding_epoch)
-            return error.BindingEpochMismatch;
-        if (!self.taskContinuationAvailable(task) or hasActiveOperation(task))
-            return error.TaskBusy;
-        const workspace = self.findWorkspace(task.durable.workspace_id) orelse
+        const facts = try self.task_runtime.catalogRefreshFacts(
+            task_id,
+            expected_binding_epoch,
+        );
+        const workspace = self.findWorkspace(facts.workspace_id) orelse
             return error.WorkspaceUnavailable;
         if (self.skill.enablementHealth() != .ready)
             return error.RecoveryUnavailable;
         if (workspace.kind != .manual) return error.CatalogUnavailable;
-        if (workspace.epoch != task.durable.workspace_epoch)
+        if (workspace.epoch != facts.workspace_epoch)
             return error.WorkspaceEpochMismatch;
         const authority = switch (try self.skill.workspaceCatalogAuthority(
             workspace.id,
@@ -2460,17 +2373,16 @@ pub const Workbench = struct {
                 self.allocator,
                 skill.skill_id,
             );
-        var access = task.runtime.acquireAccess() catch return error.TaskClosing;
-        defer access.deinit();
-        try access.refreshSkillCatalog(lease, .{
-            .granted_skill_ids = granted_skill_ids.items,
-        });
-        if (task.runtime.pinnedCatalog()) |old| {
-            self.projection_bytes -= old.projected_bytes;
-            old.deinit();
-        }
-        self.projection_bytes += replacement.projected_bytes;
-        task.runtime.attached().?.pinned_catalog = replacement;
+        const replacement_bytes = replacement.projected_bytes;
+        const old_bytes = try self.task_runtime.installCatalogRefresh(
+            task_id,
+            expected_binding_epoch,
+            lease,
+            granted_skill_ids.items,
+            &replacement,
+        );
+        self.projection_bytes -= old_bytes;
+        self.projection_bytes += replacement_bytes;
         self.bumpRevision();
     }
 
@@ -2493,8 +2405,7 @@ pub const Workbench = struct {
 
     pub fn taskWorkspaceId(self: *Workbench, task_id: u64) Error!u64 {
         self.syncLifecycle();
-        const task = self.findTask(task_id) orelse return error.UnknownTask;
-        return task.durable.workspace_id;
+        return self.task_runtime.taskWorkspaceId(task_id) orelse error.UnknownTask;
     }
 
     /// Copies the canonical Workspace projection without allocating. Hidden
@@ -2591,20 +2502,15 @@ pub const Workbench = struct {
         self.reconcileSkillEnablementNoFail();
         self.skill.invalidateWorkspace(workspace.id, self.skillProjectionBudget());
         self.bumpRevision();
-        for (self.task_runtime.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
-            if (task.durable.workspace_id != workspace_id or
-                !task.runtime.hasAttachedSession()) continue;
-            self.detachTaskSession(task.durable.id) catch |err| switch (err) {
-                error.CloseInProgress => {},
-                else => {
-                    workspace.authorization = .available;
-                    workspace.last_removal_failure = .task_close_failed;
-                    self.commitTaskStateNoFail();
-                    self.bumpRevision();
-                    return err;
-                },
-            };
+        if (!self.task_runtime.releaseWorkspaceSessions(workspace_id, .{
+            .context = self,
+            .release_fn = releaseTaskRuntimeSession,
+        })) {
+            workspace.authorization = .available;
+            workspace.last_removal_failure = .task_close_failed;
+            self.commitTaskStateNoFail();
+            self.bumpRevision();
+            return error.TaskClosing;
         }
         if (self.finalizeWorkspaceRemovalsNoFail()) {
             self.commitTaskStateNoFail();
@@ -2622,7 +2528,7 @@ pub const Workbench = struct {
             return error.ExecutionInUse;
         if (!self.canCreateTask())
             return error.ExecutionUnavailable;
-        if (findEmpty(TaskView, self.task_runtime.tasks) == null) return error.TaskCapacity;
+        if (!self.task_runtime.hasCapacity()) return error.TaskCapacity;
         const workspace_id = try self.openWorkspace(input);
         return self.createTaskInWorkspace(
             workspace_id,
@@ -2753,42 +2659,15 @@ pub const Workbench = struct {
                 self.allocator,
                 skill.skill_id,
             );
-        var task_execution = try self.execution.cloneOwned(self.allocator);
-        errdefer task_execution.deinit();
-        const task_execution_input = task_execution.input();
-        const slot = findEmpty(TaskView, self.task_runtime.tasks) orelse return error.TaskCapacity;
-        const canonical = workspace_view.canonical_root;
-        const workspace_trust: lifecycle.WorkspaceTrust = switch (workspace_view.trust) {
-            .explicitly_trusted => .explicitly_trusted,
-            .temporary => |root| .{ .temporary = root },
+        const execution_input: account_contract.ExecutionConfigInput = .{
+            .target = .{
+                .provider_kind = accountProviderKind(self.execution.provider.?),
+                .model = self.execution.model(),
+                .base_url = self.execution.baseUrl(),
+            },
+            .api_key = self.execution.credential(),
+            .execution_generation = self.execution.generation,
         };
-        const workspace_projection = try self.copyProjected(
-            canonical,
-            self.limits.max_workspace_bytes,
-            task_execution_input.api_key,
-        );
-        std.debug.assert(!workspace_projection.truncated);
-        const workspace = workspace_projection.value;
-        errdefer self.freeTracked(workspace);
-        const title = try self.copyBounded("", self.limits.max_task_title_bytes);
-        errdefer self.freeTracked(title);
-        const execution_model = try self.copyBounded(
-            self.admissionModel(),
-            account_contract.Limits.model_id_bytes,
-        );
-        errdefer self.freeTracked(execution_model);
-        const runs = try self.allocator.alloc(?RunRecord, self.limits.max_runs_per_task);
-        errdefer self.allocator.free(runs);
-        @memset(runs, null);
-        const compacts = try self.allocator.alloc(
-            ?CompactRecord,
-            self.limits.max_compacts_per_task,
-        );
-        errdefer self.allocator.free(compacts);
-        @memset(compacts, null);
-        const ui_history = try self.allocator.alloc(?UiRecord, self.limits.max_ui_history_per_task);
-        errdefer self.allocator.free(ui_history);
-        @memset(ui_history, null);
         const workspace_recent_order = if (workspace_view.kind == .manual)
             try self.takeWorkspaceRecentOrder()
         else
@@ -2797,36 +2676,44 @@ pub const Workbench = struct {
             if (workspace_view.kind == .manual)
                 self.next_workspace_recent_order = workspace_recent_order;
         }
-        const previous_workspace_recent_order = workspace_view.recent_order;
-        if (self.task_runtime.next_task_id == 0) return error.TaskIdentityExhausted;
-        const task_id = self.task_runtime.next_task_id;
-        var epoch_storage: [32]u8 = undefined;
-        const epoch_token = std.fmt.bufPrint(
-            &epoch_storage,
-            "{d}",
-            .{workspace_view.epoch},
-        ) catch unreachable;
-        var binding = task_agent_session.Binding.open(self.agent_runtime, .{
-            .provider = agentProvider(accountProvider(task_execution_input.target.provider_kind)),
-            .permission_mode = .accept_edits,
-            .shell_policy = .unrestricted,
-            .credential = task_execution_input.api_key,
+        var order_context = TaskWorkspaceOrderContext{
+            .workbench = self,
+            .workspace = workspace_view,
+            .previous_order = workspace_view.recent_order,
+        };
+        const task_id = self.task_runtime.openTask(.{
+            .agent_runtime = self.agent_runtime,
+            .execution = execution_input,
+            .provider = accountProvider(execution_input.target.provider_kind),
             .model = self.admissionModel(),
-            .base_url = task_execution_input.target.base_url,
-            .workspace = .{
-                .canonical_root = canonical,
-                .trust = workspace_trust,
+            .workspace_id = workspace_id,
+            .workspace_epoch = workspace_view.epoch,
+            .workspace_root = workspace_view.canonical_root,
+            .workspace_trust = switch (workspace_view.trust) {
+                .explicitly_trusted => .explicitly_trusted,
+                .temporary => |root| .{ .temporary = root },
             },
             .canonical_user_home = self.canonical_user_home orelse "",
-            .workspace_epoch = if (self.canonical_user_home != null)
-                epoch_token
-            else
-                "",
             .skill_catalog = catalog_lease,
-            .skill_policy = if (catalog_lease != null) .{
-                .granted_skill_ids = granted_skill_ids.items,
-            } else null,
+            .granted_skill_ids = granted_skill_ids.items,
             .mcp_selection = mcp_policy.selectionForNewTask(if (self.mcp) |*mcp| mcp else null),
+            .pinned_catalog = &pinned_catalog,
+            .max_workspace_bytes = self.limits.max_workspace_bytes,
+            .max_title_bytes = self.limits.max_task_title_bytes,
+            .max_model_id_bytes = account_contract.Limits.model_id_bytes,
+            .max_runs = self.limits.max_runs_per_task,
+            .max_compacts = self.limits.max_compacts_per_task,
+            .max_ui_history = self.limits.max_ui_history_per_task,
+            .workspace_order = .{
+                .context = &order_context,
+                .manual = workspace_view.kind == .manual,
+                .recent_order = workspace_recent_order,
+                .apply_fn = applyTaskWorkspaceOrder,
+                .rollback_fn = rollbackTaskWorkspaceOrder,
+            },
+            .text = self.taskRuntimeTextProjection(),
+            .durable = self.taskRuntimeDurableEffect(),
+            .release = self.taskRuntimeReleaseEffects(),
         }) catch |err| switch (err) {
             error.SessionCapacity => return error.TaskCapacity,
             error.McpNotRefreshed => {
@@ -2834,49 +2721,6 @@ pub const Workbench = struct {
                 return error.CatalogLoading;
             },
             else => return err,
-        };
-        self.task_runtime.next_task_id +%= 1;
-        self.task_runtime.tasks[slot] = .{
-            .durable = .{
-                .id = task_id,
-                .recent_order = self.takeTaskRecentOrder(),
-                .execution_generation = task_execution_input.execution_generation,
-                .execution_provider = accountProvider(task_execution_input.target.provider_kind),
-                .execution_model = execution_model,
-                .workspace_id = workspace_id,
-                .workspace_epoch = workspace_view.epoch,
-                .workspace_root = workspace,
-                .title = title,
-                .runs = runs,
-                .compacts = compacts,
-                .ui_history = ui_history,
-            },
-            .runtime = .{
-                .attachment = .{ .attached = .{
-                    .binding = binding.take(),
-                    .execution = task_execution.take(),
-                    .pinned_catalog = pinned_catalog,
-                } },
-            },
-        };
-        if (workspace_view.kind == .manual)
-            workspace_view.recent_order = workspace_recent_order;
-        errdefer {
-            if (workspace_view.kind == .manual)
-                workspace_view.recent_order = previous_workspace_recent_order;
-        }
-        self.commitTaskStateIfConfigured() catch |err| {
-            const inserted = &self.task_runtime.tasks[slot].?;
-            var live = inserted.runtime.detach(.cold_start);
-            switch (live.binding.closeOutcome(.session_close)) {
-                .closed => live.binding.releaseClosed() catch
-                    @panic("fresh Task Session release failed during persistence rollback"),
-                .failure => @panic("fresh Task Session close failed during persistence rollback"),
-            }
-            live.execution.deinit();
-            self.task_runtime.tasks[slot] = null;
-            self.task_runtime.next_task_id = task_id;
-            return err;
         };
         self.bumpRevision();
         return task_id;
@@ -2899,7 +2743,7 @@ pub const Workbench = struct {
         if (expected_skill_catalog_revision != null or
             expected_skill_selection_revision != null)
             return error.CatalogUnavailable;
-        if (findEmpty(TaskView, self.task_runtime.tasks) == null) return error.TaskCapacity;
+        if (!self.task_runtime.hasCapacity()) return error.TaskCapacity;
         if (self.workspaceCount(.automatic) >= self.limits.max_tasks)
             return error.WorkspaceCapacity;
         const store = if (self.automatic_workspaces) |*value| value else return error.WorkspaceUnavailable;
@@ -2934,45 +2778,17 @@ pub const Workbench = struct {
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
-        const task = self.findTask(task_id) orelse return error.UnknownTask;
-        if (expected_binding_epoch == 0 or
-            expected_binding_epoch != task.durable.binding_epoch)
-            return error.BindingEpochMismatch;
-        if (!self.taskRecoveryProjection(task).recovery_available)
-            return error.RecoveryUnavailable;
-        const checkpoint = task.durable.checkpoint orelse
-            return error.RecoveryUnavailable;
-        const workspace = self.findWorkspace(task.durable.workspace_id) orelse
+        const facts = try self.task_runtime.recoveryStartFacts(
+            task_id,
+            expected_binding_epoch,
+            self.taskRuntimeProjectionEffects(),
+        );
+        const workspace = self.findWorkspace(facts.workspace_id) orelse
             return error.WorkspaceUnavailable;
         if (workspace.kind == .manual and self.skill.enablementHealth() != .ready)
             return error.RecoveryUnavailable;
         const canonical_user_home = self.canonical_user_home orelse
             return error.WorkspaceUnavailable;
-        if (self.task_runtime.next_restore_attempt_id == 0)
-            return error.RestoreAttemptExhausted;
-        const attempt_id = self.task_runtime.next_restore_attempt_id;
-
-        var checkpoint_copy = try checkpoint.clone(self.allocator);
-        var checkpoint_copy_live = true;
-        errdefer if (checkpoint_copy_live) checkpoint_copy.deinit(self.allocator);
-        var epoch_storage: [32]u8 = undefined;
-        const epoch_token = std.fmt.bufPrint(
-            &epoch_storage,
-            "{d}",
-            .{workspace.epoch},
-        ) catch unreachable;
-        var workspace_copy = try task_recovery_job.OwnedWorkspaceBinding.init(
-            self.allocator,
-            workspace.canonical_root,
-            canonical_user_home,
-            epoch_token,
-            switch (workspace.trust) {
-                .explicitly_trusted => .explicitly_trusted,
-                .temporary => .temporary,
-            },
-        );
-        var workspace_copy_live = true;
-        errdefer if (workspace_copy_live) workspace_copy.deinit();
         const skill_scope: skill_runtime.ManagementScope = .{ .project = .{
             .workspace_id = workspace.id,
             .workspace_epoch = workspace.epoch,
@@ -2984,81 +2800,55 @@ pub const Workbench = struct {
             .ready, .degraded => |authority| authority.snapshot,
             .uninitialized, .loading, .unavailable => return error.RecoveryUnavailable,
         };
-        var disabled_skill_policy_keys: std.ArrayList([]const u8) = .empty;
-        defer disabled_skill_policy_keys.deinit(self.allocator);
+        var disabled_keys: std.ArrayList([]const u8) = .empty;
+        defer disabled_keys.deinit(self.allocator);
         for (current_catalog.skills) |skill|
             if (!self.skill.isSkillEnabled(skill_scope, skill.skill_policy_key))
-                try disabled_skill_policy_keys.append(self.allocator, skill.skill_policy_key);
-        var skill_policy = try task_recovery_job.OwnedSkillPolicy.init(
-            self.allocator,
-            self.skill.enablementRevision(skill_scope),
-            disabled_skill_policy_keys.items,
-        );
-        var skill_policy_live = true;
-        errdefer if (skill_policy_live) skill_policy.deinit();
-        var execution = try self.execution.cloneOwned(self.allocator);
-        errdefer execution.deinit();
-        const target_model = try self.allocator.dupe(
-            u8,
-            task.durable.execution_model,
-        );
-        errdefer self.allocator.free(target_model);
+                try disabled_keys.append(self.allocator, skill.skill_policy_key);
         var mcp = try self.createRecoveryMcpAuthority();
-        errdefer mcp.deinit();
-        const job = try self.allocator.create(task_recovery_job.Job);
-        errdefer self.allocator.destroy(job);
-        job.* = .{
-            .allocator = self.allocator,
-            .runtime = self.agent_runtime,
-            .store = self.checkpoint_store orelse return error.RecoveryUnavailable,
+        defer mcp.deinit();
+        const store = self.checkpoint_store orelse return error.RecoveryUnavailable;
+        var selection = mcp.selection;
+        mcp.selection = null;
+        errdefer if (selection) |value| value.deinit();
+        const attempt_id = try self.task_runtime.startRecovery(task_id, .{
+            .expected_binding_epoch = expected_binding_epoch,
+            .workspace_id = workspace.id,
+            .workspace_epoch = workspace.epoch,
+            .workspace_root = workspace.canonical_root,
+            .canonical_user_home = canonical_user_home,
+            .workspace_trust = switch (workspace.trust) {
+                .explicitly_trusted => .explicitly_trusted,
+                .temporary => .temporary,
+            },
+            .skill_policy_revision = self.skill.enablementRevision(skill_scope),
+            .disabled_skill_policy_keys = disabled_keys.items,
+            .execution = .{
+                .target = .{
+                    .provider_kind = accountProviderKind(self.execution.provider.?),
+                    .model = self.execution.model(),
+                    .base_url = self.execution.baseUrl(),
+                },
+                .api_key = self.execution.credential(),
+                .execution_generation = self.execution.generation,
+            },
+            .mcp_selection = &selection,
+            .mcp_catalog_generation = mcp.catalog_generation,
+            .agent_runtime = self.agent_runtime,
+            .checkpoint_store = store,
+            .catalog_limits = catalogSnapshotLimits(self.limits),
+            .checkpoint_limits = checkpoint_export_limits,
+            .available_projection_bytes = self.limits.max_projection_bytes - self.projection_bytes,
             .notifier = .{
                 .context = self.change_notifier.context,
                 .notify_fn = self.change_notifier.wake,
             },
-            .catalog_limits = catalogSnapshotLimits(self.limits),
-            .available_projection_bytes = self.limits.max_projection_bytes - self.projection_bytes,
-            .checkpoint_limits = checkpoint_export_limits,
-            .attempt = .{
-                .attempt_id = attempt_id,
-                .task_id = task_id,
-                .binding_epoch = expected_binding_epoch,
-                .workspace_id = workspace.id,
-                .workspace_epoch = workspace.epoch,
-                .checkpoint = checkpoint_copy,
-                .workspace = workspace_copy,
-                .skill_policy = skill_policy,
-                .execution = execution.take(),
-                .execution_generation = self.execution.generation,
-                .model = target_model,
-                .provider = agentProvider(task.durable.execution_provider),
-                .mcp_selection = mcp.selection,
-                .mcp_catalog_generation = mcp.catalog_generation,
+            .executor = .{
+                .context = self,
+                .enqueue_fn = enqueueTaskRuntimeExecutor,
+                .cancel_fn = cancelTaskRuntimeExecutor,
             },
-        };
-        checkpoint_copy_live = false;
-        workspace_copy_live = false;
-        skill_policy_live = false;
-        mcp.selection = null;
-        task.runtime.active_operation = .{ .restore = .{ .id = attempt_id } };
-        task.runtime.restore_job = job;
-        task.runtime.last_restore_failure = null;
-        _ = task.runtime.worker_references.fetchAdd(1, .acq_rel);
-        self.executor.enqueue(.{
-            .identity = job,
-            .context = job,
-            .execute_fn = task_recovery_job.Job.execute,
-            .cancel_fn = task_recovery_job.Job.cancelQueued,
-        }) catch |err| {
-            task.runtime.restore_job = null;
-            task.runtime.active_operation = .none;
-            const previous = task.runtime.worker_references.fetchSub(1, .release);
-            std.debug.assert(previous != 0);
-            job.outcome = .{ .failure = .cancelled };
-            job.state.store(.cancelled, .release);
-            job.deinit();
-            return err;
-        };
-        self.task_runtime.next_restore_attempt_id +%= 1;
+        });
         self.bumpRevision();
         return attempt_id;
     }
@@ -3070,13 +2860,14 @@ pub const Workbench = struct {
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
-        const task = self.findTask(task_id) orelse return error.UnknownTask;
-        return self.runTaskAtBinding(task_id, task.durable.binding_epoch, input);
+        const binding_epoch = self.task_runtime.taskBindingEpoch(task_id) orelse
+            return error.UnknownTask;
+        return self.runTaskAtBinding(task_id, binding_epoch, input);
     }
 
     pub fn taskBindingEpoch(self: *Workbench, task_id: u64) Error!u64 {
         self.syncLifecycle();
-        return (self.findTask(task_id) orelse return error.UnknownTask).durable.binding_epoch;
+        return self.task_runtime.taskBindingEpoch(task_id) orelse error.UnknownTask;
     }
 
     pub fn testRestoreCancellationRequested(
@@ -3084,14 +2875,12 @@ pub const Workbench = struct {
         task_id: u64,
     ) bool {
         std.debug.assert(builtin.is_test);
-        const task = self.findTask(task_id) orelse return false;
-        const job = task.runtime.restore_job orelse return false;
-        return job.cancellation.load(.acquire);
+        return self.task_runtime.testRestoreCancellationRequested(task_id);
     }
 
     pub fn testLateTerminalEventCount(self: *const Workbench) u64 {
         std.debug.assert(builtin.is_test);
-        return self.task_runtime.late_terminal_event_count;
+        return self.task_runtime.testLateTerminalEventCount();
     }
 
     /// Selects the model for one Task. Credentials and their execution
@@ -3108,14 +2897,15 @@ pub const Workbench = struct {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
         try self.requireTaskPersistenceMutation();
-        const task = self.findTask(task_id) orelse return error.UnknownTask;
+        const identity = self.task_runtime.taskExecutionIdentity(task_id) orelse
+            return error.UnknownTask;
         if (expected_model.len == 0 or model.len == 0 or
             expected_model.len > account_contract.Limits.model_id_bytes or
             model.len > account_contract.Limits.model_id_bytes or
             !std.unicode.utf8ValidateSlice(expected_model) or
             !std.unicode.utf8ValidateSlice(model))
             return error.InvalidTaskModel;
-        if (!std.mem.eql(u8, expected_model, task.durable.execution_model))
+        if (!std.mem.eql(u8, expected_model, identity.model))
             return error.TaskModelMismatch;
         if (self.account.catalog_state != .ready or
             expected_catalog_generation == 0 or
@@ -3129,46 +2919,23 @@ pub const Workbench = struct {
             }
         }
         if (!found) return error.StaleCatalog;
-        if (hasActiveOperation(task)) {
-            const replacement = try self.allocator.dupe(u8, model);
-            if (task.runtime.pending_model) |old| self.allocator.free(old);
-            task.runtime.pending_model = replacement;
-            self.bumpRevision();
-            return;
-        }
-        if (self.checkpointMutationPending(task)) return error.TaskBusy;
-        var access = task.runtime.acquireAccess() catch return error.TaskClosing;
-        var access_live = true;
-        defer if (access_live) access.deinit();
-        try access.setModel(model);
-        const replacement = self.copyBounded(
+        _ = self.task_runtime.selectModel(
+            task_id,
+            expected_model,
             model,
+            &self.checkpoint_store_health,
+            self.taskRuntimeTextProjection(),
+            self.taskRuntimeDurableEffect(),
             account_contract.Limits.model_id_bytes,
         ) catch |err| {
-            if (!restoreTaskModel(&access, expected_model)) {
-                access.deinit();
-                access_live = false;
-                self.beginTaskSessionDetachAfterModelFailureNoFail(task);
-            }
+            if (err == error.TaskPersistenceOutcomeUnknown or
+                err == error.TaskClosing)
+                _ = self.task_runtime.beginDetach(
+                    task_id,
+                    self.taskRuntimeOperationEffects(),
+                ) catch {};
             return err;
         };
-        const previous = task.durable.execution_model;
-        task.durable.execution_model = replacement;
-        self.commitTaskStateIfConfigured() catch |err| {
-            // Keep the durable binding and live Session coherent if the
-            // persistence commit fails after AgentCore accepted the change.
-            const must_close = err == error.TaskPersistenceOutcomeUnknown or
-                !restoreTaskModel(&access, expected_model);
-            if (must_close) {
-                access.deinit();
-                access_live = false;
-                self.beginTaskSessionDetachAfterModelFailureNoFail(task);
-            }
-            self.freeTracked(task.durable.execution_model);
-            task.durable.execution_model = previous;
-            return err;
-        };
-        self.freeTracked(previous);
         self.bumpRevision();
     }
 
@@ -3181,11 +2948,17 @@ pub const Workbench = struct {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
         try self.requireTaskPersistenceMutation();
-        const view = self.findTask(task_id) orelse return error.UnknownTask;
-        if (expected_binding_epoch == 0 or expected_binding_epoch != view.durable.binding_epoch)
+        const binding_epoch = self.task_runtime.taskBindingEpoch(task_id) orelse
+            return error.UnknownTask;
+        if (expected_binding_epoch == 0 or expected_binding_epoch != binding_epoch)
             return error.BindingEpochMismatch;
-        if (!self.taskContinuationAvailable(view)) return error.TaskClosing;
-        const workspace = self.findWorkspace(view.durable.workspace_id) orelse
+        if (!self.task_runtime.continuationAvailable(
+            task_id,
+            self.taskRuntimeProjectionEffects(),
+        )) return error.TaskClosing;
+        const workspace_id = self.task_runtime.taskWorkspaceId(task_id) orelse
+            return error.UnknownTask;
+        const workspace = self.findWorkspace(workspace_id) orelse
             return error.WorkspaceUnavailable;
         if (workspace.kind == .manual and !workspace.visible)
             return error.WorkspaceUnavailable;
@@ -3193,259 +2966,36 @@ pub const Workbench = struct {
             return error.WorkspaceRemovalInProgress;
         if (workspace.authorization != .available)
             return error.WorkspaceUnavailable;
-        if (workspace.epoch != view.durable.workspace_epoch)
+        const task_workspace_epoch = self.task_runtime.taskWorkspaceEpoch(task_id) orelse
+            return error.UnknownTask;
+        if (workspace.epoch != task_workspace_epoch)
             return error.WorkspaceEpochMismatch;
-        if (workspace.kind == .automatic and switch (input) {
-            .text => false,
-            .skill => true,
-        })
+        if (workspace.kind == .automatic and input == .skill)
             return error.CatalogUnavailable;
-        _ = try taskExecutionInput(view);
-        if (hasActiveOperation(view)) return error.TaskBusy;
-        if (self.checkpointMutationPending(view)) return error.TaskBusy;
-        var access = view.runtime.acquireAccess() catch return error.TaskClosing;
-        var access_live = true;
-        errdefer if (access_live) access.deinit();
-        self.applyPendingTaskModel(view, &access) catch |err| {
-            access.deinit();
-            access_live = false;
-            if (err == error.TaskPersistenceOutcomeUnknown or
-                err == error.TaskClosing)
-                self.beginTaskSessionDetachAfterModelFailureNoFail(view);
-            return err;
-        };
-        const execution = try taskExecutionInput(view);
-        const agent_input: lifecycle.RunInput = switch (input) {
-            .text => |text| .{ .text = text },
-            .skill => |skill_input| skill_admission: {
-                const pinned = view.runtime.pinnedCatalogConst() orelse
-                    return error.CatalogUnavailable;
-                if (!std.mem.eql(
-                    u8,
-                    skill_input.catalog_revision,
-                    pinned.revision,
-                ))
-                    return error.StaleCatalog;
-                if (skill_input.selection_revision != pinned.selection_revision)
-                    return error.StaleCatalog;
-                const skill = pinned.findSkill(skill_input.skill_id) orelse
-                    return error.SkillNotFound;
-                if (!skill.enabled) return error.SkillUnavailable;
-                if (skill_input.argument_values.len >
-                    @min(
-                        @as(usize, @intCast(skill.max_values)),
-                        self.limits.max_skill_arguments,
-                    ))
-                    return error.InvalidSkillArguments;
-                var argument_bytes = std.math.add(
-                    usize,
-                    skill.skill_id.len,
-                    pinned.revision.len,
-                ) catch return error.ProjectionCapacity;
-                if (argument_bytes > self.limits.max_user_message_bytes)
-                    return error.ProjectionCapacity;
-                for (skill_input.argument_values) |value| {
-                    if (!std.unicode.utf8ValidateSlice(value))
-                        return error.InvalidSkillArguments;
-                    argument_bytes = std.math.add(
-                        usize,
-                        argument_bytes,
-                        value.len,
-                    ) catch return error.ProjectionCapacity;
-                    if (argument_bytes > self.limits.max_user_message_bytes)
-                        return error.ProjectionCapacity;
-                }
-                break :skill_admission .{ .skill = .{
-                    .skill_id = skill.skill_id,
-                    .catalog_revision = pinned.revision,
-                    .argument_values = skill_input.argument_values,
-                } };
-            },
-        };
         const recent_order = if (workspace.kind == .manual)
             try self.takeWorkspaceRecentOrder()
         else
             0;
-        const run_id = try access.prepareRun(agent_input);
-        var prepared = true;
-        errdefer if (prepared) cancelPreparedRunOrPanic(&access, run_id);
-        const slot = try self.reserveRunRecord(view, input);
-        var record_owned = true;
-        errdefer if (record_owned) self.discardRunRecord(view, slot);
-        const run = &view.durable.runs[slot].?;
-        run.id = run_id;
-        const job_context = try std.heap.c_allocator.create(RunJobContext);
-        var job_context_owned = true;
-        errdefer if (job_context_owned) job_context.destroy();
-        job_context.* = .{
-            .run = run,
-            .worker_references = &view.runtime.worker_references,
-            .notifier = .{
-                .context = self.change_notifier.context,
-                .notify_fn = self.change_notifier.wake,
+        var order_context = TaskWorkspaceOrderContext{
+            .workbench = self,
+            .workspace = workspace,
+            .previous_order = workspace.recent_order,
+        };
+        const run_id = try self.task_runtime.startRun(
+            task_id,
+            expected_binding_epoch,
+            input,
+            .{
+                .context = &order_context,
+                .manual = workspace.kind == .manual,
+                .recent_order = recent_order,
+                .apply_fn = applyTaskWorkspaceOrder,
+                .rollback_fn = rollbackTaskWorkspaceOrder,
             },
-            .projector = .{ .project_fn = projectTaskWorkerText },
-            .completion_factory = .{
-                .context = self.completion_factory.context,
-                .create_fn = self.completion_factory.create_fn,
-            },
-            .checkpoint = .{
-                .allocator = self.allocator,
-                .io = self.io,
-                .store = self.checkpoint_store,
-                .store_health = &self.checkpoint_store_health,
-                .limits = checkpoint_export_limits,
-            },
-        };
-        if (run.automatic_title.state.load(.acquire) == .pending) {
-            job_context.title_execution = OwnedTaskExecution.clone(
-                self.allocator,
-                execution.target.provider_kind,
-                execution.target.model,
-                execution.target.base_url,
-                execution.execution_generation,
-                execution.api_key,
-            ) catch null;
-            if (job_context.title_execution == null)
-                run.automatic_title.state.store(.ready, .release);
-        }
-        run.checkpoint_export_context = .{
-            .task_id = view.durable.id,
-            .binding_epoch = view.durable.binding_epoch,
-            .terminal_kind = .run,
-            .terminal_id = run_id,
-            .last_run_id = run_id,
-            .last_compact_id = latestCompactId(view),
-            .model = run.execution_model,
-        };
-        const previous_title = view.durable.title;
-        const previous_title_redacted = view.durable.title_redacted;
-        const provisional_title_applied = self.applyProvisionalTaskTitle(view, run);
-        run.automatic_title.provisional_applied = provisional_title_applied;
-        const previous_active_run_id = view.runtime.active_run_id;
-        const previous_active_operation = view.runtime.active_operation;
-        const previous_task_recent_order = view.durable.recent_order;
-        const previous_next_task_recent_order = self.task_runtime.next_recent_order;
-        const previous_workspace_recent_order = workspace.recent_order;
-        view.runtime.active_run_id = run_id;
-        view.runtime.active_operation = .{ .run = run_id };
-        view.runtime.cancel_requested = false;
-        self.touchTask(view);
-        if (workspace.kind == .manual) workspace.recent_order = recent_order;
-        self.commitTaskStateIfConfigured() catch |err| {
-            view.runtime.active_run_id = previous_active_run_id;
-            view.runtime.active_operation = previous_active_operation;
-            view.durable.recent_order = previous_task_recent_order;
-            self.task_runtime.next_recent_order = previous_next_task_recent_order;
-            if (workspace.kind == .manual) {
-                workspace.recent_order = previous_workspace_recent_order;
-                self.next_workspace_recent_order = recent_order;
-            }
-            view.durable.next_run_generation -= 1;
-            if (provisional_title_applied)
-                self.rollbackProvisionalTaskTitle(
-                    view,
-                    previous_title,
-                    previous_title_redacted,
-                );
-            return err;
-        };
-        if (provisional_title_applied) self.allocator.free(previous_title);
-        job_context.access = access.take();
-        access_live = false;
-        _ = view.runtime.worker_references.fetchAdd(1, .acq_rel);
-        run.worker_reference_held.store(true, .release);
-        self.executor.enqueue(.{
-            .identity = run,
-            .context = job_context,
-            .execute_fn = task_worker.executeRun,
-            .cancel_fn = task_worker.cancelRun,
-        }) catch |err| {
-            publishAutomaticTitleFallback(run);
-            releaseWorkerReference(&view.runtime.worker_references, run);
-            cancelPreparedRunOrPanic(job_context.sessionAccess(), run_id);
-            prepared = false;
-            job_context.destroy();
-            job_context_owned = false;
-            _ = commitTerminal(
-                run,
-                .interrupted,
-                .interrupted,
-                .queue_capacity_failure,
-                .reusable,
-                "",
-                false,
-            );
-            run.terminal_observed = true;
-            run.event_stream_finalized = true;
-            view.runtime.active_operation = .none;
-            self.commitTaskStateNoFail();
-            record_owned = false;
-            self.bumpRevision();
-            return err;
-        };
-        job_context_owned = false;
-        prepared = false;
-        record_owned = false;
+            self.taskRuntimeOperationEffects(),
+        );
         self.bumpRevision();
         return run_id;
-    }
-
-    fn applyPendingTaskModel(
-        self: *Workbench,
-        task: *TaskView,
-        access: *task_agent_session.Access,
-    ) Error!void {
-        const pending = task.runtime.pending_model orelse return;
-        const previous = task.durable.execution_model;
-        try access.setModel(pending);
-        const replacement = self.copyBounded(
-            pending,
-            account_contract.Limits.model_id_bytes,
-        ) catch |err| {
-            if (!restoreTaskModel(access, previous)) return error.TaskClosing;
-            return err;
-        };
-        task.durable.execution_model = replacement;
-        self.commitTaskStateIfConfigured() catch |err| {
-            const coherent = if (err == error.TaskPersistenceOutcomeUnknown) blk: {
-                break :blk false;
-            } else restoreTaskModel(access, previous);
-            self.freeTracked(task.durable.execution_model);
-            task.durable.execution_model = previous;
-            if (coherent) task.runtime.pending_model = pending;
-            if (!coherent and err != error.TaskPersistenceOutcomeUnknown)
-                return error.TaskClosing;
-            return err;
-        };
-        task.runtime.pending_model = null;
-        self.freeTracked(previous);
-        self.allocator.free(pending);
-    }
-
-    /// Attempts to restore the durable model after a failed Product mutation.
-    /// The caller closes the Binding if Agent rejects this repair.
-    fn restoreTaskModel(
-        access: *task_agent_session.Access,
-        model: []const u8,
-    ) bool {
-        access.setModel(model) catch {
-            return false;
-        };
-        return true;
-    }
-
-    fn beginTaskSessionDetachAfterModelFailureNoFail(
-        self: *Workbench,
-        task: *TaskView,
-    ) void {
-        _ = self.beginTaskSessionDetach(task) catch {
-            // A model mutation whose rollback failed must never remain
-            // admissible merely because the close worker could not start.
-            if (task.runtime.attached()) |attached|
-                attached.health = .session_poisoned;
-            self.bumpRevision();
-        };
     }
 
     pub fn compactTaskAtBinding(
@@ -3456,105 +3006,19 @@ pub const Workbench = struct {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
         try self.requireTaskPersistenceMutation();
-        const view = self.findTask(task_id) orelse return error.UnknownTask;
-        if (expected_binding_epoch == 0 or
-            expected_binding_epoch != view.durable.binding_epoch)
+        const binding_epoch = self.task_runtime.taskBindingEpoch(task_id) orelse
+            return error.UnknownTask;
+        if (expected_binding_epoch == 0 or expected_binding_epoch != binding_epoch)
             return error.BindingEpochMismatch;
-        if (!self.taskContinuationAvailable(view)) return error.TaskClosing;
-        if (hasActiveOperation(view)) return error.TaskBusy;
-        if (self.checkpointMutationPending(view)) return error.TaskBusy;
-        if (hasUnfinalizedTerminalEvents(view)) return error.TaskBusy;
-        if (findEmpty(CompactRecord, view.durable.compacts) == null)
-            return error.CompactCapacity;
-        const after_run_id = lastFinalizedRunId(view) orelse
-            return error.NoSuchRun;
-        _ = try taskExecutionInput(view);
-        var access = view.runtime.acquireAccess() catch return error.TaskClosing;
-        var access_live = true;
-        errdefer if (access_live) access.deinit();
-        const operation_id = try access.prepareCompact();
-        var prepared = true;
-        errdefer if (prepared)
-            cancelPreparedCompactOrPanic(&access, operation_id);
-        const slot = try self.reserveCompactRecord(view, operation_id, after_run_id);
-        var record_owned = true;
-        errdefer if (record_owned) self.discardCompactRecord(view, slot);
-        const compact = &view.durable.compacts[slot].?;
-        const job_context = try std.heap.c_allocator.create(CompactJobContext);
-        var job_context_owned = true;
-        errdefer if (job_context_owned) job_context.destroy();
-        job_context.* = .{
-            .compact = compact,
-            .worker_references = &view.runtime.worker_references,
-            .notifier = .{
-                .context = self.change_notifier.context,
-                .notify_fn = self.change_notifier.wake,
-            },
-            .projector = .{ .project_fn = projectTaskWorkerText },
-            .checkpoint = .{
-                .allocator = self.allocator,
-                .io = self.io,
-                .store = self.checkpoint_store,
-                .store_health = &self.checkpoint_store_health,
-                .limits = checkpoint_export_limits,
-            },
-        };
-        compact.checkpoint_export_context = .{
-            .task_id = view.durable.id,
-            .binding_epoch = view.durable.binding_epoch,
-            .terminal_kind = .compact,
-            .terminal_id = operation_id,
-            .last_run_id = after_run_id,
-            .last_compact_id = operation_id,
-            .model = view.durable.execution_model,
-        };
-        const previous_active_operation = view.runtime.active_operation;
-        const previous_task_recent_order = view.durable.recent_order;
-        const previous_next_task_recent_order = self.task_runtime.next_recent_order;
-        view.runtime.active_operation = .{ .compact = operation_id };
-        self.touchTask(view);
-        self.commitTaskStateIfConfigured() catch |err| {
-            view.runtime.active_operation = previous_active_operation;
-            view.durable.recent_order = previous_task_recent_order;
-            self.task_runtime.next_recent_order = previous_next_task_recent_order;
-            return err;
-        };
-        job_context.access = access.take();
-        access_live = false;
-        _ = view.runtime.worker_references.fetchAdd(1, .acq_rel);
-        compact.worker_reference_held.store(true, .release);
-        self.executor.enqueue(.{
-            .identity = compact,
-            .context = job_context,
-            .execute_fn = task_worker.executeCompact,
-            .cancel_fn = task_worker.cancelCompact,
-        }) catch |err| {
-            releaseCompactWorkerReference(&view.runtime.worker_references, compact);
-            cancelPreparedCompactOrPanic(job_context.sessionAccess(), operation_id);
-            prepared = false;
-            job_context.destroy();
-            job_context_owned = false;
-            _ = commitCompactProductTerminal(
-                compact,
-                .interrupted,
-                .resource_limit,
-                .reusable,
-                .{},
-                0,
-                0,
-                "",
-                false,
-            );
-            compact.terminal_observed = true;
-            view.runtime.active_operation = .none;
-            self.commitTaskStateNoFail();
-            record_owned = false;
-            self.bumpRevision();
-            return err;
-        };
-        job_context_owned = false;
-        prepared = false;
-        record_owned = false;
+        if (!self.task_runtime.continuationAvailable(
+            task_id,
+            self.taskRuntimeProjectionEffects(),
+        )) return error.TaskClosing;
+        const operation_id = try self.task_runtime.startCompact(
+            task_id,
+            expected_binding_epoch,
+            self.taskRuntimeOperationEffects(),
+        );
         self.bumpRevision();
         return operation_id;
     }
@@ -3565,79 +3029,23 @@ pub const Workbench = struct {
         operation_id: u64,
     ) Error!void {
         self.syncLifecycle();
-        const view = self.findTask(task_id) orelse return error.UnknownTask;
-        const active_id = switch (view.runtime.active_operation) {
-            .compact => |id| id,
-            .none, .run, .restore => return error.NoSuchCompact,
-        };
-        if (operation_id == 0 or operation_id != active_id)
-            return error.NoSuchCompact;
-        const compact = findCompact(view.durable.compacts, operation_id) orelse
-            return error.NoSuchCompact;
-        _ = self.cancelCompactRecord(view, compact, .user_cancel);
-    }
-
-    fn cancelCompactRecord(
-        self: *Workbench,
-        view: *TaskView,
-        compact: *CompactRecord,
-        interruption: lifecycle.ExternalInterruption,
-    ) CompactTerminationDispatch {
-        if (compactTerminalPayload(compact) != null) {
-            self.syncLifecycle();
-            return .already_terminal;
-        }
-        const pending = pendingInterruption(interruption);
-        const prior = compact.pending_interruption.cmpxchgStrong(
-            .none,
-            pending,
-            .acq_rel,
-            .acquire,
+        _ = try self.task_runtime.cancelCompact(
+            task_id,
+            operation_id,
+            .user_cancel,
+            self.taskRuntimeOperationEffects(),
         );
-        if (compactTerminalPayload(compact) != null) {
-            self.syncLifecycle();
-            return .already_terminal;
-        }
-        if (self.executor.cancel(compact)) {
-            self.touchTask(view);
-            self.syncLifecycle();
-            self.commitTaskStateNoFail();
-            return .queued_aborted;
-        } else {
-            var access = view.runtime.acquireAccess() catch {
-                self.syncLifecycle();
-                return .session_closing;
-            };
-            defer access.deinit();
-            access.requestCompactCancellation(
-                compact.id,
-                pendingExternalInterruption(compact),
-            ) catch |err| switch (err) {
-                error.NoSuchCompact, error.SessionClosing => {
-                    self.syncLifecycle();
-                    return if (err == error.NoSuchCompact)
-                        .already_terminal
-                    else
-                        .session_closing;
-                },
-            };
-        }
-        self.touchTask(view);
-        self.commitTaskStateNoFail();
+        self.syncLifecycle();
         self.bumpRevision();
-        return if (prior == null) .requested else .already_requested;
     }
 
     pub fn taskExecutionIdentity(
         self: *Workbench,
         task_id: u64,
     ) Error!ExecutionIdentity {
-        const task = self.findTask(task_id) orelse return error.UnknownTask;
-        return .{
-            .generation = task.durable.execution_generation,
-            .provider = task.durable.execution_provider,
-            .model = task.durable.execution_model,
-        };
+        const value = self.task_runtime.taskExecutionIdentity(task_id) orelse
+            return error.UnknownTask;
+        return .{ .generation = value.generation, .provider = value.provider, .model = value.model };
     }
 
     pub fn runExecutionIdentity(
@@ -3645,14 +3053,11 @@ pub const Workbench = struct {
         task_id: u64,
         run_id: u64,
     ) Error!ExecutionIdentity {
-        const task = self.findTask(task_id) orelse return error.UnknownTask;
-        const run = findRun(task.durable.runs, run_id) orelse
+        if (self.task_runtime.taskExecutionIdentity(task_id) == null)
+            return error.UnknownTask;
+        const value = self.task_runtime.runExecutionIdentity(task_id, run_id) orelse
             return error.NoSuchRun;
-        return .{
-            .generation = run.execution_generation,
-            .provider = run.execution_provider,
-            .model = run.execution_model,
-        };
+        return .{ .generation = value.generation, .provider = value.provider, .model = value.model };
     }
 
     /// Lifecycle tests use this read-only counter to verify ownership rollback
@@ -3663,40 +3068,12 @@ pub const Workbench = struct {
 
     pub fn cancel(self: *Workbench, task_id: u64, run_id: u64) Error!void {
         self.syncLifecycle();
-        const view = self.findTask(task_id) orelse return error.UnknownTask;
-        const run = findRun(view.durable.runs, run_id) orelse return error.NoSuchRun;
-        if (terminalPayload(run) != null) return;
-        var access = view.runtime.acquireAccess() catch return error.TaskClosing;
-        defer access.deinit();
-        const record = self.prepareCancelledUiRecord(
-            &access,
+        if (try self.task_runtime.cancelRun(
+            task_id,
             run_id,
-            run.redaction_secret,
-        );
-        const dispatch = requestRunTermination(run, .user_cancel);
-        if (self.executor.cancel(run)) {
-            run.terminal_observed = true;
-            if (record) |value| self.pushUiRecord(view, value);
-            view.runtime.cancel_requested = false;
-            self.touchTask(view);
-            self.commitTaskStateNoFail();
-            self.bumpRevision();
-            return;
-        }
-        const stopping = switch (dispatch) {
-            .pending, .requested, .already_requested => true,
-            .already_finishing, .already_terminal, .stale_run, .session_closing => false,
-        };
-        if (!stopping) {
-            self.syncLifecycle();
-            return;
-        }
-        if (record) |value| self.pushUiRecord(view, value);
-        view.runtime.cancel_requested = true;
-        _ = setActivePhase(run, .stopping);
-        self.touchTask(view);
-        self.commitTaskStateNoFail();
-        self.bumpRevision();
+            self.taskRuntimeOperationEffects(),
+        )) self.bumpRevision();
+        self.syncLifecycle();
     }
 
     pub fn respondUi(
@@ -3708,183 +3085,34 @@ pub const Workbench = struct {
     ) Error!void {
         self.syncLifecycle();
         try self.requireTaskPersistenceMutation();
-        const view = self.findTask(task_id) orelse return error.UnknownTask;
-        const run = findRun(view.durable.runs, run_id) orelse return error.NoSuchRun;
-        var access = view.runtime.acquireAccess() catch return error.TaskClosing;
-        defer access.deinit();
-        const record = self.prepareUiRecord(
-            &access,
+        try self.task_runtime.respondUi(
+            task_id,
             run_id,
             request_id,
             response,
-            run.redaction_secret,
+            self.taskRuntimeOperationEffects(),
         );
-        const history_slot = view.durable.ui_history_next;
-        const previous_history_record = view.durable.ui_history[history_slot];
-        const previous_history_next = view.durable.ui_history_next;
-        const previous_history_count = view.durable.ui_history_count;
-        const previous_pending_request_id = view.runtime.pending_ui_request_id;
-        const previous_pending_order = view.runtime.pending_ui_order;
-        const previous_activity_order = run.next_activity_order;
-        const previous_task_recent_order = view.durable.recent_order;
-        const previous_next_task_recent_order = self.task_runtime.next_recent_order;
-        self.pushUiRecord(view, record);
-        self.touchTask(view);
-        self.commitTaskStateIfConfigured() catch |err| {
-            view.durable.ui_history[history_slot] = previous_history_record;
-            view.durable.ui_history_next = previous_history_next;
-            view.durable.ui_history_count = previous_history_count;
-            view.runtime.pending_ui_request_id = previous_pending_request_id;
-            view.runtime.pending_ui_order = previous_pending_order;
-            run.next_activity_order = previous_activity_order;
-            view.durable.recent_order = previous_task_recent_order;
-            self.task_runtime.next_recent_order = previous_next_task_recent_order;
-            return err;
-        };
-        const response_result = access.respondPermission(
-            run_id,
-            request_id,
-            agentPermissionChoice(response.permission),
-        );
-        response_result catch |err| {
-            view.durable.ui_history[history_slot] = previous_history_record;
-            view.durable.ui_history_next = previous_history_next;
-            view.durable.ui_history_count = previous_history_count;
-            view.runtime.pending_ui_request_id = previous_pending_request_id;
-            view.runtime.pending_ui_order = previous_pending_order;
-            run.next_activity_order = previous_activity_order;
-            view.durable.recent_order = previous_task_recent_order;
-            self.task_runtime.next_recent_order = previous_next_task_recent_order;
-            self.commitTaskStateNoFail();
-            return err;
-        };
         self.bumpRevision();
     }
 
     fn detachTaskSession(self: *Workbench, task_id: u64) Error!void {
         self.syncLifecycle();
-        const view = self.findTask(task_id) orelse return error.UnknownTask;
-        if (try self.beginTaskSessionDetach(view)) self.bumpRevision();
-    }
-
-    /// Starts or retries the attachment-owned Session release without
-    /// recursively synchronizing Workbench lifecycle. Callers that publish
-    /// outside `syncLifecycle` are responsible for bumping the revision.
-    fn beginTaskSessionDetach(self: *Workbench, view: *TaskView) Error!bool {
-        if (!hasActiveOperation(view) and self.checkpointMutationPending(view)) {
-            cancelTaskCheckpoints(view);
-            return error.TaskBusy;
-        }
-        if (view.runtime.close_thread != null) return error.CloseInProgress;
-        const retrying_closing_session = view.runtime.close_failed and
-            view.runtime.hasClosingSession();
-        if (view.runtime.live() == null) return false;
-        const prior_health = if (view.runtime.attached()) |attached|
-            attached.health
-        else
-            task_attachment.AttachedHealth.available;
-        if (switch (view.runtime.active_operation) {
-            .compact => true,
-            .none, .run, .restore => false,
-        }) {
-            const compact_id = switch (view.runtime.active_operation) {
-                .compact => |id| id,
-                .none, .run, .restore => unreachable,
-            };
-            const compact = findCompact(view.durable.compacts, compact_id) orelse
-                return error.NoSuchCompact;
-            _ = self.cancelCompactRecord(view, compact, .session_close);
-        }
-        var observation_access = view.runtime.acquireAccess() catch null;
-        defer if (observation_access) |*access| access.deinit();
-        const cancelled_ui = if (view.runtime.pending_ui_request_id != 0 and
-            observation_access != null)
-            self.prepareCancelledUiRecord(
-                &observation_access.?,
-                view.runtime.active_run_id,
-                if (findRun(view.durable.runs, view.runtime.active_run_id)) |run|
-                    run.redaction_secret
-                else if (view.runtime.execution()) |execution|
-                    execution.input().api_key
-                else
-                    &.{},
-            )
-        else
-            null;
-        if (findRun(view.durable.runs, view.runtime.active_run_id)) |run| {
-            const dispatch = requestRunTermination(run, .session_close);
-            if (self.executor.cancel(run)) {
-                run.terminal_observed = true;
-            } else consumeLifecycleTermination(dispatch, run.id);
-        }
-        if (!retrying_closing_session)
-            std.debug.assert(view.runtime.beginClosing());
-        const binding = view.runtime.closingWorkerBinding() orelse unreachable;
-        view.runtime.cancel_requested = switch (view.runtime.active_operation) {
-            .run => true,
-            .none, .compact, .restore => false,
-        };
-        if (findRun(view.durable.runs, view.runtime.active_run_id)) |run| {
-            if (!isTerminalPhase(runPhase(run))) _ = setActivePhase(run, .stopping);
-        }
-        view.runtime.close_failed = false;
-        view.runtime.close_completion.store(.running, .release);
-        view.runtime.close_thread = std.Thread.spawn(.{}, closeWorker, .{
-            &view.runtime.close_completion,
-            binding,
-            self.change_notifier,
-        }) catch |err| {
-            view.runtime.close_completion.store(.none, .release);
-            if (retrying_closing_session)
-                view.runtime.close_failed = true
-            else
-                view.runtime.restoreCloseFailure(prior_health);
-            return err;
-        };
-        if (cancelled_ui) |record|
-            self.pushUiRecord(view, record);
-        self.touchTask(view);
-        self.commitTaskStateNoFail();
-        return true;
+        if (try self.task_runtime.beginDetach(
+            task_id,
+            self.taskRuntimeOperationEffects(),
+        )) self.bumpRevision();
     }
 
     pub fn renameTask(self: *Workbench, task_id: u64, title: []const u8) Error!void {
         self.syncLifecycle();
         try self.requireTaskPersistenceMutation();
-        const view = self.findTask(task_id) orelse return error.UnknownTask;
-        if (view.deletion == .deleting) return error.TaskBusy;
-        const trimmed = std.mem.trim(u8, title, " \t\r\n");
-        if (trimmed.len == 0 or trimmed.len > self.limits.max_task_title_bytes or
-            !std.unicode.utf8ValidateSlice(trimmed))
-            return error.InvalidTaskTitle;
-        for (trimmed) |byte| if (byte < 0x20) return error.InvalidTaskTitle;
-        const previous_title = view.durable.title;
-        const previous_redacted = view.durable.title_redacted;
-        const previous_recent_order = view.durable.recent_order;
-        const previous_next_recent_order = self.task_runtime.next_recent_order;
-        self.projection_bytes -= previous_title.len;
-        const projected = self.copyProjected(
-            trimmed,
+        try self.task_runtime.renameTask(
+            task_id,
+            title,
             self.limits.max_task_title_bytes,
-            if (view.runtime.execution()) |execution| execution.input().api_key else &.{},
-        ) catch |err| {
-            self.projection_bytes += previous_title.len;
-            return err;
-        };
-        view.durable.title = projected.value;
-        view.durable.title_redacted = projected.redacted;
-        self.touchTask(view);
-        self.commitTaskStateIfConfigured() catch |err| {
-            self.freeTracked(view.durable.title);
-            view.durable.title = previous_title;
-            self.projection_bytes += previous_title.len;
-            view.durable.title_redacted = previous_redacted;
-            view.durable.recent_order = previous_recent_order;
-            self.task_runtime.next_recent_order = previous_next_recent_order;
-            return err;
-        };
-        self.allocator.free(previous_title);
-        self.markAutomaticTitleUserOverride(view);
+            self.taskRuntimeTextProjection(),
+            self.taskRuntimeDurableEffect(),
+        );
         self.bumpRevision();
     }
 
@@ -4027,134 +3255,27 @@ pub const Workbench = struct {
     pub fn setTaskArchived(self: *Workbench, task_id: u64, archived: bool) Error!void {
         self.syncLifecycle();
         try self.requireTaskPersistenceMutation();
-        const view = self.findTask(task_id) orelse return error.UnknownTask;
-        if (view.deletion == .deleting or taskLifecycle(view) == .closing or
-            hasActiveOperation(view)) return error.TaskBusy;
-        if (view.durable.archived == archived) return;
-        const previous_recent_order = view.durable.recent_order;
-        const previous_next_recent_order = self.task_runtime.next_recent_order;
-        const previous_deletion = view.deletion;
-        view.durable.archived = archived;
-        if (!archived and view.deletion == .failed) view.deletion = .idle;
-        self.touchTask(view);
-        self.commitTaskStateIfConfigured() catch |err| {
-            view.durable.archived = !archived;
-            view.deletion = previous_deletion;
-            view.durable.recent_order = previous_recent_order;
-            self.task_runtime.next_recent_order = previous_next_recent_order;
-            return err;
-        };
-        self.bumpRevision();
+        if (try self.task_runtime.setArchived(
+            task_id,
+            archived,
+            self.taskRuntimeDurableEffect(),
+        )) self.bumpRevision();
     }
 
     pub fn deleteTask(self: *Workbench, task_id: u64) Error!void {
         self.syncLifecycle();
         try self.requireTaskPersistenceMutation();
-        const index = self.findTaskIndex(task_id) orelse return error.UnknownTask;
-        const view = &(self.task_runtime.tasks[index] orelse unreachable);
-        if (!view.durable.archived) return error.TaskNotArchived;
-        if (view.deletion == .deleting) return;
-        view.deletion = .deleting;
-        _ = self.advanceTaskDeletion(index) catch |err| {
-            if (self.task_runtime.tasks[index]) |*retained|
-                retained.deletion = .failed;
-            self.bumpRevision();
-            return err;
-        };
-        self.bumpRevision();
-    }
-
-    /// Advances one accepted deletion intent as far as current owner facts
-    /// permit. Waiting is not an error: later lifecycle synchronization calls
-    /// this function again after checkpoint, worker, event, or Session state
-    /// changes. Only an explicit retry changes `.failed` back to `.deleting`.
-    fn advanceTaskDeletion(self: *Workbench, index: usize) Error!bool {
-        const view = &(self.task_runtime.tasks[index] orelse return error.UnknownTask);
-        if (view.deletion == .deleting) std.debug.assert(view.durable.archived);
-        const session: task_deletion.Session = if (view.runtime.hasAttachedSession())
-            .attached
-        else if (view.runtime.hasClosingSession())
-            if (view.runtime.close_failed) .retryable_close_failure else .closing
-        else
-            .detached;
-        return switch (task_deletion.decide(view.deletion, .{
-            .checkpoint_pending = self.checkpointMutationPending(view),
-            .close_operation_running = view.runtime.close_completion.load(.acquire) == .running or
-                view.runtime.close_thread != null,
-            .unfinalized_terminal_events = hasUnfinalizedTerminalEvents(view),
-            .session = session,
-            .worker_references = view.runtime.worker_references.load(.acquire),
-        })) {
-            .wait => false,
-            .cancel_checkpoint => cancel: {
-                cancelTaskCheckpoints(view);
-                break :cancel false;
-            },
-            .release_session => try self.beginTaskSessionDetach(view),
-            .commit_record_deletion => commit: {
-                try self.finalizeTaskDeletion(index);
-                break :commit true;
-            },
-        };
-    }
-
-    fn finalizeTaskDeletion(self: *Workbench, index: usize) Error!void {
-        const view = &(self.task_runtime.tasks[index] orelse return error.UnknownTask);
-        std.debug.assert(view.durable.archived);
-        std.debug.assert(view.deletion == .deleting);
-        std.debug.assert(!view.runtime.hasAttachedSession());
-        std.debug.assert(!view.runtime.hasClosingSession());
-        std.debug.assert(view.runtime.worker_references.load(.acquire) == 0);
-        std.debug.assert(!hasUnfinalizedTerminalEvents(view));
-        std.debug.assert(!self.checkpointMutationPending(view));
-        const workspace_id = view.durable.workspace_id;
-        const release_automatic_workspace = if (self.findWorkspace(workspace_id)) |workspace|
-            workspace.kind == .automatic
-        else
-            false;
-        var removed_task = view.*;
-        self.task_runtime.tasks[index] = null;
-        var removed_workspace_index: ?usize = null;
-        var removed_workspace: WorkspaceView = undefined;
-        if (release_automatic_workspace) {
-            for (self.workspaces, 0..) |*entry, workspace_index| {
-                const workspace = &(entry.* orelse continue);
-                if (workspace.id != workspace_id) continue;
-                removed_workspace = workspace.*;
-                entry.* = null;
-                removed_workspace_index = workspace_index;
-                break;
-            }
+        const requested = try self.task_runtime.requestDeletion(task_id);
+        const deletion = self.task_runtime.syncDeletions(
+            self.checkpoint_store_health.load(.acquire) != .unavailable,
+            self.taskRuntimeDeletionEffects(),
+        );
+        if (requested or deletion.changed) self.bumpRevision();
+        if (deletion.failed_task_id == task_id) {
+            if (!self.task_runtime.durableMutationAvailable())
+                return error.TaskPersistenceOutcomeUnknown;
+            return error.TaskPersistenceFailed;
         }
-        self.commitTaskStateIfConfigured() catch |err| {
-            self.task_runtime.tasks[index] = removed_task;
-            if (removed_workspace_index) |workspace_index|
-                self.workspaces[workspace_index] = removed_workspace;
-            return err;
-        };
-        if (self.checkpoint_store) |store| store.deleteTask(removed_task.durable.id);
-        self.deinitTaskView(&removed_task);
-        if (removed_workspace_index != null)
-            self.deinitWorkspaceView(&removed_workspace);
-    }
-
-    fn advanceRequestedTaskDeletionsNoFail(self: *Workbench) bool {
-        var changed = false;
-        for (self.task_runtime.tasks, 0..) |*entry, index| {
-            const view = &(entry.* orelse continue);
-            if (view.deletion != .deleting) continue;
-            const advanced = self.advanceTaskDeletion(index) catch {
-                // The accepted deletion intent cannot manufacture a durable
-                // success. Leave the archived Task intact and allow an
-                // explicit retry after persistence recovers.
-                if (self.task_runtime.tasks[index]) |*retained|
-                    retained.deletion = .failed;
-                changed = true;
-                continue;
-            };
-            changed = advanced or changed;
-        }
-        return changed;
     }
 
     pub fn currentRevision(self: *Workbench) u64 {
@@ -4175,139 +3296,24 @@ pub const Workbench = struct {
         changed = self.syncMcpHealthNoFail() or changed;
         var durable_changed = false;
         var mcp_refresh_needed = false;
-        for (self.task_runtime.tasks) |*entry| {
-            const view = &(entry.* orelse continue);
-            const recovery_commit = self.commitRecoveryJobNoFail(view);
-            changed = recovery_commit.changed or changed;
-            durable_changed = recovery_commit.durable_changed or durable_changed;
-            if (self.commitAutomaticTitlesNoFail(view)) {
-                changed = true;
-                durable_changed = true;
-            }
-            mcp_refresh_needed = recovery_commit.mcp_refresh_needed or mcp_refresh_needed;
-            const close_completion = view.runtime.close_completion.load(.acquire);
-            // Session close may finish after Agent execution but before the
-            // main thread has drained callbacks already enqueued for the Run.
-            // Keep the Task in `closing` until those events and the immutable
-            // terminal result become product-visible together.
-            if (close_completion != .none and close_completion != .running and
-                !hasUnfinalizedTerminalEvents(view))
-            {
-                view.runtime.close_thread.?.join();
-                view.runtime.close_thread = null;
-                std.debug.assert(view.runtime.hasClosingSession());
-                view.runtime.close_completion.store(.none, .release);
-                switch (close_completion) {
-                    .closed => {
-                        std.debug.assert(
-                            view.runtime.closingWorkerBinding().?.state() == .released,
-                        );
-                        var live = view.runtime.detach(.released);
-                        self.releaseExecutionValueNoFail(view, &live.execution);
-                        if (live.pinned_catalog) |*snapshot| {
-                            self.projection_bytes -= snapshot.projected_bytes;
-                            snapshot.deinit();
-                        }
-                        view.runtime.close_failed = false;
-                    },
-                    .failed_reusable, .failed_poisoned, .failed_closing => {
-                        view.runtime.close_failed = true;
-                        if (view.deletion == .deleting)
-                            view.deletion = .failed;
-                        switch (close_completion) {
-                            .failed_reusable => view.runtime.restoreCloseFailure(.available),
-                            .failed_poisoned => view.runtime.restoreCloseFailure(.session_poisoned),
-                            .failed_closing => {},
-                            else => unreachable,
-                        }
-                    },
-                    .none, .running => unreachable,
-                }
-                view.runtime.cancel_requested = false;
-                changed = true;
-            }
-            // A pending UI request can only exist while a Run worker still
-            // owns its Task reference. Avoid touching an idle attachment when
-            // there is no Agent-to-Workbench handoff to observe.
-            var observation_access = if (view.runtime.worker_references.load(.acquire) != 0 and
-                view.runtime.active_run_id != 0)
-                view.runtime.acquireAccess() catch null
-            else
-                null;
-            defer if (observation_access) |*access| access.deinit();
-            const pending = if (observation_access) |*access|
-                access.pendingUiObservation()
-            else
-                null;
-            const pending_request_id = if (pending) |value| value.request_id else 0;
-            if (view.runtime.pending_ui_request_id != pending_request_id) {
-                view.runtime.pending_ui_request_id = pending_request_id;
-                view.runtime.pending_ui_order = 0;
-                if (pending) |observation| {
-                    if (findRun(view.durable.runs, observation.run_id)) |pending_run|
-                        view.runtime.pending_ui_order = takeActivityOrder(pending_run);
-                }
-                changed = true;
-            }
-            if (switch (view.runtime.active_operation) {
-                .compact => true,
-                .none, .run, .restore => false,
-            }) {
-                const operation_id = switch (view.runtime.active_operation) {
-                    .compact => |id| id,
-                    .none, .run, .restore => unreachable,
-                };
-                const compact = findCompact(view.durable.compacts, operation_id) orelse {
-                    view.runtime.active_operation = .none;
-                    changed = true;
-                    continue;
-                };
-                if (compactTerminalPayload(compact)) |terminal| {
-                    if (!compact.terminal_observed) {
-                        foldTerminalDisposition(
-                            view,
-                            terminal.session_disposition_at_completion,
-                        );
-                        compact.terminal_observed = true;
-                    }
-                    view.runtime.active_operation = .none;
-                    changed = true;
-                    durable_changed = true;
-                }
-                continue;
-            }
-            const run = findRun(view.durable.runs, view.runtime.active_run_id) orelse continue;
-            if (productTerminalFacts(run)) |terminal| {
-                var terminal_durable_changed = false;
-                view.runtime.cancel_requested = false;
-                if (switch (view.runtime.active_operation) {
-                    .run => |id| id == run.id,
-                    .none, .compact, .restore => false,
-                }) {
-                    view.runtime.active_operation = .none;
-                    changed = true;
-                    terminal_durable_changed = true;
-                }
-                if (!run.terminal_observed) {
-                    foldTerminalDisposition(view, terminal.session_disposition_at_completion);
-                    run.terminal_observed = true;
-                    changed = true;
-                    terminal_durable_changed = true;
-                }
-                durable_changed = durable_changed or terminal_durable_changed;
-                continue;
-            }
-            const next_phase: RunPhase = if (view.runtime.cancel_requested)
-                .stopping
-            else if (pending != null)
-                .waiting_ui
-            else switch (run.agent_handoff.load(.acquire)) {
-                .queued, .starting => .queued,
-                .running, .finishing => .running,
-            };
-            if (runPhase(run) != next_phase and setActivePhase(run, next_phase))
-                changed = true;
-        }
+        const title_sync = self.task_runtime.syncAutomaticTitles(
+            self.limits.max_task_title_bytes,
+            self.taskRuntimeTextProjection(),
+        );
+        changed = title_sync.changed or changed;
+        durable_changed = title_sync.durable_changed or durable_changed;
+        const recovery_sync = self.task_runtime.syncRecoveryCompletions(
+            self.taskRuntimeRecoveryEffects(),
+        );
+        changed = recovery_sync.changed or changed;
+        durable_changed = recovery_sync.durable_changed or durable_changed;
+        mcp_refresh_needed = recovery_sync.mcp_refresh_needed;
+        changed = self.task_runtime.syncCloseCompletions(
+            self.taskRuntimeReleaseEffects(),
+        ) or changed;
+        const task_sync = self.task_runtime.syncOperationRecords();
+        changed = task_sync.changed or changed;
+        durable_changed = task_sync.durable_changed or durable_changed;
         if (self.finalizeWorkspaceRemovalsNoFail()) {
             changed = true;
             durable_changed = true;
@@ -4315,222 +3321,15 @@ pub const Workbench = struct {
         if (self.reconcileScheduledTaskBindingsNoFail()) changed = true;
         if (self.reconcileScheduledTaskCompletionsNoFail()) changed = true;
         if (durable_changed) self.commitTaskStateNoFail();
-        for (self.task_runtime.tasks) |*entry| {
-            const view = &(entry.* orelse continue);
-            if (self.commitCheckpointPostprocessesNoFail(view)) changed = true;
-        }
-        if (self.advanceRequestedTaskDeletionsNoFail()) changed = true;
+        if (self.task_runtime.syncCheckpointPostprocesses(
+            self.taskRuntimeCheckpointEffects(),
+        )) changed = true;
+        if (self.task_runtime.syncDeletions(
+            self.checkpoint_store_health.load(.acquire) != .unavailable,
+            self.taskRuntimeDeletionEffects(),
+        ).changed) changed = true;
         if (changed) self.bumpRevision();
         if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
-    }
-
-    const RecoveryCommit = struct {
-        changed: bool = false,
-        durable_changed: bool = false,
-        mcp_refresh_needed: bool = false,
-    };
-
-    fn commitRecoveryJobNoFail(
-        self: *Workbench,
-        task: *TaskView,
-    ) RecoveryCommit {
-        const job = task.runtime.restore_job orelse return .{};
-        if (!job.completionReady()) return .{};
-        const active_attempt_id: ?u64 = switch (task.runtime.active_operation) {
-            .restore => |attempt| attempt.id,
-            .none, .run, .compact => null,
-        };
-        var durable_changed = false;
-        var mcp_refresh_needed = false;
-        if (job.takeCandidate()) |candidate_value| {
-            var candidate = candidate_value;
-            const workspace = self.findWorkspace(task.durable.workspace_id);
-            const record_matches = if (task.durable.checkpoint) |record|
-                checkpointIdentityEqual(record.blob, job.attempt.checkpoint.blob)
-            else
-                false;
-            const skill_policy_revision = if (workspace) |current_workspace|
-                self.skill.enablementRevision(.{ .project = .{
-                    .workspace_id = current_workspace.id,
-                    .workspace_epoch = current_workspace.epoch,
-                } })
-            else
-                0;
-            const commit_allowed = task_recovery_job.commitAllowed(
-                &job.attempt,
-                .{
-                    .task_id = task.durable.id,
-                    .binding_epoch = task.durable.binding_epoch,
-                    .workspace_id = task.durable.workspace_id,
-                    .workspace_epoch = task.durable.workspace_epoch,
-                    .workspace_root = if (workspace) |value| value.canonical_root else "",
-                    .skill_policy_revision = skill_policy_revision,
-                    .execution_generation = task.durable.execution_generation,
-                    .execution_model = task.durable.execution_model,
-                    .provider = agentProvider(task.durable.execution_provider),
-                    .mcp_catalog_generation = mcp_policy.recoveryGeneration(
-                        if (self.mcp) |*mcp| mcp else null,
-                        self.mcp_refresh_job != null,
-                    ),
-                    .active_attempt_id = active_attempt_id,
-                    .shutting_down = self.shutting_down,
-                    .archived = task.durable.archived,
-                    .attachment_detached = task.runtime.attachment == .detached,
-                    .checkpoint_matches = record_matches,
-                    .workspace_authority_stable = self.recoveryAuthorityStable(workspace),
-                    .execution_authority_stable = self.recoveryExecutionExact(task),
-                    .available_projection_bytes = self.limits.max_projection_bytes - self.projection_bytes,
-                },
-                candidate.pinned_catalog.projected_bytes,
-            );
-            if (commit_allowed) {
-                self.projection_bytes += candidate.pinned_catalog.projected_bytes;
-                task.runtime.last_restore_permission = .{
-                    .restored_rules = candidate.report.restored_permission_rules,
-                    .invalidated_rules = candidate.report.invalidated_permission_rules,
-                };
-                task.runtime.attachment = .{ .attached = .{
-                    .binding = candidate.takeBinding(),
-                    .execution = candidate.takeExecution(),
-                    .pinned_catalog = candidate.takeCatalog(),
-                } };
-                task.runtime.last_restore_failure = null;
-            } else if (!candidate.discard()) {
-                self.task_runtime.recovery_poisoned = true;
-                task.runtime.last_restore_failure = .candidate_cleanup_failed;
-            }
-        } else if (job.failure()) |failure| {
-            task.runtime.last_restore_failure = failure;
-            mcp_refresh_needed = failure == .mcp_not_refreshed and
-                optionalU64Equal(
-                    mcp_policy.recoveryGeneration(if (self.mcp) |*mcp| mcp else null, self.mcp_refresh_job != null),
-                    job.attempt.mcp_catalog_generation,
-                );
-            switch (failure) {
-                .checkpoint_missing => {
-                    task.durable.checkpoint_anchor = .blob_missing;
-                    durable_changed = true;
-                },
-                .checkpoint_mismatch => {
-                    task.durable.checkpoint_anchor = .blob_mismatch;
-                    durable_changed = true;
-                },
-                .checkpoint_io => {
-                    // A transient blob read failure is an attempt fact; the
-                    // durable anchor stays valid and recovery stays retryable.
-                    task.durable.checkpoint_attempt = .io_failed;
-                    durable_changed = true;
-                },
-                .candidate_cleanup_failed => self.task_runtime.recovery_poisoned = true,
-                else => {},
-            }
-        }
-        task.runtime.restore_job = null;
-        task.runtime.active_operation = .none;
-        const references = task.runtime.worker_references.fetchSub(1, .release);
-        std.debug.assert(references != 0);
-        job.deinit();
-        return .{
-            .changed = true,
-            .durable_changed = durable_changed,
-            .mcp_refresh_needed = mcp_refresh_needed,
-        };
-    }
-
-    fn commitCheckpointPostprocessesNoFail(
-        self: *Workbench,
-        task: *TaskView,
-    ) bool {
-        var changed = false;
-        for (task.durable.runs) |*entry| {
-            const run = &(entry.* orelse continue);
-            if (!run.event_stream_finalized) continue;
-            if (!self.commitCheckpointPostprocessNoFail(task, &run.checkpoint)) continue;
-            if (run.checkpoint.state.load(.acquire) == .settled and
-                run.worker_reference_held.load(.acquire))
-                releaseWorkerReference(&task.runtime.worker_references, run);
-            changed = true;
-        }
-        for (task.durable.compacts) |*entry| {
-            const compact = &(entry.* orelse continue);
-            if (!compact.terminal_observed) continue;
-            if (!self.commitCheckpointPostprocessNoFail(task, &compact.checkpoint)) continue;
-            if (compact.checkpoint.state.load(.acquire) == .settled)
-                releaseCompactWorkerReference(&task.runtime.worker_references, compact);
-            changed = true;
-        }
-        return changed;
-    }
-
-    fn commitCheckpointPostprocessNoFail(
-        self: *Workbench,
-        task: *TaskView,
-        postprocess: *CheckpointPostprocess,
-    ) bool {
-        switch (postprocess.state.load(.acquire)) {
-            .none, .exporting, .settled => return false,
-            .failure_ready => {
-                const attempt = postprocess.payload.failure;
-                const previous = task.durable.checkpoint_attempt;
-                task.durable.checkpoint_attempt = attempt;
-                self.commitTaskStateIfConfigured() catch {
-                    task.durable.checkpoint_attempt = previous;
-                };
-                postprocess.payload = .none;
-                postprocess.state.store(.settled, .release);
-                return true;
-            },
-            .candidate_ready => {
-                const candidate = &postprocess.payload.candidate;
-                const history_commit_started = std.Io.Timestamp.now(self.io, .awake);
-                self.commitTaskStateWithCheckpoint(.{
-                    .task_id = task.durable.id,
-                    .record = &candidate.record,
-                    .anchor = .available,
-                }) catch |err| {
-                    if (err == error.TaskPersistenceOutcomeUnknown) {
-                        task.durable.checkpoint_attempt = .outcome_unknown;
-                        postprocess.state.store(.store_outcome_unknown, .release);
-                        return true;
-                    }
-                    candidate.record.deinit(self.allocator);
-                    postprocess.payload = .none;
-                    postprocess.state.store(.settled, .release);
-                    return true;
-                };
-                const history_commit_finished = std.Io.Timestamp.now(self.io, .awake);
-                if (builtin.mode == .Debug) std.log.info(
-                    "checkpoint.commit task_id={d} terminal_kind={s} terminal_id={d} byte_size={d} chunk_count={d} export_duration_ns={d} history_commit_duration_ns={d}",
-                    .{
-                        task.durable.id,
-                        @tagName(candidate.record.anchor.terminal),
-                        candidate.record.anchor.terminal.id(),
-                        candidate.record.blob.byte_size,
-                        candidate.metrics.chunk_count,
-                        candidate.metrics.export_duration_ns,
-                        history_commit_started.durationTo(history_commit_finished).nanoseconds,
-                    },
-                );
-                const old_identity = if (task.durable.checkpoint) |old| old.blob else null;
-                if (task.durable.checkpoint) |*old|
-                    old.deinit(self.allocator);
-                task.durable.checkpoint = candidate.record;
-                candidate.record = undefined;
-                task.durable.checkpoint_anchor = .available;
-                task.durable.checkpoint_attempt = .none;
-                postprocess.payload = .none;
-                postprocess.state.store(.settled, .release);
-                if (old_identity) |identity|
-                    if (self.checkpoint_store) |store| store.delete(identity);
-                return true;
-            },
-            .store_outcome_unknown => {
-                if (task.durable.checkpoint_attempt == .outcome_unknown)
-                    return false;
-                task.durable.checkpoint_attempt = .outcome_unknown;
-                return true;
-            },
-        }
     }
 
     /// Consumes the canonical Agent event stream and owns the complete product
@@ -4575,21 +3374,24 @@ pub const Workbench = struct {
     }
 
     pub fn applyEvent(self: *Workbench, envelope: *const lifecycle.OwnedCoreEvent) Error!void {
-        const task = self.findTaskByRouteId(envelope.session_id) orelse return error.UnknownTask;
-        const outcome = task_model.applyEvent(
-            task,
+        const outcome = self.task_runtime.applyEvent(
             envelope,
-            self.taskEventProjection(),
+            .{
+                .text = self.taskRuntimeTextProjection(),
+                .max_assistant_message_bytes = self.limits.max_assistant_message_bytes,
+                .max_tool_field_bytes = self.limits.max_tool_field_bytes,
+                .max_file_refs_per_tool = self.limits.max_file_refs_per_tool,
+                .max_file_ref_field_bytes = self.limits.max_file_ref_field_bytes,
+            },
         ) catch |err| return @errorCast(err);
         switch (outcome) {
             .unknown, .unchanged => {},
-            .late_terminal => {
+            .late_terminal => |late| {
                 // A late event cannot change a published product terminal, and
                 // is not by itself proof of an AgentCore contract violation.
-                self.task_runtime.late_terminal_event_count +|= 1;
                 if (builtin.mode == .Debug) std.log.warn(
                     "workbench.late_terminal_event task_id={d} run_id={d} count={d}",
-                    .{ task.durable.id, envelope.run_id, self.task_runtime.late_terminal_event_count },
+                    .{ late.task_id, envelope.run_id, late.count },
                 );
             },
             .applied => |application| {
@@ -4607,10 +3409,7 @@ pub const Workbench = struct {
         route_id: u64,
         run_id: u64,
     ) void {
-        const task = self.findTaskByRouteId(route_id) orelse return;
-        const run = findRun(task.durable.runs, run_id) orelse return;
-        if (!task_model.recordEventProjectionFailure(run)) return;
-        self.touchTask(task);
+        if (!self.task_runtime.recordEventProjectionFailure(route_id, run_id)) return;
         self.commitTaskStateNoFail();
         self.bumpRevision();
     }
@@ -4619,10 +3418,7 @@ pub const Workbench = struct {
     /// event-pump drain. The acquire in `terminalPayload` observes every
     /// callback enqueue that happened before Run completion.
     fn markTerminalRunsBeforeEventDrain(self: *Workbench) void {
-        for (self.task_runtime.tasks) |*task_entry| {
-            const task = &(task_entry.* orelse continue);
-            _ = task_model.markTerminalRunsBeforeEventDrain(task);
-        }
+        _ = self.task_runtime.markTerminalRunsBeforeEventDrain();
     }
 
     fn syncMcpHealthNoFail(self: *Workbench) bool {
@@ -6063,13 +4859,7 @@ pub const Workbench = struct {
     /// Agent event pump following `markTerminalRunsBeforeEventDrain`.
     /// Any later event for the Run is rejected by `applyEvent`.
     pub fn finalizeMarkedTerminalRunsAfterEventDrain(self: *Workbench) void {
-        var changed = false;
-        for (self.task_runtime.tasks) |*task_entry| {
-            const task = &(task_entry.* orelse continue);
-            if (!task_model.finalizeMarkedTerminalRunsAfterEventDrain(task)) continue;
-            changed = true;
-            self.touchTask(task);
-        }
+        const changed = self.task_runtime.finalizeMarkedTerminalRunsAfterEventDrain();
         if (changed) {
             self.commitTaskStateNoFail();
             self.bumpRevision();
@@ -6147,13 +4937,10 @@ pub const Workbench = struct {
         }
         writer.writeAll("],\"tasks\":[") catch
             return error.SnapshotTooLarge;
-        var task_count: usize = 0;
-        for (self.task_runtime.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
-            if (task_count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
-            task_count += 1;
-            try self.writeTask(&writer, task);
-        }
+        self.task_runtime.writeProjectionList(
+            &writer,
+            self.taskRuntimeProjectionEffects(),
+        ) catch |err| return @errorCast(err);
         writer.writeAll("]}") catch return error.SnapshotTooLarge;
         return writer.buffered();
     }
@@ -6410,15 +5197,7 @@ pub const Workbench = struct {
         self.shutdownExecutor();
         self.schedule_timer.cancelCurrent();
         self.mcp_refresh_timer.cancelCurrent();
-        for (self.task_runtime.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
-            if (task.runtime.close_thread) |thread| {
-                thread.join();
-                task.runtime.close_thread = null;
-            }
-            self.deinitTaskView(task);
-            entry.* = null;
-        }
+        self.task_runtime.deinitTasks(self.taskRuntimeReleaseEffects());
         self.task_runtime.deinitStorage();
         for (self.workspaces) |*entry| {
             const workspace = &(entry.* orelse continue);
@@ -6450,41 +5229,10 @@ pub const Workbench = struct {
         self.schedule_timer.cancelCurrent();
         self.mcp_refresh_timer.cancelCurrent();
         self.skill.beginShutdown();
-        for (self.task_runtime.tasks) |*entry| {
-            const view = &(entry.* orelse continue);
-            cancelTaskCheckpoints(view);
-            cancelTaskAutomaticTitles(view);
-            if (view.runtime.worker_references.load(.acquire) == 0) continue;
-            if (view.runtime.active_operation == .restore) {
-                const job = view.runtime.restore_job orelse continue;
-                job.requestCancellation();
-                _ = self.executor.cancel(job);
-                continue;
-            }
-            switch (view.runtime.active_operation) {
-                .none => {},
-                .restore => unreachable,
-                .compact => |operation_id| {
-                    const compact = findCompact(view.durable.compacts, operation_id) orelse
-                        continue;
-                    _ = self.cancelCompactRecord(
-                        view,
-                        compact,
-                        .app_shutdown,
-                    );
-                },
-                .run => |run_id| {
-                    const run = findRun(view.durable.runs, run_id) orelse continue;
-                    if (isTerminalPhase(runPhase(run))) continue;
-                    const dispatch = requestRunTermination(run, .app_shutdown);
-                    if (self.executor.cancel(run)) {
-                        run.terminal_observed = true;
-                    } else {
-                        consumeLifecycleTermination(dispatch, run.id);
-                    }
-                },
-            }
-        }
+        self.task_runtime.prepareShutdown(.{
+            .context = self,
+            .cancel_fn = cancelTaskRuntimeExecutor,
+        });
         self.executor.shutdown();
         self.executor_shutdown = true;
         self.skill.finishShutdownAfterExecutorJoin(
@@ -6501,68 +5249,16 @@ pub const Workbench = struct {
     /// this only after Runtime.shutdown succeeds and the final lifecycle sync.
     pub fn relinquishAgentSessionsAfterRuntimeShutdown(self: *Workbench) void {
         std.debug.assert(self.executor_shutdown);
-        for (self.task_runtime.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
-            if (task.runtime.close_thread) |thread| {
-                thread.join();
-                task.runtime.close_thread = null;
-            }
-            const binding = task.runtime.bindingAfterCloseJoin() orelse continue;
-            switch (binding.state()) {
-                .owned, .closed => binding.relinquishAfterRuntimeShutdown(),
-                .released, .relinquished, .moved, .fixture, .abandoned => {},
-            }
-            task.runtime.clearClosingRouteAfterRuntimeShutdown();
-        }
-        self.task_runtime.agent_runtime_shutdown_complete = true;
+        self.task_runtime.relinquishSessionsAfterRuntimeShutdown();
     }
 
     pub fn abandonAgentSessionsForRuntimeDeinit(self: *Workbench) void {
         std.debug.assert(self.executor_shutdown);
-        for (self.task_runtime.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
-            if (task.runtime.close_thread) |thread| {
-                thread.join();
-                task.runtime.close_thread = null;
-            }
-            const binding = task.runtime.bindingAfterCloseJoin() orelse continue;
-            switch (binding.state()) {
-                .owned, .closed => binding.abandonForRuntimeDeinit(),
-                .released, .relinquished, .moved, .fixture, .abandoned => {},
-            }
-            task.runtime.clearClosingRouteAfterRuntimeShutdown();
-        }
-        self.task_runtime.agent_runtime_shutdown_complete = true;
+        self.task_runtime.abandonSessionsForRuntimeDeinit();
     }
 
     fn settleCheckpointTransactionsForShutdown(self: *Workbench) void {
-        for (self.task_runtime.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
-            for (task.durable.runs) |*run_entry| {
-                const run = &(run_entry.* orelse continue);
-                self.settleCheckpointPostprocessForShutdown(&run.checkpoint);
-                if (run.worker_reference_held.load(.acquire))
-                    releaseWorkerReference(&task.runtime.worker_references, run);
-            }
-            for (task.durable.compacts) |*compact_entry| {
-                const compact = &(compact_entry.* orelse continue);
-                self.settleCheckpointPostprocessForShutdown(&compact.checkpoint);
-                releaseCompactWorkerReference(&task.runtime.worker_references, compact);
-            }
-        }
-    }
-
-    fn settleCheckpointPostprocessForShutdown(
-        self: *Workbench,
-        postprocess: *CheckpointPostprocess,
-    ) void {
-        switch (postprocess.payload) {
-            .candidate => |*candidate| candidate.record.deinit(self.allocator),
-            .store_outcome_unknown => |*candidate| candidate.record.deinit(self.allocator),
-            .none, .failure => {},
-        }
-        postprocess.payload = .none;
-        postprocess.state.store(.settled, .release);
+        self.task_runtime.settleCheckpointTransactionsForShutdown();
     }
 
     fn taskViewContainsSensitive(context: *const anyopaque, value: []const u8) bool {
@@ -6574,17 +5270,79 @@ pub const Workbench = struct {
         context: *const anyopaque,
         writer: *std.Io.Writer,
         value: []const u8,
-    ) task_view.Error!void {
+    ) product_task.ProjectionError!void {
         const self: *const Workbench = @ptrCast(@alignCast(context));
         self.projectedJsonValueWithKnownCredentials(writer, value) catch
             return error.SnapshotTooLarge;
     }
 
-    fn taskTextProjection(self: *const Workbench) task_view.TextProjection {
+    fn taskTextProjection(self: *const Workbench) product_task.ProjectionText {
         return .{
             .context = self,
             .contains_sensitive_fn = taskViewContainsSensitive,
             .write_json_fn = writeTaskViewJson,
+        };
+    }
+
+    fn taskProjectionAuthority(
+        context: *anyopaque,
+        query: task_runtime.ProjectionAuthorityQuery,
+    ) task_runtime.ProjectionAuthority {
+        const self: *Workbench = @ptrCast(@alignCast(context));
+        const workspace = self.findWorkspace(query.workspace_id);
+        const workspace_authorized = if (workspace) |value|
+            value.visible and value.authorization == .available and
+                value.epoch == query.workspace_epoch and
+                std.mem.eql(u8, value.canonical_root, query.workspace_root)
+        else
+            false;
+        const execution_exact = self.execution_replacement == .none and
+            self.execution.ready() and
+            query.execution_generation == self.execution.generation and
+            query.execution_provider == self.execution.provider.? and
+            if (self.custom_execution_binding) |binding|
+                std.mem.eql(u8, binding.model_id, self.execution.model()) and
+                    std.mem.eql(u8, query.execution_model, binding.model_id)
+            else
+                self.account.account_can_create_task and
+                    self.account.catalog_state == .ready and
+                    self.account.execution_generation == self.execution.generation and
+                    self.accountHasModel(query.execution_model);
+        return .{
+            .shutting_down = self.shutting_down,
+            .task_persistence_ready = self.task_persistence_health.operational(),
+            .checkpoint_store_ready = self.checkpoint_store != null and
+                self.checkpoint_store_health.load(.acquire) == .ready,
+            .execution_exact = execution_exact,
+            .workspace_authorized = workspace_authorized,
+            .runtime_admission_available = self.agent_runtime.restoreAdmissionAvailable(),
+            .authority_stable = self.recoveryAuthorityStable(workspace),
+        };
+    }
+
+    fn writeTaskCatalogProjection(
+        context: *const anyopaque,
+        writer: *std.Io.Writer,
+        catalog: CatalogProjection,
+    ) product_task.ProjectionError!void {
+        const self: *Workbench = @ptrCast(@alignCast(@constCast(context)));
+        skill_runtime.Runtime.writeCatalogProjection(
+            writer,
+            self.skillTextProjection(),
+            catalog,
+        ) catch return error.SnapshotTooLarge;
+    }
+
+    fn taskRuntimeProjectionEffects(self: *Workbench) task_runtime.ProjectionEffects {
+        return .{
+            .context = self,
+            .authority_fn = taskProjectionAuthority,
+            .text = self.taskTextProjection(),
+            .catalog = .{
+                .context = self,
+                .write_fn = writeTaskCatalogProjection,
+            },
+            .max_pending_ui_json_bytes = self.limits.max_pending_ui_json_bytes,
         };
     }
 
@@ -6625,50 +5383,6 @@ pub const Workbench = struct {
         return self.skill.scopedWorkspaceCatalog(workspace.id, workspace.epoch);
     }
 
-    fn writeTaskCatalogProjection(
-        context: *const anyopaque,
-        writer: *std.Io.Writer,
-        catalog: CatalogProjection,
-    ) task_view.Error!void {
-        const self: *Workbench = @ptrCast(@alignCast(@constCast(context)));
-        skill_runtime.Runtime.writeCatalogProjection(
-            writer,
-            self.skillTextProjection(),
-            catalog,
-        ) catch return error.SnapshotTooLarge;
-    }
-
-    fn writeTaskPendingUiProjection(
-        context: *anyopaque,
-        writer: *std.Io.Writer,
-        task: *const TaskView,
-        text: task_view.TextProjection,
-    ) task_view.Error!void {
-        const self: *Workbench = @ptrCast(@alignCast(context));
-        self.writePendingUi(writer, task, text) catch |err| return switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-            error.SnapshotTooLarge => error.SnapshotTooLarge,
-            else => error.InvalidUiResponse,
-        };
-    }
-
-    fn writeTask(self: *Workbench, writer: *std.Io.Writer, task: *TaskView) Error!void {
-        task_view.writeProjection(writer, .{
-            .task = task,
-            .recovery = self.taskRecoveryProjection(task),
-            .shutting_down = self.shutting_down,
-            .text = self.taskTextProjection(),
-            .catalog = .{
-                .context = self,
-                .write_fn = writeTaskCatalogProjection,
-            },
-            .pending_ui = .{
-                .context = self,
-                .write_fn = writeTaskPendingUiProjection,
-            },
-        }) catch |err| return @errorCast(err);
-    }
-
     fn writeSkillManagement(
         self: *Workbench,
         writer: *std.Io.Writer,
@@ -6682,376 +5396,6 @@ pub const Workbench = struct {
                 .get_fn = skillWorkspaceCatalog,
             },
         ) catch return error.SnapshotTooLarge;
-    }
-
-    fn writePendingUi(
-        self: *Workbench,
-        writer: *std.Io.Writer,
-        view: *const TaskView,
-        text: task_view.TextProjection,
-    ) Error!void {
-        if (view.runtime.pending_ui_request_id == 0) {
-            writer.writeAll("null") catch return error.SnapshotTooLarge;
-            return;
-        }
-        var access = @constCast(&view.runtime).acquireAccess() catch {
-            writer.writeAll("null") catch return error.SnapshotTooLarge;
-            return;
-        };
-        defer access.deinit();
-        var pending = access.copyPendingUiRequest(self.allocator) catch |err| switch (err) {
-            error.NoPendingUiRequest, error.StaleUiResponse => {
-                writer.writeAll("null") catch return error.SnapshotTooLarge;
-                return;
-            },
-            else => return err,
-        };
-        defer pending.deinit();
-        var parsed = lifecycle.decodePermissionRequest(self.allocator, pending.json) catch return error.InvalidUiResponse;
-        defer parsed.deinit();
-        // The synchronous callback may publish between lifecycle reconciliation
-        // and serialization. Omit that just-arrived request from this snapshot;
-        // its notification drives the next revision instead of failing the
-        // whole product snapshot on a benign observation race.
-        if (view.runtime.pending_ui_request_id != pending.request_id or view.runtime.pending_ui_order == 0) {
-            writer.writeAll("null") catch return error.SnapshotTooLarge;
-            return;
-        }
-        if (findRun(view.durable.runs, pending.run_id) == null)
-            return error.InvalidUiResponse;
-        task_view.writePendingUi(
-            writer,
-            text,
-            pending.request_id,
-            pending.run_id,
-            view.runtime.pending_ui_order,
-            parsed.value(),
-        ) catch |err| return @errorCast(err);
-    }
-
-    fn deinitFileReference(self: *Workbench, reference: *FileReferenceView) void {
-        self.freeTracked(reference.id);
-        self.freeTracked(reference.title);
-        self.freeTracked(reference.display_path);
-        self.freeTracked(reference.kind);
-        self.freeTracked(reference.locator);
-        reference.* = undefined;
-    }
-
-    fn taskEventProjection(self: *Workbench) task_model.EventProjection {
-        return .{
-            .context = self,
-            .max_assistant_message_bytes = self.limits.max_assistant_message_bytes,
-            .max_tool_field_bytes = self.limits.max_tool_field_bytes,
-            .append_assistant_fn = appendTaskEventAssistant,
-            .replace_text_fn = replaceTaskEventText,
-            .find_or_create_tool_fn = findOrCreateTaskEventTool,
-            .replace_file_references_fn = replaceTaskEventFileReferences,
-        };
-    }
-
-    fn appendTaskEventAssistant(
-        context: *anyopaque,
-        target: *TrackedText,
-        suffix: []const u8,
-        max: usize,
-        credential: []const u8,
-    ) task_model.EventProjectionError!bool {
-        const self: *Workbench = @ptrCast(@alignCast(context));
-        self.appendTrackedText(target, suffix, max) catch |err|
-            return @errorCast(err);
-        return self.redactTrackedText(target, credential);
-    }
-
-    fn replaceTaskEventText(
-        context: *anyopaque,
-        target: *[]u8,
-        value: []const u8,
-        max: usize,
-        credential: []const u8,
-    ) task_model.EventProjectionError!task_model.TextProjectionResult {
-        const self: *Workbench = @ptrCast(@alignCast(context));
-        const result = self.replaceTrackedProjected(
-            target,
-            value,
-            max,
-            credential,
-        ) catch |err| return @errorCast(err);
-        return .{ .truncated = result.truncated, .redacted = result.redacted };
-    }
-
-    fn findOrCreateTaskEventTool(
-        context: *anyopaque,
-        run: *RunRecord,
-        id: []const u8,
-        name: []const u8,
-        input: []const u8,
-    ) task_model.EventProjectionError!*ToolView {
-        const self: *Workbench = @ptrCast(@alignCast(context));
-        return self.findOrCreateTool(run, id, name, input) catch |err|
-            return @errorCast(err);
-    }
-
-    fn replaceTaskEventFileReferences(
-        context: *anyopaque,
-        tool: *ToolView,
-        envelope: *const lifecycle.OwnedCoreEvent,
-        credential: []const u8,
-        task_id: u64,
-        run_generation: u64,
-    ) task_model.EventProjectionError!void {
-        const self: *Workbench = @ptrCast(@alignCast(context));
-        const event = switch (envelope.event.value) {
-            .unknown => unreachable,
-            .known => |known| known,
-        };
-        const result = switch (event) {
-            .tool_result => |value| value,
-            else => unreachable,
-        };
-        const file_refs = if (comptime @hasField(@TypeOf(result), "file_refs"))
-            result.file_refs
-        else
-            null;
-        self.replaceFileReferences(
-            tool,
-            file_refs,
-            credential,
-            task_id,
-            run_generation,
-        ) catch |err| return @errorCast(err);
-    }
-
-    fn clearFileReferences(self: *Workbench, tool: *ToolView) void {
-        if (tool.file_refs) |refs| {
-            for (refs) |*entry| {
-                if (entry.*) |*reference| self.deinitFileReference(reference);
-                entry.* = null;
-            }
-        }
-    }
-
-    fn deinitToolView(self: *Workbench, tool: *ToolView) void {
-        self.freeTracked(tool.id);
-        self.freeTracked(tool.name);
-        self.freeTracked(tool.input);
-        self.freeTracked(tool.progress);
-        self.freeTracked(tool.content);
-        self.clearFileReferences(tool);
-        if (tool.file_refs) |refs| self.allocator.free(refs);
-        tool.* = undefined;
-    }
-
-    fn replaceFileReferences(
-        self: *Workbench,
-        tool: *ToolView,
-        refs: anytype,
-        credential: []const u8,
-        task_id: u64,
-        run_generation: u64,
-    ) Error!void {
-        self.clearFileReferences(tool);
-        const values = refs orelse return;
-        if (values.len > self.limits.max_file_refs_per_tool)
-            return error.ToolCapacity;
-        if (tool.file_refs == null) {
-            const refs_storage = try self.allocator.alloc(?FileReferenceView, self.limits.max_file_refs_per_tool);
-            @memset(refs_storage, null);
-            tool.file_refs = refs_storage;
-        }
-        errdefer self.clearFileReferences(tool);
-        for (values, 0..) |reference, index| {
-            var locator_kind: FileReferenceLocatorKind = undefined;
-            var locator_value: []const u8 = undefined;
-            switch (reference.locator) {
-                .workspace_path => |value| {
-                    locator_kind = .workspace_path;
-                    locator_value = value;
-                },
-                .absolute_path => |value| {
-                    locator_kind = .absolute_path;
-                    locator_value = value;
-                },
-                .uri => |value| {
-                    locator_kind = .uri;
-                    locator_value = value;
-                },
-            }
-            if (locator_value.len > self.limits.max_file_ref_field_bytes or
-                reference.title.len > self.limits.max_file_ref_field_bytes or
-                reference.kind.len > self.limits.max_file_ref_field_bytes)
-                return error.ToolCapacity;
-            var id_storage: [96]u8 = undefined;
-            const id = formatFileReferenceId(
-                &id_storage,
-                task_id,
-                run_generation,
-                tool.order,
-                index + 1,
-            );
-            var owned = FileReferenceView{
-                .id = try self.copyBounded(id, id.len),
-                .title = undefined,
-                .display_path = undefined,
-                .kind = undefined,
-                .locator_kind = locator_kind,
-                .locator = undefined,
-                .range = if (reference.range) |range| .{
-                    .start = .{ .line = range.start.line, .column = range.start.column },
-                    .end = .{ .line = range.end.line, .column = range.end.column },
-                } else null,
-            };
-            errdefer self.deinitFileReference(&owned);
-            const title_projection = try self.copyProjected(
-                reference.title,
-                self.limits.max_file_ref_field_bytes,
-                credential,
-            );
-            owned.title = title_projection.value;
-            const display_source = if (locator_kind == .workspace_path)
-                locator_value
-            else if (reference.title.len != 0)
-                reference.title
-            else
-                "file";
-            const display_projection = try self.copyProjected(
-                display_source,
-                self.limits.max_file_ref_field_bytes,
-                credential,
-            );
-            owned.display_path = display_projection.value;
-            const kind_projection = try self.copyProjected(
-                reference.kind,
-                self.limits.max_file_ref_field_bytes,
-                credential,
-            );
-            owned.kind = kind_projection.value;
-            owned.locator = try self.copyBounded(locator_value, self.limits.max_file_ref_field_bytes);
-            tool.file_refs.?[index] = owned;
-            owned = undefined;
-            tool.redacted = tool.redacted or title_projection.redacted or
-                display_projection.redacted or kind_projection.redacted;
-        }
-    }
-
-    fn findOrCreateTool(
-        self: *Workbench,
-        run: *RunRecord,
-        id: []const u8,
-        name: []const u8,
-        input: []const u8,
-    ) Error!*ToolView {
-        const route_digest = toolRouteDigest(id);
-        if (findToolByRouteDigest(run.tools, route_digest)) |tool| return tool;
-        const slot = findEmpty(ToolView, run.tools) orelse return error.ToolCapacity;
-        const order = run.next_activity_order;
-        var product_id_storage: [tool_product_id_capacity]u8 = undefined;
-        const product_id = std.fmt.bufPrint(&product_id_storage, "tool-{d}", .{order}) catch unreachable;
-        const owned_id = try self.copyBounded(product_id, tool_product_id_capacity);
-        errdefer self.freeTracked(owned_id);
-        const name_projection = try self.copyProjected(name, self.limits.max_tool_field_bytes, run.redaction_secret);
-        const owned_name = name_projection.value;
-        errdefer self.freeTracked(owned_name);
-        const input_projection = try self.copyProjected(input, self.limits.max_tool_field_bytes, run.redaction_secret);
-        const owned_input = input_projection.value;
-        errdefer self.freeTracked(owned_input);
-        const progress = try self.copyBounded("", self.limits.max_tool_field_bytes);
-        errdefer self.freeTracked(progress);
-        const content = try self.copyBounded("", self.limits.max_tool_field_bytes);
-        errdefer self.freeTracked(content);
-        const file_refs = try self.allocator.alloc(?FileReferenceView, self.limits.max_file_refs_per_tool);
-        errdefer self.allocator.free(file_refs);
-        @memset(file_refs, null);
-        run.tools[slot] = .{
-            .route_digest = route_digest,
-            .id = owned_id,
-            .order = takeActivityOrder(run),
-            .name = owned_name,
-            .input = owned_input,
-            .progress = progress,
-            .content = content,
-            .file_refs = file_refs,
-            .state = .running,
-            .input_truncated = input_projection.truncated,
-            .redacted = name_projection.redacted or
-                input_projection.redacted,
-        };
-        return &run.tools[slot].?;
-    }
-
-    fn taskContinuationAvailable(self: *Workbench, task: *const TaskView) bool {
-        return !self.shutting_down and
-            taskLifecycle(task) == .open and
-            continuationAvailable(self.taskContinuation(task));
-    }
-
-    fn taskContinuation(
-        self: *Workbench,
-        task: *const TaskView,
-    ) ContinuationCapability {
-        return self.taskRecoveryProjection(task).continuation;
-    }
-
-    fn taskRecoveryProjection(
-        self: *Workbench,
-        task: *const TaskView,
-    ) task_recovery.Projection {
-        const checkpoint = task.durable.checkpoint;
-        const workspace = self.findWorkspace(task.durable.workspace_id);
-        const checkpoint_binding_valid = if (checkpoint) |record| binding: {
-            if (record.blob.generation == 0) break :binding false;
-            record.validateBinding(
-                task.durable.id,
-                task.durable.binding_epoch,
-            ) catch break :binding false;
-            break :binding true;
-        } else false;
-        const checkpoint_history_current = if (checkpoint) |record|
-            checkpointMatchesCurrentHistory(task, record)
-        else
-            false;
-        const workspace_authorized = if (workspace) |value|
-            value.visible and value.authorization == .available and
-                value.epoch == task.durable.workspace_epoch and
-                std.mem.eql(u8, value.canonical_root, task.durable.workspace_root)
-        else
-            false;
-        return task_recovery.project(.{
-            .archived = task.durable.archived,
-            .attachment = if (task.deletion == .deleting)
-                .closing
-            else
-                recoveryAttachment(task.runtime.attachment),
-            .operation = recoveryOperation(task.runtime.active_operation),
-            .task_persistence_ready = self.task_persistence_health.operational(),
-            .checkpoint_store_ready = self.checkpoint_store != null and
-                self.checkpoint_store_health.load(.acquire) == .ready,
-            .checkpoint_available = checkpoint != null and
-                task.durable.checkpoint_anchor == .available,
-            .checkpoint_binding_valid = checkpoint_binding_valid,
-            .checkpoint_history_current = checkpoint_history_current,
-            .execution_exact = self.recoveryExecutionExact(task),
-            .workspace_authorized = workspace_authorized,
-            .runtime_admission_available = self.agent_runtime.restoreAdmissionAvailable(),
-            .authority_stable = !self.task_runtime.recovery_poisoned and
-                self.recoveryAuthorityStable(workspace),
-            .recovery_failed = task.runtime.last_restore_failure != null,
-        });
-    }
-
-    fn recoveryExecutionExact(self: *const Workbench, task: *const TaskView) bool {
-        if (self.execution_replacement != .none or
-            !self.execution.ready() or
-            task.durable.execution_generation != self.execution.generation or
-            task.durable.execution_provider != self.execution.provider.?)
-            return false;
-        if (self.custom_execution_binding) |binding|
-            return std.mem.eql(u8, binding.model_id, self.execution.model()) and
-                std.mem.eql(u8, task.durable.execution_model, binding.model_id);
-        return self.account.account_can_create_task and
-            self.account.catalog_state == .ready and
-            self.account.execution_generation == self.execution.generation and
-            self.accountHasModel(task.durable.execution_model);
     }
 
     fn accountHasModel(self: *const Workbench, model: []const u8) bool {
@@ -7077,17 +5421,6 @@ pub const Workbench = struct {
             mcp.runtime_auth_failure_blocked)
             return false;
         return mcp.admission == .ready;
-    }
-
-    fn taskExecutionInput(
-        task: *const TaskView,
-    ) Error!account_contract.ExecutionConfigInput {
-        const execution = task.runtime.executionConst() orelse return error.ExecutionUnavailable;
-        const input = execution.input();
-        if (input.execution_generation != task.durable.execution_generation or
-            accountProvider(input.target.provider_kind) != task.durable.execution_provider)
-            return error.ExecutionGenerationMismatch;
-        return input;
     }
 
     fn canCreateTask(self: *const Workbench) bool {
@@ -7155,34 +5488,32 @@ pub const Workbench = struct {
         const item = self.scheduled_tasks.find(id) orelse
             return error.UnknownScheduledTask;
         if (item.last_occurrence) |last| if (last.task_id != 0) {
-            if (self.findTask(last.task_id)) |task| {
-                if (hasActiveOperation(task)) {
-                    if (source == .timer) {
-                        var skipped = try self.scheduled_tasks.clone(
-                            self.allocator,
-                        );
-                        var skipped_owned = true;
-                        defer if (skipped_owned) skipped.deinit();
-                        try skipped.markSkipped(
-                            skipped.find(id).?,
-                            planned_at_unix_seconds,
-                            triggered_at_unix_seconds,
-                        );
-                        try self.commitScheduledTaskCandidate(&skipped);
-                        self.replaceScheduledTaskStore(&skipped);
-                        skipped_owned = false;
-                        self.bumpRevision();
-                        _ = self.schedule_notifier.notify(.{
-                            .scheduled_task_id = id,
-                            .task_id = last.task_id,
-                            .title = (self.scheduled_tasks.find(id) orelse
-                                unreachable).title,
-                            .kind = .skipped,
-                        });
-                        return last.task_id;
-                    }
-                    return error.TaskBusy;
+            if (self.task_runtime.taskHasActiveOperation(last.task_id)) {
+                if (source == .timer) {
+                    var skipped = try self.scheduled_tasks.clone(
+                        self.allocator,
+                    );
+                    var skipped_owned = true;
+                    defer if (skipped_owned) skipped.deinit();
+                    try skipped.markSkipped(
+                        skipped.find(id).?,
+                        planned_at_unix_seconds,
+                        triggered_at_unix_seconds,
+                    );
+                    try self.commitScheduledTaskCandidate(&skipped);
+                    self.replaceScheduledTaskStore(&skipped);
+                    skipped_owned = false;
+                    self.bumpRevision();
+                    _ = self.schedule_notifier.notify(.{
+                        .scheduled_task_id = id,
+                        .task_id = last.task_id,
+                        .title = (self.scheduled_tasks.find(id) orelse
+                            unreachable).title,
+                        .kind = .skipped,
+                    });
+                    return last.task_id;
                 }
+                return error.TaskBusy;
             }
         };
         var claimed = try self.scheduled_tasks.clone(self.allocator);
@@ -7224,11 +5555,11 @@ pub const Workbench = struct {
             );
             return err;
         };
-        const task = self.findTask(task_id) orelse unreachable;
+        const binding_epoch = self.task_runtime.taskBindingEpoch(task_id) orelse unreachable;
         const run_input: TaskRunInput = .{
             .text = claimed_item.input.borrowed(),
         };
-        _ = self.runTaskAtBinding(task_id, task.durable.binding_epoch, run_input) catch |err| {
+        _ = self.runTaskAtBinding(task_id, binding_epoch, run_input) catch |err| {
             self.finalizeScheduledTaskClaimRejected(
                 id,
                 planned_at_unix_seconds,
@@ -7327,10 +5658,11 @@ pub const Workbench = struct {
                 if (occurrence.result != .submitted or
                     occurrence.task_id == 0 or occurrence.notification_sent)
                     continue;
-                const task = self.findTask(occurrence.task_id) orelse continue;
-                const terminal = lastTerminalFacts(task.durable.runs) orelse continue;
+                const terminal_outcome = self.task_runtime.lastTerminalOutcome(
+                    occurrence.task_id,
+                ) orelse continue;
                 const notification_kind: ScheduleNotificationKind =
-                    if (terminal.outcome == .completed) .completed else .failed;
+                    if (terminal_outcome == .completed) .completed else .failed;
                 const item_id = item.id;
                 var candidate = self.scheduled_tasks.clone(self.allocator) catch
                     return false;
@@ -7340,7 +5672,7 @@ pub const Workbench = struct {
                     candidate.find(item_id) orelse return false,
                     occurrence.planned_at_unix_seconds,
                     occurrence.source,
-                    scheduledOccurrenceOutcome(terminal.outcome),
+                    scheduledOccurrenceOutcome(terminal_outcome),
                 ) catch return false;
                 self.commitScheduledTaskCandidate(&candidate) catch return false;
                 self.replaceScheduledTaskStore(&candidate);
@@ -7453,7 +5785,7 @@ pub const Workbench = struct {
 
     fn appendRestoredTaskText(
         context: *anyopaque,
-        target: *TrackedText,
+        target: *task_persistence.RestoreText,
         suffix: []const u8,
         max: usize,
     ) task_persistence.ProjectionError!void {
@@ -7467,14 +5799,17 @@ pub const Workbench = struct {
         self.freeTracked(value);
     }
 
-    fn freeRestoredTrackedText(context: *anyopaque, target: *TrackedText) void {
+    fn freeRestoredTrackedText(
+        context: *anyopaque,
+        target: *task_persistence.RestoreText,
+    ) void {
         const self: *Workbench = @ptrCast(@alignCast(context));
         self.freeTrackedText(target);
     }
 
     fn restoreTaskState(self: *Workbench, bytes: []const u8) Error!void {
         std.debug.assert(countPresent(WorkspaceView, self.workspaces) == 0);
-        std.debug.assert(countPresent(TaskView, self.task_runtime.tasks) == 0);
+        std.debug.assert(self.task_runtime.taskCount() == 0);
         var recovered = try task_persistence.decodeRecovering(
             self.allocator,
             bytes,
@@ -7504,45 +5839,30 @@ pub const Workbench = struct {
             skill_root_owned = false;
             restored_workspace_count += 1;
         }
-        var restored_task_count: usize = 0;
-        for (recovered.value.tasks) |task| {
-            const restored = task_persistence.restoreTask(
-                self.taskRestoreProjection(),
-                task,
-            ) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => {
-                    recovered.dropped_tasks += 1;
-                    try self.recordTaskFailure(task.id, task.recent_order, "task_restore");
-                    continue;
-                },
-            };
-            self.task_runtime.tasks[restored_task_count] = restored;
+        recovered.dropped_tasks += try self.task_runtime.restoreTasks(
+            recovered.value.tasks,
+            self.taskRestoreProjection(),
+        );
+        for (recovered.value.tasks) |task|
             if (self.findWorkspace(task.workspace_id)) |workspace| {
-                if (workspace.kind == .automatic) workspace.automatic_task_id = task.id;
-            }
-            restored_task_count += 1;
-        }
+                if (workspace.kind == .automatic and
+                    self.task_runtime.taskWorkspaceId(task.id) != null)
+                    workspace.automatic_task_id = task.id;
+            };
         for (self.workspaces) |*entry| {
             const workspace = &(entry.* orelse continue);
             if (workspace.kind != .automatic) continue;
-            var owned_task_count: usize = 0;
-            for (self.task_runtime.tasks) |task_entry| {
-                if (task_entry) |task| {
-                    if (task.durable.workspace_id == workspace.id) {
-                        owned_task_count += 1;
-                    }
-                }
-            }
-            if (owned_task_count == 1) continue;
+            if (self.task_runtime.taskCountInWorkspace(workspace.id) == 1) continue;
             self.deinitWorkspaceView(workspace);
             entry.* = null;
             recovered.dropped_workspaces += 1;
         }
         self.next_workspace_id = recovered.value.next_workspace_id;
         self.next_workspace_recent_order = recovered.value.next_workspace_recent_order;
-        self.task_runtime.next_task_id = recovered.value.next_task_id;
-        self.task_runtime.next_recent_order = recovered.value.next_task_recent_order;
+        self.task_runtime.restoreIdentityState(
+            recovered.value.next_task_id,
+            recovered.value.next_task_recent_order,
+        );
         if (recovered.degraded or recovered.dropped_workspaces != 0 or recovered.dropped_tasks != 0)
             self.task_persistence_health = .degraded;
     }
@@ -7553,17 +5873,7 @@ pub const Workbench = struct {
         recent_order: u64,
         reason: []const u8,
     ) Error!void {
-        if (task_id == 0 or reason.len == 0 or reason.len > task_persistence.max_failure_reason_bytes)
-            return error.TaskStoreCorrupt;
-        for (self.task_runtime.failures.items) |failure|
-            if (failure.task_id == task_id and std.mem.eql(u8, failure.reason, reason)) return;
-        const owned_reason = try self.allocator.dupe(u8, reason);
-        errdefer self.allocator.free(owned_reason);
-        try self.task_runtime.failures.append(self.allocator, .{
-            .task_id = task_id,
-            .recent_order = recent_order,
-            .reason = owned_reason,
-        });
+        return self.task_runtime.recordFailure(task_id, recent_order, reason);
     }
 
     fn restoreWorkspace(
@@ -7613,66 +5923,14 @@ pub const Workbench = struct {
             self.checkpoint_store_health.load(.acquire) != .ready)
             return;
         const store = self.checkpoint_store orelse return;
-        for (self.task_runtime.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
-            const record = task.durable.checkpoint orelse continue;
-            store.verify(record.blob) catch |err| {
-                const health: CheckpointAnchor = switch (err) {
-                    error.BlobMissing => .blob_missing,
-                    error.BlobMismatch => .blob_mismatch,
-                    else => {
-                        self.checkpoint_store_health.store(.unavailable, .release);
-                        return;
-                    },
-                };
-                var removed = task.durable.checkpoint.?;
-                const previous_anchor = task.durable.checkpoint_anchor;
-                task.durable.checkpoint = null;
-                task.durable.checkpoint_anchor = health;
-                self.commitTaskState() catch {
-                    task.durable.checkpoint = removed;
-                    task.durable.checkpoint_anchor = previous_anchor;
-                    return;
-                };
-                removed.deinit(self.allocator);
-            };
-        }
-        var reference_count: usize = 0;
-        for (self.task_runtime.tasks) |entry| if (entry) |task|
-            if (task.durable.checkpoint != null) {
-                reference_count += 1;
-            };
-        const references = self.allocator.alloc(
-            checkpoint_store.Identity,
-            reference_count,
-        ) catch {
-            self.checkpoint_store_health.store(.unavailable, .release);
-            return;
-        };
-        defer self.allocator.free(references);
-        var index: usize = 0;
-        for (self.task_runtime.tasks) |entry| if (entry) |task|
-            if (task.durable.checkpoint) |record| {
-                references[index] = record.blob;
-                index += 1;
-            };
-        store.cleanupOrphans(self.allocator, references) catch |err| {
-            self.checkpoint_store_health.store(
-                if (err == error.PersistenceOutcomeUnknown)
-                    .outcome_unknown
-                else
-                    .unavailable,
-                .release,
-            );
-        };
+        self.task_runtime.reconcileCheckpointStoreNoFail(
+            store,
+            &self.checkpoint_store_health,
+            self.taskRuntimeDurableEffect(),
+        );
     }
-
     fn clearRestoredTaskStateNoFail(self: *Workbench) void {
-        for (self.task_runtime.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
-            self.deinitTaskView(task);
-            entry.* = null;
-        }
+        self.task_runtime.deinitTasks(self.taskRuntimeReleaseEffects());
         for (self.workspaces) |*entry| {
             const workspace = &(entry.* orelse continue);
             self.deinitWorkspaceView(workspace);
@@ -7680,8 +5938,7 @@ pub const Workbench = struct {
         }
         self.next_workspace_id = 1;
         self.next_workspace_recent_order = 1;
-        self.task_runtime.next_task_id = 1;
-        self.task_runtime.next_recent_order = 1;
+        self.task_runtime.resetIdentity();
     }
 
     const CheckpointPersistenceOverride = task_persistence.CheckpointPersistenceOverride;
@@ -7695,7 +5952,6 @@ pub const Workbench = struct {
         checkpoint_override: ?CheckpointPersistenceOverride,
     ) Error!task_persistence.TaskStateWireScratch {
         const workspace_count = countPresent(WorkspaceView, self.workspaces);
-        const task_count = countPresent(TaskView, self.task_runtime.tasks);
         const workspaces = try self.allocator.alloc(
             task_persistence.WorkspaceWire,
             workspace_count,
@@ -7716,42 +5972,20 @@ pub const Workbench = struct {
             workspace_index += 1;
         }
 
-        const tasks = try self.allocator.alloc(task_persistence.TaskWire, task_count);
-        errdefer self.allocator.free(tasks);
-        var task_index: usize = 0;
-        errdefer task_persistence.deinitTaskWires(self.allocator, tasks[0..task_index]);
-        for (self.task_runtime.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
-            tasks[task_index] = try task_persistence.projectTask(
-                self.allocator,
-                task,
-                checkpoint_override,
-            );
-            task_index += 1;
-        }
-        const failures = try self.allocator.alloc(
-            task_persistence.TaskFailureWire,
-            self.task_runtime.failures.items.len,
-        );
-        errdefer self.allocator.free(failures);
-        for (self.task_runtime.failures.items, failures) |failure, *target| target.* = .{
-            .task_id = failure.task_id,
-            .recent_order = failure.recent_order,
-            .reason = failure.reason,
-        };
+        const task_frames = try self.task_runtime.projectHistory(checkpoint_override);
         return .{
             .allocator = self.allocator,
             .allocated_workspaces = workspaces,
-            .allocated_tasks = tasks,
-            .allocated_failures = failures,
+            .allocated_tasks = task_frames.tasks,
+            .allocated_failures = task_frames.failures,
             .state = .{
                 .next_workspace_id = self.next_workspace_id,
                 .next_workspace_recent_order = self.next_workspace_recent_order,
-                .next_task_id = self.task_runtime.next_task_id,
-                .next_task_recent_order = self.task_runtime.next_recent_order,
+                .next_task_id = task_frames.next_task_id,
+                .next_task_recent_order = task_frames.next_recent_order,
                 .workspaces = workspaces[0..workspace_index],
-                .tasks = tasks[0..task_index],
-                .failures = failures,
+                .tasks = task_frames.tasks,
+                .failures = task_frames.failures,
             },
         };
     }
@@ -7770,6 +6004,323 @@ pub const Workbench = struct {
             else {},
             .outcome_unknown => error.TaskPersistenceOutcomeUnknown,
             .read_failed, .corrupt, .write_failed => error.TaskPersistenceUnavailable,
+        };
+    }
+
+    fn projectTaskRuntimeText(
+        context: *anyopaque,
+        value: []const u8,
+        max: usize,
+        sensitive: []const u8,
+        reclaimable: usize,
+    ) (std.mem.Allocator.Error || error{ProjectionCapacity})!task_runtime.ProjectedText {
+        const self: *Workbench = @ptrCast(@alignCast(context));
+        std.debug.assert(reclaimable <= self.projection_bytes);
+        self.projection_bytes -= reclaimable;
+        const projected = self.copyProjected(value, max, sensitive) catch |err|
+            return restore: {
+                self.projection_bytes += reclaimable;
+                break :restore switch (err) {
+                    error.OutOfMemory => error.OutOfMemory,
+                    else => error.ProjectionCapacity,
+                };
+            };
+        return .{
+            .value = projected.value,
+            .truncated = projected.truncated,
+            .redacted = projected.redacted,
+        };
+    }
+
+    fn freeTaskRuntimeText(context: *anyopaque, value: []u8) void {
+        const self: *Workbench = @ptrCast(@alignCast(context));
+        self.freeTracked(value);
+    }
+
+    fn discardPreviousTaskRuntimeText(context: *anyopaque, value: []u8) void {
+        const self: *Workbench = @ptrCast(@alignCast(context));
+        self.allocator.free(value);
+    }
+
+    fn restorePreviousTaskRuntimeText(context: *anyopaque, bytes: usize) void {
+        const self: *Workbench = @ptrCast(@alignCast(context));
+        self.projection_bytes += bytes;
+    }
+
+    fn allocateTaskRuntimeCapacity(
+        context: *anyopaque,
+        capacity: usize,
+    ) (std.mem.Allocator.Error || error{ProjectionCapacity})![]u8 {
+        const self: *Workbench = @ptrCast(@alignCast(context));
+        return self.allocTrackedCapacity(capacity) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.ProjectionCapacity,
+        };
+    }
+
+    fn reserveTaskRuntimeBytes(context: *anyopaque, bytes: usize) error{ProjectionCapacity}!void {
+        const self: *Workbench = @ptrCast(@alignCast(context));
+        if (bytes > self.limits.max_projection_bytes - self.projection_bytes)
+            return error.ProjectionCapacity;
+        self.projection_bytes += bytes;
+    }
+
+    fn releaseTaskRuntimeBytes(context: *anyopaque, bytes: usize) void {
+        const self: *Workbench = @ptrCast(@alignCast(context));
+        std.debug.assert(bytes <= self.projection_bytes);
+        self.projection_bytes -= bytes;
+    }
+
+    fn taskRuntimeTextProjection(self: *Workbench) task_runtime.TextProjection {
+        return .{
+            .context = self,
+            .project_fn = projectTaskRuntimeText,
+            .discard_candidate_fn = freeTaskRuntimeText,
+            .discard_previous_fn = discardPreviousTaskRuntimeText,
+            .restore_previous_fn = restorePreviousTaskRuntimeText,
+            .allocate_capacity_fn = allocateTaskRuntimeCapacity,
+            .reserve_bytes_fn = reserveTaskRuntimeBytes,
+            .release_bytes_fn = releaseTaskRuntimeBytes,
+        };
+    }
+
+    fn commitTaskRuntimeCandidate(context: *anyopaque) task_runtime.DurableCommit {
+        const self: *Workbench = @ptrCast(@alignCast(context));
+        self.commitTaskStateIfConfigured() catch |err| return switch (err) {
+            error.TaskPersistenceOutcomeUnknown => .outcome_unknown,
+            else => .failed,
+        };
+        return .committed;
+    }
+
+    fn taskRuntimeDurableEffect(self: *Workbench) task_runtime.DurableEffect {
+        return .{ .context = self, .commit_fn = commitTaskRuntimeCandidate };
+    }
+
+    fn commitTaskRuntimeCheckpoint(
+        context: *anyopaque,
+        checkpoint_override: ?task_persistence.CheckpointPersistenceOverride,
+    ) task_runtime.DurableCommit {
+        const self: *Workbench = @ptrCast(@alignCast(context));
+        self.commitTaskStateWithCheckpoint(checkpoint_override) catch |err| return switch (err) {
+            error.TaskPersistenceOutcomeUnknown => .outcome_unknown,
+            else => .failed,
+        };
+        return .committed;
+    }
+
+    fn deleteTaskRuntimeCheckpoint(
+        context: *anyopaque,
+        identity: checkpoint_store.Identity,
+    ) void {
+        const self: *Workbench = @ptrCast(@alignCast(context));
+        if (self.checkpoint_store) |store| store.delete(identity);
+    }
+
+    fn taskRuntimeCheckpointEffects(self: *Workbench) task_runtime.CheckpointEffects {
+        return .{
+            .context = self,
+            .commit_fn = commitTaskRuntimeCheckpoint,
+            .delete_fn = deleteTaskRuntimeCheckpoint,
+        };
+    }
+
+    fn releaseTaskRuntimeSession(
+        context: *anyopaque,
+        task_id: u64,
+    ) task_runtime.SessionReleaseOutcome {
+        const self: *Workbench = @ptrCast(@alignCast(context));
+        const started = self.task_runtime.beginDetach(
+            task_id,
+            self.taskRuntimeOperationEffects(),
+        ) catch return .failed;
+        return if (started) .started else .unchanged;
+    }
+
+    fn commitTaskRuntimeWithoutTask(
+        context: *anyopaque,
+        workspace_id: u64,
+    ) task_runtime.DurableCommit {
+        const self: *Workbench = @ptrCast(@alignCast(context));
+        var removed_index: ?usize = null;
+        var removed_workspace: WorkspaceView = undefined;
+        for (self.workspaces, 0..) |*entry, index| {
+            const workspace = &(entry.* orelse continue);
+            if (workspace.id != workspace_id or workspace.kind != .automatic) continue;
+            removed_workspace = workspace.*;
+            entry.* = null;
+            removed_index = index;
+            break;
+        }
+        const outcome = commitTaskRuntimeCandidate(context);
+        switch (outcome) {
+            .committed => if (removed_index != null)
+                self.deinitWorkspaceView(&removed_workspace),
+            .failed, .outcome_unknown => {
+                if (removed_index) |index|
+                    self.workspaces[index] = removed_workspace;
+            },
+        }
+        return outcome;
+    }
+
+    fn deleteTaskRuntimeCheckpointTask(context: *anyopaque, task_id: u64) void {
+        const self: *Workbench = @ptrCast(@alignCast(context));
+        if (self.checkpoint_store) |store| store.deleteTask(task_id);
+    }
+
+    fn taskRuntimeDeletionEffects(self: *Workbench) task_runtime.DeletionEffects {
+        return .{
+            .context = self,
+            .release_session_fn = releaseTaskRuntimeSession,
+            .commit_without_task_fn = commitTaskRuntimeWithoutTask,
+            .delete_checkpoint_task_fn = deleteTaskRuntimeCheckpointTask,
+            .release = self.taskRuntimeReleaseEffects(),
+        };
+    }
+
+    fn cancelTaskRuntimeExecutor(context: *anyopaque, identity: *anyopaque) bool {
+        const self: *Workbench = @ptrCast(@alignCast(context));
+        return self.executor.cancel(identity);
+    }
+
+    fn enqueueTaskRuntimeExecutor(
+        context: *anyopaque,
+        identity: *anyopaque,
+        job_context: *anyopaque,
+        execute_fn: *const fn (*anyopaque) void,
+        cancel_fn: *const fn (*anyopaque) void,
+    ) error{ ExecutorShuttingDown, QueueFull }!void {
+        const self: *Workbench = @ptrCast(@alignCast(context));
+        return self.executor.enqueue(.{
+            .identity = identity,
+            .context = job_context,
+            .execute_fn = execute_fn,
+            .cancel_fn = cancel_fn,
+        });
+    }
+
+    fn applyTaskWorkspaceOrder(context: *anyopaque, recent_order: u64) void {
+        const value: *TaskWorkspaceOrderContext = @ptrCast(@alignCast(context));
+        value.workspace.recent_order = recent_order;
+    }
+
+    fn rollbackTaskWorkspaceOrder(context: *anyopaque, recent_order: u64) void {
+        const value: *TaskWorkspaceOrderContext = @ptrCast(@alignCast(context));
+        value.workspace.recent_order = value.previous_order;
+        value.workbench.next_workspace_recent_order = recent_order;
+    }
+
+    fn taskRuntimeOperationEffects(self: *Workbench) task_runtime.OperationEffects {
+        return .{
+            .text = self.taskRuntimeTextProjection(),
+            .durable = self.taskRuntimeDurableEffect(),
+            .release = self.taskRuntimeReleaseEffects(),
+            .executor = .{
+                .context = self,
+                .enqueue_fn = enqueueTaskRuntimeExecutor,
+                .cancel_fn = cancelTaskRuntimeExecutor,
+            },
+            .worker = .{
+                .notifier = .{
+                    .context = self.change_notifier.context,
+                    .notify_fn = self.change_notifier.wake,
+                },
+                .completion_factory = .{
+                    .context = self.completion_factory.context,
+                    .create_fn = self.completion_factory.create_fn,
+                },
+                .checkpoint = .{
+                    .allocator = self.allocator,
+                    .io = self.io,
+                    .store = self.checkpoint_store,
+                    .store_health = &self.checkpoint_store_health,
+                    .limits = checkpoint_export_limits,
+                },
+            },
+            .limits = .{
+                .max_user_message_bytes = self.limits.max_user_message_bytes,
+                .max_catalog_projection_bytes = self.limits.max_catalog_projection_bytes,
+                .max_tool_field_bytes = self.limits.max_tool_field_bytes,
+                .max_terminal_diagnostic_bytes = self.limits.max_terminal_diagnostic_bytes,
+                .max_tools_per_run = self.limits.max_tools_per_run,
+                .max_skill_arguments = self.limits.max_skill_arguments,
+                .max_task_title_bytes = self.limits.max_task_title_bytes,
+                .max_model_id_bytes = account_contract.Limits.model_id_bytes,
+            },
+        };
+    }
+
+    fn redactTaskRuntimeProducts(context: *anyopaque, credential: []const u8) void {
+        const self: *Workbench = @ptrCast(@alignCast(context));
+        self.redactAllProductProjectionsNoFail(credential);
+    }
+
+    fn releaseTaskRuntimeProjectionBytes(context: *anyopaque, bytes: usize) void {
+        const self: *Workbench = @ptrCast(@alignCast(context));
+        std.debug.assert(bytes <= self.projection_bytes);
+        self.projection_bytes -= bytes;
+    }
+
+    fn taskRuntimeReleaseEffects(self: *Workbench) task_runtime.ReleaseEffects {
+        return .{
+            .context = self,
+            .redact_all_fn = redactTaskRuntimeProducts,
+            .release_projection_bytes_fn = releaseTaskRuntimeProjectionBytes,
+        };
+    }
+
+    fn taskRuntimeRecoveryAuthority(
+        context: *anyopaque,
+        query: task_runtime.RecoveryAuthorityQuery,
+    ) task_runtime.RecoveryExternalAuthority {
+        const self: *Workbench = @ptrCast(@alignCast(context));
+        const workspace = self.findWorkspace(query.workspace_id);
+        const skill_revision = if (workspace) |value|
+            self.skill.enablementRevision(.{ .project = .{
+                .workspace_id = value.id,
+                .workspace_epoch = value.epoch,
+            } })
+        else
+            0;
+        const execution_exact = self.execution_replacement == .none and
+            self.execution.ready() and
+            query.execution_generation == self.execution.generation and
+            query.provider == agentProvider(self.execution.provider.?) and
+            if (self.custom_execution_binding) |binding|
+                std.mem.eql(u8, binding.model_id, self.execution.model()) and
+                    std.mem.eql(u8, query.execution_model, binding.model_id)
+            else
+                self.account.account_can_create_task and
+                    self.account.catalog_state == .ready and
+                    self.account.execution_generation == self.execution.generation and
+                    self.accountHasModel(query.execution_model);
+        return .{
+            .workspace_root = if (workspace) |value| value.canonical_root else "",
+            .skill_policy_revision = skill_revision,
+            .mcp_catalog_generation = mcp_policy.recoveryGeneration(
+                if (self.mcp) |*mcp| mcp else null,
+                self.mcp_refresh_job != null,
+            ),
+            .shutting_down = self.shutting_down,
+            .workspace_authority_stable = self.recoveryAuthorityStable(workspace),
+            .execution_authority_stable = execution_exact,
+            .available_projection_bytes = self.limits.max_projection_bytes -
+                self.projection_bytes,
+        };
+    }
+
+    fn reserveTaskRuntimeProjectionBytes(context: *anyopaque, bytes: usize) void {
+        const self: *Workbench = @ptrCast(@alignCast(context));
+        std.debug.assert(bytes <= self.limits.max_projection_bytes - self.projection_bytes);
+        self.projection_bytes += bytes;
+    }
+
+    fn taskRuntimeRecoveryEffects(self: *Workbench) task_runtime.RecoveryEffects {
+        return .{
+            .context = self,
+            .authority_fn = taskRuntimeRecoveryAuthority,
+            .reserve_projection_bytes_fn = reserveTaskRuntimeProjectionBytes,
         };
     }
 
@@ -7894,24 +6445,6 @@ pub const Workbench = struct {
     /// after those facts were recorded. Every Task-owned secret release must
     /// pass through this function so the final live copy scrubs all retained
     /// projections before secure-zero makes the credential unavailable.
-    fn releaseExecutionValueNoFail(
-        self: *Workbench,
-        task: *TaskView,
-        execution: *OwnedTaskExecution,
-    ) void {
-        const credential = execution.input().api_key;
-        self.redactAllProductProjectionsNoFail(credential);
-        for (task.durable.runs) |*run_entry| {
-            const run = &(run_entry.* orelse continue);
-            run.redaction_secret = &.{};
-        }
-        for (task.durable.compacts) |*compact_entry| {
-            const compact = &(compact_entry.* orelse continue);
-            compact.redaction_secret = &.{};
-        }
-        execution.deinit();
-    }
-
     fn upsertWorkspace(
         self: *Workbench,
         input: TaskCreateInput,
@@ -8215,17 +6748,6 @@ pub const Workbench = struct {
         return recent_order;
     }
 
-    fn takeTaskRecentOrder(self: *Workbench) u64 {
-        const recent_order = self.task_runtime.next_recent_order;
-        if (self.task_runtime.next_recent_order != std.math.maxInt(u64))
-            self.task_runtime.next_recent_order += 1;
-        return recent_order;
-    }
-
-    fn touchTask(self: *Workbench, task: *TaskView) void {
-        task.durable.recent_order = self.takeTaskRecentOrder();
-    }
-
     fn findWorkspace(self: *Workbench, workspace_id: u64) ?*WorkspaceView {
         if (workspace_id == 0) return null;
         for (self.workspaces) |*entry| if (entry.*) |*workspace|
@@ -8265,10 +6787,7 @@ pub const Workbench = struct {
         self.syncLifecycle();
         switch (scope) {
             .personal => {
-                for (self.task_runtime.tasks) |*entry| {
-                    const task = &(entry.* orelse continue);
-                    if (hasActiveOperation(task)) return error.TaskBusy;
-                }
+                if (self.task_runtime.hasActiveOperation(null)) return error.TaskBusy;
             },
             .project => |project| {
                 const workspace = self.findWorkspace(project.workspace_id) orelse
@@ -8278,12 +6797,8 @@ pub const Workbench = struct {
                 if (workspace.kind != .manual or !workspace.visible or
                     workspace.authorization != .available)
                     return error.WorkspaceUnavailable;
-                for (self.task_runtime.tasks) |*entry| {
-                    const task = &(entry.* orelse continue);
-                    if (task.durable.workspace_id == project.workspace_id and
-                        hasActiveOperation(task))
-                        return error.TaskBusy;
-                }
+                if (self.task_runtime.hasActiveOperation(project.workspace_id))
+                    return error.TaskBusy;
             },
         }
     }
@@ -8400,9 +6915,7 @@ pub const Workbench = struct {
     }
 
     fn workspaceHasTasks(self: *const Workbench, workspace_id: u64) bool {
-        for (self.task_runtime.tasks) |entry| if (entry) |task|
-            if (task.durable.workspace_id == workspace_id) return true;
-        return false;
+        return self.task_runtime.workspaceHasTasks(workspace_id);
     }
 
     /// Completes the second phase of Workspace removal only after every Task
@@ -8413,31 +6926,16 @@ pub const Workbench = struct {
         for (self.workspaces) |*entry| {
             const workspace = &(entry.* orelse continue);
             if (!workspace.visible or workspace.authorization != .removing) continue;
-            var pending = false;
-            var failed = false;
-            for (self.task_runtime.tasks) |*task_entry| {
-                const task = &(task_entry.* orelse continue);
-                if (task.durable.workspace_id != workspace.id) continue;
-                if (task.runtime.close_failed) {
-                    failed = true;
-                    break;
-                }
-                if (task.runtime.hasAttachedSession() or
-                    task.runtime.hasClosingSession() or
-                    task.runtime.close_thread != null or
-                    task.runtime.worker_references.load(.acquire) != 0 or
-                    hasActiveOperation(task))
-                {
-                    pending = true;
-                }
+            switch (self.task_runtime.workspaceRemovalState(workspace.id)) {
+                .close_failed => {
+                    workspace.authorization = .available;
+                    workspace.last_removal_failure = .task_close_failed;
+                    changed = true;
+                    continue;
+                },
+                .pending => continue,
+                .ready => {},
             }
-            if (failed) {
-                workspace.authorization = .available;
-                workspace.last_removal_failure = .task_close_failed;
-                changed = true;
-                continue;
-            }
-            if (pending) continue;
             workspace.authorization = .reauthorization_required;
             workspace.visible = false;
             changed = true;
@@ -8446,31 +6944,12 @@ pub const Workbench = struct {
     }
 
     fn workspaceSignals(self: *const Workbench, workspace_id: u64) WorkspaceSignals {
-        var signals: WorkspaceSignals = .{};
-        for (self.task_runtime.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
-            if (task.durable.workspace_id != workspace_id or task.durable.archived) continue;
-            if (currentRunPhase(task)) |phase| {
-                switch (phase) {
-                    .waiting_ui => signals.attention +|= 1,
-                    .queued, .running, .stopping => signals.running +|= 1,
-                    else => unreachable,
-                }
-                continue;
-            }
-            if (switch (task.runtime.active_operation) {
-                .compact => true,
-                .none, .run, .restore => false,
-            }) {
-                signals.running +|= 1;
-                continue;
-            }
-            if (lastTerminalFacts(task.durable.runs)) |terminal| switch (terminal.outcome) {
-                .failed, .interrupted, .dependency_contract_failure => signals.failed_or_interrupted +|= 1,
-                .completed, .stopped, .cancelled => {},
-            };
-        }
-        return signals;
+        const facts = self.task_runtime.workspaceSignals(workspace_id);
+        return .{
+            .running = facts.running,
+            .attention = facts.attention,
+            .failed_or_interrupted = facts.failed_or_interrupted,
+        };
     }
 
     fn deinitWorkspaceView(self: *Workbench, workspace: *WorkspaceView) void {
@@ -8511,10 +6990,11 @@ pub const Workbench = struct {
             const item = &(entry.* orelse continue);
             self.redactScheduledTaskNoFail(item, credential);
         }
-        for (self.task_runtime.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
-            self.redactTaskProjectionNoFail(task, credential);
-        }
+        self.task_runtime.redactProjectionsNoFail(credential, .{
+            .context = self,
+            .redact_fn = redactFixedWidthNoFail,
+            .release_projection_bytes_fn = releaseTaskRuntimeProjectionBytes,
+        });
     }
 
     fn redactScheduledTaskNoFail(
@@ -8540,22 +7020,11 @@ pub const Workbench = struct {
             credential,
             self.skillProjectionBudget(),
         );
-        for (self.task_runtime.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
-            const snapshot = task.runtime.pinnedCatalog() orelse continue;
-            if (snapshot.identityContainsCredential(credential)) {
-                self.projection_bytes -= snapshot.projected_bytes;
-                snapshot.deinit();
-                task.runtime.live().?.pinned_catalog = null;
-            } else {
-                snapshot.redactPresentationNoFail(credential);
-            }
-        }
     }
 
     fn redactTaskProjectionNoFail(
         _: *Workbench,
-        task: *TaskView,
+        task: *TestTask,
         credential: []const u8,
     ) void {
         if (credential.len == 0) return;
@@ -8642,340 +7111,12 @@ pub const Workbench = struct {
             workspace.projection_redacted;
     }
 
-    fn findTask(self: *Workbench, task_id: u64) ?*TaskView {
-        if (task_id == 0) return null;
-        for (self.task_runtime.tasks) |*entry| if (entry.*) |*task|
-            if (task.durable.id == task_id) return task;
-        return null;
-    }
-
     fn checkpointMutationPending(
         self: *const Workbench,
-        task: *const TaskView,
+        task: *const TestTask,
     ) bool {
         return self.checkpoint_store_health.load(.acquire) != .unavailable and
             task.runtime.worker_references.load(.acquire) != 0;
-    }
-
-    fn findTaskByRouteId(self: *Workbench, route_id: u64) ?*TaskView {
-        if (route_id == 0) return null;
-        for (self.task_runtime.tasks) |*entry| if (entry.*) |*task|
-            if (task.runtime.routeId() == route_id) return task;
-        return null;
-    }
-
-    fn findTaskIndex(self: *Workbench, task_id: u64) ?usize {
-        if (task_id == 0) return null;
-        for (self.task_runtime.tasks, 0..) |entry, index|
-            if (entry) |task| if (task.durable.id == task_id) return index;
-        return null;
-    }
-
-    fn copyRunInputRecord(
-        self: *Workbench,
-        task: *const TaskView,
-        input: TaskRunInput,
-        credential: []const u8,
-    ) Error!RunInputRecord {
-        return switch (input) {
-            .text => |text| {
-                if (text.len > self.limits.max_user_message_bytes)
-                    return error.ProjectionCapacity;
-                const projected = try self.copyProjected(
-                    text,
-                    self.limits.max_user_message_bytes,
-                    credential,
-                );
-                return .{ .text = .{
-                    .value = projected.value,
-                    .redacted = projected.redacted,
-                } };
-            },
-            .skill => |skill_input| {
-                const pinned = task.runtime.pinnedCatalogConst() orelse
-                    return error.CatalogUnavailable;
-                if (!std.mem.eql(
-                    u8,
-                    skill_input.catalog_revision,
-                    pinned.revision,
-                ))
-                    return error.StaleCatalog;
-                if (skill_input.selection_revision != pinned.selection_revision)
-                    return error.StaleCatalog;
-                const skill = pinned.findSkill(skill_input.skill_id) orelse
-                    return error.SkillNotFound;
-                if (!skill.enabled) return error.SkillUnavailable;
-                const skill_id = try self.copyBounded(
-                    skill.skill_id,
-                    self.limits.max_catalog_projection_bytes,
-                );
-                errdefer self.freeTracked(skill_id);
-                const revision = try self.copyBounded(
-                    pinned.revision,
-                    self.limits.max_catalog_projection_bytes,
-                );
-                errdefer self.freeTracked(revision);
-                const invocation = try self.copyProjected(
-                    skill.invocation_name,
-                    self.limits.max_catalog_projection_bytes,
-                    credential,
-                );
-                errdefer self.freeTracked(invocation.value);
-                const display = try self.copyProjected(
-                    skill.display_name,
-                    self.limits.max_catalog_projection_bytes,
-                    credential,
-                );
-                errdefer self.freeTracked(display.value);
-                const values = try self.allocator.alloc(
-                    []u8,
-                    skill_input.argument_values.len,
-                );
-                errdefer self.allocator.free(values);
-                var initialized: usize = 0;
-                var redacted = invocation.redacted or display.redacted;
-                errdefer for (values[0..initialized]) |value|
-                    self.freeTracked(value);
-                for (skill_input.argument_values, values) |value, *target| {
-                    const projected = try self.copyProjected(
-                        value,
-                        self.limits.max_user_message_bytes,
-                        credential,
-                    );
-                    target.* = projected.value;
-                    initialized += 1;
-                    redacted = redacted or projected.redacted;
-                }
-                return .{ .skill = .{
-                    .skill_id = skill_id,
-                    .catalog_revision = revision,
-                    .invocation_name = invocation.value,
-                    .display_name = display.value,
-                    .argument_values = values,
-                    .redacted = redacted,
-                } };
-            },
-        };
-    }
-
-    fn automaticTitleCandidate(input: *const RunInputRecord) ?[]const u8 {
-        return switch (input.*) {
-            .text => |text| firstAutomaticTitleLine(text.value),
-            .skill => |skill| blk: {
-                const display_name = std.mem.trim(u8, skill.display_name, " \t\r\n");
-                if (display_name.len == 0 or !validAutomaticTitleText(display_name))
-                    break :blk null;
-                break :blk display_name;
-            },
-        };
-    }
-
-    fn automaticTitleCompletionInput(input: *const RunInputRecord) ?[]const u8 {
-        const value = switch (input.*) {
-            .text => |text| text.value,
-            .skill => |skill| skill.display_name,
-        };
-        const trimmed = std.mem.trim(u8, value, " \t\r\n");
-        if (trimmed.len == 0 or !std.unicode.utf8ValidateSlice(trimmed)) return null;
-        return trimmed;
-    }
-
-    fn firstAutomaticTitleLine(value: []const u8) ?[]const u8 {
-        if (value.len == 0 or !std.unicode.utf8ValidateSlice(value)) return null;
-        var cursor: usize = 0;
-        var in_fence = false;
-        while (cursor < value.len) {
-            const line_end = std.mem.indexOfScalarPos(u8, value, cursor, '\n') orelse value.len;
-            var line = std.mem.trim(u8, value[cursor..line_end], " \t\r");
-            const fence = std.mem.startsWith(u8, line, "```") or
-                std.mem.startsWith(u8, line, "~~~");
-            if (fence) {
-                in_fence = !in_fence;
-            } else if (!in_fence) {
-                while (line.len != 0 and line[0] == '#')
-                    line = std.mem.trim(u8, line[1..], " \t");
-                if (std.mem.startsWith(u8, line, "- ") or
-                    std.mem.startsWith(u8, line, "* ") or
-                    std.mem.startsWith(u8, line, "+ "))
-                    line = std.mem.trim(u8, line[2..], " \t");
-                if (line.len != 0 and validAutomaticTitleText(line)) return line;
-            }
-            if (line_end == value.len) break;
-            cursor = line_end + 1;
-        }
-        return null;
-    }
-
-    fn validAutomaticTitleText(value: []const u8) bool {
-        if (value.len == 0) return false;
-        for (value) |byte| if (byte < 0x20) return false;
-        return true;
-    }
-
-    fn generatedAutomaticTitleCandidate(value: []const u8) ?[]const u8 {
-        const trimmed = std.mem.trim(u8, value, " \t\r\n");
-        if (!std.unicode.utf8ValidateSlice(trimmed) or
-            !validAutomaticTitleText(trimmed) or
-            std.mem.indexOfAny(u8, trimmed, "\r\n") != null)
-            return null;
-        const bounded = boundAutomaticTitle(trimmed);
-        return if (bounded.len == 0) null else bounded;
-    }
-
-    fn boundAutomaticTitle(value: []const u8) []const u8 {
-        var cursor: usize = 0;
-        var codepoints: usize = 0;
-        var preferred_boundary: usize = 0;
-        while (cursor < value.len and codepoints < automatic_title_max_codepoints) {
-            const start = cursor;
-            cursor += utf8CodepointLen(value, cursor);
-            codepoints += 1;
-            if (isAutomaticTitleBoundary(value[start..cursor]))
-                preferred_boundary = start;
-        }
-        if (cursor == value.len) return value;
-        const boundary = if (preferred_boundary > 0) preferred_boundary else cursor;
-        var bounded = value[0..boundary];
-        while (bounded.len != 0 and (bounded[bounded.len - 1] == ' ' or
-            bounded[bounded.len - 1] == '\t'))
-            bounded = bounded[0 .. bounded.len - 1];
-        return bounded;
-    }
-
-    fn isAutomaticTitleBoundary(codepoint: []const u8) bool {
-        if (codepoint.len == 1) {
-            return switch (codepoint[0]) {
-                ' ', '\t', ',', '.', ';', ':', '!', '?' => true,
-                else => false,
-            };
-        }
-        return std.mem.eql(u8, codepoint, "，") or
-            std.mem.eql(u8, codepoint, "。") or
-            std.mem.eql(u8, codepoint, "；") or
-            std.mem.eql(u8, codepoint, "：") or
-            std.mem.eql(u8, codepoint, "！") or
-            std.mem.eql(u8, codepoint, "？") or
-            std.mem.eql(u8, codepoint, "、");
-    }
-
-    fn applyProvisionalTaskTitle(
-        self: *Workbench,
-        task: *TaskView,
-        run: *const RunRecord,
-    ) bool {
-        if (task.durable.title.len != 0 or run.generation != 1) return false;
-        const candidate = automaticTitleCandidate(&run.input) orelse return false;
-        const execution = taskExecutionInput(task) catch return false;
-        const projected = self.copyProjected(
-            boundAutomaticTitle(candidate),
-            self.limits.max_task_title_bytes,
-            execution.api_key,
-        ) catch return false;
-        if (projected.value.len == 0) {
-            self.freeTracked(projected.value);
-            return false;
-        }
-        const previous_title = task.durable.title;
-        self.projection_bytes -= previous_title.len;
-        task.durable.title = projected.value;
-        task.durable.title_redacted = projected.redacted;
-        return true;
-    }
-
-    fn rollbackProvisionalTaskTitle(
-        self: *Workbench,
-        task: *TaskView,
-        previous_title: []u8,
-        previous_redacted: bool,
-    ) void {
-        self.freeTracked(task.durable.title);
-        task.durable.title = previous_title;
-        self.projection_bytes += previous_title.len;
-        task.durable.title_redacted = previous_redacted;
-    }
-
-    fn markAutomaticTitleUserOverride(_: *Workbench, task: *TaskView) void {
-        for (task.durable.runs) |*entry| {
-            const run = &(entry.* orelse continue);
-            if (!run.automatic_title.provisional_applied) continue;
-            switch (run.automatic_title.state.load(.acquire)) {
-                .pending, .running, .ready => run.automatic_title.user_overrode = true,
-                .none, .settled => {},
-            }
-        }
-    }
-
-    fn commitAutomaticTitlesNoFail(
-        self: *Workbench,
-        task: *TaskView,
-    ) bool {
-        var durable_changed = false;
-        for (task.durable.runs) |*entry| {
-            const run = &(entry.* orelse continue);
-            if (run.automatic_title.state.load(.acquire) != .ready) continue;
-            const candidate = if (run.automatic_title.generated)
-                generatedAutomaticTitleCandidate(
-                    run.automatic_title.result[0..run.automatic_title.result_len],
-                )
-            else
-                null;
-            const selected = candidate orelse automaticTitleCandidate(&run.input);
-            const may_replace = run.generation == 1 and
-                !run.automatic_title.user_overrode and
-                (task.durable.title.len == 0 or run.automatic_title.provisional_applied);
-            const keep_provisional = run.automatic_title.provisional_applied and
-                candidate == null;
-            if (may_replace and !keep_provisional) {
-                if (selected) |value| {
-                    const bounded = boundAutomaticTitle(value);
-                    const projected = self.copyProjected(
-                        bounded,
-                        self.limits.max_task_title_bytes,
-                        run.redaction_secret,
-                    ) catch null;
-                    if (projected) |title| {
-                        if (title.value.len == 0) {
-                            self.freeTracked(title.value);
-                        } else if (std.mem.eql(u8, title.value, task.durable.title) and
-                            (title.redacted or run.automatic_title.generated_redacted) ==
-                                task.durable.title_redacted)
-                        {
-                            self.freeTracked(title.value);
-                        } else {
-                            self.freeTracked(task.durable.title);
-                            task.durable.title = title.value;
-                            task.durable.title_redacted = title.redacted or
-                                run.automatic_title.generated_redacted;
-                            durable_changed = true;
-                        }
-                    }
-                }
-            }
-            std.crypto.secureZero(u8, &run.automatic_title.result);
-            run.automatic_title.result_len = 0;
-            run.automatic_title.generated = false;
-            run.automatic_title.generated_redacted = false;
-            run.automatic_title.state.store(.settled, .release);
-        }
-        return durable_changed;
-    }
-
-    fn prepareAutomaticTitle(
-        _: *Workbench,
-        task: *const TaskView,
-        generation: u64,
-    ) AutomaticTitle {
-        if (generation != 1 or task.durable.title.len != 0) return .{};
-        var result = AutomaticTitle{};
-        result.state.store(.pending, .release);
-        return result;
-    }
-
-    fn releaseAutomaticTitle(self: *Workbench, title: *AutomaticTitle) void {
-        std.debug.assert(title.state.load(.acquire) != .running);
-        std.crypto.secureZero(u8, &title.result);
-        title.state.store(.settled, .release);
-        _ = self;
     }
 
     test "automatic title fallback extracts text and skill display names" {
@@ -9037,7 +7178,11 @@ pub const Workbench = struct {
         const task = &workbench.task_runtime.tasks[0].?;
         const run = &task.durable.runs[0].?;
         run.automatic_title.state.store(.ready, .release);
-        try std.testing.expect(!workbench.commitAutomaticTitlesNoFail(task));
+        const sync = workbench.task_runtime.syncAutomaticTitles(
+            workbench.limits.max_task_title_bytes,
+            workbench.taskRuntimeTextProjection(),
+        );
+        try std.testing.expect(!sync.durable_changed);
         try std.testing.expectEqualStrings("", task.durable.title);
     }
 
@@ -9054,19 +7199,18 @@ pub const Workbench = struct {
         );
         run.automatic_title.provisional_applied = true;
         run.automatic_title.state.store(.pending, .release);
-        try workbench.replaceTracked(
-            &task.durable.title,
-            "User title",
-            workbench.limits.max_task_title_bytes,
-        );
-        workbench.markAutomaticTitleUserOverride(task);
+        try workbench.renameTask(task.durable.id, "User title");
         const generated = "Generated title";
         @memcpy(run.automatic_title.result[0..generated.len], generated);
         run.automatic_title.result_len = generated.len;
         run.automatic_title.generated = true;
         run.automatic_title.state.store(.ready, .release);
 
-        try std.testing.expect(!workbench.commitAutomaticTitlesNoFail(task));
+        const sync = workbench.task_runtime.syncAutomaticTitles(
+            workbench.limits.max_task_title_bytes,
+            workbench.taskRuntimeTextProjection(),
+        );
+        try std.testing.expect(!sync.durable_changed);
         try std.testing.expectEqualStrings("User title", task.durable.title);
         try std.testing.expect(run.automatic_title.user_overrode);
         try std.testing.expectEqual(
@@ -9075,203 +7219,58 @@ pub const Workbench = struct {
         );
     }
 
-    fn deinitRunInputRecord(
-        self: *Workbench,
-        input: *RunInputRecord,
-    ) void {
-        switch (input.*) {
-            .text => |text| self.freeTracked(text.value),
-            .skill => |skill| {
-                self.freeTracked(skill.skill_id);
-                self.freeTracked(skill.catalog_revision);
-                self.freeTracked(skill.invocation_name);
-                self.freeTracked(skill.display_name);
-                for (skill.argument_values) |value| self.freeTracked(value);
-                self.allocator.free(skill.argument_values);
-            },
-        }
-        input.* = undefined;
-    }
-
     fn reserveRunRecord(
         self: *Workbench,
-        task: *TaskView,
+        task: *TestTask,
         input: TaskRunInput,
     ) Error!usize {
-        const execution = try taskExecutionInput(task);
-        const slot = findEmpty(RunRecord, task.durable.runs) orelse return error.RunCapacity;
-        if (task.durable.next_run_generation == std.math.maxInt(u64)) return error.RunGenerationExhausted;
-        var input_record = try self.copyRunInputRecord(
-            task,
+        return self.task_runtime.testReserveRun(
+            task.durable.id,
             input,
-            execution.api_key,
+            self.taskRuntimeOperationEffects(),
         );
-        errdefer self.deinitRunInputRecord(&input_record);
-        const status_text = try self.copyBounded("Queued", self.limits.max_tool_field_bytes);
-        errdefer self.freeTracked(status_text);
-        const tools = try self.allocator.alloc(?ToolView, self.limits.max_tools_per_run);
-        errdefer self.allocator.free(tools);
-        @memset(tools, null);
-        const terminal_diagnostic = try self.allocTrackedCapacity(self.limits.max_terminal_diagnostic_bytes);
-        errdefer self.freeTracked(terminal_diagnostic);
-        const execution_model = try self.copyBounded(
-            task.durable.execution_model,
-            account_contract.Limits.model_id_bytes,
+    }
+
+    fn discardRunRecord(self: *Workbench, task: *TestTask, slot: usize) void {
+        self.task_runtime.testDiscardRun(
+            task.durable.id,
+            slot,
+            self.taskRuntimeReleaseEffects(),
         );
-        errdefer self.freeTracked(execution_model);
-        task.durable.next_run_generation += 1;
-        var automatic_title = self.prepareAutomaticTitle(
-            task,
-            task.durable.next_run_generation,
-        );
-        errdefer self.releaseAutomaticTitle(&automatic_title);
-        task.durable.runs[slot] = .{
-            .id = 0,
-            .generation = task.durable.next_run_generation,
-            .execution_generation = task.durable.execution_generation,
-            .execution_provider = task.durable.execution_provider,
-            .execution_model = execution_model,
-            .execution_model_owned = true,
-            .input = input_record,
-            .tools = tools,
-            .status_text = status_text,
-            .terminal_diagnostic = terminal_diagnostic,
-            .redaction_secret = execution.api_key,
-            .automatic_title = automatic_title,
-        };
-        return slot;
     }
 
     fn reserveCompactRecord(
         self: *Workbench,
-        task: *TaskView,
+        task: *TestTask,
         operation_id: u64,
         after_run_id: u64,
     ) Error!usize {
-        const slot = findEmpty(CompactRecord, task.durable.compacts) orelse
-            return error.CompactCapacity;
-        const diagnostic = try self.allocTrackedCapacity(
-            self.limits.max_terminal_diagnostic_bytes,
+        return self.task_runtime.testReserveCompact(
+            task.durable.id,
+            operation_id,
+            after_run_id,
+            self.taskRuntimeOperationEffects(),
         );
-        errdefer self.freeTracked(diagnostic);
-        const execution = try taskExecutionInput(task);
-        task.durable.compacts[slot] = .{
-            .id = operation_id,
-            .after_run_id = after_run_id,
-            .terminal_diagnostic = diagnostic,
-            .redaction_secret = execution.api_key,
-        };
-        return slot;
     }
 
-    fn discardCompactRecord(
-        self: *Workbench,
-        task: *TaskView,
-        slot: usize,
-    ) void {
-        const compact = &(task.durable.compacts[slot] orelse return);
-        self.deinitCompactRecord(compact);
-        task.durable.compacts[slot] = null;
-    }
-
-    fn deinitCompactRecord(self: *Workbench, compact: *CompactRecord) void {
-        std.debug.assert(!compact.worker_reference_held.load(.acquire));
-        std.debug.assert(compact.terminal_publication.load(.acquire) != .publishing);
-        self.freeTracked(compact.terminal_diagnostic);
-        compact.* = undefined;
-    }
-
-    fn discardRunRecord(self: *Workbench, task: *TaskView, slot: usize) void {
-        const run = &(task.durable.runs[slot] orelse return);
-        self.deinitRunRecord(run);
-        task.durable.runs[slot] = null;
-    }
-
-    fn deinitRunRecord(self: *Workbench, run: *RunRecord) void {
-        std.debug.assert(run.automatic_title.state.load(.acquire) != .running);
-        self.releaseAutomaticTitle(&run.automatic_title);
-        for (run.tools) |*tool_entry| {
-            const tool = &(tool_entry.* orelse continue);
-            self.deinitToolView(tool);
-        }
-        self.allocator.free(run.tools);
-        self.deinitRunInputRecord(&run.input);
-        self.freeTrackedText(&run.assistant);
-        if (run.execution_model_owned)
-            self.freeTracked(@constCast(run.execution_model));
-        self.freeTracked(run.status_text);
-        self.freeTracked(run.terminal_diagnostic);
-        run.* = undefined;
-    }
-
-    fn deinitTaskView(self: *Workbench, task: *TaskView) void {
-        std.debug.assert(task.runtime.worker_references.load(.acquire) == 0);
-        std.debug.assert(task.runtime.restore_job == null);
-        self.releaseTaskAttachmentNoFail(task, .cold_start);
-        for (task.durable.runs) |*run_entry| {
-            const run = &(run_entry.* orelse continue);
-            self.deinitRunRecord(run);
-        }
-        self.allocator.free(task.durable.runs);
-        for (task.durable.compacts) |*compact_entry| {
-            const compact = &(compact_entry.* orelse continue);
-            self.deinitCompactRecord(compact);
-        }
-        self.allocator.free(task.durable.compacts);
-        self.allocator.free(task.durable.ui_history);
-        self.freeTracked(task.durable.execution_model);
-        self.freeTracked(task.durable.workspace_root);
-        self.freeTracked(task.durable.title);
-        if (task.durable.checkpoint) |*checkpoint|
-            checkpoint.deinit(self.allocator);
-        if (task.runtime.pending_model) |model| self.allocator.free(model);
-        task.* = undefined;
+    fn discardCompactRecord(self: *Workbench, task: *TestTask, slot: usize) void {
+        self.task_runtime.testDiscardCompact(
+            task.durable.id,
+            slot,
+            self.taskRuntimeReleaseEffects(),
+        );
     }
 
     fn releaseTaskAttachmentNoFail(
         self: *Workbench,
-        task: *TaskView,
-        cause: task_attachment.DetachmentCause,
+        task: *TestTask,
+        cause: task_test_attachment.DetachmentCause,
     ) void {
-        if (task.runtime.pending_model) |model| {
-            self.allocator.free(model);
-            task.runtime.pending_model = null;
-        }
-        if (task.runtime.live() == null) {
-            task.runtime.attachment = .{ .detached = cause };
-            return;
-        }
-        var live = task.runtime.detach(cause);
-        switch (live.binding.state()) {
-            .owned => {
-                switch (live.binding.closeOutcome(.session_close)) {
-                    .closed => {},
-                    .failure => @panic("Task Session close failed during attachment release"),
-                }
-                live.binding.releaseClosed() catch |err| {
-                    if (err == error.RuntimeShuttingDown) {
-                        if (self.task_runtime.agent_runtime_shutdown_complete)
-                            live.binding.relinquishAfterRuntimeShutdown()
-                        else
-                            live.binding.abandonForRuntimeDeinit();
-                    } else @panic("Task Session slot release failed during attachment release");
-                };
-            },
-            .closed => live.binding.releaseClosed() catch |err| {
-                if (err == error.RuntimeShuttingDown) {
-                    if (self.task_runtime.agent_runtime_shutdown_complete)
-                        live.binding.relinquishAfterRuntimeShutdown()
-                    else
-                        live.binding.abandonForRuntimeDeinit();
-                } else @panic("closed Task Session slot release failed during attachment release");
-            },
-            .released, .relinquished, .moved, .fixture, .abandoned => {},
-        }
-        self.releaseExecutionValueNoFail(task, &live.execution);
-        if (live.pinned_catalog) |*snapshot| {
-            self.projection_bytes -= snapshot.projected_bytes;
-            snapshot.deinit();
-        }
+        self.task_runtime.testReleaseAttachment(
+            task.durable.id,
+            cause,
+            self.taskRuntimeReleaseEffects(),
+        );
     }
 
     fn copyBounded(self: *Workbench, value: []const u8, max: usize) Error![]u8 {
@@ -9295,7 +7294,7 @@ pub const Workbench = struct {
         return result;
     }
 
-    fn appendTrackedText(self: *Workbench, target: *TrackedText, suffix: []const u8, max: usize) Error!void {
+    fn appendTrackedText(self: *Workbench, target: *task_persistence.RestoreText, suffix: []const u8, max: usize) Error!void {
         if (suffix.len > max - target.list.items.len) return error.ProjectionCapacity;
         const needed = target.list.items.len + suffix.len;
         if (needed > target.list.capacity) {
@@ -9411,12 +7410,7 @@ pub const Workbench = struct {
     fn containsKnownCredential(self: *const Workbench, value: []const u8) bool {
         const current = self.execution.credential();
         if (containsKnownSecret(value, current)) return true;
-        for (self.task_runtime.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
-            if (task.runtime.execution()) |execution|
-                if (containsKnownSecret(value, execution.input().api_key)) return true;
-        }
-        return false;
+        return self.task_runtime.containsExecutionCredential(value);
     }
 
     fn matchedKnownCredentialLen(
@@ -9427,14 +7421,7 @@ pub const Workbench = struct {
         const current = self.execution.credential();
         if (current.len != 0 and std.mem.startsWith(u8, value, current))
             longest = current.len;
-        for (self.task_runtime.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
-            if (task.runtime.execution()) |execution| {
-                const credential = execution.input().api_key;
-                if (credential.len > longest and std.mem.startsWith(u8, value, credential))
-                    longest = credential.len;
-            }
-        }
+        longest = @max(longest, self.task_runtime.matchedExecutionCredentialPrefix(value));
         return longest;
     }
 
@@ -9543,7 +7530,7 @@ pub const Workbench = struct {
 
     fn prepareUiRecord(
         self: *Workbench,
-        access: *task_agent_session.Access,
+        access: *task_test_agent_session.Access,
         run_id: u64,
         request_id: u64,
         response: UiResponse,
@@ -9566,7 +7553,7 @@ pub const Workbench = struct {
 
     fn prepareCancelledUiRecord(
         self: *Workbench,
-        access: *task_agent_session.Access,
+        access: *task_test_agent_session.Access,
         run_id: u64,
         credential: []const u8,
     ) ?UiRecord {
@@ -9606,7 +7593,7 @@ pub const Workbench = struct {
         record.redacted = result.redacted;
     }
 
-    fn pushUiRecord(_: *Workbench, view: *TaskView, record: UiRecord) void {
+    fn pushUiRecord(_: *Workbench, view: *TestTask, record: UiRecord) void {
         for (view.durable.ui_history) |entry| if (entry) |existing|
             if (existing.request_id == record.request_id) return;
         var stored = record;
@@ -9631,7 +7618,7 @@ pub const Workbench = struct {
         view.durable.ui_history_count = @min(view.durable.ui_history_count + 1, view.durable.ui_history.len);
     }
 
-    fn freeTrackedText(self: *Workbench, target: *TrackedText) void {
+    fn freeTrackedText(self: *Workbench, target: *task_persistence.RestoreText) void {
         self.projection_bytes -= target.list.capacity;
         target.list.deinit(self.allocator);
         target.* = undefined;
@@ -9658,7 +7645,7 @@ pub const Workbench = struct {
 
 fn closeWorker(
     completion_out: *std.atomic.Value(CloseCompletion),
-    binding: *task_agent_session.Binding,
+    binding: *task_test_agent_session.Binding,
     notifier: ChangeNotifier,
 ) void {
     const completion: CloseCompletion = close: {
@@ -9682,14 +7669,14 @@ fn closeWorker(
     _ = notifier.notify();
 }
 
-const publishAutomaticTitleFallback = task_worker.publishAutomaticTitleFallback;
+const publishAutomaticTitleFallback = if (builtin.is_test) task_test_execution.publishAutomaticTitleFallback else void;
 const cancelPreparedRunOrPanic = taskWorkerCancelPreparedRun;
 const cancelPreparedCompactOrPanic = taskWorkerCancelPreparedCompact;
-const releaseWorkerReference = task_worker.releaseRunWorkerReference;
-const releaseCompactWorkerReference = task_worker.releaseCompactWorkerReference;
+const releaseWorkerReference = if (builtin.is_test) task_test_execution.releaseRunWorkerReference else void;
+const releaseCompactWorkerReference = if (builtin.is_test) task_test_execution.releaseCompactWorkerReference else void;
 
 fn taskWorkerCancelPreparedRun(
-    access: *task_agent_session.Access,
+    access: *task_test_agent_session.Access,
     run_id: u64,
 ) void {
     access.cancelPreparedRun(run_id) catch |err| std.debug.panic(
@@ -9699,7 +7686,7 @@ fn taskWorkerCancelPreparedRun(
 }
 
 fn taskWorkerCancelPreparedCompact(
-    access: *task_agent_session.Access,
+    access: *task_test_agent_session.Access,
     operation_id: u64,
 ) void {
     access.cancelPreparedCompact(operation_id) catch |err| std.debug.panic(
@@ -9709,7 +7696,7 @@ fn taskWorkerCancelPreparedCompact(
 }
 
 fn commitCompactProductTerminal(
-    compact: *CompactRecord,
+    compact: *TestCompactRecord,
     phase: CompactPhase,
     cause: ?CompactCause,
     session_disposition: lifecycle.SessionDisposition,
@@ -9719,7 +7706,7 @@ fn commitCompactProductTerminal(
     diagnostic: []const u8,
     source_diagnostic_truncated: bool,
 ) bool {
-    return task_worker.commitCompactProductTerminal(
+    return task_test_execution.commitCompactProductTerminal(
         .{ .project_fn = projectTaskWorkerText },
         compact,
         phase,
@@ -9784,7 +7771,7 @@ fn cancelMcpRefreshJob(context: *anyopaque) void {
 }
 
 fn requestRunTermination(
-    run: *RunRecord,
+    run: *TestRunRecord,
     interruption: lifecycle.ExternalInterruption,
 ) RunTerminationDispatch {
     const pending = pendingInterruption(interruption);
@@ -9904,7 +7891,7 @@ fn agentPermissionChoice(choice: PermissionChoice) lifecycle.PermissionChoice {
 }
 
 fn commitTerminal(
-    run: *RunRecord,
+    run: *TestRunRecord,
     phase: RunPhase,
     outcome: RunOutcome,
     cause: ?RunCause,
@@ -9935,7 +7922,7 @@ fn commitTerminal(
     return false;
 }
 
-fn commitAgentTerminal(run: *RunRecord, result: *const lifecycle.TerminalResult) bool {
+fn commitAgentTerminal(run: *TestRunRecord, result: *const lifecycle.TerminalResult) bool {
     const decision = classifyAgentTerminal(result);
     return commitTerminal(
         run,
@@ -9948,8 +7935,8 @@ fn commitAgentTerminal(run: *RunRecord, result: *const lifecycle.TerminalResult)
     );
 }
 
-fn commitBeginFailure(run: *RunRecord, failure: lifecycle.BeginRunFailure) void {
-    const decision = task_policy.classifyBeginFailure(run, failure);
+fn commitBeginFailure(run: *TestRunRecord, failure: lifecycle.BeginRunFailure) void {
+    const decision = task_test_policy.classifyBeginFailure(run, failure);
     _ = commitTerminal(
         run,
         decision.phase,
@@ -9961,7 +7948,7 @@ fn commitBeginFailure(run: *RunRecord, failure: lifecycle.BeginRunFailure) void 
     );
 }
 
-fn cancelTaskCheckpoints(task: *TaskView) void {
+fn cancelTaskCheckpoints(task: *TestTask) void {
     for (task.durable.runs) |*entry| {
         const run = &(entry.* orelse continue);
         switch (run.checkpoint.state.load(.acquire)) {
@@ -9978,7 +7965,7 @@ fn cancelTaskCheckpoints(task: *TaskView) void {
     }
 }
 
-fn cancelTaskAutomaticTitles(task: *TaskView) void {
+fn cancelTaskAutomaticTitles(task: *TestTask) void {
     for (task.durable.runs) |*entry| {
         const run = &(entry.* orelse continue);
         run.automatic_title.cancel_requested.store(true, .release);
@@ -10041,7 +8028,7 @@ fn projectTaskWorkerText(
     destination: []u8,
     value: []const u8,
     secret: []const u8,
-) task_worker.Projection {
+) if (builtin.is_test) task_test_execution.Projection else void {
     const projected = sanitizeInto(destination, value, secret);
     return .{
         .len = projected.len,
@@ -10216,7 +8203,7 @@ fn catalogSnapshotLimits(limits: Limits) catalog_snapshot.Limits {
     };
 }
 
-fn takeActivityOrder(run: *RunRecord) u64 {
+fn takeActivityOrder(run: *TestRunRecord) u64 {
     const result = run.next_activity_order;
     std.debug.assert(result != std.math.maxInt(u64));
     run.next_activity_order += 1;
@@ -10520,10 +8507,10 @@ fn testWorkbench() !Workbench {
         workbench.execution.model(),
         account_contract.Limits.model_id_bytes,
     );
-    const runs = try workbench.allocator.alloc(?RunRecord, workbench.limits.max_runs_per_task);
+    const runs = try workbench.allocator.alloc(?TestRunRecord, workbench.limits.max_runs_per_task);
     @memset(runs, null);
     const compacts = try workbench.allocator.alloc(
-        ?CompactRecord,
+        ?TestCompactRecord,
         workbench.limits.max_compacts_per_task,
     );
     @memset(compacts, null);
@@ -10567,7 +8554,7 @@ fn testWorkbench() !Workbench {
         },
         .runtime = .{
             .attachment = .{ .attached = .{
-                .binding = task_agent_session.Binding.testFixture(3),
+                .binding = task_test_agent_session.Binding.testFixture(3),
                 .execution = task_execution.take(),
                 .pinned_catalog = null,
             } },
@@ -10711,7 +8698,7 @@ const TestTaskPersistence = struct {
 };
 
 fn replaceTaskCredentialForTest(
-    task: *TaskView,
+    task: *TestTask,
     credential: []const u8,
 ) !void {
     const live = task.runtime.live().?;
@@ -10731,7 +8718,7 @@ fn replaceTaskCredentialForTest(
     }
 }
 
-fn detachTaskForTest(workbench: *Workbench, task: *TaskView) void {
+fn detachTaskForTest(workbench: *Workbench, task: *TestTask) void {
     switch (task.runtime.attachment) {
         .detached => return,
         .attached, .closing => {},
@@ -11094,7 +9081,7 @@ test "Task state round trip restores product history without fabricating a Sessi
             },
         );
         defer terminal_restore.deinit();
-        const terminal_task = terminal_restore.findTask(3) orelse
+        const terminal_task = terminal_restore.task_runtime.find(3) orelse
             return error.TestUnexpectedResult;
         const terminal_run = findRun(terminal_task.durable.runs, 7) orelse
             return error.TestUnexpectedResult;
@@ -11118,13 +9105,16 @@ test "Task state round trip restores product history without fabricating a Sessi
         },
     );
     defer restored.deinit();
-    const task = restored.findTask(3) orelse return error.TestUnexpectedResult;
+    const task = restored.task_runtime.find(3) orelse return error.TestUnexpectedResult;
     try std.testing.expect(!task.runtime.hasAttachedSession());
     try std.testing.expect(task.runtime.executionConst() == null);
     try std.testing.expectEqual(ActiveOperation.none, task.runtime.active_operation);
     try std.testing.expectEqual(
         ContinuationUnavailableReason.checkpoint_unavailable,
-        restored.taskContinuation(task).unavailable,
+        restored.task_runtime.continuationProjection(
+            task.durable.id,
+            restored.taskRuntimeProjectionEffects(),
+        ).?.unavailable,
     );
     try std.testing.expectError(
         error.RecoveryUnavailable,
@@ -11171,7 +9161,7 @@ test "Task state round trip restores product history without fabricating a Sessi
         },
     );
     defer deleted_restore.deinit();
-    try std.testing.expect(deleted_restore.findTask(3) == null);
+    try std.testing.expect(deleted_restore.task_runtime.find(3) == null);
 }
 
 test "one damaged Task record does not poison surviving history" {
@@ -11204,7 +9194,7 @@ test "one damaged Task record does not poison surviving history" {
         .{ .task_persistence = persistence.capability(bytes) },
     );
     defer restored.deinit();
-    try std.testing.expect(restored.findTask(3) != null);
+    try std.testing.expect(restored.task_runtime.find(3) != null);
     try std.testing.expectEqual(TaskPersistenceHealth.degraded, restored.task_persistence_health);
     var snapshot_storage: [96 * 1024]u8 = undefined;
     const snapshot = try restored.writeSnapshot(&snapshot_storage);
@@ -11259,10 +9249,13 @@ test "Automatic Workspace history survives an unavailable allocator" {
     try std.testing.expectEqual(@as(usize, 1), workspaces.len);
     try std.testing.expectEqual(WorkspaceKind.automatic, workspaces[0].kind);
     try std.testing.expectEqual(WorkspaceAuthorization.available, workspaces[0].authorization);
-    const task = restored.findTask(3) orelse return error.TestUnexpectedResult;
+    const task = restored.task_runtime.find(3) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(
         ContinuationUnavailableReason.checkpoint_unavailable,
-        restored.taskContinuation(task).unavailable,
+        restored.task_runtime.continuationProjection(
+            task.durable.id,
+            restored.taskRuntimeProjectionEffects(),
+        ).?.unavailable,
     );
 
     var snapshot_storage: [96 * 1024]u8 = undefined;
@@ -11349,7 +9342,7 @@ test "Task persistence failure rolls back deletion before physical release" {
     const tracked_before_delete = workbench.projection_bytes;
 
     try std.testing.expectError(error.TaskPersistenceFailed, workbench.deleteTask(3));
-    try std.testing.expect(workbench.findTask(3) != null);
+    try std.testing.expect(workbench.task_runtime.find(3) != null);
     try std.testing.expectEqual(tracked_before_delete, workbench.projection_bytes);
     try std.testing.expectEqual(TaskPersistenceHealth.write_failed, workbench.task_persistence_health);
     var snapshot_storage: [128 * 1024]u8 = undefined;
@@ -12107,7 +10100,10 @@ test "credential release permanently scrubs catalog and every Skill history fiel
             .argument_values = values,
         } };
     };
-    workbench.deinitRunInputRecord(&run.input);
+    workbench.task_runtime.testDeinitRunInput(
+        &run.input,
+        workbench.taskRuntimeReleaseEffects(),
+    );
     run.input = history_input;
 
     workbench.redactAllProductProjectionsNoFail("SECRET-KEY");
@@ -12180,7 +10176,7 @@ test "Task metadata mutations preserve lifecycle guards and projection accountin
     workbench.task_runtime.tasks[0].?.runtime.active_operation = .none;
     workbench.task_runtime.tasks[0].?.deletion = .failed;
     try workbench.setTaskArchived(3, false);
-    try std.testing.expectEqual(task_deletion.State.idle, workbench.task_runtime.tasks[0].?.deletion);
+    try std.testing.expectEqual(task_test_deletion.State.idle, workbench.task_runtime.tasks[0].?.deletion);
     try workbench.setTaskArchived(3, true);
     workbench.releaseTaskAttachmentNoFail(&workbench.task_runtime.tasks[0].?, .cold_start);
     workbench.task_runtime.tasks[0].?.runtime.worker_references.store(1, .release);
@@ -12468,7 +10464,7 @@ test "default replacement preserves Task generation and installs the next admiss
         "future metawork status",
         workbench.limits.max_tool_field_bytes,
     );
-    const old_input = try Workbench.taskExecutionInput(task);
+    const old_input = try workbench.task_runtime.testExecutionInput(task.durable.id);
     try std.testing.expectEqual(@as(u64, 1), old_input.execution_generation);
     try std.testing.expectEqualStrings("SECRET-KEY", old_input.api_key);
 
@@ -12495,10 +10491,13 @@ test "default replacement preserves Task generation and installs the next admiss
         .display_name = "Fixture model 2",
     }};
     try workbench.beginDefaultExecutionReplacement();
-    try std.testing.expect(workbench.taskContinuationAvailable(task));
+    try std.testing.expect(workbench.task_runtime.continuationAvailable(
+        task.durable.id,
+        workbench.taskRuntimeProjectionEffects(),
+    ));
     try std.testing.expectEqual(
         @as(u64, 1),
-        (try Workbench.taskExecutionInput(task)).execution_generation,
+        (try workbench.task_runtime.testExecutionInput(task.durable.id)).execution_generation,
     );
     try std.testing.expect(!workbench.accountView().can_create_task);
     workbench.commitAccountFactNoFail(.{
@@ -12522,7 +10521,7 @@ test "default replacement preserves Task generation and installs the next admiss
     workbench.endExecutionReplacementNoFail();
     workbench.finishAccountCommitNoFail();
 
-    const preserved = try Workbench.taskExecutionInput(task);
+    const preserved = try workbench.task_runtime.testExecutionInput(task.durable.id);
     try std.testing.expectEqual(@as(u64, 1), preserved.execution_generation);
     try std.testing.expectEqualStrings("fixture-model", preserved.target.model);
     try std.testing.expectEqualStrings("SECRET-KEY", preserved.api_key);
@@ -12565,7 +10564,7 @@ test "default replacement preserves Task generation and installs the next admiss
     task.durable.execution_generation = 2;
     try std.testing.expectError(
         error.ExecutionGenerationMismatch,
-        Workbench.taskExecutionInput(task),
+        workbench.task_runtime.testExecutionInput(task.durable.id),
     );
     try std.testing.expectError(
         error.ExecutionGenerationMismatch,
@@ -12673,7 +10672,7 @@ test "clearing the admission default preserves active Task execution" {
     defer workbench.deinit();
 
     const task = &workbench.task_runtime.tasks[0].?;
-    const task_execution = try Workbench.taskExecutionInput(task);
+    const task_execution = try workbench.task_runtime.testExecutionInput(task.durable.id);
     try std.testing.expectEqualStrings("SECRET-KEY", task_execution.api_key);
 
     try workbench.beginDefaultExecutionReplacement();
@@ -12692,7 +10691,7 @@ test "clearing the admission default preserves active Task execution" {
 
     try std.testing.expect(!workbench.execution.ready());
     try std.testing.expect(!workbench.accountView().can_create_task);
-    const preserved = try Workbench.taskExecutionInput(task);
+    const preserved = try workbench.task_runtime.testExecutionInput(task.durable.id);
     try std.testing.expectEqual(@as(u64, 1), preserved.execution_generation);
     try std.testing.expectEqualStrings("fixture-model", preserved.target.model);
     try std.testing.expectEqualStrings("SECRET-KEY", preserved.api_key);
@@ -12896,7 +10895,7 @@ test "opaque credential redaction is UTF-8 safe across product inputs and assist
     const request = testPermissionRequest("café", "café");
     var pending_storage: [4096]u8 = undefined;
     var pending_writer = std.Io.Writer.fixed(&pending_storage);
-    try task_view.writePendingUi(
+    try task_test_view.writePendingUi(
         &pending_writer,
         workbench.taskTextProjection(),
         9,
@@ -12938,7 +10937,7 @@ test "product Task identity is independent from Agent Session route identity" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
     const task = &workbench.task_runtime.tasks[0].?;
-    task.runtime.attached().?.binding = task_agent_session.Binding.testFixture(99);
+    task.runtime.attached().?.binding = task_test_agent_session.Binding.testFixture(99);
 
     var routed = try testEnvelope(99, 7, "{\"text_chunk\":\"routed\"}");
     defer routed.deinit();
@@ -13100,11 +11099,14 @@ test "event projection failure routes by Agent Session identity not product Task
     var workbench = try testWorkbench();
     defer workbench.deinit();
     const task = &workbench.task_runtime.tasks[0].?;
-    task.runtime.attached().?.binding = task_agent_session.Binding.testFixture(99);
+    task.runtime.attached().?.binding = task_test_agent_session.Binding.testFixture(99);
 
     workbench.recordEventProjectionFailure(task.durable.id, 7);
     try std.testing.expect(task.durable.runs[0].?.event_projection_failure == null);
-    try std.testing.expect(workbench.taskContinuationAvailable(task));
+    try std.testing.expect(workbench.task_runtime.continuationAvailable(
+        task.durable.id,
+        workbench.taskRuntimeProjectionEffects(),
+    ));
 
     workbench.recordEventProjectionFailure(task.runtime.routeId(), 7);
     try std.testing.expectEqual(
@@ -13113,7 +11115,10 @@ test "event projection failure routes by Agent Session identity not product Task
     );
     // The projection failure is a Run-level product fact. Continuation is
     // owned by the Session disposition and stays available.
-    try std.testing.expect(workbench.taskContinuationAvailable(task));
+    try std.testing.expect(workbench.task_runtime.continuationAvailable(
+        task.durable.id,
+        workbench.taskRuntimeProjectionEffects(),
+    ));
 }
 
 test "Workbench shutdown releases current and Task-owned execution generations" {
@@ -13212,7 +11217,7 @@ test "terminal publication is allocation-free write-once bounded history" {
 
 test "compact terminal publication is write-once and outranks late cancellation" {
     var diagnostic_storage: [32]u8 = undefined;
-    var compact = CompactRecord{
+    var compact = TestCompactRecord{
         .id = 1,
         .after_run_id = 7,
         .terminal_diagnostic = &diagnostic_storage,
@@ -13270,7 +11275,10 @@ test "terminal disposition folds exactly once without reopening a closing Task" 
     try std.testing.expectEqual(TaskLifecycle.open, taskLifecycle(task));
     try std.testing.expectEqual(
         ContinuationUnavailableReason.session_poisoned,
-        workbench.taskContinuation(task).unavailable,
+        workbench.task_runtime.continuationProjection(
+            task.durable.id,
+            workbench.taskRuntimeProjectionEffects(),
+        ).?.unavailable,
     );
 
     try std.testing.expect(task.runtime.beginClosing());
@@ -13278,7 +11286,10 @@ test "terminal disposition folds exactly once without reopening a closing Task" 
     try std.testing.expectEqual(TaskLifecycle.closing, taskLifecycle(task));
     try std.testing.expectEqual(
         ContinuationUnavailableReason.closing,
-        workbench.taskContinuation(task).unavailable,
+        workbench.task_runtime.continuationProjection(
+            task.durable.id,
+            workbench.taskRuntimeProjectionEffects(),
+        ).?.unavailable,
     );
 }
 
@@ -13544,10 +11555,10 @@ test "default snapshot budget contains the maximum structural projection" {
             "fixture-model",
             account_contract.Limits.model_id_bytes,
         );
-        const runs = try workbench.allocator.alloc(?RunRecord, limits.max_runs_per_task);
+        const runs = try workbench.allocator.alloc(?TestRunRecord, limits.max_runs_per_task);
         @memset(runs, null);
         const compacts = try workbench.allocator.alloc(
-            ?CompactRecord,
+            ?TestCompactRecord,
             limits.max_compacts_per_task,
         );
         @memset(compacts, null);
@@ -13768,7 +11779,7 @@ test "permission UI re-encoding remains inside its concurrent snapshot allowance
     var writer = std.Io.Writer.fixed(storage);
     var workbench = try testWorkbench();
     defer workbench.deinit();
-    try task_view.writePendingUi(
+    try task_test_view.writePendingUi(
         &writer,
         workbench.taskTextProjection(),
         std.math.maxInt(u64),
@@ -13804,7 +11815,7 @@ test "permission pending projection follows responses and candidate scope" {
     };
     var candidate_storage: [4096]u8 = undefined;
     var candidate_writer = std.Io.Writer.fixed(&candidate_storage);
-    try task_view.writePendingUi(
+    try task_test_view.writePendingUi(
         &candidate_writer,
         workbench.taskTextProjection(),
         1,
@@ -13819,7 +11830,7 @@ test "permission pending projection follows responses and candidate scope" {
     const once_only = testPermissionRequest("Bash", "{}");
     var once_storage: [4096]u8 = undefined;
     var once_writer = std.Io.Writer.fixed(&once_storage);
-    try task_view.writePendingUi(
+    try task_test_view.writePendingUi(
         &once_writer,
         workbench.taskTextProjection(),
         1,
@@ -13852,7 +11863,7 @@ test "permission provenance projection keeps typed fields bounded and non-persis
         .callback_outcome = .answered,
         .response = .allow_session,
     };
-    const projected = try task_model.permissionSummary(value);
+    const projected = try task_test_state.permissionSummary(value);
     try std.testing.expectEqual(lifecycle.PermissionDecision.allow, projected.decision);
     try std.testing.expectEqual(lifecycle.PermissionDecisionSource.session_allow, projected.source);
     try std.testing.expectEqual(@as(u64, 7), projected.policy_generation);
@@ -13918,13 +11929,17 @@ test "file reference ids use durable task and run identities" {
 test "file preview allocation rollback does not touch projection budget" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
-    var reference = FileReferenceView{
+    const reference = task_runtime.FileReference{
+        .workspace_id = 1,
+        .workspace_epoch = 1,
+        .workspace_root = "",
         .id = @constCast("file-3-1-1-1"),
         .title = @constCast("main.zig"),
         .display_path = @constCast("src/main.zig"),
         .kind = @constCast("read"),
         .locator_kind = .workspace_path,
         .locator = @constCast("src/main.zig"),
+        .range = null,
     };
     const tracked_before = workbench.projection_bytes;
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
@@ -13933,14 +11948,14 @@ test "file preview allocation rollback does not touch projection budget" {
     const bytes = try allocator.dupe(u8, "preview");
     try std.testing.expectError(
         error.OutOfMemory,
-        workbench.finishFilePreview(&reference, bytes, false),
+        workbench.finishFilePreview(reference, bytes, false),
     );
     workbench.allocator = allocator;
     allocator.free(bytes);
     try std.testing.expectEqual(tracked_before, workbench.projection_bytes);
 
     const success_bytes = try allocator.dupe(u8, "preview");
-    var preview = try workbench.finishFilePreview(&reference, success_bytes, false);
+    var preview = try workbench.finishFilePreview(reference, success_bytes, false);
     defer preview.deinit();
     try std.testing.expectEqual(tracked_before, workbench.projection_bytes);
 }
@@ -13985,7 +12000,7 @@ test "known Host credentials are removed from assistant, tool, and UI projection
     const request = testPermissionRequest("Bash", "token=SECRET-KEY");
     var pending_storage: [4096]u8 = undefined;
     var pending_writer = std.Io.Writer.fixed(&pending_storage);
-    try task_view.writePendingUi(
+    try task_test_view.writePendingUi(
         &pending_writer,
         workbench.taskTextProjection(),
         9,
@@ -14133,7 +12148,10 @@ test "projection failure after Agent terminal becomes a product failure" {
     try std.testing.expectEqual(RunCause.event_pipeline_failure, product.cause.?);
     // Continuation stays with the Session disposition; the projection loss is
     // a Run-level product fact only.
-    try std.testing.expect(continuationAvailable(workbench.taskContinuation(&workbench.task_runtime.tasks[0].?)));
+    try std.testing.expect(workbench.task_runtime.continuationAvailable(
+        workbench.task_runtime.tasks[0].?.durable.id,
+        workbench.taskRuntimeProjectionEffects(),
+    ));
 
     var snapshot_storage: [96 * 1024]u8 = undefined;
     const snapshot = try workbench.writeSnapshot(&snapshot_storage);
@@ -14190,7 +12208,7 @@ test "event drain barrier atomically publishes terminal product state" {
 test "close and delete wait for terminal event drain" {
     const Harness = struct {
         fn complete(
-            binding: *task_agent_session.Binding,
+            binding: *task_test_agent_session.Binding,
             completion: *std.atomic.Value(CloseCompletion),
         ) void {
             binding.markReleasedForTest();
@@ -14250,7 +12268,7 @@ test "close and delete wait for terminal event drain" {
 test "Runtime shutdown joins a flying close owner before relinquish" {
     const Harness = struct {
         fn close(
-            binding: *task_agent_session.Binding,
+            binding: *task_test_agent_session.Binding,
             completion: *std.atomic.Value(CloseCompletion),
         ) void {
             for (0..128) |_| std.Thread.yield() catch {};
@@ -14277,7 +12295,7 @@ test "Runtime shutdown joins a flying close owner before relinquish" {
     try std.testing.expect(route_id != 0);
     try std.testing.expectEqual(@as(u64, 0), task.runtime.routeId());
     try std.testing.expectEqual(
-        task_agent_session.BindingState.relinquished,
+        task_test_agent_session.BindingState.relinquished,
         task.runtime.bindingAfterCloseJoin().?.state(),
     );
     try std.testing.expectError(

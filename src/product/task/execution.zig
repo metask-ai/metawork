@@ -17,7 +17,7 @@ pub const Notifier = struct {
     context: ?*anyopaque = null,
     notify_fn: *const fn (?*anyopaque) bool,
 
-    fn notify(self: Notifier) void {
+    pub fn notify(self: Notifier) void {
         _ = self.notify_fn(self.context);
     }
 };
@@ -47,6 +47,76 @@ pub const Projection = struct {
     truncated: bool,
     redacted: bool,
 };
+
+/// Projects Task-owned text into a fixed destination while replacing any
+/// credential match with a short marker. Worker jobs and the live aggregate
+/// share this implementation so credential handling cannot drift across the
+/// executor boundary.
+pub fn projectSanitized(
+    destination: []u8,
+    value: []const u8,
+    secret: []const u8,
+) Projection {
+    var read: usize = 0;
+    var write: usize = 0;
+    var redacted = false;
+    while (read < value.len) {
+        if (credentialEndAtCodepoint(value, read, secret)) |redaction_end| {
+            const marker_len = @min(redaction_end - read, 3);
+            if (marker_len > destination.len - write) break;
+            @memset(destination[write..][0..marker_len], '*');
+            write += marker_len;
+            read = redaction_end;
+            redacted = true;
+            continue;
+        }
+        const sequence_len = utf8CodepointLen(value, read);
+        if (sequence_len > value.len - read or sequence_len > destination.len - write)
+            break;
+        @memcpy(
+            destination[write..][0..sequence_len],
+            value[read..][0..sequence_len],
+        );
+        write += sequence_len;
+        read += sequence_len;
+    }
+    return .{
+        .len = write,
+        .truncated = read != value.len,
+        .redacted = redacted,
+    };
+}
+
+fn utf8CodepointLen(value: []const u8, start: usize) usize {
+    return @min(
+        std.unicode.utf8ByteSequenceLength(value[start]) catch 1,
+        value.len - start,
+    );
+}
+
+fn credentialEndAtCodepoint(
+    value: []const u8,
+    codepoint_start: usize,
+    credential: []const u8,
+) ?usize {
+    if (credential.len == 0) return null;
+    const codepoint_len = utf8CodepointLen(value, codepoint_start);
+    var match_end: usize = 0;
+    for (0..codepoint_len) |offset| {
+        if (std.mem.startsWith(
+            u8,
+            value[codepoint_start + offset ..],
+            credential,
+        )) match_end = @max(
+            match_end,
+            codepoint_start + offset + credential.len,
+        );
+    }
+    if (match_end == 0) return null;
+    var end = @min(value.len, match_end);
+    while (end < value.len and value[end] & 0xc0 == 0x80) end += 1;
+    return end;
+}
 
 pub const TextProjector = struct {
     project_fn: *const fn ([]u8, []const u8, []const u8) Projection,
@@ -641,14 +711,14 @@ fn takeCheckpointRecord(
     return result;
 }
 
-fn cancelPreparedRunOrPanic(access: *agent_session.Access, run_id: u64) void {
+pub fn cancelPreparedRunOrPanic(access: *agent_session.Access, run_id: u64) void {
     access.cancelPreparedRun(run_id) catch |err| std.debug.panic(
         "Executor removed queued Run {d}, but Agent rejected prepared cancellation: {s}",
         .{ run_id, @errorName(err) },
     );
 }
 
-fn cancelPreparedCompactOrPanic(access: *agent_session.Access, operation_id: u64) void {
+pub fn cancelPreparedCompactOrPanic(access: *agent_session.Access, operation_id: u64) void {
     access.cancelPreparedCompact(operation_id) catch |err| std.debug.panic(
         "Executor removed queued compact {d}, but Agent rejected prepared cancellation: {s}",
         .{ operation_id, @errorName(err) },

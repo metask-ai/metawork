@@ -9,6 +9,106 @@ const task_attachment = @import("product_task_attachment");
 const task_recovery = @import("product_task_recovery");
 const checkpoint_record = @import("product_task_checkpoint_record");
 
+const automatic_title_max_codepoints: usize = 32;
+
+pub fn automaticTitleCandidate(input: *const task_state.RunInputRecord) ?[]const u8 {
+    return switch (input.*) {
+        .text => |text| firstAutomaticTitleLine(text.value),
+        .skill => |skill| blk: {
+            const display_name = std.mem.trim(u8, skill.display_name, " \t\r\n");
+            if (display_name.len == 0 or !validAutomaticTitleText(display_name))
+                break :blk null;
+            break :blk display_name;
+        },
+    };
+}
+
+pub fn automaticTitleCompletionInput(input: *const task_state.RunInputRecord) ?[]const u8 {
+    const value = switch (input.*) {
+        .text => |text| text.value,
+        .skill => |skill| skill.display_name,
+    };
+    const trimmed = std.mem.trim(u8, value, " \t\r\n");
+    if (trimmed.len == 0 or !std.unicode.utf8ValidateSlice(trimmed)) return null;
+    return trimmed;
+}
+
+fn firstAutomaticTitleLine(value: []const u8) ?[]const u8 {
+    if (value.len == 0 or !std.unicode.utf8ValidateSlice(value)) return null;
+    var cursor: usize = 0;
+    var in_fence = false;
+    while (cursor < value.len) {
+        const line_end = std.mem.indexOfScalarPos(u8, value, cursor, '\n') orelse value.len;
+        var line = std.mem.trim(u8, value[cursor..line_end], " \t\r");
+        const fence = std.mem.startsWith(u8, line, "```") or
+            std.mem.startsWith(u8, line, "~~~");
+        if (fence) {
+            in_fence = !in_fence;
+        } else if (!in_fence) {
+            while (line.len != 0 and line[0] == '#')
+                line = std.mem.trim(u8, line[1..], " \t");
+            if (std.mem.startsWith(u8, line, "- ") or
+                std.mem.startsWith(u8, line, "* ") or
+                std.mem.startsWith(u8, line, "+ "))
+                line = std.mem.trim(u8, line[2..], " \t");
+            if (line.len != 0 and validAutomaticTitleText(line)) return line;
+        }
+        if (line_end == value.len) break;
+        cursor = line_end + 1;
+    }
+    return null;
+}
+
+fn validAutomaticTitleText(value: []const u8) bool {
+    if (value.len == 0) return false;
+    for (value) |byte| if (byte < 0x20) return false;
+    return true;
+}
+
+pub fn generatedAutomaticTitleCandidate(value: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trim(u8, value, " \t\r\n");
+    if (!std.unicode.utf8ValidateSlice(trimmed) or
+        !validAutomaticTitleText(trimmed) or
+        std.mem.indexOfAny(u8, trimmed, "\r\n") != null)
+        return null;
+    const bounded = boundAutomaticTitle(trimmed);
+    return if (bounded.len == 0) null else bounded;
+}
+
+pub fn boundAutomaticTitle(value: []const u8) []const u8 {
+    var cursor: usize = 0;
+    var codepoints: usize = 0;
+    var preferred_boundary: usize = 0;
+    while (cursor < value.len and codepoints < automatic_title_max_codepoints) {
+        const start = cursor;
+        cursor += std.unicode.utf8ByteSequenceLength(value[cursor]) catch unreachable;
+        codepoints += 1;
+        if (isAutomaticTitleBoundary(value[start..cursor]))
+            preferred_boundary = start;
+    }
+    if (cursor == value.len) return value;
+    const boundary = if (preferred_boundary > 0) preferred_boundary else cursor;
+    var bounded = value[0..boundary];
+    while (bounded.len != 0 and (bounded[bounded.len - 1] == ' ' or
+        bounded[bounded.len - 1] == '\t'))
+        bounded = bounded[0 .. bounded.len - 1];
+    return bounded;
+}
+
+fn isAutomaticTitleBoundary(codepoint: []const u8) bool {
+    if (codepoint.len == 1) return switch (codepoint[0]) {
+        ' ', '\t', ',', '.', ';', ':', '!', '?' => true,
+        else => false,
+    };
+    return std.mem.eql(u8, codepoint, "，") or
+        std.mem.eql(u8, codepoint, "。") or
+        std.mem.eql(u8, codepoint, "；") or
+        std.mem.eql(u8, codepoint, "：") or
+        std.mem.eql(u8, codepoint, "！") or
+        std.mem.eql(u8, codepoint, "？") or
+        std.mem.eql(u8, codepoint, "、");
+}
+
 pub const TerminalDecision = struct {
     phase: task_state.RunPhase,
     outcome: task_state.RunOutcome,
