@@ -24,6 +24,7 @@ const task_recovery = product_task.recovery;
 const task_recovery_job = product_task.recovery_job;
 const task_model = product_task.state;
 const task_policy = product_task.policy;
+const task_worker = product_task.execution;
 const task_view = product_task.view;
 const product_mcp = @import("metawork_product_mcp");
 const mcp_configuration = product_mcp.configuration;
@@ -768,43 +769,10 @@ const CompactRecord = task_model.CompactRecord;
 /// Executor-only resources for one queued or running Run. Product records keep
 /// stable state and cancellation identity; this sidecar owns the composition
 /// references needed only while the executor has the job.
-const RunJobContext = struct {
-    workbench: *Workbench,
-    task: *TaskView,
-    run: *RunRecord,
-    access: ?task_agent_session.Access = null,
-
-    fn sessionAccess(self: *@This()) *task_agent_session.Access {
-        return if (self.access) |*value| value else unreachable;
-    }
-
-    fn releaseSessionAccess(self: *@This()) void {
-        if (self.access) |*access| access.deinit();
-        self.access = null;
-    }
-
-    fn destroy(self: *@This()) void {
-        self.releaseSessionAccess();
-        std.heap.c_allocator.destroy(self);
-    }
-};
+const RunJobContext = task_worker.RunJob;
 
 /// Executor-only resources for one queued or running compact operation.
-const CompactJobContext = struct {
-    workbench: *Workbench,
-    task: *TaskView,
-    compact: *CompactRecord,
-    access: ?task_agent_session.Access = null,
-
-    fn sessionAccess(self: *@This()) *task_agent_session.Access {
-        return if (self.access) |*value| value else unreachable;
-    }
-
-    fn destroy(self: *@This()) void {
-        if (self.access) |*access| access.deinit();
-        std.heap.c_allocator.destroy(self);
-    }
-};
+const CompactJobContext = task_worker.CompactJob;
 
 const UiRecordKind = task_model.UiRecordKind;
 const UiRecordState = task_model.UiRecordState;
@@ -3240,7 +3208,7 @@ pub const Workbench = struct {
                 self.beginTaskSessionDetachAfterModelFailureNoFail(view);
             return err;
         };
-        _ = try taskExecutionInput(view);
+        const execution = try taskExecutionInput(view);
         const agent_input: lifecycle.RunInput = switch (input) {
             .text => |text| .{ .text = text },
             .skill => |skill_input| skill_admission: {
@@ -3304,10 +3272,37 @@ pub const Workbench = struct {
         var job_context_owned = true;
         errdefer if (job_context_owned) job_context.destroy();
         job_context.* = .{
-            .workbench = self,
-            .task = view,
             .run = run,
+            .worker_references = &view.runtime.worker_references,
+            .notifier = .{
+                .context = self.change_notifier.context,
+                .notify_fn = self.change_notifier.wake,
+            },
+            .projector = .{ .project_fn = projectTaskWorkerText },
+            .completion_factory = .{
+                .context = self.completion_factory.context,
+                .create_fn = self.completion_factory.create_fn,
+            },
+            .checkpoint = .{
+                .allocator = self.allocator,
+                .io = self.io,
+                .store = self.checkpoint_store,
+                .store_health = &self.checkpoint_store_health,
+                .limits = checkpoint_export_limits,
+            },
         };
+        if (run.automatic_title.state.load(.acquire) == .pending) {
+            job_context.title_execution = OwnedTaskExecution.clone(
+                self.allocator,
+                execution.target.provider_kind,
+                execution.target.model,
+                execution.target.base_url,
+                execution.execution_generation,
+                execution.api_key,
+            ) catch null;
+            if (job_context.title_execution == null)
+                run.automatic_title.state.store(.ready, .release);
+        }
         run.checkpoint_export_context = .{
             .task_id = view.durable.id,
             .binding_epoch = view.durable.binding_epoch,
@@ -3357,11 +3352,11 @@ pub const Workbench = struct {
         self.executor.enqueue(.{
             .identity = run,
             .context = job_context,
-            .execute_fn = executeRunJob,
-            .cancel_fn = cancelRunJob,
+            .execute_fn = task_worker.executeRun,
+            .cancel_fn = task_worker.cancelRun,
         }) catch |err| {
             publishAutomaticTitleFallback(run);
-            releaseWorkerReference(view, run);
+            releaseWorkerReference(&view.runtime.worker_references, run);
             cancelPreparedRunOrPanic(job_context.sessionAccess(), run_id);
             prepared = false;
             job_context.destroy();
@@ -3483,9 +3478,20 @@ pub const Workbench = struct {
         var job_context_owned = true;
         errdefer if (job_context_owned) job_context.destroy();
         job_context.* = .{
-            .workbench = self,
-            .task = view,
             .compact = compact,
+            .worker_references = &view.runtime.worker_references,
+            .notifier = .{
+                .context = self.change_notifier.context,
+                .notify_fn = self.change_notifier.wake,
+            },
+            .projector = .{ .project_fn = projectTaskWorkerText },
+            .checkpoint = .{
+                .allocator = self.allocator,
+                .io = self.io,
+                .store = self.checkpoint_store,
+                .store_health = &self.checkpoint_store_health,
+                .limits = checkpoint_export_limits,
+            },
         };
         compact.checkpoint_export_context = .{
             .task_id = view.durable.id,
@@ -3514,10 +3520,10 @@ pub const Workbench = struct {
         self.executor.enqueue(.{
             .identity = compact,
             .context = job_context,
-            .execute_fn = executeCompactJob,
-            .cancel_fn = cancelCompactJob,
+            .execute_fn = task_worker.executeCompact,
+            .cancel_fn = task_worker.cancelCompact,
         }) catch |err| {
-            releaseCompactWorkerReference(view, compact);
+            releaseCompactWorkerReference(&view.runtime.worker_references, compact);
             cancelPreparedCompactOrPanic(job_context.sessionAccess(), operation_id);
             prepared = false;
             job_context.destroy();
@@ -4416,7 +4422,7 @@ pub const Workbench = struct {
             if (!self.commitCheckpointPostprocessNoFail(task, &run.checkpoint)) continue;
             if (run.checkpoint.state.load(.acquire) == .settled and
                 run.worker_reference_held.load(.acquire))
-                releaseWorkerReference(task, run);
+                releaseWorkerReference(&task.runtime.worker_references, run);
             changed = true;
         }
         for (task.durable.compacts) |*entry| {
@@ -4424,7 +4430,7 @@ pub const Workbench = struct {
             if (!compact.terminal_observed) continue;
             if (!self.commitCheckpointPostprocessNoFail(task, &compact.checkpoint)) continue;
             if (compact.checkpoint.state.load(.acquire) == .settled)
-                releaseCompactWorkerReference(task, compact);
+                releaseCompactWorkerReference(&task.runtime.worker_references, compact);
             changed = true;
         }
         return changed;
@@ -6512,12 +6518,12 @@ pub const Workbench = struct {
                 const run = &(run_entry.* orelse continue);
                 self.settleCheckpointPostprocessForShutdown(&run.checkpoint);
                 if (run.worker_reference_held.load(.acquire))
-                    releaseWorkerReference(task, run);
+                    releaseWorkerReference(&task.runtime.worker_references, run);
             }
             for (task.durable.compacts) |*compact_entry| {
                 const compact = &(compact_entry.* orelse continue);
                 self.settleCheckpointPostprocessForShutdown(&compact.checkpoint);
-                releaseCompactWorkerReference(task, compact);
+                releaseCompactWorkerReference(&task.runtime.worker_references, compact);
             }
         }
     }
@@ -8879,10 +8885,6 @@ pub const Workbench = struct {
         for (task.durable.runs) |*entry| {
             const run = &(entry.* orelse continue);
             if (run.automatic_title.state.load(.acquire) != .ready) continue;
-            const credential = if (run.automatic_title.execution) |*execution|
-                execution.input().api_key
-            else
-                run.redaction_secret;
             const candidate = if (run.automatic_title.generated)
                 generatedAutomaticTitleCandidate(
                     run.automatic_title.result[0..run.automatic_title.result_len],
@@ -8901,19 +8903,21 @@ pub const Workbench = struct {
                     const projected = self.copyProjected(
                         bounded,
                         self.limits.max_task_title_bytes,
-                        credential,
+                        run.redaction_secret,
                     ) catch null;
                     if (projected) |title| {
                         if (title.value.len == 0) {
                             self.freeTracked(title.value);
                         } else if (std.mem.eql(u8, title.value, task.durable.title) and
-                            title.redacted == task.durable.title_redacted)
+                            (title.redacted or run.automatic_title.generated_redacted) ==
+                                task.durable.title_redacted)
                         {
                             self.freeTracked(title.value);
                         } else {
                             self.freeTracked(task.durable.title);
                             task.durable.title = title.value;
-                            task.durable.title_redacted = title.redacted;
+                            task.durable.title_redacted = title.redacted or
+                                run.automatic_title.generated_redacted;
                             durable_changed = true;
                         }
                     }
@@ -8922,32 +8926,19 @@ pub const Workbench = struct {
             std.crypto.secureZero(u8, &run.automatic_title.result);
             run.automatic_title.result_len = 0;
             run.automatic_title.generated = false;
-            if (run.automatic_title.execution) |*execution| execution.deinit();
-            run.automatic_title.execution = null;
+            run.automatic_title.generated_redacted = false;
             run.automatic_title.state.store(.settled, .release);
         }
         return durable_changed;
     }
 
     fn prepareAutomaticTitle(
-        self: *Workbench,
+        _: *Workbench,
         task: *const TaskView,
         generation: u64,
-        execution: account_contract.ExecutionConfigInput,
     ) AutomaticTitle {
         if (generation != 1 or task.durable.title.len != 0) return .{};
         var result = AutomaticTitle{};
-        result.execution = OwnedTaskExecution.clone(
-            self.allocator,
-            execution.target.provider_kind,
-            execution.target.model,
-            execution.target.base_url,
-            execution.execution_generation,
-            execution.api_key,
-        ) catch {
-            result.state.store(.ready, .release);
-            return result;
-        };
         result.state.store(.pending, .release);
         return result;
     }
@@ -8955,8 +8946,6 @@ pub const Workbench = struct {
     fn releaseAutomaticTitle(self: *Workbench, title: *AutomaticTitle) void {
         std.debug.assert(title.state.load(.acquire) != .running);
         std.crypto.secureZero(u8, &title.result);
-        if (title.execution) |*execution| execution.deinit();
-        title.execution = null;
         title.state.store(.settled, .release);
         _ = self;
     }
@@ -9106,7 +9095,6 @@ pub const Workbench = struct {
         var automatic_title = self.prepareAutomaticTitle(
             task,
             task.durable.next_run_generation,
-            execution,
         );
         errdefer self.releaseAutomaticTitle(&automatic_title);
         task.durable.runs[slot] = .{
@@ -9666,449 +9654,29 @@ fn closeWorker(
     _ = notifier.notify();
 }
 
-const AutomaticTitleWatchdog = struct {
-    io: std.Io,
-    title: *AutomaticTitle,
-    stream: *lifecycle.CompletionStream,
-    finished: std.atomic.Value(bool) = .init(false),
-    timed_out: std.atomic.Value(bool) = .init(false),
+const publishAutomaticTitleFallback = task_worker.publishAutomaticTitleFallback;
+const cancelPreparedRunOrPanic = taskWorkerCancelPreparedRun;
+const cancelPreparedCompactOrPanic = taskWorkerCancelPreparedCompact;
+const releaseWorkerReference = task_worker.releaseRunWorkerReference;
+const releaseCompactWorkerReference = task_worker.releaseCompactWorkerReference;
 
-    fn run(self: *AutomaticTitleWatchdog) void {
-        var elapsed_ms: u32 = 0;
-        while (elapsed_ms < automatic_title_timeout_ms) : (elapsed_ms += automatic_title_watchdog_poll_ms) {
-            if (self.finished.load(.acquire)) return;
-            if (self.title.cancel_requested.load(.acquire)) {
-                _ = self.stream.abort(.user_request) catch return;
-                return;
-            }
-            std.Io.Timeout.sleep(.{ .duration = .{
-                .raw = std.Io.Duration.fromMilliseconds(
-                    automatic_title_watchdog_poll_ms,
-                ),
-                .clock = .awake,
-            } }, self.io) catch break;
-        }
-        if (self.finished.load(.acquire)) return;
-        if (self.title.cancel_requested.load(.acquire)) {
-            _ = self.stream.abort(.user_request) catch return;
-            return;
-        }
-        self.timed_out.store(true, .release);
-        _ = self.stream.abort(.timeout) catch return;
-    }
-};
-
-fn generateAutomaticTitle(workbench: *Workbench, run: *RunRecord) void {
-    const claimed = run.automatic_title.state.cmpxchgStrong(
-        .pending,
-        .running,
-        .acq_rel,
-        .acquire,
-    );
-    if (claimed != null) return;
-    defer run.automatic_title.state.store(.ready, .release);
-    if (run.automatic_title.cancel_requested.load(.acquire)) return;
-    const source = Workbench.automaticTitleCompletionInput(&run.input) orelse return;
-    const execution = &(run.automatic_title.execution orelse return);
-    const config = execution.input();
-    const owner = workbench.completion_factory.create(std.heap.c_allocator, .{
-        .provider = agentProvider(run.execution_provider),
-        .credential = config.api_key,
-        .base_url = config.target.base_url,
-        .model = config.target.model,
-    }) catch return;
-    const messages = [_]lifecycle.CompletionMessage{.{
-        .role = .user,
-        .text = source,
-    }};
-    const stream = owner.startStream(.{
-        .system = automatic_title_system_prompt,
-        .messages = &messages,
-    }) catch {
-        _ = destroyAutomaticTitleCompletion(owner);
-        return;
-    };
-    var watchdog = AutomaticTitleWatchdog{
-        .io = workbench.io,
-        .title = &run.automatic_title,
-        .stream = stream,
-    };
-    const watchdog_thread = std.Thread.spawn(.{}, AutomaticTitleWatchdog.run, .{&watchdog}) catch {
-        _ = destroyAutomaticTitleStream(stream, owner);
-        return;
-    };
-
-    var output_len: usize = 0;
-    var overflow = false;
-    var terminal_reason: ?lifecycle.CompletionStopReason = null;
-    var stream_failed = false;
-    while (terminal_reason == null and !stream_failed) {
-        var event = stream.next() catch {
-            stream_failed = true;
-            break;
-        };
-        const kind = event.kind;
-        const stop_reason = event.stop_reason;
-        const payload = event.payload;
-        switch (kind) {
-            .text => {
-                if (payload.len > automatic_title_result_capacity - output_len) {
-                    overflow = true;
-                } else if (!overflow) {
-                    @memcpy(
-                        run.automatic_title.result[output_len..][0..payload.len],
-                        payload,
-                    );
-                    output_len += payload.len;
-                }
-            },
-            .done => terminal_reason = stop_reason,
-            .thinking, .usage => {},
-        }
-        event.deinit();
-    }
-    watchdog.finished.store(true, .release);
-    watchdog_thread.join();
-    const destroyed = destroyAutomaticTitleStream(stream, owner);
-    if (!destroyed or stream_failed or overflow or
-        watchdog.timed_out.load(.acquire) or
-        run.automatic_title.cancel_requested.load(.acquire) or
-        terminal_reason != .end_turn)
-        return;
-    run.automatic_title.result_len = output_len;
-    run.automatic_title.generated = true;
-}
-
-fn destroyAutomaticTitleCompletion(owner: *lifecycle.Completion) bool {
-    owner.deinit() catch return false;
-    return true;
-}
-
-fn destroyAutomaticTitleStream(
-    stream: *lifecycle.CompletionStream,
-    owner: *lifecycle.Completion,
-) bool {
-    stream.deinit() catch return false;
-    return destroyAutomaticTitleCompletion(owner);
-}
-
-fn publishAutomaticTitleFallback(run: *RunRecord) void {
-    _ = run.automatic_title.state.cmpxchgStrong(
-        .pending,
-        .ready,
-        .acq_rel,
-        .acquire,
-    );
-}
-
-fn executeRunJob(context: *anyopaque) void {
-    const job: *RunJobContext = @ptrCast(@alignCast(context));
-    defer job.destroy();
-    const run = job.run;
-    const claimed = run.agent_handoff.cmpxchgStrong(
-        .queued,
-        .starting,
-        .acq_rel,
-        .acquire,
-    );
-    std.debug.assert(claimed == null);
-    var agent_run = switch (job.sessionAccess().beginRunOutcome(run.id)) {
-        .run => |agent_run| agent_run,
-        .failure => |failure| {
-            run.agent_handoff.store(.finishing, .release);
-            commitBeginFailure(run, failure);
-            publishAutomaticTitleFallback(run);
-            const notifier = job.workbench.change_notifier;
-            releaseWorkerReference(job.task, run);
-            _ = notifier.notify();
-            return;
-        },
-    };
-    run.run_control = agent_run.control();
-    run.agent_handoff.store(.running, .release);
-    if (run.pending_termination.load(.acquire) != .none) {
-        if (run.run_control.tryAcquireLease()) |lease_value| {
-            var lease = lease_value;
-            const result = lease.requestTermination(pendingTerminationSignal(run));
-            lease.deinit();
-            if (result == .stale_run) std.debug.panic(
-                "newly published RunControl for Run {d} was already stale",
-                .{run.id},
-            );
-        }
-    }
-    var terminal = agent_run.execute();
-    run.agent_handoff.store(.finishing, .release);
-    _ = commitAgentTerminal(run, &terminal);
-    const checkpoint_eligible = terminal.raw_status_code != null and
-        terminal.session_disposition_at_completion == .reusable;
-    terminal.deinit();
-    agent_run.deinit();
-    // The Run capability has finished its Agent operation. Do not retain the
-    // Session across best-effort title generation: Task close may start as
-    // soon as the terminal fact is visible. Checkpoint export below acquires
-    // its own scoped lease, so close either waits for that real Session use or
-    // prevents it from starting.
-    job.releaseSessionAccess();
-    const notifier = job.workbench.change_notifier;
-    _ = notifier.notify();
-    generateAutomaticTitle(job.workbench, run);
-    _ = notifier.notify();
-    var checkpoint_access: ?task_agent_session.Access = if (checkpoint_eligible)
-        job.task.runtime.acquireAccess() catch null
-    else
-        null;
-    defer if (checkpoint_access) |*access| access.deinit();
-    if (!checkpoint_eligible or checkpoint_access == null or
-        !postprocessCheckpoint(
-            job.workbench,
-            &checkpoint_access.?,
-            &run.checkpoint,
-            run.checkpoint_export_context,
-        )) releaseWorkerReference(job.task, run);
-    _ = notifier.notify();
-}
-
-fn executeCompactJob(context: *anyopaque) void {
-    const job: *CompactJobContext = @ptrCast(@alignCast(context));
-    defer job.destroy();
-    const compact = job.compact;
-    compact.agent_handoff.store(.starting, .release);
-    _ = job.workbench.change_notifier.notify();
-    compact.agent_handoff.store(.running, .release);
-    var terminal = job.sessionAccess().executePreparedCompact(compact.id) catch |err| {
-        compact.agent_handoff.store(.finishing, .release);
-        _ = commitCompactProductTerminal(
-            compact,
-            .failed,
-            if (err == error.SessionClosing)
-                .session_close
-            else
-                .dependency_contract_failure,
-            if (err == error.SessionClosing)
-                .closing
-            else
-                .poisoned,
-            .{},
-            0,
-            0,
-            "",
-            false,
-        );
-        const notifier = job.workbench.change_notifier;
-        releaseCompactWorkerReference(job.task, compact);
-        _ = notifier.notify();
-        return;
-    };
-    compact.agent_handoff.store(.finishing, .release);
-    commitCompactTerminal(compact, &terminal);
-    const checkpoint_eligible = terminal.raw_status_code != null and
-        terminal.session_disposition_at_completion == .reusable;
-    terminal.deinit();
-    const notifier = job.workbench.change_notifier;
-    if (!checkpoint_eligible or !postprocessCheckpoint(
-        job.workbench,
-        job.sessionAccess(),
-        &compact.checkpoint,
-        compact.checkpoint_export_context,
-    )) releaseCompactWorkerReference(job.task, compact);
-    _ = notifier.notify();
-}
-
-const CheckpointSinkContext = struct {
-    writer: *checkpoint_store.Writer,
-    cancelled: *std.atomic.Value(bool),
-
-    fn write(
-        context: ?*anyopaque,
-        bytes: []const u8,
-    ) lifecycle.CheckpointSinkWriteResult {
-        const self: *CheckpointSinkContext = @ptrCast(@alignCast(
-            context orelse return .contract_failed,
-        ));
-        if (self.cancelled.load(.acquire)) return .cancelled;
-        self.writer.write(bytes) catch |err| return switch (err) {
-            error.ResourceLimit => .contract_failed,
-            error.WriteFailed => .io_failed,
-        };
-        return .ok;
-    }
-};
-
-fn postprocessCheckpoint(
-    workbench: *Workbench,
+fn taskWorkerCancelPreparedRun(
     access: *task_agent_session.Access,
-    postprocess: *CheckpointPostprocess,
-    context: CheckpointExportContext,
-) bool {
-    if (workbench.checkpoint_store_health.load(.acquire) != .ready)
-        return false;
-    const store = workbench.checkpoint_store orelse return false;
-    postprocess.state.store(.exporting, .release);
-    if (postprocess.cancelled.load(.acquire)) {
-        publishCheckpointFailure(postprocess, .cancelled);
-        return true;
-    }
-    var writer = store.begin(context.task_id, checkpoint_export_limits.hard_bytes) catch {
-        publishCheckpointFailure(postprocess, .io_failed);
-        return true;
-    };
-    defer writer.deinit();
-    var sink_context = CheckpointSinkContext{
-        .writer = &writer,
-        .cancelled = &postprocess.cancelled,
-    };
-    const started = std.Io.Timestamp.now(workbench.io, .awake);
-    var outcome = access.exportCheckpoint(
-        checkpoint_export_limits,
-        .{ .context = &sink_context, .write_fn = CheckpointSinkContext.write },
-        context.last_run_id,
-        context.last_compact_id,
-        context.model,
-    ) catch {
-        publishCheckpointFailure(postprocess, .export_failed);
-        return true;
-    };
-    const finished = std.Io.Timestamp.now(workbench.io, .awake);
-    const duration_ns: i128 = @intCast(started.durationTo(finished).nanoseconds);
-    switch (outcome) {
-        .failure => |failure| {
-            const attempt = checkpointFailureAttempt(failure);
-            outcome.deinit();
-            publishCheckpointFailure(postprocess, attempt);
-            return true;
-        },
-        .success => |*success| {
-            const chunk_count = success.checkpoint.chunk_count;
-            var candidate = CheckpointCandidate{
-                .record = takeCheckpointRecord(
-                    success,
-                    context.task_id,
-                    context.terminal_kind,
-                    context.terminal_id,
-                    context.binding_epoch,
-                ),
-                .metrics = .{
-                    .chunk_count = chunk_count,
-                    .export_duration_ns = duration_ns,
-                },
-            };
-            outcome = undefined;
-            const identity = writer.commit(
-                candidate.record.blob.generation,
-                candidate.record.blob.digest,
-                candidate.record.blob.byte_size,
-            ) catch |err| {
-                if (err == error.PersistenceOutcomeUnknown) {
-                    workbench.checkpoint_store_health.store(.outcome_unknown, .release);
-                    postprocess.payload = .{ .store_outcome_unknown = candidate };
-                    postprocess.state.store(.store_outcome_unknown, .release);
-                    return true;
-                }
-                candidate.record.deinit(workbench.allocator);
-                publishCheckpointFailure(postprocess, .io_failed);
-                return true;
-            };
-            candidate.record.blob = identity;
-            postprocess.payload = .{ .candidate = candidate };
-            postprocess.state.store(.candidate_ready, .release);
-            return true;
-        },
-    }
-}
-
-fn publishCheckpointFailure(
-    postprocess: *CheckpointPostprocess,
-    attempt: CheckpointAttempt,
+    run_id: u64,
 ) void {
-    postprocess.payload = .{ .failure = attempt };
-    postprocess.state.store(.failure_ready, .release);
-}
-
-fn takeCheckpointRecord(
-    success: *lifecycle.CheckpointSuccess,
-    task_id: u64,
-    terminal_kind: std.meta.Tag(checkpoint_record.Terminal),
-    terminal_id: u64,
-    binding_epoch: u64,
-) checkpoint_record.Record {
-    const description = &success.description;
-    if (description.skill_catalog_revision) |value| description.allocator.free(value);
-    description.allocator.free(description.mcp_selection_fingerprint);
-    const terminal: checkpoint_record.Terminal = switch (terminal_kind) {
-        .run => .{ .run = terminal_id },
-        .compact => .{ .compact = terminal_id },
-    };
-    const result = checkpoint_record.Record{
-        .blob = .{
-            .task_id = task_id,
-            .generation = success.checkpoint.generation,
-            .byte_size = success.checkpoint.total_bytes,
-            .digest = success.checkpoint.digest,
-        },
-        .session = .{
-            .logical_session_id = description.session_id,
-            .last_run_id = description.last_run_id,
-            .last_compact_id = description.last_compact_id,
-            .model = description.model,
-        },
-        .anchor = .{
-            .terminal = terminal,
-            .binding_epoch = binding_epoch,
-        },
-    };
-    success.* = undefined;
-    return result;
-}
-
-fn cancelCompactJob(context: *anyopaque) void {
-    const job: *CompactJobContext = @ptrCast(@alignCast(context));
-    defer job.destroy();
-    const compact = job.compact;
-    _ = compact.pending_interruption.cmpxchgStrong(
-        .none,
-        .app_shutdown,
-        .acq_rel,
-        .acquire,
+    access.cancelPreparedRun(run_id) catch |err| std.debug.panic(
+        "Executor removed queued Run {d}, but Agent rejected prepared cancellation: {s}",
+        .{ run_id, @errorName(err) },
     );
-    const interruption = pendingExternalInterruption(compact);
-    cancelPreparedCompactOrPanic(job.sessionAccess(), compact.id);
-    _ = commitCompactProductTerminal(
-        compact,
-        .aborted,
-        compactCauseForInterruption(interruption),
-        if (interruption == .user_cancel) .reusable else .closing,
-        .{},
-        0,
-        0,
-        "",
-        false,
-    );
-    const notifier = job.workbench.change_notifier;
-    releaseCompactWorkerReference(job.task, compact);
-    _ = notifier.notify();
 }
 
-fn commitCompactTerminal(
-    compact: *CompactRecord,
-    result: *const lifecycle.CompactTerminalResult,
+fn taskWorkerCancelPreparedCompact(
+    access: *task_agent_session.Access,
+    operation_id: u64,
 ) void {
-    const decision = task_policy.classifyCompactTerminal(result);
-    _ = commitCompactProductTerminal(
-        compact,
-        decision.phase,
-        decision.cause,
-        result.session_disposition_at_completion,
-        .{
-            .input_tokens = result.input_tokens,
-            .output_tokens = result.output_tokens,
-            .cache_read_input_tokens = result.cache_read_input_tokens,
-            .cache_creation_input_tokens = result.cache_creation_input_tokens,
-        },
-        result.before_context_tokens,
-        result.after_context_tokens,
-        result.diagnostic(),
-        result.diagnostic_truncated,
+    access.cancelPreparedCompact(operation_id) catch |err| std.debug.panic(
+        "Executor removed queued compact {d}, but Agent rejected prepared cancellation: {s}",
+        .{ operation_id, @errorName(err) },
     );
 }
 
@@ -10116,41 +9684,25 @@ fn commitCompactProductTerminal(
     compact: *CompactRecord,
     phase: CompactPhase,
     cause: ?CompactCause,
-    session_disposition_at_completion: lifecycle.SessionDisposition,
+    session_disposition: lifecycle.SessionDisposition,
     usage: UsageView,
     before_context_tokens: u64,
     after_context_tokens: u64,
-    diagnostic_bytes: []const u8,
+    diagnostic: []const u8,
     source_diagnostic_truncated: bool,
 ) bool {
-    std.debug.assert(isTerminalCompactPhase(phase));
-    if (compact.terminal_publication.cmpxchgStrong(
-        .open,
-        .publishing,
-        .acq_rel,
-        .acquire,
-    ) == null) {
-        const diagnostic = sanitizeInto(
-            compact.terminal_diagnostic,
-            diagnostic_bytes,
-            compact.redaction_secret,
-        );
-        compact.terminal_payload = .{
-            .phase = phase,
-            .cause = cause,
-            .before_context_tokens = before_context_tokens,
-            .after_context_tokens = after_context_tokens,
-            .usage = usage,
-            .session_disposition_at_completion = session_disposition_at_completion,
-            .diagnostic_len = diagnostic.len,
-            .diagnostic_truncated = source_diagnostic_truncated or diagnostic.truncated,
-            .diagnostic_redacted = diagnostic.redacted,
-        };
-        compact.terminal_publication.store(.published, .release);
-        return true;
-    }
-    _ = compactTerminalPayload(compact).?;
-    return false;
+    return task_worker.commitCompactProductTerminal(
+        .{ .project_fn = projectTaskWorkerText },
+        compact,
+        phase,
+        cause,
+        session_disposition,
+        usage,
+        before_context_tokens,
+        after_context_tokens,
+        diagnostic,
+        source_diagnostic_truncated,
+    );
 }
 
 fn executeMcpRefreshJob(context: *anyopaque) void {
@@ -10240,74 +9792,6 @@ fn consumeLifecycleTermination(dispatch: RunTerminationDispatch, run_id: u64) vo
             .{run_id},
         ),
     }
-}
-
-fn cancelRunJob(context: *anyopaque) void {
-    const job: *RunJobContext = @ptrCast(@alignCast(context));
-    defer job.destroy();
-    const run = job.run;
-    _ = run.pending_termination.cmpxchgStrong(
-        .none,
-        .app_shutdown,
-        .acq_rel,
-        .acquire,
-    );
-    const signal = pendingTerminationSignal(run);
-    const decision = decisionForSignal(signal);
-    const interruption = switch (signal) {
-        .interrupted => |value| value,
-        else => unreachable,
-    };
-    cancelPreparedRunOrPanic(job.sessionAccess(), run.id);
-    _ = commitTerminal(
-        run,
-        decision.phase,
-        decision.outcome,
-        decision.cause,
-        switch (interruption) {
-            .user_cancel, .timeout => .reusable,
-            .session_close, .app_shutdown => .closing,
-        },
-        "",
-        false,
-    );
-    publishAutomaticTitleFallback(run);
-    const notifier = job.workbench.change_notifier;
-    releaseWorkerReference(job.task, run);
-    _ = notifier.notify();
-}
-
-fn cancelPreparedRunOrPanic(
-    access: *task_agent_session.Access,
-    run_id: u64,
-) void {
-    access.cancelPreparedRun(run_id) catch |err| std.debug.panic(
-        "Executor removed queued Run {d}, but Agent rejected prepared cancellation: {s}",
-        .{ run_id, @errorName(err) },
-    );
-}
-
-fn cancelPreparedCompactOrPanic(
-    access: *task_agent_session.Access,
-    operation_id: u64,
-) void {
-    access.cancelPreparedCompact(operation_id) catch |err| std.debug.panic(
-        "Executor removed queued compact {d}, but Agent rejected prepared cancellation: {s}",
-        .{ operation_id, @errorName(err) },
-    );
-}
-
-fn releaseWorkerReference(task: *TaskView, run: *RunRecord) void {
-    std.debug.assert(run.worker_reference_held.swap(false, .acq_rel));
-    const references = &task.runtime.worker_references;
-    const previous = references.fetchSub(1, .release);
-    std.debug.assert(previous != 0);
-}
-
-fn releaseCompactWorkerReference(task: *TaskView, compact: *CompactRecord) void {
-    if (!compact.worker_reference_held.swap(false, .acq_rel)) return;
-    const previous = task.runtime.worker_references.fetchSub(1, .release);
-    std.debug.assert(previous != 0);
 }
 
 fn noChangeNotification(_: ?*anyopaque) bool {
@@ -10523,6 +10007,19 @@ fn sanitizeInto(destination: []u8, value: []const u8, secret: []const u8) Saniti
         read += sequence_len;
     }
     return .{ .len = write, .truncated = read != value.len, .redacted = redacted };
+}
+
+fn projectTaskWorkerText(
+    destination: []u8,
+    value: []const u8,
+    secret: []const u8,
+) task_worker.Projection {
+    const projected = sanitizeInto(destination, value, secret);
+    return .{
+        .len = projected.len,
+        .truncated = projected.truncated,
+        .redacted = projected.redacted,
+    };
 }
 
 fn redactWorkspaceBytesNoFail(

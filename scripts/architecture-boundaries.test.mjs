@@ -527,6 +527,7 @@ test("Product Task kernels have one physical home without taking the executor", 
   const taskPersistence = read("src/product/task/persistence.zig");
   const taskState = read("src/product/task/state.zig");
   const taskPolicy = read("src/product/task/policy.zig");
+  const taskExecution = read("src/product/task/execution.zig");
   const taskView = read("src/product/task/view.zig");
   const taskAgentSession = read("src/product/task/agent_session.zig");
   const taskRuntime = read("src/product/task/runtime.zig");
@@ -549,6 +550,7 @@ test("Product Task kernels have one physical home without taking the executor", 
     "recovery_job",
     "state",
     "policy",
+    "execution",
     "view",
   ]) {
     assert.match(
@@ -576,6 +578,7 @@ test("Product Task kernels have one physical home without taking the executor", 
   assert.match(build, /src\/product\/task\/agent_session\.zig/);
   assert.match(build, /src\/product\/task\/state\.zig/);
   assert.match(build, /src\/product\/task\/policy\.zig/);
+  assert.match(build, /src\/product\/task\/execution\.zig/);
   assert.match(build, /src\/product\/task\/view\.zig/);
   assert.match(
     build,
@@ -614,8 +617,37 @@ test("Product Task kernels have one physical home without taking the executor", 
   assert.match(projection, /const CompactRecord = task_model\.CompactRecord;/);
   assert.doesNotMatch(projection, /const RunRecord = struct/);
   assert.doesNotMatch(projection, /const CompactRecord = struct/);
-  assert.match(projection, /const RunJobContext = struct/);
-  assert.match(projection, /const CompactJobContext = struct/);
+  assert.match(projection, /const RunJobContext = task_worker\.RunJob;/);
+  assert.match(projection, /const CompactJobContext = task_worker\.CompactJob;/);
+  assert.match(taskExecution, /pub const RunJob = struct/);
+  assert.match(taskExecution, /pub const CompactJob = struct/);
+  assert.match(taskExecution, /pub fn executeRun\(/);
+  assert.match(taskExecution, /pub fn cancelRun\(/);
+  assert.match(taskExecution, /pub fn executeCompact\(/);
+  assert.match(taskExecution, /pub fn cancelCompact\(/);
+  assert.match(taskExecution, /title_execution: \?execution_binding\.OwnedTaskExecution/);
+  assert.match(taskExecution, /if \(self\.title_execution\) \|\*execution\| execution\.deinit\(\)/);
+  const automaticTitle = taskState.match(
+    /pub const AutomaticTitle = struct \{[\s\S]*?\n\};/,
+  )?.[0];
+  assert.ok(automaticTitle, "Task state must own AutomaticTitle facts");
+  assert.doesNotMatch(automaticTitle, /OwnedTaskExecution|credential|secret|execution:/);
+  assert.doesNotMatch(
+    taskExecution,
+    /Workbench|TaskView|\*task_runtime\.|workbench_executor|@import\("(?:metawork_workbench|metawork_app|metawork_bridge|native_sdk|metask_agentcore)"\)/,
+  );
+  assert.doesNotMatch(
+    taskExecution,
+    /\b(?:workbench|task|runtime):\s*\*/,
+  );
+  assert.match(projection, /\.execute_fn = task_worker\.executeRun/);
+  assert.match(projection, /\.cancel_fn = task_worker\.cancelRun/);
+  assert.match(projection, /\.execute_fn = task_worker\.executeCompact/);
+  assert.match(projection, /\.cancel_fn = task_worker\.cancelCompact/);
+  assert.doesNotMatch(
+    projection,
+    /fn (?:execute|cancel)(?:Run|Compact)Job\(/,
+  );
   assert.match(projection, /fn drainAgentEventPass\(/);
   assert.match(projection, /agent_runtime\.takeEvent\(\)/);
   assert.match(projection, /task_model\.applyEvent\(/);

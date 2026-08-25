@@ -6,7 +6,6 @@
 const std = @import("std");
 const agent = @import("metawork_agent");
 const checkpoint_record = @import("product_task_checkpoint_record");
-const execution_binding = @import("product_task_execution_binding");
 const task_runtime = @import("product_task_runtime");
 const task_deletion = @import("product_task_deletion");
 const task_recovery = @import("product_task_recovery");
@@ -277,9 +276,9 @@ pub const AutomaticTitle = struct {
     provisional_applied: bool = false,
     user_overrode: bool = false,
     generated: bool = false,
+    generated_redacted: bool = false,
     result_len: usize = 0,
     result: [automatic_title_result_capacity]u8 = undefined,
-    execution: ?execution_binding.OwnedTaskExecution = null,
 };
 
 pub const CheckpointAnchor = enum {

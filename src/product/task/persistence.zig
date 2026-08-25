@@ -1449,7 +1449,6 @@ fn deinitRestoredRunInput(
 
 fn deinitRestoredRun(projection: RestoreProjection, run: *task_state.RunRecord) void {
     std.debug.assert(run.automatic_title.state.load(.acquire) != .running);
-    std.debug.assert(run.automatic_title.execution == null);
     for (run.tools) |*entry| {
         const tool = &(entry.* orelse continue);
         deinitRestoredTool(projection, tool);

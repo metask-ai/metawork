@@ -12,4 +12,5 @@ pub const recovery = @import("product_task_recovery");
 pub const recovery_job = @import("product_task_recovery_job");
 pub const state = @import("product_task_state");
 pub const policy = @import("product_task_policy");
+pub const execution = @import("product_task_execution");
 pub const view = @import("product_task_view");
