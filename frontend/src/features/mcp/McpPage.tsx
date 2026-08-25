@@ -242,10 +242,11 @@ function validMcpNames(values: string[]): boolean {
   );
 }
 
-function serverNeedsAttention(server: McpServer) {
+function serverNeedsAttention(server: McpServer, applying: boolean) {
   if (server.connection === null) return true;
   if (server.approvalStatus === "unapproved") return true;
   if (!server.desiredEnabled) return false;
+  if (applying) return false;
   return (
     !["not_required", "ready"].includes(server.authorizationStatus) ||
     attentionStatuses.has(server.runtimeStatus) ||
@@ -253,7 +254,7 @@ function serverNeedsAttention(server: McpServer) {
   );
 }
 
-function serverStateKey(server: McpServer) {
+function serverStateKey(server: McpServer, applying: boolean) {
   if (server.connection === null)
     return "mcp.detail.connection_unavailable" as const;
   if (server.approvalStatus === "unapproved")
@@ -261,16 +262,18 @@ function serverStateKey(server: McpServer) {
   if (!server.desiredEnabled) return "mcp.desired.disabled" as const;
   if (!["not_required", "ready"].includes(server.authorizationStatus))
     return `mcp.authorization_status.${server.authorizationStatus}` as const;
+  if (applying) return "mcp.status.connecting" as const;
   if (server.runtimeStatus !== "ready")
     return `mcp.status.${server.runtimeStatus}` as const;
   return `mcp.access.${server.newTaskAccess}` as const;
 }
 
-function serverVisualStatus(server: McpServer) {
+function serverVisualStatus(server: McpServer, applying: boolean) {
   if (server.connection === null) return "invalid_catalog" as const;
   if (server.approvalStatus === "unapproved") return "not_loaded" as const;
   if (!server.desiredEnabled) return "disabled" as const;
-  if (serverNeedsAttention(server)) return "attention" as const;
+  if (applying) return "connecting" as const;
+  if (serverNeedsAttention(server, false)) return "attention" as const;
   return server.runtimeStatus;
 }
 
@@ -283,8 +286,9 @@ function serverCanApply(server: McpServer) {
   );
 }
 
-function serverStateIcon(server: McpServer) {
-  if (serverNeedsAttention(server)) return "warning" as const;
+function serverStateIcon(server: McpServer, applying: boolean) {
+  if (applying) return "refresh" as const;
+  if (serverNeedsAttention(server, false)) return "warning" as const;
   if (server.runtimeStatus === "ready") return "check" as const;
   return "mcp" as const;
 }
@@ -321,7 +325,7 @@ function McpServerRow({
   return (
     <li
       className="mcp-server-row"
-      data-status={applying ? "connecting" : serverVisualStatus(server)}
+      data-status={serverVisualStatus(server, applying)}
       data-selected={selected}
     >
       <span className="mcp-status-rail" aria-hidden="true" />
@@ -333,7 +337,7 @@ function McpServerRow({
         onClick={(event) => onOpen(server, event.currentTarget)}
       >
         <span className="mcp-server-icon" aria-hidden="true">
-          <Icon name={applying ? "refresh" : serverStateIcon(server)} />
+          <Icon name={serverStateIcon(server, applying)} />
         </span>
         <span className="mcp-server-identity">
           <strong>{server.displayName}</strong>
@@ -349,7 +353,7 @@ function McpServerRow({
           })}
         </span>
         <span className="mcp-server-state">
-          <strong>{t(serverStateKey(server))}</strong>
+          <strong>{t(serverStateKey(server, applying))}</strong>
         </span>
         <Icon name="chevron-right" />
       </button>
@@ -635,12 +639,20 @@ export function McpPage({
         (server) => server.id === confirmation.serverId,
       ) ?? null)
     : null;
-  const attention = visibleServers.filter(serverNeedsAttention);
+  const isServerApplying = (server: McpServer) =>
+    management.configurationApply === "applying" && serverCanApply(server);
+  const attention = visibleServers.filter((server) =>
+    serverNeedsAttention(server, isServerApplying(server)),
+  );
   const available = visibleServers.filter(
-    (server) => !serverNeedsAttention(server) && server.desiredEnabled,
+    (server) =>
+      !serverNeedsAttention(server, isServerApplying(server)) &&
+      server.desiredEnabled,
   );
   const disabledServers = visibleServers.filter(
-    (server) => !serverNeedsAttention(server) && !server.desiredEnabled,
+    (server) =>
+      !serverNeedsAttention(server, isServerApplying(server)) &&
+      !server.desiredEnabled,
   );
   const managementReady = management.managementHealth === "ready";
   const mutationLocked =
@@ -958,7 +970,7 @@ export function McpPage({
     successNotice?: McpMutationSuccessNotice,
   ) {
     const generation = management.desiredGeneration;
-    if (!generation || mutationLocked || pendingServerId === server.id) return;
+    if (!generation || mutationLocked || pendingServerId !== null) return;
     setPendingServerId(server.id);
     setNotice(null);
     try {
@@ -993,7 +1005,7 @@ export function McpPage({
 
   async function authorizeServer(server: McpServer) {
     const generation = management.desiredGeneration;
-    if (!generation || mutationLocked || pendingServerId === server.id) return;
+    if (!generation || mutationLocked || pendingServerId !== null) return;
     setPendingServerId(server.id);
     try {
       const result = await onAuthorize(generation, server.id);
@@ -1010,7 +1022,7 @@ export function McpPage({
 
   async function testConnection(server: McpServer) {
     const generation = management.desiredGeneration;
-    if (!generation || mutationLocked || pendingServerId === server.id) return;
+    if (!generation || mutationLocked || pendingServerId !== null) return;
     setPendingServerId(server.id);
     setNotice(null);
     try {
@@ -1090,14 +1102,11 @@ export function McpPage({
             <McpServerRow
               key={server.id}
               server={server}
-              applying={
-                management.configurationApply === "applying" &&
-                serverCanApply(server)
-              }
+              applying={isServerApplying(server)}
               selected={selected?.id === server.id}
               toggleDisabled={
                 mutationLocked ||
-                pendingServerId === server.id ||
+                pendingServerId !== null ||
                 (management.authorizationOperation.kind !== "idle" &&
                   management.authorizationOperation.serverId === server.id) ||
                 server.connectionTest.status === "testing"
@@ -1222,7 +1231,7 @@ export function McpPage({
 
   function renderNextAction(server: McpServer) {
     const serverBusy =
-      mutationLocked || pendingServerId === server.id || selectedOperationBusy;
+      mutationLocked || pendingServerId !== null || selectedOperationBusy;
     if (server.connection === null)
       return nextActionCard(
         t("mcp.detail.connection_unavailable"),
@@ -1992,7 +2001,7 @@ export function McpPage({
                               checked={tool.desiredAllowed}
                               disabled={
                                 mutationLocked ||
-                                pendingServerId === selected.id ||
+                                pendingServerId !== null ||
                                 selectedOperationBusy ||
                                 selected.connection === null
                               }
@@ -2029,7 +2038,7 @@ export function McpPage({
                         size="sm"
                         disabled={
                           mutationLocked ||
-                          pendingServerId === selected.id ||
+                          pendingServerId !== null ||
                           selectedOperationBusy ||
                           selected.connection === null
                         }
@@ -2071,7 +2080,7 @@ export function McpPage({
                             size="sm"
                             disabled={
                               mutationLocked ||
-                              pendingServerId === selected.id ||
+                              pendingServerId !== null ||
                               selectedOperationBusy
                             }
                             onClick={() => void testConnection(selected)}
@@ -2084,7 +2093,7 @@ export function McpPage({
                         size="sm"
                         disabled={
                           mutationLocked ||
-                          pendingServerId === selected.id ||
+                          pendingServerId !== null ||
                           selectedOperationBusy ||
                           selected.connection === null
                         }
@@ -2206,7 +2215,7 @@ export function McpPage({
                               size="sm"
                               disabled={
                                 mutationLocked ||
-                                pendingServerId === selected.id ||
+                                pendingServerId !== null ||
                                 selectedOperationBusy ||
                                 selected.approvalStatus !== "approved"
                               }
@@ -2253,7 +2262,7 @@ export function McpPage({
                             size="sm"
                             disabled={
                               mutationLocked ||
-                              pendingServerId === selected.id ||
+                              pendingServerId !== null ||
                               selectedOperationBusy ||
                               selected.approvalStatus !== "approved"
                             }
@@ -2306,7 +2315,7 @@ export function McpPage({
                             maxLength={256}
                             disabled={
                               mutationLocked ||
-                              pendingServerId === selected.id ||
+                              pendingServerId !== null ||
                               selectedOperationBusy ||
                               selected.connection === null
                             }
@@ -2321,7 +2330,7 @@ export function McpPage({
                           size="sm"
                           disabled={
                             mutationLocked ||
-                            pendingServerId === selected.id ||
+                            pendingServerId !== null ||
                             selectedOperationBusy ||
                             selected.connection === null ||
                             !validMcpDisplayName(renameDraft) ||
@@ -2434,7 +2443,7 @@ export function McpPage({
                         size="sm"
                         disabled={
                           mutationLocked ||
-                          pendingServerId === selected.id ||
+                          pendingServerId !== null ||
                           selectedOperationBusy
                         }
                         onClick={(event) =>
@@ -2454,7 +2463,7 @@ export function McpPage({
                       size="sm"
                       disabled={
                         mutationLocked ||
-                        pendingServerId === selected.id ||
+                        pendingServerId !== null ||
                         selectedOperationBusy
                       }
                       onClick={(event) =>
@@ -2473,7 +2482,7 @@ export function McpPage({
                     size="sm"
                     disabled={
                       mutationLocked ||
-                      pendingServerId === selected.id ||
+                      pendingServerId !== null ||
                       selectedOperationBusy
                     }
                     onClick={(event) =>

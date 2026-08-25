@@ -72,7 +72,7 @@ candidate probe、真实桌面验收、签名、公证和发布验证不进入 `
 
 MCP catalog freshness 的真实边界回归属于 `test-mcp-interop`：fixture 给 modern catalog 注入短 TTL，并覆盖同一 model/selection 到期时的 typed `McpNotRefreshed`、refresh 后成功，以及短 TTL 不启动高频后台 timer、过期后按需重建 Admission。纯 Workbench 测试验证 earliest safe TTL 到绝对 monotonic deadline 的单次转换、主动刷新下限，以及 OAuth/refresh 串行边界内 pending request 不丢失；它不伪造 AgentCore freshness 状态。
 
-MCP 启动解耦由 `test-mcp-app` 验证 Application composition、empty Runtime Manifest proof 与 configuration-apply 失败收口，由 Agent lifecycle 验证 canonical empty Runtime 的 null authority 和 declarative apply，由 Workbench MCP tests 验证 initial blocked Admission 仍只向普通 Task提供 null selection、完成事务只更新后续新 Task。真实第三方 server 或平台首窗不是该确定性测试的替代品。
+MCP 启动解耦由 `test-mcp-app` 验证 Application composition、empty Runtime Manifest proof 与 configuration-apply 失败收口，由 Agent lifecycle 验证 canonical empty Runtime 的 null authority 和 declarative apply，由 `test-product-mcp-policy` 验证 initial blocked Admission 仍只向普通 Task 提供 null selection，由 `test-workbench-mcp` 验证完成事务只更新后续新 Task。真实第三方 server 或平台首窗不是该确定性测试的替代品。
 
 Product Account 的目录身份固定为 `src/product/account.zig` 与 `src/product/account/`；architecture guard 必须证明旧 `src/account.zig`、`src/account/` 不存在，全部 build root 指向新路径，同时公开 module identity 仍为 `metawork_account` 与 `metawork_account_contract`。
 

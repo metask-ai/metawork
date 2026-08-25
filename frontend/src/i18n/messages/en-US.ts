@@ -140,6 +140,7 @@ export const enUS = {
   "mcp.section.available": "Available servers",
   "mcp.section.disabled": "Disabled",
   "mcp.status.ready": "Ready",
+  "mcp.status.connecting": "Connecting",
   "mcp.status.not_loaded": "Not loaded",
   "mcp.status.disabled": "Disabled",
   "mcp.status.needs_authentication": "Sign-in required",

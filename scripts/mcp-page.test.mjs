@@ -232,6 +232,38 @@ test("MCP page groups verified server state without presenting a marketplace", (
   assert.equal(document.querySelector(".mcp-workspace"), null);
 });
 
+test("MCP presents eligible servers as connecting during configuration apply", () => {
+  render(
+    pageElement({
+      availability: "degraded",
+      managementHealth: "ready",
+      operation: "idle",
+      configurationApply: "applying",
+      desiredGeneration: "startup-generation",
+      runtimeAlignment: "restart_required",
+      redacted: false,
+      servers: [
+        {
+          ...servers[0],
+          runtimeStatus: "unreachable",
+          newTaskAccess: "unavailable",
+          tools: servers[0].tools.map((tool) => ({
+            ...tool,
+            availableToNewTasks: false,
+          })),
+        },
+      ],
+    }),
+  );
+
+  const row = screen.getByRole("button", { name: /GitHub/ });
+  assert.ok(within(row).getByText("Connecting"));
+  assert.equal(screen.queryByText("Cannot connect"), null);
+  assert.equal(screen.queryByText("Needs attention"), null);
+  assert.ok(screen.getByRole("heading", { name: "Available servers" }));
+  assert.equal(row.closest("li")?.dataset.status, "connecting");
+});
+
 test("MCP opens details only on request and restores the list trigger on close", async () => {
   render(
     pageElement({
@@ -292,6 +324,62 @@ test("MCP toggles a server from the list without opening details", async () => {
     screen.getByText(
       "Server disabled for new tasks. Open tasks keep their current access.",
     ),
+  );
+});
+
+test("MCP locks every server switch while one mutation is pending", async () => {
+  const calls = [];
+  let resolveFirstMutation = () => {};
+  const firstMutation = new Promise((resolve) => {
+    resolveFirstMutation = resolve;
+  });
+  const gitlab = {
+    ...servers[0],
+    id: "gitlab-binding",
+    displayName: "GitLab",
+    namespace: "gitlab",
+    connection: {
+      ...servers[0].connection,
+      endpoint: "https://gitlab.example/mcp",
+    },
+    tools: servers[0].tools.map((tool) => ({ ...tool })),
+  };
+  render(
+    pageElement(
+      {
+        availability: "ready",
+        managementHealth: "ready",
+        operation: "idle",
+        desiredGeneration: "shared-generation",
+        runtimeAlignment: "current",
+        redacted: false,
+        servers: [servers[0], gitlab],
+      },
+      "",
+      {
+        onSetEnabled: async (...args) => {
+          calls.push(args);
+          return args[1] === "github-binding"
+            ? firstMutation
+            : { outcome: "saved" };
+        },
+      },
+    ),
+  );
+
+  const githubToggle = screen.getByRole("switch", { name: "GitHub enabled" });
+  const gitlabToggle = screen.getByRole("switch", { name: "GitLab enabled" });
+  fireEvent.click(githubToggle);
+
+  await waitFor(() =>
+    assert.equal(gitlabToggle.getAttribute("aria-disabled"), "true"),
+  );
+  fireEvent.click(gitlabToggle);
+  assert.deepEqual(calls, [["shared-generation", "github-binding", false]]);
+
+  resolveFirstMutation({ outcome: "saved" });
+  await waitFor(() =>
+    assert.equal(gitlabToggle.getAttribute("aria-disabled"), null),
   );
 });
 

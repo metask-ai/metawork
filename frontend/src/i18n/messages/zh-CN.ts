@@ -131,6 +131,7 @@ export const zhCN: Record<MessageId, string> = {
   "mcp.section.available": "可用服务",
   "mcp.section.disabled": "已停用",
   "mcp.status.ready": "可用",
+  "mcp.status.connecting": "正在连接",
   "mcp.status.not_loaded": "未加载",
   "mcp.status.disabled": "已停用",
   "mcp.status.needs_authentication": "需要登录",
