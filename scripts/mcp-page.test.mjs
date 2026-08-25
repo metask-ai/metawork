@@ -226,9 +226,42 @@ test("MCP page groups verified server state without presenting a marketplace", (
   assert.ok(screen.getAllByText("GitHub").length >= 1);
   assert.ok(screen.getByText("Notion"));
   assert.ok(screen.getByText("Filesystem"));
+  assert.equal(screen.getAllByRole("switch").length, 3);
   assert.equal(screen.queryByText(/marketplace|install/i), null);
   assert.equal(screen.queryByRole("dialog"), null);
   assert.equal(document.querySelector(".mcp-workspace"), null);
+});
+
+test("MCP presents eligible servers as connecting during configuration apply", () => {
+  render(
+    pageElement({
+      availability: "degraded",
+      managementHealth: "ready",
+      operation: "idle",
+      configurationApply: "applying",
+      desiredGeneration: "startup-generation",
+      runtimeAlignment: "restart_required",
+      redacted: false,
+      servers: [
+        {
+          ...servers[0],
+          runtimeStatus: "unreachable",
+          newTaskAccess: "unavailable",
+          tools: servers[0].tools.map((tool) => ({
+            ...tool,
+            availableToNewTasks: false,
+          })),
+        },
+      ],
+    }),
+  );
+
+  const row = screen.getByRole("button", { name: /GitHub/ });
+  assert.ok(within(row).getByText("Connecting"));
+  assert.equal(screen.queryByText("Cannot connect"), null);
+  assert.equal(screen.queryByText("Needs attention"), null);
+  assert.ok(screen.getByRole("heading", { name: "Available servers" }));
+  assert.equal(row.closest("li")?.dataset.status, "connecting");
 });
 
 test("MCP opens details only on request and restores the list trigger on close", async () => {
@@ -254,6 +287,102 @@ test("MCP opens details only on request and restores the list trigger on close",
   await waitFor(() => assert.equal(document.activeElement, row));
 });
 
+test("MCP toggles a server from the list without opening details", async () => {
+  const calls = [];
+  render(
+    pageElement(
+      {
+        availability: "ready",
+        managementHealth: "ready",
+        operation: "idle",
+        desiredGeneration: "list-generation",
+        runtimeAlignment: "current",
+        redacted: false,
+        servers: [servers[0]],
+      },
+      "",
+      {
+        onSetEnabled: async (...args) => {
+          calls.push(args);
+          return { outcome: "saved" };
+        },
+      },
+    ),
+  );
+
+  const toggle = screen.getByRole("switch", { name: "GitHub enabled" });
+  assert.equal(toggle.getAttribute("aria-checked"), "true");
+  fireEvent.click(toggle);
+
+  assert.equal(screen.queryByRole("dialog", { name: "GitHub" }), null);
+  assert.equal(screen.queryByRole("alertdialog"), null);
+
+  await waitFor(() =>
+    assert.deepEqual(calls, [["list-generation", "github-binding", false]]),
+  );
+  assert.ok(
+    screen.getByText(
+      "Server disabled for new tasks. Open tasks keep their current access.",
+    ),
+  );
+});
+
+test("MCP locks every server switch while one mutation is pending", async () => {
+  const calls = [];
+  let resolveFirstMutation = () => {};
+  const firstMutation = new Promise((resolve) => {
+    resolveFirstMutation = resolve;
+  });
+  const gitlab = {
+    ...servers[0],
+    id: "gitlab-binding",
+    displayName: "GitLab",
+    namespace: "gitlab",
+    connection: {
+      ...servers[0].connection,
+      endpoint: "https://gitlab.example/mcp",
+    },
+    tools: servers[0].tools.map((tool) => ({ ...tool })),
+  };
+  render(
+    pageElement(
+      {
+        availability: "ready",
+        managementHealth: "ready",
+        operation: "idle",
+        desiredGeneration: "shared-generation",
+        runtimeAlignment: "current",
+        redacted: false,
+        servers: [servers[0], gitlab],
+      },
+      "",
+      {
+        onSetEnabled: async (...args) => {
+          calls.push(args);
+          return args[1] === "github-binding"
+            ? firstMutation
+            : { outcome: "saved" };
+        },
+      },
+    ),
+  );
+
+  const githubToggle = screen.getByRole("switch", { name: "GitHub enabled" });
+  const gitlabToggle = screen.getByRole("switch", { name: "GitLab enabled" });
+  fireEvent.click(githubToggle);
+
+  await waitFor(() =>
+    assert.equal(gitlabToggle.getAttribute("aria-disabled"), "true"),
+  );
+  fireEvent.click(gitlabToggle);
+  assert.deepEqual(calls, [["shared-generation", "github-binding", false]]);
+
+  resolveFirstMutation({ outcome: "saved" });
+  await waitFor(() =>
+    assert.equal(gitlabToggle.getAttribute("aria-disabled"), null),
+  );
+});
+
 test("MCP shares the centered management-page frame and foundation Drawer", async () => {
   const [page, css] = await Promise.all([
     readFile(
@@ -273,7 +402,7 @@ test("MCP shares the centered management-page frame and foundation Drawer", asyn
   assert.doesNotMatch(css, /\.mcp-workspace\s*\{/);
 });
 
-test("MCP row keeps service availability separate from the last connection test", () => {
+test("MCP keeps isolated test results in connection details", () => {
   render(
     pageElement({
       availability: "ready",
@@ -293,7 +422,54 @@ test("MCP row keeps service availability separate from the last connection test"
 
   const row = screen.getByRole("button", { name: /GitHub/ });
   assert.ok(within(row).getByText("Available to new tasks"));
-  assert.ok(within(row).getByText("Failed · 2 issues"));
+  assert.equal(within(row).queryByText("Failed · 2 issues"), null);
+  fireEvent.click(row);
+  const dialog = screen.getByRole("dialog", { name: "GitHub" });
+  assert.ok(within(dialog).getByText("Failed · 2 issues"));
+  assert.equal(within(dialog).queryByText("Connection test failed"), null);
+});
+
+test("MCP retries the formal Runtime instead of promoting connection tests", async () => {
+  const refreshes = [];
+  render(
+    pageElement(
+      {
+        availability: "degraded",
+        managementHealth: "ready",
+        operation: "idle",
+        desiredGeneration: "runtime-retry-generation",
+        runtimeAlignment: "current",
+        redacted: false,
+        servers: [
+          {
+            ...servers[0],
+            runtimeStatus: "unreachable",
+            newTaskAccess: "unavailable",
+            connectionTest: {
+              status: "connected",
+              toolCount: 2,
+              issueCount: 0,
+            },
+          },
+        ],
+      },
+      "",
+      {
+        onRefresh: async () => {
+          refreshes.push("refresh");
+          return { outcome: "started" };
+        },
+      },
+    ),
+  );
+
+  fireEvent.click(screen.getByRole("button", { name: /GitHub/ }));
+  const dialog = screen.getByRole("dialog", { name: "GitHub" });
+  assert.ok(within(dialog).getByText("Succeeded · 2 found"));
+  fireEvent.click(
+    within(dialog).getByRole("button", { name: "Retry connection" }),
+  );
+  await waitFor(() => assert.deepEqual(refreshes, ["refresh"]));
 });
 
 test("MCP keeps intentionally disabled servers out of the attention group", () => {
@@ -393,6 +569,43 @@ test("MCP detail exposes complete non-secret configuration and the tool catalog"
   assert.ok(screen.getByRole("dialog", { name: "GitHub" }));
 });
 
+test("MCP keeps choosing tools as the final setup step", () => {
+  const toolsNotAllowed = {
+    ...servers[0],
+    newTaskAccess: "not_allowed",
+    tools: servers[0].tools.map((tool) => ({
+      ...tool,
+      desiredAllowed: false,
+      availableToNewTasks: false,
+    })),
+  };
+  render(
+    pageElement({
+      availability: "ready",
+      managementHealth: "ready",
+      operation: "idle",
+      desiredGeneration: "choose-tools-generation",
+      runtimeAlignment: "current",
+      redacted: false,
+      servers: [toolsNotAllowed],
+    }),
+  );
+
+  fireEvent.click(screen.getByRole("button", { name: /GitHub/ }));
+  const dialog = screen.getByRole("dialog", { name: "GitHub" });
+  assert.ok(within(dialog).getByRole("button", { name: "Choose tools" }));
+  assert.ok(
+    within(dialog).getByText(
+      "2 tools were discovered. Choose which ones new tasks may use.",
+    ),
+  );
+  assert.equal(
+    dialog.querySelector(".mcp-connection-trace > div:last-child")?.dataset
+      .state,
+    "active",
+  );
+});
+
 test("MCP keeps a missing connection read-only instead of guessing repair data", () => {
   render(
     pageElement({
@@ -419,6 +632,13 @@ test("MCP keeps a missing connection read-only instead of guessing repair data",
     }),
   );
 
+  const enablement = screen.getByRole("switch", { name: "GitHub enabled" });
+  assert.equal(enablement.getAttribute("aria-disabled"), "true");
+  assert.ok(
+    document
+      .getElementById(enablement.getAttribute("aria-describedby"))
+      .textContent.includes("Connection settings are unavailable"),
+  );
   fireEvent.click(screen.getByRole("button", { name: /GitHub/ }));
   const dialog = screen.getByRole("dialog", { name: "GitHub" });
   assert.ok(dialog.textContent.includes("Connection settings unavailable"));
@@ -609,7 +829,7 @@ test("MCP add selects Streamable HTTP and preserves its typed public input", asy
   );
   const name = within(dialog).getByRole("textbox", { name: "Display name" });
   const endpoint = within(dialog).getByRole("textbox", { name: "Endpoint" });
-  const submit = within(dialog).getByRole("button", { name: "Add and enable" });
+  const submit = within(dialog).getByRole("button", { name: "Add server" });
 
   fireEvent.change(name, { target: { value: "Local Search" } });
   fireEvent.change(endpoint, {
@@ -730,9 +950,7 @@ test("MCP STDIO add preserves ordered argv and names without secret values", asy
     }),
     { target: { value: "FILES_TOKEN" } },
   );
-  fireEvent.click(
-    within(dialog).getByRole("button", { name: "Add and enable" }),
-  );
+  fireEvent.click(within(dialog).getByRole("button", { name: "Add server" }));
 
   await waitFor(() => assert.equal(calls.length, 1));
   assert.deepEqual(calls[0], [
@@ -813,9 +1031,7 @@ test("MCP OAuth add carries an explicit client auth method and no secret", async
   });
   fireEvent.pointerDown(clientSecretBasicOption);
   fireEvent.click(clientSecretBasicOption);
-  fireEvent.click(
-    within(dialog).getByRole("button", { name: "Add and enable" }),
-  );
+  fireEvent.click(within(dialog).getByRole("button", { name: "Add server" }));
 
   await waitFor(() => assert.equal(calls.length, 1));
   assert.deepEqual(calls[0], [
@@ -1064,11 +1280,55 @@ test("MCP keeps approved enable intent separate from authentication readiness", 
   const confirmation = screen.getByRole("alertdialog", {
     name: "Enable this server?",
   });
+  assert.ok(
+    confirmation.textContent.includes(
+      "this restores the previous tool access (1 selected) for new tasks",
+    ),
+  );
   fireEvent.click(
     within(confirmation).getByRole("button", { name: "Enable server" }),
   );
   await waitFor(() =>
     assert.deepEqual(calls, [["auth-generation", "filesystem-binding", true]]),
+  );
+});
+
+test("MCP enables a server directly when no tool authority is restored", async () => {
+  const calls = [];
+  const noGrantedTools = {
+    ...servers[2],
+    tools: servers[2].tools.map((tool) => ({
+      ...tool,
+      desiredAllowed: false,
+    })),
+  };
+  render(
+    pageElement(
+      {
+        availability: "ready",
+        managementHealth: "ready",
+        operation: "idle",
+        desiredGeneration: "empty-authority-generation",
+        runtimeAlignment: "current",
+        redacted: false,
+        servers: [noGrantedTools],
+      },
+      "",
+      {
+        onSetEnabled: async (...args) => {
+          calls.push(args);
+          return { outcome: "saved" };
+        },
+      },
+    ),
+  );
+
+  fireEvent.click(screen.getByRole("switch", { name: "Filesystem enabled" }));
+  assert.equal(screen.queryByRole("alertdialog"), null);
+  await waitFor(() =>
+    assert.deepEqual(calls, [
+      ["empty-authority-generation", "filesystem-binding", true],
+    ]),
   );
 });
 
@@ -1105,6 +1365,15 @@ test("MCP approval and OAuth operation actions stay Host-owned and typed", async
         },
       },
     ),
+  );
+  const enablement = screen.getByRole("switch", {
+    name: "Filesystem enabled",
+  });
+  assert.equal(enablement.getAttribute("aria-disabled"), "true");
+  assert.ok(
+    document
+      .getElementById(enablement.getAttribute("aria-describedby"))
+      .textContent.includes("finish connecting this server"),
   );
   fireEvent.click(screen.getByRole("button", { name: /Filesystem/ }));
   fireEvent.click(screen.getByRole("button", { name: "Connect and enable" }));

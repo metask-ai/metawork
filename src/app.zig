@@ -100,51 +100,19 @@ const App = struct {
         var preparation = startup_preparation.preparation;
         var preparation_owned = true;
         defer if (preparation_owned) preparation.deinit();
-        var mcp_build: mcp_platform.RuntimeBuild = undefined;
-        var mcp_build_initialized = false;
-        defer if (mcp_build_initialized) mcp_build.deinit();
-        var runtime_manifest: ?mcp_configuration.RuntimeManifest = null;
-        var runtime_manifest_owned = false;
-        defer if (runtime_manifest_owned) runtime_manifest.?.deinit();
-        var activation_failed = false;
-        var input_construction_succeeded = true;
-        mcp_build = mcp_platform.buildRuntime(
-            self.io,
-            std.heap.c_allocator,
-            &preparation,
-            mcp_host_environment,
-        ) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidConfig => failed: {
-                activation_failed = true;
-                input_construction_succeeded = false;
-                break :failed .{
-                    .authorizations = .{ .allocator = std.heap.c_allocator },
-                };
-            },
-        };
-        mcp_build_initialized = true;
-        if (input_construction_succeeded) {
-            runtime_manifest = try mcp_configuration.RuntimeManifest.candidate(
-                std.heap.c_allocator,
-                &preparation,
-            );
-            runtime_manifest_owned = runtime_manifest != null;
-        }
+        var runtime_manifest = try mcp_startup.emptyRuntimeManifest(std.heap.c_allocator);
+        var runtime_manifest_owned = true;
+        defer if (runtime_manifest_owned) runtime_manifest.deinit();
         const agent_runtime = try createAgentRuntime(
             self.io,
             self.agent_events.notifier(),
-            if (mcp_build.input) |*input| input else null,
+            null,
         );
         self.agent_runtime = agent_runtime;
-        self.mcp_authorizations = mcp_build.takeAuthorizations();
-        var activation: ?*agent.McpActivation = null;
-        defer if (activation) |value| value.deinit();
-        switch (try agent_runtime.activateMcp()) {
-            .empty => {},
-            .activated => |value| activation = value,
-            .unavailable => activation_failed = true,
-        }
+        self.mcp_authorizations = .{ .allocator = std.heap.c_allocator };
+        // Startup preparation may transiently own resolved credential bytes.
+        // The empty Runtime cannot consume them, and Workbench must never
+        // retain them; the normal apply coordinator resolves them again.
         preparation.releaseCredentials();
         const workbench_storage = self.workbench_storage orelse
             @panic("Workbench storage is not composed");
@@ -159,8 +127,8 @@ const App = struct {
         };
         configuration.mcp = .{
             .preparation = &preparation,
-            .activation = activation,
-            .activation_failed = activation_failed,
+            .activation = null,
+            .activation_failed = false,
             .management = if (self.mcp_configuration_store) |store| .{
                 .persistence = store.mutationPersistence(),
                 .credentials = self.mcp_credential_store.?.effects(),
@@ -168,7 +136,7 @@ const App = struct {
                 .identity_generator = self.mcp_credential_store.?.serverIdentityGenerator(),
                 .limits = mcp_startup.configuration_limits,
                 .initial_health = startup_preparation.management_health,
-                .runtime_manifest = if (runtime_manifest) |*manifest| manifest else null,
+                .runtime_manifest = &runtime_manifest,
             } else null,
             .host_capabilities = .{
                 .connection_approval = mcp_management_host.confirmation_available,
@@ -193,7 +161,6 @@ const App = struct {
             configuration,
         );
         preparation_owned = false;
-        activation = null;
         if (configuration.mcp.management != null) runtime_manifest_owned = false;
         self.workbench = workbench_storage;
         self.workbench_initialized = true;
@@ -211,6 +178,10 @@ const App = struct {
         (self.dispatcher orelse @panic("Bridge Dispatcher is not composed")).attachMcpManagementHost(
             mcp_bridge_adapter.host(&self.mcp_management.?),
         );
+        // Initial MCP connection and catalog discovery use the same complete
+        // declarative apply transaction as later Desired mutations. No
+        // external MCP effect remains on the Application readiness path.
+        _ = self.mcp_management.?.applyConfiguration() catch {};
         self.mcp_oauth_refresh = mcp_oauth_coordinator.Coordinator.init(
             std.heap.c_allocator,
             self.io,

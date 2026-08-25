@@ -21,6 +21,28 @@ pub const Preparation = struct {
     management_health: mcp_configuration.StoreHealth,
 };
 
+/// Builds the exact in-memory proof for the canonical Runtime created without
+/// MCP descriptors. Desired registry state is restored separately and may
+/// immediately make this manifest report `restart_required` until the normal
+/// declarative configuration-apply transaction completes.
+pub fn emptyRuntimeManifest(
+    allocator: std.mem.Allocator,
+) std.mem.Allocator.Error!mcp_configuration.RuntimeManifest {
+    var preparation = try mcp_configuration.prepare(
+        allocator,
+        null,
+        true,
+        false,
+        .{},
+        configuration_limits,
+    );
+    defer preparation.deinit();
+    return (try mcp_configuration.RuntimeManifest.candidate(
+        allocator,
+        &preparation,
+    )).?;
+}
+
 pub fn prepare(
     store: ?*mcp_configuration.FileStore,
     credential_store_optional: ?*mcp_platform.CredentialStore,
@@ -238,4 +260,8 @@ test "MCP startup keeps registry limits within AgentCore authority bounds" {
             .outcome_unknown,
         ),
     );
+
+    var manifest = try emptyRuntimeManifest(std.testing.allocator);
+    defer manifest.deinit();
+    try std.testing.expectEqual(@as(usize, 0), manifest.entries.len);
 }

@@ -28,6 +28,7 @@ import { Drawer } from "../../components/ui/drawer.tsx";
 import { Input } from "../../components/ui/input.tsx";
 import { SearchField } from "../../components/ui/search-field.tsx";
 import { SelectField } from "../../components/ui/select.tsx";
+import { Switch } from "../../components/ui/switch.tsx";
 import { useI18n } from "../../i18n/context.ts";
 
 type McpServer = McpManagementView["servers"][number];
@@ -36,7 +37,10 @@ type PaneState =
   | { kind: "replace"; id: string }
   | { kind: "server"; id: string }
   | null;
-type ConfirmAction = "enable" | "disable" | "delete" | "allow_all" | null;
+type ConfirmAction = "enable" | "delete" | "allow_all";
+type Confirmation = { action: ConfirmAction; serverId: string } | null;
+type McpMutationSuccessNotice =
+  "mcp.mutation.enabled" | "mcp.mutation.disabled";
 
 const attentionStatuses = new Set<McpServer["runtimeStatus"]>([
   "not_loaded",
@@ -238,10 +242,11 @@ function validMcpNames(values: string[]): boolean {
   );
 }
 
-function serverNeedsAttention(server: McpServer) {
+function serverNeedsAttention(server: McpServer, applying: boolean) {
   if (server.connection === null) return true;
   if (server.approvalStatus === "unapproved") return true;
   if (!server.desiredEnabled) return false;
+  if (applying) return false;
   return (
     !["not_required", "ready"].includes(server.authorizationStatus) ||
     attentionStatuses.has(server.runtimeStatus) ||
@@ -249,7 +254,7 @@ function serverNeedsAttention(server: McpServer) {
   );
 }
 
-function serverStateKey(server: McpServer) {
+function serverStateKey(server: McpServer, applying: boolean) {
   if (server.connection === null)
     return "mcp.detail.connection_unavailable" as const;
   if (server.approvalStatus === "unapproved")
@@ -257,16 +262,18 @@ function serverStateKey(server: McpServer) {
   if (!server.desiredEnabled) return "mcp.desired.disabled" as const;
   if (!["not_required", "ready"].includes(server.authorizationStatus))
     return `mcp.authorization_status.${server.authorizationStatus}` as const;
+  if (applying) return "mcp.status.connecting" as const;
   if (server.runtimeStatus !== "ready")
     return `mcp.status.${server.runtimeStatus}` as const;
   return `mcp.access.${server.newTaskAccess}` as const;
 }
 
-function serverVisualStatus(server: McpServer) {
+function serverVisualStatus(server: McpServer, applying: boolean) {
   if (server.connection === null) return "invalid_catalog" as const;
   if (server.approvalStatus === "unapproved") return "not_loaded" as const;
   if (!server.desiredEnabled) return "disabled" as const;
-  if (serverNeedsAttention(server)) return "attention" as const;
+  if (applying) return "connecting" as const;
+  if (serverNeedsAttention(server, false)) return "attention" as const;
   return server.runtimeStatus;
 }
 
@@ -279,8 +286,9 @@ function serverCanApply(server: McpServer) {
   );
 }
 
-function serverStateIcon(server: McpServer) {
-  if (serverNeedsAttention(server)) return "warning" as const;
+function serverStateIcon(server: McpServer, applying: boolean) {
+  if (applying) return "refresh" as const;
+  if (serverNeedsAttention(server, false)) return "warning" as const;
   if (server.runtimeStatus === "ready") return "check" as const;
   return "mcp" as const;
 }
@@ -289,43 +297,47 @@ function McpServerRow({
   server,
   applying,
   selected,
+  toggleDisabled,
   onOpen,
+  onToggle,
 }: {
   server: McpServer;
   applying: boolean;
   selected: boolean;
+  toggleDisabled: boolean;
   onOpen: (server: McpServer, trigger: HTMLElement) => void;
+  onToggle: (server: McpServer, enabled: boolean, trigger: HTMLElement) => void;
 }) {
   const { t } = useI18n();
+  const enablementDescriptionId = useId();
   const available = server.tools.filter(
     (tool) => tool.availableToNewTasks,
   ).length;
-  const testSummary =
-    server.connectionTest.status === "connected"
-      ? t("mcp.test.summary.connected", {
-          tools: server.connectionTest.toolCount,
-        })
-      : server.connectionTest.status === "failed"
-        ? t("mcp.test.summary.failed", {
-            issues: server.connectionTest.issueCount,
-          })
-        : server.connectionTest.status === "testing"
-          ? t("mcp.test.summary.testing")
-          : null;
+  const enablementUnavailable =
+    server.connection === null ||
+    (!server.desiredEnabled && server.approvalStatus !== "approved");
+  const enablementDescription =
+    server.connection === null
+      ? t("mcp.enablement.connection_unavailable")
+      : server.approvalStatus !== "approved"
+        ? t("mcp.enablement.approval_required")
+        : null;
   return (
-    <li>
+    <li
+      className="mcp-server-row"
+      data-status={serverVisualStatus(server, applying)}
+      data-selected={selected}
+    >
+      <span className="mcp-status-rail" aria-hidden="true" />
       <button
-        className="mcp-server-row focus-ring"
-        data-status={applying ? "connecting" : serverVisualStatus(server)}
-        data-selected={selected}
+        className="mcp-server-open focus-ring"
         aria-current={selected ? "true" : undefined}
         aria-haspopup="dialog"
         aria-expanded={selected}
         onClick={(event) => onOpen(server, event.currentTarget)}
       >
-        <span className="mcp-status-rail" aria-hidden="true" />
         <span className="mcp-server-icon" aria-hidden="true">
-          <Icon name={applying ? "refresh" : serverStateIcon(server)} />
+          <Icon name={serverStateIcon(server, applying)} />
         </span>
         <span className="mcp-server-identity">
           <strong>{server.displayName}</strong>
@@ -341,11 +353,43 @@ function McpServerRow({
           })}
         </span>
         <span className="mcp-server-state">
-          <strong>{t(serverStateKey(server))}</strong>
-          {testSummary && <small>{testSummary}</small>}
+          <strong>{t(serverStateKey(server, applying))}</strong>
         </span>
         <Icon name="chevron-right" />
       </button>
+      <span
+        className="mcp-server-enablement"
+        data-enabled={server.desiredEnabled}
+      >
+        <span className="mcp-server-enablement-label" aria-hidden="true">
+          {server.desiredEnabled
+            ? t("mcp.desired.enabled")
+            : t("mcp.desired.disabled")}
+        </span>
+        <Switch.Root
+          checked={server.desiredEnabled}
+          disabled={toggleDisabled || enablementUnavailable}
+          aria-label={t("mcp.enablement.label", {
+            server: server.displayName,
+          })}
+          aria-describedby={
+            enablementDescription ? enablementDescriptionId : undefined
+          }
+          title={t(
+            server.desiredEnabled ? "mcp.disable.action" : "mcp.enable.action",
+          )}
+          onClick={(event) =>
+            onToggle(server, !server.desiredEnabled, event.currentTarget)
+          }
+        >
+          <Switch.Thumb />
+        </Switch.Root>
+        {enablementDescription && (
+          <span id={enablementDescriptionId} className="sr-only">
+            {enablementDescription}
+          </span>
+        )}
+      </span>
     </li>
   );
 }
@@ -545,8 +589,9 @@ export function McpPage({
   const confirmTrigger = useRef<HTMLElement | null>(null);
   const paneTrigger = useRef<HTMLElement | null>(null);
   const connectionSection = useRef<HTMLElement>(null);
+  const toolSection = useRef<HTMLElement>(null);
   const [paneState, setPaneState] = useState<PaneState>(null);
-  const [confirmAction, setConfirmAction] = useState<ConfirmAction>(null);
+  const [confirmation, setConfirmation] = useState<Confirmation>(null);
   const [pendingServerId, setPendingServerId] = useState<string | null>(null);
   const [createPending, setCreatePending] = useState(false);
   const [refreshPending, setRefreshPending] = useState(false);
@@ -589,12 +634,25 @@ export function McpPage({
       ? (management.servers.find((server) => server.id === paneState.id) ??
         null)
       : null;
-  const attention = visibleServers.filter(serverNeedsAttention);
+  const confirmationServer = confirmation
+    ? (management.servers.find(
+        (server) => server.id === confirmation.serverId,
+      ) ?? null)
+    : null;
+  const isServerApplying = (server: McpServer) =>
+    management.configurationApply === "applying" && serverCanApply(server);
+  const attention = visibleServers.filter((server) =>
+    serverNeedsAttention(server, isServerApplying(server)),
+  );
   const available = visibleServers.filter(
-    (server) => !serverNeedsAttention(server) && server.desiredEnabled,
+    (server) =>
+      !serverNeedsAttention(server, isServerApplying(server)) &&
+      server.desiredEnabled,
   );
   const disabledServers = visibleServers.filter(
-    (server) => !serverNeedsAttention(server) && !server.desiredEnabled,
+    (server) =>
+      !serverNeedsAttention(server, isServerApplying(server)) &&
+      !server.desiredEnabled,
   );
   const managementReady = management.managementHealth === "ready";
   const mutationLocked =
@@ -669,7 +727,7 @@ export function McpPage({
 
   function openServer(server: McpServer, trigger: HTMLElement) {
     paneTrigger.current = trigger;
-    setConfirmAction(null);
+    setConfirmation(null);
     setNotice(null);
     setPaneState({ kind: "server", id: server.id });
   }
@@ -770,42 +828,52 @@ export function McpPage({
   function closePane() {
     const trigger = paneTrigger.current;
     setPaneState(null);
-    setConfirmAction(null);
+    setConfirmation(null);
     confirmTrigger.current = null;
     window.requestAnimationFrame(() => {
       if (trigger?.isConnected) trigger.focus();
       else
         (
-          document.querySelector<HTMLElement>(".mcp-server-row") ??
+          document.querySelector<HTMLElement>(".mcp-server-open") ??
           title.current
         )?.focus();
     });
   }
 
   function openConfirmation(
-    action: Exclude<ConfirmAction, null>,
+    action: ConfirmAction,
+    server: McpServer,
     trigger: HTMLElement,
   ) {
     confirmTrigger.current = trigger;
-    setConfirmAction(action);
+    setConfirmation({ action, serverId: server.id });
   }
 
   function closeConfirmation() {
     const trigger = confirmTrigger.current;
-    setConfirmAction(null);
+    setConfirmation(null);
     confirmTrigger.current = null;
     window.requestAnimationFrame(() => {
       if (trigger?.isConnected) trigger.focus();
     });
   }
 
-  function acceptConfirmation() {
-    setConfirmAction(null);
+  function acceptConfirmation(serverId: string) {
+    const trigger = confirmTrigger.current;
+    setConfirmation(null);
     confirmTrigger.current = null;
-    window.requestAnimationFrame(() => paneHeading.current?.focus());
+    window.requestAnimationFrame(() => {
+      if (paneState?.kind !== "add" && paneState?.id === serverId)
+        paneHeading.current?.focus();
+      else if (trigger?.isConnected) trigger.focus();
+      else title.current?.focus();
+    });
   }
 
-  function mutationNotice(result: McpMutationResult) {
+  function mutationNotice(
+    result: McpMutationResult,
+    successNotice?: McpMutationSuccessNotice,
+  ) {
     const attention = [
       "saved_recovery_required",
       "stale_generation",
@@ -816,7 +884,10 @@ export function McpPage({
     ].includes(result.outcome);
     setNotice({
       tone: attention ? "attention" : "quiet",
-      text: t(`mcp.mutation.${result.outcome}`),
+      text:
+        result.outcome === "saved" && successNotice
+          ? t(successNotice)
+          : t(`mcp.mutation.${result.outcome}`),
     });
   }
 
@@ -896,14 +967,15 @@ export function McpPage({
   async function mutateServer(
     server: McpServer,
     mutation: (generation: string) => Promise<McpMutationResult>,
+    successNotice?: McpMutationSuccessNotice,
   ) {
     const generation = management.desiredGeneration;
-    if (!generation || mutationLocked || pendingServerId === server.id) return;
+    if (!generation || mutationLocked || pendingServerId !== null) return;
     setPendingServerId(server.id);
     setNotice(null);
     try {
       const result = await mutation(generation);
-      mutationNotice(result);
+      mutationNotice(result, successNotice);
       return result;
     } catch {
       setNotice({ tone: "attention", text: t("mcp.mutation.failed") });
@@ -913,9 +985,27 @@ export function McpPage({
     }
   }
 
+  function requestServerEnablement(
+    server: McpServer,
+    enabled: boolean,
+    trigger: HTMLElement,
+  ) {
+    const restoresToolAccess =
+      enabled && server.tools.some((tool) => tool.desiredAllowed);
+    if (restoresToolAccess) {
+      openConfirmation("enable", server, trigger);
+      return;
+    }
+    void mutateServer(
+      server,
+      (generation) => onSetEnabled(generation, server.id, enabled),
+      enabled ? "mcp.mutation.enabled" : "mcp.mutation.disabled",
+    );
+  }
+
   async function authorizeServer(server: McpServer) {
     const generation = management.desiredGeneration;
-    if (!generation || mutationLocked || pendingServerId === server.id) return;
+    if (!generation || mutationLocked || pendingServerId !== null) return;
     setPendingServerId(server.id);
     try {
       const result = await onAuthorize(generation, server.id);
@@ -932,7 +1022,7 @@ export function McpPage({
 
   async function testConnection(server: McpServer) {
     const generation = management.desiredGeneration;
-    if (!generation || mutationLocked || pendingServerId === server.id) return;
+    if (!generation || mutationLocked || pendingServerId !== null) return;
     setPendingServerId(server.id);
     setNotice(null);
     try {
@@ -1012,12 +1102,17 @@ export function McpPage({
             <McpServerRow
               key={server.id}
               server={server}
-              applying={
-                management.configurationApply === "applying" &&
-                serverCanApply(server)
-              }
+              applying={isServerApplying(server)}
               selected={selected?.id === server.id}
+              toggleDisabled={
+                mutationLocked ||
+                pendingServerId !== null ||
+                (management.authorizationOperation.kind !== "idle" &&
+                  management.authorizationOperation.serverId === server.id) ||
+                server.connectionTest.status === "testing"
+              }
               onOpen={openServer}
+              onToggle={requestServerEnablement}
             />
           ))}
         </ul>
@@ -1136,7 +1231,7 @@ export function McpPage({
 
   function renderNextAction(server: McpServer) {
     const serverBusy =
-      mutationLocked || pendingServerId === server.id || selectedOperationBusy;
+      mutationLocked || pendingServerId !== null || selectedOperationBusy;
     if (server.connection === null)
       return nextActionCard(
         t("mcp.detail.connection_unavailable"),
@@ -1250,29 +1345,46 @@ export function McpPage({
       );
     }
 
-    if (server.connectionTest.status === "testing")
-      return nextActionCard(t("mcp.test.testing"), t("mcp.test.started"));
-
-    if (
-      server.connectionTest.status === "failed" ||
-      server.runtimeStatus !== "ready"
-    )
+    if (server.runtimeStatus !== "ready")
       return nextActionCard(
-        server.connectionTest.status === "failed"
-          ? t("mcp.next.retry_test.title")
-          : t("mcp.next.test.title"),
-        server.connectionTest.status === "failed"
-          ? t("mcp.test.failed")
-          : t("mcp.next.test.body"),
+        t(`mcp.status.${server.runtimeStatus}`),
+        server.runtimeStatus === "invalid_catalog"
+          ? t("mcp.next.invalid_catalog.body")
+          : t("mcp.next.retry_connection.body"),
+        server.runtimeStatus === "invalid_catalog" ? undefined : (
+          <Button
+            variant="primary"
+            size="sm"
+            disabled={
+              server.runtimeStatus === "not_loaded"
+                ? applyPending || mutationLocked
+                : refreshLocked
+            }
+            onClick={() =>
+              void (server.runtimeStatus === "not_loaded"
+                ? applyConfiguration()
+                : refreshCatalog())
+            }
+          >
+            {t("mcp.next.retry_connection.action")}
+          </Button>
+        ),
+      );
+
+    const discoveredTools = server.tools.filter((tool) => tool.discovered);
+    if (discoveredTools.length > 0 && server.newTaskAccess === "not_allowed")
+      return nextActionCard(
+        t("mcp.next.choose_tools.title"),
+        t("mcp.next.choose_tools.body", { count: discoveredTools.length }),
         <Button
           variant="primary"
           size="sm"
           disabled={serverBusy}
-          onClick={() => void testConnection(server)}
+          onClick={() =>
+            toolSection.current?.scrollIntoView({ block: "start" })
+          }
         >
-          {server.connectionTest.status === "failed"
-            ? t("mcp.next.retry_test.action")
-            : t("mcp.test.action")}
+          {t("mcp.next.choose_tools.action")}
         </Button>,
       );
 
@@ -1814,9 +1926,12 @@ export function McpPage({
                           ).length,
                           total: selected.tools.length,
                         }),
-                        selected.runtimeStatus === "ready"
+                        selected.newTaskAccess === "available"
                           ? "complete"
-                          : "pending",
+                          : selected.runtimeStatus === "ready" &&
+                              selected.tools.some((tool) => tool.discovered)
+                            ? "active"
+                            : "pending",
                       ],
                     ] as const
                   ).map(([step, summary, state], index) => (
@@ -1845,7 +1960,7 @@ export function McpPage({
                   </p>
                 )}
 
-                <section className="mcp-tool-catalog">
+                <section className="mcp-tool-catalog" ref={toolSection}>
                   <header>
                     <div>
                       <h3>{t("mcp.detail.tool_permissions")}</h3>
@@ -1886,7 +2001,7 @@ export function McpPage({
                               checked={tool.desiredAllowed}
                               disabled={
                                 mutationLocked ||
-                                pendingServerId === selected.id ||
+                                pendingServerId !== null ||
                                 selectedOperationBusy ||
                                 selected.connection === null
                               }
@@ -1923,12 +2038,16 @@ export function McpPage({
                         size="sm"
                         disabled={
                           mutationLocked ||
-                          pendingServerId === selected.id ||
+                          pendingServerId !== null ||
                           selectedOperationBusy ||
                           selected.connection === null
                         }
                         onClick={(event) =>
-                          openConfirmation("allow_all", event.currentTarget)
+                          openConfirmation(
+                            "allow_all",
+                            selected,
+                            event.currentTarget,
+                          )
                         }
                       >
                         {t("mcp.detail.allow_all", {
@@ -1952,14 +2071,16 @@ export function McpPage({
                     </div>
                     <div className="mcp-connection-actions">
                       {selected.connection !== null &&
-                        selected.runtimeStatus === "ready" &&
+                        ["not_required", "ready"].includes(
+                          selected.authorizationStatus,
+                        ) &&
                         selected.connectionTest.status !== "testing" && (
                           <Button
                             variant="secondary"
                             size="sm"
                             disabled={
                               mutationLocked ||
-                              pendingServerId === selected.id ||
+                              pendingServerId !== null ||
                               selectedOperationBusy
                             }
                             onClick={() => void testConnection(selected)}
@@ -1972,7 +2093,7 @@ export function McpPage({
                         size="sm"
                         disabled={
                           mutationLocked ||
-                          pendingServerId === selected.id ||
+                          pendingServerId !== null ||
                           selectedOperationBusy ||
                           selected.connection === null
                         }
@@ -2040,6 +2161,41 @@ export function McpPage({
                         </small>
                       </span>
                     </div>
+                    {selected.connectionTest.status !== "untested" && (
+                      <div
+                        data-tone={
+                          selected.connectionTest.status === "connected"
+                            ? "ready"
+                            : selected.connectionTest.status === "failed"
+                              ? "attention"
+                              : undefined
+                        }
+                      >
+                        <Icon
+                          name={
+                            selected.connectionTest.status === "connected"
+                              ? "check"
+                              : selected.connectionTest.status === "failed"
+                                ? "warning"
+                                : "refresh"
+                          }
+                        />
+                        <span>
+                          <strong>{t("mcp.detail.connection_test")}</strong>
+                          <small>
+                            {selected.connectionTest.status === "connected"
+                              ? t("mcp.test.summary.connected", {
+                                  tools: selected.connectionTest.toolCount,
+                                })
+                              : selected.connectionTest.status === "failed"
+                                ? t("mcp.test.summary.failed", {
+                                    issues: selected.connectionTest.issueCount,
+                                  })
+                                : t("mcp.test.summary.testing")}
+                          </small>
+                        </span>
+                      </div>
+                    )}
                   </div>
 
                   {selected.authMode === "static" && (
@@ -2059,7 +2215,7 @@ export function McpPage({
                               size="sm"
                               disabled={
                                 mutationLocked ||
-                                pendingServerId === selected.id ||
+                                pendingServerId !== null ||
                                 selectedOperationBusy ||
                                 selected.approvalStatus !== "approved"
                               }
@@ -2106,7 +2262,7 @@ export function McpPage({
                             size="sm"
                             disabled={
                               mutationLocked ||
-                              pendingServerId === selected.id ||
+                              pendingServerId !== null ||
                               selectedOperationBusy ||
                               selected.approvalStatus !== "approved"
                             }
@@ -2159,7 +2315,7 @@ export function McpPage({
                             maxLength={256}
                             disabled={
                               mutationLocked ||
-                              pendingServerId === selected.id ||
+                              pendingServerId !== null ||
                               selectedOperationBusy ||
                               selected.connection === null
                             }
@@ -2174,7 +2330,7 @@ export function McpPage({
                           size="sm"
                           disabled={
                             mutationLocked ||
-                            pendingServerId === selected.id ||
+                            pendingServerId !== null ||
                             selectedOperationBusy ||
                             selected.connection === null ||
                             !validMcpDisplayName(renameDraft) ||
@@ -2287,11 +2443,15 @@ export function McpPage({
                         size="sm"
                         disabled={
                           mutationLocked ||
-                          pendingServerId === selected.id ||
+                          pendingServerId !== null ||
                           selectedOperationBusy
                         }
                         onClick={(event) =>
-                          openConfirmation("enable", event.currentTarget)
+                          requestServerEnablement(
+                            selected,
+                            true,
+                            event.currentTarget,
+                          )
                         }
                       >
                         {t("mcp.enable.action")}
@@ -2303,11 +2463,15 @@ export function McpPage({
                       size="sm"
                       disabled={
                         mutationLocked ||
-                        pendingServerId === selected.id ||
+                        pendingServerId !== null ||
                         selectedOperationBusy
                       }
                       onClick={(event) =>
-                        openConfirmation("disable", event.currentTarget)
+                        requestServerEnablement(
+                          selected,
+                          false,
+                          event.currentTarget,
+                        )
                       }
                     >
                       {t("mcp.disable.action")}
@@ -2318,11 +2482,11 @@ export function McpPage({
                     size="sm"
                     disabled={
                       mutationLocked ||
-                      pendingServerId === selected.id ||
+                      pendingServerId !== null ||
                       selectedOperationBusy
                     }
                     onClick={(event) =>
-                      openConfirmation("delete", event.currentTarget)
+                      openConfirmation("delete", selected, event.currentTarget)
                     }
                   >
                     <Icon name="trash" />
@@ -2334,7 +2498,7 @@ export function McpPage({
           </McpDetailDrawer>
         )}
       </>
-      {selected && confirmAction && (
+      {confirmationServer && confirmation && (
         <AlertDialog.Root
           open
           onOpenChange={(open) => {
@@ -2345,10 +2509,16 @@ export function McpPage({
             <AlertDialog.Backdrop />
             <AlertDialog.Popup>
               <AlertDialog.Title>
-                {t(`mcp.confirm.${confirmAction}.title`)}
+                {t(`mcp.confirm.${confirmation.action}.title`)}
               </AlertDialog.Title>
               <AlertDialog.Description>
-                {t(`mcp.confirm.${confirmAction}.body`)}
+                {confirmation.action === "enable"
+                  ? t("mcp.confirm.enable.body", {
+                      count: confirmationServer.tools.filter(
+                        (tool) => tool.desiredAllowed,
+                      ).length,
+                    })
+                  : t(`mcp.confirm.${confirmation.action}.body`)}
               </AlertDialog.Description>
               <div className="mcp-confirm-actions">
                 <Button
@@ -2360,33 +2530,36 @@ export function McpPage({
                   {t("common.cancel")}
                 </Button>
                 <Button
-                  variant={confirmAction === "delete" ? "danger" : "primary"}
+                  variant={
+                    confirmation.action === "delete" ? "danger" : "primary"
+                  }
                   size="sm"
                   onClick={() => {
-                    const action = confirmAction;
-                    acceptConfirmation();
-                    void mutateServer(selected, (generation) =>
-                      action === "delete"
-                        ? onRemove(generation, selected.id)
-                        : action === "allow_all"
-                          ? onSetAllowedTools(
-                              generation,
-                              selected.id,
-                              selected.tools
-                                .filter(
-                                  (tool) =>
-                                    tool.desiredAllowed || tool.discovered,
-                                )
-                                .map((tool) => tool.name),
-                            )
-                          : onSetEnabled(
-                              generation,
-                              selected.id,
-                              action === "enable",
-                            ),
+                    const { action } = confirmation;
+                    const target = confirmationServer;
+                    acceptConfirmation(target.id);
+                    void mutateServer(
+                      target,
+                      (generation) =>
+                        action === "delete"
+                          ? onRemove(generation, target.id)
+                          : action === "allow_all"
+                            ? onSetAllowedTools(
+                                generation,
+                                target.id,
+                                target.tools
+                                  .filter(
+                                    (tool) =>
+                                      tool.desiredAllowed || tool.discovered,
+                                  )
+                                  .map((tool) => tool.name),
+                              )
+                            : onSetEnabled(generation, target.id, true),
+                      action === "enable" ? "mcp.mutation.enabled" : undefined,
                     ).then((result) => {
                       if (
                         action === "delete" &&
+                        selected?.id === target.id &&
                         (result?.outcome === "saved" ||
                           result?.outcome === "saved_recovery_required")
                       )
@@ -2394,7 +2567,7 @@ export function McpPage({
                     });
                   }}
                 >
-                  {t(`mcp.confirm.${confirmAction}.action`)}
+                  {t(`mcp.confirm.${confirmation.action}.action`)}
                 </Button>
               </div>
             </AlertDialog.Popup>

@@ -406,6 +406,39 @@ test "Product MCP scope policy detects only new requirements" {
     try std.testing.expect(scopeSetAddsRequirement(&approved, &.{"files.delete"}));
 }
 
+test "blocked MCP Admission gives an ordinary new Task null authority" {
+    var preparation = try mcp_configuration.prepare(
+        std.testing.allocator,
+        null,
+        true,
+        false,
+        .{},
+        .{
+            .max_servers = 1,
+            .max_tools_per_server = 1,
+            .max_namespace_bytes = 1,
+            .max_credential_locators = 1,
+            .max_runtime_secrets_per_server = 1,
+            .max_runtime_secret_bytes_per_server = 1,
+        },
+    );
+    var state: mcp_state.McpProductState = .{
+        .preparation = preparation.take(),
+        .activation = null,
+        .activation_failed = false,
+        .management = null,
+        .admission = .{ .blocked = .refreshing },
+        .host_capabilities = .{},
+        .committed = true,
+    };
+    defer state.deinit();
+
+    try std.testing.expectEqual(
+        @as(?*const lifecycle.McpSelection, null),
+        selectionForNewTask(&state),
+    );
+}
+
 test "OAuth operation remains excluded from every rebuilt Admission target" {
     var oauth_server: mcp_configuration.ServerWire = .{
         .id = "oauth",

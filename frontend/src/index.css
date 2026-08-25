@@ -3365,17 +3365,10 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   position: relative;
   display: grid;
   width: 100%;
-  min-height: 62px;
-  padding: 10px 13px 10px 17px;
-  grid-template-columns:
-    22px minmax(180px, 1fr) minmax(104px, auto) minmax(120px, auto)
-    14px;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 12px;
-  border: 0;
-  color: var(--ui-content-primary);
+  padding-right: 10px;
   background: transparent;
-  text-align: left;
   transition: background 120ms ease;
 }
 
@@ -3385,6 +3378,23 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .mcp-server-row[data-selected="true"] {
   background: color-mix(in srgb, var(--ui-action-primary) 8%, transparent);
+}
+
+.mcp-server-open {
+  display: grid;
+  width: 100%;
+  min-height: 62px;
+  padding: 10px 8px 10px 17px;
+  grid-template-columns:
+    22px minmax(180px, 1fr) minmax(104px, auto) minmax(120px, auto)
+    14px;
+  align-items: center;
+  gap: 12px;
+  border: 0;
+  border-radius: 11px;
+  color: var(--ui-content-primary);
+  background: transparent;
+  text-align: left;
 }
 
 .mcp-status-rail {
@@ -3505,10 +3515,38 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   color: var(--ui-content-warning);
 }
 
-.mcp-server-row > svg {
+.mcp-server-open > svg {
   justify-self: end;
   color: var(--ui-content-muted);
   font-size: var(--text-body);
+}
+
+.mcp-server-enablement {
+  display: flex;
+  min-width: 118px;
+  min-height: 38px;
+  padding: 0 8px 0 14px;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 9px;
+  border-left: 1px solid var(--ui-border);
+}
+
+.mcp-server-enablement-label {
+  color: var(--ui-content-muted);
+  font-size: var(--text-micro);
+  font-weight: 560;
+  white-space: nowrap;
+}
+
+.mcp-server-enablement[data-enabled="true"] .mcp-server-enablement-label {
+  color: var(--ui-content-primary);
+}
+
+.mcp-server-enablement [role="switch"]::after {
+  position: absolute;
+  inset: -12px -4px;
+  content: "";
 }
 
 .mcp-empty-state {
@@ -5254,8 +5292,17 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
     display: none;
   }
 
-  .mcp-server-row {
+  .mcp-server-open {
     grid-template-columns: 22px minmax(0, 1fr) minmax(90px, auto) 14px;
+  }
+
+  .mcp-server-enablement {
+    min-width: 44px;
+    padding: 0 4px 0 8px;
+  }
+
+  .mcp-server-enablement-label {
+    display: none;
   }
 
   .mcp-connection-trace {

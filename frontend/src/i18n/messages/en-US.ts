@@ -140,6 +140,7 @@ export const enUS = {
   "mcp.section.available": "Available servers",
   "mcp.section.disabled": "Disabled",
   "mcp.status.ready": "Ready",
+  "mcp.status.connecting": "Connecting",
   "mcp.status.not_loaded": "Not loaded",
   "mcp.status.disabled": "Disabled",
   "mcp.status.needs_authentication": "Sign-in required",
@@ -147,11 +148,11 @@ export const enUS = {
   "mcp.status.invalid_catalog": "Invalid tool catalog",
   "mcp.transport.stdio": "Local · STDIO",
   "mcp.transport.streamable_http": "Remote · HTTP",
-  "mcp.tool_access_summary": "{available} of {total} for new tasks",
+  "mcp.tool_access_summary": "{available}/{total} tools available",
   "mcp.trace.label": "Connection progress",
   "mcp.trace.connection": "Connection",
   "mcp.trace.handshake": "MCP handshake",
-  "mcp.trace.tools": "Tools",
+  "mcp.trace.tools": "Choose tools",
   "mcp.access.available": "Available to new tasks",
   "mcp.access.not_allowed": "Not allowed",
   "mcp.access.restart_required": "Connecting",
@@ -249,7 +250,7 @@ export const enUS = {
     "Use HTTPS, or HTTP only for localhost, 127.0.0.1, or ::1. User info, query strings, and fragments are not accepted.",
   "mcp.add.defaults":
     "Credentials are collected separately and never enter this form. After saving, MetaWork shows the one next action this connection needs.",
-  "mcp.add.submit": "Add and enable",
+  "mcp.add.submit": "Add server",
   "mcp.add.adding": "Adding…",
   "mcp.rename.action": "Save name",
   "mcp.enable.action": "Enable",
@@ -283,16 +284,19 @@ export const enUS = {
   "mcp.test.summary.connected": "Succeeded · {tools} found",
   "mcp.test.summary.failed": "Failed · {issues} issues",
   "mcp.next.authorization.title": "Complete sign-in",
-  "mcp.next.authorization.body":
-    "Sign in before testing the connection and loading its tools.",
+  "mcp.next.authorization.body": "Sign in to connect and load available tools.",
   "mcp.next.credentials.body":
-    "Add the required credential before testing the connection and loading its tools.",
+    "Add the required credential to connect and load available tools.",
   "mcp.next.configure_credentials": "Set credentials",
-  "mcp.next.test.title": "Test this connection",
-  "mcp.next.test.body":
-    "Verify the saved connection and discover how many tools it provides.",
-  "mcp.next.retry_test.title": "Connection test failed",
-  "mcp.next.retry_test.action": "Retry test",
+  "mcp.next.retry_connection.body":
+    "Retry the saved connection to update tools and new-task access.",
+  "mcp.next.retry_connection.action": "Retry connection",
+  "mcp.next.invalid_catalog.body":
+    "This tool catalog cannot be used. Remove the server and add it again.",
+  "mcp.next.choose_tools.title": "Choose tools",
+  "mcp.next.choose_tools.body":
+    "{count} tools were discovered. Choose which ones new tasks may use.",
+  "mcp.next.choose_tools.action": "Choose tools",
   "mcp.mutation.unchanged": "No configuration change was needed.",
   "mcp.mutation.saved": "MCP settings saved.",
   "mcp.mutation.saved_recovery_required":
@@ -304,6 +308,10 @@ export const enUS = {
     "The save result is unknown. MetaWork blocked MCP access for new tasks.",
   "mcp.mutation.failed":
     "The change could not be completed. The last confirmed state is unchanged.",
+  "mcp.mutation.enabled":
+    "Server enabled for new tasks. Open tasks keep their current access.",
+  "mcp.mutation.disabled":
+    "Server disabled for new tasks. Open tasks keep their current access.",
   "mcp.tool.not_discovered":
     "Configured, but not present in the current catalog",
   "mcp.tool.available_to_new_tasks": "Allowed and available to new tasks",
@@ -320,12 +328,13 @@ export const enUS = {
     "Secret-based methods require secure secret capture. An existing selection can be preserved.",
   "mcp.confirm.enable.title": "Enable this server?",
   "mcp.confirm.enable.body":
-    "The connection is applied after saving. Open tasks keep their current access.",
+    "When the connection is ready, this restores the previous tool access ({count} selected) for new tasks. Open tasks keep their current access.",
   "mcp.confirm.enable.action": "Enable server",
-  "mcp.confirm.disable.title": "Disable this server?",
-  "mcp.confirm.disable.body":
-    "Access is removed from new tasks after saving. Open tasks are not changed.",
-  "mcp.confirm.disable.action": "Disable server",
+  "mcp.enablement.label": "{server} enabled",
+  "mcp.enablement.connection_unavailable":
+    "Connection settings are unavailable. Open details to review recovery options.",
+  "mcp.enablement.approval_required":
+    "Open details and finish connecting this server first.",
   "mcp.confirm.delete.title": "Delete this server?",
   "mcp.confirm.delete.body":
     "This removes the configuration and updates access for new tasks. Open tasks keep their current access.",
