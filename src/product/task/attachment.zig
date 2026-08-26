@@ -1,6 +1,7 @@
 //! Process-only Task resource ownership and legal operation state.
 
 const std = @import("std");
+const agent = @import("metawork_agent");
 const catalog_snapshot = @import("metawork_product_skill").catalog;
 const agent_session = @import("product_task_agent_session");
 const owned_execution = @import("product_task_execution_binding");
@@ -77,6 +78,10 @@ pub const State = struct {
     active_operation: ActiveOperation = .none,
     restore_job: ?*recovery_job.Job = null,
     last_restore_failure: ?recovery_job.Failure = null,
+    /// Full AgentCore restore health is retained only in process memory. It is
+    /// not a recovery admission fact and is never persisted or sent over the
+    /// Renderer Bridge.
+    last_restore_report: ?agent.CheckpointRestoreReport = null,
     last_restore_permission: ?RestorePermissionSummary = null,
     close_thread: ?std.Thread = null,
     close_completion: std.atomic.Value(CloseCompletion) = .init(.none),

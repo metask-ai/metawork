@@ -1051,6 +1051,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .target = target,
         .optimize = root_module.optimize,
     });
+    task_attachment.addImport("metawork_agent", agent);
     task_attachment.addImport("product_task_agent_session", task_agent_session);
     task_attachment.addImport("metawork_product_skill", product_skill);
     task_attachment.addImport("product_task_execution_binding", owned_task_execution);

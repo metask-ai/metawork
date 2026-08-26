@@ -3016,6 +3016,7 @@ pub const Runtime = struct {
                     },
                 );
                 if (allowed) {
+                    task.runtime.last_restore_report = candidate.report;
                     task.runtime.last_restore_permission = .{
                         .restored_rules = candidate.report.restored_permission_rules,
                         .invalidated_rules = candidate.report.invalidated_permission_rules,
@@ -4428,11 +4429,6 @@ fn checkpointIdentityEqual(left: anytype, right: @TypeOf(left)) bool {
         left.generation == right.generation and
         left.byte_size == right.byte_size and
         std.mem.eql(u8, &left.digest, &right.digest);
-}
-
-fn optionalU64Equal(left: ?u64, right: ?u64) bool {
-    if (left == null or right == null) return left == null and right == null;
-    return left.? == right.?;
 }
 
 test "Runtime owns bounded Task collection and monotonic process facts" {

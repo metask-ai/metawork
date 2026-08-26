@@ -161,6 +161,7 @@ pub const FakeSession = struct {
     running: bool = false,
     destroyed: bool = false,
     restored: bool = false,
+    restore_degraded: bool = false,
     plan: Plan = .immediate,
     callbacks: wire.SessionCallbacksV1 = std.mem.zeroes(wire.SessionCallbacksV1),
     session_id: [wire.MAX_SESSION_ID_BYTES_V1]u8 = [_]u8{0} ** wire.MAX_SESSION_ID_BYTES_V1,
@@ -260,6 +261,7 @@ pub const FakeCore = struct {
     forced_checkpoint_export_status: ?u32 = null,
     forced_checkpoint_describe_status: ?u32 = null,
     forced_checkpoint_restore_status: ?u32 = null,
+    forced_checkpoint_restore_degraded: bool = false,
     checkpoint_generation: u64 = 0,
     checkpoint_payload: []const u8 = "fixture-checkpoint",
     malformed_checkpoint_result: bool = false,
@@ -514,6 +516,12 @@ pub const FakeCore = struct {
         self.lock();
         defer self.unlock();
         self.forced_checkpoint_restore_status = status;
+    }
+
+    pub fn forceNextCheckpointRestoreDegraded(self: *FakeCore) void {
+        self.lock();
+        defer self.unlock();
+        self.forced_checkpoint_restore_degraded = true;
     }
 
     pub fn armControlledRestore(self: *FakeCore) void {
@@ -1209,6 +1217,8 @@ pub fn sessionRestore(
     fake_core.checkpoint_restores += 1;
     const forced_status = fake_core.forced_checkpoint_restore_status;
     fake_core.forced_checkpoint_restore_status = null;
+    const restore_degraded = fake_core.forced_checkpoint_restore_degraded;
+    fake_core.forced_checkpoint_restore_degraded = false;
     if (fake_core.restore_controlled) {
         fake_core.restore_controlled = false;
         fake_core.restore_entered = true;
@@ -1265,17 +1275,25 @@ pub fn sessionRestore(
         session.* = .{
             .in_use = true,
             .restored = true,
+            .restore_degraded = restore_degraded,
             .callbacks = callbacks.?.*,
             .session_id = session_id,
             .session_id_len = id.len,
             .run_id = last_run_id,
             .compact_id = last_compact_id,
         };
-        const encoded = std.fmt.bufPrint(
-            &session.description_buffer,
-            "{{\"schema\":\"agentcore.restore-report/v1\",\"health\":\"complete\",\"session_id\":\"{s}\",\"checkpoint_generation\":{d},\"policy_generation\":1,\"catalog_generation\":0,\"skill\":{{\"disposition\":\"not_bound\",\"checkpoint_enabled\":0,\"restored_enabled\":0,\"invalidated\":0}},\"permission\":{{\"restored_rules\":0,\"invalidated_rules\":0}},\"mcp\":{{\"restored_bindings\":0,\"invalidated_bindings\":0}},\"issues\":[]}}",
-            .{ id, generation },
-        ) catch {
+        const encoded = (if (restore_degraded)
+            std.fmt.bufPrint(
+                &session.description_buffer,
+                "{{\"schema\":\"agentcore.restore-report/v1\",\"health\":\"degraded\",\"session_id\":\"{s}\",\"checkpoint_generation\":{d},\"policy_generation\":1,\"catalog_generation\":0,\"skill\":{{\"disposition\":\"unavailable\",\"checkpoint_enabled\":1,\"restored_enabled\":0,\"invalidated\":1}},\"permission\":{{\"restored_rules\":0,\"invalidated_rules\":1}},\"mcp\":{{\"restored_bindings\":0,\"invalidated_bindings\":1}},\"issues\":[{{\"issue_id\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"subsystem\":\"mcp\",\"reason\":\"unavailable\",\"skill_id\":null,\"permission_rule_id\":null,\"server_binding_identity\":null,\"authority_binding\":null,\"canonical_name\":null}}]}}",
+                .{ id, generation },
+            )
+        else
+            std.fmt.bufPrint(
+                &session.description_buffer,
+                "{{\"schema\":\"agentcore.restore-report/v1\",\"health\":\"complete\",\"session_id\":\"{s}\",\"checkpoint_generation\":{d},\"policy_generation\":1,\"catalog_generation\":0,\"skill\":{{\"disposition\":\"not_bound\",\"checkpoint_enabled\":0,\"restored_enabled\":0,\"invalidated\":0}},\"permission\":{{\"restored_rules\":0,\"invalidated_rules\":0}},\"mcp\":{{\"restored_bindings\":0,\"invalidated_bindings\":0}},\"issues\":[]}}",
+                .{ id, generation },
+            )) catch {
             diagnostic(out_error);
             return wire.STATUS_OUT_OF_MEMORY;
         };
@@ -1339,17 +1357,30 @@ pub fn sessionDescribe(
             return wire.STATUS_OUT_OF_MEMORY;
         }
     else
-        std.fmt.bufPrint(
-            &session.description_buffer,
-            "{{\"schema\":\"agentcore.session-description/v1\",\"session_id\":\"{s}\",\"origin\":\"{s}\",\"lifecycle\":\"idle\",\"registered\":true,\"last_run_id\":{d},\"last_compact_id\":{d},\"checkpoint_generation\":{d},\"policy_generation\":1,\"catalog_generation\":0,\"model\":\"fixture-model\",\"conversation\":{{\"message_count\":0,\"compact_boundary\":0}},\"skill\":{{\"catalog_revision\":null}},\"mcp\":{{\"selection_fingerprint\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"tools\":[]}},\"budget\":{{\"hard_bytes\":1024,\"soft_bytes\":512,\"durable_usage_bytes\":0,\"available_bytes\":1024,\"compaction_recommended\":false,\"last_outcome\":\"none\",\"required_bytes\":0}},\"restore\":{{\"health\":\"complete\",\"invalidated_skill_authority\":0,\"invalidated_permission_rules\":0,\"invalidated_mcp_bindings\":0,\"issues\":[]}}}}",
-            .{
-                described_session_id,
-                if (session.restored) "restored" else "fresh",
-                session.run_id,
-                session.compact_id,
-                generation,
-            },
-        ) catch {
+        (if (session.restore_degraded)
+            std.fmt.bufPrint(
+                &session.description_buffer,
+                "{{\"schema\":\"agentcore.session-description/v1\",\"session_id\":\"{s}\",\"origin\":\"{s}\",\"lifecycle\":\"idle\",\"registered\":true,\"last_run_id\":{d},\"last_compact_id\":{d},\"checkpoint_generation\":{d},\"policy_generation\":1,\"catalog_generation\":0,\"model\":\"fixture-model\",\"conversation\":{{\"message_count\":0,\"compact_boundary\":0}},\"skill\":{{\"catalog_revision\":null}},\"mcp\":{{\"selection_fingerprint\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"tools\":[]}},\"budget\":{{\"hard_bytes\":1024,\"soft_bytes\":512,\"durable_usage_bytes\":0,\"available_bytes\":1024,\"compaction_recommended\":false,\"last_outcome\":\"none\",\"required_bytes\":0}},\"restore\":{{\"health\":\"degraded\",\"invalidated_skill_authority\":1,\"invalidated_permission_rules\":1,\"invalidated_mcp_bindings\":1,\"issues\":[{{\"issue_id\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"subsystem\":\"mcp\",\"reason\":\"unavailable\",\"skill_id\":null,\"permission_rule_id\":null,\"server_binding_identity\":null,\"authority_binding\":null,\"canonical_name\":null}}]}}}}",
+                .{
+                    described_session_id,
+                    if (session.restored) "restored" else "fresh",
+                    session.run_id,
+                    session.compact_id,
+                    generation,
+                },
+            )
+        else
+            std.fmt.bufPrint(
+                &session.description_buffer,
+                "{{\"schema\":\"agentcore.session-description/v1\",\"session_id\":\"{s}\",\"origin\":\"{s}\",\"lifecycle\":\"idle\",\"registered\":true,\"last_run_id\":{d},\"last_compact_id\":{d},\"checkpoint_generation\":{d},\"policy_generation\":1,\"catalog_generation\":0,\"model\":\"fixture-model\",\"conversation\":{{\"message_count\":0,\"compact_boundary\":0}},\"skill\":{{\"catalog_revision\":null}},\"mcp\":{{\"selection_fingerprint\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"tools\":[]}},\"budget\":{{\"hard_bytes\":1024,\"soft_bytes\":512,\"durable_usage_bytes\":0,\"available_bytes\":1024,\"compaction_recommended\":false,\"last_outcome\":\"none\",\"required_bytes\":0}},\"restore\":{{\"health\":\"complete\",\"invalidated_skill_authority\":0,\"invalidated_permission_rules\":0,\"invalidated_mcp_bindings\":0,\"issues\":[]}}}}",
+                .{
+                    described_session_id,
+                    if (session.restored) "restored" else "fresh",
+                    session.run_id,
+                    session.compact_id,
+                    generation,
+                },
+            )) catch {
             diagnostic(out_error);
             return wire.STATUS_OUT_OF_MEMORY;
         };

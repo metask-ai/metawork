@@ -76,7 +76,7 @@ candidate probe 只用于证明锁定 artifact 与官方 Zig package 可以 sour
 | compact abort     | Host → Core | 只按 active compact operation ID 请求取消，不等待 provider I/O response                                                             |
 | Skill descriptor  | Core → Host | query-scoped owned bytes；由 SDK 解码后立即释放                                                                                     |
 | Skill catalog     | 双向借用    | Runtime query 返回 opaque handle；Session create/idle update 同步借用                                                               |
-| Skill policy      | Host → Core | Session create/restore/idle update 显式传入完整 replacement；由 Workbench committed policy 编译当前 catalog 的 granted concrete IDs |
+| Skill policy      | Host → Core | fresh Session create 与 idle update 显式传入完整 replacement；Conversation restore 固定传 null，后续 Manual Task 显式 refresh 再绑定 |
 
 `UiEvent` / `UiBackend.poll()` 虽然存在于 Metask AgentCore native 协议中，但当前生产 agent loop 未证明消费。MetaWork 不依赖它完成 stop、生成期 queue message 或 steering。
 
@@ -86,7 +86,7 @@ revision 9 的公开 Runtime/Session surface 包含 fresh create、checkpoint ex
 
 Agent 复制官方 MCP catalog 的 `fresh` 与 `ttl_remaining_ms` 作为产品无关 freshness fact；Session create 的官方 `mcp_not_refreshed` 只在无返回 handle 的合法拒绝形态映射为 `McpNotRefreshed`，Session restore 的同一 typed status 只在空 report、无返回 handle且 cleanup 完整的合法拒绝形态保留为相同错误，其余非 ok/handle/report 组合仍 fail closed 为 ABI contract failure。
 
-`agent/checkpoint.zig` 独占流式 export 与 typed Session description；`agent/checkpoint_restore.zig` 独占 source callback、restore config/report、post-restore description 与 expectation 对账。Workbench 持久化 opaque blob 和无 secret `CheckpointRecord`，并只把经过 size/hash 再校验的 source 与当前 Skill/MCP authority 交给 Agent。restore 不读取私有 transcript，不从 CLI 行为推断 resume，也不在 `agent/` 外复制 ABI。
+`agent/checkpoint.zig` 独占流式 export 与 typed Session description；`agent/checkpoint_restore.zig` 独占 source callback、restore config/report、post-restore description 与 expectation 对账。Workbench 持久化 opaque blob 和无 secret `CheckpointRecord`，并把经过 size/hash 再校验的 source、精确 Workspace/ExecutionConfig 与 null Skill catalog/policy、null MCP selection、null durable permission rules交给 Agent。AgentCore 可以返回 complete 或 degraded 的有效 Session；二者都保留同一 Conversation，degraded report 精确说明被安全失效的可选 authority。restore 不读取私有 transcript，不从 CLI 行为推断 resume，也不在 `agent/` 外复制 ABI。
 
 `Runtime.restoreSessionRoute` 按 catalog query 的既有并发范式工作：在 `sessions_mutex` 内预留 Session slot 并递增 active restore count，解锁后执行可能流式读取整个 checkpoint 的 ABI 调用，返回后重新加锁对账并在 shutdown 已开始时拒绝安装。`Runtime.shutdown()` 自己等待 restore、catalog 与 MCP in-flight 调用归零，然后关闭 Sessions、检查 catalog leases 并调用 `runtimeDestroy`；Workbench/Application 的正常关闭顺序不能替代这条 Agent-owned fence。
 
@@ -238,7 +238,7 @@ Agent Runtime 的 catalog resolve 是同步 Core 调用；调用在哪条受界�
 - MetaWork-owned catalog projection：只包含 revision、health、可调用 Skill 的产品字段与 bounded issue；不包含 raw JSON、catalog scope、物理路径、Skill body 或内部 policy；
 - opaque catalog lease：内部持有 AgentCore handle 及 root/home/epoch/Runtime owner 绑定，只能同步借给 Session create 或 idle refresh，并由原 Runtime 精确 release 一次。
 
-projection 的销毁不释放 lease，lease 的释放也不使已经复制的 projection 失效。Session create/update/restore 必须拒绝另一 Runtime、Workspace、home 或 epoch 的 lease；绑定 catalog 时由 Workbench 同步提交 typed `SkillPolicyV1`，其中 `granted_skill_ids` 是对当前 resolved winners 应用稳定 `skill_policy_key` 策略后得到的 concrete ID 集合。update 只在 idle 状态调用 `sessionBindSkillPolicy` 并原子替换 catalog 与同一 policy；queued/running/waiting/closing 状态 fail closed。Agent 只校验并转交 typed policy，不拥有启用 policy、持久 revision 或 UI mutation；`permission_rules` 保持 null。Manual compact 只由 Workbench 在 Task idle admission 后进入 Agent typed surface，不由 catalog、Bridge 或 Renderer 直接调用。Runtime shutdown 先阻止新 query，等待正在执行的 catalog call 收敛，并在仍有 lease 时明确返回 `CatalogLeasesOutstanding` 而不销毁 Core Runtime；上层释放 lease 后可重试同一 shutdown。实际 catalog 缓存、policy persistence、刷新合并、Task admission 和状态投影归 Workbench，Agent 不在内部隐式监听文件变化。
+projection 的销毁不释放 lease，lease 的释放也不使已经复制的 projection 失效。Fresh Session create 与 idle update 必须拒绝另一 Runtime、Workspace、home 或 epoch 的 lease；绑定 catalog 时由 Workbench 同步提交 typed `SkillPolicyV1`，其中 `granted_skill_ids` 是对当前 resolved winners 应用稳定 `skill_policy_key` 策略后得到的 concrete ID 集合。Conversation restore 不取得 lease，Skill catalog/policy 成对为 null；有效 complete/degraded Session 安装后，Manual Task 可以在 idle 状态调用 `sessionBindSkillPolicy` 原子绑定当前 catalog 与同一 policy，Automatic Task 不绑定。queued/running/waiting/closing 状态 fail closed。Agent 只校验并转交 typed policy，不拥有启用 policy、持久 revision 或 UI mutation；`permission_rules` 保持 null。Manual compact 只由 Workbench 在 Task idle admission 后进入 Agent typed surface，不由 catalog、Bridge 或 Renderer 直接调用。Runtime shutdown 先阻止新 query，等待正在执行的 catalog call 收敛，并在仍有 lease 时明确返回 `CatalogLeasesOutstanding` 而不销毁 Core Runtime；上层释放 lease 后可重试同一 shutdown。实际 catalog 缓存、policy persistence、刷新合并、Task admission 和状态投影归 Workbench，Agent 不在内部隐式监听文件变化。
 
 本地 Skill 管理不改变上述 Agent 边界。Workbench package/inventory 层可以在 Application 授予的 personal root 与已授权 Manual Workspace root 内执行机械文件检查和事务，但不能生成 AgentCore handle、复制 catalog parser、决定 winner/conflict 或把管理 `install_id` 传给 Session。每次 import/reimport/uninstall publish 后由既有 bounded Executor 发起精确 scope 的 catalog query；只有 AgentCore 返回的 projection 才能把管理资产标记为 runtime ready/degraded。明确属于候选的 definition/resource/conflict issue 触发 Workbench filesystem rollback；query 本身暂不可用只产生 `pending_verification`，不能伪造成空 catalog 或成功。AgentCore 不需要 staged install API，也不承担下载、归档、provenance、导出或删除职责。
 
