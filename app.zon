@@ -3,7 +3,7 @@
     .name = "metawork",
     .display_name = "MetaWork",
     .description = "A native workbench for structured agent sessions.",
-    .version = "0.1.3",
+    .version = "0.1.4",
     .icons = .{
         "assets/icons/app-icon.png",
         "assets/icons/app-icon.ico",

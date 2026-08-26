@@ -6,6 +6,25 @@
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-08-26
+
+### Added
+
+- 新增 macOS x64 发布目标；macOS 打包默认同时生成 arm64 与 x64 DMG，并保留已有架构产物。
+- MCP server 启用状态进入产品投影，启动不再等待 server activation，并简化配置与恢复流程。
+
+### Changed
+
+- 将 Product Task、MCP 与 Skill 收口为各自的 live aggregate，关闭跨 owner 的内部状态与生命周期入口，并隔离 executor job 和 catalog refresh worker。
+- AgentCore bundle 改为按目标平台选择 canonical bundle，开发与发布流程使用同一 target-specific 规则。
+
+### Fixed
+
+- 修复 Conversation 恢复错误绑定历史 execution generation 的问题；兼容当前 provider/model authority 时持久化推进 Task binding，并在首次发送前透明恢复。
+- 修复 Task Session 所有权竞态与 recovery authority 失效处理。
+- 修复 Skill 无效重调度，以及 MCP applying 状态和 mutation locking。
+- 修复 Windows 主程序图标嵌入，以及 macOS flat icon 打包与 staged icon cache 刷新。
+
 ## [0.1.3] - 2026-08-24
 
 ### Added
@@ -92,7 +111,8 @@
 - 定时任务：本地进程内 cron 调度；窗口关闭后继续运行；下次启动执行单次 missed-run reconciliation。
 - 界面：中英双语；统一的 Metask 设计语言字号阶梯与组件体系。
 
-[unreleased]: https://github.com/metask-ai/metawork/compare/v0.1.3...HEAD
+[unreleased]: https://github.com/metask-ai/metawork/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/metask-ai/metawork/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/metask-ai/metawork/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/metask-ai/metawork/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/metask-ai/metawork/compare/v0.1.0...v0.1.1
