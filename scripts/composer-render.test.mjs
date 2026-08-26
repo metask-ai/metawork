@@ -40,9 +40,6 @@ const base = {
   closing: false,
   unavailable: false,
   unavailableReason: null,
-  recoveryAvailable: false,
-  recoveryInProgress: false,
-  recoveryDisabled: false,
   draft: { kind: "text", text: "" },
   skillCatalog: {
     availability: "ready",
@@ -84,7 +81,6 @@ const base = {
   onDraftChange() {},
   onSubmit() {},
   onStop() {},
-  onRestore() {},
   onSlashCommand() {},
   onRefreshSkillCatalog() {},
   onConfirmAccess() {},
@@ -92,25 +88,36 @@ const base = {
   onSelectModel() {},
 };
 
-test("Conversation recovery is an explicit accessible Composer action", () => {
+test("detached Conversation recovery stays invisible until normal send", () => {
   const required = render({
     unavailable: true,
     unavailableReason: "session_recovery_required",
-    recoveryAvailable: true,
+    draft: { kind: "text", text: "Continue" },
+    canSubmit: true,
   });
-  assert.match(required, /role="status"/);
-  assert.match(required, /aria-live="polite"/);
-  assert.match(required, />Continue this conversation</);
-  assert.match(required, />Restore conversation</);
+  assert.doesNotMatch(required, /conversation-recovery/);
+  assert.doesNotMatch(required, /Restore conversation/);
+  assert.match(required, /placeholder="Describe the outcome you need…"/);
+  assert.match(required, /aria-label="Send"/);
 
   const restoring = render({
     unavailable: true,
     unavailableReason: "session_recovery_in_progress",
-    recoveryInProgress: true,
+    composeDisabled: true,
   });
-  assert.match(restoring, /data-state="in-progress"/);
-  assert.match(restoring, /disabled=""/);
-  assert.match(restoring, />Restoring…</);
+  assert.doesNotMatch(restoring, /Restoring conversation/);
+  assert.match(restoring.match(/<textarea[^>]*>/)?.[0] ?? "", /disabled/);
+  assert.match(restoring, /placeholder="Describe the outcome you need…"/);
+
+  const failed = render({
+    unavailable: true,
+    unavailableReason: "session_recovery_failed",
+    draft: { kind: "text", text: "Retry without a recovery control" },
+    canSubmit: true,
+  });
+  assert.doesNotMatch(failed, /Try again|Restore conversation/);
+  assert.match(failed, /placeholder="Describe the outcome you need…"/);
+  assert.match(failed, /aria-label="Send"/);
 });
 
 function relativeLuminance(hex) {
@@ -644,18 +651,14 @@ test("a restart-detached Task keeps the Composer ready for send-time recovery", 
   const markup = render({
     unavailable: true,
     unavailableReason: "session_recovery_required",
-    recoveryAvailable: true,
     composeDisabled: false,
   });
   assert.equal(
     hasBooleanAttribute(markup.match(/<textarea[^>]*>/)?.[0] ?? "", "disabled"),
     false,
   );
-  assert.match(
-    markup,
-    /Type a message; the conversation will restore when you send/,
-  );
-  assert.match(markup, />Restore conversation</);
+  assert.match(markup, /Describe the outcome you need/);
+  assert.doesNotMatch(markup, />Restore conversation</);
   assert.doesNotMatch(markup, /start a new one to continue/);
 });
 

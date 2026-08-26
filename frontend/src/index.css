@@ -6360,59 +6360,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   margin: 0 auto;
 }
 
-.conversation-recovery {
-  display: flex;
-  min-height: 68px;
-  margin-bottom: 8px;
-  padding: 11px 12px 11px 14px;
-  align-items: center;
-  justify-content: space-between;
-  gap: 18px;
-  border: 1px solid var(--ui-action-primary-border);
-  border-radius: 10px;
-  background: var(--metask-primary-soft);
-}
-
-.conversation-recovery[data-state="failed"] {
-  border-color: var(--ui-action-danger-border);
-  background: var(--ui-action-danger-surface);
-}
-
-.conversation-recovery strong {
-  display: block;
-  color: var(--ui-content-primary);
-  font-size: var(--text-control);
-  font-weight: 700;
-}
-
-.conversation-recovery p {
-  margin: 3px 0 0;
-  color: var(--ui-content-muted);
-  font-size: var(--text-label);
-  line-height: 1.45;
-}
-
-.recovery-action {
-  min-width: 150px;
-  min-height: 44px;
-  padding: 0 14px;
-  flex: 0 0 auto;
-  border: 1px solid var(--ui-action-primary);
-  border-radius: 7px;
-  color: var(--ui-content-on-primary);
-  background: var(--ui-action-primary);
-  font-size: var(--text-control);
-  font-weight: 680;
-}
-
-.recovery-action:hover:not(:disabled) {
-  background: var(--ui-action-primary-hover);
-}
-
-.recovery-action:disabled {
-  opacity: 0.48;
-}
-
 .slash-menu {
   max-height: min(420px, 48vh);
   margin-bottom: 8px;
@@ -6937,16 +6884,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 @media (max-width: 620px) {
-  .conversation-recovery {
-    align-items: stretch;
-    flex-direction: column;
-    gap: 10px;
-  }
-
-  .recovery-action {
-    width: 100%;
-  }
-
   .slash-option {
     grid-template-columns: minmax(82px, 0.4fr) minmax(0, 1fr);
   }
