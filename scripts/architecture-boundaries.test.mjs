@@ -833,13 +833,15 @@ test("Product Task kernels have one physical home without taking the executor", 
   assert.match(executor, /if \(item\.identity != identity\) continue;/);
 });
 
-test("Product MCP kernels have one physical home and remain Workbench-held", () => {
+test("Product MCP kernels have one physical home and isolate refresh workers", () => {
   const build = read("build.zig");
   const productMcp = read("src/product/mcp.zig");
   const configuration = read("src/product/mcp/configuration.zig");
   const state = read("src/product/mcp/state.zig");
   const policy = read("src/product/mcp/policy.zig");
   const view = read("src/product/mcp/view.zig");
+  const ports = read("src/product/mcp/ports.zig");
+  const refreshJob = read("src/product/mcp/refresh_job.zig");
   const workbenchRoot = read("src/workbench.zig");
   const workbenchProjection = read("src/workbench/projection.zig");
 
@@ -853,6 +855,8 @@ test("Product MCP kernels have one physical home and remain Workbench-held", () 
   assert.match(productMcp, /@import\("product_mcp_state"\)/);
   assert.match(productMcp, /@import\("product_mcp_policy"\)/);
   assert.match(productMcp, /@import\("product_mcp_view"\)/);
+  assert.match(productMcp, /@import\("product_mcp_ports"\)/);
+  assert.match(productMcp, /@import\("product_mcp_refresh_job"\)/);
   assert.match(configuration, /@import\("agent_mcp_http_protocol"\)/);
   assert.doesNotMatch(configuration, /@import\("metawork_agent"\)/);
   // Product MCP state intentionally consumes MetaWork Agent's public
@@ -905,6 +909,22 @@ test("Product MCP kernels have one physical home and remain Workbench-held", () 
     view,
     /McpRefreshJob|workbench_executor|std\.Thread|pub const McpProductState/,
   );
+  assert.match(ports, /pub const Executor = struct/);
+  assert.match(ports, /pub const Catalog = struct/);
+  assert.match(ports, /pub const Timer = struct/);
+  assert.match(ports, /pub const Notifier = struct/);
+  assert.doesNotMatch(
+    ports,
+    /@import\("metawork_workbench"\)|@import\("workbench_executor"\)|std\.Thread|\*agent\.Runtime/,
+  );
+  assert.match(refreshJob, /pub const Job = struct/);
+  assert.match(refreshJob, /pub fn execute/);
+  assert.match(refreshJob, /pub fn cancel/);
+  assert.match(refreshJob, /executorJob/);
+  assert.doesNotMatch(
+    refreshJob,
+    /\b(?:workbench|runtime|state):\s*\*|@import\("workbench_executor"\)|std\.Thread/,
+  );
   assert.match(build, /addImport\("metawork_product_mcp", product_mcp\)/);
   assert.match(build, /src\/product\/mcp\/view\.zig/);
   assert.match(build, /src\/product\/mcp\/policy\.zig/);
@@ -930,6 +950,11 @@ test("Product MCP kernels have one physical home and remain Workbench-held", () 
   );
   assert.match(build, /"test-product-mcp-view"/);
   assert.match(build, /"test-product-mcp-policy"/);
+  assert.match(build, /"test-product-mcp-refresh-job"/);
+  assert.match(
+    build,
+    /product_mcp_refresh_job\.addImport\("product_mcp_ports", product_mcp_ports\)/,
+  );
   assert.match(build, /"Workbench snapshot serializer"/);
   assert.match(
     workbenchProjection,
@@ -938,6 +963,11 @@ test("Product MCP kernels have one physical home and remain Workbench-held", () 
   assert.match(workbenchProjection, /const mcp_state = product_mcp\.state/);
   assert.match(workbenchProjection, /const mcp_policy = product_mcp\.policy/);
   assert.match(workbenchProjection, /const mcp_view = product_mcp\.view/);
+  assert.match(workbenchProjection, /const mcp_ports = product_mcp\.ports/);
+  assert.match(
+    workbenchProjection,
+    /const mcp_refresh_job = product_mcp\.refresh_job/,
+  );
   assert.match(workbenchProjection, /mcp_view\.writeProjection/);
   assert.doesNotMatch(
     workbenchProjection,
@@ -952,11 +982,14 @@ test("Product MCP kernels have one physical home and remain Workbench-held", () 
     "mcpAdmissionForTarget",
     "rearmMcpRefreshTimerNoFail",
     "commitMcpRefreshJobNoFail",
-    "executeMcpRefreshJob",
-    "cancelMcpRefreshJob",
   ]) {
     assert.match(workbenchProjection, new RegExp(`fn ${name}\\b`));
   }
+  assert.doesNotMatch(
+    workbenchProjection,
+    /fn executeMcpRefreshJob|fn cancelMcpRefreshJob/,
+  );
+  assert.match(workbenchProjection, /job\.executorJob\(\)/);
   assert.match(
     workbenchProjection,
     /agent_runtime\.createMcpAdmissionSelection/,

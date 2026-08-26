@@ -30,6 +30,8 @@ const mcp_configuration = product_mcp.configuration;
 const mcp_state = product_mcp.state;
 const mcp_policy = product_mcp.policy;
 const mcp_view = product_mcp.view;
+const mcp_ports = product_mcp.ports;
+const mcp_refresh_job = product_mcp.refresh_job;
 const contract_fixture = @import("workbench_contract_fixture");
 const build_options = @import("build_options");
 
@@ -517,6 +519,61 @@ fn cancelSkillJob(context: *anyopaque, identity: *anyopaque) bool {
     return executor.cancel(identity);
 }
 
+fn enqueueMcpJob(
+    context: *anyopaque,
+    job: mcp_ports.Job,
+) error{ ExecutorShuttingDown, QueueFull }!void {
+    const executor: *executor_impl.Executor = @ptrCast(@alignCast(context));
+    return executor.enqueue(.{
+        .identity = job.identity,
+        .context = job.context,
+        .execute_fn = job.execute_fn,
+        .cancel_fn = job.cancel_fn,
+    });
+}
+
+fn cancelMcpJob(context: *anyopaque, identity: *anyopaque) bool {
+    const executor: *executor_impl.Executor = @ptrCast(@alignCast(context));
+    return executor.cancel(identity);
+}
+
+fn activateMcpCatalog(context: *anyopaque) anyerror!lifecycle.McpActivationOutcome {
+    const runtime: *lifecycle.Runtime = @ptrCast(@alignCast(context));
+    return runtime.activateMcp();
+}
+
+fn createMcpAdmissionSelection(
+    context: *anyopaque,
+    activation: *const lifecycle.McpActivation,
+    allowlists: []const lifecycle.McpServerAllowlist,
+) anyerror!?*lifecycle.McpSelection {
+    const runtime: *lifecycle.Runtime = @ptrCast(@alignCast(context));
+    return runtime.createMcpAdmissionSelection(activation, allowlists);
+}
+
+fn mcpExecutorPort(executor: *executor_impl.Executor) mcp_ports.Executor {
+    return .{
+        .context = executor,
+        .enqueue_fn = enqueueMcpJob,
+        .cancel_fn = cancelMcpJob,
+    };
+}
+
+fn mcpCatalogPort(runtime: *lifecycle.Runtime) mcp_ports.Catalog {
+    return .{
+        .context = runtime,
+        .activate_fn = activateMcpCatalog,
+        .create_admission_selection_fn = createMcpAdmissionSelection,
+    };
+}
+
+fn mcpNotifierPort(notifier: ChangeNotifier) mcp_ports.Notifier {
+    return .{
+        .context = notifier.context,
+        .notify_fn = notifier.wake,
+    };
+}
+
 fn querySkillCatalog(
     context: *anyopaque,
     input: lifecycle.CatalogQuery,
@@ -809,48 +866,7 @@ const WorkspaceTrust = union(enum) {
 
 const CatalogSnapshot = catalog_snapshot.Snapshot;
 
-const CatalogJobState = enum(u8) {
-    queued,
-    running,
-    completed,
-    cancelled,
-};
-
-const McpRefreshJobOutcome = union(enum) {
-    empty,
-    activated: struct {
-        activation: *lifecycle.McpActivation,
-        selection: ?*lifecycle.McpSelection,
-    },
-    unavailable,
-};
-
-const McpRefreshJob = struct {
-    allocator: std.mem.Allocator,
-    runtime: *lifecycle.Runtime,
-    notifier: ChangeNotifier,
-    request_generation: u64,
-    requested_at_ms: ?u64,
-    arena: std.heap.ArenaAllocator,
-    allowlists: []const lifecycle.McpServerAllowlist,
-    build_admission: bool,
-    state: std.atomic.Value(CatalogJobState) = .init(.queued),
-    outcome: McpRefreshJobOutcome = .unavailable,
-
-    fn deinit(self: *McpRefreshJob) void {
-        switch (self.outcome) {
-            .activated => |activated| {
-                if (activated.selection) |selection| selection.deinit();
-                activated.activation.deinit();
-            },
-            .empty, .unavailable => {},
-        }
-        self.arena.deinit();
-        const allocator = self.allocator;
-        self.* = undefined;
-        allocator.destroy(self);
-    }
-};
+const McpRefreshJob = mcp_refresh_job.Job;
 
 const WorkspaceView = struct {
     id: u64,
@@ -2270,20 +2286,15 @@ pub const Workbench = struct {
         errdefer self.allocator.destroy(job);
         job.* = .{
             .allocator = self.allocator,
-            .runtime = self.agent_runtime,
-            .notifier = self.change_notifier,
+            .catalog = mcpCatalogPort(self.agent_runtime),
+            .notifier = mcpNotifierPort(self.change_notifier),
             .request_generation = generation,
             .requested_at_ms = self.mcp_refresh_timer.now(),
             .arena = refresh_arena,
             .allowlists = allowlists,
             .build_admission = alignment == .current,
         };
-        try self.executor.enqueue(.{
-            .identity = job,
-            .context = job,
-            .execute_fn = executeMcpRefreshJob,
-            .cancel_fn = cancelMcpRefreshJob,
-        });
+        try mcpExecutorPort(self.executor).enqueue(job.executorJob());
         mcp_policy.blockAdmission(mcp, .refreshing);
         mcp.refresh_pending = false;
         mcp.refresh_pending_blocks_admission = false;
@@ -7720,56 +7731,6 @@ fn commitCompactProductTerminal(
     );
 }
 
-fn executeMcpRefreshJob(context: *anyopaque) void {
-    const job: *McpRefreshJob = @ptrCast(@alignCast(context));
-    const claimed = job.state.cmpxchgStrong(
-        .queued,
-        .running,
-        .acq_rel,
-        .acquire,
-    );
-    std.debug.assert(claimed == null);
-    job.outcome = if (job.runtime.activateMcp()) |outcome|
-        switch (outcome) {
-            .empty => .empty,
-            .activated => |activation| activated: {
-                if (activation.takeSelection()) |startup_selection|
-                    startup_selection.deinit();
-                const selection = if (job.build_admission)
-                    job.runtime.createMcpAdmissionSelection(
-                        activation,
-                        job.allowlists,
-                    ) catch {
-                        activation.deinit();
-                        break :activated .unavailable;
-                    }
-                else
-                    null;
-                break :activated .{ .activated = .{
-                    .activation = activation,
-                    .selection = selection,
-                } };
-            },
-            .unavailable => .unavailable,
-        }
-    else |_|
-        .unavailable;
-    job.state.store(.completed, .release);
-    _ = job.notifier.notify();
-}
-
-fn cancelMcpRefreshJob(context: *anyopaque) void {
-    const job: *McpRefreshJob = @ptrCast(@alignCast(context));
-    const prior = job.state.cmpxchgStrong(
-        .queued,
-        .cancelled,
-        .acq_rel,
-        .acquire,
-    );
-    std.debug.assert(prior == null);
-    _ = job.notifier.notify();
-}
-
 fn requestRunTermination(
     run: *TestRunRecord,
     interruption: lifecycle.ExternalInterruption,
@@ -13189,8 +13150,8 @@ test "MCP startup health commits a safe degraded Workbench projection" {
     const blocked_job = try workbench.allocator.create(McpRefreshJob);
     blocked_job.* = .{
         .allocator = workbench.allocator,
-        .runtime = workbench.agent_runtime,
-        .notifier = .{},
+        .catalog = mcpCatalogPort(workbench.agent_runtime),
+        .notifier = mcpNotifierPort(.{}),
         .request_generation = 1,
         .requested_at_ms = null,
         .arena = std.heap.ArenaAllocator.init(workbench.allocator),
@@ -13217,8 +13178,8 @@ test "MCP startup health commits a safe degraded Workbench projection" {
     const stale_job = try workbench.allocator.create(McpRefreshJob);
     stale_job.* = .{
         .allocator = workbench.allocator,
-        .runtime = workbench.agent_runtime,
-        .notifier = .{},
+        .catalog = mcpCatalogPort(workbench.agent_runtime),
+        .notifier = mcpNotifierPort(.{}),
         .request_generation = 2,
         .requested_at_ms = null,
         .arena = std.heap.ArenaAllocator.init(workbench.allocator),
@@ -13236,8 +13197,8 @@ test "MCP startup health commits a safe degraded Workbench projection" {
     const cancelled_job = try workbench.allocator.create(McpRefreshJob);
     cancelled_job.* = .{
         .allocator = workbench.allocator,
-        .runtime = workbench.agent_runtime,
-        .notifier = .{},
+        .catalog = mcpCatalogPort(workbench.agent_runtime),
+        .notifier = mcpNotifierPort(.{}),
         .request_generation = 4,
         .requested_at_ms = null,
         .arena = std.heap.ArenaAllocator.init(workbench.allocator),
@@ -13246,7 +13207,7 @@ test "MCP startup health commits a safe degraded Workbench projection" {
     };
     workbench.mcp.?.refresh_request_generation = 4;
     workbench.mcp_refresh_job = cancelled_job;
-    cancelMcpRefreshJob(cancelled_job);
+    McpRefreshJob.cancel(cancelled_job);
     workbench.shutting_down = true;
     workbench.syncLifecycle();
     try std.testing.expect(workbench.mcp_refresh_job == null);
