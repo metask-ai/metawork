@@ -284,10 +284,15 @@ test("Product Skill has one live owner behind narrow composition ports", () => {
     catalog,
     /Workbench|Task|Workspace|workbench_executor|std\.Thread|\*agent\.Runtime|\*agent\.Session/,
   );
-  for (const source of [projection, taskAttachment, recoveryJob]) {
+  for (const source of [projection, taskAttachment]) {
     assert.match(source, /@import\("metawork_product_skill"\)\.catalog/);
     assert.doesNotMatch(source, /@import\("workbench_catalog_snapshot"\)/);
   }
+  assert.doesNotMatch(recoveryJob, /metawork_product_skill|product_skill_catalog/);
+  assert.doesNotMatch(
+    build,
+    /task_recovery_job\.addImport\("metawork_product_skill"/,
+  );
   assert.doesNotMatch(
     packageKernel,
     /Workbench|Workspace|Task|workbench_executor|std\.Thread|@import\("metawork_agent"\)/,

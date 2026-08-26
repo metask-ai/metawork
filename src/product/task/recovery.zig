@@ -1,23 +1,12 @@
-//! Pure continuation and recovery eligibility policy.
+//! Pure continuation and recovery admission policy.
 //!
-//! Callers must provide already-observed in-memory facts. This module owns no
-//! store, Agent, Task, or Workspace resource and cannot perform I/O.
+//! Callers provide already-observed Product facts. This module owns no store,
+//! Agent, Task, Workspace, Skill, MCP, Permission, or projection resource.
 
 const std = @import("std");
 
-pub const Attachment = enum {
-    detached,
-    attached_available,
-    attached_session_poisoned,
-    closing,
-};
-
-pub const Operation = enum {
-    none,
-    run,
-    compact,
-    restore,
-};
+pub const Attachment = enum { detached, attached_available, attached_session_poisoned, closing };
+pub const Operation = enum { none, run, compact, restore };
 
 pub const UnavailableReason = enum {
     session_poisoned,
@@ -34,33 +23,61 @@ pub const UnavailableReason = enum {
     runtime_unavailable,
 };
 
-pub const Capability = union(enum) {
-    available,
-    unavailable: UnavailableReason,
-};
-
+pub const Capability = union(enum) { available, unavailable: UnavailableReason };
 pub const Projection = struct {
     continuation: Capability,
     recovery_available: bool = false,
 };
 
-pub const Facts = struct {
+pub const RuntimeAdmission = enum { available, busy, capacity_reached, unavailable, shutting_down };
+
+/// Stable Product identities that make a historical Conversation belong to
+/// the current Task attachment. Optional capability authority is deliberately
+/// absent: Skill, MCP and durable permission continuity may only narrow the
+/// restored Session after this decision.
+pub const CoreRecoveryAuthority = struct {
+    checkpoint_available: bool = false,
+    checkpoint_binding_exact: bool = false,
+    checkpoint_history_exact: bool = false,
+    execution_exact: bool = false,
+    workspace_identity_exact: bool = false,
+    automatic_owner_exact: bool = false,
+    authority_stable: bool = false,
+};
+
+pub const RecoveryAdmissionFacts = struct {
     archived: bool = false,
     attachment: Attachment = .detached,
     operation: Operation = .none,
     task_persistence_ready: bool = false,
     checkpoint_store_ready: bool = false,
-    checkpoint_available: bool = false,
-    checkpoint_binding_valid: bool = false,
-    checkpoint_history_current: bool = false,
-    execution_exact: bool = false,
-    workspace_authorized: bool = false,
-    runtime_admission_available: bool = false,
-    authority_stable: bool = false,
+    runtime_admission: RuntimeAdmission = .unavailable,
+    core: CoreRecoveryAuthority = .{},
     recovery_failed: bool = false,
 };
 
-pub fn project(facts: Facts) Projection {
+pub const AdmissionDecision = union(enum) { admitted, denied: UnavailableReason };
+
+pub fn evaluateRecoveryAdmission(facts: RecoveryAdmissionFacts) AdmissionDecision {
+    if (facts.operation == .restore) return .{ .denied = .session_recovery_in_progress };
+    if (facts.operation != .none) return .{ .denied = .authority_unavailable };
+    if (facts.archived) return .{ .denied = .task_archived };
+    if (!facts.task_persistence_ready) return .{ .denied = .persistence_unavailable };
+    if (!facts.checkpoint_store_ready) return .{ .denied = .checkpoint_unavailable };
+    if (!facts.core.checkpoint_available or
+        !facts.core.checkpoint_binding_exact or
+        !facts.core.checkpoint_history_exact)
+        return .{ .denied = .checkpoint_unavailable };
+    if (!facts.core.execution_exact) return .{ .denied = .execution_mismatch };
+    if (!facts.core.workspace_identity_exact or !facts.core.automatic_owner_exact)
+        return .{ .denied = .workspace_unavailable };
+    if (facts.runtime_admission != .available)
+        return .{ .denied = .runtime_unavailable };
+    if (!facts.core.authority_stable) return .{ .denied = .authority_unavailable };
+    return .admitted;
+}
+
+pub fn project(facts: RecoveryAdmissionFacts) Projection {
     return switch (facts.attachment) {
         .closing => unavailable(.closing),
         .attached_available => .{ .continuation = .available },
@@ -69,22 +86,11 @@ pub fn project(facts: Facts) Projection {
     };
 }
 
-fn projectDetached(facts: Facts) Projection {
-    if (facts.operation == .restore)
-        return unavailable(.session_recovery_in_progress);
-    if (facts.operation != .none)
-        return unavailable(.authority_unavailable);
-    if (facts.archived) return unavailable(.task_archived);
-    if (!facts.task_persistence_ready) return unavailable(.persistence_unavailable);
-    if (!facts.checkpoint_store_ready) return unavailable(.checkpoint_unavailable);
-    if (!facts.checkpoint_available or
-        !facts.checkpoint_binding_valid or
-        !facts.checkpoint_history_current)
-        return unavailable(.checkpoint_unavailable);
-    if (!facts.execution_exact) return unavailable(.execution_mismatch);
-    if (!facts.workspace_authorized) return unavailable(.workspace_unavailable);
-    if (!facts.runtime_admission_available) return unavailable(.runtime_unavailable);
-    if (!facts.authority_stable) return unavailable(.authority_unavailable);
+fn projectDetached(facts: RecoveryAdmissionFacts) Projection {
+    switch (evaluateRecoveryAdmission(facts)) {
+        .denied => |reason| return unavailable(reason),
+        .admitted => {},
+    }
     return .{
         .continuation = .{ .unavailable = if (facts.recovery_failed)
             .session_recovery_failed
@@ -98,27 +104,27 @@ fn unavailable(reason: UnavailableReason) Projection {
     return .{ .continuation = .{ .unavailable = reason } };
 }
 
-fn eligibleFacts() Facts {
+fn eligibleFacts() RecoveryAdmissionFacts {
     return .{
         .task_persistence_ready = true,
         .checkpoint_store_ready = true,
-        .checkpoint_available = true,
-        .checkpoint_binding_valid = true,
-        .checkpoint_history_current = true,
-        .execution_exact = true,
-        .workspace_authorized = true,
-        .runtime_admission_available = true,
-        .authority_stable = true,
+        .runtime_admission = .available,
+        .core = .{
+            .checkpoint_available = true,
+            .checkpoint_binding_exact = true,
+            .checkpoint_history_exact = true,
+            .execution_exact = true,
+            .workspace_identity_exact = true,
+            .automatic_owner_exact = true,
+            .authority_stable = true,
+        },
     };
 }
 
 test "eligible detached task exposes recovery through continuation truth" {
     const result = project(eligibleFacts());
     try std.testing.expect(result.recovery_available);
-    try std.testing.expectEqual(
-        UnavailableReason.session_recovery_required,
-        result.continuation.unavailable,
-    );
+    try std.testing.expectEqual(UnavailableReason.session_recovery_required, result.continuation.unavailable);
 }
 
 test "attached and restoring tasks cannot expose a second recovery state" {
@@ -132,10 +138,7 @@ test "attached and restoring tasks cannot expose a second recovery state" {
     restoring.operation = .restore;
     const in_progress = project(restoring);
     try std.testing.expect(!in_progress.recovery_available);
-    try std.testing.expectEqual(
-        UnavailableReason.session_recovery_in_progress,
-        in_progress.continuation.unavailable,
-    );
+    try std.testing.expectEqual(UnavailableReason.session_recovery_in_progress, in_progress.continuation.unavailable);
 }
 
 test "failed recovery remains one retryable continuation state" {
@@ -143,13 +146,10 @@ test "failed recovery remains one retryable continuation state" {
     facts.recovery_failed = true;
     const result = project(facts);
     try std.testing.expect(result.recovery_available);
-    try std.testing.expectEqual(
-        UnavailableReason.session_recovery_failed,
-        result.continuation.unavailable,
-    );
+    try std.testing.expectEqual(UnavailableReason.session_recovery_failed, result.continuation.unavailable);
 }
 
-test "recovery eligibility is fail closed for every external prerequisite" {
+test "recovery admission is fail closed for every core prerequisite" {
     const Case = struct {
         field: enum {
             task_persistence,
@@ -159,6 +159,7 @@ test "recovery eligibility is fail closed for every external prerequisite" {
             history,
             execution,
             workspace,
+            automatic_owner,
             runtime,
             authority,
         },
@@ -172,6 +173,7 @@ test "recovery eligibility is fail closed for every external prerequisite" {
         .{ .field = .history, .reason = .checkpoint_unavailable },
         .{ .field = .execution, .reason = .execution_mismatch },
         .{ .field = .workspace, .reason = .workspace_unavailable },
+        .{ .field = .automatic_owner, .reason = .workspace_unavailable },
         .{ .field = .runtime, .reason = .runtime_unavailable },
         .{ .field = .authority, .reason = .authority_unavailable },
     }) |case| {
@@ -179,13 +181,14 @@ test "recovery eligibility is fail closed for every external prerequisite" {
         switch (case.field) {
             .task_persistence => facts.task_persistence_ready = false,
             .checkpoint_store => facts.checkpoint_store_ready = false,
-            .checkpoint => facts.checkpoint_available = false,
-            .binding => facts.checkpoint_binding_valid = false,
-            .history => facts.checkpoint_history_current = false,
-            .execution => facts.execution_exact = false,
-            .workspace => facts.workspace_authorized = false,
-            .runtime => facts.runtime_admission_available = false,
-            .authority => facts.authority_stable = false,
+            .checkpoint => facts.core.checkpoint_available = false,
+            .binding => facts.core.checkpoint_binding_exact = false,
+            .history => facts.core.checkpoint_history_exact = false,
+            .execution => facts.core.execution_exact = false,
+            .workspace => facts.core.workspace_identity_exact = false,
+            .automatic_owner => facts.core.automatic_owner_exact = false,
+            .runtime => facts.runtime_admission = .capacity_reached,
+            .authority => facts.core.authority_stable = false,
         }
         const result = project(facts);
         try std.testing.expect(!result.recovery_available);

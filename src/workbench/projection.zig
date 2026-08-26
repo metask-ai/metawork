@@ -294,7 +294,6 @@ pub const CheckpointStoreConfiguration = struct {
 pub const McpHostCapabilities = mcp_runtime.McpHostCapabilities;
 pub const McpStartupConfiguration = mcp_runtime.McpStartupConfiguration;
 pub const McpAdmissionBlockReason = mcp_runtime.McpAdmissionBlockReason;
-const RecoveryMcpAuthority = mcp_runtime.RecoveryMcpAuthority;
 pub const McpOauthRefreshBinding = mcp_runtime.McpOauthRefreshBinding;
 pub const McpOauthRefreshBeginOutcome = mcp_runtime.McpOauthRefreshBeginOutcome;
 pub const McpOauthAuthorizationPlan = mcp_runtime.McpOauthAuthorizationPlan;
@@ -2681,36 +2680,11 @@ pub const Workbench = struct {
         const facts = try self.task_runtime.recoveryStartFacts(
             task_id,
             expected_binding_epoch,
-            self.taskRuntimeProjectionEffects(),
+            self.taskRuntimeRecoveryAdmissionEffects(),
         );
-        const workspace = self.findWorkspace(facts.workspace_id) orelse
-            return error.WorkspaceUnavailable;
-        if (workspace.kind == .manual and self.skill.enablementHealth() != .ready)
-            return error.RecoveryUnavailable;
-        const canonical_user_home = self.canonical_user_home orelse
-            return error.WorkspaceUnavailable;
-        const skill_scope: skill_runtime.ManagementScope = .{ .project = .{
-            .workspace_id = workspace.id,
-            .workspace_epoch = workspace.epoch,
-        } };
-        const current_catalog = switch (try self.skill.workspaceCatalogAuthority(
-            workspace.id,
-            workspace.epoch,
-        )) {
-            .ready, .degraded => |authority| authority.snapshot,
-            .uninitialized, .loading, .unavailable => return error.RecoveryUnavailable,
-        };
-        var disabled_keys: std.ArrayList([]const u8) = .empty;
-        defer disabled_keys.deinit(self.allocator);
-        for (current_catalog.skills) |skill|
-            if (!self.skill.isSkillEnabled(skill_scope, skill.skill_policy_key))
-                try disabled_keys.append(self.allocator, skill.skill_policy_key);
-        var mcp = try self.createRecoveryMcpAuthority();
-        defer mcp.deinit();
-        const store = self.checkpoint_store orelse return error.RecoveryUnavailable;
-        var selection = mcp.selection;
-        mcp.selection = null;
-        errdefer if (selection) |value| value.deinit();
+        const workspace = self.findWorkspace(facts.workspace_id) orelse unreachable;
+        const canonical_user_home = self.canonical_user_home orelse unreachable;
+        const store = self.checkpoint_store orelse unreachable;
         const attempt_id = try self.task_runtime.startRecovery(task_id, .{
             .expected_binding_epoch = expected_binding_epoch,
             .workspace_id = workspace.id,
@@ -2721,8 +2695,10 @@ pub const Workbench = struct {
                 .explicitly_trusted => .explicitly_trusted,
                 .temporary => .temporary,
             },
-            .skill_policy_revision = self.skill.enablementRevision(skill_scope),
-            .disabled_skill_policy_keys = disabled_keys.items,
+            .workspace_kind = switch (workspace.kind) {
+                .manual => .manual,
+                .automatic => .automatic,
+            },
             .execution = .{
                 .target = .{
                     .provider_kind = accountProviderKind(self.execution.provider.?),
@@ -2732,13 +2708,9 @@ pub const Workbench = struct {
                 .api_key = self.execution.credential(),
                 .execution_generation = self.execution.generation,
             },
-            .mcp_selection = &selection,
-            .mcp_catalog_generation = mcp.catalog_generation,
             .agent_runtime = self.agent_runtime,
             .checkpoint_store = store,
-            .catalog_limits = catalogSnapshotLimits(self.limits),
             .checkpoint_limits = checkpoint_export_limits,
-            .available_projection_bytes = self.limits.max_projection_bytes - self.projection_bytes,
             .notifier = .{
                 .context = self.change_notifier.context,
                 .notify_fn = self.change_notifier.wake,
@@ -3781,13 +3753,6 @@ pub const Workbench = struct {
         if (self.mcp) |*runtime| runtime.rearmRefreshTimer();
     }
 
-    fn createRecoveryMcpAuthority(self: *Workbench) Error!RecoveryMcpAuthority {
-        const runtime = if (self.mcp) |*value| value else return .{
-            .selection = null,
-            .catalog_generation = null,
-        };
-        return runtime.recoveryAuthority() catch |err| return @errorCast(err);
-    }
     fn mcpViewContainsSensitive(context: *const anyopaque, value: []const u8) bool {
         const self: *const Workbench = @ptrCast(@alignCast(context));
         return self.containsKnownCredential(value);
@@ -4242,11 +4207,29 @@ pub const Workbench = struct {
         query: task_runtime.ProjectionAuthorityQuery,
     ) task_runtime.ProjectionAuthority {
         const self: *Workbench = @ptrCast(@alignCast(context));
+        return self.observeTaskRecoveryAuthority(query);
+    }
+
+    fn taskRecoveryAdmissionAuthority(
+        context: *anyopaque,
+        query: task_runtime.ProjectionAuthorityQuery,
+    ) task_runtime.ProjectionAuthority {
+        const self: *Workbench = @ptrCast(@alignCast(context));
+        return self.observeTaskRecoveryAuthority(query);
+    }
+
+    fn observeTaskRecoveryAuthority(
+        self: *Workbench,
+        query: task_runtime.ProjectionAuthorityQuery,
+    ) task_runtime.ProjectionAuthority {
         const workspace = self.findWorkspace(query.workspace_id);
-        const workspace_authorized = if (workspace) |value|
-            value.visible and value.authorization == .available and
-                value.epoch == query.workspace_epoch and
+        const workspace_identity_exact = if (workspace) |value|
+            value.authorization == .available and value.epoch == query.workspace_epoch and
                 std.mem.eql(u8, value.canonical_root, query.workspace_root)
+        else
+            false;
+        const automatic_owner_exact = if (workspace) |value|
+            value.kind != .automatic or value.automatic_task_id == query.task_id
         else
             false;
         const execution_exact = self.execution_replacement == .none and
@@ -4267,9 +4250,16 @@ pub const Workbench = struct {
             .checkpoint_store_ready = self.checkpoint_store != null and
                 self.checkpoint_store_health.load(.acquire) == .ready,
             .execution_exact = execution_exact,
-            .workspace_authorized = workspace_authorized,
-            .runtime_admission_available = self.agent_runtime.restoreAdmissionAvailable(),
-            .authority_stable = self.recoveryAuthorityStable(workspace),
+            .workspace_identity_exact = workspace_identity_exact,
+            .automatic_owner_exact = automatic_owner_exact,
+            .runtime_admission = if (self.shutting_down)
+                .shutting_down
+            else if (self.agent_runtime.restoreAdmissionAvailable())
+                .available
+            else
+                .unavailable,
+            .authority_stable = !self.shutting_down and
+                self.canonical_user_home != null and workspace != null,
         };
     }
 
@@ -4296,6 +4286,15 @@ pub const Workbench = struct {
                 .write_fn = writeTaskCatalogProjection,
             },
             .max_pending_ui_json_bytes = self.limits.max_pending_ui_json_bytes,
+        };
+    }
+
+    fn taskRuntimeRecoveryAdmissionEffects(
+        self: *Workbench,
+    ) task_runtime.RecoveryAdmissionEffects {
+        return .{
+            .context = self,
+            .authority_fn = taskRecoveryAdmissionAuthority,
         };
     }
 
@@ -4355,20 +4354,6 @@ pub const Workbench = struct {
         for (self.account.model_views[0..self.account.model_count]) |candidate|
             if (std.mem.eql(u8, candidate.id, model)) return true;
         return false;
-    }
-
-    fn recoveryAuthorityStable(
-        self: *const Workbench,
-        workspace: ?*const WorkspaceView,
-    ) bool {
-        if (self.shutting_down or self.canonical_user_home == null or
-            self.skill.reconciliationPending())
-            return false;
-        const value = workspace orelse return false;
-        if (!self.skill.workspaceAuthorityStable(value.id, value.epoch))
-            return false;
-        const runtime = if (self.mcp) |*mcp_runtime_value| mcp_runtime_value else return true;
-        return runtime.authorityStable();
     }
 
     fn canCreateTask(self: *const Workbench) bool {
@@ -5224,13 +5209,6 @@ pub const Workbench = struct {
     ) task_runtime.RecoveryExternalAuthority {
         const self: *Workbench = @ptrCast(@alignCast(context));
         const workspace = self.findWorkspace(query.workspace_id);
-        const skill_revision = if (workspace) |value|
-            self.skill.enablementRevision(.{ .project = .{
-                .workspace_id = value.id,
-                .workspace_epoch = value.epoch,
-            } })
-        else
-            0;
         const execution_exact = self.execution_replacement == .none and
             self.execution.ready() and
             query.execution_generation == self.execution.generation and
@@ -5245,30 +5223,27 @@ pub const Workbench = struct {
                     self.accountHasModel(query.execution_model);
         return .{
             .workspace_root = if (workspace) |value| value.canonical_root else "",
-            .skill_policy_revision = skill_revision,
-            .mcp_catalog_generation = if (self.mcp) |*runtime|
-                runtime.recoveryGeneration()
-            else
-                null,
+            .workspace_kind = if (workspace) |value| switch (value.kind) {
+                .manual => .manual,
+                .automatic => .automatic,
+            } else .manual,
             .shutting_down = self.shutting_down,
-            .workspace_authority_stable = self.recoveryAuthorityStable(workspace),
-            .execution_authority_stable = execution_exact,
-            .available_projection_bytes = self.limits.max_projection_bytes -
-                self.projection_bytes,
+            .workspace_authority_exact = if (workspace) |value|
+                value.authorization == .available and value.epoch == query.workspace_epoch
+            else
+                false,
+            .automatic_owner_exact = if (workspace) |value|
+                value.kind != .automatic or value.automatic_task_id == query.task_id
+            else
+                false,
+            .execution_authority_exact = execution_exact,
         };
-    }
-
-    fn reserveTaskRuntimeProjectionBytes(context: *anyopaque, bytes: usize) void {
-        const self: *Workbench = @ptrCast(@alignCast(context));
-        std.debug.assert(bytes <= self.limits.max_projection_bytes - self.projection_bytes);
-        self.projection_bytes += bytes;
     }
 
     fn taskRuntimeRecoveryEffects(self: *Workbench) task_runtime.RecoveryEffects {
         return .{
             .context = self,
             .authority_fn = taskRuntimeRecoveryAuthority,
-            .reserve_projection_bytes_fn = reserveTaskRuntimeProjectionBytes,
         };
     }
 

@@ -697,17 +697,6 @@ test "restart recovery revalidates live authority and continues the same Convers
         "\"id\":\"1\"",
         "\"continuationRecoveryAvailable\":true",
     );
-    fake_core.setCatalogPlan(.query_failure);
-    _ = try restored.restoreTaskConversation(
-        task_id,
-        try restored.taskBindingEpoch(task_id),
-    );
-    try waitTaskSnapshot(
-        &restored,
-        "\"id\":\"1\"",
-        "\"continuationUnavailableReason\":\"session_recovery_failed\"",
-    );
-    fake_core.setCatalogPlan(.healthy);
     fake_core.forceNextCheckpointRestoreStatus(wire.STATUS_CHECKPOINT_CORRUPT);
     _ = try restored.restoreTaskConversation(
         task_id,
@@ -765,6 +754,9 @@ test "restart recovery revalidates live authority and continues the same Convers
         "\"continuationRecoveryAvailable\":true",
     );
 
+    fake_core.lock();
+    const catalog_queries_before_restore = fake_core.catalog_queries;
+    fake_core.unlock();
     fake_core.armControlledRestore();
     _ = try restored.restoreTaskConversation(
         task_id,
@@ -783,6 +775,19 @@ test "restart recovery revalidates live authority and continues the same Convers
         &restored,
         "\"id\":\"1\"",
         "\"continuationAvailable\":true",
+    );
+    const unbound_catalog = try restored.taskCatalog(task_id);
+    try std.testing.expectEqual(
+        workbench_api.CatalogAvailability.uninitialized,
+        unbound_catalog.availability,
+    );
+    fake_core.lock();
+    const catalog_queries_after_restore = fake_core.catalog_queries;
+    fake_core.unlock();
+    try std.testing.expectEqual(catalog_queries_before_restore, catalog_queries_after_restore);
+    try restored.refreshTaskCatalog(
+        task_id,
+        try restored.taskBindingEpoch(task_id),
     );
     const restored_catalog = try restored.taskCatalog(task_id);
     try std.testing.expectEqual(@as(?u64, 2), restored_catalog.selection_revision);

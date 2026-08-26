@@ -8,7 +8,6 @@ const agent = @import("metawork_agent");
 const agent_session = @import("product_task_agent_session");
 const checkpoint_record = @import("product_task_checkpoint_record");
 const checkpoint_store = @import("product_task_checkpoint_store");
-const catalog_snapshot = @import("metawork_product_skill").catalog;
 const owned_execution = @import("product_task_execution_binding");
 
 pub const Notifier = struct {
@@ -24,6 +23,8 @@ pub const WorkspaceTrust = enum {
     explicitly_trusted,
     temporary,
 };
+
+pub const WorkspaceKind = enum { manual, automatic };
 
 pub const OwnedWorkspaceBinding = struct {
     arena: std.heap.ArenaAllocator,
@@ -60,51 +61,19 @@ pub const OwnedWorkspaceBinding = struct {
     }
 };
 
-pub const OwnedSkillPolicy = struct {
-    arena: std.heap.ArenaAllocator,
-    policy_revision: u64,
-    disabled_skill_policy_keys: []const []const u8,
-
-    pub fn init(
-        allocator: std.mem.Allocator,
-        policy_revision: u64,
-        disabled_skill_policy_keys: anytype,
-    ) std.mem.Allocator.Error!OwnedSkillPolicy {
-        std.debug.assert(policy_revision != 0);
-        var arena = std.heap.ArenaAllocator.init(allocator);
-        errdefer arena.deinit();
-        const owned = arena.allocator();
-        const keys = try owned.alloc([]const u8, disabled_skill_policy_keys.len);
-        for (disabled_skill_policy_keys, keys) |key, *target|
-            target.* = try owned.dupe(u8, key);
-        return .{
-            .arena = arena,
-            .policy_revision = policy_revision,
-            .disabled_skill_policy_keys = keys,
-        };
-    }
-
-    pub fn deinit(self: *OwnedSkillPolicy) void {
-        self.arena.deinit();
-        self.* = undefined;
-    }
-};
-
 pub const PreparedAttempt = struct {
     attempt_id: u64,
     task_id: u64,
     binding_epoch: u64,
     workspace_id: u64,
     workspace_epoch: u64,
+    workspace_kind: WorkspaceKind,
     checkpoint: checkpoint_record.Record,
     workspace: OwnedWorkspaceBinding,
-    skill_policy: OwnedSkillPolicy,
     execution: owned_execution.OwnedTaskExecution,
     execution_generation: u64,
     model: []u8,
     provider: agent.ProviderKind,
-    mcp_selection: ?*agent.McpSelection,
-    mcp_catalog_generation: ?u64,
 };
 
 /// Callback-time facts supplied by composition when a completed restore
@@ -116,20 +85,19 @@ pub const CommitAuthority = struct {
     binding_epoch: u64,
     workspace_id: u64,
     workspace_epoch: u64,
+    workspace_kind: WorkspaceKind,
     workspace_root: []const u8,
-    skill_policy_revision: u64,
     execution_generation: u64,
     execution_model: []const u8,
     provider: agent.ProviderKind,
-    mcp_catalog_generation: ?u64,
     active_attempt_id: ?u64,
     shutting_down: bool,
     archived: bool,
     attachment_detached: bool,
     checkpoint_matches: bool,
-    workspace_authority_stable: bool,
-    execution_authority_stable: bool,
-    available_projection_bytes: usize,
+    workspace_authority_exact: bool,
+    automatic_owner_exact: bool,
+    execution_authority_exact: bool,
 };
 
 pub const AttemptAuthority = struct {
@@ -138,12 +106,11 @@ pub const AttemptAuthority = struct {
     binding_epoch: u64,
     workspace_id: u64,
     workspace_epoch: u64,
+    workspace_kind: WorkspaceKind,
     workspace_root: []const u8,
-    skill_policy_revision: u64,
     execution_generation: u64,
     execution_model: []const u8,
     provider: agent.ProviderKind,
-    mcp_catalog_generation: ?u64,
 };
 
 /// A restore completion is publishable only while every authority token that
@@ -152,7 +119,6 @@ pub const AttemptAuthority = struct {
 pub fn commitAllowed(
     attempt: *const PreparedAttempt,
     authority: CommitAuthority,
-    candidate_projection_bytes: usize,
 ) bool {
     return authorityExact(.{
         .attempt_id = attempt.attempt_id,
@@ -160,44 +126,36 @@ pub fn commitAllowed(
         .binding_epoch = attempt.binding_epoch,
         .workspace_id = attempt.workspace_id,
         .workspace_epoch = attempt.workspace_epoch,
+        .workspace_kind = attempt.workspace_kind,
         .workspace_root = attempt.workspace.canonical_root,
-        .skill_policy_revision = attempt.skill_policy.policy_revision,
         .execution_generation = attempt.execution_generation,
         .execution_model = attempt.model,
         .provider = attempt.provider,
-        .mcp_catalog_generation = attempt.mcp_catalog_generation,
-    }, authority, candidate_projection_bytes);
+    }, authority);
 }
 
 pub fn authorityExact(
     attempt: AttemptAuthority,
     authority: CommitAuthority,
-    candidate_projection_bytes: usize,
 ) bool {
     return !authority.shutting_down and
         !authority.archived and
         authority.attachment_detached and
         authority.checkpoint_matches and
-        authority.workspace_authority_stable and
-        authority.execution_authority_stable and
+        authority.workspace_authority_exact and
+        authority.automatic_owner_exact and
+        authority.execution_authority_exact and
         authority.active_attempt_id != null and
         authority.active_attempt_id.? == attempt.attempt_id and
         authority.task_id == attempt.task_id and
         authority.binding_epoch == attempt.binding_epoch and
         authority.workspace_id == attempt.workspace_id and
         authority.workspace_epoch == attempt.workspace_epoch and
+        authority.workspace_kind == attempt.workspace_kind and
         std.mem.eql(u8, authority.workspace_root, attempt.workspace_root) and
-        authority.skill_policy_revision == attempt.skill_policy_revision and
         authority.execution_generation == attempt.execution_generation and
         std.mem.eql(u8, authority.execution_model, attempt.execution_model) and
-        authority.provider == attempt.provider and
-        optionalU64Equal(authority.mcp_catalog_generation, attempt.mcp_catalog_generation) and
-        candidate_projection_bytes <= authority.available_projection_bytes;
-}
-
-fn optionalU64Equal(left: ?u64, right: ?u64) bool {
-    if (left == null or right == null) return left == null and right == null;
-    return left.? == right.?;
+        authority.provider == attempt.provider;
 }
 
 test "restore authority rejects every stale asynchronous dimension" {
@@ -207,69 +165,66 @@ test "restore authority rejects every stale asynchronous dimension" {
         .binding_epoch = 3,
         .workspace_id = 5,
         .workspace_epoch = 9,
+        .workspace_kind = .automatic,
         .workspace_root = "C:/workspace",
-        .skill_policy_revision = 13,
         .execution_generation = 17,
         .execution_model = "model-a",
         .provider = .anthropic,
-        .mcp_catalog_generation = 19,
     };
     const current: CommitAuthority = .{
         .task_id = 7,
         .binding_epoch = 3,
         .workspace_id = 5,
         .workspace_epoch = 9,
+        .workspace_kind = .automatic,
         .workspace_root = "C:/workspace",
-        .skill_policy_revision = 13,
         .execution_generation = 17,
         .execution_model = "model-a",
         .provider = .anthropic,
-        .mcp_catalog_generation = 19,
         .active_attempt_id = 11,
         .shutting_down = false,
         .archived = false,
         .attachment_detached = true,
         .checkpoint_matches = true,
-        .workspace_authority_stable = true,
-        .execution_authority_stable = true,
-        .available_projection_bytes = 100,
+        .workspace_authority_exact = true,
+        .automatic_owner_exact = true,
+        .execution_authority_exact = true,
     };
-    try std.testing.expect(authorityExact(attempt, current, 100));
+    try std.testing.expect(authorityExact(attempt, current));
 
     var stale = current;
     stale.workspace_epoch += 1;
-    try std.testing.expect(!authorityExact(attempt, stale, 1));
+    try std.testing.expect(!authorityExact(attempt, stale));
     stale = current;
     stale.workspace_root = "C:/replacement";
-    try std.testing.expect(!authorityExact(attempt, stale, 1));
+    try std.testing.expect(!authorityExact(attempt, stale));
     stale = current;
-    stale.skill_policy_revision += 1;
-    try std.testing.expect(!authorityExact(attempt, stale, 1));
+    stale.workspace_kind = .manual;
+    try std.testing.expect(!authorityExact(attempt, stale));
     stale = current;
     stale.execution_generation += 1;
-    try std.testing.expect(!authorityExact(attempt, stale, 1));
+    try std.testing.expect(!authorityExact(attempt, stale));
     stale = current;
     stale.execution_model = "model-b";
-    try std.testing.expect(!authorityExact(attempt, stale, 1));
-    stale = current;
-    stale.mcp_catalog_generation = 20;
-    try std.testing.expect(!authorityExact(attempt, stale, 1));
+    try std.testing.expect(!authorityExact(attempt, stale));
     stale = current;
     stale.active_attempt_id = 12;
-    try std.testing.expect(!authorityExact(attempt, stale, 1));
+    try std.testing.expect(!authorityExact(attempt, stale));
     stale = current;
     stale.checkpoint_matches = false;
-    try std.testing.expect(!authorityExact(attempt, stale, 1));
+    try std.testing.expect(!authorityExact(attempt, stale));
     stale = current;
-    stale.workspace_authority_stable = false;
-    try std.testing.expect(!authorityExact(attempt, stale, 1));
+    stale.workspace_authority_exact = false;
+    try std.testing.expect(!authorityExact(attempt, stale));
     stale = current;
-    stale.execution_authority_stable = false;
-    try std.testing.expect(!authorityExact(attempt, stale, 1));
+    stale.automatic_owner_exact = false;
+    try std.testing.expect(!authorityExact(attempt, stale));
+    stale = current;
+    stale.execution_authority_exact = false;
+    try std.testing.expect(!authorityExact(attempt, stale));
     stale = current;
     stale.shutting_down = true;
-    try std.testing.expect(!authorityExact(attempt, stale, 1));
-    try std.testing.expect(!authorityExact(attempt, current, 101));
+    try std.testing.expect(!authorityExact(attempt, stale));
 }
 
 pub const Failure = enum {
@@ -277,14 +232,11 @@ pub const Failure = enum {
     checkpoint_missing,
     checkpoint_mismatch,
     checkpoint_io,
-    skill_catalog_unavailable,
-    catalog_projection_unavailable,
-    mcp_not_refreshed,
-    mcp_authority_stale,
+    runtime_busy,
+    runtime_refresh_required,
     runtime_unavailable,
     session_capacity,
     restore_rejected,
-    degraded,
     candidate_cleanup_failed,
 };
 
@@ -292,16 +244,9 @@ pub const Candidate = struct {
     binding: agent_session.Binding,
     report: agent.CheckpointRestoreReport,
     execution: owned_execution.OwnedTaskExecution,
-    pinned_catalog: catalog_snapshot.Snapshot,
 
     pub fn takeExecution(self: *Candidate) owned_execution.OwnedTaskExecution {
         return self.execution.take();
-    }
-
-    pub fn takeCatalog(self: *Candidate) catalog_snapshot.Snapshot {
-        const value = self.pinned_catalog;
-        self.pinned_catalog = undefined;
-        return value;
     }
 
     pub fn takeBinding(self: *Candidate) agent_session.Binding {
@@ -310,7 +255,7 @@ pub const Candidate = struct {
 
     /// Releases every candidate-owned resource on all paths. A failed close or
     /// release leaves the Session owned by the Agent Runtime, but the execution
-    /// secret and catalog projection must never survive that failure.
+    /// secret must never survive that failure.
     pub fn discard(self: *Candidate) bool {
         var released = switch (self.binding.closeOutcome(.session_close)) {
             .closed => true,
@@ -320,7 +265,6 @@ pub const Candidate = struct {
             released = false;
         };
         self.execution.deinit();
-        self.pinned_catalog.deinit();
         self.* = undefined;
         return released;
     }
@@ -344,8 +288,6 @@ pub const Job = struct {
     runtime: *agent.Runtime,
     store: *checkpoint_store.FileStore,
     notifier: Notifier,
-    catalog_limits: catalog_snapshot.Limits,
-    available_projection_bytes: usize,
     checkpoint_limits: agent.CheckpointLimits,
     attempt: PreparedAttempt,
     cancellation: std.atomic.Value(bool) = .init(false),
@@ -414,10 +356,8 @@ pub const Job = struct {
             .candidate => |*candidate| _ = candidate.discard(),
             .none, .failure => {},
         }
-        if (self.attempt.mcp_selection) |selection| selection.deinit();
         self.allocator.free(self.attempt.model);
         self.attempt.execution.deinit();
-        self.attempt.skill_policy.deinit();
         self.attempt.workspace.deinit();
         self.attempt.checkpoint.deinit(self.allocator);
         const allocator = self.allocator;
@@ -428,38 +368,6 @@ pub const Job = struct {
     fn run(self: *Job) Outcome {
         if (self.cancellation.load(.acquire))
             return .{ .failure = .cancelled };
-
-        var acquisition = self.runtime.querySkillCatalog(.{
-            .workspace_root = self.attempt.workspace.canonical_root,
-            .canonical_user_home = self.attempt.workspace.canonical_user_home,
-            .workspace_epoch = self.attempt.workspace.epoch_token,
-        }) catch return .{ .failure = .skill_catalog_unavailable };
-        var projection_live = true;
-        var lease_live = true;
-        defer if (lease_live) {
-            if (projection_live) acquisition.projection.deinit();
-            self.runtime.releaseSkillCatalog(acquisition.lease) catch {};
-        };
-
-        var snapshot = catalog_snapshot.Snapshot.init(
-            self.allocator,
-            acquisition.projection,
-            self.attempt.skill_policy.policy_revision,
-            self.attempt.skill_policy.disabled_skill_policy_keys,
-            self.catalog_limits,
-            self.available_projection_bytes,
-        ) catch return .{ .failure = .catalog_projection_unavailable };
-        var snapshot_live = true;
-        defer if (snapshot_live) snapshot.deinit();
-        var granted_skill_ids: std.ArrayList([]const u8) = .empty;
-        defer granted_skill_ids.deinit(self.allocator);
-        for (snapshot.skills) |skill|
-            if (skill.enabled) granted_skill_ids.append(
-                self.allocator,
-                skill.skill_id,
-            ) catch return .{ .failure = .catalog_projection_unavailable };
-        acquisition.projection.deinit();
-        projection_live = false;
 
         var source = self.store.openVerified(
             self.attempt.checkpoint.blob,
@@ -490,11 +398,9 @@ pub const Job = struct {
                 },
                 .canonical_user_home = self.attempt.workspace.canonical_user_home,
                 .workspace_epoch = self.attempt.workspace.epoch_token,
-                .skill_catalog = acquisition.lease,
-                .skill_policy = .{
-                    .granted_skill_ids = granted_skill_ids.items,
-                },
-                .mcp_selection = self.attempt.mcp_selection,
+                .skill_catalog = null,
+                .skill_policy = null,
+                .mcp_selection = null,
             },
             .checkpoint_limits = self.checkpoint_limits,
             .source = .{ .context = &source, .read_fn = readCheckpoint },
@@ -506,20 +412,6 @@ pub const Job = struct {
                 .model = self.attempt.checkpoint.session.model,
             },
         }) catch |err| return .{ .failure = mapRestoreError(err) };
-        self.runtime.releaseSkillCatalog(acquisition.lease) catch {
-            lease_live = false;
-            return .{ .failure = if (discardBinding(&restored.binding))
-                .skill_catalog_unavailable
-            else
-                .candidate_cleanup_failed };
-        };
-        lease_live = false;
-        if (restored.report.health != .complete)
-            return .{ .failure = if (discardBinding(&restored.binding))
-                .degraded
-            else
-                .candidate_cleanup_failed };
-
         var access = restored.binding.acquireAccess() catch {
             return .{ .failure = if (discardBinding(&restored.binding))
                 .restore_rejected
@@ -535,12 +427,10 @@ pub const Job = struct {
         };
         access.deinit();
 
-        snapshot_live = false;
         return .{ .candidate = .{
             .binding = restored.takeBinding(),
             .report = restored.report,
             .execution = self.attempt.execution.take(),
-            .pinned_catalog = snapshot,
         } };
     }
 };
@@ -559,12 +449,12 @@ fn readCheckpoint(context: ?*anyopaque, destination: []u8) agent.CheckpointSourc
 
 fn mapRestoreError(err: anyerror) Failure {
     return switch (err) {
-        error.McpNotRefreshed => .mcp_not_refreshed,
+        error.McpRefreshInProgress => .runtime_busy,
+        error.McpNotRefreshed,
         error.StaleMcpSelection,
-        error.McpRefreshInProgress,
         error.InvalidMcpSelection,
         error.McpCatalogBindingMismatch,
-        => .mcp_authority_stale,
+        => .runtime_refresh_required,
         error.RuntimeShuttingDown => .runtime_unavailable,
         error.SessionCapacity => .session_capacity,
         else => .restore_rejected,
@@ -580,17 +470,17 @@ fn discardBinding(binding: *agent_session.Binding) bool {
     return true;
 }
 
-test "restore authority failures remain retryable job outcomes" {
+test "restore Runtime serialization failures remain retryable job outcomes" {
     try std.testing.expectEqual(
-        Failure.mcp_not_refreshed,
+        Failure.runtime_refresh_required,
         mapRestoreError(error.McpNotRefreshed),
     );
     try std.testing.expectEqual(
-        Failure.mcp_authority_stale,
+        Failure.runtime_refresh_required,
         mapRestoreError(error.StaleMcpSelection),
     );
     try std.testing.expectEqual(
-        Failure.mcp_authority_stale,
+        Failure.runtime_busy,
         mapRestoreError(error.McpRefreshInProgress),
     );
     try std.testing.expectEqual(

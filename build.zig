@@ -1073,7 +1073,6 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     task_recovery_job.addImport("product_task_agent_session", task_agent_session);
     task_recovery_job.addImport("product_task_checkpoint_record", checkpoint_record);
     task_recovery_job.addImport("product_task_checkpoint_store", checkpoint_store);
-    task_recovery_job.addImport("metawork_product_skill", product_skill);
     task_recovery_job.addImport("product_task_execution_binding", owned_task_execution);
     task_attachment.addImport("product_task_recovery_job", task_recovery_job);
     const task_state = b.createModule(.{
