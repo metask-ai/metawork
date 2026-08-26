@@ -1,6 +1,6 @@
 const std = @import("std");
 const workbench_api = @import("metawork_workbench");
-const mcp_configuration = @import("metawork_product_mcp").configuration;
+const mcp_configuration = @import("metawork_product_mcp").contract;
 const skill_enablement = @import("metawork_product_skill").enablement;
 const skill_management = @import("metawork_product_skill").management;
 const product_task = @import("metawork_product_task");

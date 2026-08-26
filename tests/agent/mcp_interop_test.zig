@@ -4,8 +4,8 @@ const agent = @import("metawork_agent");
 const mcp_platform = @import("metawork_mcp_platform");
 const options = @import("mcp_interop_options");
 const workbench = @import("metawork_workbench");
-const mcp_configuration = @import("metawork_product_mcp").configuration;
-const mcp_state = @import("metawork_product_mcp").state;
+const mcp_configuration = @import("metawork_product_mcp").contract;
+const mcp_types = @import("metawork_product_mcp");
 
 const Fixture = struct {
     transport_owner: agent.McpTransportOwner = undefined,
@@ -135,7 +135,7 @@ const McpRefreshTimerProbe = struct {
         self.cancel_count += 1;
     }
 
-    fn capability(self: *@This()) mcp_state.McpRefreshTimer {
+    fn capability(self: *@This()) mcp_types.McpRefreshTimer {
         return .{
             .context = self,
             .enabled = true,

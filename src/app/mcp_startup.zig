@@ -1,7 +1,7 @@
 const std = @import("std");
 const native_sdk = @import("native_sdk");
 const agent = @import("metawork_agent");
-const mcp_configuration = @import("metawork_product_mcp").configuration;
+const mcp_configuration = @import("metawork_product_mcp").contract;
 const mcp_platform = @import("metawork_mcp_platform");
 
 const runtime_limits: agent.McpRuntimeLimits = .{};
