@@ -540,7 +540,7 @@ test "Run checkpoint commits immutable blob before durable descriptor" {
     try std.testing.expectEqual(@as(usize, 1), session_count);
 }
 
-test "restart restores a Task attachment and continues the same Conversation" {
+test "restart recovery revalidates live authority and continues the same Conversation" {
     fake_core.reset();
     fake_core.setCheckpointGeneration(1);
     const home = try std.Io.Dir.cwd().realPathFileAlloc(
@@ -720,6 +720,52 @@ test "restart restores a Task attachment and continues the same Conversation" {
     );
     fake_core.armControlledRestore();
     defer fake_core.releaseControlledRestore();
+    fake_core.lock();
+    const restores_before_execution_replacement = fake_core.checkpoint_restores;
+    const sessions_destroyed_before_execution_replacement = fake_core.session_destroyed;
+    fake_core.unlock();
+    _ = try restored.restoreTaskConversation(
+        task_id,
+        try restored.taskBindingEpoch(task_id),
+    );
+    fake_core.waitUntilRestoreEntered();
+    var execution_replacement_pending = false;
+    defer if (execution_replacement_pending)
+        restored.endExecutionReplacementNoFail();
+    try restored.beginExecutionReplacement();
+    execution_replacement_pending = true;
+    fake_core.releaseControlledRestore();
+    try waitTaskSnapshot(
+        &restored,
+        "\"id\":\"1\"",
+        "\"activeOperation\":null",
+    );
+    fake_core.lock();
+    const restores_after_execution_replacement = fake_core.checkpoint_restores;
+    const sessions_destroyed_after_execution_replacement = fake_core.session_destroyed;
+    // FakeCore synthesizes the restored logical Session identity from this
+    // counter. The stale candidate consumed and released identity 1; reset the
+    // fixture generator so the next independent attempt still models the same
+    // checkpoint-owned logical identity.
+    fake_core.session_created = 0;
+    fake_core.unlock();
+    try std.testing.expectEqual(
+        restores_before_execution_replacement + 1,
+        restores_after_execution_replacement,
+    );
+    try std.testing.expectEqual(
+        sessions_destroyed_before_execution_replacement + 1,
+        sessions_destroyed_after_execution_replacement,
+    );
+    restored.endExecutionReplacementNoFail();
+    execution_replacement_pending = false;
+    try waitTaskSnapshot(
+        &restored,
+        "\"id\":\"1\"",
+        "\"continuationRecoveryAvailable\":true",
+    );
+
+    fake_core.armControlledRestore();
     _ = try restored.restoreTaskConversation(
         task_id,
         try restored.taskBindingEpoch(task_id),
@@ -763,7 +809,7 @@ test "restart restores a Task attachment and continues the same Conversation" {
     const run_calls = fake_core.run_calls;
     const credential_seen = fake_core.credential_seen;
     fake_core.unlock();
-    try std.testing.expectEqual(@as(usize, 2), restore_calls);
+    try std.testing.expectEqual(@as(usize, 3), restore_calls);
     try std.testing.expectEqual(@as(usize, 1), run_calls);
     try std.testing.expect(credential_seen);
 
@@ -803,7 +849,8 @@ test "restart restores a Task attachment and continues the same Conversation" {
         },
         third_configuration,
     );
-    defer shutdown_restore.deinit();
+    var shutdown_restore_live = true;
+    defer if (shutdown_restore_live) shutdown_restore.deinit();
     try installWorkbenchExecution(&shutdown_restore);
     try std.testing.expectEqual(
         workspace_id,
@@ -853,6 +900,99 @@ test "restart restores a Task attachment and continues the same Conversation" {
             shutdown_snapshot,
             "\"continuationRecoveryAvailable\":false",
         ) != null,
+    );
+
+    shutdown_restore.deinit();
+    shutdown_restore_live = false;
+    try shutdownTestComposition(runtime);
+    deinitTestComposition(runtime);
+    runtime_live = false;
+
+    runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_sessions = 1,
+    });
+    runtime_live = true;
+    var invalidation_configuration = workbenchConfiguration();
+    invalidation_configuration.directories.canonical_user_home = home;
+    invalidation_configuration.task_persistence =
+        persistence.capabilityRestored(restart_history);
+    invalidation_configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
+    invalidation_configuration.skill_enablement = .{
+        .file_store = &skill_enablement_store,
+        .restored_bytes = restored_enablement,
+    };
+    var workspace_invalidation = try workbench_api.Workbench.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 2,
+            .max_workspaces = 1,
+            .max_tasks = 1,
+            .max_runs_per_task = 3,
+            .max_tools_per_run = 1,
+        },
+        invalidation_configuration,
+    );
+    defer workspace_invalidation.deinit();
+    try installWorkbenchExecution(&workspace_invalidation);
+    try std.testing.expectEqual(
+        workspace_id,
+        try workspace_invalidation.openWorkspace(workbenchTaskInput()),
+    );
+    _ = try waitCatalogReady(&workspace_invalidation, workspace_id);
+    try waitTaskSnapshot(
+        &workspace_invalidation,
+        "\"id\":\"1\"",
+        "\"continuationRecoveryAvailable\":true",
+    );
+
+    fake_core.armControlledRestore();
+    fake_core.lock();
+    const restores_before_workspace_removal = fake_core.checkpoint_restores;
+    const sessions_destroyed_before_workspace_removal = fake_core.session_destroyed;
+    fake_core.unlock();
+    _ = try workspace_invalidation.restoreTaskConversation(
+        task_id,
+        try workspace_invalidation.taskBindingEpoch(task_id),
+    );
+    fake_core.waitUntilRestoreEntered();
+    try workspace_invalidation.removeWorkspace(workspace_id);
+    fake_core.releaseControlledRestore();
+    try waitTaskSnapshot(
+        &workspace_invalidation,
+        "\"id\":\"1\"",
+        "\"activeOperation\":null",
+    );
+    try waitWorkbenchSnapshot(&workspace_invalidation, "\"workspaces\":[]");
+    var invalidation_snapshot_storage: [128 * 1024]u8 = undefined;
+    const invalidation_snapshot = try workspace_invalidation.writeSnapshot(
+        &invalidation_snapshot_storage,
+    );
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        invalidation_snapshot,
+        "\"continuationAvailable\":true",
+    ) == null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        invalidation_snapshot,
+        "\"continuationRecoveryAvailable\":false",
+    ) != null);
+    fake_core.lock();
+    const restores_after_workspace_removal = fake_core.checkpoint_restores;
+    const sessions_destroyed_after_workspace_removal = fake_core.session_destroyed;
+    fake_core.unlock();
+    try std.testing.expectEqual(
+        restores_before_workspace_removal + 1,
+        restores_after_workspace_removal,
+    );
+    try std.testing.expectEqual(
+        sessions_destroyed_before_workspace_removal + 1,
+        sessions_destroyed_after_workspace_removal,
     );
 }
 
@@ -904,6 +1044,8 @@ test "accepted Task deletion advances after checkpoint quiescence without a seco
     const task_id = try workbench.createTask(workbenchTaskInput());
     _ = try workbench.runTask(task_id, .{ .text = "cancel checkpoint export" });
     fake_core.waitCheckpointExportEntered();
+    // Product terminal publication must not wait for the same executor job's
+    // controlled checkpoint export to be released.
     try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
     try workbench.setTaskArchived(task_id, true);
     try workbench.deleteTask(task_id);
