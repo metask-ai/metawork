@@ -840,6 +840,10 @@ pub const Runtime = struct {
         else
             null;
         host_config.durable_budget = null;
+        // MetaWork persists finalized Conversation checkpoints. Revision 13's
+        // active-Run journal remains disabled until a crash-recovery policy is
+        // defined for its intent/result evidence.
+        host_config.run_journal_mode_code = wire.RUN_JOURNAL_EPHEMERAL;
         const allowed_views = try self.allocator.alloc(wire.BytesViewV1, capabilities.builtins.len);
         defer self.allocator.free(allowed_views);
         for (capabilities.builtins, 0..) |builtin, index|
@@ -1067,6 +1071,7 @@ pub const Runtime = struct {
         else
             null;
         host_config.durable_budget = null;
+        host_config.run_journal_mode_code = wire.RUN_JOURNAL_EPHEMERAL;
         host_config.allowed_tools = if (allowed_views.len == 0) null else allowed_views.ptr;
         host_config.allowed_tool_count = allowed_views.len;
 

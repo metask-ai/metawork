@@ -684,7 +684,7 @@ test "malformed compact result poisons Session and queued compact can be cancell
     try closeSession(session, .session_close);
 }
 
-test "Runtime rejects tables missing required revision 9 capabilities" {
+test "Runtime rejects tables missing required capabilities" {
     var api = fake_api;
     api.capabilities &= ~wire.CAP_SKILL_CATALOG;
     try std.testing.expectError(
@@ -2050,7 +2050,7 @@ test "status is validated before RunResult and invalid results poison the Sessio
     }
 }
 
-test "revision 9 checkpoint outcomes are typed and budget admission remains retryable" {
+test "checkpoint outcomes are typed and budget admission remains retryable" {
     fake_core.reset();
     const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 3 });
     defer {

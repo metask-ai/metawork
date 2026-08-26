@@ -176,7 +176,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - 当前 baseline 的 Renderer reload 只能从仍存活的 Host 恢复视图；
 - Host 或 AgentCore 进程退出时，当前同步 Run 标记 `interrupted`，不得伪装完成；
 - 崩溃后不得自动重放可能产生副作用的工具；
-- AgentCore revision 9 checkpoint export/restore 已接入 Application 重启后的 Conversation 恢复；它不是 transcript 重放，不恢复 checkpoint 之后未完成的 Run，不自动重放工具、permission 或结果不确定的 mutation；
+- AgentCore checkpoint export/restore 已接入 Application 重启后的 Conversation 恢复；它不是 transcript 重放，不恢复 checkpoint 之后未完成的 Run，不自动重放工具、permission 或结果不确定的 mutation；
 - async pending、可恢复 suspend/resume、独立 AgentCore Worker crash recovery 和跨进程 in-flight Run 恢复仍属于后续 capability；
 - 成本预算、轮数上限或工具循环熔断后，Task 进入等待用户状态，只有用户明确继续后才创建新 Run。
 
@@ -320,7 +320,7 @@ Metask C1 OAuth/login 已按 `metawork-app` / `metawork:use` 发布合同锁定�
 
 ### 7.4 Windows 接入 baseline
 
-Windows x86_64 GNU 当前锁定 AgentCore revision 9 target；是否形成与 macOS 同一产品语义的开发可执行 baseline，以 Native Debug/Release、真实 AgentCore vertical 和干净退出验收为准。精确 bundle、Renderer 与 MetaWork 平台无关测试通过不能替代这些平台证据。
+Windows x86_64 GNU 的当前 target availability 与 exact artifact identity 以 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)为准；是否形成与 macOS 同一产品语义的开发可执行 baseline，以 Native Debug/Release、真实 AgentCore vertical 和干净退出验收为准。精确 bundle、Renderer 与 MetaWork 平台无关测试通过不能替代这些平台证据。
 
 ### 7.5 后续产品能力
 

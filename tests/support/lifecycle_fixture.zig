@@ -702,6 +702,7 @@ pub fn runtimeCreate(
         servers[0].struct_size == @sizeOf(wire.McpServerV1) and
             servers[0].connector.open != null and
             servers[0].connector.request != null and
+            servers[0].connector.request_tool_stream != null and
             servers[0].connector.notify != null and
             servers[0].connector.close != null and
             servers[0].connector.release_response != null
@@ -709,6 +710,19 @@ pub fn runtimeCreate(
         false;
     out_runtime.?.* = @ptrCast(&fake_core.runtime);
     return wire.STATUS_OK;
+}
+
+pub fn runtimeCreateWithPlugins(
+    config: ?*const wire.RuntimeConfigV1,
+    plugins: ?*const wire.RuntimePluginConfigV1,
+    out_runtime: ?*?*wire.RuntimeHandle,
+    out_error: ?*wire.OwnedBytesV1,
+) callconv(.c) u32 {
+    if (plugins != null) {
+        diagnostic(out_error);
+        return wire.STATUS_INVALID_ARGUMENT;
+    }
+    return runtimeCreate(config, out_runtime, out_error);
 }
 
 pub fn runtimeDestroy(
@@ -2175,7 +2189,8 @@ pub const fake_api = wire.ApiV1{
     .session_abort_compact = sessionAbortCompact,
     .session_export_checkpoint = sessionExportCheckpoint,
     .buffer_release = bufferRelease,
-    .reserved = [_]u64{0} ** 3,
+    .runtime_create_with_plugins = runtimeCreateWithPlugins,
+    .reserved = [_]u64{0} ** 2,
 };
 
 pub fn createCompletion(

@@ -25,7 +25,7 @@ AgentCore bundle 仍是面向所有消费者的通用能力全集，并继续支
 ## 2. 本次不处理的内容
 
 - 尚未通过对应 bundle verifier 和 Session 探针的其他平台工具可用性；本 hard cut 不建立第三交付面；
-- AgentCore catalog、binding identity 或 ABI revision 变更；当前 revision 9 名称数组已足够完成本次名称接入；
+- AgentCore catalog、binding identity 或 ABI revision 变更；当前锁定 bundle 的名称数组已足够完成本次名称接入；
 - ABI Host tools、MCP 工具合并、第二套 ToolManager 或 MetaWork 自建进程/网络执行器；
 - permission contract 重构；沿用 [会话权限系统重构方案](permission-system-refactor-plan.md)；
 - WebSearch 的 provider 差异、网络策略和外部服务可用性；这些不是工具名称 admission 的身份问题；
@@ -40,7 +40,7 @@ AgentCore bundle 仍是面向所有消费者的通用能力全集，并继续支
 - Workbench 不持有 built-in profile、wire name 或 `allowed_tools`，只消费 Agent 形成后的执行能力；
 - bundle 已验证能力是外部上限，MetaWork Agent 集合是产品化子集；bundle 支持但产品未开放不是 admission failure。
 
-当前 Windows x86_64 GNU、macOS arm64 与 macOS x86_64 bundle 分别使用其 target-specific 静态库，三份 lock source 均为 `1183550f15b4eef27799076ee0908e9667d849a0`（ABI v1 revision 9）。该证据不替代真实 Session 运行证据。
+Exact target artifact、ABI identity 与验证状态分别由 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)和[验证规范](validation.md)记录；本计划不复制版本事实。
 
 ## 4. 最小架构
 

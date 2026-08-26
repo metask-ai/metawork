@@ -2,9 +2,9 @@
   "schema_version": 1,
   "vendor": "metask",
   "name": "agentcore",
-  "version": "0.1.0-dev+1183550f15b4",
+  "version": "0.1.0-dev+af1ea06dddc1",
   "source": {
-    "commit": "1183550f15b4eef27799076ee0908e9667d849a0",
+    "commit": "af1ea06dddc1e4f5274e93a971070d0c578f8f3c",
     "dirty": false
   },
   "toolchain": {
@@ -30,9 +30,9 @@
   "contract": {
     "binary_abi_status": "experimental",
     "binary_abi_version": 1,
-    "binary_abi_revision": 9,
+    "binary_abi_revision": 13,
     "binary_abi_table_size": 280,
-    "capabilities": 4194303
+    "capabilities": 67108863
   },
   "files": [
     {

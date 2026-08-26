@@ -188,6 +188,7 @@ pub const Adapter = struct {
             .ctx = self,
             .open = open,
             .request = request,
+            .request_tool_stream = requestToolStream,
             .notify = notify,
             .close = close,
             .release_response = releaseResponse,
@@ -327,6 +328,71 @@ pub const Adapter = struct {
                 if (body.len != 0)
                     output.body = .{ .ptr = body.ptr, .len = body.len };
                 break :result wire.MCP_EXCHANGE_RESPONSE;
+            },
+        };
+    }
+
+    fn requestToolStream(
+        context: ?*anyopaque,
+        connection_context: ?*anyopaque,
+        request_json: wire.BytesViewV1,
+        timeout_ms: u32,
+        raw_cancellation: ?*const wire.McpCancellationV1,
+        response_sink: ?*const wire.HostResultSinkV1,
+    ) callconv(.c) u32 {
+        const self: *Adapter = @ptrCast(@alignCast(
+            context orelse return wire.MCP_EXCHANGE_FATAL,
+        ));
+        const connection: *Connection = @ptrCast(@alignCast(
+            connection_context orelse return wire.MCP_EXCHANGE_FATAL,
+        ));
+        const sink = response_sink orelse return wire.MCP_EXCHANGE_FATAL;
+        if (connection.adapter != self or timeout_ms == 0 or
+            sink.struct_size != @sizeOf(wire.HostResultSinkV1) or
+            sink.reserved0 != 0 or sink.write == null or sink.max_bytes == 0 or
+            !allZero(&sink.reserved))
+            return wire.MCP_EXCHANGE_FATAL;
+        const encoded = borrowedBytes(request_json) orelse
+            return wire.MCP_EXCHANGE_FATAL;
+        if (self.containsSecret(encoded)) return wire.MCP_EXCHANGE_FATAL;
+        var bridge: CancellationBridge = undefined;
+        const cancellation = makeCancellation(raw_cancellation, &bridge) catch
+            return wire.MCP_EXCHANGE_FATAL;
+        if (cancellation.isCancelled()) return wire.MCP_EXCHANGE_CANCELLED;
+        return switch (self.transport.request_fn(
+            connection.backend,
+            self.allocator,
+            encoded,
+            timeout_ms,
+            cancellation,
+        )) {
+            .failure => |failure| mapExchangeFailure(failure),
+            .response => |response| result: {
+                const body = response.body;
+                defer if (body.len != 0) self.discardResponse(body);
+                if (response.http_status == 401 or response.http_status == 403)
+                    break :result wire.MCP_EXCHANGE_AUTH_ERROR;
+                if (response.http_status != 0 and
+                    (response.http_status < 200 or response.http_status > 299))
+                    break :result wire.MCP_EXCHANGE_SERVER_ERROR;
+                const sink_limit = std.math.cast(usize, sink.max_bytes) orelse
+                    break :result wire.MCP_EXCHANGE_FATAL;
+                if (body.len == 0 or body.len > self.max_response_bytes or
+                    body.len > sink_limit or self.containsSecret(body))
+                    break :result wire.MCP_EXCHANGE_FATAL;
+                const sink_status = sink.write.?(
+                    sink.ctx,
+                    .{ .ptr = body.ptr, .len = body.len },
+                );
+                break :result switch (sink_status) {
+                    wire.HOST_SINK_OK => wire.MCP_EXCHANGE_RESPONSE,
+                    wire.HOST_SINK_ABORTED => wire.MCP_EXCHANGE_CANCELLED,
+                    wire.HOST_SINK_TOO_LARGE,
+                    wire.HOST_SINK_FAILED,
+                    wire.HOST_SINK_CLOSED,
+                    => wire.MCP_EXCHANGE_FATAL,
+                    else => wire.MCP_EXCHANGE_FATAL,
+                };
             },
         };
     }
@@ -600,6 +666,23 @@ fn openTestConnection(descriptor: wire.McpConnectorV1) !*anyopaque {
     return connection.?;
 }
 
+const FakeResultSink = struct {
+    bytes: [256]u8 = undefined,
+    len: usize = 0,
+
+    fn write(context: ?*anyopaque, view: wire.BytesViewV1) callconv(.c) u32 {
+        const self: *FakeResultSink = @ptrCast(@alignCast(
+            context orelse return wire.HOST_SINK_FAILED,
+        ));
+        const bytes = borrowedBytes(view) orelse return wire.HOST_SINK_FAILED;
+        if (bytes.len > self.bytes.len - self.len)
+            return wire.HOST_SINK_TOO_LARGE;
+        @memcpy(self.bytes[self.len..][0..bytes.len], bytes);
+        self.len += bytes.len;
+        return wire.HOST_SINK_OK;
+    }
+};
+
 test "adapter exports the complete official connector descriptor" {
     var fake = FakeTransport{};
     var adapter = try Adapter.init(std.testing.allocator, .{
@@ -612,12 +695,47 @@ test "adapter exports the complete official connector descriptor" {
     try std.testing.expect(descriptor.ctx != null);
     try std.testing.expect(descriptor.open != null);
     try std.testing.expect(descriptor.request != null);
+    try std.testing.expect(descriptor.request_tool_stream != null);
     try std.testing.expect(descriptor.notify != null);
     try std.testing.expect(descriptor.close != null);
     try std.testing.expect(descriptor.release_response != null);
     try std.testing.expect(descriptor.retain_connector != null);
     try std.testing.expect(descriptor.release_connector != null);
     try std.testing.expectEqual([_]u64{0}, descriptor.reserved);
+}
+
+test "tool request streams the complete response into the borrowed sink" {
+    var fake = FakeTransport{};
+    var adapter = try Adapter.init(std.testing.allocator, .{
+        .transport = fake.capability(),
+    });
+    defer adapter.deinit() catch unreachable;
+    const descriptor = adapter.descriptor();
+    const connection = try openTestConnection(descriptor);
+    defer descriptor.close.?(descriptor.ctx, connection);
+    var captured = FakeResultSink{};
+    const sink = wire.HostResultSinkV1{
+        .struct_size = @sizeOf(wire.HostResultSinkV1),
+        .reserved0 = 0,
+        .ctx = &captured,
+        .write = FakeResultSink.write,
+        .max_bytes = captured.bytes.len,
+        .reserved = [_]u64{0} ** 3,
+    };
+    const request_json = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\"}";
+    try std.testing.expectEqual(
+        wire.MCP_EXCHANGE_RESPONSE,
+        descriptor.request_tool_stream.?(
+            descriptor.ctx,
+            connection,
+            .{ .ptr = request_json.ptr, .len = request_json.len },
+            1000,
+            null,
+            &sink,
+        ),
+    );
+    try std.testing.expectEqualStrings(fake.response, captured.bytes[0..captured.len]);
+    try std.testing.expectEqual(@as(usize, 1), fake.requests);
 }
 
 test "response ownership transfers once and release clears the descriptor" {

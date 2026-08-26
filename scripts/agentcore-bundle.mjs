@@ -9,7 +9,6 @@ const maxManifestBytes = 1024 * 1024;
 const maxPayloadBytes = 128 * 1024 * 1024;
 const maxPayloadFiles = 256;
 const supportedAbiVersion = 1;
-const supportedAbiTableSize = 280;
 
 const targetPolicies = [
   {
@@ -23,8 +22,9 @@ const targetPolicies = [
     library: "lib/metask_agentcore.lib",
     optimize: "ReleaseSafe",
     systemLibraries: ["advapi32", "crypt32"],
-    abiRevision: 9,
-    capabilities: 0x3fffff,
+    abiRevision: 13,
+    abiTableSize: 280,
+    capabilities: 0x3ffffff,
     lock: path.join("build_support", "agentcore-bundle.windows.lock.json"),
   },
   {
@@ -38,8 +38,9 @@ const targetPolicies = [
     library: "lib/libmetask_agentcore.a",
     optimize: "ReleaseSafe",
     systemLibraries: [],
-    abiRevision: 9,
-    capabilities: 0x3fffff,
+    abiRevision: 13,
+    abiTableSize: 280,
+    capabilities: 0x3ffffff,
     lock: path.join("build_support", "agentcore-bundle.macos.lock.json"),
   },
   {
@@ -53,8 +54,9 @@ const targetPolicies = [
     library: "lib/libmetask_agentcore.a",
     optimize: "ReleaseSafe",
     systemLibraries: [],
-    abiRevision: 9,
-    capabilities: 0x3fffff,
+    abiRevision: 13,
+    abiTableSize: 280,
+    capabilities: 0x3ffffff,
     lock: path.join("build_support", "agentcore-bundle.macos-x86_64.lock.json"),
   },
 ];
@@ -403,7 +405,7 @@ export async function validateAgentCoreBundle(bundleRoot, options = {}) {
     `unsupported AgentCore binary ABI revision for ${policy.id}`,
   );
   requireValue(
-    manifest.contract.binary_abi_table_size === supportedAbiTableSize,
+    manifest.contract.binary_abi_table_size === policy.abiTableSize,
     "unsupported AgentCore binary ABI table size",
   );
   requireValue(

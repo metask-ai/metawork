@@ -47,7 +47,7 @@ MetaWork 的视觉记忆点不是装饰性的暖色、通用衬线大标题、�
 
 ### 2.1 当前 ABI v1 capability profile
 
-Windows 与 macOS 当前锁定的 development ABI v1 revision 9 已为以下既有界面提供可验证数据；Skill catalog、typed Skill Run 与 Composer Slash 使用同一 Workspace/Task snapshot 和 Run product path：
+当前锁定的 AgentCore 合同已为以下既有界面提供可验证数据；target availability 与平台证据见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)和[验证规范](validation.md)。Skill catalog、typed Skill Run 与 Composer Slash 使用同一 Workspace/Task snapshot 和 Run product path：
 
 - 文本流、工具开始/进度/结果、Run progress、usage、context warning、auto compact、retry 和 stream done；
 - tool permission 同步用户请求；AgentCore ABI 虽保留 Ask question，但 MetaWork Agent 不开放对应 built-in；
@@ -193,7 +193,7 @@ Workspace
 
 ## 5. 左栏：能力与 Task
 
-> Capability：**部分当前、部分目标**。Renderer 合同已提供 MetaWork 顶层与 Workspace/Task 分离的 revision 9 Skill catalog projection；本地 package/inventory、详情与管理 mutation 是本次目标合同。shell 已提供稳定 New task、全局 Task 导航、行动优先分组和左下角账号入口；Skill 中心、消费 Host-owned management/Runtime/admission 事实的 MCP 页面与持久定时任务都作为同级全局能力进入该 shell。
+> Capability：**部分当前、部分目标**。Renderer 合同已提供 MetaWork 顶层与 Workspace/Task 分离的 AgentCore Skill catalog projection；本地 package/inventory、详情与管理 mutation 是本次目标合同。shell 已提供稳定 New task、全局 Task 导航、行动优先分组和左下角账号入口；Skill 中心、消费 Host-owned management/Runtime/admission 事实的 MCP 页面与持久定时任务都作为同级全局能力进入该 shell。
 
 ### 5.1 Task 列表与路径上下文
 
@@ -213,7 +213,7 @@ Workspace
 
 ### 5.2 全局能力入口
 
-> Capability：**当前与受 gate 目标**。Skill 入口只依赖现有 AgentCore revision 9 discovery/catalog；定时任务入口依赖 Workbench-owned 持久 schedule projection、后台 Host timer/notification 与真实 Task admission。MCP 入口与 route 已进入稳定 shell；当前合同由 Workbench typed 管理能力、Runtime/catalog availability 与新 Task authority 三类事实共同驱动，页面不得把其中任何一个状态冒充另一个。
+> Capability：**当前与受 gate 目标**。Skill 入口只依赖现有 AgentCore discovery/catalog；定时任务入口依赖 Workbench-owned 持久 schedule projection、后台 Host timer/notification 与真实 Task admission。MCP 入口与 route 已进入稳定 shell；当前合同由 Workbench typed 管理能力、Runtime/catalog availability 与新 Task authority 三类事实共同驱动，页面不得把其中任何一个状态冒充另一个。
 
 `新建任务`、`技能`、`MCP` 与 `定时任务` 位于 Task 列表上方的同一个纵向紧凑菜单，不使用窄侧栏中的卡片宫格，也不通过额外分组间距制造父子关系：
 
@@ -236,7 +236,7 @@ Tasks
 
 ### 5.3 Skill 中心
 
-> Capability：**当前合同**。页面在 revision 9 catalog/health projection 之上消费 Workbench-owned 本地 package、inventory、管理 mutation 与“用户默认 + Manual Workspace 覆盖”enablement policy；不要求 AgentCore 增加安装或来源身份 API，也不把管理 projection 当作 Session execution binding。
+> Capability：**当前合同**。页面在 AgentCore catalog/health projection 之上消费 Workbench-owned 本地 package、inventory、管理 mutation 与“用户默认 + Manual Workspace 覆盖”enablement policy；不要求 AgentCore 增加安装或来源身份 API，也不把管理 projection 当作 Session execution binding。
 
 Skill 中心只有一个工作：管理 MetaWork 已知的本地 Skill 资产及用户/项目启用状态。Personal 开关定义所有项目继承的用户默认值；Project 开关写入当前 Manual Workspace 的显式 enabled/disabled 覆盖，并提供“恢复跟随用户”清除覆盖。创建和修改仍属于普通 Task；在线市场、远程更新、Preset、标签、排序、中央仓库和多 Agent 同步当前不存在，也不显示占位入口。
 

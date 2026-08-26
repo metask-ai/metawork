@@ -109,8 +109,8 @@ Product Skill 的公开表面 guard 必须证明 `product/skill.zig` 只导出 r
 ### AgentCore target baseline
 
 - **规范**：[高层架构](architecture.md)、[ABI v1 消费合同](agentcore-abi-v1.md)。
-- **证据**：Windows x86_64 GNU、macOS arm64 与 macOS x86_64 均锁定 clean source commit `1183550f15b4eef27799076ee0908e9667d849a0` 的 target artifact；repository lock 与 bundle tests 验证 manifest/target/ABI identity。各 target vertical 结果以本节对应平台记录为准。
-- **结论**：三个 target artifact 均为 ABI v1 revision 9、280-byte table、required capabilities `0x3fffff`。三份 lock、artifact 和 target 结果不能互相替代。
+- **证据**：三个 target 的 policy 与 repository lock identity 均同步为 clean source commit `af1ea06dddc1e4f5274e93a971070d0c578f8f3c`、ABI v1 revision 13。Windows x86_64 GNU 的 exact artifact 已由 bundle tests 与 staged probe 验证；按本次升级决策，macOS payload 与 platform vertical 不在本轮验证范围。
+- **结论**：所有 target policy 只接受 ABI v1 revision 13、280-byte table、required capabilities `0x3ffffff`；没有旧 revision fallback。macOS 不得引用本轮 Windows 结果宣称平台已验证。
 
 2026-08-13 的 Windows staged run-state probe 可由 Git object `51e0fcc847e7b832b628f6c64183525dd8300710` 定位：Host Run ID `7` 的 callback identity 与 `run_state.run_id` 一致，首序号为 `1`，并观察到 `starting → generating → finalizing → completed`。结论已进入 ABI 合同和 Workbench 回归，因此 active tree 不再保留该一次性 probe。
 
@@ -186,7 +186,7 @@ node scripts/test-window-chrome-windows.mjs --resize-session-only
 node scripts/test-window-chrome-windows.mjs
 ```
 
-`run-windows-bringup.mjs` 必须覆盖 staged verifier、restore probe、bundle/lifecycle tests、正式 test graph、Debug/Release build 和真实 Windows vertical，并明确报告 revision 9。window-chrome 的 resize/session gate 与 pointer/controls gate 分开报告：程序化 resize 只能证明 Native window、最小尺寸和同一 Renderer session，不能替代真实鼠标 edge resize、work-area clamp 或 WebView 焦点验收。
+`run-windows-bringup.mjs` 必须覆盖 staged verifier、restore probe、bundle/lifecycle tests、正式 test graph、Debug/Release build 和真实 Windows vertical，并报告 verifier 实际读取的 staged ABI identity，不硬编码 revision 文案。window-chrome 的 resize/session gate 与 pointer/controls gate 分开报告：程序化 resize 只能证明 Native window、最小尺寸和同一 Renderer session，不能替代真实鼠标 edge resize、work-area clamp 或 WebView 焦点验收。
 
 当前已验收普通拖动、最大化拖动恢复、Renderer controls、close-policy hide/reopen 与 clean shutdown。top/bottom/四角 resize、edge snap、双击标题栏、系统菜单、touch/pen 和完整 UIA 焦点仍需独立证据。
 
@@ -206,7 +206,7 @@ npm run package:windows
 
 ### Checkpoint artifact boundary
 
-revision 9 不继承旧 artifact 的 checkpoint 样本或通过结论。Windows 与 macOS 必须分别使用各自锁定 artifact 重新采集平台 vertical；旧版本结果不能替代。checkpoint digest 与产品预算的规范性语义见[AgentCore 集成契约](agentcore-integration.md)和[ABI v1 消费合同](agentcore-abi-v1.md)。
+revision 13 不继承旧 artifact 的 checkpoint 样本或通过结论。每个平台必须取得并锁定 revision 13 exact artifact 后重新采集 platform vertical；旧版本结果不能替代，缺少 artifact 的平台直接失败。checkpoint digest 与产品预算的规范性语义见[AgentCore 集成契约](agentcore-integration.md)和[ABI v1 消费合同](agentcore-abi-v1.md)。
 
 ## 尚未验证的能力
 

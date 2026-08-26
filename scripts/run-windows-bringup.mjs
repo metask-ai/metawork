@@ -34,5 +34,5 @@ for (const [script, args] of steps) {
 }
 
 console.log(
-  "Windows integration baseline passed: staged revision 9 GNU bundle, bundle guards, staged SDK probe, lifecycle, Native Debug/Release, and AgentCore vertical automation.",
+  "Windows integration baseline passed: staged exact GNU bundle, bundle guards, staged SDK probe, lifecycle, Native Debug/Release, and AgentCore vertical automation.",
 );
