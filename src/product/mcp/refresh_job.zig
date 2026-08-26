@@ -111,7 +111,7 @@ pub const Job = struct {
 const TestHarness = struct {
     notifications: usize = 0,
 
-    fn activate(_: *anyopaque) anyerror!agent.McpActivationOutcome {
+    fn activate(_: *anyopaque) ports.CatalogError!agent.McpActivationOutcome {
         return .empty;
     }
 
@@ -119,7 +119,7 @@ const TestHarness = struct {
         _: *anyopaque,
         _: *const agent.McpActivation,
         _: []const agent.McpServerAllowlist,
-    ) anyerror!?*agent.McpSelection {
+    ) ports.CatalogError!?*agent.McpSelection {
         return null;
     }
 

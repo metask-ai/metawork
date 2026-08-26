@@ -2,6 +2,9 @@
 //! Capability values grant no Workbench, concrete Executor, or Agent Runtime identity.
 
 const agent = @import("metawork_agent");
+const std = @import("std");
+
+pub const CatalogError = agent.Error || std.mem.Allocator.Error;
 
 pub const Job = struct {
     identity: *anyopaque,
@@ -26,14 +29,14 @@ pub const Executor = struct {
 
 pub const Catalog = struct {
     context: *anyopaque,
-    activate_fn: *const fn (*anyopaque) anyerror!agent.McpActivationOutcome,
+    activate_fn: *const fn (*anyopaque) CatalogError!agent.McpActivationOutcome,
     create_admission_selection_fn: *const fn (
         *anyopaque,
         *const agent.McpActivation,
         []const agent.McpServerAllowlist,
-    ) anyerror!?*agent.McpSelection,
+    ) CatalogError!?*agent.McpSelection,
 
-    pub fn activate(self: Catalog) anyerror!agent.McpActivationOutcome {
+    pub fn activate(self: Catalog) CatalogError!agent.McpActivationOutcome {
         return self.activate_fn(self.context);
     }
 
@@ -41,7 +44,7 @@ pub const Catalog = struct {
         self: Catalog,
         activation: *const agent.McpActivation,
         allowlists: []const agent.McpServerAllowlist,
-    ) anyerror!?*agent.McpSelection {
+    ) CatalogError!?*agent.McpSelection {
         return self.create_admission_selection_fn(
             self.context,
             activation,

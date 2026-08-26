@@ -538,7 +538,7 @@ fn cancelMcpJob(context: *anyopaque, identity: *anyopaque) bool {
     return executor.cancel(identity);
 }
 
-fn activateMcpCatalog(context: *anyopaque) anyerror!lifecycle.McpActivationOutcome {
+fn activateMcpCatalog(context: *anyopaque) mcp_ports.CatalogError!lifecycle.McpActivationOutcome {
     const runtime: *lifecycle.Runtime = @ptrCast(@alignCast(context));
     return runtime.activateMcp();
 }
@@ -547,7 +547,7 @@ fn createMcpAdmissionSelection(
     context: *anyopaque,
     activation: *const lifecycle.McpActivation,
     allowlists: []const lifecycle.McpServerAllowlist,
-) anyerror!?*lifecycle.McpSelection {
+) mcp_ports.CatalogError!?*lifecycle.McpSelection {
     const runtime: *lifecycle.Runtime = @ptrCast(@alignCast(context));
     return runtime.createMcpAdmissionSelection(activation, allowlists);
 }
@@ -3387,6 +3387,10 @@ pub const Workbench = struct {
         const runtime = if (self.mcp) |*value| value else return false;
         return runtime.syncInitialHealth();
     }
+    fn publishMcpRuntimeChanges(self: *Workbench) void {
+        const runtime = if (self.mcp) |*value| value else return;
+        if (runtime.takeChanged()) self.bumpRevision();
+    }
 
     pub fn inspectMcpDesiredConfiguration(
         self: *const Workbench,
@@ -3508,102 +3512,15 @@ pub const Workbench = struct {
         self: *Workbench,
         failure: McpRuntimeAuthorizationFailure,
     ) Error!McpRuntimeAuthorizationFailureOutcome {
-        if (self.shutting_down) return .rejected;
-        const mcp = if (self.mcp) |*value| &value.state else return .rejected;
-        if (self.mcp.?.hasRefreshJob()) return .rejected;
-        if (mcp.authorization_operation) |operation|
-            if (std.mem.eql(u8, operation.server_id, failure.server_id))
-                return .rejected;
-        const management = if (mcp.management) |*value| value else return .rejected;
-        if (!failure.challenge_scopes_complete)
-            return error.McpOauthScopeCapacity;
-        if (!mcp_configuration.validOauthScopeSet(
-            failure.challenge_scopes,
-            management.limits,
-        )) return error.McpOauthScopeCapacity;
-        if (management.inspect().health != .ready) return .rejected;
-        const registry = management.desiredRegistry() orelse return .rejected;
-        if (registry.oauth_operation) |operation|
-            if (std.mem.eql(u8, operation.server_id, failure.server_id))
-                return .rejected;
-        const server = findMcpServer(registry.servers, failure.server_id) orelse
-            return .stale;
-        const oauth = server.auth.oauth orelse return .stale;
-        const consent = oauth.consent orelse return .stale;
-        if (consent.epoch != failure.consent_epoch) return .stale;
-        const scope_step_up = mcp_policy.scopeSetAddsRequirement(
-            consent.scopes,
-            failure.challenge_scopes,
-        );
-        if (std.mem.eql(u8, oauth.status, "reauth_required")) {
-            var pending = if (failure.challenge_scopes.len != 0)
-                try mcp_policy.preparePendingReauthorization(
-                    self.allocator,
-                    mcp,
-                    server.id,
-                    consent.epoch,
-                    failure.challenge_scopes,
-                    management.limits.max_oauth_scopes,
-                )
-            else
-                null;
-            if (pending) |*replacement| {
-                mcp_policy.installPendingReauthorization(mcp, replacement);
-                self.bumpRevision();
-            }
-            return .applied;
-        }
-        const grant = oauth.grant orelse return .stale;
-        if (!std.mem.eql(u8, oauth.status, "ready") or
-            grant.consent_epoch != consent.epoch or
-            failure.token_revision > grant.token_revision or
-            (!scope_step_up and failure.token_revision != grant.token_revision))
-            return .stale;
-        var pending = if (failure.challenge_scopes.len != 0)
-            try mcp_policy.preparePendingReauthorization(
-                self.allocator,
-                mcp,
-                server.id,
-                consent.epoch,
-                failure.challenge_scopes,
-                management.limits.max_oauth_scopes,
-            )
-        else
-            null;
-        var pending_owned = pending != null;
-        defer if (pending_owned) pending.?.deinit();
-        var preparation = try management.prepareRequireOauthReauthorization(
-            registry.generation,
-            .{
-                .server_id = server.id,
-                .consent_epoch = consent.epoch,
-                .token_revision = grant.token_revision,
-            },
-        );
-        const result: McpRuntimeAuthorizationFailureOutcome = switch (try self.commitMcpMutation(mcp, &preparation)) {
-            .saved, .saved_recovery_required => .applied,
-            .indeterminate => .persistence_outcome_unknown,
-            .rejected => .rejected,
-            .unchanged, .stale_generation => unreachable,
-        };
-        if (result == .rejected)
-            self.blockMcpAdmissionAfterRuntimeAuthFailure();
-        if (result != .rejected) if (pending) |*replacement| {
-            mcp_policy.installPendingReauthorization(mcp, replacement);
-            pending_owned = false;
-        };
-        return result;
+        const runtime = if (self.mcp) |*value| value else return .rejected;
+        defer self.publishMcpRuntimeChanges();
+        return runtime.requireOauthReauthorization(failure) catch |err| return @errorCast(err);
     }
 
     pub fn blockMcpAdmissionAfterRuntimeAuthFailure(self: *Workbench) void {
-        const mcp = if (self.mcp) |*value| &value.state else return;
-        mcp.runtime_auth_failure_blocked = true;
-        switch (mcp.admission) {
-            .blocked => |reason| if (reason == .runtime_authorization_failure) return,
-            .ready => {},
-        }
-        mcp_policy.blockAdmission(mcp, .runtime_authorization_failure);
-        self.bumpRevision();
+        const runtime = if (self.mcp) |*value| value else return;
+        runtime.blockAdmissionAfterRuntimeAuthFailure();
+        self.publishMcpRuntimeChanges();
     }
 
     pub fn beginMcpAuthorization(
@@ -3612,35 +3529,8 @@ pub const Workbench = struct {
         server_id: []const u8,
     ) Error!?McpAuthorizationStart {
         if (self.shutting_down) return null;
-        const mcp = if (self.mcp) |*value| &value.state else return null;
-        if (self.mcp.?.hasRefreshJob() or
-            mcp.authorization_operation != null or
-            mcp.configuration_apply_state == .applying)
-            return null;
-        const management = if (mcp.management) |*value| value else return null;
-        if (!mcp_policy.expectedGenerationMatches(management, expected_generation) or
-            management.inspect().health != .ready)
-            return null;
-        const registry = management.desiredRegistry() orelse return null;
-        if (registry.oauth_operation != null) return null;
-        const server = findMcpServer(registry.servers, server_id) orelse return null;
-        const oauth = server.auth.oauth orelse return null;
-        if (server.connection_approval == null or
-            mcp_configuration.serverProblem(server, management.limits) != null or
-            !std.mem.eql(u8, server.transport.kind, "streamable_http") or
-            !std.mem.eql(u8, server.auth.kind, "oauth") or
-            !(std.mem.eql(u8, oauth.status, "client_registration_required") or
-                std.mem.eql(u8, oauth.status, "consent_required") or
-                std.mem.eql(u8, oauth.status, "awaiting_tokens") or
-                std.mem.eql(u8, oauth.status, "reauth_required")))
-            return null;
-        if (oauth.registration.client_id != null) {
-            const method = oauth.registration.token_endpoint_auth_method orelse return null;
-            if (!std.mem.eql(u8, method, "none") and
-                oauth.registration.client_secret_ref == null)
-                return null;
-        }
-
+        const runtime = if (self.mcp) |*value| value else return null;
+        if (!runtime.canBeginAuthorization(expected_generation, server_id)) return null;
         var entropy: [16]u8 = undefined;
         std.Io.randomSecure(self.io, &entropy) catch return null;
         const hex = std.fmt.bytesToHex(entropy, .lower);
@@ -3650,58 +3540,12 @@ pub const Workbench = struct {
             "mcp-auth-{s}",
             .{hex[0..16]},
         ) catch unreachable;
-
-        var arena = std.heap.ArenaAllocator.init(self.allocator);
-        errdefer arena.deinit();
-        const owned = arena.allocator();
-        const owned_operation_id = try owned.dupe(u8, operation_id);
-        const owned_server_id = try owned.dupe(u8, server.id);
-        const owned_endpoint = try owned.dupe(u8, server.transport.url orelse return null);
-        const owned_registration_kind = try owned.dupe(u8, oauth.registration.kind);
-        const owned_client_id = if (oauth.registration.client_id) |client_id|
-            try owned.dupe(u8, client_id)
-        else
-            null;
-        const owned_auth_method = if (oauth.registration.token_endpoint_auth_method) |method|
-            try owned.dupe(u8, method)
-        else
-            null;
-        const consent_scopes = if (oauth.consent) |consent|
-            consent.scopes
-        else
-            &.{};
-        const pending_scopes = if (oauth.consent) |consent|
-            mcp_policy.pendingReauthorizationScopes(mcp, server.id, consent.epoch)
-        else
-            &.{};
-        const owned_additional_scopes = try ownMcpScopeUnion(
-            owned,
-            consent_scopes,
-            pending_scopes,
-            management.limits.max_oauth_scopes,
-        );
-        const result: McpAuthorizationStart = .{
-            .arena = arena,
-            .operation_id = owned_operation_id,
-            .server_id = owned_server_id,
-            .endpoint = owned_endpoint,
-            .registration_kind = owned_registration_kind,
-            .client_id = owned_client_id,
-            .token_endpoint_auth_method = owned_auth_method,
-            .additional_scopes = owned_additional_scopes,
-        };
-        const operation_server_id = try self.allocator.dupe(u8, server.id);
-        errdefer self.allocator.free(operation_server_id);
-        const operation_identity = try self.allocator.dupe(u8, operation_id);
-        const operation: McpAuthorizationOperation = .{
-            .phase = .discovering,
-            .server_id = operation_server_id,
-            .operation_id = operation_identity,
-        };
-        self.mcp.?.cancelRefreshTimer();
-        mcp.authorization_operation = operation;
-        self.bumpRevision();
-        return result;
+        defer self.publishMcpRuntimeChanges();
+        return runtime.beginAuthorization(
+            expected_generation,
+            server_id,
+            operation_id,
+        ) catch |err| return @errorCast(err);
     }
 
     pub fn advanceMcpAuthorization(
@@ -3709,31 +3553,19 @@ pub const Workbench = struct {
         operation_id: []const u8,
         phase: McpAuthorizationPhase,
     ) bool {
-        if (self.shutting_down) return false;
-        const mcp = if (self.mcp) |*value| &value.state else return false;
-        const operation = if (mcp.authorization_operation) |*value| value else return false;
-        if (!std.mem.eql(u8, operation.operation_id, operation_id) or
-            !mcp_policy.validAuthorizationTransition(operation.phase, phase))
-            return false;
-        operation.phase = phase;
-        self.bumpRevision();
-        return true;
+        const runtime = if (self.mcp) |*value| value else return false;
+        defer self.publishMcpRuntimeChanges();
+        return runtime.advanceAuthorization(operation_id, phase);
     }
 
     pub fn finishMcpAuthorization(
         self: *Workbench,
         operation_id: []const u8,
     ) bool {
-        const mcp = if (self.mcp) |*value| &value.state else return false;
-        const operation = if (mcp.authorization_operation) |*value| value else return false;
-        if (!std.mem.eql(u8, operation.operation_id, operation_id)) return false;
-        operation.deinit(self.allocator);
-        mcp.authorization_operation = null;
-        self.rearmMcpRefreshTimerNoFail();
-        self.bumpRevision();
-        return true;
+        const runtime = if (self.mcp) |*value| value else return false;
+        defer self.publishMcpRuntimeChanges();
+        return runtime.finishAuthorization(operation_id);
     }
-
     /// Writes the exact public configuration covered by connection approval.
     /// This is a Host-only confirmation surface: it may include the complete
     /// endpoint or command, and therefore must never be used for a snapshot or
@@ -3869,324 +3701,75 @@ pub const Workbench = struct {
     /// returns the exact client identity used to construct the authorization
     /// URL. Dynamic registration already committed these facts; a
     /// pre-registered client commits them here as one ordinary mutation.
+    /// Binds metadata-validated consent to the current approved server and
+    /// returns the exact client identity used by the Application coordinator.
     pub fn authorizeMcpOauth(
         self: *Workbench,
         plan: McpOauthAuthorizationPlan,
     ) Error!McpOauthAuthorizationOutcome {
-        if (self.shutting_down or plan.attempt_id == 0) return .rejected;
-        const mcp = if (self.mcp) |*value| &value.state else return .rejected;
-        if (self.mcp.?.hasRefreshJob() or mcp.configuration_apply_state == .applying)
-            return .rejected;
-        if (!mcp_policy.authorizationAt(
-            mcp,
-            plan.server_id,
-            &.{ .awaiting_consent, .registering },
-        )) return .rejected;
-        const management = if (mcp.management) |*value| value else return .rejected;
-        if (management.inspect().health != .ready) return .rejected;
-        const before = management.desiredRegistry() orelse return .rejected;
-        if (before.oauth_operation != null) return .rejected;
-        const before_server = findMcpServer(before.servers, plan.server_id) orelse
-            return .rejected;
-        const before_oauth = before_server.auth.oauth orelse return .rejected;
-
-        const consent_already_bound = if (before_oauth.consent) |consent|
-            std.mem.eql(u8, before_oauth.status, "awaiting_tokens") and
-                std.mem.eql(u8, consent.issuer, plan.issuer) and
-                std.mem.eql(u8, consent.resource, plan.resource) and
-                std.mem.eql(u8, consent.redirect_uri, plan.redirect_uri) and
-                textSetsEqual(consent.scopes, plan.scopes)
-        else
-            false;
-        if (!consent_already_bound) {
-            var preparation = try management.prepareOauthConsent(
-                before.generation,
-                .{
-                    .server_id = plan.server_id,
-                    .resource = plan.resource,
-                    .issuer = plan.issuer,
-                    .scopes = plan.scopes,
-                    .redirect_uri = plan.redirect_uri,
-                },
-            );
-            const outcome = try self.commitMcpMutation(mcp, &preparation);
-            switch (outcome) {
-                .saved, .saved_recovery_required => {},
-                .indeterminate => return .persistence_outcome_unknown,
-                .unchanged, .stale_generation, .rejected => return .rejected,
-            }
-        }
-
-        const current = management.desiredRegistry() orelse return .rejected;
-        const server = findMcpServer(current.servers, plan.server_id) orelse
-            return .rejected;
-        const oauth = server.auth.oauth orelse return .rejected;
-        const consent = oauth.consent orelse return .rejected;
-        const client_id = oauth.registration.client_id orelse return .rejected;
-        if (!std.mem.eql(u8, oauth.status, "awaiting_tokens") or
-            !std.mem.eql(u8, consent.issuer, plan.issuer) or
-            !std.mem.eql(u8, consent.resource, plan.resource) or
-            !std.mem.eql(u8, consent.redirect_uri, plan.redirect_uri) or
-            !textSetsEqual(consent.scopes, plan.scopes))
-            return .rejected;
-        return .{ .ready = .{
-            .attempt_id = plan.attempt_id,
-            .server_id = server.id,
-            .issuer = consent.issuer,
-            .resource = consent.resource,
-            .scopes = consent.scopes,
-            .redirect_uri = consent.redirect_uri,
-            .client_id = client_id,
-        } };
+        const runtime = if (self.mcp) |*value| value else return .rejected;
+        defer self.publishMcpRuntimeChanges();
+        return runtime.authorizeOauth(plan) catch |err| return @errorCast(err);
     }
 
     pub fn beginMcpOauthDynamicRegistration(
         self: *Workbench,
         consent: mcp_configuration.OauthConsentInput,
     ) Error!McpOauthOperationBeginOutcome {
-        if (self.shutting_down) return .rejected;
-        const mcp = if (self.mcp) |*value| &value.state else return .rejected;
-        if (self.mcp.?.hasRefreshJob()) return .rejected;
-        if (!mcp_policy.authorizationAt(
-            mcp,
-            consent.server_id,
-            &.{.awaiting_consent},
-        )) return .rejected;
-        const management = if (mcp.management) |*value| value else return .rejected;
-        const desired = management.desiredRegistry() orelse return .rejected;
-        var preparation = switch (try management.prepareBeginDynamicRegistration(
-            desired.generation,
-            .{ .consent = consent },
-        )) {
-            .rejected => return .rejected,
-            .prepared => |prepared| prepared,
-        };
-        return self.commitMcpOauthOperationBegin(mcp, &preparation);
+        const runtime = if (self.mcp) |*value| value else return .rejected;
+        defer self.publishMcpRuntimeChanges();
+        return runtime.beginOauthDynamicRegistration(consent) catch |err| return @errorCast(err);
     }
 
     pub fn completeMcpOauthDynamicRegistration(
         self: *Workbench,
         input: mcp_configuration.CompleteDynamicRegistrationInput,
     ) Error!mcp_configuration.ManagementOutcome {
-        if (self.shutting_down) {
-            if (input.client_secret) |secret| std.crypto.secureZero(u8, secret);
-            return .rejected;
-        }
-        const mcp = if (self.mcp) |*value| &value.state else {
+        const runtime = if (self.mcp) |*value| value else {
             if (input.client_secret) |secret| std.crypto.secureZero(u8, secret);
             return .rejected;
         };
-        if (self.mcp.?.hasRefreshJob()) {
-            if (input.client_secret) |secret| std.crypto.secureZero(u8, secret);
-            return .rejected;
-        }
-        if (!mcp_policy.authorizationAt(mcp, input.server_id, &.{.registering})) {
-            if (input.client_secret) |secret| std.crypto.secureZero(u8, secret);
-            return .rejected;
-        }
-        const management = if (mcp.management) |*value| value else {
-            if (input.client_secret) |secret| std.crypto.secureZero(u8, secret);
-            return .rejected;
-        };
-        var preparation = try management.prepareCompleteDynamicRegistration(input);
-        const outcome = try self.commitMcpMutation(mcp, &preparation);
-        switch (outcome) {
-            .saved, .saved_recovery_required => self.rearmMcpRefreshTimerNoFail(),
-            else => {},
-        }
-        return outcome;
+        defer self.publishMcpRuntimeChanges();
+        return runtime.completeOauthDynamicRegistration(input) catch |err| return @errorCast(err);
     }
 
     pub fn beginMcpOauthCodeExchange(
         self: *Workbench,
         server_id: []const u8,
     ) Error!McpOauthCodeExchangeBeginOutcome {
-        if (self.shutting_down) return .rejected;
-        const mcp = if (self.mcp) |*value| &value.state else return .rejected;
-        if (self.mcp.?.hasRefreshJob() or mcp.configuration_apply_state == .applying)
-            return .rejected;
-        if (!mcp_policy.authorizationAt(mcp, server_id, &.{.awaiting_browser}))
-            return .rejected;
-        const management = if (mcp.management) |*value| value else return .rejected;
-        const desired = management.desiredRegistry() orelse return .rejected;
-        var preparation = switch (try management.prepareBeginCodeExchange(
-            desired.generation,
-            .{ .server_id = server_id },
-        )) {
-            .rejected => return .rejected,
-            .prepared => |prepared| prepared,
-        };
-        const outcome = try self.commitMcpOauthOperationBegin(mcp, &preparation);
-        const handle = switch (outcome) {
-            .started => |value| value,
-            .rejected => return .rejected,
-            .persistence_outcome_unknown => return .persistence_outcome_unknown,
-        };
-        const current = management.desiredRegistry() orelse return .rejected;
-        const server = findMcpServer(current.servers, server_id) orelse return .rejected;
-        const oauth = server.auth.oauth orelse return .rejected;
-        const consent = oauth.consent orelse return .rejected;
-        return .{ .started = .{
-            .operation = handle,
-            .issuer = consent.issuer,
-            .client_id = oauth.registration.client_id orelse return .rejected,
-            .token_endpoint_auth_method = oauth.registration.token_endpoint_auth_method orelse
-                return .rejected,
-            .client_secret_ref = oauth.registration.client_secret_ref,
-            .resource = consent.resource,
-            .redirect_uri = consent.redirect_uri,
-        } };
+        const runtime = if (self.mcp) |*value| value else return .rejected;
+        defer self.publishMcpRuntimeChanges();
+        return runtime.beginOauthCodeExchange(server_id) catch |err| return @errorCast(err);
     }
 
     pub fn completeMcpOauthCodeExchange(
         self: *Workbench,
         input: mcp_configuration.CompleteCodeExchangeInput,
     ) Error!mcp_configuration.ManagementOutcome {
-        if (self.shutting_down) {
-            std.crypto.secureZero(u8, input.access_token);
-            if (input.refresh_token) |secret| std.crypto.secureZero(u8, secret);
-            return .rejected;
-        }
-        const mcp = if (self.mcp) |*value| &value.state else {
+        const runtime = if (self.mcp) |*value| value else {
             std.crypto.secureZero(u8, input.access_token);
             if (input.refresh_token) |secret| std.crypto.secureZero(u8, secret);
             return .rejected;
         };
-        if (self.mcp.?.hasRefreshJob()) {
-            std.crypto.secureZero(u8, input.access_token);
-            if (input.refresh_token) |secret| std.crypto.secureZero(u8, secret);
-            return .rejected;
-        }
-        if (!mcp_policy.authorizationAt(mcp, input.server_id, &.{.exchanging})) {
-            std.crypto.secureZero(u8, input.access_token);
-            if (input.refresh_token) |secret| std.crypto.secureZero(u8, secret);
-            return .rejected;
-        }
-        const management = if (mcp.management) |*value| value else {
-            std.crypto.secureZero(u8, input.access_token);
-            if (input.refresh_token) |secret| std.crypto.secureZero(u8, secret);
-            return .rejected;
-        };
-        var preparation = try management.prepareCompleteCodeExchange(input);
-        const outcome = try self.commitMcpMutation(mcp, &preparation);
-        switch (outcome) {
-            .saved, .saved_recovery_required => self.rearmMcpRefreshTimerNoFail(),
-            else => {},
-        }
-        return outcome;
+        defer self.publishMcpRuntimeChanges();
+        return runtime.completeOauthCodeExchange(input) catch |err| return @errorCast(err);
     }
 
-    fn commitMcpOauthOperationBegin(
-        self: *Workbench,
-        mcp: *McpProductState,
-        preparation: *mcp_configuration.PreparedOauthOperationState,
-    ) Error!McpOauthOperationBeginOutcome {
-        defer preparation.deinit();
-        var reduced = try self.mcpAdmissionForTarget(mcp, preparation.target());
-        var reduced_owned = true;
-        defer if (reduced_owned) reduced.deinit();
-        if (reduced != .ready) return .rejected;
-        const management = &mcp.management.?;
-        const outcome = try management.commitPreparedOauthOperationState(preparation);
-        switch (outcome) {
-            .saved => {
-                self.mcp.?.cancelRefreshTimer();
-                mcp_policy.installCommittedDesiredState(mcp, management, reduced);
-                reduced_owned = false;
-                self.bumpRevision();
-                const registry = management.desiredRegistry() orelse return .rejected;
-                const operation = registry.oauth_operation orelse return .rejected;
-                return .{ .started = .{
-                    .id = operation.id,
-                    .server_id = operation.server_id,
-                } };
-            },
-            .indeterminate => {
-                self.mcp.?.cancelRefreshTimer();
-                mcp_policy.blockAdmission(mcp, .persistence_outcome_unknown);
-                self.bumpRevision();
-                return .persistence_outcome_unknown;
-            },
-            .rejected => return .rejected,
-            .unchanged, .stale_generation, .saved_recovery_required => unreachable,
-        }
-    }
-
-    /// Borrowed until the next Workbench mutation. Application stores only
+    /// Borrowed until the next Product MCP mutation. Application stores only
     /// the due time in its one-shot timer and asks again when it fires.
     pub fn nextMcpOauthExpiry(self: *const Workbench) ?McpOauthExpiry {
-        if (self.shutting_down) return null;
-        const mcp = if (self.mcp) |*value| &value.state else return null;
-        return mcp_policy.nextOauthExpiry(mcp);
+        const runtime = if (self.mcp) |*value| value else return null;
+        return runtime.nextOauthExpiry();
     }
 
-    /// Begins the global OAuth refresh operation as one Workbench short
-    /// transaction. Every fallible allocation, including the reduced
-    /// Admission selection and the detached network binding, completes before
-    /// the marker is persisted. A successful marker commit is followed only
-    /// by the no-fail authority swap.
     pub fn beginMcpOauthRefresh(
         self: *Workbench,
         server_id: []const u8,
     ) Error!McpOauthRefreshBeginOutcome {
-        if (self.shutting_down) return .rejected;
         self.syncLifecycle();
-        const mcp = if (self.mcp) |*value| &value.state else return .rejected;
-        if (!mcp.committed or self.mcp.?.hasRefreshJob() or
-            mcp.configuration_apply_state == .applying or
-            mcp.authorization_operation != null)
-            return .rejected;
-        const management = if (mcp.management) |*value| value else return .rejected;
-        const inspection = management.inspect();
-        if (inspection.health != .ready or inspection.runtime_alignment != .current)
-            return .rejected;
-        if (mcp.activation_failed) return .rejected;
-        const activation = mcp.activation orelse return .rejected;
-        var runtime_loaded = false;
-        for (activation.serverHealth()) |server| {
-            if (!std.mem.eql(u8, server.id, server_id)) continue;
-            runtime_loaded = true;
-            break;
-        }
-        if (!runtime_loaded) return .rejected;
-        const desired = management.desiredRegistry() orelse return .rejected;
-        var preparation = switch (try management.prepareBeginRefresh(
-            desired.generation,
-            .{ .server_id = server_id },
-        )) {
-            .rejected => return .rejected,
-            .prepared => |prepared| prepared,
-        };
-        defer preparation.deinit();
-        var reduced = try self.mcpAdmissionForTarget(mcp, preparation.target());
-        var reduced_owned = true;
-        defer if (reduced_owned) reduced.deinit();
-        if (reduced != .ready) return .rejected;
-        var binding = try mcp_policy.buildOauthRefreshBinding(
-            self.allocator,
-            preparation.target(),
-        );
-        var binding_owned = true;
-        defer if (binding_owned) binding.deinit();
-        const outcome = try management.commitPreparedOauthOperationState(&preparation);
-        switch (outcome) {
-            .saved => {
-                self.mcp.?.cancelRefreshTimer();
-                mcp_policy.installCommittedDesiredState(mcp, management, reduced);
-                reduced_owned = false;
-                binding_owned = false;
-                self.bumpRevision();
-                return .{ .started = binding };
-            },
-            .indeterminate => {
-                self.mcp.?.cancelRefreshTimer();
-                mcp_policy.blockAdmission(mcp, .persistence_outcome_unknown);
-                self.bumpRevision();
-                return .persistence_outcome_unknown;
-            },
-            .rejected => return .rejected,
-            .unchanged, .stale_generation, .saved_recovery_required => unreachable,
-        }
+        const runtime = if (self.mcp) |*value| value else return .rejected;
+        defer self.publishMcpRuntimeChanges();
+        return runtime.beginOauthRefresh(server_id) catch |err| return @errorCast(err);
     }
 
     pub fn completeMcpOauthRefresh(
@@ -4194,128 +3777,40 @@ pub const Workbench = struct {
         input: mcp_configuration.CompleteRefreshInput,
         runtime_commit: McpOauthRuntimeCommit,
     ) Error!mcp_configuration.ManagementOutcome {
-        if (self.shutting_down) {
-            std.crypto.secureZero(u8, input.access_token);
-            if (input.refresh_token) |secret| std.crypto.secureZero(u8, secret);
-            return .rejected;
-        }
-        const mcp = if (self.mcp) |*value| &value.state else {
+        const runtime = if (self.mcp) |*value| value else {
             std.crypto.secureZero(u8, input.access_token);
             if (input.refresh_token) |secret| std.crypto.secureZero(u8, secret);
             return .rejected;
         };
-        if (self.mcp.?.hasRefreshJob()) {
-            std.crypto.secureZero(u8, input.access_token);
-            if (input.refresh_token) |secret| std.crypto.secureZero(u8, secret);
-            return .rejected;
-        }
-        const management = if (mcp.management) |*value| value else {
-            std.crypto.secureZero(u8, input.access_token);
-            if (input.refresh_token) |secret| std.crypto.secureZero(u8, secret);
-            return .rejected;
-        };
-        var preparation = try management.prepareCompleteRefresh(input);
-        switch (preparation) {
-            .unchanged, .rejected => return .rejected,
-            .prepared => |*mutation| {
-                defer mutation.deinit();
-                var candidate = try self.mcpAdmissionForTarget(mcp, mutation.target());
-                var candidate_owned = true;
-                defer if (candidate_owned) candidate.deinit();
-                if (candidate != .ready) return .rejected;
-                const outcome = try management.commitPreparedMutation(mutation);
-                const reported_outcome = if (outcome == .saved_recovery_required and
-                    management.inspect().health == .outcome_unknown)
-                    mcp_configuration.ManagementOutcome.indeterminate
-                else
-                    outcome;
-                switch (reported_outcome) {
-                    .saved, .saved_recovery_required => {
-                        runtime_commit.commit();
-                        mcp_policy.installCommittedDesiredState(mcp, management, candidate);
-                        candidate_owned = false;
-                        self.rearmMcpRefreshTimerNoFail();
-                        self.bumpRevision();
-                    },
-                    .indeterminate => {
-                        mcp_policy.blockAdmission(mcp, .persistence_outcome_unknown);
-                        self.bumpRevision();
-                    },
-                    .rejected => if (management.inspect().health != .ready) {
-                        mcp_policy.blockAdmissionForCurrentState(mcp);
-                        self.bumpRevision();
-                    },
-                    .unchanged, .stale_generation => unreachable,
-                }
-                return reported_outcome;
-            },
-        }
+        defer self.publishMcpRuntimeChanges();
+        return runtime.completeOauthRefresh(input, runtime_commit) catch |err| return @errorCast(err);
     }
 
     pub fn clearMcpOauthOperation(
         self: *Workbench,
         operation_id: []const u8,
     ) Error!mcp_configuration.ManagementOutcome {
-        if (self.shutting_down) return .rejected;
-        const mcp = if (self.mcp) |*value| &value.state else return .rejected;
-        if (self.mcp.?.hasRefreshJob()) return .rejected;
-        const management = if (mcp.management) |*value| value else return .rejected;
-        var preparation = switch (try management.prepareClearOauthOperation(operation_id)) {
-            .rejected => return .rejected,
-            .prepared => |prepared| prepared,
-        };
-        defer preparation.deinit();
-        var candidate = try self.mcpAdmissionForTarget(mcp, preparation.target());
-        var candidate_owned = true;
-        defer if (candidate_owned) candidate.deinit();
-        const outcome = try management.commitPreparedOauthOperationState(&preparation);
-        switch (outcome) {
-            .saved => {
-                mcp_policy.installCommittedDesiredState(mcp, management, candidate);
-                candidate_owned = false;
-                self.rearmMcpRefreshTimerNoFail();
-                self.bumpRevision();
-            },
-            .indeterminate => {
-                mcp_policy.blockAdmission(mcp, .persistence_outcome_unknown);
-                self.bumpRevision();
-            },
-            .rejected => {},
-            .unchanged, .stale_generation, .saved_recovery_required => unreachable,
-        }
-        return outcome;
+        const runtime = if (self.mcp) |*value| value else return .rejected;
+        defer self.publishMcpRuntimeChanges();
+        return runtime.clearOauthOperation(operation_id) catch |err| return @errorCast(err);
     }
 
     pub fn recoverMcpOauthOperation(
         self: *Workbench,
         operation_id: []const u8,
     ) Error!mcp_configuration.ManagementOutcome {
-        if (self.shutting_down) return .rejected;
-        const mcp = if (self.mcp) |*value| &value.state else return .rejected;
-        if (self.mcp.?.hasRefreshJob()) return .rejected;
-        const management = if (mcp.management) |*value| value else return .rejected;
-        var preparation = try management.prepareOauthOperationRecovery(operation_id);
-        const outcome = try self.commitMcpMutation(mcp, &preparation);
-        switch (outcome) {
-            .saved, .saved_recovery_required => self.rearmMcpRefreshTimerNoFail(),
-            else => {},
-        }
-        return outcome;
+        const runtime = if (self.mcp) |*value| value else return .rejected;
+        defer self.publishMcpRuntimeChanges();
+        return runtime.recoverOauthOperation(operation_id) catch |err| return @errorCast(err);
     }
-
     pub fn createMcpHttpServer(
         self: *Workbench,
         expected_generation: u64,
         input: mcp_configuration.CreateHttpServerInput,
     ) Error!mcp_configuration.ManagementOutcome {
-        if (self.shutting_down) return .rejected;
-        const mcp = if (self.mcp) |*value| &value.state else return .rejected;
-        if (self.mcp.?.hasRefreshJob()) return .rejected;
-        const management = if (mcp.management) |*value| value else return .rejected;
-        if (!mcp_policy.expectedGenerationMatches(management, expected_generation))
-            return .stale_generation;
-        var preparation = try management.prepareCreateHttpServer(expected_generation, input);
-        return try self.commitMcpMutation(mcp, &preparation);
+        const runtime = if (self.mcp) |*value| value else return .rejected;
+        defer self.publishMcpRuntimeChanges();
+        return runtime.createHttpServer(expected_generation, input) catch |err| return @errorCast(err);
     }
 
     pub fn createMcpOauthHttpServer(
@@ -4323,17 +3818,9 @@ pub const Workbench = struct {
         expected_generation: u64,
         input: mcp_configuration.CreateOauthHttpServerInput,
     ) Error!mcp_configuration.ManagementOutcome {
-        if (self.shutting_down) return .rejected;
-        const mcp = if (self.mcp) |*value| &value.state else return .rejected;
-        if (self.mcp.?.hasRefreshJob()) return .rejected;
-        const management = if (mcp.management) |*value| value else return .rejected;
-        if (!mcp_policy.expectedGenerationMatches(management, expected_generation))
-            return .stale_generation;
-        var preparation = try management.prepareCreateOauthHttpServer(
-            expected_generation,
-            input,
-        );
-        return try self.commitMcpMutation(mcp, &preparation);
+        const runtime = if (self.mcp) |*value| value else return .rejected;
+        defer self.publishMcpRuntimeChanges();
+        return runtime.createOauthHttpServer(expected_generation, input) catch |err| return @errorCast(err);
     }
 
     pub fn createMcpStdioServer(
@@ -4341,14 +3828,9 @@ pub const Workbench = struct {
         expected_generation: u64,
         input: mcp_configuration.CreateStdioServerInput,
     ) Error!mcp_configuration.ManagementOutcome {
-        if (self.shutting_down) return .rejected;
-        const mcp = if (self.mcp) |*value| &value.state else return .rejected;
-        if (self.mcp.?.hasRefreshJob()) return .rejected;
-        const management = if (mcp.management) |*value| value else return .rejected;
-        if (!mcp_policy.expectedGenerationMatches(management, expected_generation))
-            return .stale_generation;
-        var preparation = try management.prepareCreateStdioServer(expected_generation, input);
-        return try self.commitMcpMutation(mcp, &preparation);
+        const runtime = if (self.mcp) |*value| value else return .rejected;
+        defer self.publishMcpRuntimeChanges();
+        return runtime.createStdioServer(expected_generation, input) catch |err| return @errorCast(err);
     }
 
     pub fn updateMcpHttpConnection(
@@ -4356,15 +3838,9 @@ pub const Workbench = struct {
         expected_generation: u64,
         input: mcp_configuration.UpdateHttpConnectionInput,
     ) Error!mcp_configuration.ManagementOutcome {
-        if (self.shutting_down) return .rejected;
-        const mcp = if (self.mcp) |*value| &value.state else return .rejected;
-        if (self.mcp.?.hasRefreshJob()) return .rejected;
-        if (mcp_policy.serverMutationBusy(mcp, input.server_id)) return .rejected;
-        const management = if (mcp.management) |*value| value else return .rejected;
-        if (!mcp_policy.expectedGenerationMatches(management, expected_generation))
-            return .stale_generation;
-        var preparation = try management.prepareUpdateHttpConnection(expected_generation, input);
-        return try self.commitMcpMutation(mcp, &preparation);
+        const runtime = if (self.mcp) |*value| value else return .rejected;
+        defer self.publishMcpRuntimeChanges();
+        return runtime.updateHttpConnection(expected_generation, input) catch |err| return @errorCast(err);
     }
 
     pub fn updateMcpOauthHttpConnection(
@@ -4372,18 +3848,9 @@ pub const Workbench = struct {
         expected_generation: u64,
         input: mcp_configuration.UpdateOauthHttpConnectionInput,
     ) Error!mcp_configuration.ManagementOutcome {
-        if (self.shutting_down) return .rejected;
-        const mcp = if (self.mcp) |*value| &value.state else return .rejected;
-        if (self.mcp.?.hasRefreshJob()) return .rejected;
-        if (mcp_policy.serverMutationBusy(mcp, input.server_id)) return .rejected;
-        const management = if (mcp.management) |*value| value else return .rejected;
-        if (!mcp_policy.expectedGenerationMatches(management, expected_generation))
-            return .stale_generation;
-        var preparation = try management.prepareUpdateOauthHttpConnection(
-            expected_generation,
-            input,
-        );
-        return try self.commitMcpMutation(mcp, &preparation);
+        const runtime = if (self.mcp) |*value| value else return .rejected;
+        defer self.publishMcpRuntimeChanges();
+        return runtime.updateOauthHttpConnection(expected_generation, input) catch |err| return @errorCast(err);
     }
 
     pub fn updateMcpStdioConnection(
@@ -4391,56 +3858,38 @@ pub const Workbench = struct {
         expected_generation: u64,
         input: mcp_configuration.UpdateStdioConnectionInput,
     ) Error!mcp_configuration.ManagementOutcome {
-        if (self.shutting_down) return .rejected;
-        const mcp = if (self.mcp) |*value| &value.state else return .rejected;
-        if (self.mcp.?.hasRefreshJob()) return .rejected;
-        if (mcp_policy.serverMutationBusy(mcp, input.server_id)) return .rejected;
-        const management = if (mcp.management) |*value| value else return .rejected;
-        if (!mcp_policy.expectedGenerationMatches(management, expected_generation))
-            return .stale_generation;
-        var preparation = try management.prepareUpdateStdioConnection(expected_generation, input);
-        return try self.commitMcpMutation(mcp, &preparation);
+        const runtime = if (self.mcp) |*value| value else return .rejected;
+        defer self.publishMcpRuntimeChanges();
+        return runtime.updateStdioConnection(expected_generation, input) catch |err| return @errorCast(err);
     }
 
-    /// Host-only secure capture boundary. Renderer/Bridge commands must not
-    /// construct this input because it contains credential material.
+    /// Host-only secure capture boundary. Product MCP Runtime consumes and
+    /// zeroes the secret on every path after this owner boundary is present.
     pub fn captureMcpStaticSecret(
         self: *Workbench,
         expected_generation: u64,
         input: mcp_configuration.CaptureStaticSecretInput,
     ) Error!mcp_configuration.ManagementOutcome {
-        defer std.crypto.secureZero(u8, input.secret);
-        if (self.shutting_down) return .rejected;
-        const mcp = if (self.mcp) |*value| &value.state else return .rejected;
-        if (self.mcp.?.hasRefreshJob()) return .rejected;
-        if (mcp_policy.serverMutationBusy(mcp, input.server_id)) return .rejected;
-        const management = if (mcp.management) |*value| value else return .rejected;
-        if (!mcp_policy.expectedGenerationMatches(management, expected_generation))
-            return .stale_generation;
-        var preparation = try management.prepareCaptureStaticSecret(expected_generation, input);
-        return try self.commitMcpMutation(mcp, &preparation);
+        const runtime = if (self.mcp) |*value| value else {
+            std.crypto.secureZero(u8, input.secret);
+            return .rejected;
+        };
+        defer self.publishMcpRuntimeChanges();
+        return runtime.captureStaticSecret(expected_generation, input) catch |err| return @errorCast(err);
     }
 
     /// Host-only secure capture boundary for a pre-registered OAuth client.
-    /// Like static capture, this consumes and zeroes `secret` on every path.
     pub fn captureMcpOauthClientSecret(
         self: *Workbench,
         expected_generation: u64,
         input: mcp_configuration.CaptureOauthClientSecretInput,
     ) Error!mcp_configuration.ManagementOutcome {
-        defer std.crypto.secureZero(u8, input.secret);
-        if (self.shutting_down) return .rejected;
-        const mcp = if (self.mcp) |*value| &value.state else return .rejected;
-        if (self.mcp.?.hasRefreshJob()) return .rejected;
-        if (mcp_policy.serverMutationBusy(mcp, input.server_id)) return .rejected;
-        const management = if (mcp.management) |*value| value else return .rejected;
-        if (!mcp_policy.expectedGenerationMatches(management, expected_generation))
-            return .stale_generation;
-        var preparation = try management.prepareCaptureOauthClientSecret(
-            expected_generation,
-            input,
-        );
-        return try self.commitMcpMutation(mcp, &preparation);
+        const runtime = if (self.mcp) |*value| value else {
+            std.crypto.secureZero(u8, input.secret);
+            return .rejected;
+        };
+        defer self.publishMcpRuntimeChanges();
+        return runtime.captureOauthClientSecret(expected_generation, input) catch |err| return @errorCast(err);
     }
 
     pub fn renameMcpServer(
@@ -4448,15 +3897,9 @@ pub const Workbench = struct {
         expected_generation: u64,
         input: mcp_configuration.RenameServerInput,
     ) Error!mcp_configuration.ManagementOutcome {
-        if (self.shutting_down) return .rejected;
-        const mcp = if (self.mcp) |*value| &value.state else return .rejected;
-        if (self.mcp.?.hasRefreshJob()) return .rejected;
-        if (mcp_policy.serverMutationBusy(mcp, input.server_id)) return .rejected;
-        const management = if (mcp.management) |*value| value else return .rejected;
-        if (!mcp_policy.expectedGenerationMatches(management, expected_generation))
-            return .stale_generation;
-        var preparation = try management.prepareRenameServer(expected_generation, input);
-        return try self.commitMcpMutation(mcp, &preparation);
+        const runtime = if (self.mcp) |*value| value else return .rejected;
+        defer self.publishMcpRuntimeChanges();
+        return runtime.renameServer(expected_generation, input) catch |err| return @errorCast(err);
     }
 
     pub fn approveMcpConnection(
@@ -4464,18 +3907,9 @@ pub const Workbench = struct {
         expected_generation: u64,
         input: mcp_configuration.ApproveConnectionInput,
     ) Error!mcp_configuration.ManagementOutcome {
-        if (self.shutting_down) return .rejected;
-        const mcp = if (self.mcp) |*value| &value.state else return .rejected;
-        if (self.mcp.?.hasRefreshJob()) return .rejected;
-        if (mcp_policy.serverMutationBusy(mcp, input.server_id)) return .rejected;
-        const management = if (mcp.management) |*value| value else return .rejected;
-        if (!mcp_policy.expectedGenerationMatches(management, expected_generation))
-            return .stale_generation;
-        var preparation = try management.prepareApproveConnection(
-            expected_generation,
-            input,
-        );
-        return try self.commitMcpMutation(mcp, &preparation);
+        const runtime = if (self.mcp) |*value| value else return .rejected;
+        defer self.publishMcpRuntimeChanges();
+        return runtime.approveConnection(expected_generation, input) catch |err| return @errorCast(err);
     }
 
     pub fn setMcpServerEnabled(
@@ -4483,15 +3917,9 @@ pub const Workbench = struct {
         expected_generation: u64,
         input: mcp_configuration.SetServerEnabledInput,
     ) Error!mcp_configuration.ManagementOutcome {
-        if (self.shutting_down) return .rejected;
-        const mcp = if (self.mcp) |*value| &value.state else return .rejected;
-        if (self.mcp.?.hasRefreshJob()) return .rejected;
-        if (mcp_policy.serverMutationBusy(mcp, input.server_id)) return .rejected;
-        const management = if (mcp.management) |*value| value else return .rejected;
-        if (!mcp_policy.expectedGenerationMatches(management, expected_generation))
-            return .stale_generation;
-        var preparation = try management.prepareSetServerEnabled(expected_generation, input);
-        return try self.commitMcpMutation(mcp, &preparation);
+        const runtime = if (self.mcp) |*value| value else return .rejected;
+        defer self.publishMcpRuntimeChanges();
+        return runtime.setServerEnabled(expected_generation, input) catch |err| return @errorCast(err);
     }
 
     pub fn setMcpAllowedTools(
@@ -4499,15 +3927,9 @@ pub const Workbench = struct {
         expected_generation: u64,
         input: mcp_configuration.SetAllowedToolsInput,
     ) Error!mcp_configuration.ManagementOutcome {
-        if (self.shutting_down) return .rejected;
-        const mcp = if (self.mcp) |*value| &value.state else return .rejected;
-        if (self.mcp.?.hasRefreshJob()) return .rejected;
-        if (mcp_policy.serverMutationBusy(mcp, input.server_id)) return .rejected;
-        const management = if (mcp.management) |*value| value else return .rejected;
-        if (!mcp_policy.expectedGenerationMatches(management, expected_generation))
-            return .stale_generation;
-        var preparation = try management.prepareSetAllowedTools(expected_generation, input);
-        return try self.commitMcpMutation(mcp, &preparation);
+        const runtime = if (self.mcp) |*value| value else return .rejected;
+        defer self.publishMcpRuntimeChanges();
+        return runtime.setAllowedTools(expected_generation, input) catch |err| return @errorCast(err);
     }
 
     pub fn removeMcpServer(
@@ -4515,106 +3937,10 @@ pub const Workbench = struct {
         expected_generation: u64,
         server_id: []const u8,
     ) Error!mcp_configuration.ManagementOutcome {
-        if (self.shutting_down) return .rejected;
-        const mcp = if (self.mcp) |*value| &value.state else return .rejected;
-        if (self.mcp.?.hasRefreshJob()) return .rejected;
-        if (mcp_policy.serverMutationBusy(mcp, server_id)) return .rejected;
-        const management = if (mcp.management) |*value| value else return .rejected;
-        if (!mcp_policy.expectedGenerationMatches(management, expected_generation))
-            return .stale_generation;
-        var preparation = try management.prepareRemoveServer(expected_generation, server_id);
-        return try self.commitMcpMutation(mcp, &preparation);
+        const runtime = if (self.mcp) |*value| value else return .rejected;
+        defer self.publishMcpRuntimeChanges();
+        return runtime.removeServer(expected_generation, server_id) catch |err| return @errorCast(err);
     }
-
-    fn commitMcpMutation(
-        self: *Workbench,
-        mcp: *McpProductState,
-        preparation: *mcp_configuration.MutationPreparation,
-    ) Error!mcp_configuration.ManagementOutcome {
-        if (mcp.configuration_apply_state == .applying) return .rejected;
-        switch (preparation.*) {
-            .unchanged => return .unchanged,
-            .rejected => return .rejected,
-            .prepared => |*mutation| {
-                defer mutation.deinit();
-                var candidate = try self.mcpAdmissionForTarget(mcp, mutation.target());
-                var candidate_owned = true;
-                defer if (candidate_owned) candidate.deinit();
-                const management = &mcp.management.?;
-                const outcome = try management.commitPreparedMutation(mutation);
-                const reported_outcome = if (outcome == .saved_recovery_required and
-                    management.inspect().health == .outcome_unknown)
-                    mcp_configuration.ManagementOutcome.indeterminate
-                else
-                    outcome;
-                var changed = false;
-                switch (reported_outcome) {
-                    .saved, .saved_recovery_required => {
-                        mcp_policy.installCommittedDesiredState(mcp, management, candidate);
-                        mcp.connection_test = null;
-                        candidate_owned = false;
-                        changed = true;
-                    },
-                    .indeterminate => {
-                        mcp.connection_test = null;
-                        mcp_policy.blockAdmission(mcp, .persistence_outcome_unknown);
-                        changed = true;
-                    },
-                    .rejected => if (management.inspect().health != .ready) {
-                        mcp_policy.blockAdmissionForCurrentState(mcp);
-                        changed = true;
-                    },
-                    .unchanged, .stale_generation => unreachable,
-                }
-                if (changed) self.bumpRevision();
-                return reported_outcome;
-            },
-        }
-    }
-
-    fn mcpAdmissionForTarget(
-        self: *Workbench,
-        mcp: *McpProductState,
-        target: mcp_configuration.RegistryWire,
-    ) Error!McpAdmissionAuthority {
-        if (mcp.runtime_auth_failure_blocked)
-            return .{ .blocked = .runtime_authorization_failure };
-        const management = &mcp.management.?;
-        return switch (management.runtimeAlignmentFor(target)) {
-            .restart_required => .{ .blocked = .pending_restart },
-            .unknown => .{ .blocked = .alignment_unknown },
-            .current => current: {
-                if (mcp.activation_failed)
-                    break :current .{ .blocked = .activation_unavailable };
-                const activation = mcp.activation orelse break :current .{ .ready = .{
-                    .selection = null,
-                    .catalog_generation = null,
-                } };
-                const health = activation.serverHealth();
-                const allowlists = try self.allocator.alloc(
-                    lifecycle.McpServerAllowlist,
-                    health.len,
-                );
-                defer self.allocator.free(allowlists);
-                for (health, allowlists) |server, *allowlist| {
-                    const desired = findMcpServer(target.servers, server.id) orelse
-                        return error.McpCatalogBindingMismatch;
-                    allowlist.* = .{
-                        .id = server.id,
-                        .tools = mcp_policy.serverToolsForAdmission(target, desired),
-                    };
-                }
-                break :current .{ .ready = .{
-                    .selection = try self.agent_runtime.createMcpAdmissionSelection(
-                        activation,
-                        allowlists,
-                    ),
-                    .catalog_generation = activation.catalogGeneration(),
-                } };
-            },
-        };
-    }
-
     fn recoverExpiredMcpCatalogNoFail(self: *Workbench) void {
         if (self.shutting_down) return;
         if (self.mcp) |*runtime|

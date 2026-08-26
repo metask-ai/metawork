@@ -939,6 +939,19 @@ test("Product MCP kernels have one physical home and isolate refresh workers", (
     "rearmRefreshTimer",
     "beginShutdown",
     "finishShutdownAfterExecutorJoin",
+    "requireOauthReauthorization",
+    "beginAuthorization",
+    "authorizeOauth",
+    "beginOauthDynamicRegistration",
+    "completeOauthCodeExchange",
+    "beginOauthRefresh",
+    "completeOauthRefresh",
+    "clearOauthOperation",
+    "recoverOauthOperation",
+    "createHttpServer",
+    "updateHttpConnection",
+    "captureStaticSecret",
+    "removeServer",
   ]) {
     assert.match(runtime, new RegExp(`pub fn ${name}\\b`));
   }
@@ -1004,14 +1017,13 @@ test("Product MCP kernels have one physical home and isolate refresh workers", (
     workbenchProjection,
     /fn validMcpAuthorizationTransition|fn mcpServerMutationBusy|fn mcpPendingReauthorization|fn mcpScopeSetAddsRequirement|fn prepareMcpPendingReauthorization|fn installMcpPendingReauthorization|fn mcpServerToolsForAdmission|fn buildMcpOauthRefreshBinding|fn buildMcpRefreshAllowlists|fn mcpExpectedGenerationMatches|fn replaceMcpAdmission|fn blockMcpAdmissionForCurrentState|fn recoveryMcpGeneration/,
   );
-  for (const name of [
-    "commitMcpMutation",
-    "mcpAdmissionForTarget",
-    "rearmMcpRefreshTimerNoFail",
-    "commitMcpRefreshJobNoFail",
-  ]) {
+  for (const name of ["rearmMcpRefreshTimerNoFail", "commitMcpRefreshJobNoFail"]) {
     assert.match(workbenchProjection, new RegExp(`fn ${name}\\b`));
   }
+  assert.doesNotMatch(
+    workbenchProjection,
+    /fn commitMcpMutation|fn mcpAdmissionForTarget|\.prepare(?:Create|Update|Remove|Approve|Capture|Oauth|Begin|Complete|Clear|Require)[A-Z]|\.commitPrepared(?:Mutation|OauthOperationState)/,
+  );
   assert.doesNotMatch(
     workbenchProjection,
     /fn executeMcpRefreshJob|fn cancelMcpRefreshJob/,
