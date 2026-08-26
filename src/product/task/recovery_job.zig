@@ -71,8 +71,9 @@ pub const PreparedAttempt = struct {
     checkpoint: checkpoint_record.Record,
     workspace: OwnedWorkspaceBinding,
     execution: owned_execution.OwnedTaskExecution,
-    execution_generation: u64,
-    model: []u8,
+    source_execution_generation: u64,
+    target_execution_generation: u64,
+    task_model: []u8,
     provider: agent.ProviderKind,
 };
 
@@ -87,8 +88,9 @@ pub const CommitAuthority = struct {
     workspace_epoch: u64,
     workspace_kind: WorkspaceKind,
     workspace_root: []const u8,
-    execution_generation: u64,
-    execution_model: []const u8,
+    source_execution_generation: u64,
+    target_execution_generation: u64,
+    task_model: []const u8,
     provider: agent.ProviderKind,
     active_attempt_id: ?u64,
     shutting_down: bool,
@@ -97,7 +99,7 @@ pub const CommitAuthority = struct {
     checkpoint_matches: bool,
     workspace_authority_exact: bool,
     automatic_owner_exact: bool,
-    execution_authority_exact: bool,
+    target_execution_authority_exact: bool,
 };
 
 pub const AttemptAuthority = struct {
@@ -108,8 +110,9 @@ pub const AttemptAuthority = struct {
     workspace_epoch: u64,
     workspace_kind: WorkspaceKind,
     workspace_root: []const u8,
-    execution_generation: u64,
-    execution_model: []const u8,
+    source_execution_generation: u64,
+    target_execution_generation: u64,
+    task_model: []const u8,
     provider: agent.ProviderKind,
 };
 
@@ -128,8 +131,9 @@ pub fn commitAllowed(
         .workspace_epoch = attempt.workspace_epoch,
         .workspace_kind = attempt.workspace_kind,
         .workspace_root = attempt.workspace.canonical_root,
-        .execution_generation = attempt.execution_generation,
-        .execution_model = attempt.model,
+        .source_execution_generation = attempt.source_execution_generation,
+        .target_execution_generation = attempt.target_execution_generation,
+        .task_model = attempt.task_model,
         .provider = attempt.provider,
     }, authority);
 }
@@ -144,7 +148,7 @@ pub fn authorityExact(
         authority.checkpoint_matches and
         authority.workspace_authority_exact and
         authority.automatic_owner_exact and
-        authority.execution_authority_exact and
+        authority.target_execution_authority_exact and
         authority.active_attempt_id != null and
         authority.active_attempt_id.? == attempt.attempt_id and
         authority.task_id == attempt.task_id and
@@ -153,8 +157,9 @@ pub fn authorityExact(
         authority.workspace_epoch == attempt.workspace_epoch and
         authority.workspace_kind == attempt.workspace_kind and
         std.mem.eql(u8, authority.workspace_root, attempt.workspace_root) and
-        authority.execution_generation == attempt.execution_generation and
-        std.mem.eql(u8, authority.execution_model, attempt.execution_model) and
+        authority.source_execution_generation == attempt.source_execution_generation and
+        authority.target_execution_generation == attempt.target_execution_generation and
+        std.mem.eql(u8, authority.task_model, attempt.task_model) and
         authority.provider == attempt.provider;
 }
 
@@ -167,8 +172,9 @@ test "restore authority rejects every stale asynchronous dimension" {
         .workspace_epoch = 9,
         .workspace_kind = .automatic,
         .workspace_root = "C:/workspace",
-        .execution_generation = 17,
-        .execution_model = "model-a",
+        .source_execution_generation = 13,
+        .target_execution_generation = 17,
+        .task_model = "model-a",
         .provider = .anthropic,
     };
     const current: CommitAuthority = .{
@@ -178,8 +184,9 @@ test "restore authority rejects every stale asynchronous dimension" {
         .workspace_epoch = 9,
         .workspace_kind = .automatic,
         .workspace_root = "C:/workspace",
-        .execution_generation = 17,
-        .execution_model = "model-a",
+        .source_execution_generation = 13,
+        .target_execution_generation = 17,
+        .task_model = "model-a",
         .provider = .anthropic,
         .active_attempt_id = 11,
         .shutting_down = false,
@@ -188,7 +195,7 @@ test "restore authority rejects every stale asynchronous dimension" {
         .checkpoint_matches = true,
         .workspace_authority_exact = true,
         .automatic_owner_exact = true,
-        .execution_authority_exact = true,
+        .target_execution_authority_exact = true,
     };
     try std.testing.expect(authorityExact(attempt, current));
 
@@ -202,10 +209,13 @@ test "restore authority rejects every stale asynchronous dimension" {
     stale.workspace_kind = .manual;
     try std.testing.expect(!authorityExact(attempt, stale));
     stale = current;
-    stale.execution_generation += 1;
+    stale.source_execution_generation += 1;
     try std.testing.expect(!authorityExact(attempt, stale));
     stale = current;
-    stale.execution_model = "model-b";
+    stale.target_execution_generation += 1;
+    try std.testing.expect(!authorityExact(attempt, stale));
+    stale = current;
+    stale.task_model = "model-b";
     try std.testing.expect(!authorityExact(attempt, stale));
     stale = current;
     stale.active_attempt_id = 12;
@@ -220,7 +230,7 @@ test "restore authority rejects every stale asynchronous dimension" {
     stale.automatic_owner_exact = false;
     try std.testing.expect(!authorityExact(attempt, stale));
     stale = current;
-    stale.execution_authority_exact = false;
+    stale.target_execution_authority_exact = false;
     try std.testing.expect(!authorityExact(attempt, stale));
     stale = current;
     stale.shutting_down = true;
@@ -237,6 +247,9 @@ pub const Failure = enum {
     runtime_unavailable,
     session_capacity,
     restore_rejected,
+    binding_epoch_exhausted,
+    binding_persistence_failed,
+    binding_persistence_unknown,
     candidate_cleanup_failed,
 };
 
@@ -356,7 +369,7 @@ pub const Job = struct {
             .candidate => |*candidate| _ = candidate.discard(),
             .none, .failure => {},
         }
-        self.allocator.free(self.attempt.model);
+        self.allocator.free(self.attempt.task_model);
         self.attempt.execution.deinit();
         self.attempt.workspace.deinit();
         self.attempt.checkpoint.deinit(self.allocator);
@@ -418,7 +431,7 @@ pub const Job = struct {
             else
                 .candidate_cleanup_failed };
         };
-        access.setModel(self.attempt.model) catch {
+        access.setModel(self.attempt.task_model) catch {
             access.deinit();
             return .{ .failure = if (discardBinding(&restored.binding))
                 .restore_rejected

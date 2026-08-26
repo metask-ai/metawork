@@ -2583,6 +2583,14 @@ pub fn workbenchConfiguration() workbench_api.Configuration {
 pub fn installWorkbenchExecution(
     workbench: *workbench_api.Workbench,
 ) !void {
+    return installWorkbenchExecutionGeneration(workbench, 1);
+}
+
+pub fn installWorkbenchExecutionGeneration(
+    workbench: *workbench_api.Workbench,
+    generation: u64,
+) !void {
+    if (generation == 0) return error.InvalidExecutionGeneration;
     var execution = try account_contract.OwnedExecutionConfig.initOwned(
         std.testing.allocator,
         .anthropic,
@@ -2591,7 +2599,7 @@ pub fn installWorkbenchExecution(
             u8,
             account_contract.metask_anthropic_messages_url,
         ),
-        1,
+        generation,
         try std.testing.allocator.dupe(u8, "fixture-secret"),
     );
     errdefer execution.deinit();
@@ -2620,8 +2628,8 @@ pub fn installWorkbenchExecution(
             .model_catalog_api_key_id = "key-1",
             .can_create_task = true,
             .catalog_generation = 1,
-            .metask_execution_generation = 1,
-            .execution_generation = 1,
+            .metask_execution_generation = generation,
+            .execution_generation = generation,
         },
     });
     workbench.installExecutionNoFail(&execution);

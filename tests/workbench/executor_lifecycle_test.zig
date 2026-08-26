@@ -17,6 +17,7 @@ const workbenchConfiguration = fixture.workbenchConfiguration;
 const workbenchTaskInput = fixture.workbenchTaskInput;
 const waitWorkbenchSnapshot = fixture.waitWorkbenchSnapshot;
 const installWorkbenchExecution = fixture.installWorkbenchExecution;
+const installWorkbenchExecutionGeneration = fixture.installWorkbenchExecutionGeneration;
 
 const ShutdownContext = struct {
     workbench: *workbench_api.Workbench,
@@ -684,7 +685,7 @@ test "restart recovery revalidates live authority and continues the same Convers
     );
     var restored_live = true;
     defer if (restored_live) restored.deinit();
-    try installWorkbenchExecution(&restored);
+    try installWorkbenchExecutionGeneration(&restored, 2);
     // A persisted manual Workspace deliberately restarts without authority.
     // Reopening it models the user's explicit reauthorization action.
     try std.testing.expectEqual(
@@ -777,6 +778,7 @@ test "restart recovery revalidates live authority and continues the same Convers
         "\"id\":\"1\"",
         "\"continuationAvailable\":true",
     );
+    try std.testing.expectEqual(@as(u64, 2), try restored.taskBindingEpoch(task_id));
     try waitTaskSnapshot(
         &restored,
         "\"id\":\"1\"",
@@ -1137,7 +1139,7 @@ test "automatic Task restart restores Conversation and admits a second Text Run"
     );
     var restored_live = true;
     defer if (restored_live) restored.deinit();
-    try installWorkbenchExecution(&restored);
+    try installWorkbenchExecutionGeneration(&restored, 2);
     try waitTaskSnapshot(
         &restored,
         "\"id\":\"1\"",
@@ -1152,6 +1154,7 @@ test "automatic Task restart restores Conversation and admits a second Text Run"
         "\"id\":\"1\"",
         "\"continuationAvailable\":true",
     );
+    try std.testing.expectEqual(@as(u64, 2), try restored.taskBindingEpoch(task_id));
     try std.testing.expectEqual(
         workbench_api.CatalogAvailability.uninitialized,
         (try restored.taskCatalog(task_id)).availability,

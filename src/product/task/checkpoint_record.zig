@@ -73,6 +73,19 @@ pub const Record = struct {
             .compact => |id| if (self.session.last_compact_id != id) return error.InvalidRecord,
         }
     }
+
+    pub fn adoptBindingEpoch(
+        self: *Record,
+        expected: u64,
+        next: u64,
+    ) error{InvalidRecord}!void {
+        if (expected == 0 or next == 0 or
+            self.anchor.binding_epoch != expected or
+            expected == std.math.maxInt(u64) or
+            next != expected + 1)
+            return error.InvalidRecord;
+        self.anchor.binding_epoch = next;
+    }
 };
 
 test "record owns exactly blob, session binding, and commit anchor facts" {
@@ -94,4 +107,7 @@ test "record owns exactly blob, session binding, and commit anchor facts" {
     };
     defer record.deinit(allocator);
     try record.validateBinding(9, 3);
+    try record.adoptBindingEpoch(3, 4);
+    try record.validateBinding(9, 4);
+    try std.testing.expectError(error.InvalidRecord, record.adoptBindingEpoch(3, 4));
 }

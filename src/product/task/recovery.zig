@@ -30,6 +30,7 @@ pub const Projection = struct {
 };
 
 pub const RuntimeAdmission = enum { available, busy, capacity_reached, unavailable, shutting_down };
+pub const ExecutionAdmission = enum { available, unavailable };
 
 /// Stable Product identities that make a historical Conversation belong to
 /// the current Task attachment. Optional capability authority is deliberately
@@ -39,7 +40,6 @@ pub const CoreRecoveryAuthority = struct {
     checkpoint_available: bool = false,
     checkpoint_binding_exact: bool = false,
     checkpoint_history_exact: bool = false,
-    execution_exact: bool = false,
     workspace_identity_exact: bool = false,
     automatic_owner_exact: bool = false,
     authority_stable: bool = false,
@@ -52,6 +52,7 @@ pub const RecoveryAdmissionFacts = struct {
     task_persistence_ready: bool = false,
     checkpoint_store_ready: bool = false,
     runtime_admission: RuntimeAdmission = .unavailable,
+    execution_admission: ExecutionAdmission = .unavailable,
     core: CoreRecoveryAuthority = .{},
     recovery_failed: bool = false,
 };
@@ -68,7 +69,7 @@ pub fn evaluateRecoveryAdmission(facts: RecoveryAdmissionFacts) AdmissionDecisio
         !facts.core.checkpoint_binding_exact or
         !facts.core.checkpoint_history_exact)
         return .{ .denied = .checkpoint_unavailable };
-    if (!facts.core.execution_exact) return .{ .denied = .execution_mismatch };
+    if (facts.execution_admission != .available) return .{ .denied = .execution_mismatch };
     if (!facts.core.workspace_identity_exact or !facts.core.automatic_owner_exact)
         return .{ .denied = .workspace_unavailable };
     if (facts.runtime_admission != .available)
@@ -109,11 +110,11 @@ fn eligibleFacts() RecoveryAdmissionFacts {
         .task_persistence_ready = true,
         .checkpoint_store_ready = true,
         .runtime_admission = .available,
+        .execution_admission = .available,
         .core = .{
             .checkpoint_available = true,
             .checkpoint_binding_exact = true,
             .checkpoint_history_exact = true,
-            .execution_exact = true,
             .workspace_identity_exact = true,
             .automatic_owner_exact = true,
             .authority_stable = true,
@@ -184,7 +185,7 @@ test "recovery admission is fail closed for every core prerequisite" {
             .checkpoint => facts.core.checkpoint_available = false,
             .binding => facts.core.checkpoint_binding_exact = false,
             .history => facts.core.checkpoint_history_exact = false,
-            .execution => facts.core.execution_exact = false,
+            .execution => facts.execution_admission = .unavailable,
             .workspace => facts.core.workspace_identity_exact = false,
             .automatic_owner => facts.core.automatic_owner_exact = false,
             .runtime => facts.runtime_admission = .capacity_reached,

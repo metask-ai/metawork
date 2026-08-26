@@ -524,18 +524,19 @@ pub const RecoveryAuthorityQuery = struct {
     task_id: u64,
     workspace_id: u64,
     workspace_epoch: u64,
-    execution_generation: u64,
-    execution_model: []const u8,
+    target_execution_generation: u64,
+    task_model: []const u8,
     provider: agent.ProviderKind,
 };
 
 pub const RecoveryExternalAuthority = struct {
     workspace_root: []const u8,
     workspace_kind: recovery_job.WorkspaceKind,
+    target_execution_generation: u64,
     shutting_down: bool,
     workspace_authority_exact: bool,
     automatic_owner_exact: bool,
-    execution_authority_exact: bool,
+    target_execution_authority_exact: bool,
 };
 
 pub const RecoveryEffects = struct {
@@ -544,6 +545,7 @@ pub const RecoveryEffects = struct {
         *anyopaque,
         RecoveryAuthorityQuery,
     ) RecoveryExternalAuthority,
+    durable: DurableEffect,
 
     fn authority(
         self: RecoveryEffects,
@@ -564,7 +566,6 @@ pub const ProjectionAuthorityQuery = struct {
     workspace_id: u64,
     workspace_epoch: u64,
     workspace_root: []const u8,
-    execution_generation: u64,
     execution_provider: task_state.Provider,
     execution_model: []const u8,
 };
@@ -573,7 +574,7 @@ pub const ProjectionAuthority = struct {
     shutting_down: bool,
     task_persistence_ready: bool,
     checkpoint_store_ready: bool,
-    execution_exact: bool,
+    execution_admission: task_recovery.ExecutionAdmission,
     workspace_identity_exact: bool,
     automatic_owner_exact: bool,
     runtime_admission: task_recovery.RuntimeAdmission,
@@ -2636,6 +2637,10 @@ pub const Runtime = struct {
             return error.BindingEpochMismatch;
         const checkpoint = task.durable.checkpoint orelse
             return error.RecoveryUnavailable;
+        if (input.execution.execution_generation == 0 or
+            providerFromAccount(input.execution.target.provider_kind) !=
+                task.durable.execution_provider)
+            return error.RecoveryUnavailable;
         if (task.runtime.active_operation != .none or
             task.runtime.liveConst() != null)
             return error.RecoveryUnavailable;
@@ -2695,8 +2700,9 @@ pub const Runtime = struct {
                 .checkpoint = checkpoint_copy,
                 .workspace = workspace,
                 .execution = execution.take(),
-                .execution_generation = input.execution.execution_generation,
-                .model = model,
+                .source_execution_generation = task.durable.execution_generation,
+                .target_execution_generation = input.execution.execution_generation,
+                .task_model = model,
                 .provider = providerToAgent(task.durable.execution_provider),
             },
         };
@@ -2789,6 +2795,7 @@ pub const Runtime = struct {
             .task_persistence_ready = external.task_persistence_ready,
             .checkpoint_store_ready = external.checkpoint_store_ready,
             .runtime_admission = external.runtime_admission,
+            .execution_admission = external.execution_admission,
             .core = .{
                 .checkpoint_available = checkpoint != null and
                     task.durable.checkpoint_anchor == .available,
@@ -2797,7 +2804,6 @@ pub const Runtime = struct {
                     task_policy.checkpointMatchesCurrentHistory(task, record)
                 else
                     false,
-                .execution_exact = external.execution_exact,
                 .workspace_identity_exact = external.workspace_identity_exact,
                 .automatic_owner_exact = external.automatic_owner_exact,
                 .authority_stable = !self.recovery_poisoned and external.authority_stable,
@@ -2979,8 +2985,8 @@ pub const Runtime = struct {
                 .task_id = task.durable.id,
                 .workspace_id = task.durable.workspace_id,
                 .workspace_epoch = task.durable.workspace_epoch,
-                .execution_generation = task.durable.execution_generation,
-                .execution_model = task.durable.execution_model,
+                .target_execution_generation = job.attempt.target_execution_generation,
+                .task_model = task.durable.execution_model,
                 .provider = providerKind(task.durable.execution_provider),
             });
             const active_attempt_id: ?u64 = switch (task.runtime.active_operation) {
@@ -3002,8 +3008,9 @@ pub const Runtime = struct {
                         .workspace_epoch = task.durable.workspace_epoch,
                         .workspace_kind = external.workspace_kind,
                         .workspace_root = external.workspace_root,
-                        .execution_generation = task.durable.execution_generation,
-                        .execution_model = task.durable.execution_model,
+                        .source_execution_generation = task.durable.execution_generation,
+                        .target_execution_generation = external.target_execution_generation,
+                        .task_model = task.durable.execution_model,
                         .provider = providerKind(task.durable.execution_provider),
                         .active_attempt_id = active_attempt_id,
                         .shutting_down = external.shutting_down,
@@ -3012,10 +3019,51 @@ pub const Runtime = struct {
                         .checkpoint_matches = checkpoint_matches,
                         .workspace_authority_exact = external.workspace_authority_exact,
                         .automatic_owner_exact = external.automatic_owner_exact,
-                        .execution_authority_exact = external.execution_authority_exact,
+                        .target_execution_authority_exact = external.target_execution_authority_exact,
                     },
                 );
-                if (allowed) {
+                var install_candidate = allowed;
+                if (install_candidate and
+                    job.attempt.source_execution_generation !=
+                        job.attempt.target_execution_generation)
+                adoption: {
+                    if (task.durable.binding_epoch == std.math.maxInt(u64)) {
+                        task.runtime.last_restore_failure = .binding_epoch_exhausted;
+                        install_candidate = false;
+                        break :adoption;
+                    }
+                    const previous_generation = task.durable.execution_generation;
+                    const previous_epoch = task.durable.binding_epoch;
+                    const next_epoch = previous_epoch + 1;
+                    const checkpoint = &(task.durable.checkpoint orelse {
+                        task.runtime.last_restore_failure = .binding_persistence_failed;
+                        install_candidate = false;
+                        break :adoption;
+                    });
+                    checkpoint.adoptBindingEpoch(previous_epoch, next_epoch) catch {
+                        task.runtime.last_restore_failure = .binding_persistence_failed;
+                        install_candidate = false;
+                        break :adoption;
+                    };
+                    task.durable.execution_generation =
+                        job.attempt.target_execution_generation;
+                    task.durable.binding_epoch = next_epoch;
+                    switch (effects.durable.commit()) {
+                        .committed => {},
+                        .failed, .outcome_unknown => |outcome| {
+                            task.durable.execution_generation = previous_generation;
+                            task.durable.binding_epoch = previous_epoch;
+                            checkpoint.anchor.binding_epoch = previous_epoch;
+                            task.runtime.last_restore_failure = switch (outcome) {
+                                .failed => .binding_persistence_failed,
+                                .outcome_unknown => .binding_persistence_unknown,
+                                .committed => unreachable,
+                            };
+                            install_candidate = false;
+                        },
+                    }
+                }
+                if (install_candidate) {
                     task.runtime.last_restore_report = candidate.report;
                     task.runtime.last_restore_permission = .{
                         .restored_rules = candidate.report.restored_permission_rules,
@@ -3027,9 +3075,11 @@ pub const Runtime = struct {
                         .pinned_catalog = null,
                     } };
                     task.runtime.last_restore_failure = null;
-                } else if (!candidate.discard()) {
-                    self.recovery_poisoned = true;
-                    task.runtime.last_restore_failure = .candidate_cleanup_failed;
+                } else {
+                    if (!candidate.discard()) {
+                        self.recovery_poisoned = true;
+                        task.runtime.last_restore_failure = .candidate_cleanup_failed;
+                    }
                 }
             } else if (job.failure()) |failure| {
                 task.runtime.last_restore_failure = failure;
@@ -3082,7 +3132,6 @@ fn projectionAuthorityQuery(
         .workspace_id = task.durable.workspace_id,
         .workspace_epoch = task.durable.workspace_epoch,
         .workspace_root = task.durable.workspace_root,
-        .execution_generation = task.durable.execution_generation,
         .execution_provider = task.durable.execution_provider,
         .execution_model = task.durable.execution_model,
     };

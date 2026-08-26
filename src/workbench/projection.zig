@@ -4232,9 +4232,8 @@ pub const Workbench = struct {
             value.kind != .automatic or value.automatic_task_id == query.task_id
         else
             false;
-        const execution_exact = self.execution_replacement == .none and
+        const execution_available = self.execution_replacement == .none and
             self.execution.ready() and
-            query.execution_generation == self.execution.generation and
             query.execution_provider == self.execution.provider.? and
             if (self.custom_execution_binding) |binding|
                 std.mem.eql(u8, binding.model_id, self.execution.model()) and
@@ -4249,7 +4248,7 @@ pub const Workbench = struct {
             .task_persistence_ready = self.task_persistence_health.operational(),
             .checkpoint_store_ready = self.checkpoint_store != null and
                 self.checkpoint_store_health.load(.acquire) == .ready,
-            .execution_exact = execution_exact,
+            .execution_admission = if (execution_available) .available else .unavailable,
             .workspace_identity_exact = workspace_identity_exact,
             .automatic_owner_exact = automatic_owner_exact,
             .runtime_admission = if (self.shutting_down)
@@ -5211,22 +5210,26 @@ pub const Workbench = struct {
         const workspace = self.findWorkspace(query.workspace_id);
         const execution_exact = self.execution_replacement == .none and
             self.execution.ready() and
-            query.execution_generation == self.execution.generation and
+            query.target_execution_generation == self.execution.generation and
             query.provider == agentProvider(self.execution.provider.?) and
             if (self.custom_execution_binding) |binding|
                 std.mem.eql(u8, binding.model_id, self.execution.model()) and
-                    std.mem.eql(u8, query.execution_model, binding.model_id)
+                    std.mem.eql(u8, query.task_model, binding.model_id)
             else
                 self.account.account_can_create_task and
                     self.account.catalog_state == .ready and
                     self.account.execution_generation == self.execution.generation and
-                    self.accountHasModel(query.execution_model);
+                    self.accountHasModel(query.task_model);
         return .{
             .workspace_root = if (workspace) |value| value.canonical_root else "",
             .workspace_kind = if (workspace) |value| switch (value.kind) {
                 .manual => .manual,
                 .automatic => .automatic,
             } else .manual,
+            .target_execution_generation = if (self.execution.ready())
+                self.execution.generation
+            else
+                0,
             .shutting_down = self.shutting_down,
             .workspace_authority_exact = if (workspace) |value|
                 value.authorization == .available and value.epoch == query.workspace_epoch
@@ -5236,7 +5239,7 @@ pub const Workbench = struct {
                 value.kind != .automatic or value.automatic_task_id == query.task_id
             else
                 false,
-            .execution_authority_exact = execution_exact,
+            .target_execution_authority_exact = execution_exact,
         };
     }
 
@@ -5244,6 +5247,7 @@ pub const Workbench = struct {
         return .{
             .context = self,
             .authority_fn = taskRuntimeRecoveryAuthority,
+            .durable = self.taskRuntimeDurableEffect(),
         };
     }
 
