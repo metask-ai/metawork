@@ -9,6 +9,11 @@ const checkpoint_record = @import("product_task_checkpoint_record");
 const checkpoint_store = @import("product_task_checkpoint_store");
 const task_state = @import("product_task_state");
 
+/// Callback-scoped text buffer used while reconstructing Task history. The
+/// persistence leaf owns this wire-to-memory contract; callers never retain
+/// or inspect the enclosing live Task aggregate through it.
+pub const RestoreText = task_state.TrackedText;
+
 // Hard-cut persistence format. This deliberately has no migration/version
 // contract: the fixed frame layout and magic identify the sole active format.
 pub const max_store_bytes: usize = 16 * 1024 * 1024;
@@ -1449,7 +1454,6 @@ fn deinitRestoredRunInput(
 
 fn deinitRestoredRun(projection: RestoreProjection, run: *task_state.RunRecord) void {
     std.debug.assert(run.automatic_title.state.load(.acquire) != .running);
-    std.debug.assert(run.automatic_title.execution == null);
     for (run.tools) |*entry| {
         const tool = &(entry.* orelse continue);
         deinitRestoredTool(projection, tool);

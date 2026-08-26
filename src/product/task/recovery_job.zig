@@ -94,15 +94,183 @@ pub const PreparedAttempt = struct {
     attempt_id: u64,
     task_id: u64,
     binding_epoch: u64,
+    workspace_id: u64,
+    workspace_epoch: u64,
     checkpoint: checkpoint_record.Record,
     workspace: OwnedWorkspaceBinding,
     skill_policy: OwnedSkillPolicy,
     execution: owned_execution.OwnedTaskExecution,
+    execution_generation: u64,
     model: []u8,
     provider: agent.ProviderKind,
     mcp_selection: ?*agent.McpSelection,
     mcp_catalog_generation: ?u64,
 };
+
+/// Callback-time facts supplied by composition when a completed restore
+/// candidate is considered for installation. Every field names authority
+/// that may have changed while the worker was running; none is retained by
+/// the Task Runtime.
+pub const CommitAuthority = struct {
+    task_id: u64,
+    binding_epoch: u64,
+    workspace_id: u64,
+    workspace_epoch: u64,
+    workspace_root: []const u8,
+    skill_policy_revision: u64,
+    execution_generation: u64,
+    execution_model: []const u8,
+    provider: agent.ProviderKind,
+    mcp_catalog_generation: ?u64,
+    active_attempt_id: ?u64,
+    shutting_down: bool,
+    archived: bool,
+    attachment_detached: bool,
+    checkpoint_matches: bool,
+    workspace_authority_stable: bool,
+    execution_authority_stable: bool,
+    available_projection_bytes: usize,
+};
+
+pub const AttemptAuthority = struct {
+    attempt_id: u64,
+    task_id: u64,
+    binding_epoch: u64,
+    workspace_id: u64,
+    workspace_epoch: u64,
+    workspace_root: []const u8,
+    skill_policy_revision: u64,
+    execution_generation: u64,
+    execution_model: []const u8,
+    provider: agent.ProviderKind,
+    mcp_catalog_generation: ?u64,
+};
+
+/// A restore completion is publishable only while every authority token that
+/// admitted the attempt remains exact. Stale candidates are discarded and
+/// are never implicitly retried.
+pub fn commitAllowed(
+    attempt: *const PreparedAttempt,
+    authority: CommitAuthority,
+    candidate_projection_bytes: usize,
+) bool {
+    return authorityExact(.{
+        .attempt_id = attempt.attempt_id,
+        .task_id = attempt.task_id,
+        .binding_epoch = attempt.binding_epoch,
+        .workspace_id = attempt.workspace_id,
+        .workspace_epoch = attempt.workspace_epoch,
+        .workspace_root = attempt.workspace.canonical_root,
+        .skill_policy_revision = attempt.skill_policy.policy_revision,
+        .execution_generation = attempt.execution_generation,
+        .execution_model = attempt.model,
+        .provider = attempt.provider,
+        .mcp_catalog_generation = attempt.mcp_catalog_generation,
+    }, authority, candidate_projection_bytes);
+}
+
+pub fn authorityExact(
+    attempt: AttemptAuthority,
+    authority: CommitAuthority,
+    candidate_projection_bytes: usize,
+) bool {
+    return !authority.shutting_down and
+        !authority.archived and
+        authority.attachment_detached and
+        authority.checkpoint_matches and
+        authority.workspace_authority_stable and
+        authority.execution_authority_stable and
+        authority.active_attempt_id != null and
+        authority.active_attempt_id.? == attempt.attempt_id and
+        authority.task_id == attempt.task_id and
+        authority.binding_epoch == attempt.binding_epoch and
+        authority.workspace_id == attempt.workspace_id and
+        authority.workspace_epoch == attempt.workspace_epoch and
+        std.mem.eql(u8, authority.workspace_root, attempt.workspace_root) and
+        authority.skill_policy_revision == attempt.skill_policy_revision and
+        authority.execution_generation == attempt.execution_generation and
+        std.mem.eql(u8, authority.execution_model, attempt.execution_model) and
+        authority.provider == attempt.provider and
+        optionalU64Equal(authority.mcp_catalog_generation, attempt.mcp_catalog_generation) and
+        candidate_projection_bytes <= authority.available_projection_bytes;
+}
+
+fn optionalU64Equal(left: ?u64, right: ?u64) bool {
+    if (left == null or right == null) return left == null and right == null;
+    return left.? == right.?;
+}
+
+test "restore authority rejects every stale asynchronous dimension" {
+    const attempt: AttemptAuthority = .{
+        .attempt_id = 11,
+        .task_id = 7,
+        .binding_epoch = 3,
+        .workspace_id = 5,
+        .workspace_epoch = 9,
+        .workspace_root = "C:/workspace",
+        .skill_policy_revision = 13,
+        .execution_generation = 17,
+        .execution_model = "model-a",
+        .provider = .anthropic,
+        .mcp_catalog_generation = 19,
+    };
+    const current: CommitAuthority = .{
+        .task_id = 7,
+        .binding_epoch = 3,
+        .workspace_id = 5,
+        .workspace_epoch = 9,
+        .workspace_root = "C:/workspace",
+        .skill_policy_revision = 13,
+        .execution_generation = 17,
+        .execution_model = "model-a",
+        .provider = .anthropic,
+        .mcp_catalog_generation = 19,
+        .active_attempt_id = 11,
+        .shutting_down = false,
+        .archived = false,
+        .attachment_detached = true,
+        .checkpoint_matches = true,
+        .workspace_authority_stable = true,
+        .execution_authority_stable = true,
+        .available_projection_bytes = 100,
+    };
+    try std.testing.expect(authorityExact(attempt, current, 100));
+
+    var stale = current;
+    stale.workspace_epoch += 1;
+    try std.testing.expect(!authorityExact(attempt, stale, 1));
+    stale = current;
+    stale.workspace_root = "C:/replacement";
+    try std.testing.expect(!authorityExact(attempt, stale, 1));
+    stale = current;
+    stale.skill_policy_revision += 1;
+    try std.testing.expect(!authorityExact(attempt, stale, 1));
+    stale = current;
+    stale.execution_generation += 1;
+    try std.testing.expect(!authorityExact(attempt, stale, 1));
+    stale = current;
+    stale.execution_model = "model-b";
+    try std.testing.expect(!authorityExact(attempt, stale, 1));
+    stale = current;
+    stale.mcp_catalog_generation = 20;
+    try std.testing.expect(!authorityExact(attempt, stale, 1));
+    stale = current;
+    stale.active_attempt_id = 12;
+    try std.testing.expect(!authorityExact(attempt, stale, 1));
+    stale = current;
+    stale.checkpoint_matches = false;
+    try std.testing.expect(!authorityExact(attempt, stale, 1));
+    stale = current;
+    stale.workspace_authority_stable = false;
+    try std.testing.expect(!authorityExact(attempt, stale, 1));
+    stale = current;
+    stale.execution_authority_stable = false;
+    try std.testing.expect(!authorityExact(attempt, stale, 1));
+    stale = current;
+    stale.shutting_down = true;
+    try std.testing.expect(!authorityExact(attempt, stale, 1));
+    try std.testing.expect(!authorityExact(attempt, current, 101));
+}
 
 pub const Failure = enum {
     cancelled,
