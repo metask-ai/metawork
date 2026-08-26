@@ -161,8 +161,8 @@ pub fn writeProjection(
 pub const Runtime = struct {
     allocator: std.mem.Allocator,
     ports: ports_module.Ports,
-    /// Temporary migration seam for management/OAuth callers. The final
-    /// surface-closure cut makes every kernel field private to this module.
+    /// Aggregate-owned MCP state. Production composition consumes it only
+    /// through Runtime typed operations; direct access is test-seam only.
     state: state_module.McpProductState,
     refresh_job: ?*refresh_job.Job = null,
     shutting_down: bool = false,
