@@ -533,6 +533,8 @@ export const enUS = {
   "run.placeholder_closing": "This task is ending",
   "run.placeholder_unavailable":
     "End this task and start a new one to continue",
+  "run.placeholder_execution_rebind_required":
+    "The current execution cannot run this conversation. Switch to an account or connection that supports the task model",
   "run.placeholder_recovery_required":
     "Type a message; the conversation will restore when you send",
   "run.draft_only":

@@ -493,6 +493,8 @@ export const zhCN: Record<MessageId, string> = {
   "run.placeholder_archived": "恢复此任务后才能继续",
   "run.placeholder_closing": "此任务正在结束",
   "run.placeholder_unavailable": "结束此任务并新建任务后才能继续",
+  "run.placeholder_execution_rebind_required":
+    "当前执行配置无法承载此会话，请切换到支持该任务模型的账号或连接",
   "run.placeholder_recovery_required": "输入消息，发送时会恢复此会话",
   "run.draft_only": "已在本地保存为草稿。当前工作结束后即可发送。",
   "run.started": "工作已开始。",

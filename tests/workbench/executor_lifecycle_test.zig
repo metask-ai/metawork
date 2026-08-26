@@ -609,7 +609,7 @@ test "restart recovery revalidates live authority and continues the same Convers
     );
     var first_workbench_live = true;
     defer if (first_workbench_live) first.deinit();
-    try installWorkbenchExecution(&first);
+    try installWorkbenchExecutionGeneration(&first, 1);
     const workspace_id = try first.openWorkspace(workbenchTaskInput());
     var catalog = try waitCatalogReady(&first, workspace_id);
     _ = try first.setSkillEnabled(.{
@@ -869,7 +869,7 @@ test "restart recovery revalidates live authority and continues the same Convers
     );
     var shutdown_restore_live = true;
     defer if (shutdown_restore_live) shutdown_restore.deinit();
-    try installWorkbenchExecution(&shutdown_restore);
+    try installWorkbenchExecutionGeneration(&shutdown_restore, 2);
     try std.testing.expectEqual(
         workspace_id,
         try shutdown_restore.openWorkspace(workbenchTaskInput()),
@@ -956,7 +956,7 @@ test "restart recovery revalidates live authority and continues the same Convers
         invalidation_configuration,
     );
     defer workspace_invalidation.deinit();
-    try installWorkbenchExecution(&workspace_invalidation);
+    try installWorkbenchExecutionGeneration(&workspace_invalidation, 2);
     try std.testing.expectEqual(
         workspace_id,
         try workspace_invalidation.openWorkspace(workbenchTaskInput()),
@@ -1014,7 +1014,7 @@ test "restart recovery revalidates live authority and continues the same Convers
     );
 }
 
-test "automatic Task restart restores Conversation and admits a second Text Run" {
+test "automatic Task binding adoption survives another restart and admits a second Text Run" {
     fake_core.reset();
     fake_core.setCheckpointGeneration(1);
     const home = try std.Io.Dir.cwd().realPathFileAlloc(
@@ -1083,7 +1083,7 @@ test "automatic Task restart restores Conversation and admits a second Text Run"
     );
     var first_live = true;
     defer if (first_live) first.deinit();
-    try installWorkbenchExecution(&first);
+    try installWorkbenchExecutionGeneration(&first, 1);
     const task_id = try first.createTaskForWorkspace(.automatic, 1, null, null);
     _ = try first.runTask(task_id, .{ .text = "automatic first run" });
     try waitCheckpointRecord(&first, &persistence);
@@ -1155,12 +1155,80 @@ test "automatic Task restart restores Conversation and admits a second Text Run"
         "\"continuationAvailable\":true",
     );
     try std.testing.expectEqual(@as(u64, 2), try restored.taskBindingEpoch(task_id));
+    const adopted_history = try std.testing.allocator.dupe(
+        u8,
+        persistence_storage[0..persistence.len],
+    );
+    defer std.testing.allocator.free(adopted_history);
+    restored.shutdownExecutor();
+    restored.deinit();
+    restored_live = false;
+    try shutdownTestComposition(runtime);
+    deinitTestComposition(runtime);
+    runtime_live = false;
+
+    fake_core.lock();
+    fake_core.session_created = 0;
+    fake_core.checkpoint_restores = 0;
+    fake_core.run_calls = 0;
+    fake_core.restore_last_run_id = 1;
+    fake_core.restore_last_compact_id = 0;
+    fake_core.unlock();
+    runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_sessions = 1,
+    });
+    runtime_live = true;
+    var continued_automatic_root = try workbench_api.AutomaticWorkspaceRoot.open(
+        std.testing.io,
+        std.testing.allocator,
+        root_storage[0..root_len],
+    );
+    defer continued_automatic_root.deinit();
+    var third_configuration = workbenchConfiguration();
+    third_configuration.directories.canonical_user_home = home;
+    third_configuration.directories.automatic_workspace_root = &continued_automatic_root;
+    third_configuration.task_persistence = persistence.capabilityRestored(adopted_history);
+    third_configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
+    var continued = try workbench_api.Workbench.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 2,
+            .max_workspaces = 1,
+            .max_tasks = 1,
+            .max_runs_per_task = 2,
+            .max_tools_per_run = 1,
+        },
+        third_configuration,
+    );
+    var continued_live = true;
+    defer if (continued_live) continued.deinit();
+    try installWorkbenchExecutionGeneration(&continued, 2);
+    try waitTaskSnapshot(
+        &continued,
+        "\"id\":\"1\"",
+        "\"continuationRecoveryAvailable\":true",
+    );
+    _ = try continued.restoreTaskConversation(
+        task_id,
+        try continued.taskBindingEpoch(task_id),
+    );
+    try waitTaskSnapshot(
+        &continued,
+        "\"id\":\"1\"",
+        "\"continuationAvailable\":true",
+    );
+    try std.testing.expectEqual(@as(u64, 2), try continued.taskBindingEpoch(task_id));
     try std.testing.expectEqual(
         workbench_api.CatalogAvailability.uninitialized,
-        (try restored.taskCatalog(task_id)).availability,
+        (try continued.taskCatalog(task_id)).availability,
     );
-    _ = try restored.runTask(task_id, .{ .text = "automatic second run" });
-    try waitTaskSnapshot(&restored, "\"id\":\"2\"", "\"phase\":\"completed\"");
+    _ = try continued.runTask(task_id, .{ .text = "automatic second run" });
+    try waitTaskSnapshot(&continued, "\"id\":\"2\"", "\"phase\":\"completed\"");
     fake_core.lock();
     const restores = fake_core.checkpoint_restores;
     const runs = fake_core.run_calls;
@@ -1168,9 +1236,9 @@ test "automatic Task restart restores Conversation and admits a second Text Run"
     try std.testing.expectEqual(@as(usize, 1), restores);
     try std.testing.expectEqual(@as(usize, 1), runs);
 
-    restored.shutdownExecutor();
-    restored.deinit();
-    restored_live = false;
+    continued.shutdownExecutor();
+    continued.deinit();
+    continued_live = false;
     try shutdownTestComposition(runtime);
     deinitTestComposition(runtime);
     runtime_live = false;

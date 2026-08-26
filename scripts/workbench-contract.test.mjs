@@ -692,6 +692,19 @@ test("Conversation recovery projection is one coherent continuation state", () =
   restoring.tasks[0].continuationRecoveryAvailable = false;
   assert.deepEqual(decodeWorkbenchSnapshot(restoring), restoring);
 
+  const rebindRequired = clone(recoverable);
+  rebindRequired.tasks[0].continuationUnavailableReason =
+    "execution_rebind_required";
+  rebindRequired.tasks[0].continuationRecoveryAvailable = false;
+  assert.deepEqual(decodeWorkbenchSnapshot(rebindRequired), rebindRequired);
+
+  const retiredReason = clone(rebindRequired);
+  retiredReason.tasks[0].continuationUnavailableReason = "execution_mismatch";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(retiredReason),
+    /execution_mismatch/,
+  );
+
   const missingOperation = clone(restoring);
   missingOperation.tasks[0].activeOperation = null;
   assert.throws(

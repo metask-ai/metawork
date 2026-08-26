@@ -400,7 +400,9 @@ export function ComposerFooter({
                             "session_recovery_in_progress" ||
                           unavailableReason === "session_recovery_failed"
                           ? "run.placeholder_recovery_required"
-                          : "run.placeholder_unavailable",
+                          : unavailableReason === "execution_rebind_required"
+                            ? "run.placeholder_execution_rebind_required"
+                            : "run.placeholder_unavailable",
                       )
                     : archived
                       ? t("run.placeholder_archived")

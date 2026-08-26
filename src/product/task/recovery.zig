@@ -17,7 +17,7 @@ pub const UnavailableReason = enum {
     session_recovery_failed,
     persistence_unavailable,
     checkpoint_unavailable,
-    execution_mismatch,
+    execution_rebind_required,
     workspace_unavailable,
     authority_unavailable,
     runtime_unavailable,
@@ -69,7 +69,8 @@ pub fn evaluateRecoveryAdmission(facts: RecoveryAdmissionFacts) AdmissionDecisio
         !facts.core.checkpoint_binding_exact or
         !facts.core.checkpoint_history_exact)
         return .{ .denied = .checkpoint_unavailable };
-    if (facts.execution_admission != .available) return .{ .denied = .execution_mismatch };
+    if (facts.execution_admission != .available)
+        return .{ .denied = .execution_rebind_required };
     if (!facts.core.workspace_identity_exact or !facts.core.automatic_owner_exact)
         return .{ .denied = .workspace_unavailable };
     if (facts.runtime_admission != .available)
@@ -172,7 +173,7 @@ test "recovery admission is fail closed for every core prerequisite" {
         .{ .field = .checkpoint, .reason = .checkpoint_unavailable },
         .{ .field = .binding, .reason = .checkpoint_unavailable },
         .{ .field = .history, .reason = .checkpoint_unavailable },
-        .{ .field = .execution, .reason = .execution_mismatch },
+        .{ .field = .execution, .reason = .execution_rebind_required },
         .{ .field = .workspace, .reason = .workspace_unavailable },
         .{ .field = .automatic_owner, .reason = .workspace_unavailable },
         .{ .field = .runtime, .reason = .runtime_unavailable },

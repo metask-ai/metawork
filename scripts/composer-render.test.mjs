@@ -627,6 +627,19 @@ test("a poisoned Task explains why continuation is unavailable", () => {
   assert.match(markup, /End this task and start a new one to continue/);
 });
 
+test("execution target incompatibility does not mislabel the Conversation as lost", () => {
+  const markup = render({
+    unavailable: true,
+    unavailableReason: "execution_rebind_required",
+    composeDisabled: true,
+  });
+  assert.match(
+    markup,
+    /The current execution cannot run this conversation\. Switch to an account or connection that supports the task model/,
+  );
+  assert.doesNotMatch(markup, /End this task and start a new one/);
+});
+
 test("a restart-detached Task keeps the Composer ready for send-time recovery", () => {
   const markup = render({
     unavailable: true,
