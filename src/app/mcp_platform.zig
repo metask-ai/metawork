@@ -6,7 +6,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const native_sdk = @import("native_sdk");
 const agent = @import("metawork_agent");
-const mcp_configuration = @import("metawork_product_mcp").configuration;
+const mcp_configuration = @import("metawork_product_mcp").contract;
 const mcp_oauth = @import("metawork_mcp_oauth");
 const product_identity = @import("metawork_product_identity");
 

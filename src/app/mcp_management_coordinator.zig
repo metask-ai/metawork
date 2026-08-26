@@ -8,8 +8,8 @@ const builtin = @import("builtin");
 const agent = @import("metawork_agent");
 const workbench = @import("metawork_workbench");
 const product_mcp = @import("metawork_product_mcp");
-const mcp_configuration = product_mcp.configuration;
-const mcp_state = product_mcp.state;
+const mcp_configuration = product_mcp.contract;
+const mcp_types = product_mcp;
 const mcp_oauth = @import("metawork_mcp_oauth");
 const mcp_platform = @import("metawork_mcp_platform");
 const mcp_startup = @import("mcp_startup.zig");
@@ -168,7 +168,7 @@ pub const ConfigurationApplyStartOutcome = enum {
     unavailable,
 };
 
-pub const SecretSlot = mcp_state.McpSecretCaptureTarget;
+pub const SecretSlot = mcp_types.McpSecretCaptureTarget;
 
 const oauth_timeout: std.Io.Clock.Duration = .{
     .raw = .fromSeconds(5 * 60),
@@ -422,7 +422,7 @@ fn deinitJobInput(allocator: std.mem.Allocator, input: *JobInput) void {
 }
 
 const Flow = struct {
-    start: mcp_state.McpAuthorizationStart,
+    start: mcp_types.McpAuthorizationStart,
     deadline: std.Io.Clock.Timestamp,
     discovery: ?DiscoveryResult = null,
     attempt: ?*mcp_oauth.AuthorizationAttempt = null,
@@ -445,7 +445,7 @@ const Flow = struct {
 };
 
 const ConnectionTestResult = struct {
-    outcome: mcp_state.McpConnectionTestOutcome = .failed,
+    outcome: mcp_types.McpConnectionTestOutcome = .failed,
     tool_count: u32 = 0,
     issue_count: u32 = 0,
 };
@@ -1853,12 +1853,12 @@ test "MCP configuration apply publishes failed when preparation cannot start" {
 
     try std.testing.expectError(error.OutOfMemory, coordinator.applyConfiguration());
     try std.testing.expectEqual(
-        mcp_state.McpConfigurationApplyState.failed,
-        workbench_owner.mcp.?.configuration_apply_state,
+        mcp_types.McpConfigurationApplyState.failed,
+        product_mcp.testing.state(&workbench_owner.mcp.?).configuration_apply_state,
     );
     try std.testing.expectEqual(
-        mcp_state.McpAdmissionBlockReason.pending_restart,
-        workbench_owner.mcp.?.admission.blocked,
+        mcp_types.McpAdmissionBlockReason.pending_restart,
+        product_mcp.testing.state(&workbench_owner.mcp.?).admission.blocked,
     );
 }
 

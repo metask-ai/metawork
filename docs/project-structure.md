@@ -72,7 +72,7 @@ metawork/
 │   ├── product/           # Product owner 与其持有的具名产品子模块；不形成统一 facade
 │   │   ├── account.zig    # Account module entrypoint；公开模块名仍为 metawork_account
 │   │   ├── account/       # Account Runtime、OAuth、catalog、credential 与状态机
-│   │   ├── mcp.zig        # Workbench-held Product MCP module entrypoint
+│   │   ├── mcp.zig        # Product MCP Runtime、Ports、contract 与 typed DTO 窄入口
 │   │   ├── mcp/           # MCP configuration、runtime state/freshness 与 owner-defined testdata
 │   │   ├── skill.zig      # Live Product Skill 的窄公开入口
 │   │   ├── skill/         # runtime/ports 与内部 state/policy/view/management-runtime 等 kernels
@@ -121,6 +121,8 @@ metawork/
 | Renderer        | snapshot 消费、产品 WebUI 交互、纯 UI 状态与本地草稿、`frontend/src/bridge/` 合同实现层（transport 适配与 runtime decode）    | 原生窗口 owner、平台真实状态、安全决策、secret、AgentCore raw event、产品状态机    |
 
 `product/account/contract.zig` 是 Account owner 发布的纯合同，不是新的产品 owner。`product/mcp.zig` 与 `product/mcp/` 是 Workbench 持有的产品 MCP 子模块；`product/skill.zig` 与 `product/skill/` 收拢 live aggregate state、Workspace/Task 共用的 immutable catalog compiler、enablement policy/store、本地 Skill management transaction，以及 package 的有界检查、staging 和导入导出 kernel；`product/task.zig` 与 `product/task/` 构成 live Task aggregate，聚合入口只发布 Runtime、typed operation/port/fact 与 history/checkpoint store 叶面，内部 state/policy/view/attachment/Session/execution/deletion/recovery kernel 不向生产组合层开放。三者都不增加新的 Product owner。`product/` 是产品 owner 及具名产品子模块的目录归属，不增加统一 Product facade。`automation/` 只提供受控账号、origin 和临时 Workspace authority，不注册额外协议，也不拥有产品 transport state。
+
+`product/mcp.zig` 同样是窄聚合入口：生产只发布 data-only `contract`、Runtime、Ports 与必要 typed DTO；state/policy/view/refresh-job 仍是 Runtime 内部 kernel，只有测试可经 `builtin.is_test` seam 访问。build graph 不把这些内部 kernel 注入聚合根。
 
 Product Skill 的公开 module 只发布 runtime、ports、catalog、enablement 与 management。package、policy、state、view、management-runtime 只在 Runtime 的内部 module graph 中装配；Workbench projection 不得直接 import 这些 kernel、拼装其状态、读取 `.skill.state`，也不得取得 `CatalogSlot`/`CatalogControl` 可变指针。Task/Session 组合只消费 Runtime 发布的 immutable catalog authority；catalog redaction、invalidation、generation 与 reschedule 不离开 Runtime。已安装 definition read/export 的 `.agents/skills` root 由 Runtime 根据 canonical binding 打开，Workbench 不拼接路径或传递 `CanonicalRoot`。
 

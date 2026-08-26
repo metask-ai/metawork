@@ -26,10 +26,10 @@ const task_test_policy = if (builtin.is_test) task_testing.policy_module else st
 const task_test_execution = if (builtin.is_test) task_testing.execution_module else struct {};
 const task_test_view = if (builtin.is_test) task_testing.view_module else struct {};
 const product_mcp = @import("metawork_product_mcp");
-const mcp_configuration = product_mcp.configuration;
-const mcp_ports = product_mcp.ports;
-const mcp_refresh_job = product_mcp.refresh_job;
-const mcp_runtime = product_mcp.runtime;
+const mcp_configuration = product_mcp.contract;
+const mcp_ports = product_mcp;
+const mcp_runtime = product_mcp;
+const mcp_testing = product_mcp.testing;
 const contract_fixture = @import("workbench_contract_fixture");
 const build_options = @import("build_options");
 
@@ -854,7 +854,7 @@ const WorkspaceTrust = union(enum) {
 
 const CatalogSnapshot = catalog_snapshot.Snapshot;
 
-const McpRefreshJob = mcp_refresh_job.Job;
+const McpRefreshTestJob = if (builtin.is_test) mcp_testing.RefreshJob else struct {};
 
 const WorkspaceView = struct {
     id: u64,
@@ -11360,7 +11360,7 @@ test "MCP runtime OAuth failure durably reauthorizes and preserves scope step-up
     var workbench = try testWorkbench();
     defer workbench.deinit();
     std.debug.assert(workbench.mcp == null);
-    workbench.mcp = mcp_runtime.Runtime.init(
+    workbench.mcp = mcp_testing.init(
         workbench.allocator,
         productMcpPorts(
             workbench.executor,
@@ -11396,7 +11396,7 @@ test "MCP runtime OAuth failure durably reauthorizes and preserves scope step-up
     );
     try std.testing.expectEqualStrings(
         "ready",
-        workbench.mcp.?.state.management.?.desiredRegistry().?.servers[0].auth.oauth.?.status,
+        mcp_testing.state(&workbench.mcp.?).management.?.desiredRegistry().?.servers[0].auth.oauth.?.status,
     );
     try std.testing.expectEqual(
         McpRuntimeAuthorizationFailureOutcome.applied,
@@ -11408,7 +11408,7 @@ test "MCP runtime OAuth failure durably reauthorizes and preserves scope step-up
             .challenge_scopes_complete = true,
         }),
     );
-    const desired = workbench.mcp.?.state.management.?.desiredRegistry().?;
+    const desired = mcp_testing.state(&workbench.mcp.?).management.?.desiredRegistry().?;
     try std.testing.expectEqualStrings(
         "reauth_required",
         desired.servers[0].auth.oauth.?.status,
@@ -11418,14 +11418,14 @@ test "MCP runtime OAuth failure durably reauthorizes and preserves scope step-up
         mcp_configuration.RuntimeAlignment.current,
         workbench.inspectMcpDesiredConfiguration().?.runtime_alignment,
     );
-    try std.testing.expect(workbench.mcp.?.state.admission == .ready);
+    try std.testing.expect(mcp_testing.state(&workbench.mcp.?).admission == .ready);
     try std.testing.expectEqual(
         @as(usize, 1),
-        workbench.mcp.?.state.pending_reauthorizations.items.len,
+        mcp_testing.state(&workbench.mcp.?).pending_reauthorizations.items.len,
     );
     try std.testing.expectEqualStrings(
         "oauth",
-        workbench.mcp.?.state.pending_reauthorizations.items[0].server_id,
+        mcp_testing.state(&workbench.mcp.?).pending_reauthorizations.items[0].server_id,
     );
     var start = (try workbench.beginMcpAuthorization(5, "oauth")).?;
     defer start.deinit();
@@ -11437,7 +11437,7 @@ test "MCP runtime OAuth failure durably reauthorizes and preserves scope step-up
     workbench.blockMcpAdmissionAfterRuntimeAuthFailure();
     try std.testing.expectEqual(
         McpAdmissionBlockReason.runtime_authorization_failure,
-        workbench.mcp.?.state.admission.blocked,
+        mcp_testing.state(&workbench.mcp.?).admission.blocked,
     );
     try std.testing.expectEqual(
         mcp_configuration.ManagementOutcome.saved,
@@ -11448,11 +11448,11 @@ test "MCP runtime OAuth failure durably reauthorizes and preserves scope step-up
     );
     try std.testing.expectEqual(
         McpAdmissionBlockReason.runtime_authorization_failure,
-        workbench.mcp.?.state.admission.blocked,
+        mcp_testing.state(&workbench.mcp.?).admission.blocked,
     );
     try std.testing.expectEqual(
         @as(usize, 1),
-        workbench.mcp.?.state.pending_reauthorizations.items.len,
+        mcp_testing.state(&workbench.mcp.?).pending_reauthorizations.items.len,
     );
     try std.testing.expectEqual(
         mcp_configuration.ManagementOutcome.saved,
@@ -11460,7 +11460,7 @@ test "MCP runtime OAuth failure durably reauthorizes and preserves scope step-up
     );
     try std.testing.expectEqual(
         @as(usize, 0),
-        workbench.mcp.?.state.pending_reauthorizations.items.len,
+        mcp_testing.state(&workbench.mcp.?).pending_reauthorizations.items.len,
     );
 }
 
@@ -11575,7 +11575,7 @@ test "empty MCP startup commits a proven manageable runtime" {
     );
     try std.testing.expectEqual(
         McpAdmissionBlockReason.pending_restart,
-        workbench.mcp.?.state.admission.blocked,
+        mcp_testing.state(&workbench.mcp.?).admission.blocked,
     );
     const created_snapshot = try workbench.writeSnapshot(&output);
     try std.testing.expect(std.mem.indexOf(
@@ -11588,7 +11588,7 @@ test "empty MCP startup commits a proven manageable runtime" {
         created_snapshot,
         "\"desiredEnabled\":true,\"runtimeStatus\":\"not_loaded\",\"newTaskAccess\":\"restart_required\"",
     ) != null);
-    const server_id = workbench.mcp.?.state.management.?.desiredRegistry().?.servers[0].id;
+    const server_id = mcp_testing.state(&workbench.mcp.?).management.?.desiredRegistry().?.servers[0].id;
     try workbench.beginMcpConnectionTest(server_id);
     const testing_snapshot = try workbench.writeSnapshot(&output);
     try std.testing.expect(std.mem.indexOf(
@@ -11605,7 +11605,7 @@ test "empty MCP startup commits a proven manageable runtime" {
     ) != null);
     try workbench.beginMcpConfigurationApply(1);
     try std.testing.expectError(error.CatalogLoading, workbench.refreshMcpCatalog());
-    try std.testing.expect(workbench.mcp.?.state.refresh_pending);
+    try std.testing.expect(mcp_testing.state(&workbench.mcp.?).refresh_pending);
     try std.testing.expect(!workbench.mcp.?.hasRefreshJob());
     const applying_snapshot = try workbench.writeSnapshot(&output);
     try std.testing.expect(std.mem.indexOf(
@@ -11615,7 +11615,7 @@ test "empty MCP startup commits a proven manageable runtime" {
     ) != null);
     try std.testing.expectEqual(
         McpAdmissionBlockReason.refreshing,
-        workbench.mcp.?.state.admission.blocked,
+        mcp_testing.state(&workbench.mcp.?).admission.blocked,
     );
     workbench.failMcpConfigurationApply(1);
     const failed_apply_snapshot = try workbench.writeSnapshot(&output);
@@ -11626,9 +11626,9 @@ test "empty MCP startup commits a proven manageable runtime" {
     ) != null);
     try std.testing.expectEqual(
         McpAdmissionBlockReason.refreshing,
-        workbench.mcp.?.state.admission.blocked,
+        mcp_testing.state(&workbench.mcp.?).admission.blocked,
     );
-    try std.testing.expect(!workbench.mcp.?.state.refresh_pending);
+    try std.testing.expect(!mcp_testing.state(&workbench.mcp.?).refresh_pending);
     try std.testing.expect(workbench.mcp.?.hasRefreshJob());
 }
 
@@ -11719,14 +11719,14 @@ test "MCP authorization operation owns product phase and durable token boundary"
             .client = .{ .pre_registered = .{ .client_id = "client-1" } },
         }),
     );
-    const server_id = workbench.mcp.?.state.management.?.desiredRegistry().?.servers[0].id;
+    const server_id = mcp_testing.state(&workbench.mcp.?).management.?.desiredRegistry().?.servers[0].id;
     var start = (try workbench.beginMcpAuthorization(1, server_id)).?;
     defer start.deinit();
     try std.testing.expectError(error.CatalogLoading, workbench.refreshMcpCatalog());
-    try std.testing.expect(workbench.mcp.?.state.refresh_pending);
-    try std.testing.expect(!workbench.mcp.?.state.refresh_pending_blocks_admission);
-    try std.testing.expect(workbench.mcp.?.state.admission == .ready);
-    try std.testing.expectEqual(@as(u64, 1), workbench.mcp.?.state.refresh_request_generation);
+    try std.testing.expect(mcp_testing.state(&workbench.mcp.?).refresh_pending);
+    try std.testing.expect(!mcp_testing.state(&workbench.mcp.?).refresh_pending_blocks_admission);
+    try std.testing.expect(mcp_testing.state(&workbench.mcp.?).admission == .ready);
+    try std.testing.expectEqual(@as(u64, 1), mcp_testing.state(&workbench.mcp.?).refresh_request_generation);
     try std.testing.expect(!workbench.mcp.?.hasRefreshJob());
     try std.testing.expectEqual(
         McpAuthorizationPhase.discovering,
@@ -11774,22 +11774,22 @@ test "MCP authorization operation owns product phase and durable token boundary"
     const durable_id = exchange.started.operation.id;
     try std.testing.expect(workbench.finishMcpAuthorization(start.operation_id));
     try std.testing.expect(workbench.mcpAuthorizationOperation() == null);
-    try std.testing.expect(workbench.mcp.?.state.refresh_pending);
-    try std.testing.expect(!workbench.mcp.?.state.refresh_pending_blocks_admission);
+    try std.testing.expect(mcp_testing.state(&workbench.mcp.?).refresh_pending);
+    try std.testing.expect(!mcp_testing.state(&workbench.mcp.?).refresh_pending_blocks_admission);
     try std.testing.expect(!workbench.mcp.?.hasRefreshJob());
     try std.testing.expectError(error.CatalogLoading, workbench.refreshMcpCatalog());
-    try std.testing.expectEqual(@as(u64, 2), workbench.mcp.?.state.refresh_request_generation);
+    try std.testing.expectEqual(@as(u64, 2), mcp_testing.state(&workbench.mcp.?).refresh_request_generation);
     try std.testing.expectEqual(
         mcp_configuration.ManagementOutcome.saved,
         try workbench.recoverMcpOauthOperation(durable_id),
     );
-    try std.testing.expect(!workbench.mcp.?.state.refresh_pending);
+    try std.testing.expect(!mcp_testing.state(&workbench.mcp.?).refresh_pending);
     try std.testing.expect(workbench.mcp.?.hasRefreshJob());
     try std.testing.expectEqual(
         @as(u64, 2),
-        workbench.mcp.?.refreshJobForTesting().?.request_generation,
+        mcp_testing.refreshJob(&workbench.mcp.?).?.request_generation,
     );
-    const oauth = workbench.mcp.?.state.management.?.desiredRegistry().?.servers[0].auth.oauth.?;
+    const oauth = mcp_testing.state(&workbench.mcp.?).management.?.desiredRegistry().?.servers[0].auth.oauth.?;
     try std.testing.expectEqualStrings("reauth_required", oauth.status);
 }
 
@@ -11935,7 +11935,7 @@ test "MCP startup health commits a safe degraded Workbench projection" {
     );
     try std.testing.expectEqual(
         McpAdmissionBlockReason.activation_unavailable,
-        workbench.mcp.?.state.admission.blocked,
+        mcp_testing.state(&workbench.mcp.?).admission.blocked,
     );
     const revision_before_mutation = workbench.revision;
     try std.testing.expectEqual(
@@ -11954,7 +11954,7 @@ test "MCP startup health commits a safe degraded Workbench projection" {
     );
     try std.testing.expectEqual(
         McpAdmissionBlockReason.activation_unavailable,
-        workbench.mcp.?.state.admission.blocked,
+        mcp_testing.state(&workbench.mcp.?).admission.blocked,
     );
 
     try std.testing.expectEqual(
@@ -11974,7 +11974,7 @@ test "MCP startup health commits a safe degraded Workbench projection" {
     );
     try std.testing.expectEqual(
         McpAdmissionBlockReason.pending_restart,
-        workbench.mcp.?.state.admission.blocked,
+        mcp_testing.state(&workbench.mcp.?).admission.blocked,
     );
     try std.testing.expectEqual(
         mcp_configuration.ManagementOutcome.saved,
@@ -11989,9 +11989,9 @@ test "MCP startup health commits a safe degraded Workbench projection" {
     );
     try std.testing.expectEqual(
         McpAdmissionBlockReason.activation_unavailable,
-        workbench.mcp.?.state.admission.blocked,
+        mcp_testing.state(&workbench.mcp.?).admission.blocked,
     );
-    workbench.mcp.?.state.management.?.persistence.commit_registry_fn =
+    mcp_testing.state(&workbench.mcp.?).management.?.persistence.commit_registry_fn =
         ManagementEffects.failRegistry;
     try std.testing.expectEqual(
         mcp_configuration.ManagementOutcome.rejected,
@@ -12006,11 +12006,11 @@ test "MCP startup health commits a safe degraded Workbench projection" {
     );
     try std.testing.expectEqual(
         McpAdmissionBlockReason.activation_unavailable,
-        workbench.mcp.?.state.admission.blocked,
+        mcp_testing.state(&workbench.mcp.?).admission.blocked,
     );
-    workbench.mcp.?.state.management.?.persistence.commit_registry_fn =
+    mcp_testing.state(&workbench.mcp.?).management.?.persistence.commit_registry_fn =
         ManagementEffects.registry;
-    workbench.mcp.?.state.management.?.persistence.clear_journal_fn =
+    mcp_testing.state(&workbench.mcp.?).management.?.persistence.clear_journal_fn =
         ManagementEffects.unknownClear;
     try std.testing.expectEqual(
         mcp_configuration.ManagementOutcome.indeterminate,
@@ -12025,7 +12025,7 @@ test "MCP startup health commits a safe degraded Workbench projection" {
     );
     try std.testing.expectEqual(
         McpAdmissionBlockReason.persistence_outcome_unknown,
-        workbench.mcp.?.state.admission.blocked,
+        mcp_testing.state(&workbench.mcp.?).admission.blocked,
     );
 
     const effective_snapshot = try workbench.writeSnapshot(&output);
@@ -12040,7 +12040,7 @@ test "MCP startup health commits a safe degraded Workbench projection" {
         "Updated local files",
     ) == null);
 
-    const blocked_job = try workbench.allocator.create(McpRefreshJob);
+    const blocked_job = try workbench.allocator.create(McpRefreshTestJob);
     blocked_job.* = .{
         .allocator = workbench.allocator,
         .catalog = mcpCatalogPort(workbench.agent_runtime),
@@ -12051,24 +12051,24 @@ test "MCP startup health commits a safe degraded Workbench projection" {
         .allowlists = &.{},
         .build_admission = false,
     };
-    workbench.mcp.?.state.refresh_request_generation = 1;
-    workbench.mcp.?.installRefreshJobForTesting(blocked_job);
+    mcp_testing.state(&workbench.mcp.?).refresh_request_generation = 1;
+    mcp_testing.installRefreshJob(&workbench.mcp.?, blocked_job);
     try std.testing.expectError(
         error.CatalogLoading,
         workbench.createTaskInWorkspace(1, 1, 1, null, null),
     );
-    workbench.mcp.?.state.activation_failed = false;
+    mcp_testing.state(&workbench.mcp.?).activation_failed = false;
     blocked_job.outcome = .unavailable;
     blocked_job.state.store(.completed, .release);
     workbench.syncLifecycle();
     try std.testing.expect(!workbench.mcp.?.hasRefreshJob());
-    try std.testing.expect(workbench.mcp.?.state.activation_failed);
+    try std.testing.expect(mcp_testing.state(&workbench.mcp.?).activation_failed);
     try std.testing.expectEqual(
         @as(?u64, 14),
         workbench.inspectMcpDesiredConfiguration().?.desired_generation,
     );
 
-    const stale_job = try workbench.allocator.create(McpRefreshJob);
+    const stale_job = try workbench.allocator.create(McpRefreshTestJob);
     stale_job.* = .{
         .allocator = workbench.allocator,
         .catalog = mcpCatalogPort(workbench.agent_runtime),
@@ -12081,13 +12081,13 @@ test "MCP startup health commits a safe degraded Workbench projection" {
         .state = .init(.completed),
         .outcome = .unavailable,
     };
-    workbench.mcp.?.state.activation_failed = false;
-    workbench.mcp.?.state.refresh_request_generation = 3;
-    workbench.mcp.?.installRefreshJobForTesting(stale_job);
+    mcp_testing.state(&workbench.mcp.?).activation_failed = false;
+    mcp_testing.state(&workbench.mcp.?).refresh_request_generation = 3;
+    mcp_testing.installRefreshJob(&workbench.mcp.?, stale_job);
     workbench.syncLifecycle();
-    try std.testing.expect(!workbench.mcp.?.state.activation_failed);
+    try std.testing.expect(!mcp_testing.state(&workbench.mcp.?).activation_failed);
 
-    const cancelled_job = try workbench.allocator.create(McpRefreshJob);
+    const cancelled_job = try workbench.allocator.create(McpRefreshTestJob);
     cancelled_job.* = .{
         .allocator = workbench.allocator,
         .catalog = mcpCatalogPort(workbench.agent_runtime),
@@ -12098,9 +12098,9 @@ test "MCP startup health commits a safe degraded Workbench projection" {
         .allowlists = &.{},
         .build_admission = false,
     };
-    workbench.mcp.?.state.refresh_request_generation = 4;
-    workbench.mcp.?.installRefreshJobForTesting(cancelled_job);
-    McpRefreshJob.cancel(cancelled_job);
+    mcp_testing.state(&workbench.mcp.?).refresh_request_generation = 4;
+    mcp_testing.installRefreshJob(&workbench.mcp.?, cancelled_job);
+    McpRefreshTestJob.cancel(cancelled_job);
     workbench.shutting_down = true;
     workbench.syncLifecycle();
     try std.testing.expect(!workbench.mcp.?.hasRefreshJob());

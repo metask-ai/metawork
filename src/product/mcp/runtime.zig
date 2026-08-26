@@ -3,6 +3,7 @@
 //! snapshot ownership remain outside and enter only through narrow capabilities.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const agent = @import("metawork_agent");
 const configuration = @import("product_mcp_configuration");
 const state_module = @import("product_mcp_state");
@@ -27,6 +28,7 @@ pub const Capabilities = struct {
     host: state_module.McpHostCapabilities,
 };
 pub const ViewError = view.Error;
+pub const TextProjection = view.TextProjection;
 pub const McpHostCapabilities = state_module.McpHostCapabilities;
 pub const McpStartupConfiguration = state_module.McpStartupConfiguration;
 pub const McpAdmissionBlockReason = state_module.McpAdmissionBlockReason;
@@ -53,6 +55,34 @@ pub const McpAuthorizationStart = state_module.McpAuthorizationStart;
 pub const McpSecretCaptureTarget = state_module.McpSecretCaptureTarget;
 pub const McpOauthRuntimeCommit = state_module.McpOauthRuntimeCommit;
 pub const McpRefreshTimer = state_module.McpRefreshTimer;
+
+/// Test-only access to the aggregate's internal kernel types and fixture
+/// constructor. The production Product root publishes an empty struct here.
+pub const testing = if (builtin.is_test) struct {
+    pub const State = state_module.McpProductState;
+    pub const RefreshJob = refresh_job.Job;
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        ports: ports_module.Ports,
+        initial_state: State,
+    ) Runtime {
+        return Runtime.init(allocator, ports, initial_state);
+    }
+
+    pub fn state(runtime: *Runtime) *State {
+        return &runtime.state;
+    }
+
+    pub fn refreshJob(runtime: *Runtime) ?*RefreshJob {
+        return runtime.refresh_job;
+    }
+
+    pub fn installRefreshJob(runtime: *Runtime, job: *RefreshJob) void {
+        std.debug.assert(runtime.refresh_job == null);
+        runtime.refresh_job = job;
+    }
+} else struct {};
 
 /// Fallible startup preparation happens before the composition aggregate is
 /// installed. `takeRuntime` is the final no-fail ownership move.
@@ -138,7 +168,7 @@ pub const Runtime = struct {
     shutting_down: bool = false,
     changed: bool = false,
 
-    pub fn init(
+    fn init(
         allocator: std.mem.Allocator,
         ports: ports_module.Ports,
         initial_state: state_module.McpProductState,
@@ -398,17 +428,6 @@ pub const Runtime = struct {
 
     pub fn cancelRefreshTimer(self: *Runtime) void {
         self.ports.timer.cancel();
-    }
-
-    pub fn refreshJobForTesting(self: *Runtime) ?*refresh_job.Job {
-        if (!@import("builtin").is_test) @compileError("test-only MCP refresh seam");
-        return self.refresh_job;
-    }
-
-    pub fn installRefreshJobForTesting(self: *Runtime, job: *refresh_job.Job) void {
-        if (!@import("builtin").is_test) @compileError("test-only MCP refresh seam");
-        std.debug.assert(self.refresh_job == null);
-        self.refresh_job = job;
     }
 
     pub fn syncInitialHealth(self: *Runtime) bool {

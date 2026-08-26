@@ -1177,7 +1177,6 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     });
     product_mcp_state.addImport("metawork_agent", agent);
     product_mcp_state.addImport("product_mcp_configuration", mcp_configuration);
-    product_mcp.addImport("product_mcp_state", product_mcp_state);
     const product_mcp_policy = b.createModule(.{
         .root_source_file = b.path("src/product/mcp/policy.zig"),
         .target = target,
@@ -1186,7 +1185,6 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     product_mcp_policy.addImport("metawork_agent", agent);
     product_mcp_policy.addImport("product_mcp_configuration", mcp_configuration);
     product_mcp_policy.addImport("product_mcp_state", product_mcp_state);
-    product_mcp.addImport("product_mcp_policy", product_mcp_policy);
     const product_mcp_view = b.createModule(.{
         .root_source_file = b.path("src/product/mcp/view.zig"),
         .target = target,
@@ -1194,14 +1192,12 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     });
     product_mcp_view.addImport("product_mcp_configuration", mcp_configuration);
     product_mcp_view.addImport("product_mcp_state", product_mcp_state);
-    product_mcp.addImport("product_mcp_view", product_mcp_view);
     const product_mcp_ports = b.createModule(.{
         .root_source_file = b.path("src/product/mcp/ports.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     product_mcp_ports.addImport("metawork_agent", agent);
-    product_mcp.addImport("product_mcp_ports", product_mcp_ports);
     const product_mcp_refresh_job = b.createModule(.{
         .root_source_file = b.path("src/product/mcp/refresh_job.zig"),
         .target = target,
@@ -1209,7 +1205,6 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     });
     product_mcp_refresh_job.addImport("metawork_agent", agent);
     product_mcp_refresh_job.addImport("product_mcp_ports", product_mcp_ports);
-    product_mcp.addImport("product_mcp_refresh_job", product_mcp_refresh_job);
     const product_mcp_runtime = b.createModule(.{
         .root_source_file = b.path("src/product/mcp/runtime.zig"),
         .target = target,
@@ -1222,6 +1217,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     product_mcp_runtime.addImport("product_mcp_view", product_mcp_view);
     product_mcp_runtime.addImport("product_mcp_ports", product_mcp_ports);
     product_mcp_runtime.addImport("product_mcp_refresh_job", product_mcp_refresh_job);
+    product_mcp.addImport("product_mcp_ports", product_mcp_ports);
     product_mcp.addImport("product_mcp_runtime", product_mcp_runtime);
     const projection = b.createModule(.{
         .root_source_file = b.path("src/workbench/projection.zig"),
