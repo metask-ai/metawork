@@ -59,6 +59,7 @@ pub fn build(b: *std.Build) void {
     addProductMcpPolicyTests(b, test_modules, bundle.link_libc);
     addProductMcpViewTests(b, test_modules, bundle.link_libc);
     addProductMcpRefreshJobTests(b, test_modules, bundle.link_libc);
+    addProductMcpRuntimeTests(b, test_modules, bundle.link_libc);
     addMcpPlatformTests(b, test_modules, bundle.link_libc);
     addMcpOauthTests(b, test_modules, bundle.link_libc);
     addMcpAppTests(b, test_modules, bundle.link_libc);
@@ -119,6 +120,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-product-mcp-policy", .root_module = test_modules.product_mcp_policy },
         .{ .name = "metawork-product-mcp-view", .root_module = test_modules.product_mcp_view },
         .{ .name = "metawork-product-mcp-refresh-job", .root_module = test_modules.product_mcp_refresh_job },
+        .{ .name = "metawork-product-mcp-runtime", .root_module = test_modules.product_mcp_runtime },
         .{ .name = "metawork-mcp-platform", .root_module = test_modules.mcp_platform },
         .{ .name = "metawork-mcp-oauth", .root_module = test_modules.mcp_oauth },
         .{ .name = "metawork-product-task-persistence", .root_module = test_modules.product_task_persistence },
@@ -271,6 +273,7 @@ const WiredModules = struct {
     product_mcp_view: *std.Build.Module,
     product_mcp_ports: *std.Build.Module,
     product_mcp_refresh_job: *std.Build.Module,
+    product_mcp_runtime: *std.Build.Module,
     product_skill: *std.Build.Module,
     product_skill_catalog: *std.Build.Module,
     product_task: *std.Build.Module,
@@ -472,6 +475,23 @@ fn addProductMcpRefreshJobTests(
     const tests = b.addTest(.{
         .name = "metawork-product-mcp-refresh-job",
         .root_module = modules.product_mcp_refresh_job,
+    });
+    step.dependOn(&b.addRunArtifact(tests).step);
+}
+
+fn addProductMcpRuntimeTests(
+    b: *std.Build,
+    modules: WiredModules,
+    link_libc: bool,
+) void {
+    const step = b.step(
+        "test-product-mcp-runtime",
+        "Run Product MCP aggregate lifecycle tests",
+    );
+    modules.product_mcp_runtime.link_libc = link_libc;
+    const tests = b.addTest(.{
+        .name = "metawork-product-mcp-runtime",
+        .root_module = modules.product_mcp_runtime,
     });
     step.dependOn(&b.addRunArtifact(tests).step);
 }
@@ -1190,6 +1210,18 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     product_mcp_refresh_job.addImport("metawork_agent", agent);
     product_mcp_refresh_job.addImport("product_mcp_ports", product_mcp_ports);
     product_mcp.addImport("product_mcp_refresh_job", product_mcp_refresh_job);
+    const product_mcp_runtime = b.createModule(.{
+        .root_source_file = b.path("src/product/mcp/runtime.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    product_mcp_runtime.addImport("metawork_agent", agent);
+    product_mcp_runtime.addImport("product_mcp_configuration", mcp_configuration);
+    product_mcp_runtime.addImport("product_mcp_state", product_mcp_state);
+    product_mcp_runtime.addImport("product_mcp_policy", product_mcp_policy);
+    product_mcp_runtime.addImport("product_mcp_ports", product_mcp_ports);
+    product_mcp_runtime.addImport("product_mcp_refresh_job", product_mcp_refresh_job);
+    product_mcp.addImport("product_mcp_runtime", product_mcp_runtime);
     const projection = b.createModule(.{
         .root_source_file = b.path("src/workbench/projection.zig"),
         .target = target,
@@ -1375,6 +1407,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .product_mcp_view = product_mcp_view,
         .product_mcp_ports = product_mcp_ports,
         .product_mcp_refresh_job = product_mcp_refresh_job,
+        .product_mcp_runtime = product_mcp_runtime,
         .product_skill = product_skill,
         .product_skill_catalog = catalog_snapshot,
         .product_task = product_task,

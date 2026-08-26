@@ -51,21 +51,23 @@ pub const Catalog = struct {
 };
 
 pub const Timer = struct {
+    enabled: bool,
     context: ?*anyopaque,
     now_fn: *const fn (?*anyopaque) ?u64,
     arm_at_fn: *const fn (?*anyopaque, u64) bool,
     cancel_fn: *const fn (?*anyopaque) void,
 
     pub fn now(self: Timer) ?u64 {
+        if (!self.enabled) return null;
         return self.now_fn(self.context);
     }
 
     pub fn armAt(self: Timer, deadline_ms: u64) bool {
-        return self.arm_at_fn(self.context, deadline_ms);
+        return self.enabled and self.arm_at_fn(self.context, deadline_ms);
     }
 
     pub fn cancel(self: Timer) void {
-        self.cancel_fn(self.context);
+        if (self.enabled) self.cancel_fn(self.context);
     }
 };
 

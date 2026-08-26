@@ -842,6 +842,7 @@ test("Product MCP kernels have one physical home and isolate refresh workers", (
   const view = read("src/product/mcp/view.zig");
   const ports = read("src/product/mcp/ports.zig");
   const refreshJob = read("src/product/mcp/refresh_job.zig");
+  const runtime = read("src/product/mcp/runtime.zig");
   const workbenchRoot = read("src/workbench.zig");
   const workbenchProjection = read("src/workbench/projection.zig");
 
@@ -857,6 +858,7 @@ test("Product MCP kernels have one physical home and isolate refresh workers", (
   assert.match(productMcp, /@import\("product_mcp_view"\)/);
   assert.match(productMcp, /@import\("product_mcp_ports"\)/);
   assert.match(productMcp, /@import\("product_mcp_refresh_job"\)/);
+  assert.match(productMcp, /@import\("product_mcp_runtime"\)/);
   assert.match(configuration, /@import\("agent_mcp_http_protocol"\)/);
   assert.doesNotMatch(configuration, /@import\("metawork_agent"\)/);
   // Product MCP state intentionally consumes MetaWork Agent's public
@@ -925,6 +927,25 @@ test("Product MCP kernels have one physical home and isolate refresh workers", (
     refreshJob,
     /\b(?:workbench|runtime|state):\s*\*|@import\("workbench_executor"\)|std\.Thread/,
   );
+  assert.match(runtime, /pub const Runtime = struct/);
+  assert.match(runtime, /state: state_module\.McpProductState/);
+  assert.match(runtime, /refresh_job: \?\*refresh_job\.Job/);
+  for (const name of [
+    "requestRefresh",
+    "syncRefreshJob",
+    "beginConnectionTest",
+    "beginConfigurationApply",
+    "completeConfigurationApply",
+    "rearmRefreshTimer",
+    "beginShutdown",
+    "finishShutdownAfterExecutorJoin",
+  ]) {
+    assert.match(runtime, new RegExp(`pub fn ${name}\\b`));
+  }
+  assert.doesNotMatch(
+    runtime,
+    /@import\("metawork_workbench"\)|@import\("metawork_app"\)|@import\("metawork_bridge"\)|@import\("metawork_account"\)|native_sdk|std\.Thread|\bworkbench:\s*\*/,
+  );
   assert.match(build, /addImport\("metawork_product_mcp", product_mcp\)/);
   assert.match(build, /src\/product\/mcp\/view\.zig/);
   assert.match(build, /src\/product\/mcp\/policy\.zig/);
@@ -951,9 +972,14 @@ test("Product MCP kernels have one physical home and isolate refresh workers", (
   assert.match(build, /"test-product-mcp-view"/);
   assert.match(build, /"test-product-mcp-policy"/);
   assert.match(build, /"test-product-mcp-refresh-job"/);
+  assert.match(build, /"test-product-mcp-runtime"/);
   assert.match(
     build,
     /product_mcp_refresh_job\.addImport\("product_mcp_ports", product_mcp_ports\)/,
+  );
+  assert.match(
+    build,
+    /product_mcp_runtime\.addImport\("product_mcp_refresh_job", product_mcp_refresh_job\)/,
   );
   assert.match(build, /"Workbench snapshot serializer"/);
   assert.match(
@@ -968,6 +994,7 @@ test("Product MCP kernels have one physical home and isolate refresh workers", (
     workbenchProjection,
     /const mcp_refresh_job = product_mcp\.refresh_job/,
   );
+  assert.match(workbenchProjection, /const mcp_runtime = product_mcp\.runtime/);
   assert.match(workbenchProjection, /mcp_view\.writeProjection/);
   assert.doesNotMatch(
     workbenchProjection,
@@ -989,7 +1016,10 @@ test("Product MCP kernels have one physical home and isolate refresh workers", (
     workbenchProjection,
     /fn executeMcpRefreshJob|fn cancelMcpRefreshJob/,
   );
-  assert.match(workbenchProjection, /job\.executorJob\(\)/);
+  assert.doesNotMatch(
+    workbenchProjection,
+    /fn requestMcpCatalogRefresh|fn startPendingMcpCatalogRefresh/,
+  );
   assert.match(
     workbenchProjection,
     /agent_runtime\.createMcpAdmissionSelection/,
@@ -999,7 +1029,9 @@ test("Product MCP kernels have one physical home and isolate refresh workers", (
   assert.doesNotMatch(workbenchRoot, /pub const McpManagementOutcome/);
   assert.doesNotMatch(workbenchRoot, /pub const McpRefreshTimer/);
   assert.doesNotMatch(workbenchRoot, /pub const McpOauthRefreshBinding/);
-  assert.match(workbenchProjection, /mcp_refresh_job: \?\*McpRefreshJob/);
+  assert.match(workbenchProjection, /mcp: \?mcp_runtime\.Runtime/);
+  assert.doesNotMatch(workbenchProjection, /mcp_refresh_job: \?\*McpRefreshJob/);
+  assert.doesNotMatch(workbenchProjection, /^\s*mcp_refresh_timer: McpRefreshTimer,/m);
 });
 
 test("Product Account owns Metask protocol without a concrete HTTP client", () => {
