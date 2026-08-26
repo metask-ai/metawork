@@ -27,9 +27,6 @@ const task_test_execution = if (builtin.is_test) task_testing.execution_module e
 const task_test_view = if (builtin.is_test) task_testing.view_module else struct {};
 const product_mcp = @import("metawork_product_mcp");
 const mcp_configuration = product_mcp.configuration;
-const mcp_state = product_mcp.state;
-const mcp_policy = product_mcp.policy;
-const mcp_view = product_mcp.view;
 const mcp_ports = product_mcp.ports;
 const mcp_refresh_job = product_mcp.refresh_job;
 const mcp_runtime = product_mcp.runtime;
@@ -294,64 +291,30 @@ pub const CheckpointStoreConfiguration = struct {
     open_failed: bool = false,
 };
 
-pub const McpHostCapabilities = mcp_state.McpHostCapabilities;
-pub const McpStartupConfiguration = mcp_state.McpStartupConfiguration;
-pub const McpAdmissionBlockReason = mcp_state.McpAdmissionBlockReason;
-const McpAdmissionReady = mcp_state.McpAdmissionReady;
-const McpAdmissionAuthority = mcp_state.McpAdmissionAuthority;
-const RecoveryMcpAuthority = mcp_state.RecoveryMcpAuthority;
-pub const McpOauthRefreshBinding = mcp_state.McpOauthRefreshBinding;
-pub const McpOauthRefreshBeginOutcome = mcp_state.McpOauthRefreshBeginOutcome;
-pub const McpOauthAuthorizationPlan = mcp_state.McpOauthAuthorizationPlan;
-pub const McpOauthAuthorizationBinding = mcp_state.McpOauthAuthorizationBinding;
-pub const McpOauthAuthorizationOutcome = mcp_state.McpOauthAuthorizationOutcome;
-pub const McpOauthOperationHandle = mcp_state.McpOauthOperationHandle;
-pub const McpOauthCodeExchangeBinding = mcp_state.McpOauthCodeExchangeBinding;
-pub const McpOauthOperationBeginOutcome = mcp_state.McpOauthOperationBeginOutcome;
-pub const McpOauthCodeExchangeBeginOutcome = mcp_state.McpOauthCodeExchangeBeginOutcome;
-pub const McpOauthExpiry = mcp_state.McpOauthExpiry;
-pub const McpRuntimeAuthorizationFailure = mcp_state.McpRuntimeAuthorizationFailure;
-pub const McpRuntimeAuthorizationFailureOutcome = mcp_state.McpRuntimeAuthorizationFailureOutcome;
-pub const McpAuthorizationPhase = mcp_state.McpAuthorizationPhase;
-pub const McpConnectionTestOutcome = mcp_state.McpConnectionTestOutcome;
-pub const McpConfigurationApplyState = mcp_state.McpConfigurationApplyState;
-const McpConnectionTest = mcp_state.McpConnectionTest;
-pub const McpAuthorizationOperationView = mcp_state.McpAuthorizationOperationView;
-pub const McpAuthorizationStart = mcp_state.McpAuthorizationStart;
-pub const McpSecretCaptureTarget = mcp_state.McpSecretCaptureTarget;
-const McpAuthorizationOperation = mcp_state.McpAuthorizationOperation;
-pub const McpOauthRuntimeCommit = mcp_state.McpOauthRuntimeCommit;
-const McpProductState = mcp_state.McpProductState;
-pub const McpRefreshTimer = mcp_state.McpRefreshTimer;
-
-const initialMcpAdmission = mcp_state.initialMcpAdmission;
-const findMcpServer = mcp_state.findMcpServer;
-const ownMcpScopeUnion = mcp_state.ownMcpScopeUnion;
-const mcpRefreshDelayMs = mcp_state.mcpRefreshDelayMs;
-const mcpRefreshDeadlineMs = mcp_state.mcpRefreshDeadlineMs;
-
-fn textSetsEqual(left: []const []const u8, right: []const []const u8) bool {
-    if (left.len != right.len) return false;
-    for (left, right) |left_value, right_value|
-        if (!std.mem.eql(u8, left_value, right_value)) return false;
-    return true;
-}
-
-fn writeQuotedField(
-    writer: *std.Io.Writer,
-    label: []const u8,
-    value: []const u8,
-) !void {
-    try writer.print("{s}: ", .{label});
-    try std.json.Stringify.value(value, .{}, writer);
-    try writer.writeByte('\n');
-}
-
-fn writeQuotedListItem(writer: *std.Io.Writer, value: []const u8) !void {
-    try writer.writeAll("  ");
-    try std.json.Stringify.value(value, .{}, writer);
-    try writer.writeByte('\n');
-}
+pub const McpHostCapabilities = mcp_runtime.McpHostCapabilities;
+pub const McpStartupConfiguration = mcp_runtime.McpStartupConfiguration;
+pub const McpAdmissionBlockReason = mcp_runtime.McpAdmissionBlockReason;
+const RecoveryMcpAuthority = mcp_runtime.RecoveryMcpAuthority;
+pub const McpOauthRefreshBinding = mcp_runtime.McpOauthRefreshBinding;
+pub const McpOauthRefreshBeginOutcome = mcp_runtime.McpOauthRefreshBeginOutcome;
+pub const McpOauthAuthorizationPlan = mcp_runtime.McpOauthAuthorizationPlan;
+pub const McpOauthAuthorizationBinding = mcp_runtime.McpOauthAuthorizationBinding;
+pub const McpOauthAuthorizationOutcome = mcp_runtime.McpOauthAuthorizationOutcome;
+pub const McpOauthOperationHandle = mcp_runtime.McpOauthOperationHandle;
+pub const McpOauthCodeExchangeBinding = mcp_runtime.McpOauthCodeExchangeBinding;
+pub const McpOauthOperationBeginOutcome = mcp_runtime.McpOauthOperationBeginOutcome;
+pub const McpOauthCodeExchangeBeginOutcome = mcp_runtime.McpOauthCodeExchangeBeginOutcome;
+pub const McpOauthExpiry = mcp_runtime.McpOauthExpiry;
+pub const McpRuntimeAuthorizationFailure = mcp_runtime.McpRuntimeAuthorizationFailure;
+pub const McpRuntimeAuthorizationFailureOutcome = mcp_runtime.McpRuntimeAuthorizationFailureOutcome;
+pub const McpAuthorizationPhase = mcp_runtime.McpAuthorizationPhase;
+pub const McpConnectionTestOutcome = mcp_runtime.McpConnectionTestOutcome;
+pub const McpConfigurationApplyState = mcp_runtime.McpConfigurationApplyState;
+pub const McpAuthorizationOperationView = mcp_runtime.McpAuthorizationOperationView;
+pub const McpAuthorizationStart = mcp_runtime.McpAuthorizationStart;
+pub const McpSecretCaptureTarget = mcp_runtime.McpSecretCaptureTarget;
+pub const McpOauthRuntimeCommit = mcp_runtime.McpOauthRuntimeCommit;
+pub const McpRefreshTimer = mcp_runtime.McpRefreshTimer;
 
 pub const SchedulePersistenceCommit = enum {
     committed,
@@ -1565,19 +1528,8 @@ pub const Workbench = struct {
         );
         var skill_owned = true;
         errdefer if (skill_owned) skill.deinit();
-        var mcp_management: ?mcp_configuration.ManagementPort =
-            if (configuration.mcp.preparation) |preparation|
-                if (configuration.mcp.management) |management|
-                    try mcp_configuration.ManagementPort.init(
-                        allocator,
-                        if (preparation.registry) |registry| registry.value else null,
-                        management,
-                    )
-                else
-                    null
-            else
-                null;
-        errdefer if (mcp_management) |*management| management.deinit();
+        var mcp_startup = try mcp_runtime.Startup.prepare(allocator, configuration.mcp);
+        errdefer if (mcp_startup) |*startup| startup.deinit();
         var workbench: Workbench = .{
             .allocator = allocator,
             .io = io,
@@ -1641,30 +1593,16 @@ pub const Workbench = struct {
         // This is the last ownership move in init: no later operation may fail.
         // The first health observation is committed before App exposes Bridge
         // ingress or loads the Renderer window.
-        if (configuration.mcp.preparation) |preparation| {
-            const admission = initialMcpAdmission(
-                configuration.mcp.activation,
-                configuration.mcp.activation_failed,
-                if (mcp_management) |*management| management else null,
-            );
-            workbench.mcp = mcp_runtime.Runtime.init(
-                allocator,
+        if (mcp_startup) |*startup| {
+            workbench.mcp = startup.takeRuntime(
                 productMcpPorts(
                     executor,
                     agent_runtime,
                     configuration.mcp_refresh_timer,
                     configuration.change_notifier,
                 ),
-                .{
-                    .preparation = preparation.take(),
-                    .activation = configuration.mcp.activation,
-                    .activation_failed = configuration.mcp.activation_failed,
-                    .management = mcp_management,
-                    .admission = admission,
-                    .host_capabilities = configuration.mcp.host_capabilities,
-                },
             );
-            mcp_management = null;
+            mcp_startup = null;
             _ = workbench.syncMcpHealthNoFail();
             workbench.updateMcpRefreshDeadlineNoFail();
             workbench.rearmMcpRefreshTimerNoFail();
@@ -2554,7 +2492,7 @@ pub const Workbench = struct {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
         if (self.mcp) |*mcp|
-            if (mcp.hasRefreshJob() or mcp.state.refresh_pending_blocks_admission)
+            if (mcp.blocksNewTaskAdmission())
                 return error.CatalogLoading;
         try self.requireTaskPersistenceMutation();
         if (self.execution_replacement != .none)
@@ -2658,7 +2596,7 @@ pub const Workbench = struct {
             .canonical_user_home = self.canonical_user_home orelse "",
             .skill_catalog = catalog_lease,
             .granted_skill_ids = granted_skill_ids.items,
-            .mcp_selection = mcp_policy.selectionForNewTask(if (self.mcp) |*mcp| &mcp.state else null),
+            .mcp_selection = if (self.mcp) |*mcp| mcp.selectionForNewTask() else null,
             .pinned_catalog = &pinned_catalog,
             .max_workspace_bytes = self.limits.max_workspace_bytes,
             .max_title_bytes = self.limits.max_task_title_bytes,
@@ -3395,9 +3333,8 @@ pub const Workbench = struct {
     pub fn inspectMcpDesiredConfiguration(
         self: *const Workbench,
     ) ?mcp_configuration.ManagementInspection {
-        const mcp = if (self.mcp) |*value| &value.state else return null;
-        const management = if (mcp.management) |*value| value else return null;
-        return management.inspect();
+        const runtime = if (self.mcp) |*value| value else return null;
+        return runtime.inspectDesiredConfiguration();
     }
 
     /// Host-only copy used to construct an isolated connection-test Runtime.
@@ -3407,19 +3344,9 @@ pub const Workbench = struct {
         expected_generation: u64,
         output: []u8,
     ) Error![]const u8 {
-        const mcp = if (self.mcp) |*value| &value.state else return error.McpManagementUnavailable;
-        const management = if (mcp.management) |*value| value else return error.McpManagementUnavailable;
-        const inspection = management.inspect();
-        if (inspection.health != .ready or
-            inspection.desired_generation != expected_generation)
-            return error.McpManagementUnavailable;
-        const registry = management.desiredRegistry() orelse
-            return error.McpManagementUnavailable;
-        return mcp_configuration.encode(
-            output,
-            registry,
-            management.limits,
-        ) catch return error.McpManagementUnavailable;
+        const runtime = if (self.mcp) |*value| value else return error.McpManagementUnavailable;
+        return runtime.writeDesiredConfiguration(expected_generation, output) catch |err|
+            return @errorCast(err);
     }
 
     pub fn beginMcpConnectionTest(
@@ -3495,17 +3422,16 @@ pub const Workbench = struct {
     pub fn mcpAuthorizationOperation(
         self: *const Workbench,
     ) ?McpAuthorizationOperationView {
-        return mcp_policy.authorizationOperation(
-            if (self.mcp) |*mcp| &mcp.state else null,
-        );
+        const runtime = if (self.mcp) |*value| value else return null;
+        return runtime.authorizationOperation();
     }
 
     pub fn mcpServerOperationBusy(
         self: *const Workbench,
         server_id: []const u8,
     ) bool {
-        const mcp = if (self.mcp) |*value| &value.state else return false;
-        return mcp_policy.serverOperationBusy(mcp, server_id);
+        const runtime = if (self.mcp) |*value| value else return false;
+        return runtime.serverOperationBusy(server_id);
     }
 
     pub fn requireMcpOauthReauthorization(
@@ -3566,74 +3492,22 @@ pub const Workbench = struct {
         defer self.publishMcpRuntimeChanges();
         return runtime.finishAuthorization(operation_id);
     }
-    /// Writes the exact public configuration covered by connection approval.
-    /// This is a Host-only confirmation surface: it may include the complete
-    /// endpoint or command, and therefore must never be used for a snapshot or
-    /// Bridge response.
+    /// Host-only rendering delegates canonical validation and formatting to the
+    /// Product MCP aggregate; bytes never enter the Renderer snapshot path.
     pub fn writeMcpConnectionApprovalDetails(
         self: *const Workbench,
         expected_generation: u64,
         server_id: []const u8,
         output: []u8,
     ) ![]const u8 {
-        const mcp = if (self.mcp) |*value| &value.state else return error.McpManagementUnavailable;
-        if (self.mcp.?.hasRefreshJob() or mcp_policy.serverMutationBusy(mcp, server_id))
-            return error.McpManagementUnavailable;
-        const management = if (mcp.management) |*value| value else return error.McpManagementUnavailable;
-        if (management.inspect().health != .ready or
-            !mcp_policy.expectedGenerationMatches(management, expected_generation))
-            return error.McpManagementUnavailable;
-        const registry = management.desiredRegistry() orelse return error.McpManagementUnavailable;
-        const server = findMcpServer(registry.servers, server_id) orelse
-            return error.McpManagementUnavailable;
-        if (mcp_configuration.serverProblem(server, management.limits)) |problem|
-            if (problem != .invalid_connection_approval)
-                return error.McpManagementUnavailable;
-        if (registry.oauth_operation) |operation|
-            if (std.mem.eql(u8, operation.server_id, server_id))
-                return error.McpManagementUnavailable;
-        var writer = std.Io.Writer.fixed(output);
-        try writeQuotedField(&writer, "Name", server.display_name);
-        try writeQuotedField(&writer, "Protocol policy", server.negotiation);
-        try writer.print("Timeout: {d} ms\n", .{server.timeout_ms});
-        try writeQuotedField(&writer, "Authentication", server.auth.kind);
-        if (!std.mem.eql(u8, server.transport.kind, "streamable_http")) {
-            try writer.writeAll("Transport: STDIO\n");
-            try writeQuotedField(&writer, "Executable", server.transport.command.?);
-            try writer.writeAll("Arguments:\n");
-            for (server.transport.arguments) |argument|
-                try writeQuotedListItem(&writer, argument.literal.?);
-            try writeQuotedField(
-                &writer,
-                "Working directory",
-                server.transport.cwd orelse "(none)",
-            );
-            try writer.writeAll("Environment names:\n");
-            for (server.transport.environment) |slot|
-                try writeQuotedListItem(&writer, slot.name);
-        } else {
-            try writer.writeAll("Transport: Streamable HTTP\n");
-            try writeQuotedField(&writer, "Endpoint", server.transport.url.?);
-            try writer.writeAll("Header names:\n");
-            for (server.transport.headers) |slot|
-                try writeQuotedListItem(&writer, slot.name);
-            if (server.auth.oauth) |oauth| {
-                try writeQuotedField(
-                    &writer,
-                    "OAuth registration",
-                    oauth.registration.kind,
-                );
-                if (oauth.registration.client_id) |client_id|
-                    try writeQuotedField(&writer, "OAuth client ID", client_id);
-            }
-        }
-        return writer.buffered();
+        const runtime = if (self.mcp) |*value| value else return error.McpManagementUnavailable;
+        return runtime.writeConnectionApprovalDetails(
+            expected_generation,
+            server_id,
+            output,
+        );
     }
 
-    /// Validates a Host-only secure capture target against the canonical
-    /// desired registry before any secret-entry surface is shown. The prompt
-    /// contains only escaped canonical values; Renderer-provided names never
-    /// become trusted dialog text.
     pub fn writeMcpSecretCapturePrompt(
         self: *const Workbench,
         expected_generation: u64,
@@ -3641,62 +3515,14 @@ pub const Workbench = struct {
         target: McpSecretCaptureTarget,
         output: []u8,
     ) ![]const u8 {
-        const mcp = if (self.mcp) |*value| &value.state else return error.McpManagementUnavailable;
-        if (self.mcp.?.hasRefreshJob() or mcp_policy.serverMutationBusy(mcp, server_id))
-            return error.McpManagementUnavailable;
-        const management = if (mcp.management) |*value| value else return error.McpManagementUnavailable;
-        if (management.inspect().health != .ready or
-            !mcp_policy.expectedGenerationMatches(management, expected_generation))
-            return error.McpManagementUnavailable;
-        const registry = management.desiredRegistry() orelse return error.McpManagementUnavailable;
-        const server = findMcpServer(registry.servers, server_id) orelse
-            return error.McpManagementUnavailable;
-        if (server.connection_approval == null or
-            mcp_configuration.serverProblem(server, management.limits) != null)
-            return error.McpManagementUnavailable;
-        var writer = std.Io.Writer.fixed(output);
-        try writeQuotedField(&writer, "MCP server", server.display_name);
-        switch (target) {
-            .stdio_environment => |requested_name| {
-                if (!std.mem.eql(u8, server.auth.kind, "static") or
-                    !std.mem.eql(u8, server.transport.kind, "stdio"))
-                    return error.McpManagementUnavailable;
-                for (server.transport.environment) |slot| {
-                    if (!std.ascii.eqlIgnoreCase(slot.name, requested_name)) continue;
-                    try writeQuotedField(&writer, "Environment variable", slot.name);
-                    return writer.buffered();
-                }
-                return error.McpManagementUnavailable;
-            },
-            .http_header => |requested_name| {
-                if (!std.mem.eql(u8, server.auth.kind, "static") or
-                    !std.mem.eql(u8, server.transport.kind, "streamable_http"))
-                    return error.McpManagementUnavailable;
-                for (server.transport.headers) |slot| {
-                    if (!std.ascii.eqlIgnoreCase(slot.name, requested_name)) continue;
-                    try writeQuotedField(&writer, "HTTP header", slot.name);
-                    return writer.buffered();
-                }
-                return error.McpManagementUnavailable;
-            },
-            .oauth_client_secret => {
-                if (registry.oauth_operation != null) return error.McpManagementUnavailable;
-                const oauth = server.auth.oauth orelse return error.McpManagementUnavailable;
-                const method = oauth.registration.token_endpoint_auth_method orelse
-                    return error.McpManagementUnavailable;
-                if (!std.mem.eql(u8, oauth.registration.kind, "pre_registered") or
-                    std.mem.eql(u8, method, "none"))
-                    return error.McpManagementUnavailable;
-                try writeQuotedField(
-                    &writer,
-                    "OAuth client ID",
-                    oauth.registration.client_id orelse return error.McpManagementUnavailable,
-                );
-                return writer.buffered();
-            },
-        }
+        const runtime = if (self.mcp) |*value| value else return error.McpManagementUnavailable;
+        return runtime.writeSecretCapturePrompt(
+            expected_generation,
+            server_id,
+            target,
+            output,
+        );
     }
-
     /// Binds metadata-validated consent to the current approved server and
     /// returns the exact client identity used to construct the authorization
     /// URL. Dynamic registration already committed these facts; a
@@ -3956,58 +3782,12 @@ pub const Workbench = struct {
     }
 
     fn createRecoveryMcpAuthority(self: *Workbench) Error!RecoveryMcpAuthority {
-        const mcp = if (self.mcp) |*value| &value.state else return .{
+        const runtime = if (self.mcp) |*value| value else return .{
             .selection = null,
             .catalog_generation = null,
         };
-        if (!mcp.committed or self.mcp.?.hasRefreshJob() or
-            mcp.refresh_pending_blocks_admission or
-            mcp.authorization_operation != null or
-            mcp.runtime_auth_failure_blocked)
-            return error.RecoveryUnavailable;
-        const ready = switch (mcp.admission) {
-            .ready => |value| value,
-            .blocked => return error.RecoveryUnavailable,
-        };
-        const activation = mcp.activation orelse {
-            if (ready.catalog_generation != null) return error.RecoveryUnavailable;
-            return .{ .selection = null, .catalog_generation = null };
-        };
-        if (ready.catalog_generation == null or
-            ready.catalog_generation.? != activation.catalogGeneration())
-            return error.RecoveryUnavailable;
-        const registry = if (mcp.management) |*management|
-            management.desiredRegistry() orelse return error.RecoveryUnavailable
-        else if (mcp.preparation.registry) |registry|
-            registry.value
-        else
-            return error.RecoveryUnavailable;
-        const health = activation.serverHealth();
-        const allowlists = try self.allocator.alloc(
-            lifecycle.McpServerAllowlist,
-            health.len,
-        );
-        defer self.allocator.free(allowlists);
-        for (health, allowlists) |server, *allowlist| {
-            const desired = findMcpServer(registry.servers, server.id) orelse
-                return error.RecoveryUnavailable;
-            allowlist.* = .{
-                .id = server.id,
-                .tools = mcp_policy.serverToolsForAdmission(registry, desired),
-            };
-        }
-        return .{
-            .selection = self.agent_runtime.createMcpAdmissionSelection(
-                activation,
-                allowlists,
-            ) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => return error.RecoveryUnavailable,
-            },
-            .catalog_generation = activation.catalogGeneration(),
-        };
+        return runtime.recoveryAuthority() catch |err| return @errorCast(err);
     }
-
     fn mcpViewContainsSensitive(context: *const anyopaque, value: []const u8) bool {
         const self: *const Workbench = @ptrCast(@alignCast(context));
         return self.containsKnownCredential(value);
@@ -4017,7 +3797,7 @@ pub const Workbench = struct {
         context: *const anyopaque,
         writer: *std.Io.Writer,
         value: []const u8,
-    ) mcp_view.Error!void {
+    ) mcp_runtime.ViewError!void {
         const self: *const Workbench = @ptrCast(@alignCast(context));
         self.projectedJsonValueWithKnownCredentials(writer, value) catch
             return error.SnapshotTooLarge;
@@ -4027,15 +3807,15 @@ pub const Workbench = struct {
         self: *Workbench,
         writer: *std.Io.Writer,
     ) Error!void {
-        mcp_view.writeProjection(writer, .{
-            .state = if (self.mcp) |*mcp| &mcp.state else null,
-            .refresh_job_active = if (self.mcp) |*mcp| mcp.hasRefreshJob() else false,
-            .text = .{
+        mcp_runtime.writeProjection(
+            if (self.mcp) |*runtime| runtime else null,
+            writer,
+            .{
                 .context = self,
                 .contains_sensitive_fn = mcpViewContainsSensitive,
                 .write_json_fn = writeMcpViewJson,
             },
-        }) catch return error.SnapshotTooLarge;
+        ) catch return error.SnapshotTooLarge;
     }
 
     /// Commits the final assistant suffix only after Workbench has drained the
@@ -4056,14 +3836,10 @@ pub const Workbench = struct {
             self.schedule_persistence_health == .ready;
         const task_persistence_ready = self.task_persistence_health.operational();
         const background_schedule_wake = self.schedule_background_available;
-        const mcp_management = if (self.mcp) |*mcp|
-            mcp.state.committed and mcp.state.management != null
+        const mcp_capabilities = if (self.mcp) |*runtime|
+            runtime.capabilities()
         else
-            false;
-        const mcp_host_capabilities = if (self.mcp) |*mcp|
-            if (mcp_management) mcp.state.host_capabilities else McpHostCapabilities{}
-        else
-            McpHostCapabilities{};
+            mcp_runtime.Capabilities{ .management = false, .host = .{} };
         writer.print("{{\"revision\":\"{d}\",\"capabilities\":{{\"taskHistoryPersistence\":{},\"taskHistoryPersistenceHealth\":\"{s}\",\"conversationRecovery\":true,\"executionRebind\":false,\"structuredPlan\":false,\"typedOutputs\":false,\"typedFileChanges\":false,\"persistentWorkspacePermissions\":false,\"automaticWorkspaces\":{},\"scheduledTasks\":{},\"scheduledTaskPersistence\":{},\"scheduledTaskPersistenceHealth\":\"{s}\",\"backgroundScheduleWake\":{},\"localSkillManagement\":{},\"skillManagementHealth\":\"{s}\",\"modelConnectionManagement\":{},\"modelConnectionSecretCapture\":{},\"modelConnectionTest\":{},\"mcpManagement\":{},\"mcpConnectionApproval\":{},\"mcpSecretCapture\":{},\"mcpOAuth\":{}}},\"account\":", .{
             self.revision,
             task_persistence_ready,
@@ -4079,10 +3855,10 @@ pub const Workbench = struct {
             self.model_connection_capabilities.management,
             self.model_connection_capabilities.secret_capture,
             self.model_connection_capabilities.connection_test,
-            mcp_management,
-            mcp_host_capabilities.connection_approval,
-            mcp_host_capabilities.secret_capture,
-            mcp_host_capabilities.oauth,
+            mcp_capabilities.management,
+            mcp_capabilities.host.connection_approval,
+            mcp_capabilities.host.secret_capture,
+            mcp_capabilities.host.oauth,
         }) catch
             return error.SnapshotTooLarge;
         try self.writeAccount(&writer);
@@ -4591,13 +4367,8 @@ pub const Workbench = struct {
         const value = workspace orelse return false;
         if (!self.skill.workspaceAuthorityStable(value.id, value.epoch))
             return false;
-        const mcp = if (self.mcp) |*runtime| &runtime.state else return true;
-        if (!mcp.committed or self.mcp.?.hasRefreshJob() or
-            mcp.refresh_pending_blocks_admission or
-            mcp.authorization_operation != null or
-            mcp.runtime_auth_failure_blocked)
-            return false;
-        return mcp.admission == .ready;
+        const runtime = if (self.mcp) |*mcp_runtime_value| mcp_runtime_value else return true;
+        return runtime.authorityStable();
     }
 
     fn canCreateTask(self: *const Workbench) bool {
@@ -5475,10 +5246,10 @@ pub const Workbench = struct {
         return .{
             .workspace_root = if (workspace) |value| value.canonical_root else "",
             .skill_policy_revision = skill_revision,
-            .mcp_catalog_generation = mcp_policy.recoveryGeneration(
-                if (self.mcp) |*mcp| &mcp.state else null,
-                if (self.mcp) |*mcp| mcp.hasRefreshJob() else false,
-            ),
+            .mcp_catalog_generation = if (self.mcp) |*runtime|
+                runtime.recoveryGeneration()
+            else
+                null,
             .shutting_down = self.shutting_down,
             .workspace_authority_stable = self.recoveryAuthorityStable(workspace),
             .execution_authority_stable = execution_exact,

@@ -994,21 +994,37 @@ test("Product MCP kernels have one physical home and isolate refresh workers", (
     build,
     /product_mcp_runtime\.addImport\("product_mcp_refresh_job", product_mcp_refresh_job\)/,
   );
+  assert.match(
+    build,
+    /product_mcp_runtime\.addImport\("product_mcp_view", product_mcp_view\)/,
+  );
   assert.match(build, /"Workbench snapshot serializer"/);
   assert.match(
     workbenchProjection,
     /const product_mcp = @import\("metawork_product_mcp"\)/,
   );
-  assert.match(workbenchProjection, /const mcp_state = product_mcp\.state/);
-  assert.match(workbenchProjection, /const mcp_policy = product_mcp\.policy/);
-  assert.match(workbenchProjection, /const mcp_view = product_mcp\.view/);
+  assert.doesNotMatch(
+    workbenchProjection,
+    /const mcp_(?:state|policy|view) = product_mcp\.(?:state|policy|view)/,
+  );
   assert.match(workbenchProjection, /const mcp_ports = product_mcp\.ports/);
   assert.match(
     workbenchProjection,
     /const mcp_refresh_job = product_mcp\.refresh_job/,
   );
   assert.match(workbenchProjection, /const mcp_runtime = product_mcp\.runtime/);
-  assert.match(workbenchProjection, /mcp_view\.writeProjection/);
+  assert.match(workbenchProjection, /mcp_runtime\.writeProjection/);
+  for (const name of [
+    "selectionForNewTask",
+    "recoveryAuthority",
+    "authorityStable",
+    "recoveryGeneration",
+    "writeConnectionApprovalDetails",
+    "writeSecretCapturePrompt",
+    "capabilities",
+  ]) {
+    assert.match(runtime, new RegExp(`pub fn ${name}\\b`));
+  }
   assert.doesNotMatch(
     workbenchProjection,
     /fn mcpAvailability|fn mcpRuntimeServerStatus|fn mcpProjectionRedacted|fn mcpAuthorizationStatus|fn mcpNewTaskAccess/,
@@ -1032,7 +1048,7 @@ test("Product MCP kernels have one physical home and isolate refresh workers", (
     workbenchProjection,
     /fn requestMcpCatalogRefresh|fn startPendingMcpCatalogRefresh/,
   );
-  assert.match(
+  assert.doesNotMatch(
     workbenchProjection,
     /agent_runtime\.createMcpAdmissionSelection/,
   );

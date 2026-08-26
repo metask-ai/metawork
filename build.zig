@@ -1219,6 +1219,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     product_mcp_runtime.addImport("product_mcp_configuration", mcp_configuration);
     product_mcp_runtime.addImport("product_mcp_state", product_mcp_state);
     product_mcp_runtime.addImport("product_mcp_policy", product_mcp_policy);
+    product_mcp_runtime.addImport("product_mcp_view", product_mcp_view);
     product_mcp_runtime.addImport("product_mcp_ports", product_mcp_ports);
     product_mcp_runtime.addImport("product_mcp_refresh_job", product_mcp_refresh_job);
     product_mcp.addImport("product_mcp_runtime", product_mcp_runtime);

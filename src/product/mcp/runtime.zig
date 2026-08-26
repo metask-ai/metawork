@@ -9,6 +9,7 @@ const state_module = @import("product_mcp_state");
 const policy = @import("product_mcp_policy");
 const ports_module = @import("product_mcp_ports");
 const refresh_job = @import("product_mcp_refresh_job");
+const view = @import("product_mcp_view");
 
 pub const Error = agent.Error || std.mem.Allocator.Error || error{
     ExecutorShuttingDown,
@@ -17,8 +18,115 @@ pub const Error = agent.Error || std.mem.Allocator.Error || error{
     CatalogUnavailable,
     McpManagementUnavailable,
     McpOauthScopeCapacity,
+    RecoveryUnavailable,
     CatalogRequestGenerationExhausted,
 };
+
+pub const Capabilities = struct {
+    management: bool,
+    host: state_module.McpHostCapabilities,
+};
+pub const ViewError = view.Error;
+pub const McpHostCapabilities = state_module.McpHostCapabilities;
+pub const McpStartupConfiguration = state_module.McpStartupConfiguration;
+pub const McpAdmissionBlockReason = state_module.McpAdmissionBlockReason;
+pub const McpAdmissionReady = state_module.McpAdmissionReady;
+pub const McpAdmissionAuthority = state_module.McpAdmissionAuthority;
+pub const RecoveryMcpAuthority = state_module.RecoveryMcpAuthority;
+pub const McpOauthRefreshBinding = state_module.McpOauthRefreshBinding;
+pub const McpOauthRefreshBeginOutcome = state_module.McpOauthRefreshBeginOutcome;
+pub const McpOauthAuthorizationPlan = state_module.McpOauthAuthorizationPlan;
+pub const McpOauthAuthorizationBinding = state_module.McpOauthAuthorizationBinding;
+pub const McpOauthAuthorizationOutcome = state_module.McpOauthAuthorizationOutcome;
+pub const McpOauthOperationHandle = state_module.McpOauthOperationHandle;
+pub const McpOauthCodeExchangeBinding = state_module.McpOauthCodeExchangeBinding;
+pub const McpOauthOperationBeginOutcome = state_module.McpOauthOperationBeginOutcome;
+pub const McpOauthCodeExchangeBeginOutcome = state_module.McpOauthCodeExchangeBeginOutcome;
+pub const McpOauthExpiry = state_module.McpOauthExpiry;
+pub const McpRuntimeAuthorizationFailure = state_module.McpRuntimeAuthorizationFailure;
+pub const McpRuntimeAuthorizationFailureOutcome = state_module.McpRuntimeAuthorizationFailureOutcome;
+pub const McpAuthorizationPhase = state_module.McpAuthorizationPhase;
+pub const McpConnectionTestOutcome = state_module.McpConnectionTestOutcome;
+pub const McpConfigurationApplyState = state_module.McpConfigurationApplyState;
+pub const McpAuthorizationOperationView = state_module.McpAuthorizationOperationView;
+pub const McpAuthorizationStart = state_module.McpAuthorizationStart;
+pub const McpSecretCaptureTarget = state_module.McpSecretCaptureTarget;
+pub const McpOauthRuntimeCommit = state_module.McpOauthRuntimeCommit;
+pub const McpRefreshTimer = state_module.McpRefreshTimer;
+
+/// Fallible startup preparation happens before the composition aggregate is
+/// installed. `takeRuntime` is the final no-fail ownership move.
+pub const Startup = struct {
+    allocator: std.mem.Allocator,
+    preparation: *configuration.Preparation,
+    activation: ?*agent.McpActivation,
+    activation_failed: bool,
+    management: ?configuration.ManagementPort,
+    host_capabilities: McpHostCapabilities,
+
+    pub fn prepare(
+        allocator: std.mem.Allocator,
+        input: McpStartupConfiguration,
+    ) Error!?Startup {
+        const preparation = input.preparation orelse return null;
+        const management = if (input.management) |management|
+            try configuration.ManagementPort.init(
+                allocator,
+                if (preparation.registry) |registry| registry.value else null,
+                management,
+            )
+        else
+            null;
+        return .{
+            .allocator = allocator,
+            .preparation = preparation,
+            .activation = input.activation,
+            .activation_failed = input.activation_failed,
+            .management = management,
+            .host_capabilities = input.host_capabilities,
+        };
+    }
+
+    pub fn deinit(self: *Startup) void {
+        if (self.management) |*management| management.deinit();
+        self.* = undefined;
+    }
+
+    pub fn takeRuntime(self: *Startup, ports: ports_module.Ports) Runtime {
+        const admission = state_module.initialMcpAdmission(
+            self.activation,
+            self.activation_failed,
+            if (self.management) |*management| management else null,
+        );
+        const runtime = Runtime.init(
+            self.allocator,
+            ports,
+            .{
+                .preparation = self.preparation.take(),
+                .activation = self.activation,
+                .activation_failed = self.activation_failed,
+                .management = self.management,
+                .admission = admission,
+                .host_capabilities = self.host_capabilities,
+            },
+        );
+        self.management = null;
+        self.* = undefined;
+        return runtime;
+    }
+};
+
+pub fn writeProjection(
+    runtime: ?*const Runtime,
+    writer: *std.Io.Writer,
+    text: view.TextProjection,
+) view.Error!void {
+    return view.writeProjection(writer, .{
+        .state = if (runtime) |value| &value.state else null,
+        .refresh_job_active = if (runtime) |value| value.refresh_job != null else false,
+        .text = text,
+    });
+}
 
 pub const Runtime = struct {
     allocator: std.mem.Allocator,
@@ -51,6 +159,229 @@ pub const Runtime = struct {
 
     pub fn hasRefreshJob(self: *const Runtime) bool {
         return self.refresh_job != null;
+    }
+
+    pub fn blocksNewTaskAdmission(self: *const Runtime) bool {
+        return self.refresh_job != null or self.state.refresh_pending_blocks_admission;
+    }
+
+    pub fn selectionForNewTask(self: *const Runtime) ?*const agent.McpSelection {
+        return policy.selectionForNewTask(&self.state);
+    }
+
+    pub fn authorizationOperation(
+        self: *const Runtime,
+    ) ?state_module.McpAuthorizationOperationView {
+        return policy.authorizationOperation(&self.state);
+    }
+
+    pub fn serverOperationBusy(self: *const Runtime, server_id: []const u8) bool {
+        return policy.serverOperationBusy(&self.state, server_id);
+    }
+
+    pub fn capabilities(self: *const Runtime) Capabilities {
+        const management = self.state.committed and self.state.management != null;
+        return .{
+            .management = management,
+            .host = if (management) self.state.host_capabilities else .{},
+        };
+    }
+
+    pub fn recoveryGeneration(self: *const Runtime) ?u64 {
+        return policy.recoveryGeneration(&self.state, self.refresh_job != null);
+    }
+
+    pub fn authorityStable(self: *const Runtime) bool {
+        if (!self.state.committed or self.refresh_job != null or
+            self.state.refresh_pending_blocks_admission or
+            self.state.authorization_operation != null or
+            self.state.runtime_auth_failure_blocked)
+            return false;
+        return self.state.admission == .ready;
+    }
+
+    pub fn recoveryAuthority(self: *Runtime) Error!state_module.RecoveryMcpAuthority {
+        if (!self.authorityStable()) return error.RecoveryUnavailable;
+        const ready = switch (self.state.admission) {
+            .ready => |value| value,
+            .blocked => return error.RecoveryUnavailable,
+        };
+        const activation = self.state.activation orelse {
+            if (ready.catalog_generation != null) return error.RecoveryUnavailable;
+            return .{ .selection = null, .catalog_generation = null };
+        };
+        if (ready.catalog_generation == null or
+            ready.catalog_generation.? != activation.catalogGeneration())
+            return error.RecoveryUnavailable;
+        const registry = if (self.state.management) |*management|
+            management.desiredRegistry() orelse return error.RecoveryUnavailable
+        else if (self.state.preparation.registry) |registry|
+            registry.value
+        else
+            return error.RecoveryUnavailable;
+        const health = activation.serverHealth();
+        const allowlists = try self.allocator.alloc(agent.McpServerAllowlist, health.len);
+        defer self.allocator.free(allowlists);
+        for (health, allowlists) |server, *allowlist| {
+            const desired = state_module.findMcpServer(registry.servers, server.id) orelse
+                return error.RecoveryUnavailable;
+            allowlist.* = .{
+                .id = server.id,
+                .tools = policy.serverToolsForAdmission(registry, desired),
+            };
+        }
+        return .{
+            .selection = self.ports.catalog.createAdmissionSelection(
+                activation,
+                allowlists,
+            ) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.RecoveryUnavailable,
+            },
+            .catalog_generation = activation.catalogGeneration(),
+        };
+    }
+
+    pub fn inspectDesiredConfiguration(
+        self: *const Runtime,
+    ) ?configuration.ManagementInspection {
+        const management = if (self.state.management) |*value| value else return null;
+        return management.inspect();
+    }
+
+    pub fn writeDesiredConfiguration(
+        self: *const Runtime,
+        expected_generation: u64,
+        output: []u8,
+    ) Error![]const u8 {
+        const management = if (self.state.management) |*value| value else return error.McpManagementUnavailable;
+        const inspection = management.inspect();
+        if (inspection.health != .ready or
+            inspection.desired_generation != expected_generation)
+            return error.McpManagementUnavailable;
+        const registry = management.desiredRegistry() orelse
+            return error.McpManagementUnavailable;
+        return configuration.encode(output, registry, management.limits) catch
+            return error.McpManagementUnavailable;
+    }
+
+    pub fn writeConnectionApprovalDetails(
+        self: *const Runtime,
+        expected_generation: u64,
+        server_id: []const u8,
+        output: []u8,
+    ) ![]const u8 {
+        if (self.refresh_job != null or policy.serverMutationBusy(&self.state, server_id))
+            return error.McpManagementUnavailable;
+        const management = if (self.state.management) |*value| value else return error.McpManagementUnavailable;
+        if (management.inspect().health != .ready or
+            !policy.expectedGenerationMatches(management, expected_generation))
+            return error.McpManagementUnavailable;
+        const registry = management.desiredRegistry() orelse
+            return error.McpManagementUnavailable;
+        const server = state_module.findMcpServer(registry.servers, server_id) orelse
+            return error.McpManagementUnavailable;
+        if (configuration.serverProblem(server, management.limits)) |problem|
+            if (problem != .invalid_connection_approval)
+                return error.McpManagementUnavailable;
+        if (registry.oauth_operation) |operation|
+            if (std.mem.eql(u8, operation.server_id, server_id))
+                return error.McpManagementUnavailable;
+        var writer = std.Io.Writer.fixed(output);
+        try writeQuotedField(&writer, "Name", server.display_name);
+        try writeQuotedField(&writer, "Protocol policy", server.negotiation);
+        try writer.print("Timeout: {d} ms\n", .{server.timeout_ms});
+        try writeQuotedField(&writer, "Authentication", server.auth.kind);
+        if (!std.mem.eql(u8, server.transport.kind, "streamable_http")) {
+            try writer.writeAll("Transport: STDIO\n");
+            try writeQuotedField(&writer, "Executable", server.transport.command.?);
+            try writer.writeAll("Arguments:\n");
+            for (server.transport.arguments) |argument|
+                try writeQuotedListItem(&writer, argument.literal.?);
+            try writeQuotedField(
+                &writer,
+                "Working directory",
+                server.transport.cwd orelse "(none)",
+            );
+            try writer.writeAll("Environment names:\n");
+            for (server.transport.environment) |slot|
+                try writeQuotedListItem(&writer, slot.name);
+        } else {
+            try writer.writeAll("Transport: Streamable HTTP\n");
+            try writeQuotedField(&writer, "Endpoint", server.transport.url.?);
+            try writer.writeAll("Header names:\n");
+            for (server.transport.headers) |slot|
+                try writeQuotedListItem(&writer, slot.name);
+            if (server.auth.oauth) |oauth| {
+                try writeQuotedField(&writer, "OAuth registration", oauth.registration.kind);
+                if (oauth.registration.client_id) |client_id|
+                    try writeQuotedField(&writer, "OAuth client ID", client_id);
+            }
+        }
+        return writer.buffered();
+    }
+
+    pub fn writeSecretCapturePrompt(
+        self: *const Runtime,
+        expected_generation: u64,
+        server_id: []const u8,
+        target: state_module.McpSecretCaptureTarget,
+        output: []u8,
+    ) ![]const u8 {
+        if (self.refresh_job != null or policy.serverMutationBusy(&self.state, server_id))
+            return error.McpManagementUnavailable;
+        const management = if (self.state.management) |*value| value else return error.McpManagementUnavailable;
+        if (management.inspect().health != .ready or
+            !policy.expectedGenerationMatches(management, expected_generation))
+            return error.McpManagementUnavailable;
+        const registry = management.desiredRegistry() orelse
+            return error.McpManagementUnavailable;
+        const server = state_module.findMcpServer(registry.servers, server_id) orelse
+            return error.McpManagementUnavailable;
+        if (server.connection_approval == null or
+            configuration.serverProblem(server, management.limits) != null)
+            return error.McpManagementUnavailable;
+        var writer = std.Io.Writer.fixed(output);
+        try writeQuotedField(&writer, "MCP server", server.display_name);
+        switch (target) {
+            .stdio_environment => |requested_name| {
+                if (!std.mem.eql(u8, server.auth.kind, "static") or
+                    !std.mem.eql(u8, server.transport.kind, "stdio"))
+                    return error.McpManagementUnavailable;
+                for (server.transport.environment) |slot| {
+                    if (!std.ascii.eqlIgnoreCase(slot.name, requested_name)) continue;
+                    try writeQuotedField(&writer, "Environment variable", slot.name);
+                    return writer.buffered();
+                }
+                return error.McpManagementUnavailable;
+            },
+            .http_header => |requested_name| {
+                if (!std.mem.eql(u8, server.auth.kind, "static") or
+                    !std.mem.eql(u8, server.transport.kind, "streamable_http"))
+                    return error.McpManagementUnavailable;
+                for (server.transport.headers) |slot| {
+                    if (!std.ascii.eqlIgnoreCase(slot.name, requested_name)) continue;
+                    try writeQuotedField(&writer, "HTTP header", slot.name);
+                    return writer.buffered();
+                }
+                return error.McpManagementUnavailable;
+            },
+            .oauth_client_secret => {
+                if (registry.oauth_operation != null) return error.McpManagementUnavailable;
+                const oauth = server.auth.oauth orelse return error.McpManagementUnavailable;
+                const method = oauth.registration.token_endpoint_auth_method orelse
+                    return error.McpManagementUnavailable;
+                if (!std.mem.eql(u8, oauth.registration.kind, "pre_registered") or
+                    std.mem.eql(u8, method, "none"))
+                    return error.McpManagementUnavailable;
+                try writeQuotedField(
+                    &writer,
+                    "OAuth client ID",
+                    oauth.registration.client_id orelse return error.McpManagementUnavailable,
+                );
+                return writer.buffered();
+            },
+        }
     }
 
     /// Returns and clears the product-state publication fact. The composition
@@ -1233,6 +1564,22 @@ fn textSetsEqual(left: []const []const u8, right: []const []const u8) bool {
     for (left, right) |left_value, right_value|
         if (!std.mem.eql(u8, left_value, right_value)) return false;
     return true;
+}
+
+fn writeQuotedField(
+    writer: *std.Io.Writer,
+    label: []const u8,
+    value: []const u8,
+) !void {
+    try writer.print("{s}: ", .{label});
+    try std.json.Stringify.value(value, .{}, writer);
+    try writer.writeByte('\n');
+}
+
+fn writeQuotedListItem(writer: *std.Io.Writer, value: []const u8) !void {
+    try writer.writeAll("  ");
+    try std.json.Stringify.value(value, .{}, writer);
+    try writer.writeByte('\n');
 }
 
 const TestHarness = struct {
