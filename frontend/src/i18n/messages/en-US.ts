@@ -496,22 +496,8 @@ export const enUS = {
   "compact.phase.queued": "Compaction queued",
   "compact.phase.compacting": "Compacting context",
   "compact.phase.stopping": "Stopping compaction",
-  "recovery.status": "Restoring conversation",
-  "recovery.title_required": "Continue this conversation",
-  "recovery.help_required":
-    "Your history is ready. Sending a message will restore this conversation first.",
-  "recovery.action": "Restore conversation",
-  "recovery.title_in_progress": "Restoring conversation",
-  "recovery.help_in_progress":
-    "Rebuilding the Agent session from the last verified save.",
-  "recovery.progress": "Restoring…",
-  "recovery.title_failed": "Conversation restore failed",
-  "recovery.help_failed":
-    "The saved conversation is still available. Check the current configuration and try again.",
-  "recovery.retry": "Try again",
-  "recovery.started": "Conversation restore started.",
   "recovery.start_failed":
-    "Conversation restore could not start. Refresh and try again.",
+    "This conversation cannot continue yet. Your message is saved; send it again to retry.",
   "task.create_failed":
     "The task could not be created. Check your connection and try again.",
   "task.created": "Task created.",
@@ -533,8 +519,8 @@ export const enUS = {
   "run.placeholder_closing": "This task is ending",
   "run.placeholder_unavailable":
     "End this task and start a new one to continue",
-  "run.placeholder_recovery_required":
-    "Type a message; the conversation will restore when you send",
+  "run.placeholder_execution_rebind_required":
+    "The current execution cannot run this conversation. Switch to an account or connection that supports the task model",
   "run.draft_only":
     "Saved locally as a draft. You can send it after the current work finishes.",
   "run.started": "Work started.",

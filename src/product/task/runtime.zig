@@ -333,16 +333,11 @@ pub const RecoveryStartInput = struct {
     workspace_root: []const u8,
     canonical_user_home: []const u8,
     workspace_trust: RecoveryWorkspaceTrust,
-    skill_policy_revision: u64,
-    disabled_skill_policy_keys: []const []const u8,
+    workspace_kind: recovery_job.WorkspaceKind,
     execution: account_contract.ExecutionConfigInput,
-    mcp_selection: *?*agent.McpSelection,
-    mcp_catalog_generation: ?u64,
     agent_runtime: *agent.Runtime,
     checkpoint_store: *checkpoint_store.FileStore,
-    catalog_limits: product_skill.catalog.Limits,
     checkpoint_limits: agent.CheckpointLimits,
-    available_projection_bytes: usize,
     notifier: task_execution.Notifier,
     executor: ExecutorPort,
 };
@@ -529,19 +524,19 @@ pub const RecoveryAuthorityQuery = struct {
     task_id: u64,
     workspace_id: u64,
     workspace_epoch: u64,
-    execution_generation: u64,
-    execution_model: []const u8,
+    target_execution_generation: u64,
+    task_model: []const u8,
     provider: agent.ProviderKind,
 };
 
 pub const RecoveryExternalAuthority = struct {
     workspace_root: []const u8,
-    skill_policy_revision: u64,
-    mcp_catalog_generation: ?u64,
+    workspace_kind: recovery_job.WorkspaceKind,
+    target_execution_generation: u64,
     shutting_down: bool,
-    workspace_authority_stable: bool,
-    execution_authority_stable: bool,
-    available_projection_bytes: usize,
+    workspace_authority_exact: bool,
+    automatic_owner_exact: bool,
+    target_execution_authority_exact: bool,
 };
 
 pub const RecoveryEffects = struct {
@@ -550,17 +545,13 @@ pub const RecoveryEffects = struct {
         *anyopaque,
         RecoveryAuthorityQuery,
     ) RecoveryExternalAuthority,
-    reserve_projection_bytes_fn: *const fn (*anyopaque, usize) void,
+    durable: DurableEffect,
 
     fn authority(
         self: RecoveryEffects,
         query: RecoveryAuthorityQuery,
     ) RecoveryExternalAuthority {
         return self.authority_fn(self.context, query);
-    }
-
-    fn reserveProjectionBytes(self: RecoveryEffects, bytes: usize) void {
-        self.reserve_projection_bytes_fn(self.context, bytes);
     }
 };
 
@@ -575,7 +566,6 @@ pub const ProjectionAuthorityQuery = struct {
     workspace_id: u64,
     workspace_epoch: u64,
     workspace_root: []const u8,
-    execution_generation: u64,
     execution_provider: task_state.Provider,
     execution_model: []const u8,
 };
@@ -584,10 +574,26 @@ pub const ProjectionAuthority = struct {
     shutting_down: bool,
     task_persistence_ready: bool,
     checkpoint_store_ready: bool,
-    execution_exact: bool,
-    workspace_authorized: bool,
-    runtime_admission_available: bool,
+    execution_admission: task_recovery.ExecutionAdmission,
+    workspace_identity_exact: bool,
+    automatic_owner_exact: bool,
+    runtime_admission: task_recovery.RuntimeAdmission,
     authority_stable: bool,
+};
+
+/// Command admission uses its own typed observation port. It deliberately
+/// cannot see projection writers, budgets, visibility or optional capability
+/// readiness.
+pub const RecoveryAdmissionEffects = struct {
+    context: *anyopaque,
+    authority_fn: *const fn (*anyopaque, ProjectionAuthorityQuery) ProjectionAuthority,
+
+    fn authority(
+        self: RecoveryAdmissionEffects,
+        query: ProjectionAuthorityQuery,
+    ) ProjectionAuthority {
+        return self.authority_fn(self.context, query);
+    }
 };
 
 pub const ProjectionEffects = struct {
@@ -2596,28 +2602,23 @@ pub const Runtime = struct {
         }
     }
 
-    pub fn recoveryAvailable(
-        self: *const Runtime,
-        task_id: u64,
-        effects: ProjectionEffects,
-    ) bool {
-        const task = self.findConst(task_id) orelse return false;
-        return self.recoveryProjection(task, effects).recovery_available;
-    }
-
     pub fn recoveryStartFacts(
         self: *const Runtime,
         task_id: u64,
         expected_binding_epoch: u64,
-        effects: ProjectionEffects,
+        effects: RecoveryAdmissionEffects,
     ) error{ UnknownTask, BindingEpochMismatch, RecoveryUnavailable }!RecoveryStartFacts {
         const task = self.findConst(task_id) orelse return error.UnknownTask;
         if (expected_binding_epoch == 0 or
             expected_binding_epoch != task.durable.binding_epoch)
             return error.BindingEpochMismatch;
-        if (!self.recoveryAvailable(task_id, effects) or
-            task.durable.checkpoint == null)
-            return error.RecoveryUnavailable;
+        const external = effects.authority(projectionAuthorityQuery(task));
+        switch (task_recovery.evaluateRecoveryAdmission(
+            self.recoveryAdmissionFacts(task, external),
+        )) {
+            .admitted => {},
+            .denied => return error.RecoveryUnavailable,
+        }
         return .{
             .workspace_id = task.durable.workspace_id,
             .workspace_epoch = task.durable.workspace_epoch,
@@ -2635,6 +2636,10 @@ pub const Runtime = struct {
             input.expected_binding_epoch != task.durable.binding_epoch)
             return error.BindingEpochMismatch;
         const checkpoint = task.durable.checkpoint orelse
+            return error.RecoveryUnavailable;
+        if (input.execution.execution_generation == 0 or
+            providerFromAccount(input.execution.target.provider_kind) !=
+                task.durable.execution_provider)
             return error.RecoveryUnavailable;
         if (task.runtime.active_operation != .none or
             task.runtime.liveConst() != null)
@@ -2663,13 +2668,6 @@ pub const Runtime = struct {
         );
         var workspace_live = true;
         errdefer if (workspace_live) workspace.deinit();
-        var skill_policy = try recovery_job.OwnedSkillPolicy.init(
-            self.allocator,
-            input.skill_policy_revision,
-            input.disabled_skill_policy_keys,
-        );
-        var skill_policy_live = true;
-        errdefer if (skill_policy_live) skill_policy.deinit();
         var execution = try owned_task_execution.OwnedTaskExecution.clone(
             self.allocator,
             input.execution.target.provider_kind,
@@ -2691,8 +2689,6 @@ pub const Runtime = struct {
                 .context = input.notifier.context,
                 .notify_fn = input.notifier.notify_fn,
             },
-            .catalog_limits = input.catalog_limits,
-            .available_projection_bytes = input.available_projection_bytes,
             .checkpoint_limits = input.checkpoint_limits,
             .attempt = .{
                 .attempt_id = attempt_id,
@@ -2700,21 +2696,18 @@ pub const Runtime = struct {
                 .binding_epoch = input.expected_binding_epoch,
                 .workspace_id = input.workspace_id,
                 .workspace_epoch = input.workspace_epoch,
+                .workspace_kind = input.workspace_kind,
                 .checkpoint = checkpoint_copy,
                 .workspace = workspace,
-                .skill_policy = skill_policy,
                 .execution = execution.take(),
-                .execution_generation = input.execution.execution_generation,
-                .model = model,
+                .source_execution_generation = task.durable.execution_generation,
+                .target_execution_generation = input.execution.execution_generation,
+                .task_model = model,
                 .provider = providerToAgent(task.durable.execution_provider),
-                .mcp_selection = input.mcp_selection.*,
-                .mcp_catalog_generation = input.mcp_catalog_generation,
             },
         };
-        input.mcp_selection.* = null;
         checkpoint_live = false;
         workspace_live = false;
-        skill_policy_live = false;
         task.runtime.active_operation = .{ .restore = .{ .id = attempt_id } };
         task.runtime.restore_job = job;
         task.runtime.last_restore_failure = null;
@@ -2777,6 +2770,14 @@ pub const Runtime = struct {
         task: *const task_state.Task,
         external: ProjectionAuthority,
     ) task_recovery.Projection {
+        return task_recovery.project(self.recoveryAdmissionFacts(task, external));
+    }
+
+    fn recoveryAdmissionFacts(
+        self: *const Runtime,
+        task: *const task_state.Task,
+        external: ProjectionAuthority,
+    ) task_recovery.RecoveryAdmissionFacts {
         const checkpoint = task.durable.checkpoint;
         const checkpoint_binding_valid = if (checkpoint) |record| binding: {
             if (record.blob.generation == 0) break :binding false;
@@ -2784,7 +2785,7 @@ pub const Runtime = struct {
                 break :binding false;
             break :binding true;
         } else false;
-        return task_recovery.project(.{
+        return .{
             .archived = task.durable.archived,
             .attachment = if (task.deletion == .deleting)
                 .closing
@@ -2793,19 +2794,22 @@ pub const Runtime = struct {
             .operation = task_policy.recoveryOperation(task.runtime.active_operation),
             .task_persistence_ready = external.task_persistence_ready,
             .checkpoint_store_ready = external.checkpoint_store_ready,
-            .checkpoint_available = checkpoint != null and
-                task.durable.checkpoint_anchor == .available,
-            .checkpoint_binding_valid = checkpoint_binding_valid,
-            .checkpoint_history_current = if (checkpoint) |record|
-                task_policy.checkpointMatchesCurrentHistory(task, record)
-            else
-                false,
-            .execution_exact = external.execution_exact,
-            .workspace_authorized = external.workspace_authorized,
-            .runtime_admission_available = external.runtime_admission_available,
-            .authority_stable = !self.recovery_poisoned and external.authority_stable,
+            .runtime_admission = external.runtime_admission,
+            .execution_admission = external.execution_admission,
+            .core = .{
+                .checkpoint_available = checkpoint != null and
+                    task.durable.checkpoint_anchor == .available,
+                .checkpoint_binding_exact = checkpoint_binding_valid,
+                .checkpoint_history_exact = if (checkpoint) |record|
+                    task_policy.checkpointMatchesCurrentHistory(task, record)
+                else
+                    false,
+                .workspace_identity_exact = external.workspace_identity_exact,
+                .automatic_owner_exact = external.automatic_owner_exact,
+                .authority_stable = !self.recovery_poisoned and external.authority_stable,
+            },
             .recovery_failed = task.runtime.last_restore_failure != null,
-        });
+        };
     }
 
     fn settleCheckpointPostprocessForShutdown(
@@ -2981,8 +2985,8 @@ pub const Runtime = struct {
                 .task_id = task.durable.id,
                 .workspace_id = task.durable.workspace_id,
                 .workspace_epoch = task.durable.workspace_epoch,
-                .execution_generation = task.durable.execution_generation,
-                .execution_model = task.durable.execution_model,
+                .target_execution_generation = job.attempt.target_execution_generation,
+                .task_model = task.durable.execution_model,
                 .provider = providerKind(task.durable.execution_provider),
             });
             const active_attempt_id: ?u64 = switch (task.runtime.active_operation) {
@@ -3002,25 +3006,65 @@ pub const Runtime = struct {
                         .binding_epoch = task.durable.binding_epoch,
                         .workspace_id = task.durable.workspace_id,
                         .workspace_epoch = task.durable.workspace_epoch,
+                        .workspace_kind = external.workspace_kind,
                         .workspace_root = external.workspace_root,
-                        .skill_policy_revision = external.skill_policy_revision,
-                        .execution_generation = task.durable.execution_generation,
-                        .execution_model = task.durable.execution_model,
+                        .source_execution_generation = task.durable.execution_generation,
+                        .target_execution_generation = external.target_execution_generation,
+                        .task_model = task.durable.execution_model,
                         .provider = providerKind(task.durable.execution_provider),
-                        .mcp_catalog_generation = external.mcp_catalog_generation,
                         .active_attempt_id = active_attempt_id,
                         .shutting_down = external.shutting_down,
                         .archived = task.durable.archived,
                         .attachment_detached = task.runtime.attachment == .detached,
                         .checkpoint_matches = checkpoint_matches,
-                        .workspace_authority_stable = external.workspace_authority_stable,
-                        .execution_authority_stable = external.execution_authority_stable,
-                        .available_projection_bytes = external.available_projection_bytes,
+                        .workspace_authority_exact = external.workspace_authority_exact,
+                        .automatic_owner_exact = external.automatic_owner_exact,
+                        .target_execution_authority_exact = external.target_execution_authority_exact,
                     },
-                    candidate.pinned_catalog.projected_bytes,
                 );
-                if (allowed) {
-                    effects.reserveProjectionBytes(candidate.pinned_catalog.projected_bytes);
+                var install_candidate = allowed;
+                if (install_candidate and
+                    job.attempt.source_execution_generation !=
+                        job.attempt.target_execution_generation)
+                adoption: {
+                    if (task.durable.binding_epoch == std.math.maxInt(u64)) {
+                        task.runtime.last_restore_failure = .binding_epoch_exhausted;
+                        install_candidate = false;
+                        break :adoption;
+                    }
+                    const previous_generation = task.durable.execution_generation;
+                    const previous_epoch = task.durable.binding_epoch;
+                    const next_epoch = previous_epoch + 1;
+                    const checkpoint = &(task.durable.checkpoint orelse {
+                        task.runtime.last_restore_failure = .binding_persistence_failed;
+                        install_candidate = false;
+                        break :adoption;
+                    });
+                    checkpoint.adoptBindingEpoch(previous_epoch, next_epoch) catch {
+                        task.runtime.last_restore_failure = .binding_persistence_failed;
+                        install_candidate = false;
+                        break :adoption;
+                    };
+                    task.durable.execution_generation =
+                        job.attempt.target_execution_generation;
+                    task.durable.binding_epoch = next_epoch;
+                    switch (effects.durable.commit()) {
+                        .committed => {},
+                        .failed, .outcome_unknown => |outcome| {
+                            task.durable.execution_generation = previous_generation;
+                            task.durable.binding_epoch = previous_epoch;
+                            checkpoint.anchor.binding_epoch = previous_epoch;
+                            task.runtime.last_restore_failure = switch (outcome) {
+                                .failed => .binding_persistence_failed,
+                                .outcome_unknown => .binding_persistence_unknown,
+                                .committed => unreachable,
+                            };
+                            install_candidate = false;
+                        },
+                    }
+                }
+                if (install_candidate) {
+                    task.runtime.last_restore_report = candidate.report;
                     task.runtime.last_restore_permission = .{
                         .restored_rules = candidate.report.restored_permission_rules,
                         .invalidated_rules = candidate.report.invalidated_permission_rules,
@@ -3028,21 +3072,19 @@ pub const Runtime = struct {
                     task.runtime.attachment = .{ .attached = .{
                         .binding = candidate.takeBinding(),
                         .execution = candidate.takeExecution(),
-                        .pinned_catalog = candidate.takeCatalog(),
+                        .pinned_catalog = null,
                     } };
                     task.runtime.last_restore_failure = null;
-                } else if (!candidate.discard()) {
-                    self.recovery_poisoned = true;
-                    task.runtime.last_restore_failure = .candidate_cleanup_failed;
+                } else {
+                    if (!candidate.discard()) {
+                        self.recovery_poisoned = true;
+                        task.runtime.last_restore_failure = .candidate_cleanup_failed;
+                    }
                 }
             } else if (job.failure()) |failure| {
                 task.runtime.last_restore_failure = failure;
                 result.mcp_refresh_needed = result.mcp_refresh_needed or
-                    (failure == .mcp_not_refreshed and
-                        optionalU64Equal(
-                            external.mcp_catalog_generation,
-                            job.attempt.mcp_catalog_generation,
-                        ));
+                    failure == .runtime_refresh_required;
                 switch (failure) {
                     .checkpoint_missing => {
                         task.durable.checkpoint_anchor = .blob_missing;
@@ -3090,7 +3132,6 @@ fn projectionAuthorityQuery(
         .workspace_id = task.durable.workspace_id,
         .workspace_epoch = task.durable.workspace_epoch,
         .workspace_root = task.durable.workspace_root,
-        .execution_generation = task.durable.execution_generation,
         .execution_provider = task.durable.execution_provider,
         .execution_model = task.durable.execution_model,
     };
@@ -4437,11 +4478,6 @@ fn checkpointIdentityEqual(left: anytype, right: @TypeOf(left)) bool {
         left.generation == right.generation and
         left.byte_size == right.byte_size and
         std.mem.eql(u8, &left.digest, &right.digest);
-}
-
-fn optionalU64Equal(left: ?u64, right: ?u64) bool {
-    if (left == null or right == null) return left == null and right == null;
-    return left.? == right.?;
 }
 
 test "Runtime owns bounded Task collection and monotonic process facts" {

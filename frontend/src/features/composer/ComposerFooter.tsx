@@ -48,9 +48,6 @@ export function ComposerFooter({
   closing,
   unavailable,
   unavailableReason,
-  recoveryAvailable,
-  recoveryInProgress,
-  recoveryDisabled,
   draft,
   skillCatalog,
   slashCommands,
@@ -77,7 +74,6 @@ export function ComposerFooter({
   onDraftChange,
   onSubmit,
   onStop,
-  onRestore,
   onSlashCommand,
   onRefreshSkillCatalog,
   onConfirmAccess,
@@ -89,9 +85,6 @@ export function ComposerFooter({
   closing: boolean;
   unavailable: boolean;
   unavailableReason: TaskView["continuationUnavailableReason"];
-  recoveryAvailable: boolean;
-  recoveryInProgress: boolean;
-  recoveryDisabled: boolean;
   draft: ComposerDraft;
   skillCatalog: SkillCatalogView;
   slashCommands: readonly SlashCommandState[];
@@ -128,7 +121,6 @@ export function ComposerFooter({
   onDraftChange: (value: ComposerDraft) => void;
   onSubmit: () => void;
   onStop: () => void;
-  onRestore: () => void;
   onSlashCommand: (command: SlashCommandName) => void;
   onRefreshSkillCatalog: () => void;
   onConfirmAccess: () => void;
@@ -143,8 +135,6 @@ export function ComposerFooter({
   const [composing, setComposing] = useState(false);
   const firstSkillArgumentRef = useRef<HTMLInputElement>(null);
   const skillRemoveButtonRef = useRef<HTMLButtonElement>(null);
-  const recoveryFailed = unavailableReason === "session_recovery_failed";
-  const recoveryVisible = recoveryAvailable || recoveryInProgress;
   const sendButtonRef = useRef<HTMLButtonElement>(null);
   const stopButtonRef = useRef<HTMLButtonElement>(null);
   const text = draft.kind === "text" ? draft.text : "";
@@ -303,57 +293,6 @@ export function ComposerFooter({
   return (
     <footer className="composer-bar">
       <div className="composer-shell">
-        {recoveryVisible && (
-          <section
-            className="conversation-recovery"
-            data-state={
-              recoveryInProgress
-                ? "in-progress"
-                : recoveryFailed
-                  ? "failed"
-                  : "required"
-            }
-            role="status"
-            aria-live="polite"
-          >
-            <div>
-              <strong>
-                {t(
-                  recoveryInProgress
-                    ? "recovery.title_in_progress"
-                    : recoveryFailed
-                      ? "recovery.title_failed"
-                      : "recovery.title_required",
-                )}
-              </strong>
-              <p>
-                {t(
-                  recoveryInProgress
-                    ? "recovery.help_in_progress"
-                    : recoveryFailed
-                      ? "recovery.help_failed"
-                      : "recovery.help_required",
-                )}
-              </p>
-            </div>
-            <Button
-              type="button"
-              variant="primary"
-              size="md"
-              className="recovery-action"
-              disabled={recoveryDisabled || recoveryInProgress}
-              onClick={onRestore}
-            >
-              {t(
-                recoveryInProgress
-                  ? "recovery.progress"
-                  : recoveryFailed
-                    ? "recovery.retry"
-                    : "recovery.action",
-              )}
-            </Button>
-          </section>
-        )}
         {menuOpen && slashInput && (
           <SlashMenu
             input={slashInput}
@@ -399,8 +338,10 @@ export function ComposerFooter({
                           unavailableReason ===
                             "session_recovery_in_progress" ||
                           unavailableReason === "session_recovery_failed"
-                          ? "run.placeholder_recovery_required"
-                          : "run.placeholder_unavailable",
+                          ? "run.placeholder"
+                          : unavailableReason === "execution_rebind_required"
+                            ? "run.placeholder_execution_rebind_required"
+                            : "run.placeholder_unavailable",
                       )
                     : archived
                       ? t("run.placeholder_archived")

@@ -2049,7 +2049,6 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
         if (run.id == 0 or run.generation == 0 or run.execution_generation == 0 or
             !oneOf(run.execution_provider, &.{ "anthropic", "openai", "gemini" }) or
             !validText(run.execution_model, limits.max_execution_model_bytes, false) or
-            run.execution_generation != task.binding.execution_generation or
             !std.mem.eql(u8, run.execution_provider, task.binding.provider) or
             !validText(run.assistant, limits.max_assistant_message_bytes, true) or
             !validText(run.status, limits.max_tool_field_bytes, true) or
@@ -2579,6 +2578,94 @@ test "corrupt Task identity cannot manufacture a global failure" {
     try std.testing.expect(recovered.degraded);
     try std.testing.expectEqual(@as(usize, 1), recovered.dropped_tasks);
     try std.testing.expectEqual(@as(usize, 0), recovered.value.failures.len);
+}
+
+test "task store round-trips per-run execution generations across binding adoption" {
+    var workspaces = [_]WorkspaceWire{.{
+        .id = 1,
+        .epoch = 1,
+        .kind = "manual",
+        .canonical_root = "/tmp/repo",
+        .display_name = "repo",
+        .visible = true,
+        .recent_order = 1,
+    }};
+    var runs: [2]RunWire = undefined;
+    runs[0] = .{
+        .id = 1,
+        .generation = 1,
+        .execution_generation = 13,
+        .execution_provider = "openai",
+        .execution_model = "model",
+        .input = .{
+            .kind = "text",
+            .text = "before adoption",
+            .skill_id = null,
+            .catalog_revision = null,
+            .invocation_name = null,
+            .display_name = null,
+            .argument_values = null,
+            .redacted = false,
+        },
+        .assistant = "done",
+        .assistant_redacted = false,
+        .phase = "completed",
+        .outcome = "completed",
+        .cause = null,
+        .status = "Completed",
+        .usage = .{
+            .input_tokens = 1,
+            .output_tokens = 1,
+            .cache_read_input_tokens = 0,
+            .cache_creation_input_tokens = 0,
+        },
+        .tools = &.{},
+        .diagnostic = "",
+        .diagnostic_truncated = false,
+        .diagnostic_redacted = false,
+        .event_projection_failure = false,
+        .next_activity_order = 1,
+    };
+    runs[1] = runs[0];
+    runs[1].id = 2;
+    runs[1].generation = 2;
+    runs[1].execution_generation = 17;
+    runs[1].input.text = "after adoption";
+    var tasks = [_]TaskWire{.{
+        .id = 1,
+        .recent_order = 1,
+        .workspace_id = 1,
+        .workspace_epoch = 1,
+        .workspace_root = "/tmp/repo",
+        .title = "task",
+        .title_redacted = false,
+        .archived = false,
+        .binding = .{
+            .epoch = 2,
+            .execution_generation = 17,
+            .provider = "openai",
+            .model = "model",
+        },
+        .next_run_generation = 2,
+        .active_operation = null,
+        .runs = &runs,
+        .compacts = &.{},
+        .ui_history = &.{},
+    }};
+    var output: [64 * 1024]u8 = undefined;
+    const bytes = try encode(&output, .{
+        .next_workspace_id = 2,
+        .next_workspace_recent_order = 2,
+        .next_task_id = 2,
+        .next_task_recent_order = 2,
+        .workspaces = &workspaces,
+        .tasks = &tasks,
+    });
+    var decoded = try decode(std.testing.allocator, bytes, testLimits());
+    defer decoded.deinit();
+    try std.testing.expectEqual(@as(u64, 17), decoded.value.tasks[0].binding.execution_generation);
+    try std.testing.expectEqual(@as(u64, 13), decoded.value.tasks[0].runs[0].execution_generation);
+    try std.testing.expectEqual(@as(u64, 17), decoded.value.tasks[0].runs[1].execution_generation);
 }
 
 test "task store rejects states that would violate the Renderer contract" {

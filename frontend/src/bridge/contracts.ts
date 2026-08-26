@@ -433,7 +433,7 @@ export type TaskView = {
     | "session_recovery_failed"
     | "persistence_unavailable"
     | "checkpoint_unavailable"
-    | "execution_mismatch"
+    | "execution_rebind_required"
     | "workspace_unavailable"
     | "authority_unavailable"
     | "runtime_unavailable"

@@ -17,6 +17,7 @@ const workbenchConfiguration = fixture.workbenchConfiguration;
 const workbenchTaskInput = fixture.workbenchTaskInput;
 const waitWorkbenchSnapshot = fixture.waitWorkbenchSnapshot;
 const installWorkbenchExecution = fixture.installWorkbenchExecution;
+const installWorkbenchExecutionGeneration = fixture.installWorkbenchExecutionGeneration;
 
 const ShutdownContext = struct {
     workbench: *workbench_api.Workbench,
@@ -608,7 +609,7 @@ test "restart recovery revalidates live authority and continues the same Convers
     );
     var first_workbench_live = true;
     defer if (first_workbench_live) first.deinit();
-    try installWorkbenchExecution(&first);
+    try installWorkbenchExecutionGeneration(&first, 1);
     const workspace_id = try first.openWorkspace(workbenchTaskInput());
     var catalog = try waitCatalogReady(&first, workspace_id);
     _ = try first.setSkillEnabled(.{
@@ -684,7 +685,7 @@ test "restart recovery revalidates live authority and continues the same Convers
     );
     var restored_live = true;
     defer if (restored_live) restored.deinit();
-    try installWorkbenchExecution(&restored);
+    try installWorkbenchExecutionGeneration(&restored, 2);
     // A persisted manual Workspace deliberately restarts without authority.
     // Reopening it models the user's explicit reauthorization action.
     try std.testing.expectEqual(
@@ -697,17 +698,6 @@ test "restart recovery revalidates live authority and continues the same Convers
         "\"id\":\"1\"",
         "\"continuationRecoveryAvailable\":true",
     );
-    fake_core.setCatalogPlan(.query_failure);
-    _ = try restored.restoreTaskConversation(
-        task_id,
-        try restored.taskBindingEpoch(task_id),
-    );
-    try waitTaskSnapshot(
-        &restored,
-        "\"id\":\"1\"",
-        "\"continuationUnavailableReason\":\"session_recovery_failed\"",
-    );
-    fake_core.setCatalogPlan(.healthy);
     fake_core.forceNextCheckpointRestoreStatus(wire.STATUS_CHECKPOINT_CORRUPT);
     _ = try restored.restoreTaskConversation(
         task_id,
@@ -765,6 +755,10 @@ test "restart recovery revalidates live authority and continues the same Convers
         "\"continuationRecoveryAvailable\":true",
     );
 
+    fake_core.lock();
+    const catalog_queries_before_restore = fake_core.catalog_queries;
+    fake_core.unlock();
+    fake_core.forceNextCheckpointRestoreDegraded();
     fake_core.armControlledRestore();
     _ = try restored.restoreTaskConversation(
         task_id,
@@ -783,6 +777,30 @@ test "restart recovery revalidates live authority and continues the same Convers
         &restored,
         "\"id\":\"1\"",
         "\"continuationAvailable\":true",
+    );
+    try std.testing.expectEqual(@as(u64, 2), try restored.taskBindingEpoch(task_id));
+    try waitTaskSnapshot(
+        &restored,
+        "\"id\":\"1\"",
+        "\"restorePermission\":{\"restoredRules\":\"0\",\"invalidatedRules\":\"1\"}",
+    );
+    const restore_report = restored.task_runtime.tasks[0].?.runtime.last_restore_report.?;
+    try std.testing.expectEqual(@as(@TypeOf(restore_report.health), .degraded), restore_report.health);
+    try std.testing.expectEqual(@as(u32, 1), restore_report.invalidated_skill_authority);
+    try std.testing.expectEqual(@as(u32, 1), restore_report.invalidated_permission_rules);
+    try std.testing.expectEqual(@as(u32, 1), restore_report.invalidated_mcp_bindings);
+    const unbound_catalog = try restored.taskCatalog(task_id);
+    try std.testing.expectEqual(
+        workbench_api.CatalogAvailability.uninitialized,
+        unbound_catalog.availability,
+    );
+    fake_core.lock();
+    const catalog_queries_after_restore = fake_core.catalog_queries;
+    fake_core.unlock();
+    try std.testing.expectEqual(catalog_queries_before_restore, catalog_queries_after_restore);
+    try restored.refreshTaskCatalog(
+        task_id,
+        try restored.taskBindingEpoch(task_id),
     );
     const restored_catalog = try restored.taskCatalog(task_id);
     try std.testing.expectEqual(@as(?u64, 2), restored_catalog.selection_revision);
@@ -851,7 +869,7 @@ test "restart recovery revalidates live authority and continues the same Convers
     );
     var shutdown_restore_live = true;
     defer if (shutdown_restore_live) shutdown_restore.deinit();
-    try installWorkbenchExecution(&shutdown_restore);
+    try installWorkbenchExecutionGeneration(&shutdown_restore, 2);
     try std.testing.expectEqual(
         workspace_id,
         try shutdown_restore.openWorkspace(workbenchTaskInput()),
@@ -938,7 +956,7 @@ test "restart recovery revalidates live authority and continues the same Convers
         invalidation_configuration,
     );
     defer workspace_invalidation.deinit();
-    try installWorkbenchExecution(&workspace_invalidation);
+    try installWorkbenchExecutionGeneration(&workspace_invalidation, 2);
     try std.testing.expectEqual(
         workspace_id,
         try workspace_invalidation.openWorkspace(workbenchTaskInput()),
@@ -994,6 +1012,236 @@ test "restart recovery revalidates live authority and continues the same Convers
         sessions_destroyed_before_workspace_removal + 1,
         sessions_destroyed_after_workspace_removal,
     );
+}
+
+test "automatic Task binding adoption survives another restart and admits a second Text Run" {
+    fake_core.reset();
+    fake_core.setCheckpointGeneration(1);
+    const home = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        ".",
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(home);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
+    var automatic_root = try workbench_api.AutomaticWorkspaceRoot.open(
+        std.testing.io,
+        std.testing.allocator,
+        root_storage[0..root_len],
+    );
+    defer automatic_root.deinit();
+    var checkpoint_tmp = std.testing.tmpDir(.{});
+    defer checkpoint_tmp.cleanup();
+    var checkpoint_root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const checkpoint_root_len = try checkpoint_tmp.dir.realPath(
+        std.testing.io,
+        &checkpoint_root_storage,
+    );
+    var checkpoint_store = try product_task.checkpoint_store.FileStore.init(
+        std.testing.io,
+        checkpoint_root_storage[0..checkpoint_root_len],
+    );
+    defer checkpoint_store.deinit();
+    const persistence_storage = try std.testing.allocator.alloc(
+        u8,
+        product_task.history.max_store_bytes,
+    );
+    defer std.testing.allocator.free(persistence_storage);
+    var persistence = TaskPersistenceProbe{ .storage = persistence_storage };
+
+    var runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_sessions = 1,
+    });
+    var runtime_live = true;
+    defer if (runtime_live) {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    };
+    var first_configuration = workbenchConfiguration();
+    first_configuration.directories.canonical_user_home = home;
+    first_configuration.directories.automatic_workspace_root = &automatic_root;
+    first_configuration.task_persistence = persistence.capability();
+    first_configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
+    var first = try workbench_api.Workbench.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 2,
+            .max_workspaces = 1,
+            .max_tasks = 1,
+            .max_runs_per_task = 2,
+            .max_tools_per_run = 1,
+        },
+        first_configuration,
+    );
+    var first_live = true;
+    defer if (first_live) first.deinit();
+    try installWorkbenchExecutionGeneration(&first, 1);
+    const task_id = try first.createTaskForWorkspace(.automatic, 1, null, null);
+    _ = try first.runTask(task_id, .{ .text = "automatic first run" });
+    try waitCheckpointRecord(&first, &persistence);
+    const restart_history = try std.testing.allocator.dupe(
+        u8,
+        persistence_storage[0..persistence.len],
+    );
+    defer std.testing.allocator.free(restart_history);
+    first.shutdownExecutor();
+    first.deinit();
+    first_live = false;
+    try shutdownTestComposition(runtime);
+    deinitTestComposition(runtime);
+    runtime_live = false;
+
+    fake_core.lock();
+    fake_core.session_created = 0;
+    fake_core.checkpoint_restores = 0;
+    fake_core.run_calls = 0;
+    fake_core.restore_last_run_id = 1;
+    fake_core.restore_last_compact_id = 0;
+    fake_core.unlock();
+    runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_sessions = 1,
+    });
+    runtime_live = true;
+    var restored_automatic_root = try workbench_api.AutomaticWorkspaceRoot.open(
+        std.testing.io,
+        std.testing.allocator,
+        root_storage[0..root_len],
+    );
+    defer restored_automatic_root.deinit();
+    var second_configuration = workbenchConfiguration();
+    second_configuration.directories.canonical_user_home = home;
+    second_configuration.directories.automatic_workspace_root = &restored_automatic_root;
+    second_configuration.task_persistence = persistence.capabilityRestored(restart_history);
+    second_configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
+    var restored = try workbench_api.Workbench.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 2,
+            .max_workspaces = 1,
+            .max_tasks = 1,
+            .max_runs_per_task = 2,
+            .max_tools_per_run = 1,
+        },
+        second_configuration,
+    );
+    var restored_live = true;
+    defer if (restored_live) restored.deinit();
+    try installWorkbenchExecutionGeneration(&restored, 2);
+    try waitTaskSnapshot(
+        &restored,
+        "\"id\":\"1\"",
+        "\"continuationRecoveryAvailable\":true",
+    );
+    _ = try restored.restoreTaskConversation(
+        task_id,
+        try restored.taskBindingEpoch(task_id),
+    );
+    try waitTaskSnapshot(
+        &restored,
+        "\"id\":\"1\"",
+        "\"continuationAvailable\":true",
+    );
+    try std.testing.expectEqual(@as(u64, 2), try restored.taskBindingEpoch(task_id));
+    const adopted_history = try std.testing.allocator.dupe(
+        u8,
+        persistence_storage[0..persistence.len],
+    );
+    defer std.testing.allocator.free(adopted_history);
+    restored.shutdownExecutor();
+    restored.deinit();
+    restored_live = false;
+    try shutdownTestComposition(runtime);
+    deinitTestComposition(runtime);
+    runtime_live = false;
+
+    fake_core.lock();
+    fake_core.session_created = 0;
+    fake_core.checkpoint_restores = 0;
+    fake_core.run_calls = 0;
+    fake_core.restore_last_run_id = 1;
+    fake_core.restore_last_compact_id = 0;
+    fake_core.unlock();
+    runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_sessions = 1,
+    });
+    runtime_live = true;
+    var continued_automatic_root = try workbench_api.AutomaticWorkspaceRoot.open(
+        std.testing.io,
+        std.testing.allocator,
+        root_storage[0..root_len],
+    );
+    defer continued_automatic_root.deinit();
+    var third_configuration = workbenchConfiguration();
+    third_configuration.directories.canonical_user_home = home;
+    third_configuration.directories.automatic_workspace_root = &continued_automatic_root;
+    third_configuration.task_persistence = persistence.capabilityRestored(adopted_history);
+    third_configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
+    var continued = try workbench_api.Workbench.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 2,
+            .max_workspaces = 1,
+            .max_tasks = 1,
+            .max_runs_per_task = 2,
+            .max_tools_per_run = 1,
+        },
+        third_configuration,
+    );
+    var continued_live = true;
+    defer if (continued_live) continued.deinit();
+    try installWorkbenchExecutionGeneration(&continued, 2);
+    try waitTaskSnapshot(
+        &continued,
+        "\"id\":\"1\"",
+        "\"continuationRecoveryAvailable\":true",
+    );
+    _ = try continued.restoreTaskConversation(
+        task_id,
+        try continued.taskBindingEpoch(task_id),
+    );
+    try waitTaskSnapshot(
+        &continued,
+        "\"id\":\"1\"",
+        "\"continuationAvailable\":true",
+    );
+    try std.testing.expectEqual(@as(u64, 2), try continued.taskBindingEpoch(task_id));
+    try std.testing.expectEqual(
+        workbench_api.CatalogAvailability.uninitialized,
+        (try continued.taskCatalog(task_id)).availability,
+    );
+    _ = try continued.runTask(task_id, .{ .text = "automatic second run" });
+    try waitTaskSnapshot(&continued, "\"id\":\"2\"", "\"phase\":\"completed\"");
+    fake_core.lock();
+    const restores = fake_core.checkpoint_restores;
+    const runs = fake_core.run_calls;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 1), restores);
+    try std.testing.expectEqual(@as(usize, 1), runs);
+
+    continued.shutdownExecutor();
+    continued.deinit();
+    continued_live = false;
+    try shutdownTestComposition(runtime);
+    deinitTestComposition(runtime);
+    runtime_live = false;
 }
 
 test "accepted Task deletion advances after checkpoint quiescence without a second command" {

@@ -493,14 +493,14 @@ Execution binding availability 是下一次 admission 的独立前置事实，�
 
 1. Host 从 bounded Workbench store 恢复 Workspace/Task、消息、Run/tool/UI 决策、compact 历史、无 secret execution binding 与 checkpoint record；不得把当前默认配置静默写入历史 Task；
 2. 没有 live owner 的 non-terminal Run 或 compact 显示为 `Interrupted`，不显示 Running/Stopping，不自动重放输入、工具或 permission；
-3. 点击左栏 Task 始终只是导航。满足资格的 detached Task 在 Composer 上方显示历史已准备提示；用户发送第一条新消息时，Renderer 才提交现有 restore，并等待 Host snapshot 确认 attachment 后继续提交该条 Run；选择、reload 或 timeout 不会自动触发 restore；
-4. restore 期间显示 `Restoring conversation / 正在恢复对话`，禁用发送、compact 和重复 restore。左栏把该 Task 归入正在运行分组，但不能伪造 Agent Run 或 Stop 按钮；
-5. restore 失败时保留可阅读历史、用户草稿与稳定原因；Host 仍发布 `continuationRecoveryAvailable = true` 时显示 `Try again / 重试`。timeout 只触发 canonical snapshot resync，绝不重放 restore 或 Run；
+3. 点击左栏 Task 始终只是导航。满足资格的 detached Task 使用普通 Composer，不显示恢复卡片、恢复按钮、专用 placeholder 或其他 capability continuity 提示；用户发送第一条新消息时，Renderer 才在同一次发送意图内提交现有 restore，并等待 Host snapshot 确认 attachment 后继续提交该条 Run；选择、reload 或 timeout 不会自动触发 restore；
+4. restore 只表现为该次普通发送的 preparing/busy 状态，期间禁用发送、compact 和重复提交，不显示 `Restoring conversation / 正在恢复对话`。左栏可以把该 Task 归入正在运行分组，但不能伪造 Agent Run 或 Stop 按钮；
+5. restore 失败时保留可阅读历史、用户草稿与稳定原因，并显示准确、可执行的失败说明；Host 仍发布 `continuationRecoveryAvailable = true` 时，下一次普通发送重试同一前置流程，不建立专用 `Try again / 重试` 按钮。timeout 只触发 canonical snapshot resync，绝不重放 restore 或 Run；
 6. 成功后 Host 原子发布 attachment 与 `continuationAvailable = true`，Renderer 只在这一状态确认后提交一次 Run。`continuationAvailable`、`continuationUnavailableReason` 和 `continuationRecoveryAvailable` 是同一 continuation 模型；不得建立第二个 `recovery.state` 或由 Renderer 猜测资格；
-7. checkpoint、Workspace、execution、catalog/MCP authority、Runtime 或持久化任一 gate 不满足时只显示对应 unavailable 说明，不显示恢复按钮。Task store read/corrupt/write/outcome-unknown health 由 Host 发布；Renderer 不自行清空、修复、迁移或重试持久数据；
+7. checkpoint、Task/Workspace/Execution identity、Agent Runtime、checkpoint store 或 Task persistence 任一核心 gate 不满足时显示对应 unavailable 说明，不开放发送。Workspace 是否因导航语义 `visible=false`、Skill catalog 是否 ready、MCP selection 是否可重建、Permission 是否仍有效以及 projection capacity 都不是恢复资格；这些可选能力缺失时 Host 可以发布成功但 degraded 的 attachment，普通 Text 立即可用，相关能力按各自现有显式流程恢复。Task store read/corrupt/write/outcome-unknown health 由 Host 发布；Renderer 不自行清空、修复、迁移或重试持久数据；
 8. `closed` 不是 Task 产品状态。非归档 Task 只要 Host gate 允许，就应恢复 attachment 并继续；归档只控制日常列表可见性，删除才永久移除记录。
 
-恢复要求 checkpoint record 与 Task execution binding 共同证明 provider、execution generation、Task binding epoch 与当前可用 execution authority 精确匹配；checkpoint 的 model 只用于满足 AgentCore restore expectation，并与其 terminal Run 的历史 model 自洽校验。candidate 提交前由 Host 以 Task 当前 model binding 调用 `session_set_model`，不能把 checkpoint 的旧 model 或 Account 当前默认 model 静默写回 Task。durable Task 不保存 account、API Key 或 Model Connection identity，恢复不能从当前 Account projection 反推或补写这些字段；Task 当前 pinned model 不在当前 execution catalog 时，恢复 gate 保持 unavailable。若未来交付 rebind，必须由用户明确发起，重新校验 Workspace 和当前 catalog ownership，创建新 binding epoch/Session，并以不可改写的配置边界保留旧 Run、usage 与模型归属；失败不得回退到静默默认值。
+恢复要求 checkpoint record 与 Task execution binding 证明 source Task/binding、provider、Task binding epoch 和 terminal anchor 精确，当前 execution authority 则作为独立 target readiness：provider 相同、Task pinned model 仍在当前 catalog，且 restore start→commit 期间 target generation 不变。历史 H 与当前 G 可以不同；H≠G 时 Host 必须先以 durable adoption 同步推进 Task execution generation、binding epoch 与 checkpoint anchor epoch，commit 成功后才安装 attachment，旧 Run 的 generation/model/usage 不改写。checkpoint 的 model 只用于满足 AgentCore restore expectation，并与其 terminal Run 的历史 model 自洽校验；candidate 提交前由 Host 以 Task 当前 model binding 调用 `session_set_model`，不能把 checkpoint 的旧 model 或 Account 当前默认 model 静默写回 Task。durable Task 不保存 account、API Key 或 Model Connection identity，恢复不能从当前 Account projection 反推或补写这些字段。该 adoption 只连接同一 Conversation 的 source 与兼容 target，不允许切换 provider 或 Task model；未来的通用 rebind 仍必须由用户明确发起，重新校验 Workspace 和当前 catalog ownership，创建新 binding epoch/Session，并以不可改写的配置边界保留旧 Run、usage 与模型归属；失败不得回退到静默默认值。
 
 ## 7. 中间区域：Task 内容
 
@@ -566,7 +566,7 @@ New task 页面以 Composer 为绝对主视觉。其上方使用直接的行动�
 
 - New task 始终显示当前默认连接与模型；点击后只列出当前连接的 Host-validated 模型目录；
 - 弹层顶部显示当前连接的脱敏名称与 Provider，并提供 `模型连接设置…`；不得显示完整 secret；
-- 默认连接、Metask API/provider/credential authority 或 ready Model Connection 的模型变化更新 Account 当前默认 execution generation；只有同一已提交 Metask API 下修改默认模型时才只更新 Account preference、保持 generation 不变。两类默认变化都只影响之后创建的 Task，不自动修改已有 Task；历史 Task 只有 §6.4 的显式 rebind 可以采用该默认值；
+- 默认连接、Metask API/provider/credential authority 或 ready Model Connection 的模型变化更新 Account 当前默认 execution generation；只有同一已提交 Metask API 下修改默认模型时才只更新 Account preference、保持 generation 不变。两类默认变化都不热替换已有 live Task；detached 历史 Task 可在 §6.4 的 Conversation restore 中采用同 provider、可承载其 pinned model 的当前 credential authority，并通过窄 binding adoption 提交新 generation，任意 provider/model 变化仍只能走未来的显式 rebind；
 - 已有 Task 的 Composer 显示当前 binding epoch 的模型事实，历史按 epoch 保留原模型；第一版不提供 live Session 热切换；
 - 正在更新默认模型时只禁用相关选择和发送 admission，不冻结导航、历史阅读或其他 Task；
 - 模型不可用时说明原因并给出刷新或设置入口，不能留下永久 disabled selector。
@@ -1150,8 +1150,8 @@ Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成
 - New task 首次发送覆盖本地 admission 不满足、`create_rejected`、`create_failed`、Task 已创建后的 `run_rejected` / `run_failed`、Run accepted 与 command timeout；每种结果都保持正确页面和草稿 scope，不伪造指令、Running 或失败定论；
 - 当前 API 模型列表、模型切换 pending/error、设置与 Composer 默认值一致；
 - 设置页切换默认 API 后加载对应模型，默认只影响新 Task admission，不自动改绑已有 Task；
-- 已有 Task 保留当前 execution binding epoch，默认变化不改写历史或 live Session；只有 §6.4 的显式 rebind 可以建立新 epoch；
-- Host 重启后点击左栏 Task 只浏览已保存时间线，未完成 operation 显示 `Interrupted`；满足 Host 恢复资格时 Composer 显示显式恢复动作，覆盖 required、restoring、failed/retry 和成功后重新发送。不得自动 restore、伪造 Run/Stop、显示假的 rebind，或仅因当前默认配置看似匹配而开放发送；
+- 已有 live Task 保留当前 execution binding epoch，默认变化不改写历史或 live Session；detached Task 的 Conversation restore 可按 §6.4 为兼容 credential target 建立 adoption epoch，任意 provider/model 变化仍只有未来的显式 rebind 可以建立新 epoch；
+- Host 重启后点击左栏 Task 只浏览已保存时间线，未完成 operation 显示 `Interrupted`；满足 Host 恢复资格时 Composer 保持普通输入形态，用户发送时在同一意图内执行 restore→Run，required、restoring 与 failed/retry 不形成独立恢复控件或文案。不得因导航自动 restore、伪造 Run/Stop、显示假的 rebind，或仅因当前默认配置看似匹配而开放发送；
 - API 只在设置中显示脱敏名称、Provider 和尾号；完整 secret 不进入 DOM、snapshot、日志或错误；
 - 左下账号入口在窄窗口、长姓名、重认证和 200% text 下仍可用。
 
