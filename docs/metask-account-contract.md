@@ -108,16 +108,16 @@ Model Connection 是 Account-owned 的本地连接对象，不是 Metask identit
 | Protocol                | AgentCore provider | Normalized endpoint contract                                        |
 | ----------------------- | ------------------ | ------------------------------------------------------------------- |
 | OpenAI Chat Completions | `openai`           | 完整 `/v1/chat/completions` endpoint；不支持 `/v1/responses`        |
-| Gemini Native           | `gemini`           | 服务 base URL；AgentCore 追加 model 与 `streamGenerateContent` 路径 |
+| Gemini Native           | `gemini`           | 服务 base URL；消费者追加 model 与对应 operation path               |
 
 Anthropic Messages 当前不在可创建协议表内：staged AgentCore 仍把 API Key 作为 Bearer 发送，尚未满足 Anthropic Native 所需的 `x-api-key` 合同。MetaWork 不复制 transport 进行补偿；AgentCore 修复并通过同一 provider contract 后再开放。
 
-- Model Connection 不要求 Metask OAuth；但必须通过 Host 的 typed validation、credential persistence 和一次有界的 AgentCore streaming connection test 后，才能成为 default execution source；
+- Model Connection 不要求 Metask OAuth；但必须通过 Host 的 typed validation、credential persistence 和一次有界的 Agent-owned one-shot Completion test 后，才能成为 default execution source；
 - endpoint 只允许 HTTPS，或用户明确配置的 loopback HTTP；拒绝 control character、userinfo、query/fragment credential、过长 URL 和未登记 provider path。Host 将用户输入规范化为 AgentCore 所需的 endpoint，Renderer 不直接拼接或覆盖 `base_url`；
 - API credential 只进入系统安全存储和当前 Session/Run 所需的 bounded owned copy。Renderer、Bridge、snapshot、Task/Run history、日志和 diagnostics 不得接收 credential 原文；
 - 第一版不做 model discovery；用户明确提交 bounded model id，Host 保存其模型 metadata，并仍以 provider contract 校验连接；
 - endpoint、provider 或 credential 变化生成新的 `connection_generation`；同一 ready connection 内切换已登记模型只生成新的 opaque execution generation。已有 live Session 不热替换，既有 Task 保留创建时的 execution binding；
-- Test connection 只验证 provider request/streaming response，不创建产品 Task、Run history、checkpoint 或 durable Conversation。连接的 generation readiness 与最新 `untested | testing | connected | failed` 测试状态是两个事实：首次成功把当前 generation 标记为 ready；对已 ready generation 的失败重测只更新最新测试结果，不撤销既有 default execution 或跨重启 binding。AgentCore provider SSE/JSON parsing 仍归 AgentCore，MetaWork 不维护平行 transport。
+- Test connection 只验证一次 provider request/final JSON response，不创建产品 Task、Run history、checkpoint 或 durable Conversation。连接的 generation readiness 与最新 `untested | testing | connected | failed` 测试状态是两个事实：首次成功把当前 generation 标记为 ready；对已 ready generation 的失败重测只更新最新测试结果，不撤销既有 default execution 或跨重启 binding。Agent Run 的 provider transport 仍归 AgentCore；MetaWork 只为 Probe 和标题维护三个固定 Provider 的最小无 Tool one-shot Completion codec。
 
 ## 6. 持久化崩溃一致性
 

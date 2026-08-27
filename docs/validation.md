@@ -64,11 +64,14 @@ candidate probe、真实桌面验收、签名、公证和发布验证不进入 `
 | 单个 lifecycle 不变量     | 设置 `LIFECYCLE_TEST_FILTER` 后运行 lifecycle 入口                              | 只缩小开发反馈；提交前仍运行完整关联 root                                                   |
 | Storage foundation        | `zig build test-storage`                                                        | SQL contract、conformance、direct SQLite backend、migration、文件恢复与 engine profile      |
 | Account OAuth loopback    | `metawork-account-loopback` 与 `metawork-oauth-loopback-transport` module tests | Account callback policy/invalid budget，以及 Application listener/cancel/deadline/sink 组合 |
+| Agent Completion          | `agent/completion.zig` 与 `agent/provider_probe.zig` 定向 test root | 三 Provider 非流式 JSON codec、typed failure、请求取消、credential 清零与 Probe lifecycle |
 | MCP owner                 | `build.zig` 中对应的 `test-mcp-*` step                                          | configuration、OAuth、transport、Runtime、catalog、interop 或 Application composition       |
 | AgentCore candidate       | staged verifier 与对应 `run-agentcore-*-probe.mjs`                              | 新 artifact 或尚未进入合同的外部行为                                                        |
 | 平台能力                  | 本文后续 Windows/macOS 入口                                                     | 真实窗口、系统 credential、签名、公证或平台生命周期                                         |
 
 `build.zig` 是正式 Zig test graph 的注册真源；architecture guard 必须证明所有 active external test root 已接线。`scripts/*.test.mjs` 由总入口自动发现，不维护文件数量或手工清单。
+
+Agent Completion 的确定性测试使用 MetaWork-owned fake Transport，覆盖三个 Provider 的非流式 request/result、text/usage/stop 映射、Tool wire fail-closed、非 2xx typed rejection、请求前取消、阻塞 perform 被外部取消唤醒，以及 credential 和 sensitive header copy 清零。Application Transport 沿用仓库已有的 `std.Io.Select` buffered fetch/cancel 模式；生产使用系统 CA，不接受 Completion 专用证书配置，也不维护本地 CA/leaf 测试 fixture。
 
 MCP catalog freshness 的真实边界回归属于 `test-mcp-interop`：fixture 给 modern catalog 注入短 TTL，并覆盖同一 model/selection 到期时的 typed `McpNotRefreshed`、refresh 后成功，以及短 TTL 不启动高频后台 timer、过期后按需重建 Admission。纯 Workbench 测试验证 earliest safe TTL 到绝对 monotonic deadline 的单次转换、主动刷新下限，以及 OAuth/refresh 串行边界内 pending request 不丢失；它不伪造 AgentCore freshness 状态。
 
