@@ -21,11 +21,13 @@ pub const ModelConnectionProbeNotifier = struct {
 const ModelConnectionProbeJob = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
+    completion_transport: agent.CompletionTransport,
     notifier: ModelConnectionProbeNotifier,
     selection: account_contract.ModelConnectionSelectionCommand,
     connection_id: []u8,
     model_id: []u8,
     execution: ?account_contract.OwnedExecutionConfig,
+    cancellation: agent.ProviderProbeCancellation = .{},
     succeeded: bool = false,
     finished: std.atomic.Value(bool) = .init(false),
     thread: ?std.Thread = null,
@@ -33,6 +35,7 @@ const ModelConnectionProbeJob = struct {
     fn create(
         allocator: std.mem.Allocator,
         io: std.Io,
+        completion_transport: agent.CompletionTransport,
         notifier: ModelConnectionProbeNotifier,
         command_value: account_contract.ModelConnectionTestCommand,
         execution: *account_contract.OwnedExecutionConfig,
@@ -49,6 +52,7 @@ const ModelConnectionProbeJob = struct {
         self.* = .{
             .allocator = allocator,
             .io = io,
+            .completion_transport = completion_transport,
             .notifier = notifier,
             .selection = .{
                 .connection_id = connection_id,
@@ -68,7 +72,7 @@ const ModelConnectionProbeJob = struct {
     fn run(self: *ModelConnectionProbeJob) void {
         const execution = &self.execution.?;
         const input = execution.input();
-        self.succeeded = agent.runProviderProbe(self.io, .{
+        self.succeeded = agent.runProviderProbe(self.io, self.completion_transport, .{
             .provider = switch (input.target.provider_kind) {
                 .anthropic => .anthropic,
                 .openai => .openai,
@@ -77,7 +81,7 @@ const ModelConnectionProbeJob = struct {
             .credential = input.api_key,
             .model = input.target.model,
             .base_url = input.target.base_url,
-        }) == .connected;
+        }, &self.cancellation) == .connected;
         execution.deinit();
         self.execution = null;
         self.finished.store(true, .release);
@@ -88,6 +92,10 @@ const ModelConnectionProbeJob = struct {
         const thread = self.thread orelse return;
         thread.join();
         self.thread = null;
+    }
+
+    fn cancel(self: *ModelConnectionProbeJob) void {
+        self.cancellation.request();
     }
 
     fn deinit(self: *ModelConnectionProbeJob) void {
@@ -117,6 +125,7 @@ pub const Coordinator = struct {
     workbench: *workbench_api.Workbench,
     main_thread_id: std.Thread.Id,
     model_connection_probe_notifier: ?ModelConnectionProbeNotifier = null,
+    completion_transport: ?agent.CompletionTransport = null,
     model_connection_probe_job: ?*ModelConnectionProbeJob = null,
     metask_activation_attempt_id: ?u64 = null,
 
@@ -139,6 +148,13 @@ pub const Coordinator = struct {
         notifier: ?ModelConnectionProbeNotifier,
     ) void {
         self.model_connection_probe_notifier = notifier;
+    }
+
+    pub fn setCompletionTransport(
+        self: *Coordinator,
+        network: agent.CompletionTransport,
+    ) void {
+        self.completion_transport = network;
     }
 
     pub fn commandSink(self: *Coordinator) account_contract.AccountCommandSink {
@@ -271,6 +287,8 @@ pub const Coordinator = struct {
     ) account_contract.AccountCommandResult {
         const notifier = self.model_connection_probe_notifier orelse
             return .rejected(.model_connection_test_unavailable);
+        const completion_transport = self.completion_transport orelse
+            return .rejected(.model_connection_test_unavailable);
         if (self.model_connection_probe_job != null)
             return .rejected(.operation_in_progress);
         const execution_generation = self.runtime.nextExecutionGeneration(
@@ -287,6 +305,7 @@ pub const Coordinator = struct {
         const job = ModelConnectionProbeJob.create(
             allocator,
             self.io,
+            completion_transport,
             notifier,
             command,
             &execution,
@@ -569,6 +588,7 @@ pub const Coordinator = struct {
     pub fn shutdown(self: *Coordinator) void {
         self.assertMainThread();
         if (self.model_connection_probe_job) |job| {
+            job.cancel();
             job.join();
             self.drainModelConnectionProbe();
         }

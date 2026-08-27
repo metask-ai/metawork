@@ -1235,11 +1235,9 @@ test("AgentCore SDK access is restricted to Agent modules and the test fixture",
       "agent_catalog",
       "agent_checkpoint",
       "agent_checkpoint_restore",
-      "agent_completion",
       "agent_mcp_connector",
       "agent_mcp_catalog",
       "agent_mcp_runtime",
-      "agent_provider",
       "event_pump",
       "event_sink",
       "fixture",
@@ -1314,8 +1312,18 @@ test("all active test roots are connected without test-count assertions", () => 
     /^\s*test(?:\s+"|\s*\{)/m.test(read(path)),
   );
   const sessionRoot = read("src/agent/session.zig");
+  const completionRoot = read("src/agent/completion.zig");
   for (const path of inlineAgentTests) {
     if (build.includes(`"${path}"`)) continue;
+    if (path.startsWith("src/agent/completion/")) {
+      const relative = path.slice("src/agent/completion/".length, -4);
+      assert.match(
+        completionRoot,
+        new RegExp(`@import\\("completion/${relative}\\.zig"\\)`),
+        `${path} is not aggregated by completion.zig`,
+      );
+      continue;
+    }
     const relative = path.slice("src/agent/session/".length, -4);
     assert.match(
       sessionRoot,

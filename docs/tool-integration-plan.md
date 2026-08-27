@@ -20,7 +20,7 @@ WebSearch / WebFetch
 
 AgentCore bundle 仍是面向所有消费者的通用能力全集，并继续支持 `AskUserQuestion`；MetaWork 不修改 bundle 或 ABI，只在 Agent 产品化边界中不注册、不向 Session 开放该工具。需要补充信息时使用普通 Assistant 回复与下一次 Composer 输入。
 
-对 MetaWork 来说，`WebSearch` 和其他 built-in 一样只是传给 AgentCore 的精确工具名。MetaWork 不实现 WebSearch executor，不注册 Host tool，也不解析 Provider SSE。Windows 与 macOS library 中出现的 11 个名称和对应描述只能作为实现侧证据；正式开放仍以各 target 的真实 Session 探针和 vertical 证据为准。
+对 MetaWork 来说，`WebSearch` 和其他 built-in 一样只是传给 AgentCore 的精确工具名。MetaWork 不实现 WebSearch executor，不注册 Host tool，也不解析 AgentCore Run 的 Provider SSE；Agent-owned 独立 Completion codec 不属于工具集成路径。Windows 与 macOS library 中出现的 11 个名称和对应描述只能作为实现侧证据；正式开放仍以各 target 的真实 Session 探针和 vertical 证据为准。
 
 ## 2. 本次不处理的内容
 

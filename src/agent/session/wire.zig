@@ -139,7 +139,11 @@ fn validUtf8(values: []const []const u8) bool {
 }
 
 pub fn providerKindCode(value: provider.ProviderKind) u32 {
-    return provider.wireCode(value);
+    return switch (value) {
+        .anthropic => wire.PROVIDER_ANTHROPIC,
+        .openai => wire.PROVIDER_OPENAI,
+        .gemini => wire.PROVIDER_GEMINI,
+    };
 }
 
 pub fn permissionModeCode(value: control.PermissionMode) u32 {

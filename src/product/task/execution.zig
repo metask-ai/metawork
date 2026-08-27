@@ -4,7 +4,6 @@
 //! never retain a composition aggregate or Task runtime pointer.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const agent = @import("metawork_agent");
 const checkpoint_record = @import("product_task_checkpoint_record");
 const checkpoint_store = @import("product_task_checkpoint_store");
@@ -37,8 +36,7 @@ pub const CompletionFactory = struct {
     ) anyerror!*agent.Completion {
         if (self.create_fn) |create_fn|
             return create_fn(self.context, allocator, config);
-        if (builtin.is_test) return error.CompletionUnavailable;
-        return agent.Completion.init(allocator, config);
+        return error.CompletionUnavailable;
     }
 };
 
@@ -195,7 +193,7 @@ const automatic_title_system_prompt =
 const AutomaticTitleWatchdog = struct {
     io: std.Io,
     title: *state.AutomaticTitle,
-    stream: *agent.CompletionStream,
+    request_cancellation: *agent.CompletionCancellation,
     finished: std.atomic.Value(bool) = .init(false),
     timed_out: std.atomic.Value(bool) = .init(false),
 
@@ -204,7 +202,7 @@ const AutomaticTitleWatchdog = struct {
         while (elapsed_ms < automatic_title_timeout_ms) : (elapsed_ms += automatic_title_watchdog_poll_ms) {
             if (self.finished.load(.acquire)) return;
             if (self.title.cancel_requested.load(.acquire)) {
-                _ = self.stream.abort(.user_request) catch return;
+                self.request_cancellation.request();
                 return;
             }
             std.Io.Timeout.sleep(.{ .duration = .{
@@ -214,11 +212,11 @@ const AutomaticTitleWatchdog = struct {
         }
         if (self.finished.load(.acquire)) return;
         if (self.title.cancel_requested.load(.acquire)) {
-            _ = self.stream.abort(.user_request) catch return;
+            self.request_cancellation.request();
             return;
         }
         self.timed_out.store(true, .release);
-        _ = self.stream.abort(.timeout) catch return;
+        self.request_cancellation.request();
     }
 };
 
@@ -380,59 +378,44 @@ fn generateAutomaticTitle(job: *RunJob) void {
         .base_url = config.target.base_url,
         .model = config.target.model,
     }) catch return;
+    defer owner.deinit();
     const messages = [_]agent.CompletionMessage{.{ .role = .user, .text = source }};
-    const stream = owner.startStream(.{
-        .system = automatic_title_system_prompt,
-        .messages = &messages,
-    }) catch {
-        _ = destroyAutomaticTitleCompletion(owner);
-        return;
-    };
+    var request_cancellation = owner.newCancellation();
     var watchdog = AutomaticTitleWatchdog{
         .io = job.checkpoint.io,
         .title = &run.automatic_title,
-        .stream = stream,
+        .request_cancellation = &request_cancellation,
     };
     const watchdog_thread = std.Thread.spawn(.{}, AutomaticTitleWatchdog.run, .{&watchdog}) catch {
-        _ = destroyAutomaticTitleStream(stream, owner);
         return;
     };
-    var raw_result: [automatic_title_result_capacity]u8 = undefined;
-    defer std.crypto.secureZero(u8, &raw_result);
-    var output_len: usize = 0;
-    var overflow = false;
-    var terminal_reason: ?agent.CompletionStopReason = null;
-    var stream_failed = false;
-    while (terminal_reason == null and !stream_failed) {
-        var event = stream.next() catch {
-            stream_failed = true;
-            break;
-        };
-        switch (event.kind) {
-            .text => {
-                if (event.payload.len > automatic_title_result_capacity - output_len) {
-                    overflow = true;
-                } else if (!overflow) {
-                    @memcpy(raw_result[output_len..][0..event.payload.len], event.payload);
-                    output_len += event.payload.len;
-                }
-            },
-            .done => terminal_reason = event.stop_reason,
-            .thinking, .usage => {},
-        }
-        event.deinit();
-    }
+    var completion_outcome = owner.complete(.{
+        .system = automatic_title_system_prompt,
+        .messages = &messages,
+    }, &request_cancellation);
     watchdog.finished.store(true, .release);
     watchdog_thread.join();
-    const destroyed = destroyAutomaticTitleStream(stream, owner);
-    if (!destroyed or stream_failed or overflow or
-        watchdog.timed_out.load(.acquire) or
+    if (watchdog.timed_out.load(.acquire) or
         run.automatic_title.cancel_requested.load(.acquire) or
-        terminal_reason != .end_turn)
+        request_cancellation.isRequested())
+    {
+        switch (completion_outcome) {
+            .result => |*result| result.deinit(),
+            .failure => {},
+        }
+        return;
+    }
+    var result = switch (completion_outcome) {
+        .result => |value| value,
+        .failure => return,
+    };
+    defer result.deinit();
+    if (result.stop_reason != .end_turn or
+        result.text.len > automatic_title_result_capacity)
         return;
     const projected = job.projector.project(
         &run.automatic_title.result,
-        raw_result[0..output_len],
+        result.text,
         config.api_key,
     );
     run.automatic_title.result_len = projected.len;
@@ -448,16 +431,6 @@ fn automaticTitleCompletionInput(input: *const state.RunInputRecord) ?[]const u8
     const trimmed = std.mem.trim(u8, value, " \t\r\n");
     if (trimmed.len == 0 or !std.unicode.utf8ValidateSlice(trimmed)) return null;
     return trimmed;
-}
-
-fn destroyAutomaticTitleCompletion(owner: *agent.Completion) bool {
-    owner.deinit() catch return false;
-    return true;
-}
-
-fn destroyAutomaticTitleStream(stream: *agent.CompletionStream, owner: *agent.Completion) bool {
-    stream.deinit() catch return false;
-    return destroyAutomaticTitleCompletion(owner);
 }
 
 pub fn publishAutomaticTitleFallback(run: *state.RunRecord) void {

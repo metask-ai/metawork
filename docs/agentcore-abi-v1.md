@@ -19,7 +19,7 @@
 
 - `binary_abi_version = 1`；
 - `binary_abi_revision = 13`，`capabilities = 67108863`（`0x3ffffff`）；
-- `CAP_TEXT_COMPLETION = 1 << 21` 已包含在 `REQUIRED_CAPABILITIES_V1`，Completion 不建立独立的可选 discovery 或降级路径；
+- `CAP_TEXT_COMPLETION = 1 << 21` 仍属于 revision 13 artifact 的 `REQUIRED_CAPABILITIES_V1`，但 MetaWork 产品不再调用对应 entry；
 - `binary_abi_table_size = 280`；
 - 唯一 discovery symbol 为 `metask_agentcore_get_api`；
 - struct size 必须精确匹配，Host 提供的 reserved 字段必须全部为零；
@@ -27,7 +27,7 @@
 
 MetaWork 不接受目标 policy 之外的 ABI revision，不保留 function-table 分流、旧类型别名、shim、兼容 parser、双 bundle 或静默 fallback。需要回退时只能回退整个 MetaWork 变更和对应 exact artifact，运行时没有降级路径。
 
-当前 revision 13 尚处 experimental 状态。它保留全部八个 Completion entry，并新增 mandatory `runtime_create_with_plugins`、MCP `request_tool_stream`、Host stream tool contract 与 active-Run journal mode。revision、table size、capability set 与 repository lock 的 exact manifest/header/bindings checksum 必须一起匹配；MetaWork 不为任何旧 revision 或旧 callback shape 保留条件编译、运行时 shim 或 target-specific 例外。
+当前 revision 13 尚处 experimental 状态。artifact 仍保留全部八个 Completion entry，并新增 mandatory `runtime_create_with_plugins`、MCP `request_tool_stream`、Host stream tool contract 与 active-Run journal mode。完整 table 仍由 SDK 与 verifier 精确校验，但 Agent-owned Completion 已与这些 entry 解耦；后续 AgentCore 删除它们时，MetaWork 只随 exact bundle hard cut，不建立兼容分支。revision、table size、capability set 与 repository lock 的 exact manifest/header/bindings checksum 必须一起匹配；MetaWork 不为任何旧 revision 或旧 callback shape 保留条件编译、运行时 shim 或 target-specific 例外。
 
 ### revision 8 的执行状态事件
 
@@ -45,7 +45,7 @@ revision 8 新增 `CAP_RUN_STATE_OBSERVATION` 和 `CoreEvent.run_state`。事件
 - 禁止 Git/path implementation dependency、源码复制、archive 直链、`latest`、可变 tag 和 source fallback；
 - `agent/` 只通过 bundle 官方 `bindings/zig` package 获取 ABI types、typed protocol、module 和 link graph。
 
-MetaWork 不复制 header、raw enum、event tag、Permission/Skill/MCP JSON schema、facade code 或 SDK validation。官方 SDK 是 `Status`、`StopReason`、Completion event/stop reason、`CoreEvent`、`UiRequest`、`UiResponse`、Permission、Skill、MCP、Session description 与 restore report 的唯一协议来源。
+MetaWork 不复制 header、raw enum、event tag、Permission/Skill/MCP JSON schema、facade code 或 SDK validation。官方 SDK 是 AgentCore `Status`、`StopReason`、`CoreEvent`、`UiRequest`、`UiResponse`、Permission、Skill、MCP、Session description 与 restore report 的唯一协议来源。MetaWork Completion 的 result/stop reason/error 是独立自有类型，不来自该 SDK。
 
 ## 3. Target function table
 
@@ -58,26 +58,17 @@ MetaWork 不复制 header、raw enum、event tag、Permission/Skill/MCP JSON sch
 - typed Text/Skill Run、Run abort；
 - manual compact、compact abort；
 - checkpoint export；
-- independent Completion create/destroy/describe/complete；
-- Completion stream start/next/abort/destroy；
+- revision 13 artifact 的 independent Completion create/destroy/describe/complete（只做 table 完整性校验，MetaWork 不调用）；
+- revision 13 artifact 的 Completion stream start/next/abort/destroy（只做 table 完整性校验，MetaWork 不调用）；
 - owned buffer release。
 
 必需 entry 不等于 MetaWork 产品自动开放对应能力。`runtime_apply_mcp_configuration` 在 revision 13 table 中必须存在，MetaWork 使用它提交完整 declarative MCP server replacement。Host 为每次 apply 生成非零 desired revision，严格校验 status、report size、disposition、desired/active revision 与 reserved fields；只有 `APPLIED` 才转移 replacement ownership并推进正式 registry generation，`SUPERSEDED`/`REJECTED` 保留旧配置，malformed report fail closed。测试 fake 必须覆盖 applied/rejected 与签名/报告校验。
 
 `runtime_create_with_plugins` 是 mandatory entry，但当前 MetaWork 不授予 process-plugin 或 Host stream-tool authority，正式 Runtime 继续调用 revision 13 同表内的 `runtime_create`。这不是旧 revision fallback；两条 entry 都属于唯一 revision 13 table，后续开放 plugin authority 必须另过 capability gate。
 
-### Completion 合同
+### revision 13 Completion entry
 
-Completion 是独立于 Runtime、Session 和 AgentLoop 的 provider-bound text-completion owner。MetaWork 对锁定 revision 13 固定四项上游限额：
-
-- `MAX_COMPLETION_CONFIG_BYTES_V1 = 1 MiB`；
-- `MAX_COMPLETION_MESSAGES_V1 = 4096`；
-- `MAX_COMPLETION_REQUEST_BYTES_V1 = 16 MiB`；
-- `MAX_COMPLETION_RESULT_BYTES_V1 = 16 MiB`。
-
-Host 在 ABI 调用前校验 config、message count、累计 request bytes 与 UTF-8；所有 Host struct 的 `struct_size` 必须精确，reserved 必须为零。成功返回后先校验 struct、reserved、typed event/stop reason、pointer/length 和上限，再深拷贝 payload；AgentCore owned bytes 无论成功或失败都由同一 API 的 `buffer_release` 恰好释放一次。
-
-Completion 与 Stream 都是唯一 owner。Stream 从属创建它的 Completion，全部 Stream 必须先于 Completion 销毁。`completion_stream_next` 可以与另一线程的 `completion_stream_abort` 并发，但两者都返回后才允许销毁 Stream；其他 direct FFI call 也必须在对应 owner 销毁前 quiescent。该并发与所有权依据来自锁定 bundle `af1ea06dddc1` 的官方 `bindings/rust/src/lib.rs`：`Completion` 的说明明确其不借用 Runtime/Session，`CompletionStream` 的说明明确允许另一线程通过 raw API abort，并禁止在 next 活跃时 drop。
+这些 entry 只因为当前 exact artifact 仍把它们列入 required table 而接受 SDK/verifier 的结构校验。MetaWork 没有 AgentCore Completion adapter、类型映射、状态映射、运行时 fallback 或调用路径；其独立 Completion 合同、上限、并发与 Provider codec 全部由 [Completion 自有能力设计](model-completion-architecture-plan.md)和 MetaWork-owned 测试定义。AgentCore 后续删除 entry 时必须随新 exact revision 原子更新 table、capability、locks 与 fake API，不保留 revision 13 兼容。
 
 ## 4. Runtime 与 Session create
 
@@ -103,8 +94,8 @@ fresh Session 只使用 `SessionHostConfigV1` 与 `SessionCreateConfigV1`：
 
 当前正式产品消费：
 
-- Model Connection 测试使用独立 Completion streaming；它不创建 Runtime、Session、Task、Run history 或 durable Conversation；
-- Workbench Task 标题生成使用首个 Run 已固定 ExecutionConfig 的独立 Completion streaming；它不创建新的 Runtime、Session、Run history 或 durable Conversation，失败只触发 Workbench 本地回退；
+- Model Connection 测试使用 Agent-owned 独立 one-shot Completion；它不调用 AgentCore Completion，也不创建 Runtime、Session、Task、Run history 或 durable Conversation；
+- Workbench Task 标题生成使用首个 Run 已固定 ExecutionConfig 的 Agent-owned 独立 one-shot Completion；它不调用 AgentCore Completion，也不创建新的 Runtime、Session、Run history 或 durable Conversation，失败只触发 Workbench 本地回退；
 - shared Runtime；
 - Runtime-owned MCP server descriptors、connector 生命周期与 catalog refresh/describe；
 - 新 Session 的 MCP selection 与经 AgentCore Run 执行的 MCP tools；
@@ -198,7 +189,7 @@ checkpoint restore 是第三条独立 disposition。`checkpoint_corrupt`、`chec
 - owned diagnostic、UI response、catalog descriptor 与 SDK parse owner 各自 release 恰好一次；
 - catalog handle 只由创建它的 Runtime release；Session 只同步借用 catalog；
 - callback response ownership 只有在返回 answered 时转移给 Core；最终 identity 复检失败时 Host 释放已编码 bytes；
-- Completion 不借用 Runtime 或 Session；Stream 先于其 Completion 销毁，stream next/abort quiescent 后才可销毁 Stream；
+- MetaWork-owned Completion 不借用 Runtime 或 Session；一次调用和它的 cancellation watchdog quiescent 后才可销毁 Completion；
 - Run 返回后仍须等待 active callback 和 abort call quiescence；
 - shutdown 顺序固定为停止 ingress、取消 queue、唤醒 UI wait、abort/join、等待 callback/control ref、destroy Session、release catalog、destroy Runtime、最后释放 transport。
 

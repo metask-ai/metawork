@@ -17,7 +17,7 @@
 | AgentCore   | Metask AgentCore library bundle | 外部执行依赖；独立构建和发布，MetaWork 只消费 canonical bundle        |
 | Native SDK  | Native SDK                      | 外部桌面依赖；由 Application 消费                                     |
 
-正式主路径不采用 Tauri + Rust，不建立第二套 Renderer，不以 PTY、xterm、终端字节流或 Provider SSE 作为 Agent UI 协议，不复制 AgentCore ABI 或实现源码，也不建立 Native SDK Adapter、通用 Desktop Interface 或可替换框架抽象。
+正式主路径不采用 Tauri + Rust，不建立第二套 Renderer，不以 PTY、xterm、终端字节流或 Provider SSE 作为 Agent UI 协议，不复制 AgentCore ABI 或实现源码，也不建立 Native SDK Adapter、通用 Desktop Interface 或可替换框架抽象。Agent-owned 独立 Completion 只解析三个封闭 Provider 的无 Tool 非流式 JSON 响应；该模型调用能力不构成 Agent UI/Event 协议。
 
 Application、Renderer、Bridge、Product、Agent 与 Storage 是 MetaWork-owned 并列逻辑边界；Metask AgentCore 与 Native SDK 是外部依赖。Application 由 `src/app.zig` 和 `src/app/` 实现：代码组合类型名为 `App`，`app.zig` 是 composition root，具名适配、resolver、store 生命周期和跨 owner 用例编排位于 `app/`。Application 组装 Bridge、Product 与 Agent，消费 Native SDK 的原生应用生命周期、窗口和 System WebView 能力，并托管 React Renderer；它不是业务 owner，也不形成统一 facade。Storage 当前只进入独立测试图，尚未由 Application 或任何 Product owner 消费。
 
@@ -69,6 +69,8 @@ flowchart TB
 用法约定：文档中的架构边界统一称为 Application，代码中的组合类型保持 `App`；不再另设 Desktop Host 或 Host infrastructure。`Product 边界/Product 模块`指本节逻辑边界，`桌面产品`指整个交付物。`product_identity.zig`（交付物 Bundle ID）与 Bridge 的 `ProductDelivery`（产品数据运输）维持原名，词根含义不同，不指 Product 边界。
 
 Agent 是 MetaWork 对通用 AgentCore 的产品化边界，不是透明转发层。它可以在不修改 canonical bundle 或 ABI 的前提下收窄、组合或补充 Agent 能力，并独占 MetaWork built-in 工具集合及其 Runtime/Session 配置。Workbench 只消费形成后的 Agent 执行能力，不选择 AgentCore built-in 名称或 profile；MCP 的用户配置、授权和 Task admission 仍归 Workbench，Agent 只消费其解析后的窄 selection。
+
+Completion 是 Agent 边界提供、但不属于 AgentCore Runtime/Session/AgentLoop 的独立能力。`src/agent/completion*` 拥有 MetaWork 自有 request/result/error 与 Anthropic/OpenAI/Gemini 三个无 Tool 非流式 JSON codec；它只消费 Account selection 冻结的同一 ExecutionConfig，不选择或回退模型。Application 通过窄 Transport port 提供一次有界、可取消的 buffered HTTP/TLS 请求并使用系统 CA；产品不配置证书。该 Transport 不拥有 Provider 语义，Agent 不导入 Application 实现。
 
 ## 3. 模块职责
 
