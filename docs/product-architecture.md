@@ -5,18 +5,30 @@
 
 Task history 当前采用 hard-cut `workbench-history.store` record store：旧 JSON envelope 不读取、不迁移、不双写；Workspace/Task frame 独立校验，单条损坏只进入 `degraded`，不阻塞有效历史或新 Task admission。
 
-顶层模块、进程方向和跨模块安全边界见 [MetaWork 高层架构](architecture.md)。本文件定义 Product 内部的 `account`、`workbench` owner、它们与相邻 Agent 执行边界的产品协作，以及由 Application 负责的跨 owner 协调和生命周期顺序；实际目录和依赖见 [工程结构与所有权](project-structure.md)，AgentCore 线程与 ABI 生命周期见 [AgentCore 集成契约](agentcore-integration.md)，Metask Account 外部合同见 [Metask Account API 合同](metask-account-contract.md)。
+顶层模块、进程方向和跨模块安全边界见 [MetaWork 高层架构](architecture.md)。本文件定义 Product 内部的 Account、Product Control 两个 owner、它们与相邻 Agent 执行边界的产品协作，以及由 Application 负责的跨 owner 协调和生命周期顺序；实际目录和依赖见 [工程结构与所有权](project-structure.md)，AgentCore 线程与 ABI 生命周期见 [AgentCore 集成契约](agentcore-integration.md)，Metask Account 外部合同见 [Metask Account API 合同](metask-account-contract.md)。
 
 ## 1. 模块与 owner
 
 Product 内部由两个 named product owners 组成；跨 owner 用例由 Application coordinator 编排：
 
 - `account` 的 Runtime 负责 Metask 登录、catalog、credential、attempt/effect/mailbox、恢复与 ExecutionConfig generation；
-- `workbench` 拥有产品状态、Task、队列、投影与持久化语义，并直接消费相邻 Agent 的公共执行能力。
+- Product Control 拥有已安装的 ExecutionConfig、Workspace/Task 产品历史、Task/Skill/MCP aggregate、共享 Executor、跨 aggregate admission/reconciliation、revision、完整 snapshot 与 shutdown 顺序，并直接消费相邻 Agent 的公共执行能力。
 
-Agent 是 Product 之外的 MetaWork-owned 执行边界，也是 AgentCore integration owner，拥有 MetaWork 对 AgentCore Runtime、Session、Conversation 的集成生命周期、callback、event pump 与 terminal execution facts。Application 创建并关闭 Agent、安排 event-ready 主线程 wake；Workbench 直接调用 Agent，但不管理 Agent Runtime 生命周期、不读取 Runtime 内部字段，也不借 Agent 获取通用 I/O。
+Agent 是 Product 之外的 MetaWork-owned 执行边界，也是 AgentCore integration owner，拥有 MetaWork 对 AgentCore Runtime、Session、Conversation 的集成生命周期、callback、event pump 与 terminal execution facts。Application 创建并关闭 Agent、安排 event-ready 主线程 wake；Product Control 直接调用 Agent，但不管理 Agent Runtime 生命周期、不读取 Runtime 内部字段，也不借 Agent 获取通用 I/O。
 
-Application coordinator 负责 Account/Workbench 主线程跨 owner 提交与全局生命周期顺序，不持有领域运行状态，也不独立决定 Account、Workbench 或 Agent policy。它由 `src/app/` 下的具名 coordinator 实现，`app.zig` 只负责装配；这不产生新的产品 owner。Bridge 位于 Product 之外；`metawork_account_contract` 只承载 Account 发布给 Application/Bridge/Workbench 的有界纯合同。Application、Agent、Renderer 与原生窗口边界只由 [高层架构](architecture.md)定义。
+Application coordinator 负责 Account/Product Control 主线程跨 owner 提交与全局生命周期顺序，不持有领域运行状态，也不独立决定 Account、Product Control 或 Agent policy。它由 `src/app/` 下的具名 coordinator 实现，`app.zig` 只负责装配；这不产生新的产品 owner。Bridge 位于 Product 之外；`metawork_account_contract` 只承载 Account 发布给 Application、Bridge 与 Product Control 的有界纯合同。Application、Agent、Renderer 与原生窗口边界只由 [高层架构](architecture.md)定义。
+
+Product Control 是现有组合 owner 的正式名称和源码身份，不是包裹各 aggregate 的 facade，也不是第三个 Product owner。它直接持有并协调 Task、Skill、MCP 等内部 aggregate；这些 aggregate 的 Runtime 仍独占各自状态机与局部事务。Product Control 只保留必须同时观察多个 aggregate、Workspace、execution 或 publication 的不变量，不能把局部 policy 重新吸回顶层。
+
+Product 事务只使用三种机制：
+
+1. aggregate-local transaction：由对应 aggregate Runtime 完成 prepare、effect、typed outcome 与 no-fail install；
+2. cross-owner handoff：由 Application coordinator 在主线程按 Account prepare → Product Control install → Account commit 的既定顺序编排，线性值只在明确的 take/install/commit 点转移；
+3. asynchronous reconciliation：worker 只持 owned payload、窄 effect capability 和不可变或 atomic facts，完成回到主线程后按完整 authority token 重新校验，stale 结果只销毁、不安装、不自动重放。
+
+不建立统一事务引擎、通用 command bus 或 Product event bus。共享 revision、projection budget、credential-safe 文本投影、Executor admission、completion reconciliation 与 shutdown ordering 继续由 Product Control 作为跨 aggregate 不变量拥有。
+
+Application coordinator 对 Product Control 的访问必须使用按用例裁剪的 capability value。capability 的表示固定为 `*anyopaque` context 加函数指针，不能保存或公开 `*product_control.Runtime`，不能返回内部 aggregate、可变状态指针或 raw getter。首批 capability 为 ExecutionHandoff、AgentEventConsumer、McpManagementPort、McpOauthPort 与 ScheduleHost；方法数量由用例范围决定，scoped 比刻意 small 更重要。`app.zig` 是唯一可持有完整 Runtime 并构造这些 capability 的 Application composition root；`platform.zig` 只传递 capability，不调用 Runtime；`window.zig` 的 schedule 观察与更新只经 ScheduleHost。Product Control 必须晚于所有 coordinator、window callback 与 worker 的 shutdown/join 才释放，worker job 不得跨 callback 保存这些 capability。
 
 Product 内部负责：
 
