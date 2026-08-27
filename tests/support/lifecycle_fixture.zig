@@ -284,11 +284,10 @@ pub const FakeCore = struct {
     permission_response_valid: bool = false,
     callback_signal: ?*CallbackSignal = null,
     completion_enabled: bool = false,
-    completion_handle: u8 = 0,
-    completion_stream_handle: u8 = 0,
     completion_title: [512]u8 = [_]u8{0} ** 512,
     completion_title_len: usize = 0,
-    completion_next_index: usize = 0,
+    completion_response: [4096]u8 = [_]u8{0} ** 4096,
+    completion_response_len: usize = 0,
     completion_requests: usize = 0,
 
     pub fn lock(self: *FakeCore) void {
@@ -311,11 +310,20 @@ pub const FakeCore = struct {
 
     pub fn setCompletionTitle(self: *FakeCore, title: []const u8) void {
         std.debug.assert(title.len != 0 and title.len <= self.completion_title.len);
+        std.debug.assert(std.mem.indexOfAny(u8, title, "\\\"\r\n") == null);
         self.lock();
         @memset(&self.completion_title, 0);
         @memcpy(self.completion_title[0..title.len], title);
         self.completion_title_len = title.len;
-        self.completion_next_index = 0;
+        const prefix =
+            "{\"type\":\"message\",\"content\":[{\"type\":\"text\",\"text\":\"";
+        const suffix =
+            "\"}],\"stop_reason\":\"end_turn\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}";
+        std.debug.assert(prefix.len + title.len + suffix.len <= self.completion_response.len);
+        @memcpy(self.completion_response[0..prefix.len], prefix);
+        @memcpy(self.completion_response[prefix.len..][0..title.len], title);
+        @memcpy(self.completion_response[prefix.len + title.len ..][0..suffix.len], suffix);
+        self.completion_response_len = prefix.len + title.len + suffix.len;
         self.completion_enabled = true;
         self.unlock();
     }
@@ -2043,28 +2051,24 @@ pub fn bufferRelease(out: ?*wire.OwnedBytesV1) callconv(.c) void {
     fake_core.unlock();
 }
 
+// The exact revision 13 SDK still validates these table slots as non-null.
+// They deliberately reject every call: product Completion tests use the
+// MetaWork-owned fake Transport below, so no revision 13 Completion behavior
+// remains available through this fixture. Delete these slots with the next
+// exact AgentCore table hard cut.
 fn completionCreate(
-    config: ?*const wire.CompletionConfigV1,
+    _: ?*const wire.CompletionConfigV1,
     out_completion: ?*?*wire.CompletionHandle,
     out_diagnostic: ?*wire.OwnedBytesV1,
 ) callconv(.c) u32 {
     if (out_diagnostic) |out| out.* = .{ .ptr = null, .len = 0 };
-    fake_core.lock();
-    defer fake_core.unlock();
-    if (!fake_core.completion_enabled or config == null or out_completion == null) {
-        if (out_completion) |out| out.* = null;
-        return wire.STATUS_INVALID_ARGUMENT;
-    }
-    out_completion.?.* = @ptrCast(&fake_core.completion_handle);
-    return wire.STATUS_OK;
+    if (out_completion) |out| out.* = null;
+    return wire.STATUS_INVALID_ARGUMENT;
 }
 
-fn completionDestroy(completion: ?*wire.CompletionHandle, out_diagnostic: ?*wire.OwnedBytesV1) callconv(.c) u32 {
+fn completionDestroy(_: ?*wire.CompletionHandle, out_diagnostic: ?*wire.OwnedBytesV1) callconv(.c) u32 {
     if (out_diagnostic) |out| out.* = .{ .ptr = null, .len = 0 };
-    return if (completion == @as(?*wire.CompletionHandle, @ptrCast(&fake_core.completion_handle)))
-        wire.STATUS_OK
-    else
-        wire.STATUS_INVALID_ARGUMENT;
+    return wire.STATUS_INVALID_ARGUMENT;
 }
 
 fn completionDescribe(
@@ -2087,54 +2091,23 @@ fn completionComplete(
 }
 
 fn completionStreamStart(
-    completion: ?*wire.CompletionHandle,
-    request: ?*const wire.CompletionRequestV1,
+    _: ?*wire.CompletionHandle,
+    _: ?*const wire.CompletionRequestV1,
     out_stream: ?*?*wire.CompletionStreamHandle,
     out_diagnostic: ?*wire.OwnedBytesV1,
 ) callconv(.c) u32 {
     if (out_diagnostic) |out| out.* = .{ .ptr = null, .len = 0 };
-    fake_core.lock();
-    defer fake_core.unlock();
-    if (!fake_core.completion_enabled or
-        completion != @as(?*wire.CompletionHandle, @ptrCast(&fake_core.completion_handle)) or
-        request == null or out_stream == null)
-    {
-        if (out_stream) |out| out.* = null;
-        return wire.STATUS_INVALID_ARGUMENT;
-    }
-    fake_core.completion_next_index = 0;
-    fake_core.completion_requests += 1;
-    out_stream.?.* = @ptrCast(&fake_core.completion_stream_handle);
-    return wire.STATUS_OK;
+    if (out_stream) |out| out.* = null;
+    return wire.STATUS_INVALID_ARGUMENT;
 }
 
 fn completionStreamNext(
-    stream: ?*wire.CompletionStreamHandle,
-    out_event: ?*wire.CompletionEventV1,
+    _: ?*wire.CompletionStreamHandle,
+    _: ?*wire.CompletionEventV1,
     out_diagnostic: ?*wire.OwnedBytesV1,
 ) callconv(.c) u32 {
     if (out_diagnostic) |out| out.* = .{ .ptr = null, .len = 0 };
-    fake_core.lock();
-    defer fake_core.unlock();
-    if (stream != @as(?*wire.CompletionStreamHandle, @ptrCast(&fake_core.completion_stream_handle)) or
-        out_event == null)
-        return wire.STATUS_INVALID_ARGUMENT;
-    const event = out_event.?;
-    event.* = std.mem.zeroes(wire.CompletionEventV1);
-    event.struct_size = @sizeOf(wire.CompletionEventV1);
-    if (fake_core.completion_next_index == 0) {
-        event.kind_code = wire.COMPLETION_EVENT_TEXT;
-        event.stop_reason_code = wire.COMPLETION_STOP_UNKNOWN;
-        event.payload = .{
-            .ptr = @ptrCast(&fake_core.completion_title),
-            .len = fake_core.completion_title_len,
-        };
-    } else {
-        event.kind_code = wire.COMPLETION_EVENT_DONE;
-        event.stop_reason_code = wire.COMPLETION_STOP_END_TURN;
-    }
-    fake_core.completion_next_index += 1;
-    return wire.STATUS_OK;
+    return wire.STATUS_INVALID_ARGUMENT;
 }
 
 fn completionStreamAbort(
@@ -2146,12 +2119,41 @@ fn completionStreamAbort(
     return wire.STATUS_INVALID_ARGUMENT;
 }
 
-fn completionStreamDestroy(stream: ?*wire.CompletionStreamHandle, out_diagnostic: ?*wire.OwnedBytesV1) callconv(.c) u32 {
+fn completionStreamDestroy(_: ?*wire.CompletionStreamHandle, out_diagnostic: ?*wire.OwnedBytesV1) callconv(.c) u32 {
     if (out_diagnostic) |out| out.* = .{ .ptr = null, .len = 0 };
-    return if (stream == @as(?*wire.CompletionStreamHandle, @ptrCast(&fake_core.completion_stream_handle)))
-        wire.STATUS_OK
-    else
-        wire.STATUS_INVALID_ARGUMENT;
+    return wire.STATUS_INVALID_ARGUMENT;
+}
+
+fn fakeCompletionPerform(
+    context: ?*anyopaque,
+    _: lifecycle.CompletionHttpRequest,
+    cancellation: *const lifecycle.CompletionCancellation,
+    response_buffer: []u8,
+) lifecycle.CompletionTransportError!lifecycle.CompletionTransportResponse {
+    if (cancellation.isRequested()) return error.Cancelled;
+    const core: *FakeCore = @ptrCast(@alignCast(context orelse
+        return error.Unexpected));
+    core.lock();
+    defer core.unlock();
+    if (!core.completion_enabled) return error.Unexpected;
+    core.completion_requests += 1;
+    if (core.completion_response_len > response_buffer.len)
+        return error.ResponseTooLarge;
+    @memcpy(
+        response_buffer[0..core.completion_response_len],
+        core.completion_response[0..core.completion_response_len],
+    );
+    return .{
+        .status = 200,
+        .body = response_buffer[0..core.completion_response_len],
+    };
+}
+
+fn fakeCompletionTransport() lifecycle.CompletionTransport {
+    return .{
+        .context = &fake_core,
+        .perform_fn = fakeCompletionPerform,
+    };
 }
 
 pub const fake_api = wire.ApiV1{
@@ -2198,7 +2200,11 @@ pub fn createCompletion(
     allocator: std.mem.Allocator,
     config: lifecycle.CompletionConfig,
 ) anyerror!*lifecycle.Completion {
-    return lifecycle.Completion.initWithApi(allocator, &fake_api, config);
+    return lifecycle.Completion.init(
+        allocator,
+        fakeCompletionTransport(),
+        config,
+    );
 }
 
 fn validSkillPolicy(policy: *const wire.SkillPolicyV1) bool {

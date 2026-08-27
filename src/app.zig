@@ -13,6 +13,7 @@ const mcp_oauth = @import("metawork_mcp_oauth");
 const account_coordinator = @import("app/account_coordinator.zig");
 const account_platform_binding = @import("app/account_platform_binding.zig");
 const metask_http_transport = @import("app/metask_http_transport.zig");
+const completion_http_transport = @import("app/completion_http_transport.zig");
 const oauth_loopback_transport = @import("oauth_loopback_transport");
 const agent_event_coordinator = @import("app/agent_event_coordinator.zig");
 const app_automation = @import("app/automation.zig");
@@ -45,6 +46,7 @@ const App = struct {
     main_thread_id: std.Thread.Id,
     automation: app_automation.Adapter,
     platform: app_platform.Adapter,
+    completion_transport: completion_http_transport.Backend,
     account_path: []const u8 = "",
     account_platform_binding: ?account_platform_binding.Adapter = null,
     dispatcher: ?*bridge_api.Dispatcher = null,
@@ -365,6 +367,10 @@ pub fn run(init: std.process.Init) !void {
         .main_thread_id = std.Thread.getCurrentId(),
         .automation = app_automation.Adapter.init(init.environ_map),
         .platform = app_platform.Adapter.init(init.io, std.Thread.getCurrentId()),
+        .completion_transport = .{
+            .allocator = std.heap.c_allocator,
+            .io = init.io,
+        },
     };
     app.platform.setProductDeliveryTrace(app.automation.productDeliveryTraceEnabled());
     app.agent_events.bindWake(.{
@@ -454,6 +460,10 @@ pub fn run(init: std.process.Init) !void {
             .restored_bytes = stores_state.skill_enablement_restored_bytes,
             .restore_failed = stores_state.skill_enablement_restore_failed,
         },
+        .completion_factory = .{
+            .context = &app.completion_transport,
+            .create_fn = completion_http_transport.Backend.createCompletion,
+        },
     };
     defer {
         if (app.mcp_management) |*coordinator| {
@@ -511,6 +521,9 @@ pub fn run(init: std.process.Init) !void {
         &workbench,
         app.main_thread_id,
         init.io,
+    );
+    account_coordinator_state.setCompletionTransport(
+        app.completion_transport.transport(),
     );
     app.account_coordinator = &account_coordinator_state;
     defer {

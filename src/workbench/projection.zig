@@ -275,8 +275,7 @@ pub const CompletionFactory = struct {
     ) anyerror!*lifecycle.Completion {
         if (self.create_fn) |create_fn|
             return create_fn(self.context, allocator, config);
-        if (builtin.is_test) return error.CompletionUnavailable;
-        return lifecycle.Completion.init(allocator, config);
+        return error.CompletionUnavailable;
     }
 };
 

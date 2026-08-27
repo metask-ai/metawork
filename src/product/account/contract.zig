@@ -47,9 +47,10 @@ pub const ProviderKind = enum {
     gemini,
 };
 
-/// A user-managed connection uses the provider's native streaming protocol.
+/// A user-managed connection uses one exact provider-native protocol.
 /// This deliberately does not include OpenAI Responses or an arbitrary HTTP
-/// adapter; AgentCore owns provider transport and protocol decoding.
+/// adapter; AgentCore owns Agent Run transport, while Agent-owned Completion
+/// separately consumes the same frozen execution selection.
 pub const ModelConnectionProtocol = enum {
     anthropic_messages,
     openai_chat_completions,
