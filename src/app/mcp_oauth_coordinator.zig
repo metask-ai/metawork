@@ -1,9 +1,8 @@
 //! Application lifecycle adapter for the one MCP OAuth expiry timer and the
-//! single refresh network effect. Workbench owns every durable transition;
+//! single refresh network effect. Product Control owns every durable transition;
 //! this owner only sequences platform time/credential/network capabilities.
 
 const std = @import("std");
-const workbench = @import("metawork_workbench");
 const control_ports = @import("metawork_product_control_ports");
 const mcp_types = @import("metawork_product_mcp");
 const mcp_oauth = @import("metawork_mcp_oauth");

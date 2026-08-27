@@ -1,6 +1,6 @@
 pub const std = @import("std");
 pub const lifecycle = @import("metawork_agent");
-pub const workbench_api = @import("metawork_workbench");
+pub const product_control = @import("metawork_product_control");
 pub const product_skill = @import("metawork_product_skill");
 pub const product_task = @import("metawork_product_task");
 pub const account_contract = @import("metawork_account_contract");
@@ -2531,18 +2531,18 @@ pub fn createTestRuntime(limits: lifecycle.Limits) !*lifecycle.Runtime {
     );
 }
 
-pub fn workbenchConfiguration() workbench_api.Configuration {
+pub fn productControlConfiguration() product_control.Configuration {
     return .{};
 }
 
-pub fn installWorkbenchExecution(
-    workbench: *workbench_api.Workbench,
+pub fn installProductControlExecution(
+    workbench: *product_control.Runtime,
 ) !void {
-    return installWorkbenchExecutionGeneration(workbench, 1);
+    return installProductControlExecutionGeneration(workbench, 1);
 }
 
-pub fn installWorkbenchExecutionGeneration(
-    workbench: *workbench_api.Workbench,
+pub fn installProductControlExecutionGeneration(
+    workbench: *product_control.Runtime,
     generation: u64,
 ) !void {
     if (generation == 0) return error.InvalidExecutionGeneration;
@@ -2592,7 +2592,7 @@ pub fn installWorkbenchExecutionGeneration(
     workbench.finishAccountCommitNoFail();
 }
 
-pub fn workbenchTaskInput() workbench_api.TaskCreateInput {
+pub fn productControlTaskInput() product_control.TaskCreateInput {
     const workspace_root = if (std.fs.path.sep == '\\') "C:\\tmp" else "/tmp";
     const temporary_root = if (std.fs.path.sep == '\\') "C:\\tmp" else "/tmp";
     return .{
@@ -2601,8 +2601,8 @@ pub fn workbenchTaskInput() workbench_api.TaskCreateInput {
     };
 }
 
-pub fn waitWorkbenchSnapshot(
-    workbench: *workbench_api.Workbench,
+pub fn waitProductControlSnapshot(
+    workbench: *product_control.Runtime,
     needle: []const u8,
 ) !void {
     var output: [128 * 1024]u8 = undefined;

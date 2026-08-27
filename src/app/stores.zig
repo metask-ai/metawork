@@ -1,5 +1,5 @@
 const std = @import("std");
-const workbench_api = @import("metawork_workbench");
+const product_control = @import("metawork_product_control");
 const mcp_configuration = @import("metawork_product_mcp").contract;
 const skill_enablement = @import("metawork_product_skill").enablement;
 const skill_management = @import("metawork_product_skill").management;
@@ -8,14 +8,14 @@ const app_paths = @import("paths.zig");
 
 pub const Stores = struct {
     allocator: std.mem.Allocator = undefined,
-    automatic_workspace_root: ?workbench_api.AutomaticWorkspaceRoot = null,
+    automatic_workspace_root: ?product_control.AutomaticWorkspaceRoot = null,
     mcp_configuration: ?mcp_configuration.FileStore = null,
     task: ?product_task.history.FileStore = null,
     task_restore_failed: bool = true,
     task_restored_bytes: ?[]u8 = null,
     checkpoint: ?product_task.checkpoint_store.FileStore = null,
     checkpoint_open_failed: bool = true,
-    scheduled_task: ?workbench_api.ScheduledTaskFileStore = null,
+    scheduled_task: ?product_control.ScheduledTaskFileStore = null,
     scheduled_task_restore_failed: bool = true,
     scheduled_task_restored_bytes: ?[]u8 = null,
     skill_management: ?skill_management.FileStore = null,
@@ -34,7 +34,7 @@ pub const Stores = struct {
         self.* = .{ .allocator = allocator };
 
         if (paths.automaticWorkspaceDir()) |directory| {
-            self.automatic_workspace_root = workbench_api.AutomaticWorkspaceRoot.open(
+            self.automatic_workspace_root = product_control.AutomaticWorkspaceRoot.open(
                 io,
                 allocator,
                 directory,
@@ -62,7 +62,7 @@ pub const Stores = struct {
         ) catch null;
         self.checkpoint_open_failed = self.checkpoint == null;
 
-        self.scheduled_task = workbench_api.ScheduledTaskFileStore.init(
+        self.scheduled_task = product_control.ScheduledTaskFileStore.init(
             io,
             paths.workbenchDir(),
         ) catch null;
@@ -122,8 +122,8 @@ pub const Stores = struct {
 pub fn commitScheduledTaskStore(
     context: ?*anyopaque,
     bytes: []const u8,
-) workbench_api.SchedulePersistenceCommit {
-    const store: *workbench_api.ScheduledTaskFileStore = @ptrCast(
+) product_control.SchedulePersistenceCommit {
+    const store: *product_control.ScheduledTaskFileStore = @ptrCast(
         @alignCast(context orelse return .failed),
     );
     store.commit(bytes) catch |err| return switch (err) {

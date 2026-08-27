@@ -1,7 +1,7 @@
 const fixture = @import("lifecycle_fixture");
 const std = fixture.std;
 const lifecycle = fixture.lifecycle;
-const workbench_api = fixture.workbench_api;
+const product_control = fixture.product_control;
 const product_skill = fixture.product_skill;
 const product_task = fixture.product_task;
 const account_contract = fixture.account_contract;
@@ -13,14 +13,14 @@ const closeSession = fixture.closeSession;
 const shutdownTestComposition = fixture.shutdownTestComposition;
 const deinitTestComposition = fixture.deinitTestComposition;
 const createTestComposition = fixture.createTestComposition;
-const workbenchConfiguration = fixture.workbenchConfiguration;
-const workbenchTaskInput = fixture.workbenchTaskInput;
-const waitWorkbenchSnapshot = fixture.waitWorkbenchSnapshot;
-const installWorkbenchExecution = fixture.installWorkbenchExecution;
-const installWorkbenchExecutionGeneration = fixture.installWorkbenchExecutionGeneration;
+const productControlConfiguration = fixture.productControlConfiguration;
+const productControlTaskInput = fixture.productControlTaskInput;
+const waitControlSnapshot = fixture.waitProductControlSnapshot;
+const installControlExecution = fixture.installProductControlExecution;
+const installControlExecutionGeneration = fixture.installProductControlExecutionGeneration;
 
 const ShutdownContext = struct {
-    workbench: *workbench_api.Workbench,
+    workbench: *product_control.Runtime,
 
     fn run(self: *@This()) void {
         self.workbench.shutdownExecutor();
@@ -193,7 +193,7 @@ fn expectFakeSessionModel(index: usize, expected: []const u8) !void {
     try std.testing.expectEqualStrings(expected, session.model[0..session.model_len]);
 }
 
-fn installTwoModelCatalog(workbench: *workbench_api.Workbench) void {
+fn installTwoModelCatalog(workbench: *product_control.Runtime) void {
     const api_keys = [_]account_contract.ApiKeyView{.{
         .id = "key-1",
         .name = "Fixture API",
@@ -226,9 +226,9 @@ fn installTwoModelCatalog(workbench: *workbench_api.Workbench) void {
 }
 
 fn waitCatalogReady(
-    workbench: *workbench_api.Workbench,
+    workbench: *product_control.Runtime,
     workspace_id: u64,
-) !workbench_api.CatalogProjection {
+) !product_control.CatalogProjection {
     for (0..10_000) |_| {
         const projection = try workbench.workspaceCatalog(workspace_id);
         switch (projection.availability) {
@@ -244,7 +244,7 @@ fn waitCatalogReady(
 }
 
 fn waitTaskSnapshot(
-    workbench: *workbench_api.Workbench,
+    workbench: *product_control.Runtime,
     task_marker: []const u8,
     needle: []const u8,
 ) !void {
@@ -260,7 +260,7 @@ fn waitTaskSnapshot(
     return error.TestUnexpectedResult;
 }
 
-fn waitSetTaskArchived(workbench: *workbench_api.Workbench, task_id: u64) !void {
+fn waitSetTaskArchived(workbench: *product_control.Runtime, task_id: u64) !void {
     for (0..10_000) |_| {
         workbench.setTaskArchived(task_id, true) catch |err| switch (err) {
             error.TaskBusy => {
@@ -275,7 +275,7 @@ fn waitSetTaskArchived(workbench: *workbench_api.Workbench, task_id: u64) !void 
     return error.TestUnexpectedResult;
 }
 
-fn waitTaskDeleted(workbench: *workbench_api.Workbench, task_id: u64) !void {
+fn waitTaskDeleted(workbench: *product_control.Runtime, task_id: u64) !void {
     for (0..10_000) |_| {
         try workbench.drainAgentEvents();
         _ = workbench.taskBindingEpoch(task_id) catch |err| switch (err) {
@@ -288,7 +288,7 @@ fn waitTaskDeleted(workbench: *workbench_api.Workbench, task_id: u64) !void {
 }
 
 fn waitCheckpointRecord(
-    workbench: *workbench_api.Workbench,
+    workbench: *product_control.Runtime,
     persistence: *TaskPersistenceProbe,
 ) !void {
     var output: [128 * 1024]u8 = undefined;
@@ -304,7 +304,7 @@ fn waitCheckpointRecord(
 }
 
 fn waitHistoryNeedle(
-    workbench: *workbench_api.Workbench,
+    workbench: *product_control.Runtime,
     persistence: *TaskPersistenceProbe,
     needle: []const u8,
 ) !void {
@@ -320,7 +320,7 @@ fn waitHistoryNeedle(
     return error.TestUnexpectedResult;
 }
 
-test "Workbench Task admission consumes the fixed MetaWork Agent tool surface" {
+test "Product Control Task admission consumes the fixed MetaWork Agent tool surface" {
     fake_core.reset();
     const runtime = try createTestComposition(.{
         .worker_count = 1,
@@ -331,7 +331,7 @@ test "Workbench Task admission consumes the fixed MetaWork Agent tool surface" {
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
     }
-    var workbench = try workbench_api.Workbench.init(
+    var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
         runtime,
@@ -343,11 +343,11 @@ test "Workbench Task admission consumes the fixed MetaWork Agent tool surface" {
             .max_runs_per_task = 1,
             .max_tools_per_run = 1,
         },
-        workbenchConfiguration(),
+        productControlConfiguration(),
     );
     defer workbench.deinit();
-    try installWorkbenchExecution(&workbench);
-    _ = try workbench.createTask(workbenchTaskInput());
+    try installControlExecution(&workbench);
+    _ = try workbench.createTask(productControlTaskInput());
 
     try std.testing.expect(fake_core.builtin_allowlist_seen);
 }
@@ -378,10 +378,10 @@ test "Run checkpoint commits immutable blob before durable descriptor" {
     );
     defer std.testing.allocator.free(persistence_storage);
     var persistence = TaskPersistenceProbe{ .storage = persistence_storage };
-    var configuration = workbenchConfiguration();
+    var configuration = productControlConfiguration();
     configuration.task_persistence = persistence.capability();
     configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
-    var workbench = try workbench_api.Workbench.init(
+    var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
         runtime,
@@ -396,8 +396,8 @@ test "Run checkpoint commits immutable blob before durable descriptor" {
     );
     var workbench_initialized = true;
     defer if (workbench_initialized) workbench.deinit();
-    try installWorkbenchExecution(&workbench);
-    const task_id = try workbench.createTask(workbenchTaskInput());
+    try installControlExecution(&workbench);
+    const task_id = try workbench.createTask(productControlTaskInput());
     _ = try workbench.runTask(task_id, .{ .text = "persist checkpoint" });
     try waitCheckpointRecord(&workbench, &persistence);
 
@@ -482,10 +482,10 @@ test "Run checkpoint commits immutable blob before durable descriptor" {
         .sub_path = blob_path,
         .data = "corrupt-checkpoint",
     });
-    var restart_configuration = workbenchConfiguration();
+    var restart_configuration = productControlConfiguration();
     restart_configuration.task_persistence = persistence.capabilityRestored(restart_history);
     restart_configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
-    var restored = try workbench_api.Workbench.init(
+    var restored = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
         runtime,
@@ -513,10 +513,10 @@ test "Run checkpoint commits immutable blob before durable descriptor" {
         _ = try replacement_writer.commit(2, digest, "fixture-checkpoint".len);
     }
     checkpoint_store.delete(post_compact_run_identity);
-    var missing_configuration = workbenchConfiguration();
+    var missing_configuration = productControlConfiguration();
     missing_configuration.task_persistence = persistence.capabilityRestored(restart_history);
     missing_configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
-    var missing_restored = try workbench_api.Workbench.init(
+    var missing_restored = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
         runtime,
@@ -588,12 +588,12 @@ test "restart recovery revalidates live authority and continues the same Convers
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
     };
-    var first_configuration = workbenchConfiguration();
+    var first_configuration = productControlConfiguration();
     first_configuration.directories.canonical_user_home = home;
     first_configuration.task_persistence = persistence.capability();
     first_configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
     first_configuration.skill_enablement = .{ .file_store = &skill_enablement_store };
-    var first = try workbench_api.Workbench.init(
+    var first = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
         runtime,
@@ -609,8 +609,8 @@ test "restart recovery revalidates live authority and continues the same Convers
     );
     var first_workbench_live = true;
     defer if (first_workbench_live) first.deinit();
-    try installWorkbenchExecutionGeneration(&first, 1);
-    const workspace_id = try first.openWorkspace(workbenchTaskInput());
+    try installControlExecutionGeneration(&first, 1);
+    const workspace_id = try first.openWorkspace(productControlTaskInput());
     var catalog = try waitCatalogReady(&first, workspace_id);
     _ = try first.setSkillEnabled(.{
         .scope = .{ .project = .{
@@ -661,7 +661,7 @@ test "restart recovery revalidates live authority and continues the same Convers
         .max_sessions = 1,
     });
     runtime_live = true;
-    var second_configuration = workbenchConfiguration();
+    var second_configuration = productControlConfiguration();
     second_configuration.directories.canonical_user_home = home;
     second_configuration.task_persistence = persistence.capabilityRestored(restart_history);
     second_configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
@@ -669,7 +669,7 @@ test "restart recovery revalidates live authority and continues the same Convers
         .file_store = &skill_enablement_store,
         .restored_bytes = restored_enablement,
     };
-    var restored = try workbench_api.Workbench.init(
+    var restored = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
         runtime,
@@ -685,12 +685,12 @@ test "restart recovery revalidates live authority and continues the same Convers
     );
     var restored_live = true;
     defer if (restored_live) restored.deinit();
-    try installWorkbenchExecutionGeneration(&restored, 2);
+    try installControlExecutionGeneration(&restored, 2);
     // A persisted manual Workspace deliberately restarts without authority.
     // Reopening it models the user's explicit reauthorization action.
     try std.testing.expectEqual(
         workspace_id,
-        try restored.openWorkspace(workbenchTaskInput()),
+        try restored.openWorkspace(productControlTaskInput()),
     );
     _ = try waitCatalogReady(&restored, workspace_id);
     try waitTaskSnapshot(
@@ -791,7 +791,7 @@ test "restart recovery revalidates live authority and continues the same Convers
     try std.testing.expectEqual(@as(u32, 1), restore_report.invalidated_mcp_bindings);
     const unbound_catalog = try restored.taskCatalog(task_id);
     try std.testing.expectEqual(
-        workbench_api.CatalogAvailability.uninitialized,
+        product_control.CatalogAvailability.uninitialized,
         unbound_catalog.availability,
     );
     fake_core.lock();
@@ -845,7 +845,7 @@ test "restart recovery revalidates live authority and continues the same Convers
     });
     runtime_live = true;
 
-    var third_configuration = workbenchConfiguration();
+    var third_configuration = productControlConfiguration();
     third_configuration.directories.canonical_user_home = home;
     third_configuration.task_persistence = persistence.capabilityRestored(restart_history);
     third_configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
@@ -853,7 +853,7 @@ test "restart recovery revalidates live authority and continues the same Convers
         .file_store = &skill_enablement_store,
         .restored_bytes = restored_enablement,
     };
-    var shutdown_restore = try workbench_api.Workbench.init(
+    var shutdown_restore = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
         runtime,
@@ -869,10 +869,10 @@ test "restart recovery revalidates live authority and continues the same Convers
     );
     var shutdown_restore_live = true;
     defer if (shutdown_restore_live) shutdown_restore.deinit();
-    try installWorkbenchExecutionGeneration(&shutdown_restore, 2);
+    try installControlExecutionGeneration(&shutdown_restore, 2);
     try std.testing.expectEqual(
         workspace_id,
-        try shutdown_restore.openWorkspace(workbenchTaskInput()),
+        try shutdown_restore.openWorkspace(productControlTaskInput()),
     );
     _ = try waitCatalogReady(&shutdown_restore, workspace_id);
     try waitTaskSnapshot(
@@ -932,7 +932,7 @@ test "restart recovery revalidates live authority and continues the same Convers
         .max_sessions = 1,
     });
     runtime_live = true;
-    var invalidation_configuration = workbenchConfiguration();
+    var invalidation_configuration = productControlConfiguration();
     invalidation_configuration.directories.canonical_user_home = home;
     invalidation_configuration.task_persistence =
         persistence.capabilityRestored(restart_history);
@@ -941,7 +941,7 @@ test "restart recovery revalidates live authority and continues the same Convers
         .file_store = &skill_enablement_store,
         .restored_bytes = restored_enablement,
     };
-    var workspace_invalidation = try workbench_api.Workbench.init(
+    var workspace_invalidation = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
         runtime,
@@ -956,10 +956,10 @@ test "restart recovery revalidates live authority and continues the same Convers
         invalidation_configuration,
     );
     defer workspace_invalidation.deinit();
-    try installWorkbenchExecutionGeneration(&workspace_invalidation, 2);
+    try installControlExecutionGeneration(&workspace_invalidation, 2);
     try std.testing.expectEqual(
         workspace_id,
-        try workspace_invalidation.openWorkspace(workbenchTaskInput()),
+        try workspace_invalidation.openWorkspace(productControlTaskInput()),
     );
     _ = try waitCatalogReady(&workspace_invalidation, workspace_id);
     try waitTaskSnapshot(
@@ -985,7 +985,7 @@ test "restart recovery revalidates live authority and continues the same Convers
         "\"id\":\"1\"",
         "\"activeOperation\":null",
     );
-    try waitWorkbenchSnapshot(&workspace_invalidation, "\"workspaces\":[]");
+    try waitControlSnapshot(&workspace_invalidation, "\"workspaces\":[]");
     var invalidation_snapshot_storage: [128 * 1024]u8 = undefined;
     const invalidation_snapshot = try workspace_invalidation.writeSnapshot(
         &invalidation_snapshot_storage,
@@ -1027,7 +1027,7 @@ test "automatic Task binding adoption survives another restart and admits a seco
     defer tmp.cleanup();
     var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
-    var automatic_root = try workbench_api.AutomaticWorkspaceRoot.open(
+    var automatic_root = try product_control.AutomaticWorkspaceRoot.open(
         std.testing.io,
         std.testing.allocator,
         root_storage[0..root_len],
@@ -1062,12 +1062,12 @@ test "automatic Task binding adoption survives another restart and admits a seco
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
     };
-    var first_configuration = workbenchConfiguration();
+    var first_configuration = productControlConfiguration();
     first_configuration.directories.canonical_user_home = home;
     first_configuration.directories.automatic_workspace_root = &automatic_root;
     first_configuration.task_persistence = persistence.capability();
     first_configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
-    var first = try workbench_api.Workbench.init(
+    var first = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
         runtime,
@@ -1083,7 +1083,7 @@ test "automatic Task binding adoption survives another restart and admits a seco
     );
     var first_live = true;
     defer if (first_live) first.deinit();
-    try installWorkbenchExecutionGeneration(&first, 1);
+    try installControlExecutionGeneration(&first, 1);
     const task_id = try first.createTaskForWorkspace(.automatic, 1, null, null);
     _ = try first.runTask(task_id, .{ .text = "automatic first run" });
     try waitCheckpointRecord(&first, &persistence);
@@ -1112,18 +1112,18 @@ test "automatic Task binding adoption survives another restart and admits a seco
         .max_sessions = 1,
     });
     runtime_live = true;
-    var restored_automatic_root = try workbench_api.AutomaticWorkspaceRoot.open(
+    var restored_automatic_root = try product_control.AutomaticWorkspaceRoot.open(
         std.testing.io,
         std.testing.allocator,
         root_storage[0..root_len],
     );
     defer restored_automatic_root.deinit();
-    var second_configuration = workbenchConfiguration();
+    var second_configuration = productControlConfiguration();
     second_configuration.directories.canonical_user_home = home;
     second_configuration.directories.automatic_workspace_root = &restored_automatic_root;
     second_configuration.task_persistence = persistence.capabilityRestored(restart_history);
     second_configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
-    var restored = try workbench_api.Workbench.init(
+    var restored = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
         runtime,
@@ -1139,7 +1139,7 @@ test "automatic Task binding adoption survives another restart and admits a seco
     );
     var restored_live = true;
     defer if (restored_live) restored.deinit();
-    try installWorkbenchExecutionGeneration(&restored, 2);
+    try installControlExecutionGeneration(&restored, 2);
     try waitTaskSnapshot(
         &restored,
         "\"id\":\"1\"",
@@ -1180,18 +1180,18 @@ test "automatic Task binding adoption survives another restart and admits a seco
         .max_sessions = 1,
     });
     runtime_live = true;
-    var continued_automatic_root = try workbench_api.AutomaticWorkspaceRoot.open(
+    var continued_automatic_root = try product_control.AutomaticWorkspaceRoot.open(
         std.testing.io,
         std.testing.allocator,
         root_storage[0..root_len],
     );
     defer continued_automatic_root.deinit();
-    var third_configuration = workbenchConfiguration();
+    var third_configuration = productControlConfiguration();
     third_configuration.directories.canonical_user_home = home;
     third_configuration.directories.automatic_workspace_root = &continued_automatic_root;
     third_configuration.task_persistence = persistence.capabilityRestored(adopted_history);
     third_configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
-    var continued = try workbench_api.Workbench.init(
+    var continued = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
         runtime,
@@ -1207,7 +1207,7 @@ test "automatic Task binding adoption survives another restart and admits a seco
     );
     var continued_live = true;
     defer if (continued_live) continued.deinit();
-    try installWorkbenchExecutionGeneration(&continued, 2);
+    try installControlExecutionGeneration(&continued, 2);
     try waitTaskSnapshot(
         &continued,
         "\"id\":\"1\"",
@@ -1224,7 +1224,7 @@ test "automatic Task binding adoption survives another restart and admits a seco
     );
     try std.testing.expectEqual(@as(u64, 2), try continued.taskBindingEpoch(task_id));
     try std.testing.expectEqual(
-        workbench_api.CatalogAvailability.uninitialized,
+        product_control.CatalogAvailability.uninitialized,
         (try continued.taskCatalog(task_id)).availability,
     );
     _ = try continued.runTask(task_id, .{ .text = "automatic second run" });
@@ -1271,10 +1271,10 @@ test "accepted Task deletion advances after checkpoint quiescence without a seco
     );
     defer std.testing.allocator.free(persistence_storage);
     var persistence = TaskPersistenceProbe{ .storage = persistence_storage };
-    var configuration = workbenchConfiguration();
+    var configuration = productControlConfiguration();
     configuration.task_persistence = persistence.capability();
     configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
-    var workbench = try workbench_api.Workbench.init(
+    var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
         runtime,
@@ -1288,16 +1288,16 @@ test "accepted Task deletion advances after checkpoint quiescence without a seco
         configuration,
     );
     defer workbench.deinit();
-    try installWorkbenchExecution(&workbench);
-    const task_id = try workbench.createTask(workbenchTaskInput());
+    try installControlExecution(&workbench);
+    const task_id = try workbench.createTask(productControlTaskInput());
     _ = try workbench.runTask(task_id, .{ .text = "cancel checkpoint export" });
     fake_core.waitCheckpointExportEntered();
     // Product terminal publication must not wait for the same executor job's
     // controlled checkpoint export to be released.
-    try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
+    try waitControlSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
     try workbench.setTaskArchived(task_id, true);
     try workbench.deleteTask(task_id);
-    try waitWorkbenchSnapshot(&workbench, "\"deletionStatus\":\"deleting\"");
+    try waitControlSnapshot(&workbench, "\"deletionStatus\":\"deleting\"");
     fake_core.releaseCheckpointExport();
     try waitTaskDeleted(&workbench, task_id);
 }
@@ -1329,10 +1329,10 @@ test "definite descriptor failure preserves terminal history and leaves a recove
     );
     defer std.testing.allocator.free(persistence_storage);
     var persistence = TaskPersistenceProbe{ .storage = persistence_storage };
-    var configuration = workbenchConfiguration();
+    var configuration = productControlConfiguration();
     configuration.task_persistence = persistence.capability();
     configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
-    var workbench = try workbench_api.Workbench.init(
+    var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
         runtime,
@@ -1341,8 +1341,8 @@ test "definite descriptor failure preserves terminal history and leaves a recove
     );
     var initialized = true;
     defer if (initialized) workbench.deinit();
-    try installWorkbenchExecution(&workbench);
-    const task_id = try workbench.createTask(workbenchTaskInput());
+    try installControlExecution(&workbench);
+    const task_id = try workbench.createTask(productControlTaskInput());
     _ = try workbench.runTask(task_id, .{ .text = "descriptor commit fails" });
     fake_core.waitCheckpointExportEntered();
     try workbench.drainAgentEvents();
@@ -1383,10 +1383,10 @@ test "definite descriptor failure preserves terminal history and leaves a recove
     workbench.deinit();
     initialized = false;
     persistence.result = .committed;
-    var restart_configuration = workbenchConfiguration();
+    var restart_configuration = productControlConfiguration();
     restart_configuration.task_persistence = persistence.capabilityRestored(durable_terminal);
     restart_configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
-    var restored = try workbench_api.Workbench.init(
+    var restored = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
         runtime,
@@ -1435,10 +1435,10 @@ test "unknown descriptor commit freezes checkpoint transaction until shutdown" {
     );
     defer std.testing.allocator.free(persistence_storage);
     var persistence = TaskPersistenceProbe{ .storage = persistence_storage };
-    var configuration = workbenchConfiguration();
+    var configuration = productControlConfiguration();
     configuration.task_persistence = persistence.capability();
     configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
-    var workbench = try workbench_api.Workbench.init(
+    var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
         runtime,
@@ -1447,8 +1447,8 @@ test "unknown descriptor commit freezes checkpoint transaction until shutdown" {
     );
     var initialized = true;
     defer if (initialized) workbench.deinit();
-    try installWorkbenchExecution(&workbench);
-    const task_id = try workbench.createTask(workbenchTaskInput());
+    try installControlExecution(&workbench);
+    const task_id = try workbench.createTask(productControlTaskInput());
     _ = try workbench.runTask(task_id, .{ .text = "descriptor outcome is unknown" });
     fake_core.waitCheckpointExportEntered();
     try workbench.drainAgentEvents();
@@ -1529,10 +1529,10 @@ test "untrusted Task history never opens checkpoint orphan cleanup" {
         );
     };
     var persistence = TaskPersistenceProbe{};
-    var configuration = workbenchConfiguration();
+    var configuration = productControlConfiguration();
     configuration.task_persistence = persistence.capabilityRestored("{");
     configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
-    var workbench = try workbench_api.Workbench.init(
+    var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
         runtime,
@@ -1567,9 +1567,9 @@ test "unavailable checkpoint store does not close Task admission" {
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
     }
-    var configuration = workbenchConfiguration();
+    var configuration = productControlConfiguration();
     configuration.checkpoint_store = .{ .open_failed = true };
-    var workbench = try workbench_api.Workbench.init(
+    var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
         runtime,
@@ -1587,16 +1587,16 @@ test "unavailable checkpoint store does not close Task admission" {
         product_task.checkpoint_store.Health.unavailable,
         workbench.checkpointStoreHealth(),
     );
-    try installWorkbenchExecution(&workbench);
-    const task_id = try workbench.createTask(workbenchTaskInput());
+    try installControlExecution(&workbench);
+    const task_id = try workbench.createTask(productControlTaskInput());
     _ = try workbench.runTask(task_id, .{ .text = "checkpoint store unavailable" });
-    try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
+    try waitControlSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
     try std.testing.expectEqual(@as(usize, 1), fake_core.session_created);
     try std.testing.expectEqual(@as(usize, 0), fake_core.checkpoint_exports);
 }
 
 fn waitCatalogUnavailable(
-    workbench: *workbench_api.Workbench,
+    workbench: *product_control.Runtime,
     workspace_id: u64,
 ) !void {
     for (0..10_000) |_| {
@@ -1641,14 +1641,14 @@ const TestScheduleSupport = struct {
     fn commit(
         context: ?*anyopaque,
         bytes: []const u8,
-    ) workbench_api.SchedulePersistenceCommit {
+    ) product_control.SchedulePersistenceCommit {
         const self: *@This() = @ptrCast(@alignCast(context.?));
         std.debug.assert(bytes.len != 0);
         self.commits += 1;
         return .committed;
     }
 
-    fn timer(self: *@This()) workbench_api.ScheduleTimer {
+    fn timer(self: *@This()) product_control.ScheduleTimer {
         return .{
             .context = self,
             .enabled = true,
@@ -1658,7 +1658,7 @@ const TestScheduleSupport = struct {
         };
     }
 
-    fn persistence(self: *@This()) workbench_api.SchedulePersistence {
+    fn persistence(self: *@This()) product_control.SchedulePersistence {
         return .{
             .context = self,
             .enabled = true,
@@ -1707,7 +1707,7 @@ test "bounded executor rejects overflow and close cancels a queued Run" {
     try closeSession(rejected, .session_close);
 }
 
-test "Workbench pins an async catalog and admits typed Skill through the existing executor" {
+test "Product Control pins an async catalog and admits typed Skill through the existing executor" {
     fake_core.reset();
     fake_core.setCatalogPlan(.degraded);
     const runtime = try createTestComposition(.{
@@ -1730,7 +1730,7 @@ test "Workbench pins an async catalog and admits typed Skill through the existin
         home,
     );
     defer skill_enablement_store.deinit();
-    var workbench = try workbench_api.Workbench.init(
+    var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
         runtime,
@@ -1748,11 +1748,11 @@ test "Workbench pins an async catalog and admits typed Skill through the existin
         },
     );
     defer workbench.deinit();
-    try installWorkbenchExecution(&workbench);
+    try installControlExecution(&workbench);
 
-    const workspace_id = try workbench.openWorkspace(workbenchTaskInput());
+    const workspace_id = try workbench.openWorkspace(productControlTaskInput());
     const catalog = try waitCatalogReady(&workbench, workspace_id);
-    try std.testing.expectEqual(workbench_api.CatalogAvailability.degraded, catalog.availability);
+    try std.testing.expectEqual(product_control.CatalogAvailability.degraded, catalog.availability);
     try std.testing.expectEqual(@as(usize, 1), catalog.issues.len);
     try std.testing.expectEqualStrings(
         fixture.fixture_catalog_revision,
@@ -1777,19 +1777,19 @@ test "Workbench pins an async catalog and admits typed Skill through the existin
         .selection_revision = catalog.selection_revision.?,
         .argument_values = &.{ "src/main.zig", "correctness" },
     } });
-    try waitWorkbenchSnapshot(
+    try waitControlSnapshot(
         &workbench,
         "\"lastRunOutcome\":\"completed\"",
     );
-    try waitWorkbenchSnapshot(
+    try waitControlSnapshot(
         &workbench,
         "\"skillCatalog\":{\"availability\":\"degraded\"",
     );
-    try waitWorkbenchSnapshot(
+    try waitControlSnapshot(
         &workbench,
         "\"input\":{\"kind\":\"skill\"",
     );
-    try waitWorkbenchSnapshot(&workbench, "\"title\":\"Review\"");
+    try waitControlSnapshot(&workbench, "\"title\":\"Review\"");
     var skill_title_snapshot: [128 * 1024]u8 = undefined;
     const skill_title_snapshot_bytes = try workbench.writeSnapshot(&skill_title_snapshot);
     try std.testing.expect(
@@ -1825,7 +1825,7 @@ test "Workspace incomplete catalog refresh preserves the committed last-good aut
         home,
     );
     defer skill_enablement_store.deinit();
-    var workbench = try workbench_api.Workbench.init(
+    var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
         runtime,
@@ -1843,9 +1843,9 @@ test "Workspace incomplete catalog refresh preserves the committed last-good aut
         },
     );
     defer workbench.deinit();
-    try installWorkbenchExecution(&workbench);
+    try installControlExecution(&workbench);
 
-    const workspace_id = try workbench.openWorkspace(workbenchTaskInput());
+    const workspace_id = try workbench.openWorkspace(productControlTaskInput());
     const before = try waitCatalogReady(&workbench, workspace_id);
     fake_core.setCatalogPlan(.controlled);
     defer fake_core.releaseCatalogQuery();
@@ -1854,7 +1854,7 @@ test "Workspace incomplete catalog refresh preserves the committed last-good aut
     fake_core.waitCatalogQueryEntered();
     const refresh_revision = workbench.currentRevision();
     const refreshing = try workbench.workspaceCatalog(workspace_id);
-    try std.testing.expectEqual(workbench_api.CatalogAvailability.ready, refreshing.availability);
+    try std.testing.expectEqual(product_control.CatalogAvailability.ready, refreshing.availability);
     try std.testing.expectEqualStrings(before.revision, refreshing.revision);
     try std.testing.expectEqual(before.selection_revision, refreshing.selection_revision);
 
@@ -1866,7 +1866,7 @@ test "Workspace incomplete catalog refresh preserves the committed last-good aut
     } else return error.TestUnexpectedResult;
 
     const after = try workbench.workspaceCatalog(workspace_id);
-    try std.testing.expectEqual(workbench_api.CatalogAvailability.ready, after.availability);
+    try std.testing.expectEqual(product_control.CatalogAvailability.ready, after.availability);
     try std.testing.expectEqualStrings(before.revision, after.revision);
     try std.testing.expectEqual(before.selection_revision, after.selection_revision);
     try std.testing.expectEqual(before.skills.len, after.skills.len);
@@ -1885,9 +1885,9 @@ test "Manual Task persistence failure rolls back Workspace recent order" {
         deinitTestComposition(runtime);
     }
     var persistence: TaskPersistenceProbe = .{};
-    var configuration = workbenchConfiguration();
+    var configuration = productControlConfiguration();
     configuration.task_persistence = persistence.capability();
-    var workbench = try workbench_api.Workbench.init(
+    var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
         runtime,
@@ -1902,9 +1902,9 @@ test "Manual Task persistence failure rolls back Workspace recent order" {
         configuration,
     );
     defer workbench.deinit();
-    try installWorkbenchExecution(&workbench);
-    const workspace_id = try workbench.openWorkspace(workbenchTaskInput());
-    var projection_storage: [1]workbench_api.WorkspaceProjection = undefined;
+    try installControlExecution(&workbench);
+    const workspace_id = try workbench.openWorkspace(productControlTaskInput());
+    var projection_storage: [1]product_control.WorkspaceProjection = undefined;
     const before = try workbench.copyWorkspaceProjections(&projection_storage);
     const recent_order = before[0].recent_order;
     const epoch = before[0].epoch;
@@ -1947,9 +1947,9 @@ test "Idle Task model persistence failure restores Session and detaches on unkno
     defer std.testing.allocator.free(persistence_storage);
     var persistence = TaskPersistenceProbe{ .storage = persistence_storage };
     {
-        var configuration = workbenchConfiguration();
+        var configuration = productControlConfiguration();
         configuration.task_persistence = persistence.capability();
-        var workbench = try workbench_api.Workbench.init(
+        var workbench = try product_control.Runtime.init(
             std.testing.allocator,
             std.testing.io,
             runtime,
@@ -1964,9 +1964,9 @@ test "Idle Task model persistence failure restores Session and detaches on unkno
             configuration,
         );
         defer workbench.deinit();
-        try installWorkbenchExecution(&workbench);
+        try installControlExecution(&workbench);
         installTwoModelCatalog(&workbench);
-        const task_id = try workbench.createTask(workbenchTaskInput());
+        const task_id = try workbench.createTask(productControlTaskInput());
         const before = try workbench.taskExecutionIdentity(task_id);
         const projection_before = workbench.projectionBytesForTest();
         try expectFakeSessionModel(0, "fixture-model");
@@ -1983,9 +1983,9 @@ test "Idle Task model persistence failure restores Session and detaches on unkno
 
     persistence.result = .committed;
     {
-        var configuration = workbenchConfiguration();
+        var configuration = productControlConfiguration();
         configuration.task_persistence = persistence.capability();
-        var workbench = try workbench_api.Workbench.init(
+        var workbench = try product_control.Runtime.init(
             std.testing.allocator,
             std.testing.io,
             runtime,
@@ -2000,9 +2000,9 @@ test "Idle Task model persistence failure restores Session and detaches on unkno
             configuration,
         );
         defer workbench.deinit();
-        try installWorkbenchExecution(&workbench);
+        try installControlExecution(&workbench);
         installTwoModelCatalog(&workbench);
-        const task_id = try workbench.createTask(workbenchTaskInput());
+        const task_id = try workbench.createTask(productControlTaskInput());
         const before = try workbench.taskExecutionIdentity(task_id);
         const projection_before = workbench.projectionBytesForTest();
         persistence.result = .outcome_unknown;
@@ -2039,13 +2039,13 @@ test "automatic Workspace admission is Task-owned and Text-only" {
     defer tmp.cleanup();
     var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
-    var automatic_root = try workbench_api.AutomaticWorkspaceRoot.open(
+    var automatic_root = try product_control.AutomaticWorkspaceRoot.open(
         std.testing.io,
         std.testing.allocator,
         root_storage[0..root_len],
     );
     defer automatic_root.deinit();
-    var workbench = try workbench_api.Workbench.init(
+    var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
         runtime,
@@ -2063,10 +2063,10 @@ test "automatic Workspace admission is Task-owned and Text-only" {
         },
     );
     defer workbench.deinit();
-    try installWorkbenchExecution(&workbench);
+    try installControlExecution(&workbench);
 
-    _ = try workbench.openWorkspace(workbenchTaskInput());
-    var user_projection_storage: [3]workbench_api.WorkspaceProjection = undefined;
+    _ = try workbench.openWorkspace(productControlTaskInput());
+    var user_projection_storage: [3]product_control.WorkspaceProjection = undefined;
     const before = try workbench.copyWorkspaceProjections(&user_projection_storage);
     const manual_recent_order = before[0].recent_order;
 
@@ -2078,11 +2078,11 @@ test "automatic Workspace admission is Task-owned and Text-only" {
     );
     const first_workspace = try workbench.taskWorkspaceId(first_task);
     try std.testing.expectEqual(
-        workbench_api.WorkspaceKind.automatic,
+        product_control.WorkspaceKind.automatic,
         try workbench.workspaceKind(first_workspace),
     );
     try std.testing.expectEqual(
-        workbench_api.CatalogAvailability.uninitialized,
+        product_control.CatalogAvailability.uninitialized,
         (try workbench.taskCatalog(first_task)).availability,
     );
     const after_first = try workbench.copyWorkspaceProjections(&user_projection_storage);
@@ -2142,7 +2142,7 @@ test "automatic Workspace admission is Task-owned and Text-only" {
 
     try workbench.renameTask(second_task, "Preset title");
     _ = try workbench.runTask(second_task, .{ .text = "must not replace preset" });
-    try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
+    try waitControlSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
     var preset_title_snapshot: [128 * 1024]u8 = undefined;
     const preset_title_snapshot_bytes = try workbench.writeSnapshot(&preset_title_snapshot);
     try std.testing.expect(
@@ -2152,7 +2152,7 @@ test "automatic Workspace admission is Task-owned and Text-only" {
     fake_core.setCompletionTitle("Generated task title");
     fake_core.setSessionPlan(.controlled);
     _ = try workbench.runTask(first_task, .{ .text = "automatic text run" });
-    try waitWorkbenchSnapshot(&workbench, "\"currentRunPhase\":\"running\"");
+    try waitControlSnapshot(&workbench, "\"currentRunPhase\":\"running\"");
     var provisional_title_snapshot: [128 * 1024]u8 = undefined;
     const provisional_title_snapshot_bytes = try workbench.writeSnapshot(
         &provisional_title_snapshot,
@@ -2165,8 +2165,8 @@ test "automatic Workspace admission is Task-owned and Text-only" {
         ) != null,
     );
     fake_core.releaseControlled();
-    try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
-    try waitWorkbenchSnapshot(&workbench, "\"title\":\"Generated task title\"");
+    try waitControlSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
+    try waitControlSnapshot(&workbench, "\"title\":\"Generated task title\"");
     var title_snapshot: [128 * 1024]u8 = undefined;
     const title_snapshot_bytes = try workbench.writeSnapshot(&title_snapshot);
     try std.testing.expect(
@@ -2185,11 +2185,11 @@ test "automatic Workspace admission is Task-owned and Text-only" {
     );
     try std.testing.expectEqual(@as(usize, 2), try directoryEntryCount(tmp.dir));
     try std.testing.expectEqual(
-        workbench_api.WorkspaceKind.automatic,
+        product_control.WorkspaceKind.automatic,
         try workbench.workspaceKind(second_workspace),
     );
     try std.testing.expectEqual(
-        workbench_api.CatalogAvailability.uninitialized,
+        product_control.CatalogAvailability.uninitialized,
         (try workbench.taskCatalog(second_task)).availability,
     );
 }
@@ -2209,13 +2209,13 @@ test "automatic Workspace creation rolls back record and empty directory on Sess
     defer tmp.cleanup();
     var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
-    var automatic_root = try workbench_api.AutomaticWorkspaceRoot.open(
+    var automatic_root = try product_control.AutomaticWorkspaceRoot.open(
         std.testing.io,
         std.testing.allocator,
         root_storage[0..root_len],
     );
     defer automatic_root.deinit();
-    var workbench = try workbench_api.Workbench.init(
+    var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
         runtime,
@@ -2230,8 +2230,8 @@ test "automatic Workspace creation rolls back record and empty directory on Sess
         .{ .directories = .{ .automatic_workspace_root = &automatic_root } },
     );
     defer workbench.deinit();
-    try installWorkbenchExecution(&workbench);
-    _ = try workbench.createTask(workbenchTaskInput());
+    try installControlExecution(&workbench);
+    _ = try workbench.createTask(productControlTaskInput());
     const revision = workbench.currentRevision();
 
     try std.testing.expectError(
@@ -2257,14 +2257,14 @@ test "Text schedule default creates a fresh automatic Workspace per occurrence" 
     defer tmp.cleanup();
     var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
-    var automatic_root = try workbench_api.AutomaticWorkspaceRoot.open(
+    var automatic_root = try product_control.AutomaticWorkspaceRoot.open(
         std.testing.io,
         std.testing.allocator,
         root_storage[0..root_len],
     );
     defer automatic_root.deinit();
     var schedule_support: TestScheduleSupport = .{};
-    var workbench = try workbench_api.Workbench.init(
+    var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
         runtime,
@@ -2284,7 +2284,7 @@ test "Text schedule default creates a fresh automatic Workspace per occurrence" 
         },
     );
     defer workbench.deinit();
-    try installWorkbenchExecution(&workbench);
+    try installControlExecution(&workbench);
 
     const default_schedule = try workbench.createScheduledTask(.{
         .title = "Independent brief",
@@ -2310,27 +2310,27 @@ test "Text schedule default creates a fresh automatic Workspace per occurrence" 
     const first_task = try workbench.runScheduledTaskNow(default_schedule, 1);
     const first_workspace = try workbench.taskWorkspaceId(first_task);
     try std.testing.expectEqual(
-        workbench_api.WorkspaceKind.automatic,
+        product_control.WorkspaceKind.automatic,
         try workbench.workspaceKind(first_workspace),
     );
-    try waitWorkbenchSnapshot(&workbench, "\"taskOutcome\":\"completed\"");
+    try waitControlSnapshot(&workbench, "\"taskOutcome\":\"completed\"");
 
     const second_task = try workbench.runScheduledTaskNow(default_schedule, 1);
     const second_workspace = try workbench.taskWorkspaceId(second_task);
     try std.testing.expect(first_task != second_task);
     try std.testing.expect(first_workspace != second_workspace);
     try std.testing.expectEqual(
-        workbench_api.WorkspaceKind.automatic,
+        product_control.WorkspaceKind.automatic,
         try workbench.workspaceKind(second_workspace),
     );
-    var projection_storage: [2]workbench_api.WorkspaceProjection = undefined;
+    var projection_storage: [2]product_control.WorkspaceProjection = undefined;
     const projections = try workbench.copyWorkspaceProjections(
         &projection_storage,
     );
     try std.testing.expectEqual(@as(usize, 2), projections.len);
     for (projections) |workspace| {
         try std.testing.expectEqual(
-            workbench_api.WorkspaceKind.automatic,
+            product_control.WorkspaceKind.automatic,
             workspace.kind,
         );
         try std.testing.expectEqual(@as(u64, 0), workspace.recent_order);
@@ -2357,14 +2357,14 @@ test "schedule rejection retains the automatic Task created before a full Run qu
     defer tmp.cleanup();
     var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
-    var automatic_root = try workbench_api.AutomaticWorkspaceRoot.open(
+    var automatic_root = try product_control.AutomaticWorkspaceRoot.open(
         std.testing.io,
         std.testing.allocator,
         root_storage[0..root_len],
     );
     defer automatic_root.deinit();
     var schedule_support: TestScheduleSupport = .{};
-    var workbench = try workbench_api.Workbench.init(
+    var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
         runtime,
@@ -2383,7 +2383,7 @@ test "schedule rejection retains the automatic Task created before a full Run qu
         },
     );
     defer workbench.deinit();
-    try installWorkbenchExecution(&workbench);
+    try installControlExecution(&workbench);
 
     const schedule_id = try workbench.createScheduledTask(.{
         .title = "Queued brief",
@@ -2396,7 +2396,7 @@ test "schedule rejection retains the automatic Task created before a full Run qu
     const running_task = try workbench.createTaskForWorkspace(.automatic, 1, null, null);
     const queued_task = try workbench.createTaskForWorkspace(.automatic, 1, null, null);
     _ = try workbench.runTask(running_task, .{ .text = "hold worker" });
-    try waitWorkbenchSnapshot(
+    try waitControlSnapshot(
         &workbench,
         "\"currentRunPhase\":\"running\"",
     );
@@ -2438,7 +2438,7 @@ test "Workspace reauthorization reschedules the latest catalog query" {
         home,
     );
     defer skill_enablement_store.deinit();
-    var workbench = try workbench_api.Workbench.init(
+    var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
         runtime,
@@ -2457,7 +2457,7 @@ test "Workspace reauthorization reschedules the latest catalog query" {
     );
     defer workbench.deinit();
     defer fake_core.releaseCatalogQuery();
-    try installWorkbenchExecution(&workbench);
+    try installControlExecution(&workbench);
 
     for (0..10_000) |_| {
         const personal = workbench.skillCatalog();
@@ -2467,13 +2467,13 @@ test "Workspace reauthorization reschedules the latest catalog query" {
     } else return error.TestUnexpectedResult;
     fake_core.setCatalogPlan(.controlled);
 
-    const workspace_id = try workbench.openWorkspace(workbenchTaskInput());
+    const workspace_id = try workbench.openWorkspace(productControlTaskInput());
     fake_core.waitCatalogQueryEntered();
     try workbench.removeWorkspace(workspace_id);
-    const reauthorized_id = try workbench.openWorkspace(workbenchTaskInput());
+    const reauthorized_id = try workbench.openWorkspace(productControlTaskInput());
     try std.testing.expectEqual(workspace_id, reauthorized_id);
     try std.testing.expectEqual(
-        workbench_api.CatalogAvailability.loading,
+        product_control.CatalogAvailability.loading,
         (try workbench.workspaceCatalog(workspace_id)).availability,
     );
 
@@ -2488,7 +2488,7 @@ test "Workspace reauthorization reschedules the latest catalog query" {
     try std.testing.expectEqual(@as(usize, 1), catalog_releases);
 }
 
-test "Workbench rejects stale Skill identity before Session or Run mutation and releases catalog on shutdown" {
+test "Product Control rejects stale Skill identity before Session or Run mutation and releases catalog on shutdown" {
     fake_core.reset();
     const runtime = try createTestComposition(.{
         .worker_count = 1,
@@ -2510,7 +2510,7 @@ test "Workbench rejects stale Skill identity before Session or Run mutation and 
         home,
     );
     defer skill_enablement_store.deinit();
-    var workbench = try workbench_api.Workbench.init(
+    var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
         runtime,
@@ -2528,9 +2528,9 @@ test "Workbench rejects stale Skill identity before Session or Run mutation and 
         },
     );
     defer workbench.deinit();
-    try installWorkbenchExecution(&workbench);
+    try installControlExecution(&workbench);
 
-    const workspace_id = try workbench.openWorkspace(workbenchTaskInput());
+    const workspace_id = try workbench.openWorkspace(productControlTaskInput());
     const catalog = try waitCatalogReady(&workbench, workspace_id);
     try std.testing.expectError(
         error.StaleCatalog,
@@ -2575,7 +2575,7 @@ test "Workbench rejects stale Skill identity before Session or Run mutation and 
         .selection_revision = catalog.selection_revision.?,
         .argument_values = &.{},
     } });
-    try waitWorkbenchSnapshot(
+    try waitControlSnapshot(
         &workbench,
         "\"cause\":\"stale_catalog\"",
     );
@@ -2588,7 +2588,7 @@ test "Workbench rejects stale Skill identity before Session or Run mutation and 
     try std.testing.expectEqual(@as(usize, 2), catalog_releases);
 }
 
-test "Workbench refreshes a Task only from the committed Workspace catalog while idle" {
+test "Product Control refreshes a Task only from the committed Workspace catalog while idle" {
     fake_core.reset();
     fake_core.setCatalogPlan(.query_failure);
     const runtime = try createTestComposition(.{
@@ -2611,7 +2611,7 @@ test "Workbench refreshes a Task only from the committed Workspace catalog while
         home,
     );
     defer skill_enablement_store.deinit();
-    var workbench = try workbench_api.Workbench.init(
+    var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
         runtime,
@@ -2629,9 +2629,9 @@ test "Workbench refreshes a Task only from the committed Workspace catalog while
         },
     );
     defer workbench.deinit();
-    try installWorkbenchExecution(&workbench);
+    try installControlExecution(&workbench);
 
-    const workspace_id = try workbench.openWorkspace(workbenchTaskInput());
+    const workspace_id = try workbench.openWorkspace(productControlTaskInput());
     try waitCatalogUnavailable(&workbench, workspace_id);
     fake_core.setNextPlan(.controlled);
     const task_id = try workbench.createTaskInWorkspace(
@@ -2642,7 +2642,7 @@ test "Workbench refreshes a Task only from the committed Workspace catalog while
         null,
     );
     _ = try workbench.runTask(task_id, .{ .text = "hold refresh" });
-    try waitWorkbenchSnapshot(
+    try waitControlSnapshot(
         &workbench,
         "\"currentRunPhase\":\"running\"",
     );
@@ -2654,7 +2654,7 @@ test "Workbench refreshes a Task only from the committed Workspace catalog while
         ),
     );
     fake_core.releaseControlled();
-    try waitWorkbenchSnapshot(
+    try waitControlSnapshot(
         &workbench,
         "\"lastRunOutcome\":\"completed\"",
     );
@@ -2680,19 +2680,19 @@ test "Task deletion retries an off-thread Session release failure" {
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
     }
-    var workbench = try workbench_api.Workbench.init(std.testing.allocator, std.testing.io, runtime, .{
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
         .max_tasks = 2,
         .max_runs_per_task = 2,
         .max_tools_per_run = 2,
-    }, workbenchConfiguration());
+    }, productControlConfiguration());
     defer workbench.deinit();
-    try installWorkbenchExecution(&workbench);
+    try installControlExecution(&workbench);
 
-    const task_id = try workbench.createTask(workbenchTaskInput());
+    const task_id = try workbench.createTask(productControlTaskInput());
     try workbench.setTaskArchived(task_id, true);
     fake_core.failNextSessionDestroy();
     try workbench.deleteTask(task_id);
-    try waitWorkbenchSnapshot(&workbench, "\"deletionStatus\":\"failed\"");
+    try waitControlSnapshot(&workbench, "\"deletionStatus\":\"failed\"");
 
     try workbench.deleteTask(task_id);
     try waitTaskDeleted(&workbench, task_id);
@@ -2715,9 +2715,9 @@ test "asynchronous Task deletion commit failure retains a retryable archived rec
     );
     defer std.testing.allocator.free(persistence_storage);
     var persistence = TaskPersistenceProbe{ .storage = persistence_storage };
-    var configuration = workbenchConfiguration();
+    var configuration = productControlConfiguration();
     configuration.task_persistence = persistence.capability();
-    var workbench = try workbench_api.Workbench.init(
+    var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
         runtime,
@@ -2731,13 +2731,13 @@ test "asynchronous Task deletion commit failure retains a retryable archived rec
         configuration,
     );
     defer workbench.deinit();
-    try installWorkbenchExecution(&workbench);
+    try installControlExecution(&workbench);
 
-    const task_id = try workbench.createTask(workbenchTaskInput());
+    const task_id = try workbench.createTask(productControlTaskInput());
     try workbench.setTaskArchived(task_id, true);
     persistence.result = .failed;
     try workbench.deleteTask(task_id);
-    try waitWorkbenchSnapshot(&workbench, "\"deletionStatus\":\"failed\"");
+    try waitControlSnapshot(&workbench, "\"deletionStatus\":\"failed\"");
     try std.testing.expectEqual(
         @as(u64, 1),
         try workbench.taskBindingEpoch(task_id),
@@ -2752,18 +2752,18 @@ test "Task deletion releases an idle Session without blocking the caller" {
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
     }
-    var workbench = try workbench_api.Workbench.init(std.testing.allocator, std.testing.io, runtime, .{
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
         .max_tasks = 1,
         .max_runs_per_task = 1,
         .max_tools_per_run = 1,
-    }, workbenchConfiguration());
+    }, productControlConfiguration());
     defer workbench.deinit();
-    try installWorkbenchExecution(&workbench);
+    try installControlExecution(&workbench);
 
-    const task_id = try workbench.createTask(workbenchTaskInput());
+    const task_id = try workbench.createTask(productControlTaskInput());
     const run_id = try workbench.runTask(task_id, .{ .text = "finish before deletion" });
     try workbench.cancel(task_id, run_id);
-    try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"cancelled\"");
+    try waitControlSnapshot(&workbench, "\"lastRunOutcome\":\"cancelled\"");
     try workbench.setTaskArchived(task_id, true);
     try workbench.deleteTask(task_id);
     try waitTaskDeleted(&workbench, task_id);
@@ -2783,28 +2783,28 @@ test "Workspace removal interrupts live Runs without deleting Task history" {
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
     }
-    var workbench = try workbench_api.Workbench.init(std.testing.allocator, std.testing.io, runtime, .{
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
         .worker_count = 1,
         .queue_capacity = 2,
         .max_workspaces = 1,
         .max_tasks = 1,
         .max_runs_per_task = 1,
         .max_tools_per_run = 1,
-    }, workbenchConfiguration());
+    }, productControlConfiguration());
     defer workbench.deinit();
-    try installWorkbenchExecution(&workbench);
+    try installControlExecution(&workbench);
 
-    const task_id = try workbench.createTask(workbenchTaskInput());
+    const task_id = try workbench.createTask(productControlTaskInput());
     const workspace_id = try workbench.taskWorkspaceId(task_id);
     _ = try workbench.runTask(
         task_id,
         .{ .text = "stop when the workspace is removed" },
     );
-    try waitWorkbenchSnapshot(&workbench, "\"currentRunPhase\":\"running\"");
+    try waitControlSnapshot(&workbench, "\"currentRunPhase\":\"running\"");
 
     try workbench.removeWorkspace(workspace_id);
-    try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"interrupted\"");
-    try waitWorkbenchSnapshot(&workbench, "\"lifecycle\":\"open\"");
+    try waitControlSnapshot(&workbench, "\"lastRunOutcome\":\"interrupted\"");
+    try waitControlSnapshot(&workbench, "\"lifecycle\":\"open\"");
 
     var snapshot_storage: [128 * 1024]u8 = undefined;
     const snapshot = try workbench.writeSnapshot(&snapshot_storage);
@@ -2821,22 +2821,22 @@ test "Workspace removal failure remains a retryable Workspace fact" {
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
     }
-    var workbench = try workbench_api.Workbench.init(std.testing.allocator, std.testing.io, runtime, .{
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
         .worker_count = 1,
         .queue_capacity = 1,
         .max_workspaces = 1,
         .max_tasks = 1,
         .max_runs_per_task = 1,
         .max_tools_per_run = 1,
-    }, workbenchConfiguration());
+    }, productControlConfiguration());
     defer workbench.deinit();
-    try installWorkbenchExecution(&workbench);
+    try installControlExecution(&workbench);
 
-    const task_id = try workbench.createTask(workbenchTaskInput());
+    const task_id = try workbench.createTask(productControlTaskInput());
     const workspace_id = try workbench.taskWorkspaceId(task_id);
     fake_core.failNextSessionDestroy();
     try workbench.removeWorkspace(workspace_id);
-    try waitWorkbenchSnapshot(
+    try waitControlSnapshot(
         &workbench,
         "\"lastRemovalFailure\":\"task_close_failed\"",
     );
@@ -2851,36 +2851,36 @@ test "Workspace removal failure remains a retryable Workspace fact" {
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"workspaces\":[{") != null);
 }
 
-test "Workbench cancel of a completed Run is an idempotent no-op" {
+test "Product Control cancel of a completed Run is an idempotent no-op" {
     fake_core.reset();
     const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
     defer {
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
     }
-    var workbench = try workbench_api.Workbench.init(std.testing.allocator, std.testing.io, runtime, .{
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
         .worker_count = 1,
         .queue_capacity = 1,
         .max_tasks = 1,
         .max_runs_per_task = 1,
         .max_tools_per_run = 1,
-    }, workbenchConfiguration());
+    }, productControlConfiguration());
     defer workbench.deinit();
-    try installWorkbenchExecution(&workbench);
+    try installControlExecution(&workbench);
 
-    const task_id = try workbench.createTask(workbenchTaskInput());
+    const task_id = try workbench.createTask(productControlTaskInput());
     const run_id = try workbench.runTask(
         task_id,
         .{ .text = "finish before cancel arrives" },
     );
-    try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
+    try waitControlSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
     const revision = workbench.currentRevision();
     try workbench.cancel(task_id, run_id);
     try std.testing.expectEqual(revision, workbench.currentRevision());
-    try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
+    try waitControlSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
 }
 
-test "Workbench manual compact uses the active operation lane and appends history" {
+test "Product Control manual compact uses the active operation lane and appends history" {
     fake_core.reset();
     const runtime = try createTestComposition(.{
         .worker_count = 1,
@@ -2891,7 +2891,7 @@ test "Workbench manual compact uses the active operation lane and appends histor
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
     }
-    var workbench = try workbench_api.Workbench.init(
+    var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
         runtime,
@@ -2903,21 +2903,21 @@ test "Workbench manual compact uses the active operation lane and appends histor
             .max_compacts_per_task = 2,
             .max_tools_per_run = 1,
         },
-        workbenchConfiguration(),
+        productControlConfiguration(),
     );
     defer workbench.deinit();
-    try installWorkbenchExecution(&workbench);
+    try installControlExecution(&workbench);
 
-    const task_id = try workbench.createTask(workbenchTaskInput());
+    const task_id = try workbench.createTask(productControlTaskInput());
     try std.testing.expectError(
         error.NoSuchRun,
         workbench.compactTaskAtBinding(task_id, 1),
     );
     _ = try workbench.runTask(task_id, .{ .text = "establish conversation" });
-    try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
+    try waitControlSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
 
     _ = try workbench.compactTaskAtBinding(task_id, 1);
-    try waitWorkbenchSnapshot(&workbench, "\"phase\":\"compacted\"");
+    try waitControlSnapshot(&workbench, "\"phase\":\"compacted\"");
     _ = try workbench.compactTaskAtBinding(task_id, 1);
     try waitTaskSnapshot(
         &workbench,
@@ -2947,7 +2947,7 @@ test "Workbench manual compact uses the active operation lane and appends histor
     ) != null);
 }
 
-test "Workbench compact cancellation and Task deletion wait for the Agent terminal result" {
+test "Product Control compact cancellation and Task deletion wait for the Agent terminal result" {
     fake_core.reset();
     const runtime = try createTestComposition(.{
         .worker_count = 1,
@@ -2958,7 +2958,7 @@ test "Workbench compact cancellation and Task deletion wait for the Agent termin
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
     }
-    var workbench = try workbench_api.Workbench.init(
+    var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
         runtime,
@@ -2970,25 +2970,25 @@ test "Workbench compact cancellation and Task deletion wait for the Agent termin
             .max_compacts_per_task = 2,
             .max_tools_per_run = 1,
         },
-        workbenchConfiguration(),
+        productControlConfiguration(),
     );
     defer workbench.deinit();
-    try installWorkbenchExecution(&workbench);
+    try installControlExecution(&workbench);
 
-    const task_id = try workbench.createTask(workbenchTaskInput());
+    const task_id = try workbench.createTask(productControlTaskInput());
     _ = try workbench.runTask(task_id, .{ .text = "establish conversation" });
-    try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
+    try waitControlSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
     fake_core.setSessionPlan(.controlled);
     fake_core.rearmControlled();
     const operation_id = try workbench.compactTaskAtBinding(task_id, 1);
-    try waitWorkbenchSnapshot(&workbench, "\"phase\":\"compacting\"");
+    try waitControlSnapshot(&workbench, "\"phase\":\"compacting\"");
     try std.testing.expectError(
         error.TaskBusy,
         workbench.runTask(task_id, .{ .text = "must wait" }),
     );
     try workbench.cancelCompact(task_id, operation_id);
-    try waitWorkbenchSnapshot(&workbench, "\"phase\":\"aborted\"");
-    try waitWorkbenchSnapshot(&workbench, "\"activeOperation\":null");
+    try waitControlSnapshot(&workbench, "\"phase\":\"aborted\"");
+    try waitControlSnapshot(&workbench, "\"activeOperation\":null");
 
     try workbench.setTaskArchived(task_id, true);
     try workbench.deleteTask(task_id);
@@ -2999,7 +2999,7 @@ test "Workbench compact cancellation and Task deletion wait for the Agent termin
     try std.testing.expectEqual(@as(usize, 1), abort_calls);
 }
 
-test "Workbench terminal compact result wins a too-late cancellation race" {
+test "Product Control terminal compact result wins a too-late cancellation race" {
     fake_core.reset();
     const runtime = try createTestComposition(.{
         .worker_count = 1,
@@ -3010,7 +3010,7 @@ test "Workbench terminal compact result wins a too-late cancellation race" {
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
     }
-    var workbench = try workbench_api.Workbench.init(
+    var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
         runtime,
@@ -3022,31 +3022,31 @@ test "Workbench terminal compact result wins a too-late cancellation race" {
             .max_compacts_per_task = 1,
             .max_tools_per_run = 1,
         },
-        workbenchConfiguration(),
+        productControlConfiguration(),
     );
     defer workbench.deinit();
-    try installWorkbenchExecution(&workbench);
+    try installControlExecution(&workbench);
 
-    const task_id = try workbench.createTask(workbenchTaskInput());
+    const task_id = try workbench.createTask(productControlTaskInput());
     _ = try workbench.runTask(task_id, .{ .text = "establish conversation" });
-    try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
+    try waitControlSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
     fake_core.setSessionPlan(.controlled);
     fake_core.rearmControlled();
     fake_core.forceNextCompactAbortStatus(wire.STATUS_TOO_LATE);
     const operation_id = try workbench.compactTaskAtBinding(task_id, 1);
-    try waitWorkbenchSnapshot(&workbench, "\"phase\":\"compacting\"");
+    try waitControlSnapshot(&workbench, "\"phase\":\"compacting\"");
     try workbench.cancelCompact(task_id, operation_id);
-    try waitWorkbenchSnapshot(&workbench, "\"phase\":\"stopping\"");
+    try waitControlSnapshot(&workbench, "\"phase\":\"stopping\"");
     fake_core.releaseControlled();
-    try waitWorkbenchSnapshot(&workbench, "\"phase\":\"compacted\"");
-    try waitWorkbenchSnapshot(&workbench, "\"activeOperation\":null");
+    try waitControlSnapshot(&workbench, "\"phase\":\"compacted\"");
+    try waitControlSnapshot(&workbench, "\"activeOperation\":null");
     try std.testing.expectError(
         error.NoSuchCompact,
         workbench.cancelCompact(task_id, operation_id),
     );
 }
 
-test "Workbench cancels a queued compact without entering AgentCore" {
+test "Product Control cancels a queued compact without entering AgentCore" {
     fake_core.reset();
     const runtime = try createTestComposition(.{
         .worker_count = 1,
@@ -3057,7 +3057,7 @@ test "Workbench cancels a queued compact without entering AgentCore" {
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
     }
-    var workbench = try workbench_api.Workbench.init(
+    var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
         runtime,
@@ -3069,13 +3069,13 @@ test "Workbench cancels a queued compact without entering AgentCore" {
             .max_compacts_per_task = 1,
             .max_tools_per_run = 1,
         },
-        workbenchConfiguration(),
+        productControlConfiguration(),
     );
     defer workbench.deinit();
-    try installWorkbenchExecution(&workbench);
+    try installControlExecution(&workbench);
 
-    const blocking_task_id = try workbench.createTask(workbenchTaskInput());
-    const compact_task_id = try workbench.createTask(workbenchTaskInput());
+    const blocking_task_id = try workbench.createTask(productControlTaskInput());
+    const compact_task_id = try workbench.createTask(productControlTaskInput());
     try workbench.renameTask(blocking_task_id, "blocking target");
     try workbench.renameTask(compact_task_id, "compact target");
     _ = try workbench.runTask(blocking_task_id, .{ .text = "first conversation" });
@@ -3097,11 +3097,11 @@ test "Workbench cancels a queued compact without entering AgentCore" {
         blocking_task_id,
         .{ .text = "occupy the only worker" },
     );
-    try waitWorkbenchSnapshot(&workbench, "\"currentRunPhase\":\"running\"");
+    try waitControlSnapshot(&workbench, "\"currentRunPhase\":\"running\"");
     const operation_id = try workbench.compactTaskAtBinding(compact_task_id, 1);
-    try waitWorkbenchSnapshot(&workbench, "\"phase\":\"queued\"");
+    try waitControlSnapshot(&workbench, "\"phase\":\"queued\"");
     try workbench.cancelCompact(compact_task_id, operation_id);
-    try waitWorkbenchSnapshot(&workbench, "\"phase\":\"aborted\"");
+    try waitControlSnapshot(&workbench, "\"phase\":\"aborted\"");
     fake_core.lock();
     const compact_calls = fake_core.compact_calls;
     const compact_abort_calls = fake_core.compact_abort_calls;
@@ -3110,10 +3110,10 @@ test "Workbench cancels a queued compact without entering AgentCore" {
     try std.testing.expectEqual(@as(usize, 0), compact_abort_calls);
 
     try workbench.cancel(blocking_task_id, blocking_run_id);
-    try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"cancelled\"");
+    try waitControlSnapshot(&workbench, "\"lastRunOutcome\":\"cancelled\"");
 }
 
-test "Workbench shutdown terminates a waiting UI Run before joining workers" {
+test "Product Control shutdown terminates a waiting UI Run before joining workers" {
     fake_core.reset();
     fake_core.setNextPlan(.ui_wait);
     const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
@@ -3121,44 +3121,44 @@ test "Workbench shutdown terminates a waiting UI Run before joining workers" {
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
     }
-    var workbench = try workbench_api.Workbench.init(std.testing.allocator, std.testing.io, runtime, .{
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
         .worker_count = 1,
         .queue_capacity = 2,
         .max_tasks = 1,
         .max_runs_per_task = 1,
         .max_tools_per_run = 1,
-    }, workbenchConfiguration());
+    }, productControlConfiguration());
     defer workbench.deinit();
-    try installWorkbenchExecution(&workbench);
+    try installControlExecution(&workbench);
 
-    const task_id = try workbench.createTask(workbenchTaskInput());
+    const task_id = try workbench.createTask(productControlTaskInput());
     _ = try workbench.runTask(task_id, .{ .text = "wait for shutdown" });
-    try waitWorkbenchSnapshot(&workbench, "\"currentRunPhase\":\"waiting_ui\"");
+    try waitControlSnapshot(&workbench, "\"currentRunPhase\":\"waiting_ui\"");
     workbench.shutdownExecutor();
-    try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"interrupted\"");
-    try waitWorkbenchSnapshot(&workbench, "\"continuationAvailable\":false");
+    try waitControlSnapshot(&workbench, "\"lastRunOutcome\":\"interrupted\"");
+    try waitControlSnapshot(&workbench, "\"continuationAvailable\":false");
 }
 
-test "Workbench shutdown rejects new Task admission without creating product state" {
+test "Product Control shutdown rejects new Task admission without creating product state" {
     fake_core.reset();
     const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
     defer {
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
     }
-    var workbench = try workbench_api.Workbench.init(std.testing.allocator, std.testing.io, runtime, .{
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
         .worker_count = 1,
         .queue_capacity = 1,
         .max_tasks = 1,
         .max_runs_per_task = 1,
         .max_tools_per_run = 1,
-    }, workbenchConfiguration());
+    }, productControlConfiguration());
     defer workbench.deinit();
 
     workbench.shutdownExecutor();
     try std.testing.expectError(
         error.ExecutorShuttingDown,
-        workbench.createTask(workbenchTaskInput()),
+        workbench.createTask(productControlTaskInput()),
     );
     try std.testing.expectEqual(@as(u64, 0), workbench.currentRevision());
 
@@ -3175,28 +3175,28 @@ test "late event from a finalized Run is dropped and newer active work continues
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
     }
-    var workbench = try workbench_api.Workbench.init(std.testing.allocator, std.testing.io, runtime, .{
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
         .worker_count = 1,
         .queue_capacity = 1,
         .max_tasks = 1,
         .max_runs_per_task = 2,
         .max_tools_per_run = 1,
-    }, workbenchConfiguration());
+    }, productControlConfiguration());
     defer workbench.deinit();
-    try installWorkbenchExecution(&workbench);
+    try installControlExecution(&workbench);
 
-    const task_id = try workbench.createTask(workbenchTaskInput());
+    const task_id = try workbench.createTask(productControlTaskInput());
     const first_run_id = try workbench.runTask(
         task_id,
         .{ .text = "finish first" },
     );
-    try waitWorkbenchSnapshot(&workbench, "\"currentRunPhase\":\"running\"");
+    try waitControlSnapshot(&workbench, "\"currentRunPhase\":\"running\"");
     fake_core.releaseControlled();
-    try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
+    try waitControlSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
 
     fake_core.rearmControlled();
     _ = try workbench.runTask(task_id, .{ .text = "new active work" });
-    try waitWorkbenchSnapshot(&workbench, "\"currentRunPhase\":\"running\"");
+    try waitControlSnapshot(&workbench, "\"currentRunPhase\":\"running\"");
 
     const encoded = "{\"text_chunk\":\"late\"}";
     var late_event = lifecycle.OwnedCoreEvent{
@@ -3216,5 +3216,5 @@ test "late event from a finalized Run is dropped and newer active work continues
     try std.testing.expect(std.mem.indexOf(u8, open_snapshot, "\"lifecycle\":\"open\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, open_snapshot, "\"currentRunPhase\":\"running\"") != null);
     fake_core.releaseControlled();
-    try waitWorkbenchSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
+    try waitControlSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
 }

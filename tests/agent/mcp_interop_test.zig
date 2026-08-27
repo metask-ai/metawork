@@ -3,7 +3,7 @@ const account_contract = @import("metawork_account_contract");
 const agent = @import("metawork_agent");
 const mcp_platform = @import("metawork_mcp_platform");
 const options = @import("mcp_interop_options");
-const workbench = @import("metawork_workbench");
+const product_control = @import("metawork_product_control");
 const mcp_configuration = @import("metawork_product_mcp").contract;
 const mcp_types = @import("metawork_product_mcp");
 
@@ -237,7 +237,7 @@ fn managementConfiguration(
     };
 }
 
-fn installExecution(workbench_value: *workbench.Workbench) !void {
+fn installExecution(workbench_value: *product_control.Runtime) !void {
     var execution = try account_contract.OwnedExecutionConfig.initOwned(
         std.testing.allocator,
         .anthropic,
@@ -284,7 +284,7 @@ fn installExecution(workbench_value: *workbench.Workbench) !void {
     workbench_value.finishAccountCommitNoFail();
 }
 
-fn shutdownProduct(workbench_value: *workbench.Workbench, runtime: *agent.Runtime) void {
+fn shutdownProduct(workbench_value: *product_control.Runtime, runtime: *agent.Runtime) void {
     workbench_value.shutdownExecutor();
     runtime.shutdown() catch unreachable;
     workbench_value.syncLifecycle();
@@ -292,7 +292,7 @@ fn shutdownProduct(workbench_value: *workbench.Workbench, runtime: *agent.Runtim
     runtime.deinit();
 }
 
-fn waitForMcpSnapshot(workbench_value: *workbench.Workbench, expected: []const u8) !void {
+fn waitForMcpSnapshot(workbench_value: *product_control.Runtime, expected: []const u8) !void {
     var storage: [512 * 1024]u8 = undefined;
     for (0..400) |_| {
         const snapshot = try workbench_value.writeSnapshot(&storage);
@@ -792,7 +792,7 @@ test "MCP product chain reaches new Task authority after add restart refresh and
     )).?;
     var initial_manifest_owned = true;
     errdefer if (initial_manifest_owned) initial_manifest.deinit();
-    var initial_workbench = try workbench.Workbench.init(
+    var initial_workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
         initial_runtime,
@@ -882,7 +882,7 @@ test "MCP product chain reaches new Task authority after add restart refresh and
     errdefer if (restarted_activation_owned) restarted_activation.deinit();
     try std.testing.expectEqual(agent.McpActivationState.ready, restarted_activation.state());
     var refresh_timer: McpRefreshTimerProbe = .{};
-    var restarted_workbench = try workbench.Workbench.init(
+    var restarted_workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
         restarted_runtime,

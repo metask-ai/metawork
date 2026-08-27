@@ -1,7 +1,7 @@
 //! Strict payload records and parsing shared by Bridge handlers.
 
 const std = @import("std");
-const workbench_api = @import("metawork_workbench");
+const product_control = @import("metawork_product_control");
 const max_skill_argument_values: usize = 64;
 
 pub const PermissionChoice = enum {
@@ -16,7 +16,7 @@ pub const RendererBridgeConnect = struct {
     contractRevision: u32,
 };
 pub const EventDisconnect = struct { generation: []const u8 };
-pub const WorkbenchSnapshotChunk = struct { snapshotId: []const u8, offset: []const u8 };
+pub const ProductSnapshotChunk = struct { snapshotId: []const u8, offset: []const u8 };
 pub const Empty = struct {};
 pub const WindowChromeRegion = struct {
     x: f64,
@@ -377,7 +377,7 @@ pub fn parseScheduledTaskInstruction(value: std.json.Value) ![]const u8 {
 
 pub fn parseScheduledTaskRecurrence(
     value: std.json.Value,
-) !workbench_api.ScheduledTaskRecurrence {
+) !product_control.ScheduledTaskRecurrence {
     const object = switch (value) {
         .object => |object| object,
         else => return error.InvalidBridgePayload,

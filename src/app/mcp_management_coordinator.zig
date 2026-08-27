@@ -1,13 +1,13 @@
-//! Application-owned MCP management effects. Workbench remains the sole
+//! Application-owned MCP management effects. Product Control remains the sole
 //! product-state owner; this coordinator sequences native confirmation,
 //! secure capture, browser, loopback, bounded network workers and isolated
-//! connection-test Runtimes around the Workbench transaction seams.
+//! connection-test Runtimes around the Product Control transaction seams.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const agent = @import("metawork_agent");
-const workbench = @import("metawork_workbench");
 const control_ports = @import("metawork_product_control_ports");
+const test_control = if (builtin.is_test) @import("lifecycle_fixture").product_control else struct {};
 const product_mcp = @import("metawork_product_mcp");
 const mcp_configuration = product_mcp.contract;
 const mcp_types = product_mcp;
@@ -1786,7 +1786,7 @@ test "MCP configuration apply publishes failed when preparation cannot start" {
     var manifest_owned = true;
     defer if (manifest_owned) manifest.deinit();
     var agent_runtime: agent.Runtime = undefined;
-    var workbench_owner = try workbench.Workbench.init(
+    var workbench_owner = try test_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &agent_runtime,
@@ -2000,7 +2000,7 @@ test "MCP Application coordinator completes dynamic registration and OAuth loopb
     defer if (manifest_owned) manifest.deinit();
     var agent_runtime: agent.Runtime = undefined;
     var identity_generator: IdentityGenerator = .{};
-    var workbench_owner = try workbench.Workbench.init(
+    var workbench_owner = try test_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &agent_runtime,

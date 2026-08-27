@@ -1,11 +1,11 @@
 //! Concrete Renderer command boundary. This module owns command registration,
 //! authority checks, connection/grant state, payload decoding, response
-//! encoding, and the only Bridge -> Workbench product calls.
+//! encoding, and the only Bridge -> Product Control calls.
 
 const std = @import("std");
 const native_sdk = @import("native_sdk");
 const account_contract = @import("metawork_account_contract");
-const workbench_api = @import("metawork_workbench");
+const product_control = @import("metawork_product_control");
 const mcp_configuration = @import("metawork_product_mcp").contract;
 const skill_management = @import("metawork_product_skill").management;
 const commands = @import("commands.zig");
@@ -193,7 +193,7 @@ pub const Dispatcher = struct {
         request_id_len: usize = 0,
     };
 
-    workbench: ?*workbench_api.Workbench,
+    control: ?*product_control.Runtime,
     account_commands: account_contract.AccountCommandSink,
     platform: Platform,
     automation: AutomationAuthority,
@@ -215,7 +215,7 @@ pub const Dispatcher = struct {
 
     pub fn init(
         allocator: std.mem.Allocator,
-        workbench: *workbench_api.Workbench,
+        control: *product_control.Runtime,
         account_commands: account_contract.AccountCommandSink,
         platform: Platform,
         automation: AutomationAuthority,
@@ -223,7 +223,7 @@ pub const Dispatcher = struct {
     ) std.mem.Allocator.Error!Dispatcher {
         std.debug.assert(bootstrap_window_id != 0);
         return .{
-            .workbench = workbench,
+            .control = control,
             .account_commands = account_commands,
             .platform = platform,
             .automation = automation,
@@ -239,7 +239,7 @@ pub const Dispatcher = struct {
         self.grants.invalidate();
         self.skill_grants.invalidate();
         self.window_chrome_connected = false;
-        self.workbench = null;
+        self.control = null;
         self.delivery.deinitOwnedBuffers();
         self.* = undefined;
     }
@@ -362,16 +362,16 @@ pub const Dispatcher = struct {
         self.callbacks.assertQuiescent();
     }
 
-    pub fn detachWorkbench(self: *Dispatcher) void {
+    pub fn detachProductControl(self: *Dispatcher) void {
         self.mcp_management_host = null;
-        self.workbench = null;
+        self.control = null;
     }
 
     pub fn attachMcpManagementHost(
         self: *Dispatcher,
         host: McpManagementHost,
     ) void {
-        std.debug.assert(self.workbench != null);
+        std.debug.assert(self.control != null);
         std.debug.assert(self.mcp_management_host == null);
         self.mcp_management_host = host;
     }
@@ -394,8 +394,8 @@ pub const Dispatcher = struct {
         return self.delivery.onTimer(timer_id);
     }
 
-    pub fn emitWorkbenchChanged(self: *Dispatcher) !void {
-        const workbench = self.workbench orelse return;
+    pub fn emitProductChanged(self: *Dispatcher) !void {
+        const workbench = self.control orelse return;
         const revision = workbench.currentRevision();
         _ = self.delivery.deliverRevision(
             revision,
@@ -403,16 +403,16 @@ pub const Dispatcher = struct {
             self.transport(),
         ) catch |err| switch (err) {
             error.RevisionRetryExhausted, error.RevisionRetryUnavailable => {
-                const revision_decision = workbench_api.decideTransportFailure(.{
+                const revision_decision = product_control.decideTransportFailure(.{
                     .stage = .revision_delivery,
                 });
-                const connection_decision = workbench_api.decideTransportFailure(.{
+                const connection_decision = product_control.decideTransportFailure(.{
                     .stage = .connection_generation,
                 });
                 std.debug.assert(revision_decision == .retry);
                 std.debug.assert(connection_decision == .detach_renderer);
                 self.breakConnection();
-                return error.WorkbenchRevisionDeliveryUnavailable;
+                return error.RuntimeRevisionDeliveryUnavailable;
             },
             else => return err,
         };
@@ -692,7 +692,7 @@ pub const Dispatcher = struct {
             invocation.source.window_id,
             .{ .context = self, .write_fn = writeSnapshot },
         ) catch |err| {
-            std.debug.assert(workbench_api.decideTransportFailure(.{
+            std.debug.assert(product_control.decideTransportFailure(.{
                 .stage = .snapshot_transport,
             }) == .retry);
             return err;
@@ -710,7 +710,7 @@ pub const Dispatcher = struct {
         defer callback.deinit();
         try self.requireWindow(invocation.source.window_id);
         var parsed = try handlers.parsePayload(
-            handlers.WorkbenchSnapshotChunk,
+            handlers.RuntimeSnapshotChunk,
             invocation.request.payload,
         );
         defer parsed.deinit();
@@ -770,7 +770,7 @@ pub const Dispatcher = struct {
             respondFilePreview(responder, invocation.request.id, .failed, "", false, false);
             return;
         };
-        const workbench = self.requireWorkbench() catch {
+        const workbench = self.requireProductControl() catch {
             respondFilePreview(responder, invocation.request.id, .failed, "", false, false);
             return;
         };
@@ -818,13 +818,13 @@ pub const Dispatcher = struct {
         return null;
     }
 
-    pub fn filePreviewSink(self: *Dispatcher) workbench_api.FilePreviewSink {
+    pub fn filePreviewSink(self: *Dispatcher) product_control.FilePreviewSink {
         return .{ .context = self, .complete_fn = completeFilePreviewFromSink };
     }
 
     fn completeFilePreviewFromSink(
         context: *anyopaque,
-        result: workbench_api.FilePreviewResult,
+        result: product_control.FilePreviewResult,
     ) void {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
         self.completeFilePreview(result);
@@ -832,7 +832,7 @@ pub const Dispatcher = struct {
 
     fn completeFilePreview(
         self: *Dispatcher,
-        result: workbench_api.FilePreviewResult,
+        result: product_control.FilePreviewResult,
     ) void {
         for (&self.preview_in_flight) |*slot| {
             if (!slot.active or slot.completion_id != result.completion_id) continue;
@@ -874,7 +874,7 @@ pub const Dispatcher = struct {
     fn respondFilePreview(
         responder: native_sdk.bridge.AsyncResponder,
         request_id: []const u8,
-        state: workbench_api.FilePreviewState,
+        state: product_control.FilePreviewState,
         content: []const u8,
         truncated: bool,
         redacted: bool,
@@ -1296,7 +1296,7 @@ pub const Dispatcher = struct {
             self.delivery.connectedGeneration() orelse return error.NoConnection,
             &path_storage,
         );
-        const workspace_id = try (try self.requireWorkbench()).openWorkspace(.{
+        const workspace_id = try (try self.requireProductControl()).openWorkspace(.{
             .workspace_root = consumed_path,
             .trust = if (self.automation.active())
                 .{ .temporary = consumed_path }
@@ -1318,7 +1318,7 @@ pub const Dispatcher = struct {
         try self.requireWindow(invocation.source.window_id);
         var parsed = try handlers.parsePayload(handlers.TaskCreate, invocation.request.payload);
         defer parsed.deinit();
-        const workspace_request: workbench_api.TaskWorkspaceRequest = if (std.mem.eql(
+        const workspace_request: product_control.TaskWorkspaceRequest = if (std.mem.eql(
             u8,
             parsed.value.workspace.kind,
             "automatic",
@@ -1351,7 +1351,7 @@ pub const Dispatcher = struct {
             try handlers.parseWireId(revision)
         else
             null;
-        const workbench = try self.requireWorkbench();
+        const workbench = try self.requireProductControl();
         const task_id = workbench.createTaskForWorkspace(
             workspace_request,
             execution_generation,
@@ -1388,7 +1388,7 @@ pub const Dispatcher = struct {
         defer input.deinit();
         const task_id = try handlers.parseWireId(parsed.value.taskId);
         const binding_epoch = try handlers.parseWireId(parsed.value.expectedBindingEpoch);
-        const workbench_input: workbench_api.TaskRunInput = switch (input.value) {
+        const workbench_input: product_control.TaskRunInput = switch (input.value) {
             .text => |text| text_input: {
                 if (text.len == 0) return error.EmptyPrompt;
                 break :text_input .{ .text = text };
@@ -1404,7 +1404,7 @@ pub const Dispatcher = struct {
                 } };
             },
         };
-        const run_id = (try self.requireWorkbench()).runTaskAtBinding(
+        const run_id = (try self.requireProductControl()).runTaskAtBinding(
             task_id,
             binding_epoch,
             workbench_input,
@@ -1448,7 +1448,7 @@ pub const Dispatcher = struct {
         const catalog_generation = try handlers.parseWireId(
             parsed.value.expectedCatalogGeneration,
         );
-        (try self.requireWorkbench()).selectTaskModel(
+        (try self.requireProductControl()).selectTaskModel(
             task_id,
             parsed.value.expectedModel,
             catalog_generation,
@@ -1492,7 +1492,7 @@ pub const Dispatcher = struct {
         const binding_epoch = try handlers.parseWireId(
             parsed.value.expectedBindingEpoch,
         );
-        const operation_id = (try self.requireWorkbench()).compactTaskAtBinding(
+        const operation_id = (try self.requireProductControl()).compactTaskAtBinding(
             task_id,
             binding_epoch,
         ) catch |err| {
@@ -1534,7 +1534,7 @@ pub const Dispatcher = struct {
         const binding_epoch = try handlers.parseWireId(
             parsed.value.expectedBindingEpoch,
         );
-        const attempt_id = (try self.requireWorkbench()).restoreTaskConversation(
+        const attempt_id = (try self.requireProductControl()).restoreTaskConversation(
             task_id,
             binding_epoch,
         ) catch |err| {
@@ -1574,7 +1574,7 @@ pub const Dispatcher = struct {
         defer parsed.deinit();
         const task_id = try handlers.parseWireId(parsed.value.taskId);
         const operation_id = try handlers.parseWireId(parsed.value.operationId);
-        try (try self.requireWorkbench()).cancelCompact(task_id, operation_id);
+        try (try self.requireProductControl()).cancelCompact(task_id, operation_id);
         self.notifyCommitted();
         return std.fmt.bufPrint(
             output,
@@ -1601,7 +1601,7 @@ pub const Dispatcher = struct {
         const expected_epoch = try handlers.parseWireId(
             parsed.value.expectedWorkspaceEpoch,
         );
-        const workbench = try self.requireWorkbench();
+        const workbench = try self.requireProductControl();
         workbench.refreshWorkspaceCatalog(
             workspace_id,
             expected_epoch,
@@ -1640,7 +1640,7 @@ pub const Dispatcher = struct {
             invocation.request.payload,
         );
         defer parsed.deinit();
-        (try self.requireWorkbench()).refreshSkillCatalog() catch |err| {
+        (try self.requireProductControl()).refreshSkillCatalog() catch |err| {
             if (catalogRefreshRejection(err)) |reason|
                 return encodeSkillCatalogRefreshResult(output, false, reason);
             return err;
@@ -1666,7 +1666,7 @@ pub const Dispatcher = struct {
         if (parsed.value.skillPolicyKey.len == 0 or
             parsed.value.expectedCatalogRevision.len == 0)
             return error.InvalidBridgePayload;
-        const state: workbench_api.SkillEnablementState =
+        const state: product_control.SkillEnablementState =
             if (std.mem.eql(u8, parsed.value.state, "enabled"))
                 .enabled
             else if (std.mem.eql(u8, parsed.value.state, "disabled"))
@@ -1675,7 +1675,7 @@ pub const Dispatcher = struct {
                 .inherit
             else
                 return error.InvalidBridgePayload;
-        const scope: workbench_api.SkillEnablementScope =
+        const scope: product_control.SkillEnablementScope =
             if (std.mem.eql(u8, parsed.value.scope, "personal")) personal: {
                 if (parsed.value.workspaceId != null or
                     parsed.value.expectedWorkspaceEpoch != null or
@@ -1692,7 +1692,7 @@ pub const Dispatcher = struct {
                     .expected_workspace_epoch = try handlers.parseWireId(workspace_epoch),
                 } };
             } else return error.InvalidBridgePayload;
-        const next_revision = (try self.requireWorkbench()).setSkillEnabled(.{
+        const next_revision = (try self.requireProductControl()).setSkillEnabled(.{
             .scope = scope,
             .skill_policy_key = parsed.value.skillPolicyKey,
             .state = state,
@@ -1766,10 +1766,10 @@ pub const Dispatcher = struct {
             selected.paths.len > skill_grant.max_path_bytes)
             return error.InvalidBridgePayload;
         var preview = switch (source_kind) {
-            .local_package => try (try self.requireWorkbench()).previewSkillArchive(
+            .local_package => try (try self.requireProductControl()).previewSkillArchive(
                 selected.paths,
             ),
-            .local_directory => try (try self.requireWorkbench()).previewSkillDirectory(
+            .local_directory => try (try self.requireProductControl()).previewSkillDirectory(
                 selected.paths,
             ),
         };
@@ -1850,7 +1850,7 @@ pub const Dispatcher = struct {
             .local_package => .local_package,
             .local_directory => .local_directory,
         };
-        const input: workbench_api.SkillInstallInput = .{
+        const input: product_control.SkillInstallInput = .{
             .source_kind = source_kind,
             .scope = scope,
             .expected_invocation_name = consumed.invocationName(),
@@ -1858,11 +1858,11 @@ pub const Dispatcher = struct {
             .allow_replace = parsed.value.allowReplace,
         };
         const result = switch (consumed.source_kind) {
-            .local_package => (try self.requireWorkbench()).installSkillArchive(
+            .local_package => (try self.requireProductControl()).installSkillArchive(
                 consumed.path(),
                 input,
             ),
-            .local_directory => (try self.requireWorkbench()).installSkillDirectory(
+            .local_directory => (try self.requireProductControl()).installSkillDirectory(
                 consumed.path(),
                 input,
             ),
@@ -1925,13 +1925,13 @@ pub const Dispatcher = struct {
             "invalid_preview",
         );
         const result = switch (consumed.source_kind) {
-            .local_package => (try self.requireWorkbench()).reimportSkillArchive(
+            .local_package => (try self.requireProductControl()).reimportSkillArchive(
                 install_id,
                 consumed.path(),
                 consumed.invocationName(),
                 consumed.content_hash,
             ),
-            .local_directory => (try self.requireWorkbench()).reimportSkillDirectory(
+            .local_directory => (try self.requireProductControl()).reimportSkillDirectory(
                 install_id,
                 consumed.path(),
                 consumed.invocationName(),
@@ -2001,7 +2001,7 @@ pub const Dispatcher = struct {
                 false,
                 "asset_unavailable",
             );
-        const workbench = try self.requireWorkbench();
+        const workbench = try self.requireProductControl();
         const result = switch (operation) {
             .uninstall => workbench.uninstallSkill(install_id),
             .retry => workbench.retrySkillVerification(install_id),
@@ -2058,7 +2058,7 @@ pub const Dispatcher = struct {
         if (selected.count != 1 or selected.paths.len == 0 or
             selected.paths.len > skill_grant.max_path_bytes)
             return error.InvalidBridgePayload;
-        const result = (try self.requireWorkbench()).exportSkill(
+        const result = (try self.requireProductControl()).exportSkill(
             install_id,
             selected.paths,
         ) catch |err| return encodeSkillExportResult(
@@ -2086,7 +2086,7 @@ pub const Dispatcher = struct {
         defer parsed.deinit();
         const install_id = parseSkillInstallId(parsed.value.installId) catch
             return encodeSkillDetailUnavailable(output, "asset_unavailable");
-        var detail = (try self.requireWorkbench()).readSkillDefinition(
+        var detail = (try self.requireProductControl()).readSkillDefinition(
             install_id,
         ) catch |err| return encodeSkillDetailUnavailable(
             output,
@@ -2127,7 +2127,7 @@ pub const Dispatcher = struct {
             parsed.value.environmentNames,
         );
         const expected = try handlers.parseWireId(parsed.value.expectedDesiredGeneration);
-        const workbench = try self.requireWorkbench();
+        const workbench = try self.requireProductControl();
         const outcome = try workbench.createMcpStdioServer(expected, .{
             .display_name = parsed.value.displayName,
             .negotiation = parsed.value.negotiation,
@@ -2163,7 +2163,7 @@ pub const Dispatcher = struct {
             parsed.value.headerNames,
         );
         const expected = try handlers.parseWireId(parsed.value.expectedDesiredGeneration);
-        const workbench = try self.requireWorkbench();
+        const workbench = try self.requireProductControl();
         const outcome = if (std.mem.eql(u8, parsed.value.authMode, "oauth")) oauth: {
             if (parsed.value.headerNames.len != 0) return error.InvalidBridgePayload;
             break :oauth try workbench.createMcpOauthHttpServer(expected, .{
@@ -2210,7 +2210,7 @@ pub const Dispatcher = struct {
             parsed.value.environmentNames,
         );
         const expected = try handlers.parseWireId(parsed.value.expectedDesiredGeneration);
-        const workbench = try self.requireWorkbench();
+        const workbench = try self.requireProductControl();
         if (workbench.mcpServerOperationBusy(parsed.value.serverId))
             return encodeMcpTypedOutcome(output, "busy", null);
         const outcome = try workbench.updateMcpStdioConnection(expected, .{
@@ -2249,7 +2249,7 @@ pub const Dispatcher = struct {
             parsed.value.headerNames,
         );
         const expected = try handlers.parseWireId(parsed.value.expectedDesiredGeneration);
-        const workbench = try self.requireWorkbench();
+        const workbench = try self.requireProductControl();
         if (workbench.mcpServerOperationBusy(parsed.value.serverId))
             return encodeMcpTypedOutcome(output, "busy", null);
         const outcome = if (std.mem.eql(u8, parsed.value.authMode, "oauth")) oauth: {
@@ -2293,7 +2293,7 @@ pub const Dispatcher = struct {
         );
         defer parsed.deinit();
         const expected = try handlers.parseWireId(parsed.value.expectedDesiredGeneration);
-        const workbench = try self.requireWorkbench();
+        const workbench = try self.requireProductControl();
         if (workbench.mcpServerOperationBusy(parsed.value.serverId))
             return encodeMcpTypedOutcome(output, "busy", null);
         const outcome = try workbench.renameMcpServer(expected, .{
@@ -2315,7 +2315,7 @@ pub const Dispatcher = struct {
         var parsed = try handlers.parsePayload(handlers.McpServerIdentity, invocation.request.payload);
         defer parsed.deinit();
         const expected = try handlers.parseWireId(parsed.value.expectedDesiredGeneration);
-        const workbench = try self.requireWorkbench();
+        const workbench = try self.requireProductControl();
         if (workbench.mcpServerOperationBusy(parsed.value.serverId))
             return encodeMcpTypedOutcome(output, "busy", null);
         const host = self.mcp_management_host orelse
@@ -2340,7 +2340,7 @@ pub const Dispatcher = struct {
         );
         defer parsed.deinit();
         const expected = try handlers.parseWireId(parsed.value.expectedDesiredGeneration);
-        const workbench = try self.requireWorkbench();
+        const workbench = try self.requireProductControl();
         if (workbench.mcpServerOperationBusy(parsed.value.serverId))
             return encodeMcpTypedOutcome(output, "busy", null);
         const slot: McpSecretSlot = if (std.mem.eql(u8, parsed.value.slot.kind, "stdio_environment"))
@@ -2375,7 +2375,7 @@ pub const Dispatcher = struct {
         var parsed = try handlers.parsePayload(handlers.McpServerIdentity, invocation.request.payload);
         defer parsed.deinit();
         const expected = try handlers.parseWireId(parsed.value.expectedDesiredGeneration);
-        const workbench = try self.requireWorkbench();
+        const workbench = try self.requireProductControl();
         if (workbench.mcpServerOperationBusy(parsed.value.serverId)) return std.fmt.bufPrint(
             output,
             "{{\"outcome\":\"busy\",\"operationId\":null}}",
@@ -2442,7 +2442,7 @@ pub const Dispatcher = struct {
         );
         defer parsed.deinit();
         const expected = try handlers.parseWireId(parsed.value.expectedDesiredGeneration);
-        const workbench = try self.requireWorkbench();
+        const workbench = try self.requireProductControl();
         if (workbench.mcpServerOperationBusy(parsed.value.serverId))
             return encodeMcpTypedOutcome(output, "busy", null);
         const outcome = try workbench.setMcpServerEnabled(expected, .{
@@ -2469,7 +2469,7 @@ pub const Dispatcher = struct {
         defer parsed.deinit();
         try validateMcpToolNames(parsed.value.toolNames);
         const expected = try handlers.parseWireId(parsed.value.expectedDesiredGeneration);
-        const workbench = try self.requireWorkbench();
+        const workbench = try self.requireProductControl();
         if (workbench.mcpServerOperationBusy(parsed.value.serverId))
             return encodeMcpTypedOutcome(output, "busy", null);
         const outcome = try workbench.setMcpAllowedTools(expected, .{
@@ -2494,7 +2494,7 @@ pub const Dispatcher = struct {
         );
         defer parsed.deinit();
         const expected = try handlers.parseWireId(parsed.value.expectedDesiredGeneration);
-        const workbench = try self.requireWorkbench();
+        const workbench = try self.requireProductControl();
         if (workbench.mcpServerOperationBusy(parsed.value.serverId))
             return encodeMcpTypedOutcome(output, "busy", null);
         const outcome = try workbench.removeMcpServer(expected, parsed.value.serverId);
@@ -2512,7 +2512,7 @@ pub const Dispatcher = struct {
         try self.requireWindow(invocation.source.window_id);
         var parsed = try handlers.parsePayload(handlers.Empty, invocation.request.payload);
         defer parsed.deinit();
-        const workbench = try self.requireWorkbench();
+        const workbench = try self.requireProductControl();
         workbench.refreshMcpCatalog() catch |err| {
             const outcome: ?[]const u8 = if (err == error.CatalogLoading)
                 "busy"
@@ -2576,7 +2576,7 @@ pub const Dispatcher = struct {
 
     fn finishMcpMutation(
         self: *Dispatcher,
-        workbench: *workbench_api.Workbench,
+        workbench: *product_control.Runtime,
         output: []u8,
         outcome: mcp_configuration.ManagementOutcome,
     ) ![]const u8 {
@@ -2612,7 +2612,7 @@ pub const Dispatcher = struct {
 
     fn finishMcpHostMutation(
         self: *Dispatcher,
-        workbench: *workbench_api.Workbench,
+        workbench: *product_control.Runtime,
         output: []u8,
         outcome: McpHostOutcome,
     ) ![]const u8 {
@@ -2636,7 +2636,7 @@ pub const Dispatcher = struct {
 
     fn startMcpConfigurationApplyIfNeeded(
         self: *Dispatcher,
-        workbench: *workbench_api.Workbench,
+        workbench: *product_control.Runtime,
     ) void {
         const inspection = workbench.inspectMcpDesiredConfiguration() orelse return;
         if (inspection.health != .ready or
@@ -2756,7 +2756,7 @@ pub const Dispatcher = struct {
         const expected_binding_epoch = try handlers.parseWireId(
             parsed.value.expectedBindingEpoch,
         );
-        (try self.requireWorkbench()).refreshTaskCatalog(
+        (try self.requireProductControl()).refreshTaskCatalog(
             task_id,
             expected_binding_epoch,
         ) catch |err| {
@@ -2789,7 +2789,7 @@ pub const Dispatcher = struct {
         defer parsed.deinit();
         const task_id = try handlers.parseWireId(parsed.value.taskId);
         const run_id = try handlers.parseWireId(parsed.value.runId);
-        try (try self.requireWorkbench()).cancel(task_id, run_id);
+        try (try self.requireProductControl()).cancel(task_id, run_id);
         self.notifyCommitted();
         return std.fmt.bufPrint(
             output,
@@ -2814,7 +2814,7 @@ pub const Dispatcher = struct {
         const run_id = try handlers.parseWireId(request.runId);
         const request_id = try handlers.parseWireId(request.requestId);
         const response = try decodeUiResponse(request);
-        try (try self.requireWorkbench()).respondUi(task_id, run_id, request_id, response);
+        try (try self.requireProductControl()).respondUi(task_id, run_id, request_id, response);
         self.notifyCommitted();
         return std.fmt.bufPrint(
             output,
@@ -2831,7 +2831,7 @@ pub const Dispatcher = struct {
         var parsed = try handlers.parsePayload(handlers.TaskRename, invocation.request.payload);
         defer parsed.deinit();
         const task_id = try handlers.parseWireId(parsed.value.taskId);
-        try (try self.requireWorkbench()).renameTask(task_id, parsed.value.title);
+        try (try self.requireProductControl()).renameTask(task_id, parsed.value.title);
         self.notifyCommitted();
         return std.fmt.bufPrint(output, "{{\"taskId\":\"{d}\",\"renamed\":true}}", .{task_id});
     }
@@ -2844,7 +2844,7 @@ pub const Dispatcher = struct {
         var parsed = try handlers.parsePayload(handlers.TaskArchive, invocation.request.payload);
         defer parsed.deinit();
         const task_id = try handlers.parseWireId(parsed.value.taskId);
-        try (try self.requireWorkbench()).setTaskArchived(task_id, parsed.value.archived);
+        try (try self.requireProductControl()).setTaskArchived(task_id, parsed.value.archived);
         self.notifyCommitted();
         return std.fmt.bufPrint(
             output,
@@ -2861,7 +2861,7 @@ pub const Dispatcher = struct {
         var parsed = try handlers.parsePayload(handlers.TaskDelete, invocation.request.payload);
         defer parsed.deinit();
         const task_id = try handlers.parseWireId(parsed.value.taskId);
-        try (try self.requireWorkbench()).deleteTask(task_id);
+        try (try self.requireProductControl()).deleteTask(task_id);
         self.notifyCommitted();
         return std.fmt.bufPrint(output, "{{\"taskId\":\"{d}\",\"deleting\":true}}", .{task_id});
     }
@@ -2890,7 +2890,7 @@ pub const Dispatcher = struct {
             instruction,
             parsed.value.recurrence,
         );
-        const workbench = try self.requireWorkbench();
+        const workbench = try self.requireProductControl();
         const scheduled_task_id = try workbench.createScheduledTask(definition);
         const epoch = try workbench.scheduledTaskEpoch(scheduled_task_id);
         self.notifyCommitted();
@@ -2928,7 +2928,7 @@ pub const Dispatcher = struct {
             instruction,
             parsed.value.recurrence,
         );
-        const workbench = try self.requireWorkbench();
+        const workbench = try self.requireProductControl();
         try workbench.updateScheduledTask(
             scheduled_task_id,
             expected_epoch,
@@ -2959,7 +2959,7 @@ pub const Dispatcher = struct {
         defer parsed.deinit();
         const id = try handlers.parseWireId(parsed.value.scheduledTaskId);
         const epoch = try handlers.parseWireId(parsed.value.expectedEpoch);
-        const workbench = try self.requireWorkbench();
+        const workbench = try self.requireProductControl();
         try workbench.setScheduledTaskEnabled(id, epoch, parsed.value.enabled);
         const next_epoch = try workbench.scheduledTaskEpoch(id);
         self.notifyCommitted();
@@ -2986,7 +2986,7 @@ pub const Dispatcher = struct {
         defer parsed.deinit();
         const id = try handlers.parseWireId(parsed.value.scheduledTaskId);
         const epoch = try handlers.parseWireId(parsed.value.expectedEpoch);
-        const task_id = try (try self.requireWorkbench()).runScheduledTaskNow(
+        const task_id = try (try self.requireProductControl()).runScheduledTaskNow(
             id,
             epoch,
         );
@@ -3014,7 +3014,7 @@ pub const Dispatcher = struct {
         defer parsed.deinit();
         const id = try handlers.parseWireId(parsed.value.scheduledTaskId);
         const epoch = try handlers.parseWireId(parsed.value.expectedEpoch);
-        try (try self.requireWorkbench()).deleteScheduledTask(id, epoch);
+        try (try self.requireProductControl()).deleteScheduledTask(id, epoch);
         self.notifyCommitted();
         return std.fmt.bufPrint(
             output,
@@ -3044,8 +3044,8 @@ pub const Dispatcher = struct {
             return error.InvalidBridgeThread;
     }
 
-    fn requireWorkbench(self: *Dispatcher) !*workbench_api.Workbench {
-        return self.workbench orelse error.RuntimeUnavailable;
+    fn requireProductControl(self: *Dispatcher) !*product_control.Runtime {
+        return self.control orelse error.RuntimeUnavailable;
     }
 
     fn notifyCommitted(self: *Dispatcher) void {
@@ -3100,7 +3100,7 @@ pub const Dispatcher = struct {
 
     fn writeSnapshot(context: ?*anyopaque, output: []u8) anyerror![]const u8 {
         const self: *Dispatcher = @ptrCast(@alignCast(context.?));
-        return (try self.requireWorkbench()).writeSnapshot(output);
+        return (try self.requireProductControl()).writeSnapshot(output);
     }
 };
 
@@ -3347,7 +3347,7 @@ fn scheduledTaskDefinition(
     execution_generation_wire: []const u8,
     instruction: []const u8,
     recurrence_value: std.json.Value,
-) !workbench_api.ScheduledTaskDefinitionInput {
+) !product_control.ScheduledTaskDefinitionInput {
     return .{
         .title = title,
         .expected_execution_generation = try handlers.parseWireId(execution_generation_wire),
@@ -3583,7 +3583,7 @@ fn encodeSkillDetailUnavailable(output: []u8, reason: []const u8) ![]const u8 {
     return writer.buffered();
 }
 
-fn decodeUiResponse(request: handlers.UiResponseRequest) !workbench_api.UiResponse {
+fn decodeUiResponse(request: handlers.UiResponseRequest) !product_control.UiResponse {
     if (std.mem.eql(u8, request.kind, "permission")) {
         if (request.permission == null) return error.InvalidUiResponse;
         const choice = handlers.permissionChoice(request.permission.?) orelse
@@ -3656,7 +3656,7 @@ test "permission command ingress accepts AgentCore Session choices" {
         .permission = "allow_once",
     });
     try std.testing.expectEqual(
-        workbench_api.PermissionChoice.allow_once,
+        product_control.PermissionChoice.allow_once,
         allow_once.permission,
     );
 
@@ -3668,7 +3668,7 @@ test "permission command ingress accepts AgentCore Session choices" {
         .permission = "allow_session",
     });
     try std.testing.expectEqual(
-        workbench_api.PermissionChoice.allow_session,
+        product_control.PermissionChoice.allow_session,
         allow_session.permission,
     );
 
@@ -3680,7 +3680,7 @@ test "permission command ingress accepts AgentCore Session choices" {
         .permission = "deny_once",
     });
     try std.testing.expectEqual(
-        workbench_api.PermissionChoice.deny_once,
+        product_control.PermissionChoice.deny_once,
         deny_once.permission,
     );
 
@@ -3692,7 +3692,7 @@ test "permission command ingress accepts AgentCore Session choices" {
         .permission = "deny_session",
     });
     try std.testing.expectEqual(
-        workbench_api.PermissionChoice.deny_session,
+        product_control.PermissionChoice.deny_session,
         deny_session.permission,
     );
 
@@ -4070,14 +4070,14 @@ test "Dispatcher validates authority before domain calls and preserves committed
 
     fixture.fake_core.reset();
     const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
-    var workbench = try workbench_api.Workbench.init(
+    var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
         runtime,
         .{ .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 },
-        fixture.workbenchConfiguration(),
+        fixture.productControlConfiguration(),
     );
-    try fixture.installWorkbenchExecution(&workbench);
+    try fixture.installProductControlExecution(&workbench);
     const initial_revision = workbench.currentRevision();
     var harness = Harness{};
     var dispatcher = try Dispatcher.init(

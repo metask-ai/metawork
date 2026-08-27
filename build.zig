@@ -63,7 +63,7 @@ pub fn build(b: *std.Build) void {
     addMcpPlatformTests(b, test_modules, bundle.link_libc);
     addMcpOauthTests(b, test_modules, bundle.link_libc);
     addMcpAppTests(b, test_modules, bundle.link_libc);
-    addWorkbenchMcpTests(b, test_modules, bundle.link_libc);
+    addProductControlMcpTests(b, test_modules, bundle.link_libc);
     artifacts.tests.step.dependOn(addMcpInteropTests(
         b,
         test_modules,
@@ -104,7 +104,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-agent-catalog", .root_module = test_modules.agent_catalog },
         .{ .name = "metawork-agent-checkpoint", .root_module = test_modules.agent_checkpoint },
         .{ .name = "metawork-agent-session", .root_module = test_modules.agent_session },
-        .{ .name = "metawork-workbench", .root_module = test_modules.workbench_projection },
+        .{ .name = "metawork-product-control", .root_module = test_modules.product_control_runtime },
         .{ .name = "metawork-workbench-executor", .root_module = test_modules.workbench_executor },
         .{ .name = "metawork-automatic-workspace-allocator", .root_module = test_modules.workbench_automatic_workspace_allocator },
         .{ .name = "metawork-scheduled-task-persistence", .root_module = test_modules.workbench_scheduled_persistence },
@@ -184,7 +184,7 @@ fn addLifecycleTests(
     const roots = [_][]const u8{
         "tests/agent/lifecycle_test.zig",
         "tests/agent/event_pump_test.zig",
-        "tests/workbench/executor_lifecycle_test.zig",
+        "tests/product/control_lifecycle_test.zig",
         "tests/integration/lifecycle/lifecycle_test.zig",
     };
     for (roots) |root| {
@@ -207,7 +207,7 @@ fn addLifecycleTests(
     }
 
     const source_tests = b.addTest(.{
-        .root_module = modules.workbench_projection,
+        .root_module = modules.product_control_runtime,
         .filters = if (test_filter) |filter|
             &.{filter}
         else
@@ -254,8 +254,8 @@ const WiredModules = struct {
     bridge: *std.Build.Module,
     event_pump: *std.Build.Module,
     sdk: *std.Build.Module,
-    workbench: *std.Build.Module,
-    workbench_projection: *std.Build.Module,
+    product_control: *std.Build.Module,
+    product_control_runtime: *std.Build.Module,
     workbench_executor: *std.Build.Module,
     workbench_automatic_workspace_allocator: *std.Build.Module,
     workbench_scheduled_persistence: *std.Build.Module,
@@ -305,7 +305,7 @@ fn createLifecycleFixture(
         .link_libc = link_libc,
     });
     fixture.addImport("metawork_agent", modules.agent);
-    fixture.addImport("metawork_workbench", modules.workbench);
+    fixture.addImport("metawork_product_control", modules.product_control);
     fixture.addImport("metawork_product_skill", modules.product_skill);
     fixture.addImport("metawork_product_task", modules.product_task);
     fixture.addImport("metawork_account_contract", modules.account_contract);
@@ -496,20 +496,20 @@ fn addProductMcpRuntimeTests(
     step.dependOn(&b.addRunArtifact(tests).step);
 }
 
-fn addWorkbenchMcpTests(
+fn addProductControlMcpTests(
     b: *std.Build,
     modules: WiredModules,
     link_libc: bool,
 ) void {
     const step = b.step(
-        "test-workbench-mcp",
-        "Run Workbench MCP binding and safe projection tests",
+        "test-product-control-mcp",
+        "Run Product Control MCP binding and safe projection tests",
     );
-    modules.workbench_projection.link_libc = link_libc;
+    modules.product_control_runtime.link_libc = link_libc;
     const tests = b.addTest(.{
-        .name = "metawork-workbench-mcp",
-        .root_module = modules.workbench_projection,
-        .filters = &.{ "MCP", "Workbench snapshot serializer" },
+        .name = "metawork-product-control-mcp",
+        .root_module = modules.product_control_runtime,
+        .filters = &.{ "MCP", "Product Control snapshot serializer" },
     });
     step.dependOn(&b.addRunArtifact(tests).step);
 }
@@ -594,7 +594,7 @@ fn addMcpInteropTests(
     cases.addImport("metawork_agent", modules.agent);
     cases.addImport("metawork_account_contract", modules.account_contract);
     cases.addImport("metawork_mcp_platform", modules.mcp_platform);
-    cases.addImport("metawork_workbench", modules.workbench);
+    cases.addImport("metawork_product_control", modules.product_control);
     cases.addImport("metawork_product_mcp", modules.product_mcp);
     cases.addOptions("mcp_interop_options", fixture_options);
     const tests = b.addTest(.{
@@ -903,6 +903,12 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .target = target,
         .optimize = root_module.optimize,
     });
+    const file_preview = b.createModule(.{
+        .root_source_file = b.path("src/workbench/file_preview.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    file_preview.addImport("workbench_executor", executor);
     const automatic_workspace_allocator = b.createModule(.{
         .root_source_file = b.path("src/workbench/automatic_workspace_allocator.zig"),
         .target = target,
@@ -1225,50 +1231,54 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     product_control_ports.addImport("metawork_agent", agent);
     product_control_ports.addImport("metawork_account_contract", account_contract);
     product_control_ports.addImport("metawork_product_mcp", product_mcp);
-    const projection = b.createModule(.{
-        .root_source_file = b.path("src/workbench/projection.zig"),
+    const product_control_runtime = b.createModule(.{
+        .root_source_file = b.path("src/product/control/runtime.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
-    projection.addImport("metawork_agent", agent);
-    projection.addImport("metawork_account_contract", account_contract);
-    projection.addImport("workbench_executor", executor);
-    projection.addImport("workbench_automatic_workspace_allocator", automatic_workspace_allocator);
-    projection.addImport("workbench_scheduled_tasks", scheduled_tasks);
-    projection.addImport(
+    product_control_runtime.addImport("metawork_agent", agent);
+    product_control_runtime.addImport("metawork_account_contract", account_contract);
+    product_control_runtime.addImport("workbench_executor", executor);
+    product_control_runtime.addImport("product_control_file_preview", file_preview);
+    product_control_runtime.addImport("workbench_automatic_workspace_allocator", automatic_workspace_allocator);
+    product_control_runtime.addImport("workbench_scheduled_tasks", scheduled_tasks);
+    product_control_runtime.addImport(
         "workbench_scheduled_task_persistence",
         scheduled_task_persistence,
     );
-    projection.addImport("metawork_product_task", product_task);
-    projection.addImport("metawork_product_skill", product_skill);
-    projection.addImport("metawork_product_mcp", product_mcp);
-    projection.addImport("metawork_product_control_ports", product_control_ports);
-    projection.addImport(
+    product_control_runtime.addImport("metawork_product_task", product_task);
+    product_control_runtime.addImport("metawork_product_skill", product_skill);
+    product_control_runtime.addImport("metawork_product_mcp", product_mcp);
+    product_control_runtime.addImport("metawork_product_control_ports", product_control_ports);
+    product_control_runtime.addImport(
         "build_options",
         existingImport(
             existingImport(root_module, "runner"),
             "build_options",
         ),
     );
-    const workbench_contract_fixture = b.addOptions();
-    workbench_contract_fixture.addOption(
+    const product_control_contract_fixture = b.addOptions();
+    product_control_contract_fixture.addOption(
         []const u8,
         "snapshot",
         @embedFile("frontend/src/bridge/__fixtures__/workbench-snapshot.fixture"),
     );
-    projection.addOptions("workbench_contract_fixture", workbench_contract_fixture);
-    const workbench = b.createModule(.{
-        .root_source_file = b.path("src/workbench.zig"),
+    product_control_runtime.addOptions(
+        "product_control_contract_fixture",
+        product_control_contract_fixture,
+    );
+    const product_control = b.createModule(.{
+        .root_source_file = b.path("src/product/control.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
-    workbench.addImport("workbench_projection", projection);
-    workbench.addImport("workbench_automatic_workspace_allocator", automatic_workspace_allocator);
-    workbench.addImport(
+    product_control.addImport("product_control_runtime", product_control_runtime);
+    product_control.addImport("workbench_automatic_workspace_allocator", automatic_workspace_allocator);
+    product_control.addImport(
         "workbench_scheduled_task_persistence",
         scheduled_task_persistence,
     );
-    workbench.addImport("metawork_product_skill", product_skill);
+    product_control.addImport("metawork_product_skill", product_skill);
 
     const bridge = b.createModule(.{
         .root_source_file = b.path("src/bridge.zig"),
@@ -1277,7 +1287,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     });
     bridge.addImport("native_sdk", existingImport(root_module, "native_sdk"));
     bridge.addImport("metawork_account_contract", account_contract);
-    bridge.addImport("metawork_workbench", workbench);
+    bridge.addImport("metawork_product_control", product_control);
     bridge.addImport("metawork_product_mcp", product_mcp);
     bridge.addImport("metawork_product_skill", product_skill);
 
@@ -1334,7 +1344,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     app.addImport("build_options", existingImport(runner, "build_options"));
     app.addImport("native_sdk", existingImport(root_module, "native_sdk"));
     app.addImport("metawork_agent", agent);
-    app.addImport("metawork_workbench", workbench);
+    app.addImport("metawork_product_control", product_control);
     app.addImport("metawork_product_mcp", product_mcp);
     app.addImport("metawork_product_control_ports", product_control_ports);
     app.addImport("metawork_product_skill", product_skill);
@@ -1393,8 +1403,8 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .bridge = bridge,
         .event_pump = event_pump,
         .sdk = sdk,
-        .workbench = workbench,
-        .workbench_projection = projection,
+        .product_control = product_control,
+        .product_control_runtime = product_control_runtime,
         .workbench_executor = executor,
         .workbench_automatic_workspace_allocator = automatic_workspace_allocator,
         .workbench_scheduled_persistence = scheduled_task_persistence,

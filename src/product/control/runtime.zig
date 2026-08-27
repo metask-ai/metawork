@@ -3,7 +3,7 @@ const builtin = @import("builtin");
 const lifecycle = @import("metawork_agent");
 const account_contract = @import("metawork_account_contract");
 const executor_impl = @import("workbench_executor");
-const file_preview = @import("file_preview.zig");
+const file_preview = @import("product_control_file_preview");
 const automatic_workspace_allocator = @import("workbench_automatic_workspace_allocator");
 const scheduled_tasks_impl = @import("workbench_scheduled_tasks");
 const scheduled_task_persistence = @import("workbench_scheduled_task_persistence");
@@ -32,7 +32,7 @@ const mcp_configuration = product_mcp.contract;
 const mcp_ports = product_mcp;
 const mcp_runtime = product_mcp;
 const mcp_testing = product_mcp.testing;
-const contract_fixture = @import("workbench_contract_fixture");
+const contract_fixture = @import("product_control_contract_fixture");
 const build_options = @import("build_options");
 
 pub const Error = lifecycle.Error || scheduled_tasks_impl.Error || scheduled_task_persistence.Error || skill_runtime.MutationError || skill_runtime.EnablementError || skill_runtime.EnablementFileStoreError || task_persistence.Error || std.mem.Allocator.Error || std.Thread.SpawnError || error{
@@ -125,7 +125,7 @@ pub const Limits = struct {
     max_snapshot_bytes: usize = 64 * 1024 * 1024,
 };
 
-// Single Workbench-owned production source. Agent validates these product
+// Single Runtime-owned production source. Agent validates these product
 // limits against the official ABI ceilings at the dependency boundary.
 const checkpoint_export_limits: lifecycle.CheckpointLimits = .{
     .hard_bytes = 64 * 1024 * 1024,
@@ -444,7 +444,7 @@ pub const ChangeNotifier = struct {
 };
 
 const TaskWorkspaceOrderContext = struct {
-    workbench: *Workbench,
+    workbench: *Runtime,
     workspace: *WorkspaceView,
     previous_order: u64,
 };
@@ -636,7 +636,7 @@ pub const TransportFailureDecision = enum {
     request_run_termination,
 };
 
-/// Workbench owns product impact policy; Bridge supplies transport facts only.
+/// Runtime owns product impact policy; Bridge supplies transport facts only.
 /// Current Renderer transport failures never terminate an Agent Run.
 pub fn decideTransportFailure(report: TransportFailureReport) TransportFailureDecision {
     std.debug.assert((report.session_id == 0) == (report.run_id == 0));
@@ -1268,7 +1268,7 @@ const ActiveExecution = struct {
     }
 };
 
-/// Workbench-owned product projection. AgentCore protocol is interpreted only
+/// Runtime-owned product projection. AgentCore protocol is interpreted only
 /// through the bundle SDK; the Renderer receives this bounded domain view.
 /// All methods currently run on the Native loop thread.
 const ExecutionReplacementKind = enum { none, default, identity };
@@ -1277,7 +1277,7 @@ pub const PreparedModelConnectionBinding = control_ports.PreparedModelConnection
 
 const CustomExecutionBinding = PreparedModelConnectionBinding;
 
-pub const Workbench = struct {
+pub const Runtime = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     agent_runtime: *lifecycle.Runtime,
@@ -1324,7 +1324,7 @@ pub const Workbench = struct {
         agent_runtime: *lifecycle.Runtime,
         limits: Limits,
         configuration: Configuration,
-    ) Error!Workbench {
+    ) Error!Runtime {
         if (limits.worker_count == 0 or limits.queue_capacity == 0 or
             limits.max_tasks == 0 or limits.max_workspaces == 0 or
             limits.max_scheduled_tasks == 0 or
@@ -1452,7 +1452,7 @@ pub const Workbench = struct {
         errdefer if (skill_owned) skill.deinit();
         var mcp_startup = try mcp_runtime.Startup.prepare(allocator, configuration.mcp);
         errdefer if (mcp_startup) |*startup| startup.deinit();
-        var workbench: Workbench = .{
+        var workbench: Runtime = .{
             .allocator = allocator,
             .io = io,
             .agent_runtime = agent_runtime,
@@ -1543,7 +1543,7 @@ pub const Workbench = struct {
     /// submits immutable Host-only input to the preview lane. File I/O never
     /// occurs in this call.
     pub fn beginFilePreview(
-        self: *Workbench,
+        self: *Runtime,
         completion_id: u64,
         task_id: u64,
         run_id: u64,
@@ -1592,10 +1592,10 @@ pub const Workbench = struct {
 
     /// Drains worker-owned raw completions on the main thread. Current Task,
     /// Run, reference and Workspace authority are checked again before any
-    /// bytes are projected. Raw buffers remain inside Workbench and are
+    /// bytes are projected. Raw buffers remain inside Runtime and are
     /// securely erased immediately after the callback returns.
     pub fn drainFilePreviewCompletions(
-        self: *Workbench,
+        self: *Runtime,
         sink: FilePreviewSink,
     ) void {
         while (self.preview_lane.take()) |taken| {
@@ -1668,7 +1668,7 @@ pub const Workbench = struct {
     }
 
     fn filePreviewWorkspaceAuthorized(
-        self: *const Workbench,
+        self: *const Runtime,
         reference: task_runtime.FileReference,
     ) bool {
         for (self.workspaces) |*workspace_entry| {
@@ -1687,7 +1687,7 @@ pub const Workbench = struct {
     };
 
     fn sanitizeFilePreviewInto(
-        self: *const Workbench,
+        self: *const Runtime,
         output: []u8,
         value: []const u8,
     ) PreviewProjection {
@@ -1712,7 +1712,7 @@ pub const Workbench = struct {
     }
 
     fn filePreviewCredentialSafeCutoff(
-        self: *const Workbench,
+        self: *const Runtime,
         value: []const u8,
         truncated: bool,
     ) usize {
@@ -1731,7 +1731,7 @@ pub const Workbench = struct {
     }
 
     fn knownCredentialMayContinueAtCodepoint(
-        self: *const Workbench,
+        self: *const Runtime,
         value: []const u8,
         codepoint_start: usize,
     ) bool {
@@ -1748,7 +1748,7 @@ pub const Workbench = struct {
     }
 
     pub fn setScheduleBackgroundAvailableNoFail(
-        self: *Workbench,
+        self: *Runtime,
         available: bool,
     ) void {
         if (self.schedule_background_available == available) return;
@@ -1761,19 +1761,19 @@ pub const Workbench = struct {
     }
 
     pub fn previewSkillDirectory(
-        self: *Workbench,
+        self: *Runtime,
         absolute_path: []const u8,
     ) Error!skill_runtime.Preview {
         return self.skill.previewDirectory(absolute_path);
     }
     pub fn previewSkillArchive(
-        self: *Workbench,
+        self: *Runtime,
         absolute_path: []const u8,
     ) Error!skill_runtime.Preview {
         return self.skill.previewArchive(absolute_path);
     }
     pub fn installSkillDirectory(
-        self: *Workbench,
+        self: *Runtime,
         absolute_path: []const u8,
         input: SkillInstallInput,
     ) Error!SkillMutationResult {
@@ -1788,7 +1788,7 @@ pub const Workbench = struct {
     }
 
     pub fn installSkillArchive(
-        self: *Workbench,
+        self: *Runtime,
         absolute_path: []const u8,
         input: SkillInstallInput,
     ) Error!SkillMutationResult {
@@ -1803,7 +1803,7 @@ pub const Workbench = struct {
     }
 
     pub fn reimportSkillDirectory(
-        self: *Workbench,
+        self: *Runtime,
         install_id: skill_runtime.InstallId,
         absolute_path: []const u8,
         expected_invocation_name: []const u8,
@@ -1822,7 +1822,7 @@ pub const Workbench = struct {
     }
 
     pub fn reimportSkillArchive(
-        self: *Workbench,
+        self: *Runtime,
         install_id: skill_runtime.InstallId,
         absolute_path: []const u8,
         expected_invocation_name: []const u8,
@@ -1841,7 +1841,7 @@ pub const Workbench = struct {
     }
 
     pub fn uninstallSkill(
-        self: *Workbench,
+        self: *Runtime,
         install_id: skill_runtime.InstallId,
     ) Error!SkillMutationResult {
         const scope = try self.skill.assetScope(install_id);
@@ -1855,7 +1855,7 @@ pub const Workbench = struct {
     }
 
     pub fn retrySkillVerification(
-        self: *Workbench,
+        self: *Runtime,
         install_id: skill_runtime.InstallId,
     ) Error!SkillMutationResult {
         const scope = try self.skill.assetScope(install_id);
@@ -1865,25 +1865,25 @@ pub const Workbench = struct {
         return result;
     }
     pub fn readSkillDefinition(
-        self: *Workbench,
+        self: *Runtime,
         install_id: skill_runtime.InstallId,
     ) Error!skill_runtime.Preview {
         try self.requireSkillAssetAuthority(try self.skill.assetScope(install_id));
         return self.skill.readDefinition(install_id);
     }
     pub fn exportSkill(
-        self: *Workbench,
+        self: *Runtime,
         install_id: skill_runtime.InstallId,
         absolute_destination: []const u8,
     ) Error!SkillExportResult {
         try self.requireSkillAssetAuthority(try self.skill.assetScope(install_id));
         return self.skill.exportPackage(install_id, absolute_destination);
     }
-    pub fn automaticWorkspacesAvailable(self: *const Workbench) bool {
+    pub fn automaticWorkspacesAvailable(self: *const Runtime) bool {
         return self.automatic_workspaces != null;
     }
 
-    pub fn hasEnabledScheduledTasks(self: *Workbench) bool {
+    pub fn hasEnabledScheduledTasks(self: *Runtime) bool {
         for (self.scheduled_tasks.items) |*entry| {
             const item = &(entry.* orelse continue);
             if (item.enabled) return true;
@@ -1892,14 +1892,14 @@ pub const Workbench = struct {
     }
 
     pub fn commitAccountFactNoFail(
-        self: *Workbench,
+        self: *Runtime,
         fact: account_contract.AccountFact,
     ) void {
         self.account.commitNoFail(fact.view);
     }
 
     pub fn installExecutionNoFail(
-        self: *Workbench,
+        self: *Runtime,
         execution: *account_contract.OwnedExecutionConfig,
     ) void {
         if (self.custom_execution_binding) |*binding| binding.deinit();
@@ -1922,10 +1922,10 @@ pub const Workbench = struct {
 
     /// Installs a Host-resolved user Model Connection execution without
     /// pretending that it is a Metask OAuth account/catalog. The active
-    /// execution still uses the same Workbench-owned secret and generation
+    /// execution still uses the same Runtime-owned secret and generation
     /// machinery as the built-in path.
     pub fn prepareModelConnectionBinding(
-        self: *Workbench,
+        self: *Runtime,
         connection_id: []const u8,
         model_id: []const u8,
     ) std.mem.Allocator.Error!PreparedModelConnectionBinding {
@@ -1937,7 +1937,7 @@ pub const Workbench = struct {
     }
 
     pub fn installModelConnectionExecutionNoFail(
-        self: *Workbench,
+        self: *Runtime,
         execution: *account_contract.OwnedExecutionConfig,
         prepared_binding: *PreparedModelConnectionBinding,
     ) void {
@@ -1950,7 +1950,7 @@ pub const Workbench = struct {
         prepared_binding.* = undefined;
     }
 
-    pub fn clearExecutionNoFail(self: *Workbench) void {
+    pub fn clearExecutionNoFail(self: *Runtime) void {
         std.debug.assert(self.execution_replacement != .none);
         std.debug.assert(self.account.execution_generation == 0);
         self.redactAllProductProjectionsNoFail(self.execution.credential());
@@ -1959,7 +1959,7 @@ pub const Workbench = struct {
         self.custom_execution_binding = null;
     }
 
-    pub fn finishAccountCommitNoFail(self: *Workbench) void {
+    pub fn finishAccountCommitNoFail(self: *Runtime) void {
         if (self.canCreateTask()) {
             _ = self.reconcileScheduledTaskBindingsNoFail();
             self.rearmScheduledTaskTimerNoFail();
@@ -1969,7 +1969,7 @@ pub const Workbench = struct {
         self.bumpRevision();
     }
 
-    pub fn accountView(self: *const Workbench) account_contract.AccountView {
+    pub fn accountView(self: *const Runtime) account_contract.AccountView {
         var result = self.account.view(self.canCreateTask());
         if (self.custom_execution_binding != null) {
             result.execution_source = .model_connection;
@@ -1980,14 +1980,14 @@ pub const Workbench = struct {
     }
 
     pub fn modelConnectionExecutionActive(
-        self: *const Workbench,
+        self: *const Runtime,
         connection_id: []const u8,
     ) bool {
         const binding = self.custom_execution_binding orelse return false;
         return std.mem.eql(u8, binding.connection_id, connection_id);
     }
 
-    pub fn modelConnectionExecutionSelected(self: *const Workbench) bool {
+    pub fn modelConnectionExecutionSelected(self: *const Runtime) bool {
         return self.custom_execution_binding != null;
     }
 
@@ -1995,7 +1995,7 @@ pub const Workbench = struct {
     /// contract. This path is compiled only into `-Dautomation=true` builds;
     /// release builds reject it before observing any input.
     pub fn installAutomationExecution(
-        self: *Workbench,
+        self: *Runtime,
         input: AutomationExecutionInput,
     ) Error!void {
         if (!build_options.automation)
@@ -2046,7 +2046,7 @@ pub const Workbench = struct {
         self.finishAccountCommitNoFail();
     }
 
-    pub fn beginExecutionReplacement(self: *Workbench) Error!void {
+    pub fn beginExecutionReplacement(self: *Runtime) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
         if (self.execution_replacement != .none)
@@ -2057,7 +2057,7 @@ pub const Workbench = struct {
         self.execution_replacement = .identity;
     }
 
-    pub fn beginDefaultExecutionReplacement(self: *Workbench) Error!void {
+    pub fn beginDefaultExecutionReplacement(self: *Runtime) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
         if (self.execution_replacement != .none)
@@ -2065,26 +2065,26 @@ pub const Workbench = struct {
         self.execution_replacement = .default;
     }
 
-    pub fn endExecutionReplacementNoFail(self: *Workbench) void {
+    pub fn endExecutionReplacementNoFail(self: *Runtime) void {
         std.debug.assert(self.execution_replacement != .none);
         self.execution_replacement = .none;
     }
 
-    pub fn executionReplacementPending(self: *const Workbench) bool {
+    pub fn executionReplacementPending(self: *const Runtime) bool {
         return self.execution_replacement != .none;
     }
 
-    pub fn identityReplacementPending(self: *const Workbench) bool {
+    pub fn identityReplacementPending(self: *const Runtime) bool {
         return self.execution_replacement == .identity;
     }
 
-    pub fn defaultExecutionReplacementPending(self: *const Workbench) bool {
+    pub fn defaultExecutionReplacementPending(self: *const Runtime) bool {
         return self.execution_replacement == .default;
     }
 
     /// Registers or reauthorizes a manually selected Workspace.
     pub fn openWorkspace(
-        self: *Workbench,
+        self: *Runtime,
         input: TaskCreateInput,
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
@@ -2119,21 +2119,21 @@ pub const Workbench = struct {
     }
 
     fn skillBudgetAvailable(context: *anyopaque, reclaimable: usize) usize {
-        const self: *Workbench = @ptrCast(@alignCast(context));
+        const self: *Runtime = @ptrCast(@alignCast(context));
         std.debug.assert(self.projection_bytes <= self.limits.max_projection_bytes);
         std.debug.assert(reclaimable <= self.projection_bytes);
         return self.limits.max_projection_bytes - self.projection_bytes + reclaimable;
     }
 
     fn skillBudgetReplace(context: *anyopaque, old: usize, new: usize) void {
-        const self: *Workbench = @ptrCast(@alignCast(context));
+        const self: *Runtime = @ptrCast(@alignCast(context));
         std.debug.assert(old <= self.projection_bytes);
         const retained = self.projection_bytes - old;
         std.debug.assert(new <= self.limits.max_projection_bytes - retained);
         self.projection_bytes = retained + new;
     }
 
-    fn skillProjectionBudget(self: *Workbench) skill_runtime.ProjectionBudget {
+    fn skillProjectionBudget(self: *Runtime) skill_runtime.ProjectionBudget {
         return .{
             .context = self,
             .available_fn = skillBudgetAvailable,
@@ -2141,7 +2141,7 @@ pub const Workbench = struct {
         };
     }
 
-    fn syncSkillCatalogsNoFail(self: *Workbench) bool {
+    fn syncSkillCatalogsNoFail(self: *Runtime) bool {
         return self.skill.sync(
             self.skillProjectionBudget(),
             catalogSnapshotLimits(self.limits),
@@ -2150,7 +2150,7 @@ pub const Workbench = struct {
     }
 
     pub fn workspaceCatalog(
-        self: *Workbench,
+        self: *Runtime,
         workspace_id: u64,
     ) Error!CatalogProjection {
         self.syncLifecycle();
@@ -2159,12 +2159,12 @@ pub const Workbench = struct {
         return self.skill.workspaceCatalogProjection(workspace.id, workspace.epoch);
     }
 
-    pub fn skillCatalog(self: *Workbench) CatalogProjection {
+    pub fn skillCatalog(self: *Runtime) CatalogProjection {
         self.syncLifecycle();
         return self.skill.personalCatalogProjection();
     }
 
-    pub fn refreshSkillCatalog(self: *Workbench) Error!void {
+    pub fn refreshSkillCatalog(self: *Runtime) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
         try self.skill.refreshPersonal();
@@ -2172,7 +2172,7 @@ pub const Workbench = struct {
     }
 
     pub fn setSkillEnabled(
-        self: *Workbench,
+        self: *Runtime,
         mutation: SkillEnablementMutation,
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
@@ -2199,7 +2199,7 @@ pub const Workbench = struct {
             self.bumpRevision();
         return next_revision;
     }
-    pub fn refreshMcpCatalog(self: *Workbench) Error!void {
+    pub fn refreshMcpCatalog(self: *Runtime) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
         const runtime = if (self.mcp) |*value| value else return error.CatalogUnavailable;
@@ -2209,8 +2209,8 @@ pub const Workbench = struct {
     }
 
     /// Native one-shot timer ingress. Refresh work is always enqueued on the
-    /// bounded Workbench executor; the main thread never performs catalog I/O.
-    pub fn onMcpRefreshTimer(self: *Workbench) void {
+    /// bounded Runtime executor; the main thread never performs catalog I/O.
+    pub fn onMcpRefreshTimer(self: *Runtime) void {
         if (self.shutting_down) return;
         self.syncLifecycle();
         if (self.mcp) |*runtime|
@@ -2218,7 +2218,7 @@ pub const Workbench = struct {
     }
 
     pub fn taskCatalog(
-        self: *Workbench,
+        self: *Runtime,
         task_id: u64,
     ) Error!CatalogProjection {
         self.syncLifecycle();
@@ -2226,7 +2226,7 @@ pub const Workbench = struct {
     }
 
     pub fn refreshWorkspaceCatalog(
-        self: *Workbench,
+        self: *Runtime,
         workspace_id: u64,
         expected_workspace_epoch: u64,
     ) Error!void {
@@ -2244,7 +2244,7 @@ pub const Workbench = struct {
     }
 
     pub fn refreshTaskCatalog(
-        self: *Workbench,
+        self: *Runtime,
         task_id: u64,
         expected_binding_epoch: u64,
     ) Error!void {
@@ -2297,7 +2297,7 @@ pub const Workbench = struct {
         self.bumpRevision();
     }
 
-    pub fn workspaceEpoch(self: *Workbench, workspace_id: u64) Error!u64 {
+    pub fn workspaceEpoch(self: *Runtime, workspace_id: u64) Error!u64 {
         self.syncLifecycle();
         const workspace = self.findWorkspace(workspace_id) orelse
             return error.UnknownWorkspace;
@@ -2305,7 +2305,7 @@ pub const Workbench = struct {
     }
 
     pub fn workspaceKind(
-        self: *Workbench,
+        self: *Runtime,
         workspace_id: u64,
     ) Error!WorkspaceKind {
         self.syncLifecycle();
@@ -2314,7 +2314,7 @@ pub const Workbench = struct {
         return workspace.kind;
     }
 
-    pub fn taskWorkspaceId(self: *Workbench, task_id: u64) Error!u64 {
+    pub fn taskWorkspaceId(self: *Runtime, task_id: u64) Error!u64 {
         self.syncLifecycle();
         return self.task_runtime.taskWorkspaceId(task_id) orelse error.UnknownTask;
     }
@@ -2325,7 +2325,7 @@ pub const Workbench = struct {
     /// their Task routes remain addressable. Aggregate signals are computed
     /// from canonical Task state.
     pub fn copyWorkspaceProjections(
-        self: *Workbench,
+        self: *Runtime,
         output: []WorkspaceProjection,
     ) Error![]const WorkspaceProjection {
         self.syncLifecycle();
@@ -2364,7 +2364,7 @@ pub const Workbench = struct {
     /// closed, and starts closing every live Task Session in that Workspace.
     /// Task history and files remain owned by their original systems.
     pub fn removeWorkspace(
-        self: *Workbench,
+        self: *Runtime,
         workspace_id: u64,
     ) Error!void {
         const workspace = self.findWorkspace(workspace_id) orelse
@@ -2373,7 +2373,7 @@ pub const Workbench = struct {
     }
 
     pub fn removeWorkspaceAtEpoch(
-        self: *Workbench,
+        self: *Runtime,
         workspace_id: u64,
         expected_workspace_epoch: u64,
     ) Error!void {
@@ -2430,7 +2430,7 @@ pub const Workbench = struct {
     }
 
     pub fn createTask(
-        self: *Workbench,
+        self: *Runtime,
         input: TaskCreateInput,
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
@@ -2451,7 +2451,7 @@ pub const Workbench = struct {
     }
 
     pub fn createTaskInWorkspace(
-        self: *Workbench,
+        self: *Runtime,
         workspace_id: u64,
         expected_workspace_epoch: u64,
         expected_execution_generation: u64,
@@ -2469,7 +2469,7 @@ pub const Workbench = struct {
     }
 
     pub fn createTaskForWorkspace(
-        self: *Workbench,
+        self: *Runtime,
         request: TaskWorkspaceRequest,
         expected_execution_generation: u64,
         expected_skill_catalog_revision: ?[]const u8,
@@ -2492,7 +2492,7 @@ pub const Workbench = struct {
     }
 
     fn createTaskInWorkspaceInternal(
-        self: *Workbench,
+        self: *Runtime,
         workspace_id: u64,
         expected_workspace_epoch: u64,
         expected_execution_generation: u64,
@@ -2638,7 +2638,7 @@ pub const Workbench = struct {
     }
 
     fn createAutomaticTask(
-        self: *Workbench,
+        self: *Runtime,
         expected_execution_generation: u64,
         expected_skill_catalog_revision: ?[]const u8,
         expected_skill_selection_revision: ?u64,
@@ -2683,7 +2683,7 @@ pub const Workbench = struct {
     /// the bounded recovery attempt was enqueued; the canonical Snapshot owns
     /// publication of the eventual result.
     pub fn restoreTaskConversation(
-        self: *Workbench,
+        self: *Runtime,
         task_id: u64,
         expected_binding_epoch: u64,
     ) Error!u64 {
@@ -2738,7 +2738,7 @@ pub const Workbench = struct {
     }
 
     pub fn runTask(
-        self: *Workbench,
+        self: *Runtime,
         task_id: u64,
         input: TaskRunInput,
     ) Error!u64 {
@@ -2749,20 +2749,20 @@ pub const Workbench = struct {
         return self.runTaskAtBinding(task_id, binding_epoch, input);
     }
 
-    pub fn taskBindingEpoch(self: *Workbench, task_id: u64) Error!u64 {
+    pub fn taskBindingEpoch(self: *Runtime, task_id: u64) Error!u64 {
         self.syncLifecycle();
         return self.task_runtime.taskBindingEpoch(task_id) orelse error.UnknownTask;
     }
 
     pub fn testRestoreCancellationRequested(
-        self: *Workbench,
+        self: *Runtime,
         task_id: u64,
     ) bool {
         std.debug.assert(builtin.is_test);
         return self.task_runtime.testRestoreCancellationRequested(task_id);
     }
 
-    pub fn testLateTerminalEventCount(self: *const Workbench) u64 {
+    pub fn testLateTerminalEventCount(self: *const Runtime) u64 {
         std.debug.assert(builtin.is_test);
         return self.task_runtime.testLateTerminalEventCount();
     }
@@ -2772,7 +2772,7 @@ pub const Workbench = struct {
     /// request received during a Run is kept in runtime-only pending state
     /// and applied before the next Run.
     pub fn selectTaskModel(
-        self: *Workbench,
+        self: *Runtime,
         task_id: u64,
         expected_model: []const u8,
         expected_catalog_generation: u64,
@@ -2824,7 +2824,7 @@ pub const Workbench = struct {
     }
 
     pub fn runTaskAtBinding(
-        self: *Workbench,
+        self: *Runtime,
         task_id: u64,
         expected_binding_epoch: u64,
         input: TaskRunInput,
@@ -2883,7 +2883,7 @@ pub const Workbench = struct {
     }
 
     pub fn compactTaskAtBinding(
-        self: *Workbench,
+        self: *Runtime,
         task_id: u64,
         expected_binding_epoch: u64,
     ) Error!u64 {
@@ -2908,7 +2908,7 @@ pub const Workbench = struct {
     }
 
     pub fn cancelCompact(
-        self: *Workbench,
+        self: *Runtime,
         task_id: u64,
         operation_id: u64,
     ) Error!void {
@@ -2924,7 +2924,7 @@ pub const Workbench = struct {
     }
 
     pub fn taskExecutionIdentity(
-        self: *Workbench,
+        self: *Runtime,
         task_id: u64,
     ) Error!ExecutionIdentity {
         const value = self.task_runtime.taskExecutionIdentity(task_id) orelse
@@ -2933,7 +2933,7 @@ pub const Workbench = struct {
     }
 
     pub fn runExecutionIdentity(
-        self: *Workbench,
+        self: *Runtime,
         task_id: u64,
         run_id: u64,
     ) Error!ExecutionIdentity {
@@ -2946,11 +2946,11 @@ pub const Workbench = struct {
 
     /// Lifecycle tests use this read-only counter to verify ownership rollback
     /// without exposing projection accounting through the Renderer contract.
-    pub fn projectionBytesForTest(self: *const Workbench) usize {
+    pub fn projectionBytesForTest(self: *const Runtime) usize {
         return self.projection_bytes;
     }
 
-    pub fn cancel(self: *Workbench, task_id: u64, run_id: u64) Error!void {
+    pub fn cancel(self: *Runtime, task_id: u64, run_id: u64) Error!void {
         self.syncLifecycle();
         if (try self.task_runtime.cancelRun(
             task_id,
@@ -2961,7 +2961,7 @@ pub const Workbench = struct {
     }
 
     pub fn respondUi(
-        self: *Workbench,
+        self: *Runtime,
         task_id: u64,
         run_id: u64,
         request_id: u64,
@@ -2979,7 +2979,7 @@ pub const Workbench = struct {
         self.bumpRevision();
     }
 
-    fn detachTaskSession(self: *Workbench, task_id: u64) Error!void {
+    fn detachTaskSession(self: *Runtime, task_id: u64) Error!void {
         self.syncLifecycle();
         if (try self.task_runtime.beginDetach(
             task_id,
@@ -2987,7 +2987,7 @@ pub const Workbench = struct {
         )) self.bumpRevision();
     }
 
-    pub fn renameTask(self: *Workbench, task_id: u64, title: []const u8) Error!void {
+    pub fn renameTask(self: *Runtime, task_id: u64, title: []const u8) Error!void {
         self.syncLifecycle();
         try self.requireTaskPersistenceMutation();
         try self.task_runtime.renameTask(
@@ -3001,7 +3001,7 @@ pub const Workbench = struct {
     }
 
     pub fn createScheduledTask(
-        self: *Workbench,
+        self: *Runtime,
         input: ScheduledTaskDefinitionInput,
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
@@ -3026,7 +3026,7 @@ pub const Workbench = struct {
     }
 
     pub fn updateScheduledTask(
-        self: *Workbench,
+        self: *Runtime,
         id: u64,
         expected_epoch: u64,
         input: ScheduledTaskDefinitionInput,
@@ -3052,7 +3052,7 @@ pub const Workbench = struct {
     }
 
     pub fn setScheduledTaskEnabled(
-        self: *Workbench,
+        self: *Runtime,
         id: u64,
         expected_epoch: u64,
         enabled: bool,
@@ -3080,7 +3080,7 @@ pub const Workbench = struct {
     }
 
     pub fn deleteScheduledTask(
-        self: *Workbench,
+        self: *Runtime,
         id: u64,
         expected_epoch: u64,
     ) Error!void {
@@ -3097,7 +3097,7 @@ pub const Workbench = struct {
     }
 
     pub fn scheduledTaskEpoch(
-        self: *Workbench,
+        self: *Runtime,
         id: u64,
     ) Error!u64 {
         self.syncLifecycle();
@@ -3106,7 +3106,7 @@ pub const Workbench = struct {
     }
 
     pub fn runScheduledTaskNow(
-        self: *Workbench,
+        self: *Runtime,
         id: u64,
         expected_epoch: u64,
     ) Error!u64 {
@@ -3121,7 +3121,7 @@ pub const Workbench = struct {
         return self.triggerScheduledTask(id, now, now, .manual);
     }
 
-    pub fn onScheduledTaskTimer(self: *Workbench) void {
+    pub fn onScheduledTaskTimer(self: *Runtime) void {
         if (self.shutting_down) return;
         self.syncLifecycle();
         const now = self.schedule_timer.now() orelse return;
@@ -3136,7 +3136,7 @@ pub const Workbench = struct {
         self.rearmScheduledTaskTimerNoFail();
     }
 
-    pub fn setTaskArchived(self: *Workbench, task_id: u64, archived: bool) Error!void {
+    pub fn setTaskArchived(self: *Runtime, task_id: u64, archived: bool) Error!void {
         self.syncLifecycle();
         try self.requireTaskPersistenceMutation();
         if (try self.task_runtime.setArchived(
@@ -3146,7 +3146,7 @@ pub const Workbench = struct {
         )) self.bumpRevision();
     }
 
-    pub fn deleteTask(self: *Workbench, task_id: u64) Error!void {
+    pub fn deleteTask(self: *Runtime, task_id: u64) Error!void {
         self.syncLifecycle();
         try self.requireTaskPersistenceMutation();
         const requested = try self.task_runtime.requestDeletion(task_id);
@@ -3162,19 +3162,19 @@ pub const Workbench = struct {
         }
     }
 
-    pub fn currentRevision(self: *Workbench) u64 {
+    pub fn currentRevision(self: *Runtime) u64 {
         self.syncLifecycle();
         return self.revision;
     }
 
-    pub fn checkpointStoreHealth(self: *const Workbench) checkpoint_store.Health {
+    pub fn checkpointStoreHealth(self: *const Runtime) checkpoint_store.Health {
         return self.checkpoint_store_health.load(.acquire);
     }
 
     /// Reconciles worker-owned lifecycle state into the main-thread product
     /// projection. It never allocates, so an effects wake cannot fail merely
     /// while publishing a terminal state.
-    pub fn syncLifecycle(self: *Workbench) void {
+    pub fn syncLifecycle(self: *Runtime) void {
         var changed = self.syncSkillCatalogsNoFail();
         changed = self.commitMcpRefreshJobNoFail() or changed;
         changed = self.syncMcpHealthNoFail() or changed;
@@ -3220,7 +3220,7 @@ pub const Workbench = struct {
     /// terminal-publication barrier. This operation is main-loop-thread only.
     /// It remains valid after Executor and Agent Runtime shutdown, does not
     /// depend on Executor liveness, and must run before Agent Runtime deinit.
-    pub fn drainAgentEvents(self: *Workbench) Error!void {
+    pub fn drainAgentEvents(self: *Runtime) Error!void {
         var first_projection_error: ?Error = null;
         self.drainAgentEventPass(&first_projection_error);
         // Terminal publication happens after the synchronous AgentCore Run
@@ -3235,7 +3235,7 @@ pub const Workbench = struct {
     }
 
     fn drainAgentEventPass(
-        self: *Workbench,
+        self: *Runtime,
         first_projection_error: *?Error,
     ) void {
         while (self.agent_runtime.takeEvent()) |value| {
@@ -3257,7 +3257,7 @@ pub const Workbench = struct {
         }
     }
 
-    pub fn applyEvent(self: *Workbench, envelope: *const lifecycle.OwnedCoreEvent) Error!void {
+    pub fn applyEvent(self: *Runtime, envelope: *const lifecycle.OwnedCoreEvent) Error!void {
         const outcome = self.task_runtime.applyEvent(
             envelope,
             .{
@@ -3289,7 +3289,7 @@ pub const Workbench = struct {
     /// A termination request may arrive after Agent terminal publication, so
     /// it cannot be the only owner of this product failure fact.
     fn recordEventProjectionFailure(
-        self: *Workbench,
+        self: *Runtime,
         route_id: u64,
         run_id: u64,
     ) void {
@@ -3298,24 +3298,24 @@ pub const Workbench = struct {
         self.bumpRevision();
     }
 
-    /// Marks terminal Runs before Workbench performs one more complete Agent
+    /// Marks terminal Runs before Runtime performs one more complete Agent
     /// event-pump drain. The acquire in `terminalPayload` observes every
     /// callback enqueue that happened before Run completion.
-    fn markTerminalRunsBeforeEventDrain(self: *Workbench) void {
+    fn markTerminalRunsBeforeEventDrain(self: *Runtime) void {
         _ = self.task_runtime.markTerminalRunsBeforeEventDrain();
     }
 
-    fn syncMcpHealthNoFail(self: *Workbench) bool {
+    fn syncMcpHealthNoFail(self: *Runtime) bool {
         const runtime = if (self.mcp) |*value| value else return false;
         return runtime.syncInitialHealth();
     }
-    fn publishMcpRuntimeChanges(self: *Workbench) void {
+    fn publishMcpRuntimeChanges(self: *Runtime) void {
         const runtime = if (self.mcp) |*value| value else return;
         if (runtime.takeChanged()) self.bumpRevision();
     }
 
     pub fn inspectMcpDesiredConfiguration(
-        self: *const Workbench,
+        self: *const Runtime,
     ) ?mcp_configuration.ManagementInspection {
         const runtime = if (self.mcp) |*value| value else return null;
         return runtime.inspectDesiredConfiguration();
@@ -3324,7 +3324,7 @@ pub const Workbench = struct {
     /// Host-only copy used to construct an isolated connection-test Runtime.
     /// The bytes never cross Bridge and contain no resolved credential values.
     pub fn writeMcpDesiredConfiguration(
-        self: *const Workbench,
+        self: *const Runtime,
         expected_generation: u64,
         output: []u8,
     ) Error![]const u8 {
@@ -3334,7 +3334,7 @@ pub const Workbench = struct {
     }
 
     pub fn beginMcpConnectionTest(
-        self: *Workbench,
+        self: *Runtime,
         server_id: []const u8,
     ) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
@@ -3344,7 +3344,7 @@ pub const Workbench = struct {
     }
 
     pub fn beginMcpConfigurationApply(
-        self: *Workbench,
+        self: *Runtime,
         expected_generation: u64,
     ) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
@@ -3358,7 +3358,7 @@ pub const Workbench = struct {
     /// successful declarative AgentCore apply. Every pointer remains owned by
     /// the caller when the generation no longer matches.
     pub fn completeMcpConfigurationApply(
-        self: *Workbench,
+        self: *Runtime,
         expected_generation: u64,
         preparation: *mcp_configuration.Preparation,
         manifest: *mcp_configuration.RuntimeManifest,
@@ -3380,7 +3380,7 @@ pub const Workbench = struct {
     }
 
     pub fn failMcpConfigurationApply(
-        self: *Workbench,
+        self: *Runtime,
         expected_generation: u64,
     ) void {
         const runtime = if (self.mcp) |*value| value else return;
@@ -3388,7 +3388,7 @@ pub const Workbench = struct {
     }
 
     pub fn completeMcpConnectionTest(
-        self: *Workbench,
+        self: *Runtime,
         server_id: []const u8,
         outcome: McpConnectionTestOutcome,
         tool_count: u32,
@@ -3404,14 +3404,14 @@ pub const Workbench = struct {
     }
 
     pub fn mcpAuthorizationOperation(
-        self: *const Workbench,
+        self: *const Runtime,
     ) ?McpAuthorizationOperationView {
         const runtime = if (self.mcp) |*value| value else return null;
         return runtime.authorizationOperation();
     }
 
     pub fn mcpServerOperationBusy(
-        self: *const Workbench,
+        self: *const Runtime,
         server_id: []const u8,
     ) bool {
         const runtime = if (self.mcp) |*value| value else return false;
@@ -3419,7 +3419,7 @@ pub const Workbench = struct {
     }
 
     pub fn requireMcpOauthReauthorization(
-        self: *Workbench,
+        self: *Runtime,
         failure: McpRuntimeAuthorizationFailure,
     ) Error!McpRuntimeAuthorizationFailureOutcome {
         const runtime = if (self.mcp) |*value| value else return .rejected;
@@ -3427,14 +3427,14 @@ pub const Workbench = struct {
         return runtime.requireOauthReauthorization(failure) catch |err| return @errorCast(err);
     }
 
-    pub fn blockMcpAdmissionAfterRuntimeAuthFailure(self: *Workbench) void {
+    pub fn blockMcpAdmissionAfterRuntimeAuthFailure(self: *Runtime) void {
         const runtime = if (self.mcp) |*value| value else return;
         runtime.blockAdmissionAfterRuntimeAuthFailure();
         self.publishMcpRuntimeChanges();
     }
 
     pub fn beginMcpAuthorization(
-        self: *Workbench,
+        self: *Runtime,
         expected_generation: u64,
         server_id: []const u8,
     ) Error!?McpAuthorizationStart {
@@ -3459,7 +3459,7 @@ pub const Workbench = struct {
     }
 
     pub fn advanceMcpAuthorization(
-        self: *Workbench,
+        self: *Runtime,
         operation_id: []const u8,
         phase: McpAuthorizationPhase,
     ) bool {
@@ -3469,7 +3469,7 @@ pub const Workbench = struct {
     }
 
     pub fn finishMcpAuthorization(
-        self: *Workbench,
+        self: *Runtime,
         operation_id: []const u8,
     ) bool {
         const runtime = if (self.mcp) |*value| value else return false;
@@ -3479,7 +3479,7 @@ pub const Workbench = struct {
     /// Host-only rendering delegates canonical validation and formatting to the
     /// Product MCP aggregate; bytes never enter the Renderer snapshot path.
     pub fn writeMcpConnectionApprovalDetails(
-        self: *const Workbench,
+        self: *const Runtime,
         expected_generation: u64,
         server_id: []const u8,
         output: []u8,
@@ -3493,7 +3493,7 @@ pub const Workbench = struct {
     }
 
     pub fn writeMcpSecretCapturePrompt(
-        self: *const Workbench,
+        self: *const Runtime,
         expected_generation: u64,
         server_id: []const u8,
         target: McpSecretCaptureTarget,
@@ -3514,7 +3514,7 @@ pub const Workbench = struct {
     /// Binds metadata-validated consent to the current approved server and
     /// returns the exact client identity used by the Application coordinator.
     pub fn authorizeMcpOauth(
-        self: *Workbench,
+        self: *Runtime,
         plan: McpOauthAuthorizationPlan,
     ) Error!McpOauthAuthorizationOutcome {
         const runtime = if (self.mcp) |*value| value else return .rejected;
@@ -3523,7 +3523,7 @@ pub const Workbench = struct {
     }
 
     pub fn beginMcpOauthDynamicRegistration(
-        self: *Workbench,
+        self: *Runtime,
         consent: mcp_configuration.OauthConsentInput,
     ) Error!McpOauthOperationBeginOutcome {
         const runtime = if (self.mcp) |*value| value else return .rejected;
@@ -3532,7 +3532,7 @@ pub const Workbench = struct {
     }
 
     pub fn completeMcpOauthDynamicRegistration(
-        self: *Workbench,
+        self: *Runtime,
         input: mcp_configuration.CompleteDynamicRegistrationInput,
     ) Error!mcp_configuration.ManagementOutcome {
         const runtime = if (self.mcp) |*value| value else {
@@ -3544,7 +3544,7 @@ pub const Workbench = struct {
     }
 
     pub fn beginMcpOauthCodeExchange(
-        self: *Workbench,
+        self: *Runtime,
         server_id: []const u8,
     ) Error!McpOauthCodeExchangeBeginOutcome {
         const runtime = if (self.mcp) |*value| value else return .rejected;
@@ -3553,7 +3553,7 @@ pub const Workbench = struct {
     }
 
     pub fn completeMcpOauthCodeExchange(
-        self: *Workbench,
+        self: *Runtime,
         input: mcp_configuration.CompleteCodeExchangeInput,
     ) Error!mcp_configuration.ManagementOutcome {
         const runtime = if (self.mcp) |*value| value else {
@@ -3567,13 +3567,13 @@ pub const Workbench = struct {
 
     /// Borrowed until the next Product MCP mutation. Application stores only
     /// the due time in its one-shot timer and asks again when it fires.
-    pub fn nextMcpOauthExpiry(self: *const Workbench) ?McpOauthExpiry {
+    pub fn nextMcpOauthExpiry(self: *const Runtime) ?McpOauthExpiry {
         const runtime = if (self.mcp) |*value| value else return null;
         return runtime.nextOauthExpiry();
     }
 
     pub fn beginMcpOauthRefresh(
-        self: *Workbench,
+        self: *Runtime,
         server_id: []const u8,
     ) Error!McpOauthRefreshBeginOutcome {
         self.syncLifecycle();
@@ -3583,7 +3583,7 @@ pub const Workbench = struct {
     }
 
     pub fn completeMcpOauthRefresh(
-        self: *Workbench,
+        self: *Runtime,
         input: mcp_configuration.CompleteRefreshInput,
         runtime_commit: McpOauthRuntimeCommit,
     ) Error!mcp_configuration.ManagementOutcome {
@@ -3597,7 +3597,7 @@ pub const Workbench = struct {
     }
 
     pub fn clearMcpOauthOperation(
-        self: *Workbench,
+        self: *Runtime,
         operation_id: []const u8,
     ) Error!mcp_configuration.ManagementOutcome {
         const runtime = if (self.mcp) |*value| value else return .rejected;
@@ -3606,7 +3606,7 @@ pub const Workbench = struct {
     }
 
     pub fn recoverMcpOauthOperation(
-        self: *Workbench,
+        self: *Runtime,
         operation_id: []const u8,
     ) Error!mcp_configuration.ManagementOutcome {
         const runtime = if (self.mcp) |*value| value else return .rejected;
@@ -3614,7 +3614,7 @@ pub const Workbench = struct {
         return runtime.recoverOauthOperation(operation_id) catch |err| return @errorCast(err);
     }
     pub fn createMcpHttpServer(
-        self: *Workbench,
+        self: *Runtime,
         expected_generation: u64,
         input: mcp_configuration.CreateHttpServerInput,
     ) Error!mcp_configuration.ManagementOutcome {
@@ -3624,7 +3624,7 @@ pub const Workbench = struct {
     }
 
     pub fn createMcpOauthHttpServer(
-        self: *Workbench,
+        self: *Runtime,
         expected_generation: u64,
         input: mcp_configuration.CreateOauthHttpServerInput,
     ) Error!mcp_configuration.ManagementOutcome {
@@ -3634,7 +3634,7 @@ pub const Workbench = struct {
     }
 
     pub fn createMcpStdioServer(
-        self: *Workbench,
+        self: *Runtime,
         expected_generation: u64,
         input: mcp_configuration.CreateStdioServerInput,
     ) Error!mcp_configuration.ManagementOutcome {
@@ -3644,7 +3644,7 @@ pub const Workbench = struct {
     }
 
     pub fn updateMcpHttpConnection(
-        self: *Workbench,
+        self: *Runtime,
         expected_generation: u64,
         input: mcp_configuration.UpdateHttpConnectionInput,
     ) Error!mcp_configuration.ManagementOutcome {
@@ -3654,7 +3654,7 @@ pub const Workbench = struct {
     }
 
     pub fn updateMcpOauthHttpConnection(
-        self: *Workbench,
+        self: *Runtime,
         expected_generation: u64,
         input: mcp_configuration.UpdateOauthHttpConnectionInput,
     ) Error!mcp_configuration.ManagementOutcome {
@@ -3664,7 +3664,7 @@ pub const Workbench = struct {
     }
 
     pub fn updateMcpStdioConnection(
-        self: *Workbench,
+        self: *Runtime,
         expected_generation: u64,
         input: mcp_configuration.UpdateStdioConnectionInput,
     ) Error!mcp_configuration.ManagementOutcome {
@@ -3676,7 +3676,7 @@ pub const Workbench = struct {
     /// Host-only secure capture boundary. Product MCP Runtime consumes and
     /// zeroes the secret on every path after this owner boundary is present.
     pub fn captureMcpStaticSecret(
-        self: *Workbench,
+        self: *Runtime,
         expected_generation: u64,
         input: mcp_configuration.CaptureStaticSecretInput,
     ) Error!mcp_configuration.ManagementOutcome {
@@ -3690,7 +3690,7 @@ pub const Workbench = struct {
 
     /// Host-only secure capture boundary for a pre-registered OAuth client.
     pub fn captureMcpOauthClientSecret(
-        self: *Workbench,
+        self: *Runtime,
         expected_generation: u64,
         input: mcp_configuration.CaptureOauthClientSecretInput,
     ) Error!mcp_configuration.ManagementOutcome {
@@ -3703,7 +3703,7 @@ pub const Workbench = struct {
     }
 
     pub fn renameMcpServer(
-        self: *Workbench,
+        self: *Runtime,
         expected_generation: u64,
         input: mcp_configuration.RenameServerInput,
     ) Error!mcp_configuration.ManagementOutcome {
@@ -3713,7 +3713,7 @@ pub const Workbench = struct {
     }
 
     pub fn approveMcpConnection(
-        self: *Workbench,
+        self: *Runtime,
         expected_generation: u64,
         input: mcp_configuration.ApproveConnectionInput,
     ) Error!mcp_configuration.ManagementOutcome {
@@ -3723,7 +3723,7 @@ pub const Workbench = struct {
     }
 
     pub fn setMcpServerEnabled(
-        self: *Workbench,
+        self: *Runtime,
         expected_generation: u64,
         input: mcp_configuration.SetServerEnabledInput,
     ) Error!mcp_configuration.ManagementOutcome {
@@ -3733,7 +3733,7 @@ pub const Workbench = struct {
     }
 
     pub fn setMcpAllowedTools(
-        self: *Workbench,
+        self: *Runtime,
         expected_generation: u64,
         input: mcp_configuration.SetAllowedToolsInput,
     ) Error!mcp_configuration.ManagementOutcome {
@@ -3743,7 +3743,7 @@ pub const Workbench = struct {
     }
 
     pub fn removeMcpServer(
-        self: *Workbench,
+        self: *Runtime,
         expected_generation: u64,
         server_id: []const u8,
     ) Error!mcp_configuration.ManagementOutcome {
@@ -3751,22 +3751,22 @@ pub const Workbench = struct {
         defer self.publishMcpRuntimeChanges();
         return runtime.removeServer(expected_generation, server_id) catch |err| return @errorCast(err);
     }
-    fn recoverExpiredMcpCatalogNoFail(self: *Workbench) void {
+    fn recoverExpiredMcpCatalogNoFail(self: *Runtime) void {
         if (self.shutting_down) return;
         if (self.mcp) |*runtime|
             if (runtime.recoverExpiredCatalog()) self.bumpRevision();
     }
 
-    fn updateMcpRefreshDeadlineNoFail(self: *Workbench) void {
+    fn updateMcpRefreshDeadlineNoFail(self: *Runtime) void {
         if (self.mcp) |*runtime| runtime.updateRefreshDeadline();
     }
 
-    fn rearmMcpRefreshTimerNoFail(self: *Workbench) void {
+    fn rearmMcpRefreshTimerNoFail(self: *Runtime) void {
         if (self.mcp) |*runtime| runtime.rearmRefreshTimer();
     }
 
     fn mcpViewContainsSensitive(context: *const anyopaque, value: []const u8) bool {
-        const self: *const Workbench = @ptrCast(@alignCast(context));
+        const self: *const Runtime = @ptrCast(@alignCast(context));
         return self.containsKnownCredential(value);
     }
 
@@ -3775,13 +3775,13 @@ pub const Workbench = struct {
         writer: *std.Io.Writer,
         value: []const u8,
     ) mcp_runtime.ViewError!void {
-        const self: *const Workbench = @ptrCast(@alignCast(context));
+        const self: *const Runtime = @ptrCast(@alignCast(context));
         self.projectedJsonValueWithKnownCredentials(writer, value) catch
             return error.SnapshotTooLarge;
     }
 
     fn writeMcpProjection(
-        self: *Workbench,
+        self: *Runtime,
         writer: *std.Io.Writer,
     ) Error!void {
         mcp_runtime.writeProjection(
@@ -3795,10 +3795,10 @@ pub const Workbench = struct {
         ) catch return error.SnapshotTooLarge;
     }
 
-    /// Commits the final assistant suffix only after Workbench has drained the
+    /// Commits the final assistant suffix only after Runtime has drained the
     /// Agent event pump following `markTerminalRunsBeforeEventDrain`.
     /// Any later event for the Run is rejected by `applyEvent`.
-    pub fn finalizeMarkedTerminalRunsAfterEventDrain(self: *Workbench) void {
+    pub fn finalizeMarkedTerminalRunsAfterEventDrain(self: *Runtime) void {
         const changed = self.task_runtime.finalizeMarkedTerminalRunsAfterEventDrain();
         if (changed) {
             self.commitTaskStateNoFail();
@@ -3806,7 +3806,7 @@ pub const Workbench = struct {
         }
     }
 
-    pub fn writeSnapshot(self: *Workbench, output: []u8) Error![]const u8 {
+    pub fn writeSnapshot(self: *Runtime, output: []u8) Error![]const u8 {
         self.syncLifecycle();
         var writer = std.Io.Writer.fixed(output);
         const schedule_persistence_ready =
@@ -3882,7 +3882,7 @@ pub const Workbench = struct {
     }
 
     fn writeScheduledTask(
-        self: *Workbench,
+        self: *Runtime,
         writer: *std.Io.Writer,
         item: *const scheduled_tasks_impl.Item,
     ) Error!void {
@@ -3969,7 +3969,7 @@ pub const Workbench = struct {
     }
 
     fn writeAccount(
-        self: *Workbench,
+        self: *Runtime,
         writer: *std.Io.Writer,
     ) Error!void {
         const view = self.accountView();
@@ -4086,7 +4086,7 @@ pub const Workbench = struct {
     }
 
     fn writeWorkspace(
-        self: *Workbench,
+        self: *Runtime,
         writer: *std.Io.Writer,
         workspace: *const WorkspaceView,
     ) Error!void {
@@ -4129,7 +4129,7 @@ pub const Workbench = struct {
         }) catch return error.SnapshotTooLarge;
     }
 
-    pub fn deinit(self: *Workbench) void {
+    pub fn deinit(self: *Runtime) void {
         self.shutdownExecutor();
         self.schedule_timer.cancelCurrent();
         self.task_runtime.deinitTasks(self.taskRuntimeReleaseEffects());
@@ -4153,17 +4153,17 @@ pub const Workbench = struct {
         self.* = undefined;
     }
 
-    pub fn stopFilePreviewAdmission(self: *Workbench) void {
+    pub fn stopFilePreviewAdmission(self: *Runtime) void {
         self.preview_lane.stopAdmission();
     }
 
-    pub fn shutdownFilePreviewExecutor(self: *Workbench) void {
+    pub fn shutdownFilePreviewExecutor(self: *Runtime) void {
         if (self.preview_executor_shutdown) return;
         self.preview_lane.shutdownExecutor();
         self.preview_executor_shutdown = true;
     }
 
-    pub fn shutdownExecutor(self: *Workbench) void {
+    pub fn shutdownExecutor(self: *Runtime) void {
         if (self.executor_shutdown) return;
         self.shutting_down = true;
         self.shutdownFilePreviewExecutor();
@@ -4189,22 +4189,22 @@ pub const Workbench = struct {
     /// Records the Application-owned Runtime shutdown fact and permanently
     /// invalidates every remaining Task Session Binding. Application calls
     /// this only after Runtime.shutdown succeeds and the final lifecycle sync.
-    pub fn relinquishAgentSessionsAfterRuntimeShutdown(self: *Workbench) void {
+    pub fn relinquishAgentSessionsAfterRuntimeShutdown(self: *Runtime) void {
         std.debug.assert(self.executor_shutdown);
         self.task_runtime.relinquishSessionsAfterRuntimeShutdown();
     }
 
-    pub fn abandonAgentSessionsForRuntimeDeinit(self: *Workbench) void {
+    pub fn abandonAgentSessionsForRuntimeDeinit(self: *Runtime) void {
         std.debug.assert(self.executor_shutdown);
         self.task_runtime.abandonSessionsForRuntimeDeinit();
     }
 
-    fn settleCheckpointTransactionsForShutdown(self: *Workbench) void {
+    fn settleCheckpointTransactionsForShutdown(self: *Runtime) void {
         self.task_runtime.settleCheckpointTransactionsForShutdown();
     }
 
     fn taskViewContainsSensitive(context: *const anyopaque, value: []const u8) bool {
-        const self: *const Workbench = @ptrCast(@alignCast(context));
+        const self: *const Runtime = @ptrCast(@alignCast(context));
         return self.containsKnownCredential(value);
     }
 
@@ -4213,12 +4213,12 @@ pub const Workbench = struct {
         writer: *std.Io.Writer,
         value: []const u8,
     ) product_task.ProjectionError!void {
-        const self: *const Workbench = @ptrCast(@alignCast(context));
+        const self: *const Runtime = @ptrCast(@alignCast(context));
         self.projectedJsonValueWithKnownCredentials(writer, value) catch
             return error.SnapshotTooLarge;
     }
 
-    fn taskTextProjection(self: *const Workbench) product_task.ProjectionText {
+    fn taskTextProjection(self: *const Runtime) product_task.ProjectionText {
         return .{
             .context = self,
             .contains_sensitive_fn = taskViewContainsSensitive,
@@ -4230,7 +4230,7 @@ pub const Workbench = struct {
         context: *anyopaque,
         query: task_runtime.ProjectionAuthorityQuery,
     ) task_runtime.ProjectionAuthority {
-        const self: *Workbench = @ptrCast(@alignCast(context));
+        const self: *Runtime = @ptrCast(@alignCast(context));
         return self.observeTaskRecoveryAuthority(query);
     }
 
@@ -4238,12 +4238,12 @@ pub const Workbench = struct {
         context: *anyopaque,
         query: task_runtime.ProjectionAuthorityQuery,
     ) task_runtime.ProjectionAuthority {
-        const self: *Workbench = @ptrCast(@alignCast(context));
+        const self: *Runtime = @ptrCast(@alignCast(context));
         return self.observeTaskRecoveryAuthority(query);
     }
 
     fn observeTaskRecoveryAuthority(
-        self: *Workbench,
+        self: *Runtime,
         query: task_runtime.ProjectionAuthorityQuery,
     ) task_runtime.ProjectionAuthority {
         const workspace = self.findWorkspace(query.workspace_id);
@@ -4291,7 +4291,7 @@ pub const Workbench = struct {
         writer: *std.Io.Writer,
         catalog: CatalogProjection,
     ) product_task.ProjectionError!void {
-        const self: *Workbench = @ptrCast(@alignCast(@constCast(context)));
+        const self: *Runtime = @ptrCast(@alignCast(@constCast(context)));
         skill_runtime.Runtime.writeCatalogProjection(
             writer,
             self.skillTextProjection(),
@@ -4299,7 +4299,7 @@ pub const Workbench = struct {
         ) catch return error.SnapshotTooLarge;
     }
 
-    fn taskRuntimeProjectionEffects(self: *Workbench) task_runtime.ProjectionEffects {
+    fn taskRuntimeProjectionEffects(self: *Runtime) task_runtime.ProjectionEffects {
         return .{
             .context = self,
             .authority_fn = taskProjectionAuthority,
@@ -4313,7 +4313,7 @@ pub const Workbench = struct {
     }
 
     fn taskRuntimeRecoveryAdmissionEffects(
-        self: *Workbench,
+        self: *Runtime,
     ) task_runtime.RecoveryAdmissionEffects {
         return .{
             .context = self,
@@ -4325,7 +4325,7 @@ pub const Workbench = struct {
         context: *const anyopaque,
         value: []const u8,
     ) bool {
-        const self: *const Workbench = @ptrCast(@alignCast(context));
+        const self: *const Runtime = @ptrCast(@alignCast(context));
         return self.containsKnownCredential(value);
     }
 
@@ -4334,12 +4334,12 @@ pub const Workbench = struct {
         writer: *std.Io.Writer,
         value: []const u8,
     ) skill_runtime.ViewError!void {
-        const self: *const Workbench = @ptrCast(@alignCast(context));
+        const self: *const Runtime = @ptrCast(@alignCast(context));
         self.projectedJsonValueWithKnownCredentials(writer, value) catch
             return error.SnapshotTooLarge;
     }
 
-    fn skillTextProjection(self: *const Workbench) skill_runtime.TextProjection {
+    fn skillTextProjection(self: *const Runtime) skill_runtime.TextProjection {
         return .{
             .context = self,
             .contains_sensitive_fn = skillViewContainsSensitive,
@@ -4351,7 +4351,7 @@ pub const Workbench = struct {
         context: *const anyopaque,
         index: usize,
     ) ?skill_runtime.ScopedCatalog {
-        const self: *const Workbench = @ptrCast(@alignCast(context));
+        const self: *const Runtime = @ptrCast(@alignCast(context));
         const workspace = &(self.workspaces[index] orelse return null);
         if (workspace.kind != .manual or !workspace.visible or
             workspace.authorization != .available) return null;
@@ -4359,7 +4359,7 @@ pub const Workbench = struct {
     }
 
     fn writeSkillManagement(
-        self: *Workbench,
+        self: *Runtime,
         writer: *std.Io.Writer,
     ) Error!void {
         self.skill.writeManagementProjection(
@@ -4373,13 +4373,13 @@ pub const Workbench = struct {
         ) catch return error.SnapshotTooLarge;
     }
 
-    fn accountHasModel(self: *const Workbench, model: []const u8) bool {
+    fn accountHasModel(self: *const Runtime, model: []const u8) bool {
         for (self.account.model_views[0..self.account.model_count]) |candidate|
             if (std.mem.eql(u8, candidate.id, model)) return true;
         return false;
     }
 
-    fn canCreateTask(self: *const Workbench) bool {
+    fn canCreateTask(self: *const Runtime) bool {
         return !self.shutting_down and
             self.execution_replacement == .none and
             self.execution.ready() and
@@ -4391,13 +4391,13 @@ pub const Workbench = struct {
                     self.account.execution_generation == self.execution.generation;
     }
 
-    fn validExecutionGeneration(self: *const Workbench, generation: u64) bool {
+    fn validExecutionGeneration(self: *const Runtime, generation: u64) bool {
         return generation != 0 and generation == self.execution.generation and
             (self.custom_execution_binding != null or
                 generation == self.account.execution_generation);
     }
 
-    fn admissionModel(self: *const Workbench) []const u8 {
+    fn admissionModel(self: *const Runtime) []const u8 {
         return if (self.custom_execution_binding != null)
             self.execution.model()
         else
@@ -4405,7 +4405,7 @@ pub const Workbench = struct {
     }
 
     fn scheduledTaskDefinition(
-        self: *Workbench,
+        self: *Runtime,
         input: ScheduledTaskDefinitionInput,
     ) Error!scheduled_tasks_impl.Definition {
         if (!self.canCreateTask()) return error.ExecutionUnavailable;
@@ -4435,7 +4435,7 @@ pub const Workbench = struct {
     }
 
     fn triggerScheduledTask(
-        self: *Workbench,
+        self: *Runtime,
         id: u64,
         planned_at_unix_seconds: u64,
         triggered_at_unix_seconds: u64,
@@ -4535,7 +4535,7 @@ pub const Workbench = struct {
     }
 
     fn finalizeScheduledTaskClaimSubmitted(
-        self: *Workbench,
+        self: *Runtime,
         id: u64,
         planned_at_unix_seconds: u64,
         source: scheduled_tasks_impl.OccurrenceSource,
@@ -4557,7 +4557,7 @@ pub const Workbench = struct {
     }
 
     fn finalizeScheduledTaskClaimRejected(
-        self: *Workbench,
+        self: *Runtime,
         id: u64,
         planned_at_unix_seconds: u64,
         source: scheduled_tasks_impl.OccurrenceSource,
@@ -4585,7 +4585,7 @@ pub const Workbench = struct {
         });
     }
 
-    fn rearmScheduledTaskTimerNoFail(self: *Workbench) void {
+    fn rearmScheduledTaskTimerNoFail(self: *Runtime) void {
         self.schedule_timer.cancelCurrent();
         if (!self.schedule_background_available) return;
         if (self.schedule_persistence_health != .ready) return;
@@ -4606,7 +4606,7 @@ pub const Workbench = struct {
         self.bumpRevision();
     }
 
-    fn reconcileScheduledTaskCompletionsNoFail(self: *Workbench) bool {
+    fn reconcileScheduledTaskCompletionsNoFail(self: *Runtime) bool {
         if (self.schedule_persistence_health != .ready) return false;
         for (self.scheduled_tasks.items) |*entry| {
             const item = &(entry.* orelse continue);
@@ -4647,7 +4647,7 @@ pub const Workbench = struct {
         return false;
     }
 
-    fn reconcileScheduledTaskBindingsNoFail(self: *Workbench) bool {
+    fn reconcileScheduledTaskBindingsNoFail(self: *Runtime) bool {
         if (self.schedule_persistence_health != .ready) return false;
         var candidate = self.scheduled_tasks.clone(self.allocator) catch
             return false;
@@ -4663,7 +4663,7 @@ pub const Workbench = struct {
     }
 
     fn reconcileScheduledTaskBindingsInStore(
-        self: *Workbench,
+        self: *Runtime,
         store: *scheduled_tasks_impl.Store,
     ) bool {
         var changed = false;
@@ -4689,7 +4689,7 @@ pub const Workbench = struct {
         return changed;
     }
 
-    fn taskPersistenceLimits(self: *const Workbench) task_persistence.Limits {
+    fn taskPersistenceLimits(self: *const Runtime) task_persistence.Limits {
         return .{
             .max_workspaces = self.workspaces.len,
             .max_tasks = self.limits.max_tasks,
@@ -4709,7 +4709,7 @@ pub const Workbench = struct {
         };
     }
 
-    fn taskRestoreProjection(self: *Workbench) task_persistence.RestoreProjection {
+    fn taskRestoreProjection(self: *Runtime) task_persistence.RestoreProjection {
         return .{
             .context = self,
             .allocator = self.allocator,
@@ -4727,7 +4727,7 @@ pub const Workbench = struct {
         value: []const u8,
         max: usize,
     ) task_persistence.ProjectionError![]u8 {
-        const self: *Workbench = @ptrCast(@alignCast(context));
+        const self: *Runtime = @ptrCast(@alignCast(context));
         return self.copyBounded(value, max) catch |err| return @errorCast(err);
     }
 
@@ -4735,7 +4735,7 @@ pub const Workbench = struct {
         context: *anyopaque,
         capacity: usize,
     ) task_persistence.ProjectionError![]u8 {
-        const self: *Workbench = @ptrCast(@alignCast(context));
+        const self: *Runtime = @ptrCast(@alignCast(context));
         return self.allocTrackedCapacity(capacity) catch |err| return @errorCast(err);
     }
 
@@ -4745,13 +4745,13 @@ pub const Workbench = struct {
         suffix: []const u8,
         max: usize,
     ) task_persistence.ProjectionError!void {
-        const self: *Workbench = @ptrCast(@alignCast(context));
+        const self: *Runtime = @ptrCast(@alignCast(context));
         self.appendTrackedText(target, suffix, max) catch |err|
             return @errorCast(err);
     }
 
     fn freeRestoredTaskText(context: *anyopaque, value: []u8) void {
-        const self: *Workbench = @ptrCast(@alignCast(context));
+        const self: *Runtime = @ptrCast(@alignCast(context));
         self.freeTracked(value);
     }
 
@@ -4759,11 +4759,11 @@ pub const Workbench = struct {
         context: *anyopaque,
         target: *task_persistence.RestoreText,
     ) void {
-        const self: *Workbench = @ptrCast(@alignCast(context));
+        const self: *Runtime = @ptrCast(@alignCast(context));
         self.freeTrackedText(target);
     }
 
-    fn restoreTaskState(self: *Workbench, bytes: []const u8) Error!void {
+    fn restoreTaskState(self: *Runtime, bytes: []const u8) Error!void {
         std.debug.assert(countPresent(WorkspaceView, self.workspaces) == 0);
         std.debug.assert(self.task_runtime.taskCount() == 0);
         var recovered = try task_persistence.decodeRecovering(
@@ -4824,7 +4824,7 @@ pub const Workbench = struct {
     }
 
     fn recordTaskFailure(
-        self: *Workbench,
+        self: *Runtime,
         task_id: u64,
         recent_order: u64,
         reason: []const u8,
@@ -4833,7 +4833,7 @@ pub const Workbench = struct {
     }
 
     fn restoreWorkspace(
-        self: *Workbench,
+        self: *Runtime,
         wire: task_persistence.WorkspaceWire,
     ) Error!WorkspaceView {
         const canonical_root = try self.copyBounded(
@@ -4874,7 +4874,7 @@ pub const Workbench = struct {
         };
     }
 
-    fn reconcileCheckpointStoreNoFail(self: *Workbench) void {
+    fn reconcileCheckpointStoreNoFail(self: *Runtime) void {
         if (self.task_persistence_health != .ready or
             self.checkpoint_store_health.load(.acquire) != .ready)
             return;
@@ -4885,7 +4885,7 @@ pub const Workbench = struct {
             self.taskRuntimeDurableEffect(),
         );
     }
-    fn clearRestoredTaskStateNoFail(self: *Workbench) void {
+    fn clearRestoredTaskStateNoFail(self: *Runtime) void {
         self.task_runtime.deinitTasks(self.taskRuntimeReleaseEffects());
         for (self.workspaces) |*entry| {
             const workspace = &(entry.* orelse continue);
@@ -4899,12 +4899,12 @@ pub const Workbench = struct {
 
     const CheckpointPersistenceOverride = task_persistence.CheckpointPersistenceOverride;
 
-    fn buildTaskStateWire(self: *Workbench) Error!task_persistence.TaskStateWireScratch {
+    fn buildTaskStateWire(self: *Runtime) Error!task_persistence.TaskStateWireScratch {
         return self.buildTaskStateWireWithCheckpoint(null);
     }
 
     fn buildTaskStateWireWithCheckpoint(
-        self: *Workbench,
+        self: *Runtime,
         checkpoint_override: ?CheckpointPersistenceOverride,
     ) Error!task_persistence.TaskStateWireScratch {
         const workspace_count = countPresent(WorkspaceView, self.workspaces);
@@ -4946,13 +4946,13 @@ pub const Workbench = struct {
         };
     }
 
-    fn requireTaskPersistenceMutation(self: *const Workbench) Error!void {
+    fn requireTaskPersistenceMutation(self: *const Runtime) Error!void {
         if (!self.task_runtime.durableMutationAvailable())
             return error.TaskPersistenceOutcomeUnknown;
         return switch (self.task_persistence_health) {
             .ready => {},
             .degraded => {},
-            // Unit-level Workbench users may deliberately omit persistence.
+            // Unit-level Runtime users may deliberately omit persistence.
             // Production startup converts every store initialization/read
             // failure into a typed non-ready health instead.
             .unavailable => if (self.task_persistence.restore_failed)
@@ -4970,7 +4970,7 @@ pub const Workbench = struct {
         sensitive: []const u8,
         reclaimable: usize,
     ) (std.mem.Allocator.Error || error{ProjectionCapacity})!task_runtime.ProjectedText {
-        const self: *Workbench = @ptrCast(@alignCast(context));
+        const self: *Runtime = @ptrCast(@alignCast(context));
         std.debug.assert(reclaimable <= self.projection_bytes);
         self.projection_bytes -= reclaimable;
         const projected = self.copyProjected(value, max, sensitive) catch |err|
@@ -4989,17 +4989,17 @@ pub const Workbench = struct {
     }
 
     fn freeTaskRuntimeText(context: *anyopaque, value: []u8) void {
-        const self: *Workbench = @ptrCast(@alignCast(context));
+        const self: *Runtime = @ptrCast(@alignCast(context));
         self.freeTracked(value);
     }
 
     fn discardPreviousTaskRuntimeText(context: *anyopaque, value: []u8) void {
-        const self: *Workbench = @ptrCast(@alignCast(context));
+        const self: *Runtime = @ptrCast(@alignCast(context));
         self.allocator.free(value);
     }
 
     fn restorePreviousTaskRuntimeText(context: *anyopaque, bytes: usize) void {
-        const self: *Workbench = @ptrCast(@alignCast(context));
+        const self: *Runtime = @ptrCast(@alignCast(context));
         self.projection_bytes += bytes;
     }
 
@@ -5007,7 +5007,7 @@ pub const Workbench = struct {
         context: *anyopaque,
         capacity: usize,
     ) (std.mem.Allocator.Error || error{ProjectionCapacity})![]u8 {
-        const self: *Workbench = @ptrCast(@alignCast(context));
+        const self: *Runtime = @ptrCast(@alignCast(context));
         return self.allocTrackedCapacity(capacity) catch |err| switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             else => error.ProjectionCapacity,
@@ -5015,19 +5015,19 @@ pub const Workbench = struct {
     }
 
     fn reserveTaskRuntimeBytes(context: *anyopaque, bytes: usize) error{ProjectionCapacity}!void {
-        const self: *Workbench = @ptrCast(@alignCast(context));
+        const self: *Runtime = @ptrCast(@alignCast(context));
         if (bytes > self.limits.max_projection_bytes - self.projection_bytes)
             return error.ProjectionCapacity;
         self.projection_bytes += bytes;
     }
 
     fn releaseTaskRuntimeBytes(context: *anyopaque, bytes: usize) void {
-        const self: *Workbench = @ptrCast(@alignCast(context));
+        const self: *Runtime = @ptrCast(@alignCast(context));
         std.debug.assert(bytes <= self.projection_bytes);
         self.projection_bytes -= bytes;
     }
 
-    fn taskRuntimeTextProjection(self: *Workbench) task_runtime.TextProjection {
+    fn taskRuntimeTextProjection(self: *Runtime) task_runtime.TextProjection {
         return .{
             .context = self,
             .project_fn = projectTaskRuntimeText,
@@ -5041,7 +5041,7 @@ pub const Workbench = struct {
     }
 
     fn commitTaskRuntimeCandidate(context: *anyopaque) task_runtime.DurableCommit {
-        const self: *Workbench = @ptrCast(@alignCast(context));
+        const self: *Runtime = @ptrCast(@alignCast(context));
         self.commitTaskStateIfConfigured() catch |err| return switch (err) {
             error.TaskPersistenceOutcomeUnknown => .outcome_unknown,
             else => .failed,
@@ -5049,7 +5049,7 @@ pub const Workbench = struct {
         return .committed;
     }
 
-    fn taskRuntimeDurableEffect(self: *Workbench) task_runtime.DurableEffect {
+    fn taskRuntimeDurableEffect(self: *Runtime) task_runtime.DurableEffect {
         return .{ .context = self, .commit_fn = commitTaskRuntimeCandidate };
     }
 
@@ -5057,7 +5057,7 @@ pub const Workbench = struct {
         context: *anyopaque,
         checkpoint_override: ?task_persistence.CheckpointPersistenceOverride,
     ) task_runtime.DurableCommit {
-        const self: *Workbench = @ptrCast(@alignCast(context));
+        const self: *Runtime = @ptrCast(@alignCast(context));
         self.commitTaskStateWithCheckpoint(checkpoint_override) catch |err| return switch (err) {
             error.TaskPersistenceOutcomeUnknown => .outcome_unknown,
             else => .failed,
@@ -5069,11 +5069,11 @@ pub const Workbench = struct {
         context: *anyopaque,
         identity: checkpoint_store.Identity,
     ) void {
-        const self: *Workbench = @ptrCast(@alignCast(context));
+        const self: *Runtime = @ptrCast(@alignCast(context));
         if (self.checkpoint_store) |store| store.delete(identity);
     }
 
-    fn taskRuntimeCheckpointEffects(self: *Workbench) task_runtime.CheckpointEffects {
+    fn taskRuntimeCheckpointEffects(self: *Runtime) task_runtime.CheckpointEffects {
         return .{
             .context = self,
             .commit_fn = commitTaskRuntimeCheckpoint,
@@ -5085,7 +5085,7 @@ pub const Workbench = struct {
         context: *anyopaque,
         task_id: u64,
     ) task_runtime.SessionReleaseOutcome {
-        const self: *Workbench = @ptrCast(@alignCast(context));
+        const self: *Runtime = @ptrCast(@alignCast(context));
         const started = self.task_runtime.beginDetach(
             task_id,
             self.taskRuntimeOperationEffects(),
@@ -5097,7 +5097,7 @@ pub const Workbench = struct {
         context: *anyopaque,
         workspace_id: u64,
     ) task_runtime.DurableCommit {
-        const self: *Workbench = @ptrCast(@alignCast(context));
+        const self: *Runtime = @ptrCast(@alignCast(context));
         var removed_index: ?usize = null;
         var removed_workspace: WorkspaceView = undefined;
         for (self.workspaces, 0..) |*entry, index| {
@@ -5121,11 +5121,11 @@ pub const Workbench = struct {
     }
 
     fn deleteTaskRuntimeCheckpointTask(context: *anyopaque, task_id: u64) void {
-        const self: *Workbench = @ptrCast(@alignCast(context));
+        const self: *Runtime = @ptrCast(@alignCast(context));
         if (self.checkpoint_store) |store| store.deleteTask(task_id);
     }
 
-    fn taskRuntimeDeletionEffects(self: *Workbench) task_runtime.DeletionEffects {
+    fn taskRuntimeDeletionEffects(self: *Runtime) task_runtime.DeletionEffects {
         return .{
             .context = self,
             .release_session_fn = releaseTaskRuntimeSession,
@@ -5136,7 +5136,7 @@ pub const Workbench = struct {
     }
 
     fn cancelTaskRuntimeExecutor(context: *anyopaque, identity: *anyopaque) bool {
-        const self: *Workbench = @ptrCast(@alignCast(context));
+        const self: *Runtime = @ptrCast(@alignCast(context));
         return self.executor.cancel(identity);
     }
 
@@ -5147,7 +5147,7 @@ pub const Workbench = struct {
         execute_fn: *const fn (*anyopaque) void,
         cancel_fn: *const fn (*anyopaque) void,
     ) error{ ExecutorShuttingDown, QueueFull }!void {
-        const self: *Workbench = @ptrCast(@alignCast(context));
+        const self: *Runtime = @ptrCast(@alignCast(context));
         return self.executor.enqueue(.{
             .identity = identity,
             .context = job_context,
@@ -5167,7 +5167,7 @@ pub const Workbench = struct {
         value.workbench.next_workspace_recent_order = recent_order;
     }
 
-    fn taskRuntimeOperationEffects(self: *Workbench) task_runtime.OperationEffects {
+    fn taskRuntimeOperationEffects(self: *Runtime) task_runtime.OperationEffects {
         return .{
             .text = self.taskRuntimeTextProjection(),
             .durable = self.taskRuntimeDurableEffect(),
@@ -5208,17 +5208,17 @@ pub const Workbench = struct {
     }
 
     fn redactTaskRuntimeProducts(context: *anyopaque, credential: []const u8) void {
-        const self: *Workbench = @ptrCast(@alignCast(context));
+        const self: *Runtime = @ptrCast(@alignCast(context));
         self.redactAllProductProjectionsNoFail(credential);
     }
 
     fn releaseTaskRuntimeProjectionBytes(context: *anyopaque, bytes: usize) void {
-        const self: *Workbench = @ptrCast(@alignCast(context));
+        const self: *Runtime = @ptrCast(@alignCast(context));
         std.debug.assert(bytes <= self.projection_bytes);
         self.projection_bytes -= bytes;
     }
 
-    fn taskRuntimeReleaseEffects(self: *Workbench) task_runtime.ReleaseEffects {
+    fn taskRuntimeReleaseEffects(self: *Runtime) task_runtime.ReleaseEffects {
         return .{
             .context = self,
             .redact_all_fn = redactTaskRuntimeProducts,
@@ -5230,7 +5230,7 @@ pub const Workbench = struct {
         context: *anyopaque,
         query: task_runtime.RecoveryAuthorityQuery,
     ) task_runtime.RecoveryExternalAuthority {
-        const self: *Workbench = @ptrCast(@alignCast(context));
+        const self: *Runtime = @ptrCast(@alignCast(context));
         const workspace = self.findWorkspace(query.workspace_id);
         const execution_exact = self.execution_replacement == .none and
             self.execution.ready() and
@@ -5267,7 +5267,7 @@ pub const Workbench = struct {
         };
     }
 
-    fn taskRuntimeRecoveryEffects(self: *Workbench) task_runtime.RecoveryEffects {
+    fn taskRuntimeRecoveryEffects(self: *Runtime) task_runtime.RecoveryEffects {
         return .{
             .context = self,
             .authority_fn = taskRuntimeRecoveryAuthority,
@@ -5275,7 +5275,7 @@ pub const Workbench = struct {
         };
     }
 
-    fn commitTaskStateIfConfigured(self: *Workbench) Error!void {
+    fn commitTaskStateIfConfigured(self: *Runtime) Error!void {
         if (self.task_persistence_health == .unavailable and
             !self.task_persistence.enabled and
             !self.task_persistence.restore_failed)
@@ -5283,7 +5283,7 @@ pub const Workbench = struct {
         return self.commitTaskState();
     }
 
-    fn commitTaskStateNoFail(self: *Workbench) void {
+    fn commitTaskStateNoFail(self: *Runtime) void {
         self.commitTaskStateIfConfigured() catch |err| switch (err) {
             error.TaskPersistenceOutcomeUnknown,
             error.TaskPersistenceUnavailable,
@@ -5298,18 +5298,18 @@ pub const Workbench = struct {
         };
     }
 
-    fn markTaskPersistenceWriteFailed(self: *Workbench) void {
+    fn markTaskPersistenceWriteFailed(self: *Runtime) void {
         if (self.task_persistence_health == .write_failed) return;
         self.task_persistence_health = .write_failed;
         self.bumpRevision();
     }
 
-    fn commitTaskState(self: *Workbench) Error!void {
+    fn commitTaskState(self: *Runtime) Error!void {
         return self.commitTaskStateWithCheckpoint(null);
     }
 
     fn commitTaskStateWithCheckpoint(
-        self: *Workbench,
+        self: *Runtime,
         checkpoint_override: ?CheckpointPersistenceOverride,
     ) Error!void {
         switch (self.task_persistence_health) {
@@ -5354,7 +5354,7 @@ pub const Workbench = struct {
     }
 
     fn commitScheduledTaskCandidate(
-        self: *Workbench,
+        self: *Runtime,
         candidate: *const scheduled_tasks_impl.Store,
     ) Error!void {
         switch (self.schedule_persistence_health) {
@@ -5384,7 +5384,7 @@ pub const Workbench = struct {
     }
 
     fn replaceScheduledTaskStore(
-        self: *Workbench,
+        self: *Runtime,
         candidate: *scheduled_tasks_impl.Store,
     ) void {
         self.scheduled_tasks.deinit();
@@ -5397,7 +5397,7 @@ pub const Workbench = struct {
     /// pass through this function so the final live copy scrubs all retained
     /// projections before secure-zero makes the credential unavailable.
     fn upsertWorkspace(
-        self: *Workbench,
+        self: *Runtime,
         input: TaskCreateInput,
     ) Error!WorkspaceUpsert {
         if (!std.fs.path.isAbsolute(input.workspace_root))
@@ -5557,7 +5557,7 @@ pub const Workbench = struct {
     }
 
     fn rollbackWorkspaceUpsert(
-        self: *Workbench,
+        self: *Runtime,
         upsert: WorkspaceUpsert,
     ) void {
         switch (upsert.previous) {
@@ -5582,7 +5582,7 @@ pub const Workbench = struct {
     }
 
     fn finishWorkspaceUpsert(
-        self: *Workbench,
+        self: *Runtime,
         upsert: WorkspaceUpsert,
         skill_root: []u8,
     ) void {
@@ -5609,7 +5609,7 @@ pub const Workbench = struct {
     }
 
     fn registerAutomaticWorkspace(
-        self: *Workbench,
+        self: *Runtime,
         canonical_root: []const u8,
     ) Error!*WorkspaceView {
         const store = if (self.automatic_workspaces) |*value| value else return error.WorkspaceUnavailable;
@@ -5675,7 +5675,7 @@ pub const Workbench = struct {
     }
 
     fn releaseAutomaticWorkspaceNoFail(
-        self: *Workbench,
+        self: *Runtime,
         workspace_id: u64,
     ) void {
         for (self.workspaces) |*entry| {
@@ -5691,7 +5691,7 @@ pub const Workbench = struct {
         unreachable;
     }
 
-    fn takeWorkspaceRecentOrder(self: *Workbench) Error!u64 {
+    fn takeWorkspaceRecentOrder(self: *Runtime) Error!u64 {
         if (self.next_workspace_recent_order == 0)
             return error.WorkspaceOrderExhausted;
         const recent_order = self.next_workspace_recent_order;
@@ -5699,21 +5699,21 @@ pub const Workbench = struct {
         return recent_order;
     }
 
-    fn findWorkspace(self: *Workbench, workspace_id: u64) ?*WorkspaceView {
+    fn findWorkspace(self: *Runtime, workspace_id: u64) ?*WorkspaceView {
         if (workspace_id == 0) return null;
         for (self.workspaces) |*entry| if (entry.*) |*workspace|
             if (workspace.id == workspace_id) return workspace;
         return null;
     }
 
-    fn findWorkspaceByRoot(self: *Workbench, canonical_root: []const u8) ?*WorkspaceView {
+    fn findWorkspaceByRoot(self: *Runtime, canonical_root: []const u8) ?*WorkspaceView {
         for (self.workspaces) |*entry| if (entry.*) |*workspace|
             if (std.mem.eql(u8, workspace.canonical_root, canonical_root)) return workspace;
         return null;
     }
 
     fn findWorkspaceIndexByRoot(
-        self: *const Workbench,
+        self: *const Runtime,
         canonical_root: []const u8,
     ) ?usize {
         for (self.workspaces, 0..) |entry, index| if (entry) |workspace|
@@ -5721,7 +5721,7 @@ pub const Workbench = struct {
         return null;
     }
 
-    fn workspaceCount(self: *const Workbench, kind: WorkspaceKind) usize {
+    fn workspaceCount(self: *const Runtime, kind: WorkspaceKind) usize {
         var count: usize = 0;
         for (self.workspaces) |entry| if (entry) |workspace|
             if (workspace.kind == kind) {
@@ -5731,7 +5731,7 @@ pub const Workbench = struct {
     }
 
     fn requireSkillMutationAuthority(
-        self: *Workbench,
+        self: *Runtime,
         scope: skill_runtime.ManagementScope,
     ) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
@@ -5755,7 +5755,7 @@ pub const Workbench = struct {
     }
 
     fn requireSkillAssetAuthority(
-        self: *Workbench,
+        self: *Runtime,
         scope: skill_runtime.ManagementScope,
     ) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
@@ -5779,7 +5779,7 @@ pub const Workbench = struct {
         context: *const anyopaque,
         index: usize,
     ) ?skill_runtime.EnablementWorkspaceIdentity {
-        const self: *const Workbench = @ptrCast(@alignCast(context));
+        const self: *const Runtime = @ptrCast(@alignCast(context));
         const workspace = self.workspaces[index] orelse return null;
         if (workspace.kind != .manual or !workspace.visible) return null;
         return .{
@@ -5788,7 +5788,7 @@ pub const Workbench = struct {
         };
     }
 
-    fn reconcileSkillEnablementNoFail(self: *Workbench) void {
+    fn reconcileSkillEnablementNoFail(self: *Runtime) void {
         self.skill.reconcileEnablementNoFail(.{
             .context = self,
             .slot_count = self.workspaces.len,
@@ -5797,7 +5797,7 @@ pub const Workbench = struct {
     }
 
     fn recoverSkillTransactionsForScopeNoFail(
-        self: *Workbench,
+        self: *Runtime,
         scope: skill_runtime.ManagementScope,
     ) void {
         self.skill.recoverTransactionsForScopeNoFail(
@@ -5806,19 +5806,19 @@ pub const Workbench = struct {
         );
     }
 
-    fn commitMcpRefreshJobNoFail(self: *Workbench) bool {
+    fn commitMcpRefreshJobNoFail(self: *Runtime) bool {
         const runtime = if (self.mcp) |*value| value else return false;
         return runtime.syncRefreshJob();
     }
 
-    fn workspaceHasTasks(self: *const Workbench, workspace_id: u64) bool {
+    fn workspaceHasTasks(self: *const Runtime, workspace_id: u64) bool {
         return self.task_runtime.workspaceHasTasks(workspace_id);
     }
 
     /// Completes the second phase of Workspace removal only after every Task
     /// Session in that Workspace has reached a stable terminal owner state.
     /// A close failure restores admission so the user can retry explicitly.
-    fn finalizeWorkspaceRemovalsNoFail(self: *Workbench) bool {
+    fn finalizeWorkspaceRemovalsNoFail(self: *Runtime) bool {
         var changed = false;
         for (self.workspaces) |*entry| {
             const workspace = &(entry.* orelse continue);
@@ -5840,7 +5840,7 @@ pub const Workbench = struct {
         return changed;
     }
 
-    fn workspaceSignals(self: *const Workbench, workspace_id: u64) WorkspaceSignals {
+    fn workspaceSignals(self: *const Runtime, workspace_id: u64) WorkspaceSignals {
         const facts = self.task_runtime.workspaceSignals(workspace_id);
         return .{
             .running = facts.running,
@@ -5849,7 +5849,7 @@ pub const Workbench = struct {
         };
     }
 
-    fn deinitWorkspaceView(self: *Workbench, workspace: *WorkspaceView) void {
+    fn deinitWorkspaceView(self: *Runtime, workspace: *WorkspaceView) void {
         std.debug.assert(self.skill.unregisterWorkspace(
             workspace.id,
             self.skillProjectionBudget(),
@@ -5863,7 +5863,7 @@ pub const Workbench = struct {
     }
 
     fn redactWorkspaceProjectionsNoFail(
-        self: *Workbench,
+        self: *Runtime,
         credential: []const u8,
     ) void {
         if (credential.len == 0) return;
@@ -5877,7 +5877,7 @@ pub const Workbench = struct {
     /// or may be about to leave the set scanned by snapshot serialization.
     /// Permanently scrub every Renderer-facing projection before either edge.
     fn redactAllProductProjectionsNoFail(
-        self: *Workbench,
+        self: *Runtime,
         credential: []const u8,
     ) void {
         if (credential.len == 0) return;
@@ -5895,7 +5895,7 @@ pub const Workbench = struct {
     }
 
     fn redactScheduledTaskNoFail(
-        _: *Workbench,
+        _: *Runtime,
         item: *scheduled_tasks_impl.Item,
         credential: []const u8,
     ) void {
@@ -5910,7 +5910,7 @@ pub const Workbench = struct {
     }
 
     fn redactCatalogProjectionsNoFail(
-        self: *Workbench,
+        self: *Runtime,
         credential: []const u8,
     ) void {
         self.skill.redactCatalogsNoFail(
@@ -5920,7 +5920,7 @@ pub const Workbench = struct {
     }
 
     fn redactTaskProjectionNoFail(
-        _: *Workbench,
+        _: *Runtime,
         task: *TestTask,
         credential: []const u8,
     ) void {
@@ -5989,7 +5989,7 @@ pub const Workbench = struct {
     }
 
     fn redactWorkspaceProjectionNoFail(
-        _: *Workbench,
+        _: *Runtime,
         workspace: *WorkspaceView,
         credential: []const u8,
     ) void {
@@ -6009,7 +6009,7 @@ pub const Workbench = struct {
     }
 
     fn checkpointMutationPending(
-        self: *const Workbench,
+        self: *const Runtime,
         task: *const TestTask,
     ) bool {
         return self.checkpoint_store_health.load(.acquire) != .unavailable and
@@ -6027,7 +6027,7 @@ pub const Workbench = struct {
             text_title,
         );
         const long_title = boundAutomaticTitle(
-            "请分析 AgentCore Conversation 生命周期以及它和 Workbench 的边界并给出迁移建议",
+            "请分析 AgentCore Conversation 生命周期以及它和 Runtime 的边界并给出迁移建议",
         );
         try std.testing.expectEqualStrings(
             "请分析 AgentCore Conversation",
@@ -6065,7 +6065,7 @@ pub const Workbench = struct {
     }
 
     test "automatic title allocation failure does not escape the fallback" {
-        var workbench = try testWorkbench();
+        var workbench = try testRuntime();
         defer workbench.deinit();
 
         const remaining = workbench.limits.max_projection_bytes - workbench.projection_bytes;
@@ -6084,7 +6084,7 @@ pub const Workbench = struct {
     }
 
     test "automatic title settlement never overwrites a user title" {
-        var workbench = try testWorkbench();
+        var workbench = try testRuntime();
         defer workbench.deinit();
 
         const task = &workbench.task_runtime.tasks[0].?;
@@ -6117,7 +6117,7 @@ pub const Workbench = struct {
     }
 
     fn reserveRunRecord(
-        self: *Workbench,
+        self: *Runtime,
         task: *TestTask,
         input: TaskRunInput,
     ) Error!usize {
@@ -6128,7 +6128,7 @@ pub const Workbench = struct {
         );
     }
 
-    fn discardRunRecord(self: *Workbench, task: *TestTask, slot: usize) void {
+    fn discardRunRecord(self: *Runtime, task: *TestTask, slot: usize) void {
         self.task_runtime.testDiscardRun(
             task.durable.id,
             slot,
@@ -6137,7 +6137,7 @@ pub const Workbench = struct {
     }
 
     fn reserveCompactRecord(
-        self: *Workbench,
+        self: *Runtime,
         task: *TestTask,
         operation_id: u64,
         after_run_id: u64,
@@ -6150,7 +6150,7 @@ pub const Workbench = struct {
         );
     }
 
-    fn discardCompactRecord(self: *Workbench, task: *TestTask, slot: usize) void {
+    fn discardCompactRecord(self: *Runtime, task: *TestTask, slot: usize) void {
         self.task_runtime.testDiscardCompact(
             task.durable.id,
             slot,
@@ -6159,7 +6159,7 @@ pub const Workbench = struct {
     }
 
     fn releaseTaskAttachmentNoFail(
-        self: *Workbench,
+        self: *Runtime,
         task: *TestTask,
         cause: task_test_attachment.DetachmentCause,
     ) void {
@@ -6170,7 +6170,7 @@ pub const Workbench = struct {
         );
     }
 
-    fn copyBounded(self: *Workbench, value: []const u8, max: usize) Error![]u8 {
+    fn copyBounded(self: *Runtime, value: []const u8, max: usize) Error![]u8 {
         if (value.len > max or value.len > self.limits.max_projection_bytes - self.projection_bytes)
             return error.ProjectionCapacity;
         const result = try self.allocator.dupe(u8, value);
@@ -6178,12 +6178,12 @@ pub const Workbench = struct {
         return result;
     }
 
-    fn copyPreviewBounded(self: *Workbench, value: []const u8, max: usize) Error![]u8 {
+    fn copyPreviewBounded(self: *Runtime, value: []const u8, max: usize) Error![]u8 {
         if (value.len > max) return error.ProjectionCapacity;
         return self.allocator.dupe(u8, value);
     }
 
-    fn allocTrackedCapacity(self: *Workbench, capacity: usize) Error![]u8 {
+    fn allocTrackedCapacity(self: *Runtime, capacity: usize) Error![]u8 {
         if (capacity > self.limits.max_projection_bytes - self.projection_bytes)
             return error.ProjectionCapacity;
         const result = try self.allocator.alloc(u8, capacity);
@@ -6191,7 +6191,7 @@ pub const Workbench = struct {
         return result;
     }
 
-    fn appendTrackedText(self: *Workbench, target: *task_persistence.RestoreText, suffix: []const u8, max: usize) Error!void {
+    fn appendTrackedText(self: *Runtime, target: *task_persistence.RestoreText, suffix: []const u8, max: usize) Error!void {
         if (suffix.len > max - target.list.items.len) return error.ProjectionCapacity;
         const needed = target.list.items.len + suffix.len;
         if (needed > target.list.capacity) {
@@ -6213,7 +6213,7 @@ pub const Workbench = struct {
     };
 
     fn copyProjected(
-        self: *Workbench,
+        self: *Runtime,
         value: []const u8,
         max: usize,
         credential: []const u8,
@@ -6234,7 +6234,7 @@ pub const Workbench = struct {
     }
 
     fn replaceTrackedProjected(
-        self: *Workbench,
+        self: *Runtime,
         target: *[]u8,
         value: []const u8,
         max: usize,
@@ -6253,7 +6253,7 @@ pub const Workbench = struct {
     }
 
     fn redactTrackedText(
-        _: *Workbench,
+        _: *Runtime,
         target: *TrackedText,
         credential: []const u8,
     ) bool {
@@ -6300,18 +6300,18 @@ pub const Workbench = struct {
         return redacted;
     }
 
-    fn projectedJsonValue(self: *Workbench, writer: *std.Io.Writer, value: []const u8) Error!void {
+    fn projectedJsonValue(self: *Runtime, writer: *std.Io.Writer, value: []const u8) Error!void {
         return self.projectedJsonValueWithKnownCredentials(writer, value);
     }
 
-    fn containsKnownCredential(self: *const Workbench, value: []const u8) bool {
+    fn containsKnownCredential(self: *const Runtime, value: []const u8) bool {
         const current = self.execution.credential();
         if (containsKnownSecret(value, current)) return true;
         return self.task_runtime.containsExecutionCredential(value);
     }
 
     fn matchedKnownCredentialLen(
-        self: *const Workbench,
+        self: *const Runtime,
         value: []const u8,
     ) usize {
         var longest: usize = 0;
@@ -6323,7 +6323,7 @@ pub const Workbench = struct {
     }
 
     fn projectedJsonValueWithKnownCredentials(
-        self: *const Workbench,
+        self: *const Runtime,
         writer: *std.Io.Writer,
         value: []const u8,
     ) Error!void {
@@ -6359,7 +6359,7 @@ pub const Workbench = struct {
     }
 
     fn knownCredentialEndAtCodepoint(
-        self: *const Workbench,
+        self: *const Runtime,
         value: []const u8,
         codepoint_start: usize,
     ) ?usize {
@@ -6384,7 +6384,7 @@ pub const Workbench = struct {
     }
 
     fn projectedJsonValueWithCredential(
-        _: *Workbench,
+        _: *Runtime,
         writer: *std.Io.Writer,
         value: []const u8,
         credential: []const u8,
@@ -6426,7 +6426,7 @@ pub const Workbench = struct {
     }
 
     fn prepareUiRecord(
-        self: *Workbench,
+        self: *Runtime,
         access: *task_test_agent_session.Access,
         run_id: u64,
         request_id: u64,
@@ -6449,7 +6449,7 @@ pub const Workbench = struct {
     }
 
     fn prepareCancelledUiRecord(
-        self: *Workbench,
+        self: *Runtime,
         access: *task_test_agent_session.Access,
         run_id: u64,
         credential: []const u8,
@@ -6471,7 +6471,7 @@ pub const Workbench = struct {
     }
 
     fn fillUiRecord(
-        _: *Workbench,
+        _: *Runtime,
         record: *UiRecord,
         permission: lifecycle.PermissionRequest,
         credential: []const u8,
@@ -6490,7 +6490,7 @@ pub const Workbench = struct {
         record.redacted = result.redacted;
     }
 
-    fn pushUiRecord(_: *Workbench, view: *TestTask, record: UiRecord) void {
+    fn pushUiRecord(_: *Runtime, view: *TestTask, record: UiRecord) void {
         for (view.durable.ui_history) |entry| if (entry) |existing|
             if (existing.request_id == record.request_id) return;
         var stored = record;
@@ -6515,13 +6515,13 @@ pub const Workbench = struct {
         view.durable.ui_history_count = @min(view.durable.ui_history_count + 1, view.durable.ui_history.len);
     }
 
-    fn freeTrackedText(self: *Workbench, target: *task_persistence.RestoreText) void {
+    fn freeTrackedText(self: *Runtime, target: *task_persistence.RestoreText) void {
         self.projection_bytes -= target.list.capacity;
         target.list.deinit(self.allocator);
         target.* = undefined;
     }
 
-    fn replaceTracked(self: *Workbench, target: *[]u8, value: []const u8, max: usize) Error!void {
+    fn replaceTracked(self: *Runtime, target: *[]u8, value: []const u8, max: usize) Error!void {
         if (value.len > max or value.len > self.limits.max_projection_bytes - (self.projection_bytes - target.len))
             return error.ProjectionCapacity;
         const next = try self.allocator.dupe(u8, value);
@@ -6530,12 +6530,12 @@ pub const Workbench = struct {
         target.* = next;
     }
 
-    fn freeTracked(self: *Workbench, value: []u8) void {
+    fn freeTracked(self: *Runtime, value: []u8) void {
         self.projection_bytes -= value.len;
         self.allocator.free(value);
     }
 
-    pub fn executionHandoff(self: *Workbench) control_ports.ExecutionHandoff {
+    pub fn executionHandoff(self: *Runtime) control_ports.ExecutionHandoff {
         return .{
             .context = self,
             .commit_account_fact_fn = controlCommitAccountFact,
@@ -6554,11 +6554,11 @@ pub const Workbench = struct {
         };
     }
 
-    pub fn agentEventConsumer(self: *Workbench) control_ports.AgentEventConsumer {
+    pub fn agentEventConsumer(self: *Runtime) control_ports.AgentEventConsumer {
         return .{ .context = self, .drain_fn = controlDrainAgentEvents };
     }
 
-    pub fn mcpManagementPort(self: *Workbench) control_ports.McpManagementPort {
+    pub fn mcpManagementPort(self: *Runtime) control_ports.McpManagementPort {
         return .{
             .context = self,
             .inspect_fn = controlMcpInspect,
@@ -6587,7 +6587,7 @@ pub const Workbench = struct {
         };
     }
 
-    pub fn mcpOauthPort(self: *Workbench) control_ports.McpOauthPort {
+    pub fn mcpOauthPort(self: *Runtime) control_ports.McpOauthPort {
         return .{
             .context = self,
             .next_expiry_fn = controlMcpNextOauthExpiry,
@@ -6600,7 +6600,7 @@ pub const Workbench = struct {
         };
     }
 
-    pub fn scheduleHost(self: *Workbench) control_ports.ScheduleHost {
+    pub fn scheduleHost(self: *Runtime) control_ports.ScheduleHost {
         return .{
             .context = self,
             .set_background_available_fn = controlSetScheduleBackgroundAvailable,
@@ -6608,12 +6608,12 @@ pub const Workbench = struct {
         };
     }
 
-    fn bumpRevision(self: *Workbench) void {
+    fn bumpRevision(self: *Runtime) void {
         if (self.revision != std.math.maxInt(u64)) self.revision += 1;
     }
 };
 
-fn controlOwner(context: *anyopaque) *Workbench {
+fn controlOwner(context: *anyopaque) *Runtime {
     return @ptrCast(@alignCast(context));
 }
 
@@ -7469,12 +7469,12 @@ fn testLimits() Limits {
         .max_pending_ui_json_bytes = 64 * 1024,
         .max_pending_ui_requests = 2,
         // Includes the independently bounded MCP safe projection in addition
-        // to the ordinary Workbench projection budget.
+        // to the ordinary Runtime projection budget.
         .max_snapshot_bytes = 8 * 1024 * 1024,
     };
 }
 
-fn installTestExecution(workbench: *Workbench) !void {
+fn installTestExecution(workbench: *Runtime) !void {
     var execution = try account_contract.OwnedExecutionConfig.initOwned(
         std.testing.allocator,
         .anthropic,
@@ -7522,9 +7522,9 @@ fn installTestExecution(workbench: *Workbench) !void {
     workbench.finishAccountCommitNoFail();
 }
 
-fn testWorkbench() !Workbench {
+fn testRuntime() !Runtime {
     test_agent_runtime.io = std.testing.io;
-    var workbench = try Workbench.init(
+    var workbench = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &test_agent_runtime,
@@ -7778,7 +7778,7 @@ fn replaceTaskCredentialForTest(
     }
 }
 
-fn detachTaskForTest(workbench: *Workbench, task: *TestTask) void {
+fn detachTaskForTest(workbench: *Runtime, task: *TestTask) void {
     switch (task.runtime.attachment) {
         .detached => return,
         .attached, .closing => {},
@@ -7823,7 +7823,7 @@ fn testPermissionRequest(tool_name: []const u8, arguments_json: []const u8) life
     };
 }
 
-fn finalizeTestTerminalEvents(workbench: *Workbench) void {
+fn finalizeTestTerminalEvents(workbench: *Runtime) void {
     workbench.markTerminalRunsBeforeEventDrain();
     workbench.finalizeMarkedTerminalRunsAfterEventDrain();
     workbench.syncLifecycle();
@@ -7842,7 +7842,7 @@ test "Workspace containment accepts platform roots and rejects path prefixes" {
 
 test "automatic Workspace root is optional and reserved from user registration" {
     test_agent_runtime.io = std.testing.io;
-    var unavailable = try Workbench.init(
+    var unavailable = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &test_agent_runtime,
@@ -7870,7 +7870,7 @@ test "automatic Workspace root is optional and reserved from user registration" 
         canonical_storage[0..canonical_len],
     );
     defer root.deinit();
-    var workbench = try Workbench.init(
+    var workbench = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &test_agent_runtime,
@@ -7918,7 +7918,7 @@ test "Workspace registry owns empty selection recent use authorization and capac
         std.testing.allocator,
     );
     defer std.testing.allocator.free(tests_path);
-    var workbench = try Workbench.init(
+    var workbench = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &test_agent_runtime,
@@ -7990,7 +7990,7 @@ test "Workspace registry owns empty selection recent use authorization and capac
 }
 
 test "Workspace projection derives aggregate Task signals and removal preserves history" {
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
     var storage: [2]WorkspaceProjection = undefined;
 
@@ -8019,8 +8019,8 @@ test "Workspace projection derives aggregate Task signals and removal preserves 
     try std.testing.expectError(error.TaskClosing, workbench.runTask(3, .{ .text = "continue" }));
 }
 
-test "Workbench snapshot serializer matches the Renderer contract fixture" {
-    var workbench = try testWorkbench();
+test "Product Control snapshot serializer matches the Renderer contract fixture" {
+    var workbench = try testRuntime();
     defer workbench.deinit();
 
     try std.testing.expectEqual(
@@ -8047,7 +8047,7 @@ test "Workbench snapshot serializer matches the Renderer contract fixture" {
 }
 
 test "Restore permission stats are projected as runtime health" {
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
     workbench.task_runtime.tasks[0].?.runtime.last_restore_permission = .{
         .restored_rules = 2,
@@ -8067,7 +8067,7 @@ test "Task state round trip restores product history without fabricating a Sessi
     var persistence = TestTaskPersistence{ .storage = persistence_storage };
 
     {
-        var source = try testWorkbench();
+        var source = try testRuntime();
         defer source.deinit();
         try source.replaceTracked(
             &source.workspaces[0].?.canonical_root,
@@ -8131,7 +8131,7 @@ test "Task state round trip restores product history without fabricating a Sessi
             terminal_storage,
             terminal_state.value,
         );
-        var terminal_restore = try Workbench.init(
+        var terminal_restore = try Runtime.init(
             std.testing.allocator,
             std.testing.io,
             &test_agent_runtime,
@@ -8153,7 +8153,7 @@ test "Task state round trip restores product history without fabricating a Sessi
         }
     }
 
-    var restored = try Workbench.init(
+    var restored = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &test_agent_runtime,
@@ -8209,7 +8209,7 @@ test "Task state round trip restores product history without fabricating a Sessi
 
     try restored.setTaskArchived(3, true);
     try restored.deleteTask(3);
-    var deleted_restore = try Workbench.init(
+    var deleted_restore = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &test_agent_runtime,
@@ -8225,7 +8225,7 @@ test "Task state round trip restores product history without fabricating a Sessi
 }
 
 test "one damaged Task record does not poison surviving history" {
-    var source = try testWorkbench();
+    var source = try testRuntime();
     defer source.deinit();
     var scratch = try source.buildTaskStateWire();
     defer scratch.deinit();
@@ -8246,7 +8246,7 @@ test "one damaged Task record does not poison surviving history" {
         .storage = try std.testing.allocator.alloc(u8, task_persistence.max_store_bytes),
     };
     defer std.testing.allocator.free(persistence.storage);
-    var restored = try Workbench.init(
+    var restored = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &test_agent_runtime,
@@ -8274,7 +8274,7 @@ test "Automatic Workspace history survives an unavailable allocator" {
     var persistence = TestTaskPersistence{ .storage = persistence_storage };
 
     {
-        var source = try testWorkbench();
+        var source = try testRuntime();
         defer source.deinit();
         const workspace = &source.workspaces[0].?;
         workspace.kind = .automatic;
@@ -8287,7 +8287,7 @@ test "Automatic Workspace history survives an unavailable allocator" {
         try source.commitTaskState();
     }
 
-    var restored = try Workbench.init(
+    var restored = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &test_agent_runtime,
@@ -8330,7 +8330,7 @@ test "Automatic Workspace history survives an unavailable allocator" {
 
 test "Task persistence restore failure blocks product mutations" {
     test_agent_runtime.io = std.testing.io;
-    var workbench = try Workbench.init(
+    var workbench = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &test_agent_runtime,
@@ -8356,7 +8356,7 @@ test "Task persistence failure rolls back metadata and closes mutation admission
         .storage = persistence_storage,
         .result = .failed,
     };
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
     workbench.task_persistence = persistence.capability(null);
     workbench.task_persistence_health = .ready;
@@ -8387,7 +8387,7 @@ test "Task persistence failure rolls back deletion before physical release" {
         .storage = persistence_storage,
         .result = .failed,
     };
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
 
     const task = &workbench.task_runtime.tasks[0].?;
@@ -8436,7 +8436,7 @@ test "Task persistence failure rolls back Workspace upsert candidates" {
     };
 
     {
-        var workbench = try Workbench.init(
+        var workbench = try Runtime.init(
             std.testing.allocator,
             std.testing.io,
             &test_agent_runtime,
@@ -8459,7 +8459,7 @@ test "Task persistence failure rolls back Workspace upsert candidates" {
     }
 
     persistence.result = .committed;
-    var workbench = try Workbench.init(
+    var workbench = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &test_agent_runtime,
@@ -8496,8 +8496,8 @@ test "Task persistence failure rolls back Workspace upsert candidates" {
     try std.testing.expectEqual(next_recent_order, workbench.next_workspace_recent_order);
 }
 
-test "Scheduled Task admission is bounded redacted and arms the Workbench clock" {
-    var workbench = try testWorkbench();
+test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {
+    var workbench = try testRuntime();
     defer workbench.deinit();
     var automatic_tmp = std.testing.tmpDir(.{});
     defer automatic_tmp.cleanup();
@@ -8592,7 +8592,7 @@ test "Scheduled Task admission is bounded redacted and arms the Workbench clock"
 }
 
 test "Scheduled Task execution drift becomes needs attention without blocking Account" {
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
     var automatic_tmp = std.testing.tmpDir(.{});
     defer automatic_tmp.cleanup();
@@ -8641,7 +8641,7 @@ test "Scheduled Task execution drift becomes needs attention without blocking Ac
 }
 
 test "Skill catalog snapshot reports redaction without exposing credential bytes" {
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
     const skills = [_]SkillProjection{.{
         .skill_id = "builtin.review",
@@ -8674,7 +8674,7 @@ test "Skill catalog snapshot reports redaction without exposing credential bytes
     );
 }
 
-fn installTestCommittedSkillAuthorities(workbench: *Workbench) !void {
+fn installTestCommittedSkillAuthorities(workbench: *Runtime) !void {
     const source_skills = [_]lifecycle.CatalogSkill{.{
         .skill_id = "builtin.review",
         .skill_policy_key = "review",
@@ -8727,12 +8727,12 @@ fn installTestCommittedSkillAuthorities(workbench: *Workbench) !void {
     workspace_catalog = undefined;
 }
 
-fn testWorkspaceSkillProjection(workbench: *Workbench) CatalogProjection {
+fn testWorkspaceSkillProjection(workbench: *Runtime) CatalogProjection {
     return workbench.skill.workspaceCatalogProjection(1, 1) catch unreachable;
 }
 
 test "definite Skill enablement persistence failure preserves committed authorities" {
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
     try installTestCommittedSkillAuthorities(&workbench);
 
@@ -8761,7 +8761,7 @@ test "definite Skill enablement persistence failure preserves committed authorit
 }
 
 test "unknown Skill enablement persistence outcome freezes authorities" {
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
     try installTestCommittedSkillAuthorities(&workbench);
 
@@ -8802,7 +8802,7 @@ test "Workspace Skill enablement uses double revision CAS and leaves pinned cata
     );
     defer file_store.deinit();
 
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
     workbench.skill.testSetEnablementPersistence(&file_store);
     const source_skills = [_]lifecycle.CatalogSkill{.{
@@ -8893,7 +8893,7 @@ test "User Skill defaults stamp Personal and Workspace catalogs while project ov
     );
     defer file_store.deinit();
 
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
     workbench.skill.testSetEnablementPersistence(&file_store);
     const source_skills = [_]lifecycle.CatalogSkill{.{
@@ -9018,7 +9018,7 @@ test "User Skill mutation does not require every Workspace to have committed aut
     );
     defer file_store.deinit();
 
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
     workbench.skill.testSetEnablementPersistence(&file_store);
     const source_skills = [_]lifecycle.CatalogSkill{.{
@@ -9076,7 +9076,7 @@ test "User Skill mutation does not require every Workspace to have committed aut
 }
 
 test "credential release permanently scrubs catalog and every Skill history field" {
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
     const source_skills = [_]lifecycle.CatalogSkill{.{
         .skill_id = "builtin.review",
@@ -9190,7 +9190,7 @@ test "credential release permanently scrubs catalog and every Skill history fiel
 }
 
 test "mutation admission rejects stale execution and binding facts" {
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
 
     try std.testing.expectError(
@@ -9212,7 +9212,7 @@ test "mutation admission rejects stale execution and binding facts" {
 }
 
 test "Task metadata mutations preserve lifecycle guards and projection accounting" {
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
 
     try std.testing.expectError(error.TaskBusy, workbench.setTaskArchived(3, true));
@@ -9252,7 +9252,7 @@ test "Task metadata mutations preserve lifecycle guards and projection accountin
 }
 
 test "Run admission reserves a stable generation and rolls back every fallible allocation" {
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
     const task = &workbench.task_runtime.tasks[0].?;
     const tracked_before = workbench.projection_bytes;
@@ -9306,9 +9306,9 @@ test "Run admission reserves a stable generation and rolls back every fallible a
     workbench.discardRunRecord(task, reused_slot);
 }
 
-test "Workbench starts without execution and fails Task admission closed" {
+test "Runtime starts without execution and fails Task admission closed" {
     test_agent_runtime.io = std.testing.io;
-    var workbench = try Workbench.init(
+    var workbench = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &test_agent_runtime,
@@ -9330,9 +9330,9 @@ test "Workbench starts without execution and fails Task admission closed" {
     try std.testing.expectEqual(@as(u64, 0), workbench.currentRevision());
 }
 
-test "Workbench publishes a user model connection as an independent execution source" {
+test "Runtime publishes a user model connection as an independent execution source" {
     test_agent_runtime.io = std.testing.io;
-    var workbench = try Workbench.init(
+    var workbench = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &test_agent_runtime,
@@ -9413,7 +9413,7 @@ test "Workbench publishes a user model connection as an independent execution so
 
 test "Account projection and execution install use preallocated no-fail storage" {
     test_agent_runtime.io = std.testing.io;
-    var workbench = try Workbench.init(
+    var workbench = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &test_agent_runtime,
@@ -9478,7 +9478,7 @@ test "Account projection and execution install use preallocated no-fail storage"
 }
 
 test "identity replacement does not disturb live Task runtime references" {
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
     try workbench.beginDefaultExecutionReplacement();
     try std.testing.expect(workbench.executionReplacementPending());
@@ -9510,7 +9510,7 @@ test "identity replacement does not disturb live Task runtime references" {
 }
 
 test "default replacement preserves Task generation and installs the next admission default" {
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
 
     const task = &workbench.task_runtime.tasks[0].?;
@@ -9637,7 +9637,7 @@ test "default replacement preserves Task generation and installs the next admiss
 }
 
 test "Account default model changes do not bump credentials" {
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
 
     const api_keys = [_]account_contract.ApiKeyView{.{
@@ -9677,7 +9677,7 @@ test "Account default model changes do not bump credentials" {
 }
 
 test "busy Task model selection keeps only the last runtime pending model" {
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
 
     const api_keys = [_]account_contract.ApiKeyView{.{
@@ -9728,7 +9728,7 @@ test "busy Task model selection keeps only the last runtime pending model" {
 }
 
 test "clearing the admission default preserves active Task execution" {
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
 
     const task = &workbench.task_runtime.tasks[0].?;
@@ -9758,7 +9758,7 @@ test "clearing the admission default preserves active Task execution" {
 }
 
 test "released Task credential is permanently scrubbed from every product projection" {
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
     const task = &workbench.task_runtime.tasks[0].?;
     const run = &task.durable.runs[0].?;
@@ -9830,7 +9830,7 @@ test "released Task credential is permanently scrubbed from every product projec
 
 test "clearing the last default execution scrubs its credential before secure zero" {
     test_agent_runtime.io = std.testing.io;
-    var workbench = try Workbench.init(
+    var workbench = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &test_agent_runtime,
@@ -9883,7 +9883,7 @@ test "clearing the last default execution scrubs its credential before secure ze
 }
 
 test "known credential matching chooses the longest overlapping secret" {
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
     std.crypto.secureZero(u8, workbench.execution.credential_storage);
     @memcpy(workbench.execution.credential_storage[0.."SECRET".len], "SECRET");
@@ -9905,7 +9905,7 @@ test "known credential matching chooses the longest overlapping secret" {
 }
 
 test "opaque credential redaction preserves UTF-8 projection validity" {
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
     std.crypto.secureZero(u8, workbench.execution.credential_storage);
     workbench.execution.credential_storage[0] = 0xa9;
@@ -9924,7 +9924,7 @@ test "opaque credential redaction preserves UTF-8 projection validity" {
 }
 
 test "opaque credential redaction is UTF-8 safe across product inputs and assistant chunks" {
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
     const task = &workbench.task_runtime.tasks[0].?;
     try replaceTaskCredentialForTest(task, &.{0xa9});
@@ -9975,7 +9975,7 @@ test "opaque credential redaction is UTF-8 safe across product inputs and assist
 }
 
 test "assistant redaction withholds a UTF-8 codepoint across credential chunks" {
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
     var assistant = TrackedText{};
     defer assistant.list.deinit(std.testing.allocator);
@@ -9994,7 +9994,7 @@ test "assistant redaction withholds a UTF-8 codepoint across credential chunks" 
 }
 
 test "product Task identity is independent from Agent Session route identity" {
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
     const task = &workbench.task_runtime.tasks[0].?;
     task.runtime.attached().?.binding = task_test_agent_session.Binding.testFixture(99);
@@ -10017,7 +10017,7 @@ test "product Task identity is independent from Agent Session route identity" {
 }
 
 test "streaming Run events do not reorder Task navigation" {
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
     const before = workbench.task_runtime.tasks[0].?.durable.recent_order;
 
@@ -10037,7 +10037,7 @@ test "streaming Run events do not reorder Task navigation" {
 }
 
 test "thinking and assistant chunks update distinct safe projections" {
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
     const task = &workbench.task_runtime.tasks[0].?;
     const run = &task.durable.runs[0].?;
@@ -10083,7 +10083,7 @@ test "thinking and assistant chunks update distinct safe projections" {
 }
 
 test "AgentCore RunState refines status without owning RunPhase and rejects stale transitions" {
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
     const task = &workbench.task_runtime.tasks[0].?;
     const route = task.runtime.routeId();
@@ -10139,7 +10139,7 @@ test "AgentCore RunState refines status without owning RunPhase and rejects stal
 }
 
 test "AgentCore RunState accepts a zero first transition sequence" {
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
     const task = &workbench.task_runtime.tasks[0].?;
     const route = task.runtime.routeId();
@@ -10156,7 +10156,7 @@ test "AgentCore RunState accepts a zero first transition sequence" {
 }
 
 test "event projection failure routes by Agent Session identity not product Task identity" {
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
     const task = &workbench.task_runtime.tasks[0].?;
     task.runtime.attached().?.binding = task_test_agent_session.Binding.testFixture(99);
@@ -10181,8 +10181,8 @@ test "event projection failure routes by Agent Session identity not product Task
     ));
 }
 
-test "Workbench shutdown releases current and Task-owned execution generations" {
-    var workbench = try testWorkbench();
+test "Runtime shutdown releases current and Task-owned execution generations" {
+    var workbench = try testRuntime();
     try workbench.beginDefaultExecutionReplacement();
     var replacement = try account_contract.OwnedExecutionConfig.initOwned(
         std.testing.allocator,
@@ -10229,7 +10229,7 @@ test "Workbench shutdown releases current and Task-owned execution generations" 
 }
 
 test "terminal publication is allocation-free write-once bounded history" {
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
     const run = &workbench.task_runtime.tasks[0].?.durable.runs[0].?;
     const diagnostic = try std.testing.allocator.alloc(u8, run.terminal_diagnostic.len + 17);
@@ -10326,7 +10326,7 @@ test "compact terminal publication is write-once and outranks late cancellation"
 }
 
 test "terminal disposition folds exactly once without reopening a closing Task" {
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
     const task = &workbench.task_runtime.tasks[0].?;
     defer detachTaskForTest(&workbench, task);
@@ -10354,7 +10354,7 @@ test "terminal disposition folds exactly once without reopening a closing Task" 
 }
 
 test "canonical prompt title and terminal diagnostic never retain the registered credential" {
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
     const task = &workbench.task_runtime.tasks[0].?;
 
@@ -10411,7 +10411,7 @@ test "Renderer transport failures never own Agent Run termination" {
 }
 
 test "Task deletion scrubs retained projections before releasing its credential" {
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
     const task = &workbench.task_runtime.tasks[0].?;
     const workspace = &workbench.workspaces[0].?;
@@ -10444,8 +10444,8 @@ test "Task deletion scrubs retained projections before releasing its credential"
     );
 }
 
-test "Workbench projection preserves text bytes with bounded geometric growth" {
-    var workbench = try testWorkbench();
+test "Runtime projection preserves text bytes with bounded geometric growth" {
+    var workbench = try testRuntime();
     defer workbench.deinit();
 
     const chunk = "0123456789abcdef";
@@ -10465,7 +10465,7 @@ test "Workbench projection preserves text bytes with bounded geometric growth" {
     try std.testing.expect(workbench.projection_bytes <= workbench.limits.max_projection_bytes);
 }
 
-test "Workbench snapshot budget includes JSON escaping and structural overhead" {
+test "Runtime snapshot budget includes JSON escaping and structural overhead" {
     const limits = Limits{};
     const worst_case = worstCaseSnapshotBytes(limits).?;
     try std.testing.expect(worst_case <= limits.max_snapshot_bytes);
@@ -10475,7 +10475,7 @@ test "Workbench snapshot budget includes JSON escaping and structural overhead" 
     const single_pending_budget = limits.max_pending_ui_json_bytes * pending_ui_reencode_expansion + pending_ui_snapshot_overhead;
     try std.testing.expect(worst_case >= single_pending_budget * limits.max_pending_ui_requests);
 
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
     const run = findRun(workbench.task_runtime.tasks[0].?.durable.runs, 7).?;
     const remaining = @min(
@@ -10494,7 +10494,7 @@ test "Workbench snapshot budget includes JSON escaping and structural overhead" 
     try std.testing.expect(snapshot.len > controls.len * 5);
 }
 
-fn installMaximumAccountProjection(workbench: *Workbench) !void {
+fn installMaximumAccountProjection(workbench: *Runtime) !void {
     const account_id: [account_contract.Limits.account_id_bytes]u8 =
         @splat('a');
     const display_name: [account_contract.Limits.display_name_bytes]u8 =
@@ -10579,7 +10579,7 @@ fn installMaximumAccountProjection(workbench: *Workbench) !void {
 test "default snapshot budget contains the maximum structural projection" {
     const limits = Limits{};
     test_agent_runtime.io = std.testing.io;
-    var workbench = try Workbench.init(
+    var workbench = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &test_agent_runtime,
@@ -10837,7 +10837,7 @@ test "permission UI re-encoding remains inside its concurrent snapshot allowance
     const storage = try std.testing.allocator.alloc(u8, allowance);
     defer std.testing.allocator.free(storage);
     var writer = std.Io.Writer.fixed(storage);
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
     try task_test_view.writePendingUi(
         &writer,
@@ -10851,7 +10851,7 @@ test "permission UI re-encoding remains inside its concurrent snapshot allowance
 }
 
 test "permission pending projection follows responses and candidate scope" {
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
     const with_candidate = lifecycle.PermissionRequest{
         .type = "permission",
@@ -10932,8 +10932,8 @@ test "permission provenance projection keeps typed fields bounded and non-persis
     try std.testing.expect(!@hasField(task_persistence.RunWire, "permission_provenance"));
 }
 
-test "Workbench projects tools and full-width usage without parsing protocol in Renderer" {
-    var workbench = try testWorkbench();
+test "Runtime projects tools and full-width usage without parsing protocol in Renderer" {
+    var workbench = try testRuntime();
     defer workbench.deinit();
 
     const events = [_][]const u8{
@@ -10956,9 +10956,9 @@ test "Workbench projects tools and full-width usage without parsing protocol in 
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"input\":\"18446744073709551615\"") != null);
 }
 
-test "Workbench projects typed AgentCore file references into bounded tool entries" {
+test "Runtime projects typed AgentCore file references into bounded tool entries" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
 
     const encoded = "{\"tool_result\":{\"id\":\"tool-1\",\"name\":\"Read\",\"input\":\"{}\",\"content\":\"ok\",\"is_error\":false,\"elapsed_ms\":1,\"file_refs\":[{\"locator\":{\"workspace_path\":\"src/main.zig\"},\"title\":\"main.zig\",\"kind\":\"read\",\"range\":{\"start\":{\"line\":1,\"column\":1},\"end\":{\"line\":2,\"column\":1}}}]}}";
@@ -11002,7 +11002,7 @@ test "file reference ids use durable task and run identities" {
 }
 
 test "file preview redaction protects credentials that cross a truncation boundary" {
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
     const boundary_value = "visible SECRET-";
     const cutoff = workbench.filePreviewCredentialSafeCutoff(
@@ -11024,7 +11024,7 @@ test "file preview redaction protects credentials that cross a truncation bounda
 }
 
 test "known Host credentials are removed from assistant, tool, and UI projections" {
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
     const events = [_][]const u8{
         "{\"text_chunk\":\"prefix SECRET-\"}",
@@ -11074,8 +11074,8 @@ test "known Host credentials are removed from assistant, tool, and UI projection
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"redacted\":true") != null);
 }
 
-test "Workbench product tool identities remain unique after raw ID redaction" {
-    var workbench = try testWorkbench();
+test "Runtime product tool identities remain unique after raw ID redaction" {
+    var workbench = try testRuntime();
     defer workbench.deinit();
     const events = [_][]const u8{
         "{\"tool_start\":{\"id\":\"SECRET-KEY\",\"name\":\"Read\",\"input\":\"first\"}}",
@@ -11099,7 +11099,7 @@ test "Workbench product tool identities remain unique after raw ID redaction" {
 }
 
 test "assistant credential redaction finalizes ordinary chunks without rescanning history" {
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
     const assistant = &workbench.task_runtime.tasks[0].?.durable.runs[0].?.assistant;
 
@@ -11161,7 +11161,7 @@ test "assistant credential redaction finalizes ordinary chunks without rescannin
 }
 
 test "projection failure after Agent terminal becomes a product failure" {
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
     const events = [_][]const u8{
         "{\"tool_start\":{\"id\":\"first\",\"name\":\"Read\",\"input\":\"one\"}}",
@@ -11193,7 +11193,7 @@ test "projection failure after Agent terminal becomes a product failure" {
     workbench.recordEventProjectionFailure(3, 7);
     finalizeTestTerminalEvents(&workbench);
 
-    // Agent completion remains immutable; only Workbench product facts report
+    // Agent completion remains immutable; only Runtime product facts report
     // that the canonical event stream could not be represented completely.
     try std.testing.expectEqual(RunOutcome.completed, terminalPayload(run).?.outcome);
     const product = productTerminalFacts(run).?;
@@ -11215,7 +11215,7 @@ test "projection failure after Agent terminal becomes a product failure" {
 }
 
 test "event drain barrier atomically publishes terminal product state" {
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
     const run = &workbench.task_runtime.tasks[0].?.durable.runs[0].?;
 
@@ -11269,7 +11269,7 @@ test "close and delete wait for terminal event drain" {
         }
     };
 
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
     const task = &workbench.task_runtime.tasks[0].?;
     const run = &task.durable.runs[0].?;
@@ -11330,7 +11330,7 @@ test "Runtime shutdown joins a flying close owner before relinquish" {
         }
     };
 
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
     const task = &workbench.task_runtime.tasks[0].?;
     const route_id = task.runtime.routeId();
@@ -11358,7 +11358,7 @@ test "Runtime shutdown joins a flying close owner before relinquish" {
 }
 
 test "streaming projection escaping is allocation-free JSON with redaction" {
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
     var storage: [256]u8 = undefined;
     var writer = std.Io.Writer.fixed(&storage);
@@ -11370,7 +11370,7 @@ test "streaming projection escaping is allocation-free JSON with redaction" {
 }
 
 test "tool projection truncates on UTF-8 boundaries and records bounded UI history" {
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
 
     const long = try std.testing.allocator.alloc(u8, workbench.limits.max_tool_field_bytes + 4);
@@ -11406,8 +11406,8 @@ test "tool projection truncates on UTF-8 boundaries and records bounded UI histo
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"requestId\":\"10\"") != null);
 }
 
-test "Workbench rejects cross-session routes and usage overflow" {
-    var workbench = try testWorkbench();
+test "Runtime rejects cross-session routes and usage overflow" {
+    var workbench = try testRuntime();
     defer workbench.deinit();
 
     var foreign_session = try testEnvelope(4, 7, "{\"text_chunk\":\"wrong\"}");
@@ -11566,7 +11566,7 @@ test "MCP runtime OAuth failure durably reauthorizes and preserves scope step-up
     var management_owned = true;
     defer if (management_owned) management.deinit();
     manifest_owned = false;
-    var workbench = try testWorkbench();
+    var workbench = try testRuntime();
     defer workbench.deinit();
     std.debug.assert(workbench.mcp == null);
     workbench.mcp = mcp_testing.init(
@@ -11722,7 +11722,7 @@ test "empty MCP startup commits a proven manageable runtime" {
     var runtime_manifest_owned = true;
     defer if (runtime_manifest_owned) runtime_manifest.deinit();
     test_agent_runtime.io = std.testing.io;
-    var workbench = try Workbench.init(
+    var workbench = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &test_agent_runtime,
@@ -11889,7 +11889,7 @@ test "MCP authorization operation owns product phase and durable token boundary"
     defer if (manifest_owned) manifest.deinit();
     var refresh_timer: TestMcpRefreshTimer = .{};
     test_agent_runtime.io = std.testing.io;
-    var workbench = try Workbench.init(
+    var workbench = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &test_agent_runtime,
@@ -12002,7 +12002,7 @@ test "MCP authorization operation owns product phase and durable token boundary"
     try std.testing.expectEqualStrings("reauth_required", oauth.status);
 }
 
-test "MCP startup health commits a safe degraded Workbench projection" {
+test "MCP startup health commits a safe degraded Runtime projection" {
     const ManagementEffects = struct {
         fn journal(_: ?*anyopaque, _: []const u8) mcp_configuration.PersistenceEffect {
             return .committed;
@@ -12056,7 +12056,7 @@ test "MCP startup health commits a safe degraded Workbench projection" {
     var runtime_manifest_owned = true;
     defer if (runtime_manifest_owned) runtime_manifest.deinit();
     test_agent_runtime.io = std.testing.io;
-    var workbench = try Workbench.init(
+    var workbench = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &test_agent_runtime,

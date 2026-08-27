@@ -4,7 +4,7 @@ const runner = @import("runner");
 const native_sdk = @import("native_sdk");
 const bridge_api = @import("metawork_bridge");
 const agent = @import("metawork_agent");
-const workbench_api = @import("metawork_workbench");
+const product_control = @import("metawork_product_control");
 const mcp_configuration = @import("metawork_product_mcp").contract;
 const account_api = @import("metawork_account");
 const product_identity = @import("metawork_product_identity");
@@ -38,7 +38,7 @@ const agent_event_notification_timeout: std.Io.Duration = .fromMilliseconds(50);
 // conversations, not CPU. Sized so approval-blocked runs cannot easily
 // exhaust the pool.
 const host_worker_count = 16;
-const workbench_snapshot_capacity = bridge_api.snapshot_max_bytes;
+const product_snapshot_capacity = bridge_api.snapshot_max_bytes;
 const App = struct {
     env_map: *std.process.Environ.Map,
     io: std.Io,
@@ -51,14 +51,14 @@ const App = struct {
     account_platform_binding: ?account_platform_binding.Adapter = null,
     dispatcher: ?*bridge_api.Dispatcher = null,
     agent_runtime: ?*agent.Runtime = null,
-    workbench: ?*workbench_api.Workbench = null,
+    control: ?*product_control.Runtime = null,
     agent_shutdown: bool = false,
     agent_events: agent_event_coordinator.Coordinator = .{},
     account_coordinator: ?*account_coordinator.Coordinator = null,
     account_started: bool = false,
-    workbench_storage: ?*workbench_api.Workbench = null,
-    workbench_configuration: workbench_api.Configuration = .{},
-    workbench_initialized: bool = false,
+    control_storage: ?*product_control.Runtime = null,
+    control_configuration: product_control.Configuration = .{},
+    control_initialized: bool = false,
     mcp_configuration_store: ?*mcp_configuration.FileStore = null,
     mcp_credential_store: ?mcp_platform.CredentialStore = null,
     mcp_authorizations: ?mcp_platform.HttpAuthorizations = null,
@@ -113,12 +113,12 @@ const App = struct {
         self.agent_runtime = agent_runtime;
         self.mcp_authorizations = .{ .allocator = std.heap.c_allocator };
         // Startup preparation may transiently own resolved credential bytes.
-        // The empty Runtime cannot consume them, and Workbench must never
+        // The empty Runtime cannot consume them, and Product Control must never
         // retain them; the normal apply coordinator resolves them again.
         preparation.releaseCredentials();
-        const workbench_storage = self.workbench_storage orelse
-            @panic("Workbench storage is not composed");
-        var configuration = self.workbench_configuration;
+        const control_storage = self.control_storage orelse
+            @panic("Product Control storage is not composed");
+        var configuration = self.control_configuration;
         const model_connection_platform_available = self.platform.services() != null;
         configuration.model_connections = .{
             .management = model_connection_platform_available,
@@ -147,7 +147,7 @@ const App = struct {
                     mcp_management_host.confirmation_available,
             },
         };
-        workbench_storage.* = try workbench_api.Workbench.init(
+        control_storage.* = try product_control.Runtime.init(
             std.heap.c_allocator,
             self.io,
             agent_runtime,
@@ -158,19 +158,19 @@ const App = struct {
                 .max_pending_ui_json_bytes = pending_ui_json_capacity,
                 .max_pending_ui_requests = host_worker_count,
                 .max_terminal_diagnostic_bytes = terminal_diagnostic_capacity,
-                .max_snapshot_bytes = workbench_snapshot_capacity,
+                .max_snapshot_bytes = product_snapshot_capacity,
             },
             configuration,
         );
         preparation_owned = false;
         if (configuration.mcp.management != null) runtime_manifest_owned = false;
-        self.workbench = workbench_storage;
-        self.workbench_initialized = true;
-        try self.platform.installScheduleHost(workbench_storage.scheduleHost());
+        self.control = control_storage;
+        self.control_initialized = true;
+        try self.platform.installScheduleHost(control_storage.scheduleHost());
         self.mcp_management = mcp_management_coordinator.Coordinator.init(
             std.heap.c_allocator,
             self.io,
-            workbench_storage.mcpManagementPort(),
+            control_storage.mcpManagementPort(),
             agent_runtime,
             &self.mcp_credential_store.?,
             &self.mcp_authorizations.?,
@@ -187,7 +187,7 @@ const App = struct {
         self.mcp_oauth_refresh = mcp_oauth_coordinator.Coordinator.init(
             std.heap.c_allocator,
             self.io,
-            workbench_storage.mcpOauthPort(),
+            control_storage.mcpOauthPort(),
             &self.mcp_credential_store.?,
             &self.mcp_authorizations.?,
             mcp_oauth_coordinator.platformHost(&self.platform),
@@ -202,9 +202,9 @@ const App = struct {
         if (self.automation.active()) {
             coordinator.startAutomation();
             if (self.automation.executionFixture()) |execution| {
-                const workbench = self.workbench orelse
-                    @panic("Workbench is not composed");
-                workbench.installAutomationExecution(.{
+                const control = self.control orelse
+                    @panic("Product Control is not composed");
+                control.installAutomationExecution(.{
                     .provider = execution.provider,
                     .credential = execution.credential,
                     .model = execution.model,
@@ -235,11 +235,11 @@ const App = struct {
     fn stop(context: *anyopaque, native_runtime: *native_sdk.Runtime) anyerror!void {
         const self: *@This() = @ptrCast(@alignCast(context));
         if (self.dispatcher) |dispatcher| dispatcher.stopIngress();
-        if (self.workbench) |workbench| {
-            workbench.stopFilePreviewAdmission();
-            workbench.shutdownFilePreviewExecutor();
+        if (self.control) |control| {
+            control.stopFilePreviewAdmission();
+            control.shutdownFilePreviewExecutor();
             if (self.dispatcher) |dispatcher| {
-                workbench.drainFilePreviewCompletions(dispatcher.filePreviewSink());
+                control.drainFilePreviewCompletions(dispatcher.filePreviewSink());
                 dispatcher.settleFilePreviewsForShutdown();
             }
         }
@@ -249,7 +249,7 @@ const App = struct {
             // quiescent before the remaining owners begin shutdown.
             dispatcher.assertQuiescent();
             dispatcher.breakConnection();
-            dispatcher.detachWorkbench();
+            dispatcher.detachProductControl();
         }
         if (self.mcp_management) |*coordinator| coordinator.shutdown();
         if (self.mcp_oauth_refresh) |*coordinator| coordinator.shutdown();
@@ -259,18 +259,18 @@ const App = struct {
         };
         if (self.account_platform_binding) |*binding| binding.deinit();
         self.account_platform_binding = null;
-        if (self.workbench) |workbench| workbench.shutdownExecutor();
+        if (self.control) |control| control.shutdownExecutor();
         if (self.agent_runtime) |agent_runtime| {
             try agent_runtime.shutdown();
             self.agent_shutdown = true;
         }
         self.drainAgentEvents();
-        if (self.workbench) |workbench| {
-            workbench.syncLifecycle();
-            workbench.relinquishAgentSessionsAfterRuntimeShutdown();
+        if (self.control) |control| {
+            control.syncLifecycle();
+            control.relinquishAgentSessionsAfterRuntimeShutdown();
         }
         self.platform.stop(native_runtime);
-        self.workbench = null;
+        self.control = null;
         self.account_started = false;
     }
 
@@ -292,13 +292,13 @@ const App = struct {
                         if (self.mcp_oauth_refresh) |*refresh|
                             refresh.reconcileTimer();
                 self.drainAgentEvents();
-                if (self.workbench) |workbench|
+                if (self.control) |control|
                     if (self.dispatcher) |dispatcher|
-                        workbench.drainFilePreviewCompletions(
+                        control.drainFilePreviewCompletions(
                             dispatcher.filePreviewSink(),
                         );
                 if (self.dispatcher) |dispatcher| if (dispatcher.connectedWindow() != null) {
-                    try dispatcher.emitWorkbenchChanged();
+                    try dispatcher.emitProductChanged();
                 };
             },
             .timer => |timer| {
@@ -306,18 +306,18 @@ const App = struct {
                     if (coordinator.onTimer(timer.id))
                         return;
                 if (timer.id == app_platform.scheduled_task_timer_id) {
-                    if (self.workbench) |workbench| {
-                        workbench.onScheduledTaskTimer();
+                    if (self.control) |control| {
+                        control.onScheduledTaskTimer();
                         if (self.dispatcher) |dispatcher|
-                            try dispatcher.emitWorkbenchChanged();
+                            try dispatcher.emitProductChanged();
                     }
                     return;
                 }
                 if (timer.id == app_platform.mcp_catalog_timer_id) {
-                    if (self.workbench) |workbench| {
-                        workbench.onMcpRefreshTimer();
+                    if (self.control) |control| {
+                        control.onMcpRefreshTimer();
                         if (self.dispatcher) |dispatcher|
-                            try dispatcher.emitWorkbenchChanged();
+                            try dispatcher.emitProductChanged();
                     }
                     return;
                 }
@@ -329,11 +329,11 @@ const App = struct {
                 if (self.dispatcher != null and
                     self.dispatcher.?.onTimer(timer.id))
                 {
-                    try self.dispatcher.?.emitWorkbenchChanged();
+                    try self.dispatcher.?.emitProductChanged();
                 }
             },
-            .command => |command| if (command.source == .tray) if (self.workbench) |workbench|
-                self.platform.handleTrayCommand(command.tray_item_id, workbench.scheduleHost()),
+            .command => |command| if (command.source == .tray) if (self.control) |control|
+                self.platform.handleTrayCommand(command.tray_item_id, control.scheduleHost()),
             else => {},
         }
     }
@@ -345,8 +345,8 @@ const App = struct {
     }
 
     fn drainAgentEvents(self: *@This()) void {
-        const workbench = self.workbench orelse return;
-        self.agent_events.drain(workbench.agentEventConsumer());
+        const control = self.control orelse return;
+        self.agent_events.drain(control.agentEventConsumer());
     }
 };
 
@@ -406,13 +406,13 @@ pub fn run(init: std.process.Init) !void {
     defer stores_state.deinit();
     app.mcp_configuration_store = if (stores_state.mcp_configuration) |*store| store else null;
 
-    // The Application Account coordinator and Dispatcher need stable Workbench addresses before
+    // The Application Account coordinator and Dispatcher need stable Product Control addresses before
     // Native startup, but neither may dereference this storage while Bridge
-    // ingress is closed. App.start initializes Workbench completely and only
+    // ingress is closed. App.start initializes Product Control completely and only
     // then opens ingress, before the first Renderer window is loaded.
-    var workbench: workbench_api.Workbench = undefined;
-    app.workbench_storage = &workbench;
-    app.workbench_configuration = .{
+    var control: product_control.Runtime = undefined;
+    app.control_storage = &control;
+    app.control_configuration = .{
         .change_notifier = .{
             .context = &app.platform,
             .wake = app_platform.Adapter.notifyMainLoop,
@@ -487,7 +487,7 @@ pub fn run(init: std.process.Init) !void {
             coordinator.deinit();
             app.mcp_oauth_refresh = null;
         }
-        if (app.workbench_initialized) workbench.shutdownExecutor();
+        if (app.control_initialized) control.shutdownExecutor();
         if (app.agent_runtime) |runtime| {
             const shutdown_complete = if (app.agent_shutdown)
                 true
@@ -496,13 +496,13 @@ pub fn run(init: std.process.Init) !void {
                 app.agent_shutdown = true;
                 break :shutdown true;
             };
-            if (app.workbench_initialized) {
-                workbench.syncLifecycle();
+            if (app.control_initialized) {
+                control.syncLifecycle();
                 if (shutdown_complete)
-                    workbench.relinquishAgentSessionsAfterRuntimeShutdown()
+                    control.relinquishAgentSessionsAfterRuntimeShutdown()
                 else
-                    workbench.abandonAgentSessionsForRuntimeDeinit();
-                workbench.deinit();
+                    control.abandonAgentSessionsForRuntimeDeinit();
+                control.deinit();
             }
             if (app.mcp_authorizations) |*authorizations| {
                 authorizations.deinit();
@@ -531,7 +531,7 @@ pub fn run(init: std.process.Init) !void {
     );
     var account_coordinator_state = account_coordinator.Coordinator.init(
         &account_runtime,
-        workbench.executionHandoff(),
+        control.executionHandoff(),
         app.main_thread_id,
         init.io,
     );
@@ -546,7 +546,7 @@ pub fn run(init: std.process.Init) !void {
 
     var dispatcher = try bridge_api.Dispatcher.init(
         std.heap.c_allocator,
-        &workbench,
+        &control,
         account_coordinator_state.commandSink(),
         app.platform.dispatcherPlatform(),
         app.automation.dispatcherAuthority(),

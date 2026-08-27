@@ -5,8 +5,8 @@ const account_contract = @import("metawork_account_contract");
 const account_api = @import("metawork_account");
 const account_ports = @import("account_ports");
 const account_store = @import("account_credential_store");
-const workbench_api = @import("metawork_workbench");
 const control_ports = @import("metawork_product_control_ports");
+const test_control = if (builtin.is_test) @import("lifecycle_fixture").product_control else struct {};
 
 const ExecutionReplacement = enum { none, startup, default, identity };
 
@@ -666,7 +666,7 @@ test "Application coordinator commits Account Runtime facts into Workbench" {
     defer account_runtime.deinit();
 
     var agent_runtime: agent.Runtime = undefined;
-    var workbench = try workbench_api.Workbench.init(
+    var workbench = try test_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &agent_runtime,
@@ -797,7 +797,7 @@ test "Application coordinator balances Workbench gate when Account effect admiss
     defer account_runtime.deinit();
 
     var agent_runtime: agent.Runtime = undefined;
-    var workbench = try workbench_api.Workbench.init(
+    var workbench = try test_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &agent_runtime,
@@ -1141,7 +1141,7 @@ test "restored login drives automatic key and model defaults end to end" {
     );
 
     var agent_runtime: agent.Runtime = undefined;
-    var workbench = try workbench_api.Workbench.init(
+    var workbench = try test_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &agent_runtime,
@@ -1269,7 +1269,7 @@ test "relaunch with persisted selection restores the saved execution" {
             fake_metask.transport(),
         );
         var agent_runtime: agent.Runtime = undefined;
-        var workbench = try workbench_api.Workbench.init(
+        var workbench = try test_control.Runtime.init(
             std.testing.allocator,
             std.testing.io,
             &agent_runtime,
@@ -1317,7 +1317,7 @@ test "relaunch with persisted selection restores the saved execution" {
             fake_metask.transport(),
         );
         var agent_runtime: agent.Runtime = undefined;
-        var workbench = try workbench_api.Workbench.init(
+        var workbench = try test_control.Runtime.init(
             std.testing.allocator,
             std.testing.io,
             &agent_runtime,
@@ -1402,7 +1402,7 @@ test "relaunch with persisted selection restores the saved execution" {
             fake_metask.transport(),
         );
         var agent_runtime: agent.Runtime = undefined;
-        var workbench = try workbench_api.Workbench.init(
+        var workbench = try test_control.Runtime.init(
             std.testing.allocator,
             std.testing.io,
             &agent_runtime,
@@ -1463,7 +1463,7 @@ test "broken first key parks the catalog and a manual switch recovers" {
         fake_metask.transport(),
     );
     var agent_runtime: agent.Runtime = undefined;
-    var workbench = try workbench_api.Workbench.init(
+    var workbench = try test_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &agent_runtime,
