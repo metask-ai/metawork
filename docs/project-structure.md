@@ -214,6 +214,7 @@ Account 与 Workbench 是同级 owner，只通过纯 `product/account/contract.z
 - `product_delivery.zig` 是 connection generation、revision retry/timer、snapshot identity 和 owned transport storage 的唯一 owner；
 - `revision_delivery.zig` 与 `snapshot_delivery.zig` 是 `ProductDelivery` 内部状态，不形成第二个公开 transport；
 - `callback_gate.zig` 管理同步 Native callback ingress stop/quiescence；
+- `dispatcher.zig` 另以 Native SDK async registry 承载唯一 `metawork.files.preview`，只保存最多 8 个 responder/request identity；文件读取、权限和正文脱敏仍归 Workbench；
 - `workspace_grant.zig` 管理绑定 window/source 的一次性 Renderer capability，不是持久 Workspace registry；
 - `skill_grant.zig` 管理绑定 window/source 的一次性 Skill capability，与 workspace_grant 同构，不是持久 Skill registry。
 
@@ -234,6 +235,10 @@ Bridge handler 不能绕过 Workbench 操作 AgentCore handle。automation 只�
 ### `frontend/src/features/scheduled-tasks/`
 
 `ScheduledTasksPage.tsx` 是与 Skill 中心同级的持久自动化管理视图，拥有搜索、Text 建议模板、状态分区、连续列表、真实 Task/occurrence 链接与 detail/editor drawer；任务内容只编辑 Text instruction，不读取任何 Skill catalog 或持有 Skill 配置。recurrence 的本地输入与确认摘要留在该 feature，但 Host snapshot 和 typed mutation result 始终是产品真相。该目录不得使用 Renderer timer 触发 Run、用浏览器存储持久化 Scheduled Task、直接调用 AgentCore，或复制 Task timeline。
+
+### `frontend/src/features/files/`
+
+`FilePreviewDrawer.tsx` 是受控的当前文件内容阅读面，只消费 `App.tsx` 已绑定到精确 Task/Run/reference 的状态和 callback。Run footer 的 reference 聚合与打开意图留在 `features/tasks/TaskContent.tsx`，请求 generation、late-result 丢弃、Task/snapshot 失效关闭与 Bridge 调用留在 `app/App.tsx`；Drawer 不读取文件系统、Task store 或 AgentCore，不保存 cache，也不展示或推断 Files Changed、Output、kind、range 或历史版本。
 
 ### `workbench/` 与 `agent/`
 
@@ -282,6 +287,8 @@ storage -> SQLite amalgamation
 `storage -> SQLite amalgamation` 只存在于 direct backend；Storage contract 不依赖 SQLite 或 Native SDK，当前没有任何 `app/product -> storage` 正式运行时边。`bridge -> Native SDK` 只允许消费正式 Bridge transport contract，以及 transport authority 和窄 Application capability 调用所需的 data-only DTO/opaque identifier；它不允许 Bridge 持有 `PlatformServices`、具体平台实现、OS handle 或直接系统调用权。`automation -> bridge` 只消费 policy 类型；`automation -> Native SDK` 只消费同级 Bridge policy contract 类型，同样不得持有 `PlatformServices`、平台实现或系统调用权。Account 只依赖自身 `ports.zig`；`app/account_platform_binding.zig` 在 Application 生命周期内持有并绑定对应系统 effect，shutdown 必须先让 Account 清空 port 引用，再释放 binding。禁止 `agent -> workbench/bridge/app`、`workbench -> bridge`、`bridge -> Account runtime` 和任何产品模块反向依赖 Renderer。
 
 `product/skill/management_runtime.zig` 是总 Runtime 内部的 live local-asset use-case owner：它调用唯一 package/management kernels，闭合 preview/read/export、install/reimport/uninstall/retry、staging、恢复和 catalog reconciliation。`product/skill/runtime.zig` 只保留 aggregate 入口、catalog refresh 协调与内部 owner 委托；`projection.zig` 只证明 Workspace authority/Task quiescence、传入时间事实并发布 revision，不直接调用 package 或 Transactions。
+
+`workbench/file_preview.zig` 是独立于产品执行队列的只读安全 lane，固定 2 workers/8 in-flight，独占 no-follow bounded file read、metadata 撕裂检测、raw buffer/completion 所有权与 secure-zero；它不执行 Agent/Product mutation，也不持有 Workbench、Bridge 或 Renderer。`workbench/projection.zig` 在主线程完成精确 locator/authority 校验、completion reauthorization、current/historical credential redaction 与 callback-scoped projection。
 
 ## 6. 测试与构建资产
 

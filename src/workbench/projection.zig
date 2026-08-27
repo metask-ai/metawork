@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const lifecycle = @import("metawork_agent");
 const account_contract = @import("metawork_account_contract");
 const executor_impl = @import("workbench_executor");
+const file_preview = @import("file_preview.zig");
 const automatic_workspace_allocator = @import("workbench_automatic_workspace_allocator");
 const scheduled_tasks_impl = @import("workbench_scheduled_tasks");
 const scheduled_task_persistence = @import("workbench_scheduled_task_persistence");
@@ -85,11 +86,6 @@ pub const Error = lifecycle.Error || scheduled_tasks_impl.Error || scheduled_tas
     RecoveryUnavailable,
     RestoreAttemptExhausted,
     UnsupportedBuiltinProfile,
-    FileReferenceNotFound,
-    FilePreviewMissing,
-    FilePreviewRestricted,
-    FilePreviewUnsupported,
-    FilePreviewReadFailed,
 };
 
 pub const Limits = struct {
@@ -664,9 +660,6 @@ pub fn decideTransportFailure(report: TransportFailureReport) TransportFailureDe
 const TrackedText = if (builtin.is_test) task_test_state.TrackedText else void;
 const permission_summary_field_capacity = if (builtin.is_test) task_test_state.permission_summary_field_capacity else 0;
 const ToolView = if (builtin.is_test) task_test_state.ToolView else void;
-pub const FileReferencePositionView = product_task.FileReferencePosition;
-pub const FileReferenceRangeView = product_task.FileReferenceRange;
-
 fn formatFileReferenceId(
     storage: []u8,
     task_id: u64,
@@ -700,67 +693,22 @@ fn absoluteReferenceRelativePath(
     return storage[0..relative.len];
 }
 
-fn boundedPreviewCutoff(bytes: []const u8, max_lines: usize, max_line_bytes: usize) usize {
-    var lines: usize = 1;
-    var line_bytes: usize = 0;
-    for (bytes, 0..) |byte, index| {
-        if (byte == '\n') {
-            lines += 1;
-            line_bytes = 0;
-            if (lines > max_lines) return index;
-        } else {
-            line_bytes += 1;
-            if (line_bytes > max_line_bytes) return index;
-        }
-    }
-    return bytes.len;
-}
+pub const FilePreviewState = file_preview.State;
 
-fn trimIncompleteUtf8Tail(bytes: []u8) []u8 {
-    if (std.unicode.utf8ValidateSlice(bytes) or bytes.len == 0) return bytes;
-
-    var suffix_start = bytes.len;
-    var continuation_count: usize = 0;
-    while (suffix_start > 0 and continuation_count < 3 and
-        (bytes[suffix_start - 1] & 0xc0) == 0x80)
-    {
-        suffix_start -= 1;
-        continuation_count += 1;
-    }
-    if (suffix_start == 0) return bytes;
-
-    const lead_index = suffix_start - 1;
-    const lead = bytes[lead_index];
-    if (lead < 0xc2 or lead > 0xf4) return bytes;
-    const sequence_len = std.unicode.utf8ByteSequenceLength(lead) catch return bytes;
-    if (bytes.len - lead_index < sequence_len) return bytes[0..lead_index];
-    return bytes;
-}
-
-/// Workbench-owned projection of AgentCore's typed file reference. The raw
-/// locator is retained only on the Host side; snapshot serialization uses the
-/// safe display path and opaque product id below.
-pub const FilePreviewState = enum { ready, truncated, missing, restricted, unsupported, failed };
-
-pub const FilePreview = struct {
-    id: []u8,
-    title: []u8,
-    display_path: []u8,
-    language: []u8,
-    content: []u8,
-    truncated: bool,
-    range: ?FileReferenceRangeView,
+/// Callback-scoped safe projection. `content` has already passed current
+/// authority and known-credential redaction and must not be retained by the
+/// sink after `complete_fn` returns.
+pub const FilePreviewResult = struct {
+    completion_id: u64,
     state: FilePreviewState,
-    allocator: std.mem.Allocator,
+    content: []const u8,
+    truncated: bool,
+    redacted: bool,
+};
 
-    pub fn deinit(self: *FilePreview) void {
-        self.allocator.free(self.id);
-        self.allocator.free(self.title);
-        self.allocator.free(self.display_path);
-        self.allocator.free(self.language);
-        self.allocator.free(self.content);
-        self.* = undefined;
-    }
+pub const FilePreviewSink = struct {
+    context: *anyopaque,
+    complete_fn: *const fn (*anyopaque, FilePreviewResult) void,
 };
 
 const UsageView = if (builtin.is_test) task_test_state.UsageView else void;
@@ -1384,8 +1332,10 @@ pub const Workbench = struct {
     schedule_background_available: bool = false,
     change_notifier: ChangeNotifier,
     executor: *executor_impl.Executor,
+    preview_lane: *file_preview.Lane,
     shutting_down: bool = false,
     executor_shutdown: bool = false,
+    preview_executor_shutdown: bool = false,
     projection_bytes: usize = 0,
     revision: u64 = 0,
     account: AccountProjection,
@@ -1505,6 +1455,12 @@ pub const Workbench = struct {
         };
         var executor_owned = true;
         errdefer if (executor_owned) executor.deinit();
+        const preview_lane = try file_preview.Lane.create(io, allocator, .{
+            .context = configuration.change_notifier.context,
+            .wake_fn = configuration.change_notifier.wake,
+        });
+        var preview_lane_owned = true;
+        errdefer if (preview_lane_owned) preview_lane.deinit();
         var skill = try skill_runtime.Runtime.init(
             io,
             allocator,
@@ -1547,6 +1503,7 @@ pub const Workbench = struct {
             .schedule_notifier = configuration.schedule_notifier,
             .change_notifier = configuration.change_notifier,
             .executor = executor,
+            .preview_lane = preview_lane,
             .account = account,
             .execution = execution,
             .canonical_user_home = canonical_user_home,
@@ -1605,26 +1562,36 @@ pub const Workbench = struct {
             workbench.updateMcpRefreshDeadlineNoFail();
             workbench.rearmMcpRefreshTimerNoFail();
         }
+        preview_lane_owned = false;
         return workbench;
     }
 
-    /// Re-authorizes a projected file reference and returns a bounded UTF-8
-    /// preview. Renderer callers only provide the opaque product id; locator
-    /// and workspace ownership remain inside Workbench.
-    pub fn previewFileReference(self: *Workbench, reference_id: []const u8) Error!FilePreview {
-        const reference = self.task_runtime.fileReference(reference_id) orelse
-            return error.FileReferenceNotFound;
-        var workspace_valid = false;
-        for (self.workspaces) |*workspace_entry| {
-            const workspace = workspace_entry.* orelse continue;
-            if (workspace.id == reference.workspace_id) {
-                workspace_valid = workspace.epoch == reference.workspace_epoch and
-                    std.mem.eql(u8, workspace.canonical_root, reference.workspace_root);
-                break;
-            }
-        }
-        if (!workspace_valid) return error.FilePreviewRestricted;
-        if (reference.locator_kind == .uri) return error.FilePreviewUnsupported;
+    pub const FilePreviewAdmission = union(enum) {
+        queued,
+        immediate: FilePreviewState,
+    };
+
+    /// Performs only bounded identity/authority work on the main thread and
+    /// submits immutable Host-only input to the preview lane. File I/O never
+    /// occurs in this call.
+    pub fn beginFilePreview(
+        self: *Workbench,
+        completion_id: u64,
+        task_id: u64,
+        run_id: u64,
+        reference_id: []const u8,
+    ) FilePreviewAdmission {
+        if (self.shutting_down or self.preview_executor_shutdown)
+            return .{ .immediate = .failed };
+        const reference = self.task_runtime.fileReference(
+            task_id,
+            run_id,
+            reference_id,
+        ) orelse return .{ .immediate = .missing };
+        if (!self.filePreviewWorkspaceAuthorized(reference))
+            return .{ .immediate = .restricted };
+        if (reference.locator_kind == .uri)
+            return .{ .immediate = .unsupported };
 
         var relative_storage: [4096]u8 = undefined;
         const relative = switch (reference.locator_kind) {
@@ -1633,105 +1600,183 @@ pub const Workbench = struct {
                 reference.workspace_root,
                 reference.locator,
                 &relative_storage,
-            ) orelse return error.FilePreviewRestricted,
+            ) orelse return .{ .immediate = .restricted },
             .uri => unreachable,
         };
         if (relative.len == 0 or relative.len > relative_storage.len)
-            return error.FilePreviewRestricted;
+            return .{ .immediate = .restricted };
 
-        var root = std.Io.Dir.openDirAbsolute(self.io, reference.workspace_root, .{
-            .access_sub_paths = true,
-            .follow_symlinks = false,
-        }) catch return error.FilePreviewRestricted;
-        defer root.close(self.io);
-        var file = root.openFile(self.io, relative, .{
-            .allow_directory = false,
-            .follow_symlinks = false,
-            .resolve_beneath = true,
-        }) catch |err| return switch (err) {
-            error.FileNotFound, error.NotDir => error.FilePreviewMissing,
-            else => error.FilePreviewRestricted,
-        };
-        defer file.close(self.io);
-        if (builtin.os.tag == .windows) file.flags.nonblocking = true;
-        const length = file.length(self.io) catch return error.FilePreviewReadFailed;
-        if (length > self.limits.max_file_preview_bytes) {
-            const bytes = try self.allocator.alloc(u8, self.limits.max_file_preview_bytes);
-            var bytes_owned = true;
-            defer if (bytes_owned) self.allocator.free(bytes);
-            const read = file.readPositionalAll(self.io, bytes, 0) catch return error.FilePreviewReadFailed;
-            if (read != bytes.len) return error.FilePreviewUnsupported;
-            const complete_bytes = trimIncompleteUtf8Tail(bytes);
-            if (!std.unicode.utf8ValidateSlice(complete_bytes))
-                return error.FilePreviewUnsupported;
-            const preview = try self.finishFilePreview(reference, complete_bytes, true);
-            if (preview.content.ptr == bytes.ptr) bytes_owned = false;
-            return preview;
-        }
-        const bytes = try self.allocator.alloc(u8, @intCast(length));
-        var bytes_owned = true;
-        defer if (bytes_owned) self.allocator.free(bytes);
-        const read = file.readPositionalAll(self.io, bytes, 0) catch return error.FilePreviewReadFailed;
-        if (read != bytes.len or !std.unicode.utf8ValidateSlice(bytes))
-            return error.FilePreviewUnsupported;
-        const preview = try self.finishFilePreview(reference, bytes, false);
-        if (preview.content.ptr == bytes.ptr) bytes_owned = false;
-        return preview;
+        self.preview_lane.begin(.{
+            .completion_id = completion_id,
+            .task_id = task_id,
+            .run_id = run_id,
+            .workspace_id = reference.workspace_id,
+            .workspace_epoch = reference.workspace_epoch,
+            .reference_id = reference.id,
+            .workspace_root = reference.workspace_root,
+            .relative_path = relative,
+            .max_bytes = self.limits.max_file_preview_bytes,
+            .max_lines = self.limits.max_file_preview_lines,
+            .max_line_bytes = self.limits.max_file_preview_line_bytes,
+        }) catch return .{ .immediate = .failed };
+        return .queued;
     }
 
-    fn finishFilePreview(
+    /// Drains worker-owned raw completions on the main thread. Current Task,
+    /// Run, reference and Workspace authority are checked again before any
+    /// bytes are projected. Raw buffers remain inside Workbench and are
+    /// securely erased immediately after the callback returns.
+    pub fn drainFilePreviewCompletions(
         self: *Workbench,
-        reference: task_runtime.FileReference,
-        bytes: []u8,
-        truncated: bool,
-    ) Error!FilePreview {
-        const cutoff = boundedPreviewCutoff(
-            bytes,
-            self.limits.max_file_preview_lines,
-            self.limits.max_file_preview_line_bytes,
-        );
-        const safe_cutoff = if (cutoff < bytes.len)
-            trimIncompleteUtf8Tail(bytes[0..cutoff]).len
-        else
-            cutoff;
-        var content = bytes;
-        var content_truncated = truncated;
-        var content_is_owned = false;
-        errdefer if (content_is_owned) self.allocator.free(content);
-        if (safe_cutoff < bytes.len) {
-            content = try self.allocator.alloc(u8, safe_cutoff);
-            @memcpy(content, bytes[0..safe_cutoff]);
-            content_is_owned = true;
-            content_truncated = true;
+        sink: FilePreviewSink,
+    ) void {
+        while (self.preview_lane.take()) |taken| {
+            defer self.preview_lane.release(taken);
+            const raw = taken.completion;
+            var state = raw.state;
+            var truncated = false;
+            var redacted = false;
+            var safe_buffer: []u8 = &.{};
+            var safe_content: []const u8 = &.{};
+            defer if (safe_buffer.len != 0) {
+                std.crypto.secureZero(u8, safe_buffer);
+                self.allocator.free(safe_buffer);
+            };
+
+            const reference = self.task_runtime.fileReference(
+                raw.task_id,
+                raw.run_id,
+                raw.reference_id,
+            );
+            if (reference == null) {
+                state = .missing;
+            } else if (reference.?.workspace_id != raw.workspace_id or
+                reference.?.workspace_epoch != raw.workspace_epoch or
+                !std.mem.eql(u8, reference.?.workspace_root, raw.workspace_root) or
+                !self.filePreviewWorkspaceAuthorized(reference.?))
+            {
+                state = .restricted;
+            } else if (state == .ready) {
+                const cutoff = self.filePreviewCredentialSafeCutoff(
+                    raw.content,
+                    raw.truncated,
+                );
+                truncated = raw.truncated or cutoff < raw.content.len;
+                redacted = cutoff < raw.content.len;
+                if (cutoff != 0) {
+                    safe_buffer = self.allocator.alloc(u8, cutoff) catch {
+                        state = .failed;
+                        sink.complete_fn(sink.context, .{
+                            .completion_id = raw.completion_id,
+                            .state = state,
+                            .content = "",
+                            .truncated = false,
+                            .redacted = false,
+                        });
+                        continue;
+                    };
+                    const projected = self.sanitizeFilePreviewInto(
+                        safe_buffer,
+                        raw.content[0..cutoff],
+                    );
+                    safe_content = safe_buffer[0..projected.len];
+                    redacted = projected.redacted or redacted;
+                }
+            }
+
+            if (state != .ready) {
+                safe_content = &.{};
+                truncated = false;
+                redacted = false;
+            }
+            sink.complete_fn(sink.context, .{
+                .completion_id = raw.completion_id,
+                .state = state,
+                .content = safe_content,
+                .truncated = truncated,
+                .redacted = redacted,
+            });
         }
-        const id = try self.copyPreviewBounded(reference.id, self.limits.max_file_ref_field_bytes);
-        errdefer self.allocator.free(id);
-        const title = try self.copyPreviewBounded(reference.title, self.limits.max_file_ref_field_bytes);
-        errdefer self.allocator.free(title);
-        const display_path = try self.copyPreviewBounded(
-            reference.display_path,
-            self.limits.max_file_ref_field_bytes,
+    }
+
+    fn filePreviewWorkspaceAuthorized(
+        self: *const Workbench,
+        reference: task_runtime.FileReference,
+    ) bool {
+        for (self.workspaces) |*workspace_entry| {
+            const workspace = workspace_entry.* orelse continue;
+            if (workspace.id != reference.workspace_id) continue;
+            return workspace.epoch == reference.workspace_epoch and
+                workspace.authorization == .available and
+                std.mem.eql(u8, workspace.canonical_root, reference.workspace_root);
+        }
+        return false;
+    }
+
+    const PreviewProjection = struct {
+        len: usize,
+        redacted: bool,
+    };
+
+    fn sanitizeFilePreviewInto(
+        self: *const Workbench,
+        output: []u8,
+        value: []const u8,
+    ) PreviewProjection {
+        var read: usize = 0;
+        var write: usize = 0;
+        var redacted = false;
+        while (read < value.len) {
+            if (self.knownCredentialEndAtCodepoint(value, read)) |redaction_end| {
+                const marker_len = @min(redaction_end - read, 3);
+                @memset(output[write..][0..marker_len], '*');
+                write += marker_len;
+                read = redaction_end;
+                redacted = true;
+                continue;
+            }
+            const codepoint_len = utf8CodepointLen(value, read);
+            @memcpy(output[write..][0..codepoint_len], value[read..][0..codepoint_len]);
+            write += codepoint_len;
+            read += codepoint_len;
+        }
+        return .{ .len = write, .redacted = redacted };
+    }
+
+    fn filePreviewCredentialSafeCutoff(
+        self: *const Workbench,
+        value: []const u8,
+        truncated: bool,
+    ) usize {
+        if (!truncated or value.len == 0) return value.len;
+        var index = value.len - @min(
+            value.len,
+            account_contract.Limits.api_key_bytes - 1,
         );
-        errdefer self.allocator.free(display_path);
-        const extension = std.fs.path.extension(reference.display_path);
-        const language = if (extension.len > 1) extension[1..] else "text";
-        const language_copy = try self.copyPreviewBounded(language, 64);
-        errdefer self.allocator.free(language_copy);
-        content_is_owned = false;
-        return .{
-            .id = id,
-            .title = title,
-            .display_path = display_path,
-            .language = language_copy,
-            .content = content,
-            .truncated = content_truncated,
-            .range = if (reference.range) |range| .{
-                .start = .{ .line = @intCast(range.start.line), .column = @intCast(range.start.column) },
-                .end = .{ .line = @intCast(range.end.line), .column = @intCast(range.end.column) },
-            } else null,
-            .state = if (content_truncated) .truncated else .ready,
-            .allocator = self.allocator,
-        };
+        while (index < value.len and value[index] & 0xc0 == 0x80) index += 1;
+        while (index < value.len) {
+            if (self.knownCredentialMayContinueAtCodepoint(value, index))
+                return index;
+            index += utf8CodepointLen(value, index);
+        }
+        return value.len;
+    }
+
+    fn knownCredentialMayContinueAtCodepoint(
+        self: *const Workbench,
+        value: []const u8,
+        codepoint_start: usize,
+    ) bool {
+        const current = self.execution.credential();
+        if (credentialMayContinueAtCodepoint(value, codepoint_start, current))
+            return true;
+        const codepoint_len = utf8CodepointLen(value, codepoint_start);
+        for (0..codepoint_len) |offset| {
+            if (self.task_runtime.executionCredentialMayContinue(
+                value[codepoint_start + offset ..],
+            )) return true;
+        }
+        return false;
     }
 
     pub fn setScheduleBackgroundAvailableNoFail(
@@ -4136,12 +4181,24 @@ pub const Workbench = struct {
         self.account.deinit();
         std.debug.assert(self.projection_bytes == 0);
         self.executor.deinit();
+        self.preview_lane.deinit();
         self.* = undefined;
+    }
+
+    pub fn stopFilePreviewAdmission(self: *Workbench) void {
+        self.preview_lane.stopAdmission();
+    }
+
+    pub fn shutdownFilePreviewExecutor(self: *Workbench) void {
+        if (self.preview_executor_shutdown) return;
+        self.preview_lane.shutdownExecutor();
+        self.preview_executor_shutdown = true;
     }
 
     pub fn shutdownExecutor(self: *Workbench) void {
         if (self.executor_shutdown) return;
         self.shutting_down = true;
+        self.shutdownFilePreviewExecutor();
         if (self.mcp) |*runtime| runtime.beginShutdown();
         self.schedule_timer.cancelCurrent();
         self.skill.beginShutdown();
@@ -10732,8 +10789,23 @@ test "Workbench projects typed AgentCore file references into bounded tool entri
     const snapshot = try workbench.writeSnapshot(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"fileRefs\":[{\"id\":\"file-3-1-1-1\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"displayPath\":\"src/main.zig\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"kind\":\"read\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"line\":\"2\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"kind\":\"read\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"range\":") == null);
+    try std.testing.expect(workbench.task_runtime.fileReference(
+        3,
+        7,
+        "file-3-1-1-1",
+    ) != null);
+    try std.testing.expect(workbench.task_runtime.fileReference(
+        4,
+        7,
+        "file-3-1-1-1",
+    ) == null);
+    try std.testing.expect(workbench.task_runtime.fileReference(
+        3,
+        8,
+        "file-3-1-1-1",
+    ) == null);
 }
 
 test "file reference ids use durable task and run identities" {
@@ -10748,48 +10820,26 @@ test "file reference ids use durable task and run identities" {
     try std.testing.expect(!std.mem.eql(u8, first, other_task));
 }
 
-test "file preview allocation rollback does not touch projection budget" {
+test "file preview redaction protects credentials that cross a truncation boundary" {
     var workbench = try testWorkbench();
     defer workbench.deinit();
-    const reference = task_runtime.FileReference{
-        .workspace_id = 1,
-        .workspace_epoch = 1,
-        .workspace_root = "",
-        .id = @constCast("file-3-1-1-1"),
-        .title = @constCast("main.zig"),
-        .display_path = @constCast("src/main.zig"),
-        .kind = @constCast("read"),
-        .locator_kind = .workspace_path,
-        .locator = @constCast("src/main.zig"),
-        .range = null,
-    };
-    const tracked_before = workbench.projection_bytes;
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
-    const allocator = workbench.allocator;
-    workbench.allocator = failing.allocator();
-    const bytes = try allocator.dupe(u8, "preview");
-    try std.testing.expectError(
-        error.OutOfMemory,
-        workbench.finishFilePreview(reference, bytes, false),
+    const boundary_value = "visible SECRET-";
+    const cutoff = workbench.filePreviewCredentialSafeCutoff(
+        boundary_value,
+        true,
     );
-    workbench.allocator = allocator;
-    allocator.free(bytes);
-    try std.testing.expectEqual(tracked_before, workbench.projection_bytes);
+    try std.testing.expectEqualStrings("visible ", boundary_value[0..cutoff]);
 
-    const success_bytes = try allocator.dupe(u8, "preview");
-    var preview = try workbench.finishFilePreview(reference, success_bytes, false);
-    defer preview.deinit();
-    try std.testing.expectEqual(tracked_before, workbench.projection_bytes);
-}
-
-test "truncated file preview keeps a complete UTF-8 prefix" {
-    var bytes = [_]u8{ 'a', 0xe4, 0xb8, 0xad, 0xe4, 0xb8 };
-    const complete = trimIncompleteUtf8Tail(&bytes);
-    try std.testing.expectEqual(@as(usize, 4), complete.len);
-    try std.testing.expect(std.unicode.utf8ValidateSlice(complete));
-
-    var invalid = [_]u8{ 'a', 0xf5 };
-    try std.testing.expectEqual(invalid.len, trimIncompleteUtf8Tail(&invalid).len);
+    var output: [64]u8 = undefined;
+    const projected = workbench.sanitizeFilePreviewInto(
+        &output,
+        "visible SECRET-KEY suffix",
+    );
+    try std.testing.expect(projected.redacted);
+    try std.testing.expectEqualStrings(
+        "visible *** suffix",
+        output[0..projected.len],
+    );
 }
 
 test "known Host credentials are removed from assistant, tool, and UI projections" {

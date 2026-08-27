@@ -323,17 +323,6 @@ fn writeRun(
             try text_projection.writeJson(writer, reference.title);
             writer.writeAll(",\"displayPath\":") catch return error.SnapshotTooLarge;
             try text_projection.writeJson(writer, reference.display_path);
-            writer.writeAll(",\"kind\":") catch return error.SnapshotTooLarge;
-            try text_projection.writeJson(writer, reference.kind);
-            writer.writeAll(",\"range\":") catch return error.SnapshotTooLarge;
-            if (reference.range) |range| {
-                writer.print("{{\"start\":{{\"line\":\"{d}\",\"column\":\"{d}\"}},\"end\":{{\"line\":\"{d}\",\"column\":\"{d}\"}}}}", .{
-                    range.start.line,
-                    range.start.column,
-                    range.end.line,
-                    range.end.column,
-                }) catch return error.SnapshotTooLarge;
-            } else writer.writeAll("null") catch return error.SnapshotTooLarge;
             writer.writeByte('}') catch return error.SnapshotTooLarge;
         };
         writer.writeAll("]}") catch return error.SnapshotTooLarge;

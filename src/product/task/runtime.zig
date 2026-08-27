@@ -1523,39 +1523,37 @@ pub const Runtime = struct {
 
     pub fn fileReference(
         self: *const Runtime,
+        task_id: u64,
+        run_id: u64,
         reference_id: []const u8,
     ) ?FileReference {
-        for (self.tasks) |*entry| {
-            const task = &(entry.* orelse continue);
-            for (task.durable.runs) |*run_entry| {
-                const run = &(run_entry.* orelse continue);
-                for (run.tools) |*tool_entry| {
-                    const tool = &(tool_entry.* orelse continue);
-                    const references = tool.file_refs orelse continue;
-                    for (references) |reference_entry| {
-                        const reference = reference_entry orelse continue;
-                        if (!std.mem.eql(u8, reference.id, reference_id)) continue;
-                        return .{
-                            .workspace_id = task.durable.workspace_id,
-                            .workspace_epoch = task.durable.workspace_epoch,
-                            .workspace_root = task.durable.workspace_root,
-                            .id = reference.id,
-                            .title = reference.title,
-                            .display_path = reference.display_path,
-                            .kind = reference.kind,
-                            .locator_kind = switch (reference.locator_kind) {
-                                .workspace_path => .workspace_path,
-                                .absolute_path => .absolute_path,
-                                .uri => .uri,
-                            },
-                            .locator = reference.locator,
-                            .range = if (reference.range) |range| .{
-                                .start = .{ .line = range.start.line, .column = range.start.column },
-                                .end = .{ .line = range.end.line, .column = range.end.column },
-                            } else null,
-                        };
-                    }
-                }
+        const task = self.findConst(task_id) orelse return null;
+        const run = task_state.findRun(task.durable.runs, run_id) orelse return null;
+        for (run.tools) |*tool_entry| {
+            const tool = &(tool_entry.* orelse continue);
+            const references = tool.file_refs orelse continue;
+            for (references) |reference_entry| {
+                const reference = reference_entry orelse continue;
+                if (!std.mem.eql(u8, reference.id, reference_id)) continue;
+                return .{
+                    .workspace_id = task.durable.workspace_id,
+                    .workspace_epoch = task.durable.workspace_epoch,
+                    .workspace_root = task.durable.workspace_root,
+                    .id = reference.id,
+                    .title = reference.title,
+                    .display_path = reference.display_path,
+                    .kind = reference.kind,
+                    .locator_kind = switch (reference.locator_kind) {
+                        .workspace_path => .workspace_path,
+                        .absolute_path => .absolute_path,
+                        .uri => .uri,
+                    },
+                    .locator = reference.locator,
+                    .range = if (reference.range) |range| .{
+                        .start = .{ .line = range.start.line, .column = range.start.column },
+                        .end = .{ .line = range.end.line, .column = range.end.column },
+                    } else null,
+                };
             }
         }
         return null;
@@ -2548,6 +2546,22 @@ pub const Runtime = struct {
             }
         }
         return longest;
+    }
+
+    pub fn executionCredentialMayContinue(
+        self: *const Runtime,
+        value: []const u8,
+    ) bool {
+        if (value.len == 0) return false;
+        for (self.tasks) |*entry| {
+            const task = &(entry.* orelse continue);
+            if (task.runtime.executionConst()) |execution| {
+                const credential = execution.input().api_key;
+                if (value.len < credential.len and
+                    std.mem.startsWith(u8, credential, value)) return true;
+            }
+        }
+        return false;
     }
 
     pub fn redactProjectionsNoFail(

@@ -106,40 +106,18 @@ export type AccountCommandResult = {
   attemptId: string | null;
 };
 
-export type FileReferencePositionView = {
-  line: string;
-  column: string;
-};
-
-export type FileReferenceRangeView = {
-  start: FileReferencePositionView;
-  end: FileReferencePositionView;
-};
-
 export type FileReferenceView = {
   id: string;
   title: string;
   displayPath: string;
-  kind: string;
-  range: FileReferenceRangeView | null;
 };
 
 export type FilePreview = {
   state:
-    | "loading"
-    | "ready"
-    | "truncated"
-    | "missing"
-    | "restricted"
-    | "unsupported"
-    | "error";
-  id: string;
-  title: string;
-  displayPath: string;
-  language: string;
+    "ready" | "missing" | "restricted" | "unsupported" | "changing" | "error";
   content: string;
   truncated: boolean;
-  range: FileReferenceRangeView | null;
+  redacted: boolean;
 };
 
 export type ToolView = {

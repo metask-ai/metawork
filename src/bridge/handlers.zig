@@ -235,7 +235,11 @@ pub const TaskCatalogRefresh = struct {
     expectedBindingEpoch: []const u8,
 };
 pub const TaskIdentity = struct { taskId: []const u8, runId: []const u8 };
-pub const FilePreviewRequest = struct { fileReferenceId: []const u8 };
+pub const FilePreviewRequest = struct {
+    taskId: []const u8,
+    runId: []const u8,
+    fileReferenceId: []const u8,
+};
 pub const TaskRename = struct { taskId: []const u8, title: []const u8 };
 pub const TaskArchive = struct { taskId: []const u8, archived: bool };
 pub const TaskDelete = struct { taskId: []const u8 };
@@ -477,6 +481,31 @@ test "Task creation requires an explicit nullable catalog revision" {
         error.InvalidBridgePayload,
         parsePayload(TaskCreate,
             \\{"workspace":{"kind":"manual","workspaceId":"1","expectedWorkspaceEpoch":"2"},"expectedExecutionGeneration":"3"}
+        ),
+    );
+}
+
+test "file preview payload requires exact Task Run and reference identity" {
+    var request = try parsePayload(FilePreviewRequest,
+        \\{"taskId":"1","runId":"2","fileReferenceId":"task:1:run:2:file:3"}
+    );
+    defer request.deinit();
+    try std.testing.expectEqualStrings("1", request.value.taskId);
+    try std.testing.expectEqualStrings("2", request.value.runId);
+    try std.testing.expectEqualStrings(
+        "task:1:run:2:file:3",
+        request.value.fileReferenceId,
+    );
+    try std.testing.expectError(
+        error.InvalidBridgePayload,
+        parsePayload(FilePreviewRequest,
+            \\{"fileReferenceId":"task:1:run:2:file:3"}
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidBridgePayload,
+        parsePayload(FilePreviewRequest,
+            \\{"taskId":"1","runId":"2","fileReferenceId":"task:1:run:2:file:3","path":"src/main.zig"}
         ),
     );
 }

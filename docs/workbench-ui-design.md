@@ -770,18 +770,29 @@ Task overview 是当前 Task 的按需结构化摘要，不是固定存在的第
 
 当前只显示 Needs your attention、Current activity / Last run 和 Context and usage；Tool、Plan 和 Outputs 不渲染空壳、占位符或“即将推出”模块。
 
-## 12. 文件变更与结果文件
+## 12. 文件预览、文件变更与结果文件
 
-> Capability：**未来**。只有 AgentCore 发布 typed FileChange/Output 事件并完成验收后才显示本章模块；当前不能从工具文本或文件后缀推断。
+### 12.1 相关文件预览
 
-### 12.1 两类对象
+> Capability：**当前**。入口只来自 AgentCore 已发布并由 Workbench 持久化的结构化 `tool_result.file_refs`；它是按需读取当前文件内容的只读能力，不是 Files changed 或 Output。
+
+- 每个 Run 按 `tool order → fileRefs order` 聚合并按稳定 reference id 去重，在 Assistant 回复之后显示紧凑的“相关文件”footer；没有结构化引用时不显示入口，不展示 Tool 卡片、kind、range、language、变更类型或 Run ID；
+- 文件按钮显示 Workspace 相对 `displayPath`，具备至少 44px 点击高度、可见键盘焦点和完整 accessible name；点击后打开右侧 Drawer。多文件时 Drawer 提供同一 Run 的文件列表，窄于约 620px 时列表移到正文上方，约 390px 下不得产生页面级横向滚动；
+- Drawer 标题区显示当前路径、刷新与关闭，正文固定说明“显示当前文件内容，不是本次运行时的版本”。正文使用中性等宽文本、保留空白并允许自身横向滚动；不做语法高亮、diff、行号、range 高亮、自动刷新或文件 watcher；
+- UI-only `loading` 不进入 Host wire；Host 状态精确映射为 `ready | missing | restricted | unsupported | changing | error`。`changing` 与 `error` 可以显式重试，其他非 ready 状态只解释原因且正文必须为空；`truncated` 和 `redacted` 以文字说明，不只依赖颜色；
+- Renderer 每次打开、切换文件或刷新都推进 request generation。关闭 Drawer、切换 Task、reference 从新 snapshot 消失或后续请求开始后，旧 Promise 即使完成也不得覆盖当前内容；
+- File Preview 只陈述“这个 Run 引用了哪个文件，以及它现在可读取的内容”。Renderer 不从 reference kind、Tool 名称、Assistant 文本、Bash 输出或文件后缀推断 create/modify/delete、Output、citation 或 Run 时版本。
+
+### 12.2 Files changed 与 Outputs
+
+> Capability：**未来**。只有 AgentCore 发布 typed FileChange/Output 事件并完成验收后才显示本节模块；当前不能从 Tool 文本、文件后缀或 File Preview reference 推断。
 
 - `Files changed`：Agent 在 Workspace 中新增、修改或删除的全部文件；
 - `Outputs`：用户关心的最终交付文件、链接或结构化结果。
 
 Inspector 默认只列 Outputs，完整 Files changed 进入中间工具活动。不能仅凭“新建文件”自动判断它是 Output；需要 Agent 的结构化标记或用户明确标记。
 
-### 12.2 Output 卡片
+### 12.3 Output 卡片
 
 Output 至少显示：
 
@@ -796,7 +807,7 @@ Output 至少显示：
 
 同一路径被再次写入时显示 `Updated`，不在第一版构造虚假的完整版本控制。真实文件缺失或被外部修改时要重新检测并显示状态，不能继续提供无效的打开动作。
 
-### 12.3 结果完成态
+### 12.4 结果完成态
 
 一次执行完成时，中间区域提供简洁交付摘要：
 

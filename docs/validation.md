@@ -189,7 +189,7 @@ node scripts/test-window-chrome-windows.mjs --resize-session-only
 node scripts/test-window-chrome-windows.mjs
 ```
 
-`run-windows-bringup.mjs` 必须覆盖 staged verifier、restore probe、bundle/lifecycle tests、正式 test graph、Debug/Release build 和真实 Windows vertical，并报告 verifier 实际读取的 staged ABI identity，不硬编码 revision 文案。window-chrome 的 resize/session gate 与 pointer/controls gate 分开报告：程序化 resize 只能证明 Native window、最小尺寸和同一 Renderer session，不能替代真实鼠标 edge resize、work-area clamp 或 WebView 焦点验收。
+`run-windows-bringup.mjs` 必须覆盖 staged verifier、restore probe、bundle/lifecycle tests、正式 test graph、Debug/Release build 和真实 Windows vertical，并报告 verifier 实际读取的 staged ABI identity，不硬编码 revision 文案。真实 vertical 还必须观察同步 Renderer Bridge command 的 `main_thread=true`，缺失该事实或观察到 false 均失败；该断言证明同步 handler 占用平台主线程，因此只能承载有界即时工作，并构成 File Preview 必须使用 Native SDK async registry + Workbench worker lane 的回归依据。window-chrome 的 resize/session gate 与 pointer/controls gate 分开报告：程序化 resize 只能证明 Native window、最小尺寸和同一 Renderer session，不能替代真实鼠标 edge resize、work-area clamp 或 WebView 焦点验收。
 
 当前已验收普通拖动、最大化拖动恢复、Renderer controls、close-policy hide/reopen 与 clean shutdown。top/bottom/四角 resize、edge snap、双击标题栏、系统菜单、touch/pen 和完整 UIA 焦点仍需独立证据。
 
@@ -217,6 +217,7 @@ revision 14 不继承旧 artifact 的 checkpoint 样本或通过结论。每个�
 
 - 单 AgentCore Worker、进程级 crash semantics、async pending、suspend/resume 和跨进程 in-flight Run recovery 尚未实现。当前只支持正常 Application 重启后从 latest finalized checkpoint 显式恢复 Conversation attachment。
 - strict Workspace security、正式 Host tools 和持久权限规则尚未完成独立安全验收。
+- File Preview 的确定性回归必须覆盖：Snapshot file reference 只发布 `id/title/displayPath`；request 精确绑定 Task/Run/reference 且拒绝旧单-id/额外 path shape；async command 不出现在同步 registry；2-worker/8 in-flight 独立 lane 的 no-follow、root containment、regular-file、256 KiB/行/UTF-8/control 分类与 metadata changing；completion 的 Workspace/locator reauthorization、current/historical credential 与截断前缀遮蔽；非 ready 空正文；Renderer generation stale-result 丢弃、Task/reference 失效关闭、桌面和约 390px Drawer、键盘/焦点/横向溢出；shutdown join/drain/settle exactly once。当前自动化覆盖 wire、owner 与 bounded read/redaction 核心不变量；真实桌面 Drawer 的 Windows/macOS 视觉、键盘和窄屏验收仍为人工验收待完成，不影响 typed File Preview 路径的自动化状态。
 - typed Output、FileChange、plan progress/approval 和 custom UI 不由当前 ABI 提供，对应 UI 必须保持关闭。
 - Task 当前进程内 execution binding 和模型切换已有自动化；显式 execution rebind 的跨重启 epoch/history 与竞态尚未实现。
 - MCP 的真实第三方 server、平台 credential/network、secure capture、browser/callback 和 issuer 行为尚未完成跨平台验收；marketplace 不在当前范围。

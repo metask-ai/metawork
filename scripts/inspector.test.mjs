@@ -117,6 +117,7 @@ function renderTaskContent(value, locale = "en-US") {
         retryAvailable: false,
         responseDisabled: false,
         onPrepareRetry() {},
+        onPreviewFile() {},
         onRespond() {},
         renderPendingUi() {
           return null;
@@ -353,6 +354,46 @@ test("thinking and response activity use safe localized status labels", () => {
     ],
   });
   assert.doesNotMatch(renderInspector(unsafeStatus), /private-provider-status/);
+});
+
+test("Run file references render as preview entry without change semantics", () => {
+  const referenced = task({
+    currentRunId: "0",
+    currentRunPhase: null,
+    runs: [
+      run({
+        assistant: "Done",
+        tools: [
+          {
+            id: "tool-1",
+            order: "1",
+            name: "Read",
+            input: "{}",
+            progress: "",
+            content: "ok",
+            state: "completed",
+            isError: false,
+            elapsedMs: "1",
+            inputTruncated: false,
+            progressTruncated: false,
+            contentTruncated: false,
+            redacted: false,
+            fileRefs: [
+              {
+                id: "file-1",
+                title: "main.zig",
+                displayPath: "src/main.zig",
+              },
+            ],
+          },
+        ],
+      }),
+    ],
+  });
+  const markup = renderTaskContent(referenced);
+  assert.match(markup, />Referenced files</);
+  assert.match(markup, /src\/main\.zig/);
+  assert.doesNotMatch(markup, /Files changed|modified|Output/);
 });
 
 test("permission intervention never exposes internal Run identity", () => {
