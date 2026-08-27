@@ -27,6 +27,7 @@ const task_test_policy = if (builtin.is_test) task_testing.policy_module else st
 const task_test_execution = if (builtin.is_test) task_testing.execution_module else struct {};
 const task_test_view = if (builtin.is_test) task_testing.view_module else struct {};
 const product_mcp = @import("metawork_product_mcp");
+const control_ports = @import("metawork_product_control_ports");
 const mcp_configuration = product_mcp.contract;
 const mcp_ports = product_mcp;
 const mcp_runtime = product_mcp;
@@ -351,19 +352,8 @@ pub const SchedulePersistenceHealth = enum {
     outcome_unknown,
 };
 
-pub const ScheduleNotificationKind = enum {
-    completed,
-    failed,
-    skipped,
-    needs_attention,
-};
-
-pub const ScheduleNotification = struct {
-    scheduled_task_id: u64,
-    task_id: u64 = 0,
-    title: []const u8,
-    kind: ScheduleNotificationKind,
-};
+pub const ScheduleNotificationKind = control_ports.ScheduleNotificationKind;
+pub const ScheduleNotification = control_ports.ScheduleNotification;
 
 pub const ScheduleNotifier = struct {
     context: ?*anyopaque = null,
@@ -1283,29 +1273,7 @@ const ActiveExecution = struct {
 /// All methods currently run on the Native loop thread.
 const ExecutionReplacementKind = enum { none, default, identity };
 
-pub const PreparedModelConnectionBinding = struct {
-    allocator: std.mem.Allocator,
-    connection_id: []u8,
-    model_id: []u8,
-
-    fn init(
-        allocator: std.mem.Allocator,
-        connection_id: []const u8,
-        model_id: []const u8,
-    ) std.mem.Allocator.Error!PreparedModelConnectionBinding {
-        return .{
-            .allocator = allocator,
-            .connection_id = try allocator.dupe(u8, connection_id),
-            .model_id = try allocator.dupe(u8, model_id),
-        };
-    }
-
-    pub fn deinit(self: *PreparedModelConnectionBinding) void {
-        self.allocator.free(self.model_id);
-        self.allocator.free(self.connection_id);
-        self.* = undefined;
-    }
-};
+pub const PreparedModelConnectionBinding = control_ports.PreparedModelConnectionBinding;
 
 const CustomExecutionBinding = PreparedModelConnectionBinding;
 
@@ -6567,10 +6535,223 @@ pub const Workbench = struct {
         self.allocator.free(value);
     }
 
+    pub fn executionHandoff(self: *Workbench) control_ports.ExecutionHandoff {
+        return .{
+            .context = self,
+            .commit_account_fact_fn = controlCommitAccountFact,
+            .finish_account_commit_fn = controlFinishAccountCommit,
+            .account_view_fn = controlAccountView,
+            .model_connection_active_fn = controlModelConnectionActive,
+            .model_connection_selected_fn = controlModelConnectionSelected,
+            .prepare_model_connection_fn = controlPrepareModelConnection,
+            .replacement_pending_fn = controlReplacementPending,
+            .begin_default_replacement_fn = controlBeginDefaultReplacement,
+            .begin_replacement_fn = controlBeginReplacement,
+            .install_model_connection_fn = controlInstallModelConnection,
+            .install_execution_fn = controlInstallExecution,
+            .clear_execution_fn = controlClearExecution,
+            .end_replacement_fn = controlEndReplacement,
+        };
+    }
+
+    pub fn agentEventConsumer(self: *Workbench) control_ports.AgentEventConsumer {
+        return .{ .context = self, .drain_fn = controlDrainAgentEvents };
+    }
+
+    pub fn mcpManagementPort(self: *Workbench) control_ports.McpManagementPort {
+        return .{
+            .context = self,
+            .inspect_fn = controlMcpInspect,
+            .write_desired_fn = controlMcpWriteDesired,
+            .begin_connection_test_fn = controlMcpBeginConnectionTest,
+            .complete_connection_test_fn = controlMcpCompleteConnectionTest,
+            .begin_apply_fn = controlMcpBeginApply,
+            .complete_apply_fn = controlMcpCompleteApply,
+            .fail_apply_fn = controlMcpFailApply,
+            .authorization_operation_fn = controlMcpAuthorizationOperation,
+            .begin_authorization_fn = controlMcpBeginAuthorization,
+            .advance_authorization_fn = controlMcpAdvanceAuthorization,
+            .finish_authorization_fn = controlMcpFinishAuthorization,
+            .write_approval_fn = controlMcpWriteApproval,
+            .approve_connection_fn = controlMcpApproveConnection,
+            .write_secret_prompt_fn = controlMcpWriteSecretPrompt,
+            .capture_static_secret_fn = controlMcpCaptureStaticSecret,
+            .capture_oauth_client_secret_fn = controlMcpCaptureOauthClientSecret,
+            .begin_dynamic_registration_fn = controlMcpBeginDynamicRegistration,
+            .complete_dynamic_registration_fn = controlMcpCompleteDynamicRegistration,
+            .begin_code_exchange_fn = controlMcpBeginCodeExchange,
+            .complete_code_exchange_fn = controlMcpCompleteCodeExchange,
+            .authorize_oauth_fn = controlMcpAuthorizeOauth,
+            .clear_oauth_operation_fn = controlMcpClearOauthOperation,
+            .recover_oauth_operation_fn = controlMcpRecoverOauthOperation,
+        };
+    }
+
+    pub fn mcpOauthPort(self: *Workbench) control_ports.McpOauthPort {
+        return .{
+            .context = self,
+            .next_expiry_fn = controlMcpNextOauthExpiry,
+            .begin_refresh_fn = controlMcpBeginOauthRefresh,
+            .complete_refresh_fn = controlMcpCompleteOauthRefresh,
+            .block_admission_fn = controlMcpBlockAdmission,
+            .require_reauthorization_fn = controlMcpRequireReauthorization,
+            .clear_operation_fn = controlMcpClearOauthOperation,
+            .recover_operation_fn = controlMcpRecoverOauthOperation,
+        };
+    }
+
+    pub fn scheduleHost(self: *Workbench) control_ports.ScheduleHost {
+        return .{
+            .context = self,
+            .set_background_available_fn = controlSetScheduleBackgroundAvailable,
+            .has_enabled_fn = controlHasEnabledScheduledTasks,
+        };
+    }
+
     fn bumpRevision(self: *Workbench) void {
         if (self.revision != std.math.maxInt(u64)) self.revision += 1;
     }
 };
+
+fn controlOwner(context: *anyopaque) *Workbench {
+    return @ptrCast(@alignCast(context));
+}
+
+fn controlCommitAccountFact(context: *anyopaque, fact: account_contract.AccountFact) void {
+    controlOwner(context).commitAccountFactNoFail(fact);
+}
+fn controlFinishAccountCommit(context: *anyopaque) void {
+    controlOwner(context).finishAccountCommitNoFail();
+}
+fn controlAccountView(context: *anyopaque) account_contract.AccountView {
+    return controlOwner(context).accountView();
+}
+fn controlModelConnectionActive(context: *anyopaque, id: []const u8) bool {
+    return controlOwner(context).modelConnectionExecutionActive(id);
+}
+fn controlModelConnectionSelected(context: *anyopaque) bool {
+    return controlOwner(context).modelConnectionExecutionSelected();
+}
+fn controlPrepareModelConnection(context: *anyopaque, connection_id: []const u8, model_id: []const u8) anyerror!PreparedModelConnectionBinding {
+    return controlOwner(context).prepareModelConnectionBinding(connection_id, model_id);
+}
+fn controlReplacementPending(context: *anyopaque) bool {
+    return controlOwner(context).executionReplacementPending();
+}
+fn controlBeginDefaultReplacement(context: *anyopaque) anyerror!void {
+    return controlOwner(context).beginDefaultExecutionReplacement();
+}
+fn controlBeginReplacement(context: *anyopaque) anyerror!void {
+    return controlOwner(context).beginExecutionReplacement();
+}
+fn controlInstallModelConnection(context: *anyopaque, execution: *account_contract.OwnedExecutionConfig, binding: *PreparedModelConnectionBinding) void {
+    controlOwner(context).installModelConnectionExecutionNoFail(execution, binding);
+}
+fn controlInstallExecution(context: *anyopaque, execution: *account_contract.OwnedExecutionConfig) void {
+    controlOwner(context).installExecutionNoFail(execution);
+}
+fn controlClearExecution(context: *anyopaque) void {
+    controlOwner(context).clearExecutionNoFail();
+}
+fn controlEndReplacement(context: *anyopaque) void {
+    controlOwner(context).endExecutionReplacementNoFail();
+}
+fn controlDrainAgentEvents(context: *anyopaque) anyerror!void {
+    return controlOwner(context).drainAgentEvents();
+}
+
+fn controlMcpInspect(context: *anyopaque) ?mcp_configuration.ManagementInspection {
+    return controlOwner(context).inspectMcpDesiredConfiguration();
+}
+fn controlMcpWriteDesired(context: *anyopaque, generation: u64, output: []u8) anyerror![]const u8 {
+    return controlOwner(context).writeMcpDesiredConfiguration(generation, output);
+}
+fn controlMcpBeginConnectionTest(context: *anyopaque, server_id: []const u8) anyerror!void {
+    return controlOwner(context).beginMcpConnectionTest(server_id);
+}
+fn controlMcpCompleteConnectionTest(context: *anyopaque, server_id: []const u8, outcome: McpConnectionTestOutcome, tools: u32, issues: u32) void {
+    controlOwner(context).completeMcpConnectionTest(server_id, outcome, tools, issues);
+}
+fn controlMcpBeginApply(context: *anyopaque, generation: u64) anyerror!void {
+    return controlOwner(context).beginMcpConfigurationApply(generation);
+}
+fn controlMcpCompleteApply(context: *anyopaque, generation: u64, preparation: *mcp_configuration.Preparation, manifest: *mcp_configuration.RuntimeManifest, activation: ?*lifecycle.McpActivation, selection: ?*lifecycle.McpSelection, activation_failed: bool) bool {
+    return controlOwner(context).completeMcpConfigurationApply(generation, preparation, manifest, activation, selection, activation_failed);
+}
+fn controlMcpFailApply(context: *anyopaque, generation: u64) void {
+    controlOwner(context).failMcpConfigurationApply(generation);
+}
+fn controlMcpAuthorizationOperation(context: *anyopaque) ?McpAuthorizationOperationView {
+    return controlOwner(context).mcpAuthorizationOperation();
+}
+fn controlMcpBeginAuthorization(context: *anyopaque, generation: u64, server_id: []const u8) anyerror!?McpAuthorizationStart {
+    return controlOwner(context).beginMcpAuthorization(generation, server_id);
+}
+fn controlMcpAdvanceAuthorization(context: *anyopaque, operation_id: []const u8, phase: McpAuthorizationPhase) bool {
+    return controlOwner(context).advanceMcpAuthorization(operation_id, phase);
+}
+fn controlMcpFinishAuthorization(context: *anyopaque, operation_id: []const u8) bool {
+    return controlOwner(context).finishMcpAuthorization(operation_id);
+}
+fn controlMcpWriteApproval(context: *anyopaque, generation: u64, server_id: []const u8, output: []u8) anyerror![]const u8 {
+    return controlOwner(context).writeMcpConnectionApprovalDetails(generation, server_id, output);
+}
+fn controlMcpApproveConnection(context: *anyopaque, generation: u64, input: mcp_configuration.ApproveConnectionInput) anyerror!mcp_configuration.ManagementOutcome {
+    return controlOwner(context).approveMcpConnection(generation, input);
+}
+fn controlMcpWriteSecretPrompt(context: *anyopaque, generation: u64, server_id: []const u8, target: McpSecretCaptureTarget, output: []u8) anyerror![]const u8 {
+    return controlOwner(context).writeMcpSecretCapturePrompt(generation, server_id, target, output);
+}
+fn controlMcpCaptureStaticSecret(context: *anyopaque, generation: u64, input: mcp_configuration.CaptureStaticSecretInput) anyerror!mcp_configuration.ManagementOutcome {
+    return controlOwner(context).captureMcpStaticSecret(generation, input);
+}
+fn controlMcpCaptureOauthClientSecret(context: *anyopaque, generation: u64, input: mcp_configuration.CaptureOauthClientSecretInput) anyerror!mcp_configuration.ManagementOutcome {
+    return controlOwner(context).captureMcpOauthClientSecret(generation, input);
+}
+fn controlMcpBeginDynamicRegistration(context: *anyopaque, input: mcp_configuration.OauthConsentInput) anyerror!McpOauthOperationBeginOutcome {
+    return controlOwner(context).beginMcpOauthDynamicRegistration(input);
+}
+fn controlMcpCompleteDynamicRegistration(context: *anyopaque, input: mcp_configuration.CompleteDynamicRegistrationInput) anyerror!mcp_configuration.ManagementOutcome {
+    return controlOwner(context).completeMcpOauthDynamicRegistration(input);
+}
+fn controlMcpBeginCodeExchange(context: *anyopaque, server_id: []const u8) anyerror!McpOauthCodeExchangeBeginOutcome {
+    return controlOwner(context).beginMcpOauthCodeExchange(server_id);
+}
+fn controlMcpCompleteCodeExchange(context: *anyopaque, input: mcp_configuration.CompleteCodeExchangeInput) anyerror!mcp_configuration.ManagementOutcome {
+    return controlOwner(context).completeMcpOauthCodeExchange(input);
+}
+fn controlMcpAuthorizeOauth(context: *anyopaque, plan: McpOauthAuthorizationPlan) anyerror!McpOauthAuthorizationOutcome {
+    return controlOwner(context).authorizeMcpOauth(plan);
+}
+fn controlMcpClearOauthOperation(context: *anyopaque, operation_id: []const u8) anyerror!mcp_configuration.ManagementOutcome {
+    return controlOwner(context).clearMcpOauthOperation(operation_id);
+}
+fn controlMcpRecoverOauthOperation(context: *anyopaque, operation_id: []const u8) anyerror!mcp_configuration.ManagementOutcome {
+    return controlOwner(context).recoverMcpOauthOperation(operation_id);
+}
+
+fn controlMcpNextOauthExpiry(context: *anyopaque) ?McpOauthExpiry {
+    return controlOwner(context).nextMcpOauthExpiry();
+}
+fn controlMcpBeginOauthRefresh(context: *anyopaque, server_id: []const u8) anyerror!McpOauthRefreshBeginOutcome {
+    return controlOwner(context).beginMcpOauthRefresh(server_id);
+}
+fn controlMcpCompleteOauthRefresh(context: *anyopaque, input: mcp_configuration.CompleteRefreshInput, commit: McpOauthRuntimeCommit) anyerror!mcp_configuration.ManagementOutcome {
+    return controlOwner(context).completeMcpOauthRefresh(input, commit);
+}
+fn controlMcpBlockAdmission(context: *anyopaque) void {
+    controlOwner(context).blockMcpAdmissionAfterRuntimeAuthFailure();
+}
+fn controlMcpRequireReauthorization(context: *anyopaque, failure: McpRuntimeAuthorizationFailure) anyerror!McpRuntimeAuthorizationFailureOutcome {
+    return controlOwner(context).requireMcpOauthReauthorization(failure);
+}
+
+fn controlSetScheduleBackgroundAvailable(context: *anyopaque, available: bool) void {
+    controlOwner(context).setScheduleBackgroundAvailableNoFail(available);
+}
+fn controlHasEnabledScheduledTasks(context: *anyopaque) bool {
+    return controlOwner(context).hasEnabledScheduledTasks();
+}
 
 fn closeWorker(
     completion_out: *std.atomic.Value(CloseCompletion),

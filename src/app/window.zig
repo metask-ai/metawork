@@ -1,7 +1,7 @@
 const builtin = @import("builtin");
 const native_sdk = @import("native_sdk");
 const bridge_api = @import("metawork_bridge");
-const workbench_api = @import("metawork_workbench");
+const control_ports = @import("metawork_product_control_ports");
 const drag_region = @import("../native_sdk_compat/system_webview_drag_region.zig");
 const secure_input = @import("../native_sdk_compat/secure_input.zig");
 const startup_window = @import("../native_sdk_compat/system_webview_startup_window.zig");
@@ -69,7 +69,7 @@ pub const State = struct {
     pub fn installTray(
         self: *State,
         runtime: *native_sdk.Runtime,
-        workbench: *workbench_api.Workbench,
+        schedule: control_ports.ScheduleHost,
     ) !void {
         try runtime.createTray(.{
             .icon_path = tray_icon_path,
@@ -77,7 +77,7 @@ pub const State = struct {
             .items = &tray_items,
         });
         self.tray_installed = true;
-        workbench.setScheduleBackgroundAvailableNoFail(true);
+        schedule.setScheduleBackgroundAvailableNoFail(true);
     }
 
     pub fn removeTray(self: *State, runtime: *native_sdk.Runtime) void {
@@ -94,9 +94,9 @@ pub const State = struct {
     pub fn requestExplicitQuit(
         _: *State,
         runtime: *native_sdk.Runtime,
-        workbench: *workbench_api.Workbench,
+        schedule: control_ports.ScheduleHost,
     ) void {
-        if (workbench.hasEnabledScheduledTasks()) {
+        if (schedule.hasEnabledScheduledTasks()) {
             const result = runtime.showMessageDialog(.{
                 .style = .warning,
                 .title = "Quit MetaWork?",
@@ -113,7 +113,7 @@ pub const State = struct {
     pub fn notifyScheduledTask(
         _: *State,
         services: native_sdk.platform.PlatformServices,
-        notification: workbench_api.ScheduleNotification,
+        notification: control_ports.ScheduleNotification,
     ) bool {
         const body = switch (notification.kind) {
             .completed => "Scheduled task completed",

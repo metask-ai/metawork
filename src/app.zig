@@ -166,11 +166,11 @@ const App = struct {
         if (configuration.mcp.management != null) runtime_manifest_owned = false;
         self.workbench = workbench_storage;
         self.workbench_initialized = true;
-        try self.platform.installScheduleHost(workbench_storage);
+        try self.platform.installScheduleHost(workbench_storage.scheduleHost());
         self.mcp_management = mcp_management_coordinator.Coordinator.init(
             std.heap.c_allocator,
             self.io,
-            workbench_storage,
+            workbench_storage.mcpManagementPort(),
             agent_runtime,
             &self.mcp_credential_store.?,
             &self.mcp_authorizations.?,
@@ -187,7 +187,7 @@ const App = struct {
         self.mcp_oauth_refresh = mcp_oauth_coordinator.Coordinator.init(
             std.heap.c_allocator,
             self.io,
-            workbench_storage,
+            workbench_storage.mcpOauthPort(),
             &self.mcp_credential_store.?,
             &self.mcp_authorizations.?,
             mcp_oauth_coordinator.platformHost(&self.platform),
@@ -333,7 +333,7 @@ const App = struct {
                 }
             },
             .command => |command| if (command.source == .tray) if (self.workbench) |workbench|
-                self.platform.handleTrayCommand(command.tray_item_id, workbench),
+                self.platform.handleTrayCommand(command.tray_item_id, workbench.scheduleHost()),
             else => {},
         }
     }
@@ -346,7 +346,7 @@ const App = struct {
 
     fn drainAgentEvents(self: *@This()) void {
         const workbench = self.workbench orelse return;
-        self.agent_events.drain(workbench);
+        self.agent_events.drain(workbench.agentEventConsumer());
     }
 };
 
@@ -531,7 +531,7 @@ pub fn run(init: std.process.Init) !void {
     );
     var account_coordinator_state = account_coordinator.Coordinator.init(
         &account_runtime,
-        &workbench,
+        workbench.executionHandoff(),
         app.main_thread_id,
         init.io,
     );

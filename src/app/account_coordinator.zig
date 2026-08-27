@@ -6,6 +6,7 @@ const account_api = @import("metawork_account");
 const account_ports = @import("account_ports");
 const account_store = @import("account_credential_store");
 const workbench_api = @import("metawork_workbench");
+const control_ports = @import("metawork_product_control_ports");
 
 const ExecutionReplacement = enum { none, startup, default, identity };
 
@@ -122,7 +123,7 @@ const ModelConnectionProbeJob = struct {
 pub const Coordinator = struct {
     io: std.Io,
     runtime: *account_api.Runtime,
-    workbench: *workbench_api.Workbench,
+    control: control_ports.ExecutionHandoff,
     main_thread_id: std.Thread.Id,
     model_connection_probe_notifier: ?ModelConnectionProbeNotifier = null,
     completion_transport: ?agent.CompletionTransport = null,
@@ -131,14 +132,14 @@ pub const Coordinator = struct {
 
     pub fn init(
         runtime: *account_api.Runtime,
-        workbench: *workbench_api.Workbench,
+        control: control_ports.ExecutionHandoff,
         main_thread_id: std.Thread.Id,
         io: std.Io,
     ) Coordinator {
         return .{
             .io = io,
             .runtime = runtime,
-            .workbench = workbench,
+            .control = control,
             .main_thread_id = main_thread_id,
         };
     }
@@ -180,11 +181,11 @@ pub const Coordinator = struct {
             model_display_name,
         );
         if (!result.accepted) return result;
-        self.workbench.commitAccountFactNoFail(.{
+        self.control.commitAccountFactNoFail(.{
             .kind = .model_connections_changed,
             .view = self.runtime.view(),
         });
-        self.workbench.finishAccountCommitNoFail();
+        self.control.finishAccountCommitNoFail();
         return result;
     }
 
@@ -197,7 +198,7 @@ pub const Coordinator = struct {
         if (command == .model_connection)
             return self.submitModelConnection(command.model_connection);
         if (command == .activate_metask and
-            !self.workbench.modelConnectionExecutionSelected())
+            !self.control.modelConnectionExecutionSelected())
             return .rejected(.invalid_state);
         return switch (self.runtime.prepareCommand(command)) {
             .prepared => |prepared| result: {
@@ -221,14 +222,14 @@ pub const Coordinator = struct {
             .create, .test_connection, .select_default => null,
         };
         if (mutation_connection_id) |connection_id|
-            if (self.workbench.modelConnectionExecutionActive(connection_id))
+            if (self.control.modelConnectionExecutionActive(connection_id))
                 return .rejected(.execution_in_use);
         if (command == .test_connection)
             return self.startModelConnectionProbe(command.test_connection);
         if (command == .select_default) {
             const value = command.select_default;
             const execution_generation = self.runtime.nextExecutionGeneration(
-                self.workbench.accountView().execution_generation,
+                self.control.accountView().execution_generation,
             ) catch return .rejected(.local_resource_exhausted);
             var owned_execution = switch (self.runtime.prepareModelConnectionExecution(
                 value.selection,
@@ -239,15 +240,15 @@ pub const Coordinator = struct {
                 .rejected => |error_code| return .rejected(error_code),
             };
             errdefer owned_execution.deinit();
-            var prepared_binding = self.workbench.prepareModelConnectionBinding(
+            var prepared_binding = self.control.prepareModelConnectionBinding(
                 value.selection.connection_id,
                 value.model_id,
             ) catch return .rejected(.local_resource_exhausted);
             var prepared_binding_owned = true;
             defer if (prepared_binding_owned) prepared_binding.deinit();
-            if (self.workbench.executionReplacementPending())
+            if (self.control.executionReplacementPending())
                 return .rejected(.operation_in_progress);
-            self.workbench.beginDefaultExecutionReplacement() catch |err|
+            self.control.beginDefaultExecutionReplacement() catch |err|
                 return .rejected(replacementErrorCode(err));
             var replacement_started = true;
             defer if (replacement_started)
@@ -257,27 +258,27 @@ pub const Coordinator = struct {
                 owned_execution.input().execution_generation,
             );
             if (!result.accepted) return result;
-            self.workbench.commitAccountFactNoFail(.{
+            self.control.commitAccountFactNoFail(.{
                 .kind = .model_connections_changed,
                 .view = self.runtime.view(),
             });
-            self.workbench.installModelConnectionExecutionNoFail(
+            self.control.installModelConnectionExecutionNoFail(
                 &owned_execution,
                 &prepared_binding,
             );
             prepared_binding_owned = false;
             replacement_started = false;
             self.endActiveReplacementNoFail();
-            self.workbench.finishAccountCommitNoFail();
+            self.control.finishAccountCommitNoFail();
             return result;
         }
         const result = self.runtime.submitModelConnectionCommand(command);
         if (!result.accepted) return result;
-        self.workbench.commitAccountFactNoFail(.{
+        self.control.commitAccountFactNoFail(.{
             .kind = .model_connections_changed,
             .view = self.runtime.view(),
         });
-        self.workbench.finishAccountCommitNoFail();
+        self.control.finishAccountCommitNoFail();
         return result;
     }
 
@@ -292,7 +293,7 @@ pub const Coordinator = struct {
         if (self.model_connection_probe_job != null)
             return .rejected(.operation_in_progress);
         const execution_generation = self.runtime.nextExecutionGeneration(
-            self.workbench.accountView().execution_generation,
+            self.control.accountView().execution_generation,
         ) catch return .rejected(.local_resource_exhausted);
         var execution = self.runtime.resolveModelConnectionProbeExecution(
             command.selection,
@@ -319,18 +320,18 @@ pub const Coordinator = struct {
             job.deinit();
             return result;
         }
-        self.workbench.commitAccountFactNoFail(.{
+        self.control.commitAccountFactNoFail(.{
             .kind = .model_connections_changed,
             .view = self.runtime.view(),
         });
-        self.workbench.finishAccountCommitNoFail();
+        self.control.finishAccountCommitNoFail();
         job.start() catch {
             _ = self.runtime.completeModelConnectionTest(job.command(), false);
-            self.workbench.commitAccountFactNoFail(.{
+            self.control.commitAccountFactNoFail(.{
                 .kind = .model_connections_changed,
                 .view = self.runtime.view(),
             });
-            self.workbench.finishAccountCommitNoFail();
+            self.control.finishAccountCommitNoFail();
             job.deinit();
             return .rejected(.local_resource_exhausted);
         };
@@ -372,36 +373,36 @@ pub const Coordinator = struct {
     fn restoreModelConnectionDefaultNoFail(self: *Coordinator) void {
         const binding = self.runtime.modelConnectionDefaultBinding() orelse return;
         var execution = (self.runtime.resolveDefaultModelConnectionExecution() catch return) orelse {
-            self.workbench.commitAccountFactNoFail(.{
+            self.control.commitAccountFactNoFail(.{
                 .kind = .model_connections_changed,
                 .view = self.runtime.view(),
             });
-            self.workbench.finishAccountCommitNoFail();
+            self.control.finishAccountCommitNoFail();
             return;
         };
         defer execution.deinit();
-        var prepared_binding = self.workbench.prepareModelConnectionBinding(
+        var prepared_binding = self.control.prepareModelConnectionBinding(
             binding.connection_id,
             binding.model_id,
         ) catch return;
         var prepared_binding_owned = true;
         defer if (prepared_binding_owned) prepared_binding.deinit();
-        if (self.workbench.executionReplacementPending()) return;
-        self.workbench.beginDefaultExecutionReplacement() catch return;
+        if (self.control.executionReplacementPending()) return;
+        self.control.beginDefaultExecutionReplacement() catch return;
         var replacement_started = true;
         defer if (replacement_started) self.endActiveReplacementNoFail();
-        self.workbench.installModelConnectionExecutionNoFail(
+        self.control.installModelConnectionExecutionNoFail(
             &execution,
             &prepared_binding,
         );
         prepared_binding_owned = false;
         replacement_started = false;
         self.endActiveReplacementNoFail();
-        self.workbench.commitAccountFactNoFail(.{
+        self.control.commitAccountFactNoFail(.{
             .kind = .model_connections_changed,
             .view = self.runtime.view(),
         });
-        self.workbench.finishAccountCommitNoFail();
+        self.control.finishAccountCommitNoFail();
     }
 
     pub fn onTimer(self: *Coordinator, timer_id: u64) bool {
@@ -442,11 +443,11 @@ pub const Coordinator = struct {
             job.succeeded,
         );
         if (result.accepted) {
-            self.workbench.commitAccountFactNoFail(.{
+            self.control.commitAccountFactNoFail(.{
                 .kind = .model_connections_changed,
                 .view = self.runtime.view(),
             });
-            self.workbench.finishAccountCommitNoFail();
+            self.control.finishAccountCommitNoFail();
         }
         self.model_connection_probe_job = null;
         job.deinit();
@@ -473,16 +474,16 @@ pub const Coordinator = struct {
             // in-process identity switch, but installation still needs the
             // Workbench's default-execution transaction boundary.
             .startup, .default => {
-                if (self.workbench.executionReplacementPending())
+                if (self.control.executionReplacementPending())
                     return .rejected(.operation_in_progress);
-                self.workbench.beginDefaultExecutionReplacement() catch |err|
+                self.control.beginDefaultExecutionReplacement() catch |err|
                     return .rejected(replacementErrorCode(err));
                 started_replacement = true;
             },
             .identity => {
-                if (self.workbench.executionReplacementPending())
+                if (self.control.executionReplacementPending())
                     return .rejected(.operation_in_progress);
-                self.workbench.beginExecutionReplacement() catch |err|
+                self.control.beginExecutionReplacement() catch |err|
                     return .rejected(replacementErrorCode(err));
                 started_replacement = true;
             },
@@ -493,7 +494,7 @@ pub const Coordinator = struct {
                 self.endActiveReplacementNoFail();
                 return .rejected(.local_resource_exhausted);
             }
-            if (!self.workbench.executionReplacementPending())
+            if (!self.control.executionReplacementPending())
                 return .rejected(.local_resource_exhausted);
         }
 
@@ -501,10 +502,10 @@ pub const Coordinator = struct {
         const prepared_attempt_id = prepared.attemptId();
         const activates_metask = prepared_attempt_id != null and
             prepared_attempt_id == self.metask_activation_attempt_id;
-        self.workbench.commitAccountFactNoFail(fact);
+        self.control.commitAccountFactNoFail(fact);
         if (prepared.takeExecution()) |execution_value| {
             var execution = execution_value;
-            if (self.workbench.modelConnectionExecutionSelected() and
+            if (self.control.modelConnectionExecutionSelected() and
                 !activates_metask)
             {
                 execution.deinit();
@@ -513,19 +514,19 @@ pub const Coordinator = struct {
             {
                 execution.deinit();
             } else {
-                if (!self.workbench.executionReplacementPending()) {
-                    self.workbench.beginDefaultExecutionReplacement() catch
+                if (!self.control.executionReplacementPending()) {
+                    self.control.beginDefaultExecutionReplacement() catch
                         unreachable;
                 }
-                self.workbench.installExecutionNoFail(&execution);
+                self.control.installExecutionNoFail(&execution);
             }
         } else if (prepared.executionIntent() == .clear) {
-            if (!self.workbench.modelConnectionExecutionSelected()) {
-                if (!self.workbench.executionReplacementPending()) {
-                    self.workbench.beginDefaultExecutionReplacement() catch
+            if (!self.control.modelConnectionExecutionSelected()) {
+                if (!self.control.executionReplacementPending()) {
+                    self.control.beginDefaultExecutionReplacement() catch
                         unreachable;
                 }
-                self.workbench.clearExecutionNoFail();
+                self.control.clearExecutionNoFail();
             }
         }
         self.runtime.commit(&prepared);
@@ -548,9 +549,9 @@ pub const Coordinator = struct {
             self.metask_activation_attempt_id = null;
         if ((prepared.replacementIntent() == .finish or
             replacement == .startup) and
-            self.workbench.executionReplacementPending())
+            self.control.executionReplacementPending())
             self.endActiveReplacementNoFail();
-        self.workbench.finishAccountCommitNoFail();
+        self.control.finishAccountCommitNoFail();
 
         if (refresh_after_commit) {
             const refreshed = self.commitPrepared(
@@ -564,7 +565,7 @@ pub const Coordinator = struct {
     }
 
     fn endActiveReplacementNoFail(self: *Coordinator) void {
-        self.workbench.endExecutionReplacementNoFail();
+        self.control.endExecutionReplacementNoFail();
     }
 
     fn submitFollowUp(
@@ -681,7 +682,7 @@ test "Application coordinator commits Account Runtime facts into Workbench" {
     defer workbench.deinit();
     var coordinator = Coordinator.init(
         &account_runtime,
-        &workbench,
+        workbench.executionHandoff(),
         std.Thread.getCurrentId(),
         std.testing.io,
     );
@@ -812,7 +813,7 @@ test "Application coordinator balances Workbench gate when Account effect admiss
     defer workbench.deinit();
     var coordinator = Coordinator.init(
         &account_runtime,
-        &workbench,
+        workbench.executionHandoff(),
         std.Thread.getCurrentId(),
         std.testing.io,
     );
@@ -1156,7 +1157,7 @@ test "restored login drives automatic key and model defaults end to end" {
     defer workbench.deinit();
     var coordinator = Coordinator.init(
         &account_runtime,
-        &workbench,
+        workbench.executionHandoff(),
         std.Thread.getCurrentId(),
         std.testing.io,
     );
@@ -1284,7 +1285,7 @@ test "relaunch with persisted selection restores the saved execution" {
         defer workbench.deinit();
         var coordinator = Coordinator.init(
             &account_runtime,
-            &workbench,
+            workbench.executionHandoff(),
             std.Thread.getCurrentId(),
             std.testing.io,
         );
@@ -1332,7 +1333,7 @@ test "relaunch with persisted selection restores the saved execution" {
         defer workbench.deinit();
         var coordinator = Coordinator.init(
             &account_runtime,
-            &workbench,
+            workbench.executionHandoff(),
             std.Thread.getCurrentId(),
             std.testing.io,
         );
@@ -1417,7 +1418,7 @@ test "relaunch with persisted selection restores the saved execution" {
         defer workbench.deinit();
         var coordinator = Coordinator.init(
             &account_runtime,
-            &workbench,
+            workbench.executionHandoff(),
             std.Thread.getCurrentId(),
             std.testing.io,
         );
@@ -1478,7 +1479,7 @@ test "broken first key parks the catalog and a manual switch recovers" {
     defer workbench.deinit();
     var coordinator = Coordinator.init(
         &account_runtime,
-        &workbench,
+        workbench.executionHandoff(),
         std.Thread.getCurrentId(),
         std.testing.io,
     );

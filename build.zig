@@ -1217,6 +1217,14 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     product_mcp_runtime.addImport("product_mcp_refresh_job", product_mcp_refresh_job);
     product_mcp.addImport("product_mcp_ports", product_mcp_ports);
     product_mcp.addImport("product_mcp_runtime", product_mcp_runtime);
+    const product_control_ports = b.createModule(.{
+        .root_source_file = b.path("src/product/control/ports.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    product_control_ports.addImport("metawork_agent", agent);
+    product_control_ports.addImport("metawork_account_contract", account_contract);
+    product_control_ports.addImport("metawork_product_mcp", product_mcp);
     const projection = b.createModule(.{
         .root_source_file = b.path("src/workbench/projection.zig"),
         .target = target,
@@ -1234,6 +1242,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     projection.addImport("metawork_product_task", product_task);
     projection.addImport("metawork_product_skill", product_skill);
     projection.addImport("metawork_product_mcp", product_mcp);
+    projection.addImport("metawork_product_control_ports", product_control_ports);
     projection.addImport(
         "build_options",
         existingImport(
@@ -1327,6 +1336,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     app.addImport("metawork_agent", agent);
     app.addImport("metawork_workbench", workbench);
     app.addImport("metawork_product_mcp", product_mcp);
+    app.addImport("metawork_product_control_ports", product_control_ports);
     app.addImport("metawork_product_skill", product_skill);
     app.addImport("metawork_product_task", product_task);
     app.addImport("metawork_bridge", bridge);

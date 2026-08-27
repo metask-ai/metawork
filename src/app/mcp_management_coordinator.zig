@@ -7,6 +7,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const agent = @import("metawork_agent");
 const workbench = @import("metawork_workbench");
+const control_ports = @import("metawork_product_control_ports");
 const product_mcp = @import("metawork_product_mcp");
 const mcp_configuration = product_mcp.contract;
 const mcp_types = product_mcp;
@@ -637,7 +638,7 @@ const ConfigurationApplyJob = struct {
 pub const Coordinator = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
-    workbench_owner: *workbench.Workbench,
+    control: control_ports.McpManagementPort,
     agent_runtime: *agent.Runtime,
     credential_store: *mcp_platform.CredentialStore,
     active_authorizations: *mcp_platform.HttpAuthorizations,
@@ -653,7 +654,7 @@ pub const Coordinator = struct {
     pub fn init(
         allocator: std.mem.Allocator,
         io: std.Io,
-        workbench_owner: *workbench.Workbench,
+        control: control_ports.McpManagementPort,
         agent_runtime: *agent.Runtime,
         credential_store: *mcp_platform.CredentialStore,
         active_authorizations: *mcp_platform.HttpAuthorizations,
@@ -663,7 +664,7 @@ pub const Coordinator = struct {
         return .{
             .allocator = allocator,
             .io = io,
-            .workbench_owner = workbench_owner,
+            .control = control,
             .agent_runtime = agent_runtime,
             .credential_store = credential_store,
             .active_authorizations = active_authorizations,
@@ -694,11 +695,11 @@ pub const Coordinator = struct {
             return .rejected;
         self.last_cancel_outcome = null;
         if (!self.oauthAvailable()) return .capability_unavailable;
-        const inspection = self.workbench_owner.inspectMcpDesiredConfiguration() orelse
+        const inspection = self.control.inspectMcpDesiredConfiguration() orelse
             return .rejected;
         if (inspection.desired_generation != expected_generation)
             return .stale_generation;
-        var start = (try self.workbench_owner.beginMcpAuthorization(
+        var start = (try self.control.beginMcpAuthorization(
             expected_generation,
             server_id,
         )) orelse return .rejected;
@@ -711,7 +712,7 @@ pub const Coordinator = struct {
         };
         start_owned = false;
         errdefer {
-            _ = self.workbench_owner.finishMcpAuthorization(flow.start.operation_id);
+            _ = self.control.finishMcpAuthorization(flow.start.operation_id);
             if (self.flow == flow) self.flow = null;
             flow.deinit(self.allocator);
             self.allocator.destroy(flow);
@@ -729,7 +730,7 @@ pub const Coordinator = struct {
         if (!std.mem.eql(u8, flow.start.operation_id, operation_id))
             return .rejected;
         self.last_cancel_outcome = null;
-        _ = self.workbench_owner.advanceMcpAuthorization(
+        _ = self.control.advanceMcpAuthorization(
             operation_id,
             .cancelling,
         );
@@ -758,7 +759,7 @@ pub const Coordinator = struct {
         if (self.stopping) return .unavailable;
         if (self.connection_test_job != null or self.configuration_apply_job != null or
             self.flow != null) return .busy;
-        const inspection = self.workbench_owner.inspectMcpDesiredConfiguration() orelse
+        const inspection = self.control.inspectMcpDesiredConfiguration() orelse
             return .unavailable;
         if (inspection.desired_generation != expected_generation)
             return .stale_generation;
@@ -768,7 +769,7 @@ pub const Coordinator = struct {
             mcp_configuration.max_store_bytes,
         );
         defer self.allocator.free(registry_storage);
-        const registry_bytes = self.workbench_owner.writeMcpDesiredConfiguration(
+        const registry_bytes = self.control.writeMcpDesiredConfiguration(
             expected_generation,
             registry_storage,
         ) catch return .unavailable;
@@ -828,9 +829,9 @@ pub const Coordinator = struct {
             .authorizations = authorizations,
         };
         errdefer self.allocator.free(job.server_id);
-        try self.workbench_owner.beginMcpConnectionTest(server_id);
+        try self.control.beginMcpConnectionTest(server_id);
         job.start() catch {
-            self.workbench_owner.completeMcpConnectionTest(
+            self.control.completeMcpConnectionTest(
                 server_id,
                 .failed,
                 0,
@@ -849,24 +850,24 @@ pub const Coordinator = struct {
         if (self.stopping) return .unavailable;
         if (self.configuration_apply_job != null or self.connection_test_job != null or
             self.flow != null) return .busy;
-        const inspection = self.workbench_owner.inspectMcpDesiredConfiguration() orelse
+        const inspection = self.control.inspectMcpDesiredConfiguration() orelse
             return .unavailable;
         if (inspection.health != .ready) return .unavailable;
         const generation = inspection.desired_generation orelse return .rejected;
         if (generation == 0) return .rejected;
 
-        self.workbench_owner.beginMcpConfigurationApply(generation) catch
+        self.control.beginMcpConfigurationApply(generation) catch
             return .busy;
         var apply_state_owned = true;
         defer if (apply_state_owned)
-            self.workbench_owner.failMcpConfigurationApply(generation);
+            self.control.failMcpConfigurationApply(generation);
 
         const registry_storage = try self.allocator.alloc(
             u8,
             mcp_configuration.max_store_bytes,
         );
         defer self.allocator.free(registry_storage);
-        const registry_bytes = self.workbench_owner.writeMcpDesiredConfiguration(
+        const registry_bytes = self.control.writeMcpDesiredConfiguration(
             generation,
             registry_storage,
         ) catch return .unavailable;
@@ -950,7 +951,7 @@ pub const Coordinator = struct {
                     .applied => |applied| {
                         self.active_authorizations.deinit();
                         self.active_authorizations.* = apply_job.takeAuthorizations();
-                        const installed = self.workbench_owner.completeMcpConfigurationApply(
+                        const installed = self.control.completeMcpConfigurationApply(
                             apply_job.generation,
                             &apply_job.preparation,
                             &apply_job.manifest,
@@ -961,11 +962,11 @@ pub const Coordinator = struct {
                         if (installed) {
                             apply_job.product_state_installed = true;
                             apply_job.result = .pending;
-                        } else self.workbench_owner.failMcpConfigurationApply(
+                        } else self.control.failMcpConfigurationApply(
                             apply_job.generation,
                         );
                     },
-                    .rejected, .failed => self.workbench_owner.failMcpConfigurationApply(
+                    .rejected, .failed => self.control.failMcpConfigurationApply(
                         apply_job.generation,
                     ),
                     .pending => unreachable,
@@ -978,7 +979,7 @@ pub const Coordinator = struct {
         if (self.connection_test_job) |test_job| {
             if (test_job.finished.load(.acquire)) {
                 test_job.join();
-                self.workbench_owner.completeMcpConnectionTest(
+                self.control.completeMcpConnectionTest(
                     test_job.server_id,
                     test_job.result.outcome,
                     test_job.result.tool_count,
@@ -1026,7 +1027,7 @@ pub const Coordinator = struct {
         } else self.finishFlow(flow);
         if (self.flow) |remaining| {
             if (remaining.durable_operation_id) |operation_id|
-                _ = self.workbench_owner.recoverMcpOauthOperation(operation_id) catch {};
+                _ = self.control.recoverMcpOauthOperation(operation_id) catch {};
             self.finishFlow(remaining);
         }
     }
@@ -1045,7 +1046,7 @@ pub const Coordinator = struct {
         if (self.stopping or self.configuration_apply_job != null or
             self.connection_test_job != null or self.flow != null) return .rejected;
         if (!self.connectionApprovalAvailable()) return .capability_unavailable;
-        const inspection = self.workbench_owner.inspectMcpDesiredConfiguration() orelse
+        const inspection = self.control.inspectMcpDesiredConfiguration() orelse
             return .rejected;
         if (inspection.desired_generation != expected_generation)
             return .stale_generation;
@@ -1054,7 +1055,7 @@ pub const Coordinator = struct {
             connection_approval_details_bytes,
         );
         defer self.allocator.free(details_storage);
-        const details = self.workbench_owner.writeMcpConnectionApprovalDetails(
+        const details = self.control.writeMcpConnectionApprovalDetails(
             expected_generation,
             server_id,
             details_storage,
@@ -1064,7 +1065,7 @@ pub const Coordinator = struct {
             details,
             "Approve connection",
         )) {
-            .approved => mapManagementOutcome(try self.workbench_owner.approveMcpConnection(
+            .approved => mapManagementOutcome(try self.control.approveMcpConnection(
                 expected_generation,
                 .{ .server_id = server_id },
             )),
@@ -1082,12 +1083,12 @@ pub const Coordinator = struct {
         if (self.stopping or self.configuration_apply_job != null or
             self.connection_test_job != null or self.flow != null) return .rejected;
         if (!self.secretCaptureAvailable()) return .capability_unavailable;
-        const inspection = self.workbench_owner.inspectMcpDesiredConfiguration() orelse
+        const inspection = self.control.inspectMcpDesiredConfiguration() orelse
             return .rejected;
         if (inspection.desired_generation != expected_generation)
             return .stale_generation;
         var prompt_storage: [secret_capture_prompt_bytes]u8 = undefined;
-        const prompt = self.workbench_owner.writeMcpSecretCapturePrompt(
+        const prompt = self.control.writeMcpSecretCapturePrompt(
             expected_generation,
             server_id,
             slot,
@@ -1108,19 +1109,19 @@ pub const Coordinator = struct {
         const secret = secret_storage[0..captured];
         return switch (slot) {
             .stdio_environment => |name| mapManagementOutcome(
-                try self.workbench_owner.captureMcpStaticSecret(
+                try self.control.captureMcpStaticSecret(
                     expected_generation,
                     .{ .server_id = server_id, .slot_name = name, .secret = secret },
                 ),
             ),
             .http_header => |name| mapManagementOutcome(
-                try self.workbench_owner.captureMcpStaticSecret(
+                try self.control.captureMcpStaticSecret(
                     expected_generation,
                     .{ .server_id = server_id, .slot_name = name, .secret = secret },
                 ),
             ),
             .oauth_client_secret => mapManagementOutcome(
-                try self.workbench_owner.captureMcpOauthClientSecret(
+                try self.control.captureMcpOauthClientSecret(
                     expected_generation,
                     .{ .server_id = server_id, .secret = secret },
                 ),
@@ -1206,7 +1207,7 @@ pub const Coordinator = struct {
         } else if (discovery.authorization.registration_endpoint == null) {
             return error.DynamicRegistrationUnavailable;
         }
-        if (!self.workbench_owner.advanceMcpAuthorization(
+        if (!self.control.advanceMcpAuthorization(
             flow.start.operation_id,
             .awaiting_consent,
         )) return error.InvalidState;
@@ -1252,7 +1253,7 @@ pub const Coordinator = struct {
         if (flow.start.client_id == null) {
             if (!std.mem.eql(u8, flow.start.registration_kind, "dynamic_registration"))
                 return error.InvalidState;
-            const begin = try self.workbench_owner.beginMcpOauthDynamicRegistration(.{
+            const begin = try self.control.beginMcpOauthDynamicRegistration(.{
                 .server_id = flow.start.server_id,
                 .resource = discovery.resource.resource,
                 .issuer = discovery.authorization.issuer,
@@ -1264,10 +1265,10 @@ pub const Coordinator = struct {
                 .rejected, .persistence_outcome_unknown => return error.StateRejected,
             };
             flow.durable_operation_id = self.allocator.dupe(u8, operation.id) catch |err| {
-                _ = self.workbench_owner.clearMcpOauthOperation(operation.id) catch {};
+                _ = self.control.clearMcpOauthOperation(operation.id) catch {};
                 return err;
             };
-            if (!self.workbench_owner.advanceMcpAuthorization(
+            if (!self.control.advanceMcpAuthorization(
                 flow.start.operation_id,
                 .registering,
             )) return error.InvalidState;
@@ -1293,7 +1294,7 @@ pub const Coordinator = struct {
         );
         if (!self.host.openUrl(attempt.authorizationUrl()))
             return error.BrowserUnavailable;
-        if (!self.workbench_owner.advanceMcpAuthorization(
+        if (!self.control.advanceMcpAuthorization(
             flow.start.operation_id,
             .awaiting_browser,
         )) return error.InvalidState;
@@ -1316,7 +1317,7 @@ pub const Coordinator = struct {
                     self.finishFlow(flow);
                     return;
                 };
-                const outcome = self.workbench_owner.completeMcpOauthDynamicRegistration(.{
+                const outcome = self.control.completeMcpOauthDynamicRegistration(.{
                     .operation_id = operation_id,
                     .server_id = flow.start.server_id,
                     .client_id = registration.client_id,
@@ -1398,7 +1399,7 @@ pub const Coordinator = struct {
         defer if (code_owned) code.deinit();
         const discovery = if (flow.discovery) |*value| value else return error.InvalidState;
         const attempt = flow.attempt orelse return error.InvalidState;
-        const begin = try self.workbench_owner.beginMcpOauthCodeExchange(
+        const begin = try self.control.beginMcpOauthCodeExchange(
             flow.start.server_id,
         );
         const binding = switch (begin) {
@@ -1406,7 +1407,7 @@ pub const Coordinator = struct {
             .rejected, .persistence_outcome_unknown => return error.StateRejected,
         };
         flow.durable_operation_id = self.allocator.dupe(u8, binding.operation.id) catch |err| {
-            _ = self.workbench_owner.clearMcpOauthOperation(binding.operation.id) catch {};
+            _ = self.control.clearMcpOauthOperation(binding.operation.id) catch {};
             return err;
         };
         const method = mcp_oauth.TokenEndpointAuthMethod.fromWire(
@@ -1425,7 +1426,7 @@ pub const Coordinator = struct {
             secureFree(self.allocator, secret);
         if ((method == .none) != (client_secret == null))
             return error.InvalidState;
-        if (!self.workbench_owner.advanceMcpAuthorization(
+        if (!self.control.advanceMcpAuthorization(
             flow.start.operation_id,
             .exchanging,
         )) return error.InvalidState;
@@ -1478,7 +1479,7 @@ pub const Coordinator = struct {
                     self.finishFlow(flow);
                     return;
                 };
-                const outcome = self.workbench_owner.completeMcpOauthCodeExchange(.{
+                const outcome = self.control.completeMcpOauthCodeExchange(.{
                     .operation_id = operation_id,
                     .server_id = flow.start.server_id,
                     .access_token = tokens.access_token.bytes,
@@ -1521,7 +1522,7 @@ pub const Coordinator = struct {
         plan: mcp_oauth.AuthorizationPlan,
     ) mcp_oauth.StateError!mcp_oauth.AuthorizationBinding {
         const self: *Coordinator = @ptrCast(@alignCast(context));
-        return switch (self.workbench_owner.authorizeMcpOauth(.{
+        return switch (self.control.authorizeMcpOauth(.{
             .attempt_id = plan.attempt_id,
             .server_id = plan.server_id,
             .issuer = plan.issuer,
@@ -1566,7 +1567,7 @@ pub const Coordinator = struct {
     fn clearDurable(self: *Coordinator, flow: *Flow) Outcome {
         const operation_id = flow.durable_operation_id orelse return .rejected;
         const outcome = mapManagementOutcome(
-            self.workbench_owner.clearMcpOauthOperation(operation_id) catch {
+            self.control.clearMcpOauthOperation(operation_id) catch {
                 self.releaseDurableId(flow);
                 return .rejected;
             },
@@ -1578,7 +1579,7 @@ pub const Coordinator = struct {
     fn recoverDurable(self: *Coordinator, flow: *Flow) Outcome {
         const operation_id = flow.durable_operation_id orelse return .rejected;
         const outcome = mapManagementOutcome(
-            self.workbench_owner.recoverMcpOauthOperation(operation_id) catch {
+            self.control.recoverMcpOauthOperation(operation_id) catch {
                 self.releaseDurableId(flow);
                 return .rejected;
             },
@@ -1605,7 +1606,7 @@ pub const Coordinator = struct {
             else
                 _ = self.clearDurable(flow);
         }
-        _ = self.workbench_owner.finishMcpAuthorization(flow.start.operation_id);
+        _ = self.control.finishMcpAuthorization(flow.start.operation_id);
         if (self.flow == flow) self.flow = null;
         flow.deinit(self.allocator);
         self.allocator.destroy(flow);
@@ -1835,7 +1836,7 @@ test "MCP configuration apply publishes failed when preparation cannot start" {
     var coordinator = Coordinator.init(
         failing.allocator(),
         std.testing.io,
-        &workbench_owner,
+        workbench_owner.mcpManagementPort(),
         &agent_runtime,
         &credential_store,
         &authorizations,
@@ -2058,7 +2059,7 @@ test "MCP Application coordinator completes dynamic registration and OAuth loopb
     var coordinator = Coordinator.init(
         std.testing.allocator,
         std.testing.io,
-        &workbench_owner,
+        workbench_owner.mcpManagementPort(),
         &agent_runtime,
         &credential_store,
         &active_authorizations,

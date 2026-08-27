@@ -250,6 +250,48 @@ test("named module roots exist and lower owners cannot import composition", () =
   }
 });
 
+test("Application coordinators consume scoped Product Control capabilities", () => {
+  const build = read("build.zig");
+  const ports = read("src/product/control/ports.zig");
+  const projection = read("src/workbench/projection.zig");
+  const accountCoordinator = read("src/app/account_coordinator.zig");
+  const agentEvents = read("src/app/agent_event_coordinator.zig");
+  const mcpManagement = read("src/app/mcp_management_coordinator.zig");
+  const mcpOauth = read("src/app/mcp_oauth_coordinator.zig");
+  const window = read("src/app/window.zig");
+  const platform = read("src/app/platform.zig");
+
+  assert.match(build, /src\/product\/control\/ports\.zig/);
+  assert.match(build, /metawork_product_control_ports/);
+  for (const name of [
+    "ExecutionHandoff",
+    "AgentEventConsumer",
+    "McpManagementPort",
+    "McpOauthPort",
+    "ScheduleHost",
+  ]) {
+    assert.match(ports, new RegExp(`pub const ${name} = struct`));
+  }
+  assert.match(ports, /context: \*anyopaque/);
+  assert.doesNotMatch(ports, /Workbench|product_control\.Runtime|rawRuntime|rawOwner/);
+  assert.match(projection, /pub fn executionHandoff/);
+  assert.match(projection, /pub fn agentEventConsumer/);
+  assert.match(projection, /pub fn mcpManagementPort/);
+  assert.match(projection, /pub fn mcpOauthPort/);
+  assert.match(projection, /pub fn scheduleHost/);
+
+  for (const source of [accountCoordinator, mcpManagement, mcpOauth]) {
+    const coordinator = source.match(
+      /pub const Coordinator = struct \{([\s\S]*?)\n    pub fn init/,
+    )?.[1];
+    assert.ok(coordinator, "coordinator state must be inspectable");
+    assert.doesNotMatch(coordinator, /Workbench|workbench_owner|\*workbench/);
+  }
+  assert.doesNotMatch(agentEvents, /metawork_workbench|\*workbench/);
+  assert.doesNotMatch(window, /metawork_workbench|workbench_api|\*workbench/);
+  assert.doesNotMatch(platform, /metawork_workbench|workbench_api|\*workbench/);
+});
+
 test("Product Skill has one live owner behind narrow composition ports", () => {
   const build = read("build.zig");
   const productSkill = read("src/product/skill.zig");
