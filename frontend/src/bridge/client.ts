@@ -193,9 +193,17 @@ export class BridgeClient {
     );
   }
 
-  async previewFile(fileReferenceId: string): Promise<FilePreview> {
+  async previewFile(
+    taskId: string,
+    runId: string,
+    fileReferenceId: string,
+  ): Promise<FilePreview> {
     return decodeFilePreview(
-      await this.invoke(commands.previewFile, { fileReferenceId }),
+      await this.invoke(commands.previewFile, {
+        taskId,
+        runId,
+        fileReferenceId,
+      }),
     );
   }
 

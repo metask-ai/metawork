@@ -47,7 +47,6 @@ import {
   type TaskRunResult,
   type TaskModelSelectionResult,
   type ToolView,
-  type FileReferenceRangeView,
   type FileReferenceView,
   type FilePreview,
   type UiRecord,
@@ -1117,80 +1116,40 @@ function decodeAccount(value: unknown, path: string): AccountView {
   };
 }
 
-function decodeFileReferenceRange(
-  value: unknown,
-  path: string,
-): FileReferenceRangeView {
-  const item = object(value, path, ["start", "end"]);
-  const start = object(item.start, `${path}.start`, ["line", "column"]);
-  const end = object(item.end, `${path}.end`, ["line", "column"]);
-  const result = {
-    start: {
-      line: positiveWireId(start.line, `${path}.start.line`),
-      column: positiveWireId(start.column, `${path}.start.column`),
-    },
-    end: {
-      line: positiveWireId(end.line, `${path}.end.line`),
-      column: positiveWireId(end.column, `${path}.end.column`),
-    },
-  };
-  if (
-    BigInt(result.end.line) < BigInt(result.start.line) ||
-    (result.end.line === result.start.line &&
-      BigInt(result.end.column) < BigInt(result.start.column))
-  )
-    fail(path, "range end must not precede start");
-  return result;
-}
-
 function decodeFileReference(value: unknown, path: string): FileReferenceView {
-  const item = object(value, path, [
-    "id",
-    "title",
-    "displayPath",
-    "kind",
-    "range",
-  ]);
+  const item = object(value, path, ["id", "title", "displayPath"]);
   return {
     id: stringValue(item.id, `${path}.id`),
     title: stringValue(item.title, `${path}.title`),
     displayPath: stringValue(item.displayPath, `${path}.displayPath`),
-    kind: stringValue(item.kind, `${path}.kind`),
-    range: nullableObject(
-      item.range,
-      `${path}.range`,
-      decodeFileReferenceRange,
-    ),
   };
 }
 
 export function decodeFilePreview(value: unknown): FilePreview {
   const item = object(value, "$", [
     "state",
-    "id",
-    "title",
-    "displayPath",
-    "language",
     "content",
     "truncated",
-    "range",
+    "redacted",
   ]);
+  const state = enumValue(item.state, "$.state", [
+    "ready",
+    "missing",
+    "restricted",
+    "unsupported",
+    "changing",
+    "error",
+  ] as const);
+  const content = stringValue(item.content, "$.content");
+  const truncated = booleanValue(item.truncated, "$.truncated");
+  const redacted = booleanValue(item.redacted, "$.redacted");
+  if (state !== "ready" && (content !== "" || truncated || redacted))
+    fail("$", "non-ready preview must not publish content or success facts");
   return {
-    state: enumValue(item.state, "$.state", [
-      "ready",
-      "truncated",
-      "missing",
-      "restricted",
-      "unsupported",
-      "error",
-    ] as const),
-    id: stringValue(item.id, "$.id"),
-    title: stringValue(item.title, "$.title"),
-    displayPath: stringValue(item.displayPath, "$.displayPath"),
-    language: stringValue(item.language, "$.language"),
-    content: stringValue(item.content, "$.content"),
-    truncated: booleanValue(item.truncated, "$.truncated"),
-    range: nullableObject(item.range, "$.range", decodeFileReferenceRange),
+    state,
+    content,
+    truncated,
+    redacted,
   };
 }
 

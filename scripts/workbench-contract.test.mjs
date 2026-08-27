@@ -20,6 +20,7 @@ import {
   decodeSkillMutationResult,
   decodeMcpMutationResult,
   decodeMcpRefreshResult,
+  decodeFilePreview,
   decodeWorkbenchSnapshot,
 } from "../frontend/src/bridge/decode-contracts.ts";
 
@@ -48,9 +49,9 @@ test("the canonical Workbench fixture decodes without normalization", () => {
   );
 });
 
-test("ranged file references use canonical decimal wire strings", () => {
-  const ranged = clone(fixture);
-  ranged.tasks[0].runs[0].tools = [
+test("file references expose only preview identity and presentation", () => {
+  const referenced = clone(fixture);
+  referenced.tasks[0].runs[0].tools = [
     {
       id: "tool-1",
       order: "1",
@@ -70,20 +71,67 @@ test("ranged file references use canonical decimal wire strings", () => {
           id: "file-3-1-1-1",
           title: "main.zig",
           displayPath: "src/main.zig",
-          kind: "read",
-          range: {
-            start: { line: "1", column: "1" },
-            end: { line: "2", column: "1" },
-          },
         },
       ],
     },
   ];
-  assert.deepEqual(decodeWorkbenchSnapshot(ranged), ranged);
+  assert.deepEqual(decodeWorkbenchSnapshot(referenced), referenced);
 
-  const numericRange = clone(ranged);
-  numericRange.tasks[0].runs[0].tools[0].fileRefs[0].range.start.line = 1;
-  assert.throws(() => decodeWorkbenchSnapshot(numericRange), /expected string/);
+  const legacyShape = clone(referenced);
+  legacyShape.tasks[0].runs[0].tools[0].fileRefs[0].kind = "read";
+  assert.throws(() => decodeWorkbenchSnapshot(legacyShape), /expected keys/);
+});
+
+test("file preview response is exact and non-ready states cannot carry bytes", () => {
+  assert.deepEqual(
+    decodeFilePreview({
+      state: "ready",
+      content: "const answer = 42;",
+      truncated: true,
+      redacted: false,
+    }),
+    {
+      state: "ready",
+      content: "const answer = 42;",
+      truncated: true,
+      redacted: false,
+    },
+  );
+  assert.deepEqual(
+    decodeFilePreview({
+      state: "changing",
+      content: "",
+      truncated: false,
+      redacted: false,
+    }),
+    {
+      state: "changing",
+      content: "",
+      truncated: false,
+      redacted: false,
+    },
+  );
+  assert.throws(
+    () =>
+      decodeFilePreview({
+        state: "restricted",
+        content: "leaked",
+        truncated: false,
+        redacted: false,
+      }),
+    /non-ready preview must not publish content/,
+  );
+  assert.throws(
+    () =>
+      decodeFilePreview({
+        state: "ready",
+        content: "ok",
+        truncated: false,
+        redacted: false,
+        path: "src/main.zig",
+      }),
+    /expected keys/,
+  );
 });
 
 test("resource-limited Run terminal crosses the Host to Renderer contract", () => {
