@@ -227,7 +227,7 @@ pub fn refresh(
 
     var generation: u64 = 0;
     var diagnostic = emptyOwnedBytes();
-    const refresh_code = api.runtimeRefreshMcp()(
+    const refresh_code = api.mcp().refresh()(
         runtime,
         &generation,
         &diagnostic,
@@ -239,7 +239,7 @@ pub fn refresh(
 
     var descriptor = emptyOwnedBytes();
     var describe_diagnostic = emptyOwnedBytes();
-    const describe_code = api.runtimeDescribeMcp()(
+    const describe_code = api.mcp().describe()(
         runtime,
         &descriptor,
         &describe_diagnostic,

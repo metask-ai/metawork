@@ -93,7 +93,7 @@ Provider 非 2xx 响应按 HTTP status 分类，不把响应正文、credential 
 
 MetaWork 产品代码不调用或 re-export AgentCore Completion API，也不保留运行时 fallback、revision 探测或条件编译。
 
-当前 canonical AgentCore artifact 仍是 ABI v1 revision 13，其 SDK 要求测试 `ApiV1` 表包含 Completion slots。`tests/support/lifecycle_fixture.zig` 中这些 slots 始终返回拒绝状态，只满足当前精确表结构，不是产品兼容路径。未来精确 artifact 删除这些 slots 时，fixture 与 bundle lock 原子更新，不保留双 revision。
+当前 canonical AgentCore artifact 已经删除全部 AgentCore Completion 类型与 slots。产品 Completion 测试仅使用 MetaWork-owned fake Transport，AgentCore lifecycle fixture 不承担 Completion 行为或兼容路径。
 
 ## 8. 验证
 

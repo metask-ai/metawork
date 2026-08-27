@@ -205,7 +205,7 @@ pub fn restore(
     var raw_session: ?*wire.SessionHandle = null;
     var encoded_report = emptyOwnedBytes();
     var diagnostic = emptyOwnedBytes();
-    const status_code = api.sessionRestore()(
+    const status_code = api.sessionControl().restore()(
         runtime,
         &config,
         callbacks,
@@ -370,7 +370,6 @@ fn failureForStatus(status: sdk.Status, local: LocalSourceFailure) Failure {
         .skill_unavailable,
         .stale_compact,
         .invalid_mcp_selection,
-        .completion_unsupported_response,
         .skill_catalog_incomplete,
         .ok,
         => dependencyFailure(.restore),
@@ -397,7 +396,7 @@ fn mapDescriptionFailure(failure: checkpoint.Failure) Failure {
 pub fn destroyCandidate(api: sdk.Api, candidate: ?*wire.SessionHandle) bool {
     const session = candidate orelse return true;
     var diagnostic = emptyOwnedBytes();
-    const status_code = api.sessionDestroy()(session, &diagnostic);
+    const status_code = api.session().destroy()(session, &diagnostic);
     _ = validOwnedBytes(diagnostic);
     releaseOwned(api, &diagnostic);
     const status = sdk.Status.fromCode(status_code) catch return false;

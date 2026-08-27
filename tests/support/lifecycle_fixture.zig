@@ -688,11 +688,12 @@ fn recordAllowedTools(
 
 pub fn runtimeCreate(
     config: ?*const wire.RuntimeConfigV1,
+    plugins: ?*const wire.RuntimePluginConfigV1,
     out_runtime: ?*?*wire.RuntimeHandle,
     out_error: ?*wire.OwnedBytesV1,
 ) callconv(.c) u32 {
     if (out_error) |out| out.* = .{ .ptr = null, .len = 0 };
-    if (config == null or out_runtime == null) {
+    if (config == null or plugins != null or out_runtime == null) {
         diagnostic(out_error);
         return wire.STATUS_INVALID_ARGUMENT;
     }
@@ -718,19 +719,6 @@ pub fn runtimeCreate(
         false;
     out_runtime.?.* = @ptrCast(&fake_core.runtime);
     return wire.STATUS_OK;
-}
-
-pub fn runtimeCreateWithPlugins(
-    config: ?*const wire.RuntimeConfigV1,
-    plugins: ?*const wire.RuntimePluginConfigV1,
-    out_runtime: ?*?*wire.RuntimeHandle,
-    out_error: ?*wire.OwnedBytesV1,
-) callconv(.c) u32 {
-    if (plugins != null) {
-        diagnostic(out_error);
-        return wire.STATUS_INVALID_ARGUMENT;
-    }
-    return runtimeCreate(config, out_runtime, out_error);
 }
 
 pub fn runtimeDestroy(
@@ -2051,79 +2039,6 @@ pub fn bufferRelease(out: ?*wire.OwnedBytesV1) callconv(.c) void {
     fake_core.unlock();
 }
 
-// The exact revision 13 SDK still validates these table slots as non-null.
-// They deliberately reject every call: product Completion tests use the
-// MetaWork-owned fake Transport below, so no revision 13 Completion behavior
-// remains available through this fixture. Delete these slots with the next
-// exact AgentCore table hard cut.
-fn completionCreate(
-    _: ?*const wire.CompletionConfigV1,
-    out_completion: ?*?*wire.CompletionHandle,
-    out_diagnostic: ?*wire.OwnedBytesV1,
-) callconv(.c) u32 {
-    if (out_diagnostic) |out| out.* = .{ .ptr = null, .len = 0 };
-    if (out_completion) |out| out.* = null;
-    return wire.STATUS_INVALID_ARGUMENT;
-}
-
-fn completionDestroy(_: ?*wire.CompletionHandle, out_diagnostic: ?*wire.OwnedBytesV1) callconv(.c) u32 {
-    if (out_diagnostic) |out| out.* = .{ .ptr = null, .len = 0 };
-    return wire.STATUS_INVALID_ARGUMENT;
-}
-
-fn completionDescribe(
-    _: ?*wire.CompletionHandle,
-    _: ?*wire.CompletionInfoV1,
-    out_diagnostic: ?*wire.OwnedBytesV1,
-) callconv(.c) u32 {
-    if (out_diagnostic) |out| out.* = .{ .ptr = null, .len = 0 };
-    return wire.STATUS_INVALID_ARGUMENT;
-}
-
-fn completionComplete(
-    _: ?*wire.CompletionHandle,
-    _: ?*const wire.CompletionRequestV1,
-    _: ?*wire.CompletionResultV1,
-    out_diagnostic: ?*wire.OwnedBytesV1,
-) callconv(.c) u32 {
-    if (out_diagnostic) |out| out.* = .{ .ptr = null, .len = 0 };
-    return wire.STATUS_INVALID_ARGUMENT;
-}
-
-fn completionStreamStart(
-    _: ?*wire.CompletionHandle,
-    _: ?*const wire.CompletionRequestV1,
-    out_stream: ?*?*wire.CompletionStreamHandle,
-    out_diagnostic: ?*wire.OwnedBytesV1,
-) callconv(.c) u32 {
-    if (out_diagnostic) |out| out.* = .{ .ptr = null, .len = 0 };
-    if (out_stream) |out| out.* = null;
-    return wire.STATUS_INVALID_ARGUMENT;
-}
-
-fn completionStreamNext(
-    _: ?*wire.CompletionStreamHandle,
-    _: ?*wire.CompletionEventV1,
-    out_diagnostic: ?*wire.OwnedBytesV1,
-) callconv(.c) u32 {
-    if (out_diagnostic) |out| out.* = .{ .ptr = null, .len = 0 };
-    return wire.STATUS_INVALID_ARGUMENT;
-}
-
-fn completionStreamAbort(
-    _: ?*wire.CompletionStreamHandle,
-    _: u32,
-    out_diagnostic: ?*wire.OwnedBytesV1,
-) callconv(.c) u32 {
-    if (out_diagnostic) |out| out.* = .{ .ptr = null, .len = 0 };
-    return wire.STATUS_INVALID_ARGUMENT;
-}
-
-fn completionStreamDestroy(_: ?*wire.CompletionStreamHandle, out_diagnostic: ?*wire.OwnedBytesV1) callconv(.c) u32 {
-    if (out_diagnostic) |out| out.* = .{ .ptr = null, .len = 0 };
-    return wire.STATUS_INVALID_ARGUMENT;
-}
-
 fn fakeCompletionPerform(
     context: ?*anyopaque,
     _: lifecycle.CompletionHttpRequest,
@@ -2156,43 +2071,62 @@ fn fakeCompletionTransport() lifecycle.CompletionTransport {
     };
 }
 
+const fake_runtime_api = wire.RuntimeApiV1{
+    .struct_size = @sizeOf(wire.RuntimeApiV1),
+    .reserved0 = 0,
+    .create = runtimeCreate,
+    .destroy = runtimeDestroy,
+};
+
+const fake_session_api = wire.SessionApiV1{
+    .struct_size = @sizeOf(wire.SessionApiV1),
+    .reserved0 = 0,
+    .create = sessionCreate,
+    .destroy = sessionDestroy,
+    .run_input = sessionRunInput,
+    .abort = sessionAbort,
+};
+
+const fake_session_control_api = wire.SessionControlApiV1{
+    .struct_size = @sizeOf(wire.SessionControlApiV1),
+    .reserved0 = 0,
+    .restore = sessionRestore,
+    .describe = sessionDescribe,
+    .set_model = sessionSetModel,
+    .update_permission_rules = sessionUpdatePermissionRules,
+    .compact = sessionCompact,
+    .abort_compact = sessionAbortCompact,
+    .export_checkpoint = sessionExportCheckpoint,
+};
+
+const fake_skill_api = wire.SkillApiV1{
+    .struct_size = @sizeOf(wire.SkillApiV1),
+    .reserved0 = 0,
+    .resolve_catalog = runtimeQuerySkillCatalog,
+    .release_catalog = skillCatalogRelease,
+    .bind_policy = sessionBindSkillPolicy,
+};
+
+const fake_mcp_api = wire.McpApiV1{
+    .struct_size = @sizeOf(wire.McpApiV1),
+    .reserved0 = 0,
+    .apply_configuration = runtimeApplyMcpConfiguration,
+    .refresh = runtimeRefreshMcp,
+    .describe = runtimeDescribeMcp,
+    .update_selection = sessionUpdateMcp,
+};
+
 pub const fake_api = wire.ApiV1{
     .struct_size = @sizeOf(wire.ApiV1),
     .abi_version = wire.ABI_VERSION_V1,
     .abi_revision = wire.ABI_REVISION,
     .reserved0 = 0,
-    .capabilities = wire.REQUIRED_CAPABILITIES_V1,
-    .runtime_create = runtimeCreate,
-    .runtime_destroy = runtimeDestroy,
-    .runtime_query_skill_catalog = runtimeQuerySkillCatalog,
-    .skill_catalog_release = skillCatalogRelease,
-    .completion_create = completionCreate,
-    .completion_destroy = completionDestroy,
-    .completion_describe = completionDescribe,
-    .completion_complete = completionComplete,
-    .completion_stream_start = completionStreamStart,
-    .completion_stream_next = completionStreamNext,
-    .completion_stream_abort = completionStreamAbort,
-    .completion_stream_destroy = completionStreamDestroy,
-    .runtime_refresh_mcp = runtimeRefreshMcp,
-    .runtime_describe_mcp = runtimeDescribeMcp,
-    .runtime_apply_mcp_configuration = runtimeApplyMcpConfiguration,
-    .session_create = sessionCreate,
-    .session_restore = sessionRestore,
-    .session_destroy = sessionDestroy,
-    .session_describe = sessionDescribe,
-    .session_set_model = sessionSetModel,
-    .session_update_skills = sessionBindSkillPolicy,
-    .session_update_permission_rules = sessionUpdatePermissionRules,
-    .session_update_mcp = sessionUpdateMcp,
-    .session_run_input = sessionRunInput,
-    .session_abort = sessionAbort,
-    .session_compact = sessionCompact,
-    .session_abort_compact = sessionAbortCompact,
-    .session_export_checkpoint = sessionExportCheckpoint,
     .buffer_release = bufferRelease,
-    .runtime_create_with_plugins = runtimeCreateWithPlugins,
-    .reserved = [_]u64{0} ** 2,
+    .runtime = &fake_runtime_api,
+    .session = &fake_session_api,
+    .session_control = &fake_session_control_api,
+    .skill = &fake_skill_api,
+    .mcp = &fake_mcp_api,
 };
 
 pub fn createCompletion(

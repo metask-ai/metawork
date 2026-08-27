@@ -297,7 +297,7 @@ fn exportCheckpoint(
     config.sink = &raw_sink;
     var result = std.mem.zeroes(wire.CheckpointExportResultV1);
     var diagnostic = emptyOwnedBytes();
-    const status_code = api.sessionExportCheckpoint()(
+    const status_code = api.sessionControl().exportCheckpoint()(
         raw_session,
         &config,
         &result,
@@ -367,7 +367,6 @@ fn exportCheckpoint(
         .stale_compact,
         .mcp_not_refreshed,
         .invalid_mcp_selection,
-        .completion_unsupported_response,
         .skill_catalog_incomplete,
         .ok,
         => dependencyFailure(.checkpoint_export),
@@ -387,7 +386,7 @@ pub fn describe(
 ) DescriptionOutcome {
     var encoded = emptyOwnedBytes();
     var diagnostic = emptyOwnedBytes();
-    const status_code = api.sessionDescribe()(raw_session, &encoded, &diagnostic);
+    const status_code = api.sessionControl().describe()(raw_session, &encoded, &diagnostic);
     const diagnostic_valid = validOwnedBytes(diagnostic);
     defer releaseOwned(api, &diagnostic);
     const status = sdk.Status.fromCode(status_code) catch {
@@ -429,7 +428,6 @@ pub fn describe(
             .logical_session_conflict,
             .mcp_not_refreshed,
             .invalid_mcp_selection,
-            .completion_unsupported_response,
             .skill_catalog_incomplete,
             => dependencyFailure(.describe),
         } };

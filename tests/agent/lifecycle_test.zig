@@ -684,9 +684,9 @@ test "malformed compact result poisons Session and queued compact can be cancell
     try closeSession(session, .session_close);
 }
 
-test "Runtime rejects tables missing required capabilities" {
+test "Runtime rejects missing revision 14 child tables and entries" {
     var api = fake_api;
-    api.capabilities &= ~wire.CAP_SKILL_CATALOG;
+    api.skill = null;
     try std.testing.expectError(
         error.UnsupportedAbi,
         lifecycle.Runtime.initWithApi(
@@ -697,8 +697,10 @@ test "Runtime rejects tables missing required capabilities" {
         ),
     );
 
+    var session_api = api.session.?.*;
+    session_api.run_input = null;
     api = fake_api;
-    api.capabilities &= ~wire.CAP_TYPED_RUN_INPUT;
+    api.session = &session_api;
     try std.testing.expectError(
         error.UnsupportedAbi,
         lifecycle.Runtime.initWithApi(
@@ -709,8 +711,10 @@ test "Runtime rejects tables missing required capabilities" {
         ),
     );
 
+    var session_control_api = api.session_control.?.*;
+    session_control_api.describe = null;
     api = fake_api;
-    api.capabilities &= ~wire.CAP_RUN_STATE_OBSERVATION;
+    api.session_control = &session_control_api;
     try std.testing.expectError(
         error.UnsupportedAbi,
         lifecycle.Runtime.initWithApi(
@@ -721,8 +725,10 @@ test "Runtime rejects tables missing required capabilities" {
         ),
     );
 
+    var mcp_api = api.mcp.?.*;
+    mcp_api.apply_configuration = null;
     api = fake_api;
-    api.runtime_apply_mcp_configuration = null;
+    api.mcp = &mcp_api;
     try std.testing.expectError(
         error.UnsupportedAbi,
         lifecycle.Runtime.initWithApi(

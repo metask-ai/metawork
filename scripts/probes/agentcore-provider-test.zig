@@ -63,7 +63,7 @@ fn makeRuntime(api: agentcore.Api) !*wire.RuntimeHandle {
     config.builtin_tools = &views;
     config.builtin_tool_count = views.len;
     var runtime: ?*wire.RuntimeHandle = null;
-    try expectOk(api, "runtime_create", api.runtimeCreate()(&config, &runtime, null));
+    try expectOk(api, "runtime_create", api.runtime().create()(&config, null, &runtime, null));
     return runtime orelse error.MissingRuntime;
 }
 
@@ -90,7 +90,7 @@ pub fn main() !void {
     host.workspace_home = agentcore.bytesView(workspace);
 
     const runtime = try makeRuntime(api);
-    defer _ = api.runtimeDestroy()(runtime, null);
+    defer _ = api.runtime().destroy()(runtime, null);
 
     var config = std.mem.zeroes(wire.SessionCreateConfigV1);
     config.struct_size = @sizeOf(wire.SessionCreateConfigV1);
@@ -100,10 +100,10 @@ pub fn main() !void {
     try expectOk(
         api,
         "session_create",
-        api.sessionCreate()(runtime, &config, &callbacks, &session, null),
+        api.session().create()(runtime, &config, &callbacks, &session, null),
     );
     const raw_session = session orelse return error.MissingSession;
-    defer _ = api.sessionDestroy()(raw_session, null);
+    defer _ = api.session().destroy()(raw_session, null);
 
     var options = std.mem.zeroes(wire.RunOptionsV1);
     options.struct_size = @sizeOf(wire.RunOptionsV1);
@@ -114,7 +114,7 @@ pub fn main() !void {
     try expectOk(
         api,
         "session_run_provider_test",
-        api.sessionRunText(
+        api.session().runText(
             raw_session,
             1,
             agentcore.bytesView("Reply with one short sentence."),

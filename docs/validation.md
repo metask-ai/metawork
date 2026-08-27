@@ -112,8 +112,8 @@ Product Skill 的公开表面 guard 必须证明 `product/skill.zig` 只导出 r
 ### AgentCore target baseline
 
 - **规范**：[高层架构](architecture.md)、[ABI v1 消费合同](agentcore-abi-v1.md)。
-- **证据**：三个 target 的 policy 与 repository lock identity 均同步为 clean source commit `af1ea06dddc1e4f5274e93a971070d0c578f8f3c`、ABI v1 revision 13。Windows x86_64 GNU 的 exact artifact 已由 bundle tests 与 staged probe 验证；按本次升级决策，macOS payload 与 platform vertical 不在本轮验证范围。
-- **结论**：所有 target policy 只接受 ABI v1 revision 13、280-byte table、required capabilities `0x3ffffff`；没有旧 revision fallback。macOS 不得引用本轮 Windows 结果宣称平台已验证。
+- **证据**：三个 target 均锁定 clean source commit `e5a423697f7853d8d609950b5d7e2d7c1ac2e83a`、ABI v1 revision 14 的 exact artifact。两个 macOS archive 的外部 SHA-256、manifest payload checksum、target 架构与 discovery symbol 已验证并原子 stage；arm64 desktop vertical 已覆盖真实 Skill/Text/Compact checkpoint、恢复与 clean shutdown，x86_64 已通过隔离 restore、Anthropic/OpenAI/Gemini provider probe 及 Debug/Release build。
+- **结论**：所有 target policy 只接受 ABI v1 revision 14 与 64-byte root table，required surface 由 root + 五个 mandatory child table 定义；没有 revision 13 fallback。macOS x86_64 的真实 desktop vertical 仍须在对应目标环境独立采集，不能由 arm64 vertical 或 Rosetta probe 替代。
 
 2026-08-13 的 Windows staged run-state probe 可由 Git object `51e0fcc847e7b832b628f6c64183525dd8300710` 定位：Host Run ID `7` 的 callback identity 与 `run_state.run_id` 一致，首序号为 `1`，并观察到 `starting → generating → finalizing → completed`。结论已进入 ABI 合同和 Workbench 回归，因此 active tree 不再保留该一次性 probe。
 
@@ -209,7 +209,7 @@ npm run package:windows
 
 ### Checkpoint artifact boundary
 
-revision 13 不继承旧 artifact 的 checkpoint 样本或通过结论。每个平台必须取得并锁定 revision 13 exact artifact 后重新采集 platform vertical；旧版本结果不能替代，缺少 artifact 的平台直接失败。checkpoint digest 与产品预算的规范性语义见[AgentCore 集成契约](agentcore-integration.md)和[ABI v1 消费合同](agentcore-abi-v1.md)。
+revision 14 不继承旧 artifact 的 checkpoint 样本或通过结论。每个平台必须取得并锁定 revision 14 exact artifact 后重新采集 platform vertical；旧版本结果不能替代，缺少 artifact 的平台直接失败。checkpoint digest 与产品预算的规范性语义见[AgentCore 集成契约](agentcore-integration.md)和[ABI v1 消费合同](agentcore-abi-v1.md)。
 
 ## 尚未验证的能力
 

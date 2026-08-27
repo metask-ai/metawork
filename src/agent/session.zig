@@ -744,7 +744,7 @@ pub const Session = struct {
 
         var result = std.mem.zeroes(wire.CompactResultV1);
         var diagnostic = emptyOwnedBytes();
-        const status_code = self.agent_runtime.api.sessionCompact()(
+        const status_code = self.agent_runtime.api.sessionControl().compact()(
             self.raw,
             operation_id,
             &result,
@@ -871,7 +871,7 @@ pub const Session = struct {
             .closing, .closed => return error.SessionClosing,
         }
         var diagnostic = emptyOwnedBytes();
-        const status_code = self.agent_runtime.api.sessionBindSkillPolicy()(
+        const status_code = self.agent_runtime.api.skill().bindPolicy()(
             self.raw,
             catalog.rawHandle(lease),
             &policy,
@@ -910,7 +910,7 @@ pub const Session = struct {
             .closing, .closed => return error.SessionClosing,
         }
         var diagnostic = emptyOwnedBytes();
-        const status_code = self.agent_runtime.api.sessionSetModel()(
+        const status_code = self.agent_runtime.api.sessionControl().setModel()(
             self.raw,
             sdk.bytesView(model),
             &diagnostic,
@@ -1396,7 +1396,7 @@ pub const Session = struct {
 
     fn destroyRawSession(self: *Session) Error!void {
         var diagnostic = emptyOwnedBytes();
-        const status = self.agent_runtime.api.sessionDestroy()(self.raw, &diagnostic);
+        const status = self.agent_runtime.api.session().destroy()(self.raw, &diagnostic);
         releaseOwned(self.agent_runtime.api, &diagnostic);
         const typed_status = sdk.Status.fromCode(status) catch null;
         self.lock();
@@ -1441,7 +1441,7 @@ pub const Session = struct {
         var result = std.mem.zeroes(wire.RunResultV1);
         var diagnostic = emptyOwnedBytes();
         const status = switch (input.*) {
-            .text => |text| self.agent_runtime.api.sessionRunText(
+            .text => |text| self.agent_runtime.api.session().runText(
                 self.raw,
                 run_id,
                 sdk.bytesView(text),
@@ -1457,7 +1457,7 @@ pub const Session = struct {
                     fixed.allocator(),
                     skill.argument_values,
                 ) catch unreachable;
-                break :skill_run self.agent_runtime.api.sessionRunSkill(
+                break :skill_run self.agent_runtime.api.session().runSkill(
                     self.raw,
                     run_id,
                     sdk.bytesView(skill.skill_id),
@@ -1588,7 +1588,7 @@ pub const Session = struct {
 
     fn abortRun(self: *Session, run_id: u64, signal: TerminationSignal) void {
         var diagnostic = emptyOwnedBytes();
-        const status = self.agent_runtime.api.sessionAbort()(
+        const status = self.agent_runtime.api.session().abort()(
             self.raw,
             run_id,
             abortReason(signal),
@@ -1652,7 +1652,7 @@ pub const Session = struct {
 
     fn abortCompact(self: *Session, operation_id: u64) void {
         var diagnostic = emptyOwnedBytes();
-        const status_code = self.agent_runtime.api.sessionAbortCompact()(
+        const status_code = self.agent_runtime.api.sessionControl().abortCompact()(
             self.raw,
             operation_id,
             &diagnostic,
@@ -2154,7 +2154,6 @@ fn compactStatusDisposition(status: sdk.Status) ?SessionStatusDisposition {
         .logical_session_conflict,
         .mcp_not_refreshed,
         .invalid_mcp_selection,
-        .completion_unsupported_response,
         .skill_catalog_incomplete,
         => null,
     };
@@ -2184,7 +2183,6 @@ fn isCompactAbortStatus(status: sdk.Status) bool {
         .logical_session_conflict,
         .mcp_not_refreshed,
         .invalid_mcp_selection,
-        .completion_unsupported_response,
         .skill_catalog_incomplete,
         => false,
     };
@@ -2219,7 +2217,6 @@ fn skillUpdateStatusDisposition(status: sdk.Status) ?SessionStatusDisposition {
         .logical_session_conflict,
         .mcp_not_refreshed,
         .invalid_mcp_selection,
-        .completion_unsupported_response,
         .skill_catalog_incomplete,
         => null,
     };
@@ -2255,7 +2252,6 @@ fn runStatusDisposition(status: sdk.Status) ?SessionStatusDisposition {
         .logical_session_conflict,
         .mcp_not_refreshed,
         .invalid_mcp_selection,
-        .completion_unsupported_response,
         .skill_catalog_incomplete,
         => null,
     };
@@ -2311,7 +2307,6 @@ fn isAbortStatus(status: sdk.Status) bool {
         .logical_session_conflict,
         .mcp_not_refreshed,
         .invalid_mcp_selection,
-        .completion_unsupported_response,
         .skill_catalog_incomplete,
         => false,
     };
@@ -2346,7 +2341,6 @@ fn isSessionDestroyStatus(status: sdk.Status) bool {
         .logical_session_conflict,
         .mcp_not_refreshed,
         .invalid_mcp_selection,
-        .completion_unsupported_response,
         .skill_catalog_incomplete,
         => false,
     };
@@ -2381,7 +2375,6 @@ pub fn mcpUpdateStatusDisposition(status: sdk.Status) ?SessionStatusDisposition 
         .checkpoint_incompatible,
         .checkpoint_io,
         .logical_session_conflict,
-        .completion_unsupported_response,
         .skill_catalog_incomplete,
         => null,
     };

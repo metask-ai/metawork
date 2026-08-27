@@ -139,7 +139,7 @@ pub fn query(
     var raw: ?*wire.SkillCatalogHandle = null;
     var descriptor = emptyOwnedBytes();
     var diagnostic = emptyOwnedBytes();
-    const status_code = api.resolveWorkspaceSkillCatalog()(
+    const status_code = api.skill().resolveCatalog()(
         runtime,
         &query_input,
         &raw,
@@ -192,7 +192,7 @@ pub fn query(
 pub fn release(lease: *Lease) Error!void {
     const owned = leaseStorage(lease);
     var diagnostic = emptyOwnedBytes();
-    const status_code = owned.api.skillCatalogRelease()(
+    const status_code = owned.api.skill().releaseCatalog()(
         owned.raw,
         &diagnostic,
     );
@@ -376,7 +376,7 @@ fn catalogStatusError(status: sdk.Status) Error {
 
 fn discardRaw(api: sdk.Api, raw: *wire.SkillCatalogHandle) void {
     var diagnostic = emptyOwnedBytes();
-    _ = api.skillCatalogRelease()(raw, &diagnostic);
+    _ = api.skill().releaseCatalog()(raw, &diagnostic);
     releaseOwned(api, &diagnostic);
 }
 

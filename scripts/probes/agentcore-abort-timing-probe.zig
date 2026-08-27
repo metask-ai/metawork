@@ -62,7 +62,7 @@ const Probe = struct {
         while (!self.first_event_seen.load(.acquire))
             std.Thread.sleep(2 * std.time.ns_per_ms);
         std.Thread.sleep(50 * std.time.ns_per_ms);
-        const status = self.api.sessionAbort()(self.session, 7, null);
+        const status = self.api.session().abort()(self.session, 7, null);
         self.abort_status.store(status, .release);
         self.abort_returned.store(true, .release);
         std.debug.print("session_abort returned status={d}\n", .{status});
@@ -111,18 +111,18 @@ pub fn main() !void {
     runtime_config.builtin_tools = &builtin_views;
     runtime_config.builtin_tool_count = builtin_views.len;
     var runtime: ?*wire.RuntimeHandle = null;
-    _ = try expectStatus("runtime_create", api.runtimeCreate()(&runtime_config, &runtime, null));
+    _ = try expectStatus("runtime_create", api.runtime().create()(&runtime_config, null, &runtime, null));
     const raw_runtime = runtime orelse return error.MissingRuntime;
-    defer _ = api.runtimeDestroy()(raw_runtime, null);
+    defer _ = api.runtime().destroy()(raw_runtime, null);
 
     var session: ?*wire.SessionHandle = null;
     const create_status = try expectStatus(
         "session_create",
-        api.sessionCreate()(raw_runtime, &config, &callbacks, &session, null),
+        api.session().create()(raw_runtime, &config, &callbacks, &session, null),
     );
     if (create_status != .ok) return error.SessionCreateFailed;
     probe.session = session orelse return error.MissingSession;
-    defer _ = api.sessionDestroy()(probe.session, null);
+    defer _ = api.session().destroy()(probe.session, null);
 
     const worker = try std.Thread.spawn(.{}, Probe.abortThread, .{&probe});
 
@@ -130,7 +130,7 @@ pub fn main() !void {
     options.struct_size = @sizeOf(wire.RunOptionsV1);
     options.max_turns = 1;
     var result = std.mem.zeroes(wire.RunResultV1);
-    const run_status_code = api.sessionRunText(
+    const run_status_code = api.session().runText(
         probe.session,
         7,
         agentcore.bytesView("Stream slowly so the abort lands mid-run."),

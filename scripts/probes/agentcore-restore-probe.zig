@@ -113,7 +113,7 @@ fn makeRuntime(api: agentcore.Api) !*wire.RuntimeHandle {
     config.builtin_tools = &builtin_views;
     config.builtin_tool_count = builtin_views.len;
     var runtime: ?*wire.RuntimeHandle = null;
-    try expectStatus(api, "runtime_create", api.runtimeCreate()(&config, &runtime, null));
+    try expectStatus(api, "runtime_create", api.runtime().create()(&config, null, &runtime, null));
     return runtime orelse error.MissingRuntime;
 }
 
@@ -159,7 +159,7 @@ fn describe(
 ) !Description {
     var encoded = emptyOwnedBytes();
     defer releaseOwned(api, &encoded);
-    try expectStatus(api, "session_describe", api.sessionDescribe()(session, &encoded, null));
+    try expectStatus(api, "session_describe", api.sessionControl().describe()(session, &encoded, null));
     const bytes = try agentcore.borrowedBytes(.{ .ptr = encoded.ptr, .len = encoded.len });
     var parsed = try agentcore.decodeSessionDescription(allocator, bytes);
     defer parsed.deinit();
@@ -173,11 +173,11 @@ fn describe(
 }
 
 fn destroySession(api: agentcore.Api, session: *wire.SessionHandle) !void {
-    try expectStatus(api, "session_destroy", api.sessionDestroy()(session, null));
+    try expectStatus(api, "session_destroy", api.session().destroy()(session, null));
 }
 
 fn destroyRuntime(api: agentcore.Api, runtime: *wire.RuntimeHandle) !void {
-    try expectStatus(api, "runtime_destroy", api.runtimeDestroy()(runtime, null));
+    try expectStatus(api, "runtime_destroy", api.runtime().destroy()(runtime, null));
 }
 
 fn expectStatus(api: agentcore.Api, operation: []const u8, status_code: u32) !void {
@@ -214,7 +214,7 @@ pub fn main() !void {
     var probe_host = host;
     probe_host.shell_policy_code = wire.SHELL_UNRESTRICTED;
     const probe_names = [_][]const u8{
-        "Read", "Write", "Edit", "Glob", "Grep", "Bash", "BashOutput",
+        "Read",      "Write",           "Edit",      "Glob",     "Grep", "Bash", "BashOutput",
         "KillShell", "AskUserQuestion", "WebSearch", "WebFetch",
     };
     var probe_view: [1]wire.BytesViewV1 = undefined;
@@ -227,7 +227,7 @@ pub fn main() !void {
         probe_config.host = &probe_host;
         probe_config.model = agentcore.bytesView("gpt-5-mini");
         var probe_session: ?*wire.SessionHandle = null;
-        const status = agentcore.Status.fromCode(api.sessionCreate()(
+        const status = agentcore.Status.fromCode(api.session().create()(
             first_runtime,
             &probe_config,
             &callbacks,
@@ -244,7 +244,7 @@ pub fn main() !void {
     create_config.host = &host;
     create_config.model = agentcore.bytesView("gpt-5-mini");
     var first_session: ?*wire.SessionHandle = null;
-    try expectStatus(api, "session_create", api.sessionCreate()(
+    try expectStatus(api, "session_create", api.session().create()(
         first_runtime,
         &create_config,
         &callbacks,
@@ -265,7 +265,7 @@ pub fn main() !void {
     export_config.limits = &limits;
     export_config.sink = &sink;
     var export_result = std.mem.zeroes(wire.CheckpointExportResultV1);
-    try expectStatus(api, "session_export_checkpoint", api.sessionExportCheckpoint()(
+    try expectStatus(api, "session_export_checkpoint", api.sessionControl().exportCheckpoint()(
         session,
         &export_config,
         &export_result,
@@ -303,7 +303,7 @@ pub fn main() !void {
     var restored_session: ?*wire.SessionHandle = null;
     var restore_report = emptyOwnedBytes();
     defer releaseOwned(api, &restore_report);
-    try expectStatus(api, "session_restore", api.sessionRestore()(
+    try expectStatus(api, "session_restore", api.sessionControl().restore()(
         restored_runtime,
         &restore_config,
         &callbacks,
@@ -370,7 +370,7 @@ pub fn main() !void {
     defer releaseOwned(api, &corrupt_report);
     var corrupt_diagnostic = emptyOwnedBytes();
     defer releaseOwned(api, &corrupt_diagnostic);
-    const corrupt_status_code = api.sessionRestore()(
+    const corrupt_status_code = api.sessionControl().restore()(
         corrupt_runtime,
         &corrupt_config,
         &callbacks,

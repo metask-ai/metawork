@@ -450,16 +450,13 @@ try {
   });
   checkpointEvidence.descriptorLatencyMs =
     Date.now() - checkpointTerminalObservedAt;
-  const skillCommitMetrics = checkpointCommitMetrics(taskId, "run", runId);
   process.stdout.write(
     `AgentCore checkpoint evidence: ${JSON.stringify({
       kind: "skill",
       byteSize: checkpointEvidence.byteSize,
-      chunkCount: checkpointEvidence.chunkCount,
       generation: checkpointEvidence.generation,
       descriptorLatencyMs: checkpointEvidence.descriptorLatencyMs,
       historyByteSize: checkpointEvidence.historyByteSize,
-      ...skillCommitMetrics,
     })}\n`,
   );
   const activityOrders = [];
@@ -599,17 +596,14 @@ try {
     "Text durable checkpoint descriptor",
   );
   textCheckpoint.descriptorLatencyMs = Date.now() - textCheckpointObservedAt;
-  const textCommitMetrics = checkpointCommitMetrics(taskId, "run", textRunId);
   await expectMissing(checkpointEvidence.blobPath);
   process.stdout.write(
     `AgentCore checkpoint evidence: ${JSON.stringify({
       kind: "text",
       byteSize: textCheckpoint.byteSize,
-      chunkCount: textCheckpoint.chunkCount,
       generation: textCheckpoint.generation,
       descriptorLatencyMs: textCheckpoint.descriptorLatencyMs,
       historyByteSize: textCheckpoint.historyByteSize,
-      ...textCommitMetrics,
     })}\n`,
   );
 
@@ -665,26 +659,23 @@ try {
   );
   compactCheckpoint.descriptorLatencyMs =
     Date.now() - compactCheckpointObservedAt;
-  const compactCommitMetrics = checkpointCommitMetrics(
-    taskId,
-    "compact",
-    compactId,
-  );
   await expectMissing(textCheckpoint.blobPath);
   process.stdout.write(
     `AgentCore checkpoint evidence: ${JSON.stringify({
       kind: "compact",
       byteSize: compactCheckpoint.byteSize,
-      chunkCount: compactCheckpoint.chunkCount,
       generation: compactCheckpoint.generation,
       descriptorLatencyMs: compactCheckpoint.descriptorLatencyMs,
       historyByteSize: compactCheckpoint.historyByteSize,
-      ...compactCommitMetrics,
     })}\n`,
   );
   if (provider.served !== responses.length)
     throw new Error(
       `provider served ${provider.served}/${responses.length} responses`,
+    );
+  if (provider.titleCompletions !== 1)
+    throw new Error(
+      `automatic title Completion served ${provider.titleCompletions}/1 responses`,
     );
   if (provider.error) throw provider.error;
   const providerInput = JSON.stringify(provider.requests);
@@ -748,13 +739,17 @@ try {
     async () => {
       const health = await readCheckpointHealth(taskId);
       return health?.checkpoint === null &&
-        health.checkpointHealth === "blob_missing"
+        health.checkpointAnchor === "blob_missing"
         ? health
         : null;
     },
     commandTimeoutMs,
     "missing checkpoint startup reconciliation",
   );
+  await invokeBridge("metawork.tasks.archive", {
+    taskId,
+    archived: true,
+  });
   await invokeBridge("metawork.tasks.delete", { taskId });
   const afterDelete = await snapshot();
   if (afterDelete.tasks.some((item) => item.id === taskId))
@@ -958,7 +953,6 @@ async function readCheckpointEvidence(
   return {
     blobPath,
     byteSize: blobDescriptor.byte_size,
-    chunkCount: null,
     generation: blobDescriptor.generation,
     historyByteSize: historyBytes.length,
   };
@@ -972,27 +966,6 @@ async function expectMissing(filePath) {
     throw error;
   }
   throw new Error(`checkpoint blob survived Task deletion: ${filePath}`);
-}
-
-function checkpointCommitMetrics(taskId, terminalKind, terminalId) {
-  const records = [
-    ...output.matchAll(
-      /checkpoint\.commit task_id=(\d+) terminal_kind=(run|compact) terminal_id=(\d+) byte_size=(\d+) chunk_count=(\d+) export_duration_ns=(\d+) history_commit_duration_ns=(\d+)/g,
-    ),
-  ];
-  const record = records.find(
-    (item) =>
-      item[1] === taskId && item[2] === terminalKind && item[3] === terminalId,
-  );
-  if (!record)
-    throw new Error(
-      `checkpoint commit metrics were not observed for ${terminalKind} ${terminalId}`,
-    );
-  return {
-    exportDurationNs: Number(record[6]),
-    historyCommitDurationNs: Number(record[7]),
-    additionalHistoryCommitCount: 1,
-  };
 }
 
 async function invokeBridge(command, payload) {
@@ -1316,6 +1289,7 @@ async function removeWorkspaceWithRetry() {
 
 function createProvider(queue, responseDelayMs = 0) {
   let served = 0;
+  let titleCompletions = 0;
   let providerError = null;
   const requests = [];
   const server = createServer((request, response) => {
@@ -1333,12 +1307,46 @@ function createProvider(queue, responseDelayMs = 0) {
           );
         if (request.method !== "POST" || request.url !== "/v1/messages")
           throw new Error("AgentCore used an unexpected provider endpoint");
+        const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        if (request.headers["x-api-key"] !== undefined) {
+          if (
+            request.headers["x-api-key"] !==
+              "metawork-agentcore-vertical-fixture-key" ||
+            request.headers.authorization !== undefined ||
+            request.headers["anthropic-version"] !== "2023-06-01" ||
+            payload.model !== "metawork-agentcore-vertical-fixture-model" ||
+            typeof payload.system !== "string" ||
+            !payload.system.startsWith("Generate a concise title") ||
+            !Array.isArray(payload.messages) ||
+            payload.messages.length !== 1 ||
+            payload.messages[0]?.role !== "user" ||
+            payload.messages[0]?.content !== "Review"
+          )
+            throw new Error(
+              "automatic title Completion did not preserve its frozen Anthropic request",
+            );
+          titleCompletions += 1;
+          response.writeHead(200, {
+            "content-type": "application/json",
+            connection: "close",
+          });
+          response.end(
+            JSON.stringify({
+              type: "message",
+              content: [{ type: "text", text: "Review fixture" }],
+              stop_reason: "end_turn",
+              usage: { input_tokens: 1, output_tokens: 1 },
+            }),
+          );
+          return;
+        }
         if (
           request.headers.authorization !==
           "Bearer metawork-agentcore-vertical-fixture-key"
         )
-          throw new Error("Host credential did not reach AgentCore correctly");
-        const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+          throw new Error(
+            `Host credential did not reach AgentCore correctly (${describeAuthorizationHeader(request.headers.authorization)}, x-api-key=${request.headers["x-api-key"] === undefined ? "absent" : "present"})`,
+          );
         requests.push(payload);
         if (payload.model !== "metawork-agentcore-vertical-fixture-model")
           throw new Error("Host model did not reach AgentCore correctly");
@@ -1369,6 +1377,9 @@ function createProvider(queue, responseDelayMs = 0) {
     get error() {
       return providerError;
     },
+    get titleCompletions() {
+      return titleCompletions;
+    },
     get requests() {
       return requests;
     },
@@ -1385,6 +1396,11 @@ function createProvider(queue, responseDelayMs = 0) {
       return new Promise((resolve) => server.close(resolve));
     },
   };
+}
+
+function describeAuthorizationHeader(value) {
+  if (value === undefined) return "authorization=absent";
+  return `authorization=present,length=${value.length},bearer=${value.startsWith("Bearer ")}`;
 }
 
 function toolSse(messageId, toolId, name, input) {

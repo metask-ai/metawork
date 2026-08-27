@@ -45,6 +45,60 @@ const bundle = await validateAgentCoreBundle(bundleRoot, {
 
 const providers = [
   {
+    name: "anthropic",
+    code: "wire.PROVIDER_ANTHROPIC",
+    apiKey: "anthropic-provider-test-key",
+    model: "anthropic-provider-test-model",
+    path: "/v1/messages",
+    baseUrlSuffix: "/v1/messages",
+    authorization: "Bearer anthropic-provider-test-key",
+    anthropicVersion: "2023-06-01",
+    bodyOk(payload) {
+      return (
+        payload.model === this.model &&
+        Array.isArray(payload.messages) &&
+        payload.messages.some(
+          (message) =>
+            message?.role === "user" &&
+            (message.content === "Reply with one short sentence." ||
+              message.content?.some?.(
+                (content) =>
+                  content?.type === "text" &&
+                  content.text === "Reply with one short sentence.",
+              )),
+        )
+      );
+    },
+    response: [
+      {
+        type: "message_start",
+        message: {
+          id: "anthropic-provider-test-message",
+          role: "assistant",
+          model: "fixture",
+          usage: { input_tokens: 1, output_tokens: 1 },
+        },
+      },
+      {
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "text", text: "" },
+      },
+      {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "text_delta", text: "anthropic provider test" },
+      },
+      { type: "content_block_stop", index: 0 },
+      {
+        type: "message_delta",
+        delta: { stop_reason: "end_turn" },
+        usage: { output_tokens: 1 },
+      },
+      { type: "message_stop" },
+    ],
+  },
+  {
     name: "openai",
     code: "wire.PROVIDER_OPENAI",
     apiKey: "openai-provider-test-key",
@@ -141,6 +195,11 @@ const server = createServer((request, response) => {
           `${activeProvider.name} authorization did not reach AgentCore`,
         );
       }
+      if (
+        activeProvider.anthropicVersion &&
+        request.headers["anthropic-version"] !== activeProvider.anthropicVersion
+      )
+        throw new Error("Anthropic protocol version did not reach AgentCore");
       if (request.headers["content-type"] !== "application/json")
         throw new Error(
           `${activeProvider.name} request must use application/json`,
