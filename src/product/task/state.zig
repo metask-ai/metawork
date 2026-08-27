@@ -877,6 +877,7 @@ pub fn applyEvent(
                 run.redaction_secret,
             );
         },
+        .output_segment_begin, .output_segment_end => return .unchanged,
         .stream_done => {
             _ = try projection.replaceText(
                 &run.status_text,

@@ -85,7 +85,12 @@ fn coreEventTextValid(event: sdk.DecodedCoreEvent) bool {
                 }
                 return true;
             },
-            .usage, .retry_notice, .stream_done => true,
+            .output_segment_begin,
+            .output_segment_end,
+            .usage,
+            .retry_notice,
+            .stream_done,
+            => true,
             .run_state => |state| {
                 if (state.run_id == 0) return false;
                 for (state.in_flight_tools) |tool|
