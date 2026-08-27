@@ -49,6 +49,27 @@ candidate probe 只用于证明锁定 artifact 与官方 Zig package 可以 sour
 
 当前 bundle 提供完整 typed status、八个 StopReason、known/unknown observation decoder、Permission provenance、`UiRequest` decoder、request-aware `UiResponse` encoder、Skill/MCP catalog decoder、Session description/restore/checkpoint entry、idle-only Session model mutation、Runtime MCP configuration apply，以及 callback-scoped validated `RunContext`。revision 8 额外提供结构化 `CoreEvent.run_state`；正式 `agent/` 直接使用官方 `bindings/zig` package 暴露的表面，Workbench 只保存受限运行时投影；MetaWork 不手写 raw enum、tag switch、identity layout、Permission/Skill/MCP schema 或 SDK module/link graph。
 
+当前十五种公开 observation 的消费审计如下；“持久化”均指 Product Task 派生事实，不保存 raw CoreEvent：
+
+| CoreEvent | Product Task 消费 | 持久化边界 |
+| --- | --- | --- |
+| `output_segment_begin/end` | 校验 index/turn/group/bytes，驱动 group 定性 | 分类边界当前不持久化 |
+| `text_chunk` | 写入当前 open segment | 已闭合可见 group 进入既有 assistant history |
+| `thinking_chunk` | 只更新安全状态 | 不保存 reasoning 正文 |
+| `stream_done` | 更新为 Finishing，不作为完成信号 | 仅现有安全状态 |
+| `retry_notice` | 更新 retry 状态 | 仅现有安全状态 |
+| `tool_start` | 建立/更新 Tool record | 随 Run history 保存 |
+| `tool_progress` | 按 tool identity 更新进度 | 随 Run history 保存 |
+| `tool_result` | 完成 Tool record 与 file reference 投影 | durable boundary |
+| `run_state` | 受 transition sequence 保护的 runtime observation | phase observation 不持久化 |
+| `progress` | 更新 executing-tools 状态 | 仅现有安全状态 |
+| `usage` | checked delta 累计 | 随 Run history 保存 |
+| `context_warning` | 更新 context-pressure 状态 | 仅现有安全状态 |
+| `auto_compact` | 更新 context-compacted 状态 | 仅现有安全状态 |
+| `permission_provenance` | 更新 Run/UI permission summary | 随对应 UI history 保存 |
+
+unknown observation 继续走官方 unknown 分支并被忽略，不由 MetaWork 猜测其 payload。
+
 ### MetaWork module boundary
 
 - `src/agent.zig` 是 Agent 执行层的 named module root；
@@ -341,7 +362,7 @@ callback 返回后的 Product Task event application failure 仍由 Workbench �
 
 AgentCore tool event 的 raw `id` 只在 Product Task 应用当前 event 时用于计算固定长度 SHA-256 correlation key；raw `id` 不保存在产品历史。后续 progress/result 使用同一 digest 关联 Tool record。callback-scoped projection 以 Run 内唯一 activity order 生成稳定且不敏感的产品 tool `id`；`name`、input、progress 和 content 在进入 canonical projection 前统一清理。该 digest 不进入 Renderer wire，也不是第二个产品 tool identity。Renderer decoder 必须拒绝同一 Run 内重复的产品 tool `id` 或 activity order。
 
-`thinking_chunk` 正文属于 private reasoning，Product Task state 不把它写入 Assistant、Snapshot 或 Task persistence，只用事件类型把现有 safe status 更新为 `Thinking`；同状态的连续 chunk 不重复发布 revision。`text_chunk` 到达后 safe status 更新为 `Writing response`，正文继续进入 Assistant。assistant `text_chunk` 的 credential 清理采用流式未决尾部：已经提交的 canonical 字节不再随之后的 chunk 重扫，只有仍可能组成跨 chunk credential 的有限后缀与新字节参与下一次清理。snapshot 只发布 committed prefix，未决尾部保持 Host-only。Run terminal publication acquire 后，Application 只安排 main-loop 调用；`Workbench.drainAgentEvents()` 在第一次 drain 后观察 terminal、再完整排空一次 Agent event pump，最后调用 Product Task state 同时发布产品可见 terminal phase/outcome/cause、折叠 completion-time Session disposition、提交最终安全 assistant 尾部并关闭该 Run 的 event ingestion。raw terminal publication 本身不能替代这次 drain barrier。barrier 完成前新 Run admission 仍以当前 Run 未结束处理，close completion 和 Task 物理删除也必须等待该 Run 的事件流完成收口。barrier 后仍到达的 event 属于合同违约；仍开放的 Task 必须关闭 owning Session 并终止可能已经开始的后续 Run，不能只对已经 terminal 的历史 Run 重发无效 termination。上述状态只存在于 Product Task aggregate，不形成第二份 terminal 或 assistant 内容；Workbench 保留事件泵、提交与 revision 编排，并以 callback-scoped capability 提供 bounded projection 与 credential 清洗。
+`thinking_chunk` 正文属于 private reasoning，Product Task state 不把它写入 Assistant、Snapshot 或 Task persistence，只用事件类型把现有 safe status 更新为 `Thinking`；同状态的连续 chunk 不重复发布 revision。`text_chunk` 到达后 safe status 更新为 `Writing response`，正文写入当前 open output segment；正式 macOS 路径中没有 begin 的裸 text、重复/跳跃 index、身份或 bytes 不匹配均为 dependency contract failure。open segment 与 continued group 使用有界 Host-only `TrackedText`，credential 清理继续只重扫未决后缀；`discarded` 原位清除，`continued` 只合并同 group，`commentary/final/partial` 关闭 group 后才进入 canonical assistant。Run terminal publication acquire 后，Application 只安排 main-loop 调用；`Workbench.drainAgentEvents()` 在第一次 drain 后观察 terminal、再完整排空一次 Agent event pump，最后调用 Product Task state 同时发布产品可见 terminal phase/outcome/cause、折叠 completion-time Session disposition、提交最终安全 assistant 尾部并关闭该 Run 的 event ingestion。若此时仍有 open segment 或 continued group，Product 清除 provisional bytes 并把 Run 收口为 `dependency_contract_failure`。raw terminal publication 本身不能替代这次 drain barrier。barrier 完成前新 Run admission 仍以当前 Run 未结束处理，close completion 和 Task 物理删除也必须等待该 Run 的事件流完成收口。barrier 后仍到达的 event 属于合同违约；仍开放的 Task 必须关闭 owning Session 并终止可能已经开始的后续 Run，不能只对已经 terminal 的历史 Run 重发无效 termination。上述状态只存在于 Product Task aggregate，不形成第二份 terminal 或 assistant 内容；Workbench 保留事件泵、提交与 revision 编排，并以 callback-scoped capability 提供 bounded projection 与 credential 清洗。
 
 Bridge 异步 payload 必须是 owned copy 或显式 ownership transfer。Native SDK 在 platform loop 上串行执行同步 Bridge handler 与 `app.stop`；Application 先关闭 ingress，用 callback lease 计数断言 quiescence，再依次收口 Workbench 与 Agent 并 detach Workbench。Bridge retained JSON/batch 不借用 Workbench memory，因此在 Workbench deinit 后独立释放。
 

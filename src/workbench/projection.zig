@@ -38,6 +38,7 @@ pub const Error = lifecycle.Error || scheduled_tasks_impl.Error || scheduled_tas
     RunCapacity,
     CompactCapacity,
     ToolCapacity,
+    InvalidOutputSegment,
     SnapshotTooLarge,
     CloseInProgress,
     TaskBusy,
@@ -3231,10 +3232,16 @@ pub const Workbench = struct {
             self.applyEvent(&envelope) catch |err| {
                 if (first_projection_error.* == null)
                     first_projection_error.* = err;
-                self.recordEventProjectionFailure(
-                    envelope.session_id,
-                    envelope.run_id,
-                );
+                if (err == error.InvalidOutputSegment)
+                    self.recordDependencyContractFailure(
+                        envelope.session_id,
+                        envelope.run_id,
+                    )
+                else
+                    self.recordEventProjectionFailure(
+                        envelope.session_id,
+                        envelope.run_id,
+                    );
                 self.agent_runtime.requestRunTermination(
                     envelope.session_id,
                     envelope.run_id,
@@ -3281,6 +3288,16 @@ pub const Workbench = struct {
         run_id: u64,
     ) void {
         if (!self.task_runtime.recordEventProjectionFailure(route_id, run_id)) return;
+        self.commitTaskStateNoFail();
+        self.bumpRevision();
+    }
+
+    fn recordDependencyContractFailure(
+        self: *Workbench,
+        route_id: u64,
+        run_id: u64,
+    ) void {
+        if (!self.task_runtime.recordDependencyContractFailure(route_id, run_id)) return;
         self.commitTaskStateNoFail();
         self.bumpRevision();
     }
@@ -9842,6 +9859,137 @@ test "thinking and assistant chunks update distinct safe projections" {
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "private-reasoning-marker") == null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "more-private-reasoning") == null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "public response") != null);
+}
+
+test "output segments commit commentary and a continued final while discarding rollback" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    const task = &workbench.task_runtime.tasks[0].?;
+    const run = &task.durable.runs[0].?;
+    const route = task.runtime.routeId();
+    const events = [_][]const u8{
+        "{\"output_segment_begin\":{\"index\":0,\"turn\":1,\"group\":0}}",
+        "{\"text_chunk\":\"look \"}",
+        "{\"output_segment_end\":{\"index\":0,\"turn\":1,\"group\":0,\"disposition\":\"commentary\",\"bytes\":5}}",
+        "{\"output_segment_begin\":{\"index\":1,\"turn\":2,\"group\":1}}",
+        "{\"text_chunk\":\"half \"}",
+        "{\"output_segment_end\":{\"index\":1,\"turn\":2,\"group\":1,\"disposition\":\"continued\",\"bytes\":5}}",
+        "{\"output_segment_begin\":{\"index\":2,\"turn\":2,\"group\":1}}",
+        "{\"text_chunk\":\"discarded\"}",
+        "{\"output_segment_end\":{\"index\":2,\"turn\":2,\"group\":1,\"disposition\":\"discarded\",\"bytes\":9}}",
+        "{\"output_segment_begin\":{\"index\":3,\"turn\":2,\"group\":1}}",
+        "{\"text_chunk\":\"done\"}",
+        "{\"output_segment_end\":{\"index\":3,\"turn\":2,\"group\":1,\"disposition\":\"final\",\"bytes\":4}}",
+    };
+    for (events) |encoded| {
+        var envelope = try testEnvelope(route, 7, encoded);
+        defer envelope.deinit();
+        try workbench.applyEvent(&envelope);
+    }
+
+    try std.testing.expectEqualStrings("look half done", run.assistant.list.items);
+    try std.testing.expectEqual(
+        task_test_state.AssistantOutputKind.final,
+        run.assistant_output_kind.?,
+    );
+    try std.testing.expectEqual(@as(usize, 5), run.assistant_output_start.?);
+    try std.testing.expect(run.open_output_segment == null);
+    try std.testing.expect(run.output_continued_group == null);
+    try std.testing.expectEqual(@as(u64, 4), run.next_output_segment_index);
+    try std.testing.expect(std.mem.indexOf(u8, run.assistant.list.items, "discarded") == null);
+}
+
+test "output segment byte mismatch fails the dependency protocol" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    const task = &workbench.task_runtime.tasks[0].?;
+    const route = task.runtime.routeId();
+
+    var begin = try testEnvelope(
+        route,
+        7,
+        "{\"output_segment_begin\":{\"index\":0,\"turn\":1,\"group\":0}}",
+    );
+    defer begin.deinit();
+    try workbench.applyEvent(&begin);
+    var text_event = try testEnvelope(route, 7, "{\"text_chunk\":\"ok\"}");
+    defer text_event.deinit();
+    try workbench.applyEvent(&text_event);
+    var invalid_end = try testEnvelope(
+        route,
+        7,
+        "{\"output_segment_end\":{\"index\":0,\"turn\":1,\"group\":0,\"disposition\":\"final\",\"bytes\":1}}",
+    );
+    defer invalid_end.deinit();
+    try std.testing.expectError(
+        error.InvalidOutputSegment,
+        workbench.applyEvent(&invalid_end),
+    );
+}
+
+test "partial output stays provisional until the segment is classified" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    const task = &workbench.task_runtime.tasks[0].?;
+    const run = &task.durable.runs[0].?;
+    const route = task.runtime.routeId();
+
+    var begin = try testEnvelope(
+        route,
+        7,
+        "{\"output_segment_begin\":{\"index\":0,\"turn\":1,\"group\":0}}",
+    );
+    defer begin.deinit();
+    try workbench.applyEvent(&begin);
+    var text_event = try testEnvelope(route, 7, "{\"text_chunk\":\"unfinished\"}");
+    defer text_event.deinit();
+    try workbench.applyEvent(&text_event);
+    try std.testing.expectEqualStrings("", run.assistant.list.items);
+    try std.testing.expectEqualStrings("unfinished", run.output_segment.list.items);
+
+    var end = try testEnvelope(
+        route,
+        7,
+        "{\"output_segment_end\":{\"index\":0,\"turn\":1,\"group\":0,\"disposition\":\"partial\",\"bytes\":10}}",
+    );
+    defer end.deinit();
+    try workbench.applyEvent(&end);
+    try std.testing.expectEqualStrings("unfinished", run.assistant.list.items);
+    try std.testing.expectEqual(
+        task_test_state.AssistantOutputKind.partial,
+        run.assistant_output_kind.?,
+    );
+    try std.testing.expectEqual(@as(usize, 0), run.assistant_output_start.?);
+}
+
+test "discarded output requires an in-group retry without committing bytes" {
+    var workbench = try testWorkbench();
+    defer workbench.deinit();
+    const task = &workbench.task_runtime.tasks[0].?;
+    const run = &task.durable.runs[0].?;
+    const route = task.runtime.routeId();
+    const events = [_][]const u8{
+        "{\"output_segment_begin\":{\"index\":0,\"turn\":1,\"group\":4}}",
+        "{\"text_chunk\":\"rolled back\"}",
+        "{\"output_segment_end\":{\"index\":0,\"turn\":1,\"group\":4,\"disposition\":\"discarded\",\"bytes\":11}}",
+    };
+    for (events) |encoded| {
+        var envelope = try testEnvelope(route, 7, encoded);
+        defer envelope.deinit();
+        try workbench.applyEvent(&envelope);
+    }
+    try std.testing.expectEqualStrings("", run.assistant.list.items);
+
+    var wrong_group = try testEnvelope(
+        route,
+        7,
+        "{\"output_segment_begin\":{\"index\":1,\"turn\":1,\"group\":5}}",
+    );
+    defer wrong_group.deinit();
+    try std.testing.expectError(
+        error.InvalidOutputSegment,
+        workbench.applyEvent(&wrong_group),
+    );
 }
 
 test "AgentCore RunState refines status without owning RunPhase and rejects stale transitions" {

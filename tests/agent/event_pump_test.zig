@@ -41,13 +41,13 @@ test "event pump preserves per-Session order with round-robin fairness" {
 
 test "event pump data cannot consume reserved control capacity" {
     var pump = try event_pump.EventPump.init(std.testing.io, std.testing.allocator, .{
-        .global_count = 4,
+        .global_count = 5,
         .global_bytes = 1024,
-        .global_control_reserved_count = 1,
+        .global_control_reserved_count = 2,
         .global_control_reserved_bytes = 128,
-        .per_session_count = 4,
+        .per_session_count = 5,
         .per_session_bytes = 1024,
-        .per_session_control_reserved_count = 1,
+        .per_session_control_reserved_count = 2,
         .per_session_control_reserved_bytes = 128,
         .session_slots = 1,
     });
@@ -59,9 +59,18 @@ test "event pump data cannot consume reserved control capacity" {
     var rejected = try pumpEnvelope(1, 1, "{\"text_chunk\":\"d\"}");
     try std.testing.expectError(error.GlobalCapacity, pump.enqueue(rejected));
     rejected.deinit();
-    try pump.enqueue(try pumpEnvelope(1, 1, "{\"stream_done\":{}}"));
+    try pump.enqueue(try pumpEnvelope(
+        1,
+        1,
+        "{\"output_segment_begin\":{\"index\":0,\"turn\":1,\"group\":0}}",
+    ));
+    try pump.enqueue(try pumpEnvelope(
+        1,
+        1,
+        "{\"output_segment_end\":{\"index\":0,\"turn\":1,\"group\":0,\"disposition\":\"final\",\"bytes\":0}}",
+    ));
     const stats = pump.stats();
-    try std.testing.expectEqual(@as(usize, 4), stats.count);
+    try std.testing.expectEqual(@as(usize, 5), stats.count);
     try std.testing.expectEqual(@as(usize, 3), stats.data_count);
 }
 

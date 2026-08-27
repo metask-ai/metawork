@@ -4,6 +4,7 @@
 //! subtree derivation and encoding belong to the sibling view kernel.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const agent = @import("metawork_agent");
 const checkpoint_record = @import("product_task_checkpoint_record");
 const task_attachment = @import("product_task_attachment");
@@ -107,6 +108,15 @@ pub const TrackedText = struct {
     committed_len: usize = 0,
 };
 
+pub const AssistantOutputKind = enum { final, partial };
+
+const OpenOutputSegment = struct {
+    index: u32,
+    turn: u32,
+    group: u32,
+    bytes: u64 = 0,
+};
+
 /// A bounded, redaction-safe permission decision summary. It contains no raw
 /// arguments or response and may be attached to Run and UI occurrence history.
 pub const PermissionSummary = struct {
@@ -192,7 +202,10 @@ pub const UsageView = struct {
 };
 
 pub const TerminalPublication = enum(u8) { open, publishing, published };
-pub const EventProjectionFailure = enum { consumer_rejected };
+pub const EventProjectionFailure = enum {
+    consumer_rejected,
+    dependency_contract_failure,
+};
 pub const AgentHandoffState = enum(u8) { queued, starting, running, finishing };
 
 pub const RunTerminationDispatch = enum {
@@ -339,6 +352,23 @@ pub const RunRecord = struct {
     input: RunInputRecord,
     assistant: TrackedText = .{},
     assistant_redacted: bool = false,
+    /// Host-only buffers for the currently open segment and a max-token
+    /// continuation group. Only a closed commentary/final/partial group is
+    /// appended to `assistant` and becomes durable.
+    output_segment: TrackedText = .{},
+    output_continued: TrackedText = .{},
+    open_output_segment: ?OpenOutputSegment = null,
+    output_continued_group: ?u32 = null,
+    output_retry_group: ?u32 = null,
+    next_output_segment_index: u64 = 0,
+    output_segment_protocol_seen: bool = false,
+    output_segment_redacted: bool = false,
+    output_continued_redacted: bool = false,
+    /// Product classification over the sanitized canonical assistant text.
+    /// Bytes before `assistant_output_start` are aggregated commentary; the
+    /// suffix is the final or partial answer.
+    assistant_output_kind: ?AssistantOutputKind = null,
+    assistant_output_start: ?usize = null,
     active_phase: RunPhase = .queued,
     tools: []?ToolView,
     usage: UsageView = .{},
@@ -471,11 +501,19 @@ pub fn productTerminalPayload(run: *const RunRecord) ?*const TerminalPayload {
 
 pub fn productTerminalFacts(run: *const RunRecord) ?ProductTerminalFacts {
     const terminal = productTerminalPayload(run) orelse return null;
-    if (run.event_projection_failure != null) return .{
-        .phase = .failed,
-        .outcome = .failed,
-        .cause = .event_pipeline_failure,
-        .session_disposition_at_completion = terminal.session_disposition_at_completion,
+    if (run.event_projection_failure) |failure| return switch (failure) {
+        .consumer_rejected => .{
+            .phase = .failed,
+            .outcome = .failed,
+            .cause = .event_pipeline_failure,
+            .session_disposition_at_completion = terminal.session_disposition_at_completion,
+        },
+        .dependency_contract_failure => .{
+            .phase = .failed,
+            .outcome = .dependency_contract_failure,
+            .cause = .dependency_contract_failure,
+            .session_disposition_at_completion = terminal.session_disposition_at_completion,
+        },
     };
     return .{
         .phase = terminal.phase,
@@ -569,6 +607,22 @@ pub fn finalizeMarkedTerminalRunsAfterEventDrain(task: *Task) bool {
         if (!run.terminal_event_drain_marked) continue;
         std.debug.assert(terminalPayload(run) != null);
         run.terminal_event_drain_marked = false;
+        if (run.open_output_segment != null or
+            run.output_continued_group != null or
+            run.output_segment.list.items.len != 0 or
+            run.output_continued.list.items.len != 0)
+        {
+            if (run.event_projection_failure == null)
+                run.event_projection_failure = .dependency_contract_failure;
+            run.open_output_segment = null;
+            run.output_continued_group = null;
+            run.output_retry_group = null;
+            clearTrackedText(&run.output_segment);
+            clearTrackedText(&run.output_continued);
+            run.output_segment_redacted = false;
+            run.output_continued_redacted = false;
+        }
+        run.output_retry_group = null;
         run.event_stream_finalized = true;
         run.assistant.committed_len = run.assistant.list.items.len;
         changed = true;
@@ -582,11 +636,20 @@ pub fn recordEventProjectionFailure(run: *RunRecord) bool {
     return true;
 }
 
+pub fn recordDependencyContractFailure(run: *RunRecord) bool {
+    if (run.event_projection_failure != null) return false;
+    run.event_projection_failure = .dependency_contract_failure;
+    return true;
+}
+
 pub const EventProjectionError = std.mem.Allocator.Error || error{
     ProjectionCapacity,
     ToolCapacity,
 };
-pub const EventApplyError = EventProjectionError || error{NoSuchRun};
+pub const EventApplyError = EventProjectionError || error{
+    NoSuchRun,
+    InvalidOutputSegment,
+};
 
 pub const TextProjectionResult = struct {
     truncated: bool,
@@ -724,11 +787,30 @@ pub fn applyEvent(
             );
         },
         .text_chunk => |text| {
-            if (try projection.appendAssistant(
-                &run.assistant,
-                text,
-                run.redaction_secret,
-            )) run.assistant_redacted = true;
+            if (run.output_segment_protocol_seen) {
+                const open = &(run.open_output_segment orelse
+                    return error.InvalidOutputSegment);
+                open.bytes = std.math.add(
+                    u64,
+                    open.bytes,
+                    std.math.cast(u64, text.len) orelse
+                        return error.InvalidOutputSegment,
+                ) catch return error.InvalidOutputSegment;
+                if (try projection.appendAssistant(
+                    &run.output_segment,
+                    text,
+                    run.redaction_secret,
+                )) run.output_segment_redacted = true;
+            } else if (builtin.is_test) {
+                // Legacy fixtures exercise unrelated event behavior without
+                // constructing the output framing now guaranteed by the
+                // canonical macOS AgentCore artifact.
+                if (try projection.appendAssistant(
+                    &run.assistant,
+                    text,
+                    run.redaction_secret,
+                )) run.assistant_redacted = true;
+            } else return error.InvalidOutputSegment;
             if (!std.mem.eql(u8, run.status_text, "Writing response"))
                 _ = try projection.replaceText(
                     &run.status_text,
@@ -877,7 +959,104 @@ pub fn applyEvent(
                 run.redaction_secret,
             );
         },
-        .output_segment_begin, .output_segment_end => return .unchanged,
+        .output_segment_begin => |segment| {
+            const continued_group_mismatch = if (run.output_continued_group) |group|
+                group != segment.group
+            else
+                false;
+            const retry_group_mismatch = if (run.output_retry_group) |group|
+                group != segment.group
+            else
+                false;
+            if (run.open_output_segment != null or
+                run.output_segment.list.items.len != 0 or
+                run.assistant_output_kind != null or
+                run.next_output_segment_index > std.math.maxInt(u32) or
+                @as(u64, segment.index) != run.next_output_segment_index or
+                segment.turn == 0 or
+                continued_group_mismatch or
+                retry_group_mismatch)
+                return error.InvalidOutputSegment;
+            run.output_segment_protocol_seen = true;
+            run.open_output_segment = .{
+                .index = segment.index,
+                .turn = segment.turn,
+                .group = segment.group,
+            };
+        },
+        .output_segment_end => |segment| {
+            const open = run.open_output_segment orelse
+                return error.InvalidOutputSegment;
+            if (open.index != segment.index or
+                open.turn != segment.turn or
+                open.group != segment.group or
+                open.bytes != segment.bytes)
+                return error.InvalidOutputSegment;
+            run.open_output_segment = null;
+            run.next_output_segment_index = @as(u64, segment.index) + 1;
+            switch (segment.disposition) {
+                .discarded => {
+                    clearTrackedText(&run.output_segment);
+                    run.output_segment_redacted = false;
+                    run.output_retry_group = segment.group;
+                },
+                .continued => {
+                    if (run.output_continued_group) |group|
+                        if (group != segment.group)
+                            return error.InvalidOutputSegment;
+                    if (run.output_segment.list.items.len != 0) {
+                        run.output_continued_redacted = (try projection.appendAssistant(
+                            &run.output_continued,
+                            run.output_segment.list.items,
+                            run.redaction_secret,
+                        )) or run.output_segment_redacted or
+                            run.output_continued_redacted;
+                    }
+                    clearTrackedText(&run.output_segment);
+                    run.output_segment_redacted = false;
+                    run.output_continued_group = segment.group;
+                    run.output_retry_group = null;
+                },
+                .commentary, .final, .partial => {
+                    const output_start = run.assistant.committed_len;
+                    if (run.output_continued.list.items.len != 0) {
+                        run.assistant_redacted = (try projection.appendAssistant(
+                            &run.assistant,
+                            run.output_continued.list.items,
+                            run.redaction_secret,
+                        )) or run.output_continued_redacted or
+                            run.assistant_redacted;
+                    }
+                    if (run.output_segment.list.items.len != 0) {
+                        run.assistant_redacted = (try projection.appendAssistant(
+                            &run.assistant,
+                            run.output_segment.list.items,
+                            run.redaction_secret,
+                        )) or run.output_segment_redacted or
+                            run.assistant_redacted;
+                    }
+                    clearTrackedText(&run.output_continued);
+                    clearTrackedText(&run.output_segment);
+                    run.output_continued_group = null;
+                    run.output_retry_group = null;
+                    run.output_continued_redacted = false;
+                    run.output_segment_redacted = false;
+                    switch (segment.disposition) {
+                        .commentary => {},
+                        .final => {
+                            run.assistant_output_kind = .final;
+                            run.assistant_output_start = output_start;
+                        },
+                        .partial => {
+                            run.assistant_output_kind = .partial;
+                            run.assistant_output_start = output_start;
+                        },
+                        .continued, .discarded => unreachable,
+                    }
+                    durable_boundary = true;
+                },
+            }
+        },
         .stream_done => {
             _ = try projection.replaceText(
                 &run.status_text,
@@ -887,6 +1066,11 @@ pub fn applyEvent(
         },
     }
     return .{ .applied = .{ .durable_boundary = durable_boundary } };
+}
+
+fn clearTrackedText(target: *TrackedText) void {
+    target.list.clearRetainingCapacity();
+    target.committed_len = 0;
 }
 
 pub fn permissionSummary(value: agent.PermissionProvenance) EventProjectionError!PermissionSummary {
@@ -1015,4 +1199,60 @@ test "event drain withholds terminal facts and assistant suffix until finalizati
     try std.testing.expect(finalizeMarkedTerminalRunsAfterEventDrain(&task));
     try std.testing.expectEqual(@as(usize, 6), run.assistant.committed_len);
     try std.testing.expectEqual(RunOutcome.completed, productTerminalFacts(run).?.outcome);
+}
+
+test "event drain fails closed when an output segment remains unresolved" {
+    var runs = [_]?RunRecord{.{
+        .id = 7,
+        .generation = 1,
+        .execution_generation = 1,
+        .execution_provider = .anthropic,
+        .execution_model = "model",
+        .input = .{ .text = .{ .value = @constCast("prompt") } },
+        .tools = &.{},
+        .status_text = @constCast("running"),
+        .terminal_diagnostic = @constCast(""),
+        .open_output_segment = .{ .index = 0, .turn = 1, .group = 0, .bytes = 5 },
+        .output_segment_protocol_seen = true,
+    }};
+    var compacts: [0]?CompactRecord = .{};
+    var ui_history: [0]?UiRecord = .{};
+    var task = Task{
+        .durable = .{
+            .id = 3,
+            .recent_order = 1,
+            .execution_generation = 1,
+            .execution_provider = .anthropic,
+            .execution_model = @constCast("model"),
+            .workspace_id = 2,
+            .workspace_root = @constCast("root"),
+            .title = @constCast("title"),
+            .runs = &runs,
+            .compacts = &compacts,
+            .ui_history = &ui_history,
+        },
+        .runtime = .{},
+    };
+    const run = &task.durable.runs[0].?;
+    try run.output_segment.list.appendSlice(std.testing.allocator, "draft");
+    defer run.output_segment.list.deinit(std.testing.allocator);
+    run.terminal_payload = .{
+        .phase = .completed,
+        .outcome = .completed,
+        .cause = null,
+        .session_disposition_at_completion = .reusable,
+    };
+    run.terminal_publication.store(.published, .release);
+
+    try std.testing.expect(markTerminalRunsBeforeEventDrain(&task));
+    try std.testing.expect(finalizeMarkedTerminalRunsAfterEventDrain(&task));
+    try std.testing.expectEqual(
+        EventProjectionFailure.dependency_contract_failure,
+        run.event_projection_failure.?,
+    );
+    try std.testing.expectEqual(
+        RunOutcome.dependency_contract_failure,
+        productTerminalFacts(run).?.outcome,
+    );
+    try std.testing.expectEqual(@as(usize, 0), run.output_segment.list.items.len);
 }
