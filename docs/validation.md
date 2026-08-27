@@ -112,8 +112,8 @@ Product Skill 的公开表面 guard 必须证明 `product/skill.zig` 只导出 r
 ### AgentCore target baseline
 
 - **规范**：[高层架构](architecture.md)、[ABI v1 消费合同](agentcore-abi-v1.md)。
-- **证据**：三个 target 的 policy 与 repository lock contract identity 均同步为 clean source commit `e5a423697f7853d8d609950b5d7e2d7c1ac2e83a`、ABI v1 revision 14。Windows x86_64 GNU 的 exact artifact 已由 bundle tests 与 staged probe 验证；macOS `files` checksum 尚不构成 revision 14 artifact 证据，必须在后续 macOS 工作中生成 Apple `ar/libtool` payload、以 exact manifest 原子刷新 lock 并运行 platform vertical。
-- **结论**：所有 target policy 只接受 ABI v1 revision 14 与 64-byte root table，required surface 由 root + 五个 mandatory child table 定义；没有 revision 13 fallback。macOS 不得引用本轮 Windows 结果宣称 payload 或平台已验证。
+- **证据**：三个 target 均锁定 clean source commit `e5a423697f7853d8d609950b5d7e2d7c1ac2e83a`、ABI v1 revision 14 的 exact artifact。两个 macOS archive 的外部 SHA-256、manifest payload checksum、target 架构与 discovery symbol 已验证并原子 stage；arm64 desktop vertical 已覆盖真实 Skill/Text/Compact checkpoint、恢复与 clean shutdown，x86_64 已通过隔离 restore、Anthropic/OpenAI/Gemini provider probe 及 Debug/Release build。
+- **结论**：所有 target policy 只接受 ABI v1 revision 14 与 64-byte root table，required surface 由 root + 五个 mandatory child table 定义；没有 revision 13 fallback。macOS x86_64 的真实 desktop vertical 仍须在对应目标环境独立采集，不能由 arm64 vertical 或 Rosetta probe 替代。
 
 2026-08-13 的 Windows staged run-state probe 可由 Git object `51e0fcc847e7b832b628f6c64183525dd8300710` 定位：Host Run ID `7` 的 callback identity 与 `run_state.run_id` 一致，首序号为 `1`，并观察到 `starting → generating → finalizing → completed`。结论已进入 ABI 合同和 Workbench 回归，因此 active tree 不再保留该一次性 probe。
 

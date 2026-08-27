@@ -1,19 +1,19 @@
 # MetaWork AgentCore ABI v1 消费合同
 
-> 状态：三个 target 的 policy 与 repository lock identity 已同步 hard cut 到 revision 14；Windows x86_64 GNU 锁定 AgentCore `e5a423697f78` exact artifact，macOS payload 与平台验证后续在 macOS 完成；不声明 stable support policy
+> 状态：三个 target 均已锁定 AgentCore `e5a423697f78` ABI v1 revision 14 exact artifact；macOS arm64 desktop vertical 已通过，macOS x86_64 已通过隔离 probe 与 Debug/Release build；不声明 stable support policy
 > 所有者：Metask AgentCore 负责 facade、bindings、bundle 和 ABI 政策；MetaWork 负责 exact artifact 消费、Host 生命周期和产品 capability gate
 
 本文定义 MetaWork 对 Metask AgentCore binary ABI version 1 的 target-specific 消费边界。线程、事件泵和 Host 生命周期见 [AgentCore 集成契约](agentcore-integration.md)，验证入口见 [验证规范](validation.md)。
 
 ## 1. Target-specific baseline
 
-所有 target policy 与 lock contract identity 只接受 ABI v1 revision 14，不识别或加载任何旧 revision。Windows 使用 clean source commit `e5a423697f7853d8d609950b5d7e2d7c1ac2e83a`、package version `0.1.0-dev+e5a423697f78` 的已提供 artifact；macOS lock 的 contract identity 同步到相同 revision，但 `files` checksum 尚不是 revision 14 artifact 证据。Apple `ar/libtool` 重打包后必须用 macOS 生成的 exact manifest 原子刷新整个 lock，再执行 stage 与平台验证；在此之前 macOS candidate 会因 exact manifest/checksum 不匹配而 fail closed：
+所有 target policy 与 repository lock 只接受 clean source commit `e5a423697f7853d8d609950b5d7e2d7c1ac2e83a`、package version `0.1.0-dev+e5a423697f78`、ABI v1 revision 14 的 target-specific exact artifact，不识别或加载任何旧 revision。每个平台仍以自己的完整 manifest bytes 与 payload checksum 独立锁定：
 
 | Target             | Build       | Link input            | Repository lock                                         |
 | ------------------ | ----------- | --------------------- | ------------------------------------------------------- |
 | Windows x86_64 GNU | ReleaseSafe | `advapi32`、`crypt32` | `build_support/agentcore-bundle.windows.lock.json`      |
-| macOS arm64        | 未验证      | 无                    | `build_support/agentcore-bundle.macos.lock.json`        |
-| macOS x86_64       | 未验证      | 无                    | `build_support/agentcore-bundle.macos-x86_64.lock.json` |
+| macOS arm64        | ReleaseSafe | 无                    | `build_support/agentcore-bundle.macos.lock.json`        |
+| macOS x86_64       | ReleaseSafe | 无                    | `build_support/agentcore-bundle.macos-x86_64.lock.json` |
 
 固定合同按 target 为：
 
