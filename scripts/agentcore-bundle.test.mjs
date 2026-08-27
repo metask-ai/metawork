@@ -83,9 +83,8 @@ async function fixture(t, mutateManifest = () => {}) {
     contract: {
       binary_abi_status: "experimental",
       binary_abi_version: 1,
-      binary_abi_revision: 13,
-      binary_abi_table_size: 280,
-      capabilities: 0x3ffffff,
+      binary_abi_revision: 14,
+      binary_abi_table_size: 64,
     },
     files,
   };
@@ -270,7 +269,7 @@ test("rejects a missing or legacy binary ABI revision", async (t) => {
   );
 });
 
-test("rejects incorrect ABI table size and capability set", async (t) => {
+test("rejects incorrect ABI table size and legacy contract fields", async (t) => {
   const table = await fixture(t, (manifest) => {
     manifest.contract.binary_abi_table_size = 136;
   });
@@ -279,12 +278,12 @@ test("rejects incorrect ABI table size and capability set", async (t) => {
     /binary ABI table size/,
   );
 
-  const capabilities = await fixture(t, (manifest) => {
-    manifest.contract.capabilities ^= 1;
+  const legacy = await fixture(t, (manifest) => {
+    manifest.contract.capabilities = 0x3ffffff;
   });
   await assert.rejects(
-    validateAgentCoreBundle(capabilities.root, injectedChecks),
-    /capability set/,
+    validateAgentCoreBundle(legacy.root, injectedChecks),
+    /contract fields do not match/,
   );
 });
 

@@ -37,7 +37,6 @@ const Manifest = struct {
         binary_abi_version: u32,
         binary_abi_revision: u32,
         binary_abi_table_size: u32,
-        capabilities: u64,
     },
     files: []const ManifestFile,
 };
@@ -81,10 +80,9 @@ pub fn verify(b: *std.Build, root: []const u8) Bundle {
         lock.contract.binary_abi_version != 1 or
         !std.mem.eql(u8, lock.contract.binary_abi_status, "experimental"))
         @panic("unsupported locked AgentCore bundle contract");
-    if (lock.contract.binary_abi_revision != 13 or
-        lock.contract.binary_abi_table_size != 280 or
-        lock.contract.capabilities != 0x3ffffff)
-        @panic("unsupported locked AgentCore revision 13 contract");
+    if (lock.contract.binary_abi_revision != 14 or
+        lock.contract.binary_abi_table_size != 64)
+        @panic("unsupported locked AgentCore revision 14 contract");
     if (!std.mem.eql(u8, lock.build.optimize, "ReleaseSafe") or !lock.build.strip)
         @panic("unsupported locked AgentCore build identity");
     const target = validateTarget(lock);

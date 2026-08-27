@@ -182,13 +182,13 @@ pub const Runtime = struct {
         mcp_servers.attach(&runtime_config);
         var diagnostic = emptyOwnedBytes();
         var runtime: ?*wire.RuntimeHandle = null;
-        const status = api.runtimeCreate()(&runtime_config, &runtime, &diagnostic);
+        const status = api.runtime().create()(&runtime_config, null, &runtime, &diagnostic);
         defer releaseOwned(api, &diagnostic);
         const typed_status = sdk.Status.fromCode(status) catch return error.CoreCallFailed;
         if (typed_status != .ok or runtime == null) return error.CoreCallFailed;
         errdefer {
             var destroy_diagnostic = emptyOwnedBytes();
-            _ = api.runtimeDestroy()(runtime, &destroy_diagnostic);
+            _ = api.runtime().destroy()(runtime, &destroy_diagnostic);
             releaseOwned(api, &destroy_diagnostic);
         }
 
@@ -391,7 +391,7 @@ pub const Runtime = struct {
         var report = std.mem.zeroes(wire.McpApplyReportV1);
         report.struct_size = @sizeOf(wire.McpApplyReportV1);
         var diagnostic = emptyOwnedBytes();
-        const status_code = self.api.runtimeApplyMcpConfiguration()(
+        const status_code = self.api.mcp().applyConfiguration()(
             raw_runtime,
             &configuration,
             &report,
@@ -651,7 +651,7 @@ pub const Runtime = struct {
 
         const raw_selection = mcp_catalog.rawSelectionReplacement(selection);
         var diagnostic = emptyOwnedBytes();
-        const status_code = self.api.sessionUpdateMcp()(
+        const status_code = self.api.mcp().updateSelection()(
             session.raw,
             &raw_selection,
             &diagnostic,
@@ -840,7 +840,7 @@ pub const Runtime = struct {
         else
             null;
         host_config.durable_budget = null;
-        // MetaWork persists finalized Conversation checkpoints. Revision 13's
+        // MetaWork persists finalized Conversation checkpoints. Revision 14's
         // active-Run journal remains disabled until a crash-recovery policy is
         // defined for its intent/result evidence.
         host_config.run_journal_mode_code = wire.RUN_JOURNAL_EPHEMERAL;
@@ -857,7 +857,7 @@ pub const Runtime = struct {
 
         var diagnostic = emptyOwnedBytes();
         var raw_session: ?*wire.SessionHandle = null;
-        const status = self.api.sessionCreate()(
+        const status = self.api.session().create()(
             self.runtime,
             &config,
             &callbacks,
@@ -1222,7 +1222,7 @@ pub const Runtime = struct {
 
         if (self.runtime != null) {
             var diagnostic = emptyOwnedBytes();
-            const status = self.api.runtimeDestroy()(self.runtime, &diagnostic);
+            const status = self.api.runtime().destroy()(self.runtime, &diagnostic);
             releaseOwned(self.api, &diagnostic);
             const typed_status = sdk.Status.fromCode(status) catch null;
             if (typed_status == .ok) {

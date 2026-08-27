@@ -69,7 +69,7 @@ const Probe = struct {
         const self: *Probe = @ptrCast(@alignCast(context orelse return wire.EVENT_FATAL));
         if (!self.active_mutation_attempted) {
             self.active_mutation_attempted = true;
-            const raw_status = self.api.sessionSetModel()(
+            const raw_status = self.api.sessionControl().setModel()(
                 self.session,
                 agentcore.bytesView("model-a"),
                 null,
@@ -105,7 +105,7 @@ fn statusName(raw: u32) []const u8 {
 
 fn makeRuntime(api: agentcore.Api) !*wire.RuntimeHandle {
     const names = [_][]const u8{
-        "Read", "Write", "Edit", "Glob", "Grep", "Bash", "BashOutput",
+        "Read",      "Write",           "Edit",      "Glob",     "Grep", "Bash", "BashOutput",
         "KillShell", "AskUserQuestion", "WebSearch", "WebFetch",
     };
     var views: [names.len]wire.BytesViewV1 = undefined;
@@ -115,7 +115,7 @@ fn makeRuntime(api: agentcore.Api) !*wire.RuntimeHandle {
     config.builtin_tools = &views;
     config.builtin_tool_count = views.len;
     var runtime: ?*wire.RuntimeHandle = null;
-    try expectOk(api, "runtime_create", api.runtimeCreate()(&config, &runtime, null));
+    try expectOk(api, "runtime_create", api.runtime().create()(&config, null, &runtime, null));
     return runtime orelse error.MissingRuntime;
 }
 
@@ -160,7 +160,7 @@ fn makeHost() wire.SessionHostConfigV1 {
 fn describe(allocator: std.mem.Allocator, api: agentcore.Api, session: *wire.SessionHandle) !Description {
     var encoded = emptyOwned();
     defer releaseOwned(api, &encoded);
-    try expectOk(api, "session_describe", api.sessionDescribe()(session, &encoded, null));
+    try expectOk(api, "session_describe", api.sessionControl().describe()(session, &encoded, null));
     const bytes = try agentcore.borrowedBytes(.{ .ptr = encoded.ptr, .len = encoded.len });
     var parsed = try agentcore.decodeSessionDescription(allocator, bytes);
     defer parsed.deinit();
@@ -189,23 +189,23 @@ pub fn main() !void {
     const callbacks = makeCallbacks(&probe);
     const host = makeHost();
     const runtime = try makeRuntime(api);
-    defer _ = api.runtimeDestroy()(runtime, null);
+    defer _ = api.runtime().destroy()(runtime, null);
 
     var create_config = std.mem.zeroes(wire.SessionCreateConfigV1);
     create_config.struct_size = @sizeOf(wire.SessionCreateConfigV1);
     create_config.host = &host;
     create_config.model = agentcore.bytesView("model-a");
     var session: ?*wire.SessionHandle = null;
-    try expectOk(api, "session_create", api.sessionCreate()(runtime, &create_config, &callbacks, &session, null));
+    try expectOk(api, "session_create", api.session().create()(runtime, &create_config, &callbacks, &session, null));
     const raw_session = session orelse return error.MissingSession;
-    defer _ = api.sessionDestroy()(raw_session, null);
+    defer _ = api.session().destroy()(raw_session, null);
     probe.session = raw_session;
 
     var before = try describe(allocator, api, raw_session);
     defer before.deinit(allocator);
     if (!std.mem.eql(u8, before.model, "model-a")) return error.InitialModelMismatch;
 
-    try expectOk(api, "session_set_model_idle", api.sessionSetModel()(raw_session, agentcore.bytesView("model-b"), null));
+    try expectOk(api, "session_set_model_idle", api.sessionControl().setModel()(raw_session, agentcore.bytesView("model-b"), null));
     var after_idle = try describe(allocator, api, raw_session);
     defer after_idle.deinit(allocator);
     if (!std.mem.eql(u8, after_idle.model, "model-b")) return error.IdleMutationNotApplied;
@@ -216,7 +216,7 @@ pub fn main() !void {
     var run_result = std.mem.zeroes(wire.RunResultV1);
     var run_diagnostic = emptyOwned();
     defer releaseOwned(api, &run_diagnostic);
-    try expectOk(api, "active_run", api.sessionRunText(
+    try expectOk(api, "active_run", api.session().runText(
         raw_session,
         2,
         agentcore.bytesView("probe active run"),
@@ -227,7 +227,7 @@ pub fn main() !void {
     const busy_status = probe.active_mutation_status orelse return error.ActiveMutationNotObserved;
     std.debug.print("session_set_model_active: {s}\n", .{@tagName(busy_status)});
     if (busy_status == .ok) return error.ActiveMutationAccepted;
-    try expectOk(api, "session_set_model_after_run", api.sessionSetModel()(raw_session, agentcore.bytesView("model-a"), null));
+    try expectOk(api, "session_set_model_after_run", api.sessionControl().setModel()(raw_session, agentcore.bytesView("model-a"), null));
 
     var sink_context = Sink{};
     var sink = std.mem.zeroes(wire.CheckpointSinkV1);
@@ -240,13 +240,13 @@ pub fn main() !void {
     export_config.limits = &limits;
     export_config.sink = &sink;
     var export_result = std.mem.zeroes(wire.CheckpointExportResultV1);
-    try expectOk(api, "session_export_checkpoint", api.sessionExportCheckpoint()(raw_session, &export_config, &export_result, null));
+    try expectOk(api, "session_export_checkpoint", api.sessionControl().exportCheckpoint()(raw_session, &export_config, &export_result, null));
     if (sink_context.len == 0) return error.EmptyCheckpoint;
 
     var expected = try describe(allocator, api, raw_session);
     defer expected.deinit(allocator);
     const restored_runtime = try makeRuntime(api);
-    defer _ = api.runtimeDestroy()(restored_runtime, null);
+    defer _ = api.runtime().destroy()(restored_runtime, null);
     var source_context = Source{ .bytes = sink_context.bytes[0..sink_context.len] };
     var source = std.mem.zeroes(wire.CheckpointSourceV1);
     source.struct_size = @sizeOf(wire.CheckpointSourceV1);
@@ -260,10 +260,10 @@ pub fn main() !void {
     var restored_session: ?*wire.SessionHandle = null;
     var restore_report = emptyOwned();
     defer releaseOwned(api, &restore_report);
-    try expectOk(api, "session_restore", api.sessionRestore()(restored_runtime, &restore_config, &callbacks, &restored_session, &restore_report, null));
+    try expectOk(api, "session_restore", api.sessionControl().restore()(restored_runtime, &restore_config, &callbacks, &restored_session, &restore_report, null));
     const candidate = restored_session orelse return error.MissingRestoredSession;
-    defer _ = api.sessionDestroy()(candidate, null);
-    try expectOk(api, "session_set_model_restore_candidate", api.sessionSetModel()(candidate, agentcore.bytesView("model-b"), null));
+    defer _ = api.session().destroy()(candidate, null);
+    try expectOk(api, "session_set_model_restore_candidate", api.sessionControl().setModel()(candidate, agentcore.bytesView("model-b"), null));
     var restored = try describe(allocator, api, candidate);
     defer restored.deinit(allocator);
     if (!std.mem.eql(u8, restored.session_id, expected.session_id) or
