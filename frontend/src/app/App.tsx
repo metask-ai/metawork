@@ -57,7 +57,14 @@ import type { InspectorSection } from "../features/inspector/inspector-state.ts"
 import { useInspectorSession } from "../features/inspector/useInspectorSession.ts";
 import { TaskList, type TaskMenuAction } from "../features/tasks/TaskList.tsx";
 import { NewTaskView } from "../features/tasks/NewTaskView.tsx";
-import { TaskContent } from "../features/tasks/TaskContent.tsx";
+import {
+  TaskContent,
+  runFileReferences,
+} from "../features/tasks/TaskContent.tsx";
+import {
+  FilePreviewDrawer,
+  type FilePreviewDrawerState,
+} from "../features/files/FilePreviewDrawer.tsx";
 import {
   useNewTaskDrafts,
   useTaskDrafts,
@@ -104,6 +111,8 @@ import type {
   TaskRunReason,
   TaskModelSelectionReason,
   TaskView,
+  FilePreview,
+  FileReferenceView,
   WorkbenchSnapshot,
   UiResponsePayload,
 } from "../bridge/contracts.ts";
@@ -159,6 +168,20 @@ type ContinuationWaiter = {
   timeout: ReturnType<typeof setTimeout>;
 };
 
+type FilePreviewIdentity = {
+  taskId: string;
+  runId: string;
+  references: FileReferenceView[];
+  reference: FileReferenceView;
+  requestGeneration: number;
+};
+
+type FilePreviewUiState =
+  | { kind: "closed" }
+  | (FilePreviewIdentity & { kind: "loading" })
+  | (FilePreviewIdentity & { kind: "ready"; preview: FilePreview })
+  | (FilePreviewIdentity & { kind: "failed"; preview: FilePreview });
+
 export default function App() {
   const { t } = useI18n();
   const [workbench, dispatchWorkbench] = useReducer(
@@ -179,6 +202,10 @@ export default function App() {
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [filePreview, setFilePreview] = useState<FilePreviewUiState>({
+    kind: "closed",
+  });
+  const filePreviewGeneration = useRef(0);
   const [statuses, setStatuses] = useState<ShellStatusState>(() =>
     publishStatus(
       {},
@@ -247,6 +274,141 @@ export default function App() {
   }, [snapshot.tasks]);
   const activeTaskIdRef = useRef<string | null>(null);
   activeTaskIdRef.current = activeTask?.id ?? null;
+
+  function closeFilePreview() {
+    filePreviewGeneration.current += 1;
+    setFilePreview({ kind: "closed" });
+  }
+
+  function requestFilePreview(
+    taskId: string,
+    runId: string,
+    references: FileReferenceView[],
+    reference: FileReferenceView,
+  ) {
+    const requestGeneration = filePreviewGeneration.current + 1;
+    filePreviewGeneration.current = requestGeneration;
+    const identity: FilePreviewIdentity = {
+      taskId,
+      runId,
+      references,
+      reference,
+      requestGeneration,
+    };
+    setFilePreview({ kind: "loading", ...identity });
+    void client
+      .previewFile(taskId, runId, reference.id)
+      .then((preview) => {
+        if (
+          filePreviewGeneration.current !== requestGeneration ||
+          activeTaskIdRef.current !== taskId
+        )
+          return;
+        setFilePreview((current) => {
+          if (
+            current.kind === "closed" ||
+            current.requestGeneration !== requestGeneration ||
+            current.taskId !== taskId ||
+            current.runId !== runId ||
+            current.reference.id !== reference.id
+          )
+            return current;
+          return preview.state === "ready"
+            ? { ...current, kind: "ready", preview }
+            : { ...current, kind: "failed", preview };
+        });
+      })
+      .catch(() => {
+        if (
+          filePreviewGeneration.current !== requestGeneration ||
+          activeTaskIdRef.current !== taskId
+        )
+          return;
+        setFilePreview((current) => {
+          if (
+            current.kind === "closed" ||
+            current.requestGeneration !== requestGeneration ||
+            current.taskId !== taskId ||
+            current.runId !== runId ||
+            current.reference.id !== reference.id
+          )
+            return current;
+          return {
+            ...current,
+            kind: "failed",
+            preview: {
+              state: "error",
+              content: "",
+              truncated: false,
+              redacted: false,
+            },
+          };
+        });
+      });
+  }
+
+  function openFilePreview(
+    taskId: string,
+    runId: string,
+    reference: FileReferenceView,
+  ) {
+    const task = snapshot.tasks.find((candidate) => candidate.id === taskId);
+    const run = task?.runs.find((candidate) => candidate.id === runId);
+    if (!task || !run || activeTaskIdRef.current !== taskId) return;
+    const references = runFileReferences(run);
+    const selected = references.find(
+      (candidate) => candidate.id === reference.id,
+    );
+    if (!selected) return;
+    requestFilePreview(taskId, runId, references, selected);
+  }
+
+  function selectFilePreview(reference: FileReferenceView) {
+    if (filePreview.kind === "closed") return;
+    requestFilePreview(
+      filePreview.taskId,
+      filePreview.runId,
+      filePreview.references,
+      reference,
+    );
+  }
+
+  function refreshFilePreview() {
+    if (filePreview.kind === "closed") return;
+    requestFilePreview(
+      filePreview.taskId,
+      filePreview.runId,
+      filePreview.references,
+      filePreview.reference,
+    );
+  }
+
+  useEffect(() => {
+    filePreviewGeneration.current += 1;
+    setFilePreview({ kind: "closed" });
+  }, [activeTask?.id]);
+
+  useEffect(() => {
+    setFilePreview((current) => {
+      if (current.kind === "closed") return current;
+      const task = snapshot.tasks.find(
+        (candidate) => candidate.id === current.taskId,
+      );
+      const run = task?.runs.find(
+        (candidate) => candidate.id === current.runId,
+      );
+      const references = run ? runFileReferences(run) : [];
+      const reference = references.find(
+        (candidate) => candidate.id === current.reference.id,
+      );
+      if (!task || !run || !reference) {
+        filePreviewGeneration.current += 1;
+        return { kind: "closed" };
+      }
+      return { ...current, references, reference };
+    });
+  }, [snapshot.revision, snapshot.tasks]);
+
   const inspector = useInspectorSession(activeTask);
   const manualWorkspaces = useMemo(
     () =>
@@ -2135,6 +2297,15 @@ export default function App() {
       }
     />
   );
+  const filePreviewDrawerState: FilePreviewDrawerState | null =
+    filePreview.kind === "closed"
+      ? null
+      : {
+          references: filePreview.references,
+          selected: filePreview.reference,
+          phase: filePreview.kind === "loading" ? "loading" : "settled",
+          preview: filePreview.kind === "loading" ? null : filePreview.preview,
+        };
 
   return (
     <AppShell
@@ -2639,6 +2810,7 @@ export default function App() {
                 retryAvailable={taskCanCompose && !taskOperationInFlight}
                 responseDisabled={bridgeUnavailable}
                 onPrepareRetry={prepareRetry}
+                onPreviewFile={openFilePreview}
                 onRespond={(payload) => void respondUi(payload)}
                 renderPendingUi={(props) => {
                   const { taskId, ...panelProps } = props;
@@ -2670,6 +2842,14 @@ export default function App() {
         }}
         onSelect={selectSearchResult}
       />
+      {filePreviewDrawerState && (
+        <FilePreviewDrawer
+          state={filePreviewDrawerState}
+          onSelect={selectFilePreview}
+          onRefresh={refreshFilePreview}
+          onClose={closeFilePreview}
+        />
+      )}
     </AppShell>
   );
 }

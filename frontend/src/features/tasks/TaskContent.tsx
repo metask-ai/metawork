@@ -1,6 +1,7 @@
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 
 import type {
+  FileReferenceView,
   PendingUi,
   RunInputView,
   RunView,
@@ -13,6 +14,7 @@ import {
   Markdown,
   Message,
 } from "../../components/ai/index.ts";
+import { Icon } from "../../components/ui/Icon.tsx";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
 
 type ReadingState = { scrollTop: number; followingLatest: boolean };
@@ -67,6 +69,24 @@ function retryable(outcome: NonNullable<RunView["outcome"]>): boolean {
   return ["failed", "interrupted", "dependency_contract_failure"].includes(
     outcome,
   );
+}
+
+export function runFileReferences(run: RunView): FileReferenceView[] {
+  const seen = new Set<string>();
+  const references: FileReferenceView[] = [];
+  const tools = [...run.tools].sort((left, right) => {
+    const leftOrder = BigInt(left.order);
+    const rightOrder = BigInt(right.order);
+    return leftOrder < rightOrder ? -1 : leftOrder > rightOrder ? 1 : 0;
+  });
+  for (const tool of tools) {
+    for (const reference of tool.fileRefs) {
+      if (seen.has(reference.id)) continue;
+      seen.add(reference.id);
+      references.push(reference);
+    }
+  }
+  return references;
 }
 
 function outcomeState(
@@ -124,6 +144,7 @@ export function TaskContent({
   retryAvailable,
   responseDisabled,
   onPrepareRetry,
+  onPreviewFile,
   onRespond,
   renderPendingUi,
 }: {
@@ -133,6 +154,11 @@ export function TaskContent({
   retryAvailable: boolean;
   responseDisabled: boolean;
   onPrepareRetry: (input: RunInputView) => void;
+  onPreviewFile: (
+    taskId: string,
+    runId: string,
+    reference: FileReferenceView,
+  ) => void;
   onRespond: (payload: UiResponsePayload) => void;
   renderPendingUi: (props: {
     taskId: string;
@@ -216,6 +242,7 @@ export function TaskContent({
     >
       {task?.runs.map((run) => {
         const isCurrent = run.id === currentRun?.id;
+        const fileReferences = runFileReferences(run);
         const showOutcome =
           run.outcome !== null &&
           (run.outcome !== "completed" || run.assistant.length === 0);
@@ -233,6 +260,30 @@ export function TaskContent({
                   </p>
                 )}
               </Message>
+            )}
+            {fileReferences.length > 0 && (
+              <footer className="ml-11 flex flex-wrap items-center gap-2 border-l-2 border-(--ui-border) py-1 pl-3">
+                <span className="text-xs font-medium text-(--ui-content-muted)">
+                  {t("file_preview.references")}
+                </span>
+                {fileReferences.map((reference) => (
+                  <button
+                    key={reference.id}
+                    type="button"
+                    className="focus-ring inline-flex min-h-11 max-w-full items-center gap-1.5 rounded-lg border border-(--ui-border) bg-(--ui-surface-panel) px-3 py-2 text-xs text-(--ui-content-primary) hover:bg-(--ui-action-hover-surface)"
+                    title={reference.displayPath}
+                    aria-label={t("file_preview.open", {
+                      path: reference.displayPath,
+                    })}
+                    onClick={() => onPreviewFile(task.id, run.id, reference)}
+                  >
+                    <Icon name="skill-file" />
+                    <span className="max-w-72 truncate font-mono">
+                      {reference.displayPath}
+                    </span>
+                  </button>
+                ))}
+              </footer>
             )}
             {isCurrent && activeRun(run) && (
               <Activity state="live" label={t(activeRunMessage(run))} />
