@@ -27,33 +27,36 @@ Host 与 Renderer 随同一应用包原子发布，不承担旧 Renderer/新 Hos
 
 Renderer Bridge 使用独立合同身份 `metawork.renderer-bridge`，快速开发阶段固定 revision 为 `1`。Host 与 Renderer 随同一应用包原子发布，任何 command、event、payload 字段或 wire 语义变化都直接原地 hard cut，不为临时合同形态递增 revision、不维护兼容层，也不在 snapshot 内维护第二个局部版本。`contractRevision` 仍精确匹配，用于拒绝非当前固定标识，但不承诺识别同 revision 的开发产物错配。任何合同类版本标识的变更都必须先得到用户显式同意；对本文件即包括 Renderer Bridge revision。
 
-## File preview command (v1)
+## File preview command
 
-`metawork.files.preview` accepts exactly `{ "fileReferenceId": string }`. The
-Renderer never submits a filesystem path, URI, shell command, or AgentCore
-handle. The Host resolves the opaque id against Workbench history, rechecks
-workspace containment and no-follow file access, and returns a bounded UTF-8
-preview:
+`metawork.files.preview` 是 revision 1 command catalog 中唯一的异步 command，原地 hard cut 使用 Native SDK async registry；它不出现在同步 handler registry。request 精确为：
 
 ```json
 {
-  "state": "ready | truncated | missing | restricted | unsupported | error",
-  "id": "file-id",
-  "title": "main.zig",
-  "displayPath": "src/main.zig",
-  "language": "zig",
-  "content": "...",
-  "truncated": false,
-  "range": null
+  "taskId": "17",
+  "runId": "23",
+  "fileReferenceId": "task:17:run:23:file:1"
 }
 ```
 
-Line and column values in `range` are canonical decimal strings in both the
-`metawork.files.preview` response and Snapshot `tools[].fileRefs[]` entries.
-The Host converts AgentCore's typed numeric positions at this wire boundary;
-Renderer decoders do not accept a second numeric representation. Preview
-content is bounded by the Workbench limits and is never persisted as a second
-product state; the file reference metadata is persisted with Task history.
+三个字段均不可省略或增加替代字段；Task/Run 必须是 canonical decimal `u64`，reference id 必须是 1–128 bytes 的 opaque identity。Renderer 永不提交文件系统路径、URI、shell command、range、Tool name 或 AgentCore handle。Host 只在精确 Task + Run 内解析 reference，不做全局 reference id 扫描。
+
+response result 精确为：
+
+```json
+{
+  "state": "ready | missing | restricted | unsupported | changing | error",
+  "content": "...",
+  "truncated": false,
+  "redacted": false
+}
+```
+
+`loading` 只属于 Renderer 临时状态，不进入 wire。仅 `ready` 可以携带正文与 true 的 `truncated/redacted`；其他状态必须精确返回空 `content` 和两个 false。`changing` 表示同一次有界读取的 before/after metadata 连续两次不稳定，不是 FileChange observation。Host 结果编码必须容纳 256 KiB 正文在 JSON escaping 后仍落在 Native SDK 1 MiB async response 上限内；任一解析、authority、容量或 shutdown failure 都以一次 terminal `error` result 收口，不悬挂 responder，也不改用同步 handler。
+
+Workbench 使用独立 2-worker、最多 8 个 in-flight 的 File Preview lane 执行 no-follow、root-contained、regular-file-only 的有界读取；worker 不持有 Workbench/Bridge/Renderer，不向 Bridge 发布 raw bytes。主线程 completion 在序列化前重新校验 Task、Run、reference、Workspace id/epoch/root/authorization，并扫描当前及历史 Task execution credential（含截断边界前缀）；安全内容只在 callback 期间借给 Bridge，随后 secure-zero。正文不进入 Snapshot、Task persistence、日志或缓存。
+
+Snapshot `tools[].fileRefs[]` entry 精确只含 `{ id, title, displayPath }`。AgentCore 可能提供的 kind/range 只可作为 Host 内部历史事实，不进入当前 Renderer wire，Renderer 也不得将其解释为 Files Changed。
 
 当前 `metawork.tasks.run` 只有 `input.kind = text | skill` 的 tagged payload，旧 `prompt` 不兼容；Skill input 精确为 `{ kind, skillId, catalogRevision, selectionRevision, argumentValues }`。`tasks.create` 必须携带 `workspace = { kind: "automatic" } | { kind: "manual", workspaceId, expectedWorkspaceEpoch }`、nullable `expectedSkillCatalogRevision` 和 nullable `expectedSkillSelectionRevision`；Text 两个 revision 均为 `null`，Skill 两者均非空，混合状态 fail closed。Bridge 与 Workbench 直接使用同一组 `manual | automatic` admission 语义；混合、缺字段或未知 kind 的 payload 一律 fail closed。不存在 `workspaces.select` 命令或 Snapshot 级 selected Workspace；Manual 选择只属于 Renderer New task draft，真正的 epoch、authorization 与 recent order 在 `tasks.create(manual)` 事务中校验和提交。`automaticWorkspaces` 只声明新 Automatic Workspace 的分配能力；capability 不可用时，已恢复的 Automatic Workspace 与 owning Task 历史仍可出现在 snapshot 中。Skill 没有 `runSkill` 第二入口。Workspace/Task catalog、typed Run history 和 Skill terminal cause 只从 Workbench snapshot 发布；显式 catalog refresh 也只通过 Bridge 调用 Workbench transaction，Bridge 不持有 catalog lease、不解析 slash、不读取 Skill body。
 

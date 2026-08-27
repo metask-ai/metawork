@@ -84,6 +84,8 @@ Renderer 不直接加载 AgentCore，不访问任意文件或进程，不持有 
 
 Bridge 是 Renderer 与 MetaWork 本地边界之间的唯一通信边界，承运两类 surface：产品命令面把 typed 产品命令直接 dispatch 给 Product 中对应 owner，并运输 Snapshot/Event，不经过 Application 代理，也不决定 Task admission、Workspace authority、Agent cancellation、credential replacement 或历史持久化；受限平台 capability 面只承运封闭枚举的 window-chrome bootstrap command，dispatch 给 Application 执行。两面共用 transport、origin policy 与 source/window authority，不共用数据面。
 
+File Preview 沿同一产品命令面使用 Native SDK async registry：Bridge 只保存有界 responder/request identity，将精确 Task/Run/reference intent 交给 Workbench，并在主线程接收 Workbench 已重新授权、已脱敏的 callback-scoped 结果。Bridge 不读取文件、不持有 raw preview bytes、不建立文件缓存或 Files Changed 协议；Application 只负责 wake 与 shutdown 排序。
+
 职责细节、封闭 command 枚举、连接、revision、snapshot identity、分块读取、retry 和 fail-closed 规则只由 [Renderer Bridge 合同](renderer-bridge-contract.md)定义。受限 window-chrome bootstrap session 的 source-window authority 与 document generation 同样归 Bridge：document attach 只建立一次 generation，Native SDK resize event 与 DOM layout observation 只驱动同 generation 的 geometry sync，不建立 resize command、第二 connection 或平台状态副本。
 
 ### 3.3 Product
@@ -192,7 +194,7 @@ Bridge transport、Product 产品状态和 Agent execution terminal cause 是不
 
 当前正式 AgentCore target availability、exact artifact identity 与 ABI policy 由 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)唯一记录。MetaWork 只消费经 verifier 接收并 stage 到 `.agentcore/bundles/<target-id>` 的 canonical target-specific bundle 及其中的官方 Zig package。构建 target 精确选择同名 bundle，不读取“最后一次 stage”状态。缺失、identity、checksum、target、ABI 或 symbol 校验失败必须明确失败，不允许旧 revision、`latest`、可变 tag、implementation source fallback 或静默降级。精确 bundle 规则见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。
 
-当前 baseline 已包含同一桌面 Application 正常重启后、由 durable checkpoint 驱动的显式 Conversation 恢复，但不包含 async pending、suspend/resume、独立 AgentCore Worker crash recovery、跨进程 in-flight Run 恢复、strict Workspace security、正式 Host tools、typed Output/FileChange、plan progress/approval、custom UI 或 Windows 更新。当前仍是同进程 prototype；存在 ABI entry 不代表更宽的进程隔离或恢复能力已经开放，能力状态只以 [验证规范](validation.md)为准。
+当前 baseline 已包含同一桌面 Application 正常重启后、由 durable checkpoint 驱动的显式 Conversation 恢复，以及基于结构化 file reference、按需读取当前内容的异步 File Preview。File Preview 不构成 async Agent pending、文件版本或 FileChange observation。当前仍不包含 suspend/resume、独立 AgentCore Worker crash recovery、跨进程 in-flight Run 恢复、strict Workspace security、正式 Host tools、typed Output/FileChange、plan progress/approval、custom UI 或 Windows 更新。当前仍是同进程 prototype；存在 ABI entry 不代表更宽的进程隔离或恢复能力已经开放，能力状态只以 [验证规范](validation.md)为准。
 
 Native SDK 的平台支持矩阵、真实 WebView 路径、构建与分发证据只在 [验证规范](validation.md)维护。架构不预设未经验证的 push、poll 或自制 `events.drain` 协议，也不从一个平台的结果推断另一个平台已经可用。
 
