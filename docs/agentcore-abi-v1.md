@@ -1,13 +1,13 @@
 # MetaWork AgentCore ABI v1 消费合同
 
-> 状态：三个 target 的 policy 与 repository lock identity 已同步 hard cut 到 revision 13；Windows x86_64 GNU 锁定 AgentCore `af1ea06dddc1` exact artifact，macOS 本轮不做 artifact/platform 验证；不声明 stable support policy
+> 状态：三个 target 的 policy 与 repository lock identity 已同步 hard cut 到 revision 14；Windows x86_64 GNU 锁定 AgentCore `e5a423697f78` exact artifact，macOS payload 与平台验证后续在 macOS 完成；不声明 stable support policy
 > 所有者：Metask AgentCore 负责 facade、bindings、bundle 和 ABI 政策；MetaWork 负责 exact artifact 消费、Host 生命周期和产品 capability gate
 
 本文定义 MetaWork 对 Metask AgentCore binary ABI version 1 的 target-specific 消费边界。线程、事件泵和 Host 生命周期见 [AgentCore 集成契约](agentcore-integration.md)，验证入口见 [验证规范](validation.md)。
 
 ## 1. Target-specific baseline
 
-所有 target policy 与 lock identity 只接受 ABI v1 revision 13，不识别或加载任何旧 revision。Windows 使用 clean source commit `af1ea06dddc1e4f5274e93a971070d0c578f8f3c`、package version `0.1.0-dev+af1ea06dddc1` 的已提供 artifact；macOS lock 同步到相同 identity，但本轮不声明 payload 或平台验证通过：
+所有 target policy 与 lock contract identity 只接受 ABI v1 revision 14，不识别或加载任何旧 revision。Windows 使用 clean source commit `e5a423697f7853d8d609950b5d7e2d7c1ac2e83a`、package version `0.1.0-dev+e5a423697f78` 的已提供 artifact；macOS lock 的 contract identity 同步到相同 revision，但 `files` checksum 尚不是 revision 14 artifact 证据。Apple `ar/libtool` 重打包后必须用 macOS 生成的 exact manifest 原子刷新整个 lock，再执行 stage 与平台验证；在此之前 macOS candidate 会因 exact manifest/checksum 不匹配而 fail closed：
 
 | Target             | Build       | Link input            | Repository lock                                         |
 | ------------------ | ----------- | --------------------- | ------------------------------------------------------- |
@@ -18,16 +18,16 @@
 固定合同按 target 为：
 
 - `binary_abi_version = 1`；
-- `binary_abi_revision = 13`，`capabilities = 67108863`（`0x3ffffff`）；
-- `CAP_TEXT_COMPLETION = 1 << 21` 仍属于 revision 13 artifact 的 `REQUIRED_CAPABILITIES_V1`，但 MetaWork 产品不再调用对应 entry；
-- `binary_abi_table_size = 280`；
+- `binary_abi_revision = 14`；
+- root `binary_abi_table_size = 64`；Runtime、Session、SessionControl、Skill、MCP 子表大小分别为 24、40、64、32、40 bytes；
+- revision 14 不再发布 root capability bitset；required surface 由 exact root 与五个 mandatory 子表共同定义；
 - 唯一 discovery symbol 为 `metask_agentcore_get_api`；
 - struct size 必须精确匹配，Host 提供的 reserved 字段必须全部为零；
 - 每个平台按完整 manifest bytes 和 payload checksum 独立锁定，不能用 source commit 推断 artifact bytes 可互换。
 
 MetaWork 不接受目标 policy 之外的 ABI revision，不保留 function-table 分流、旧类型别名、shim、兼容 parser、双 bundle 或静默 fallback。需要回退时只能回退整个 MetaWork 变更和对应 exact artifact，运行时没有降级路径。
 
-当前 revision 13 尚处 experimental 状态。artifact 仍保留全部八个 Completion entry，并新增 mandatory `runtime_create_with_plugins`、MCP `request_tool_stream`、Host stream tool contract 与 active-Run journal mode。完整 table 仍由 SDK 与 verifier 精确校验，但 Agent-owned Completion 已与这些 entry 解耦；后续 AgentCore 删除它们时，MetaWork 只随 exact bundle hard cut，不建立兼容分支。revision、table size、capability set 与 repository lock 的 exact manifest/header/bindings checksum 必须一起匹配；MetaWork 不为任何旧 revision 或旧 callback shape 保留条件编译、运行时 shim 或 target-specific 例外。
+当前 revision 14 尚处 experimental 状态。artifact 已删除 AgentCore Completion 类型、status 与八个 entry，将原扁平 function table hard cut 为 root + Runtime、Session、SessionControl、Skill、MCP 五个 mandatory 子表，并把唯一 Runtime create 签名扩展为可空 `RuntimePluginConfigV1`。MetaWork 正式 Runtime 传 null plugin config，独立 Completion 继续由 MetaWork 自己提供。revision、root/child table size 与 repository lock 的 exact manifest/header/bindings checksum 必须一起匹配；MetaWork 不为 revision 13 的扁平表、capability bitset、Completion ABI 或旧 callback shape 保留条件编译、运行时 shim 或 target-specific 例外。
 
 ### revision 8 的执行状态事件
 
@@ -49,26 +49,22 @@ MetaWork 不复制 header、raw enum、event tag、Permission/Skill/MCP JSON sch
 
 ## 3. Target function table
 
-`ApiV1` 的全部非可选 entry 都必须存在并通过 SDK discovery：
+`ApiV1` root 与五个 mandatory child table 必须全部存在、大小精确、reserved 为零且通过 SDK discovery：
 
-- Runtime create/create-with-plugins/destroy、Workspace Skill catalog resolve/release；
-- Runtime MCP refresh/describe/configuration apply；
-- Session create/restore/destroy/describe；
-- model、Skill policy、Permission rules 与 MCP selection replacement；
-- typed Text/Skill Run、Run abort；
-- manual compact、compact abort；
-- checkpoint export；
-- revision 13 artifact 的 independent Completion create/destroy/describe/complete（只做 table 完整性校验，MetaWork 不调用）；
-- revision 13 artifact 的 Completion stream start/next/abort/destroy（只做 table 完整性校验，MetaWork 不调用）；
-- owned buffer release。
+- root：owned buffer release 与 Runtime、Session、SessionControl、Skill、MCP 子表指针；
+- Runtime：create/destroy；
+- Session：create/destroy、typed Run、Run abort；
+- SessionControl：restore/describe、model、Permission rules、manual compact/abort 与 checkpoint export；
+- Skill：Workspace catalog resolve/release 与 Skill policy bind；
+- MCP：Runtime configuration apply/refresh/describe 与 Session selection replacement。
 
-必需 entry 不等于 MetaWork 产品自动开放对应能力。`runtime_apply_mcp_configuration` 在 revision 13 table 中必须存在，MetaWork 使用它提交完整 declarative MCP server replacement。Host 为每次 apply 生成非零 desired revision，严格校验 status、report size、disposition、desired/active revision 与 reserved fields；只有 `APPLIED` 才转移 replacement ownership并推进正式 registry generation，`SUPERSEDED`/`REJECTED` 保留旧配置，malformed report fail closed。测试 fake 必须覆盖 applied/rejected 与签名/报告校验。
+必需 entry 不等于 MetaWork 产品自动开放对应能力。MCP 子表的 `apply_configuration` 必须存在，MetaWork 使用它提交完整 declarative MCP server replacement。Host 为每次 apply 生成非零 desired revision，严格校验 status、report size、disposition、desired/active revision 与 reserved fields；只有 `APPLIED` 才转移 replacement ownership并推进正式 registry generation，`SUPERSEDED`/`REJECTED` 保留旧配置，malformed report fail closed。测试 fake 必须覆盖 applied/rejected 与签名/报告校验。
 
-`runtime_create_with_plugins` 是 mandatory entry，但当前 MetaWork 不授予 process-plugin 或 Host stream-tool authority，正式 Runtime 继续调用 revision 13 同表内的 `runtime_create`。这不是旧 revision fallback；两条 entry 都属于唯一 revision 13 table，后续开放 plugin authority 必须另过 capability gate。
+revision 14 只有一个 Runtime `create` entry。第二个参数是可空 `RuntimePluginConfigV1`；当前 MetaWork 不授予 process-plugin 或 Host stream-tool authority，因此正式 Runtime必须传 null。后续开放 plugin authority 必须另过 capability gate，不能建立第二条 Runtime create 路径。
 
-### revision 13 Completion entry
+### revision 14 Completion hard cut
 
-这些 entry 只因为当前 exact artifact 仍把它们列入 required table 而接受 SDK/verifier 的结构校验。MetaWork 没有 AgentCore Completion adapter、类型映射、状态映射、运行时 fallback 或调用路径；其独立 Completion 合同、上限、并发与 Provider codec 全部由 [Completion 自有能力设计](model-completion-architecture-plan.md)和 MetaWork-owned 测试定义。AgentCore 后续删除 entry 时必须随新 exact revision 原子更新 table、capability、locks 与 fake API，不保留 revision 13 兼容。
+AgentCore Completion handle、request/result/event、stop reason、status、上限与八个 function entry 已从 exact artifact 删除。MetaWork 没有 AgentCore Completion adapter、fixture slots、类型映射、状态映射、运行时 fallback 或调用路径；独立 Completion 合同、上限、取消与 Provider codec 全部由 [Completion 自有能力设计](model-completion-architecture-plan.md)和 MetaWork-owned 测试定义。
 
 ## 4. Runtime 与 Session create
 
@@ -78,8 +74,8 @@ fresh Session 只使用 `SessionHostConfigV1` 与 `SessionCreateConfigV1`：
 - create config 持有 Host config 与 model；
 - credential、root/home、model 和 allowlist 在同步 create 边界内借用，AgentCore 按合同复制；
 - Skill catalog 与显式 `SkillPolicyV1` 成对传入；Workbench 先按稳定 `skill_policy_key` 编译启用策略，再把当前 catalog 中获准执行的 concrete `skill_id` 写入 `granted_skill_ids`；无 catalog 时 policy 必须为 null；
-- catalog 只通过 `resolveWorkspaceSkillCatalog` 取得；默认 `.agents/skills` 与受控 `additional_sources` 的候选校验、冲突解析和 winner 选择由 AgentCore 负责。刷新后的 catalog 与 policy 只通过 idle-only `sessionBindSkillPolicy` 原子重绑；
-- MCP authority 是完整 replacement：create config 的 `mcp_selection = null` 表示 empty view；`sessionUpdateMcp` 的 selection pointer 必须非 null，合法的零 selector descriptor 表示清空当前 view；
+- catalog 只通过 `SkillApi.resolveCatalog` 取得；默认 `.agents/skills` 与受控 `additional_sources` 的候选校验、冲突解析和 winner 选择由 AgentCore 负责。刷新后的 catalog 与 policy 只通过 idle-only `SkillApi.bindPolicy` 原子重绑；
+- MCP authority 是完整 replacement：create config 的 `mcp_selection = null` 表示 empty view；`McpApi.updateSelection` 的 selection pointer 必须非 null，合法的零 selector descriptor 表示清空当前 view；
 - 每个 `McpServerV1` 必须携带非零、非 secret 的 `configuration_fingerprint`；`McpConnectorV1` 必须提供成对的 `retain_connector` / `release_connector`，Host owner 只有在全部 Core retain 与 active connection 都释放后才可销毁；
 - `request_tool_stream` 是 mandatory `tools/call` 路径：Host 验证 borrowed `HostResultSinkV1` 的 layout、reserved、writer 与上限，把完整 JSON-RPC response 从 byte zero 同步写入 sink，并在 callback 返回前释放 transport response；sink failure、越界、secret、取消和非法 HTTP status 必须 fail closed；
 - Host transport 支持 `2026-07-28`、`2025-11-25` 与 `2025-06-18` 三个 exact era；`automatic` 可以由 AgentCore 协商并 exact reopen，MetaWork 不把 MCP era 当作 ABI revision 兼容；
@@ -109,7 +105,7 @@ fresh Session 只使用 `SessionHostConfigV1` 与 `SessionCreateConfigV1`：
 - ABI 提供 synchronous AskUserQuestion 与 Permission；当前 MetaWork Agent 只开放 Permission 产品路径；
 - typed Core event 和 Permission provenance。
 
-以下 revision 13 ABI 能力仍关闭，直到各自完成产品 owner、安全、持久化和恢复验收：
+以下 revision 14 ABI 能力仍关闭，直到各自完成产品 owner、安全、持久化和恢复验收：
 
 - Runtime MCP configuration live apply；
 - persistent Permission rules；
@@ -119,7 +115,7 @@ fresh Session 只使用 `SessionHostConfigV1` 与 `SessionCreateConfigV1`：
 - async UI continuation；
 - Worker crash recovery。
 
-当前 restore 只用于正常 Application 重启后重建 finalized Conversation 的 Session attachment。`SessionRestoreConfigV1` 不携带 model，因此 Host 首先以 Checkpoint 自己的 `SessionBinding.model` 满足 AgentCore restore expectation；restore 产出 candidate 后，Host 在 commit 前再以当前 Task model binding 调用 idle-only `session_set_model`。Checkpoint 模型是历史事实，不与当前 Account 默认模型或 Task 当前模型做全局相等比较；candidate 的模型设置失败必须销毁 candidate 并把本次 restore 作为可重试失败收口。Host 不向 restore 提供 logical Session ID。AgentCore 将当前 authority 与 checkpoint state 取交集，Host 只能提交重新取得且不宽于历史事实的 Skill/MCP authority。该消费不声明 Worker crash、in-flight Run、async pending 或 suspend/resume recovery。
+当前 restore 只用于正常 Application 重启后重建 finalized Conversation 的 Session attachment。`SessionRestoreConfigV1` 不携带 model，因此 Host 首先以 Checkpoint 自己的 `SessionBinding.model` 满足 AgentCore restore expectation；restore 产出 candidate 后，Host 在 commit 前再以当前 Task model binding 调用 idle-only `SessionControlApi.setModel`。Checkpoint 模型是历史事实，不与当前 Account 默认模型或 Task 当前模型做全局相等比较；candidate 的模型设置失败必须销毁 candidate 并把本次 restore 作为可重试失败收口。Host 不向 restore 提供 logical Session ID。AgentCore 将当前 authority 与 checkpoint state 取交集，Host 只能提交重新取得且不宽于历史事实的 Skill/MCP authority。该消费不声明 Worker crash、in-flight Run、async pending 或 suspend/resume recovery。
 
 ## 6. Callback、事件与 Permission
 
@@ -152,22 +148,13 @@ Host 先校验 function `Status`，再按 operation-specific status set 决定�
 - 其他非 OK status：不得读取 `RunResultV1` 的结果字段，只读取并释放 diagnostic；
 - unknown status、属于其他 operation 的 known status、unknown StopReason/outcome/flag 或 StopReason 与 checkpoint outcome 不一致都属于 dependency contract failure。
 
-Run、manual compact 与 Session Skill mutation 分别维护 operation-specific status disposition，不能从“SDK 已知 status”推断某个 entry 接受该 status，也不能用一份全局 allowlist 代替。revision 13 的 `checkpoint_budget_required` 对这三条当前消费路径都是合法、可恢复的非 OK 结果：操作向上失败收口，但 Session 保持 reusable；只有不属于该 operation 的 known status 才按 dependency contract failure 处理。
-
-Completion 同样维护逐操作 disposition；下列集合是 MetaWork 对锁定 artifact 的 fail-closed 消费分类，不把 SDK 全局 `Status` 枚举冒充所有 entry 的共同返回合同：
-
-- create：`ok | invalid_argument | out_of_memory | core_error | internal_error | resource_limit`；
-- destroy、describe、stream destroy：`ok | invalid_argument | busy | invalid_state | core_error | internal_error | resource_limit`；
-- complete、stream start、stream next：`ok | invalid_argument | out_of_memory | busy | invalid_state | core_error | internal_error | resource_limit | completion_unsupported_response`；
-- stream abort：`ok | invalid_argument | too_late | invalid_state | core_error | internal_error`。
-
-`too_late` 只在 stream abort 上映射为 typed outcome；`completion_unsupported_response` 只在产生 completion 响应的路径映射为 typed error。unknown status 或出现在错误 operation 上的 known status 都是 dependency contract failure；非 OK 时不读取 result/event/info 字段，只释放 diagnostic。
+Run、manual compact 与 Session Skill mutation 分别维护 operation-specific status disposition，不能从“SDK 已知 status”推断某个 entry 接受该 status，也不能用一份全局 allowlist 代替。revision 14 的 `checkpoint_budget_required` 对这三条当前消费路径都是合法、可恢复的非 OK 结果：操作向上失败收口，但 Session 保持 reusable；只有不属于该 operation 的 known status 才按 dependency contract failure 处理。revision 13 的 `completion_unsupported_response` 已从官方 Status 删除，MetaWork 的独立 Completion 使用自己的 typed failure，不把该旧 code 保留为 AgentCore status。
 
 checkpoint export 与 Session describe 是另外两条 operation-specific 消费路径。export 中经本地 sink 原因验证的 `checkpoint_io` 不污染 Session；restore 侧 checkpoint status 不是 export 合法结果。`out_of_memory`、`core_error`、malformed OK 或 callback/dependency contract failure 保守关闭 Session admission。describe 的 resource/busy/argument failure 可重试，内部 fatal 与 malformed result 同样关闭 admission。`checkpoint_budget_required` 对这两个 entry 都不是合法结果，必须显式按 dependency contract failure 收口。export 的 generation 只按 opaque `u64` 保存，ABI 未定义非零或单调性，Host 不得自行断言。
 
-checkpoint restore 是第三条独立 disposition。`checkpoint_corrupt`、`checkpoint_unsupported`、`checkpoint_incompatible`、`logical_session_conflict` 与 verified source 的 I/O failure 只失败本次 candidate；unknown/malformed OK、restore report 与持久 expectation 不一致或依赖合同失败必须 fail closed 并销毁 candidate。source `read_fn` 允许短读；canonical revision 13 probe 已确认 Core 持续读取到 EOF。启动 size/hash verify 是 eligibility 事实，job 内同一 source handle 的再校验是 commit 前的权威检查，流式 digest 只作为完整消费时的额外交叉验证。
+checkpoint restore 是第三条独立 disposition。`checkpoint_corrupt`、`checkpoint_unsupported`、`checkpoint_incompatible`、`logical_session_conflict` 与 verified source 的 I/O failure 只失败本次 candidate；unknown/malformed OK、restore report 与持久 expectation 不一致或依赖合同失败必须 fail closed 并销毁 candidate。source `read_fn` 允许短读；canonical revision 14 probe 必须重新确认 Core 持续读取到 EOF。启动 size/hash verify 是 eligibility 事实，job 内同一 source handle 的再校验是 commit 前的权威检查，流式 digest 只作为完整消费时的额外交叉验证。
 
-`CheckpointExportResultV1.digest` 的算法在 revision 13 合同中未定义，canonical bundle 的真实输出也不等于 streamed bytes 的 SHA-256。MetaWork 不把该字段冒充内容哈希或据此拒绝合法 export；checkpoint store 的文件名、`CheckpointRecord.blob` 和启动校验统一使用 Host 在 sink 中对实际 bytes 独立计算的 SHA-256。若上游未来定义 raw digest 语义，须先补充 ABI 合同与 candidate probe，再决定是否增加独立校验，不能静默替换产品 content hash。
+`CheckpointExportResultV1.digest` 的算法在 revision 14 合同中未定义。MetaWork 不把该字段冒充内容哈希或据此拒绝合法 export；checkpoint store 的文件名、`CheckpointRecord.blob` 和启动校验统一使用 Host 在 sink 中对实际 bytes 独立计算的 SHA-256。若上游未来定义 raw digest 语义，须先补充 ABI 合同与 candidate probe，再决定是否增加独立校验，不能静默替换产品 content hash。
 
 八个 StopReason 必须无 `else` 穷尽映射：
 
@@ -226,8 +213,9 @@ staged Host gate：
 
 - staged verifier 与 bundle guard；
 - mandatory function-table discovery；
-- Completion 八个 entry、四项上限、operation-specific status、owned buffer、typed result/event 与 stream-before-completion teardown 测试；
-- mandatory Runtime MCP apply/create-with-plugins entry、connector retain/release、非零 configuration fingerprint、MCP response status/body ownership、`request_tool_stream` byte-zero sink/limit/cancel/failure、三个 exact MCP era，以及 `automatic` 收到裸 HTTP 400 后 exact reopen 的 interop；
+- root 与五个 mandatory child table 的 exact layout/non-null entry、revision 13 root 和旧 revision 14 root fail-closed 测试；
+- mandatory Runtime create 的 null plugin config、MCP apply、connector retain/release、非零 configuration fingerprint、MCP response status/body ownership、`request_tool_stream` byte-zero sink/limit/cancel/failure、三个 exact MCP era，以及 `automatic` 收到裸 HTTP 400 后 exact reopen 的 interop；
+- MetaWork-owned Completion 的三 Provider 非流式 codec、typed failure、取消与 credential 清零测试；
 - Session create config、ephemeral run-journal mode、Permission identity/response echo/provenance 测试；
 - status-before-result、checkpoint partial-result、八个 StopReason 与 unknown/mismatch fail-closed 测试；
 - Run、manual compact 与 Session Skill mutation 的 operation-specific status disposition，以及 budget rejection 后 Session reuse 测试；
@@ -236,4 +224,4 @@ staged Host gate：
 - 当前平台真实 AgentCore vertical；
 - architecture guard 证明正式 build 只消费 canonical bundle，且只有 `agent/` import SDK。
 
-Linux 或其他 target 必须新增独立 policy、lock、artifact 和平台验证。缺少目标 revision 13 artifact 时直接失败，不得保留旧 ABI 作为替代。
+Linux 或其他 target 必须新增独立 policy、lock、artifact 和平台验证。缺少目标 revision 14 artifact 时直接失败，不得保留旧 ABI 作为替代。

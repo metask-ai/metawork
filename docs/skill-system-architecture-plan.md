@@ -20,8 +20,8 @@ AgentCore R9 已经提供 MetaWork 建立正确 Skill 执行链所需的核心�
 - incomplete query 以 `skill_catalog_incomplete` 明确失败，不伪装为空 catalog；
 - `SkillPolicyV1` 以 concrete `granted_skill_ids` 表示某个精确 catalog 的完整 default-deny 执行授权；
 - Session create/restore 同时绑定 catalog 与 policy；
-- `sessionBindSkillPolicy` 在 idle Session 上原子替换 catalog 与 policy；
-- `sessionRunSkill` 按 `skill_id + catalog_revision + arguments` 执行并由 AgentCore 做最终校验。
+- Agent-owned `Session.refreshSkillCatalog` 在 idle Session 上原子替换 catalog 与 policy；
+- typed Skill `RunInput` 按 `skill_id + catalog_revision + arguments` 执行并由 AgentCore 做最终校验。
 
 因此，当前问题已经不再是“等待 AgentCore 提供 Skill policy 和来源身份”。本阶段主线是：
 
@@ -49,8 +49,8 @@ MetaWork 不建立第二套 Skill scanner、parser、resolver 或 AgentCore poli
 | catalog health/issues | R9 descriptor 已提供 |
 | incomplete observation | R9 typed status 已提供 |
 | Session authorization | R9 `SkillPolicyV1` 已提供 |
-| atomic Session catalog+policy update | R9 `sessionBindSkillPolicy` 已提供 |
-| typed Skill execution | R9 `sessionRunSkill` 已提供 |
+| atomic Session catalog+policy update | Agent-owned `Session.refreshSkillCatalog` 已提供 |
+| typed Skill execution | Agent-owned typed `RunInput` 已提供 |
 | 用户默认与 Workspace override | Workbench 已实现 |
 | policy key → granted skill IDs 编译 | Workbench 已实现 |
 
@@ -106,7 +106,7 @@ flowchart LR
     D --> E["Workbench Policy Compiler<br/>user default + workspace override"]
     E --> F["Committed SkillAuthority<br/>catalog + grants + product revision"]
     F --> G["Task / Session Binding"]
-    G --> H["sessionRunSkill"]
+    G --> H["typed Skill RunInput"]
 
     I["Management Inventory<br/>install_id / file transaction"] -. "safe reconciliation" .-> D
     J["Policy Store<br/>skill_policy_key / revision"] --> E
@@ -161,7 +161,7 @@ SourceContributionRef
 - Workbench 只保存或投影任务所需的 MetaWork-owned bounded copy；
 - contribution identity 用于 provenance、issue 归属和管理 reconciliation；
 - content revision 用于证明具体内容版本，不授予来源管理 authority；
-- source identity 不用于 `sessionRunSkill`；
+- source identity 不进入 typed Skill Run input；
 - Renderer 不接收 opaque locator 或未经脱敏的绝对路径。
 
 R9 descriptor 只为 winner 提供完整 contribution identity；issue 不一定对应一个可展示或可操作的候选资产，不能据此重建 candidate registry。
@@ -418,7 +418,7 @@ policy mutation 只改变 Personal/Workspace current authority；已经创建的
 
 1. 校验 Task/Workspace identity、epoch、idle 状态和 expected revision；
 2. 从 Workspace current committed authority 构造 Task candidate projection；
-3. 通过 `sessionBindSkillPolicy` 一次提交 candidate catalog lease 与 policy；
+3. 通过 `Session.refreshSkillCatalog` 一次提交 candidate catalog lease 与 policy；
 4. bind 成功后 no-fail 替换 Task pinned authority；
 5. bind 失败时保留 Task 原 pinned authority。
 
@@ -454,7 +454,7 @@ Session create 同步提交同一 catalog lease 与 `SkillPolicyV1`。无 commit
 ### 13.2 Existing Task
 
 - policy mutation 和 catalog refresh 不得在 active Run 中替换 binding；
-- idle 更新必须使用 `sessionBindSkillPolicy` 一次提交 catalog+policy；
+- idle 更新必须使用 `Session.refreshSkillCatalog` 一次提交 catalog+policy；
 - 不能先换 catalog 再换 grants，或反向执行；
 - stale draft 保留用户输入，但发送前必须重新验证 pinned revisions 和 Skill membership。
 
@@ -597,7 +597,7 @@ R9 不提供 shadowed candidate 列表，因此 UI 不得承诺 loser 详情。�
 - catalog job 独立表达进行中的 refresh，refresh 期间继续服务 last-good，incomplete、查询失败、编译失败和 stale completion 不再清空 committed authority；当前不宣称保存或投影最近一次失败状态；
 - `CatalogSnapshot` 在构造或 recompile candidate 时一次应用 policy 与非零 `selection_revision`，mutable `applyEnablement` 已移除；
 - policy mutation 先预编译所有具有 committed authority 的受影响 context，持久化明确成功后再 no-fail swap；
-- Task/Session 继续使用 pinned authority，idle refresh 继续通过 `sessionBindSkillPolicy` 一次更新；
+- Task/Session 继续使用 pinned authority，idle refresh 继续通过 `Session.refreshSkillCatalog` 一次更新；
 - Bridge、persistence schema、AgentCore ABI 与所有版本标识均未变化。
 
 ### 18.3 当前来源边界
@@ -659,7 +659,7 @@ R9 不提供 shadowed candidate 列表，因此 UI 不得承诺 loser 详情。�
 | 首次启动 query 失败 | Skill unavailable，不构造 ready+null |
 | policy store unavailable | Skill admission fail closed，Text 可用 |
 | refresh catalog change | current authority 原子替换，不出现旧 grants+新 catalog |
-| Session idle bind | `sessionBindSkillPolicy` 一次替换 catalog+policy |
+| Session idle bind | `Session.refreshSkillCatalog` 一次替换 catalog+policy |
 | active Run | 禁止替换 binding |
 | Host restart restore | 重绑 Workspace current authority，Run 使用同一 revision pair |
 | external source | resolved winner 可启停；无管理 authority 时不可卸载 |
@@ -676,7 +676,7 @@ AgentCore R9 已足以完成当前默认 `.agents/skills` 范围。以下事项�
 3. Renderer 是否需要新增 provider/source detail 字段；
 4. 任何合同、persistence shape 或版本标识变化必须在实施前取得用户明确同意。
 
-R9 已明确提供的 `skill_policy_key`、source identity、typed issues、`SkillPolicyV1` 和 `sessionBindSkillPolicy` 不再列为 AgentCore 前置确认项。其他路径与格式兼容已从当前方案移除，后续如重新提出必须独立设计。
+AgentCore 已明确提供的 `skill_policy_key`、source identity、typed issues 与 `SkillPolicyV1` 不再列为前置确认项；MetaWork 只经 `Session.refreshSkillCatalog` 消费该能力。其他路径与格式兼容已从当前方案移除，后续如重新提出必须独立设计。
 
 ## 22. 竞品参考的使用边界
 
