@@ -47,7 +47,7 @@ revision 8 新增 `CAP_RUN_STATE_OBSERVATION` 和 `CoreEvent.run_state`。事件
 
 MetaWork 不复制 header、raw enum、event tag、Permission/Skill/MCP JSON schema、facade code 或 SDK validation。官方 SDK 是 AgentCore `Status`、`StopReason`、`CoreEvent`、`UiRequest`、`UiResponse`、Permission、Skill、MCP、Session description 与 restore report 的唯一协议来源。MetaWork Completion 的 result/stop reason/error 是独立自有类型，不来自该 SDK。
 
-macOS `a4a908a39b36` SDK 新增 `output_segment_begin` / `output_segment_end` typed event variant。Agent/event pump 使用官方 typed variant 接收，Product Task 状态机验证 framing、合并/回滚 segment 并形成 runtime final/partial 边界；分类持久化与 Bridge/Renderer 投影尚未接入。Windows 不在本次能力接收范围内。
+macOS `a4a908a39b36` SDK 新增 `output_segment_begin` / `output_segment_end` typed event variant。Agent/event pump 使用官方 typed variant 接收，Product Task 状态机验证 framing、合并/回滚 segment，并持久化 final/partial 分类及安全 assistant 正文起点；Bridge/Renderer 投影尚未接入。Windows 不在本次能力接收范围内。
 
 ## 3. Target function table
 

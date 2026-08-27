@@ -7884,12 +7884,26 @@ test "Task state round trip restores product history without fabricating a Sessi
         defer tool_result.deinit();
         try source.applyEvent(&tool_result);
         try std.testing.expectEqual(@as(usize, 2), persistence.commits);
+        const persisted_run = &source.task_runtime.tasks[0].?.durable.runs[0].?;
+        persisted_run.assistant_output_kind = .final;
+        persisted_run.assistant_output_start = 0;
+        try source.commitTaskState();
+        try std.testing.expectEqual(@as(usize, 3), persistence.commits);
         try std.testing.expect(persistence.len != 0);
         var verified = try task_persistence.decode(
             std.testing.allocator,
             persistence.storage[0..persistence.len],
             source.taskPersistenceLimits(),
         );
+        try std.testing.expectEqualStrings(
+            "final",
+            verified.value.tasks[0].runs[0].assistant_output_kind.?,
+        );
+        try std.testing.expectEqual(
+            @as(?u64, 0),
+            verified.value.tasks[0].runs[0].assistant_output_start,
+        );
+        try std.testing.expectEqual(null, verified.value.tasks[0].runs[0].event_projection_failure);
         verified.deinit();
         try std.testing.expect(
             std.mem.indexOf(u8, persistence.storage[0..persistence.len], "SECRET-KEY") == null,
@@ -7925,11 +7939,45 @@ test "Task state round trip restores product history without fabricating a Sessi
         const terminal_run = findRun(terminal_task.durable.runs, 7) orelse
             return error.TestUnexpectedResult;
         try std.testing.expectEqual(RunPhase.completed, runPhase(terminal_run));
+        try std.testing.expectEqual(task_test_state.AssistantOutputKind.final, terminal_run.assistant_output_kind.?);
+        try std.testing.expectEqual(@as(?usize, 0), terminal_run.assistant_output_start);
+        try std.testing.expectEqual(
+            null,
+            terminal_run.event_projection_failure,
+        );
         for (terminal_run.tools) |*entry| {
             const restored_tool = &(entry.* orelse continue);
             try std.testing.expect(restored_tool.state != .running);
             try std.testing.expect(!std.mem.eql(u8, restored_tool.id, "tool-running"));
         }
+
+        const failed_storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
+        defer std.testing.allocator.free(failed_storage);
+        terminal_state.value.tasks[0].runs[0].event_projection_failure =
+            "dependency_contract_failure";
+        const failed_bytes = try task_persistence.encode(
+            failed_storage,
+            terminal_state.value,
+        );
+        var failed_restore = try Workbench.init(
+            std.testing.allocator,
+            std.testing.io,
+            &test_agent_runtime,
+            testLimits(),
+            .{
+                .task_persistence = persistence.capability(failed_bytes),
+            },
+        );
+        defer failed_restore.deinit();
+        const failed_task = failed_restore.task_runtime.find(3) orelse
+            return error.TestUnexpectedResult;
+        const failed_run = findRun(failed_task.durable.runs, 7) orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expectEqual(RunPhase.failed, runPhase(failed_run));
+        try std.testing.expectEqual(
+            task_test_state.EventProjectionFailure.dependency_contract_failure,
+            failed_run.event_projection_failure.?,
+        );
     }
 
     var restored = try Workbench.init(
@@ -7962,6 +8010,9 @@ test "Task state round trip restores product history without fabricating a Sessi
     const run = findRun(task.durable.runs, 7) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(RunPhase.interrupted, runPhase(run));
     try std.testing.expectEqual(RunOutcome.interrupted, productTerminalFacts(run).?.outcome);
+    try std.testing.expectEqual(task_test_state.AssistantOutputKind.final, run.assistant_output_kind.?);
+    try std.testing.expectEqual(@as(?usize, 0), run.assistant_output_start);
+    try std.testing.expectEqual(null, run.event_projection_failure);
     const tool = for (run.tools) |*entry| {
         const candidate = &(entry.* orelse continue);
         if (std.mem.eql(u8, candidate.content, "persisted before terminal"))

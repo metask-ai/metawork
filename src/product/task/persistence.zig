@@ -396,6 +396,8 @@ pub const RunWire = struct {
     input: RunInputWire,
     assistant: []const u8,
     assistant_redacted: bool,
+    assistant_output_kind: ?[]const u8,
+    assistant_output_start: ?u64,
     phase: []const u8,
     outcome: ?[]const u8,
     cause: ?[]const u8,
@@ -405,7 +407,7 @@ pub const RunWire = struct {
     diagnostic: []const u8,
     diagnostic_truncated: bool,
     diagnostic_redacted: bool,
-    event_projection_failure: bool,
+    event_projection_failure: ?[]const u8,
     next_activity_order: u64,
 };
 
@@ -800,6 +802,8 @@ fn projectRun(
         .input = input,
         .assistant = run.assistant.list.items[0..run.assistant.committed_len],
         .assistant_redacted = run.assistant_redacted,
+        .assistant_output_kind = if (run.assistant_output_kind) |kind| @tagName(kind) else null,
+        .assistant_output_start = if (run.assistant_output_start) |start| @intCast(start) else null,
         .phase = @tagName(task_state.runPhase(run)),
         .outcome = if (terminal) |value| @tagName(value.outcome) else null,
         .cause = if (terminal) |value|
@@ -815,7 +819,7 @@ fn projectRun(
             "",
         .diagnostic_truncated = if (terminal_payload) |payload| payload.diagnostic_truncated else false,
         .diagnostic_redacted = if (terminal_payload) |payload| payload.diagnostic_redacted else false,
-        .event_projection_failure = run.event_projection_failure != null,
+        .event_projection_failure = if (run.event_projection_failure) |failure| @tagName(failure) else null,
         .next_activity_order = run.next_activity_order,
     };
 }
@@ -1094,6 +1098,21 @@ fn restoreRun(projection: RestoreProjection, wire: RunWire) RestoreError!task_st
         projection.limits.max_assistant_message_bytes,
     );
     assistant.committed_len = assistant.list.items.len;
+    const assistant_output_kind = if (wire.assistant_output_kind) |kind|
+        parseEnum(task_state.AssistantOutputKind, kind) orelse return error.TaskStoreCorrupt
+    else
+        null;
+    const assistant_output_start = if (wire.assistant_output_start) |start|
+        std.math.cast(usize, start) orelse return error.TaskStoreCorrupt
+    else
+        null;
+    if ((assistant_output_kind == null) != (assistant_output_start == null))
+        return error.TaskStoreCorrupt;
+    if (assistant_output_start) |start| {
+        if (start > assistant.committed_len or
+            !std.unicode.utf8ValidateSlice(assistant.list.items[0..start]))
+            return error.TaskStoreCorrupt;
+    }
     const interrupted = !persistedTerminalRunPhase(wire.phase);
     const status_text = try projection.copy(
         if (interrupted) "Interrupted" else wire.status,
@@ -1150,6 +1169,8 @@ fn restoreRun(projection: RestoreProjection, wire: RunWire) RestoreError!task_st
         .input = input,
         .assistant = assistant,
         .assistant_redacted = wire.assistant_redacted,
+        .assistant_output_kind = assistant_output_kind,
+        .assistant_output_start = assistant_output_start,
         .active_phase = .queued,
         .tools = tools,
         .usage = usageFromWire(wire.usage),
@@ -1166,8 +1187,9 @@ fn restoreRun(projection: RestoreProjection, wire: RunWire) RestoreError!task_st
         },
         .terminal_observed = true,
         .event_stream_finalized = true,
-        .event_projection_failure = if (wire.event_projection_failure)
-            .consumer_rejected
+        .event_projection_failure = if (wire.event_projection_failure) |failure|
+            parseEnum(task_state.EventProjectionFailure, failure) orelse
+                return error.TaskStoreCorrupt
         else
             null,
         .terminal_diagnostic = diagnostic,
@@ -2055,6 +2077,19 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
             !validText(run.diagnostic, limits.max_terminal_diagnostic_bytes, true) or
             run.tools.len > limits.max_tools_per_run or run.next_activity_order == 0)
             return error.Invalid;
+        if ((run.assistant_output_kind == null) != (run.assistant_output_start == null))
+            return error.Invalid;
+        if (run.assistant_output_kind) |kind|
+            if (!oneOf(kind, &.{ "final", "partial" })) return error.Invalid;
+        if (run.assistant_output_start) |start_wire| {
+            const start = std.math.cast(usize, start_wire) orelse return error.Invalid;
+            if (start > run.assistant.len or
+                !std.unicode.utf8ValidateSlice(run.assistant[0..start]))
+                return error.Invalid;
+        }
+        if (run.event_projection_failure) |failure|
+            if (!oneOf(failure, &.{ "consumer_rejected", "dependency_contract_failure" }))
+                return error.Invalid;
         for (task.runs[0..index]) |previous|
             if (previous.id == run.id or previous.generation == run.generation)
                 return error.Invalid;
@@ -2609,6 +2644,8 @@ test "task store round-trips per-run execution generations across binding adopti
         },
         .assistant = "done",
         .assistant_redacted = false,
+        .assistant_output_kind = "final",
+        .assistant_output_start = 0,
         .phase = "completed",
         .outcome = "completed",
         .cause = null,
@@ -2623,7 +2660,7 @@ test "task store round-trips per-run execution generations across binding adopti
         .diagnostic = "",
         .diagnostic_truncated = false,
         .diagnostic_redacted = false,
-        .event_projection_failure = false,
+        .event_projection_failure = null,
         .next_activity_order = 1,
     };
     runs[1] = runs[0];
@@ -2631,6 +2668,7 @@ test "task store round-trips per-run execution generations across binding adopti
     runs[1].generation = 2;
     runs[1].execution_generation = 17;
     runs[1].input.text = "after adoption";
+    runs[1].event_projection_failure = "dependency_contract_failure";
     var tasks = [_]TaskWire{.{
         .id = 1,
         .recent_order = 1,
@@ -2666,9 +2704,18 @@ test "task store round-trips per-run execution generations across binding adopti
     try std.testing.expectEqual(@as(u64, 17), decoded.value.tasks[0].binding.execution_generation);
     try std.testing.expectEqual(@as(u64, 13), decoded.value.tasks[0].runs[0].execution_generation);
     try std.testing.expectEqual(@as(u64, 17), decoded.value.tasks[0].runs[1].execution_generation);
+    try std.testing.expectEqualStrings(
+        "final",
+        decoded.value.tasks[0].runs[0].assistant_output_kind.?,
+    );
+    try std.testing.expectEqual(@as(?u64, 0), decoded.value.tasks[0].runs[0].assistant_output_start);
+    try std.testing.expectEqualStrings(
+        "dependency_contract_failure",
+        decoded.value.tasks[0].runs[1].event_projection_failure.?,
+    );
 }
 
-test "task store rejects states that would violate the Renderer contract" {
+test "task store rejects states that would violate the product contract" {
     var workspaces = [_]WorkspaceWire{.{
         .id = 1,
         .epoch = 1,
@@ -2711,6 +2758,8 @@ test "task store rejects states that would violate the Renderer contract" {
         },
         .assistant = "done",
         .assistant_redacted = false,
+        .assistant_output_kind = "final",
+        .assistant_output_start = 0,
         .phase = "completed",
         .outcome = "completed",
         .cause = null,
@@ -2725,7 +2774,7 @@ test "task store rejects states that would violate the Renderer contract" {
         .diagnostic = "",
         .diagnostic_truncated = false,
         .diagnostic_redacted = false,
-        .event_projection_failure = false,
+        .event_projection_failure = null,
         .next_activity_order = 3,
     }};
     var compacts = [_]CompactWire{.{
@@ -2786,6 +2835,28 @@ test "task store rejects states that would violate the Renderer contract" {
         .tasks = &tasks,
     };
     try validate(&state, testLimits());
+
+    runs[0].assistant_output_start = 5;
+    try std.testing.expectError(error.Invalid, validate(&state, testLimits()));
+    runs[0].assistant_output_start = 0;
+
+    runs[0].assistant_output_kind = null;
+    try std.testing.expectError(error.Invalid, validate(&state, testLimits()));
+    runs[0].assistant_output_kind = "final";
+
+    runs[0].assistant = "好";
+    runs[0].assistant_output_start = 1;
+    try std.testing.expectError(error.Invalid, validate(&state, testLimits()));
+    runs[0].assistant = "done";
+    runs[0].assistant_output_start = 0;
+
+    runs[0].assistant_output_kind = "commentary";
+    try std.testing.expectError(error.Invalid, validate(&state, testLimits()));
+    runs[0].assistant_output_kind = "final";
+
+    runs[0].event_projection_failure = "unknown";
+    try std.testing.expectError(error.Invalid, validate(&state, testLimits()));
+    runs[0].event_projection_failure = null;
 
     var mixed_tasks = [_]TaskWire{ tasks[0], tasks[0] };
     mixed_tasks[1].id = 0;

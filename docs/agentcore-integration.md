@@ -53,7 +53,7 @@ candidate probe 只用于证明锁定 artifact 与官方 Zig package 可以 sour
 
 | CoreEvent | Product Task 消费 | 持久化边界 |
 | --- | --- | --- |
-| `output_segment_begin/end` | 校验 index/turn/group/bytes，驱动 group 定性 | 分类边界当前不持久化 |
+| `output_segment_begin/end` | 校验 index/turn/group/bytes，驱动 group 定性 | 保存 final/partial 分类与安全 assistant 正文起点 |
 | `text_chunk` | 写入当前 open segment | 已闭合可见 group 进入既有 assistant history |
 | `thinking_chunk` | 只更新安全状态 | 不保存 reasoning 正文 |
 | `stream_done` | 更新为 Finishing，不作为完成信号 | 仅现有安全状态 |
