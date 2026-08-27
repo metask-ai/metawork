@@ -658,7 +658,6 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .target = target,
         .optimize = root_module.optimize,
     });
-    agent_provider.addImport("metask_agentcore", sdk);
     const agent_completion = b.createModule(.{
         .root_source_file = b.path("src/agent/completion.zig"),
         .target = target,
