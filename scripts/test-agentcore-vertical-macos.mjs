@@ -504,6 +504,14 @@ try {
     throw new Error(
       "ProductDelivery emitted a Renderer revision off the main thread",
     );
+  if (!/metawork\.smoke\.event_ack.*main_thread=true/.test(output))
+    throw new Error(
+      "synchronous Renderer Bridge commands were not observed on the main thread",
+    );
+  if (/metawork\.smoke\.event_ack.*main_thread=false/.test(output))
+    throw new Error(
+      "a synchronous Renderer Bridge command ran off the main thread",
+    );
   if (task.pendingUi !== null)
     throw new Error("completed run retained an actionable UI request");
   if (!Array.isArray(task.uiHistory) || task.uiHistory.length === 0)

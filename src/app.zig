@@ -234,11 +234,19 @@ const App = struct {
 
     fn stop(context: *anyopaque, native_runtime: *native_sdk.Runtime) anyerror!void {
         const self: *@This() = @ptrCast(@alignCast(context));
+        if (self.dispatcher) |dispatcher| dispatcher.stopIngress();
+        if (self.workbench) |workbench| {
+            workbench.stopFilePreviewAdmission();
+            workbench.shutdownFilePreviewExecutor();
+            if (self.dispatcher) |dispatcher| {
+                workbench.drainFilePreviewCompletions(dispatcher.filePreviewSink());
+                dispatcher.settleFilePreviewsForShutdown();
+            }
+        }
         if (self.dispatcher) |dispatcher| {
-            dispatcher.stopIngress();
-            // Native Bridge callbacks are synchronous on this same platform
-            // loop. Prove the product ingress boundary is quiescent before
-            // Workbench workers or Agent-owned transports begin shutdown.
+            // Synchronous ingress has returned and every asynchronous preview
+            // responder has been settled above. Prove the Bridge boundary is
+            // quiescent before the remaining owners begin shutdown.
             dispatcher.assertQuiescent();
             dispatcher.breakConnection();
             dispatcher.detachWorkbench();
@@ -284,6 +292,11 @@ const App = struct {
                         if (self.mcp_oauth_refresh) |*refresh|
                             refresh.reconcileTimer();
                 self.drainAgentEvents();
+                if (self.workbench) |workbench|
+                    if (self.dispatcher) |dispatcher|
+                        workbench.drainFilePreviewCompletions(
+                            dispatcher.filePreviewSink(),
+                        );
                 if (self.dispatcher) |dispatcher| if (dispatcher.connectedWindow() != null) {
                     try dispatcher.emitWorkbenchChanged();
                 };

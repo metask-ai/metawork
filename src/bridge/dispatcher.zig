@@ -16,6 +16,8 @@ const workspace_grant = @import("workspace_grant.zig");
 const skill_grant = @import("skill_grant.zig");
 
 const product_handler_count = commands.product.len;
+const sync_product_handler_count = product_handler_count - 1;
+const max_preview_in_flight: usize = 8;
 const workspace_path_capacity = workspace_grant.max_path_bytes;
 const event_name = "metawork:host-signal";
 
@@ -183,6 +185,14 @@ pub const McpManagementHost = struct {
 };
 
 pub const Dispatcher = struct {
+    const PreviewInFlight = struct {
+        active: bool = false,
+        completion_id: u64 = 0,
+        responder: native_sdk.bridge.AsyncResponder = undefined,
+        request_id_storage: [native_sdk.bridge.max_id_bytes]u8 = undefined,
+        request_id_len: usize = 0,
+    };
+
     workbench: ?*workbench_api.Workbench,
     account_commands: account_contract.AccountCommandSink,
     platform: Platform,
@@ -198,7 +208,10 @@ pub const Dispatcher = struct {
     window_chrome_connected: bool = false,
     sequence: u64 = 0,
     acknowledged_sequence: u64 = 0,
-    registered_handlers: [product_handler_count]native_sdk.bridge.Handler = undefined,
+    registered_handlers: [sync_product_handler_count]native_sdk.bridge.Handler = undefined,
+    registered_async_handlers: [1]native_sdk.bridge.AsyncHandler = undefined,
+    preview_in_flight: [max_preview_in_flight]PreviewInFlight = @splat(.{}),
+    next_preview_completion_id: u64 = 1,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -287,7 +300,6 @@ pub const Dispatcher = struct {
             .{ .name = commands.mcp_refresh_catalog, .function = refreshMcpCatalog },
             .{ .name = commands.snapshot, .function = beginSnapshot },
             .{ .name = commands.snapshot_chunk, .function = fetchSnapshotChunk },
-            .{ .name = commands.preview_file, .function = previewFile },
             .{ .name = commands.account_begin_login, .function = accountBeginLogin },
             .{ .name = commands.account_cancel_operation, .function = accountCancelOperation },
             .{ .name = commands.account_refresh_catalog, .function = accountRefreshCatalog },
@@ -323,9 +335,15 @@ pub const Dispatcher = struct {
             .context = self,
             .invoke_fn = spec.function,
         };
+        self.registered_async_handlers[0] = .{
+            .name = commands.preview_file,
+            .context = self,
+            .invoke_fn = previewFile,
+        };
         return .{
             .policy = policy,
             .registry = .{ .handlers = &self.registered_handlers },
+            .async_registry = .{ .handlers = &self.registered_async_handlers },
         };
     }
 
@@ -717,56 +735,183 @@ pub const Dispatcher = struct {
         return writer.buffered();
     }
 
-    fn previewFile(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+    fn previewFile(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        responder: native_sdk.bridge.AsyncResponder,
+    ) anyerror!void {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
-        var callback = try self.callbacks.enter();
-        defer callback.deinit();
-        try self.requireWindow(invocation.source.window_id);
-        var parsed = try handlers.parsePayload(handlers.FilePreviewRequest, invocation.request.payload);
-        defer parsed.deinit();
-        if (parsed.value.fileReferenceId.len == 0 or parsed.value.fileReferenceId.len > 128)
-            return error.InvalidBridgePayload;
-        const workbench = try self.requireWorkbench();
-        var preview = workbench.previewFileReference(parsed.value.fileReferenceId) catch |err| {
-            const state: []const u8 = switch (err) {
-                error.FileReferenceNotFound, error.FilePreviewMissing => "missing",
-                error.FilePreviewRestricted => "restricted",
-                error.FilePreviewUnsupported => "unsupported",
-                else => "error",
-            };
-            var writer = std.Io.Writer.fixed(output);
-            writer.writeAll("{\"state\":\"") catch return error.NoSpaceLeft;
-            writer.writeAll(state) catch return error.NoSpaceLeft;
-            writer.writeAll("\",\"id\":") catch return error.NoSpaceLeft;
-            std.json.Stringify.value(parsed.value.fileReferenceId, .{}, &writer) catch return error.NoSpaceLeft;
-            writer.writeAll(",\"title\":\"\",\"displayPath\":\"\",\"language\":\"\",\"content\":\"\",\"truncated\":false,\"range\":null}") catch return error.NoSpaceLeft;
-            return writer.buffered();
+        var callback = self.callbacks.enter() catch {
+            respondFilePreview(responder, invocation.request.id, .failed, "", false, false);
+            return;
         };
-        defer preview.deinit();
-        var writer = std.Io.Writer.fixed(output);
-        writer.writeAll("{\"state\":\"") catch return error.NoSpaceLeft;
-        writer.writeAll(if (preview.state == .truncated) "truncated" else "ready") catch return error.NoSpaceLeft;
-        writer.writeAll("\",\"id\":") catch return error.NoSpaceLeft;
-        std.json.Stringify.value(preview.id, .{}, &writer) catch return error.NoSpaceLeft;
-        writer.writeAll(",\"title\":") catch return error.NoSpaceLeft;
-        std.json.Stringify.value(preview.title, .{}, &writer) catch return error.NoSpaceLeft;
-        writer.writeAll(",\"displayPath\":") catch return error.NoSpaceLeft;
-        std.json.Stringify.value(preview.display_path, .{}, &writer) catch return error.NoSpaceLeft;
-        writer.writeAll(",\"language\":") catch return error.NoSpaceLeft;
-        std.json.Stringify.value(preview.language, .{}, &writer) catch return error.NoSpaceLeft;
-        writer.writeAll(",\"content\":") catch return error.NoSpaceLeft;
-        std.json.Stringify.value(preview.content, .{}, &writer) catch return error.NoSpaceLeft;
-        writer.print(",\"truncated\":{},\"range\":", .{preview.truncated}) catch return error.NoSpaceLeft;
-        if (preview.range) |range| {
-            writer.print("{{\"start\":{{\"line\":\"{d}\",\"column\":\"{d}\"}},\"end\":{{\"line\":\"{d}\",\"column\":\"{d}\"}}}}", .{
-                range.start.line,
-                range.start.column,
-                range.end.line,
-                range.end.column,
-            }) catch return error.NoSpaceLeft;
-        } else writer.writeAll("null") catch return error.NoSpaceLeft;
-        writer.writeByte('}') catch return error.NoSpaceLeft;
-        return writer.buffered();
+        defer callback.deinit();
+        self.requireWindow(invocation.source.window_id) catch {
+            respondFilePreview(responder, invocation.request.id, .failed, "", false, false);
+            return;
+        };
+        var parsed = handlers.parsePayload(
+            handlers.FilePreviewRequest,
+            invocation.request.payload,
+        ) catch {
+            respondFilePreview(responder, invocation.request.id, .failed, "", false, false);
+            return;
+        };
+        defer parsed.deinit();
+        if (parsed.value.fileReferenceId.len == 0 or parsed.value.fileReferenceId.len > 128) {
+            respondFilePreview(responder, invocation.request.id, .failed, "", false, false);
+            return;
+        }
+        const task_id = handlers.parseWireId(parsed.value.taskId) catch {
+            respondFilePreview(responder, invocation.request.id, .failed, "", false, false);
+            return;
+        };
+        const run_id = handlers.parseWireId(parsed.value.runId) catch {
+            respondFilePreview(responder, invocation.request.id, .failed, "", false, false);
+            return;
+        };
+        const workbench = self.requireWorkbench() catch {
+            respondFilePreview(responder, invocation.request.id, .failed, "", false, false);
+            return;
+        };
+        const completion_id = self.reserveFilePreview(
+            responder,
+            invocation.request.id,
+        ) orelse {
+            respondFilePreview(responder, invocation.request.id, .failed, "", false, false);
+            return;
+        };
+        switch (workbench.beginFilePreview(
+            completion_id,
+            task_id,
+            run_id,
+            parsed.value.fileReferenceId,
+        )) {
+            .queued => {},
+            .immediate => |state| self.completeFilePreview(.{
+                .completion_id = completion_id,
+                .state = state,
+                .content = "",
+                .truncated = false,
+                .redacted = false,
+            }),
+        }
+    }
+
+    fn reserveFilePreview(
+        self: *Dispatcher,
+        responder: native_sdk.bridge.AsyncResponder,
+        request_id: []const u8,
+    ) ?u64 {
+        if (self.next_preview_completion_id == std.math.maxInt(u64)) return null;
+        for (&self.preview_in_flight) |*slot| {
+            if (slot.active) continue;
+            const completion_id = self.next_preview_completion_id;
+            self.next_preview_completion_id += 1;
+            @memcpy(slot.request_id_storage[0..request_id.len], request_id);
+            slot.active = true;
+            slot.completion_id = completion_id;
+            slot.responder = responder;
+            slot.request_id_len = request_id.len;
+            return completion_id;
+        }
+        return null;
+    }
+
+    pub fn filePreviewSink(self: *Dispatcher) workbench_api.FilePreviewSink {
+        return .{ .context = self, .complete_fn = completeFilePreviewFromSink };
+    }
+
+    fn completeFilePreviewFromSink(
+        context: *anyopaque,
+        result: workbench_api.FilePreviewResult,
+    ) void {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        self.completeFilePreview(result);
+    }
+
+    fn completeFilePreview(
+        self: *Dispatcher,
+        result: workbench_api.FilePreviewResult,
+    ) void {
+        for (&self.preview_in_flight) |*slot| {
+            if (!slot.active or slot.completion_id != result.completion_id) continue;
+            const responder = slot.responder;
+            var request_id_storage: [native_sdk.bridge.max_id_bytes]u8 = undefined;
+            @memcpy(
+                request_id_storage[0..slot.request_id_len],
+                slot.request_id_storage[0..slot.request_id_len],
+            );
+            const request_id = request_id_storage[0..slot.request_id_len];
+            slot.* = .{};
+            respondFilePreview(
+                responder,
+                request_id,
+                result.state,
+                result.content,
+                result.truncated,
+                result.redacted,
+            );
+            return;
+        }
+    }
+
+    pub fn settleFilePreviewsForShutdown(self: *Dispatcher) void {
+        for (&self.preview_in_flight) |*slot| {
+            if (!slot.active) continue;
+            const responder = slot.responder;
+            var request_id_storage: [native_sdk.bridge.max_id_bytes]u8 = undefined;
+            @memcpy(
+                request_id_storage[0..slot.request_id_len],
+                slot.request_id_storage[0..slot.request_id_len],
+            );
+            const request_id = request_id_storage[0..slot.request_id_len];
+            slot.* = .{};
+            respondFilePreview(responder, request_id, .failed, "", false, false);
+        }
+    }
+
+    fn respondFilePreview(
+        responder: native_sdk.bridge.AsyncResponder,
+        request_id: []const u8,
+        state: workbench_api.FilePreviewState,
+        content: []const u8,
+        truncated: bool,
+        redacted: bool,
+    ) void {
+        var result_buffer: [native_sdk.bridge.max_result_bytes]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&result_buffer);
+        writer.writeAll("{\"state\":\"") catch {
+            responder.fail(request_id, .internal_error, "File preview encoding failed") catch {};
+            return;
+        };
+        writer.writeAll(switch (state) {
+            .ready => "ready",
+            .missing => "missing",
+            .restricted => "restricted",
+            .unsupported => "unsupported",
+            .changing => "changing",
+            .failed => "error",
+        }) catch {
+            responder.fail(request_id, .internal_error, "File preview encoding failed") catch {};
+            return;
+        };
+        writer.writeAll("\",\"content\":") catch {
+            responder.fail(request_id, .internal_error, "File preview encoding failed") catch {};
+            return;
+        };
+        std.json.Stringify.value(if (state == .ready) content else "", .{}, &writer) catch {
+            responder.fail(request_id, .internal_error, "File preview encoding failed") catch {};
+            return;
+        };
+        writer.print(",\"truncated\":{},\"redacted\":{}}}", .{
+            state == .ready and truncated,
+            state == .ready and redacted,
+        }) catch {
+            responder.fail(request_id, .internal_error, "File preview encoding failed") catch {};
+            return;
+        };
+        responder.success(request_id, writer.buffered()) catch {};
     }
 
     fn accountBeginLogin(
@@ -3564,6 +3709,95 @@ test "permission command ingress accepts AgentCore Session choices" {
     }
 }
 
+test "file preview async response preserves the exact bounded wire shape" {
+    const Capture = struct {
+        allocator: std.mem.Allocator,
+        response: ?[]u8 = null,
+        calls: usize = 0,
+
+        fn receive(
+            context: *anyopaque,
+            _: native_sdk.bridge.Source,
+            response: []const u8,
+        ) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.response) |previous| self.allocator.free(previous);
+            self.response = try self.allocator.dupe(u8, response);
+            self.calls += 1;
+        }
+
+        fn reset(self: *@This()) void {
+            if (self.response) |response| self.allocator.free(response);
+            self.response = null;
+            self.calls = 0;
+        }
+    };
+    var capture = Capture{ .allocator = std.testing.allocator };
+    defer capture.reset();
+    const responder: native_sdk.bridge.AsyncResponder = .{
+        .context = &capture,
+        .source = .{ .origin = "zero://app", .window_id = 3 },
+        .respond_fn = Capture.receive,
+    };
+
+    Dispatcher.respondFilePreview(
+        responder,
+        "preview-1",
+        .ready,
+        "line 1\nline 2",
+        true,
+        true,
+    );
+    try std.testing.expectEqual(@as(usize, 1), capture.calls);
+    var ready = try std.json.parseFromSlice(
+        std.json.Value,
+        std.testing.allocator,
+        capture.response.?,
+        .{},
+    );
+    defer ready.deinit();
+    const ready_result = ready.value.object.get("result").?.object;
+    try std.testing.expectEqualStrings(
+        "ready",
+        ready_result.get("state").?.string,
+    );
+    try std.testing.expectEqualStrings(
+        "line 1\nline 2",
+        ready_result.get("content").?.string,
+    );
+    try std.testing.expect(ready_result.get("truncated").?.bool);
+    try std.testing.expect(ready_result.get("redacted").?.bool);
+
+    capture.reset();
+    Dispatcher.respondFilePreview(
+        responder,
+        "preview-2",
+        .restricted,
+        "must not cross the Bridge",
+        true,
+        true,
+    );
+    try std.testing.expectEqual(@as(usize, 1), capture.calls);
+    var restricted = try std.json.parseFromSlice(
+        std.json.Value,
+        std.testing.allocator,
+        capture.response.?,
+        .{},
+    );
+    defer restricted.deinit();
+    const restricted_result = restricted.value.object.get("result").?.object;
+    try std.testing.expectEqualStrings(
+        "restricted",
+        restricted_result.get("state").?.string,
+    );
+    try std.testing.expectEqualStrings(
+        "",
+        restricted_result.get("content").?.string,
+    );
+    try std.testing.expect(!restricted_result.get("truncated").?.bool);
+    try std.testing.expect(!restricted_result.get("redacted").?.bool);
+}
+
 test "Account command response encoding rejects inconsistent attempt metadata" {
     var output: [256]u8 = undefined;
     try std.testing.expectError(
@@ -3882,6 +4116,8 @@ test "Dispatcher validates authority before domain calls and preserves committed
     const native_dispatcher = dispatcher.register(
         @import("policy.zig").product(.release),
     );
+    try std.testing.expect(native_dispatcher.registry.find(commands.preview_file) == null);
+    try std.testing.expect(native_dispatcher.async_registry.find(commands.preview_file) != null);
     const source = native_sdk.bridge.Source{ .origin = "zero://app", .window_id = 3 };
     var response: [4096]u8 = undefined;
 
