@@ -54,6 +54,24 @@ pub const Error = error{
     Capacity,
 } || std.mem.Allocator.Error;
 
+pub const ExecutorJob = struct {
+    identity: *anyopaque,
+    context: *anyopaque,
+    execute_fn: *const fn (*anyopaque) void,
+    cancel_fn: *const fn (*anyopaque) void,
+};
+
+/// Narrow queue capability. File Preview owns its jobs and completion lane,
+/// but never receives the concrete Product Control executor.
+pub const Executor = struct {
+    context: *anyopaque,
+    enqueue_fn: *const fn (*anyopaque, ExecutorJob) error{ ExecutorShuttingDown, QueueFull }!void,
+
+    fn enqueue(self: Executor, job: ExecutorJob) error{ ExecutorShuttingDown, QueueFull }!void {
+        return self.enqueue_fn(self.context, job);
+    }
+};
+
 const Job = struct {
     lane: *Lane,
     completion_id: u64,
@@ -205,7 +223,7 @@ pub const Lane = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
     notifier: Notifier,
-    executor: *Executor,
+    executor: Executor,
     mutex: std.Io.Mutex = .init,
     completions: [max_in_flight]?*Job = @splat(null),
     completion_head: usize = 0,
@@ -213,24 +231,15 @@ pub const Lane = struct {
     completion_count: usize = 0,
     active_count: usize = 0,
     accepting: bool = true,
-    shutdown: bool = false,
-
-    const Executor = @import("workbench_executor").Executor;
 
     pub fn create(
         io: std.Io,
         allocator: std.mem.Allocator,
         notifier: Notifier,
-    ) (std.mem.Allocator.Error || std.Thread.SpawnError)!*Lane {
+        executor: Executor,
+    ) std.mem.Allocator.Error!*Lane {
         const self = try allocator.create(Lane);
         errdefer allocator.destroy(self);
-        const executor = @import("workbench_executor").Executor.create(io, allocator, .{
-            .worker_count = worker_count,
-            .queue_capacity = max_in_flight,
-        }) catch |err| switch (err) {
-            error.InvalidLimits => unreachable,
-            else => return @errorCast(err),
-        };
         self.* = .{
             .io = io,
             .allocator = allocator,
@@ -297,18 +306,10 @@ pub const Lane = struct {
         self.unlock();
     }
 
-    pub fn shutdownExecutor(self: *Lane) void {
-        if (self.shutdown) return;
-        self.stopAdmission();
-        self.executor.shutdown();
-        self.shutdown = true;
-    }
-
     pub fn deinit(self: *Lane) void {
-        self.shutdownExecutor();
+        std.debug.assert(!self.accepting);
         std.debug.assert(self.active_count == 0);
         std.debug.assert(self.completion_count == 0);
-        self.executor.deinit();
         const allocator = self.allocator;
         allocator.destroy(self);
     }
@@ -448,11 +449,23 @@ test "file preview lane classifies bounded text empty and unsafe files" {
         }
     };
     var wake = Wake{};
+    const TestExecutor = struct {
+        fn enqueue(_: *anyopaque, job: ExecutorJob) error{ ExecutorShuttingDown, QueueFull }!void {
+            job.execute_fn(job.context);
+        }
+    };
+    var executor_context: u8 = 0;
     const lane = try Lane.create(std.testing.io, std.testing.allocator, .{
         .context = &wake,
         .wake_fn = Wake.notify,
+    }, .{
+        .context = &executor_context,
+        .enqueue_fn = TestExecutor.enqueue,
     });
-    defer lane.deinit();
+    defer {
+        lane.stopAdmission();
+        lane.deinit();
+    }
 
     inline for (.{
         .{ @as(u64, 1), "text.txt", @as(usize, 5) },
@@ -472,7 +485,7 @@ test "file preview lane classifies bounded text empty and unsafe files" {
         .max_line_bytes = 100,
     });
 
-    while (wake.count.load(.acquire) != 3) std.Thread.yield() catch {};
+    try std.testing.expectEqual(@as(usize, 3), wake.count.load(.acquire));
     var seen: [3]bool = @splat(false);
     while (lane.take()) |taken| {
         defer lane.release(taken);
@@ -499,7 +512,6 @@ test "file preview lane classifies bounded text empty and unsafe files" {
         }
     }
     try std.testing.expectEqual([3]bool{ true, true, true }, seen);
-    lane.shutdownExecutor();
 }
 
 test "file preview text bounds stop before an over-limit line or codepoint" {

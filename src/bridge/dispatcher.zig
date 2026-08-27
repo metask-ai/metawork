@@ -710,7 +710,7 @@ pub const Dispatcher = struct {
         defer callback.deinit();
         try self.requireWindow(invocation.source.window_id);
         var parsed = try handlers.parsePayload(
-            handlers.RuntimeSnapshotChunk,
+            handlers.ProductSnapshotChunk,
             invocation.request.payload,
         );
         defer parsed.deinit();

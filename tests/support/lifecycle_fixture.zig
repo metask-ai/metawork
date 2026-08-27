@@ -5,7 +5,7 @@ pub const product_skill = @import("metawork_product_skill");
 pub const product_task = @import("metawork_product_task");
 pub const account_contract = @import("metawork_account_contract");
 pub const event_pump = @import("event_pump");
-pub const workbench_executor = @import("workbench_executor");
+pub const product_control_executor = @import("product_control_executor");
 pub const sdk = @import("metask_agentcore");
 pub const wire = sdk.types;
 
@@ -2351,7 +2351,7 @@ pub fn unavailableEventConsumer(_: ?*anyopaque) lifecycle.EventReadyNotification
 
 pub const TestCompositionEntry = struct {
     runtime: *lifecycle.Runtime,
-    executor: *workbench_executor.Executor,
+    executor: *product_control_executor.Executor,
     executor_shutdown: std.atomic.Value(enum(u8) { open, running, complete }) = .init(.open),
     terminal_mutex: std.Io.Mutex = .init,
     terminal_condition: std.Io.Condition = .init,
@@ -2366,7 +2366,7 @@ pub const StoredTerminalResult = struct {
 
 pub var test_compositions: [32]?TestCompositionEntry = @splat(null);
 
-pub fn registerTestComposition(runtime: *lifecycle.Runtime, executor: *workbench_executor.Executor) !void {
+pub fn registerTestComposition(runtime: *lifecycle.Runtime, executor: *product_control_executor.Executor) !void {
     for (&test_compositions) |*entry| {
         if (entry.* == null) {
             entry.* = .{ .runtime = runtime, .executor = executor };
@@ -2384,11 +2384,11 @@ pub fn testCompositionEntry(runtime: *lifecycle.Runtime) *TestCompositionEntry {
     unreachable;
 }
 
-pub fn testExecutor(runtime: *lifecycle.Runtime) *workbench_executor.Executor {
+pub fn testExecutor(runtime: *lifecycle.Runtime) *product_control_executor.Executor {
     return testCompositionEntry(runtime).executor;
 }
 
-pub fn unregisterTestComposition(runtime: *lifecycle.Runtime) *workbench_executor.Executor {
+pub fn unregisterTestComposition(runtime: *lifecycle.Runtime) *product_control_executor.Executor {
     for (&test_compositions) |*entry| {
         const value = entry.* orelse continue;
         if (value.runtime == runtime) {
@@ -2505,7 +2505,7 @@ pub fn deinitTestComposition(runtime: *lifecycle.Runtime) void {
 }
 
 pub fn createTestComposition(limits: TestCompositionLimits) !*lifecycle.Runtime {
-    const executor = try workbench_executor.Executor.create(
+    const executor = try product_control_executor.Executor.create(
         std.testing.io,
         std.testing.allocator,
         .{ .worker_count = limits.worker_count, .queue_capacity = limits.queue_capacity },

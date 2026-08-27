@@ -71,7 +71,7 @@ metawork/
 │   │       └── windows.zig # 最大化/还原、用户关闭与最大化状态
 │   ├── product/           # Product owner 与其持有的具名产品子模块；不形成统一 facade
 │   │   ├── control.zig    # Product Control module entrypoint；公开唯一 Runtime owner identity
-│   │   ├── control/       # 当前 Runtime、Application capability ports；Executor/File Preview 下一阶段归位
+│   │   ├── control/       # Runtime、Application capability ports、Executor 与 File Preview lane
 │   │   ├── account.zig    # Account module entrypoint；公开模块名仍为 metawork_account
 │   │   ├── account/       # Account Runtime、OAuth、catalog、credential 与状态机
 │   │   ├── mcp.zig        # Product MCP Runtime、Ports、contract 与 typed DTO 窄入口
@@ -82,7 +82,7 @@ metawork/
 │   │   └── task/          # aggregate state/policy、persistence、checkpoint、binding、runtime 与 recovery kernels
 │   ├── bridge.zig         # Renderer Bridge module entrypoint
 │   ├── bridge/            # command policy、Dispatcher 与 ProductDelivery
-│   ├── workbench/         # 尚待归位的 Executor、File Preview、schedule 与 automatic Workspace kernels
+│   ├── workbench/         # 尚待后续领域裁决的 schedule 与 automatic Workspace kernels
 │   ├── agent.zig          # Agent execution module entrypoint
 │   ├── agent/             # catalog、Completion、Session/Runtime、event pump、callback 与 MCP ownership
 │   │   ├── provider.zig   # MetaWork-owned 封闭 ProviderKind
@@ -289,7 +289,7 @@ storage -> SQLite amalgamation
 
 `product/skill/management_runtime.zig` 是总 Runtime 内部的 live local-asset use-case owner：它调用唯一 package/management kernels，闭合 preview/read/export、install/reimport/uninstall/retry、staging、恢复和 catalog reconciliation。`product/skill/runtime.zig` 只保留 aggregate 入口、catalog refresh 协调与内部 owner 委托；`projection.zig` 只证明 Workspace authority/Task quiescence、传入时间事实并发布 revision，不直接调用 package 或 Transactions。
 
-`workbench/file_preview.zig` 在本阶段已经通过具名 `product_control_file_preview` module 接入，不再由组合 Runtime 相对导入；它仍是独立于产品执行队列的只读安全 lane，固定 2 workers/8 in-flight，独占 no-follow bounded file read、metadata 撕裂检测、raw buffer/completion 所有权与 secure-zero。`product/control/runtime.zig` 在主线程完成精确 locator/authority 校验、completion reauthorization、current/historical credential redaction 与 callback-scoped projection。Executor 与 File Preview 的物理归位属于下一次 owner cut，当前 active tree 不提前宣称已完成。
+`product/control/executor.zig` 独占 Product Control 的有界 queue、workers、admission 与 shutdown；Task、Skill 与 MCP 只能消费由 Runtime 绑定的窄 enqueue/cancel capability。`product/control/file_preview.zig` 是独立于产品执行队列的只读安全 lane，固定 2 workers/8 in-flight，独占 no-follow bounded file read、metadata 撕裂检测、raw buffer/completion 所有权与 secure-zero，并只消费 opaque enqueue capability，不导入具体 Executor。`product/control/runtime.zig` 拥有两套 concrete Executor 的创建、join 与销毁顺序，并在主线程完成 preview 的精确 locator/authority 校验、completion reauthorization、current/historical credential redaction 与 callback-scoped projection。
 
 ## 6. 测试与构建资产
 

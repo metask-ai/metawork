@@ -2,7 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const lifecycle = @import("metawork_agent");
 const account_contract = @import("metawork_account_contract");
-const executor_impl = @import("workbench_executor");
+const executor_impl = @import("product_control_executor");
 const file_preview = @import("product_control_file_preview");
 const automatic_workspace_allocator = @import("workbench_automatic_workspace_allocator");
 const scheduled_tasks_impl = @import("workbench_scheduled_tasks");
@@ -465,6 +465,26 @@ fn enqueueSkillJob(
 fn cancelSkillJob(context: *anyopaque, identity: *anyopaque) bool {
     const executor: *executor_impl.Executor = @ptrCast(@alignCast(context));
     return executor.cancel(identity);
+}
+
+fn enqueueFilePreviewJob(
+    context: *anyopaque,
+    job: file_preview.ExecutorJob,
+) error{ ExecutorShuttingDown, QueueFull }!void {
+    const executor: *executor_impl.Executor = @ptrCast(@alignCast(context));
+    return executor.enqueue(.{
+        .identity = job.identity,
+        .context = job.context,
+        .execute_fn = job.execute_fn,
+        .cancel_fn = job.cancel_fn,
+    });
+}
+
+fn filePreviewExecutor(executor: *executor_impl.Executor) file_preview.Executor {
+    return .{
+        .context = executor,
+        .enqueue_fn = enqueueFilePreviewJob,
+    };
 }
 
 fn enqueueMcpJob(
@@ -1300,6 +1320,7 @@ pub const Runtime = struct {
     schedule_background_available: bool = false,
     change_notifier: ChangeNotifier,
     executor: *executor_impl.Executor,
+    preview_executor: *executor_impl.Executor,
     preview_lane: *file_preview.Lane,
     shutting_down: bool = false,
     executor_shutdown: bool = false,
@@ -1423,12 +1444,25 @@ pub const Runtime = struct {
         };
         var executor_owned = true;
         errdefer if (executor_owned) executor.deinit();
+        const preview_executor = executor_impl.Executor.create(io, allocator, .{
+            .worker_count = file_preview.worker_count,
+            .queue_capacity = file_preview.max_in_flight,
+        }) catch |err| switch (err) {
+            error.InvalidLimits => unreachable,
+            else => return err,
+        };
+        var preview_executor_owned = true;
+        errdefer if (preview_executor_owned) preview_executor.deinit();
         const preview_lane = try file_preview.Lane.create(io, allocator, .{
             .context = configuration.change_notifier.context,
             .wake_fn = configuration.change_notifier.wake,
-        });
+        }, filePreviewExecutor(preview_executor));
         var preview_lane_owned = true;
-        errdefer if (preview_lane_owned) preview_lane.deinit();
+        errdefer if (preview_lane_owned) {
+            preview_lane.stopAdmission();
+            preview_executor.shutdown();
+            preview_lane.deinit();
+        };
         var skill = try skill_runtime.Runtime.init(
             io,
             allocator,
@@ -1471,6 +1505,7 @@ pub const Runtime = struct {
             .schedule_notifier = configuration.schedule_notifier,
             .change_notifier = configuration.change_notifier,
             .executor = executor,
+            .preview_executor = preview_executor,
             .preview_lane = preview_lane,
             .account = account,
             .execution = execution,
@@ -1481,6 +1516,7 @@ pub const Runtime = struct {
         };
         skill_owned = false;
         executor_owned = false;
+        preview_executor_owned = false;
         if ((workbench.task_persistence_health == .ready or
             workbench.task_persistence_health == .degraded) and
             configuration.task_persistence.restored_bytes != null)
@@ -4150,6 +4186,7 @@ pub const Runtime = struct {
         std.debug.assert(self.projection_bytes == 0);
         self.executor.deinit();
         self.preview_lane.deinit();
+        self.preview_executor.deinit();
         self.* = undefined;
     }
 
@@ -4159,14 +4196,15 @@ pub const Runtime = struct {
 
     pub fn shutdownFilePreviewExecutor(self: *Runtime) void {
         if (self.preview_executor_shutdown) return;
-        self.preview_lane.shutdownExecutor();
+        self.preview_lane.stopAdmission();
+        self.preview_executor.shutdown();
         self.preview_executor_shutdown = true;
     }
 
     pub fn shutdownExecutor(self: *Runtime) void {
+        self.shutdownFilePreviewExecutor();
         if (self.executor_shutdown) return;
         self.shutting_down = true;
-        self.shutdownFilePreviewExecutor();
         if (self.mcp) |*runtime| runtime.beginShutdown();
         self.schedule_timer.cancelCurrent();
         self.skill.beginShutdown();

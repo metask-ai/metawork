@@ -113,9 +113,13 @@ test("named module roots exist and lower owners cannot import composition", () =
   assert.equal(existsSync(new URL("src/account.zig", root)), false);
   assert.equal(existsSync(new URL("src/account/", root)), false);
   assert.equal(existsSync(new URL("src/product/control/runtime.zig", root)), true);
+  assert.equal(existsSync(new URL("src/product/control/executor.zig", root)), true);
+  assert.equal(existsSync(new URL("src/product/control/file_preview.zig", root)), true);
   assert.equal(existsSync(new URL("tests/product/control_lifecycle_test.zig", root)), true);
   assert.equal(existsSync(new URL("src/workbench.zig", root)), false);
   assert.equal(existsSync(new URL("src/workbench/projection.zig", root)), false);
+  assert.equal(existsSync(new URL("src/workbench/executor.zig", root)), false);
+  assert.equal(existsSync(new URL("src/workbench/file_preview.zig", root)), false);
   assert.equal(
     existsSync(new URL("tests/workbench/executor_lifecycle_test.zig", root)),
     false,
@@ -262,6 +266,8 @@ test("Product Control is the only composition owner identity", () => {
   const build = read("build.zig");
   const control = read("src/product/control.zig");
   const runtime = read("src/product/control/runtime.zig");
+  const executor = read("src/product/control/executor.zig");
+  const filePreview = read("src/product/control/file_preview.zig");
   const source = [
     ...zigFiles("src/"),
     ...zigFiles("tests/"),
@@ -271,7 +277,10 @@ test("Product Control is the only composition owner identity", () => {
 
   assert.match(build, /src\/product\/control\.zig/);
   assert.match(build, /src\/product\/control\/runtime\.zig/);
+  assert.match(build, /src\/product\/control\/executor\.zig/);
+  assert.match(build, /src\/product\/control\/file_preview\.zig/);
   assert.match(build, /metawork_product_control/);
+  assert.match(build, /product_control_executor/);
   assert.match(build, /product_control_file_preview/);
   assert.match(control, /pub const Runtime = runtime_impl\.Runtime/);
   assert.match(runtime, /pub const Runtime = struct/);
@@ -279,6 +288,21 @@ test("Product Control is the only composition owner identity", () => {
   assert.doesNotMatch(source, /@import\("metawork_workbench"\)|@import\("workbench_projection"\)/);
   assert.doesNotMatch(source, /pub const Workbench\s*=|pub const Workbench = struct/);
   assert.doesNotMatch(build, /workbench_contract_fixture/);
+  assert.doesNotMatch(build, /src\/workbench\/(?:executor|file_preview)\.zig|workbench_executor/);
+  assert.match(filePreview, /pub const Executor = struct/);
+  assert.match(filePreview, /context: \*anyopaque/);
+  assert.match(filePreview, /enqueue_fn:/);
+  assert.doesNotMatch(
+    filePreview,
+    /@import\("product_control_executor"\)|\*Runtime|\*Control|std\.Thread/,
+  );
+  const job = executor.match(/pub const Job = struct \{([\s\S]*?)\n\};/)?.[1];
+  assert.ok(job, "executor Job must remain inspectable");
+  assert.doesNotMatch(job, /Runtime|Control|Application|App|Task|Skill|Mcp/);
+  assert.doesNotMatch(
+    executor,
+    /@import\("(?:metawork_product_control|metawork_app)"\)|\*Runtime|\*Control/,
+  );
 });
 
 test("Application coordinators consume scoped Product Control capabilities", () => {
@@ -364,7 +388,7 @@ test("Product Skill has one live owner behind narrow composition ports", () => {
   assert.match(catalog, /@import\("metawork_agent"\)/);
   assert.doesNotMatch(
     catalog,
-    /Workbench|Task|Workspace|workbench_executor|std\.Thread|\*agent\.Runtime|\*agent\.Session/,
+    /Workbench|Task|Workspace|product_control_executor|std\.Thread|\*agent\.Runtime|\*agent\.Session/,
   );
   for (const source of [projection, taskAttachment]) {
     assert.match(source, /@import\("metawork_product_skill"\)\.catalog/);
@@ -377,16 +401,16 @@ test("Product Skill has one live owner behind narrow composition ports", () => {
   );
   assert.doesNotMatch(
     packageKernel,
-    /Workbench|Workspace|Task|workbench_executor|std\.Thread|@import\("metawork_agent"\)/,
+    /Workbench|Workspace|Task|product_control_executor|std\.Thread|@import\("metawork_agent"\)/,
   );
   assert.doesNotMatch(
     enablement,
-    /Workbench|workbench_executor|std\.Thread|@import\("metawork_agent"\)/,
+    /Workbench|product_control_executor|std\.Thread|@import\("metawork_agent"\)/,
   );
   assert.match(management, /@import\("product_skill_package"\)/);
   assert.doesNotMatch(
     management,
-    /Workbench|workbench_executor|std\.Thread|@import\("metawork_agent"\)/,
+    /Workbench|product_control_executor|std\.Thread|@import\("metawork_agent"\)/,
   );
   assert.match(managementRuntime, /@import\("product_skill_management"\)/);
   assert.match(managementRuntime, /@import\("product_skill_package"\)/);
@@ -398,7 +422,7 @@ test("Product Skill has one live owner behind narrow composition ports", () => {
   assert.match(managementRuntime, /pub fn reconcileNoFail/);
   assert.doesNotMatch(
     managementRuntime,
-    /Workbench|WorkspaceView|TaskView|workbench_executor|std\.Thread|@import\("metawork_agent"\)|\*agent\.(?:Runtime|Session)/,
+    /Workbench|WorkspaceView|TaskView|product_control_executor|std\.Thread|@import\("metawork_agent"\)|\*agent\.(?:Runtime|Session)/,
   );
   assert.match(state, /@import\("metawork_agent"\)/);
   assert.match(state, /@import\("product_skill_catalog"\)/);
@@ -406,7 +430,7 @@ test("Product Skill has one live owner behind narrow composition ports", () => {
   assert.match(state, /@import\("product_skill_management"\)/);
   assert.doesNotMatch(
     state,
-    /Workbench|workbench_executor|std\.Thread|CatalogJob|\*agent\.Runtime|\*agent\.Session/,
+    /Workbench|product_control_executor|std\.Thread|CatalogJob|\*agent\.Runtime|\*agent\.Session/,
   );
   assert.match(state, /pub const State = struct/);
   assert.match(state, /pub const CatalogControl = struct/);
@@ -421,13 +445,13 @@ test("Product Skill has one live owner behind narrow composition ports", () => {
   assert.match(policy, /pub fn enablementPersistenceFailure/);
   assert.doesNotMatch(
     policy,
-    /Workbench|WorkspaceView|TaskView|workbench_executor|std\.Thread|CatalogJob|\*agent\.Runtime|\*agent\.Session|FileStore|\.commit\(|bumpRevision|scheduleSkill/,
+    /Workbench|WorkspaceView|TaskView|product_control_executor|std\.Thread|CatalogJob|\*agent\.Runtime|\*agent\.Session|FileStore|\.commit\(|bumpRevision|scheduleSkill/,
   );
   assert.match(ports, /@import\("metawork_agent"\)/);
   assert.match(ports, /pub const Ports = struct/);
   assert.doesNotMatch(
     ports,
-    /@import\("(?:metawork_product_control|workbench_executor|metawork_app|native_sdk|metask_agentcore)"\)|\*agent\.(?:Runtime|Session)/,
+    /@import\("(?:metawork_product_control|product_control_executor|metawork_app|native_sdk|metask_agentcore)"\)|\*agent\.(?:Runtime|Session)/,
   );
   assert.match(runtime, /const CatalogJob = struct/);
   assert.match(runtime, /workspaces: \[\]\?WorkspaceCatalog/);
@@ -451,7 +475,7 @@ test("Product Skill has one live owner behind narrow composition ports", () => {
   assert.match(runtime, /pub fn beginShutdown/);
   assert.doesNotMatch(
     runtime,
-    /@import\("(?:metawork_product_control|workbench_executor|metawork_app|native_sdk|metask_agentcore)"\)|\*agent\.(?:Runtime|Session)|std\.Thread/,
+    /@import\("(?:metawork_product_control|product_control_executor|metawork_app|native_sdk|metask_agentcore)"\)|\*agent\.(?:Runtime|Session)|std\.Thread/,
   );
   assert.doesNotMatch(
     runtime,
@@ -499,7 +523,7 @@ test("Product Skill has one live owner behind narrow composition ports", () => {
   assert.match(view, /pub fn writeManagementProjection/);
   assert.doesNotMatch(
     view,
-    /Workbench|WorkspaceView|TaskView|workbench_executor|std\.Thread|CatalogJob|Agent Runtime|Session|FileStore|credential|bumpRevision|projection_bytes/,
+    /Workbench|WorkspaceView|TaskView|product_control_executor|std\.Thread|CatalogJob|Agent Runtime|Session|FileStore|credential|bumpRevision|projection_bytes/,
   );
   assert.match(projection, /fn skillWorkspaceCatalog/);
   assert.doesNotMatch(projection, /fn skillManagementInput|\.skill\.state/);
@@ -621,7 +645,7 @@ test("Product Task kernels have one physical home without taking the executor", 
   const taskRuntime = read("src/product/task/runtime.zig");
   const taskKernelFiles = zigFiles("src/product/task/");
   const projection = read("src/product/control/runtime.zig");
-  const executor = read("src/workbench/executor.zig");
+  const executor = read("src/product/control/executor.zig");
   const workbenchRoot = read("src/product/control.zig");
   const appStores = read("src/app/stores.zig");
   const recoveryJob = read("src/product/task/recovery_job.zig");
@@ -648,7 +672,7 @@ test("Product Task kernels have one physical home without taking the executor", 
   assert.match(appStores, /product_task\.checkpoint_store\.FileStore/);
   assert.doesNotMatch(
     recoveryJob,
-    /workbench_executor|@import\("metawork_product_control"\)/,
+    /product_control_executor|@import\("metawork_product_control"\)/,
   );
   assert.match(build, /src\/product\/task\/recovery_job\.zig/);
   assert.match(build, /src\/product\/task\/agent_session\.zig/);
@@ -689,7 +713,7 @@ test("Product Task kernels have one physical home without taking the executor", 
   assert.match(taskState, /@import\("metawork_agent"\)/);
   assert.doesNotMatch(
     taskState,
-    /Workbench|workbench_executor|std\.Thread|@import\("(?:metawork_app|metawork_bridge|native_sdk|metask_agentcore)"\)/,
+    /Workbench|product_control_executor|std\.Thread|@import\("(?:metawork_app|metawork_bridge|native_sdk|metask_agentcore)"\)/,
   );
   assert.doesNotMatch(projection, /const RunRecord = task_model\.RunRecord;/);
   assert.doesNotMatch(projection, /const CompactRecord = task_model\.CompactRecord;/);
@@ -713,7 +737,7 @@ test("Product Task kernels have one physical home without taking the executor", 
   assert.doesNotMatch(automaticTitle, /OwnedTaskExecution|credential|secret|execution:/);
   assert.doesNotMatch(
     taskExecution,
-    /Workbench|TaskView|\*task_runtime\.|workbench_executor|@import\("(?:metawork_product_control|metawork_app|metawork_bridge|native_sdk|metask_agentcore)"\)/,
+    /Workbench|TaskView|\*task_runtime\.|product_control_executor|@import\("(?:metawork_product_control|metawork_app|metawork_bridge|native_sdk|metask_agentcore)"\)/,
   );
   assert.doesNotMatch(
     taskExecution,
@@ -749,7 +773,7 @@ test("Product Task kernels have one physical home without taking the executor", 
   assert.match(taskPolicy, /@import\("metawork_agent"\)/);
   assert.doesNotMatch(
     taskPolicy,
-    /Workbench|workbench_executor|std\.Thread|commitTaskState|bumpRevision|agent_runtime\.takeEvent|@import\("(?:metawork_app|metawork_bridge|native_sdk|metask_agentcore)"\)/,
+    /Workbench|product_control_executor|std\.Thread|commitTaskState|bumpRevision|agent_runtime\.takeEvent|@import\("(?:metawork_app|metawork_bridge|native_sdk|metask_agentcore)"\)/,
   );
   for (const operation of [
     "openTask",
@@ -805,7 +829,7 @@ test("Product Task kernels have one physical home without taking the executor", 
   assert.match(projection, /fn commitTaskStateWithCheckpoint\(/);
   assert.doesNotMatch(
     taskPersistence,
-    /Workbench|workbench_executor|std\.Thread|commitTaskState|bumpRevision|writeSnapshot|@import\("(?:metawork_app|metawork_bridge|native_sdk|metask_agentcore)"\)/,
+    /Workbench|product_control_executor|std\.Thread|commitTaskState|bumpRevision|writeSnapshot|@import\("(?:metawork_app|metawork_bridge|native_sdk|metask_agentcore)"\)/,
   );
   for (const viewFn of [
     "writeProjection",
@@ -824,7 +848,7 @@ test("Product Task kernels have one physical home without taking the executor", 
   assert.match(taskView, /@import\("metawork_product_skill"\)/);
   assert.doesNotMatch(
     taskView,
-    /\*Workbench|:\s*Workbench\b|workbench_executor|std\.Thread|\*agent\.Session|commitTaskState|bumpRevision|writeSnapshot|@import\("(?:metawork_product_control|metawork_app|metawork_bridge|native_sdk|metask_agentcore)"\)/,
+    /\*Workbench|:\s*Workbench\b|product_control_executor|std\.Thread|\*agent\.Session|commitTaskState|bumpRevision|writeSnapshot|@import\("(?:metawork_product_control|metawork_app|metawork_bridge|native_sdk|metask_agentcore)"\)/,
   );
   for (const retiredViewFn of [
     "writeCompact",
@@ -892,7 +916,7 @@ test("Product Task kernels have one physical home without taking the executor", 
   assert.match(taskRuntime, /pub fn observeDurableCommit\(/);
   assert.doesNotMatch(
     taskRuntime,
-    /Workbench|workbench_executor|@import\("(?:metawork_app|metawork_bridge|native_sdk|metask_agentcore)"\)/,
+    /Workbench|product_control_executor|@import\("(?:metawork_app|metawork_bridge|native_sdk|metask_agentcore)"\)/,
   );
   assert.match(projection, /task_runtime: task_runtime\.Runtime/);
   assert.doesNotMatch(
@@ -955,7 +979,7 @@ test("Product MCP kernels have one physical home and isolate refresh workers", (
   // Activation/Selection surface; the AgentCore SDK remains forbidden here.
   assert.match(state, /@import\("metawork_agent"\)/);
   assert.match(state, /@import\("product_mcp_configuration"\)/);
-  assert.doesNotMatch(state, /McpRefreshJob|workbench_executor|std\.Thread/);
+  assert.doesNotMatch(state, /McpRefreshJob|product_control_executor|std\.Thread/);
   for (const field of [
     "refresh_request_generation",
     "refresh_pending",
@@ -973,7 +997,7 @@ test("Product MCP kernels have one physical home and isolate refresh workers", (
   assert.match(policy, /@import\("product_mcp_state"\)/);
   assert.doesNotMatch(
     policy,
-    /McpRefreshJob|workbench_executor|std\.Thread|pub const Workbench|createMcpAdmissionSelection|commitPrepared|bumpRevision|mcp_refresh_timer/,
+    /McpRefreshJob|product_control_executor|std\.Thread|pub const Workbench|createMcpAdmissionSelection|commitPrepared|bumpRevision|mcp_refresh_timer/,
   );
   for (const name of [
     "validAuthorizationTransition",
@@ -999,7 +1023,7 @@ test("Product MCP kernels have one physical home and isolate refresh workers", (
   assert.doesNotMatch(view, /mcp_refresh_job/);
   assert.doesNotMatch(
     view,
-    /McpRefreshJob|workbench_executor|std\.Thread|pub const McpProductState/,
+    /McpRefreshJob|product_control_executor|std\.Thread|pub const McpProductState/,
   );
   assert.match(ports, /pub const Executor = struct/);
   assert.match(ports, /pub const Catalog = struct/);
@@ -1007,7 +1031,7 @@ test("Product MCP kernels have one physical home and isolate refresh workers", (
   assert.match(ports, /pub const Notifier = struct/);
   assert.doesNotMatch(
     ports,
-    /@import\("metawork_product_control"\)|@import\("workbench_executor"\)|std\.Thread|\*agent\.Runtime/,
+    /@import\("metawork_product_control"\)|@import\("product_control_executor"\)|std\.Thread|\*agent\.Runtime/,
   );
   assert.match(refreshJob, /pub const Job = struct/);
   assert.match(refreshJob, /pub fn execute/);
@@ -1015,7 +1039,7 @@ test("Product MCP kernels have one physical home and isolate refresh workers", (
   assert.match(refreshJob, /executorJob/);
   assert.doesNotMatch(
     refreshJob,
-    /\b(?:workbench|runtime|state):\s*\*|@import\("workbench_executor"\)|std\.Thread/,
+    /\b(?:workbench|runtime|state):\s*\*|@import\("product_control_executor"\)|std\.Thread/,
   );
   assert.match(runtime, /pub const Runtime = struct/);
   assert.match(runtime, /state: state_module\.McpProductState/);

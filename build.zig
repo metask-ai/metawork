@@ -105,7 +105,8 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-agent-checkpoint", .root_module = test_modules.agent_checkpoint },
         .{ .name = "metawork-agent-session", .root_module = test_modules.agent_session },
         .{ .name = "metawork-product-control", .root_module = test_modules.product_control_runtime },
-        .{ .name = "metawork-workbench-executor", .root_module = test_modules.workbench_executor },
+        .{ .name = "metawork-product-control-executor", .root_module = test_modules.product_control_executor },
+        .{ .name = "metawork-product-control-file-preview", .root_module = test_modules.product_control_file_preview },
         .{ .name = "metawork-automatic-workspace-allocator", .root_module = test_modules.workbench_automatic_workspace_allocator },
         .{ .name = "metawork-scheduled-task-persistence", .root_module = test_modules.workbench_scheduled_persistence },
         .{ .name = "metawork-product-skill-package", .root_module = test_modules.product_skill_package },
@@ -256,7 +257,8 @@ const WiredModules = struct {
     sdk: *std.Build.Module,
     product_control: *std.Build.Module,
     product_control_runtime: *std.Build.Module,
-    workbench_executor: *std.Build.Module,
+    product_control_executor: *std.Build.Module,
+    product_control_file_preview: *std.Build.Module,
     workbench_automatic_workspace_allocator: *std.Build.Module,
     workbench_scheduled_persistence: *std.Build.Module,
     product_skill_package: *std.Build.Module,
@@ -311,7 +313,7 @@ fn createLifecycleFixture(
     fixture.addImport("metawork_account_contract", modules.account_contract);
     fixture.addImport("event_pump", modules.event_pump);
     fixture.addImport("metask_agentcore", modules.sdk);
-    fixture.addImport("workbench_executor", modules.workbench_executor);
+    fixture.addImport("product_control_executor", modules.product_control_executor);
     return fixture;
 }
 
@@ -899,16 +901,15 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     account.addImport("account_network_attempt", account_network_attempt);
     account.addImport("account_runtime", account_runtime);
     const executor = b.createModule(.{
-        .root_source_file = b.path("src/workbench/executor.zig"),
+        .root_source_file = b.path("src/product/control/executor.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     const file_preview = b.createModule(.{
-        .root_source_file = b.path("src/workbench/file_preview.zig"),
+        .root_source_file = b.path("src/product/control/file_preview.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
-    file_preview.addImport("workbench_executor", executor);
     const automatic_workspace_allocator = b.createModule(.{
         .root_source_file = b.path("src/workbench/automatic_workspace_allocator.zig"),
         .target = target,
@@ -1238,7 +1239,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     });
     product_control_runtime.addImport("metawork_agent", agent);
     product_control_runtime.addImport("metawork_account_contract", account_contract);
-    product_control_runtime.addImport("workbench_executor", executor);
+    product_control_runtime.addImport("product_control_executor", executor);
     product_control_runtime.addImport("product_control_file_preview", file_preview);
     product_control_runtime.addImport("workbench_automatic_workspace_allocator", automatic_workspace_allocator);
     product_control_runtime.addImport("workbench_scheduled_tasks", scheduled_tasks);
@@ -1405,7 +1406,8 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .sdk = sdk,
         .product_control = product_control,
         .product_control_runtime = product_control_runtime,
-        .workbench_executor = executor,
+        .product_control_executor = executor,
+        .product_control_file_preview = file_preview,
         .workbench_automatic_workspace_allocator = automatic_workspace_allocator,
         .workbench_scheduled_persistence = scheduled_task_persistence,
         .product_skill_package = skill_package,
