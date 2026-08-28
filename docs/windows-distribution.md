@@ -7,8 +7,8 @@
 Windows development baseline 与平台证据见[验证规范](validation.md)；本文不定义 development bringup。
 
 ```text
-zig-out/package/metawork-<version>-windows-x64-setup.exe
-zig-out/package/metawork-<version>-windows-arm64-setup.exe
+zig-out/package/metawork-<version>-windows-x64.exe
+zig-out/package/metawork-<version>-windows-arm64.exe
 ```
 
 安装器按当前用户安装到 `%LOCALAPPDATA%\Programs\MetaWork`，不请求管理员权限；它注册开始菜单入口和卸载程序，并提供默认不勾选的桌面快捷方式。安装后运行的是 Native SDK package 中的完整目录，不能把其中的 `metawork.exe` 单独取出分发。

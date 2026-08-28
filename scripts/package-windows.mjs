@@ -43,7 +43,7 @@ export function windowsDistributionForArchitecture(
       `unsupported Windows package architecture ${architecture}; expected x64 or arm64`,
     );
   }
-  const installerArtifactName = `${manifest.identity.executableName}-${manifest.metadata.version}-windows-${architecture}-setup.exe`;
+  const installerArtifactName = `${manifest.identity.executableName}-${manifest.metadata.version}-windows-${architecture}.exe`;
   return Object.freeze({
     architecture,
     installerArtifactName,
