@@ -246,7 +246,7 @@ Skill 中心只有一个工作：管理 MetaWork 已知的本地 Skill 资产及
 Skills                                           [ Import skill ] [ Refresh ]
 Manage skills available to MetaWork.
 
-[ Search skills…                              ]  [ All ] [ Personal ] [ Project ]
+[ Search skills…                              ]  [ User defaults ] [ Project settings ]
                                                    Project: [ MetaWork ▾ ]
 
 Needs attention                                                     2
@@ -268,7 +268,10 @@ Skills                                                              10
 
 - 页面保留 Workbench 左栏和约 944 px 内容宽度；标题使用现有 24–28 px Display scale，一句产品说明后直接进入 controls，不增加 Hero、统计卡、渐变、来源 Logo 或装饰插画；
 - Header 的 `Import skill` 是唯一主动作，`Refresh` 使用现有次级按钮。导入、重新导入或卸载成功后仍自动请求 catalog reconciliation；显式 Refresh 是恢复与外部文件变化入口；
-- 搜索过滤已提交管理 projection 的 display name、description、invocation 和 argument name。`All / Personal / Project` 是范围筛选；选择 Project 后显示已注册 Manual Workspace selector，不借用左栏 current Workspace，也不列出 Automatic Workspace；
+- 页面一次只展示一个 policy context，不提供把 Personal 与全部 Project row 相加的 `All` 入口。默认 `User defaults` 只展示 `scope.kind = personal`；`Project settings` 只展示一个已选择 Manual Workspace 的 row，并严格同时匹配 Workspace id 与 epoch；
+- Project selector 只包含 `kind = manual` 且 authorization available 的 Workspace，保持 Host authoritative recent order。当前选择仍存在时保持；失效后切换到第一个合法候选；没有合法 Workspace 时显示 `No configurable projects`，不得回退到其他 scope；
+- 搜索只过滤当前 context 已提交 projection 的 display name、description、invocation 和 argument name；计数、空状态、Needs attention、普通列表、键盘导航和详情入口全部从当前 context 的 visible rows 派生。切换 context 或 Workspace 时关闭已经不属于 visible rows 的详情；
+- Personal row 标签为 `User defaults`；Project row 标签为 `Project settings · <Workspace display name>`。标签表达 policy context，不表达 Skill 文件来源；`sourceKind` 只用于已有 provenance 与管理动作；
 - 异常、冲突和 `pending_verification` 进入 `Needs attention`，正常资产进入 `Skills`；空分组不渲染，同一 Skill 不在两个分组重复；
 - 常规桌面使用两列卡片，中等与窄窗降为一列。卡片使用 `canvas/paper`、`rule`、约 12 px 圆角和无常驻阴影；hover/focus 只增加极浅 brand 背景、边框和最多 1 px 位移；
 - 卡片显示统一的线性 Skill 文档图标、display name、单行 description、范围、可选 monospace invocation 和带文字的状态。删除原 `/` 装饰；不显示安装量、`Installed` 或来源品牌徽章。能够精确映射对应 current catalog member 的 Personal 与 Project asset 都在卡片尾部显示独立 switch：Personal 使用 `已启用/已禁用`，Project 的 inherit 状态显示 `跟随用户设置`，显式覆盖额外显示 `恢复跟随用户`。external source kind 不自动剥夺启停 authority，但 catalog/selection 不可用或 identity 不可证明时不显示可操作开关；

@@ -297,7 +297,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 
 ```text
 临时或 trusted Workspace → Task（持有内部 Agent Session）→ 用户输入 → 同步 Agent Run
-→ 文本流 → built-in Read/Bash/Edit → 同步 permission / question
+→ 文本流 → Agent-owned 固定 built-in 集合 → 同步 permission
 → 工具结果 → 最终回复 → 取消/关闭 → Renderer reload 视图重建
 ```
 

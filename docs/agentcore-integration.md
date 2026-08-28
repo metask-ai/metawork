@@ -47,7 +47,7 @@ candidate probe 只用于证明锁定 artifact 与官方 Zig package 可以 sour
 - 不能注册到 React/Native SDK 正式链路；
 - 不维护上游 ABI facade 或 SDK 行为的平行测试套件。
 
-当前 bundle 提供完整 typed status、八个 StopReason、known/unknown observation decoder、Permission provenance、`UiRequest` decoder、request-aware `UiResponse` encoder、Skill/MCP catalog decoder、Session description/restore/checkpoint entry、idle-only Session model mutation、Runtime MCP configuration apply，以及 callback-scoped validated `RunContext`。revision 8 额外提供结构化 `CoreEvent.run_state`；正式 `agent/` 直接使用官方 `bindings/zig` package 暴露的表面，Product Control 只保存受限运行时投影；MetaWork 不手写 raw enum、tag switch、identity layout、Permission/Skill/MCP schema 或 SDK module/link graph。
+当前 bundle 提供完整 typed status、八个 StopReason、known/unknown observation decoder、结构化 `CoreEvent.run_state`、Permission provenance、`UiRequest` decoder、request-aware `UiResponse` encoder、Skill/MCP catalog decoder、Session description/restore/checkpoint entry、idle-only Session model mutation、Runtime MCP configuration apply，以及 callback-scoped validated `RunContext`。正式 `agent/` 直接使用官方 `bindings/zig` package 暴露的表面，Product Control 只保存受限运行时投影；MetaWork 不手写 raw enum、tag switch、identity layout、Permission/Skill/MCP schema 或 SDK module/link graph。
 
 当前十六种公开 observation 的消费审计如下；“持久化”均指 Product Task 派生事实，不保存 raw CoreEvent：
 
@@ -171,9 +171,9 @@ Bridge handler 只写入 response channel，不同步等待 AgentCore。callback
 
 callback admission 只建立 lifetime 与当时的 identity 事实，不保证等待期间不会有另一个并发 callback 发现 identity 漂移。因此 Host 在发布 UI request 前和最终提取 response 的线性化点都必须在同一 Session lock 下重新检查现有 Core identity 与 dependency-contract 状态。检查失败时返回 UI fatal；如果 Renderer response 已完成编码但 ownership 尚未转移给 Core，Host 必须自行释放，禁止返回 answered。
 
-当前锁定 ABI 的 `UiRequest` / `UiResponse` 只有 `ask_question`/`answers` 与 `permission`。Agent 边界继续使用官方 decoder 完整理解该 ABI，但 MetaWork 固定工具集合不注册或允许 `AskUserQuestion`，正式产品路径只会产生 Permission request。Permission request 是携带 request/session/run/tool/digest/policy generation/candidate 的 typed flat object，response 必须回显 request identity 与 generation，Session choice 还必须回显 candidate rule ID。Permission request 与 callback `RunContext` identity 不一致时立即 fatal 并 poison Session；`permission_provenance` 是 control event，不得静默丢弃。
+当前锁定 ABI 的 `UiRequest` / `UiResponse` 只有 `ask_question`/`answers` 与 `permission`。Agent 边界继续使用官方 decoder 完整理解该 ABI，但 MetaWork 固定工具集合不注册或允许 `AskUserQuestion`，正式产品路径只会产生 Permission request。Permission request 是携带 request/session/run/tool/digest/policy generation、`responses[]` 与可选 candidate 的 typed flat object；当前 choice 为 `deny_once | deny_session | allow_once | allow_session`，Session choice 只有在 candidate 存在且 scope 精确为 `exact_arguments` 时才可发布。response 必须回显 request identity 与 generation，Session choice 还必须回显 candidate rule ID。Permission request 与 callback `RunContext` identity 不一致时立即 fatal 并 poison Session；`permission_provenance` 是 control event，不得静默丢弃。
 
-Agent Session 的公开回答入口只有 choice-only `respondPermission`。调用方不能提交任意 SDK `UiResponse`：Permission 入口从 pending request 回填 request ID、policy generation 和 candidate rule ID；完整 SDK response 只在 Agent 私有 encoder 边界内构造并校验。ABI decoder 仍识别 `ask_question`，但 Agent capability gate 在建立 pending UI 状态前返回 callback fatal，因此 Product Control、Bridge 与 Renderer 不拥有 answers 产品路径。
+Agent Session 的公开回答入口只有 choice-only `respondPermission`。调用方不能提交任意 SDK `UiResponse`：Permission 入口从 pending request 回填 request ID、policy generation 和 candidate rule ID；完整 SDK response 只在 Agent 私有 encoder 边界内构造并校验。AgentCore 独占 Session grant 匹配与 provenance，Workbench 只保存当前 permission occurrence 和有界审计摘要，不维护平行 grant cache 或规则 compiler。ABI decoder 仍识别 `ask_question`，但 Agent capability gate 在建立 pending UI 状态前返回 callback fatal，因此 Product Control、Bridge 与 Renderer 不拥有 answers 产品路径。
 
 ### Host tools
 
@@ -515,6 +515,11 @@ Agent sink 同时累计 total bytes、chunk count 与实际 streamed bytes 的 S
 
 ### built-in tools
 
+- MetaWork Agent 固定开放 `Read / Write / Edit / Glob / Grep / Bash / BashOutput / KillShell / WebSearch / WebFetch`；`AskUserQuestion` 虽可由 bundle 提供，但不进入产品集合；
+- `src/agent/capabilities.zig` 是精确工具名与顺序的实现真源；Agent 将同一非空集合用于 Runtime 注册和 fresh/restore Session allowlist，公开 Session options 不允许调用方扩大或收窄；
+- Workbench 与 Application 不持有 built-in profile、wire name 或 `allowed_tools`；bundle 能力是外部上限，Agent 集合是产品化子集；
+- unknown name、未验证名称和空集合使 Agent 初始化失败，不得静默编码为 `allowed_tools = null`；Runtime `host_tool_count` 保持零；
+- `WebSearch` 与 `WebFetch` 只是 AgentCore built-in 名称，MetaWork 不实现第二个 executor 或 provider-specific tool identity；
 - Runtime catalog 与 Session allowlist 共同限制可发布工具；
 - Provider 伪造未发布工具名必须 dispatch 失败；
 - 正式 Session 使用 `accept_edits`：当前 Workspace 范围内的 Write/Edit 由 AgentCore 自动允许，范围外编辑与 Bash 等其他危险操作仍经过同步 permission；

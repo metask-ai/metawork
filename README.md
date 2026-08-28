@@ -24,16 +24,16 @@ flowchart LR
         APPLICATION -->|"registered compatibility paths"| NATIVE_COMPAT
     end
 
-    AGENTCORE["Metask AgentCore<br/>ABI v1 revision 9 (Windows x64 GNU / macOS arm64 / macOS x64)"]
+    AGENTCORE["Metask AgentCore<br/>ABI v1 revision 14 (Windows x64 GNU / macOS arm64 / macOS x64)"]
     NATIVE_RUNTIME["Native SDK<br/>Runtime API"]
     AGENT -->|"typed ABI"| AGENTCORE
     APPLICATION -->|"platform capabilities"| NATIVE_RUNTIME
     NATIVE_RUNTIME -->|"hosts System WebView"| RENDERER
 ```
 
-当前应用是一条真实的同进程同步垂直链路，已经覆盖 Account、Task、typed Text/Skill Run、built-in Read/Bash/Edit、question/permission、取消、Renderer reload、bounded event delivery 和生命周期收口。正式 build 只消费 staged `.agentcore/bundles/<target-id>` 及其中逐字节锁定的官方 Zig package。Windows、macOS arm64 与 macOS x64 均锁定 AgentCore ABI v1 revision 9；未完成独立产品验收的能力保持关闭。
+当前应用是一条真实的同进程同步垂直链路，已经覆盖 Account、Task、typed Text/Skill Run、Agent-owned 十个 built-in、同步 permission、取消、Renderer reload、bounded event delivery 和生命周期收口；`AskUserQuestion` 不进入 MetaWork Agent 产品集合。正式 build 只消费 staged `.agentcore/bundles/<target-id>` 及其中逐字节锁定的官方 Zig package。Windows、macOS arm64 与 macOS x64 均锁定 AgentCore ABI v1 revision 14；未完成独立产品验收的能力保持关闭。
 
-Windows x86_64 GNU、macOS arm64 与 macOS x64 revision 9 development bundle 已分别独立锁定。当前仍是同进程 prototype，不具备 AgentCore 进程隔离、crash recovery、跨进程 Conversation 恢复、strict Workspace security 或正式更新能力。Windows 已有按用户安装/卸载的单 EXE 与显式 Authenticode 签名路径，并完成隔离目录静默安装/卸载验收；交互式平台矩阵与更新仍是独立分发 Gate。精确证据与尚未验证的能力见 [验证规范](docs/validation.md)。
+Windows x86_64 GNU、macOS arm64 与 macOS x64 revision 14 development bundle 已分别独立锁定。当前仍是同进程 prototype，不具备 AgentCore 进程隔离、crash recovery、跨进程 Conversation 恢复、strict Workspace security 或正式更新能力。Windows 已有按用户安装/卸载的单 EXE 与显式 Authenticode 签名路径，并完成隔离目录静默安装/卸载验收；交互式平台矩阵与更新仍是独立分发 Gate。精确证据与尚未验证的能力见 [验证规范](docs/validation.md)。
 
 ## 快速开始
 

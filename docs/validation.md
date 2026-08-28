@@ -73,6 +73,8 @@ candidate probe、真实桌面验收、签名、公证和发布验证不进入 `
 
 Agent Completion 的确定性测试使用 MetaWork-owned fake Transport，覆盖三个 Provider 的非流式 request/result、text/usage/stop 映射、Tool wire fail-closed、非 2xx typed rejection、请求前取消、阻塞 perform 被外部取消唤醒，以及 credential 和 sensitive header copy 清零。Application Transport 沿用仓库已有的 `std.Io.Select` buffered fetch/cancel 模式；生产使用系统 CA，不接受 Completion 专用证书配置，也不维护本地 CA/leaf 测试 fixture。
 
+MetaWork Agent capability 的确定性回归归 `tests/agent/`：Runtime 注册与 fresh/restore Session allowlist 必须精确等于 Agent-owned 的十个 built-in，`AskUserQuestion` 必须缺席，unknown/empty set 必须 fail closed，`host_tool_count` 保持零；permission 回归同时覆盖 request `responses[]`、`exact_arguments` candidate、四种 choice、Session grant、provenance、restore 对账和 capability gate。bundle 名称 probe 只证明外部 artifact 上限，不能替代 Agent 产品集合回归，也不形成长期维护的独立工具计划。
+
 MCP catalog freshness 的真实边界回归属于 `test-mcp-interop`：fixture 给 modern catalog 注入短 TTL，并覆盖同一 model/selection 到期时的 typed `McpNotRefreshed`、refresh 后成功，以及短 TTL 不启动高频后台 timer、过期后按需重建 Admission。纯 Product Control 测试验证 earliest safe TTL 到绝对 monotonic deadline 的单次转换、主动刷新下限，以及 OAuth/refresh 串行边界内 pending request 不丢失；它不伪造 AgentCore freshness 状态。
 
 MCP 启动解耦由 `test-mcp-app` 验证 Application composition、empty Runtime Manifest proof 与 configuration-apply 失败收口，由 Agent lifecycle 验证 canonical empty Runtime 的 null authority 和 declarative apply，由 `test-product-mcp-policy` 验证 initial blocked Admission 仍只向普通 Task 提供 null selection，由 `test-workbench-mcp` 验证完成事务只更新后续新 Task。真实第三方 server 或平台首窗不是该确定性测试的替代品。
@@ -125,7 +127,7 @@ Product Skill 的公开表面 guard 必须证明 `product/skill.zig` 只导出 r
 - **证据**：macOS arm64/x86_64 与 Windows x86_64 GNU 均锁定 clean source commit `b4fe9a9b8cb020db8fb7efc637aa5fb1263ba2ce`；三者均为 ABI v1 revision 14 exact artifact。三个 target archive 的 manifest payload checksum、target 架构与 discovery symbol 已验证并原子 stage。
 - **结论**：所有 target policy 只接受 ABI v1 revision 14 与 64-byte root table，required surface 由 root + 五个 mandatory child table 定义；没有 revision 13 fallback。macOS x86_64 的真实 desktop vertical 仍须在对应目标环境独立采集。
 
-2026-08-13 的 Windows staged run-state probe 可由 Git object `51e0fcc847e7b832b628f6c64183525dd8300710` 定位：Host Run ID `7` 的 callback identity 与 `run_state.run_id` 一致，首序号为 `1`，并观察到 `starting → generating → finalizing → completed`。结论已进入 ABI 合同和 Product Control 回归，因此 active tree 不再保留该一次性 probe。
+2026-08-13 的 Windows staged run-state probe 可由 Git object `51e0fcc847e7b832b628f6c64183525dd8300710` 定位：Host Run ID `7` 的 callback identity 与 `run_state.run_id` 一致，首序号为 `1`，并观察到 `starting → generating → finalizing → completed`。结论已进入 AgentCore 集成契约和 Product Control 回归，因此 active tree 不再保留该一次性 probe。
 
 ### Fault-domain direction
 
@@ -229,6 +231,7 @@ revision 14 不继承旧 artifact 的 checkpoint 样本或通过结论。每个�
 - strict Workspace security、正式 Host tools 和持久权限规则尚未完成独立安全验收。
 - File Preview 的确定性回归必须覆盖：Snapshot file reference 只发布 `id/title/displayPath`；request 精确绑定 Task/Run/reference 且拒绝旧单-id/额外 path shape；async command 不出现在同步 registry；2-worker/8 in-flight 独立 lane 的 no-follow、root containment、regular-file、256 KiB/行/UTF-8/control 分类与 metadata changing；completion 的 Workspace/locator reauthorization、current/historical credential 与截断前缀遮蔽；非 ready 空正文；Renderer generation stale-result 丢弃、Task/reference 失效关闭、桌面和约 390px Drawer、键盘/焦点/横向溢出；shutdown join/drain/settle exactly once。当前自动化覆盖 wire、owner 与 bounded read/redaction 核心不变量；真实桌面 Drawer 的 Windows/macOS 视觉、键盘和窄屏验收仍为人工验收待完成，不影响 typed File Preview 路径的自动化状态。
 - 当前三个 target ABI package 均已提供 typed `file_changes` observation，但 Product FileChange 的 owner、持久化、恢复与投影尚未验收；typed Output、plan progress/approval 和 custom UI 仍不由当前 ABI 提供。对应 UI 必须保持关闭。
+- AgentCore Skill catalog lease 是否固定 Skill body/resources 的历史快照尚未取得独立合同证据；当前只承诺 pinned catalog/policy identity 与显式 refresh，不宣称未 refresh 的外部内容必然可按历史字节执行。AgentCore 也不提供 shadowed candidates 或完整 resolution trace，Skill UI 只能展示 resolved winner 与 typed issues。
 - Task 当前进程内 execution binding 和模型切换已有自动化；显式 execution rebind 的跨重启 epoch/history 与竞态尚未实现。
 - MCP 的真实第三方 server、平台 credential/network、secure capture、browser/callback 和 issuer 行为尚未完成跨平台验收；marketplace 不在当前范围。
 - 系统关机或用户显式退出 MetaWork 期间的准点执行、登录前系统服务和远端云调度尚未实现。当前只保证窗口关闭而 Host 仍运行时继续调度，并在下次启动协调至多一个 missed occurrence。

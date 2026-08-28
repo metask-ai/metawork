@@ -15,9 +15,8 @@
 | Account owner、Metask 合同、状态、事务、持久化、并发与恢复     | [docs/account-architecture.md](docs/account-architecture.md)         |
 | Renderer Bridge command、event、Snapshot 与运输合同           | [docs/renderer-bridge-contract.md](docs/renderer-bridge-contract.md) |
 | active tree、目录 owner 与依赖方向                            | [docs/project-structure.md](docs/project-structure.md)               |
-| AgentCore 线程、事件、所有权和生命周期                        | [docs/agentcore-integration.md](docs/agentcore-integration.md)       |
+| AgentCore Session、工具、Skill、Permission、事件与生命周期    | [docs/agentcore-integration.md](docs/agentcore-integration.md)       |
 | AgentCore bundle、ABI 与 required capability                  | [docs/agentcore-abi-v1.md](docs/agentcore-abi-v1.md)                 |
-| AgentCore 工具目标范围、探针、profile 与 capability Gate      | [docs/tool-integration-plan.md](docs/tool-integration-plan.md)       |
 | 测试归属、验证状态、证据和持续回归入口                        | [docs/validation.md](docs/validation.md)                             |
 
 `README.md` 只负责项目入口与快速开始，不是规范。
@@ -56,7 +55,7 @@
 - 正式应用只消费 canonical `.agentcore/bundles/<target-id>` 及其中的官方 `bindings/zig` package。外部 bundle root 只用于 candidate probe/stage；禁止源码依赖、源码复制、Git/path implementation dependency、`latest`、可变 tag 和静默 fallback。
 - Metask AgentCore 是 binary ABI facade 和 Agent 结构化协议的唯一 owner。MetaWork 不复制 ABI code、event tag、UI JSON schema，不维护上游 facade/SDK 的平行测试套件，也不建立 `AgentEvent` / `WorkbenchEvent` 镜像协议。
 - 正式 Host 只使用 bundle SDK 校验后的 typed `Status`、`StopReason`、`CoreEvent`、`UiRequest` 和 `UiResponse`。unknown、malformed、ownership 或 notification failure 必须 fail closed；详细处理以 AgentCore 两份 source of truth 为准。
-- 当前产品不注册 ABI v1 Host tools；Read/Bash/Edit/AskUserQuestion 使用 AgentCore built-in tools。MetaWork 不以 PTY/xterm、终端字节流或 Provider SSE 作为 Agent 协议；`src/agent/completion*` 只为独立无 Tool Completion 能力解析 Anthropic、OpenAI、Gemini 的有界非流式 JSON 响应，该路径不进入 AgentCore Run/Event 协议。
+- 当前产品不注册 ABI v1 Host tools；实际工具集合只使用 AgentCore built-in，精确名单由 AgentCore 集成契约定义，`AskUserQuestion` 不进入产品集合。MetaWork 不以 PTY/xterm、终端字节流或 Provider SSE 作为 Agent 协议；`src/agent/completion*` 只为独立无 Tool Completion 能力解析 Anthropic、OpenAI、Gemini 的有界非流式 JSON 响应，该路径不进入 AgentCore Run/Event 协议。
 
 ### Owner、并发与生命周期
 
@@ -80,9 +79,8 @@
 - 顶层技术决策、模块职责、进程或安全边界变化更新 `docs/architecture.md`。
 - Product 跨 owner 事务、并发、恢复或其与 Agent 的产品协作变化更新 `docs/product-architecture.md`；Account owner、Metask OAuth/catalog/ExecutionTarget 消费合同、状态、事务、持久化、提交、并发或恢复变化更新 `docs/account-architecture.md`；实际目录和依赖变化更新 `docs/project-structure.md`。
 - Renderer Bridge command、event、Snapshot 或 transport 语义变化更新 `docs/renderer-bridge-contract.md`。
-- AgentCore 线程、所有权、生命周期和 Shell 行为变化更新 `docs/agentcore-integration.md`。
+- AgentCore Session、工具集合、Skill catalog binding、Permission、线程、所有权、生命周期和 Shell 行为变化更新 `docs/agentcore-integration.md`。
 - AgentCore ABI、bundle、required capability 或兼容门槛变化更新 `docs/agentcore-abi-v1.md`。
-- AgentCore 工具目标范围、名称探针、profile/admission 或工具 capability Gate 变化更新 `docs/tool-integration-plan.md`。
 - 测试层与归属、验收矩阵、长期证据、持续回归入口和能力缺口变化更新 `docs/validation.md`。
 - 同一事实只在一份规范中定义；其他文档链接或做不产生新语义的摘要。
 

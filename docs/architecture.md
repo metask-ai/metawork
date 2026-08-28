@@ -3,7 +3,7 @@
 > 状态：当前为同进程 prototype；后续正式故障域选择单 AgentCore Worker
 > 日期：2026-08-06
 
-本文只定义 MetaWork 的顶层边界、依赖方向、运行形态、进程与故障域以及跨模块安全边界。产品对象和行为见 [产品需求](requirements.md)，Product 内部 owner、事务、并发和恢复见 [Product 内部架构](product-architecture.md)，Renderer Bridge wire 见 [Renderer Bridge 合同](renderer-bridge-contract.md)，AgentCore 线程与生命周期见 [AgentCore 集成契约](agentcore-integration.md)，ABI 与 bundle 门槛见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)，核心工具候选的探测与接入顺序见 [核心工具接入方案](tool-integration-plan.md)。实际源码目录和依赖方向见 [工程结构与所有权](project-structure.md)，验证状态见 [验证规范](validation.md)。
+本文只定义 MetaWork 的顶层边界、依赖方向、运行形态、进程与故障域以及跨模块安全边界。产品对象和行为见 [产品需求](requirements.md)，Product 内部 owner、事务、并发和恢复见 [Product 内部架构](product-architecture.md)，Renderer Bridge wire 见 [Renderer Bridge 合同](renderer-bridge-contract.md)，AgentCore Session、工具、Skill、Permission、线程与生命周期见 [AgentCore 集成契约](agentcore-integration.md)，ABI 与 bundle 门槛见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。实际源码目录和依赖方向见 [工程结构与所有权](project-structure.md)，验证状态见 [验证规范](validation.md)。
 
 ## 1. 已确认的技术选型
 
