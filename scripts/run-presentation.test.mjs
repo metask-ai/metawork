@@ -59,6 +59,25 @@ test("active Runs always derive one safe current activity and remain expanded", 
   assert.equal(presentation.processCanCollapse, false);
 });
 
+test("active process evidence remains user-collapsible without losing activity", () => {
+  const presentation = deriveRunPresentation(
+    run({
+      output: {
+        commentary: "Inspecting the workspace",
+        response: "",
+        responseKind: null,
+        provisional: "",
+        redacted: false,
+        provisionalRedacted: false,
+      },
+      activity: { kind: "thinking" },
+    }),
+  );
+  assert.equal(presentation.processCanCollapse, true);
+  assert.equal(presentation.processDefaultExpanded, true);
+  assert.deepEqual(presentation.activity, { kind: "thinking" });
+});
+
 test("presentation orders Tool evidence and only names one typed running Tool", () => {
   const presentation = deriveRunPresentation(
     run({

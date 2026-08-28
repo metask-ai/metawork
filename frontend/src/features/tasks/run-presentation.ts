@@ -83,7 +83,7 @@ export function deriveRunPresentation(run: RunView): RunPresentation {
     responseVisible,
     processVisible,
     processDefaultExpanded,
-    processCanCollapse: processVisible && !active,
+    processCanCollapse: processEvidenceVisible,
     showStreamingCaret:
       active &&
       (run.output.provisional.length > 0 ||

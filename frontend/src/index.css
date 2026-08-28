@@ -1943,6 +1943,195 @@ summary::-webkit-details-marker {
   white-space: pre-wrap;
 }
 
+.run-process {
+  margin-top: 18px;
+  border-block: 1px solid var(--ui-border);
+  color: var(--ui-content-muted);
+}
+
+.run-process-header {
+  display: grid;
+  width: 100%;
+  min-height: 46px;
+  padding: 8px 2px;
+  grid-template-columns: 9px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  border: 0;
+  border-radius: 6px;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+}
+
+button.run-process-header {
+  cursor: pointer;
+}
+
+button.run-process-header:hover {
+  color: var(--ui-content-primary);
+}
+
+.run-process-mark,
+.run-process-tool-mark {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.run-process[data-active="true"] .run-process-mark {
+  color: var(--ui-action-primary);
+  animation: ai-activity-pulse 1.5s ease-in-out infinite;
+}
+
+.run-process-heading {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.run-process-heading strong {
+  overflow: hidden;
+  color: var(--ui-content-primary);
+  font-size: var(--text-label);
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-process-heading small {
+  overflow: hidden;
+  color: var(--ui-content-muted);
+  font-size: var(--text-micro);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-process-chevron {
+  display: inline-flex;
+  color: var(--ui-content-muted);
+}
+
+.run-process-chevron svg {
+  transition: transform 140ms ease;
+}
+
+.run-process[data-expanded="true"] .run-process-chevron svg {
+  transform: rotate(180deg);
+}
+
+.run-process-body {
+  padding: 4px 0 12px 18px;
+}
+
+.run-process-commentary {
+  color: var(--ui-content-muted);
+  font-size: var(--text-control);
+  line-height: 1.65;
+}
+
+.run-process-commentary .ai-markdown h1,
+.run-process-commentary .ai-markdown h2,
+.run-process-commentary .ai-markdown h3,
+.run-process-commentary .ai-markdown h4 {
+  font-size: var(--text-body);
+}
+
+.run-process-provisional {
+  margin-top: 12px;
+  padding: 9px 11px;
+  border-radius: 8px;
+  background: color-mix(
+    in srgb,
+    var(--ui-action-primary) 5%,
+    var(--ui-surface-panel)
+  );
+}
+
+.run-process-provisional > span {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--ui-content-muted);
+  font-size: var(--text-micro);
+  font-weight: 680;
+  letter-spacing: 0.03em;
+}
+
+.run-process-provisional > p {
+  margin: 0;
+  color: color-mix(
+    in srgb,
+    var(--ui-content-primary) 78%,
+    var(--ui-content-muted)
+  );
+  font-size: var(--text-control);
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.run-process-tools {
+  margin: 12px 0 0;
+  padding: 0;
+  border-top: 1px solid var(--ui-border);
+  list-style: none;
+}
+
+.run-process-tools li + li {
+  border-top: 1px solid color-mix(in srgb, var(--ui-border) 72%, transparent);
+}
+
+.run-process-tool {
+  display: grid;
+  width: 100%;
+  min-height: 38px;
+  padding: 7px 2px;
+  grid-template-columns: 7px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  border-radius: 5px;
+  color: var(--ui-content-muted);
+  background: transparent;
+  font: inherit;
+  text-align: left;
+}
+
+button.run-process-tool {
+  cursor: pointer;
+}
+
+button.run-process-tool:hover {
+  background: var(--ui-action-hover-surface);
+}
+
+.run-process-tools li[data-state="running"] .run-process-tool-mark {
+  color: var(--ui-action-primary);
+}
+
+.run-process-tools li[data-state="failed"] .run-process-tool-mark {
+  color: var(--metask-state-error);
+}
+
+.run-process-tool-name {
+  overflow: hidden;
+  color: var(--ui-content-primary);
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-process-tool-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--text-micro);
+  white-space: nowrap;
+}
+
 .ai-message[data-role="assistant"][data-streaming="true"]::after {
   display: inline-block;
   width: 5px;
@@ -6211,12 +6400,14 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 @media (prefers-reduced-motion: reduce) {
   .ai-message[data-role="assistant"][data-streaming="true"]::after,
-  .ai-activity-mark {
+  .ai-activity-mark,
+  .run-process-mark {
     animation: none;
   }
 
   .agent-commentary-toggle svg,
-  .inspector-tool-meta svg {
+  .inspector-tool-meta svg,
+  .run-process-chevron svg {
     transition: none;
   }
 }

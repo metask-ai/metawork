@@ -60,6 +60,12 @@ const { TaskOverview } = await vite.ssrLoadModule(
 const { TaskContent } = await vite.ssrLoadModule(
   "/src/features/tasks/TaskContent.tsx",
 );
+const { RunProcess } = await vite.ssrLoadModule(
+  "/src/features/tasks/RunProcess.tsx",
+);
+const { deriveRunPresentation } = await vite.ssrLoadModule(
+  "/src/features/tasks/run-presentation.ts",
+);
 const { ApprovalPanel } = await vite.ssrLoadModule(
   "/src/features/approvals/ApprovalPanel.tsx",
 );
@@ -198,6 +204,21 @@ function taskContentElement(value, revision = "1") {
       renderPendingUi() {
         return null;
       },
+    }),
+  );
+}
+
+function runProcessElement(
+  value,
+  { expanded = true, onExpandedChange = () => {}, onOpenTool } = {},
+) {
+  return localizedView(
+    createElement(RunProcess, {
+      run: value,
+      presentation: deriveRunPresentation(value),
+      expanded,
+      onExpandedChange,
+      onOpenTool,
     }),
   );
 }
@@ -518,6 +539,118 @@ test("conversation separates commentary, Markdown response, and plain provisiona
   assert.match(completedMarkup, /aria-expanded="false"/);
   assert.doesNotMatch(completedMarkup, /A historical update/);
   assert.match(completedMarkup, /<strong>Ready<\/strong>/);
+});
+
+test("Run process exposes live commentary and safe Tool summaries without raw details", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  const opened = [];
+  const expandedChanges = [];
+  const value = run({
+    phase: "running",
+    outcome: null,
+    activity: { kind: "executing_tools", inFlight: "1" },
+    output: {
+      commentary: "Checked **two files**.",
+      response: "",
+      responseKind: null,
+      provisional: "Live **plain text**",
+      redacted: false,
+      provisionalRedacted: false,
+    },
+    tools: [
+      {
+        id: "tool-1",
+        order: "1",
+        name: "Read",
+        input: "private input",
+        progress: "private progress",
+        content: "private result",
+        state: "running",
+        isError: false,
+        elapsedMs: "0",
+        inputTruncated: false,
+        progressTruncated: false,
+        contentTruncated: false,
+        redacted: false,
+        fileRefs: [],
+      },
+    ],
+  });
+  render(
+    runProcessElement(value, {
+      onExpandedChange: (expanded) => expandedChanges.push(expanded),
+      onOpenTool: (tool) => opened.push(tool.id),
+    }),
+  );
+
+  const header = screen.getByRole("button", { name: /Executing tools/ });
+  assert.equal(header.getAttribute("aria-expanded"), "true");
+  assert.ok(screen.getByText("two files", { selector: "strong" }));
+  assert.ok(screen.getByText("Live **plain text**"));
+  assert.equal(screen.queryByText("private input"), null);
+  assert.equal(screen.queryByText("private progress"), null);
+  assert.equal(screen.queryByText("private result"), null);
+
+  await user.click(
+    screen.getByRole("button", { name: "View details for Read" }),
+  );
+  assert.deepEqual(opened, ["tool-1"]);
+  await user.click(header);
+  assert.deepEqual(expandedChanges, [false]);
+});
+
+test("terminal Run process summarizes Tool evidence without implying Run failure", () => {
+  const value = run({
+    output: {
+      commentary: "Finished checking",
+      response: "Done",
+      responseKind: "final",
+      provisional: "",
+      redacted: false,
+      provisionalRedacted: false,
+    },
+    tools: [
+      {
+        id: "tool-1",
+        order: "1",
+        name: "Read",
+        input: "",
+        progress: "",
+        content: "",
+        state: "completed",
+        isError: false,
+        elapsedMs: "12",
+        inputTruncated: false,
+        progressTruncated: false,
+        contentTruncated: false,
+        redacted: false,
+        fileRefs: [],
+      },
+      {
+        id: "tool-2",
+        order: "2",
+        name: "Bash",
+        input: "",
+        progress: "",
+        content: "",
+        state: "failed",
+        isError: true,
+        elapsedMs: "4",
+        inputTruncated: false,
+        progressTruncated: false,
+        contentTruncated: false,
+        redacted: false,
+        fileRefs: [],
+      },
+    ],
+  });
+  const markup = renderToStaticMarkup(
+    runProcessElement(value, { expanded: false }),
+  );
+  assert.match(markup, />Work process</);
+  assert.match(markup, /2 tool steps · 1 failed/);
+  assert.doesNotMatch(markup, /Finished checking/);
+  assert.doesNotMatch(markup, />Work failed</);
 });
 
 test("Agent updates disclosure remains user-controlled across revisions and Task switches", async () => {

@@ -547,6 +547,12 @@ export const enUS = {
   "run.terminal.partial_failed": "Work failed before the response was complete",
   "run.output.agent_updates": "Agent updates",
   "run.output.in_progress": "Output in progress",
+  "run.process.title": "Work process",
+  "run.process.live_output": "Live output",
+  "run.process.tool_step_one": "{count} tool step",
+  "run.process.tool_step_many": "{count} tool steps",
+  "run.process.failed_steps": "{count} failed",
+  "run.process.open_tool": "View details for {name}",
   "run.prepare_retry": "Use instruction again",
   "run.retry_help":
     "Copies this instruction to the Composer for review. Nothing is sent automatically.",
