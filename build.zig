@@ -107,8 +107,9 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-product-control", .root_module = test_modules.product_control_runtime },
         .{ .name = "metawork-product-control-executor", .root_module = test_modules.product_control_executor },
         .{ .name = "metawork-product-control-file-preview", .root_module = test_modules.product_control_file_preview },
-        .{ .name = "metawork-automatic-workspace-allocator", .root_module = test_modules.workbench_automatic_workspace_allocator },
-        .{ .name = "metawork-scheduled-task-persistence", .root_module = test_modules.workbench_scheduled_persistence },
+        .{ .name = "metawork-product-control-automatic-workspace", .root_module = test_modules.product_control_automatic_workspace },
+        .{ .name = "metawork-product-control-schedule", .root_module = test_modules.product_control_schedule },
+        .{ .name = "metawork-product-control-schedule-persistence", .root_module = test_modules.product_control_schedule_persistence },
         .{ .name = "metawork-product-skill-package", .root_module = test_modules.product_skill_package },
         .{ .name = "metawork-product-skill-management", .root_module = test_modules.product_skill_management },
         .{ .name = "metawork-product-skill-enablement", .root_module = test_modules.product_skill_enablement },
@@ -259,8 +260,9 @@ const WiredModules = struct {
     product_control_runtime: *std.Build.Module,
     product_control_executor: *std.Build.Module,
     product_control_file_preview: *std.Build.Module,
-    workbench_automatic_workspace_allocator: *std.Build.Module,
-    workbench_scheduled_persistence: *std.Build.Module,
+    product_control_automatic_workspace: *std.Build.Module,
+    product_control_schedule: *std.Build.Module,
+    product_control_schedule_persistence: *std.Build.Module,
     product_skill_package: *std.Build.Module,
     product_skill_management: *std.Build.Module,
     product_skill_enablement: *std.Build.Module,
@@ -910,24 +912,24 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .target = target,
         .optimize = root_module.optimize,
     });
-    const automatic_workspace_allocator = b.createModule(.{
-        .root_source_file = b.path("src/workbench/automatic_workspace_allocator.zig"),
+    const product_control_automatic_workspace = b.createModule(.{
+        .root_source_file = b.path("src/product/control/automatic_workspace.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
-    const scheduled_tasks = b.createModule(.{
-        .root_source_file = b.path("src/workbench/scheduled_tasks.zig"),
+    const product_control_schedule = b.createModule(.{
+        .root_source_file = b.path("src/product/control/schedule.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
-    const scheduled_task_persistence = b.createModule(.{
-        .root_source_file = b.path("src/workbench/scheduled_task_persistence.zig"),
+    const product_control_schedule_persistence = b.createModule(.{
+        .root_source_file = b.path("src/product/control/schedule/persistence.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
-    scheduled_task_persistence.addImport(
-        "workbench_scheduled_tasks",
-        scheduled_tasks,
+    product_control_schedule_persistence.addImport(
+        "product_control_schedule",
+        product_control_schedule,
     );
     const skill_package = b.createModule(.{
         .root_source_file = b.path("src/product/skill/package.zig"),
@@ -1241,11 +1243,17 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     product_control_runtime.addImport("metawork_account_contract", account_contract);
     product_control_runtime.addImport("product_control_executor", executor);
     product_control_runtime.addImport("product_control_file_preview", file_preview);
-    product_control_runtime.addImport("workbench_automatic_workspace_allocator", automatic_workspace_allocator);
-    product_control_runtime.addImport("workbench_scheduled_tasks", scheduled_tasks);
     product_control_runtime.addImport(
-        "workbench_scheduled_task_persistence",
-        scheduled_task_persistence,
+        "product_control_automatic_workspace",
+        product_control_automatic_workspace,
+    );
+    product_control_runtime.addImport(
+        "product_control_schedule",
+        product_control_schedule,
+    );
+    product_control_runtime.addImport(
+        "product_control_schedule_persistence",
+        product_control_schedule_persistence,
     );
     product_control_runtime.addImport("metawork_product_task", product_task);
     product_control_runtime.addImport("metawork_product_skill", product_skill);
@@ -1274,10 +1282,9 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .optimize = root_module.optimize,
     });
     product_control.addImport("product_control_runtime", product_control_runtime);
-    product_control.addImport("workbench_automatic_workspace_allocator", automatic_workspace_allocator);
     product_control.addImport(
-        "workbench_scheduled_task_persistence",
-        scheduled_task_persistence,
+        "product_control_automatic_workspace",
+        product_control_automatic_workspace,
     );
     product_control.addImport("metawork_product_skill", product_skill);
 
@@ -1346,6 +1353,10 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     app.addImport("native_sdk", existingImport(root_module, "native_sdk"));
     app.addImport("metawork_agent", agent);
     app.addImport("metawork_product_control", product_control);
+    app.addImport(
+        "product_control_schedule_persistence",
+        product_control_schedule_persistence,
+    );
     app.addImport("metawork_product_mcp", product_mcp);
     app.addImport("metawork_product_control_ports", product_control_ports);
     app.addImport("metawork_product_skill", product_skill);
@@ -1408,8 +1419,9 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .product_control_runtime = product_control_runtime,
         .product_control_executor = executor,
         .product_control_file_preview = file_preview,
-        .workbench_automatic_workspace_allocator = automatic_workspace_allocator,
-        .workbench_scheduled_persistence = scheduled_task_persistence,
+        .product_control_automatic_workspace = product_control_automatic_workspace,
+        .product_control_schedule = product_control_schedule,
+        .product_control_schedule_persistence = product_control_schedule_persistence,
         .product_skill_package = skill_package,
         .product_skill_management = skill_management,
         .product_skill_enablement = skill_enablement,

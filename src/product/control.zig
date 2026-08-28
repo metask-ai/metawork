@@ -1,8 +1,7 @@
 //! Product Control orchestration and durable projection surface.
 
 const runtime_impl = @import("product_control_runtime");
-const automatic_workspace_allocator = @import("workbench_automatic_workspace_allocator");
-const scheduled_task_persistence = @import("workbench_scheduled_task_persistence");
+const automatic_workspace_allocator = @import("product_control_automatic_workspace");
 
 pub const Error = runtime_impl.Error;
 pub const Limits = runtime_impl.Limits;
@@ -37,8 +36,6 @@ pub const SchedulePersistenceHealth = runtime_impl.SchedulePersistenceHealth;
 pub const ScheduleNotification = runtime_impl.ScheduleNotification;
 pub const ScheduleNotificationKind = runtime_impl.ScheduleNotificationKind;
 pub const ScheduleNotifier = runtime_impl.ScheduleNotifier;
-pub const ScheduledTaskFileStore = scheduled_task_persistence.FileStore;
-pub const scheduled_task_store_max_bytes = scheduled_task_persistence.max_store_bytes;
 pub const SkillManagementHealth = runtime_impl.SkillManagementHealth;
 pub const SkillEnablementHealth = runtime_impl.SkillEnablementHealth;
 pub const SkillImportPreview = runtime_impl.SkillImportPreview;

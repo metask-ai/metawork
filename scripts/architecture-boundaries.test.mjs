@@ -115,11 +115,17 @@ test("named module roots exist and lower owners cannot import composition", () =
   assert.equal(existsSync(new URL("src/product/control/runtime.zig", root)), true);
   assert.equal(existsSync(new URL("src/product/control/executor.zig", root)), true);
   assert.equal(existsSync(new URL("src/product/control/file_preview.zig", root)), true);
+  assert.equal(existsSync(new URL("src/product/control/automatic_workspace.zig", root)), true);
+  assert.equal(existsSync(new URL("src/product/control/schedule.zig", root)), true);
+  assert.equal(existsSync(new URL("src/product/control/schedule/persistence.zig", root)), true);
   assert.equal(existsSync(new URL("tests/product/control_lifecycle_test.zig", root)), true);
   assert.equal(existsSync(new URL("src/workbench.zig", root)), false);
   assert.equal(existsSync(new URL("src/workbench/projection.zig", root)), false);
   assert.equal(existsSync(new URL("src/workbench/executor.zig", root)), false);
   assert.equal(existsSync(new URL("src/workbench/file_preview.zig", root)), false);
+  assert.equal(existsSync(new URL("src/workbench/scheduled_tasks.zig", root)), false);
+  assert.equal(existsSync(new URL("src/workbench/scheduled_task_persistence.zig", root)), false);
+  assert.equal(existsSync(new URL("src/workbench/", root)), false);
   assert.equal(
     existsSync(new URL("tests/workbench/executor_lifecycle_test.zig", root)),
     false,
@@ -168,9 +174,14 @@ test("named module roots exist and lower owners cannot import composition", () =
   assert.match(buildSource, /src\/product\/task\.zig/);
   assert.match(buildSource, /src\/product\/task\/persistence\.zig/);
   assert.match(buildSource, /src\/product\/task\/runtime\.zig/);
+  assert.match(buildSource, /src\/product\/control\/schedule\.zig/);
+  assert.match(buildSource, /src\/product\/control\/schedule\/persistence\.zig/);
+  assert.match(buildSource, /src\/product\/control\/automatic_workspace\.zig/);
   assert.doesNotMatch(buildSource, /src\/account(?:\.zig|\/)/);
   assert.doesNotMatch(buildSource, /src\/workbench\/mcp_configuration\.zig/);
   assert.doesNotMatch(buildSource, /src\/workbench\/catalog_snapshot\.zig/);
+  assert.doesNotMatch(buildSource, /workbench_scheduled_tasks|workbench_scheduled_task_persistence/);
+  assert.doesNotMatch(buildSource, /workbench_automatic_workspace_allocator|src\/workbench\/automatic_workspace_allocator\.zig/);
   assert.doesNotMatch(
     buildSource,
     /src\/workbench\/(?:task_persistence|checkpoint_record|checkpoint_store|owned_task_execution|task_runtime|task_deletion|task_recovery|task_recovery_job)\.zig/,
@@ -205,12 +216,6 @@ test("named module roots exist and lower owners cannot import composition", () =
     "metawork_product_control",
     "metawork_bridge",
     "metawork_account",
-  ]);
-  assertNoImports(zigFiles("src/workbench/"), [
-    "metawork_app",
-    "metawork_bridge",
-    "metawork_account",
-    "metask_agentcore",
   ]);
   assertNoImports(zigFiles("src/product/account/"), [
     "metawork_app",
@@ -279,9 +284,15 @@ test("Product Control is the only composition owner identity", () => {
   assert.match(build, /src\/product\/control\/runtime\.zig/);
   assert.match(build, /src\/product\/control\/executor\.zig/);
   assert.match(build, /src\/product\/control\/file_preview\.zig/);
+  assert.match(build, /src\/product\/control\/schedule\.zig/);
+  assert.match(build, /src\/product\/control\/schedule\/persistence\.zig/);
+  assert.match(build, /src\/product\/control\/automatic_workspace\.zig/);
   assert.match(build, /metawork_product_control/);
   assert.match(build, /product_control_executor/);
   assert.match(build, /product_control_file_preview/);
+  assert.match(build, /product_control_schedule/);
+  assert.match(build, /product_control_schedule_persistence/);
+  assert.match(build, /product_control_automatic_workspace/);
   assert.match(control, /pub const Runtime = runtime_impl\.Runtime/);
   assert.match(runtime, /pub const Runtime = struct/);
   assert.doesNotMatch(build, /metawork_workbench|workbench_projection/);
@@ -303,6 +314,23 @@ test("Product Control is the only composition owner identity", () => {
     executor,
     /@import\("(?:metawork_product_control|metawork_app)"\)|\*Runtime|\*Control/,
   );
+});
+
+test("Product Control Schedule owns its state and persistence leaves", () => {
+  const build = read("build.zig");
+  const control = read("src/product/control.zig");
+  const runtime = read("src/product/control/runtime.zig");
+  const schedule = read("src/product/control/schedule.zig");
+  const persistence = read("src/product/control/schedule/persistence.zig");
+  const stores = read("src/app/stores.zig");
+
+  assert.match(runtime, /@import\("product_control_schedule"\)/);
+  assert.match(runtime, /@import\("product_control_schedule_persistence"\)/);
+  assert.match(persistence, /@import\("product_control_schedule"\)/);
+  assert.match(stores, /@import\("product_control_schedule_persistence"\)/);
+  assert.doesNotMatch(control, /ScheduledTaskFileStore|scheduled_task_store_max_bytes|product_control_schedule_persistence/);
+  assert.doesNotMatch(`${schedule}\n${persistence}`, /@import\("(?:metawork_app|metawork_bridge|metawork_agent|metawork_product_task|metawork_product_skill|metawork_product_mcp)"\)|std\.Thread/);
+  assert.doesNotMatch(build, /workbench_scheduled_tasks|workbench_scheduled_task_persistence|metawork-scheduled-task-persistence/);
 });
 
 test("Application coordinators consume scoped Product Control capabilities", () => {
@@ -1386,11 +1414,10 @@ test("MetaWork Agent capability shaping stays private to Agent", () => {
   const agentRoot = read("src/agent.zig");
   const sessionApi = read("src/agent/session.zig");
   const capabilities = read("src/agent/capabilities.zig");
-  const applicationAndWorkbench = [
+  const applicationAndProduct = [
     "src/app.zig",
     ...zigFiles("src/app/"),
     "src/product/control.zig",
-    ...zigFiles("src/workbench/"),
   ]
     .map(read)
     .join("\n");
@@ -1400,7 +1427,7 @@ test("MetaWork Agent capability shaping stays private to Agent", () => {
   assert.doesNotMatch(agentRoot, /capabilities|builtins|allowed_tools/);
   assert.doesNotMatch(sessionApi, /allowed_tools|respondAnswers/);
   assert.doesNotMatch(
-    applicationAndWorkbench,
+    applicationAndProduct,
     /BuiltinToolProfile|builtin_tool_profile|builtinToolsForProfile|AskUserQuestion/,
   );
 });
