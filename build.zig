@@ -640,6 +640,13 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    const app_single_instance_compat = b.createModule(.{
+        .root_source_file = b.path("src/native_sdk_compat/app_single_instance.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    if (target.result.os.tag == .macos)
+        app_single_instance_compat.linkFramework("CoreFoundation", .{});
     const storage = b.createModule(.{
         .root_source_file = b.path("src/storage.zig"),
         .target = target,
@@ -1383,6 +1390,10 @@ fn wireAgentCore(
     app.addImport("account_credential_store", account_credential_store);
     app.addImport("metask_client", metask_client);
     app.addImport("metawork_product_identity", product_identity);
+    app.addImport(
+        "metawork_app_single_instance_compat",
+        app_single_instance_compat,
+    );
     app.addImport("metawork_mcp_platform", mcp_platform);
     app.addImport("metawork_mcp_oauth", mcp_oauth);
 

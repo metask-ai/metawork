@@ -55,10 +55,15 @@ metawork/
 │   │   ├── paths.zig                 # data directory 与 canonical home resolver
 │   │   ├── platform.zig              # DispatcherPlatform vtable 与 Native SDK 引用
 │   │   ├── single_instance.zig       # 有界 activation 协议、identity 校验与合并队列
+│   │   ├── single_instance_coordinator.zig # data-root lease、转交与 ingress 生命周期
 │   │   ├── stores.zig                # Application-created stores 与 restored bytes 生命周期
 │   │   └── window.zig                # window/tray/dialog/notification 与 compat capability
 │   ├── product_identity.zig # artifact identity、data root 与 credential namespace 真源
 │   ├── native_sdk_compat/ # 按已登记 capability 隔离的 Application 兼容实现
+│   │   ├── app_single_instance.zig # data-root lease、local transport 与固定失败提示 contract
+│   │   ├── app_single_instance/
+│   │       ├── windows.zig # current-user Named Pipe、前台资格转交与固定提示
+│   │       └── macos.zig   # 0600 Unix Domain Socket、peer UID gate 与固定提示
 │   │   ├── secure_input.zig # 有界安全文本输入 contract、线程与清零纪律
 │   │   ├── secure_input/
 │   │       ├── windows.zig # startup HWND-owned 密码对话框与严格 UTF-16 转换
@@ -173,6 +178,8 @@ Task 内容 presentation 只按 canonical Run 顺序把用户输入、Assistant 
 `app/platform.zig` 是唯一 `DispatcherPlatform` vtable 实现并持有 Native SDK runtime/services 引用；窗口系统行为委托给 `app/window.zig`。`app/window.zig` 拥有窗口、tray、notification、dialog 与两个已登记 compat capability，但不拥有 Bridge authority 或 Product policy。`app/account_platform_binding.zig` 把 Account 定义的 credential/preference、authorization URL、timer 与 Model Connection credential vault ports 绑定到 Native SDK 和有界文件 I/O；它只拥有系统资源与机械 effect，不拥有 Account transaction、codec、恢复或 Model Connection registry policy。`app/metask_http_transport.zig` 实现 Account 定义的窄 Metask HTTP transport port，拥有 `std.http.Client`、请求 deadline/cancellation race 与 bounded response 写入；Metask request kind、响应状态分类、JSON codec 和 credential 生命周期仍归 Account。`app/oauth_loopback_transport.zig` 独占 OAuth loopback listener、connection、accept/receive deadline、跨线程 cancel 与 HTTP response byte pump；它只向 Account-owned callback sink 传递 callback-scoped request metadata，不解释 state、code、error 或 issuer。`app/paths.zig` 的 `Paths` 原位持有所有路径 buffer，只能按指针传递并由 `run()` 保持稳定地址。`app/stores.zig` 拥有 Application 创建的 store、单写锁与 restored bytes 生命周期。
 
 `app/mcp_startup.zig` 负责启动期 registry load、credential transaction recovery、Product Control Desired preparation 与 canonical empty Runtime Manifest proof；它在 Desired preparation 进入 Product Control 前释放 credential staging，不构造正式 transport input或执行外部 MCP effect。`app/mcp_platform.zig` 只适配 MCP 系统 credential、stdio process/pipe 与 Streamable HTTP connection/raw-byte effect，不解析 MCP JSON-RPC、STDIO/HTTP framing 或复制协商，也不形成新的产品 owner。`app/mcp_management_coordinator.zig` 把 Product Control transaction seam、正式 Runtime complete replacement/activation、原生确认、Application-owned secure-input capability、系统浏览器、loopback、有界 OAuth worker，以及单一候选 Runtime 测试 worker串成用例；Application 启动与后续 Desired mutation复用同一个 configuration-apply job，没有第二个 startup worker。测试 worker 只消费 canonical prepared target并回写安全结果，不拥有正式 Runtime authority。coordinator 不拥有 registry、持久 operation、credential 或 OAuth policy。MCP secret capture 只在对应平台通过真实 modal 事件 gate 后开放；未验收平台保持 unavailable，不能扩展 Renderer credential bridge。
+
+`app/single_instance_coordinator.zig` 是 `app_single_instance` seam 的唯一调用者，拥有 lease/transport 与 Application activation queue 的装配、Secondary 转交、失败分类和 ingress shutdown；它不拥有窗口 handle、业务 Store、Renderer Bridge 或 Product 状态。`native_sdk_compat/app_single_instance.zig` 只拥有 canonical data root 上的 OS 自动释放独占 lease、同用户 local transport 和由固定失败枚举映射的 pre-Runtime 系统提示。Windows 子文件独占 current-user DACL Named Pipe、server PID observation 与 `AllowSetForegroundWindow`；macOS 子文件独占 `/tmp` 下 0600 Unix Domain Socket 和 `getpeereid` UID gate。endpoint 只由当前 OS 用户与 canonical data root 摘要派生，artifact/revision 只进入 Application 协议帧；残留 socket 只能由已取得 lease 的 Primary 清理。listener 线程只能传输有界字节并调用 Application handler，不能调用 Native SDK Runtime、窗口或业务 owner。
 
 `native_sdk_compat/system_webview_drag_region.zig` 是 Application-owned 的有界 System WebView drag-region capability seam。它只拥有有界 region 校验、root 平台 binding 与 drag 调用编排；document generation 和 source-window authority 归 Bridge `Dispatcher`，不进入该 seam。只有 `app/window.zig` 可以组装它；不拥有按钮 action、按钮 capability、窗口最大化状态或 resize。Windows 消费共享 startup root binding；document `connect/disconnect` 只标记 Renderer 会话是否附着，`sync` 只事务式替换 region，不能安装、重装或销毁平台资源。`beginDrag` 不信任 Renderer 坐标授予执行权，而是重新观察逻辑主鼠标键、实际 OS 光标、光标下 HWND 的 root identity、root native hit 与当前 DPI，并只在实际点命中最新 candidate-minus-exclusions 时通过 `ReleaseCapture`/`PostMessageW(WM_NCLBUTTONDOWN, HTCAPTION)` 进入系统 move loop。它不递归依赖 Chromium 跨进程 child HWND，也不保留旧 root `WM_NCHITTEST` subclass 路径。`system_webview_drag_region/macos.zig` 只在 live pointer event 内调用 SDK 已有 `startWindowDrag` 原语并保留系统交通灯。System WebView 隐藏标题栏的 resize hit surface 仍归 Native SDK，不由该 seam 模拟；平台文件不创建覆盖 WebView 的辅助窗口。
 

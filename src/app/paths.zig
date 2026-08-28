@@ -34,14 +34,31 @@ pub const Paths = struct {
     ) !void {
         self.* = .{ .allocator = allocator };
 
-        const data = try native_sdk.app_dirs.resolveOne(
+        const resolved_data = try native_sdk.app_dirs.resolveOne(
             .{ .name = dataDirectoryName(builtin.os.tag) },
             native_sdk.app_dirs.currentPlatform(),
             native_sdk.debug.envFromMap(env_map),
             .data,
             &self.data_buffer,
         );
-        self.data_len = data.len;
+        const data_dir = try std.Io.Dir.cwd().createDirPathOpen(
+            io,
+            resolved_data,
+            .{
+                .open_options = .{ .follow_symlinks = false },
+                .permissions = directoryPermissions(),
+            },
+        );
+        data_dir.close(io);
+        const canonical_data = try std.Io.Dir.realPathFileAbsoluteAlloc(
+            io,
+            resolved_data,
+            allocator,
+        );
+        defer allocator.free(canonical_data);
+        if (canonical_data.len > self.data_buffer.len) return error.NameTooLong;
+        @memcpy(self.data_buffer[0..canonical_data.len], canonical_data);
+        self.data_len = canonical_data.len;
 
         const automatic_workspace = native_sdk.app_dirs.join(
             native_sdk.app_dirs.currentPlatform(),
@@ -155,6 +172,10 @@ fn resolveCanonicalDirectory(
         return null;
     }
     return canonical;
+}
+
+fn directoryPermissions() std.Io.File.Permissions {
+    return if (builtin.os.tag == .windows) .default_dir else .fromMode(0o700);
 }
 
 test "product and automation data roots are compile-time isolated" {
