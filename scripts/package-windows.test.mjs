@@ -97,6 +97,15 @@ test("Windows application icon is embedded and assigned to installed shortcuts",
   }
 });
 
+test("Windows installer closes the old Host before replacement and does not restart it", () => {
+  const installer = readFileSync(
+    new URL("../packaging/windows/metawork.iss", import.meta.url),
+    "utf8",
+  );
+  assert.match(installer, /^CloseApplications=yes$/mu);
+  assert.match(installer, /^RestartApplications=no$/mu);
+});
+
 test("Inno Setup compiler discovery prefers an explicit absolute path", () => {
   const explicit = path.resolve("C:/toolchains/inno/ISCC.exe");
   const environment = {

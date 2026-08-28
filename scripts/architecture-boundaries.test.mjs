@@ -1845,6 +1845,39 @@ test("Native compatibility seams have exact owners and symbol allowlists", () =>
   assert.match(window, /runtime\.showMessageDialog\(/);
 });
 
+test("Application arbitrates single-instance ownership before business owners", () => {
+  const app = read("src/app.zig");
+  const platform = read("src/app/platform.zig");
+  const arbitration = app.indexOf("single_instance_state.init(");
+  const frontend = app.indexOf("frontend.resolveAssetRoot(");
+  const stores = app.indexOf("stores_state.init(");
+  assert.ok(arbitration >= 0);
+  assert.ok(frontend > arbitration);
+  assert.ok(stores > arbitration);
+  assert.match(
+    app.slice(arbitration, frontend),
+    /if \(disposition == \.secondary\) return;/u,
+  );
+
+  const stop = app.match(
+    /fn stop\([\s\S]*?fn event\(/u,
+  )?.[0];
+  assert.ok(stop, "Application stop lifecycle must remain explicit");
+  assert.ok(stop.indexOf("coordinator.stopIngress();") >= 0);
+  assert.ok(
+    stop.indexOf("coordinator.stopIngress();") <
+      stop.indexOf("dispatcher.stopIngress();"),
+  );
+  assert.match(
+    app,
+    /\.effects_wake => \{[\s\S]*?coordinator\.drain\(\)[\s\S]*?platform\.activateMainWindow\(\)/u,
+  );
+  assert.match(
+    platform,
+    /pub fn activateMainWindow\([\s\S]*?window\.showMainWindow\(runtime_value\);/u,
+  );
+});
+
 test("ordinary build and test entries stay isolated from macOS signing", () => {
   const packageJson = JSON.parse(read("package.json"));
   for (const script of ["check", "test", "build:debug", "build:release"]) {

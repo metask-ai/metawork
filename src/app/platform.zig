@@ -121,6 +121,11 @@ pub const Adapter = struct {
         }
     }
 
+    pub fn activateMainWindow(self: *Adapter) void {
+        const runtime_value = self.native_runtime orelse return;
+        self.window.showMainWindow(runtime_value);
+    }
+
     pub fn dispatcherPlatform(self: *Adapter) bridge_api.DispatcherPlatform {
         return .{
             .context = self,

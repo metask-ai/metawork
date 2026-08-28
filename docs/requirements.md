@@ -184,6 +184,9 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 ### 5.8 桌面能力
 
 - 提供窗口与应用生命周期管理；
+- MetaWork 默认按 artifact identity 与 canonical 产品数据目录保持单实例；development、release 与 automation 使用彼此隔离的 identity、数据目录和 credential service，可以并存，但同一 artifact 指向同一数据目录时只能有一个持有写入 authority 的 Host；
+- 重复启动必须在初始化 Store 和其他业务 owner 之前把有界启动参数与当前目录转交给既有 Host；既有 Host 在主线程显示并请求聚焦主窗口，随后新进程退出。主窗口已关闭但 Host 仍在托盘或后台运行时仍属于既有实例；
+- 数据目录 lease 是阻止双写的最终裁决。既有 Host 无响应或协议不兼容时不得绕过 lease 启动第二套 Store：交互式启动显示固定的可操作提示并以失败状态退出，automation 不显示系统对话框并以失败状态退出；
 - 一体化标题栏由 Renderer 绘制窗口按钮并提交固定语义意图，Bridge 校验 transport authority 后交由 Application 通过 Native SDK Runtime API 或已登记 Native Compat seam 执行；Renderer 不持有原生窗口 identity、handle 或执行权；
 - 提供受控的文件/目录选择；
 - 为通知、更新和系统集成保留明确入口；

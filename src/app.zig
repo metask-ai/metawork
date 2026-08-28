@@ -23,6 +23,7 @@ const mcp_oauth_coordinator = @import("app/mcp_oauth_coordinator.zig");
 const mcp_management_coordinator = @import("app/mcp_management_coordinator.zig");
 const app_paths = @import("app/paths.zig");
 const app_platform = @import("app/platform.zig");
+const app_single_instance = @import("app/single_instance_coordinator.zig");
 const app_stores = @import("app/stores.zig");
 const app_window = @import("app/window.zig");
 
@@ -63,6 +64,7 @@ const App = struct {
     mcp_authorizations: ?mcp_platform.HttpAuthorizations = null,
     mcp_management: ?mcp_management_coordinator.Coordinator = null,
     mcp_oauth_refresh: ?mcp_oauth_coordinator.Coordinator = null,
+    single_instance: ?*app_single_instance.Coordinator = null,
 
     fn app(self: *@This()) native_sdk.App {
         return .{
@@ -87,6 +89,8 @@ const App = struct {
     fn start(context: *anyopaque, native_runtime: *native_sdk.Runtime) anyerror!void {
         const self: *@This() = @ptrCast(@alignCast(context));
         try self.platform.start(native_runtime);
+        if (self.single_instance) |coordinator|
+            if (coordinator.drain()) self.platform.activateMainWindow();
         self.mcp_credential_store = .{
             .io = self.io,
             .services = self.platform.services().?,
@@ -233,6 +237,7 @@ const App = struct {
 
     fn stop(context: *anyopaque, native_runtime: *native_sdk.Runtime) anyerror!void {
         const self: *@This() = @ptrCast(@alignCast(context));
+        if (self.single_instance) |coordinator| coordinator.stopIngress();
         if (self.dispatcher) |dispatcher| dispatcher.stopIngress();
         if (self.control) |control| {
             control.stopFilePreviewAdmission();
@@ -282,6 +287,8 @@ const App = struct {
         _ = native_runtime;
         switch (value) {
             .effects_wake => {
+                if (self.single_instance) |coordinator|
+                    if (coordinator.drain()) self.platform.activateMainWindow();
                 if (self.account_coordinator) |coordinator|
                     coordinator.drain();
                 if (self.mcp_oauth_refresh) |*coordinator|
@@ -366,16 +373,10 @@ fn createAgentRuntime(
 }
 
 pub fn run(init: std.process.Init) !void {
-    const frontend_asset_root = if (init.environ_map.get(frontend.url_env) == null)
-        try frontend.resolveAssetRoot(init.io, std.heap.c_allocator)
-    else
-        try std.heap.c_allocator.dupe(u8, frontend.dist);
-    defer std.heap.c_allocator.free(frontend_asset_root);
-
     var app = App{
         .env_map = init.environ_map,
         .io = init.io,
-        .frontend_asset_root = frontend_asset_root,
+        .frontend_asset_root = "",
         .main_thread_id = std.Thread.getCurrentId(),
         .automation = app_automation.Adapter.init(init.environ_map),
         .platform = app_platform.Adapter.init(init.io, std.Thread.getCurrentId()),
@@ -400,6 +401,33 @@ pub fn run(init: std.process.Init) !void {
     );
     defer paths_state.deinit();
     app.account_path = paths_state.accountDir();
+    var single_instance_state: app_single_instance.Coordinator = undefined;
+    const disposition = try single_instance_state.init(
+        init.io,
+        std.heap.c_allocator,
+        init.minimal.args,
+        paths_state.dataDir(),
+        product_identity.runnerBundleId(),
+        .{
+            .context = &app.platform,
+            .notify_fn = app_platform.Adapter.notifyMainLoop,
+        },
+        product_identity.artifact_kind != .automation,
+    );
+    if (disposition == .secondary) return;
+    app.single_instance = &single_instance_state;
+    defer {
+        app.single_instance = null;
+        single_instance_state.deinit();
+    }
+
+    const frontend_asset_root = if (init.environ_map.get(frontend.url_env) == null)
+        try frontend.resolveAssetRoot(init.io, std.heap.c_allocator)
+    else
+        try std.heap.c_allocator.dupe(u8, frontend.dist);
+    defer std.heap.c_allocator.free(frontend_asset_root);
+    app.frontend_asset_root = frontend_asset_root;
+
     var stores_state: app_stores.Stores = undefined;
     stores_state.init(init.io, std.heap.c_allocator, &paths_state);
     defer stores_state.deinit();

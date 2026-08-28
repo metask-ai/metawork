@@ -21,6 +21,8 @@ Inno 编译器按显式环境变量、标准安装目录、`PATH` 和 Windows �
 
 Inno Setup 只负责把 Native SDK runtime stage 安装和卸载为一个 Windows 应用，不成为应用 runtime owner，也不替代 Native SDK package。
 
+安装器必须在替换 runtime stage 前处理仍在运行的已安装 MetaWork。`packaging/windows/metawork.iss` 固定启用 `CloseApplications=yes`，并以 `RestartApplications=no` 禁止安装完成后擅自恢复 Host；用户取消关闭时安装不得继续覆盖正在使用的文件。第一次部署具备单实例能力的版本时，旧 Host 尚未持有数据目录 lease，也不理解新的启动转交协议，因此“先退出旧 Host，再替换应用”本身就是 rollout 的正确性边界，不能依赖新版本在启动后补救跨代双写。
+
 ## 固定流程
 
 同一个 `package:windows` 入口按以下顺序执行：
@@ -31,6 +33,8 @@ Inno Setup 只负责把 Native SDK runtime stage 安装和卸载为一个 Window
 4. signed mode 签署 MetaWork 主程序并立即验证，同时验证 WebView2 loader 的微软原厂签名；unsigned mode 完整跳过签名身份读取。
 5. Inno Setup 将 runtime stage 编译为单 EXE；signed mode 由同一个 SignTool definition 签署卸载器模板和最终安装器。
 6. signed mode 验证最终安装器；随后统一检查安装器 PE identity、精确文件名与非空内容，并输出最终文件 SHA-256。
+
+交互式安装验收还必须覆盖两条路径：拒绝关闭正在运行的旧 Host 时安装取消且旧 Host 保持运行；允许关闭时旧 Host 完全退出后才安装新文件，安装完成后不自动重启应用。
 
 任一步失败都不会报告 package 成功，也不会从 signed mode 静默降级为 unsigned mode。
 
