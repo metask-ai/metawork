@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const scheduled = @import("product_control_schedule");
+const scheduled = @import("product_schedule_state");
 
 pub const schema_version: u8 = 1;
 pub const max_store_bytes: usize = 256 * 1024;

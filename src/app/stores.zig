@@ -1,6 +1,6 @@
 const std = @import("std");
 const product_control = @import("metawork_product_control");
-const schedule_persistence = @import("product_control_schedule_persistence");
+const schedule_persistence = @import("product_schedule_persistence");
 const mcp_configuration = @import("metawork_product_mcp").contract;
 const skill_enablement = @import("metawork_product_skill").enablement;
 const skill_management = @import("metawork_product_skill").management;

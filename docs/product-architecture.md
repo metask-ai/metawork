@@ -35,7 +35,7 @@ Product 内部负责：
 - 由 Account 在 Renderer 之外完成 Metask OAuth、目录查询、凭据持久化与 ExecutionConfig 生成；
 - 由 Account Runtime 在 committed transition 之后产生有界 continuation，由 Application coordinator 将其重新送入同一提交链；登录后的确定性目录准备留在后台，并只把真实歧义投影成用户动作；
 - 由 Application coordinator 在同一主线程 turn 内协调 Account prepare、Product Control no-fail install 和 Account commit；
-- 由 Product Control 管理持久 Scheduled Task、触发游标、有界 occurrence history、Task、Run/maintenance record、唯一 active operation 槽、队列、取消协调和产品历史；
+- 由 Product Control 持有 Product Schedule 与 Product Task aggregate；Schedule Runtime 管理持久 Scheduled Task、触发游标和有界 occurrence history，Task Runtime 管理 Task、Run/maintenance record 与唯一 active operation 槽，Product Control 管理共享队列、跨 aggregate 取消协调和产品历史；
 - 由 Product Control 调用相邻 Agent 管理的 AgentCore Session、active Run/manual compact、callback binding 和有界事件泵，在主线程泵出 Agent event，并由 Product Task state 将事件应用为产品事实；
 - 管理跨会话产品状态，并向 Bridge 提供 canonical 产品 projection。
 
@@ -140,7 +140,7 @@ Task 标题仍由 Product Control 独占。首个 Run admission 在标题为空�
 
 ### 2.3 Scheduled Task
 
-Scheduled Task 是 Product Control 内新的可测试不变量，不是独立 Product owner。内部 `product/control/schedule.zig` 拥有结构化 recurrence、bounded definition/occurrence storage、跨恢复稳定的 `(scheduledTaskId, plannedAt)` identity 与纯状态转换；`product/control/schedule/persistence.zig` 拥有无 secret codec、原子 candidate commit、恢复校验和 schema revision。定义只保存名称、Text instruction、recurrence 与无 secret execution facts，不保存 Workspace target、Skill identity、catalog revision 或 Skill 参数；需要 Skill 的意图仍属于 instruction，occurrence 只生成普通 Text Run。Product Control Runtime 在每个 occurrence 中固定请求新的 Automatic Workspace，再进入真实 Task admission。当前仍处于 pre-release 开发期，Scheduled Task persistence schema 固定为 `1` 并对定义结构原地 hard cut：只接受当前 shape，不保留旧字段的解析、双写或迁移；旧开发数据按现有损坏恢复路径处理。
+Scheduled Task 是 Product Control 持有的 live Product Schedule aggregate，不是独立 Product owner。`product/schedule/runtime.zig` 是唯一存储与行为入口，独占 bounded definition/occurrence store、persistence health/candidate commit、wall-clock/timer policy、background availability、notification 与 occurrence claim/finalize/reconciliation；`state.zig` 只定义结构化 recurrence、跨恢复稳定的 `(scheduledTaskId, plannedAt)` identity 与纯状态转换，`persistence.zig` 独占无 secret codec、恢复校验、schema revision 与 Application-opened concrete FileStore。Product Control 不得读取 Store/Item 或直接编码 Schedule persistence，只经 Runtime 的 typed operation/query/view 调用；它仍负责证明当前 execution/Automatic Workspace authority、创建真实 Task、查询 terminal outcome、发布全局 revision 和把 Schedule view 编入完整 snapshot。定义只保存名称、Text instruction、recurrence 与无 secret execution facts，不保存 Workspace target、Skill identity、catalog revision 或 Skill 参数；需要 Skill 的意图仍属于 instruction，occurrence 只生成普通 Text Run。当前仍处于 pre-release 开发期，Scheduled Task persistence schema 固定为 `1` 并对定义结构原地 hard cut：只接受当前 shape，不保留旧字段的解析、双写或迁移；旧开发数据按现有损坏恢复路径处理。
 
 Application 只注入平台 capability：产品数据目录中的原子读写、wall clock、单一 Native timer、notification，以及 tray/hidden-window 生命周期。主窗口 `close_policy = hide` 后 Application、Product Control、Executor 与 timer 都保持存活；tray 是重新打开窗口和显式退出的唯一入口。后台不是 Renderer timer，也不是 Agent Runtime capability。Application 重启时必须先恢复并校验 canonical Schedule store，再 arm 最早 due time；若最近计划时间已经过去，只对每条定义协调一个最新 occurrence，不遍历补跑全部历史。store 损坏或提交结果不确定时 fail closed，保留可诊断 persistence health，不能假装成空列表。
 
@@ -208,7 +208,7 @@ CompactJob
 - Host 使用有上限的 Product Control executor；
 - 空闲 Session 不占 worker；同步 Run、同步 UI wait 和 manual compact 占用 execution slot；
 - Product Control 创建、排队、停止并销毁 bounded Executor；Agent Runtime 不接收 Scheduler capability，worker 从 Product Control queue 主动进入 Agent Run；
-- Scheduled Task 的 recurrence、持久触发游标、wall clock 和 timer admission 由 Product Control 拥有；Application 只提供 store/timer/notification/tray capability。Product Control 只向同一 Task/Run Executor 提交真实产品工作，不把 scheduler capability 注入 Agent Runtime；
+- Scheduled Task 的 recurrence、持久触发游标、wall clock 和 timer admission 由 Product Control 持有的 Schedule Runtime 拥有；Application 只提供 store/timer/notification/tray capability。Product Control 只消费 typed due/claim/completion facts并向同一 Task/Run Executor 提交真实产品工作，不把 scheduler capability 注入 Agent Runtime；
 - Bridge/main thread 不执行长耗时 Run，也不等待 permission；
 - File Preview 使用 Product Control-owned 的独立有界 lane（2 workers、最多 8 个 in-flight），不占用 Run/catalog/restore/MCP 共用 Executor。主线程只做精确 Task/Run/reference lookup、Workspace authority 冻结与 completion reauthorization；worker 只拥有深拷贝的 root-relative locator 和上限，执行 no-follow bounded read 并写入 lane-owned completion。raw bytes 不进入 Product Task、Snapshot、persistence 或 Bridge；主线程完成 current/historical credential redaction 后只以 callback-scoped result 交付；
 - 只有 `agent/` import `metask_agentcore`；Application 只组装 Agent，ABI discovery 由 Agent 内部完成，Product Control 通过 Agent 公共 validated types 消费，Bridge DTO 不暴露 SDK enum/owner/handle；

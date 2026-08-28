@@ -5,6 +5,7 @@
 const std = @import("std");
 const agent = @import("metawork_agent");
 const account = @import("metawork_account_contract");
+const product_schedule = @import("metawork_product_schedule");
 const mcp = @import("metawork_product_mcp");
 const mcp_contract = mcp.contract;
 
@@ -251,16 +252,5 @@ pub const ScheduleHost = struct {
     }
 };
 
-pub const ScheduleNotificationKind = enum {
-    completed,
-    failed,
-    skipped,
-    needs_attention,
-};
-
-pub const ScheduleNotification = struct {
-    scheduled_task_id: u64,
-    task_id: u64 = 0,
-    title: []const u8,
-    kind: ScheduleNotificationKind,
-};
+pub const ScheduleNotificationKind = product_schedule.NotificationKind;
+pub const ScheduleNotification = product_schedule.Notification;
