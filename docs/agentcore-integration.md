@@ -49,7 +49,7 @@ candidate probe 只用于证明锁定 artifact 与官方 Zig package 可以 sour
 
 当前 bundle 提供完整 typed status、八个 StopReason、known/unknown observation decoder、Permission provenance、`UiRequest` decoder、request-aware `UiResponse` encoder、Skill/MCP catalog decoder、Session description/restore/checkpoint entry、idle-only Session model mutation、Runtime MCP configuration apply，以及 callback-scoped validated `RunContext`。revision 8 额外提供结构化 `CoreEvent.run_state`；正式 `agent/` 直接使用官方 `bindings/zig` package 暴露的表面，Workbench 只保存受限运行时投影；MetaWork 不手写 raw enum、tag switch、identity layout、Permission/Skill/MCP schema 或 SDK module/link graph。
 
-当前十五种公开 observation 的消费审计如下；“持久化”均指 Product Task 派生事实，不保存 raw CoreEvent：
+当前十六种公开 observation 的消费审计如下；“持久化”均指 Product Task 派生事实，不保存 raw CoreEvent：
 
 | CoreEvent | Product Task 消费 | 持久化边界 |
 | --- | --- | --- |
@@ -61,6 +61,7 @@ candidate probe 只用于证明锁定 artifact 与官方 Zig package 可以 sour
 | `tool_start` | 建立/更新 Tool record | 随 Run history 保存 |
 | `tool_progress` | 按 tool identity 更新进度 | 随 Run history 保存 |
 | `tool_result` | 完成 Tool record 与 file reference 投影 | durable boundary |
+| `file_changes` | Agent typed decode 后由 Product 显式消费；产品 capability 尚未验收 | 不保存、不投影 |
 | `run_state` | 受 transition sequence 保护的 runtime observation | phase observation 不持久化 |
 | `progress` | 更新 executing-tools 状态 | 仅现有安全状态 |
 | `usage` | checked delta 累计 | 随 Run history 保存 |

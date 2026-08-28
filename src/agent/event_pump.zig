@@ -259,6 +259,7 @@ pub fn classify(event: sdk.DecodedCoreEvent) EventClass {
             .text_chunk,
             .thinking_chunk,
             .tool_progress,
+            .file_changes,
             .usage,
             => .data,
             .tool_start,

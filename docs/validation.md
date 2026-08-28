@@ -114,7 +114,7 @@ Product Skill 的公开表面 guard 必须证明 `product/skill.zig` 只导出 r
 ### AgentCore target baseline
 
 - **规范**：[高层架构](architecture.md)、[ABI v1 消费合同](agentcore-abi-v1.md)。
-- **证据**：macOS arm64/x86_64 锁定 clean source commit `a4a908a39b3625dca89c34f91f21f450288f3832`，Windows x86_64 GNU 继续锁定 `e5a423697f7853d8d609950b5d7e2d7c1ac2e83a`；三者均为 ABI v1 revision 14 exact artifact。两个新 macOS archive 的 manifest payload checksum、target 架构与 discovery symbol 已验证并原子 stage。
+- **证据**：macOS arm64/x86_64 锁定 clean source commit `b4fe9a9b8cb020db8fb7efc637aa5fb1263ba2ce`，Windows x86_64 GNU 继续锁定 `e5a423697f7853d8d609950b5d7e2d7c1ac2e83a`；三者均为 ABI v1 revision 14 exact artifact。两个新 macOS archive 的 manifest payload checksum、target 架构与 discovery symbol 已验证并原子 stage。
 - **结论**：所有 target policy 只接受 ABI v1 revision 14 与 64-byte root table，required surface 由 root + 五个 mandatory child table 定义；没有 revision 13 fallback。Windows 本轮不升级；macOS x86_64 的真实 desktop vertical 仍须在对应目标环境独立采集。
 
 2026-08-13 的 Windows staged run-state probe 可由 Git object `51e0fcc847e7b832b628f6c64183525dd8300710` 定位：Host Run ID `7` 的 callback identity 与 `run_state.run_id` 一致，首序号为 `1`，并观察到 `starting → generating → finalizing → completed`。结论已进入 ABI 合同和 Workbench 回归，因此 active tree 不再保留该一次性 probe。
@@ -219,7 +219,7 @@ revision 14 不继承旧 artifact 的 checkpoint 样本或通过结论。每个�
 
 - 单 AgentCore Worker、进程级 crash semantics、async pending、suspend/resume 和跨进程 in-flight Run recovery 尚未实现。当前只支持正常 Application 重启后从 latest finalized checkpoint 显式恢复 Conversation attachment。
 - strict Workspace security、正式 Host tools 和持久权限规则尚未完成独立安全验收。
-- typed Output、FileChange、plan progress/approval 和 custom UI 不由当前 ABI 提供，对应 UI 必须保持关闭。
+- 当前 macOS ABI package 已提供 typed `file_changes` observation，但 Product FileChange 的 owner、持久化、恢复与投影尚未验收；typed Output、plan progress/approval 和 custom UI 仍不由当前 ABI 提供。对应 UI 必须保持关闭。
 - Task 当前进程内 execution binding 和模型切换已有自动化；显式 execution rebind 的跨重启 epoch/history 与竞态尚未实现。
 - MCP 的真实第三方 server、平台 credential/network、secure capture、browser/callback 和 issuer 行为尚未完成跨平台验收；marketplace 不在当前范围。
 - 系统关机或用户显式退出 MetaWork 期间的准点执行、登录前系统服务和远端云调度尚未实现。当前只保证窗口关闭而 Host 仍运行时继续调度，并在下次启动协调至多一个 missed occurrence。

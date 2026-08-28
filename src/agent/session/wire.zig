@@ -75,13 +75,23 @@ fn coreEventTextValid(event: sdk.DecodedCoreEvent) bool {
                         for (refs) |reference| {
                             if (!std.unicode.utf8ValidateSlice(reference.title) or
                                 !std.unicode.utf8ValidateSlice(reference.kind)) return false;
-                            switch (reference.locator) {
-                                .workspace_path => |path| if (!std.unicode.utf8ValidateSlice(path)) return false,
-                                .absolute_path => |path| if (!std.unicode.utf8ValidateSlice(path)) return false,
-                                .uri => |uri| if (!std.unicode.utf8ValidateSlice(uri)) return false,
-                            }
+                            if (!fileLocatorTextValid(reference.locator)) return false;
                         }
                     }
+                }
+                return true;
+            },
+            .file_changes => |value| {
+                if (!validUtf8(&.{ value.id, value.name })) return false;
+                for (value.changes) |change| {
+                    if (!fileLocatorTextValid(change.locator) or
+                        (change.from_locator != null and
+                            !fileLocatorTextValid(change.from_locator.?)) or
+                        !validUtf8(&.{
+                            change.tool,
+                            change.tool_use_id,
+                            change.unified_diff orelse "",
+                        })) return false;
                 }
                 return true;
             },
@@ -109,6 +119,13 @@ fn coreEventTextValid(event: sdk.DecodedCoreEvent) bool {
                 value.canonical_arguments_digest,
             }),
         },
+    };
+}
+
+fn fileLocatorTextValid(locator: sdk.FileReferenceLocator) bool {
+    return switch (locator) {
+        .workspace_path, .absolute_path => |path| std.unicode.utf8ValidateSlice(path),
+        .uri => |uri| std.unicode.utf8ValidateSlice(uri),
     };
 }
 

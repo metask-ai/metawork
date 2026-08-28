@@ -882,6 +882,12 @@ pub fn applyEvent(
             );
             durable_boundary = true;
         },
+        .file_changes => {
+            // AgentCore now publishes this typed observation, but Product
+            // File Changes remains capability-gated. Consume it explicitly
+            // without deriving or exposing a partial product contract.
+            return .unchanged;
+        },
         .usage => |usage| {
             run.usage.input_tokens = try addU64(run.usage.input_tokens, usage.input_tokens);
             run.usage.output_tokens = try addU64(run.usage.output_tokens, usage.output_tokens);

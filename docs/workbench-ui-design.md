@@ -772,7 +772,7 @@ Task overview 是当前 Task 的按需结构化摘要，不是固定存在的第
 
 ## 12. 文件变更与结果文件
 
-> Capability：**未来**。只有 AgentCore 发布 typed FileChange/Output 事件并完成验收后才显示本章模块；当前不能从工具文本或文件后缀推断。
+> Capability：**未来**。AgentCore 已发布 typed `file_changes` observation，但只有 Product owner、持久化、恢复与 Renderer 合同完成验收后才显示本章模块；typed Output 仍等待上游能力。当前不能从工具文本或文件后缀推断。
 
 ### 12.1 两类对象
 
