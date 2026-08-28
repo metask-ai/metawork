@@ -12,6 +12,24 @@ const supportedAbiVersion = 1;
 
 const targetPolicies = [
   {
+    supportedHosts: [{ platform: "win32", architectures: ["x64", "arm64"] }],
+    id: "aarch64-windows-gnu",
+    architecture: "aarch64",
+    os: "windows",
+    abi: "gnu",
+    rustTarget: "aarch64-pc-windows-gnullvm",
+    zigTarget: /^aarch64-windows\.[a-z0-9_]+\.\.\.[a-z0-9_]+-gnu$/,
+    library: "lib/metask_agentcore.lib",
+    optimize: "ReleaseSafe",
+    systemLibraries: ["advapi32", "crypt32"],
+    abiRevision: 14,
+    abiTableSize: 64,
+    lock: path.join(
+      "build_support",
+      "agentcore-bundle.windows-aarch64.lock.json",
+    ),
+  },
+  {
     supportedHosts: [{ platform: "win32", architectures: ["x64"] }],
     id: "x86_64-windows-gnu",
     architecture: "x86_64",

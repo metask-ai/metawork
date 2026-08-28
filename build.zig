@@ -179,6 +179,7 @@ fn agentCoreTargetId(target: std.Target) []const u8 {
             else => @panic("unsupported macOS AgentCore architecture"),
         },
         .windows => switch (target.cpu.arch) {
+            .aarch64 => "aarch64-windows-gnu",
             .x86_64 => "x86_64-windows-gnu",
             else => @panic("unsupported Windows AgentCore architecture"),
         },
@@ -686,6 +687,7 @@ fn wireAgentCore(
     const sdk = switch (bundle.sdk_dependency) {
         .macos_arm64 => b.dependency("agentcore_macos_arm64", dependency_options),
         .macos_x64 => b.dependency("agentcore_macos_x64", dependency_options),
+        .windows_arm64 => b.dependency("agentcore_windows_arm64", dependency_options),
         .windows_x64 => b.dependency("agentcore_windows_x64", dependency_options),
     }.module("metask_agentcore");
     const agent_provider = b.createModule(.{
