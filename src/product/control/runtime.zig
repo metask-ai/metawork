@@ -7875,6 +7875,118 @@ test "Workspace registry owns empty selection recent use authorization and capac
     );
 }
 
+test "Workspace upsert unknown outcome rolls back the candidate and freezes mutation" {
+    test_agent_runtime.io = std.testing.io;
+    const root_path = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        ".",
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(root_path);
+    const persistence_storage = try std.testing.allocator.alloc(
+        u8,
+        task_persistence.max_store_bytes,
+    );
+    defer std.testing.allocator.free(persistence_storage);
+    var persistence = TestTaskPersistence{
+        .storage = persistence_storage,
+        .result = .outcome_unknown,
+    };
+    var control = try Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        &test_agent_runtime,
+        testLimits(),
+        .{ .task_persistence = persistence.capability(null) },
+    );
+    defer control.deinit();
+    const next_workspace_id = control.next_workspace_id;
+    const next_recent_order = control.next_workspace_recent_order;
+
+    try std.testing.expectError(
+        error.TaskPersistenceOutcomeUnknown,
+        control.openWorkspace(.{
+            .workspace_root = root_path,
+            .trust = .explicitly_trusted,
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), control.workspaceCount(.manual));
+    try std.testing.expectEqual(next_workspace_id, control.next_workspace_id);
+    try std.testing.expectEqual(next_recent_order, control.next_workspace_recent_order);
+    try std.testing.expectEqual(
+        TaskPersistenceHealth.outcome_unknown,
+        control.task_persistence_health,
+    );
+    try std.testing.expectError(
+        error.TaskPersistenceOutcomeUnknown,
+        control.openWorkspace(.{
+            .workspace_root = root_path,
+            .trust = .explicitly_trusted,
+        }),
+    );
+}
+
+test "hidden Workspace record with Task history cannot be reused" {
+    var control = try testRuntime();
+    defer control.deinit();
+    control.limits.max_workspaces = 1;
+
+    const task = &control.task_runtime.tasks[0].?;
+    const run = &task.durable.runs[0].?;
+    _ = commitTerminal(run, .completed, .completed, null, .reusable, "", false);
+    finalizeTestTerminalEvents(&control);
+    control.releaseTaskAttachmentNoFail(task, .cold_start);
+    try control.removeWorkspace(1);
+    try std.testing.expect(!(control.findWorkspace(1) orelse
+        return error.TestUnexpectedResult).visible);
+
+    const replacement_root = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        ".",
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(replacement_root);
+    try std.testing.expectError(
+        error.WorkspaceCapacity,
+        control.openWorkspace(.{
+            .workspace_root = replacement_root,
+            .trust = .explicitly_trusted,
+        }),
+    );
+    try std.testing.expect(control.findWorkspaceByRoot(replacement_root) == null);
+    try std.testing.expect(control.findWorkspace(1) != null);
+}
+
+test "File Preview Workspace authority requires exact identity epoch and root" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const exact: task_runtime.FileReference = .{
+        .workspace_id = 1,
+        .workspace_epoch = 1,
+        .workspace_root = "/tmp/metawork-test",
+        .id = "ref-1",
+        .title = "fixture",
+        .display_path = "fixture.txt",
+        .kind = "file",
+        .locator_kind = .workspace_path,
+        .locator = "fixture.txt",
+        .range = null,
+    };
+    try std.testing.expect(control.filePreviewWorkspaceAuthorized(exact));
+
+    var stale_id = exact;
+    stale_id.workspace_id = 2;
+    try std.testing.expect(!control.filePreviewWorkspaceAuthorized(stale_id));
+    var stale_epoch = exact;
+    stale_epoch.workspace_epoch = 2;
+    try std.testing.expect(!control.filePreviewWorkspaceAuthorized(stale_epoch));
+    var stale_root = exact;
+    stale_root.workspace_root = "/tmp/other";
+    try std.testing.expect(!control.filePreviewWorkspaceAuthorized(stale_root));
+    control.workspaces[0].?.authorization = .removing;
+    try std.testing.expect(!control.filePreviewWorkspaceAuthorized(exact));
+}
+
 test "Workspace projection derives aggregate Task signals and removal preserves history" {
     var control = try testRuntime();
     defer control.deinit();
