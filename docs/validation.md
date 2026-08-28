@@ -2,7 +2,7 @@
 
 > 状态：初始技术验证已经收口；本文维护持续回归归属、当前验证状态、可复现入口、长期证据和覆盖缺口
 
-本文是验证控制面，不是产品或技术设计文档。它只回答四个问题：依据哪份规范验证什么、由哪个测试层负责、证据在哪里、还缺什么。产品行为以[产品需求](requirements.md)为准，UI 信息架构、交互与视觉以[UI 设计规范](ui-design.md)为准，系统边界以[高层架构](architecture.md)和[Product 内部架构](product-architecture.md)为准，Renderer Bridge、AgentCore 与外部合同分别由对应 source of truth 定义。
+本文是验证控制面，不是产品或技术设计文档。它只回答四个问题：依据哪份规范验证什么、由哪个测试层负责、证据在哪里、还缺什么。产品行为以[产品需求](requirements.md)为准，UI 信息架构、交互与视觉以[UI 设计规范](ui-design.md)为准，系统边界以[高层架构](architecture.md)和[Product 架构](product-architecture.md)为准；Renderer Bridge、AgentCore、Completion、Storage 与外部合同分别由对应 source of truth 定义。
 
 普通测试名称、实现位置和逐项断言由当前 test graph 与测试源码负责，不在本文建立第二份目录。只有测试层或归属规则、验证入口、长期证据、平台状态或覆盖缺口变化时才更新本文。
 
@@ -62,7 +62,7 @@ candidate probe、真实桌面验收、签名、公证和发布验证不进入 `
 | 单个 Node/Renderer suite  | `node --experimental-strip-types --test scripts/<suite>.test.mjs`               | Renderer、Bridge client、fixture 或工程脚本的单一失败模式                                   |
 | Agent/Product lifecycle   | `node scripts/run-lifecycle-tests.mjs`                                          | Session、Product Control、Executor、恢复、并发或 shutdown                                                    |
 | 单个 lifecycle 不变量     | 设置 `LIFECYCLE_TEST_FILTER` 后运行 lifecycle 入口                              | 只缩小开发反馈；提交前仍运行完整关联 root                                                   |
-| Storage foundation        | `zig build test-storage`                                                        | SQL contract、conformance、direct SQLite backend、migration、文件恢复与 engine profile      |
+| Storage                   | `zig build test-storage`                                                        | SQL contract、conformance、direct SQLite backend、migration、文件恢复与 engine profile      |
 | Account OAuth loopback    | `metawork-account-loopback` 与 `metawork-oauth-loopback-transport` module tests | Account callback policy/invalid budget，以及 Application listener/cancel/deadline/sink 组合 |
 | Agent Completion          | `agent/completion.zig` 与 `agent/provider_probe.zig` 定向 test root | 三 Provider 非流式 JSON codec、typed failure、请求取消、credential 清零与 Probe lifecycle |
 | MCP owner                 | `build.zig` 中对应的 `test-mcp-*` step                                          | configuration、OAuth、transport、Runtime、catalog、interop 或 Application composition       |
@@ -107,7 +107,7 @@ Output-segment 状态机验收必须覆盖 begin/text/end 严格顺序与 contro
 
 Product Task Session gateway 的结构验收固定为：`product/task/agent_session.zig` 是 Product 侧唯一允许出现裸 `*agent.Session`、`agent.SessionRoute`、`agent.SessionRestoreRoute` 与 `Runtime.releaseClosedSession` 的文件；`runtime.zig` 的 attached 状态只持 `Binding`，closing 状态只额外保存 close-worker 独占 Binding 与不可变 route id fact，recovery candidate 只持 `Binding + CheckpointRestoreReport`，Runtime attachment 与 worker job 持 scoped/worker-owned `Access`，projection 不持 Binding、Access 或 Session route。guard 必须同时禁止 raw Session getter、Task 外 route 逃逸和 projection 直接 Session API 调用，并允许 `SessionDisposition`、`RunControl/RunControlLease`、route id 与 restore report 等 typed facts。lifecycle tests 必须覆盖 queued cancel/worker exactly-once Access、close 等待 Access quiescence、close worker 与主线程 Binding 隔离、terminal event drain 前 route id 稳定、Runtime shutdown join 后 Binding 不可再用，以及 `max_sessions = 1` 下 model rollback/persistence outcome unknown 收口后 slot 可复用。
 
-Storage foundation 的自动化必须同时覆盖内存 target 与测试显式提供的 temporary file path，并在 Debug、ReleaseSafe 至少各运行一次定向入口。共享 conformance 负责 backend-independent 行为，包括 receiver 对同一 Database 的直接再入拒绝；direct backend tests 负责 `WAL + synchronous=NORMAL` profile、单连接内存可见性、Database 级间接再入与异 Database 调用、migration 原子性与版本 namespace、完整 batch rollback、reopen、busy/corrupt/invalid output 和结果上限。architecture guard 负责证明 SQLite C API 与 amalgamation 只进入 Storage concrete backend、上层尚未导入 Storage/SQLite、`app.zon` 尚未声明 Native SDK `sqlite` capability。上述结果只证明基础能力，不证明 production `app.db`、Product schema、业务迁移、单实例或断电 durable policy 已接入。
+Storage 的自动化必须同时覆盖内存 target 与测试显式提供的 temporary file path，并在 Debug、ReleaseSafe 至少各运行一次定向入口。共享 conformance 负责 backend-independent 行为，包括 receiver 对同一 Database 的直接再入拒绝；direct backend tests 负责 `WAL + synchronous=NORMAL` profile、单连接内存可见性、Database 级间接再入与异 Database 调用、migration 原子性与版本 namespace、完整 batch rollback、reopen、busy/corrupt/invalid output 和结果上限。architecture guard 负责证明 SQLite C API 与 amalgamation 只进入 Storage concrete backend、上层尚未导入 Storage/SQLite、`app.zon` 尚未声明 Native SDK `sqlite` capability。上述结果只证明基础能力，不证明 production `app.db`、Product schema、业务迁移、单实例或断电 durable policy 已接入。
 
 Product Skill 的 local-asset guard 必须正向证明总 Runtime 只经内部 `management_runtime.zig` 闭合目录/归档 preview、已安装 definition 读取、canonical `.skill` 导出、install/reimport/uninstall/retry、staging、恢复与 catalog reconciliation；该内部 owner 可以依赖唯一 package/management/policy/state kernels，但不得取得 Product Control、Task/Workspace view、具体 Executor、Agent Runtime/Session 或线程。Product Control 对应公开方法只能做 Workspace authority/Task quiescence gate、时间事实与 revision publication；projection 不得直接调用 package 实现、Transactions、staging root、persistence failure mapping 或 catalog reconciliation。
 

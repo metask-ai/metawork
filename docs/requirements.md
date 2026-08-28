@@ -293,9 +293,9 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 
 ## 7. 当前交付层级
 
-### 7.1 同步 macOS baseline
+### 7.1 当前同步执行 baseline
 
-当前首先交付：
+当前核心执行路径为：
 
 ```text
 临时或 trusted Workspace → Task（持有内部 Agent Session）→ 用户输入 → 同步 Agent Run
@@ -303,32 +303,32 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 → 工具结果 → 最终回复 → 取消/关闭 → Renderer reload 视图重建
 ```
 
-它不包含进程恢复、async suspend/resume、strict Workspace security 或产品 Host tools。
+它不包含独立 AgentCore Worker crash recovery、in-flight Run 恢复、async suspend/resume、strict Workspace security 或正式 Host tools。正常 Application 重启后的 finalized Conversation attachment 恢复按现有 checkpoint 合同独立提供，不扩大上述边界。
 
-### 7.2 Account- and connection-integrated macOS 目标
+### 7.2 Account 与 Model Connection 集成 baseline
 
-下一阶段在不改写既有 baseline 证据的前提下增加：
+当前在同步执行路径之前提供：
 
 ```text
 Metask 登录或配置用户模型连接 → Host 后台恢复/验证 API、credential 与模型
 → 仅在真实歧义时请求默认连接/模型 → ready ExecutionConfig
 → 进入 Workbench → 选择 Workspace / 编辑 New task 草稿
-→ Composer 确认模型 → Task admission → 既有同步 macOS baseline
+→ Composer 确认模型 → Task admission → 当前同步执行 baseline
 ```
 
-Metask C1 OAuth/login 已按 `metawork-app` / `metawork:use` 发布合同锁定；C2 使用已通过 production 复核的无 Profile-ID 通用路径。登录先提交 token rotation，再严格验证并提交 `/me` identity，随后直接启动 API Key/model catalog continuation；C2 失败不得抹除已完成登录。用户连接使用独立的 typed provider/endpoint/credential 流程，不依赖 OAuth，但必须通过 Host/AgentCore streaming test。Workbench 的新 Task admission 以完整 `execution_ready` 或 ready Model Connection 为条件，不能把仅有 authenticated identity 或未验证的连接误报成已经可以执行。
+Metask C1 OAuth/login 已按 `metawork-app` / `metawork:use` 发布合同锁定；C2 使用已通过 production 复核的无 Profile-ID 通用路径。登录先提交 token rotation，再严格验证并提交 `/me` identity，随后直接启动 API Key/model catalog continuation；C2 失败不得抹除已完成登录。用户连接使用独立的 typed provider/endpoint/credential 流程，不依赖 OAuth，但必须通过 [Completion 架构](completion-architecture.md)定义的 Agent-owned one-shot test。Workbench 的新 Task admission 以完整 `execution_ready` 或 ready Model Connection 为条件，不能把仅有 authenticated identity 或未验证的连接误报成已经可以执行。
 
 ### 7.3 Fault-domain 结论
 
 事件泵数据、生命周期压力测试和同进程/最小 Worker fault-domain spike 已完成。结论是选择单 AgentCore Worker 作为后续正式故障域；当前应用仍是同进程 prototype，正式 Worker、跨进程恢复和危险工具重放策略不属于当前交付。
 
-### 7.4 Windows 接入 baseline
+### 7.4 Windows baseline
 
-Windows x86_64 GNU 的当前 target availability 与 exact artifact identity 以 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)为准；是否形成与 macOS 同一产品语义的开发可执行 baseline，以 Native Debug/Release、真实 AgentCore vertical 和干净退出验收为准。精确 bundle、Renderer 与 MetaWork 平台无关测试通过不能替代这些平台证据。
+Windows x86_64 GNU 已进入当前开发 baseline；target availability 与 exact artifact identity 以 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)为准，Native Debug/Release、真实 AgentCore vertical、干净退出与分发证据以[验证规范](validation.md)为准。精确 bundle、Renderer 与 MetaWork 平台无关测试通过不能替代这些平台证据。
 
 ### 7.5 后续产品能力
 
-async pending、更完整的跨重启 execution rebind、Personal Skill 全局启用 policy、strict Workspace security、正式 Host tools、远程 artifact 发布、Windows 分发交付和 Linux 接入按独立 capability 与阶段推进，不能反向伪装成当前 v1 已具备。
+async pending、更完整的跨重启 execution rebind、strict Workspace security、正式 Host tools、typed Output/FileChange、plan progress/approval、custom UI、远程 artifact 发布与正式更新、独立 AgentCore Worker 和 Linux 接入按独立 capability 与阶段推进，不能反向伪装成当前 v1 已具备。
 
 具体验证矩阵见 [当前验证规范](validation.md)。
 

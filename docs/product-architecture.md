@@ -1,4 +1,4 @@
-# MetaWork Product 内部架构
+# MetaWork Product 架构
 
 > 状态：Product owner、事务、并发、恢复及其与 Agent 执行边界协作的当前规范
 > 日期：2026-08-08

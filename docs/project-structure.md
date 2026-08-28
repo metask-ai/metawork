@@ -8,10 +8,12 @@
 
 - 产品行为以 [产品需求](requirements.md) 为准；
 - 系统职责与安全边界以 [高层架构](architecture.md) 为准；
-- Product 内部 owner、事务与恢复以 [Product 内部架构](product-architecture.md) 为准；
+- Product owner、事务与恢复以 [Product 架构](product-architecture.md) 为准；
 - Account owner、Metask 消费合同、状态、事务、持久化、提交与恢复以 [Account 架构](account-architecture.md) 为准；
 - Renderer Bridge wire 与运输语义以 [Renderer Bridge 合同](renderer-bridge-contract.md) 为准；
 - AgentCore 生命周期以 [AgentCore 集成契约](agentcore-integration.md) 为准；
+- Agent-owned Completion 以 [Completion 架构](completion-architecture.md) 为准；
+- Storage SQL contract 与 backend 以 [Storage 架构](storage-architecture.md) 为准；
 - UI 信息架构、交互与视觉以 [UI 设计规范](ui-design.md) 为准；
 - 测试归属、验证状态与入口以 [验证规范](validation.md) 为准。
 

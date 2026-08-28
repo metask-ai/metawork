@@ -9,7 +9,7 @@
 本文定义 `src/product/account.zig` 与 `src/product/account/` 的内部职责、领域状态、事务、effect、持久化提交、恢复、并发和生命周期，同时锁定 MetaWork 实际消费的 Metask OAuth、HTTP catalog、Provider、ExecutionTarget 与 Account persistence 合同。以下事实由其他规范独占：
 
 - 产品可见行为、默认模型与 Task 的关系见[产品需求](requirements.md)；
-- Account 与 Application、Workbench、Bridge、Agent 的跨 owner 协作见[Product 内部架构](product-architecture.md)；
+- Account 与 Application、Workbench、Bridge、Agent 的跨 owner 协作见[Product 架构](product-architecture.md)；
 - Renderer 展示和交互见[UI 设计规范](ui-design.md)；
 - wire command、Snapshot 与 transport 见[Renderer Bridge 合同](renderer-bridge-contract.md)；
 - 测试层、验证入口和平台证据见[验证规范](validation.md)。
@@ -96,7 +96,7 @@ Model Connection registry 与 Metask identity/catalog 独立，继续使用自�
 
 Anthropic Messages 当前不可创建、恢复或选择：canonical AgentCore 仍未满足 Anthropic Native `x-api-key` 合同，Account 不以自建 transport 或 Bearer 兼容路径补偿。连接 endpoint 只允许 HTTPS 或用户明确配置的 loopback HTTP，并拒绝 control character、userinfo、query/fragment credential、过长 URL 和未登记 provider path；Renderer 不得直接拼接或覆盖规范化 endpoint。
 
-第一版不做 model discovery；用户显式提交 bounded model id，Account 保存对应 metadata 并以 provider contract 验证连接。API credential 只进入系统安全存储和当前调用所需的 bounded owned copy，系统 credential account 由公开 connection id 确定，不另存 locator。首次成功的 [Agent-owned one-shot Completion](model-completion-architecture-plan.md) test 将当前 connection generation 标记为 ready；test 不创建 Task、Run history、checkpoint 或 durable Conversation。之后的失败重测只更新最新测试结果，不撤销已经 ready 的 generation、默认 execution 或跨重启 binding。endpoint、provider 或 credential 变化生成新 connection generation；同一 ready connection 内切换已登记模型只生成新的 opaque execution generation。现有 Task 与 Session 不热替换。
+当前不做 model discovery；用户显式提交 bounded model id，Account 保存对应 metadata 并以 provider contract 验证连接。API credential 只进入系统安全存储和当前调用所需的 bounded owned copy，系统 credential account 由公开 connection id 确定，不另存 locator。首次成功的 [Agent-owned one-shot Completion](completion-architecture.md) test 将当前 connection generation 标记为 ready；test 不创建 Task、Run history、checkpoint 或 durable Conversation。之后的失败重测只更新最新测试结果，不撤销已经 ready 的 generation、默认 execution 或跨重启 binding。endpoint、provider 或 credential 变化生成新 connection generation；同一 ready connection 内切换已登记模型只生成新的 opaque execution generation。现有 Task 与 Session 不热替换。
 
 ### 3.5 MetaWork 消费的 Metask 合同
 
@@ -224,7 +224,7 @@ ReplacementIntent =
 - prepared transition 被拒绝或 effect admission 失败时不得修改 committed aggregate；
 - completion 产生的下一 effect admission 失败时，先提交已经观察到的外部结果，再从该 committed phase 产生唯一 terminal failure。
 
-主线程跨 owner 顺序由 [Product 内部架构](product-architecture.md#21-account-与-executionconfig)定义。Account 内部 commit 必须一次应用 state、catalog intent 和 preference shadow；owned execution payload 由 Coordinator 按 `ExecutionIntent` 精确转移一次，并在 Account commit 前安装或销毁。不得发布只有 state 或只有 catalog 已更新的中间事实。
+主线程跨 owner 顺序由 [Product 架构](product-architecture.md#21-account-与-executionconfig)定义。Account 内部 commit 必须一次应用 state、catalog intent 和 preference shadow；owned execution payload 由 Coordinator 按 `ExecutionIntent` 精确转移一次，并在 Account commit 前安装或销毁。不得发布只有 state 或只有 catalog 已更新的中间事实。
 
 ## 6. 关键事务
 

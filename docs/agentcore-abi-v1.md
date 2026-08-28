@@ -62,7 +62,7 @@ revision 14 只有一个 Runtime `create` entry。第二个参数是可空 `Runt
 
 ### revision 14 Completion hard cut
 
-AgentCore Completion handle、request/result/event、stop reason、status、上限与八个 function entry 已从 exact artifact 删除。MetaWork 没有 AgentCore Completion adapter、fixture slots、类型映射、状态映射、运行时 fallback 或调用路径；独立 Completion 合同、上限、取消与 Provider codec 全部由 [Completion 自有能力设计](model-completion-architecture-plan.md)和 MetaWork-owned 测试定义。
+AgentCore Completion handle、request/result/event、stop reason、status、上限与八个 function entry 已从 exact artifact 删除。MetaWork 没有 AgentCore Completion adapter、fixture slots、类型映射、状态映射、运行时 fallback 或调用路径；独立 Completion 合同、上限、取消与 Provider codec 全部由 [Completion 架构](completion-architecture.md)和 MetaWork-owned 测试定义。
 
 ## 4. Runtime 与 Session create
 

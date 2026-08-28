@@ -3,7 +3,7 @@
 > 状态：当前为同进程 prototype；后续正式故障域选择单 AgentCore Worker
 > 日期：2026-08-06
 
-本文只定义 MetaWork 的顶层边界、依赖方向、运行形态、进程与故障域以及跨模块安全边界。产品对象和行为见 [产品需求](requirements.md)，UI 信息架构、交互与视觉见 [UI 设计规范](ui-design.md)，Product 内部 owner、事务、并发和恢复见 [Product 内部架构](product-architecture.md)，Renderer Bridge wire 见 [Renderer Bridge 合同](renderer-bridge-contract.md)，AgentCore Session、工具、Skill、Permission、线程与生命周期见 [AgentCore 集成契约](agentcore-integration.md)，ABI 与 bundle 门槛见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。实际源码目录和依赖方向见 [工程结构与所有权](project-structure.md)，验证状态见 [验证规范](validation.md)。
+本文只定义 MetaWork 的顶层边界、依赖方向、运行形态、进程与故障域以及跨模块安全边界。产品对象和行为见 [产品需求](requirements.md)，UI 信息架构、交互与视觉见 [UI 设计规范](ui-design.md)，Product owner、事务、并发和恢复见 [Product 架构](product-architecture.md)，Renderer Bridge wire 见 [Renderer Bridge 合同](renderer-bridge-contract.md)，AgentCore Session、工具、Skill、Permission、线程与生命周期见 [AgentCore 集成契约](agentcore-integration.md)，ABI 与 bundle 门槛见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)，Agent-owned 无 Tool Completion 见 [Completion 架构](completion-architecture.md)，Storage SQL contract 与 backend 见 [Storage 架构](storage-architecture.md)。实际源码目录和依赖方向见 [工程结构与所有权](project-structure.md)，验证状态见 [验证规范](validation.md)。
 
 ## 1. 已确认的技术选型
 
@@ -94,7 +94,7 @@ File Preview 沿同一产品命令面使用 Native SDK async registry：Bridge �
 
 Product 是 MetaWork 产品事实与行为的逻辑边界。它不是统一源码 module 或 facade；Bridge 把 typed 产品命令 dispatch 给内部对应 owner，由这些 owner 执行 admission，协调账号、Workspace、Task、Run、持久化与恢复，并由 Product Control 直接调用相邻 Agent 边界完成执行，共同生成 canonical 产品 projection。
 
-Product 内部如何拆分 owner 不属于本图，见 [Product 内部架构](product-architecture.md)；Account owner、Metask 消费合同、状态、事务、持久化、提交与恢复见 [Account 架构](account-architecture.md)。Product 的产品 policy 不依赖 DOM、React tab、Toast、JSX state 或 WebView URL。
+Product 如何拆分内部 owner 不属于本图，见 [Product 架构](product-architecture.md)；Account owner、Metask 消费合同、状态、事务、持久化、提交与恢复见 [Account 架构](account-architecture.md)。Product 的产品 policy 不依赖 DOM、React tab、Toast、JSX state 或 WebView URL。
 
 MCP 不形成第五个 Product owner。`src/product/mcp*` 只是 Product Control 持有的产品 MCP 子模块源码归属：configuration kernel 负责 schema 2 Desired Registry、connection approval、OAuth consent、credential locator/恢复、`oauth_operation`、Runtime preparation 与事务；state kernel 持有 Runtime Manifest、Agent Activation、Admission Authority、configuration-apply、OAuth/reauthorization、connection test，以及 request generation、pending、admission invalidation 与绝对 deadline 组成的 freshness 状态；policy kernel 负责 authorization transition、pending reauthorization、desired Admission allowlist、OAuth refresh binding、generation gate 与 Admission 状态转换，只构造 Agent 公共 allowlist/Selection 相关值而不持有 Runtime；view kernel 只借用 configuration/state 与 callback-scoped 敏感文本投影器，派生 revision 1 snapshot 的 MCP 子树；refresh-job 在途事实由 Runtime 从自身 aggregate 提供。`ports.zig` 只描述 Executor、Agent catalog、timer 与 notifier 的窄 capability；`refresh_job.zig` 独占 refresh worker payload、execute/cancel callback、atomic state 与线性 outcome，worker 不持有 Product Control、Product MCP aggregate 或裸 Agent Runtime。`runtime.zig` 是该子模块的 live aggregate，持有 MCP state、refresh job identity 与 timer capability，并闭合 refresh request/start/sync、connection test、configuration apply、Task admission/recovery authority、typed query、View 派生和 shutdown settlement；异步 worker 只写其独占 job，Runtime 在主线程安装结果。该子模块仍不取得独立 Product owner、具体 Executor 或额外线程；MCP management/OAuth 的 prepare→Admission candidate→durable commit→typed outcome 由 Runtime 闭合，具体 registry/credential effect 仍经注入 capability 执行；跨 owner coordinator、revision publication、完整 snapshot 编排和交付仍归 Product Control。Agent 继续拥有运行期 connector/backend 生命周期、AgentCore descriptor/catalog/selection、declarative Runtime apply、Activation 与 typed MCP health。Application 注入 bounded child/network effect，并拥有系统 credential、HTTP auth snapshot、OAuth effect，以及把 canonical desired preparation、Agent Runtime apply、activation 与 Product Control 完成事务串起来的窄 coordinator；它不拥有 transport 产品状态或 MCP JSON-RPC。Application 先创建 canonical empty MCP Runtime并提交零 entry Manifest，再由同一个 coordinator 后台应用恢复出的 Desired；因此外部 MCP effect 不成为 Application/普通 Task readiness 依赖，也不增加第二条 Runtime 或 worker 路径。STDIO child 只获得 Application 构造的显式 environment：受控 executable search path、Windows 必需的 `SystemRoot` 与用户逐名安全采集的 secret slot，不继承其余 Host 环境。隔离 connection test 仍不替换正式 Runtime。Runtime Manifest 记录正式 Runtime 已接管的 descriptor fingerprint 或安全 absence proof；`restart_required` alignment 只表示一次 apply 尚未完成，产品不要求重启 Application。新 Task 只消费 Product Control 原子提交的 Admission Authority，既有 Session 保持创建时 authority。Account 不参与 MCP；Bridge 与 Renderer 只运输 typed intent/状态；AgentCore 继续唯一拥有 MCP JSON-RPC、版本协商、catalog 与 tool binding。
 
@@ -165,7 +165,7 @@ Native SDK 的发布 artifact 缺口不进入上述 Application Runtime 三级�
 
 Storage 是 MetaWork-owned、无业务语义的基础设施边界，拥有后端无关的 SQL value、statement、query/exec outcome、limits、migration mechanism，以及当前直接 SQLite 后端的连接、事务、错误映射和 engine profile。SQLite C API 只存在于 concrete backend；公共 SQL contract 不依赖 Product、Application、Native SDK 或 SQLite 类型。
 
-Product owner 仍独占自己的 schema、migration 内容、health、恢复、并发和 durable boundary 决策；Application 未来只负责创建 concrete backend、借出 capability 和安排 shutdown。当前 Storage foundation 不解析产品数据目录、不创建 production `app.db`、不接入任何现有 persistence，也不改变 Product Control 单实例锁或恢复合同。直接 SQLite 是正式基础后端而非 Native SDK compatibility seam；未来只有在 Native SDK relational surface 满足同一 conformance contract 时，才可原位替换访问后端，并继续使用同一个 SQLite 文件。
+Product owner 仍独占自己的 schema、migration 内容、health、恢复、并发和 durable boundary 决策；Application 未来只负责创建 concrete backend、借出 capability 和安排 shutdown。当前 Storage 不解析产品数据目录、不创建 production `app.db`、不接入任何现有 persistence，也不改变 Product Control 单实例锁或恢复合同。直接 SQLite 是正式基础后端而非 Native SDK compatibility seam；未来只有在 Native SDK relational surface 满足同一 conformance contract 时，才可原位替换访问后端，并继续使用同一个 SQLite 文件。
 
 ## 4. 跨模块合同
 
@@ -180,9 +180,9 @@ Product owner 仍独占自己的 schema、migration 内容、health、恢复、�
 
 ## 5. 状态、恢复与故障域
 
-Product 在 Renderer 生命周期之外拥有产品状态。WebView reload 通过完整 Snapshot 重建视图；Application 重启先恢复经过校验的产品历史，再由用户显式触发 Conversation attachment 重建。Product Control 拥有 checkpoint blob store、record transaction、恢复资格、bounded recovery job 与主线程 commit；Agent 只拥有 AgentCore restore adapter、Session slot 和 Runtime shutdown fence；Application 只按既有 store 模式注入 `<MetaWork data dir>/workbench/checkpoints` 目录 capability、持有进程级单写锁并维持 owner 关闭顺序。恢复不重放历史输入、工具或 permission，无法恢复的 non-terminal operation 仍保守收口为 interrupted。精确事务见 [Product 内部架构](product-architecture.md)。
+Product 在 Renderer 生命周期之外拥有产品状态。WebView reload 通过完整 Snapshot 重建视图；Application 重启先恢复经过校验的产品历史，再由用户显式触发 Conversation attachment 重建。Product Control 拥有 checkpoint blob store、record transaction、恢复资格、bounded recovery job 与主线程 commit；Agent 只拥有 AgentCore restore adapter、Session slot 和 Runtime shutdown fence；Application 只按既有 store 模式注入 `<MetaWork data dir>/workbench/checkpoints` 目录 capability、持有进程级单写锁并维持 owner 关闭顺序。恢复不重放历史输入、工具或 permission，无法恢复的 non-terminal operation 仍保守收口为 interrupted。精确事务见 [Product 架构](product-architecture.md)。
 
-Bridge transport、Product 产品状态和 Agent execution terminal cause 是不同事实。Snapshot/Event 失败不覆盖产品历史；transport failure 不伪造用户取消；Agent terminal result 只有经 Product 提交后才成为 MetaWork 产品事实。详细线性化、持久化和恢复规则见 [Product 内部架构](product-architecture.md)，连接与 Snapshot transport 见 [Renderer Bridge 合同](renderer-bridge-contract.md)。
+Bridge transport、Product 产品状态和 Agent execution terminal cause 是不同事实。Snapshot/Event 失败不覆盖产品历史；transport failure 不伪造用户取消；Agent terminal result 只有经 Product 提交后才成为 MetaWork 产品事实。详细线性化、持久化和恢复规则见 [Product 架构](product-architecture.md)，连接与 Snapshot transport 见 [Renderer Bridge 合同](renderer-bridge-contract.md)。
 
 | 模型                      | 故障隔离               | 作用                                |
 | ------------------------- | ---------------------- | ----------------------------------- |
