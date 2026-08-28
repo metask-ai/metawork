@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import test from "node:test";
 
+import { JSDOM } from "jsdom";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createServer } from "vite";
@@ -15,6 +16,37 @@ import {
   reduceInspectorSession,
   taskHasInspectorFacts,
 } from "../frontend/src/features/inspector/inspector-state.ts";
+
+const dom = new JSDOM("<!doctype html><html><body></body></html>", {
+  pretendToBeVisual: true,
+  url: "http://localhost/",
+});
+if (!dom.window.PointerEvent) dom.window.PointerEvent = dom.window.MouseEvent;
+Object.assign(globalThis, {
+  window: dom.window,
+  document: dom.window.document,
+  Node: dom.window.Node,
+  DocumentFragment: dom.window.DocumentFragment,
+  Element: dom.window.Element,
+  HTMLElement: dom.window.HTMLElement,
+  HTMLButtonElement: dom.window.HTMLButtonElement,
+  MutationObserver: dom.window.MutationObserver,
+  getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
+  requestAnimationFrame: dom.window.requestAnimationFrame.bind(dom.window),
+  cancelAnimationFrame: dom.window.cancelAnimationFrame.bind(dom.window),
+  PointerEvent: dom.window.PointerEvent,
+});
+Object.defineProperty(globalThis, "navigator", {
+  configurable: true,
+  value: dom.window.navigator,
+});
+if (!HTMLElement.prototype.scrollIntoView)
+  HTMLElement.prototype.scrollIntoView = () => undefined;
+if (!HTMLElement.prototype.scrollTo)
+  HTMLElement.prototype.scrollTo = () => undefined;
+
+const { cleanup, render, screen } = await import("@testing-library/react");
+const { default: userEvent } = await import("@testing-library/user-event");
 
 const vite = await createServer({
   root: join(process.cwd(), "frontend"),
@@ -34,7 +66,11 @@ const { ApprovalPanel } = await vite.ssrLoadModule(
 const { I18nContext } = await vite.ssrLoadModule("/src/i18n/context.ts");
 const { translate } = await vite.ssrLoadModule("/src/i18n/runtime.ts");
 
-test.after(async () => vite.close());
+test.afterEach(() => cleanup());
+test.after(async () => {
+  await vite.close();
+  dom.window.close();
+});
 
 function run(overrides = {}) {
   return {
@@ -134,6 +170,38 @@ function renderTaskContent(value, locale = "en-US") {
   );
 }
 
+function localizedView(component, locale = "en-US") {
+  return createElement(
+    I18nContext.Provider,
+    {
+      value: {
+        locale,
+        setLocale() {},
+        t: (id, values) => translate(locale, id, values),
+      },
+    },
+    component,
+  );
+}
+
+function taskContentElement(value, revision = "1") {
+  return localizedView(
+    createElement(TaskContent, {
+      task: value,
+      revision,
+      composerHasDraft: false,
+      retryAvailable: false,
+      responseDisabled: false,
+      onPrepareRetry() {},
+      onPreviewFile() {},
+      onRespond() {},
+      renderPendingUi() {
+        return null;
+      },
+    }),
+  );
+}
+
 test("Inspector availability comes only from real Task facts", () => {
   assert.equal(taskHasInspectorFacts(null), false);
   assert.equal(taskHasInspectorFacts(task()), false);
@@ -216,7 +284,7 @@ test("Inspector visibility stays isolated per Task and ignores content churn", (
   assert.equal(inspectorOpenForTask(state, "task-a"), true);
 });
 
-test("Inspector shows latest canonical run facts without copying raw output", () => {
+test("Inspector shows Work process without eagerly mounting raw tool output", () => {
   const markup = renderInspector(
     task({
       runs: [
@@ -252,17 +320,283 @@ test("Inspector shows latest canonical run facts without copying raw output", ()
         }),
       ],
       lastRunOutcome: "completed",
+      context: {
+        pressure: {
+          sourceRunId: "9",
+          currentTokens: "90",
+          warningThreshold: "80",
+          autoCompactThreshold: "100",
+          blockingLimit: "120",
+          severity: "warning",
+        },
+        lastAutoCompact: {
+          sourceRunId: "9",
+          dropped: "4",
+          kept: "8",
+          beforeTokens: "110",
+          afterTokens: "70",
+        },
+      },
     }),
   );
   assert.match(markup, />Task overview</);
   assert.match(markup, />Last run</);
+  assert.match(markup, />Work process</);
+  assert.match(markup, />Bash</);
+  assert.match(markup, /aria-expanded="false"/);
   assert.match(markup, />17</);
-  assert.doesNotMatch(markup, />Bash</);
+  assert.match(markup, />Context is filling up</);
+  assert.match(markup, /90 tokens now · auto-compact at 100 · limit 120/);
+  assert.match(markup, />110 → 70 tokens</);
   assert.doesNotMatch(
     markup,
     /1,000|private raw output|private input|INTERNAL_PROVIDER_RETRY/,
   );
   assert.doesNotMatch(markup, />Plan<|>Outputs<|>Files changed</);
+});
+
+test("Context and usage remains visible for cache-only usage", () => {
+  const markup = renderInspector(
+    task({
+      runs: [
+        run({
+          usage: {
+            input: "0",
+            output: "0",
+            cacheRead: "9",
+            cacheCreation: "0",
+          },
+        }),
+      ],
+    }),
+  );
+  assert.match(markup, />Context and usage</);
+  assert.match(markup, />Cache read<\/dt><dd>9</);
+});
+
+test("Work process mounts and removes one Tool detail on demand", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  const value = task({
+    runs: [
+      run({
+        tools: [
+          {
+            id: "tool-1",
+            order: "1",
+            name: "Bash",
+            input: "private input",
+            progress: "private progress",
+            content: "private raw output",
+            state: "completed",
+            isError: false,
+            elapsedMs: "25",
+            inputTruncated: false,
+            progressTruncated: false,
+            contentTruncated: false,
+            redacted: false,
+            fileRefs: [],
+          },
+          {
+            id: "tool-2",
+            order: "2",
+            name: "Read",
+            input: "",
+            progress: "",
+            content: "second private output",
+            state: "completed",
+            isError: false,
+            elapsedMs: "10",
+            inputTruncated: false,
+            progressTruncated: false,
+            contentTruncated: false,
+            redacted: false,
+            fileRefs: [],
+          },
+        ],
+      }),
+    ],
+  });
+  const view = render(
+    localizedView(
+      createElement(TaskOverview, {
+        task: value,
+        focusRequest: null,
+        onFocusPending() {},
+      }),
+    ),
+  );
+
+  assert.equal(screen.queryByText("private raw output"), null);
+  const disclosure = screen.getByRole("button", { name: /Bash/ });
+  assert.equal(disclosure.getAttribute("aria-expanded"), "false");
+  await user.click(disclosure);
+  assert.equal(disclosure.getAttribute("aria-expanded"), "true");
+  assert.ok(screen.getByText("private raw output"));
+  const secondDisclosure = screen.getByRole("button", { name: /Read/ });
+  await user.click(secondDisclosure);
+  assert.equal(screen.queryByText("private raw output"), null);
+  assert.ok(screen.getByText("second private output"));
+  assert.equal(disclosure.getAttribute("aria-expanded"), "false");
+  await user.click(secondDisclosure);
+  assert.equal(screen.queryByText("second private output"), null);
+
+  await user.click(disclosure);
+  assert.ok(screen.getByText("private raw output"));
+  view.rerender(
+    localizedView(
+      createElement(TaskOverview, {
+        task: {
+          ...value,
+          id: "task-b",
+          runs: [
+            {
+              ...value.runs[0],
+              id: "run-b",
+              tools: [
+                {
+                  ...value.runs[0].tools[0],
+                  content: "another private output",
+                },
+              ],
+            },
+          ],
+        },
+        focusRequest: null,
+        onFocusPending() {},
+      }),
+    ),
+  );
+  assert.equal(screen.queryByText("another private output"), null);
+  assert.equal(
+    screen.getByRole("button", { name: /Bash/ }).getAttribute("aria-expanded"),
+    "false",
+  );
+});
+
+test("conversation separates commentary, Markdown response, and plain provisional output", () => {
+  const active = task({
+    currentRunId: "9",
+    currentRunPhase: "running",
+    runs: [
+      run({
+        phase: "running",
+        outcome: null,
+        activity: { kind: "writing_response" },
+        output: {
+          commentary: "Checked **two files**.",
+          response: "",
+          responseKind: null,
+          provisional: "Draft **not Markdown**",
+          redacted: false,
+          provisionalRedacted: false,
+        },
+      }),
+    ],
+  });
+  const activeMarkup = renderTaskContent(active);
+  assert.match(activeMarkup, />Agent updates</);
+  assert.match(activeMarkup, /aria-expanded="true"/);
+  assert.match(activeMarkup, /Checked <strong>two files<\/strong>\./);
+  assert.match(activeMarkup, /Draft \*\*not Markdown\*\*/);
+  assert.doesNotMatch(activeMarkup, /Draft <strong>not Markdown<\/strong>/);
+
+  const completed = task({
+    runs: [
+      run({
+        output: {
+          commentary: "A historical update",
+          response: "**Ready**",
+          responseKind: "final",
+          provisional: "",
+          redacted: false,
+          provisionalRedacted: false,
+        },
+      }),
+    ],
+  });
+  const completedMarkup = renderTaskContent(completed);
+  assert.match(completedMarkup, /aria-expanded="false"/);
+  assert.doesNotMatch(completedMarkup, /A historical update/);
+  assert.match(completedMarkup, /<strong>Ready<\/strong>/);
+});
+
+test("Agent updates disclosure remains user-controlled across revisions and Task switches", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  const active = task({
+    id: "task-a",
+    currentRunId: "9",
+    currentRunPhase: "running",
+    runs: [
+      run({
+        phase: "running",
+        outcome: null,
+        activity: { kind: "writing_response" },
+        output: {
+          commentary: "Checking the workspace",
+          response: "",
+          responseKind: null,
+          provisional: "",
+          redacted: false,
+          provisionalRedacted: false,
+        },
+      }),
+    ],
+  });
+  const view = render(taskContentElement(active));
+  let disclosure = screen.getByRole("button", { name: "Agent updates" });
+  assert.equal(disclosure.getAttribute("aria-expanded"), "true");
+  await user.click(disclosure);
+  assert.equal(disclosure.getAttribute("aria-expanded"), "false");
+
+  view.rerender(
+    taskContentElement(
+      {
+        ...active,
+        runs: [
+          {
+            ...active.runs[0],
+            output: {
+              ...active.runs[0].output,
+              commentary: "Checking the workspace\n\nStill working",
+            },
+          },
+        ],
+      },
+      "2",
+    ),
+  );
+  disclosure = screen.getByRole("button", { name: "Agent updates" });
+  assert.equal(disclosure.getAttribute("aria-expanded"), "false");
+
+  view.rerender(taskContentElement(task({ id: "task-b" }), "3"));
+  assert.equal(screen.queryByRole("button", { name: "Agent updates" }), null);
+  view.rerender(taskContentElement(active, "4"));
+  disclosure = screen.getByRole("button", { name: "Agent updates" });
+  assert.equal(disclosure.getAttribute("aria-expanded"), "false");
+});
+
+test("partial output and terminal failure render one composite notice", () => {
+  const value = task({
+    runs: [
+      run({
+        phase: "failed",
+        outcome: "failed",
+        cause: "timeout",
+        output: {
+          commentary: "",
+          response: "An incomplete answer",
+          responseKind: "partial",
+          provisional: "",
+          redacted: false,
+          provisionalRedacted: false,
+        },
+      }),
+    ],
+  });
+  const markup = renderTaskContent(value);
+  assert.match(markup, />Work failed before the response was complete</);
+  assert.equal((markup.match(/class="ai-activity"/g) ?? []).length, 1);
+  assert.doesNotMatch(markup, />Work failed</);
 });
 
 test("typed Run activity uses safe localized labels", () => {
@@ -325,6 +659,12 @@ test("typed Run activity uses safe localized labels", () => {
       renderInspector(activityTask, "zh-CN"),
       new RegExp(`>${expected}<`),
     );
+    if (activity.kind === "retrying_provider") {
+      assert.match(
+        renderTaskContent(activityTask, "zh-CN"),
+        /第 1\/2 次尝试 · 50 毫秒后重试/,
+      );
+    }
   }
 
   const waitingModel = task({
