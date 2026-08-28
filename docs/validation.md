@@ -2,7 +2,7 @@
 
 > 状态：初始技术验证已经收口；本文维护持续回归归属、当前验证状态、可复现入口、长期证据和覆盖缺口
 
-本文是验证控制面，不是产品或技术设计文档。它只回答四个问题：依据哪份规范验证什么、由哪个测试层负责、证据在哪里、还缺什么。产品行为以[产品需求](requirements.md)为准，系统边界以[高层架构](architecture.md)和[Product 内部架构](product-architecture.md)为准，Renderer、AgentCore 与外部合同分别由对应 source of truth 定义。
+本文是验证控制面，不是产品或技术设计文档。它只回答四个问题：依据哪份规范验证什么、由哪个测试层负责、证据在哪里、还缺什么。产品行为以[产品需求](requirements.md)为准，UI 信息架构、交互与视觉以[UI 设计规范](ui-design.md)为准，系统边界以[高层架构](architecture.md)和[Product 架构](product-architecture.md)为准；Renderer Bridge、AgentCore、Completion、Storage 与外部合同分别由对应 source of truth 定义。
 
 普通测试名称、实现位置和逐项断言由当前 test graph 与测试源码负责，不在本文建立第二份目录。只有测试层或归属规则、验证入口、长期证据、平台状态或覆盖缺口变化时才更新本文。
 
@@ -62,7 +62,7 @@ candidate probe、真实桌面验收、签名、公证和发布验证不进入 `
 | 单个 Node/Renderer suite  | `node --experimental-strip-types --test scripts/<suite>.test.mjs`               | Renderer、Bridge client、fixture 或工程脚本的单一失败模式                                   |
 | Agent/Product lifecycle   | `node scripts/run-lifecycle-tests.mjs`                                          | Session、Product Control、Executor、恢复、并发或 shutdown                                                    |
 | 单个 lifecycle 不变量     | 设置 `LIFECYCLE_TEST_FILTER` 后运行 lifecycle 入口                              | 只缩小开发反馈；提交前仍运行完整关联 root                                                   |
-| Storage foundation        | `zig build test-storage`                                                        | SQL contract、conformance、direct SQLite backend、migration、文件恢复与 engine profile      |
+| Storage                   | `zig build test-storage`                                                        | SQL contract、conformance、direct SQLite backend、migration、文件恢复与 engine profile      |
 | Account OAuth loopback    | `metawork-account-loopback` 与 `metawork-oauth-loopback-transport` module tests | Account callback policy/invalid budget，以及 Application listener/cancel/deadline/sink 组合 |
 | Agent Completion          | `agent/completion.zig` 与 `agent/provider_probe.zig` 定向 test root | 三 Provider 非流式 JSON codec、typed failure、请求取消、credential 清零与 Probe lifecycle |
 | MCP owner                 | `build.zig` 中对应的 `test-mcp-*` step                                          | configuration、OAuth、transport、Runtime、catalog、interop 或 Application composition       |
@@ -72,6 +72,8 @@ candidate probe、真实桌面验收、签名、公证和发布验证不进入 `
 `build.zig` 是正式 Zig test graph 的注册真源；architecture guard 必须证明所有 active external test root 已接线。`scripts/*.test.mjs` 由总入口自动发现，不维护文件数量或手工清单。
 
 Agent Completion 的确定性测试使用 MetaWork-owned fake Transport，覆盖三个 Provider 的非流式 request/result、text/usage/stop 映射、Tool wire fail-closed、非 2xx typed rejection、请求前取消、阻塞 perform 被外部取消唤醒，以及 credential 和 sensitive header copy 清零。Application Transport 沿用仓库已有的 `std.Io.Select` buffered fetch/cancel 模式；生产使用系统 CA，不接受 Completion 专用证书配置，也不维护本地 CA/leaf 测试 fixture。
+
+MetaWork Agent capability 的确定性回归归 `tests/agent/`：Runtime 注册与 fresh/restore Session allowlist 必须精确等于 Agent-owned 的十个 built-in，`AskUserQuestion` 必须缺席，unknown/empty set 必须 fail closed，`host_tool_count` 保持零；permission 回归同时覆盖 request `responses[]`、`exact_arguments` candidate、四种 choice、Session grant、provenance、restore 对账和 capability gate。bundle 名称 probe 只证明外部 artifact 上限，不能替代 Agent 产品集合回归，也不形成长期维护的独立工具计划。
 
 MCP catalog freshness 的真实边界回归属于 `test-mcp-interop`：fixture 给 modern catalog 注入短 TTL，并覆盖同一 model/selection 到期时的 typed `McpNotRefreshed`、refresh 后成功，以及短 TTL 不启动高频后台 timer、过期后按需重建 Admission。纯 Product Control 测试验证 earliest safe TTL 到绝对 monotonic deadline 的单次转换、主动刷新下限，以及 OAuth/refresh 串行边界内 pending request 不丢失；它不伪造 AgentCore freshness 状态。
 
@@ -105,7 +107,7 @@ Output-segment 状态机验收必须覆盖 begin/text/end 严格顺序与 contro
 
 Product Task Session gateway 的结构验收固定为：`product/task/agent_session.zig` 是 Product 侧唯一允许出现裸 `*agent.Session`、`agent.SessionRoute`、`agent.SessionRestoreRoute` 与 `Runtime.releaseClosedSession` 的文件；`runtime.zig` 的 attached 状态只持 `Binding`，closing 状态只额外保存 close-worker 独占 Binding 与不可变 route id fact，recovery candidate 只持 `Binding + CheckpointRestoreReport`，Runtime attachment 与 worker job 持 scoped/worker-owned `Access`，projection 不持 Binding、Access 或 Session route。guard 必须同时禁止 raw Session getter、Task 外 route 逃逸和 projection 直接 Session API 调用，并允许 `SessionDisposition`、`RunControl/RunControlLease`、route id 与 restore report 等 typed facts。lifecycle tests 必须覆盖 queued cancel/worker exactly-once Access、close 等待 Access quiescence、close worker 与主线程 Binding 隔离、terminal event drain 前 route id 稳定、Runtime shutdown join 后 Binding 不可再用，以及 `max_sessions = 1` 下 model rollback/persistence outcome unknown 收口后 slot 可复用。
 
-Storage foundation 的自动化必须同时覆盖内存 target 与测试显式提供的 temporary file path，并在 Debug、ReleaseSafe 至少各运行一次定向入口。共享 conformance 负责 backend-independent 行为，包括 receiver 对同一 Database 的直接再入拒绝；direct backend tests 负责 `WAL + synchronous=NORMAL` profile、单连接内存可见性、Database 级间接再入与异 Database 调用、migration 原子性与版本 namespace、完整 batch rollback、reopen、busy/corrupt/invalid output 和结果上限。architecture guard 负责证明 SQLite C API 与 amalgamation 只进入 Storage concrete backend、上层尚未导入 Storage/SQLite、`app.zon` 尚未声明 Native SDK `sqlite` capability。上述结果只证明基础能力，不证明 production `app.db`、Product schema、业务迁移、单实例或断电 durable policy 已接入。
+Storage 的自动化必须同时覆盖内存 target 与测试显式提供的 temporary file path，并在 Debug、ReleaseSafe 至少各运行一次定向入口。共享 conformance 负责 backend-independent 行为，包括 receiver 对同一 Database 的直接再入拒绝；direct backend tests 负责 `WAL + synchronous=NORMAL` profile、单连接内存可见性、Database 级间接再入与异 Database 调用、migration 原子性与版本 namespace、完整 batch rollback、reopen、busy/corrupt/invalid output 和结果上限。architecture guard 负责证明 SQLite C API 与 amalgamation 只进入 Storage concrete backend、上层尚未导入 Storage/SQLite、`app.zon` 尚未声明 Native SDK `sqlite` capability。上述结果只证明基础能力，不证明 production `app.db`、Product schema、业务迁移、单实例或断电 durable policy 已接入。
 
 Product Skill 的 local-asset guard 必须正向证明总 Runtime 只经内部 `management_runtime.zig` 闭合目录/归档 preview、已安装 definition 读取、canonical `.skill` 导出、install/reimport/uninstall/retry、staging、恢复与 catalog reconciliation；该内部 owner 可以依赖唯一 package/management/policy/state kernels，但不得取得 Product Control、Task/Workspace view、具体 Executor、Agent Runtime/Session 或线程。Product Control 对应公开方法只能做 Workspace authority/Task quiescence gate、时间事实与 revision publication；projection 不得直接调用 package 实现、Transactions、staging root、persistence failure mapping 或 catalog reconciliation。
 
@@ -115,9 +117,9 @@ Product Skill 的公开表面 guard 必须证明 `product/skill.zig` 只导出 r
 
 ### Metask Account 与真实 AgentCore Run
 
-- **规范**：[产品需求](requirements.md)、[Account 内部架构](account-architecture.md)、[Metask Account 合同](metask-account-contract.md)。
-- **证据**：`git show dbaaf81b0217d4016944960ee8621e9a23274f05:docs/phase-0-validation.md` 中 2026-07-20 的真实链路记录。
-- **结论**：打包 `.app` 完成 OAuth、profile、API Key/model catalog、execution persistence，以及 `gpt-5.5`、`deepseek-v4-pro` AgentCore Run。该证据不证明后续 Renderer、设置、模型选择或平台交互仍然通过。
+- **规范**：[产品需求](requirements.md)、[Account 架构](account-architecture.md)。
+- **证据**：`git show dbaaf81b0217d4016944960ee8621e9a23274f05:docs/phase-0-validation.md` 中 2026-07-20 的真实链路记录；2026-08-10 使用 production `metawork-app` / `metawork:use` refresh generation 复核当前无 Profile-ID 路径。
+- **结论**：2026-07-20 的打包 `.app` 完成当时的 OAuth、profile、API Key/model catalog、execution persistence，以及 `gpt-5.5`、`deepseek-v4-pro` AgentCore Run；该旧证据不证明后续 Renderer、设置、模型选择或平台交互仍然通过。2026-08-10 的复核确认 `/api/v1/auth/me` 返回 HTTP 200 与匹配用户，错误的 `/api/v1/auth/oauth/userinfo` 返回 HTTP 400 `invalid scope`，OAuth API Key catalog 与 API Key bearer model catalog 均不需要 Profile header；这些结论现由 Account 合同和回归测试持续约束。
 
 ### AgentCore target baseline
 
@@ -125,7 +127,7 @@ Product Skill 的公开表面 guard 必须证明 `product/skill.zig` 只导出 r
 - **证据**：macOS arm64/x86_64 与 Windows x86_64 GNU 均锁定 clean source commit `b4fe9a9b8cb020db8fb7efc637aa5fb1263ba2ce`；三者均为 ABI v1 revision 14 exact artifact。三个 target archive 的 manifest payload checksum、target 架构与 discovery symbol 已验证并原子 stage。
 - **结论**：所有 target policy 只接受 ABI v1 revision 14 与 64-byte root table，required surface 由 root + 五个 mandatory child table 定义；没有 revision 13 fallback。macOS x86_64 的真实 desktop vertical 仍须在对应目标环境独立采集。
 
-2026-08-13 的 Windows staged run-state probe 可由 Git object `51e0fcc847e7b832b628f6c64183525dd8300710` 定位：Host Run ID `7` 的 callback identity 与 `run_state.run_id` 一致，首序号为 `1`，并观察到 `starting → generating → finalizing → completed`。结论已进入 ABI 合同和 Product Control 回归，因此 active tree 不再保留该一次性 probe。
+2026-08-13 的 Windows staged run-state probe 可由 Git object `51e0fcc847e7b832b628f6c64183525dd8300710` 定位：Host Run ID `7` 的 callback identity 与 `run_state.run_id` 一致，首序号为 `1`，并观察到 `starting → generating → finalizing → completed`。结论已进入 AgentCore 集成契约和 Product Control 回归，因此 active tree 不再保留该一次性 probe。
 
 ### Fault-domain direction
 
@@ -164,7 +166,7 @@ architecture guard 必须保持 `PlatformServices.context` 零 allowlist。原�
 
 ### macOS
 
-首次使用真实 Account 前，按[macOS 开发与分发签名](macos-local-development.md)选择 Apple Development identity：
+首次使用真实 Account 前，按 [macOS 分发的本地签名规则](macos-distribution.md#本地签名非分发)选择 Apple Development identity：
 
 ```bash
 node scripts/setup-macos-local-signing.mjs setup
@@ -175,7 +177,7 @@ npm run build:release
 npm run package:macos
 ```
 
-跨平台开发入口与 Apple Development 签名规则由 `dev.mjs` 负责，setup 只复用该开发 owner；Developer ID、应用与 DMG 签名、公证、staple、Gatekeeper、Finder 左到右拖拽布局、磁盘映像及挂载内容的身份与完整性规则由 `package-macos.mjs` 负责。两个 owner 必须保持双向隔离。`package-macos.mjs` 必须先验证 canonical bundle，再以版本 allowlist 内的 Xcode `actool` 编译一次 `assets/icons/MetaWork.icon`，随后按 resolved build target 让 Native SDK 从 `.agentcore/bundles/<target-id>` 生成未签名 `.app`。应用签名前必须把编译所得 `Assets.car` 与 `MetaWork.icns` 逐字节 stage 到 `Contents/Resources`，删除 SDK 的 `AppIcon.icns`，把 `CFBundleIconFile` 与 `CFBundleIconName` 精确设为 `MetaWork`，同时把 64 × 64 托盘 PNG stage 到运行时相对路径 `Contents/Resources/assets/icons/tray-icon.png`；任一资源、metadata 或工具链变化都 fail closed。完成资源 gate 后以 `lipo` 确认主程序恰好为该 target 的单一架构，随后只执行一次 Developer ID 应用签名，并在签名后再次检查 Icon Composer resource digest、Renderer、托盘资源、metadata 与签名 policy。`package:macos` 默认 `all`，两种架构必须复用同一次 actool 输出并依次产出小写 `metawork-<version>-macos-arm64.dmg` 与 `metawork-<version>-macos-x64.dmg`；`npm run package:macos -- arm64` 或 `-- x64` 只产出所选单一架构。入口不得根据 last-stage state 推断架构，也不生成 Universal、preview 或 ZIP。普通 check/test/build 不得访问 Icon Composer compiler、个人证书、Finder 或 notary profile；`package:macos` 成功证明当前图形用户会话生成的可分发磁盘映像，不等于更新能力完成。macOS 26 的 Finder、Dock 与运行中已打包应用须在 Light/Dark 下独立确认没有非设计渐变；至少一套 macOS 26 以前的系统须确认 fallback ICNS，未取得这些视觉证据前不得报告图标最终验收完成。
+跨平台开发入口与 Apple Development 签名规则由 [macOS 分发的本地签名章节](macos-distribution.md#本地签名非分发)定义并由 `dev.mjs` 负责，setup 只复用该开发 owner；Developer ID、应用与 DMG 签名、公证、staple、Gatekeeper、Finder 左到右拖拽布局、磁盘映像及挂载内容的身份与完整性规则由同一平台文档的正式分发章节定义并由 `package-macos.mjs` 负责。两个实现 owner 必须保持双向隔离。`package-macos.mjs` 必须先验证 canonical bundle，再以版本 allowlist 内的 Xcode `actool` 编译一次 `assets/icons/MetaWork.icon`，随后按 resolved build target 让 Native SDK 从 `.agentcore/bundles/<target-id>` 生成未签名 `.app`。应用签名前必须把编译所得 `Assets.car` 与 `MetaWork.icns` 逐字节 stage 到 `Contents/Resources`，删除 SDK 的 `AppIcon.icns`，把 `CFBundleIconFile` 与 `CFBundleIconName` 精确设为 `MetaWork`，同时把 64 × 64 托盘 PNG stage 到运行时相对路径 `Contents/Resources/assets/icons/tray-icon.png`；任一资源、metadata 或工具链变化都 fail closed。完成资源 gate 后以 `lipo` 确认主程序恰好为该 target 的单一架构，随后只执行一次 Developer ID 应用签名，并在签名后再次检查 Icon Composer resource digest、Renderer、托盘资源、metadata 与签名 policy。`package:macos` 默认 `all`，两种架构必须复用同一次 actool 输出并依次产出小写 `metawork-<version>-macos-arm64.dmg` 与 `metawork-<version>-macos-x64.dmg`；`npm run package:macos -- arm64` 或 `-- x64` 只产出所选单一架构。入口不得根据 last-stage state 推断架构，也不生成 Universal、preview 或 ZIP。普通 check/test/build 不得访问 Icon Composer compiler、个人证书、Finder 或 notary profile；`package:macos` 成功证明当前图形用户会话生成的可分发磁盘映像，不等于更新能力完成。macOS 26 的 Finder、Dock 与运行中已打包应用须在 Light/Dark 下独立确认没有非设计渐变；至少一套 macOS 26 以前的系统须确认 fallback ICNS，未取得这些视觉证据前不得报告图标最终验收完成。
 
 Keychain 跨重建授权稳定性当前为 **人工验收待完成**：在同一精确 commit 上让 Debug app 写入并读取 Account credential，完全退出并重新构建，再次恢复 Account，确认没有出现新的 Account Keychain 授权框。首次选择签名私钥产生的系统授权不属于 Account Keychain 失败。
 
@@ -205,7 +207,9 @@ node scripts/test-window-chrome-windows.mjs
 
 `node scripts/run-agentcore-abort-timing-probe.mjs --staged` 用于取证 `session_abort` 返回后是否仍有 callback 投递；结果尚未采集，因此该 probe 保留。Windows distribution、安装/更新、完整 process-tree/timeout/security matrix 和 Linux target 不由 development baseline 证明。
 
-### Windows 安装 artifact
+### Windows 分发
+
+具体安装器、Authenticode 与发布边界见 [Windows 分发](windows-distribution.md)。
 
 ```powershell
 npm run package:windows
@@ -229,6 +233,7 @@ revision 14 不继承旧 artifact 的 checkpoint 样本或通过结论。每个�
 - strict Workspace security、正式 Host tools 和持久权限规则尚未完成独立安全验收。
 - File Preview 的确定性回归必须覆盖：Snapshot file reference 只发布 `id/title/displayPath`；request 精确绑定 Task/Run/reference 且拒绝旧单-id/额外 path shape；async command 不出现在同步 registry；2-worker/8 in-flight 独立 lane 的 no-follow、root containment、regular-file、256 KiB/行/UTF-8/control 分类与 metadata changing；completion 的 Workspace/locator reauthorization、current/historical credential 与截断前缀遮蔽；非 ready 空正文；Renderer generation stale-result 丢弃、Task/reference 失效关闭、桌面和约 390px Drawer、键盘/焦点/横向溢出；shutdown join/drain/settle exactly once。当前自动化覆盖 wire、owner 与 bounded read/redaction 核心不变量；真实桌面 Drawer 的 Windows/macOS 视觉、键盘和窄屏验收仍为人工验收待完成，不影响 typed File Preview 路径的自动化状态。
 - 当前三个 target ABI package 均已提供 typed `file_changes` observation，但 Product FileChange 的 owner、持久化、恢复与投影尚未验收；typed Output、plan progress/approval 和 custom UI 仍不由当前 ABI 提供。对应 UI 必须保持关闭。
+- AgentCore Skill catalog lease 是否固定 Skill body/resources 的历史快照尚未取得独立合同证据；当前只承诺 pinned catalog/policy identity 与显式 refresh，不宣称未 refresh 的外部内容必然可按历史字节执行。AgentCore 也不提供 shadowed candidates 或完整 resolution trace，Skill UI 只能展示 resolved winner 与 typed issues。
 - Task 当前进程内 execution binding 和模型切换已有自动化；显式 execution rebind 的跨重启 epoch/history 与竞态尚未实现。
 - MCP 的真实第三方 server、平台 credential/network、secure capture、browser/callback 和 issuer 行为尚未完成跨平台验收；marketplace 不在当前范围。
 - 系统关机或用户显式退出 MetaWork 期间的准点执行、登录前系统服务和远端云调度尚未实现。当前只保证窗口关闭而 Host 仍运行时继续调度，并在下次启动协调至多一个 missed occurrence。

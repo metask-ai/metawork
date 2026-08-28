@@ -1,6 +1,8 @@
-# MetaWork Completion 实现
+# MetaWork Completion 架构
 
-状态：已接受并实现。本文件取代此前的流式 Completion、`metask_model`、Model ABI 和 Runtime Set 方向。
+> 状态：Agent-owned one-shot Completion 的 source of truth；当前消费者为 Model Connection Probe 与首个 Run 自动标题
+
+本文定义 MetaWork 自有的无 Tool、非流式 Completion 边界。它不属于 Metask AgentCore Run/Event 协议，也不建立第二套 AgentLoop；测试归属和持续回归入口见[验证规范](validation.md)。
 
 ## 1. 目标
 

@@ -29,10 +29,6 @@ MetaWork 不接受目标 policy 之外的 ABI revision，不保留 function-tabl
 
 当前 revision 14 尚处 experimental 状态。artifact 已删除 AgentCore Completion 类型、status 与八个 entry，将原扁平 function table hard cut 为 root + Runtime、Session、SessionControl、Skill、MCP 五个 mandatory 子表，并把唯一 Runtime create 签名扩展为可空 `RuntimePluginConfigV1`。MetaWork 正式 Runtime 传 null plugin config，独立 Completion 继续由 MetaWork 自己提供。revision、root/child table size 与 repository lock 的 exact manifest/header/bindings checksum 必须一起匹配；MetaWork 不为 revision 13 的扁平表、capability bitset、Completion ABI 或旧 callback shape 保留条件编译、运行时 shim 或 target-specific 例外。
 
-### revision 8 的执行状态事件
-
-revision 8 新增 `CAP_RUN_STATE_OBSERVATION` 和 `CoreEvent.run_state`。事件携带单调 `transition_seq`、`phase`（starting、generating、executing_tools、waiting_ui、retrying、compacting、finalizing、completed、failed、aborted、poisoned）、turn、累计 tool call 数及当前 in-flight tool 数组。Windows 与 macOS 的 staged probe 都使用非首值 Host Run ID `7` 确认 callback envelope 的 Run identity 与 `run_state.run_id` 一致，首个观测序号为 `1`；Windows 取证可由 2026-08-13 的 Git object `51e0fcc847e7b832b628f6c64183525dd8300710` 定位。MetaWork 将该事件限制为 runtime-only observation/status 投影，不写入或决定 Workbench `RunPhase`，不产生持久终态；projection 层重复/过期或关联/边界校验失败只丢弃该 observation 并标记 runtime-only degraded，不以 `consumer_rejected` 终止用户 Run。callback 边界的非法 wire/UTF-8、`run_id == 0` 或无法安全解码的文本仍按既有 `invalid_event` 合同失败当前 Run。重启后仍按未完成 Run 的既有恢复规则收口。该一次性 probe 的结论已进入本合同和 Workbench 回归，active tree 不再保留重复脚本。
-
 ## 2. Bundle 与 SDK 边界
 
 正式应用只消费 canonical `.agentcore/bundles/<target-id>`：
@@ -66,7 +62,7 @@ revision 14 只有一个 Runtime `create` entry。第二个参数是可空 `Runt
 
 ### revision 14 Completion hard cut
 
-AgentCore Completion handle、request/result/event、stop reason、status、上限与八个 function entry 已从 exact artifact 删除。MetaWork 没有 AgentCore Completion adapter、fixture slots、类型映射、状态映射、运行时 fallback 或调用路径；独立 Completion 合同、上限、取消与 Provider codec 全部由 [Completion 自有能力设计](model-completion-architecture-plan.md)和 MetaWork-owned 测试定义。
+AgentCore Completion handle、request/result/event、stop reason、status、上限与八个 function entry 已从 exact artifact 删除。MetaWork 没有 AgentCore Completion adapter、fixture slots、类型映射、状态映射、运行时 fallback 或调用路径；独立 Completion 合同、上限、取消与 Provider codec 全部由 [Completion 架构](completion-architecture.md)和 MetaWork-owned 测试定义。
 
 ## 4. Runtime 与 Session create
 
@@ -100,7 +96,7 @@ fresh Session 只使用 `SessionHostConfigV1` 与 `SessionCreateConfigV1`：
 - immutable Skill catalog query/lease；
 - fresh Session create/destroy；
 - typed Text/Skill Run 与 abort；
-- AgentCore bundle 支持的 built-in Read/Bash/Edit/AskUserQuestion；其中 MetaWork Agent 的产品集合不开放 AskUserQuestion；
+- AgentCore bundle 的 built-in capability 上限；MetaWork 实际开放的固定子集只由 [AgentCore 集成契约](agentcore-integration.md#built-in-tools)定义，bundle 提供不等于产品开放；
 - manual compact；
 - post-terminal checkpoint export 与 Session description；
 - verified checkpoint source 驱动的 Session restore 与 restore report/description 对账；

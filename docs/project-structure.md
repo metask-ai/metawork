@@ -8,11 +8,13 @@
 
 - 产品行为以 [产品需求](requirements.md) 为准；
 - 系统职责与安全边界以 [高层架构](architecture.md) 为准；
-- Product 内部 owner、事务与恢复以 [Product 内部架构](product-architecture.md) 为准；
-- Account 内部状态、事务、提交与恢复以 [Account 内部架构](account-architecture.md) 为准；
+- Product owner、事务与恢复以 [Product 架构](product-architecture.md) 为准；
+- Account owner、Metask 消费合同、状态、事务、持久化、提交与恢复以 [Account 架构](account-architecture.md) 为准；
 - Renderer Bridge wire 与运输语义以 [Renderer Bridge 合同](renderer-bridge-contract.md) 为准；
 - AgentCore 生命周期以 [AgentCore 集成契约](agentcore-integration.md) 为准；
-- UI 行为以 [Workbench UI 设计](workbench-ui-design.md) 为准；
+- Agent-owned Completion 以 [Completion 架构](completion-architecture.md) 为准；
+- Storage SQL contract 与 backend 以 [Storage 架构](storage-architecture.md) 为准；
+- UI 信息架构、交互与视觉以 [UI 设计规范](ui-design.md) 为准；
 - 测试归属、验证状态与入口以 [验证规范](validation.md) 为准。
 
 本文不预测尚不存在的文件，不为未来 capability 预建空目录，也不记录已经完成的迁移步骤。结构变化只有在真实职责或不变量形成后才进入本文。
@@ -22,7 +24,7 @@
 ```text
 metawork/
 ├── assets/
-│   ├── brand/             # MetaWork 标志几何真源
+│   ├── brand/             # UI 规范治理的 MetaWork canonical 标志几何资产
 │   └── icons/             # 用途资产、macOS Icon Composer 源与 Windows 平台交付产物
 ├── docs/                  # 当前规范、验证账本与保留的 artifact migration 证据
 ├── frontend/
@@ -299,7 +301,7 @@ storage -> SQLite amalgamation
 - `tests/agent/` 与 `tests/product/` 分别归 Agent 和 Product Control，`tests/integration/` 只容纳无法归属于单一 owner 的跨边界失败，`tests/support/` 只提供 test-only fake 和 fixture，不形成产品 owner；
 - Storage contract、conformance 与 direct backend test 与 `src/storage/` 共置；`zig build test-storage` 是其定向入口，正式 Native test graph 仍是提交前的完整入口；
 - `scripts/*.test.mjs` 是默认 Node/Renderer 回归资产，由 `npm test` 自动发现；其他 `scripts/` 可以编排真实应用、平台验收和 artifact 工具，但不能建立测试专用产品协议；
-- `assets/brand/logo-mark.svg` 是标志几何真源；`assets/icons/` 保存从该真源导出的应用与托盘用途母版、`MetaWork.icon` macOS 平台组合真源及 Windows 平台交付资产；仓库不维护通用图标格式转换工具链，唯一例外是已登记的 `scripts/native-sdk-compat/macos-icon-composer.mjs`，只在 `package:macos` 中调用受版本门约束的 Xcode `actool` 生成不提交的 `Assets.car` 与 fallback ICNS；
+- `assets/brand/logo-mark.svg` 是 [UI 设计规范](ui-design.md#162-品牌资产)治理的 canonical 标志几何资产；`assets/icons/` 保存从该资产导出的应用与托盘用途母版、`MetaWork.icon` macOS 平台组合资产及 Windows 平台交付资产。`app.zon.icons` 只声明当前 Native SDK 能消费的 PNG 与 ICO；应用复合 SVG 依赖 even-odd 镂空，禁止交给不支持该语义的窄 SVG rasterizer。仓库不维护通用图标格式转换工具链，唯一例外是已登记的 `scripts/native-sdk-compat/macos-icon-composer.mjs`，只在 `package:macos` 中调用受版本门约束的 Xcode `actool` 生成不提交的 `Assets.car` 与 fallback ICNS；
 - 根 `package.json` 只保留 `dev`、`check`、`test`、`format`、`format:check`、`build:debug`、`build:release`、`package:macos` 与 `package:windows` 九个工程入口，不登记内部步骤、单项测试、probe 或平台验收 harness；`scripts/dev.mjs` 是跨平台开发入口并独占 Apple Development 本地签名策略，`setup-macos-local-signing.mjs` 只复用该 owner 完成一次性选择，二者不得依赖发布脚本；`package-macos.mjs` 独占 Developer ID、Icon Composer 资源 staging、DMG、公证与发布验证，`scripts/native-sdk-compat/macos-icon-composer.mjs` 只作为其内部 artifact compiler/stager，不得依赖开发或 setup owner。macOS `dev` 只使用显式选择的 Apple Development identity；`package:macos` 默认按固定 target store 顺序输出版本化 arm64 与 x64 DMG，显式 `arm64` 或 `x64` 只构建一个，并在当前图形用户会话中使用 Finder 写入左到右拖拽布局，只使用唯一有效的 Developer ID Application identity 和钥匙串 `metawork-notary` profile，要求每份应用与 DMG 签名、notarization `Accepted`、DMG staple、Gatekeeper、磁盘映像及挂载内容完整性全部通过；Windows `package:windows` 只消费 Release build 与 Native SDK Windows runtime stage，要求 x64 GUI subsystem 和完整 runtime 结构，再由 Inno Setup 输出版本化单 EXE；其显式 signed mode 使用 Windows SDK SignTool、精确证书 thumbprint、SHA-256、RFC 3161 与 Authenticode verification，普通 unsigned mode 不读取签名身份；
 - `build_support/agentcore_bundle.zig` 与 target lock 是正式信任边界；candidate probe 只使用临时 source-free SDK consumer；
 

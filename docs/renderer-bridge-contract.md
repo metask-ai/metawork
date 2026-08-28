@@ -3,7 +3,7 @@
 > 状态：`metawork.renderer-bridge` 固定 revision 1
 > 日期：2026-08-07
 
-顶层模块职责见 [MetaWork 高层架构](architecture.md)。本文件是 Renderer 与 Product 之间 command、event、Snapshot、连接与运输语义的唯一架构真源；具体源码目录见 [工程结构与所有权](project-structure.md)，持续验收入口见 [验证规范](validation.md)。
+顶层模块职责见 [MetaWork 高层架构](architecture.md)，用户可见的信息架构、交互与视觉见 [UI 设计规范](ui-design.md)。本文件是 Renderer 与 Product 之间 command、event、Snapshot、连接与运输语义的唯一架构真源；具体源码目录见 [工程结构与所有权](project-structure.md)，持续验收入口见 [验证规范](validation.md)。
 
 ## 1. Bridge 定位
 
