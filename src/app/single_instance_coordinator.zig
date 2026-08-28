@@ -330,7 +330,7 @@ test "single-instance coordinator fails closed while an owner stays unreachable"
 }
 
 fn activationFailure(interactive: bool, failure: compat.Failure) CoordinateError {
-    std.log.err("single-instance activation failed: {s}", .{@tagName(failure)});
+    std.log.warn("single-instance activation failed: {s}", .{@tagName(failure)});
     if (interactive) compat.reportFailure(failure);
     return error.ActivationFailed;
 }

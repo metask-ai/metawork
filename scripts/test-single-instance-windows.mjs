@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -30,6 +30,7 @@ const windowProbe = path.join(
   "probe-windows-window-chrome.ps1",
 );
 const automationDir = path.join(appCwd, ".zig-cache", "native-sdk-automation");
+const bridgeResponsePath = path.join(automationDir, "bridge-response.txt");
 const timeoutMs = 20_000;
 const outputLimit = 1024 * 1024;
 const powershell =
@@ -65,6 +66,7 @@ try {
     );
   }
   assertAlive(primary, "concurrent Primary");
+  await waitForRendererChromeReady(primary);
 
   await runWindowProbe(primary.child.pid, "close");
   await runSecondary(primary, ["--from-hidden-window"], canonicalFixtureRoot);
@@ -74,6 +76,17 @@ try {
   await runSecondary(primary, ["--from-minimized-window"], fixtureRoot);
   await runWindowProbe(primary.child.pid, "activated");
 
+  await requestTrayQuit();
+  await assertCleanPrimaryShutdown(primary, "graceful Primary shutdown");
+
+  primary = startInstance(["--after-graceful-shutdown"]);
+  await waitForOutput(primary, /metawork\.smoke\.event_ack sequence=1/u);
+  await runSecondary(
+    primary,
+    ["--after-graceful-restart"],
+    canonicalFixtureRoot,
+  );
+
   if (!primary.child.kill()) throw new Error("failed to terminate Primary");
   await withTimeout(primary.exited, timeoutMs, "forced Primary termination");
   await rm(automationDir, { recursive: true, force: true });
@@ -82,25 +95,11 @@ try {
   await waitForOutput(primary, /metawork\.smoke\.event_ack sequence=1/u);
   await runSecondary(primary, ["--lease-recovered"], canonicalFixtureRoot);
 
-  await execFileAsync(
-    process.execPath,
-    [native, "automate", "tray-action", "2"],
-    {
-      cwd: appCwd,
-      timeout: timeoutMs,
-      maxBuffer: outputLimit,
-    },
-  );
-  const final = await withTimeout(primary.exited, timeoutMs, "clean shutdown");
-  if (final.code !== 0 || final.signal !== null)
-    throw new Error(
-      `replacement Primary exited abnormally: ${JSON.stringify(final)}`,
-    );
-  if (!/runtime\.event.*event="stop"/u.test(primary.output()))
-    throw new Error("clean Runtime stop was not observed");
+  await requestTrayQuit();
+  await assertCleanPrimaryShutdown(primary, "final Primary shutdown");
 
   process.stdout.write(
-    "Windows 20-process arbitration, hidden/minimized activation, argv/cwd handoff, crash recovery, and clean shutdown passed.\n",
+    "Windows 20-process arbitration, hidden/minimized activation, argv/cwd handoff, graceful restart, crash recovery, and clean shutdown passed.\n",
   );
 } catch (error) {
   for (const child of children)
@@ -178,6 +177,26 @@ async function runSecondary(primary, args, cwd) {
   assertAlive(primary, "Primary after Secondary handoff");
 }
 
+async function requestTrayQuit() {
+  await execFileAsync(
+    process.execPath,
+    [native, "automate", "tray-action", "2"],
+    {
+      cwd: appCwd,
+      timeout: timeoutMs,
+      maxBuffer: outputLimit,
+    },
+  );
+}
+
+async function assertCleanPrimaryShutdown(primary, label) {
+  const state = await withTimeout(primary.exited, timeoutMs, label);
+  if (state.code !== 0 || state.signal !== null)
+    throw new Error(`${label} exited abnormally: ${JSON.stringify(state)}`);
+  if (!/runtime\.event.*event="stop"/u.test(primary.output()))
+    throw new Error(`${label} did not observe a clean Runtime stop`);
+}
+
 function assertCleanSecondary(state) {
   if (state.code !== 0 || state.signal !== null)
     throw new Error(`Secondary exited abnormally: ${JSON.stringify(state)}`);
@@ -219,6 +238,27 @@ async function waitForOutput(instance, pattern) {
     await delay(25);
   }
   throw new Error(`timed out waiting for ${pattern}`);
+}
+
+async function waitForRendererChromeReady(instance) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const response = JSON.parse(await readFile(bridgeResponsePath, "utf8"));
+      if (
+        response?.ok === true &&
+        /^[1-9][0-9]*$/u.test(response.result?.generation) &&
+        Number.isFinite(response.result?.insets?.top)
+      )
+        return;
+    } catch (error) {
+      if (error?.code !== "ENOENT" && !(error instanceof SyntaxError))
+        throw error;
+    }
+    assertAlive(instance, "Primary before Renderer chrome readiness");
+    await delay(20);
+  }
+  throw new Error("Renderer window chrome did not reach a synchronized state");
 }
 
 function withTimeout(promise, milliseconds, label) {

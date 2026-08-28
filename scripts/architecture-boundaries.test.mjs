@@ -1874,6 +1874,21 @@ test("Application arbitrates single-instance ownership before business owners", 
     platform,
     /pub fn activateMainWindow\([\s\S]*?window\.showMainWindow\(runtime_value\);/u,
   );
+
+  const explicitQuit = app.match(
+    /if \(result == \.quit_confirmed\) \{[\s\S]*?\n\s*\}/u,
+  )?.[0];
+  assert.ok(explicitQuit, "explicit quit lifecycle must remain explicit");
+  assert.ok(explicitQuit.indexOf("coordinator.stopIngress();") >= 0);
+  assert.ok(explicitQuit.indexOf("platform.requestExplicitQuit();") >= 0);
+  assert.ok(
+    explicitQuit.indexOf("coordinator.stopIngress();") <
+      explicitQuit.indexOf("platform.requestExplicitQuit();"),
+  );
+  assert.match(
+    platform,
+    /confirmExplicitQuit\([\s\S]*?\.quit_confirmed[\s\S]*?pub fn requestExplicitQuit/u,
+  );
 });
 
 test("ordinary build and test entries stay isolated from macOS signing", () => {

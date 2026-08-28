@@ -338,8 +338,16 @@ const App = struct {
                     try self.dispatcher.?.emitProductChanged();
                 }
             },
-            .command => |command| if (command.source == .tray) if (self.control) |control|
-                self.platform.handleTrayCommand(command.tray_item_id, control.scheduleHost()),
+            .command => |command| if (command.source == .tray) if (self.control) |control| {
+                const result = self.platform.handleTrayCommand(
+                    command.tray_item_id,
+                    control.scheduleHost(),
+                );
+                if (result == .quit_confirmed) {
+                    if (self.single_instance) |coordinator| coordinator.stopIngress();
+                    try self.platform.requestExplicitQuit();
+                }
+            },
             else => {},
         }
     }
