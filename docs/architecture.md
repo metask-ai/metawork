@@ -223,9 +223,11 @@ Renderer 按不可信调用方处理：
 
 MetaWork 桌面产品、根 npm workspace、Renderer workspace 和 Zig package 随同一仓库原子发布，共用一个 release version。`app.zon` 是产品版本与 Bundle ID 真源；根 npm、Renderer 与 Zig manifest 必须精确镜像，派生 lock 只保存工具生成结果。实际源码 owner 见 [工程结构与所有权](project-structure.md)。
 
-Windows 分发先由 Native SDK 生成完整 runtime stage，再由仓库的安装器定义生成单 EXE；安装器层只拥有文件安装、快捷方式和卸载语义，不成为 Application runtime owner，也不能重写 Native SDK artifact。具体能力与签名边界见 [Windows 安装包](windows-distribution.md)。
+macOS 分发由 Native SDK 生成 target-specific `.app`，再由仓库打包入口完成原生资源 staging、Developer ID 签名、公证和 DMG 验证；打包层不成为 Application runtime owner，也不提供更新能力。具体能力与签名边界见 [macOS 分发](macos-distribution.md)。
 
-Renderer Bridge revision、Account persistence layout、AgentCore artifact version、AgentCore ABI version/revision 和 bundle manifest schema 各自保护不同合同，不得随 MetaWork release version 自动升降。Account persistence 采用无版本 hard cut，精确账号存储身份见 [Account 架构](account-architecture.md#7-persistence-与恢复)；macOS 签名规则见 [macOS 开发与内部测试签名](macos-local-development.md)。任何合同类版本标识的变更都必须先得到用户显式同意。
+Windows 分发先由 Native SDK 生成完整 runtime stage，再由仓库的安装器定义生成单 EXE；安装器层只拥有文件安装、快捷方式和卸载语义，不成为 Application runtime owner，也不能重写 Native SDK artifact。具体能力与签名边界见 [Windows 分发](windows-distribution.md)。
+
+Renderer Bridge revision、Account persistence layout、AgentCore artifact version、AgentCore ABI version/revision 和 bundle manifest schema 各自保护不同合同，不得随 MetaWork release version 自动升降。Account persistence 采用无版本 hard cut，精确账号存储身份见 [Account 架构](account-architecture.md#7-persistence-与恢复)；Apple Development 本地身份见 [macOS 分发](macos-distribution.md#本地签名非分发)。任何合同类版本标识的变更都必须先得到用户显式同意。
 
 ## 9. 主要风险
 

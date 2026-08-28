@@ -68,7 +68,7 @@ npm run package:windows
 
 `package.json` 只保留九个工程入口：`dev`、`check`、`test`、`format`、`format:check`、`build:debug`、`build:release`、`package:macos` 与 `package:windows`。一次性平台准备、平台验收 harness 和 probe 不是入口，直接以 `node scripts/<name>.mjs` 调用。
 
-macOS 的 Apple Development identity 只需在每台开发机选择一次；`npm run dev` 使用该本地身份，`npm run package:macos` 默认依次构建 arm64 与 x64 DMG，也可显式传入 `arm64` 或 `x64`。正式入口要求唯一有效的 Developer ID Application identity 和钥匙串 `metawork-notary` profile，自动完成 hardened runtime、可信时间戳、DMG 签名、Apple notarization、staple、Gatekeeper、磁盘映像与挂载内容验证。具体要求见 [macOS 开发与分发签名](docs/macos-local-development.md)。Windows development baseline 使用 `node scripts/run-windows-bringup.mjs`；`npm run package:windows` 使用 Native SDK runtime staging 与 Inno Setup 生成版本化 x64 单 EXE，正式签名构建额外传入 `--signing required`，具体要求见 [Windows 安装包](docs/windows-distribution.md)。完整验证范围与按变更选择的命令见 [验证规范](docs/validation.md)。
+macOS 的 Apple Development identity 只需在每台开发机选择一次；`npm run dev` 使用该本地身份。`npm run package:macos` 默认依次构建 arm64 与 x64 DMG，也可显式传入 `arm64` 或 `x64`；正式入口要求唯一有效的 Developer ID Application identity 和钥匙串 `metawork-notary` profile，自动完成 hardened runtime、可信时间戳、DMG 签名、Apple notarization、staple、Gatekeeper、磁盘映像与挂载内容验证。两条路径的具体要求见 [macOS 分发](docs/macos-distribution.md)。Windows development baseline 使用 `node scripts/run-windows-bringup.mjs`；`npm run package:windows` 使用 Native SDK runtime staging 与 Inno Setup 生成版本化 x64 单 EXE，正式签名构建额外传入 `--signing required`，具体要求见 [Windows 分发](docs/windows-distribution.md)。完整验证范围与按变更选择的命令见 [验证规范](docs/validation.md)。
 
 ## AgentCore 输入边界
 
@@ -95,6 +95,7 @@ probe 使用临时 source-free SDK consumer，不进入正式产品 build graph�
 - [AgentCore ABI v1 消费合同](docs/agentcore-abi-v1.md)：锁定各 target bundle 的机器合同与能力边界
 - [Completion 架构](docs/completion-architecture.md)：Agent-owned 非流式无 Tool Completion、Provider codec、Transport 与取消
 - [Storage 架构](docs/storage-architecture.md)：SQL contract、直接 SQLite backend、limits 与 lifecycle
-- [macOS 开发与分发签名](docs/macos-local-development.md)：Apple Development、Developer ID Application、notarization 与正式 DMG
+- [macOS 分发](docs/macos-distribution.md)：Apple Development 本地身份、Developer ID Application、DMG、公证与发布验证
+- [Windows 分发](docs/windows-distribution.md)：Inno Setup、Authenticode、安装与发布验证
 - [验证规范](docs/validation.md)：证据、持续回归和未验证能力
 - [Agent 工作约束](AGENTS.md)：仓库内执行规则

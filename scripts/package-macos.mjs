@@ -198,7 +198,7 @@ export function selectDistributionCodeSigningIdentity(
       ? ` matching configured fingerprint ${configuredFingerprint.toUpperCase()}`
       : "";
     throw new Error(
-      `Expected exactly one valid Developer ID Application Code Signing identity${qualifier}, found ${matching.length}. See docs/macos-local-development.md.`,
+      `Expected exactly one valid Developer ID Application Code Signing identity${qualifier}, found ${matching.length}. See docs/macos-distribution.md.`,
     );
   }
   return matching[0];

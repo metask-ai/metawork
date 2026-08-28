@@ -1,6 +1,10 @@
-# Windows 安装包
+# MetaWork Windows 分发
+
+> 状态：Inno Setup 安装器、Authenticode 与发布验证的 source of truth
 
 `npm run package:windows` 是 Windows 安装 artifact 的正式工程入口。它输出一个版本化安装器：
+
+Windows development baseline 与平台证据见[验证规范](validation.md)；本文不定义 development bringup。
 
 ```text
 zig-out/package/metawork-<version>-windows-x64-setup.exe

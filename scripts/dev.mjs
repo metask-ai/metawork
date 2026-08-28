@@ -104,7 +104,7 @@ export function selectLocalCodeSigningIdentity(
       ? ` matching configured fingerprint ${configuredFingerprint.toUpperCase()}`
       : "";
     throw new Error(
-      `Expected exactly one valid Apple Development Code Signing identity${qualifier}, found ${matching.length}. See docs/macos-local-development.md.`,
+      `Expected exactly one valid Apple Development Code Signing identity${qualifier}, found ${matching.length}. See docs/macos-distribution.md.`,
     );
   }
   return matching[0];

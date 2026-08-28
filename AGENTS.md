@@ -19,6 +19,8 @@
 | AgentCore bundle、ABI 与 required capability                  | [docs/agentcore-abi-v1.md](docs/agentcore-abi-v1.md)                 |
 | Agent-owned Completion、Provider codec、Transport 与取消      | [docs/completion-architecture.md](docs/completion-architecture.md)   |
 | Storage SQL contract、backend、limits、migration 与 lifecycle | [docs/storage-architecture.md](docs/storage-architecture.md)         |
+| macOS Apple Development、Developer ID、DMG、公证与发布验证   | [docs/macos-distribution.md](docs/macos-distribution.md)             |
+| Windows 安装器、Authenticode 与发布验证                       | [docs/windows-distribution.md](docs/windows-distribution.md)         |
 | 测试归属、验证状态、证据和持续回归入口                        | [docs/validation.md](docs/validation.md)                             |
 
 `README.md` 只负责项目入口与快速开始，不是规范。
@@ -85,6 +87,8 @@
 - AgentCore ABI、bundle、required capability 或兼容门槛变化更新 `docs/agentcore-abi-v1.md`。
 - Agent-owned Completion 的 Provider 范围、codec、Transport、结果、取消或生命周期变化更新 `docs/completion-architecture.md`。
 - Storage SQL contract、backend、limits、migration mechanism 或 lifecycle 变化更新 `docs/storage-architecture.md`。
+- macOS Apple Development 身份、项目选择、本地签名、Developer ID、DMG、公证或发布验证变化更新 `docs/macos-distribution.md`。
+- Windows 安装器、Authenticode 或发布验证变化更新 `docs/windows-distribution.md`。
 - 测试层与归属、验收矩阵、长期证据、持续回归入口和能力缺口变化更新 `docs/validation.md`。
 - 同一事实只在一份规范中定义；其他文档链接或做不产生新语义的摘要。
 

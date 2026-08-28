@@ -166,7 +166,7 @@ architecture guard 必须保持 `PlatformServices.context` 零 allowlist。原�
 
 ### macOS
 
-首次使用真实 Account 前，按[macOS 开发与分发签名](macos-local-development.md)选择 Apple Development identity：
+首次使用真实 Account 前，按 [macOS 分发的本地签名规则](macos-distribution.md#本地签名非分发)选择 Apple Development identity：
 
 ```bash
 node scripts/setup-macos-local-signing.mjs setup
@@ -177,7 +177,7 @@ npm run build:release
 npm run package:macos
 ```
 
-跨平台开发入口与 Apple Development 签名规则由 `dev.mjs` 负责，setup 只复用该开发 owner；Developer ID、应用与 DMG 签名、公证、staple、Gatekeeper、Finder 左到右拖拽布局、磁盘映像及挂载内容的身份与完整性规则由 `package-macos.mjs` 负责。两个 owner 必须保持双向隔离。`package-macos.mjs` 必须先验证 canonical bundle，再以版本 allowlist 内的 Xcode `actool` 编译一次 `assets/icons/MetaWork.icon`，随后按 resolved build target 让 Native SDK 从 `.agentcore/bundles/<target-id>` 生成未签名 `.app`。应用签名前必须把编译所得 `Assets.car` 与 `MetaWork.icns` 逐字节 stage 到 `Contents/Resources`，删除 SDK 的 `AppIcon.icns`，把 `CFBundleIconFile` 与 `CFBundleIconName` 精确设为 `MetaWork`，同时把 64 × 64 托盘 PNG stage 到运行时相对路径 `Contents/Resources/assets/icons/tray-icon.png`；任一资源、metadata 或工具链变化都 fail closed。完成资源 gate 后以 `lipo` 确认主程序恰好为该 target 的单一架构，随后只执行一次 Developer ID 应用签名，并在签名后再次检查 Icon Composer resource digest、Renderer、托盘资源、metadata 与签名 policy。`package:macos` 默认 `all`，两种架构必须复用同一次 actool 输出并依次产出小写 `metawork-<version>-macos-arm64.dmg` 与 `metawork-<version>-macos-x64.dmg`；`npm run package:macos -- arm64` 或 `-- x64` 只产出所选单一架构。入口不得根据 last-stage state 推断架构，也不生成 Universal、preview 或 ZIP。普通 check/test/build 不得访问 Icon Composer compiler、个人证书、Finder 或 notary profile；`package:macos` 成功证明当前图形用户会话生成的可分发磁盘映像，不等于更新能力完成。macOS 26 的 Finder、Dock 与运行中已打包应用须在 Light/Dark 下独立确认没有非设计渐变；至少一套 macOS 26 以前的系统须确认 fallback ICNS，未取得这些视觉证据前不得报告图标最终验收完成。
+跨平台开发入口与 Apple Development 签名规则由 [macOS 分发的本地签名章节](macos-distribution.md#本地签名非分发)定义并由 `dev.mjs` 负责，setup 只复用该开发 owner；Developer ID、应用与 DMG 签名、公证、staple、Gatekeeper、Finder 左到右拖拽布局、磁盘映像及挂载内容的身份与完整性规则由同一平台文档的正式分发章节定义并由 `package-macos.mjs` 负责。两个实现 owner 必须保持双向隔离。`package-macos.mjs` 必须先验证 canonical bundle，再以版本 allowlist 内的 Xcode `actool` 编译一次 `assets/icons/MetaWork.icon`，随后按 resolved build target 让 Native SDK 从 `.agentcore/bundles/<target-id>` 生成未签名 `.app`。应用签名前必须把编译所得 `Assets.car` 与 `MetaWork.icns` 逐字节 stage 到 `Contents/Resources`，删除 SDK 的 `AppIcon.icns`，把 `CFBundleIconFile` 与 `CFBundleIconName` 精确设为 `MetaWork`，同时把 64 × 64 托盘 PNG stage 到运行时相对路径 `Contents/Resources/assets/icons/tray-icon.png`；任一资源、metadata 或工具链变化都 fail closed。完成资源 gate 后以 `lipo` 确认主程序恰好为该 target 的单一架构，随后只执行一次 Developer ID 应用签名，并在签名后再次检查 Icon Composer resource digest、Renderer、托盘资源、metadata 与签名 policy。`package:macos` 默认 `all`，两种架构必须复用同一次 actool 输出并依次产出小写 `metawork-<version>-macos-arm64.dmg` 与 `metawork-<version>-macos-x64.dmg`；`npm run package:macos -- arm64` 或 `-- x64` 只产出所选单一架构。入口不得根据 last-stage state 推断架构，也不生成 Universal、preview 或 ZIP。普通 check/test/build 不得访问 Icon Composer compiler、个人证书、Finder 或 notary profile；`package:macos` 成功证明当前图形用户会话生成的可分发磁盘映像，不等于更新能力完成。macOS 26 的 Finder、Dock 与运行中已打包应用须在 Light/Dark 下独立确认没有非设计渐变；至少一套 macOS 26 以前的系统须确认 fallback ICNS，未取得这些视觉证据前不得报告图标最终验收完成。
 
 Keychain 跨重建授权稳定性当前为 **人工验收待完成**：在同一精确 commit 上让 Debug app 写入并读取 Account credential，完全退出并重新构建，再次恢复 Account，确认没有出现新的 Account Keychain 授权框。首次选择签名私钥产生的系统授权不属于 Account Keychain 失败。
 
@@ -207,7 +207,9 @@ node scripts/test-window-chrome-windows.mjs
 
 `node scripts/run-agentcore-abort-timing-probe.mjs --staged` 用于取证 `session_abort` 返回后是否仍有 callback 投递；结果尚未采集，因此该 probe 保留。Windows distribution、安装/更新、完整 process-tree/timeout/security matrix 和 Linux target 不由 development baseline 证明。
 
-### Windows 安装 artifact
+### Windows 分发
+
+具体安装器、Authenticode 与发布边界见 [Windows 分发](windows-distribution.md)。
 
 ```powershell
 npm run package:windows
