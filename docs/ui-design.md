@@ -62,7 +62,9 @@ MetaWork 的视觉记忆点不是装饰性的暖色、通用衬线大标题、�
 - Run 状态、六种终止原因，以及 Session 是否仍可继续。
 - revision 8 的 `run_state` 阶段观察；Workbench 将其投影为 Current activity 文案，并按 transition sequence 丢弃过期观察。
 
-因此当前产品只在 Task 内容区显示用户输入、Assistant 回复、权限决策面、唯一当前状态和必要的终止结果；真实 usage 仅进入按需 Task overview。普通信息不足时，Agent 通过 Assistant 回复说明问题并结束当前 Run，用户从 Composer 继续，不进入结构化 Question wait。工具开始、进度和结果继续作为 Host 事实存在，但不作为面向用户的主叙事。Plan、plan approval、Outputs、Files changed、持久权限管理和 custom UI 均保持隐藏；它们在本文档中的设计是后续 capability 到位后的产品规范，不是当前实现承诺。Renderer 不解析工具参数、stdout 或普通文本来猜测这些状态；Current activity 的细粒度文案只来自 Host 对 AgentCore `run_state` 的受序列保护投影。当前 Renderer 合同已提供独立 Workspace projection、Task-bound ExecutionConfig facts、正式设置 route，以及设置与 New task 共享的默认 API/模型选择；跨重启 rebind 等仍须等对应 capability 落地后才能宣称可用，差距由 [验证规范](validation.md)明确记录。
+因此当前产品只在 Task 内容区显示用户输入、Agent 可见输出、权限决策面、唯一当前状态和必要的终止结果；真实 Tool process、usage 与 context observation 仅进入按需 Task overview。普通信息不足时，Agent 通过可见回复说明问题并结束当前 Run，用户从 Composer 继续，不进入结构化 Question wait。工具开始、进度和结果继续作为 Host 事实存在，但不成为主叙事或事件时间线。Plan、plan approval、Outputs、Files changed、持久权限管理和 custom UI 均保持隐藏；它们在本文档中的设计是后续 capability 到位后的产品规范，不是当前实现承诺。Renderer 不解析工具参数、stdout 或普通文本来猜测这些状态；Current activity 的细粒度文案只来自 Host 对 AgentCore `run_state` 的受序列保护投影。当前 Renderer 合同已提供独立 Workspace projection、Task-bound ExecutionConfig facts、正式设置 route，以及设置与 New task 共享的默认 API/模型选择；跨重启 rebind 等仍须等对应 capability 落地后才能宣称可用，差距由 [验证规范](validation.md)明确记录。
+
+上述边界只定义当前 typed observation 的安全消费基线，不代表 Agent 对话渲染已经完成。现有 disclosure、单一 activity 和按需 overview 是过渡实现；终态前反馈密度、过程信息的可发现性、主次层级、更新节奏与长任务连续阅读仍由后续独立 Renderer 重构确定，但该重构仍必须遵守不泄漏 private reasoning、不从文本猜测结构化事实和不提前开放 gated capability 的边界。
 
 ### 2.2 Capability 标记
 
@@ -514,13 +516,13 @@ Execution binding availability 是下一次 admission 的独立前置事实，�
 
 ## 7. 中间区域：Task 内容
 
-> Capability：**当前**。用户输入、Assistant 回复、permission 与 Run 状态属于当前产品路径；typed Delivery、Outputs、FileChange 与 Plan 属于未来 capability，当前不得从 Assistant 文本或 Tool 记录推断。
+> Capability：**混合**。用户输入、Agent 可见输出、permission、typed activity 与 Run 状态的安全消费属于当前产品路径；现有组件组织只是过渡实现，完整的过程可见性与对话信息架构属于后续 Renderer 重构。typed Delivery、Outputs、FileChange 与 Plan 仍是未来 capability，当前不得从 Agent 文本或 Tool 记录推断。
 
 中间区域使用同一套 MetaWork AI UI 基础语义：`Conversation` 组织阅读面，`Message` 表达用户与 Assistant 发言，`Activity` 表达当前过程与必要终止状态，`Intervention` 表达真正需要用户介入的决定，`Composer` 控制下一步输入，`Markdown` 与 `CodeBlock` 呈现回复内容。它们是 Renderer 视觉语法，不把 Bridge 或 AgentCore 对象直接变成组件。当前不存在第二套 Task 专用消息、状态、请求或输入表面，也不以 Tool、Reasoning、Question 或 Approval Card 建立平行组件分类。
 
 ### 7.1 内容模型
 
-中间区域按 Task 中 Run 的稳定顺序只显示用户输入与 Assistant 回复，不按 Run、Tool 或 AgentCore event 结构组织页面。当前执行状态、待处理请求和 terminal notice 是独立的临时或行动组件，不伪装成历史节点。
+当前过渡布局按 Task 中 Run 的稳定顺序显示用户输入与 Agent 可见输出，不直接按 raw Tool 或 AgentCore event 结构组织页面。每个 Run 的 `commentary` 进入同一回复内的 `Agent updates` disclosure，`response` 保持主阅读内容，未定性的 `provisional` 是可回滚临时文本；三者不是三种说话者。当前执行状态、待处理请求和 terminal notice 是独立的临时或行动组件，不伪装成历史节点。后续 Renderer 重构可以重新组织这些 typed facts 的可见层级与节奏，但不能退化为原始事件日志或复制一套 Renderer-owned 状态机。
 
 ### 7.2 用户指令
 
@@ -534,16 +536,17 @@ Execution binding availability 是下一次 admission 的独立前置事实，�
 
 - 不使用头像和大气泡，使用正文排版；
 - 支持 Markdown、表格、代码、引用和链接；
-- 流式生成只显示克制的末尾活动指示；
-- 不展示原始 chain-of-thought；`thinking_chunk` 只显示“正在思考”的安全状态，`text_chunk` 开始后显示“正在撰写回复”；Renderer 还必须把 Host 已投影的 Starting、Generating response、Executing tools、Retrying、Compacting 与 Finishing 显示为本地化 Current activity；存在 running tool 时显示“正在执行工具”，尚未取得可识别细粒度事件时显示“正在等待模型响应”，active Run 不能统一退化成“正在工作”；
-- `assistant` 只表示回复内容，不标记为 Delivery、Output 或最终成果；
+- `commentary` 使用可键盘操作的 `Agent updates` disclosure；首次在 active Run 出现时展开、历史首次加载时折叠，用户选择按 Task+Run 在当前 Renderer 会话内保存，Snapshot revision、terminal 或 Task 切换不得擅自重置；
+- `final | partial` response 使用安全 Markdown；尚未收到 output-segment 定性的 provisional 只按纯文本呈现，不解释 Markdown，discard 后随下一 Snapshot 消失；流式生成只显示克制的末尾活动指示；
+- 不展示原始 chain-of-thought；`thinking_chunk` 只显示“正在思考”的安全状态，`text_chunk` 开始后显示“正在撰写回复”；Renderer 还必须把 Host 已投影的 Starting、Waiting model、Executing tools、Retrying、Compacting 与 Finishing 显示为本地化 Current activity，并在 Host 提供时显示 in-flight tool count 或 retry attempt/max/delay；active Run 不能统一退化成“正在工作”；
+- output 只表示 Agent 可见输出，不标记为 Delivery、Output artifact 或最终成果；
 - 不从回复文本解析活动、计划、文件变化或完成状态；不得为每条内容重复“Agent”标签或品牌头像。
 
 ### 7.4 当前状态、请求与结果
 
-- active Run 只显示一个来自 canonical phase/status 的紧凑临时状态；不得把 Tool 名称、输入、输出、usage 或 Run ID 带入主阅读流；
+- active Run 只显示一个来自 canonical phase/activity 的紧凑临时状态；不得把 Tool 名称、输入、输出、usage 或 Run ID 带入主阅读流；
 - pending UI 位于当前 Assistant 回复之后、Composer 之前，并提供唯一可操作控件；
-- `completed` 且已有 Assistant 回复时不追加重复的完成条；空回复完成、停止、失败、中断或 dependency failure 只显示准确状态、原因与真实可用的恢复动作；
+- `completed` 且已有 final response 时不追加重复的完成条；空 final response、停止、失败、中断或 dependency failure 只显示准确状态、原因与真实可用的恢复动作；partial response 与 terminal outcome 必须合并为唯一 notice，同时表达“回复未完整生成”和真实终止原因，不能再追加第二条 partial 警告；
 - Renderer reload、成功同步、Tool completion 与 Compact history 不生成主区记录；只有同步失败、当前 maintenance 或内容可能不完整时显示相应状态。
 
 ### 7.5 滚动与密度
@@ -753,7 +756,9 @@ Full access
 
 ## 11. 按需 Task overview
 
-> Capability：**当前**。按需 Task overview 只承载 Needs your attention、Current activity / Last run 与真实 usage，不提供历史 Run 或 Tool 浏览。
+> Capability：**当前**。按需 Task overview 承载 Needs your attention、Current activity / Last run、所选当前/最近 Run 的 Work process，以及当前 Conversation 的 Context 与真实 usage；它不提供历史 Run 浏览、事件时间线或文件变化视图。
+
+该面板是当前过渡 Renderer 对 Tool、Context 与 usage 的安全落点，不是完整 Agent 过程体验的最终归属。后续 Renderer 重构可以调整这些信息与主阅读流的关系；在新方案通过真实运行验收前，不得以本面板已经能读取 typed records 作为过程可见性已经完成的证据。
 
 Task overview 是当前 Task 的按需结构化摘要，不是固定存在的第三栏、第二份回复记录、日志面板或执行审计器。New task、无 Task 和没有有效模块的普通 idle Task 默认不占用右侧列宽。
 
@@ -763,22 +768,24 @@ Task overview 是当前 Task 的按需结构化摘要，不是固定存在的第
 
 1. Needs your attention；
 2. Current activity / Last run summary；
-3. Context and usage。
+3. Work process；
+4. Context and usage。
 
 规则：
 
 - 空模块隐藏；
 - 需要用户处理始终置顶；
 - Current activity 显示此刻可观察动作，不复制完整工具输出；
+- Work process 只读取当前或最近 Run 的有界 typed Tool records，按 Host order 显示名称、状态与真实 elapsed；input/progress/result 默认不挂载 DOM，同一时刻至多展开一个 Tool，并只在展开后以纯文本/代码面按需呈现，折叠或切换 Task/Run 后再次卸载。Tool details 不进入主对话、全局搜索或 live announcement，也不把 Tool、Bash 文本或 file reference 推断成 File change/Output；
 - Run terminal 后，已经打开的 Inspector 用真实 outcome、状态和 usage 转为 Last run summary；只有 Host 发布 typed Run duration 时才显示总耗时，当前不得从 Renderer 时钟猜测；不得因为 Current activity 消失而清空内容；
-- Context and usage 显示真实 usage、预算、压缩或警告，不显示伪百分比；
+- Context and usage 显示当前 attached Conversation 的真实 pressure/auto-compact observation 和所选 Run usage；只陈述 current/auto-compact/blocking token 数、最近压缩前后 token 与 dropped/kept，不显示伪百分比、raw source Run identity 或跨 attachment 历史；
 - 用户打开 overview 后在当前 Task 内保持打开，直到主动关闭；切换 Task 时显示目标 Task 自己的会话内状态；
 - 只有新的 `Needs your attention` 请求可以对当前 Task 自动打开 overview 一次，且不能抢走主区请求的键盘焦点；普通运行开始、usage 更新或 terminal 都不得自动切换显隐；
 - 切换 Task 是允许重新决定布局的显式边界：新 Task 使用自己的会话内显隐状态和内容，绝不能短暂显示前一个 Task 的详情；窄窗口自动打开时使用覆盖层，不触发中栏重排；
 - Inspector 折叠不影响通知、审批或 Task 状态；
 - 同一可操作审批只在主区请求中提供按钮，overview 只能提醒并定位，不能复制第二套操作。
 
-当前只显示 Needs your attention、Current activity / Last run 和 Context and usage；Tool、Plan 和 Outputs 不渲染空壳、占位符或“即将推出”模块。
+当前只显示 Needs your attention、Current activity / Last run、存在真实 Tool record 时的 Work process，以及存在真实 observation/usage 时的 Context and usage；Plan、Outputs 和 Files changed 不渲染空壳、占位符或“即将推出”模块。
 
 ## 12. 文件预览、文件变更与结果文件
 

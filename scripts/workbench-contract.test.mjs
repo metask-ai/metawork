@@ -143,6 +143,7 @@ test("resource-limited Run terminal crosses the Host to Renderer contract", () =
   task.lastRunOutcome = "stopped";
   task.cause = "resource_limit";
   task.runs[0].phase = "stopped";
+  task.runs[0].activity = null;
   task.runs[0].outcome = "stopped";
   task.runs[0].cause = "resource_limit";
 
@@ -158,6 +159,7 @@ test("Agent execution failure crosses the Host to Renderer contract", () => {
   task.lastRunOutcome = "failed";
   task.cause = "agent_failure";
   task.runs[0].phase = "failed";
+  task.runs[0].activity = null;
   task.runs[0].outcome = "failed";
   task.runs[0].cause = "agent_failure";
 
@@ -722,6 +724,7 @@ test("Conversation recovery projection is one coherent continuation state", () =
   task.currentRunId = "0";
   task.currentRunPhase = null;
   task.runs[0].phase = "interrupted";
+  task.runs[0].activity = null;
   task.runs[0].outcome = "interrupted";
   task.runs[0].cause = "app_shutdown";
   task.lastRunOutcome = "interrupted";
@@ -780,6 +783,7 @@ test("Task deletion exposes one product-level progress and retry fact", () => {
   deleting.tasks[0].currentRunId = "0";
   deleting.tasks[0].currentRunPhase = null;
   deleting.tasks[0].runs[0].phase = "completed";
+  deleting.tasks[0].runs[0].activity = null;
   deleting.tasks[0].runs[0].outcome = "completed";
   deleting.tasks[0].lastRunOutcome = "completed";
   deleting.tasks[0].continuationAvailable = false;
@@ -806,6 +810,7 @@ test("Compact projection is append-only and mutually exclusive with Run work", (
   task.currentRunPhase = null;
   task.lastRunOutcome = "completed";
   task.runs[0].phase = "completed";
+  task.runs[0].activity = null;
   task.runs[0].outcome = "completed";
   task.compacts.push({
     operationId: "11",
@@ -844,6 +849,7 @@ test("Compact projection is append-only and mutually exclusive with Run work", (
     ...clone(simultaneous.tasks[0].runs[0]),
     id: "8",
     phase: "running",
+    activity: { kind: "waiting_model" },
     outcome: null,
   });
   simultaneous.tasks[0].currentRunId = "8";
@@ -858,6 +864,74 @@ test("Compact projection is append-only and mutually exclusive with Run work", (
   assert.throws(
     () => decodeWorkbenchSnapshot(invalidCause),
     /phase and cause must describe the same terminal state/,
+  );
+});
+
+test("Agent output activity and Conversation context are strict typed facts", () => {
+  const observed = clone(fixture);
+  observed.tasks[0].runs[0].activity = {
+    kind: "retrying_provider",
+    attempt: "2",
+    max: "3",
+    delayMs: "250",
+  };
+  observed.tasks[0].context = {
+    pressure: {
+      sourceRunId: "7",
+      currentTokens: "90",
+      warningThreshold: "80",
+      autoCompactThreshold: "100",
+      blockingLimit: "120",
+      severity: "warning",
+    },
+    lastAutoCompact: {
+      sourceRunId: "7",
+      dropped: "4",
+      kept: "8",
+      beforeTokens: "110",
+      afterTokens: "70",
+    },
+  };
+  assert.deepEqual(decodeWorkbenchSnapshot(observed), observed);
+
+  const legacyOutput = clone(fixture);
+  legacyOutput.tasks[0].runs[0].assistant = "legacy";
+  assert.throws(() => decodeWorkbenchSnapshot(legacyOutput), /expected keys/);
+
+  const unclassifiedResponse = clone(fixture);
+  unclassifiedResponse.tasks[0].runs[0].output.response = "answer";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(unclassifiedResponse),
+    /unclassified output cannot publish a response/,
+  );
+
+  const classifiedProvisional = clone(fixture);
+  classifiedProvisional.tasks[0].runs[0].output.responseKind = "partial";
+  classifiedProvisional.tasks[0].runs[0].output.provisional = "retry";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(classifiedProvisional),
+    /classified response cannot retain provisional output/,
+  );
+
+  const partialRetry = clone(observed);
+  partialRetry.tasks[0].runs[0].activity.delayMs = null;
+  assert.throws(
+    () => decodeWorkbenchSnapshot(partialRetry),
+    /retry details must be either complete or absent/,
+  );
+
+  const impossiblePressure = clone(observed);
+  impossiblePressure.tasks[0].context.pressure.severity = "critical";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(impossiblePressure),
+    /context severity disagrees with pressure/,
+  );
+
+  const foreignContext = clone(observed);
+  foreignContext.tasks[0].context.lastAutoCompact.sourceRunId = "99";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(foreignContext),
+    /must reference projected Run history/,
   );
 });
 
@@ -1036,7 +1110,7 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   assert.throws(() => decodeWorkbenchSnapshot(missingField), /expected keys/);
 
   const missingPrivacyFlag = clone(fixture);
-  delete missingPrivacyFlag.tasks[0].runs[0].assistantRedacted;
+  delete missingPrivacyFlag.tasks[0].runs[0].output.provisionalRedacted;
   assert.throws(
     () => decodeWorkbenchSnapshot(missingPrivacyFlag),
     /expected keys/,
@@ -1053,6 +1127,7 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   terminalCurrentRun.tasks[0].currentRunPhase = "completed";
   terminalCurrentRun.tasks[0].runs[0].phase = "completed";
   terminalCurrentRun.tasks[0].runs[0].outcome = "completed";
+  terminalCurrentRun.tasks[0].runs[0].activity = null;
   assert.throws(
     () => decodeWorkbenchSnapshot(terminalCurrentRun),
     /unexpected value/,
@@ -1117,6 +1192,7 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   closingRun.tasks[0].continuationUnavailableReason = "closing";
   closingRun.tasks[0].currentRunPhase = "stopping";
   closingRun.tasks[0].runs[0].phase = "stopping";
+  closingRun.tasks[0].runs[0].activity = { kind: "stopping" };
   assert.doesNotThrow(() => decodeWorkbenchSnapshot(closingRun));
 
   const continuableClosing = clone(closingRun);
@@ -1130,6 +1206,7 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   const closingWithRequest = clone(closingRun);
   closingWithRequest.tasks[0].currentRunPhase = "waiting_ui";
   closingWithRequest.tasks[0].runs[0].phase = "waiting_ui";
+  closingWithRequest.tasks[0].runs[0].activity = { kind: "waiting_user" };
   closingWithRequest.tasks[0].pendingUi = {
     requestId: "9",
     runId: "7",
@@ -1187,6 +1264,7 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   const pendingPermission = clone(fixture);
   pendingPermission.tasks[0].currentRunPhase = "waiting_ui";
   pendingPermission.tasks[0].runs[0].phase = "waiting_ui";
+  pendingPermission.tasks[0].runs[0].activity = { kind: "waiting_user" };
   pendingPermission.tasks[0].pendingUi = {
     requestId: "9",
     runId: "7",

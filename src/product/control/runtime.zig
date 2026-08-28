@@ -4273,11 +4273,89 @@ pub const Runtime = struct {
             return error.SnapshotTooLarge;
     }
 
+    fn writeTaskViewJsonParts(
+        context: *const anyopaque,
+        writer: *std.Io.Writer,
+        first: []const u8,
+        second: []const u8,
+    ) product_task.ProjectionError!bool {
+        const self: *const Runtime = @ptrCast(@alignCast(context));
+        const total = std.math.add(usize, first.len, second.len) catch
+            return error.SnapshotTooLarge;
+        const joined = self.allocator.alloc(u8, total) catch
+            return error.OutOfMemory;
+        defer {
+            std.crypto.secureZero(u8, joined);
+            self.allocator.free(joined);
+        }
+        @memcpy(joined[0..first.len], first);
+        @memcpy(joined[first.len..], second);
+        const redacted = self.containsKnownCredential(joined);
+        self.projectedJsonValueWithKnownCredentials(writer, joined) catch
+            return error.SnapshotTooLarge;
+        return redacted;
+    }
+
+    fn writeTaskViewJsonPartition(
+        context: *const anyopaque,
+        writer: *std.Io.Writer,
+        value: []const u8,
+        split: usize,
+        separator: []const u8,
+    ) product_task.ProjectionError!bool {
+        const self: *const Runtime = @ptrCast(@alignCast(context));
+        if (split > value.len) return error.SnapshotTooLarge;
+        const projected = self.allocator.alloc(u8, value.len) catch
+            return error.OutOfMemory;
+        defer {
+            std.crypto.secureZero(u8, projected);
+            self.allocator.free(projected);
+        }
+        var read: usize = 0;
+        var write: usize = 0;
+        var projected_split: ?usize = null;
+        var redacted = false;
+        while (read < value.len) {
+            if (read == split) projected_split = write;
+            if (self.knownCredentialEndAtCodepoint(value, read)) |redaction_end| {
+                const marker_len = @min(redaction_end - read, 3);
+                @memset(projected[write..][0..marker_len], '*');
+                write += marker_len;
+                if (read < split and redaction_end >= split)
+                    projected_split = write;
+                read = redaction_end;
+                redacted = true;
+                continue;
+            }
+            const codepoint_len = utf8CodepointLen(value, read);
+            @memcpy(
+                projected[write..][0..codepoint_len],
+                value[read..][0..codepoint_len],
+            );
+            write += codepoint_len;
+            read += codepoint_len;
+        }
+        if (read == split) projected_split = write;
+        const boundary = projected_split orelse return error.SnapshotTooLarge;
+        self.projectedJsonValueWithKnownCredentials(
+            writer,
+            projected[0..boundary],
+        ) catch return error.SnapshotTooLarge;
+        writer.writeAll(separator) catch return error.SnapshotTooLarge;
+        self.projectedJsonValueWithKnownCredentials(
+            writer,
+            projected[boundary..write],
+        ) catch return error.SnapshotTooLarge;
+        return redacted;
+    }
+
     fn taskTextProjection(self: *const Runtime) product_task.ProjectionText {
         return .{
             .context = self,
             .contains_sensitive_fn = taskViewContainsSensitive,
             .write_json_fn = writeTaskViewJson,
+            .write_json_partition_fn = writeTaskViewJsonPartition,
+            .write_json_parts_fn = writeTaskViewJsonParts,
         };
     }
 
@@ -6022,7 +6100,6 @@ pub const Runtime = struct {
                 run.assistant.list.items,
                 credential,
             ) or run.assistant_redacted;
-            _ = redactFixedWidthNoFail(run.status_text, credential);
             for (run.tools) |*tool_entry| {
                 const tool = &(tool_entry.* orelse continue);
                 const id_redacted = redactFixedWidthNoFail(tool.id, credential);
@@ -7648,7 +7725,6 @@ fn testRuntime() !Runtime {
         .active_phase = .running,
         .agent_handoff = .init(.running),
         .tools = tools,
-        .status_text = try control.copyBounded("Queued", control.limits.max_tool_field_bytes),
         .terminal_diagnostic = try control.allocTrackedCapacity(control.limits.max_terminal_diagnostic_bytes),
         .redaction_secret = control.execution.credential(),
     };
@@ -9599,7 +9675,17 @@ test "identity replacement does not disturb live Task runtime references" {
     try std.testing.expectEqual(execution, task.runtime.executionConst().?);
     control.endExecutionReplacementNoFail();
 
-    task.durable.runs[0].?.active_phase = .completed;
+    const run = &task.durable.runs[0].?;
+    try std.testing.expect(commitTerminal(
+        run,
+        .completed,
+        .completed,
+        null,
+        .reusable,
+        "",
+        false,
+    ));
+    run.event_stream_finalized = true;
     task.runtime.active_run_id = 0;
     task.runtime.worker_references.store(1, .release);
     try control.beginExecutionReplacement();
@@ -9624,11 +9710,6 @@ test "default replacement preserves Task generation and installs the next admiss
         &task.durable.title,
         "review future metawork credential",
         control.limits.max_task_title_bytes,
-    );
-    try control.replaceTracked(
-        &task.durable.runs[0].?.status_text,
-        "future metawork status",
-        control.limits.max_tool_field_bytes,
     );
     const old_input = try control.task_runtime.testExecutionInput(task.durable.id);
     try std.testing.expectEqual(@as(u64, 1), old_input.execution_generation);
@@ -9695,7 +9776,6 @@ test "default replacement preserves Task generation and installs the next admiss
     try std.testing.expectEqualStrings("fixture-model-2", control.execution.model());
     try std.testing.expectEqualStrings("fixture-model", task.durable.execution_model);
     try std.testing.expect(std.mem.indexOf(u8, task.durable.title, "metawork") == null);
-    try std.testing.expect(std.mem.indexOf(u8, task.durable.runs[0].?.status_text, "metawork") == null);
     var scrubbed_snapshot_storage: [96 * 1024]u8 = undefined;
     const scrubbed_snapshot = try control.writeSnapshot(&scrubbed_snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, scrubbed_snapshot, "metawork") == null);
@@ -9884,11 +9964,6 @@ test "released Task credential is permanently scrubbed from every product projec
         "answer SECRET-KEY",
         control.limits.max_assistant_message_bytes,
     );
-    try control.replaceTracked(
-        &run.status_text,
-        "status SECRET-KEY",
-        control.limits.max_tool_field_bytes,
-    );
     run.tools[0] = .{
         .route_digest = toolRouteDigest("SECRET-KEY"),
         .id = try control.copyBounded("id SECRET-KEY", control.limits.max_tool_field_bytes),
@@ -9920,7 +9995,16 @@ test "released Task credential is permanently scrubbed from every product projec
         account_contract.Limits.model_id_bytes,
     );
 
-    run.active_phase = .completed;
+    try std.testing.expect(commitTerminal(
+        run,
+        .completed,
+        .completed,
+        null,
+        .reusable,
+        "",
+        false,
+    ));
+    run.event_stream_finalized = true;
     control.releaseTaskAttachmentNoFail(task, .cold_start);
     task.runtime.active_run_id = 0;
     try control.beginExecutionReplacement();
@@ -10000,9 +10084,9 @@ test "known credential matching chooses the longest overlapping secret" {
         control.matchedKnownCredentialLen("SECRET-KEY suffix"),
     );
     try control.replaceTracked(
-        &control.task_runtime.tasks[0].?.durable.runs[0].?.status_text,
+        &control.task_runtime.tasks[0].?.durable.title,
         "SECRET-KEY suffix",
-        control.limits.max_tool_field_bytes,
+        control.limits.max_task_title_bytes,
     );
     var snapshot_storage: [96 * 1024]u8 = undefined;
     const snapshot = try control.writeSnapshot(&snapshot_storage);
@@ -10158,7 +10242,7 @@ test "thinking and assistant chunks update distinct safe projections" {
     defer thinking.deinit();
     try control.applyEvent(&thinking);
     try std.testing.expectEqualStrings("", run.assistant.list.items);
-    try std.testing.expectEqualStrings("Thinking", run.status_text);
+    try std.testing.expectEqual(task_test_state.RunActivity.thinking, run.observed_activity);
     try std.testing.expectEqual(revision_before_thinking + 1, control.revision);
 
     const revision_before_duplicate = control.revision;
@@ -10179,7 +10263,10 @@ test "thinking and assistant chunks update distinct safe projections" {
     defer assistant.deinit();
     try control.applyEvent(&assistant);
     try std.testing.expectEqualStrings("public response", run.assistant.list.items);
-    try std.testing.expectEqualStrings("Writing response", run.status_text);
+    try std.testing.expectEqual(
+        task_test_state.RunActivity.writing_response,
+        run.observed_activity,
+    );
 
     var snapshot_storage: [96 * 1024]u8 = undefined;
     const snapshot = try control.writeSnapshot(&snapshot_storage);
@@ -10189,9 +10276,9 @@ test "thinking and assistant chunks update distinct safe projections" {
 }
 
 test "output segments commit commentary and a continued final while discarding rollback" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
-    const task = &workbench.task_runtime.tasks[0].?;
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = &control.task_runtime.tasks[0].?;
     const run = &task.durable.runs[0].?;
     const route = task.runtime.routeId();
     const events = [_][]const u8{
@@ -10211,7 +10298,7 @@ test "output segments commit commentary and a continued final while discarding r
     for (events) |encoded| {
         var envelope = try testEnvelope(route, 7, encoded);
         defer envelope.deinit();
-        try workbench.applyEvent(&envelope);
+        try control.applyEvent(&envelope);
     }
 
     try std.testing.expectEqualStrings("look half done", run.assistant.list.items);
@@ -10224,12 +10311,24 @@ test "output segments commit commentary and a continued final while discarding r
     try std.testing.expect(run.output_continued_group == null);
     try std.testing.expectEqual(@as(u64, 4), run.next_output_segment_index);
     try std.testing.expect(std.mem.indexOf(u8, run.assistant.list.items, "discarded") == null);
+    var snapshot_storage: [96 * 1024]u8 = undefined;
+    const snapshot = try control.writeSnapshot(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"output\":{\"commentary\":\"look \",\"response\":\"half done\",\"responseKind\":\"final\",\"provisional\":\"\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"activity\":{\"kind\":\"finalizing\"}",
+    ) != null);
 }
 
 test "output segment byte mismatch fails the dependency protocol" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
-    const task = &workbench.task_runtime.tasks[0].?;
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = &control.task_runtime.tasks[0].?;
     const route = task.runtime.routeId();
 
     var begin = try testEnvelope(
@@ -10238,10 +10337,10 @@ test "output segment byte mismatch fails the dependency protocol" {
         "{\"output_segment_begin\":{\"index\":0,\"turn\":1,\"group\":0}}",
     );
     defer begin.deinit();
-    try workbench.applyEvent(&begin);
+    try control.applyEvent(&begin);
     var text_event = try testEnvelope(route, 7, "{\"text_chunk\":\"ok\"}");
     defer text_event.deinit();
-    try workbench.applyEvent(&text_event);
+    try control.applyEvent(&text_event);
     var invalid_end = try testEnvelope(
         route,
         7,
@@ -10250,14 +10349,75 @@ test "output segment byte mismatch fails the dependency protocol" {
     defer invalid_end.deinit();
     try std.testing.expectError(
         error.InvalidOutputSegment,
-        workbench.applyEvent(&invalid_end),
+        control.applyEvent(&invalid_end),
     );
 }
 
+test "output segment close is atomic when the destination reserve fails" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = &control.task_runtime.tasks[0].?;
+    const run = &task.durable.runs[0].?;
+    const route = task.runtime.routeId();
+
+    var begin = try testEnvelope(
+        route,
+        run.id,
+        "{\"output_segment_begin\":{\"index\":0,\"turn\":1,\"group\":0}}",
+    );
+    defer begin.deinit();
+    try control.applyEvent(&begin);
+    var text_event = try testEnvelope(route, run.id, "{\"text_chunk\":\"answer\"}");
+    defer text_event.deinit();
+    try control.applyEvent(&text_event);
+
+    control.limits.max_projection_bytes = control.projection_bytes;
+    var end = try testEnvelope(
+        route,
+        run.id,
+        "{\"output_segment_end\":{\"index\":0,\"turn\":1,\"group\":0,\"disposition\":\"final\",\"bytes\":6}}",
+    );
+    defer end.deinit();
+    try std.testing.expectError(error.ProjectionCapacity, control.applyEvent(&end));
+    try std.testing.expect(run.open_output_segment != null);
+    try std.testing.expectEqual(@as(u64, 0), run.next_output_segment_index);
+    try std.testing.expectEqualStrings("answer", run.output_segment.list.items);
+    try std.testing.expectEqualStrings("", run.assistant.list.items);
+    try std.testing.expect(run.assistant_output_kind == null);
+}
+
+test "assistant output budget is aggregate across committed and open segments" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = &control.task_runtime.tasks[0].?;
+    const run = &task.durable.runs[0].?;
+    const route = task.runtime.routeId();
+    control.limits.max_assistant_message_bytes = 8;
+
+    const first = [_][]const u8{
+        "{\"output_segment_begin\":{\"index\":0,\"turn\":1,\"group\":0}}",
+        "{\"text_chunk\":\"four\"}",
+        "{\"output_segment_end\":{\"index\":0,\"turn\":1,\"group\":0,\"disposition\":\"commentary\",\"bytes\":4}}",
+        "{\"output_segment_begin\":{\"index\":1,\"turn\":2,\"group\":1}}",
+    };
+    for (first) |encoded| {
+        var envelope = try testEnvelope(route, run.id, encoded);
+        defer envelope.deinit();
+        try control.applyEvent(&envelope);
+    }
+    var overflow = try testEnvelope(route, run.id, "{\"text_chunk\":\"five!\"}");
+    defer overflow.deinit();
+    try std.testing.expectError(error.ProjectionCapacity, control.applyEvent(&overflow));
+    try std.testing.expectEqualStrings("four", run.assistant.list.items);
+    try std.testing.expectEqualStrings("", run.output_segment.list.items);
+    try std.testing.expect(run.open_output_segment != null);
+    try std.testing.expectEqual(@as(u64, 0), run.open_output_segment.?.bytes);
+}
+
 test "partial output stays provisional until the segment is classified" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
-    const task = &workbench.task_runtime.tasks[0].?;
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = &control.task_runtime.tasks[0].?;
     const run = &task.durable.runs[0].?;
     const route = task.runtime.routeId();
 
@@ -10267,12 +10427,19 @@ test "partial output stays provisional until the segment is classified" {
         "{\"output_segment_begin\":{\"index\":0,\"turn\":1,\"group\":0}}",
     );
     defer begin.deinit();
-    try workbench.applyEvent(&begin);
+    try control.applyEvent(&begin);
     var text_event = try testEnvelope(route, 7, "{\"text_chunk\":\"unfinished\"}");
     defer text_event.deinit();
-    try workbench.applyEvent(&text_event);
+    try control.applyEvent(&text_event);
     try std.testing.expectEqualStrings("", run.assistant.list.items);
     try std.testing.expectEqualStrings("unfinished", run.output_segment.list.items);
+    var provisional_storage: [96 * 1024]u8 = undefined;
+    const provisional_snapshot = try control.writeSnapshot(&provisional_storage);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        provisional_snapshot,
+        "\"response\":\"\",\"responseKind\":null,\"provisional\":\"unfinished\"",
+    ) != null);
 
     var end = try testEnvelope(
         route,
@@ -10280,19 +10447,97 @@ test "partial output stays provisional until the segment is classified" {
         "{\"output_segment_end\":{\"index\":0,\"turn\":1,\"group\":0,\"disposition\":\"partial\",\"bytes\":10}}",
     );
     defer end.deinit();
-    try workbench.applyEvent(&end);
+    try control.applyEvent(&end);
     try std.testing.expectEqualStrings("unfinished", run.assistant.list.items);
     try std.testing.expectEqual(
         task_test_state.AssistantOutputKind.partial,
         run.assistant_output_kind.?,
     );
     try std.testing.expectEqual(@as(usize, 0), run.assistant_output_start.?);
+    var classified_storage: [96 * 1024]u8 = undefined;
+    const classified_snapshot = try control.writeSnapshot(&classified_storage);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        classified_snapshot,
+        "\"response\":\"unfinished\",\"responseKind\":\"partial\",\"provisional\":\"\"",
+    ) != null);
+}
+
+test "provisional output exposes only credential-safe committed bytes" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = &control.task_runtime.tasks[0].?;
+    const run = &task.durable.runs[0].?;
+    const route = task.runtime.routeId();
+
+    var begin = try testEnvelope(
+        route,
+        run.id,
+        "{\"output_segment_begin\":{\"index\":0,\"turn\":1,\"group\":0}}",
+    );
+    defer begin.deinit();
+    try control.applyEvent(&begin);
+    var prefix = try testEnvelope(route, run.id, "{\"text_chunk\":\"SECRET-\"}");
+    defer prefix.deinit();
+    try control.applyEvent(&prefix);
+    var prefix_storage: [96 * 1024]u8 = undefined;
+    const prefix_snapshot = try control.writeSnapshot(&prefix_storage);
+    try std.testing.expect(std.mem.indexOf(u8, prefix_snapshot, "SECRET-") == null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        prefix_snapshot,
+        "\"provisional\":\"\"",
+    ) != null);
+
+    var suffix = try testEnvelope(route, run.id, "{\"text_chunk\":\"KEY\"}");
+    defer suffix.deinit();
+    try control.applyEvent(&suffix);
+    var redacted_storage: [96 * 1024]u8 = undefined;
+    const redacted_snapshot = try control.writeSnapshot(&redacted_storage);
+    try std.testing.expect(std.mem.indexOf(u8, redacted_snapshot, "SECRET-KEY") == null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        redacted_snapshot,
+        "\"provisional\":\"***\",\"redacted\":false,\"provisionalRedacted\":true",
+    ) != null);
+}
+
+test "output partition redacts a known credential across the response boundary" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = &control.task_runtime.tasks[0].?;
+    const run = &task.durable.runs[0].?;
+    const route = task.runtime.routeId();
+    run.redaction_secret = &.{};
+
+    const events = [_][]const u8{
+        "{\"output_segment_begin\":{\"index\":0,\"turn\":1,\"group\":0}}",
+        "{\"text_chunk\":\"SECRET-\"}",
+        "{\"output_segment_end\":{\"index\":0,\"turn\":1,\"group\":0,\"disposition\":\"commentary\",\"bytes\":7}}",
+        "{\"output_segment_begin\":{\"index\":1,\"turn\":2,\"group\":1}}",
+        "{\"text_chunk\":\"KEY\"}",
+        "{\"output_segment_end\":{\"index\":1,\"turn\":2,\"group\":1,\"disposition\":\"final\",\"bytes\":3}}",
+    };
+    for (events) |encoded| {
+        var envelope = try testEnvelope(route, run.id, encoded);
+        defer envelope.deinit();
+        try control.applyEvent(&envelope);
+    }
+    try std.testing.expectEqualStrings("SECRET-KEY", run.assistant.list.items);
+    var storage: [96 * 1024]u8 = undefined;
+    const snapshot = try control.writeSnapshot(&storage);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"output\":{\"commentary\":\"***\",\"response\":\"\",\"responseKind\":\"final\",\"provisional\":\"\",\"redacted\":true",
+    ) != null);
 }
 
 test "discarded output requires an in-group retry without committing bytes" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
-    const task = &workbench.task_runtime.tasks[0].?;
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = &control.task_runtime.tasks[0].?;
     const run = &task.durable.runs[0].?;
     const route = task.runtime.routeId();
     const events = [_][]const u8{
@@ -10303,7 +10548,7 @@ test "discarded output requires an in-group retry without committing bytes" {
     for (events) |encoded| {
         var envelope = try testEnvelope(route, 7, encoded);
         defer envelope.deinit();
-        try workbench.applyEvent(&envelope);
+        try control.applyEvent(&envelope);
     }
     try std.testing.expectEqualStrings("", run.assistant.list.items);
 
@@ -10315,11 +10560,11 @@ test "discarded output requires an in-group retry without committing bytes" {
     defer wrong_group.deinit();
     try std.testing.expectError(
         error.InvalidOutputSegment,
-        workbench.applyEvent(&wrong_group),
+        control.applyEvent(&wrong_group),
     );
 }
 
-test "AgentCore RunState refines status without owning RunPhase and rejects stale transitions" {
+test "AgentCore RunState refines typed activity without owning RunPhase and rejects stale transitions" {
     var control = try testRuntime();
     defer control.deinit();
     const task = &control.task_runtime.tasks[0].?;
@@ -10338,7 +10583,7 @@ test "AgentCore RunState refines status without owning RunPhase and rejects stal
     try std.testing.expectEqual(lifecycle.RunStatePhase.starting, run.agent_phase.?);
     try std.testing.expectEqual(@as(u64, 1), run.agent_transition_seq.?);
     try std.testing.expectEqual(host_phase, run.active_phase);
-    try std.testing.expectEqualStrings("Starting", run.status_text);
+    try std.testing.expectEqual(task_test_state.RunActivity.starting, run.observed_activity);
 
     var executing = try testEnvelope(
         route,
@@ -10351,7 +10596,10 @@ test "AgentCore RunState refines status without owning RunPhase and rejects stal
     try std.testing.expectEqual(@as(u32, 1), run.agent_turn);
     try std.testing.expectEqual(@as(u32, 2), run.agent_tool_calls);
     try std.testing.expectEqual(@as(u32, 2), run.agent_in_flight_tools);
-    try std.testing.expectEqualStrings("Executing tools", run.status_text);
+    try std.testing.expectEqual(
+        @as(?u32, 2),
+        run.observed_activity.executing_tools.in_flight,
+    );
 
     var stale = try testEnvelope(
         route,
@@ -10361,7 +10609,10 @@ test "AgentCore RunState refines status without owning RunPhase and rejects stal
     defer stale.deinit();
     try control.applyEvent(&stale);
     try std.testing.expectEqual(lifecycle.RunStatePhase.executing_tools, run.agent_phase.?);
-    try std.testing.expectEqualStrings("Executing tools", run.status_text);
+    try std.testing.expectEqual(
+        @as(?u32, 2),
+        run.observed_activity.executing_tools.in_flight,
+    );
 
     var cross_run = try testEnvelope(
         route,
@@ -10373,6 +10624,101 @@ test "AgentCore RunState refines status without owning RunPhase and rejects stal
     try std.testing.expect(run.agent_observation_degraded);
     try std.testing.expectEqual(lifecycle.RunStatePhase.executing_tools, run.agent_phase.?);
     try std.testing.expectEqual(host_phase, run.active_phase);
+}
+
+test "provider retry is replaced by the next forward activity" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = &control.task_runtime.tasks[0].?;
+    const run = &task.durable.runs[0].?;
+    const route = task.runtime.routeId();
+
+    var retry = try testEnvelope(
+        route,
+        run.id,
+        "{\"retry_notice\":{\"attempt\":2,\"max\":3,\"delay_ms\":250}}",
+    );
+    defer retry.deinit();
+    try control.applyEvent(&retry);
+    try std.testing.expectEqual(
+        @as(?u32, 2),
+        run.observed_activity.retrying_provider.attempt,
+    );
+    try std.testing.expectEqual(
+        @as(?u64, 250),
+        run.observed_activity.retrying_provider.delay_ms,
+    );
+
+    var generating = try testEnvelope(
+        route,
+        run.id,
+        "{\"run_state\":{\"run_id\":7,\"transition_seq\":1,\"phase\":\"generating\",\"turn\":1,\"tool_calls\":0,\"in_flight_tools\":[]}}",
+    );
+    defer generating.deinit();
+    try control.applyEvent(&generating);
+    try std.testing.expectEqual(
+        task_test_state.RunActivity.waiting_model,
+        run.observed_activity,
+    );
+}
+
+test "Conversation context observation survives Runs and clears with attachment" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = &control.task_runtime.tasks[0].?;
+    const run = &task.durable.runs[0].?;
+    const route = task.runtime.routeId();
+
+    var warning = try testEnvelope(
+        route,
+        run.id,
+        "{\"context_warning\":{\"current_tokens\":90,\"warning_threshold\":80,\"auto_compact_threshold\":100,\"blocking_limit\":120,\"level\":\"warning\"}}",
+    );
+    defer warning.deinit();
+    try control.applyEvent(&warning);
+    try std.testing.expectEqual(
+        task_test_state.ContextPressureSeverity.warning,
+        task.conversation_observation.pressure.?.severity,
+    );
+    try std.testing.expectEqual(
+        run.id,
+        task.conversation_observation.pressure.?.source_run_id,
+    );
+
+    var compacting = try testEnvelope(
+        route,
+        run.id,
+        "{\"run_state\":{\"run_id\":7,\"transition_seq\":1,\"phase\":\"compacting\",\"turn\":1,\"tool_calls\":0,\"in_flight_tools\":[]}}",
+    );
+    defer compacting.deinit();
+    try control.applyEvent(&compacting);
+    var compacted = try testEnvelope(
+        route,
+        run.id,
+        "{\"auto_compact\":{\"dropped\":4,\"kept\":8,\"before_tokens\":110,\"after_tokens\":70}}",
+    );
+    defer compacted.deinit();
+    try control.applyEvent(&compacted);
+    try std.testing.expect(task.conversation_observation.pressure == null);
+    try std.testing.expectEqual(
+        @as(u64, 70),
+        task.conversation_observation.last_auto_compact.?.after_tokens,
+    );
+    try std.testing.expectEqual(
+        task_test_state.RunActivity.waiting_model,
+        run.observed_activity,
+    );
+    var context_storage: [96 * 1024]u8 = undefined;
+    const context_snapshot = try control.writeSnapshot(&context_storage);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        context_snapshot,
+        "\"context\":{\"pressure\":null,\"lastAutoCompact\":{\"sourceRunId\":\"7\",\"dropped\":\"4\",\"kept\":\"8\",\"beforeTokens\":\"110\",\"afterTokens\":\"70\"}}",
+    ) != null);
+
+    control.releaseTaskAttachmentNoFail(task, .cold_start);
+    try std.testing.expect(task.conversation_observation.pressure == null);
+    try std.testing.expect(task.conversation_observation.last_auto_compact == null);
 }
 
 test "AgentCore RunState accepts a zero first transition sequence" {
@@ -10896,7 +11242,6 @@ test "default snapshot budget contains the maximum structural projection" {
                     ),
                 } },
                 .tools = tools,
-                .status_text = try control.copyBounded("", limits.max_tool_field_bytes),
                 .terminal_publication = .init(.published),
                 .terminal_payload = .{
                     .phase = .completed,
@@ -11307,7 +11652,11 @@ test "known Host credentials are removed from assistant, tool, and UI projection
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "prefix *** suffix") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"id\":\"tool-1\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"name\":\"Bash ***\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"assistantRedacted\":true") != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"redacted\":true,\"provisionalRedacted\":false",
+    ) != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"redacted\":true") != null);
 }
 
@@ -11376,6 +11725,21 @@ test "assistant credential redaction finalizes ordinary chunks without rescannin
     var terminal_pending_storage: [96 * 1024]u8 = undefined;
     const terminal_pending = try control.writeSnapshot(&terminal_pending_storage);
     try std.testing.expect(std.mem.indexOf(u8, terminal_pending, "tail SECRET-") == null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        terminal_pending,
+        "\"currentRunPhase\":\"running\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        terminal_pending,
+        "\"activity\":{\"kind\":\"finalizing\"}",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        terminal_pending,
+        "\"pendingUi\":null",
+    ) != null);
     const revision_before_finalization = control.revision;
     control.finalizeMarkedTerminalRunsAfterEventDrain();
     try std.testing.expectEqual(assistant.list.items.len, assistant.committed_len);

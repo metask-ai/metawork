@@ -138,11 +138,12 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 ### 5.4 Agent 交互
 
 - 用户可以提交文本输入并启动真实 Agent Run；
-- UI 流式显示 assistant 文本；
-- `thinking_chunk` 正文不进入 Assistant、Snapshot、持久历史或搜索；其事件类型只把当前安全状态细化为“正在思考”，`text_chunk` 到达后状态切换为“正在撰写回复”；
-- macOS AgentCore 的 visible-output segment 由 `output_segment_begin/end` 权威定性：`commentary` 是可见过程说明，`continued` 与同 group 后续段合并，`final` 是完成答案，`partial` 是可见但未完成输出，`discarded` 必须回滚。Product Task 只把已闭合的可见组提交到既有 assistant 文本，并持久化 final/partial 分类及其在安全 assistant 文本中的正文起点；Bridge 与 Renderer 投影留到后续阶段。open、continued 和 discarded 不形成 durable record，Renderer 也不得从 Tool、`stream_done` 或 StopReason 猜测这些语义；
-- UI 展示工具开始、进度、结果、错误和耗时；
-- UI 展示 token usage、上下文警告、重试和压缩等可见状态；
+- AgentCore → Host → Bridge 持续投影 Agent 可见输出，并把 commentary、final/partial response 与 provisional 区分为稳定过程说明、安全正文和可回滚临时文本；当前 Renderer 只负责安全消费并以过渡形态呈现这些事实，不能把字段已经可见等同于完整的对话过程体验已经完成；
+- `thinking_chunk` 正文不进入可见 output、Snapshot、持久历史或搜索；其事件类型只把当前安全状态细化为“正在思考”，`text_chunk` 到达后状态切换为“正在撰写回复”；
+- macOS AgentCore 的 visible-output segment 由 `output_segment_begin/end` 权威定性：`commentary` 是可见过程说明，`continued` 与同 group 后续段合并，`final` 是完成答案，`partial` 是可见但未完成输出，`discarded` 必须回滚。Product Task 只把已闭合的可见组提交到 durable visible-output history，并持久化 final/partial 分类及安全正文起点；Bridge revision 1 从该边界派生 typed commentary/response，同时只把 open/continued 中 credential-safe committed bytes 作为可回滚 provisional。open、continued 和 discarded 不形成 durable record，Renderer 也不得从 Tool、`stream_done` 或 StopReason 猜测这些语义；
+- UI 在按需 Task overview 的 Work process 中展示当前或最近 Run 的工具开始、进度、结果、错误和耗时；同刻至多挂载一个展开详情，工具内容不进入主阅读流；
+- UI 以唯一 Current activity 展示 thinking、writing、tool、retry、context compact 与 finalizing，在 Task overview 展示真实 token usage、context warning 和最近 auto compact；
+- 完整的 Agent 对话渲染属于独立 Renderer 能力：必须基于真实 Run 验证终态前的持续反馈、过程信息的可发现性、主次层级、更新节奏和长任务阅读连续性。当前 `Agent updates`、Current activity 与按需 Task overview 只是 typed observation 的安全过渡落点，不构成该能力的最终信息架构或验收完成声明；
 - 用户可以在已有 finalized Run 且 Task 可继续时显式压缩当前 Conversation；manual compact 是 Workbench-owned Task maintenance operation，不创建 Turn/Run，不产生用户消息，也不把 `/compact` 原文送入 Bridge 或模型；
 - manual compact 必须发布真实的 queued/compacting/stopping 与 terminal outcome；`compacted / no_change / degraded / aborted` 保持各自语义，before/after context token 只作为估算展示，compact provider usage 与 Run usage 分开记录；
 - 用户可以取消当前 Run；
@@ -175,7 +176,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - OAuth 等待超过正常感知时长时，界面只提供 Host-owned `取消登录`；Renderer 不接触授权 URL。目录等幂读取和已保存 refresh token 的瞬时失败可以有限重试，OAuth code exchange、持久化 mutation 和其他结果不确定操作不得盲目重放；
 - Bridge command 或 view refresh 超时必须释放 Renderer 本地 busy 状态并进入 snapshot resync；结果不确定的 mutation 只能依据 Host snapshot 决定后续动作，不能由 Renderer 自动重复；
 - Account cancel 是独立逃生动作，不能因普通 mutation busy 被禁用；但 credential persistence 一旦开始提交就跨过取消边界，Host 必须暂时撤销 cancel 并等待唯一 terminal completion，不能在磁盘已提交、main-thread completion 尚未消费的窗口把内存回滚到旧 generation。Bridge 暂不可用时 Host deadline 仍必须收口 attempt，Renderer reload 后从 snapshot 恢复可用动作；
-- 用户消息、已完成 assistant 消息、工具结果、审批决策、关键 Run 状态和改变 Conversation 的 manual compact 应形成可靠状态边界；Run/compact admission 必须先建立稳定的 Workbench record，terminal payload 一经发布不可变，内部 Agent Session 关闭或销毁后 Task 历史仍可独立生成 snapshot；compact history 有界且 append-only，容量耗尽时拒绝新 compact，不覆盖既有 Conversation 边界；
+- 用户消息、已完成 Agent 可见输出、工具结果、审批决策、关键 Run 状态和改变 Conversation 的 manual compact 应形成可靠状态边界；Run/compact admission 必须先建立稳定的 Workbench record，terminal payload 一经发布不可变，内部 Agent Session 关闭或销毁后 Task 历史仍可独立生成 snapshot；compact history 有界且 append-only，容量耗尽时拒绝新 compact，不覆盖既有 Conversation 边界；
 - 当前 baseline 的 Renderer reload 只能从仍存活的 Host 恢复视图；
 - Host 或 AgentCore 进程退出时，当前同步 Run 标记 `interrupted`，不得伪装完成；
 - 崩溃后不得自动重放可能产生副作用的工具；
@@ -199,7 +200,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - 未登录只禁止创建和发送新 Task；Workbench 仍展示 Workspace、durable Task 与执行历史，并允许查看和停止真实 live Run；默认执行配置 ready 后才开放 Composer admission；
 - Workbench 左栏承担稳定 New task、已接通的全局能力入口、全局 Task 列表与左下角账号入口；`新建任务`、`技能`、`MCP` 与 `定时任务` 使用同一紧凑一级菜单的相同行高、缩进和 active 语义，不用额外留白或独立大按钮制造虚假层级；只有真实接通的 capability 才显示对应入口，Task 按 `需要处理 / 正在运行 / 最近` 等行动优先级组织；
 - New task 中央区域始终以 Composer 为主，当前模型和 Workspace 在发送前可见；API 管理不进入 Composer，模型与 Workspace 也不得混成不透明的单一“模式”；
-- Task 启动后中央区域显示该 Task 的用户输入与 Assistant 回复，Composer 固定在底部；当前 Run 只追加一个临时 canonical 状态，待处理请求在回复之后、Composer 之前提供唯一操作面，terminal outcome 只在影响理解或恢复动作时出现。工具详情和 usage 不进入主阅读流，只决定按需 Task overview 是否有对应内容；普通 Run 开始或结束不自动开合 overview，只有新的待处理请求可以自动打开一次；
+- Task 启动后中央区域显示该 Task 的用户输入与 Agent 可见输出，Composer 固定在底部；当前过渡 Renderer 将 commentary 放入稳定 disclosure，以 Markdown 显示 final/partial response，并以可随 discard 消失的纯文本显示 provisional。当前 Run 只追加一个临时 canonical activity，待处理请求在回复之后、Composer 之前提供唯一操作面；partial 与 terminal outcome 合并为一条提示，其他 terminal outcome 只在影响理解或恢复动作时出现。工具详情和 usage 当前只进入按需 Task overview，普通 Run 开始或结束不自动开合 overview，只有新的待处理请求可以自动打开一次；这些具体落点不替代后续完整对话渲染对信息层级和过程可见性的重新设计；
 - `queued / running / waiting_user` 的停止入口位于 Composer 的发送位置，并替换发送按钮；标题栏不重复提供 Task Stop。Composer 仍只保存本地草稿，停止请求必须等待 canonical terminal，transport acknowledgement 或 UI 状态变化都不能伪造 `Stopped`；
 - 标题栏只承载 Renderer 绘制的窗口按钮、当前 Task 名称、搜索与异常状态等全局入口；不重复说明 Task 的 Workspace，正常连接状态、语言选择和工程诊断也不长期占据主视觉；
 - 界面在任一时刻只突出一个与当前阶段一致的主动作；独立的导航和设置入口可以持续可见，但不得与主动作竞争；
@@ -207,7 +208,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - Renderer reload、断开连接以及 Bridge revision/snapshot failure 默认只影响视图同步和重连，不得终止后台 Agent Run；只有 Workbench 根据 canonical 产品状态作出的显式 termination 决策才能请求结束 Run；
 - 左栏直接列出 canonical snapshot 中 owning Workspace 仍被投影的全部 Task，不提供全局 Workspace 切换器；每个 Task 的路径由自身上下文决定，后台请求不能因路径不同而从导航中消失。已移除 Workspace 的历史 Task 仍由 Workbench 保存，但随 Workspace 退出活动导航，重新授权恢复同一稳定 Workspace identity 后才重新出现；
 - Task 是可持续补充、归档和删除的产品对象；Task lifecycle、当前 Run phase 和最近一次 Run outcome 是三类独立状态，Renderer 只能从 Workbench projection 派生展示标签；
-- 中间区域不按 Run/Tool 结构组织内容，不展示 Tool 调用、usage、Run ID、raw AgentCore event 或 chain-of-thought。`assistant` 只表示 Assistant 回复，Renderer 不把它提升为 Delivery、Output 或最终成果；完成、失败、中断与恢复动作只依据独立 canonical outcome/cause；
+- 中间区域不按 Run/Tool 结构组织内容，不展示 Tool 调用、usage、Run ID、raw AgentCore event 或 chain-of-thought。Renderer 只消费 typed `output/activity`，不把可见回复提升为 Delivery、Output artifact 或最终成果；完成、失败、中断与恢复动作只依据独立 canonical outcome/cause；
 - Run 执行期间的新输入不得暗示可以修改当前 Run；首版只保存 Renderer 草稿，等待当前 Run terminal 后由用户明确发送，不自动创建或启动下一次 Run；
 - Composer 以 `/` 作为 context-aware 发现手势，统一显示 Renderer 注册的产品 Command 与当前 Workspace/Task catalog 投影的 Skill；Slash 文本本身不是 Agent 输入协议，Command 必须在 Renderer 消费且不得进入 Bridge、Task 历史或 AgentCore；
 - Command 只复用已有产品动作，不迁移 CLI/TUI 的会话控制语义；V1 只注册 `/new` 与 `/compact`，前者打开既有 New task draft action，后者触发 Workbench-owned typed maintenance action；不注册 `/model`、`/status`、`/goal`、`/resume`、`/continue` 或其他已有正式界面、与桌面产品对象冲突、缺少 typed capability 的 identifier；
@@ -219,7 +220,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - 用户创建或修改 Skill 仍通过普通 Text Run 与 AgentCore built-in Read/Edit 完成，不在 Skill 中心建立第二个创作或文件编辑器。Workspace 内的 `.agents/skills` 服从现有 Workspace authority；用户级目录只有在用户明确将目标 Skill 目录作为 trusted Workspace 授权后才能修改。Skill 中心可以导航到预填的普通 Text draft；项目 Skill 创建完成后通过显式 catalog refresh 出现，个人 Skill 通过受控本地导入发布。一次 Run 使用已绑定 snapshot，不热替换正在执行的 Skill；文件变化只在显式 catalog refresh 后影响后续选择与 Run；
 - Host 重启后恢复的历史 Task 先以 detached、可阅读状态出现；满足恢复资格时，用户选择左栏 Task 只看到已保存产品历史与普通 Composer，不显示恢复卡片、恢复按钮或专用 placeholder。用户首次发送新消息时，Renderer 在同一次发送意图内先提交 restore，等待 Host 确认 attachment 后再精确提交一次 Text Run；失败时保留草稿并显示可执行的失败说明，下一次普通发送可以重试。只有 source Task/binding、checkpoint ownership、Workspace/Task identity、Conversation、terminal state 与当前 execution target readiness 均可安全恢复后才允许该内部前置步骤；Skill/MCP/Permission continuity 缺失只产生 degraded 能力状态。历史 execution generation 不要求等于当前 generation：同 provider 且当前 authority 可承载 Task model 时，restore 必须以 durable adoption 同步推进 Task generation、binding epoch 与 checkpoint anchor 后再安装 attachment，并保留旧 Run 的逐 Run provenance。该窄 adoption 只连接同一 Task 的 source Conversation 与当前可执行 target，不允许切换 provider/model，也不构成通用 rebind；任意配置 rebind 或从历史创建新 Task 仍属于后续显式产品能力，当前实现不得用它们冒充恢复；
 - Run 中 AgentCore `tool_result.file_refs` 提供的结构化文件引用是 File Preview 的唯一入口。Renderer 按 `tool order → fileRefs order` 在对应 Run 回复后显示“相关文件”，用户显式选择后才通过精确 `taskId + runId + fileReferenceId` 请求 Host 读取 Workspace 中的当前文件内容；预览以右侧 Drawer 展示，明确说明不是 Run 时版本，不缓存、不持久化、不自动刷新，也不把 reference 的 kind、Tool 名称、普通文本或 Bash 输出解释为文件变更、Output 或 citation。Host 必须在独立有界 worker lane 中执行 no-follow、root-contained、regular-file-only 的最多 256 KiB UTF-8 文本读取，主线程在响应前重新校验 Task/Run/reference/Workspace authority，并以当前及历史 execution credential 做内容脱敏；非 ready 状态不得携带正文；
-- `Files changed` 表示实际文件变更集合，`Outputs` 表示用户关心的交付结果，两者不得用“新建文件”或 File Preview reference 自动等同；当前 ABI v1 未提供这两类 typed event 时，相关模块必须隐藏；
+- `Files changed` 表示实际文件变更集合，`Outputs` 表示用户关心的交付结果，两者不得用“新建文件”或 File Preview reference 自动等同；当前 AgentCore 已发布 typed `file_changes` observation，但 Product owner、持久化、恢复与 Renderer 投影尚未验收，typed Output 也尚未提供，因此两个模块都必须隐藏；
 - Task 归档只隐藏日常列表且可恢复；归档、删除 Task 或移除 Workspace 前必须先终止其 queued/running/waiting/stopping Run。删除只允许已归档 Task；Workbench 接受一次删除意图后负责收口仍存活的 Session，并在 executor stable record reference、checkpoint 与全部资源 quiescent 后原子提交和物理释放，不要求用户为正常推进重复提交。删除进度以 runtime-only 的 `idle | deleting | failed` 产品事实发布，不持久化、不混入 Task lifecycle 或 Agent Session 状态；明确失败必须保留归档 Task 并等待用户显式重试，不能伪造成功、静默回弹或自动形成重试循环。若失败后 attachment 已恢复到可用状态，用户显式恢复归档表示放弃该次删除，Workbench 必须把删除状态原子重置为 `idle`；仍在 closing 的 Task 不开放恢复归档。删除 Task 记录不删除 Workspace 中的真实文件；移除 Workspace 先原子进入 `removing` 并推进 Workspace epoch、拒绝新 admission，全部 Task 收口后撤销当前 Host authorization 并退出活动导航；
 - 全局搜索覆盖 Task、用户指令、完成消息和 Output 文件名；Workspace 只作为 Task 与 New task 的路径上下文，不作为独立导航结果；工具原始日志默认不进入普通搜索；
 - `en-US` 是规范产品文案和回退语言，`zh-CN` 是首个完整 locale；Host 传递 structured code 与参数，Renderer 负责本地化。

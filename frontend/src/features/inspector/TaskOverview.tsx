@@ -1,8 +1,10 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 
-import type { RunView, TaskView } from "../../bridge/contracts.ts";
+import type { RunView, TaskView, ToolView } from "../../bridge/contracts.ts";
+import { CodeBlock } from "../../components/ai/index.ts";
+import { Icon } from "../../components/ui/Icon.tsx";
 import { formatInteger } from "../../i18n/formatters.ts";
-import { useI18n, type MessageId } from "../../i18n/context.ts";
+import { useI18n, type I18nValue, type MessageId } from "../../i18n/context.ts";
 import type { InspectorSection } from "./inspector-state.ts";
 
 export type InspectorFocusRequest = {
@@ -30,28 +32,65 @@ function isActiveRun(run: RunView): boolean {
 
 function runActivityMessage(run: RunView): MessageId | null {
   if (run.phase !== "running") return null;
-  switch (run.status) {
-    case "Queued":
-    case "Starting":
+  switch (run.activity?.kind) {
+    case "queued":
+    case "starting":
       return "run.activity.starting";
-    case "Generating response":
-      return "run.activity.generating_response";
-    case "Thinking":
+    case "thinking":
       return "run.activity.thinking";
-    case "Writing response":
+    case "writing_response":
       return "run.activity.writing_response";
-    case "Executing tools":
+    case "executing_tools":
       return "run.activity.executing_tools";
-    case "Retrying provider":
+    case "retrying_provider":
       return "run.activity.retrying_provider";
-    case "Compacting context":
-    case "Context compacted":
+    case "compacting_context":
       return "run.activity.compacting_context";
-    case "Finishing":
+    case "finalizing":
       return "run.activity.finishing";
-    default:
+    case "waiting_user":
+      return "task.phase.waiting_ui";
+    case "stopping":
+      return "task.phase.stopping";
+    case "waiting_model":
+    case undefined:
       return "run.activity.waiting_model";
   }
+}
+
+function runActivityDetail(
+  run: RunView,
+  locale: I18nValue["locale"],
+  t: I18nValue["t"],
+): string | null {
+  if (run.activity?.kind === "executing_tools" && run.activity.inFlight) {
+    const count = BigInt(run.activity.inFlight);
+    return t(
+      count === 1n
+        ? "run.activity.tool_running_one"
+        : "run.activity.tool_running_many",
+      { count: formatInteger(locale, count) },
+    );
+  }
+  if (
+    run.activity?.kind === "retrying_provider" &&
+    run.activity.attempt &&
+    run.activity.max &&
+    run.activity.delayMs
+  ) {
+    const values = {
+      attempt: formatInteger(locale, BigInt(run.activity.attempt)),
+      max: formatInteger(locale, BigInt(run.activity.max)),
+      delay: formatInteger(locale, BigInt(run.activity.delayMs)),
+    };
+    return t(
+      run.activity.delayMs === "0"
+        ? "run.activity.retry_detail_now"
+        : "run.activity.retry_detail",
+      values,
+    );
+  }
+  return null;
 }
 
 function runLabel(run: RunView): MessageId {
@@ -78,6 +117,150 @@ function wireInteger(value: string): bigint {
   }
 }
 
+function orderedTools(run: RunView): ToolView[] {
+  return [...run.tools].sort((left, right) => {
+    const leftOrder = BigInt(left.order);
+    const rightOrder = BigInt(right.order);
+    return leftOrder < rightOrder ? -1 : leftOrder > rightOrder ? 1 : 0;
+  });
+}
+
+function toolStateMessage(tool: ToolView): MessageId {
+  switch (tool.state) {
+    case "running":
+      return "inspector.tool.running";
+    case "completed":
+      return "inspector.tool.completed";
+    case "failed":
+      return "inspector.tool.failed";
+  }
+}
+
+function ToolProcessItem({
+  tool,
+  expanded,
+  onToggle,
+}: {
+  tool: ToolView;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  const { locale, t } = useI18n();
+  const detailId = useId();
+  const hasDetails = Boolean(tool.input || tool.progress || tool.content);
+  const truncated =
+    tool.inputTruncated || tool.progressTruncated || tool.contentTruncated;
+  const elapsed = wireInteger(tool.elapsedMs);
+  const identity = (
+    <>
+      <span className="inspector-tool-state" aria-hidden="true" />
+      <span className="inspector-tool-identity">
+        <strong>{tool.name}</strong>
+        <small>{t(toolStateMessage(tool))}</small>
+      </span>
+      <span className="inspector-tool-meta">
+        {elapsed > 0n && (
+          <span>
+            {t("inspector.tool.elapsed", {
+              duration: formatInteger(locale, elapsed),
+            })}
+          </span>
+        )}
+        {hasDetails && <Icon name="chevron" />}
+      </span>
+    </>
+  );
+
+  return (
+    <li data-state={tool.state} data-expanded={expanded}>
+      {hasDetails ? (
+        <button
+          type="button"
+          className="inspector-tool-summary focus-ring"
+          aria-expanded={expanded}
+          aria-controls={expanded ? detailId : undefined}
+          onClick={onToggle}
+        >
+          {identity}
+        </button>
+      ) : (
+        <div className="inspector-tool-summary">{identity}</div>
+      )}
+      {expanded && hasDetails && (
+        <div className="inspector-tool-detail" id={detailId}>
+          {tool.input && (
+            <div className="detail-field">
+              <p className="detail-field-label">{t("inspector.tool.input")}</p>
+              <CodeBlock
+                aria-label={t("inspector.tool.input")}
+                value={tool.input}
+              />
+            </div>
+          )}
+          {tool.progress && (
+            <div className="detail-field">
+              <p className="detail-field-label">
+                {t("inspector.tool.progress")}
+              </p>
+              <CodeBlock
+                aria-label={t("inspector.tool.progress")}
+                value={tool.progress}
+              />
+            </div>
+          )}
+          {tool.content && (
+            <div className="detail-field">
+              <p className="detail-field-label">{t("inspector.tool.result")}</p>
+              <CodeBlock
+                aria-label={t("inspector.tool.result")}
+                value={tool.content}
+              />
+            </div>
+          )}
+          {truncated && (
+            <p className="projection-note">{t("inspector.tool.truncated")}</p>
+          )}
+          {tool.redacted && (
+            <p className="projection-note">{t("privacy.sensitive_hidden")}</p>
+          )}
+        </div>
+      )}
+    </li>
+  );
+}
+
+function WorkProcess({
+  taskId,
+  runId,
+  tools,
+}: {
+  taskId: string;
+  runId: string;
+  tools: ToolView[];
+}) {
+  const { t } = useI18n();
+  const [expandedToolId, setExpandedToolId] = useState<string | null>(null);
+  return (
+    <section className="inspector-section inspector-work-process">
+      <p className="section-label">{t("inspector.work_process")}</p>
+      <ul className="inspector-tool-list">
+        {tools.map((tool) => (
+          <ToolProcessItem
+            key={`${taskId}:${runId}:${tool.id}`}
+            tool={tool}
+            expanded={expandedToolId === tool.id}
+            onToggle={() =>
+              setExpandedToolId((current) =>
+                current === tool.id ? null : tool.id,
+              )
+            }
+          />
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 export function TaskOverview({
   task,
   focusRequest,
@@ -93,6 +276,8 @@ export function TaskOverview({
   );
   const run = selectedRun(task);
   const activityMessage = run ? runActivityMessage(run) : null;
+  const activityDetail = run ? runActivityDetail(run, locale, t) : null;
+  const tools = useMemo(() => (run ? orderedTools(run) : []), [run]);
   const usage = useMemo(() => {
     if (!run) return null;
     const input = wireInteger(run.usage.input);
@@ -105,6 +290,7 @@ export function TaskOverview({
       cacheRead,
       cacheCreation,
       total: input + output,
+      hasAny: input > 0n || output > 0n || cacheRead > 0n || cacheCreation > 0n,
     };
   }, [run]);
 
@@ -164,49 +350,127 @@ export function TaskOverview({
                 {isActiveRun(run) && activityMessage && (
                   <span>{t(activityMessage)}</span>
                 )}
+                {isActiveRun(run) && activityDetail && (
+                  <span>{activityDetail}</span>
+                )}
                 {run.cause && <small>{t(`cause.${run.cause}`)}</small>}
               </div>
             </div>
           </section>
         )}
 
-        {usage && usage.total > 0n && (
-          <section
-            ref={(node) => {
-              sectionRefs.current.usage = node ?? undefined;
-            }}
-            className="inspector-section inspector-usage"
-            tabIndex={-1}
-          >
-            <p className="section-label">{t("inspector.context_usage")}</p>
-            <p className="inspector-usage-total">
-              {formatInteger(locale, usage.total)}
-            </p>
-            <span>{t("inspector.tokens_this_run")}</span>
-            <dl>
-              <div>
-                <dt>{t("inspector.input_tokens")}</dt>
-                <dd>{formatInteger(locale, usage.input)}</dd>
-              </div>
-              <div>
-                <dt>{t("inspector.output_tokens")}</dt>
-                <dd>{formatInteger(locale, usage.output)}</dd>
-              </div>
-              {usage.cacheRead > 0n && (
-                <div>
-                  <dt>{t("inspector.cache_read_tokens")}</dt>
-                  <dd>{formatInteger(locale, usage.cacheRead)}</dd>
-                </div>
-              )}
-              {usage.cacheCreation > 0n && (
-                <div>
-                  <dt>{t("inspector.cache_creation_tokens")}</dt>
-                  <dd>{formatInteger(locale, usage.cacheCreation)}</dd>
-                </div>
-              )}
-            </dl>
-          </section>
+        {run && tools.length > 0 && (
+          <WorkProcess
+            key={`${task.id}:${run.id}`}
+            taskId={task.id}
+            runId={run.id}
+            tools={tools}
+          />
         )}
+
+        {usage &&
+          (usage.hasAny ||
+            task.context.pressure !== null ||
+            task.context.lastAutoCompact !== null) && (
+            <section
+              ref={(node) => {
+                sectionRefs.current.usage = node ?? undefined;
+              }}
+              className="inspector-section inspector-context-usage"
+              tabIndex={-1}
+            >
+              <p className="section-label">{t("inspector.context_usage")}</p>
+              {task.context.pressure && (
+                <div
+                  className="inspector-context-pressure"
+                  data-severity={task.context.pressure.severity}
+                >
+                  <strong>
+                    {t(
+                      task.context.pressure.severity === "critical"
+                        ? "inspector.context_critical"
+                        : "inspector.context_warning",
+                    )}
+                  </strong>
+                  <span>
+                    {t("inspector.context_pressure_detail", {
+                      current: formatInteger(
+                        locale,
+                        wireInteger(task.context.pressure.currentTokens),
+                      ),
+                      compact: formatInteger(
+                        locale,
+                        wireInteger(task.context.pressure.autoCompactThreshold),
+                      ),
+                      limit: formatInteger(
+                        locale,
+                        wireInteger(task.context.pressure.blockingLimit),
+                      ),
+                    })}
+                  </span>
+                </div>
+              )}
+              {task.context.lastAutoCompact && (
+                <div className="inspector-last-compact">
+                  <strong>{t("inspector.last_auto_compact")}</strong>
+                  <span>
+                    {t("inspector.compact_token_change", {
+                      before: formatInteger(
+                        locale,
+                        wireInteger(task.context.lastAutoCompact.beforeTokens),
+                      ),
+                      after: formatInteger(
+                        locale,
+                        wireInteger(task.context.lastAutoCompact.afterTokens),
+                      ),
+                    })}
+                  </span>
+                  <small>
+                    {t("inspector.compact_items", {
+                      dropped: formatInteger(
+                        locale,
+                        wireInteger(task.context.lastAutoCompact.dropped),
+                      ),
+                      kept: formatInteger(
+                        locale,
+                        wireInteger(task.context.lastAutoCompact.kept),
+                      ),
+                    })}
+                  </small>
+                </div>
+              )}
+              {usage.hasAny && (
+                <div className="inspector-usage">
+                  <p className="inspector-usage-total">
+                    {formatInteger(locale, usage.total)}
+                  </p>
+                  <span>{t("inspector.tokens_this_run")}</span>
+                  <dl>
+                    <div>
+                      <dt>{t("inspector.input_tokens")}</dt>
+                      <dd>{formatInteger(locale, usage.input)}</dd>
+                    </div>
+                    <div>
+                      <dt>{t("inspector.output_tokens")}</dt>
+                      <dd>{formatInteger(locale, usage.output)}</dd>
+                    </div>
+                    {usage.cacheRead > 0n && (
+                      <div>
+                        <dt>{t("inspector.cache_read_tokens")}</dt>
+                        <dd>{formatInteger(locale, usage.cacheRead)}</dd>
+                      </div>
+                    )}
+                    {usage.cacheCreation > 0n && (
+                      <div>
+                        <dt>{t("inspector.cache_creation_tokens")}</dt>
+                        <dd>{formatInteger(locale, usage.cacheCreation)}</dd>
+                      </div>
+                    )}
+                  </dl>
+                </div>
+              )}
+            </section>
+          )}
       </div>
     </div>
   );
