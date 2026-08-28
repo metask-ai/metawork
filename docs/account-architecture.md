@@ -1,16 +1,15 @@
-# MetaWork Account 内部架构
+# MetaWork Account 架构
 
-> 状态：Account Product owner 的内部架构 source of truth。
+> 状态：Account Product owner、其消费的 Metask 合同与持久化边界的 source of truth。
 >
 > 当前实现已按本文完成 Account transaction kernel 硬切；后续变更必须继续满足本文不变量，不得恢复历史组合状态或隐式提交判断。
 
 ## 1. 文档职责
 
-本文定义 `src/product/account.zig` 与 `src/product/account/` 的内部职责、领域状态、事务、effect、持久化提交、恢复、并发和生命周期。以下事实由其他规范独占：
+本文定义 `src/product/account.zig` 与 `src/product/account/` 的内部职责、领域状态、事务、effect、持久化提交、恢复、并发和生命周期，同时锁定 MetaWork 实际消费的 Metask OAuth、HTTP catalog、Provider、ExecutionTarget 与 Account persistence 合同。以下事实由其他规范独占：
 
 - 产品可见行为、默认模型与 Task 的关系见[产品需求](requirements.md)；
 - Account 与 Application、Workbench、Bridge、Agent 的跨 owner 协作见[Product 内部架构](product-architecture.md)；
-- Metask OAuth、HTTP catalog、Provider、ExecutionTarget、`preferences.json` 字段和平台持久化合同见[Metask Account API 合同](metask-account-contract.md)；
 - Renderer 展示和交互见[Workbench UI 设计](workbench-ui-design.md)；
 - wire command、Snapshot 与 transport 见[Renderer Bridge 合同](renderer-bridge-contract.md)；
 - 测试层、验证入口和平台证据见[验证规范](validation.md)。
@@ -87,6 +86,58 @@ Account 同时最多拥有两个 secret-free `PublicCatalog` slot：
 ### 3.4 Model Connection
 
 Model Connection registry 与 Metask identity/catalog 独立，继续使用自己的 committed candidate、credential vault 和 persistence health。连接 CRUD、测试状态和 credential cleanup 由 Account 拥有；默认 execution source 在 Metask 与 Model Connection 之间切换时，必须使用同一条显式 execution replacement 协议。
+
+用户创建 Model Connection 时必须显式选择已登记协议：
+
+| Protocol                | Agent provider | Endpoint contract                                             |
+| ----------------------- | -------------- | ------------------------------------------------------------- |
+| OpenAI Chat Completions | `openai`       | 完整 `/v1/chat/completions` endpoint；不支持 `/v1/responses` |
+| Gemini Native           | `gemini`       | 服务 base URL；消费者追加 model 与 operation path            |
+
+Anthropic Messages 当前不可创建、恢复或选择：canonical AgentCore 仍未满足 Anthropic Native `x-api-key` 合同，Account 不以自建 transport 或 Bearer 兼容路径补偿。连接 endpoint 只允许 HTTPS 或用户明确配置的 loopback HTTP，并拒绝 control character、userinfo、query/fragment credential、过长 URL 和未登记 provider path；Renderer 不得直接拼接或覆盖规范化 endpoint。
+
+第一版不做 model discovery；用户显式提交 bounded model id，Account 保存对应 metadata 并以 provider contract 验证连接。API credential 只进入系统安全存储和当前调用所需的 bounded owned copy，系统 credential account 由公开 connection id 确定，不另存 locator。首次成功的 [Agent-owned one-shot Completion](model-completion-architecture-plan.md) test 将当前 connection generation 标记为 ready；test 不创建 Task、Run history、checkpoint 或 durable Conversation。之后的失败重测只更新最新测试结果，不撤销已经 ready 的 generation、默认 execution 或跨重启 binding。endpoint、provider 或 credential 变化生成新 connection generation；同一 ready connection 内切换已登记模型只生成新的 opaque execution generation。现有 Task 与 Session 不热替换。
+
+### 3.5 MetaWork 消费的 Metask 合同
+
+MetaWork 是 Metask Account API 的消费方，不拥有或修改 Metask 服务端实现。正式客户端只接受以下固定 OAuth public-client 合同：
+
+| 项目      | 固定值                                                       |
+| --------- | ------------------------------------------------------------ |
+| Flow      | OAuth 2.0 Authorization Code + PKCE S256                     |
+| Authority | `https://napi.metask-ai.com`                                 |
+| Authorize | `https://napi.metask-ai.com/oauth/authorize`                 |
+| Token     | `https://napi.metask-ai.com/oauth/token`                     |
+| Revoke    | `https://napi.metask-ai.com/oauth/revoke`                    |
+| Client ID | `metawork-app`，无 `client_secret`                           |
+| Scope     | `metawork:use`                                               |
+| Redirect  | `http://127.0.0.1:{dynamic_port}/auth/callback`              |
+| Identity  | bearer `GET https://napi.metask-ai.com/api/v1/auth/me`       |
+
+Account 只生成 CSPRNG `state` 与 PKCE verifier，只接受 S256 challenge。callback 只绑定 IPv4 loopback 动态端口，不依赖 `localhost` DNS、不绑定 wildcard，只接受一次精确路径的 `GET`，严格解析 query、拒绝重复或 unknown 参数，并以 constant-time 比较 `state`。token response 必须有界解码并包含非空 `access_token`、每次必需的新 `refresh_token`、Bearer `token_type`、正整数 `expires_in`、精确 scope 与非空 `account_id`；服务端可以增加未消费 metadata。refresh token 每次成功刷新都轮换，rotation durable commit 后不得恢复旧 token。
+
+只有 `/me` 返回 `code = 0`、数值 `data.id` 的十进制文本精确匹配 token `account_id`，且 `data.username` 是非空有界 UTF-8 时，Account 才能提交 authenticated identity。明确的 `401/403` 删除无效 refresh token并进入 `signed_out`；网络、deadline、`429` 或 `5xx` 保留当前 refresh token并发布重试入口，不得回退到 saved identity。
+
+Metask catalog 使用以下固定路径：
+
+- OAuth Bearer `GET https://napi.metask-ai.com/api/v1/keys?page=1&page_size=100`；只接受完整单页结果，item 必须具有稳定 id、name、secret、status、group identity 和完整 group，且 item/group 均为 `active`；
+- 选中 API Key 后以该 Key 作为 Bearer 请求 `GET https://napi.metask-ai.com/v1/models`；拒绝缺失或非法消费字段、重复 model id、`has_more = true`、超限字段与超限集合；
+- 两条路径都不发送 Profile header，不读取或持久化 `profile_id`，也不接受 Renderer、环境变量或任意 URL 覆盖；
+- decoder 允许服务端增加未消费 metadata，但所有已消费字段、分页、集合和字节上限必须严格验证。
+
+API Key catalog success 必须为 `code = 0`、`message = "success"` 和完整分页对象；model catalog success 必须为有界 list root 与 `data[]`。Account 在当前会话中以 token `account_id + API Key id` 证明 catalog 和 execution credential 归属，自动 refresh 与冷启动不得静默切换账号。
+
+Metask managed `ExecutionTarget` 只从选中 API Key 的精确 `group.platform` 形成，不根据模型名、显示名或列表顺序推断：
+
+| `group.platform` | Provider    | Fixed target URL                                  |
+| ---------------- | ----------- | ------------------------------------------------- |
+| `anthropic`      | `anthropic` | `https://napi.metask-ai.com/v1/messages`          |
+| `openai`         | `openai`    | `https://napi.metask-ai.com/v1/chat/completions`  |
+| `gemini`         | `gemini`    | `https://generativelanguage.googleapis.com`       |
+
+其他 platform fail closed。OAuth token、PKCE verifier、authorization code、完整 authorize URL、Provider API Key 和 Authorization header 不得进入 Renderer、Bridge、日志、Snapshot 或产品历史。
+
+Gemini fixed target 是 AgentCore Gemini Native client 使用的服务基址；AgentCore 负责追加 model 与 `streamGenerateContent` operation path、认证 header 和请求格式，Account 不实现 provider transport。
 
 ## 4. 事务状态模型
 
@@ -230,7 +281,21 @@ Metask 与 ready Model Connection 之间切换必须产生显式 `ExecutionInten
 
 ## 7. Persistence 与恢复
 
-平台存储格式、字段、原子 rename 和 credential 顺序以 [Metask Account API 合同](metask-account-contract.md)为准。Account 内部区分以下结果：
+Account persistence 使用无版本 hard cut，不读取、迁移、清理或兼容旧 manifest、slot、`account.json` 或旧 credential family：
+
+- secure credential service identity 为产品 Bundle ID 加 `.account`，automation 构建在编译期使用 `.automation.account`；Metask refresh token 的固定 account name 是 `metask-refresh-token`；
+- 数据目录中的 `preferences.json` 精确保存 `selection_owner_account_id`、`api_key_id`、`model_id` 和非零 `execution_generation`；它不保存 display name、access token、Provider API Key、provider、base URL 或完整 `ExecutionConfig`；
+- Model Connection 使用独立原子 registry，只保存 connection id、display name、provider、normalized endpoint、有界 model metadata、credential status、generation、默认选择和待完成 credential deletion tombstone；API credential 只进入系统安全存储；
+- production 与 automation 的数据根和 credential service 在编译期隔离；任何一侧不得读取另一侧的 preference、registry 或 credential；
+- preference 与 registry 写入都使用同目录临时文件、文件 sync、原子 rename 和提交确认；不存在双写、运行时 fallback 或隐式迁移。
+
+refresh rotation、preference 和 Model Connection registry 是独立 commit。refresh response 成功后必须先替换 secure refresh token；后续 identity、catalog 或 preference 失败不得恢复已作废的旧 token。logout 固定先删除 refresh token，再删除无 secret preference；本地退出不依赖 remote revoke 成功，refresh token 已删除后即使 preference 删除失败也不能继续使用旧 identity。
+
+冷启动只依赖 refresh token：不存在 token 时直接进入 `signed_out`；存在时先 refresh 并提交 rotation，再以 `/me` 建立当前 identity，最后决定 preference 和 Model Connection default 是否可复用。preference 缺失、损坏、owner 不同或 catalog membership 失效只清空默认选择，不影响已验证 identity，也不能制造 account mismatch。
+
+Model Connection 删除先持久化 credential cleanup tombstone，再删除系统 credential，最后原子清除 tombstone；创建连接先持久化目标 id 的 tombstone，再写 credential，最后以一次原子 registry commit 替换为完整连接。启动和后续 mutation 必须继续排空未完成 tombstone。系统确认 credential 缺失时撤销对应 default 并持久化 `credential_status = missing`；安全存储暂时不可读不能被误写成已确认缺失。
+
+Account persistence effect 区分以下结果：
 
 - `committed`：磁盘真相已确认，可以提交内存；
 - `definite_failure`：磁盘未提交，保留旧 committed state；
@@ -266,6 +331,7 @@ Renderer acknowledgement 不是 committed fact。Renderer reload、Bridge discon
 - 每个 Account attempt 有唯一 identity、Host deadline 和最多一个 terminal completion；
 - worker 只通过有界 mailbox 交付 owned completion，不调用 Workbench、Bridge 或 WebView；
 - stale completion 必须销毁其 secret/owned payload，不能改变 transaction 或 catalog slots；
+- credential 与 open-browser effect 只经 Application 注入的 Native SDK 主线程 capability 执行；网络、OAuth loopback wait、deadline 与 cancellation 在有界 Account worker 和 Application byte-transport port 上收口；
 - 取消只在 transaction 明确允许的阶段进入；credential/preference persistence 一旦可能提交即跨过取消边界；
 - mailbox collision、notification failure和 malformed completion 必须收口为当前 attempt 的明确失败，不能永久 wedged；
 - shutdown 先停止新 command、取消 timer、cancel/join attempt、消费或销毁 mailbox、清空 private secret，再清 committed/candidate catalog 和 Runtime-owned credential，最后断开 ports；

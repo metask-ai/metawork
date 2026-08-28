@@ -115,9 +115,9 @@ Product Skill 的公开表面 guard 必须证明 `product/skill.zig` 只导出 r
 
 ### Metask Account 与真实 AgentCore Run
 
-- **规范**：[产品需求](requirements.md)、[Account 内部架构](account-architecture.md)、[Metask Account 合同](metask-account-contract.md)。
-- **证据**：`git show dbaaf81b0217d4016944960ee8621e9a23274f05:docs/phase-0-validation.md` 中 2026-07-20 的真实链路记录。
-- **结论**：打包 `.app` 完成 OAuth、profile、API Key/model catalog、execution persistence，以及 `gpt-5.5`、`deepseek-v4-pro` AgentCore Run。该证据不证明后续 Renderer、设置、模型选择或平台交互仍然通过。
+- **规范**：[产品需求](requirements.md)、[Account 架构](account-architecture.md)。
+- **证据**：`git show dbaaf81b0217d4016944960ee8621e9a23274f05:docs/phase-0-validation.md` 中 2026-07-20 的真实链路记录；2026-08-10 使用 production `metawork-app` / `metawork:use` refresh generation 复核当前无 Profile-ID 路径。
+- **结论**：2026-07-20 的打包 `.app` 完成当时的 OAuth、profile、API Key/model catalog、execution persistence，以及 `gpt-5.5`、`deepseek-v4-pro` AgentCore Run；该旧证据不证明后续 Renderer、设置、模型选择或平台交互仍然通过。2026-08-10 的复核确认 `/api/v1/auth/me` 返回 HTTP 200 与匹配用户，错误的 `/api/v1/auth/oauth/userinfo` 返回 HTTP 400 `invalid scope`，OAuth API Key catalog 与 API Key bearer model catalog 均不需要 Profile header；这些结论现由 Account 合同和回归测试持续约束。
 
 ### AgentCore target baseline
 

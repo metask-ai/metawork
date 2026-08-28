@@ -12,13 +12,12 @@
 | UI 信息架构、交互与 capability gate                           | [docs/workbench-ui-design.md](docs/workbench-ui-design.md)           |
 | 技术选型、系统 owner 与安全边界                               | [docs/architecture.md](docs/architecture.md)                         |
 | Product owner、事务、并发、恢复及其与 Agent 的协作            | [docs/product-architecture.md](docs/product-architecture.md)         |
-| Account 内部 owner、状态、事务、提交、并发与恢复               | [docs/account-architecture.md](docs/account-architecture.md)         |
+| Account owner、Metask 合同、状态、事务、持久化、并发与恢复     | [docs/account-architecture.md](docs/account-architecture.md)         |
 | Renderer Bridge command、event、Snapshot 与运输合同           | [docs/renderer-bridge-contract.md](docs/renderer-bridge-contract.md) |
 | active tree、目录 owner 与依赖方向                            | [docs/project-structure.md](docs/project-structure.md)               |
 | AgentCore 线程、事件、所有权和生命周期                        | [docs/agentcore-integration.md](docs/agentcore-integration.md)       |
 | AgentCore bundle、ABI 与 required capability                  | [docs/agentcore-abi-v1.md](docs/agentcore-abi-v1.md)                 |
 | AgentCore 工具目标范围、探针、profile 与 capability Gate      | [docs/tool-integration-plan.md](docs/tool-integration-plan.md)       |
-| Metask OAuth、catalog、ExecutionTarget 与 Account persistence | [docs/metask-account-contract.md](docs/metask-account-contract.md)   |
 | 测试归属、验证状态、证据和持续回归入口                        | [docs/validation.md](docs/validation.md)                             |
 
 `README.md` 只负责项目入口与快速开始，不是规范。
@@ -79,12 +78,11 @@
 - 产品需求变化更新 `docs/requirements.md`。
 - UI 交互规则变化更新 `docs/workbench-ui-design.md`。
 - 顶层技术决策、模块职责、进程或安全边界变化更新 `docs/architecture.md`。
-- Product 跨 owner 事务、并发、恢复或其与 Agent 的产品协作变化更新 `docs/product-architecture.md`；Account 内部 owner、状态、事务、提交、并发或恢复变化更新 `docs/account-architecture.md`；实际目录和依赖变化更新 `docs/project-structure.md`。
+- Product 跨 owner 事务、并发、恢复或其与 Agent 的产品协作变化更新 `docs/product-architecture.md`；Account owner、Metask OAuth/catalog/ExecutionTarget 消费合同、状态、事务、持久化、提交、并发或恢复变化更新 `docs/account-architecture.md`；实际目录和依赖变化更新 `docs/project-structure.md`。
 - Renderer Bridge command、event、Snapshot 或 transport 语义变化更新 `docs/renderer-bridge-contract.md`。
 - AgentCore 线程、所有权、生命周期和 Shell 行为变化更新 `docs/agentcore-integration.md`。
 - AgentCore ABI、bundle、required capability 或兼容门槛变化更新 `docs/agentcore-abi-v1.md`。
 - AgentCore 工具目标范围、名称探针、profile/admission 或工具 capability Gate 变化更新 `docs/tool-integration-plan.md`。
-- Metask Account 外部合同或 persistence revision 策略变化更新 `docs/metask-account-contract.md`。
 - 测试层与归属、验收矩阵、长期证据、持续回归入口和能力缺口变化更新 `docs/validation.md`。
 - 同一事实只在一份规范中定义；其他文档链接或做不产生新语义的摘要。
 

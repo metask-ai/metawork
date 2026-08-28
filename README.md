@@ -88,12 +88,11 @@ probe 使用临时 source-free SDK consumer，不进入正式产品 build graph�
 - [Workbench UI 设计](docs/workbench-ui-design.md)：当前交互规则与 capability-gated 目标行为
 - [高层架构](docs/architecture.md)：技术选型、系统职责与安全边界
 - [Product 内部架构](docs/product-architecture.md)：内部 owner、事务、并发与恢复
-- [Account 内部架构](docs/account-architecture.md)：Account owner、状态、事务、提交与恢复
+- [Account 架构](docs/account-architecture.md)：Account owner、Metask 消费合同、状态、事务、持久化、提交与恢复
 - [Renderer Bridge 合同](docs/renderer-bridge-contract.md)：command、event、Snapshot 与运输语义
 - [工程结构与所有权](docs/project-structure.md)：active tree、owner 与依赖方向
 - [AgentCore 集成契约](docs/agentcore-integration.md)：线程、事件、所有权和生命周期
 - [AgentCore ABI v1 消费合同](docs/agentcore-abi-v1.md)：锁定各 target bundle 的机器合同与能力边界
-- [Metask Account API 合同](docs/metask-account-contract.md)：OAuth、catalog、ExecutionTarget 与持久化
 - [macOS 开发与分发签名](docs/macos-local-development.md)：Apple Development、Developer ID Application、notarization 与正式 DMG
 - [验证规范](docs/validation.md)：证据、持续回归和未验证能力
 - [Agent 工作约束](AGENTS.md)：仓库内执行规则
