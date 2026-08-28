@@ -1859,9 +1859,7 @@ test("Application arbitrates single-instance ownership before business owners", 
     /if \(disposition == \.secondary\) return;/u,
   );
 
-  const stop = app.match(
-    /fn stop\([\s\S]*?fn event\(/u,
-  )?.[0];
+  const stop = app.match(/fn stop\([\s\S]*?fn event\(/u)?.[0];
   assert.ok(stop, "Application stop lifecycle must remain explicit");
   assert.ok(stop.indexOf("coordinator.stopIngress();") >= 0);
   assert.ok(

@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory = $true)]
     [int]$ProcessId,
-    [ValidateSet('drag', 'resize', 'controls', 'close')]
+    [ValidateSet('drag', 'resize', 'controls', 'close', 'minimize', 'activated')]
     [string]$Mode = 'drag'
 )
 
@@ -166,6 +166,31 @@ if ($Mode -eq 'close') {
         throw 'Renderer close control did not hide the Native window'
     }
     Write-Output 'hidden=true processAlive=true windowAlive=true'
+    return
+}
+
+if ($Mode -eq 'minimize') {
+    [MetaWorkChromeProbe]::ShowWindow($window, 6) | Out-Null
+    Start-Sleep -Milliseconds 350
+    if (-not [MetaWorkChromeProbe]::IsIconic($window)) {
+        throw 'Native window did not enter the minimized precondition'
+    }
+    Write-Output 'minimized=true'
+    return
+}
+
+if ($Mode -eq 'activated') {
+    $activationDeadline = (Get-Date).AddSeconds(10)
+    while ((-not [MetaWorkChromeProbe]::IsWindowVisible($window) -or [MetaWorkChromeProbe]::IsIconic($window)) -and (Get-Date) -lt $activationDeadline) {
+        Start-Sleep -Milliseconds 100
+    }
+    if (-not [MetaWorkChromeProbe]::IsWindowVisible($window)) {
+        throw 'Repeated launch did not show the existing Native window'
+    }
+    if ([MetaWorkChromeProbe]::IsIconic($window)) {
+        throw 'Repeated launch did not restore the minimized Native window'
+    }
+    Write-Output 'visible=true restored=true'
     return
 }
 
