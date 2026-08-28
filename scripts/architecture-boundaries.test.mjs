@@ -62,27 +62,45 @@ test("release version has one manifest owner and exact package mirrors", () => {
   assert.equal(lock.packages.frontend.version, appVersion);
 });
 
-test("automation derives a runner namespace without replacing the product identity", () => {
+test("artifact identities preserve development and isolate automation namespaces", () => {
   const identity = read("src/product_identity.zig");
   const app = read("src/app.zig");
+  const paths = read("src/app/paths.zig");
+  const accountCredentials = read(
+    "src/product/account/credential_store.zig",
+  );
+  const mcpPlatform = read("src/app/mcp_platform.zig");
+  const build = read("build.zig");
 
   assert.match(identity, /pub const bundle_id = app_manifest\.id;/);
+  assert.match(identity, /pub const ArtifactKind = enum \{[\s\S]*development,[\s\S]*release,[\s\S]*automation/);
+  assert.match(identity, /artifact_options\.kind/);
   assert.match(
     identity,
     /automation_runner_bundle_id = bundle_id \+\+ "\.automation"/,
   );
-  assert.match(
-    identity,
-    /return if \(automation\) automation_runner_bundle_id else bundle_id;/,
-  );
-  assert.match(
-    app,
-    /\.bundle_id = product_identity\.runnerBundleId\(build_options\.automation\)/,
-  );
+  assert.match(identity, /windows_data_directory_name = "MetaWork"/);
+  assert.match(identity, /macos_data_directory_name = "MetaWork Dev"/);
+  assert.match(identity, /automation_data_directory_name = "MetaWork Automation"/);
+  assert.match(identity, /development_account_credential_service = bundle_id \+\+ "\.account"/);
+  assert.match(identity, /automation_account_credential_service = bundle_id \+\+ "\.automation\.account"/);
+  assert.match(identity, /development_mcp_credential_service = bundle_id \+\+ "\.mcp"/);
+  assert.match(identity, /automation_mcp_credential_service = bundle_id \+\+ "\.automation\.mcp"/);
+  assert.match(identity, /\.release => @compileError\("MetaWork release identity is not configured"\)/);
+  assert.match(app, /\.bundle_id = product_identity\.runnerBundleId\(\)/);
   assert.doesNotMatch(
     app,
     /\.bundle_id = product_identity\.automation_runner_bundle_id/,
   );
+  assert.match(paths, /product_identity\.dataDirectoryName\(os_tag\)/);
+  assert.doesNotMatch(paths, /@import\("build_options"\)/);
+  assert.match(
+    accountCredentials,
+    /product_identity\.accountCredentialService\(\)/,
+  );
+  assert.match(mcpPlatform, /product_identity\.mcpCredentialService\(\)/);
+  assert.match(build, /const ArtifactOption = enum \{[\s\S]*development,[\s\S]*release,[\s\S]*automation/);
+  assert.match(build, /release identity is not configured/);
 });
 
 test("the root test entry discovers Node tests and reaches the Native graph", () => {

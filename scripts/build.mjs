@@ -50,6 +50,7 @@ export async function buildNative(
     "--yes",
     `-Dtarget=${target}`,
     `-Doptimize=${optimize}`,
+    `-Dartifact=${automation ? "automation" : "development"}`,
   ];
   if (automation) args.push("-Dautomation=true");
   await runChild(process.execPath, args, {

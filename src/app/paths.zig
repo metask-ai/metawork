@@ -1,12 +1,9 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const build_options = @import("build_options");
 const native_sdk = @import("native_sdk");
 const product_identity = @import("metawork_product_identity");
 
 const path_capacity = 4096;
-const windows_data_directory_name = "MetaWork";
-const automation_data_directory_name = "MetaWork Automation";
 
 // Paths owns the backing storage for every returned slice. Keep this value at
 // one stable address for its full lifetime and pass it only by pointer.
@@ -121,11 +118,7 @@ pub const Paths = struct {
 };
 
 pub fn dataDirectoryName(os_tag: @TypeOf(builtin.os.tag)) []const u8 {
-    if (build_options.automation) return automation_data_directory_name;
-    return if (os_tag == .macos)
-        product_identity.macos_data_directory_name
-    else
-        windows_data_directory_name;
+    return product_identity.dataDirectoryName(os_tag);
 }
 
 fn resolveCanonicalUserHome(
@@ -169,13 +162,13 @@ test "product and automation data roots are compile-time isolated" {
         "com.metask.metawork.dev",
         product_identity.bundle_id,
     );
-    if (build_options.automation) {
+    if (product_identity.artifact_kind == .automation) {
         try std.testing.expectEqualStrings(
-            automation_data_directory_name,
+            product_identity.automation_data_directory_name,
             dataDirectoryName(.macos),
         );
         try std.testing.expectEqualStrings(
-            automation_data_directory_name,
+            product_identity.automation_data_directory_name,
             dataDirectoryName(.windows),
         );
     } else {
@@ -184,7 +177,7 @@ test "product and automation data roots are compile-time isolated" {
             dataDirectoryName(.macos),
         );
         try std.testing.expectEqualStrings(
-            windows_data_directory_name,
+            product_identity.windows_data_directory_name,
             dataDirectoryName(.windows),
         );
     }

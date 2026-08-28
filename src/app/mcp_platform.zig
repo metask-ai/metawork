@@ -10,7 +10,7 @@ const mcp_configuration = @import("metawork_product_mcp").contract;
 const mcp_oauth = @import("metawork_mcp_oauth");
 const product_identity = @import("metawork_product_identity");
 
-pub const credential_service = product_identity.mcp_credential_service;
+pub const credential_service = product_identity.mcpCredentialService();
 pub const max_credential_secret_bytes = native_sdk.platform.max_credential_secret_bytes;
 const client_name = "MetaWork";
 const client_version = product_identity.version;

@@ -160,7 +160,7 @@ architecture guard 必须保持 `PlatformServices.context` 零 allowlist。原�
 
 ## 平台与 artifact 验收
 
-`-Dautomation=true` artifact 必须把从 `app.zon` identity 派生的 `.automation` identity 传给 Native SDK runner，使 SDK-owned data/window/log namespace 即使脱离 harness 启动也不命中 production；正式 artifact 必须继续精确使用 `app.zon` identity。架构 guard 与 Native test graph共同验证派生关系，真实 automation harness 仍使用隔离的 `HOME`/`APPDATA`/`LOCALAPPDATA`，两层隔离不能互相替代。
+构建必须显式或按受控默认值选择 `development | release | automation` artifact kind。development 精确保留当前 `app.zon` runner identity、Windows `MetaWork`、macOS `MetaWork Dev`、`<base>.account` 与 `<base>.mcp`；`-Dautomation=true` 必须与 `-Dartifact=automation` 同时成立，并派生 `.automation` runner、`MetaWork Automation`、`.automation.account` 与 `.automation.mcp`。release identity 未完整登记前必须在 build/package 阶段 fail closed。architecture guard 与 Native test graph 必须验证已启用 artifact 的 runner/data/Account/MCP namespace 不重合；真实 automation harness 仍使用隔离的 `HOME`/`APPDATA`/`LOCALAPPDATA`，两层隔离不能互相替代。
 
 ### macOS
 

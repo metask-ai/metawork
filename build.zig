@@ -12,8 +12,15 @@ const std = @import("std");
 const native_sdk = @import("native_sdk");
 const agentcore_bundle = @import("build_support/agentcore_bundle.zig");
 
+const ArtifactOption = enum {
+    development,
+    release,
+    automation,
+};
+
 pub fn build(b: *std.Build) void {
     const artifacts = native_sdk.addAppArtifacts(b, b.dependency("native_sdk", .{}), .{ .name = "metawork" });
+    const artifact = selectedArtifact(b);
     artifacts.exe.root_module.addWin32ResourceFile(.{
         .file = b.path("packaging/windows/metawork.rc"),
         .include_paths = &.{b.path("assets/icons")},
@@ -28,9 +35,9 @@ pub fn build(b: *std.Build) void {
     const target_id = agentCoreTargetId(app_target);
     const root = b.pathFromRoot(b.pathJoin(&.{ ".agentcore/bundles", target_id }));
     const bundle = agentcore_bundle.verify(b, root);
-    const modules = wireAgentCore(b, artifacts.exe.root_module, bundle);
+    const modules = wireAgentCore(b, artifacts.exe.root_module, bundle, artifact);
     const test_modules = if (artifacts.tests.root_module != artifacts.exe.root_module)
-        wireAgentCore(b, artifacts.tests.root_module, bundle)
+        wireAgentCore(b, artifacts.tests.root_module, bundle, artifact)
     else
         modules;
     if (test_modules.app.resolved_target.?.result.os.tag == .macos) {
@@ -613,7 +620,12 @@ fn addMcpInteropTests(
     return &run.step;
 }
 
-fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcore_bundle.Bundle) WiredModules {
+fn wireAgentCore(
+    b: *std.Build,
+    root_module: *std.Build.Module,
+    bundle: agentcore_bundle.Bundle,
+    artifact: ArtifactOption,
+) WiredModules {
     var query = (root_module.resolved_target orelse @panic("Native SDK app target is unresolved")).query;
     if (bundle.deployment_target) |deployment_target|
         query.os_version_min = .{ .semver = deployment_target };
@@ -621,6 +633,8 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     root_module.resolved_target = target;
 
     const runner = existingImport(root_module, "runner");
+    const artifact_options = b.addOptions();
+    artifact_options.addOption([]const u8, "kind", @tagName(artifact));
     const product_identity = b.createModule(.{
         .root_source_file = b.path("src/product_identity.zig"),
         .target = target,
@@ -648,6 +662,7 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         "app_manifest_zon",
         existingImport(runner, "app_manifest_zon"),
     );
+    product_identity.addOptions("metawork_artifact_options", artifact_options);
     const dependency_options = .{
         .target = target,
         .optimize = root_module.optimize,
@@ -859,10 +874,6 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
     account_credential_store.addImport("metawork_account_contract", account_contract);
     account_credential_store.addImport("account_oauth", account_oauth);
     account_credential_store.addImport("metawork_product_identity", product_identity);
-    account_credential_store.addImport(
-        "build_options",
-        existingImport(runner, "build_options"),
-    );
     const account_ports = b.createModule(.{
         .root_source_file = b.path("src/product/account/ports.zig"),
         .target = target,
@@ -1455,6 +1466,32 @@ fn wireAgentCore(b: *std.Build, root_module: *std.Build.Module, bundle: agentcor
         .product_task_execution = task_execution,
         .product_task_view = task_view,
     };
+}
+
+fn parsedBooleanOption(b: *std.Build, name: []const u8) bool {
+    const option = b.user_input_options.get(name) orelse return false;
+    return switch (option.value) {
+        .flag => true,
+        .scalar => |value| std.mem.eql(u8, value, "true"),
+        else => false,
+    };
+}
+
+fn selectedArtifact(b: *std.Build) ArtifactOption {
+    // Native SDK already declares and validates -Dautomation before the app
+    // extends its graph. Read the parsed input instead of declaring the same
+    // public build option a second time.
+    const native_automation = parsedBooleanOption(b, "automation");
+    const artifact: ArtifactOption = b.option(
+        ArtifactOption,
+        "artifact",
+        "MetaWork artifact identity: development, release, automation",
+    ) orelse if (native_automation) .automation else .development;
+    if ((artifact == .automation) != native_automation)
+        @panic("-Dartifact=automation and -Dautomation=true must be selected together");
+    if (artifact == .release)
+        @panic("MetaWork release identity is not configured; register the release Bundle ID, data directory, and credential services before enabling -Dartifact=release");
+    return artifact;
 }
 
 fn existingImport(module: *std.Build.Module, name: []const u8) *std.Build.Module {

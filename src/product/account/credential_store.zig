@@ -1,14 +1,10 @@
 //! Product Account credential and preference persistence policy.
 const std = @import("std");
-const build_options = @import("build_options");
 const contract = @import("metawork_account_contract");
 const oauth = @import("account_oauth");
 const product_identity = @import("metawork_product_identity");
 
-pub const service = if (build_options.automation)
-    product_identity.bundle_id ++ ".automation.account"
-else
-    product_identity.bundle_id ++ ".account";
+pub const service = product_identity.accountCredentialService();
 pub const refresh_token_account = "metask-refresh-token";
 pub const preference_name = "preferences.json";
 pub const preference_bytes = 8 * 1024;
@@ -374,11 +370,11 @@ test "optional preference deletion cannot block logout" {
 }
 
 test "automation credential namespace is compile-time isolated" {
-    if (build_options.automation) {
+    if (product_identity.artifact_kind == .automation) {
         try std.testing.expect(std.mem.endsWith(u8, service, ".automation.account"));
     } else {
         try std.testing.expectEqualStrings(
-            product_identity.bundle_id ++ ".account",
+            product_identity.development_account_credential_service,
             service,
         );
     }

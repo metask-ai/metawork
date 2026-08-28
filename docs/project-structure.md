@@ -54,9 +54,10 @@ metawork/
 │   │   ├── oauth_loopback_transport.zig # OAuth loopback listener/socket/HTTP pump
 │   │   ├── paths.zig                 # data directory 与 canonical home resolver
 │   │   ├── platform.zig              # DispatcherPlatform vtable 与 Native SDK 引用
+│   │   ├── single_instance.zig       # 有界 activation 协议、identity 校验与合并队列
 │   │   ├── stores.zig                # Application-created stores 与 restored bytes 生命周期
 │   │   └── window.zig                # window/tray/dialog/notification 与 compat capability
-│   ├── product_identity.zig # 从 app.zon 派生 development identity 与 macOS namespace
+│   ├── product_identity.zig # artifact identity、data root 与 credential namespace 真源
 │   ├── native_sdk_compat/ # 按已登记 capability 隔离的 Application 兼容实现
 │   │   ├── secure_input.zig # 有界安全文本输入 contract、线程与清零纪律
 │   │   ├── secure_input/
@@ -199,7 +200,7 @@ Storage 当前只接入正式 Native test graph 和定向 `zig build test-storag
 - `state.zig` 拥有封闭 `Transaction` sum type、attempt/generation、bounded pending facts 与 prepare/commit decision；每个 prepared change 显式给出 catalog/execution/replacement intent，不保存可独立漂移的 operation/attempt 组合状态；
 - `oauth.zig` 与 `loopback.zig` 拥有 OAuth material、callback/state/code/error/issuer 校验、无效请求预算和 response policy；`login_attempt.zig`、`network_attempt.zig` 拥有 Account worker、token/identity 链路与取消编排，只经注入的 endpoint/sink 使用 Application loopback transport；
 - `metask_client.zig` 与 `catalog.zig` 消费锁定的 Metask production contract；`metask_client.zig` 只发布协议、状态分类与 transport port，不持有 concrete HTTP client；
-- `app.zon` 单一拥有 development 产品 Bundle ID；`product_identity.zig` 派生该值、macOS 数据目录和仅供 `-Dautomation=true` artifact 使用的 `.automation` Native SDK runner identity。正式 artifact 始终把 manifest identity 传给 runner；automation identity 只隔离 Native SDK 的 data/window/log namespace，不改写产品 identity、签名或 credential 合同；
+- `app.zon` 单一拥有现有 development Bundle ID；`product_identity.zig` 由显式 `development | release | automation` artifact kind 统一派生 runner identity、数据目录以及 Account/MCP credential service。development 精确保留现有 Windows `MetaWork`、macOS `MetaWork Dev`、`<base>.account` 与 `<base>.mcp` namespace；automation 使用 `.automation` runner、`MetaWork Automation`、`.automation.account` 与 `.automation.mcp`，不得读取 development secret。release 尚未登记独立 Bundle ID、数据目录和 credential service，选择该 artifact 必须在 build/package 阶段 fail closed；
 - `credential_store.zig` 独立拥有跨平台 Account persistence 合同、preference codec 与事务：secure store 中唯一的 refresh token，以及原子、无 secret 的 `preferences.json`；production 与 automation service 在编译期隔离；
 - `ports.zig` 定义 Account 对内需要的五族 effect surface：refresh-token credential、preference load/commit/delete、authorization URL、timer 与 Model Connection credential vault；它复用 `credential_store.Backend` 表达前两族，不为每个函数制造独立抽象，也不导入 Native SDK 或 Application；
 - `credentials.zig` 管理 execution credential ownership/rotation。
