@@ -15,6 +15,7 @@ import {
   type CatalogRefreshResult,
   type CompactView,
   type RunInputView,
+  type RunActivity,
   type RunView,
   type ScheduledTaskView,
   type SkillCatalogView,
@@ -93,6 +94,17 @@ const runOutcomes = [
   "interrupted",
   "failed",
   "dependency_contract_failure",
+] as const;
+const simpleRunActivities = [
+  "queued",
+  "starting",
+  "waiting_model",
+  "thinking",
+  "writing_response",
+  "waiting_user",
+  "compacting_context",
+  "finalizing",
+  "stopping",
 ] as const;
 const uiRecordKinds = ["permission"] as const;
 const uiRecordStates = [
@@ -1211,9 +1223,8 @@ function decodeRun(value: unknown, path: string): RunView {
     "id",
     "phase",
     "input",
-    "assistant",
-    "assistantRedacted",
-    "status",
+    "output",
+    "activity",
     "outcome",
     "cause",
     "usage",
@@ -1228,16 +1239,59 @@ function decodeRun(value: unknown, path: string): RunView {
   const phase = enumValue(item.phase, `${path}.phase`, runPhases);
   const outcome = nullableEnum(item.outcome, `${path}.outcome`, runOutcomes);
   validateRunTerminalState(phase, outcome, path);
+  const outputItem = object(item.output, `${path}.output`, [
+    "commentary",
+    "response",
+    "responseKind",
+    "provisional",
+    "redacted",
+    "provisionalRedacted",
+  ]);
+  const output = {
+    commentary: stringValue(outputItem.commentary, `${path}.output.commentary`),
+    response: stringValue(outputItem.response, `${path}.output.response`),
+    responseKind: nullableEnum(
+      outputItem.responseKind,
+      `${path}.output.responseKind`,
+      ["final", "partial"] as const,
+    ),
+    provisional: stringValue(
+      outputItem.provisional,
+      `${path}.output.provisional`,
+    ),
+    redacted: booleanValue(outputItem.redacted, `${path}.output.redacted`),
+    provisionalRedacted: booleanValue(
+      outputItem.provisionalRedacted,
+      `${path}.output.provisionalRedacted`,
+    ),
+  };
+  const activity = decodeRunActivity(item.activity, `${path}.activity`);
+  const terminal = !nonTerminalRunPhases.includes(phase as never);
+  if (terminal !== (activity === null))
+    fail(path, "Run phase and activity must describe the same terminal state");
+  if (phase === "queued" && activity?.kind !== "queued")
+    fail(path, "queued Run must expose queued activity");
+  if (phase === "waiting_ui" && activity?.kind !== "waiting_user")
+    fail(path, "waiting Run must expose waiting_user activity");
+  if (phase === "stopping" && activity?.kind !== "stopping")
+    fail(path, "stopping Run must expose stopping activity");
+  if (
+    phase === "running" &&
+    (activity?.kind === "queued" || activity?.kind === "stopping")
+  )
+    fail(path, "running Run cannot expose a phase-owned activity");
+  if (output.responseKind === null && output.response !== "")
+    fail(path, "unclassified output cannot publish a response");
+  if (output.responseKind !== null && output.provisional !== "")
+    fail(path, "classified response cannot retain provisional output");
+  if (terminal && output.provisional !== "")
+    fail(path, "terminal Run cannot retain provisional output");
   return {
     id: positiveWireId(item.id, `${path}.id`),
     phase,
     input: decodeRunInput(item.input, `${path}.input`),
-    assistant: stringValue(item.assistant, `${path}.assistant`),
-    assistantRedacted: booleanValue(
-      item.assistantRedacted,
-      `${path}.assistantRedacted`,
-    ),
-    status: stringValue(item.status, `${path}.status`),
+    output,
+    activity,
     outcome,
     cause: nullableEnum(item.cause, `${path}.cause`, runCauses),
     usage: {
@@ -1248,6 +1302,148 @@ function decodeRun(value: unknown, path: string): RunView {
     },
     tools: arrayValue(item.tools, `${path}.tools`, decodeTool),
   };
+}
+
+function decodeRunActivity(value: unknown, path: string): RunActivity | null {
+  if (value === null) return null;
+  const kind = stringValue(record(value, path).kind, `${path}.kind`);
+  if ((simpleRunActivities as readonly string[]).includes(kind)) {
+    const item = object(value, path, ["kind"]);
+    return {
+      kind: enumValue(item.kind, `${path}.kind`, simpleRunActivities),
+    };
+  }
+  if (kind === "executing_tools") {
+    const item = object(value, path, ["kind", "inFlight"]);
+    return {
+      kind,
+      inFlight:
+        item.inFlight === null
+          ? null
+          : positiveWireId(item.inFlight, `${path}.inFlight`),
+    };
+  }
+  if (kind === "retrying_provider") {
+    const item = object(value, path, ["kind", "attempt", "max", "delayMs"]);
+    const attempt =
+      item.attempt === null
+        ? null
+        : positiveWireId(item.attempt, `${path}.attempt`);
+    const max =
+      item.max === null ? null : positiveWireId(item.max, `${path}.max`);
+    const delayMs =
+      item.delayMs === null ? null : wireId(item.delayMs, `${path}.delayMs`);
+    if (
+      (attempt === null || max === null || delayMs === null) &&
+      (attempt !== null || max !== null || delayMs !== null)
+    )
+      fail(path, "retry details must be either complete or absent");
+    if (attempt !== null && max !== null && BigInt(attempt) > BigInt(max))
+      fail(path, "retry attempt cannot exceed max");
+    return { kind, attempt, max, delayMs };
+  }
+  return fail(`${path}.kind`, `unexpected Run activity ${kind}`);
+}
+
+function decodeConversationContext(value: unknown, path: string) {
+  const item = object(value, path, ["pressure", "lastAutoCompact"]);
+  const pressure =
+    item.pressure === null
+      ? null
+      : (() => {
+          const pressureItem = object(item.pressure, `${path}.pressure`, [
+            "sourceRunId",
+            "currentTokens",
+            "warningThreshold",
+            "autoCompactThreshold",
+            "blockingLimit",
+            "severity",
+          ]);
+          const result = {
+            sourceRunId: positiveWireId(
+              pressureItem.sourceRunId,
+              `${path}.pressure.sourceRunId`,
+            ),
+            currentTokens: wireId(
+              pressureItem.currentTokens,
+              `${path}.pressure.currentTokens`,
+            ),
+            warningThreshold: positiveWireId(
+              pressureItem.warningThreshold,
+              `${path}.pressure.warningThreshold`,
+            ),
+            autoCompactThreshold: positiveWireId(
+              pressureItem.autoCompactThreshold,
+              `${path}.pressure.autoCompactThreshold`,
+            ),
+            blockingLimit: positiveWireId(
+              pressureItem.blockingLimit,
+              `${path}.pressure.blockingLimit`,
+            ),
+            severity: enumValue(
+              pressureItem.severity,
+              `${path}.pressure.severity`,
+              ["warning", "critical"] as const,
+            ),
+          };
+          const current = BigInt(result.currentTokens);
+          const warning = BigInt(result.warningThreshold);
+          const compact = BigInt(result.autoCompactThreshold);
+          const blocking = BigInt(result.blockingLimit);
+          if (!(
+            warning <= compact &&
+            compact <= blocking &&
+            current >= warning
+          ))
+            fail(`${path}.pressure`, "context thresholds are inconsistent");
+          if (current >= compact !== (result.severity === "critical"))
+            fail(
+              `${path}.pressure`,
+              "context severity disagrees with pressure",
+            );
+          return result;
+        })();
+  const lastAutoCompact =
+    item.lastAutoCompact === null
+      ? null
+      : (() => {
+          const compactItem = object(
+            item.lastAutoCompact,
+            `${path}.lastAutoCompact`,
+            ["sourceRunId", "dropped", "kept", "beforeTokens", "afterTokens"],
+          );
+          const result = {
+            sourceRunId: positiveWireId(
+              compactItem.sourceRunId,
+              `${path}.lastAutoCompact.sourceRunId`,
+            ),
+            dropped: wireId(
+              compactItem.dropped,
+              `${path}.lastAutoCompact.dropped`,
+            ),
+            kept: wireId(compactItem.kept, `${path}.lastAutoCompact.kept`),
+            beforeTokens: wireId(
+              compactItem.beforeTokens,
+              `${path}.lastAutoCompact.beforeTokens`,
+            ),
+            afterTokens: wireId(
+              compactItem.afterTokens,
+              `${path}.lastAutoCompact.afterTokens`,
+            ),
+          };
+          const before = BigInt(result.beforeTokens);
+          const after = BigInt(result.afterTokens);
+          if (!(
+            (before === 0n && after === 0n) ||
+            (before > 0n && after <= before)
+          ))
+            fail(
+              `${path}.lastAutoCompact`,
+              "compact token counts are inconsistent",
+            );
+          return result;
+        })();
+  return { pressure, lastAutoCompact };
 }
 
 function decodeCompact(value: unknown, path: string): CompactView {
@@ -1478,6 +1674,7 @@ function decodeTask(value: unknown, path: string): TaskView {
     "currentRunPhase",
     "lastRunOutcome",
     "cause",
+    "context",
     "runs",
     "compacts",
     "pendingUi",
@@ -1522,6 +1719,7 @@ function decodeTask(value: unknown, path: string): TaskView {
     unavailableReason,
   };
   const runs = arrayValue(item.runs, `${path}.runs`, decodeRun);
+  const context = decodeConversationContext(item.context, `${path}.context`);
   const compacts = arrayValue(item.compacts, `${path}.compacts`, decodeCompact);
   const lifecycle = enumValue(
     item.lifecycle,
@@ -1639,6 +1837,17 @@ function decodeTask(value: unknown, path: string): TaskView {
     decodeUiRecord,
   );
   const runIds = new Set(runs.map((run) => run.id));
+  if (
+    (context.pressure !== null && !runIds.has(context.pressure.sourceRunId)) ||
+    (context.lastAutoCompact !== null &&
+      !runIds.has(context.lastAutoCompact.sourceRunId))
+  )
+    fail(path, "Conversation context must reference projected Run history");
+  if (
+    binding.availability !== "available" &&
+    (context.pressure !== null || context.lastAutoCompact !== null)
+  )
+    fail(path, "detached Task cannot expose Conversation context observations");
   const compactIds = new Set(compacts.map((compact) => compact.operationId));
   if (compactIds.size !== compacts.length)
     fail(path, "Compact operation identities must be unique");
@@ -1759,6 +1968,7 @@ function decodeTask(value: unknown, path: string): TaskView {
       runOutcomes,
     ),
     cause: nullableEnum(item.cause, `${path}.cause`, runCauses),
+    context,
     runs,
     compacts,
     pendingUi,

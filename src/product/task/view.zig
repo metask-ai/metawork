@@ -21,6 +21,19 @@ pub const TextProjection = struct {
     context: *const anyopaque,
     contains_sensitive_fn: *const fn (*const anyopaque, []const u8) bool,
     write_json_fn: *const fn (*const anyopaque, *std.Io.Writer, []const u8) Error!void,
+    write_json_partition_fn: *const fn (
+        *const anyopaque,
+        *std.Io.Writer,
+        []const u8,
+        usize,
+        []const u8,
+    ) Error!bool,
+    write_json_parts_fn: *const fn (
+        *const anyopaque,
+        *std.Io.Writer,
+        []const u8,
+        []const u8,
+    ) Error!bool,
 
     fn containsSensitive(self: TextProjection, value: []const u8) bool {
         return self.contains_sensitive_fn(self.context, value);
@@ -32,6 +45,31 @@ pub const TextProjection = struct {
         value: []const u8,
     ) Error!void {
         return self.write_json_fn(self.context, writer, value);
+    }
+
+    fn writeJsonParts(
+        self: TextProjection,
+        writer: *std.Io.Writer,
+        first: []const u8,
+        second: []const u8,
+    ) Error!bool {
+        return self.write_json_parts_fn(self.context, writer, first, second);
+    }
+
+    fn writeJsonPartition(
+        self: TextProjection,
+        writer: *std.Io.Writer,
+        value: []const u8,
+        split: usize,
+        separator: []const u8,
+    ) Error!bool {
+        return self.write_json_partition_fn(
+            self.context,
+            writer,
+            value,
+            split,
+            separator,
+        );
     }
 };
 
@@ -160,6 +198,8 @@ pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
         else
             writer.writeAll("null") catch return error.SnapshotTooLarge;
     } else writer.writeAll("null") catch return error.SnapshotTooLarge;
+    writer.writeAll(",\"context\":") catch return error.SnapshotTooLarge;
+    try writeConversationContext(writer, task.conversation_observation);
     writer.writeAll(",\"runs\":[") catch return error.SnapshotTooLarge;
     var run_count: usize = 0;
     for (task.durable.runs) |*entry| {
@@ -259,14 +299,9 @@ fn writeRun(
                 return error.SnapshotTooLarge;
         },
     }
-    writer.writeAll(",\"assistant\":") catch return error.SnapshotTooLarge;
-    try text_projection.writeJson(
-        writer,
-        run.assistant.list.items[0..run.assistant.committed_len],
-    );
-    writer.print(",\"assistantRedacted\":{},\"status\":", .{run.assistant_redacted}) catch
-        return error.SnapshotTooLarge;
-    jsonValue(writer, legacyActivityLabel(run)) catch return error.SnapshotTooLarge;
+    try writeRunOutput(writer, text_projection, run);
+    writer.writeAll(",\"activity\":") catch return error.SnapshotTooLarge;
+    try writeRunActivity(writer, task_state.currentActivity(run));
     writer.writeAll(",\"outcome\":") catch return error.SnapshotTooLarge;
     if (terminal) |value|
         jsonValue(writer, @tagName(value.outcome)) catch return error.SnapshotTooLarge
@@ -330,31 +365,108 @@ fn writeRun(
     writer.writeAll("]}") catch return error.SnapshotTooLarge;
 }
 
-/// The mutable Product status string has been removed. Until the revision-1
-/// snapshot is hard-cut to the typed activity union, keep the existing wire
-/// field as a pure projection so this internal Product-state change remains a
-/// buildable commit rather than a second source of runtime truth.
-fn legacyActivityLabel(run: *const task_state.RunRecord) []const u8 {
-    const activity = task_state.currentActivity(run) orelse return switch (task_state.runPhase(run)) {
-        .completed => "Completed",
-        .stopped, .cancelled => "Stopped",
-        .interrupted => "Interrupted",
-        .failed => "Failed",
-        .queued, .running, .waiting_ui, .stopping => unreachable,
+fn writeRunOutput(
+    writer: *std.Io.Writer,
+    text: TextProjection,
+    run: *const task_state.RunRecord,
+) Error!void {
+    const committed = run.assistant.list.items[0..run.assistant.committed_len];
+    const response_start = run.assistant_output_start orelse committed.len;
+    std.debug.assert(response_start <= committed.len);
+    std.debug.assert((run.assistant_output_kind == null) ==
+        (run.assistant_output_start == null));
+    writer.writeAll(",\"output\":{\"commentary\":") catch
+        return error.SnapshotTooLarge;
+    const output_redacted = try text.writeJsonPartition(
+        writer,
+        committed,
+        response_start,
+        ",\"response\":",
+    );
+    writer.writeAll(",\"responseKind\":") catch return error.SnapshotTooLarge;
+    if (run.assistant_output_kind) |kind|
+        jsonValue(writer, @tagName(kind)) catch return error.SnapshotTooLarge
+    else
+        writer.writeAll("null") catch return error.SnapshotTooLarge;
+    writer.writeAll(",\"provisional\":") catch return error.SnapshotTooLarge;
+    const provisional_redacted = try text.writeJsonParts(
+        writer,
+        run.output_continued.list.items[0..run.output_continued.committed_len],
+        run.output_segment.list.items[0..run.output_segment.committed_len],
+    );
+    writer.print(",\"redacted\":{},\"provisionalRedacted\":{}}}", .{
+        run.assistant_redacted or output_redacted,
+        run.output_continued_redacted or run.output_segment_redacted or
+            provisional_redacted,
+    }) catch return error.SnapshotTooLarge;
+}
+
+fn writeRunActivity(
+    writer: *std.Io.Writer,
+    activity: ?task_state.RunActivity,
+) Error!void {
+    const value = activity orelse {
+        writer.writeAll("null") catch return error.SnapshotTooLarge;
+        return;
     };
-    return switch (activity) {
-        .queued => "Queued",
-        .starting => "Starting",
-        .waiting_model => "Waiting for model",
-        .thinking => "Thinking",
-        .writing_response => "Writing response",
-        .executing_tools => "Executing tools",
-        .retrying_provider => "Retrying provider",
-        .waiting_user => "Waiting for your input",
-        .compacting_context => "Compacting context",
-        .finalizing => "Finishing",
-        .stopping => "Stopping",
-    };
+    switch (value) {
+        .executing_tools => |tools| {
+            writer.writeAll("{\"kind\":\"executing_tools\",\"inFlight\":") catch
+                return error.SnapshotTooLarge;
+            if (tools.in_flight) |count|
+                writer.print("\"{d}\"", .{count}) catch return error.SnapshotTooLarge
+            else
+                writer.writeAll("null") catch return error.SnapshotTooLarge;
+            writer.writeByte('}') catch return error.SnapshotTooLarge;
+        },
+        .retrying_provider => |retry| {
+            writer.writeAll("{\"kind\":\"retrying_provider\",\"attempt\":") catch
+                return error.SnapshotTooLarge;
+            try writeOptionalInteger(writer, retry.attempt);
+            writer.writeAll(",\"max\":") catch return error.SnapshotTooLarge;
+            try writeOptionalInteger(writer, retry.max);
+            writer.writeAll(",\"delayMs\":") catch return error.SnapshotTooLarge;
+            try writeOptionalInteger(writer, retry.delay_ms);
+            writer.writeByte('}') catch return error.SnapshotTooLarge;
+        },
+        else => writer.print("{{\"kind\":\"{s}\"}}", .{@tagName(value)}) catch
+            return error.SnapshotTooLarge,
+    }
+}
+
+fn writeConversationContext(
+    writer: *std.Io.Writer,
+    observation: task_state.ConversationObservation,
+) Error!void {
+    writer.writeAll("{\"pressure\":") catch return error.SnapshotTooLarge;
+    if (observation.pressure) |pressure| {
+        writer.print("{{\"sourceRunId\":\"{d}\",\"currentTokens\":\"{d}\",\"warningThreshold\":\"{d}\",\"autoCompactThreshold\":\"{d}\",\"blockingLimit\":\"{d}\",\"severity\":\"{s}\"}}", .{
+            pressure.source_run_id,
+            pressure.current_tokens,
+            pressure.warning_threshold,
+            pressure.auto_compact_threshold,
+            pressure.blocking_limit,
+            @tagName(pressure.severity),
+        }) catch return error.SnapshotTooLarge;
+    } else writer.writeAll("null") catch return error.SnapshotTooLarge;
+    writer.writeAll(",\"lastAutoCompact\":") catch return error.SnapshotTooLarge;
+    if (observation.last_auto_compact) |compact| {
+        writer.print("{{\"sourceRunId\":\"{d}\",\"dropped\":\"{d}\",\"kept\":\"{d}\",\"beforeTokens\":\"{d}\",\"afterTokens\":\"{d}\"}}", .{
+            compact.source_run_id,
+            compact.dropped,
+            compact.kept,
+            compact.before_tokens,
+            compact.after_tokens,
+        }) catch return error.SnapshotTooLarge;
+    } else writer.writeAll("null") catch return error.SnapshotTooLarge;
+    writer.writeByte('}') catch return error.SnapshotTooLarge;
+}
+
+fn writeOptionalInteger(writer: *std.Io.Writer, value: anytype) Error!void {
+    if (value) |number|
+        writer.print("\"{d}\"", .{number}) catch return error.SnapshotTooLarge
+    else
+        writer.writeAll("null") catch return error.SnapshotTooLarge;
 }
 
 fn writeCompact(

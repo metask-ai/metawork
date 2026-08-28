@@ -45,9 +45,15 @@ function run(overrides = {}) {
       text: "Inspect the release",
       redacted: false,
     },
-    assistant: "Release is ready",
-    assistantRedacted: false,
-    status: "Completed",
+    output: {
+      commentary: "",
+      response: "Release is ready",
+      responseKind: "final",
+      provisional: "",
+      redacted: false,
+      provisionalRedacted: false,
+    },
+    activity: null,
     outcome: "completed",
     cause: null,
     usage: { input: "12", output: "5", cacheRead: "0", cacheCreation: "0" },
@@ -71,6 +77,7 @@ function task(overrides = {}) {
     currentRunPhase: null,
     lastRunOutcome: null,
     cause: null,
+    context: { pressure: null, lastAutoCompact: null },
     runs: [],
     pendingUi: null,
     uiHistory: [],
@@ -224,7 +231,6 @@ test("Inspector shows latest canonical run facts without copying raw output", ()
         }),
         run({
           id: "9",
-          status: "INTERNAL_PROVIDER_RETRY",
           tools: [
             {
               id: "tool-1",
@@ -259,12 +265,19 @@ test("Inspector shows latest canonical run facts without copying raw output", ()
   assert.doesNotMatch(markup, />Plan<|>Outputs<|>Files changed</);
 });
 
-test("thinking and response activity use safe localized status labels", () => {
+test("typed Run activity uses safe localized labels", () => {
   const thinkingRun = run({
     phase: "running",
-    status: "Thinking",
+    activity: { kind: "thinking" },
     outcome: null,
-    assistant: "",
+    output: {
+      commentary: "",
+      response: "",
+      responseKind: null,
+      provisional: "",
+      redacted: false,
+      provisionalRedacted: false,
+    },
   });
   const thinkingTask = task({
     currentRunId: "9",
@@ -282,26 +295,27 @@ test("thinking and response activity use safe localized status labels", () => {
     runs: [
       run({
         phase: "running",
-        status: "Writing response",
+        activity: { kind: "writing_response" },
         outcome: null,
       }),
     ],
   });
   assert.match(renderTaskContent(writingTask, "zh-CN"), />正在撰写回复</);
 
-  for (const [status, expected] of [
-    ["Queued", "正在启动"],
-    ["Starting", "正在启动"],
-    ["Generating response", "正在生成回复"],
-    ["Executing tools", "正在执行工具"],
-    ["Retrying provider", "正在重试模型请求"],
-    ["Compacting context", "正在压缩上下文"],
-    ["Finishing", "正在整理结果"],
+  for (const [activity, expected] of [
+    [{ kind: "starting" }, "正在启动"],
+    [{ kind: "executing_tools", inFlight: "2" }, "正在执行工具"],
+    [
+      { kind: "retrying_provider", attempt: "1", max: "2", delayMs: "50" },
+      "正在重试模型请求",
+    ],
+    [{ kind: "compacting_context" }, "正在压缩上下文"],
+    [{ kind: "finalizing" }, "正在整理结果"],
   ]) {
     const activityTask = task({
       currentRunId: "9",
       currentRunPhase: "running",
-      runs: [run({ phase: "running", status, outcome: null })],
+      runs: [run({ phase: "running", activity, outcome: null })],
     });
     assert.match(
       renderTaskContent(activityTask, "zh-CN"),
@@ -319,7 +333,7 @@ test("thinking and response activity use safe localized status labels", () => {
     runs: [
       run({
         phase: "running",
-        status: "private-provider-status",
+        activity: { kind: "waiting_model" },
         outcome: null,
       }),
     ],
@@ -333,7 +347,7 @@ test("thinking and response activity use safe localized status labels", () => {
     runs: [
       run({
         phase: "stopping",
-        status: "Thinking",
+        activity: { kind: "stopping" },
         outcome: null,
       }),
     ],
@@ -341,19 +355,6 @@ test("thinking and response activity use safe localized status labels", () => {
   const stoppingContent = renderTaskContent(stoppingTask, "zh-CN");
   assert.match(stoppingContent, />正在停止</);
   assert.doesNotMatch(stoppingContent, />正在思考</);
-
-  const unsafeStatus = task({
-    currentRunId: "9",
-    currentRunPhase: "running",
-    runs: [
-      run({
-        phase: "running",
-        status: "private-provider-status",
-        outcome: null,
-      }),
-    ],
-  });
-  assert.doesNotMatch(renderInspector(unsafeStatus), /private-provider-status/);
 });
 
 test("Run file references render as preview entry without change semantics", () => {
@@ -362,7 +363,14 @@ test("Run file references render as preview entry without change semantics", () 
     currentRunPhase: null,
     runs: [
       run({
-        assistant: "Done",
+        output: {
+          commentary: "",
+          response: "Done",
+          responseKind: "final",
+          provisional: "",
+          redacted: false,
+          provisionalRedacted: false,
+        },
         tools: [
           {
             id: "tool-1",

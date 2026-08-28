@@ -261,13 +261,39 @@ export const runCauses = [
 
 export type RunCause = (typeof runCauses)[number];
 
+export type RunOutput = {
+  commentary: string;
+  response: string;
+  responseKind: "final" | "partial" | null;
+  provisional: string;
+  redacted: boolean;
+  provisionalRedacted: boolean;
+};
+
+export type RunActivity =
+  | { kind: "queued" }
+  | { kind: "starting" }
+  | { kind: "waiting_model" }
+  | { kind: "thinking" }
+  | { kind: "writing_response" }
+  | { kind: "executing_tools"; inFlight: string | null }
+  | {
+      kind: "retrying_provider";
+      attempt: string | null;
+      max: string | null;
+      delayMs: string | null;
+    }
+  | { kind: "waiting_user" }
+  | { kind: "compacting_context" }
+  | { kind: "finalizing" }
+  | { kind: "stopping" };
+
 export type RunView = {
   id: string;
   phase: RunPhase;
   input: RunInputView;
-  assistant: string;
-  assistantRedacted: boolean;
-  status: string;
+  output: RunOutput;
+  activity: RunActivity | null;
   outcome:
     | "completed"
     | "stopped"
@@ -284,6 +310,24 @@ export type RunView = {
     cacheCreation: string;
   };
   tools: ToolView[];
+};
+
+export type ConversationContext = {
+  pressure: {
+    sourceRunId: string;
+    currentTokens: string;
+    warningThreshold: string;
+    autoCompactThreshold: string;
+    blockingLimit: string;
+    severity: "warning" | "critical";
+  } | null;
+  lastAutoCompact: {
+    sourceRunId: string;
+    dropped: string;
+    kept: string;
+    beforeTokens: string;
+    afterTokens: string;
+  } | null;
 };
 
 export type CompactPhase =
@@ -427,6 +471,7 @@ export type TaskView = {
   currentRunPhase: NonTerminalRunPhase | null;
   lastRunOutcome: RunView["outcome"];
   cause: RunView["cause"];
+  context: ConversationContext;
   runs: RunView[];
   compacts: CompactView[];
   pendingUi: PendingUi | null;

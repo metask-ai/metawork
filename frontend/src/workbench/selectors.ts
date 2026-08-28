@@ -213,6 +213,7 @@ export function searchWorkbench(
       });
     for (const run of task.runs) {
       const input = runInputDisplay(run.input);
+      const output = run.output.commentary + run.output.response;
       if (matches(input))
         results.push({
           key: `instruction:${task.id}:${run.id}`,
@@ -221,17 +222,13 @@ export function searchWorkbench(
           title,
           detail: input,
         });
-      if (
-        run.outcome === "completed" &&
-        run.assistant &&
-        matches(run.assistant)
-      )
+      if (run.outcome === "completed" && output && matches(output))
         results.push({
           key: `completion:${task.id}:${run.id}`,
           kind: "completion",
           taskId: task.id,
           title,
-          detail: run.assistant,
+          detail: output,
         });
     }
   }

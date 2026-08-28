@@ -4273,11 +4273,89 @@ pub const Runtime = struct {
             return error.SnapshotTooLarge;
     }
 
+    fn writeTaskViewJsonParts(
+        context: *const anyopaque,
+        writer: *std.Io.Writer,
+        first: []const u8,
+        second: []const u8,
+    ) product_task.ProjectionError!bool {
+        const self: *const Runtime = @ptrCast(@alignCast(context));
+        const total = std.math.add(usize, first.len, second.len) catch
+            return error.SnapshotTooLarge;
+        const joined = self.allocator.alloc(u8, total) catch
+            return error.OutOfMemory;
+        defer {
+            std.crypto.secureZero(u8, joined);
+            self.allocator.free(joined);
+        }
+        @memcpy(joined[0..first.len], first);
+        @memcpy(joined[first.len..], second);
+        const redacted = self.containsKnownCredential(joined);
+        self.projectedJsonValueWithKnownCredentials(writer, joined) catch
+            return error.SnapshotTooLarge;
+        return redacted;
+    }
+
+    fn writeTaskViewJsonPartition(
+        context: *const anyopaque,
+        writer: *std.Io.Writer,
+        value: []const u8,
+        split: usize,
+        separator: []const u8,
+    ) product_task.ProjectionError!bool {
+        const self: *const Runtime = @ptrCast(@alignCast(context));
+        if (split > value.len) return error.SnapshotTooLarge;
+        const projected = self.allocator.alloc(u8, value.len) catch
+            return error.OutOfMemory;
+        defer {
+            std.crypto.secureZero(u8, projected);
+            self.allocator.free(projected);
+        }
+        var read: usize = 0;
+        var write: usize = 0;
+        var projected_split: ?usize = null;
+        var redacted = false;
+        while (read < value.len) {
+            if (read == split) projected_split = write;
+            if (self.knownCredentialEndAtCodepoint(value, read)) |redaction_end| {
+                const marker_len = @min(redaction_end - read, 3);
+                @memset(projected[write..][0..marker_len], '*');
+                write += marker_len;
+                if (read < split and redaction_end >= split)
+                    projected_split = write;
+                read = redaction_end;
+                redacted = true;
+                continue;
+            }
+            const codepoint_len = utf8CodepointLen(value, read);
+            @memcpy(
+                projected[write..][0..codepoint_len],
+                value[read..][0..codepoint_len],
+            );
+            write += codepoint_len;
+            read += codepoint_len;
+        }
+        if (read == split) projected_split = write;
+        const boundary = projected_split orelse return error.SnapshotTooLarge;
+        self.projectedJsonValueWithKnownCredentials(
+            writer,
+            projected[0..boundary],
+        ) catch return error.SnapshotTooLarge;
+        writer.writeAll(separator) catch return error.SnapshotTooLarge;
+        self.projectedJsonValueWithKnownCredentials(
+            writer,
+            projected[boundary..write],
+        ) catch return error.SnapshotTooLarge;
+        return redacted;
+    }
+
     fn taskTextProjection(self: *const Runtime) product_task.ProjectionText {
         return .{
             .context = self,
             .contains_sensitive_fn = taskViewContainsSensitive,
             .write_json_fn = writeTaskViewJson,
+            .write_json_partition_fn = writeTaskViewJsonPartition,
+            .write_json_parts_fn = writeTaskViewJsonParts,
         };
     }
 
@@ -10179,9 +10257,9 @@ test "thinking and assistant chunks update distinct safe projections" {
 }
 
 test "output segments commit commentary and a continued final while discarding rollback" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
-    const task = &workbench.task_runtime.tasks[0].?;
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = &control.task_runtime.tasks[0].?;
     const run = &task.durable.runs[0].?;
     const route = task.runtime.routeId();
     const events = [_][]const u8{
@@ -10201,7 +10279,7 @@ test "output segments commit commentary and a continued final while discarding r
     for (events) |encoded| {
         var envelope = try testEnvelope(route, 7, encoded);
         defer envelope.deinit();
-        try workbench.applyEvent(&envelope);
+        try control.applyEvent(&envelope);
     }
 
     try std.testing.expectEqualStrings("look half done", run.assistant.list.items);
@@ -10214,12 +10292,24 @@ test "output segments commit commentary and a continued final while discarding r
     try std.testing.expect(run.output_continued_group == null);
     try std.testing.expectEqual(@as(u64, 4), run.next_output_segment_index);
     try std.testing.expect(std.mem.indexOf(u8, run.assistant.list.items, "discarded") == null);
+    var snapshot_storage: [96 * 1024]u8 = undefined;
+    const snapshot = try control.writeSnapshot(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"output\":{\"commentary\":\"look \",\"response\":\"half done\",\"responseKind\":\"final\",\"provisional\":\"\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"activity\":{\"kind\":\"finalizing\"}",
+    ) != null);
 }
 
 test "output segment byte mismatch fails the dependency protocol" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
-    const task = &workbench.task_runtime.tasks[0].?;
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = &control.task_runtime.tasks[0].?;
     const route = task.runtime.routeId();
 
     var begin = try testEnvelope(
@@ -10228,10 +10318,10 @@ test "output segment byte mismatch fails the dependency protocol" {
         "{\"output_segment_begin\":{\"index\":0,\"turn\":1,\"group\":0}}",
     );
     defer begin.deinit();
-    try workbench.applyEvent(&begin);
+    try control.applyEvent(&begin);
     var text_event = try testEnvelope(route, 7, "{\"text_chunk\":\"ok\"}");
     defer text_event.deinit();
-    try workbench.applyEvent(&text_event);
+    try control.applyEvent(&text_event);
     var invalid_end = try testEnvelope(
         route,
         7,
@@ -10240,7 +10330,7 @@ test "output segment byte mismatch fails the dependency protocol" {
     defer invalid_end.deinit();
     try std.testing.expectError(
         error.InvalidOutputSegment,
-        workbench.applyEvent(&invalid_end),
+        control.applyEvent(&invalid_end),
     );
 }
 
@@ -10306,9 +10396,9 @@ test "assistant output budget is aggregate across committed and open segments" {
 }
 
 test "partial output stays provisional until the segment is classified" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
-    const task = &workbench.task_runtime.tasks[0].?;
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = &control.task_runtime.tasks[0].?;
     const run = &task.durable.runs[0].?;
     const route = task.runtime.routeId();
 
@@ -10318,12 +10408,19 @@ test "partial output stays provisional until the segment is classified" {
         "{\"output_segment_begin\":{\"index\":0,\"turn\":1,\"group\":0}}",
     );
     defer begin.deinit();
-    try workbench.applyEvent(&begin);
+    try control.applyEvent(&begin);
     var text_event = try testEnvelope(route, 7, "{\"text_chunk\":\"unfinished\"}");
     defer text_event.deinit();
-    try workbench.applyEvent(&text_event);
+    try control.applyEvent(&text_event);
     try std.testing.expectEqualStrings("", run.assistant.list.items);
     try std.testing.expectEqualStrings("unfinished", run.output_segment.list.items);
+    var provisional_storage: [96 * 1024]u8 = undefined;
+    const provisional_snapshot = try control.writeSnapshot(&provisional_storage);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        provisional_snapshot,
+        "\"response\":\"\",\"responseKind\":null,\"provisional\":\"unfinished\"",
+    ) != null);
 
     var end = try testEnvelope(
         route,
@@ -10331,19 +10428,97 @@ test "partial output stays provisional until the segment is classified" {
         "{\"output_segment_end\":{\"index\":0,\"turn\":1,\"group\":0,\"disposition\":\"partial\",\"bytes\":10}}",
     );
     defer end.deinit();
-    try workbench.applyEvent(&end);
+    try control.applyEvent(&end);
     try std.testing.expectEqualStrings("unfinished", run.assistant.list.items);
     try std.testing.expectEqual(
         task_test_state.AssistantOutputKind.partial,
         run.assistant_output_kind.?,
     );
     try std.testing.expectEqual(@as(usize, 0), run.assistant_output_start.?);
+    var classified_storage: [96 * 1024]u8 = undefined;
+    const classified_snapshot = try control.writeSnapshot(&classified_storage);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        classified_snapshot,
+        "\"response\":\"unfinished\",\"responseKind\":\"partial\",\"provisional\":\"\"",
+    ) != null);
+}
+
+test "provisional output exposes only credential-safe committed bytes" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = &control.task_runtime.tasks[0].?;
+    const run = &task.durable.runs[0].?;
+    const route = task.runtime.routeId();
+
+    var begin = try testEnvelope(
+        route,
+        run.id,
+        "{\"output_segment_begin\":{\"index\":0,\"turn\":1,\"group\":0}}",
+    );
+    defer begin.deinit();
+    try control.applyEvent(&begin);
+    var prefix = try testEnvelope(route, run.id, "{\"text_chunk\":\"SECRET-\"}");
+    defer prefix.deinit();
+    try control.applyEvent(&prefix);
+    var prefix_storage: [96 * 1024]u8 = undefined;
+    const prefix_snapshot = try control.writeSnapshot(&prefix_storage);
+    try std.testing.expect(std.mem.indexOf(u8, prefix_snapshot, "SECRET-") == null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        prefix_snapshot,
+        "\"provisional\":\"\"",
+    ) != null);
+
+    var suffix = try testEnvelope(route, run.id, "{\"text_chunk\":\"KEY\"}");
+    defer suffix.deinit();
+    try control.applyEvent(&suffix);
+    var redacted_storage: [96 * 1024]u8 = undefined;
+    const redacted_snapshot = try control.writeSnapshot(&redacted_storage);
+    try std.testing.expect(std.mem.indexOf(u8, redacted_snapshot, "SECRET-KEY") == null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        redacted_snapshot,
+        "\"provisional\":\"***\",\"redacted\":false,\"provisionalRedacted\":true",
+    ) != null);
+}
+
+test "output partition redacts a known credential across the response boundary" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = &control.task_runtime.tasks[0].?;
+    const run = &task.durable.runs[0].?;
+    const route = task.runtime.routeId();
+    run.redaction_secret = &.{};
+
+    const events = [_][]const u8{
+        "{\"output_segment_begin\":{\"index\":0,\"turn\":1,\"group\":0}}",
+        "{\"text_chunk\":\"SECRET-\"}",
+        "{\"output_segment_end\":{\"index\":0,\"turn\":1,\"group\":0,\"disposition\":\"commentary\",\"bytes\":7}}",
+        "{\"output_segment_begin\":{\"index\":1,\"turn\":2,\"group\":1}}",
+        "{\"text_chunk\":\"KEY\"}",
+        "{\"output_segment_end\":{\"index\":1,\"turn\":2,\"group\":1,\"disposition\":\"final\",\"bytes\":3}}",
+    };
+    for (events) |encoded| {
+        var envelope = try testEnvelope(route, run.id, encoded);
+        defer envelope.deinit();
+        try control.applyEvent(&envelope);
+    }
+    try std.testing.expectEqualStrings("SECRET-KEY", run.assistant.list.items);
+    var storage: [96 * 1024]u8 = undefined;
+    const snapshot = try control.writeSnapshot(&storage);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"output\":{\"commentary\":\"***\",\"response\":\"\",\"responseKind\":\"final\",\"provisional\":\"\",\"redacted\":true",
+    ) != null);
 }
 
 test "discarded output requires an in-group retry without committing bytes" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
-    const task = &workbench.task_runtime.tasks[0].?;
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = &control.task_runtime.tasks[0].?;
     const run = &task.durable.runs[0].?;
     const route = task.runtime.routeId();
     const events = [_][]const u8{
@@ -10354,7 +10529,7 @@ test "discarded output requires an in-group retry without committing bytes" {
     for (events) |encoded| {
         var envelope = try testEnvelope(route, 7, encoded);
         defer envelope.deinit();
-        try workbench.applyEvent(&envelope);
+        try control.applyEvent(&envelope);
     }
     try std.testing.expectEqualStrings("", run.assistant.list.items);
 
@@ -10366,7 +10541,7 @@ test "discarded output requires an in-group retry without committing bytes" {
     defer wrong_group.deinit();
     try std.testing.expectError(
         error.InvalidOutputSegment,
-        workbench.applyEvent(&wrong_group),
+        control.applyEvent(&wrong_group),
     );
 }
 
@@ -10514,6 +10689,13 @@ test "Conversation context observation survives Runs and clears with attachment"
         task_test_state.RunActivity.waiting_model,
         run.observed_activity,
     );
+    var context_storage: [96 * 1024]u8 = undefined;
+    const context_snapshot = try control.writeSnapshot(&context_storage);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        context_snapshot,
+        "\"context\":{\"pressure\":null,\"lastAutoCompact\":{\"sourceRunId\":\"7\",\"dropped\":\"4\",\"kept\":\"8\",\"beforeTokens\":\"110\",\"afterTokens\":\"70\"}}",
+    ) != null);
 
     control.releaseTaskAttachmentNoFail(task, .cold_start);
     try std.testing.expect(task.conversation_observation.pressure == null);
@@ -11451,7 +11633,11 @@ test "known Host credentials are removed from assistant, tool, and UI projection
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "prefix *** suffix") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"id\":\"tool-1\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"name\":\"Bash ***\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"assistantRedacted\":true") != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"redacted\":true,\"provisionalRedacted\":false",
+    ) != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"redacted\":true") != null);
 }
 

@@ -27,6 +27,10 @@ Host 与 Renderer 随同一应用包原子发布，不承担旧 Renderer/新 Hos
 
 Renderer Bridge 使用独立合同身份 `metawork.renderer-bridge`，快速开发阶段固定 revision 为 `1`。Host 与 Renderer 随同一应用包原子发布，任何 command、event、payload 字段或 wire 语义变化都直接原地 hard cut，不为临时合同形态递增 revision、不维护兼容层，也不在 snapshot 内维护第二个局部版本。`contractRevision` 仍精确匹配，用于拒绝非当前固定标识，但不承诺识别同 revision 的开发产物错配。任何合同类版本标识的变更都必须先得到用户显式同意；对本文件即包括 Renderer Bridge revision。
 
+Run snapshot 已在 revision 1 内原地 hard cut 删除自由文本 `assistant`、`assistantRedacted` 与 `status`。每个 Run 精确发布 `output + activity`：`output = { commentary, response, responseKind, provisional, redacted, provisionalRedacted }`，其中 `responseKind = final | partial | null`；null 时 response 必须为空，分类后的 response 不得同时保留 provisional，terminal Run 的 provisional 必须为空。`commentary + response + provisional` 来自同一个 Host output budget；provisional 只包含 open/continued buffer 中 credential-safe committed bytes，discard 后必须消失。`activity` 是 nullable discriminated union：简单 kind 为 `queued | starting | waiting_model | thinking | writing_response | waiting_user | compacting_context | finalizing | stopping`；`executing_tools` 额外带 nullable 正整数 `inFlight`；`retrying_provider` 额外带要么全部为空、要么完整的 `attempt/max/delayMs`，且 attempt 不超过 max。非 terminal Run 必须有 activity，terminal Run 必须为 null；queued、waiting_ui、stopping phase 分别只接受 queued、waiting_user、stopping activity。
+
+每个 Task 精确发布 `context = { pressure, lastAutoCompact }`。pressure 为 null，或 `{ sourceRunId, currentTokens, warningThreshold, autoCompactThreshold, blockingLimit, severity }`；lastAutoCompact 为 null，或 `{ sourceRunId, dropped, kept, beforeTokens, afterTokens }`。所有计量使用 canonical decimal wire integer，sourceRunId 必须引用同一 Task 的 Run history；threshold 顺序、severity 与 token 数必须一致。context 属于当前 attached Conversation，可跨同一 Session 的 Run 保留，但 Task detach/replacement/restart 后两项均为空，且 detached Task 不得发布 observation。该 surface 不运输 raw CoreEvent tag、transition sequence、private reasoning、provider diagnostic 或 `file_changes`。
+
 ## File preview command
 
 `metawork.files.preview` 是 revision 1 command catalog 中唯一的异步 command，原地 hard cut 使用 Native SDK async registry；它不出现在同步 handler registry。request 精确为：

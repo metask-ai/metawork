@@ -25,27 +25,30 @@ function activeRun(run: RunView): boolean {
 
 function activeRunMessage(run: RunView): MessageId {
   if (run.phase === "running") {
-    switch (run.status) {
-      case "Queued":
-      case "Starting":
+    switch (run.activity?.kind) {
+      case "queued":
+      case "starting":
         return "run.activity.starting";
-      case "Generating response":
-        return "run.activity.generating_response";
-      case "Thinking":
+      case "thinking":
         return "run.activity.thinking";
-      case "Writing response":
+      case "writing_response":
         return "run.activity.writing_response";
-      case "Executing tools":
+      case "executing_tools":
         return "run.activity.executing_tools";
-      case "Retrying provider":
+      case "retrying_provider":
         return "run.activity.retrying_provider";
-      case "Compacting context":
-      case "Context compacted":
+      case "compacting_context":
         return "run.activity.compacting_context";
-      case "Finishing":
+      case "finalizing":
         return "run.activity.finishing";
+      case "waiting_user":
+        return "task.phase.waiting_ui";
+      case "stopping":
+        return "task.phase.stopping";
+      case "waiting_model":
+      case undefined:
+        return "run.activity.waiting_model";
     }
-    return "run.activity.waiting_model";
   }
   return `task.phase.${run.phase}`;
 }
@@ -243,18 +246,19 @@ export function TaskContent({
       {task?.runs.map((run) => {
         const isCurrent = run.id === currentRun?.id;
         const fileReferences = runFileReferences(run);
+        const assistant = run.output.commentary + run.output.response;
         const showOutcome =
           run.outcome !== null &&
-          (run.outcome !== "completed" || run.assistant.length === 0);
+          (run.outcome !== "completed" || assistant.length === 0);
         return (
           <section className="ai-exchange" key={run.id}>
             <Message role="user">
               <TaskInput input={run.input} />
             </Message>
-            {run.assistant.length > 0 && (
+            {assistant.length > 0 && (
               <Message role="assistant" streaming={activeRun(run)}>
-                <Markdown>{run.assistant}</Markdown>
-                {run.assistantRedacted && (
+                <Markdown>{assistant}</Markdown>
+                {run.output.redacted && (
                   <p className="projection-note">
                     {t("privacy.sensitive_hidden")}
                   </p>

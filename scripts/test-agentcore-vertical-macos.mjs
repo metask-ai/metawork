@@ -435,7 +435,11 @@ try {
     throw new Error(
       `completed run retained a Host cause: ${JSON.stringify(task)}`,
     );
-  if (!run.assistant.includes("metawork agentcore vertical complete"))
+  if (
+    !(run.output.commentary + run.output.response).includes(
+      "metawork agentcore vertical complete",
+    )
+  )
     throw new Error("final assistant text was not projected");
   const checkpointTerminalObservedAt = Date.now();
   const checkpointEvidence = await poll(
@@ -591,7 +595,9 @@ try {
   );
   if (
     textTerminal.run.phase !== "completed" ||
-    !textTerminal.run.assistant.includes("metawork text checkpoint complete")
+    !(
+      textTerminal.run.output.commentary + textTerminal.run.output.response
+    ).includes("metawork text checkpoint complete")
   )
     throw new Error(
       `Text checkpoint Run did not complete: ${JSON.stringify(textTerminal.run)}`,

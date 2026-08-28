@@ -138,7 +138,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - 用户可以提交文本输入并启动真实 Agent Run；
 - UI 流式显示 assistant 文本；
 - `thinking_chunk` 正文不进入 Assistant、Snapshot、持久历史或搜索；其事件类型只把当前安全状态细化为“正在思考”，`text_chunk` 到达后状态切换为“正在撰写回复”；
-- macOS AgentCore 的 visible-output segment 由 `output_segment_begin/end` 权威定性：`commentary` 是可见过程说明，`continued` 与同 group 后续段合并，`final` 是完成答案，`partial` 是可见但未完成输出，`discarded` 必须回滚。Product Task 只把已闭合的可见组提交到既有 assistant 文本，并持久化 final/partial 分类及其在安全 assistant 文本中的正文起点；Bridge 与 Renderer 投影留到后续阶段。open、continued 和 discarded 不形成 durable record，Renderer 也不得从 Tool、`stream_done` 或 StopReason 猜测这些语义；
+- macOS AgentCore 的 visible-output segment 由 `output_segment_begin/end` 权威定性：`commentary` 是可见过程说明，`continued` 与同 group 后续段合并，`final` 是完成答案，`partial` 是可见但未完成输出，`discarded` 必须回滚。Product Task 只把已闭合的可见组提交到 durable assistant history，并持久化 final/partial 分类及安全正文起点；Bridge revision 1 从该边界派生 typed commentary/response，同时只把 open/continued 中 credential-safe committed bytes 作为可回滚 provisional。open、continued 和 discarded 不形成 durable record，Renderer 也不得从 Tool、`stream_done` 或 StopReason 猜测这些语义；
 - UI 展示工具开始、进度、结果、错误和耗时；
 - UI 展示 token usage、上下文警告、重试和压缩等可见状态；
 - 用户可以在已有 finalized Run 且 Task 可继续时显式压缩当前 Conversation；manual compact 是 Workbench-owned Task maintenance operation，不创建 Turn/Run，不产生用户消息，也不把 `/compact` 原文送入 Bridge 或模型；
