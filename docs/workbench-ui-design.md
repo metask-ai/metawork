@@ -57,6 +57,8 @@ MetaWork 的视觉记忆点不是装饰性的暖色、通用衬线大标题、�
 
 因此当前产品只在 Task 内容区显示用户输入、Agent 可见输出、权限决策面、唯一当前状态和必要的终止结果；真实 Tool process、usage 与 context observation 仅进入按需 Task overview。普通信息不足时，Agent 通过可见回复说明问题并结束当前 Run，用户从 Composer 继续，不进入结构化 Question wait。工具开始、进度和结果继续作为 Host 事实存在，但不成为主叙事或事件时间线。Plan、plan approval、Outputs、Files changed、持久权限管理和 custom UI 均保持隐藏；它们在本文档中的设计是后续 capability 到位后的产品规范，不是当前实现承诺。Renderer 不解析工具参数、stdout 或普通文本来猜测这些状态；Current activity 的细粒度文案只来自 Host 对 AgentCore `run_state` 的受序列保护投影。当前 Renderer 合同已提供独立 Workspace projection、Task-bound ExecutionConfig facts、正式设置 route，以及设置与 New task 共享的默认 API/模型选择；跨重启 rebind 等仍须等对应 capability 落地后才能宣称可用，差距由 [验证规范](validation.md)明确记录。
 
+上述边界只定义当前 typed observation 的安全消费基线，不代表 Agent 对话渲染已经完成。现有 disclosure、单一 activity 和按需 overview 是过渡实现；终态前反馈密度、过程信息的可发现性、主次层级、更新节奏与长任务连续阅读仍由后续独立 Renderer 重构确定，但该重构仍必须遵守不泄漏 private reasoning、不从文本猜测结构化事实和不提前开放 gated capability 的边界。
+
 ### 2.2 Capability 标记
 
 本文在每个依赖未落地合同的章节就地标记状态，不要求实现者只靠本节的全局免责声明推断：
@@ -504,13 +506,13 @@ Execution binding availability 是下一次 admission 的独立前置事实，�
 
 ## 7. 中间区域：Task 内容
 
-> Capability：**当前**。用户输入、Assistant 回复、permission 与 Run 状态属于当前产品路径；typed Delivery、Outputs、FileChange 与 Plan 属于未来 capability，当前不得从 Assistant 文本或 Tool 记录推断。
+> Capability：**混合**。用户输入、Agent 可见输出、permission、typed activity 与 Run 状态的安全消费属于当前产品路径；现有组件组织只是过渡实现，完整的过程可见性与对话信息架构属于后续 Renderer 重构。typed Delivery、Outputs、FileChange 与 Plan 仍是未来 capability，当前不得从 Agent 文本或 Tool 记录推断。
 
 中间区域使用同一套 MetaWork AI UI 基础语义：`Conversation` 组织阅读面，`Message` 表达用户与 Assistant 发言，`Activity` 表达当前过程与必要终止状态，`Intervention` 表达真正需要用户介入的决定，`Composer` 控制下一步输入，`Markdown` 与 `CodeBlock` 呈现回复内容。它们是 Renderer 视觉语法，不把 Bridge 或 AgentCore 对象直接变成组件。当前不存在第二套 Task 专用消息、状态、请求或输入表面，也不以 Tool、Reasoning、Question 或 Approval Card 建立平行组件分类。
 
 ### 7.1 内容模型
 
-中间区域按 Task 中 Run 的稳定顺序只显示用户输入与 Agent 可见输出，不按 Run、Tool 或 AgentCore event 结构组织页面。每个 Run 的 `commentary` 只进入同一回复内的 `Agent updates` disclosure，`response` 保持主阅读内容，未定性的 `provisional` 是可回滚临时文本；三者不是事件时间线或三种说话者。当前执行状态、待处理请求和 terminal notice 是独立的临时或行动组件，不伪装成历史节点。
+当前过渡布局按 Task 中 Run 的稳定顺序显示用户输入与 Agent 可见输出，不直接按 raw Tool 或 AgentCore event 结构组织页面。每个 Run 的 `commentary` 进入同一回复内的 `Agent updates` disclosure，`response` 保持主阅读内容，未定性的 `provisional` 是可回滚临时文本；三者不是三种说话者。当前执行状态、待处理请求和 terminal notice 是独立的临时或行动组件，不伪装成历史节点。后续 Renderer 重构可以重新组织这些 typed facts 的可见层级与节奏，但不能退化为原始事件日志或复制一套 Renderer-owned 状态机。
 
 ### 7.2 用户指令
 
@@ -745,6 +747,8 @@ Full access
 ## 11. 按需 Task overview
 
 > Capability：**当前**。按需 Task overview 承载 Needs your attention、Current activity / Last run、所选当前/最近 Run 的 Work process，以及当前 Conversation 的 Context 与真实 usage；它不提供历史 Run 浏览、事件时间线或文件变化视图。
+
+该面板是当前过渡 Renderer 对 Tool、Context 与 usage 的安全落点，不是完整 Agent 过程体验的最终归属。后续 Renderer 重构可以调整这些信息与主阅读流的关系；在新方案通过真实运行验收前，不得以本面板已经能读取 typed records 作为过程可见性已经完成的证据。
 
 Task overview 是当前 Task 的按需结构化摘要，不是固定存在的第三栏、第二份回复记录、日志面板或执行审计器。New task、无 Task 和没有有效模块的普通 idle Task 默认不占用右侧列宽。
 
