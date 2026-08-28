@@ -757,7 +757,7 @@ Full access
 
 ## 11. 按需 Task overview
 
-> Capability：**当前**。按需 Task overview 承载 Needs your attention、Current activity / Last run、所选当前/最近 Run 的 Work process，以及当前 Conversation 的 Context 与真实 usage；它不提供历史 Run 浏览、事件时间线或文件变化视图。
+> Capability：**当前**。按需 Task overview 承载 Needs your attention、Current activity / Last run、当前/最近 Run 或主区 Tool 摘要精确定位 Run 的 Work process，以及当前 Conversation 的 Context 与真实 usage；它不提供通用历史 Run 浏览、事件时间线或文件变化视图。
 
 该面板拥有 Tool input/progress/result、Context 与 usage 的完整详情；主阅读流的 Tool 摘要只提供可发现性与定位入口，不复制详情。过程可见性的验收仍必须来自 terminal 前真实多 revision 运行，不能以本面板最终能读取 typed records 代替。
 
@@ -777,7 +777,7 @@ Task overview 是当前 Task 的按需结构化摘要，不是固定存在的第
 - 空模块隐藏；
 - 需要用户处理始终置顶；
 - Current activity 显示此刻可观察动作，不复制完整工具输出；
-- Work process 只读取当前或最近 Run 的有界 typed Tool records，按 Host order 显示名称、状态与真实 elapsed；input/progress/result 默认不挂载 DOM，同一时刻至多展开一个 Tool，并只在展开后以纯文本/代码面按需呈现，折叠或切换 Task/Run 后再次卸载。Tool details 不进入主对话、全局搜索或 live announcement，也不把 Tool、Bash 文本或 file reference 推断成 File change/Output；
+- Work process 读取当前或最近 Run 的有界 typed Tool records；从主区 Tool 摘要进入时，可以在该 focus request 存活期间精确选择来源 Run 与 Tool，但不增加历史 Run selector。它按 Host order 显示名称、状态与真实 elapsed；input/progress/result 默认不挂载 DOM，同一时刻至多展开一个 Tool，并只在展开后以纯文本/代码面按需呈现，折叠或切换 Task/Run 后再次卸载。Tool details 不进入主对话、全局搜索或 live announcement，也不把 Tool、Bash 文本或 file reference 推断成 File change/Output；
 - Run terminal 后，已经打开的 Inspector 用真实 outcome、状态和 usage 转为 Last run summary；只有 Host 发布 typed Run duration 时才显示总耗时，当前不得从 Renderer 时钟猜测；不得因为 Current activity 消失而清空内容；
 - Context and usage 显示当前 attached Conversation 的真实 pressure/auto-compact observation 和所选 Run usage；只陈述 current/auto-compact/blocking token 数、最近压缩前后 token 与 dropped/kept，不显示伪百分比、raw source Run identity 或跨 attachment 历史；
 - 用户打开 overview 后在当前 Task 内保持打开，直到主动关闭；切换 Task 时显示目标 Task 自己的会话内状态；

@@ -45,7 +45,8 @@ if (!HTMLElement.prototype.scrollIntoView)
 if (!HTMLElement.prototype.scrollTo)
   HTMLElement.prototype.scrollTo = () => undefined;
 
-const { cleanup, render, screen } = await import("@testing-library/react");
+const { cleanup, fireEvent, render, screen } =
+  await import("@testing-library/react");
 const { default: userEvent } = await import("@testing-library/user-event");
 
 const vite = await createServer({
@@ -166,6 +167,7 @@ function renderTaskContent(value, locale = "en-US") {
         retryAvailable: false,
         responseDisabled: false,
         onPrepareRetry() {},
+        onOpenTool() {},
         onPreviewFile() {},
         onRespond() {},
         renderPendingUi() {
@@ -190,7 +192,7 @@ function localizedView(component, locale = "en-US") {
   );
 }
 
-function taskContentElement(value, revision = "1") {
+function taskContentElement(value, revision = "1", overrides = {}) {
   return localizedView(
     createElement(TaskContent, {
       task: value,
@@ -199,11 +201,13 @@ function taskContentElement(value, revision = "1") {
       retryAvailable: false,
       responseDisabled: false,
       onPrepareRetry() {},
+      onOpenTool() {},
       onPreviewFile() {},
       onRespond() {},
       renderPendingUi() {
         return null;
       },
+      ...overrides,
     }),
   );
 }
@@ -515,7 +519,7 @@ test("conversation separates commentary, Markdown response, and plain provisiona
     ],
   });
   const activeMarkup = renderTaskContent(active);
-  assert.match(activeMarkup, />Agent updates</);
+  assert.match(activeMarkup, />Writing response</);
   assert.match(activeMarkup, /aria-expanded="true"/);
   assert.match(activeMarkup, /Checked <strong>two files<\/strong>\./);
   assert.match(activeMarkup, /Draft \*\*not Markdown\*\*/);
@@ -653,7 +657,7 @@ test("terminal Run process summarizes Tool evidence without implying Run failure
   assert.doesNotMatch(markup, />Work failed</);
 });
 
-test("Agent updates disclosure remains user-controlled across revisions and Task switches", async () => {
+test("Run process disclosure remains user-controlled across revisions and Task switches", async () => {
   const user = userEvent.setup({ document: dom.window.document });
   const active = task({
     id: "task-a",
@@ -676,7 +680,7 @@ test("Agent updates disclosure remains user-controlled across revisions and Task
     ],
   });
   const view = render(taskContentElement(active));
-  let disclosure = screen.getByRole("button", { name: "Agent updates" });
+  let disclosure = screen.getByRole("button", { name: "Writing response" });
   assert.equal(disclosure.getAttribute("aria-expanded"), "true");
   await user.click(disclosure);
   assert.equal(disclosure.getAttribute("aria-expanded"), "false");
@@ -698,14 +702,230 @@ test("Agent updates disclosure remains user-controlled across revisions and Task
       "2",
     ),
   );
-  disclosure = screen.getByRole("button", { name: "Agent updates" });
+  disclosure = screen.getByRole("button", { name: "Writing response" });
   assert.equal(disclosure.getAttribute("aria-expanded"), "false");
 
   view.rerender(taskContentElement(task({ id: "task-b" }), "3"));
-  assert.equal(screen.queryByRole("button", { name: "Agent updates" }), null);
+  assert.equal(
+    screen.queryByRole("button", { name: "Writing response" }),
+    null,
+  );
   view.rerender(taskContentElement(active, "4"));
-  disclosure = screen.getByRole("button", { name: "Agent updates" });
+  disclosure = screen.getByRole("button", { name: "Writing response" });
   assert.equal(disclosure.getAttribute("aria-expanded"), "false");
+});
+
+test("successful terminal transition collapses process only while following latest", () => {
+  const activeRun = run({
+    phase: "running",
+    outcome: null,
+    activity: { kind: "writing_response" },
+    output: {
+      commentary: "Working through the task",
+      response: "",
+      responseKind: null,
+      provisional: "",
+      redacted: false,
+      provisionalRedacted: false,
+    },
+  });
+  const active = task({
+    currentRunId: "9",
+    currentRunPhase: "running",
+    runs: [activeRun],
+  });
+  const view = render(taskContentElement(active));
+  const completed = task({
+    runs: [
+      {
+        ...activeRun,
+        phase: "completed",
+        activity: null,
+        outcome: "completed",
+        output: {
+          ...activeRun.output,
+          response: "Final response",
+          responseKind: "final",
+        },
+      },
+    ],
+  });
+  view.rerender(taskContentElement(completed, "2"));
+  const disclosure = screen.getByRole("button", { name: "Work process" });
+  assert.equal(disclosure.getAttribute("aria-expanded"), "false");
+  assert.equal(screen.queryByText("Working through the task"), null);
+  assert.ok(screen.getByText("Final response"));
+});
+
+test("terminal transition preserves process layout while the user reads history", () => {
+  const activeRun = run({
+    phase: "running",
+    outcome: null,
+    activity: { kind: "thinking" },
+    output: {
+      commentary: "Evidence the reader is reviewing",
+      response: "",
+      responseKind: null,
+      provisional: "",
+      redacted: false,
+      provisionalRedacted: false,
+    },
+  });
+  const active = task({
+    currentRunId: "9",
+    currentRunPhase: "running",
+    runs: [activeRun],
+  });
+  const view = render(taskContentElement(active));
+  const viewport = document.querySelector(".ai-conversation-viewport");
+  Object.defineProperties(viewport, {
+    scrollHeight: { configurable: true, value: 1200 },
+    clientHeight: { configurable: true, value: 400 },
+    scrollTop: { configurable: true, writable: true, value: 160 },
+  });
+  fireEvent.scroll(viewport);
+
+  view.rerender(
+    taskContentElement(
+      task({
+        runs: [
+          {
+            ...activeRun,
+            phase: "completed",
+            activity: null,
+            outcome: "completed",
+            output: {
+              ...activeRun.output,
+              response: "Final response",
+              responseKind: "final",
+            },
+          },
+        ],
+      }),
+      "2",
+    ),
+  );
+  const disclosure = screen.getByRole("button", { name: "Work process" });
+  assert.equal(disclosure.getAttribute("aria-expanded"), "true");
+  assert.ok(screen.getByText("Evidence the reader is reviewing"));
+  assert.ok(screen.getByRole("button", { name: "Jump to latest" }));
+});
+
+test("Task switches restore each Task reading position without cross-contamination", () => {
+  const taskA = task({ id: "task-a", runs: [run({ id: "run-a" })] });
+  const taskB = task({ id: "task-b", runs: [run({ id: "run-b" })] });
+  const view = render(taskContentElement(taskA));
+  const viewport = document.querySelector(".ai-conversation-viewport");
+  Object.defineProperties(viewport, {
+    scrollHeight: { configurable: true, value: 1400 },
+    clientHeight: { configurable: true, value: 400 },
+    scrollTop: { configurable: true, writable: true, value: 180 },
+  });
+  fireEvent.scroll(viewport);
+
+  view.rerender(taskContentElement(taskB, "2"));
+  viewport.scrollTop = 520;
+  fireEvent.scroll(viewport);
+  view.rerender(taskContentElement(taskA, "3"));
+  assert.equal(viewport.scrollTop, 180);
+  assert.ok(screen.getByRole("button", { name: "Jump to latest" }));
+});
+
+test("Tool summary forwards exact Run, Tool, and opener identity", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  const calls = [];
+  const value = task({
+    currentRunId: "9",
+    currentRunPhase: "running",
+    runs: [
+      run({
+        phase: "running",
+        outcome: null,
+        activity: { kind: "executing_tools", inFlight: "1" },
+        tools: [
+          {
+            id: "tool-7",
+            order: "1",
+            name: "Bash",
+            input: "private input",
+            progress: "",
+            content: "",
+            state: "running",
+            isError: false,
+            elapsedMs: "0",
+            inputTruncated: false,
+            progressTruncated: false,
+            contentTruncated: false,
+            redacted: false,
+            fileRefs: [],
+          },
+        ],
+      }),
+    ],
+  });
+  render(
+    taskContentElement(value, "1", {
+      onOpenTool: (runId, toolId, opener) =>
+        calls.push({ runId, toolId, opener }),
+    }),
+  );
+  await user.click(
+    screen.getByRole("button", { name: "View details for Bash" }),
+  );
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].runId, "9");
+  assert.equal(calls[0].toolId, "tool-7");
+  assert.ok(calls[0].opener instanceof HTMLButtonElement);
+  assert.equal(screen.queryByText("private input"), null);
+});
+
+test("Inspector focus request opens the exact historical Tool detail once", async () => {
+  const historical = run({
+    id: "8",
+    tools: [
+      {
+        id: "tool-8",
+        order: "1",
+        name: "Bash",
+        input: "historical input",
+        progress: "",
+        content: "historical result",
+        state: "completed",
+        isError: false,
+        elapsedMs: "8",
+        inputTruncated: false,
+        progressTruncated: false,
+        contentTruncated: false,
+        redacted: false,
+        fileRefs: [],
+      },
+    ],
+  });
+  const current = run({ id: "9", tools: [] });
+  render(
+    localizedView(
+      createElement(TaskOverview, {
+        task: task({
+          currentRunId: "9",
+          runs: [historical, current],
+        }),
+        focusRequest: {
+          taskId: "3",
+          section: "work_process",
+          runId: "8",
+          toolId: "tool-8",
+          nonce: 1,
+        },
+        onFocusPending() {},
+      }),
+    ),
+  );
+  await new Promise((resolve) => requestAnimationFrame(resolve));
+  assert.ok(screen.getByText("historical input"));
+  assert.ok(screen.getByText("historical result"));
+  const toolButton = screen.getByRole("button", { name: /Bash/ });
+  assert.equal(toolButton.getAttribute("aria-expanded"), "true");
+  assert.equal(document.activeElement, toolButton);
 });
 
 test("partial output and terminal failure render one composite notice", () => {

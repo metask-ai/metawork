@@ -3,7 +3,9 @@ import test from "node:test";
 
 import {
   deriveRunPresentation,
+  observeRunProcessDisclosure,
   shouldAutoCollapseRunProcess,
+  toggleRunProcessDisclosure,
 } from "../frontend/src/features/tasks/run-presentation.ts";
 import { RevisionNotificationQueue } from "../frontend/src/bridge/revision-notification.ts";
 
@@ -190,6 +192,65 @@ test("automatic terminal collapse never overrides reading position or user choic
       false,
     );
   }
+});
+
+test("Run disclosure preserves manual choice and only collapses on an eligible terminal transition", () => {
+  const activePresentation = deriveRunPresentation(
+    run({
+      output: {
+        commentary: "Working",
+        response: "",
+        responseKind: null,
+        provisional: "",
+        redacted: false,
+        provisionalRedacted: false,
+      },
+    }),
+  );
+  const terminalPresentation = deriveRunPresentation(
+    run({
+      phase: "completed",
+      output: {
+        commentary: "Working",
+        response: "Done",
+        responseKind: "final",
+        provisional: "",
+        redacted: false,
+        provisionalRedacted: false,
+      },
+      activity: null,
+      outcome: "completed",
+    }),
+  );
+
+  const active = observeRunProcessDisclosure(
+    undefined,
+    activePresentation,
+    true,
+  );
+  assert.deepEqual(active, {
+    expanded: true,
+    userToggled: false,
+    wasActive: true,
+  });
+  assert.equal(
+    observeRunProcessDisclosure(active, terminalPresentation, true).expanded,
+    false,
+  );
+  assert.equal(
+    observeRunProcessDisclosure(active, terminalPresentation, false).expanded,
+    true,
+  );
+
+  const manual = toggleRunProcessDisclosure(active, false);
+  assert.deepEqual(
+    observeRunProcessDisclosure(manual, activePresentation, true),
+    { expanded: false, userToggled: true, wasActive: true },
+  );
+  assert.equal(
+    observeRunProcessDisclosure(manual, terminalPresentation, true).expanded,
+    false,
+  );
 });
 
 test("revision delivery coalesces bursts but releases spaced preterminal updates", async () => {

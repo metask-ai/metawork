@@ -843,6 +843,7 @@ export default function App() {
   function openInspectorSection(
     section: InspectorSection,
     opener: HTMLButtonElement,
+    target?: { runId: string; toolId: string },
   ) {
     if (!activeTask || !inspector.available) return;
     inspectorOpener.current = opener;
@@ -851,6 +852,8 @@ export default function App() {
     setInspectorFocusRequest({
       taskId: activeTask.id,
       section,
+      runId: target?.runId,
+      toolId: target?.toolId,
       nonce: inspectorFocusSequence.current,
     });
   }
@@ -2810,6 +2813,12 @@ export default function App() {
                 retryAvailable={taskCanCompose && !taskOperationInFlight}
                 responseDisabled={bridgeUnavailable}
                 onPrepareRetry={prepareRetry}
+                onOpenTool={(runId, toolId, opener) =>
+                  openInspectorSection("work_process", opener, {
+                    runId,
+                    toolId,
+                  })
+                }
                 onPreviewFile={openFilePreview}
                 onRespond={(payload) => void respondUi(payload)}
                 renderPendingUi={(props) => {

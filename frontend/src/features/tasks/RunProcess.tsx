@@ -135,7 +135,7 @@ function ProcessTool({
   onOpen,
 }: {
   tool: ToolView;
-  onOpen?: () => void;
+  onOpen?: (opener: HTMLButtonElement) => void;
 }) {
   const { locale, t } = useI18n();
   const elapsed = BigInt(tool.elapsedMs);
@@ -164,7 +164,7 @@ function ProcessTool({
           type="button"
           className="run-process-tool focus-ring"
           aria-label={t("run.process.open_tool", { name: tool.name })}
-          onClick={onOpen}
+          onClick={(event) => onOpen(event.currentTarget)}
         >
           {content}
         </button>
@@ -205,7 +205,7 @@ export function RunProcess({
   presentation: RunPresentation;
   expanded: boolean;
   onExpandedChange: (expanded: boolean) => void;
-  onOpenTool?: (tool: ToolView) => void;
+  onOpenTool?: (tool: ToolView, opener: HTMLButtonElement) => void;
 }) {
   const { locale, t } = useI18n();
   const bodyId = useId();
@@ -251,7 +251,8 @@ export function RunProcess({
               <p>{run.output.provisional}</p>
             </div>
           )}
-          {run.output.provisionalRedacted && (
+          {(run.output.provisionalRedacted ||
+            (run.output.redacted && !presentation.responseVisible)) && (
             <p className="projection-note">{t("privacy.sensitive_hidden")}</p>
           )}
           {presentation.tools.length > 0 && (
@@ -260,7 +261,11 @@ export function RunProcess({
                 <ProcessTool
                   key={tool.id}
                   tool={tool}
-                  onOpen={onOpenTool ? () => onOpenTool(tool) : undefined}
+                  onOpen={
+                    onOpenTool
+                      ? (opener) => onOpenTool(tool, opener)
+                      : undefined
+                  }
                 />
               ))}
             </ul>

@@ -1,6 +1,7 @@
 import type { TaskView } from "../../bridge/contracts.ts";
 
-export type InspectorSection = "attention" | "summary" | "usage";
+export type InspectorSection =
+  "attention" | "summary" | "work_process" | "usage";
 
 type TaskOverviewMemory = {
   open: boolean;

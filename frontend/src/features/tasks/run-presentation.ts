@@ -25,7 +25,6 @@ export type RunPresentation = {
   processVisible: boolean;
   processDefaultExpanded: boolean;
   processCanCollapse: boolean;
-  showStreamingCaret: boolean;
   showTerminalNotice: boolean;
   tools: ToolView[];
   runningToolName: string | null;
@@ -72,6 +71,7 @@ export function deriveRunPresentation(run: RunView): RunPresentation {
     run.output.commentary.length > 0 ||
     run.output.provisional.length > 0 ||
     run.output.provisionalRedacted ||
+    (run.output.redacted && !responseVisible) ||
     tools.length > 0;
   const processVisible = active || processEvidenceVisible;
   const failure = run.outcome !== null && failureOutcomes.has(run.outcome);
@@ -84,10 +84,6 @@ export function deriveRunPresentation(run: RunView): RunPresentation {
     processVisible,
     processDefaultExpanded,
     processCanCollapse: processEvidenceVisible,
-    showStreamingCaret:
-      active &&
-      (run.output.provisional.length > 0 ||
-        activity?.kind === "writing_response"),
     showTerminalNotice:
       run.outcome !== null &&
       (run.output.responseKind === "partial" ||
@@ -101,6 +97,52 @@ export function deriveRunPresentation(run: RunView): RunPresentation {
     toolCount: tools.length,
     failedToolCount: tools.filter((tool) => tool.state === "failed").length,
   };
+}
+
+export type RunProcessDisclosure = {
+  expanded: boolean;
+  userToggled: boolean;
+  wasActive: boolean;
+};
+
+export function observeRunProcessDisclosure(
+  current: RunProcessDisclosure | undefined,
+  presentation: RunPresentation,
+  followingLatest: boolean,
+): RunProcessDisclosure {
+  if (!current) {
+    return {
+      expanded: presentation.processDefaultExpanded,
+      userToggled: false,
+      wasActive: presentation.active,
+    };
+  }
+  if (presentation.active) {
+    return {
+      ...current,
+      expanded: current.userToggled ? current.expanded : true,
+      wasActive: true,
+    };
+  }
+  return {
+    ...current,
+    expanded: shouldAutoCollapseRunProcess({
+      presentation,
+      wasActive: current.wasActive,
+      followingLatest,
+      userToggled: current.userToggled,
+    })
+      ? false
+      : current.expanded,
+    wasActive: false,
+  };
+}
+
+export function toggleRunProcessDisclosure(
+  current: RunProcessDisclosure,
+  expanded: boolean,
+): RunProcessDisclosure {
+  return { ...current, expanded, userToggled: true };
 }
 
 export function shouldAutoCollapseRunProcess({
