@@ -45,6 +45,8 @@ pub const ExecutionHandoff = struct {
     replacement_pending_fn: *const fn (*anyopaque) bool,
     begin_default_replacement_fn: *const fn (*anyopaque) anyerror!void,
     begin_replacement_fn: *const fn (*anyopaque) anyerror!void,
+    prepare_install_fn: *const fn (*anyopaque, account.ExecutionConfigInput) anyerror!void,
+    prepare_clear_fn: *const fn (*anyopaque) anyerror!void,
     install_model_connection_fn: *const fn (*anyopaque, *account.OwnedExecutionConfig, *PreparedModelConnectionBinding) void,
     install_execution_fn: *const fn (*anyopaque, *account.OwnedExecutionConfig) void,
     clear_execution_fn: *const fn (*anyopaque) void,
@@ -76,6 +78,12 @@ pub const ExecutionHandoff = struct {
     }
     pub fn beginExecutionReplacement(self: ExecutionHandoff) anyerror!void {
         return self.begin_replacement_fn(self.context);
+    }
+    pub fn prepareExecutionInstall(self: ExecutionHandoff, input: account.ExecutionConfigInput) anyerror!void {
+        return self.prepare_install_fn(self.context, input);
+    }
+    pub fn prepareExecutionClear(self: ExecutionHandoff) anyerror!void {
+        return self.prepare_clear_fn(self.context);
     }
     pub fn installModelConnectionExecutionNoFail(self: ExecutionHandoff, execution: *account.OwnedExecutionConfig, binding: *PreparedModelConnectionBinding) void {
         self.install_model_connection_fn(self.context, execution, binding);

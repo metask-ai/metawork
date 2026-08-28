@@ -2587,6 +2587,7 @@ pub fn installProductControlExecutionGeneration(
             .execution_generation = generation,
         },
     });
+    try workbench.prepareExecutionInstall(execution.input());
     workbench.installExecutionNoFail(&execution);
     workbench.endExecutionReplacementNoFail();
     workbench.finishAccountCommitNoFail();

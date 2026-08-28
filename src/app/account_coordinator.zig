@@ -262,6 +262,15 @@ pub const Coordinator = struct {
                 .kind = .model_connections_changed,
                 .view = self.runtime.view(),
             });
+            self.control.prepareExecutionInstall(
+                owned_execution.input(),
+            ) catch {
+                owned_execution.deinit();
+                replacement_started = false;
+                self.endActiveReplacementNoFail();
+                self.control.finishAccountCommitNoFail();
+                return result;
+            };
             self.control.installModelConnectionExecutionNoFail(
                 &owned_execution,
                 &prepared_binding,
@@ -391,6 +400,16 @@ pub const Coordinator = struct {
         self.control.beginDefaultExecutionReplacement() catch return;
         var replacement_started = true;
         defer if (replacement_started) self.endActiveReplacementNoFail();
+        self.control.commitAccountFactNoFail(.{
+            .kind = .model_connections_changed,
+            .view = self.runtime.view(),
+        });
+        self.control.prepareExecutionInstall(execution.input()) catch {
+            replacement_started = false;
+            self.endActiveReplacementNoFail();
+            self.control.finishAccountCommitNoFail();
+            return;
+        };
         self.control.installModelConnectionExecutionNoFail(
             &execution,
             &prepared_binding,
@@ -398,10 +417,6 @@ pub const Coordinator = struct {
         prepared_binding_owned = false;
         replacement_started = false;
         self.endActiveReplacementNoFail();
-        self.control.commitAccountFactNoFail(.{
-            .kind = .model_connections_changed,
-            .view = self.runtime.view(),
-        });
         self.control.finishAccountCommitNoFail();
     }
 
@@ -518,7 +533,11 @@ pub const Coordinator = struct {
                     self.control.beginDefaultExecutionReplacement() catch
                         unreachable;
                 }
-                self.control.installExecutionNoFail(&execution);
+                if (self.control.prepareExecutionInstall(execution.input())) |_| {
+                    self.control.installExecutionNoFail(&execution);
+                } else |_| {
+                    execution.deinit();
+                }
             }
         } else if (prepared.executionIntent() == .clear) {
             if (!self.control.modelConnectionExecutionSelected()) {
@@ -526,7 +545,9 @@ pub const Coordinator = struct {
                     self.control.beginDefaultExecutionReplacement() catch
                         unreachable;
                 }
-                self.control.clearExecutionNoFail();
+                if (self.control.prepareExecutionClear()) |_| {
+                    self.control.clearExecutionNoFail();
+                } else |_| {}
             }
         }
         self.runtime.commit(&prepared);

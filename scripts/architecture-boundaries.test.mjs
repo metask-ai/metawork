@@ -412,6 +412,9 @@ test("Product Control Schedule owns its state and persistence leaves", () => {
   const schedule = read("src/product/control/schedule.zig");
   const persistence = read("src/product/control/schedule/persistence.zig");
   const stores = read("src/app/stores.zig");
+  const ports = read("src/product/control/ports.zig");
+  const accountCoordinator = read("src/app/account_coordinator.zig");
+  const taskRuntime = read("src/product/task/runtime.zig");
 
   assert.match(runtime, /@import\("product_control_schedule"\)/);
   assert.match(runtime, /@import\("product_control_schedule_persistence"\)/);
@@ -429,6 +432,19 @@ test("Product Control Schedule owns its state and persistence leaves", () => {
     build,
     /workbench_scheduled_tasks|workbench_scheduled_task_persistence|metawork-scheduled-task-persistence/,
   );
+  assert.match(runtime, /fn prepareScheduledTaskCredentialRedaction/);
+  assert.match(
+    runtime,
+    /fn commitScheduledTaskCandidate[\s\S]*?redactScheduledTaskStoreWithKnownCredentialsNoFail[\s\S]*?containsKnownCredential/,
+  );
+  assert.match(runtime, /consumeExecutionInstallPreparation/);
+  assert.match(runtime, /consumeExecutionClearPreparation/);
+  assert.match(runtime, /redactWithExecutionCredentialsNoFail/);
+  assert.match(taskRuntime, /pub fn redactWithExecutionCredentialsNoFail/);
+  assert.match(ports, /pub fn prepareExecutionInstall/);
+  assert.match(ports, /pub fn prepareExecutionClear/);
+  assert.match(accountCoordinator, /prepareExecutionInstall/);
+  assert.match(accountCoordinator, /prepareExecutionClear/);
 });
 
 test("Application coordinators consume scoped Product Control capabilities", () => {

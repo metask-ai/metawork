@@ -175,6 +175,8 @@ Product Skill Runtime 同时拥有本地 package 与 management 用例。内部 
 Product Control 单独分配稳定的产品 Task identity，并在 Task owner 内保存 Agent Session route identity；AgentCore event 与 event-projection failure 都只按 route identity 回到 owner，Bridge snapshot 与 mutation 只使用产品 Task identity，二者不共享生成器也不依赖数值相等。durable Task binding descriptor 只包含 Workspace/binding epoch、Provider、model 与 opaque execution generation；account identity、Model Connection identity、API Key identity/metadata、connection credential locator 和完整 ExecutionConfig 只属于对应 owner 的当前进程运行时，不进入 Task store、Bridge 或 Renderer。
 credential redaction 是 owner 释放协议的一部分，而不是 snapshot 时的偶然过滤。安装新 credential 前先永久清洗所有既有产品投影；替换或清空默认 execution、释放 quiescent Task-owned execution 前再次使用即将释放的 credential 清洗 Workspace、Task、Run、tool 与 UI history，然后才 secure-zero。序列化仍扫描所有 live credential，并在前缀重叠时采用最长匹配，作为释放前的第二道防线。credential 是 opaque bytes；若匹配发生在 UTF-8 codepoint 内部，所有 ingestion、流式跨 chunk 清洗与序列化路径都必须扩大到完整 codepoint，禁止为了替换 secret 产生非法 UTF-8 产品事实或 JSON。
 
+Schedule 是独立持久化边界，因此 credential redaction 也必须是它的 durable candidate mutation，不能只修改内存投影。Account/Application handoff 在 Product Control 安装新 execution 或清除旧 execution 前，必须先用当前默认 execution、所有 live Task execution 与候选 credential 清洗完整 Schedule candidate，并确认 `scheduled-tasks.json` commit 成功；明确失败或 outcome unknown 都不得转移 execution ownership。Account fact 已提交而 Schedule scrub 失败时保留旧 Product Control execution，但 generation 不一致会关闭新的 Task/Schedule admission，不回滚另一个 owner 的 Account 事务。每一次 Schedule candidate commit 都必须在编码前用当前默认与全部 live Task execution credential 清洗完整 store，并对最终 bytes 做零 credential 断言，保证后续 Task execution 释放路径不需要以 no-fail 内存回调补写持久化。
+
 ## 3. 并发与生命周期
 
 ```text

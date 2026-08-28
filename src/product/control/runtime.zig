@@ -1294,6 +1294,19 @@ const ActiveExecution = struct {
 /// All methods currently run on the Native loop thread.
 const ExecutionReplacementKind = enum { none, default, identity };
 
+/// Callback-scoped proof that the exact still-owned execution candidate was
+/// scrubbed against Schedule. The borrowed pointer is never dereferenced and
+/// is cleared when the synchronous replacement scope ends.
+const ExecutionRedactionPreparation = union(enum) {
+    none,
+    install: struct {
+        generation: u64,
+        credential_ptr: [*]const u8,
+        credential_len: usize,
+    },
+    clear: u64,
+};
+
 pub const PreparedModelConnectionBinding = control_ports.PreparedModelConnectionBinding;
 
 const CustomExecutionBinding = PreparedModelConnectionBinding;
@@ -1333,6 +1346,7 @@ pub const Runtime = struct {
     canonical_user_home: ?[]u8,
     automatic_workspaces: ?automatic_workspace_allocator.Allocator,
     execution_replacement: ExecutionReplacementKind = .none,
+    execution_redaction_preparation: ExecutionRedactionPreparation = .none,
     custom_execution_binding: ?CustomExecutionBinding = null,
     model_connection_capabilities: ModelConnectionCapabilities,
     completion_factory: CompletionFactory,
@@ -1939,8 +1953,6 @@ pub const Runtime = struct {
         self: *Runtime,
         execution: *account_contract.OwnedExecutionConfig,
     ) void {
-        if (self.custom_execution_binding) |*binding| binding.deinit();
-        self.custom_execution_binding = null;
         std.debug.assert(self.execution_replacement != .none);
         const input = execution.input();
         std.debug.assert(self.account.catalog_state == .ready);
@@ -1952,6 +1964,9 @@ pub const Runtime = struct {
             self.account.selected_model.view(),
             input.target.model,
         ));
+        self.consumeExecutionInstallPreparation(input);
+        if (self.custom_execution_binding) |*binding| binding.deinit();
+        self.custom_execution_binding = null;
         self.redactAllProductProjectionsNoFail(self.execution.credential());
         self.redactAllProductProjectionsNoFail(input.api_key);
         self.execution.installNoFail(execution);
@@ -1979,6 +1994,7 @@ pub const Runtime = struct {
         prepared_binding: *PreparedModelConnectionBinding,
     ) void {
         std.debug.assert(self.execution_replacement != .none);
+        self.consumeExecutionInstallPreparation(execution.input());
         self.redactAllProductProjectionsNoFail(self.execution.credential());
         self.redactAllProductProjectionsNoFail(execution.input().api_key);
         self.execution.installNoFail(execution);
@@ -1990,10 +2006,41 @@ pub const Runtime = struct {
     pub fn clearExecutionNoFail(self: *Runtime) void {
         std.debug.assert(self.execution_replacement != .none);
         std.debug.assert(self.account.execution_generation == 0);
+        self.consumeExecutionClearPreparation(self.execution.generation);
         self.redactAllProductProjectionsNoFail(self.execution.credential());
         self.execution.clearNoFail();
         if (self.custom_execution_binding) |*binding| binding.deinit();
         self.custom_execution_binding = null;
+    }
+
+    /// Durably removes every credential that the candidate execution could
+    /// expose from Schedule projections before the execution becomes live.
+    /// Account and Product Control are separate saga owners: failure leaves
+    /// the old execution installed while the committed Account fact closes
+    /// admission through the generation mismatch.
+    pub fn prepareExecutionInstall(
+        self: *Runtime,
+        input: account_contract.ExecutionConfigInput,
+    ) Error!void {
+        std.debug.assert(self.execution_replacement != .none);
+        std.debug.assert(self.execution_redaction_preparation == .none);
+        try self.prepareScheduledTaskCredentialRedaction(input.api_key);
+        self.execution_redaction_preparation = .{ .install = .{
+            .generation = input.execution_generation,
+            .credential_ptr = input.api_key.ptr,
+            .credential_len = input.api_key.len,
+        } };
+    }
+
+    /// Durably scrubs the execution being released before its final owned
+    /// credential can be cleared and secure-zeroed.
+    pub fn prepareExecutionClear(self: *Runtime) Error!void {
+        std.debug.assert(self.execution_replacement != .none);
+        std.debug.assert(self.execution_redaction_preparation == .none);
+        try self.prepareScheduledTaskCredentialRedaction("");
+        self.execution_redaction_preparation = .{
+            .clear = self.execution.generation,
+        };
     }
 
     pub fn finishAccountCommitNoFail(self: *Runtime) void {
@@ -2049,6 +2096,7 @@ pub const Runtime = struct {
             return error.InvalidAutomationExecution;
         try self.beginExecutionReplacement();
         errdefer self.endExecutionReplacementNoFail();
+        try self.prepareScheduledTaskCredentialRedaction(input.credential);
         const api_keys = [_]account_contract.ApiKeyView{.{
             .id = "automation-key",
             .name = "Automation",
@@ -2088,6 +2136,7 @@ pub const Runtime = struct {
         self.syncLifecycle();
         if (self.execution_replacement != .none)
             return error.ExecutionInUse;
+        std.debug.assert(self.execution_redaction_preparation == .none);
         // Identity replacement changes only Account-owned admission defaults.
         // Live Tasks keep their owned ExecutionConfig until their own runtime
         // lifecycle releases it, so their references cannot block this gate.
@@ -2099,12 +2148,42 @@ pub const Runtime = struct {
         self.syncLifecycle();
         if (self.execution_replacement != .none)
             return error.ExecutionInUse;
+        std.debug.assert(self.execution_redaction_preparation == .none);
         self.execution_replacement = .default;
     }
 
     pub fn endExecutionReplacementNoFail(self: *Runtime) void {
         std.debug.assert(self.execution_replacement != .none);
         self.execution_replacement = .none;
+        self.execution_redaction_preparation = .none;
+    }
+
+    fn consumeExecutionInstallPreparation(
+        self: *Runtime,
+        input: account_contract.ExecutionConfigInput,
+    ) void {
+        switch (self.execution_redaction_preparation) {
+            .install => |prepared| {
+                std.debug.assert(prepared.generation == input.execution_generation);
+                std.debug.assert(prepared.credential_len == input.api_key.len);
+                std.debug.assert(prepared.credential_ptr == input.api_key.ptr);
+            },
+            else => unreachable,
+        }
+        self.execution_redaction_preparation = .none;
+    }
+
+    fn consumeExecutionClearPreparation(
+        self: *Runtime,
+        execution_generation: u64,
+    ) void {
+        switch (self.execution_redaction_preparation) {
+            .clear => |prepared_generation| std.debug.assert(
+                prepared_generation == execution_generation,
+            ),
+            else => unreachable,
+        }
+        self.execution_redaction_preparation = .none;
     }
 
     pub fn executionReplacementPending(self: *const Runtime) bool {
@@ -3050,10 +3129,6 @@ pub const Runtime = struct {
         var candidate_owned = true;
         defer if (candidate_owned) candidate.deinit();
         const id = try candidate.create(definition, now);
-        self.redactScheduledTaskNoFail(
-            candidate.find(id).?,
-            self.execution.credential(),
-        );
         try self.commitScheduledTaskCandidate(&candidate);
         self.replaceScheduledTaskStore(&candidate);
         candidate_owned = false;
@@ -3077,10 +3152,6 @@ pub const Runtime = struct {
         var candidate_owned = true;
         defer if (candidate_owned) candidate.deinit();
         try candidate.update(id, expected_epoch, definition, now);
-        self.redactScheduledTaskNoFail(
-            candidate.find(id).?,
-            self.execution.credential(),
-        );
         try self.commitScheduledTaskCandidate(&candidate);
         self.replaceScheduledTaskStore(&candidate);
         candidate_owned = false;
@@ -5410,19 +5481,28 @@ pub const Runtime = struct {
 
     fn commitScheduledTaskCandidate(
         self: *Runtime,
-        candidate: *const scheduled_tasks_impl.Store,
+        candidate: *scheduled_tasks_impl.Store,
     ) Error!void {
         switch (self.schedule_persistence_health) {
             .ready => {},
             .outcome_unknown => return error.ScheduledTaskPersistenceOutcomeUnknown,
             else => return error.ScheduledTaskPersistenceUnavailable,
         }
+        _ = self.redactScheduledTaskStoreWithKnownCredentialsNoFail(
+            candidate,
+            "",
+        );
         const output = try self.allocator.alloc(
             u8,
             scheduled_task_persistence.max_store_bytes,
         );
         defer self.allocator.free(output);
         const bytes = try scheduled_task_persistence.encode(output, candidate);
+        if (self.containsKnownCredential(bytes)) {
+            self.schedule_persistence_health = .write_failed;
+            self.bumpRevision();
+            return error.ScheduledTaskPersistenceFailed;
+        }
         switch (self.schedule_persistence.commit(bytes)) {
             .committed => {},
             .failed => {
@@ -5436,6 +5516,40 @@ pub const Runtime = struct {
                 return error.ScheduledTaskPersistenceOutcomeUnknown;
             },
         }
+    }
+
+    /// Redaction is itself a durable Schedule mutation. The caller may
+    /// install or release an execution only after this candidate commits;
+    /// failures therefore retain both the previous Schedule store and the
+    /// previous execution owner.
+    fn prepareScheduledTaskCredentialRedaction(
+        self: *Runtime,
+        additional_credential: []const u8,
+    ) Error!void {
+        if (self.schedule_persistence.enabled) switch (self.schedule_persistence_health) {
+            .ready => {},
+            .outcome_unknown => return error.ScheduledTaskPersistenceOutcomeUnknown,
+            else => return error.ScheduledTaskPersistenceUnavailable,
+        };
+        var has_items = false;
+        for (self.scheduled_tasks.items) |entry| {
+            if (entry != null) {
+                has_items = true;
+                break;
+            }
+        }
+        if (!has_items) return;
+        var candidate = try self.scheduled_tasks.clone(self.allocator);
+        var candidate_owned = true;
+        defer if (candidate_owned) candidate.deinit();
+        if (!self.redactScheduledTaskStoreWithKnownCredentialsNoFail(
+            &candidate,
+            additional_credential,
+        )) return;
+        try self.commitScheduledTaskCandidate(&candidate);
+        self.replaceScheduledTaskStore(&candidate);
+        candidate_owned = false;
+        self.bumpRevision();
     }
 
     fn replaceScheduledTaskStore(
@@ -5940,7 +6054,7 @@ pub const Runtime = struct {
         self.redactCatalogProjectionsNoFail(credential);
         for (self.scheduled_tasks.items) |*entry| {
             const item = &(entry.* orelse continue);
-            self.redactScheduledTaskNoFail(item, credential);
+            _ = self.redactScheduledTaskNoFail(item, credential);
         }
         self.task_runtime.redactProjectionsNoFail(credential, .{
             .context = self,
@@ -5953,15 +6067,70 @@ pub const Runtime = struct {
         _: *Runtime,
         item: *scheduled_tasks_impl.Item,
         credential: []const u8,
-    ) void {
-        if (credential.len == 0) return;
-        item.title_redacted =
-            redactFixedWidthNoFail(item.title, credential) or
-            item.title_redacted;
-        _ = redactFixedWidthNoFail(item.execution_model, credential);
-        item.input.redacted =
-            redactFixedWidthNoFail(item.input.value, credential) or
-            item.input.redacted;
+    ) bool {
+        if (credential.len == 0) return false;
+        const title_changed = redactFixedWidthNoFail(item.title, credential);
+        const model_changed = redactFixedWidthNoFail(
+            item.execution_model,
+            credential,
+        );
+        const input_changed = redactFixedWidthNoFail(
+            item.input.value,
+            credential,
+        );
+        item.title_redacted = title_changed or item.title_redacted;
+        item.input.redacted = input_changed or item.input.redacted;
+        return title_changed or model_changed or input_changed;
+    }
+
+    fn redactScheduledTaskWithKnownCredentialsNoFail(
+        self: *Runtime,
+        item: *scheduled_tasks_impl.Item,
+        additional_credential: []const u8,
+    ) bool {
+        var changed = self.redactScheduledTaskNoFail(
+            item,
+            self.execution.credential(),
+        );
+        const title_changed = self.task_runtime
+            .redactWithExecutionCredentialsNoFail(
+            item.title,
+            redactFixedWidthNoFail,
+        );
+        const model_changed = self.task_runtime
+            .redactWithExecutionCredentialsNoFail(
+            item.execution_model,
+            redactFixedWidthNoFail,
+        );
+        const input_changed = self.task_runtime
+            .redactWithExecutionCredentialsNoFail(
+            item.input.value,
+            redactFixedWidthNoFail,
+        );
+        item.title_redacted = title_changed or item.title_redacted;
+        item.input.redacted = input_changed or item.input.redacted;
+        changed = title_changed or model_changed or input_changed or changed;
+        changed = self.redactScheduledTaskNoFail(
+            item,
+            additional_credential,
+        ) or changed;
+        return changed;
+    }
+
+    fn redactScheduledTaskStoreWithKnownCredentialsNoFail(
+        self: *Runtime,
+        store: *scheduled_tasks_impl.Store,
+        additional_credential: []const u8,
+    ) bool {
+        var changed = false;
+        for (store.items) |*entry| {
+            const item = &(entry.* orelse continue);
+            changed = self.redactScheduledTaskWithKnownCredentialsNoFail(
+                item,
+                additional_credential,
+            ) or changed;
+        }
+        return changed;
     }
 
     fn redactCatalogProjectionsNoFail(
@@ -6602,6 +6771,8 @@ pub const Runtime = struct {
             .replacement_pending_fn = controlReplacementPending,
             .begin_default_replacement_fn = controlBeginDefaultReplacement,
             .begin_replacement_fn = controlBeginReplacement,
+            .prepare_install_fn = controlPrepareExecutionInstall,
+            .prepare_clear_fn = controlPrepareExecutionClear,
             .install_model_connection_fn = controlInstallModelConnection,
             .install_execution_fn = controlInstallExecution,
             .clear_execution_fn = controlClearExecution,
@@ -6698,6 +6869,12 @@ fn controlBeginDefaultReplacement(context: *anyopaque) anyerror!void {
 }
 fn controlBeginReplacement(context: *anyopaque) anyerror!void {
     return controlOwner(context).beginExecutionReplacement();
+}
+fn controlPrepareExecutionInstall(context: *anyopaque, input: account_contract.ExecutionConfigInput) anyerror!void {
+    return controlOwner(context).prepareExecutionInstall(input);
+}
+fn controlPrepareExecutionClear(context: *anyopaque) anyerror!void {
+    return controlOwner(context).prepareExecutionClear();
 }
 fn controlInstallModelConnection(context: *anyopaque, execution: *account_contract.OwnedExecutionConfig, binding: *PreparedModelConnectionBinding) void {
     controlOwner(context).installModelConnectionExecutionNoFail(execution, binding);
@@ -7572,9 +7749,41 @@ fn installTestExecution(control: *Runtime) !void {
         },
     });
     try account_contract.validateView(control.accountView());
+    try control.prepareExecutionInstall(execution.input());
     control.installExecutionNoFail(&execution);
     control.endExecutionReplacementNoFail();
     control.finishAccountCommitNoFail();
+}
+
+fn commitTestExecutionFact(control: *Runtime, generation: u64) void {
+    const api_keys = [_]account_contract.ApiKeyView{.{
+        .id = "key-1",
+        .name = "Primary",
+        .suffix = "1234",
+        .provider_kind = .anthropic,
+    }};
+    const models = [_]account_contract.ModelView{.{
+        .id = "fixture-model",
+        .display_name = "Fixture model",
+    }};
+    control.commitAccountFactNoFail(.{
+        .kind = .execution_changed,
+        .view = .{
+            .state = .authenticated,
+            .catalog_state = .ready,
+            .account_id = "account-1",
+            .display_name = "Metask User",
+            .api_keys = &api_keys,
+            .models = &models,
+            .selected_api_key_id = "key-1",
+            .selected_model = "fixture-model",
+            .model_catalog_api_key_id = "key-1",
+            .can_create_task = true,
+            .catalog_generation = generation,
+            .metask_execution_generation = generation,
+            .execution_generation = generation,
+        },
+    });
 }
 
 fn testRuntime() !Runtime {
@@ -7760,6 +7969,8 @@ test "MCP refresh timer rearm preserves the absolute deadline" {
 const TestSchedulePersistence = struct {
     commits: usize = 0,
     result: SchedulePersistenceCommit = .committed,
+    storage: ?[]u8 = null,
+    len: usize = 0,
 
     fn commit(
         context: ?*anyopaque,
@@ -7768,6 +7979,13 @@ const TestSchedulePersistence = struct {
         const self: *@This() = @ptrCast(@alignCast(context.?));
         std.debug.assert(bytes.len != 0);
         self.commits += 1;
+        if (self.result == .committed) {
+            if (self.storage) |storage| {
+                if (bytes.len > storage.len) return .failed;
+                @memcpy(storage[0..bytes.len], bytes);
+                self.len = bytes.len;
+            }
+        }
         return self.result;
     }
 
@@ -8619,10 +8837,21 @@ test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {
     );
     defer automatic_root.deinit();
     var clock: TestScheduleClock = .{ .now = 1_000 };
-    var persistence: TestSchedulePersistence = .{};
+    const persistence_storage = try std.testing.allocator.alloc(
+        u8,
+        scheduled_task_persistence.max_store_bytes,
+    );
+    defer std.testing.allocator.free(persistence_storage);
+    var persistence: TestSchedulePersistence = .{
+        .storage = persistence_storage,
+    };
     control.schedule_timer = clock.timer();
     control.schedule_persistence = persistence.capability();
     control.schedule_persistence_health = .ready;
+    defer {
+        control.schedule_persistence = .{};
+        control.schedule_persistence_health = .unavailable;
+    }
     try std.testing.expectError(
         error.WorkspaceUnavailable,
         control.createScheduledTask(.{
@@ -8661,6 +8890,13 @@ test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {
             "SECRET-KEY",
         ) == null,
     );
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            persistence_storage[0..persistence.len],
+            "SECRET-KEY",
+        ) == null,
+    );
     const storage = try std.testing.allocator.alloc(
         u8,
         control.limits.max_snapshot_bytes,
@@ -8695,6 +8931,160 @@ test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {
         SchedulePersistenceHealth.write_failed,
         control.schedule_persistence_health,
     );
+}
+
+test "execution replacement durably scrubs Schedule before ownership transfer" {
+    var control = try testRuntime();
+    defer control.deinit();
+    try replaceTaskCredentialForTest(
+        &control.task_runtime.tasks[0].?,
+        "TASK-SECRET",
+    );
+    var automatic_tmp = std.testing.tmpDir(.{});
+    defer automatic_tmp.cleanup();
+    var automatic_root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const automatic_root_len = try automatic_tmp.dir.realPath(
+        std.testing.io,
+        &automatic_root_storage,
+    );
+    var automatic_root = try automatic_workspace_allocator.Root.open(
+        std.testing.io,
+        std.testing.allocator,
+        automatic_root_storage[0..automatic_root_len],
+    );
+    defer automatic_root.deinit();
+    var clock: TestScheduleClock = .{ .now = 1_000 };
+    const persistence_storage = try std.testing.allocator.alloc(
+        u8,
+        scheduled_task_persistence.max_store_bytes,
+    );
+    defer std.testing.allocator.free(persistence_storage);
+    var persistence: TestSchedulePersistence = .{
+        .storage = persistence_storage,
+    };
+    control.schedule_timer = clock.timer();
+    control.schedule_persistence = persistence.capability();
+    control.schedule_persistence_health = .ready;
+    defer {
+        control.schedule_persistence = .{};
+        control.schedule_persistence_health = .unavailable;
+    }
+    control.automatic_workspaces = automatic_workspace_allocator.Allocator.init(
+        &automatic_root,
+    );
+
+    const id = try control.createScheduledTask(.{
+        .title = "Use NEXT-SECRET and TASK-SECRET",
+        .expected_execution_generation = 1,
+        .input = "Review NEXT-SECRET with TASK-SECRET",
+        .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
+    });
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        persistence_storage[0..persistence.len],
+        "TASK-SECRET",
+    ) == null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        persistence_storage[0..persistence.len],
+        "NEXT-SECRET",
+    ) != null);
+
+    var replacement = try account_contract.OwnedExecutionConfig.initOwned(
+        std.testing.allocator,
+        .anthropic,
+        try std.testing.allocator.dupe(u8, "fixture-model"),
+        try std.testing.allocator.dupe(
+            u8,
+            account_contract.metask_anthropic_messages_url,
+        ),
+        2,
+        try std.testing.allocator.dupe(u8, "NEXT-SECRET"),
+    );
+    errdefer replacement.deinit();
+    try control.beginDefaultExecutionReplacement();
+    commitTestExecutionFact(&control, 2);
+    try control.prepareExecutionInstall(replacement.input());
+    try std.testing.expectEqual(@as(usize, 2), persistence.commits);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        persistence_storage[0..persistence.len],
+        "NEXT-SECRET",
+    ) == null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        control.scheduled_tasks.find(id).?.input.value,
+        "NEXT-SECRET",
+    ) == null);
+    control.installExecutionNoFail(&replacement);
+    control.endExecutionReplacementNoFail();
+    control.finishAccountCommitNoFail();
+    try std.testing.expectEqual(@as(u64, 2), control.execution.generation);
+
+    const blocked_id = try control.createScheduledTask(.{
+        .title = "Use BLOCKED-SECRET",
+        .expected_execution_generation = 2,
+        .input = "Review BLOCKED-SECRET",
+        .recurrence = .{ .once = .{ .at_unix_seconds = 3_000 } },
+    });
+    var blocked = try account_contract.OwnedExecutionConfig.initOwned(
+        std.testing.allocator,
+        .anthropic,
+        try std.testing.allocator.dupe(u8, "fixture-model"),
+        try std.testing.allocator.dupe(
+            u8,
+            account_contract.metask_anthropic_messages_url,
+        ),
+        3,
+        try std.testing.allocator.dupe(u8, "BLOCKED-SECRET"),
+    );
+    var blocked_owned = true;
+    defer if (blocked_owned) blocked.deinit();
+    persistence.result = .failed;
+    try control.beginDefaultExecutionReplacement();
+    commitTestExecutionFact(&control, 3);
+    try std.testing.expectError(
+        error.ScheduledTaskPersistenceFailed,
+        control.prepareExecutionInstall(blocked.input()),
+    );
+    try std.testing.expectEqual(@as(u64, 2), control.execution.generation);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        control.scheduled_tasks.find(blocked_id).?.input.value,
+        "BLOCKED-SECRET",
+    ) != null);
+    control.endExecutionReplacementNoFail();
+    control.finishAccountCommitNoFail();
+    try std.testing.expect(!control.accountView().can_create_task);
+    try std.testing.expectEqual(
+        SchedulePersistenceHealth.write_failed,
+        control.schedule_persistence_health,
+    );
+
+    blocked.deinit();
+    blocked_owned = false;
+    persistence.result = .committed;
+    control.schedule_persistence_health = .ready;
+    const legacy_item = control.scheduled_tasks.find(id).?;
+    @memcpy(legacy_item.input.value[0.."NEXT-SECRET".len], "NEXT-SECRET");
+    try control.beginDefaultExecutionReplacement();
+    control.commitAccountFactNoFail(.{
+        .kind = .signed_out,
+        .view = .{
+            .state = .signed_out,
+            .catalog_state = .unavailable,
+        },
+    });
+    try control.prepareExecutionClear();
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        persistence_storage[0..persistence.len],
+        "NEXT-SECRET",
+    ) == null);
+    control.clearExecutionNoFail();
+    control.endExecutionReplacementNoFail();
+    control.finishAccountCommitNoFail();
+    try std.testing.expect(!control.execution.ready());
 }
 
 test "Scheduled Task execution drift becomes needs attention without blocking Account" {
@@ -9491,6 +9881,7 @@ test "Runtime publishes a user model connection as an independent execution sour
     var prepared_binding_owned = true;
     defer if (prepared_binding_owned) prepared_binding.deinit();
     try control.beginDefaultExecutionReplacement();
+    try control.prepareExecutionInstall(execution.input());
     control.installModelConnectionExecutionNoFail(
         &execution,
         &prepared_binding,
@@ -9572,6 +9963,7 @@ test "Account projection and execution install use preallocated no-fail storage"
             .execution_generation = 1,
         },
     });
+    try control.prepareExecutionInstall(execution.input());
     control.installExecutionNoFail(&execution);
     try std.testing.expect(!control.accountView().can_create_task);
     control.endExecutionReplacementNoFail();
@@ -9683,6 +10075,7 @@ test "default replacement preserves Task generation and installs the next admiss
             .execution_generation = 2,
         },
     });
+    try control.prepareExecutionInstall(replacement.input());
     control.installExecutionNoFail(&replacement);
     control.endExecutionReplacementNoFail();
     control.finishAccountCommitNoFail();
@@ -9851,6 +10244,7 @@ test "clearing the admission default preserves active Task execution" {
             .execution_generation = 0,
         },
     });
+    try control.prepareExecutionClear();
     control.clearExecutionNoFail();
     control.endExecutionReplacementNoFail();
     control.finishAccountCommitNoFail();
@@ -9978,6 +10372,7 @@ test "clearing the last default execution scrubs its credential before secure ze
             .catalog_state = .unavailable,
         },
     });
+    try control.prepareExecutionClear();
     control.clearExecutionNoFail();
     control.endExecutionReplacementNoFail();
     control.finishAccountCommitNoFail();
@@ -10460,6 +10855,7 @@ test "Runtime shutdown releases current and Task-owned execution generations" {
             .execution_generation = 2,
         },
     });
+    try control.prepareExecutionInstall(replacement.input());
     control.installExecutionNoFail(&replacement);
     control.endExecutionReplacementNoFail();
     control.deinit();

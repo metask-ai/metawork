@@ -2543,6 +2543,27 @@ pub const Runtime = struct {
         return false;
     }
 
+    /// Applies a callback-scoped projection scrubber against every credential
+    /// still retained by a live Task execution. The callback may observe a
+    /// borrowed credential only for the duration of the call and must not
+    /// retain it; only the aggregate redaction result is returned.
+    pub fn redactWithExecutionCredentialsNoFail(
+        self: *const Runtime,
+        value: []u8,
+        redact_fn: *const fn ([]u8, []const u8) bool,
+    ) bool {
+        var changed = false;
+        for (self.tasks) |*entry| {
+            const task = &(entry.* orelse continue);
+            if (task.runtime.executionConst()) |execution| {
+                const credential = execution.input().api_key;
+                if (credential.len != 0)
+                    changed = redact_fn(value, credential) or changed;
+            }
+        }
+        return changed;
+    }
+
     pub fn matchedExecutionCredentialPrefix(
         self: *const Runtime,
         value: []const u8,
