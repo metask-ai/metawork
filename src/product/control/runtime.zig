@@ -4,7 +4,7 @@ const lifecycle = @import("metawork_agent");
 const account_contract = @import("metawork_account_contract");
 const executor_impl = @import("product_control_executor");
 const file_preview = @import("product_control_file_preview");
-const automatic_workspace_allocator = @import("product_control_automatic_workspace");
+const product_workspace = @import("metawork_product_workspace");
 const product_schedule = @import("metawork_product_schedule");
 const skill_ports = @import("metawork_product_skill").ports;
 const skill_runtime = @import("metawork_product_skill").runtime;
@@ -167,40 +167,13 @@ pub const ScheduledTaskDefinitionInput = struct {
     recurrence: ScheduledTaskRecurrence,
 };
 
-pub const WorkspaceAuthorization = enum {
-    available,
-    removing,
-    reauthorization_required,
-};
-
-pub const WorkspaceKind = enum {
-    manual,
-    automatic,
-};
-
-pub const WorkspaceRemovalFailure = enum {
-    none,
-    task_close_failed,
-};
-
-pub const WorkspaceSignals = struct {
-    running: u32 = 0,
-    attention: u32 = 0,
-    failed_or_interrupted: u32 = 0,
-};
+pub const WorkspaceAuthorization = product_workspace.Authorization;
+pub const WorkspaceKind = product_workspace.Kind;
+pub const WorkspaceRemovalFailure = product_workspace.RemovalFailure;
+pub const WorkspaceSignals = product_workspace.Signals;
 
 /// Borrowed, bounded Host-owned Workspace projection.
-pub const WorkspaceProjection = struct {
-    id: u64,
-    epoch: u64,
-    kind: WorkspaceKind,
-    canonical_root: []const u8,
-    display_name: []const u8,
-    authorization: WorkspaceAuthorization,
-    last_removal_failure: WorkspaceRemovalFailure,
-    recent_order: u64,
-    signals: WorkspaceSignals,
-};
+pub const WorkspaceProjection = product_workspace.Projection;
 
 pub const CatalogAvailability = catalog_snapshot.CatalogAvailability;
 
@@ -226,7 +199,7 @@ pub const UiResponse = task_runtime.UiResponse;
 
 pub const AppDirectories = struct {
     canonical_user_home: ?[]const u8 = null,
-    automatic_workspace_root: ?*automatic_workspace_allocator.Root = null,
+    automatic_workspace_root: ?*product_workspace.AutomaticRoot = null,
 };
 
 pub const SkillManagementHealth = skill_runtime.ManagementHealth;
@@ -384,10 +357,62 @@ pub const ChangeNotifier = struct {
 };
 
 const TaskWorkspaceOrderContext = struct {
-    control: *Runtime,
-    workspace: *WorkspaceView,
-    previous_order: u64,
+    workspace: *product_workspace.Runtime,
+    preparation: *product_workspace.OrderPreparation,
 };
+
+fn copyWorkspaceStorage(
+    context: *anyopaque,
+    value: []const u8,
+    max: usize,
+) product_workspace.StorageError![]u8 {
+    const self: *Runtime = @ptrCast(@alignCast(context));
+    return self.copyBounded(value, max) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.ProjectionCapacity => error.ProjectionCapacity,
+        else => unreachable,
+    };
+}
+
+fn projectWorkspaceStorage(
+    context: *anyopaque,
+    value: []const u8,
+    max: usize,
+    sensitive: []const u8,
+) product_workspace.StorageError!product_workspace.ProjectedText {
+    const self: *Runtime = @ptrCast(@alignCast(context));
+    const projected = self.copyProjected(value, max, sensitive) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.ProjectionCapacity => return error.ProjectionCapacity,
+        else => unreachable,
+    };
+    return .{ .value = projected.value, .redacted = projected.redacted };
+}
+
+fn freeWorkspaceStorage(context: *anyopaque, value: []u8) void {
+    const self: *Runtime = @ptrCast(@alignCast(context));
+    self.freeTracked(value);
+}
+
+fn redactWorkspaceStorage(
+    _: *anyopaque,
+    storage: []u8,
+    projected_len: *usize,
+    credential: []const u8,
+) bool {
+    return redactWorkspaceBytesNoFail(storage, projected_len, credential);
+}
+
+fn automaticWorkspaceContains(context: *const anyopaque, path: []const u8) bool {
+    const self: *const Runtime = @ptrCast(@alignCast(context));
+    return self.workspace.automaticRootContains(path);
+}
+
+fn hiddenWorkspaceReusable(context: *const anyopaque, workspace_id: u64) bool {
+    const self: *const Runtime = @ptrCast(@alignCast(context));
+    return !self.task_runtime.workspaceHasTasks(workspace_id) and
+        !self.skill.hasWorkspaceJob(workspace_id);
+}
 
 fn enqueueSkillJob(
     context: *anyopaque,
@@ -714,52 +739,9 @@ test "Task aggregate separates Task runtime ownership from product history" {
 
 const OwnedTaskExecution = if (builtin.is_test) task_test_execution_binding.OwnedTaskExecution else void;
 
-const WorkspaceTrust = union(enum) {
-    explicitly_trusted,
-    temporary: []u8,
-};
-
 const CatalogSnapshot = catalog_snapshot.Snapshot;
 
 const McpRefreshTestJob = if (builtin.is_test) mcp_testing.RefreshJob else struct {};
-
-const WorkspaceView = struct {
-    id: u64,
-    kind: WorkspaceKind = .manual,
-    automatic_task_id: u64 = 0,
-    epoch: u64 = 1,
-    canonical_root: []u8,
-    projected_root_storage: []u8,
-    projected_root_len: usize,
-    display_name_storage: []u8,
-    display_name_len: usize,
-    projection_redacted: bool = false,
-    trust: WorkspaceTrust,
-    authorization: WorkspaceAuthorization = .available,
-    last_removal_failure: WorkspaceRemovalFailure = .none,
-    visible: bool = true,
-    recent_order: u64,
-};
-
-const ExistingWorkspaceState = struct {
-    trust: WorkspaceTrust,
-    authorization: WorkspaceAuthorization,
-    visible: bool,
-    epoch: u64,
-    recent_order: u64,
-};
-
-const WorkspaceUpsert = struct {
-    index: usize,
-    reauthorizing: bool = false,
-    previous: union(enum) {
-        existing: ExistingWorkspaceState,
-        created: struct {
-            next_workspace_id: u64,
-            replaced: ?WorkspaceView,
-        },
-    },
-};
 
 fn FixedText(comptime capacity: usize) type {
     return struct {
@@ -1226,7 +1208,7 @@ pub const Runtime = struct {
     io: std.Io,
     agent_runtime: *lifecycle.Runtime,
     limits: Limits,
-    workspaces: []?WorkspaceView,
+    workspace: product_workspace.Runtime,
     task_runtime: task_runtime.Runtime,
     task_persistence: TaskPersistence,
     task_persistence_health: TaskPersistenceHealth,
@@ -1249,15 +1231,12 @@ pub const Runtime = struct {
     account: AccountProjection,
     execution: ActiveExecution,
     canonical_user_home: ?[]u8,
-    automatic_workspaces: ?automatic_workspace_allocator.Allocator,
     execution_replacement: ExecutionReplacementKind = .none,
     execution_redaction_preparation: ExecutionRedactionPreparation = .none,
     custom_execution_binding: ?CustomExecutionBinding = null,
     model_connection_capabilities: ModelConnectionCapabilities,
     completion_factory: CompletionFactory,
     mcp: ?mcp_runtime.Runtime = null,
-    next_workspace_id: u64 = 1,
-    next_workspace_recent_order: u64 = 1,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -1306,16 +1285,17 @@ pub const Runtime = struct {
             break :home_copy try allocator.dupe(u8, home);
         } else null;
         errdefer if (canonical_user_home) |home| allocator.free(home);
-        var automatic_workspaces = if (configuration.directories.automatic_workspace_root) |root|
-            automatic_workspace_allocator.Allocator.init(root)
-        else
-            null;
-        errdefer if (automatic_workspaces) |*store| store.deinit();
         const workspace_capacity = workspaceRecordCapacity(limits) orelse
             return error.ProjectionCapacity;
-        const workspaces = try allocator.alloc(?WorkspaceView, workspace_capacity);
-        errdefer allocator.free(workspaces);
-        @memset(workspaces, null);
+        var workspace = try product_workspace.Runtime.init(
+            allocator,
+            io,
+            limits.max_workspaces,
+            limits.max_tasks,
+            limits.max_workspace_bytes,
+            configuration.directories.automatic_workspace_root,
+        );
+        errdefer workspace.deinitEmpty();
         var product_tasks = try task_runtime.Runtime.init(allocator, limits.max_tasks);
         errdefer product_tasks.deinitStorage();
         var task_persistence_health: TaskPersistenceHealth =
@@ -1393,7 +1373,7 @@ pub const Runtime = struct {
             .io = io,
             .agent_runtime = agent_runtime,
             .limits = limits,
-            .workspaces = workspaces,
+            .workspace = workspace,
             .task_runtime = product_tasks,
             .task_persistence = configuration.task_persistence,
             .task_persistence_health = task_persistence_health,
@@ -1408,7 +1388,6 @@ pub const Runtime = struct {
             .account = account,
             .execution = execution,
             .canonical_user_home = canonical_user_home,
-            .automatic_workspaces = automatic_workspaces,
             .model_connection_capabilities = configuration.model_connections,
             .completion_factory = configuration.completion_factory,
         };
@@ -1456,6 +1435,16 @@ pub const Runtime = struct {
         }
         preview_lane_owned = false;
         return control;
+    }
+
+    fn workspaceStorage(self: *Runtime) product_workspace.Storage {
+        return .{
+            .context = self,
+            .copy_fn = copyWorkspaceStorage,
+            .project_fn = projectWorkspaceStorage,
+            .free_fn = freeWorkspaceStorage,
+            .redact_fn = redactWorkspaceStorage,
+        };
     }
 
     pub const FilePreviewAdmission = union(enum) {
@@ -1595,14 +1584,11 @@ pub const Runtime = struct {
         self: *const Runtime,
         reference: task_runtime.FileReference,
     ) bool {
-        for (self.workspaces) |*workspace_entry| {
-            const workspace = workspace_entry.* orelse continue;
-            if (workspace.id != reference.workspace_id) continue;
-            return workspace.epoch == reference.workspace_epoch and
-                workspace.authorization == .available and
-                std.mem.eql(u8, workspace.canonical_root, reference.workspace_root);
-        }
-        return false;
+        return self.workspace.filePreviewAuthorized(
+            reference.workspace_id,
+            reference.workspace_epoch,
+            reference.workspace_root,
+        );
     }
 
     const PreviewProjection = struct {
@@ -1803,7 +1789,7 @@ pub const Runtime = struct {
         return self.skill.exportPackage(install_id, absolute_destination);
     }
     pub fn automaticWorkspacesAvailable(self: *const Runtime) bool {
-        return self.automatic_workspaces != null;
+        return self.workspace.automaticRootAvailable();
     }
 
     pub fn hasEnabledScheduledTasks(self: *Runtime) bool {
@@ -2093,20 +2079,45 @@ pub const Runtime = struct {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
         try self.requireTaskPersistenceMutation();
-        const recent_order = try self.takeWorkspaceRecentOrder();
-        const upsert = try self.upsertWorkspace(input);
-        const workspace = &self.workspaces[upsert.index].?;
+        var preparation = try self.workspace.prepareOpen(
+            input.workspace_root,
+            switch (input.trust) {
+                .explicitly_trusted => .explicitly_trusted,
+                .temporary => |root| .{ .temporary = root },
+            },
+            self.execution.credential(),
+            self.workspaceStorage(),
+            .{
+                .context = self,
+                .automatic_contains_fn = automaticWorkspaceContains,
+                .reusable_fn = hiddenWorkspaceReusable,
+            },
+        );
+        errdefer if (preparation.isActive())
+            self.workspace.rollbackOpen(&preparation, self.workspaceStorage());
+        const workspace = self.workspace.preparedFacts(&preparation);
         const skill_root = try self.allocator.dupe(u8, workspace.canonical_root);
         var skill_root_owned = true;
         defer if (skill_root_owned) self.allocator.free(skill_root);
-        workspace.recent_order = recent_order;
         self.commitTaskStateIfConfigured() catch |err| {
-            self.next_workspace_recent_order = recent_order;
-            self.rollbackWorkspaceUpsert(upsert);
+            self.workspace.rollbackOpen(&preparation, self.workspaceStorage());
             return err;
         };
-        self.finishWorkspaceUpsert(upsert, skill_root);
+        if (self.workspace.commitOpen(&preparation, self.workspaceStorage())) |displaced_id|
+            std.debug.assert(self.skill.unregisterWorkspace(
+                displaced_id,
+                self.skillProjectionBudget(),
+            ));
+        self.skill.registerWorkspaceOwned(.{
+            .id = workspace.id,
+            .epoch = workspace.epoch,
+            .canonical_root = skill_root,
+        }, self.skillProjectionBudget());
         skill_root_owned = false;
+        self.workspace.redactNoFail(
+            self.execution.credential(),
+            self.workspaceStorage(),
+        );
         self.reconcileSkillEnablementNoFail();
         self.recoverSkillTransactionsForScopeNoFail(.{ .project = .{
             .workspace_id = workspace.id,
@@ -2157,7 +2168,7 @@ pub const Runtime = struct {
         workspace_id: u64,
     ) Error!CatalogProjection {
         self.syncLifecycle();
-        const workspace = self.findWorkspace(workspace_id) orelse
+        const workspace = self.workspace.binding(workspace_id) orelse
             return error.UnknownWorkspace;
         return self.skill.workspaceCatalogProjection(workspace.id, workspace.epoch);
     }
@@ -2183,7 +2194,7 @@ pub const Runtime = struct {
         switch (mutation.scope) {
             .personal => {},
             .project => |project| {
-                const workspace = self.findWorkspace(project.workspace_id) orelse
+                const workspace = self.workspace.facts(project.workspace_id) orelse
                     return error.UnknownWorkspace;
                 if (workspace.kind != .manual or !workspace.visible or
                     workspace.authorization != .available)
@@ -2235,7 +2246,7 @@ pub const Runtime = struct {
     ) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
-        const workspace = self.findWorkspace(workspace_id) orelse
+        const workspace = self.workspace.facts(workspace_id) orelse
             return error.UnknownWorkspace;
         if (workspace.kind != .manual) return error.WorkspaceUnavailable;
         if (workspace.epoch != expected_workspace_epoch)
@@ -2257,7 +2268,7 @@ pub const Runtime = struct {
             task_id,
             expected_binding_epoch,
         );
-        const workspace = self.findWorkspace(facts.workspace_id) orelse
+        const workspace = self.workspace.facts(facts.workspace_id) orelse
             return error.WorkspaceUnavailable;
         if (self.skill.enablementHealth() != .ready)
             return error.RecoveryUnavailable;
@@ -2302,7 +2313,7 @@ pub const Runtime = struct {
 
     pub fn workspaceEpoch(self: *Runtime, workspace_id: u64) Error!u64 {
         self.syncLifecycle();
-        const workspace = self.findWorkspace(workspace_id) orelse
+        const workspace = self.workspace.facts(workspace_id) orelse
             return error.UnknownWorkspace;
         return workspace.epoch;
     }
@@ -2312,7 +2323,7 @@ pub const Runtime = struct {
         workspace_id: u64,
     ) Error!WorkspaceKind {
         self.syncLifecycle();
-        const workspace = self.findWorkspace(workspace_id) orelse
+        const workspace = self.workspace.facts(workspace_id) orelse
             return error.UnknownWorkspace;
         return workspace.kind;
     }
@@ -2332,35 +2343,11 @@ pub const Runtime = struct {
         output: []WorkspaceProjection,
     ) Error![]const WorkspaceProjection {
         self.syncLifecycle();
-        var count: usize = 0;
-        for (self.workspaces) |*entry| {
-            const workspace = &(entry.* orelse continue);
-            if (workspace.kind == .manual and !workspace.visible) continue;
-            if (count == output.len) return error.WorkspaceCapacity;
-            output[count] = .{
-                .id = workspace.id,
-                .epoch = workspace.epoch,
-                .kind = workspace.kind,
-                .canonical_root = workspace.projected_root_storage[0..workspace.projected_root_len],
-                .display_name = workspace.display_name_storage[0..workspace.display_name_len],
-                .authorization = workspace.authorization,
-                .last_removal_failure = workspace.last_removal_failure,
-                .recent_order = workspace.recent_order,
-                .signals = self.workspaceSignals(workspace.id),
-            };
-            count += 1;
-        }
-        std.mem.sort(
-            WorkspaceProjection,
-            output[0..count],
-            {},
-            struct {
-                fn lessThan(_: void, left: WorkspaceProjection, right: WorkspaceProjection) bool {
-                    return left.recent_order > right.recent_order;
-                }
-            }.lessThan,
+        return product_workspace.copyProjections(
+            &self.workspace,
+            output,
+            self.workspaceViewProvider(),
         );
-        return output[0..count];
     }
 
     /// Removes a Workspace from navigation, makes future Run admission fail
@@ -2370,7 +2357,7 @@ pub const Runtime = struct {
         self: *Runtime,
         workspace_id: u64,
     ) Error!void {
-        const workspace = self.findWorkspace(workspace_id) orelse
+        const workspace = self.workspace.facts(workspace_id) orelse
             return error.UnknownWorkspace;
         return self.removeWorkspaceAtEpoch(workspace_id, workspace.epoch);
     }
@@ -2382,31 +2369,20 @@ pub const Runtime = struct {
     ) Error!void {
         self.syncLifecycle();
         try self.requireTaskPersistenceMutation();
-        const workspace = self.findWorkspace(workspace_id) orelse
-            return error.UnknownWorkspace;
-        if (workspace.kind != .manual or !workspace.visible)
-            return error.UnknownWorkspace;
-        if (expected_workspace_epoch == 0 or workspace.epoch != expected_workspace_epoch)
-            return error.WorkspaceEpochMismatch;
-        if (workspace.authorization == .removing)
-            return error.WorkspaceRemovalInProgress;
-        if (workspace.epoch == std.math.maxInt(u64))
-            return error.WorkspaceEpochExhausted;
+        var preparation = try self.workspace.prepareRemoval(
+            workspace_id,
+            expected_workspace_epoch,
+        );
+        errdefer if (preparation.isActive()) self.workspace.rollbackRemoval(&preparation);
+        const workspace = self.workspace.preparedRemovalFacts(&preparation);
         const skill_root = try self.allocator.dupe(u8, workspace.canonical_root);
         var skill_root_owned = true;
         defer if (skill_root_owned) self.allocator.free(skill_root);
-        const previous_epoch = workspace.epoch;
-        const previous_authorization = workspace.authorization;
-        const previous_failure = workspace.last_removal_failure;
-        workspace.epoch += 1;
-        workspace.authorization = .removing;
-        workspace.last_removal_failure = .none;
         self.commitTaskStateIfConfigured() catch |err| {
-            workspace.epoch = previous_epoch;
-            workspace.authorization = previous_authorization;
-            workspace.last_removal_failure = previous_failure;
+            self.workspace.rollbackRemoval(&preparation);
             return err;
         };
+        self.workspace.commitRemoval(&preparation);
         self.skill.registerWorkspaceOwned(.{
             .id = workspace.id,
             .epoch = workspace.epoch,
@@ -2420,8 +2396,7 @@ pub const Runtime = struct {
             .context = self,
             .release_fn = releaseTaskRuntimeSession,
         })) {
-            workspace.authorization = .available;
-            workspace.last_removal_failure = .task_close_failed;
+            self.workspace.failRemovalStart(workspace_id);
             self.commitTaskStateNoFail();
             self.bumpRevision();
             return error.TaskClosing;
@@ -2446,7 +2421,7 @@ pub const Runtime = struct {
         const workspace_id = try self.openWorkspace(input);
         return self.createTaskInWorkspace(
             workspace_id,
-            (self.findWorkspace(workspace_id) orelse return error.UnknownWorkspace).epoch,
+            (self.workspace.facts(workspace_id) orelse return error.UnknownWorkspace).epoch,
             self.execution.generation,
             null,
             null,
@@ -2515,20 +2490,11 @@ pub const Runtime = struct {
             return error.ExecutionUnavailable;
         if (!self.validExecutionGeneration(expected_execution_generation))
             return error.ExecutionGenerationMismatch;
-        const workspace_view = self.findWorkspace(workspace_id) orelse
-            return error.UnknownWorkspace;
-        if (expected_workspace_epoch == 0 or
-            expected_workspace_epoch != workspace_view.epoch)
-            return error.WorkspaceEpochMismatch;
-        if (workspace_view.kind == .automatic and
-            (!allow_unowned_automatic or workspace_view.automatic_task_id != 0))
-            return error.WorkspaceUnavailable;
-        if (workspace_view.kind == .manual and !workspace_view.visible)
-            return error.WorkspaceUnavailable;
-        if (workspace_view.authorization == .removing)
-            return error.WorkspaceRemovalInProgress;
-        if (workspace_view.authorization != .available)
-            return error.WorkspaceUnavailable;
+        const workspace_view = try self.workspace.taskCreateAuthority(
+            workspace_id,
+            expected_workspace_epoch,
+            allow_unowned_automatic,
+        );
         var pinned_catalog: ?CatalogSnapshot = null;
         errdefer if (pinned_catalog) |*snapshot| {
             self.projection_bytes -= snapshot.projected_bytes;
@@ -2582,18 +2548,15 @@ pub const Runtime = struct {
             .api_key = self.execution.credential(),
             .execution_generation = self.execution.generation,
         };
-        const workspace_recent_order = if (workspace_view.kind == .manual)
-            try self.takeWorkspaceRecentOrder()
+        var order_preparation = if (workspace_view.kind == .manual)
+            try self.workspace.prepareOrder(workspace_view.id)
         else
-            0;
-        errdefer {
-            if (workspace_view.kind == .manual)
-                self.next_workspace_recent_order = workspace_recent_order;
-        }
+            product_workspace.OrderPreparation.inactive();
+        errdefer if (order_preparation.isActive())
+            self.workspace.rollbackOrder(&order_preparation);
         var order_context = TaskWorkspaceOrderContext{
-            .control = self,
-            .workspace = workspace_view,
-            .previous_order = workspace_view.recent_order,
+            .workspace = &self.workspace,
+            .preparation = &order_preparation,
         };
         const task_id = self.task_runtime.openTask(.{
             .agent_runtime = self.agent_runtime,
@@ -2621,7 +2584,7 @@ pub const Runtime = struct {
             .workspace_order = .{
                 .context = &order_context,
                 .manual = workspace_view.kind == .manual,
-                .recent_order = workspace_recent_order,
+                .recent_order = order_preparation.recentOrder(),
                 .apply_fn = applyTaskWorkspaceOrder,
                 .rollback_fn = rollbackTaskWorkspaceOrder,
             },
@@ -2636,6 +2599,8 @@ pub const Runtime = struct {
             },
             else => return err,
         };
+        if (order_preparation.isActive())
+            self.workspace.commitOrder(&order_preparation);
         self.bumpRevision();
         return task_id;
     }
@@ -2658,15 +2623,10 @@ pub const Runtime = struct {
             expected_skill_selection_revision != null)
             return error.CatalogUnavailable;
         if (!self.task_runtime.hasCapacity()) return error.TaskCapacity;
-        if (self.workspaceCount(.automatic) >= self.limits.max_tasks)
+        if (!self.workspace.automaticCapacityAvailable())
             return error.WorkspaceCapacity;
-        const store = if (self.automatic_workspaces) |*value| value else return error.WorkspaceUnavailable;
-        var allocation = store.allocate() catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidAutomaticRoot => return error.InvalidWorkspace,
-            error.RootUnavailable, error.AllocationUnavailable => return error.WorkspaceUnavailable,
-        };
-        errdefer _ = store.rollback(&allocation);
+        var allocation = try self.workspace.allocateAutomatic();
+        errdefer _ = self.workspace.rollbackAutomaticAllocation(&allocation);
         const workspace = try self.registerAutomaticWorkspace(allocation.path());
         errdefer self.releaseAutomaticWorkspaceNoFail(workspace.id);
         const task_id = try self.createTaskInWorkspaceInternal(
@@ -2677,8 +2637,8 @@ pub const Runtime = struct {
             null,
             true,
         );
-        workspace.automatic_task_id = task_id;
-        allocation.deinit();
+        self.workspace.setAutomaticOwner(workspace.id, task_id);
+        self.workspace.finishAutomaticAllocation(&allocation);
         return task_id;
     }
 
@@ -2697,7 +2657,7 @@ pub const Runtime = struct {
             expected_binding_epoch,
             self.taskRuntimeRecoveryAdmissionEffects(),
         );
-        const workspace = self.findWorkspace(facts.workspace_id) orelse unreachable;
+        const workspace = self.workspace.recoveryBinding(facts.workspace_id) orelse unreachable;
         const canonical_user_home = self.canonical_user_home orelse unreachable;
         const store = self.checkpoint_store orelse unreachable;
         const attempt_id = try self.task_runtime.startRecovery(task_id, .{
@@ -2845,28 +2805,23 @@ pub const Runtime = struct {
         )) return error.TaskClosing;
         const workspace_id = self.task_runtime.taskWorkspaceId(task_id) orelse
             return error.UnknownTask;
-        const workspace = self.findWorkspace(workspace_id) orelse
-            return error.WorkspaceUnavailable;
-        if (workspace.kind == .manual and !workspace.visible)
-            return error.WorkspaceUnavailable;
-        if (workspace.authorization == .removing)
-            return error.WorkspaceRemovalInProgress;
-        if (workspace.authorization != .available)
-            return error.WorkspaceUnavailable;
         const task_workspace_epoch = self.task_runtime.taskWorkspaceEpoch(task_id) orelse
             return error.UnknownTask;
-        if (workspace.epoch != task_workspace_epoch)
-            return error.WorkspaceEpochMismatch;
+        const workspace = try self.workspace.taskRunAuthority(
+            workspace_id,
+            task_workspace_epoch,
+        );
         if (workspace.kind == .automatic and input == .skill)
             return error.CatalogUnavailable;
-        const recent_order = if (workspace.kind == .manual)
-            try self.takeWorkspaceRecentOrder()
+        var order_preparation = if (workspace.kind == .manual)
+            try self.workspace.prepareOrder(workspace.id)
         else
-            0;
+            product_workspace.OrderPreparation.inactive();
+        errdefer if (order_preparation.isActive())
+            self.workspace.rollbackOrder(&order_preparation);
         var order_context = TaskWorkspaceOrderContext{
-            .control = self,
-            .workspace = workspace,
-            .previous_order = workspace.recent_order,
+            .workspace = &self.workspace,
+            .preparation = &order_preparation,
         };
         const run_id = try self.task_runtime.startRun(
             task_id,
@@ -2875,12 +2830,14 @@ pub const Runtime = struct {
             .{
                 .context = &order_context,
                 .manual = workspace.kind == .manual,
-                .recent_order = recent_order,
+                .recent_order = order_preparation.recentOrder(),
                 .apply_fn = applyTaskWorkspaceOrder,
                 .rollback_fn = rollbackTaskWorkspaceOrder,
             },
             self.taskRuntimeOperationEffects(),
         );
+        if (order_preparation.isActive())
+            self.workspace.commitOrder(&order_preparation);
         self.bumpRevision();
         return run_id;
     }
@@ -3814,7 +3771,7 @@ pub const Runtime = struct {
             self.revision,
             task_persistence_ready,
             @tagName(self.task_persistence_health),
-            self.automatic_workspaces != null,
+            self.workspace.automaticRootAvailable(),
             self.schedule.timerEnabled() and schedule_persistence_ready and
                 background_schedule_wake,
             schedule_persistence_ready,
@@ -3844,18 +3801,13 @@ pub const Runtime = struct {
         try self.writeSkillManagement(&writer);
         writer.writeAll(",\"mcp\":") catch return error.SnapshotTooLarge;
         try self.writeMcpProjection(&writer);
-        writer.writeAll(",\"workspaces\":[") catch return error.SnapshotTooLarge;
-        var workspace_count: usize = 0;
-        for (self.workspaces) |*entry| {
-            const workspace = &(entry.* orelse continue);
-            if (workspace.kind == .manual and !workspace.visible) continue;
-            if (workspace_count != 0) writer.writeByte(',') catch
-                return error.SnapshotTooLarge;
-            workspace_count += 1;
-            try self.writeWorkspace(&writer, workspace);
-        }
-        writer.writeAll("],\"scheduledTasks\":") catch
-            return error.SnapshotTooLarge;
+        writer.writeAll(",\"workspaces\":") catch return error.SnapshotTooLarge;
+        product_workspace.writeProjectionList(
+            &writer,
+            &self.workspace,
+            self.workspaceViewProvider(),
+        ) catch return error.SnapshotTooLarge;
+        writer.writeAll(",\"scheduledTasks\":") catch return error.SnapshotTooLarge;
         self.schedule.writeProjection(&writer, .{
             .context = self,
             .write_json_fn = writeScheduleViewJson,
@@ -3997,62 +3949,76 @@ pub const Runtime = struct {
         ) catch return error.SnapshotTooLarge;
     }
 
-    fn writeWorkspace(
-        self: *Runtime,
+    fn workspaceViewSignals(
+        context: *const anyopaque,
+        workspace_id: u64,
+    ) WorkspaceSignals {
+        const self: *const Runtime = @ptrCast(@alignCast(context));
+        const facts = self.task_runtime.workspaceSignals(workspace_id);
+        return .{
+            .running = facts.running,
+            .attention = facts.attention,
+            .failed_or_interrupted = facts.failed_or_interrupted,
+        };
+    }
+
+    fn workspaceViewContainsSensitive(
+        context: *const anyopaque,
+        value: []const u8,
+    ) bool {
+        const self: *const Runtime = @ptrCast(@alignCast(context));
+        return self.containsKnownCredential(value);
+    }
+
+    fn workspaceViewWriteJson(
+        context: *const anyopaque,
         writer: *std.Io.Writer,
-        workspace: *const WorkspaceView,
-    ) Error!void {
-        const signals = self.workspaceSignals(workspace.id);
-        writer.print("{{\"id\":\"{d}\",\"epoch\":\"{d}\",\"kind\":\"{s}\",\"displayName\":", .{
-            workspace.id,
-            workspace.epoch,
-            @tagName(workspace.kind),
-        }) catch
+        value: []const u8,
+    ) product_workspace.ViewError!void {
+        const self: *const Runtime = @ptrCast(@alignCast(context));
+        self.projectedJsonValueWithKnownCredentials(writer, value) catch
             return error.SnapshotTooLarge;
-        const display_name = workspace.display_name_storage[0..workspace.display_name_len];
-        const projected_root = workspace.projected_root_storage[0..workspace.projected_root_len];
-        try self.projectedJsonValueWithKnownCredentials(writer, display_name);
-        writer.writeAll(",\"canonicalRoot\":") catch return error.SnapshotTooLarge;
-        try self.projectedJsonValueWithKnownCredentials(writer, projected_root);
-        writer.print(",\"redacted\":{},\"authorization\":\"{s}\",\"lastRemovalFailure\":", .{
-            workspace.projection_redacted or
-                self.containsKnownCredential(display_name) or
-                self.containsKnownCredential(projected_root),
-            @tagName(workspace.authorization),
-        }) catch return error.SnapshotTooLarge;
-        if (workspace.last_removal_failure == .none)
-            writer.writeAll("null") catch return error.SnapshotTooLarge
-        else
-            writer.print("\"{s}\"", .{@tagName(workspace.last_removal_failure)}) catch
-                return error.SnapshotTooLarge;
-        writer.writeAll(",\"skillCatalog\":") catch
-            return error.SnapshotTooLarge;
-        try skill_runtime.Runtime.writeCatalogProjection(
+    }
+
+    fn workspaceViewWriteCatalog(
+        context: *const anyopaque,
+        writer: *std.Io.Writer,
+        workspace_id: u64,
+        workspace_epoch: u64,
+    ) product_workspace.ViewError!void {
+        const self: *const Runtime = @ptrCast(@alignCast(context));
+        skill_runtime.Runtime.writeCatalogProjection(
             writer,
             self.skillTextProjection(),
-            self.skill.workspaceCatalogProjection(workspace.id, workspace.epoch) catch
+            self.skill.workspaceCatalogProjection(workspace_id, workspace_epoch) catch
                 unreachable,
-        );
-        writer.print(",\"recentOrder\":\"{d}\",\"signals\":{{\"running\":{},\"attention\":{},\"failedOrInterrupted\":{}}}}}", .{
-            workspace.recent_order,
-            signals.running,
-            signals.attention,
-            signals.failed_or_interrupted,
-        }) catch return error.SnapshotTooLarge;
+        ) catch return error.SnapshotTooLarge;
+    }
+
+    fn workspaceViewProvider(self: *const Runtime) product_workspace.ViewProvider {
+        return .{
+            .context = self,
+            .signals_fn = workspaceViewSignals,
+            .contains_sensitive_fn = workspaceViewContainsSensitive,
+            .write_json_fn = workspaceViewWriteJson,
+            .write_catalog_fn = workspaceViewWriteCatalog,
+        };
     }
 
     pub fn deinit(self: *Runtime) void {
         self.shutdownExecutor();
         self.task_runtime.deinitTasks(self.taskRuntimeReleaseEffects());
         self.task_runtime.deinitStorage();
-        for (self.workspaces) |*entry| {
-            const workspace = &(entry.* orelse continue);
-            self.deinitWorkspaceView(workspace);
+        for (0..self.workspace.slotCount()) |index| {
+            const workspace = self.workspace.factsAt(index) orelse continue;
+            std.debug.assert(self.skill.unregisterWorkspace(
+                workspace.id,
+                self.skillProjectionBudget(),
+            ));
         }
-        self.allocator.free(self.workspaces);
+        self.workspace.deinit(self.workspaceStorage());
         self.schedule.deinit();
         self.skill.deinit();
-        if (self.automatic_workspaces) |*store| store.deinit();
         if (self.canonical_user_home) |home| self.allocator.free(home);
         if (self.mcp) |*mcp| mcp.deinit();
         self.execution.deinit();
@@ -4237,16 +4203,12 @@ pub const Runtime = struct {
         self: *Runtime,
         query: task_runtime.ProjectionAuthorityQuery,
     ) task_runtime.ProjectionAuthority {
-        const workspace = self.findWorkspace(query.workspace_id);
-        const workspace_identity_exact = if (workspace) |value|
-            value.authorization == .available and value.epoch == query.workspace_epoch and
-                std.mem.eql(u8, value.canonical_root, query.workspace_root)
-        else
-            false;
-        const automatic_owner_exact = if (workspace) |value|
-            value.kind != .automatic or value.automatic_task_id == query.task_id
-        else
-            false;
+        const workspace = self.workspace.recoveryAuthority(
+            query.workspace_id,
+            query.workspace_epoch,
+            query.workspace_root,
+            query.task_id,
+        );
         const execution_available = self.execution_replacement == .none and
             self.execution.ready() and
             query.execution_provider == self.execution.provider.? and
@@ -4264,8 +4226,8 @@ pub const Runtime = struct {
             .checkpoint_store_ready = self.checkpoint_store != null and
                 self.checkpoint_store_health.load(.acquire) == .ready,
             .execution_admission = if (execution_available) .available else .unavailable,
-            .workspace_identity_exact = workspace_identity_exact,
-            .automatic_owner_exact = automatic_owner_exact,
+            .workspace_identity_exact = workspace.identity_exact,
+            .automatic_owner_exact = workspace.automatic_owner_exact,
             .runtime_admission = if (self.shutting_down)
                 .shutting_down
             else if (self.agent_runtime.restoreAdmissionAvailable())
@@ -4273,7 +4235,7 @@ pub const Runtime = struct {
             else
                 .unavailable,
             .authority_stable = !self.shutting_down and
-                self.canonical_user_home != null and workspace != null,
+                self.canonical_user_home != null and workspace.exists,
         };
     }
 
@@ -4343,9 +4305,8 @@ pub const Runtime = struct {
         index: usize,
     ) ?skill_runtime.ScopedCatalog {
         const self: *const Runtime = @ptrCast(@alignCast(context));
-        const workspace = &(self.workspaces[index] orelse return null);
-        if (workspace.kind != .manual or !workspace.visible or
-            workspace.authorization != .available) return null;
+        const workspace = self.workspace.availableManualBindingAt(index) orelse
+            return null;
         return self.skill.scopedWorkspaceCatalog(workspace.id, workspace.epoch);
     }
 
@@ -4358,7 +4319,7 @@ pub const Runtime = struct {
             self.skillTextProjection(),
             .{
                 .context = self,
-                .slot_count = self.workspaces.len,
+                .slot_count = self.workspace.slotCount(),
                 .get_fn = skillWorkspaceCatalog,
             },
         ) catch return error.SnapshotTooLarge;
@@ -4404,7 +4365,7 @@ pub const Runtime = struct {
             else
                 null,
             .model = self.admissionModel(),
-            .automatic_workspace_available = self.automatic_workspaces != null,
+            .automatic_workspace_available = self.workspace.automaticRootAvailable(),
         };
     }
 
@@ -4560,7 +4521,7 @@ pub const Runtime = struct {
             !std.unicode.utf8ValidateSlice(title))
             return error.InvalidTaskTitle;
         for (title) |byte| if (byte < 0x20) return error.InvalidTaskTitle;
-        if (self.automatic_workspaces == null)
+        if (!self.workspace.automaticRootAvailable())
             return error.WorkspaceUnavailable;
         try input.recurrence.validate();
         const scheduled_input = std.mem.trim(u8, input.input, " \t\r\n");
@@ -4580,7 +4541,7 @@ pub const Runtime = struct {
 
     fn taskPersistenceLimits(self: *const Runtime) task_persistence.Limits {
         return .{
-            .max_workspaces = self.workspaces.len,
+            .max_workspaces = self.workspace.slotCount(),
             .max_tasks = self.limits.max_tasks,
             .max_runs_per_task = self.limits.max_runs_per_task,
             .max_compacts_per_task = self.limits.max_compacts_per_task,
@@ -4653,7 +4614,7 @@ pub const Runtime = struct {
     }
 
     fn restoreTaskState(self: *Runtime, bytes: []const u8) Error!void {
-        std.debug.assert(countPresent(WorkspaceView, self.workspaces) == 0);
+        std.debug.assert(self.workspace.historyCount() == 0);
         std.debug.assert(self.task_runtime.taskCount() == 0);
         var recovered = try task_persistence.decodeRecovering(
             self.allocator,
@@ -4663,47 +4624,58 @@ pub const Runtime = struct {
         defer recovered.deinit();
         for (recovered.value.failures) |failure|
             try self.recordTaskFailure(failure.task_id, failure.recent_order, failure.reason);
-        var restored_workspace_count: usize = 0;
         for (recovered.value.workspaces) |workspace| {
             const skill_root = try self.allocator.dupe(u8, workspace.canonical_root);
             var skill_root_owned = true;
             defer if (skill_root_owned) self.allocator.free(skill_root);
-            const restored = self.restoreWorkspace(workspace) catch |err| switch (err) {
+            const kind = task_persistence.parseEnum(WorkspaceKind, workspace.kind) orelse {
+                recovered.dropped_workspaces += 1;
+                continue;
+            };
+            self.workspace.restore(.{
+                .id = workspace.id,
+                .epoch = workspace.epoch,
+                .kind = kind,
+                .canonical_root = workspace.canonical_root,
+                .display_name = workspace.display_name,
+                .visible = workspace.visible,
+                .recent_order = workspace.recent_order,
+            }, self.workspaceStorage()) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => {
                     recovered.dropped_workspaces += 1;
                     continue;
                 },
             };
-            self.workspaces[restored_workspace_count] = restored;
+            const restored = self.workspace.facts(workspace.id) orelse unreachable;
             self.skill.registerWorkspaceOwned(.{
                 .id = restored.id,
                 .epoch = restored.epoch,
                 .canonical_root = skill_root,
             }, self.skillProjectionBudget());
             skill_root_owned = false;
-            restored_workspace_count += 1;
         }
         recovered.dropped_tasks += try self.task_runtime.restoreTasks(
             recovered.value.tasks,
             self.taskRestoreProjection(),
         );
         for (recovered.value.tasks) |task|
-            if (self.findWorkspace(task.workspace_id)) |workspace| {
-                if (workspace.kind == .automatic and
-                    self.task_runtime.taskWorkspaceId(task.id) != null)
-                    workspace.automatic_task_id = task.id;
-            };
-        for (self.workspaces) |*entry| {
-            const workspace = &(entry.* orelse continue);
-            if (workspace.kind != .automatic) continue;
+            if (self.task_runtime.taskWorkspaceId(task.id) != null)
+                self.workspace.setAutomaticOwnerFromRestore(task.workspace_id, task.id);
+        for (0..self.workspace.slotCount()) |index| {
+            const workspace = self.workspace.automaticBindingAt(index) orelse continue;
             if (self.task_runtime.taskCountInWorkspace(workspace.id) == 1) continue;
-            self.deinitWorkspaceView(workspace);
-            entry.* = null;
+            std.debug.assert(self.skill.unregisterWorkspace(
+                workspace.id,
+                self.skillProjectionBudget(),
+            ));
+            self.workspace.removeAt(index, self.workspaceStorage());
             recovered.dropped_workspaces += 1;
         }
-        self.next_workspace_id = recovered.value.next_workspace_id;
-        self.next_workspace_recent_order = recovered.value.next_workspace_recent_order;
+        self.workspace.restoreIdentity(
+            recovered.value.next_workspace_id,
+            recovered.value.next_workspace_recent_order,
+        );
         self.task_runtime.restoreIdentityState(
             recovered.value.next_task_id,
             recovered.value.next_task_recent_order,
@@ -4721,48 +4693,6 @@ pub const Runtime = struct {
         return self.task_runtime.recordFailure(task_id, recent_order, reason);
     }
 
-    fn restoreWorkspace(
-        self: *Runtime,
-        wire: task_persistence.WorkspaceWire,
-    ) Error!WorkspaceView {
-        const canonical_root = try self.copyBounded(
-            wire.canonical_root,
-            self.limits.max_workspace_bytes,
-        );
-        errdefer self.freeTracked(canonical_root);
-        const projected_root = try self.copyBounded(
-            wire.canonical_root,
-            self.limits.max_workspace_bytes,
-        );
-        errdefer self.freeTracked(projected_root);
-        const display_name = try self.copyBounded(
-            wire.display_name,
-            self.limits.max_workspace_bytes,
-        );
-        errdefer self.freeTracked(display_name);
-        const trust_root = try self.copyBounded(
-            wire.canonical_root,
-            self.limits.max_workspace_bytes,
-        );
-        errdefer self.freeTracked(trust_root);
-        const kind = task_persistence.parseEnum(WorkspaceKind, wire.kind) orelse
-            return error.InvalidWorkspace;
-        return .{
-            .id = wire.id,
-            .kind = kind,
-            .epoch = wire.epoch,
-            .canonical_root = canonical_root,
-            .projected_root_storage = projected_root,
-            .projected_root_len = projected_root.len,
-            .display_name_storage = display_name,
-            .display_name_len = display_name.len,
-            .trust = .{ .temporary = trust_root },
-            .authorization = if (kind == .automatic) .available else .reauthorization_required,
-            .visible = wire.visible,
-            .recent_order = wire.recent_order,
-        };
-    }
-
     fn reconcileCheckpointStoreNoFail(self: *Runtime) void {
         if (self.task_persistence_health != .ready or
             self.checkpoint_store_health.load(.acquire) != .ready)
@@ -4776,13 +4706,14 @@ pub const Runtime = struct {
     }
     fn clearRestoredTaskStateNoFail(self: *Runtime) void {
         self.task_runtime.deinitTasks(self.taskRuntimeReleaseEffects());
-        for (self.workspaces) |*entry| {
-            const workspace = &(entry.* orelse continue);
-            self.deinitWorkspaceView(workspace);
-            entry.* = null;
+        for (0..self.workspace.slotCount()) |index| {
+            const workspace = self.workspace.factsAt(index) orelse continue;
+            std.debug.assert(self.skill.unregisterWorkspace(
+                workspace.id,
+                self.skillProjectionBudget(),
+            ));
         }
-        self.next_workspace_id = 1;
-        self.next_workspace_recent_order = 1;
+        self.workspace.reset(self.workspaceStorage());
         self.task_runtime.resetIdentity();
     }
 
@@ -4796,27 +4727,28 @@ pub const Runtime = struct {
         self: *Runtime,
         checkpoint_override: ?CheckpointPersistenceOverride,
     ) Error!task_persistence.TaskStateWireScratch {
-        const workspace_count = countPresent(WorkspaceView, self.workspaces);
+        const workspace_count = self.workspace.historyCount();
         const workspaces = try self.allocator.alloc(
             task_persistence.WorkspaceWire,
             workspace_count,
         );
         errdefer self.allocator.free(workspaces);
         var workspace_index: usize = 0;
-        for (self.workspaces) |entry| {
-            const workspace = entry orelse continue;
+        for (0..self.workspace.slotCount()) |index| {
+            const workspace = self.workspace.historyAt(index) orelse continue;
             workspaces[workspace_index] = .{
                 .id = workspace.id,
                 .epoch = workspace.epoch,
                 .kind = @tagName(workspace.kind),
                 .canonical_root = workspace.canonical_root,
-                .display_name = workspace.display_name_storage[0..workspace.display_name_len],
+                .display_name = workspace.display_name,
                 .visible = workspace.visible,
                 .recent_order = workspace.recent_order,
             };
             workspace_index += 1;
         }
 
+        const identity = self.workspace.identity();
         const task_frames = try self.task_runtime.projectHistory(checkpoint_override);
         return .{
             .allocator = self.allocator,
@@ -4824,8 +4756,8 @@ pub const Runtime = struct {
             .allocated_tasks = task_frames.tasks,
             .allocated_failures = task_frames.failures,
             .state = .{
-                .next_workspace_id = self.next_workspace_id,
-                .next_workspace_recent_order = self.next_workspace_recent_order,
+                .next_workspace_id = identity.next_id,
+                .next_workspace_recent_order = identity.next_recent_order,
                 .next_task_id = task_frames.next_task_id,
                 .next_task_recent_order = task_frames.next_recent_order,
                 .workspaces = workspaces[0..workspace_index],
@@ -4987,23 +4919,22 @@ pub const Runtime = struct {
         workspace_id: u64,
     ) task_runtime.DurableCommit {
         const self: *Runtime = @ptrCast(@alignCast(context));
-        var removed_index: ?usize = null;
-        var removed_workspace: WorkspaceView = undefined;
-        for (self.workspaces, 0..) |*entry, index| {
-            const workspace = &(entry.* orelse continue);
-            if (workspace.id != workspace_id or workspace.kind != .automatic) continue;
-            removed_workspace = workspace.*;
-            entry.* = null;
-            removed_index = index;
-            break;
-        }
+        var removed_workspace = self.workspace.takeAutomatic(workspace_id);
         const outcome = commitTaskRuntimeCandidate(context);
         switch (outcome) {
-            .committed => if (removed_index != null)
-                self.deinitWorkspaceView(&removed_workspace),
+            .committed => if (removed_workspace) |*removed| {
+                std.debug.assert(self.skill.unregisterWorkspace(
+                    workspace_id,
+                    self.skillProjectionBudget(),
+                ));
+                self.workspace.commitAutomaticRemoval(
+                    removed,
+                    self.workspaceStorage(),
+                );
+            },
             .failed, .outcome_unknown => {
-                if (removed_index) |index|
-                    self.workspaces[index] = removed_workspace;
+                if (removed_workspace) |*removed|
+                    self.workspace.rollbackAutomatic(removed);
             },
         }
         return outcome;
@@ -5047,13 +4978,14 @@ pub const Runtime = struct {
 
     fn applyTaskWorkspaceOrder(context: *anyopaque, recent_order: u64) void {
         const value: *TaskWorkspaceOrderContext = @ptrCast(@alignCast(context));
-        value.workspace.recent_order = recent_order;
+        std.debug.assert(value.preparation.recentOrder() == recent_order);
+        value.workspace.applyOrder(value.preparation);
     }
 
     fn rollbackTaskWorkspaceOrder(context: *anyopaque, recent_order: u64) void {
         const value: *TaskWorkspaceOrderContext = @ptrCast(@alignCast(context));
-        value.workspace.recent_order = value.previous_order;
-        value.control.next_workspace_recent_order = recent_order;
+        std.debug.assert(value.preparation.recentOrder() == recent_order);
+        value.workspace.rollbackOrder(value.preparation);
     }
 
     fn taskRuntimeOperationEffects(self: *Runtime) task_runtime.OperationEffects {
@@ -5120,7 +5052,12 @@ pub const Runtime = struct {
         query: task_runtime.RecoveryAuthorityQuery,
     ) task_runtime.RecoveryExternalAuthority {
         const self: *Runtime = @ptrCast(@alignCast(context));
-        const workspace = self.findWorkspace(query.workspace_id);
+        const workspace = self.workspace.recoveryAuthority(
+            query.workspace_id,
+            query.workspace_epoch,
+            null,
+            query.task_id,
+        );
         const execution_exact = self.execution_replacement == .none and
             self.execution.ready() and
             query.target_execution_generation == self.execution.generation and
@@ -5134,24 +5071,18 @@ pub const Runtime = struct {
                     self.account.execution_generation == self.execution.generation and
                     self.accountHasModel(query.task_model);
         return .{
-            .workspace_root = if (workspace) |value| value.canonical_root else "",
-            .workspace_kind = if (workspace) |value| switch (value.kind) {
+            .workspace_root = workspace.canonical_root,
+            .workspace_kind = switch (workspace.kind) {
                 .manual => .manual,
                 .automatic => .automatic,
-            } else .manual,
+            },
             .target_execution_generation = if (self.execution.ready())
                 self.execution.generation
             else
                 0,
             .shutting_down = self.shutting_down,
-            .workspace_authority_exact = if (workspace) |value|
-                value.authorization == .available and value.epoch == query.workspace_epoch
-            else
-                false,
-            .automatic_owner_exact = if (workspace) |value|
-                value.kind != .automatic or value.automatic_task_id == query.task_id
-            else
-                false,
+            .workspace_authority_exact = workspace.identity_exact,
+            .automatic_owner_exact = workspace.automatic_owner_exact,
             .target_execution_authority_exact = execution_exact,
         };
     }
@@ -5246,340 +5177,41 @@ pub const Runtime = struct {
     /// after those facts were recorded. Every Task-owned secret release must
     /// pass through this function so the final live copy scrubs all retained
     /// projections before secure-zero makes the credential unavailable.
-    fn upsertWorkspace(
+    fn registerAutomaticWorkspace(
         self: *Runtime,
-        input: TaskCreateInput,
-    ) Error!WorkspaceUpsert {
-        if (!std.fs.path.isAbsolute(input.workspace_root))
+        canonical_root: []const u8,
+    ) Error!product_workspace.Facts {
+        if (!self.workspace.automaticRootContains(canonical_root))
             return error.InvalidWorkspace;
-        const canonical = std.Io.Dir.realPathFileAbsoluteAlloc(
-            self.io,
-            input.workspace_root,
-            self.allocator,
-        ) catch return error.InvalidWorkspace;
-        defer self.allocator.free(canonical);
-        if (canonical.len > self.limits.max_workspace_bytes)
-            return error.ProjectionCapacity;
-        const workspace_stat = std.Io.Dir.cwd().statFile(
-            self.io,
-            canonical,
-            .{},
-        ) catch return error.InvalidWorkspace;
-        if (workspace_stat.kind != .directory) return error.InvalidWorkspace;
-        if (self.automatic_workspaces) |*store|
-            if (store.containsCanonicalPath(canonical))
-                return error.InvalidWorkspace;
-
-        var canonical_temporary: ?[:0]u8 = null;
-        defer if (canonical_temporary) |root| self.allocator.free(root);
-        switch (input.trust) {
-            .explicitly_trusted => {},
-            .temporary => |root| {
-                if (!std.fs.path.isAbsolute(root))
-                    return error.InvalidWorkspace;
-                const temporary = std.Io.Dir.realPathFileAbsoluteAlloc(
-                    self.io,
-                    root,
-                    self.allocator,
-                ) catch return error.InvalidWorkspace;
-                canonical_temporary = temporary;
-                if (temporary.len > self.limits.max_workspace_bytes)
-                    return error.ProjectionCapacity;
-                const root_stat = std.Io.Dir.cwd().statFile(
-                    self.io,
-                    temporary,
-                    .{},
-                ) catch return error.InvalidWorkspace;
-                if (root_stat.kind != .directory) return error.InvalidWorkspace;
-                if (!workspacePathWithin(temporary, canonical))
-                    return error.WorkspaceNotTrusted;
-            },
-        }
-
-        if (self.findWorkspaceIndexByRoot(canonical)) |index| {
-            const workspace = &self.workspaces[index].?;
-            if (workspace.authorization == .removing)
-                return error.WorkspaceRemovalInProgress;
-            const reauthorizing = !workspace.visible or
-                workspace.authorization == .reauthorization_required;
-            // Startup deliberately forgets the Host authority while retaining
-            // the durable Workspace identity. Confirming that same visible
-            // Workspace restores authority without changing its epoch. A
-            // hidden Workspace was explicitly removed; reopening it creates a
-            // new authority epoch so old Task bindings remain invalid.
-            const reopening_removed_workspace = !workspace.visible;
-            if (reopening_removed_workspace and workspace.epoch == std.math.maxInt(u64))
-                return error.WorkspaceEpochExhausted;
-            const next_temporary = if (canonical_temporary) |root|
-                try self.copyBounded(root, self.limits.max_workspace_bytes)
-            else
-                null;
-            const previous = ExistingWorkspaceState{
-                .trust = workspace.trust,
-                .authorization = workspace.authorization,
-                .visible = workspace.visible,
-                .epoch = workspace.epoch,
-                .recent_order = workspace.recent_order,
-            };
-            workspace.trust = if (next_temporary) |root|
-                .{ .temporary = root }
-            else
-                .explicitly_trusted;
-            workspace.authorization = .available;
-            workspace.visible = true;
-            if (reopening_removed_workspace) workspace.epoch += 1;
-            return .{
-                .index = index,
-                .reauthorizing = reauthorizing,
-                .previous = .{ .existing = previous },
-            };
-        }
-
-        var slot: ?usize = null;
-        var replaced: ?WorkspaceView = null;
-        for (self.workspaces, 0..) |*entry, index| {
-            const workspace = &(entry.* orelse continue);
-            if (workspace.kind != .manual or workspace.visible or
-                self.skill.hasWorkspaceJob(workspace.id) or
-                self.workspaceHasTasks(workspace.id))
-                continue;
-            replaced = workspace.*;
-            entry.* = null;
-            slot = index;
-            break;
-        }
-        var restore_replaced = true;
-        errdefer if (restore_replaced) {
-            if (slot) |index| self.workspaces[index] = replaced;
-        };
-        if (slot == null and self.workspaceCount(.manual) >= self.limits.max_workspaces)
-            return error.WorkspaceCapacity;
-        if (slot == null) slot = findEmpty(WorkspaceView, self.workspaces);
-        const target = slot orelse return error.WorkspaceCapacity;
-        if (self.next_workspace_id == 0) return error.WorkspaceIdentityExhausted;
-
-        const owned_root = try self.copyBounded(canonical, self.limits.max_workspace_bytes);
-        errdefer self.freeTracked(owned_root);
-        const base_name = std.fs.path.basename(canonical);
-        const projected_root = try self.copyProjected(
-            canonical,
-            self.limits.max_workspace_bytes,
+        const skill_root = try self.allocator.dupe(u8, canonical_root);
+        errdefer self.allocator.free(skill_root);
+        const workspace = try self.workspace.registerAutomatic(
+            canonical_root,
             self.execution.credential(),
+            self.workspaceStorage(),
         );
-        errdefer self.freeTracked(projected_root.value);
-        const display_name = try self.copyProjected(
-            if (base_name.len == 0) canonical else base_name,
-            self.limits.max_workspace_bytes,
-            self.execution.credential(),
-        );
-        errdefer self.freeTracked(display_name.value);
-        const owned_temporary = if (canonical_temporary) |root|
-            try self.copyBounded(root, self.limits.max_workspace_bytes)
-        else
-            null;
-        errdefer if (owned_temporary) |root| self.freeTracked(root);
-
-        const previous_next_workspace_id = self.next_workspace_id;
-        const workspace_id = previous_next_workspace_id;
-        self.next_workspace_id +%= 1;
-        self.workspaces[target] = .{
-            .id = workspace_id,
-            .canonical_root = owned_root,
-            .projected_root_storage = projected_root.value,
-            .projected_root_len = projected_root.value.len,
-            .display_name_storage = display_name.value,
-            .display_name_len = display_name.value.len,
-            .projection_redacted = projected_root.redacted or display_name.redacted,
-            .trust = if (owned_temporary) |root|
-                .{ .temporary = root }
-            else
-                .explicitly_trusted,
-            .recent_order = 0,
-        };
-        restore_replaced = false;
-        return .{
-            .index = target,
-            .previous = .{ .created = .{
-                .next_workspace_id = previous_next_workspace_id,
-                .replaced = replaced,
-            } },
-        };
-    }
-
-    fn rollbackWorkspaceUpsert(
-        self: *Runtime,
-        upsert: WorkspaceUpsert,
-    ) void {
-        switch (upsert.previous) {
-            .existing => |previous| {
-                const workspace = &self.workspaces[upsert.index].?;
-                if (workspace.trust == .temporary)
-                    self.freeTracked(workspace.trust.temporary);
-                workspace.trust = previous.trust;
-                workspace.authorization = previous.authorization;
-                workspace.visible = previous.visible;
-                workspace.epoch = previous.epoch;
-                workspace.recent_order = previous.recent_order;
-            },
-            .created => |previous| {
-                var workspace = self.workspaces[upsert.index].?;
-                self.workspaces[upsert.index] = null;
-                self.deinitWorkspaceView(&workspace);
-                self.workspaces[upsert.index] = previous.replaced;
-                self.next_workspace_id = previous.next_workspace_id;
-            },
-        }
-    }
-
-    fn finishWorkspaceUpsert(
-        self: *Runtime,
-        upsert: WorkspaceUpsert,
-        skill_root: []u8,
-    ) void {
-        switch (upsert.previous) {
-            .existing => |previous| {
-                if (previous.trust == .temporary)
-                    self.freeTracked(previous.trust.temporary);
-            },
-            .created => |previous| if (previous.replaced) |replaced_value| {
-                var replaced = replaced_value;
-                self.deinitWorkspaceView(&replaced);
-            },
-        }
-        const workspace = &self.workspaces[upsert.index].?;
         self.skill.registerWorkspaceOwned(.{
             .id = workspace.id,
             .epoch = workspace.epoch,
             .canonical_root = skill_root,
         }, self.skillProjectionBudget());
-        self.redactWorkspaceProjectionNoFail(
-            workspace,
-            self.execution.credential(),
-        );
-    }
-
-    fn registerAutomaticWorkspace(
-        self: *Runtime,
-        canonical_root: []const u8,
-    ) Error!*WorkspaceView {
-        const store = if (self.automatic_workspaces) |*value| value else return error.WorkspaceUnavailable;
-        if (!std.fs.path.isAbsolute(canonical_root) or
-            canonical_root.len > self.limits.max_workspace_bytes or
-            !std.unicode.utf8ValidateSlice(canonical_root) or
-            !store.containsCanonicalPath(canonical_root) or
-            self.findWorkspaceByRoot(canonical_root) != null)
-            return error.InvalidWorkspace;
-        if (self.workspaceCount(.automatic) >= self.limits.max_tasks)
-            return error.WorkspaceCapacity;
-        const target = findEmpty(WorkspaceView, self.workspaces) orelse
-            return error.WorkspaceCapacity;
-        if (self.next_workspace_id == 0) return error.WorkspaceIdentityExhausted;
-
-        const skill_root = try self.allocator.dupe(u8, canonical_root);
-        errdefer self.allocator.free(skill_root);
-
-        const owned_root = try self.copyBounded(
-            canonical_root,
-            self.limits.max_workspace_bytes,
-        );
-        errdefer self.freeTracked(owned_root);
-        const projected_root = try self.copyProjected(
-            canonical_root,
-            self.limits.max_workspace_bytes,
-            self.execution.credential(),
-        );
-        errdefer self.freeTracked(projected_root.value);
-        const display_name = try self.copyProjected(
-            "Automatic workspace",
-            self.limits.max_workspace_bytes,
-            self.execution.credential(),
-        );
-        errdefer self.freeTracked(display_name.value);
-        const owned_temporary = try self.copyBounded(
-            canonical_root,
-            self.limits.max_workspace_bytes,
-        );
-        errdefer self.freeTracked(owned_temporary);
-
-        const workspace_id = self.next_workspace_id;
-        self.next_workspace_id +%= 1;
-        self.workspaces[target] = .{
-            .id = workspace_id,
-            .kind = .automatic,
-            .canonical_root = owned_root,
-            .projected_root_storage = projected_root.value,
-            .projected_root_len = projected_root.value.len,
-            .display_name_storage = display_name.value,
-            .display_name_len = display_name.value.len,
-            .projection_redacted = projected_root.redacted or display_name.redacted,
-            .trust = .{ .temporary = owned_temporary },
-            .visible = false,
-            .recent_order = 0,
-        };
-        self.skill.registerWorkspaceOwned(.{
-            .id = workspace_id,
-            .epoch = 1,
-            .canonical_root = skill_root,
-        }, self.skillProjectionBudget());
-        return &self.workspaces[target].?;
+        return workspace;
     }
 
     fn releaseAutomaticWorkspaceNoFail(
         self: *Runtime,
         workspace_id: u64,
     ) void {
-        for (self.workspaces) |*entry| {
-            const workspace = &(entry.* orelse continue);
-            if (workspace.id != workspace_id) continue;
-            std.debug.assert(workspace.kind == .automatic);
-            std.debug.assert(!self.workspaceHasTasks(workspace_id));
-            std.debug.assert(!self.skill.hasWorkspaceJob(workspace.id));
-            self.deinitWorkspaceView(workspace);
-            entry.* = null;
-            return;
-        }
-        unreachable;
+        const workspace = self.workspace.facts(workspace_id) orelse unreachable;
+        std.debug.assert(workspace.kind == .automatic);
+        std.debug.assert(!self.workspaceHasTasks(workspace_id));
+        std.debug.assert(!self.skill.hasWorkspaceJob(workspace_id));
+        std.debug.assert(self.skill.unregisterWorkspace(
+            workspace_id,
+            self.skillProjectionBudget(),
+        ));
+        self.workspace.releaseAutomatic(workspace_id, self.workspaceStorage());
     }
-
-    fn takeWorkspaceRecentOrder(self: *Runtime) Error!u64 {
-        if (self.next_workspace_recent_order == 0)
-            return error.WorkspaceOrderExhausted;
-        const recent_order = self.next_workspace_recent_order;
-        self.next_workspace_recent_order +%= 1;
-        return recent_order;
-    }
-
-    fn findWorkspace(self: *Runtime, workspace_id: u64) ?*WorkspaceView {
-        if (workspace_id == 0) return null;
-        for (self.workspaces) |*entry| if (entry.*) |*workspace|
-            if (workspace.id == workspace_id) return workspace;
-        return null;
-    }
-
-    fn findWorkspaceByRoot(self: *Runtime, canonical_root: []const u8) ?*WorkspaceView {
-        for (self.workspaces) |*entry| if (entry.*) |*workspace|
-            if (std.mem.eql(u8, workspace.canonical_root, canonical_root)) return workspace;
-        return null;
-    }
-
-    fn findWorkspaceIndexByRoot(
-        self: *const Runtime,
-        canonical_root: []const u8,
-    ) ?usize {
-        for (self.workspaces, 0..) |entry, index| if (entry) |workspace|
-            if (std.mem.eql(u8, workspace.canonical_root, canonical_root)) return index;
-        return null;
-    }
-
-    fn workspaceCount(self: *const Runtime, kind: WorkspaceKind) usize {
-        var count: usize = 0;
-        for (self.workspaces) |entry| if (entry) |workspace|
-            if (workspace.kind == kind) {
-                count += 1;
-            };
-        return count;
-    }
-
     fn requireSkillMutationAuthority(
         self: *Runtime,
         scope: skill_runtime.ManagementScope,
@@ -5591,7 +5223,7 @@ pub const Runtime = struct {
                 if (self.task_runtime.hasActiveOperation(null)) return error.TaskBusy;
             },
             .project => |project| {
-                const workspace = self.findWorkspace(project.workspace_id) orelse
+                const workspace = self.workspace.facts(project.workspace_id) orelse
                     return error.UnknownWorkspace;
                 if (workspace.epoch != project.workspace_epoch)
                     return error.WorkspaceEpochMismatch;
@@ -5614,7 +5246,7 @@ pub const Runtime = struct {
             .personal => if (self.canonical_user_home == null)
                 return error.WorkspaceUnavailable,
             .project => |project| {
-                const workspace = self.findWorkspace(project.workspace_id) orelse
+                const workspace = self.workspace.facts(project.workspace_id) orelse
                     return error.UnknownWorkspace;
                 if (workspace.epoch != project.workspace_epoch)
                     return error.WorkspaceEpochMismatch;
@@ -5630,8 +5262,8 @@ pub const Runtime = struct {
         index: usize,
     ) ?skill_runtime.EnablementWorkspaceIdentity {
         const self: *const Runtime = @ptrCast(@alignCast(context));
-        const workspace = self.workspaces[index] orelse return null;
-        if (workspace.kind != .manual or !workspace.visible) return null;
+        const workspace = self.workspace.visibleManualBindingAt(index) orelse
+            return null;
         return .{
             .workspace_id = workspace.id,
             .workspace_epoch = workspace.epoch,
@@ -5641,7 +5273,7 @@ pub const Runtime = struct {
     fn reconcileSkillEnablementNoFail(self: *Runtime) void {
         self.skill.reconcileEnablementNoFail(.{
             .context = self,
-            .slot_count = self.workspaces.len,
+            .slot_count = self.workspace.slotCount(),
             .get_fn = skillEnablementWorkspace,
         }, self.skillProjectionBudget());
     }
@@ -5670,57 +5302,24 @@ pub const Runtime = struct {
     /// A close failure restores admission so the user can retry explicitly.
     fn finalizeWorkspaceRemovalsNoFail(self: *Runtime) bool {
         var changed = false;
-        for (self.workspaces) |*entry| {
-            const workspace = &(entry.* orelse continue);
+        for (0..self.workspace.slotCount()) |index| {
+            const workspace = self.workspace.factsAt(index) orelse continue;
             if (!workspace.visible or workspace.authorization != .removing) continue;
-            switch (self.task_runtime.workspaceRemovalState(workspace.id)) {
-                .close_failed => {
-                    workspace.authorization = .available;
-                    workspace.last_removal_failure = .task_close_failed;
-                    changed = true;
-                    continue;
-                },
-                .pending => continue,
-                .ready => {},
-            }
-            workspace.authorization = .reauthorization_required;
-            workspace.visible = false;
-            changed = true;
+            const state: product_workspace.RemovalState = switch (self.task_runtime.workspaceRemovalState(workspace.id)) {
+                .close_failed => .close_failed,
+                .pending => .pending,
+                .ready => .ready,
+            };
+            changed = self.workspace.applyRemovalState(workspace.id, state) or changed;
         }
         return changed;
-    }
-
-    fn workspaceSignals(self: *const Runtime, workspace_id: u64) WorkspaceSignals {
-        const facts = self.task_runtime.workspaceSignals(workspace_id);
-        return .{
-            .running = facts.running,
-            .attention = facts.attention,
-            .failed_or_interrupted = facts.failed_or_interrupted,
-        };
-    }
-
-    fn deinitWorkspaceView(self: *Runtime, workspace: *WorkspaceView) void {
-        std.debug.assert(self.skill.unregisterWorkspace(
-            workspace.id,
-            self.skillProjectionBudget(),
-        ));
-        self.freeTracked(workspace.canonical_root);
-        self.freeTracked(workspace.projected_root_storage);
-        self.freeTracked(workspace.display_name_storage);
-        if (workspace.trust == .temporary)
-            self.freeTracked(workspace.trust.temporary);
-        workspace.* = undefined;
     }
 
     fn redactWorkspaceProjectionsNoFail(
         self: *Runtime,
         credential: []const u8,
     ) void {
-        if (credential.len == 0) return;
-        for (self.workspaces) |*entry| {
-            const workspace = &(entry.* orelse continue);
-            self.redactWorkspaceProjectionNoFail(workspace, credential);
-        }
+        self.workspace.redactNoFail(credential, self.workspaceStorage());
     }
 
     /// A credential may become known after older product facts were stored,
@@ -5820,26 +5419,6 @@ pub const Runtime = struct {
                 credential,
             ) or record.redacted;
         }
-    }
-
-    fn redactWorkspaceProjectionNoFail(
-        _: *Runtime,
-        workspace: *WorkspaceView,
-        credential: []const u8,
-    ) void {
-        if (credential.len == 0) return;
-        const root_redacted = redactWorkspaceBytesNoFail(
-            workspace.projected_root_storage,
-            &workspace.projected_root_len,
-            credential,
-        );
-        const name_redacted = redactWorkspaceBytesNoFail(
-            workspace.display_name_storage,
-            &workspace.display_name_len,
-            credential,
-        );
-        workspace.projection_redacted = root_redacted or name_redacted or
-            workspace.projection_redacted;
     }
 
     fn checkpointMutationPending(
@@ -7414,7 +6993,7 @@ fn testRuntime() !Runtime {
     errdefer task_execution.deinit();
     control.revision = 0;
     const workspace = try control.copyBounded("/tmp/metawork-test", control.limits.max_workspace_bytes);
-    control.workspaces[0] = .{
+    product_workspace.testing.installOwned(&control.workspace, 0, .{
         .id = 1,
         .canonical_root = try control.copyBounded(
             "/tmp/metawork-test",
@@ -7430,16 +7009,14 @@ fn testRuntime() !Runtime {
             control.limits.max_workspace_bytes,
         ),
         .display_name_len = "metawork-test".len,
-        .trust = .explicitly_trusted,
         .recent_order = 1,
-    };
+    });
     control.skill.registerWorkspaceOwned(.{
         .id = 1,
         .epoch = 1,
         .canonical_root = try control.allocator.dupe(u8, "/tmp/metawork-test"),
     }, control.skillProjectionBudget());
-    control.next_workspace_id = 2;
-    control.next_workspace_recent_order = 2;
+    product_workspace.testing.setIdentity(&control.workspace, 2, 2);
     control.task_runtime.next_task_id = 4;
     const execution_model = try control.copyBounded(
         control.execution.model(),
@@ -7750,7 +7327,7 @@ test "automatic Workspace root is optional and reserved from user registration" 
         std.testing.io,
         &canonical_storage,
     );
-    var root = try automatic_workspace_allocator.Root.open(
+    var root = try product_workspace.AutomaticRoot.open(
         std.testing.io,
         std.testing.allocator,
         canonical_storage[0..canonical_len],
@@ -7768,12 +7345,11 @@ test "automatic Workspace root is optional and reserved from user registration" 
     try std.testing.expectError(
         error.InvalidWorkspace,
         control.openWorkspace(.{
-            .workspace_root = control.automatic_workspaces.?.canonicalRoot(),
+            .workspace_root = control.workspace.automaticRootPath().?,
             .trust = .explicitly_trusted,
         }),
     );
-    var allocation = try control.automatic_workspaces.?.allocate();
-    defer allocation.deinit();
+    var allocation = try control.workspace.allocateAutomatic();
     try std.testing.expectError(
         error.InvalidWorkspace,
         control.openWorkspace(.{
@@ -7781,7 +7357,7 @@ test "automatic Workspace root is optional and reserved from user registration" 
             .trust = .explicitly_trusted,
         }),
     );
-    try std.testing.expect(control.automatic_workspaces.?.rollback(&allocation));
+    try std.testing.expect(control.workspace.rollbackAutomaticAllocation(&allocation));
 }
 
 test "Workspace registry owns empty selection recent use authorization and capacity" {
@@ -7875,6 +7451,123 @@ test "Workspace registry owns empty selection recent use authorization and capac
     );
 }
 
+test "Workspace upsert unknown outcome rolls back the candidate and freezes mutation" {
+    test_agent_runtime.io = std.testing.io;
+    const root_path = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        ".",
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(root_path);
+    const persistence_storage = try std.testing.allocator.alloc(
+        u8,
+        task_persistence.max_store_bytes,
+    );
+    defer std.testing.allocator.free(persistence_storage);
+    var persistence = TestTaskPersistence{
+        .storage = persistence_storage,
+        .result = .outcome_unknown,
+    };
+    var control = try Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        &test_agent_runtime,
+        testLimits(),
+        .{ .task_persistence = persistence.capability(null) },
+    );
+    defer control.deinit();
+    const next_workspace_id = control.workspace.identity().next_id;
+    const next_recent_order = control.workspace.identity().next_recent_order;
+
+    try std.testing.expectError(
+        error.TaskPersistenceOutcomeUnknown,
+        control.openWorkspace(.{
+            .workspace_root = root_path,
+            .trust = .explicitly_trusted,
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), control.workspace.count(.manual));
+    try std.testing.expectEqual(next_workspace_id, control.workspace.identity().next_id);
+    try std.testing.expectEqual(next_recent_order, control.workspace.identity().next_recent_order);
+    try std.testing.expectEqual(
+        TaskPersistenceHealth.outcome_unknown,
+        control.task_persistence_health,
+    );
+    try std.testing.expectError(
+        error.TaskPersistenceOutcomeUnknown,
+        control.openWorkspace(.{
+            .workspace_root = root_path,
+            .trust = .explicitly_trusted,
+        }),
+    );
+}
+
+test "hidden Workspace record with Task history cannot be reused" {
+    var control = try testRuntime();
+    defer control.deinit();
+    control.limits.max_workspaces = 1;
+    product_workspace.testing.setManualLimit(&control.workspace, 1);
+
+    const task = &control.task_runtime.tasks[0].?;
+    const run = &task.durable.runs[0].?;
+    _ = commitTerminal(run, .completed, .completed, null, .reusable, "", false);
+    finalizeTestTerminalEvents(&control);
+    control.releaseTaskAttachmentNoFail(task, .cold_start);
+    try control.removeWorkspace(1);
+    try std.testing.expect(!(control.workspace.facts(1) orelse
+        return error.TestUnexpectedResult).visible);
+
+    const replacement_root = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        ".",
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(replacement_root);
+    try std.testing.expectError(
+        error.WorkspaceCapacity,
+        control.openWorkspace(.{
+            .workspace_root = replacement_root,
+            .trust = .explicitly_trusted,
+        }),
+    );
+    try std.testing.expect(control.workspace.findByRoot(replacement_root) == null);
+    try std.testing.expect(control.workspace.facts(1) != null);
+}
+
+test "File Preview Workspace authority requires exact identity epoch and root" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const exact: task_runtime.FileReference = .{
+        .workspace_id = 1,
+        .workspace_epoch = 1,
+        .workspace_root = "/tmp/metawork-test",
+        .id = "ref-1",
+        .title = "fixture",
+        .display_path = "fixture.txt",
+        .kind = "file",
+        .locator_kind = .workspace_path,
+        .locator = "fixture.txt",
+        .range = null,
+    };
+    try std.testing.expect(control.filePreviewWorkspaceAuthorized(exact));
+
+    var stale_id = exact;
+    stale_id.workspace_id = 2;
+    try std.testing.expect(!control.filePreviewWorkspaceAuthorized(stale_id));
+    var stale_epoch = exact;
+    stale_epoch.workspace_epoch = 2;
+    try std.testing.expect(!control.filePreviewWorkspaceAuthorized(stale_epoch));
+    var stale_root = exact;
+    stale_root.workspace_root = "/tmp/other";
+    try std.testing.expect(!control.filePreviewWorkspaceAuthorized(stale_root));
+    product_workspace.testing.setAuthorization(
+        &control.workspace,
+        1,
+        .removing,
+    );
+    try std.testing.expect(!control.filePreviewWorkspaceAuthorized(exact));
+}
+
 test "Workspace projection derives aggregate Task signals and removal preserves history" {
     var control = try testRuntime();
     defer control.deinit();
@@ -7885,7 +7578,7 @@ test "Workspace projection derives aggregate Task signals and removal preserves 
     try std.testing.expectEqual(@as(u32, 0), running[0].signals.attention);
 
     control.task_runtime.tasks[0].?.durable.runs[0].?.active_phase = .waiting_ui;
-    const attention = control.workspaceSignals(1);
+    const attention = Runtime.workspaceViewSignals(&control, 1);
     try std.testing.expectEqual(@as(u32, 0), attention.running);
     try std.testing.expectEqual(@as(u32, 1), attention.attention);
 
@@ -7955,17 +7648,6 @@ test "Task state round trip restores product history without fabricating a Sessi
     {
         var source = try testRuntime();
         defer source.deinit();
-        try source.replaceTracked(
-            &source.workspaces[0].?.canonical_root,
-            "/tmp/metawork-test",
-            source.limits.max_workspace_bytes,
-        );
-        try source.replaceTracked(
-            &source.workspaces[0].?.projected_root_storage,
-            "/tmp/metawork-test",
-            source.limits.max_workspace_bytes,
-        );
-        source.workspaces[0].?.projected_root_len = "/tmp/metawork-test".len;
         try source.replaceTracked(
             &source.task_runtime.tasks[0].?.durable.workspace_root,
             "/tmp/metawork-test",
@@ -8213,11 +7895,7 @@ test "Automatic Workspace history survives an unavailable allocator" {
     {
         var source = try testRuntime();
         defer source.deinit();
-        const workspace = &source.workspaces[0].?;
-        workspace.kind = .automatic;
-        workspace.automatic_task_id = 3;
-        workspace.visible = false;
-        workspace.recent_order = 0;
+        product_workspace.testing.makeAutomatic(&source.workspace, 1, 3);
         source.task_runtime.next_recent_order = 2;
         source.task_persistence = persistence.capability(null);
         source.task_persistence_health = .ready;
@@ -8238,7 +7916,7 @@ test "Automatic Workspace history survives an unavailable allocator" {
     defer restored.deinit();
     try std.testing.expectEqual(TaskPersistenceHealth.ready, restored.task_persistence_health);
     try std.testing.expect(!restored.automaticWorkspacesAvailable());
-    const restored_workspace = restored.findWorkspace(1) orelse
+    const restored_workspace = restored.workspace.facts(1) orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(WorkspaceKind.automatic, restored_workspace.kind);
     var workspace_storage: [1]WorkspaceProjection = undefined;
@@ -8381,8 +8059,8 @@ test "Task persistence failure rolls back Workspace upsert candidates" {
             .{ .task_persistence = persistence.capability(null) },
         );
         defer control.deinit();
-        const next_workspace_id = control.next_workspace_id;
-        const next_recent_order = control.next_workspace_recent_order;
+        const next_workspace_id = control.workspace.identity().next_id;
+        const next_recent_order = control.workspace.identity().next_recent_order;
         try std.testing.expectError(
             error.TaskPersistenceFailed,
             control.openWorkspace(.{
@@ -8390,9 +8068,9 @@ test "Task persistence failure rolls back Workspace upsert candidates" {
                 .trust = .explicitly_trusted,
             }),
         );
-        try std.testing.expectEqual(@as(usize, 0), control.workspaceCount(.manual));
-        try std.testing.expectEqual(next_workspace_id, control.next_workspace_id);
-        try std.testing.expectEqual(next_recent_order, control.next_workspace_recent_order);
+        try std.testing.expectEqual(@as(usize, 0), control.workspace.count(.manual));
+        try std.testing.expectEqual(next_workspace_id, control.workspace.identity().next_id);
+        try std.testing.expectEqual(next_recent_order, control.workspace.identity().next_recent_order);
     }
 
     persistence.result = .committed;
@@ -8409,12 +8087,12 @@ test "Task persistence failure rolls back Workspace upsert candidates" {
         .trust = .explicitly_trusted,
     });
     try control.removeWorkspace(root_id);
-    const hidden = control.findWorkspace(root_id) orelse
+    const hidden = control.workspace.facts(root_id) orelse
         return error.TestUnexpectedResult;
     try std.testing.expect(!hidden.visible);
     const hidden_epoch = hidden.epoch;
-    const next_workspace_id = control.next_workspace_id;
-    const next_recent_order = control.next_workspace_recent_order;
+    const next_workspace_id = control.workspace.identity().next_id;
+    const next_recent_order = control.workspace.identity().next_recent_order;
     persistence.result = .failed;
     try std.testing.expectError(
         error.TaskPersistenceFailed,
@@ -8423,14 +8101,14 @@ test "Task persistence failure rolls back Workspace upsert candidates" {
             .trust = .explicitly_trusted,
         }),
     );
-    const restored_hidden = control.findWorkspace(root_id) orelse
+    const restored_hidden = control.workspace.facts(root_id) orelse
         return error.TestUnexpectedResult;
     try std.testing.expect(!restored_hidden.visible);
     try std.testing.expectEqual(hidden_epoch, restored_hidden.epoch);
     try std.testing.expectEqualStrings(root_path, restored_hidden.canonical_root);
-    try std.testing.expect(control.findWorkspaceByRoot(source_path) == null);
-    try std.testing.expectEqual(next_workspace_id, control.next_workspace_id);
-    try std.testing.expectEqual(next_recent_order, control.next_workspace_recent_order);
+    try std.testing.expect(control.workspace.findByRoot(source_path) == null);
+    try std.testing.expectEqual(next_workspace_id, control.workspace.identity().next_id);
+    try std.testing.expectEqual(next_recent_order, control.workspace.identity().next_recent_order);
 }
 
 test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {
@@ -8443,7 +8121,7 @@ test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {
         std.testing.io,
         &automatic_root_storage,
     );
-    var automatic_root = try automatic_workspace_allocator.Root.open(
+    var automatic_root = try product_workspace.AutomaticRoot.open(
         std.testing.io,
         std.testing.allocator,
         automatic_root_storage[0..automatic_root_len],
@@ -8482,7 +8160,8 @@ test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {
         }),
     );
     try std.testing.expectEqual(@as(usize, 0), persistence.commits);
-    control.automatic_workspaces = automatic_workspace_allocator.Allocator.init(
+    product_workspace.testing.installAutomaticRoot(
+        &control.workspace,
         &automatic_root,
     );
     const id = try control.createScheduledTask(.{
@@ -8569,7 +8248,7 @@ test "execution replacement durably scrubs Schedule before ownership transfer" {
         std.testing.io,
         &automatic_root_storage,
     );
-    var automatic_root = try automatic_workspace_allocator.Root.open(
+    var automatic_root = try product_workspace.AutomaticRoot.open(
         std.testing.io,
         std.testing.allocator,
         automatic_root_storage[0..automatic_root_len],
@@ -8598,7 +8277,8 @@ test "execution replacement durably scrubs Schedule before ownership transfer" {
             .unavailable,
         );
     }
-    control.automatic_workspaces = automatic_workspace_allocator.Allocator.init(
+    product_workspace.testing.installAutomaticRoot(
+        &control.workspace,
         &automatic_root,
     );
 
@@ -8729,7 +8409,7 @@ test "Scheduled Task execution drift becomes needs attention without blocking Ac
         std.testing.io,
         &automatic_root_storage,
     );
-    var automatic_root = try automatic_workspace_allocator.Root.open(
+    var automatic_root = try product_workspace.AutomaticRoot.open(
         std.testing.io,
         std.testing.allocator,
         automatic_root_storage[0..automatic_root_len],
@@ -8743,7 +8423,8 @@ test "Scheduled Task execution drift becomes needs attention without blocking Ac
         persistence.capability(),
         .ready,
     );
-    control.automatic_workspaces = automatic_workspace_allocator.Allocator.init(
+    product_workspace.testing.installAutomaticRoot(
+        &control.workspace,
         &automatic_root,
     );
     control.setScheduleBackgroundAvailableNoFail(true);
@@ -9930,9 +9611,11 @@ test "released Task credential is permanently scrubbed from every product projec
         .content = try control.copyBounded("content SECRET-KEY", control.limits.max_tool_field_bytes),
         .state = .completed,
     };
-    const workspace = &control.workspaces[0].?;
-    @memcpy(workspace.projected_root_storage[0.."SECRET-KEY".len], "SECRET-KEY");
-    workspace.projected_root_len = "SECRET-KEY".len;
+    product_workspace.testing.overwriteProjectedRoot(
+        &control.workspace,
+        1,
+        "SECRET-KEY",
+    );
     task.durable.ui_history[0] = .{
         .request_id = 8,
         .run_id = run.id,
@@ -9989,7 +9672,7 @@ test "clearing the last default execution scrubs its credential before secure ze
     );
     defer control.deinit();
     try installTestExecution(&control);
-    control.workspaces[0] = .{
+    product_workspace.testing.installOwned(&control.workspace, 0, .{
         .id = 1,
         .canonical_root = try control.copyBounded("/tmp", control.limits.max_workspace_bytes),
         .projected_root_storage = try control.copyBounded(
@@ -10002,9 +9685,8 @@ test "clearing the last default execution scrubs its credential before secure ze
             control.limits.max_workspace_bytes,
         ),
         .display_name_len = "SECRET-KEY".len,
-        .trust = .explicitly_trusted,
         .recent_order = 1,
-    };
+    });
     control.skill.registerWorkspaceOwned(.{
         .id = 1,
         .epoch = 1,
@@ -10955,10 +10637,11 @@ test "Task deletion scrubs retained projections before releasing its credential"
     var control = try testRuntime();
     defer control.deinit();
     const task = &control.task_runtime.tasks[0].?;
-    const workspace = &control.workspaces[0].?;
-    @memcpy(workspace.projected_root_storage[0.."SECRET-KEY".len], "SECRET-KEY");
-    workspace.projected_root_len = "SECRET-KEY".len;
-    workspace.projection_redacted = false;
+    product_workspace.testing.overwriteProjectedRoot(
+        &control.workspace,
+        1,
+        "SECRET-KEY",
+    );
     task.durable.archived = true;
     control.releaseTaskAttachmentNoFail(task, .cold_start);
     task.runtime.active_run_id = 0;
@@ -10975,11 +10658,15 @@ test "Task deletion scrubs retained projections before releasing its credential"
 
     try control.deleteTask(3);
     try std.testing.expect(control.task_runtime.tasks[0] == null);
-    try std.testing.expect(workspace.projection_redacted);
+    const workspace_projection = product_workspace.testing.projectedRoot(
+        &control.workspace,
+        1,
+    );
+    try std.testing.expect(workspace_projection.redacted);
     try std.testing.expect(
         std.mem.indexOf(
             u8,
-            workspace.projected_root_storage[0..workspace.projected_root_len],
+            workspace_projection.value,
             "SECRET-KEY",
         ) == null,
     );
@@ -11137,16 +10824,15 @@ test "default snapshot budget contains the maximum structural projection" {
             "/maximum-task-{d}",
             .{task_index + 1},
         );
-        control.workspaces[task_index] = .{
+        product_workspace.testing.installOwned(&control.workspace, task_index, .{
             .id = @intCast(task_index + 1),
             .canonical_root = try control.copyBounded(root, limits.max_workspace_bytes),
             .projected_root_storage = try control.copyBounded(root, limits.max_workspace_bytes),
             .projected_root_len = root.len,
             .display_name_storage = try control.copyBounded("maximum", limits.max_workspace_bytes),
             .display_name_len = "maximum".len,
-            .trust = .explicitly_trusted,
             .recent_order = @intCast(task_index + 1),
-        };
+        });
         control.skill.registerWorkspaceOwned(.{
             .id = @intCast(task_index + 1),
             .epoch = 1,
@@ -11270,8 +10956,11 @@ test "default snapshot budget contains the maximum structural projection" {
         }
         control.task_runtime.tasks[task_index].?.durable.ui_history_count = limits.max_ui_history_per_task;
     }
-    control.next_workspace_id = @intCast(limits.max_tasks + 1);
-    control.next_workspace_recent_order = @intCast(limits.max_tasks + 1);
+    product_workspace.testing.setIdentity(
+        &control.workspace,
+        @intCast(limits.max_tasks + 1),
+        @intCast(limits.max_tasks + 1),
+    );
     control.task_runtime.next_task_id = @intCast(limits.max_tasks + 1);
     control.task_runtime.next_recent_order = @intCast(limits.max_tasks + 1);
 

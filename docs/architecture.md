@@ -61,7 +61,7 @@ flowchart TB
 | 词          | 含义                                              | 图节点      | 所有权表行         | 源码                                                                                                    |
 | ----------- | ------------------------------------------------- | ----------- | ------------------ | ------------------------------------------------------------------------------------------------------- |
 | Application | 组合、用例编排、平台能力适配与生命周期边界        | APPLICATION | Application        | `src/main.zig`、`src/app.zig`、`src/app/`、`src/native_sdk_compat/`                                     |
-| Product     | 产品逻辑边界；不是统一源码 module 或 facade       | PRODUCT     | Account、Product Control | `src/product/account*`、`src/product/control*`、`src/product/mcp*`、`src/product/schedule*`、`src/product/skill*`、`src/product/task*` |
+| Product     | 产品逻辑边界；不是统一源码 module 或 facade       | PRODUCT     | Account、Product Control | `src/product/account*`、`src/product/control*`、`src/product/mcp*`、`src/product/schedule*`、`src/product/skill*`、`src/product/task*`、`src/product/workspace*` |
 | Agent       | AgentCore 执行、Session/Conversation 与事件泵边界 | AGENT       | Agent              | `src/agent.zig`、`src/agent/`                                                                           |
 | Bridge      | Renderer 与 MetaWork 本地边界之间的唯一通信边界   | BRIDGE      | Bridge             | `src/bridge*`                                                                                           |
 | Renderer    | 产品 WebUI 模块                                   | RENDERER    | Renderer           | `frontend/`（含 `bridge/` 合同实现层）                                                                  |

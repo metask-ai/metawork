@@ -1,7 +1,7 @@
 //! Product Control orchestration and durable projection surface.
 
 const runtime_impl = @import("product_control_runtime");
-const automatic_workspace_allocator = @import("product_control_automatic_workspace");
+const product_workspace = @import("metawork_product_workspace");
 
 pub const Error = runtime_impl.Error;
 pub const Limits = runtime_impl.Limits;
@@ -16,7 +16,7 @@ pub const WorkspaceProjection = runtime_impl.WorkspaceProjection;
 pub const ScheduledTaskRecurrence = runtime_impl.ScheduledTaskRecurrence;
 pub const ScheduledTaskDefinitionInput = runtime_impl.ScheduledTaskDefinitionInput;
 pub const AppDirectories = runtime_impl.AppDirectories;
-pub const AutomaticWorkspaceRoot = automatic_workspace_allocator.Root;
+pub const AutomaticWorkspaceRoot = product_workspace.AutomaticRoot;
 pub const CatalogAvailability = runtime_impl.CatalogAvailability;
 pub const SkillProjection = runtime_impl.SkillProjection;
 pub const CatalogIssueProjection = runtime_impl.CatalogIssueProjection;
