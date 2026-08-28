@@ -1,12 +1,9 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const build_options = @import("build_options");
 const native_sdk = @import("native_sdk");
 const product_identity = @import("metawork_product_identity");
 
 const path_capacity = 4096;
-const windows_data_directory_name = "MetaWork";
-const automation_data_directory_name = "MetaWork Automation";
 
 // Paths owns the backing storage for every returned slice. Keep this value at
 // one stable address for its full lifetime and pass it only by pointer.
@@ -37,14 +34,31 @@ pub const Paths = struct {
     ) !void {
         self.* = .{ .allocator = allocator };
 
-        const data = try native_sdk.app_dirs.resolveOne(
+        const resolved_data = try native_sdk.app_dirs.resolveOne(
             .{ .name = dataDirectoryName(builtin.os.tag) },
             native_sdk.app_dirs.currentPlatform(),
             native_sdk.debug.envFromMap(env_map),
             .data,
             &self.data_buffer,
         );
-        self.data_len = data.len;
+        const data_dir = try std.Io.Dir.cwd().createDirPathOpen(
+            io,
+            resolved_data,
+            .{
+                .open_options = .{ .follow_symlinks = false },
+                .permissions = directoryPermissions(),
+            },
+        );
+        data_dir.close(io);
+        const canonical_data = try std.Io.Dir.realPathFileAbsoluteAlloc(
+            io,
+            resolved_data,
+            allocator,
+        );
+        defer allocator.free(canonical_data);
+        if (canonical_data.len > self.data_buffer.len) return error.NameTooLong;
+        @memcpy(self.data_buffer[0..canonical_data.len], canonical_data);
+        self.data_len = canonical_data.len;
 
         const automatic_workspace = native_sdk.app_dirs.join(
             native_sdk.app_dirs.currentPlatform(),
@@ -121,11 +135,7 @@ pub const Paths = struct {
 };
 
 pub fn dataDirectoryName(os_tag: @TypeOf(builtin.os.tag)) []const u8 {
-    if (build_options.automation) return automation_data_directory_name;
-    return if (os_tag == .macos)
-        product_identity.macos_data_directory_name
-    else
-        windows_data_directory_name;
+    return product_identity.dataDirectoryName(os_tag);
 }
 
 fn resolveCanonicalUserHome(
@@ -164,18 +174,22 @@ fn resolveCanonicalDirectory(
     return canonical;
 }
 
+fn directoryPermissions() std.Io.File.Permissions {
+    return if (builtin.os.tag == .windows) .default_dir else .fromMode(0o700);
+}
+
 test "product and automation data roots are compile-time isolated" {
     try std.testing.expectEqualStrings(
         "com.metask.metawork.dev",
         product_identity.bundle_id,
     );
-    if (build_options.automation) {
+    if (product_identity.artifact_kind == .automation) {
         try std.testing.expectEqualStrings(
-            automation_data_directory_name,
+            product_identity.automation_data_directory_name,
             dataDirectoryName(.macos),
         );
         try std.testing.expectEqualStrings(
-            automation_data_directory_name,
+            product_identity.automation_data_directory_name,
             dataDirectoryName(.windows),
         );
     } else {
@@ -184,7 +198,7 @@ test "product and automation data roots are compile-time isolated" {
             dataDirectoryName(.macos),
         );
         try std.testing.expectEqualStrings(
-            windows_data_directory_name,
+            product_identity.windows_data_directory_name,
             dataDirectoryName(.windows),
         );
     }

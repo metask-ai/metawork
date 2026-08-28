@@ -10,6 +10,11 @@ pub const SecureInputResult = union(enum) {
     cancelled,
 };
 
+pub const TrayCommandResult = enum {
+    handled,
+    quit_confirmed,
+};
+
 pub const scheduled_task_timer_id: u64 = 0x4d57_5343_4844_544b;
 pub const mcp_oauth_timer_id: u64 = 0x4d57_4d43_504f_4155;
 pub const mcp_catalog_timer_id: u64 = 0x4d57_4d43_5043_4154;
@@ -112,13 +117,30 @@ pub const Adapter = struct {
         self: *Adapter,
         tray_item_id: native_sdk.platform.TrayItemId,
         schedule: control_ports.ScheduleHost,
-    ) void {
+    ) TrayCommandResult {
+        const runtime_value = self.native_runtime orelse return .handled;
+        return switch (tray_item_id) {
+            app_window.tray_open_id => result: {
+                self.window.showMainWindow(runtime_value);
+                break :result .handled;
+            },
+            app_window.tray_quit_id => if (self.window.confirmExplicitQuit(runtime_value, schedule))
+                .quit_confirmed
+            else
+                .handled,
+            else => .handled,
+        };
+    }
+
+    pub fn requestExplicitQuit(self: *Adapter) !void {
+        try self.window.requestExplicitQuit(
+            self.native_runtime orelse return error.RuntimeUnavailable,
+        );
+    }
+
+    pub fn activateMainWindow(self: *Adapter) void {
         const runtime_value = self.native_runtime orelse return;
-        switch (tray_item_id) {
-            app_window.tray_open_id => self.window.showMainWindow(runtime_value),
-            app_window.tray_quit_id => self.window.requestExplicitQuit(runtime_value, schedule),
-            else => {},
-        }
+        self.window.showMainWindow(runtime_value);
     }
 
     pub fn dispatcherPlatform(self: *Adapter) bridge_api.DispatcherPlatform {

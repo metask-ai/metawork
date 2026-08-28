@@ -91,11 +91,11 @@ pub const State = struct {
         runtime.focusWindow(main_window_id) catch {};
     }
 
-    pub fn requestExplicitQuit(
+    pub fn confirmExplicitQuit(
         _: *State,
         runtime: *native_sdk.Runtime,
         schedule: control_ports.ScheduleHost,
-    ) void {
+    ) bool {
         if (schedule.hasEnabledScheduledTasks()) {
             const result = runtime.showMessageDialog(.{
                 .style = .warning,
@@ -104,10 +104,14 @@ pub const State = struct {
                 .informative_text = "Closing the main window keeps them running. Use Quit only when you want to stop the background host.",
                 .primary_button = "Keep Running",
                 .secondary_button = "Quit MetaWork",
-            }) catch return;
-            if (result != .secondary) return;
+            }) catch return false;
+            if (result != .secondary) return false;
         }
-        runtime.closeWindow(main_window_id) catch {};
+        return true;
+    }
+
+    pub fn requestExplicitQuit(_: *State, runtime: *native_sdk.Runtime) !void {
+        try runtime.closeWindow(main_window_id);
     }
 
     pub fn notifyScheduledTask(

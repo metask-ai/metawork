@@ -149,6 +149,8 @@ architecture guard 必须保持 `PlatformServices.context` 零 allowlist。原�
 - `src/native_sdk_compat/secure_input/macos.zig` — `secure_input` 二级兼容。macOS 编译、modal 行为、VoiceOver 明文检查和 shutdown 尚未取得目标平台证据。Runtime secure-input API 经 macOS 验收后删除实现、allowlist 和专用测试。
 - `src/native_sdk_compat/system_webview_drag_region/windows.zig` — `system_webview_drag_region` 二级兼容。普通拖动和最大化拖动恢复已验收；edge snap、双击标题栏、系统菜单、touch/pen 尚未验收。Runtime drag-region API 经 Windows 验收后删除实现、allowlist 和 pointer probe。
 - `src/native_sdk_compat/system_webview_window_controls/windows.zig` — `system_webview_maximize_restore`、`system_webview_maximized_state` 与 `system_webview_user_close` 二级兼容。controls、maximize/restore、close-policy hide/reopen 与 clean shutdown 已验收。Runtime 对应能力逐项验收后删除相应 action/state；三项全部替换后删除共置文件、HWND binding、allowlist 和 probe。
+- `src/native_sdk_compat/app_single_instance/windows.zig` — `app_single_instance` 二级兼容。精确 Win32 symbol allowlist、data-root lease 的二次取得/释放恢复、current-user Named Pipe 单次有界 transport、Coordinator 的 listener-closed/lease-held 重新竞争与 cold-start endpoint 重试、20 个真实进程冷启动竞争、隐藏/最小化窗口激活、argv/cwd 转交、显式退出后的 graceful restart、clean shutdown、强制终止后的 lease 恢复、development/automation 正式构建与 macOS 分支隔离已在 Windows 验证；显式退出确认后的 ingress-before-close 顺序、前台资格转交 API 与 `showWindow`/`focusWindow` 请求由精确结构 guard 覆盖，交互式失败提示和真实安装升级仍待人工平台验收。Native SDK 提供并通过同等实例仲裁与 activation 验收后删除实现、allowlist 和专用测试。
+- `src/native_sdk_compat/app_single_instance/macos.zig` — `app_single_instance` 二级兼容。精确 POSIX/CoreFoundation symbol allowlist、`confstr(_CS_DARWIN_USER_TEMP_DIR)` 私有 endpoint、128-bit 有界名称与 aarch64 macOS 交叉语义编译已通过；0600 socket、peer UID、并发转交、固定失败提示、clean shutdown、残留 socket 和 crash recovery 尚未取得 macOS 目标平台证据。Native SDK 提供并通过同等实例仲裁与 activation 验收后删除实现、framework link、allowlist 和专用测试。
 - `scripts/native-sdk-compat/macos-icon-composer.mjs` — `macos_icon_composer_package` 打包期兼容，不属于 Application Runtime 一级/二级路径。当前只允许 Xcode `actool` 26.6（bundle 24765）把单一无 glass/effect 的 `assets/icons/MetaWork.icon` 编译为 `Assets.car` 与 fallback ICNS，在未签名 `.app` 中替换 Native SDK 临时 ICNS 并写入标准 icon metadata。源结构、PNG 字节一致性、编译参数、工具版本、输出集合、resource digest、plist identity 和签名前顺序已有 Node test 与本机真实 `actool` compile 证据；Developer ID/DMG/notarization 和 macOS 26 Finder/Dock 明暗模式视觉验收尚未执行。Native SDK 正式提供同等 `.icon` artifact 能力并通过全部验收后删除 seam、测试和 allowlist。
 
 `src/app/window.zig` 的显式退出使用 `Runtime.showMessageDialog` 与 `Runtime.closeWindow`，属于正常 Runtime 路径，不进入兼容 allowlist。
@@ -162,7 +164,7 @@ architecture guard 必须保持 `PlatformServices.context` 零 allowlist。原�
 
 ## 平台与 artifact 验收
 
-`-Dautomation=true` artifact 必须把从 `app.zon` identity 派生的 `.automation` identity 传给 Native SDK runner，使 SDK-owned data/window/log namespace 即使脱离 harness 启动也不命中 production；正式 artifact 必须继续精确使用 `app.zon` identity。架构 guard 与 Native test graph共同验证派生关系，真实 automation harness 仍使用隔离的 `HOME`/`APPDATA`/`LOCALAPPDATA`，两层隔离不能互相替代。
+构建必须显式或按受控默认值选择 `development | release | automation` artifact kind。development 精确保留当前 `app.zon` runner identity、Windows `MetaWork`、macOS `MetaWork Dev`、`<base>.account` 与 `<base>.mcp`；`-Dautomation=true` 必须与 `-Dartifact=automation` 同时成立，并派生 `.automation` runner、`MetaWork Automation`、`.automation.account` 与 `.automation.mcp`。release identity 未完整登记前必须在 build/package 阶段 fail closed。architecture guard 与 Native test graph 必须验证已启用 artifact 的 runner/data/Account/MCP namespace 不重合；真实 automation harness 仍使用隔离的 `HOME`/`APPDATA`/`LOCALAPPDATA`，两层隔离不能互相替代。
 
 ### macOS
 
@@ -197,11 +199,15 @@ macOS artifact、Native vertical、secure input、window chrome 与真实 WebVie
 ```powershell
 node scripts/stage-agentcore-bundle.mjs C:\absolute\path\to\x86_64-windows.win10...win11_dt-gnu
 node scripts/run-windows-bringup.mjs
+zig build test-single-instance -j2 -Dartifact=development
 node scripts/test-window-chrome-windows.mjs --resize-session-only
 node scripts/test-window-chrome-windows.mjs
+node scripts/test-single-instance-windows.mjs
 ```
 
 `run-windows-bringup.mjs` 必须覆盖 staged verifier、restore probe、bundle/lifecycle tests、正式 test graph、Debug/Release build 和真实 Windows vertical，并报告 verifier 实际读取的 staged ABI identity，不硬编码 revision 文案。真实 vertical 还必须观察同步 Renderer Bridge command 的 `main_thread=true`，缺失该事实或观察到 false 均失败；该断言证明同步 handler 占用平台主线程，因此只能承载有界即时工作，并构成 File Preview 必须使用 Native SDK async registry + Product Control worker lane 的回归依据。window-chrome 的 resize/session gate 与 pointer/controls gate 分开报告：程序化 resize 只能证明 Native window、最小尺寸和同一 Renderer session，不能替代真实鼠标 edge resize、work-area clamp 或 WebView 焦点验收。
+
+`test-single-instance` Zig step 确定性覆盖 listener 已关闭但 lease 延迟释放时 Secondary 成为新 Primary、Primary 已持 lease但 endpoint 延迟出现时转交成功，以及 owner 在完整 deadline 内始终不可达时 fail closed。`test-single-instance-windows.mjs` 使用临时 `APPDATA`/`LOCALAPPDATA` 和 automation artifact，不接触 development 或正式用户数据。它必须让 20 个真实 OS process 同时竞争同一 canonical data root，证明恰好一个 Primary 到达 Runtime、其余 Secondary 在转交 argv/cwd 后正常退出；随后覆盖隐藏窗口与最小化窗口的显示/恢复、显式退出后的 clean restart、强制终止后的 lease 恢复以及最终 clean shutdown。该 vertical 证明真实进程仲裁和窗口状态恢复；显式退出确认后先停止 ingress 再关闭主窗口、前台资格 API 与 `focusWindow` 请求仍由精确结构 guard 证明，Windows 是否最终授予前台属于系统策略，不能用测试强制置前来伪造。
 
 当前已验收普通拖动、最大化拖动恢复、Renderer controls、close-policy hide/reopen 与 clean shutdown。top/bottom/四角 resize、edge snap、双击标题栏、系统菜单、touch/pen 和完整 UIA 焦点仍需独立证据。
 
