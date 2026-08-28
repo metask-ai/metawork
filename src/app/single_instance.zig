@@ -16,7 +16,7 @@ pub const max_frame_bytes: usize = 64 * 1024;
 const request_magic = "MWACTV01";
 const response_magic = "MWACK001";
 const digest_bytes = 32;
-pub const request_header_bytes = 84;
+pub const request_header_bytes = payload_len_offset + @sizeOf(u32);
 pub const response_frame_bytes = 12;
 
 const revision_offset = request_magic.len;
@@ -306,6 +306,21 @@ test "activation request round trips bounded argv and cwd" {
     try std.testing.expectEqualStrings("--example", decoded.argument(1).?);
     try std.testing.expectEqualStrings("value", decoded.argument(2).?);
     try std.testing.expect(decoded.argument(3) == null);
+}
+
+test "activation request header has no implicit padding" {
+    try std.testing.expectEqual(@as(usize, 82), request_header_bytes);
+    try std.testing.expectEqual(
+        payload_len_offset + @sizeOf(u32),
+        request_header_bytes,
+    );
+    const identity = Identity.init("development", "C:/Data/MetaWork");
+    var storage = [_]u8{0xa5} ** max_frame_bytes;
+    const frame = try encodeRequest(&storage, identity, "C:/", &.{"metawork"});
+    try std.testing.expectEqual(
+        request_header_bytes + "C:/".len + @sizeOf(u32) + "metawork".len,
+        frame.len,
+    );
 }
 
 test "activation request rejects revision identity and malformed payload" {

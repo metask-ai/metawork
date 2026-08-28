@@ -32,7 +32,7 @@ pub const Coordinator = struct {
     ) CoordinateError!Disposition {
         const identity = protocol.Identity.init(artifact_identity, canonical_data_root);
         var lease = switch (compat.tryAcquireLease(io, canonical_data_root) catch {
-            return activationFailure(interactive, .primary_unresponsive);
+            return activationFailure(interactive, .startup_failed);
         }) {
             .acquired => |value| value,
             .occupied => switch (try forwardOrFail(
@@ -57,7 +57,7 @@ pub const Coordinator = struct {
         self.server = compat.Server.init(allocator, canonical_data_root, .{
             .state = &self.queue,
             .handle_fn = handleActivation,
-        }) catch return activationFailure(interactive, .primary_unresponsive);
+        }) catch return activationFailure(interactive, .startup_failed);
         self.started = true;
         return .primary;
     }

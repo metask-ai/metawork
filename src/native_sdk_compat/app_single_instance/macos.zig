@@ -189,14 +189,10 @@ pub fn forward(
 }
 
 pub fn reportFailure(failure: contract.Failure) void {
-    const message = switch (failure) {
-        .incompatible => "Another MetaWork version is already running. Quit it before opening this version.",
-        .primary_unresponsive => "MetaWork is already running but could not be activated. Return to the running app or quit it and try again.",
-        .rejected => "MetaWork is already running and rejected this launch request.",
-    };
+    const message = contract.failureMessage(failure);
     const title = CFStringCreateWithCString(null, "MetaWork", utf8_encoding) orelse return;
     defer CFRelease(title);
-    const body = CFStringCreateWithCString(null, message, utf8_encoding) orelse return;
+    const body = CFStringCreateWithCString(null, message.ptr, utf8_encoding) orelse return;
     defer CFRelease(body);
     const button = CFStringCreateWithCString(null, "OK", utf8_encoding) orelse return;
     defer CFRelease(button);

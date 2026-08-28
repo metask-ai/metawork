@@ -40,10 +40,31 @@ pub const max_transport_request_bytes: usize = 64 * 1024;
 pub const max_transport_response_bytes: usize = 64;
 
 pub const Failure = enum {
+    startup_failed,
     incompatible,
     primary_unresponsive,
     rejected,
 };
+
+pub const failure_messages = struct {
+    pub const startup_failed =
+        "MetaWork could not start. Try again. If the problem continues, check the application log.";
+    pub const incompatible =
+        "Another MetaWork version is already running. Quit it before opening this version.";
+    pub const primary_unresponsive =
+        "MetaWork is already running but could not be activated. Return to the running app or quit it and try again.";
+    pub const rejected =
+        "MetaWork is already running and rejected this launch request.";
+};
+
+pub fn failureMessage(failure: Failure) [:0]const u8 {
+    return switch (failure) {
+        .startup_failed => failure_messages.startup_failed,
+        .incompatible => failure_messages.incompatible,
+        .primary_unresponsive => failure_messages.primary_unresponsive,
+        .rejected => failure_messages.rejected,
+    };
+}
 
 pub const Handler = struct {
     state: *anyopaque,
@@ -141,6 +162,22 @@ fn openOrCreateLock(io: std.Io, dir: std.Io.Dir) !std.Io.File {
 
 fn privateFilePermissions() std.Io.File.Permissions {
     return if (builtin.os.tag == .windows) .default_file else .fromMode(0o600);
+}
+
+test "fixed failure categories distinguish startup from an existing primary" {
+    try std.testing.expectEqualStrings(
+        failure_messages.startup_failed,
+        failureMessage(.startup_failed),
+    );
+    try std.testing.expectEqualStrings(
+        failure_messages.primary_unresponsive,
+        failureMessage(.primary_unresponsive),
+    );
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        failureMessage(.startup_failed),
+        "already running",
+    ) == null);
 }
 
 test "data-root lease rejects a second writer and recovers after close" {

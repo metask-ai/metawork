@@ -275,15 +275,19 @@ pub fn forward(
 }
 
 pub fn reportFailure(failure: contract.Failure) void {
+    @setEvalBranchQuota(5000);
     const text = switch (failure) {
+        .startup_failed => std.unicode.utf8ToUtf16LeStringLiteral(
+            contract.failure_messages.startup_failed,
+        ),
         .incompatible => std.unicode.utf8ToUtf16LeStringLiteral(
-            "Another MetaWork version is already running. Quit it before opening this version.",
+            contract.failure_messages.incompatible,
         ),
         .primary_unresponsive => std.unicode.utf8ToUtf16LeStringLiteral(
-            "MetaWork is already running but could not be activated. Return to the running app or quit it and try again.",
+            contract.failure_messages.primary_unresponsive,
         ),
         .rejected => std.unicode.utf8ToUtf16LeStringLiteral(
-            "MetaWork is already running and rejected this launch request.",
+            contract.failure_messages.rejected,
         ),
     };
     _ = MessageBoxW(
