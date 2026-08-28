@@ -6,6 +6,9 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const automatic_root = @import("product_workspace_automatic_root");
+
+pub const AutomaticRoot = automatic_root.Root;
 
 pub const Kind = enum { manual, automatic };
 pub const Authorization = enum { available, removing, reauthorization_required };
@@ -125,6 +128,20 @@ pub const Error = StorageError || error{
     UnknownWorkspace,
 };
 
+/// Linear directory allocation borrowed from the Runtime's automatic root.
+/// Product Control may only finish or roll it back through the originating
+/// Runtime; the concrete allocator never crosses the aggregate boundary.
+pub const AutomaticAllocation = struct {
+    inner: automatic_root.Allocation,
+    root_identity: *const anyopaque,
+    active: bool = true,
+
+    pub fn path(self: *const AutomaticAllocation) []const u8 {
+        std.debug.assert(self.active);
+        return self.inner.path();
+    }
+};
+
 const Trust = union(enum) {
     explicitly_trusted,
     temporary: []u8,
@@ -237,6 +254,7 @@ pub const Runtime = struct {
     max_manual: usize,
     max_automatic: usize,
     max_workspace_bytes: usize,
+    automatic_allocator: ?automatic_root.Allocator,
     next_id: u64 = 1,
     next_recent_order: u64 = 1,
 
@@ -246,6 +264,7 @@ pub const Runtime = struct {
         max_manual: usize,
         max_automatic: usize,
         max_workspace_bytes: usize,
+        automatic_root_capability: ?*AutomaticRoot,
     ) Error!Runtime {
         const capacity = std.math.add(usize, max_manual, max_automatic) catch
             return error.ProjectionCapacity;
@@ -258,6 +277,10 @@ pub const Runtime = struct {
             .max_manual = max_manual,
             .max_automatic = max_automatic,
             .max_workspace_bytes = max_workspace_bytes,
+            .automatic_allocator = if (automatic_root_capability) |root|
+                automatic_root.Allocator.init(root)
+            else
+                null,
         };
     }
 
@@ -268,13 +291,65 @@ pub const Runtime = struct {
             entry.* = null;
         }
         self.allocator.free(self.records);
+        if (self.automatic_allocator) |*allocator| allocator.deinit();
         self.* = undefined;
     }
 
     pub fn deinitEmpty(self: *Runtime) void {
         std.debug.assert(self.historyCount() == 0);
         self.allocator.free(self.records);
+        if (self.automatic_allocator) |*allocator| allocator.deinit();
         self.* = undefined;
+    }
+
+    pub fn automaticRootAvailable(self: *const Runtime) bool {
+        return self.automatic_allocator != null;
+    }
+
+    pub fn automaticRootPath(self: *const Runtime) ?[]const u8 {
+        const allocator = if (self.automatic_allocator) |*value| value else return null;
+        return allocator.canonicalRoot();
+    }
+
+    pub fn automaticRootContains(self: *const Runtime, path: []const u8) bool {
+        const allocator = if (self.automatic_allocator) |*value| value else return false;
+        return allocator.containsCanonicalPath(path);
+    }
+
+    pub fn allocateAutomatic(self: *Runtime) Error!AutomaticAllocation {
+        const allocator = if (self.automatic_allocator) |*value| value else return error.WorkspaceUnavailable;
+        const allocation = allocator.allocate() catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidAutomaticRoot => return error.InvalidWorkspace,
+            error.RootUnavailable, error.AllocationUnavailable => return error.WorkspaceUnavailable,
+        };
+        return .{
+            .inner = allocation,
+            .root_identity = &allocator.root,
+        };
+    }
+
+    pub fn finishAutomaticAllocation(
+        self: *Runtime,
+        allocation: *AutomaticAllocation,
+    ) void {
+        std.debug.assert(allocation.active);
+        const allocator = if (self.automatic_allocator) |*value| value else unreachable;
+        std.debug.assert(allocation.root_identity == @as(*const anyopaque, @ptrCast(&allocator.root)));
+        allocation.inner.deinit();
+        allocation.active = false;
+    }
+
+    pub fn rollbackAutomaticAllocation(
+        self: *Runtime,
+        allocation: *AutomaticAllocation,
+    ) bool {
+        std.debug.assert(allocation.active);
+        const allocator = if (self.automatic_allocator) |*value| value else unreachable;
+        std.debug.assert(allocation.root_identity == @as(*const anyopaque, @ptrCast(&allocator.root)));
+        const deleted = allocator.rollback(&allocation.inner);
+        allocation.active = false;
+        return deleted;
     }
 
     pub fn slotCount(self: *const Runtime) usize {
@@ -1000,6 +1075,11 @@ fn pathWithin(parent: []const u8, child: []const u8) bool {
 }
 
 pub const testing = if (builtin.is_test) struct {
+    pub fn installAutomaticRoot(runtime: *Runtime, root: *AutomaticRoot) void {
+        std.debug.assert(runtime.automatic_allocator == null);
+        runtime.automatic_allocator = automatic_root.Allocator.init(root);
+    }
+
     pub const OwnedRecord = struct {
         id: u64,
         kind: Kind = .manual,
@@ -1122,7 +1202,14 @@ test "typed authorities invalidate stale Workspace consumers" {
         .free_fn = testStorageFree,
         .redact_fn = testStorageRedact,
     };
-    var runtime = try Runtime.init(std.testing.allocator, std.testing.io, 1, 1, 1024);
+    var runtime = try Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        1,
+        1,
+        1024,
+        null,
+    );
     defer runtime.deinit(storage);
     testing.installOwned(&runtime, 0, .{
         .id = 1,

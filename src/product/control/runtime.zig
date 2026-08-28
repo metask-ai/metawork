@@ -405,9 +405,7 @@ fn redactWorkspaceStorage(
 
 fn automaticWorkspaceContains(context: *const anyopaque, path: []const u8) bool {
     const self: *const Runtime = @ptrCast(@alignCast(context));
-    if (self.automatic_workspaces) |*store|
-        return store.containsCanonicalPath(path);
-    return false;
+    return self.workspace.automaticRootContains(path);
 }
 
 fn hiddenWorkspaceReusable(context: *const anyopaque, workspace_id: u64) bool {
@@ -1233,7 +1231,6 @@ pub const Runtime = struct {
     account: AccountProjection,
     execution: ActiveExecution,
     canonical_user_home: ?[]u8,
-    automatic_workspaces: ?product_workspace.AutomaticAllocator,
     execution_replacement: ExecutionReplacementKind = .none,
     execution_redaction_preparation: ExecutionRedactionPreparation = .none,
     custom_execution_binding: ?CustomExecutionBinding = null,
@@ -1288,11 +1285,6 @@ pub const Runtime = struct {
             break :home_copy try allocator.dupe(u8, home);
         } else null;
         errdefer if (canonical_user_home) |home| allocator.free(home);
-        var automatic_workspaces = if (configuration.directories.automatic_workspace_root) |root|
-            product_workspace.AutomaticAllocator.init(root)
-        else
-            null;
-        errdefer if (automatic_workspaces) |*store| store.deinit();
         const workspace_capacity = workspaceRecordCapacity(limits) orelse
             return error.ProjectionCapacity;
         var workspace = try product_workspace.Runtime.init(
@@ -1301,6 +1293,7 @@ pub const Runtime = struct {
             limits.max_workspaces,
             limits.max_tasks,
             limits.max_workspace_bytes,
+            configuration.directories.automatic_workspace_root,
         );
         errdefer workspace.deinitEmpty();
         var product_tasks = try task_runtime.Runtime.init(allocator, limits.max_tasks);
@@ -1395,7 +1388,6 @@ pub const Runtime = struct {
             .account = account,
             .execution = execution,
             .canonical_user_home = canonical_user_home,
-            .automatic_workspaces = automatic_workspaces,
             .model_connection_capabilities = configuration.model_connections,
             .completion_factory = configuration.completion_factory,
         };
@@ -1797,7 +1789,7 @@ pub const Runtime = struct {
         return self.skill.exportPackage(install_id, absolute_destination);
     }
     pub fn automaticWorkspacesAvailable(self: *const Runtime) bool {
-        return self.automatic_workspaces != null;
+        return self.workspace.automaticRootAvailable();
     }
 
     pub fn hasEnabledScheduledTasks(self: *Runtime) bool {
@@ -2633,13 +2625,8 @@ pub const Runtime = struct {
         if (!self.task_runtime.hasCapacity()) return error.TaskCapacity;
         if (!self.workspace.automaticCapacityAvailable())
             return error.WorkspaceCapacity;
-        const store = if (self.automatic_workspaces) |*value| value else return error.WorkspaceUnavailable;
-        var allocation = store.allocate() catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidAutomaticRoot => return error.InvalidWorkspace,
-            error.RootUnavailable, error.AllocationUnavailable => return error.WorkspaceUnavailable,
-        };
-        errdefer _ = store.rollback(&allocation);
+        var allocation = try self.workspace.allocateAutomatic();
+        errdefer _ = self.workspace.rollbackAutomaticAllocation(&allocation);
         const workspace = try self.registerAutomaticWorkspace(allocation.path());
         errdefer self.releaseAutomaticWorkspaceNoFail(workspace.id);
         const task_id = try self.createTaskInWorkspaceInternal(
@@ -2651,7 +2638,7 @@ pub const Runtime = struct {
             true,
         );
         self.workspace.setAutomaticOwner(workspace.id, task_id);
-        allocation.deinit();
+        self.workspace.finishAutomaticAllocation(&allocation);
         return task_id;
     }
 
@@ -3784,7 +3771,7 @@ pub const Runtime = struct {
             self.revision,
             task_persistence_ready,
             @tagName(self.task_persistence_health),
-            self.automatic_workspaces != null,
+            self.workspace.automaticRootAvailable(),
             self.schedule.timerEnabled() and schedule_persistence_ready and
                 background_schedule_wake,
             schedule_persistence_ready,
@@ -4032,7 +4019,6 @@ pub const Runtime = struct {
         self.workspace.deinit(self.workspaceStorage());
         self.schedule.deinit();
         self.skill.deinit();
-        if (self.automatic_workspaces) |*store| store.deinit();
         if (self.canonical_user_home) |home| self.allocator.free(home);
         if (self.mcp) |*mcp| mcp.deinit();
         self.execution.deinit();
@@ -4379,7 +4365,7 @@ pub const Runtime = struct {
             else
                 null,
             .model = self.admissionModel(),
-            .automatic_workspace_available = self.automatic_workspaces != null,
+            .automatic_workspace_available = self.workspace.automaticRootAvailable(),
         };
     }
 
@@ -4535,7 +4521,7 @@ pub const Runtime = struct {
             !std.unicode.utf8ValidateSlice(title))
             return error.InvalidTaskTitle;
         for (title) |byte| if (byte < 0x20) return error.InvalidTaskTitle;
-        if (self.automatic_workspaces == null)
+        if (!self.workspace.automaticRootAvailable())
             return error.WorkspaceUnavailable;
         try input.recurrence.validate();
         const scheduled_input = std.mem.trim(u8, input.input, " \t\r\n");
@@ -5195,8 +5181,7 @@ pub const Runtime = struct {
         self: *Runtime,
         canonical_root: []const u8,
     ) Error!product_workspace.Facts {
-        const store = if (self.automatic_workspaces) |*value| value else return error.WorkspaceUnavailable;
-        if (!store.containsCanonicalPath(canonical_root))
+        if (!self.workspace.automaticRootContains(canonical_root))
             return error.InvalidWorkspace;
         const skill_root = try self.allocator.dupe(u8, canonical_root);
         errdefer self.allocator.free(skill_root);
@@ -7360,12 +7345,11 @@ test "automatic Workspace root is optional and reserved from user registration" 
     try std.testing.expectError(
         error.InvalidWorkspace,
         control.openWorkspace(.{
-            .workspace_root = control.automatic_workspaces.?.canonicalRoot(),
+            .workspace_root = control.workspace.automaticRootPath().?,
             .trust = .explicitly_trusted,
         }),
     );
-    var allocation = try control.automatic_workspaces.?.allocate();
-    defer allocation.deinit();
+    var allocation = try control.workspace.allocateAutomatic();
     try std.testing.expectError(
         error.InvalidWorkspace,
         control.openWorkspace(.{
@@ -7373,7 +7357,7 @@ test "automatic Workspace root is optional and reserved from user registration" 
             .trust = .explicitly_trusted,
         }),
     );
-    try std.testing.expect(control.automatic_workspaces.?.rollback(&allocation));
+    try std.testing.expect(control.workspace.rollbackAutomaticAllocation(&allocation));
 }
 
 test "Workspace registry owns empty selection recent use authorization and capacity" {
@@ -8176,7 +8160,8 @@ test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {
         }),
     );
     try std.testing.expectEqual(@as(usize, 0), persistence.commits);
-    control.automatic_workspaces = product_workspace.AutomaticAllocator.init(
+    product_workspace.testing.installAutomaticRoot(
+        &control.workspace,
         &automatic_root,
     );
     const id = try control.createScheduledTask(.{
@@ -8292,7 +8277,8 @@ test "execution replacement durably scrubs Schedule before ownership transfer" {
             .unavailable,
         );
     }
-    control.automatic_workspaces = product_workspace.AutomaticAllocator.init(
+    product_workspace.testing.installAutomaticRoot(
+        &control.workspace,
         &automatic_root,
     );
 
@@ -8437,7 +8423,8 @@ test "Scheduled Task execution drift becomes needs attention without blocking Ac
         persistence.capability(),
         .ready,
     );
-    control.automatic_workspaces = product_workspace.AutomaticAllocator.init(
+    product_workspace.testing.installAutomaticRoot(
+        &control.workspace,
         &automatic_root,
     );
     control.setScheduleBackgroundAvailableNoFail(true);

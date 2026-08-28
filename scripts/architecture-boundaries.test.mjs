@@ -550,7 +550,11 @@ test("Product Workspace owns the bounded registry without owning the shared comm
   assert.match(control, /workspace: product_workspace\.Runtime/);
   assert.match(workspaceRoot, /pub const Runtime = runtime_impl\.Runtime/);
   assert.match(workspaceRoot, /pub const Projection = view_impl\.Projection/);
-  assert.match(workspaceRoot, /pub const AutomaticRoot = automatic_root_impl\.Root/);
+  assert.match(workspaceRoot, /pub const AutomaticRoot = runtime_impl\.AutomaticRoot/);
+  assert.doesNotMatch(
+    workspaceRoot,
+    /AutomaticAllocator|AutomaticAllocation|AutomaticError|automatic_root_impl/,
+  );
   assert.match(workspaceRuntime, /records: \[\]\?Record/);
   assert.match(workspaceRuntime, /pub fn prepareOpen/);
   assert.match(workspaceRuntime, /pub fn prepareRemoval/);
@@ -559,6 +563,10 @@ test("Product Workspace owns the bounded registry without owning the shared comm
   assert.match(workspaceRuntime, /pub fn taskRunAuthority/);
   assert.match(workspaceRuntime, /pub fn recoveryAuthority/);
   assert.match(workspaceRuntime, /pub fn filePreviewAuthorized/);
+  assert.match(workspaceRuntime, /automatic_allocator: \?automatic_root\.Allocator/);
+  assert.match(workspaceRuntime, /pub fn allocateAutomatic/);
+  assert.match(workspaceRuntime, /pub fn finishAutomaticAllocation/);
+  assert.match(workspaceRuntime, /pub fn rollbackAutomaticAllocation/);
   assert.doesNotMatch(
     workspaceRuntime,
     /commitTaskState|TaskPersistence|FileStore|Executor|std\.Thread|@import\("(?:metawork_product_control|metawork_product_task|metawork_product_skill|metawork_product_mcp|metawork_product_schedule|metawork_agent|metawork_app|metawork_bridge|metawork_account)"\)/,
@@ -580,7 +588,7 @@ test("Product Workspace owns the bounded registry without owning the shared comm
   );
   assert.doesNotMatch(
     control,
-    /const WorkspaceView = struct|workspaces: \[\]\?Workspace|next_workspace_id:|next_workspace_recent_order:|fn upsertWorkspace\(|fn rollbackWorkspaceUpsert\(|fn finishWorkspaceUpsert\(|fn findWorkspace\(|fn findWorkspaceByRoot\(|fn writeWorkspace\(/,
+    /const WorkspaceView = struct|workspaces: \[\]\?Workspace|automatic_workspaces:|AutomaticAllocator|next_workspace_id:|next_workspace_recent_order:|fn upsertWorkspace\(|fn rollbackWorkspaceUpsert\(|fn finishWorkspaceUpsert\(|fn findWorkspace\(|fn findWorkspaceByRoot\(|fn writeWorkspace\(/,
   );
   assert.match(control, /commitTaskStateWithCheckpoint/);
   assert.match(control, /workspace\.prepareOpen/);

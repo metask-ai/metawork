@@ -2,7 +2,6 @@
 
 const runtime_impl = @import("product_workspace_runtime");
 const view_impl = @import("product_workspace_view");
-const automatic_root_impl = @import("product_workspace_automatic_root");
 
 pub const Runtime = runtime_impl.Runtime;
 pub const Kind = runtime_impl.Kind;
@@ -31,8 +30,5 @@ pub const ViewProvider = view_impl.Provider;
 pub const ViewError = view_impl.Error;
 pub const copyProjections = view_impl.copyProjections;
 pub const writeProjectionList = view_impl.writeProjectionList;
-pub const AutomaticRoot = automatic_root_impl.Root;
-pub const AutomaticAllocator = automatic_root_impl.Allocator;
-pub const AutomaticAllocation = automatic_root_impl.Allocation;
-pub const AutomaticError = automatic_root_impl.Error;
+pub const AutomaticRoot = runtime_impl.AutomaticRoot;
 pub const testing = runtime_impl.testing;

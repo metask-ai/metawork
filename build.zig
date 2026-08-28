@@ -1298,6 +1298,10 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    product_workspace_runtime.addImport(
+        "product_workspace_automatic_root",
+        product_workspace_automatic_root,
+    );
     const product_workspace_view = b.createModule(.{
         .root_source_file = b.path("src/product/workspace/view.zig"),
         .target = target,
@@ -1311,10 +1315,6 @@ fn wireAgentCore(
     });
     product_workspace.addImport("product_workspace_runtime", product_workspace_runtime);
     product_workspace.addImport("product_workspace_view", product_workspace_view);
-    product_workspace.addImport(
-        "product_workspace_automatic_root",
-        product_workspace_automatic_root,
-    );
     const product_control_runtime = b.createModule(.{
         .root_source_file = b.path("src/product/control/runtime.zig"),
         .target = target,
