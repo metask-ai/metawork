@@ -536,6 +536,10 @@ test("Product Workspace owns the bounded registry without owning the shared comm
   assert.match(workspaceRuntime, /pub fn prepareOpen/);
   assert.match(workspaceRuntime, /pub fn prepareRemoval/);
   assert.match(workspaceRuntime, /pub fn prepareOrder/);
+  assert.match(workspaceRuntime, /pub fn taskCreateAuthority/);
+  assert.match(workspaceRuntime, /pub fn taskRunAuthority/);
+  assert.match(workspaceRuntime, /pub fn recoveryAuthority/);
+  assert.match(workspaceRuntime, /pub fn filePreviewAuthorized/);
   assert.doesNotMatch(
     workspaceRuntime,
     /commitTaskState|TaskPersistence|FileStore|Executor|std\.Thread|@import\("(?:metawork_product_control|metawork_product_task|metawork_product_skill|metawork_product_mcp|metawork_product_schedule|metawork_agent|metawork_app|metawork_bridge|metawork_account)"\)/,
@@ -548,6 +552,25 @@ test("Product Workspace owns the bounded registry without owning the shared comm
   assert.match(control, /workspace\.prepareOpen/);
   assert.match(control, /workspace\.prepareRemoval/);
   assert.match(control, /workspace\.prepareOrder/);
+  assert.match(control, /workspace\.taskCreateAuthority/);
+  assert.match(control, /workspace\.taskRunAuthority/);
+  assert.match(control, /workspace\.recoveryAuthority/);
+  assert.match(control, /workspace\.filePreviewAuthorized/);
+  assert.match(control, /workspace\.availableManualBindingAt/);
+  assert.match(control, /workspace\.visibleManualBindingAt/);
+  const registryFields = workspaceRuntime.match(
+    /pub const Runtime = struct \{([\s\S]*?)\n\s*pub fn init\(/,
+  )?.[1];
+  assert.ok(registryFields, "Workspace Runtime fields must remain inspectable");
+  assert.doesNotMatch(
+    registryFields,
+    /Storage|OpenAuthority|TaskAuthority|RecoveryAuthority|Binding/,
+  );
+  const orderContext = control.match(
+    /const TaskWorkspaceOrderContext = struct \{([\s\S]*?)\n\};/,
+  )?.[1];
+  assert.ok(orderContext, "Workspace order context must remain inspectable");
+  assert.doesNotMatch(orderContext, /control:|\*Runtime|Task|Skill|Mcp/);
 });
 
 test("Application coordinators consume scoped Product Control capabilities", () => {

@@ -44,6 +44,28 @@ pub const Facts = struct {
     recent_order: u64,
 };
 
+pub const Binding = struct {
+    id: u64,
+    epoch: u64,
+    canonical_root: []const u8,
+};
+
+pub const TaskAuthority = struct {
+    id: u64,
+    epoch: u64,
+    kind: Kind,
+    canonical_root: []const u8,
+    trust: TrustFact,
+};
+
+pub const RecoveryAuthority = struct {
+    canonical_root: []const u8 = "",
+    kind: Kind = .manual,
+    identity_exact: bool = false,
+    automatic_owner_exact: bool = false,
+    exists: bool = false,
+};
+
 pub const HistoryFact = struct {
     id: u64,
     epoch: u64,
@@ -268,6 +290,10 @@ pub const Runtime = struct {
         return result;
     }
 
+    pub fn automaticCapacityAvailable(self: *const Runtime) bool {
+        return self.count(.automatic) < self.max_automatic;
+    }
+
     pub fn historyCount(self: *const Runtime) usize {
         var result: usize = 0;
         for (self.records) |entry| if (entry != null) {
@@ -313,6 +339,120 @@ pub const Runtime = struct {
     } {
         const fact = self.factsAt(index) orelse return null;
         return .{ .id = fact.id, .epoch = fact.epoch, .canonical_root = fact.canonical_root };
+    }
+
+    pub fn binding(self: *const Runtime, id: u64) ?Binding {
+        const fact = self.facts(id) orelse return null;
+        return .{
+            .id = fact.id,
+            .epoch = fact.epoch,
+            .canonical_root = fact.canonical_root,
+        };
+    }
+
+    pub fn availableManualBindingAt(self: *const Runtime, index: usize) ?Binding {
+        const fact = self.factsAt(index) orelse return null;
+        if (fact.kind != .manual or !fact.visible or
+            fact.authorization != .available) return null;
+        return .{
+            .id = fact.id,
+            .epoch = fact.epoch,
+            .canonical_root = fact.canonical_root,
+        };
+    }
+
+    pub fn visibleManualBindingAt(self: *const Runtime, index: usize) ?Binding {
+        const fact = self.factsAt(index) orelse return null;
+        if (fact.kind != .manual or !fact.visible) return null;
+        return .{
+            .id = fact.id,
+            .epoch = fact.epoch,
+            .canonical_root = fact.canonical_root,
+        };
+    }
+
+    pub fn automaticBindingAt(self: *const Runtime, index: usize) ?Binding {
+        const fact = self.factsAt(index) orelse return null;
+        if (fact.kind != .automatic) return null;
+        return .{
+            .id = fact.id,
+            .epoch = fact.epoch,
+            .canonical_root = fact.canonical_root,
+        };
+    }
+
+    pub fn filePreviewAuthorized(
+        self: *const Runtime,
+        id: u64,
+        epoch: u64,
+        canonical_root: []const u8,
+    ) bool {
+        const fact = self.facts(id) orelse return false;
+        return fact.epoch == epoch and fact.authorization == .available and
+            std.mem.eql(u8, fact.canonical_root, canonical_root);
+    }
+
+    pub fn taskCreateAuthority(
+        self: *const Runtime,
+        id: u64,
+        expected_epoch: u64,
+        allow_unowned_automatic: bool,
+    ) Error!TaskAuthority {
+        const fact = self.facts(id) orelse return error.UnknownWorkspace;
+        if (expected_epoch == 0 or expected_epoch != fact.epoch)
+            return error.WorkspaceEpochMismatch;
+        if (fact.kind == .automatic and
+            (!allow_unowned_automatic or fact.automatic_task_id != 0))
+            return error.WorkspaceUnavailable;
+        if (fact.kind == .manual and !fact.visible)
+            return error.WorkspaceUnavailable;
+        if (fact.authorization == .removing)
+            return error.WorkspaceRemovalInProgress;
+        if (fact.authorization != .available)
+            return error.WorkspaceUnavailable;
+        return taskAuthorityFromFacts(fact);
+    }
+
+    pub fn taskRunAuthority(
+        self: *const Runtime,
+        id: u64,
+        expected_epoch: u64,
+    ) Error!TaskAuthority {
+        const fact = self.facts(id) orelse return error.WorkspaceUnavailable;
+        if (fact.kind == .manual and !fact.visible)
+            return error.WorkspaceUnavailable;
+        if (fact.authorization == .removing)
+            return error.WorkspaceRemovalInProgress;
+        if (fact.authorization != .available)
+            return error.WorkspaceUnavailable;
+        if (fact.epoch != expected_epoch) return error.WorkspaceEpochMismatch;
+        return taskAuthorityFromFacts(fact);
+    }
+
+    pub fn recoveryBinding(self: *const Runtime, id: u64) ?TaskAuthority {
+        const fact = self.facts(id) orelse return null;
+        return taskAuthorityFromFacts(fact);
+    }
+
+    pub fn recoveryAuthority(
+        self: *const Runtime,
+        id: u64,
+        expected_epoch: u64,
+        expected_root: ?[]const u8,
+        task_id: u64,
+    ) RecoveryAuthority {
+        const fact = self.facts(id) orelse return .{};
+        return .{
+            .canonical_root = fact.canonical_root,
+            .kind = fact.kind,
+            .identity_exact = fact.authorization == .available and
+                fact.epoch == expected_epoch and
+                (expected_root == null or
+                    std.mem.eql(u8, fact.canonical_root, expected_root.?)),
+            .automatic_owner_exact = fact.kind != .automatic or
+                fact.automatic_task_id == task_id,
+            .exists = true,
+        };
     }
 
     pub fn prepareOpen(
@@ -829,6 +969,16 @@ fn factsFromRecord(record: *const Record) Facts {
     };
 }
 
+fn taskAuthorityFromFacts(fact: Facts) TaskAuthority {
+    return .{
+        .id = fact.id,
+        .epoch = fact.epoch,
+        .kind = fact.kind,
+        .canonical_root = fact.canonical_root,
+        .trust = fact.trust,
+    };
+}
+
 fn deinitRecord(record: *Record, storage: Storage) void {
     storage.free(record.canonical_root);
     storage.free(record.projected_root_storage);
@@ -937,8 +1087,80 @@ pub const testing = if (builtin.is_test) struct {
     }
 } else struct {};
 
-test "registry owns identity and rolls back an uncommitted open" {
-    // Full storage/transaction behavior is covered through Product Control;
-    // this root-level test intentionally remains focused on module identity.
-    try std.testing.expect(@sizeOf(Runtime) != 0);
+fn testStorageCopy(_: *anyopaque, value: []const u8, max: usize) StorageError![]u8 {
+    if (value.len > max) return error.ProjectionCapacity;
+    return std.testing.allocator.dupe(u8, value);
+}
+
+fn testStorageProject(
+    _: *anyopaque,
+    value: []const u8,
+    max: usize,
+    _: []const u8,
+) StorageError!ProjectedText {
+    if (value.len > max) return error.ProjectionCapacity;
+    return .{
+        .value = try std.testing.allocator.dupe(u8, value),
+        .redacted = false,
+    };
+}
+
+fn testStorageFree(_: *anyopaque, value: []u8) void {
+    std.testing.allocator.free(value);
+}
+
+fn testStorageRedact(_: *anyopaque, _: []u8, _: *usize, _: []const u8) bool {
+    return false;
+}
+
+test "typed authorities invalidate stale Workspace consumers" {
+    var context: u8 = 0;
+    const storage: Storage = .{
+        .context = &context,
+        .copy_fn = testStorageCopy,
+        .project_fn = testStorageProject,
+        .free_fn = testStorageFree,
+        .redact_fn = testStorageRedact,
+    };
+    var runtime = try Runtime.init(std.testing.allocator, std.testing.io, 1, 1, 1024);
+    defer runtime.deinit(storage);
+    testing.installOwned(&runtime, 0, .{
+        .id = 1,
+        .canonical_root = try storage.copy("/workspace", 1024),
+        .projected_root_storage = try storage.copy("/workspace", 1024),
+        .projected_root_len = "/workspace".len,
+        .display_name_storage = try storage.copy("workspace", 1024),
+        .display_name_len = "workspace".len,
+        .recent_order = 1,
+    });
+    testing.installOwned(&runtime, 1, .{
+        .id = 2,
+        .kind = .automatic,
+        .automatic_task_id = 7,
+        .canonical_root = try storage.copy("/automatic", 1024),
+        .projected_root_storage = try storage.copy("/automatic", 1024),
+        .projected_root_len = "/automatic".len,
+        .display_name_storage = try storage.copy("automatic", 1024),
+        .display_name_len = "automatic".len,
+        .visible = false,
+        .recent_order = 0,
+    });
+
+    try std.testing.expect(runtime.filePreviewAuthorized(1, 1, "/workspace"));
+    try std.testing.expect(!runtime.filePreviewAuthorized(1, 2, "/workspace"));
+    try std.testing.expectError(
+        error.WorkspaceEpochMismatch,
+        runtime.taskCreateAuthority(1, 2, false),
+    );
+    const exact = runtime.recoveryAuthority(1, 1, "/workspace", 9);
+    try std.testing.expect(exact.identity_exact and exact.automatic_owner_exact);
+    try std.testing.expect(runtime.recoveryAuthority(2, 1, null, 7).automatic_owner_exact);
+    try std.testing.expect(!runtime.recoveryAuthority(2, 1, null, 8).automatic_owner_exact);
+
+    testing.setAuthorization(&runtime, 1, .removing);
+    try std.testing.expect(!runtime.filePreviewAuthorized(1, 1, "/workspace"));
+    try std.testing.expectError(
+        error.WorkspaceRemovalInProgress,
+        runtime.taskRunAuthority(1, 1),
+    );
 }

@@ -1605,11 +1605,11 @@ pub const Runtime = struct {
         self: *const Runtime,
         reference: task_runtime.FileReference,
     ) bool {
-        const workspace = self.workspace.facts(reference.workspace_id) orelse
-            return false;
-        return workspace.epoch == reference.workspace_epoch and
-            workspace.authorization == .available and
-            std.mem.eql(u8, workspace.canonical_root, reference.workspace_root);
+        return self.workspace.filePreviewAuthorized(
+            reference.workspace_id,
+            reference.workspace_epoch,
+            reference.workspace_root,
+        );
     }
 
     const PreviewProjection = struct {
@@ -2189,7 +2189,7 @@ pub const Runtime = struct {
         workspace_id: u64,
     ) Error!CatalogProjection {
         self.syncLifecycle();
-        const workspace = self.workspace.facts(workspace_id) orelse
+        const workspace = self.workspace.binding(workspace_id) orelse
             return error.UnknownWorkspace;
         return self.skill.workspaceCatalogProjection(workspace.id, workspace.epoch);
     }
@@ -2535,20 +2535,11 @@ pub const Runtime = struct {
             return error.ExecutionUnavailable;
         if (!self.validExecutionGeneration(expected_execution_generation))
             return error.ExecutionGenerationMismatch;
-        const workspace_view = self.workspace.facts(workspace_id) orelse
-            return error.UnknownWorkspace;
-        if (expected_workspace_epoch == 0 or
-            expected_workspace_epoch != workspace_view.epoch)
-            return error.WorkspaceEpochMismatch;
-        if (workspace_view.kind == .automatic and
-            (!allow_unowned_automatic or workspace_view.automatic_task_id != 0))
-            return error.WorkspaceUnavailable;
-        if (workspace_view.kind == .manual and !workspace_view.visible)
-            return error.WorkspaceUnavailable;
-        if (workspace_view.authorization == .removing)
-            return error.WorkspaceRemovalInProgress;
-        if (workspace_view.authorization != .available)
-            return error.WorkspaceUnavailable;
+        const workspace_view = try self.workspace.taskCreateAuthority(
+            workspace_id,
+            expected_workspace_epoch,
+            allow_unowned_automatic,
+        );
         var pinned_catalog: ?CatalogSnapshot = null;
         errdefer if (pinned_catalog) |*snapshot| {
             self.projection_bytes -= snapshot.projected_bytes;
@@ -2677,7 +2668,7 @@ pub const Runtime = struct {
             expected_skill_selection_revision != null)
             return error.CatalogUnavailable;
         if (!self.task_runtime.hasCapacity()) return error.TaskCapacity;
-        if (self.workspace.count(.automatic) >= self.limits.max_tasks)
+        if (!self.workspace.automaticCapacityAvailable())
             return error.WorkspaceCapacity;
         const store = if (self.automatic_workspaces) |*value| value else return error.WorkspaceUnavailable;
         var allocation = store.allocate() catch |err| switch (err) {
@@ -2716,7 +2707,7 @@ pub const Runtime = struct {
             expected_binding_epoch,
             self.taskRuntimeRecoveryAdmissionEffects(),
         );
-        const workspace = self.workspace.facts(facts.workspace_id) orelse unreachable;
+        const workspace = self.workspace.recoveryBinding(facts.workspace_id) orelse unreachable;
         const canonical_user_home = self.canonical_user_home orelse unreachable;
         const store = self.checkpoint_store orelse unreachable;
         const attempt_id = try self.task_runtime.startRecovery(task_id, .{
@@ -2864,18 +2855,12 @@ pub const Runtime = struct {
         )) return error.TaskClosing;
         const workspace_id = self.task_runtime.taskWorkspaceId(task_id) orelse
             return error.UnknownTask;
-        const workspace = self.workspace.facts(workspace_id) orelse
-            return error.WorkspaceUnavailable;
-        if (workspace.kind == .manual and !workspace.visible)
-            return error.WorkspaceUnavailable;
-        if (workspace.authorization == .removing)
-            return error.WorkspaceRemovalInProgress;
-        if (workspace.authorization != .available)
-            return error.WorkspaceUnavailable;
         const task_workspace_epoch = self.task_runtime.taskWorkspaceEpoch(task_id) orelse
             return error.UnknownTask;
-        if (workspace.epoch != task_workspace_epoch)
-            return error.WorkspaceEpochMismatch;
+        const workspace = try self.workspace.taskRunAuthority(
+            workspace_id,
+            task_workspace_epoch,
+        );
         if (workspace.kind == .automatic and input == .skill)
             return error.CatalogUnavailable;
         var order_preparation = if (workspace.kind == .manual)
@@ -4262,16 +4247,12 @@ pub const Runtime = struct {
         self: *Runtime,
         query: task_runtime.ProjectionAuthorityQuery,
     ) task_runtime.ProjectionAuthority {
-        const workspace = self.workspace.facts(query.workspace_id);
-        const workspace_identity_exact = if (workspace) |value|
-            value.authorization == .available and value.epoch == query.workspace_epoch and
-                std.mem.eql(u8, value.canonical_root, query.workspace_root)
-        else
-            false;
-        const automatic_owner_exact = if (workspace) |value|
-            value.kind != .automatic or value.automatic_task_id == query.task_id
-        else
-            false;
+        const workspace = self.workspace.recoveryAuthority(
+            query.workspace_id,
+            query.workspace_epoch,
+            query.workspace_root,
+            query.task_id,
+        );
         const execution_available = self.execution_replacement == .none and
             self.execution.ready() and
             query.execution_provider == self.execution.provider.? and
@@ -4289,8 +4270,8 @@ pub const Runtime = struct {
             .checkpoint_store_ready = self.checkpoint_store != null and
                 self.checkpoint_store_health.load(.acquire) == .ready,
             .execution_admission = if (execution_available) .available else .unavailable,
-            .workspace_identity_exact = workspace_identity_exact,
-            .automatic_owner_exact = automatic_owner_exact,
+            .workspace_identity_exact = workspace.identity_exact,
+            .automatic_owner_exact = workspace.automatic_owner_exact,
             .runtime_admission = if (self.shutting_down)
                 .shutting_down
             else if (self.agent_runtime.restoreAdmissionAvailable())
@@ -4298,7 +4279,7 @@ pub const Runtime = struct {
             else
                 .unavailable,
             .authority_stable = !self.shutting_down and
-                self.canonical_user_home != null and workspace != null,
+                self.canonical_user_home != null and workspace.exists,
         };
     }
 
@@ -4368,9 +4349,8 @@ pub const Runtime = struct {
         index: usize,
     ) ?skill_runtime.ScopedCatalog {
         const self: *const Runtime = @ptrCast(@alignCast(context));
-        const workspace = self.workspace.factsAt(index) orelse return null;
-        if (workspace.kind != .manual or !workspace.visible or
-            workspace.authorization != .available) return null;
+        const workspace = self.workspace.availableManualBindingAt(index) orelse
+            return null;
         return self.skill.scopedWorkspaceCatalog(workspace.id, workspace.epoch);
     }
 
@@ -4724,14 +4704,10 @@ pub const Runtime = struct {
             self.taskRestoreProjection(),
         );
         for (recovered.value.tasks) |task|
-            if (self.workspace.facts(task.workspace_id)) |workspace| {
-                if (workspace.kind == .automatic and
-                    self.task_runtime.taskWorkspaceId(task.id) != null)
-                    self.workspace.setAutomaticOwnerFromRestore(workspace.id, task.id);
-            };
+            if (self.task_runtime.taskWorkspaceId(task.id) != null)
+                self.workspace.setAutomaticOwnerFromRestore(task.workspace_id, task.id);
         for (0..self.workspace.slotCount()) |index| {
-            const workspace = self.workspace.factsAt(index) orelse continue;
-            if (workspace.kind != .automatic) continue;
+            const workspace = self.workspace.automaticBindingAt(index) orelse continue;
             if (self.task_runtime.taskCountInWorkspace(workspace.id) == 1) continue;
             std.debug.assert(self.skill.unregisterWorkspace(
                 workspace.id,
@@ -5120,7 +5096,12 @@ pub const Runtime = struct {
         query: task_runtime.RecoveryAuthorityQuery,
     ) task_runtime.RecoveryExternalAuthority {
         const self: *Runtime = @ptrCast(@alignCast(context));
-        const workspace = self.workspace.facts(query.workspace_id);
+        const workspace = self.workspace.recoveryAuthority(
+            query.workspace_id,
+            query.workspace_epoch,
+            null,
+            query.task_id,
+        );
         const execution_exact = self.execution_replacement == .none and
             self.execution.ready() and
             query.target_execution_generation == self.execution.generation and
@@ -5134,24 +5115,18 @@ pub const Runtime = struct {
                     self.account.execution_generation == self.execution.generation and
                     self.accountHasModel(query.task_model);
         return .{
-            .workspace_root = if (workspace) |value| value.canonical_root else "",
-            .workspace_kind = if (workspace) |value| switch (value.kind) {
+            .workspace_root = workspace.canonical_root,
+            .workspace_kind = switch (workspace.kind) {
                 .manual => .manual,
                 .automatic => .automatic,
-            } else .manual,
+            },
             .target_execution_generation = if (self.execution.ready())
                 self.execution.generation
             else
                 0,
             .shutting_down = self.shutting_down,
-            .workspace_authority_exact = if (workspace) |value|
-                value.authorization == .available and value.epoch == query.workspace_epoch
-            else
-                false,
-            .automatic_owner_exact = if (workspace) |value|
-                value.kind != .automatic or value.automatic_task_id == query.task_id
-            else
-                false,
+            .workspace_authority_exact = workspace.identity_exact,
+            .automatic_owner_exact = workspace.automatic_owner_exact,
             .target_execution_authority_exact = execution_exact,
         };
     }
@@ -5332,8 +5307,8 @@ pub const Runtime = struct {
         index: usize,
     ) ?skill_runtime.EnablementWorkspaceIdentity {
         const self: *const Runtime = @ptrCast(@alignCast(context));
-        const workspace = self.workspace.factsAt(index) orelse return null;
-        if (workspace.kind != .manual or !workspace.visible) return null;
+        const workspace = self.workspace.visibleManualBindingAt(index) orelse
+            return null;
         return .{
             .workspace_id = workspace.id,
             .workspace_epoch = workspace.epoch,
