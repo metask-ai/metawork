@@ -167,8 +167,16 @@ test("named module roots exist and lower owners cannot import composition", () =
     true,
   );
   assert.equal(
-    existsSync(new URL("src/product/control/automatic_workspace.zig", root)),
+    existsSync(new URL("src/product/workspace/view.zig", root)),
     true,
+  );
+  assert.equal(
+    existsSync(new URL("src/product/workspace/automatic_root.zig", root)),
+    true,
+  );
+  assert.equal(
+    existsSync(new URL("src/product/control/automatic_workspace.zig", root)),
+    false,
   );
   assert.equal(
     existsSync(new URL("src/product/schedule/state.zig", root)),
@@ -270,7 +278,12 @@ test("named module roots exist and lower owners cannot import composition", () =
   assert.match(buildSource, /src\/product\/schedule\/runtime\.zig/);
   assert.match(buildSource, /src\/product\/schedule\/view\.zig/);
   assert.match(buildSource, /src\/product\/schedule\/persistence\.zig/);
-  assert.match(buildSource, /src\/product\/control\/automatic_workspace\.zig/);
+  assert.match(buildSource, /src\/product\/workspace\/view\.zig/);
+  assert.match(buildSource, /src\/product\/workspace\/automatic_root\.zig/);
+  assert.doesNotMatch(
+    buildSource,
+    /src\/product\/control\/automatic_workspace\.zig|product_control_automatic_workspace/,
+  );
   assert.doesNotMatch(buildSource, /src\/account(?:\.zig|\/)/);
   assert.doesNotMatch(buildSource, /src\/workbench\/mcp_configuration\.zig/);
   assert.doesNotMatch(buildSource, /src\/workbench\/catalog_snapshot\.zig/);
@@ -409,13 +422,11 @@ test("Product Control is the only composition owner identity", () => {
   assert.match(build, /src\/product\/schedule\.zig/);
   assert.match(build, /src\/product\/schedule\/runtime\.zig/);
   assert.match(build, /src\/product\/schedule\/view\.zig/);
-  assert.match(build, /src\/product\/control\/automatic_workspace\.zig/);
   assert.match(build, /metawork_product_control/);
   assert.match(build, /product_control_executor/);
   assert.match(build, /product_control_file_preview/);
   assert.match(build, /metawork_product_schedule/);
   assert.match(build, /product_schedule_runtime/);
-  assert.match(build, /product_control_automatic_workspace/);
   assert.match(control, /pub const Runtime = runtime_impl\.Runtime/);
   assert.match(runtime, /pub const Runtime = struct/);
   assert.doesNotMatch(runtime, /\bworkbench(?:\b|_)/);
@@ -525,13 +536,21 @@ test("Product Workspace owns the bounded registry without owning the shared comm
   const control = read("src/product/control/runtime.zig");
   const workspaceRoot = read("src/product/workspace.zig");
   const workspaceRuntime = read("src/product/workspace/runtime.zig");
+  const workspaceView = read("src/product/workspace/view.zig");
+  const automaticRoot = read("src/product/workspace/automatic_root.zig");
 
   assert.match(build, /src\/product\/workspace\.zig/);
   assert.match(build, /src\/product\/workspace\/runtime\.zig/);
+  assert.match(build, /src\/product\/workspace\/view\.zig/);
+  assert.match(build, /src\/product\/workspace\/automatic_root\.zig/);
   assert.match(build, /metawork_product_workspace/);
+  assert.match(build, /product_workspace_view/);
+  assert.match(build, /product_workspace_automatic_root/);
   assert.match(control, /@import\("metawork_product_workspace"\)/);
   assert.match(control, /workspace: product_workspace\.Runtime/);
   assert.match(workspaceRoot, /pub const Runtime = runtime_impl\.Runtime/);
+  assert.match(workspaceRoot, /pub const Projection = view_impl\.Projection/);
+  assert.match(workspaceRoot, /pub const AutomaticRoot = automatic_root_impl\.Root/);
   assert.match(workspaceRuntime, /records: \[\]\?Record/);
   assert.match(workspaceRuntime, /pub fn prepareOpen/);
   assert.match(workspaceRuntime, /pub fn prepareRemoval/);
@@ -544,9 +563,24 @@ test("Product Workspace owns the bounded registry without owning the shared comm
     workspaceRuntime,
     /commitTaskState|TaskPersistence|FileStore|Executor|std\.Thread|@import\("(?:metawork_product_control|metawork_product_task|metawork_product_skill|metawork_product_mcp|metawork_product_schedule|metawork_agent|metawork_app|metawork_bridge|metawork_account)"\)/,
   );
+  assert.match(workspaceView, /pub const Provider = struct/);
+  assert.match(workspaceView, /context: \*const anyopaque/);
+  assert.match(workspaceView, /pub fn copyProjections/);
+  assert.match(workspaceView, /pub fn writeProjectionList/);
+  assert.match(workspaceView, /skillCatalog/);
+  assert.doesNotMatch(
+    workspaceView,
+    /@import\("(?:metawork_product_control|metawork_product_task|metawork_product_skill|metawork_product_mcp|metawork_product_schedule|metawork_agent|metawork_app|metawork_bridge|metawork_account)"\)|std\.Thread|FileStore|Executor|\*Runtime|\*Control/,
+  );
+  assert.match(automaticRoot, /pub const Root = struct/);
+  assert.match(automaticRoot, /pub const Allocator = struct/);
+  assert.doesNotMatch(
+    automaticRoot,
+    /@import\("(?:metawork_product_control|metawork_product_task|metawork_product_skill|metawork_product_mcp|metawork_product_schedule|metawork_agent|metawork_app|metawork_bridge|metawork_account)"\)|std\.Thread/,
+  );
   assert.doesNotMatch(
     control,
-    /const WorkspaceView = struct|workspaces: \[\]\?Workspace|next_workspace_id:|next_workspace_recent_order:|fn upsertWorkspace\(|fn rollbackWorkspaceUpsert\(|fn finishWorkspaceUpsert\(|fn findWorkspace\(|fn findWorkspaceByRoot\(/,
+    /const WorkspaceView = struct|workspaces: \[\]\?Workspace|next_workspace_id:|next_workspace_recent_order:|fn upsertWorkspace\(|fn rollbackWorkspaceUpsert\(|fn finishWorkspaceUpsert\(|fn findWorkspace\(|fn findWorkspaceByRoot\(|fn writeWorkspace\(/,
   );
   assert.match(control, /commitTaskStateWithCheckpoint/);
   assert.match(control, /workspace\.prepareOpen/);
@@ -558,6 +592,12 @@ test("Product Workspace owns the bounded registry without owning the shared comm
   assert.match(control, /workspace\.filePreviewAuthorized/);
   assert.match(control, /workspace\.availableManualBindingAt/);
   assert.match(control, /workspace\.visibleManualBindingAt/);
+  assert.match(control, /product_workspace\.copyProjections/);
+  assert.match(control, /product_workspace\.writeProjectionList/);
+  assert.doesNotMatch(
+    control,
+    /product_workspace_(?:runtime|view|automatic_root)|automatic_workspace_allocator/,
+  );
   const registryFields = workspaceRuntime.match(
     /pub const Runtime = struct \{([\s\S]*?)\n\s*pub fn init\(/,
   )?.[1];

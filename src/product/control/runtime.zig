@@ -4,7 +4,6 @@ const lifecycle = @import("metawork_agent");
 const account_contract = @import("metawork_account_contract");
 const executor_impl = @import("product_control_executor");
 const file_preview = @import("product_control_file_preview");
-const automatic_workspace_allocator = @import("product_control_automatic_workspace");
 const product_workspace = @import("metawork_product_workspace");
 const product_schedule = @import("metawork_product_schedule");
 const skill_ports = @import("metawork_product_skill").ports;
@@ -174,17 +173,7 @@ pub const WorkspaceRemovalFailure = product_workspace.RemovalFailure;
 pub const WorkspaceSignals = product_workspace.Signals;
 
 /// Borrowed, bounded Host-owned Workspace projection.
-pub const WorkspaceProjection = struct {
-    id: u64,
-    epoch: u64,
-    kind: WorkspaceKind,
-    canonical_root: []const u8,
-    display_name: []const u8,
-    authorization: WorkspaceAuthorization,
-    last_removal_failure: WorkspaceRemovalFailure,
-    recent_order: u64,
-    signals: WorkspaceSignals,
-};
+pub const WorkspaceProjection = product_workspace.Projection;
 
 pub const CatalogAvailability = catalog_snapshot.CatalogAvailability;
 
@@ -210,7 +199,7 @@ pub const UiResponse = task_runtime.UiResponse;
 
 pub const AppDirectories = struct {
     canonical_user_home: ?[]const u8 = null,
-    automatic_workspace_root: ?*automatic_workspace_allocator.Root = null,
+    automatic_workspace_root: ?*product_workspace.AutomaticRoot = null,
 };
 
 pub const SkillManagementHealth = skill_runtime.ManagementHealth;
@@ -756,8 +745,6 @@ const CatalogSnapshot = catalog_snapshot.Snapshot;
 
 const McpRefreshTestJob = if (builtin.is_test) mcp_testing.RefreshJob else struct {};
 
-const WorkspaceFact = product_workspace.Facts;
-
 fn FixedText(comptime capacity: usize) type {
     return struct {
         bytes: [capacity]u8 = undefined,
@@ -1246,7 +1233,7 @@ pub const Runtime = struct {
     account: AccountProjection,
     execution: ActiveExecution,
     canonical_user_home: ?[]u8,
-    automatic_workspaces: ?automatic_workspace_allocator.Allocator,
+    automatic_workspaces: ?product_workspace.AutomaticAllocator,
     execution_replacement: ExecutionReplacementKind = .none,
     execution_redaction_preparation: ExecutionRedactionPreparation = .none,
     custom_execution_binding: ?CustomExecutionBinding = null,
@@ -1302,7 +1289,7 @@ pub const Runtime = struct {
         } else null;
         errdefer if (canonical_user_home) |home| allocator.free(home);
         var automatic_workspaces = if (configuration.directories.automatic_workspace_root) |root|
-            automatic_workspace_allocator.Allocator.init(root)
+            product_workspace.AutomaticAllocator.init(root)
         else
             null;
         errdefer if (automatic_workspaces) |*store| store.deinit();
@@ -2364,35 +2351,11 @@ pub const Runtime = struct {
         output: []WorkspaceProjection,
     ) Error![]const WorkspaceProjection {
         self.syncLifecycle();
-        var count: usize = 0;
-        for (0..self.workspace.slotCount()) |index| {
-            const workspace = self.workspace.factsAt(index) orelse continue;
-            if (workspace.kind == .manual and !workspace.visible) continue;
-            if (count == output.len) return error.WorkspaceCapacity;
-            output[count] = .{
-                .id = workspace.id,
-                .epoch = workspace.epoch,
-                .kind = workspace.kind,
-                .canonical_root = workspace.projected_root,
-                .display_name = workspace.display_name,
-                .authorization = workspace.authorization,
-                .last_removal_failure = workspace.last_removal_failure,
-                .recent_order = workspace.recent_order,
-                .signals = self.workspaceSignals(workspace.id),
-            };
-            count += 1;
-        }
-        std.mem.sort(
-            WorkspaceProjection,
-            output[0..count],
-            {},
-            struct {
-                fn lessThan(_: void, left: WorkspaceProjection, right: WorkspaceProjection) bool {
-                    return left.recent_order > right.recent_order;
-                }
-            }.lessThan,
+        return product_workspace.copyProjections(
+            &self.workspace,
+            output,
+            self.workspaceViewProvider(),
         );
-        return output[0..count];
     }
 
     /// Removes a Workspace from navigation, makes future Run admission fail
@@ -3851,18 +3814,13 @@ pub const Runtime = struct {
         try self.writeSkillManagement(&writer);
         writer.writeAll(",\"mcp\":") catch return error.SnapshotTooLarge;
         try self.writeMcpProjection(&writer);
-        writer.writeAll(",\"workspaces\":[") catch return error.SnapshotTooLarge;
-        var workspace_count: usize = 0;
-        for (0..self.workspace.slotCount()) |index| {
-            const workspace = self.workspace.factsAt(index) orelse continue;
-            if (workspace.kind == .manual and !workspace.visible) continue;
-            if (workspace_count != 0) writer.writeByte(',') catch
-                return error.SnapshotTooLarge;
-            workspace_count += 1;
-            try self.writeWorkspace(&writer, workspace);
-        }
-        writer.writeAll("],\"scheduledTasks\":") catch
-            return error.SnapshotTooLarge;
+        writer.writeAll(",\"workspaces\":") catch return error.SnapshotTooLarge;
+        product_workspace.writeProjectionList(
+            &writer,
+            &self.workspace,
+            self.workspaceViewProvider(),
+        ) catch return error.SnapshotTooLarge;
+        writer.writeAll(",\"scheduledTasks\":") catch return error.SnapshotTooLarge;
         self.schedule.writeProjection(&writer, .{
             .context = self,
             .write_json_fn = writeScheduleViewJson,
@@ -4004,48 +3962,60 @@ pub const Runtime = struct {
         ) catch return error.SnapshotTooLarge;
     }
 
-    fn writeWorkspace(
-        self: *Runtime,
+    fn workspaceViewSignals(
+        context: *const anyopaque,
+        workspace_id: u64,
+    ) WorkspaceSignals {
+        const self: *const Runtime = @ptrCast(@alignCast(context));
+        const facts = self.task_runtime.workspaceSignals(workspace_id);
+        return .{
+            .running = facts.running,
+            .attention = facts.attention,
+            .failed_or_interrupted = facts.failed_or_interrupted,
+        };
+    }
+
+    fn workspaceViewContainsSensitive(
+        context: *const anyopaque,
+        value: []const u8,
+    ) bool {
+        const self: *const Runtime = @ptrCast(@alignCast(context));
+        return self.containsKnownCredential(value);
+    }
+
+    fn workspaceViewWriteJson(
+        context: *const anyopaque,
         writer: *std.Io.Writer,
-        workspace: WorkspaceFact,
-    ) Error!void {
-        const signals = self.workspaceSignals(workspace.id);
-        writer.print("{{\"id\":\"{d}\",\"epoch\":\"{d}\",\"kind\":\"{s}\",\"displayName\":", .{
-            workspace.id,
-            workspace.epoch,
-            @tagName(workspace.kind),
-        }) catch
+        value: []const u8,
+    ) product_workspace.ViewError!void {
+        const self: *const Runtime = @ptrCast(@alignCast(context));
+        self.projectedJsonValueWithKnownCredentials(writer, value) catch
             return error.SnapshotTooLarge;
-        const display_name = workspace.display_name;
-        const projected_root = workspace.projected_root;
-        try self.projectedJsonValueWithKnownCredentials(writer, display_name);
-        writer.writeAll(",\"canonicalRoot\":") catch return error.SnapshotTooLarge;
-        try self.projectedJsonValueWithKnownCredentials(writer, projected_root);
-        writer.print(",\"redacted\":{},\"authorization\":\"{s}\",\"lastRemovalFailure\":", .{
-            workspace.projection_redacted or
-                self.containsKnownCredential(display_name) or
-                self.containsKnownCredential(projected_root),
-            @tagName(workspace.authorization),
-        }) catch return error.SnapshotTooLarge;
-        if (workspace.last_removal_failure == .none)
-            writer.writeAll("null") catch return error.SnapshotTooLarge
-        else
-            writer.print("\"{s}\"", .{@tagName(workspace.last_removal_failure)}) catch
-                return error.SnapshotTooLarge;
-        writer.writeAll(",\"skillCatalog\":") catch
-            return error.SnapshotTooLarge;
-        try skill_runtime.Runtime.writeCatalogProjection(
+    }
+
+    fn workspaceViewWriteCatalog(
+        context: *const anyopaque,
+        writer: *std.Io.Writer,
+        workspace_id: u64,
+        workspace_epoch: u64,
+    ) product_workspace.ViewError!void {
+        const self: *const Runtime = @ptrCast(@alignCast(context));
+        skill_runtime.Runtime.writeCatalogProjection(
             writer,
             self.skillTextProjection(),
-            self.skill.workspaceCatalogProjection(workspace.id, workspace.epoch) catch
+            self.skill.workspaceCatalogProjection(workspace_id, workspace_epoch) catch
                 unreachable,
-        );
-        writer.print(",\"recentOrder\":\"{d}\",\"signals\":{{\"running\":{},\"attention\":{},\"failedOrInterrupted\":{}}}}}", .{
-            workspace.recent_order,
-            signals.running,
-            signals.attention,
-            signals.failed_or_interrupted,
-        }) catch return error.SnapshotTooLarge;
+        ) catch return error.SnapshotTooLarge;
+    }
+
+    fn workspaceViewProvider(self: *const Runtime) product_workspace.ViewProvider {
+        return .{
+            .context = self,
+            .signals_fn = workspaceViewSignals,
+            .contains_sensitive_fn = workspaceViewContainsSensitive,
+            .write_json_fn = workspaceViewWriteJson,
+            .write_catalog_fn = workspaceViewWriteCatalog,
+        };
     }
 
     pub fn deinit(self: *Runtime) void {
@@ -5224,7 +5194,7 @@ pub const Runtime = struct {
     fn registerAutomaticWorkspace(
         self: *Runtime,
         canonical_root: []const u8,
-    ) Error!WorkspaceFact {
+    ) Error!product_workspace.Facts {
         const store = if (self.automatic_workspaces) |*value| value else return error.WorkspaceUnavailable;
         if (!store.containsCanonicalPath(canonical_root))
             return error.InvalidWorkspace;
@@ -5358,15 +5328,6 @@ pub const Runtime = struct {
             changed = self.workspace.applyRemovalState(workspace.id, state) or changed;
         }
         return changed;
-    }
-
-    fn workspaceSignals(self: *const Runtime, workspace_id: u64) WorkspaceSignals {
-        const facts = self.task_runtime.workspaceSignals(workspace_id);
-        return .{
-            .running = facts.running,
-            .attention = facts.attention,
-            .failed_or_interrupted = facts.failed_or_interrupted,
-        };
     }
 
     fn redactWorkspaceProjectionsNoFail(
@@ -7381,7 +7342,7 @@ test "automatic Workspace root is optional and reserved from user registration" 
         std.testing.io,
         &canonical_storage,
     );
-    var root = try automatic_workspace_allocator.Root.open(
+    var root = try product_workspace.AutomaticRoot.open(
         std.testing.io,
         std.testing.allocator,
         canonical_storage[0..canonical_len],
@@ -7633,7 +7594,7 @@ test "Workspace projection derives aggregate Task signals and removal preserves 
     try std.testing.expectEqual(@as(u32, 0), running[0].signals.attention);
 
     control.task_runtime.tasks[0].?.durable.runs[0].?.active_phase = .waiting_ui;
-    const attention = control.workspaceSignals(1);
+    const attention = Runtime.workspaceViewSignals(&control, 1);
     try std.testing.expectEqual(@as(u32, 0), attention.running);
     try std.testing.expectEqual(@as(u32, 1), attention.attention);
 
@@ -8176,7 +8137,7 @@ test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {
         std.testing.io,
         &automatic_root_storage,
     );
-    var automatic_root = try automatic_workspace_allocator.Root.open(
+    var automatic_root = try product_workspace.AutomaticRoot.open(
         std.testing.io,
         std.testing.allocator,
         automatic_root_storage[0..automatic_root_len],
@@ -8215,7 +8176,7 @@ test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {
         }),
     );
     try std.testing.expectEqual(@as(usize, 0), persistence.commits);
-    control.automatic_workspaces = automatic_workspace_allocator.Allocator.init(
+    control.automatic_workspaces = product_workspace.AutomaticAllocator.init(
         &automatic_root,
     );
     const id = try control.createScheduledTask(.{
@@ -8302,7 +8263,7 @@ test "execution replacement durably scrubs Schedule before ownership transfer" {
         std.testing.io,
         &automatic_root_storage,
     );
-    var automatic_root = try automatic_workspace_allocator.Root.open(
+    var automatic_root = try product_workspace.AutomaticRoot.open(
         std.testing.io,
         std.testing.allocator,
         automatic_root_storage[0..automatic_root_len],
@@ -8331,7 +8292,7 @@ test "execution replacement durably scrubs Schedule before ownership transfer" {
             .unavailable,
         );
     }
-    control.automatic_workspaces = automatic_workspace_allocator.Allocator.init(
+    control.automatic_workspaces = product_workspace.AutomaticAllocator.init(
         &automatic_root,
     );
 
@@ -8462,7 +8423,7 @@ test "Scheduled Task execution drift becomes needs attention without blocking Ac
         std.testing.io,
         &automatic_root_storage,
     );
-    var automatic_root = try automatic_workspace_allocator.Root.open(
+    var automatic_root = try product_workspace.AutomaticRoot.open(
         std.testing.io,
         std.testing.allocator,
         automatic_root_storage[0..automatic_root_len],
@@ -8476,7 +8437,7 @@ test "Scheduled Task execution drift becomes needs attention without blocking Ac
         persistence.capability(),
         .ready,
     );
-    control.automatic_workspaces = automatic_workspace_allocator.Allocator.init(
+    control.automatic_workspaces = product_workspace.AutomaticAllocator.init(
         &automatic_root,
     );
     control.setScheduleBackgroundAvailableNoFail(true);
