@@ -2938,7 +2938,7 @@ pub const Runtime = struct {
                     terminal_durable_changed;
                 continue;
             }
-            const next_phase: task_state.RunPhase = if (task.runtime.cancel_requested)
+            const next_phase: task_state.ActiveRunPhase = if (task.runtime.cancel_requested)
                 .stopping
             else if (pending != null)
                 .waiting_ui
@@ -2946,7 +2946,7 @@ pub const Runtime = struct {
                 .queued, .starting => .queued,
                 .running, .finishing => .running,
             };
-            if (task_state.runPhase(run) != next_phase and
+            if (run.active_phase != next_phase and
                 task_state.setActivePhase(run, next_phase))
                 result.changed = true;
         }

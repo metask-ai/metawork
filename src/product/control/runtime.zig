@@ -9675,7 +9675,17 @@ test "identity replacement does not disturb live Task runtime references" {
     try std.testing.expectEqual(execution, task.runtime.executionConst().?);
     control.endExecutionReplacementNoFail();
 
-    task.durable.runs[0].?.active_phase = .completed;
+    const run = &task.durable.runs[0].?;
+    try std.testing.expect(commitTerminal(
+        run,
+        .completed,
+        .completed,
+        null,
+        .reusable,
+        "",
+        false,
+    ));
+    run.event_stream_finalized = true;
     task.runtime.active_run_id = 0;
     task.runtime.worker_references.store(1, .release);
     try control.beginExecutionReplacement();
@@ -9985,7 +9995,16 @@ test "released Task credential is permanently scrubbed from every product projec
         account_contract.Limits.model_id_bytes,
     );
 
-    run.active_phase = .completed;
+    try std.testing.expect(commitTerminal(
+        run,
+        .completed,
+        .completed,
+        null,
+        .reusable,
+        "",
+        false,
+    ));
+    run.event_stream_finalized = true;
     control.releaseTaskAttachmentNoFail(task, .cold_start);
     task.runtime.active_run_id = 0;
     try control.beginExecutionReplacement();

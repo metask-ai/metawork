@@ -37,6 +37,16 @@ pub const RunPhase = enum {
     failed,
 };
 
+/// Mutable Run lifecycle before the write-once terminal publication. Terminal
+/// phases are derived exclusively from `ProductTerminalFacts` and therefore
+/// cannot be stored here.
+pub const ActiveRunPhase = enum {
+    queued,
+    running,
+    waiting_ui,
+    stopping,
+};
+
 pub const RunOutcome = enum {
     completed,
     stopped,
@@ -416,7 +426,7 @@ pub const RunRecord = struct {
     /// suffix is the final or partial answer.
     assistant_output_kind: ?AssistantOutputKind = null,
     assistant_output_start: ?usize = null,
-    active_phase: RunPhase = .queued,
+    active_phase: ActiveRunPhase = .queued,
     tools: []?ToolView,
     usage: UsageView = .{},
     /// Latest safe Product activity observation. Product Run phase and formal
@@ -574,23 +584,28 @@ pub fn productTerminalFacts(run: *const RunRecord) ?ProductTerminalFacts {
 }
 
 pub fn runPhase(run: *const RunRecord) RunPhase {
-    return if (productTerminalFacts(run)) |terminal| terminal.phase else run.active_phase;
+    return if (productTerminalFacts(run)) |terminal| terminal.phase else switch (run.active_phase) {
+        .queued => .queued,
+        .running => .running,
+        .waiting_ui => .waiting_ui,
+        .stopping => .stopping,
+    };
 }
 
 pub fn currentActivity(run: *const RunRecord) ?RunActivity {
     if (productTerminalFacts(run) != null) return null;
-    if (terminalPayload(run) != null) return .finalizing;
     return switch (run.active_phase) {
         .queued => .queued,
-        .running => run.observed_activity,
+        .running => if (terminalPayload(run) != null)
+            .finalizing
+        else
+            run.observed_activity,
         .waiting_ui => .waiting_user,
         .stopping => .stopping,
-        .completed, .stopped, .cancelled, .interrupted, .failed => unreachable,
     };
 }
 
-pub fn setActivePhase(run: *RunRecord, phase: RunPhase) bool {
-    std.debug.assert(!isTerminalPhase(phase));
+pub fn setActivePhase(run: *RunRecord, phase: ActiveRunPhase) bool {
     if (run.terminal_publication.load(.acquire) != .open) return false;
     run.active_phase = phase;
     return run.terminal_publication.load(.acquire) == .open;
@@ -1337,6 +1352,7 @@ test "event drain withholds terminal facts and assistant suffix until finalizati
         .execution_provider = .anthropic,
         .execution_model = "model",
         .input = .{ .text = .{ .value = @constCast("prompt") } },
+        .active_phase = .running,
         .tools = &.{},
         .terminal_diagnostic = @constCast(""),
     }};
@@ -1372,6 +1388,13 @@ test "event drain withholds terminal facts and assistant suffix until finalizati
 
     try std.testing.expect(productTerminalFacts(run) == null);
     try std.testing.expectEqual(RunActivity.finalizing, currentActivity(run).?);
+    run.active_phase = .queued;
+    try std.testing.expectEqual(RunActivity.queued, currentActivity(run).?);
+    run.active_phase = .waiting_ui;
+    try std.testing.expectEqual(RunActivity.waiting_user, currentActivity(run).?);
+    run.active_phase = .stopping;
+    try std.testing.expectEqual(RunActivity.stopping, currentActivity(run).?);
+    run.active_phase = .running;
     try std.testing.expect(markTerminalRunsBeforeEventDrain(&task));
     try std.testing.expect(finalizeMarkedTerminalRunsAfterEventDrain(&task));
     try std.testing.expectEqual(@as(usize, 6), run.assistant.committed_len);
