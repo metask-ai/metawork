@@ -122,9 +122,21 @@ await rm(automationDir, { recursive: true, force: true });
 
 const writtenPath = join(workspace, "agentcore-vertical-write.txt");
 const responses = [
-  toolSse("m1", "read-1", "Read", { file_path: fixturePath }),
+  streamedSse(
+    toolSse(
+      "m1",
+      "read-1",
+      "Read",
+      { file_path: fixturePath },
+      "I’m checking the workspace before making changes.",
+    ),
+    350,
+  ),
   toolSse("m2", "bash-1", "Bash", {
-    command: "echo agentcore-vertical-bash-ok",
+    command:
+      process.platform === "win32"
+        ? 'powershell -NoProfile -Command "Start-Sleep -Milliseconds 400; Write-Output agentcore-vertical-bash-ok"'
+        : "sleep 0.4; echo agentcore-vertical-bash-ok",
   }),
   toolSse("m3", "edit-1", "Edit", {
     file_path: fixturePath,
@@ -168,7 +180,10 @@ const responses = [
     "metawork compact checkpoint complete",
   ),
 ];
-const provider = createProvider(responses, visualCaptureDir ? 1_500 : 0);
+const provider = createProvider(responses, {
+  initialDelayMs: visualCaptureDir ? 1_500 : 120,
+  frameDelayMs: 80,
+});
 const baseUrl = await provider.listen();
 
 let output = "";
@@ -307,6 +322,7 @@ try {
     throw new Error(
       `Task snapshot disagrees with the accepted binding epoch: ${JSON.stringify(createdTask.binding)}`,
     );
+  const deliveryCountBeforeRun = productDeliveryEmitCount();
   const runResult = await invokeBridge("metawork.tasks.run", {
     taskId,
     expectedBindingEpoch,
@@ -364,6 +380,7 @@ try {
   await captureVisual("running", 1320, 812);
   let visualAttentionCaptured = false;
   const answered = new Set();
+  const observedRunRevisions = new Map();
   const terminal = new Set([
     "completed",
     "stopped",
@@ -378,6 +395,7 @@ try {
       const task = current.tasks.find((item) => item.id === taskId);
       const run = task?.runs.find((item) => item.id === runId);
       if (!task || !run) return null;
+      observeRunRevision(observedRunRevisions, current.revision, run);
       const pending = task.pendingUi;
       if (pending && !answered.has(pending.requestId)) {
         if (!visualAttentionCaptured) {
@@ -429,6 +447,11 @@ try {
     throw new Error("completed Task did not remain available for continuation");
   if (run.phase !== "completed" || run.outcome !== "completed")
     throw new Error(`run did not complete truthfully: ${JSON.stringify(run)}`);
+  assertLiveRunRevisions(
+    observedRunRevisions,
+    run,
+    productDeliveryEmitCount() - deliveryCountBeforeRun,
+  );
   await captureVisual("terminal", 1320, 812);
   await captureVisual("settings", 1320, 812, true);
   if (run.cause !== null || task.cause !== null)
@@ -1030,6 +1053,82 @@ function productDeliveryEmitCount() {
   ).length;
 }
 
+function observeRunRevision(observations, revision, run) {
+  if (!isWireId(revision))
+    throw new Error(`Run observation omitted snapshot revision: ${revision}`);
+  if (observations.has(revision)) return;
+  observations.set(revision, {
+    revision,
+    phase: run.phase,
+    activity: run.activity?.kind ?? null,
+    commentaryBytes: Buffer.byteLength(run.output.commentary),
+    provisionalBytes: Buffer.byteLength(run.output.provisional),
+    responseBytes: Buffer.byteLength(run.output.response),
+    tools: run.tools.map((tool) => ({ name: tool.name, state: tool.state })),
+  });
+}
+
+function assertLiveRunRevisions(observations, terminalRun, deliveryEvents) {
+  const observed = [...observations.values()];
+  const preterminal = observed.filter((item) =>
+    ["queued", "running", "waiting_ui", "stopping"].includes(item.phase),
+  );
+  for (let index = 1; index < observed.length; index += 1) {
+    if (
+      BigInt(observed[index - 1].revision) >= BigInt(observed[index].revision)
+    )
+      throw new Error(
+        `Run snapshots did not advance monotonically: ${JSON.stringify(observed)}`,
+      );
+  }
+  const hasActivity = (kind) =>
+    preterminal.some((item) => item.activity === kind);
+  const hasToolState = (state) =>
+    preterminal.some((item) => item.tools.some((tool) => tool.state === state));
+  if (
+    deliveryEvents < 4 ||
+    preterminal.length < 4 ||
+    !preterminal.some((item) => item.commentaryBytes > 0) ||
+    !hasActivity("executing_tools") ||
+    !hasActivity("waiting_user") ||
+    !hasToolState("running") ||
+    !hasToolState("completed")
+  )
+    throw new Error(
+      `Run did not expose sufficient preterminal presentation facts: ${JSON.stringify(observed)}`,
+    );
+  if (
+    terminalRun.output.provisional !== "" ||
+    terminalRun.output.responseKind !== "final" ||
+    terminalRun.output.response.length === 0
+  )
+    throw new Error(
+      `terminal Run did not settle live output into a final response: ${JSON.stringify(terminalRun.output)}`,
+    );
+  process.stdout.write(
+    `AgentCore live revision evidence: ${JSON.stringify({
+      observedRevisions: observed.length,
+      preterminalRevisions: preterminal.length,
+      deliveryEvents,
+      activities: [...new Set(preterminal.map((item) => item.activity))],
+      toolStates: [
+        ...new Set(
+          preterminal.flatMap((item) => item.tools.map((tool) => tool.state)),
+        ),
+      ],
+      provisionalObserved: preterminal.some(
+        (item) => item.provisionalBytes > 0,
+      ),
+      commentaryObserved: preterminal.some((item) => item.commentaryBytes > 0),
+      textDeliveryGranularity: preterminal.some(
+        (item) => item.provisionalBytes > 0,
+      )
+        ? "chunk"
+        : "provider_message_boundary",
+    })}\n`,
+  );
+}
+
 async function expectBridgeFailure(command, payload, context) {
   try {
     await invokeBridge(command, payload);
@@ -1301,7 +1400,7 @@ async function removeWorkspaceWithRetry() {
   throw lastError;
 }
 
-function createProvider(queue, responseDelayMs = 0) {
+function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
   let served = 0;
   let titleCompletions = 0;
   let providerError = null;
@@ -1313,7 +1412,7 @@ function createProvider(queue, responseDelayMs = 0) {
       bytes += chunk.length;
       if (bytes <= 2 * 1024 * 1024) chunks.push(chunk);
     });
-    request.on("end", () => {
+    request.on("end", async () => {
       try {
         if (bytes > 2 * 1024 * 1024)
           throw new Error(
@@ -1365,8 +1464,10 @@ function createProvider(queue, responseDelayMs = 0) {
         if (payload.model !== "metawork-agentcore-vertical-fixture-model")
           throw new Error("Host model did not reach AgentCore correctly");
         const queued = queue[served];
-        const body =
+        const fixture =
           typeof queued === "function" ? queued(payload, requests) : queued;
+        const body =
+          typeof fixture === "string" ? fixture : (fixture?.body ?? null);
         if (!body) throw new Error("unexpected extra provider request");
         served += 1;
         response.writeHead(200, {
@@ -1374,13 +1475,20 @@ function createProvider(queue, responseDelayMs = 0) {
           "cache-control": "no-cache",
           connection: "close",
         });
-        if (responseDelayMs > 0)
-          setTimeout(() => response.end(body), responseDelayMs);
-        else response.end(body);
+        response.flushHeaders();
+        response.socket?.setNoDelay(true);
+        await streamProviderResponse(
+          response,
+          body,
+          initialDelayMs,
+          fixture?.frameDelayMs ?? frameDelayMs,
+        );
       } catch (error) {
         providerError ??= error;
-        response.writeHead(400, { "content-type": "application/json" });
-        response.end(JSON.stringify({ error: "invalid fixture request" }));
+        if (!response.headersSent) {
+          response.writeHead(400, { "content-type": "application/json" });
+          response.end(JSON.stringify({ error: "invalid fixture request" }));
+        } else response.destroy(error);
       }
     });
   });
@@ -1412,13 +1520,32 @@ function createProvider(queue, responseDelayMs = 0) {
   };
 }
 
+async function streamProviderResponse(
+  response,
+  body,
+  initialDelayMs,
+  frameDelayMs,
+) {
+  if (initialDelayMs > 0)
+    await new Promise((resolve) => setTimeout(resolve, initialDelayMs));
+  const frames = body.match(/[\s\S]*?\n\n/g) ?? [];
+  if (frames.join("") !== body)
+    throw new Error("provider fixture produced an invalid SSE body");
+  for (const frame of frames) {
+    response.write(frame);
+    if (frameDelayMs > 0)
+      await new Promise((resolve) => setTimeout(resolve, frameDelayMs));
+  }
+  response.end();
+}
+
 function describeAuthorizationHeader(value) {
   if (value === undefined) return "authorization=absent";
   return `authorization=present,length=${value.length},bearer=${value.startsWith("Bearer ")}`;
 }
 
-function toolSse(messageId, toolId, name, input) {
-  return sse([
+function toolSse(messageId, toolId, name, input, commentary = null) {
+  const events = [
     {
       type: "message_start",
       message: {
@@ -1428,24 +1555,44 @@ function toolSse(messageId, toolId, name, input) {
         usage: { input_tokens: 1, output_tokens: 1 },
       },
     },
+  ];
+  let toolIndex = 0;
+  if (commentary !== null) {
+    events.push(
+      {
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "text", text: "" },
+      },
+      {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "text_delta", text: commentary },
+      },
+      { type: "content_block_stop", index: 0 },
+    );
+    toolIndex = 1;
+  }
+  events.push(
     {
       type: "content_block_start",
-      index: 0,
+      index: toolIndex,
       content_block: { type: "tool_use", id: toolId, name, input: {} },
     },
     {
       type: "content_block_delta",
-      index: 0,
+      index: toolIndex,
       delta: { type: "input_json_delta", partial_json: JSON.stringify(input) },
     },
-    { type: "content_block_stop", index: 0 },
+    { type: "content_block_stop", index: toolIndex },
     {
       type: "message_delta",
       delta: { stop_reason: "tool_use" },
       usage: { output_tokens: 1 },
     },
     { type: "message_stop" },
-  ]);
+  );
+  return sse(events);
 }
 
 function toolSseFromBackgroundJob(messageId, toolId, name, input = {}) {
@@ -1518,6 +1665,10 @@ function textSse(messageId, text) {
 
 function sse(events) {
   return events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("");
+}
+
+function streamedSse(body, frameDelayMs) {
+  return { body, frameDelayMs };
 }
 
 function assertTransport(snapshot) {

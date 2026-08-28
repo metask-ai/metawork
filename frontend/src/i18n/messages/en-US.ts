@@ -545,8 +545,6 @@ export const enUS = {
   "run.terminal.partial_interrupted":
     "Work was interrupted before the response was complete",
   "run.terminal.partial_failed": "Work failed before the response was complete",
-  "run.output.agent_updates": "Agent updates",
-  "run.output.in_progress": "Output in progress",
   "run.process.title": "Work process",
   "run.process.live_output": "Live output",
   "run.process.tool_step_one": "{count} tool step",

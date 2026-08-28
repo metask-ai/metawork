@@ -501,8 +501,6 @@ export const zhCN: Record<MessageId, string> = {
   "run.terminal.partial_stopped": "工作已停止，回复未完整生成",
   "run.terminal.partial_interrupted": "工作意外中断，回复未完整生成",
   "run.terminal.partial_failed": "工作失败，回复未完整生成",
-  "run.output.agent_updates": "Agent 动态",
-  "run.output.in_progress": "正在生成的内容",
   "run.process.title": "工作过程",
   "run.process.live_output": "实时输出",
   "run.process.tool_step_one": "{count} 个工具步骤",

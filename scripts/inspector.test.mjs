@@ -545,6 +545,49 @@ test("conversation separates commentary, Markdown response, and plain provisiona
   assert.match(completedMarkup, /<strong>Ready<\/strong>/);
 });
 
+test("discarded provisional output disappears on the next Snapshot revision", () => {
+  const activeRun = run({
+    phase: "running",
+    outcome: null,
+    activity: { kind: "writing_response" },
+    output: {
+      commentary: "",
+      response: "",
+      responseKind: null,
+      provisional: "This segment may be discarded",
+      redacted: false,
+      provisionalRedacted: false,
+    },
+  });
+  const activeTask = task({
+    currentRunId: "9",
+    currentRunPhase: "running",
+    runs: [activeRun],
+  });
+  const view = render(taskContentElement(activeTask));
+  assert.ok(screen.getByText("This segment may be discarded"));
+  assert.ok(screen.getByText("Live output"));
+
+  view.rerender(
+    taskContentElement(
+      {
+        ...activeTask,
+        runs: [
+          {
+            ...activeRun,
+            activity: { kind: "waiting_model" },
+            output: { ...activeRun.output, provisional: "" },
+          },
+        ],
+      },
+      "2",
+    ),
+  );
+  assert.equal(screen.queryByText("This segment may be discarded"), null);
+  assert.equal(screen.queryByText("Live output"), null);
+  assert.ok(screen.getByText("Waiting for model response"));
+});
+
 test("Run process exposes live commentary and safe Tool summaries without raw details", async () => {
   const user = userEvent.setup({ document: dom.window.document });
   const opened = [];
