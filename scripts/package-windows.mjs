@@ -19,32 +19,76 @@ import { verifyStagedAgentCoreBundle } from "./verify-staged-agentcore-bundle.mj
 
 const packageManifest = readNativePackageManifest(repositoryRoot);
 
-export const windowsRuntimeStagePath = path.join(
-  repositoryRoot,
-  "zig-out",
-  "package",
-  "windows-runtime-x64",
-);
-export const windowsReleaseBuildPath = path.join(
-  repositoryRoot,
-  "zig-out",
-  "package",
-  "windows-release-build",
-);
-export const windowsInstallerArtifactName = `${packageManifest.identity.executableName}-${packageManifest.metadata.version}-windows-x64-setup.exe`;
-export const windowsInstallerArtifactPath = path.join(
-  repositoryRoot,
-  "zig-out",
-  "package",
-  windowsInstallerArtifactName,
-);
+const windowsArchitecturePolicies = Object.freeze({
+  x64: Object.freeze({
+    targetId: "x86_64-windows-gnu",
+    peMachine: 0x8664,
+    innoArchitecture: "x64compatible",
+  }),
+  arm64: Object.freeze({
+    targetId: "aarch64-windows-gnu",
+    peMachine: 0xaa64,
+    innoArchitecture: "arm64",
+  }),
+});
+
+export function windowsDistributionForArchitecture(
+  architecture,
+  root = repositoryRoot,
+  manifest = packageManifest,
+) {
+  const policy = windowsArchitecturePolicies[architecture];
+  if (!policy) {
+    throw new Error(
+      `unsupported Windows package architecture ${architecture}; expected x64 or arm64`,
+    );
+  }
+  const installerArtifactName = `${manifest.identity.executableName}-${manifest.metadata.version}-windows-${architecture}-setup.exe`;
+  return Object.freeze({
+    architecture,
+    installerArtifactName,
+    installerArtifactPath: path.join(
+      root,
+      "zig-out",
+      "package",
+      installerArtifactName,
+    ),
+    innoArchitecture: policy.innoArchitecture,
+    peMachine: policy.peMachine,
+    releaseBuildPath: path.join(
+      root,
+      "zig-out",
+      "package",
+      `windows-release-build-${architecture}`,
+    ),
+    runtimeStagePath: path.join(
+      root,
+      "zig-out",
+      "package",
+      `windows-runtime-${architecture}`,
+    ),
+    targetId: policy.targetId,
+  });
+}
 export const defaultWindowsTimestampUrl = "http://time.certum.pl";
 
 export function parseWindowsPackageArguments(arguments_) {
+  let architecture = "x64";
+  let architectureSeen = false;
   let signing = "none";
   let signingSeen = false;
   for (let index = 0; index < arguments_.length; index += 1) {
     const argument = arguments_[index];
+    if (argument === "x64" || argument === "arm64") {
+      if (architectureSeen) {
+        throw new Error(
+          "Windows package architecture may only be specified once",
+        );
+      }
+      architecture = argument;
+      architectureSeen = true;
+      continue;
+    }
     let value;
     if (argument === "--signing") {
       value = arguments_[index + 1];
@@ -61,7 +105,7 @@ export function parseWindowsPackageArguments(arguments_) {
     }
     signing = value;
   }
-  return Object.freeze({ signing });
+  return Object.freeze({ architecture, signing });
 }
 
 export function windowsFileVersion(version) {
@@ -336,6 +380,14 @@ export function verifyInnoSetupCompiler(compiler) {
 }
 
 export function readPortableExecutableSubsystem(executablePath) {
+  return readPortableExecutableIdentity(executablePath).subsystem;
+}
+
+export function readPortableExecutableMachine(executablePath) {
+  return readPortableExecutableIdentity(executablePath).machine;
+}
+
+function readPortableExecutableIdentity(executablePath) {
   const bytes = readFileSync(executablePath);
   if (bytes.length < 0x40 || bytes.toString("ascii", 0, 2) !== "MZ") {
     throw new Error(`${executablePath} is not a PE executable`);
@@ -352,7 +404,10 @@ export function readPortableExecutableSubsystem(executablePath) {
   if (magic !== 0x10b && magic !== 0x20b) {
     throw new Error(`${executablePath} has an unsupported PE optional header`);
   }
-  return bytes.readUInt16LE(optionalHeaderOffset + 68);
+  return Object.freeze({
+    machine: bytes.readUInt16LE(peOffset + 4),
+    subsystem: bytes.readUInt16LE(optionalHeaderOffset + 68),
+  });
 }
 
 function requireRegularFile(filePath) {
@@ -362,7 +417,8 @@ function requireRegularFile(filePath) {
 }
 
 export function verifyWindowsRuntimeStage(
-  stagePath = windowsRuntimeStagePath,
+  stagePath,
+  distribution,
   manifest = packageManifest,
 ) {
   const executablePath = path.join(
@@ -380,10 +436,22 @@ export function verifyWindowsRuntimeStage(
     requireRegularFile(path.join(stagePath, relativePath));
   }
   requireRegularFile(executablePath);
+  const loaderPath = path.join(stagePath, "bin", "WebView2Loader.dll");
   if (readPortableExecutableSubsystem(executablePath) !== 2) {
     throw new Error(
       "Windows runtime package does not contain a GUI-subsystem executable",
     );
+  }
+  for (const [label, filePath] of [
+    ["MetaWork executable", executablePath],
+    ["WebView2 loader", loaderPath],
+  ]) {
+    const actualMachine = readPortableExecutableMachine(filePath);
+    if (actualMachine !== distribution.peMachine) {
+      throw new Error(
+        `${label} PE machine is 0x${actualMachine.toString(16)}, expected ${distribution.architecture} 0x${distribution.peMachine.toString(16)}`,
+      );
+    }
   }
   const nativeManifest = readFileSync(
     path.join(stagePath, "package-manifest.zon"),
@@ -442,13 +510,16 @@ async function packageWindows() {
     throw new Error("package:windows must run on Windows");
   }
   const options = parseWindowsPackageArguments(process.argv.slice(2));
+  const distribution = windowsDistributionForArchitecture(options.architecture);
   const signing = windowsSigningConfiguration(options);
   const compiler = resolveInnoSetupCompiler();
   const compilerMajor = verifyInnoSetupCompiler(compiler);
 
-  const bundle = await verifyStagedAgentCoreBundle(repositoryRoot);
+  const bundle = await verifyStagedAgentCoreBundle(repositoryRoot, {
+    targetId: distribution.targetId,
+  });
   await buildFrontend(repositoryRoot);
-  rmSync(windowsReleaseBuildPath, { recursive: true, force: true });
+  rmSync(distribution.releaseBuildPath, { recursive: true, force: true });
   await runChild(
     "zig",
     [
@@ -456,7 +527,7 @@ async function packageWindows() {
       `-Dtarget=${bundle.target}`,
       "-Doptimize=ReleaseFast",
       "--prefix",
-      windowsReleaseBuildPath,
+      distribution.releaseBuildPath,
     ],
     {
       cwd: repositoryRoot,
@@ -465,14 +536,14 @@ async function packageWindows() {
     },
   );
   const releaseExecutablePath = path.join(
-    windowsReleaseBuildPath,
+    distribution.releaseBuildPath,
     "bin",
     `${packageManifest.identity.executableName}.exe`,
   );
   await verifyNativeAutomationIsolation(releaseExecutablePath);
 
-  rmSync(windowsRuntimeStagePath, { recursive: true, force: true });
-  rmSync(windowsInstallerArtifactPath, { force: true });
+  rmSync(distribution.runtimeStagePath, { recursive: true, force: true });
+  rmSync(distribution.installerArtifactPath, { force: true });
   await runChild(
     process.execPath,
     [
@@ -481,7 +552,7 @@ async function packageWindows() {
       "--target",
       "windows",
       "--output",
-      windowsRuntimeStagePath,
+      distribution.runtimeStagePath,
       "--binary",
       releaseExecutablePath,
       "--assets",
@@ -493,12 +564,12 @@ async function packageWindows() {
       timeoutMs: null,
     },
   );
-  verifyWindowsRuntimeStage();
+  verifyWindowsRuntimeStage(distribution.runtimeStagePath, distribution);
   if (signing) {
     await signWindowsFile(
       signing,
       path.join(
-        windowsRuntimeStagePath,
+        distribution.runtimeStagePath,
         "bin",
         `${packageManifest.identity.executableName}.exe`,
       ),
@@ -506,17 +577,22 @@ async function packageWindows() {
     );
     await verifyWindowsSignature(
       signing,
-      path.join(windowsRuntimeStagePath, "bin", "WebView2Loader.dll"),
+      path.join(distribution.runtimeStagePath, "bin", "WebView2Loader.dll"),
       "Microsoft WebView2Loader signature verification",
     );
   }
 
-  const installerStem = windowsInstallerArtifactName.slice(0, -".exe".length);
+  const installerStem = distribution.installerArtifactName.slice(
+    0,
+    -".exe".length,
+  );
   const definitions = [
     `AppVersion=${packageManifest.metadata.version}`,
     `AppDisplayName=${packageManifest.metadata.displayName}`,
     `AppExecutableName=${packageManifest.identity.executableName}`,
     `AppFileVersion=${windowsFileVersion(packageManifest.metadata.version)}`,
+    `AppArchitecture=${distribution.innoArchitecture}`,
+    `RuntimeStage=${distribution.runtimeStagePath}`,
   ];
   if (signing) definitions.push("AppSignTool=metawork");
   const signingCompilerArgument = signing
@@ -526,14 +602,14 @@ async function packageWindows() {
     compilerMajor === 7
       ? [
           "--quiet-progress",
-          `--output-dir=${path.dirname(windowsInstallerArtifactPath)}`,
+          `--output-dir=${path.dirname(distribution.installerArtifactPath)}`,
           `--output-filename=${installerStem}`,
           ...signingCompilerArgument,
           ...definitions.map((definition) => `--define=${definition}`),
         ]
       : [
           "/Qp",
-          `/O${path.dirname(windowsInstallerArtifactPath)}`,
+          `/O${path.dirname(distribution.installerArtifactPath)}`,
           `/F${installerStem}`,
           ...signingCompilerArgument,
           ...definitions.map((definition) => `/D${definition}`),
@@ -553,13 +629,13 @@ async function packageWindows() {
   if (signing) {
     await verifyWindowsSignature(
       signing,
-      windowsInstallerArtifactPath,
+      distribution.installerArtifactPath,
       "Windows installer signature verification",
     );
   }
-  const digest = verifyWindowsInstaller(windowsInstallerArtifactPath);
+  const digest = verifyWindowsInstaller(distribution.installerArtifactPath);
   console.log(
-    `built ${signing ? "signed" : "unsigned"} Windows installer with Inno Setup ${compilerMajor}: ${windowsInstallerArtifactPath} (sha256=${digest})`,
+    `built ${signing ? "signed" : "unsigned"} Windows ${distribution.architecture} installer with Inno Setup ${compilerMajor}: ${distribution.installerArtifactPath} (sha256=${digest})`,
   );
 }
 

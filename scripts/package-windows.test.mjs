@@ -17,34 +17,52 @@ import {
   parseInnoSetupCompilerMajor,
   parseInnoSetupRegistryInstallLocation,
   parseWindowsPackageArguments,
+  readPortableExecutableMachine,
   readPortableExecutableSubsystem,
   resolveInnoSetupCompiler,
   resolveWindowsSignTool,
   verifyWindowsInstaller,
   verifyWindowsRuntimeStage,
   windowsFileVersion,
-  windowsInstallerArtifactName,
+  windowsDistributionForArchitecture,
   windowsSignArguments,
   windowsSigningConfiguration,
   windowsSignToolCandidates,
   windowsVerifyArguments,
 } from "./package-windows.mjs";
 
-function guiExecutableBytes(size = 512) {
+function guiExecutableBytes(size = 512, machine = 0x8664) {
   const bytes = Buffer.alloc(size);
   bytes.write("MZ", 0, "ascii");
   bytes.writeUInt32LE(0x80, 0x3c);
   bytes.write("PE\0\0", 0x80, "ascii");
+  bytes.writeUInt16LE(machine, 0x80 + 4);
   const optionalHeaderOffset = 0x80 + 24;
   bytes.writeUInt16LE(0x20b, optionalHeaderOffset);
   bytes.writeUInt16LE(2, optionalHeaderOffset + 68);
   return bytes;
 }
 
-test("Windows installer name is derived from app.zon", () => {
+test("Windows distributions derive exact target and artifact identities", () => {
+  const x64 = windowsDistributionForArchitecture("x64");
+  const arm64 = windowsDistributionForArchitecture("arm64");
+  assert.equal(x64.targetId, "x86_64-windows-gnu");
+  assert.equal(x64.peMachine, 0x8664);
+  assert.equal(x64.innoArchitecture, "x64compatible");
   assert.equal(
-    windowsInstallerArtifactName,
+    x64.installerArtifactName,
     "metawork-0.1.4-windows-x64-setup.exe",
+  );
+  assert.equal(arm64.targetId, "aarch64-windows-gnu");
+  assert.equal(arm64.peMachine, 0xaa64);
+  assert.equal(arm64.innoArchitecture, "arm64");
+  assert.equal(
+    arm64.installerArtifactName,
+    "metawork-0.1.4-windows-arm64-setup.exe",
+  );
+  assert.throws(
+    () => windowsDistributionForArchitecture("x86"),
+    /expected x64 or arm64/u,
   );
   assert.equal(windowsFileVersion("0.1.1"), "0.1.1.0");
   assert.equal(windowsFileVersion("1.2.3-beta.1"), "1.2.3.0");
@@ -88,6 +106,11 @@ test("Windows application icon is embedded and assigned to installed shortcuts",
   );
   assert.match(installer, /^SetupIconFile=.*app-icon\.ico$/mu);
   assert.match(installer, /^UninstallDisplayIcon=.*app-icon\.ico$/mu);
+  assert.match(installer, /^ArchitecturesAllowed=\{#AppArchitecture\}$/mu);
+  assert.match(
+    installer,
+    /^ArchitecturesInstallIn64BitMode=\{#AppArchitecture\}$/mu,
+  );
   const shortcuts = installer
     .split(/\r?\n/u)
     .filter((line) => line.startsWith('Name: "{auto'));
@@ -148,13 +171,22 @@ test("Inno Setup compiler gate accepts the supported 6 and 7 families", () => {
 });
 
 test("signed packaging is explicit and fail closed", () => {
-  assert.deepEqual(parseWindowsPackageArguments([]), { signing: "none" });
+  assert.deepEqual(parseWindowsPackageArguments([]), {
+    architecture: "x64",
+    signing: "none",
+  });
+  assert.deepEqual(parseWindowsPackageArguments(["arm64"]), {
+    architecture: "arm64",
+    signing: "none",
+  });
   assert.deepEqual(parseWindowsPackageArguments(["--signing", "required"]), {
+    architecture: "x64",
     signing: "required",
   });
-  assert.deepEqual(parseWindowsPackageArguments(["--signing=required"]), {
-    signing: "required",
-  });
+  assert.deepEqual(
+    parseWindowsPackageArguments(["arm64", "--signing=required"]),
+    { architecture: "arm64", signing: "required" },
+  );
   assert.throws(
     () => parseWindowsPackageArguments(["--signing", "auto"]),
     /none or required/u,
@@ -167,6 +199,10 @@ test("signed packaging is explicit and fail closed", () => {
     () =>
       parseWindowsPackageArguments(["--signing=none", "--signing=required"]),
     /only be specified once/u,
+  );
+  assert.throws(
+    () => parseWindowsPackageArguments(["x64", "arm64"]),
+    /architecture may only be specified once/u,
   );
 });
 
@@ -285,7 +321,10 @@ test("Windows runtime gate requires the Native release package and GUI executabl
       mkdirSync(directory, { recursive: true });
     }
     writeFileSync(path.join(root, "bin", "metawork.exe"), guiExecutableBytes());
-    writeFileSync(path.join(root, "bin", "WebView2Loader.dll"), "loader");
+    writeFileSync(
+      path.join(root, "bin", "WebView2Loader.dll"),
+      guiExecutableBytes(512, 0x8664),
+    );
     writeFileSync(path.join(root, "app-icon.ico"), "icon");
     writeFileSync(
       path.join(root, "resources", "frontend", "dist", "index.html"),
@@ -306,16 +345,30 @@ test("Windows runtime gate requires the Native release package and GUI executabl
   .subsystem = "gui",
 }`,
     );
-    verifyWindowsRuntimeStage(root, {
+    const distribution = windowsDistributionForArchitecture("x64");
+    const manifest = {
       identity: {
         bundleId: "com.metask.metawork.dev",
         executableName: "metawork",
       },
       metadata: { displayName: "MetaWork", version: "0.1.1" },
-    });
+    };
+    verifyWindowsRuntimeStage(root, distribution, manifest);
     assert.equal(
       readPortableExecutableSubsystem(path.join(root, "bin", "metawork.exe")),
       2,
+    );
+    assert.equal(
+      readPortableExecutableMachine(path.join(root, "bin", "metawork.exe")),
+      0x8664,
+    );
+    writeFileSync(
+      path.join(root, "bin", "WebView2Loader.dll"),
+      guiExecutableBytes(512, 0xaa64),
+    );
+    assert.throws(
+      () => verifyWindowsRuntimeStage(root, distribution, manifest),
+      /WebView2 loader PE machine/u,
     );
   } finally {
     rmSync(root, { recursive: true, force: true });

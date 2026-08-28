@@ -124,7 +124,7 @@ Product Skill 的公开表面 guard 必须证明 `product/skill.zig` 只导出 r
 ### AgentCore target baseline
 
 - **规范**：[高层架构](architecture.md)、[ABI v1 消费合同](agentcore-abi-v1.md)。
-- **证据**：macOS arm64/x86_64 锁定 clean source commit `b4fe9a9b8cb020db8fb7efc637aa5fb1263ba2ce`，Windows x86_64 GNU 锁定 clean source commit `f46d400c5b59a41204781cf336d3b891299b9308`；三者均为 ABI v1 revision 14 exact artifact。三个 target archive 的 manifest payload checksum、target 架构与 discovery symbol 已验证并原子 stage。
+- **证据**：macOS arm64/x86_64 锁定 clean source commit `b4fe9a9b8cb020db8fb7efc637aa5fb1263ba2ce`，Windows x86_64 GNU 锁定 clean source commit `f46d400c5b59a41204781cf336d3b891299b9308`，Windows arm64 GNU 锁定 clean source commit `b66e3d4c11ab220fd9d0826a6841fc61ae90270e`；四者均为 ABI v1 revision 14 exact artifact。四个 target archive 的 manifest payload checksum、target 架构与 discovery symbol 已验证并原子 stage。
 - **结论**：所有 target policy 只接受 ABI v1 revision 14 与 64-byte root table，required surface 由 root + 五个 mandatory child table 定义；没有 revision 13 fallback。macOS x86_64 的真实 desktop vertical 仍须在对应目标环境独立采集。
 
 2026-08-13 的 Windows staged run-state probe 可由 Git object `51e0fcc847e7b832b628f6c64183525dd8300710` 定位：Host Run ID `7` 的 callback identity 与 `run_state.run_id` 一致，首序号为 `1`，并观察到 `starting → generating → finalizing → completed`。结论已进入 AgentCore 集成契约和 Product Control 回归，因此 active tree 不再保留该一次性 probe。
@@ -219,13 +219,14 @@ node scripts/test-single-instance-windows.mjs
 
 ```powershell
 npm run package:windows
+npm run package:windows -- arm64
 ```
 
-该入口必须先完成正式 Release build；Windows build graph 把 `assets/icons/app-icon.ico` 编译为主程序的 PE 图标资源，再由 Native SDK `package --target windows` 生成独立 runtime stage 并保留同一 ICO 的外部副本。stage gate 精确验证 app.zon version/App ID、ReleaseFast、Windows GUI subsystem、主程序、WebView2 loader、应用图标与 Renderer assets，随后才允许 Inno Setup 6.7.3 或兼容的 7.x 生成小写 `metawork-<version>-windows-x64-setup.exe`。安装器、卸载项、开始菜单和可选桌面快捷方式统一消费该 ICO，最终 gate 要求精确文件存在、具有 PE identity 且输出 SHA-256。安装器按用户安装、注册开始菜单与卸载入口，不要求管理员权限。
+该入口默认选择 x64，显式 `arm64` 选择 ARM64；两种架构都必须先完成对应 target 的正式 Release build。Windows build graph 把 `assets/icons/app-icon.ico` 编译为主程序的 PE 图标资源，再由 Native SDK `package --target windows` 生成架构隔离的 runtime stage 并保留同一 ICO 的外部副本。stage gate 精确验证 app.zon version/App ID、ReleaseFast、Windows GUI subsystem、主程序与 WebView2 loader 的目标 PE machine、应用图标与 Renderer assets，随后才允许 Inno Setup 6.7.3 或兼容的 7.x 生成小写 `metawork-<version>-windows-x64-setup.exe` 或 `metawork-<version>-windows-arm64-setup.exe`。安装器、卸载项、开始菜单和可选桌面快捷方式统一消费该 ICO，最终 gate 要求精确文件存在、具有 PE identity 且输出 SHA-256。安装器按用户安装、注册开始菜单与卸载入口，不要求管理员权限。
 
-`npm run package:windows -- --signing required` 是同一入口的正式 Authenticode 模式。它必须从 Windows SDK 发现 x64 SignTool，以精确 SHA-1 thumbprint 选择当前用户证书库身份，使用 SHA-256 文件摘要和 RFC 3161 SHA-256 时间戳；MetaWork-owned EXE、Inno signed uninstaller 与最终安装器必须由同一 SignTool definition 签署，Microsoft-owned DLL 保留并验证原厂签名。每个可直接验证的 PE 都必须通过 `signtool verify /pa /all /v`，任何缺失配置、签名、时间戳或验证失败必须 fail closed。普通 unsigned mode 不读取签名身份，不能满足该 Gate。
+`npm run package:windows -- --signing required` 与 `npm run package:windows -- arm64 --signing required` 是同一入口对应架构的正式 Authenticode 模式。它们必须从 Windows SDK 发现 x64 SignTool，以精确 SHA-1 thumbprint 选择当前用户证书库身份，使用 SHA-256 文件摘要和 RFC 3161 SHA-256 时间戳；MetaWork-owned EXE、Inno signed uninstaller 与最终安装器必须由同一 SignTool definition 签署，Microsoft-owned DLL 保留并验证原厂签名。每个可直接验证的 PE 都必须通过 `signtool verify /pa /all /v`，任何缺失配置、签名、时间戳或验证失败必须 fail closed。普通 unsigned mode 不读取签名身份，不能满足该 Gate。
 
-当前自动化覆盖 metadata、Inno/SignTool 发现与 capability gate、Native runtime stage 结构、GUI subsystem、精确签名参数、单 EXE identity 和直接 PE 的 Authenticode verification；当前 signed Windows artifact 已完成一次隔离目录 silent install/uninstall smoke，直接验证安装器、实际落盘主程序与 `unins000.exe` 的 `/pa /all /v` Authenticode policy、Certum EV signer、RFC 3161 时间戳和零 warning，并确认 WebView2 loader 原厂签名、Renderer assets、图标、安装目录与卸载注册表清理。该 smoke 只能在没有同 App ID 正式安装的干净环境执行，避免覆盖真实用户安装状态，因此不内嵌进普通 package 命令。交互式 wizard、开始菜单启动、托盘驻留下升级替换和 Windows 10/11 平台矩阵仍是人工验收待完成。普通 check/test/build 与未签名 package 不得访问签名身份。安装器能力不证明自动更新、channel、回滚或迁移能力。
+当前自动化覆盖 metadata、架构选择、Inno/SignTool 发现与 capability gate、Native runtime stage 结构、GUI subsystem、主程序与 WebView2 loader 的精确 PE machine、精确签名参数、单 EXE identity 和直接 PE 的 Authenticode verification；当前 signed Windows x64 artifact 已完成一次隔离目录 silent install/uninstall smoke，直接验证安装器、实际落盘主程序与 `unins000.exe` 的 `/pa /all /v` Authenticode policy、Certum EV signer、RFC 3161 时间戳和零 warning，并确认 WebView2 loader 原厂签名、Renderer assets、图标、安装目录与卸载注册表清理。该 smoke 只能在没有同 App ID 正式安装的干净环境执行，避免覆盖真实用户安装状态，因此不内嵌进普通 package 命令。交互式 wizard、开始菜单启动、托盘驻留下升级替换和 Windows 10/11 平台矩阵仍是人工验收待完成。普通 check/test/build 与未签名 package 不得访问签名身份。安装器能力不证明自动更新、channel、回滚或迁移能力。
 
 ### Checkpoint artifact boundary
 
@@ -238,7 +239,7 @@ revision 14 不继承旧 artifact 的 checkpoint 样本或通过结论。每个�
 - 单 AgentCore Worker、进程级 crash semantics、async pending、suspend/resume 和跨进程 in-flight Run recovery 尚未实现。当前只支持正常 Application 重启后从 latest finalized checkpoint 显式恢复 Conversation attachment。
 - strict Workspace security、正式 Host tools 和持久权限规则尚未完成独立安全验收。
 - File Preview 的确定性回归必须覆盖：Snapshot file reference 只发布 `id/title/displayPath`；request 精确绑定 Task/Run/reference 且拒绝旧单-id/额外 path shape；async command 不出现在同步 registry；2-worker/8 in-flight 独立 lane 的 no-follow、root containment、regular-file、256 KiB/行/UTF-8/control 分类与 metadata changing；completion 的 Workspace/locator reauthorization、current/historical credential 与截断前缀遮蔽；非 ready 空正文；Renderer generation stale-result 丢弃、Task/reference 失效关闭、桌面和约 390px Drawer、键盘/焦点/横向溢出；shutdown join/drain/settle exactly once。当前自动化覆盖 wire、owner 与 bounded read/redaction 核心不变量；真实桌面 Drawer 的 Windows/macOS 视觉、键盘和窄屏验收仍为人工验收待完成，不影响 typed File Preview 路径的自动化状态。
-- 当前三个 target ABI package 均已提供 typed `file_changes` observation，但 Product FileChange 的 owner、持久化、恢复与投影尚未验收；typed Output、plan progress/approval 和 custom UI 仍不由当前 ABI 提供。对应 UI 必须保持关闭。
+- 当前四个 target ABI package 均已提供 typed `file_changes` observation，但 Product FileChange 的 owner、持久化、恢复与投影尚未验收；typed Output、plan progress/approval 和 custom UI 仍不由当前 ABI 提供。对应 UI 必须保持关闭。
 - AgentCore Skill catalog lease 是否固定 Skill body/resources 的历史快照尚未取得独立合同证据；当前只承诺 pinned catalog/policy identity 与显式 refresh，不宣称未 refresh 的外部内容必然可按历史字节执行。AgentCore 也不提供 shadowed candidates 或完整 resolution trace，Skill UI 只能展示 resolved winner 与 typed issues。
 - Task 当前进程内 execution binding 和模型切换已有自动化；显式 execution rebind 的跨重启 epoch/history 与竞态尚未实现。
 - MCP 的真实第三方 server、平台 credential/network、secure capture、browser/callback 和 issuer 行为尚未完成跨平台验收；marketplace 不在当前范围。

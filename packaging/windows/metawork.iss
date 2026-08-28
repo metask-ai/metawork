@@ -10,8 +10,12 @@
 #ifndef AppFileVersion
   #error AppFileVersion must be supplied by the package driver
 #endif
-
-#define RuntimeStage "..\..\zig-out\package\windows-runtime-x64"
+#ifndef AppArchitecture
+  #error AppArchitecture must be supplied by the package driver
+#endif
+#ifndef RuntimeStage
+  #error RuntimeStage must be supplied by the package driver
+#endif
 
 [Setup]
 AppId={{D91F0757-EE64-4D3C-9CA0-686FE2C12CF4}
@@ -22,8 +26,8 @@ DefaultDirName={localappdata}\Programs\{#AppDisplayName}
 DefaultGroupName={#AppDisplayName}
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
-ArchitecturesAllowed=x64compatible
-ArchitecturesInstallIn64BitMode=x64compatible
+ArchitecturesAllowed={#AppArchitecture}
+ArchitecturesInstallIn64BitMode={#AppArchitecture}
 SetupIconFile={#RuntimeStage}\app-icon.ico
 UninstallDisplayIcon={app}\app-icon.ico
 Compression=lzma2/ultra64
