@@ -790,7 +790,8 @@ fn projectRun(
             };
         },
     };
-    const terminal = task_state.productTerminalFacts(run);
+    const projection = task_state.runProjectionFacts(run);
+    const terminal = projection.terminal;
     const terminal_payload = if (terminal != null) task_state.terminalPayload(run) else null;
     return .{
         .id = run.id,
@@ -803,7 +804,7 @@ fn projectRun(
         .assistant_redacted = run.assistant_redacted,
         .assistant_output_kind = if (run.assistant_output_kind) |kind| @tagName(kind) else null,
         .assistant_output_start = if (run.assistant_output_start) |start| @intCast(start) else null,
-        .phase = @tagName(task_state.runPhase(run)),
+        .phase = @tagName(projection.phase),
         .outcome = if (terminal) |value| @tagName(value.outcome) else null,
         .cause = if (terminal) |value|
             if (value.cause) |cause| @tagName(cause) else null

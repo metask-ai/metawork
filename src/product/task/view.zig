@@ -123,6 +123,11 @@ pub const Input = struct {
 
 pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
     const task = input.task;
+    const current_run_projection = task_policy.currentRunProjection(task);
+    const current_run_phase = if (current_run_projection) |projection|
+        projection.phase
+    else
+        null;
     writer.print("{{\"id\":\"{d}\",\"recentOrder\":\"{d}\",\"title\":", .{
         task.durable.id,
         task.durable.recent_order,
@@ -179,9 +184,9 @@ pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
         ) catch return error.SnapshotTooLarge,
     }
     writer.print(",\"currentRunId\":\"{d}\",\"currentRunPhase\":", .{
-        if (task_policy.currentRunPhase(task) == null) 0 else task.runtime.active_run_id,
+        if (current_run_phase == null) 0 else task.runtime.active_run_id,
     }) catch return error.SnapshotTooLarge;
-    if (task_policy.currentRunPhase(task)) |phase|
+    if (current_run_phase) |phase|
         jsonValue(writer, @tagName(phase)) catch return error.SnapshotTooLarge
     else
         writer.writeAll("null") catch return error.SnapshotTooLarge;
@@ -206,7 +211,14 @@ pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
         const run = &(entry.* orelse continue);
         if (run_count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
         run_count += 1;
-        try writeRun(writer, input.text, run);
+        const projection = if (current_run_projection) |current|
+            if (run.id == task.runtime.active_run_id)
+                current
+            else
+                task_state.runProjectionFacts(run)
+        else
+            task_state.runProjectionFacts(run);
+        try writeRun(writer, input.text, run, projection);
     }
     writer.writeAll("],\"compacts\":[") catch return error.SnapshotTooLarge;
     var compact_count: usize = 0;
@@ -218,7 +230,10 @@ pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
         try writeCompact(writer, compact);
     }
     writer.writeAll("],\"pendingUi\":") catch return error.SnapshotTooLarge;
-    try input.pending_ui.write(writer, task, input.text);
+    if (current_run_phase == .waiting_ui)
+        try input.pending_ui.write(writer, task, input.text)
+    else
+        writer.writeAll("null") catch return error.SnapshotTooLarge;
     writer.writeAll(",\"uiHistory\":[") catch return error.SnapshotTooLarge;
     try writeUiHistory(writer, input.text, task);
     writer.writeAll("]}") catch return error.SnapshotTooLarge;
@@ -261,11 +276,12 @@ fn writeRun(
     writer: *std.Io.Writer,
     text_projection: TextProjection,
     run: *const task_state.RunRecord,
+    projection: task_state.RunProjectionFacts,
 ) Error!void {
-    const terminal = task_state.productTerminalFacts(run);
+    const terminal = projection.terminal;
     writer.print("{{\"id\":\"{d}\",\"phase\":\"{s}\",\"input\":", .{
         run.id,
-        @tagName(task_state.runPhase(run)),
+        @tagName(projection.phase),
     }) catch return error.SnapshotTooLarge;
     switch (run.input) {
         .text => |text| {
@@ -301,7 +317,7 @@ fn writeRun(
     }
     try writeRunOutput(writer, text_projection, run);
     writer.writeAll(",\"activity\":") catch return error.SnapshotTooLarge;
-    try writeRunActivity(writer, task_state.currentActivity(run));
+    try writeRunActivity(writer, projection.activity);
     writer.writeAll(",\"outcome\":") catch return error.SnapshotTooLarge;
     if (terminal) |value|
         jsonValue(writer, @tagName(value.outcome)) catch return error.SnapshotTooLarge

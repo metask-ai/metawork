@@ -11725,6 +11725,21 @@ test "assistant credential redaction finalizes ordinary chunks without rescannin
     var terminal_pending_storage: [96 * 1024]u8 = undefined;
     const terminal_pending = try control.writeSnapshot(&terminal_pending_storage);
     try std.testing.expect(std.mem.indexOf(u8, terminal_pending, "tail SECRET-") == null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        terminal_pending,
+        "\"currentRunPhase\":\"running\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        terminal_pending,
+        "\"activity\":{\"kind\":\"finalizing\"}",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        terminal_pending,
+        "\"pendingUi\":null",
+    ) != null);
     const revision_before_finalization = control.revision;
     control.finalizeMarkedTerminalRunsAfterEventDrain();
     try std.testing.expectEqual(assistant.list.items.len, assistant.committed_len);

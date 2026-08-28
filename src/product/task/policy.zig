@@ -351,13 +351,20 @@ pub fn lastTerminalFacts(
     return if (latest) |run| task_state.productTerminalFacts(run) else null;
 }
 
-pub fn currentRunPhase(task: *const task_state.Task) ?task_state.RunPhase {
+pub fn currentRunProjection(
+    task: *const task_state.Task,
+) ?task_state.RunProjectionFacts {
     const run = task_state.findRun(
         task.durable.runs,
         task.runtime.active_run_id,
     ) orelse return null;
-    const phase = task_state.runPhase(run);
-    return if (task_state.isTerminalPhase(phase)) null else phase;
+    const projection = task_state.runProjectionFacts(run);
+    return if (task_state.isTerminalPhase(projection.phase)) null else projection;
+}
+
+pub fn currentRunPhase(task: *const task_state.Task) ?task_state.RunPhase {
+    const projection = currentRunProjection(task) orelse return null;
+    return projection.phase;
 }
 
 pub fn hasActiveOperation(task: *const task_state.Task) bool {

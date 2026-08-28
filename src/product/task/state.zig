@@ -546,6 +546,12 @@ pub const ProductTerminalFacts = struct {
     session_disposition_at_completion: agent.SessionDisposition,
 };
 
+pub const RunProjectionFacts = struct {
+    phase: RunPhase,
+    activity: ?RunActivity,
+    terminal: ?ProductTerminalFacts,
+};
+
 pub fn terminalPayload(run: *const RunRecord) ?*const TerminalPayload {
     while (true) switch (run.terminal_publication.load(.acquire)) {
         .open => return null,
@@ -583,26 +589,31 @@ pub fn productTerminalFacts(run: *const RunRecord) ?ProductTerminalFacts {
     };
 }
 
-pub fn runPhase(run: *const RunRecord) RunPhase {
-    return if (productTerminalFacts(run)) |terminal| terminal.phase else switch (run.active_phase) {
-        .queued => .queued,
-        .running => .running,
-        .waiting_ui => .waiting_ui,
-        .stopping => .stopping,
+pub fn runProjectionFacts(run: *const RunRecord) RunProjectionFacts {
+    if (productTerminalFacts(run)) |terminal| return .{
+        .phase = terminal.phase,
+        .activity = null,
+        .terminal = terminal,
+    };
+    if (terminalPayload(run) != null) return .{
+        .phase = .running,
+        .activity = .finalizing,
+        .terminal = null,
+    };
+    return switch (run.active_phase) {
+        .queued => .{ .phase = .queued, .activity = .queued, .terminal = null },
+        .running => .{ .phase = .running, .activity = run.observed_activity, .terminal = null },
+        .waiting_ui => .{ .phase = .waiting_ui, .activity = .waiting_user, .terminal = null },
+        .stopping => .{ .phase = .stopping, .activity = .stopping, .terminal = null },
     };
 }
 
+pub fn runPhase(run: *const RunRecord) RunPhase {
+    return runProjectionFacts(run).phase;
+}
+
 pub fn currentActivity(run: *const RunRecord) ?RunActivity {
-    if (productTerminalFacts(run) != null) return null;
-    return switch (run.active_phase) {
-        .queued => .queued,
-        .running => if (terminalPayload(run) != null)
-            .finalizing
-        else
-            run.observed_activity,
-        .waiting_ui => .waiting_user,
-        .stopping => .stopping,
-    };
+    return runProjectionFacts(run).activity;
 }
 
 pub fn setActivePhase(run: *RunRecord, phase: ActiveRunPhase) bool {
@@ -1386,20 +1397,20 @@ test "event drain withholds terminal facts and assistant suffix until finalizati
     };
     run.terminal_publication.store(.published, .release);
 
-    try std.testing.expect(productTerminalFacts(run) == null);
-    try std.testing.expectEqual(RunActivity.finalizing, currentActivity(run).?);
-    run.active_phase = .queued;
-    try std.testing.expectEqual(RunActivity.queued, currentActivity(run).?);
-    run.active_phase = .waiting_ui;
-    try std.testing.expectEqual(RunActivity.waiting_user, currentActivity(run).?);
-    run.active_phase = .stopping;
-    try std.testing.expectEqual(RunActivity.stopping, currentActivity(run).?);
-    run.active_phase = .running;
+    for ([_]ActiveRunPhase{ .running, .queued, .waiting_ui, .stopping }) |phase| {
+        run.active_phase = phase;
+        const projection = runProjectionFacts(run);
+        try std.testing.expectEqual(RunPhase.running, projection.phase);
+        try std.testing.expectEqual(RunActivity.finalizing, projection.activity.?);
+        try std.testing.expect(projection.terminal == null);
+    }
     try std.testing.expect(markTerminalRunsBeforeEventDrain(&task));
     try std.testing.expect(finalizeMarkedTerminalRunsAfterEventDrain(&task));
     try std.testing.expectEqual(@as(usize, 6), run.assistant.committed_len);
-    try std.testing.expectEqual(RunOutcome.completed, productTerminalFacts(run).?.outcome);
-    try std.testing.expect(currentActivity(run) == null);
+    const terminal_projection = runProjectionFacts(run);
+    try std.testing.expectEqual(RunPhase.completed, terminal_projection.phase);
+    try std.testing.expectEqual(RunOutcome.completed, terminal_projection.terminal.?.outcome);
+    try std.testing.expect(terminal_projection.activity == null);
 }
 
 test "event drain fails closed when an output segment remains unresolved" {
