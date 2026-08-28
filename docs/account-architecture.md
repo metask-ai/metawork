@@ -10,7 +10,7 @@
 
 - 产品可见行为、默认模型与 Task 的关系见[产品需求](requirements.md)；
 - Account 与 Application、Workbench、Bridge、Agent 的跨 owner 协作见[Product 内部架构](product-architecture.md)；
-- Renderer 展示和交互见[Workbench UI 设计](workbench-ui-design.md)；
+- Renderer 展示和交互见[UI 设计规范](ui-design.md)；
 - wire command、Snapshot 与 transport 见[Renderer Bridge 合同](renderer-bridge-contract.md)；
 - 测试层、验证入口和平台证据见[验证规范](validation.md)。
 

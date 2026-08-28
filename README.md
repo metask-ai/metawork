@@ -85,7 +85,7 @@ probe 使用临时 source-free SDK consumer，不进入正式产品 build graph�
 ## 文档入口
 
 - [产品需求](docs/requirements.md)：产品对象、行为与范围
-- [Workbench UI 设计](docs/workbench-ui-design.md)：当前交互规则与 capability-gated 目标行为
+- [UI 设计规范](docs/ui-design.md)：全产品信息架构、交互、视觉与 capability-gated 目标行为
 - [高层架构](docs/architecture.md)：技术选型、系统职责与安全边界
 - [Product 内部架构](docs/product-architecture.md)：内部 owner、事务、并发与恢复
 - [Account 架构](docs/account-architecture.md)：Account owner、Metask 消费合同、状态、事务、持久化、提交与恢复

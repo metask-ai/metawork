@@ -9,6 +9,8 @@ MetaWork 是一款桌面端 **Agent Workbench**。它帮助用户在本地工作
 
 MetaWork 的核心不是模拟终端或展示 Agent 执行流水，而是让用户围绕 Task 提交要求、在必要时介入并读取回复与结果。底层 Run、Tool、usage 和恢复事实只在其产品用途需要时进入界面。
 
+本文只定义产品对象、行为、范围与能力要求；用户界面的信息架构、呈现、交互、视觉与 capability gate 由 [UI 设计规范](ui-design.md)统一定义。
+
 ## 2. 产品目标
 
 - 提供清晰、稳定的桌面 Agent 工作入口；

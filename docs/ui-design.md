@@ -1,24 +1,31 @@
-# MetaWork Workbench UI 设计
+# MetaWork UI 设计规范
 
-> 状态：维护登录优先、任务中心和 capability-gated 的成熟产品目标；未通过对应能力验收的界面不得出现
+> 状态：MetaWork 全部用户界面的唯一设计 source of truth；未通过对应能力验收的界面不得出现
 > 设计基线：MetaWork 自有的“明亮工作台 + 紫色任务流”；外部产品和参考图只用于提炼交互模式，不构成可复制的布局、品牌或组件规范
 
 ## 1. 文档职责
 
-本文档把现有视觉稿补充为可实现、可测试的 Workbench UI 方案，定义：
+本文档定义 MetaWork 全部用户界面的规范语义。登录、Workbench、设置、全局能力页面、平台窗口呈现与后续 capability-gated 界面都以本文为唯一设计真源；其他文档只能链接或提供不产生新设计语义的摘要。
+
+本文定义：
 
 - 用户可见的信息架构与术语；
 - Workspace、Task 和一次执行在界面中的关系；
 - Task 内容、当前状态、审批、权限、结果与错误状态；
 - 左、中、右三栏及输入区的职责；
-- 国际化、视觉、响应式、平台适配和验收矩阵。
+- 品牌资产使用、Design Token、Foundation 组件与产品视觉；
+- 国际化、主题、动效、响应式、平台适配、可访问性和验收矩阵。
 
 本文档不替代其他 source of truth：
 
 - 产品范围与行为以 [产品需求](requirements.md) 为准；
 - 系统边界、Renderer/Host/AgentCore 职责以 [高层架构](architecture.md) 为准；
 - AgentCore 事件、线程、所有权和生命周期以 [AgentCore 集成契约](agentcore-integration.md) 为准；
-- 当前 ABI 能力以 [AgentCore ABI v1 消费基线](agentcore-abi-v1.md) 为准。
+- 当前 ABI 能力以 [AgentCore ABI v1 消费基线](agentcore-abi-v1.md) 为准；
+- 源码位置、模块依赖和平台资产生成路径以 [工程结构与所有权](project-structure.md) 为准；
+- 测试归属、平台证据和未验证能力以 [验证规范](validation.md) 为准。
+
+品牌 SVG、用途图标、`metask-tokens.css`、Foundation 组件和产品样式是本文的可执行实现，不是并列规范。实现不得自行引入新的品牌 primitive、组件语义、页面布局或 capability 表达；发现实现与本文冲突时必须显式裁决并同步收口，不能反过来把偶然实现写成设计真相。
 
 设计稿中出现但当前能力尚未满足的功能必须隐藏、禁用并解释，或明确标注为后续能力；不得用前端模拟状态制造已经可用的假象。
 
@@ -229,7 +236,7 @@ Tasks
 ```
 
 - 四个菜单项使用相同行高、左右 padding、图标列、字号、字重、hover 与 focus 样式；`New task` 不再使用独立填充按钮，快捷键只作为 tooltip 或不改变布局的尾部提示；
-- 当前能力 route 使用 `brand-100` 弱背景、`brand-700` 图标/文字和左侧 2 px 选中标识，并设置 `aria-current="page"`；选中不能只靠颜色；
+- 当前能力 route 使用 `--ui-action-selected-surface` 弱背景、`--ui-action-selected-content` 图标/文字和左侧 2 px 选中标识，并设置 `aria-current="page"`；选中不能只靠颜色；
 - 一个能力可用时只显示一行；后续能力按真实 owner 与使用频率增加，不预留 disabled 占位、不用 `More` 收纳尚不存在的产品；
 - 点击能力入口保留完整 Workbench 左栏和 Task 选择，只替换中央 route；点击 New task 或 Task 回到对应 Workbench route。Settings 覆盖整个 Workbench 内容区，保留窗口壳层和底层 Workbench 挂载，不重复显示或操作 Task 左栏；
 - 能力页面打开期间后台 Task 继续运行，左栏的 `Needs your attention`、Running 与失败信号继续更新。
@@ -276,7 +283,7 @@ Skills                                                              10
 - 常规桌面使用两列卡片，中等与窄窗降为一列。卡片使用 `canvas/paper`、`rule`、约 12 px 圆角和无常驻阴影；hover/focus 只增加极浅 brand 背景、边框和最多 1 px 位移；
 - 卡片显示统一的线性 Skill 文档图标、display name、单行 description、范围、可选 monospace invocation 和带文字的状态。删除原 `/` 装饰；不显示安装量、`Installed` 或来源品牌徽章。能够精确映射对应 current catalog member 的 Personal 与 Project asset 都在卡片尾部显示独立 switch：Personal 使用 `已启用/已禁用`，Project 的 inherit 状态显示 `跟随用户设置`，显式覆盖额外显示 `恢复跟随用户`。external source kind 不自动剥夺启停 authority，但 catalog/selection 不可用或 identity 不可证明时不显示可操作开关；
 - 状态颜色只复用 `live / amber / danger`，且必须同时显示文字或图标。来源、revision、资源数量和物理管理细节留在 drawer；
-- 卡片是带标题的 `article/listitem`，打开详情的按钮、启用 switch、“恢复跟随用户”与可能存在的 `···` menu button 为并列元素，禁止嵌套 interactive element。开关最小命中区 44 px，checked 使用 `#8A4ED1`/主动作 token，off 使用中性边框色，并始终有文字、键盘焦点与 disabled 状态；Renderer 不 optimistic 更新，等待 committed Snapshot 后再反映新状态；
+- 卡片是带标题的 `article/listitem`，打开详情的按钮、启用 switch、“恢复跟随用户”与可能存在的 `···` menu button 为并列元素，禁止嵌套 interactive element。开关最小命中区 44 px，checked 使用 `--ui-action-primary`，off 使用中性边框色，并始终有文字、键盘焦点与 disabled 状态；Renderer 不 optimistic 更新，等待 committed Snapshot 后再反映新状态；
 - Skill invocation、display name、description、argument name、文件名和用户内容不翻译；页面标题、范围、状态、动作、错误和空状态进入完整 locale catalog。
 
 详情 drawer：
@@ -988,74 +995,91 @@ Host/Core 传递状态 code 和结构化参数，Renderer 负责本地化。用�
 - 缺失 key 回退；
 - 运行时切换与 reload 后持久化。
 
-## 16. 视觉系统
+## 16. 视觉与设计系统
 
-> Capability：**当前**。登录、Workbench、设置和全部 capability gate 已存在；本章定义的明亮紫色视觉系统已经进入正式 Renderer，并由持续回归约束。它不授权显示尚未通过 capability gate 的数据或控件。
+> Capability：**当前与受 gate 目标**。明亮紫色视觉系统已经进入正式 Renderer；当前产品只开放浅色主题。Dark primitive 或语义映射的存在不代表深色产品主题已经通过设计、可访问性和平台验收，也不授权显示主题开关。
 
 ### 16.1 视觉方向
 
 MetaWork 采用“明亮工作台 + 紫色任务流”的桌面工具方向。视觉个性来自克制的紫色交互信号、信息密度转换和本地执行语义，而不是暗色全局背景、暖米色加通用衬线、巨大品牌空态、吉祥物、渐变或每块内容一张圆角卡片。外部参考只用于判断主次关系，不能复制品牌字形、导航结构、输入框比例、图标或配色。
 
-核心色板如下；公司发布正式品牌色时，`brand-*` 必须整体校准并重新验证，而不是只替换单个按钮：
+智能紫只表达品牌、关键操作、当前选择、键盘焦点与正在活动的真实路径。普通正文、图标、边框和面板使用中性色；成功、等待与失败使用独立语义色并同时提供文字、图标或形状。应用背景、普通卡片和完整首屏不得铺设大面积紫色渐变、发光、玻璃拟态或装饰性粒子；正常完成不使用庆祝动画。
 
-| Token                 | Value     | Role                     |
-| --------------------- | --------- | ------------------------ |
-| `brand-700`           | `#4E38C2` | Pressed、高对比紫色文字  |
-| `brand-600`           | `#5B46D8` | 主按钮、Focus ring       |
-| `brand-500`           | `#6C5CFF` | Logo、当前轨迹、品牌识别 |
-| `brand-100`           | `#EAE7FF` | 当前导航项、弱标签       |
-| `brand-50`            | `#F6F4FF` | 紫色弱背景               |
-| `ink-primary`         | `#25222D` | 主文字与标题             |
-| `ink-secondary`       | `#6E6879` | 次级文字                 |
-| `surface-app`         | `#F6F5FA` | 应用外层背景             |
-| `surface-work`        | `#FFFFFF` | 中央工作面与浮层         |
-| `surface-rail`        | `#F1EFF7` | Workspace / Task 左栏    |
-| `surface-inspector`   | `#F7F6FA` | Inspector                |
-| `rule`                | `#E3E0E9` | 分隔线                   |
-| `status-success`      | `#287A54` | 明确成功                 |
-| `status-success-bg`   | `#EAF6EF` | 成功弱背景               |
-| `status-attention`    | `#9C5B10` | 等待用户或警告           |
-| `status-attention-bg` | `#FFF5E7` | 等待弱背景               |
-| `status-danger`       | `#B6424C` | 失败、危险和删除         |
-| `status-danger-bg`    | `#FFF0F1` | 失败弱背景               |
+### 16.2 品牌资产
 
-组件级规则：
+- `assets/brand/logo-mark.svg` 是唯一手工维护的 MetaWork 标志几何资产；不同用途不得直接修改该文件，而应在独立画布中处理安全区、背景、视觉居中和必要的小尺寸适配；
+- `assets/icons/app-icon.svg` 是应用图标用途母版，使用纯白背景；标志按画布中心缩放至约 88%，使可见主体约占画布宽度 70%。`assets/icons/app-icon.png`、`assets/icons/MetaWork.icon` 与 `assets/icons/app-icon.ico` 都从该视觉母版派生，不增加非设计渐变、shadow、specular 或 translucency；
+- `assets/icons/tray-icon.svg` 使用透明背景，主体约占画布宽度 88%；macOS 作为 template image 使用，Windows 保留品牌色；
+- favicon 或其他用途资产只有出现真实 consumer 时才新增。用途资产可以调整内容占比、视觉居中、背景和小尺寸细节，但不得重新设计基础几何；
+- 图标编译、平台资源 staging、PE/ICNS/Assets.car、签名与打包验证属于工程和分发合同，分别由工程结构、平台文档与验证规范定义，不在本文复制实现步骤。
 
-- Primary button 使用 `brand-600` 和白色文字；Pressed 使用 `brand-700`；
-- Selected navigation 使用 `brand-100` 背景和 `brand-700` 标识；
-- Focus visible 使用 2 px `brand-600` 并保留 2 px offset；
-- 普通正文、图标、边框和卡片默认使用中性色，不默认变紫；
-- 普通内容不使用紫色描边，App 背景不使用大面积紫色、发光或装饰渐变；
-- 主操作色不能同时代表成功、等待或危险；语义状态始终配合文字或图标；
-- 正常完成不使用大面积绿色或庆祝动画；
-- 状态图标、焦点、文字和控件组合必须通过 WCAG 对比度校验。当前候选的白字/`brand-600` 为 6.34:1，`brand-700`/`brand-100` 为 6.51:1，`status-attention`/浅琥珀背景为 4.97:1。
+### 16.3 Design Token
 
-组件层级依靠排版、间距、背景层次和分隔线建立。圆角只服务输入区、弹层和需要形成边界的交互组；普通消息、活动和设置项不默认卡片化。阴影只用于真实抬升层。
+当前批准的品牌 primitive 为：
 
-### 16.2 字体
+| Token                        | Value     | Role                       |
+| ---------------------------- | --------- | -------------------------- |
+| `--metask-primary`           | `#8A4ED1` | 智能状态、关键操作、激活路径 |
+| `--metask-primary-deep`      | `#4B2DB5` | Hover、pressed 与高对比强调 |
+| `--metask-primary-soft`      | `#E9E6FF` | 浅色主题弱强调背景         |
+| `--metask-accent`            | `#B35BE8` | 运行中、智能活动和轻量状态 |
+| `--metask-state-running`     | `#B35BE8` | 明确的运行与活动状态       |
+| `--metask-state-warning`     | `#9C5B10` | 等待用户与警告             |
+| `--metask-state-warning-ink` | `#7D4308` | 浅色表面上的警告文字       |
+| `--metask-state-complete`    | `#4C9A72` | 完成、健康与校验通过       |
+| `--metask-state-error`       | `#C85A5A` | 异常、失败与破坏性反馈     |
+| `--metask-light-canvas`      | `#F7F8FA` | 浅色页面背景               |
+| `--metask-light-panel`       | `#FFFFFF` | 浅色面板                   |
+| `--metask-light-panel-2`     | `#F1F2F5` | 浅色次级或抬升表面         |
+| `--metask-light-text`        | `#191B21` | 浅色主题主要文字           |
+| `--metask-light-text-muted`  | `#626775` | 浅色主题次要文字           |
+| `--metask-light-border`      | `#DFE2E8` | 浅色主题边界               |
+| `--metask-dark-canvas`       | `#0F1115` | 深色主题页面背景 primitive |
+| `--metask-dark-panel`        | `#12141B` | 深色主题面板 primitive     |
+| `--metask-dark-panel-2`      | `#181A23` | 深色主题抬升表面 primitive |
+| `--metask-dark-text`         | `#F4F5F7` | 深色主题主要文字 primitive |
+| `--metask-dark-text-muted`   | `#A7ABB7` | 深色主题次要文字 primitive |
+| `--metask-dark-border`       | `#2B2F3A` | 深色主题边界 primitive     |
 
-- 标题：macOS 使用 SF Pro Display，Windows 使用 Segoe UI Variable Display，并在不可用时回退系统 UI；不使用通用 serif 制造空态“高级感”；
-- 正文：macOS 使用 SF Pro Text，Windows 使用 Segoe UI；中文分别使用 PingFang SC 和 Microsoft YaHei fallback；默认正文不小于 13 px，主要阅读正文目标为 14–15 px；
-- Data：SF Mono、Menlo、Consolas 或系统等宽字体；
-- Task、按钮、设置、状态和正文统一使用系统无衬线字体；等宽字体只用于命令、路径、稳定标识和数据；
-- 不依赖运行时网络字体。
+Token 只有三层：
 
-### 16.3 形态与动效
+1. `--metask-*` 是品牌 primitive，逐字镜像本文批准的值；
+2. `--ui-*` 是 Foundation semantic token，只表达 surface、content、action、status、focus、overlay 等组件语义；
+3. Tailwind `@theme inline` 只是消费桥接层，不拥有新的视觉值。
 
-- 间距使用 4 / 8 / 12 / 16 / 24 / 32 px；小控件圆角约 7 px，导航与普通交互组约 9 px，Composer 16 px，Popover / Modal 约 14 px；
+Foundation 组件只消费 `--ui-*`；只有直接表现品牌或状态本身时才消费对应 `--metask-*`。产品 CSS、组件和其他文档不得复制另一套品牌 primitive。新增 semantic token 必须有当前 consumer，并优先由现有 primitive、surface 和 `color-mix()` 推导；若该 token 参与未来主题切换，Light/Dark 必须同时定义。`frontend/src/styles/metask-tokens.css` 是上述规则的实现镜像，不是独立设计真源。
+
+### 16.4 字体、间距与形态
+
+- `--metask-font-sans` 精确为 `Inter, "SF Pro Display", "PingFang SC", "Microsoft YaHei", Arial, sans-serif`；不依赖运行时网络字体，不使用通用 serif 制造空态“高级感”；
+- `--metask-font-mono` 精确为 `"SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", monospace`；命令、路径、版本、稳定标识和数据才使用等宽字体，普通 Task、按钮、设置、状态和正文保持无衬线；
+- 字号 token 固定为 `--metask-text-micro: 11px`、`--metask-text-label: 12px`、`--metask-text-control: 13px`、`--metask-text-body: 14px`、`--metask-text-lead: 16px`、`--metask-text-title: 18px`、`--metask-text-title-lg: 20px`、`--metask-text-display: 24px` 与 `--metask-text-display-lg: 28px`；默认正文为 14 px，主要阅读内容不得低于 13 px；
+- 间距以 8 px 为基础节奏，紧凑桌面控件可以使用 4 px micro gap；优先复用 8 / 16 / 24 / 32 px，不为单个页面建立新的间距阶梯；
+- 小型控件使用约 6 px 圆角，导航、按钮与输入使用约 7 px，卡片和命令面使用约 12 px，Composer 与大面板使用约 16 px；
+- 按钮、输入和触控动作默认使用至少 44 px 命中高度；平台窗口按钮和明确的紧凑桌面控件只按各自已记录且经过键盘、DPI 与窄屏验收的规则例外；
+- 组件层级依靠排版、间距、背景和分隔线建立。圆角只服务输入区、弹层和需要形成边界的交互组；普通消息、活动和设置项不默认卡片化，阴影只用于真实抬升层。
+
+### 16.5 Foundation 组件
+
+- `frontend/src/components/ui/` 只实现无业务语义的 Foundation primitive；业务 feature 通过公开 preset、slot 和 token 组合，不在产品 CSS 中重建 Button、Input、Dialog、Drawer、Popover 或状态体系；
+- 同一区域只允许一个紫色主动作。次级动作使用中性表面与边界，危险动作使用异常红，不使用紫色表达删除；
+- 按钮、输入、菜单、开关和弹层必须提供一致的 resting、hover、active、disabled 与 `focus-visible` 状态；操作名称、反馈和结果使用同一用户语言；
+- 状态色必须同时配合文字、图标或形状。标签只描述类别或状态，不承担按钮功能；
+- 卡片与面板使用边界、间距和表面层级组织信息，不依赖强阴影或渐变；同一页面不为不同模块发明互不兼容的卡片结构；
+- Foundation primitive 不拥有 Workspace、Task、Run、AgentCore、Bridge command 或 capability gate；产品 feature 也不得反向修改 Foundation 的定位和 lifecycle 内部细节。
+
+### 16.6 主题与动效
+
+- 当前产品只开放浅色主题；`Appearance` 和主题切换在第二套主题完成完整设计、WCAG、约 390 px 窄屏及 Windows/macOS 平台验收前保持隐藏；
+- 深浅主题必须保持相同 DOM 结构、内容顺序、信息密度和状态语义，只替换 surface、content、border、shadow 与 glow 变量；
 - Task 输入、回复与行动状态通过排版和间距形成清晰关系，不用装饰线、节点或卡片伪造底层时序；
-- 圆角服务于交互分组，不让每条信息都变成浮动卡片；
-- 阴影只用于 Composer、浮层和真正需要抬升的元素；
 - 只让当前运行节点旋转，避免全屏多个 spinner；
 - Hover / Press 只在约 100–120 ms 内改变颜色或背景，不做位移；Popover / Slash menu 使用约 120–150 ms 淡入和最多 4 px 位移；
 - 左栏与 Inspector 的平移或列宽变化约 160–180 ms；不能使用内容状态驱动高频开合；
 - capability 到位后的新 Output 只使用约 160 ms 轻微淡入；
 - 从 New task 到运行 Task 的布局变化使用一次约 220 ms 的克制过渡：Composer 从中央主视觉落到底部，Task 内容获得空间；不散布无意义入场动画；
 - Inspector 不随普通 Run 开始或 terminal 自动改变列宽；显隐只在用户动作、切换 Task 或新的待处理请求边界改变，避免正文高频重排；
-- 完成状态不使用庆祝动画；
-- 尊重 `prefers-reduced-motion`。
-
-首个正式视觉版本只交付浅色主题。颜色结构必须 token 化，但在深色主题完成完整设计和测试前不暴露半成品主题开关。
+- 完成状态不使用庆祝动画；所有非必要动画为 `prefers-reduced-motion` 提供静态等价状态。
 
 ## 17. 空状态与异常状态
 
@@ -1209,8 +1233,12 @@ Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成
 - 左栏折叠后完全隐藏且命令栏入口仍可达；Inspector 关闭或覆盖显示后功能不丢失。
 - Windows Renderer 窗口按钮在登录页与 Workbench 均可见、键盘可达；最小化、最大化/还原和遵循 `close_policy = hide` 的关闭命中真实窗口，按钮区域不进入 drag candidate；
 
-## 20. 工程目录结构
+### 19.9 视觉与 Foundation
 
-Workbench 的仓库外层、Renderer、Zig `src/`、依赖方向和测试布局单独维护在 [工程结构与所有权](project-structure.md)。
-
-本文档只定义 UI feature 和产品交互；目录方案不得反向改变 Renderer/Host/AgentCore 的产品边界。
+- `ui-design.md` 是唯一设计规范，品牌资产、token CSS、Foundation 组件与产品样式只作为实现镜像；
+- 品牌 primitive 与本文逐字一致，不存在 `brand-*`、组件局部色板或其他平行视觉值；
+- Foundation 组件只消费 semantic token；Tailwind bridge 不引入新值，产品 feature 不重建基础控件；
+- 智能紫只用于品牌、关键动作、当前选择、焦点和真实活动路径；成功、等待、失败与删除保持独立语义并提供非颜色提示；
+- 当前 Light 主题在桌面与约 390 px 窄屏下完成对比度、键盘焦点、长中英文、横向溢出和 reduced-motion 检查；未经同等验收不得显示 Dark/Appearance；
+- 标志、应用图标与托盘图标保持同一基础几何和各自用途安全区；平台生成资产不得引入未经设计的渐变、阴影或材质；
+- 普通页面不使用大面积紫色渐变、玻璃拟态、装饰性节点、粒子、3D 透视或游戏 HUD。

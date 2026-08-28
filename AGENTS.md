@@ -9,7 +9,7 @@
 | 变更范围                                                      | Source of truth                                                      |
 | ------------------------------------------------------------- | -------------------------------------------------------------------- |
 | 产品对象、行为与范围                                          | [docs/requirements.md](docs/requirements.md)                         |
-| UI 信息架构、交互与 capability gate                           | [docs/workbench-ui-design.md](docs/workbench-ui-design.md)           |
+| UI 信息架构、交互、视觉、响应式与 capability gate             | [docs/ui-design.md](docs/ui-design.md)                               |
 | 技术选型、系统 owner 与安全边界                               | [docs/architecture.md](docs/architecture.md)                         |
 | Product owner、事务、并发、恢复及其与 Agent 的协作            | [docs/product-architecture.md](docs/product-architecture.md)         |
 | Account owner、Metask 合同、状态、事务、持久化、并发与恢复     | [docs/account-architecture.md](docs/account-architecture.md)         |
@@ -75,7 +75,7 @@
 ## 文档变更路由
 
 - 产品需求变化更新 `docs/requirements.md`。
-- UI 交互规则变化更新 `docs/workbench-ui-design.md`。
+- UI 信息架构、交互、品牌视觉、Design Token、Foundation 组件、主题、响应式、可访问性或 capability gate 变化更新 `docs/ui-design.md`。
 - 顶层技术决策、模块职责、进程或安全边界变化更新 `docs/architecture.md`。
 - Product 跨 owner 事务、并发、恢复或其与 Agent 的产品协作变化更新 `docs/product-architecture.md`；Account owner、Metask OAuth/catalog/ExecutionTarget 消费合同、状态、事务、持久化、提交、并发或恢复变化更新 `docs/account-architecture.md`；实际目录和依赖变化更新 `docs/project-structure.md`。
 - Renderer Bridge command、event、Snapshot 或 transport 语义变化更新 `docs/renderer-bridge-contract.md`。

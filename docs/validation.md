@@ -2,7 +2,7 @@
 
 > 状态：初始技术验证已经收口；本文维护持续回归归属、当前验证状态、可复现入口、长期证据和覆盖缺口
 
-本文是验证控制面，不是产品或技术设计文档。它只回答四个问题：依据哪份规范验证什么、由哪个测试层负责、证据在哪里、还缺什么。产品行为以[产品需求](requirements.md)为准，系统边界以[高层架构](architecture.md)和[Product 内部架构](product-architecture.md)为准，Renderer、AgentCore 与外部合同分别由对应 source of truth 定义。
+本文是验证控制面，不是产品或技术设计文档。它只回答四个问题：依据哪份规范验证什么、由哪个测试层负责、证据在哪里、还缺什么。产品行为以[产品需求](requirements.md)为准，UI 信息架构、交互与视觉以[UI 设计规范](ui-design.md)为准，系统边界以[高层架构](architecture.md)和[Product 内部架构](product-architecture.md)为准，Renderer Bridge、AgentCore 与外部合同分别由对应 source of truth 定义。
 
 普通测试名称、实现位置和逐项断言由当前 test graph 与测试源码负责，不在本文建立第二份目录。只有测试层或归属规则、验证入口、长期证据、平台状态或覆盖缺口变化时才更新本文。
 

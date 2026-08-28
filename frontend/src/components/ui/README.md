@@ -1,8 +1,14 @@
 # Foundation UI
 
-Headless Base UI primitives wrapped with token-based default styling. The
-library defines resting shapes on its own terms; product surfaces adapt to the
-library, not the other way around.
+Normative visual, interaction, theme, and accessibility rules live only in
+[`docs/ui-design.md`](../../../../docs/ui-design.md). This file records
+implementation-only composition and lifecycle constraints for the Foundation
+UI library; it is not a second design specification.
+
+The library wraps headless Base UI primitives with token-based default styling.
+Its presets implement the shapes approved by the UI specification; product
+surfaces adapt through the public customization contract instead of redefining
+Foundation behavior in product CSS.
 
 ## Customization contract
 
