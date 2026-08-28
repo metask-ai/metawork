@@ -279,6 +279,7 @@ fn installExecution(workbench_value: *product_control.Runtime) !void {
             .execution_generation = 1,
         },
     });
+    try workbench_value.prepareExecutionInstall(execution.input());
     workbench_value.installExecutionNoFail(&execution);
     workbench_value.endExecutionReplacementNoFail();
     workbench_value.finishAccountCommitNoFail();

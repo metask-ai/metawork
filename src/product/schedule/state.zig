@@ -1,4 +1,4 @@
-//! Product Control's bounded Scheduled Task state and recurrence kernel.
+//! Product Schedule-owned bounded state and occurrence transitions.
 
 const std = @import("std");
 

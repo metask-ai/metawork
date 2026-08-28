@@ -61,7 +61,7 @@ flowchart TB
 | 词          | 含义                                              | 图节点      | 所有权表行         | 源码                                                                                                    |
 | ----------- | ------------------------------------------------- | ----------- | ------------------ | ------------------------------------------------------------------------------------------------------- |
 | Application | 组合、用例编排、平台能力适配与生命周期边界        | APPLICATION | Application        | `src/main.zig`、`src/app.zig`、`src/app/`、`src/native_sdk_compat/`                                     |
-| Product     | 产品逻辑边界；不是统一源码 module 或 facade       | PRODUCT     | Account、Product Control | `src/product/account*`、`src/product/control*`、`src/product/mcp*`、`src/product/skill*`、`src/product/task*` |
+| Product     | 产品逻辑边界；不是统一源码 module 或 facade       | PRODUCT     | Account、Product Control | `src/product/account*`、`src/product/control*`、`src/product/mcp*`、`src/product/schedule*`、`src/product/skill*`、`src/product/task*` |
 | Agent       | AgentCore 执行、Session/Conversation 与事件泵边界 | AGENT       | Agent              | `src/agent.zig`、`src/agent/`                                                                           |
 | Bridge      | Renderer 与 MetaWork 本地边界之间的唯一通信边界   | BRIDGE      | Bridge             | `src/bridge*`                                                                                           |
 | Renderer    | 产品 WebUI 模块                                   | RENDERER    | Renderer           | `frontend/`（含 `bridge/` 合同实现层）                                                                  |
@@ -70,7 +70,7 @@ flowchart TB
 
 Agent 是 MetaWork 对通用 AgentCore 的产品化边界，不是透明转发层。它可以在不修改 canonical bundle 或 ABI 的前提下收窄、组合或补充 Agent 能力，并独占 MetaWork built-in 工具集合及其 Runtime/Session 配置。Product Control 只消费形成后的 Agent 执行能力，不选择 AgentCore built-in 名称或 profile；MCP 的用户配置、授权和 Task admission 仍归 Product Control，Agent 只消费其解析后的窄 selection。
 
-Product Control 是现有产品组合 owner 的身份收口，不是在 Account 与各 aggregate 之上新建统一 `ProductRuntime`。它拥有已安装的 execution、Workspace/Task history、Task/Skill/MCP aggregate、共享 Executor、跨 aggregate admission/reconciliation、revision、完整 snapshot 与 shutdown 顺序。Account 继续独立拥有 credential、catalog 与 ExecutionConfig 生成。Application 的具名 coordinator 只经按用例裁剪的 opaque capability 调用 Product Control；除 `app.zig` composition root 外，Application 文件不得取得完整 Product Control Runtime 类型或字段访问权。
+Product Control 是现有产品组合 owner 的身份收口，不是在 Account 与各 aggregate 之上新建统一 `ProductRuntime`。它拥有已安装的 execution、Workspace/Task history、Task/Skill/MCP/Schedule aggregate、共享 Executor、跨 aggregate admission/reconciliation、revision、完整 snapshot 与 shutdown 顺序。Account 继续独立拥有 credential、catalog 与 ExecutionConfig 生成。Application 的具名 coordinator 只经按用例裁剪的 opaque capability 调用 Product Control；除 `app.zig` composition root 外，Application 文件不得取得完整 Product Control Runtime 类型或字段访问权。
 
 Completion 是 Agent 边界提供、但不属于 AgentCore Runtime/Session/AgentLoop 的独立能力。`src/agent/completion*` 拥有 MetaWork 自有 request/result/error 与 Anthropic/OpenAI/Gemini 三个无 Tool 非流式 JSON codec；它只消费 Account selection 冻结的同一 ExecutionConfig，不选择或回退模型。Application 通过窄 Transport port 提供一次有界、可取消的 buffered HTTP/TLS 请求并使用系统 CA；产品不配置证书。该 Transport 不拥有 Provider 语义，Agent 不导入 Application 实现。
 

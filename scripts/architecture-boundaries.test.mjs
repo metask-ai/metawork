@@ -141,6 +141,7 @@ test("named module roots exist and lower owners cannot import composition", () =
     "src/product/mcp.zig",
     "src/product/skill.zig",
     "src/product/task.zig",
+    "src/product/schedule.zig",
     "src/agent.zig",
     "src/product/control.zig",
     "src/bridge.zig",
@@ -169,12 +170,24 @@ test("named module roots exist and lower owners cannot import composition", () =
     true,
   );
   assert.equal(
-    existsSync(new URL("src/product/control/schedule.zig", root)),
+    existsSync(new URL("src/product/schedule/state.zig", root)),
     true,
   );
   assert.equal(
-    existsSync(new URL("src/product/control/schedule/persistence.zig", root)),
+    existsSync(new URL("src/product/schedule/persistence.zig", root)),
     true,
+  );
+  assert.equal(
+    existsSync(new URL("src/product/schedule/runtime.zig", root)),
+    true,
+  );
+  assert.equal(
+    existsSync(new URL("src/product/schedule/view.zig", root)),
+    true,
+  );
+  assert.equal(
+    existsSync(new URL("src/product/control/schedule.zig", root)),
+    false,
   );
   assert.equal(
     existsSync(new URL("tests/product/control_lifecycle_test.zig", root)),
@@ -247,11 +260,11 @@ test("named module roots exist and lower owners cannot import composition", () =
   assert.match(buildSource, /src\/product\/task\.zig/);
   assert.match(buildSource, /src\/product\/task\/persistence\.zig/);
   assert.match(buildSource, /src\/product\/task\/runtime\.zig/);
-  assert.match(buildSource, /src\/product\/control\/schedule\.zig/);
-  assert.match(
-    buildSource,
-    /src\/product\/control\/schedule\/persistence\.zig/,
-  );
+  assert.match(buildSource, /src\/product\/schedule\.zig/);
+  assert.match(buildSource, /src\/product\/schedule\/state\.zig/);
+  assert.match(buildSource, /src\/product\/schedule\/runtime\.zig/);
+  assert.match(buildSource, /src\/product\/schedule\/view\.zig/);
+  assert.match(buildSource, /src\/product\/schedule\/persistence\.zig/);
   assert.match(buildSource, /src\/product\/control\/automatic_workspace\.zig/);
   assert.doesNotMatch(buildSource, /src\/account(?:\.zig|\/)/);
   assert.doesNotMatch(buildSource, /src\/workbench\/mcp_configuration\.zig/);
@@ -330,6 +343,18 @@ test("named module roots exist and lower owners cannot import composition", () =
     "metask_agentcore",
     "native_sdk",
   ]);
+  assertNoImports(zigFiles("src/product/schedule/"), [
+    "metawork_app",
+    "metawork_product_control",
+    "metawork_bridge",
+    "metawork_account",
+    "metawork_agent",
+    "metawork_product_task",
+    "metawork_product_skill",
+    "metawork_product_mcp",
+    "metask_agentcore",
+    "native_sdk",
+  ]);
   assertNoImports(zigFiles("src/bridge/"), [
     "metawork_app",
     "metask_agentcore",
@@ -363,14 +388,15 @@ test("Product Control is the only composition owner identity", () => {
   assert.match(build, /src\/product\/control\/runtime\.zig/);
   assert.match(build, /src\/product\/control\/executor\.zig/);
   assert.match(build, /src\/product\/control\/file_preview\.zig/);
-  assert.match(build, /src\/product\/control\/schedule\.zig/);
-  assert.match(build, /src\/product\/control\/schedule\/persistence\.zig/);
+  assert.match(build, /src\/product\/schedule\.zig/);
+  assert.match(build, /src\/product\/schedule\/runtime\.zig/);
+  assert.match(build, /src\/product\/schedule\/view\.zig/);
   assert.match(build, /src\/product\/control\/automatic_workspace\.zig/);
   assert.match(build, /metawork_product_control/);
   assert.match(build, /product_control_executor/);
   assert.match(build, /product_control_file_preview/);
-  assert.match(build, /product_control_schedule/);
-  assert.match(build, /product_control_schedule_persistence/);
+  assert.match(build, /metawork_product_schedule/);
+  assert.match(build, /product_schedule_runtime/);
   assert.match(build, /product_control_automatic_workspace/);
   assert.match(control, /pub const Runtime = runtime_impl\.Runtime/);
   assert.match(runtime, /pub const Runtime = struct/);
@@ -405,30 +431,75 @@ test("Product Control is the only composition owner identity", () => {
   );
 });
 
-test("Product Control Schedule owns its state and persistence leaves", () => {
+test("Product Schedule owns its aggregate state and persistence", () => {
   const build = read("build.zig");
   const control = read("src/product/control.zig");
   const runtime = read("src/product/control/runtime.zig");
-  const schedule = read("src/product/control/schedule.zig");
-  const persistence = read("src/product/control/schedule/persistence.zig");
+  const scheduleRoot = read("src/product/schedule.zig");
+  const scheduleRuntime = read("src/product/schedule/runtime.zig");
+  const scheduleState = read("src/product/schedule/state.zig");
+  const scheduleView = read("src/product/schedule/view.zig");
+  const persistence = read("src/product/schedule/persistence.zig");
   const stores = read("src/app/stores.zig");
+  const ports = read("src/product/control/ports.zig");
+  const accountCoordinator = read("src/app/account_coordinator.zig");
+  const taskRuntime = read("src/product/task/runtime.zig");
 
-  assert.match(runtime, /@import\("product_control_schedule"\)/);
-  assert.match(runtime, /@import\("product_control_schedule_persistence"\)/);
-  assert.match(persistence, /@import\("product_control_schedule"\)/);
-  assert.match(stores, /@import\("product_control_schedule_persistence"\)/);
+  assert.match(runtime, /@import\("metawork_product_schedule"\)/);
+  assert.doesNotMatch(runtime, /product_schedule_(?:state|persistence|runtime)/);
+  assert.match(scheduleRoot, /pub const Runtime = runtime_impl\.Runtime/);
+  assert.match(scheduleRuntime, /@import\("product_schedule_state"\)/);
+  assert.match(scheduleRuntime, /@import\("product_schedule_persistence"\)/);
+  assert.match(scheduleRuntime, /@import\("product_schedule_view"\)/);
+  assert.match(scheduleView, /@import\("product_schedule_state"\)/);
+  assert.match(persistence, /@import\("product_schedule_state"\)/);
+  assert.match(stores, /@import\("product_schedule_persistence"\)/);
   assert.doesNotMatch(
     control,
-    /ScheduledTaskFileStore|scheduled_task_store_max_bytes|product_control_schedule_persistence/,
+    /ScheduledTaskFileStore|scheduled_task_store_max_bytes|product_schedule_persistence/,
   );
   assert.doesNotMatch(
-    `${schedule}\n${persistence}`,
+    `${scheduleRoot}\n${scheduleRuntime}\n${scheduleState}\n${scheduleView}\n${persistence}`,
     /@import\("(?:metawork_app|metawork_bridge|metawork_agent|metawork_product_task|metawork_product_skill|metawork_product_mcp)"\)|std\.Thread/,
   );
   assert.doesNotMatch(
     build,
     /workbench_scheduled_tasks|workbench_scheduled_task_persistence|metawork-scheduled-task-persistence/,
   );
+  assert.doesNotMatch(runtime, /scheduled_tasks_impl|\.scheduled_tasks\b/);
+  assert.doesNotMatch(
+    runtime,
+    /ItemView|forEachView|plannedAtUnixSeconds|nextRunAtUnixSeconds|titleRedacted|previousTaskId|beginOccurrence|finishSubmitted|finishRejectedNoFail|nextPendingCompletion|finishCompletionNoFail|dueNow|validateManual/,
+  );
+  assert.doesNotMatch(
+    scheduleRoot,
+    /ItemView|forEachView|OccurrenceSource|OccurrenceTaskOutcome|Claim|BeginOutcome|PendingCompletion|pub const Due/,
+  );
+  assert.match(scheduleRuntime, /pub const TaskEffects = struct/);
+  assert.match(scheduleRuntime, /context: \*anyopaque/);
+  assert.match(scheduleRuntime, /pub fn runNow/);
+  assert.match(scheduleRuntime, /pub fn onTimer/);
+  assert.match(scheduleRuntime, /pub fn reconcileNoFail/);
+  assert.match(scheduleView, /pub const TextProjection = struct/);
+  assert.match(scheduleView, /pub fn writeProjection/);
+  assert.match(
+    scheduleRuntime,
+    /fn commitCandidate[\s\S]*?redactStore[\s\S]*?redaction\.contains/,
+  );
+  assert.match(runtime, /schedule\.prepareCredentialRedaction/);
+  assert.match(runtime, /schedule\.runNow/);
+  assert.match(runtime, /schedule\.onTimer/);
+  assert.match(runtime, /schedule\.reconcileNoFail/);
+  assert.match(runtime, /product_schedule\.TaskEffects/);
+  assert.match(runtime, /schedule\.writeProjection/);
+  assert.match(runtime, /consumeExecutionInstallPreparation/);
+  assert.match(runtime, /consumeExecutionClearPreparation/);
+  assert.match(runtime, /redactWithExecutionCredentialsNoFail/);
+  assert.match(taskRuntime, /pub fn redactWithExecutionCredentialsNoFail/);
+  assert.match(ports, /pub fn prepareExecutionInstall/);
+  assert.match(ports, /pub fn prepareExecutionClear/);
+  assert.match(accountCoordinator, /prepareExecutionInstall/);
+  assert.match(accountCoordinator, /prepareExecutionClear/);
 });
 
 test("Application coordinators consume scoped Product Control capabilities", () => {

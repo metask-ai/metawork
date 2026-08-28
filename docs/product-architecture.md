@@ -35,7 +35,7 @@ Product 内部负责：
 - 由 Account 在 Renderer 之外完成 Metask OAuth、目录查询、凭据持久化与 ExecutionConfig 生成；
 - 由 Account Runtime 在 committed transition 之后产生有界 continuation，由 Application coordinator 将其重新送入同一提交链；登录后的确定性目录准备留在后台，并只把真实歧义投影成用户动作；
 - 由 Application coordinator 在同一主线程 turn 内协调 Account prepare、Product Control no-fail install 和 Account commit；
-- 由 Product Control 管理持久 Scheduled Task、触发游标、有界 occurrence history、Task、Run/maintenance record、唯一 active operation 槽、队列、取消协调和产品历史；
+- 由 Product Control 持有 Product Schedule 与 Product Task aggregate；Schedule Runtime 管理持久 Scheduled Task、触发游标和有界 occurrence history，Task Runtime 管理 Task、Run/maintenance record 与唯一 active operation 槽，Product Control 管理共享队列、跨 aggregate 取消协调和产品历史；
 - 由 Product Control 调用相邻 Agent 管理的 AgentCore Session、active Run/manual compact、callback binding 和有界事件泵，在主线程泵出 Agent event，并由 Product Task state 将事件应用为产品事实；
 - 管理跨会话产品状态，并向 Bridge 提供 canonical 产品 projection。
 
@@ -142,11 +142,11 @@ Task 标题仍由 Product Control 独占。首个 Run admission 在标题为空�
 
 ### 2.3 Scheduled Task
 
-Scheduled Task 是 Product Control 内新的可测试不变量，不是独立 Product owner。内部 `product/control/schedule.zig` 拥有结构化 recurrence、bounded definition/occurrence storage、跨恢复稳定的 `(scheduledTaskId, plannedAt)` identity 与纯状态转换；`product/control/schedule/persistence.zig` 拥有无 secret codec、原子 candidate commit、恢复校验和 schema revision。定义只保存名称、Text instruction、recurrence 与无 secret execution facts，不保存 Workspace target、Skill identity、catalog revision 或 Skill 参数；需要 Skill 的意图仍属于 instruction，occurrence 只生成普通 Text Run。Product Control Runtime 在每个 occurrence 中固定请求新的 Automatic Workspace，再进入真实 Task admission。当前仍处于 pre-release 开发期，Scheduled Task persistence schema 固定为 `1` 并对定义结构原地 hard cut：只接受当前 shape，不保留旧字段的解析、双写或迁移；旧开发数据按现有损坏恢复路径处理。
+Scheduled Task 是 Product Control 持有的 live Product Schedule aggregate，不是独立 Product owner。`product/schedule/runtime.zig` 是唯一存储与行为入口，独占 bounded definition/occurrence store、persistence health/candidate commit、wall-clock/timer policy、background availability、notification 与 occurrence claim/finalize/reconciliation；`state.zig` 只定义结构化 recurrence、跨恢复稳定的 `(scheduledTaskId, plannedAt)` identity 与纯状态转换，`persistence.zig` 独占无 secret codec、恢复校验、schema revision 与 Application-opened concrete FileStore，`view.zig` 只借用 state 与 callback-scoped 文本投影器并编码完整 `scheduledTasks` 子树。Product Control 不得读取 Store/Item、occurrence wire、Claim/Due/PendingCompletion 阶段或直接编码 Schedule persistence，只经 Runtime 的 typed operation/query 和 `writeProjection` 调用；Runtime 以 callback-scoped `TaskEffects` 请求“是否仍活跃、启动一个 Scheduled Task、读取 terminal outcome”三项能力并完整收口 occurrence saga，只持久化已提交的 Task id 事实，不保留 Product Control capability 或可变 Task 指针。Product Control 仍负责证明当前 execution/Automatic Workspace authority、执行真实 Task create→rename→Run、发布全局 revision、注入全局 credential 清洗规则并把 Schedule 子树编入完整 snapshot。定义只保存名称、Text instruction、recurrence 与无 secret execution facts，不保存 Workspace target、Skill identity、catalog revision 或 Skill 参数；需要 Skill 的意图仍属于 instruction，occurrence 只生成普通 Text Run。当前仍处于 pre-release 开发期，Scheduled Task persistence schema 固定为 `1` 并对定义结构原地 hard cut：只接受当前 shape，不保留旧字段的解析、双写或迁移；旧开发数据按现有损坏恢复路径处理。
 
 Application 只注入平台 capability：产品数据目录中的原子读写、wall clock、单一 Native timer、notification，以及 tray/hidden-window 生命周期。主窗口 `close_policy = hide` 后 Application、Product Control、Executor 与 timer 都保持存活；tray 是重新打开窗口和显式退出的唯一入口。后台不是 Renderer timer，也不是 Agent Runtime capability。Application 重启时必须先恢复并校验 canonical Schedule store，再 arm 最早 due time；若最近计划时间已经过去，只对每条定义协调一个最新 occurrence，不遍历补跑全部历史。store 损坏或提交结果不确定时 fail closed，保留可诊断 persistence health，不能假装成空列表。
 
-到期回调在主线程要求 Product Control 最多提交一个 occurrence，再为下一次 due time 重新 arm。成功 occurrence 调用既有 Task 创建、命名与 `runTaskAtBinding`，因此复用同一 Session、Run record、Executor、event pump、permission 和 snapshot 路径；不能新增绕开 admission 的 schedule queue、schedule worker 或直接 AgentCore call。系统通知只消费已经提交的 Product Control occurrence/Task fact，通知失败不得伪造 Run cause或回滚 terminal fact。
+到期回调在主线程要求 Schedule Runtime 最多提交一个 occurrence，再为下一次 due time 重新 arm。成功 occurrence 通过 Product Control 注入的单次 `TaskEffects.launch` 调用既有 Task 创建、命名与 `runTaskAtBinding`，因此复用同一 Session、Run record、Executor、event pump、permission 和 snapshot 路径；不能新增绕开 admission 的 schedule queue、schedule worker 或直接 AgentCore call。系统通知只消费已经提交的 Product occurrence/Task fact，通知失败不得伪造 Run cause或回滚 terminal fact。
 
 ### 2.4 Skill catalog 与本地资产管理
 
@@ -176,6 +176,8 @@ Product Skill Runtime 同时拥有本地 package 与 management 用例。内部 
 
 Product Control 单独分配稳定的产品 Task identity，并在 Task owner 内保存 Agent Session route identity；AgentCore event 与 event-projection failure 都只按 route identity 回到 owner，Bridge snapshot 与 mutation 只使用产品 Task identity，二者不共享生成器也不依赖数值相等。durable Task binding descriptor 只包含 Workspace/binding epoch、Provider、model 与 opaque execution generation；account identity、Model Connection identity、API Key identity/metadata、connection credential locator 和完整 ExecutionConfig 只属于对应 owner 的当前进程运行时，不进入 Task store、Bridge 或 Renderer。
 credential redaction 是 owner 释放协议的一部分，而不是 snapshot 时的偶然过滤。安装新 credential 前先永久清洗所有既有产品投影；替换或清空默认 execution、释放 quiescent Task-owned execution 前再次使用即将释放的 credential 清洗 Workspace、Task、Run、tool 与 UI history，然后才 secure-zero。序列化仍扫描所有 live credential，并在前缀重叠时采用最长匹配，作为释放前的第二道防线。credential 是 opaque bytes；若匹配发生在 UTF-8 codepoint 内部，所有 ingestion、流式跨 chunk 清洗与序列化路径都必须扩大到完整 codepoint，禁止为了替换 secret 产生非法 UTF-8 产品事实或 JSON。
+
+Schedule 是独立持久化边界，因此 credential redaction 也必须是它的 durable candidate mutation，不能只修改内存投影。Account/Application handoff 在 Product Control 安装新 execution 或清除旧 execution 前，必须先用当前默认 execution、所有 live Task execution 与候选 credential 清洗完整 Schedule candidate，并确认 `scheduled-tasks.json` commit 成功；明确失败或 outcome unknown 都不得转移 execution ownership。Account fact 已提交而 Schedule scrub 失败时保留旧 Product Control execution，但 generation 不一致会关闭新的 Task/Schedule admission，不回滚另一个 owner 的 Account 事务。每一次 Schedule candidate commit 都必须在编码前用当前默认与全部 live Task execution credential 清洗完整 store，并对最终 bytes 做零 credential 断言，保证后续 Task execution 释放路径不需要以 no-fail 内存回调补写持久化。
 
 ## 3. 并发与生命周期
 
@@ -208,7 +210,7 @@ CompactJob
 - Host 使用有上限的 Product Control executor；
 - 空闲 Session 不占 worker；同步 Run、同步 UI wait 和 manual compact 占用 execution slot；
 - Product Control 创建、排队、停止并销毁 bounded Executor；Agent Runtime 不接收 Scheduler capability，worker 从 Product Control queue 主动进入 Agent Run；
-- Scheduled Task 的 recurrence、持久触发游标、wall clock 和 timer admission 由 Product Control 拥有；Application 只提供 store/timer/notification/tray capability。Product Control 只向同一 Task/Run Executor 提交真实产品工作，不把 scheduler capability 注入 Agent Runtime；
+- Scheduled Task 的 recurrence、持久触发游标、wall clock、timer admission 与 occurrence saga 由 Product Control 持有的 Schedule Runtime 拥有；Application 只提供 store/timer/notification/tray capability。Product Control 只注入 callback-scoped `TaskEffects` 并向同一 Task/Run Executor 提交真实产品工作，不消费 Schedule 内部 due/claim/completion 阶段，也不把 scheduler capability 注入 Agent Runtime；
 - Bridge/main thread 不执行长耗时 Run，也不等待 permission；
 - File Preview 使用 Product Control-owned 的独立有界 lane（2 workers、最多 8 个 in-flight），不占用 Run/catalog/restore/MCP 共用 Executor。主线程只做精确 Task/Run/reference lookup、Workspace authority 冻结与 completion reauthorization；worker 只拥有深拷贝的 root-relative locator 和上限，执行 no-follow bounded read 并写入 lane-owned completion。raw bytes 不进入 Product Task、Snapshot、persistence 或 Bridge；主线程完成 current/historical credential redaction 后只以 callback-scoped result 交付；
 - 只有 `agent/` import `metask_agentcore`；Application 只组装 Agent，ABI discovery 由 Agent 内部完成，Product Control 通过 Agent 公共 validated types 消费，Bridge DTO 不暴露 SDK enum/owner/handle；

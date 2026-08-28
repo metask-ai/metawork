@@ -5,8 +5,7 @@ const account_contract = @import("metawork_account_contract");
 const executor_impl = @import("product_control_executor");
 const file_preview = @import("product_control_file_preview");
 const automatic_workspace_allocator = @import("product_control_automatic_workspace");
-const scheduled_tasks_impl = @import("product_control_schedule");
-const scheduled_task_persistence = @import("product_control_schedule_persistence");
+const product_schedule = @import("metawork_product_schedule");
 const skill_ports = @import("metawork_product_skill").ports;
 const skill_runtime = @import("metawork_product_skill").runtime;
 const product_task = @import("metawork_product_task");
@@ -35,7 +34,7 @@ const mcp_testing = product_mcp.testing;
 const contract_fixture = @import("product_control_contract_fixture");
 const build_options = @import("build_options");
 
-pub const Error = lifecycle.Error || scheduled_tasks_impl.Error || scheduled_task_persistence.Error || skill_runtime.MutationError || skill_runtime.EnablementError || skill_runtime.EnablementFileStoreError || task_persistence.Error || std.mem.Allocator.Error || std.Thread.SpawnError || error{
+pub const Error = lifecycle.Error || product_schedule.Error || skill_runtime.MutationError || skill_runtime.EnablementError || skill_runtime.EnablementFileStoreError || task_persistence.Error || std.mem.Allocator.Error || std.Thread.SpawnError || error{
     ProjectionCapacity,
     RunCapacity,
     CompactCapacity,
@@ -159,7 +158,7 @@ pub const TaskWorkspaceRequest = union(enum) {
 
 pub const TaskRunInput = task_runtime.RunInput;
 
-pub const ScheduledTaskRecurrence = scheduled_tasks_impl.Recurrence;
+pub const ScheduledTaskRecurrence = product_schedule.Recurrence;
 
 pub const ScheduledTaskDefinitionInput = struct {
     title: []const u8,
@@ -312,72 +311,12 @@ pub const McpSecretCaptureTarget = mcp_runtime.McpSecretCaptureTarget;
 pub const McpOauthRuntimeCommit = mcp_runtime.McpOauthRuntimeCommit;
 pub const McpRefreshTimer = mcp_runtime.McpRefreshTimer;
 
-pub const SchedulePersistenceCommit = enum {
-    committed,
-    failed,
-    outcome_unknown,
-};
-
-pub const SchedulePersistence = struct {
-    context: ?*anyopaque = null,
-    enabled: bool = false,
-    restored_bytes: ?[]const u8 = null,
-    restore_failed: bool = false,
-    commit_fn: *const fn (
-        context: ?*anyopaque,
-        bytes: []const u8,
-    ) SchedulePersistenceCommit = unsupportedCommit,
-
-    fn commit(
-        self: SchedulePersistence,
-        bytes: []const u8,
-    ) SchedulePersistenceCommit {
-        if (!self.enabled) return .failed;
-        return self.commit_fn(self.context, bytes);
-    }
-
-    fn unsupportedCommit(
-        _: ?*anyopaque,
-        _: []const u8,
-    ) SchedulePersistenceCommit {
-        return .failed;
-    }
-};
-
-pub const SchedulePersistenceHealth = enum {
-    unavailable,
-    ready,
-    read_failed,
-    corrupt,
-    write_failed,
-    outcome_unknown,
-};
-
-pub const ScheduleNotificationKind = control_ports.ScheduleNotificationKind;
-pub const ScheduleNotification = control_ports.ScheduleNotification;
-
-pub const ScheduleNotifier = struct {
-    context: ?*anyopaque = null,
-    enabled: bool = false,
-    notify_fn: *const fn (
-        context: ?*anyopaque,
-        notification: ScheduleNotification,
-    ) bool = noScheduleNotification,
-
-    fn notify(
-        self: ScheduleNotifier,
-        notification: ScheduleNotification,
-    ) bool {
-        return self.enabled and self.notify_fn(self.context, notification);
-    }
-};
-
-fn noScheduleNotification(
-    _: ?*anyopaque,
-    _: ScheduleNotification,
-) bool {
-    return false;
-}
+pub const SchedulePersistenceCommit = product_schedule.PersistenceCommit;
+pub const SchedulePersistence = product_schedule.Persistence;
+pub const SchedulePersistenceHealth = product_schedule.PersistenceHealth;
+pub const ScheduleNotificationKind = product_schedule.NotificationKind;
+pub const ScheduleNotification = product_schedule.Notification;
+pub const ScheduleNotifier = product_schedule.Notifier;
 
 const json_string_expansion: usize = 6;
 const pending_ui_reencode_expansion: usize = 2;
@@ -604,36 +543,7 @@ fn productSkillPorts(
     };
 }
 
-pub const ScheduleTimer = struct {
-    context: ?*anyopaque = null,
-    enabled: bool = false,
-    now_unix_seconds: *const fn (?*anyopaque) ?u64 = noScheduleClock,
-    arm: *const fn (?*anyopaque, u64) bool = noScheduleArm,
-    cancel: *const fn (?*anyopaque) void = noScheduleCancel,
-
-    fn now(self: ScheduleTimer) ?u64 {
-        if (!self.enabled) return null;
-        return self.now_unix_seconds(self.context);
-    }
-
-    fn armAt(self: ScheduleTimer, due_unix_seconds: u64) bool {
-        return self.enabled and self.arm(self.context, due_unix_seconds);
-    }
-
-    fn cancelCurrent(self: ScheduleTimer) void {
-        if (self.enabled) self.cancel(self.context);
-    }
-};
-
-fn noScheduleClock(_: ?*anyopaque) ?u64 {
-    return null;
-}
-
-fn noScheduleArm(_: ?*anyopaque, _: u64) bool {
-    return false;
-}
-
-fn noScheduleCancel(_: ?*anyopaque) void {}
+pub const ScheduleTimer = product_schedule.Timer;
 
 pub const TransportFailureStage = enum {
     ingress_validation,
@@ -1294,6 +1204,19 @@ const ActiveExecution = struct {
 /// All methods currently run on the Native loop thread.
 const ExecutionReplacementKind = enum { none, default, identity };
 
+/// Callback-scoped proof that the exact still-owned execution candidate was
+/// scrubbed against Schedule. The borrowed pointer is never dereferenced and
+/// is cleared when the synchronous replacement scope ends.
+const ExecutionRedactionPreparation = union(enum) {
+    none,
+    install: struct {
+        generation: u64,
+        credential_ptr: [*]const u8,
+        credential_len: usize,
+    },
+    clear: u64,
+};
+
 pub const PreparedModelConnectionBinding = control_ports.PreparedModelConnectionBinding;
 
 const CustomExecutionBinding = PreparedModelConnectionBinding;
@@ -1312,13 +1235,8 @@ pub const Runtime = struct {
     /// the Stop-barrier investigation; never persisted or published.
     checkpoint_store: ?*checkpoint_store.FileStore,
     checkpoint_store_health: std.atomic.Value(checkpoint_store.Health),
-    scheduled_tasks: scheduled_tasks_impl.Store,
+    schedule: product_schedule.Runtime,
     skill: skill_runtime.Runtime,
-    schedule_timer: ScheduleTimer,
-    schedule_persistence: SchedulePersistence,
-    schedule_persistence_health: SchedulePersistenceHealth,
-    schedule_notifier: ScheduleNotifier,
-    schedule_background_available: bool = false,
     change_notifier: ChangeNotifier,
     executor: *executor_impl.Executor,
     preview_executor: *executor_impl.Executor,
@@ -1333,6 +1251,7 @@ pub const Runtime = struct {
     canonical_user_home: ?[]u8,
     automatic_workspaces: ?automatic_workspace_allocator.Allocator,
     execution_replacement: ExecutionReplacementKind = .none,
+    execution_redaction_preparation: ExecutionRedactionPreparation = .none,
     custom_execution_binding: ?CustomExecutionBinding = null,
     model_connection_capabilities: ModelConnectionCapabilities,
     completion_factory: CompletionFactory,
@@ -1409,33 +1328,15 @@ pub const Runtime = struct {
                 .ready
             else
                 .unavailable;
-        const scheduled_limits: scheduled_tasks_impl.Limits = .{
+        var schedule = try product_schedule.Runtime.init(allocator, .{
             .max_items = limits.max_scheduled_tasks,
             .max_projection_bytes = limits.max_scheduled_task_projection_bytes,
-        };
-        var schedule_persistence_health: SchedulePersistenceHealth =
-            if (configuration.schedule_persistence.enabled)
-                .ready
-            else
-                .unavailable;
-        if (configuration.schedule_persistence.restore_failed)
-            schedule_persistence_health = .read_failed;
-        var scheduled_tasks = if (schedule_persistence_health == .ready and
-            configuration.schedule_persistence.restored_bytes != null)
-            scheduled_task_persistence.decode(
-                allocator,
-                configuration.schedule_persistence.restored_bytes.?,
-                scheduled_limits,
-            ) catch restore: {
-                schedule_persistence_health = .corrupt;
-                break :restore try scheduled_tasks_impl.Store.init(
-                    allocator,
-                    scheduled_limits,
-                );
-            }
-        else
-            try scheduled_tasks_impl.Store.init(allocator, scheduled_limits);
-        errdefer scheduled_tasks.deinit();
+        }, .{
+            .timer = configuration.schedule_timer,
+            .persistence = configuration.schedule_persistence,
+            .notifier = configuration.schedule_notifier,
+        });
+        errdefer schedule.deinit();
         const executor = executor_impl.Executor.create(io, allocator, .{
             .worker_count = limits.worker_count,
             .queue_capacity = limits.queue_capacity,
@@ -1498,12 +1399,8 @@ pub const Runtime = struct {
             .task_persistence_health = task_persistence_health,
             .checkpoint_store = configuration.checkpoint_store.file_store,
             .checkpoint_store_health = .init(checkpoint_store_health),
-            .scheduled_tasks = scheduled_tasks,
+            .schedule = schedule,
             .skill = skill,
-            .schedule_timer = configuration.schedule_timer,
-            .schedule_persistence = configuration.schedule_persistence,
-            .schedule_persistence_health = schedule_persistence_health,
-            .schedule_notifier = configuration.schedule_notifier,
             .change_notifier = configuration.change_notifier,
             .executor = executor,
             .preview_executor = preview_executor,
@@ -1534,20 +1431,10 @@ pub const Runtime = struct {
         }
         control.reconcileCheckpointStoreNoFail();
         control.reconcileSkillEnablementNoFail();
-        if (control.schedule_persistence_health == .ready) {
-            var recovered = control.scheduled_tasks.clone(allocator) catch null;
-            if (recovered) |*candidate| {
-                var candidate_owned = true;
-                defer if (candidate_owned) candidate.deinit();
-                if (candidate.interruptClaimedOccurrences()) {
-                    control.commitScheduledTaskCandidate(candidate) catch {};
-                    if (control.schedule_persistence_health == .ready) {
-                        control.replaceScheduledTaskStore(candidate);
-                        candidate_owned = false;
-                    }
-                }
-            }
-        }
+        _ = control.schedule.recoverInterruptedNoFail(
+            control.scheduleRedaction(),
+        );
+        if (control.schedule.takeChanged()) control.bumpRevision();
         control.recoverSkillTransactionsForScopeNoFail(.personal);
         control.skill.ensurePersonalCatalog(control.skillProjectionBudget());
         // This is the last ownership move in init: no later operation may fail.
@@ -1788,13 +1675,12 @@ pub const Runtime = struct {
         self: *Runtime,
         available: bool,
     ) void {
-        if (self.schedule_background_available == available) return;
-        self.schedule_background_available = available;
-        if (available)
-            self.rearmScheduledTaskTimerNoFail()
-        else
-            self.schedule_timer.cancelCurrent();
-        self.bumpRevision();
+        _ = self.schedule.setBackgroundAvailable(
+            available,
+            self.scheduleExecutionBinding(),
+            self.scheduleRedaction(),
+        );
+        self.publishScheduleChangesNoFail();
     }
 
     pub fn previewSkillDirectory(
@@ -1818,7 +1704,7 @@ pub const Runtime = struct {
         const result = try self.skill.installDirectory(
             absolute_path,
             input,
-            self.schedule_timer.now(),
+            self.schedule.now(),
         );
         self.bumpRevision();
         return result;
@@ -1833,7 +1719,7 @@ pub const Runtime = struct {
         const result = try self.skill.installArchive(
             absolute_path,
             input,
-            self.schedule_timer.now(),
+            self.schedule.now(),
         );
         self.bumpRevision();
         return result;
@@ -1885,7 +1771,7 @@ pub const Runtime = struct {
         try self.requireSkillMutationAuthority(scope);
         const result = try self.skill.uninstall(
             install_id,
-            self.schedule_timer.now(),
+            self.schedule.now(),
         );
         self.bumpRevision();
         return result;
@@ -1921,11 +1807,7 @@ pub const Runtime = struct {
     }
 
     pub fn hasEnabledScheduledTasks(self: *Runtime) bool {
-        for (self.scheduled_tasks.items) |*entry| {
-            const item = &(entry.* orelse continue);
-            if (item.enabled) return true;
-        }
-        return false;
+        return self.schedule.hasEnabled();
     }
 
     pub fn commitAccountFactNoFail(
@@ -1939,8 +1821,6 @@ pub const Runtime = struct {
         self: *Runtime,
         execution: *account_contract.OwnedExecutionConfig,
     ) void {
-        if (self.custom_execution_binding) |*binding| binding.deinit();
-        self.custom_execution_binding = null;
         std.debug.assert(self.execution_replacement != .none);
         const input = execution.input();
         std.debug.assert(self.account.catalog_state == .ready);
@@ -1952,6 +1832,9 @@ pub const Runtime = struct {
             self.account.selected_model.view(),
             input.target.model,
         ));
+        self.consumeExecutionInstallPreparation(input);
+        if (self.custom_execution_binding) |*binding| binding.deinit();
+        self.custom_execution_binding = null;
         self.redactAllProductProjectionsNoFail(self.execution.credential());
         self.redactAllProductProjectionsNoFail(input.api_key);
         self.execution.installNoFail(execution);
@@ -1979,6 +1862,7 @@ pub const Runtime = struct {
         prepared_binding: *PreparedModelConnectionBinding,
     ) void {
         std.debug.assert(self.execution_replacement != .none);
+        self.consumeExecutionInstallPreparation(execution.input());
         self.redactAllProductProjectionsNoFail(self.execution.credential());
         self.redactAllProductProjectionsNoFail(execution.input().api_key);
         self.execution.installNoFail(execution);
@@ -1990,19 +1874,65 @@ pub const Runtime = struct {
     pub fn clearExecutionNoFail(self: *Runtime) void {
         std.debug.assert(self.execution_replacement != .none);
         std.debug.assert(self.account.execution_generation == 0);
+        self.consumeExecutionClearPreparation(self.execution.generation);
         self.redactAllProductProjectionsNoFail(self.execution.credential());
         self.execution.clearNoFail();
         if (self.custom_execution_binding) |*binding| binding.deinit();
         self.custom_execution_binding = null;
     }
 
+    /// Durably removes every credential that the candidate execution could
+    /// expose from Schedule projections before the execution becomes live.
+    /// Account and Product Control are separate saga owners: failure leaves
+    /// the old execution installed while the committed Account fact closes
+    /// admission through the generation mismatch.
+    pub fn prepareExecutionInstall(
+        self: *Runtime,
+        input: account_contract.ExecutionConfigInput,
+    ) Error!void {
+        defer self.publishScheduleChangesNoFail();
+        std.debug.assert(self.execution_replacement != .none);
+        std.debug.assert(self.execution_redaction_preparation == .none);
+        _ = try self.schedule.prepareCredentialRedaction(
+            input.api_key,
+            self.scheduleRedaction(),
+        );
+        self.execution_redaction_preparation = .{ .install = .{
+            .generation = input.execution_generation,
+            .credential_ptr = input.api_key.ptr,
+            .credential_len = input.api_key.len,
+        } };
+    }
+
+    /// Durably scrubs the execution being released before its final owned
+    /// credential can be cleared and secure-zeroed.
+    pub fn prepareExecutionClear(self: *Runtime) Error!void {
+        defer self.publishScheduleChangesNoFail();
+        std.debug.assert(self.execution_replacement != .none);
+        std.debug.assert(self.execution_redaction_preparation == .none);
+        _ = try self.schedule.prepareCredentialRedaction(
+            "",
+            self.scheduleRedaction(),
+        );
+        self.execution_redaction_preparation = .{
+            .clear = self.execution.generation,
+        };
+    }
+
     pub fn finishAccountCommitNoFail(self: *Runtime) void {
         if (self.canCreateTask()) {
-            _ = self.reconcileScheduledTaskBindingsNoFail();
-            self.rearmScheduledTaskTimerNoFail();
+            _ = self.schedule.refreshBindingNoFail(
+                self.scheduleExecutionBinding(),
+                self.scheduleRedaction(),
+            );
+            _ = self.schedule.rearmNoFail(
+                self.scheduleExecutionBinding(),
+                self.scheduleRedaction(),
+            );
         } else {
-            self.schedule_timer.cancelCurrent();
+            self.schedule.cancelTimer();
         }
+        _ = self.schedule.takeChanged();
         self.bumpRevision();
     }
 
@@ -2035,6 +1965,7 @@ pub const Runtime = struct {
         self: *Runtime,
         input: AutomationExecutionInput,
     ) Error!void {
+        defer self.publishScheduleChangesNoFail();
         if (!build_options.automation)
             return error.InvalidAutomationExecution;
         if (input.credential.len == 0 or
@@ -2049,6 +1980,10 @@ pub const Runtime = struct {
             return error.InvalidAutomationExecution;
         try self.beginExecutionReplacement();
         errdefer self.endExecutionReplacementNoFail();
+        _ = try self.schedule.prepareCredentialRedaction(
+            input.credential,
+            self.scheduleRedaction(),
+        );
         const api_keys = [_]account_contract.ApiKeyView{.{
             .id = "automation-key",
             .name = "Automation",
@@ -2088,6 +2023,7 @@ pub const Runtime = struct {
         self.syncLifecycle();
         if (self.execution_replacement != .none)
             return error.ExecutionInUse;
+        std.debug.assert(self.execution_redaction_preparation == .none);
         // Identity replacement changes only Account-owned admission defaults.
         // Live Tasks keep their owned ExecutionConfig until their own runtime
         // lifecycle releases it, so their references cannot block this gate.
@@ -2099,12 +2035,42 @@ pub const Runtime = struct {
         self.syncLifecycle();
         if (self.execution_replacement != .none)
             return error.ExecutionInUse;
+        std.debug.assert(self.execution_redaction_preparation == .none);
         self.execution_replacement = .default;
     }
 
     pub fn endExecutionReplacementNoFail(self: *Runtime) void {
         std.debug.assert(self.execution_replacement != .none);
         self.execution_replacement = .none;
+        self.execution_redaction_preparation = .none;
+    }
+
+    fn consumeExecutionInstallPreparation(
+        self: *Runtime,
+        input: account_contract.ExecutionConfigInput,
+    ) void {
+        switch (self.execution_redaction_preparation) {
+            .install => |prepared| {
+                std.debug.assert(prepared.generation == input.execution_generation);
+                std.debug.assert(prepared.credential_len == input.api_key.len);
+                std.debug.assert(prepared.credential_ptr == input.api_key.ptr);
+            },
+            else => unreachable,
+        }
+        self.execution_redaction_preparation = .none;
+    }
+
+    fn consumeExecutionClearPreparation(
+        self: *Runtime,
+        execution_generation: u64,
+    ) void {
+        switch (self.execution_redaction_preparation) {
+            .clear => |prepared_generation| std.debug.assert(
+                prepared_generation == execution_generation,
+            ),
+            else => unreachable,
+        }
+        self.execution_redaction_preparation = .none;
     }
 
     pub fn executionReplacementPending(self: *const Runtime) bool {
@@ -2182,7 +2148,7 @@ pub const Runtime = struct {
         return self.skill.sync(
             self.skillProjectionBudget(),
             catalogSnapshotLimits(self.limits),
-            self.schedule_timer.now(),
+            self.schedule.now(),
         );
     }
 
@@ -3041,24 +3007,15 @@ pub const Runtime = struct {
         self: *Runtime,
         input: ScheduledTaskDefinitionInput,
     ) Error!u64 {
+        defer self.publishScheduleChangesNoFail();
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
-        const now = self.schedule_timer.now() orelse
-            return error.ScheduleTimerUnavailable;
         const definition = try self.scheduledTaskDefinition(input);
-        var candidate = try self.scheduled_tasks.clone(self.allocator);
-        var candidate_owned = true;
-        defer if (candidate_owned) candidate.deinit();
-        const id = try candidate.create(definition, now);
-        self.redactScheduledTaskNoFail(
-            candidate.find(id).?,
-            self.execution.credential(),
+        const id = try self.schedule.create(
+            definition,
+            self.scheduleExecutionBinding(),
+            self.scheduleRedaction(),
         );
-        try self.commitScheduledTaskCandidate(&candidate);
-        self.replaceScheduledTaskStore(&candidate);
-        candidate_owned = false;
-        self.bumpRevision();
-        self.rearmScheduledTaskTimerNoFail();
         return id;
     }
 
@@ -3068,24 +3025,17 @@ pub const Runtime = struct {
         expected_epoch: u64,
         input: ScheduledTaskDefinitionInput,
     ) Error!void {
+        defer self.publishScheduleChangesNoFail();
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
-        const now = self.schedule_timer.now() orelse
-            return error.ScheduleTimerUnavailable;
         const definition = try self.scheduledTaskDefinition(input);
-        var candidate = try self.scheduled_tasks.clone(self.allocator);
-        var candidate_owned = true;
-        defer if (candidate_owned) candidate.deinit();
-        try candidate.update(id, expected_epoch, definition, now);
-        self.redactScheduledTaskNoFail(
-            candidate.find(id).?,
-            self.execution.credential(),
+        try self.schedule.update(
+            id,
+            expected_epoch,
+            definition,
+            self.scheduleExecutionBinding(),
+            self.scheduleRedaction(),
         );
-        try self.commitScheduledTaskCandidate(&candidate);
-        self.replaceScheduledTaskStore(&candidate);
-        candidate_owned = false;
-        self.bumpRevision();
-        self.rearmScheduledTaskTimerNoFail();
     }
 
     pub fn setScheduledTaskEnabled(
@@ -3094,26 +3044,16 @@ pub const Runtime = struct {
         expected_epoch: u64,
         enabled: bool,
     ) Error!void {
+        defer self.publishScheduleChangesNoFail();
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
-        const now = self.schedule_timer.now() orelse
-            return error.ScheduleTimerUnavailable;
-        const current = self.scheduled_tasks.find(id) orelse
-            return error.UnknownScheduledTask;
-        if (expected_epoch == 0 or current.epoch != expected_epoch)
-            return error.ScheduledTaskEpochMismatch;
-        if (enabled and current.health == .needs_attention)
-            return error.ScheduledTaskNeedsAttention;
-        var candidate = try self.scheduled_tasks.clone(self.allocator);
-        var candidate_owned = true;
-        defer if (candidate_owned) candidate.deinit();
-        try candidate.setEnabled(id, expected_epoch, enabled, now);
-        _ = self.reconcileScheduledTaskBindingsInStore(&candidate);
-        try self.commitScheduledTaskCandidate(&candidate);
-        self.replaceScheduledTaskStore(&candidate);
-        candidate_owned = false;
-        self.bumpRevision();
-        self.rearmScheduledTaskTimerNoFail();
+        try self.schedule.setEnabled(
+            id,
+            expected_epoch,
+            enabled,
+            self.scheduleExecutionBinding(),
+            self.scheduleRedaction(),
+        );
     }
 
     pub fn deleteScheduledTask(
@@ -3121,16 +3061,14 @@ pub const Runtime = struct {
         id: u64,
         expected_epoch: u64,
     ) Error!void {
+        defer self.publishScheduleChangesNoFail();
         self.syncLifecycle();
-        var candidate = try self.scheduled_tasks.clone(self.allocator);
-        var candidate_owned = true;
-        defer if (candidate_owned) candidate.deinit();
-        try candidate.delete(id, expected_epoch);
-        try self.commitScheduledTaskCandidate(&candidate);
-        self.replaceScheduledTaskStore(&candidate);
-        candidate_owned = false;
-        self.bumpRevision();
-        self.rearmScheduledTaskTimerNoFail();
+        try self.schedule.delete(
+            id,
+            expected_epoch,
+            self.scheduleExecutionBinding(),
+            self.scheduleRedaction(),
+        );
     }
 
     pub fn scheduledTaskEpoch(
@@ -3138,8 +3076,7 @@ pub const Runtime = struct {
         id: u64,
     ) Error!u64 {
         self.syncLifecycle();
-        return (self.scheduled_tasks.find(id) orelse
-            return error.UnknownScheduledTask).epoch;
+        return self.schedule.epoch(id);
     }
 
     pub fn runScheduledTaskNow(
@@ -3147,30 +3084,29 @@ pub const Runtime = struct {
         id: u64,
         expected_epoch: u64,
     ) Error!u64 {
+        defer self.publishScheduleChangesNoFail();
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
-        const now = self.schedule_timer.now() orelse
-            return error.ScheduleTimerUnavailable;
-        const item = self.scheduled_tasks.find(id) orelse
-            return error.UnknownScheduledTask;
-        if (expected_epoch == 0 or item.epoch != expected_epoch)
-            return error.ScheduledTaskEpochMismatch;
-        return self.triggerScheduledTask(id, now, now, .manual);
+        return self.schedule.runNow(
+            id,
+            expected_epoch,
+            self.scheduleRedaction(),
+            self.scheduleTaskEffects(),
+        ) catch |err| switch (err) {
+            error.PreviousTaskActive => error.TaskBusy,
+            else => return @errorCast(err),
+        };
     }
 
     pub fn onScheduledTaskTimer(self: *Runtime) void {
+        defer self.publishScheduleChangesNoFail();
         if (self.shutting_down) return;
         self.syncLifecycle();
-        const now = self.schedule_timer.now() orelse return;
-        const item = self.scheduled_tasks.earliestDue() orelse return;
-        const id = item.id;
-        const planned = item.next_run_at_unix_seconds orelse return;
-        if (planned > now) {
-            self.rearmScheduledTaskTimerNoFail();
-            return;
-        }
-        _ = self.triggerScheduledTask(id, planned, now, .timer) catch {};
-        self.rearmScheduledTaskTimerNoFail();
+        self.schedule.onTimer(
+            self.scheduleExecutionBinding(),
+            self.scheduleRedaction(),
+            self.scheduleTaskEffects(),
+        );
     }
 
     pub fn setTaskArchived(self: *Runtime, task_id: u64, archived: bool) Error!void {
@@ -3239,8 +3175,12 @@ pub const Runtime = struct {
             changed = true;
             durable_changed = true;
         }
-        if (self.reconcileScheduledTaskBindingsNoFail()) changed = true;
-        if (self.reconcileScheduledTaskCompletionsNoFail()) changed = true;
+        if (self.schedule.reconcileNoFail(
+            self.scheduleExecutionBinding(),
+            self.scheduleRedaction(),
+            self.scheduleTaskEffects(),
+        )) changed = true;
+        if (self.schedule.takeChanged()) changed = true;
         if (durable_changed) self.commitTaskStateNoFail();
         if (self.task_runtime.syncCheckpointPostprocesses(
             self.taskRuntimeCheckpointEffects(),
@@ -3863,9 +3803,9 @@ pub const Runtime = struct {
         self.syncLifecycle();
         var writer = std.Io.Writer.fixed(output);
         const schedule_persistence_ready =
-            self.schedule_persistence_health == .ready;
+            self.schedule.persistenceHealth() == .ready;
         const task_persistence_ready = self.task_persistence_health.operational();
-        const background_schedule_wake = self.schedule_background_available;
+        const background_schedule_wake = self.schedule.backgroundAvailable();
         const mcp_capabilities = if (self.mcp) |*runtime|
             runtime.capabilities()
         else
@@ -3875,10 +3815,10 @@ pub const Runtime = struct {
             task_persistence_ready,
             @tagName(self.task_persistence_health),
             self.automatic_workspaces != null,
-            self.schedule_timer.enabled and schedule_persistence_ready and
+            self.schedule.timerEnabled() and schedule_persistence_ready and
                 background_schedule_wake,
             schedule_persistence_ready,
-            @tagName(self.schedule_persistence_health),
+            @tagName(self.schedule.persistenceHealth()),
             background_schedule_wake,
             self.skill.managementHealth() == .ready,
             @tagName(self.skill.managementHealth()),
@@ -3914,17 +3854,13 @@ pub const Runtime = struct {
             workspace_count += 1;
             try self.writeWorkspace(&writer, workspace);
         }
-        writer.writeAll("],\"scheduledTasks\":[") catch
+        writer.writeAll("],\"scheduledTasks\":") catch
             return error.SnapshotTooLarge;
-        var scheduled_task_count: usize = 0;
-        for (self.scheduled_tasks.items) |*entry| {
-            const scheduled_task = &(entry.* orelse continue);
-            if (scheduled_task_count != 0) writer.writeByte(',') catch
-                return error.SnapshotTooLarge;
-            scheduled_task_count += 1;
-            try self.writeScheduledTask(&writer, scheduled_task);
-        }
-        writer.writeAll("],\"tasks\":[") catch
+        self.schedule.writeProjection(&writer, .{
+            .context = self,
+            .write_json_fn = writeScheduleViewJson,
+        }) catch return error.SnapshotTooLarge;
+        writer.writeAll(",\"tasks\":[") catch
             return error.SnapshotTooLarge;
         self.task_runtime.writeProjectionList(
             &writer,
@@ -3934,91 +3870,14 @@ pub const Runtime = struct {
         return writer.buffered();
     }
 
-    fn writeScheduledTask(
-        self: *Runtime,
+    fn writeScheduleViewJson(
+        context: *const anyopaque,
         writer: *std.Io.Writer,
-        item: *const scheduled_tasks_impl.Item,
-    ) Error!void {
-        writer.print(
-            "{{\"id\":\"{d}\",\"epoch\":\"{d}\",\"title\":",
-            .{ item.id, item.epoch },
-        ) catch return error.SnapshotTooLarge;
-        try self.projectedJsonValueWithKnownCredentials(writer, item.title);
-        writer.print(
-            ",\"titleRedacted\":{},\"enabled\":{},\"health\":\"{s}\",\"failureReason\":",
-            .{ item.title_redacted, item.enabled, @tagName(item.health) },
-        ) catch return error.SnapshotTooLarge;
-        if (item.failure_reason) |reason|
-            writer.print("\"{s}\"", .{@tagName(reason)}) catch
-                return error.SnapshotTooLarge
-        else
-            writer.writeAll("null") catch return error.SnapshotTooLarge;
-        writer.print(
-            ",\"execution\":{{\"generation\":\"{d}\",\"provider\":\"{s}\",\"model\":",
-            .{ item.execution_generation, @tagName(item.execution_provider) },
-        ) catch return error.SnapshotTooLarge;
-        try self.projectedJsonValueWithKnownCredentials(
-            writer,
-            item.execution_model,
-        );
-        writer.writeAll("},\"input\":{\"kind\":\"text\",\"text\":") catch
+        value: []const u8,
+    ) product_schedule.ViewError!void {
+        const self: *const Runtime = @ptrCast(@alignCast(context));
+        self.projectedJsonValueWithKnownCredentials(writer, value) catch
             return error.SnapshotTooLarge;
-        try self.projectedJsonValueWithKnownCredentials(writer, item.input.value);
-        writer.print(",\"redacted\":{}}}", .{item.input.redacted}) catch
-            return error.SnapshotTooLarge;
-        writer.writeAll(",\"recurrence\":") catch return error.SnapshotTooLarge;
-        switch (item.recurrence) {
-            .once => |once| writer.print(
-                "{{\"kind\":\"once\",\"atUnixSeconds\":\"{d}\"}}",
-                .{once.at_unix_seconds},
-            ) catch return error.SnapshotTooLarge,
-            .interval => |interval| writer.print(
-                "{{\"kind\":\"interval\",\"startAtUnixSeconds\":\"{d}\",\"everySeconds\":\"{d}\"}}",
-                .{ interval.start_at_unix_seconds, interval.every_seconds },
-            ) catch return error.SnapshotTooLarge,
-        }
-        writer.writeAll(",\"nextRunAtUnixSeconds\":") catch
-            return error.SnapshotTooLarge;
-        if (item.next_run_at_unix_seconds) |next|
-            writer.print("\"{d}\"", .{next}) catch
-                return error.SnapshotTooLarge
-        else
-            writer.writeAll("null") catch return error.SnapshotTooLarge;
-        writer.writeAll(",\"occurrences\":[") catch
-            return error.SnapshotTooLarge;
-        for (item.occurrences(), 0..) |occurrence, index| {
-            if (index != 0) writer.writeByte(',') catch
-                return error.SnapshotTooLarge;
-            writer.print(
-                "{{\"plannedAtUnixSeconds\":\"{d}\",\"triggeredAtUnixSeconds\":\"{d}\",\"source\":\"{s}\",\"result\":\"{s}\",\"taskId\":",
-                .{
-                    occurrence.planned_at_unix_seconds,
-                    occurrence.triggered_at_unix_seconds,
-                    @tagName(occurrence.source),
-                    @tagName(occurrence.result),
-                },
-            ) catch return error.SnapshotTooLarge;
-            if (occurrence.task_id == 0)
-                writer.writeAll("null") catch return error.SnapshotTooLarge
-            else
-                writer.print("\"{d}\"", .{occurrence.task_id}) catch
-                    return error.SnapshotTooLarge;
-            writer.writeAll(",\"reason\":") catch return error.SnapshotTooLarge;
-            if (occurrence.reason) |reason|
-                writer.print("\"{s}\"", .{@tagName(reason)}) catch
-                    return error.SnapshotTooLarge
-            else
-                writer.writeAll("null") catch return error.SnapshotTooLarge;
-            writer.writeAll(",\"taskOutcome\":") catch
-                return error.SnapshotTooLarge;
-            if (occurrence.task_outcome) |outcome|
-                writer.print("\"{s}\"", .{@tagName(outcome)}) catch
-                    return error.SnapshotTooLarge
-            else
-                writer.writeAll("null") catch return error.SnapshotTooLarge;
-            writer.writeByte('}') catch return error.SnapshotTooLarge;
-        }
-        writer.writeAll("]}") catch return error.SnapshotTooLarge;
     }
 
     fn writeAccount(
@@ -4184,7 +4043,6 @@ pub const Runtime = struct {
 
     pub fn deinit(self: *Runtime) void {
         self.shutdownExecutor();
-        self.schedule_timer.cancelCurrent();
         self.task_runtime.deinitTasks(self.taskRuntimeReleaseEffects());
         self.task_runtime.deinitStorage();
         for (self.workspaces) |*entry| {
@@ -4192,7 +4050,7 @@ pub const Runtime = struct {
             self.deinitWorkspaceView(workspace);
         }
         self.allocator.free(self.workspaces);
-        self.scheduled_tasks.deinit();
+        self.schedule.deinit();
         self.skill.deinit();
         if (self.automatic_workspaces) |*store| store.deinit();
         if (self.canonical_user_home) |home| self.allocator.free(home);
@@ -4223,7 +4081,7 @@ pub const Runtime = struct {
         if (self.executor_shutdown) return;
         self.shutting_down = true;
         if (self.mcp) |*runtime| runtime.beginShutdown();
-        self.schedule_timer.cancelCurrent();
+        self.schedule.cancelTimer();
         self.skill.beginShutdown();
         self.task_runtime.prepareShutdown(.{
             .context = self,
@@ -4537,10 +4395,163 @@ pub const Runtime = struct {
             self.account.selected_model.view();
     }
 
+    fn scheduleExecutionBinding(self: *const Runtime) product_schedule.ExecutionBinding {
+        return .{
+            .available = self.canCreateTask(),
+            .generation = self.execution.generation,
+            .provider = if (self.execution.provider) |provider|
+                scheduledProvider(provider)
+            else
+                null,
+            .model = self.admissionModel(),
+            .automatic_workspace_available = self.automatic_workspaces != null,
+        };
+    }
+
+    fn scheduleTaskEffects(self: *Runtime) product_schedule.TaskEffects {
+        return .{
+            .context = self,
+            .has_active_fn = scheduleTaskHasActive,
+            .launch_fn = scheduleTaskLaunch,
+            .terminal_fn = scheduleTaskTerminal,
+        };
+    }
+
+    fn scheduleTaskHasActive(context: *anyopaque, task_id: u64) bool {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        return self.task_runtime.taskHasActiveOperation(task_id);
+    }
+
+    fn scheduleTaskLaunch(
+        context: *anyopaque,
+        input: product_schedule.TaskLaunch,
+    ) product_schedule.TaskLaunchOutcome {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        const task_id = self.createTaskForWorkspace(
+            .automatic,
+            input.execution_generation,
+            null,
+            null,
+        ) catch |err| return .{ .rejected = .{
+            .cause = err,
+            .reason = scheduledFailure(err),
+            .task_id = 0,
+        } };
+        self.renameTask(task_id, input.title) catch |err|
+            return .{ .rejected = .{
+                .cause = err,
+                .reason = .task_start_failed,
+                .task_id = task_id,
+            } };
+        const binding_epoch = self.task_runtime.taskBindingEpoch(task_id) orelse
+            unreachable;
+        _ = self.runTaskAtBinding(
+            task_id,
+            binding_epoch,
+            .{ .text = input.input },
+        ) catch |err| return .{ .rejected = .{
+            .cause = err,
+            .reason = scheduledFailure(err),
+            .task_id = task_id,
+        } };
+        return .{ .submitted = task_id };
+    }
+
+    fn scheduleTaskTerminal(
+        context: *anyopaque,
+        task_id: u64,
+    ) ?product_schedule.TaskOutcome {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        const outcome = self.task_runtime.lastTerminalOutcome(task_id) orelse
+            return null;
+        return scheduledTaskOutcome(outcome);
+    }
+
+    fn scheduleRedaction(self: *Runtime) product_schedule.Redaction {
+        return .{
+            .context = self,
+            .redact_fn = redactScheduleProjection,
+            .contains_fn = scheduleProjectionContainsCredential,
+        };
+    }
+
+    fn redactScheduleProjection(
+        context: *anyopaque,
+        projection: product_schedule.MutableProjection,
+        additional_credential: []const u8,
+    ) bool {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        var changed = false;
+        const current_credential = self.execution.credential();
+        if (current_credential.len != 0) {
+            const title_changed = redactFixedWidthNoFail(
+                projection.title,
+                current_credential,
+            );
+            const model_changed = redactFixedWidthNoFail(
+                projection.execution_model,
+                current_credential,
+            );
+            const input_changed = redactFixedWidthNoFail(
+                projection.input,
+                current_credential,
+            );
+            projection.title_redacted.* =
+                projection.title_redacted.* or title_changed;
+            projection.input_redacted.* =
+                projection.input_redacted.* or input_changed;
+            changed = title_changed or model_changed or input_changed;
+        }
+        const title_changed = self.task_runtime.redactWithExecutionCredentialsNoFail(
+            projection.title,
+            redactFixedWidthNoFail,
+        );
+        const model_changed = self.task_runtime.redactWithExecutionCredentialsNoFail(
+            projection.execution_model,
+            redactFixedWidthNoFail,
+        );
+        const input_changed = self.task_runtime.redactWithExecutionCredentialsNoFail(
+            projection.input,
+            redactFixedWidthNoFail,
+        );
+        projection.title_redacted.* = projection.title_redacted.* or title_changed;
+        projection.input_redacted.* = projection.input_redacted.* or input_changed;
+        changed = changed or title_changed or model_changed or input_changed;
+        if (additional_credential.len != 0) {
+            const additional_title_changed = redactFixedWidthNoFail(
+                projection.title,
+                additional_credential,
+            );
+            const additional_model_changed = redactFixedWidthNoFail(
+                projection.execution_model,
+                additional_credential,
+            );
+            const additional_input_changed = redactFixedWidthNoFail(
+                projection.input,
+                additional_credential,
+            );
+            projection.title_redacted.* = projection.title_redacted.* or
+                additional_title_changed;
+            projection.input_redacted.* = projection.input_redacted.* or
+                additional_input_changed;
+            changed = changed or additional_title_changed or
+                additional_model_changed or additional_input_changed;
+        }
+        return changed;
+    }
+
+    fn scheduleProjectionContainsCredential(
+        context: *anyopaque,
+        bytes: []const u8,
+    ) bool {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        return self.containsKnownCredential(bytes);
+    }
+
     fn scheduledTaskDefinition(
         self: *Runtime,
         input: ScheduledTaskDefinitionInput,
-    ) Error!scheduled_tasks_impl.Definition {
+    ) Error!product_schedule.Definition {
         if (!self.canCreateTask()) return error.ExecutionUnavailable;
         if (!self.validExecutionGeneration(input.expected_execution_generation))
             return error.ExecutionGenerationMismatch;
@@ -4565,261 +4576,6 @@ pub const Runtime = struct {
             .input = scheduled_input,
             .recurrence = input.recurrence,
         };
-    }
-
-    fn triggerScheduledTask(
-        self: *Runtime,
-        id: u64,
-        planned_at_unix_seconds: u64,
-        triggered_at_unix_seconds: u64,
-        source: scheduled_tasks_impl.OccurrenceSource,
-    ) Error!u64 {
-        const item = self.scheduled_tasks.find(id) orelse
-            return error.UnknownScheduledTask;
-        if (item.last_occurrence) |last| if (last.task_id != 0) {
-            if (self.task_runtime.taskHasActiveOperation(last.task_id)) {
-                if (source == .timer) {
-                    var skipped = try self.scheduled_tasks.clone(
-                        self.allocator,
-                    );
-                    var skipped_owned = true;
-                    defer if (skipped_owned) skipped.deinit();
-                    try skipped.markSkipped(
-                        skipped.find(id).?,
-                        planned_at_unix_seconds,
-                        triggered_at_unix_seconds,
-                    );
-                    try self.commitScheduledTaskCandidate(&skipped);
-                    self.replaceScheduledTaskStore(&skipped);
-                    skipped_owned = false;
-                    self.bumpRevision();
-                    _ = self.schedule_notifier.notify(.{
-                        .scheduled_task_id = id,
-                        .task_id = last.task_id,
-                        .title = (self.scheduled_tasks.find(id) orelse
-                            unreachable).title,
-                        .kind = .skipped,
-                    });
-                    return last.task_id;
-                }
-                return error.TaskBusy;
-            }
-        };
-        var claimed = try self.scheduled_tasks.clone(self.allocator);
-        var claimed_owned = true;
-        defer if (claimed_owned) claimed.deinit();
-        try claimed.claim(
-            claimed.find(id).?,
-            planned_at_unix_seconds,
-            triggered_at_unix_seconds,
-            source,
-        );
-        try self.commitScheduledTaskCandidate(&claimed);
-        self.replaceScheduledTaskStore(&claimed);
-        claimed_owned = false;
-
-        const claimed_item = self.scheduled_tasks.find(id) orelse unreachable;
-        const task_id = self.createTaskForWorkspace(
-            .automatic,
-            claimed_item.execution_generation,
-            null,
-            null,
-        ) catch |err| {
-            self.finalizeScheduledTaskClaimRejected(
-                id,
-                planned_at_unix_seconds,
-                source,
-                scheduledFailure(err),
-                0,
-            );
-            return err;
-        };
-        self.renameTask(task_id, claimed_item.title) catch |err| {
-            self.finalizeScheduledTaskClaimRejected(
-                id,
-                planned_at_unix_seconds,
-                source,
-                .task_start_failed,
-                task_id,
-            );
-            return err;
-        };
-        const binding_epoch = self.task_runtime.taskBindingEpoch(task_id) orelse unreachable;
-        const run_input: TaskRunInput = .{
-            .text = claimed_item.input.borrowed(),
-        };
-        _ = self.runTaskAtBinding(task_id, binding_epoch, run_input) catch |err| {
-            self.finalizeScheduledTaskClaimRejected(
-                id,
-                planned_at_unix_seconds,
-                source,
-                scheduledFailure(err),
-                task_id,
-            );
-            return err;
-        };
-        try self.finalizeScheduledTaskClaimSubmitted(
-            id,
-            planned_at_unix_seconds,
-            source,
-            task_id,
-        );
-        return task_id;
-    }
-
-    fn finalizeScheduledTaskClaimSubmitted(
-        self: *Runtime,
-        id: u64,
-        planned_at_unix_seconds: u64,
-        source: scheduled_tasks_impl.OccurrenceSource,
-        task_id: u64,
-    ) Error!void {
-        var candidate = try self.scheduled_tasks.clone(self.allocator);
-        var candidate_owned = true;
-        defer if (candidate_owned) candidate.deinit();
-        try candidate.finalizeClaimSubmitted(
-            candidate.find(id) orelse return error.UnknownScheduledTask,
-            planned_at_unix_seconds,
-            source,
-            task_id,
-        );
-        try self.commitScheduledTaskCandidate(&candidate);
-        self.replaceScheduledTaskStore(&candidate);
-        candidate_owned = false;
-        self.bumpRevision();
-    }
-
-    fn finalizeScheduledTaskClaimRejected(
-        self: *Runtime,
-        id: u64,
-        planned_at_unix_seconds: u64,
-        source: scheduled_tasks_impl.OccurrenceSource,
-        reason: scheduled_tasks_impl.FailureReason,
-        task_id: u64,
-    ) void {
-        var candidate = self.scheduled_tasks.clone(self.allocator) catch return;
-        var candidate_owned = true;
-        defer if (candidate_owned) candidate.deinit();
-        candidate.finalizeClaimRejected(
-            candidate.find(id) orelse return,
-            planned_at_unix_seconds,
-            source,
-            reason,
-            task_id,
-        ) catch return;
-        self.commitScheduledTaskCandidate(&candidate) catch return;
-        self.replaceScheduledTaskStore(&candidate);
-        candidate_owned = false;
-        self.bumpRevision();
-        _ = self.schedule_notifier.notify(.{
-            .scheduled_task_id = id,
-            .title = (self.scheduled_tasks.find(id) orelse unreachable).title,
-            .kind = .needs_attention,
-        });
-    }
-
-    fn rearmScheduledTaskTimerNoFail(self: *Runtime) void {
-        self.schedule_timer.cancelCurrent();
-        if (!self.schedule_background_available) return;
-        if (self.schedule_persistence_health != .ready) return;
-        if (!self.canCreateTask()) return;
-        const item = self.scheduled_tasks.earliestDue() orelse return;
-        const due = item.next_run_at_unix_seconds orelse return;
-        if (self.schedule_timer.armAt(due)) return;
-        var candidate = self.scheduled_tasks.clone(self.allocator) catch return;
-        var candidate_owned = true;
-        defer if (candidate_owned) candidate.deinit();
-        candidate.markNeedsAttention(
-            candidate.find(item.id) orelse return,
-            .timer_unavailable,
-        );
-        self.commitScheduledTaskCandidate(&candidate) catch return;
-        self.replaceScheduledTaskStore(&candidate);
-        candidate_owned = false;
-        self.bumpRevision();
-    }
-
-    fn reconcileScheduledTaskCompletionsNoFail(self: *Runtime) bool {
-        if (self.schedule_persistence_health != .ready) return false;
-        for (self.scheduled_tasks.items) |*entry| {
-            const item = &(entry.* orelse continue);
-            for (item.occurrences()) |occurrence| {
-                if (occurrence.result != .submitted or
-                    occurrence.task_id == 0 or occurrence.notification_sent)
-                    continue;
-                const terminal_outcome = self.task_runtime.lastTerminalOutcome(
-                    occurrence.task_id,
-                ) orelse continue;
-                const notification_kind: ScheduleNotificationKind =
-                    if (terminal_outcome == .completed) .completed else .failed;
-                const item_id = item.id;
-                var candidate = self.scheduled_tasks.clone(self.allocator) catch
-                    return false;
-                var candidate_owned = true;
-                defer if (candidate_owned) candidate.deinit();
-                candidate.finalizeOccurrenceTask(
-                    candidate.find(item_id) orelse return false,
-                    occurrence.planned_at_unix_seconds,
-                    occurrence.source,
-                    scheduledOccurrenceOutcome(terminal_outcome),
-                ) catch return false;
-                self.commitScheduledTaskCandidate(&candidate) catch return false;
-                self.replaceScheduledTaskStore(&candidate);
-                candidate_owned = false;
-                const committed = self.scheduled_tasks.find(item_id) orelse
-                    return true;
-                _ = self.schedule_notifier.notify(.{
-                    .scheduled_task_id = committed.id,
-                    .task_id = occurrence.task_id,
-                    .title = committed.title,
-                    .kind = notification_kind,
-                });
-                return true;
-            }
-        }
-        return false;
-    }
-
-    fn reconcileScheduledTaskBindingsNoFail(self: *Runtime) bool {
-        if (self.schedule_persistence_health != .ready) return false;
-        var candidate = self.scheduled_tasks.clone(self.allocator) catch
-            return false;
-        var candidate_owned = true;
-        defer if (candidate_owned) candidate.deinit();
-        const changed = self.reconcileScheduledTaskBindingsInStore(&candidate);
-        if (!changed) return false;
-        self.commitScheduledTaskCandidate(&candidate) catch return false;
-        self.replaceScheduledTaskStore(&candidate);
-        candidate_owned = false;
-        self.rearmScheduledTaskTimerNoFail();
-        return true;
-    }
-
-    fn reconcileScheduledTaskBindingsInStore(
-        self: *Runtime,
-        store: *scheduled_tasks_impl.Store,
-    ) bool {
-        var changed = false;
-        for (store.items) |*entry| {
-            const item = &(entry.* orelse continue);
-            if (!item.enabled or item.health != .ready) continue;
-            const reason: ?scheduled_tasks_impl.FailureReason = binding: {
-                if (!self.canCreateTask() or
-                    item.execution_generation != self.execution.generation or
-                    item.execution_provider != scheduledProvider(self.execution.provider orelse
-                        break :binding .execution_changed) or
-                    !std.mem.eql(u8, item.execution_model, self.admissionModel()))
-                    break :binding .execution_changed;
-                if (self.automatic_workspaces == null)
-                    break :binding .workspace_unavailable;
-                break :binding null;
-            };
-            if (reason) |failure| {
-                store.markNeedsAttention(item, failure);
-                changed = true;
-            }
-        }
-        return changed;
     }
 
     fn taskPersistenceLimits(self: *const Runtime) task_persistence.Limits {
@@ -5486,45 +5242,6 @@ pub const Runtime = struct {
         }
     }
 
-    fn commitScheduledTaskCandidate(
-        self: *Runtime,
-        candidate: *const scheduled_tasks_impl.Store,
-    ) Error!void {
-        switch (self.schedule_persistence_health) {
-            .ready => {},
-            .outcome_unknown => return error.ScheduledTaskPersistenceOutcomeUnknown,
-            else => return error.ScheduledTaskPersistenceUnavailable,
-        }
-        const output = try self.allocator.alloc(
-            u8,
-            scheduled_task_persistence.max_store_bytes,
-        );
-        defer self.allocator.free(output);
-        const bytes = try scheduled_task_persistence.encode(output, candidate);
-        switch (self.schedule_persistence.commit(bytes)) {
-            .committed => {},
-            .failed => {
-                self.schedule_persistence_health = .write_failed;
-                self.bumpRevision();
-                return error.ScheduledTaskPersistenceFailed;
-            },
-            .outcome_unknown => {
-                self.schedule_persistence_health = .outcome_unknown;
-                self.bumpRevision();
-                return error.ScheduledTaskPersistenceOutcomeUnknown;
-            },
-        }
-    }
-
-    fn replaceScheduledTaskStore(
-        self: *Runtime,
-        candidate: *scheduled_tasks_impl.Store,
-    ) void {
-        self.scheduled_tasks.deinit();
-        self.scheduled_tasks = candidate.*;
-        candidate.* = undefined;
-    }
-
     /// Product projections may contain a credential that became known only
     /// after those facts were recorded. Every Task-owned secret release must
     /// pass through this function so the final live copy scrubs all retained
@@ -5935,7 +5652,7 @@ pub const Runtime = struct {
     ) void {
         self.skill.recoverTransactionsForScopeNoFail(
             scope,
-            self.schedule_timer.now(),
+            self.schedule.now(),
         );
     }
 
@@ -6016,30 +5733,15 @@ pub const Runtime = struct {
         if (credential.len == 0) return;
         self.redactWorkspaceProjectionsNoFail(credential);
         self.redactCatalogProjectionsNoFail(credential);
-        for (self.scheduled_tasks.items) |*entry| {
-            const item = &(entry.* orelse continue);
-            self.redactScheduledTaskNoFail(item, credential);
-        }
+        _ = self.schedule.redactInMemoryNoFail(
+            credential,
+            self.scheduleRedaction(),
+        );
         self.task_runtime.redactProjectionsNoFail(credential, .{
             .context = self,
             .redact_fn = redactFixedWidthNoFail,
             .release_projection_bytes_fn = releaseTaskRuntimeProjectionBytes,
         });
-    }
-
-    fn redactScheduledTaskNoFail(
-        _: *Runtime,
-        item: *scheduled_tasks_impl.Item,
-        credential: []const u8,
-    ) void {
-        if (credential.len == 0) return;
-        item.title_redacted =
-            redactFixedWidthNoFail(item.title, credential) or
-            item.title_redacted;
-        _ = redactFixedWidthNoFail(item.execution_model, credential);
-        item.input.redacted =
-            redactFixedWidthNoFail(item.input.value, credential) or
-            item.input.redacted;
     }
 
     fn redactCatalogProjectionsNoFail(
@@ -6679,6 +6381,8 @@ pub const Runtime = struct {
             .replacement_pending_fn = controlReplacementPending,
             .begin_default_replacement_fn = controlBeginDefaultReplacement,
             .begin_replacement_fn = controlBeginReplacement,
+            .prepare_install_fn = controlPrepareExecutionInstall,
+            .prepare_clear_fn = controlPrepareExecutionClear,
             .install_model_connection_fn = controlInstallModelConnection,
             .install_execution_fn = controlInstallExecution,
             .clear_execution_fn = controlClearExecution,
@@ -6740,6 +6444,10 @@ pub const Runtime = struct {
         };
     }
 
+    fn publishScheduleChangesNoFail(self: *Runtime) void {
+        if (self.schedule.takeChanged()) self.bumpRevision();
+    }
+
     fn bumpRevision(self: *Runtime) void {
         if (self.revision != std.math.maxInt(u64)) self.revision += 1;
     }
@@ -6775,6 +6483,12 @@ fn controlBeginDefaultReplacement(context: *anyopaque) anyerror!void {
 }
 fn controlBeginReplacement(context: *anyopaque) anyerror!void {
     return controlOwner(context).beginExecutionReplacement();
+}
+fn controlPrepareExecutionInstall(context: *anyopaque, input: account_contract.ExecutionConfigInput) anyerror!void {
+    return controlOwner(context).prepareExecutionInstall(input);
+}
+fn controlPrepareExecutionClear(context: *anyopaque) anyerror!void {
+    return controlOwner(context).prepareExecutionClear();
 }
 fn controlInstallModelConnection(context: *anyopaque, execution: *account_contract.OwnedExecutionConfig, binding: *PreparedModelConnectionBinding) void {
     controlOwner(context).installModelConnectionExecutionNoFail(execution, binding);
@@ -7031,7 +6745,7 @@ fn accountProvider(
     };
 }
 
-fn scheduledProvider(provider: Provider) scheduled_tasks_impl.Provider {
+fn scheduledProvider(provider: Provider) product_schedule.Provider {
     return switch (provider) {
         .anthropic => .anthropic,
         .openai => .openai,
@@ -7039,9 +6753,9 @@ fn scheduledProvider(provider: Provider) scheduled_tasks_impl.Provider {
     };
 }
 
-fn scheduledOccurrenceOutcome(
+fn scheduledTaskOutcome(
     outcome: RunOutcome,
-) scheduled_tasks_impl.OccurrenceTaskOutcome {
+) product_schedule.TaskOutcome {
     return switch (outcome) {
         .completed => .completed,
         .stopped => .stopped,
@@ -7052,7 +6766,7 @@ fn scheduledOccurrenceOutcome(
     };
 }
 
-fn scheduledFailure(err: anyerror) scheduled_tasks_impl.FailureReason {
+fn scheduledFailure(err: anyerror) product_schedule.FailureReason {
     return switch (err) {
         error.ExecutionUnavailable,
         error.ExecutionInUse,
@@ -7649,9 +7363,41 @@ fn installTestExecution(control: *Runtime) !void {
         },
     });
     try account_contract.validateView(control.accountView());
+    try control.prepareExecutionInstall(execution.input());
     control.installExecutionNoFail(&execution);
     control.endExecutionReplacementNoFail();
     control.finishAccountCommitNoFail();
+}
+
+fn commitTestExecutionFact(control: *Runtime, generation: u64) void {
+    const api_keys = [_]account_contract.ApiKeyView{.{
+        .id = "key-1",
+        .name = "Primary",
+        .suffix = "1234",
+        .provider_kind = .anthropic,
+    }};
+    const models = [_]account_contract.ModelView{.{
+        .id = "fixture-model",
+        .display_name = "Fixture model",
+    }};
+    control.commitAccountFactNoFail(.{
+        .kind = .execution_changed,
+        .view = .{
+            .state = .authenticated,
+            .catalog_state = .ready,
+            .account_id = "account-1",
+            .display_name = "Metask User",
+            .api_keys = &api_keys,
+            .models = &models,
+            .selected_api_key_id = "key-1",
+            .selected_model = "fixture-model",
+            .model_catalog_api_key_id = "key-1",
+            .can_create_task = true,
+            .catalog_generation = generation,
+            .metask_execution_generation = generation,
+            .execution_generation = generation,
+        },
+    });
 }
 
 fn testRuntime() !Runtime {
@@ -7836,6 +7582,8 @@ test "MCP refresh timer rearm preserves the absolute deadline" {
 const TestSchedulePersistence = struct {
     commits: usize = 0,
     result: SchedulePersistenceCommit = .committed,
+    storage: ?[]u8 = null,
+    len: usize = 0,
 
     fn commit(
         context: ?*anyopaque,
@@ -7844,6 +7592,13 @@ const TestSchedulePersistence = struct {
         const self: *@This() = @ptrCast(@alignCast(context.?));
         std.debug.assert(bytes.len != 0);
         self.commits += 1;
+        if (self.result == .committed) {
+            if (self.storage) |storage| {
+                if (bytes.len > storage.len) return .failed;
+                @memcpy(storage[0..bytes.len], bytes);
+                self.len = bytes.len;
+            }
+        }
         return self.result;
     }
 
@@ -8695,10 +8450,28 @@ test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {
     );
     defer automatic_root.deinit();
     var clock: TestScheduleClock = .{ .now = 1_000 };
-    var persistence: TestSchedulePersistence = .{};
-    control.schedule_timer = clock.timer();
-    control.schedule_persistence = persistence.capability();
-    control.schedule_persistence_health = .ready;
+    const persistence_storage = try std.testing.allocator.alloc(
+        u8,
+        product_schedule.testing.max_store_bytes,
+    );
+    defer std.testing.allocator.free(persistence_storage);
+    var persistence: TestSchedulePersistence = .{
+        .storage = persistence_storage,
+    };
+    product_schedule.testing.configure(
+        &control.schedule,
+        clock.timer(),
+        persistence.capability(),
+        .ready,
+    );
+    defer {
+        product_schedule.testing.configure(
+            &control.schedule,
+            .{},
+            .{},
+            .unavailable,
+        );
+    }
     try std.testing.expectError(
         error.WorkspaceUnavailable,
         control.createScheduledTask(.{
@@ -8725,7 +8498,7 @@ test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {
     control.setScheduleBackgroundAvailableNoFail(true);
     try std.testing.expectEqual(@as(u64, 2_000), clock.armed_at.?);
     try std.testing.expectEqual(@as(usize, 1), persistence.commits);
-    const item = control.scheduled_tasks.find(id).?;
+    const item = product_schedule.testing.item(&control.schedule, id).?;
     try std.testing.expect(item.title_redacted);
     try std.testing.expect(
         std.mem.indexOf(u8, item.title, "SECRET-KEY") == null,
@@ -8733,7 +8506,14 @@ test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {
     try std.testing.expect(
         std.mem.indexOf(
             u8,
-            item.input.value,
+            item.input,
+            "SECRET-KEY",
+        ) == null,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            persistence_storage[0..persistence.len],
             "SECRET-KEY",
         ) == null,
     );
@@ -8753,24 +8533,190 @@ test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {
     try std.testing.expectEqual(@as(usize, 2), persistence.commits);
     try std.testing.expect(clock.armed_at == null);
     try std.testing.expectEqual(
-        scheduled_tasks_impl.Health.paused,
-        control.scheduled_tasks.find(id).?.health,
+        product_schedule.Health.paused,
+        product_schedule.testing.item(&control.schedule, id).?.health,
     );
-    const committed_epoch = control.scheduled_tasks.find(id).?.epoch;
+    const committed_epoch = product_schedule.testing.item(&control.schedule, id).?.epoch;
     persistence.result = .failed;
+    const revision_before_failure = control.revision;
     try std.testing.expectError(
         error.ScheduledTaskPersistenceFailed,
         control.deleteScheduledTask(id, committed_epoch),
     );
-    try std.testing.expect(control.scheduled_tasks.find(id) != null);
+    try std.testing.expectEqual(revision_before_failure + 1, control.revision);
+    try std.testing.expect(product_schedule.testing.item(&control.schedule, id) != null);
     try std.testing.expectEqual(
         committed_epoch,
-        control.scheduled_tasks.find(id).?.epoch,
+        product_schedule.testing.item(&control.schedule, id).?.epoch,
     );
     try std.testing.expectEqual(
         SchedulePersistenceHealth.write_failed,
-        control.schedule_persistence_health,
+        control.schedule.persistenceHealth(),
     );
+}
+
+test "execution replacement durably scrubs Schedule before ownership transfer" {
+    var control = try testRuntime();
+    defer control.deinit();
+    try replaceTaskCredentialForTest(
+        &control.task_runtime.tasks[0].?,
+        "TASK-SECRET",
+    );
+    var automatic_tmp = std.testing.tmpDir(.{});
+    defer automatic_tmp.cleanup();
+    var automatic_root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const automatic_root_len = try automatic_tmp.dir.realPath(
+        std.testing.io,
+        &automatic_root_storage,
+    );
+    var automatic_root = try automatic_workspace_allocator.Root.open(
+        std.testing.io,
+        std.testing.allocator,
+        automatic_root_storage[0..automatic_root_len],
+    );
+    defer automatic_root.deinit();
+    var clock: TestScheduleClock = .{ .now = 1_000 };
+    const persistence_storage = try std.testing.allocator.alloc(
+        u8,
+        product_schedule.testing.max_store_bytes,
+    );
+    defer std.testing.allocator.free(persistence_storage);
+    var persistence: TestSchedulePersistence = .{
+        .storage = persistence_storage,
+    };
+    product_schedule.testing.configure(
+        &control.schedule,
+        clock.timer(),
+        persistence.capability(),
+        .ready,
+    );
+    defer {
+        product_schedule.testing.configure(
+            &control.schedule,
+            .{},
+            .{},
+            .unavailable,
+        );
+    }
+    control.automatic_workspaces = automatic_workspace_allocator.Allocator.init(
+        &automatic_root,
+    );
+
+    const id = try control.createScheduledTask(.{
+        .title = "Use NEXT-SECRET and TASK-SECRET",
+        .expected_execution_generation = 1,
+        .input = "Review NEXT-SECRET with TASK-SECRET",
+        .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
+    });
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        persistence_storage[0..persistence.len],
+        "TASK-SECRET",
+    ) == null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        persistence_storage[0..persistence.len],
+        "NEXT-SECRET",
+    ) != null);
+
+    var replacement = try account_contract.OwnedExecutionConfig.initOwned(
+        std.testing.allocator,
+        .anthropic,
+        try std.testing.allocator.dupe(u8, "fixture-model"),
+        try std.testing.allocator.dupe(
+            u8,
+            account_contract.metask_anthropic_messages_url,
+        ),
+        2,
+        try std.testing.allocator.dupe(u8, "NEXT-SECRET"),
+    );
+    errdefer replacement.deinit();
+    try control.beginDefaultExecutionReplacement();
+    commitTestExecutionFact(&control, 2);
+    try control.prepareExecutionInstall(replacement.input());
+    try std.testing.expectEqual(@as(usize, 2), persistence.commits);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        persistence_storage[0..persistence.len],
+        "NEXT-SECRET",
+    ) == null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        product_schedule.testing.item(&control.schedule, id).?.input,
+        "NEXT-SECRET",
+    ) == null);
+    control.installExecutionNoFail(&replacement);
+    control.endExecutionReplacementNoFail();
+    control.finishAccountCommitNoFail();
+    try std.testing.expectEqual(@as(u64, 2), control.execution.generation);
+
+    const blocked_id = try control.createScheduledTask(.{
+        .title = "Use BLOCKED-SECRET",
+        .expected_execution_generation = 2,
+        .input = "Review BLOCKED-SECRET",
+        .recurrence = .{ .once = .{ .at_unix_seconds = 3_000 } },
+    });
+    var blocked = try account_contract.OwnedExecutionConfig.initOwned(
+        std.testing.allocator,
+        .anthropic,
+        try std.testing.allocator.dupe(u8, "fixture-model"),
+        try std.testing.allocator.dupe(
+            u8,
+            account_contract.metask_anthropic_messages_url,
+        ),
+        3,
+        try std.testing.allocator.dupe(u8, "BLOCKED-SECRET"),
+    );
+    var blocked_owned = true;
+    defer if (blocked_owned) blocked.deinit();
+    persistence.result = .failed;
+    try control.beginDefaultExecutionReplacement();
+    commitTestExecutionFact(&control, 3);
+    try std.testing.expectError(
+        error.ScheduledTaskPersistenceFailed,
+        control.prepareExecutionInstall(blocked.input()),
+    );
+    try std.testing.expectEqual(@as(u64, 2), control.execution.generation);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        product_schedule.testing.item(&control.schedule, blocked_id).?.input,
+        "BLOCKED-SECRET",
+    ) != null);
+    control.endExecutionReplacementNoFail();
+    control.finishAccountCommitNoFail();
+    try std.testing.expect(!control.accountView().can_create_task);
+    try std.testing.expectEqual(
+        SchedulePersistenceHealth.write_failed,
+        control.schedule.persistenceHealth(),
+    );
+
+    blocked.deinit();
+    blocked_owned = false;
+    persistence.result = .committed;
+    product_schedule.testing.setPersistenceHealth(&control.schedule, .ready);
+    product_schedule.testing.overwriteInputPrefix(
+        &control.schedule,
+        id,
+        "NEXT-SECRET",
+    );
+    try control.beginDefaultExecutionReplacement();
+    control.commitAccountFactNoFail(.{
+        .kind = .signed_out,
+        .view = .{
+            .state = .signed_out,
+            .catalog_state = .unavailable,
+        },
+    });
+    try control.prepareExecutionClear();
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        persistence_storage[0..persistence.len],
+        "NEXT-SECRET",
+    ) == null);
+    control.clearExecutionNoFail();
+    control.endExecutionReplacementNoFail();
+    control.finishAccountCommitNoFail();
+    try std.testing.expect(!control.execution.ready());
 }
 
 test "Scheduled Task execution drift becomes needs attention without blocking Account" {
@@ -8791,9 +8737,12 @@ test "Scheduled Task execution drift becomes needs attention without blocking Ac
     defer automatic_root.deinit();
     var clock: TestScheduleClock = .{ .now = 1_000 };
     var persistence: TestSchedulePersistence = .{};
-    control.schedule_timer = clock.timer();
-    control.schedule_persistence = persistence.capability();
-    control.schedule_persistence_health = .ready;
+    product_schedule.testing.configure(
+        &control.schedule,
+        clock.timer(),
+        persistence.capability(),
+        .ready,
+    );
     control.automatic_workspaces = automatic_workspace_allocator.Allocator.init(
         &automatic_root,
     );
@@ -8808,13 +8757,16 @@ test "Scheduled Task execution drift becomes needs attention without blocking Ac
 
     control.execution.generation = 2;
     control.account.execution_generation = 2;
-    try std.testing.expect(control.reconcileScheduledTaskBindingsNoFail());
+    try std.testing.expect(control.schedule.refreshBindingNoFail(
+        control.scheduleExecutionBinding(),
+        control.scheduleRedaction(),
+    ));
 
-    const item = control.scheduled_tasks.find(id).?;
+    const item = product_schedule.testing.item(&control.schedule, id).?;
     try std.testing.expect(!item.enabled);
-    try std.testing.expectEqual(scheduled_tasks_impl.Health.needs_attention, item.health);
+    try std.testing.expectEqual(product_schedule.Health.needs_attention, item.health);
     try std.testing.expectEqual(
-        scheduled_tasks_impl.FailureReason.execution_changed,
+        product_schedule.FailureReason.execution_changed,
         item.failure_reason,
     );
     try std.testing.expect(item.next_run_at_unix_seconds == null);
@@ -9567,6 +9519,7 @@ test "Runtime publishes a user model connection as an independent execution sour
     var prepared_binding_owned = true;
     defer if (prepared_binding_owned) prepared_binding.deinit();
     try control.beginDefaultExecutionReplacement();
+    try control.prepareExecutionInstall(execution.input());
     control.installModelConnectionExecutionNoFail(
         &execution,
         &prepared_binding,
@@ -9648,6 +9601,7 @@ test "Account projection and execution install use preallocated no-fail storage"
             .execution_generation = 1,
         },
     });
+    try control.prepareExecutionInstall(execution.input());
     control.installExecutionNoFail(&execution);
     try std.testing.expect(!control.accountView().can_create_task);
     control.endExecutionReplacementNoFail();
@@ -9764,6 +9718,7 @@ test "default replacement preserves Task generation and installs the next admiss
             .execution_generation = 2,
         },
     });
+    try control.prepareExecutionInstall(replacement.input());
     control.installExecutionNoFail(&replacement);
     control.endExecutionReplacementNoFail();
     control.finishAccountCommitNoFail();
@@ -9931,6 +9886,7 @@ test "clearing the admission default preserves active Task execution" {
             .execution_generation = 0,
         },
     });
+    try control.prepareExecutionClear();
     control.clearExecutionNoFail();
     control.endExecutionReplacementNoFail();
     control.finishAccountCommitNoFail();
@@ -10062,6 +10018,7 @@ test "clearing the last default execution scrubs its credential before secure ze
             .catalog_state = .unavailable,
         },
     });
+    try control.prepareExecutionClear();
     control.clearExecutionNoFail();
     control.endExecutionReplacementNoFail();
     control.finishAccountCommitNoFail();
@@ -10806,6 +10763,7 @@ test "Runtime shutdown releases current and Task-owned execution generations" {
             .execution_generation = 2,
         },
     });
+    try control.prepareExecutionInstall(replacement.input());
     control.installExecutionNoFail(&replacement);
     control.endExecutionReplacementNoFail();
     control.deinit();
