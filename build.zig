@@ -115,6 +115,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-product-control-executor", .root_module = test_modules.product_control_executor },
         .{ .name = "metawork-product-control-file-preview", .root_module = test_modules.product_control_file_preview },
         .{ .name = "metawork-product-control-automatic-workspace", .root_module = test_modules.product_control_automatic_workspace },
+        .{ .name = "metawork-product-workspace", .root_module = test_modules.product_workspace_runtime },
         .{ .name = "metawork-product-schedule", .root_module = test_modules.product_schedule },
         .{ .name = "metawork-product-schedule-state", .root_module = test_modules.product_schedule_state },
         .{ .name = "metawork-product-schedule-persistence", .root_module = test_modules.product_schedule_persistence },
@@ -280,6 +281,8 @@ const WiredModules = struct {
     product_control_executor: *std.Build.Module,
     product_control_file_preview: *std.Build.Module,
     product_control_automatic_workspace: *std.Build.Module,
+    product_workspace: *std.Build.Module,
+    product_workspace_runtime: *std.Build.Module,
     product_schedule: *std.Build.Module,
     product_schedule_state: *std.Build.Module,
     product_schedule_persistence: *std.Build.Module,
@@ -1288,6 +1291,17 @@ fn wireAgentCore(
     product_control_ports.addImport("metawork_account_contract", account_contract);
     product_control_ports.addImport("metawork_product_mcp", product_mcp);
     product_control_ports.addImport("metawork_product_schedule", product_schedule);
+    const product_workspace_runtime = b.createModule(.{
+        .root_source_file = b.path("src/product/workspace/runtime.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    const product_workspace = b.createModule(.{
+        .root_source_file = b.path("src/product/workspace.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    product_workspace.addImport("product_workspace_runtime", product_workspace_runtime);
     const product_control_runtime = b.createModule(.{
         .root_source_file = b.path("src/product/control/runtime.zig"),
         .target = target,
@@ -1302,6 +1316,7 @@ fn wireAgentCore(
         product_control_automatic_workspace,
     );
     product_control_runtime.addImport("metawork_product_schedule", product_schedule);
+    product_control_runtime.addImport("metawork_product_workspace", product_workspace);
     product_control_runtime.addImport("metawork_product_task", product_task);
     product_control_runtime.addImport("metawork_product_skill", product_skill);
     product_control_runtime.addImport("metawork_product_mcp", product_mcp);
@@ -1471,6 +1486,8 @@ fn wireAgentCore(
         .product_control_executor = executor,
         .product_control_file_preview = file_preview,
         .product_control_automatic_workspace = product_control_automatic_workspace,
+        .product_workspace = product_workspace,
+        .product_workspace_runtime = product_workspace_runtime,
         .product_schedule = product_schedule,
         .product_schedule_state = product_schedule_state,
         .product_schedule_persistence = product_schedule_persistence,

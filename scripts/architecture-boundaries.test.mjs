@@ -142,6 +142,7 @@ test("named module roots exist and lower owners cannot import composition", () =
     "src/product/skill.zig",
     "src/product/task.zig",
     "src/product/schedule.zig",
+    "src/product/workspace.zig",
     "src/agent.zig",
     "src/product/control.zig",
     "src/bridge.zig",
@@ -183,6 +184,10 @@ test("named module roots exist and lower owners cannot import composition", () =
   );
   assert.equal(
     existsSync(new URL("src/product/schedule/view.zig", root)),
+    true,
+  );
+  assert.equal(
+    existsSync(new URL("src/product/workspace/runtime.zig", root)),
     true,
   );
   assert.equal(
@@ -355,6 +360,19 @@ test("named module roots exist and lower owners cannot import composition", () =
     "metask_agentcore",
     "native_sdk",
   ]);
+  assertNoImports(zigFiles("src/product/workspace/"), [
+    "metawork_app",
+    "metawork_product_control",
+    "metawork_bridge",
+    "metawork_account",
+    "metawork_agent",
+    "metawork_product_task",
+    "metawork_product_skill",
+    "metawork_product_mcp",
+    "metawork_product_schedule",
+    "metask_agentcore",
+    "native_sdk",
+  ]);
   assertNoImports(zigFiles("src/bridge/"), [
     "metawork_app",
     "metask_agentcore",
@@ -500,6 +518,36 @@ test("Product Schedule owns its aggregate state and persistence", () => {
   assert.match(ports, /pub fn prepareExecutionClear/);
   assert.match(accountCoordinator, /prepareExecutionInstall/);
   assert.match(accountCoordinator, /prepareExecutionClear/);
+});
+
+test("Product Workspace owns the bounded registry without owning the shared commit", () => {
+  const build = read("build.zig");
+  const control = read("src/product/control/runtime.zig");
+  const workspaceRoot = read("src/product/workspace.zig");
+  const workspaceRuntime = read("src/product/workspace/runtime.zig");
+
+  assert.match(build, /src\/product\/workspace\.zig/);
+  assert.match(build, /src\/product\/workspace\/runtime\.zig/);
+  assert.match(build, /metawork_product_workspace/);
+  assert.match(control, /@import\("metawork_product_workspace"\)/);
+  assert.match(control, /workspace: product_workspace\.Runtime/);
+  assert.match(workspaceRoot, /pub const Runtime = runtime_impl\.Runtime/);
+  assert.match(workspaceRuntime, /records: \[\]\?Record/);
+  assert.match(workspaceRuntime, /pub fn prepareOpen/);
+  assert.match(workspaceRuntime, /pub fn prepareRemoval/);
+  assert.match(workspaceRuntime, /pub fn prepareOrder/);
+  assert.doesNotMatch(
+    workspaceRuntime,
+    /commitTaskState|TaskPersistence|FileStore|Executor|std\.Thread|@import\("(?:metawork_product_control|metawork_product_task|metawork_product_skill|metawork_product_mcp|metawork_product_schedule|metawork_agent|metawork_app|metawork_bridge|metawork_account)"\)/,
+  );
+  assert.doesNotMatch(
+    control,
+    /const WorkspaceView = struct|workspaces: \[\]\?Workspace|next_workspace_id:|next_workspace_recent_order:|fn upsertWorkspace\(|fn rollbackWorkspaceUpsert\(|fn finishWorkspaceUpsert\(|fn findWorkspace\(|fn findWorkspaceByRoot\(/,
+  );
+  assert.match(control, /commitTaskStateWithCheckpoint/);
+  assert.match(control, /workspace\.prepareOpen/);
+  assert.match(control, /workspace\.prepareRemoval/);
+  assert.match(control, /workspace\.prepareOrder/);
 });
 
 test("Application coordinators consume scoped Product Control capabilities", () => {
