@@ -4,6 +4,9 @@ const std = @import("std");
 const protocol = @import("single_instance.zig");
 const compat = @import("metawork_app_single_instance_compat");
 
+const handoff_attempts = 60;
+const handoff_retry_interval_ms = 50;
+
 pub const Disposition = enum { primary, secondary };
 
 pub const CoordinateError = error{
@@ -122,37 +125,208 @@ fn forwardOrFail(
         cwd_storage[0..cwd_len],
         argument_storage[0..argument_count],
     );
-    var response_storage: [compat.max_transport_response_bytes]u8 = undefined;
-    const response_len = compat.forward(
+    return competeForOwnership(
+        io,
         allocator,
         canonical_data_root,
         request,
-        &response_storage,
-    ) catch return activationFailure(interactive, .primary_unresponsive);
-    const status = protocol.decodeResponse(response_storage[0..response_len]) catch
-        return activationFailure(interactive, .incompatible);
-    return switch (status) {
-        .accepted => .secondary,
-        .incompatible => activationFailure(interactive, .incompatible),
-        .rejected => activationFailure(interactive, .rejected),
-        .stopping => waitForPrimaryExit(io, canonical_data_root, interactive),
-    };
+        interactive,
+    );
 }
 
-fn waitForPrimaryExit(
+fn competeForOwnership(
     io: std.Io,
+    allocator: std.mem.Allocator,
     canonical_data_root: []const u8,
+    request: []const u8,
     interactive: bool,
 ) CoordinateError!ExistingResult {
-    for (0..60) |_| {
-        io.sleep(.fromMilliseconds(50), .awake) catch
-            return activationFailure(interactive, .primary_unresponsive);
-        switch (compat.tryAcquireLease(io, canonical_data_root) catch continue) {
-            .occupied => continue,
+    var response_storage: [compat.max_transport_response_bytes]u8 = undefined;
+    competition: for (0..handoff_attempts) |attempt| {
+        switch (compat.tryAcquireLease(io, canonical_data_root) catch {
+            return activationFailure(interactive, .startup_failed);
+        }) {
+            .occupied => {},
             .acquired => |lease| return .{ .acquired = lease },
+        }
+
+        const response_len = compat.forward(
+            allocator,
+            canonical_data_root,
+            request,
+            &response_storage,
+        ) catch |err| switch (err) {
+            error.EndpointUnavailable => {
+                if (attempt + 1 == handoff_attempts) break :competition;
+                io.sleep(.fromMilliseconds(handoff_retry_interval_ms), .awake) catch
+                    return activationFailure(interactive, .primary_unresponsive);
+                continue :competition;
+            },
+            else => return activationFailure(interactive, .primary_unresponsive),
+        };
+        const status = protocol.decodeResponse(response_storage[0..response_len]) catch
+            return activationFailure(interactive, .incompatible);
+        switch (status) {
+            .accepted => return .secondary,
+            .incompatible => return activationFailure(interactive, .incompatible),
+            .rejected => return activationFailure(interactive, .rejected),
+            .stopping => {
+                if (attempt + 1 == handoff_attempts) break :competition;
+                io.sleep(.fromMilliseconds(handoff_retry_interval_ms), .awake) catch
+                    return activationFailure(interactive, .primary_unresponsive);
+            },
         }
     }
     return activationFailure(interactive, .primary_unresponsive);
+}
+
+const DelayedLeaseRelease = struct {
+    io: std.Io,
+    lease: *compat.Lease,
+
+    fn run(self: *@This()) void {
+        self.io.sleep(.fromMilliseconds(100), .awake) catch return;
+        self.lease.deinit();
+    }
+};
+
+fn ignoreNotify(_: ?*anyopaque) bool {
+    return true;
+}
+
+const DelayedEndpoint = struct {
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    root: []const u8,
+    queue: *protocol.ActivationQueue,
+    server: ?compat.Server = null,
+
+    fn run(self: *@This()) void {
+        self.io.sleep(.fromMilliseconds(100), .awake) catch return;
+        self.server = compat.Server.init(self.allocator, self.root, .{
+            .state = self.queue,
+            .handle_fn = handleActivation,
+        }) catch null;
+    }
+};
+
+test "single-instance coordinator reacquires a lease after ingress closes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(
+        std.testing.io,
+        ".",
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(root);
+    var held = switch (try compat.tryAcquireLease(std.testing.io, root)) {
+        .acquired => |lease| lease,
+        .occupied => return error.UnexpectedOccupiedLease,
+    };
+    var delayed = DelayedLeaseRelease{ .io = std.testing.io, .lease = &held };
+    const thread = try std.Thread.spawn(.{}, DelayedLeaseRelease.run, .{&delayed});
+    defer thread.join();
+
+    const identity = protocol.Identity.init("development", root);
+    var request_storage: [protocol.max_frame_bytes]u8 = undefined;
+    const request = try protocol.encodeRequest(
+        &request_storage,
+        identity,
+        root,
+        &.{"metawork"},
+    );
+    var acquired = switch (try competeForOwnership(
+        std.testing.io,
+        std.testing.allocator,
+        root,
+        request,
+        false,
+    )) {
+        .acquired => |lease| lease,
+        .secondary => return error.UnexpectedSecondary,
+    };
+    acquired.deinit();
+}
+
+test "single-instance coordinator forwards after a cold-start endpoint appears" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(
+        std.testing.io,
+        ".",
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(root);
+    var held = switch (try compat.tryAcquireLease(std.testing.io, root)) {
+        .acquired => |lease| lease,
+        .occupied => return error.UnexpectedOccupiedLease,
+    };
+    defer held.deinit();
+    const identity = protocol.Identity.init("development", root);
+    var queue = protocol.ActivationQueue.init(std.testing.io, identity, .{
+        .context = null,
+        .notify_fn = ignoreNotify,
+    });
+    var delayed = DelayedEndpoint{
+        .io = std.testing.io,
+        .allocator = std.testing.allocator,
+        .root = root,
+        .queue = &queue,
+    };
+    const thread = try std.Thread.spawn(.{}, DelayedEndpoint.run, .{&delayed});
+    defer {
+        thread.join();
+        if (delayed.server) |*server| server.deinit();
+    }
+
+    var request_storage: [protocol.max_frame_bytes]u8 = undefined;
+    const request = try protocol.encodeRequest(
+        &request_storage,
+        identity,
+        root,
+        &.{"metawork"},
+    );
+    try std.testing.expect((try competeForOwnership(
+        std.testing.io,
+        std.testing.allocator,
+        root,
+        request,
+        false,
+    )) == .secondary);
+}
+
+test "single-instance coordinator fails closed while an owner stays unreachable" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(
+        std.testing.io,
+        ".",
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(root);
+    var held = switch (try compat.tryAcquireLease(std.testing.io, root)) {
+        .acquired => |lease| lease,
+        .occupied => return error.UnexpectedOccupiedLease,
+    };
+    defer held.deinit();
+    const identity = protocol.Identity.init("development", root);
+    var request_storage: [protocol.max_frame_bytes]u8 = undefined;
+    const request = try protocol.encodeRequest(
+        &request_storage,
+        identity,
+        root,
+        &.{"metawork"},
+    );
+    try std.testing.expectError(
+        error.ActivationFailed,
+        competeForOwnership(
+            std.testing.io,
+            std.testing.allocator,
+            root,
+            request,
+            false,
+        ),
+    );
 }
 
 fn activationFailure(interactive: bool, failure: compat.Failure) CoordinateError {

@@ -39,6 +39,18 @@ pub const lock_file_name = ".metawork-instance.lock";
 pub const max_transport_request_bytes: usize = 64 * 1024;
 pub const max_transport_response_bytes: usize = 64;
 
+pub const ForwardError = std.mem.Allocator.Error || error{
+    InvalidFrame,
+    EndpointUnavailable,
+    TransferFailed,
+    ResponseTimeout,
+    SecurityUnavailable,
+    EndpointNameTooLong,
+    NoSpaceLeft,
+    InvalidUtf8,
+    Unavailable,
+};
+
 pub const Failure = enum {
     startup_failed,
     incompatible,
@@ -112,7 +124,7 @@ pub fn forward(
     canonical_data_root: []const u8,
     request: []const u8,
     response: []u8,
-) !usize {
+) ForwardError!usize {
     if (request.len == 0 or request.len > max_transport_request_bytes or
         response.len < max_transport_response_bytes)
         return error.InvalidFrame;
@@ -230,42 +242,4 @@ test "local transport forwards one bounded frame to the primary" {
         &response,
     );
     try std.testing.expectEqualStrings(request, response[0..response_len]);
-}
-
-const ConcurrentForward = struct {
-    root: []const u8,
-    succeeded: bool = false,
-
-    fn run(self: *ConcurrentForward) void {
-        var response: [max_transport_response_bytes]u8 = undefined;
-        const request = "concurrent-activation";
-        const response_len = forward(
-            std.heap.page_allocator,
-            self.root,
-            request,
-            &response,
-        ) catch return;
-        self.succeeded = std.mem.eql(u8, request, response[0..response_len]);
-    }
-};
-
-test "concurrent secondaries serialize through the bounded local endpoint" {
-    if (builtin.os.tag != .windows) return;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
-    defer std.testing.allocator.free(root);
-    var marker: u8 = 0;
-    var server = try Server.init(std.testing.allocator, root, .{
-        .state = &marker,
-        .handle_fn = echoRequest,
-    });
-    defer server.deinit();
-
-    var states = [_]ConcurrentForward{.{ .root = root }} ** 8;
-    var threads: [states.len]std.Thread = undefined;
-    for (&threads, &states) |*thread, *state|
-        thread.* = try std.Thread.spawn(.{}, ConcurrentForward.run, .{state});
-    for (&threads) |*thread| thread.join();
-    for (states) |state| try std.testing.expect(state.succeeded);
 }

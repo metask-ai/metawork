@@ -160,6 +160,15 @@ pub fn build(b: *std.Build) void {
         "test-storage",
         "Run the backend-independent Storage contract and SQLite backend tests",
     ).dependOn(&b.addRunArtifact(storage_tests).step);
+    const single_instance_tests = b.addTest(.{
+        .name = "metawork-app-single-instance",
+        .root_module = test_modules.app,
+        .filters = &.{"single-instance coordinator"},
+    });
+    b.step(
+        "test-single-instance",
+        "Run Application single-instance lifecycle race tests",
+    ).dependOn(&b.addRunArtifact(single_instance_tests).step);
 }
 
 fn agentCoreTargetId(target: std.Target) []const u8 {

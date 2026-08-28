@@ -1816,7 +1816,6 @@ test("Native compatibility seams have exact owners and symbol allowlists", () =>
       "ReadFile",
       "SetNamedPipeHandleState",
       "Sleep",
-      "WaitNamedPipeW",
       "WriteFile",
     ].sort(),
   );

@@ -67,7 +67,6 @@ extern "kernel32" fn FlushFileBuffers(HANDLE) callconv(.winapi) BOOL;
 extern "kernel32" fn ReadFile(HANDLE, [*]u8, DWORD, *DWORD, ?*anyopaque) callconv(.winapi) BOOL;
 extern "kernel32" fn WriteFile(HANDLE, [*]const u8, DWORD, *DWORD, ?*anyopaque) callconv(.winapi) BOOL;
 extern "kernel32" fn CreateFileW([*:0]const u16, DWORD, DWORD, ?*const SecurityAttributes, DWORD, DWORD, HANDLE) callconv(.winapi) HANDLE;
-extern "kernel32" fn WaitNamedPipeW([*:0]const u16, DWORD) callconv(.winapi) BOOL;
 extern "kernel32" fn SetNamedPipeHandleState(HANDLE, ?*const DWORD, ?*const DWORD, ?*const DWORD) callconv(.winapi) BOOL;
 extern "kernel32" fn GetNamedPipeServerProcessId(HANDLE, *ULONG) callconv(.winapi) BOOL;
 extern "kernel32" fn CancelSynchronousIo(HANDLE) callconv(.winapi) BOOL;
@@ -230,25 +229,19 @@ pub fn forward(
     const name = try pipeName(allocator, sid_digest, canonical_data_root);
     defer allocator.free(name);
 
-    const deadline = GetTickCount64() + response_timeout_ms;
-    var pipe: HANDLE = invalid_handle;
-    while (GetTickCount64() < deadline) {
-        pipe = CreateFileW(
-            name.ptr,
-            generic_read | generic_write,
-            0,
-            null,
-            open_existing,
-            0,
-            null,
-        );
-        if (pipe != invalid_handle) break;
-        const err = GetLastError();
-        if (err != error_pipe_busy and err != error_file_not_found)
-            return error.EndpointUnavailable;
-        _ = WaitNamedPipeW(name.ptr, @intCast(retry_interval_ms));
-    }
-    if (pipe == invalid_handle) return error.EndpointUnavailable;
+    const pipe = CreateFileW(
+        name.ptr,
+        generic_read | generic_write,
+        0,
+        null,
+        open_existing,
+        0,
+        null,
+    );
+    if (pipe == invalid_handle) return switch (GetLastError()) {
+        error_pipe_busy, error_file_not_found => error.EndpointUnavailable,
+        else => error.TransferFailed,
+    };
     defer _ = CloseHandle(pipe);
 
     var mode: DWORD = pipe_readmode_message | pipe_nowait;
@@ -263,7 +256,8 @@ pub fn forward(
         written != request.len)
         return error.TransferFailed;
 
-    while (GetTickCount64() < deadline) {
+    const response_deadline = GetTickCount64() + response_timeout_ms;
+    while (GetTickCount64() < response_deadline) {
         var read: DWORD = 0;
         if (ReadFile(pipe, response.ptr, @intCast(response.len), &read, null) != 0)
             return read;
