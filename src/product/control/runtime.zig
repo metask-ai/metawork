@@ -444,7 +444,7 @@ pub const ChangeNotifier = struct {
 };
 
 const TaskWorkspaceOrderContext = struct {
-    workbench: *Runtime,
+    control: *Runtime,
     workspace: *WorkspaceView,
     previous_order: u64,
 };
@@ -1486,7 +1486,7 @@ pub const Runtime = struct {
         errdefer if (skill_owned) skill.deinit();
         var mcp_startup = try mcp_runtime.Startup.prepare(allocator, configuration.mcp);
         errdefer if (mcp_startup) |*startup| startup.deinit();
-        var workbench: Runtime = .{
+        var control: Runtime = .{
             .allocator = allocator,
             .io = io,
             .agent_runtime = agent_runtime,
@@ -1517,43 +1517,43 @@ pub const Runtime = struct {
         skill_owned = false;
         executor_owned = false;
         preview_executor_owned = false;
-        if ((workbench.task_persistence_health == .ready or
-            workbench.task_persistence_health == .degraded) and
+        if ((control.task_persistence_health == .ready or
+            control.task_persistence_health == .degraded) and
             configuration.task_persistence.restored_bytes != null)
         {
-            workbench.restoreTaskState(
+            control.restoreTaskState(
                 configuration.task_persistence.restored_bytes.?,
             ) catch |err| {
-                workbench.clearRestoredTaskStateNoFail();
+                control.clearRestoredTaskStateNoFail();
                 switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
-                    else => workbench.task_persistence_health = .corrupt,
+                    else => control.task_persistence_health = .corrupt,
                 }
             };
         }
-        workbench.reconcileCheckpointStoreNoFail();
-        workbench.reconcileSkillEnablementNoFail();
-        if (workbench.schedule_persistence_health == .ready) {
-            var recovered = workbench.scheduled_tasks.clone(allocator) catch null;
+        control.reconcileCheckpointStoreNoFail();
+        control.reconcileSkillEnablementNoFail();
+        if (control.schedule_persistence_health == .ready) {
+            var recovered = control.scheduled_tasks.clone(allocator) catch null;
             if (recovered) |*candidate| {
                 var candidate_owned = true;
                 defer if (candidate_owned) candidate.deinit();
                 if (candidate.interruptClaimedOccurrences()) {
-                    workbench.commitScheduledTaskCandidate(candidate) catch {};
-                    if (workbench.schedule_persistence_health == .ready) {
-                        workbench.replaceScheduledTaskStore(candidate);
+                    control.commitScheduledTaskCandidate(candidate) catch {};
+                    if (control.schedule_persistence_health == .ready) {
+                        control.replaceScheduledTaskStore(candidate);
                         candidate_owned = false;
                     }
                 }
             }
         }
-        workbench.recoverSkillTransactionsForScopeNoFail(.personal);
-        workbench.skill.ensurePersonalCatalog(workbench.skillProjectionBudget());
+        control.recoverSkillTransactionsForScopeNoFail(.personal);
+        control.skill.ensurePersonalCatalog(control.skillProjectionBudget());
         // This is the last ownership move in init: no later operation may fail.
         // The first health observation is committed before App exposes Bridge
         // ingress or loads the Renderer window.
         if (mcp_startup) |*startup| {
-            workbench.mcp = startup.takeRuntime(
+            control.mcp = startup.takeRuntime(
                 productMcpPorts(
                     executor,
                     agent_runtime,
@@ -1562,12 +1562,12 @@ pub const Runtime = struct {
                 ),
             );
             mcp_startup = null;
-            _ = workbench.syncMcpHealthNoFail();
-            workbench.updateMcpRefreshDeadlineNoFail();
-            workbench.rearmMcpRefreshTimerNoFail();
+            _ = control.syncMcpHealthNoFail();
+            control.updateMcpRefreshDeadlineNoFail();
+            control.rearmMcpRefreshTimerNoFail();
         }
         preview_lane_owned = false;
-        return workbench;
+        return control;
     }
 
     pub const FilePreviewAdmission = union(enum) {
@@ -2624,7 +2624,7 @@ pub const Runtime = struct {
                 self.next_workspace_recent_order = workspace_recent_order;
         }
         var order_context = TaskWorkspaceOrderContext{
-            .workbench = self,
+            .control = self,
             .workspace = workspace_view,
             .previous_order = workspace_view.recent_order,
         };
@@ -2897,7 +2897,7 @@ pub const Runtime = struct {
         else
             0;
         var order_context = TaskWorkspaceOrderContext{
-            .workbench = self,
+            .control = self,
             .workspace = workspace,
             .previous_order = workspace.recent_order,
         };
@@ -3310,7 +3310,7 @@ pub const Runtime = struct {
                 // A late event cannot change a published product terminal, and
                 // is not by itself proof of an AgentCore contract violation.
                 if (builtin.mode == .Debug) std.log.warn(
-                    "workbench.late_terminal_event task_id={d} run_id={d} count={d}",
+                    "control.late_terminal_event task_id={d} run_id={d} count={d}",
                     .{ late.task_id, envelope.run_id, late.count },
                 );
             },
@@ -5202,7 +5202,7 @@ pub const Runtime = struct {
     fn rollbackTaskWorkspaceOrder(context: *anyopaque, recent_order: u64) void {
         const value: *TaskWorkspaceOrderContext = @ptrCast(@alignCast(context));
         value.workspace.recent_order = value.previous_order;
-        value.workbench.next_workspace_recent_order = recent_order;
+        value.control.next_workspace_recent_order = recent_order;
     }
 
     fn taskRuntimeOperationEffects(self: *Runtime) task_runtime.OperationEffects {
@@ -6103,47 +6103,47 @@ pub const Runtime = struct {
     }
 
     test "automatic title allocation failure does not escape the fallback" {
-        var workbench = try testRuntime();
-        defer workbench.deinit();
+        var control = try testRuntime();
+        defer control.deinit();
 
-        const remaining = workbench.limits.max_projection_bytes - workbench.projection_bytes;
-        const reservation = try workbench.allocTrackedCapacity(remaining);
-        defer workbench.freeTracked(reservation);
+        const remaining = control.limits.max_projection_bytes - control.projection_bytes;
+        const reservation = try control.allocTrackedCapacity(remaining);
+        defer control.freeTracked(reservation);
 
-        const task = &workbench.task_runtime.tasks[0].?;
+        const task = &control.task_runtime.tasks[0].?;
         const run = &task.durable.runs[0].?;
         run.automatic_title.state.store(.ready, .release);
-        const sync = workbench.task_runtime.syncAutomaticTitles(
-            workbench.limits.max_task_title_bytes,
-            workbench.taskRuntimeTextProjection(),
+        const sync = control.task_runtime.syncAutomaticTitles(
+            control.limits.max_task_title_bytes,
+            control.taskRuntimeTextProjection(),
         );
         try std.testing.expect(!sync.durable_changed);
         try std.testing.expectEqualStrings("", task.durable.title);
     }
 
     test "automatic title settlement never overwrites a user title" {
-        var workbench = try testRuntime();
-        defer workbench.deinit();
+        var control = try testRuntime();
+        defer control.deinit();
 
-        const task = &workbench.task_runtime.tasks[0].?;
+        const task = &control.task_runtime.tasks[0].?;
         const run = &task.durable.runs[0].?;
-        try workbench.replaceTracked(
+        try control.replaceTracked(
             &task.durable.title,
             "Provisional title",
-            workbench.limits.max_task_title_bytes,
+            control.limits.max_task_title_bytes,
         );
         run.automatic_title.provisional_applied = true;
         run.automatic_title.state.store(.pending, .release);
-        try workbench.renameTask(task.durable.id, "User title");
+        try control.renameTask(task.durable.id, "User title");
         const generated = "Generated title";
         @memcpy(run.automatic_title.result[0..generated.len], generated);
         run.automatic_title.result_len = generated.len;
         run.automatic_title.generated = true;
         run.automatic_title.state.store(.ready, .release);
 
-        const sync = workbench.task_runtime.syncAutomaticTitles(
-            workbench.limits.max_task_title_bytes,
-            workbench.taskRuntimeTextProjection(),
+        const sync = control.task_runtime.syncAutomaticTitles(
+            control.limits.max_task_title_bytes,
+            control.taskRuntimeTextProjection(),
         );
         try std.testing.expect(!sync.durable_changed);
         try std.testing.expectEqualStrings("User title", task.durable.title);
@@ -7512,7 +7512,7 @@ fn testLimits() Limits {
     };
 }
 
-fn installTestExecution(workbench: *Runtime) !void {
+fn installTestExecution(control: *Runtime) !void {
     var execution = try account_contract.OwnedExecutionConfig.initOwned(
         std.testing.allocator,
         .anthropic,
@@ -7525,7 +7525,7 @@ fn installTestExecution(workbench: *Runtime) !void {
         try std.testing.allocator.dupe(u8, "SECRET-KEY"),
     );
     errdefer execution.deinit();
-    try workbench.beginExecutionReplacement();
+    try control.beginExecutionReplacement();
     const api_keys = [_]account_contract.ApiKeyView{.{
         .id = "key-1",
         .name = "Primary",
@@ -7536,7 +7536,7 @@ fn installTestExecution(workbench: *Runtime) !void {
         .id = "fixture-model",
         .display_name = "Fixture model",
     }};
-    workbench.commitAccountFactNoFail(.{
+    control.commitAccountFactNoFail(.{
         .kind = .execution_changed,
         .view = .{
             .state = .authenticated,
@@ -7554,67 +7554,67 @@ fn installTestExecution(workbench: *Runtime) !void {
             .execution_generation = 1,
         },
     });
-    try account_contract.validateView(workbench.accountView());
-    workbench.installExecutionNoFail(&execution);
-    workbench.endExecutionReplacementNoFail();
-    workbench.finishAccountCommitNoFail();
+    try account_contract.validateView(control.accountView());
+    control.installExecutionNoFail(&execution);
+    control.endExecutionReplacementNoFail();
+    control.finishAccountCommitNoFail();
 }
 
 fn testRuntime() !Runtime {
     test_agent_runtime.io = std.testing.io;
-    var workbench = try Runtime.init(
+    var control = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &test_agent_runtime,
         testLimits(),
         .{},
     );
-    try installTestExecution(&workbench);
-    var task_execution = try workbench.execution.cloneOwned(workbench.allocator);
+    try installTestExecution(&control);
+    var task_execution = try control.execution.cloneOwned(control.allocator);
     errdefer task_execution.deinit();
-    workbench.revision = 0;
-    const workspace = try workbench.copyBounded("/tmp/metawork-test", workbench.limits.max_workspace_bytes);
-    workbench.workspaces[0] = .{
+    control.revision = 0;
+    const workspace = try control.copyBounded("/tmp/metawork-test", control.limits.max_workspace_bytes);
+    control.workspaces[0] = .{
         .id = 1,
-        .canonical_root = try workbench.copyBounded(
+        .canonical_root = try control.copyBounded(
             "/tmp/metawork-test",
-            workbench.limits.max_workspace_bytes,
+            control.limits.max_workspace_bytes,
         ),
-        .projected_root_storage = try workbench.copyBounded(
+        .projected_root_storage = try control.copyBounded(
             "/tmp/metawork-test",
-            workbench.limits.max_workspace_bytes,
+            control.limits.max_workspace_bytes,
         ),
         .projected_root_len = "/tmp/metawork-test".len,
-        .display_name_storage = try workbench.copyBounded(
+        .display_name_storage = try control.copyBounded(
             "metawork-test",
-            workbench.limits.max_workspace_bytes,
+            control.limits.max_workspace_bytes,
         ),
         .display_name_len = "metawork-test".len,
         .trust = .explicitly_trusted,
         .recent_order = 1,
     };
-    workbench.skill.registerWorkspaceOwned(.{
+    control.skill.registerWorkspaceOwned(.{
         .id = 1,
         .epoch = 1,
-        .canonical_root = try workbench.allocator.dupe(u8, "/tmp/metawork-test"),
-    }, workbench.skillProjectionBudget());
-    workbench.next_workspace_id = 2;
-    workbench.next_workspace_recent_order = 2;
-    workbench.task_runtime.next_task_id = 4;
-    const execution_model = try workbench.copyBounded(
-        workbench.execution.model(),
+        .canonical_root = try control.allocator.dupe(u8, "/tmp/metawork-test"),
+    }, control.skillProjectionBudget());
+    control.next_workspace_id = 2;
+    control.next_workspace_recent_order = 2;
+    control.task_runtime.next_task_id = 4;
+    const execution_model = try control.copyBounded(
+        control.execution.model(),
         account_contract.Limits.model_id_bytes,
     );
-    const runs = try workbench.allocator.alloc(?TestRunRecord, workbench.limits.max_runs_per_task);
+    const runs = try control.allocator.alloc(?TestRunRecord, control.limits.max_runs_per_task);
     @memset(runs, null);
-    const compacts = try workbench.allocator.alloc(
+    const compacts = try control.allocator.alloc(
         ?TestCompactRecord,
-        workbench.limits.max_compacts_per_task,
+        control.limits.max_compacts_per_task,
     );
     @memset(compacts, null);
-    const ui_history = try workbench.allocator.alloc(?UiRecord, workbench.limits.max_ui_history_per_task);
+    const ui_history = try control.allocator.alloc(?UiRecord, control.limits.max_ui_history_per_task);
     @memset(ui_history, null);
-    const tools = try workbench.allocator.alloc(?ToolView, workbench.limits.max_tools_per_run);
+    const tools = try control.allocator.alloc(?ToolView, control.limits.max_tools_per_run);
     @memset(tools, null);
     runs[0] = .{
         .id = 7,
@@ -7623,19 +7623,19 @@ fn testRuntime() !Runtime {
         .execution_provider = .anthropic,
         .execution_model = execution_model,
         .input = .{ .text = .{
-            .value = try workbench.copyBounded(
+            .value = try control.copyBounded(
                 "inspect",
-                workbench.limits.max_user_message_bytes,
+                control.limits.max_user_message_bytes,
             ),
         } },
         .active_phase = .running,
         .agent_handoff = .init(.running),
         .tools = tools,
-        .status_text = try workbench.copyBounded("Queued", workbench.limits.max_tool_field_bytes),
-        .terminal_diagnostic = try workbench.allocTrackedCapacity(workbench.limits.max_terminal_diagnostic_bytes),
-        .redaction_secret = workbench.execution.credential(),
+        .status_text = try control.copyBounded("Queued", control.limits.max_tool_field_bytes),
+        .terminal_diagnostic = try control.allocTrackedCapacity(control.limits.max_terminal_diagnostic_bytes),
+        .redaction_secret = control.execution.credential(),
     };
-    workbench.task_runtime.tasks[0] = .{
+    control.task_runtime.tasks[0] = .{
         .durable = .{
             .id = 3,
             .recent_order = 1,
@@ -7644,7 +7644,7 @@ fn testRuntime() !Runtime {
             .execution_model = execution_model,
             .workspace_id = 1,
             .workspace_root = workspace,
-            .title = try workbench.copyBounded("", workbench.limits.max_task_title_bytes),
+            .title = try control.copyBounded("", control.limits.max_task_title_bytes),
             .runs = runs,
             .compacts = compacts,
             .next_run_generation = 1,
@@ -7660,7 +7660,7 @@ fn testRuntime() !Runtime {
             .active_operation = .{ .run = 7 },
         },
     };
-    return workbench;
+    return control;
 }
 
 const TestScheduleClock = struct {
@@ -7816,7 +7816,7 @@ fn replaceTaskCredentialForTest(
     }
 }
 
-fn detachTaskForTest(workbench: *Runtime, task: *TestTask) void {
+fn detachTaskForTest(control: *Runtime, task: *TestTask) void {
     switch (task.runtime.attachment) {
         .detached => return,
         .attached, .closing => {},
@@ -7824,7 +7824,7 @@ fn detachTaskForTest(workbench: *Runtime, task: *TestTask) void {
     var live = task.runtime.detach(.cold_start);
     live.execution.deinit();
     if (live.pinned_catalog) |*snapshot| {
-        workbench.projection_bytes -= snapshot.projected_bytes;
+        control.projection_bytes -= snapshot.projected_bytes;
         snapshot.deinit();
     }
 }
@@ -7861,10 +7861,10 @@ fn testPermissionRequest(tool_name: []const u8, arguments_json: []const u8) life
     };
 }
 
-fn finalizeTestTerminalEvents(workbench: *Runtime) void {
-    workbench.markTerminalRunsBeforeEventDrain();
-    workbench.finalizeMarkedTerminalRunsAfterEventDrain();
-    workbench.syncLifecycle();
+fn finalizeTestTerminalEvents(control: *Runtime) void {
+    control.markTerminalRunsBeforeEventDrain();
+    control.finalizeMarkedTerminalRunsAfterEventDrain();
+    control.syncLifecycle();
 }
 
 test "Workspace containment accepts platform roots and rejects path prefixes" {
@@ -7908,32 +7908,32 @@ test "automatic Workspace root is optional and reserved from user registration" 
         canonical_storage[0..canonical_len],
     );
     defer root.deinit();
-    var workbench = try Runtime.init(
+    var control = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &test_agent_runtime,
         testLimits(),
         .{ .directories = .{ .automatic_workspace_root = &root } },
     );
-    defer workbench.deinit();
-    try std.testing.expect(workbench.automaticWorkspacesAvailable());
+    defer control.deinit();
+    try std.testing.expect(control.automaticWorkspacesAvailable());
     try std.testing.expectError(
         error.InvalidWorkspace,
-        workbench.openWorkspace(.{
-            .workspace_root = workbench.automatic_workspaces.?.canonicalRoot(),
+        control.openWorkspace(.{
+            .workspace_root = control.automatic_workspaces.?.canonicalRoot(),
             .trust = .explicitly_trusted,
         }),
     );
-    var allocation = try workbench.automatic_workspaces.?.allocate();
+    var allocation = try control.automatic_workspaces.?.allocate();
     defer allocation.deinit();
     try std.testing.expectError(
         error.InvalidWorkspace,
-        workbench.openWorkspace(.{
+        control.openWorkspace(.{
             .workspace_root = allocation.path(),
             .trust = .explicitly_trusted,
         }),
     );
-    try std.testing.expect(workbench.automatic_workspaces.?.rollback(&allocation));
+    try std.testing.expect(control.automatic_workspaces.?.rollback(&allocation));
 }
 
 test "Workspace registry owns empty selection recent use authorization and capacity" {
@@ -7956,7 +7956,7 @@ test "Workspace registry owns empty selection recent use authorization and capac
         std.testing.allocator,
     );
     defer std.testing.allocator.free(tests_path);
-    var workbench = try Runtime.init(
+    var control = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &test_agent_runtime,
@@ -7968,47 +7968,47 @@ test "Workspace registry owns empty selection recent use authorization and capac
         },
         .{},
     );
-    defer workbench.deinit();
+    defer control.deinit();
 
     try std.testing.expectError(
         error.InvalidWorkspace,
-        workbench.openWorkspace(.{
+        control.openWorkspace(.{
             .workspace_root = ".",
             .trust = .explicitly_trusted,
         }),
     );
-    const root_id = try workbench.openWorkspace(.{
+    const root_id = try control.openWorkspace(.{
         .workspace_root = root_path,
         .trust = .explicitly_trusted,
     });
     try std.testing.expect(root_id != 0);
-    try std.testing.expect(workbench.task_runtime.tasks[0] == null);
+    try std.testing.expect(control.task_runtime.tasks[0] == null);
 
-    const source_id = try workbench.openWorkspace(.{
+    const source_id = try control.openWorkspace(.{
         .workspace_root = source_path,
         .trust = .{ .temporary = root_path },
     });
     try std.testing.expect(source_id != root_id);
 
     var storage: [2]WorkspaceProjection = undefined;
-    const projections = try workbench.copyWorkspaceProjections(&storage);
+    const projections = try control.copyWorkspaceProjections(&storage);
     try std.testing.expectEqual(@as(usize, 2), projections.len);
     try std.testing.expectEqual(source_id, projections[0].id);
     try std.testing.expectEqual(WorkspaceAuthorization.available, projections[0].authorization);
     try std.testing.expectEqualStrings("src", projections[0].display_name);
     try std.testing.expect(std.fs.path.isAbsolute(projections[0].canonical_root));
 
-    try workbench.removeWorkspace(root_id);
-    try std.testing.expectEqual(@as(u64, 2), try workbench.workspaceEpoch(root_id));
-    const remaining = try workbench.copyWorkspaceProjections(&storage);
+    try control.removeWorkspace(root_id);
+    try std.testing.expectEqual(@as(u64, 2), try control.workspaceEpoch(root_id));
+    const remaining = try control.copyWorkspaceProjections(&storage);
     try std.testing.expectEqual(@as(usize, 1), remaining.len);
 
-    const restored_id = try workbench.openWorkspace(.{
+    const restored_id = try control.openWorkspace(.{
         .workspace_root = root_path,
         .trust = .explicitly_trusted,
     });
     try std.testing.expectEqual(root_id, restored_id);
-    const restored = try workbench.copyWorkspaceProjections(&storage);
+    const restored = try control.copyWorkspaceProjections(&storage);
     try std.testing.expectEqual(root_id, restored[0].id);
     try std.testing.expectEqual(@as(u64, 3), restored[0].epoch);
     try std.testing.expectEqual(WorkspaceAuthorization.available, restored[0].authorization);
@@ -8016,11 +8016,11 @@ test "Workspace registry owns empty selection recent use authorization and capac
     var no_space: [0]WorkspaceProjection = .{};
     try std.testing.expectError(
         error.WorkspaceCapacity,
-        workbench.copyWorkspaceProjections(&no_space),
+        control.copyWorkspaceProjections(&no_space),
     );
     try std.testing.expectError(
         error.WorkspaceCapacity,
-        workbench.openWorkspace(.{
+        control.openWorkspace(.{
             .workspace_root = tests_path,
             .trust = .{ .temporary = root_path },
         }),
@@ -8028,45 +8028,45 @@ test "Workspace registry owns empty selection recent use authorization and capac
 }
 
 test "Workspace projection derives aggregate Task signals and removal preserves history" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
+    var control = try testRuntime();
+    defer control.deinit();
     var storage: [2]WorkspaceProjection = undefined;
 
-    const running = try workbench.copyWorkspaceProjections(&storage);
+    const running = try control.copyWorkspaceProjections(&storage);
     try std.testing.expectEqual(@as(u32, 1), running[0].signals.running);
     try std.testing.expectEqual(@as(u32, 0), running[0].signals.attention);
 
-    workbench.task_runtime.tasks[0].?.durable.runs[0].?.active_phase = .waiting_ui;
-    const attention = workbench.workspaceSignals(1);
+    control.task_runtime.tasks[0].?.durable.runs[0].?.active_phase = .waiting_ui;
+    const attention = control.workspaceSignals(1);
     try std.testing.expectEqual(@as(u32, 0), attention.running);
     try std.testing.expectEqual(@as(u32, 1), attention.attention);
 
-    const run = &workbench.task_runtime.tasks[0].?.durable.runs[0].?;
+    const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
     _ = commitTerminal(run, .failed, .failed, null, .reusable, "", false);
-    finalizeTestTerminalEvents(&workbench);
-    const failed = try workbench.copyWorkspaceProjections(&storage);
+    finalizeTestTerminalEvents(&control);
+    const failed = try control.copyWorkspaceProjections(&storage);
     try std.testing.expectEqual(@as(u32, 1), failed[0].signals.failed_or_interrupted);
 
-    const task_root = workbench.task_runtime.tasks[0].?.durable.workspace_root;
-    workbench.releaseTaskAttachmentNoFail(&workbench.task_runtime.tasks[0].?, .cold_start);
-    try workbench.removeWorkspace(1);
-    try std.testing.expect(workbench.task_runtime.tasks[0] != null);
-    try std.testing.expectEqualStrings(task_root, workbench.task_runtime.tasks[0].?.durable.workspace_root);
-    const removed = try workbench.copyWorkspaceProjections(&storage);
+    const task_root = control.task_runtime.tasks[0].?.durable.workspace_root;
+    control.releaseTaskAttachmentNoFail(&control.task_runtime.tasks[0].?, .cold_start);
+    try control.removeWorkspace(1);
+    try std.testing.expect(control.task_runtime.tasks[0] != null);
+    try std.testing.expectEqualStrings(task_root, control.task_runtime.tasks[0].?.durable.workspace_root);
+    const removed = try control.copyWorkspaceProjections(&storage);
     try std.testing.expectEqual(@as(usize, 0), removed.len);
-    try std.testing.expectError(error.TaskClosing, workbench.runTask(3, .{ .text = "continue" }));
+    try std.testing.expectError(error.TaskClosing, control.runTask(3, .{ .text = "continue" }));
 }
 
 test "Product Control snapshot serializer matches the Renderer contract fixture" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
+    var control = try testRuntime();
+    defer control.deinit();
 
     try std.testing.expectEqual(
         CatalogAvailability.uninitialized,
-        (try workbench.taskCatalog(3)).availability,
+        (try control.taskCatalog(3)).availability,
     );
     var storage: [4096]u8 = undefined;
-    const snapshot = try workbench.writeSnapshot(&storage);
+    const snapshot = try control.writeSnapshot(&storage);
     const fixture = std.mem.trimEnd(
         u8,
         contract_fixture.snapshot,
@@ -8085,14 +8085,14 @@ test "Product Control snapshot serializer matches the Renderer contract fixture"
 }
 
 test "Restore permission stats are projected as runtime health" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
-    workbench.task_runtime.tasks[0].?.runtime.last_restore_permission = .{
+    var control = try testRuntime();
+    defer control.deinit();
+    control.task_runtime.tasks[0].?.runtime.last_restore_permission = .{
         .restored_rules = 2,
         .invalidated_rules = 1,
     };
     var storage: [8192]u8 = undefined;
-    const snapshot = try workbench.writeSnapshot(&storage);
+    const snapshot = try control.writeSnapshot(&storage);
     try std.testing.expect(
         std.mem.indexOf(u8, snapshot, "\"restorePermission\":{\"restoredRules\":\"2\",\"invalidatedRules\":\"1\"}") != null,
     );
@@ -8368,19 +8368,19 @@ test "Automatic Workspace history survives an unavailable allocator" {
 
 test "Task persistence restore failure blocks product mutations" {
     test_agent_runtime.io = std.testing.io;
-    var workbench = try Runtime.init(
+    var control = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &test_agent_runtime,
         testLimits(),
         .{ .task_persistence = .{ .restore_failed = true } },
     );
-    defer workbench.deinit();
-    try installTestExecution(&workbench);
-    try std.testing.expectEqual(TaskPersistenceHealth.read_failed, workbench.task_persistence_health);
+    defer control.deinit();
+    try installTestExecution(&control);
+    try std.testing.expectEqual(TaskPersistenceHealth.read_failed, control.task_persistence_health);
     try std.testing.expectError(
         error.TaskPersistenceUnavailable,
-        workbench.openWorkspace(.{
+        control.openWorkspace(.{
             .workspace_root = "/tmp/metawork-test",
             .trust = .explicitly_trusted,
         }),
@@ -8394,27 +8394,27 @@ test "Task persistence failure rolls back metadata and closes mutation admission
         .storage = persistence_storage,
         .result = .failed,
     };
-    var workbench = try testRuntime();
-    defer workbench.deinit();
-    workbench.task_persistence = persistence.capability(null);
-    workbench.task_persistence_health = .ready;
-    const previous_recent_order = workbench.task_runtime.tasks[0].?.durable.recent_order;
-    const previous_next_recent_order = workbench.task_runtime.next_recent_order;
+    var control = try testRuntime();
+    defer control.deinit();
+    control.task_persistence = persistence.capability(null);
+    control.task_persistence_health = .ready;
+    const previous_recent_order = control.task_runtime.tasks[0].?.durable.recent_order;
+    const previous_next_recent_order = control.task_runtime.next_recent_order;
 
     try std.testing.expectError(
         error.TaskPersistenceFailed,
-        workbench.renameTask(3, "must not publish"),
+        control.renameTask(3, "must not publish"),
     );
-    try std.testing.expectEqualStrings("", workbench.task_runtime.tasks[0].?.durable.title);
+    try std.testing.expectEqualStrings("", control.task_runtime.tasks[0].?.durable.title);
     try std.testing.expectEqual(
         previous_recent_order,
-        workbench.task_runtime.tasks[0].?.durable.recent_order,
+        control.task_runtime.tasks[0].?.durable.recent_order,
     );
-    try std.testing.expectEqual(previous_next_recent_order, workbench.task_runtime.next_recent_order);
-    try std.testing.expectEqual(TaskPersistenceHealth.write_failed, workbench.task_persistence_health);
+    try std.testing.expectEqual(previous_next_recent_order, control.task_runtime.next_recent_order);
+    try std.testing.expectEqual(TaskPersistenceHealth.write_failed, control.task_persistence_health);
     try std.testing.expectError(
         error.TaskPersistenceUnavailable,
-        workbench.setTaskArchived(3, true),
+        control.setTaskArchived(3, true),
     );
 }
 
@@ -8425,26 +8425,26 @@ test "Task persistence failure rolls back deletion before physical release" {
         .storage = persistence_storage,
         .result = .failed,
     };
-    var workbench = try testRuntime();
-    defer workbench.deinit();
+    var control = try testRuntime();
+    defer control.deinit();
 
-    const task = &workbench.task_runtime.tasks[0].?;
+    const task = &control.task_runtime.tasks[0].?;
     task.runtime.active_run_id = 0;
     const completed = &task.durable.runs[0].?;
     _ = commitTerminal(completed, .completed, .completed, null, .reusable, "", false);
-    finalizeTestTerminalEvents(&workbench);
+    finalizeTestTerminalEvents(&control);
     task.durable.archived = true;
-    workbench.releaseTaskAttachmentNoFail(task, .cold_start);
-    workbench.task_persistence = persistence.capability(null);
-    workbench.task_persistence_health = .ready;
-    const tracked_before_delete = workbench.projection_bytes;
+    control.releaseTaskAttachmentNoFail(task, .cold_start);
+    control.task_persistence = persistence.capability(null);
+    control.task_persistence_health = .ready;
+    const tracked_before_delete = control.projection_bytes;
 
-    try std.testing.expectError(error.TaskPersistenceFailed, workbench.deleteTask(3));
-    try std.testing.expect(workbench.task_runtime.find(3) != null);
-    try std.testing.expectEqual(tracked_before_delete, workbench.projection_bytes);
-    try std.testing.expectEqual(TaskPersistenceHealth.write_failed, workbench.task_persistence_health);
+    try std.testing.expectError(error.TaskPersistenceFailed, control.deleteTask(3));
+    try std.testing.expect(control.task_runtime.find(3) != null);
+    try std.testing.expectEqual(tracked_before_delete, control.projection_bytes);
+    try std.testing.expectEqual(TaskPersistenceHealth.write_failed, control.task_persistence_health);
     var snapshot_storage: [128 * 1024]u8 = undefined;
-    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    const snapshot = try control.writeSnapshot(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
@@ -8474,69 +8474,69 @@ test "Task persistence failure rolls back Workspace upsert candidates" {
     };
 
     {
-        var workbench = try Runtime.init(
+        var control = try Runtime.init(
             std.testing.allocator,
             std.testing.io,
             &test_agent_runtime,
             testLimits(),
             .{ .task_persistence = persistence.capability(null) },
         );
-        defer workbench.deinit();
-        const next_workspace_id = workbench.next_workspace_id;
-        const next_recent_order = workbench.next_workspace_recent_order;
+        defer control.deinit();
+        const next_workspace_id = control.next_workspace_id;
+        const next_recent_order = control.next_workspace_recent_order;
         try std.testing.expectError(
             error.TaskPersistenceFailed,
-            workbench.openWorkspace(.{
+            control.openWorkspace(.{
                 .workspace_root = root_path,
                 .trust = .explicitly_trusted,
             }),
         );
-        try std.testing.expectEqual(@as(usize, 0), workbench.workspaceCount(.manual));
-        try std.testing.expectEqual(next_workspace_id, workbench.next_workspace_id);
-        try std.testing.expectEqual(next_recent_order, workbench.next_workspace_recent_order);
+        try std.testing.expectEqual(@as(usize, 0), control.workspaceCount(.manual));
+        try std.testing.expectEqual(next_workspace_id, control.next_workspace_id);
+        try std.testing.expectEqual(next_recent_order, control.next_workspace_recent_order);
     }
 
     persistence.result = .committed;
-    var workbench = try Runtime.init(
+    var control = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &test_agent_runtime,
         .{ .max_workspaces = 1 },
         .{ .task_persistence = persistence.capability(null) },
     );
-    defer workbench.deinit();
-    const root_id = try workbench.openWorkspace(.{
+    defer control.deinit();
+    const root_id = try control.openWorkspace(.{
         .workspace_root = root_path,
         .trust = .explicitly_trusted,
     });
-    try workbench.removeWorkspace(root_id);
-    const hidden = workbench.findWorkspace(root_id) orelse
+    try control.removeWorkspace(root_id);
+    const hidden = control.findWorkspace(root_id) orelse
         return error.TestUnexpectedResult;
     try std.testing.expect(!hidden.visible);
     const hidden_epoch = hidden.epoch;
-    const next_workspace_id = workbench.next_workspace_id;
-    const next_recent_order = workbench.next_workspace_recent_order;
+    const next_workspace_id = control.next_workspace_id;
+    const next_recent_order = control.next_workspace_recent_order;
     persistence.result = .failed;
     try std.testing.expectError(
         error.TaskPersistenceFailed,
-        workbench.openWorkspace(.{
+        control.openWorkspace(.{
             .workspace_root = source_path,
             .trust = .explicitly_trusted,
         }),
     );
-    const restored_hidden = workbench.findWorkspace(root_id) orelse
+    const restored_hidden = control.findWorkspace(root_id) orelse
         return error.TestUnexpectedResult;
     try std.testing.expect(!restored_hidden.visible);
     try std.testing.expectEqual(hidden_epoch, restored_hidden.epoch);
     try std.testing.expectEqualStrings(root_path, restored_hidden.canonical_root);
-    try std.testing.expect(workbench.findWorkspaceByRoot(source_path) == null);
-    try std.testing.expectEqual(next_workspace_id, workbench.next_workspace_id);
-    try std.testing.expectEqual(next_recent_order, workbench.next_workspace_recent_order);
+    try std.testing.expect(control.findWorkspaceByRoot(source_path) == null);
+    try std.testing.expectEqual(next_workspace_id, control.next_workspace_id);
+    try std.testing.expectEqual(next_recent_order, control.next_workspace_recent_order);
 }
 
 test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
+    var control = try testRuntime();
+    defer control.deinit();
     var automatic_tmp = std.testing.tmpDir(.{});
     defer automatic_tmp.cleanup();
     var automatic_root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -8552,12 +8552,12 @@ test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {
     defer automatic_root.deinit();
     var clock: TestScheduleClock = .{ .now = 1_000 };
     var persistence: TestSchedulePersistence = .{};
-    workbench.schedule_timer = clock.timer();
-    workbench.schedule_persistence = persistence.capability();
-    workbench.schedule_persistence_health = .ready;
+    control.schedule_timer = clock.timer();
+    control.schedule_persistence = persistence.capability();
+    control.schedule_persistence_health = .ready;
     try std.testing.expectError(
         error.WorkspaceUnavailable,
-        workbench.createScheduledTask(.{
+        control.createScheduledTask(.{
             .title = "Independent review",
             .expected_execution_generation = 1,
             .input = "Review current work",
@@ -8565,10 +8565,10 @@ test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {
         }),
     );
     try std.testing.expectEqual(@as(usize, 0), persistence.commits);
-    workbench.automatic_workspaces = automatic_workspace_allocator.Allocator.init(
+    control.automatic_workspaces = automatic_workspace_allocator.Allocator.init(
         &automatic_root,
     );
-    const id = try workbench.createScheduledTask(.{
+    const id = try control.createScheduledTask(.{
         .title = "Review SECRET-KEY",
         .expected_execution_generation = 1,
         .input = "Inspect SECRET-KEY usage",
@@ -8578,10 +8578,10 @@ test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {
         } },
     });
     try std.testing.expect(clock.armed_at == null);
-    workbench.setScheduleBackgroundAvailableNoFail(true);
+    control.setScheduleBackgroundAvailableNoFail(true);
     try std.testing.expectEqual(@as(u64, 2_000), clock.armed_at.?);
     try std.testing.expectEqual(@as(usize, 1), persistence.commits);
-    const item = workbench.scheduled_tasks.find(id).?;
+    const item = control.scheduled_tasks.find(id).?;
     try std.testing.expect(item.title_redacted);
     try std.testing.expect(
         std.mem.indexOf(u8, item.title, "SECRET-KEY") == null,
@@ -8595,43 +8595,43 @@ test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {
     );
     const storage = try std.testing.allocator.alloc(
         u8,
-        workbench.limits.max_snapshot_bytes,
+        control.limits.max_snapshot_bytes,
     );
     defer std.testing.allocator.free(storage);
-    const snapshot = try workbench.writeSnapshot(storage);
+    const snapshot = try control.writeSnapshot(storage);
     try std.testing.expect(
         std.mem.indexOf(u8, snapshot, "\"scheduledTasks\":[{") != null,
     );
     try std.testing.expect(
         std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null,
     );
-    try workbench.setScheduledTaskEnabled(id, item.epoch, false);
+    try control.setScheduledTaskEnabled(id, item.epoch, false);
     try std.testing.expectEqual(@as(usize, 2), persistence.commits);
     try std.testing.expect(clock.armed_at == null);
     try std.testing.expectEqual(
         scheduled_tasks_impl.Health.paused,
-        workbench.scheduled_tasks.find(id).?.health,
+        control.scheduled_tasks.find(id).?.health,
     );
-    const committed_epoch = workbench.scheduled_tasks.find(id).?.epoch;
+    const committed_epoch = control.scheduled_tasks.find(id).?.epoch;
     persistence.result = .failed;
     try std.testing.expectError(
         error.ScheduledTaskPersistenceFailed,
-        workbench.deleteScheduledTask(id, committed_epoch),
+        control.deleteScheduledTask(id, committed_epoch),
     );
-    try std.testing.expect(workbench.scheduled_tasks.find(id) != null);
+    try std.testing.expect(control.scheduled_tasks.find(id) != null);
     try std.testing.expectEqual(
         committed_epoch,
-        workbench.scheduled_tasks.find(id).?.epoch,
+        control.scheduled_tasks.find(id).?.epoch,
     );
     try std.testing.expectEqual(
         SchedulePersistenceHealth.write_failed,
-        workbench.schedule_persistence_health,
+        control.schedule_persistence_health,
     );
 }
 
 test "Scheduled Task execution drift becomes needs attention without blocking Account" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
+    var control = try testRuntime();
+    defer control.deinit();
     var automatic_tmp = std.testing.tmpDir(.{});
     defer automatic_tmp.cleanup();
     var automatic_root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -8647,14 +8647,14 @@ test "Scheduled Task execution drift becomes needs attention without blocking Ac
     defer automatic_root.deinit();
     var clock: TestScheduleClock = .{ .now = 1_000 };
     var persistence: TestSchedulePersistence = .{};
-    workbench.schedule_timer = clock.timer();
-    workbench.schedule_persistence = persistence.capability();
-    workbench.schedule_persistence_health = .ready;
-    workbench.automatic_workspaces = automatic_workspace_allocator.Allocator.init(
+    control.schedule_timer = clock.timer();
+    control.schedule_persistence = persistence.capability();
+    control.schedule_persistence_health = .ready;
+    control.automatic_workspaces = automatic_workspace_allocator.Allocator.init(
         &automatic_root,
     );
-    workbench.setScheduleBackgroundAvailableNoFail(true);
-    const id = try workbench.createScheduledTask(.{
+    control.setScheduleBackgroundAvailableNoFail(true);
+    const id = try control.createScheduledTask(.{
         .title = "Review current work",
         .expected_execution_generation = 1,
         .input = "Review current work",
@@ -8662,11 +8662,11 @@ test "Scheduled Task execution drift becomes needs attention without blocking Ac
     });
     try std.testing.expectEqual(@as(u64, 2_000), clock.armed_at.?);
 
-    workbench.execution.generation = 2;
-    workbench.account.execution_generation = 2;
-    try std.testing.expect(workbench.reconcileScheduledTaskBindingsNoFail());
+    control.execution.generation = 2;
+    control.account.execution_generation = 2;
+    try std.testing.expect(control.reconcileScheduledTaskBindingsNoFail());
 
-    const item = workbench.scheduled_tasks.find(id).?;
+    const item = control.scheduled_tasks.find(id).?;
     try std.testing.expect(!item.enabled);
     try std.testing.expectEqual(scheduled_tasks_impl.Health.needs_attention, item.health);
     try std.testing.expectEqual(
@@ -8679,8 +8679,8 @@ test "Scheduled Task execution drift becomes needs attention without blocking Ac
 }
 
 test "Skill catalog snapshot reports redaction without exposing credential bytes" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
+    var control = try testRuntime();
+    defer control.deinit();
     const skills = [_]SkillProjection{.{
         .skill_id = "builtin.review",
         .skill_policy_key = "review",
@@ -8697,7 +8697,7 @@ test "Skill catalog snapshot reports redaction without exposing credential bytes
     }};
     var storage: [2048]u8 = undefined;
     var writer = std.Io.Writer.fixed(&storage);
-    try skill_runtime.Runtime.writeCatalogProjection(&writer, workbench.skillTextProjection(), .{
+    try skill_runtime.Runtime.writeCatalogProjection(&writer, control.skillTextProjection(), .{
         .availability = .ready,
         .revision = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         .selection_revision = 1,
@@ -8712,7 +8712,7 @@ test "Skill catalog snapshot reports redaction without exposing credential bytes
     );
 }
 
-fn installTestCommittedSkillAuthorities(workbench: *Runtime) !void {
+fn installTestCommittedSkillAuthorities(control: *Runtime) !void {
     const source_skills = [_]lifecycle.CatalogSkill{.{
         .skill_id = "builtin.review",
         .skill_policy_key = "review",
@@ -8728,7 +8728,7 @@ fn installTestCommittedSkillAuthorities(workbench: *Runtime) !void {
         .max_values = 1,
     }};
     var personal_catalog = try CatalogSnapshot.init(
-        workbench.allocator,
+        control.allocator,
         .{
             .revision = "catalog-1",
             .health = .healthy,
@@ -8738,88 +8738,88 @@ fn installTestCommittedSkillAuthorities(workbench: *Runtime) !void {
         },
         1,
         &.{},
-        catalogSnapshotLimits(workbench.limits),
-        workbench.limits.max_projection_bytes - workbench.projection_bytes,
+        catalogSnapshotLimits(control.limits),
+        control.limits.max_projection_bytes - control.projection_bytes,
     );
     errdefer personal_catalog.deinit();
     var workspace_catalog = try personal_catalog.clone(
-        workbench.allocator,
-        catalogSnapshotLimits(workbench.limits),
-        workbench.limits.max_projection_bytes -
-            workbench.projection_bytes -
+        control.allocator,
+        catalogSnapshotLimits(control.limits),
+        control.limits.max_projection_bytes -
+            control.projection_bytes -
             personal_catalog.projected_bytes,
     );
     errdefer workspace_catalog.deinit();
 
-    workbench.skill.testInstallPersonalSnapshot(
+    control.skill.testInstallPersonalSnapshot(
         personal_catalog,
-        workbench.skillProjectionBudget(),
+        control.skillProjectionBudget(),
     );
     personal_catalog = undefined;
-    try workbench.skill.testInstallWorkspaceSnapshot(
+    try control.skill.testInstallWorkspaceSnapshot(
         1,
         1,
         workspace_catalog,
-        workbench.skillProjectionBudget(),
+        control.skillProjectionBudget(),
     );
     workspace_catalog = undefined;
 }
 
-fn testWorkspaceSkillProjection(workbench: *Runtime) CatalogProjection {
-    return workbench.skill.workspaceCatalogProjection(1, 1) catch unreachable;
+fn testWorkspaceSkillProjection(control: *Runtime) CatalogProjection {
+    return control.skill.workspaceCatalogProjection(1, 1) catch unreachable;
 }
 
 test "definite Skill enablement persistence failure preserves committed authorities" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
-    try installTestCommittedSkillAuthorities(&workbench);
+    var control = try testRuntime();
+    defer control.deinit();
+    try installTestCommittedSkillAuthorities(&control);
 
-    workbench.skill.testNoteEnablementPersistenceFailure(
+    control.skill.testNoteEnablementPersistenceFailure(
         error.WriteFailed,
-        workbench.skillProjectionBudget(),
+        control.skillProjectionBudget(),
     );
 
-    try std.testing.expectEqual(SkillEnablementHealth.write_failed, workbench.skill.enablementHealth());
+    try std.testing.expectEqual(SkillEnablementHealth.write_failed, control.skill.enablementHealth());
     try std.testing.expectEqual(
         CatalogAvailability.ready,
-        workbench.skill.personalCatalogProjection().availability,
+        control.skill.personalCatalogProjection().availability,
     );
     try std.testing.expectEqual(
         CatalogAvailability.ready,
-        testWorkspaceSkillProjection(&workbench).availability,
+        testWorkspaceSkillProjection(&control).availability,
     );
     try std.testing.expectEqualStrings(
         "catalog-1",
-        workbench.skill.personalCatalogProjection().revision,
+        control.skill.personalCatalogProjection().revision,
     );
     try std.testing.expectEqualStrings(
         "catalog-1",
-        testWorkspaceSkillProjection(&workbench).revision,
+        testWorkspaceSkillProjection(&control).revision,
     );
 }
 
 test "unknown Skill enablement persistence outcome freezes authorities" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
-    try installTestCommittedSkillAuthorities(&workbench);
+    var control = try testRuntime();
+    defer control.deinit();
+    try installTestCommittedSkillAuthorities(&control);
 
-    workbench.skill.testNoteEnablementPersistenceFailure(
+    control.skill.testNoteEnablementPersistenceFailure(
         error.PersistenceOutcomeUnknown,
-        workbench.skillProjectionBudget(),
+        control.skillProjectionBudget(),
     );
 
-    try std.testing.expectEqual(SkillEnablementHealth.outcome_unknown, workbench.skill.enablementHealth());
+    try std.testing.expectEqual(SkillEnablementHealth.outcome_unknown, control.skill.enablementHealth());
     try std.testing.expectEqual(
         CatalogAvailability.unavailable,
-        workbench.skill.personalCatalogProjection().availability,
+        control.skill.personalCatalogProjection().availability,
     );
     try std.testing.expectEqual(
         CatalogAvailability.unavailable,
-        testWorkspaceSkillProjection(&workbench).availability,
+        testWorkspaceSkillProjection(&control).availability,
     );
     try std.testing.expectError(
         error.PersistenceFailed,
-        workbench.setSkillEnabled(.{
+        control.setSkillEnabled(.{
             .scope = .personal,
             .skill_policy_key = "review",
             .state = .disabled,
@@ -8840,9 +8840,9 @@ test "Workspace Skill enablement uses double revision CAS and leaves pinned cata
     );
     defer file_store.deinit();
 
-    var workbench = try testRuntime();
-    defer workbench.deinit();
-    workbench.skill.testSetEnablementPersistence(&file_store);
+    var control = try testRuntime();
+    defer control.deinit();
+    control.skill.testSetEnablementPersistence(&file_store);
     const source_skills = [_]lifecycle.CatalogSkill{.{
         .skill_id = "builtin.review",
         .skill_policy_key = "review",
@@ -8858,7 +8858,7 @@ test "Workspace Skill enablement uses double revision CAS and leaves pinned cata
         .max_values = 1,
     }};
     var workspace_catalog = try CatalogSnapshot.init(
-        workbench.allocator,
+        control.allocator,
         .{
             .revision = "catalog-1",
             .health = .healthy,
@@ -8868,26 +8868,26 @@ test "Workspace Skill enablement uses double revision CAS and leaves pinned cata
         },
         1,
         &.{},
-        catalogSnapshotLimits(workbench.limits),
-        workbench.limits.max_projection_bytes - workbench.projection_bytes,
+        catalogSnapshotLimits(control.limits),
+        control.limits.max_projection_bytes - control.projection_bytes,
     );
     var pinned = try workspace_catalog.clone(
-        workbench.allocator,
-        catalogSnapshotLimits(workbench.limits),
-        workbench.limits.max_projection_bytes -
-            workbench.projection_bytes -
+        control.allocator,
+        catalogSnapshotLimits(control.limits),
+        control.limits.max_projection_bytes -
+            control.projection_bytes -
             workspace_catalog.projected_bytes,
     );
     defer pinned.deinit();
-    try workbench.skill.testInstallWorkspaceSnapshot(
+    try control.skill.testInstallWorkspaceSnapshot(
         1,
         1,
         workspace_catalog,
-        workbench.skillProjectionBudget(),
+        control.skillProjectionBudget(),
     );
     workspace_catalog = undefined;
 
-    const next_revision = try workbench.setSkillEnabled(.{
+    const next_revision = try control.setSkillEnabled(.{
         .scope = .{ .project = .{
             .workspace_id = 1,
             .expected_workspace_epoch = 1,
@@ -8900,14 +8900,14 @@ test "Workspace Skill enablement uses double revision CAS and leaves pinned cata
     try std.testing.expectEqual(@as(u64, 2), next_revision);
     try std.testing.expectEqual(
         @as(u64, 2),
-        testWorkspaceSkillProjection(&workbench).selection_revision.?,
+        testWorkspaceSkillProjection(&control).selection_revision.?,
     );
-    try std.testing.expect(!testWorkspaceSkillProjection(&workbench).skills[0].enabled);
+    try std.testing.expect(!testWorkspaceSkillProjection(&control).skills[0].enabled);
     try std.testing.expectEqual(@as(u64, 1), pinned.selection_revision);
     try std.testing.expect(pinned.skills[0].enabled);
     try std.testing.expectError(
         error.StaleCatalog,
-        workbench.setSkillEnabled(.{
+        control.setSkillEnabled(.{
             .scope = .{ .project = .{
                 .workspace_id = 1,
                 .expected_workspace_epoch = 1,
@@ -8931,9 +8931,9 @@ test "User Skill defaults stamp Personal and Workspace catalogs while project ov
     );
     defer file_store.deinit();
 
-    var workbench = try testRuntime();
-    defer workbench.deinit();
-    workbench.skill.testSetEnablementPersistence(&file_store);
+    var control = try testRuntime();
+    defer control.deinit();
+    control.skill.testSetEnablementPersistence(&file_store);
     const source_skills = [_]lifecycle.CatalogSkill{.{
         .skill_id = "builtin.review",
         .skill_policy_key = "review",
@@ -8949,7 +8949,7 @@ test "User Skill defaults stamp Personal and Workspace catalogs while project ov
         .max_values = 1,
     }};
     var personal_catalog = try CatalogSnapshot.init(
-        workbench.allocator,
+        control.allocator,
         .{
             .revision = "personal-1",
             .health = .healthy,
@@ -8959,17 +8959,17 @@ test "User Skill defaults stamp Personal and Workspace catalogs while project ov
         },
         1,
         &.{},
-        catalogSnapshotLimits(workbench.limits),
-        workbench.limits.max_projection_bytes - workbench.projection_bytes,
+        catalogSnapshotLimits(control.limits),
+        control.limits.max_projection_bytes - control.projection_bytes,
     );
-    workbench.skill.testInstallPersonalSnapshot(
+    control.skill.testInstallPersonalSnapshot(
         personal_catalog,
-        workbench.skillProjectionBudget(),
+        control.skillProjectionBudget(),
     );
     personal_catalog = undefined;
 
     var workspace_catalog = try CatalogSnapshot.init(
-        workbench.allocator,
+        control.allocator,
         .{
             .revision = "workspace-1",
             .health = .healthy,
@@ -8979,30 +8979,30 @@ test "User Skill defaults stamp Personal and Workspace catalogs while project ov
         },
         1,
         &.{},
-        catalogSnapshotLimits(workbench.limits),
-        workbench.limits.max_projection_bytes - workbench.projection_bytes,
+        catalogSnapshotLimits(control.limits),
+        control.limits.max_projection_bytes - control.projection_bytes,
     );
-    try workbench.skill.testInstallWorkspaceSnapshot(
+    try control.skill.testInstallWorkspaceSnapshot(
         1,
         1,
         workspace_catalog,
-        workbench.skillProjectionBudget(),
+        control.skillProjectionBudget(),
     );
     workspace_catalog = undefined;
 
-    try std.testing.expectEqual(@as(u64, 2), try workbench.setSkillEnabled(.{
+    try std.testing.expectEqual(@as(u64, 2), try control.setSkillEnabled(.{
         .scope = .personal,
         .skill_policy_key = "review",
         .state = .disabled,
         .expected_catalog_revision = "personal-1",
         .expected_selection_revision = 1,
     }));
-    try std.testing.expectEqual(@as(u64, 2), workbench.skill.personalCatalogProjection().selection_revision.?);
-    try std.testing.expectEqual(@as(u64, 2), testWorkspaceSkillProjection(&workbench).selection_revision.?);
-    try std.testing.expect(!workbench.skill.personalCatalogProjection().skills[0].enabled);
-    try std.testing.expect(!testWorkspaceSkillProjection(&workbench).skills[0].enabled);
+    try std.testing.expectEqual(@as(u64, 2), control.skill.personalCatalogProjection().selection_revision.?);
+    try std.testing.expectEqual(@as(u64, 2), testWorkspaceSkillProjection(&control).selection_revision.?);
+    try std.testing.expect(!control.skill.personalCatalogProjection().skills[0].enabled);
+    try std.testing.expect(!testWorkspaceSkillProjection(&control).skills[0].enabled);
 
-    try std.testing.expectEqual(@as(u64, 3), try workbench.setSkillEnabled(.{
+    try std.testing.expectEqual(@as(u64, 3), try control.setSkillEnabled(.{
         .scope = .{ .project = .{
             .workspace_id = 1,
             .expected_workspace_epoch = 1,
@@ -9012,12 +9012,12 @@ test "User Skill defaults stamp Personal and Workspace catalogs while project ov
         .expected_catalog_revision = "workspace-1",
         .expected_selection_revision = 2,
     }));
-    try std.testing.expect(!workbench.skill.personalCatalogProjection().skills[0].enabled);
-    try std.testing.expect(testWorkspaceSkillProjection(&workbench).skills[0].enabled);
-    try std.testing.expectEqual(@as(u64, 2), workbench.skill.personalCatalogProjection().selection_revision.?);
-    try std.testing.expectEqual(@as(u64, 3), testWorkspaceSkillProjection(&workbench).selection_revision.?);
+    try std.testing.expect(!control.skill.personalCatalogProjection().skills[0].enabled);
+    try std.testing.expect(testWorkspaceSkillProjection(&control).skills[0].enabled);
+    try std.testing.expectEqual(@as(u64, 2), control.skill.personalCatalogProjection().selection_revision.?);
+    try std.testing.expectEqual(@as(u64, 3), testWorkspaceSkillProjection(&control).selection_revision.?);
 
-    try std.testing.expectEqual(@as(u64, 4), try workbench.setSkillEnabled(.{
+    try std.testing.expectEqual(@as(u64, 4), try control.setSkillEnabled(.{
         .scope = .{ .project = .{
             .workspace_id = 1,
             .expected_workspace_epoch = 1,
@@ -9027,11 +9027,11 @@ test "User Skill defaults stamp Personal and Workspace catalogs while project ov
         .expected_catalog_revision = "workspace-1",
         .expected_selection_revision = 3,
     }));
-    try std.testing.expect(!testWorkspaceSkillProjection(&workbench).skills[0].enabled);
+    try std.testing.expect(!testWorkspaceSkillProjection(&control).skills[0].enabled);
 
     var management_storage: [8192]u8 = undefined;
     var management_writer = std.Io.Writer.fixed(&management_storage);
-    try workbench.writeSkillManagement(&management_writer);
+    try control.writeSkillManagement(&management_writer);
     const management_projection = management_writer.buffered();
     try std.testing.expect(std.mem.indexOf(
         u8,
@@ -9056,9 +9056,9 @@ test "User Skill mutation does not require every Workspace to have committed aut
     );
     defer file_store.deinit();
 
-    var workbench = try testRuntime();
-    defer workbench.deinit();
-    workbench.skill.testSetEnablementPersistence(&file_store);
+    var control = try testRuntime();
+    defer control.deinit();
+    control.skill.testSetEnablementPersistence(&file_store);
     const source_skills = [_]lifecycle.CatalogSkill{.{
         .skill_id = "builtin.review",
         .skill_policy_key = "review",
@@ -9074,7 +9074,7 @@ test "User Skill mutation does not require every Workspace to have committed aut
         .max_values = 1,
     }};
     var personal_catalog = try CatalogSnapshot.init(
-        workbench.allocator,
+        control.allocator,
         .{
             .revision = "personal-1",
             .health = .healthy,
@@ -9084,16 +9084,16 @@ test "User Skill mutation does not require every Workspace to have committed aut
         },
         1,
         &.{},
-        catalogSnapshotLimits(workbench.limits),
-        workbench.limits.max_projection_bytes - workbench.projection_bytes,
+        catalogSnapshotLimits(control.limits),
+        control.limits.max_projection_bytes - control.projection_bytes,
     );
-    workbench.skill.testInstallPersonalSnapshot(
+    control.skill.testInstallPersonalSnapshot(
         personal_catalog,
-        workbench.skillProjectionBudget(),
+        control.skillProjectionBudget(),
     );
     personal_catalog = undefined;
 
-    try std.testing.expectEqual(@as(u64, 2), try workbench.setSkillEnabled(.{
+    try std.testing.expectEqual(@as(u64, 2), try control.setSkillEnabled(.{
         .scope = .personal,
         .skill_policy_key = "review",
         .state = .disabled,
@@ -9102,20 +9102,20 @@ test "User Skill mutation does not require every Workspace to have committed aut
     }));
     try std.testing.expectEqual(
         @as(u64, 2),
-        workbench.skill.enablementRevision(.{ .project = .{
+        control.skill.enablementRevision(.{ .project = .{
             .workspace_id = 1,
             .workspace_epoch = 1,
         } }),
     );
     try std.testing.expectEqual(
         CatalogAvailability.uninitialized,
-        testWorkspaceSkillProjection(&workbench).availability,
+        testWorkspaceSkillProjection(&control).availability,
     );
 }
 
 test "credential release permanently scrubs catalog and every Skill history field" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
+    var control = try testRuntime();
+    defer control.deinit();
     const source_skills = [_]lifecycle.CatalogSkill{.{
         .skill_id = "builtin.review",
         .skill_policy_key = "review",
@@ -9131,7 +9131,7 @@ test "credential release permanently scrubs catalog and every Skill history fiel
         .max_values = 1,
     }};
     var workspace_catalog = try CatalogSnapshot.init(
-        workbench.allocator,
+        control.allocator,
         .{
             .revision = "safe-revision",
             .health = .healthy,
@@ -9141,55 +9141,55 @@ test "credential release permanently scrubs catalog and every Skill history fiel
         },
         1,
         &.{},
-        catalogSnapshotLimits(workbench.limits),
-        workbench.limits.max_projection_bytes - workbench.projection_bytes,
+        catalogSnapshotLimits(control.limits),
+        control.limits.max_projection_bytes - control.projection_bytes,
     );
     const task_catalog = try workspace_catalog.clone(
-        workbench.allocator,
-        catalogSnapshotLimits(workbench.limits),
-        workbench.limits.max_projection_bytes -
-            workbench.projection_bytes -
+        control.allocator,
+        catalogSnapshotLimits(control.limits),
+        control.limits.max_projection_bytes -
+            control.projection_bytes -
             workspace_catalog.projected_bytes,
     );
-    try workbench.skill.testInstallWorkspaceSnapshot(
+    try control.skill.testInstallWorkspaceSnapshot(
         1,
         1,
         workspace_catalog,
-        workbench.skillProjectionBudget(),
+        control.skillProjectionBudget(),
     );
     workspace_catalog = undefined;
-    workbench.projection_bytes += task_catalog.projected_bytes;
-    const task = &workbench.task_runtime.tasks[0].?;
+    control.projection_bytes += task_catalog.projected_bytes;
+    const task = &control.task_runtime.tasks[0].?;
     task.runtime.attached().?.pinned_catalog = task_catalog;
     const run = &task.durable.runs[0].?;
     const history_input: RunInputRecord = history: {
-        const skill_id = try workbench.copyBounded(
+        const skill_id = try control.copyBounded(
             "history-SECRET-KEY",
-            workbench.limits.max_catalog_projection_bytes,
+            control.limits.max_catalog_projection_bytes,
         );
-        errdefer workbench.freeTracked(skill_id);
-        const revision = try workbench.copyBounded(
+        errdefer control.freeTracked(skill_id);
+        const revision = try control.copyBounded(
             "revision-SECRET-KEY",
-            workbench.limits.max_catalog_projection_bytes,
+            control.limits.max_catalog_projection_bytes,
         );
-        errdefer workbench.freeTracked(revision);
-        const invocation = try workbench.copyBounded(
+        errdefer control.freeTracked(revision);
+        const invocation = try control.copyBounded(
             "review-SECRET-KEY",
-            workbench.limits.max_catalog_projection_bytes,
+            control.limits.max_catalog_projection_bytes,
         );
-        errdefer workbench.freeTracked(invocation);
-        const display = try workbench.copyBounded(
+        errdefer control.freeTracked(invocation);
+        const display = try control.copyBounded(
             "Review SECRET-KEY",
-            workbench.limits.max_catalog_projection_bytes,
+            control.limits.max_catalog_projection_bytes,
         );
-        errdefer workbench.freeTracked(display);
-        const values = try workbench.allocator.alloc([]u8, 1);
-        errdefer workbench.allocator.free(values);
-        values[0] = try workbench.copyBounded(
+        errdefer control.freeTracked(display);
+        const values = try control.allocator.alloc([]u8, 1);
+        errdefer control.allocator.free(values);
+        values[0] = try control.copyBounded(
             "SECRET-KEY target",
-            workbench.limits.max_user_message_bytes,
+            control.limits.max_user_message_bytes,
         );
-        errdefer workbench.freeTracked(values[0]);
+        errdefer control.freeTracked(values[0]);
         break :history .{ .skill = .{
             .skill_id = skill_id,
             .catalog_revision = revision,
@@ -9198,125 +9198,125 @@ test "credential release permanently scrubs catalog and every Skill history fiel
             .argument_values = values,
         } };
     };
-    workbench.task_runtime.testDeinitRunInput(
+    control.task_runtime.testDeinitRunInput(
         &run.input,
-        workbench.taskRuntimeReleaseEffects(),
+        control.taskRuntimeReleaseEffects(),
     );
     run.input = history_input;
 
-    workbench.redactAllProductProjectionsNoFail("SECRET-KEY");
-    workbench.execution.clearNoFail();
+    control.redactAllProductProjectionsNoFail("SECRET-KEY");
+    control.execution.clearNoFail();
     var detached = task.runtime.detach(.cold_start);
     var detached_execution = detached.execution;
     detached_execution.deinit();
     if (detached.pinned_catalog) |*snapshot| {
-        workbench.projection_bytes -= snapshot.projected_bytes;
+        control.projection_bytes -= snapshot.projected_bytes;
         snapshot.deinit();
     }
     run.redaction_secret = &.{};
 
     var storage: [16 * 1024]u8 = undefined;
-    const snapshot = try workbench.writeSnapshot(&storage);
+    const snapshot = try control.writeSnapshot(&storage);
     try std.testing.expect(
         std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null,
     );
     try std.testing.expect(
         std.mem.indexOf(u8, snapshot, "\"redacted\":true") != null,
     );
-    try std.testing.expect(testWorkspaceSkillProjection(&workbench).redacted);
+    try std.testing.expect(testWorkspaceSkillProjection(&control).redacted);
     try std.testing.expect(task.runtime.pinnedCatalogConst() == null);
 }
 
 test "mutation admission rejects stale execution and binding facts" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
+    var control = try testRuntime();
+    defer control.deinit();
 
     try std.testing.expectError(
         error.ExecutionGenerationMismatch,
-        workbench.createTaskInWorkspace(1, 1, 0, null, null),
+        control.createTaskInWorkspace(1, 1, 0, null, null),
     );
     try std.testing.expectError(
         error.ExecutionGenerationMismatch,
-        workbench.createTaskInWorkspace(1, 1, 2, null, null),
+        control.createTaskInWorkspace(1, 1, 2, null, null),
     );
     try std.testing.expectError(
         error.WorkspaceEpochMismatch,
-        workbench.createTaskInWorkspace(1, 2, 1, null, null),
+        control.createTaskInWorkspace(1, 2, 1, null, null),
     );
     try std.testing.expectError(
         error.BindingEpochMismatch,
-        workbench.runTaskAtBinding(3, 2, .{ .text = "stale continuation" }),
+        control.runTaskAtBinding(3, 2, .{ .text = "stale continuation" }),
     );
 }
 
 test "Task metadata mutations preserve lifecycle guards and projection accounting" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
+    var control = try testRuntime();
+    defer control.deinit();
 
-    try std.testing.expectError(error.TaskBusy, workbench.setTaskArchived(3, true));
-    try std.testing.expectError(error.TaskNotArchived, workbench.deleteTask(3));
-    try std.testing.expectError(error.InvalidTaskTitle, workbench.renameTask(3, "  \n  "));
-    try std.testing.expectError(error.InvalidTaskTitle, workbench.renameTask(3, "bad\ttitle"));
-    try std.testing.expectError(error.InvalidTaskTitle, workbench.renameTask(3, &.{0xff}));
+    try std.testing.expectError(error.TaskBusy, control.setTaskArchived(3, true));
+    try std.testing.expectError(error.TaskNotArchived, control.deleteTask(3));
+    try std.testing.expectError(error.InvalidTaskTitle, control.renameTask(3, "  \n  "));
+    try std.testing.expectError(error.InvalidTaskTitle, control.renameTask(3, "bad\ttitle"));
+    try std.testing.expectError(error.InvalidTaskTitle, control.renameTask(3, &.{0xff}));
 
-    try workbench.renameTask(3, "Review release readiness");
-    try std.testing.expectEqualStrings("Review release readiness", workbench.task_runtime.tasks[0].?.durable.title);
+    try control.renameTask(3, "Review release readiness");
+    try std.testing.expectEqualStrings("Review release readiness", control.task_runtime.tasks[0].?.durable.title);
 
-    workbench.task_runtime.tasks[0].?.runtime.active_run_id = 0;
-    const completed = &workbench.task_runtime.tasks[0].?.durable.runs[0].?;
+    control.task_runtime.tasks[0].?.runtime.active_run_id = 0;
+    const completed = &control.task_runtime.tasks[0].?.durable.runs[0].?;
     _ = commitTerminal(completed, .completed, .completed, null, .reusable, "", false);
-    finalizeTestTerminalEvents(&workbench);
-    try workbench.setTaskArchived(3, true);
-    try std.testing.expect(workbench.task_runtime.tasks[0].?.durable.archived);
+    finalizeTestTerminalEvents(&control);
+    try control.setTaskArchived(3, true);
+    try std.testing.expect(control.task_runtime.tasks[0].?.durable.archived);
 
-    workbench.task_runtime.tasks[0].?.runtime.active_operation = .{ .restore = .{ .id = 1 } };
-    try std.testing.expectError(error.TaskBusy, workbench.setTaskArchived(3, false));
-    workbench.task_runtime.tasks[0].?.runtime.active_operation = .none;
-    workbench.task_runtime.tasks[0].?.deletion = .failed;
-    try workbench.setTaskArchived(3, false);
-    try std.testing.expectEqual(task_test_deletion.State.idle, workbench.task_runtime.tasks[0].?.deletion);
-    try workbench.setTaskArchived(3, true);
-    workbench.releaseTaskAttachmentNoFail(&workbench.task_runtime.tasks[0].?, .cold_start);
-    workbench.task_runtime.tasks[0].?.runtime.worker_references.store(1, .release);
-    try workbench.deleteTask(3);
-    try std.testing.expect(workbench.task_runtime.tasks[0] != null);
-    try std.testing.expectError(error.TaskBusy, workbench.renameTask(3, "too late"));
-    workbench.task_runtime.tasks[0].?.runtime.worker_references.store(0, .release);
-    const tracked_before_delete = workbench.projection_bytes;
-    _ = workbench.currentRevision();
-    try std.testing.expect(workbench.task_runtime.tasks[0] == null);
-    try std.testing.expect(workbench.projection_bytes < tracked_before_delete);
-    try std.testing.expectError(error.UnknownTask, workbench.renameTask(3, "gone"));
+    control.task_runtime.tasks[0].?.runtime.active_operation = .{ .restore = .{ .id = 1 } };
+    try std.testing.expectError(error.TaskBusy, control.setTaskArchived(3, false));
+    control.task_runtime.tasks[0].?.runtime.active_operation = .none;
+    control.task_runtime.tasks[0].?.deletion = .failed;
+    try control.setTaskArchived(3, false);
+    try std.testing.expectEqual(task_test_deletion.State.idle, control.task_runtime.tasks[0].?.deletion);
+    try control.setTaskArchived(3, true);
+    control.releaseTaskAttachmentNoFail(&control.task_runtime.tasks[0].?, .cold_start);
+    control.task_runtime.tasks[0].?.runtime.worker_references.store(1, .release);
+    try control.deleteTask(3);
+    try std.testing.expect(control.task_runtime.tasks[0] != null);
+    try std.testing.expectError(error.TaskBusy, control.renameTask(3, "too late"));
+    control.task_runtime.tasks[0].?.runtime.worker_references.store(0, .release);
+    const tracked_before_delete = control.projection_bytes;
+    _ = control.currentRevision();
+    try std.testing.expect(control.task_runtime.tasks[0] == null);
+    try std.testing.expect(control.projection_bytes < tracked_before_delete);
+    try std.testing.expectError(error.UnknownTask, control.renameTask(3, "gone"));
 }
 
 test "Run admission reserves a stable generation and rolls back every fallible allocation" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
-    const task = &workbench.task_runtime.tasks[0].?;
-    const tracked_before = workbench.projection_bytes;
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = &control.task_runtime.tasks[0].?;
+    const tracked_before = control.projection_bytes;
     const generation_before = task.durable.next_run_generation;
     var oversized_prompt: [1025]u8 = undefined;
     @memset(&oversized_prompt, 'x');
     try std.testing.expectError(
         error.ProjectionCapacity,
-        workbench.reserveRunRecord(task, .{ .text = &oversized_prompt }),
+        control.reserveRunRecord(task, .{ .text = &oversized_prompt }),
     );
-    try std.testing.expectEqual(tracked_before, workbench.projection_bytes);
+    try std.testing.expectEqual(tracked_before, control.projection_bytes);
     try std.testing.expectEqual(generation_before, task.durable.next_run_generation);
 
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
-    const allocator = workbench.allocator;
-    workbench.allocator = failing.allocator();
-    defer workbench.allocator = allocator;
+    const allocator = control.allocator;
+    control.allocator = failing.allocator();
+    defer control.allocator = allocator;
     try std.testing.expectError(
         error.OutOfMemory,
-        workbench.reserveRunRecord(task, .{ .text = "will fail" }),
+        control.reserveRunRecord(task, .{ .text = "will fail" }),
     );
-    workbench.allocator = allocator;
-    try std.testing.expectEqual(tracked_before, workbench.projection_bytes);
+    control.allocator = allocator;
+    try std.testing.expectEqual(tracked_before, control.projection_bytes);
     try std.testing.expectEqual(generation_before, task.durable.next_run_generation);
 
-    const slot = try workbench.reserveRunRecord(task, .{ .text = "reserved" });
+    const slot = try control.reserveRunRecord(task, .{ .text = "reserved" });
     const first_generation = task.durable.runs[slot].?.generation;
     try std.testing.expectEqual(
         task.durable.execution_generation,
@@ -9330,8 +9330,8 @@ test "Run admission reserves a stable generation and rolls back every fallible a
         task.durable.execution_model,
         task.durable.runs[slot].?.execution_model,
     );
-    workbench.discardRunRecord(task, slot);
-    const reused_slot = try workbench.reserveRunRecord(
+    control.discardRunRecord(task, slot);
+    const reused_slot = try control.reserveRunRecord(
         task,
         .{ .text = "reserved again" },
     );
@@ -9339,14 +9339,14 @@ test "Run admission reserves a stable generation and rolls back every fallible a
     try std.testing.expect(task.durable.runs[reused_slot].?.generation > first_generation);
     try std.testing.expectError(
         error.RunCapacity,
-        workbench.reserveRunRecord(task, .{ .text = "overflow" }),
+        control.reserveRunRecord(task, .{ .text = "overflow" }),
     );
-    workbench.discardRunRecord(task, reused_slot);
+    control.discardRunRecord(task, reused_slot);
 }
 
 test "Runtime starts without execution and fails Task admission closed" {
     test_agent_runtime.io = std.testing.io;
-    var workbench = try Runtime.init(
+    var control = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &test_agent_runtime,
@@ -9357,20 +9357,20 @@ test "Runtime starts without execution and fails Task admission closed" {
         },
         .{},
     );
-    defer workbench.deinit();
+    defer control.deinit();
     try std.testing.expectError(
         error.ExecutionUnavailable,
-        workbench.createTask(.{
+        control.createTask(.{
             .workspace_root = "/tmp",
             .trust = .{ .temporary = "/tmp" },
         }),
     );
-    try std.testing.expectEqual(@as(u64, 0), workbench.currentRevision());
+    try std.testing.expectEqual(@as(u64, 0), control.currentRevision());
 }
 
 test "Runtime publishes a user model connection as an independent execution source" {
     test_agent_runtime.io = std.testing.io;
-    var workbench = try Runtime.init(
+    var control = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &test_agent_runtime,
@@ -9381,7 +9381,7 @@ test "Runtime publishes a user model connection as an independent execution sour
         },
         .{},
     );
-    defer workbench.deinit();
+    defer control.deinit();
     const models = [_]account_contract.ModelConnectionModelView{.{
         .id = "gpt-5",
         .display_name = "GPT-5",
@@ -9399,7 +9399,7 @@ test "Runtime publishes a user model connection as an independent execution sour
         .selected_model = "gpt-5",
         .connection_generation = 1,
     }};
-    workbench.commitAccountFactNoFail(.{
+    control.commitAccountFactNoFail(.{
         .kind = .model_connections_changed,
         .view = .{
             .state = .signed_out,
@@ -9416,20 +9416,20 @@ test "Runtime publishes a user model connection as an independent execution sour
         try std.testing.allocator.dupe(u8, "secret-key"),
     );
     errdefer execution.deinit();
-    var prepared_binding = try workbench.prepareModelConnectionBinding(
+    var prepared_binding = try control.prepareModelConnectionBinding(
         "connection-1",
         "gpt-5",
     );
     var prepared_binding_owned = true;
     defer if (prepared_binding_owned) prepared_binding.deinit();
-    try workbench.beginDefaultExecutionReplacement();
-    workbench.installModelConnectionExecutionNoFail(
+    try control.beginDefaultExecutionReplacement();
+    control.installModelConnectionExecutionNoFail(
         &execution,
         &prepared_binding,
     );
     prepared_binding_owned = false;
-    workbench.endExecutionReplacementNoFail();
-    const view = workbench.accountView();
+    control.endExecutionReplacementNoFail();
+    const view = control.accountView();
     try std.testing.expectEqual(account_contract.ExecutionSource.model_connection, view.execution_source);
     try std.testing.expectEqual(account_contract.AccountState.signed_out, view.state);
     try std.testing.expectEqual(account_contract.CatalogState.unavailable, view.catalog_state);
@@ -9440,8 +9440,8 @@ test "Runtime publishes a user model connection as an independent execution sour
         "connection-1",
         view.selected_model_connection_id,
     );
-    try std.testing.expect(workbench.modelConnectionExecutionActive("connection-1"));
-    try std.testing.expect(!workbench.modelConnectionExecutionActive("connection-2"));
+    try std.testing.expect(control.modelConnectionExecutionActive("connection-1"));
+    try std.testing.expect(!control.modelConnectionExecutionActive("connection-2"));
     try account_contract.validateModelConnectionSpec(.{
         .display_name = "Team OpenAI",
         .protocol = .openai_chat_completions,
@@ -9451,7 +9451,7 @@ test "Runtime publishes a user model connection as an independent execution sour
 
 test "Account projection and execution install use preallocated no-fail storage" {
     test_agent_runtime.io = std.testing.io;
-    var workbench = try Runtime.init(
+    var control = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &test_agent_runtime,
@@ -9462,7 +9462,7 @@ test "Account projection and execution install use preallocated no-fail storage"
         },
         .{},
     );
-    defer workbench.deinit();
+    defer control.deinit();
     var execution = try account_contract.OwnedExecutionConfig.initOwned(
         std.testing.allocator,
         .openai,
@@ -9485,8 +9485,8 @@ test "Account projection and execution install use preallocated no-fail storage"
         .id = "model-1",
         .display_name = "Model One",
     }};
-    try workbench.beginExecutionReplacement();
-    workbench.commitAccountFactNoFail(.{
+    try control.beginExecutionReplacement();
+    control.commitAccountFactNoFail(.{
         .kind = .execution_changed,
         .view = .{
             .state = .authenticated,
@@ -9504,65 +9504,65 @@ test "Account projection and execution install use preallocated no-fail storage"
             .execution_generation = 1,
         },
     });
-    workbench.installExecutionNoFail(&execution);
-    try std.testing.expect(!workbench.accountView().can_create_task);
-    workbench.endExecutionReplacementNoFail();
-    workbench.finishAccountCommitNoFail();
-    const view = workbench.accountView();
+    control.installExecutionNoFail(&execution);
+    try std.testing.expect(!control.accountView().can_create_task);
+    control.endExecutionReplacementNoFail();
+    control.finishAccountCommitNoFail();
+    const view = control.accountView();
     try std.testing.expect(view.can_create_task);
     try std.testing.expectEqualStrings("Primary", view.api_keys[0].name);
     try std.testing.expectEqualStrings("Model One", view.models[0].display_name);
-    try std.testing.expectEqual(@as(u64, 1), workbench.currentRevision());
+    try std.testing.expectEqual(@as(u64, 1), control.currentRevision());
 }
 
 test "identity replacement does not disturb live Task runtime references" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
-    try workbench.beginDefaultExecutionReplacement();
-    try std.testing.expect(workbench.executionReplacementPending());
-    try std.testing.expect(!workbench.accountView().can_create_task);
-    workbench.endExecutionReplacementNoFail();
-    const task = &workbench.task_runtime.tasks[0].?;
+    var control = try testRuntime();
+    defer control.deinit();
+    try control.beginDefaultExecutionReplacement();
+    try std.testing.expect(control.executionReplacementPending());
+    try std.testing.expect(!control.accountView().can_create_task);
+    control.endExecutionReplacementNoFail();
+    const task = &control.task_runtime.tasks[0].?;
     const route_id = task.runtime.routeId();
     const execution = task.runtime.executionConst().?;
-    try workbench.beginExecutionReplacement();
-    try std.testing.expect(workbench.executionReplacementPending());
+    try control.beginExecutionReplacement();
+    try std.testing.expect(control.executionReplacementPending());
     try std.testing.expectEqual(route_id, task.runtime.routeId());
     try std.testing.expectEqual(execution, task.runtime.executionConst().?);
-    workbench.endExecutionReplacementNoFail();
+    control.endExecutionReplacementNoFail();
 
     task.durable.runs[0].?.active_phase = .completed;
     task.runtime.active_run_id = 0;
     task.runtime.worker_references.store(1, .release);
-    try workbench.beginExecutionReplacement();
-    try std.testing.expect(workbench.executionReplacementPending());
+    try control.beginExecutionReplacement();
+    try std.testing.expect(control.executionReplacementPending());
     try std.testing.expectEqual(@as(usize, 1), task.runtime.worker_references.load(.acquire));
     try std.testing.expectEqual(route_id, task.runtime.routeId());
     try std.testing.expectEqual(execution, task.runtime.executionConst().?);
     try std.testing.expectEqual(TaskLifecycle.open, taskLifecycle(task));
     try std.testing.expectEqualStrings("fixture-model", task.durable.execution_model);
-    try std.testing.expect(!workbench.accountView().can_create_task);
-    workbench.endExecutionReplacementNoFail();
-    try std.testing.expect(workbench.accountView().can_create_task);
+    try std.testing.expect(!control.accountView().can_create_task);
+    control.endExecutionReplacementNoFail();
+    try std.testing.expect(control.accountView().can_create_task);
     task.runtime.worker_references.store(0, .release);
 }
 
 test "default replacement preserves Task generation and installs the next admission default" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
+    var control = try testRuntime();
+    defer control.deinit();
 
-    const task = &workbench.task_runtime.tasks[0].?;
-    try workbench.replaceTracked(
+    const task = &control.task_runtime.tasks[0].?;
+    try control.replaceTracked(
         &task.durable.title,
         "review future metawork credential",
-        workbench.limits.max_task_title_bytes,
+        control.limits.max_task_title_bytes,
     );
-    try workbench.replaceTracked(
+    try control.replaceTracked(
         &task.durable.runs[0].?.status_text,
         "future metawork status",
-        workbench.limits.max_tool_field_bytes,
+        control.limits.max_tool_field_bytes,
     );
-    const old_input = try workbench.task_runtime.testExecutionInput(task.durable.id);
+    const old_input = try control.task_runtime.testExecutionInput(task.durable.id);
     try std.testing.expectEqual(@as(u64, 1), old_input.execution_generation);
     try std.testing.expectEqualStrings("SECRET-KEY", old_input.api_key);
 
@@ -9588,17 +9588,17 @@ test "default replacement preserves Task generation and installs the next admiss
         .id = "fixture-model-2",
         .display_name = "Fixture model 2",
     }};
-    try workbench.beginDefaultExecutionReplacement();
-    try std.testing.expect(workbench.task_runtime.continuationAvailable(
+    try control.beginDefaultExecutionReplacement();
+    try std.testing.expect(control.task_runtime.continuationAvailable(
         task.durable.id,
-        workbench.taskRuntimeProjectionEffects(),
+        control.taskRuntimeProjectionEffects(),
     ));
     try std.testing.expectEqual(
         @as(u64, 1),
-        (try workbench.task_runtime.testExecutionInput(task.durable.id)).execution_generation,
+        (try control.task_runtime.testExecutionInput(task.durable.id)).execution_generation,
     );
-    try std.testing.expect(!workbench.accountView().can_create_task);
-    workbench.commitAccountFactNoFail(.{
+    try std.testing.expect(!control.accountView().can_create_task);
+    control.commitAccountFactNoFail(.{
         .kind = .execution_changed,
         .view = .{
             .state = .authenticated,
@@ -9615,24 +9615,24 @@ test "default replacement preserves Task generation and installs the next admiss
             .execution_generation = 2,
         },
     });
-    workbench.installExecutionNoFail(&replacement);
-    workbench.endExecutionReplacementNoFail();
-    workbench.finishAccountCommitNoFail();
+    control.installExecutionNoFail(&replacement);
+    control.endExecutionReplacementNoFail();
+    control.finishAccountCommitNoFail();
 
-    const preserved = try workbench.task_runtime.testExecutionInput(task.durable.id);
+    const preserved = try control.task_runtime.testExecutionInput(task.durable.id);
     try std.testing.expectEqual(@as(u64, 1), preserved.execution_generation);
     try std.testing.expectEqualStrings("fixture-model", preserved.target.model);
     try std.testing.expectEqualStrings("SECRET-KEY", preserved.api_key);
-    try std.testing.expectEqual(@as(u64, 2), workbench.execution.generation);
-    try std.testing.expectEqualStrings("fixture-model-2", workbench.execution.model());
+    try std.testing.expectEqual(@as(u64, 2), control.execution.generation);
+    try std.testing.expectEqualStrings("fixture-model-2", control.execution.model());
     try std.testing.expectEqualStrings("fixture-model", task.durable.execution_model);
     try std.testing.expect(std.mem.indexOf(u8, task.durable.title, "metawork") == null);
     try std.testing.expect(std.mem.indexOf(u8, task.durable.runs[0].?.status_text, "metawork") == null);
     var scrubbed_snapshot_storage: [96 * 1024]u8 = undefined;
-    const scrubbed_snapshot = try workbench.writeSnapshot(&scrubbed_snapshot_storage);
+    const scrubbed_snapshot = try control.writeSnapshot(&scrubbed_snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, scrubbed_snapshot, "metawork") == null);
     var workspace_storage: [2]WorkspaceProjection = undefined;
-    const workspace_projection = try workbench.copyWorkspaceProjections(&workspace_storage);
+    const workspace_projection = try control.copyWorkspaceProjections(&workspace_storage);
     try std.testing.expect(workspace_projection[0].canonical_root.len != 0);
     try std.testing.expect(std.mem.indexOf(
         u8,
@@ -9640,18 +9640,18 @@ test "default replacement preserves Task generation and installs the next admiss
         "metawork",
     ) == null);
 
-    var next_task_execution = try workbench.execution.cloneOwned(std.testing.allocator);
+    var next_task_execution = try control.execution.cloneOwned(std.testing.allocator);
     defer next_task_execution.deinit();
     try std.testing.expectEqual(
         @as(u64, 2),
         next_task_execution.input().execution_generation,
     );
 
-    const slot = try workbench.reserveRunRecord(
+    const slot = try control.reserveRunRecord(
         task,
         .{ .text = "old SECRET-KEY remains private" },
     );
-    defer workbench.discardRunRecord(task, slot);
+    defer control.discardRunRecord(task, slot);
     try std.testing.expectEqual(@as(u64, 1), task.durable.runs[slot].?.execution_generation);
     try std.testing.expectEqualStrings(
         "old *** remains private",
@@ -9662,11 +9662,11 @@ test "default replacement preserves Task generation and installs the next admiss
     task.durable.execution_generation = 2;
     try std.testing.expectError(
         error.ExecutionGenerationMismatch,
-        workbench.task_runtime.testExecutionInput(task.durable.id),
+        control.task_runtime.testExecutionInput(task.durable.id),
     );
     try std.testing.expectError(
         error.ExecutionGenerationMismatch,
-        workbench.runTask(
+        control.runTask(
             task.durable.id,
             .{ .text = "must reject a mismatched binding" },
         ),
@@ -9675,8 +9675,8 @@ test "default replacement preserves Task generation and installs the next admiss
 }
 
 test "Account default model changes do not bump credentials" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
+    var control = try testRuntime();
+    defer control.deinit();
 
     const api_keys = [_]account_contract.ApiKeyView{.{
         .id = "key-1",
@@ -9688,7 +9688,7 @@ test "Account default model changes do not bump credentials" {
         .{ .id = "fixture-model", .display_name = "Fixture model" },
         .{ .id = "fixture-model-2", .display_name = "Fixture model 2" },
     };
-    workbench.commitAccountFactNoFail(.{
+    control.commitAccountFactNoFail(.{
         .kind = .catalog_changed,
         .view = .{
             .state = .authenticated,
@@ -9705,18 +9705,18 @@ test "Account default model changes do not bump credentials" {
             .execution_generation = 1,
         },
     });
-    workbench.finishAccountCommitNoFail();
+    control.finishAccountCommitNoFail();
 
-    try std.testing.expectEqual(@as(u64, 1), workbench.execution.generation);
+    try std.testing.expectEqual(@as(u64, 1), control.execution.generation);
     try std.testing.expectEqualStrings(
         "fixture-model-2",
-        workbench.accountView().selected_model,
+        control.accountView().selected_model,
     );
 }
 
 test "busy Task model selection keeps only the last runtime pending model" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
+    var control = try testRuntime();
+    defer control.deinit();
 
     const api_keys = [_]account_contract.ApiKeyView{.{
         .id = "key-1",
@@ -9729,7 +9729,7 @@ test "busy Task model selection keeps only the last runtime pending model" {
         .{ .id = "fixture-model-2", .display_name = "Fixture model 2" },
         .{ .id = "fixture-model-3", .display_name = "Fixture model 3" },
     };
-    workbench.commitAccountFactNoFail(.{
+    control.commitAccountFactNoFail(.{
         .kind = .catalog_changed,
         .view = .{
             .state = .authenticated,
@@ -9748,33 +9748,33 @@ test "busy Task model selection keeps only the last runtime pending model" {
         },
     });
 
-    const task = &workbench.task_runtime.tasks[0].?;
+    const task = &control.task_runtime.tasks[0].?;
     const binding_epoch = task.durable.binding_epoch;
-    try workbench.selectTaskModel(task.durable.id, "fixture-model", 2, "fixture-model-2");
+    try control.selectTaskModel(task.durable.id, "fixture-model", 2, "fixture-model-2");
     try std.testing.expectEqualStrings("fixture-model", task.durable.execution_model);
     try std.testing.expectEqualStrings("fixture-model-2", task.runtime.pending_model.?);
     try std.testing.expectEqual(binding_epoch, task.durable.binding_epoch);
     try std.testing.expectEqual(@as(u64, 1), task.durable.execution_generation);
 
-    try workbench.selectTaskModel(task.durable.id, "fixture-model", 2, "fixture-model-3");
+    try control.selectTaskModel(task.durable.id, "fixture-model", 2, "fixture-model-3");
     try std.testing.expectEqualStrings("fixture-model-3", task.runtime.pending_model.?);
     try std.testing.expectEqualStrings("fixture-model", task.durable.execution_model);
     try std.testing.expectError(
         error.TaskModelMismatch,
-        workbench.selectTaskModel(task.durable.id, "fixture-model-2", 2, "fixture-model"),
+        control.selectTaskModel(task.durable.id, "fixture-model-2", 2, "fixture-model"),
     );
 }
 
 test "clearing the admission default preserves active Task execution" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
+    var control = try testRuntime();
+    defer control.deinit();
 
-    const task = &workbench.task_runtime.tasks[0].?;
-    const task_execution = try workbench.task_runtime.testExecutionInput(task.durable.id);
+    const task = &control.task_runtime.tasks[0].?;
+    const task_execution = try control.task_runtime.testExecutionInput(task.durable.id);
     try std.testing.expectEqualStrings("SECRET-KEY", task_execution.api_key);
 
-    try workbench.beginDefaultExecutionReplacement();
-    workbench.commitAccountFactNoFail(.{
+    try control.beginDefaultExecutionReplacement();
+    control.commitAccountFactNoFail(.{
         .kind = .signed_out,
         .view = .{
             .state = .signed_out,
@@ -9783,55 +9783,55 @@ test "clearing the admission default preserves active Task execution" {
             .execution_generation = 0,
         },
     });
-    workbench.clearExecutionNoFail();
-    workbench.endExecutionReplacementNoFail();
-    workbench.finishAccountCommitNoFail();
+    control.clearExecutionNoFail();
+    control.endExecutionReplacementNoFail();
+    control.finishAccountCommitNoFail();
 
-    try std.testing.expect(!workbench.execution.ready());
-    try std.testing.expect(!workbench.accountView().can_create_task);
-    const preserved = try workbench.task_runtime.testExecutionInput(task.durable.id);
+    try std.testing.expect(!control.execution.ready());
+    try std.testing.expect(!control.accountView().can_create_task);
+    const preserved = try control.task_runtime.testExecutionInput(task.durable.id);
     try std.testing.expectEqual(@as(u64, 1), preserved.execution_generation);
     try std.testing.expectEqualStrings("fixture-model", preserved.target.model);
     try std.testing.expectEqualStrings("SECRET-KEY", preserved.api_key);
 }
 
 test "released Task credential is permanently scrubbed from every product projection" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
-    const task = &workbench.task_runtime.tasks[0].?;
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = &control.task_runtime.tasks[0].?;
     const run = &task.durable.runs[0].?;
 
-    try workbench.replaceTracked(
+    try control.replaceTracked(
         &task.durable.title,
         "title SECRET-KEY",
-        workbench.limits.max_task_title_bytes,
+        control.limits.max_task_title_bytes,
     );
-    try workbench.replaceTracked(
+    try control.replaceTracked(
         &run.input.text.value,
         "prompt SECRET-KEY",
-        workbench.limits.max_user_message_bytes,
+        control.limits.max_user_message_bytes,
     );
-    try workbench.appendTrackedText(
+    try control.appendTrackedText(
         &run.assistant,
         "answer SECRET-KEY",
-        workbench.limits.max_assistant_message_bytes,
+        control.limits.max_assistant_message_bytes,
     );
-    try workbench.replaceTracked(
+    try control.replaceTracked(
         &run.status_text,
         "status SECRET-KEY",
-        workbench.limits.max_tool_field_bytes,
+        control.limits.max_tool_field_bytes,
     );
     run.tools[0] = .{
         .route_digest = toolRouteDigest("SECRET-KEY"),
-        .id = try workbench.copyBounded("id SECRET-KEY", workbench.limits.max_tool_field_bytes),
+        .id = try control.copyBounded("id SECRET-KEY", control.limits.max_tool_field_bytes),
         .order = 1,
-        .name = try workbench.copyBounded("name SECRET-KEY", workbench.limits.max_tool_field_bytes),
-        .input = try workbench.copyBounded("input SECRET-KEY", workbench.limits.max_tool_field_bytes),
-        .progress = try workbench.copyBounded("progress SECRET-KEY", workbench.limits.max_tool_field_bytes),
-        .content = try workbench.copyBounded("content SECRET-KEY", workbench.limits.max_tool_field_bytes),
+        .name = try control.copyBounded("name SECRET-KEY", control.limits.max_tool_field_bytes),
+        .input = try control.copyBounded("input SECRET-KEY", control.limits.max_tool_field_bytes),
+        .progress = try control.copyBounded("progress SECRET-KEY", control.limits.max_tool_field_bytes),
+        .content = try control.copyBounded("content SECRET-KEY", control.limits.max_tool_field_bytes),
         .state = .completed,
     };
-    const workspace = &workbench.workspaces[0].?;
+    const workspace = &control.workspaces[0].?;
     @memcpy(workspace.projected_root_storage[0.."SECRET-KEY".len], "SECRET-KEY");
     workspace.projected_root_len = "SECRET-KEY".len;
     task.durable.ui_history[0] = .{
@@ -9843,32 +9843,32 @@ test "released Task credential is permanently scrubbed from every product projec
     @memcpy(task.durable.ui_history[0].?.detail[0.."SECRET-KEY".len], "SECRET-KEY");
     task.durable.ui_history[0].?.detail_len = "SECRET-KEY".len;
     task.durable.ui_history_count = 1;
-    const compact_slot = try workbench.reserveCompactRecord(task, 9, run.id);
+    const compact_slot = try control.reserveCompactRecord(task, 9, run.id);
     const compact = &task.durable.compacts[compact_slot].?;
     try std.testing.expectEqualStrings("SECRET-KEY", compact.redaction_secret);
-    try workbench.replaceTracked(
+    try control.replaceTracked(
         &task.durable.execution_model,
         "model-SECRET-KEY",
         account_contract.Limits.model_id_bytes,
     );
 
     run.active_phase = .completed;
-    workbench.releaseTaskAttachmentNoFail(task, .cold_start);
+    control.releaseTaskAttachmentNoFail(task, .cold_start);
     task.runtime.active_run_id = 0;
-    try workbench.beginExecutionReplacement();
+    try control.beginExecutionReplacement();
     try std.testing.expect(task.runtime.executionConst() == null);
     try std.testing.expectEqual(@as(usize, 0), run.redaction_secret.len);
     try std.testing.expectEqual(@as(usize, 0), compact.redaction_secret.len);
     try std.testing.expect(std.mem.indexOf(u8, task.durable.execution_model, "SECRET-KEY") == null);
     var snapshot_storage: [96 * 1024]u8 = undefined;
-    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    const snapshot = try control.writeSnapshot(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null);
-    workbench.endExecutionReplacementNoFail();
+    control.endExecutionReplacementNoFail();
 }
 
 test "clearing the last default execution scrubs its credential before secure zero" {
     test_agent_runtime.io = std.testing.io;
-    var workbench = try Runtime.init(
+    var control = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &test_agent_runtime,
@@ -9879,79 +9879,79 @@ test "clearing the last default execution scrubs its credential before secure ze
         },
         .{},
     );
-    defer workbench.deinit();
-    try installTestExecution(&workbench);
-    workbench.workspaces[0] = .{
+    defer control.deinit();
+    try installTestExecution(&control);
+    control.workspaces[0] = .{
         .id = 1,
-        .canonical_root = try workbench.copyBounded("/tmp", workbench.limits.max_workspace_bytes),
-        .projected_root_storage = try workbench.copyBounded(
+        .canonical_root = try control.copyBounded("/tmp", control.limits.max_workspace_bytes),
+        .projected_root_storage = try control.copyBounded(
             "path-SECRET-KEY",
-            workbench.limits.max_workspace_bytes,
+            control.limits.max_workspace_bytes,
         ),
         .projected_root_len = "path-SECRET-KEY".len,
-        .display_name_storage = try workbench.copyBounded(
+        .display_name_storage = try control.copyBounded(
             "SECRET-KEY",
-            workbench.limits.max_workspace_bytes,
+            control.limits.max_workspace_bytes,
         ),
         .display_name_len = "SECRET-KEY".len,
         .trust = .explicitly_trusted,
         .recent_order = 1,
     };
-    workbench.skill.registerWorkspaceOwned(.{
+    control.skill.registerWorkspaceOwned(.{
         .id = 1,
         .epoch = 1,
-        .canonical_root = try workbench.allocator.dupe(u8, "/tmp"),
-    }, workbench.skillProjectionBudget());
-    try workbench.beginDefaultExecutionReplacement();
-    workbench.commitAccountFactNoFail(.{
+        .canonical_root = try control.allocator.dupe(u8, "/tmp"),
+    }, control.skillProjectionBudget());
+    try control.beginDefaultExecutionReplacement();
+    control.commitAccountFactNoFail(.{
         .kind = .signed_out,
         .view = .{
             .state = .signed_out,
             .catalog_state = .unavailable,
         },
     });
-    workbench.clearExecutionNoFail();
-    workbench.endExecutionReplacementNoFail();
-    workbench.finishAccountCommitNoFail();
+    control.clearExecutionNoFail();
+    control.endExecutionReplacementNoFail();
+    control.finishAccountCommitNoFail();
 
-    try std.testing.expectEqual(@as(usize, 0), workbench.execution.credential().len);
+    try std.testing.expectEqual(@as(usize, 0), control.execution.credential().len);
     var snapshot_storage: [96 * 1024]u8 = undefined;
-    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    const snapshot = try control.writeSnapshot(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null);
 }
 
 test "known credential matching chooses the longest overlapping secret" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
-    std.crypto.secureZero(u8, workbench.execution.credential_storage);
-    @memcpy(workbench.execution.credential_storage[0.."SECRET".len], "SECRET");
-    workbench.execution.credential_len = "SECRET".len;
+    var control = try testRuntime();
+    defer control.deinit();
+    std.crypto.secureZero(u8, control.execution.credential_storage);
+    @memcpy(control.execution.credential_storage[0.."SECRET".len], "SECRET");
+    control.execution.credential_len = "SECRET".len;
 
     try std.testing.expectEqual(
         @as(usize, "SECRET-KEY".len),
-        workbench.matchedKnownCredentialLen("SECRET-KEY suffix"),
+        control.matchedKnownCredentialLen("SECRET-KEY suffix"),
     );
-    try workbench.replaceTracked(
-        &workbench.task_runtime.tasks[0].?.durable.runs[0].?.status_text,
+    try control.replaceTracked(
+        &control.task_runtime.tasks[0].?.durable.runs[0].?.status_text,
         "SECRET-KEY suffix",
-        workbench.limits.max_tool_field_bytes,
+        control.limits.max_tool_field_bytes,
     );
     var snapshot_storage: [96 * 1024]u8 = undefined;
-    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    const snapshot = try control.writeSnapshot(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "***-KEY") == null);
 }
 
 test "opaque credential redaction preserves UTF-8 projection validity" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
-    std.crypto.secureZero(u8, workbench.execution.credential_storage);
-    workbench.execution.credential_storage[0] = 0xa9;
-    workbench.execution.credential_len = 1;
+    var control = try testRuntime();
+    defer control.deinit();
+    std.crypto.secureZero(u8, control.execution.credential_storage);
+    control.execution.credential_storage[0] = 0xa9;
+    control.execution.credential_len = 1;
 
     var output: [64]u8 = undefined;
     var writer = std.Io.Writer.fixed(&output);
-    try workbench.projectedJsonValueWithKnownCredentials(&writer, "café");
+    try control.projectedJsonValueWithKnownCredentials(&writer, "café");
     try std.testing.expectEqualStrings("\"caf**\"", writer.buffered());
     try std.testing.expect(std.unicode.utf8ValidateSlice(writer.buffered()));
 
@@ -9962,13 +9962,13 @@ test "opaque credential redaction preserves UTF-8 projection validity" {
 }
 
 test "opaque credential redaction is UTF-8 safe across product inputs and assistant chunks" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
-    const task = &workbench.task_runtime.tasks[0].?;
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = &control.task_runtime.tasks[0].?;
     try replaceTaskCredentialForTest(task, &.{0xa9});
 
-    const slot = try workbench.reserveRunRecord(task, .{ .text = "café" });
-    defer workbench.discardRunRecord(task, slot);
+    const slot = try control.reserveRunRecord(task, .{ .text = "café" });
+    defer control.discardRunRecord(task, slot);
     try std.testing.expectEqualStrings(
         "caf**",
         task.durable.runs[slot].?.input.text.value,
@@ -9983,7 +9983,7 @@ test "opaque credential redaction is UTF-8 safe across product inputs and assist
         "{\"tool_start\":{\"id\":\"tool-1\",\"name\":\"café\",\"input\":\"café\"}}",
     );
     defer tool_event.deinit();
-    try workbench.applyEvent(&tool_event);
+    try control.applyEvent(&tool_event);
     const tool = &task.durable.runs[0].?.tools[0].?;
     try std.testing.expectEqualStrings("caf**", tool.name);
     try std.testing.expectEqualStrings("caf**", tool.input);
@@ -9995,7 +9995,7 @@ test "opaque credential redaction is UTF-8 safe across product inputs and assist
     var pending_writer = std.Io.Writer.fixed(&pending_storage);
     try task_test_view.writePendingUi(
         &pending_writer,
-        workbench.taskTextProjection(),
+        control.taskTextProjection(),
         9,
         7,
         1,
@@ -10007,62 +10007,62 @@ test "opaque credential redaction is UTF-8 safe across product inputs and assist
     var assistant = TrackedText{};
     defer assistant.list.deinit(std.testing.allocator);
     try assistant.list.appendSlice(std.testing.allocator, "café");
-    try std.testing.expect(workbench.redactTrackedText(&assistant, &.{0xa9}));
+    try std.testing.expect(control.redactTrackedText(&assistant, &.{0xa9}));
     try std.testing.expectEqualStrings("caf**", assistant.list.items);
     try std.testing.expect(std.unicode.utf8ValidateSlice(assistant.list.items));
 }
 
 test "assistant redaction withholds a UTF-8 codepoint across credential chunks" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
+    var control = try testRuntime();
+    defer control.deinit();
     var assistant = TrackedText{};
     defer assistant.list.deinit(std.testing.allocator);
     const credential = [_]u8{ 0xa9, 'X' };
 
     try assistant.list.appendSlice(std.testing.allocator, "é");
-    try std.testing.expect(!workbench.redactTrackedText(&assistant, &credential));
+    try std.testing.expect(!control.redactTrackedText(&assistant, &credential));
     try std.testing.expectEqual(@as(usize, 0), assistant.committed_len);
     try std.testing.expect(std.unicode.utf8ValidateSlice(assistant.list.items));
 
     try assistant.list.appendSlice(std.testing.allocator, "X tail");
-    try std.testing.expect(workbench.redactTrackedText(&assistant, &credential));
+    try std.testing.expect(control.redactTrackedText(&assistant, &credential));
     try std.testing.expectEqualStrings("*** tail", assistant.list.items);
     try std.testing.expectEqual(assistant.list.items.len, assistant.committed_len);
     try std.testing.expect(std.unicode.utf8ValidateSlice(assistant.list.items));
 }
 
 test "product Task identity is independent from Agent Session route identity" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
-    const task = &workbench.task_runtime.tasks[0].?;
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = &control.task_runtime.tasks[0].?;
     task.runtime.attached().?.binding = task_test_agent_session.Binding.testFixture(99);
 
     var routed = try testEnvelope(99, 7, "{\"text_chunk\":\"routed\"}");
     defer routed.deinit();
-    try workbench.applyEvent(&routed);
-    try std.testing.expectEqual(@as(u64, 3), workbench.task_runtime.tasks[0].?.durable.id);
+    try control.applyEvent(&routed);
+    try std.testing.expectEqual(@as(u64, 3), control.task_runtime.tasks[0].?.durable.id);
     try std.testing.expectEqualStrings(
         "routed",
-        workbench.task_runtime.tasks[0].?.durable.runs[0].?.assistant.list.items,
+        control.task_runtime.tasks[0].?.durable.runs[0].?.assistant.list.items,
     );
 
     var product_id_is_not_route = try testEnvelope(3, 7, "{\"text_chunk\":\"wrong\"}");
     defer product_id_is_not_route.deinit();
     try std.testing.expectError(
         error.UnknownTask,
-        workbench.applyEvent(&product_id_is_not_route),
+        control.applyEvent(&product_id_is_not_route),
     );
 }
 
 test "streaming Run events do not reorder Task navigation" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
-    const before = workbench.task_runtime.tasks[0].?.durable.recent_order;
+    var control = try testRuntime();
+    defer control.deinit();
+    const before = control.task_runtime.tasks[0].?.durable.recent_order;
 
     var text = try testEnvelope(3, 7, "{\"text_chunk\":\"streaming\"}");
     defer text.deinit();
-    try workbench.applyEvent(&text);
-    try std.testing.expectEqual(before, workbench.task_runtime.tasks[0].?.durable.recent_order);
+    try control.applyEvent(&text);
+    try std.testing.expectEqual(before, control.task_runtime.tasks[0].?.durable.recent_order);
 
     var usage = try testEnvelope(
         3,
@@ -10070,38 +10070,38 @@ test "streaming Run events do not reorder Task navigation" {
         "{\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0}}",
     );
     defer usage.deinit();
-    try workbench.applyEvent(&usage);
-    try std.testing.expectEqual(before, workbench.task_runtime.tasks[0].?.durable.recent_order);
+    try control.applyEvent(&usage);
+    try std.testing.expectEqual(before, control.task_runtime.tasks[0].?.durable.recent_order);
 }
 
 test "thinking and assistant chunks update distinct safe projections" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
-    const task = &workbench.task_runtime.tasks[0].?;
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = &control.task_runtime.tasks[0].?;
     const run = &task.durable.runs[0].?;
     const route = task.runtime.routeId();
 
-    const revision_before_thinking = workbench.revision;
+    const revision_before_thinking = control.revision;
     var thinking = try testEnvelope(
         route,
         7,
         "{\"thinking_chunk\":\"private-reasoning-marker\"}",
     );
     defer thinking.deinit();
-    try workbench.applyEvent(&thinking);
+    try control.applyEvent(&thinking);
     try std.testing.expectEqualStrings("", run.assistant.list.items);
     try std.testing.expectEqualStrings("Thinking", run.status_text);
-    try std.testing.expectEqual(revision_before_thinking + 1, workbench.revision);
+    try std.testing.expectEqual(revision_before_thinking + 1, control.revision);
 
-    const revision_before_duplicate = workbench.revision;
+    const revision_before_duplicate = control.revision;
     var duplicate = try testEnvelope(
         route,
         7,
         "{\"thinking_chunk\":\"more-private-reasoning\"}",
     );
     defer duplicate.deinit();
-    try workbench.applyEvent(&duplicate);
-    try std.testing.expectEqual(revision_before_duplicate, workbench.revision);
+    try control.applyEvent(&duplicate);
+    try std.testing.expectEqual(revision_before_duplicate, control.revision);
 
     var assistant = try testEnvelope(
         route,
@@ -10109,21 +10109,21 @@ test "thinking and assistant chunks update distinct safe projections" {
         "{\"text_chunk\":\"public response\"}",
     );
     defer assistant.deinit();
-    try workbench.applyEvent(&assistant);
+    try control.applyEvent(&assistant);
     try std.testing.expectEqualStrings("public response", run.assistant.list.items);
     try std.testing.expectEqualStrings("Writing response", run.status_text);
 
     var snapshot_storage: [96 * 1024]u8 = undefined;
-    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    const snapshot = try control.writeSnapshot(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "private-reasoning-marker") == null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "more-private-reasoning") == null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "public response") != null);
 }
 
 test "AgentCore RunState refines status without owning RunPhase and rejects stale transitions" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
-    const task = &workbench.task_runtime.tasks[0].?;
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = &control.task_runtime.tasks[0].?;
     const route = task.runtime.routeId();
 
     var starting = try testEnvelope(
@@ -10135,7 +10135,7 @@ test "AgentCore RunState refines status without owning RunPhase and rejects stal
     const run = &task.durable.runs[0].?;
     run.active_phase = .queued;
     const host_phase = run.active_phase;
-    try workbench.applyEvent(&starting);
+    try control.applyEvent(&starting);
     try std.testing.expectEqual(lifecycle.RunStatePhase.starting, run.agent_phase.?);
     try std.testing.expectEqual(@as(u64, 1), run.agent_transition_seq.?);
     try std.testing.expectEqual(host_phase, run.active_phase);
@@ -10147,7 +10147,7 @@ test "AgentCore RunState refines status without owning RunPhase and rejects stal
         "{\"run_state\":{\"run_id\":7,\"transition_seq\":2,\"phase\":\"executing_tools\",\"turn\":1,\"tool_calls\":2,\"in_flight_tools\":[{\"tool_call_id\":\"tool-1\",\"name\":\"Read\"},{\"tool_call_id\":\"tool-2\",\"name\":\"Bash\"}]}}",
     );
     defer executing.deinit();
-    try workbench.applyEvent(&executing);
+    try control.applyEvent(&executing);
     try std.testing.expectEqual(lifecycle.RunStatePhase.executing_tools, run.agent_phase.?);
     try std.testing.expectEqual(@as(u32, 1), run.agent_turn);
     try std.testing.expectEqual(@as(u32, 2), run.agent_tool_calls);
@@ -10160,7 +10160,7 @@ test "AgentCore RunState refines status without owning RunPhase and rejects stal
         "{\"run_state\":{\"run_id\":7,\"transition_seq\":1,\"phase\":\"failed\",\"turn\":9,\"tool_calls\":9,\"in_flight_tools\":[]}}",
     );
     defer stale.deinit();
-    try workbench.applyEvent(&stale);
+    try control.applyEvent(&stale);
     try std.testing.expectEqual(lifecycle.RunStatePhase.executing_tools, run.agent_phase.?);
     try std.testing.expectEqualStrings("Executing tools", run.status_text);
 
@@ -10170,16 +10170,16 @@ test "AgentCore RunState refines status without owning RunPhase and rejects stal
         "{\"run_state\":{\"run_id\":99,\"transition_seq\":3,\"phase\":\"failed\",\"turn\":9,\"tool_calls\":9,\"in_flight_tools\":[]}}",
     );
     defer cross_run.deinit();
-    try workbench.applyEvent(&cross_run);
+    try control.applyEvent(&cross_run);
     try std.testing.expect(run.agent_observation_degraded);
     try std.testing.expectEqual(lifecycle.RunStatePhase.executing_tools, run.agent_phase.?);
     try std.testing.expectEqual(host_phase, run.active_phase);
 }
 
 test "AgentCore RunState accepts a zero first transition sequence" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
-    const task = &workbench.task_runtime.tasks[0].?;
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = &control.task_runtime.tasks[0].?;
     const route = task.runtime.routeId();
     var first = try testEnvelope(
         route,
@@ -10187,41 +10187,41 @@ test "AgentCore RunState accepts a zero first transition sequence" {
         "{\"run_state\":{\"run_id\":7,\"transition_seq\":0,\"phase\":\"starting\",\"turn\":0,\"tool_calls\":0,\"in_flight_tools\":[]}}",
     );
     defer first.deinit();
-    try workbench.applyEvent(&first);
+    try control.applyEvent(&first);
     const run = &task.durable.runs[0].?;
     try std.testing.expectEqual(@as(u64, 0), run.agent_transition_seq.?);
     try std.testing.expectEqual(lifecycle.RunStatePhase.starting, run.agent_phase.?);
 }
 
 test "event projection failure routes by Agent Session identity not product Task identity" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
-    const task = &workbench.task_runtime.tasks[0].?;
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = &control.task_runtime.tasks[0].?;
     task.runtime.attached().?.binding = task_test_agent_session.Binding.testFixture(99);
 
-    workbench.recordEventProjectionFailure(task.durable.id, 7);
+    control.recordEventProjectionFailure(task.durable.id, 7);
     try std.testing.expect(task.durable.runs[0].?.event_projection_failure == null);
-    try std.testing.expect(workbench.task_runtime.continuationAvailable(
+    try std.testing.expect(control.task_runtime.continuationAvailable(
         task.durable.id,
-        workbench.taskRuntimeProjectionEffects(),
+        control.taskRuntimeProjectionEffects(),
     ));
 
-    workbench.recordEventProjectionFailure(task.runtime.routeId(), 7);
+    control.recordEventProjectionFailure(task.runtime.routeId(), 7);
     try std.testing.expectEqual(
         EventProjectionFailure.consumer_rejected,
         task.durable.runs[0].?.event_projection_failure.?,
     );
     // The projection failure is a Run-level product fact. Continuation is
     // owned by the Session disposition and stays available.
-    try std.testing.expect(workbench.task_runtime.continuationAvailable(
+    try std.testing.expect(control.task_runtime.continuationAvailable(
         task.durable.id,
-        workbench.taskRuntimeProjectionEffects(),
+        control.taskRuntimeProjectionEffects(),
     ));
 }
 
 test "Runtime shutdown releases current and Task-owned execution generations" {
-    var workbench = try testRuntime();
-    try workbench.beginDefaultExecutionReplacement();
+    var control = try testRuntime();
+    try control.beginDefaultExecutionReplacement();
     var replacement = try account_contract.OwnedExecutionConfig.initOwned(
         std.testing.allocator,
         .anthropic,
@@ -10244,7 +10244,7 @@ test "Runtime shutdown releases current and Task-owned execution generations" {
         .id = "fixture-model-2",
         .display_name = "Fixture model 2",
     }};
-    workbench.commitAccountFactNoFail(.{
+    control.commitAccountFactNoFail(.{
         .kind = .execution_changed,
         .view = .{
             .state = .authenticated,
@@ -10261,15 +10261,15 @@ test "Runtime shutdown releases current and Task-owned execution generations" {
             .execution_generation = 2,
         },
     });
-    workbench.installExecutionNoFail(&replacement);
-    workbench.endExecutionReplacementNoFail();
-    workbench.deinit();
+    control.installExecutionNoFail(&replacement);
+    control.endExecutionReplacementNoFail();
+    control.deinit();
 }
 
 test "terminal publication is allocation-free write-once bounded history" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
-    const run = &workbench.task_runtime.tasks[0].?.durable.runs[0].?;
+    var control = try testRuntime();
+    defer control.deinit();
+    const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
     const diagnostic = try std.testing.allocator.alloc(u8, run.terminal_diagnostic.len + 17);
     defer std.testing.allocator.free(diagnostic);
     @memset(diagnostic, 'x');
@@ -10364,18 +10364,18 @@ test "compact terminal publication is write-once and outranks late cancellation"
 }
 
 test "terminal disposition folds exactly once without reopening a closing Task" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
-    const task = &workbench.task_runtime.tasks[0].?;
-    defer detachTaskForTest(&workbench, task);
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = &control.task_runtime.tasks[0].?;
+    defer detachTaskForTest(&control, task);
 
     foldTerminalDisposition(task, .poisoned);
     try std.testing.expectEqual(TaskLifecycle.open, taskLifecycle(task));
     try std.testing.expectEqual(
         ContinuationUnavailableReason.session_poisoned,
-        workbench.task_runtime.continuationProjection(
+        control.task_runtime.continuationProjection(
             task.durable.id,
-            workbench.taskRuntimeProjectionEffects(),
+            control.taskRuntimeProjectionEffects(),
         ).?.unavailable,
     );
 
@@ -10384,23 +10384,23 @@ test "terminal disposition folds exactly once without reopening a closing Task" 
     try std.testing.expectEqual(TaskLifecycle.closing, taskLifecycle(task));
     try std.testing.expectEqual(
         ContinuationUnavailableReason.closing,
-        workbench.task_runtime.continuationProjection(
+        control.task_runtime.continuationProjection(
             task.durable.id,
-            workbench.taskRuntimeProjectionEffects(),
+            control.taskRuntimeProjectionEffects(),
         ).?.unavailable,
     );
 }
 
 test "canonical prompt title and terminal diagnostic never retain the registered credential" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
-    const task = &workbench.task_runtime.tasks[0].?;
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = &control.task_runtime.tasks[0].?;
 
-    try workbench.renameTask(task.durable.id, "Review SECRET-KEY usage");
+    try control.renameTask(task.durable.id, "Review SECRET-KEY usage");
     try std.testing.expect(std.mem.indexOf(u8, task.durable.title, "SECRET-KEY") == null);
     try std.testing.expect(task.durable.title_redacted);
 
-    const slot = try workbench.reserveRunRecord(
+    const slot = try control.reserveRunRecord(
         task,
         .{ .text = "prompt SECRET-KEY payload" },
     );
@@ -10449,15 +10449,15 @@ test "Renderer transport failures never own Agent Run termination" {
 }
 
 test "Task deletion scrubs retained projections before releasing its credential" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
-    const task = &workbench.task_runtime.tasks[0].?;
-    const workspace = &workbench.workspaces[0].?;
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = &control.task_runtime.tasks[0].?;
+    const workspace = &control.workspaces[0].?;
     @memcpy(workspace.projected_root_storage[0.."SECRET-KEY".len], "SECRET-KEY");
     workspace.projected_root_len = "SECRET-KEY".len;
     workspace.projection_redacted = false;
     task.durable.archived = true;
-    workbench.releaseTaskAttachmentNoFail(task, .cold_start);
+    control.releaseTaskAttachmentNoFail(task, .cold_start);
     task.runtime.active_run_id = 0;
     _ = commitTerminal(
         &task.durable.runs[0].?,
@@ -10468,10 +10468,10 @@ test "Task deletion scrubs retained projections before releasing its credential"
         "",
         false,
     );
-    finalizeTestTerminalEvents(&workbench);
+    finalizeTestTerminalEvents(&control);
 
-    try workbench.deleteTask(3);
-    try std.testing.expect(workbench.task_runtime.tasks[0] == null);
+    try control.deleteTask(3);
+    try std.testing.expect(control.task_runtime.tasks[0] == null);
     try std.testing.expect(workspace.projection_redacted);
     try std.testing.expect(
         std.mem.indexOf(
@@ -10483,24 +10483,24 @@ test "Task deletion scrubs retained projections before releasing its credential"
 }
 
 test "Runtime projection preserves text bytes with bounded geometric growth" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
+    var control = try testRuntime();
+    defer control.deinit();
 
     const chunk = "0123456789abcdef";
     for (0..2048) |_| {
         var envelope = try testEnvelope(3, 7, "{\"text_chunk\":\"0123456789abcdef\"}");
         defer envelope.deinit();
-        try workbench.applyEvent(&envelope);
+        try control.applyEvent(&envelope);
     }
-    const run = findRun(workbench.task_runtime.tasks[0].?.durable.runs, 7).?;
+    const run = findRun(control.task_runtime.tasks[0].?.durable.runs, 7).?;
     try std.testing.expectEqual(@as(usize, chunk.len * 2048), run.assistant.list.items.len);
     for (0..2048) |index|
         try std.testing.expectEqualStrings(chunk, run.assistant.list.items[index * chunk.len ..][0..chunk.len]);
     var overflow = try testEnvelope(3, 7, "{\"text_chunk\":\"x\"}");
     defer overflow.deinit();
-    try std.testing.expectError(error.ProjectionCapacity, workbench.applyEvent(&overflow));
-    try std.testing.expect(run.assistant.list.capacity <= workbench.limits.max_assistant_message_bytes);
-    try std.testing.expect(workbench.projection_bytes <= workbench.limits.max_projection_bytes);
+    try std.testing.expectError(error.ProjectionCapacity, control.applyEvent(&overflow));
+    try std.testing.expect(run.assistant.list.capacity <= control.limits.max_assistant_message_bytes);
+    try std.testing.expect(control.projection_bytes <= control.limits.max_projection_bytes);
 }
 
 test "Runtime snapshot budget includes JSON escaping and structural overhead" {
@@ -10513,26 +10513,26 @@ test "Runtime snapshot budget includes JSON escaping and structural overhead" {
     const single_pending_budget = limits.max_pending_ui_json_bytes * pending_ui_reencode_expansion + pending_ui_snapshot_overhead;
     try std.testing.expect(worst_case >= single_pending_budget * limits.max_pending_ui_requests);
 
-    var workbench = try testRuntime();
-    defer workbench.deinit();
-    const run = findRun(workbench.task_runtime.tasks[0].?.durable.runs, 7).?;
+    var control = try testRuntime();
+    defer control.deinit();
+    const run = findRun(control.task_runtime.tasks[0].?.durable.runs, 7).?;
     const remaining = @min(
-        workbench.limits.max_assistant_message_bytes,
-        workbench.limits.max_projection_bytes - workbench.projection_bytes,
+        control.limits.max_assistant_message_bytes,
+        control.limits.max_projection_bytes - control.projection_bytes,
     );
     const controls = try std.testing.allocator.alloc(u8, remaining);
     defer std.testing.allocator.free(controls);
     @memset(controls, 1);
-    try workbench.appendTrackedText(&run.assistant, controls, workbench.limits.max_assistant_message_bytes);
-    _ = workbench.redactTrackedText(&run.assistant, run.redaction_secret);
+    try control.appendTrackedText(&run.assistant, controls, control.limits.max_assistant_message_bytes);
+    _ = control.redactTrackedText(&run.assistant, run.redaction_secret);
 
-    const snapshot_storage = try std.testing.allocator.alloc(u8, workbench.limits.max_snapshot_bytes);
+    const snapshot_storage = try std.testing.allocator.alloc(u8, control.limits.max_snapshot_bytes);
     defer std.testing.allocator.free(snapshot_storage);
-    const snapshot = try workbench.writeSnapshot(snapshot_storage);
+    const snapshot = try control.writeSnapshot(snapshot_storage);
     try std.testing.expect(snapshot.len > controls.len * 5);
 }
 
-fn installMaximumAccountProjection(workbench: *Runtime) !void {
+fn installMaximumAccountProjection(control: *Runtime) !void {
     const account_id: [account_contract.Limits.account_id_bytes]u8 =
         @splat('a');
     const display_name: [account_contract.Limits.display_name_bytes]u8 =
@@ -10591,7 +10591,7 @@ fn installMaximumAccountProjection(workbench: *Runtime) !void {
             .display_name = &model_name,
         };
     }
-    workbench.commitAccountFactNoFail(.{
+    control.commitAccountFactNoFail(.{
         .kind = .catalog_changed,
         .view = .{
             .state = .authenticated,
@@ -10611,21 +10611,21 @@ fn installMaximumAccountProjection(workbench: *Runtime) !void {
             .execution_generation = std.math.maxInt(u64),
         },
     });
-    workbench.finishAccountCommitNoFail();
+    control.finishAccountCommitNoFail();
 }
 
 test "default snapshot budget contains the maximum structural projection" {
     const limits = Limits{};
     test_agent_runtime.io = std.testing.io;
-    var workbench = try Runtime.init(
+    var control = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &test_agent_runtime,
         limits,
         .{},
     );
-    defer workbench.deinit();
-    try installMaximumAccountProjection(&workbench);
+    defer control.deinit();
+    try installMaximumAccountProjection(&control);
 
     for (0..limits.max_tasks) |task_index| {
         var root_storage: [64]u8 = undefined;
@@ -10634,36 +10634,36 @@ test "default snapshot budget contains the maximum structural projection" {
             "/maximum-task-{d}",
             .{task_index + 1},
         );
-        workbench.workspaces[task_index] = .{
+        control.workspaces[task_index] = .{
             .id = @intCast(task_index + 1),
-            .canonical_root = try workbench.copyBounded(root, limits.max_workspace_bytes),
-            .projected_root_storage = try workbench.copyBounded(root, limits.max_workspace_bytes),
+            .canonical_root = try control.copyBounded(root, limits.max_workspace_bytes),
+            .projected_root_storage = try control.copyBounded(root, limits.max_workspace_bytes),
             .projected_root_len = root.len,
-            .display_name_storage = try workbench.copyBounded("maximum", limits.max_workspace_bytes),
+            .display_name_storage = try control.copyBounded("maximum", limits.max_workspace_bytes),
             .display_name_len = "maximum".len,
             .trust = .explicitly_trusted,
             .recent_order = @intCast(task_index + 1),
         };
-        workbench.skill.registerWorkspaceOwned(.{
+        control.skill.registerWorkspaceOwned(.{
             .id = @intCast(task_index + 1),
             .epoch = 1,
-            .canonical_root = try workbench.allocator.dupe(u8, root),
-        }, workbench.skillProjectionBudget());
-        const execution_model = try workbench.copyBounded(
+            .canonical_root = try control.allocator.dupe(u8, root),
+        }, control.skillProjectionBudget());
+        const execution_model = try control.copyBounded(
             "fixture-model",
             account_contract.Limits.model_id_bytes,
         );
-        const runs = try workbench.allocator.alloc(?TestRunRecord, limits.max_runs_per_task);
+        const runs = try control.allocator.alloc(?TestRunRecord, limits.max_runs_per_task);
         @memset(runs, null);
-        const compacts = try workbench.allocator.alloc(
+        const compacts = try control.allocator.alloc(
             ?TestCompactRecord,
             limits.max_compacts_per_task,
         );
         @memset(compacts, null);
-        const ui_history = try workbench.allocator.alloc(?UiRecord, limits.max_ui_history_per_task);
+        const ui_history = try control.allocator.alloc(?UiRecord, limits.max_ui_history_per_task);
         @memset(ui_history, null);
         for (0..limits.max_runs_per_task) |run_index| {
-            const tools = try workbench.allocator.alloc(?ToolView, limits.max_tools_per_run);
+            const tools = try control.allocator.alloc(?ToolView, limits.max_tools_per_run);
             @memset(tools, null);
             for (0..limits.max_tools_per_run) |tool_index| {
                 var tool_id_storage: [32]u8 = undefined;
@@ -10674,12 +10674,12 @@ test "default snapshot budget contains the maximum structural projection" {
                 );
                 tools[tool_index] = .{
                     .route_digest = toolRouteDigest(""),
-                    .id = try workbench.copyBounded(tool_id, limits.max_tool_field_bytes),
+                    .id = try control.copyBounded(tool_id, limits.max_tool_field_bytes),
                     .order = @intCast(tool_index + 1),
-                    .name = try workbench.copyBounded("tool", limits.max_tool_field_bytes),
-                    .input = try workbench.copyBounded("", limits.max_tool_field_bytes),
-                    .progress = try workbench.copyBounded("", limits.max_tool_field_bytes),
-                    .content = try workbench.copyBounded("", limits.max_tool_field_bytes),
+                    .name = try control.copyBounded("tool", limits.max_tool_field_bytes),
+                    .input = try control.copyBounded("", limits.max_tool_field_bytes),
+                    .progress = try control.copyBounded("", limits.max_tool_field_bytes),
+                    .content = try control.copyBounded("", limits.max_tool_field_bytes),
                     .state = .completed,
                     .elapsed_ms = std.math.maxInt(u64),
                 };
@@ -10691,13 +10691,13 @@ test "default snapshot budget contains the maximum structural projection" {
                 .execution_provider = .anthropic,
                 .execution_model = execution_model,
                 .input = .{ .text = .{
-                    .value = try workbench.copyBounded(
+                    .value = try control.copyBounded(
                         "x",
                         limits.max_user_message_bytes,
                     ),
                 } },
                 .tools = tools,
-                .status_text = try workbench.copyBounded("", limits.max_tool_field_bytes),
+                .status_text = try control.copyBounded("", limits.max_tool_field_bytes),
                 .terminal_publication = .init(.published),
                 .terminal_payload = .{
                     .phase = .completed,
@@ -10707,7 +10707,7 @@ test "default snapshot budget contains the maximum structural projection" {
                 },
                 .terminal_observed = true,
                 .event_stream_finalized = true,
-                .terminal_diagnostic = try workbench.allocTrackedCapacity(limits.max_terminal_diagnostic_bytes),
+                .terminal_diagnostic = try control.allocTrackedCapacity(limits.max_terminal_diagnostic_bytes),
                 .next_activity_order = @intCast(
                     limits.max_tools_per_run + limits.max_ui_history_per_task + 1,
                 ),
@@ -10731,12 +10731,12 @@ test "default snapshot budget contains the maximum structural projection" {
                     },
                     .session_disposition_at_completion = .reusable,
                 },
-                .terminal_diagnostic = try workbench.allocTrackedCapacity(
+                .terminal_diagnostic = try control.allocTrackedCapacity(
                     limits.max_terminal_diagnostic_bytes,
                 ),
             };
         }
-        workbench.task_runtime.tasks[task_index] = .{
+        control.task_runtime.tasks[task_index] = .{
             .durable = .{
                 .id = @intCast(task_index + 1),
                 .recent_order = @intCast(task_index + 1),
@@ -10744,8 +10744,8 @@ test "default snapshot budget contains the maximum structural projection" {
                 .execution_provider = .anthropic,
                 .execution_model = execution_model,
                 .workspace_id = @intCast(task_index + 1),
-                .workspace_root = try workbench.copyBounded(root, limits.max_workspace_bytes),
-                .title = try workbench.copyBounded("", limits.max_task_title_bytes),
+                .workspace_root = try control.copyBounded(root, limits.max_workspace_bytes),
+                .title = try control.copyBounded("", limits.max_task_title_bytes),
                 .runs = runs,
                 .compacts = compacts,
                 .next_run_generation = @intCast(limits.max_runs_per_task),
@@ -10764,48 +10764,48 @@ test "default snapshot budget contains the maximum structural projection" {
                 .detail_truncated = true,
             };
             @memset(record.detail[0..], 'x');
-            workbench.task_runtime.tasks[task_index].?.durable.ui_history[record_index] = record;
+            control.task_runtime.tasks[task_index].?.durable.ui_history[record_index] = record;
         }
-        workbench.task_runtime.tasks[task_index].?.durable.ui_history_count = limits.max_ui_history_per_task;
+        control.task_runtime.tasks[task_index].?.durable.ui_history_count = limits.max_ui_history_per_task;
     }
-    workbench.next_workspace_id = @intCast(limits.max_tasks + 1);
-    workbench.next_workspace_recent_order = @intCast(limits.max_tasks + 1);
-    workbench.task_runtime.next_task_id = @intCast(limits.max_tasks + 1);
-    workbench.task_runtime.next_recent_order = @intCast(limits.max_tasks + 1);
+    control.next_workspace_id = @intCast(limits.max_tasks + 1);
+    control.next_workspace_recent_order = @intCast(limits.max_tasks + 1);
+    control.task_runtime.next_task_id = @intCast(limits.max_tasks + 1);
+    control.task_runtime.next_recent_order = @intCast(limits.max_tasks + 1);
 
     const escaped_assistant = try std.testing.allocator.alloc(u8, limits.max_assistant_message_bytes);
     defer std.testing.allocator.free(escaped_assistant);
     @memset(escaped_assistant, 1);
-    try workbench.appendTrackedText(
-        &workbench.task_runtime.tasks[0].?.durable.runs[0].?.assistant,
+    try control.appendTrackedText(
+        &control.task_runtime.tasks[0].?.durable.runs[0].?.assistant,
         escaped_assistant,
         limits.max_assistant_message_bytes,
     );
-    _ = workbench.redactTrackedText(
-        &workbench.task_runtime.tasks[0].?.durable.runs[0].?.assistant,
-        workbench.task_runtime.tasks[0].?.durable.runs[0].?.redaction_secret,
+    _ = control.redactTrackedText(
+        &control.task_runtime.tasks[0].?.durable.runs[0].?.assistant,
+        control.task_runtime.tasks[0].?.durable.runs[0].?.redaction_secret,
     );
-    const remaining_projection = limits.max_projection_bytes - workbench.projection_bytes;
+    const remaining_projection = limits.max_projection_bytes - control.projection_bytes;
     const escaped_tool = try std.testing.allocator.alloc(
         u8,
         @min(limits.max_tool_field_bytes, remaining_projection),
     );
     defer std.testing.allocator.free(escaped_tool);
     @memset(escaped_tool, 2);
-    try workbench.replaceTracked(
-        &workbench.task_runtime.tasks[0].?.durable.runs[0].?.tools[0].?.content,
+    try control.replaceTracked(
+        &control.task_runtime.tasks[0].?.durable.runs[0].?.tools[0].?.content,
         escaped_tool,
         limits.max_tool_field_bytes,
     );
-    try std.testing.expectEqual(limits.max_projection_bytes, workbench.projection_bytes);
+    try std.testing.expectEqual(limits.max_projection_bytes, control.projection_bytes);
 
     const storage = try std.testing.allocator.alloc(u8, limits.max_snapshot_bytes);
     defer std.testing.allocator.free(storage);
-    const snapshot = try workbench.writeSnapshot(storage);
+    const snapshot = try control.writeSnapshot(storage);
     try std.testing.expect(snapshot.len <= worstCaseSnapshotBytes(limits).?);
     try std.testing.expect(snapshot.len <= limits.max_snapshot_bytes);
 
-    var task_state = try workbench.buildTaskStateWire();
+    var task_state = try control.buildTaskStateWire();
     defer task_state.deinit();
     const persistence_storage = try std.testing.allocator.alloc(
         u8,
@@ -10820,7 +10820,7 @@ test "default snapshot budget contains the maximum structural projection" {
     var raw = try task_persistence.decode(
         std.testing.allocator,
         persisted,
-        workbench.taskPersistenceLimits(),
+        control.taskPersistenceLimits(),
     );
     defer raw.deinit();
     for (raw.value.tasks) |task| {
@@ -10843,7 +10843,7 @@ test "default snapshot budget contains the maximum structural projection" {
     var decoded = try task_persistence.decode(
         std.testing.allocator,
         persisted,
-        workbench.taskPersistenceLimits(),
+        control.taskPersistenceLimits(),
     );
     decoded.deinit();
 }
@@ -10875,11 +10875,11 @@ test "permission UI re-encoding remains inside its concurrent snapshot allowance
     const storage = try std.testing.allocator.alloc(u8, allowance);
     defer std.testing.allocator.free(storage);
     var writer = std.Io.Writer.fixed(storage);
-    var workbench = try testRuntime();
-    defer workbench.deinit();
+    var control = try testRuntime();
+    defer control.deinit();
     try task_test_view.writePendingUi(
         &writer,
-        workbench.taskTextProjection(),
+        control.taskTextProjection(),
         std.math.maxInt(u64),
         std.math.maxInt(u64),
         std.math.maxInt(u64),
@@ -10889,8 +10889,8 @@ test "permission UI re-encoding remains inside its concurrent snapshot allowance
 }
 
 test "permission pending projection follows responses and candidate scope" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
+    var control = try testRuntime();
+    defer control.deinit();
     const with_candidate = lifecycle.PermissionRequest{
         .type = "permission",
         .request_id = "1111111111111111111111111111111111111111111111111111111111111111",
@@ -10915,7 +10915,7 @@ test "permission pending projection follows responses and candidate scope" {
     var candidate_writer = std.Io.Writer.fixed(&candidate_storage);
     try task_test_view.writePendingUi(
         &candidate_writer,
-        workbench.taskTextProjection(),
+        control.taskTextProjection(),
         1,
         1,
         1,
@@ -10930,7 +10930,7 @@ test "permission pending projection follows responses and candidate scope" {
     var once_writer = std.Io.Writer.fixed(&once_storage);
     try task_test_view.writePendingUi(
         &once_writer,
-        workbench.taskTextProjection(),
+        control.taskTextProjection(),
         1,
         1,
         1,
@@ -10971,8 +10971,8 @@ test "permission provenance projection keeps typed fields bounded and non-persis
 }
 
 test "Runtime projects tools and full-width usage without parsing protocol in Renderer" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
+    var control = try testRuntime();
+    defer control.deinit();
 
     const events = [_][]const u8{
         "{\"tool_start\":{\"id\":\"tool-1\",\"name\":\"Bash\",\"input\":\"{\\\"command\\\":\\\"printf ok\\\"}\"}}",
@@ -10983,11 +10983,11 @@ test "Runtime projects tools and full-width usage without parsing protocol in Re
     for (events) |encoded| {
         var envelope = try testEnvelope(3, 7, encoded);
         defer envelope.deinit();
-        try workbench.applyEvent(&envelope);
+        try control.applyEvent(&envelope);
     }
 
     var snapshot_storage: [96 * 1024]u8 = undefined;
-    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    const snapshot = try control.writeSnapshot(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"name\":\"Bash\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "stdout\\nexit 0") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"elapsedMs\":\"18446744073709551615\"") != null);
@@ -10996,31 +10996,31 @@ test "Runtime projects tools and full-width usage without parsing protocol in Re
 
 test "Runtime projects typed AgentCore file references into bounded tool entries" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
-    var workbench = try testRuntime();
-    defer workbench.deinit();
+    var control = try testRuntime();
+    defer control.deinit();
 
     const encoded = "{\"tool_result\":{\"id\":\"tool-1\",\"name\":\"Read\",\"input\":\"{}\",\"content\":\"ok\",\"is_error\":false,\"elapsed_ms\":1,\"file_refs\":[{\"locator\":{\"workspace_path\":\"src/main.zig\"},\"title\":\"main.zig\",\"kind\":\"read\",\"range\":{\"start\":{\"line\":1,\"column\":1},\"end\":{\"line\":2,\"column\":1}}}]}}";
     var envelope = try testEnvelope(3, 7, encoded);
     defer envelope.deinit();
-    try workbench.applyEvent(&envelope);
+    try control.applyEvent(&envelope);
 
     var snapshot_storage: [96 * 1024]u8 = undefined;
-    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    const snapshot = try control.writeSnapshot(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"fileRefs\":[{\"id\":\"file-3-1-1-1\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"displayPath\":\"src/main.zig\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"kind\":\"read\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"range\":") == null);
-    try std.testing.expect(workbench.task_runtime.fileReference(
+    try std.testing.expect(control.task_runtime.fileReference(
         3,
         7,
         "file-3-1-1-1",
     ) != null);
-    try std.testing.expect(workbench.task_runtime.fileReference(
+    try std.testing.expect(control.task_runtime.fileReference(
         4,
         7,
         "file-3-1-1-1",
     ) == null);
-    try std.testing.expect(workbench.task_runtime.fileReference(
+    try std.testing.expect(control.task_runtime.fileReference(
         3,
         8,
         "file-3-1-1-1",
@@ -11040,17 +11040,17 @@ test "file reference ids use durable task and run identities" {
 }
 
 test "file preview redaction protects credentials that cross a truncation boundary" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
+    var control = try testRuntime();
+    defer control.deinit();
     const boundary_value = "visible SECRET-";
-    const cutoff = workbench.filePreviewCredentialSafeCutoff(
+    const cutoff = control.filePreviewCredentialSafeCutoff(
         boundary_value,
         true,
     );
     try std.testing.expectEqualStrings("visible ", boundary_value[0..cutoff]);
 
     var output: [64]u8 = undefined;
-    const projected = workbench.sanitizeFilePreviewInto(
+    const projected = control.sanitizeFilePreviewInto(
         &output,
         "visible SECRET-KEY suffix",
     );
@@ -11062,8 +11062,8 @@ test "file preview redaction protects credentials that cross a truncation bounda
 }
 
 test "known Host credentials are removed from assistant, tool, and UI projections" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
+    var control = try testRuntime();
+    defer control.deinit();
     const events = [_][]const u8{
         "{\"text_chunk\":\"prefix SECRET-\"}",
         "{\"text_chunk\":\"KEY suffix\"}",
@@ -11074,9 +11074,9 @@ test "known Host credentials are removed from assistant, tool, and UI projection
     for (events) |encoded| {
         var envelope = try testEnvelope(3, 7, encoded);
         defer envelope.deinit();
-        try workbench.applyEvent(&envelope);
+        try control.applyEvent(&envelope);
     }
-    const tool = &workbench.task_runtime.tasks[0].?.durable.runs[0].?.tools[0].?;
+    const tool = &control.task_runtime.tasks[0].?.durable.runs[0].?.tools[0].?;
     for ([_][]const u8{
         tool.id,
         tool.name,
@@ -11093,7 +11093,7 @@ test "known Host credentials are removed from assistant, tool, and UI projection
     var pending_writer = std.Io.Writer.fixed(&pending_storage);
     try task_test_view.writePendingUi(
         &pending_writer,
-        workbench.taskTextProjection(),
+        control.taskTextProjection(),
         9,
         7,
         1,
@@ -11101,7 +11101,7 @@ test "known Host credentials are removed from assistant, tool, and UI projection
     );
 
     var snapshot_storage: [96 * 1024]u8 = undefined;
-    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    const snapshot = try control.writeSnapshot(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null);
     try std.testing.expect(std.mem.indexOf(u8, pending_writer.buffered(), "SECRET-KEY") == null);
     try std.testing.expect(std.mem.indexOf(u8, pending_writer.buffered(), "\"redacted\":true") != null);
@@ -11113,8 +11113,8 @@ test "known Host credentials are removed from assistant, tool, and UI projection
 }
 
 test "Runtime product tool identities remain unique after raw ID redaction" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
+    var control = try testRuntime();
+    defer control.deinit();
     const events = [_][]const u8{
         "{\"tool_start\":{\"id\":\"SECRET-KEY\",\"name\":\"Read\",\"input\":\"first\"}}",
         "{\"tool_start\":{\"id\":\"***\",\"name\":\"Bash\",\"input\":\"second\"}}",
@@ -11124,11 +11124,11 @@ test "Runtime product tool identities remain unique after raw ID redaction" {
     for (events) |encoded| {
         var envelope = try testEnvelope(3, 7, encoded);
         defer envelope.deinit();
-        try workbench.applyEvent(&envelope);
+        try control.applyEvent(&envelope);
     }
 
-    const first = &workbench.task_runtime.tasks[0].?.durable.runs[0].?.tools[0].?;
-    const second = &workbench.task_runtime.tasks[0].?.durable.runs[0].?.tools[1].?;
+    const first = &control.task_runtime.tasks[0].?.durable.runs[0].?.tools[0].?;
+    const second = &control.task_runtime.tasks[0].?.durable.runs[0].?.tools[1].?;
     try std.testing.expectEqualStrings("tool-1", first.id);
     try std.testing.expectEqualStrings("tool-2", second.id);
     try std.testing.expectEqualStrings("first progress", first.progress);
@@ -11137,33 +11137,33 @@ test "Runtime product tool identities remain unique after raw ID redaction" {
 }
 
 test "assistant credential redaction finalizes ordinary chunks without rescanning history" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
-    const assistant = &workbench.task_runtime.tasks[0].?.durable.runs[0].?.assistant;
+    var control = try testRuntime();
+    defer control.deinit();
+    const assistant = &control.task_runtime.tasks[0].?.durable.runs[0].?.assistant;
 
     for (0..4096) |_| {
-        try workbench.appendTrackedText(assistant, "x", workbench.limits.max_assistant_message_bytes);
-        try std.testing.expect(!workbench.redactTrackedText(assistant, workbench.execution.credential()));
+        try control.appendTrackedText(assistant, "x", control.limits.max_assistant_message_bytes);
+        try std.testing.expect(!control.redactTrackedText(assistant, control.execution.credential()));
         try std.testing.expectEqual(assistant.list.items.len, assistant.committed_len);
     }
     try std.testing.expectEqual(@as(usize, 4096), assistant.list.items.len);
 
-    try workbench.appendTrackedText(assistant, "SECRET-", workbench.limits.max_assistant_message_bytes);
-    try std.testing.expect(!workbench.redactTrackedText(assistant, workbench.execution.credential()));
+    try control.appendTrackedText(assistant, "SECRET-", control.limits.max_assistant_message_bytes);
+    try std.testing.expect(!control.redactTrackedText(assistant, control.execution.credential()));
     try std.testing.expectEqual(assistant.list.items.len - "SECRET-".len, assistant.committed_len);
 
     var pending_snapshot_storage: [96 * 1024]u8 = undefined;
-    const pending_snapshot = try workbench.writeSnapshot(&pending_snapshot_storage);
+    const pending_snapshot = try control.writeSnapshot(&pending_snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, pending_snapshot, "SECRET-") == null);
 
-    try workbench.appendTrackedText(assistant, "KEY", workbench.limits.max_assistant_message_bytes);
-    try std.testing.expect(workbench.redactTrackedText(assistant, workbench.execution.credential()));
+    try control.appendTrackedText(assistant, "KEY", control.limits.max_assistant_message_bytes);
+    try std.testing.expect(control.redactTrackedText(assistant, control.execution.credential()));
     try std.testing.expectEqual(assistant.list.items.len, assistant.committed_len);
     try std.testing.expect(std.mem.endsWith(u8, assistant.list.items, "***"));
 
-    try workbench.appendTrackedText(assistant, " tail SECRET-", workbench.limits.max_assistant_message_bytes);
-    try std.testing.expect(!workbench.redactTrackedText(assistant, workbench.execution.credential()));
-    const run = &workbench.task_runtime.tasks[0].?.durable.runs[0].?;
+    try control.appendTrackedText(assistant, " tail SECRET-", control.limits.max_assistant_message_bytes);
+    try std.testing.expect(!control.redactTrackedText(assistant, control.execution.credential()));
+    const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
     try std.testing.expect(commitTerminal(
         run,
         .completed,
@@ -11173,34 +11173,34 @@ test "assistant credential redaction finalizes ordinary chunks without rescannin
         "",
         false,
     ));
-    workbench.markTerminalRunsBeforeEventDrain();
+    control.markTerminalRunsBeforeEventDrain();
     var terminal_pending_storage: [96 * 1024]u8 = undefined;
-    const terminal_pending = try workbench.writeSnapshot(&terminal_pending_storage);
+    const terminal_pending = try control.writeSnapshot(&terminal_pending_storage);
     try std.testing.expect(std.mem.indexOf(u8, terminal_pending, "tail SECRET-") == null);
-    const revision_before_finalization = workbench.revision;
-    workbench.finalizeMarkedTerminalRunsAfterEventDrain();
+    const revision_before_finalization = control.revision;
+    control.finalizeMarkedTerminalRunsAfterEventDrain();
     try std.testing.expectEqual(assistant.list.items.len, assistant.committed_len);
-    try std.testing.expectEqual(revision_before_finalization + 1, workbench.revision);
+    try std.testing.expectEqual(revision_before_finalization + 1, control.revision);
 
     var terminal_snapshot_storage: [96 * 1024]u8 = undefined;
-    const terminal_snapshot = try workbench.writeSnapshot(&terminal_snapshot_storage);
+    const terminal_snapshot = try control.writeSnapshot(&terminal_snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, terminal_snapshot, "tail SECRET-") != null);
 
     var late_event = try testEnvelope(3, 7, "{\"text_chunk\":\"late\"}");
     defer late_event.deinit();
-    const revision_before_late_event = workbench.revision;
-    const late_count_before = workbench.task_runtime.late_terminal_event_count;
-    try workbench.applyEvent(&late_event);
-    try std.testing.expectEqual(late_count_before + 1, workbench.task_runtime.late_terminal_event_count);
-    try std.testing.expectEqual(revision_before_late_event, workbench.revision);
+    const revision_before_late_event = control.revision;
+    const late_count_before = control.task_runtime.late_terminal_event_count;
+    try control.applyEvent(&late_event);
+    try std.testing.expectEqual(late_count_before + 1, control.task_runtime.late_terminal_event_count);
+    try std.testing.expectEqual(revision_before_late_event, control.revision);
     try std.testing.expect(
-        std.mem.indexOf(u8, workbench.task_runtime.tasks[0].?.durable.runs[0].?.assistant.list.items, "late") == null,
+        std.mem.indexOf(u8, control.task_runtime.tasks[0].?.durable.runs[0].?.assistant.list.items, "late") == null,
     );
 }
 
 test "projection failure after Agent terminal becomes a product failure" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
+    var control = try testRuntime();
+    defer control.deinit();
     const events = [_][]const u8{
         "{\"tool_start\":{\"id\":\"first\",\"name\":\"Read\",\"input\":\"one\"}}",
         "{\"tool_start\":{\"id\":\"second\",\"name\":\"Bash\",\"input\":\"two\"}}",
@@ -11208,10 +11208,10 @@ test "projection failure after Agent terminal becomes a product failure" {
     for (events) |encoded| {
         var envelope = try testEnvelope(3, 7, encoded);
         defer envelope.deinit();
-        try workbench.applyEvent(&envelope);
+        try control.applyEvent(&envelope);
     }
 
-    const run = &workbench.task_runtime.tasks[0].?.durable.runs[0].?;
+    const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
     try std.testing.expect(commitTerminal(
         run,
         .completed,
@@ -11227,9 +11227,9 @@ test "projection failure after Agent terminal becomes a product failure" {
         "{\"tool_start\":{\"id\":\"third\",\"name\":\"Edit\",\"input\":\"three\"}}",
     );
     defer overflow.deinit();
-    try std.testing.expectError(error.ToolCapacity, workbench.applyEvent(&overflow));
-    workbench.recordEventProjectionFailure(3, 7);
-    finalizeTestTerminalEvents(&workbench);
+    try std.testing.expectError(error.ToolCapacity, control.applyEvent(&overflow));
+    control.recordEventProjectionFailure(3, 7);
+    finalizeTestTerminalEvents(&control);
 
     // Agent completion remains immutable; only Runtime product facts report
     // that the canonical event stream could not be represented completely.
@@ -11239,13 +11239,13 @@ test "projection failure after Agent terminal becomes a product failure" {
     try std.testing.expectEqual(RunCause.event_pipeline_failure, product.cause.?);
     // Continuation stays with the Session disposition; the projection loss is
     // a Run-level product fact only.
-    try std.testing.expect(workbench.task_runtime.continuationAvailable(
-        workbench.task_runtime.tasks[0].?.durable.id,
-        workbench.taskRuntimeProjectionEffects(),
+    try std.testing.expect(control.task_runtime.continuationAvailable(
+        control.task_runtime.tasks[0].?.durable.id,
+        control.taskRuntimeProjectionEffects(),
     ));
 
     var snapshot_storage: [96 * 1024]u8 = undefined;
-    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    const snapshot = try control.writeSnapshot(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"phase\":\"failed\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"lastRunOutcome\":\"failed\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"cause\":\"event_pipeline_failure\"") != null);
@@ -11253,14 +11253,14 @@ test "projection failure after Agent terminal becomes a product failure" {
 }
 
 test "event drain barrier atomically publishes terminal product state" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
-    const run = &workbench.task_runtime.tasks[0].?.durable.runs[0].?;
+    var control = try testRuntime();
+    defer control.deinit();
+    const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
 
-    try workbench.appendTrackedText(
+    try control.appendTrackedText(
         &run.assistant,
         "final assistant suffix",
-        workbench.limits.max_assistant_message_bytes,
+        control.limits.max_assistant_message_bytes,
     );
     try std.testing.expect(commitTerminal(
         run,
@@ -11272,9 +11272,9 @@ test "event drain barrier atomically publishes terminal product state" {
         false,
     ));
 
-    try std.testing.expectError(error.TaskBusy, workbench.setTaskArchived(3, true));
+    try std.testing.expectError(error.TaskBusy, control.setTaskArchived(3, true));
     var pending_storage: [96 * 1024]u8 = undefined;
-    const pending = try workbench.writeSnapshot(&pending_storage);
+    const pending = try control.writeSnapshot(&pending_storage);
     try std.testing.expect(std.mem.indexOf(u8, pending, "\"phase\":\"running\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, pending, "\"lastRunOutcome\":null") != null);
     try std.testing.expect(std.mem.indexOf(u8, pending, "\"outcome\":null") != null);
@@ -11282,12 +11282,12 @@ test "event drain barrier atomically publishes terminal product state" {
     try std.testing.expect(std.mem.indexOf(u8, pending, "\"continuationAvailable\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, pending, "final assistant suffix") == null);
 
-    const revision_before_finalization = workbench.revision;
-    finalizeTestTerminalEvents(&workbench);
-    try std.testing.expect(workbench.revision > revision_before_finalization);
+    const revision_before_finalization = control.revision;
+    finalizeTestTerminalEvents(&control);
+    try std.testing.expect(control.revision > revision_before_finalization);
 
     var terminal_storage: [96 * 1024]u8 = undefined;
-    const terminal = try workbench.writeSnapshot(&terminal_storage);
+    const terminal = try control.writeSnapshot(&terminal_storage);
     try std.testing.expect(std.mem.indexOf(u8, terminal, "\"phase\":\"failed\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, terminal, "\"lastRunOutcome\":\"failed\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, terminal, "\"outcome\":\"failed\"") != null);
@@ -11307,9 +11307,9 @@ test "close and delete wait for terminal event drain" {
         }
     };
 
-    var workbench = try testRuntime();
-    defer workbench.deinit();
-    const task = &workbench.task_runtime.tasks[0].?;
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = &control.task_runtime.tasks[0].?;
     const run = &task.durable.runs[0].?;
     const route_id = task.runtime.routeId();
     try std.testing.expect(task.runtime.beginClosing());
@@ -11338,22 +11338,22 @@ test "close and delete wait for terminal event drain" {
         task.runtime.close_completion.load(.acquire),
     );
 
-    workbench.syncLifecycle();
+    control.syncLifecycle();
     try std.testing.expectEqual(TaskLifecycle.closing, taskLifecycle(task));
     try std.testing.expect(task.runtime.close_thread != null);
     try std.testing.expectEqual(route_id, task.runtime.routeId());
-    try workbench.deleteTask(3);
+    try control.deleteTask(3);
 
     var queued_event = try testEnvelope(3, 7, "{\"text_chunk\":\"queued before terminal\"}");
     defer queued_event.deinit();
-    try workbench.applyEvent(&queued_event);
+    try control.applyEvent(&queued_event);
 
-    finalizeTestTerminalEvents(&workbench);
-    try std.testing.expect(workbench.task_runtime.tasks[0] == null);
+    finalizeTestTerminalEvents(&control);
+    try std.testing.expect(control.task_runtime.tasks[0] == null);
 
     var late_event = try testEnvelope(3, 7, "{\"text_chunk\":\"late\"}");
     defer late_event.deinit();
-    try std.testing.expectError(error.UnknownTask, workbench.applyEvent(&late_event));
+    try std.testing.expectError(error.UnknownTask, control.applyEvent(&late_event));
 }
 
 test "Runtime shutdown joins a flying close owner before relinquish" {
@@ -11368,9 +11368,9 @@ test "Runtime shutdown joins a flying close owner before relinquish" {
         }
     };
 
-    var workbench = try testRuntime();
-    defer workbench.deinit();
-    const task = &workbench.task_runtime.tasks[0].?;
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = &control.task_runtime.tasks[0].?;
     const route_id = task.runtime.routeId();
     try std.testing.expect(task.runtime.beginClosing());
     task.runtime.close_completion.store(.running, .release);
@@ -11378,9 +11378,9 @@ test "Runtime shutdown joins a flying close owner before relinquish" {
         task.runtime.closingWorkerBinding().?,
         &task.runtime.close_completion,
     });
-    workbench.executor_shutdown = true;
+    control.executor_shutdown = true;
 
-    workbench.relinquishAgentSessionsAfterRuntimeShutdown();
+    control.relinquishAgentSessionsAfterRuntimeShutdown();
 
     try std.testing.expect(task.runtime.close_thread == null);
     try std.testing.expect(route_id != 0);
@@ -11396,11 +11396,11 @@ test "Runtime shutdown joins a flying close owner before relinquish" {
 }
 
 test "streaming projection escaping is allocation-free JSON with redaction" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
+    var control = try testRuntime();
+    defer control.deinit();
     var storage: [256]u8 = undefined;
     var writer = std.Io.Writer.fixed(&storage);
-    try workbench.projectedJsonValue(&writer, "quote\" slash\\ control\x01 line\n 界 SECRET-KEY");
+    try control.projectedJsonValue(&writer, "quote\" slash\\ control\x01 line\n 界 SECRET-KEY");
     try std.testing.expectEqualStrings(
         "\"quote\\\" slash\\\\ control\\u0001 line\\n 界 ***\"",
         writer.buffered(),
@@ -11408,23 +11408,23 @@ test "streaming projection escaping is allocation-free JSON with redaction" {
 }
 
 test "tool projection truncates on UTF-8 boundaries and records bounded UI history" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
+    var control = try testRuntime();
+    defer control.deinit();
 
-    const long = try std.testing.allocator.alloc(u8, workbench.limits.max_tool_field_bytes + 4);
+    const long = try std.testing.allocator.alloc(u8, control.limits.max_tool_field_bytes + 4);
     defer std.testing.allocator.free(long);
     @memset(long, 'x');
     @memcpy(long[long.len - 3 ..], "界");
-    const projected = try workbench.copyProjected(
+    const projected = try control.copyProjected(
         long,
-        workbench.limits.max_tool_field_bytes,
-        workbench.execution.credential(),
+        control.limits.max_tool_field_bytes,
+        control.execution.credential(),
     );
-    defer workbench.freeTracked(projected.value);
+    defer control.freeTracked(projected.value);
     try std.testing.expect(projected.truncated);
     try std.testing.expect(std.unicode.utf8ValidateSlice(projected.value));
 
-    const view = &workbench.task_runtime.tasks[0].?;
+    const view = &control.task_runtime.tasks[0].?;
     for (1..11) |request_id| {
         var record = UiRecord{
             .request_id = request_id,
@@ -11434,34 +11434,34 @@ test "tool projection truncates on UTF-8 boundaries and records bounded UI histo
         };
         const detail = sanitizeInto(&record.detail, "Continue?", "");
         record.detail_len = detail.len;
-        workbench.pushUiRecord(view, record);
+        control.pushUiRecord(view, record);
     }
-    try std.testing.expectEqual(workbench.limits.max_ui_history_per_task, view.durable.ui_history_count);
+    try std.testing.expectEqual(control.limits.max_ui_history_per_task, view.durable.ui_history_count);
     var storage: [96 * 1024]u8 = undefined;
-    const snapshot = try workbench.writeSnapshot(&storage);
+    const snapshot = try control.writeSnapshot(&storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"requestId\":\"1\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"requestId\":\"3\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"requestId\":\"10\"") != null);
 }
 
 test "Runtime rejects cross-session routes and usage overflow" {
-    var workbench = try testRuntime();
-    defer workbench.deinit();
+    var control = try testRuntime();
+    defer control.deinit();
 
     var foreign_session = try testEnvelope(4, 7, "{\"text_chunk\":\"wrong\"}");
     defer foreign_session.deinit();
-    try std.testing.expectError(error.UnknownTask, workbench.applyEvent(&foreign_session));
+    try std.testing.expectError(error.UnknownTask, control.applyEvent(&foreign_session));
 
     var foreign_run = try testEnvelope(3, 8, "{\"text_chunk\":\"wrong\"}");
     defer foreign_run.deinit();
-    try std.testing.expectError(error.NoSuchRun, workbench.applyEvent(&foreign_run));
+    try std.testing.expectError(error.NoSuchRun, control.applyEvent(&foreign_run));
 
     var maximum = try testEnvelope(3, 7, "{\"usage\":{\"input_tokens\":18446744073709551615}}");
     defer maximum.deinit();
-    try workbench.applyEvent(&maximum);
+    try control.applyEvent(&maximum);
     var overflow = try testEnvelope(3, 7, "{\"usage\":{\"input_tokens\":1}}");
     defer overflow.deinit();
-    try std.testing.expectError(error.ProjectionCapacity, workbench.applyEvent(&overflow));
+    try std.testing.expectError(error.ProjectionCapacity, control.applyEvent(&overflow));
 }
 
 test "MCP runtime OAuth failure durably reauthorizes and preserves scope step-up" {
@@ -11604,14 +11604,14 @@ test "MCP runtime OAuth failure durably reauthorizes and preserves scope step-up
     var management_owned = true;
     defer if (management_owned) management.deinit();
     manifest_owned = false;
-    var workbench = try testRuntime();
-    defer workbench.deinit();
-    std.debug.assert(workbench.mcp == null);
-    workbench.mcp = mcp_testing.init(
-        workbench.allocator,
+    var control = try testRuntime();
+    defer control.deinit();
+    std.debug.assert(control.mcp == null);
+    control.mcp = mcp_testing.init(
+        control.allocator,
         productMcpPorts(
-            workbench.executor,
-            workbench.agent_runtime,
+            control.executor,
+            control.agent_runtime,
             .{},
             .{},
         ),
@@ -11633,7 +11633,7 @@ test "MCP runtime OAuth failure durably reauthorizes and preserves scope step-up
 
     try std.testing.expectEqual(
         McpRuntimeAuthorizationFailureOutcome.stale,
-        try workbench.requireMcpOauthReauthorization(.{
+        try control.requireMcpOauthReauthorization(.{
             .server_id = "oauth",
             .consent_epoch = 3,
             .token_revision = 7,
@@ -11643,11 +11643,11 @@ test "MCP runtime OAuth failure durably reauthorizes and preserves scope step-up
     );
     try std.testing.expectEqualStrings(
         "ready",
-        mcp_testing.state(&workbench.mcp.?).management.?.desiredRegistry().?.servers[0].auth.oauth.?.status,
+        mcp_testing.state(&control.mcp.?).management.?.desiredRegistry().?.servers[0].auth.oauth.?.status,
     );
     try std.testing.expectEqual(
         McpRuntimeAuthorizationFailureOutcome.applied,
-        try workbench.requireMcpOauthReauthorization(.{
+        try control.requireMcpOauthReauthorization(.{
             .server_id = "oauth",
             .consent_epoch = 3,
             .token_revision = 7,
@@ -11655,7 +11655,7 @@ test "MCP runtime OAuth failure durably reauthorizes and preserves scope step-up
             .challenge_scopes_complete = true,
         }),
     );
-    const desired = mcp_testing.state(&workbench.mcp.?).management.?.desiredRegistry().?;
+    const desired = mcp_testing.state(&control.mcp.?).management.?.desiredRegistry().?;
     try std.testing.expectEqualStrings(
         "reauth_required",
         desired.servers[0].auth.oauth.?.status,
@@ -11663,51 +11663,51 @@ test "MCP runtime OAuth failure durably reauthorizes and preserves scope step-up
     try std.testing.expect(desired.servers[0].auth.oauth.?.grant == null);
     try std.testing.expectEqual(
         mcp_configuration.RuntimeAlignment.current,
-        workbench.inspectMcpDesiredConfiguration().?.runtime_alignment,
+        control.inspectMcpDesiredConfiguration().?.runtime_alignment,
     );
-    try std.testing.expect(mcp_testing.state(&workbench.mcp.?).admission == .ready);
+    try std.testing.expect(mcp_testing.state(&control.mcp.?).admission == .ready);
     try std.testing.expectEqual(
         @as(usize, 1),
-        mcp_testing.state(&workbench.mcp.?).pending_reauthorizations.items.len,
+        mcp_testing.state(&control.mcp.?).pending_reauthorizations.items.len,
     );
     try std.testing.expectEqualStrings(
         "oauth",
-        mcp_testing.state(&workbench.mcp.?).pending_reauthorizations.items[0].server_id,
+        mcp_testing.state(&control.mcp.?).pending_reauthorizations.items[0].server_id,
     );
-    var start = (try workbench.beginMcpAuthorization(5, "oauth")).?;
+    var start = (try control.beginMcpAuthorization(5, "oauth")).?;
     defer start.deinit();
     try std.testing.expectEqual(@as(usize, 2), start.additional_scopes.len);
     try std.testing.expectEqualStrings("files.read", start.additional_scopes[0]);
     try std.testing.expectEqualStrings("files.write", start.additional_scopes[1]);
-    try std.testing.expect(workbench.finishMcpAuthorization(start.operation_id));
+    try std.testing.expect(control.finishMcpAuthorization(start.operation_id));
 
-    workbench.blockMcpAdmissionAfterRuntimeAuthFailure();
+    control.blockMcpAdmissionAfterRuntimeAuthFailure();
     try std.testing.expectEqual(
         McpAdmissionBlockReason.runtime_authorization_failure,
-        mcp_testing.state(&workbench.mcp.?).admission.blocked,
+        mcp_testing.state(&control.mcp.?).admission.blocked,
     );
     try std.testing.expectEqual(
         mcp_configuration.ManagementOutcome.saved,
-        try workbench.renameMcpServer(5, .{
+        try control.renameMcpServer(5, .{
             .server_id = "oauth",
             .display_name = "Renamed OAuth",
         }),
     );
     try std.testing.expectEqual(
         McpAdmissionBlockReason.runtime_authorization_failure,
-        mcp_testing.state(&workbench.mcp.?).admission.blocked,
+        mcp_testing.state(&control.mcp.?).admission.blocked,
     );
     try std.testing.expectEqual(
         @as(usize, 1),
-        mcp_testing.state(&workbench.mcp.?).pending_reauthorizations.items.len,
+        mcp_testing.state(&control.mcp.?).pending_reauthorizations.items.len,
     );
     try std.testing.expectEqual(
         mcp_configuration.ManagementOutcome.saved,
-        try workbench.removeMcpServer(6, "oauth"),
+        try control.removeMcpServer(6, "oauth"),
     );
     try std.testing.expectEqual(
         @as(usize, 0),
-        mcp_testing.state(&workbench.mcp.?).pending_reauthorizations.items.len,
+        mcp_testing.state(&control.mcp.?).pending_reauthorizations.items.len,
     );
 }
 
@@ -11760,7 +11760,7 @@ test "empty MCP startup commits a proven manageable runtime" {
     var runtime_manifest_owned = true;
     defer if (runtime_manifest_owned) runtime_manifest.deinit();
     test_agent_runtime.io = std.testing.io;
-    var workbench = try Runtime.init(
+    var control = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &test_agent_runtime,
@@ -11798,10 +11798,10 @@ test "empty MCP startup commits a proven manageable runtime" {
     );
     preparation_owned = false;
     runtime_manifest_owned = false;
-    defer workbench.deinit();
+    defer control.deinit();
 
     var output: [128 * 1024]u8 = undefined;
-    const empty_snapshot = try workbench.writeSnapshot(&output);
+    const empty_snapshot = try control.writeSnapshot(&output);
     try std.testing.expect(std.mem.indexOf(
         u8,
         empty_snapshot,
@@ -11809,12 +11809,12 @@ test "empty MCP startup commits a proven manageable runtime" {
     ) != null);
     try std.testing.expectEqual(
         mcp_configuration.ManagementOutcome.saved,
-        try workbench.createMcpHttpServer(0, .{
+        try control.createMcpHttpServer(0, .{
             .display_name = "Remote",
             .url = "https://mcp.example.test/rpc",
         }),
     );
-    const inspection = workbench.inspectMcpDesiredConfiguration().?;
+    const inspection = control.inspectMcpDesiredConfiguration().?;
     try std.testing.expectEqual(@as(?u64, 1), inspection.desired_generation);
     try std.testing.expectEqual(
         mcp_configuration.RuntimeAlignment.restart_required,
@@ -11822,9 +11822,9 @@ test "empty MCP startup commits a proven manageable runtime" {
     );
     try std.testing.expectEqual(
         McpAdmissionBlockReason.pending_restart,
-        mcp_testing.state(&workbench.mcp.?).admission.blocked,
+        mcp_testing.state(&control.mcp.?).admission.blocked,
     );
-    const created_snapshot = try workbench.writeSnapshot(&output);
+    const created_snapshot = try control.writeSnapshot(&output);
     try std.testing.expect(std.mem.indexOf(
         u8,
         created_snapshot,
@@ -11835,26 +11835,26 @@ test "empty MCP startup commits a proven manageable runtime" {
         created_snapshot,
         "\"desiredEnabled\":true,\"runtimeStatus\":\"not_loaded\",\"newTaskAccess\":\"restart_required\"",
     ) != null);
-    const server_id = mcp_testing.state(&workbench.mcp.?).management.?.desiredRegistry().?.servers[0].id;
-    try workbench.beginMcpConnectionTest(server_id);
-    const testing_snapshot = try workbench.writeSnapshot(&output);
+    const server_id = mcp_testing.state(&control.mcp.?).management.?.desiredRegistry().?.servers[0].id;
+    try control.beginMcpConnectionTest(server_id);
+    const testing_snapshot = try control.writeSnapshot(&output);
     try std.testing.expect(std.mem.indexOf(
         u8,
         testing_snapshot,
         "\"connectionTest\":{\"status\":\"testing\",\"toolCount\":0,\"issueCount\":0}",
     ) != null);
-    workbench.completeMcpConnectionTest(server_id, .connected, 3, 1);
-    const connected_snapshot = try workbench.writeSnapshot(&output);
+    control.completeMcpConnectionTest(server_id, .connected, 3, 1);
+    const connected_snapshot = try control.writeSnapshot(&output);
     try std.testing.expect(std.mem.indexOf(
         u8,
         connected_snapshot,
         "\"connectionTest\":{\"status\":\"connected\",\"toolCount\":3,\"issueCount\":1}",
     ) != null);
-    try workbench.beginMcpConfigurationApply(1);
-    try std.testing.expectError(error.CatalogLoading, workbench.refreshMcpCatalog());
-    try std.testing.expect(mcp_testing.state(&workbench.mcp.?).refresh_pending);
-    try std.testing.expect(!workbench.mcp.?.hasRefreshJob());
-    const applying_snapshot = try workbench.writeSnapshot(&output);
+    try control.beginMcpConfigurationApply(1);
+    try std.testing.expectError(error.CatalogLoading, control.refreshMcpCatalog());
+    try std.testing.expect(mcp_testing.state(&control.mcp.?).refresh_pending);
+    try std.testing.expect(!control.mcp.?.hasRefreshJob());
+    const applying_snapshot = try control.writeSnapshot(&output);
     try std.testing.expect(std.mem.indexOf(
         u8,
         applying_snapshot,
@@ -11862,10 +11862,10 @@ test "empty MCP startup commits a proven manageable runtime" {
     ) != null);
     try std.testing.expectEqual(
         McpAdmissionBlockReason.refreshing,
-        mcp_testing.state(&workbench.mcp.?).admission.blocked,
+        mcp_testing.state(&control.mcp.?).admission.blocked,
     );
-    workbench.failMcpConfigurationApply(1);
-    const failed_apply_snapshot = try workbench.writeSnapshot(&output);
+    control.failMcpConfigurationApply(1);
+    const failed_apply_snapshot = try control.writeSnapshot(&output);
     try std.testing.expect(std.mem.indexOf(
         u8,
         failed_apply_snapshot,
@@ -11873,10 +11873,10 @@ test "empty MCP startup commits a proven manageable runtime" {
     ) != null);
     try std.testing.expectEqual(
         McpAdmissionBlockReason.refreshing,
-        mcp_testing.state(&workbench.mcp.?).admission.blocked,
+        mcp_testing.state(&control.mcp.?).admission.blocked,
     );
-    try std.testing.expect(!mcp_testing.state(&workbench.mcp.?).refresh_pending);
-    try std.testing.expect(workbench.mcp.?.hasRefreshJob());
+    try std.testing.expect(!mcp_testing.state(&control.mcp.?).refresh_pending);
+    try std.testing.expect(control.mcp.?.hasRefreshJob());
 }
 
 test "MCP authorization operation owns product phase and durable token boundary" {
@@ -11927,7 +11927,7 @@ test "MCP authorization operation owns product phase and durable token boundary"
     defer if (manifest_owned) manifest.deinit();
     var refresh_timer: TestMcpRefreshTimer = .{};
     test_agent_runtime.io = std.testing.io;
-    var workbench = try Runtime.init(
+    var control = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &test_agent_runtime,
@@ -11956,28 +11956,28 @@ test "MCP authorization operation owns product phase and durable token boundary"
     );
     preparation_owned = false;
     manifest_owned = false;
-    defer workbench.deinit();
+    defer control.deinit();
 
     try std.testing.expectEqual(
         mcp_configuration.ManagementOutcome.saved,
-        try workbench.createMcpOauthHttpServer(0, .{
+        try control.createMcpOauthHttpServer(0, .{
             .display_name = "Remote OAuth",
             .url = "https://mcp.example.test/mcp",
             .client = .{ .pre_registered = .{ .client_id = "client-1" } },
         }),
     );
-    const server_id = mcp_testing.state(&workbench.mcp.?).management.?.desiredRegistry().?.servers[0].id;
-    var start = (try workbench.beginMcpAuthorization(1, server_id)).?;
+    const server_id = mcp_testing.state(&control.mcp.?).management.?.desiredRegistry().?.servers[0].id;
+    var start = (try control.beginMcpAuthorization(1, server_id)).?;
     defer start.deinit();
-    try std.testing.expectError(error.CatalogLoading, workbench.refreshMcpCatalog());
-    try std.testing.expect(mcp_testing.state(&workbench.mcp.?).refresh_pending);
-    try std.testing.expect(!mcp_testing.state(&workbench.mcp.?).refresh_pending_blocks_admission);
-    try std.testing.expect(mcp_testing.state(&workbench.mcp.?).admission == .ready);
-    try std.testing.expectEqual(@as(u64, 1), mcp_testing.state(&workbench.mcp.?).refresh_request_generation);
-    try std.testing.expect(!workbench.mcp.?.hasRefreshJob());
+    try std.testing.expectError(error.CatalogLoading, control.refreshMcpCatalog());
+    try std.testing.expect(mcp_testing.state(&control.mcp.?).refresh_pending);
+    try std.testing.expect(!mcp_testing.state(&control.mcp.?).refresh_pending_blocks_admission);
+    try std.testing.expect(mcp_testing.state(&control.mcp.?).admission == .ready);
+    try std.testing.expectEqual(@as(u64, 1), mcp_testing.state(&control.mcp.?).refresh_request_generation);
+    try std.testing.expect(!control.mcp.?.hasRefreshJob());
     try std.testing.expectEqual(
         McpAuthorizationPhase.discovering,
-        workbench.mcpAuthorizationOperation().?.phase,
+        control.mcpAuthorizationOperation().?.phase,
     );
     try std.testing.expectEqualStrings(
         "https://mcp.example.test/mcp",
@@ -11985,21 +11985,21 @@ test "MCP authorization operation owns product phase and durable token boundary"
     );
     try std.testing.expectEqual(
         mcp_configuration.ManagementOutcome.rejected,
-        try workbench.renameMcpServer(1, .{
+        try control.renameMcpServer(1, .{
             .server_id = server_id,
             .display_name = "Blocked while authorizing",
         }),
     );
-    try std.testing.expect(!workbench.advanceMcpAuthorization(
+    try std.testing.expect(!control.advanceMcpAuthorization(
         start.operation_id,
         .exchanging,
     ));
-    try std.testing.expect(workbench.advanceMcpAuthorization(
+    try std.testing.expect(control.advanceMcpAuthorization(
         start.operation_id,
         .awaiting_consent,
     ));
 
-    const authorization = try workbench.authorizeMcpOauth(.{
+    const authorization = try control.authorizeMcpOauth(.{
         .attempt_id = 7,
         .server_id = server_id,
         .issuer = "https://auth.example.test",
@@ -12012,31 +12012,31 @@ test "MCP authorization operation owns product phase and durable token boundary"
         "client-1",
         authorization.ready.client_id,
     );
-    try std.testing.expect(workbench.advanceMcpAuthorization(
+    try std.testing.expect(control.advanceMcpAuthorization(
         start.operation_id,
         .awaiting_browser,
     ));
-    const exchange = try workbench.beginMcpOauthCodeExchange(server_id);
+    const exchange = try control.beginMcpOauthCodeExchange(server_id);
     try std.testing.expect(exchange == .started);
     const durable_id = exchange.started.operation.id;
-    try std.testing.expect(workbench.finishMcpAuthorization(start.operation_id));
-    try std.testing.expect(workbench.mcpAuthorizationOperation() == null);
-    try std.testing.expect(mcp_testing.state(&workbench.mcp.?).refresh_pending);
-    try std.testing.expect(!mcp_testing.state(&workbench.mcp.?).refresh_pending_blocks_admission);
-    try std.testing.expect(!workbench.mcp.?.hasRefreshJob());
-    try std.testing.expectError(error.CatalogLoading, workbench.refreshMcpCatalog());
-    try std.testing.expectEqual(@as(u64, 2), mcp_testing.state(&workbench.mcp.?).refresh_request_generation);
+    try std.testing.expect(control.finishMcpAuthorization(start.operation_id));
+    try std.testing.expect(control.mcpAuthorizationOperation() == null);
+    try std.testing.expect(mcp_testing.state(&control.mcp.?).refresh_pending);
+    try std.testing.expect(!mcp_testing.state(&control.mcp.?).refresh_pending_blocks_admission);
+    try std.testing.expect(!control.mcp.?.hasRefreshJob());
+    try std.testing.expectError(error.CatalogLoading, control.refreshMcpCatalog());
+    try std.testing.expectEqual(@as(u64, 2), mcp_testing.state(&control.mcp.?).refresh_request_generation);
     try std.testing.expectEqual(
         mcp_configuration.ManagementOutcome.saved,
-        try workbench.recoverMcpOauthOperation(durable_id),
+        try control.recoverMcpOauthOperation(durable_id),
     );
-    try std.testing.expect(!mcp_testing.state(&workbench.mcp.?).refresh_pending);
-    try std.testing.expect(workbench.mcp.?.hasRefreshJob());
+    try std.testing.expect(!mcp_testing.state(&control.mcp.?).refresh_pending);
+    try std.testing.expect(control.mcp.?.hasRefreshJob());
     try std.testing.expectEqual(
         @as(u64, 2),
-        mcp_testing.refreshJob(&workbench.mcp.?).?.request_generation,
+        mcp_testing.refreshJob(&control.mcp.?).?.request_generation,
     );
-    const oauth = mcp_testing.state(&workbench.mcp.?).management.?.desiredRegistry().?.servers[0].auth.oauth.?;
+    const oauth = mcp_testing.state(&control.mcp.?).management.?.desiredRegistry().?.servers[0].auth.oauth.?;
     try std.testing.expectEqualStrings("reauth_required", oauth.status);
 }
 
@@ -12094,7 +12094,7 @@ test "MCP startup health commits a safe degraded Runtime projection" {
     var runtime_manifest_owned = true;
     defer if (runtime_manifest_owned) runtime_manifest.deinit();
     test_agent_runtime.io = std.testing.io;
-    var workbench = try Runtime.init(
+    var control = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &test_agent_runtime,
@@ -12129,10 +12129,10 @@ test "MCP startup health commits a safe degraded Runtime projection" {
     );
     preparation_owned = false;
     runtime_manifest_owned = false;
-    defer workbench.deinit();
+    defer control.deinit();
 
     var output: [128 * 1024]u8 = undefined;
-    const snapshot = try workbench.writeSnapshot(&output);
+    const snapshot = try control.writeSnapshot(&output);
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
@@ -12174,7 +12174,7 @@ test "MCP startup health commits a safe degraded Runtime projection" {
         "\"connection\":null",
     ) != null);
 
-    const before = workbench.inspectMcpDesiredConfiguration().?;
+    const before = control.inspectMcpDesiredConfiguration().?;
     try std.testing.expectEqual(@as(?u64, 9), before.desired_generation);
     try std.testing.expectEqual(
         mcp_configuration.RuntimeAlignment.current,
@@ -12182,18 +12182,18 @@ test "MCP startup health commits a safe degraded Runtime projection" {
     );
     try std.testing.expectEqual(
         McpAdmissionBlockReason.activation_unavailable,
-        mcp_testing.state(&workbench.mcp.?).admission.blocked,
+        mcp_testing.state(&control.mcp.?).admission.blocked,
     );
-    const revision_before_mutation = workbench.revision;
+    const revision_before_mutation = control.revision;
     try std.testing.expectEqual(
         mcp_configuration.ManagementOutcome.saved,
-        try workbench.renameMcpServer(9, .{
+        try control.renameMcpServer(9, .{
             .server_id = "local-files",
             .display_name = "Updated local files",
         }),
     );
-    try std.testing.expectEqual(revision_before_mutation + 1, workbench.revision);
-    const after = workbench.inspectMcpDesiredConfiguration().?;
+    try std.testing.expectEqual(revision_before_mutation + 1, control.revision);
+    const after = control.inspectMcpDesiredConfiguration().?;
     try std.testing.expectEqual(@as(?u64, 10), after.desired_generation);
     try std.testing.expectEqual(
         mcp_configuration.RuntimeAlignment.current,
@@ -12201,81 +12201,81 @@ test "MCP startup health commits a safe degraded Runtime projection" {
     );
     try std.testing.expectEqual(
         McpAdmissionBlockReason.activation_unavailable,
-        mcp_testing.state(&workbench.mcp.?).admission.blocked,
+        mcp_testing.state(&control.mcp.?).admission.blocked,
     );
 
     try std.testing.expectEqual(
         mcp_configuration.ManagementOutcome.saved,
-        try workbench.approveMcpConnection(10, .{ .server_id = "disabled" }),
+        try control.approveMcpConnection(10, .{ .server_id = "disabled" }),
     );
     try std.testing.expectEqual(
         mcp_configuration.ManagementOutcome.saved,
-        try workbench.setMcpServerEnabled(11, .{
+        try control.setMcpServerEnabled(11, .{
             .server_id = "disabled",
             .enabled = true,
         }),
     );
     try std.testing.expectEqual(
         mcp_configuration.RuntimeAlignment.restart_required,
-        workbench.inspectMcpDesiredConfiguration().?.runtime_alignment,
+        control.inspectMcpDesiredConfiguration().?.runtime_alignment,
     );
     try std.testing.expectEqual(
         McpAdmissionBlockReason.pending_restart,
-        mcp_testing.state(&workbench.mcp.?).admission.blocked,
+        mcp_testing.state(&control.mcp.?).admission.blocked,
     );
     try std.testing.expectEqual(
         mcp_configuration.ManagementOutcome.saved,
-        try workbench.setMcpServerEnabled(12, .{
+        try control.setMcpServerEnabled(12, .{
             .server_id = "disabled",
             .enabled = false,
         }),
     );
     try std.testing.expectEqual(
         mcp_configuration.RuntimeAlignment.current,
-        workbench.inspectMcpDesiredConfiguration().?.runtime_alignment,
+        control.inspectMcpDesiredConfiguration().?.runtime_alignment,
     );
     try std.testing.expectEqual(
         McpAdmissionBlockReason.activation_unavailable,
-        mcp_testing.state(&workbench.mcp.?).admission.blocked,
+        mcp_testing.state(&control.mcp.?).admission.blocked,
     );
-    mcp_testing.state(&workbench.mcp.?).management.?.persistence.commit_registry_fn =
+    mcp_testing.state(&control.mcp.?).management.?.persistence.commit_registry_fn =
         ManagementEffects.failRegistry;
     try std.testing.expectEqual(
         mcp_configuration.ManagementOutcome.rejected,
-        try workbench.setMcpServerEnabled(13, .{
+        try control.setMcpServerEnabled(13, .{
             .server_id = "disabled",
             .enabled = true,
         }),
     );
     try std.testing.expectEqual(
         @as(?u64, 13),
-        workbench.inspectMcpDesiredConfiguration().?.desired_generation,
+        control.inspectMcpDesiredConfiguration().?.desired_generation,
     );
     try std.testing.expectEqual(
         McpAdmissionBlockReason.activation_unavailable,
-        mcp_testing.state(&workbench.mcp.?).admission.blocked,
+        mcp_testing.state(&control.mcp.?).admission.blocked,
     );
-    mcp_testing.state(&workbench.mcp.?).management.?.persistence.commit_registry_fn =
+    mcp_testing.state(&control.mcp.?).management.?.persistence.commit_registry_fn =
         ManagementEffects.registry;
-    mcp_testing.state(&workbench.mcp.?).management.?.persistence.clear_journal_fn =
+    mcp_testing.state(&control.mcp.?).management.?.persistence.clear_journal_fn =
         ManagementEffects.unknownClear;
     try std.testing.expectEqual(
         mcp_configuration.ManagementOutcome.indeterminate,
-        try workbench.setMcpServerEnabled(13, .{
+        try control.setMcpServerEnabled(13, .{
             .server_id = "disabled",
             .enabled = true,
         }),
     );
     try std.testing.expectEqual(
         @as(?u64, 14),
-        workbench.inspectMcpDesiredConfiguration().?.desired_generation,
+        control.inspectMcpDesiredConfiguration().?.desired_generation,
     );
     try std.testing.expectEqual(
         McpAdmissionBlockReason.persistence_outcome_unknown,
-        mcp_testing.state(&workbench.mcp.?).admission.blocked,
+        mcp_testing.state(&control.mcp.?).admission.blocked,
     );
 
-    const effective_snapshot = try workbench.writeSnapshot(&output);
+    const effective_snapshot = try control.writeSnapshot(&output);
     try std.testing.expect(std.mem.indexOf(
         u8,
         effective_snapshot,
@@ -12287,68 +12287,68 @@ test "MCP startup health commits a safe degraded Runtime projection" {
         "Updated local files",
     ) == null);
 
-    const blocked_job = try workbench.allocator.create(McpRefreshTestJob);
+    const blocked_job = try control.allocator.create(McpRefreshTestJob);
     blocked_job.* = .{
-        .allocator = workbench.allocator,
-        .catalog = mcpCatalogPort(workbench.agent_runtime),
+        .allocator = control.allocator,
+        .catalog = mcpCatalogPort(control.agent_runtime),
         .notifier = mcpNotifierPort(.{}),
         .request_generation = 1,
         .requested_at_ms = null,
-        .arena = std.heap.ArenaAllocator.init(workbench.allocator),
+        .arena = std.heap.ArenaAllocator.init(control.allocator),
         .allowlists = &.{},
         .build_admission = false,
     };
-    mcp_testing.state(&workbench.mcp.?).refresh_request_generation = 1;
-    mcp_testing.installRefreshJob(&workbench.mcp.?, blocked_job);
+    mcp_testing.state(&control.mcp.?).refresh_request_generation = 1;
+    mcp_testing.installRefreshJob(&control.mcp.?, blocked_job);
     try std.testing.expectError(
         error.CatalogLoading,
-        workbench.createTaskInWorkspace(1, 1, 1, null, null),
+        control.createTaskInWorkspace(1, 1, 1, null, null),
     );
-    mcp_testing.state(&workbench.mcp.?).activation_failed = false;
+    mcp_testing.state(&control.mcp.?).activation_failed = false;
     blocked_job.outcome = .unavailable;
     blocked_job.state.store(.completed, .release);
-    workbench.syncLifecycle();
-    try std.testing.expect(!workbench.mcp.?.hasRefreshJob());
-    try std.testing.expect(mcp_testing.state(&workbench.mcp.?).activation_failed);
+    control.syncLifecycle();
+    try std.testing.expect(!control.mcp.?.hasRefreshJob());
+    try std.testing.expect(mcp_testing.state(&control.mcp.?).activation_failed);
     try std.testing.expectEqual(
         @as(?u64, 14),
-        workbench.inspectMcpDesiredConfiguration().?.desired_generation,
+        control.inspectMcpDesiredConfiguration().?.desired_generation,
     );
 
-    const stale_job = try workbench.allocator.create(McpRefreshTestJob);
+    const stale_job = try control.allocator.create(McpRefreshTestJob);
     stale_job.* = .{
-        .allocator = workbench.allocator,
-        .catalog = mcpCatalogPort(workbench.agent_runtime),
+        .allocator = control.allocator,
+        .catalog = mcpCatalogPort(control.agent_runtime),
         .notifier = mcpNotifierPort(.{}),
         .request_generation = 2,
         .requested_at_ms = null,
-        .arena = std.heap.ArenaAllocator.init(workbench.allocator),
+        .arena = std.heap.ArenaAllocator.init(control.allocator),
         .allowlists = &.{},
         .build_admission = false,
         .state = .init(.completed),
         .outcome = .unavailable,
     };
-    mcp_testing.state(&workbench.mcp.?).activation_failed = false;
-    mcp_testing.state(&workbench.mcp.?).refresh_request_generation = 3;
-    mcp_testing.installRefreshJob(&workbench.mcp.?, stale_job);
-    workbench.syncLifecycle();
-    try std.testing.expect(!mcp_testing.state(&workbench.mcp.?).activation_failed);
+    mcp_testing.state(&control.mcp.?).activation_failed = false;
+    mcp_testing.state(&control.mcp.?).refresh_request_generation = 3;
+    mcp_testing.installRefreshJob(&control.mcp.?, stale_job);
+    control.syncLifecycle();
+    try std.testing.expect(!mcp_testing.state(&control.mcp.?).activation_failed);
 
-    const cancelled_job = try workbench.allocator.create(McpRefreshTestJob);
+    const cancelled_job = try control.allocator.create(McpRefreshTestJob);
     cancelled_job.* = .{
-        .allocator = workbench.allocator,
-        .catalog = mcpCatalogPort(workbench.agent_runtime),
+        .allocator = control.allocator,
+        .catalog = mcpCatalogPort(control.agent_runtime),
         .notifier = mcpNotifierPort(.{}),
         .request_generation = 4,
         .requested_at_ms = null,
-        .arena = std.heap.ArenaAllocator.init(workbench.allocator),
+        .arena = std.heap.ArenaAllocator.init(control.allocator),
         .allowlists = &.{},
         .build_admission = false,
     };
-    mcp_testing.state(&workbench.mcp.?).refresh_request_generation = 4;
-    mcp_testing.installRefreshJob(&workbench.mcp.?, cancelled_job);
+    mcp_testing.state(&control.mcp.?).refresh_request_generation = 4;
+    mcp_testing.installRefreshJob(&control.mcp.?, cancelled_job);
     McpRefreshTestJob.cancel(cancelled_job);
-    workbench.shutting_down = true;
-    workbench.syncLifecycle();
-    try std.testing.expect(!workbench.mcp.?.hasRefreshJob());
+    control.shutting_down = true;
+    control.syncLifecycle();
+    try std.testing.expect(!control.mcp.?.hasRefreshJob());
 }

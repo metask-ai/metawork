@@ -216,7 +216,7 @@ pub const Runtime = struct {
         return self;
     }
 
-    /// Performs one synchronous AgentCore discovery call. Workbench decides
+    /// Performs one synchronous AgentCore discovery call. The caller decides
     /// where this blocking operation runs and owns the returned projection and
     /// opaque lease as two independent linear values.
     pub fn querySkillCatalog(
@@ -710,8 +710,8 @@ pub const Runtime = struct {
     }
 
     /// Creates one Agent Session and returns its canonical routing identity in
-    /// the same operation. Product owners must not reconstruct this identity
-    /// from a live Session snapshot.
+    /// the same operation. The identity must not be reconstructed from a live
+    /// Session snapshot.
     pub fn createSessionRoute(
         self: *Runtime,
         options: SessionOpenOptions,
@@ -869,7 +869,7 @@ pub const Runtime = struct {
         if (typed_status != .ok) {
             // AgentCore must not return a live handle for a rejected create.
             // Preserve the typed freshness signal only for a well-formed
-            // rejection so Workbench can rebuild MCP authority.
+            // rejection so the caller can rebuild MCP authority.
             if (raw_session != null) return error.CoreCallFailed;
             if (typed_status == .mcp_not_refreshed)
                 return error.McpNotRefreshed;

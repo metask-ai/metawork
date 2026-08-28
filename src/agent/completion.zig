@@ -1,7 +1,7 @@
 //! MetaWork-owned one-shot text Completion.
 //!
 //! Provider JSON belongs here. DNS, HTTP, TLS and request cancellation are
-//! supplied through the injected Application Transport.
+//! supplied through the injected Transport.
 
 const std = @import("std");
 const provider = @import("agent_provider");

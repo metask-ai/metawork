@@ -1,9 +1,8 @@
 //! MetaWork's productized Agent capability definition.
 //!
 //! AgentCore owns the general-purpose capability superset. This module owns
-//! the narrower Agent that MetaWork exposes to its Product layer. It is
-//! intentionally private to Agent: Application and Workbench cannot select or
-//! widen built-in tools per Session.
+//! MetaWork's narrower Agent capability surface. Built-in tool selection and
+//! widening remain private to Agent and cannot vary per Session.
 
 const sdk = @import("metask_agentcore");
 

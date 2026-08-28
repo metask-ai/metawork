@@ -2,7 +2,7 @@
 //!
 //! This module owns the official restore ABI mapping, source callback, report
 //! decoding, and post-restore description cross-check. It does not know about
-//! files, Workbench tasks, credentials, or product recovery policy.
+//! filesystem layout, credentials, or recovery policy outside Agent.
 
 const std = @import("std");
 const checkpoint = @import("agent_checkpoint");

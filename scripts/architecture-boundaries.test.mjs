@@ -295,6 +295,7 @@ test("Product Control is the only composition owner identity", () => {
   assert.match(build, /product_control_automatic_workspace/);
   assert.match(control, /pub const Runtime = runtime_impl\.Runtime/);
   assert.match(runtime, /pub const Runtime = struct/);
+  assert.doesNotMatch(runtime, /\bworkbench(?:\b|_)/);
   assert.doesNotMatch(build, /metawork_workbench|workbench_projection/);
   assert.doesNotMatch(source, /@import\("metawork_workbench"\)|@import\("workbench_projection"\)/);
   assert.doesNotMatch(source, /pub const Workbench\s*=|pub const Workbench = struct/);
@@ -1414,6 +1415,9 @@ test("MetaWork Agent capability shaping stays private to Agent", () => {
   const agentRoot = read("src/agent.zig");
   const sessionApi = read("src/agent/session.zig");
   const capabilities = read("src/agent/capabilities.zig");
+  const agentSource = ["src/agent.zig", ...zigFiles("src/agent/")]
+    .map(read)
+    .join("\n");
   const applicationAndProduct = [
     "src/app.zig",
     ...zigFiles("src/app/"),
@@ -1425,6 +1429,10 @@ test("MetaWork Agent capability shaping stays private to Agent", () => {
   assert.match(capabilities, /pub const Builtin = enum/);
   assert.match(capabilities, /\.ask_question => false/);
   assert.doesNotMatch(agentRoot, /capabilities|builtins|allowed_tools/);
+  assert.doesNotMatch(
+    agentSource,
+    /\b(?:[Ww]orkbench(?:\b|_)|Product Control|Product layer|Product owners?|Renderer transport|Application Transport)\b/,
+  );
   assert.doesNotMatch(sessionApi, /allowed_tools|respondAnswers/);
   assert.doesNotMatch(
     applicationAndProduct,

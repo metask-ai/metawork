@@ -1,7 +1,7 @@
 //! Operation-specific AgentCore checkpoint consumption.
 //!
 //! This module owns the official ABI mapping and streaming callback contract.
-//! It never owns filesystem paths or Workbench persistence policy.
+//! It never owns filesystem paths or external persistence policy.
 
 const std = @import("std");
 const sdk = @import("metask_agentcore");
@@ -328,7 +328,7 @@ fn exportCheckpoint(
                 .total_bytes = result.total_bytes,
                 .chunk_count = result.chunk_count,
                 // The ABI exposes a fixed-width `digest` field but does not
-                // define its algorithm. Product integrity therefore uses the
+                // define its algorithm. Checkpoint integrity therefore uses the
                 // independently observed SHA-256 of the streamed bytes.
                 .digest = observed_digest,
             },
