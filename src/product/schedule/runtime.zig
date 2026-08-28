@@ -13,9 +13,10 @@ const view = @import("product_schedule_view");
 pub const Recurrence = state.Recurrence;
 pub const Provider = state.Provider;
 pub const Definition = state.Definition;
-pub const Occurrence = state.Occurrence;
-pub const OccurrenceSource = state.OccurrenceSource;
-pub const OccurrenceTaskOutcome = state.OccurrenceTaskOutcome;
+const Occurrence = state.Occurrence;
+const OccurrenceSource = state.OccurrenceSource;
+pub const TaskOutcome = state.OccurrenceTaskOutcome;
+const OccurrenceTaskOutcome = TaskOutcome;
 pub const FailureReason = state.FailureReason;
 pub const Health = state.Health;
 pub const TextProjection = view.TextProjection;
@@ -159,14 +160,14 @@ pub const ExecutionBinding = struct {
     automatic_workspace_available: bool,
 };
 
-pub const Due = struct {
+const Due = struct {
     id: u64,
     epoch: u64,
     planned_at_unix_seconds: u64,
     triggered_at_unix_seconds: u64,
 };
 
-pub const Claim = struct {
+const Claim = struct {
     allocator: std.mem.Allocator,
     id: u64,
     planned_at_unix_seconds: u64,
@@ -182,16 +183,55 @@ pub const Claim = struct {
     }
 };
 
-pub const BeginOutcome = union(enum) {
+const BeginOutcome = union(enum) {
     skipped: u64,
     claimed: Claim,
 };
 
-pub const PendingCompletion = struct {
+const PendingCompletion = struct {
     scheduled_task_id: u64,
     planned_at_unix_seconds: u64,
     source: OccurrenceSource,
     task_id: u64,
+};
+
+/// Callback-scoped access to the Task aggregate. Schedule owns occurrence
+/// transaction order; Product Control retains authority checks and the real
+/// Task effects behind this opaque capability. Runtime never retains it.
+pub const TaskLaunch = struct {
+    title: []const u8,
+    input: []const u8,
+    execution_generation: u64,
+};
+
+pub const TaskLaunchFailure = struct {
+    cause: anyerror,
+    reason: FailureReason,
+    task_id: u64,
+};
+
+pub const TaskLaunchOutcome = union(enum) {
+    submitted: u64,
+    rejected: TaskLaunchFailure,
+};
+
+pub const TaskEffects = struct {
+    context: *anyopaque,
+    has_active_fn: *const fn (*anyopaque, u64) bool,
+    launch_fn: *const fn (*anyopaque, TaskLaunch) TaskLaunchOutcome,
+    terminal_fn: *const fn (*anyopaque, u64) ?TaskOutcome,
+
+    fn hasActive(self: TaskEffects, task_id: u64) bool {
+        return self.has_active_fn(self.context, task_id);
+    }
+
+    fn launch(self: TaskEffects, input: TaskLaunch) TaskLaunchOutcome {
+        return self.launch_fn(self.context, input);
+    }
+
+    fn terminal(self: TaskEffects, task_id: u64) ?TaskOutcome {
+        return self.terminal_fn(self.context, task_id);
+    }
 };
 
 pub const Runtime = struct {
@@ -375,17 +415,73 @@ pub const Runtime = struct {
         _ = self.rearmNoFail(binding, redaction);
     }
 
+    pub fn runNow(
+        self: *Runtime,
+        id: u64,
+        expected_epoch: u64,
+        redaction: Redaction,
+        tasks: TaskEffects,
+    ) anyerror!u64 {
+        try self.validateManual(id, expected_epoch);
+        const current = self.timer.now() orelse return error.ScheduleTimerUnavailable;
+        return self.triggerOccurrence(
+            id,
+            current,
+            current,
+            .manual,
+            tasks,
+            redaction,
+        );
+    }
+
+    pub fn onTimer(
+        self: *Runtime,
+        binding: ExecutionBinding,
+        redaction: Redaction,
+        tasks: TaskEffects,
+    ) void {
+        const due = self.dueNow(binding, redaction) orelse return;
+        _ = self.triggerOccurrence(
+            due.id,
+            due.planned_at_unix_seconds,
+            due.triggered_at_unix_seconds,
+            .timer,
+            tasks,
+            redaction,
+        ) catch {};
+        _ = self.rearmNoFail(binding, redaction);
+    }
+
+    pub fn reconcileNoFail(
+        self: *Runtime,
+        binding: ExecutionBinding,
+        redaction: Redaction,
+        tasks: TaskEffects,
+    ) bool {
+        var changed = self.reconcileBindingsNoFail(binding, redaction);
+        changed = self.reconcileCompletionNoFail(tasks, redaction) or changed;
+        return changed;
+    }
+
+    pub fn refreshBindingNoFail(
+        self: *Runtime,
+        binding: ExecutionBinding,
+        redaction: Redaction,
+    ) bool {
+        return self.reconcileBindingsNoFail(binding, redaction);
+    }
+
     pub fn epoch(self: *Runtime, id: u64) Error!u64 {
         return (self.store.find(id) orelse return error.UnknownScheduledTask).epoch;
     }
 
-    pub fn validateManual(self: *Runtime, id: u64, expected_epoch: u64) Error!void {
+    fn validateManual(self: *Runtime, id: u64, expected_epoch: u64) Error!void {
         const item = self.store.find(id) orelse return error.UnknownScheduledTask;
         if (expected_epoch == 0 or item.epoch != expected_epoch)
             return error.ScheduledTaskEpochMismatch;
     }
 
-    pub fn dueNow(
+    fn dueNow(
         self: *Runtime,
         binding: ExecutionBinding,
         redaction: Redaction,
@@ -405,7 +501,7 @@ pub const Runtime = struct {
         };
     }
 
-    pub fn beginOccurrence(
+    fn beginOccurrence(
         self: *Runtime,
         id: u64,
         planned_at: u64,
@@ -461,12 +557,12 @@ pub const Runtime = struct {
         } };
     }
 
-    pub fn previousTaskId(self: *Runtime, id: u64) Error!u64 {
+    fn previousTaskId(self: *Runtime, id: u64) Error!u64 {
         const item = self.store.find(id) orelse return error.UnknownScheduledTask;
         return if (item.last_occurrence) |last| last.task_id else 0;
     }
 
-    pub fn finishSubmitted(
+    fn finishSubmitted(
         self: *Runtime,
         claim: *const Claim,
         task_id: u64,
@@ -486,7 +582,7 @@ pub const Runtime = struct {
         owned = false;
     }
 
-    pub fn finishRejectedNoFail(
+    fn finishRejectedNoFail(
         self: *Runtime,
         claim: *const Claim,
         reason: FailureReason,
@@ -514,7 +610,7 @@ pub const Runtime = struct {
         return true;
     }
 
-    pub fn nextPendingCompletion(self: *Runtime) ?PendingCompletion {
+    fn nextPendingCompletion(self: *Runtime) ?PendingCompletion {
         for (self.store.items) |*entry| {
             const item = &(entry.* orelse continue);
             for (item.occurrences()) |occurrence| {
@@ -531,7 +627,7 @@ pub const Runtime = struct {
         return null;
     }
 
-    pub fn finishCompletionNoFail(
+    fn finishCompletionNoFail(
         self: *Runtime,
         pending: PendingCompletion,
         outcome: OccurrenceTaskOutcome,
@@ -560,7 +656,67 @@ pub const Runtime = struct {
         return true;
     }
 
-    pub fn reconcileBindingsNoFail(
+    fn triggerOccurrence(
+        self: *Runtime,
+        id: u64,
+        planned_at_unix_seconds: u64,
+        triggered_at_unix_seconds: u64,
+        source: OccurrenceSource,
+        tasks: TaskEffects,
+        redaction: Redaction,
+    ) anyerror!u64 {
+        const previous_task_id = try self.previousTaskId(id);
+        const previous_task_active = previous_task_id != 0 and
+            tasks.hasActive(previous_task_id);
+        const begin = try self.beginOccurrence(
+            id,
+            planned_at_unix_seconds,
+            triggered_at_unix_seconds,
+            source,
+            previous_task_active,
+            redaction,
+        );
+        var claim = switch (begin) {
+            .skipped => |task_id| return task_id,
+            .claimed => |value| value,
+        };
+        defer claim.deinit();
+        const task_id = switch (tasks.launch(.{
+            .title = claim.title,
+            .input = claim.input,
+            .execution_generation = claim.execution_generation,
+        })) {
+            .submitted => |task_id| task_id,
+            .rejected => |failure| {
+                _ = self.finishRejectedNoFail(
+                    &claim,
+                    failure.reason,
+                    failure.task_id,
+                    redaction,
+                );
+                return failure.cause;
+            },
+        };
+        try self.finishSubmitted(&claim, task_id, redaction);
+        return task_id;
+    }
+
+    fn reconcileCompletionNoFail(
+        self: *Runtime,
+        tasks: TaskEffects,
+        redaction: Redaction,
+    ) bool {
+        const pending = self.nextPendingCompletion() orelse return false;
+        const terminal_outcome = tasks.terminal(pending.task_id) orelse return false;
+        return self.finishCompletionNoFail(
+            pending,
+            terminal_outcome,
+            if (terminal_outcome == .completed) .completed else .failed,
+            redaction,
+        );
+    }
+
+    fn reconcileBindingsNoFail(
         self: *Runtime,
         binding: ExecutionBinding,
         redaction: Redaction,

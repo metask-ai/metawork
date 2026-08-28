@@ -1921,7 +1921,10 @@ pub const Runtime = struct {
 
     pub fn finishAccountCommitNoFail(self: *Runtime) void {
         if (self.canCreateTask()) {
-            _ = self.reconcileScheduledTaskBindingsNoFail();
+            _ = self.schedule.refreshBindingNoFail(
+                self.scheduleExecutionBinding(),
+                self.scheduleRedaction(),
+            );
             _ = self.schedule.rearmNoFail(
                 self.scheduleExecutionBinding(),
                 self.scheduleRedaction(),
@@ -3084,28 +3087,25 @@ pub const Runtime = struct {
         defer self.publishScheduleChangesNoFail();
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
-        try self.schedule.validateManual(id, expected_epoch);
-        const now = self.schedule.now() orelse return error.ScheduleTimerUnavailable;
-        return self.triggerScheduledTask(id, now, now, .manual);
+        return self.schedule.runNow(
+            id,
+            expected_epoch,
+            self.scheduleRedaction(),
+            self.scheduleTaskEffects(),
+        ) catch |err| switch (err) {
+            error.PreviousTaskActive => error.TaskBusy,
+            else => return @errorCast(err),
+        };
     }
 
     pub fn onScheduledTaskTimer(self: *Runtime) void {
         defer self.publishScheduleChangesNoFail();
         if (self.shutting_down) return;
         self.syncLifecycle();
-        const due = self.schedule.dueNow(
+        self.schedule.onTimer(
             self.scheduleExecutionBinding(),
             self.scheduleRedaction(),
-        ) orelse return;
-        _ = self.triggerScheduledTask(
-            due.id,
-            due.planned_at_unix_seconds,
-            due.triggered_at_unix_seconds,
-            .timer,
-        ) catch {};
-        _ = self.schedule.rearmNoFail(
-            self.scheduleExecutionBinding(),
-            self.scheduleRedaction(),
+            self.scheduleTaskEffects(),
         );
     }
 
@@ -3175,8 +3175,11 @@ pub const Runtime = struct {
             changed = true;
             durable_changed = true;
         }
-        if (self.reconcileScheduledTaskBindingsNoFail()) changed = true;
-        if (self.reconcileScheduledTaskCompletionsNoFail()) changed = true;
+        if (self.schedule.reconcileNoFail(
+            self.scheduleExecutionBinding(),
+            self.scheduleRedaction(),
+            self.scheduleTaskEffects(),
+        )) changed = true;
         if (self.schedule.takeChanged()) changed = true;
         if (durable_changed) self.commitTaskStateNoFail();
         if (self.task_runtime.syncCheckpointPostprocesses(
@@ -4327,6 +4330,65 @@ pub const Runtime = struct {
         };
     }
 
+    fn scheduleTaskEffects(self: *Runtime) product_schedule.TaskEffects {
+        return .{
+            .context = self,
+            .has_active_fn = scheduleTaskHasActive,
+            .launch_fn = scheduleTaskLaunch,
+            .terminal_fn = scheduleTaskTerminal,
+        };
+    }
+
+    fn scheduleTaskHasActive(context: *anyopaque, task_id: u64) bool {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        return self.task_runtime.taskHasActiveOperation(task_id);
+    }
+
+    fn scheduleTaskLaunch(
+        context: *anyopaque,
+        input: product_schedule.TaskLaunch,
+    ) product_schedule.TaskLaunchOutcome {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        const task_id = self.createTaskForWorkspace(
+            .automatic,
+            input.execution_generation,
+            null,
+            null,
+        ) catch |err| return .{ .rejected = .{
+            .cause = err,
+            .reason = scheduledFailure(err),
+            .task_id = 0,
+        } };
+        self.renameTask(task_id, input.title) catch |err|
+            return .{ .rejected = .{
+                .cause = err,
+                .reason = .task_start_failed,
+                .task_id = task_id,
+            } };
+        const binding_epoch = self.task_runtime.taskBindingEpoch(task_id) orelse
+            unreachable;
+        _ = self.runTaskAtBinding(
+            task_id,
+            binding_epoch,
+            .{ .text = input.input },
+        ) catch |err| return .{ .rejected = .{
+            .cause = err,
+            .reason = scheduledFailure(err),
+            .task_id = task_id,
+        } };
+        return .{ .submitted = task_id };
+    }
+
+    fn scheduleTaskTerminal(
+        context: *anyopaque,
+        task_id: u64,
+    ) ?product_schedule.TaskOutcome {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        const outcome = self.task_runtime.lastTerminalOutcome(task_id) orelse
+            return null;
+        return scheduledTaskOutcome(outcome);
+    }
+
     fn scheduleRedaction(self: *Runtime) product_schedule.Redaction {
         return .{
             .context = self,
@@ -4436,98 +4498,6 @@ pub const Runtime = struct {
             .input = scheduled_input,
             .recurrence = input.recurrence,
         };
-    }
-
-    fn triggerScheduledTask(
-        self: *Runtime,
-        id: u64,
-        planned_at_unix_seconds: u64,
-        triggered_at_unix_seconds: u64,
-        source: product_schedule.OccurrenceSource,
-    ) Error!u64 {
-        const previous_task_id = try self.schedule.previousTaskId(id);
-        const previous_task_active = previous_task_id != 0 and
-            self.task_runtime.taskHasActiveOperation(previous_task_id);
-        const begin = self.schedule.beginOccurrence(
-            id,
-            planned_at_unix_seconds,
-            triggered_at_unix_seconds,
-            source,
-            previous_task_active,
-            self.scheduleRedaction(),
-        ) catch |err| switch (err) {
-            error.PreviousTaskActive => return error.TaskBusy,
-            else => return @errorCast(err),
-        };
-        var claim = switch (begin) {
-            .skipped => |task_id| {
-                return task_id;
-            },
-            .claimed => |claim| claim,
-        };
-        defer claim.deinit();
-        const task_id = self.createTaskForWorkspace(
-            .automatic,
-            claim.execution_generation,
-            null,
-            null,
-        ) catch |err| {
-            _ = self.schedule.finishRejectedNoFail(
-                &claim,
-                scheduledFailure(err),
-                0,
-                self.scheduleRedaction(),
-            );
-            return err;
-        };
-        self.renameTask(task_id, claim.title) catch |err| {
-            _ = self.schedule.finishRejectedNoFail(
-                &claim,
-                .task_start_failed,
-                task_id,
-                self.scheduleRedaction(),
-            );
-            return err;
-        };
-        const binding_epoch = self.task_runtime.taskBindingEpoch(task_id) orelse unreachable;
-        const run_input: TaskRunInput = .{
-            .text = claim.input,
-        };
-        _ = self.runTaskAtBinding(task_id, binding_epoch, run_input) catch |err| {
-            _ = self.schedule.finishRejectedNoFail(
-                &claim,
-                scheduledFailure(err),
-                task_id,
-                self.scheduleRedaction(),
-            );
-            return err;
-        };
-        try self.schedule.finishSubmitted(
-            &claim,
-            task_id,
-            self.scheduleRedaction(),
-        );
-        return task_id;
-    }
-
-    fn reconcileScheduledTaskCompletionsNoFail(self: *Runtime) bool {
-        const pending = self.schedule.nextPendingCompletion() orelse return false;
-        const terminal_outcome = self.task_runtime.lastTerminalOutcome(
-            pending.task_id,
-        ) orelse return false;
-        return self.schedule.finishCompletionNoFail(
-            pending,
-            scheduledOccurrenceOutcome(terminal_outcome),
-            if (terminal_outcome == .completed) .completed else .failed,
-            self.scheduleRedaction(),
-        );
-    }
-
-    fn reconcileScheduledTaskBindingsNoFail(self: *Runtime) bool {
-        return self.schedule.reconcileBindingsNoFail(
-            self.scheduleExecutionBinding(),
-            self.scheduleRedaction(),
-        );
     }
 
     fn taskPersistenceLimits(self: *const Runtime) task_persistence.Limits {
@@ -6706,9 +6676,9 @@ fn scheduledProvider(provider: Provider) product_schedule.Provider {
     };
 }
 
-fn scheduledOccurrenceOutcome(
+fn scheduledTaskOutcome(
     outcome: RunOutcome,
-) product_schedule.OccurrenceTaskOutcome {
+) product_schedule.TaskOutcome {
     return switch (outcome) {
         .completed => .completed,
         .stopped => .stopped,
@@ -8711,7 +8681,10 @@ test "Scheduled Task execution drift becomes needs attention without blocking Ac
 
     control.execution.generation = 2;
     control.account.execution_generation = 2;
-    try std.testing.expect(control.reconcileScheduledTaskBindingsNoFail());
+    try std.testing.expect(control.schedule.refreshBindingNoFail(
+        control.scheduleExecutionBinding(),
+        control.scheduleRedaction(),
+    ));
 
     const item = product_schedule.testing.item(&control.schedule, id).?;
     try std.testing.expect(!item.enabled);

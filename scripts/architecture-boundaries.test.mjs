@@ -469,9 +469,17 @@ test("Product Schedule owns its aggregate state and persistence", () => {
   assert.doesNotMatch(runtime, /scheduled_tasks_impl|\.scheduled_tasks\b/);
   assert.doesNotMatch(
     runtime,
-    /ItemView|forEachView|plannedAtUnixSeconds|nextRunAtUnixSeconds|titleRedacted/,
+    /ItemView|forEachView|plannedAtUnixSeconds|nextRunAtUnixSeconds|titleRedacted|previousTaskId|beginOccurrence|finishSubmitted|finishRejectedNoFail|nextPendingCompletion|finishCompletionNoFail|dueNow|validateManual/,
   );
-  assert.doesNotMatch(scheduleRoot, /ItemView|forEachView/);
+  assert.doesNotMatch(
+    scheduleRoot,
+    /ItemView|forEachView|OccurrenceSource|OccurrenceTaskOutcome|Claim|BeginOutcome|PendingCompletion|pub const Due/,
+  );
+  assert.match(scheduleRuntime, /pub const TaskEffects = struct/);
+  assert.match(scheduleRuntime, /context: \*anyopaque/);
+  assert.match(scheduleRuntime, /pub fn runNow/);
+  assert.match(scheduleRuntime, /pub fn onTimer/);
+  assert.match(scheduleRuntime, /pub fn reconcileNoFail/);
   assert.match(scheduleView, /pub const TextProjection = struct/);
   assert.match(scheduleView, /pub fn writeProjection/);
   assert.match(
@@ -479,8 +487,10 @@ test("Product Schedule owns its aggregate state and persistence", () => {
     /fn commitCandidate[\s\S]*?redactStore[\s\S]*?redaction\.contains/,
   );
   assert.match(runtime, /schedule\.prepareCredentialRedaction/);
-  assert.match(runtime, /schedule\.reconcileBindingsNoFail/);
-  assert.match(runtime, /schedule\.finishCompletionNoFail/);
+  assert.match(runtime, /schedule\.runNow/);
+  assert.match(runtime, /schedule\.onTimer/);
+  assert.match(runtime, /schedule\.reconcileNoFail/);
+  assert.match(runtime, /product_schedule\.TaskEffects/);
   assert.match(runtime, /schedule\.writeProjection/);
   assert.match(runtime, /consumeExecutionInstallPreparation/);
   assert.match(runtime, /consumeExecutionClearPreparation/);
