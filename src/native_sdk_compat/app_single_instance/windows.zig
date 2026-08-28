@@ -197,6 +197,19 @@ pub const Server = struct {
         const state = self.state;
         if (state.stopping.swap(true, .acq_rel)) return;
         if (state.thread) |thread| {
+            // A wake client covers the gap before ConnectNamedPipe becomes a
+            // pending synchronous operation. Cancellation separately covers
+            // a listener already blocked in Connect/Read/Write.
+            const wake_pipe = CreateFileW(
+                state.pipe_name.ptr,
+                generic_read | generic_write,
+                0,
+                null,
+                open_existing,
+                0,
+                null,
+            );
+            if (wake_pipe != invalid_handle) _ = CloseHandle(wake_pipe);
             _ = CancelSynchronousIo(thread.getHandle());
             thread.join();
             state.thread = null;

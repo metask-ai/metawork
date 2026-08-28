@@ -1829,6 +1829,7 @@ test("Native compatibility seams have exact owners and symbol allowlists", () =>
       "bind",
       "chmod",
       "close",
+      "confstr",
       "connect",
       "getpeereid",
       "getuid",

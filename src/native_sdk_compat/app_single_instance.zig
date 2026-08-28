@@ -243,3 +243,19 @@ test "local transport forwards one bounded frame to the primary" {
     );
     try std.testing.expectEqualStrings(request, response[0..response_len]);
 }
+
+test "Windows listener stop always wakes an idle synchronous accept" {
+    if (builtin.os.tag != .windows) return;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    var marker: u8 = 0;
+    for (0..64) |_| {
+        var server = try Server.init(std.testing.allocator, root, .{
+            .state = &marker,
+            .handle_fn = echoRequest,
+        });
+        server.deinit();
+    }
+}

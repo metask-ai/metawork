@@ -10,6 +10,8 @@ const af_unix: c_int = 1;
 const sock_stream: c_int = 1;
 const shut_rdwr: c_int = 2;
 const response_timeout_ms: c_int = 3000;
+const cs_darwin_user_temp_dir: c_int = 65537;
+const endpoint_digest_bytes = 16;
 
 const SockAddrUn = extern struct {
     len: u8 = @sizeOf(SockAddrUn),
@@ -36,6 +38,7 @@ extern "c" fn write(fd_t, [*]const u8, usize) isize;
 extern "c" fn setsockopt(fd_t, c_int, c_int, *const anyopaque, socklen_t) c_int;
 extern "c" fn getuid() uid_t;
 extern "c" fn getpeereid(fd_t, *uid_t, *u32) c_int;
+extern "c" fn confstr(c_int, ?[*]u8, usize) usize;
 
 const sol_socket: c_int = 0xffff;
 const so_sndtimeo: c_int = 0x1005;
@@ -212,6 +215,8 @@ fn endpointPath(
     allocator: std.mem.Allocator,
     canonical_data_root: []const u8,
 ) ![:0]u8 {
+    const temporary_root = try userTemporaryDirectory(allocator);
+    defer allocator.free(temporary_root);
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
     var uid_bytes: [4]u8 = undefined;
     std.mem.writeInt(u32, &uid_bytes, getuid(), .little);
@@ -219,8 +224,42 @@ fn endpointPath(
     hash.update(canonical_data_root);
     var digest: [32]u8 = undefined;
     hash.final(&digest);
-    const hex = std.fmt.bytesToHex(digest, .lower);
-    return std.fmt.allocPrintSentinel(allocator, "/tmp/metawork-{s}.sock", .{hex}, 0);
+    const hex = std.fmt.bytesToHex(digest[0..endpoint_digest_bytes].*, .lower);
+    const separator = if (std.mem.endsWith(u8, temporary_root, "/")) "" else "/";
+    const endpoint = try std.fmt.allocPrintSentinel(
+        allocator,
+        "{s}{s}metawork-{s}.sock",
+        .{ temporary_root, separator, hex },
+        0,
+    );
+    return endpoint;
+}
+
+fn userTemporaryDirectory(allocator: std.mem.Allocator) ![:0]u8 {
+    const required = confstr(cs_darwin_user_temp_dir, null, 0);
+    if (required <= 1 or required > 4096) return error.EndpointUnavailable;
+    const result = try allocator.allocSentinel(u8, required - 1, 0);
+    errdefer allocator.free(result);
+    if (confstr(cs_darwin_user_temp_dir, result.ptr, required) != required or
+        result[result.len] != 0 or result[0] != '/')
+        return error.EndpointUnavailable;
+    const without_trailing_separator = std.mem.trimEnd(u8, result, "/");
+    if (std.mem.eql(u8, without_trailing_separator, "/tmp") or
+        std.mem.eql(u8, without_trailing_separator, "/private/tmp"))
+        return error.EndpointUnavailable;
+    return result;
+}
+
+test "macOS endpoint stays in the private user temporary directory and fits sun_path" {
+    const temporary_root = try userTemporaryDirectory(std.testing.allocator);
+    defer std.testing.allocator.free(temporary_root);
+    const first = try endpointPath(std.testing.allocator, "/Users/test/MetaWork Dev");
+    defer std.testing.allocator.free(first);
+    const second = try endpointPath(std.testing.allocator, "/Users/test/MetaWork Dev");
+    defer std.testing.allocator.free(second);
+    try std.testing.expect(std.mem.startsWith(u8, first, temporary_root));
+    try std.testing.expect(first.len < @sizeOf(@FieldType(SockAddrUn, "path")));
+    try std.testing.expectEqualStrings(first, second);
 }
 
 fn socketAddress(endpoint: []const u8) !SockAddrUn {
