@@ -182,6 +182,10 @@ test("named module roots exist and lower owners cannot import composition", () =
     true,
   );
   assert.equal(
+    existsSync(new URL("src/product/schedule/view.zig", root)),
+    true,
+  );
+  assert.equal(
     existsSync(new URL("src/product/control/schedule.zig", root)),
     false,
   );
@@ -259,6 +263,7 @@ test("named module roots exist and lower owners cannot import composition", () =
   assert.match(buildSource, /src\/product\/schedule\.zig/);
   assert.match(buildSource, /src\/product\/schedule\/state\.zig/);
   assert.match(buildSource, /src\/product\/schedule\/runtime\.zig/);
+  assert.match(buildSource, /src\/product\/schedule\/view\.zig/);
   assert.match(buildSource, /src\/product\/schedule\/persistence\.zig/);
   assert.match(buildSource, /src\/product\/control\/automatic_workspace\.zig/);
   assert.doesNotMatch(buildSource, /src\/account(?:\.zig|\/)/);
@@ -385,6 +390,7 @@ test("Product Control is the only composition owner identity", () => {
   assert.match(build, /src\/product\/control\/file_preview\.zig/);
   assert.match(build, /src\/product\/schedule\.zig/);
   assert.match(build, /src\/product\/schedule\/runtime\.zig/);
+  assert.match(build, /src\/product\/schedule\/view\.zig/);
   assert.match(build, /src\/product\/control\/automatic_workspace\.zig/);
   assert.match(build, /metawork_product_control/);
   assert.match(build, /product_control_executor/);
@@ -432,6 +438,7 @@ test("Product Schedule owns its aggregate state and persistence", () => {
   const scheduleRoot = read("src/product/schedule.zig");
   const scheduleRuntime = read("src/product/schedule/runtime.zig");
   const scheduleState = read("src/product/schedule/state.zig");
+  const scheduleView = read("src/product/schedule/view.zig");
   const persistence = read("src/product/schedule/persistence.zig");
   const stores = read("src/app/stores.zig");
   const ports = read("src/product/control/ports.zig");
@@ -443,6 +450,8 @@ test("Product Schedule owns its aggregate state and persistence", () => {
   assert.match(scheduleRoot, /pub const Runtime = runtime_impl\.Runtime/);
   assert.match(scheduleRuntime, /@import\("product_schedule_state"\)/);
   assert.match(scheduleRuntime, /@import\("product_schedule_persistence"\)/);
+  assert.match(scheduleRuntime, /@import\("product_schedule_view"\)/);
+  assert.match(scheduleView, /@import\("product_schedule_state"\)/);
   assert.match(persistence, /@import\("product_schedule_state"\)/);
   assert.match(stores, /@import\("product_schedule_persistence"\)/);
   assert.doesNotMatch(
@@ -450,7 +459,7 @@ test("Product Schedule owns its aggregate state and persistence", () => {
     /ScheduledTaskFileStore|scheduled_task_store_max_bytes|product_schedule_persistence/,
   );
   assert.doesNotMatch(
-    `${scheduleRoot}\n${scheduleRuntime}\n${scheduleState}\n${persistence}`,
+    `${scheduleRoot}\n${scheduleRuntime}\n${scheduleState}\n${scheduleView}\n${persistence}`,
     /@import\("(?:metawork_app|metawork_bridge|metawork_agent|metawork_product_task|metawork_product_skill|metawork_product_mcp)"\)|std\.Thread/,
   );
   assert.doesNotMatch(
@@ -458,6 +467,13 @@ test("Product Schedule owns its aggregate state and persistence", () => {
     /workbench_scheduled_tasks|workbench_scheduled_task_persistence|metawork-scheduled-task-persistence/,
   );
   assert.doesNotMatch(runtime, /scheduled_tasks_impl|\.scheduled_tasks\b/);
+  assert.doesNotMatch(
+    runtime,
+    /ItemView|forEachView|plannedAtUnixSeconds|nextRunAtUnixSeconds|titleRedacted/,
+  );
+  assert.doesNotMatch(scheduleRoot, /ItemView|forEachView/);
+  assert.match(scheduleView, /pub const TextProjection = struct/);
+  assert.match(scheduleView, /pub fn writeProjection/);
   assert.match(
     scheduleRuntime,
     /fn commitCandidate[\s\S]*?redactStore[\s\S]*?redaction\.contains/,
@@ -465,7 +481,7 @@ test("Product Schedule owns its aggregate state and persistence", () => {
   assert.match(runtime, /schedule\.prepareCredentialRedaction/);
   assert.match(runtime, /schedule\.reconcileBindingsNoFail/);
   assert.match(runtime, /schedule\.finishCompletionNoFail/);
-  assert.match(runtime, /schedule\.forEachView/);
+  assert.match(runtime, /schedule\.writeProjection/);
   assert.match(runtime, /consumeExecutionInstallPreparation/);
   assert.match(runtime, /consumeExecutionClearPreparation/);
   assert.match(runtime, /redactWithExecutionCredentialsNoFail/);

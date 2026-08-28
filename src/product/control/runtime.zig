@@ -3851,19 +3851,13 @@ pub const Runtime = struct {
             workspace_count += 1;
             try self.writeWorkspace(&writer, workspace);
         }
-        writer.writeAll("],\"scheduledTasks\":[") catch
+        writer.writeAll("],\"scheduledTasks\":") catch
             return error.SnapshotTooLarge;
-        var scheduled_task_count: usize = 0;
-        var schedule_context: ScheduleSnapshotContext = .{
-            .control = self,
-            .writer = &writer,
-            .count = &scheduled_task_count,
-        };
-        self.schedule.forEachView(
-            &schedule_context,
-            writeScheduledTaskProjection,
-        ) catch return error.SnapshotTooLarge;
-        writer.writeAll("],\"tasks\":[") catch
+        self.schedule.writeProjection(&writer, .{
+            .context = self,
+            .write_json_fn = writeScheduleViewJson,
+        }) catch return error.SnapshotTooLarge;
+        writer.writeAll(",\"tasks\":[") catch
             return error.SnapshotTooLarge;
         self.task_runtime.writeProjectionList(
             &writer,
@@ -3873,107 +3867,14 @@ pub const Runtime = struct {
         return writer.buffered();
     }
 
-    const ScheduleSnapshotContext = struct {
-        control: *Runtime,
+    fn writeScheduleViewJson(
+        context: *const anyopaque,
         writer: *std.Io.Writer,
-        count: *usize,
-    };
-
-    fn writeScheduledTaskProjection(
-        context: *anyopaque,
-        item: product_schedule.ItemView,
-    ) anyerror!void {
-        const snapshot: *ScheduleSnapshotContext = @ptrCast(@alignCast(context));
-        if (snapshot.count.* != 0) try snapshot.writer.writeByte(',');
-        snapshot.count.* += 1;
-        try snapshot.control.writeScheduledTask(snapshot.writer, item);
-    }
-
-    fn writeScheduledTask(
-        self: *Runtime,
-        writer: *std.Io.Writer,
-        item: product_schedule.ItemView,
-    ) Error!void {
-        writer.print(
-            "{{\"id\":\"{d}\",\"epoch\":\"{d}\",\"title\":",
-            .{ item.id, item.epoch },
-        ) catch return error.SnapshotTooLarge;
-        try self.projectedJsonValueWithKnownCredentials(writer, item.title);
-        writer.print(
-            ",\"titleRedacted\":{},\"enabled\":{},\"health\":\"{s}\",\"failureReason\":",
-            .{ item.title_redacted, item.enabled, @tagName(item.health) },
-        ) catch return error.SnapshotTooLarge;
-        if (item.failure_reason) |reason|
-            writer.print("\"{s}\"", .{@tagName(reason)}) catch
-                return error.SnapshotTooLarge
-        else
-            writer.writeAll("null") catch return error.SnapshotTooLarge;
-        writer.print(
-            ",\"execution\":{{\"generation\":\"{d}\",\"provider\":\"{s}\",\"model\":",
-            .{ item.execution_generation, @tagName(item.execution_provider) },
-        ) catch return error.SnapshotTooLarge;
-        try self.projectedJsonValueWithKnownCredentials(
-            writer,
-            item.execution_model,
-        );
-        writer.writeAll("},\"input\":{\"kind\":\"text\",\"text\":") catch
+        value: []const u8,
+    ) product_schedule.ViewError!void {
+        const self: *const Runtime = @ptrCast(@alignCast(context));
+        self.projectedJsonValueWithKnownCredentials(writer, value) catch
             return error.SnapshotTooLarge;
-        try self.projectedJsonValueWithKnownCredentials(writer, item.input);
-        writer.print(",\"redacted\":{}}}", .{item.input_redacted}) catch
-            return error.SnapshotTooLarge;
-        writer.writeAll(",\"recurrence\":") catch return error.SnapshotTooLarge;
-        switch (item.recurrence) {
-            .once => |once| writer.print(
-                "{{\"kind\":\"once\",\"atUnixSeconds\":\"{d}\"}}",
-                .{once.at_unix_seconds},
-            ) catch return error.SnapshotTooLarge,
-            .interval => |interval| writer.print(
-                "{{\"kind\":\"interval\",\"startAtUnixSeconds\":\"{d}\",\"everySeconds\":\"{d}\"}}",
-                .{ interval.start_at_unix_seconds, interval.every_seconds },
-            ) catch return error.SnapshotTooLarge,
-        }
-        writer.writeAll(",\"nextRunAtUnixSeconds\":") catch
-            return error.SnapshotTooLarge;
-        if (item.next_run_at_unix_seconds) |next|
-            writer.print("\"{d}\"", .{next}) catch
-                return error.SnapshotTooLarge
-        else
-            writer.writeAll("null") catch return error.SnapshotTooLarge;
-        writer.writeAll(",\"occurrences\":[") catch
-            return error.SnapshotTooLarge;
-        for (item.occurrences, 0..) |occurrence, index| {
-            if (index != 0) writer.writeByte(',') catch
-                return error.SnapshotTooLarge;
-            writer.print(
-                "{{\"plannedAtUnixSeconds\":\"{d}\",\"triggeredAtUnixSeconds\":\"{d}\",\"source\":\"{s}\",\"result\":\"{s}\",\"taskId\":",
-                .{
-                    occurrence.planned_at_unix_seconds,
-                    occurrence.triggered_at_unix_seconds,
-                    @tagName(occurrence.source),
-                    @tagName(occurrence.result),
-                },
-            ) catch return error.SnapshotTooLarge;
-            if (occurrence.task_id == 0)
-                writer.writeAll("null") catch return error.SnapshotTooLarge
-            else
-                writer.print("\"{d}\"", .{occurrence.task_id}) catch
-                    return error.SnapshotTooLarge;
-            writer.writeAll(",\"reason\":") catch return error.SnapshotTooLarge;
-            if (occurrence.reason) |reason|
-                writer.print("\"{s}\"", .{@tagName(reason)}) catch
-                    return error.SnapshotTooLarge
-            else
-                writer.writeAll("null") catch return error.SnapshotTooLarge;
-            writer.writeAll(",\"taskOutcome\":") catch
-                return error.SnapshotTooLarge;
-            if (occurrence.task_outcome) |outcome|
-                writer.print("\"{s}\"", .{@tagName(outcome)}) catch
-                    return error.SnapshotTooLarge
-            else
-                writer.writeAll("null") catch return error.SnapshotTooLarge;
-            writer.writeByte('}') catch return error.SnapshotTooLarge;
-        }
-        writer.writeAll("]}") catch return error.SnapshotTooLarge;
     }
 
     fn writeAccount(
@@ -8551,7 +8452,7 @@ test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {
     control.setScheduleBackgroundAvailableNoFail(true);
     try std.testing.expectEqual(@as(u64, 2_000), clock.armed_at.?);
     try std.testing.expectEqual(@as(usize, 1), persistence.commits);
-    const item = product_schedule.testing.view(&control.schedule, id).?;
+    const item = product_schedule.testing.item(&control.schedule, id).?;
     try std.testing.expect(item.title_redacted);
     try std.testing.expect(
         std.mem.indexOf(u8, item.title, "SECRET-KEY") == null,
@@ -8587,9 +8488,9 @@ test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {
     try std.testing.expect(clock.armed_at == null);
     try std.testing.expectEqual(
         product_schedule.Health.paused,
-        product_schedule.testing.view(&control.schedule, id).?.health,
+        product_schedule.testing.item(&control.schedule, id).?.health,
     );
-    const committed_epoch = product_schedule.testing.view(&control.schedule, id).?.epoch;
+    const committed_epoch = product_schedule.testing.item(&control.schedule, id).?.epoch;
     persistence.result = .failed;
     const revision_before_failure = control.revision;
     try std.testing.expectError(
@@ -8597,10 +8498,10 @@ test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {
         control.deleteScheduledTask(id, committed_epoch),
     );
     try std.testing.expectEqual(revision_before_failure + 1, control.revision);
-    try std.testing.expect(product_schedule.testing.view(&control.schedule, id) != null);
+    try std.testing.expect(product_schedule.testing.item(&control.schedule, id) != null);
     try std.testing.expectEqual(
         committed_epoch,
-        product_schedule.testing.view(&control.schedule, id).?.epoch,
+        product_schedule.testing.item(&control.schedule, id).?.epoch,
     );
     try std.testing.expectEqual(
         SchedulePersistenceHealth.write_failed,
@@ -8695,7 +8596,7 @@ test "execution replacement durably scrubs Schedule before ownership transfer" {
     ) == null);
     try std.testing.expect(std.mem.indexOf(
         u8,
-        product_schedule.testing.view(&control.schedule, id).?.input,
+        product_schedule.testing.item(&control.schedule, id).?.input,
         "NEXT-SECRET",
     ) == null);
     control.installExecutionNoFail(&replacement);
@@ -8732,7 +8633,7 @@ test "execution replacement durably scrubs Schedule before ownership transfer" {
     try std.testing.expectEqual(@as(u64, 2), control.execution.generation);
     try std.testing.expect(std.mem.indexOf(
         u8,
-        product_schedule.testing.view(&control.schedule, blocked_id).?.input,
+        product_schedule.testing.item(&control.schedule, blocked_id).?.input,
         "BLOCKED-SECRET",
     ) != null);
     control.endExecutionReplacementNoFail();
@@ -8812,7 +8713,7 @@ test "Scheduled Task execution drift becomes needs attention without blocking Ac
     control.account.execution_generation = 2;
     try std.testing.expect(control.reconcileScheduledTaskBindingsNoFail());
 
-    const item = product_schedule.testing.view(&control.schedule, id).?;
+    const item = product_schedule.testing.item(&control.schedule, id).?;
     try std.testing.expect(!item.enabled);
     try std.testing.expectEqual(product_schedule.Health.needs_attention, item.health);
     try std.testing.expectEqual(

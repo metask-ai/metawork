@@ -118,6 +118,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-product-schedule", .root_module = test_modules.product_schedule },
         .{ .name = "metawork-product-schedule-state", .root_module = test_modules.product_schedule_state },
         .{ .name = "metawork-product-schedule-persistence", .root_module = test_modules.product_schedule_persistence },
+        .{ .name = "metawork-product-schedule-view", .root_module = test_modules.product_schedule_view },
         .{ .name = "metawork-product-schedule-runtime", .root_module = test_modules.product_schedule_runtime },
         .{ .name = "metawork-product-skill-package", .root_module = test_modules.product_skill_package },
         .{ .name = "metawork-product-skill-management", .root_module = test_modules.product_skill_management },
@@ -282,6 +283,7 @@ const WiredModules = struct {
     product_schedule: *std.Build.Module,
     product_schedule_state: *std.Build.Module,
     product_schedule_persistence: *std.Build.Module,
+    product_schedule_view: *std.Build.Module,
     product_schedule_runtime: *std.Build.Module,
     product_skill_package: *std.Build.Module,
     product_skill_management: *std.Build.Module,
@@ -962,6 +964,12 @@ fn wireAgentCore(
         "product_schedule_state",
         product_schedule_state,
     );
+    const product_schedule_view = b.createModule(.{
+        .root_source_file = b.path("src/product/schedule/view.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    product_schedule_view.addImport("product_schedule_state", product_schedule_state);
     const product_schedule_runtime = b.createModule(.{
         .root_source_file = b.path("src/product/schedule/runtime.zig"),
         .target = target,
@@ -969,6 +977,7 @@ fn wireAgentCore(
     });
     product_schedule_runtime.addImport("product_schedule_state", product_schedule_state);
     product_schedule_runtime.addImport("product_schedule_persistence", product_schedule_persistence);
+    product_schedule_runtime.addImport("product_schedule_view", product_schedule_view);
     const product_schedule = b.createModule(.{
         .root_source_file = b.path("src/product/schedule.zig"),
         .target = target,
@@ -1465,6 +1474,7 @@ fn wireAgentCore(
         .product_schedule = product_schedule,
         .product_schedule_state = product_schedule_state,
         .product_schedule_persistence = product_schedule_persistence,
+        .product_schedule_view = product_schedule_view,
         .product_schedule_runtime = product_schedule_runtime,
         .product_skill_package = skill_package,
         .product_skill_management = skill_management,

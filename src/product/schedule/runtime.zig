@@ -8,6 +8,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const state = @import("product_schedule_state");
 const persistence = @import("product_schedule_persistence");
+const view = @import("product_schedule_view");
 
 pub const Recurrence = state.Recurrence;
 pub const Provider = state.Provider;
@@ -17,6 +18,8 @@ pub const OccurrenceSource = state.OccurrenceSource;
 pub const OccurrenceTaskOutcome = state.OccurrenceTaskOutcome;
 pub const FailureReason = state.FailureReason;
 pub const Health = state.Health;
+pub const TextProjection = view.TextProjection;
+pub const ViewError = view.Error;
 
 pub const Error = state.Error || persistence.Error || error{
     ScheduleTimerUnavailable,
@@ -154,24 +157,6 @@ pub const ExecutionBinding = struct {
     provider: ?Provider = null,
     model: []const u8 = "",
     automatic_workspace_available: bool,
-};
-
-pub const ItemView = struct {
-    id: u64,
-    epoch: u64,
-    title: []const u8,
-    title_redacted: bool,
-    execution_generation: u64,
-    execution_provider: Provider,
-    execution_model: []const u8,
-    input: []const u8,
-    input_redacted: bool,
-    recurrence: Recurrence,
-    enabled: bool,
-    health: Health,
-    failure_reason: ?FailureReason,
-    next_run_at_unix_seconds: ?u64,
-    occurrences: []const Occurrence,
 };
 
 pub const Due = struct {
@@ -663,15 +648,12 @@ pub const Runtime = struct {
         return true;
     }
 
-    pub fn forEachView(
+    pub fn writeProjection(
         self: *const Runtime,
-        context: *anyopaque,
-        write_fn: *const fn (*anyopaque, ItemView) anyerror!void,
-    ) anyerror!void {
-        for (self.store.items) |*entry| {
-            const item = &(entry.* orelse continue);
-            try write_fn(context, itemView(item));
-        }
+        writer: *std.Io.Writer,
+        text: TextProjection,
+    ) ViewError!void {
+        return view.writeProjection(writer, &self.store, text);
     }
 
     fn commitCandidate(
@@ -718,6 +700,17 @@ pub const Runtime = struct {
 
 pub const testing = if (builtin.is_test) struct {
     pub const max_store_bytes = persistence.max_store_bytes;
+    pub const Item = struct {
+        id: u64,
+        epoch: u64,
+        title: []const u8,
+        title_redacted: bool,
+        input: []const u8,
+        enabled: bool,
+        health: Health,
+        failure_reason: ?FailureReason,
+        next_run_at_unix_seconds: ?u64,
+    };
 
     pub fn configure(
         runtime: *Runtime,
@@ -737,9 +730,19 @@ pub const testing = if (builtin.is_test) struct {
         runtime.persistence_health = health;
     }
 
-    pub fn view(runtime: *Runtime, id: u64) ?ItemView {
-        const item = runtime.store.find(id) orelse return null;
-        return itemView(item);
+    pub fn item(runtime: *Runtime, id: u64) ?Item {
+        const stored = runtime.store.find(id) orelse return null;
+        return .{
+            .id = stored.id,
+            .epoch = stored.epoch,
+            .title = stored.title,
+            .title_redacted = stored.title_redacted,
+            .input = stored.input.borrowed(),
+            .enabled = stored.enabled,
+            .health = stored.health,
+            .failure_reason = stored.failure_reason,
+            .next_run_at_unix_seconds = stored.next_run_at_unix_seconds,
+        };
     }
 
     pub fn overwriteInputPrefix(
@@ -747,9 +750,9 @@ pub const testing = if (builtin.is_test) struct {
         id: u64,
         bytes: []const u8,
     ) void {
-        const item = runtime.store.find(id) orelse unreachable;
-        std.debug.assert(bytes.len <= item.input.value.len);
-        @memcpy(item.input.value[0..bytes.len], bytes);
+        const stored = runtime.store.find(id) orelse unreachable;
+        std.debug.assert(bytes.len <= stored.input.value.len);
+        @memcpy(stored.input.value[0..bytes.len], bytes);
     }
 } else struct {};
 
@@ -790,26 +793,6 @@ fn reconcileBindingsInStore(
         }
     }
     return changed;
-}
-
-fn itemView(item: *const state.Item) ItemView {
-    return .{
-        .id = item.id,
-        .epoch = item.epoch,
-        .title = item.title,
-        .title_redacted = item.title_redacted,
-        .execution_generation = item.execution_generation,
-        .execution_provider = item.execution_provider,
-        .execution_model = item.execution_model,
-        .input = item.input.borrowed(),
-        .input_redacted = item.input.redacted,
-        .recurrence = item.recurrence,
-        .enabled = item.enabled,
-        .health = item.health,
-        .failure_reason = item.failure_reason,
-        .next_run_at_unix_seconds = item.next_run_at_unix_seconds,
-        .occurrences = item.occurrences(),
-    };
 }
 
 const TestEffects = struct {
