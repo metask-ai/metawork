@@ -124,6 +124,7 @@ async function repository(t, manifest) {
   const lockRoot = path.join(root, "build_support");
   await mkdir(lockRoot, { recursive: true });
   for (const lockName of [
+    "agentcore-bundle.windows-aarch64.lock.json",
     "agentcore-bundle.windows.lock.json",
     "agentcore-bundle.macos.lock.json",
     "agentcore-bundle.macos-x86_64.lock.json",
@@ -163,6 +164,25 @@ test("accepts the current pinned Windows x64 GNU bundle", async (t) => {
     expectedManifest: manifest,
   });
   assert.equal(result.target, "x86_64-windows.win10...win11_dt-gnu");
+  assert.deepEqual(result.payloadFiles, fixtureFiles);
+});
+
+test("accepts the current pinned Windows ARM64 GNU bundle", async (t) => {
+  const { root, manifest } = await fixture(t, (manifest) => {
+    manifest.target = {
+      id: "aarch64-windows-gnu",
+      architecture: "aarch64",
+      os: "windows",
+      abi: "gnu",
+      zig_target: "aarch64-windows.win10...win11_dt-gnu",
+      rust_target: "aarch64-pc-windows-gnullvm",
+    };
+  });
+  const result = await validateAgentCoreBundle(root, {
+    ...injectedChecks,
+    expectedManifest: manifest,
+  });
+  assert.equal(result.target, "aarch64-windows.win10...win11_dt-gnu");
   assert.deepEqual(result.payloadFiles, fixtureFiles);
 });
 
