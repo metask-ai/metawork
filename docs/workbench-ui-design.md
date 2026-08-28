@@ -785,7 +785,7 @@ Task overview 是当前 Task 的按需结构化摘要，不是固定存在的第
 
 ### 12.2 Files changed 与 Outputs
 
-> Capability：**未来**。只有 AgentCore 发布 typed FileChange/Output 事件并完成验收后才显示本节模块；当前不能从 Tool 文本、文件后缀或 File Preview reference 推断。
+> Capability：**未来**。AgentCore 已在当前 macOS package 发布 typed `file_changes` observation，但只有 Product owner、持久化、恢复与 Renderer 合同完成验收后才显示 Files changed；typed Output 仍等待上游能力。当前不能从 Tool 文本、文件后缀或 File Preview reference 推断。
 
 - `Files changed`：Agent 在 Workspace 中新增、修改或删除的全部文件；
 - `Outputs`：用户关心的最终交付文件、链接或结构化结果。

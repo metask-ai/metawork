@@ -2034,6 +2034,18 @@ pub const Runtime = struct {
         return true;
     }
 
+    pub fn recordDependencyContractFailure(
+        self: *Runtime,
+        route_id: u64,
+        run_id: u64,
+    ) bool {
+        const task = self.findByRouteId(route_id) orelse return false;
+        const run = task_state.findRun(task.durable.runs, run_id) orelse return false;
+        if (!task_state.recordDependencyContractFailure(run)) return false;
+        task.durable.recent_order = self.takeRecentOrder();
+        return true;
+    }
+
     pub fn markTerminalRunsBeforeEventDrain(self: *Runtime) bool {
         var changed = false;
         for (self.tasks) |*entry| {
@@ -3179,6 +3191,14 @@ fn redactTaskProjection(
             run.assistant.list.items,
             credential,
         ) or run.assistant_redacted;
+        run.output_segment_redacted = effects.redact(
+            run.output_segment.list.items,
+            credential,
+        ) or run.output_segment_redacted;
+        run.output_continued_redacted = effects.redact(
+            run.output_continued.list.items,
+            credential,
+        ) or run.output_continued_redacted;
         _ = effects.redact(run.status_text, credential);
         for (run.tools) |*tool_entry| {
             const tool = &(tool_entry.* orelse continue);
@@ -4390,6 +4410,8 @@ fn deinitRun(
     self.allocator.free(run.tools);
     deinitRunInput(self, effects, &run.input);
     releaseTrackedText(self, effects, &run.assistant);
+    releaseTrackedText(self, effects, &run.output_segment);
+    releaseTrackedText(self, effects, &run.output_continued);
     if (run.execution_model_owned)
         releaseProjectedSlice(self, effects, @constCast(run.execution_model));
     releaseProjectedSlice(self, effects, run.status_text);

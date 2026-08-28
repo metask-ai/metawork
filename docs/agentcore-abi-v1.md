@@ -1,13 +1,13 @@
 # MetaWork AgentCore ABI v1 消费合同
 
-> 状态：三个 target 均已锁定 AgentCore `e5a423697f78` ABI v1 revision 14 exact artifact；macOS arm64 desktop vertical 已通过，macOS x86_64 已通过隔离 probe 与 Debug/Release build；不声明 stable support policy
+> 状态：macOS arm64/x86_64 已锁定 AgentCore `b4fe9a9b8cb0`，Windows x86_64 GNU 继续锁定 `e5a423697f78`；三者均为 ABI v1 revision 14 exact artifact；不声明 stable support policy
 > 所有者：Metask AgentCore 负责 facade、bindings、bundle 和 ABI 政策；MetaWork 负责 exact artifact 消费、Host 生命周期和产品 capability gate
 
 本文定义 MetaWork 对 Metask AgentCore binary ABI version 1 的 target-specific 消费边界。线程、事件泵和 Host 生命周期见 [AgentCore 集成契约](agentcore-integration.md)，验证入口见 [验证规范](validation.md)。
 
 ## 1. Target-specific baseline
 
-所有 target policy 与 repository lock 只接受 clean source commit `e5a423697f7853d8d609950b5d7e2d7c1ac2e83a`、package version `0.1.0-dev+e5a423697f78`、ABI v1 revision 14 的 target-specific exact artifact，不识别或加载任何旧 revision。每个平台仍以自己的完整 manifest bytes 与 payload checksum 独立锁定：
+所有 target policy 与 repository lock 只接受 ABI v1 revision 14 的 target-specific exact artifact，不识别或加载任何旧 revision。macOS 两个 target 精确锁定 clean source commit `b4fe9a9b8cb020db8fb7efc637aa5fb1263ba2ce`、package version `0.1.0-dev+b4fe9a9b8cb0`；Windows x86_64 GNU 继续锁定 clean source commit `e5a423697f7853d8d609950b5d7e2d7c1ac2e83a`、package version `0.1.0-dev+e5a423697f78`。每个平台仍以自己的完整 manifest bytes 与 payload checksum 独立锁定：
 
 | Target             | Build       | Link input            | Repository lock                                         |
 | ------------------ | ----------- | --------------------- | ------------------------------------------------------- |
@@ -46,6 +46,8 @@ revision 8 新增 `CAP_RUN_STATE_OBSERVATION` 和 `CoreEvent.run_state`。事件
 - `agent/` 只通过 bundle 官方 `bindings/zig` package 获取 ABI types、typed protocol、module 和 link graph。
 
 MetaWork 不复制 header、raw enum、event tag、Permission/Skill/MCP JSON schema、facade code 或 SDK validation。官方 SDK 是 AgentCore `Status`、`StopReason`、`CoreEvent`、`UiRequest`、`UiResponse`、Permission、Skill、MCP、Session description 与 restore report 的唯一协议来源。MetaWork Completion 的 result/stop reason/error 是独立自有类型，不来自该 SDK。
+
+macOS `b4fe9a9b8cb0` SDK 保留 `output_segment_begin` / `output_segment_end` typed event，并新增 `file_changes` observation。Agent/event pump 使用官方 typed variant 接收；Product Task 已消费 output framing 并持久化 final/partial 分类及安全 assistant 正文起点。`file_changes` 当前只在 Agent 边界完成 typed decode、文本校验和有界 data-queue 接收，Product 明确消费但不派生状态；typed File Changes capability、持久化与 Bridge/Renderer 投影仍关闭。Windows 不在本次能力接收范围内。
 
 ## 3. Target function table
 
