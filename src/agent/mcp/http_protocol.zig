@@ -1,5 +1,5 @@
 //! Dependency-free MCP Streamable HTTP request-header facts shared with
-//! product configuration validation. Runtime transport behavior remains in
+//! configuration validation. Runtime transport behavior remains in
 //! `http.zig`.
 
 const std = @import("std");

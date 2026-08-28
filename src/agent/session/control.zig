@@ -46,7 +46,7 @@ pub const EventConsumerNotificationFailure = enum {
 };
 
 /// The single mutable, first-writer-wins termination latch for an active Run.
-/// This is execution control state, not a durable product outcome.
+/// This is execution control state, not a durable outcome.
 pub const TerminationSignal = union(enum) {
     interrupted: ExternalInterruption,
     callback_failure: CallbackFailure,
@@ -70,7 +70,7 @@ pub const DurableBudgetObservation = struct {
     required_checkpoint_bytes: u64,
 };
 
-/// Immutable Agent-owned facts for exactly one begun Run. Workbench must copy
+/// Immutable Agent-owned facts for exactly one begun Run. The caller must copy
 /// the bounded diagnostic into its admission-reserved Run record, then deinit
 /// this value. `session_disposition_at_completion` is a completion-time
 /// snapshot, never live Session state.

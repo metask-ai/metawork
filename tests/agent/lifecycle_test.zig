@@ -1,7 +1,7 @@
 const fixture = @import("lifecycle_fixture");
 const std = fixture.std;
 const lifecycle = fixture.lifecycle;
-const workbench_executor = fixture.workbench_executor;
+const product_control_executor = fixture.product_control_executor;
 const sdk = fixture.sdk;
 const wire = fixture.wire;
 const textChunk = fixture.textChunk;
@@ -2759,7 +2759,7 @@ test "Agent Runtime initialization OOM fails before acquiring the Runtime" {
 test "Session creation OOM leaves Runtime reusable and credential process-only" {
     fake_core.reset();
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    const executor = try workbench_executor.Executor.create(
+    const executor = try product_control_executor.Executor.create(
         std.testing.io,
         std.testing.allocator,
         .{ .worker_count = 1, .queue_capacity = 1 },

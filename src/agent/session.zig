@@ -528,7 +528,7 @@ pub const Session = struct {
         self.condition.broadcast(self.agent_runtime.io);
     }
 
-    /// Prepares an Agent Run after Workbench admission. Workbench owns queueing
+    /// Prepares an Agent Run after caller-owned admission. The caller owns queueing
     /// and must call exactly one of `beginRun` or `cancelPreparedRun`.
     pub fn prepareRun(
         self: *Session,
@@ -600,7 +600,7 @@ pub const Session = struct {
     }
 
     /// Installs the generation-checked termination control and transfers
-    /// execution ownership from Workbench to Agent. A successful call must be
+    /// execution ownership from the caller to Agent. A successful call must be
     /// followed by exactly one `Run.execute` and `Run.deinit`.
     pub fn beginRun(self: *Session, run_id: u64) Error!Run {
         return switch (self.beginRunOutcome(run_id)) {
@@ -670,8 +670,8 @@ pub const Session = struct {
         _ = self.agent_runtime.notifyEventConsumer();
     }
 
-    /// Reserves the Session's single operation slot for a Workbench-owned
-    /// manual compact. Workbench must either execute or cancel the reservation.
+    /// Reserves the Session's single operation slot for a caller-owned manual
+    /// compact. The caller must either execute or cancel the reservation.
     pub fn prepareCompact(self: *Session) (Error || std.mem.Allocator.Error)!u64 {
         const diagnostic = try self.agent_runtime.allocator.alloc(
             u8,
@@ -719,7 +719,7 @@ pub const Session = struct {
         self.finishPreparedCompactLocked();
     }
 
-    /// Called only by a Workbench executor worker after successful admission.
+    /// Called only by an executor worker after successful caller admission.
     pub fn executePreparedCompact(
         self: *Session,
         operation_id: u64,
@@ -894,7 +894,7 @@ pub const Session = struct {
     }
 
     /// Rebinds the model of this Session while it is idle. AgentCore rejects
-    /// the same operation while a Run is active; Workbench uses that busy
+    /// the same operation while a Run is active; the caller uses that busy
     /// result to keep model changes out of the in-flight Run path.
     pub fn setModel(self: *Session, model: []const u8) Error!void {
         if (model.len == 0 or !std.unicode.utf8ValidateSlice(model))
@@ -1108,8 +1108,8 @@ pub const Session = struct {
         request_id: u64,
     };
 
-    /// Bounded execution observation used by Workbench projection. This does
-    /// not expose Session lifecycle or product identity.
+    /// Bounded execution observation that exposes neither Session lifecycle nor
+    /// external owner identity.
     pub fn pendingUiObservation(self: *Session) ?PendingUiObservation {
         self.lock();
         defer self.unlock();
@@ -1177,7 +1177,7 @@ pub const Session = struct {
 
     /// Runs the complete export -> describe Agent operation while holding the
     /// Session's single-operation lane. The sink owns bytes only for the
-    /// duration of each callback; filesystem commit remains a Workbench fact.
+    /// duration of each callback; filesystem commit remains an external fact.
     pub fn exportCheckpoint(
         self: *Session,
         limits: CheckpointLimits,
@@ -1371,7 +1371,7 @@ pub const Session = struct {
         while (self.active_refs != 0) self.wait();
         self.unlock();
 
-        // Never wait for Agent control references while holding a Workbench or
+        // Never wait for Agent control references while holding a caller-owned or
         // Session lock. A worker may need both to publish terminal completion
         // and release the execution base lease.
         self.control_block.waitForLeaseQuiescence();

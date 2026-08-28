@@ -1,5 +1,5 @@
 //! MetaWork's Agent execution boundary over the external AgentCore SDK.
-//! Product projection and Renderer transport do not belong here.
+//! Projection and presentation transport do not belong here.
 
 const session_impl = @import("agent_session");
 const mcp_connector = @import("agent_mcp_connector");

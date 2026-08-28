@@ -1,6 +1,6 @@
 //! Agent-private ownership for AgentCore Skill catalog handles.
-//! Product owners receive only MetaWork-owned projection values and an opaque
-//! lease token that can be borrowed synchronously by Session operations.
+//! Only MetaWork-owned projection values and an opaque lease token leave this
+//! boundary; Session operations may borrow the token synchronously.
 
 const std = @import("std");
 const sdk = @import("metask_agentcore");
@@ -59,7 +59,7 @@ pub const Skill = struct {
     max_values: u32,
 };
 
-/// Linear, allocator-owned product-neutral copy of one catalog descriptor.
+/// Linear, allocator-owned consumer-neutral copy of one catalog descriptor.
 /// It contains no AgentCore handle, raw JSON, source path, scope id, or policy.
 pub const Projection = struct {
     revision: []const u8,

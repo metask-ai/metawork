@@ -1,7 +1,7 @@
 const std = @import("std");
 const native_sdk = @import("native_sdk");
 const bridge_api = @import("metawork_bridge");
-const workbench_api = @import("metawork_workbench");
+const control_ports = @import("metawork_product_control_ports");
 const automation_api = @import("metawork_automation");
 const app_window = @import("window.zig");
 
@@ -100,23 +100,23 @@ pub const Adapter = struct {
 
     pub fn installScheduleHost(
         self: *Adapter,
-        workbench: *workbench_api.Workbench,
+        schedule: control_ports.ScheduleHost,
     ) !void {
         try self.window.installTray(
             self.native_runtime orelse return error.RuntimeUnavailable,
-            workbench,
+            schedule,
         );
     }
 
     pub fn handleTrayCommand(
         self: *Adapter,
         tray_item_id: native_sdk.platform.TrayItemId,
-        workbench: *workbench_api.Workbench,
+        schedule: control_ports.ScheduleHost,
     ) void {
         const runtime_value = self.native_runtime orelse return;
         switch (tray_item_id) {
             app_window.tray_open_id => self.window.showMainWindow(runtime_value),
-            app_window.tray_quit_id => self.window.requestExplicitQuit(runtime_value, workbench),
+            app_window.tray_quit_id => self.window.requestExplicitQuit(runtime_value, schedule),
             else => {},
         }
     }
@@ -287,7 +287,7 @@ pub const Adapter = struct {
 
     pub fn notifyScheduledTask(
         context: ?*anyopaque,
-        notification: workbench_api.ScheduleNotification,
+        notification: control_ports.ScheduleNotification,
     ) bool {
         const self: *Adapter = @ptrCast(@alignCast(context orelse return false));
         const services_value = self.platform_services orelse return false;

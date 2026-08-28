@@ -11,7 +11,7 @@ pub const TransportKind = enum { stdio, streamable_http };
 pub const NegotiationPolicy = enum { automatic, modern_only, compat_only };
 
 pub const ServerInput = struct {
-    /// Stable Workbench registry identity. Agent derives the opaque AgentCore
+    /// Stable registry identity. Agent derives the opaque AgentCore
     /// binding identity; callers cannot supply a second authority identity.
     id: []const u8,
     /// Runtime input linearly consumes the concrete transport owner.
@@ -25,7 +25,7 @@ pub const ServerInput = struct {
     client_name: []const u8,
     client_version: []const u8,
     timeout_ms: u32,
-    /// Non-secret Workbench Runtime Manifest identity. A changed value causes
+    /// Non-secret Runtime Manifest identity. A changed value causes
     /// AgentCore to replace the corresponding ServerInstance during a
     /// declarative Runtime configuration apply.
     configuration_fingerprint: [32]u8,

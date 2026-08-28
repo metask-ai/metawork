@@ -1,3 +1,5 @@
+//! Product Control's bounded Scheduled Task state and recurrence kernel.
+
 const std = @import("std");
 
 pub const minimum_interval_seconds: u64 = 60;

@@ -12,7 +12,7 @@ pub const Error = std.mem.Allocator.Error || error{
 };
 
 /// App-created, opened capability for the reserved automatic Workspace root.
-/// `Allocator.init` consumes it even when the surrounding Workbench init later
+/// `Allocator.init` consumes it even when the surrounding Product Control init later
 /// fails, so the App can unconditionally call `deinit` on its moved-from Root.
 pub const Root = struct {
     allocator: std.mem.Allocator,
@@ -94,7 +94,7 @@ pub const Allocation = struct {
     }
 };
 
-/// Workbench-owned allocator for one-directory-per-automatic-Task roots.
+/// Product Control-owned allocator for one-directory-per-automatic-Task roots.
 /// It intentionally has no recovery scan or recursive deletion operation.
 pub const Allocator = struct {
     root: Root,

@@ -1,6 +1,6 @@
 //! Agent-private consumption of the official AgentCore MCP catalog and
 //! selection ABI. This module decodes only through the bundle SDK, then copies
-//! the minimum product-neutral authority facts. Fingerprints, schema bodies,
+//! the minimum consumer-neutral authority facts. Fingerprints, schema bodies,
 //! permission bindings, raw JSON, and issue detail never leave this boundary.
 
 const std = @import("std");
@@ -79,7 +79,7 @@ pub const Selection = opaque {
         allocator.destroy(owned);
     }
 
-    /// Safe product facts for the exact selectors encoded by this authority.
+    /// Safe projected facts for the exact selectors encoded by this authority.
     /// The names are owned by the Selection and never expose schema or ABI data.
     pub fn selectedTools(self: *const Selection) []const ActivationTool {
         return selectionStorageConst(self).published_tools;
@@ -98,8 +98,8 @@ pub const ActivationServerState = enum {
     unavailable,
 };
 
-/// Product-neutral, bounded health facts derived from the official catalog and
-/// the Workbench allowlist. No raw issue detail, schema, fingerprint, endpoint,
+/// Consumer-neutral, bounded health facts derived from the official catalog and
+/// the supplied allowlist. No raw issue detail, schema, fingerprint, endpoint,
 /// command, or credential crosses this boundary.
 pub const ActivationServer = struct {
     id: []const u8,
@@ -674,7 +674,7 @@ fn copyProjection(
     storage.tools = tools;
     storage.issues = issues;
 
-    // The public projection is deliberately a second copy. Workbench may
+    // The public projection is deliberately a second copy. Callers may
     // inspect it, but selection and integrity checks always read the private
     // canonical arrays above. Sharing either structs or string bytes would
     // let a caller rewrite the value against which it is later validated.

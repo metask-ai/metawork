@@ -1,9 +1,9 @@
 //! Application lifecycle adapter for the one MCP OAuth expiry timer and the
-//! single refresh network effect. Workbench owns every durable transition;
+//! single refresh network effect. Product Control owns every durable transition;
 //! this owner only sequences platform time/credential/network capabilities.
 
 const std = @import("std");
-const workbench = @import("metawork_workbench");
+const control_ports = @import("metawork_product_control_ports");
 const mcp_types = @import("metawork_product_mcp");
 const mcp_oauth = @import("metawork_mcp_oauth");
 const mcp_platform = @import("metawork_mcp_platform");
@@ -206,7 +206,7 @@ const RefreshJob = struct {
 pub const Coordinator = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
-    workbench_owner: *workbench.Workbench,
+    control: control_ports.McpOauthPort,
     credential_store: *mcp_platform.CredentialStore,
     authorizations: *mcp_platform.HttpAuthorizations,
     host: Host,
@@ -217,7 +217,7 @@ pub const Coordinator = struct {
     pub fn init(
         allocator: std.mem.Allocator,
         io: std.Io,
-        workbench_owner: *workbench.Workbench,
+        control: control_ports.McpOauthPort,
         credential_store: *mcp_platform.CredentialStore,
         authorizations: *mcp_platform.HttpAuthorizations,
         host: Host,
@@ -225,7 +225,7 @@ pub const Coordinator = struct {
         return .{
             .allocator = allocator,
             .io = io,
-            .workbench_owner = workbench_owner,
+            .control = control,
             .credential_store = credential_store,
             .authorizations = authorizations,
             .host = host,
@@ -255,7 +255,7 @@ pub const Coordinator = struct {
             }
             self.retry_not_before_unix_ms = null;
         }
-        const expiry = self.workbench_owner.nextMcpOauthExpiry() orelse return true;
+        const expiry = self.control.nextMcpOauthExpiry() orelse return true;
         if (expiry.expires_at_unix_ms > now_unix_ms) {
             self.host.armRequired(expiry.expires_at_unix_ms);
             return true;
@@ -323,7 +323,7 @@ pub const Coordinator = struct {
         server_id: []const u8,
         now_unix_ms: u64,
     ) !void {
-        var binding = switch (try self.workbench_owner.beginMcpOauthRefresh(server_id)) {
+        var binding = switch (try self.control.beginMcpOauthRefresh(server_id)) {
             .started => |value| value,
             .rejected, .persistence_outcome_unknown => return error.StateRejected,
         };
@@ -411,7 +411,7 @@ pub const Coordinator = struct {
             std.crypto.secureZero(u8, secret);
             self.allocator.free(secret);
         };
-        const outcome = try self.workbench_owner.completeMcpOauthRefresh(.{
+        const outcome = try self.control.completeMcpOauthRefresh(.{
             .operation_id = job.binding.operation_id,
             .server_id = job.binding.server_id,
             .access_token = access,
@@ -431,20 +431,20 @@ pub const Coordinator = struct {
 
     fn drainRuntimeAuthFailures(self: *Coordinator) bool {
         var batch = self.authorizations.takeRuntimeAuthFailures() catch {
-            self.workbench_owner.blockMcpAdmissionAfterRuntimeAuthFailure();
+            self.control.blockMcpAdmissionAfterRuntimeAuthFailure();
             return true;
         };
         defer batch.deinit();
         var changed = false;
         for (batch.values) |failure| {
-            const outcome = self.workbench_owner.requireMcpOauthReauthorization(.{
+            const outcome = self.control.requireMcpOauthReauthorization(.{
                 .server_id = failure.server_id,
                 .consent_epoch = failure.consent_epoch,
                 .token_revision = failure.token_revision,
                 .challenge_scopes = failure.challenge_scopes,
                 .challenge_scopes_complete = failure.challenge_scopes_complete,
             }) catch {
-                self.workbench_owner.blockMcpAdmissionAfterRuntimeAuthFailure();
+                self.control.blockMcpAdmissionAfterRuntimeAuthFailure();
                 changed = true;
                 continue;
             };
@@ -466,11 +466,11 @@ pub const Coordinator = struct {
     }
 
     fn clear(self: *Coordinator, operation_id: []const u8) void {
-        _ = self.workbench_owner.clearMcpOauthOperation(operation_id) catch {};
+        _ = self.control.clearMcpOauthOperation(operation_id) catch {};
     }
 
     fn recover(self: *Coordinator, operation_id: []const u8) void {
-        _ = self.workbench_owner.recoverMcpOauthOperation(operation_id) catch {};
+        _ = self.control.recoverMcpOauthOperation(operation_id) catch {};
     }
 
     fn deferRetry(self: *Coordinator, now_unix_ms: u64) void {
@@ -483,7 +483,7 @@ pub const Coordinator = struct {
 
     fn armEarliest(self: *Coordinator) void {
         if (self.stopping or self.job != null) return;
-        const expiry = self.workbench_owner.nextMcpOauthExpiry() orelse {
+        const expiry = self.control.nextMcpOauthExpiry() orelse {
             self.host.cancel();
             return;
         };

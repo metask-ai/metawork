@@ -1,6 +1,6 @@
 const std = @import("std");
 const agent = @import("metawork_agent");
-const workbench_api = @import("metawork_workbench");
+const control_ports = @import("metawork_product_control_ports");
 
 pub const Wake = struct {
     context: ?*anyopaque,
@@ -33,9 +33,9 @@ pub const Coordinator = struct {
 
     pub fn drain(
         self: *Coordinator,
-        workbench: *workbench_api.Workbench,
+        consumer: control_ports.AgentEventConsumer,
     ) void {
         self.wake_pending.store(false, .release);
-        workbench.drainAgentEvents() catch {};
+        consumer.drainAgentEvents() catch {};
     }
 };

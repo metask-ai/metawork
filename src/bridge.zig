@@ -1,4 +1,4 @@
-//! Minimal Renderer Bridge transport surface. Product truth remains in Workbench.
+//! Minimal Renderer Bridge transport surface. Product truth remains in Product Control.
 
 const commands_impl = @import("bridge/commands.zig");
 const callback_gate_impl = @import("bridge/callback_gate.zig");
@@ -77,7 +77,7 @@ pub const handlers = struct {
     pub const RendererBridgeConnect = handlers_impl.RendererBridgeConnect;
     pub const EventDisconnect = handlers_impl.EventDisconnect;
     pub const WindowDragStart = handlers_impl.WindowDragStart;
-    pub const WorkbenchSnapshotChunk = handlers_impl.WorkbenchSnapshotChunk;
+    pub const ProductSnapshotChunk = handlers_impl.ProductSnapshotChunk;
     pub const AccountSelection = handlers_impl.AccountSelection;
     pub const WorkspaceIdentity = handlers_impl.WorkspaceIdentity;
     pub const TaskCreate = handlers_impl.TaskCreate;
