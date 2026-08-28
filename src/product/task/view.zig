@@ -266,7 +266,7 @@ fn writeRun(
     );
     writer.print(",\"assistantRedacted\":{},\"status\":", .{run.assistant_redacted}) catch
         return error.SnapshotTooLarge;
-    try text_projection.writeJson(writer, run.status_text);
+    jsonValue(writer, legacyActivityLabel(run)) catch return error.SnapshotTooLarge;
     writer.writeAll(",\"outcome\":") catch return error.SnapshotTooLarge;
     if (terminal) |value|
         jsonValue(writer, @tagName(value.outcome)) catch return error.SnapshotTooLarge
@@ -328,6 +328,33 @@ fn writeRun(
         writer.writeAll("]}") catch return error.SnapshotTooLarge;
     }
     writer.writeAll("]}") catch return error.SnapshotTooLarge;
+}
+
+/// The mutable Product status string has been removed. Until the revision-1
+/// snapshot is hard-cut to the typed activity union, keep the existing wire
+/// field as a pure projection so this internal Product-state change remains a
+/// buildable commit rather than a second source of runtime truth.
+fn legacyActivityLabel(run: *const task_state.RunRecord) []const u8 {
+    const activity = task_state.currentActivity(run) orelse return switch (task_state.runPhase(run)) {
+        .completed => "Completed",
+        .stopped, .cancelled => "Stopped",
+        .interrupted => "Interrupted",
+        .failed => "Failed",
+        .queued, .running, .waiting_ui, .stopping => unreachable,
+    };
+    return switch (activity) {
+        .queued => "Queued",
+        .starting => "Starting",
+        .waiting_model => "Waiting for model",
+        .thinking => "Thinking",
+        .writing_response => "Writing response",
+        .executing_tools => "Executing tools",
+        .retrying_provider => "Retrying provider",
+        .waiting_user => "Waiting for your input",
+        .compacting_context => "Compacting context",
+        .finalizing => "Finishing",
+        .stopping => "Stopping",
+    };
 }
 
 fn writeCompact(

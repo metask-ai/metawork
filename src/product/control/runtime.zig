@@ -6022,7 +6022,6 @@ pub const Runtime = struct {
                 run.assistant.list.items,
                 credential,
             ) or run.assistant_redacted;
-            _ = redactFixedWidthNoFail(run.status_text, credential);
             for (run.tools) |*tool_entry| {
                 const tool = &(tool_entry.* orelse continue);
                 const id_redacted = redactFixedWidthNoFail(tool.id, credential);
@@ -7648,7 +7647,6 @@ fn testRuntime() !Runtime {
         .active_phase = .running,
         .agent_handoff = .init(.running),
         .tools = tools,
-        .status_text = try control.copyBounded("Queued", control.limits.max_tool_field_bytes),
         .terminal_diagnostic = try control.allocTrackedCapacity(control.limits.max_terminal_diagnostic_bytes),
         .redaction_secret = control.execution.credential(),
     };
@@ -9625,11 +9623,6 @@ test "default replacement preserves Task generation and installs the next admiss
         "review future metawork credential",
         control.limits.max_task_title_bytes,
     );
-    try control.replaceTracked(
-        &task.durable.runs[0].?.status_text,
-        "future metawork status",
-        control.limits.max_tool_field_bytes,
-    );
     const old_input = try control.task_runtime.testExecutionInput(task.durable.id);
     try std.testing.expectEqual(@as(u64, 1), old_input.execution_generation);
     try std.testing.expectEqualStrings("SECRET-KEY", old_input.api_key);
@@ -9695,7 +9688,6 @@ test "default replacement preserves Task generation and installs the next admiss
     try std.testing.expectEqualStrings("fixture-model-2", control.execution.model());
     try std.testing.expectEqualStrings("fixture-model", task.durable.execution_model);
     try std.testing.expect(std.mem.indexOf(u8, task.durable.title, "metawork") == null);
-    try std.testing.expect(std.mem.indexOf(u8, task.durable.runs[0].?.status_text, "metawork") == null);
     var scrubbed_snapshot_storage: [96 * 1024]u8 = undefined;
     const scrubbed_snapshot = try control.writeSnapshot(&scrubbed_snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, scrubbed_snapshot, "metawork") == null);
@@ -9884,11 +9876,6 @@ test "released Task credential is permanently scrubbed from every product projec
         "answer SECRET-KEY",
         control.limits.max_assistant_message_bytes,
     );
-    try control.replaceTracked(
-        &run.status_text,
-        "status SECRET-KEY",
-        control.limits.max_tool_field_bytes,
-    );
     run.tools[0] = .{
         .route_digest = toolRouteDigest("SECRET-KEY"),
         .id = try control.copyBounded("id SECRET-KEY", control.limits.max_tool_field_bytes),
@@ -10000,9 +9987,9 @@ test "known credential matching chooses the longest overlapping secret" {
         control.matchedKnownCredentialLen("SECRET-KEY suffix"),
     );
     try control.replaceTracked(
-        &control.task_runtime.tasks[0].?.durable.runs[0].?.status_text,
+        &control.task_runtime.tasks[0].?.durable.title,
         "SECRET-KEY suffix",
-        control.limits.max_tool_field_bytes,
+        control.limits.max_task_title_bytes,
     );
     var snapshot_storage: [96 * 1024]u8 = undefined;
     const snapshot = try control.writeSnapshot(&snapshot_storage);
@@ -10158,7 +10145,7 @@ test "thinking and assistant chunks update distinct safe projections" {
     defer thinking.deinit();
     try control.applyEvent(&thinking);
     try std.testing.expectEqualStrings("", run.assistant.list.items);
-    try std.testing.expectEqualStrings("Thinking", run.status_text);
+    try std.testing.expectEqual(task_test_state.RunActivity.thinking, run.observed_activity);
     try std.testing.expectEqual(revision_before_thinking + 1, control.revision);
 
     const revision_before_duplicate = control.revision;
@@ -10179,7 +10166,10 @@ test "thinking and assistant chunks update distinct safe projections" {
     defer assistant.deinit();
     try control.applyEvent(&assistant);
     try std.testing.expectEqualStrings("public response", run.assistant.list.items);
-    try std.testing.expectEqualStrings("Writing response", run.status_text);
+    try std.testing.expectEqual(
+        task_test_state.RunActivity.writing_response,
+        run.observed_activity,
+    );
 
     var snapshot_storage: [96 * 1024]u8 = undefined;
     const snapshot = try control.writeSnapshot(&snapshot_storage);
@@ -10254,6 +10244,67 @@ test "output segment byte mismatch fails the dependency protocol" {
     );
 }
 
+test "output segment close is atomic when the destination reserve fails" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = &control.task_runtime.tasks[0].?;
+    const run = &task.durable.runs[0].?;
+    const route = task.runtime.routeId();
+
+    var begin = try testEnvelope(
+        route,
+        run.id,
+        "{\"output_segment_begin\":{\"index\":0,\"turn\":1,\"group\":0}}",
+    );
+    defer begin.deinit();
+    try control.applyEvent(&begin);
+    var text_event = try testEnvelope(route, run.id, "{\"text_chunk\":\"answer\"}");
+    defer text_event.deinit();
+    try control.applyEvent(&text_event);
+
+    control.limits.max_projection_bytes = control.projection_bytes;
+    var end = try testEnvelope(
+        route,
+        run.id,
+        "{\"output_segment_end\":{\"index\":0,\"turn\":1,\"group\":0,\"disposition\":\"final\",\"bytes\":6}}",
+    );
+    defer end.deinit();
+    try std.testing.expectError(error.ProjectionCapacity, control.applyEvent(&end));
+    try std.testing.expect(run.open_output_segment != null);
+    try std.testing.expectEqual(@as(u64, 0), run.next_output_segment_index);
+    try std.testing.expectEqualStrings("answer", run.output_segment.list.items);
+    try std.testing.expectEqualStrings("", run.assistant.list.items);
+    try std.testing.expect(run.assistant_output_kind == null);
+}
+
+test "assistant output budget is aggregate across committed and open segments" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = &control.task_runtime.tasks[0].?;
+    const run = &task.durable.runs[0].?;
+    const route = task.runtime.routeId();
+    control.limits.max_assistant_message_bytes = 8;
+
+    const first = [_][]const u8{
+        "{\"output_segment_begin\":{\"index\":0,\"turn\":1,\"group\":0}}",
+        "{\"text_chunk\":\"four\"}",
+        "{\"output_segment_end\":{\"index\":0,\"turn\":1,\"group\":0,\"disposition\":\"commentary\",\"bytes\":4}}",
+        "{\"output_segment_begin\":{\"index\":1,\"turn\":2,\"group\":1}}",
+    };
+    for (first) |encoded| {
+        var envelope = try testEnvelope(route, run.id, encoded);
+        defer envelope.deinit();
+        try control.applyEvent(&envelope);
+    }
+    var overflow = try testEnvelope(route, run.id, "{\"text_chunk\":\"five!\"}");
+    defer overflow.deinit();
+    try std.testing.expectError(error.ProjectionCapacity, control.applyEvent(&overflow));
+    try std.testing.expectEqualStrings("four", run.assistant.list.items);
+    try std.testing.expectEqualStrings("", run.output_segment.list.items);
+    try std.testing.expect(run.open_output_segment != null);
+    try std.testing.expectEqual(@as(u64, 0), run.open_output_segment.?.bytes);
+}
+
 test "partial output stays provisional until the segment is classified" {
     var workbench = try testRuntime();
     defer workbench.deinit();
@@ -10319,7 +10370,7 @@ test "discarded output requires an in-group retry without committing bytes" {
     );
 }
 
-test "AgentCore RunState refines status without owning RunPhase and rejects stale transitions" {
+test "AgentCore RunState refines typed activity without owning RunPhase and rejects stale transitions" {
     var control = try testRuntime();
     defer control.deinit();
     const task = &control.task_runtime.tasks[0].?;
@@ -10338,7 +10389,7 @@ test "AgentCore RunState refines status without owning RunPhase and rejects stal
     try std.testing.expectEqual(lifecycle.RunStatePhase.starting, run.agent_phase.?);
     try std.testing.expectEqual(@as(u64, 1), run.agent_transition_seq.?);
     try std.testing.expectEqual(host_phase, run.active_phase);
-    try std.testing.expectEqualStrings("Starting", run.status_text);
+    try std.testing.expectEqual(task_test_state.RunActivity.starting, run.observed_activity);
 
     var executing = try testEnvelope(
         route,
@@ -10351,7 +10402,10 @@ test "AgentCore RunState refines status without owning RunPhase and rejects stal
     try std.testing.expectEqual(@as(u32, 1), run.agent_turn);
     try std.testing.expectEqual(@as(u32, 2), run.agent_tool_calls);
     try std.testing.expectEqual(@as(u32, 2), run.agent_in_flight_tools);
-    try std.testing.expectEqualStrings("Executing tools", run.status_text);
+    try std.testing.expectEqual(
+        @as(?u32, 2),
+        run.observed_activity.executing_tools.in_flight,
+    );
 
     var stale = try testEnvelope(
         route,
@@ -10361,7 +10415,10 @@ test "AgentCore RunState refines status without owning RunPhase and rejects stal
     defer stale.deinit();
     try control.applyEvent(&stale);
     try std.testing.expectEqual(lifecycle.RunStatePhase.executing_tools, run.agent_phase.?);
-    try std.testing.expectEqualStrings("Executing tools", run.status_text);
+    try std.testing.expectEqual(
+        @as(?u32, 2),
+        run.observed_activity.executing_tools.in_flight,
+    );
 
     var cross_run = try testEnvelope(
         route,
@@ -10373,6 +10430,94 @@ test "AgentCore RunState refines status without owning RunPhase and rejects stal
     try std.testing.expect(run.agent_observation_degraded);
     try std.testing.expectEqual(lifecycle.RunStatePhase.executing_tools, run.agent_phase.?);
     try std.testing.expectEqual(host_phase, run.active_phase);
+}
+
+test "provider retry is replaced by the next forward activity" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = &control.task_runtime.tasks[0].?;
+    const run = &task.durable.runs[0].?;
+    const route = task.runtime.routeId();
+
+    var retry = try testEnvelope(
+        route,
+        run.id,
+        "{\"retry_notice\":{\"attempt\":2,\"max\":3,\"delay_ms\":250}}",
+    );
+    defer retry.deinit();
+    try control.applyEvent(&retry);
+    try std.testing.expectEqual(
+        @as(?u32, 2),
+        run.observed_activity.retrying_provider.attempt,
+    );
+    try std.testing.expectEqual(
+        @as(?u64, 250),
+        run.observed_activity.retrying_provider.delay_ms,
+    );
+
+    var generating = try testEnvelope(
+        route,
+        run.id,
+        "{\"run_state\":{\"run_id\":7,\"transition_seq\":1,\"phase\":\"generating\",\"turn\":1,\"tool_calls\":0,\"in_flight_tools\":[]}}",
+    );
+    defer generating.deinit();
+    try control.applyEvent(&generating);
+    try std.testing.expectEqual(
+        task_test_state.RunActivity.waiting_model,
+        run.observed_activity,
+    );
+}
+
+test "Conversation context observation survives Runs and clears with attachment" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = &control.task_runtime.tasks[0].?;
+    const run = &task.durable.runs[0].?;
+    const route = task.runtime.routeId();
+
+    var warning = try testEnvelope(
+        route,
+        run.id,
+        "{\"context_warning\":{\"current_tokens\":90,\"warning_threshold\":80,\"auto_compact_threshold\":100,\"blocking_limit\":120,\"level\":\"warning\"}}",
+    );
+    defer warning.deinit();
+    try control.applyEvent(&warning);
+    try std.testing.expectEqual(
+        task_test_state.ContextPressureSeverity.warning,
+        task.conversation_observation.pressure.?.severity,
+    );
+    try std.testing.expectEqual(
+        run.id,
+        task.conversation_observation.pressure.?.source_run_id,
+    );
+
+    var compacting = try testEnvelope(
+        route,
+        run.id,
+        "{\"run_state\":{\"run_id\":7,\"transition_seq\":1,\"phase\":\"compacting\",\"turn\":1,\"tool_calls\":0,\"in_flight_tools\":[]}}",
+    );
+    defer compacting.deinit();
+    try control.applyEvent(&compacting);
+    var compacted = try testEnvelope(
+        route,
+        run.id,
+        "{\"auto_compact\":{\"dropped\":4,\"kept\":8,\"before_tokens\":110,\"after_tokens\":70}}",
+    );
+    defer compacted.deinit();
+    try control.applyEvent(&compacted);
+    try std.testing.expect(task.conversation_observation.pressure == null);
+    try std.testing.expectEqual(
+        @as(u64, 70),
+        task.conversation_observation.last_auto_compact.?.after_tokens,
+    );
+    try std.testing.expectEqual(
+        task_test_state.RunActivity.waiting_model,
+        run.observed_activity,
+    );
+
+    control.releaseTaskAttachmentNoFail(task, .cold_start);
+    try std.testing.expect(task.conversation_observation.pressure == null);
+    try std.testing.expect(task.conversation_observation.last_auto_compact == null);
 }
 
 test "AgentCore RunState accepts a zero first transition sequence" {
@@ -10896,7 +11041,6 @@ test "default snapshot budget contains the maximum structural projection" {
                     ),
                 } },
                 .tools = tools,
-                .status_text = try control.copyBounded("", limits.max_tool_field_bytes),
                 .terminal_publication = .init(.published),
                 .terminal_payload = .{
                     .phase = .completed,

@@ -401,7 +401,6 @@ pub const RunWire = struct {
     phase: []const u8,
     outcome: ?[]const u8,
     cause: ?[]const u8,
-    status: []const u8,
     usage: UsageWire,
     tools: []ToolWire,
     diagnostic: []const u8,
@@ -810,7 +809,6 @@ fn projectRun(
             if (value.cause) |cause| @tagName(cause) else null
         else
             null,
-        .status = run.status_text,
         .usage = usageWire(run.usage),
         .tools = tools,
         .diagnostic = if (terminal_payload) |payload|
@@ -1114,11 +1112,6 @@ fn restoreRun(projection: RestoreProjection, wire: RunWire) RestoreError!task_st
             return error.TaskStoreCorrupt;
     }
     const interrupted = !persistedTerminalRunPhase(wire.phase);
-    const status_text = try projection.copy(
-        if (interrupted) "Interrupted" else wire.status,
-        projection.limits.max_tool_field_bytes,
-    );
-    errdefer projection.free(status_text);
     const diagnostic = try projection.alloc(projection.limits.max_terminal_diagnostic_bytes);
     errdefer projection.free(diagnostic);
     @memcpy(diagnostic[0..wire.diagnostic.len], wire.diagnostic);
@@ -1174,7 +1167,6 @@ fn restoreRun(projection: RestoreProjection, wire: RunWire) RestoreError!task_st
         .active_phase = .queued,
         .tools = tools,
         .usage = usageFromWire(wire.usage),
-        .status_text = status_text,
         .terminal_publication = .init(.published),
         .terminal_payload = .{
             .phase = phase,
@@ -1485,7 +1477,6 @@ fn deinitRestoredRun(projection: RestoreProjection, run: *task_state.RunRecord) 
     if (run.assistant.list.capacity != 0) projection.freeText(&run.assistant);
     if (run.execution_model_owned)
         projection.free(@constCast(run.execution_model));
-    projection.free(run.status_text);
     projection.free(run.terminal_diagnostic);
     run.* = undefined;
 }
@@ -2073,7 +2064,6 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
             !validText(run.execution_model, limits.max_execution_model_bytes, false) or
             !std.mem.eql(u8, run.execution_provider, task.binding.provider) or
             !validText(run.assistant, limits.max_assistant_message_bytes, true) or
-            !validText(run.status, limits.max_tool_field_bytes, true) or
             !validText(run.diagnostic, limits.max_terminal_diagnostic_bytes, true) or
             run.tools.len > limits.max_tools_per_run or run.next_activity_order == 0)
             return error.Invalid;
@@ -2649,7 +2639,6 @@ test "task store round-trips per-run execution generations across binding adopti
         .phase = "completed",
         .outcome = "completed",
         .cause = null,
-        .status = "Completed",
         .usage = .{
             .input_tokens = 1,
             .output_tokens = 1,
@@ -2763,7 +2752,6 @@ test "task store rejects states that would violate the product contract" {
         .phase = "completed",
         .outcome = "completed",
         .cause = null,
-        .status = "Completed",
         .usage = .{
             .input_tokens = 1,
             .output_tokens = 1,

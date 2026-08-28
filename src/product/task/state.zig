@@ -110,6 +110,53 @@ pub const TrackedText = struct {
 
 pub const AssistantOutputKind = enum { final, partial };
 
+pub const ContextPressureSeverity = enum { warning, critical };
+
+pub const ContextPressureObservation = struct {
+    source_run_id: u64,
+    current_tokens: u64,
+    warning_threshold: u64,
+    auto_compact_threshold: u64,
+    blocking_limit: u64,
+    severity: ContextPressureSeverity,
+};
+
+pub const AutoCompactObservation = struct {
+    source_run_id: u64,
+    dropped: u32,
+    kept: u32,
+    before_tokens: u64,
+    after_tokens: u64,
+};
+
+/// Runtime-only facts for the currently attached Conversation. They survive
+/// across Runs that reuse the same Session, but never cross attachment or
+/// process boundaries and are not part of Task history persistence.
+pub const ConversationObservation = struct {
+    pressure: ?ContextPressureObservation = null,
+    last_auto_compact: ?AutoCompactObservation = null,
+};
+
+pub const RetryObservation = struct {
+    attempt: ?u32 = null,
+    max: ?u32 = null,
+    delay_ms: ?u64 = null,
+};
+
+pub const RunActivity = union(enum) {
+    queued,
+    starting,
+    waiting_model,
+    thinking,
+    writing_response,
+    executing_tools: struct { in_flight: ?u32 = null },
+    retrying_provider: RetryObservation,
+    waiting_user,
+    compacting_context,
+    finalizing,
+    stopping,
+};
+
 const OpenOutputSegment = struct {
     index: u32,
     turn: u32,
@@ -372,7 +419,9 @@ pub const RunRecord = struct {
     active_phase: RunPhase = .queued,
     tools: []?ToolView,
     usage: UsageView = .{},
-    status_text: []u8,
+    /// Latest safe Product activity observation. Product Run phase and formal
+    /// terminal facts still override this runtime-only hint.
+    observed_activity: RunActivity = .waiting_model,
     /// Latest monotonic Agent execution observation. These fields are
     /// runtime-only: an interrupted process never persists in-flight state.
     agent_phase: ?agent.RunStatePhase = null,
@@ -476,6 +525,7 @@ pub const RuntimeAttachment = task_attachment.State;
 pub const Task = struct {
     durable: DurableTaskRecord,
     runtime: RuntimeAttachment,
+    conversation_observation: ConversationObservation = .{},
     deletion: task_deletion.State = .idle,
 };
 
@@ -525,6 +575,18 @@ pub fn productTerminalFacts(run: *const RunRecord) ?ProductTerminalFacts {
 
 pub fn runPhase(run: *const RunRecord) RunPhase {
     return if (productTerminalFacts(run)) |terminal| terminal.phase else run.active_phase;
+}
+
+pub fn currentActivity(run: *const RunRecord) ?RunActivity {
+    if (productTerminalFacts(run) != null) return null;
+    if (terminalPayload(run) != null) return .finalizing;
+    return switch (run.active_phase) {
+        .queued => .queued,
+        .running => run.observed_activity,
+        .waiting_ui => .waiting_user,
+        .stopping => .stopping,
+        .completed, .stopped, .cancelled, .interrupted, .failed => unreachable,
+    };
 }
 
 pub fn setActivePhase(run: *RunRecord, phase: RunPhase) bool {
@@ -670,6 +732,14 @@ pub const EventProjection = struct {
         max: usize,
         credential: []const u8,
     ) EventProjectionError!bool,
+    append_group_fn: *const fn (
+        context: *anyopaque,
+        target: *TrackedText,
+        first: []const u8,
+        second: []const u8,
+        max: usize,
+        credential: []const u8,
+    ) EventProjectionError!bool,
     replace_text_fn: *const fn (
         context: *anyopaque,
         target: *[]u8,
@@ -703,6 +773,26 @@ pub const EventProjection = struct {
             self.context,
             target,
             suffix,
+            self.max_assistant_message_bytes,
+            credential,
+        );
+    }
+
+    /// Atomically appends an already-owned output group. The callback performs
+    /// every fallible reserve before mutating `target`; Product state only
+    /// clears the source buffers after this operation succeeds.
+    fn appendGroup(
+        self: EventProjection,
+        target: *TrackedText,
+        first: []const u8,
+        second: []const u8,
+        credential: []const u8,
+    ) EventProjectionError!bool {
+        return self.append_group_fn(
+            self.context,
+            target,
+            first,
+            second,
             self.max_assistant_message_bytes,
             credential,
         );
@@ -761,6 +851,39 @@ pub const EventApplication = union(enum) {
     },
 };
 
+fn setObservedActivity(run: *RunRecord, activity: RunActivity) bool {
+    if (std.meta.eql(run.observed_activity, activity)) return false;
+    run.observed_activity = activity;
+    return true;
+}
+
+fn outputBytes(run: *const RunRecord) EventProjectionError!usize {
+    var total = std.math.add(
+        usize,
+        run.assistant.list.items.len,
+        run.output_continued.list.items.len,
+    ) catch return error.ProjectionCapacity;
+    total = std.math.add(
+        usize,
+        total,
+        run.output_segment.list.items.len,
+    ) catch return error.ProjectionCapacity;
+    return total;
+}
+
+fn appendNewOutput(
+    projection: EventProjection,
+    run: *RunRecord,
+    target: *TrackedText,
+    suffix: []const u8,
+) EventProjectionError!bool {
+    const used = try outputBytes(run);
+    if (used > projection.max_assistant_message_bytes or
+        suffix.len > projection.max_assistant_message_bytes - used)
+        return error.ProjectionCapacity;
+    return projection.appendAssistant(target, suffix, run.redaction_secret);
+}
+
 /// Applies one canonical Agent event to the Task aggregate. Event pumping,
 /// late-event diagnostics, durable commit, and revision publication remain at
 /// the composition boundary and are selected from the returned outcome.
@@ -779,44 +902,37 @@ pub fn applyEvent(
     var durable_boundary = false;
     switch (event) {
         .thinking_chunk => {
-            if (std.mem.eql(u8, run.status_text, "Thinking")) return .unchanged;
-            _ = try projection.replaceText(
-                &run.status_text,
-                "Thinking",
-                run.redaction_secret,
-            );
+            if (!setObservedActivity(run, .thinking)) return .unchanged;
         },
         .text_chunk => |text| {
             if (run.output_segment_protocol_seen) {
                 const open = &(run.open_output_segment orelse
                     return error.InvalidOutputSegment);
-                open.bytes = std.math.add(
+                const next_bytes = std.math.add(
                     u64,
                     open.bytes,
                     std.math.cast(u64, text.len) orelse
                         return error.InvalidOutputSegment,
                 ) catch return error.InvalidOutputSegment;
-                if (try projection.appendAssistant(
+                if (try appendNewOutput(
+                    projection,
+                    run,
                     &run.output_segment,
                     text,
-                    run.redaction_secret,
                 )) run.output_segment_redacted = true;
+                open.bytes = next_bytes;
             } else if (builtin.is_test) {
                 // Legacy fixtures exercise unrelated event behavior without
                 // constructing the output framing now guaranteed by the
                 // canonical macOS AgentCore artifact.
-                if (try projection.appendAssistant(
+                if (try appendNewOutput(
+                    projection,
+                    run,
                     &run.assistant,
                     text,
-                    run.redaction_secret,
                 )) run.assistant_redacted = true;
             } else return error.InvalidOutputSegment;
-            if (!std.mem.eql(u8, run.status_text, "Writing response"))
-                _ = try projection.replaceText(
-                    &run.status_text,
-                    "Writing response",
-                    run.redaction_secret,
-                );
+            _ = setObservedActivity(run, .writing_response);
         },
         .tool_start => |tool_event| {
             const tool = try projection.findOrCreateTool(
@@ -826,11 +942,9 @@ pub fn applyEvent(
                 tool_event.input,
             );
             tool.state = .running;
-            _ = try projection.replaceText(
-                &run.status_text,
-                "Executing tools",
-                run.redaction_secret,
-            );
+            _ = setObservedActivity(run, .{ .executing_tools = .{
+                .in_flight = runningToolCount(run.tools),
+            } });
         },
         .tool_progress => |progress| {
             const tool = findTool(run.tools, progress.id) orelse
@@ -842,13 +956,13 @@ pub fn applyEvent(
             );
             tool.progress_truncated = projected.truncated;
             tool.redacted = tool.redacted or projected.redacted;
+            if (tool.state == .running)
+                _ = setObservedActivity(run, .{ .executing_tools = .{
+                    .in_flight = runningToolCount(run.tools),
+                } });
         },
         .progress => {
-            _ = try projection.replaceText(
-                &run.status_text,
-                "Executing tools",
-                run.redaction_secret,
-            );
+            _ = setObservedActivity(run, .{ .executing_tools = .{} });
         },
         .tool_result => |result| {
             const tool = try projection.findOrCreateTool(
@@ -880,6 +994,14 @@ pub fn applyEvent(
                 task.durable.id,
                 run.generation,
             );
+            const running = runningToolCount(run.tools);
+            _ = setObservedActivity(
+                run,
+                if (running == 0)
+                    .waiting_model
+                else
+                    .{ .executing_tools = .{ .in_flight = running } },
+            );
             durable_boundary = true;
         },
         .file_changes => {
@@ -901,25 +1023,53 @@ pub fn applyEvent(
             );
         },
         .context_warning => |warning| {
-            _ = try projection.replaceText(
-                &run.status_text,
-                warning.level,
-                run.redaction_secret,
-            );
+            if (!validContextWarning(warning)) {
+                run.agent_observation_degraded = true;
+                return .unchanged;
+            }
+            task.conversation_observation.pressure = .{
+                .source_run_id = run.id,
+                .current_tokens = warning.current_tokens,
+                .warning_threshold = warning.warning_threshold,
+                .auto_compact_threshold = warning.auto_compact_threshold,
+                .blocking_limit = warning.blocking_limit,
+                .severity = if (warning.current_tokens >= warning.auto_compact_threshold)
+                    .critical
+                else
+                    .warning,
+            };
         },
-        .auto_compact => {
-            _ = try projection.replaceText(
-                &run.status_text,
-                "Context compacted",
-                run.redaction_secret,
-            );
+        .auto_compact => |compact| {
+            if (!validAutoCompact(compact)) {
+                run.agent_observation_degraded = true;
+                return .unchanged;
+            }
+            task.conversation_observation.pressure = null;
+            task.conversation_observation.last_auto_compact = .{
+                .source_run_id = run.id,
+                .dropped = compact.dropped,
+                .kept = compact.kept,
+                .before_tokens = compact.before_tokens,
+                .after_tokens = compact.after_tokens,
+            };
+            if (std.meta.activeTag(run.observed_activity) == .compacting_context)
+                _ = setObservedActivity(run, .waiting_model);
         },
-        .retry_notice => {
-            _ = try projection.replaceText(
-                &run.status_text,
-                "Retrying provider",
-                run.redaction_secret,
-            );
+        .retry_notice => |retry| {
+            if (terminalPayload(run) != null or
+                std.meta.activeTag(run.observed_activity) == .finalizing)
+            {
+                run.agent_observation_degraded = true;
+                return .unchanged;
+            }
+            const details_valid = retry.attempt != 0 and retry.max != 0 and
+                retry.attempt <= retry.max;
+            if (!details_valid) run.agent_observation_degraded = true;
+            _ = setObservedActivity(run, .{ .retrying_provider = if (details_valid) .{
+                .attempt = retry.attempt,
+                .max = retry.max,
+                .delay_ms = retry.delay_ms,
+            } else .{} });
         },
         .run_state => |state| {
             if (state.run_id != run.id) {
@@ -928,19 +1078,34 @@ pub fn applyEvent(
             }
             if (run.agent_transition_seq) |last|
                 if (state.transition_seq <= last) return .unchanged;
+            if (!validRunStateTransition(run.agent_phase, state.phase)) {
+                run.agent_observation_degraded = true;
+                return .unchanged;
+            }
+            const in_flight = std.math.cast(u32, state.in_flight_tools.len) orelse {
+                run.agent_observation_degraded = true;
+                return .unchanged;
+            };
             run.agent_transition_seq = state.transition_seq;
             run.agent_phase = state.phase;
             run.agent_turn = state.turn;
             run.agent_tool_calls = state.tool_calls;
-            run.agent_in_flight_tools = std.math.cast(u32, state.in_flight_tools.len) orelse {
-                run.agent_observation_degraded = true;
-                return .unchanged;
+            run.agent_in_flight_tools = in_flight;
+            const activity: RunActivity = switch (state.phase) {
+                .starting => .starting,
+                .generating => .waiting_model,
+                .executing_tools => .{ .executing_tools = .{
+                    .in_flight = if (in_flight == 0) null else in_flight,
+                } },
+                .waiting_ui => .waiting_user,
+                .retrying => if (std.meta.activeTag(run.observed_activity) == .retrying_provider)
+                    run.observed_activity
+                else
+                    .{ .retrying_provider = .{} },
+                .compacting => .compacting_context,
+                .finalizing, .completed, .failed, .aborted, .poisoned => .finalizing,
             };
-            _ = try projection.replaceText(
-                &run.status_text,
-                agentRunStateStatus(state.phase),
-                run.redaction_secret,
-            );
+            _ = setObservedActivity(run, activity);
         },
         .permission_provenance => |provenance| {
             const summary = try permissionSummary(provenance);
@@ -954,16 +1119,6 @@ pub fn applyEvent(
                     record.permission = summary;
                     durable_boundary = true;
                 };
-            const status = switch (provenance.decision) {
-                .allow => "Permission allowed",
-                .ask => "Permission requested",
-                .deny => "Permission denied",
-            };
-            _ = try projection.replaceText(
-                &run.status_text,
-                status,
-                run.redaction_secret,
-            );
         },
         .output_segment_begin => |segment| {
             const continued_group_mismatch = if (run.output_continued_group) |group|
@@ -998,22 +1153,22 @@ pub fn applyEvent(
                 open.group != segment.group or
                 open.bytes != segment.bytes)
                 return error.InvalidOutputSegment;
-            run.open_output_segment = null;
-            run.next_output_segment_index = @as(u64, segment.index) + 1;
             switch (segment.disposition) {
                 .discarded => {
                     clearTrackedText(&run.output_segment);
                     run.output_segment_redacted = false;
                     run.output_retry_group = segment.group;
+                    _ = setObservedActivity(run, .waiting_model);
                 },
                 .continued => {
                     if (run.output_continued_group) |group|
                         if (group != segment.group)
                             return error.InvalidOutputSegment;
                     if (run.output_segment.list.items.len != 0) {
-                        run.output_continued_redacted = (try projection.appendAssistant(
+                        run.output_continued_redacted = (try projection.appendGroup(
                             &run.output_continued,
                             run.output_segment.list.items,
+                            &.{},
                             run.redaction_secret,
                         )) or run.output_segment_redacted or
                             run.output_continued_redacted;
@@ -1022,25 +1177,17 @@ pub fn applyEvent(
                     run.output_segment_redacted = false;
                     run.output_continued_group = segment.group;
                     run.output_retry_group = null;
+                    _ = setObservedActivity(run, .writing_response);
                 },
                 .commentary, .final, .partial => {
                     const output_start = run.assistant.committed_len;
-                    if (run.output_continued.list.items.len != 0) {
-                        run.assistant_redacted = (try projection.appendAssistant(
-                            &run.assistant,
-                            run.output_continued.list.items,
-                            run.redaction_secret,
-                        )) or run.output_continued_redacted or
-                            run.assistant_redacted;
-                    }
-                    if (run.output_segment.list.items.len != 0) {
-                        run.assistant_redacted = (try projection.appendAssistant(
-                            &run.assistant,
-                            run.output_segment.list.items,
-                            run.redaction_secret,
-                        )) or run.output_segment_redacted or
-                            run.assistant_redacted;
-                    }
+                    run.assistant_redacted = (try projection.appendGroup(
+                        &run.assistant,
+                        run.output_continued.list.items,
+                        run.output_segment.list.items,
+                        run.redaction_secret,
+                    )) or run.output_continued_redacted or
+                        run.output_segment_redacted or run.assistant_redacted;
                     clearTrackedText(&run.output_continued);
                     clearTrackedText(&run.output_segment);
                     run.output_continued_group = null;
@@ -1048,27 +1195,29 @@ pub fn applyEvent(
                     run.output_continued_redacted = false;
                     run.output_segment_redacted = false;
                     switch (segment.disposition) {
-                        .commentary => {},
+                        .commentary => {
+                            _ = setObservedActivity(run, .waiting_model);
+                        },
                         .final => {
                             run.assistant_output_kind = .final;
                             run.assistant_output_start = output_start;
+                            _ = setObservedActivity(run, .finalizing);
                         },
                         .partial => {
                             run.assistant_output_kind = .partial;
                             run.assistant_output_start = output_start;
+                            _ = setObservedActivity(run, .finalizing);
                         },
                         .continued, .discarded => unreachable,
                     }
                     durable_boundary = true;
                 },
             }
+            run.open_output_segment = null;
+            run.next_output_segment_index = @as(u64, segment.index) + 1;
         },
         .stream_done => {
-            _ = try projection.replaceText(
-                &run.status_text,
-                "Finishing",
-                run.redaction_secret,
-            );
+            _ = setObservedActivity(run, .finalizing);
         },
     }
     return .{ .applied = .{ .durable_boundary = durable_boundary } };
@@ -1142,19 +1291,41 @@ fn addU64(left: u64, right: u64) EventProjectionError!u64 {
     return std.math.add(u64, left, right) catch error.ProjectionCapacity;
 }
 
-fn agentRunStateStatus(phase: agent.RunStatePhase) []const u8 {
-    return switch (phase) {
-        .starting => "Starting",
-        .generating => "Generating response",
-        .executing_tools => "Executing tools",
-        .waiting_ui => "Waiting for your input",
-        .retrying => "Retrying provider",
-        .compacting => "Compacting context",
-        .finalizing => "Finishing",
-        .completed => "Completed",
-        .failed => "Failed",
-        .aborted => "Stopped",
-        .poisoned => "Session unavailable",
+fn runningToolCount(entries: []?ToolView) u32 {
+    var count: u32 = 0;
+    for (entries) |entry| {
+        if (entry) |tool| {
+            if (tool.state == .running) count +|= 1;
+        }
+    }
+    return count;
+}
+
+fn validContextWarning(warning: anytype) bool {
+    return warning.warning_threshold != 0 and
+        warning.warning_threshold <= warning.auto_compact_threshold and
+        warning.auto_compact_threshold <= warning.blocking_limit and
+        warning.current_tokens >= warning.warning_threshold;
+}
+
+fn validAutoCompact(compact: anytype) bool {
+    return (compact.before_tokens == 0 and compact.after_tokens == 0) or
+        (compact.before_tokens != 0 and
+            compact.after_tokens <= compact.before_tokens);
+}
+
+fn validRunStateTransition(
+    previous: ?agent.RunStatePhase,
+    next: agent.RunStatePhase,
+) bool {
+    const current = previous orelse return true;
+    return switch (current) {
+        .completed, .failed, .aborted, .poisoned => false,
+        .finalizing => switch (next) {
+            .finalizing, .completed, .failed, .aborted, .poisoned => true,
+            else => false,
+        },
+        else => next != .starting or current == .starting,
     };
 }
 
@@ -1167,7 +1338,6 @@ test "event drain withholds terminal facts and assistant suffix until finalizati
         .execution_model = "model",
         .input = .{ .text = .{ .value = @constCast("prompt") } },
         .tools = &.{},
-        .status_text = @constCast("running"),
         .terminal_diagnostic = @constCast(""),
     }};
     var compacts: [0]?CompactRecord = .{};
@@ -1201,10 +1371,12 @@ test "event drain withholds terminal facts and assistant suffix until finalizati
     run.terminal_publication.store(.published, .release);
 
     try std.testing.expect(productTerminalFacts(run) == null);
+    try std.testing.expectEqual(RunActivity.finalizing, currentActivity(run).?);
     try std.testing.expect(markTerminalRunsBeforeEventDrain(&task));
     try std.testing.expect(finalizeMarkedTerminalRunsAfterEventDrain(&task));
     try std.testing.expectEqual(@as(usize, 6), run.assistant.committed_len);
     try std.testing.expectEqual(RunOutcome.completed, productTerminalFacts(run).?.outcome);
+    try std.testing.expect(currentActivity(run) == null);
 }
 
 test "event drain fails closed when an output segment remains unresolved" {
@@ -1216,7 +1388,6 @@ test "event drain fails closed when an output segment remains unresolved" {
         .execution_model = "model",
         .input = .{ .text = .{ .value = @constCast("prompt") } },
         .tools = &.{},
-        .status_text = @constCast("running"),
         .terminal_diagnostic = @constCast(""),
         .open_output_segment = .{ .index = 0, .turn = 1, .group = 0, .bytes = 5 },
         .output_segment_protocol_seen = true,

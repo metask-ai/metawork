@@ -2005,6 +2005,7 @@ pub const Runtime = struct {
             .max_assistant_message_bytes = effects.max_assistant_message_bytes,
             .max_tool_field_bytes = effects.max_tool_field_bytes,
             .append_assistant_fn = appendEventAssistant,
+            .append_group_fn = appendEventGroup,
             .replace_text_fn = replaceEventText,
             .find_or_create_tool_fn = findOrCreateEventTool,
             .replace_file_references_fn = replaceEventFileReferences,
@@ -2978,6 +2979,7 @@ pub const Runtime = struct {
                         effects.releaseProjectionBytes(snapshot.projected_bytes);
                         snapshot.deinit();
                     }
+                    task.conversation_observation = .{};
                     task.runtime.close_failed = false;
                 },
                 .failed_reusable, .failed_poisoned, .failed_closing => {
@@ -3100,6 +3102,7 @@ pub const Runtime = struct {
                         .execution = candidate.takeExecution(),
                         .pinned_catalog = null,
                     } };
+                    task.conversation_observation = .{};
                     task.runtime.last_restore_failure = null;
                 } else {
                     if (!candidate.discard()) {
@@ -3199,7 +3202,6 @@ fn redactTaskProjection(
             run.output_continued.list.items,
             credential,
         ) or run.output_continued_redacted;
-        _ = effects.redact(run.status_text, credential);
         for (run.tools) |*tool_entry| {
             const tool = &(tool_entry.* orelse continue);
             const id_redacted = effects.redact(tool.id, credential);
@@ -3300,6 +3302,40 @@ fn appendEventAssistant(
         };
     }
     target.list.appendSliceAssumeCapacity(suffix);
+    return redactTrackedText(target, credential);
+}
+
+fn appendEventGroup(
+    raw_context: *anyopaque,
+    target: *task_state.TrackedText,
+    first: []const u8,
+    second: []const u8,
+    max: usize,
+    credential: []const u8,
+) task_state.EventProjectionError!bool {
+    const context: *EventContext = @ptrCast(@alignCast(raw_context));
+    const added = std.math.add(usize, first.len, second.len) catch
+        return error.ProjectionCapacity;
+    if (target.list.items.len > max or added > max - target.list.items.len)
+        return error.ProjectionCapacity;
+    const needed = target.list.items.len + added;
+    if (needed > target.list.capacity) {
+        const growth = @max(@as(usize, 1024), target.list.capacity / 2);
+        const desired = @min(max, @max(needed, target.list.capacity + growth));
+        const reserved = desired - target.list.capacity;
+        try context.effects.text.reserveBytes(reserved);
+        target.list.ensureTotalCapacityPrecise(
+            context.runtime.allocator,
+            desired,
+        ) catch |err| {
+            context.effects.text.releaseBytes(reserved);
+            return err;
+        };
+    }
+    // No fallible operation remains after the reserve, so callers may commit
+    // their segment state immediately after this returns.
+    target.list.appendSliceAssumeCapacity(first);
+    target.list.appendSliceAssumeCapacity(second);
     return redactTrackedText(target, credential);
 }
 
@@ -3989,13 +4025,6 @@ fn reserveRun(
         return error.RunGenerationExhausted;
     var input_record = try copyRunInput(self, task, input, execution.api_key, effects);
     errdefer deinitRunInput(self, effects.release, &input_record);
-    const status = (try effects.text.project(
-        "Queued",
-        effects.limits.max_tool_field_bytes,
-        &.{},
-        0,
-    )).value;
-    errdefer effects.text.discardCandidate(status);
     const tools = try self.allocator.alloc(
         ?task_state.ToolView,
         effects.limits.max_tools_per_run,
@@ -4026,7 +4055,6 @@ fn reserveRun(
         .execution_model_owned = true,
         .input = input_record,
         .tools = tools,
-        .status_text = status,
         .terminal_diagnostic = diagnostic,
         .redaction_secret = execution.api_key,
         .automatic_title = title,
@@ -4414,7 +4442,6 @@ fn deinitRun(
     releaseTrackedText(self, effects, &run.output_continued);
     if (run.execution_model_owned)
         releaseProjectedSlice(self, effects, @constCast(run.execution_model));
-    releaseProjectedSlice(self, effects, run.status_text);
     releaseProjectedSlice(self, effects, run.terminal_diagnostic);
     run.* = undefined;
 }
@@ -4436,6 +4463,7 @@ fn releaseAttachmentNoFail(
     effects: ReleaseEffects,
     cause: task_attachment.DetachmentCause,
 ) void {
+    task.conversation_observation = .{};
     if (task.runtime.pending_model) |model| {
         self.allocator.free(model);
         task.runtime.pending_model = null;
