@@ -3,7 +3,7 @@
 > 状态：当前为同进程 prototype；后续正式故障域选择单 AgentCore Worker
 > 日期：2026-08-06
 
-本文只定义 MetaWork 的顶层边界、依赖方向、运行形态、进程与故障域以及跨模块安全边界。产品对象和行为见 [产品需求](requirements.md)，UI 信息架构、交互与视觉见 [UI 设计规范](ui-design.md)，Product owner、事务、并发和恢复见 [Product 架构](product-architecture.md)，Renderer Bridge wire 见 [Renderer Bridge 合同](renderer-bridge-contract.md)，AgentCore Session、工具、Skill、Permission、线程与生命周期见 [AgentCore 集成契约](agentcore-integration.md)，ABI 与 bundle 门槛见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)，Agent-owned 无 Tool Completion 见 [Completion 架构](completion-architecture.md)，Storage SQL contract 与 backend 见 [Storage 架构](storage-architecture.md)。实际源码目录和依赖方向见 [工程结构与所有权](project-structure.md)，验证状态见 [验证规范](validation.md)。
+本文只定义 MetaWork 的顶层边界、依赖方向、运行形态、进程与故障域以及跨模块安全边界。产品对象和行为见 [产品需求](requirements.md)，UI 信息架构、交互与视觉见 [UI 设计规范](ui-design.md)，Product owner、事务、并发和恢复见 [Product 架构](product-architecture.md)，Renderer Bridge wire 见 [Renderer Bridge 合同](renderer-bridge-contract.md)，AgentCore Session、工具、Skill、Permission、线程与生命周期见 [AgentCore 集成契约](agentcore-integration.md)，ABI 与 bundle 门槛见 [AgentCore ABI v1 合同](agentcore-abi-v1.md)，Agent-owned 无 Tool Completion 见 [Completion 架构](completion-architecture.md)，Storage SQL contract 与 backend 见 [Storage 架构](storage-architecture.md)。实际源码目录和依赖方向见 [工程结构与所有权](project-structure.md)，验证状态见 [验证规范](validation.md)。
 
 ## 1. 已确认的技术选型
 
@@ -114,7 +114,7 @@ Agent 是 MetaWork-owned 独立执行边界，也是 MetaWork 对 AgentCore 的 
 
 AgentCore 拥有 Provider 调用、agent loop、Conversation、built-in tools、Session、结构化 CoreEvent、同步 UI request 和 RunResult；这些是 AgentCore 内部的执行机制与协议状态。Agent 通过官方 SDK 集成并管理这些机制在 MetaWork 中的 Runtime/Session 生命周期、同步、所有权引用和执行 API，但不取得 AgentCore 实现的内部 ownership。AgentCore 不拥有 MetaWork 的 Workspace、Task、Run 产品历史、Renderer projection 或持久化 policy。
 
-正式 MetaWork 产品模块中只有 Agent 边界可以消费官方 typed SDK 与 binary ABI；隔离 probe、bundle verifier 和 SDK 验证工具不进入正式产品 module graph。其他模块只使用 Agent 或对应 owner 暴露的 MetaWork-owned 类型。精确合同见 [AgentCore 集成契约](agentcore-integration.md)和 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。
+正式 MetaWork 产品模块中只有 Agent 边界可以消费官方 typed SDK 与 binary ABI；隔离 probe、bundle verifier 和 SDK 验证工具不进入正式产品 module graph。其他模块只使用 Agent 或对应 owner 暴露的 MetaWork-owned 类型。精确合同见 [AgentCore 集成契约](agentcore-integration.md)和 [AgentCore ABI v1 合同](agentcore-abi-v1.md)。
 
 ### 3.5 Native SDK
 
@@ -196,7 +196,7 @@ Bridge transport、Product 产品状态和 Agent execution terminal cause 是不
 
 ## 6. 当前能力边界
 
-当前正式 AgentCore target availability、exact artifact identity 与 ABI policy 由 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)唯一记录。MetaWork 只消费经 verifier 接收并 stage 到 `.agentcore/bundles/<target-id>` 的 canonical target-specific bundle 及其中的官方 Zig package。构建 target 精确选择同名 bundle，不读取“最后一次 stage”状态。缺失、identity、checksum、target、ABI 或 symbol 校验失败必须明确失败，不允许旧 revision、`latest`、可变 tag、implementation source fallback 或静默降级。精确 bundle 规则见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。
+AgentCore exact artifact identity 由各 target repository lock 唯一定义，target availability 与平台证据由[验证规范](validation.md)记录，ABI policy 与 bundle 接受规则由 [AgentCore ABI v1 合同](agentcore-abi-v1.md)定义。MetaWork 只消费经 verifier 接收并 stage 到 `.agentcore/bundles/<target-id>` 的 canonical target-specific bundle及其中的官方 Zig package。构建 target 精确选择同名 bundle，不读取“最后一次 stage”状态。缺失、identity、checksum、target、ABI 或 symbol 校验失败必须明确失败，不允许旧 revision、`latest`、可变 tag、implementation source fallback 或静默降级。
 
 当前 baseline 已包含同一桌面 Application 正常重启后、由 durable checkpoint 驱动的显式 Conversation 恢复，以及基于结构化 file reference、按需读取当前内容的异步 File Preview。File Preview 不构成 async Agent pending、文件版本或 FileChange observation。当前仍不包含 suspend/resume、独立 AgentCore Worker crash recovery、跨进程 in-flight Run 恢复、strict Workspace security、正式 Host tools、typed Output/FileChange、plan progress/approval、custom UI 或 Windows 更新。当前仍是同进程 prototype；存在 ABI entry 不代表更宽的进程隔离或恢复能力已经开放，能力状态只以 [验证规范](validation.md)为准。
 

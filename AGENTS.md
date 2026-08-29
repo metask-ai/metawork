@@ -17,7 +17,7 @@
 | Renderer Bridge wire、command、event、Snapshot 与 transport 语义 | [Renderer Bridge 合同](docs/renderer-bridge-contract.md) |
 | module root、目录 owner 与代码依赖映射 | [工程结构与所有权](docs/project-structure.md) |
 | MetaWork 对 AgentCore Session、工具、Skill、Permission 与生命周期的产品消费 | [AgentCore 集成契约](docs/agentcore-integration.md) |
-| AgentCore binary ABI 与 bundle 接受语义 | [AgentCore ABI v1 消费合同](docs/agentcore-abi-v1.md) |
+| AgentCore binary ABI 与 bundle 接受语义 | [AgentCore ABI v1 合同](docs/agentcore-abi-v1.md) |
 | AgentCore target-specific exact artifact identity | `build_support/agentcore-bundle.*.lock.json` |
 | Agent-owned Completion、Provider codec、Transport 与取消 | [Completion 架构](docs/completion-architecture.md) |
 | Storage SQL contract、backend、limits、migration 与 lifecycle | [Storage 架构](docs/storage-architecture.md) |

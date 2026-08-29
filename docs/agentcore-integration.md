@@ -1,9 +1,9 @@
 # MetaWork AgentCore 集成契约
 
-> 状态：消费当前 canonical AgentCore exact bundle；artifact identity 与 target availability 见 ABI 消费合同，真实 vertical 结果见验证规范
-> 目标依赖：Metask AgentCore ABI v1（target-specific revision）；精确 artifact identity 见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)
+> 状态：消费 canonical AgentCore exact bundle；artifact identity 见各 target repository lock，target availability 与真实 vertical 结果见验证规范
+> 目标依赖：Metask AgentCore ABI v1；接受和安全消费规则见 [AgentCore ABI v1 合同](agentcore-abi-v1.md)
 
-本文定义 MetaWork Agent 执行边界与 Metask AgentCore 之间的规范合同。Agent 与 Product 并列，Application 管理其生命周期，Product Control 直接消费其公共执行表面。顶层模块与故障域见 [高层架构](architecture.md)，Product owner 及其与 Agent 的协作见 [Product 架构](product-architecture.md)，Bridge transport 见 [Renderer Bridge 合同](renderer-bridge-contract.md)，target-specific ABI 能力见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。
+本文定义 MetaWork Agent 执行边界与 Metask AgentCore 之间的规范合同。Agent 与 Product 并列，Application 管理其生命周期，Product Control 直接消费其公共执行表面。顶层模块与故障域见 [高层架构](architecture.md)，Product owner 及其与 Agent 的协作见 [Product 架构](product-architecture.md)，Bridge transport 见 [Renderer Bridge 合同](renderer-bridge-contract.md)，ABI 接受边界见 [AgentCore ABI v1 合同](agentcore-abi-v1.md)。
 
 ## 1. 集成原则
 
@@ -19,7 +19,7 @@
 
 ## 2. Bundle 消费合同
 
-MetaWork 的依赖输入是一个完整 bundle，而不是 AgentCore 实现源码。精确 artifact identity、payload whitelist 和 manifest schema 只由 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)定义；本文只定义 candidate、staging、build graph 和 Host 生命周期。
+MetaWork 的依赖输入是一个完整 bundle，而不是 AgentCore 实现源码。精确 artifact identity 与 payload whitelist 由各 target repository lock 和 bundle manifest 定义，[AgentCore ABI v1 合同](agentcore-abi-v1.md)定义其接受规则；本文只定义 candidate、staging、build graph 和 Host 生命周期。
 
 ### target-specific 开发期 bootstrap
 

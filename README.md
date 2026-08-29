@@ -63,7 +63,7 @@ npm run package:windows
 AGENTCORE_BUNDLE_ROOT=/absolute/path/to/bundle node scripts/run-agentcore-restore-probe.mjs
 ```
 
-精确 bundle、ABI 和集成规则见 [AgentCore ABI v1 消费合同](docs/agentcore-abi-v1.md)与 [AgentCore 集成契约](docs/agentcore-integration.md)。
+bundle 与 ABI 接受规则见 [AgentCore ABI v1 合同](docs/agentcore-abi-v1.md)，产品集成规则见 [AgentCore 集成契约](docs/agentcore-integration.md)。
 
 ## 文档入口
 
@@ -85,7 +85,7 @@ AGENTCORE_BUNDLE_ROOT=/absolute/path/to/bundle node scripts/run-agentcore-restor
 
 - [Renderer Bridge 合同](docs/renderer-bridge-contract.md)：command、event、Snapshot 与 transport
 - [AgentCore 集成契约](docs/agentcore-integration.md)：Session、工具、Skill、Permission 与生命周期
-- [AgentCore ABI v1 消费合同](docs/agentcore-abi-v1.md)：bundle、ABI 与 required capability
+- [AgentCore ABI v1 合同](docs/agentcore-abi-v1.md)：bundle 接受、ABI surface 与 Host 安全消费
 - [验证规范](docs/validation.md)：测试归属、持续回归、平台证据与能力缺口
 
 ### 平台与执行规则
