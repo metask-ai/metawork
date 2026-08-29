@@ -10,7 +10,7 @@ MetaWork 是一款面向本地工作区的桌面 Agent Workbench。用户可以�
 
 ## 快速开始
 
-需要 Node.js 22.15+、Zig 0.16.0，以及与仓库 lock 精确匹配的 target-specific AgentCore bundle。
+需要 Node.js 24+、Zig 0.16.0，以及与仓库 lock 精确匹配的 target-specific AgentCore bundle。
 
 ### macOS
 

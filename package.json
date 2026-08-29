@@ -3,7 +3,7 @@
   "version": "0.1.5",
   "private": true,
   "engines": {
-    "node": ">=22.15.0"
+    "node": ">=24"
   },
   "workspaces": [
     "frontend"
@@ -20,7 +20,7 @@
     "package:windows": "node scripts/package-windows.mjs"
   },
   "devDependencies": {
-    "@native-sdk/cli": "0.9.2",
+    "@native-sdk/cli": "0.10.1",
     "prettier": "3.9.5"
   }
 }

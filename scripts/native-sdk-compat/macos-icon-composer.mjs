@@ -253,7 +253,7 @@ export function macosIconActoolArguments(sourcePath, outputPath) {
     "--minimum-deployment-target",
     "11.0",
     "--output-partial-info-plist",
-    path.join(outputPath, partialPlistName),
+    path.posix.join(outputPath, partialPlistName),
     "--output-format",
     "human-readable-text",
   ];

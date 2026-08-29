@@ -55,7 +55,7 @@ candidate probe、真实桌面验收、签名、公证和发布验证不属于 `
 
 | 范围 | 标准入口 | 说明 |
 | --- | --- | --- |
-| 单个 Node / Renderer suite | `node --experimental-strip-types --test scripts/<suite>.test.mjs` | 只用于单一失败模式 |
+| 单个 Node / Renderer suite | `node --test scripts/<suite>.test.mjs` | 只用于单一失败模式 |
 | Agent / Product lifecycle | `node scripts/run-lifecycle-tests.mjs` | Session、Product、恢复、并发和 shutdown |
 | 单个 Native owner | `zig build <registered-test-step>` | 精确 step 由 `build.zig` 注册 |
 | AgentCore staged candidate | `node scripts/verify-staged-agentcore-bundle.mjs` 后运行相关 `run-agentcore-*-probe.mjs` | verifier 证明接受条件，probe 证明候选行为；二者不能互换 |

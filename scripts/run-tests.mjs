@@ -35,13 +35,11 @@ export async function typecheckRenderer(root = repositoryRoot) {
 export async function runNodeTests(root = repositoryRoot) {
   const files = await discoverNodeTests(root);
   if (files.length === 0) throw new Error("no scripts/*.test.mjs were found");
-  // The flag is a no-op on Node 22.18+ but is still required at the 22.15
-  // engines floor, where type stripping is not yet on by default.
-  await runChild(
-    process.execPath,
-    ["--experimental-strip-types", "--test", ...files],
-    { cwd: root, label: "Node tests", timeoutMs: null },
-  );
+  await runChild(process.execPath, ["--test", ...files], {
+    cwd: root,
+    label: "Node tests",
+    timeoutMs: null,
+  });
 }
 
 export async function runNativeTests(root = repositoryRoot, target) {
