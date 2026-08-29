@@ -683,6 +683,7 @@ export const enUS = {
   "operation.task_delete": "Deleting the task record",
   "operation.workspace_remove": "Removing the workspace",
   "operation.skill_catalog_refresh": "Refreshing the Skill catalog",
+  "operation.permission_default": "Updating the permission default",
   "search.open": "Search",
   "search.title": "Search MetaWork",
   "search.placeholder": "Search workspaces, tasks, and completed work…",
@@ -708,7 +709,28 @@ export const enUS = {
   "settings.sections": "Settings sections",
   "settings.section_label": "Settings",
   "settings.general": "General",
+  "settings.permissions": "Permissions",
   "settings.account": "Account",
+  "permission.profile.approval_required": "Request approval",
+  "permission.profile.approval_required.help":
+    "Routine workspace edits run automatically. MetaWork asks before operations the current policy does not cover.",
+  "permission.profile.full_access": "Full access",
+  "permission.profile.full_access.help":
+    "MetaWork does not apply tool permission checks for this Task.",
+  "permission.new_task.label": "Permission policy",
+  "permission.new_task.help":
+    "Applies to this Task and cannot be changed after it is created.",
+  "permission.task.label": "Permission policy",
+  "permission.default.label": "Default for new Tasks",
+  "permission.default.help":
+    "This choice applies only when you create a new Task. Existing Tasks keep their original policy.",
+  "permission.menu_help":
+    "Choose how this Task handles operations outside its current authority.",
+  "permission.full_access.boundary":
+    "Full access still follows operating system permissions and service access. It is not root access or a sandbox setting.",
+  "permission.default_updated": "Permission default updated.",
+  "permission.default_update_failed":
+    "MetaWork could not update the permission default.",
   "settings.execution_defaults": "Execution defaults",
   "settings.use_metask_default": "Use Metask for new tasks",
   "settings.model_connections": "Model connections",
@@ -839,6 +861,7 @@ export const enUS = {
   "cause.skill_unavailable":
     "Skill execution did not start because it is unavailable in the current execution environment",
   "cause.resource_limit": "Task runtime resource limit reached",
+  "cause.permission_required": "Permission required",
   "workspace.selection_unavailable":
     "That workspace is no longer available. Refresh and choose another one.",
   "account.options_updated":

@@ -957,6 +957,37 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   extraField.compatibility = true;
   assert.throws(() => decodeWorkbenchSnapshot(extraField), /expected keys/);
 
+  const enabledPermissionProfiles = clone(fixture);
+  enabledPermissionProfiles.capabilities.permissionProfiles = true;
+  enabledPermissionProfiles.permissions.availableProfiles = [
+    "approval_required",
+    "full_access",
+  ];
+  assert.doesNotThrow(() => decodeWorkbenchSnapshot(enabledPermissionProfiles));
+
+  const hiddenPermissionLeak = clone(fixture);
+  hiddenPermissionLeak.permissions.availableProfiles = ["approval_required"];
+  assert.throws(
+    () => decodeWorkbenchSnapshot(hiddenPermissionLeak),
+    /profile capability and available profiles must agree/,
+  );
+
+  const mismatchedPermissionProvenance = clone(fixture);
+  mismatchedPermissionProvenance.tasks[0].runs[0].permissionProfile =
+    "full_access";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(mismatchedPermissionProvenance),
+    /permission provenance must match/,
+  );
+
+  const invalidPermissionInteraction = clone(fixture);
+  invalidPermissionInteraction.tasks[0].runs[0].permissionInteraction =
+    "background";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(invalidPermissionInteraction),
+    /unexpected value/,
+  );
+
   const invalidId = clone(fixture);
   invalidId.tasks[0].currentRunId = "07";
   assert.throws(() => decodeWorkbenchSnapshot(invalidId), /wire integer/);

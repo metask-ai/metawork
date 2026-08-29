@@ -53,6 +53,7 @@ pub const model_connection_remove = "metawork.modelConnections.remove";
 pub const model_connection_test = "metawork.modelConnections.test";
 pub const model_connection_select_default = "metawork.modelConnections.selectDefault";
 pub const account_logout = "metawork.account.logout";
+pub const set_default_permission_profile = "metawork.permissions.setDefaultProfile";
 pub const create_task = "metawork.tasks.create";
 pub const run = "metawork.tasks.run";
 pub const select_task_model = "metawork.tasks.selectModel";
@@ -122,6 +123,7 @@ pub const product = [_][]const u8{
     model_connection_test,
     model_connection_select_default,
     account_logout,
+    set_default_permission_profile,
     create_task,
     run,
     select_task_model,

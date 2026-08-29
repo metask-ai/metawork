@@ -342,6 +342,12 @@ function settingsElement(account, overrides = {}) {
         secretCapture: false,
         connectionTest: true,
       },
+      permissionProfiles: {
+        enabled: false,
+        available: [],
+        defaultProfile: "approval_required",
+        busy: false,
+      },
       focusTarget: "title",
       disabled: false,
       cancelDisabled: false,
@@ -364,6 +370,7 @@ function settingsElement(account, overrides = {}) {
       onActivateMetask() {},
       onBeginLogin() {},
       onLogout() {},
+      onSetDefaultPermissionProfile() {},
       ...overrides,
     }),
   );
@@ -662,6 +669,35 @@ test("Settings keeps section navigation fixed while content scrolls independentl
     screen.getByRole("link", { name: "Account" }).getAttribute("aria-current"),
     "location",
   );
+});
+
+test("Settings changes only the future Task permission default in one action", async () => {
+  const selected = [];
+  const user = userEvent.setup({ document: dom.window.document });
+  renderSettings(readySettingsAccount, {
+    permissionProfiles: {
+      enabled: true,
+      available: ["approval_required", "full_access"],
+      defaultProfile: "approval_required",
+      busy: false,
+    },
+    onSetDefaultPermissionProfile(profile) {
+      selected.push(profile);
+    },
+  });
+
+  assert.ok(screen.getByRole("link", { name: "Permissions" }));
+  assert.match(
+    document.querySelector(".permission-policy-boundary").textContent,
+    /not root access or a sandbox setting/,
+  );
+  const trigger = screen.getByRole("combobox", {
+    name: "Default for new Tasks",
+  });
+  await user.click(trigger);
+  await user.keyboard("{ArrowDown}{Enter}");
+  assert.deepEqual(selected, ["full_access"]);
+  assert.equal(screen.queryByRole("alertdialog"), null);
 });
 
 test("Settings closes on Escape at the surface boundary", () => {

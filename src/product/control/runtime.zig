@@ -141,6 +141,10 @@ const checkpoint_export_limits: lifecycle.CheckpointLimits = .{
 pub const Provider = product_task.Provider;
 pub const PermissionProfile = product_task.PermissionProfile;
 pub const PermissionInteraction = product_task.PermissionInteraction;
+// Flipped only when every admitted profile is complete across manual and
+// Scheduled Task execution. Bridge mutations and snapshot publication consume
+// this same gate so a hidden capability cannot remain callable.
+pub const permission_profiles_available = false;
 
 pub const TaskWorkspaceTrust = union(enum) {
     explicitly_trusted,
@@ -3317,10 +3321,11 @@ pub const Runtime = struct {
             runtime.capabilities()
         else
             mcp_runtime.Capabilities{ .management = false, .host = .{} };
-        writer.print("{{\"revision\":\"{d}\",\"capabilities\":{{\"taskHistoryPersistence\":{},\"taskHistoryPersistenceHealth\":\"{s}\",\"conversationRecovery\":true,\"executionRebind\":false,\"structuredPlan\":false,\"typedOutputs\":false,\"typedFileChanges\":false,\"persistentWorkspacePermissions\":false,\"automaticWorkspaces\":{},\"scheduledTasks\":{},\"scheduledTaskPersistence\":{},\"scheduledTaskPersistenceHealth\":\"{s}\",\"backgroundScheduleWake\":{},\"localSkillManagement\":{},\"skillManagementHealth\":\"{s}\",\"modelConnectionManagement\":{},\"modelConnectionSecretCapture\":{},\"modelConnectionTest\":{},\"mcpManagement\":{},\"mcpConnectionApproval\":{},\"mcpSecretCapture\":{},\"mcpOAuth\":{}}},\"account\":", .{
+        writer.print("{{\"revision\":\"{d}\",\"capabilities\":{{\"taskHistoryPersistence\":{},\"taskHistoryPersistenceHealth\":\"{s}\",\"conversationRecovery\":true,\"executionRebind\":false,\"structuredPlan\":false,\"typedOutputs\":false,\"typedFileChanges\":false,\"persistentWorkspacePermissions\":false,\"permissionProfiles\":{},\"automaticWorkspaces\":{},\"scheduledTasks\":{},\"scheduledTaskPersistence\":{},\"scheduledTaskPersistenceHealth\":\"{s}\",\"backgroundScheduleWake\":{},\"localSkillManagement\":{},\"skillManagementHealth\":\"{s}\",\"modelConnectionManagement\":{},\"modelConnectionSecretCapture\":{},\"modelConnectionTest\":{},\"mcpManagement\":{},\"mcpConnectionApproval\":{},\"mcpSecretCapture\":{},\"mcpOAuth\":{}}},\"permissions\":{{\"availableProfiles\":", .{
             self.revision,
             task_persistence_ready,
             @tagName(self.task_persistence_health),
+            permission_profiles_available,
             self.workspace.automaticRootAvailable(),
             self.schedule.timerEnabled() and schedule_persistence_ready and
                 background_schedule_wake,
@@ -3338,6 +3343,14 @@ pub const Runtime = struct {
             mcp_capabilities.host.oauth,
         }) catch
             return error.SnapshotTooLarge;
+        if (permission_profiles_available)
+            writer.writeAll("[\"approval_required\",\"full_access\"]") catch
+                return error.SnapshotTooLarge
+        else
+            writer.writeAll("[]") catch return error.SnapshotTooLarge;
+        writer.print(",\"defaultProfile\":\"{s}\"}},\"account\":", .{
+            @tagName(self.default_permission_profile),
+        }) catch return error.SnapshotTooLarge;
         try self.writeAccount(&writer);
         writer.writeAll(",\"skillCatalog\":") catch
             return error.SnapshotTooLarge;

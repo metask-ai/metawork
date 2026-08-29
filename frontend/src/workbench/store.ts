@@ -25,6 +25,7 @@ export const initialWorkbenchState: WorkbenchState = {
       structuredPlan: false,
       typedOutputs: false,
       typedFileChanges: false,
+      permissionProfiles: false,
       persistentWorkspacePermissions: false,
       automaticWorkspaces: false,
       scheduledTasks: false,
@@ -40,6 +41,10 @@ export const initialWorkbenchState: WorkbenchState = {
       mcpConnectionApproval: false,
       mcpSecretCapture: false,
       mcpOAuth: false,
+    },
+    permissions: {
+      availableProfiles: [],
+      defaultProfile: "approval_required",
     },
     account: {
       state: "checking",

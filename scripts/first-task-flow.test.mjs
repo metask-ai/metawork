@@ -58,6 +58,7 @@ test("the first send uses Host generations and creates one Task before its Run",
         expectedExecutionGeneration,
         expectedSkillCatalogRevision,
         expectedSkillSelectionRevision,
+        permissionProfile,
       ) {
         calls.push([
           "create",
@@ -65,6 +66,7 @@ test("the first send uses Host generations and creates one Task before its Run",
           expectedExecutionGeneration,
           expectedSkillCatalogRevision,
           expectedSkillSelectionRevision,
+          permissionProfile,
         ]);
         return {
           accepted: true,
@@ -86,6 +88,7 @@ test("the first send uses Host generations and creates one Task before its Run",
     },
     expectedExecutionGeneration: "19",
     expectedBindingEpoch: null,
+    permissionProfile: "approval_required",
     input: { kind: "text", text: "Ship a working product" },
     onTaskCreated: (taskId) => created.push(taskId),
   });
@@ -96,6 +99,7 @@ test("the first send uses Host generations and creates one Task before its Run",
       "19",
       null,
       null,
+      "approval_required",
     ],
     ["run", "41", "8", { kind: "text", text: "Ship a working product" }],
   ]);
@@ -136,6 +140,7 @@ test("the first Skill send pins its selected catalog before typed execution", as
     },
     expectedExecutionGeneration: "19",
     expectedBindingEpoch: null,
+    permissionProfile: "full_access",
     input,
     onTaskCreated() {},
   });
@@ -146,6 +151,7 @@ test("the first Skill send pins its selected catalog before typed execution", as
       "19",
       "17",
       "23",
+      "full_access",
     ],
     ["run", "41", "8", input],
   ]);
@@ -169,6 +175,7 @@ test("a creation failure never starts a Run or invents a Task", async () => {
     workspace: { kind: "automatic" },
     expectedExecutionGeneration: "19",
     expectedBindingEpoch: null,
+    permissionProfile: "approval_required",
     input: { kind: "text", text: "Keep this text" },
     onTaskCreated: () => {
       createdCalled = true;
@@ -198,6 +205,7 @@ test("a Host-rejected creation preserves the structured product reason", async (
     workspace: { kind: "automatic" },
     expectedExecutionGeneration: "19",
     expectedBindingEpoch: null,
+    permissionProfile: "approval_required",
     input: { kind: "text", text: "Keep this text" },
     onTaskCreated: () => assert.fail("a rejected creation has no Task"),
   });
@@ -224,11 +232,12 @@ test("the first send can request an Automatic Workspace without a prior identity
     workspace: { kind: "automatic" },
     expectedExecutionGeneration: "19",
     expectedBindingEpoch: null,
+    permissionProfile: "approval_required",
     input: { kind: "text", text: "Do not bypass trust" },
     onTaskCreated: (taskId) => calls.push(["created", taskId]),
   });
   assert.deepEqual(calls, [
-    ["create", { kind: "automatic" }, "19", null, null],
+    ["create", { kind: "automatic" }, "19", null, null, "approval_required"],
     ["created", "1"],
     ["run", "1", "1", { kind: "text", text: "Do not bypass trust" }],
   ]);
@@ -255,6 +264,7 @@ test("a Run failure reports the real created Task for draft recovery", async () 
     workspace: { kind: "automatic" },
     expectedExecutionGeneration: "19",
     expectedBindingEpoch: null,
+    permissionProfile: "approval_required",
     input: { kind: "text", text: "Recover me" },
     onTaskCreated() {},
   });
@@ -290,6 +300,7 @@ test("sending on an existing Task uses its binding epoch and never creates", asy
     workspace: { kind: "automatic" },
     expectedExecutionGeneration: "19",
     expectedBindingEpoch: "12",
+    permissionProfile: "approval_required",
     input: { kind: "text", text: "Continue" },
     onTaskCreated() {
       assert.fail("existing Task must not create a Task");
@@ -315,6 +326,7 @@ test("a detached Task restores before its first continued Run", async () => {
     workspace: { kind: "automatic" },
     expectedExecutionGeneration: "19",
     expectedBindingEpoch: "12",
+    permissionProfile: "approval_required",
     input: { kind: "text", text: "Continue after restart" },
     continuationRecoveryAvailable: true,
     ensureContinuation: async (taskId, bindingEpoch) => {
@@ -349,6 +361,7 @@ test("a failed detached restore never sends the pending Run", async () => {
     workspace: { kind: "automatic" },
     expectedExecutionGeneration: "19",
     expectedBindingEpoch: "12",
+    permissionProfile: "approval_required",
     input: { kind: "text", text: "Keep this draft" },
     continuationRecoveryAvailable: true,
     ensureContinuation: async () => ({ kind: "failed", error: failure }),
@@ -382,6 +395,7 @@ test("a Host-rejected Run preserves the structured product reason", async () => 
     workspace: { kind: "automatic" },
     expectedExecutionGeneration: "19",
     expectedBindingEpoch: "12",
+    permissionProfile: "approval_required",
     input: { kind: "text", text: "Continue" },
     onTaskCreated() {},
   });
@@ -408,6 +422,7 @@ test("an existing Task without a binding epoch fails closed", async () => {
     workspace: { kind: "automatic" },
     expectedExecutionGeneration: "19",
     expectedBindingEpoch: null,
+    permissionProfile: "approval_required",
     input: { kind: "text", text: "Continue" },
     onTaskCreated() {},
   });

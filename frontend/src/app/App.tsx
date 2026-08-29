@@ -113,6 +113,7 @@ import type {
   TaskView,
   FilePreview,
   FileReferenceView,
+  PermissionProfile,
   WorkbenchSnapshot,
   UiResponsePayload,
 } from "../bridge/contracts.ts";
@@ -215,6 +216,9 @@ export default function App() {
   );
   const [accountBusy, setAccountBusy] = useState(false);
   const [workspaceBusy, setWorkspaceBusy] = useState(false);
+  const [permissionBusy, setPermissionBusy] = useState(false);
+  const [newTaskPermissionOverride, setNewTaskPermissionOverride] =
+    useState<PermissionProfile | null>(null);
   const [skillCatalogBusy, setSkillCatalogBusy] = useState(false);
   const [taskPending, setTaskPending] = useState<Record<string, string>>({});
   const [pendingTaskModels, setPendingTaskModels] = useState<
@@ -256,6 +260,8 @@ export default function App() {
   }
 
   const snapshot = workbench.snapshot;
+  const newTaskPermissionProfile =
+    newTaskPermissionOverride ?? snapshot.permissions.defaultProfile;
   const activeTask = useMemo(() => selectActiveTask(workbench), [workbench]);
   useEffect(() => {
     setPendingTaskModels((current) => {
@@ -1183,12 +1189,37 @@ export default function App() {
 
   function beginNewTask() {
     pendingTaskSelection.current = null;
+    setNewTaskPermissionOverride(null);
     setRoute("workbench");
     dispatchWorkbench({
       type: "task.draft.opened",
       workspaceId: null,
     });
     window.requestAnimationFrame(() => composer.current?.focus());
+  }
+
+  async function setDefaultPermissionProfile(profile: PermissionProfile) {
+    if (bridgeUnavailable || permissionBusy) return;
+    setPermissionBusy(true);
+    try {
+      await client.setDefaultPermissionProfile(profile);
+      await refreshAfterCommit(
+        "permission.default_updated",
+        "operation.permission_default",
+        { scope: "account" },
+      );
+    } catch (error) {
+      await refreshSnapshot().catch(() => undefined);
+      setStatus(
+        attentionStatus(
+          "permission.default_update_failed",
+          { scope: "account" },
+          { diagnostic: errorText(error) },
+        ),
+      );
+    } finally {
+      setPermissionBusy(false);
+    }
   }
 
   function openTask(taskId: string) {
@@ -1313,12 +1344,14 @@ export default function App() {
         workspace,
         expectedExecutionGeneration: snapshot.account.executionGeneration,
         expectedBindingEpoch: activeTask?.binding.epoch ?? null,
+        permissionProfile: newTaskPermissionProfile,
         input,
         continuationRecoveryAvailable: Boolean(
           activeTask?.continuationRecoveryAvailable,
         ),
         ensureContinuation: ensureTaskContinuation,
         onTaskCreated: (taskId) => {
+          setNewTaskPermissionOverride(null);
           pendingTaskSelection.current = taskId;
           pendingTaskDraftRetention.current.add(taskId);
           taskDrafts.setDraft(taskId, submitted);
@@ -2520,6 +2553,7 @@ export default function App() {
         inspector.available ? (
           <TaskOverview
             task={activeTask}
+            permissionProfilesEnabled={snapshot.capabilities.permissionProfiles}
             focusRequest={inspectorFocusRequest}
             onFocusPending={focusPendingFromInspector}
           />
@@ -2529,6 +2563,12 @@ export default function App() {
         settingsOpen ? (
           <SettingsPage
             account={snapshot.account}
+            permissionProfiles={{
+              enabled: snapshot.capabilities.permissionProfiles,
+              available: snapshot.permissions.availableProfiles,
+              defaultProfile: snapshot.permissions.defaultProfile,
+              busy: permissionBusy,
+            }}
             modelConnectionCapabilities={{
               management: snapshot.capabilities.modelConnectionManagement,
               secretCapture: snapshot.capabilities.modelConnectionSecretCapture,
@@ -2597,6 +2637,9 @@ export default function App() {
               void runAccountCommand(() => client.beginLogin())
             }
             onLogout={() => void runAccountCommand(() => client.logout())}
+            onSetDefaultPermissionProfile={(profile) =>
+              void setDefaultPermissionProfile(profile)
+            }
           />
         ) : null
       }
@@ -2802,6 +2845,13 @@ export default function App() {
             <NewTaskView
               hasWorkspace={Boolean(composerWorkspace)}
               composer={composerFooter}
+              permissionProfiles={
+                snapshot.capabilities.permissionProfiles
+                  ? snapshot.permissions.availableProfiles
+                  : []
+              }
+              permissionProfile={newTaskPermissionProfile}
+              onPermissionProfileChange={setNewTaskPermissionOverride}
             />
           ) : (
             <>

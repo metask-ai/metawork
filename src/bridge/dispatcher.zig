@@ -308,6 +308,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.model_connection_test, .function = modelConnectionTest },
             .{ .name = commands.model_connection_select_default, .function = modelConnectionSelectDefault },
             .{ .name = commands.account_logout, .function = accountLogout },
+            .{ .name = commands.set_default_permission_profile, .function = setDefaultPermissionProfile },
             .{ .name = commands.create_task, .function = createTask },
             .{ .name = commands.run, .function = runTask },
             .{ .name = commands.select_task_model, .function = selectTaskModel },
@@ -1332,12 +1333,15 @@ pub const Dispatcher = struct {
         else
             null;
         const workbench = try self.requireProductControl();
+        const permission_profile = handlers.permissionProfile(
+            parsed.value.permissionProfile,
+        ) orelse return error.InvalidBridgePayload;
         const task_id = workbench.createTaskForWorkspace(
             workspace_request,
             execution_generation,
             parsed.value.expectedSkillCatalogRevision,
             skill_selection_revision,
-            .{ .interactive = null },
+            .{ .interactive = permission_profile },
         ) catch |err| {
             if (taskCreateRejection(err)) |reason|
                 return encodeTaskCreateResult(output, false, null, null, reason);
@@ -1351,6 +1355,33 @@ pub const Dispatcher = struct {
             task_id,
             binding_epoch,
             null,
+        );
+    }
+
+    fn setDefaultPermissionProfile(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        if (!product_control.permission_profiles_available)
+            return error.CapabilityUnavailable;
+        var parsed = try handlers.parsePayload(
+            handlers.PermissionProfileSelection,
+            invocation.request.payload,
+        );
+        defer parsed.deinit();
+        const profile = handlers.permissionProfile(parsed.value.permissionProfile) orelse
+            return error.InvalidBridgePayload;
+        const changed = try (try self.requireProductControl()).setDefaultPermissionProfile(profile);
+        if (changed) self.notifyCommitted();
+        return std.fmt.bufPrint(
+            output,
+            "{{\"changed\":{},\"defaultProfile\":\"{s}\"}}",
+            .{ changed, @tagName(profile) },
         );
     }
 
@@ -4237,6 +4268,17 @@ test "Dispatcher validates authority before domain calls and preserves committed
         source,
         &response,
     );
+    const unavailable_permission_default = native_dispatcher.dispatch(
+        "{\"id\":\"permission-default\",\"command\":\"metawork.permissions.setDefaultProfile\",\"payload\":{\"permissionProfile\":\"full_access\"}}",
+        source,
+        &response,
+    );
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        unavailable_permission_default,
+        "\"handler_failed\"",
+    ) != null);
+    try std.testing.expectEqual(initial_revision, workbench.currentRevision());
     const login = native_dispatcher.dispatch(
         "{\"id\":\"login\",\"command\":\"metawork.account.beginLogin\",\"payload\":{}}",
         source,
@@ -4361,7 +4403,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
 
     const stale_create = try std.fmt.bufPrint(
         &workspace_request_storage,
-        "{{\"id\":\"stale-create\",\"command\":\"metawork.tasks.create\",\"payload\":{{\"workspace\":{{\"kind\":\"manual\",\"workspaceId\":\"{d}\",\"expectedWorkspaceEpoch\":\"1\"}},\"expectedExecutionGeneration\":\"99\",\"expectedSkillCatalogRevision\":null,\"expectedSkillSelectionRevision\":null}}}}",
+        "{{\"id\":\"stale-create\",\"command\":\"metawork.tasks.create\",\"payload\":{{\"workspace\":{{\"kind\":\"manual\",\"workspaceId\":\"{d}\",\"expectedWorkspaceEpoch\":\"1\"}},\"expectedExecutionGeneration\":\"99\",\"expectedSkillCatalogRevision\":null,\"expectedSkillSelectionRevision\":null,\"permissionProfile\":\"approval_required\"}}}}",
         .{workspace_id},
     );
     const rejected_create = native_dispatcher.dispatch(
@@ -4376,7 +4418,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
     ) != null);
 
     const automatic_create = native_dispatcher.dispatch(
-        "{\"id\":\"automatic-create\",\"command\":\"metawork.tasks.create\",\"payload\":{\"workspace\":{\"kind\":\"automatic\"},\"expectedExecutionGeneration\":\"1\",\"expectedSkillCatalogRevision\":null,\"expectedSkillSelectionRevision\":null}}",
+        "{\"id\":\"automatic-create\",\"command\":\"metawork.tasks.create\",\"payload\":{\"workspace\":{\"kind\":\"automatic\"},\"expectedExecutionGeneration\":\"1\",\"expectedSkillCatalogRevision\":null,\"expectedSkillSelectionRevision\":null,\"permissionProfile\":\"approval_required\"}}",
         source,
         &response,
     );
@@ -4386,10 +4428,10 @@ test "Dispatcher validates authority before domain calls and preserves committed
         "\"reason\":\"workspace_unavailable\"",
     ) != null);
 
-    var request_storage: [256]u8 = undefined;
+    var request_storage: [384]u8 = undefined;
     const request = try std.fmt.bufPrint(
         &request_storage,
-        "{{\"id\":\"create\",\"command\":\"metawork.tasks.create\",\"payload\":{{\"workspace\":{{\"kind\":\"manual\",\"workspaceId\":\"{d}\",\"expectedWorkspaceEpoch\":\"1\"}},\"expectedExecutionGeneration\":\"1\",\"expectedSkillCatalogRevision\":null,\"expectedSkillSelectionRevision\":null}}}}",
+        "{{\"id\":\"create\",\"command\":\"metawork.tasks.create\",\"payload\":{{\"workspace\":{{\"kind\":\"manual\",\"workspaceId\":\"{d}\",\"expectedWorkspaceEpoch\":\"1\"}},\"expectedExecutionGeneration\":\"1\",\"expectedSkillCatalogRevision\":null,\"expectedSkillSelectionRevision\":null,\"permissionProfile\":\"approval_required\"}}}}",
         .{workspace_id},
     );
     var lost_response: [32]u8 = undefined;
@@ -4401,6 +4443,11 @@ test "Dispatcher validates authority before domain calls and preserves committed
     const snapshot = try workbench.writeSnapshot(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"workspaceRoot\":\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"workspaces\":[{") != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"permissionProfile\":\"approval_required\"",
+    ) != null);
 
     const generation = dispatcher.productDelivery().connectedGeneration().?;
     const unused_grant = try dispatcher.grants.issue(generation, source.window_id, "/tmp");
