@@ -63,7 +63,7 @@ npm run package:windows
 AGENTCORE_BUNDLE_ROOT=/absolute/path/to/bundle node scripts/run-agentcore-restore-probe.mjs
 ```
 
-精确 bundle、ABI 和集成规则见 [AgentCore ABI v1 消费合同](docs/agentcore-abi-v1.md)与 [AgentCore 集成契约](docs/agentcore-integration.md)。
+bundle 与 ABI 接受规则见 [AgentCore ABI v1 合同](docs/agentcore-abi-v1.md)，产品集成规则见 [AgentCore 集成契约](docs/agentcore-integration.md)。
 
 ## 文档入口
 
@@ -77,7 +77,7 @@ AGENTCORE_BUNDLE_ROOT=/absolute/path/to/bundle node scripts/run-agentcore-restor
 - [高层架构](docs/architecture.md)：技术选型、系统职责与安全边界
 - [Product 架构](docs/product-architecture.md)：Product owner、事务、并发与恢复
 - [Account 架构](docs/account-architecture.md)：Account 状态、事务、Metask 合同与持久化
-- [工程结构与所有权](docs/project-structure.md)：active tree、目录 owner 与依赖方向
+- [工程结构与所有权](docs/project-structure.md)：稳定 module root、目录 owner 与依赖方向
 - [Completion 架构](docs/completion-architecture.md)：Agent-owned 无 Tool Completion
 - [Storage 架构](docs/storage-architecture.md)：SQL contract、backend、limits 与 lifecycle
 
@@ -85,7 +85,7 @@ AGENTCORE_BUNDLE_ROOT=/absolute/path/to/bundle node scripts/run-agentcore-restor
 
 - [Renderer Bridge 合同](docs/renderer-bridge-contract.md)：command、event、Snapshot 与 transport
 - [AgentCore 集成契约](docs/agentcore-integration.md)：Session、工具、Skill、Permission 与生命周期
-- [AgentCore ABI v1 消费合同](docs/agentcore-abi-v1.md)：bundle、ABI 与 required capability
+- [AgentCore ABI v1 合同](docs/agentcore-abi-v1.md)：bundle 接受、ABI surface 与 Host 安全消费
 - [验证规范](docs/validation.md)：测试归属、持续回归、平台证据与能力缺口
 
 ### 平台与执行规则

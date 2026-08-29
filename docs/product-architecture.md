@@ -1,261 +1,228 @@
 # MetaWork Product 架构
 
-> 状态：Product owner、事务、并发、恢复及其与 Agent 执行边界协作的当前规范
-> 日期：2026-08-08
+本文定义 Product 内部 owner、跨 owner 与跨 aggregate 事务、并发、生命周期、持久化和恢复、Product-owned 稳定交换 artifact，以及 Product Control 与相邻 Agent 执行边界的协作。它不定义用户可观察产品行为、Account 内部状态机、Renderer Bridge wire、AgentCore ABI、源码 leaf graph 或当前验证状态；这些内容分别以[产品需求](requirements.md)、[Account 架构](account-architecture.md)、[Renderer Bridge 合同](renderer-bridge-contract.md)、[AgentCore 集成契约](agentcore-integration.md)、[工程结构与所有权](project-structure.md)和[验证规范](validation.md)为准。顶层进程、故障域和安全边界见[高层架构](architecture.md)。
 
-Task history 当前采用 hard-cut `workbench-history.store` record store：旧 JSON envelope 不读取、不迁移、不双写；Workspace/Task frame 独立校验，单条损坏只进入 `degraded`，不阻塞有效历史或新 Task admission。
+## 1. Owner 与事务模型
 
-顶层模块、进程方向和跨模块安全边界见 [MetaWork 高层架构](architecture.md)。本文件定义 Product 内部的 Account、Product Control 两个 owner、它们与相邻 Agent 执行边界的产品协作，以及由 Application 负责的跨 owner 协调和生命周期顺序；实际目录和依赖见 [工程结构与所有权](project-structure.md)，AgentCore 线程与 ABI 生命周期见 [AgentCore 集成契约](agentcore-integration.md)，Account 内部状态与 Metask 消费合同见 [Account 架构](account-architecture.md)。
+Product 由两个 named owner 组成，跨 owner 用例由 Application coordinator 编排：
 
-## 1. 模块与 owner
+- Account 拥有 Metask identity、catalog、credential、Model Connection、默认选择及其内部事务与恢复；
+- Product Control 拥有已安装的 ExecutionConfig、Workspace、Task、Schedule、Skill、MCP、共享 Executor、跨 aggregate admission、canonical 产品 projection、revision、产品历史与关闭顺序。
 
-Product 内部由两个 named product owners 组成；跨 owner 用例由 Application coordinator 编排：
+Agent 位于 Product 之外，拥有 MetaWork 对 AgentCore Runtime、Session、Conversation、callback、event pump 与 terminal execution fact 的集成生命周期。Product Control 只调用 Agent 的公共执行能力，不管理 Agent Runtime 生命周期、不读取其内部状态，也不借 Agent 获取通用 I/O。Application 创建和关闭 Agent、安排主线程 wake，并协调 Account 与 Product Control；它不持有领域运行状态，也不独立决定这些 owner 的 policy。
 
-- `account` 的 Runtime 负责 Metask 登录、catalog、credential、attempt/effect/mailbox、恢复与 ExecutionConfig generation；
-- Product Control 拥有已安装的 ExecutionConfig、Workspace/Task 产品历史、Task/Skill/MCP aggregate、共享 Executor、跨 aggregate admission/reconciliation、revision、完整 snapshot 与 shutdown 顺序，并直接消费相邻 Agent 的公共执行能力。
-
-Agent 是 Product 之外的 MetaWork-owned 执行边界，也是 AgentCore integration owner，拥有 MetaWork 对 AgentCore Runtime、Session、Conversation 的集成生命周期、callback、event pump 与 terminal execution facts。Application 创建并关闭 Agent、安排 event-ready 主线程 wake；Product Control 直接调用 Agent，但不管理 Agent Runtime 生命周期、不读取 Runtime 内部字段，也不借 Agent 获取通用 I/O。
-
-Application coordinator 负责 Account/Product Control 主线程跨 owner 提交与全局生命周期顺序，不持有领域运行状态，也不独立决定 Account、Product Control 或 Agent policy。它由 `src/app/` 下的具名 coordinator 实现，`app.zig` 只负责装配；这不产生新的产品 owner。Bridge 位于 Product 之外；`metawork_account_contract` 只承载 Account 发布给 Application、Bridge 与 Product Control 的有界纯合同。Application、Agent、Renderer 与原生窗口边界只由 [高层架构](architecture.md)定义。
-
-Product Control 是现有组合 owner 的正式名称和源码身份，不是包裹各 aggregate 的 facade，也不是第三个 Product owner。它直接持有并协调 Task、Skill、MCP 等内部 aggregate；这些 aggregate 的 Runtime 仍独占各自状态机与局部事务。Product Control 只保留必须同时观察多个 aggregate、Workspace、execution 或 publication 的不变量，不能把局部 policy 重新吸回顶层。
+Workspace、Task、Schedule、Skill 与 MCP 是 Product Control 持有的 aggregate，不形成新的顶层 Product owner。各 aggregate 独占自身状态机、局部事务与持久化 policy；Product Control 只拥有必须同时观察多个 aggregate、execution、publication 或生命周期事实的不变量，不能把局部 policy 重新吸收到组合层。
 
 Product 事务只使用三种机制：
 
-1. aggregate-local transaction：由对应 aggregate Runtime 完成 prepare、effect、typed outcome 与 no-fail install；
-2. cross-owner handoff：由 Application coordinator 在主线程按 Account prepare → Product Control install → Account commit 的既定顺序编排，线性值只在明确的 take/install/commit 点转移；
-3. asynchronous reconciliation：worker 只持 owned payload、窄 effect capability 和不可变或 atomic facts，完成回到主线程后按完整 authority token 重新校验，stale 结果只销毁、不安装、不自动重放。
+1. **aggregate-local transaction**：对应 aggregate 完成 candidate、effect、typed outcome 与 committed install；
+2. **cross-owner handoff**：Application coordinator 在主线程按已定义顺序转移线性所有权，任何 payload 只在明确的 take、install 与 commit 点移动一次；
+3. **asynchronous reconciliation**：worker 只持 owned payload、窄 effect capability 和不可变或 atomic facts，完成回到主线程后按完整 authority token 重新校验，stale 结果只销毁、不安装、不自动重放。
 
-不建立统一事务引擎、通用 command bus 或 Product event bus。共享 revision、projection budget、credential-safe 文本投影、Executor admission、completion reconciliation 与 shutdown ordering 继续由 Product Control 作为跨 aggregate 不变量拥有。
+Product 不建立统一事务引擎、通用 command bus 或 Product event bus。跨边界 capability 必须按用例裁剪，不得暴露完整 Runtime、内部 aggregate、可变状态指针或 raw getter；其具体语言表示和 leaf module 由代码与 build graph 决定。
 
-Application coordinator 对 Product Control 的访问必须使用按用例裁剪的 capability value。capability 的表示固定为 `*anyopaque` context 加函数指针，不能保存或公开 `*product_control.Runtime`，不能返回内部 aggregate、可变状态指针或 raw getter。首批 capability 为 ExecutionHandoff、AgentEventConsumer、McpManagementPort、McpOauthPort 与 ScheduleHost；方法数量由用例范围决定，scoped 比刻意 small 更重要。`app.zig` 是唯一可持有完整 Runtime 并构造这些 capability 的 Application composition root；`platform.zig` 只传递 capability，不调用 Runtime；`window.zig` 的 schedule 观察与更新只经 ScheduleHost。Product Control 必须晚于所有 coordinator、window callback 与 worker 的 shutdown/join 才释放，worker job 不得跨 callback 保存这些 capability。
-
-Product 内部负责：
-
-- 由 Account 在 Renderer 之外完成 Metask OAuth、目录查询、凭据持久化与 ExecutionConfig 生成；
-- 由 Account Runtime 在 committed transition 之后产生有界 continuation，由 Application coordinator 将其重新送入同一提交链；登录后的确定性目录准备留在后台，并只把真实歧义投影成用户动作；
-- 由 Application coordinator 在同一主线程 turn 内协调 Account prepare、Product Control no-fail install 和 Account commit；
-- 由 Product Control 持有 Product Schedule 与 Product Task aggregate；Schedule Runtime 管理持久 Scheduled Task、触发游标和有界 occurrence history，Task Runtime 管理 Task、Run/maintenance record 与唯一 active operation 槽，Product Control 管理共享队列、跨 aggregate 取消协调和产品历史；
-- 由 Product Control 调用相邻 Agent 管理的 AgentCore Session、active Run/manual compact、callback binding 和有界事件泵，在主线程泵出 Agent event，并由 Product Task state 将事件应用为产品事实；
-- 管理跨会话产品状态，并向 Bridge 提供 canonical 产品 projection。
-
-Application 只向上述 Product owner 与相邻 Agent 注入其职责所需的能力：
-
-- 在 `<MetaWork data dir>/workbench` 打开并持有 Task history 的进程级单写锁，把 bounded load/atomic replace capability 注入 Product Control；codec、恢复校验、candidate commit、持久化 health 和所有 Workspace/Task 产品事实仍归 Product Control；
-- 通过 Native SDK `.data` 规则解析并打开 `<MetaWork data dir>/workspaces`，只把可用或不可用的 automatic root capability 注入 Product Control；Product Workspace Runtime 独占相对目录分配与空目录回滚，Product Control 继续协调 Workspace 注册、Task 创建与共享 durable commit；
-- 向 Product Control 注入原子 schedule persistence、wall clock、单一 Native timer、系统通知与后台窗口生命周期 capability；timer callback 只唤醒 Product Control due reconciliation，不直接调用 AgentCore。
-
-MCP 仍服从上述边界：Product Control 通过其持有的 `product/mcp/configuration.zig` 子模块独占 `<MetaWork data dir>/mcp/registry.json` schema 2 的严格 codec、schema 1 hard migration、单 writer lock、原子替换、Desired Registry、由 Add/Replace 绑定的 connection approval、独立 OAuth consent、credential locator、`oauth_operation`、窄事务恢复与显式 tool allowlist；`product/mcp/state.zig` 持有当前 Runtime 对应的 immutable Runtime Manifest、Admission Authority、OAuth challenge scope、连接测试和完整 freshness 内存状态；`product/mcp/policy.zig` 纯化 authorization phase、pending reauthorization、Admission allowlist、refresh binding、generation gate、expiry/operation/recovery query 与 Admission 状态转换；`product/mcp/view.zig` 无状态地派生 management health、availability、runtime status、authorization/new-task access、connection/tool projection 与 redaction fact，并保持 Renderer Bridge revision 1 的 MCP snapshot 字节合同。`product/mcp/ports.zig` 定义不暴露 Product Control、具体 Executor 或 Agent Runtime 身份的窄 effects；`product/mcp/refresh_job.zig` 独占 worker payload、execute/cancel callback、atomic state 和 outcome，异步线程只写 job 自身；`product/mcp/runtime.zig` 作为 live aggregate 持有 MCP state、refresh job identity 与 timer capability，在主线程按 request generation 安装完成结果，并独占 Task admission/recovery authority、typed query 与 View 派生入口。源码归入 `product/mcp` 不增加新的 Product owner，registry generation 也只作为 desired commit identity 与 optimistic concurrency。state 与 policy 可以消费 Agent 公共 Activation/Selection/allowlist 类型但不得消费 AgentCore SDK；policy 不持有 Agent Runtime，view 只依赖 configuration/state，并只由 Runtime 调用；敏感文本判断与 JSON 遮蔽通过 Product Control callback-scoped 借用完成；MCP management/OAuth 的 prepare、Admission candidate、durable commit、outcome-unknown 冻结与 runtime-auth-failure 收口由 Runtime 闭合；具体 registry/credential effect、Executor enqueue、catalog、timer 与 notifier 只经注入 capability 执行。具体 Executor 本体、跨 owner coordinator、revision publication、完整 snapshot 编排与交付仍由 Product Control 持有。Agent 继续拥有 stdio/Streamable HTTP connector/backend 生命周期、descriptor、official catalog/selection、Activation 与 typed health；Application 只注入 child/network mechanics，并拥有 secure secret capture、系统 credential、OAuth effect、earliest-expiry timer、Runtime HTTP auth snapshot，以及单一短寿命候选 Runtime 测试的编排。候选 Runtime 不进入正式 Manifest、Admission 或 Task 路径。Account 与 MCP 没有 ownership、credential service 或 persistence 依赖；Bridge 只运输 typed field intent 和安全 projection，不参与配置、授权、激活或 authority 事务。
-
-生产组合层只经 `product/mcp.zig` 发布的 `contract`、Runtime、Ports 与 typed DTO 协作；内部 state/policy/view/refresh-job 不从聚合根导出，也不允许 Product Control 直接拼装。测试所需的内部 fixture 只存在于 `builtin.is_test` seam。
-
-MCP management coordinator 只编排上述既有 owner：Add/Replace 由 Product Control 在单次 transaction 中绑定完整 typed connection 与 approval fingerprint；legacy unapproved 配置仍可经窄 Host approval port 收口。明确保存后 coordinator 从 canonical desired 重新 preparation，构造完整 `McpRuntimeInput` 与 Runtime Manifest candidate，调用 Agent-owned declarative Runtime apply，再执行 official activation/catalog discovery；完成回到主线程后原子安装 Manifest、Activation、HTTP authorization owners 与 Admission Authority。`configuration_apply_job`、OAuth worker 与单一候选测试 worker 都是短期执行资源，不是第二份 registry、journal 或产品状态。`testConnection` 仍只构造隔离候选 Runtime并更新短期诊断，不替换正式 Runtime。shutdown 必须 join apply/test/OAuth worker 后再释放 owner。
-
-Runtime Manifest 的 `loaded` entry 保存当前 Runtime 已完整接管的 descriptor fingerprint，`absent` entry 保存 disabled、structurally invalid、missing authentication 或 credential-invalid 等无 secret absence proof；成功接管空 input 形成零 entry Manifest。compatibility 关系仍派生 `current | restart_required | unknown`，但 `restart_required` 现在表示正式 apply 尚未完成，不是用户必须重启 Application。Product Control 在 apply 开始时安装 `blocked(refreshing)`；AgentCore 报告 applied 且 activation/selection 构造完成后才替换 Manifest 与 Admission。rejected、malformed report、resource limit 或 owner 失败进入 typed apply failure并保持 fail-closed admission。Runtime Manifest、Agent Activation 与 Admission Authority 都不是第二份 durable truth。
-
-每次 mutation 从 canonical desired 构建 immutable target并先完成 registry commit。`rename` 与 tool-only 等无 transport effect 的变更可以直接复用或重建当前 authority；loaded server 的启停/删除、启用未加载 server 或连接配置变化由 coordinator 自动进入 declarative apply。明确 commit failure 保持旧 desired/authority；saved recovery required 冻结后续 mutation；outcome unknown 不宣称 canonical desired/generation并安装 blocked authority。正式 apply 成功只影响后续新 Task；既有 Session 保持 AgentCore 已同步复制的 authority，不热替换或即时撤权。
-
-启动按 `credential transaction recovery → oauth_operation recovery → schema migration/Product Control Desired preparation → canonical empty Agent Runtime ownership commit → zero-entry Runtime Manifest install → Product Control/coordinator install → initial configuration apply start → refresh timer arm → Bridge ingress` 线性化。遗留 `oauth_operation` 不重放，绑定 server 直接进入 `reauth_required`；schema 1 迁移统一 disabled + unapproved。启动 Preparation 的 credential staging 在进入 Product Control 前释放；initial apply 从 canonical Desired 重新 preparation，并沿与后续 mutation 相同的 coordinator 路径构造完整 replacement、调用 AgentCore apply、执行 activation，再原子安装 Manifest、Activation 与 Admission。Manifest candidate 的 `loaded` entry 只有在 opaque transport/input 被 Agent Runtime 完整接管后才能提交。Preparation 的预期 registry/approval/credential 故障形成 MCP unavailable/degraded；OOM 和内部不变量仍按对应调用边界 fail closed。AgentCore Runtime create 失败始终终止 Application 启动；empty Runtime 是唯一正式启动输入，不是对一次含 MCP Runtime 创建失败的猜测或重试。外部 MCP child、network、handshake 与 catalog discovery 只发生在 initial apply worker，失败不关闭普通 Task admission。
-
-Admission Authority 是 `ready(optional opaque owned selection, catalog generation) | blocked(reason)`；`ready(null)` 表示已验证的空 authority，blocked reason 至少覆盖 pending restart、refreshing、activation unavailable、persistence outcome unknown 与 shutting down。初始 apply 期间 blocked authority 对 MCP fail closed，但 `selectionForNewTask` 向 canonical empty Runtime 提供 null selection，所以普通 Task 不等待 MCP；apply 完成前创建的 Session 保持空 authority，成功完成后只有新 Session 取得新 selection。新 Session 只能在 Product Control admission 边界同步借用 selection，AgentCore 在 create 调用内复制后不再引用 Product Control selection。MCP mutation、refresh、OAuth operation、运行时 reauthorization fact 和新 Task admission 使用 Product Control 同一短事务串行化边界；浏览器等待和网络请求不持锁，只携带 server-bound operation id。OAuth operation 若命中当前 authority，先预构建排除目标 server 的 selection，marker commit 后 no-fail 安装 reduced authority；因此其他 server 与普通 Task 不冻结，目标 server 在成功恢复 candidate 前不进入后续新 Task。运行时 challenge 也先按 consent epoch 与被拒绝的 token revision 校验：已轮换旧 token 的普通拒绝是 stale，新增 scope requirement 则并入当前 consent 的后续 authorization。Product Control 在 durable commit 前同时构造 owned pending-scope candidate 与 Admission candidate；`reauth_required` 明确保存后只做无失败安装，不再引用旧 Desired arena。每个成功 Desired install 都集中 reconcile pending state，删除已移除 server、已替换 consent epoch 或已把 scopes 固化到新 consent 的记录。内部 fact ownership/容量失败设置 process-lifetime Admission latch，后续 mutation 和 activation rebuild 都不能静默重开 authority；原失败请求不自动重放。活跃 operation 拒绝目标 server mutation，其他 server target 必须保留 marker；结果返回时以 operation id 和 server fingerprints 对当前 canonical registry 重新授权，并从当前 generation 提交，不要求起始 global generation 未变化。Cancel 在外部请求前可清除 ephemeral state；请求可能已发送后必须把目标 server 提交为 `reauth_required` 并保持 reduced authority。首版全局最多一个 OAuth operation。`recovery_required` 或 `outcome_unknown` 保留唯一 journal/marker 并冻结后续 mutation。关闭先停止 Bridge ingress、OAuth timer/callback、management、refresh 与 Task admission，释放 Admission Authority 和 Activation，再收口 callback，最后由 owner 逆序释放 MCP transport 与 Runtime。
-
-refresh timer 是 Product Control 注入给 Product MCP Runtime 的独立单次 monotonic capability。Activation 提交时，Runtime 只把其中最早的可安全调度 catalog TTL 转换一次为绝对 monotonic deadline并留出提前量；configuration apply、OAuth operation 与显式 refresh 可以取消当前 timer effect，但不得用原始相对 TTL 重新计时。timer、显式命令与新建/恢复 Session 的 typed freshness failure 都先由 Runtime 递增内存 request generation并记录 pending，再经窄 Executor port 尝试把唯一 refresh job 入 Product Control 有界 executor；refresh、apply 或 OAuth 已占用边界时只延后执行，完成后消费 pending，不能丢弃触发。成功 apply 已包含 official activation，因此同时满足 apply 期间积累的 refresh 请求；普通 refresh 只有 request generation 仍为当前值时才能由 Runtime 原子安装新 Activation/Admission。三十秒及以下 TTL 不进入后台主动刷新，避免形成高频全量刷新循环。
-
-若 AgentCore 在新建 Session 的 admission 线性化点返回 typed `mcp_not_refreshed`，Agent 必须保留为 `McpNotRefreshed`，Product Control 立即封锁旧 Admission 并异步刷新；新建 Task 向本次请求返回 catalog loading。Conversation restore 使用 null MCP selection；若 Runtime 串行化 guard 返回 `McpRefreshInProgress`，Product Task 记录可重试 `runtime_busy`；若 ABI 仍合法返回 `McpNotRefreshed`，记录 `runtime_refresh_required` 并触发既有异步 refresh。两者都不得折叠成终局连接失败或自动重放原 mutation。
-
-Product Control preparation 按 transport、auth mode、approval/consent epoch 校验 credential locators 与每服务 aggregate runtime secret limit；Application 是 transport auth snapshot 限制的真源并负责注入。Connection approval 前，Application 不得启动 child、解析 credential 或发网络请求；OAuth discovery 只能在 approval 后以无凭据有界请求运行。DCR、authorization-code exchange 与 refresh 都先 durable commit 同一 `oauth_operation` marker，外部请求后只允许提交 issued client identity/fresh locators；明确且未创建 client 的 DCR rejection 回到 `client_registration_required`，`invalid_grant`、response/persistence outcome unknown 与遗留 marker 进入 `reauth_required`。同 consent epoch 的 token revision 以 CAS 替换 ref-counted HTTP auth snapshot，旧 token 在最后一个 in-flight lease 释放后清零；新 consent epoch、connection 或 static secret 变化不得热替换 Runtime descriptor。Application HTTP capability 只处理 OAuth/auth、connection 与原始字节泵；Content-Type 分类、MCP session/status/header 规则和 SSE framing 归 Agent HTTP backend。STDIO 的 child/pipe/stderr/timeout effect 同样留在 Application，newline framing 与消息 bound 归 Agent。JSON-RPC identity 和消息语义仍完全归 AgentCore。
-
-Static credential locator 归接收它的目标，而不是孤立的 environment/header name：STDIO 目标由 command、ordered argv 与 cwd 共同确定，environment slot name 精确匹配；HTTP 目标由 endpoint 确定，header field name 按 HTTP 大小写不敏感语义匹配。Replace mutation 只有在目标和 auth mode 未改变时才按同一 slot 沿用 locator；其余 locator 由全 registry 引用差分在同一 credential journal 事务退休。Renderer 以 Host 发布的完整非敏感 typed connection 预填编辑，并仍提交完整 replacement；它不读取或提交任何 secret value/locator。
-
-Desired `enabled` 只表达用户意图，不重复承担 connection approval、auth readiness 或结构校验。已批准但缺 credential 的 enabled server 保持 desired intent，由 preparation 形成 missing-authentication absence proof 并排除出 Runtime/Admission；secure-capture capability 只决定 Host 能否执行采集，不删减 registry 可表达的 auth mode。
-
-## 2. 领域状态与业务事务
+## 2. 跨边界事务
 
 ### 2.1 Account 与 ExecutionConfig
 
-Account 和 Product Control 是同级 owner，彼此不导入 runtime。Account Runtime 独占 OAuth token、PKCE、当前 `/me` 验证的 identity、Metask 完整 API Key、用户 Model Connection registry、平台凭据 locator、catalog attempt、mailbox/effect queue、当前默认选择和 credential generation；其内部状态、事务、catalog slot、提交与恢复只由 [Account 架构](account-architecture.md)定义。Product Control 独占已安装的默认 runtime ExecutionConfig、live Session/Run/job/worker 所需的 owned config、Task admission、Workspace/Task/Run history与 replacement gate。ExecutionConfig 的运行时数据流是 Account resolve → Application coordinator controlled transfer → Product Control execution-scoped ownership → Agent Session consumption；Agent 不查询 Account 当前状态。已有 Task 的模型 mutation 是 Product Control 对 Task-owned Session 的操作，只能由与该 Task provider/generation 精确一致的当前 Metask catalog 授权；Account 当前 catalog 不是旧 generation 或 Model Connection Task 的通用模型目录。Bridge 只提交无 secret 的 catalog/connection selection identifier、严格解码后的 expected catalog/execution generation 或 typed `ModelConnectionCommand`；Renderer 不能把 provider、base URL、完整 credential 或未被 Host 验证的执行配置直接注入 AgentCore。
+Account 和 Product Control 是同级 owner，彼此不导入对方 Runtime。Account 内部 identity、catalog、credential 和 Model Connection 合同只由[Account 架构](account-architecture.md)定义；本节只定义它们与 Product Control 的交接。
 
-`product/control/account_execution.zig` 是 Product Control 内部的 Account fact read model 与已安装 execution authority kernel，不是第三个 owner、Account facade 或公开 aggregate。它预分配 Account contract 上限内的脱敏 projection 与 view slice，初始化后 Account fact commit 和 view 派生不得分配；同时线性拥有当前 ExecutionConfig credential/model/base URL、Model Connection binding、replacement gate 和 prepare→durable credential scrub→install/clear token。跨 aggregate 的 Schedule/Task/Skill/MCP 文本清洗仍由 Product Control Runtime 通过 callback-scoped redaction capability 执行，kernel 不取得这些 aggregate、Executor、Agent、Application 或 Bridge。Task 模型 mutation authority、Task execution/recovery readiness 与 Account view 的 `canCreateTask` 都必须由该 kernel 对同一份 Account/execution facts 决策，顶层 Runtime 不保留平行字段或第二套判断。
+ExecutionConfig 的唯一运行时数据流为：
 
-`src/product/account.zig` 与 `src/product/account/` 共同构成 Account Product owner；源码迁移不改变 `metawork_account` / `metawork_account_contract` 模块 identity，也不创建统一 Product facade。Account 通过自身 `ports.zig` 只声明并消费 refresh-token credential、preference persistence、authorization URL、timer 与 Model Connection credential vault；Application 在 `account_platform_binding.zig` 中绑定 Native SDK、主线程和有界文件 I/O，并在 Account shutdown 清空 port 引用后释放 binding。Preference codec、commit/recovery transaction、Model Connection registry、FileStore、原子提交与 persistence health 仍归 Account；Application 不因执行系统 effect 而取得这些产品 policy。
-
-`src/product/task.zig` 与 `src/product/task/` 是同一 Product owner 持有的 live Task aggregate 边界。聚合入口只发布 Runtime、组合层所需的 typed operation/port/fact 以及 history/checkpoint store 叶面；state、policy、view、attachment、Session、execution、deletion 与 recovery kernel 不构成组合层可拼装的生产 API，仅在 `builtin.is_test` 下提供 fixture seam。`agent_session.zig` 是 Task 对 Agent Session 的唯一 capability gateway：线性 `Binding` 保存 Runtime slot 归还责任与 route identity，线性 `Access` 以 Agent `active_refs` 覆盖一次同步调用或 worker 内实际 Session 操作区间；wrapper 本身不分配，但底层 Agent API 保留各自 allocation/ownership 合同。`state.zig` 拥有 Task aggregate、Run/Compact record、Agent event 的产品状态转换、终态可见性与 final event-drain gate；`policy.zig` 无外部 effect 地处理 Agent Run/Compact/begin/checkpoint terminal 分类、interruption/cause 映射、Task lifecycle/active-operation/continuation/recovery query 与 Session disposition transition；`persistence.zig` 拥有 Task history capability/health、逐字段 Task/Run/Tool/Compact/UI/checkpoint wire projection、恢复重建、enum 与跨记录校验；`view.zig` 无状态地派生并编码 Renderer Bridge revision 1 snapshot 的 Task/Run/Compact/pending-UI/UI-history 子树；其余子模块拥有 checkpoint record/store、owned execution binding、runtime attachment、deletion policy、recovery policy 与 recovery job。canonical history 的 Workspace frame 仍由组合层提供，Task persistence 不接管 Workspace aggregate。除 recovery job 外的相应 kernel 可以消费 Account contract、Product Skill catalog 与 Agent 公共类型，但不得依赖 Application、Bridge、Native SDK、AgentCore 或产品组合实现；recovery job 不依赖 Product Skill。Product Control 仍独占 executor 本体、Agent event pump、跨 owner authority/admission、durable commit 实现、revision 与完整 snapshot 根编排；Runtime 通过 callback-scoped ports 请求 enqueue、commit、projection、notification 与 authority，不转移 allocator、credential、Session 或组合对象所有权。
-
-Product Task 对 output-segment 只保存产品语义，不复制 AgentCore 协议：Run 内 runtime 状态验证单一 open segment、严格递增 index、begin/end 的 turn/group/bytes 一致性，并把 `continued` 暂存到同 group；`discarded` 清除当前尝试但不关闭 group，`commentary | final | partial` 才提交可见组。`assistant + continued + open segment` 共用单一 per-Run output byte budget；关闭 group 时先完成目标容量与独立 commentary-boundary 容量校验，再原子迁移两份 provisional buffer，失败不得清除 source、推进 index 或发布分类。状态机在单份 canonical assistant 上以最多 256 个单调不减、UTF-8 安全的累计 byte end 保留每个源内容非空的 closed commentary group；credential 遮蔽可以使相邻 end 相等，从而保留安全投影为空的真实组。`assistant_output_kind + assistant_output_start` 区分 final/partial suffix；最后一个 commentary end（不存在时为 0）必须等于 response 起点或尚未分类时的 committed assistant 末尾。persistence wire 随 durable assistant 保存边界数组、分类和正文起点，恢复与 serializer 对任一不一致 fail closed，并精确保留 `consumer_rejected | dependency_contract_failure` 投影失败类型。raw index/turn/group、open buffer、continued buffer 与 discarded bytes 均不持久化；终态 drain 后仍有未闭合段或 continuation group 时以 `dependency_contract_failure` fail closed。
-
-Run 的当前活动是 Product-owned typed runtime observation，不是持久化 status 字符串。正式 Product phase 优先于 observation：queued、waiting UI、stopping 分别投影固定活动，running 才读取最新 Agent observation，formal terminal fact 发布前的 `completed | failed | aborted | poisoned` observation 统一保持 `finalizing`，terminal drain 完成后 activity 为 null。retry 只在其 observation 生效，后续 generating/text/tool/terminal 按事件顺序替换，Host 不制造上游未提供的 attempt identity。context pressure 与最近一次 auto compact 属于当前 attached Conversation：同一 Session 的后续 Run 可继续观察，attachment detach/replacement 或进程重启即清空，且不进入 Task history persistence。Renderer Bridge revision 1 只消费 Product 派生的 typed `output/activity/context`，不接收 raw event、sequence、private reasoning 或自由文本 status。
-
-`product/task/runtime.zig` 是 live Task aggregate 的唯一存储与行为入口，持有有界 Task collection、identity/recent order、failure ledger、attachment/operation、late-terminal、recovery 与 Agent shutdown facts，并闭合 Task create、Run/Compact start/cancel、UI response、model selection、detach、recovery、event application、Task 子树派生与 shutdown transition。原 per-Task `attached | detached | closing` resource union 归 `attachment.zig`；Product Control 只持一个 Runtime，不再平行持有散字段或直接调用内部 kernel。共享 Workspace+Task history health 与唯一 commit effect 仍归组合层；Runtime 只观察 `committed | failed | outcome_unknown` typed 结果，definite failure 回滚 Runtime 已准备的候选，unknown 则永久冻结后续 Task mutation。recovery start 由 `CoreRecoveryAuthority + RecoveryAdmissionFacts` 唯一决策，排除 Workspace visible、Skill/MCP/Permission readiness、projection capacity 以及“历史 execution generation 必须等于当前 generation”的伪身份条件；当前 ExecutionConfig 只作为 target readiness，必须能以同 provider 和 Task model 承载后续运行。candidate 完成时必须一次校验 attempt、Task/binding、checkpoint/terminal anchor、Workspace id/kind/epoch/root/authorization 与 Automatic owner、历史 source binding 未变化、启动时 target generation 仍是当前 execution authority、attachment/archive/removal/replacement/shutdown；任一 token stale 都只丢弃 candidate，不自动重试。
-
-Run 与 Compact 的产品记录只保存稳定状态、终态发布与取消 identity，不保存指回组合对象的 `Product Control`、`TaskView` 或 Agent `Session` 指针。executor 为每次入队持有独立且短寿命的 Run/Compact job context，其中持有 exactly-once Task `Access` 与执行所需的 Task/组合 capability；queued cancel 以产品记录地址匹配 identity，并同步调用 context 的取消回调，worker 执行或 queued cancel 负责精确一次释放 Access 并销毁 context。checkpoint postprocess 可以继续延长 Task worker reference，但不延长 job context：worker 完成后，主线程只凭当前 Task 遍历及记录内的 checkpoint 状态结算该引用。
-
-OAuth loopback 采用同一切割纪律：Account `loopback.zig` 定义 endpoint/sink，并拥有 callback path、state、code/error、issuer、无效请求预算与 response policy；Application `oauth_loopback_transport.zig` 拥有 listener、connection、accept/receive deadline、跨线程 cancellation 与 HTTP byte pump。Account LoginAttempt worker 只借稳定 endpoint capability，MCP OAuth 在 Application 内直接复用 concrete transport；两条路径都不转移 socket、reader 或 request handle，sink 只在 callback 期间借用 request metadata。
-
-公开 `AccountView` 只包含四态 `checking | signed_out | authorizing | authenticated` 和独立目录状态 `unavailable | loading | choosing | ready | failed`。`canCancel` 与 `canCreateTask` 是 Host 判定的能力事实，不再由 Renderer 从 operation/readiness 推导。saved account、reauth required、account mismatch、primary action 和公开 execution state 均不存在；登录无效直接变为 `signed_out`，统一通过 `beginLogin` 建立新 identity。
-
-Model Connection projection 不扩展 Metask OAuth 状态机：每条连接发布稳定的非 secret `connection_id`、display name、provider、脱敏 normalized endpoint、credential status、bounded model metadata、generation readiness、latest test status 和 connection generation。Connection registry metadata 使用独立原子 store；API credential 只存在系统安全存储和当前运行时的 bounded owned copy。新增连接在 Account 内先 durable 提交 credential cleanup tombstone，再写系统 credential，最后原子地用完整连接替换 tombstone；Application 的 trusted capture continuation 只能同步借用 secret 并接收最终 typed result，Bridge 永远看不到中间 slot 或 secret。连接测试通过 Agent-owned 一次性非流式 Completion 完成；该短寿命 owner 独立于 AgentCore Runtime、Session 和 AgentLoop，测试 candidate 不进入 Product Control Task、Run history、Conversation 或 durable attachment。
-
-`execution replacement gate` 区分两类操作：
-
-- 默认 API、provider 或 credential 变化可以安装新 generation，既有 Task 继续引用旧 generation；同一已提交 API 下的默认模型变化只持久化 Account preference，不改变 credential generation、不安装 Product Control execution。两类操作都只暂停相关的新 Task admission，不冻结既有 Task、导航或历史；
-- Model Connection 的新增、编辑、验证、启用、禁用和删除使用独立的 connection transaction；它可以在 Metask `signed_out` 时继续管理，但安装为默认执行配置前必须通过同一 generation/replacement gate。endpoint、provider 或 credential 替换生成新的 connection generation，不能原地改变 live Session；
-- 账号 identity 切换、退出登录和设备 credential 清理只替换 Account 当前身份与 Metask-owned 默认执行配置，不等待、终止或改写既有 Task、Session、Run、job 与 worker reference。Product Control identity gate 只串行化这次 Account replacement；live Task/Session 已经取得的 owned ExecutionConfig 按原生命周期收口，退出登录不宣称对其热撤权。durable Task 和历史记录不持有 credential，也不参与 gate。
-
-冷启动恢复不是运行中的 identity 切换：新进程先从独立 registry/credential store 恢复 durable Model Connection default，再并行恢复 Metask identity/catalog；Metask execution completion 只更新其自身状态，不能覆盖已恢复的 custom default。没有 custom default 时，Metask execution 才通过 default-execution transaction 安装。运行中的显式重新登录或 logout 必须经过 identity gate；该 gate 只清理 Metask-owned credential/default，不撤销独立的 custom default。显式切回 Metask 先重建当前 Metask execution，成功后原子清除 durable custom default并安装 Metask execution；任一步失败都继续保留 custom default。live Task/Run 已拥有的 ExecutionConfig 按原生命周期收口。
+```text
+Account resolve
+→ Application coordinator controlled transfer
+→ Product Control execution-scoped ownership
+→ Agent Session consumption
+```
 
 唯一 committed-state 写路径为：
 
 ```text
-Account Runtime.prepare(command | completion)
+Account prepare(command | completion)
 → Account effect admission
-→ Product Control.commitAccountFactNoFail(...)
-→ Product Control.installDefaultExecutionNoFail(...)  [可选]
-→ Account Runtime.commit(prepared)
+→ Product Control commit Account fact
+→ Product Control install or clear default ExecutionConfig  [可选]
+→ Account commit prepared transition
 → dispatch committed Account effect
 ```
 
-前五步由 Application coordinator 在主线程同一 turn 内完成，effect 只有在 committed swap 后才能启动；worker completion 再经主循环进入同一条链。任何校验或内部不变量失败都保留旧 committed state，并清零 staged secret；Bridge 不参与 prepare/commit，也不接触 credential。C1 登录只依赖锁定的 OAuth client/scope/loopback、token rotation 和严格 `/me` identity，不等待 API Key 或模型目录。授权码交换产生新 token 后先提交 refresh token，再以已提交 generation 读取 `/me`；两步不得合成一个可回退结果。
+上述 commit 链在主线程同一 turn 内完成。外部 effect 只有在 committed swap 后才能启动；worker completion 必须回到主线程并重新进入同一条链。Product Control 安装或清除 execution 的步骤在进入 Account commit 前必须已经完成全部可能失败的验证、持久化 credential scrub 与 candidate preparation，实际所有权转移只能是 no-fail install。
 
-Renderer catalog selection 的同步拒绝顺序固定为：Bridge authority/wire validation，Account Runtime generation 与 published membership validation，Account prepare，Product Control default replacement gate，最后进入上述 commit 链。Account 独占 identity、selection、catalog 与 attempt 合法性；Product Control 独占 replacement gate；Application coordinator 只安排顺序。`prepare` 成功但 gate 拒绝时必须销毁 prepared transition，不能提交 Account fact 或启动 effect。初始 effect admission 失败直接回滚并关闭新开的 gate；异步 continuation 的 effect admission 失败必须先提交已经观察到的前一步外部结果，再从该 committed phase 生成 terminal failure，确保 token 已提交后的失败不会错误恢复旧 identity/default，并在所有路径释放对应 gate。
+Product Control 的 replacement gate 只串行化本次默认 execution 交接与相关新 Task admission。已有 Task、Session、Run 和 worker 已经取得的 owned ExecutionConfig 按原生命周期收口，不热替换、不等待 Account identity 变化，也不被 logout 伪造为已撤权。只改变默认模型且不改变 credential authority 时，不产生新的 credential generation；是否允许已有 Task 改变模型必须由该 Task 精确持有的 provider、generation 与当前 authoritative catalog 共同决定。
 
-verified identity commit 是 C1 完成边界，不是 Product Control 可见性门槛，也不要求用户手动启动 C2。C1 完成后 Account Runtime 直接产生 catalog command；catalog 失败保持 `authenticated + failed`，不回滚登录。历史选择仍存在且匹配当前 account/catalog 时优先恢复，单一候选自动采用，只有真实歧义才进入 `choosing`。Renderer 不观察状态后发送隐藏命令。
+Account prepare 后若 Product Control gate 拒绝，prepared transition 必须销毁，不能提交 Account fact、转移 credential 或启动 effect。effect admission 的明确失败保留旧 committed state 并清零 staged secret。外部 effect 已产生结果后，后续失败必须从已经观察到的 committed phase 收口，不能回滚成旧 identity、旧 credential 或旧默认 execution；结果不确定的 mutation 不得自动重放。
 
-每个 Account attempt 都有 Host-owned deadline、attempt identity 和唯一 terminal completion。浏览器未回调、网络悬挂、effect 启动失败和取消都必须收口到可恢复 committed state。幂等 catalog read 可以有限重试；OAuth code exchange、凭据持久化和结果不确定 mutation 不得自动重放。进入 credential persistence 前允许取消；持久化 effect 开始后撤销 cancel admission，直到 main thread 原子消费 completion，避免磁盘已提交而内存被取消回滚。Renderer command timeout 只释放本地交互并触发 snapshot resync，不能代表 Host mutation 失败。
+Renderer reload、断连或命令 timeout 只影响交互与 resync，不能取消 Host 中的 deadline、mutation 或 terminal completion，也不能代表这条 commit 链失败。Renderer 只提交 Account 真源发布的无 secret identifier 与 expected generation，不参与 prepare、commit 或 credential transfer。
 
-Metask managed 网络接入受 [Account 架构](account-architecture.md#35-metawork-消费的-metask-合同)约束。C1 OAuth/login 先独立提交 token rotation，再严格提交 `/me` identity；C2 使用无 Profile header 的 OAuth API Key catalog 与直接 API Key model catalog，从精确 `group.platform` 生成固定 Metask AgentCore target。用户 Model Connection 使用独立的 typed endpoint/credential/model 合同，当前只开放 OpenAI Chat Completions 和 Gemini Native；Anthropic Messages 在 AgentCore 原生 `x-api-key` 合同通过前保持关闭。除 Agent-owned 无 Tool Completion codec 外，不在本地复制 AgentCore provider transport，也不支持未登记协议。持久化只允许 secure store 中的 refresh token 和 Model Connection API credential，以及原子、无 secret 的 Metask selection/connection metadata；其中 generation 是没有顺序语义的随机不透明 binding nonce。access token、Provider API Key、custom credential、saved identity 和完整 execution config 不跨进程。冷启动先刷新 OAuth、提交 rotation，再以当前 token `/me` 结果建立 identity，最后决定是否复用 Metask preference 和可用 Model Connection。
-
-进入 Product Control 后的 API、默认模型或连接切换仍由 Account owner 执行，不是 Renderer preference。Metask API/provider/credential 变化用当前 OAuth 重新加载 authenticated API catalog，不能复用已 secure-zero 的旧 private catalog；成功后才原子安装新 generation 并提升 candidate，其他 terminal outcome 丢弃 candidate 并回到旧默认配置。同一已提交 API 下的默认模型变化只以 committed catalog 校验并持久化 preference，generation 和 Product Control credential execution 保持不变。Model Connection mutation使用独立的 private/committed registry candidate。Account projection 发布候选目录或连接的脱敏 identity，Renderer 只能从 Host-owned projection 选择模型/连接。两类默认变化都只影响之后创建的 Task，既有 Task 继续使用自身 binding epoch。
-
-durable Task/Run 只保存 Workspace binding、Provider、model 和 opaque execution generation 等历史事实；不得保存 account identity、Model Connection identity、API Key metadata、custom credential、credential locator 或可重建 secret 的信息。跨 Host 重启的 Task 先恢复成只读 projection，不创建 Session 或 Conversation。Schedule 在触发时如果保存的 execution generation 与当前默认配置不一致，进入 `needs_attention`；它不能阻止登录、替换 identity 或清除 credential。
-
-因此 identity replacement、default execution replacement 与 durable history 是三个边界：前两者只处理真实运行时资源，后者只负责解释历史，不能反向成为 Account gate。
+Identity replacement、default execution replacement 与 durable Task history 是三个边界。durable history 只保存解释执行来源所需的 provider、model、不透明 execution generation 与 binding facts，不保存 Account identity、Model Connection identity、API Key metadata、credential locator、完整 ExecutionConfig 或可重建 secret 的信息。
 
 ### 2.2 Workspace 与 Task admission
 
-Workspace 是 Product Control-owned 产品对象，而不是 Renderer 从 Task 路径派生的 convenience view。Workspace record 具有 immutable `kind = manual | automatic`：Manual Workspace 由用户选择或重新授权，一个 record 可承载零到多个共享文件上下文的 Task；Automatic Workspace 由 Product Control 分配，一个 record 精确归属一个 Task。两者共用同一个 registry、Task 引用和 AgentCore Session admission；`kind` 只表达目录取得方式，不替代 authorization、Task ownership 或生命周期事实。Product 的 canonical projection 发布 stable identity、kind、optimistic epoch、canonical root、display label、authorization/removal outcome 与聚合 Task signals；每个 Task 引用的 Automatic Workspace 必须在同一 projection 中存在。一次性用户目录能力由 Bridge/Native capability 生成并在同一 `workspaces.choose` Host 命令内消费，Renderer 只得到 Workspace identity；automatic root/path/key 永不进入 Renderer 请求。Task 创建绑定 expected execution generation，后续 Run 绑定 expected binding epoch，Workspace mutation 绑定 expected Workspace epoch；Host 对 window、ownership、catalog membership 与 admission 重新校验。预期业务拒绝编码为 typed result，非法 payload 与 authority failure 仍由 Bridge fail closed；精确 wire 语义见 [Renderer Bridge 合同](renderer-bridge-contract.md)。
+Workspace 是 Product Control-owned 产品对象；产品语义和用户操作以[产品需求](requirements.md)为准，wire 以[Renderer Bridge 合同](renderer-bridge-contract.md)为准。本节只定义 Workspace、Task、ExecutionConfig 与 Agent Session 之间的 admission 和提交关系。
 
-`src/product/workspace.zig` 与 `src/product/workspace/` 是 Product Control 持有的 live Workspace aggregate，不是新的顶层 owner。`runtime.zig` 独占 bounded registry、record、identity/recent-order、manual/automatic lifecycle、authorization/trust、restore/redaction、typed authority 与 automatic root allocator；`view.zig` 无状态地编码完整 Workspace snapshot 对象，并只以 callback-scoped opaque provider 借用 Task signals、Skill catalog 和 credential-safe 文本写出。Product Control 只持一个 Workspace Runtime，经 prepare/finish/rollback 与 typed facts 协调 Task、Skill、File Preview 和 shared history commit；Workspace Runtime 不保留这些 capability，也不取得 durable commit、Executor、Agent、Application 或 Bridge。`automatic_root.zig` 只实现 Application-opened root 的相对随机子目录、canonical containment 与发布前空目录回滚，不扫描、恢复或递归删除目录。聚合根只发布 Runtime、组合所需 typed facts/operations、AutomaticRoot 与 `builtin.is_test` seam；record、registry slice、mutable pointer、concrete allocator 和 view kernel identity 不构成生产 API。
+Manual Workspace 与 Automatic Workspace 共用一个 registry 和 Task 引用关系，`kind` 在 record 生命周期内不可改变。Manual intent 必须重新校验 Workspace identity、epoch 与 authorization；Automatic intent 必须取得 Application 注入的 automatic-root capability。Renderer 不提交物理路径、automatic root 或目录授权 token。
 
-Application 使用现有 `app_dirs.resolveOne(..., .data)` 结果派生 `workspaces` 保留根，并在启动时尝试创建、canonicalize 和打开该目录。失败只投影 `automaticWorkspaces = false`，不得阻止 Account、Manual Workspace 或普通 Product Control 启动。成功后 Product Workspace Runtime 内部的 allocator 只通过已打开的 root handle 相对创建随机 `u64` 的 16 位小写 hex 子目录，exclusive create 最多尝试 8 次，并验证结果严格位于 canonical automatic root。automatic root 及其子目录不得注册为 Manual Workspace；分配失败不得回退到 cwd、home 或共享目录。
+Task 创建在产生外部 effect 前必须证明：
 
-Product Control 的 Task workspace request 直接使用 `manual(workspace_id, expected_epoch) | automatic`；Renderer/Bridge 提交相同语义，不保留 `existing/managed` 内部别名，交互式 New task 与 Scheduled Task 也不建立第二条 Task 创建路径。Manual intent 在 Task 创建事务内重新校验 identity、epoch 与 authorization，并原子更新 recent order；Renderer 对工作目录控件的切换只更新 New task draft，不发送独立 Host selection mutation。Automatic admission 先证明 execution、Task slot、Automatic Workspace slot、Session 与 shutdown capacity，再创建目录、注册 `kind=automatic` temporary Workspace、创建 Session 并发布 Task；发布前任何失败用局部 rollback/`errdefer` 释放 Session/record 并删除本次创建且仍为空的目录，发布后的 Run 失败不回滚 Task 或目录。Manual Workspace record capacity 与 `max_tasks` 约束的 Automatic record capacity 分槽，后台创建不修改 Manual recent order 或 Renderer draft scope。owning Task 物理删除且 Run event、worker、Session 与 catalog 全部 quiescent 后释放 Automatic record，但不删除真实目录；shutdown 与重启也只释放进程内 record，不扫描、接管或删除旧目录。目录持久存在不是 Task 恢复协议。
+- 当前默认 ExecutionConfig 与 expected generation 仍有效；
+- Workspace intent、ownership、epoch 与 authorization 有效；
+- Workspace、Task、Agent Session 与 projection 容量可用；
+- Product Control 尚未进入 replacement、persistence freeze 或 shutdown。
 
-Application 在 composition 时只解析一次 existing canonical user home，并以 immutable capability 注入 Product Control；Renderer、Bridge payload 和 Workspace selection 都不能覆盖。Product Skill Runtime 经窄 ports 把 AgentCore catalog discovery 提交到现有 bounded Executor：worker 只产生 Agent-owned acquisition，Runtime 按 Workspace id、epoch 和 request generation 提交或丢弃；Product Control 不持有 catalog job。Manual Workspace current Skill authority 是 tagged slot：`committed` 分支不可分地持有唯一 opaque lease 与已按产品 policy 编译的 immutable bounded snapshot，`uninitialized | unavailable` 分支不携带可执行 authority；catalog job 独立表达进行中的 refresh。refresh 期间继续服务 last-good committed authority，incomplete、编译失败或查询失败不能用空 catalog 或半状态替换 current；当前不保留或投影最近一次 refresh 失败事实，该可观测性作为后续独立产品议题。只有首次没有 committed authority 时 Skill unavailable，Text 路径仍可用。Task 创建在 Agent Session 前完成容量证明并复制独立 pinned projection，同步借用 current lease 绑定 Session。首期 Automatic Workspace 只接纳 Text Task，不启动 Workspace catalog job、不发布 refresh 动作，并以 null catalog lease 创建 Session；Skill automatic admission fail closed，直到 root-specific acquisition、identity、容量和 shutdown 通过独立验收。Task refresh 只从已经提交的 Manual Workspace authority 进行、只允许 idle Session，并在 Agent refresh 成功后替换 pinned projection。shutdown 先令 Product Skill Runtime 停止接纳并取消 queued catalog job，再停止/join shared Executor；Runtime 随后收口 completion 并释放全部 Workspace lease，最后才允许 Agent Runtime destroy；不建立第二 scheduler、隐式文件监听或 Renderer Skill loader。
+Automatic admission 在完成上述证明后才创建候选目录、临时 Workspace record、Agent Session 和 Task record。发布前的任何失败必须释放 Session 与候选 record，并只回滚本次创建且仍为空的目录；Task 已 durable 发布后的 Run admission 或执行失败不能回滚真实 Task 或目录。Manual admission 对 registry、recent order 与 Task 引用的变化必须与 Task candidate 一同提交，不能发布只更新一半的关系。
 
-Task 标题仍由 Product Control 独占。首个 Run admission 在标题为空时立即用既有首个 Text 安全行或 Skill display name 规则提交临时标题，同时冻结一份同一 Task ExecutionConfig；Run terminal 发布后，同一 executor worker 使用 Agent 公共表面的独立非流式 Completion 生成有界标题候选，不创建新的 Session、Run、Conversation 或历史记录，也不改变 terminal fact。主线程只在该值仍由自动标题流程拥有且候选仍属于 generation 1 时替换；用户 rename、预置标题或后续结果都优先并使候选失效。Completion 失败、超时、非 `end_turn`、非法或多行输出和 shutdown cancel 均保留临时标题；标题提交继续执行 credential redaction 和 Task persistence，短寿命 ExecutionConfig 在请求与 watchdog quiescent 后 secure-zero。
+每个 Task 在创建时取得 owned ExecutionConfig 和 immutable binding epoch。默认配置变化不热替换已有 Task；显式改变 Task execution 必须在 Task idle、authority 精确且持久化 candidate 可提交时形成新的 binding。Run、manual compact 与 Conversation recovery 共享 Task-owned active-operation 槽；删除和 Session replacement 是独立生命周期用例，必须与该槽互斥并等待已有 operation 收口，不能通过不同入口并发改变同一个 attachment。
+
+Automatic Workspace record 只有在 owning Task 已物理删除且相关 Run event、worker、Session 和 catalog lease 全部 quiescent 后才能释放。真实目录不因 Task 删除、shutdown 或重启被递归删除，也不能通过扫描遗留目录猜测或恢复 Product record。
 
 ### 2.3 Scheduled Task
 
-Scheduled Task 是 Product Control 持有的 live Product Schedule aggregate，不是独立 Product owner。`product/schedule/runtime.zig` 是唯一存储与行为入口，独占 bounded definition/occurrence store、persistence health/candidate commit、wall-clock/timer policy、background availability、notification 与 occurrence claim/finalize/reconciliation；`state.zig` 只定义结构化 recurrence、跨恢复稳定的 `(scheduledTaskId, plannedAt)` identity 与纯状态转换，`persistence.zig` 独占无 secret codec、恢复校验、schema revision 与 Application-opened concrete FileStore，`view.zig` 只借用 state 与 callback-scoped 文本投影器并编码完整 `scheduledTasks` 子树。Product Control 不得读取 Store/Item、occurrence wire、Claim/Due/PendingCompletion 阶段或直接编码 Schedule persistence，只经 Runtime 的 typed operation/query 和 `writeProjection` 调用；Runtime 以 callback-scoped `TaskEffects` 请求“是否仍活跃、启动一个 Scheduled Task、读取 terminal outcome”三项能力并完整收口 occurrence saga，只持久化已提交的 Task id 事实，不保留 Product Control capability 或可变 Task 指针。Product Control 仍负责证明当前 execution/Automatic Workspace authority、执行真实 Task create→rename→Run、发布全局 revision、注入全局 credential 清洗规则并把 Schedule 子树编入完整 snapshot。定义只保存名称、Text instruction、recurrence 与无 secret execution facts，不保存 Workspace target、Skill identity、catalog revision 或 Skill 参数；需要 Skill 的意图仍属于 instruction，occurrence 只生成普通 Text Run。当前仍处于 pre-release 开发期，Scheduled Task persistence schema 固定为 `1` 并对定义结构原地 hard cut：只接受当前 shape，不保留旧字段的解析、双写或迁移；旧开发数据按现有损坏恢复路径处理。
+Schedule aggregate 拥有 Scheduled Task definition、触发游标、occurrence history、persistence health 与 occurrence reconciliation。Application 只提供持久化、wall clock、单一平台 timer、notification 和后台窗口生命周期 capability；它不决定 recurrence、missed occurrence 或 Task admission policy。
 
-Application 只注入平台 capability：产品数据目录中的原子读写、wall clock、单一 Native timer、notification，以及 tray/hidden-window 生命周期。主窗口 `close_policy = hide` 后 Application、Product Control、Executor 与 timer 都保持存活；tray 是重新打开窗口和显式退出的唯一入口。后台不是 Renderer timer，也不是 Agent Runtime capability。Application 重启时必须先恢复并校验 canonical Schedule store，再 arm 最早 due time；若最近计划时间已经过去，只对每条定义协调一个最新 occurrence，不遍历补跑全部历史。store 损坏或提交结果不确定时 fail closed，保留可诊断 persistence health，不能假装成空列表。
+到期 callback 只唤醒 Schedule reconciliation，不能直接调用 Agent。一个已接纳 occurrence 必须通过 Product Control 的既有 Task 创建、命名和 Run admission 形成真实 Task，并复用同一 Workspace、ExecutionConfig、Executor、Session、event pump、permission、persistence 与 snapshot 路径；不得建立绕过这些 Gate 的 schedule queue、worker 或 AgentCore 调用路径。
 
-到期回调在主线程要求 Schedule Runtime 最多提交一个 occurrence，再为下一次 due time 重新 arm。成功 occurrence 通过 Product Control 注入的单次 `TaskEffects.launch` 调用既有 Task 创建、命名与 `runTaskAtBinding`，因此复用同一 Session、Run record、Executor、event pump、permission 和 snapshot 路径；不能新增绕开 admission 的 schedule queue、schedule worker 或直接 AgentCore call。系统通知只消费已经提交的 Product occurrence/Task fact，通知失败不得伪造 Run cause或回滚 terminal fact。
+Schedule 只持久化已提交的 occurrence 与 Task identity，不持有 Product Control capability、可变 Task 指针、API credential 或 live Session。Task launch 的明确失败按 occurrence transaction 收口；结果不确定时不得重放可能已经创建 Task 的 launch。系统通知只消费已提交的 occurrence/Task terminal fact，通知失败不能回滚产品事实或伪造 Run cause。
 
-### 2.4 Skill catalog 与本地资产管理
+Schedule 引用的 execution authority 在触发时必须重新校验；不能用历史 generation 猜测或恢复 credential。Schedule store 是独立持久化边界，其 credential scrub 必须作为 durable candidate commit 完成，不能只修改内存 projection。
 
-Product Control `TaskRunInput` 只有 Text/Skill 两个分支。Skill admission 在建立 Run record 前校验 Workspace/Task epoch、pinned revision、稳定 `skill_id`、参数数量、UTF-8 与产品容量；Run history 保存 admission 时的 invocation/display/arguments，不随后续 catalog 改写。AgentCore 仍负责最终参数、资源和 policy 校验；`stale_catalog`、`skill_not_found`、`invalid_skill_arguments`、`skill_policy_violation` 与 `skill_unavailable` 形成独立产品 cause，保持 Session 可复用且不自动刷新或重放。
+### 2.4 Skill authority 与本地资产
 
-Skill 中心在当前锁定的 AgentCore typed catalog 之外增加 Product Skill-owned 本地资产管理层，但不形成新的产品 owner、AgentCore loader 或 Session execution binding。`product/skill/package.zig` 独占本地 Skill 目录与 canonical `.skill` ZIP 的路径/资源上限预检、regular-bytes-only staging、内容摘要和导入导出，不执行包内容或访问网络；`product/skill/management.zig` 拥有 personal/project inventory 与 transaction 实现、安装 provenance、独立 `install_id`、canonical-root 原子 publish/rollback、recovery 和持久 store，并消费同一 Product Skill package kernel；`product/skill/state.zig` 持有 live inventory/transaction、management/enablement health、staging root 与 reconciliation latch。Application 直接创建并持有 management `FileStore`，同时只注入 canonical user home、产品数据目录与 Native file/folder picker；Bridge 直接消费 management 的 data-only identity/scope 类型，Renderer 不持有物理路径。`agent/catalog.zig` 继续独占 AgentCore query/lease 与运行时 projection；catalog member/run identity 使用 concrete `skill_id`，跨 catalog 内容 revision 的启用策略身份使用 AgentCore `skill_policy_key`，两者都不得被 `install_id`、目录名或 Renderer 推导的 invocation 取代。管理 inventory 可以在已经授权的 canonical `<home>/.agents/skills` 和 `<workspace>/.agents/skills` 内枚举直接 Skill entry、读取受限 package 内容并建立 provenance，但不得自行决定 runtime winner、conflict、health 或 catalog revision；这些结果只来自 Product Skill Runtime 经窄 Agent catalog port 发起、并由内部 management runtime 完成 reconciliation 的正式路径。
+Product Skill aggregate 拥有本地资产 inventory、management transaction、enablement policy、Workspace catalog authority 与其持久化健康。Agent 拥有 AgentCore catalog acquisition、opaque lease 与运行时 catalog identity；Application 只注入 FileStore、受限文件能力和原生 picker。Product Control 负责 Workspace/Task authority、shared Executor admission、全局 revision 与完整 snapshot，不读取 Skill 内部 state 或拼装物理路径。
 
-`product/skill/enablement.zig` 独占用户默认 + Manual Workspace 覆盖 policy 与 `skill-enablement.json` schema 1 store。快速开发阶段直接原地 hard cut schema 1 内容，不解析或迁移旧 shape，也不提升 schema version。store 以全局 `last_revision` 分配 mutation revision；user record 保存 disabled `skill_policy_key`，Workspace record 保存 `workspace_id + workspace_epoch`、effective `policy_revision` 和互斥的 enabled/disabled policy-key overrides，缺少 override 表示 inherit。用户 mutation 给 user 与所有现存 Workspace record 盖同一个新 revision；项目 mutation 只推进目标 Workspace；no-op 不推进。`product/skill/policy.zig` 负责 persistence failure 到 health/authority invalidation 的纯决策、scope invocation 查询，以及按 `Workspace override > user default > enabled` 计算 selection revision 与 disabled policy keys；它调用 `catalog.zig` 一次编译/重编译 immutable authority，但不执行 persistence、catalog acquisition 或 publication。`product/skill/runtime.zig` 持有 `state.State`、Personal/Workspace current authority、request generation、catalog job 与 Workspace binding；committed authority 同时拥有 opaque lease 与 immutable snapshot，lease 释放只经窄 catalog port 回到 Agent。`product/skill/view.zig` 读取这些 state/policy/catalog/management facts，派生 revision 1 Skill catalog 与 management snapshot 子树；敏感文本写出和 Workspace scoped catalog 迭代只以 callback-scoped capability 借入，不保留 Workspace、secret、buffer 或 effect。Product Skill Runtime 拥有 catalog acquisition job 及其 refresh/reschedule/stale/shutdown 生命周期，也拥有 enablement CAS、candidate compile、persistence commit、authority swap 与 failure invalidation；它只借用 shared Executor 与 Agent catalog ports。Workspace/Task 生命周期、authority 校验、Executor 本体和线程仍不归 Product Skill。Product Control 再从 snapshot 中 enabled winners 生成 AgentCore `SkillPolicyV1.granted_skill_ids`，禁用 winner 不回退到被遮蔽候选。mutation 必须以对应 catalog、selection 和 Workspace epoch（若有）做 CAS。mutation 先 clone policy store，并为 Personal 以及所有具有 committed authority 的受影响 Workspace 预编译完整 candidate；任一 candidate 失败则不写 store，持久化明确成功后才无失败替换 store 与 authorities。没有 committed authority 的 Workspace 不进入 candidate 集合、不会锁死 user mutation，并在以后 catalog 成功时按最新 policy revision 编译。已经创建的 Task/Session 不随 toggle 自动重绑。read/corrupt/write/outcome-unknown 都 fail closed，不能降级为全启用；明确 write failure 保持旧 committed state，outcome unknown 冻结新的 Skill authority 与 admission，Text 路径保持可用。启动恢复在 Product Control ready 前清理不存在或 epoch 已变化的 Workspace record；Workspace 删除/重新授权事务提交后再次 reconciliation。Application 只直接打开并持有 Product Skill `FileStore` capability，再经 composition 注入 Product Skill Runtime；Product Control 不取得 concrete store 类型，也不执行 enablement encode/commit。Product Control 仍拥有完整 snapshot 根编排、容量 buffer、revision 与交付。
+Personal 或 Manual Workspace 的 committed Skill authority 必须不可分地拥有 immutable catalog snapshot、policy revision 与对应 Agent lease。catalog acquisition、policy mutation 或本地资产 reconciliation 先形成完整 candidate，并在提交时重新校验 Workspace identity/epoch、catalog identity、policy revision、相关 active operation 与 shutdown。stale candidate 只销毁并释放 lease，不安装、不自动重试。
 
-package、policy、state、view 与 management runtime 都是 Product Skill Runtime 的内部实现，不从 `product/skill.zig` 暴露；Product Control 只能通过 Runtime 的 typed operation、query 与 view API 使用这些事实，不得直接 import kernel 或读取 `.skill.state`。Runtime 不发布 `CatalogSlot`/`CatalogControl` 或其可变指针；新 Task admission 与 Task 显式 refresh 只借用 immutable snapshot + Agent lease authority，所有 catalog redaction、invalidation、generation 与 reschedule 仍在 Runtime 内完成。Conversation recovery 不消费 Product Skill，恢复后的 Manual Task 通过既有显式 refresh 重新取得能力。enablement 与 management 仍作为 Application FileStore 和 Bridge data-only DTO 的窄叶面直接发布，不因此形成第二个 live aggregate。
+Enablement mutation 先构造受影响 authority 的完整 candidate，再提交无 secret policy store，最后 no-fail 替换 committed authority。明确 write failure 保持旧 authority；outcome unknown 必须冻结新的 Skill authority mutation 和 Skill admission，不能降级为全启用。尚无 committed authority 的 Workspace 不得锁死无关 scope 的 mutation，但以后取得 catalog 时必须按最新 committed policy 编译。
 
-当前本地来源只有 `local_package`、`local_directory` 与 `external`。普通 Task 写出的 Skill 没有可靠发布事件，因此不得虚构 `created` 来源：写入项目 Skill root 后表现为 external project asset，打包后再导入则按真实本地来源记录。公司市场未来只能作为新的 package acquisition adapter 接入同一 staged transaction；服务上线前不注册 wire tag、UI 占位、搜索、排名、在线更新或 GitHub/skills.sh 依赖。MetaWork 不建立中央 Skill repository、symlink/copy fanout、Agent adapter、Preset 或第二份 catalog。
+Task 创建时同步借用当前 Workspace authority 并取得独立 pinned snapshot/lease；已创建 Task 不因 catalog refresh、enablement toggle、安装、替换或删除自动重绑。idle Task 只能通过显式 refresh，在 Agent 成功替换 Session catalog 后提交新的 pinned authority。Conversation recovery 不以 Skill readiness 作为资格，也不向 restore 注入旧 Skill authority；恢复后由既有显式 refresh 重新取得。
 
-`.skill` 是 MetaWork 的可交换 ZIP envelope；规范导出在 archive root 直接包含精确大小写的 `SKILL.md` 和同一 Skill 的相对资源。导入普通 `.zip` 时只允许 archive root 本身或唯一 wrapper directory 成为候选 Skill root；多个 `SKILL.md`、多个候选根或 root 缺失均失败。归档和目录 import 都必须在目标 root 之外 materialize 为 staged tree，并拒绝 absolute、drive/UNC、空、`.`、`..`、NUL、非 UTF-8、重复归一化、Windows 保留名/尾随点空格路径，拒绝 symlink、hardlink、device、socket、FIFO 与其他特殊 entry；当前合同上限为 512 个 regular files、64 MiB 解压总量、16 MiB 单文件、512 UTF-8 bytes 相对路径和 128 UTF-8 bytes 单 path component。`.skill` 压缩输入上限为 32 MiB。Importer 只读取/复制 regular bytes，不执行脚本、解析远程链接或发起网络请求；export 服从同一边界并使用稳定相对路径排序，不包含绝对路径、provenance store、credential、`.git` 或平台 metadata。
+本地资产 import、reimport、uninstall 与 retry 使用同一 staged transaction：preview capability 绑定 source、内容摘要、目标 scope 与有效期；commit 重新校验 capability、目标 Workspace authority、冲突 generation 和相关 Task quiescence；publish 后必须完成 Agent catalog reconciliation。明确且可归因于候选的失败回滚 candidate/backup；catalog 暂时不可验证时保留可恢复 transaction 并发布 `pending_verification`，不能声称 ready。恢复只能完成或回滚已登记 transaction，不扫描、接管或删除 canonical root 外的目录。
 
-Import preview 使用一次性、window/source-bound opaque staged capability，并在 preview identity 中绑定 content hash、候选名、source kind、容量结果和 expiry；Renderer 提交的 commit 只能包含该 preview identity、显式 target `personal | project(workspace_id, expected_epoch)` 与冲突确认 generation。目标 entry 由 Host 从受限候选名生成且必须保持在 canonical Skill root 直接子级；Renderer 不能提交目录名或路径。Publish 在同一 filesystem 上用 sibling candidate 与 backup 进行 rename transaction：先重新验证 capability/hash/target/generation 和相关 active-operation gate，再把既有 target 移到唯一 backup、candidate 移入 target、执行 AgentCore catalog reconciliation，最后删除 backup。明确映射到候选 invocation/scope 的 definition/resource/conflict failure 会恢复 backup；catalog transport/runtime 暂不可验证时保留 target 与 backup transaction record，发布 `pending_verification`，只允许 Retry 或 Uninstall，不能声称 ready。恢复时 fail closed 地完成或回滚唯一 transaction；不扫描、接管或删除 root 外目录。
+### 2.5 MCP authority
 
-Personal mutation 在任一可能消费 personal catalog 的 Task 存在 active operation 时拒绝；project mutation 在目标 Workspace 的 Task 存在 active operation时拒绝。已经发布的 mutation 不热更新 Session：Workspace current 与顶层管理 catalog 通过显式 transaction 重查；Task pinned catalog、draft identity 和参数保持原值并进入 stale 提示，只有用户在 idle Task 上显式 refresh 并重新选择后才能提交新的 Skill Run。Uninstall 与 replacement 使用同一 gate/backup/reconciliation；external asset 只有在 inventory 能证明它是 canonical Skill root 的直接子级、没有 link/reparse escape 且持有对应 personal/workspace authority 时才开放导出或删除，否则只以 `externally_managed` 展示。
+Product Control 拥有 MCP Desired Registry、connection approval、OAuth consent、credential locator、Runtime Manifest、Admission Authority、mutation/recovery 与 Task admission。Agent 拥有 connector/backend 生命周期、AgentCore descriptor、declarative Runtime apply、Activation、catalog 与 Selection。Application 只执行 child、network、系统 credential、OAuth、HTTP auth snapshot 与跨 owner coordination，不拥有 MCP JSON-RPC、产品状态或 admission policy。Account 与 MCP 不共享 ownership、credential service 或 persistence。
 
-启用/禁用 mutation 只更新 Workspace current policy；已经创建的 Task 保留其 pinned catalog 与 pinned policy，运行 admission 同时校验两份 revision，disabled Skill 返回独立 `skill_unavailable`。idle Task 显式调用 Agent-owned `Session.refreshSkillCatalog`，原子替换 catalog lease 与 typed policy。Host 重启恢复不查询 Workspace catalog、不向 Session restore 传入 Skill authority，也不建立 pinned projection；Task persistence 不新增 policy 字段且不升级 history wire。恢复后的 Manual Task catalog 固定为 uninitialized，只有既有显式 refresh 成功后才使用当前 catalog/policy；Automatic Task 不绑定 Skill。
+Desired Registry、Runtime Manifest 和 Admission Authority 是三个不同事实：
 
-Skill management persistence 是 Product Skill-owned、无 secret、原子 candidate commit 的独立 schema 1 store。记录仅保存 `install_id`、source kind、目标 scope/workspace identity、Host-only target entry、content hash、安装/重新导入时间、management state 与未完成 transaction recovery facts；不保存 Skill body、raw path 到 Renderer、catalog handle、credential 或 Task binding。当前仍处于 pre-release，schema 原地 hard cut，不解析、双写或迁移被替代的开发 shape。对应 wire 与 transport 只由 [Renderer Bridge 合同](renderer-bridge-contract.md)定义。
+- Desired Registry 表达已 durable 提交的用户意图；
+- Runtime Manifest 表达正式 Agent Runtime 已接管的 descriptor，或无法接管的无 secret absence proof；
+- Admission Authority 表达新 Task 当前可以同步借用的已验证 Selection，或明确的 blocked reason。
 
-Product Skill Runtime 同时拥有本地 package 与 management 用例。内部 `management_runtime.zig` 对任意选取路径执行有界目录/归档 preview，对 inventory 中已安装资产执行 definition 读取与 canonical `.skill` 导出，并闭合 install/reimport/uninstall/retry、staging、persistence failure、启动恢复和 catalog reconciliation。Runtime 根据已注册的 Personal/Workspace canonical binding 自行拼接、验证和打开 `.agents/skills`，不把 `CanonicalRoot` 或目录布局暴露给 Product Control。Product Control 只证明 scope 对应 Workspace authority 与相关 Task quiescence、提供当前时间事实并在成功后发布 revision；资产身份、健康门槛、canonical root、目标 entry、package 资源约束、文件事务与 reconciliation 决策都由 Product Skill 决定。平台 picker 仍只返回用户选择，不取得产品判断权。
+MCP mutation 必须从 canonical Desired 构造完整 candidate，先提交 registry，再由 Application coordinator 构造 Runtime input、调用 Agent declarative apply、取得正式 Activation，最后由 Product Control 原子安装 Manifest、Activation 与 Admission Authority。正式 apply 成功只影响之后创建的 Session；已有 Session 保持创建时已复制的 authority，不热替换或即时撤权。
 
-### 2.5 Identity 与 credential redaction
+registry commit 明确失败时保持旧 Desired 与 authority；commit 结果不确定时不能宣称 canonical generation，必须保留 recovery fact 并冻结后续 mutation。Agent apply 拒绝、malformed report、resource limit 或 activation failure 形成 typed failure 并保持 fail-closed admission，不能把未接管的 descriptor 标记为 loaded。candidate Runtime test 与正式 Runtime 隔离，不安装 Manifest、Admission 或 Task authority。
 
-Product Control 单独分配稳定的产品 Task identity，并在 Task owner 内保存 Agent Session route identity；AgentCore event 与 event-projection failure 都只按 route identity 回到 owner，Bridge snapshot 与 mutation 只使用产品 Task identity，二者不共享生成器也不依赖数值相等。durable Task binding descriptor 只包含 Workspace/binding epoch、Provider、model 与 opaque execution generation；account identity、Model Connection identity、API Key identity/metadata、connection credential locator 和完整 ExecutionConfig 只属于对应 owner 的当前进程运行时，不进入 Task store、Bridge 或 Renderer。
-credential redaction 是 owner 释放协议的一部分，而不是 snapshot 时的偶然过滤。安装新 credential 前先永久清洗所有既有产品投影；替换或清空默认 execution、释放 quiescent Task-owned execution 前再次使用即将释放的 credential 清洗 Workspace、Task、Run、tool 与 UI history，然后才 secure-zero。序列化仍扫描所有 live credential，并在前缀重叠时采用最长匹配，作为释放前的第二道防线。credential 是 opaque bytes；若匹配发生在 UTF-8 codepoint 内部，所有 ingestion、流式跨 chunk 清洗与序列化路径都必须扩大到完整 codepoint，禁止为了替换 secret 产生非法 UTF-8 产品事实或 JSON。
+Application 启动时只创建一次 canonical empty Agent Runtime；恢复出的 Desired 必须在 Product Control 与 coordinator 就绪后沿与后续 mutation 相同的 apply 路径安装。empty create 后 apply 是正常启动协议，不是失败 fallback 或第二条 Runtime path。Agent Runtime create 失败终止启动；外部 MCP child、network、handshake 或 catalog failure 只能使相关 MCP authority unavailable，不能关闭普通 Text Task admission。
 
-Schedule 是独立持久化边界，因此 credential redaction 也必须是它的 durable candidate mutation，不能只修改内存投影。Account/Application handoff 在 Product Control 安装新 execution 或清除旧 execution 前，必须先用当前默认 execution、所有 live Task execution 与候选 credential 清洗完整 Schedule candidate，并确认 `scheduled-tasks.json` commit 成功；明确失败或 outcome unknown 都不得转移 execution ownership。Account fact 已提交而 Schedule scrub 失败时保留旧 Product Control execution，但 generation 不一致会关闭新的 Task/Schedule admission，不回滚另一个 owner 的 Account 事务。每一次 Schedule candidate commit 都必须在编码前用当前默认与全部 live Task execution credential 清洗完整 store，并对最终 bytes 做零 credential 断言，保证后续 Task execution 释放路径不需要以 no-fail 内存回调补写持久化。
+MCP apply、OAuth operation、refresh、运行时 reauthorization 与新 Task admission 共享 Product Control 的串行化边界。浏览器等待和网络请求不得持有该边界，只携带 server-bound operation identity；完成时必须按 operation、server/connection fingerprint、consent epoch 与当前 generation 重新授权。stale 结果只清理自身资源。目标 server 进入 OAuth 或 reauthorization 时必须先提交排除它的 reduced authority，不能无关地冻结其他 server 或普通 Text Task。
+
+freshness failure 必须使旧 Admission fail closed 并触发现有异步 refresh；原 Task create、restore 或 mutation 不自动重放。refresh、apply 或 OAuth 已占用执行边界时必须保留 pending 事实，不能丢弃触发。关闭时先停止 MCP management、OAuth/refresh timer 与新 Task admission，再 settle/join worker，释放 Admission 与 Activation，最后由 Agent owner 释放 transport 与 Runtime。
+
+### 2.6 Identity 与 credential redaction
+
+Product Task identity、Agent Session route identity、execution generation、Workspace identity、Skill policy identity 和 MCP server identity 各自属于对应 owner，不共享生成器，也不能依赖数值相等。跨边界只传递完成当前校验所需的稳定 identity 和 generation，不传递内部指针或 secret-bearing owner。
+
+Credential redaction 是 owner 释放协议，而不是 snapshot 时的偶然过滤：
+
+1. 安装新 credential 前，先清洗所有可能包含它的既有产品文本；
+2. 替换或清空默认 execution 前，清洗 Workspace、Task、Run、Tool、UI 与 Schedule 的 durable candidate；
+3. 释放 quiescent Task-owned ExecutionConfig 前，再用即将释放的 credential 清洗该 Task 的全部产品历史；
+4. durable commit 成功后才能转移或 secure-zero 对应 credential ownership；
+5. serializer 继续扫描所有 live credential，作为提交前的第二道防线。
+
+Schedule scrub 明确失败或 outcome unknown 时不得转移默认 execution ownership。若 Account fact 已提交而 Product Control durable scrub 仍失败，保留旧 Product Control execution 并关闭新的 Task/Schedule admission，不回滚另一个 owner 已提交的 Account 事务。
+
+Credential 是 opaque bytes。redaction 必须覆盖流式跨 chunk 与 UTF-8 codepoint 边界；多个 credential 前缀重叠时采用最长匹配，不能因替换 secret 产生非法 UTF-8 产品事实。credential、locator、Authorization header 和可重建 secret 的 metadata 不进入 Bridge、Renderer、日志、产品历史或 checkpoint record。
 
 ## 3. 并发与生命周期
 
-```text
-SessionRuntime
-├── AgentCore Session handle
-├── Conversation 所在 AgentCore Session 生命周期
-├── task binding epoch 对应的 owned ExecutionConfig generation
-├── current_operation: none | RunJob | CompactJob
-├── bounded input/event state
-├── synchronous UI wait state
-└── callback lifetime guard
+- 每个 Agent Session 至多一个 in-flight operation；Run、manual compact、Session mutation 与 destroy 互斥。Conversation recovery 按 §2.2 的 Task-owned active-operation 槽互斥，成功提交后才形成新的 Session attachment；
+- 每个 Session 在创建时绑定 immutable ExecutionConfig generation；默认配置变化不热替换 live Session，显式 Task rebind 也必须形成新的 Session attachment；
+- Product Control 创建、排队、取消并关闭 bounded Executor；Agent Runtime 不接收 scheduler capability，worker 只能从 Product Control admission 进入 Agent 调用；
+- worker job 只持 owned payload、稳定 record reference、scoped Agent Session access 和完成本次工作所需的窄 capability，不保存 Product Control、aggregate Runtime 或主线程可变状态指针；
+- queued cancel、worker completion、terminal publication 与 worker reference 必须各自 exactly once 收口。terminal fact 在通知、释放引用或触发外部 owner 前完成 write-once publication；
+- Bridge/main thread 不执行长耗时 Agent 调用，也不等待 permission。Renderer response、snapshot failure 与 transport disconnect 只作为 typed transport fact 进入 Product policy，默认不能中止后台 Run 或覆盖 terminal cause；
+- File Preview 使用独立于 Run、catalog、restore 与 MCP 的 bounded execution lane。worker 只接收深拷贝的 root-relative locator 和读取上限；完成回主线程后重新校验 Task、Run、Workspace authority 并执行 credential redaction。raw bytes 不进入 Product history、Snapshot、持久化或日志；
+- async completion 必须按开始时冻结的 attempt、object identity、epoch/generation、attachment 与 shutdown token 全量重新校验。任一 token stale 都只销毁 candidate，不安装、不自动重放原请求；
+- capability 只在同步调用或明确的 worker lifetime 内借用；关闭开始后不得建立新的 job、timer、callback 或 responder 对 owner 的引用。
 
-RunJob
-├── run_id
-├── pending external interruption（Product Control admission/handoff 窗口）
-├── executor slot
-└── run-scoped Host scratch
+Application 关闭 Product 路径时必须遵守以下顺序：
 
-CompactJob
-├── monotonic operation_id
-├── executor slot
-├── advisory handoff / pending interruption
-├── preallocated bounded terminal diagnostic storage
-└── allocation-free write-once compact terminal publication
-```
+1. 停止 Bridge ingress、新 Product admission、Schedule/MCP timer 与会产生新工作的 coordinator；
+2. 停止独立 execution lane，并在主线程 drain completion、重新授权、脱敏且 settle responder 恰好一次；
+3. 取消 queued/running Product jobs，join Executor，并等待 Task access、worker reference 与 aggregate completion quiescent；
+4. 停止 Product 对 Agent 的新调用，再由 Agent 执行其完整 Runtime shutdown；
+5. 完成最终 event drain 与 lifecycle sync，才释放残留 attachment、execution authority、aggregate 和 Product Control；
+6. Account committed shutdown effect 取消自身 timer、join attempt worker 并清空平台 port 后，Application 才释放对应平台 binding。
 
-- 每个 Session 至多一个 in-flight operation；Run、manual compact、Session mutation 与 destroy 互斥；
-- 每个 Session 在创建时绑定一个 immutable ExecutionConfig generation；默认 Account/Model Connection 配置变化不热替换 live Session，显式 Task rebind 也必须创建新 Session；
-- Host 使用有上限的 Product Control executor；
-- 空闲 Session 不占 worker；同步 Run、同步 UI wait 和 manual compact 占用 execution slot；
-- Product Control 创建、排队、停止并销毁 bounded Executor；Agent Runtime 不接收 Scheduler capability，worker 从 Product Control queue 主动进入 Agent Run；
-- Scheduled Task 的 recurrence、持久触发游标、wall clock、timer admission 与 occurrence saga 由 Product Control 持有的 Schedule Runtime 拥有；Application 只提供 store/timer/notification/tray capability。Product Control 只注入 callback-scoped `TaskEffects` 并向同一 Task/Run Executor 提交真实产品工作，不消费 Schedule 内部 due/claim/completion 阶段，也不把 scheduler capability 注入 Agent Runtime；
-- Bridge/main thread 不执行长耗时 Run，也不等待 permission；
-- File Preview 使用 Product Control-owned 的独立有界 lane（2 workers、最多 8 个 in-flight），不占用 Run/catalog/restore/MCP 共用 Executor。主线程只做精确 Task/Run/reference lookup、Workspace authority 冻结与 completion reauthorization；worker 只拥有深拷贝的 root-relative locator 和上限，执行 no-follow bounded read 并写入 lane-owned completion。raw bytes 不进入 Product Task、Snapshot、persistence 或 Bridge；主线程完成 current/historical credential redaction 后只以 callback-scoped result 交付；
-- 只有 `agent/` import `metask_agentcore`；Application 只组装 Agent，ABI discovery 由 Agent 内部完成，Product Control 通过 Agent 公共 validated types 消费，Bridge DTO 不暴露 SDK enum/owner/handle；
-- `product/account/contract.zig` 不导入 Native SDK、Agent、Product Control、Bridge 或 AgentCore；Account Runtime 只消费 `product/account/ports.zig`，Application 的 `account_platform_binding.zig` 适配 Native SDK 与文件系统；Product Control/Bridge 只导入纯 contract，不导入 Account runtime；
-- Account Runtime 的 committed shutdown effect 必须在 Native SDK runner 返回前取消 Account timer、join attempt worker 并清空 port 引用；Application 随后释放 platform binding，Account 的普通 `deinit` 只释放不依赖平台存活的内存；
-- Agent 只通过有界 notifier 报告事件就绪，Application 负责把 wake 安全提交到平台主循环；精确状态、retry 与 deadline 见 [AgentCore 集成契约](agentcore-integration.md)；
-- Renderer response、revision、snapshot 和 connection failure 作为 typed transport fact 进入 Product Control policy，默认只拒绝、重试或断开，不中止后台 Agent Run；
-- MCP mutation、catalog refresh 与新 Task admission 共用 Product Control 的有界串行化边界；Task create 只在 authority 稳定时同步把当前 selection 交给 AgentCore 复制，持久化结果未确定、freshness-invalidating refresh pending、refresh in flight 或 shutdown 时不得取得旧 authority；仅由显式预刷新产生且尚未取得 Runtime 的 pending request 不提前撤销仍有效的 reduced authority；
+Agent Session、callback、UI request、event pump、close race、错误映射和 Agent Runtime 内部销毁顺序只由[AgentCore 集成契约](agentcore-integration.md)定义；Product/Application 不得拆开或替代 Agent-owned shutdown fence。
 
-AgentCore Session、callback、UI request、event pump、close race、错误映射与 Runtime 销毁顺序只由 [AgentCore 集成契约](agentcore-integration.md)定义。
+## 4. 产品历史、持久化与恢复
 
-## 4. 产品状态、持久化与恢复
+### 4.1 Durable history 与 runtime attachment
 
-当前同步 baseline 应形成以下可靠 Host 状态：
+Product history 保存用户可观察且跨重启仍有意义的 Workspace、Task、用户消息、已提交 assistant 输出、Tool 结果、UI 决策、Run/compact terminal fact、execution provenance 与 checkpoint reference。完整产品范围以[产品需求](requirements.md)为准。
 
-- 用户提交的消息；
-- 已完成的 assistant 消息；
-- 工具调用和结果；
-- 同步审批决策；
-- Run 的 running/waiting/stopped/completed/cancelled/failed/interrupted 状态；
-- manual compact 的 queued/compacting/stopping 与 append-only terminal history；
-- WebView reload 所需的当前 Host view snapshot。
+Durable Task record 与 runtime attachment 必须分离。durable record 不保存 live Agent Session、catalog lease、pointer、atomic、worker/control payload、credential 或 `closed` 产品终态；runtime attachment 线性拥有 Agent Binding、ExecutionConfig 与必要 lease 的唯一使用和归还责任。Task detach 或 replacement 必须先关闭并归还 live Binding，不能丢弃或复制所有权。
 
-`product/task/execution.zig` 独占 Run/Compact executor payload 与 execute/cancel callback。每个 job 只消费稳定 record、入队前取得的 scoped Session Access、notifier/completion/text-projection/checkpoint capability 与对应 worker-reference atomic，不保存 Product Control、Task aggregate 或 Task runtime 指针。自动标题 credential clone 归 Run job 线性所有，record 只保存状态/result facts；job destroy 在 queued cancel、执行完成和入队失败路径统一 secure-zero。
+Run/compact 的 terminal result 由 Agent 以自包含事实返回，Product 在预留 record 中 no-fail、write-once 提交后才能通知、释放 worker reference 或推进后续事务。queued-before-execute 由 Product 生成独立的 pre-execution terminal fact；Agent Session snapshot 只描述 live lifecycle，不承担历史 terminal truth。
 
-Product Control 在 admission 时为每个 Run 或 compact 建立稳定 record slot 和 bounded terminal diagnostic storage；Run 另有单调 generation，并拥有自己不可变的 `execution_model` 副本。checkpoint description 所需的 Task identity、binding epoch、model 与 last Run/compact identity 同时冻结进该 operation record，executor worker 在 terminal publication 后只消费这份不可变 context，不遍历 main-thread-owned durable arrays。executor worker 入队前直接取得 Task-owned stable record reference，并在 queued cancellation、执行失败或 terminal publication 收口后精确释放；需要生成 checkpoint 时，该引用延长到主线程提交 `CheckpointRecord` 或明确丢弃 candidate 后才释放。该真实引用非零时 Task record 不得物理释放。删除是 Product Control-owned、runtime-only 的独立用例，不进入 `RuntimeAttachment` 或 durable Task：`task_deletion` 只消费各 owner 的只读事实，并固定按 checkpoint → terminal event → Session release → worker reference → durable commit 的顺序选择唯一下一 effect；`projection` 在删除请求、checkpoint settle、Session close completion 与 lifecycle sync 后重复推进同一个用例。明确失败转为产品级 `failed` 并停止自动推进，只有用户显式重试才重新进入 `deleting`；Task store 提交失败必须恢复候选，命令受理只表示删除意图成立，不表示 durable record 已移除。Agent 对已开始的 operation 返回自包含、不可变的 terminal result；Product Control 将其 allocation-free、no-fail、write-once 地提交进预留 payload，`published` release-store 是唯一 terminal linearization point，完成前不得 notify、释放引用或调用外部 owner。queued-before-execute 由 Product Control 直接生成 pre-execution 产品结果。Session snapshot 只描述 live lifecycle，不再承载历史 terminal facts。
+Task 删除是跨持久化、checkpoint、event、Session 和 worker reference 的独立 Product 生命周期用例，不占用 active-operation 槽；其 `idle | deleting | failed` 状态只存在于当前 Runtime，不进入 durable Task record。删除意图可以先进入 `deleting`，但只有相关 active operation、checkpoint、terminal event、Session access 和 worker reference 全部收口且 durable history commit 成功后才能物理移除 record。明确失败形成可诊断失败并停止自动推进；只有用户显式重试才能再次进入删除事务。结果不确定时保留 candidate 并冻结相关 mutation，不能把命令受理解释为 record 已删除。
 
-Compact 的 executor handoff 与 pending interruption 是 advisory control fact，不能覆盖 terminal payload。Product Control main thread 按 `terminal publication > pending interruption > worker handoff` 派生 `terminal / stopping / queued|compacting` 产品 phase；独立 cancellation atomic 即使在 terminal race 后被设置也必须被忽略。Compact 没有 Run event stream，因此不复制 Run 的 final event-drain product gate；snapshot acquire 到 published payload 后即可消费全部 terminal fields 和 diagnostic bytes。
+### 4.2 `workbench-history.store`
 
-Product Task 将 `DurableTaskRecord` 与 `RuntimeAttachment` 分开：前者拥有 Task 产品历史、归档标记和可选 `CheckpointRecord`，不保存 `closed` 产品终态；后者以 tagged union 独占 `agent_session.Binding`、ExecutionConfig/catalog lease，或明确表示 detached 且不持有这些资源。实际 Agent Session allocation/slot、AgentCore handle 与内部生命周期仍由 Agent Runtime 拥有，Task Binding 只拥有唯一使用与归还责任；普通 detach 必须先 `closeOutcome` 并 `releaseClosedSession`，不能丢弃 live Binding。进入 closing 时，Task 将 Binding 线性移入 close-worker 独占槽，同时在主线程侧保留不可变 route id，直到已入队 Agent event 与 terminal fact 全部 drain；close worker 不得原地改写主线程可路由或可借用的 Binding，主线程只有在 join 后才能提交 release、失败恢复或 shutdown relinquish。Run/Compact 内存 record 在 quiescent 前仍包含 terminal control 与临时 redaction secret；Task persistence codec 逐字段白名单编码无 secret 的 Workspace/Task/Run/tool/UI/compact 产品事实与 checkpoint record，pointer、path、opaque handle、raw description、atomic、control payload 和 credential 不进入 wire，Task execution 释放前同时清空 Run 与 Compact 的 secret 引用。Application 在 restore 前按固定顺序取得 `workbench-history.store` 与 checkpoint 目录的 OS exclusive writer lock；history 读取上限为 16 MiB，commit 使用同目录随机临时文件、file sync、原子 rename 和最终文件/目录 sync。checkpoint blob 位于 `<data dir>/workbench/checkpoints/<taskId>/<generation>-<digest>.ckpt`，采用有界流式写入和不可变命名。当前 store 不存在表示首次启动；旧 JSON envelope 以及被当前 hard cut 取代的开发期 frame shape 均不读取、不迁移、不双写。旧 shape 的单个 Task frame 按 decode failure 隔离并进入 `degraded` health，其他符合当前精确 wire 的历史继续作为 canonical projection；该 pre-release 策略不承诺旧开发数据兼容，也不得通过全局忽略未知字段把过期 shape 静默安装。只有 store 无法建立、definite write failure 与 outcome unknown 才关闭全局 Task mutation。Product Task persistence decoder 在组合层安装候选前校验正数 recent order、Run phase/outcome、Tool state/error、Compact→Run、Compact phase/cause、activity order 与 checkpoint record 等跨记录不变量，不能把 Renderer 必然拒绝的状态标为 ready。
+`<MetaWork data dir>/workbench/workbench-history.store` 是 Workspace 与 Task 产品历史的 canonical 本地 store，不是 AgentCore checkpoint、缓存或通用 Storage SQL backend。Application 在 restore 前取得其进程级 OS writer lock，并把有界 load 与 atomic commit capability 注入 Product；Product 拥有 codec、跨记录校验、恢复 policy 和 persistence health。
 
-Renderer reload 重建仍存活 Host 的视图；Host 重启从 Product Control store 重建产品历史与 detached attachment。没有 live owner 的 non-terminal Run/compact 保守收口为 interrupted，不重放输入、工具或 permission；任何恢复 Run 中未完成的 running Tool 都不进入 projection，已完成 Tool result 保留。完成态 Tool result 是 Run terminal 前的持久边界，text chunk 与 progress 只保留在 live projection。每个成功收口且 Session 仍可复用的 Run/compact 在 terminal product fact 发布后，由同一 executor job 同步流式 export；blob 必须先 durable commit，主线程随后才把 `CheckpointRecord` 提交进 Task history。新 record 明确失败时保留新 blob 为孤儿；提交结果不确定时保留 candidate、引用和全部 blob 并冻结 mutation，等待重启对账。可信启动先校验 record 对应 blob 的 size/hash，缺失或不匹配时先 durable 清除 record 并记录 typed health，再反向删除无 record 的 blob；Task history 为 `degraded` 时暂停 checkpoint 孤儿清理以保留未知 Task 的 blob；只有完整 store/read-write 状态恢复为可信且 checkpoint store 整体可用时才执行孤儿清理。
+当前合同只接受 canonical framed store，不读取、不迁移、不双写旧 JSON envelope 或被替代的开发期 frame shape。store 不存在表示首次启动。Workspace 与 Task record 独立校验；单条可隔离损坏进入 `degraded` 并保留其他有效历史，而 store 无法打开、全局结构不可信、明确写失败或 commit outcome unknown 必须关闭相应 Product mutation，不能伪装为空历史或成功提交。
 
-`CheckpointRecord` 嵌套三种不同来源的事实：`blob` 直接复用 checkpoint store 的 Task/generation/byte-size/SHA-256 identity；`session` 只保存 AgentCore `session_describe` 中有恢复消费者的 `logical_session_id`、`last_run_id`、`last_compact_id` 与 `model`；`anchor` 保存 Product Control 提交时的最新完整 Run/compact terminal 和 binding epoch。旧 `logical_id` 只是 digest hex，内存和 wire 均删除；`chunk_count` 只属于 export candidate metrics。持久 codec 原地 hard cut 为该嵌套 shape，不保留旧内部 layout、迁移或双读。checkpoint store 的 health 只描述目录打开与已完成的启动校验，不冒充一次 Agent restore 结果。
+store 读取上限为 16 MiB。commit 必须在同一目录完成 durable atomic replace，并区分 `committed | failed | outcome_unknown`；临时文件命名、frame header、checksum 算法和 codec 内部布局由唯一实现与测试拥有，不在本文镜像。
 
-Conversation recovery 是 detached Task 的 attachment 重建事务，不是历史重放，也不新建 Product owner。恢复成功定义为 checkpoint 中的 Conversation 被 AgentCore 重建，且 source 侧 Task/binding、checkpoint/terminal anchor、Workspace id/kind/epoch/root/authorization（Automatic 还包括 owning Task）精确；target 侧当前 ExecutionConfig 只须具备相同 provider、可承载 Task model，并在 start→commit 期间保持同一 generation。历史 generation 证明旧 Run 使用过哪个 execution，不是恢复当前 credential 的句柄，也不要求与 target generation 相等。Skill、MCP、Permission 与 projection continuity 是恢复后的可选能力状态，不是恢复资格。Task 的 durable archive fact、`attached | detached` runtime attachment 与唯一 active operation 分离；continuation 可用性和 `continuationRecoveryAvailable` 由 Product Task 的 `CoreRecoveryAuthority + RecoveryAdmissionFacts` 唯一决策，输入只包含上述 source identity、target readiness、persistence/checkpoint store/Agent Runtime readiness、archive/operation/shutdown 与 recovery poison，不包含 Workspace `visible` 或任何 Skill/MCP readiness。主线程 snapshot 只消费启动时已经形成的 checkpoint health，不执行最大 64 MiB 文件读取或 SHA-256；真正的 blob size/hash 再校验只在 recovery job 内完成。
+Host 重启从通过校验的 store 重建 durable history 和 detached attachment。没有 live owner 的 non-terminal Run/compact 保守收口为 interrupted，不重放输入、工具、permission 或结果不确定 mutation；未完成 Tool 不进入恢复 projection，已经 durable 完成的 Tool result 保留。
 
-用户显式发起 restore 后，Product Control 在主线程冻结 checkpoint identity、terminal/binding expectation 与 Workspace/Execution authority，分配 attempt 和 stable worker reference，再提交同一 bounded Executor。job 不保留 Task/Workspace 指针，不导入或查询 Product Skill，不构造 MCP selection，也不取得 projection budget；它只打开并验证同一个 checkpoint source，以 null Skill catalog/policy、null MCP selection 与 null durable permission rules 调用 Agent restore，再把 Session model 切到 Task 当前 binding。checkpoint I/O、AgentCore contract、Runtime shutdown、Session capacity 与 cancellation 作为 typed attempt 结果返回；Agent Runtime 的 MCP refresh 串行化若先于 ABI restore 拒绝，映射为可重试 `runtime_busy`，官方 `mcp_not_refreshed` 空 handle/report 拒绝映射为 `runtime_refresh_required` 并触发既有 refresh coordination，不能落入终局 `restore_rejected`。restore 期间 Task 不能启动 Run、compact 或第二个 restore。
+### 4.3 Checkpoint transaction
 
-AgentCore 返回 `complete` 或 `degraded` restore 都生成成功 candidate；degraded 表示 Conversation 已恢复而不可重建的 Skill/MCP/Permission authority 已由 AgentCore 安全失效。candidate 只持 `Binding + CheckpointRestoreReport + OwnedExecution`，不暴露 `SessionRestoreRoute`，也不直接改变 Task。主线程 commit 再次精确校验 attempt、source Task/binding/checkpoint/terminal anchor、Workspace id/kind/epoch/root/authorization 与 Automatic owner、target generation/model/provider authority、attachment detached、archive/removal/replacement/shutdown。若 source generation H 与 target generation G 相同，直接安装 attachment；若 H≠G，则先以一个 durable binding-adoption 事务把 Task execution generation、binding epoch 和 checkpoint anchor epoch 一同推进到 G/E+1，commit 成功后才安装 attachment。明确持久化失败回滚候选状态并销毁 candidate，outcome unknown 同时冻结后续 Task mutation；进程若在 durable commit 后、attachment 安装前退出，下次启动从推进后的 binding/anchor 再次恢复。历史 Run 的 provider/model/generation 是逐 Run provenance，不随 adoption 改写，也不再要求 generation 等于 Task 当前 binding；同一 Task 可以合法持有 H-run 与 G-run。Skill refresh、MCP generation 变化和 projection capacity 不参与 commit。成功 attachment 的 pinned catalog 为 null，Text 与 built-ins 立即可用；Permission 重新询问，Manual Skill 走显式 Task refresh，Automatic 不绑定 Skill，MCP rebind 属于独立能力事务。完整 restore report 只保留为 runtime health，既有 `restorePermission` wire 从中派生；不新增持久字段或 Bridge shape。
+AgentCore checkpoint blob 与 Product checkpoint record 是两个提交边界。每个成功收口且 Session 可复用的 Run/compact 可以在 terminal product fact 发布后导出 checkpoint；blob 必须先 durable commit，随后 Product 才能把引用它的 checkpoint record 提交进 Task history。
 
-关闭顺序固定为 Application 停止 Bridge ingress，停止并 join File Preview lane，在平台主线程 drain completion、重新授权/脱敏并 settle 每个 async responder 恰好一次，再断开 delivery/detach Product Control；随后调用 `Product Control.shutdownExecutor()` 取消 queued/running restore 并等待 worker/Access quiescence，之后调用完整的 `Agent Runtime.shutdown()`。Agent Runtime 自己用 restore in-flight fence 保护 `session_restore`：锁内预留 Session slot 并计数，锁外执行流式 ABI 调用，返回后锁内对账；shutdown 必须等 restore、catalog、MCP、RunControl lease 与 Session `active_refs` 归零，再关闭 Sessions、检查 catalog leases 并销毁 Runtime。最终 event drain/lifecycle sync 后，Application 把 shutdown 成功事实交给 Product Task，使残留 Binding 单向进入 `relinquished`、清空 Runtime/Session identity 并永久拒绝 access/close/release；Application 不得拆开 Runtime 内部步骤。该能力只恢复正常 Application 重启后的 finalized Conversation boundary；File Preview responder 不属于 Agent async pending，独立 Worker crash、in-flight Run、Agent async pending 与 suspend/resume 仍不在当前范围。
+checkpoint record 只保存：
 
-Account attempt 与 Renderer 生命周期解耦：Renderer reload、短暂断连或视图同步失败不能遗失 Host 中的 deadline、取消能力或 terminal result。Product Control Account projection 必须发布产品 readiness 和 Host 允许的用户动作；Renderer 不从内部 operation、error code 或候选数量自行发明 continuation。
+- blob 的 Task/generation/size/digest identity；
+- AgentCore description 中恢复消费者需要的无 secret Session facts；
+- Product 提交时的最新 terminal 与 binding anchor。
+
+它不保存 credential、catalog handle、permission rule、raw Conversation、临时 export metrics 或 live Session identity。
+
+新 blob 明确成功但 history record 明确失败时，blob 可以暂时成为孤儿；record commit outcome unknown 时必须保留 candidate、引用与相关 blob，并冻结 Task mutation等待重启对账。可信启动先校验 record 引用 blob 的 identity，再清除明确失效的 record，最后反向删除无 record 的 orphan。Product history degraded 或 checkpoint store 不可信时不得执行孤儿清理，以免删除未知 Task 的有效数据。
+
+### 4.4 Conversation attachment recovery
+
+Conversation recovery 是 detached Task 的 attachment 重建事务，不是 transcript 重放、Task 克隆或新的 Product owner。恢复资格必须同时证明：
+
+- source Task、binding、checkpoint 与 terminal anchor 未变化；
+- Workspace identity、kind、epoch、root、authorization 与 Automatic owner 精确；
+- target ExecutionConfig provider 兼容、能够承载 Task model，且其 generation 在 start 到 commit 期间保持不变；
+- persistence、checkpoint store 与 Agent Runtime 可用；
+- Task 未归档、删除、运行其他 operation、replacement 或 shutdown；
+- 当前 recovery attempt 和 poison 状态允许进入。
+
+历史 execution generation 只证明历史 Run 使用过哪个 execution，不是恢复当前 credential 的句柄，也不要求等于 target generation。Skill、MCP、Permission 和 projection continuity 是恢复后的可选能力状态，不是 Conversation 恢复资格；AgentCore 合法返回 degraded Session 时，Product 接受已恢复 Conversation，并让不可重建 authority 保持安全失效。
+
+用户显式发起恢复后，Product 冻结完整 source/target authority 并提交 bounded recovery job。job 不保存 Task/Workspace 指针，不查询 Product Skill，不构造 MCP Selection，也不取得 durable permission rule；它只验证 checkpoint source 并调用 Agent restore。I/O、Agent Runtime、capacity、cancellation 与 typed AgentCore refusal 必须作为 attempt 结果返回，不能折叠成一个终局连接失败。
+
+成功 candidate 回到主线程后必须再次校验全部 source/target token、attachment、archive/removal、replacement 与 shutdown。stale candidate 只销毁。若 target generation 与 durable binding 不同，先以一个 durable adoption transaction 同时推进 Task binding、binding epoch 与 checkpoint anchor，commit 成功后才安装 attachment；明确失败销毁 candidate 并保留 detached Task，outcome unknown 冻结后续 mutation。进程若在 durable adoption 后、attachment install 前退出，下次启动从已推进的 binding/anchor 重新恢复，不改写历史 Run provenance。
+
+## 5. `.skill` 交换 artifact
+
+`.skill` 是 MetaWork 对外可交换的 ZIP envelope。规范 archive root 必须直接包含精确大小写的 `SKILL.md` 及同一 Skill 的相对资源；导入普通 `.zip` 时，只允许 archive root 本身或唯一 wrapper directory 成为候选 Skill root。多个 `SKILL.md`、多个候选根或缺少 root 均失败。
+
+导入必须在目标 root 之外 materialize 为 staged tree，并拒绝 absolute、drive/UNC、空、`.`、`..`、NUL、非 UTF-8、重复归一化、Windows 保留名和尾随点/空格路径；symlink、hardlink、device、socket、FIFO 与其他特殊 entry 一律拒绝。Importer 只读取或复制 regular bytes，不执行脚本、不解析远程链接、不访问网络。
+
+稳定资源上限为：
+
+- 最多 512 个 regular files；
+- 解压总量最多 64 MiB；
+- 单文件最多 16 MiB；
+- UTF-8 相对路径最多 512 bytes；
+- 单 path component 最多 128 UTF-8 bytes；
+- `.skill` 压缩输入最多 32 MiB。
+
+export 服从同一文件与路径边界，使用稳定相对路径顺序，不包含绝对路径、provenance store、credential、`.git` 或平台 metadata。具体 ZIP library、staging 目录、hash 实现和文件事务 helper 由代码与测试拥有；上述 envelope、拒绝规则和容量属于稳定 artifact 合同。

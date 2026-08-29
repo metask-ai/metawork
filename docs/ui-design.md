@@ -21,8 +21,8 @@
 - 产品范围与行为以 [产品需求](requirements.md) 为准；
 - 系统边界、Renderer/Host/AgentCore 职责以 [高层架构](architecture.md) 为准；
 - AgentCore 事件、线程、所有权和生命周期以 [AgentCore 集成契约](agentcore-integration.md) 为准；
-- 当前 ABI 能力以 [AgentCore ABI v1 消费基线](agentcore-abi-v1.md) 为准；
-- 源码位置、模块依赖和平台资产生成路径以 [工程结构与所有权](project-structure.md) 为准；
+- AgentCore 产品能力与投影以 [AgentCore 集成契约](agentcore-integration.md) 为准；
+- Renderer 的稳定 module root、目录 owner 与依赖方向以 [工程结构与所有权](project-structure.md) 为准；平台资产生成合同归对应分发文档与构建清单；
 - 测试归属、平台证据和未验证能力以 [验证规范](validation.md) 为准。
 
 品牌 SVG、用途图标、`metask-tokens.css`、Foundation 组件和产品样式是本文的可执行实现，不是并列规范。实现不得自行引入新的品牌 primitive、组件语义、页面布局或 capability 表达；发现实现与本文冲突时必须显式裁决并同步收口，不能反过来把偶然实现写成设计真相。
@@ -54,7 +54,7 @@ MetaWork 的视觉记忆点不是装饰性的暖色、通用衬线大标题、�
 
 ### 2.1 当前 ABI v1 capability profile
 
-当前锁定的 AgentCore 合同已为以下既有界面提供可验证数据；target availability 与平台证据见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)和[验证规范](validation.md)。Skill catalog、typed Skill Run 与 Composer Slash 使用同一 Workspace/Task snapshot 和 Run product path：
+当前 AgentCore 集成合同已为以下既有界面提供可验证数据；target availability 与平台证据见[验证规范](validation.md)，ABI 接受语义见 [AgentCore ABI v1 合同](agentcore-abi-v1.md)。Skill catalog、typed Skill Run 与 Composer Slash 使用同一 Workspace/Task snapshot 和 Run product path：
 
 - 文本流、工具开始/进度/结果、Run progress、usage、context warning、auto compact、retry 和 stream done；
 - tool permission 同步用户请求；AgentCore ABI 虽保留 Ask question，但 MetaWork Agent 不开放对应 built-in；
