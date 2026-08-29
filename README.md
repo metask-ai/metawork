@@ -77,7 +77,7 @@ bundle 与 ABI 接受规则见 [AgentCore ABI v1 合同](docs/agentcore-abi-v1.m
 - [高层架构](docs/architecture.md)：技术选型、系统职责与安全边界
 - [Product 架构](docs/product-architecture.md)：Product owner、事务、并发与恢复
 - [Account 架构](docs/account-architecture.md)：Account 状态、事务、Metask 合同与持久化
-- [工程结构与所有权](docs/project-structure.md)：active tree、目录 owner 与依赖方向
+- [工程结构与所有权](docs/project-structure.md)：稳定 module root、目录 owner 与依赖方向
 - [Completion 架构](docs/completion-architecture.md)：Agent-owned 无 Tool Completion
 - [Storage 架构](docs/storage-architecture.md)：SQL contract、backend、limits 与 lifecycle
 

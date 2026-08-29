@@ -328,10 +328,10 @@ scripts/package-metadata.mjs
 
 - `docs/requirements.md`：定义用户可观察的单实例语义；
 - `docs/architecture.md`：登记 Application owner、compat seam、线程与生命周期边界；
-- `docs/project-structure.md`：登记新增模块、依赖方向和 artifact identity；
+- `docs/project-structure.md`：仅在稳定 owner/module root、目录 owner 或依赖方向变化时更新；
 - `docs/validation.md`：登记精确 allowlist、平台验收矩阵和 seam 删除条件；
 - `docs/windows-distribution.md`：登记首次升级前退出旧 Host 的安装门槛；
-- `docs/macos-local-development.md`：登记 development namespace 归属和替换应用前的退出要求。
+- `docs/macos-distribution.md`：登记 development namespace 归属和替换应用前的退出要求。
 
 本文是实施方案，不替代上述 source of truth。实现落地时，稳定产品和架构语义必须进入对应规范，避免本文成为第二份长期合同。
 

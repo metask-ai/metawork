@@ -22,7 +22,7 @@
 - 系统边界、Renderer/Host/AgentCore 职责以 [高层架构](architecture.md) 为准；
 - AgentCore 事件、线程、所有权和生命周期以 [AgentCore 集成契约](agentcore-integration.md) 为准；
 - AgentCore 产品能力与投影以 [AgentCore 集成契约](agentcore-integration.md) 为准；
-- 源码位置、模块依赖和平台资产生成路径以 [工程结构与所有权](project-structure.md) 为准；
+- Renderer 的稳定 module root、目录 owner 与依赖方向以 [工程结构与所有权](project-structure.md) 为准；平台资产生成合同归对应分发文档与构建清单；
 - 测试归属、平台证据和未验证能力以 [验证规范](validation.md) 为准。
 
 品牌 SVG、用途图标、`metask-tokens.css`、Foundation 组件和产品样式是本文的可执行实现，不是并列规范。实现不得自行引入新的品牌 primitive、组件语义、页面布局或 capability 表达；发现实现与本文冲突时必须显式裁决并同步收口，不能反过来把偶然实现写成设计真相。

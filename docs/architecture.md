@@ -161,7 +161,7 @@ Native SDK 的发布 artifact 缺口不进入上述 Application Runtime 三级�
 
 `app_single_instance` 是二级兼容 seam，只补 Native SDK 0.9.2 缺失的应用实例仲裁与 second-launch activation transport。最终写入 authority 是 canonical data root 上由 OS 自动释放的独占文件 lease；endpoint 的存在、PID 文件或进程名都不能授予 Primary 身份。Windows 只允许 current-user DACL Named Pipe、pipe server PID observation、`AllowSetForegroundWindow` 和固定 `MessageBoxW` 失败提示；macOS 只允许 Darwin 系统 API 返回的 per-user temporary directory 下的 0600 Unix Domain Socket、`getpeereid` UID gate 和固定 CoreFoundation 失败提示，禁止退回共享 `/tmp`。Application 独占 artifact/revision/argv/cwd 协议、严格边界、合并队列、主线程 wake 与窗口 effect；Application Coordinator 还独占 endpoint readiness 与 shutdown handoff 的总 deadline，以“重新竞争 lease → 单次 transport connect”交替处理冷启动和退出窗口，只有 endpoint 尚不可用可以重试，连接后的 timeout、传输错误或协议失败必须立即 fail closed。兼容层每次 `forward` 只执行一次 connect 和一次 request/response，不解释请求语义，也不持有 Native SDK Runtime。实际显示和聚焦必须回到现有 `Runtime.showWindow`/`focusWindow` 正常路径。listener shutdown、连接 deadline、资源释放和 crash 后 lease 自动回收都是该 seam 的显式生命周期；Native SDK 正式提供具备同等 data-root authority、同用户转交、bounded activation 和 shutdown 语义的 Runtime API，并经两平台验收后，原位替换并删除平台文件、framework link、allowlist 和专用测试。
 
-获准兼容 seam 的当前文件、SDK 缺口、目标平台与删除条件由 [工程结构与所有权](project-structure.md)映射，合规状态和平台证据由 [验证规范](validation.md)维护；与 Renderer 交换的精确 wire 仍只由 [Renderer Bridge 合同](renderer-bridge-contract.md)定义。未登记的低层调用一律不构成兼容能力。
+具体 compatibility seam identity、SDK 缺口、目标平台、调用边界与删除条件由本节定义；其稳定源码根、目录 owner 与依赖方向由 [工程结构与所有权](project-structure.md)映射，合规状态和平台证据由 [验证规范](validation.md)维护。与 Renderer 交换的精确 wire 仍只由 [Renderer Bridge 合同](renderer-bridge-contract.md)定义。未登记的低层调用一律不构成兼容能力。
 
 ### 3.6 Storage
 

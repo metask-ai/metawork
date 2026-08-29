@@ -89,7 +89,7 @@ Scheduled Task 是 Product Control 持有的 live Product Schedule aggregate：`
 
 Application 侧的 ExecutionHandoff、AgentEventConsumer、McpManagementPort、McpOauthPort 与 ScheduleHost 必须由独立 `metawork_product_control_ports` module 发布，并全部使用 `*anyopaque` context + 函数指针；port 字段、返回值和 coordinator 源码不得出现 `product_control.Runtime`，不得返回内部 aggregate 或可变状态指针。`account_coordinator.zig`、`agent_event_coordinator.zig`、MCP coordinator、`window.zig` 与 `platform.zig` 不得导入完整 `metawork_product_control`；只有 `app.zig` composition root 可以持有完整 Runtime 并构造 capability。architecture guard 必须同时验证 module graph 与源码禁词，而不是只验证调用点改名。所有 capability 使用者必须先 shutdown/join，Product Control 才能 deinit；worker payload 不得保存 capability。
 
-迁移期间 `file_preview.zig` 必须先成为具名 module，消除从组合实现的相对导入；Executor 与 File Preview 随后在同一 owner cut 中迁入 Product Control，File Preview 只消费窄 enqueue capability。`project-structure.md` 只描述 active tree，因此每个实际 hard cut 必须与对应 tree、module graph、guard 和文档更新同一提交落地，不能提前声称目标目录已经存在。
+结构 hard cut 必须在同一变更中更新实际 tree、module graph、guard 与受影响测试。只有稳定 module root、目录 owner、public boundary 或允许的依赖方向发生变化时才更新 `project-structure.md`；同一 owner 内部文件搬迁不要求同步文档。
 
 Product Account 的目录身份固定为 `src/product/account.zig` 与 `src/product/account/`；architecture guard 必须证明旧 `src/account.zig`、`src/account/` 不存在，全部 build root 指向新路径，同时公开 module identity 仍为 `metawork_account` 与 `metawork_account_contract`。
 
