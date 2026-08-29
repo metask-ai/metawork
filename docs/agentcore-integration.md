@@ -177,9 +177,11 @@ Agent Session 的公开回答入口只有 choice-only `respondPermission`。调�
 
 当前同步 request 是外部执行层的 compatibility surface，不等于 MetaWork 已拥有完整的 effect 或风险语义。`tool_name`、display text、命令字符串和 `exact_arguments` candidate 都不能单独证明操作的真实文件、进程、网络或系统 effect；Product Control 不得据此编译第二套 Bash allowlist、推断“安全命令”或承诺跨 Session 的持久权限。
 
-目标 `PermissionProfile` 由 MetaWork 产品层拥有，与 AgentCore `PermissionMode`、`ShellPolicy` 和 permission rule schema 分离：Settings 只持有新 Task 默认值，Product Task 持有当前 effective profile，每个 Run 保存 provenance。Agent 只接受 Product Control 在 fresh create、restore 或已验证的 idle mutation 边界提交的精确执行配置，不拥有默认值、持久化或 UI 选择。任何 profile 在 Renderer 出现之前，都必须先证明 canonical bundle 对应模式的 exact behavior、fresh/restore 一致性、idle 切换生效点、撤权、Run provenance 和 Scheduled noninteractive；缺少其中任一项时 fail closed 并保持当前 `accept_edits + unrestricted` baseline。该目标会改变稳定 Bridge、persistence 或 ABI 合同时，必须另行取得对应合同变更批准，不能在 Agent 私有 DTO 中先行影射。
+目标 `PermissionProfile` 由 MetaWork 产品层拥有，与 AgentCore `PermissionMode`、`ShellPolicy` 和 permission rule schema 分离：Settings 只持有新 Task 默认值，Product Task 持有不可变的 effective profile，每个 Run 保存 provenance。Agent 只接受 Product Control 在 fresh create 或 same-profile restore 边界提交的精确执行配置，不拥有默认值、持久化或 UI 选择。首个切片只映射 `approval_required → accept_edits + unrestricted` 与 `full_access → full_access + unrestricted`；`auto` 对代表性 Write/Bash 仍请求 callback，不能冒充 `standard`，`dont_ask` 对同类 effect 直接拒绝且不构成产品级 typed stop。该目标会改变稳定 Bridge 或 persistence 时，必须另行取得对应合同变更批准，不能在 Agent 私有 DTO 中先行影射。
 
-当前 aarch64 macOS canonical bundle `0.1.0-dev+b66e3d4c11ab` 的 source-free probe 已证明以下外部事实：`accept_edits` 对 Workspace 内 `Edit`、Workspace 内 `Write`、Workspace 外 `Write` 和明确有副作用的 Bash 都发布同步 permission request；`full_access` 直接允许同一 Bash 和 Workspace 外 Write，但 `.git/config` 等 Core protected path 仍请求 callback；显式规则优先于 mode，重叠规则按 deny > ask > allow 收口，callback unavailable 不执行待决 effect；`allow_session` 的 `exact_arguments` grant 在同一 Session 复用并随 checkpoint restore 恢复，而未产生 grant 的 `full_access` restore 不伪造规则。该证据只定义这个精确 artifact 的行为，不代表 MetaWork 已实现 Product `PermissionProfile`，也不证明其他 target、idle mutation、撤权或 Scheduled noninteractive。
+Manual Task 使用 interactive callback policy；Scheduled occurrence 创建的 Task 使用独立的 noninteractive interaction fact，但仍按定义固定的同一 PermissionProfile 映射 AgentCore mode。noninteractive callback 收到第一个 typed permission request 后不得建立 Renderer pending UI 或等待 response：立即返回 unavailable，同时把该 request 作为 Product stop fact 并请求中止当前 Run，最终只由真实 Run 收口提交 `permission_required` 与 Schedule `needs_attention`。这不是把 Session mode 替换为 `dont_ask`：后者会在 callback 前直接拒绝代表性 effect，无法提供同一 request/stop 边界，也不能被当作另一个产品 profile。
+
+当前 aarch64 macOS canonical bundle `0.1.0-dev+b66e3d4c11ab` 的 source-free probe 使用 realpath 后的同一 canonical Workspace，已证明以下外部事实：`accept_edits` 自动执行 Workspace 内 Write/Edit，并对 Workspace 外 Write 和明确有副作用的 Bash 发布同步 permission request；`full_access` 直接允许同一 Bash 和 Workspace 外 Write，但 `.git/config` 等 Core protected path 仍请求 callback；显式规则优先于 mode，重叠规则按 deny > ask > allow 收口，callback unavailable 不执行待决 effect；`allow_session` 的 `exact_arguments` grant 在同一 Session 复用并随 same-profile checkpoint restore 恢复，而未产生 grant 的 `full_access` restore 不伪造规则。`auto` 对代表性 Write/Bash 仍请求，`dont_ask` 不请求但拒绝 effect。跨 `accept_edits ↔ full_access` restore 虽返回 `STATUS_OK` 与 candidate，却产生 `health=degraded + issues=[]` 的非法 report，官方 decoder fail closed；MetaWork 必须销毁 candidate，不能据此实现 profile mutation。该证据只定义这个精确 artifact，不证明其他 target 或 Product profile lifecycle。
 
 ### Host tools
 
@@ -529,7 +531,7 @@ Agent sink 同时累计 total bytes、chunk count 与实际 streamed bytes 的 S
 - `WebSearch` 与 `WebFetch` 只是 AgentCore built-in 名称，MetaWork 不实现第二个 executor 或 provider-specific tool identity；
 - Runtime catalog 与 Session allowlist 共同限制可发布工具；
 - Provider 伪造未发布工具名必须 dispatch 失败；
-- 正式 Session 固定使用 `accept_edits + unrestricted`：锁定 artifact 会对 Workspace 内外 Write、Workspace 内 Edit 与明确有副作用的 Bash 发布同步 permission request；因此它只是高频询问的 compatibility baseline，既不满足目标 `approval_required` 的“常规 Workspace 编辑自动”，也不是 strict security 或产品级 Sandbox；
+- 正式 Session 固定使用 `accept_edits + unrestricted`：锁定 artifact 会自动执行 Workspace 内 Write/Edit，并对 Workspace 外 Write 与明确有副作用的 Bash 发布同步 permission request；这是当前 `approval_required` compatibility baseline，不是 strict security 或产品级 Sandbox；
 - 默认 Bash 是非交互 shell，不使用 PTY；
 - stdout/stderr/exit code 有界或通过后续对象引用展示。
 

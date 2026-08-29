@@ -142,6 +142,8 @@ Permission request 是 SDK 校验后的 flat typed object，包含 request/sessi
 
 AskUserQuestion response 继续使用按 question 排列的 `values[]`。UI wait 是没有 deadline 的同步 active Run 子状态；只由 answered、cancel、close 或 shutdown 结束，Host 不得替用户让待决请求过期。
 
+revision 14 的 `SessionControlApi` 只提供 idle `update_permission_rules`，不提供 permission mode 或 shell policy mutation。当前 aarch64 macOS canonical artifact 在 `accept_edits ↔ full_access` 跨 mode restore 时返回 `STATUS_OK` 与 candidate Session，却生成 `health=degraded`、`issues=[]` 的非法 restore report；官方 typed decoder 必须拒绝该不一致，Host 随即销毁 candidate，不能忽略 report、猜测 effective mode 或把 checkpoint replacement 当作权限切换。首个 PermissionProfile 消费因此固定在 Task-create boundary，只允许 same-profile restore；未来 mode mutation 需要新的 canonical AgentCore capability 与 ABI 验证，而不是 MetaWork-owned ABI 镜像。
+
 ## 7. Status、RunResult 与 StopReason
 
 Host 先校验 function `Status`，再按 operation-specific status set 决定哪些结果字段可读：

@@ -840,9 +840,9 @@ strict Workspace security 未通过前，不开放 Workspace 级 Read/Edit/Delet
 - `标准`：常规本地工作自动执行，只在 Host 提供可靠 typed risk/effect 时请求决定；没有 typed effect 和执行前 commit boundary 时不得出现；
 - `完全访问`：MetaWork 不提供 tool permission 保护，仍受操作系统权限、服务授权和进程身份约束；它不是 root、Sandbox 或“信任 Workspace”。
 
-Settings 只设置新 Task 默认值；New task 可以覆盖本次选择；Task 创建后保存自己的 effective profile，Run history 保存 provenance。默认值变化不改写既有 Task，运行中的 Task 不允许切换；只有 Host 提供已验证的 idle mutation 与撤权生效点时，已有 Task 才显示切换入口。用户选择更宽松 profile 的动作本身就是明确授权，不再叠加第二个确认 modal。
+首个产品切片默认 `请求批准`。Settings 只设置后续新 Task 默认值，New task 可以覆盖本次选择；选择 `完全访问` 的同一菜单动作就是该 Task 的明确授权，不再叠加第二个确认 modal。Task 创建后保存并只读显示自己的 effective profile，Run history 保存 provenance；默认值变化不改写既有 Task，归档 Task 立即禁止新 Run，删除 Task 永久移除其 profile authority。当前 AgentCore 不支持可消费的跨 profile Session mutation，因此已有 Task 不显示切换入口；未来只有 Host 提供新的 canonical idle mutation 与撤权生效点后才可开放。
 
-Renderer 只能显示 Host capability projection 声明已端到端支持的档位：当前三档全部隐藏；后续可以先开放 `请求批准` 与 `完全访问`，`标准` 继续隐藏，而不是显示 disabled 占位。任一可见档位都必须覆盖 fresh/restore、Task persistence、idle mutation、Run provenance、Scheduled noninteractive 和撤权；不得用 Renderer preference 或 AgentCore enum 名称模拟。
+Renderer 只能显示 Host capability projection 声明已端到端支持的档位：稳定 Bridge/persistence hard cut 获批并落地前仍全部隐藏；首个切片只开放 `请求批准` 与 `完全访问`，`标准` 继续隐藏。两档都必须覆盖 Task-create authority、same-profile fresh/restore、Task persistence、Run provenance、Task archive/delete 和 Scheduled noninteractive；不得用 Renderer preference、AgentCore enum 名称或 mode-change restore 模拟。
 
 ## 11. 按需 Task overview
 
@@ -1310,7 +1310,7 @@ Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成
 ### 19.7 权限规则与失效
 
 - Host 未发布 PermissionProfile capability 时不显示策略入口；只发布部分档位时仅显示真实档位，`Standard` 未具备 typed risk/effect 和 commit boundary 时完全不存在；
-- 默认 profile 只影响新 Task；Task effective profile、Run provenance、fresh/restore、idle mutation、active-task 禁止切换和 Scheduled noninteractive 语义一致；
+- 默认 profile 只影响新 Task；首个切片的 Task effective profile 不可变，Run provenance、same-profile fresh/restore、Task archive/delete 和 Scheduled noninteractive 语义一致；已有 Task 不显示伪切换；
 - `full_access` 文案明确保留操作系统权限，不宣称 root、Sandbox 或 Workspace trust；选择动作不再追加第二个确认 modal；
 - Host 未声明可持久化 capability 时不显示 `Always allow`；
 - Workspace identity 改变、移除后重新授权和目录被替换；

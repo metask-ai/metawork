@@ -156,11 +156,11 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 
 - Authority、Interaction Policy 与 Sandbox 是三个独立维度：Authority 决定 Task 已取得的 Workspace、Shell、Skill、MCP 与系统能力；Interaction Policy 决定未覆盖操作是否询问；Sandbox 只描述执行时的物理约束。产品、UI 和验证不得把三者合并成一个“安全模式”；
 - 目标 `PermissionProfile` 是 MetaWork-owned 的产品策略，预设为 `approval_required | standard | full_access`。`approval_required` 表示常规 Workspace 编辑自动、其他当前策略未覆盖操作请求批准；`standard` 表示常规本地工作自动、只有具备可靠 typed risk/effect 的操作请求批准；`full_access` 表示不提供 MetaWork tool permission 保护，仍受操作系统权限约束。内部 AgentCore enum、ShellPolicy 和 rule schema 不得成为 Renderer 产品词汇；
-- 当前正式 Session 仍固定使用 `accept_edits + unrestricted`；锁定 artifact 会对 Workspace 内外 Write、Workspace 内 Edit 与明确有副作用的 Bash 发布同步 permission request，因此这只是一条高频询问的 compatibility baseline，不等于目标 `approval_required` 的“常规 Workspace 编辑自动”，也不是 Sandbox 或运行不可信 Workspace 的安全保证；
-- `standard` 在 typed risk/effect、执行前 commit boundary、Bash 限制说明和 fail-closed 验证完成前必须保持隐藏；`full_access` 在 exact canonical bundle 行为、Task owner、fresh/restore、idle mutation、Run provenance、Scheduled noninteractive 与撤权语义完成前同样保持隐藏。产品只能显示执行层已经真实支持的 profile，不显示 disabled 空壳；
-- 目标 owner 关系为：Settings 只提供新 Task 默认值；Task 保存当前生效 profile；每个 Run 保存解释历史所需的 effective profile provenance；已有 Task 不随默认值变化，只有 idle Task 可以显式切换。上述 persistence、mutation 与 Bridge 合同未获批准并落地前，不得用 Renderer preference 或 Session-local shadow state 模拟；
+- 当前正式 Session 仍固定使用 `accept_edits + unrestricted`；锁定 artifact 会自动执行 Workspace 内 Write/Edit，并对 Workspace 外 Write 与明确有副作用的 Bash 发布同步 permission request。这是目标 `approval_required` 的 compatibility baseline，不是 Sandbox 或运行不可信 Workspace 的安全保证；
+- 首个产品切片只开放 `approval_required | full_access`，默认保持 `approval_required`，用户可以在 Settings 改变后续新 Task 默认值，并在 New task 对本次 Task 覆盖；选择 `full_access` 的同一动作就是该 Task 的明确授权，不追加确认 modal。`standard` 在 typed risk/effect、执行前 commit boundary、Bash 限制说明和 fail-closed 验证完成前保持隐藏；产品不显示 disabled 空壳；
+- 首个切片中 profile 在 Task 创建后不可变：Task 保存 effective profile，每个 Run 保存 provenance，checkpoint restore 必须使用同一 profile；归档 Task 阻止新 Run，删除 Task 收口 Session 并永久移除该 profile authority。当前 AgentCore ABI 没有 idle permission-mode mutation，跨 mode restore 也不产生可消费的 typed report；因此不能用 Session-local shadow state、规则拼装或 checkpoint replacement 模拟切换。未来只有取得新的 canonical capability 并完成撤权生效点验证后，已有 idle Task 才可显示切换入口；
 - Shell 是广泛执行 authority。`unrestricted` 只表示获准 Bash 不经过 AgentCore file sandbox，不等于 root，也不决定是否询问；产品不得以 Bash 前缀、命令字符串分类或 `exact_arguments` Session grant 宣称可靠 effect 边界；
-- 用户选择更宽松 profile 的菜单动作本身构成授权，不追加第二个确认 modal；更严格 profile 的撤权必须有明确生效点，不能只改变未来 UI。运行中的 Task 在没有已验证 mutation/stop 合同时禁止切换；
+- 用户在 Settings 或 New task 选择更宽松 profile 的动作本身构成相应默认或本次 Task 授权，不追加第二个确认 modal；Settings 改回更严格 profile 只影响后续 Task，既有 Task 可以归档以立即禁止新 Run，并通过删除永久撤销。当前 Task 不提供伪切换；
 - 用户可以响应当前 typed permission；结构化 Agent 问答、计划批准或拒绝只有在对应 built-in/control capability 进入 MetaWork 产品集合并通过验收后才显示；
 - 审批和回答必须绑定 Task、Run 和请求标识，拒绝过期或重复响应；
 - 同步等待必须支持 deadline、用户取消、Task close 和 Application shutdown 唤醒；
@@ -341,7 +341,7 @@ Windows x86_64 GNU 已进入当前开发 baseline；Windows arm64 GNU 已接入 
 
 ### 7.5 后续产品能力
 
-`PermissionProfile` 的 Task owner、fresh/restore、idle mutation、Run provenance 与 Scheduled noninteractive，`standard` 所需的 typed risk/effect 和执行前 commit boundary，以及 async pending、更完整的跨重启 execution rebind、strict Workspace security、正式 Host tools、typed Output/FileChange、plan progress/approval、custom UI、远程 artifact 发布与正式更新、独立 AgentCore Worker 和 Linux 接入，均按独立 capability 与阶段推进，不能反向伪装成当前 v1 已具备。
+`PermissionProfile` 的 Task-create owner、same-profile fresh/restore、Run provenance 与 Scheduled noninteractive，未来独立的 idle mutation，`standard` 所需的 typed risk/effect 和执行前 commit boundary，以及 async pending、更完整的跨重启 execution rebind、strict Workspace security、正式 Host tools、typed Output/FileChange、plan progress/approval、custom UI、远程 artifact 发布与正式更新、独立 AgentCore Worker 和 Linux 接入，均按独立 capability 与阶段推进，不能反向伪装成当前 v1 已具备。
 
 具体验证矩阵见 [当前验证规范](validation.md)。
 

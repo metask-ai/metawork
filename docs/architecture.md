@@ -219,7 +219,7 @@ Renderer 按不可信调用方处理：
 - built-in Bash 使用非交互子进程；
 - strict Workspace security 未通过前，只运行 Product Control 分配的 Automatic Workspace 或用户通过原生 picker 明确授权的 Manual Workspace，不宣称这些目录因此获得 strict isolation。
 
-PermissionProfile 与持久 permission rule 是两类产品状态，不是 Renderer preference、AgentCore enum 或 parallel protocol。目标 profile 的新 Task 默认值由 Product Control 持有，effective value 与 Run provenance 由 Product Task 持有；它只改变未覆盖操作的交互策略，不创建 Sandbox 或新的 Workspace authority。任何 profile 必须在 exact bundle behavior、fresh/restore、idle mutation、撤权和 Scheduled noninteractive 完成后才能向 Renderer 发布。
+PermissionProfile 与持久 permission rule 是两类产品状态，不是 Renderer preference、AgentCore enum 或 parallel protocol。新 Task 默认值由 Product Control 持有，effective value 与 Run provenance 由 Product Task 持有；它只改变未覆盖操作的交互策略，不创建 Sandbox 或新的 Workspace authority。首个切片把 profile 固定在 Task-create boundary，并只在 exact bundle behavior、same-profile fresh/restore、Task/Run persistence、Task archive/delete 和 Scheduled noninteractive 完成后发布；当前 ABI 不支持的 idle mode mutation 不得由 Renderer preference、规则拼装或跨 mode checkpoint restore 模拟。
 
 持久 rule 必须绑定 stable Workspace identity、tool identity/version、operation、canonical resource constraint 和 rule schema version；canonical path 字符串本身不能充当 stable identity。Workspace、tool、script 或 capability 变化时规则 fail closed。Workspace 文件边界、process tree、network、environment、审计和撤销分别通过对应安全 Gate 前，UI 不得为相关能力提供 `Always allow`。这些 Gate 不把 `full_access` profile 变成一组细粒度持久规则；后者表示 MetaWork 不再提供 tool permission 保护，仍受操作系统与外部服务 authority 约束。
 

@@ -4,6 +4,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   symlink,
   writeFile,
@@ -49,12 +50,14 @@ if (!bundle.target.startsWith("aarch64-macos"))
     `permission probe evidence is defined only for aarch64-macos, received ${bundle.target}`,
   );
 
-const scratch = await mkdtemp(
-  path.join(tmpdir(), "metawork-agentcore-permission-probe-"),
+const scratch = await realpath(
+  await mkdtemp(path.join(tmpdir(), "metawork-agentcore-permission-probe-")),
 );
 const workspace = path.join(scratch, "workspace");
-const outside = await mkdtemp(
-  path.join(repositoryRoot, ".agentcore-permission-probe-outside-"),
+const outside = await realpath(
+  await mkdtemp(
+    path.join(repositoryRoot, ".agentcore-permission-probe-outside-"),
+  ),
 );
 await mkdir(path.join(workspace, ".git"), { recursive: true });
 await writeFile(path.join(workspace, "edit-target.txt"), "before");
@@ -153,15 +156,41 @@ const effects = {
   session_grant: {
     tool: "Write",
     arguments: {
-      file_path: path.join(workspace, "session-grant.txt"),
+      file_path: path.join(outside, "session-grant.txt"),
       content: "session-grant",
     },
   },
   unavailable_accept_write: {
     tool: "Write",
     arguments: {
-      file_path: path.join(workspace, "unavailable.txt"),
+      file_path: path.join(outside, "unavailable.txt"),
       content: "unavailable",
+    },
+  },
+  auto_write: {
+    tool: "Write",
+    arguments: {
+      file_path: path.join(workspace, "auto-write.txt"),
+      content: "auto-write",
+    },
+  },
+  auto_bash: {
+    tool: "Bash",
+    arguments: {
+      command: `touch ${shellQuote(path.join(workspace, "auto-bash.txt"))}`,
+    },
+  },
+  dont_ask_write: {
+    tool: "Write",
+    arguments: {
+      file_path: path.join(workspace, "dont-ask-write.txt"),
+      content: "dont-ask-write",
+    },
+  },
+  dont_ask_bash: {
+    tool: "Bash",
+    arguments: {
+      command: `touch ${shellQuote(path.join(workspace, "dont-ask-bash.txt"))}`,
     },
   },
   shell_disabled: {
@@ -191,7 +220,7 @@ const effects = {
   restore_grant: {
     tool: "Write",
     arguments: {
-      file_path: path.join(workspace, "restore-grant.txt"),
+      file_path: path.join(outside, "restore-grant.txt"),
       content: "restore-grant",
     },
   },
@@ -205,6 +234,20 @@ const effects = {
     tool: "Bash",
     arguments: {
       command: `touch ${shellQuote(path.join(workspace, "restore-full-after.txt"))}`,
+    },
+  },
+  restore_full_to_accept_seed: {
+    tool: "Write",
+    arguments: {
+      file_path: path.join(workspace, "restore-full-to-accept-seed.txt"),
+      content: "seed",
+    },
+  },
+  restore_accept_to_full_seed: {
+    tool: "Write",
+    arguments: {
+      file_path: path.join(workspace, "restore-accept-to-full-seed.txt"),
+      content: "seed",
     },
   },
 };
@@ -434,9 +477,9 @@ pub fn build(b: *std.Build) void {
     { cwd: consumerRoot, label: "isolated AgentCore permission probe" },
   );
   if (requestError) throw requestError;
-  if (requestCount !== 45)
+  if (requestCount !== 57)
     throw new Error(
-      `permission probe observed ${requestCount} provider requests instead of 45`,
+      `permission probe observed ${requestCount} provider requests instead of 57`,
     );
 
   const expectedPresent = [
@@ -448,20 +491,26 @@ pub fn build(b: *std.Build) void {
     path.join(workspace, "ask-full-bash.txt"),
     path.join(workspace, "allow-accept-bash.txt"),
     path.join(workspace, "ask-over-allow.txt"),
-    path.join(workspace, "session-grant.txt"),
+    path.join(outside, "session-grant.txt"),
     path.join(workspace, "sandbox-inside.txt"),
     path.join(outside, "unrestricted-outside.txt"),
-    path.join(workspace, "restore-grant.txt"),
+    path.join(outside, "restore-grant.txt"),
     path.join(workspace, "restore-full-seed.txt"),
     path.join(workspace, "restore-full-after.txt"),
+    path.join(workspace, "restore-full-to-accept-seed.txt"),
+    path.join(workspace, "restore-accept-to-full-seed.txt"),
+    path.join(workspace, "auto-write.txt"),
+    path.join(workspace, "auto-bash.txt"),
   ];
   const expectedAbsent = [
     path.join(workspace, ".git", "config"),
     path.join(workspace, "deny-full-bash.txt"),
-    path.join(workspace, "unavailable.txt"),
+    path.join(outside, "unavailable.txt"),
     path.join(workspace, "shell-disabled.txt"),
     path.join(workspace, "deny-over-ask-allow.txt"),
     path.join(outside, "sandbox-outside.txt"),
+    path.join(workspace, "dont-ask-write.txt"),
+    path.join(workspace, "dont-ask-bash.txt"),
   ];
   for (const file of expectedPresent) {
     if (!(await exists(file)))

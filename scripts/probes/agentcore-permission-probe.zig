@@ -379,13 +379,23 @@ fn runFresh(
             probe.unavailable_outcomes,
         },
     );
+    try expectProbe(&probe, behavior, expected_ui_calls, expected_provenance, expected_source);
+}
+
+fn expectProbe(
+    probe: *const Probe,
+    behavior: UiBehavior,
+    expected_ui_calls: u32,
+    expected_provenance: u32,
+    expected_source: agentcore.protocol.PermissionDecisionSource,
+) !void {
     const expected_releases: u32 = if (behavior == .unavailable) 0 else expected_ui_calls;
     if (probe.ui_calls != expected_ui_calls or probe.ui_releases != expected_releases)
         return error.UnexpectedUiCount;
     const expected_unavailable: u32 = if (behavior == .unavailable and expected_ui_calls != 0) 1 else 0;
     if (probe.unavailable_outcomes != expected_unavailable)
         return error.UnexpectedCallbackOutcome;
-    if (probe.provenance != expected_provenance or probe.last_source != expected_source or probe.sourceCount(expected_source) != 1)
+    if (probe.provenance != expected_provenance or probe.last_source != expected_source or probe.sourceCount(expected_source) != expected_provenance)
         return error.UnexpectedPermissionProvenance;
 }
 
@@ -492,32 +502,38 @@ fn runRestore(
     api: agentcore.Api,
     runtime: *wire.RuntimeHandle,
     allowed_tools: *const [4]wire.BytesViewV1,
-    permission_mode: u32,
+    seed_permission_mode: u32,
+    restored_permission_mode: u32,
     seed_scenario: []const u8,
     after_scenario: []const u8,
     seed_behavior: UiBehavior,
     expected_seed_ui: u32,
     expected_restored_rules: u32,
+    restored_behavior: UiBehavior,
+    expected_restored_ui: u32,
+    expected_seed_source: agentcore.protocol.PermissionDecisionSource,
+    expected_restored_source: agentcore.protocol.PermissionDecisionSource,
 ) !void {
-    const host = makeHost(permission_mode, wire.SHELL_UNRESTRICTED, null, allowed_tools);
+    const seed_host = makeHost(seed_permission_mode, wire.SHELL_UNRESTRICTED, null, allowed_tools);
     var seed_probe = Probe{ .behavior = seed_behavior };
     const seed_callbacks = makeCallbacks(&seed_probe);
     var diagnostic = emptyOwned();
     defer releaseOwned(api, &diagnostic);
-    const first = try createSession(api, runtime, &host, &seed_callbacks, &diagnostic);
+    const first = try createSession(api, runtime, &seed_host, &seed_callbacks, &diagnostic);
     _ = try run(api, first, 1, seed_scenario, &diagnostic);
-    if (seed_probe.ui_calls != expected_seed_ui) return error.UnexpectedUiCount;
+    try expectProbe(&seed_probe, seed_behavior, expected_seed_ui, 1, expected_seed_source);
     const storage = try std.heap.c_allocator.alloc(u8, checkpoint_capacity);
     defer std.heap.c_allocator.free(storage);
     const checkpoint = try exportCheckpoint(api, first, storage, &diagnostic);
     try expectOk(api, "seed_destroy", api.session().destroy()(first, &diagnostic), &diagnostic);
 
-    var restored_probe = Probe{ .behavior = .unavailable };
+    const restored_host = makeHost(restored_permission_mode, wire.SHELL_UNRESTRICTED, null, allowed_tools);
+    var restored_probe = Probe{ .behavior = restored_behavior };
     const restored_callbacks = makeCallbacks(&restored_probe);
     const restored = try restoreSession(
         api,
         runtime,
-        &host,
+        &restored_host,
         &restored_callbacks,
         checkpoint,
         expected_restored_rules,
@@ -525,17 +541,76 @@ fn runRestore(
     );
     defer _ = api.session().destroy()(restored, null);
     _ = try run(api, restored, 2, after_scenario, &diagnostic);
-    if (restored_probe.ui_calls != 0) return error.RestoreRequestedPermission;
-    if (expected_restored_rules == 1) {
-        if (seed_probe.callback_sources != 1 or restored_probe.session_allow != 1)
-            return error.RestoredGrantNotReused;
-    } else if (seed_probe.builtin_classification != 1 or restored_probe.builtin_classification != 1) {
-        return error.RestoredModeChanged;
-    }
+    try expectProbe(&restored_probe, restored_behavior, expected_restored_ui, 1, expected_restored_source);
     std.debug.print(
-        "scenario=restore seed={s} after={s} restored_rules={d} ui_after=0\n",
-        .{ seed_scenario, after_scenario, expected_restored_rules },
+        "scenario=restore seed={s} after={s} restored_rules={d} ui_after={d}\n",
+        .{ seed_scenario, after_scenario, expected_restored_rules, expected_restored_ui },
     );
+}
+
+fn expectModeChangeRestoreUnsupported(
+    api: agentcore.Api,
+    runtime: *wire.RuntimeHandle,
+    allowed_tools: *const [4]wire.BytesViewV1,
+    seed_permission_mode: u32,
+    restored_permission_mode: u32,
+    seed_scenario: []const u8,
+    seed_behavior: UiBehavior,
+    expected_seed_ui: u32,
+    expected_seed_source: agentcore.protocol.PermissionDecisionSource,
+) !void {
+    const seed_host = makeHost(seed_permission_mode, wire.SHELL_UNRESTRICTED, null, allowed_tools);
+    var seed_probe = Probe{ .behavior = seed_behavior };
+    const seed_callbacks = makeCallbacks(&seed_probe);
+    var diagnostic = emptyOwned();
+    defer releaseOwned(api, &diagnostic);
+    const first = try createSession(api, runtime, &seed_host, &seed_callbacks, &diagnostic);
+    _ = try run(api, first, 1, seed_scenario, &diagnostic);
+    try expectProbe(&seed_probe, seed_behavior, expected_seed_ui, 1, expected_seed_source);
+    const storage = try std.heap.c_allocator.alloc(u8, checkpoint_capacity);
+    defer std.heap.c_allocator.free(storage);
+    const checkpoint = try exportCheckpoint(api, first, storage, &diagnostic);
+    try expectOk(api, "mode_seed_destroy", api.session().destroy()(first, &diagnostic), &diagnostic);
+
+    const restored_host = makeHost(restored_permission_mode, wire.SHELL_UNRESTRICTED, null, allowed_tools);
+    var restored_probe = Probe{ .behavior = .unavailable };
+    const restored_callbacks = makeCallbacks(&restored_probe);
+    var source_context = Source{ .bytes = checkpoint };
+    var source = std.mem.zeroes(wire.CheckpointSourceV1);
+    source.struct_size = @sizeOf(wire.CheckpointSourceV1);
+    source.ctx = &source_context;
+    source.read = Source.read;
+    const limits = checkpointLimits();
+    var config = std.mem.zeroes(wire.SessionRestoreConfigV1);
+    config.struct_size = @sizeOf(wire.SessionRestoreConfigV1);
+    config.host = &restored_host;
+    config.source = &source;
+    config.limits = &limits;
+    var candidate: ?*wire.SessionHandle = null;
+    var report = emptyOwned();
+    defer releaseOwned(api, &report);
+    try expectOk(api, "mode_change_restore", api.sessionControl().restore()(
+        runtime,
+        &config,
+        &restored_callbacks,
+        &candidate,
+        &report,
+        &diagnostic,
+    ), &diagnostic);
+    const restored = candidate orelse return error.MissingRestoredSession;
+    defer _ = api.session().destroy()(restored, null);
+    const report_bytes = try agentcore.borrowedBytes(.{ .ptr = report.ptr, .len = report.len });
+    if (agentcore.decodeRestoreReport(std.heap.c_allocator, report_bytes)) |parsed_report| {
+        var parsed = parsed_report;
+        parsed.deinit();
+        return error.ModeChangeRestoreUnexpectedlySupported;
+    } else |err| {
+        if (err != error.InvalidPayload) return err;
+    }
+    if (std.mem.indexOf(u8, report_bytes, "\"health\":\"degraded\"") == null or
+        std.mem.indexOf(u8, report_bytes, "\"issues\":[]") == null)
+        return error.UnexpectedModeChangeRestoreReport;
+    std.debug.print("scenario=restore_mode_change seed={s} result=unsupported_invalid_report\n", .{seed_scenario});
 }
 
 pub fn main() !void {
@@ -562,8 +637,8 @@ pub fn main() !void {
     const core_runtime = runtime orelse return error.MissingRuntime;
     defer _ = api.runtime().destroy()(core_runtime, null);
 
-    try runFresh(api, core_runtime, &builtin_tools, "accept_inside_edit", wire.PERMISSION_ACCEPT_EDITS, wire.SHELL_UNRESTRICTED, .none, .allow_once, 1, 2, .callback);
-    try runFresh(api, core_runtime, &builtin_tools, "accept_inside_write", wire.PERMISSION_ACCEPT_EDITS, wire.SHELL_UNRESTRICTED, .none, .allow_once, 1, 1, .callback);
+    try runFresh(api, core_runtime, &builtin_tools, "accept_inside_edit", wire.PERMISSION_ACCEPT_EDITS, wire.SHELL_UNRESTRICTED, .none, .unavailable, 0, 2, .builtin_classification);
+    try runFresh(api, core_runtime, &builtin_tools, "accept_inside_write", wire.PERMISSION_ACCEPT_EDITS, wire.SHELL_UNRESTRICTED, .none, .unavailable, 0, 1, .builtin_classification);
     try runFresh(api, core_runtime, &builtin_tools, "accept_outside_write", wire.PERMISSION_ACCEPT_EDITS, wire.SHELL_UNRESTRICTED, .none, .allow_once, 1, 1, .callback);
     try runFresh(api, core_runtime, &builtin_tools, "accept_bash", wire.PERMISSION_ACCEPT_EDITS, wire.SHELL_UNRESTRICTED, .none, .allow_once, 1, 1, .callback);
     try runFresh(api, core_runtime, &builtin_tools, "full_bash", wire.PERMISSION_FULL_ACCESS, wire.SHELL_UNRESTRICTED, .none, .unavailable, 0, 1, .builtin_classification);
@@ -576,10 +651,16 @@ pub fn main() !void {
     try runFresh(api, core_runtime, &builtin_tools, "deny_over_ask_allow_bash", wire.PERMISSION_FULL_ACCESS, wire.SHELL_UNRESTRICTED, .deny_ask_allow_bash, .unavailable, 0, 1, .explicit_deny);
     try runSessionGrant(api, core_runtime, &builtin_tools);
     try runFresh(api, core_runtime, &builtin_tools, "unavailable_accept_write", wire.PERMISSION_ACCEPT_EDITS, wire.SHELL_UNRESTRICTED, .none, .unavailable, 1, 1, .callback);
+    try runFresh(api, core_runtime, &builtin_tools, "auto_write", wire.PERMISSION_AUTO, wire.SHELL_UNRESTRICTED, .none, .allow_once, 1, 1, .callback);
+    try runFresh(api, core_runtime, &builtin_tools, "auto_bash", wire.PERMISSION_AUTO, wire.SHELL_UNRESTRICTED, .none, .allow_once, 1, 1, .callback);
+    try runFresh(api, core_runtime, &builtin_tools, "dont_ask_write", wire.PERMISSION_DONT_ASK, wire.SHELL_UNRESTRICTED, .none, .unavailable, 0, 1, .mode_fallback);
+    try runFresh(api, core_runtime, &builtin_tools, "dont_ask_bash", wire.PERMISSION_DONT_ASK, wire.SHELL_UNRESTRICTED, .none, .unavailable, 0, 1, .mode_fallback);
     try expectShellDisabledRejected(api, core_runtime, &builtin_tools);
     try runFresh(api, core_runtime, &builtin_tools, "sandbox_inside", wire.PERMISSION_FULL_ACCESS, wire.SHELL_SANDBOXED, .none, .unavailable, 0, 1, .builtin_classification);
     try runFresh(api, core_runtime, &builtin_tools, "sandbox_outside", wire.PERMISSION_FULL_ACCESS, wire.SHELL_SANDBOXED, .none, .unavailable, 0, 1, .builtin_classification);
     try runFresh(api, core_runtime, &builtin_tools, "unrestricted_outside", wire.PERMISSION_FULL_ACCESS, wire.SHELL_UNRESTRICTED, .none, .unavailable, 0, 1, .builtin_classification);
-    try runRestore(api, core_runtime, &builtin_tools, wire.PERMISSION_ACCEPT_EDITS, "restore_grant", "restore_grant", .allow_session, 1, 1);
-    try runRestore(api, core_runtime, &builtin_tools, wire.PERMISSION_FULL_ACCESS, "restore_full_seed", "restore_full_after", .unavailable, 0, 0);
+    try runRestore(api, core_runtime, &builtin_tools, wire.PERMISSION_ACCEPT_EDITS, wire.PERMISSION_ACCEPT_EDITS, "restore_grant", "restore_grant", .allow_session, 1, 1, .unavailable, 0, .callback, .session_allow);
+    try runRestore(api, core_runtime, &builtin_tools, wire.PERMISSION_FULL_ACCESS, wire.PERMISSION_FULL_ACCESS, "restore_full_seed", "restore_full_after", .unavailable, 0, 0, .unavailable, 0, .builtin_classification, .builtin_classification);
+    try expectModeChangeRestoreUnsupported(api, core_runtime, &builtin_tools, wire.PERMISSION_FULL_ACCESS, wire.PERMISSION_ACCEPT_EDITS, "restore_full_to_accept_seed", .unavailable, 0, .builtin_classification);
+    try expectModeChangeRestoreUnsupported(api, core_runtime, &builtin_tools, wire.PERMISSION_ACCEPT_EDITS, wire.PERMISSION_FULL_ACCESS, "restore_accept_to_full_seed", .unavailable, 0, .builtin_classification);
 }
