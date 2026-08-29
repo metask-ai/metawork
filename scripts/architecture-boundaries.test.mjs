@@ -199,6 +199,10 @@ test("named module roots exist and lower owners cannot import composition", () =
     true,
   );
   assert.equal(
+    existsSync(new URL("src/product/control/account_execution.zig", root)),
+    true,
+  );
+  assert.equal(
     existsSync(new URL("src/product/control/schedule.zig", root)),
     false,
   );
@@ -409,6 +413,8 @@ test("Product Control is the only composition owner identity", () => {
   const build = read("build.zig");
   const control = read("src/product/control.zig");
   const runtime = read("src/product/control/runtime.zig");
+  const accountExecution = read("src/product/control/account_execution.zig");
+  const ports = read("src/product/control/ports.zig");
   const executor = read("src/product/control/executor.zig");
   const filePreview = read("src/product/control/file_preview.zig");
   const source = [...zigFiles("src/"), ...zigFiles("tests/")]
@@ -417,6 +423,7 @@ test("Product Control is the only composition owner identity", () => {
 
   assert.match(build, /src\/product\/control\.zig/);
   assert.match(build, /src\/product\/control\/runtime\.zig/);
+  assert.match(build, /src\/product\/control\/account_execution\.zig/);
   assert.match(build, /src\/product\/control\/executor\.zig/);
   assert.match(build, /src\/product\/control\/file_preview\.zig/);
   assert.match(build, /src\/product\/schedule\.zig/);
@@ -424,11 +431,56 @@ test("Product Control is the only composition owner identity", () => {
   assert.match(build, /src\/product\/schedule\/view\.zig/);
   assert.match(build, /metawork_product_control/);
   assert.match(build, /product_control_executor/);
+  assert.match(build, /product_control_account_execution/);
   assert.match(build, /product_control_file_preview/);
   assert.match(build, /metawork_product_schedule/);
   assert.match(build, /product_schedule_runtime/);
   assert.match(control, /pub const Runtime = runtime_impl\.Runtime/);
   assert.match(runtime, /pub const Runtime = struct/);
+  assert.match(runtime, /@import\("product_control_account_execution"\)/);
+  assert.match(runtime, /account_execution: account_execution\.State/);
+  assert.match(accountExecution, /@import\("metawork_account_contract"\)/);
+  assert.match(accountExecution, /pub const State = struct/);
+  assert.match(accountExecution, /pub const ProjectionRedaction = struct/);
+  assert.match(accountExecution, /const AccountProjection = struct/);
+  assert.match(accountExecution, /const ActiveExecution = struct/);
+  assert.match(accountExecution, /pub const testing = if \(builtin\.is_test\)/);
+  assertNoImports(
+    ["src/product/control/account_execution.zig"],
+    [
+      "metawork_product_control",
+      "metawork_product_task",
+      "metawork_product_skill",
+      "metawork_product_mcp",
+      "metawork_product_schedule",
+      "metawork_product_workspace",
+      "metawork_agent",
+      "metawork_app",
+      "metawork_bridge",
+      "metask_agentcore",
+      "native_sdk",
+    ],
+  );
+  assert.doesNotMatch(
+    accountExecution,
+    /std\.Thread|product_control_executor|rawState|rawExecution|\*Runtime|\*Control/,
+  );
+  assert.doesNotMatch(
+    runtime,
+    /const AccountProjection = struct|const ActiveExecution = struct|const ReplacementKind = enum|const RedactionPreparation = union|custom_execution_binding:|execution_replacement:|execution_redaction_preparation:/,
+  );
+  assert.match(
+    ports,
+    /pub const PreparedModelConnectionBinding\s*=\s*account_execution\.PreparedModelConnectionBinding/,
+  );
+  assert.doesNotMatch(
+    ports,
+    /pub const PreparedModelConnectionBinding = struct|account_execution\.State|AccountProjection|ActiveExecution/,
+  );
+  assert.doesNotMatch(
+    control,
+    /account_execution|AccountProjection|ActiveExecution/,
+  );
   assert.doesNotMatch(runtime, /\bworkbench(?:\b|_)/);
   assert.doesNotMatch(build, /metawork_workbench|workbench_projection/);
   assert.doesNotMatch(
@@ -464,6 +516,7 @@ test("Product Schedule owns its aggregate state and persistence", () => {
   const build = read("build.zig");
   const control = read("src/product/control.zig");
   const runtime = read("src/product/control/runtime.zig");
+  const accountExecution = read("src/product/control/account_execution.zig");
   const scheduleRoot = read("src/product/schedule.zig");
   const scheduleRuntime = read("src/product/schedule/runtime.zig");
   const scheduleState = read("src/product/schedule/state.zig");
@@ -475,7 +528,10 @@ test("Product Schedule owns its aggregate state and persistence", () => {
   const taskRuntime = read("src/product/task/runtime.zig");
 
   assert.match(runtime, /@import\("metawork_product_schedule"\)/);
-  assert.doesNotMatch(runtime, /product_schedule_(?:state|persistence|runtime)/);
+  assert.doesNotMatch(
+    runtime,
+    /product_schedule_(?:state|persistence|runtime)/,
+  );
   assert.match(scheduleRoot, /pub const Runtime = runtime_impl\.Runtime/);
   assert.match(scheduleRuntime, /@import\("product_schedule_state"\)/);
   assert.match(scheduleRuntime, /@import\("product_schedule_persistence"\)/);
@@ -521,8 +577,10 @@ test("Product Schedule owns its aggregate state and persistence", () => {
   assert.match(runtime, /schedule\.reconcileNoFail/);
   assert.match(runtime, /product_schedule\.TaskEffects/);
   assert.match(runtime, /schedule\.writeProjection/);
-  assert.match(runtime, /consumeExecutionInstallPreparation/);
-  assert.match(runtime, /consumeExecutionClearPreparation/);
+  assert.match(runtime, /account_execution\.prepareInstall/);
+  assert.match(runtime, /account_execution\.prepareClear/);
+  assert.match(accountExecution, /fn consumeInstallPreparation/);
+  assert.match(accountExecution, /fn consumeClearPreparation/);
   assert.match(runtime, /redactWithExecutionCredentialsNoFail/);
   assert.match(taskRuntime, /pub fn redactWithExecutionCredentialsNoFail/);
   assert.match(ports, /pub fn prepareExecutionInstall/);
@@ -550,7 +608,10 @@ test("Product Workspace owns the bounded registry without owning the shared comm
   assert.match(control, /workspace: product_workspace\.Runtime/);
   assert.match(workspaceRoot, /pub const Runtime = runtime_impl\.Runtime/);
   assert.match(workspaceRoot, /pub const Projection = view_impl\.Projection/);
-  assert.match(workspaceRoot, /pub const AutomaticRoot = runtime_impl\.AutomaticRoot/);
+  assert.match(
+    workspaceRoot,
+    /pub const AutomaticRoot = runtime_impl\.AutomaticRoot/,
+  );
   assert.doesNotMatch(
     workspaceRoot,
     /AutomaticAllocator|AutomaticAllocation|AutomaticError|automatic_root_impl/,
@@ -563,7 +624,10 @@ test("Product Workspace owns the bounded registry without owning the shared comm
   assert.match(workspaceRuntime, /pub fn taskRunAuthority/);
   assert.match(workspaceRuntime, /pub fn recoveryAuthority/);
   assert.match(workspaceRuntime, /pub fn filePreviewAuthorized/);
-  assert.match(workspaceRuntime, /automatic_allocator: \?automatic_root\.Allocator/);
+  assert.match(
+    workspaceRuntime,
+    /automatic_allocator: \?automatic_root\.Allocator/,
+  );
   assert.match(workspaceRuntime, /pub fn allocateAutomatic/);
   assert.match(workspaceRuntime, /pub fn finishAutomaticAllocation/);
   assert.match(workspaceRuntime, /pub fn rollbackAutomaticAllocation/);
