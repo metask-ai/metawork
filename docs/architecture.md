@@ -198,7 +198,7 @@ Bridge transport、Product 产品状态和 Agent execution terminal cause 是不
 
 当前正式 AgentCore target availability、exact artifact identity 与 ABI policy 由 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)唯一记录。MetaWork 只消费经 verifier 接收并 stage 到 `.agentcore/bundles/<target-id>` 的 canonical target-specific bundle 及其中的官方 Zig package。构建 target 精确选择同名 bundle，不读取“最后一次 stage”状态。缺失、identity、checksum、target、ABI 或 symbol 校验失败必须明确失败，不允许旧 revision、`latest`、可变 tag、implementation source fallback 或静默降级。精确 bundle 规则见 [AgentCore ABI v1 消费合同](agentcore-abi-v1.md)。
 
-当前 baseline 已包含同一桌面 Application 正常重启后、由 durable checkpoint 驱动的显式 Conversation 恢复，以及基于结构化 file reference、按需读取当前内容的异步 File Preview。File Preview 不构成 async Agent pending、文件版本或 FileChange observation。当前仍不包含 suspend/resume、独立 AgentCore Worker crash recovery、跨进程 in-flight Run 恢复、strict Workspace security、正式 Host tools、typed Output/FileChange、plan progress/approval、custom UI 或 Windows 更新。当前仍是同进程 prototype；存在 ABI entry 不代表更宽的进程隔离或恢复能力已经开放，能力状态只以 [验证规范](validation.md)为准。
+当前 baseline 已包含同一桌面 Application 正常重启后、由 durable checkpoint 驱动的显式 Conversation 恢复，以及基于结构化 file reference、按需读取当前内容的异步 File Preview。File Preview 不构成 async Agent pending、文件版本或 FileChange observation。当前仍不包含产品化 PermissionProfile、suspend/resume、独立 AgentCore Worker crash recovery、跨进程 in-flight Run 恢复、strict Workspace security、正式 Host tools、typed Output/FileChange、plan progress/approval、custom UI 或 Windows 更新。当前仍是同进程 prototype；存在 ABI entry 不代表更宽的进程隔离或恢复能力已经开放，能力状态只以 [验证规范](validation.md)为准。
 
 Native SDK 的平台支持矩阵、真实 WebView 路径、构建与分发证据只在 [验证规范](validation.md)维护。架构不预设未经验证的 push、poll 或自制 `events.drain` 协议，也不从一个平台的结果推断另一个平台已经可用。
 
@@ -209,7 +209,7 @@ Renderer 按不可信调用方处理：
 - Bridge 命令默认拒绝，只开放白名单；
 - dev origin 和 release origin 分离，开发配置不得泄漏到发布包；
 - Host 校验 payload、Session/Run 归属和请求时效；
-- trusted Workspace 只能由 Host 原生目录选择结果生成一次性 grant，用户确认选择本身构成显式授权；不得追加重复的 trust 确认，Renderer 也不能提交路径加 boolean 自行授信；
+- Manual Workspace authority 只能由 Host 原生目录选择结果生成一次性 grant，用户确认选择本身构成显式授权；不得追加重复的 trust 确认，Renderer 也不能提交路径加 boolean 自行授信；
 - Provider credential 不进入 Bridge、事件、日志或 snapshot；
 - OAuth token、PKCE verifier、authorization code、完整 API Key 和 Authorization header 只能存在于对应 Product secret transaction、系统凭据存储和受控 runtime copy；所有 owner 在释放前 secure-zero；
 - MCP credential 使用与 Metask Account 分离的 `<bundle-id>.mcp` 系统 credential service，只存在于系统凭据存储、Product Control mutation/OAuth operation 的线性临时 copy 和 Application-owned transport auth snapshot；`mcp/registry.json`、Bridge、Renderer、日志、产品历史和 raw diagnostic 均不得保存 credential 原文。Renderer 不得提交 secret；static credential 与 OAuth client secret 采集必须通过消费 Application-owned 通用 `secure_input` 的独立 `mcp_secret_capture` 窄 Host capability 直接写入系统 credential service，能力不可用时 fail closed；
@@ -217,9 +217,11 @@ Renderer 按不可信调用方处理：
 - Host 在形成产品 projection 前移除已知 Host-held credential 和 schema 标记的 secret 字段，并对命令与工具输出设置 byte 上限和 truncation 状态；Renderer 不是秘密过滤边界；
 - 当前不暴露通用 Host tool 或任意执行接口；
 - built-in Bash 使用非交互子进程；
-- strict Workspace security 未通过前，只运行临时或明确 trusted Workspace。
+- strict Workspace security 未通过前，只运行 Product Control 分配的 Automatic Workspace 或用户通过原生 picker 明确授权的 Manual Workspace，不宣称这些目录因此获得 strict isolation。
 
-持久 permission 是 Product Control-owned 产品状态，不是 Renderer preference 或 AgentCore parallel protocol。规则必须绑定 stable Workspace identity、tool identity/version、operation、canonical resource constraint 和 rule schema version；canonical path 字符串本身不能充当 stable identity。Workspace、tool、script 或 capability 变化时规则 fail closed。Workspace 文件边界、process tree、network、environment、审计和撤销分别通过对应安全 Gate 前，UI 不得为相关能力提供 `Always allow` 或 `Full access`。
+PermissionProfile 与持久 permission rule 是两类产品状态，不是 Renderer preference、AgentCore enum 或 parallel protocol。目标 profile 的新 Task 默认值由 Product Control 持有，effective value 与 Run provenance 由 Product Task 持有；它只改变未覆盖操作的交互策略，不创建 Sandbox 或新的 Workspace authority。任何 profile 必须在 exact bundle behavior、fresh/restore、idle mutation、撤权和 Scheduled noninteractive 完成后才能向 Renderer 发布。
+
+持久 rule 必须绑定 stable Workspace identity、tool identity/version、operation、canonical resource constraint 和 rule schema version；canonical path 字符串本身不能充当 stable identity。Workspace、tool、script 或 capability 变化时规则 fail closed。Workspace 文件边界、process tree、network、environment、审计和撤销分别通过对应安全 Gate 前，UI 不得为相关能力提供 `Always allow`。这些 Gate 不把 `full_access` profile 变成一组细粒度持久规则；后者表示 MetaWork 不再提供 tool permission 保护，仍受操作系统与外部服务 authority 约束。
 
 ## 8. Release 与合同 identity
 

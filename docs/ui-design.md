@@ -61,7 +61,7 @@ MetaWork 的视觉记忆点不是装饰性的暖色、通用衬线大标题、�
 - Workspace current / Task pinned Skill catalog、typed Skill Run 与独立 Skill rejection；
 - Run 状态、六种终止原因，以及 Session 是否仍可继续；当前 AgentCore typed `run_state` observation 由 Workbench 投影为 Current activity，并按 transition sequence 丢弃过期观察。
 
-因此当前产品在 Task 内容区显示用户输入、Agent 可见输出、权限决策面、唯一当前状态、紧凑 Tool 摘要和必要的终止结果；Tool input/progress/result、usage 与 context observation 进入按需 Task overview。普通信息不足时，Agent 通过可见回复说明问题并结束当前 Run，用户从 Composer 继续，不进入结构化 Question wait。工具记录只作为所属 Run 的可检查过程证据，不成为 raw event 时间线。Plan、plan approval、Outputs、Files changed、持久权限管理和 custom UI 均保持隐藏；它们在本文档中的设计是后续 capability 到位后的产品规范，不是当前实现承诺。Renderer 不解析工具参数、stdout 或普通文本来猜测这些状态；Current activity 只来自 Host 对受序列保护的 `run_state` 以及 typed text、Tool、retry、context 和 output control event 的产品投影。当前 Renderer 合同已提供独立 Workspace projection、Task-bound ExecutionConfig facts、正式设置 route，以及设置与 New task 共享的默认 API/模型选择；跨重启 rebind 等仍须等对应 capability 落地后才能宣称可用，差距由 [验证规范](validation.md)明确记录。
+因此当前产品在 Task 内容区显示用户输入、Agent 可见输出、权限决策面、唯一当前状态、紧凑 Tool 摘要和必要的终止结果；Tool input/progress/result、usage 与 context observation 进入按需 Task overview。普通信息不足时，Agent 通过可见回复说明问题并结束当前 Run，用户从 Composer 继续，不进入结构化 Question wait。工具记录只作为所属 Run 的可检查过程证据，不成为 raw event 时间线。Plan、plan approval、Outputs、Files changed、PermissionProfile 选择、持久权限管理和 custom UI 均保持隐藏；它们在本文档中的设计是后续 capability 到位后的产品规范，不是当前实现承诺。Renderer 不解析工具参数、stdout 或普通文本来猜测这些状态；Current activity 只来自 Host 对受序列保护的 `run_state` 以及 typed text、Tool、retry、context 和 output control event 的产品投影。当前 Renderer 合同已提供独立 Workspace projection、Task-bound ExecutionConfig facts、正式设置 route，以及设置与 New task 共享的默认 API/模型选择；跨重启 rebind 等仍须等对应 capability 落地后才能宣称可用，差距由 [验证规范](validation.md)明确记录。
 
 上述边界同时约束 Agent 对话渲染：工作过程必须在 terminal 前随真实 Snapshot revision 可见，过程与正式回复保持主次层级，长任务中可以检查 Tool 摘要而无需离开阅读上下文；仍不得泄漏 private reasoning、从文本猜测结构化事实或提前开放 gated capability。该信息架构只呈现实际到达的 commentary 与 typed activity，不承诺 Provider 在每个 Tool turn 输出自然语言，也不允许 Renderer 为提高信息密度而生成中间对话、推断模型意图或补造进度。
 
@@ -389,7 +389,7 @@ Disabled
 - 新建、保存、暂停/恢复、立即运行和删除使用 Host typed result 与 optimistic `scheduledTaskEpoch`。命令 timeout 后先刷新 canonical snapshot，不自动重放；
 - 点击计划打开 detail drawer：上半部是定义与下一次运行，下半部是有界运行历史。每个 occurrence 链接到其真实 Task，并显示完成、失败、已跳过、延迟或等待处理；结果历史不复制 Task timeline；
 - 删除计划不停止或删除已经创建的真实 Task；`立即运行` 也通过同一 occurrence 与 Task admission，不能建立测试/手动专用路径；上一次真实 Task 仍 non-terminal 时显示 `已跳过：上一次仍在运行`；
-- 执行配置或 Workspace authority 变化时显示 `需要处理`，并要求用户编辑确认；需要 Agent permission 的 occurrence 链接到真实请求并发出系统通知，不把等待伪装成 schedule failure；
+- 执行配置、Workspace authority 或定义固定的非交互 PermissionProfile 不再满足时显示 `需要处理`，并要求用户编辑确认；occurrence 不得进入同步 Agent permission wait。未覆盖操作使该次运行以 typed 原因停止，通知只定位真实 Task 和处理原因，不提供远程批准、临时升级或继续原 Run；
 - 每次 default occurrence 创建新的真实 Task 与 Automatic Workspace；同一 occurrence 所属 Task 的后续 Run 复用该目录。运行历史链接 Task，不展示 automatic `workspace-key`；目录保留不等于 Host 重启后恢复 Task。
 - 页面不再显示“仅在 MetaWork 运行时触发”限制条。窗口关闭时 MetaWork 留在系统后台并继续计划；显式退出通过托盘动作完成并在确认中说明影响，重启后定义与触发游标从 Host store 恢复；
 - 已有定义时的搜索使用 `type="search"`；分区是带可访问名称的 region/list；模板行、任务行和 overflow 动作都有明确 button 语义。drawer 打开后焦点进入标题/说明，`Escape` 或关闭动作回到原触发行；运行历史更新不抢焦点。
@@ -708,7 +708,7 @@ Skill draft 与 Text draft 一样按 Task/New-task scope 保存在 Renderer sess
 
 表中的 `idle` 仍受 execution binding availability 约束；`rebind_required / unavailable` 时以 §6.4 的只读说明和动作替代发送控件。
 
-输入区中的模式选择只有在语义明确时才出现。`Standard` 不能作为无定义装饰；模型、权限策略、执行强度和显示密度不能混成一个模式。
+输入区中的模式选择只有在语义明确时才出现。目标 PermissionProfile 可以在 New task 发送前作为独立、明确标注的策略选择出现，但不得与模型、执行强度或显示密度混成一个“模式”；已有 Task 只显示 Task-owned effective profile，并只在 idle mutation 合同已验证时允许切换。`Standard` 在 typed risk/effect 和执行前 commit boundary 未落地前必须完全隐藏，不能作为无定义装饰或 disabled 预告。
 
 运行中的输入不会发送给当前 Run，也不使用未验证的 `UiBackend.poll()` 模拟实时 steering。首版 Composer 只保存 Renderer 本地草稿，发送动作保持禁用并显示 `当前任务结束后发送`；当前 Run terminal 后由用户明确发送。不得自动提交、自动启动下一次 Run，或把草稿伪装成已排队状态。`queued` 只表示唯一已提交 Run 正在等待 Host executor，不表示当前 Run 后面还有另一条队列。未来只有在 AgentCore 发布 typed steering capability 后，才设计 `排队补充` 与 `立即打断` 的不同操作。
 
@@ -755,6 +755,8 @@ Skill draft 与 Text draft 一样按 Task/New-task scope 保存在 Renderer sess
 
 待处理请求是当前 wait state，不是历史：它显示在当前 Assistant 回复之后、Composer 之前；响应完成后从主内容移除。左栏和 Task overview 只负责提醒，点击后跳转到原请求，不在多个位置重复生成可操作按钮。
 
+权限请求只在当前 Task authority 未覆盖、用户决定确有必要、界面能准确说明 effect 且执行层能兑现该决定时出现。原生 Workspace picker、已选 PermissionProfile、当前 Task 已取得的 Workspace/Skill/MCP authority 和操作系统自己的授权都不得被 Renderer 再包装成“信任此工作区”或重复批准。当前 AgentCore payload 只能支撑 compatibility permission 时，卡片忠实显示其 typed tool/request 事实，不从命令文本猜测风险等级、安全性或持久作用域。
+
 ### 9.2 请求状态
 
 请求响应后仍留在时间线中：
@@ -771,9 +773,9 @@ Skill draft 与 Text draft 一样按 Task/New-task scope 保存在 Renderer sess
 
 危险批准不能由裸 Enter 触发。
 
-## 10. 持久权限
+## 10. 权限策略与持久规则
 
-> Capability：**未来**。Host-owned 持久权限、strict Workspace security 和对应恢复/撤销合同尚未验收，本章控件当前必须全部隐藏。
+> Capability：**目标与未来**。MetaWork-owned PermissionProfile 是目标能力；Host-owned 细粒度持久规则、strict Workspace security 和对应恢复/撤销合同是更后的能力。两者不是同一个机制，当前控件都必须隐藏。
 
 ### 10.1 基本原则
 
@@ -807,7 +809,7 @@ Deny    Allow once    Always allow…
 
 以下变化使规则失效或要求重新确认：Workspace 被替换或重新授权、tool/MCP identity 或 major capability 变化、项目脚本内容变化、executable resolution 变化、目标经过 symlink 或其他解析后越过授权边界。检查与使用之间仍存在无法消除的 TOCTOU 时，Host 必须拒绝持久命中并退回逐次审批。
 
-strict Workspace security 未通过前，不开放 Workspace 级 Read/Edit/Delete 持久规则；受控进程执行、process tree、network 和 environment 边界未通过独立验证前，不开放 Project script、Bash、Network 或 `Full access` 持久规则。即便对应 Gate 已通过，`PATH` 前缀、任意 shell/interpreter、可变脚本名和未约束 environment 也不能成为可持久授权范围。
+strict Workspace security 未通过前，不开放 Workspace 级 Read/Edit/Delete 持久规则；受控进程执行、process tree、network 和 environment 边界未通过独立验证前，不开放 Project script、Bash 或 Network 持久规则。即便对应 Gate 已通过，`PATH` 前缀、任意 shell/interpreter、可变脚本名和未约束 environment 也不能成为可持久授权范围。
 
 ### 10.3 管理与撤销
 
@@ -824,17 +826,23 @@ strict Workspace security 未通过前，不开放 Workspace 级 Read/Edit/Delet
 
 持久权限不得进入 Renderer 自管存储、Task 导出或聊天内容，默认不云同步。
 
-### 10.4 Full access
+### 10.4 PermissionProfile
 
-可以为未来预留：
+目标产品策略只有三档：
 
 ```text
-Ask for approval
-Use saved permissions
-Full access
+请求批准
+标准
+完全访问
 ```
 
-`Full access` 只能在 Workspace 设置中单独开启，不能在普通审批卡片中顺手授予。它不是绕过边界的总开关：只有所有已启用 tool 都能被 Host 强制限制在已验证 capability 范围内时才允许出现；strict Workspace security、process 和 network 边界未真实成立前不得开放。
+- `请求批准`：常规 Workspace 编辑自动执行，当前策略未覆盖的操作请求用户决定；当前 `accept_edits + unrestricted` 只是它的 compatibility baseline；
+- `标准`：常规本地工作自动执行，只在 Host 提供可靠 typed risk/effect 时请求决定；没有 typed effect 和执行前 commit boundary 时不得出现；
+- `完全访问`：MetaWork 不提供 tool permission 保护，仍受操作系统权限、服务授权和进程身份约束；它不是 root、Sandbox 或“信任 Workspace”。
+
+Settings 只设置新 Task 默认值；New task 可以覆盖本次选择；Task 创建后保存自己的 effective profile，Run history 保存 provenance。默认值变化不改写既有 Task，运行中的 Task 不允许切换；只有 Host 提供已验证的 idle mutation 与撤权生效点时，已有 Task 才显示切换入口。用户选择更宽松 profile 的动作本身就是明确授权，不再叠加第二个确认 modal。
+
+Renderer 只能显示 Host capability projection 声明已端到端支持的档位：当前三档全部隐藏；后续可以先开放 `请求批准` 与 `完全访问`，`标准` 继续隐藏，而不是显示 disabled 占位。任一可见档位都必须覆盖 fresh/restore、Task persistence、idle mutation、Run provenance、Scheduled noninteractive 和撤权；不得用 Renderer preference 或 AgentCore enum 名称模拟。
 
 ## 11. 按需 Task overview
 
@@ -991,6 +999,8 @@ Account
 设置是覆盖整个 Workbench 内容区的正式全局 surface，不用狭窄 popover 承载目录选择、错误恢复和危险退出。它保留窗口壳层，底层 Workbench 继续挂载但不可操作；进入后不重复显示或操作 Task 左栏，也不改变离开前的 Task、草稿、滚动和焦点状态。窗口标题栏保持一致，页面内 `返回工作台` 是返回入口；左下角用户菜单只负责打开该 surface 和少量直接动作。
 
 设置树只列当前阶段已经完整设计并通过 capability gate 的项目。显示密度不作为设置；`Appearance` 只有在第二套主题完成设计、可访问性和平台验收后才能加入，首个浅色版本不显示空入口。
+
+PermissionProfile capability 完整通过后，设置树增加独立 `Permissions` 分区，但只提供“新 Task 默认策略”；它不管理当前 Workspace、已有 Task 或 AgentCore 内部 enum。该分区至少有一个真实可用档位才出现，只列 Host capability projection 支持的选项，不显示未实现的 `Standard`、假开关或“即将推出”。已有 Task 的 effective profile 只在 Task 自身 surface 展示和按 §10.4 的 idle gate 修改。
 
 `Model connections` 当前不进入设置树，也不出现在左下角账号菜单。只有 management、Host-owned secure capture、provider connection test、默认 execution transaction 和已开放 provider admission 共同通过产品 gate 后才能整体恢复入口；不能只显示不可完成的空壳或“能力不可用”页面。
 
@@ -1186,9 +1196,9 @@ Foundation 组件只消费 `--ui-*`；只有直接表现品牌或状态本身时
 - 一句话说明 MetaWork 将在当前本地 Workspace 中完成工作；
 - 作为首屏主视觉的 Composer；
 - 当前模型与 Workspace；
-- 必要的 trusted Workspace 限制提示。
+- 当真实能力边界影响本次执行时，显示准确、可操作的 authority 限制提示；不得显示泛化的“信任此工作区”。
 
-没有 Workspace 时可以先输入临时草稿，但发送动作明确引导选择并确认 Workspace；Account 此时已经 ready，不再出现登录 prerequisite。
+没有 Workspace 时可以先输入临时草稿，但发送动作明确引导选择 Workspace；用户在原生目录 picker 中确认即完成 Manual Workspace 授权，不追加“Use this folder”或 trust 弹窗。Account 此时已经 ready，不再出现登录 prerequisite。
 
 ### 17.3 错误原则
 
@@ -1273,6 +1283,7 @@ Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成
 ### 19.5 Workspace、模型与设置
 
 - Workspace 是独立 projection：空 Workspace、最近使用、重新授权、移除和跨 Workspace Task signal；
+- 原生目录 picker 确认后直接完成 Manual Workspace 注册，不出现第二次 trust / `Use this folder` 请求，Renderer 不提交 `trusted` boolean；
 - New task Composer 始终显示当前模型和 Workspace，上下文缺失时提供明确下一步而非静默 disabled；
 - New task 首次发送覆盖本地 admission 不满足、`create_rejected`、`create_failed`、Task 已创建后的 `run_rejected` / `run_failed`、Run accepted 与 command timeout；每种结果都保持正确页面和草稿 scope，不伪造指令、Running 或失败定论；
 - 当前 API 模型列表、模型切换 pending/error、设置与 Composer 默认值一致；
@@ -1290,6 +1301,7 @@ Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成
 - Read 大量文件；
 - Edit diff；
 - one-time permission；
+- permission 请求只针对当前 authority 未覆盖且执行层能兑现的决定；Workspace picker、Task profile、MCP/Skill authority 与系统授权不重复请求；
 - capability 未验收时 Plan、plan approval、Always allow、Output 与 FileChange 完全不出现；
 - 对应 capability 未来验收后，Plan 创建/更新、计划确认、持久规则与 Output 的目标状态按各章节启用；
 - 后台 Task 通知；
@@ -1297,6 +1309,9 @@ Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成
 
 ### 19.7 权限规则与失效
 
+- Host 未发布 PermissionProfile capability 时不显示策略入口；只发布部分档位时仅显示真实档位，`Standard` 未具备 typed risk/effect 和 commit boundary 时完全不存在；
+- 默认 profile 只影响新 Task；Task effective profile、Run provenance、fresh/restore、idle mutation、active-task 禁止切换和 Scheduled noninteractive 语义一致；
+- `full_access` 文案明确保留操作系统权限，不宣称 root、Sandbox 或 Workspace trust；选择动作不再追加第二个确认 modal；
 - Host 未声明可持久化 capability 时不显示 `Always allow`；
 - Workspace identity 改变、移除后重新授权和目录被替换；
 - symlink 解析越过授权边界，以及检查/执行间发生目标变化；
