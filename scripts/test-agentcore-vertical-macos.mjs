@@ -132,17 +132,29 @@ const responses = [
     ),
     350,
   ),
-  toolSse("m2", "bash-1", "Bash", {
-    command:
-      process.platform === "win32"
-        ? 'powershell -NoProfile -Command "Start-Sleep -Milliseconds 400; Write-Output agentcore-vertical-bash-ok"'
-        : "sleep 0.4; echo agentcore-vertical-bash-ok",
-  }),
-  toolSse("m3", "edit-1", "Edit", {
-    file_path: fixturePath,
-    old_string: "agentcore-vertical-before",
-    new_string: "agentcore-vertical-after",
-  }),
+  toolSse(
+    "m2",
+    "bash-1",
+    "Bash",
+    {
+      command:
+        process.platform === "win32"
+          ? 'powershell -NoProfile -Command "Start-Sleep -Milliseconds 400; Write-Output agentcore-vertical-bash-ok"'
+          : "sleep 0.4; echo agentcore-vertical-bash-ok",
+    },
+    "I’ve checked the input; now I’m running a focused verification.",
+  ),
+  toolSse(
+    "m3",
+    "edit-1",
+    "Edit",
+    {
+      file_path: fixturePath,
+      old_string: "agentcore-vertical-before",
+      new_string: "agentcore-vertical-after",
+    },
+    "The verification passed; now I’m applying the change.",
+  ),
   ...(process.platform === "win32"
     ? [
         toolSse("m4", "write-1", "Write", {
@@ -1073,6 +1085,19 @@ function assertLiveRunRevisions(observations, terminalRun, deliveryEvents) {
   const preterminal = observed.filter((item) =>
     ["queued", "running", "waiting_ui", "stopping"].includes(item.phase),
   );
+  const commentaryTransitions = preterminal.filter(
+    (item, index) =>
+      index === 0 ||
+      item.commentaryBytes !== preterminal[index - 1].commentaryBytes,
+  );
+  const provisionalTransitions = preterminal.filter(
+    (item, index) =>
+      index === 0 ||
+      item.provisionalBytes !== preterminal[index - 1].provisionalBytes,
+  );
+  const commentaryUpdates = commentaryTransitions.filter(
+    (item) => item.commentaryBytes > 0,
+  );
   for (let index = 1; index < observed.length; index += 1) {
     if (
       BigInt(observed[index - 1].revision) >= BigInt(observed[index].revision)
@@ -1088,7 +1113,7 @@ function assertLiveRunRevisions(observations, terminalRun, deliveryEvents) {
   if (
     deliveryEvents < 4 ||
     preterminal.length < 4 ||
-    !preterminal.some((item) => item.commentaryBytes > 0) ||
+    commentaryUpdates.length < 3 ||
     !hasActivity("executing_tools") ||
     !hasActivity("waiting_user") ||
     !hasToolState("running") ||
@@ -1120,6 +1145,22 @@ function assertLiveRunRevisions(observations, terminalRun, deliveryEvents) {
         (item) => item.provisionalBytes > 0,
       ),
       commentaryObserved: preterminal.some((item) => item.commentaryBytes > 0),
+      commentaryUpdates: commentaryUpdates.length,
+      commentaryTransitions: commentaryTransitions.map((item) => ({
+        revision: item.revision,
+        bytes: item.commentaryBytes,
+      })),
+      provisionalTransitions: provisionalTransitions.map((item) => ({
+        revision: item.revision,
+        bytes: item.provisionalBytes,
+      })),
+      preterminalSequence: preterminal.map((item) => ({
+        revision: item.revision,
+        activity: item.activity,
+        commentaryBytes: item.commentaryBytes,
+        provisionalBytes: item.provisionalBytes,
+        tools: item.tools.map((tool) => `${tool.name}:${tool.state}`),
+      })),
       textDeliveryGranularity: preterminal.some(
         (item) => item.provisionalBytes > 0,
       )
