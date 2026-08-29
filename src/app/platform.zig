@@ -151,7 +151,6 @@ pub const Adapter = struct {
             .start_timer_fn = startTimer,
             .cancel_timer_fn = cancelTimer,
             .show_open_dialog_fn = showOpenDialog,
-            .show_message_dialog_fn = showMessageDialog,
             .window_chrome_connect_fn = windowChromeConnect,
             .window_chrome_sync_fn = windowChromeSync,
             .window_chrome_begin_drag_fn = windowChromeBeginDrag,

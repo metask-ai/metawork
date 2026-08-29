@@ -209,7 +209,7 @@ Renderer 按不可信调用方处理：
 - Bridge 命令默认拒绝，只开放白名单；
 - dev origin 和 release origin 分离，开发配置不得泄漏到发布包；
 - Host 校验 payload、Session/Run 归属和请求时效；
-- trusted Workspace 只能由 Host 原生目录选择与原生确认生成一次性 grant；Renderer 不能提交路径加 boolean 自行授信；
+- trusted Workspace 只能由 Host 原生目录选择结果生成一次性 grant，用户确认选择本身构成显式授权；不得追加重复的 trust 确认，Renderer 也不能提交路径加 boolean 自行授信；
 - Provider credential 不进入 Bridge、事件、日志或 snapshot；
 - OAuth token、PKCE verifier、authorization code、完整 API Key 和 Authorization header 只能存在于对应 Product secret transaction、系统凭据存储和受控 runtime copy；所有 owner 在释放前 secure-zero；
 - MCP credential 使用与 Metask Account 分离的 `<bundle-id>.mcp` 系统 credential service，只存在于系统凭据存储、Product Control mutation/OAuth operation 的线性临时 copy 和 Application-owned transport auth snapshot；`mcp/registry.json`、Bridge、Renderer、日志、产品历史和 raw diagnostic 均不得保存 credential 原文。Renderer 不得提交 secret；static credential 与 OAuth client secret 采集必须通过消费 Application-owned 通用 `secure_input` 的独立 `mcp_secret_capture` 窄 Host capability 直接写入系统 credential service，能力不可用时 fail closed；

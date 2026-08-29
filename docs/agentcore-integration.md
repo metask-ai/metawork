@@ -505,8 +505,8 @@ Agent sink 同时累计 total bytes、chunk count 与实际 streamed bytes 的 S
 
 ### Workspace
 
-- Host 直接发起原生目录选择与原生 trust 确认，Bridge 签发绑定 window、`ProductDelivery` connection generation 和该次 Native picker 结果的一次性 grant；
-- Renderer 创建 Task 时只回传 grant，不得回传任意路径加 `trusted` boolean；Product Control 消费 grant 后使用标准 I/O 规范化并验证目录，再建立 Task/Agent Session。grant 在 disconnect、拒绝、替换或首次消费后失效；
+- Host 直接发起原生目录选择，用户确认 Native picker 的结果即构成显式授权；Bridge 在同一 `workspaces.choose` 命令内签发并消费绑定 window、`ProductDelivery` connection generation 和该次 picker 结果的一次性 grant，不追加 trust 确认；
+- Renderer 只接收完成注册后的 Workspace identity，不得接收 grant、回传任意路径或提交 `trusted` boolean；Product Control 使用 grant 中的路径执行规范化与目录验证。grant 在 disconnect、拒绝、替换或首次消费后失效；
 - lifecycle API 只接收 Product Control 已规范化的绝对路径，并再次拒绝空 component、`.`、`..`、尾随分隔符和临时根的词法逃逸；symlink/TOCTOU 仍不在此保证内；
 - 当前 v1 只运行临时 fixture 或用户明确 trusted 的 Workspace；
 - 不以 `workspace_root` 字段存在为 strict security 证据；

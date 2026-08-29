@@ -209,7 +209,7 @@ Workspace
 
 - 左栏不显示 Workspace 标题、添加动作或切换器；它直接列出同一 canonical snapshot 中 owning Workspace 仍被投影的所有 Manual/Automatic Task，并按统一行动优先级分组。Workspace 移除后保留的历史 Task 不生成可点击的死入口；
 - Task 被选择后使用自身绑定的 Workspace 路径，不提交额外的全局 Workspace 导航动作；不同路径下的后台 Task 都必须持续可见；
-- New task 默认选择 Automatic Workspace，工作目录控件直接显示“默认”；此时不提前创建 Workspace 或 Task，首次发送才请求 Host 分配 Automatic Workspace。用户可以在发送前切换到已有 Manual Workspace 或打开原生目录选择器；选择完成后只更新草稿上下文，不得自动创建 Task 或发送已有内容。Manual Workspace 直接显示 canonical directory，Automatic Workspace 统一显示“默认”，不得暴露随机目录或内部 kind 术语；
+- New task 默认选择 Automatic Workspace，工作目录控件直接显示“默认”；此时不提前创建 Workspace 或 Task，首次发送才请求 Host 分配 Automatic Workspace。用户可以在发送前切换到已有 Manual Workspace 或打开原生目录选择器；用户确认目录后即完成授权并只更新草稿上下文，不得追加 trust 确认、自动创建 Task 或发送已有内容。Manual Workspace 直接显示 canonical directory，Automatic Workspace 统一显示“默认”，不得暴露随机目录或内部 kind 术语；
 - New task 草稿按 Workspace 隔离。未绑定 Workspace 的临时草稿只在目标 Workspace 没有草稿时迁移；目标已有草稿时保留两边内容并打开目标草稿，不能覆盖或丢弃任一份；
 - Workspace projection 的 `kind` 是 Host 事实；一个 Manual Workspace 可以承载多个 Task，Automatic Workspace 精确归属一个 Task；
 - Composer 的工作目录控件只选择、添加或重新授权 New task 路径；设置页不提供 Workspace 生命周期管理。设置作为覆盖整个 Workbench 内容区的长期 surface 打开，保留窗口壳层和底层 Workbench 挂载，拥有自己的分区导航与内容滚动，关闭后恢复原工作面；

@@ -65,10 +65,6 @@ pub const Platform = struct {
         native_sdk.platform.OpenDialogOptions,
         []u8,
     ) anyerror!native_sdk.platform.OpenDialogResult,
-    show_message_dialog_fn: *const fn (
-        ?*anyopaque,
-        native_sdk.platform.MessageDialogOptions,
-    ) anyerror!native_sdk.platform.MessageDialogResult,
     window_chrome_connect_fn: *const fn (
         ?*anyopaque,
         native_sdk.platform.WindowId,
@@ -1264,22 +1260,6 @@ pub const Dispatcher = struct {
             if (selected.count != 1 or selected.paths.len == 0 or
                 selected.paths.len > workspace_path_capacity)
                 return error.InvalidWorkspace;
-            const visible_path = selected.paths[0..@min(
-                selected.paths.len,
-                native_sdk.platform.max_dialog_message_bytes,
-            )];
-            const decision = try self.platform.show_message_dialog_fn(
-                self.platform.context,
-                .{
-                    .style = .warning,
-                    .title = "Trust this workspace?",
-                    .message = "MetaWork can read and change files in this folder while you use it. Only choose a folder you trust.",
-                    .informative_text = visible_path,
-                    .primary_button = "Use this folder",
-                    .secondary_button = "Cancel",
-                },
-            );
-            if (decision != .primary) return "{\"selected\":false}";
             break :user selected.paths;
         };
         if (selected_path.len == 0 or selected_path.len > workspace_path_capacity)
@@ -3940,13 +3920,6 @@ test "Dispatcher validates authority before domain calls and preserves committed
             return .{ .paths = output[0..path.len], .count = 1 };
         }
 
-        fn confirm(
-            _: ?*anyopaque,
-            _: native_sdk.platform.MessageDialogOptions,
-        ) anyerror!native_sdk.platform.MessageDialogResult {
-            return .primary;
-        }
-
         fn chromeEnvironment() WindowChromePlatformEnvironment {
             return .{
                 .top = 52,
@@ -4094,7 +4067,6 @@ test "Dispatcher validates authority before domain calls and preserves committed
             .start_timer_fn = Harness.startTimer,
             .cancel_timer_fn = Harness.cancelTimer,
             .show_open_dialog_fn = Harness.open,
-            .show_message_dialog_fn = Harness.confirm,
             .window_chrome_connect_fn = Harness.connectWindowChrome,
             .window_chrome_sync_fn = Harness.syncWindowChrome,
             .window_chrome_begin_drag_fn = Harness.beginWindowChromeDrag,
