@@ -44,6 +44,20 @@ Storage 不拥有业务表、Product health/retry/recovery policy、应用数据
 
 未来 Product owner 采用 SQL 时必须另行定义 schema、migration 内容、恢复和业务并发不变量。未来 backend adapter 必须完整满足本合同；不得以兼容层、双写或静默 fallback 弱化合同。
 
+模块 owner 固定为：
+
+```text
+src/storage.zig                         # Storage module root
+src/storage/sql.zig                     # backend-neutral public contract
+src/storage/conformance.zig             # shared backend contract tests
+src/storage/sqlite.zig                  # public concrete owner and lifecycle orchestration
+src/storage/sqlite/connection.zig       # SQLite C API, profile, limits, authorizers, bind/row/error
+src/storage/sqlite/migrations.zig       # migration metadata, checksum and atomic application
+tests/support/storage_crash_fixture.zig # child-process WAL recovery fixture
+```
+
+不继续按 helper 数量拆文件；只有出现新的 owner、生命周期或独立可测试不变量时才增加模块。
+
 ## 3. Backend-neutral SQL contract
 
 ### 3.1 输入类型

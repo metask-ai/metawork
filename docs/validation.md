@@ -26,7 +26,7 @@
 | 层级 | 唯一职责 |
 | --- | --- |
 | Zig inline test | 单模块纯状态转换、codec、容量与资源所有权不变量 |
-| Storage conformance | backend-independent SQL contract 与 concrete backend 的事务、profile、文件和错误映射 |
+| Storage conformance | backend-independent SQL contract 与 concrete backend 的事务、profile、limits、lifecycle、故障分类及 child-process WAL/crash recovery |
 | `tests/agent/` | Agent Runtime、Session、callback、ABI 消费、生命周期与并发 |
 | `tests/product/` | Product aggregate、事务、持久化、恢复与产品并发 |
 | `tests/integration/` | 必须跨两个以上 owner 才能出现的组合失败 |
