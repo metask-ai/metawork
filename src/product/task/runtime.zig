@@ -3020,6 +3020,48 @@ pub const Runtime = struct {
         return result;
     }
 
+    /// Turns the Agent-owned noninteractive permission stop observation into
+    /// a bounded Run-control effect. Terminal publication remains worker-owned
+    /// and is reconciled separately by `syncOperationRecords`.
+    pub fn requestPermissionStops(self: *Runtime) bool {
+        var changed = false;
+        for (self.tasks) |*entry| {
+            const task = &(entry.* orelse continue);
+            if (task.runtime.worker_references.load(.acquire) == 0 or
+                task.runtime.active_run_id == 0 or
+                task.runtime.cancel_requested)
+                continue;
+            const active_run_id = switch (task.runtime.active_operation) {
+                .run => |run_id| run_id,
+                .none, .compact, .restore => continue,
+            };
+            if (active_run_id != task.runtime.active_run_id) continue;
+            const run = task_state.findRun(
+                task.durable.runs,
+                active_run_id,
+            ) orelse continue;
+            if (task_state.terminalPayload(run) != null) continue;
+            var access = task.runtime.acquireAccess() catch continue;
+            defer access.deinit();
+            if (access.permissionStopRequest() != active_run_id) continue;
+            const dispatch = requestPermissionTermination(run);
+            const stopping = switch (dispatch) {
+                .requested, .already_requested => true,
+                .pending,
+                .already_finishing,
+                .already_terminal,
+                .stale_run,
+                .session_closing,
+                => false,
+            };
+            if (!stopping) continue;
+            task.runtime.cancel_requested = true;
+            changed = true;
+            if (task_state.setActivePhase(run, .stopping)) changed = true;
+        }
+        return changed;
+    }
+
     pub fn syncCloseCompletions(
         self: *Runtime,
         effects: ReleaseEffects,
@@ -4301,6 +4343,27 @@ fn requestRunTermination(
     var lease = lease_value;
     defer lease.deinit();
     return switch (lease.requestTermination(task_policy.pendingTerminationSignal(run))) {
+        .requested => .requested,
+        .already_requested => .already_requested,
+        .already_terminal => .already_terminal,
+        .stale_run => .stale_run,
+        .session_closing => .session_closing,
+    };
+}
+
+fn requestPermissionTermination(
+    run: *task_state.RunRecord,
+) task_state.RunTerminationDispatch {
+    switch (run.agent_handoff.load(.acquire)) {
+        .queued, .starting => return .pending,
+        .finishing => return .already_finishing,
+        .running => {},
+    }
+    const lease_value = run.run_control.tryAcquireLease() orelse
+        return .already_finishing;
+    var lease = lease_value;
+    defer lease.deinit();
+    return switch (lease.requestTermination(.permission_required)) {
         .requested => .requested,
         .already_requested => .already_requested,
         .already_terminal => .already_terminal,

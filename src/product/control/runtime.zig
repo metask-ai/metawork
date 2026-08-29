@@ -2679,6 +2679,7 @@ pub const Runtime = struct {
         changed = self.task_runtime.syncCloseCompletions(
             self.taskRuntimeReleaseEffects(),
         ) or changed;
+        changed = self.task_runtime.requestPermissionStops() or changed;
         const task_sync = self.task_runtime.syncOperationRecords();
         changed = task_sync.changed or changed;
         durable_changed = task_sync.durable_changed or durable_changed;

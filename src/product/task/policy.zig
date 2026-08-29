@@ -193,6 +193,10 @@ pub fn classifyAgentTerminal(
         .outcome = .dependency_contract_failure,
         .cause = .dependency_contract_failure,
     };
+    if (result.termination_signal) |signal| switch (signal) {
+        .permission_required => return decisionForSignal(signal),
+        else => {},
+    };
     if (result.failure == .abi_status) return .{
         .phase = .failed,
         .outcome = .failed,
@@ -493,6 +497,17 @@ test "Agent terminal facts map into Product Task outcomes" {
         TerminalDecision{ .phase = .completed, .outcome = .completed, .cause = null },
         classifyAgentTerminal(&terminal),
     );
+
+    terminal.termination_signal = .permission_required;
+    try std.testing.expectEqual(
+        TerminalDecision{
+            .phase = .stopped,
+            .outcome = .stopped,
+            .cause = .permission_required,
+        },
+        classifyAgentTerminal(&terminal),
+    );
+    terminal.termination_signal = null;
 
     terminal.abi_status = .checkpoint_budget_required;
     terminal.raw_status_code = @intFromEnum(agent.Status.checkpoint_budget_required);

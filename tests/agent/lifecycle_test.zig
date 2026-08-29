@@ -1763,9 +1763,9 @@ test "noninteractive permission request becomes a typed stop without pending UI"
     try std.testing.expect(observed_stop);
     try std.testing.expect(session.pendingUiRequest() == null);
 
-    // Product Control consumes the fact above and aborts through the ordinary
-    // Agent cancellation path. The callback's first-writer signal must remain
-    // the terminal cause rather than being replaced by user_cancel.
+    // This Agent-level test uses user cancellation only to finish the fake
+    // Core Run after observing the stop fact. Product Control's automatic
+    // consumption and abort are covered by its own lifecycle test.
     try cancelSession(session, run_id, .user_cancel);
     try session.waitRun(run_id);
     var terminal = takeTestTerminal(session, run_id);

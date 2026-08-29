@@ -1729,6 +1729,8 @@ fn directoryEntryCount(dir: std.Io.Dir) !usize {
 const TestScheduleSupport = struct {
     now: u64 = 1_000,
     commits: usize = 0,
+    notification_kind: ?product_control.ScheduleNotificationKind = null,
+    notification_task_id: u64 = 0,
 
     fn nowUnixSeconds(context: ?*anyopaque) ?u64 {
         const self: *@This() = @ptrCast(@alignCast(context.?));
@@ -1768,7 +1770,104 @@ const TestScheduleSupport = struct {
             .commit_fn = commit,
         };
     }
+
+    fn notify(
+        context: ?*anyopaque,
+        notification: product_control.ScheduleNotification,
+    ) bool {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        self.notification_kind = notification.kind;
+        self.notification_task_id = notification.task_id;
+        return true;
+    }
+
+    fn notifier(self: *@This()) product_control.ScheduleNotifier {
+        return .{
+            .context = self,
+            .enabled = true,
+            .notify_fn = notify,
+        };
+    }
 };
+
+test "scheduled noninteractive permission request automatically stops the Product Run" {
+    fake_core.reset();
+    fake_core.setNextPlan(.ui_wait);
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 1,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
+    var automatic_root = try product_control.AutomaticWorkspaceRoot.open(
+        std.testing.io,
+        std.testing.allocator,
+        root_storage[0..root_len],
+    );
+    defer automatic_root.deinit();
+    var schedule_support: TestScheduleSupport = .{};
+    var workbench = try product_control.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 1,
+            .max_workspaces = 1,
+            .max_tasks = 1,
+            .max_scheduled_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        .{
+            .directories = .{ .automatic_workspace_root = &automatic_root },
+            .schedule_timer = schedule_support.timer(),
+            .schedule_persistence = schedule_support.persistence(),
+            .schedule_notifier = schedule_support.notifier(),
+        },
+    );
+    defer workbench.deinit();
+    try installControlExecution(&workbench);
+
+    const schedule_id = try workbench.createScheduledTask(.{
+        .title = "Permission boundary",
+        .expected_execution_generation = 1,
+        .permission_profile = .approval_required,
+        .input = "Perform an operation requiring permission",
+        .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
+    });
+    const task_id = try workbench.runScheduledTaskNow(schedule_id, 1);
+
+    try waitControlSnapshot(&workbench, "\"lastRunOutcome\":\"stopped\"");
+    var snapshot_storage: [128 * 1024]u8 = undefined;
+    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"lastRunOutcome\":\"stopped\",\"cause\":\"permission_required\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"health\":\"needs_attention\",\"failureReason\":\"permission_required\"",
+    ) != null);
+    try std.testing.expectEqual(
+        @as(?product_control.ScheduleNotificationKind, .needs_attention),
+        schedule_support.notification_kind,
+    );
+    try std.testing.expectEqual(task_id, schedule_support.notification_task_id);
+    fake_core.lock();
+    const abort_calls = fake_core.abort_calls;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 1), abort_calls);
+}
 
 test "bounded executor rejects overflow and close cancels a queued Run" {
     fake_core.reset();
