@@ -163,7 +163,7 @@ Product Skill 的公开 module 只发布 runtime、ports、catalog、enablement 
 
 ### `frontend/src/features/tasks/`
 
-Task 内容 presentation 只按 canonical Run 顺序把用户输入、Assistant 回复、active 状态、必要 terminal 状态和 permission 适配到共享 AI UI 组件；`Conversation` 只是统一阅读面的 Renderer component，不成为新的 projection owner 或产品 facade。Tool、usage、Compact 和 UI history 不因存在于 Product Control snapshot 就进入主阅读流。长内容滚动可以保存每个 Task 的会话内阅读位置，但不得拥有输入草稿、Run admission、retry policy 或 AgentCore 语义。
+Task 内容按 canonical Run 顺序组织稳定的 Run exchange；`TaskContent.tsx` 只组合用户输入、Assistant process narrative、唯一 live status、intervention、final/partial response、file references、默认折叠的 technical work evidence 与必要 terminal notice，`Conversation` 只是统一阅读面的 Renderer component，不成为新的 projection owner 或产品 facade。`run-presentation.ts` 无副作用地从严格解码的 Run view 派生 active/response/process visibility、顺序化 Tool 摘要和当前 running Tool presentation；`RunProcess.tsx` 只拥有 live status 与会话内 disclosure/Tool→overview intent，active 时位于 narrative 后作为唯一 process surface，terminal 后移到 response/reference 后作为弱化技术摘要，不复制 Product activity、terminal 或 Tool 状态机。Tool input/progress/result、usage、Compact 和 UI history 不进入主阅读流；主区只在用户明确展开后显示有界 Tool 名称、状态和真实 elapsed，完整详情仍由按需 Task overview 独占。长内容滚动可以保存每个 Task 的会话内阅读位置，但不得拥有输入草稿、Run admission、retry policy 或 AgentCore 语义。完整机制见 [UI 设计规范](ui-design.md#72-agent-对话渲染机制)。
 
 `features/settings/SettingsPage.tsx` 是覆盖 Product Control 内容区的长期 Settings surface，消费 Account projection，并通过 App action controller 分别提交 Metask 账号默认配置与用户管理的模型连接操作；它不拥有 Workspace registry、authority、Task 导航或 Host lifecycle。已有 Task 的 Workspace 只从 Task projection 推导，New task 只持有 `draftWorkspaceId`，Renderer 不保存 `activeWorkspaceId` 镜像。
 
