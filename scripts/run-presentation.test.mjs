@@ -14,7 +14,7 @@ function run(overrides = {}) {
     phase: "running",
     input: { kind: "text", text: "Build it", redacted: false },
     output: {
-      commentary: "",
+      commentary: [],
       response: "",
       responseKind: null,
       provisional: "",
@@ -63,7 +63,7 @@ test("commentary remains narrative content instead of technical process evidence
   const presentation = deriveRunPresentation(
     run({
       output: {
-        commentary: "Inspecting the workspace",
+        commentary: ["Inspecting the workspace"],
         response: "",
         responseKind: null,
         provisional: "",
@@ -105,7 +105,7 @@ test("successful final response compresses process evidence without a duplicate 
     run({
       phase: "completed",
       output: {
-        commentary: "Checked the workspace",
+        commentary: ["Checked the workspace"],
         response: "Done",
         responseKind: "final",
         provisional: "",
@@ -138,7 +138,7 @@ test("failure, missing response, and partial response keep truthful terminal tre
     run({
       phase: "interrupted",
       output: {
-        commentary: "",
+        commentary: [],
         response: "Incomplete",
         responseKind: "partial",
         provisional: "",
@@ -164,7 +164,7 @@ test("technical process stays collapsed by default while activity remains visibl
     run({
       phase: "completed",
       output: {
-        commentary: "Worked",
+        commentary: ["Worked"],
         response: "Done",
         responseKind: "final",
         provisional: "",

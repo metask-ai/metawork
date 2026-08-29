@@ -267,15 +267,17 @@ export function TaskContent({
             <Message role="user">
               <TaskInput input={run.input} />
             </Message>
-            {(run.output.commentary ||
+            {(run.output.commentary.some(Boolean) ||
               run.output.provisional ||
               run.output.provisionalRedacted ||
               (run.output.redacted && !presentation.responseVisible)) && (
               <Message role="assistant" className="run-narrative">
-                {run.output.commentary && (
-                  <Markdown className="run-commentary">
-                    {run.output.commentary}
-                  </Markdown>
+                {run.output.commentary.map((commentary, index) =>
+                  commentary ? (
+                    <Markdown className="run-commentary-item" key={index}>
+                      {commentary}
+                    </Markdown>
+                  ) : null,
                 )}
                 {run.output.provisional && (
                   <p className="run-provisional" aria-live="polite">

@@ -212,7 +212,7 @@ function renderCompletedSurface(
         phase: pendingUi ? "waiting_ui" : "completed",
         input,
         output: {
-          commentary: "",
+          commentary: [],
           response: assistant,
           responseKind: assistant ? "final" : null,
           provisional: "",

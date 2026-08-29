@@ -89,7 +89,7 @@ function run(overrides = {}) {
       redacted: false,
     },
     output: {
-      commentary: "",
+      commentary: [],
       response: "Release is ready",
       responseKind: "final",
       provisional: "",
@@ -527,7 +527,7 @@ test("conversation separates commentary, Markdown response, and plain provisiona
         outcome: null,
         activity: { kind: "writing_response" },
         output: {
-          commentary: "Checked **two files**.",
+          commentary: ["Checked **two files**."],
           response: "",
           responseKind: null,
           provisional: "Draft **not Markdown**",
@@ -549,7 +549,7 @@ test("conversation separates commentary, Markdown response, and plain provisiona
     runs: [
       run({
         output: {
-          commentary: "A historical update",
+          commentary: ["A historical update"],
           response: "**Ready**",
           responseKind: "final",
           provisional: "",
@@ -571,7 +571,7 @@ test("live revisions extend the narrative while replacing one bottom status in p
     outcome: null,
     activity: { kind: "thinking" },
     output: {
-      commentary: "I will inspect the structure.",
+      commentary: ["I will inspect the structure."],
       response: "",
       responseKind: null,
       provisional: "",
@@ -599,8 +599,10 @@ test("live revisions extend the narrative while replacing one bottom status in p
             activity: { kind: "executing_tools", inFlight: "1" },
             output: {
               ...activeRun.output,
-              commentary:
-                "I will inspect the structure.\n\nThe structure is clear; now updating it.",
+              commentary: [
+                "I will inspect the structure.",
+                "The structure is clear; now updating it.",
+              ],
             },
             tools: [
               technicalTool({
@@ -618,6 +620,7 @@ test("live revisions extend the narrative while replacing one bottom status in p
 
   assert.equal(document.querySelectorAll(".run-process").length, 1);
   assert.equal(document.querySelector(".run-process"), statusSurface);
+  assert.equal(document.querySelectorAll(".run-commentary-item").length, 2);
   assert.ok(screen.getByText("The structure is clear; now updating it."));
   assert.ok(screen.getByRole("button", { name: "Running an operation" }));
   assert.equal(screen.queryByText("Bash"), null);
@@ -629,7 +632,7 @@ test("discarded provisional output disappears on the next Snapshot revision", ()
     outcome: null,
     activity: { kind: "writing_response" },
     output: {
-      commentary: "",
+      commentary: [],
       response: "",
       responseKind: null,
       provisional: "This segment may be discarded",
@@ -673,7 +676,7 @@ test("Run status keeps technical Tool summaries behind explicit disclosure", asy
     outcome: null,
     activity: { kind: "executing_tools", inFlight: "1" },
     output: {
-      commentary: "Checked **two files**.",
+      commentary: ["Checked **two files**."],
       response: "",
       responseKind: null,
       provisional: "Live **plain text**",
@@ -727,7 +730,7 @@ test("Run status keeps technical Tool summaries behind explicit disclosure", asy
 test("terminal Run process summarizes Tool evidence without implying Run failure", () => {
   const value = run({
     output: {
-      commentary: "Finished checking",
+      commentary: ["Finished checking"],
       response: "Done",
       responseKind: "final",
       provisional: "",
@@ -791,7 +794,7 @@ test("technical process disclosure remains user-controlled across revisions and 
         outcome: null,
         activity: { kind: "writing_response" },
         output: {
-          commentary: "Checking the workspace",
+          commentary: ["Checking the workspace"],
           response: "",
           responseKind: null,
           provisional: "",
@@ -820,7 +823,7 @@ test("technical process disclosure remains user-controlled across revisions and 
             ...active.runs[0],
             output: {
               ...active.runs[0].output,
-              commentary: "Checking the workspace\n\nStill working",
+              commentary: ["Checking the workspace", "Still working"],
             },
           },
         ],
@@ -847,7 +850,7 @@ test("successful terminal keeps commentary visible and technical process collaps
     outcome: null,
     activity: { kind: "writing_response" },
     output: {
-      commentary: "Working through the task",
+      commentary: ["Working through the task"],
       response: "",
       responseKind: null,
       provisional: "",
@@ -891,7 +894,7 @@ test("terminal transition preserves reading position without expanding technical
     outcome: null,
     activity: { kind: "thinking" },
     output: {
-      commentary: "Evidence the reader is reviewing",
+      commentary: ["Evidence the reader is reviewing"],
       response: "",
       responseKind: null,
       provisional: "",
@@ -1069,7 +1072,7 @@ test("partial output and terminal failure render one composite notice", () => {
         outcome: "failed",
         cause: "timeout",
         output: {
-          commentary: "",
+          commentary: [],
           response: "An incomplete answer",
           responseKind: "partial",
           provisional: "",
@@ -1091,7 +1094,7 @@ test("typed Run activity uses safe localized labels", () => {
     activity: { kind: "thinking" },
     outcome: null,
     output: {
-      commentary: "",
+      commentary: [],
       response: "",
       responseKind: null,
       provisional: "",
@@ -1190,7 +1193,7 @@ test("Run file references render as preview entry without change semantics", () 
     runs: [
       run({
         output: {
-          commentary: "",
+          commentary: [],
           response: "Done",
           responseKind: "final",
           provisional: "",

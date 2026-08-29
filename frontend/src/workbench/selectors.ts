@@ -213,7 +213,7 @@ export function searchWorkbench(
       });
     for (const run of task.runs) {
       const input = runInputDisplay(run.input);
-      const output = run.output.commentary + run.output.response;
+      const output = `${run.output.commentary.join("\n\n")}\n\n${run.output.response}`;
       if (matches(input))
         results.push({
           key: `instruction:${task.id}:${run.id}`,

@@ -522,7 +522,7 @@ Execution binding availability 是下一次 admission 的独立前置事实，�
 
 ### 7.1 内容模型
 
-Task 按稳定 Run 顺序显示 `Run exchange`：用户指令之后依次是 `Assistant process narrative → Live status → Intervention → Response → File references → Technical work evidence → Terminal notice`，不存在的部分不占位。process narrative 连续承载 commentary 与未定性的可回滚 provisional，是用户理解 Agent 当前方向的主阅读内容；live status 是位于当前过程底部、随唯一 Current activity 原位更新的一行状态；technical work evidence 才承载按 Host order 排列的 Tool 摘要，并默认折叠。它们属于同一 Run，不是不同说话者，也不构成 raw 事件时间线。Response 是已由 Host 定性为 final/partial 的正式主阅读内容。Renderer 只做纯 presentation derivation 和会话内 disclosure，不复制 Product 状态机。
+Task 按稳定 Run 顺序显示 `Run exchange`：用户指令之后依次是 `Assistant process narrative → Live status → Intervention → Response → File references → Technical work evidence → Terminal notice`，不存在的部分不占位。process narrative 按 Host 保存的 closed commentary group 顺序连续承载多个 Markdown block，并在其后承载未定性的可回滚 provisional，是用户理解 Agent 当前方向的主阅读内容；block 只用正文留白区分，不增加卡片、时间戳、Tool 标签或阶段标题。live status 是位于当前过程底部、随唯一 Current activity 原位更新的一行状态；technical work evidence 才承载按 Host order 排列的 Tool 摘要，并默认折叠。它们属于同一 Run，不是不同说话者，也不构成 raw 事件时间线。Response 是已由 Host 定性为 final/partial 的正式主阅读内容。Renderer 只做纯 presentation derivation 和会话内 disclosure，不复制 Product 状态机。
 
 ### 7.2 用户指令
 
@@ -536,7 +536,7 @@ Task 按稳定 Run 顺序显示 `Run exchange`：用户指令之后依次是 `As
 
 - 不使用头像和大气泡，使用正文排版；
 - 支持 Markdown、表格、代码、引用和链接；
-- commentary 作为 Assistant 过程叙事按一个连续 Markdown body 呈现，不按 chunk 或 Tool 穿插伪造顺序；只要 Host 发布新的 commentary，主阅读流就随 Snapshot revision 更新；
+- commentary 作为 Assistant 过程叙事按 Host 提供的有序 group array 渲染为同一 Assistant message 内的独立 Markdown block；Renderer 不自行按换行切组，也不按 chunk 或 Tool 穿插伪造顺序。Host 发布新的 closed commentary group 后，主阅读流随 Snapshot revision 追加一个稳定 block；
 - `final | partial` response 使用安全 Markdown；尚未收到 output-segment 定性的 provisional 紧随 commentary 以中性纯文本呈现，不称为草稿、不解释 Markdown，discard 后随下一 Snapshot 消失；流式生成只显示克制的单一活动指示；
 - 不展示原始 chain-of-thought；`thinking_chunk` 只显示“正在思考”的安全状态，`text_chunk` 开始后显示“正在撰写回复”；Renderer 还必须把 Host 已投影的 Starting、Waiting model、Executing tools、Retrying、Compacting 与 Finishing 显示为本地化 Current activity，并在 Host 提供时显示 retry attempt/max/delay；不同 activity 必须保持可理解的差异，不能把整个 active Run 统一退化成一个不变的“正在工作”；
 - output 只表示 Agent 可见输出，不标记为 Delivery、Output artifact 或最终成果；

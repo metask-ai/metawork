@@ -471,7 +471,7 @@ try {
       `completed run retained a Host cause: ${JSON.stringify(task)}`,
     );
   if (
-    !(run.output.commentary + run.output.response).includes(
+    !(run.output.commentary.join("") + run.output.response).includes(
       "metawork agentcore vertical complete",
     )
   )
@@ -631,7 +631,8 @@ try {
   if (
     textTerminal.run.phase !== "completed" ||
     !(
-      textTerminal.run.output.commentary + textTerminal.run.output.response
+      textTerminal.run.output.commentary.join("") +
+      textTerminal.run.output.response
     ).includes("metawork text checkpoint complete")
   )
     throw new Error(
@@ -1073,7 +1074,7 @@ function observeRunRevision(observations, revision, run) {
     revision,
     phase: run.phase,
     activity: run.activity?.kind ?? null,
-    commentaryBytes: Buffer.byteLength(run.output.commentary),
+    commentaryBytes: Buffer.byteLength(run.output.commentary.join("")),
     provisionalBytes: Buffer.byteLength(run.output.provisional),
     responseBytes: Buffer.byteLength(run.output.response),
     tools: run.tools.map((tool) => ({ name: tool.name, state: tool.state })),

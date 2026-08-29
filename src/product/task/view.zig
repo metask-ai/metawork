@@ -21,12 +21,11 @@ pub const TextProjection = struct {
     context: *const anyopaque,
     contains_sensitive_fn: *const fn (*const anyopaque, []const u8) bool,
     write_json_fn: *const fn (*const anyopaque, *std.Io.Writer, []const u8) Error!void,
-    write_json_partition_fn: *const fn (
+    write_json_output_fn: *const fn (
         *const anyopaque,
         *std.Io.Writer,
         []const u8,
-        usize,
-        []const u8,
+        []const u64,
     ) Error!bool,
     write_json_parts_fn: *const fn (
         *const anyopaque,
@@ -56,19 +55,17 @@ pub const TextProjection = struct {
         return self.write_json_parts_fn(self.context, writer, first, second);
     }
 
-    fn writeJsonPartition(
+    fn writeJsonOutput(
         self: TextProjection,
         writer: *std.Io.Writer,
         value: []const u8,
-        split: usize,
-        separator: []const u8,
+        commentary_ends: []const u64,
     ) Error!bool {
-        return self.write_json_partition_fn(
+        return self.write_json_output_fn(
             self.context,
             writer,
             value,
-            split,
-            separator,
+            commentary_ends,
         );
     }
 };
@@ -391,13 +388,20 @@ fn writeRunOutput(
     std.debug.assert(response_start <= committed.len);
     std.debug.assert((run.assistant_output_kind == null) ==
         (run.assistant_output_start == null));
+    if (run.commentary_count > run.commentary_ends.len)
+        return error.SnapshotTooLarge;
+    const commentary_ends = run.commentary_ends[0..run.commentary_count];
+    const commentary_end = if (commentary_ends.len != 0)
+        @as(usize, @intCast(commentary_ends[commentary_ends.len - 1]))
+    else
+        0;
+    if (commentary_end != response_start) return error.SnapshotTooLarge;
     writer.writeAll(",\"output\":{\"commentary\":") catch
         return error.SnapshotTooLarge;
-    const output_redacted = try text.writeJsonPartition(
+    const output_redacted = try text.writeJsonOutput(
         writer,
         committed,
-        response_start,
-        ",\"response\":",
+        commentary_ends,
     );
     writer.writeAll(",\"responseKind\":") catch return error.SnapshotTooLarge;
     if (run.assistant_output_kind) |kind|

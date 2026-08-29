@@ -56,6 +56,7 @@ pub const EventProjection = task_state.EventProjection;
 pub const EventEffects = struct {
     text: TextProjection,
     max_assistant_message_bytes: usize,
+    max_commentary_segments_per_run: usize,
     max_tool_field_bytes: usize,
     max_file_refs_per_tool: usize,
     max_file_ref_field_bytes: usize,
@@ -185,6 +186,7 @@ pub const OperationLimits = struct {
     max_tool_field_bytes: usize,
     max_terminal_diagnostic_bytes: usize,
     max_tools_per_run: usize,
+    max_commentary_segments_per_run: usize,
     max_skill_arguments: usize,
     max_task_title_bytes: usize,
     max_model_id_bytes: usize,
@@ -2003,6 +2005,7 @@ pub const Runtime = struct {
         const projection = EventProjection{
             .context = &context,
             .max_assistant_message_bytes = effects.max_assistant_message_bytes,
+            .max_commentary_segments_per_run = effects.max_commentary_segments_per_run,
             .max_tool_field_bytes = effects.max_tool_field_bytes,
             .append_assistant_fn = appendEventAssistant,
             .append_group_fn = appendEventGroup,
@@ -4031,6 +4034,11 @@ fn reserveRun(
     );
     errdefer self.allocator.free(tools);
     @memset(tools, null);
+    const commentary_ends = try self.allocator.alloc(
+        u64,
+        effects.limits.max_commentary_segments_per_run,
+    );
+    errdefer self.allocator.free(commentary_ends);
     const diagnostic = try effects.text.allocateCapacity(
         effects.limits.max_terminal_diagnostic_bytes,
     );
@@ -4054,6 +4062,7 @@ fn reserveRun(
         .execution_model = execution_model,
         .execution_model_owned = true,
         .input = input_record,
+        .commentary_ends = commentary_ends,
         .tools = tools,
         .terminal_diagnostic = diagnostic,
         .redaction_secret = execution.api_key,
@@ -4436,6 +4445,7 @@ fn deinitRun(
     for (run.tools) |*entry| if (entry.*) |*tool|
         deinitTool(self, effects, tool);
     self.allocator.free(run.tools);
+    self.allocator.free(run.commentary_ends);
     deinitRunInput(self, effects, &run.input);
     releaseTrackedText(self, effects, &run.assistant);
     releaseTrackedText(self, effects, &run.output_segment);

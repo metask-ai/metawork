@@ -1860,8 +1860,12 @@ summary::-webkit-details-marker {
   color: var(--ui-content-primary);
 }
 
-.run-commentary {
+.run-commentary-item {
   line-height: 1.72;
+}
+
+.run-commentary-item + .run-commentary-item {
+  margin-top: 14px;
 }
 
 .run-provisional {

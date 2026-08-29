@@ -409,6 +409,11 @@ pub const RunRecord = struct {
     input: RunInputRecord,
     assistant: TrackedText = .{},
     assistant_redacted: bool = false,
+    /// Cumulative byte ends for each non-empty, closed commentary group in
+    /// `assistant`. The backing storage is reserved with the Run; only the
+    /// prefix through `commentary_count` is meaningful.
+    commentary_ends: []u64,
+    commentary_count: usize = 0,
     /// Host-only buffers for the currently open segment and a max-token
     /// continuation group. Only a closed commentary/final/partial group is
     /// appended to `assistant` and becomes durable.
@@ -422,8 +427,8 @@ pub const RunRecord = struct {
     output_segment_redacted: bool = false,
     output_continued_redacted: bool = false,
     /// Product classification over the sanitized canonical assistant text.
-    /// Bytes before `assistant_output_start` are aggregated commentary; the
-    /// suffix is the final or partial answer.
+    /// Commentary boundaries partition bytes before `assistant_output_start`;
+    /// the suffix is the final or partial answer.
     assistant_output_kind: ?AssistantOutputKind = null,
     assistant_output_start: ?usize = null,
     active_phase: ActiveRunPhase = .queued,
@@ -750,6 +755,7 @@ pub const TextProjectionResult = struct {
 pub const EventProjection = struct {
     context: *anyopaque,
     max_assistant_message_bytes: usize,
+    max_commentary_segments_per_run: usize,
     max_tool_field_bytes: usize,
     append_assistant_fn: *const fn (
         context: *anyopaque,
@@ -951,12 +957,21 @@ pub fn applyEvent(
                 // Legacy fixtures exercise unrelated event behavior without
                 // constructing the output framing now guaranteed by the
                 // canonical macOS AgentCore artifact.
+                if (text.len != 0 and run.commentary_count == 0 and
+                    (projection.max_commentary_segments_per_run == 0 or
+                        run.commentary_ends.len == 0))
+                    return error.ProjectionCapacity;
                 if (try appendNewOutput(
                     projection,
                     run,
                     &run.assistant,
                     text,
                 )) run.assistant_redacted = true;
+                if (text.len != 0) {
+                    if (run.commentary_count == 0) run.commentary_count = 1;
+                    std.debug.assert(run.commentary_ends.len != 0);
+                    run.commentary_ends[0] = @intCast(run.assistant.committed_len);
+                }
             } else return error.InvalidOutputSegment;
             _ = setObservedActivity(run, .writing_response);
         },
@@ -1207,6 +1222,12 @@ pub fn applyEvent(
                 },
                 .commentary, .final, .partial => {
                     const output_start = run.assistant.committed_len;
+                    const group_non_empty = run.output_continued.list.items.len != 0 or
+                        run.output_segment.list.items.len != 0;
+                    if (segment.disposition == .commentary and group_non_empty and
+                        (run.commentary_count >= projection.max_commentary_segments_per_run or
+                            run.commentary_count >= run.commentary_ends.len))
+                        return error.ProjectionCapacity;
                     run.assistant_redacted = (try projection.appendGroup(
                         &run.assistant,
                         run.output_continued.list.items,
@@ -1222,6 +1243,12 @@ pub fn applyEvent(
                     run.output_segment_redacted = false;
                     switch (segment.disposition) {
                         .commentary => {
+                            if (group_non_empty) {
+                                std.debug.assert(run.commentary_count < run.commentary_ends.len);
+                                run.commentary_ends[run.commentary_count] =
+                                    @intCast(run.assistant.committed_len);
+                                run.commentary_count += 1;
+                            }
                             _ = setObservedActivity(run, .waiting_model);
                         },
                         .final => {
@@ -1356,6 +1383,7 @@ fn validRunStateTransition(
 }
 
 test "event drain withholds terminal facts and assistant suffix until finalization" {
+    var commentary_ends: [0]u64 = .{};
     var runs = [_]?RunRecord{.{
         .id = 7,
         .generation = 1,
@@ -1363,6 +1391,7 @@ test "event drain withholds terminal facts and assistant suffix until finalizati
         .execution_provider = .anthropic,
         .execution_model = "model",
         .input = .{ .text = .{ .value = @constCast("prompt") } },
+        .commentary_ends = &commentary_ends,
         .active_phase = .running,
         .tools = &.{},
         .terminal_diagnostic = @constCast(""),
@@ -1414,6 +1443,7 @@ test "event drain withholds terminal facts and assistant suffix until finalizati
 }
 
 test "event drain fails closed when an output segment remains unresolved" {
+    var commentary_ends: [0]u64 = .{};
     var runs = [_]?RunRecord{.{
         .id = 7,
         .generation = 1,
@@ -1421,6 +1451,7 @@ test "event drain fails closed when an output segment remains unresolved" {
         .execution_provider = .anthropic,
         .execution_model = "model",
         .input = .{ .text = .{ .value = @constCast("prompt") } },
+        .commentary_ends = &commentary_ends,
         .tools = &.{},
         .terminal_diagnostic = @constCast(""),
         .open_output_segment = .{ .index = 0, .turn = 1, .group = 0, .bytes = 5 },

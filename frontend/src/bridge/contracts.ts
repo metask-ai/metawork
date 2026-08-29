@@ -262,7 +262,7 @@ export const runCauses = [
 export type RunCause = (typeof runCauses)[number];
 
 export type RunOutput = {
-  commentary: string;
+  commentary: string[];
   response: string;
   responseKind: "final" | "partial" | null;
   provisional: string;

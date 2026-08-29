@@ -47,7 +47,7 @@ revision 8 新增 `CAP_RUN_STATE_OBSERVATION` 和 `CoreEvent.run_state`。事件
 
 MetaWork 不复制 header、raw enum、event tag、Permission/Skill/MCP JSON schema、facade code 或 SDK validation。官方 SDK 是 AgentCore `Status`、`StopReason`、`CoreEvent`、`UiRequest`、`UiResponse`、Permission、Skill、MCP、Session description 与 restore report 的唯一协议来源。MetaWork Completion 的 result/stop reason/error 是独立自有类型，不来自该 SDK。
 
-当前三个 target SDK 均保留 `output_segment_begin` / `output_segment_end` typed event，并提供 `file_changes` observation。Agent/event pump 使用官方 typed variant 接收；Product Task 已消费 output framing 并持久化 final/partial 分类及安全 assistant 正文起点。`file_changes` 当前只在 Agent 边界完成 typed decode、文本校验和有界 data-queue 接收，Product 明确消费但不派生状态；typed File Changes capability、持久化与 Bridge/Renderer 投影仍关闭。
+当前三个 target SDK 均保留 `output_segment_begin` / `output_segment_end` typed event，并提供 `file_changes` observation。Agent/event pump 使用官方 typed variant 接收；Product Task 已消费 output framing，以有界累计 byte ends 保留 closed commentary 的产品叙事边界，并持久化 final/partial 分类及安全 assistant 正文起点；这些边界不复制 SDK event identity。`file_changes` 当前只在 Agent 边界完成 typed decode、文本校验和有界 data-queue 接收，Product 明确消费但不派生状态；typed File Changes capability、持久化与 Bridge/Renderer 投影仍关闭。
 
 ## 3. Target function table
 
