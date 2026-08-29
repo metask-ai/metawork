@@ -1591,6 +1591,102 @@ test "file contention is busy rather than local gate contention" {
     );
 }
 
+test "abrupt child exit leaves a WAL that reopens with committed data" {
+    const fixture = std.process.Environ.getAlloc(
+        std.testing.environ,
+        std.testing.allocator,
+        "METAWORK_STORAGE_CRASH_FIXTURE",
+    ) catch |err| switch (err) {
+        error.EnvironmentVariableMissing => return error.SkipZigTest,
+        else => return err,
+    };
+    defer std.testing.allocator.free(fixture);
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var directory_storage: [std.fs.max_path_bytes]u8 = undefined;
+    const directory_len = try temporary.dir.realPath(std.testing.io, &directory_storage);
+    const path = try std.fs.path.join(
+        std.testing.allocator,
+        &.{ directory_storage[0..directory_len], "crash.db" },
+    );
+    defer std.testing.allocator.free(path);
+    {
+        const database = try Database.create(
+            std.testing.io,
+            std.testing.allocator,
+            .{ .file = path },
+            &test_migrations,
+        );
+        database.destroy();
+    }
+
+    var environment = try std.process.Environ.createMap(
+        std.testing.environ,
+        std.testing.allocator,
+    );
+    defer environment.deinit();
+    try environment.put("METAWORK_STORAGE_CRASH_DB", path);
+    const arguments = [_][]const u8{fixture};
+    var child = try std.process.spawn(std.testing.io, .{
+        .argv = &arguments,
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .inherit,
+        .environ_map = &environment,
+        .create_no_window = true,
+    });
+    const termination = try child.wait(std.testing.io);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 86 }, termination);
+
+    const wal_path = try std.fmt.allocPrint(std.testing.allocator, "{s}-wal", .{path});
+    defer std.testing.allocator.free(wal_path);
+    const wal_stat = try std.Io.Dir.cwd().statFile(std.testing.io, wal_path, .{});
+    try std.testing.expect(wal_stat.size > 0);
+
+    const database = try Database.create(
+        std.testing.io,
+        std.testing.allocator,
+        .{ .file = path },
+        &test_migrations,
+    );
+    defer database.destroy();
+    var length: IntegerObservation = .{};
+    try std.testing.expectEqual(
+        sql.QueryOutcome.ok,
+        database.capability().query(
+            "SELECT length(blob_value) FROM storage_conformance WHERE id=77",
+            &.{},
+            length.receiver(),
+        ),
+    );
+    try std.testing.expectEqual(@as(i64, 1048576), length.value);
+}
+
+test "corrupt files are not collapsed into path or empty-database outcomes" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var directory_storage: [std.fs.max_path_bytes]u8 = undefined;
+    const directory_len = try temporary.dir.realPath(std.testing.io, &directory_storage);
+    const path = try std.fs.path.join(
+        std.testing.allocator,
+        &.{ directory_storage[0..directory_len], "corrupt.db" },
+    );
+    defer std.testing.allocator.free(path);
+    try temporary.dir.writeFile(std.testing.io, .{
+        .sub_path = "corrupt.db",
+        .data = "not a sqlite database",
+    });
+    try std.testing.expectError(
+        error.Corrupt,
+        Database.create(
+            std.testing.io,
+            std.testing.allocator,
+            .{ .file = path },
+            &test_migrations,
+        ),
+    );
+}
+
 test "streaming query exposes provisional rows before terminal failure" {
     const database = try Database.create(
         std.testing.io,

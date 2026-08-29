@@ -161,10 +161,32 @@ pub fn build(b: *std.Build) void {
         .name = "metawork-storage",
         .root_module = test_modules.storage,
     });
+    const storage_crash_fixture_module = b.createModule(.{
+        .root_source_file = b.path("tests/support/storage_crash_fixture.zig"),
+        .target = test_modules.storage.resolved_target,
+        .optimize = test_modules.storage.optimize,
+    });
+    storage_crash_fixture_module.addImport("storage", test_modules.storage);
+    storage_crash_fixture_module.link_libc = bundle.link_libc;
+    const storage_crash_fixture = b.addExecutable(.{
+        .name = "metawork-storage-crash-fixture",
+        .root_module = storage_crash_fixture_module,
+    });
+    const install_storage_crash_fixture = b.addInstallArtifact(
+        storage_crash_fixture,
+        .{},
+    );
+    const storage_tests_run = b.addRunArtifact(storage_tests);
+    storage_tests_run.step.dependOn(&install_storage_crash_fixture.step);
+    const storage_crash_fixture_name = if (test_modules.storage.resolved_target.?.result.os.tag == .windows) "metawork-storage-crash-fixture.exe" else "metawork-storage-crash-fixture";
+    storage_tests_run.setEnvironmentVariable(
+        "METAWORK_STORAGE_CRASH_FIXTURE",
+        b.getInstallPath(.bin, storage_crash_fixture_name),
+    );
     b.step(
         "test-storage",
         "Run the backend-independent Storage contract and SQLite backend tests",
-    ).dependOn(&b.addRunArtifact(storage_tests).step);
+    ).dependOn(&storage_tests_run.step);
     const single_instance_tests = b.addTest(.{
         .name = "metawork-app-single-instance",
         .root_module = test_modules.app,
