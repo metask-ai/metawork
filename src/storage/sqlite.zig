@@ -1003,6 +1003,45 @@ const IntegerObservation = struct {
     }
 };
 
+const BlockingReceiver = struct {
+    mutex: std.Io.Mutex = .init,
+    condition: std.Io.Condition = .init,
+    entered: bool = false,
+    released: bool = false,
+
+    fn receive(context: *anyopaque, _: sql.Row) void {
+        const self: *BlockingReceiver = @ptrCast(@alignCast(context));
+        self.lock();
+        self.entered = true;
+        self.condition.broadcast(std.testing.io);
+        while (!self.released)
+            self.condition.waitUncancelable(std.testing.io, &self.mutex);
+        self.mutex.unlock(std.testing.io);
+    }
+
+    fn waitUntilEntered(self: *BlockingReceiver) void {
+        self.lock();
+        while (!self.entered)
+            self.condition.waitUncancelable(std.testing.io, &self.mutex);
+        self.mutex.unlock(std.testing.io);
+    }
+
+    fn release(self: *BlockingReceiver) void {
+        self.lock();
+        self.released = true;
+        self.condition.broadcast(std.testing.io);
+        self.mutex.unlock(std.testing.io);
+    }
+
+    fn receiver(self: *BlockingReceiver) sql.RowReceiver {
+        return .{ .context = self, .receive_fn = receive };
+    }
+
+    fn lock(self: *BlockingReceiver) void {
+        self.mutex.lockUncancelable(std.testing.io);
+    }
+};
+
 fn ignoreRow(_: *anyopaque, _: sql.Row) void {}
 
 test "memory database has a stable owner and passes backend conformance" {
@@ -1222,6 +1261,16 @@ test "file profile is FULL WAL and every setting is verified" {
         @as(c_int, 0),
         c.sqlite3_limit(database.connection.handle, c.SQLITE_LIMIT_ATTACHED, -1),
     );
+    try expectDatabaseConfig(
+        &database.connection,
+        c.SQLITE_DBCONFIG_DEFENSIVE,
+        1,
+    );
+    try expectDatabaseConfig(
+        &database.connection,
+        c.SQLITE_DBCONFIG_TRUSTED_SCHEMA,
+        0,
+    );
 }
 
 test "journal mode setter fails closed when SQLite returns another mode" {
@@ -1253,6 +1302,118 @@ test "shutdown is idempotent and borrowed capability becomes unavailable" {
         capability.mutate(&.{.{ .statement = .{ .sql = "DELETE FROM storage_conformance" } }}),
     );
     database.destroy();
+}
+
+test "interrupt cancels the active query without poisoning the instance" {
+    const database = try Database.create(
+        std.testing.io,
+        std.testing.allocator,
+        .memory,
+        &.{},
+    );
+    defer database.destroy();
+    var blocker: BlockingReceiver = .{};
+    var outcome: sql.QueryOutcome = .ok;
+    const thread = try std.Thread.spawn(.{}, struct {
+        fn run(
+            capability: sql.Database,
+            receiver: sql.RowReceiver,
+            output: *sql.QueryOutcome,
+        ) void {
+            output.* = capability.query(
+                \\WITH RECURSIVE values_(value) AS (
+                \\  VALUES(1) UNION ALL SELECT value + 1 FROM values_ WHERE value < 100000
+                \\) SELECT value FROM values_
+            , &.{}, receiver);
+        }
+    }.run, .{ database.capability(), blocker.receiver(), &outcome });
+    blocker.waitUntilEntered();
+    database.interrupt();
+    blocker.release();
+    thread.join();
+    try std.testing.expectEqual(sql.QueryOutcome.cancelled, outcome);
+
+    var observed: IntegerObservation = .{};
+    try std.testing.expectEqual(
+        sql.QueryOutcome.ok,
+        database.capability().query("SELECT 1", &.{}, observed.receiver()),
+    );
+    try std.testing.expectEqual(@as(i64, 1), observed.value);
+}
+
+test "shutdown interrupts an active callback and converges before close" {
+    const database = try Database.create(
+        std.testing.io,
+        std.testing.allocator,
+        .memory,
+        &.{},
+    );
+    var blocker: BlockingReceiver = .{};
+    var outcome: sql.QueryOutcome = .ok;
+    const query_thread = try std.Thread.spawn(.{}, struct {
+        fn run(
+            capability: sql.Database,
+            receiver: sql.RowReceiver,
+            output: *sql.QueryOutcome,
+        ) void {
+            output.* = capability.query(
+                \\WITH RECURSIVE values_(value) AS (
+                \\  VALUES(1) UNION ALL SELECT value + 1 FROM values_ WHERE value < 100000
+                \\) SELECT value FROM values_
+            , &.{}, receiver);
+        }
+    }.run, .{ database.capability(), blocker.receiver(), &outcome });
+    blocker.waitUntilEntered();
+    const shutdown_thread = try std.Thread.spawn(.{}, Database.shutdown, .{database});
+
+    database.lock();
+    while (database.lifecycle != .stopping) database.wait();
+    database.unlock();
+    blocker.release();
+    query_thread.join();
+    shutdown_thread.join();
+    try std.testing.expectEqual(sql.QueryOutcome.cancelled, outcome);
+    try std.testing.expectEqual(Lifecycle.stopped, database.lifecycle);
+    database.destroy();
+}
+
+test "file contention is busy rather than local gate contention" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var directory_storage: [std.fs.max_path_bytes]u8 = undefined;
+    const directory_len = try temporary.dir.realPath(std.testing.io, &directory_storage);
+    const path = try std.fs.path.join(
+        std.testing.allocator,
+        &.{ directory_storage[0..directory_len], "busy.db" },
+    );
+    defer std.testing.allocator.free(path);
+    const first = try Database.create(
+        std.testing.io,
+        std.testing.allocator,
+        .{ .file = path },
+        &test_migrations,
+    );
+    defer first.destroy();
+    const second = try Database.create(
+        std.testing.io,
+        std.testing.allocator,
+        .{ .file = path },
+        &test_migrations,
+    );
+    defer second.destroy();
+
+    try first.connection.setAuthorizer(internalTransactionAuthorizer);
+    try first.connection.execRaw("BEGIN IMMEDIATE;");
+    defer {
+        first.connection.execRaw("ROLLBACK;") catch {};
+        first.connection.setAuthorizer(denyAllAuthorizer) catch {};
+    }
+    try std.testing.expectEqual(
+        sql.MutationOutcome.busy,
+        second.capability().mutate(&.{.{
+            .statement = .{ .sql = "INSERT INTO storage_conformance(id) VALUES(33)" },
+        }}),
+    );
 }
 
 test "streaming query exposes provisional rows before terminal failure" {
@@ -1297,4 +1458,22 @@ fn expectIntegerPragma(
     try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(statement));
     try std.testing.expectEqual(expected, c.sqlite3_column_int64(statement, 0));
     try std.testing.expectEqual(c.SQLITE_DONE, c.sqlite3_step(statement));
+}
+
+fn expectDatabaseConfig(
+    connection: *Connection,
+    operation: c_int,
+    expected: c_int,
+) !void {
+    var actual: c_int = -1;
+    try std.testing.expectEqual(
+        c.SQLITE_OK,
+        c.sqlite3_db_config(
+            connection.handle,
+            operation,
+            @as(c_int, -1),
+            &actual,
+        ),
+    );
+    try std.testing.expectEqual(expected, actual);
 }
