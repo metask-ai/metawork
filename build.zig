@@ -682,7 +682,8 @@ fn wireAgentCore(
             "-DSQLITE_THREADSAFE=2",
             "-DSQLITE_OMIT_LOAD_EXTENSION",
             "-DSQLITE_DQS=0",
-            "-DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1",
+            "-DSQLITE_TRUSTED_SCHEMA=0",
+            "-DSQLITE_DEFAULT_WAL_SYNCHRONOUS=2",
             "-DSQLITE_DEFAULT_MEMSTATUS=0",
         },
     });
