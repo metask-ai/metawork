@@ -3,6 +3,7 @@
 //! escape this owner.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const sql = @import("sql.zig");
 const conformance = @import("conformance.zig");
 
@@ -85,6 +86,12 @@ const Connection = struct {
 
 const Lifecycle = enum { active, stopping, stopped, poisoned };
 const Admission = enum { entered, rejected, unavailable };
+const TestHooks = if (builtin.is_test) struct {
+    fail_before_commit: bool = false,
+    lose_ack_after_commit: bool = false,
+    fail_rollback: bool = false,
+    fail_authorizer_restore: bool = false,
+} else struct {};
 
 /// Stable concrete owner. create() allocates the instance so capabilities can
 /// safely borrow its address until shutdown() and destroy().
@@ -98,6 +105,7 @@ pub const Database = struct {
     operating: bool = false,
     active_thread: ?std.Thread.Id = null,
     schema_version: u32,
+    test_hooks: TestHooks = .{},
 
     pub fn create(
         io: std.Io,
@@ -296,6 +304,10 @@ pub const Database = struct {
     }
 
     fn commitMutation(self: *Database) sql.MutationOutcome {
+        if (builtin.is_test and self.test_hooks.fail_before_commit) {
+            self.test_hooks.fail_before_commit = false;
+            return self.rollbackMutation(.definite_io_failure);
+        }
         self.connection.setAuthorizer(internalTransactionAuthorizer) catch
             return self.unknownMutation();
         self.connection.execRaw("COMMIT;") catch |err| {
@@ -305,6 +317,10 @@ pub const Database = struct {
         };
         if (c.sqlite3_get_autocommit(self.connection.handle) == 0)
             return self.unknownMutation();
+        if (builtin.is_test and self.test_hooks.lose_ack_after_commit) {
+            self.test_hooks.lose_ack_after_commit = false;
+            return self.unknownMutation();
+        }
         if (!self.restoreDeny()) return self.unknownMutation();
         return .committed;
     }
@@ -313,6 +329,10 @@ pub const Database = struct {
         self: *Database,
         outcome: sql.MutationOutcome,
     ) sql.MutationOutcome {
+        if (builtin.is_test and self.test_hooks.fail_rollback) {
+            self.test_hooks.fail_rollback = false;
+            return self.unknownMutation();
+        }
         self.connection.setAuthorizer(internalTransactionAuthorizer) catch
             return self.unknownMutation();
         self.connection.execRaw("ROLLBACK;") catch return self.unknownMutation();
@@ -329,6 +349,10 @@ pub const Database = struct {
     }
 
     fn restoreDeny(self: *Database) bool {
+        if (builtin.is_test and self.test_hooks.fail_authorizer_restore) {
+            self.test_hooks.fail_authorizer_restore = false;
+            return false;
+        }
         self.connection.setAuthorizer(denyAllAuthorizer) catch return false;
         return true;
     }
@@ -605,7 +629,8 @@ fn insertMigrationIdentity(
         .{ .text = migration.name },
         .{ .blob = &checksum },
     });
-    if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.Rejected;
+    const result = c.sqlite3_step(statement);
+    if (result != c.SQLITE_DONE) return sqlFailure(result);
 }
 
 fn migrationChecksum(migration: sql.Migration, output: *[32]u8) void {
@@ -1141,6 +1166,142 @@ test "exact change conflict rolls the complete mutation batch back" {
     try std.testing.expectEqual(@as(i64, 0), count.value);
 }
 
+test "failure before commit is definite and leaves the instance usable" {
+    const database = try Database.create(
+        std.testing.io,
+        std.testing.allocator,
+        .memory,
+        &test_migrations,
+    );
+    defer database.destroy();
+    database.test_hooks.fail_before_commit = true;
+    try std.testing.expectEqual(
+        sql.MutationOutcome.definite_io_failure,
+        database.capability().mutate(&.{.{
+            .statement = .{ .sql = "INSERT INTO storage_conformance(id) VALUES(41)" },
+            .expected_changes = .{ .exactly = 1 },
+        }}),
+    );
+    var count: IntegerObservation = .{};
+    try std.testing.expectEqual(
+        sql.QueryOutcome.ok,
+        database.capability().query(
+            "SELECT COUNT(*) FROM storage_conformance WHERE id=41",
+            &.{},
+            count.receiver(),
+        ),
+    );
+    try std.testing.expectEqual(@as(i64, 0), count.value);
+    try std.testing.expectEqual(
+        sql.MutationOutcome.committed,
+        database.capability().mutate(&.{.{
+            .statement = .{ .sql = "INSERT INTO storage_conformance(id) VALUES(41)" },
+        }}),
+    );
+}
+
+test "lost acknowledgement after commit returns unknown and poisons" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var directory_storage: [std.fs.max_path_bytes]u8 = undefined;
+    const directory_len = try temporary.dir.realPath(std.testing.io, &directory_storage);
+    const path = try std.fs.path.join(
+        std.testing.allocator,
+        &.{ directory_storage[0..directory_len], "unknown.db" },
+    );
+    defer std.testing.allocator.free(path);
+    {
+        const database = try Database.create(
+            std.testing.io,
+            std.testing.allocator,
+            .{ .file = path },
+            &test_migrations,
+        );
+        database.test_hooks.lose_ack_after_commit = true;
+        try std.testing.expectEqual(
+            sql.MutationOutcome.outcome_unknown,
+            database.capability().mutate(&.{.{
+                .statement = .{ .sql = "INSERT INTO storage_conformance(id) VALUES(42)" },
+            }}),
+        );
+        try std.testing.expectEqual(
+            sql.MutationOutcome.unavailable,
+            database.capability().mutate(&.{.{
+                .statement = .{ .sql = "DELETE FROM storage_conformance WHERE id=42" },
+            }}),
+        );
+        database.destroy();
+    }
+    {
+        const database = try Database.create(
+            std.testing.io,
+            std.testing.allocator,
+            .{ .file = path },
+            &test_migrations,
+        );
+        defer database.destroy();
+        var count: IntegerObservation = .{};
+        try std.testing.expectEqual(
+            sql.QueryOutcome.ok,
+            database.capability().query(
+                "SELECT COUNT(*) FROM storage_conformance WHERE id=42",
+                &.{},
+                count.receiver(),
+            ),
+        );
+        try std.testing.expectEqual(@as(i64, 1), count.value);
+    }
+}
+
+test "rollback and authorizer restore failures poison instead of guessing" {
+    {
+        const database = try Database.create(
+            std.testing.io,
+            std.testing.allocator,
+            .memory,
+            &test_migrations,
+        );
+        database.test_hooks.fail_rollback = true;
+        try std.testing.expectEqual(
+            sql.MutationOutcome.outcome_unknown,
+            database.capability().mutate(&.{.{
+                .statement = .{ .sql = "SELECT 1" },
+            }}),
+        );
+        try std.testing.expectEqual(
+            sql.QueryOutcome.unavailable,
+            database.capability().query(
+                "SELECT 1",
+                &.{},
+                .{ .context = database, .receive_fn = ignoreRow },
+            ),
+        );
+        database.destroy();
+    }
+    {
+        const database = try Database.create(
+            std.testing.io,
+            std.testing.allocator,
+            .memory,
+            &test_migrations,
+        );
+        database.test_hooks.fail_authorizer_restore = true;
+        try std.testing.expectEqual(
+            sql.MutationOutcome.outcome_unknown,
+            database.capability().mutate(&.{.{
+                .statement = .{ .sql = "INSERT INTO storage_conformance(id) VALUES(43)" },
+            }}),
+        );
+        try std.testing.expectEqual(
+            sql.MutationOutcome.unavailable,
+            database.capability().mutate(&.{.{
+                .statement = .{ .sql = "DELETE FROM storage_conformance WHERE id=43" },
+            }}),
+        );
+        database.destroy();
+    }
+}
+
 test "migration identity is an append-only checksummed prefix" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
@@ -1170,7 +1331,7 @@ test "migration identity is an append-only checksummed prefix" {
         );
         database.destroy();
     }
-    const changed = [_]sql.Migration{.{
+    const changed_name = [_]sql.Migration{.{
         .version = 1,
         .name = "same version but changed identity",
         .sql = test_migrations[0].sql,
@@ -1181,7 +1342,21 @@ test "migration identity is an append-only checksummed prefix" {
             std.testing.io,
             std.testing.allocator,
             .{ .file = path },
-            &changed,
+            &changed_name,
+        ),
+    );
+    const changed_sql = [_]sql.Migration{.{
+        .version = 1,
+        .name = test_migrations[0].name,
+        .sql = test_migrations[0].sql ++ " -- changed",
+    }};
+    try std.testing.expectError(
+        error.MigrationMismatch,
+        Database.create(
+            std.testing.io,
+            std.testing.allocator,
+            .{ .file = path },
+            &changed_sql,
         ),
     );
     try std.testing.expectError(
