@@ -4,7 +4,6 @@ import test from "node:test";
 import {
   deriveRunPresentation,
   observeRunProcessDisclosure,
-  shouldAutoCollapseRunProcess,
   toggleRunProcessDisclosure,
 } from "../frontend/src/features/tasks/run-presentation.ts";
 import { RevisionNotificationQueue } from "../frontend/src/bridge/revision-notification.ts";
@@ -50,18 +49,17 @@ function tool(id, order, state = "completed") {
   };
 }
 
-test("active Runs always derive one safe current activity and remain expanded", () => {
+test("active Runs always derive one safe current activity without opening technical details", () => {
   const presentation = deriveRunPresentation(
     run({ phase: "waiting_ui", activity: null }),
   );
   assert.equal(presentation.active, true);
   assert.deepEqual(presentation.activity, { kind: "waiting_user" });
   assert.equal(presentation.processVisible, true);
-  assert.equal(presentation.processDefaultExpanded, true);
   assert.equal(presentation.processCanCollapse, false);
 });
 
-test("active process evidence remains user-collapsible without losing activity", () => {
+test("commentary remains narrative content instead of technical process evidence", () => {
   const presentation = deriveRunPresentation(
     run({
       output: {
@@ -75,8 +73,8 @@ test("active process evidence remains user-collapsible without losing activity",
       activity: { kind: "thinking" },
     }),
   );
-  assert.equal(presentation.processCanCollapse, true);
-  assert.equal(presentation.processDefaultExpanded, true);
+  assert.equal(presentation.processVisible, true);
+  assert.equal(presentation.processCanCollapse, false);
   assert.deepEqual(presentation.activity, { kind: "thinking" });
 });
 
@@ -120,7 +118,6 @@ test("successful final response compresses process evidence without a duplicate 
     }),
   );
   assert.equal(presentation.processVisible, true);
-  assert.equal(presentation.processDefaultExpanded, false);
   assert.equal(presentation.processCanCollapse, true);
   assert.equal(presentation.showTerminalNotice, false);
 });
@@ -134,7 +131,7 @@ test("failure, missing response, and partial response keep truthful terminal tre
       cause: "agent_failure",
     }),
   );
-  assert.equal(failed.processDefaultExpanded, true);
+  assert.equal(failed.processVisible, false);
   assert.equal(failed.showTerminalNotice, true);
 
   const partial = deriveRunPresentation(
@@ -154,11 +151,16 @@ test("failure, missing response, and partial response keep truthful terminal tre
   );
   assert.equal(partial.responseVisible, true);
   assert.equal(partial.showTerminalNotice, true);
-  assert.equal(partial.processDefaultExpanded, true);
 });
 
-test("automatic terminal collapse never overrides reading position or user choice", () => {
-  const presentation = deriveRunPresentation(
+test("technical process stays collapsed by default while activity remains visible", () => {
+  const active = deriveRunPresentation(
+    run({
+      activity: { kind: "executing_tools", inFlight: "1" },
+      tools: [tool("read", "1", "running")],
+    }),
+  );
+  const terminal = deriveRunPresentation(
     run({
       phase: "completed",
       output: {
@@ -171,86 +173,24 @@ test("automatic terminal collapse never overrides reading position or user choic
       },
       activity: null,
       outcome: "completed",
+      tools: [tool("read", "1")],
     }),
   );
-  assert.equal(
-    shouldAutoCollapseRunProcess({
-      presentation,
-      wasActive: true,
-      followingLatest: true,
-      userToggled: false,
-    }),
-    true,
-  );
-  for (const state of [
-    { wasActive: false, followingLatest: true, userToggled: false },
-    { wasActive: true, followingLatest: false, userToggled: false },
-    { wasActive: true, followingLatest: true, userToggled: true },
-  ]) {
-    assert.equal(
-      shouldAutoCollapseRunProcess({ presentation, ...state }),
-      false,
-    );
-  }
+  assert.equal(active.processVisible, true);
+  assert.equal(active.processCanCollapse, true);
+  assert.equal(terminal.processVisible, true);
 });
 
-test("Run disclosure preserves manual choice and only collapses on an eligible terminal transition", () => {
-  const activePresentation = deriveRunPresentation(
-    run({
-      output: {
-        commentary: "Working",
-        response: "",
-        responseKind: null,
-        provisional: "",
-        redacted: false,
-        provisionalRedacted: false,
-      },
-    }),
-  );
-  const terminalPresentation = deriveRunPresentation(
-    run({
-      phase: "completed",
-      output: {
-        commentary: "Working",
-        response: "Done",
-        responseKind: "final",
-        provisional: "",
-        redacted: false,
-        provisionalRedacted: false,
-      },
-      activity: null,
-      outcome: "completed",
-    }),
-  );
+test("Run disclosure remains collapsed unless the user explicitly opens it", () => {
+  const active = observeRunProcessDisclosure(undefined);
+  assert.deepEqual(active, { expanded: false });
+  assert.equal(observeRunProcessDisclosure(active).expanded, false);
 
-  const active = observeRunProcessDisclosure(
-    undefined,
-    activePresentation,
-    true,
-  );
-  assert.deepEqual(active, {
+  const manual = toggleRunProcessDisclosure(true);
+  assert.deepEqual(observeRunProcessDisclosure(manual), {
     expanded: true,
-    userToggled: false,
-    wasActive: true,
   });
-  assert.equal(
-    observeRunProcessDisclosure(active, terminalPresentation, true).expanded,
-    false,
-  );
-  assert.equal(
-    observeRunProcessDisclosure(active, terminalPresentation, false).expanded,
-    true,
-  );
-
-  const manual = toggleRunProcessDisclosure(active, false);
-  assert.deepEqual(
-    observeRunProcessDisclosure(manual, activePresentation, true),
-    { expanded: false, userToggled: true, wasActive: true },
-  );
-  assert.equal(
-    observeRunProcessDisclosure(manual, terminalPresentation, true).expanded,
-    false,
-  );
+  assert.equal(observeRunProcessDisclosure(manual).expanded, true);
 });
 
 test("revision delivery coalesces bursts but releases spaced preterminal updates", async () => {

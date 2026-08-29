@@ -141,9 +141,9 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - AgentCore → Host → Bridge 持续投影 Agent 可见输出，并把 commentary、final/partial response 与 provisional 区分为稳定过程说明、安全正文和可回滚临时文本；Renderer 必须在正式 terminal fact 前随真实 Snapshot revision 持续更新 Run 的工作过程，不能把已到达的过程事实藏到终态后一次性展示；
 - `thinking_chunk` 正文不进入可见 output、Snapshot、持久历史或搜索；其事件类型只把当前安全状态细化为“正在思考”，`text_chunk` 到达后状态切换为“正在撰写回复”；
 - macOS AgentCore 的 visible-output segment 由 `output_segment_begin/end` 权威定性：`commentary` 是可见过程说明，`continued` 与同 group 后续段合并，`final` 是完成答案，`partial` 是可见但未完成输出，`discarded` 必须回滚。Product Task 只把已闭合的可见组提交到 durable visible-output history，并持久化 final/partial 分类及安全正文起点；Bridge revision 1 从该边界派生 typed commentary/response，同时只把 open/continued 中 credential-safe committed bytes 作为可回滚 provisional。open、continued 和 discarded 不形成 durable record，Renderer 也不得从 Tool、`stream_done` 或 StopReason 猜测这些语义；
-- 主阅读流在所属 Run 的 Work process 中展示有界 Tool 摘要，只包含顺序、名称、状态与 Host 提供的真实耗时；Tool input、progress 与 result 仍只在按需 Task overview 中挂载，同刻至多展开一个详情；
+- 主阅读流把 commentary 与 provisional 作为所属 Run 的 Assistant 过程叙事持续呈现，并在其下方只保留一个随 canonical activity 原位更新的 live status；Tool 记录是次要技术证据，默认折叠，只在用户明确展开后显示有界的顺序、名称、状态与 Host 提供的真实耗时。Tool input、progress 与 result 仍只在按需 Task overview 中挂载，同刻至多展开一个详情；
 - UI 以唯一 Current activity 展示 thinking、writing、tool、retry、context compact 与 finalizing，在 Task overview 展示真实 token usage、context warning 和最近 auto compact；
-- Agent 对话按 Run exchange 组织为用户输入、Work process、待处理请求、final/partial response、相关文件和必要 terminal notice。active Work process 默认展开并以唯一 Current activity 为标题，连续承载 commentary、可回滚 provisional 与 Tool 摘要；成功且已有 response 的 Run 在用户仍跟随最新内容且未手动切换时压缩为可重新展开的过程证据，失败或没有 response 时默认保持展开。Renderer 不伪造 typed facts 之间不存在的严格时间线；
+- Agent 对话按 Run exchange 组织为用户输入、Assistant 过程叙事、唯一 live status、待处理请求、final/partial response、相关文件、按需技术过程和必要 terminal notice，不存在的部分不占位。commentary 使用 Markdown 形成主叙事，可回滚 provisional 使用纯文本紧随其后；active status 始终位于当前过程底部并原位更新，不因 Tool 事件追加新的主阅读行。技术过程在 active 与 terminal Run 中都默认折叠，终态只以弱化的操作数量摘要保留，不强调已被 Run 恢复的单个 Tool 失败。Renderer 不伪造 typed facts 之间不存在的严格时间线；
 - 用户可以在已有 finalized Run 且 Task 可继续时显式压缩当前 Conversation；manual compact 是 Workbench-owned Task maintenance operation，不创建 Turn/Run，不产生用户消息，也不把 `/compact` 原文送入 Bridge 或模型；
 - manual compact 必须发布真实的 queued/compacting/stopping 与 terminal outcome；`compacted / no_change / degraded / aborted` 保持各自语义，before/after context token 只作为估算展示，compact provider usage 与 Run usage 分开记录；
 - 用户可以取消当前 Run；
@@ -200,7 +200,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - 未登录只禁止创建和发送新 Task；Workbench 仍展示 Workspace、durable Task 与执行历史，并允许查看和停止真实 live Run；默认执行配置 ready 后才开放 Composer admission；
 - Workbench 左栏承担稳定 New task、已接通的全局能力入口、全局 Task 列表与左下角账号入口；`新建任务`、`技能`、`MCP` 与 `定时任务` 使用同一紧凑一级菜单的相同行高、缩进和 active 语义，不用额外留白或独立大按钮制造虚假层级；只有真实接通的 capability 才显示对应入口，Task 按 `需要处理 / 正在运行 / 最近` 等行动优先级组织；
 - New task 中央区域始终以 Composer 为主，当前模型和 Workspace 在发送前可见；API 管理不进入 Composer，模型与 Workspace 也不得混成不透明的单一“模式”；
-- Task 启动后中央区域显示该 Task 的 Run exchanges，Composer 固定在底部。Work process 与 response 是同一 Run 的两个层级：过程区实时呈现 canonical activity、commentary、纯文本 provisional 和 Tool 摘要，response 以 Markdown 呈现 final/partial；provisional 在 Host 定性或 discard 后允许迁移或消失。待处理请求在过程之后提供唯一操作面；partial 与 terminal outcome 合并为一条提示，其他 terminal outcome 只在影响理解或恢复动作时出现。主区 Tool 摘要可以打开按需 Task overview 并聚焦唯一 Tool 详情，usage 仍只在 overview；普通 Run 开始或结束不自动开合 overview，只有新的待处理请求可以自动打开一次；
+- Task 启动后中央区域显示该 Task 的 Run exchanges，Composer 固定在底部。commentary 与纯文本 provisional 是同一 Run 的 Assistant 过程叙事，response 是随后由 Host 定性的 final/partial Markdown；provisional 在 Host 定性或 discard 后允许迁移或消失。过程叙事下方的单一 live status 原位呈现 canonical activity，Tool 名称、状态和耗时只存在于默认折叠的次要技术过程或按需 Task overview，不得取代用户可理解的进展。待处理请求提供唯一操作面；partial 与 terminal outcome 合并为一条提示，其他 terminal outcome 只在影响理解或恢复动作时出现。技术 Tool 摘要可以打开 overview 并聚焦唯一 Tool 详情，usage 仍只在 overview；普通 Run 开始或结束不自动开合 overview，只有新的待处理请求可以自动打开一次；
 - `queued / running / waiting_user` 的停止入口位于 Composer 的发送位置，并替换发送按钮；标题栏不重复提供 Task Stop。Composer 仍只保存本地草稿，停止请求必须等待 canonical terminal，transport acknowledgement 或 UI 状态变化都不能伪造 `Stopped`；
 - 标题栏只承载 Renderer 绘制的窗口按钮、当前 Task 名称、搜索与异常状态等全局入口；不重复说明 Task 的 Workspace，正常连接状态、语言选择和工程诊断也不长期占据主视觉；
 - 界面在任一时刻只突出一个与当前阶段一致的主动作；独立的导航和设置入口可以持续可见，但不得与主动作竞争；

@@ -251,15 +251,13 @@ export function TaskContent({
         const disclosureKey = `${task.id}:${run.id}`;
         const disclosure = observeRunProcessDisclosure(
           processDisclosure.current.get(disclosureKey),
-          presentation,
-          reading.current.get(task.id)?.followingLatest ?? true,
         );
         processDisclosure.current.set(disclosureKey, disclosure);
 
         function setProcessExpanded(expanded: boolean) {
           processDisclosure.current.set(
             disclosureKey,
-            toggleRunProcessDisclosure(disclosure, expanded),
+            toggleRunProcessDisclosure(expanded),
           );
           setDisclosureRevision((value) => value + 1);
         }
@@ -269,15 +267,39 @@ export function TaskContent({
             <Message role="user">
               <TaskInput input={run.input} />
             </Message>
-            <RunProcess
-              run={run}
-              presentation={presentation}
-              expanded={disclosure.expanded}
-              onExpandedChange={setProcessExpanded}
-              onOpenTool={(tool: ToolView, opener) =>
-                onOpenTool(run.id, tool.id, opener)
-              }
-            />
+            {(run.output.commentary ||
+              run.output.provisional ||
+              run.output.provisionalRedacted ||
+              (run.output.redacted && !presentation.responseVisible)) && (
+              <Message role="assistant" className="run-narrative">
+                {run.output.commentary && (
+                  <Markdown className="run-commentary">
+                    {run.output.commentary}
+                  </Markdown>
+                )}
+                {run.output.provisional && (
+                  <p className="run-provisional" aria-live="polite">
+                    {run.output.provisional}
+                  </p>
+                )}
+                {(run.output.provisionalRedacted ||
+                  (run.output.redacted && !presentation.responseVisible)) && (
+                  <p className="projection-note">
+                    {t("privacy.sensitive_hidden")}
+                  </p>
+                )}
+              </Message>
+            )}
+            {presentation.active && (
+              <RunProcess
+                presentation={presentation}
+                expanded={disclosure.expanded}
+                onExpandedChange={setProcessExpanded}
+                onOpenTool={(tool: ToolView, opener) =>
+                  onOpenTool(run.id, tool.id, opener)
+                }
+              />
+            )}
             {isCurrent && task.pendingUi && (
               <div className="ai-exchange-intervention">
                 {renderPendingUi({
@@ -323,6 +345,16 @@ export function TaskContent({
                   </button>
                 ))}
               </footer>
+            )}
+            {!presentation.active && (
+              <RunProcess
+                presentation={presentation}
+                expanded={disclosure.expanded}
+                onExpandedChange={setProcessExpanded}
+                onOpenTool={(tool: ToolView, opener) =>
+                  onOpenTool(run.id, tool.id, opener)
+                }
+              />
             )}
             {presentation.showTerminalNotice && run.outcome && (
               <Activity

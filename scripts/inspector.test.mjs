@@ -105,6 +105,26 @@ function run(overrides = {}) {
   };
 }
 
+function technicalTool(overrides = {}) {
+  return {
+    id: "tool-1",
+    order: "1",
+    name: "Read",
+    input: "",
+    progress: "",
+    content: "",
+    state: "completed",
+    isError: false,
+    elapsedMs: "12",
+    inputTruncated: false,
+    progressTruncated: false,
+    contentTruncated: false,
+    redacted: false,
+    fileRefs: [],
+    ...overrides,
+  };
+}
+
 function task(overrides = {}) {
   return {
     id: "3",
@@ -218,7 +238,6 @@ function runProcessElement(
 ) {
   return localizedView(
     createElement(RunProcess, {
-      run: value,
       presentation: deriveRunPresentation(value),
       expanded,
       onExpandedChange,
@@ -519,8 +538,9 @@ test("conversation separates commentary, Markdown response, and plain provisiona
     ],
   });
   const activeMarkup = renderTaskContent(active);
-  assert.match(activeMarkup, />Writing response</);
-  assert.match(activeMarkup, /aria-expanded="true"/);
+  assert.match(activeMarkup, />Preparing a response</);
+  assert.match(activeMarkup, /data-streaming="false"/);
+  assert.doesNotMatch(activeMarkup, /aria-expanded=/);
   assert.match(activeMarkup, /Checked <strong>two files<\/strong>\./);
   assert.match(activeMarkup, /Draft \*\*not Markdown\*\*/);
   assert.doesNotMatch(activeMarkup, /Draft <strong>not Markdown<\/strong>/);
@@ -540,9 +560,67 @@ test("conversation separates commentary, Markdown response, and plain provisiona
     ],
   });
   const completedMarkup = renderTaskContent(completed);
-  assert.match(completedMarkup, /aria-expanded="false"/);
-  assert.doesNotMatch(completedMarkup, /A historical update/);
+  assert.doesNotMatch(completedMarkup, /aria-expanded=/);
+  assert.match(completedMarkup, /A historical update/);
   assert.match(completedMarkup, /<strong>Ready<\/strong>/);
+});
+
+test("live revisions extend the narrative while replacing one bottom status in place", () => {
+  const activeRun = run({
+    phase: "running",
+    outcome: null,
+    activity: { kind: "thinking" },
+    output: {
+      commentary: "I will inspect the structure.",
+      response: "",
+      responseKind: null,
+      provisional: "",
+      redacted: false,
+      provisionalRedacted: false,
+    },
+  });
+  const activeTask = task({
+    currentRunId: "9",
+    currentRunPhase: "running",
+    runs: [activeRun],
+  });
+  const view = render(taskContentElement(activeTask));
+  const statusSurface = document.querySelector(".run-process");
+  assert.ok(statusSurface);
+  assert.ok(screen.getByText("Analyzing"));
+
+  view.rerender(
+    taskContentElement(
+      {
+        ...activeTask,
+        runs: [
+          {
+            ...activeRun,
+            activity: { kind: "executing_tools", inFlight: "1" },
+            output: {
+              ...activeRun.output,
+              commentary:
+                "I will inspect the structure.\n\nThe structure is clear; now updating it.",
+            },
+            tools: [
+              technicalTool({
+                name: "Bash",
+                state: "running",
+                elapsedMs: "0",
+              }),
+            ],
+          },
+        ],
+      },
+      "2",
+    ),
+  );
+
+  assert.equal(document.querySelectorAll(".run-process").length, 1);
+  assert.equal(document.querySelector(".run-process"), statusSurface);
+  assert.ok(screen.getByText("The structure is clear; now updating it."));
+  assert.ok(screen.getByRole("button", { name: "Running an operation" }));
+  assert.equal(screen.queryByText("Bash"), null);
 });
 
 test("discarded provisional output disappears on the next Snapshot revision", () => {
@@ -566,7 +644,6 @@ test("discarded provisional output disappears on the next Snapshot revision", ()
   });
   const view = render(taskContentElement(activeTask));
   assert.ok(screen.getByText("This segment may be discarded"));
-  assert.ok(screen.getByText("Live output"));
 
   view.rerender(
     taskContentElement(
@@ -584,11 +661,10 @@ test("discarded provisional output disappears on the next Snapshot revision", ()
     ),
   );
   assert.equal(screen.queryByText("This segment may be discarded"), null);
-  assert.equal(screen.queryByText("Live output"), null);
-  assert.ok(screen.getByText("Waiting for model response"));
+  assert.ok(screen.getByText("Waiting for the next step"));
 });
 
-test("Run process exposes live commentary and safe Tool summaries without raw details", async () => {
+test("Run status keeps technical Tool summaries behind explicit disclosure", async () => {
   const user = userEvent.setup({ document: dom.window.document });
   const opened = [];
   const expandedChanges = [];
@@ -630,10 +706,12 @@ test("Run process exposes live commentary and safe Tool summaries without raw de
     }),
   );
 
-  const header = screen.getByRole("button", { name: /Executing tools/ });
+  const header = screen.getByRole("button", {
+    name: /Inspecting the workspace/,
+  });
   assert.equal(header.getAttribute("aria-expanded"), "true");
-  assert.ok(screen.getByText("two files", { selector: "strong" }));
-  assert.ok(screen.getByText("Live **plain text**"));
+  assert.equal(screen.queryByText("two files", { selector: "strong" }), null);
+  assert.equal(screen.queryByText("Live **plain text**"), null);
   assert.equal(screen.queryByText("private input"), null);
   assert.equal(screen.queryByText("private progress"), null);
   assert.equal(screen.queryByText("private result"), null);
@@ -695,12 +773,13 @@ test("terminal Run process summarizes Tool evidence without implying Run failure
     runProcessElement(value, { expanded: false }),
   );
   assert.match(markup, />Work process</);
-  assert.match(markup, /2 tool steps · 1 failed/);
+  assert.match(markup, /2 operations/);
+  assert.doesNotMatch(markup, /1 failed/);
   assert.doesNotMatch(markup, /Finished checking/);
   assert.doesNotMatch(markup, />Work failed</);
 });
 
-test("Run process disclosure remains user-controlled across revisions and Task switches", async () => {
+test("technical process disclosure remains user-controlled across revisions and Task switches", async () => {
   const user = userEvent.setup({ document: dom.window.document });
   const active = task({
     id: "task-a",
@@ -719,14 +798,18 @@ test("Run process disclosure remains user-controlled across revisions and Task s
           redacted: false,
           provisionalRedacted: false,
         },
+        tools: [technicalTool({ state: "running", elapsedMs: "0" })],
       }),
     ],
   });
   const view = render(taskContentElement(active));
-  let disclosure = screen.getByRole("button", { name: "Writing response" });
-  assert.equal(disclosure.getAttribute("aria-expanded"), "true");
-  await user.click(disclosure);
+  let disclosure = screen.getByRole("button", {
+    name: "Preparing a response",
+  });
   assert.equal(disclosure.getAttribute("aria-expanded"), "false");
+  await user.click(disclosure);
+  disclosure = screen.getByRole("button", { name: "Preparing a response" });
+  assert.equal(disclosure.getAttribute("aria-expanded"), "true");
 
   view.rerender(
     taskContentElement(
@@ -745,20 +828,20 @@ test("Run process disclosure remains user-controlled across revisions and Task s
       "2",
     ),
   );
-  disclosure = screen.getByRole("button", { name: "Writing response" });
-  assert.equal(disclosure.getAttribute("aria-expanded"), "false");
+  disclosure = screen.getByRole("button", { name: "Preparing a response" });
+  assert.equal(disclosure.getAttribute("aria-expanded"), "true");
 
   view.rerender(taskContentElement(task({ id: "task-b" }), "3"));
   assert.equal(
-    screen.queryByRole("button", { name: "Writing response" }),
+    screen.queryByRole("button", { name: "Preparing a response" }),
     null,
   );
   view.rerender(taskContentElement(active, "4"));
-  disclosure = screen.getByRole("button", { name: "Writing response" });
-  assert.equal(disclosure.getAttribute("aria-expanded"), "false");
+  disclosure = screen.getByRole("button", { name: "Preparing a response" });
+  assert.equal(disclosure.getAttribute("aria-expanded"), "true");
 });
 
-test("successful terminal transition collapses process only while following latest", () => {
+test("successful terminal keeps commentary visible and technical process collapsed", () => {
   const activeRun = run({
     phase: "running",
     outcome: null,
@@ -771,6 +854,7 @@ test("successful terminal transition collapses process only while following late
       redacted: false,
       provisionalRedacted: false,
     },
+    tools: [technicalTool({ state: "running", elapsedMs: "0" })],
   });
   const active = task({
     currentRunId: "9",
@@ -790,17 +874,18 @@ test("successful terminal transition collapses process only while following late
           response: "Final response",
           responseKind: "final",
         },
+        tools: [technicalTool()],
       },
     ],
   });
   view.rerender(taskContentElement(completed, "2"));
-  const disclosure = screen.getByRole("button", { name: "Work process" });
+  const disclosure = screen.getByRole("button", { name: /^Work process/ });
   assert.equal(disclosure.getAttribute("aria-expanded"), "false");
-  assert.equal(screen.queryByText("Working through the task"), null);
+  assert.ok(screen.getByText("Working through the task"));
   assert.ok(screen.getByText("Final response"));
 });
 
-test("terminal transition preserves process layout while the user reads history", () => {
+test("terminal transition preserves reading position without expanding technical details", () => {
   const activeRun = run({
     phase: "running",
     outcome: null,
@@ -813,6 +898,7 @@ test("terminal transition preserves process layout while the user reads history"
       redacted: false,
       provisionalRedacted: false,
     },
+    tools: [technicalTool({ state: "running", elapsedMs: "0" })],
   });
   const active = task({
     currentRunId: "9",
@@ -842,14 +928,15 @@ test("terminal transition preserves process layout while the user reads history"
               response: "Final response",
               responseKind: "final",
             },
+            tools: [technicalTool()],
           },
         ],
       }),
       "2",
     ),
   );
-  const disclosure = screen.getByRole("button", { name: "Work process" });
-  assert.equal(disclosure.getAttribute("aria-expanded"), "true");
+  const disclosure = screen.getByRole("button", { name: /^Work process/ });
+  assert.equal(disclosure.getAttribute("aria-expanded"), "false");
   assert.ok(screen.getByText("Evidence the reader is reviewing"));
   assert.ok(screen.getByRole("button", { name: "Jump to latest" }));
 });
@@ -911,6 +998,9 @@ test("Tool summary forwards exact Run, Tool, and opener identity", async () => {
       onOpenTool: (runId, toolId, opener) =>
         calls.push({ runId, toolId, opener }),
     }),
+  );
+  await user.click(
+    screen.getByRole("button", { name: "Running an operation" }),
   );
   await user.click(
     screen.getByRole("button", { name: "View details for Bash" }),
@@ -1016,8 +1106,8 @@ test("typed Run activity uses safe localized labels", () => {
   });
   const thinkingContent = renderTaskContent(thinkingTask, "zh-CN");
   const thinkingInspector = renderInspector(thinkingTask, "zh-CN");
-  assert.match(thinkingContent, />正在思考</);
-  assert.match(thinkingInspector, />正在思考</);
+  assert.match(thinkingContent, />正在分析</);
+  assert.match(thinkingInspector, />正在分析</);
 
   const writingTask = task({
     currentRunId: "9",
@@ -1030,16 +1120,16 @@ test("typed Run activity uses safe localized labels", () => {
       }),
     ],
   });
-  assert.match(renderTaskContent(writingTask, "zh-CN"), />正在撰写回复</);
+  assert.match(renderTaskContent(writingTask, "zh-CN"), />正在组织回复</);
 
   for (const [activity, expected] of [
-    [{ kind: "starting" }, "正在启动"],
-    [{ kind: "executing_tools", inFlight: "2" }, "正在执行工具"],
+    [{ kind: "starting" }, "正在准备"],
+    [{ kind: "executing_tools", inFlight: "2" }, "正在处理"],
     [
       { kind: "retrying_provider", attempt: "1", max: "2", delayMs: "50" },
-      "正在重试模型请求",
+      "正在重试连接",
     ],
-    [{ kind: "compacting_context" }, "正在压缩上下文"],
+    [{ kind: "compacting_context" }, "正在整理上下文"],
     [{ kind: "finalizing" }, "正在整理结果"],
   ]) {
     const activityTask = task({
@@ -1074,8 +1164,8 @@ test("typed Run activity uses safe localized labels", () => {
       }),
     ],
   });
-  assert.match(renderTaskContent(waitingModel, "zh-CN"), />正在等待模型响应</);
-  assert.match(renderInspector(waitingModel, "zh-CN"), />正在等待模型响应</);
+  assert.match(renderTaskContent(waitingModel, "zh-CN"), />正在等待下一步</);
+  assert.match(renderInspector(waitingModel, "zh-CN"), />正在等待下一步</);
 
   const stoppingTask = task({
     currentRunId: "9",
@@ -1090,7 +1180,7 @@ test("typed Run activity uses safe localized labels", () => {
   });
   const stoppingContent = renderTaskContent(stoppingTask, "zh-CN");
   assert.match(stoppingContent, />正在停止</);
-  assert.doesNotMatch(stoppingContent, />正在思考</);
+  assert.doesNotMatch(stoppingContent, />正在分析</);
 });
 
 test("Run file references render as preview entry without change semantics", () => {

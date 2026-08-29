@@ -522,7 +522,7 @@ Execution binding availability 是下一次 admission 的独立前置事实，�
 
 ### 7.1 内容模型
 
-Task 按稳定 Run 顺序显示 `Run exchange`：用户指令之后依次是 `Work process → Intervention → Response → File references → Terminal notice`，不存在的部分不占位。Work process 聚合唯一 Current activity、同一段连续 commentary、未定性的可回滚 provisional 和按 Host order 排列的 Tool 摘要；它们是同一 Run 的过程证据，不是不同说话者，也不构成 raw 事件时间线。Response 是已由 Host 定性为 final/partial 的主阅读内容。Renderer 只做纯 presentation derivation 和会话内 disclosure，不复制 Product 状态机。
+Task 按稳定 Run 顺序显示 `Run exchange`：用户指令之后依次是 `Assistant process narrative → Live status → Intervention → Response → File references → Technical work evidence → Terminal notice`，不存在的部分不占位。process narrative 连续承载 commentary 与未定性的可回滚 provisional，是用户理解 Agent 当前方向的主阅读内容；live status 是位于当前过程底部、随唯一 Current activity 原位更新的一行状态；technical work evidence 才承载按 Host order 排列的 Tool 摘要，并默认折叠。它们属于同一 Run，不是不同说话者，也不构成 raw 事件时间线。Response 是已由 Host 定性为 final/partial 的正式主阅读内容。Renderer 只做纯 presentation derivation 和会话内 disclosure，不复制 Product 状态机。
 
 ### 7.2 用户指令
 
@@ -536,16 +536,16 @@ Task 按稳定 Run 顺序显示 `Run exchange`：用户指令之后依次是 `Wo
 
 - 不使用头像和大气泡，使用正文排版；
 - 支持 Markdown、表格、代码、引用和链接；
-- active Work process 默认展开并以唯一 Current activity 为稳定标题；commentary 在过程区按一个连续 Markdown body 呈现，不按 chunk 或 Tool 穿插伪造顺序；
-- `final | partial` response 使用安全 Markdown；尚未收到 output-segment 定性的 provisional 在 Work process 内以中性“正在输出”纯文本呈现，不称为草稿、不解释 Markdown，discard 后随下一 Snapshot 消失；流式生成只显示克制的单一活动指示；
-- 不展示原始 chain-of-thought；`thinking_chunk` 只显示“正在思考”的安全状态，`text_chunk` 开始后显示“正在撰写回复”；Renderer 还必须把 Host 已投影的 Starting、Waiting model、Executing tools、Retrying、Compacting 与 Finishing 显示为本地化 Current activity，并在 Host 提供时显示 in-flight tool count 或 retry attempt/max/delay；active Run 不能统一退化成“正在工作”；
+- commentary 作为 Assistant 过程叙事按一个连续 Markdown body 呈现，不按 chunk 或 Tool 穿插伪造顺序；只要 Host 发布新的 commentary，主阅读流就随 Snapshot revision 更新；
+- `final | partial` response 使用安全 Markdown；尚未收到 output-segment 定性的 provisional 紧随 commentary 以中性纯文本呈现，不称为草稿、不解释 Markdown，discard 后随下一 Snapshot 消失；流式生成只显示克制的单一活动指示；
+- 不展示原始 chain-of-thought；`thinking_chunk` 只显示“正在思考”的安全状态，`text_chunk` 开始后显示“正在撰写回复”；Renderer 还必须把 Host 已投影的 Starting、Waiting model、Executing tools、Retrying、Compacting 与 Finishing 显示为本地化 Current activity，并在 Host 提供时显示 retry attempt/max/delay；不同 activity 必须保持可理解的差异，不能把整个 active Run 统一退化成一个不变的“正在工作”；
 - output 只表示 Agent 可见输出，不标记为 Delivery、Output artifact 或最终成果；
 - 不从回复文本解析活动、计划、文件变化或完成状态；不得为每条内容重复“Agent”标签或品牌头像。
 
 ### 7.4 当前状态、请求与结果
 
-- active Run 只显示一个来自 canonical phase/activity 的紧凑临时状态；`executing_tools` 且恰有一个 typed running Tool 时可以显示其名称，其他不一致或多 Tool 情况回退到 canonical activity。主区 Tool 行只显示名称、状态与 Host 提供的真实 elapsed；不得带入 Tool input/progress/result、usage 或 Run ID；
-- active Work process 默认展开；terminal 且已有 response 的成功 Run 默认压缩为“工作过程 · N 个工具步骤”，用户可以重新展开。由 active 转为成功 terminal 时，只有用户仍跟随最新内容且从未手动切换该 Run disclosure 才自动压缩；用户正在上方阅读时保持原布局。失败、中断、dependency failure 或没有 response 的 Run 默认展开。该状态按 Task+Run 仅存于当前 Renderer 会话，不写入 Bridge 或持久化；late terminal observation 不得重新打开 live 状态；
+- active Run 只显示一个来自 canonical phase/activity 的紧凑 live status，并固定在当前过程底部原位更新；它不为 Tool start/progress/result 追加时间线记录。`executing_tools` 且恰有一个 typed running Tool 时，Renderer 可以依据固定 Tool identifier 映射为“检查工作区”“更新内容”“运行操作”等宽泛但真实的用户文案；不满足条件时回退到 canonical activity，不在主状态中暴露原始 Tool 名称、参数或命令；
+- Tool 摘要属于次要 technical work evidence，active 与 terminal Run 都默认折叠；用户明确展开后，主区 Tool 行只显示名称、状态与 Host 提供的真实 elapsed，不带入 input/progress/result、usage 或 Run ID。terminal 摘要弱化为“工作过程 · N 项操作”，不单独强调已被整个 Run 恢复的 Tool failure；失败事实仍在展开详情中保留。disclosure choice 按 Task+Run 仅存于当前 Renderer 会话，不写入 Bridge 或持久化，也不随 revision 或终态自动翻转；late terminal observation 不得重新打开 live 状态；
 - pending UI 位于当前 Assistant 回复之后、Composer 之前，并提供唯一可操作控件；
 - `completed` 且已有 final response 时不追加重复的完成条；空 final response、停止、失败、中断或 dependency failure 只显示准确状态、原因与真实可用的恢复动作；partial response 与 terminal outcome 必须合并为唯一 notice，同时表达“回复未完整生成”和真实终止原因，不能再追加第二条 partial 警告；
 - Renderer reload、成功同步、Tool completion 与 Compact history 不生成主区记录；只有同步失败、当前 maintenance 或内容可能不完整时显示相应状态。

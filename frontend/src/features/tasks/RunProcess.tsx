@@ -1,13 +1,35 @@
 import { useId, type ReactNode } from "react";
 
-import type { RunActivity, RunView, ToolView } from "../../bridge/contracts.ts";
-import { Markdown } from "../../components/ai/index.ts";
+import type { RunActivity, ToolView } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { useI18n, type I18nValue, type MessageId } from "../../i18n/context.ts";
 import { formatInteger } from "../../i18n/formatters.ts";
 import type { RunPresentation } from "./run-presentation.ts";
 
-function activityMessage(activity: RunActivity): MessageId {
+function toolActivityMessage(name: string | null): MessageId {
+  switch (name) {
+    case "Read":
+    case "Glob":
+    case "Grep":
+    case "WebSearch":
+    case "WebFetch":
+      return "run.activity.inspecting_workspace";
+    case "Write":
+    case "Edit":
+      return "run.activity.updating_content";
+    case "Bash":
+    case "BashOutput":
+    case "KillShell":
+      return "run.activity.running_operation";
+    default:
+      return "run.activity.executing_tools";
+  }
+}
+
+function activityMessage(
+  activity: RunActivity,
+  runningToolName: string | null,
+): MessageId {
   switch (activity.kind) {
     case "queued":
     case "starting":
@@ -19,7 +41,7 @@ function activityMessage(activity: RunActivity): MessageId {
     case "writing_response":
       return "run.activity.writing_response";
     case "executing_tools":
-      return "run.activity.executing_tools";
+      return toolActivityMessage(runningToolName);
     case "retrying_provider":
       return "run.activity.retrying_provider";
     case "waiting_user":
@@ -38,15 +60,6 @@ function activityDetail(
   locale: I18nValue["locale"],
   t: I18nValue["t"],
 ): string | null {
-  if (activity.kind === "executing_tools" && activity.inFlight) {
-    const count = BigInt(activity.inFlight);
-    return t(
-      count === 1n
-        ? "run.activity.tool_running_one"
-        : "run.activity.tool_running_many",
-      { count: formatInteger(locale, count) },
-    );
-  }
   if (
     activity.kind === "retrying_provider" &&
     activity.attempt &&
@@ -182,26 +195,20 @@ function terminalDetail(
 ): string | null {
   if (presentation.toolCount === 0) return null;
   const count = formatInteger(locale, BigInt(presentation.toolCount));
-  const steps = t(
+  return t(
     presentation.toolCount === 1
       ? "run.process.tool_step_one"
       : "run.process.tool_step_many",
     { count },
   );
-  if (presentation.failedToolCount === 0) return steps;
-  return `${steps} · ${t("run.process.failed_steps", {
-    count: formatInteger(locale, BigInt(presentation.failedToolCount)),
-  })}`;
 }
 
 export function RunProcess({
-  run,
   presentation,
   expanded,
   onExpandedChange,
   onOpenTool,
 }: {
-  run: RunView;
   presentation: RunPresentation;
   expanded: boolean;
   onExpandedChange: (expanded: boolean) => void;
@@ -213,10 +220,10 @@ export function RunProcess({
 
   const activity = presentation.activity;
   const title = activity
-    ? t(activityMessage(activity))
+    ? t(activityMessage(activity, presentation.runningToolName))
     : t("run.process.title");
   const detail = activity
-    ? (presentation.runningToolName ?? activityDetail(activity, locale, t))
+    ? activityDetail(activity, locale, t)
     : terminalDetail(presentation, locale, t);
   const showBody = expanded && presentation.processCanCollapse;
 
@@ -237,24 +244,6 @@ export function RunProcess({
       />
       {showBody && (
         <div className="run-process-body" id={bodyId}>
-          {run.output.commentary && (
-            <div className="run-process-commentary">
-              <Markdown>{run.output.commentary}</Markdown>
-            </div>
-          )}
-          {run.output.provisional && (
-            <div
-              className="run-process-provisional"
-              aria-label={t("run.process.live_output")}
-            >
-              <span>{t("run.process.live_output")}</span>
-              <p>{run.output.provisional}</p>
-            </div>
-          )}
-          {(run.output.provisionalRedacted ||
-            (run.output.redacted && !presentation.responseVisible)) && (
-            <p className="projection-note">{t("privacy.sensitive_hidden")}</p>
-          )}
           {presentation.tools.length > 0 && (
             <ul className="run-process-tools">
               {presentation.tools.map((tool) => (

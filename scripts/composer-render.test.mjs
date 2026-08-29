@@ -417,7 +417,7 @@ test("Assistant reply is primary and completed does not add a redundant outcome"
   assert.match(renderCompletedSurface(""), /Work completed/);
 });
 
-test("pending UI follows the work process before response without resolved history", () => {
+test("pending UI follows the live status before response without technical history", () => {
   const markup = renderCompletedSurface(
     "Review this before continuing",
     undefined,
@@ -453,7 +453,8 @@ test("pending UI follows the work process before response without resolved histo
   const assistant = markup.indexOf("Review this before continuing");
   const pending = markup.indexOf("Pending decision");
   assert.ok(pending < assistant);
-  assert.match(markup, />Read</);
+  assert.match(markup, />Needs attention</);
+  assert.doesNotMatch(markup, />Read</);
   assert.doesNotMatch(markup, /fixture\.txt|>ready<|Resolved decision/);
 });
 
