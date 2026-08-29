@@ -179,6 +179,8 @@ Agent Session 的公开回答入口只有 choice-only `respondPermission`。调�
 
 目标 `PermissionProfile` 由 MetaWork 产品层拥有，与 AgentCore `PermissionMode`、`ShellPolicy` 和 permission rule schema 分离：Settings 只持有新 Task 默认值，Product Task 持有当前 effective profile，每个 Run 保存 provenance。Agent 只接受 Product Control 在 fresh create、restore 或已验证的 idle mutation 边界提交的精确执行配置，不拥有默认值、持久化或 UI 选择。任何 profile 在 Renderer 出现之前，都必须先证明 canonical bundle 对应模式的 exact behavior、fresh/restore 一致性、idle 切换生效点、撤权、Run provenance 和 Scheduled noninteractive；缺少其中任一项时 fail closed 并保持当前 `accept_edits + unrestricted` baseline。该目标会改变稳定 Bridge、persistence 或 ABI 合同时，必须另行取得对应合同变更批准，不能在 Agent 私有 DTO 中先行影射。
 
+当前 aarch64 macOS canonical bundle `0.1.0-dev+b66e3d4c11ab` 的 source-free probe 已证明以下外部事实：`accept_edits` 对 Workspace 内 `Edit`、Workspace 内 `Write` 和 Workspace 外 `Write` 都发布同步 permission request，而普通 Bash 由 built-in classification 直接允许；`full_access` 直接允许普通 Bash 和 Workspace 外 Write，但 `.git/config` 等 Core protected path 仍请求 callback；显式规则优先于 mode，重叠规则按 deny > ask > allow 收口，callback unavailable 不执行待决 effect；`allow_session` 的 `exact_arguments` grant 在同一 Session 复用并随 checkpoint restore 恢复，而未产生 grant 的 `full_access` restore 不伪造规则。该证据只定义这个精确 artifact 的行为，不代表 MetaWork 已实现 Product `PermissionProfile`，也不证明其他 target、idle mutation、撤权或 Scheduled noninteractive。
+
 ### Host tools
 
 当前锁定合同的 Host tool callback 同样携带 validated `RunContext`，但这只补齐 wire identity，不自动建立 MetaWork 的产品工具、安全与路由政策。当前产品 Runtime 配置仍必须保持 `host_tool_count = 0`；MetaWork Agent 在 Agent 模块中统一注册并允许固定 built-in 集合，Product Control 和 Application 不持有 profile 或 wire name。启用正式 Host tools 属于独立 capability Gate，不在本次 ABI 迁移中顺带开放。
@@ -527,7 +529,7 @@ Agent sink 同时累计 total bytes、chunk count 与实际 streamed bytes 的 S
 - `WebSearch` 与 `WebFetch` 只是 AgentCore built-in 名称，MetaWork 不实现第二个 executor 或 provider-specific tool identity；
 - Runtime catalog 与 Session allowlist 共同限制可发布工具；
 - Provider 伪造未发布工具名必须 dispatch 失败；
-- 正式 Session 固定使用 `accept_edits + unrestricted`：当前 Workspace 范围内的 Write/Edit 由 AgentCore 自动允许，范围外编辑与 Bash 等其他当前策略未覆盖操作仍经过同步 permission；这是 `approval_required` 的 compatibility baseline，不是 strict security 或产品级 Sandbox；
+- 正式 Session 固定使用 `accept_edits + unrestricted`：锁定 artifact 会对 Workspace 内外的 Write 以及 Workspace 内 Edit 发布同步 permission request，普通 Bash 则由 built-in classification 直接允许；因此它只是当前 `approval_required` compatibility baseline，既不是“自动接受编辑”的产品策略，也不是 strict security 或产品级 Sandbox；
 - 默认 Bash 是非交互 shell，不使用 PTY；
 - stdout/stderr/exit code 有界或通过后续对象引用展示。
 
@@ -567,7 +569,7 @@ Compact abort 同样不进入普通 FIFO；accepted cancellation 最终必须由
 
 ## 14. Shell 边界
 
-`ShellPolicy` 只决定 AgentCore 如何提供 Bash 执行能力，不决定 MetaWork 是否询问用户。当前正式值 `.unrestricted` 表示获准的 Bash 不经过 AgentCore file sandbox；它不表示 root、不绕过操作系统授权，也不等于 `PermissionProfile.full_access`。官方 surface 同时存在 `.disabled` 与 `.sandboxed` 不代表 MetaWork 已产品化对应模式；在锁定 bundle 的约束范围、路径逃逸、symlink/TOCTOU、process tree、network 和 environment 行为完成独立验证前，Renderer 不得展示“沙箱”承诺，Product Control 也不得把该 enum 当作 Workspace trust level。
+`ShellPolicy` 只决定 AgentCore 如何提供 Bash 执行能力，不决定 MetaWork 是否询问用户。当前正式值 `.unrestricted` 表示获准的 Bash 不经过 AgentCore file sandbox；它不表示 root、不绕过操作系统授权，也不等于 `PermissionProfile.full_access`。当前 aarch64 macOS artifact probe 证明 `.disabled` 在 Bash 仍位于 Session allowlist 时以 `ShellToolDisabled` 拒绝建 Session，`.sandboxed` 允许 Bash 写 Workspace 内文件并阻止同一命令写向仓库中的 Workspace 外临时目录；这只是一个路径 effect 样本，不覆盖 symlink/TOCTOU、process tree、network、environment 或其他 target。官方 surface 存在这些值不代表 MetaWork 已产品化对应模式；完整安全矩阵完成前，Renderer 不得展示“沙箱”承诺，Product Control 也不得把该 enum 当作 Workspace trust level。
 
 | 能力                         | 当前 Bash baseline |
 | ---------------------------- | ------------------ |
