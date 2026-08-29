@@ -97,13 +97,13 @@ const effects = {
   accept_bash: {
     tool: "Bash",
     arguments: {
-      command: `printf accept-bash > ${shellQuote(path.join(workspace, "accept-bash.txt"))}`,
+      command: `touch ${shellQuote(path.join(workspace, "accept-bash.txt"))}`,
     },
   },
   full_bash: {
     tool: "Bash",
     arguments: {
-      command: `printf full-bash > ${shellQuote(path.join(workspace, "full-bash.txt"))}`,
+      command: `touch ${shellQuote(path.join(workspace, "full-bash.txt"))}`,
     },
   },
   full_outside_write: {
@@ -123,31 +123,31 @@ const effects = {
   deny_full_bash: {
     tool: "Bash",
     arguments: {
-      command: `printf denied > ${shellQuote(path.join(workspace, "deny-full-bash.txt"))}`,
+      command: `touch ${shellQuote(path.join(workspace, "deny-full-bash.txt"))}`,
     },
   },
   ask_full_bash: {
     tool: "Bash",
     arguments: {
-      command: `printf asked > ${shellQuote(path.join(workspace, "ask-full-bash.txt"))}`,
+      command: `touch ${shellQuote(path.join(workspace, "ask-full-bash.txt"))}`,
     },
   },
   allow_accept_bash: {
     tool: "Bash",
     arguments: {
-      command: `printf allowed > ${shellQuote(path.join(workspace, "allow-accept-bash.txt"))}`,
+      command: `touch ${shellQuote(path.join(workspace, "allow-accept-bash.txt"))}`,
     },
   },
   ask_over_allow_bash: {
     tool: "Bash",
     arguments: {
-      command: `printf ask-over-allow > ${shellQuote(path.join(workspace, "ask-over-allow.txt"))}`,
+      command: `touch ${shellQuote(path.join(workspace, "ask-over-allow.txt"))}`,
     },
   },
   deny_over_ask_allow_bash: {
     tool: "Bash",
     arguments: {
-      command: `printf deny-over-ask-allow > ${shellQuote(path.join(workspace, "deny-over-ask-allow.txt"))}`,
+      command: `touch ${shellQuote(path.join(workspace, "deny-over-ask-allow.txt"))}`,
     },
   },
   session_grant: {
@@ -167,25 +167,25 @@ const effects = {
   shell_disabled: {
     tool: "Bash",
     arguments: {
-      command: `printf disabled > ${shellQuote(path.join(workspace, "shell-disabled.txt"))}`,
+      command: `touch ${shellQuote(path.join(workspace, "shell-disabled.txt"))}`,
     },
   },
   sandbox_inside: {
     tool: "Bash",
     arguments: {
-      command: `printf sandbox-inside > ${shellQuote(path.join(workspace, "sandbox-inside.txt"))}`,
+      command: `touch ${shellQuote(path.join(workspace, "sandbox-inside.txt"))}`,
     },
   },
   sandbox_outside: {
     tool: "Bash",
     arguments: {
-      command: `printf sandbox-outside > ${shellQuote(path.join(outside, "sandbox-outside.txt"))}`,
+      command: `touch ${shellQuote(path.join(outside, "sandbox-outside.txt"))}`,
     },
   },
   unrestricted_outside: {
     tool: "Bash",
     arguments: {
-      command: `printf unrestricted > ${shellQuote(path.join(outside, "unrestricted-outside.txt"))}`,
+      command: `touch ${shellQuote(path.join(outside, "unrestricted-outside.txt"))}`,
     },
   },
   restore_grant: {
@@ -198,13 +198,13 @@ const effects = {
   restore_full_seed: {
     tool: "Bash",
     arguments: {
-      command: `printf seed > ${shellQuote(path.join(workspace, "restore-full-seed.txt"))}`,
+      command: `touch ${shellQuote(path.join(workspace, "restore-full-seed.txt"))}`,
     },
   },
   restore_full_after: {
     tool: "Bash",
     arguments: {
-      command: `printf after > ${shellQuote(path.join(workspace, "restore-full-after.txt"))}`,
+      command: `touch ${shellQuote(path.join(workspace, "restore-full-after.txt"))}`,
     },
   },
 };

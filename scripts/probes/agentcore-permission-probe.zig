@@ -565,7 +565,7 @@ pub fn main() !void {
     try runFresh(api, core_runtime, &builtin_tools, "accept_inside_edit", wire.PERMISSION_ACCEPT_EDITS, wire.SHELL_UNRESTRICTED, .none, .allow_once, 1, 2, .callback);
     try runFresh(api, core_runtime, &builtin_tools, "accept_inside_write", wire.PERMISSION_ACCEPT_EDITS, wire.SHELL_UNRESTRICTED, .none, .allow_once, 1, 1, .callback);
     try runFresh(api, core_runtime, &builtin_tools, "accept_outside_write", wire.PERMISSION_ACCEPT_EDITS, wire.SHELL_UNRESTRICTED, .none, .allow_once, 1, 1, .callback);
-    try runFresh(api, core_runtime, &builtin_tools, "accept_bash", wire.PERMISSION_ACCEPT_EDITS, wire.SHELL_UNRESTRICTED, .none, .unavailable, 0, 1, .builtin_classification);
+    try runFresh(api, core_runtime, &builtin_tools, "accept_bash", wire.PERMISSION_ACCEPT_EDITS, wire.SHELL_UNRESTRICTED, .none, .allow_once, 1, 1, .callback);
     try runFresh(api, core_runtime, &builtin_tools, "full_bash", wire.PERMISSION_FULL_ACCESS, wire.SHELL_UNRESTRICTED, .none, .unavailable, 0, 1, .builtin_classification);
     try runFresh(api, core_runtime, &builtin_tools, "full_outside_write", wire.PERMISSION_FULL_ACCESS, wire.SHELL_UNRESTRICTED, .none, .unavailable, 0, 1, .builtin_classification);
     try runFresh(api, core_runtime, &builtin_tools, "full_protected_write", wire.PERMISSION_FULL_ACCESS, wire.SHELL_UNRESTRICTED, .none, .deny_once, 1, 1, .callback);

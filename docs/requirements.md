@@ -156,7 +156,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 
 - Authority、Interaction Policy 与 Sandbox 是三个独立维度：Authority 决定 Task 已取得的 Workspace、Shell、Skill、MCP 与系统能力；Interaction Policy 决定未覆盖操作是否询问；Sandbox 只描述执行时的物理约束。产品、UI 和验证不得把三者合并成一个“安全模式”；
 - 目标 `PermissionProfile` 是 MetaWork-owned 的产品策略，预设为 `approval_required | standard | full_access`。`approval_required` 表示常规 Workspace 编辑自动、其他当前策略未覆盖操作请求批准；`standard` 表示常规本地工作自动、只有具备可靠 typed risk/effect 的操作请求批准；`full_access` 表示不提供 MetaWork tool permission 保护，仍受操作系统权限约束。内部 AgentCore enum、ShellPolicy 和 rule schema 不得成为 Renderer 产品词汇；
-- 当前正式 Session 仍固定使用 `accept_edits + unrestricted`，只读操作与当前 Workspace 范围内的 Write/Edit 自动允许，Workspace 范围外编辑及非只读 Bash 等仍经过同步 permission；这是当前 `approval_required` compatibility baseline，不是 Sandbox，也不宣称能安全运行不可信 Workspace；
+- 当前正式 Session 仍固定使用 `accept_edits + unrestricted`；锁定 artifact 会对 Workspace 内外 Write、Workspace 内 Edit 与明确有副作用的 Bash 发布同步 permission request，因此这只是一条高频询问的 compatibility baseline，不等于目标 `approval_required` 的“常规 Workspace 编辑自动”，也不是 Sandbox 或运行不可信 Workspace 的安全保证；
 - `standard` 在 typed risk/effect、执行前 commit boundary、Bash 限制说明和 fail-closed 验证完成前必须保持隐藏；`full_access` 在 exact canonical bundle 行为、Task owner、fresh/restore、idle mutation、Run provenance、Scheduled noninteractive 与撤权语义完成前同样保持隐藏。产品只能显示执行层已经真实支持的 profile，不显示 disabled 空壳；
 - 目标 owner 关系为：Settings 只提供新 Task 默认值；Task 保存当前生效 profile；每个 Run 保存解释历史所需的 effective profile provenance；已有 Task 不随默认值变化，只有 idle Task 可以显式切换。上述 persistence、mutation 与 Bridge 合同未获批准并落地前，不得用 Renderer preference 或 Session-local shadow state 模拟；
 - Shell 是广泛执行 authority。`unrestricted` 只表示获准 Bash 不经过 AgentCore file sandbox，不等于 root，也不决定是否询问；产品不得以 Bash 前缀、命令字符串分类或 `exact_arguments` Session grant 宣称可靠 effect 边界；
