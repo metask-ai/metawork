@@ -790,12 +790,9 @@ const ModelConnectionProjection = struct {
     enabled: bool = false,
     selected_model: FixedText(account_contract.Limits.model_id_bytes) = .{},
     connection_generation: u64 = 0,
-    models: std.ArrayList(ModelProjection) = .empty,
-
-    fn deinit(self: *ModelConnectionProjection, allocator: std.mem.Allocator) void {
-        self.models.deinit(allocator);
-        self.* = undefined;
-    }
+    models: []ModelProjection = &.{},
+    model_views: []account_contract.ModelConnectionModelView = &.{},
+    model_count: usize = 0,
 };
 
 const AccountProjection = struct {
@@ -818,8 +815,9 @@ const AccountProjection = struct {
     model_views: []account_contract.ModelView,
     model_count: usize = 0,
     model_connections: []ModelConnectionProjection,
-    model_connection_views: std.ArrayList(account_contract.ModelConnectionView) = .empty,
-    model_connection_model_views: std.ArrayList(account_contract.ModelConnectionModelView) = .empty,
+    model_connection_models: []ModelProjection,
+    model_connection_views: []account_contract.ModelConnectionView,
+    model_connection_model_views: []account_contract.ModelConnectionModelView,
     model_connection_count: usize = 0,
     account_can_create_task: bool = false,
     error_code: account_contract.ErrorCode = .none,
@@ -856,6 +854,30 @@ const AccountProjection = struct {
         );
         errdefer allocator.free(model_connections);
         @memset(model_connections, .{});
+        const connection_model_capacity = account_contract.Limits.model_connection_entries *
+            account_contract.Limits.model_connection_model_entries;
+        const model_connection_models = try allocator.alloc(
+            ModelProjection,
+            connection_model_capacity,
+        );
+        errdefer allocator.free(model_connection_models);
+        @memset(model_connection_models, .{});
+        const model_connection_views = try allocator.alloc(
+            account_contract.ModelConnectionView,
+            account_contract.Limits.model_connection_entries,
+        );
+        errdefer allocator.free(model_connection_views);
+        const model_connection_model_views = try allocator.alloc(
+            account_contract.ModelConnectionModelView,
+            connection_model_capacity,
+        );
+        errdefer allocator.free(model_connection_model_views);
+        for (model_connections, 0..) |*connection, index| {
+            const start = index * account_contract.Limits.model_connection_model_entries;
+            const end = start + account_contract.Limits.model_connection_model_entries;
+            connection.models = model_connection_models[start..end];
+            connection.model_views = model_connection_model_views[start..end];
+        }
         return .{
             .allocator = allocator,
             .api_keys = api_keys,
@@ -863,14 +885,16 @@ const AccountProjection = struct {
             .models = models,
             .model_views = model_views,
             .model_connections = model_connections,
+            .model_connection_models = model_connection_models,
+            .model_connection_views = model_connection_views,
+            .model_connection_model_views = model_connection_model_views,
         };
     }
 
     fn deinit(self: *AccountProjection) void {
-        for (self.model_connections[0..self.model_connection_count]) |*connection|
-            connection.deinit(self.allocator);
-        self.model_connection_model_views.deinit(self.allocator);
-        self.model_connection_views.deinit(self.allocator);
+        self.allocator.free(self.model_connection_model_views);
+        self.allocator.free(self.model_connection_views);
+        self.allocator.free(self.model_connection_models);
         self.allocator.free(self.model_connections);
         self.allocator.free(self.model_views);
         self.allocator.free(self.models);
@@ -888,8 +912,6 @@ const AccountProjection = struct {
         std.debug.assert(source_view.api_keys.len <= self.api_keys.len);
         std.debug.assert(source_view.models.len <= self.models.len);
         std.debug.assert(source_view.model_connections.len <= self.model_connections.len);
-        for (self.model_connections[0..self.model_connection_count]) |*connection|
-            connection.deinit(self.allocator);
         self.model_connection_count = 0;
         self.state = source_view.state;
         self.catalog_state = source_view.catalog_state;
@@ -921,7 +943,13 @@ const AccountProjection = struct {
                 .provider_kind = target.provider_kind,
             };
         }
-        for (source_view.model_connections, self.model_connections[0..source_view.model_connections.len]) |source, *target| {
+        for (
+            source_view.model_connections,
+            self.model_connections[0..source_view.model_connections.len],
+            self.model_connection_views[0..source_view.model_connections.len],
+        ) |source, *target, *target_view| {
+            const target_models = target.models;
+            const target_model_views = target.model_views;
             target.* = .{
                 .protocol = source.protocol,
                 .state = source.state,
@@ -929,18 +957,41 @@ const AccountProjection = struct {
                 .credential_status = source.credential_status,
                 .enabled = source.enabled,
                 .connection_generation = source.connection_generation,
+                .models = target_models,
+                .model_views = target_model_views,
+                .model_count = source.models.len,
             };
+            std.debug.assert(source.models.len <= target.models.len);
             target.id.setNoFail(source.id);
             target.display_name.setNoFail(source.display_name);
             target.normalized_base_url.setNoFail(source.normalized_base_url);
             target.selected_model.setNoFail(source.selected_model);
-            for (source.models) |model| {
-                var owned: ModelProjection = .{};
+            for (
+                source.models,
+                target.models[0..source.models.len],
+                target.model_views[0..source.models.len],
+            ) |model, *owned, *model_view| {
+                owned.* = .{};
                 owned.id.setNoFail(model.id);
                 owned.display_name.setNoFail(model.display_name);
-                target.models.append(self.allocator, owned) catch
-                    @panic("model connection projection capacity exhausted");
+                model_view.* = .{
+                    .id = owned.id.view(),
+                    .display_name = owned.display_name.view(),
+                };
             }
+            target_view.* = .{
+                .id = target.id.view(),
+                .display_name = target.display_name.view(),
+                .protocol = target.protocol,
+                .normalized_base_url = target.normalized_base_url.view(),
+                .state = target.state,
+                .test_status = target.test_status,
+                .credential_status = target.credential_status,
+                .enabled = target.enabled,
+                .models = target.model_views[0..target.model_count],
+                .selected_model = target.selected_model.view(),
+                .connection_generation = target.connection_generation,
+            };
         }
         self.model_connection_count = source_view.model_connections.len;
         self.model_count = source_view.models.len;
@@ -967,38 +1018,6 @@ const AccountProjection = struct {
         self: *const AccountProjection,
         can_create_task: bool,
     ) account_contract.AccountView {
-        const mutable = @constCast(self);
-        mutable.model_connection_views.clearRetainingCapacity();
-        mutable.model_connection_model_views.clearRetainingCapacity();
-        var model_count: usize = 0;
-        for (self.model_connections[0..self.model_connection_count]) |connection|
-            model_count += connection.models.items.len;
-        mutable.model_connection_views.ensureTotalCapacity(self.allocator, self.model_connection_count) catch
-            @panic("model connection view capacity exhausted");
-        mutable.model_connection_model_views.ensureTotalCapacity(self.allocator, model_count) catch
-            @panic("model connection view capacity exhausted");
-        for (self.model_connections[0..self.model_connection_count]) |connection| {
-            const start = mutable.model_connection_model_views.items.len;
-            for (connection.models.items) |model|
-                mutable.model_connection_model_views.append(self.allocator, .{
-                    .id = model.id.view(),
-                    .display_name = model.display_name.view(),
-                }) catch @panic("model connection view capacity exhausted");
-            const end = mutable.model_connection_model_views.items.len;
-            mutable.model_connection_views.append(self.allocator, .{
-                .id = connection.id.view(),
-                .display_name = connection.display_name.view(),
-                .protocol = connection.protocol,
-                .normalized_base_url = connection.normalized_base_url.view(),
-                .state = connection.state,
-                .test_status = connection.test_status,
-                .credential_status = connection.credential_status,
-                .enabled = connection.enabled,
-                .models = mutable.model_connection_model_views.items[start..end],
-                .selected_model = connection.selected_model.view(),
-                .connection_generation = connection.connection_generation,
-            }) catch @panic("model connection view capacity exhausted");
-        }
         return .{
             .state = self.state,
             .catalog_state = self.catalog_state,
@@ -1007,7 +1026,7 @@ const AccountProjection = struct {
             .display_name = self.display_name.view(),
             .api_keys = self.api_key_views[0..self.api_key_count],
             .models = self.model_views[0..self.model_count],
-            .model_connections = mutable.model_connection_views.items,
+            .model_connections = self.model_connection_views[0..self.model_connection_count],
             .selected_api_key_id = self.selected_api_key_id.view(),
             .selected_model = self.selected_model.view(),
             .candidate_api_key_id = self.candidate_api_key_id.view(),
@@ -10828,6 +10847,71 @@ test "Runtime snapshot budget includes JSON escaping and structural overhead" {
     defer std.testing.allocator.free(snapshot_storage);
     const snapshot = try control.writeSnapshot(snapshot_storage);
     try std.testing.expect(snapshot.len > controls.len * 5);
+}
+
+test "Account projection commit and view allocate nothing after initialization" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var projection = try AccountProjection.init(failing.allocator());
+    defer projection.deinit();
+
+    const connection_models = [_]account_contract.ModelConnectionModelView{
+        .{ .id = "model-00", .display_name = "Model 00" },
+        .{ .id = "model-01", .display_name = "Model 01" },
+        .{ .id = "model-02", .display_name = "Model 02" },
+        .{ .id = "model-03", .display_name = "Model 03" },
+        .{ .id = "model-04", .display_name = "Model 04" },
+        .{ .id = "model-05", .display_name = "Model 05" },
+        .{ .id = "model-06", .display_name = "Model 06" },
+        .{ .id = "model-07", .display_name = "Model 07" },
+        .{ .id = "model-08", .display_name = "Model 08" },
+        .{ .id = "model-09", .display_name = "Model 09" },
+        .{ .id = "model-10", .display_name = "Model 10" },
+        .{ .id = "model-11", .display_name = "Model 11" },
+        .{ .id = "model-12", .display_name = "Model 12" },
+        .{ .id = "model-13", .display_name = "Model 13" },
+        .{ .id = "model-14", .display_name = "Model 14" },
+        .{ .id = "model-15", .display_name = "Model 15" },
+    };
+    var connection_id_storage: [account_contract.Limits.model_connection_entries][32]u8 = undefined;
+    var connections: [account_contract.Limits.model_connection_entries]account_contract.ModelConnectionView = undefined;
+    for (&connections, 0..) |*connection, index| {
+        const id = try std.fmt.bufPrint(&connection_id_storage[index], "connection-{d}", .{index});
+        connection.* = .{
+            .id = id,
+            .display_name = id,
+            .protocol = .openai_chat_completions,
+            .normalized_base_url = "https://api.openai.com/v1/chat/completions",
+            .state = .ready,
+            .test_status = .connected,
+            .credential_status = .ready,
+            .enabled = true,
+            .models = &connection_models,
+            .selected_model = connection_models[0].id,
+            .connection_generation = @intCast(index + 1),
+        };
+    }
+    const fact: account_contract.AccountFact = .{
+        .kind = .model_connections_changed,
+        .view = .{
+            .state = .signed_out,
+            .catalog_state = .unavailable,
+            .model_connections = &connections,
+        },
+    };
+
+    const allocations_after_init = failing.alloc_index;
+    failing.fail_index = allocations_after_init;
+    projection.commitNoFail(fact.view);
+    const first = projection.view(true);
+    try account_contract.validateView(first);
+    try std.testing.expectEqual(account_contract.Limits.model_connection_entries, first.model_connections.len);
+    try std.testing.expectEqual(
+        account_contract.Limits.model_connection_model_entries,
+        first.model_connections[first.model_connections.len - 1].models.len,
+    );
+    projection.commitNoFail(fact.view);
+    _ = projection.view(true);
+    try std.testing.expectEqual(allocations_after_init, failing.alloc_index);
 }
 
 fn installMaximumAccountProjection(control: *Runtime) !void {
