@@ -138,6 +138,7 @@ const permissionChoices = [
   "allow_once",
   "allow_session",
 ] as const satisfies readonly PermissionChoice[];
+const maxCommentarySegmentsPerRun = 256;
 const accountStates = [
   "checking",
   "signed_out",
@@ -1247,8 +1248,15 @@ function decodeRun(value: unknown, path: string): RunView {
     "redacted",
     "provisionalRedacted",
   ]);
+  const commentary = arrayValue(
+    outputItem.commentary,
+    `${path}.output.commentary`,
+    stringValue,
+  );
+  if (commentary.length > maxCommentarySegmentsPerRun)
+    fail(`${path}.output.commentary`, "too many commentary segments");
   const output = {
-    commentary: stringValue(outputItem.commentary, `${path}.output.commentary`),
+    commentary,
     response: stringValue(outputItem.response, `${path}.output.response`),
     responseKind: nullableEnum(
       outputItem.responseKind,

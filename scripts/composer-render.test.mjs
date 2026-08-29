@@ -212,7 +212,7 @@ function renderCompletedSurface(
         phase: pendingUi ? "waiting_ui" : "completed",
         input,
         output: {
-          commentary: "",
+          commentary: [],
           response: assistant,
           responseKind: assistant ? "final" : null,
           provisional: "",
@@ -264,6 +264,8 @@ function renderCompletedSurface(
         retryAvailable: true,
         responseDisabled: false,
         onPrepareRetry() {},
+        onOpenTool() {},
+        onPreviewFile() {},
         onRespond() {},
         renderPendingUi() {
           return createElement("div", null, "Pending decision");
@@ -415,7 +417,7 @@ test("Assistant reply is primary and completed does not add a redundant outcome"
   assert.match(renderCompletedSurface(""), /Work completed/);
 });
 
-test("pending UI follows the Assistant reply without rendering resolved history", () => {
+test("pending UI follows the live status before response without technical history", () => {
   const markup = renderCompletedSurface(
     "Review this before continuing",
     undefined,
@@ -450,8 +452,10 @@ test("pending UI follows the Assistant reply without rendering resolved history"
   );
   const assistant = markup.indexOf("Review this before continuing");
   const pending = markup.indexOf("Pending decision");
-  assert.ok(assistant < pending);
-  assert.doesNotMatch(markup, /Read|Resolved decision/);
+  assert.ok(pending < assistant);
+  assert.match(markup, />Needs attention</);
+  assert.doesNotMatch(markup, />Read</);
+  assert.doesNotMatch(markup, /fixture\.txt|>ready<|Resolved decision/);
 });
 
 test("Task content keeps Tool and Run metadata out of the reading flow", () => {

@@ -30,9 +30,9 @@ MetaWork 不接受目标 policy 之外的 ABI revision，不保留 function-tabl
 
 当前 revision 14 尚处 experimental 状态。artifact 已删除 AgentCore Completion 类型、status 与八个 entry，将原扁平 function table hard cut 为 root + Runtime、Session、SessionControl、Skill、MCP 五个 mandatory 子表，并把唯一 Runtime create 签名扩展为可空 `RuntimePluginConfigV1`。MetaWork 正式 Runtime 传 null plugin config，独立 Completion 继续由 MetaWork 自己提供。revision、root/child table size 与 repository lock 的 exact manifest/header/bindings checksum 必须一起匹配；MetaWork 不为 revision 13 的扁平表、capability bitset、Completion ABI 或旧 callback shape 保留条件编译、运行时 shim 或 target-specific 例外。
 
-### revision 8 的执行状态事件
+### `run_state` 执行状态 observation
 
-revision 8 新增 `CAP_RUN_STATE_OBSERVATION` 和 `CoreEvent.run_state`。事件携带单调 `transition_seq`、`phase`（starting、generating、executing_tools、waiting_ui、retrying、compacting、finalizing、completed、failed、aborted、poisoned）、turn、累计 tool call 数及当前 in-flight tool 数组。Windows 与 macOS 的 staged probe 都使用非首值 Host Run ID `7` 确认 callback envelope 的 Run identity 与 `run_state.run_id` 一致，首个观测序号为 `1`；Windows 取证可由 2026-08-13 的 Git object `51e0fcc847e7b832b628f6c64183525dd8300710` 定位。MetaWork 将该事件限制为 runtime-only typed activity observation，不写入或决定 Workbench `RunPhase`，不产生持久终态；`completed | failed | aborted | poisoned` 在正式 Product terminal fact 发布前只投影为 `finalizing`。projection 层重复/过期或关联/transition/boundary 校验失败只丢弃该 observation 并标记 runtime-only degraded，不以 `consumer_rejected` 终止用户 Run。callback 边界的非法 wire/UTF-8、`run_id == 0` 或无法安全解码的文本仍按既有 `invalid_event` 合同失败当前 Run。重启后仍按未完成 Run 的既有恢复规则收口。该一次性 probe 的结论已进入本合同和 Workbench 回归，active tree 不再保留重复脚本。
+当前 revision 14 SDK 提供 typed `CoreEvent.run_state`。事件携带单调 `transition_seq`、`phase`（starting、generating、executing_tools、waiting_ui、retrying、compacting、finalizing、completed、failed、aborted、poisoned）、turn、累计 tool call 数及当前 in-flight tool 数组。callback envelope 的 Run identity 必须与 `run_state.run_id` 一致，首个有效观测序号为 `1`。MetaWork 将该事件限制为 runtime-only typed activity observation，不写入或决定 Workbench `RunPhase`，不产生持久终态；`completed | failed | aborted | poisoned` 在正式 Product terminal fact 发布前只投影为 `finalizing`。projection 层重复/过期或关联/transition/boundary 校验失败只丢弃该 observation 并标记 runtime-only degraded，不以 `consumer_rejected` 终止用户 Run。callback 边界的非法 wire/UTF-8、`run_id == 0` 或无法安全解码的文本仍按既有 `invalid_event` 合同失败当前 Run。重启后仍按未完成 Run 的既有恢复规则收口。
 
 ## 2. Bundle 与 SDK 边界
 
@@ -48,7 +48,7 @@ revision 8 新增 `CAP_RUN_STATE_OBSERVATION` 和 `CoreEvent.run_state`。事件
 
 MetaWork 不复制 header、raw enum、event tag、Permission/Skill/MCP JSON schema、facade code 或 SDK validation。官方 SDK 是 AgentCore `Status`、`StopReason`、`CoreEvent`、`UiRequest`、`UiResponse`、Permission、Skill、MCP、Session description 与 restore report 的唯一协议来源。MetaWork Completion 的 result/stop reason/error 是独立自有类型，不来自该 SDK。
 
-当前四个 target SDK 均保留 `output_segment_begin` / `output_segment_end` typed event，并提供 `file_changes` observation。Agent/event pump 使用官方 typed variant 接收；Product Task 已消费 output framing 并持久化 final/partial 分类及安全 assistant 正文起点。`file_changes` 当前只在 Agent 边界完成 typed decode、文本校验和有界 data-queue 接收，Product 明确消费但不派生状态；typed File Changes capability、持久化与 Bridge/Renderer 投影仍关闭。
+当前四个 target SDK 均保留 `output_segment_begin` / `output_segment_end` typed event，并提供 `file_changes` observation。Agent/event pump 使用官方 typed variant 接收；Product Task 已消费 output framing，以有界累计 byte ends 保留 closed commentary 的产品叙事边界，并持久化 final/partial 分类及安全 assistant 正文起点；这些边界不复制 SDK event identity。`file_changes` 当前只在 Agent 边界完成 typed decode、文本校验和有界 data-queue 接收，Product 明确消费但不派生状态；typed File Changes capability、持久化与 Bridge/Renderer 投影仍关闭。
 
 ## 3. Target function table
 

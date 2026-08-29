@@ -1,10 +1,4 @@
-import {
-  useId,
-  useLayoutEffect,
-  useRef,
-  useState,
-  type ReactNode,
-} from "react";
+import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 
 import type {
   FileReferenceView,
@@ -12,6 +6,7 @@ import type {
   RunInputView,
   RunView,
   TaskView,
+  ToolView,
   UiResponsePayload,
 } from "../../bridge/contracts.ts";
 import {
@@ -21,79 +16,16 @@ import {
   Message,
 } from "../../components/ai/index.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
-import { useI18n, type I18nValue, type MessageId } from "../../i18n/context.ts";
-import { formatInteger } from "../../i18n/formatters.ts";
+import { useI18n, type MessageId } from "../../i18n/context.ts";
+import { RunProcess } from "./RunProcess.tsx";
+import {
+  deriveRunPresentation,
+  observeRunProcessDisclosure,
+  toggleRunProcessDisclosure,
+  type RunProcessDisclosure,
+} from "./run-presentation.ts";
 
 type ReadingState = { scrollTop: number; followingLatest: boolean };
-
-function activeRun(run: RunView): boolean {
-  return ["queued", "running", "waiting_ui", "stopping"].includes(run.phase);
-}
-
-function activeRunMessage(run: RunView): MessageId {
-  if (run.phase === "running") {
-    switch (run.activity?.kind) {
-      case "queued":
-      case "starting":
-        return "run.activity.starting";
-      case "thinking":
-        return "run.activity.thinking";
-      case "writing_response":
-        return "run.activity.writing_response";
-      case "executing_tools":
-        return "run.activity.executing_tools";
-      case "retrying_provider":
-        return "run.activity.retrying_provider";
-      case "compacting_context":
-        return "run.activity.compacting_context";
-      case "finalizing":
-        return "run.activity.finishing";
-      case "waiting_user":
-        return "task.phase.waiting_ui";
-      case "stopping":
-        return "task.phase.stopping";
-      case "waiting_model":
-      case undefined:
-        return "run.activity.waiting_model";
-    }
-  }
-  return `task.phase.${run.phase}`;
-}
-
-function activeRunDetail(
-  run: RunView,
-  locale: I18nValue["locale"],
-  t: I18nValue["t"],
-): string | undefined {
-  if (run.activity?.kind === "executing_tools" && run.activity.inFlight) {
-    const count = BigInt(run.activity.inFlight);
-    return t(
-      count === 1n
-        ? "run.activity.tool_running_one"
-        : "run.activity.tool_running_many",
-      { count: formatInteger(locale, count) },
-    );
-  }
-  if (
-    run.activity?.kind === "retrying_provider" &&
-    run.activity.attempt &&
-    run.activity.max &&
-    run.activity.delayMs
-  ) {
-    const values = {
-      attempt: formatInteger(locale, BigInt(run.activity.attempt)),
-      max: formatInteger(locale, BigInt(run.activity.max)),
-      delay: formatInteger(locale, BigInt(run.activity.delayMs)),
-    };
-    return t(
-      run.activity.delayMs === "0"
-        ? "run.activity.retry_detail_now"
-        : "run.activity.retry_detail",
-      values,
-    );
-  }
-  return undefined;
-}
 
 function outcomeMessage(outcome: NonNullable<RunView["outcome"]>): MessageId {
   switch (outcome) {
@@ -201,53 +133,6 @@ function TaskInput({ input }: { input: RunInputView }) {
   );
 }
 
-function AgentCommentary({
-  storageKey,
-  content,
-  active,
-  memory,
-}: {
-  storageKey: string;
-  content: string;
-  active: boolean;
-  memory: Map<string, boolean>;
-}) {
-  const { t } = useI18n();
-  const regionId = useId();
-  const [open, setOpen] = useState(() => {
-    const remembered = memory.get(storageKey);
-    if (remembered !== undefined) return remembered;
-    memory.set(storageKey, active);
-    return active;
-  });
-
-  function toggle() {
-    const next = !open;
-    memory.set(storageKey, next);
-    setOpen(next);
-  }
-
-  return (
-    <section className="agent-commentary" data-open={open}>
-      <button
-        type="button"
-        className="agent-commentary-toggle focus-ring"
-        aria-expanded={open}
-        aria-controls={open ? regionId : undefined}
-        onClick={toggle}
-      >
-        <span>{t("run.output.agent_updates")}</span>
-        <Icon name="chevron" />
-      </button>
-      {open && (
-        <div className="agent-commentary-body" id={regionId}>
-          <Markdown>{content}</Markdown>
-        </div>
-      )}
-    </section>
-  );
-}
-
 export function TaskContent({
   task,
   revision,
@@ -255,6 +140,7 @@ export function TaskContent({
   retryAvailable,
   responseDisabled,
   onPrepareRetry,
+  onOpenTool,
   onPreviewFile,
   onRespond,
   renderPendingUi,
@@ -265,6 +151,11 @@ export function TaskContent({
   retryAvailable: boolean;
   responseDisabled: boolean;
   onPrepareRetry: (input: RunInputView) => void;
+  onOpenTool: (
+    runId: string,
+    toolId: string,
+    opener: HTMLButtonElement,
+  ) => void;
   onPreviewFile: (
     taskId: string,
     runId: string,
@@ -278,10 +169,11 @@ export function TaskContent({
     respond: (payload: UiResponsePayload) => void;
   }) => ReactNode;
 }) {
-  const { locale, t } = useI18n();
+  const { t } = useI18n();
   const viewport = useRef<HTMLDivElement>(null);
   const reading = useRef(new Map<string, ReadingState>());
-  const commentaryDisclosure = useRef(new Map<string, boolean>());
+  const processDisclosure = useRef(new Map<string, RunProcessDisclosure>());
+  const [, setDisclosureRevision] = useState(0);
   const previousTaskId = useRef<string | null>(null);
   const [showJumpLatest, setShowJumpLatest] = useState(false);
   const currentRun = task
@@ -354,54 +246,78 @@ export function TaskContent({
     >
       {task?.runs.map((run) => {
         const isCurrent = run.id === currentRun?.id;
+        const presentation = deriveRunPresentation(run);
         const fileReferences = runFileReferences(run);
-        const hasAssistantOutput = Boolean(
-          run.output.commentary ||
-          run.output.response ||
-          run.output.provisional,
+        const disclosureKey = `${task.id}:${run.id}`;
+        const disclosure = observeRunProcessDisclosure(
+          processDisclosure.current.get(disclosureKey),
         );
-        const showStreamingCaret =
-          activeRun(run) &&
-          (run.output.provisional.length > 0 ||
-            run.activity?.kind === "writing_response");
-        const showOutcome =
-          run.outcome !== null &&
-          !(
-            run.outcome === "completed" &&
-            run.output.responseKind === "final" &&
-            run.output.response.length > 0
+        processDisclosure.current.set(disclosureKey, disclosure);
+
+        function setProcessExpanded(expanded: boolean) {
+          processDisclosure.current.set(
+            disclosureKey,
+            toggleRunProcessDisclosure(expanded),
           );
+          setDisclosureRevision((value) => value + 1);
+        }
+
         return (
-          <section className="ai-exchange" key={run.id}>
+          <section className="ai-exchange" key={`${task.id}:${run.id}`}>
             <Message role="user">
               <TaskInput input={run.input} />
             </Message>
-            {hasAssistantOutput && (
-              <Message role="assistant" streaming={showStreamingCaret}>
-                {run.output.commentary && (
-                  <AgentCommentary
-                    key={`${task.id}:${run.id}`}
-                    storageKey={`${task.id}:${run.id}`}
-                    content={run.output.commentary}
-                    active={activeRun(run)}
-                    memory={commentaryDisclosure.current}
-                  />
-                )}
-                {run.output.response && (
-                  <Markdown className="agent-response">
-                    {run.output.response}
-                  </Markdown>
+            {(run.output.commentary.some(Boolean) ||
+              run.output.provisional ||
+              run.output.provisionalRedacted ||
+              (run.output.redacted && !presentation.responseVisible)) && (
+              <Message role="assistant" className="run-narrative">
+                {run.output.commentary.map((commentary, index) =>
+                  commentary ? (
+                    <Markdown className="run-commentary-item" key={index}>
+                      {commentary}
+                    </Markdown>
+                  ) : null,
                 )}
                 {run.output.provisional && (
-                  <div
-                    className="agent-provisional"
-                    aria-label={t("run.output.in_progress")}
-                  >
-                    <span>{t("run.output.in_progress")}</span>
-                    <p>{run.output.provisional}</p>
-                  </div>
+                  <p className="run-provisional" aria-live="polite">
+                    {run.output.provisional}
+                  </p>
                 )}
-                {(run.output.redacted || run.output.provisionalRedacted) && (
+                {(run.output.provisionalRedacted ||
+                  (run.output.redacted && !presentation.responseVisible)) && (
+                  <p className="projection-note">
+                    {t("privacy.sensitive_hidden")}
+                  </p>
+                )}
+              </Message>
+            )}
+            {presentation.active && (
+              <RunProcess
+                presentation={presentation}
+                expanded={disclosure.expanded}
+                onExpandedChange={setProcessExpanded}
+                onOpenTool={(tool: ToolView, opener) =>
+                  onOpenTool(run.id, tool.id, opener)
+                }
+              />
+            )}
+            {isCurrent && task.pendingUi && (
+              <div className="ai-exchange-intervention">
+                {renderPendingUi({
+                  taskId: task.id,
+                  pending: task.pendingUi,
+                  busy: responseDisabled,
+                  respond: onRespond,
+                })}
+              </div>
+            )}
+            {presentation.responseVisible && (
+              <Message role="assistant">
+                <Markdown className="agent-response">
+                  {run.output.response}
+                </Markdown>
+                {run.output.redacted && (
                   <p className="projection-note">
                     {t("privacy.sensitive_hidden")}
                   </p>
@@ -432,24 +348,17 @@ export function TaskContent({
                 ))}
               </footer>
             )}
-            {isCurrent && activeRun(run) && (
-              <Activity
-                state="live"
-                label={t(activeRunMessage(run))}
-                detail={activeRunDetail(run, locale, t)}
+            {!presentation.active && (
+              <RunProcess
+                presentation={presentation}
+                expanded={disclosure.expanded}
+                onExpandedChange={setProcessExpanded}
+                onOpenTool={(tool: ToolView, opener) =>
+                  onOpenTool(run.id, tool.id, opener)
+                }
               />
             )}
-            {isCurrent && task.pendingUi && (
-              <div className="ai-exchange-intervention">
-                {renderPendingUi({
-                  taskId: task.id,
-                  pending: task.pendingUi,
-                  busy: responseDisabled,
-                  respond: onRespond,
-                })}
-              </div>
-            )}
-            {showOutcome && run.outcome && (
+            {presentation.showTerminalNotice && run.outcome && (
               <Activity
                 state={outcomeState(run.outcome)}
                 label={t(terminalMessage(run.output.responseKind, run.outcome))}

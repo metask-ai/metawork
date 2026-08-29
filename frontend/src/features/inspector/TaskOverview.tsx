@@ -10,10 +10,19 @@ import type { InspectorSection } from "./inspector-state.ts";
 export type InspectorFocusRequest = {
   taskId: string;
   section: InspectorSection;
+  runId?: string;
+  toolId?: string;
   nonce: number;
 } | null;
 
-function selectedRun(task: TaskView): RunView | null {
+function selectedRun(
+  task: TaskView,
+  focusRequest: InspectorFocusRequest,
+): RunView | null {
+  if (focusRequest?.taskId === task.id && focusRequest.runId) {
+    const requested = task.runs.find((run) => run.id === focusRequest.runId);
+    if (requested) return requested;
+  }
   return (
     task.runs.find((run) => run.id === task.currentRunId) ??
     task.runs.at(-1) ??
@@ -140,10 +149,12 @@ function ToolProcessItem({
   tool,
   expanded,
   onToggle,
+  summaryRef,
 }: {
   tool: ToolView;
   expanded: boolean;
   onToggle: () => void;
+  summaryRef: (node: HTMLElement | null) => void;
 }) {
   const { locale, t } = useI18n();
   const detailId = useId();
@@ -175,6 +186,7 @@ function ToolProcessItem({
     <li data-state={tool.state} data-expanded={expanded}>
       {hasDetails ? (
         <button
+          ref={summaryRef}
           type="button"
           className="inspector-tool-summary focus-ring"
           aria-expanded={expanded}
@@ -184,7 +196,9 @@ function ToolProcessItem({
           {identity}
         </button>
       ) : (
-        <div className="inspector-tool-summary">{identity}</div>
+        <div ref={summaryRef} className="inspector-tool-summary" tabIndex={-1}>
+          {identity}
+        </div>
       )}
       {expanded && hasDetails && (
         <div className="inspector-tool-detail" id={detailId}>
@@ -233,15 +247,38 @@ function WorkProcess({
   taskId,
   runId,
   tools,
+  focusToolId,
+  focusNonce,
+  sectionRef,
 }: {
   taskId: string;
   runId: string;
   tools: ToolView[];
+  focusToolId?: string;
+  focusNonce?: number;
+  sectionRef: (node: HTMLElement | null) => void;
 }) {
   const { t } = useI18n();
   const [expandedToolId, setExpandedToolId] = useState<string | null>(null);
+  const toolRefs = useRef(new Map<string, HTMLElement>());
+
+  useEffect(() => {
+    if (!focusToolId || !tools.some((tool) => tool.id === focusToolId)) return;
+    setExpandedToolId(focusToolId);
+    const frame = window.requestAnimationFrame(() => {
+      const target = toolRefs.current.get(focusToolId);
+      target?.scrollIntoView({ block: "nearest" });
+      target?.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [focusNonce, focusToolId, runId, taskId]);
+
   return (
-    <section className="inspector-section inspector-work-process">
+    <section
+      ref={sectionRef}
+      className="inspector-section inspector-work-process"
+      tabIndex={-1}
+    >
       <p className="section-label">{t("inspector.work_process")}</p>
       <ul className="inspector-tool-list">
         {tools.map((tool) => (
@@ -249,6 +286,10 @@ function WorkProcess({
             key={`${taskId}:${runId}:${tool.id}`}
             tool={tool}
             expanded={expandedToolId === tool.id}
+            summaryRef={(node) => {
+              if (node) toolRefs.current.set(tool.id, node);
+              else toolRefs.current.delete(tool.id);
+            }}
             onToggle={() =>
               setExpandedToolId((current) =>
                 current === tool.id ? null : tool.id,
@@ -274,7 +315,7 @@ export function TaskOverview({
   const sectionRefs = useRef<Partial<Record<InspectorSection, HTMLElement>>>(
     {},
   );
-  const run = selectedRun(task);
+  const run = selectedRun(task, focusRequest);
   const activityMessage = run ? runActivityMessage(run) : null;
   const activityDetail = run ? runActivityDetail(run, locale, t) : null;
   const tools = useMemo(() => (run ? orderedTools(run) : []), [run]);
@@ -296,6 +337,7 @@ export function TaskOverview({
 
   useEffect(() => {
     if (!focusRequest || focusRequest.taskId !== task.id) return;
+    if (focusRequest.section === "work_process" && focusRequest.toolId) return;
     const section = sectionRefs.current[focusRequest.section];
     section?.scrollIntoView({ block: "nearest" });
     section?.focus({ preventScroll: true });
@@ -365,6 +407,15 @@ export function TaskOverview({
             taskId={task.id}
             runId={run.id}
             tools={tools}
+            focusToolId={
+              focusRequest?.taskId === task.id && focusRequest.runId === run.id
+                ? focusRequest.toolId
+                : undefined
+            }
+            focusNonce={focusRequest?.nonce}
+            sectionRef={(node) => {
+              sectionRefs.current.work_process = node ?? undefined;
+            }}
           />
         )}
 

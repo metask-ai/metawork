@@ -59,12 +59,11 @@ MetaWork 的视觉记忆点不是装饰性的暖色、通用衬线大标题、�
 - 文本流、工具开始/进度/结果、Run progress、usage、context warning、auto compact、retry 和 stream done；
 - tool permission 同步用户请求；AgentCore ABI 虽保留 Ask question，但 MetaWork Agent 不开放对应 built-in；
 - Workspace current / Task pinned Skill catalog、typed Skill Run 与独立 Skill rejection；
-- Run 状态、六种终止原因，以及 Session 是否仍可继续。
-- revision 8 的 `run_state` 阶段观察；Workbench 将其投影为 Current activity 文案，并按 transition sequence 丢弃过期观察。
+- Run 状态、六种终止原因，以及 Session 是否仍可继续；当前 AgentCore typed `run_state` observation 由 Workbench 投影为 Current activity，并按 transition sequence 丢弃过期观察。
 
-因此当前产品只在 Task 内容区显示用户输入、Agent 可见输出、权限决策面、唯一当前状态和必要的终止结果；真实 Tool process、usage 与 context observation 仅进入按需 Task overview。普通信息不足时，Agent 通过可见回复说明问题并结束当前 Run，用户从 Composer 继续，不进入结构化 Question wait。工具开始、进度和结果继续作为 Host 事实存在，但不成为主叙事或事件时间线。Plan、plan approval、Outputs、Files changed、持久权限管理和 custom UI 均保持隐藏；它们在本文档中的设计是后续 capability 到位后的产品规范，不是当前实现承诺。Renderer 不解析工具参数、stdout 或普通文本来猜测这些状态；Current activity 的细粒度文案只来自 Host 对 AgentCore `run_state` 的受序列保护投影。当前 Renderer 合同已提供独立 Workspace projection、Task-bound ExecutionConfig facts、正式设置 route，以及设置与 New task 共享的默认 API/模型选择；跨重启 rebind 等仍须等对应 capability 落地后才能宣称可用，差距由 [验证规范](validation.md)明确记录。
+因此当前产品在 Task 内容区显示用户输入、Agent 可见输出、权限决策面、唯一当前状态、紧凑 Tool 摘要和必要的终止结果；Tool input/progress/result、usage 与 context observation 进入按需 Task overview。普通信息不足时，Agent 通过可见回复说明问题并结束当前 Run，用户从 Composer 继续，不进入结构化 Question wait。工具记录只作为所属 Run 的可检查过程证据，不成为 raw event 时间线。Plan、plan approval、Outputs、Files changed、持久权限管理和 custom UI 均保持隐藏；它们在本文档中的设计是后续 capability 到位后的产品规范，不是当前实现承诺。Renderer 不解析工具参数、stdout 或普通文本来猜测这些状态；Current activity 只来自 Host 对受序列保护的 `run_state` 以及 typed text、Tool、retry、context 和 output control event 的产品投影。当前 Renderer 合同已提供独立 Workspace projection、Task-bound ExecutionConfig facts、正式设置 route，以及设置与 New task 共享的默认 API/模型选择；跨重启 rebind 等仍须等对应 capability 落地后才能宣称可用，差距由 [验证规范](validation.md)明确记录。
 
-上述边界只定义当前 typed observation 的安全消费基线，不代表 Agent 对话渲染已经完成。现有 disclosure、单一 activity 和按需 overview 是过渡实现；终态前反馈密度、过程信息的可发现性、主次层级、更新节奏与长任务连续阅读仍由后续独立 Renderer 重构确定，但该重构仍必须遵守不泄漏 private reasoning、不从文本猜测结构化事实和不提前开放 gated capability 的边界。
+上述边界同时约束 Agent 对话渲染：工作过程必须在 terminal 前随真实 Snapshot revision 可见，过程与正式回复保持主次层级，长任务中可以检查 Tool 摘要而无需离开阅读上下文；仍不得泄漏 private reasoning、从文本猜测结构化事实或提前开放 gated capability。该信息架构只呈现实际到达的 commentary 与 typed activity，不承诺 Provider 在每个 Tool turn 输出自然语言，也不允许 Renderer 为提高信息密度而生成中间对话、推断模型意图或补造进度。
 
 ### 2.2 Capability 标记
 
@@ -516,15 +515,97 @@ Execution binding availability 是下一次 admission 的独立前置事实，�
 
 ## 7. 中间区域：Task 内容
 
-> Capability：**混合**。用户输入、Agent 可见输出、permission、typed activity 与 Run 状态的安全消费属于当前产品路径；现有组件组织只是过渡实现，完整的过程可见性与对话信息架构属于后续 Renderer 重构。typed Delivery、Outputs、FileChange 与 Plan 仍是未来 capability，当前不得从 Agent 文本或 Tool 记录推断。
+> Capability：**混合**。用户输入、Agent 可见输出、permission、typed activity、Tool 摘要与 Run 状态属于当前产品路径；typed Delivery、Outputs、FileChange 与 Plan 仍是未来 capability，当前不得从 Agent 文本或 Tool 记录推断。
 
 中间区域使用同一套 MetaWork AI UI 基础语义：`Conversation` 组织阅读面，`Message` 表达用户与 Assistant 发言，`Activity` 表达当前过程与必要终止状态，`Intervention` 表达真正需要用户介入的决定，`Composer` 控制下一步输入，`Markdown` 与 `CodeBlock` 呈现回复内容。它们是 Renderer 视觉语法，不把 Bridge 或 AgentCore 对象直接变成组件。当前不存在第二套 Task 专用消息、状态、请求或输入表面，也不以 Tool、Reasoning、Question 或 Approval Card 建立平行组件分类。
 
 ### 7.1 内容模型
 
-当前过渡布局按 Task 中 Run 的稳定顺序显示用户输入与 Agent 可见输出，不直接按 raw Tool 或 AgentCore event 结构组织页面。每个 Run 的 `commentary` 进入同一回复内的 `Agent updates` disclosure，`response` 保持主阅读内容，未定性的 `provisional` 是可回滚临时文本；三者不是三种说话者。当前执行状态、待处理请求和 terminal notice 是独立的临时或行动组件，不伪装成历史节点。后续 Renderer 重构可以重新组织这些 typed facts 的可见层级与节奏，但不能退化为原始事件日志或复制一套 Renderer-owned 状态机。
+Task 按稳定 Run 顺序显示 `Run exchange`：用户指令之后依次是 `Assistant process narrative → Live status → Intervention → Response → File references → Technical work evidence → Terminal notice`，不存在的部分不占位。process narrative 按 Host 保存的 closed commentary group 顺序连续承载多个 Markdown block，并在其后承载未定性的可回滚 provisional，是用户理解 Agent 当前方向的主阅读内容；block 只用正文留白区分，不增加卡片、时间戳、Tool 标签或阶段标题。live status 是位于当前过程底部、随唯一 Current activity 原位更新的一行状态；technical work evidence 才承载按 Host order 排列的 Tool 摘要，并默认折叠。它们属于同一 Run，不是不同说话者，也不构成 raw 事件时间线。Response 是已由 Host 定性为 final/partial 的正式主阅读内容。Renderer 只做纯 presentation derivation 和会话内 disclosure，不复制 Product 状态机。
 
-### 7.2 用户指令
+### 7.2 Agent 对话渲染机制
+
+Agent 对话不是 CoreEvent 列表、Tool timeline 或逐 chunk DOM append。它是 Product Task 已经定性的完整 Run projection，经 Bridge full Snapshot 进入 Renderer 后，再派生为稳定的 Run exchange。唯一 owner 链为：
+
+```text
+AgentCore typed CoreEvent
+  → Product Task：output / activity / tools / terminal facts
+  → Renderer Bridge revision 1：完整 Run snapshot
+  → deriveRunPresentation(run)：纯 presentation derivation
+  → TaskContent：稳定 Run exchange 槽位
+  → RunProcess：active status 或 terminal technical evidence
+```
+
+各层职责不可互换：
+
+- Product Task 独占 output-segment 定性、commentary 边界、provisional rollback、Current activity、Tool lifecycle、terminal outcome/cause 和 credential-safe projection；
+- Bridge 运输完整 typed facts，不运输 raw event identity、时间线、private reasoning 或组件状态；
+- `deriveRunPresentation()` 只派生 active、response/process visibility、Host-order Tool 列表、唯一 running Tool presentation 和 terminal notice 条件，不保存或推进产品状态；
+- `TaskContent` 只按 Task/Run 稳定 identity 组合槽位，不把 Snapshot revision 当消息、不从文本或 Tool 内容推断新事实；
+- Renderer 本地只拥有 Task+Run disclosure、Tool focus request、每 Task 阅读位置和 following-latest 等可丢弃 UI 状态；reload 后它们可以重置，不能写回 Product history。
+
+每个 Run exchange 使用以下条件槽位，而不是为每类事件创建节点：
+
+| 槽位 | 出现条件 | 更新方式 |
+| --- | --- | --- |
+| User instruction | Run 存在 | 历史稳定，不随 activity 更新 |
+| Process narrative | 至少一个非空 commentary、provisional 或必要 redaction note | closed commentary 只追加稳定 block；provisional 原位增长、迁移或回滚 |
+| Active process surface | Run 为 queued/running/waiting UI/stopping | 唯一 live status 原位替换；存在 Tool 时同一 surface 才可展开技术行 |
+| Intervention | 当前 Run 存在 pending UI | 只显示唯一可操作控件，不伪装成 Assistant 文本 |
+| Response | Host 已发布非空 final/partial response | 安全 Markdown；出现不等于正式 Product terminal 已发布 |
+| File references | Host 发布可预览 reference | 属于该 Run 的结果上下文，不推断 FileChange/Output |
+| Terminal process surface | Run 已 terminal 且存在 Tool record | 位于 response/reference 之后，弱化为默认折叠的“工作过程 · N 项操作” |
+| Terminal notice | partial、非 completed outcome 或完成但无 response | 与 partial 合并为唯一准确提示，不重复成功结果 |
+
+`RunProcess` 是 active 与 terminal 共用的同一 presentation surface，但生命周期位置和职责不同：
+
+```text
+active Run:
+  narrative
+  RunProcess = live status header + optional collapsed Tool body
+  intervention
+  response
+  references
+
+terminal Run:
+  narrative
+  response
+  references
+  RunProcess = weak technical summary + optional collapsed Tool body
+  terminal notice
+```
+
+active→terminal 时，live activity 必须消失，technical evidence 移到正式回复和文件引用之后；Task+Run disclosure choice 保持不变，不因 revision、Tool completion 或 terminal 自动展开/折叠。没有 Tool 的 terminal Run 不保留空 process surface。
+
+#### Output projection 与可见迁移
+
+Renderer 每次只读取当前完整 `RunOutput`，不在本地累积 text chunk：
+
+| Host output 状态 | Renderer 行为 |
+| --- | --- |
+| open/continued segment 有安全 committed bytes | 作为 commentary 后的纯文本 provisional 原位显示 |
+| segment 关闭为 commentary | provisional 对应内容迁入新的稳定 commentary Markdown block |
+| segment 关闭为 final/partial | provisional 清空，内容进入独立 response Markdown 槽位 |
+| segment 关闭为 discarded | provisional 从下一 Snapshot 消失，不保留撤回占位 |
+| closed commentary 已持久化 | terminal、reload 后仍按原 group 顺序恢复 |
+| response 已定性但 terminal 尚未发布 | response 可以显示，同时 active process surface 保持 finalizing |
+| formal terminal 已发布 | activity 必须为 null；未决 provisional 必须为空 |
+
+因此 provisional 在 DOM 中迁移或消失是 output-segment 协议的产品语义，不是 Renderer 自行重排历史；commentary array index、Run identity 和 Tool product identity 才是稳定渲染 key。credential 清理可能使某个 commentary item 为空，但 Renderer 不合并相邻 item，也不改变后续边界。
+
+#### Activity 与 Tool presentation
+
+非 terminal Run 必须有唯一 canonical activity；terminal Run 必须没有 activity。Renderer 不复制 activity 状态机，只把 Host activity 本地化并做两项有界派生：phase 缺失时只能使用同 phase 的防御性通用标签，`executing_tools` 且恰有一个真实 running Tool 时可以把固定 Tool identifier 映射为“检查工作区”“更新内容”或“运行操作”。多个、零个或未知 Tool 时回退到 canonical activity，不读取参数、结果或历史 Tool 推断 Agent 当前意图。
+
+Tool start/progress/result 只更新同一 Tool record 和 process surface，不在主阅读流追加行。active Run 中展开技术过程只用于检查当前证据；terminal 后相同 Tool records 转为弱化历史摘要。主区 Tool 行只显示名称、状态和 Host elapsed；input/progress/result 只在按需 Task overview 中挂载，并且同刻至多一个详情。
+
+#### Snapshot revision、阅读位置与稀疏输出
+
+ProductDelivery 可以合并短窗口 revision，但跨窗口更新必须以新的完整 Snapshot 到达。Renderer 对每个 Snapshot 重新执行纯派生：commentary block 稳定追加、provisional 原位变化、activity 原位替换、Tool 行按 Host order 更新，不能把 revision 数或事件次数显示成进度。用户正在 following latest 时才自动滚动；用户上滚后任何流式更新都不得抢回位置，只显示 `Jump to latest`。
+
+真实 Provider 没有提交新 commentary 或 provisional 时，主阅读流保持不变，只显示当前 canonical activity 和按需技术证据。Renderer 不重复状态行、不从 Tool 结果生成总结、不展示 thinking 正文，也不通过动画、计时器或伪百分比制造推进感。scripted Provider vertical 证明的是这套机制可以持续交付已存在的事实，不代表真实 Provider 的叙事频率。
+
+### 7.3 用户指令
 
 - 使用浅紫色“任务指令”区块，最大宽度约为正文的 72%，靠右但不使用聊天尾巴、头像或左右双方气泡布局，也不重复显示“你”等归属标签；在窄窗口下可以放宽到约 88%；
 - 首条指令建立 Task 目标，后续指令作为明确的补充或重试节点；普通界面不显示 Run ID；
@@ -532,24 +613,25 @@ Execution binding availability 是下一次 admission 的独立前置事实，�
 - 已发送内容不能静默编辑历史；
 - 未来的“编辑并重新运行”必须显式创建新的执行分支或新 Task。
 
-### 7.3 Agent 回复
+### 7.4 Agent 回复
 
 - 不使用头像和大气泡，使用正文排版；
 - 支持 Markdown、表格、代码、引用和链接；
-- `commentary` 使用可键盘操作的 `Agent updates` disclosure；首次在 active Run 出现时展开、历史首次加载时折叠，用户选择按 Task+Run 在当前 Renderer 会话内保存，Snapshot revision、terminal 或 Task 切换不得擅自重置；
-- `final | partial` response 使用安全 Markdown；尚未收到 output-segment 定性的 provisional 只按纯文本呈现，不解释 Markdown，discard 后随下一 Snapshot 消失；流式生成只显示克制的末尾活动指示；
-- 不展示原始 chain-of-thought；`thinking_chunk` 只显示“正在思考”的安全状态，`text_chunk` 开始后显示“正在撰写回复”；Renderer 还必须把 Host 已投影的 Starting、Waiting model、Executing tools、Retrying、Compacting 与 Finishing 显示为本地化 Current activity，并在 Host 提供时显示 in-flight tool count 或 retry attempt/max/delay；active Run 不能统一退化成“正在工作”；
+- commentary 作为 Assistant 过程叙事按 Host 提供的有序 group array 渲染为同一 Assistant message 内的独立 Markdown block；Renderer 不自行按换行切组，也不按 chunk 或 Tool 穿插伪造顺序。Host 发布新的 closed commentary group 后，主阅读流随 Snapshot revision 追加一个稳定 block；
+- `final | partial` response 使用安全 Markdown；尚未收到 output-segment 定性的 provisional 紧随 commentary 以中性纯文本呈现，不称为草稿、不解释 Markdown，discard 后随下一 Snapshot 消失；流式生成只显示克制的单一活动指示；
+- 不展示原始 chain-of-thought；`thinking_chunk` 只显示“正在思考”的安全状态，`text_chunk` 开始后显示“正在撰写回复”；Renderer 还必须把 Host 已投影的 Starting、Waiting model、Executing tools、Retrying、Compacting 与 Finishing 显示为本地化 Current activity，并在 Host 提供时显示 retry attempt/max/delay；不同 activity 必须保持可理解的差异，不能把整个 active Run 统一退化成一个不变的“正在工作”；
 - output 只表示 Agent 可见输出，不标记为 Delivery、Output artifact 或最终成果；
 - 不从回复文本解析活动、计划、文件变化或完成状态；不得为每条内容重复“Agent”标签或品牌头像。
 
-### 7.4 当前状态、请求与结果
+### 7.5 当前状态、请求与结果
 
-- active Run 只显示一个来自 canonical phase/activity 的紧凑临时状态；不得把 Tool 名称、输入、输出、usage 或 Run ID 带入主阅读流；
+- active Run 只显示一个来自 canonical phase/activity 的紧凑 live status，并固定在当前过程底部原位更新；它不为 Tool start/progress/result 追加时间线记录。`executing_tools` 且恰有一个 typed running Tool 时，Renderer 可以依据固定 Tool identifier 映射为“检查工作区”“更新内容”“运行操作”等宽泛但真实的用户文案；不满足条件时回退到 canonical activity，不在主状态中暴露原始 Tool 名称、参数或命令；
+- Tool 摘要属于次要 technical work evidence，active 与 terminal Run 都默认折叠；用户明确展开后，主区 Tool 行只显示名称、状态与 Host 提供的真实 elapsed，不带入 input/progress/result、usage 或 Run ID。terminal 摘要弱化为“工作过程 · N 项操作”，不单独强调已被整个 Run 恢复的 Tool failure；失败事实仍在展开详情中保留。disclosure choice 按 Task+Run 仅存于当前 Renderer 会话，不写入 Bridge 或持久化，也不随 revision 或终态自动翻转；late terminal observation 不得重新打开 live 状态；
 - pending UI 位于当前 Assistant 回复之后、Composer 之前，并提供唯一可操作控件；
 - `completed` 且已有 final response 时不追加重复的完成条；空 final response、停止、失败、中断或 dependency failure 只显示准确状态、原因与真实可用的恢复动作；partial response 与 terminal outcome 必须合并为唯一 notice，同时表达“回复未完整生成”和真实终止原因，不能再追加第二条 partial 警告；
 - Renderer reload、成功同步、Tool completion 与 Compact history 不生成主区记录；只有同步失败、当前 maintenance 或内容可能不完整时显示相应状态。
 
-### 7.5 滚动与密度
+### 7.6 滚动与密度
 
 - 用户位于底部时自动跟随最新内容；
 - 用户向上查看历史时停止自动滚动；
@@ -756,13 +838,13 @@ Full access
 
 ## 11. 按需 Task overview
 
-> Capability：**当前**。按需 Task overview 承载 Needs your attention、Current activity / Last run、所选当前/最近 Run 的 Work process，以及当前 Conversation 的 Context 与真实 usage；它不提供历史 Run 浏览、事件时间线或文件变化视图。
+> Capability：**当前**。按需 Task overview 承载 Needs your attention、Current activity / Last run、当前/最近 Run 或主区 Tool 摘要精确定位 Run 的 Work process，以及当前 Conversation 的 Context 与真实 usage；它不提供通用历史 Run 浏览、事件时间线或文件变化视图。
 
-该面板是当前过渡 Renderer 对 Tool、Context 与 usage 的安全落点，不是完整 Agent 过程体验的最终归属。后续 Renderer 重构可以调整这些信息与主阅读流的关系；在新方案通过真实运行验收前，不得以本面板已经能读取 typed records 作为过程可见性已经完成的证据。
+该面板拥有 Tool input/progress/result、Context 与 usage 的完整详情；主阅读流的 Tool 摘要只提供可发现性与定位入口，不复制详情。过程可见性的验收仍必须来自 terminal 前真实多 revision 运行，不能以本面板最终能读取 typed records 代替。
 
 Task overview 是当前 Task 的按需结构化摘要，不是固定存在的第三栏、第二份回复记录、日志面板或执行审计器。New task、无 Task 和没有有效模块的普通 idle Task 默认不占用右侧列宽。
 
-用户通过顶部命令栏右侧的 Task overview 按钮稳定打开或关闭面板；主内容不提供 Tool、diff 或 usage 详情跳转。
+用户通过顶部命令栏右侧的 Task overview 按钮稳定打开或关闭面板；主内容的 Tool 摘要可以打开 overview 并聚焦对应 Tool，diff 与 usage 不提供主区跳转。
 
 出现内容时模块优先级为：
 
@@ -776,7 +858,7 @@ Task overview 是当前 Task 的按需结构化摘要，不是固定存在的第
 - 空模块隐藏；
 - 需要用户处理始终置顶；
 - Current activity 显示此刻可观察动作，不复制完整工具输出；
-- Work process 只读取当前或最近 Run 的有界 typed Tool records，按 Host order 显示名称、状态与真实 elapsed；input/progress/result 默认不挂载 DOM，同一时刻至多展开一个 Tool，并只在展开后以纯文本/代码面按需呈现，折叠或切换 Task/Run 后再次卸载。Tool details 不进入主对话、全局搜索或 live announcement，也不把 Tool、Bash 文本或 file reference 推断成 File change/Output；
+- Work process 读取当前或最近 Run 的有界 typed Tool records；从主区 Tool 摘要进入时，可以在该 focus request 存活期间精确选择来源 Run 与 Tool，但不增加历史 Run selector。它按 Host order 显示名称、状态与真实 elapsed；input/progress/result 默认不挂载 DOM，同一时刻至多展开一个 Tool，并只在展开后以纯文本/代码面按需呈现，折叠或切换 Task/Run 后再次卸载。Tool details 不进入主对话、全局搜索或 live announcement，也不把 Tool、Bash 文本或 file reference 推断成 File change/Output；
 - Run terminal 后，已经打开的 Inspector 用真实 outcome、状态和 usage 转为 Last run summary；只有 Host 发布 typed Run duration 时才显示总耗时，当前不得从 Renderer 时钟猜测；不得因为 Current activity 消失而清空内容；
 - Context and usage 显示当前 attached Conversation 的真实 pressure/auto-compact observation 和所选 Run usage；只陈述 current/auto-compact/blocking token 数、最近压缩前后 token 与 dropped/kept，不显示伪百分比、raw source Run identity 或跨 attachment 历史；
 - 用户打开 overview 后在当前 Task 内保持打开，直到主动关闭；切换 Task 时显示目标 Task 自己的会话内状态；
@@ -1024,29 +1106,29 @@ MetaWork 采用“明亮工作台 + 紫色任务流”的桌面工具方向。�
 
 当前批准的品牌 primitive 为：
 
-| Token                        | Value     | Role                       |
-| ---------------------------- | --------- | -------------------------- |
+| Token                        | Value     | Role                         |
+| ---------------------------- | --------- | ---------------------------- |
 | `--metask-primary`           | `#8A4ED1` | 智能状态、关键操作、激活路径 |
-| `--metask-primary-deep`      | `#4B2DB5` | Hover、pressed 与高对比强调 |
-| `--metask-primary-soft`      | `#E9E6FF` | 浅色主题弱强调背景         |
-| `--metask-accent`            | `#B35BE8` | 运行中、智能活动和轻量状态 |
-| `--metask-state-running`     | `#B35BE8` | 明确的运行与活动状态       |
-| `--metask-state-warning`     | `#9C5B10` | 等待用户与警告             |
-| `--metask-state-warning-ink` | `#7D4308` | 浅色表面上的警告文字       |
-| `--metask-state-complete`    | `#4C9A72` | 完成、健康与校验通过       |
-| `--metask-state-error`       | `#C85A5A` | 异常、失败与破坏性反馈     |
-| `--metask-light-canvas`      | `#F7F8FA` | 浅色页面背景               |
-| `--metask-light-panel`       | `#FFFFFF` | 浅色面板                   |
-| `--metask-light-panel-2`     | `#F1F2F5` | 浅色次级或抬升表面         |
-| `--metask-light-text`        | `#191B21` | 浅色主题主要文字           |
-| `--metask-light-text-muted`  | `#626775` | 浅色主题次要文字           |
-| `--metask-light-border`      | `#DFE2E8` | 浅色主题边界               |
-| `--metask-dark-canvas`       | `#0F1115` | 深色主题页面背景 primitive |
-| `--metask-dark-panel`        | `#12141B` | 深色主题面板 primitive     |
-| `--metask-dark-panel-2`      | `#181A23` | 深色主题抬升表面 primitive |
-| `--metask-dark-text`         | `#F4F5F7` | 深色主题主要文字 primitive |
-| `--metask-dark-text-muted`   | `#A7ABB7` | 深色主题次要文字 primitive |
-| `--metask-dark-border`       | `#2B2F3A` | 深色主题边界 primitive     |
+| `--metask-primary-deep`      | `#4B2DB5` | Hover、pressed 与高对比强调  |
+| `--metask-primary-soft`      | `#E9E6FF` | 浅色主题弱强调背景           |
+| `--metask-accent`            | `#B35BE8` | 运行中、智能活动和轻量状态   |
+| `--metask-state-running`     | `#B35BE8` | 明确的运行与活动状态         |
+| `--metask-state-warning`     | `#9C5B10` | 等待用户与警告               |
+| `--metask-state-warning-ink` | `#7D4308` | 浅色表面上的警告文字         |
+| `--metask-state-complete`    | `#4C9A72` | 完成、健康与校验通过         |
+| `--metask-state-error`       | `#C85A5A` | 异常、失败与破坏性反馈       |
+| `--metask-light-canvas`      | `#F7F8FA` | 浅色页面背景                 |
+| `--metask-light-panel`       | `#FFFFFF` | 浅色面板                     |
+| `--metask-light-panel-2`     | `#F1F2F5` | 浅色次级或抬升表面           |
+| `--metask-light-text`        | `#191B21` | 浅色主题主要文字             |
+| `--metask-light-text-muted`  | `#626775` | 浅色主题次要文字             |
+| `--metask-light-border`      | `#DFE2E8` | 浅色主题边界                 |
+| `--metask-dark-canvas`       | `#0F1115` | 深色主题页面背景 primitive   |
+| `--metask-dark-panel`        | `#12141B` | 深色主题面板 primitive       |
+| `--metask-dark-panel-2`      | `#181A23` | 深色主题抬升表面 primitive   |
+| `--metask-dark-text`         | `#F4F5F7` | 深色主题主要文字 primitive   |
+| `--metask-dark-text-muted`   | `#A7ABB7` | 深色主题次要文字 primitive   |
+| `--metask-dark-border`       | `#2B2F3A` | 深色主题边界 primitive       |
 
 Token 只有三层：
 
@@ -1230,7 +1312,7 @@ Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成
 - 键盘完整操作；
 - focus 不丢失；
 - 用户上滚时不强制自动滚动；
-- 选择另一个 Task 时定位最新内容，不泄漏或恢复上一 Task 的像素滚动位置；
+- 每个 Task 在当前 Renderer 会话内恢复自己的阅读位置与 following-latest 状态，不泄漏另一个 Task 的位置；首次选择 Task 时定位最新内容；
 - reduced motion；
 - 状态在无颜色条件下仍可识别；
 - 长英文、中文和 pseudo-locale 不溢出；

@@ -40,7 +40,7 @@ function run(id, text, assistant, outcome, toolContent = "") {
     phase: outcome === null ? "running" : "completed",
     input: { kind: "text", text, redacted: false },
     output: {
-      commentary: "",
+      commentary: [],
       response: assistant,
       responseKind: assistant ? "final" : null,
       provisional: "",

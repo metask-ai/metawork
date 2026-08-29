@@ -100,6 +100,7 @@ pub const Limits = struct {
     max_runs_per_task: usize = 16,
     max_compacts_per_task: usize = 16,
     max_tools_per_run: usize = 32,
+    max_commentary_segments_per_run: usize = 256,
     // Must contain the maximum structural projection (every Task/Run/Compact
     // at capacity, including their eager terminal diagnostics) plus one full
     // assistant message; the budget test binds this floor exactly.
@@ -327,6 +328,7 @@ const task_snapshot_overhead: usize = 1024;
 const scheduled_task_snapshot_overhead: usize = 1024;
 const skill_asset_snapshot_overhead: usize = 1024;
 const run_snapshot_overhead: usize = 1024;
+const commentary_segment_snapshot_overhead: usize = 3;
 const compact_snapshot_overhead: usize = 512;
 const catalog_snapshot_overhead: usize = 256;
 const catalog_skill_snapshot_overhead: usize = 256;
@@ -791,7 +793,9 @@ pub const Runtime = struct {
             limits.max_skill_assets == 0 or
             limits.max_runs_per_task == 0 or
             limits.max_compacts_per_task == 0 or
-            limits.max_tools_per_run == 0 or limits.max_projection_bytes == 0 or
+            limits.max_tools_per_run == 0 or
+            limits.max_commentary_segments_per_run == 0 or
+            limits.max_projection_bytes == 0 or
             limits.max_workspace_bytes == 0 or
             limits.max_catalog_projection_bytes == 0 or
             limits.max_scheduled_task_projection_bytes == 0 or
@@ -2683,6 +2687,7 @@ pub const Runtime = struct {
             .{
                 .text = self.taskRuntimeTextProjection(),
                 .max_assistant_message_bytes = self.limits.max_assistant_message_bytes,
+                .max_commentary_segments_per_run = self.limits.max_commentary_segments_per_run,
                 .max_tool_field_bytes = self.limits.max_tool_field_bytes,
                 .max_file_refs_per_tool = self.limits.max_file_refs_per_tool,
                 .max_file_ref_field_bytes = self.limits.max_file_ref_field_bytes,
@@ -3598,33 +3603,46 @@ pub const Runtime = struct {
         return redacted;
     }
 
-    fn writeTaskViewJsonPartition(
+    fn writeTaskViewJsonOutput(
         context: *const anyopaque,
         writer: *std.Io.Writer,
         value: []const u8,
-        split: usize,
-        separator: []const u8,
+        commentary_ends: []const u64,
     ) product_task.ProjectionError!bool {
         const self: *const Runtime = @ptrCast(@alignCast(context));
-        if (split > value.len) return error.SnapshotTooLarge;
         const projected = self.allocator.alloc(u8, value.len) catch
             return error.OutOfMemory;
         defer {
             std.crypto.secureZero(u8, projected);
             self.allocator.free(projected);
         }
+        const projected_ends = self.allocator.alloc(usize, commentary_ends.len) catch
+            return error.OutOfMemory;
+        defer self.allocator.free(projected_ends);
         var read: usize = 0;
         var write: usize = 0;
-        var projected_split: ?usize = null;
+        var boundary_index: usize = 0;
         var redacted = false;
         while (read < value.len) {
-            if (read == split) projected_split = write;
+            while (boundary_index < commentary_ends.len) {
+                const boundary = std.math.cast(usize, commentary_ends[boundary_index]) orelse
+                    return error.SnapshotTooLarge;
+                if (boundary != read) break;
+                projected_ends[boundary_index] = write;
+                boundary_index += 1;
+            }
             if (self.knownCredentialEndAtCodepoint(value, read)) |redaction_end| {
                 const marker_len = @min(redaction_end - read, 3);
                 @memset(projected[write..][0..marker_len], '*');
                 write += marker_len;
-                if (read < split and redaction_end >= split)
-                    projected_split = write;
+                while (boundary_index < commentary_ends.len) {
+                    const boundary = std.math.cast(usize, commentary_ends[boundary_index]) orelse
+                        return error.SnapshotTooLarge;
+                    if (boundary > redaction_end) break;
+                    if (boundary <= read) return error.SnapshotTooLarge;
+                    projected_ends[boundary_index] = write;
+                    boundary_index += 1;
+                }
                 read = redaction_end;
                 redacted = true;
                 continue;
@@ -3637,16 +3655,29 @@ pub const Runtime = struct {
             write += codepoint_len;
             read += codepoint_len;
         }
-        if (read == split) projected_split = write;
-        const boundary = projected_split orelse return error.SnapshotTooLarge;
+        while (boundary_index < commentary_ends.len) {
+            const boundary = std.math.cast(usize, commentary_ends[boundary_index]) orelse
+                return error.SnapshotTooLarge;
+            if (boundary != read) return error.SnapshotTooLarge;
+            projected_ends[boundary_index] = write;
+            boundary_index += 1;
+        }
+        writer.writeByte('[') catch return error.SnapshotTooLarge;
+        var previous: usize = 0;
+        for (projected_ends, 0..) |boundary, index| {
+            if (boundary < previous or boundary > write)
+                return error.SnapshotTooLarge;
+            if (index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+            self.projectedJsonValueWithKnownCredentials(
+                writer,
+                projected[previous..boundary],
+            ) catch return error.SnapshotTooLarge;
+            previous = boundary;
+        }
+        writer.writeAll("],\"response\":") catch return error.SnapshotTooLarge;
         self.projectedJsonValueWithKnownCredentials(
             writer,
-            projected[0..boundary],
-        ) catch return error.SnapshotTooLarge;
-        writer.writeAll(separator) catch return error.SnapshotTooLarge;
-        self.projectedJsonValueWithKnownCredentials(
-            writer,
-            projected[boundary..write],
+            projected[previous..write],
         ) catch return error.SnapshotTooLarge;
         return redacted;
     }
@@ -3656,7 +3687,7 @@ pub const Runtime = struct {
             .context = self,
             .contains_sensitive_fn = taskViewContainsSensitive,
             .write_json_fn = writeTaskViewJson,
-            .write_json_partition_fn = writeTaskViewJsonPartition,
+            .write_json_output_fn = writeTaskViewJsonOutput,
             .write_json_parts_fn = writeTaskViewJsonParts,
         };
     }
@@ -4015,6 +4046,7 @@ pub const Runtime = struct {
             .max_runs_per_task = self.limits.max_runs_per_task,
             .max_compacts_per_task = self.limits.max_compacts_per_task,
             .max_tools_per_run = self.limits.max_tools_per_run,
+            .max_commentary_segments_per_run = self.limits.max_commentary_segments_per_run,
             .max_file_refs_per_tool = self.limits.max_file_refs_per_tool,
             .max_ui_history_per_task = self.limits.max_ui_history_per_task,
             .max_workspace_bytes = self.limits.max_workspace_bytes,
@@ -4490,6 +4522,7 @@ pub const Runtime = struct {
                 .max_tool_field_bytes = self.limits.max_tool_field_bytes,
                 .max_terminal_diagnostic_bytes = self.limits.max_terminal_diagnostic_bytes,
                 .max_tools_per_run = self.limits.max_tools_per_run,
+                .max_commentary_segments_per_run = self.limits.max_commentary_segments_per_run,
                 .max_skill_arguments = self.limits.max_skill_arguments,
                 .max_task_title_bytes = self.limits.max_task_title_bytes,
                 .max_model_id_bytes = account_contract.Limits.model_id_bytes,
@@ -6298,6 +6331,20 @@ fn worstCaseSnapshotBytes(limits: Limits) ?usize {
         total,
         std.math.mul(usize, runs, run_snapshot_overhead) catch return null,
     ) catch return null;
+    const commentary_segments = std.math.mul(
+        usize,
+        runs,
+        limits.max_commentary_segments_per_run,
+    ) catch return null;
+    total = std.math.add(
+        usize,
+        total,
+        std.math.mul(
+            usize,
+            commentary_segments,
+            commentary_segment_snapshot_overhead,
+        ) catch return null,
+    ) catch return null;
     const compacts = std.math.mul(
         usize,
         limits.max_tasks,
@@ -6505,6 +6552,10 @@ fn testRuntime() !Runtime {
     @memset(ui_history, null);
     const tools = try control.allocator.alloc(?ToolView, control.limits.max_tools_per_run);
     @memset(tools, null);
+    const commentary_ends = try control.allocator.alloc(
+        u64,
+        control.limits.max_commentary_segments_per_run,
+    );
     runs[0] = .{
         .id = 7,
         .generation = 1,
@@ -6517,6 +6568,7 @@ fn testRuntime() !Runtime {
                 control.limits.max_user_message_bytes,
             ),
         } },
+        .commentary_ends = commentary_ends,
         .active_phase = .running,
         .agent_handoff = .init(.running),
         .tools = tools,
@@ -9485,14 +9537,17 @@ test "output segments commit commentary and a continued final while discarding r
         "{\"text_chunk\":\"look \"}",
         "{\"output_segment_end\":{\"index\":0,\"turn\":1,\"group\":0,\"disposition\":\"commentary\",\"bytes\":5}}",
         "{\"output_segment_begin\":{\"index\":1,\"turn\":2,\"group\":1}}",
+        "{\"text_chunk\":\"again \"}",
+        "{\"output_segment_end\":{\"index\":1,\"turn\":2,\"group\":1,\"disposition\":\"commentary\",\"bytes\":6}}",
+        "{\"output_segment_begin\":{\"index\":2,\"turn\":3,\"group\":2}}",
         "{\"text_chunk\":\"half \"}",
-        "{\"output_segment_end\":{\"index\":1,\"turn\":2,\"group\":1,\"disposition\":\"continued\",\"bytes\":5}}",
-        "{\"output_segment_begin\":{\"index\":2,\"turn\":2,\"group\":1}}",
+        "{\"output_segment_end\":{\"index\":2,\"turn\":3,\"group\":2,\"disposition\":\"continued\",\"bytes\":5}}",
+        "{\"output_segment_begin\":{\"index\":3,\"turn\":3,\"group\":2}}",
         "{\"text_chunk\":\"discarded\"}",
-        "{\"output_segment_end\":{\"index\":2,\"turn\":2,\"group\":1,\"disposition\":\"discarded\",\"bytes\":9}}",
-        "{\"output_segment_begin\":{\"index\":3,\"turn\":2,\"group\":1}}",
+        "{\"output_segment_end\":{\"index\":3,\"turn\":3,\"group\":2,\"disposition\":\"discarded\",\"bytes\":9}}",
+        "{\"output_segment_begin\":{\"index\":4,\"turn\":3,\"group\":2}}",
         "{\"text_chunk\":\"done\"}",
-        "{\"output_segment_end\":{\"index\":3,\"turn\":2,\"group\":1,\"disposition\":\"final\",\"bytes\":4}}",
+        "{\"output_segment_end\":{\"index\":4,\"turn\":3,\"group\":2,\"disposition\":\"final\",\"bytes\":4}}",
     };
     for (events) |encoded| {
         var envelope = try testEnvelope(route, 7, encoded);
@@ -9500,22 +9555,23 @@ test "output segments commit commentary and a continued final while discarding r
         try control.applyEvent(&envelope);
     }
 
-    try std.testing.expectEqualStrings("look half done", run.assistant.list.items);
+    try std.testing.expectEqualStrings("look again half done", run.assistant.list.items);
+    try std.testing.expectEqualSlices(u64, &.{ 5, 11 }, run.commentary_ends[0..run.commentary_count]);
     try std.testing.expectEqual(
         task_test_state.AssistantOutputKind.final,
         run.assistant_output_kind.?,
     );
-    try std.testing.expectEqual(@as(usize, 5), run.assistant_output_start.?);
+    try std.testing.expectEqual(@as(usize, 11), run.assistant_output_start.?);
     try std.testing.expect(run.open_output_segment == null);
     try std.testing.expect(run.output_continued_group == null);
-    try std.testing.expectEqual(@as(u64, 4), run.next_output_segment_index);
+    try std.testing.expectEqual(@as(u64, 5), run.next_output_segment_index);
     try std.testing.expect(std.mem.indexOf(u8, run.assistant.list.items, "discarded") == null);
     var snapshot_storage: [96 * 1024]u8 = undefined;
     const snapshot = try control.writeSnapshot(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
-        "\"output\":{\"commentary\":\"look \",\"response\":\"half done\",\"responseKind\":\"final\",\"provisional\":\"\"",
+        "\"output\":{\"commentary\":[\"look \",\"again \"],\"response\":\"half done\",\"responseKind\":\"final\",\"provisional\":\"\"",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
@@ -9550,6 +9606,38 @@ test "output segment byte mismatch fails the dependency protocol" {
         error.InvalidOutputSegment,
         control.applyEvent(&invalid_end),
     );
+}
+
+test "commentary boundary capacity fails before canonical output mutation" {
+    var control = try testRuntime();
+    defer control.deinit();
+    control.limits.max_commentary_segments_per_run = 1;
+    const task = &control.task_runtime.tasks[0].?;
+    const run = &task.durable.runs[0].?;
+    const route = task.runtime.routeId();
+    const accepted = [_][]const u8{
+        "{\"output_segment_begin\":{\"index\":0,\"turn\":1,\"group\":0}}",
+        "{\"text_chunk\":\"first\"}",
+        "{\"output_segment_end\":{\"index\":0,\"turn\":1,\"group\":0,\"disposition\":\"commentary\",\"bytes\":5}}",
+        "{\"output_segment_begin\":{\"index\":1,\"turn\":2,\"group\":1}}",
+        "{\"text_chunk\":\"second\"}",
+    };
+    for (accepted) |encoded| {
+        var envelope = try testEnvelope(route, run.id, encoded);
+        defer envelope.deinit();
+        try control.applyEvent(&envelope);
+    }
+    var close = try testEnvelope(
+        route,
+        run.id,
+        "{\"output_segment_end\":{\"index\":1,\"turn\":2,\"group\":1,\"disposition\":\"commentary\",\"bytes\":6}}",
+    );
+    defer close.deinit();
+    try std.testing.expectError(error.ProjectionCapacity, control.applyEvent(&close));
+    try std.testing.expectEqualStrings("first", run.assistant.list.items);
+    try std.testing.expectEqualSlices(u64, &.{5}, run.commentary_ends[0..run.commentary_count]);
+    try std.testing.expectEqualStrings("second", run.output_segment.list.items);
+    try std.testing.expect(run.open_output_segment != null);
 }
 
 test "output segment close is atomic when the destination reserve fails" {
@@ -9701,7 +9789,7 @@ test "provisional output exposes only credential-safe committed bytes" {
     ) != null);
 }
 
-test "output partition redacts a known credential across the response boundary" {
+test "output partition redacts a known credential across commentary boundaries" {
     var control = try testRuntime();
     defer control.deinit();
     const task = &control.task_runtime.tasks[0].?;
@@ -9715,21 +9803,59 @@ test "output partition redacts a known credential across the response boundary" 
         "{\"output_segment_end\":{\"index\":0,\"turn\":1,\"group\":0,\"disposition\":\"commentary\",\"bytes\":7}}",
         "{\"output_segment_begin\":{\"index\":1,\"turn\":2,\"group\":1}}",
         "{\"text_chunk\":\"KEY\"}",
-        "{\"output_segment_end\":{\"index\":1,\"turn\":2,\"group\":1,\"disposition\":\"final\",\"bytes\":3}}",
+        "{\"output_segment_end\":{\"index\":1,\"turn\":2,\"group\":1,\"disposition\":\"commentary\",\"bytes\":3}}",
+        "{\"output_segment_begin\":{\"index\":2,\"turn\":3,\"group\":2}}",
+        "{\"text_chunk\":\"done\"}",
+        "{\"output_segment_end\":{\"index\":2,\"turn\":3,\"group\":2,\"disposition\":\"final\",\"bytes\":4}}",
     };
     for (events) |encoded| {
         var envelope = try testEnvelope(route, run.id, encoded);
         defer envelope.deinit();
         try control.applyEvent(&envelope);
     }
-    try std.testing.expectEqualStrings("SECRET-KEY", run.assistant.list.items);
+    try std.testing.expectEqualStrings("SECRET-KEYdone", run.assistant.list.items);
     var storage: [96 * 1024]u8 = undefined;
     const snapshot = try control.writeSnapshot(&storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null);
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
-        "\"output\":{\"commentary\":\"***\",\"response\":\"\",\"responseKind\":\"final\",\"provisional\":\"\",\"redacted\":true",
+        "\"output\":{\"commentary\":[\"***\",\"\"],\"response\":\"done\",\"responseKind\":\"final\",\"provisional\":\"\",\"redacted\":true",
+    ) != null);
+}
+
+test "event projection preserves commentary groups split by its credential suffix" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = &control.task_runtime.tasks[0].?;
+    const run = &task.durable.runs[0].?;
+    const route = task.runtime.routeId();
+    const events = [_][]const u8{
+        "{\"output_segment_begin\":{\"index\":0,\"turn\":1,\"group\":0}}",
+        "{\"text_chunk\":\"SECRET-\"}",
+        "{\"output_segment_end\":{\"index\":0,\"turn\":1,\"group\":0,\"disposition\":\"commentary\",\"bytes\":7}}",
+        "{\"output_segment_begin\":{\"index\":1,\"turn\":2,\"group\":1}}",
+        "{\"text_chunk\":\"KEY\"}",
+        "{\"output_segment_end\":{\"index\":1,\"turn\":2,\"group\":1,\"disposition\":\"commentary\",\"bytes\":3}}",
+        "{\"output_segment_begin\":{\"index\":2,\"turn\":3,\"group\":2}}",
+        "{\"text_chunk\":\"done\"}",
+        "{\"output_segment_end\":{\"index\":2,\"turn\":3,\"group\":2,\"disposition\":\"final\",\"bytes\":4}}",
+    };
+    for (events) |encoded| {
+        var envelope = try testEnvelope(route, run.id, encoded);
+        defer envelope.deinit();
+        try control.applyEvent(&envelope);
+    }
+    try std.testing.expectEqualStrings("***done", run.assistant.list.items);
+    try std.testing.expectEqualSlices(u64, &.{ 0, 3 }, run.commentary_ends[0..run.commentary_count]);
+    try std.testing.expectEqual(@as(?usize, 3), run.assistant_output_start);
+    var storage: [96 * 1024]u8 = undefined;
+    const snapshot = try control.writeSnapshot(&storage);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"output\":{\"commentary\":[\"\",\"***\"],\"response\":\"done\"",
     ) != null);
 }
 
@@ -10275,6 +10401,8 @@ test "Runtime snapshot budget includes JSON escaping and structural overhead" {
     @memset(controls, 1);
     try control.appendTrackedText(&run.assistant, controls, control.limits.max_assistant_message_bytes);
     _ = control.redactTrackedText(&run.assistant, run.redaction_secret);
+    run.commentary_count = 1;
+    run.commentary_ends[0] = @intCast(run.assistant.committed_len);
 
     const snapshot_storage = try std.testing.allocator.alloc(u8, control.limits.max_snapshot_bytes);
     defer std.testing.allocator.free(snapshot_storage);
@@ -10414,6 +10542,10 @@ test "default snapshot budget contains the maximum structural projection" {
         for (0..limits.max_runs_per_task) |run_index| {
             const tools = try control.allocator.alloc(?ToolView, limits.max_tools_per_run);
             @memset(tools, null);
+            const commentary_ends = try control.allocator.alloc(
+                u64,
+                limits.max_commentary_segments_per_run,
+            );
             for (0..limits.max_tools_per_run) |tool_index| {
                 var tool_id_storage: [32]u8 = undefined;
                 const tool_id = try std.fmt.bufPrint(
@@ -10445,6 +10577,7 @@ test "default snapshot budget contains the maximum structural projection" {
                         limits.max_user_message_bytes,
                     ),
                 } },
+                .commentary_ends = commentary_ends,
                 .tools = tools,
                 .terminal_publication = .init(.published),
                 .terminal_payload = .{
@@ -10535,6 +10668,10 @@ test "default snapshot budget contains the maximum structural projection" {
     _ = control.redactTrackedText(
         &control.task_runtime.tasks[0].?.durable.runs[0].?.assistant,
         control.task_runtime.tasks[0].?.durable.runs[0].?.redaction_secret,
+    );
+    control.task_runtime.tasks[0].?.durable.runs[0].?.commentary_count = 1;
+    control.task_runtime.tasks[0].?.durable.runs[0].?.commentary_ends[0] = @intCast(
+        control.task_runtime.tasks[0].?.durable.runs[0].?.assistant.committed_len,
     );
     const remaining_projection = limits.max_projection_bytes - control.projection_bytes;
     const escaped_tool = try std.testing.allocator.alloc(
@@ -10906,6 +11043,9 @@ test "assistant credential redaction finalizes ordinary chunks without rescannin
     try control.appendTrackedText(assistant, "SECRET-", control.limits.max_assistant_message_bytes);
     try std.testing.expect(!control.redactTrackedText(assistant, control.account_execution.credential()));
     try std.testing.expectEqual(assistant.list.items.len - "SECRET-".len, assistant.committed_len);
+    const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+    run.commentary_count = 1;
+    run.commentary_ends[0] = @intCast(assistant.committed_len);
 
     var pending_snapshot_storage: [96 * 1024]u8 = undefined;
     const pending_snapshot = try control.writeSnapshot(&pending_snapshot_storage);
@@ -10915,10 +11055,11 @@ test "assistant credential redaction finalizes ordinary chunks without rescannin
     try std.testing.expect(control.redactTrackedText(assistant, control.account_execution.credential()));
     try std.testing.expectEqual(assistant.list.items.len, assistant.committed_len);
     try std.testing.expect(std.mem.endsWith(u8, assistant.list.items, "***"));
+    run.commentary_ends[0] = @intCast(assistant.committed_len);
 
     try control.appendTrackedText(assistant, " tail SECRET-", control.limits.max_assistant_message_bytes);
     try std.testing.expect(!control.redactTrackedText(assistant, control.account_execution.credential()));
-    const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+    run.commentary_ends[0] = @intCast(assistant.committed_len);
     try std.testing.expect(commitTerminal(
         run,
         .completed,
@@ -10950,6 +11091,7 @@ test "assistant credential redaction finalizes ordinary chunks without rescannin
     const revision_before_finalization = control.revision;
     control.finalizeMarkedTerminalRunsAfterEventDrain();
     try std.testing.expectEqual(assistant.list.items.len, assistant.committed_len);
+    run.commentary_ends[0] = @intCast(assistant.committed_len);
     try std.testing.expectEqual(revision_before_finalization + 1, control.revision);
 
     var terminal_snapshot_storage: [96 * 1024]u8 = undefined;
@@ -11055,6 +11197,8 @@ test "event drain barrier atomically publishes terminal product state" {
     const revision_before_finalization = control.revision;
     finalizeTestTerminalEvents(&control);
     try std.testing.expect(control.revision > revision_before_finalization);
+    run.commentary_count = 1;
+    run.commentary_ends[0] = @intCast(run.assistant.committed_len);
 
     var terminal_storage: [96 * 1024]u8 = undefined;
     const terminal = try control.writeSnapshot(&terminal_storage);

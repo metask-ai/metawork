@@ -261,6 +261,7 @@ pub const Limits = struct {
     max_runs_per_task: usize,
     max_compacts_per_task: usize,
     max_tools_per_run: usize,
+    max_commentary_segments_per_run: usize,
     max_file_refs_per_tool: usize,
     max_ui_history_per_task: usize,
     max_workspace_bytes: usize,
@@ -396,6 +397,7 @@ pub const RunWire = struct {
     input: RunInputWire,
     assistant: []const u8,
     assistant_redacted: bool,
+    commentary_ends: []const u64,
     assistant_output_kind: ?[]const u8,
     assistant_output_start: ?u64,
     phase: []const u8,
@@ -802,6 +804,7 @@ fn projectRun(
         .input = input,
         .assistant = run.assistant.list.items[0..run.assistant.committed_len],
         .assistant_redacted = run.assistant_redacted,
+        .commentary_ends = run.commentary_ends[0..run.commentary_count],
         .assistant_output_kind = if (run.assistant_output_kind) |kind| @tagName(kind) else null,
         .assistant_output_start = if (run.assistant_output_start) |start| @intCast(start) else null,
         .phase = @tagName(projection.phase),
@@ -1112,6 +1115,19 @@ fn restoreRun(projection: RestoreProjection, wire: RunWire) RestoreError!task_st
             !std.unicode.utf8ValidateSlice(assistant.list.items[0..start]))
             return error.TaskStoreCorrupt;
     }
+    if (wire.commentary_ends.len > projection.limits.max_commentary_segments_per_run or
+        !validCommentaryEnds(
+            wire.assistant,
+            wire.commentary_ends,
+            assistant_output_start orelse assistant.committed_len,
+        ))
+        return error.TaskStoreCorrupt;
+    const commentary_ends = try projection.allocator.alloc(
+        u64,
+        projection.limits.max_commentary_segments_per_run,
+    );
+    errdefer projection.allocator.free(commentary_ends);
+    @memcpy(commentary_ends[0..wire.commentary_ends.len], wire.commentary_ends);
     const interrupted = !persistedTerminalRunPhase(wire.phase);
     const diagnostic = try projection.alloc(projection.limits.max_terminal_diagnostic_bytes);
     errdefer projection.free(diagnostic);
@@ -1163,6 +1179,8 @@ fn restoreRun(projection: RestoreProjection, wire: RunWire) RestoreError!task_st
         .input = input,
         .assistant = assistant,
         .assistant_redacted = wire.assistant_redacted,
+        .commentary_ends = commentary_ends,
+        .commentary_count = wire.commentary_ends.len,
         .assistant_output_kind = assistant_output_kind,
         .assistant_output_start = assistant_output_start,
         .active_phase = .queued,
@@ -1474,6 +1492,7 @@ fn deinitRestoredRun(projection: RestoreProjection, run: *task_state.RunRecord) 
         deinitRestoredTool(projection, tool);
     }
     projection.allocator.free(run.tools);
+    projection.allocator.free(run.commentary_ends);
     deinitRestoredRunInput(projection, &run.input);
     if (run.assistant.list.capacity != 0) projection.freeText(&run.assistant);
     if (run.execution_model_owned)
@@ -2078,6 +2097,13 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
                 !std.unicode.utf8ValidateSlice(run.assistant[0..start]))
                 return error.Invalid;
         }
+        const commentary_end = if (run.assistant_output_start) |start_wire|
+            std.math.cast(usize, start_wire) orelse return error.Invalid
+        else
+            run.assistant.len;
+        if (run.commentary_ends.len > limits.max_commentary_segments_per_run or
+            !validCommentaryEnds(run.assistant, run.commentary_ends, commentary_end))
+            return error.Invalid;
         if (run.event_projection_failure) |failure|
             if (!oneOf(failure, &.{ "consumer_rejected", "dependency_contract_failure" }))
                 return error.Invalid;
@@ -2270,6 +2296,22 @@ fn validBinding(binding: BindingWire, max: usize) bool {
 fn validText(value: []const u8, max: usize, allow_empty: bool) bool {
     return (allow_empty or value.len != 0) and value.len <= max and
         std.unicode.utf8ValidateSlice(value);
+}
+
+fn validCommentaryEnds(
+    assistant: []const u8,
+    ends: []const u64,
+    expected_end: usize,
+) bool {
+    var previous: usize = 0;
+    for (ends) |end_wire| {
+        const end = std.math.cast(usize, end_wire) orelse return false;
+        if (end < previous or end > assistant.len or
+            !std.unicode.utf8ValidateSlice(assistant[previous..end]))
+            return false;
+        previous = end;
+    }
+    return previous == expected_end;
 }
 
 fn oneOf(value: []const u8, options: []const []const u8) bool {
@@ -2633,10 +2675,11 @@ test "task store round-trips per-run execution generations across binding adopti
             .argument_values = null,
             .redacted = false,
         },
-        .assistant = "done",
+        .assistant = "note done",
         .assistant_redacted = false,
+        .commentary_ends = &.{5},
         .assistant_output_kind = "final",
-        .assistant_output_start = 0,
+        .assistant_output_start = 5,
         .phase = "completed",
         .outcome = "completed",
         .cause = null,
@@ -2698,7 +2741,12 @@ test "task store round-trips per-run execution generations across binding adopti
         "final",
         decoded.value.tasks[0].runs[0].assistant_output_kind.?,
     );
-    try std.testing.expectEqual(@as(?u64, 0), decoded.value.tasks[0].runs[0].assistant_output_start);
+    try std.testing.expectEqual(@as(?u64, 5), decoded.value.tasks[0].runs[0].assistant_output_start);
+    try std.testing.expectEqualSlices(
+        u64,
+        &.{5},
+        decoded.value.tasks[0].runs[0].commentary_ends,
+    );
     try std.testing.expectEqualStrings(
         "dependency_contract_failure",
         decoded.value.tasks[0].runs[1].event_projection_failure.?,
@@ -2748,6 +2796,7 @@ test "task store rejects states that would violate the product contract" {
         },
         .assistant = "done",
         .assistant_redacted = false,
+        .commentary_ends = &.{},
         .assistant_output_kind = "final",
         .assistant_output_start = 0,
         .phase = "completed",
@@ -2824,6 +2873,20 @@ test "task store rejects states that would violate the product contract" {
         .tasks = &tasks,
     };
     try validate(&state, testLimits());
+
+    runs[0].assistant = "note done";
+    runs[0].assistant_output_start = 5;
+    runs[0].commentary_ends = &.{5};
+    try validate(&state, testLimits());
+    runs[0].commentary_ends = &.{ 3, 3, 5 };
+    try validate(&state, testLimits());
+    runs[0].commentary_ends = &.{ 4, 3, 5 };
+    try std.testing.expectError(error.Invalid, validate(&state, testLimits()));
+    runs[0].commentary_ends = &.{4};
+    try std.testing.expectError(error.Invalid, validate(&state, testLimits()));
+    runs[0].assistant = "done";
+    runs[0].assistant_output_start = 0;
+    runs[0].commentary_ends = &.{};
 
     runs[0].assistant_output_start = 5;
     try std.testing.expectError(error.Invalid, validate(&state, testLimits()));
@@ -2934,6 +2997,7 @@ fn testLimits() Limits {
         .max_runs_per_task = 4,
         .max_compacts_per_task = 4,
         .max_tools_per_run = 4,
+        .max_commentary_segments_per_run = 16,
         .max_file_refs_per_tool = 4,
         .max_ui_history_per_task = 4,
         .max_workspace_bytes = 1024,

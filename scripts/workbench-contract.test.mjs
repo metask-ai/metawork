@@ -898,6 +898,23 @@ test("Agent output activity and Conversation context are strict typed facts", ()
   legacyOutput.tasks[0].runs[0].assistant = "legacy";
   assert.throws(() => decodeWorkbenchSnapshot(legacyOutput), /expected keys/);
 
+  const flattenedCommentary = clone(fixture);
+  flattenedCommentary.tasks[0].runs[0].output.commentary = "legacy";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(flattenedCommentary),
+    /expected array/,
+  );
+
+  const excessiveCommentary = clone(fixture);
+  excessiveCommentary.tasks[0].runs[0].output.commentary = Array.from(
+    { length: 257 },
+    () => "update",
+  );
+  assert.throws(
+    () => decodeWorkbenchSnapshot(excessiveCommentary),
+    /too many commentary segments/,
+  );
+
   const unclassifiedResponse = clone(fixture);
   unclassifiedResponse.tasks[0].runs[0].output.response = "answer";
   assert.throws(

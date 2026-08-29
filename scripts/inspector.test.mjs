@@ -45,7 +45,8 @@ if (!HTMLElement.prototype.scrollIntoView)
 if (!HTMLElement.prototype.scrollTo)
   HTMLElement.prototype.scrollTo = () => undefined;
 
-const { cleanup, render, screen } = await import("@testing-library/react");
+const { cleanup, fireEvent, render, screen } =
+  await import("@testing-library/react");
 const { default: userEvent } = await import("@testing-library/user-event");
 
 const vite = await createServer({
@@ -59,6 +60,12 @@ const { TaskOverview } = await vite.ssrLoadModule(
 );
 const { TaskContent } = await vite.ssrLoadModule(
   "/src/features/tasks/TaskContent.tsx",
+);
+const { RunProcess } = await vite.ssrLoadModule(
+  "/src/features/tasks/RunProcess.tsx",
+);
+const { deriveRunPresentation } = await vite.ssrLoadModule(
+  "/src/features/tasks/run-presentation.ts",
 );
 const { ApprovalPanel } = await vite.ssrLoadModule(
   "/src/features/approvals/ApprovalPanel.tsx",
@@ -82,7 +89,7 @@ function run(overrides = {}) {
       redacted: false,
     },
     output: {
-      commentary: "",
+      commentary: [],
       response: "Release is ready",
       responseKind: "final",
       provisional: "",
@@ -94,6 +101,26 @@ function run(overrides = {}) {
     cause: null,
     usage: { input: "12", output: "5", cacheRead: "0", cacheCreation: "0" },
     tools: [],
+    ...overrides,
+  };
+}
+
+function technicalTool(overrides = {}) {
+  return {
+    id: "tool-1",
+    order: "1",
+    name: "Read",
+    input: "",
+    progress: "",
+    content: "",
+    state: "completed",
+    isError: false,
+    elapsedMs: "12",
+    inputTruncated: false,
+    progressTruncated: false,
+    contentTruncated: false,
+    redacted: false,
+    fileRefs: [],
     ...overrides,
   };
 }
@@ -160,6 +187,7 @@ function renderTaskContent(value, locale = "en-US") {
         retryAvailable: false,
         responseDisabled: false,
         onPrepareRetry() {},
+        onOpenTool() {},
         onPreviewFile() {},
         onRespond() {},
         renderPendingUi() {
@@ -184,7 +212,7 @@ function localizedView(component, locale = "en-US") {
   );
 }
 
-function taskContentElement(value, revision = "1") {
+function taskContentElement(value, revision = "1", overrides = {}) {
   return localizedView(
     createElement(TaskContent, {
       task: value,
@@ -193,11 +221,27 @@ function taskContentElement(value, revision = "1") {
       retryAvailable: false,
       responseDisabled: false,
       onPrepareRetry() {},
+      onOpenTool() {},
       onPreviewFile() {},
       onRespond() {},
       renderPendingUi() {
         return null;
       },
+      ...overrides,
+    }),
+  );
+}
+
+function runProcessElement(
+  value,
+  { expanded = true, onExpandedChange = () => {}, onOpenTool } = {},
+) {
+  return localizedView(
+    createElement(RunProcess, {
+      presentation: deriveRunPresentation(value),
+      expanded,
+      onExpandedChange,
+      onOpenTool,
     }),
   );
 }
@@ -483,7 +527,7 @@ test("conversation separates commentary, Markdown response, and plain provisiona
         outcome: null,
         activity: { kind: "writing_response" },
         output: {
-          commentary: "Checked **two files**.",
+          commentary: ["Checked **two files**."],
           response: "",
           responseKind: null,
           provisional: "Draft **not Markdown**",
@@ -494,8 +538,9 @@ test("conversation separates commentary, Markdown response, and plain provisiona
     ],
   });
   const activeMarkup = renderTaskContent(active);
-  assert.match(activeMarkup, />Agent updates</);
-  assert.match(activeMarkup, /aria-expanded="true"/);
+  assert.match(activeMarkup, />Preparing a response</);
+  assert.match(activeMarkup, /data-streaming="false"/);
+  assert.doesNotMatch(activeMarkup, /aria-expanded=/);
   assert.match(activeMarkup, /Checked <strong>two files<\/strong>\./);
   assert.match(activeMarkup, /Draft \*\*not Markdown\*\*/);
   assert.doesNotMatch(activeMarkup, /Draft <strong>not Markdown<\/strong>/);
@@ -504,7 +549,7 @@ test("conversation separates commentary, Markdown response, and plain provisiona
     runs: [
       run({
         output: {
-          commentary: "A historical update",
+          commentary: ["A historical update"],
           response: "**Ready**",
           responseKind: "final",
           provisional: "",
@@ -515,12 +560,229 @@ test("conversation separates commentary, Markdown response, and plain provisiona
     ],
   });
   const completedMarkup = renderTaskContent(completed);
-  assert.match(completedMarkup, /aria-expanded="false"/);
-  assert.doesNotMatch(completedMarkup, /A historical update/);
+  assert.doesNotMatch(completedMarkup, /aria-expanded=/);
+  assert.match(completedMarkup, /A historical update/);
   assert.match(completedMarkup, /<strong>Ready<\/strong>/);
 });
 
-test("Agent updates disclosure remains user-controlled across revisions and Task switches", async () => {
+test("live revisions extend the narrative while replacing one bottom status in place", () => {
+  const activeRun = run({
+    phase: "running",
+    outcome: null,
+    activity: { kind: "thinking" },
+    output: {
+      commentary: ["I will inspect the structure."],
+      response: "",
+      responseKind: null,
+      provisional: "",
+      redacted: false,
+      provisionalRedacted: false,
+    },
+  });
+  const activeTask = task({
+    currentRunId: "9",
+    currentRunPhase: "running",
+    runs: [activeRun],
+  });
+  const view = render(taskContentElement(activeTask));
+  const statusSurface = document.querySelector(".run-process");
+  assert.ok(statusSurface);
+  assert.ok(screen.getByText("Analyzing"));
+
+  view.rerender(
+    taskContentElement(
+      {
+        ...activeTask,
+        runs: [
+          {
+            ...activeRun,
+            activity: { kind: "executing_tools", inFlight: "1" },
+            output: {
+              ...activeRun.output,
+              commentary: [
+                "I will inspect the structure.",
+                "The structure is clear; now updating it.",
+              ],
+            },
+            tools: [
+              technicalTool({
+                name: "Bash",
+                state: "running",
+                elapsedMs: "0",
+              }),
+            ],
+          },
+        ],
+      },
+      "2",
+    ),
+  );
+
+  assert.equal(document.querySelectorAll(".run-process").length, 1);
+  assert.equal(document.querySelector(".run-process"), statusSurface);
+  assert.equal(document.querySelectorAll(".run-commentary-item").length, 2);
+  assert.ok(screen.getByText("The structure is clear; now updating it."));
+  assert.ok(screen.getByRole("button", { name: "Running an operation" }));
+  assert.equal(screen.queryByText("Bash"), null);
+});
+
+test("discarded provisional output disappears on the next Snapshot revision", () => {
+  const activeRun = run({
+    phase: "running",
+    outcome: null,
+    activity: { kind: "writing_response" },
+    output: {
+      commentary: [],
+      response: "",
+      responseKind: null,
+      provisional: "This segment may be discarded",
+      redacted: false,
+      provisionalRedacted: false,
+    },
+  });
+  const activeTask = task({
+    currentRunId: "9",
+    currentRunPhase: "running",
+    runs: [activeRun],
+  });
+  const view = render(taskContentElement(activeTask));
+  assert.ok(screen.getByText("This segment may be discarded"));
+
+  view.rerender(
+    taskContentElement(
+      {
+        ...activeTask,
+        runs: [
+          {
+            ...activeRun,
+            activity: { kind: "waiting_model" },
+            output: { ...activeRun.output, provisional: "" },
+          },
+        ],
+      },
+      "2",
+    ),
+  );
+  assert.equal(screen.queryByText("This segment may be discarded"), null);
+  assert.ok(screen.getByText("Waiting for the next step"));
+});
+
+test("Run status keeps technical Tool summaries behind explicit disclosure", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  const opened = [];
+  const expandedChanges = [];
+  const value = run({
+    phase: "running",
+    outcome: null,
+    activity: { kind: "executing_tools", inFlight: "1" },
+    output: {
+      commentary: ["Checked **two files**."],
+      response: "",
+      responseKind: null,
+      provisional: "Live **plain text**",
+      redacted: false,
+      provisionalRedacted: false,
+    },
+    tools: [
+      {
+        id: "tool-1",
+        order: "1",
+        name: "Read",
+        input: "private input",
+        progress: "private progress",
+        content: "private result",
+        state: "running",
+        isError: false,
+        elapsedMs: "0",
+        inputTruncated: false,
+        progressTruncated: false,
+        contentTruncated: false,
+        redacted: false,
+        fileRefs: [],
+      },
+    ],
+  });
+  render(
+    runProcessElement(value, {
+      onExpandedChange: (expanded) => expandedChanges.push(expanded),
+      onOpenTool: (tool) => opened.push(tool.id),
+    }),
+  );
+
+  const header = screen.getByRole("button", {
+    name: /Inspecting the workspace/,
+  });
+  assert.equal(header.getAttribute("aria-expanded"), "true");
+  assert.equal(screen.queryByText("two files", { selector: "strong" }), null);
+  assert.equal(screen.queryByText("Live **plain text**"), null);
+  assert.equal(screen.queryByText("private input"), null);
+  assert.equal(screen.queryByText("private progress"), null);
+  assert.equal(screen.queryByText("private result"), null);
+
+  await user.click(
+    screen.getByRole("button", { name: "View details for Read" }),
+  );
+  assert.deepEqual(opened, ["tool-1"]);
+  await user.click(header);
+  assert.deepEqual(expandedChanges, [false]);
+});
+
+test("terminal Run process summarizes Tool evidence without implying Run failure", () => {
+  const value = run({
+    output: {
+      commentary: ["Finished checking"],
+      response: "Done",
+      responseKind: "final",
+      provisional: "",
+      redacted: false,
+      provisionalRedacted: false,
+    },
+    tools: [
+      {
+        id: "tool-1",
+        order: "1",
+        name: "Read",
+        input: "",
+        progress: "",
+        content: "",
+        state: "completed",
+        isError: false,
+        elapsedMs: "12",
+        inputTruncated: false,
+        progressTruncated: false,
+        contentTruncated: false,
+        redacted: false,
+        fileRefs: [],
+      },
+      {
+        id: "tool-2",
+        order: "2",
+        name: "Bash",
+        input: "",
+        progress: "",
+        content: "",
+        state: "failed",
+        isError: true,
+        elapsedMs: "4",
+        inputTruncated: false,
+        progressTruncated: false,
+        contentTruncated: false,
+        redacted: false,
+        fileRefs: [],
+      },
+    ],
+  });
+  const markup = renderToStaticMarkup(
+    runProcessElement(value, { expanded: false }),
+  );
+  assert.match(markup, />Work process</);
+  assert.match(markup, /2 operations/);
+  assert.doesNotMatch(markup, /1 failed/);
+  assert.doesNotMatch(markup, /Finished checking/);
+  assert.doesNotMatch(markup, />Work failed</);
+});
+
+test("technical process disclosure remains user-controlled across revisions and Task switches", async () => {
   const user = userEvent.setup({ document: dom.window.document });
   const active = task({
     id: "task-a",
@@ -532,21 +794,25 @@ test("Agent updates disclosure remains user-controlled across revisions and Task
         outcome: null,
         activity: { kind: "writing_response" },
         output: {
-          commentary: "Checking the workspace",
+          commentary: ["Checking the workspace"],
           response: "",
           responseKind: null,
           provisional: "",
           redacted: false,
           provisionalRedacted: false,
         },
+        tools: [technicalTool({ state: "running", elapsedMs: "0" })],
       }),
     ],
   });
   const view = render(taskContentElement(active));
-  let disclosure = screen.getByRole("button", { name: "Agent updates" });
-  assert.equal(disclosure.getAttribute("aria-expanded"), "true");
-  await user.click(disclosure);
+  let disclosure = screen.getByRole("button", {
+    name: "Preparing a response",
+  });
   assert.equal(disclosure.getAttribute("aria-expanded"), "false");
+  await user.click(disclosure);
+  disclosure = screen.getByRole("button", { name: "Preparing a response" });
+  assert.equal(disclosure.getAttribute("aria-expanded"), "true");
 
   view.rerender(
     taskContentElement(
@@ -557,7 +823,7 @@ test("Agent updates disclosure remains user-controlled across revisions and Task
             ...active.runs[0],
             output: {
               ...active.runs[0].output,
-              commentary: "Checking the workspace\n\nStill working",
+              commentary: ["Checking the workspace", "Still working"],
             },
           },
         ],
@@ -565,14 +831,237 @@ test("Agent updates disclosure remains user-controlled across revisions and Task
       "2",
     ),
   );
-  disclosure = screen.getByRole("button", { name: "Agent updates" });
-  assert.equal(disclosure.getAttribute("aria-expanded"), "false");
+  disclosure = screen.getByRole("button", { name: "Preparing a response" });
+  assert.equal(disclosure.getAttribute("aria-expanded"), "true");
 
   view.rerender(taskContentElement(task({ id: "task-b" }), "3"));
-  assert.equal(screen.queryByRole("button", { name: "Agent updates" }), null);
+  assert.equal(
+    screen.queryByRole("button", { name: "Preparing a response" }),
+    null,
+  );
   view.rerender(taskContentElement(active, "4"));
-  disclosure = screen.getByRole("button", { name: "Agent updates" });
+  disclosure = screen.getByRole("button", { name: "Preparing a response" });
+  assert.equal(disclosure.getAttribute("aria-expanded"), "true");
+});
+
+test("successful terminal keeps commentary visible and technical process collapsed", () => {
+  const activeRun = run({
+    phase: "running",
+    outcome: null,
+    activity: { kind: "writing_response" },
+    output: {
+      commentary: ["Working through the task"],
+      response: "",
+      responseKind: null,
+      provisional: "",
+      redacted: false,
+      provisionalRedacted: false,
+    },
+    tools: [technicalTool({ state: "running", elapsedMs: "0" })],
+  });
+  const active = task({
+    currentRunId: "9",
+    currentRunPhase: "running",
+    runs: [activeRun],
+  });
+  const view = render(taskContentElement(active));
+  const completed = task({
+    runs: [
+      {
+        ...activeRun,
+        phase: "completed",
+        activity: null,
+        outcome: "completed",
+        output: {
+          ...activeRun.output,
+          response: "Final response",
+          responseKind: "final",
+        },
+        tools: [technicalTool()],
+      },
+    ],
+  });
+  view.rerender(taskContentElement(completed, "2"));
+  const disclosure = screen.getByRole("button", { name: /^Work process/ });
   assert.equal(disclosure.getAttribute("aria-expanded"), "false");
+  assert.ok(screen.getByText("Working through the task"));
+  assert.ok(screen.getByText("Final response"));
+});
+
+test("terminal transition preserves reading position without expanding technical details", () => {
+  const activeRun = run({
+    phase: "running",
+    outcome: null,
+    activity: { kind: "thinking" },
+    output: {
+      commentary: ["Evidence the reader is reviewing"],
+      response: "",
+      responseKind: null,
+      provisional: "",
+      redacted: false,
+      provisionalRedacted: false,
+    },
+    tools: [technicalTool({ state: "running", elapsedMs: "0" })],
+  });
+  const active = task({
+    currentRunId: "9",
+    currentRunPhase: "running",
+    runs: [activeRun],
+  });
+  const view = render(taskContentElement(active));
+  const viewport = document.querySelector(".ai-conversation-viewport");
+  Object.defineProperties(viewport, {
+    scrollHeight: { configurable: true, value: 1200 },
+    clientHeight: { configurable: true, value: 400 },
+    scrollTop: { configurable: true, writable: true, value: 160 },
+  });
+  fireEvent.scroll(viewport);
+
+  view.rerender(
+    taskContentElement(
+      task({
+        runs: [
+          {
+            ...activeRun,
+            phase: "completed",
+            activity: null,
+            outcome: "completed",
+            output: {
+              ...activeRun.output,
+              response: "Final response",
+              responseKind: "final",
+            },
+            tools: [technicalTool()],
+          },
+        ],
+      }),
+      "2",
+    ),
+  );
+  const disclosure = screen.getByRole("button", { name: /^Work process/ });
+  assert.equal(disclosure.getAttribute("aria-expanded"), "false");
+  assert.ok(screen.getByText("Evidence the reader is reviewing"));
+  assert.ok(screen.getByRole("button", { name: "Jump to latest" }));
+});
+
+test("Task switches restore each Task reading position without cross-contamination", () => {
+  const taskA = task({ id: "task-a", runs: [run({ id: "run-a" })] });
+  const taskB = task({ id: "task-b", runs: [run({ id: "run-b" })] });
+  const view = render(taskContentElement(taskA));
+  const viewport = document.querySelector(".ai-conversation-viewport");
+  Object.defineProperties(viewport, {
+    scrollHeight: { configurable: true, value: 1400 },
+    clientHeight: { configurable: true, value: 400 },
+    scrollTop: { configurable: true, writable: true, value: 180 },
+  });
+  fireEvent.scroll(viewport);
+
+  view.rerender(taskContentElement(taskB, "2"));
+  viewport.scrollTop = 520;
+  fireEvent.scroll(viewport);
+  view.rerender(taskContentElement(taskA, "3"));
+  assert.equal(viewport.scrollTop, 180);
+  assert.ok(screen.getByRole("button", { name: "Jump to latest" }));
+});
+
+test("Tool summary forwards exact Run, Tool, and opener identity", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  const calls = [];
+  const value = task({
+    currentRunId: "9",
+    currentRunPhase: "running",
+    runs: [
+      run({
+        phase: "running",
+        outcome: null,
+        activity: { kind: "executing_tools", inFlight: "1" },
+        tools: [
+          {
+            id: "tool-7",
+            order: "1",
+            name: "Bash",
+            input: "private input",
+            progress: "",
+            content: "",
+            state: "running",
+            isError: false,
+            elapsedMs: "0",
+            inputTruncated: false,
+            progressTruncated: false,
+            contentTruncated: false,
+            redacted: false,
+            fileRefs: [],
+          },
+        ],
+      }),
+    ],
+  });
+  render(
+    taskContentElement(value, "1", {
+      onOpenTool: (runId, toolId, opener) =>
+        calls.push({ runId, toolId, opener }),
+    }),
+  );
+  await user.click(
+    screen.getByRole("button", { name: "Running an operation" }),
+  );
+  await user.click(
+    screen.getByRole("button", { name: "View details for Bash" }),
+  );
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].runId, "9");
+  assert.equal(calls[0].toolId, "tool-7");
+  assert.ok(calls[0].opener instanceof HTMLButtonElement);
+  assert.equal(screen.queryByText("private input"), null);
+});
+
+test("Inspector focus request opens the exact historical Tool detail once", async () => {
+  const historical = run({
+    id: "8",
+    tools: [
+      {
+        id: "tool-8",
+        order: "1",
+        name: "Bash",
+        input: "historical input",
+        progress: "",
+        content: "historical result",
+        state: "completed",
+        isError: false,
+        elapsedMs: "8",
+        inputTruncated: false,
+        progressTruncated: false,
+        contentTruncated: false,
+        redacted: false,
+        fileRefs: [],
+      },
+    ],
+  });
+  const current = run({ id: "9", tools: [] });
+  render(
+    localizedView(
+      createElement(TaskOverview, {
+        task: task({
+          currentRunId: "9",
+          runs: [historical, current],
+        }),
+        focusRequest: {
+          taskId: "3",
+          section: "work_process",
+          runId: "8",
+          toolId: "tool-8",
+          nonce: 1,
+        },
+        onFocusPending() {},
+      }),
+    ),
+  );
+  await new Promise((resolve) => requestAnimationFrame(resolve));
+  assert.ok(screen.getByText("historical input"));
+  assert.ok(screen.getByText("historical result"));
+  const toolButton = screen.getByRole("button", { name: /Bash/ });
+  assert.equal(toolButton.getAttribute("aria-expanded"), "true");
+  assert.equal(document.activeElement, toolButton);
 });
 
 test("partial output and terminal failure render one composite notice", () => {
@@ -583,7 +1072,7 @@ test("partial output and terminal failure render one composite notice", () => {
         outcome: "failed",
         cause: "timeout",
         output: {
-          commentary: "",
+          commentary: [],
           response: "An incomplete answer",
           responseKind: "partial",
           provisional: "",
@@ -605,7 +1094,7 @@ test("typed Run activity uses safe localized labels", () => {
     activity: { kind: "thinking" },
     outcome: null,
     output: {
-      commentary: "",
+      commentary: [],
       response: "",
       responseKind: null,
       provisional: "",
@@ -620,8 +1109,8 @@ test("typed Run activity uses safe localized labels", () => {
   });
   const thinkingContent = renderTaskContent(thinkingTask, "zh-CN");
   const thinkingInspector = renderInspector(thinkingTask, "zh-CN");
-  assert.match(thinkingContent, />正在思考</);
-  assert.match(thinkingInspector, />正在思考</);
+  assert.match(thinkingContent, />正在分析</);
+  assert.match(thinkingInspector, />正在分析</);
 
   const writingTask = task({
     currentRunId: "9",
@@ -634,16 +1123,16 @@ test("typed Run activity uses safe localized labels", () => {
       }),
     ],
   });
-  assert.match(renderTaskContent(writingTask, "zh-CN"), />正在撰写回复</);
+  assert.match(renderTaskContent(writingTask, "zh-CN"), />正在组织回复</);
 
   for (const [activity, expected] of [
-    [{ kind: "starting" }, "正在启动"],
-    [{ kind: "executing_tools", inFlight: "2" }, "正在执行工具"],
+    [{ kind: "starting" }, "正在准备"],
+    [{ kind: "executing_tools", inFlight: "2" }, "正在处理"],
     [
       { kind: "retrying_provider", attempt: "1", max: "2", delayMs: "50" },
-      "正在重试模型请求",
+      "正在重试连接",
     ],
-    [{ kind: "compacting_context" }, "正在压缩上下文"],
+    [{ kind: "compacting_context" }, "正在整理上下文"],
     [{ kind: "finalizing" }, "正在整理结果"],
   ]) {
     const activityTask = task({
@@ -678,8 +1167,8 @@ test("typed Run activity uses safe localized labels", () => {
       }),
     ],
   });
-  assert.match(renderTaskContent(waitingModel, "zh-CN"), />正在等待模型响应</);
-  assert.match(renderInspector(waitingModel, "zh-CN"), />正在等待模型响应</);
+  assert.match(renderTaskContent(waitingModel, "zh-CN"), />正在等待下一步</);
+  assert.match(renderInspector(waitingModel, "zh-CN"), />正在等待下一步</);
 
   const stoppingTask = task({
     currentRunId: "9",
@@ -694,7 +1183,7 @@ test("typed Run activity uses safe localized labels", () => {
   });
   const stoppingContent = renderTaskContent(stoppingTask, "zh-CN");
   assert.match(stoppingContent, />正在停止</);
-  assert.doesNotMatch(stoppingContent, />正在思考</);
+  assert.doesNotMatch(stoppingContent, />正在分析</);
 });
 
 test("Run file references render as preview entry without change semantics", () => {
@@ -704,7 +1193,7 @@ test("Run file references render as preview entry without change semantics", () 
     runs: [
       run({
         output: {
-          commentary: "",
+          commentary: [],
           response: "Done",
           responseKind: "final",
           provisional: "",
