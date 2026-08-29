@@ -135,6 +135,7 @@ import {
   accountMutationBlocksTaskAdmission,
   PendingScopes,
 } from "../workbench/pendingScopes.ts";
+import { taskModelSelectionPolicy } from "./task-model-selection.ts";
 
 function errorText(error: unknown) {
   return error instanceof Error ? error.message : String(error);
@@ -566,11 +567,6 @@ export default function App() {
   const selectedModelId = customModelConnectionSelected
     ? customModelId
     : selectedModel?.selectionId || "";
-  const customModelConnectionActive =
-    customModelConnectionSelected &&
-    customModelId.length > 0 &&
-    activeModelConnection?.state === "ready" &&
-    activeModelConnection.credentialStatus === "ready";
   const taskModelId = activeTask?.binding.model ?? "";
   const pendingTaskModelId = activeTask
     ? (pendingTaskModels[activeTask.id] ?? null)
@@ -580,17 +576,19 @@ export default function App() {
         (model) => model.selectionId === pendingTaskModelId,
       )
     : null;
-  const taskModelLabel = pendingTaskModel
+  const taskModelLabel = pendingTaskModelId
     ? t("task.model_pending", {
-        model: pendingTaskModel.displayName || pendingTaskModel.selectionId,
+        model:
+          pendingTaskModel?.displayName ||
+          pendingTaskModel?.selectionId ||
+          pendingTaskModelId,
       })
     : (activeTask?.binding.model ?? selectedModelLabel);
   const displayedTaskModelId = pendingTaskModelId ?? taskModelId;
-  const taskModelInCatalog =
-    activeTask === null ||
-    snapshot.account.models.some(
-      (model) => model.selectionId === activeTask.binding.model,
-    );
+  const taskModelPolicy = taskModelSelectionPolicy(
+    snapshot.account,
+    activeTask,
+  );
 
   const refreshSnapshot = useCallback(() => {
     const current = connection.current;
@@ -2214,15 +2212,16 @@ export default function App() {
         newTaskDraftActive ? selectedModelLabel : taskModelLabel || null
       }
       modelOptions={
-        newTaskDraftActive ? newTaskModelOptions : snapshot.account.models
+        newTaskDraftActive
+          ? newTaskModelOptions
+          : taskModelPolicy.authorityExact
+            ? snapshot.account.models
+            : []
       }
       selectedModelId={
         newTaskDraftActive ? selectedModelId : displayedTaskModelId
       }
-      modelEditable={
-        newTaskDraftActive ||
-        (activeTask !== null && !customModelConnectionActive)
-      }
+      modelEditable={newTaskDraftActive || taskModelPolicy.authorityExact}
       modelSelectionDisabled={
         bridgeUnavailable ||
         accountBusy ||
@@ -2230,9 +2229,7 @@ export default function App() {
           ? newTaskModelOptions.length === 0 ||
             (!customModelConnectionSelected &&
               snapshot.account.catalogState === "loading")
-          : snapshot.account.catalogState === "loading" ||
-            snapshot.account.models.length === 0 ||
-            !taskModelInCatalog)
+          : !taskModelPolicy.catalogUsable)
       }
       modelSelectionPending={
         accountBusy ||
@@ -2245,7 +2242,9 @@ export default function App() {
           ? customModelConnectionContext
           : newTaskDraftActive
             ? t("settings.default_model_help")
-            : t("settings.task_binding_model")
+            : taskModelPolicy.authorityExact
+              ? t("settings.task_model_help")
+              : t("settings.task_binding_model")
       }
       actionDisabled={workbenchMutationDisabled || workspaceBusy}
       stopAction={

@@ -2,38 +2,15 @@
 //! The opaque context deliberately makes the owner type unreachable to
 //! coordinators; these values are callback-scoped and must not enter jobs.
 
-const std = @import("std");
 const agent = @import("metawork_agent");
 const account = @import("metawork_account_contract");
+const account_execution = @import("product_control_account_execution");
 const product_schedule = @import("metawork_product_schedule");
 const mcp = @import("metawork_product_mcp");
 const mcp_contract = mcp.contract;
 
-pub const PreparedModelConnectionBinding = struct {
-    allocator: std.mem.Allocator,
-    connection_id: []u8,
-    model_id: []u8,
-
-    pub fn init(
-        allocator: std.mem.Allocator,
-        connection_id: []const u8,
-        model_id: []const u8,
-    ) std.mem.Allocator.Error!PreparedModelConnectionBinding {
-        const owned_connection_id = try allocator.dupe(u8, connection_id);
-        errdefer allocator.free(owned_connection_id);
-        return .{
-            .allocator = allocator,
-            .connection_id = owned_connection_id,
-            .model_id = try allocator.dupe(u8, model_id),
-        };
-    }
-
-    pub fn deinit(self: *PreparedModelConnectionBinding) void {
-        self.allocator.free(self.model_id);
-        self.allocator.free(self.connection_id);
-        self.* = undefined;
-    }
-};
+pub const PreparedModelConnectionBinding =
+    account_execution.PreparedModelConnectionBinding;
 
 pub const ExecutionHandoff = struct {
     context: *anyopaque,

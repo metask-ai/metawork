@@ -402,8 +402,9 @@ const OwnedBuffer = struct {
     }
 };
 
-/// Single-owner transfer from Account preparation into the App/Workbench
-/// commit path. Do not bit-copy this value. Transfer ownership only with
+/// Single-owner transfer from Account preparation into the
+/// Application/Product Control commit path.
+/// Do not bit-copy this value. Transfer ownership only with
 /// `take`; every live owner must call `deinit`, which securely clears the key.
 pub const OwnedExecutionConfig = struct {
     provider_kind: ProviderKind,

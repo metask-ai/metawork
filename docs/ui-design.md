@@ -448,7 +448,7 @@ Metask 已连接
 ### 6.1 核心规则
 
 - 每个 Task 同时最多一个 active operation；当前 operation 可以是 Run、manual compact 或 Conversation restore，三者不能并发；
-- 每个 Task 创建时建立第一个 execution binding epoch，固化不含 secret 的 Provider 与 opaque execution generation，并让对应 Agent Session 持有 owned ExecutionConfig；模型是独立的 Task binding，可在 Composer 为下一轮切换，切换不修改 `binding.epoch`；默认连接/API/模型变化不静默改写已有 Task；
+- 每个 Task 创建时建立第一个 execution binding epoch，固化不含 secret 的 Provider 与 opaque execution generation，并让对应 Agent Session 持有 owned ExecutionConfig；模型是独立的 Task binding，只有当前 Metask catalog 的 provider 与 execution generation 仍和该 Task 精确一致时才可在 Composer 为下一轮切换，切换不修改 `binding.epoch`；默认连接/API/credential authority 变化不静默改写已有 Task，并使其模型控件只读；
 - 多个 Task 可以后台运行，超过 Host executor 能力时明确排队；
 - 切换 Task 不停止执行；
 - `Stop task` 只停止当前执行，不删除历史、输入或已有文件；
@@ -580,7 +580,7 @@ New task 页面以 Composer 为绝对主视觉。其上方使用直接的行动�
 - New task 始终显示当前默认连接与模型；点击后只列出当前连接的 Host-validated 模型目录；
 - 弹层顶部显示当前连接的脱敏名称与 Provider，并提供 `模型连接设置…`；不得显示完整 secret；
 - 默认连接、Metask API/provider/credential authority 或 ready Model Connection 的模型变化更新 Account 当前默认 execution generation；只有同一已提交 Metask API 下修改默认模型时才只更新 Account preference、保持 generation 不变。两类默认变化都不热替换已有 live Task；detached 历史 Task 可在 §6.4 的 Conversation restore 中采用同 provider、可承载其 pinned model 的当前 credential authority，并通过窄 binding adoption 提交新 generation，任意 provider/model 变化仍只能走未来的显式 rebind；
-- 已有 Task 的 Composer 显示当前 binding epoch 的模型事实，历史按 epoch 保留原模型；第一版不提供 live Session 热切换；
+- 已有 Task 的 Composer 显示当前 binding epoch 的模型事实，历史按 epoch 保留原模型；exact Metask authority 成立时模型菜单列出该 catalog 的当前候选，即使 pinned model 已离开目录也允许切换到有效候选。authority 不一致或 Task 使用 Model Connection 时只显示 pinned model 和原因，不展示必然被 Host 拒绝的菜单；
 - 正在更新默认模型时只禁用相关选择和发送 admission，不冻结导航、历史阅读或其他 Task；
 - 模型不可用时说明原因并给出刷新或设置入口，不能留下永久 disabled selector。
 

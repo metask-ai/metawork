@@ -805,7 +805,8 @@ export const enUS = {
   "settings.signout_help":
     "This clears Metask credentials from this device. Task records and workspace files are preserved; live work may need to finish first.",
   "settings.task_binding_model":
-    "This task keeps the model bound when it was created.",
+    "This task keeps its pinned execution. The current default cannot safely change its model.",
+  "settings.task_model_help": "Choose the model for this task's next run.",
   "outcome.completed": "Completed",
   "outcome.stopped": "Stopped",
   "outcome.cancelled": "Stopped",
