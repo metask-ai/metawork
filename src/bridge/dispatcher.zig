@@ -1337,6 +1337,7 @@ pub const Dispatcher = struct {
             execution_generation,
             parsed.value.expectedSkillCatalogRevision,
             skill_selection_revision,
+            .{ .interactive = null },
         ) catch |err| {
             if (taskCreateRejection(err)) |reason|
                 return encodeTaskCreateResult(output, false, null, null, reason);

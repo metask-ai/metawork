@@ -378,6 +378,8 @@ pub const CreateCandidate = struct {
     execution_generation: u64,
     execution_provider: task_state.Provider,
     execution_model: []u8,
+    permission_profile: task_state.PermissionProfile,
+    permission_interaction: task_state.PermissionInteraction,
     workspace_id: u64,
     workspace_epoch: u64,
     workspace_root: []u8,
@@ -397,6 +399,8 @@ pub const CreateTaskInput = struct {
     execution: account_contract.ExecutionConfigInput,
     provider: task_state.Provider,
     model: []const u8,
+    permission_profile: task_state.PermissionProfile,
+    permission_interaction: task_state.PermissionInteraction,
     workspace_id: u64,
     workspace_epoch: u64,
     workspace_root: []const u8,
@@ -764,10 +768,15 @@ pub const Runtime = struct {
             "{d}",
             .{input.workspace_epoch},
         ) catch unreachable;
+        const permission = agentSessionPermission(
+            input.permission_profile,
+            input.permission_interaction,
+        );
         var binding = try task_agent_session.Binding.open(input.agent_runtime, .{
             .provider = providerToAgent(input.provider),
-            .permission_mode = .accept_edits,
-            .shell_policy = .unrestricted,
+            .permission_mode = permission.mode,
+            .shell_policy = permission.shell,
+            .permission_interaction = permission.interaction,
             .credential = input.execution.api_key,
             .model = input.model,
             .base_url = input.execution.target.base_url,
@@ -795,6 +804,8 @@ pub const Runtime = struct {
             .execution_generation = input.execution.execution_generation,
             .execution_provider = input.provider,
             .execution_model = execution_model,
+            .permission_profile = input.permission_profile,
+            .permission_interaction = input.permission_interaction,
             .workspace_id = input.workspace_id,
             .workspace_epoch = input.workspace_epoch,
             .workspace_root = projected_workspace.value,
@@ -862,6 +873,8 @@ pub const Runtime = struct {
                 .execution_generation = owned.execution_generation,
                 .execution_provider = owned.execution_provider,
                 .execution_model = owned.execution_model,
+                .permission_profile = owned.permission_profile,
+                .permission_interaction = owned.permission_interaction,
                 .workspace_id = owned.workspace_id,
                 .workspace_epoch = owned.workspace_epoch,
                 .workspace_root = owned.workspace_root,
@@ -1476,6 +1489,22 @@ pub const Runtime = struct {
     pub fn taskWorkspaceId(self: *const Runtime, task_id: u64) ?u64 {
         const task = self.findConst(task_id) orelse return null;
         return task.durable.workspace_id;
+    }
+
+    pub fn taskPermissionProfile(
+        self: *const Runtime,
+        task_id: u64,
+    ) ?task_state.PermissionProfile {
+        const task = self.findConst(task_id) orelse return null;
+        return task.durable.permission_profile;
+    }
+
+    pub fn taskPermissionInteraction(
+        self: *const Runtime,
+        task_id: u64,
+    ) ?task_state.PermissionInteraction {
+        const task = self.findConst(task_id) orelse return null;
+        return task.durable.permission_interaction;
     }
 
     pub fn taskWorkspaceEpoch(self: *const Runtime, task_id: u64) ?u64 {
@@ -2732,6 +2761,10 @@ pub const Runtime = struct {
         errdefer self.allocator.free(model);
         const job = try self.allocator.create(recovery_job.Job);
         errdefer self.allocator.destroy(job);
+        const permission = agentSessionPermission(
+            task.durable.permission_profile,
+            task.durable.permission_interaction,
+        );
         job.* = .{
             .allocator = self.allocator,
             .runtime = input.agent_runtime,
@@ -2755,6 +2788,9 @@ pub const Runtime = struct {
                 .target_execution_generation = input.execution.execution_generation,
                 .task_model = model,
                 .provider = providerToAgent(task.durable.execution_provider),
+                .permission_mode = permission.mode,
+                .shell_policy = permission.shell,
+                .permission_interaction = permission.interaction,
             },
         };
         checkpoint_live = false;
@@ -3902,6 +3938,32 @@ fn providerToAgent(provider: task_state.Provider) agent.ProviderKind {
     };
 }
 
+const AgentSessionPermission = struct {
+    mode: agent.PermissionMode,
+    shell: agent.ShellPolicy,
+    interaction: agent.PermissionInteraction,
+};
+
+/// The sole Product compiler from an admitted MetaWork profile to AgentCore
+/// execution configuration. Fresh create and checkpoint restore both consume
+/// this function; callers must not reconstruct the mapping independently.
+fn agentSessionPermission(
+    profile: task_state.PermissionProfile,
+    interaction: task_state.PermissionInteraction,
+) AgentSessionPermission {
+    return .{
+        .mode = switch (profile) {
+            .approval_required => .accept_edits,
+            .full_access => .full_access,
+        },
+        .shell = .unrestricted,
+        .interaction = switch (interaction) {
+            .interactive => .interactive,
+            .noninteractive => .noninteractive,
+        },
+    };
+}
+
 fn validateRunInput(
     task: *const task_state.Task,
     input: RunInput,
@@ -4082,6 +4144,8 @@ fn reserveRun(
         .execution_provider = task.durable.execution_provider,
         .execution_model = execution_model,
         .execution_model_owned = true,
+        .permission_profile = task.durable.permission_profile,
+        .permission_interaction = task.durable.permission_interaction,
         .input = input_record,
         .commentary_ends = commentary_ends,
         .tools = tools,

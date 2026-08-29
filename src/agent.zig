@@ -140,6 +140,7 @@ pub const runProviderProbe = provider_probe.run;
 pub const ProviderProbeCancellation = provider_probe.Cancellation;
 pub const PermissionMode = session_impl.PermissionMode;
 pub const ShellPolicy = session_impl.ShellPolicy;
+pub const PermissionInteraction = session_impl.PermissionInteraction;
 pub const EventReadyNotification = session_impl.EventReadyNotification;
 pub const EventReadyNotifier = session_impl.EventReadyNotifier;
 pub const SessionOpenOptions = session_impl.SessionOpenOptions;

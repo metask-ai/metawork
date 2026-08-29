@@ -35,6 +35,8 @@ pub const RecoveryExternalAuthority = runtime.RecoveryExternalAuthority;
 pub const RecoveryEffects = runtime.RecoveryEffects;
 
 pub const Provider = state.Provider;
+pub const PermissionProfile = state.PermissionProfile;
+pub const PermissionInteraction = state.PermissionInteraction;
 pub const RunOutcome = state.RunOutcome;
 pub const FileReferencePosition = state.FileReferencePositionView;
 pub const FileReferenceRange = state.FileReferenceRangeView;

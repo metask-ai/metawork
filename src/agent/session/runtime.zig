@@ -798,6 +798,7 @@ pub const Runtime = struct {
             .workspace_root = workspace_root,
             .workspace_home = workspace_home,
             .workspace_epoch = workspace_epoch,
+            .permission_interaction = options.permission_interaction,
             .control_block = control_block,
         };
         control_block.* = .{ .session = session };
@@ -1031,6 +1032,7 @@ pub const Runtime = struct {
             .workspace_root = workspace_root,
             .workspace_home = workspace_home,
             .workspace_epoch = workspace_epoch,
+            .permission_interaction = session_options.permission_interaction,
             .control_block = control_block,
             .next_run_id = options.expectation.last_run_id,
             .next_compact_id = options.expectation.last_compact_id,

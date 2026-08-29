@@ -242,6 +242,8 @@ pub const FakeCore = struct {
     skill_session_bound: bool = false,
     skill_policy_seen: bool = false,
     permission_rules_absent: bool = false,
+    last_permission_mode_code: ?u32 = null,
+    last_shell_policy_code: ?u32 = null,
     skill_run_seen: bool = false,
     skill_input_matches: bool = false,
     session_destroy_failures: usize = 0,
@@ -855,6 +857,8 @@ pub fn sessionCreate(
             fake_core.skill_session_bound = bound_catalog != null;
             fake_core.skill_policy_seen = bound_catalog != null and policy_valid;
             fake_core.permission_rules_absent = host.permission_rules == null;
+            fake_core.last_permission_mode_code = host.permission_mode_code;
+            fake_core.last_shell_policy_code = host.shell_policy_code;
             out_session.?.* = @ptrCast(session);
             return wire.STATUS_OK;
         }

@@ -49,6 +49,7 @@ pub const EventConsumerNotificationFailure = enum {
 /// This is execution control state, not a durable outcome.
 pub const TerminationSignal = union(enum) {
     interrupted: ExternalInterruption,
+    permission_required,
     callback_failure: CallbackFailure,
     event_pump_failure: EventPumpFailure,
     event_consumer_notification_failure: EventConsumerNotificationFailure,

@@ -139,6 +139,8 @@ const checkpoint_export_limits: lifecycle.CheckpointLimits = .{
 };
 
 pub const Provider = product_task.Provider;
+pub const PermissionProfile = product_task.PermissionProfile;
+pub const PermissionInteraction = product_task.PermissionInteraction;
 
 pub const TaskWorkspaceTrust = union(enum) {
     explicitly_trusted,
@@ -148,6 +150,12 @@ pub const TaskWorkspaceTrust = union(enum) {
 pub const TaskCreateInput = struct {
     workspace_root: []const u8,
     trust: TaskWorkspaceTrust,
+    permission_profile: ?PermissionProfile = null,
+};
+
+pub const TaskPermissionRequest = union(enum) {
+    interactive: ?PermissionProfile,
+    noninteractive: PermissionProfile,
 };
 
 pub const TaskWorkspaceRequest = union(enum) {
@@ -774,6 +782,7 @@ pub const Runtime = struct {
     preview_executor_shutdown: bool = false,
     projection_bytes: usize = 0,
     revision: u64 = 0,
+    default_permission_profile: PermissionProfile = .approval_required,
     account_execution: account_execution.State,
     canonical_user_home: ?[]u8,
     model_connection_capabilities: ModelConnectionCapabilities,
@@ -1840,6 +1849,19 @@ pub const Runtime = struct {
         return self.task_runtime.taskWorkspaceId(task_id) orelse error.UnknownTask;
     }
 
+    pub fn taskPermissionProfile(self: *Runtime, task_id: u64) Error!PermissionProfile {
+        self.syncLifecycle();
+        return self.task_runtime.taskPermissionProfile(task_id) orelse error.UnknownTask;
+    }
+
+    pub fn taskPermissionInteraction(
+        self: *Runtime,
+        task_id: u64,
+    ) Error!PermissionInteraction {
+        self.syncLifecycle();
+        return self.task_runtime.taskPermissionInteraction(task_id) orelse error.UnknownTask;
+    }
+
     /// Copies the canonical Workspace projection without allocating. Hidden
     /// Manual Workspaces that are no longer registered remain omitted;
     /// Automatic Workspaces stay projected so
@@ -1932,6 +1954,7 @@ pub const Runtime = struct {
             self.account_execution.generation(),
             null,
             null,
+            .{ .interactive = input.permission_profile },
         );
     }
 
@@ -1942,6 +1965,7 @@ pub const Runtime = struct {
         expected_execution_generation: u64,
         expected_skill_catalog_revision: ?[]const u8,
         expected_skill_selection_revision: ?u64,
+        permission: TaskPermissionRequest,
     ) Error!u64 {
         return self.createTaskInWorkspaceInternal(
             workspace_id,
@@ -1949,6 +1973,7 @@ pub const Runtime = struct {
             expected_execution_generation,
             expected_skill_catalog_revision,
             expected_skill_selection_revision,
+            permission,
             false,
         );
     }
@@ -1959,6 +1984,7 @@ pub const Runtime = struct {
         expected_execution_generation: u64,
         expected_skill_catalog_revision: ?[]const u8,
         expected_skill_selection_revision: ?u64,
+        permission: TaskPermissionRequest,
     ) Error!u64 {
         return switch (request) {
             .manual => |manual| self.createTaskInWorkspace(
@@ -1967,11 +1993,13 @@ pub const Runtime = struct {
                 expected_execution_generation,
                 expected_skill_catalog_revision,
                 expected_skill_selection_revision,
+                permission,
             ),
             .automatic => self.createAutomaticTask(
                 expected_execution_generation,
                 expected_skill_catalog_revision,
                 expected_skill_selection_revision,
+                permission,
             ),
         };
     }
@@ -1983,6 +2011,7 @@ pub const Runtime = struct {
         expected_execution_generation: u64,
         expected_skill_catalog_revision: ?[]const u8,
         expected_skill_selection_revision: ?u64,
+        permission: TaskPermissionRequest,
         allow_unowned_automatic: bool,
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
@@ -2047,6 +2076,14 @@ pub const Runtime = struct {
                 skill.skill_id,
             );
         const execution_input = self.account_execution.executionInput().?;
+        const permission_profile: PermissionProfile = switch (permission) {
+            .interactive => |profile| profile orelse self.default_permission_profile,
+            .noninteractive => |profile| profile,
+        };
+        const permission_interaction: PermissionInteraction = switch (permission) {
+            .interactive => .interactive,
+            .noninteractive => .noninteractive,
+        };
         var order_preparation = if (workspace_view.kind == .manual)
             try self.workspace.prepareOrder(workspace_view.id)
         else
@@ -2062,6 +2099,8 @@ pub const Runtime = struct {
             .execution = execution_input,
             .provider = accountProvider(execution_input.target.provider_kind),
             .model = self.admissionModel(),
+            .permission_profile = permission_profile,
+            .permission_interaction = permission_interaction,
             .workspace_id = workspace_id,
             .workspace_epoch = workspace_view.epoch,
             .workspace_root = workspace_view.canonical_root,
@@ -2109,6 +2148,7 @@ pub const Runtime = struct {
         expected_execution_generation: u64,
         expected_skill_catalog_revision: ?[]const u8,
         expected_skill_selection_revision: ?u64,
+        permission: TaskPermissionRequest,
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
@@ -2134,6 +2174,7 @@ pub const Runtime = struct {
             expected_execution_generation,
             null,
             null,
+            permission,
             true,
         );
         self.workspace.setAutomaticOwner(workspace.id, task_id);
@@ -2579,6 +2620,30 @@ pub const Runtime = struct {
     pub fn currentRevision(self: *Runtime) u64 {
         self.syncLifecycle();
         return self.revision;
+    }
+
+    pub fn defaultPermissionProfile(self: *const Runtime) PermissionProfile {
+        return self.default_permission_profile;
+    }
+
+    /// Changes only the default captured by future Tasks. Existing Task and
+    /// Session authority is immutable in this product slice.
+    pub fn setDefaultPermissionProfile(
+        self: *Runtime,
+        profile: PermissionProfile,
+    ) Error!bool {
+        self.syncLifecycle();
+        try self.requireTaskPersistenceMutation();
+        if (profile == self.default_permission_profile) return false;
+        const previous = self.default_permission_profile;
+        self.default_permission_profile = profile;
+        self.commitTaskStateIfConfigured() catch |err| {
+            if (err != error.TaskPersistenceOutcomeUnknown)
+                self.default_permission_profile = previous;
+            return err;
+        };
+        self.bumpRevision();
+        return true;
     }
 
     pub fn checkpointStoreHealth(self: *const Runtime) checkpoint_store.Health {
@@ -3891,6 +3956,7 @@ pub const Runtime = struct {
             input.execution_generation,
             null,
             null,
+            .{ .interactive = null },
         ) catch |err| return .{ .rejected = .{
             .cause = err,
             .reason = scheduledFailure(err),
@@ -4123,6 +4189,10 @@ pub const Runtime = struct {
             self.taskPersistenceLimits(),
         );
         defer recovered.deinit();
+        self.default_permission_profile = task_persistence.parseEnum(
+            PermissionProfile,
+            recovered.value.default_permission_profile,
+        ) orelse return error.TaskStoreCorrupt;
         for (recovered.value.failures) |failure|
             try self.recordTaskFailure(failure.task_id, failure.recent_order, failure.reason);
         for (recovered.value.workspaces) |workspace| {
@@ -4257,6 +4327,7 @@ pub const Runtime = struct {
             .allocated_tasks = task_frames.tasks,
             .allocated_failures = task_frames.failures,
             .state = .{
+                .default_permission_profile = @tagName(self.default_permission_profile),
                 .next_workspace_id = identity.next_id,
                 .next_workspace_recent_order = identity.next_recent_order,
                 .next_task_id = task_frames.next_task_id,
@@ -6562,6 +6633,8 @@ fn testRuntime() !Runtime {
         .execution_generation = 1,
         .execution_provider = .anthropic,
         .execution_model = execution_model,
+        .permission_profile = .approval_required,
+        .permission_interaction = .interactive,
         .input = .{ .text = .{
             .value = try control.copyBounded(
                 "inspect",
@@ -6582,6 +6655,8 @@ fn testRuntime() !Runtime {
             .execution_generation = 1,
             .execution_provider = .anthropic,
             .execution_model = execution_model,
+            .permission_profile = .approval_required,
+            .permission_interaction = .interactive,
             .workspace_id = 1,
             .workspace_root = workspace,
             .title = try control.copyBounded("", control.limits.max_task_title_bytes),
@@ -6840,7 +6915,13 @@ test "automatic Workspace root is optional and reserved from user registration" 
     try installTestExecution(&unavailable);
     try std.testing.expectError(
         error.WorkspaceUnavailable,
-        unavailable.createTaskForWorkspace(.automatic, 1, null, null),
+        unavailable.createTaskForWorkspace(
+            .automatic,
+            1,
+            null,
+            null,
+            .{ .interactive = null },
+        ),
     );
     unavailable.deinit();
 
@@ -8533,15 +8614,36 @@ test "mutation admission rejects stale execution and binding facts" {
 
     try std.testing.expectError(
         error.ExecutionGenerationMismatch,
-        control.createTaskInWorkspace(1, 1, 0, null, null),
+        control.createTaskInWorkspace(
+            1,
+            1,
+            0,
+            null,
+            null,
+            .{ .interactive = null },
+        ),
     );
     try std.testing.expectError(
         error.ExecutionGenerationMismatch,
-        control.createTaskInWorkspace(1, 1, 2, null, null),
+        control.createTaskInWorkspace(
+            1,
+            1,
+            2,
+            null,
+            null,
+            .{ .interactive = null },
+        ),
     );
     try std.testing.expectError(
         error.WorkspaceEpochMismatch,
-        control.createTaskInWorkspace(1, 2, 1, null, null),
+        control.createTaskInWorkspace(
+            1,
+            2,
+            1,
+            null,
+            null,
+            .{ .interactive = null },
+        ),
     );
     try std.testing.expectError(
         error.BindingEpochMismatch,
@@ -10571,6 +10673,8 @@ test "default snapshot budget contains the maximum structural projection" {
                 .execution_generation = 1,
                 .execution_provider = .anthropic,
                 .execution_model = execution_model,
+                .permission_profile = .approval_required,
+                .permission_interaction = .interactive,
                 .input = .{ .text = .{
                     .value = try control.copyBounded(
                         "x",
@@ -10624,6 +10728,8 @@ test "default snapshot budget contains the maximum structural projection" {
                 .execution_generation = 1,
                 .execution_provider = .anthropic,
                 .execution_model = execution_model,
+                .permission_profile = .approval_required,
+                .permission_interaction = .interactive,
                 .workspace_id = @intCast(task_index + 1),
                 .workspace_root = try control.copyBounded(root, limits.max_workspace_bytes),
                 .title = try control.copyBounded("", limits.max_task_title_bytes),
@@ -12216,7 +12322,14 @@ test "MCP startup health commits a safe degraded Runtime projection" {
     mcp_testing.installRefreshJob(&control.mcp.?, blocked_job);
     try std.testing.expectError(
         error.CatalogLoading,
-        control.createTaskInWorkspace(1, 1, 1, null, null),
+        control.createTaskInWorkspace(
+            1,
+            1,
+            1,
+            null,
+            null,
+            .{ .interactive = null },
+        ),
     );
     mcp_testing.state(&control.mcp.?).activation_failed = false;
     blocked_job.outcome = .unavailable;

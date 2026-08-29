@@ -352,6 +352,82 @@ test "Product Control Task admission consumes the fixed MetaWork Agent tool surf
     try std.testing.expect(fake_core.builtin_allowlist_seen);
 }
 
+test "Task permission profile is immutable and has one AgentCore compiler" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 3,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var workbench = try product_control.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 1,
+            .max_tasks = 3,
+            .max_workspaces = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        productControlConfiguration(),
+    );
+    defer workbench.deinit();
+    try installControlExecution(&workbench);
+
+    const default_task = try workbench.createTask(productControlTaskInput());
+    try std.testing.expectEqual(
+        product_control.PermissionProfile.approval_required,
+        try workbench.taskPermissionProfile(default_task),
+    );
+    try std.testing.expectEqual(
+        product_control.PermissionInteraction.interactive,
+        try workbench.taskPermissionInteraction(default_task),
+    );
+    fake_core.lock();
+    const default_mode = fake_core.last_permission_mode_code;
+    const default_shell = fake_core.last_shell_policy_code;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(?u32, wire.PERMISSION_ACCEPT_EDITS), default_mode);
+    try std.testing.expectEqual(@as(?u32, wire.SHELL_UNRESTRICTED), default_shell);
+
+    try std.testing.expect(try workbench.setDefaultPermissionProfile(.full_access));
+    try std.testing.expectEqual(
+        product_control.PermissionProfile.approval_required,
+        try workbench.taskPermissionProfile(default_task),
+    );
+    const inherited_full_access = try workbench.createTask(productControlTaskInput());
+    try std.testing.expectEqual(
+        product_control.PermissionProfile.full_access,
+        try workbench.taskPermissionProfile(inherited_full_access),
+    );
+    fake_core.lock();
+    const full_access_mode = fake_core.last_permission_mode_code;
+    const full_access_shell = fake_core.last_shell_policy_code;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(?u32, wire.PERMISSION_FULL_ACCESS), full_access_mode);
+    try std.testing.expectEqual(@as(?u32, wire.SHELL_UNRESTRICTED), full_access_shell);
+
+    var explicit_input = productControlTaskInput();
+    explicit_input.permission_profile = .approval_required;
+    const explicit_task = try workbench.createTask(explicit_input);
+    try std.testing.expectEqual(
+        product_control.PermissionProfile.approval_required,
+        try workbench.taskPermissionProfile(explicit_task),
+    );
+    fake_core.lock();
+    const explicit_mode = fake_core.last_permission_mode_code;
+    const explicit_shell = fake_core.last_shell_policy_code;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(?u32, wire.PERMISSION_ACCEPT_EDITS), explicit_mode);
+    try std.testing.expectEqual(@as(?u32, wire.SHELL_UNRESTRICTED), explicit_shell);
+}
+
 test "Run checkpoint commits immutable blob before durable descriptor" {
     fake_core.reset();
     const runtime = try createTestComposition(.{
@@ -629,7 +705,18 @@ test "restart recovery revalidates live authority and continues the same Convers
         1,
         catalog.revision,
         catalog.selection_revision,
+        .{ .interactive = .full_access },
     );
+    try std.testing.expectEqual(
+        product_control.PermissionProfile.full_access,
+        try first.taskPermissionProfile(task_id),
+    );
+    fake_core.lock();
+    const fresh_permission_mode = fake_core.last_permission_mode_code;
+    const fresh_shell_policy = fake_core.last_shell_policy_code;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(?u32, wire.PERMISSION_FULL_ACCESS), fresh_permission_mode);
+    try std.testing.expectEqual(@as(?u32, wire.SHELL_UNRESTRICTED), fresh_shell_policy);
     _ = try first.runTask(task_id, .{ .text = "remember restart nonce" });
     try waitCheckpointRecord(&first, &persistence);
     const restart_history = try std.testing.allocator.dupe(
@@ -779,6 +866,16 @@ test "restart recovery revalidates live authority and continues the same Convers
         "\"continuationAvailable\":true",
     );
     try std.testing.expectEqual(@as(u64, 2), try restored.taskBindingEpoch(task_id));
+    try std.testing.expectEqual(
+        product_control.PermissionProfile.full_access,
+        try restored.taskPermissionProfile(task_id),
+    );
+    fake_core.lock();
+    const restored_permission_mode = fake_core.last_permission_mode_code;
+    const restored_shell_policy = fake_core.last_shell_policy_code;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(?u32, wire.PERMISSION_FULL_ACCESS), restored_permission_mode);
+    try std.testing.expectEqual(@as(?u32, wire.SHELL_UNRESTRICTED), restored_shell_policy);
     try waitTaskSnapshot(
         &restored,
         "\"id\":\"1\"",
@@ -1084,7 +1181,13 @@ test "automatic Task binding adoption survives another restart and admits a seco
     var first_live = true;
     defer if (first_live) first.deinit();
     try installControlExecutionGeneration(&first, 1);
-    const task_id = try first.createTaskForWorkspace(.automatic, 1, null, null);
+    const task_id = try first.createTaskForWorkspace(
+        .automatic,
+        1,
+        null,
+        null,
+        .{ .interactive = null },
+    );
     _ = try first.runTask(task_id, .{ .text = "automatic first run" });
     try waitCheckpointRecord(&first, &persistence);
     const restart_history = try std.testing.allocator.dupe(
@@ -1768,6 +1871,7 @@ test "Product Control pins an async catalog and admits typed Skill through the e
         1,
         catalog.revision,
         catalog.selection_revision,
+        .{ .interactive = null },
     );
     const task_catalog = try workbench.taskCatalog(task_id);
     try std.testing.expectEqualStrings(catalog.revision, task_catalog.revision);
@@ -1920,6 +2024,7 @@ test "Manual Task persistence failure rolls back Workspace recent order" {
             1,
             null,
             null,
+            .{ .interactive = null },
         ),
     );
     const after = try workbench.copyWorkspaceProjections(&projection_storage);
@@ -2075,6 +2180,7 @@ test "automatic Workspace admission is Task-owned and Text-only" {
         1,
         null,
         null,
+        .{ .interactive = null },
     );
     const first_workspace = try workbench.taskWorkspaceId(first_task);
     try std.testing.expectEqual(
@@ -2118,6 +2224,7 @@ test "automatic Workspace admission is Task-owned and Text-only" {
             1,
             null,
             null,
+            .{ .interactive = null },
         ),
     );
     try std.testing.expectError(
@@ -2135,6 +2242,7 @@ test "automatic Workspace admission is Task-owned and Text-only" {
         1,
         null,
         null,
+        .{ .interactive = null },
     );
     const second_workspace = try workbench.taskWorkspaceId(second_task);
     try std.testing.expect(first_workspace != second_workspace);
@@ -2236,7 +2344,13 @@ test "automatic Workspace creation rolls back record and empty directory on Sess
 
     try std.testing.expectError(
         error.TaskCapacity,
-        workbench.createTaskForWorkspace(.automatic, 1, null, null),
+        workbench.createTaskForWorkspace(
+            .automatic,
+            1,
+            null,
+            null,
+            .{ .interactive = null },
+        ),
     );
     try std.testing.expectEqual(revision, workbench.currentRevision());
     try std.testing.expectEqual(@as(usize, 0), try directoryEntryCount(tmp.dir));
@@ -2393,8 +2507,20 @@ test "schedule rejection retains the automatic Task created before a full Run qu
     });
     fake_core.setNextPlan(.controlled);
     defer fake_core.releaseControlled();
-    const running_task = try workbench.createTaskForWorkspace(.automatic, 1, null, null);
-    const queued_task = try workbench.createTaskForWorkspace(.automatic, 1, null, null);
+    const running_task = try workbench.createTaskForWorkspace(
+        .automatic,
+        1,
+        null,
+        null,
+        .{ .interactive = null },
+    );
+    const queued_task = try workbench.createTaskForWorkspace(
+        .automatic,
+        1,
+        null,
+        null,
+        .{ .interactive = null },
+    );
     _ = try workbench.runTask(running_task, .{ .text = "hold worker" });
     try waitControlSnapshot(
         &workbench,
@@ -2540,6 +2666,7 @@ test "Product Control rejects stale Skill identity before Session or Run mutatio
             1,
             "stale-revision",
             catalog.selection_revision,
+            .{ .interactive = null },
         ),
     );
     fake_core.lock();
@@ -2554,6 +2681,7 @@ test "Product Control rejects stale Skill identity before Session or Run mutatio
         1,
         catalog.revision,
         catalog.selection_revision,
+        .{ .interactive = null },
     );
     try std.testing.expectError(
         error.StaleCatalog,
@@ -2640,6 +2768,7 @@ test "Product Control refreshes a Task only from the committed Workspace catalog
         1,
         null,
         null,
+        .{ .interactive = null },
     );
     _ = try workbench.runTask(task_id, .{ .text = "hold refresh" });
     try waitControlSnapshot(

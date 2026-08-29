@@ -23,6 +23,21 @@ pub const Provider = enum {
     gemini,
 };
 
+/// Product-owned execution permission policy. These values deliberately do
+/// not mirror every AgentCore PermissionMode: only profiles whose end-to-end
+/// behavior MetaWork has admitted belong here.
+pub const PermissionProfile = enum {
+    approval_required,
+    full_access,
+};
+
+/// Whether an uncovered permission may suspend this Task for a local user
+/// decision. The fact is immutable for the Task lifetime.
+pub const PermissionInteraction = enum {
+    interactive,
+    noninteractive,
+};
+
 pub const ToolState = enum { running, completed, failed };
 
 pub const RunPhase = enum {
@@ -96,6 +111,7 @@ pub const RunCause = enum {
     event_pipeline_failure,
     queue_capacity_failure,
     ui_pipeline_failure,
+    permission_required,
     agent_failure,
     stale_catalog,
     skill_not_found,
@@ -406,6 +422,8 @@ pub const RunRecord = struct {
     execution_provider: Provider,
     execution_model: []const u8,
     execution_model_owned: bool = false,
+    permission_profile: PermissionProfile,
+    permission_interaction: PermissionInteraction,
     input: RunInputRecord,
     assistant: TrackedText = .{},
     assistant_redacted: bool = false,
@@ -517,6 +535,8 @@ pub const DurableTaskRecord = struct {
     execution_generation: u64,
     execution_provider: Provider,
     execution_model: []u8,
+    permission_profile: PermissionProfile,
+    permission_interaction: PermissionInteraction,
     binding_epoch: u64 = 1,
     workspace_id: u64,
     workspace_epoch: u64 = 1,
@@ -1390,6 +1410,8 @@ test "event drain withholds terminal facts and assistant suffix until finalizati
         .execution_generation = 1,
         .execution_provider = .anthropic,
         .execution_model = "model",
+        .permission_profile = .approval_required,
+        .permission_interaction = .interactive,
         .input = .{ .text = .{ .value = @constCast("prompt") } },
         .commentary_ends = &commentary_ends,
         .active_phase = .running,
@@ -1405,6 +1427,8 @@ test "event drain withholds terminal facts and assistant suffix until finalizati
             .execution_generation = 1,
             .execution_provider = .anthropic,
             .execution_model = @constCast("model"),
+            .permission_profile = .approval_required,
+            .permission_interaction = .interactive,
             .workspace_id = 2,
             .workspace_root = @constCast("root"),
             .title = @constCast("title"),
@@ -1450,6 +1474,8 @@ test "event drain fails closed when an output segment remains unresolved" {
         .execution_generation = 1,
         .execution_provider = .anthropic,
         .execution_model = "model",
+        .permission_profile = .approval_required,
+        .permission_interaction = .interactive,
         .input = .{ .text = .{ .value = @constCast("prompt") } },
         .commentary_ends = &commentary_ends,
         .tools = &.{},
@@ -1466,6 +1492,8 @@ test "event drain fails closed when an output segment remains unresolved" {
             .execution_generation = 1,
             .execution_provider = .anthropic,
             .execution_model = @constCast("model"),
+            .permission_profile = .approval_required,
+            .permission_interaction = .interactive,
             .workspace_id = 2,
             .workspace_root = @constCast("root"),
             .title = @constCast("title"),

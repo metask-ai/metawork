@@ -75,6 +75,9 @@ pub const PreparedAttempt = struct {
     target_execution_generation: u64,
     task_model: []u8,
     provider: agent.ProviderKind,
+    permission_mode: agent.PermissionMode,
+    shell_policy: agent.ShellPolicy,
+    permission_interaction: agent.PermissionInteraction,
 };
 
 /// Callback-time facts supplied by composition when a completed restore
@@ -397,8 +400,9 @@ pub const Job = struct {
         var restored = agent_session.restore(self.runtime, .{
             .session = .{
                 .provider = self.attempt.provider,
-                .permission_mode = .accept_edits,
-                .shell_policy = .unrestricted,
+                .permission_mode = self.attempt.permission_mode,
+                .shell_policy = self.attempt.shell_policy,
+                .permission_interaction = self.attempt.permission_interaction,
                 .credential = execution.api_key,
                 .model = self.attempt.checkpoint.session.model,
                 .base_url = execution.target.base_url,

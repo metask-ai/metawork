@@ -80,6 +80,11 @@ pub const ProviderKind = session_control.ProviderKind;
 pub const PermissionMode = session_control.PermissionMode;
 pub const ShellPolicy = session_control.ShellPolicy;
 
+pub const PermissionInteraction = enum {
+    interactive,
+    noninteractive,
+};
+
 pub const PermissionRequest = sdk.PermissionRequest;
 pub const ParsedPermissionRequest = session_wire.ParsedPermissionRequest;
 pub const decodePermissionRequest = session_wire.decodePermissionRequest;
@@ -311,6 +316,7 @@ pub const SessionOpenOptions = struct {
     provider: ProviderKind,
     permission_mode: PermissionMode,
     shell_policy: ShellPolicy,
+    permission_interaction: PermissionInteraction = .interactive,
     credential: []const u8,
     model: []const u8,
     base_url: []const u8 = "",
@@ -499,6 +505,8 @@ pub const Session = struct {
     abort_status: ?sdk.Status = null,
     raw_abort_status_code: ?u32 = null,
     dependency_contract_failure: bool = false,
+    permission_interaction: PermissionInteraction = .interactive,
+    permission_stop_requested: bool = false,
     core_session_identity: CoreSessionIdentity = .unbound,
     cancel_requested: bool = false,
     active_refs: usize = 0,
@@ -593,6 +601,7 @@ pub const Session = struct {
         self.abort_status = null;
         self.raw_abort_status_code = null;
         self.dependency_contract_failure = false;
+        self.permission_stop_requested = false;
         self.cancel_requested = false;
         self.state = .queued;
         self.unlock();
@@ -1101,6 +1110,13 @@ pub const Session = struct {
         self.lock();
         defer self.unlock();
         return if (self.ui_active) self.ui_request_id else null;
+    }
+
+    pub fn permissionStopRequest(self: *Session) ?u64 {
+        self.lock();
+        defer self.unlock();
+        if (!self.permission_stop_requested or self.run_done) return null;
+        return self.active_run_id;
     }
 
     pub const PendingUiObservation = struct {
@@ -1888,10 +1904,13 @@ pub const Session = struct {
             self.recordTerminationSignal(.{ .callback_failure = .ui });
             return wire.UI_FATAL;
         }
-        const owned_request = self.agent_runtime.allocator.dupe(u8, encoded_request) catch {
-            self.recordTerminationSignal(.{ .event_pump_failure = .allocation });
-            return wire.UI_FATAL;
-        };
+        const owned_request = if (self.permission_interaction == .interactive)
+            self.agent_runtime.allocator.dupe(u8, encoded_request) catch {
+                self.recordTerminationSignal(.{ .event_pump_failure = .allocation });
+                return wire.UI_FATAL;
+            }
+        else
+            null;
 
         self.lock();
         if (!self.coreIdentityHealthyLocked() or
@@ -1899,19 +1918,27 @@ pub const Session = struct {
         {
             self.failCoreIdentityLocked();
             self.unlock();
-            self.agent_runtime.allocator.free(owned_request);
+            if (owned_request) |bytes| self.agent_runtime.allocator.free(bytes);
             return wire.UI_FATAL;
         }
         if (self.state != .running or self.ui_active) {
             setTerminationSignalLocked(self, .{ .callback_failure = .ui });
             self.unlock();
-            self.agent_runtime.allocator.free(owned_request);
+            if (owned_request) |bytes| self.agent_runtime.allocator.free(bytes);
             return wire.UI_FATAL;
+        }
+        if (self.permission_interaction == .noninteractive) {
+            setTerminationSignalLocked(self, .permission_required);
+            self.permission_stop_requested = true;
+            self.broadcast();
+            self.unlock();
+            _ = self.agent_runtime.notifyEventConsumer();
+            return wire.UI_UNAVAILABLE;
         }
         if (self.ui_request_id == std.math.maxInt(u64)) {
             self.dependency_contract_failure = true;
             self.unlock();
-            self.agent_runtime.allocator.free(owned_request);
+            self.agent_runtime.allocator.free(owned_request.?);
             return wire.UI_FATAL;
         }
         self.ui_request_id += 1;
@@ -1920,7 +1947,7 @@ pub const Session = struct {
         std.debug.assert(self.ui_request_json == null);
         std.debug.assert(self.ui_request_value == null);
         std.debug.assert(self.ui_response_json == null);
-        self.ui_request_json = owned_request;
+        self.ui_request_json = owned_request.?;
         self.ui_request_value = &parsed.value;
         self.state = .waiting_ui;
         self.broadcast();
@@ -2391,6 +2418,7 @@ fn abortReason(signal: TerminationSignal) u32 {
             wire.ABORT_TIMEOUT
         else
             wire.ABORT_USER_REQUEST,
+        .permission_required,
         .callback_failure,
         .event_pump_failure,
         .event_consumer_notification_failure,

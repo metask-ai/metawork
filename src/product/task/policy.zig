@@ -283,6 +283,11 @@ pub fn decisionForSignal(signal: ?agent.TerminationSignal) TerminalDecision {
                 .cause = causeForSignal(value),
             },
         },
+        .permission_required => .{
+            .phase = .stopped,
+            .outcome = .stopped,
+            .cause = .permission_required,
+        },
         .callback_failure,
         .event_pump_failure,
         .event_consumer_notification_failure,
@@ -298,6 +303,7 @@ pub fn causeForSignal(signal: agent.TerminationSignal) task_state.RunCause {
             .session_close => .session_close,
             .app_shutdown => .app_shutdown,
         },
+        .permission_required => .permission_required,
         .callback_failure => |failure| switch (failure) {
             .event => .event_pipeline_failure,
             .ui => .ui_pipeline_failure,
@@ -515,6 +521,16 @@ test "Agent terminal facts map into Product Task outcomes" {
     terminal.termination_signal = .{ .interrupted = .user_cancel };
     try std.testing.expectEqual(
         TerminalDecision{ .phase = .cancelled, .outcome = .cancelled, .cause = .user_cancel },
+        classifyAgentTerminal(&terminal),
+    );
+
+    terminal.termination_signal = .permission_required;
+    try std.testing.expectEqual(
+        TerminalDecision{
+            .phase = .stopped,
+            .outcome = .stopped,
+            .cause = .permission_required,
+        },
         classifyAgentTerminal(&terminal),
     );
 

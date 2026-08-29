@@ -947,6 +947,7 @@ test "MCP product chain reaches new Task authority after add restart refresh and
             1,
             null,
             null,
+            .{ .interactive = null },
         ),
     );
     var task_id: ?u64 = null;
@@ -958,6 +959,7 @@ test "MCP product chain reaches new Task authority after add restart refresh and
             1,
             null,
             null,
+            .{ .interactive = null },
         ) catch |err| switch (err) {
             error.CatalogLoading => null,
             else => return err,
