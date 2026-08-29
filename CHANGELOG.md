@@ -6,6 +6,29 @@
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-08-29
+
+### Added
+
+- 新增 Windows ARM64 签名打包流程；x64 与 ARM64 分别生成版本化安装器，并遵循相同的 Authenticode 验证规则。
+- 新增原生单实例协调与受控启动转交，并补充进程级生命周期验证。
+- 新增异步文件预览抽屉；Host 在读取前重新校验 Task、Run 与文件引用，并限制读取范围和响应大小。
+- 新增 Agent 对话过程呈现，区分过程说明与最终回复，并展示统一的 Run 执行状态。
+
+### Changed
+
+- AgentCore 升级至 ABI v1 revision 14，并锁定 macOS arm64/x64、Windows x64/ARM64 四个目标的独立 bundle。
+- Completion 脱离 AgentCore Runtime，改由 Agent 提供独立、一次性的非流式调用能力。
+- 将原 Workbench composition owner 收口为 Product Control，并将 Workspace 与 Schedule 状态分别归入各自 Runtime。
+- 收紧 Account execution authority，避免 Product Control 持有或推导不属于自身的执行配置事实。
+
+### Fixed
+
+- 修复 Task 终态事件尚未排空时提前发布结果，以及活跃 Run 阶段被错误视为终态的问题。
+- 修复 Task 模型选择未精确绑定 Metask execution authority 的问题。
+- 修复 Scheduled Task 将 execution credential 遗留在持久状态中的问题。
+- 修复单实例 endpoint 安全、启动转交重试和失败结果不确定的问题。
+
 ## [0.1.4] - 2026-08-26
 
 ### Added
@@ -111,7 +134,8 @@
 - 定时任务：本地进程内 cron 调度；窗口关闭后继续运行；下次启动执行单次 missed-run reconciliation。
 - 界面：中英双语；统一的 Metask 设计语言字号阶梯与组件体系。
 
-[unreleased]: https://github.com/metask-ai/metawork/compare/v0.1.4...HEAD
+[unreleased]: https://github.com/metask-ai/metawork/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/metask-ai/metawork/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/metask-ai/metawork/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/metask-ai/metawork/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/metask-ai/metawork/compare/v0.1.1...v0.1.2
