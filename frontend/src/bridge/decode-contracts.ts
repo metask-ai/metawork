@@ -253,6 +253,7 @@ const scheduledTaskFailureReasons = [
   "timer_unavailable",
   "persistence_failed",
   "host_interrupted",
+  "permission_required",
 ] as const;
 const taskCreateReasons = [
   "execution_changed",
@@ -2087,6 +2088,7 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
     "epoch",
     "title",
     "titleRedacted",
+    "permissionProfile",
     "enabled",
     "health",
     "failureReason",
@@ -2212,10 +2214,15 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
         (taskId !== null || reason !== null || taskOutcome !== null)
       )
         fail(occurrencePath, "claimed occurrence cannot expose terminal facts");
-      if (result === "submitted" && (taskId === null || reason !== null))
+      if (
+        result === "submitted" &&
+        (taskId === null ||
+          (reason !== null &&
+            (reason !== "permission_required" || taskOutcome === null)))
+      )
         fail(
           occurrencePath,
-          "submitted occurrence requires a Task without a rejection reason",
+          "submitted occurrence requires a Task and only permits a terminal permission reason",
         );
       if (
         result === "skipped" &&
@@ -2251,6 +2258,11 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
     },
   );
   const health = enumValue(item.health, `${path}.health`, scheduledTaskHealth);
+  const failureReason = nullableEnum(
+    item.failureReason,
+    `${path}.failureReason`,
+    scheduledTaskFailureReasons,
+  );
   const enabled = booleanValue(item.enabled, `${path}.enabled`);
   const nextRunAtUnixSeconds =
     item.nextRunAtUnixSeconds === null
@@ -2261,18 +2273,21 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
         );
   if (enabled !== (health === "ready" && nextRunAtUnixSeconds !== null))
     fail(path, "enabled schedule must be ready and expose its next run");
+  if ((health === "needs_attention") !== (failureReason !== null))
+    fail(path, "Schedule attention and failure reason must agree");
   return {
     id: positiveWireId(item.id, `${path}.id`),
     epoch: positiveWireId(item.epoch, `${path}.epoch`),
     title: stringValue(item.title, `${path}.title`),
     titleRedacted: booleanValue(item.titleRedacted, `${path}.titleRedacted`),
+    permissionProfile: enumValue(
+      item.permissionProfile,
+      `${path}.permissionProfile`,
+      permissionProfiles,
+    ),
     enabled,
     health,
-    failureReason: nullableEnum(
-      item.failureReason,
-      `${path}.failureReason`,
-      scheduledTaskFailureReasons,
-    ),
+    failureReason,
     execution: {
       generation: positiveWireId(
         execution.generation,
@@ -2984,6 +2999,28 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     scheduledTasks.length
   )
     fail("$.scheduledTasks", "scheduled Task identities must be unique");
+  const tasksById = new Map(tasks.map((task) => [task.id, task]));
+  for (const schedule of scheduledTasks) {
+    for (const occurrence of schedule.occurrences) {
+      if (occurrence.taskId === null) continue;
+      const occurrenceTask = tasksById.get(occurrence.taskId);
+      if (!occurrenceTask) continue;
+      if (occurrenceTask.permissionProfile !== schedule.permissionProfile)
+        fail(
+          "$.scheduledTasks",
+          "scheduled occurrence Task must preserve its definition permission profile",
+        );
+      if (
+        occurrenceTask.runs.some(
+          (run) => run.permissionInteraction !== "noninteractive",
+        )
+      )
+        fail(
+          "$.scheduledTasks",
+          "scheduled occurrence Runs must be noninteractive",
+        );
+    }
+  }
   for (const workspace of workspaces) {
     const taskCount = tasks.filter(
       (task) => task.workspaceId === workspace.id,

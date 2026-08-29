@@ -382,7 +382,7 @@ Disabled
 - 建议行是可执行模板，不是静态示例。整行点击进入创建确认层，预填任务说明、recurrence 和通知；自定义创建始终使用页首统一入口，不建立第二种创建协议；
 - 当前建议和自定义计划都直接使用自动工作区，不得因为标题或说明提到“项目”“工作区”或某个 Skill 就切换到 Manual Workspace；页面不显示 Workspace 配置；
 - 页面沿用 Skill 中心最大阅读宽度与克制的连续列表，不使用统计卡、流程画布或常驻左右分栏。每行显示识别图标、名称、自然语言计划摘要、短说明、下一次/最近结果；hover 才显示 `···`，键盘 focus 时动作同样可见；
-- 创建/编辑使用右侧 drawer，窄窗切为整页。按 `名称`、`任务内容`、`运行时间`、`确认摘要` 排列，名称输入始终位于表单最上方。任务内容只有一段 Text 指令，不提供 Workspace、Skill 类型切换、Skill 选择器、catalog revision 或参数配置；需要采用某个全局 Skill 时由用户在指令中说明。每次 occurrence 由 MetaWork 分配新的 Automatic Workspace，界面不要求用户理解或选择 Workspace；
+- 创建/编辑使用右侧 drawer，窄窗切为整页。按 `名称`、`任务内容`、`权限`、`运行时间`、`确认摘要` 排列，名称输入始终位于表单最上方。权限只显示已接通的 profile，新建时采用当前默认值，编辑时显示定义已固定的值；帮助文案明确无人值守运行在权限不足时停止并进入待处理，不提供临时升级或后台审批。任务内容只有一段 Text 指令，不提供 Workspace、Skill 类型切换、Skill 选择器、catalog revision 或参数配置；需要采用某个全局 Skill 时由用户在指令中说明。每次 occurrence 由 MetaWork 分配新的 Automatic Workspace，界面不要求用户理解或选择 Workspace；
 - Host 投影 `automaticWorkspaces = false` 时，Text 模板仍可查看，但创建/编辑不可保存；不得静默采用当前或第一个 Manual Workspace；
 - 时间选项优先呈现一次、每小时、每天、工作日、每周与每月，并明确本地 timezone；高级固定间隔可折叠，Renderer 只提交 Host 可验证的结构化 recurrence，不拥有 timer 或 occurrence；
 - 保存前提供一句完整确认摘要，例如“每个工作日 08:00 运行「每日工作简报」，结果完成后通知我”；provider、generation、Unix seconds 和 catalog revision 不进入产品文案；

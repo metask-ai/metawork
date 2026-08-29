@@ -928,6 +928,9 @@ export const enUS = {
   "scheduled.instruction": "Instruction",
   "scheduled.instruction_help":
     "If a global Skill should be used, describe that in the instruction.",
+  "scheduled.permission": "Permissions",
+  "scheduled.permission_help":
+    "Runs unattended. If an action is outside this profile, the run stops and needs your attention.",
   "scheduled.when": "When",
   "scheduled.recurrence.once": "Once",
   "scheduled.recurrence.interval": "Repeat",

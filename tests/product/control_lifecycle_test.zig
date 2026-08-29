@@ -2403,6 +2403,7 @@ test "Text schedule default creates a fresh automatic Workspace per occurrence" 
     const default_schedule = try workbench.createScheduledTask(.{
         .title = "Independent brief",
         .expected_execution_generation = 1,
+        .permission_profile = .full_access,
         .input = "Summarize current work",
         .recurrence = .{ .interval = .{
             .start_at_unix_seconds = 2_000,
@@ -2415,6 +2416,7 @@ test "Text schedule default creates a fresh automatic Workspace per occurrence" 
         workbench.createScheduledTask(.{
             .title = "Empty schedule input",
             .expected_execution_generation = 1,
+            .permission_profile = .approval_required,
             .input = "",
             .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
         }),
@@ -2454,6 +2456,11 @@ test "Text schedule default creates a fresh automatic Workspace per occurrence" 
     var snapshot_storage: [128 * 1024]u8 = undefined;
     const snapshot = try workbench.writeSnapshot(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"target\"") == null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"permissionProfile\":\"full_access\",\"permissionInteraction\":\"noninteractive\"",
+    ) != null);
 }
 
 test "schedule rejection retains the automatic Task created before a full Run queue" {
@@ -2502,6 +2509,7 @@ test "schedule rejection retains the automatic Task created before a full Run qu
     const schedule_id = try workbench.createScheduledTask(.{
         .title = "Queued brief",
         .expected_execution_generation = 1,
+        .permission_profile = .approval_required,
         .input = "Summarize current work",
         .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
     });

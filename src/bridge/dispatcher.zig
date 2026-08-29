@@ -2899,6 +2899,7 @@ pub const Dispatcher = struct {
         const definition = try scheduledTaskDefinition(
             parsed.value.title,
             parsed.value.expectedExecutionGeneration,
+            parsed.value.permissionProfile,
             instruction,
             parsed.value.recurrence,
         );
@@ -2937,6 +2938,7 @@ pub const Dispatcher = struct {
         const definition = try scheduledTaskDefinition(
             parsed.value.title,
             parsed.value.expectedExecutionGeneration,
+            parsed.value.permissionProfile,
             instruction,
             parsed.value.recurrence,
         );
@@ -3357,12 +3359,15 @@ fn encodeTaskCreateResult(
 fn scheduledTaskDefinition(
     title: []const u8,
     execution_generation_wire: []const u8,
+    permission_profile_wire: []const u8,
     instruction: []const u8,
     recurrence_value: std.json.Value,
 ) !product_control.ScheduledTaskDefinitionInput {
     return .{
         .title = title,
         .expected_execution_generation = try handlers.parseWireId(execution_generation_wire),
+        .permission_profile = handlers.permissionProfile(permission_profile_wire) orelse
+            return error.InvalidBridgePayload,
         .input = instruction,
         .recurrence = try handlers.parseScheduledTaskRecurrence(recurrence_value),
     };
@@ -4268,17 +4273,17 @@ test "Dispatcher validates authority before domain calls and preserves committed
         source,
         &response,
     );
-    const unavailable_permission_default = native_dispatcher.dispatch(
+    const permission_default = native_dispatcher.dispatch(
         "{\"id\":\"permission-default\",\"command\":\"metawork.permissions.setDefaultProfile\",\"payload\":{\"permissionProfile\":\"full_access\"}}",
         source,
         &response,
     );
     try std.testing.expect(std.mem.indexOf(
         u8,
-        unavailable_permission_default,
-        "\"handler_failed\"",
+        permission_default,
+        "\"changed\":true,\"defaultProfile\":\"full_access\"",
     ) != null);
-    try std.testing.expectEqual(initial_revision, workbench.currentRevision());
+    try std.testing.expectEqual(initial_revision + 1, workbench.currentRevision());
     const login = native_dispatcher.dispatch(
         "{\"id\":\"login\",\"command\":\"metawork.account.beginLogin\",\"payload\":{}}",
         source,

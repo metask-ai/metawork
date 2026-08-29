@@ -144,7 +144,7 @@ pub const PermissionInteraction = product_task.PermissionInteraction;
 // Flipped only when every admitted profile is complete across manual and
 // Scheduled Task execution. Bridge mutations and snapshot publication consume
 // this same gate so a hidden capability cannot remain callable.
-pub const permission_profiles_available = false;
+pub const permission_profiles_available = true;
 
 pub const TaskWorkspaceTrust = union(enum) {
     explicitly_trusted,
@@ -179,6 +179,7 @@ pub const ScheduledTaskDefinitionInput = struct {
     expected_execution_generation: u64,
     input: []const u8,
     recurrence: ScheduledTaskRecurrence,
+    permission_profile: PermissionProfile,
 };
 
 pub const WorkspaceAuthorization = product_workspace.Authorization;
@@ -3969,7 +3970,7 @@ pub const Runtime = struct {
             input.execution_generation,
             null,
             null,
-            .{ .interactive = null },
+            .{ .noninteractive = taskProfileFromSchedule(input.permission_profile) },
         ) catch |err| return .{ .rejected = .{
             .cause = err,
             .reason = scheduledFailure(err),
@@ -3998,11 +3999,14 @@ pub const Runtime = struct {
     fn scheduleTaskTerminal(
         context: *anyopaque,
         task_id: u64,
-    ) ?product_schedule.TaskOutcome {
+    ) ?product_schedule.TaskTerminal {
         const self: *Runtime = @ptrCast(@alignCast(context));
-        const outcome = self.task_runtime.lastTerminalOutcome(task_id) orelse
+        const terminal = self.task_runtime.lastTerminalSummary(task_id) orelse
             return null;
-        return scheduledTaskOutcome(outcome);
+        return .{
+            .outcome = scheduledTaskOutcome(terminal.outcome),
+            .permission_required = terminal.permission_required,
+        };
     }
 
     fn scheduleRedaction(self: *Runtime) product_schedule.Redaction {
@@ -4113,6 +4117,9 @@ pub const Runtime = struct {
                 self.account_execution.provider().?,
             )),
             .execution_model = self.admissionModel(),
+            .permission_profile = scheduledPermissionProfile(
+                input.permission_profile,
+            ),
             .input = scheduled_input,
             .recurrence = input.recurrence,
         };
@@ -5918,6 +5925,24 @@ fn scheduledProvider(provider: Provider) product_schedule.Provider {
         .anthropic => .anthropic,
         .openai => .openai,
         .gemini => .gemini,
+    };
+}
+
+fn scheduledPermissionProfile(
+    profile: PermissionProfile,
+) product_schedule.PermissionProfile {
+    return switch (profile) {
+        .approval_required => .approval_required,
+        .full_access => .full_access,
+    };
+}
+
+fn taskProfileFromSchedule(
+    profile: product_schedule.PermissionProfile,
+) PermissionProfile {
+    return switch (profile) {
+        .approval_required => .approval_required,
+        .full_access => .full_access,
     };
 }
 
@@ -7773,6 +7798,7 @@ test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {
         control.createScheduledTask(.{
             .title = "Independent review",
             .expected_execution_generation = 1,
+            .permission_profile = .approval_required,
             .input = "Review current work",
             .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
         }),
@@ -7785,6 +7811,7 @@ test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {
     const id = try control.createScheduledTask(.{
         .title = "Review SECRET-KEY",
         .expected_execution_generation = 1,
+        .permission_profile = .full_access,
         .input = "Inspect SECRET-KEY usage",
         .recurrence = .{ .interval = .{
             .start_at_unix_seconds = 2_000,
@@ -7903,6 +7930,7 @@ test "execution replacement durably scrubs Schedule before ownership transfer" {
     const id = try control.createScheduledTask(.{
         .title = "Use NEXT-SECRET and TASK-SECRET",
         .expected_execution_generation = 1,
+        .permission_profile = .approval_required,
         .input = "Review NEXT-SECRET with TASK-SECRET",
         .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
     });
@@ -7951,6 +7979,7 @@ test "execution replacement durably scrubs Schedule before ownership transfer" {
     const blocked_id = try control.createScheduledTask(.{
         .title = "Use BLOCKED-SECRET",
         .expected_execution_generation = 2,
+        .permission_profile = .approval_required,
         .input = "Review BLOCKED-SECRET",
         .recurrence = .{ .once = .{ .at_unix_seconds = 3_000 } },
     });
@@ -8049,6 +8078,7 @@ test "Scheduled Task execution drift becomes needs attention without blocking Ac
     const id = try control.createScheduledTask(.{
         .title = "Review current work",
         .expected_execution_generation = 1,
+        .permission_profile = .approval_required,
         .input = "Review current work",
         .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
     });

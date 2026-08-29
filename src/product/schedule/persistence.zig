@@ -178,6 +178,7 @@ const ItemWire = struct {
     execution_generation: u64,
     execution_provider: []const u8,
     execution_model: []const u8,
+    permission_profile: []const u8,
     input: InputWire,
     recurrence: RecurrenceWire,
     enabled: bool,
@@ -279,6 +280,10 @@ pub fn decode(
                     wire.execution_provider,
                 ) orelse return error.ScheduledTaskStoreCorrupt,
                 .execution_model = wire.execution_model,
+                .permission_profile = parseEnum(
+                    scheduled.PermissionProfile,
+                    wire.permission_profile,
+                ) orelse return error.ScheduledTaskStoreCorrupt,
                 .input = input_value,
                 .recurrence = recurrence,
             },
@@ -312,6 +317,8 @@ fn encodeItem(writer: *std.Io.Writer, item: *const scheduled.Item) !void {
     try jsonString(writer, @tagName(item.execution_provider));
     try writer.writeAll(",\"execution_model\":");
     try jsonString(writer, item.execution_model);
+    try writer.writeAll(",\"permission_profile\":");
+    try jsonString(writer, @tagName(item.permission_profile));
     try writer.writeAll(",\"input\":");
     try encodeInput(writer, item.input.borrowed());
     try writer.writeAll(",\"recurrence\":");
@@ -455,6 +462,7 @@ test "scheduled task store round trips bounded occurrence history" {
         .execution_generation = 9,
         .execution_provider = .openai,
         .execution_model = "gpt-test",
+        .permission_profile = .full_access,
         .input = "Summarize today's work",
         .recurrence = .{ .interval = .{
             .start_at_unix_seconds = 2_000,
@@ -463,12 +471,13 @@ test "scheduled task store round trips bounded occurrence history" {
     }, 1_000);
     const item = store.find(id).?;
     try store.markSubmitted(item, 2_000, 2_001, .timer, 42);
-    try store.finalizeOccurrenceTask(item, 2_000, .timer, .completed);
+    try store.finalizeOccurrenceTask(item, 2_000, .timer, .completed, null);
     const default_id = try store.create(.{
         .title = "Independent brief",
         .execution_generation = 9,
         .execution_provider = .openai,
         .execution_model = "gpt-test",
+        .permission_profile = .approval_required,
         .input = "Summarize current work",
         .recurrence = .{ .once = .{ .at_unix_seconds = 3_000 } },
     }, 1_000);
@@ -499,6 +508,10 @@ test "scheduled task store round trips bounded occurrence history" {
     try std.testing.expect(restored_item.occurrences()[0].notification_sent);
     try std.testing.expectEqualStrings("Daily brief", restored_item.title);
     try std.testing.expectEqual(
+        scheduled.PermissionProfile.full_access,
+        restored_item.permission_profile,
+    );
+    try std.testing.expectEqual(
         @as(u64, 84),
         restored.find(default_id).?.occurrences()[0].task_id,
     );
@@ -523,6 +536,14 @@ test "scheduled task store rejects unknown fields and revisions" {
         decode(
             std.testing.allocator,
             "{\"schema_version\":1,\"next_id\":1,\"items\":[],\"extra\":true}",
+            limits,
+        ),
+    );
+    try std.testing.expectError(
+        error.ScheduledTaskStoreCorrupt,
+        decode(
+            std.testing.allocator,
+            "{\"schema_version\":1,\"next_id\":2,\"items\":[{\"id\":1,\"epoch\":1,\"title\":\"missing profile\",\"execution_generation\":1,\"execution_provider\":\"openai\",\"execution_model\":\"gpt-test\",\"input\":{\"kind\":\"text\",\"text\":\"inspect\"},\"recurrence\":{\"kind\":\"once\",\"at_unix_seconds\":2},\"enabled\":true,\"health\":\"ready\",\"failure_reason\":null,\"next_run_at_unix_seconds\":2,\"occurrences\":[]}]}",
             limits,
         ),
     );

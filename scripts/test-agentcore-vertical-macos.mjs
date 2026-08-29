@@ -298,6 +298,7 @@ try {
     expectedExecutionGeneration,
     expectedSkillCatalogRevision: catalogSnapshot.catalog.revision,
     expectedSkillSelectionRevision: catalogSnapshot.catalog.selectionRevision,
+    permissionProfile: "approval_required",
   });
   if (
     createResult !== null &&

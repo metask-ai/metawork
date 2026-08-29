@@ -261,12 +261,14 @@ test("Scheduled Task projection decodes recurrence and occurrence without secret
   scheduled.capabilities.scheduledTaskPersistence = true;
   scheduled.capabilities.scheduledTaskPersistenceHealth = "ready";
   scheduled.capabilities.backgroundScheduleWake = true;
+  scheduled.tasks[0].runs[0].permissionInteraction = "noninteractive";
   scheduled.scheduledTasks = [
     {
       id: "8",
       epoch: "2",
       title: "Daily summary",
       titleRedacted: false,
+      permissionProfile: "approval_required",
       enabled: true,
       health: "ready",
       failureReason: null,
@@ -300,6 +302,27 @@ test("Scheduled Task projection decodes recurrence and occurrence without secret
     },
   ];
   assert.deepEqual(decodeWorkbenchSnapshot(scheduled), scheduled);
+
+  const mismatchedPermissionProfile = clone(scheduled);
+  mismatchedPermissionProfile.scheduledTasks[0].permissionProfile =
+    "full_access";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(mismatchedPermissionProfile),
+    /preserve its definition permission profile/,
+  );
+
+  const permissionRequired = clone(scheduled);
+  permissionRequired.scheduledTasks[0].enabled = false;
+  permissionRequired.scheduledTasks[0].health = "needs_attention";
+  permissionRequired.scheduledTasks[0].failureReason = "permission_required";
+  permissionRequired.scheduledTasks[0].nextRunAtUnixSeconds = null;
+  permissionRequired.scheduledTasks[0].occurrences[0].reason =
+    "permission_required";
+  permissionRequired.scheduledTasks[0].occurrences[0].taskOutcome = "stopped";
+  assert.deepEqual(
+    decodeWorkbenchSnapshot(permissionRequired),
+    permissionRequired,
+  );
 
   const rejectedAfterTaskCreation = clone(scheduled);
   rejectedAfterTaskCreation.scheduledTasks[0].occurrences[0] = {

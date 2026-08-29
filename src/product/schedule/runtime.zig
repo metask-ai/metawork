@@ -12,6 +12,7 @@ const view = @import("product_schedule_view");
 
 pub const Recurrence = state.Recurrence;
 pub const Provider = state.Provider;
+pub const PermissionProfile = state.PermissionProfile;
 pub const Definition = state.Definition;
 const Occurrence = state.Occurrence;
 const OccurrenceSource = state.OccurrenceSource;
@@ -175,6 +176,7 @@ const Claim = struct {
     title: []u8,
     input: []u8,
     execution_generation: u64,
+    permission_profile: PermissionProfile,
 
     pub fn deinit(self: *Claim) void {
         self.allocator.free(self.title);
@@ -202,6 +204,12 @@ pub const TaskLaunch = struct {
     title: []const u8,
     input: []const u8,
     execution_generation: u64,
+    permission_profile: PermissionProfile,
+};
+
+pub const TaskTerminal = struct {
+    outcome: TaskOutcome,
+    permission_required: bool,
 };
 
 pub const TaskLaunchFailure = struct {
@@ -219,7 +227,7 @@ pub const TaskEffects = struct {
     context: *anyopaque,
     has_active_fn: *const fn (*anyopaque, u64) bool,
     launch_fn: *const fn (*anyopaque, TaskLaunch) TaskLaunchOutcome,
-    terminal_fn: *const fn (*anyopaque, u64) ?TaskOutcome,
+    terminal_fn: *const fn (*anyopaque, u64) ?TaskTerminal,
 
     fn hasActive(self: TaskEffects, task_id: u64) bool {
         return self.has_active_fn(self.context, task_id);
@@ -229,7 +237,7 @@ pub const TaskEffects = struct {
         return self.launch_fn(self.context, input);
     }
 
-    fn terminal(self: TaskEffects, task_id: u64) ?TaskOutcome {
+    fn terminal(self: TaskEffects, task_id: u64) ?TaskTerminal {
         return self.terminal_fn(self.context, task_id);
     }
 };
@@ -554,6 +562,7 @@ pub const Runtime = struct {
             .title = title,
             .input = input,
             .execution_generation = candidate_item.execution_generation,
+            .permission_profile = candidate_item.permission_profile,
         } };
     }
 
@@ -630,8 +639,7 @@ pub const Runtime = struct {
     fn finishCompletionNoFail(
         self: *Runtime,
         pending: PendingCompletion,
-        outcome: OccurrenceTaskOutcome,
-        notification_kind: NotificationKind,
+        terminal: TaskTerminal,
         redaction: Redaction,
     ) bool {
         var candidate = self.store.clone(self.allocator) catch return false;
@@ -641,7 +649,8 @@ pub const Runtime = struct {
             candidate.find(pending.scheduled_task_id) orelse return false,
             pending.planned_at_unix_seconds,
             pending.source,
-            outcome,
+            terminal.outcome,
+            if (terminal.permission_required) .permission_required else null,
         ) catch return false;
         self.commitCandidate(&candidate, redaction) catch return false;
         self.replace(&candidate);
@@ -651,7 +660,12 @@ pub const Runtime = struct {
             .scheduled_task_id = committed.id,
             .task_id = pending.task_id,
             .title = committed.title,
-            .kind = notification_kind,
+            .kind = if (terminal.permission_required)
+                .needs_attention
+            else if (terminal.outcome == .completed)
+                .completed
+            else
+                .failed,
         });
         return true;
     }
@@ -685,6 +699,7 @@ pub const Runtime = struct {
             .title = claim.title,
             .input = claim.input,
             .execution_generation = claim.execution_generation,
+            .permission_profile = claim.permission_profile,
         })) {
             .submitted => |task_id| task_id,
             .rejected => |failure| {
@@ -707,11 +722,10 @@ pub const Runtime = struct {
         redaction: Redaction,
     ) bool {
         const pending = self.nextPendingCompletion() orelse return false;
-        const terminal_outcome = tasks.terminal(pending.task_id) orelse return false;
+        const terminal = tasks.terminal(pending.task_id) orelse return false;
         return self.finishCompletionNoFail(
             pending,
-            terminal_outcome,
-            if (terminal_outcome == .completed) .completed else .failed,
+            terminal,
             redaction,
         );
     }
@@ -954,6 +968,8 @@ fn reconcileBindingsInStore(
 const TestEffects = struct {
     now: u64 = 100,
     commit_result: PersistenceCommit = .committed,
+    notification_kind: ?NotificationKind = null,
+    notification_task_id: u64 = 0,
 
     fn clock(context: ?*anyopaque) ?u64 {
         const self: *TestEffects = @ptrCast(@alignCast(context.?));
@@ -986,6 +1002,50 @@ const TestEffects = struct {
             .context = self,
             .enabled = true,
             .commit_fn = commit,
+        };
+    }
+
+    fn notify(context: ?*anyopaque, notification: Notification) bool {
+        const self: *TestEffects = @ptrCast(@alignCast(context.?));
+        self.notification_kind = notification.kind;
+        self.notification_task_id = notification.task_id;
+        return true;
+    }
+
+    fn notifier(self: *TestEffects) Notifier {
+        return .{
+            .context = self,
+            .enabled = true,
+            .notify_fn = notify,
+        };
+    }
+};
+
+const TestTasks = struct {
+    launched_profile: ?PermissionProfile = null,
+    terminal: ?TaskTerminal = null,
+
+    fn hasActive(_: *anyopaque, _: u64) bool {
+        return false;
+    }
+
+    fn launch(context: *anyopaque, input: TaskLaunch) TaskLaunchOutcome {
+        const self: *TestTasks = @ptrCast(@alignCast(context));
+        self.launched_profile = input.permission_profile;
+        return .{ .submitted = 42 };
+    }
+
+    fn readTerminal(context: *anyopaque, _: u64) ?TaskTerminal {
+        const self: *TestTasks = @ptrCast(@alignCast(context));
+        return self.terminal;
+    }
+
+    fn effects(self: *TestTasks) TaskEffects {
+        return .{
+            .context = self,
+            .has_active_fn = hasActive,
+            .launch_fn = launch,
+            .terminal_fn = readTerminal,
         };
     }
 };
@@ -1022,6 +1082,7 @@ fn testDefinition(title: []const u8, input: []const u8) Definition {
         .execution_generation = 1,
         .execution_provider = .anthropic,
         .execution_model = "model",
+        .permission_profile = .approval_required,
         .input = input,
         .recurrence = .{ .once = .{ .at_unix_seconds = 200 } },
     };
@@ -1086,4 +1147,51 @@ test "persistence health failure remains observable through change latch" {
     try std.testing.expectEqual(PersistenceHealth.write_failed, runtime.persistenceHealth());
     try std.testing.expect(runtime.takeChanged());
     try std.testing.expect(!runtime.takeChanged());
+}
+
+test "permission-required scheduled occurrence stops without waiting for UI" {
+    var effects: TestEffects = .{};
+    var tasks: TestTasks = .{};
+    var runtime = try Runtime.init(std.testing.allocator, .{
+        .max_items = 1,
+        .max_projection_bytes = 4096,
+    }, .{
+        .timer = effects.timer(),
+        .persistence = effects.persistence(),
+        .notifier = effects.notifier(),
+    });
+    defer runtime.deinit();
+    const redaction = testRedaction(&effects);
+    var definition = testDefinition("unattended", "inspect");
+    definition.permission_profile = .full_access;
+    const id = try runtime.create(definition, testBinding(), redaction);
+
+    try std.testing.expectEqual(
+        @as(u64, 42),
+        try runtime.runNow(id, 1, redaction, tasks.effects()),
+    );
+    try std.testing.expectEqual(
+        PermissionProfile.full_access,
+        tasks.launched_profile.?,
+    );
+    tasks.terminal = .{
+        .outcome = .stopped,
+        .permission_required = true,
+    };
+    try std.testing.expect(runtime.reconcileNoFail(
+        testBinding(),
+        redaction,
+        tasks.effects(),
+    ));
+    const item = testing.item(&runtime, id).?;
+    try std.testing.expectEqual(Health.needs_attention, item.health);
+    try std.testing.expectEqual(
+        FailureReason.permission_required,
+        item.failure_reason.?,
+    );
+    try std.testing.expectEqual(
+        NotificationKind.needs_attention,
+        effects.notification_kind.?,
+    );
+    try std.testing.expectEqual(@as(u64, 42), effects.notification_task_id);
 }

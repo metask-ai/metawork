@@ -39,6 +39,7 @@ const {
   screen,
   waitFor,
 } = await import("@testing-library/react");
+const { default: userEvent } = await import("@testing-library/user-event");
 
 const vite = await createServer({
   root: join(process.cwd(), "frontend"),
@@ -109,6 +110,7 @@ test("Scheduled tasks is a truthful independent management page", () => {
       epoch: "1",
       title: "Daily repository summary",
       titleRedacted: false,
+      permissionProfile: "approval_required",
       enabled: true,
       health: "ready",
       failureReason: null,
@@ -184,9 +186,11 @@ test("starter templates hide Workspace configuration and submit target-free auto
   fireEvent.click(screen.getByRole("button", { name: "Save" }));
   await waitFor(() => assert.ok(created));
   assert.equal("target" in created, false);
+  assert.equal(created.permissionProfile, "approval_required");
 });
 
 test("Text schedules use an Automatic Workspace without requiring a Manual Workspace", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
   const snapshot = structuredClone(fixture);
   snapshot.capabilities.automaticWorkspaces = true;
   snapshot.capabilities.scheduledTasks = true;
@@ -229,11 +233,14 @@ test("Text schedules use an Automatic Workspace without requiring a Manual Works
     screen.getByPlaceholderText(/Describe what MetaWork should do/),
     { target: { value: "Summarize current work" } },
   );
+  await user.click(screen.getByRole("combobox", { name: "Permissions" }));
+  await user.keyboard("{ArrowDown}{Enter}");
   fireEvent.click(screen.getByRole("button", { name: "Save" }));
   await waitFor(() => assert.ok(created));
   assert.equal("target" in created, false);
   assert.equal("workspaceId" in created, false);
   assert.equal(created.input.kind, "text");
+  assert.equal(created.permissionProfile, "full_access");
 });
 
 test("schedule instructions have no separate Skill or Workspace configuration", () => {
@@ -272,6 +279,11 @@ test("schedule editor controls have explicit semantics and no native chrome", ()
       Node.DOCUMENT_POSITION_FOLLOWING,
   );
   assert.ok(screen.getByRole("heading", { level: 3, name: "What to run" }));
+  assert.ok(screen.getByRole("heading", { level: 3, name: "Permissions" }));
+  assert.equal(
+    screen.getByRole("combobox", { name: "Permissions" }).textContent,
+    "Request approval",
+  );
   assert.ok(screen.getByRole("heading", { level: 3, name: "When" }));
   assert.equal(dialog.querySelectorAll("fieldset, legend").length, 0);
   assert.ok(
@@ -361,6 +373,7 @@ test("Scheduled task Bridge commands preserve IDs, epochs, and exact payloads", 
   const mutation = {
     title: "Summary",
     expectedExecutionGeneration: "3",
+    permissionProfile: "full_access",
     input: { kind: "text", text: "Summarize" },
     recurrence: { kind: "once", atUnixSeconds: "1800000000" },
   };

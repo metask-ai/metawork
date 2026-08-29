@@ -248,6 +248,7 @@ pub const TaskDelete = struct { taskId: []const u8 };
 pub const ScheduledTaskMutation = struct {
     title: []const u8,
     expectedExecutionGeneration: []const u8,
+    permissionProfile: []const u8,
     input: std.json.Value,
     recurrence: std.json.Value,
 };
@@ -256,6 +257,7 @@ pub const ScheduledTaskUpdate = struct {
     expectedEpoch: []const u8,
     title: []const u8,
     expectedExecutionGeneration: []const u8,
+    permissionProfile: []const u8,
     input: std.json.Value,
     recurrence: std.json.Value,
 };

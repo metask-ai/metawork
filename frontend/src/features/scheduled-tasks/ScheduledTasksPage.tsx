@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import type {
+  PermissionProfile,
   ScheduledTaskMutation,
   ScheduledTaskView,
   WorkbenchSnapshot,
@@ -16,6 +17,7 @@ import { useI18n } from "../../i18n/context.ts";
 type Draft = {
   title: string;
   text: string;
+  permissionProfile: PermissionProfile;
   recurrenceKind: "once" | "interval";
   start: string;
   every: string;
@@ -68,10 +70,11 @@ function nextLocalOccurrence(hour: number, minute: number, weekday?: number) {
   return localDateTime(Math.floor(next.getTime() / 1000));
 }
 
-function defaultDraft(): Draft {
+function defaultDraft(permissionProfile: PermissionProfile): Draft {
   return {
     title: "",
     text: "",
+    permissionProfile,
     recurrenceKind: "once",
     start: localDateTime(Math.floor(Date.now() / 1000) + 3600),
     every: "1",
@@ -98,6 +101,7 @@ function draftFromTask(task: ScheduledTaskView): Draft {
   return {
     title: task.title,
     text: task.input.text,
+    permissionProfile: task.permissionProfile,
     recurrenceKind: task.recurrence.kind,
     start: localDateTime(Number(start)),
     every: String(everySeconds / divisor),
@@ -114,6 +118,11 @@ function toMutation(
     return null;
   if (!draft.text.trim()) return null;
   if (!snapshot.capabilities.automaticWorkspaces) return null;
+  if (
+    !snapshot.capabilities.permissionProfiles ||
+    !snapshot.permissions.availableProfiles.includes(draft.permissionProfile)
+  )
+    return null;
   const every = Number(draft.every);
   const unitSeconds =
     draft.unit === "days" ? 86_400 : draft.unit === "hours" ? 3600 : 60;
@@ -125,6 +134,7 @@ function toMutation(
   return {
     title: draft.title.trim(),
     expectedExecutionGeneration: snapshot.account.executionGeneration,
+    permissionProfile: draft.permissionProfile,
     input: { kind: "text", text: draft.text.trim() },
     recurrence:
       draft.recurrenceKind === "once"
@@ -192,7 +202,9 @@ export function ScheduledTasksPage({
   const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
-  const [draft, setDraft] = useState(defaultDraft);
+  const [draft, setDraft] = useState(() =>
+    defaultDraft(snapshot.permissions.defaultProfile),
+  );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const editorTrigger = useRef<HTMLElement | null>(null);
@@ -277,7 +289,10 @@ export function ScheduledTasksPage({
     rememberEditorTrigger();
     setCreating(true);
     setSelectedId(null);
-    setDraft({ ...defaultDraft(), ...seed });
+    setDraft({
+      ...defaultDraft(snapshot.permissions.defaultProfile),
+      ...seed,
+    });
     setError(null);
   }
 
@@ -364,6 +379,8 @@ export function ScheduledTasksPage({
   function occurrenceLabel(
     occurrence: ScheduledTaskView["occurrences"][number],
   ) {
+    if (occurrence.reason === "permission_required")
+      return t("cause.permission_required");
     if (occurrence.taskOutcome === "completed")
       return t("scheduled.occurrence.completed");
     if (occurrence.taskOutcome) return t("scheduled.occurrence.failed");
@@ -724,6 +741,32 @@ export function ScheduledTasksPage({
                   }
                 />
                 <small>{t("scheduled.instruction_help")}</small>
+              </section>
+
+              <section
+                className="scheduled-editor-section"
+                aria-labelledby="scheduled-editor-permission-title"
+              >
+                <h3 id="scheduled-editor-permission-title">
+                  {t("scheduled.permission")}
+                </h3>
+                <ScheduledSelect
+                  ariaLabel={t("scheduled.permission")}
+                  value={draft.permissionProfile}
+                  onValueChange={(permissionProfile) =>
+                    setDraft((value) => ({
+                      ...value,
+                      permissionProfile: permissionProfile as PermissionProfile,
+                    }))
+                  }
+                  options={snapshot.permissions.availableProfiles.map(
+                    (permissionProfile) => ({
+                      value: permissionProfile,
+                      label: t(`permission.profile.${permissionProfile}`),
+                    }),
+                  )}
+                />
+                <small>{t("scheduled.permission_help")}</small>
               </section>
 
               <section

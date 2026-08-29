@@ -183,6 +183,7 @@ export type ScheduledTaskView = {
   epoch: string;
   title: string;
   titleRedacted: boolean;
+  permissionProfile: PermissionProfile;
   enabled: boolean;
   health: "ready" | "paused" | "needs_attention" | "completed";
   failureReason:
@@ -195,6 +196,7 @@ export type ScheduledTaskView = {
     | "timer_unavailable"
     | "persistence_failed"
     | "host_interrupted"
+    | "permission_required"
     | null;
   execution: {
     generation: string;
@@ -225,6 +227,7 @@ export type ScheduledTaskView = {
 export type ScheduledTaskMutation = {
   title: string;
   expectedExecutionGeneration: string;
+  permissionProfile: PermissionProfile;
   input: Extract<TaskRunInput, { kind: "text" }>;
   recurrence: ScheduledTaskRecurrence;
 };

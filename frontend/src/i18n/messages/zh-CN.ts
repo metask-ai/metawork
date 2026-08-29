@@ -840,6 +840,9 @@ export const zhCN: Record<MessageId, string> = {
   "scheduled.instruction": "任务指令",
   "scheduled.instruction_help":
     "如需使用某个全局 Skill，直接在任务指令中说明即可。",
+  "scheduled.permission": "权限",
+  "scheduled.permission_help":
+    "任务将无人值守运行；操作超出此权限范围时会停止，并等待你处理。",
   "scheduled.when": "运行时间",
   "scheduled.recurrence.once": "仅一次",
   "scheduled.recurrence.interval": "重复",

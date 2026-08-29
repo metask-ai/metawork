@@ -22,6 +22,10 @@ const recovery_job = @import("product_task_recovery_job");
 
 pub const DurableCommit = task_persistence.Commit;
 pub const RunOutcome = task_state.RunOutcome;
+pub const TerminalSummary = struct {
+    outcome: RunOutcome,
+    permission_required: bool,
+};
 pub const ContinuationCapability = task_state.ContinuationCapability;
 pub const ExecutionIdentity = struct {
     generation: u64,
@@ -1847,10 +1851,13 @@ pub const Runtime = struct {
         return task_policy.hasActiveOperation(task);
     }
 
-    pub fn lastTerminalOutcome(self: *const Runtime, task_id: u64) ?RunOutcome {
+    pub fn lastTerminalSummary(self: *const Runtime, task_id: u64) ?TerminalSummary {
         const task = self.findConst(task_id) orelse return null;
         const terminal = task_policy.lastTerminalFacts(task.durable.runs) orelse return null;
-        return terminal.outcome;
+        return .{
+            .outcome = terminal.outcome,
+            .permission_required = terminal.cause == .permission_required,
+        };
     }
 
     pub fn workspaceRemovalState(
