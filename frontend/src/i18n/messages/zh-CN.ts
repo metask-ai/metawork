@@ -739,7 +739,9 @@ export const zhCN: Record<MessageId, string> = {
   "settings.signout_title": "在这台设备上退出",
   "settings.signout_help":
     "这会清除本机 Metask 凭据。任务记录和工作区文件会保留；正在运行的工作可能需要先结束。",
-  "settings.task_binding_model": "此任务继续使用创建时绑定的模型。",
+  "settings.task_binding_model":
+    "此任务保留原执行配置；当前默认配置无法安全修改它的模型。",
+  "settings.task_model_help": "选择此任务下一轮使用的模型。",
   "outcome.completed": "已完成",
   "outcome.stopped": "已停止",
   "outcome.cancelled": "已停止",

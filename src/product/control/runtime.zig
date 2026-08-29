@@ -2754,18 +2754,12 @@ pub const Runtime = struct {
             return error.InvalidTaskModel;
         if (!std.mem.eql(u8, expected_model, identity.model))
             return error.TaskModelMismatch;
-        if (self.account.catalog_state != .ready or
-            expected_catalog_generation == 0 or
-            expected_catalog_generation != self.account.catalog_generation)
-            return error.StaleCatalog;
-        var found = false;
-        for (self.account.model_views[0..self.account.model_count]) |candidate| {
-            if (std.mem.eql(u8, candidate.id, model)) {
-                found = true;
-                break;
-            }
-        }
-        if (!found) return error.StaleCatalog;
+        if (!self.taskModelSelectionAuthorized(
+            identity.generation,
+            identity.provider,
+            expected_catalog_generation,
+            model,
+        )) return error.StaleCatalog;
         _ = self.task_runtime.selectModel(
             task_id,
             expected_model,
@@ -4329,6 +4323,39 @@ pub const Runtime = struct {
         for (self.account.model_views[0..self.account.model_count]) |candidate|
             if (std.mem.eql(u8, candidate.id, model)) return true;
         return false;
+    }
+
+    fn taskModelSelectionAuthorized(
+        self: *const Runtime,
+        execution_generation: u64,
+        provider: Provider,
+        expected_catalog_generation: u64,
+        model: []const u8,
+    ) bool {
+        var selected_provider: ?Provider = null;
+        for (self.account.api_key_views[0..self.account.api_key_count]) |api_key| {
+            if (std.mem.eql(
+                u8,
+                api_key.id,
+                self.account.selected_api_key_id.view(),
+            )) {
+                selected_provider = accountProvider(api_key.provider_kind);
+                break;
+            }
+        }
+        return self.execution_replacement == .none and
+            self.custom_execution_binding == null and
+            self.execution.ready() and
+            self.account.account_can_create_task and
+            self.account.catalog_state == .ready and
+            self.account.catalog_generation != 0 and
+            expected_catalog_generation == self.account.catalog_generation and
+            self.account.execution_generation == self.execution.generation and
+            self.account.metask_execution_generation == self.execution.generation and
+            execution_generation == self.execution.generation and
+            provider == self.execution.provider.? and
+            selected_provider == provider and
+            self.accountHasModel(model);
     }
 
     fn canCreateTask(self: *const Runtime) bool {
@@ -9411,6 +9438,17 @@ test "default replacement preserves Task generation and installs the next admiss
     try std.testing.expectEqual(@as(u64, 2), control.execution.generation);
     try std.testing.expectEqualStrings("fixture-model-2", control.execution.model());
     try std.testing.expectEqualStrings("fixture-model", task.durable.execution_model);
+    try std.testing.expectError(
+        error.StaleCatalog,
+        control.selectTaskModel(
+            task.durable.id,
+            "fixture-model",
+            control.account.catalog_generation,
+            "fixture-model-2",
+        ),
+    );
+    try std.testing.expectEqualStrings("fixture-model", task.durable.execution_model);
+    try std.testing.expect(task.runtime.pending_model == null);
     try std.testing.expect(std.mem.indexOf(u8, task.durable.title, "metawork") == null);
     var scrubbed_snapshot_storage: [96 * 1024]u8 = undefined;
     const scrubbed_snapshot = try control.writeSnapshot(&scrubbed_snapshot_storage);
@@ -9546,6 +9584,76 @@ test "busy Task model selection keeps only the last runtime pending model" {
     try std.testing.expectError(
         error.TaskModelMismatch,
         control.selectTaskModel(task.durable.id, "fixture-model-2", 2, "fixture-model"),
+    );
+}
+
+test "Task can leave a removed model only within its exact Metask authority" {
+    var control = try testRuntime();
+    defer control.deinit();
+
+    const api_keys = [_]account_contract.ApiKeyView{.{
+        .id = "key-1",
+        .name = "Primary",
+        .suffix = "1234",
+        .provider_kind = .anthropic,
+    }};
+    const models = [_]account_contract.ModelView{.{
+        .id = "fixture-model-2",
+        .display_name = "Fixture model 2",
+    }};
+    control.commitAccountFactNoFail(.{
+        .kind = .catalog_changed,
+        .view = .{
+            .state = .authenticated,
+            .catalog_state = .ready,
+            .account_id = "account-1",
+            .display_name = "Metask User",
+            .api_keys = &api_keys,
+            .models = &models,
+            .selected_api_key_id = "key-1",
+            .selected_model = "fixture-model-2",
+            .model_catalog_api_key_id = "key-1",
+            .can_create_task = true,
+            .catalog_generation = 2,
+            .metask_execution_generation = 1,
+            .execution_generation = 1,
+        },
+    });
+
+    const task = &control.task_runtime.tasks[0].?;
+    try control.selectTaskModel(
+        task.durable.id,
+        "fixture-model",
+        2,
+        "fixture-model-2",
+    );
+    try std.testing.expectEqualStrings(
+        "fixture-model-2",
+        task.runtime.pending_model.?,
+    );
+}
+
+test "user Model Connection cannot consume the current Metask catalog" {
+    var control = try testRuntime();
+    defer control.deinit();
+
+    var binding = try PreparedModelConnectionBinding.init(
+        std.testing.allocator,
+        "connection-1",
+        "fixture-model",
+    );
+    control.custom_execution_binding = binding;
+    binding = undefined;
+
+    const task = &control.task_runtime.tasks[0].?;
+    try std.testing.expectError(
+        error.StaleCatalog,
+        control.selectTaskModel(
+            task.durable.id,
+            task.durable.execution_model,
+            control.account.catalog_generation,
+            task.durable.execution_model,
+        ),
     );
 }
 
