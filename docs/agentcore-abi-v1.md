@@ -1,13 +1,13 @@
 # MetaWork AgentCore ABI v1 消费合同
 
-> 状态：macOS arm64/x86_64 已锁定 AgentCore `b4fe9a9b8cb0`，Windows x86_64/arm64 GNU 已锁定 `b66e3d4c11ab`；四者均为 ABI v1 revision 14 exact artifact；不声明 stable support policy
+> 状态：macOS arm64/x86_64 与 Windows x86_64/arm64 GNU 均已锁定 AgentCore `b66e3d4c11ab`；四者均为 ABI v1 revision 14 exact artifact；不声明 stable support policy
 > 所有者：Metask AgentCore 负责 facade、bindings、bundle 和 ABI 政策；MetaWork 负责 exact artifact 消费、Host 生命周期和产品 capability gate
 
 本文定义 MetaWork 对 Metask AgentCore binary ABI version 1 的 target-specific 消费边界。线程、事件泵和 Host 生命周期见 [AgentCore 集成契约](agentcore-integration.md)，验证入口见 [验证规范](validation.md)。
 
 ## 1. Target-specific baseline
 
-所有 target policy 与 repository lock 只接受 ABI v1 revision 14 的 target-specific exact artifact，不识别或加载任何旧 revision。macOS 两个 target 精确锁定 clean source commit `b4fe9a9b8cb020db8fb7efc637aa5fb1263ba2ce`、package version `0.1.0-dev+b4fe9a9b8cb0`；Windows 两个 GNU target 精确锁定 clean source commit `b66e3d4c11ab220fd9d0826a6841fc61ae90270e`、package version `0.1.0-dev+b66e3d4c11ab`。每个平台仍以自己的完整 manifest bytes 与 payload checksum 独立锁定：
+所有 target policy 与 repository lock 只接受 ABI v1 revision 14 的 target-specific exact artifact，不识别或加载任何旧 revision。macOS 两个 target 与 Windows 两个 GNU target 均精确锁定 clean source commit `b66e3d4c11ab220fd9d0826a6841fc61ae90270e`、package version `0.1.0-dev+b66e3d4c11ab`。每个平台仍以自己的完整 manifest bytes 与 payload checksum 独立锁定：
 
 | Target             | Build       | Link input            | Repository lock                                            |
 | ------------------ | ----------- | --------------------- | ---------------------------------------------------------- |
