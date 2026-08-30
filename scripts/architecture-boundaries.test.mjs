@@ -1718,7 +1718,11 @@ test("Storage owns SQLite without entering the Product or Application graph", ()
   assert.doesNotMatch(storageContract, /@cImport|sqlite3|storage\/sqlite\.zig/);
   assert.deepEqual(
     storageFiles.filter((file) => /@cImport|sqlite3/.test(read(file))),
-    ["src/storage/sqlite.zig"],
+    [
+      "src/storage/sqlite/connection.zig",
+      "src/storage/sqlite/migrations.zig",
+      "src/storage/sqlite.zig",
+    ],
   );
   for (const file of nonStorageFiles) {
     assert.doesNotMatch(

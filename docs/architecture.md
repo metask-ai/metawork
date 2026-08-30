@@ -144,7 +144,7 @@ Compatibility 的 module root 与依赖方向由[工程结构与所有权](proje
 
 ### 3.6 Storage
 
-Storage 是 MetaWork-owned、无业务语义的基础设施边界，拥有 backend-neutral SQL value、statement、query/exec outcome、limit 和 migration mechanism；concrete backend 独占 engine connection、transaction 与错误映射。Product owner 始终独占自己的 schema、migration 内容、health、恢复、并发和 durable boundary，Storage 不因承载数据取得业务 policy。
+Storage 是 MetaWork-owned、无业务语义的基础设施边界，拥有 backend-neutral SQL value、statement、query/mutation outcome、limit 和 migration mechanism；concrete backend 独占 engine connection、transaction、engine profile 与错误映射。Product owner 始终独占自己的 schema、migration 内容、health、恢复、并发和所需 durability policy，Storage 不因承载数据取得业务 policy。
 
 Storage 当前不进入生产 Application/Product 运行图。直接 SQLite backend、conformance 和未来 backend 原位替换只由[Storage 架构](storage-architecture.md)定义；正式接入 Product 时必须显式改变本图和 owner composition，不能通过共享数据库或通用 repository 绕过 Product 边界。
 

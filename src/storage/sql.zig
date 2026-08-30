@@ -12,8 +12,6 @@ pub const Limits = struct {
     pub const exec_parameter_bytes: usize = 8 * 1024 * 1024;
     pub const result_rows: usize = 8 * 1024;
     pub const result_bytes: usize = 8 * 1024 * 1024;
-    /// Largest version in the Storage-owned schema metadata namespace.
-    /// A persisted user_version outside 0...migrations is corrupt metadata.
     pub const migrations: usize = 9999;
     pub const migration_bytes: usize = 1024 * 1024;
 };
@@ -29,6 +27,16 @@ pub const Value = union(enum) {
 pub const Statement = struct {
     sql: []const u8,
     params: []const Value = &.{},
+};
+
+pub const ChangeExpectation = union(enum) {
+    any,
+    exactly: u64,
+};
+
+pub const Mutation = struct {
+    statement: Statement,
+    expected_changes: ChangeExpectation = .any,
 };
 
 pub const Migration = struct {
@@ -73,30 +81,35 @@ pub const RowReceiver = struct {
 pub const QueryOutcome = enum {
     ok,
     busy,
-    io_failed,
+    cancelled,
     corrupt,
-    misuse,
     rejected,
+    resource_exhausted,
+    definite_io_failure,
+    unavailable,
 };
 
-pub const ExecOutcome = enum {
-    ok,
+pub const MutationOutcome = enum {
+    committed,
+    conflict,
     constraint,
     busy,
-    io_failed,
+    cancelled,
     corrupt,
-    misuse,
     rejected,
+    resource_exhausted,
+    definite_io_failure,
+    outcome_unknown,
+    unavailable,
 };
 
 /// Borrowed capability. The concrete backend instance and every resource it
 /// owns must outlive this value and all synchronous calls made through it.
 ///
 /// A RowReceiver may call another Database, but must not directly or
-/// indirectly call query or exec on the Database currently dispatching it.
-/// An otherwise valid nested call returns misuse. Calls from other threads are
-/// coordinated by the backend without reporting local contention as busy; the
-/// contract does not promise whether those calls wait or run concurrently.
+/// indirectly call query or mutate on the Database currently dispatching it.
+/// An otherwise valid nested call returns rejected. Calls from other threads
+/// block without spinning and execute serially; local contention is not busy.
 pub const Database = struct {
     context: *anyopaque,
     query_fn: *const fn (
@@ -105,10 +118,10 @@ pub const Database = struct {
         params: []const Value,
         receiver: RowReceiver,
     ) QueryOutcome,
-    exec_fn: *const fn (
+    mutate_fn: *const fn (
         context: *anyopaque,
-        statements: []const Statement,
-    ) ExecOutcome,
+        mutations: []const Mutation,
+    ) MutationOutcome,
 
     pub fn query(
         self: Database,
@@ -122,12 +135,12 @@ pub const Database = struct {
         return self.query_fn(self.context, sql_text, params, receiver);
     }
 
-    /// The complete batch is one transaction. Each statement must be a
-    /// mutation that produces no row; concrete backends return misuse and roll
-    /// back the whole batch when that condition is violated.
-    pub fn exec(self: Database, statements: []const Statement) ExecOutcome {
-        if (!validStatements(statements)) return .rejected;
-        return self.exec_fn(self.context, statements);
+    /// The complete batch is one transaction. Each statement must be DML that
+    /// produces no row. Every exact change expectation is checked inside that
+    /// transaction; a mismatch returns conflict and rolls the batch back.
+    pub fn mutate(self: Database, mutations: []const Mutation) MutationOutcome {
+        if (!validMutations(mutations)) return .rejected;
+        return self.mutate_fn(self.context, mutations);
     }
 };
 
@@ -141,11 +154,12 @@ pub fn validParameters(params: []const Value, byte_limit: usize) bool {
     return (parameterBytes(params, 0) orelse return false) <= byte_limit;
 }
 
-pub fn validStatements(statements: []const Statement) bool {
-    if (statements.len == 0 or statements.len > Limits.exec_statements)
+pub fn validMutations(mutations: []const Mutation) bool {
+    if (mutations.len == 0 or mutations.len > Limits.exec_statements)
         return false;
     var parameter_bytes: usize = 0;
-    for (statements) |statement| {
+    for (mutations) |mutation| {
+        const statement = mutation.statement;
         if (!validSql(statement.sql) or statement.params.len > Limits.parameters)
             return false;
         parameter_bytes = parameterBytes(statement.params, parameter_bytes) orelse
@@ -177,6 +191,7 @@ fn parameterBytes(params: []const Value, initial: usize) ?usize {
     for (params) |value| switch (value) {
         .text => |bytes| {
             if (!std.unicode.utf8ValidateSlice(bytes)) return null;
+            if (std.mem.indexOfScalar(u8, bytes, 0) != null) return null;
             total = std.math.add(usize, total, bytes.len) catch return null;
         },
         .blob => |bytes| total = std.math.add(usize, total, bytes.len) catch

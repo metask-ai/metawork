@@ -8,25 +8,28 @@ const sql = @import("sql.zig");
 /// migration must create the table used below before this function runs.
 pub fn expectBackendContract(database: sql.Database) !void {
     try std.testing.expectEqual(
-        sql.ExecOutcome.ok,
-        database.exec(&.{.{ .sql = "DELETE FROM storage_conformance" }}),
+        sql.MutationOutcome.committed,
+        database.mutate(&.{.{ .statement = .{ .sql = "DELETE FROM storage_conformance" } }}),
     );
     try std.testing.expectEqual(
-        sql.ExecOutcome.ok,
-        database.exec(&.{.{
-            .sql =
-            \\INSERT INTO storage_conformance(
-            \\  id, integer_value, real_value, text_value, blob_value, nullable
-            \\) VALUES (?, ?, ?, ?, ?, ?)
-            ,
-            .params = &.{
-                .{ .integer = 1 },
-                .{ .integer = -7 },
-                .{ .real = 2.5 },
-                .{ .text = "ready" },
-                .{ .blob = "\x00\xff" },
-                .null_value,
+        sql.MutationOutcome.committed,
+        database.mutate(&.{.{
+            .statement = .{
+                .sql =
+                \\INSERT INTO storage_conformance(
+                \\  id, integer_value, real_value, text_value, blob_value, nullable
+                \\) VALUES (?, ?, ?, ?, ?, ?)
+                ,
+                .params = &.{
+                    .{ .integer = 1 },
+                    .{ .integer = -7 },
+                    .{ .real = 2.5 },
+                    .{ .text = "ready" },
+                    .{ .blob = "\x00\xff" },
+                    .null_value,
+                },
             },
+            .expected_changes = .{ .exactly = 1 },
         }}),
     );
 
@@ -46,21 +49,25 @@ pub fn expectBackendContract(database: sql.Database) !void {
     try std.testing.expectEqual(@as(usize, 1), observed.rows);
 
     try std.testing.expectEqual(
-        sql.ExecOutcome.constraint,
-        database.exec(&.{.{
-            .sql = "INSERT INTO storage_conformance(id) VALUES (?)",
-            .params = &.{.{ .integer = 1 }},
+        sql.MutationOutcome.constraint,
+        database.mutate(&.{.{
+            .statement = .{
+                .sql = "INSERT INTO storage_conformance(id) VALUES (?)",
+                .params = &.{.{ .integer = 1 }},
+            },
         }}),
     );
 
     try std.testing.expectEqual(
-        sql.ExecOutcome.misuse,
-        database.exec(&.{
+        sql.MutationOutcome.rejected,
+        database.mutate(&.{
             .{
-                .sql = "INSERT INTO storage_conformance(id) VALUES (?)",
-                .params = &.{.{ .integer = 2 }},
+                .statement = .{
+                    .sql = "INSERT INTO storage_conformance(id) VALUES (?)",
+                    .params = &.{.{ .integer = 2 }},
+                },
             },
-            .{ .sql = "SELECT id FROM storage_conformance" },
+            .{ .statement = .{ .sql = "SELECT id FROM storage_conformance" } },
         }),
     );
     var count = IntegerObservation{};
@@ -84,11 +91,11 @@ pub fn expectBackendContract(database: sql.Database) !void {
         ),
     );
     try std.testing.expectEqual(@as(usize, 1), reentry.rows);
-    try std.testing.expectEqual(sql.QueryOutcome.misuse, reentry.query_outcome);
-    try std.testing.expectEqual(sql.ExecOutcome.misuse, reentry.exec_outcome);
+    try std.testing.expectEqual(sql.QueryOutcome.rejected, reentry.query_outcome);
+    try std.testing.expectEqual(sql.MutationOutcome.rejected, reentry.mutation_outcome);
 
     try std.testing.expectEqual(
-        sql.QueryOutcome.misuse,
+        sql.QueryOutcome.rejected,
         database.query(
             "SELECT 1; SELECT 2",
             &.{},
@@ -118,7 +125,7 @@ const ReentryObservation = struct {
     database: sql.Database,
     rows: usize = 0,
     query_outcome: sql.QueryOutcome = .ok,
-    exec_outcome: sql.ExecOutcome = .ok,
+    mutation_outcome: sql.MutationOutcome = .committed,
 
     fn receive(context: *anyopaque, _: sql.Row) void {
         const self: *ReentryObservation = @ptrCast(@alignCast(context));
@@ -129,8 +136,8 @@ const ReentryObservation = struct {
             &.{},
             .{ .context = &ignored, .receive_fn = IntegerObservation.receive },
         );
-        self.exec_outcome = self.database.exec(&.{.{
-            .sql = "DELETE FROM storage_conformance",
+        self.mutation_outcome = self.database.mutate(&.{.{
+            .statement = .{ .sql = "DELETE FROM storage_conformance" },
         }});
     }
 };
@@ -146,15 +153,15 @@ const IntegerObservation = struct {
 
 const FakeBackend = struct {
     query_calls: usize = 0,
-    exec_calls: usize = 0,
+    mutate_calls: usize = 0,
     query_outcome: sql.QueryOutcome = .ok,
-    exec_outcome: sql.ExecOutcome = .ok,
+    mutation_outcome: sql.MutationOutcome = .committed,
 
     fn capability(self: *FakeBackend) sql.Database {
         return .{
             .context = self,
             .query_fn = query,
-            .exec_fn = exec,
+            .mutate_fn = mutate,
         };
     }
 
@@ -169,13 +176,13 @@ const FakeBackend = struct {
         return self.query_outcome;
     }
 
-    fn exec(
+    fn mutate(
         context: *anyopaque,
-        _: []const sql.Statement,
-    ) sql.ExecOutcome {
+        _: []const sql.Mutation,
+    ) sql.MutationOutcome {
         const self: *FakeBackend = @ptrCast(@alignCast(context));
-        self.exec_calls += 1;
-        return self.exec_outcome;
+        self.mutate_calls += 1;
+        return self.mutation_outcome;
     }
 };
 
@@ -238,7 +245,11 @@ test "SQL contract rejects invalid query input before backend dispatch" {
     try std.testing.expectEqual(@as(usize, 1), backend.query_calls);
 }
 
-test "SQL contract validates values and exec batches" {
+test "SQL contract validates values and mutation batches" {
+    try std.testing.expect(!sql.validParameters(
+        &.{.{ .text = "a\x00b" }},
+        sql.Limits.query_parameter_bytes,
+    ));
     try std.testing.expect(!sql.validParameters(
         &.{.{ .real = std.math.inf(f64) }},
         sql.Limits.query_parameter_bytes,
@@ -248,21 +259,23 @@ test "SQL contract validates values and exec batches" {
         sql.Limits.query_parameter_bytes,
     ));
 
-    var backend: FakeBackend = .{ .exec_outcome = .constraint };
+    var backend: FakeBackend = .{ .mutation_outcome = .constraint };
     const database = backend.capability();
     try std.testing.expectEqual(
-        sql.ExecOutcome.rejected,
-        database.exec(&.{}),
+        sql.MutationOutcome.rejected,
+        database.mutate(&.{}),
     );
-    try std.testing.expectEqual(@as(usize, 0), backend.exec_calls);
+    try std.testing.expectEqual(@as(usize, 0), backend.mutate_calls);
     try std.testing.expectEqual(
-        sql.ExecOutcome.constraint,
-        database.exec(&.{.{
-            .sql = "INSERT INTO t(value) VALUES (?)",
-            .params = &.{.{ .text = "value" }},
+        sql.MutationOutcome.constraint,
+        database.mutate(&.{.{
+            .statement = .{
+                .sql = "INSERT INTO t(value) VALUES (?)",
+                .params = &.{.{ .text = "value" }},
+            },
         }}),
     );
-    try std.testing.expectEqual(@as(usize, 1), backend.exec_calls);
+    try std.testing.expectEqual(@as(usize, 1), backend.mutate_calls);
 }
 
 test "SQL migrations are contiguous append-only inputs" {

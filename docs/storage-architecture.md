@@ -2,122 +2,65 @@
 
 > 状态：Storage SQL contract、直接 SQLite backend 与 conformance 的 source of truth；Application 与 Product 尚未接入
 
-本文定义 MetaWork 自有的 SQLite 基础存储能力。SQLite 是产品必须具备的长期基础设施，不以 Native SDK relational capability 是否完整为前提；Native SDK 后续可以替换数据库访问适配层，但不接管产品 schema、数据所有权或恢复策略。
+本文定义 MetaWork 自有的 SQLite 基础存储能力。Storage 只提供无业务语义的 SQL、事务、迁移和数据库生命周期机制；基础能力完成不等于批准迁移或接入任何现有 Product 数据。
 
-Storage 的顶层边界见[高层架构](architecture.md)，源码和依赖见[工程结构与所有权](project-structure.md)，测试归属与证据见[验证规范](validation.md)。[Product 架构](product-architecture.md)仍定义现有持久化行为；本文件不授权迁移、删除或重写任何现有持久化数据。
+Storage 的顶层边界见[高层架构](architecture.md)，源码 owner 见[工程结构与所有权](project-structure.md)，验证责任见[验证规范](validation.md)。
 
-## 1. 决策
+## 1. 决策与范围
 
-建立一个小型、无业务语义、MetaWork-owned 的 `Storage SQL` contract，并先用直接 SQLite 后端完整实现：
+当前实现直接链接固定版本的 SQLite，并通过 backend-neutral contract 隔离 C API：
 
 ```text
-Product owner
-  ├─ owns schema / migration SQL / health / recovery / concurrency policy
-  ↓
+future Product owner
+  └─ owns schema and migration SQL
+       ↓
 MetaWork Storage SQL contract
-  ├─ current backend: direct SQLite
-  └─ future backend: Native SDK relational adapter
-                         ↓
-                    same app.db
+       ↓
+single direct SQLite connection
 ```
 
-核心结论：
+基础层采用以下 hard-cut 决策：
 
-1. SQL 基础能力不再等待 Native SDK 公开 Zig row decoder；
-2. 当前直接链接官方 SQLite，并通过窄后端隔离 C API；
-3. 数据库文件、schema 和 migration version 是 MetaWork/Product 的长期资产，不属于某个后端；
-4. Native SDK 后续满足完整合同后原位替换后端，继续打开同一个 `app.db`，不复制、不双写、不迁移用户数据；
-5. 直接后端与未来 Native SDK 后端必须同时通过同一套 conformance tests。
+1. 一个 SQLite connection 同时执行 query、mutation 和 migration；没有并发吞吐证据前不引入读连接、连接池或 snapshot 协调。
+2. API 同步阻塞；Storage 不创建 worker、不调度 deadline、不自动重试。
+3. concrete `Database` 由 allocator 创建在稳定地址，借出的 capability 只在 owner shutdown/destroy 前有效。
+4. query、mutation、migration 和 Storage metadata 使用不同的最小权限 authorizer；connection 空闲时默认 deny-all。
+5. mutation 是一次提交的 statement batch，不开放跨 callback、线程或 owner 的交互式 transaction handle。
+6. 文件数据库使用 `WAL + synchronous=FULL`；在没有性能证据时优先承诺已返回 commit 的断电持久性。
+7. migration identity 由 Storage-owned metadata table 保存，不使用 `PRAGMA user_version` 作为身份或兼容路径。
 
-## 2. 当前能力边界
+当前范围严格限制在 `Storage`、SQLite build profile、对应测试与本真源。它不包括 Application composition、正式数据库路径、Product schema、旧数据迁移、双写、运行时 fallback 或现有 store 的删除。
 
-当前 `Storage` 模块只开放以下可独立验收的能力：
-
-- 用显式 caller-provided path 打开和关闭文件数据库，以及测试用内存数据库；
-- parameterized read-only query；
-- 多 statement、单 `BEGIN IMMEDIATE` transaction exec；
-- `NULL`、`INTEGER`、finite `REAL`、UTF-8 `TEXT` 和 `BLOB`；
-- typed borrowed row callback；
-- 有界输入、参数和结果；
-- 连续、append-only、原子执行的 schema migrations；
-- 精确失败分类和完整 rollback；
-- 直接 SQLite 后端的真实集成测试。
-
-当前不接入 Application 启动和 shutdown，不解析正式数据目录，不创建 production `app.db`，不向任何 Product owner 注入 capability，不把任何现有业务 persistence 切换到 SQL，也不创建测试用途的正式产品表。
-
-## 3. 非目标
-
-当前边界不包括：
-
-- Workbench history、Conversation、checkpoint、Account 或 MCP 数据迁移；
-- Application composition、正式 database path、production/automation namespace 或 `app.zon` capability；
-- 修改任何上层 owner、restore、startup、shutdown 或 mutation 路径；
-- 替换或删除 `workbench-history.store`、frame、checksum、atomic replace 或现有 locks；
-- 定义 Workspace、Task、Run、Conversation 或其他产品 schema；
-- 改变现有单实例、single-writer、mutation fence、degraded health 或 crash recovery 合同；
-- ORM、query builder、Repository、全局 `StorageManager` 或 schema registry；
-- key-value、blob store、credential、远程同步、多数据库或跨 owner transaction；
-- direct/Native SDK 双后端运行、双写、运行时 fallback 或自动数据复制。
-
-未来产品 owner 采用 SQL 时，必须单独定义其 schema、迁移内容、并发、持久性、损坏处理和恢复不变量。基础模块的存在不等于批准迁移现有数据。
-
-## 4. Owner 与依赖方向
-
-### 4.1 Storage
+## 2. Owner 与依赖方向
 
 Storage 拥有：
 
-- 后端无关的 SQL value、statement、row、migration、limits 和 outcomes；
-- parameter binding、read-only query、transactional exec 与 migration 的机械语义；
-- 直接 SQLite 后端及后端 conformance suite；
-- SQLite engine profile 和数据库兼容边界。
+- backend-neutral value、statement、mutation、row、migration、limits 和 outcomes；
+- 参数绑定、只读 query、原子 mutation batch、行数期望和 migration identity；
+- SQLite connection、authorizer、engine profile、limits、interrupt、shutdown 和错误分类；
+- backend conformance、SQLite 集成、故障和 crash-recovery 验证。
 
-Storage 不拥有：
+Storage 不拥有业务表、Product health/retry/recovery policy、应用数据目录、production identity 或顶层启动顺序。`src/storage/sql.zig` 不得导入 Product、Application、Bridge、Renderer、Native SDK 或 SQLite C 类型；SQLite C 值只存在于 concrete backend 内。
 
-- 业务表、索引、trigger 或 migration SQL；
-- 产品 health、重试、恢复、checkpoint、数据保留或并发 policy；
-- 应用数据目录、production/automation identity 或顶层生命周期。
+未来 Product owner 采用 SQL 时必须另行定义 schema、migration 内容、恢复和业务并发不变量。未来 backend adapter 必须完整满足本合同；不得以兼容层、双写或静默 fallback 弱化合同。
 
-`storage` 公共合同不得导入 Workbench、Account、Agent、Bridge、Renderer、Application、Native SDK 或 SQLite C 类型。
-
-### 4.2 Product owner
-
-每个 Product owner 拥有自己的 schema 与 migration 内容，并通过 Storage 提交。业务代码只能依赖 Storage contract，不得导入 SQLite C API、直接后端或 Native SDK relational 类型。
-
-`PRAGMA user_version` 作为整个 `app.db` 的 schema version，因此首个正式 consumer 落地前必须明确数据库级 migration owner 和多个 Product owner 的组合顺序。当前没有 Product migration plan，也不提前设计跨 owner schema registry。
-
-### 4.3 Application 接入边界
-
-未来 Application 接入时负责：
-
-- 解析 canonical database directory；
-- 选择唯一后端；
-- 在 Product owner restore 前 open + migrate；
-- 注入 `storage.Database`；
-- shutdown 时先停止消费者，再关闭数据库。
-
-Application 只做 composition 和生命周期控制，不持有 schema、SQL 或业务状态。上述接入当前尚未实现；Storage backend 只保证能以显式 path 独立 open/migrate/close。
-
-### 4.4 Native SDK
-
-Native SDK 不是 SQL 数据 owner。未来 adapter 只把其 relational binding 机械映射到同一个 Storage contract；是否使用 SDK 是实现选择，不改变 Product 对 SQLite 数据的所有权。
-
-## 5. 最小模块
+模块 owner 固定为：
 
 ```text
-src/storage.zig             # module root
-src/storage/sql.zig         # 稳定 SQL contract 与基础类型
-src/storage/sqlite.zig      # 当前直接 SQLite 后端
-src/storage/conformance.zig # 后端共享合同测试，仅进入 test graph
+src/storage.zig                         # Storage module root
+src/storage/sql.zig                     # backend-neutral public contract
+src/storage/conformance.zig             # shared backend contract tests
+src/storage/sqlite.zig                  # public concrete owner and lifecycle orchestration
+src/storage/sqlite/connection.zig       # SQLite C API, profile, limits, authorizers, bind/row/error
+src/storage/sqlite/migrations.zig       # migration metadata, checksum and atomic application
+tests/support/storage_crash_fixture.zig # child-process WAL recovery fixture
 ```
 
-直接 SQLite 是 Storage 的一个具体 backend，不是 Application compatibility layer，也不是第二个 Product owner。它通过 `storage.Database` 与调用方隔离 SQLite C API，不得扩展成通用数据库框架。Native SDK adapter 可完整替代后删除 `src/storage/sqlite.zig` 和直接 SQLite build dependency；`src/storage.zig`、`src/storage/sql.zig` 与 conformance contract 保留。
+不继续按 helper 数量拆文件；只有出现新的 owner、生命周期或独立可测试不变量时才增加模块。
 
-不为未来消费者预建 repository、manager、facade 或空 schema 层。
+## 3. Backend-neutral SQL contract
 
-## 6. 稳定 SQL contract
-
-### 6.1 Value、Statement 与 Migration
+### 3.1 输入类型
 
 ```zig
 pub const Value = union(enum) {
@@ -133,237 +76,137 @@ pub const Statement = struct {
     params: []const Value = &.{},
 };
 
-pub const Migration = struct {
-    version: u32,
-    name: []const u8,
-    sql: []const u8,
+pub const ChangeExpectation = union(enum) {
+    any,
+    exactly: u64,
+};
+
+pub const Mutation = struct {
+    statement: Statement,
+    expected_changes: ChangeExpectation = .any,
 };
 ```
 
-动态值必须通过 params 绑定。Storage 不提供 SQL 字符串拼接 helper，也不解释表名、列名或业务标识。
+动态值必须通过 parameter binding 传入。SQL、migration name 和 `TEXT` 不得包含 NUL；`TEXT` 必须是 UTF-8，`REAL` 必须 finite。Value 约束同时适用于输入参数和返回 row；SQL 表达式产生的非法 TEXT/REAL 必须在 callback 前拒绝。BLOB 不受 TEXT 的 NUL/UTF-8 限制。
 
-Migration 只提供基础执行机制：
+`Database.query` 只接受一个只读 statement。`Database.mutate` 将非空 mutation array 放入一个 `BEGIN IMMEDIATE` transaction；每条 statement 必须是无返回 row 的 DML。`exactly` 使用该 statement 的 `sqlite3_changes64` 结果校验，任一 mismatch 返回 `conflict` 并回滚完整 batch。
 
-- version 从 1 开始严格连续，已经发布的 migration 不修改、不重排；
-- 当前 `user_version` 大于二进制目标版本时 fail closed；
-- 所有 pending migrations 与最终 `user_version` 更新在一个 `BEGIN IMMEDIATE` transaction 中完成；
-- 任一 migration 失败则整体 rollback，数据库版本保持不变；
-- migration SQL 和 migration 何时加入由对应 Product owner 决定。
+Storage 不开放 `RETURNING`、prepared statement、transaction handle、PRAGMA、DDL mutation、ATTACH/DETACH 或临时 schema。增加这些能力必须由真实 consumer 和对应失败模式证明，而不是预留抽象。
 
-### 6.2 Database
+### 3.2 Row 与 streaming
 
-```zig
-pub const Database = struct {
-    context: *anyopaque,
-    query_fn: *const fn (
-        context: *anyopaque,
-        sql: []const u8,
-        params: []const Value,
-        receiver: RowReceiver,
-    ) QueryOutcome,
-    exec_fn: *const fn (
-        context: *anyopaque,
-        statements: []const Statement,
-    ) ExecOutcome,
+`Row`、column name、`TEXT` 和 `BLOB` 只在同步 `RowReceiver` callback 内有效；需要保留的数据由调用方深拷贝。callback 可以调用其他 `Database`，但不得直接或间接重入当前正在派发它的同一 instance，重入返回 `rejected`。
 
-    pub fn query(
-        self: Database,
-        sql: []const u8,
-        params: []const Value,
-        receiver: RowReceiver,
-    ) QueryOutcome;
+query 是有界 streaming，不承诺 all-or-nothing row delivery。receiver 必须把已收到的 row 当作 provisional candidate，只有 terminal outcome 为 `ok` 才能采纳；若达到 result limit、被取消或后续 step 失败，先前 callback 不会撤销。Storage 不以最多 8 MiB 的内部深拷贝伪造原子结果。
 
-    pub fn exec(
-        self: Database,
-        statements: []const Statement,
-    ) ExecOutcome;
-};
-```
-
-Storage capability 不公开 path、connection、prepared statement、transaction handle 或 PRAGMA。`storage.sqlite.Database` 是 concrete backend owner，负责以显式 path open/migrate/close，并可借出后端无关的 `storage.Database` capability；借用 capability 不得比 concrete instance 活得更久。未来 Application 只持有该 instance，不复制其资源。
-
-当前合同不公开交互式 transaction 对象。多个 mutation 必须作为一个 `exec` statement array 一次提交，避免 transaction 跨 owner、线程或 callback 逃逸。`exec` 中每条 statement 都必须是 SQLite 判定为非 read-only、且执行完成不产生 row 的 mutation；`SELECT` 等 read-only statement 返回 `misuse`，并回滚整个 batch。
-
-### 6.3 Row 与 borrowed lifetime
-
-```zig
-pub const Row = struct {
-    pub fn columnCount(self: Row) usize;
-    pub fn columnName(self: Row, index: usize) []const u8;
-    pub fn value(self: Row, index: usize) Value;
-};
-```
-
-- `Row`、column name、`TEXT` 和 `BLOB` 只在同步 receiver 调用内有效；
-- receiver 外需要保留的数据由调用方深拷贝；
-- receiver 不得保存 row、slice 或 backend context；
-- receiver 可以调用其他 `Database`，但不得直接或间接调用当前正在派发它的同一个 `Database`；通过正常参数校验的 nested `query`/`exec` 返回 `misuse`，外层 query 继续按自身结果完成；
-- 同一 `Database` 的异线程调用由 backend 安全协调，但合同不承诺等待或并行；进程内协调不映射为 `busy`，file/memory 的连接拓扑不形成不同的公开再入语义；
-- callback 不跨线程异步派发；
-- 结果超过合同上限时整个 query 返回 `rejected`，不得截断后伪装成功；
-- 大结果由调用方显式使用 `LIMIT` 与 keyset pagination，Storage 不隐式分页或缓存。
-
-直接后端从 SQLite column API 构造 `Row`，不编码或复制 Native SDK 私有 page dialect。未来 adapter 使用 Native SDK 正式公开 decoder，Storage contract 不随 wire format 改变。
-
-### 6.4 Outcomes
+### 3.3 Outcomes
 
 ```zig
 pub const QueryOutcome = enum {
-    ok,
-    busy,
-    io_failed,
-    corrupt,
-    misuse,
-    rejected,
+    ok, busy, cancelled, corrupt, rejected, resource_exhausted,
+    definite_io_failure, unavailable,
 };
 
-pub const ExecOutcome = enum {
-    ok,
-    constraint,
-    busy,
-    io_failed,
-    corrupt,
-    misuse,
-    rejected,
+pub const MutationOutcome = enum {
+    committed, conflict, constraint, busy, cancelled, corrupt, rejected,
+    resource_exhausted, definite_io_failure, outcome_unknown, unavailable,
 };
 ```
 
-open/migration 使用独立的 typed error/outcome，至少区分路径或权限失败、busy、corrupt、migration failed 和 newer schema version。
+`busy` 只表示 SQLite/file contention，不能表示进程内 gate 等待。`unavailable` 表示 instance 正在停止、已经停止或已 poisoned。Storage 不自动重试；重试需要业务幂等性，因此属于未来 caller policy。
 
-`user_version` 的 Storage metadata namespace 固定为 `0...9999`：范围内高于调用方 migration target 的值是合法但当前未知的 `VersionUnknown`；负数或超出 namespace 的值违反 Storage metadata invariant，返回 `Corrupt`。
+mutation 在 `COMMIT` 失败后结合 `sqlite3_get_autocommit` 和 rollback 结果分类：能够证明事务未提交时返回原始 definite outcome；无法证明 commit 或 rollback 最终状态时返回 `outcome_unknown`，poison 当前 instance，并拒绝后续 mutation。只有 SQLite backend 能观察这些事实，不能把该判断上移给 caller。
 
-后端不把错误折叠为 bool，不自动重试，不把失败 query 解释为空结果，也不把失败 exec 解释为成功。`corrupt` 是数据库级事实；Storage 不承诺旧 frame store 的“单记录损坏隔离”，具体 health 与 mutation fence 由使用该 schema 的 Product owner 定义。
+statement 失败时 SQLite 可能已自动回滚（例如 `OR ROLLBACK`、写入取消或资源错误）；尚未尝试 `COMMIT` 且已确认事务结束时，保留原始 definite outcome，不再把重复 `ROLLBACK` 的失败当作结果未知。事务结果与连接健康分开：已确认提交或回滚后，恢复 idle authority 失败仍须 poison instance，但不得改写已知结果。
 
-### 6.5 Limits
+### 3.4 Limits
 
-当前合同采用并测试与 Native SDK relational surface 一致的公共子集：
+- ordinary SQL text：64 KiB；migration SQL：1 MiB；
+- 单 statement params：64；单 mutation batch：64 statements；
+- 单 query parameters：1 MiB；单 mutation batch parameters：8 MiB；
+- 单 query：最多 8K rows、8 MiB result bytes；
+- SQLite engine 同步设置 `LENGTH`、`SQL_LENGTH`、`VARIABLE_NUMBER`、`ATTACHED=0` 和 `WORKER_THREADS=0` limits。
 
-- SQL 文本：64 KiB；
-- 单 statement params：64；
-- 单 exec statements：64；
-- 单参数 `TEXT`/`BLOB`：1 MiB；
-- 单 exec 参数累计：8 MiB；
-- 单 query：最多 8K rows、8 MiB 结果；
-- `TEXT` 必须是有效 UTF-8，`REAL` 必须 finite；
-- SQL、name 和 text 输入不得包含 NUL。
+超限返回 `resource_exhausted` 或在 backend dispatch 前返回 `rejected`，不得截断后伪装成功。
 
-直接后端不需要模拟 Native SDK 的 256-row/256-KiB encoded page，因为 page 是 SDK transport 细节，不属于 Storage contract。未来 adapter 可以在内部逐 page 解码，但对 Product 仍表现为相同的同步 row stream 和总量上限。
+## 4. SQLite authority
 
-## 7. 直接 SQLite 后端
+每次 public operation 在 prepare 前切换到对应 authorizer，结束后恢复 deny-all：
 
-### 7.1 Dependency
+| authority | 允许 | 强制拒绝 |
+| --- | --- | --- |
+| query | main schema 的 SELECT/READ/FUNCTION/RECURSIVE | DML、DDL、transaction/savepoint、PRAGMA、ATTACH/DETACH、temp schema、Storage metadata |
+| mutation | main schema 的 INSERT/UPDATE/DELETE 及其读取表达式 | DDL、transaction/savepoint、PRAGMA、ATTACH/DETACH、temp schema、Storage metadata、row-producing statement |
+| migration | main schema 的 DDL 与 backfill DML | transaction/savepoint、PRAGMA、ATTACH/DETACH、temp schema、Storage metadata |
+| metadata | migration metadata 的建表、读取和追加 | public caller 不可获得该 authority |
+| internal transaction | Storage 自己准备的 BEGIN/COMMIT/ROLLBACK | 其他 SQL action |
 
-使用 SQLite 官方 amalgamation 作为显式、固定版本和固定 hash 的 build dependency，直接通过 SQLite C API 实现窄后端：
+authorizer 按 SQLite action 的真实参数语义检查目标对象及关联表；作用于 metadata 的 index、trigger、ALTER 等不能绕过隔离。metadata authority 只允许 Storage 自有 SQL 所需动作，不授予存储的 trigger/view，未知动作默认拒绝。
 
-- 不使用操作系统偶然存在的 SQLite；
-- 不复制 Native SDK 私有 SQLite wrapper、page parser 或内部源码；
-- 不再引入一层第三方 ORM/wrapper；
-- 禁止 loadable extensions；
-- 依赖升级必须运行文件兼容、migration、事务和故障映射测试。
+authorizer 不是 SQL 文本关键字过滤器。`sqlite3_stmt_readonly` 和 statement shape 仍作为第二层检查，但不能单独承担 transaction control 隔离，因为 SQLite 会把部分 transaction statement 标记为 readonly。
 
-当前锁定 SQLite 3.53.4 官方 amalgamation；固定 URL 与 hash 进入 `build.zig.zon`，不使用 `latest`、系统 SQLite 或浮动下载地址。后续升级仍须同时满足 Native SDK SQLite 兼容性和目标平台构建验证。
+## 5. Migration identity
 
-### 7.2 Engine profile
-
-持久化数据库使用与当前 Native SDK 可观察语义一致的 profile：
+Storage 在同一数据库创建：
 
 ```sql
--- writer connection
-PRAGMA journal_mode=WAL;
-PRAGMA synchronous=NORMAL;
-PRAGMA busy_timeout=250;
-PRAGMA foreign_keys=ON;
-
--- reader connection
-PRAGMA busy_timeout=250;
-PRAGMA foreign_keys=ON;
-PRAGMA query_only=ON;
+CREATE TABLE _metawork_storage_migrations(
+  version INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  checksum BLOB NOT NULL CHECK(length(checksum)=32)
+);
 ```
 
-- 一个 serialized writer connection；
-- 一个 read-only/query-only reader connection；
-- 持久化文件数据库使用上述双连接；普通 `:memory:` 是 per-connection database，因此内存 target 使用一个连接兼任 reader/writer，不能打开两个彼此隔离的空数据库；
-- query 只允许 SQLite 判定为 read-only 的单 statement；
-- exec 只接受不产生 row 的 mutation statement；read-only statement 返回 `misuse`，完整 statement array 使用一个 `BEGIN IMMEDIATE` transaction，任一失败完整 rollback；
-- 参数数量必须与 statement 实际 placeholder 数量一致；
-- 禁止 `ATTACH`/`DETACH`、load extension 和通过普通 query/exec 修改受保护 PRAGMA；
-- close 前等待同步调用退出，不让 SQLite pointer 或 borrowed bytes 逃逸。
+migration version 从 1 严格连续。checksum 是 SHA-256，输入依次为 big-endian u32 version、NUL、name bytes、NUL、SQL bytes。open 时按 version 读取 persisted rows，并验证它们是当前 migration input 的精确前缀：
 
-这些是可测试的后端语义，不暴露成业务可调配置。当前不增加连接池、后台 checkpoint thread、自动重试或可配置 PRAGMA。
+- persisted row 多于当前 target：`VersionUnknown`；
+- version gap 或非法 metadata：`Corrupt`；
+- name 或 checksum 不同：`MigrationMismatch`；
+- pending migration SQL 与对应 metadata insert 在一个 `BEGIN IMMEDIATE` transaction 内提交；
+- identity insert 必须实际追加一条记录；提交前验证最终完整身份序列，公开版本必须与已验证记录一致，不能仅从输入数量推导；
+- 任一失败完整 rollback；无法确认 migration commit 结果时返回 `MigrationOutcomeUnknown`。
 
-### 7.3 Durability
+普通 query/mutation 不能读取或修改 metadata table。当前没有多 Product owner schema registry；基础层只建立不可伪造的单一 migration 序列，未来 owner 组合必须另行决策。
 
-`WAL + synchronous=NORMAL` 在应用进程崩溃时保留已提交事务，并保持数据库一致性；在 OS crash 或突然断电时，最近已经返回成功的事务仍可能回滚。直接后端从第一天就与当前 Native SDK 使用相同语义，因此后续替换不存在隐式的 `FULL → NORMAL` 降级。
+## 6. Connection profile
 
-任何 Product owner 接入前都必须确认该 durable boundary 是否可接受。如果产品要求“commit 返回后即使断电也必须保留”，应先把 engine profile 明确升级为 `FULL`，并把 Native SDK 支持等价 profile 设为未来切换的硬 Gate，而不是在两个后端之间静默改变承诺。
-
-## 8. Storage instance lifecycle 与未来 path 约束
-
-当前 Storage API 接受显式 database target，不读取环境变量、产品 identity 或 OS app-data policy：
+文件数据库必须逐项设置并回读确认：
 
 ```text
-caller-provided path / in-memory target
-→ storage.sqlite.Database.open + migrate
-→ borrow storage.Database
-→ finish all synchronous calls
-→ storage.sqlite.Database.deinit
+journal_mode = WAL
+synchronous = FULL
+foreign_keys = ON
+busy_timeout = 250 ms
+mmap_size = 0
+SQLITE_DBCONFIG_DEFENSIVE = 1
+SQLITE_DBCONFIG_TRUSTED_SCHEMA = 0
 ```
 
-open/migration 失败时不产生可用 capability。`deinit` 前调用方必须停止新调用并等待现有同步调用返回；Storage 不建立全局 lifecycle state machine，也不推测上层 shutdown 顺序。
+任何设置未生效都 fail closed，不能继续使用旧值。特别是 `journal_mode=WAL` 的 statement 即使返回 `SQLITE_OK` 也可能返回未切换的实际模式，因此必须检查结果 row。内存数据库使用独立 profile，不要求 WAL 或 mmap。
 
-未来正式接入必须把 canonical database 固定为 `<runner app-data directory>/app.db`，并证明直接后端与 Native SDK 实际打开同一个绝对路径。这个约束用于保证后端原位替换不迁移数据；path 解析、production/automation identity、目录创建和 Application wiring 当前均未实现。
+build 固定 SQLite 3.53.4 official amalgamation，并启用 `THREADSAFE=2`、`OMIT_LOAD_EXTENSION`、`DQS=0`、`TRUSTED_SCHEMA=0` 和默认 WAL synchronous FULL。不得使用系统 SQLite、浮动版本或第二份 engine symbol。
 
-当前不打开现有 Workbench 目录，不删除其 OS exclusive lock，也不声称 SQLite/WAL 自带应用单实例保证。未来 Product 数据迁入 SQL 时，single-instance 或 schema-level multi-process concurrency 必须由对应整体方案明确认领。
-
-## 9. Native SDK 原位替换
-
-Native SDK adapter 进入正式路径前必须同时满足：
-
-1. 有公开、稳定、有界的 Zig row/value decoder；
-2. 能打开 canonical runner data directory 下同一个 `app.db`；
-3. 支持同一 Value、limits、read-only query、`BEGIN IMMEDIATE` exec 和 migration 语义；
-4. 使用相同 `WAL`、`synchronous`、foreign key、busy timeout 和 query-only profile，或经产品明确批准变更；
-5. 对 constraint、busy、I/O、corrupt、misuse 和 rejected 的映射通过 conformance tests；
-6. 已使用的 SQLite SQL/features 与 SDK 内置 SQLite 版本和 compile options 兼容；
-7. direct backend 完全关闭后 SDK 才打开文件；
-8. 启用 `app.zon` 的 Native SDK `sqlite` capability 与删除直接 SQLite amalgamation build dependency 必须在同一个可构建变更内完成，任何正式构建不得同时链接两份提供 `sqlite3_*` symbol 的 engine。
-
-切换步骤只有：
+## 7. Lifecycle、并发与取消
 
 ```text
-release N: direct backend closes app.db normally
-release N+1: Native SDK backend opens the same app.db
-             → schema version check
-             → quick/integrity validation required by rollout
-             → normal startup
+Database.create(io, allocator, target, migrations) -> *Database
+  -> borrow capability
+  -> synchronous query/mutate
+  -> optional interrupt
+  -> shutdown
+  -> destroy
 ```
 
-不生成新数据库，不复制表，不重写 schema，不双写，也不保留运行时 fallback。SQLite 文件、`-wal` 和 `-shm` 必须由前一后端正常关闭/恢复；切换测试覆盖未 checkpoint WAL、干净关闭、应用崩溃后重启和 newer schema rejection。
+instance 使用一个 `std.Io.Mutex` 和 `std.Io.Condition` 串行 operation，不持有 spinlock 执行 SQL。异线程调用等待 gate；同线程 callback 重入立即拒绝。
 
-这属于后端原位替换，不是用户数据迁移。若 Native SDK 无法满足任一条件，MetaWork 继续使用直接 SQLite 后端；SQL 基础能力本身不被阻塞。
+`shutdown` 原子停止 admission，唤醒 waiting caller，调用 `sqlite3_interrupt` 请求取消 active operation，等待它离开，再关闭 connection。它允许异线程并发调用并保持幂等。同步 callback 不能等待自身退出，因此在 active operation 的同一线程调用 `shutdown` 或 `destroy`，必须立即返回 `error.ReentrantOperation`，且不改变 owner 状态。
 
-## 10. 当前回归不变量
+owner 在 `destroy` 前必须停止并 join 全部其他使用者，包括 gate waiter、并发 shutdown caller 和其他 borrowed capability 使用者；通常顺序为 shutdown、收敛使用者、destroy。`destroy` 保证 shutdown 后释放 stable owner，不提供与其他 caller 并发销毁的隐式引用计数。caller 不得在 `destroy` 后使用 borrowed capability。
 
-- Product 只能看到 MetaWork Storage types，看不到 SQLite/Native SDK 类型；
-- query 与 exec 均使用参数绑定，动态值不拼 SQL；
-- migration 连续、append-only、原子，newer schema fail closed；
-- exec 任一 statement 失败后无部分写入；
-- exec 遇到 read-only 或产生 row 的 statement 时返回 `misuse` 并完整回滚；
-- reader 无法写入，普通 exec 无法绕过受保护操作；
-- 内存 target 的 query 能看到同一 instance 中 exec 写入的数据，不因错误双连接而隔离；
-- UTF-8、finite real、NUL、params、SQL 和结果上限全部 fail closed；
-- callback borrowed lifetime 无逃逸；
-- reopen 后数据与 `user_version` 保持；
-- Storage 只使用测试显式提供的 temporary path 或内存 target，不创建 production `app.db`；
-- concurrent/busy、constraint、I/O 和 corrupt 不被折叠；
-- 现有 Workbench store、exclusive lock、恢复和 mutation fence 行为零变化；
-- 文档与 guard 明确 direct backend 的唯一位置、边界和未来删除条件。
+`interrupt` 只请求取消当前 operation；SQLite 返回 `SQLITE_INTERRUPT` 时映射为 `cancelled`。取消是协作式请求，不强制中断 caller callback，也不保证胜过即将完成的提交；callback 必须自行返回，shutdown 才能完成。Storage 不创建 timer 或 deadline worker。
 
-## 11. 当前边界结论
+## 8. 验证 Gate
 
-- SQLite 是 MetaWork 的长期基础能力，不是 Native SDK capability 的附属品；
-- 当前 Storage 模块使用直接 SQLite 后端，不再被 SDK decoder 缺口阻塞；
-- Storage 只拥有无业务 SQL 机制，Product owner 继续拥有 schema 与持久化语义；
-- 当前不接 Application 或任何 Product；未来正式 `app.db`、schema 和数据保持稳定，Native SDK 只做后端原位替换；
-- 两个后端对齐同一 engine profile 和 conformance contract，因此正常切换不迁移用户数据；
-- 当前不迁移 Workbench、不删除旧 store、不改变现有锁和恢复合同。
+本合同的验证责任、标准入口、平台矩阵与未闭合证据统一由[验证规范的 Storage 基础层验证](validation.md#storage-基础层验证)定义。测试必须观察本合同中的权限隔离、持久化身份、事务结果与连接健康、借用生命周期和恢复不变量；测试数量或单次全绿不能替代这些证据。
+
+当前基础层仍不创建 production `app.db`，不改变任何 Workbench store、Account persistence、Application startup/shutdown 或 Product mutation path。

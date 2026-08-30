@@ -1,126 +1,73 @@
-//! Direct SQLite backend for the stable Storage SQL contract.
-//! This module owns every SQLite C value and never exposes one to callers.
+//! Direct SQLite backend for the backend-neutral Storage SQL contract.
+//! SQLite values, handles, authorizers, profile, and recovery state never
+//! escape this owner.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const sql = @import("sql.zig");
 const conformance = @import("conformance.zig");
+const backend = @import("sqlite/connection.zig");
+const migration_engine = @import("sqlite/migrations.zig");
 
-const c = @cImport({
-    @cInclude("sqlite3.h");
-});
-
-const Authorizer = ?*const fn (
-    ?*anyopaque,
-    c_int,
-    [*c]const u8,
-    [*c]const u8,
-    [*c]const u8,
-    [*c]const u8,
-) callconv(.c) c_int;
+const c = backend.c;
+const Connection = backend.Connection;
+const SqlError = backend.SqlError;
+const bindAll = backend.bindAll;
+const columnBlob = backend.columnBlob;
+const columnName = backend.columnName;
+const columnText = backend.columnText;
+const columnValue = backend.columnValue;
+const denyAllAuthorizer = backend.denyAllAuthorizer;
+const initializeConnection = backend.initialize;
+const initializeFailure = backend.initializeFailure;
+const internalTransactionAuthorizer = backend.internalTransactionAuthorizer;
+const mutationAuthorizer = backend.mutationAuthorizer;
+const parameterCount = backend.parameterCount;
+const prepareOne = backend.prepareOne;
+const queryAuthorizer = backend.queryAuthorizer;
+const rowBytes = backend.rowBytes;
+const setTextPragma = backend.setTextPragma;
+const sqlFailure = backend.sqlFailure;
+const applyMigrations = migration_engine.apply;
 
 pub const Target = union(enum) {
     file: []const u8,
     memory,
 };
 
-pub const OpenError = error{
-    OutOfMemory,
-    InvalidTarget,
-    InvalidMigrations,
-    PathUnavailable,
-    OpenFailed,
-    Busy,
-    Corrupt,
-    MigrationFailed,
-    VersionUnknown,
-};
+pub const OpenError = backend.OpenError;
+pub const LifecycleError = error{ReentrantOperation};
 
-const SqlError = error{
-    NoMemory,
-    Busy,
-    Constraint,
-    Corrupt,
-    IoFailed,
-    Misuse,
-    Rejected,
-};
+const Lifecycle = enum { active, stopping, stopped, poisoned };
+const Admission = enum { entered, rejected, unavailable };
+const TestHooks = if (builtin.is_test) struct {
+    fail_before_commit: bool = false,
+    lose_ack_after_commit: bool = false,
+    fail_rollback: bool = false,
+    fail_authorizer_restore: bool = false,
+    waiting_callers: usize = 0,
+} else struct {};
 
-const Connection = struct {
-    handle: *c.sqlite3,
-
-    fn open(path: [:0]const u8) OpenError!Connection {
-        var handle: ?*c.sqlite3 = null;
-        const flags = c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_CREATE |
-            c.SQLITE_OPEN_FULLMUTEX;
-        const result = c.sqlite3_open_v2(path.ptr, &handle, flags, null);
-        if (result != c.SQLITE_OK) {
-            if (handle) |opened| _ = c.sqlite3_close_v2(opened);
-            return openFailure(result);
-        }
-        const opened = handle orelse return error.OpenFailed;
-        _ = c.sqlite3_extended_result_codes(opened, 1);
-        return .{ .handle = opened };
-    }
-
-    fn close(self: *Connection) void {
-        _ = c.sqlite3_close_v2(self.handle);
-    }
-
-    fn execRaw(self: *Connection, text: [*:0]const u8) SqlError!void {
-        const result = c.sqlite3_exec(self.handle, text, null, null, null);
-        if (result != c.SQLITE_OK) return sqlFailure(result);
-    }
-
-    fn setAuthorizer(
-        self: *Connection,
-        callback: Authorizer,
-    ) SqlError!void {
-        const result = c.sqlite3_set_authorizer(self.handle, callback, null);
-        if (result != c.SQLITE_OK) return sqlFailure(result);
-    }
-};
-
-const ReceiverDispatch = struct {
-    mutex: std.atomic.Mutex = .unlocked,
-    thread_id: ?std.Thread.Id = null,
-
-    fn activeOnThread(self: *ReceiverDispatch, thread_id: std.Thread.Id) bool {
-        lock(&self.mutex);
-        defer self.mutex.unlock();
-        return self.thread_id == thread_id;
-    }
-
-    fn enter(self: *ReceiverDispatch, thread_id: std.Thread.Id) void {
-        lock(&self.mutex);
-        defer self.mutex.unlock();
-        std.debug.assert(self.thread_id == null);
-        self.thread_id = thread_id;
-    }
-
-    fn leave(self: *ReceiverDispatch, thread_id: std.Thread.Id) void {
-        lock(&self.mutex);
-        defer self.mutex.unlock();
-        std.debug.assert(self.thread_id == thread_id);
-        self.thread_id = null;
-    }
-};
-
-/// Concrete owner. Keep this value at one stable address after open; a
-/// capability returned by capability() borrows this address.
+/// Stable concrete owner. create() allocates the instance so capabilities can
+/// safely borrow its address until shutdown() and destroy().
 pub const Database = struct {
+    io: std.Io,
     allocator: std.mem.Allocator,
-    writer: Connection,
-    reader: ?Connection = null,
-    writer_mutex: std.atomic.Mutex = .unlocked,
-    reader_mutex: std.atomic.Mutex = .unlocked,
-    receiver_dispatch: ReceiverDispatch = .{},
-    schema_version: u32 = 0,
+    connection: Connection,
+    mutex: std.Io.Mutex = .init,
+    condition: std.Io.Condition = .init,
+    lifecycle: Lifecycle = .active,
+    operating: bool = false,
+    active_thread: ?std.Thread.Id = null,
+    schema_version: u32,
+    test_hooks: TestHooks = .{},
 
-    pub fn open(
+    pub fn create(
+        io: std.Io,
         allocator: std.mem.Allocator,
         target: Target,
         migrations: []const sql.Migration,
-    ) OpenError!Database {
+    ) OpenError!*Database {
         if (!sql.validMigrations(migrations)) return error.InvalidMigrations;
 
         var owned_path: ?[:0]u8 = null;
@@ -140,44 +87,70 @@ pub const Database = struct {
             },
         };
 
-        var writer = try Connection.open(path);
-        errdefer writer.close();
-        try initializeWriter(&writer, is_file);
-
-        var database: Database = .{
-            .allocator = allocator,
-            .writer = writer,
-        };
-        database.schema_version = try database.applyMigrations(migrations);
-        database.writer.setAuthorizer(normalAuthorizer) catch |err|
+        var connection = try Connection.open(path);
+        errdefer connection.close();
+        try initializeConnection(&connection, is_file);
+        const schema_version = try applyMigrations(allocator, &connection, migrations);
+        connection.setAuthorizer(denyAllAuthorizer) catch |err|
             return initializeFailure(err);
 
-        if (is_file) {
-            var reader = try Connection.open(path);
-            errdefer reader.close();
-            try initializeReader(&reader);
-            reader.setAuthorizer(normalAuthorizer) catch |err|
-                return initializeFailure(err);
-            database.reader = reader;
-        }
-        return database;
+        const self = allocator.create(Database) catch return error.OutOfMemory;
+        self.* = .{
+            .io = io,
+            .allocator = allocator,
+            .connection = connection,
+            .schema_version = schema_version,
+        };
+        return self;
     }
 
-    pub fn deinit(self: *Database) void {
-        if (self.reader) |*reader| reader.close();
-        self.writer.close();
-        self.* = undefined;
+    pub fn shutdown(self: *Database) LifecycleError!void {
+        self.lock();
+        defer self.unlock();
+        if (self.operating and self.active_thread == std.Thread.getCurrentId())
+            return error.ReentrantOperation;
+        if (self.lifecycle == .stopped) {
+            return;
+        }
+        if (self.lifecycle == .stopping) {
+            while (self.lifecycle != .stopped) self.wait();
+            return;
+        }
+        self.lifecycle = .stopping;
+        self.broadcast();
+        if (self.operating) c.sqlite3_interrupt(self.connection.handle);
+        while (self.operating) self.wait();
+        self.connection.close();
+        self.lifecycle = .stopped;
+        self.broadcast();
+    }
+
+    /// The owner must first stop and join every other caller, including
+    /// admission waiters and concurrent shutdown callers, before destruction.
+    pub fn destroy(self: *Database) LifecycleError!void {
+        try self.shutdown();
+        const allocator = self.allocator;
+        allocator.destroy(self);
+    }
+
+    pub fn interrupt(self: *Database) void {
+        self.lock();
+        defer self.unlock();
+        if (self.operating and self.lifecycle != .stopped)
+            c.sqlite3_interrupt(self.connection.handle);
     }
 
     pub fn capability(self: *Database) sql.Database {
         return .{
             .context = self,
             .query_fn = queryBound,
-            .exec_fn = execBound,
+            .mutate_fn = mutateBound,
         };
     }
 
-    pub fn schemaVersion(self: *const Database) u32 {
+    pub fn schemaVersion(self: *Database) u32 {
+        self.lock();
+        defer self.unlock();
         return self.schema_version;
     }
 
@@ -187,170 +160,223 @@ pub const Database = struct {
         params: []const sql.Value,
         receiver: sql.RowReceiver,
     ) sql.QueryOutcome {
-        if (self.receiver_dispatch.activeOnThread(std.Thread.getCurrentId()))
-            return .misuse;
-        const connection, const mutex = if (self.reader) |*reader|
-            .{ reader, &self.reader_mutex }
-        else
-            .{ &self.writer, &self.writer_mutex };
-        lock(mutex);
-        defer mutex.unlock();
+        switch (self.beginOperation()) {
+            .entered => {},
+            .rejected => return .rejected,
+            .unavailable => return .unavailable,
+        }
+        defer self.endOperation();
 
-        const statement = prepareOne(connection, text) catch |err|
+        self.connection.setAuthorizer(queryAuthorizer) catch |err|
+            return queryFailure(err);
+        const outcome = self.runQuery(text, params, receiver);
+        self.connection.setAuthorizer(denyAllAuthorizer) catch {
+            self.markPoisoned();
+            return .unavailable;
+        };
+        return outcome;
+    }
+
+    fn runQuery(
+        self: *Database,
+        text: []const u8,
+        params: []const sql.Value,
+        receiver: sql.RowReceiver,
+    ) sql.QueryOutcome {
+        const statement = prepareOne(&self.connection, text) catch |err|
             return queryFailure(err);
         defer _ = c.sqlite3_finalize(statement);
         if (c.sqlite3_stmt_readonly(statement) == 0 or
             parameterCount(statement) != params.len)
-            return .misuse;
+            return .rejected;
         bindAll(statement, params) catch |err| return queryFailure(err);
 
         const column_count: usize = @intCast(c.sqlite3_column_count(statement));
         var total_bytes: usize = 0;
         for (0..column_count) |index| {
             const name = columnName(statement, index);
-            if (!std.unicode.utf8ValidateSlice(name)) return .misuse;
+            if (!std.unicode.utf8ValidateSlice(name)) return .rejected;
             total_bytes = std.math.add(usize, total_bytes, name.len) catch
-                return .rejected;
-            if (total_bytes > sql.Limits.result_bytes) return .rejected;
+                return .resource_exhausted;
+            if (total_bytes > sql.Limits.result_bytes) return .resource_exhausted;
         }
 
         var row_count: usize = 0;
         while (true) switch (c.sqlite3_step(statement)) {
             c.SQLITE_DONE => return .ok,
             c.SQLITE_ROW => {
-                if (row_count == sql.Limits.result_rows) return .rejected;
+                if (row_count == sql.Limits.result_rows) return .resource_exhausted;
                 total_bytes = rowBytes(statement, column_count, total_bytes) catch |err|
                     return queryFailure(err);
-                if (total_bytes > sql.Limits.result_bytes) return .rejected;
+                if (total_bytes > sql.Limits.result_bytes) return .resource_exhausted;
                 var row_context: RowContext = .{
                     .statement = statement,
                     .column_count = column_count,
                 };
-                const receiver_thread_id = std.Thread.getCurrentId();
-                self.receiver_dispatch.enter(receiver_thread_id);
-                {
-                    defer self.receiver_dispatch.leave(receiver_thread_id);
-                    receiver.receive(row_context.row());
-                }
+                receiver.receive(row_context.row());
                 row_count += 1;
             },
             else => |result| return queryFailure(sqlFailure(result)),
         };
     }
 
-    fn exec(
+    fn mutate(
         self: *Database,
-        statements: []const sql.Statement,
-    ) sql.ExecOutcome {
-        if (self.receiver_dispatch.activeOnThread(std.Thread.getCurrentId()))
-            return .misuse;
-        lock(&self.writer_mutex);
-        defer self.writer_mutex.unlock();
-
-        self.writer.execRaw("BEGIN IMMEDIATE;") catch |err|
-            return execFailure(err);
-        self.writer.setAuthorizer(containedAuthorizer) catch |err| {
-            return self.rollback(execFailure(err));
-        };
-
-        for (statements) |item| {
-            const statement = prepareOne(&self.writer, item.sql) catch |err| {
-                return self.restoreAndRollback(execFailure(err));
-            };
-            const outcome = executeMutation(statement, item.params);
-            _ = c.sqlite3_finalize(statement);
-            if (outcome) |failure| return self.restoreAndRollback(failure);
+        mutations: []const sql.Mutation,
+    ) sql.MutationOutcome {
+        switch (self.beginOperation()) {
+            .entered => {},
+            .rejected => return .rejected,
+            .unavailable => return .unavailable,
+        }
+        defer self.endOperation();
+        if (c.sqlite3_get_autocommit(self.connection.handle) == 0) {
+            self.markPoisoned();
+            return .outcome_unknown;
         }
 
-        self.writer.setAuthorizer(normalAuthorizer) catch |err|
-            return self.rollback(execFailure(err));
-        self.writer.execRaw("COMMIT;") catch |err|
-            return self.rollback(execFailure(err));
-        return .ok;
+        self.connection.setAuthorizer(internalTransactionAuthorizer) catch |err|
+            return mutationFailure(err);
+        self.connection.execRaw("BEGIN IMMEDIATE;") catch |err| {
+            return self.finishKnownMutation(mutationFailure(err));
+        };
+        self.connection.setAuthorizer(mutationAuthorizer) catch |err|
+            return self.rollbackMutation(mutationFailure(err));
+
+        for (mutations) |mutation| {
+            const item = mutation.statement;
+            const statement = prepareOne(&self.connection, item.sql) catch |err|
+                return self.rollbackMutation(mutationFailure(err));
+            const failure = executeMutation(
+                &self.connection,
+                statement,
+                item.params,
+                mutation.expected_changes,
+            );
+            _ = c.sqlite3_finalize(statement);
+            if (failure) |outcome| return self.rollbackMutation(outcome);
+        }
+        return self.commitMutation();
     }
 
-    fn restoreAndRollback(
+    fn commitMutation(self: *Database) sql.MutationOutcome {
+        self.connection.setAuthorizer(internalTransactionAuthorizer) catch
+            return self.unknownMutation();
+        self.attemptCommit() catch |err| {
+            if (c.sqlite3_get_autocommit(self.connection.handle) != 0)
+                return self.unknownMutation();
+            return self.rollbackMutation(mutationFailure(err));
+        };
+        if (c.sqlite3_get_autocommit(self.connection.handle) == 0)
+            return self.unknownMutation();
+        return self.finishKnownMutation(.committed);
+    }
+
+    fn attemptCommit(self: *Database) SqlError!void {
+        // Inject at the engine-result boundary, so tests exercise the same
+        // autocommit/rollback classification as an actual COMMIT error.
+        if (builtin.is_test and self.test_hooks.fail_before_commit) {
+            self.test_hooks.fail_before_commit = false;
+            return error.IoFailed;
+        }
+        try self.connection.execRaw("COMMIT;");
+        if (builtin.is_test and self.test_hooks.lose_ack_after_commit) {
+            self.test_hooks.lose_ack_after_commit = false;
+            return error.IoFailed;
+        }
+    }
+
+    fn rollbackMutation(
         self: *Database,
-        outcome: sql.ExecOutcome,
-    ) sql.ExecOutcome {
-        self.writer.setAuthorizer(normalAuthorizer) catch return self.rollback(.io_failed);
-        return self.rollback(outcome);
+        outcome: sql.MutationOutcome,
+    ) sql.MutationOutcome {
+        if (builtin.is_test and self.test_hooks.fail_rollback and
+            c.sqlite3_get_autocommit(self.connection.handle) == 0)
+        {
+            self.test_hooks.fail_rollback = false;
+            return self.unknownMutation();
+        }
+        if (!self.connection.rollbackConfirmed()) return self.unknownMutation();
+        return self.finishKnownMutation(outcome);
     }
 
-    fn rollback(self: *Database, outcome: sql.ExecOutcome) sql.ExecOutcome {
-        self.writer.execRaw("ROLLBACK;") catch return .io_failed;
+    fn finishKnownMutation(self: *Database, outcome: sql.MutationOutcome) sql.MutationOutcome {
+        // Connection health is separate from a known commit/rollback result.
+        if (!self.restoreDeny()) self.markPoisoned();
         return outcome;
     }
 
-    fn applyMigrations(
-        self: *Database,
-        migrations: []const sql.Migration,
-    ) OpenError!u32 {
-        const current = readSchemaVersion(&self.writer) catch |err|
-            return migrationFailure(err);
-        const target: u32 = if (migrations.len == 0)
-            0
-        else
-            migrations[migrations.len - 1].version;
-        if (current > target) return error.VersionUnknown;
-        if (current == target) return current;
-
-        self.writer.execRaw("BEGIN IMMEDIATE;") catch |err|
-            return migrationFailure(err);
-        self.writer.setAuthorizer(containedAuthorizer) catch |err| {
-            _ = self.writer.execRaw("ROLLBACK;") catch {};
-            return migrationFailure(err);
-        };
-
-        for (migrations) |migration| {
-            if (migration.version <= current) continue;
-            const text = self.allocator.dupeZ(u8, migration.sql) catch {
-                _ = self.restoreMigrationAndRollback();
-                return error.OutOfMemory;
-            };
-            defer self.allocator.free(text);
-            self.writer.execRaw(text) catch |err| {
-                _ = self.restoreMigrationAndRollback();
-                return migrationFailure(err);
-            };
-        }
-
-        self.writer.setAuthorizer(normalAuthorizer) catch |err| {
-            _ = self.restoreMigrationAndRollback();
-            return migrationFailure(err);
-        };
-        var version_storage: [64]u8 = undefined;
-        const version_sql = std.fmt.bufPrintZ(
-            &version_storage,
-            "PRAGMA user_version={d};",
-            .{target},
-        ) catch {
-            _ = self.writer.execRaw("ROLLBACK;") catch {};
-            return error.MigrationFailed;
-        };
-        self.writer.setAuthorizer(null) catch |err| {
-            _ = self.writer.execRaw("ROLLBACK;") catch {};
-            return migrationFailure(err);
-        };
-        self.writer.execRaw(version_sql) catch |err| {
-            _ = self.writer.execRaw("ROLLBACK;") catch {};
-            return migrationFailure(err);
-        };
-        self.writer.setAuthorizer(normalAuthorizer) catch |err| {
-            _ = self.writer.execRaw("ROLLBACK;") catch {};
-            return migrationFailure(err);
-        };
-        self.writer.execRaw("COMMIT;") catch |err| {
-            _ = self.writer.execRaw("ROLLBACK;") catch {};
-            return migrationFailure(err);
-        };
-        return target;
+    fn unknownMutation(self: *Database) sql.MutationOutcome {
+        _ = self.restoreDeny();
+        self.markPoisoned();
+        return .outcome_unknown;
     }
 
-    fn restoreMigrationAndRollback(self: *Database) bool {
-        self.writer.setAuthorizer(normalAuthorizer) catch return false;
-        self.writer.execRaw("ROLLBACK;") catch return false;
+    fn restoreDeny(self: *Database) bool {
+        if (builtin.is_test and self.test_hooks.fail_authorizer_restore) {
+            self.test_hooks.fail_authorizer_restore = false;
+            return false;
+        }
+        self.connection.setAuthorizer(denyAllAuthorizer) catch return false;
         return true;
+    }
+
+    fn beginOperation(self: *Database) Admission {
+        const thread_id = std.Thread.getCurrentId();
+        self.lock();
+        defer self.unlock();
+        var registered_waiter = false;
+        defer if (builtin.is_test and registered_waiter) {
+            self.test_hooks.waiting_callers -= 1;
+        };
+        while (true) {
+            if (self.lifecycle != .active) return .unavailable;
+            if (!self.operating) {
+                self.operating = true;
+                self.active_thread = thread_id;
+                return .entered;
+            }
+            if (self.active_thread == thread_id) return .rejected;
+            if (builtin.is_test and !registered_waiter) {
+                registered_waiter = true;
+                self.test_hooks.waiting_callers += 1;
+                self.broadcast();
+            }
+            self.wait();
+        }
+    }
+
+    fn endOperation(self: *Database) void {
+        self.lock();
+        std.debug.assert(self.operating);
+        std.debug.assert(self.active_thread == std.Thread.getCurrentId());
+        self.operating = false;
+        self.active_thread = null;
+        self.broadcast();
+        self.unlock();
+    }
+
+    fn markPoisoned(self: *Database) void {
+        self.lock();
+        if (self.lifecycle == .active) self.lifecycle = .poisoned;
+        self.broadcast();
+        self.unlock();
+    }
+
+    fn lock(self: *Database) void {
+        self.mutex.lockUncancelable(self.io);
+    }
+
+    fn unlock(self: *Database) void {
+        self.mutex.unlock(self.io);
+    }
+
+    fn wait(self: *Database) void {
+        self.condition.waitUncancelable(self.io, &self.mutex);
+    }
+
+    fn broadcast(self: *Database) void {
+        self.condition.broadcast(self.io);
     }
 
     fn queryBound(
@@ -363,12 +389,12 @@ pub const Database = struct {
         return self.query(text, params, receiver);
     }
 
-    fn execBound(
+    fn mutateBound(
         context: *anyopaque,
-        statements: []const sql.Statement,
-    ) sql.ExecOutcome {
+        mutations: []const sql.Mutation,
+    ) sql.MutationOutcome {
         const self: *Database = @ptrCast(@alignCast(context));
-        return self.exec(statements);
+        return self.mutate(mutations);
     }
 };
 
@@ -396,315 +422,48 @@ const RowContext = struct {
     }
 };
 
-fn initializeWriter(connection: *Connection, durable: bool) OpenError!void {
-    if (durable) {
-        connection.execRaw("PRAGMA journal_mode=WAL;") catch |err|
-            return initializeFailure(err);
-        connection.execRaw("PRAGMA synchronous=NORMAL;") catch |err|
-            return initializeFailure(err);
-    }
-    connection.execRaw("PRAGMA busy_timeout=250;") catch |err|
-        return initializeFailure(err);
-    connection.execRaw("PRAGMA foreign_keys=ON;") catch |err|
-        return initializeFailure(err);
-}
-
-fn initializeReader(connection: *Connection) OpenError!void {
-    connection.execRaw("PRAGMA busy_timeout=250;") catch |err|
-        return initializeFailure(err);
-    connection.execRaw("PRAGMA foreign_keys=ON;") catch |err|
-        return initializeFailure(err);
-    connection.execRaw("PRAGMA query_only=ON;") catch |err|
-        return initializeFailure(err);
-}
-
-fn readSchemaVersion(connection: *Connection) SqlError!u32 {
-    const statement = try prepareOne(connection, "PRAGMA user_version;");
-    defer _ = c.sqlite3_finalize(statement);
-    if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.Misuse;
-    const value = c.sqlite3_column_int64(statement, 0);
-    if (value < 0 or value > sql.Limits.migrations) return error.Corrupt;
-    if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.Misuse;
-    return @intCast(value);
-}
-
-fn prepareOne(connection: *Connection, text: []const u8) SqlError!*c.sqlite3_stmt {
-    var statement: ?*c.sqlite3_stmt = null;
-    var tail: [*c]const u8 = null;
-    const result = c.sqlite3_prepare_v2(
-        connection.handle,
-        text.ptr,
-        @intCast(text.len),
-        &statement,
-        &tail,
-    );
-    if (result != c.SQLITE_OK) return sqlFailure(result);
-    errdefer {
-        if (statement) |prepared| _ = c.sqlite3_finalize(prepared);
-    }
-    const first = statement orelse return error.Misuse;
-
-    if (tail != null) {
-        const consumed: usize = @intFromPtr(tail) - @intFromPtr(text.ptr);
-        if (consumed < text.len) {
-            const remaining = text[consumed..];
-            var extra: ?*c.sqlite3_stmt = null;
-            const extra_result = c.sqlite3_prepare_v2(
-                connection.handle,
-                remaining.ptr,
-                @intCast(remaining.len),
-                &extra,
-                null,
-            );
-            if (extra_result != c.SQLITE_OK) return sqlFailure(extra_result);
-            if (extra) |prepared| {
-                _ = c.sqlite3_finalize(prepared);
-                return error.Misuse;
-            }
-        }
-    }
-    return first;
-}
-
 fn executeMutation(
+    connection: *Connection,
     statement: *c.sqlite3_stmt,
     params: []const sql.Value,
-) ?sql.ExecOutcome {
+    expectation: sql.ChangeExpectation,
+) ?sql.MutationOutcome {
     if (c.sqlite3_stmt_readonly(statement) != 0 or
         c.sqlite3_column_count(statement) != 0 or
         parameterCount(statement) != params.len)
-        return .misuse;
-    bindAll(statement, params) catch |err| return execFailure(err);
+        return .rejected;
+    bindAll(statement, params) catch |err| return mutationFailure(err);
     const result = c.sqlite3_step(statement);
-    if (result == c.SQLITE_DONE) return null;
-    if (result == c.SQLITE_ROW) return .misuse;
-    return execFailure(sqlFailure(result));
-}
-
-fn bindAll(statement: *c.sqlite3_stmt, params: []const sql.Value) SqlError!void {
-    for (params, 0..) |value, index| {
-        const parameter_index: c_int = @intCast(index + 1);
-        const result = switch (value) {
-            .null_value => c.sqlite3_bind_null(statement, parameter_index),
-            .integer => |number| c.sqlite3_bind_int64(statement, parameter_index, number),
-            .real => |number| c.sqlite3_bind_double(statement, parameter_index, number),
-            .text => |bytes| c.sqlite3_bind_text(
-                statement,
-                parameter_index,
-                bytes.ptr,
-                @intCast(bytes.len),
-                null,
-            ),
-            .blob => |bytes| if (bytes.len == 0)
-                c.sqlite3_bind_zeroblob64(statement, parameter_index, 0)
-            else
-                c.sqlite3_bind_blob64(
-                    statement,
-                    parameter_index,
-                    bytes.ptr,
-                    bytes.len,
-                    null,
-                ),
-        };
-        if (result != c.SQLITE_OK) return sqlFailure(result);
+    if (result != c.SQLITE_DONE)
+        return if (result == c.SQLITE_ROW) .rejected else mutationFailure(sqlFailure(result));
+    const changes: u64 = @intCast(c.sqlite3_changes64(connection.handle));
+    switch (expectation) {
+        .any => {},
+        .exactly => |expected| if (changes != expected) return .conflict,
     }
-}
-
-fn rowBytes(
-    statement: *c.sqlite3_stmt,
-    column_count: usize,
-    initial: usize,
-) SqlError!usize {
-    var total = initial;
-    for (0..column_count) |index| {
-        const column: c_int = @intCast(index);
-        const bytes: usize = switch (c.sqlite3_column_type(statement, column)) {
-            c.SQLITE_INTEGER, c.SQLITE_FLOAT => 8,
-            c.SQLITE_NULL => 1,
-            c.SQLITE_TEXT => text: {
-                const value = columnText(statement, index);
-                if (!std.unicode.utf8ValidateSlice(value)) return error.Misuse;
-                break :text value.len;
-            },
-            c.SQLITE_BLOB => columnBlob(statement, index).len,
-            else => return error.Misuse,
-        };
-        if (c.sqlite3_column_type(statement, column) == c.SQLITE_FLOAT and
-            !std.math.isFinite(c.sqlite3_column_double(statement, column)))
-            return error.Misuse;
-        total = std.math.add(usize, total, bytes) catch return error.Rejected;
-    }
-    return total;
-}
-
-fn columnValue(statement: *c.sqlite3_stmt, index: usize) sql.Value {
-    const column: c_int = @intCast(index);
-    return switch (c.sqlite3_column_type(statement, column)) {
-        c.SQLITE_INTEGER => .{ .integer = c.sqlite3_column_int64(statement, column) },
-        c.SQLITE_FLOAT => .{ .real = c.sqlite3_column_double(statement, column) },
-        c.SQLITE_TEXT => .{ .text = columnText(statement, index) },
-        c.SQLITE_BLOB => .{ .blob = columnBlob(statement, index) },
-        c.SQLITE_NULL => .null_value,
-        else => .null_value,
-    };
-}
-
-fn columnName(statement: *c.sqlite3_stmt, index: usize) []const u8 {
-    const pointer = c.sqlite3_column_name(statement, @intCast(index)) orelse
-        return "";
-    return std.mem.span(pointer);
-}
-
-fn columnText(statement: *c.sqlite3_stmt, index: usize) []const u8 {
-    const column: c_int = @intCast(index);
-    const length = c.sqlite3_column_bytes(statement, column);
-    if (length <= 0) return "";
-    const pointer = c.sqlite3_column_text(statement, column) orelse return "";
-    return pointer[0..@intCast(length)];
-}
-
-fn columnBlob(statement: *c.sqlite3_stmt, index: usize) []const u8 {
-    const column: c_int = @intCast(index);
-    const length = c.sqlite3_column_bytes(statement, column);
-    if (length <= 0) return "";
-    const raw = c.sqlite3_column_blob(statement, column) orelse return "";
-    const pointer: [*]const u8 = @ptrCast(raw);
-    return pointer[0..@intCast(length)];
-}
-
-fn parameterCount(statement: *c.sqlite3_stmt) usize {
-    return @intCast(c.sqlite3_bind_parameter_count(statement));
-}
-
-fn lock(mutex: *std.atomic.Mutex) void {
-    while (!mutex.tryLock()) std.atomic.spinLoopHint();
-}
-
-fn normalAuthorizer(
-    _: ?*anyopaque,
-    action: c_int,
-    first: [*c]const u8,
-    second: [*c]const u8,
-    _: [*c]const u8,
-    _: [*c]const u8,
-) callconv(.c) c_int {
-    return authorize(action, first, second, false);
-}
-
-fn containedAuthorizer(
-    _: ?*anyopaque,
-    action: c_int,
-    first: [*c]const u8,
-    second: [*c]const u8,
-    _: [*c]const u8,
-    _: [*c]const u8,
-) callconv(.c) c_int {
-    return authorize(action, first, second, true);
-}
-
-fn authorize(
-    action: c_int,
-    first: [*c]const u8,
-    second: [*c]const u8,
-    contained: bool,
-) c_int {
-    if (action == c.SQLITE_ATTACH or action == c.SQLITE_DETACH)
-        return c.SQLITE_DENY;
-    if (contained and (action == c.SQLITE_TRANSACTION or
-        action == c.SQLITE_SAVEPOINT)) return c.SQLITE_DENY;
-    if (temporarySchemaOperation(action)) return c.SQLITE_DENY;
-    if (action == c.SQLITE_PRAGMA and second != null) {
-        const name = if (first != null) std.mem.span(first) else "";
-        for (owned_pragmas) |owned| {
-            if (std.ascii.eqlIgnoreCase(name, owned)) return c.SQLITE_DENY;
-        }
-    }
-    return c.SQLITE_OK;
-}
-
-fn temporarySchemaOperation(action: c_int) bool {
-    return (action >= c.SQLITE_CREATE_TEMP_INDEX and
-        action <= c.SQLITE_CREATE_TEMP_VIEW) or
-        (action >= c.SQLITE_DROP_TEMP_INDEX and
-            action <= c.SQLITE_DROP_TEMP_VIEW);
-}
-
-const owned_pragmas = [_][]const u8{
-    "user_version",
-    "schema_version",
-    "writable_schema",
-    "query_only",
-    "journal_mode",
-    "synchronous",
-    "locking_mode",
-    "foreign_keys",
-    "defer_foreign_keys",
-    "busy_timeout",
-    "wal_autocheckpoint",
-    "temp_store",
-    "temp_store_directory",
-    "data_store_directory",
-};
-
-fn sqlFailure(result: c_int) SqlError {
-    return switch (result & 0xff) {
-        c.SQLITE_NOMEM => error.NoMemory,
-        c.SQLITE_BUSY, c.SQLITE_LOCKED => error.Busy,
-        c.SQLITE_CONSTRAINT => error.Constraint,
-        c.SQLITE_CORRUPT, c.SQLITE_NOTADB => error.Corrupt,
-        c.SQLITE_IOERR, c.SQLITE_FULL, c.SQLITE_READONLY, c.SQLITE_CANTOPEN, c.SQLITE_PERM => error.IoFailed,
-        c.SQLITE_TOOBIG => error.Rejected,
-        else => error.Misuse,
-    };
-}
-
-fn openFailure(result: c_int) OpenError {
-    return switch (result & 0xff) {
-        c.SQLITE_NOMEM => error.OutOfMemory,
-        c.SQLITE_BUSY, c.SQLITE_LOCKED => error.Busy,
-        c.SQLITE_CORRUPT, c.SQLITE_NOTADB => error.Corrupt,
-        c.SQLITE_CANTOPEN, c.SQLITE_PERM, c.SQLITE_READONLY => error.PathUnavailable,
-        else => error.OpenFailed,
-    };
-}
-
-fn initializeFailure(err: SqlError) OpenError {
-    return switch (err) {
-        error.NoMemory => error.OutOfMemory,
-        error.Busy => error.Busy,
-        error.Corrupt => error.Corrupt,
-        error.IoFailed => error.PathUnavailable,
-        else => error.OpenFailed,
-    };
-}
-
-fn migrationFailure(err: SqlError) OpenError {
-    return switch (err) {
-        error.NoMemory => error.OutOfMemory,
-        error.Busy => error.Busy,
-        error.Corrupt => error.Corrupt,
-        else => error.MigrationFailed,
-    };
+    return null;
 }
 
 fn queryFailure(err: SqlError) sql.QueryOutcome {
     return switch (err) {
         error.Busy => .busy,
+        error.Cancelled => .cancelled,
         error.Corrupt => .corrupt,
-        error.NoMemory, error.IoFailed => .io_failed,
-        error.Rejected => .rejected,
-        error.Constraint, error.Misuse => .misuse,
+        error.ResourceExhausted => .resource_exhausted,
+        error.IoFailed => .definite_io_failure,
+        error.Constraint, error.Rejected => .rejected,
     };
 }
 
-fn execFailure(err: SqlError) sql.ExecOutcome {
+fn mutationFailure(err: SqlError) sql.MutationOutcome {
     return switch (err) {
         error.Constraint => .constraint,
         error.Busy => .busy,
+        error.Cancelled => .cancelled,
         error.Corrupt => .corrupt,
-        error.NoMemory, error.IoFailed => .io_failed,
+        error.ResourceExhausted => .resource_exhausted,
+        error.IoFailed => .definite_io_failure,
         error.Rejected => .rejected,
-        error.Misuse => .misuse,
     };
 }
 
@@ -723,387 +482,986 @@ const test_migrations = [_]sql.Migration{.{
     ,
 }};
 
-const CrossDatabaseObservation = struct {
-    primary: sql.Database,
-    secondary: sql.Database,
-    secondary_outcome: sql.QueryOutcome = .misuse,
-    indirect_primary_outcome: sql.QueryOutcome = .ok,
+const IntegerObservation = struct {
+    value: i64 = -1,
+    rows: usize = 0,
 
-    fn receivePrimary(context: *anyopaque, _: sql.Row) void {
-        const self: *CrossDatabaseObservation = @ptrCast(@alignCast(context));
-        self.secondary_outcome = self.secondary.query(
-            "SELECT 1",
-            &.{},
-            .{ .context = self, .receive_fn = receiveSecondary },
-        );
+    fn receive(context: *anyopaque, row: sql.Row) void {
+        const self: *IntegerObservation = @ptrCast(@alignCast(context));
+        self.value = row.value(0).integer;
+        self.rows += 1;
     }
 
-    fn receiveSecondary(context: *anyopaque, _: sql.Row) void {
-        const self: *CrossDatabaseObservation = @ptrCast(@alignCast(context));
-        self.indirect_primary_outcome = self.primary.query(
-            "SELECT 1",
-            &.{},
-            .{ .context = self, .receive_fn = ignore },
-        );
+    fn receiver(self: *IntegerObservation) sql.RowReceiver {
+        return .{ .context = self, .receive_fn = receive };
     }
-
-    fn ignore(_: *anyopaque, _: sql.Row) void {}
 };
 
-test "memory database uses one connection and passes backend conformance" {
-    var database = try Database.open(
+const BlockingReceiver = struct {
+    mutex: std.Io.Mutex = .init,
+    condition: std.Io.Condition = .init,
+    entered: bool = false,
+    released: bool = false,
+
+    fn receive(context: *anyopaque, _: sql.Row) void {
+        const self: *BlockingReceiver = @ptrCast(@alignCast(context));
+        self.lock();
+        self.entered = true;
+        self.condition.broadcast(std.testing.io);
+        while (!self.released)
+            self.condition.waitUncancelable(std.testing.io, &self.mutex);
+        self.mutex.unlock(std.testing.io);
+    }
+
+    fn waitUntilEntered(self: *BlockingReceiver) void {
+        self.lock();
+        while (!self.entered)
+            self.condition.waitUncancelable(std.testing.io, &self.mutex);
+        self.mutex.unlock(std.testing.io);
+    }
+
+    fn release(self: *BlockingReceiver) void {
+        self.lock();
+        self.released = true;
+        self.condition.broadcast(std.testing.io);
+        self.mutex.unlock(std.testing.io);
+    }
+
+    fn receiver(self: *BlockingReceiver) sql.RowReceiver {
+        return .{ .context = self, .receive_fn = receive };
+    }
+
+    fn lock(self: *BlockingReceiver) void {
+        self.mutex.lockUncancelable(std.testing.io);
+    }
+};
+
+fn ignoreRow(_: *anyopaque, _: sql.Row) void {}
+
+test "memory database has a stable owner and passes backend conformance" {
+    const database = try Database.create(
+        std.testing.io,
         std.testing.allocator,
         .memory,
         &test_migrations,
     );
-    defer database.deinit();
+    defer database.destroy() catch unreachable;
     try std.testing.expectEqual(@as(u32, 1), database.schemaVersion());
     try conformance.expectBackendContract(database.capability());
 }
 
-test "receiver may call another database but cannot indirectly reenter its own" {
-    var primary = try Database.open(
+test "query and mutation authorities reject transaction and schema escape" {
+    const database = try Database.create(
+        std.testing.io,
         std.testing.allocator,
         .memory,
         &test_migrations,
     );
-    defer primary.deinit();
-    var secondary = try Database.open(std.testing.allocator, .memory, &.{});
-    defer secondary.deinit();
+    defer database.destroy() catch unreachable;
+    const capability = database.capability();
+    const ignored: sql.RowReceiver = .{ .context = database, .receive_fn = ignoreRow };
 
-    var observed: CrossDatabaseObservation = .{
-        .primary = primary.capability(),
-        .secondary = secondary.capability(),
-    };
     try std.testing.expectEqual(
-        sql.QueryOutcome.ok,
-        observed.primary.query(
-            "SELECT 1",
+        sql.QueryOutcome.rejected,
+        capability.query("BEGIN", &.{}, ignored),
+    );
+    try std.testing.expectEqual(
+        sql.QueryOutcome.rejected,
+        capability.query("SAVEPOINT escaped", &.{}, ignored),
+    );
+    try std.testing.expectEqual(
+        sql.MutationOutcome.rejected,
+        capability.mutate(&.{.{ .statement = .{ .sql = "CREATE TABLE escaped(id INTEGER)" } }}),
+    );
+    try std.testing.expectEqual(
+        sql.MutationOutcome.rejected,
+        capability.mutate(&.{.{ .statement = .{
+            .sql = "INSERT INTO storage_conformance(id) VALUES(7) RETURNING id",
+        } }}),
+    );
+    try std.testing.expectEqual(
+        sql.QueryOutcome.rejected,
+        capability.query("PRAGMA foreign_keys", &.{}, ignored),
+    );
+    try std.testing.expectEqual(
+        sql.QueryOutcome.rejected,
+        capability.query(
+            "SELECT version FROM _metawork_storage_migrations",
             &.{},
-            .{ .context = &observed, .receive_fn = CrossDatabaseObservation.receivePrimary },
+            ignored,
         ),
     );
-    try std.testing.expectEqual(sql.QueryOutcome.ok, observed.secondary_outcome);
+
     try std.testing.expectEqual(
-        sql.QueryOutcome.misuse,
-        observed.indirect_primary_outcome,
+        sql.MutationOutcome.committed,
+        capability.mutate(&.{.{
+            .statement = .{ .sql = "INSERT INTO storage_conformance(id) VALUES(8)" },
+            .expected_changes = .{ .exactly = 1 },
+        }}),
     );
 }
 
-test "receiver dispatch identity distinguishes other threads" {
-    var dispatch: ReceiverDispatch = .{};
-    const current = std.Thread.getCurrentId();
-    dispatch.enter(current);
-    try std.testing.expect(dispatch.activeOnThread(current));
-
-    var active_on_other_thread = true;
-    const thread = try std.Thread.spawn(.{}, struct {
-        fn run(receiver_dispatch: *ReceiverDispatch, active: *bool) void {
-            active.* = receiver_dispatch.activeOnThread(std.Thread.getCurrentId());
-        }
-    }.run, .{ &dispatch, &active_on_other_thread });
-    thread.join();
-    try std.testing.expect(!active_on_other_thread);
-
-    dispatch.leave(current);
-    try std.testing.expect(!dispatch.activeOnThread(current));
+test "exact change conflict rolls the complete mutation batch back" {
+    const database = try Database.create(
+        std.testing.io,
+        std.testing.allocator,
+        .memory,
+        &test_migrations,
+    );
+    defer database.destroy() catch unreachable;
+    const capability = database.capability();
+    try std.testing.expectEqual(
+        sql.MutationOutcome.conflict,
+        capability.mutate(&.{
+            .{
+                .statement = .{ .sql = "INSERT INTO storage_conformance(id) VALUES(21)" },
+                .expected_changes = .{ .exactly = 1 },
+            },
+            .{
+                .statement = .{ .sql = "UPDATE storage_conformance SET text_value='x' WHERE id=999" },
+                .expected_changes = .{ .exactly = 1 },
+            },
+        }),
+    );
+    var count: IntegerObservation = .{};
+    try std.testing.expectEqual(
+        sql.QueryOutcome.ok,
+        capability.query(
+            "SELECT COUNT(*) FROM storage_conformance WHERE id=21",
+            &.{},
+            count.receiver(),
+        ),
+    );
+    try std.testing.expectEqual(@as(i64, 0), count.value);
 }
 
-test "file database persists rows and migration version across reopen" {
+test "automatic rollback preserves constraint outcome data and reuse after reopen" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const length = try temporary.dir.realPath(std.testing.io, &path_buffer);
+    const path = try std.fs.path.join(std.testing.allocator, &.{ path_buffer[0..length], "auto-rollback.db" });
+    defer std.testing.allocator.free(path);
+    {
+        const database = try Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &test_migrations);
+        defer database.destroy() catch unreachable;
+        const capability = database.capability();
+        try std.testing.expectEqual(sql.MutationOutcome.committed, capability.mutate(&.{.{ .statement = .{ .sql = "INSERT INTO storage_conformance(id) VALUES(1)" } }}));
+        try std.testing.expectEqual(sql.MutationOutcome.constraint, capability.mutate(&.{
+            .{ .statement = .{ .sql = "INSERT INTO storage_conformance(id) VALUES(2)" } },
+            .{ .statement = .{ .sql = "INSERT OR ROLLBACK INTO storage_conformance(id) VALUES(1)" } },
+        }));
+        try std.testing.expectEqual(sql.MutationOutcome.committed, capability.mutate(&.{.{ .statement = .{ .sql = "INSERT INTO storage_conformance(id) VALUES(3)" } }}));
+    }
+    const reopened = try Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &test_migrations);
+    defer reopened.destroy() catch unreachable;
+    var count: IntegerObservation = .{};
+    try std.testing.expectEqual(sql.QueryOutcome.ok, reopened.capability().query("SELECT count(*) FROM storage_conformance WHERE id IN (1,3)", &.{}, count.receiver()));
+    try std.testing.expectEqual(@as(i64, 2), count.value);
+    try std.testing.expectEqual(sql.QueryOutcome.ok, reopened.capability().query("SELECT count(*) FROM storage_conformance WHERE id=2", &.{}, count.receiver()));
+    try std.testing.expectEqual(@as(i64, 0), count.value);
+}
+
+test "real write interrupt automatically rolls back without poisoning" {
+    const database = try Database.create(std.testing.io, std.testing.allocator, .memory, &test_migrations);
+    defer database.destroy() catch unreachable;
+    var blocker: BlockingReceiver = .{};
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_create_function_v2(database.connection.handle, "pause_write", 1, c.SQLITE_UTF8, &blocker, struct {
+        fn run(context: ?*c.sqlite3_context, _: c_int, args: [*c]?*c.sqlite3_value) callconv(.c) void {
+            const state = c.sqlite3_user_data(context).?;
+            BlockingReceiver.receive(state, undefined);
+            c.sqlite3_result_int64(context, c.sqlite3_value_int64(args[0]));
+        }
+    }.run, null, null, null));
+    var outcome: sql.MutationOutcome = .committed;
+    const thread = try std.Thread.spawn(.{}, struct {
+        fn run(capability: sql.Database, output: *sql.MutationOutcome) void {
+            output.* = capability.mutate(&.{.{ .statement = .{ .sql =
+                \\WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000)
+                \\INSERT INTO storage_conformance(id) SELECT pause_write(x) FROM n
+            } }});
+        }
+    }.run, .{ database.capability(), &outcome });
+    blocker.waitUntilEntered();
+    database.interrupt();
+    blocker.release();
+    thread.join();
+    try std.testing.expectEqual(sql.MutationOutcome.cancelled, outcome);
+    var count: IntegerObservation = .{};
+    try std.testing.expectEqual(sql.QueryOutcome.ok, database.capability().query("SELECT count(*) FROM storage_conformance", &.{}, count.receiver()));
+    try std.testing.expectEqual(@as(i64, 0), count.value);
+    try std.testing.expectEqual(sql.MutationOutcome.committed, database.capability().mutate(&.{.{ .statement = .{ .sql = "INSERT INTO storage_conformance(id) VALUES(7)" } }}));
+}
+
+test "deferred foreign key failure at COMMIT is definite and reusable" {
+    const migrations = [_]sql.Migration{.{ .version = 1, .name = "deferred FK", .sql =
+        \\CREATE TABLE parents(id INTEGER PRIMARY KEY);
+        \\CREATE TABLE children(parent INTEGER REFERENCES parents(id) DEFERRABLE INITIALLY DEFERRED);
+    }};
+    const database = try Database.create(std.testing.io, std.testing.allocator, .memory, &migrations);
+    defer database.destroy() catch unreachable;
+    try std.testing.expectEqual(sql.MutationOutcome.constraint, database.capability().mutate(&.{.{ .statement = .{ .sql = "INSERT INTO children VALUES(1)" } }}));
+    var count: IntegerObservation = .{};
+    try std.testing.expectEqual(sql.QueryOutcome.ok, database.capability().query("SELECT count(*) FROM children", &.{}, count.receiver()));
+    try std.testing.expectEqual(@as(i64, 0), count.value);
+    try std.testing.expectEqual(sql.MutationOutcome.committed, database.capability().mutate(&.{
+        .{ .statement = .{ .sql = "INSERT INTO parents VALUES(1)" } },
+        .{ .statement = .{ .sql = "INSERT INTO children VALUES(1)" } },
+    }));
+}
+
+test "failure before commit is definite and leaves the instance usable" {
+    const database = try Database.create(
+        std.testing.io,
+        std.testing.allocator,
+        .memory,
+        &test_migrations,
+    );
+    defer database.destroy() catch unreachable;
+    database.test_hooks.fail_before_commit = true;
+    try std.testing.expectEqual(
+        sql.MutationOutcome.definite_io_failure,
+        database.capability().mutate(&.{.{
+            .statement = .{ .sql = "INSERT INTO storage_conformance(id) VALUES(41)" },
+            .expected_changes = .{ .exactly = 1 },
+        }}),
+    );
+    var count: IntegerObservation = .{};
+    try std.testing.expectEqual(
+        sql.QueryOutcome.ok,
+        database.capability().query(
+            "SELECT COUNT(*) FROM storage_conformance WHERE id=41",
+            &.{},
+            count.receiver(),
+        ),
+    );
+    try std.testing.expectEqual(@as(i64, 0), count.value);
+    try std.testing.expectEqual(
+        sql.MutationOutcome.committed,
+        database.capability().mutate(&.{.{
+            .statement = .{ .sql = "INSERT INTO storage_conformance(id) VALUES(41)" },
+        }}),
+    );
+}
+
+test "lost acknowledgement after commit returns unknown and poisons" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     var directory_storage: [std.fs.max_path_bytes]u8 = undefined;
-    const directory_len = try temporary.dir.realPath(
-        std.testing.io,
-        &directory_storage,
-    );
+    const directory_len = try temporary.dir.realPath(std.testing.io, &directory_storage);
     const path = try std.fs.path.join(
         std.testing.allocator,
-        &.{ directory_storage[0..directory_len], "storage.db" },
+        &.{ directory_storage[0..directory_len], "unknown.db" },
+    );
+    defer std.testing.allocator.free(path);
+    {
+        const database = try Database.create(
+            std.testing.io,
+            std.testing.allocator,
+            .{ .file = path },
+            &test_migrations,
+        );
+        database.test_hooks.lose_ack_after_commit = true;
+        try std.testing.expectEqual(
+            sql.MutationOutcome.outcome_unknown,
+            database.capability().mutate(&.{.{
+                .statement = .{ .sql = "INSERT INTO storage_conformance(id) VALUES(42)" },
+            }}),
+        );
+        try std.testing.expectEqual(
+            sql.MutationOutcome.unavailable,
+            database.capability().mutate(&.{.{
+                .statement = .{ .sql = "DELETE FROM storage_conformance WHERE id=42" },
+            }}),
+        );
+        try database.destroy();
+    }
+    {
+        const database = try Database.create(
+            std.testing.io,
+            std.testing.allocator,
+            .{ .file = path },
+            &test_migrations,
+        );
+        defer database.destroy() catch unreachable;
+        var count: IntegerObservation = .{};
+        try std.testing.expectEqual(
+            sql.QueryOutcome.ok,
+            database.capability().query(
+                "SELECT COUNT(*) FROM storage_conformance WHERE id=42",
+                &.{},
+                count.receiver(),
+            ),
+        );
+        try std.testing.expectEqual(@as(i64, 1), count.value);
+    }
+}
+
+test "cleanup failures poison without changing known transaction outcomes" {
+    {
+        const database = try Database.create(
+            std.testing.io,
+            std.testing.allocator,
+            .memory,
+            &test_migrations,
+        );
+        database.test_hooks.fail_rollback = true;
+        try std.testing.expectEqual(
+            sql.MutationOutcome.outcome_unknown,
+            database.capability().mutate(&.{.{
+                .statement = .{ .sql = "SELECT 1" },
+            }}),
+        );
+        try std.testing.expectEqual(
+            sql.QueryOutcome.unavailable,
+            database.capability().query(
+                "SELECT 1",
+                &.{},
+                .{ .context = database, .receive_fn = ignoreRow },
+            ),
+        );
+        try database.destroy();
+    }
+    {
+        const database = try Database.create(
+            std.testing.io,
+            std.testing.allocator,
+            .memory,
+            &test_migrations,
+        );
+        database.test_hooks.fail_authorizer_restore = true;
+        try std.testing.expectEqual(
+            sql.MutationOutcome.committed,
+            database.capability().mutate(&.{.{
+                .statement = .{ .sql = "INSERT INTO storage_conformance(id) VALUES(43)" },
+            }}),
+        );
+        try std.testing.expectEqual(
+            sql.MutationOutcome.unavailable,
+            database.capability().mutate(&.{.{
+                .statement = .{ .sql = "DELETE FROM storage_conformance WHERE id=43" },
+            }}),
+        );
+        try database.connection.setAuthorizer(null);
+        try expectIntegerPragma(&database.connection, "SELECT count(*) FROM storage_conformance WHERE id=43", 1);
+        try database.destroy();
+    }
+    {
+        const database = try Database.create(std.testing.io, std.testing.allocator, .memory, &test_migrations);
+        defer database.destroy() catch unreachable;
+        database.test_hooks.fail_before_commit = true;
+        database.test_hooks.fail_authorizer_restore = true;
+        try std.testing.expectEqual(sql.MutationOutcome.definite_io_failure, database.capability().mutate(&.{.{ .statement = .{ .sql = "INSERT INTO storage_conformance(id) VALUES(44)" } }}));
+        try std.testing.expectEqual(sql.MutationOutcome.unavailable, database.capability().mutate(&.{.{ .statement = .{ .sql = "INSERT INTO storage_conformance(id) VALUES(45)" } }}));
+        try database.connection.setAuthorizer(null);
+        try expectIntegerPragma(&database.connection, "SELECT count(*) FROM storage_conformance", 0);
+    }
+}
+
+test "migration identity is an append-only checksummed prefix" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var directory_storage: [std.fs.max_path_bytes]u8 = undefined;
+    const directory_len = try temporary.dir.realPath(std.testing.io, &directory_storage);
+    const path = try std.fs.path.join(
+        std.testing.allocator,
+        &.{ directory_storage[0..directory_len], "identity.db" },
     );
     defer std.testing.allocator.free(path);
 
     {
-        var database = try Database.open(
+        const database = try Database.create(
+            std.testing.io,
             std.testing.allocator,
             .{ .file = path },
             &test_migrations,
         );
-        defer database.deinit();
-        try conformance.expectBackendContract(database.capability());
+        try database.destroy();
     }
     {
-        var database = try Database.open(
+        const database = try Database.create(
+            std.testing.io,
             std.testing.allocator,
             .{ .file = path },
             &test_migrations,
         );
-        defer database.deinit();
-        var count: i64 = 0;
-        const receiver: sql.RowReceiver = .{
-            .context = &count,
-            .receive_fn = struct {
-                fn receive(context: *anyopaque, row: sql.Row) void {
-                    const output: *i64 = @ptrCast(@alignCast(context));
-                    output.* = row.value(0).integer;
-                }
-            }.receive,
-        };
-        try std.testing.expectEqual(
-            sql.QueryOutcome.ok,
-            database.capability().query(
-                "SELECT COUNT(*) FROM storage_conformance",
-                &.{},
-                receiver,
-            ),
-        );
-        try std.testing.expectEqual(@as(i64, 1), count);
+        try database.destroy();
     }
+    const changed_name = [_]sql.Migration{.{
+        .version = 1,
+        .name = "same version but changed identity",
+        .sql = test_migrations[0].sql,
+    }};
+    try std.testing.expectError(
+        error.MigrationMismatch,
+        Database.create(
+            std.testing.io,
+            std.testing.allocator,
+            .{ .file = path },
+            &changed_name,
+        ),
+    );
+    const changed_sql = [_]sql.Migration{.{
+        .version = 1,
+        .name = test_migrations[0].name,
+        .sql = test_migrations[0].sql ++ " -- changed",
+    }};
+    try std.testing.expectError(
+        error.MigrationMismatch,
+        Database.create(
+            std.testing.io,
+            std.testing.allocator,
+            .{ .file = path },
+            &changed_sql,
+        ),
+    );
     try std.testing.expectError(
         error.VersionUnknown,
-        Database.open(std.testing.allocator, .{ .file = path }, &.{}),
+        Database.create(
+            std.testing.io,
+            std.testing.allocator,
+            .{ .file = path },
+            &.{},
+        ),
     );
 }
 
-test "failed migration rolls back schema and user version" {
+test "migration authority rejects metadata through associated schema objects" {
+    const forbidden = [_][]const u8{
+        "CREATE TRIGGER suppress_identity BEFORE INSERT ON _metawork_storage_migrations BEGIN SELECT RAISE(IGNORE); END;",
+        "CREATE INDEX identity_index ON _metawork_storage_migrations(name);",
+        "ALTER TABLE _metawork_storage_migrations ADD COLUMN injected TEXT;",
+        "CREATE VIEW identity_view AS SELECT * FROM _metawork_storage_migrations; SELECT * FROM identity_view;",
+    };
+    for (forbidden) |text| {
+        const migrations = [_]sql.Migration{.{ .version = 1, .name = "escape", .sql = text }};
+        const result = Database.create(std.testing.io, std.testing.allocator, .memory, &migrations);
+        if (result) |database| {
+            try database.destroy();
+            return error.MetadataEscapeAccepted;
+        } else |err| try std.testing.expectEqual(error.MigrationFailed, err);
+    }
+}
+
+test "migration permits application DDL and persists exact identity after reopen" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const length = try temporary.dir.realPath(std.testing.io, &path_buffer);
+    const path = try std.fs.path.join(std.testing.allocator, &.{ path_buffer[0..length], "ddl.db" });
+    defer std.testing.allocator.free(path);
+    const migrations = [_]sql.Migration{
+        .{ .version = 1, .name = "create", .sql = "CREATE TABLE items(id INTEGER PRIMARY KEY); CREATE TABLE audit(id INTEGER);" },
+        .{ .version = 2, .name = "evolve", .sql =
+        \\ALTER TABLE items ADD COLUMN label TEXT;
+        \\CREATE INDEX item_label ON items(label);
+        \\CREATE TRIGGER item_audit AFTER INSERT ON items BEGIN INSERT INTO audit VALUES(new.id); END;
+        \\CREATE VIEW item_view AS SELECT id FROM items;
+        \\INSERT INTO items VALUES(7, 'seven');
+        },
+    };
+    for (0..2) |_| {
+        const database = try Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &migrations);
+        defer database.destroy() catch unreachable;
+        try std.testing.expectEqual(@as(u32, 2), database.schemaVersion());
+        var observed: IntegerObservation = .{};
+        try std.testing.expectEqual(sql.QueryOutcome.ok, database.capability().query("SELECT id FROM audit", &.{}, observed.receiver()));
+        try std.testing.expectEqual(@as(i64, 7), observed.value);
+        try database.connection.setAuthorizer(null); // Test-only observation, not metadata authority.
+        try expectIntegerPragma(&database.connection, "SELECT count(*) FROM _metawork_storage_migrations", 2);
+    }
+}
+
+test "metadata authority rejects persisted trigger side effects" {
+    var connection = try Connection.open(":memory:");
+    defer connection.close();
+    try initializeConnection(&connection, false);
+    _ = try applyMigrations(std.testing.allocator, &connection, &.{});
+    try connection.setAuthorizer(null);
+    try connection.execRaw("CREATE TABLE illicit(id INTEGER); CREATE TRIGGER bad_identity BEFORE INSERT ON _metawork_storage_migrations BEGIN INSERT INTO illicit VALUES(1); SELECT RAISE(IGNORE); END;");
+    try std.testing.expectError(error.MigrationFailed, applyMigrations(std.testing.allocator, &connection, &test_migrations));
+    try connection.setAuthorizer(null);
+    try expectIntegerPragma(&connection, "SELECT count(*) FROM illicit", 0);
+    try expectIntegerPragma(&connection, "SELECT count(*) FROM _metawork_storage_migrations", 0);
+    try expectIntegerPragma(&connection, "SELECT count(*) FROM sqlite_schema WHERE name='storage_conformance'", 0);
+}
+
+test "denied migration rolls back file schema and keeps its original identity" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const length = try temporary.dir.realPath(std.testing.io, &path_buffer);
+    const path = try std.fs.path.join(std.testing.allocator, &.{ path_buffer[0..length], "denied.db" });
+    defer std.testing.allocator.free(path);
+    const initial = try Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &test_migrations);
+    try initial.destroy();
+    const extended = test_migrations ++ [_]sql.Migration{.{
+        .version = 2,
+        .name = "denied",
+        .sql = "CREATE TABLE must_rollback(id INTEGER); CREATE INDEX stolen ON _metawork_storage_migrations(name);",
+    }};
+    try std.testing.expectError(error.MigrationFailed, Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &extended));
+    const reopened = try Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &test_migrations);
+    defer reopened.destroy() catch unreachable;
+    try std.testing.expectEqual(@as(u32, 1), reopened.schemaVersion());
+    try reopened.connection.setAuthorizer(null);
+    try expectIntegerPragma(&reopened.connection, "SELECT count(*) FROM sqlite_schema WHERE name='must_rollback'", 0);
+    try expectIntegerPragma(&reopened.connection, "SELECT count(*) FROM _metawork_storage_migrations", 1);
+}
+
+test "migration metadata rejects coerced identity types" {
+    var connection = try Connection.open(":memory:");
+    defer connection.close();
+    try initializeConnection(&connection, false);
+    _ = try applyMigrations(std.testing.allocator, &connection, &test_migrations);
+    try connection.setAuthorizer(null);
+    // Same name bytes, wrong persisted storage class: implicit conversion
+    // must not hide malformed identity records.
+    try connection.execRaw("UPDATE _metawork_storage_migrations SET name=CAST(name AS BLOB);");
+    try std.testing.expectError(error.Corrupt, applyMigrations(std.testing.allocator, &connection, &test_migrations));
+}
+
+test "failed migrations roll back schema and identity together" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     var directory_storage: [std.fs.max_path_bytes]u8 = undefined;
-    const directory_len = try temporary.dir.realPath(
-        std.testing.io,
-        &directory_storage,
-    );
+    const directory_len = try temporary.dir.realPath(std.testing.io, &directory_storage);
     const path = try std.fs.path.join(
         std.testing.allocator,
-        &.{ directory_storage[0..directory_len], "migration.db" },
+        &.{ directory_storage[0..directory_len], "rollback.db" },
     );
     defer std.testing.allocator.free(path);
 
     try std.testing.expectError(
         error.MigrationFailed,
-        Database.open(std.testing.allocator, .{ .file = path }, &.{
+        Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &.{
             .{ .version = 1, .name = "first", .sql = "CREATE TABLE first(id INTEGER);" },
             .{ .version = 2, .name = "broken", .sql = "THIS IS NOT SQL;" },
         }),
     );
-    const recovered_migrations = [_]sql.Migration{.{
+    const recovered = [_]sql.Migration{.{
         .version = 1,
-        .name = "same first table proves rollback",
+        .name = "first",
         .sql = "CREATE TABLE first(id INTEGER);",
     }};
-    var database = try Database.open(
+    const database = try Database.create(
+        std.testing.io,
         std.testing.allocator,
         .{ .file = path },
-        &recovered_migrations,
+        &recovered,
     );
-    defer database.deinit();
+    defer database.destroy() catch unreachable;
     try std.testing.expectEqual(@as(u32, 1), database.schemaVersion());
 }
 
-test "user version outside the Storage namespace is corrupt metadata" {
-    var temporary = std.testing.tmpDir(.{});
-    defer temporary.cleanup();
-    var directory_storage: [std.fs.max_path_bytes]u8 = undefined;
-    const directory_len = try temporary.dir.realPath(
-        std.testing.io,
-        &directory_storage,
-    );
-    const high_path = try std.fs.path.join(
-        std.testing.allocator,
-        &.{ directory_storage[0..directory_len], "high-version.db" },
-    );
-    defer std.testing.allocator.free(high_path);
-    const negative_path = try std.fs.path.join(
-        std.testing.allocator,
-        &.{ directory_storage[0..directory_len], "negative-version.db" },
-    );
-    defer std.testing.allocator.free(negative_path);
-
-    try expectCorruptUserVersion(high_path, "PRAGMA user_version=10000;");
-    try expectCorruptUserVersion(negative_path, "PRAGMA user_version=-1;");
+test "migration handles automatic rollback and COMMIT constraint failure" {
+    const failing = [_][]const u8{
+        "CREATE TABLE partial(id INTEGER); INSERT INTO partial VALUES(1); INSERT OR ROLLBACK INTO storage_conformance(id) VALUES(1),(1);",
+        "CREATE TABLE partial(id INTEGER REFERENCES storage_conformance(id) DEFERRABLE INITIALLY DEFERRED); INSERT INTO partial VALUES(99);",
+    };
+    for (failing) |text| {
+        var connection = try Connection.open(":memory:");
+        defer connection.close();
+        try initializeConnection(&connection, false);
+        _ = try applyMigrations(std.testing.allocator, &connection, &test_migrations);
+        const migrations = test_migrations ++ [_]sql.Migration{.{ .version = 2, .name = "failing", .sql = text }};
+        try std.testing.expectError(error.MigrationFailed, applyMigrations(std.testing.allocator, &connection, &migrations));
+        try std.testing.expect(c.sqlite3_get_autocommit(connection.handle) != 0);
+        try connection.setAuthorizer(null);
+        try expectIntegerPragma(&connection, "SELECT count(*) FROM _metawork_storage_migrations", 1);
+        try expectIntegerPragma(&connection, "SELECT count(*) FROM sqlite_schema WHERE name='partial'", 0);
+        const valid = test_migrations ++ [_]sql.Migration{.{ .version = 2, .name = "valid", .sql = "CREATE TABLE partial(id INTEGER);" }};
+        try std.testing.expectEqual(@as(u32, 2), try applyMigrations(std.testing.allocator, &connection, &valid));
+    }
 }
 
-test "file engine profile is observable and protected" {
+test "file profile is FULL WAL and every setting is verified" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     var directory_storage: [std.fs.max_path_bytes]u8 = undefined;
-    const directory_len = try temporary.dir.realPath(
-        std.testing.io,
-        &directory_storage,
-    );
+    const directory_len = try temporary.dir.realPath(std.testing.io, &directory_storage);
     const path = try std.fs.path.join(
         std.testing.allocator,
         &.{ directory_storage[0..directory_len], "profile.db" },
     );
     defer std.testing.allocator.free(path);
-    var database = try Database.open(
+    const database = try Database.create(
+        std.testing.io,
         std.testing.allocator,
         .{ .file = path },
         &test_migrations,
     );
-    defer database.deinit();
+    defer database.destroy() catch unreachable;
 
-    try expectTextPragma(&database.writer, "PRAGMA journal_mode;", "wal");
-    try expectIntegerPragma(&database.writer, "PRAGMA synchronous;", 1);
-    try expectIntegerPragma(&database.writer, "PRAGMA foreign_keys;", 1);
-    try expectIntegerPragma(&database.reader.?, "PRAGMA query_only;", 1);
-    var ignored = false;
+    try database.connection.setAuthorizer(null);
+    defer database.connection.setAuthorizer(denyAllAuthorizer) catch {};
+    try expectTextPragma(&database.connection, "PRAGMA journal_mode", "wal");
+    try expectIntegerPragma(&database.connection, "PRAGMA synchronous", 2);
+    try expectIntegerPragma(&database.connection, "PRAGMA foreign_keys", 1);
+    try expectIntegerPragma(&database.connection, "PRAGMA busy_timeout", 250);
+    try expectIntegerPragma(&database.connection, "PRAGMA mmap_size", 0);
     try std.testing.expectEqual(
-        sql.QueryOutcome.misuse,
-        database.capability().query("PRAGMA synchronous=FULL;", &.{}, .{
-            .context = &ignored,
-            .receive_fn = struct {
-                fn receive(_: *anyopaque, _: sql.Row) void {}
-            }.receive,
-        }),
+        @as(c_int, sql.Limits.parameters),
+        c.sqlite3_limit(database.connection.handle, c.SQLITE_LIMIT_VARIABLE_NUMBER, -1),
+    );
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.sqlite3_limit(database.connection.handle, c.SQLITE_LIMIT_ATTACHED, -1),
+    );
+    try expectDatabaseConfig(
+        &database.connection,
+        c.SQLITE_DBCONFIG_DEFENSIVE,
+        1,
+    );
+    try expectDatabaseConfig(
+        &database.connection,
+        c.SQLITE_DBCONFIG_TRUSTED_SCHEMA,
+        0,
     );
 }
 
-test "file target must be an absolute UTF-8 path" {
+test "journal mode setter fails closed when SQLite returns another mode" {
+    var connection = try Connection.open(":memory:");
+    defer connection.close();
     try std.testing.expectError(
-        error.InvalidTarget,
-        Database.open(std.testing.allocator, .{ .file = "relative.db" }, &.{}),
+        error.ProfileMismatch,
+        setTextPragma(&connection, "PRAGMA journal_mode=WAL;", "wal"),
     );
 }
 
-test "busy and corrupt failures remain distinct" {
+test "callback lifecycle reentry is rejected without changing the owner" {
+    const database = try Database.create(std.testing.io, std.testing.allocator, .memory, &test_migrations);
+    defer database.destroy() catch unreachable;
+    const Observation = struct {
+        database: *Database,
+        shutdown_error: ?LifecycleError = null,
+        destroy_error: ?LifecycleError = null,
+        fn receive(context: *anyopaque, _: sql.Row) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.database.shutdown() catch |err| {
+                self.shutdown_error = err;
+            };
+            self.database.destroy() catch |err| {
+                self.destroy_error = err;
+            };
+        }
+    };
+    var observation: Observation = .{ .database = database };
+    try std.testing.expectEqual(sql.QueryOutcome.ok, database.capability().query("SELECT 1", &.{}, .{ .context = &observation, .receive_fn = Observation.receive }));
+    try std.testing.expectEqual(error.ReentrantOperation, observation.shutdown_error.?);
+    try std.testing.expectEqual(error.ReentrantOperation, observation.destroy_error.?);
+    try std.testing.expectEqual(sql.MutationOutcome.committed, database.capability().mutate(&.{.{ .statement = .{ .sql = "INSERT INTO storage_conformance(id) VALUES(1)" } }}));
+}
+
+fn shutdownForTest(database: *Database) void {
+    database.shutdown() catch unreachable;
+}
+
+test "queued callers serialize normally and are released by shutdown" {
+    for ([_]bool{ false, true }) |stop| {
+        const database = try Database.create(std.testing.io, std.testing.allocator, .memory, &.{});
+        defer database.destroy() catch unreachable;
+        var blocker: BlockingReceiver = .{};
+        var first_outcome: sql.QueryOutcome = .ok;
+        const first = try std.Thread.spawn(.{}, struct {
+            fn run(db: sql.Database, receiver: sql.RowReceiver, output: *sql.QueryOutcome) void {
+                output.* = db.query("SELECT 1 UNION ALL SELECT 2", &.{}, receiver);
+            }
+        }.run, .{ database.capability(), blocker.receiver(), &first_outcome });
+        blocker.waitUntilEntered();
+        var second_outcome: sql.QueryOutcome = .ok;
+        const second = try std.Thread.spawn(.{}, struct {
+            fn run(db: *Database, output: *sql.QueryOutcome) void {
+                output.* = db.capability().query("SELECT 3", &.{}, .{ .context = db, .receive_fn = ignoreRow });
+            }
+        }.run, .{ database, &second_outcome });
+        database.lock();
+        while (database.test_hooks.waiting_callers == 0) database.wait();
+        database.unlock();
+        if (stop) {
+            const stopping = try std.Thread.spawn(.{}, shutdownForTest, .{database});
+            const also_stopping = try std.Thread.spawn(.{}, shutdownForTest, .{database});
+            // The queued call must finish while the active callback is still
+            // blocked. shutdown must not wait for it to become an operator.
+            second.join();
+            blocker.release();
+            first.join();
+            stopping.join();
+            also_stopping.join();
+            try std.testing.expectEqual(sql.QueryOutcome.unavailable, second_outcome);
+            try std.testing.expectEqual(Lifecycle.stopped, database.lifecycle);
+        } else {
+            blocker.release();
+            first.join();
+            second.join();
+            try std.testing.expectEqual(sql.QueryOutcome.ok, first_outcome);
+            try std.testing.expectEqual(sql.QueryOutcome.ok, second_outcome);
+        }
+    }
+}
+
+test "shutdown is idempotent and borrowed capability becomes unavailable" {
+    const database = try Database.create(
+        std.testing.io,
+        std.testing.allocator,
+        .memory,
+        &test_migrations,
+    );
+    const capability = database.capability();
+    try database.shutdown();
+    try database.shutdown();
+    var ignored: IntegerObservation = .{};
+    try std.testing.expectEqual(
+        sql.QueryOutcome.unavailable,
+        capability.query("SELECT 1", &.{}, ignored.receiver()),
+    );
+    try std.testing.expectEqual(
+        sql.MutationOutcome.unavailable,
+        capability.mutate(&.{.{ .statement = .{ .sql = "DELETE FROM storage_conformance" } }}),
+    );
+    try database.destroy();
+}
+
+test "interrupt cancels the active query without poisoning the instance" {
+    const database = try Database.create(
+        std.testing.io,
+        std.testing.allocator,
+        .memory,
+        &.{},
+    );
+    defer database.destroy() catch unreachable;
+    var blocker: BlockingReceiver = .{};
+    var outcome: sql.QueryOutcome = .ok;
+    const thread = try std.Thread.spawn(.{}, struct {
+        fn run(
+            capability: sql.Database,
+            receiver: sql.RowReceiver,
+            output: *sql.QueryOutcome,
+        ) void {
+            output.* = capability.query(
+                \\WITH RECURSIVE values_(value) AS (
+                \\  VALUES(1) UNION ALL SELECT value + 1 FROM values_ WHERE value < 100000
+                \\) SELECT value FROM values_
+            , &.{}, receiver);
+        }
+    }.run, .{ database.capability(), blocker.receiver(), &outcome });
+    blocker.waitUntilEntered();
+    database.interrupt();
+    blocker.release();
+    thread.join();
+    try std.testing.expectEqual(sql.QueryOutcome.cancelled, outcome);
+
+    var observed: IntegerObservation = .{};
+    try std.testing.expectEqual(
+        sql.QueryOutcome.ok,
+        database.capability().query("SELECT 1", &.{}, observed.receiver()),
+    );
+    try std.testing.expectEqual(@as(i64, 1), observed.value);
+}
+
+test "shutdown interrupts an active callback and converges before close" {
+    const database = try Database.create(
+        std.testing.io,
+        std.testing.allocator,
+        .memory,
+        &.{},
+    );
+    var blocker: BlockingReceiver = .{};
+    var outcome: sql.QueryOutcome = .ok;
+    const query_thread = try std.Thread.spawn(.{}, struct {
+        fn run(
+            capability: sql.Database,
+            receiver: sql.RowReceiver,
+            output: *sql.QueryOutcome,
+        ) void {
+            output.* = capability.query(
+                \\WITH RECURSIVE values_(value) AS (
+                \\  VALUES(1) UNION ALL SELECT value + 1 FROM values_ WHERE value < 100000
+                \\) SELECT value FROM values_
+            , &.{}, receiver);
+        }
+    }.run, .{ database.capability(), blocker.receiver(), &outcome });
+    blocker.waitUntilEntered();
+    const shutdown_thread = try std.Thread.spawn(.{}, shutdownForTest, .{database});
+
+    database.lock();
+    while (database.lifecycle != .stopping) database.wait();
+    database.unlock();
+    blocker.release();
+    query_thread.join();
+    shutdown_thread.join();
+    try std.testing.expectEqual(sql.QueryOutcome.cancelled, outcome);
+    try std.testing.expectEqual(Lifecycle.stopped, database.lifecycle);
+    try database.destroy();
+}
+
+test "file contention is busy rather than local gate contention" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     var directory_storage: [std.fs.max_path_bytes]u8 = undefined;
-    const directory_len = try temporary.dir.realPath(
-        std.testing.io,
-        &directory_storage,
-    );
+    const directory_len = try temporary.dir.realPath(std.testing.io, &directory_storage);
     const path = try std.fs.path.join(
         std.testing.allocator,
         &.{ directory_storage[0..directory_len], "busy.db" },
     );
     defer std.testing.allocator.free(path);
-    var first = try Database.open(
+    const first = try Database.create(
+        std.testing.io,
         std.testing.allocator,
         .{ .file = path },
         &test_migrations,
     );
-    defer first.deinit();
-    var second = try Database.open(
+    defer first.destroy() catch unreachable;
+    const second = try Database.create(
+        std.testing.io,
         std.testing.allocator,
         .{ .file = path },
         &test_migrations,
     );
-    defer second.deinit();
-    try first.writer.execRaw("BEGIN IMMEDIATE;");
-    defer first.writer.execRaw("ROLLBACK;") catch {};
+    defer second.destroy() catch unreachable;
+
+    try first.connection.setAuthorizer(internalTransactionAuthorizer);
+    try first.connection.execRaw("BEGIN IMMEDIATE;");
+    defer {
+        first.connection.execRaw("ROLLBACK;") catch {};
+        first.connection.setAuthorizer(denyAllAuthorizer) catch {};
+    }
     try std.testing.expectEqual(
-        sql.ExecOutcome.busy,
-        second.capability().exec(&.{.{
-            .sql = "INSERT INTO storage_conformance(id) VALUES (9)",
+        sql.MutationOutcome.busy,
+        second.capability().mutate(&.{.{
+            .statement = .{ .sql = "INSERT INTO storage_conformance(id) VALUES(33)" },
         }}),
     );
+}
 
-    const corrupt_path = try std.fs.path.join(
+test "abrupt child exit leaves a WAL that reopens with committed data" {
+    const fixture = try std.process.Environ.getAlloc(
+        std.testing.environ,
+        std.testing.allocator,
+        "METAWORK_STORAGE_CRASH_FIXTURE",
+    );
+    defer std.testing.allocator.free(fixture);
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var directory_storage: [std.fs.max_path_bytes]u8 = undefined;
+    const directory_len = try temporary.dir.realPath(std.testing.io, &directory_storage);
+    const path = try std.fs.path.join(
+        std.testing.allocator,
+        &.{ directory_storage[0..directory_len], "crash.db" },
+    );
+    defer std.testing.allocator.free(path);
+    {
+        const database = try Database.create(
+            std.testing.io,
+            std.testing.allocator,
+            .{ .file = path },
+            &test_migrations,
+        );
+        try database.destroy();
+    }
+
+    var environment = try std.process.Environ.createMap(
+        std.testing.environ,
+        std.testing.allocator,
+    );
+    defer environment.deinit();
+    try environment.put("METAWORK_STORAGE_CRASH_DB", path);
+    const arguments = [_][]const u8{fixture};
+    var child = try std.process.spawn(std.testing.io, .{
+        .argv = &arguments,
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .inherit,
+        .environ_map = &environment,
+        .create_no_window = true,
+    });
+    const termination = try child.wait(std.testing.io);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 86 }, termination);
+
+    const wal_path = try std.fmt.allocPrint(std.testing.allocator, "{s}-wal", .{path});
+    defer std.testing.allocator.free(wal_path);
+    const wal_stat = try std.Io.Dir.cwd().statFile(std.testing.io, wal_path, .{});
+    try std.testing.expect(wal_stat.size > 0);
+
+    const database = try Database.create(
+        std.testing.io,
+        std.testing.allocator,
+        .{ .file = path },
+        &test_migrations,
+    );
+    defer database.destroy() catch unreachable;
+    var length: IntegerObservation = .{};
+    try std.testing.expectEqual(
+        sql.QueryOutcome.ok,
+        database.capability().query(
+            "SELECT length(blob_value) FROM storage_conformance WHERE id=77",
+            &.{},
+            length.receiver(),
+        ),
+    );
+    try std.testing.expectEqual(@as(i64, 1048576), length.value);
+}
+
+test "corrupt files are not collapsed into path or empty-database outcomes" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var directory_storage: [std.fs.max_path_bytes]u8 = undefined;
+    const directory_len = try temporary.dir.realPath(std.testing.io, &directory_storage);
+    const path = try std.fs.path.join(
         std.testing.allocator,
         &.{ directory_storage[0..directory_len], "corrupt.db" },
     );
-    defer std.testing.allocator.free(corrupt_path);
+    defer std.testing.allocator.free(path);
     try temporary.dir.writeFile(std.testing.io, .{
         .sub_path = "corrupt.db",
         .data = "not a sqlite database",
     });
     try std.testing.expectError(
         error.Corrupt,
-        Database.open(
+        Database.create(
+            std.testing.io,
             std.testing.allocator,
-            .{ .file = corrupt_path },
+            .{ .file = path },
             &test_migrations,
         ),
     );
 }
 
-test "sandbox and statement shape cannot escape an exec transaction" {
-    var database = try Database.open(
+test "streaming query exposes provisional rows before terminal failure" {
+    const database = try Database.create(
+        std.testing.io,
         std.testing.allocator,
         .memory,
-        &test_migrations,
+        &.{},
     );
-    defer database.deinit();
-    const capability = database.capability();
+    defer database.destroy() catch unreachable;
+    var observed: IntegerObservation = .{};
     try std.testing.expectEqual(
-        sql.ExecOutcome.misuse,
-        capability.exec(&.{.{ .sql = "ATTACH DATABASE ':memory:' AS other" }}),
-    );
-    try std.testing.expectEqual(
-        sql.ExecOutcome.misuse,
-        capability.exec(&.{.{ .sql = "COMMIT" }}),
-    );
-    try std.testing.expectEqual(
-        sql.ExecOutcome.misuse,
-        capability.exec(&.{.{
-            .sql = "INSERT INTO storage_conformance(id) VALUES (11) RETURNING id",
-        }}),
-    );
-    var count: i64 = -1;
-    try std.testing.expectEqual(
-        sql.QueryOutcome.ok,
-        capability.query(
-            "SELECT COUNT(*) FROM storage_conformance WHERE id = 11",
-            &.{},
-            .{
-                .context = &count,
-                .receive_fn = struct {
-                    fn receive(context: *anyopaque, row: sql.Row) void {
-                        const output: *i64 = @ptrCast(@alignCast(context));
-                        output.* = row.value(0).integer;
-                    }
-                }.receive,
-            },
-        ),
-    );
-    try std.testing.expectEqual(@as(i64, 0), count);
-    try std.testing.expectEqual(
-        sql.QueryOutcome.misuse,
-        capability.query("SELECT CAST(X'FF' AS TEXT)", &.{}, .{
-            .context = &count,
-            .receive_fn = struct {
-                fn receive(_: *anyopaque, _: sql.Row) void {}
-            }.receive,
-        }),
-    );
-}
-
-test "query result limits reject instead of truncating to success" {
-    var database = try Database.open(
-        std.testing.allocator,
-        .memory,
-        &test_migrations,
-    );
-    defer database.deinit();
-    const capability = database.capability();
-    var rows: usize = 0;
-    const receiver: sql.RowReceiver = .{
-        .context = &rows,
-        .receive_fn = struct {
-            fn receive(context: *anyopaque, _: sql.Row) void {
-                const output: *usize = @ptrCast(@alignCast(context));
-                output.* += 1;
-            }
-        }.receive,
-    };
-    try std.testing.expectEqual(
-        sql.QueryOutcome.rejected,
-        capability.query(
+        sql.QueryOutcome.resource_exhausted,
+        database.capability().query(
             \\WITH RECURSIVE values_(value) AS (
             \\  VALUES(1) UNION ALL SELECT value + 1 FROM values_ WHERE value < 8193
             \\) SELECT value FROM values_
-        , &.{}, receiver),
+        , &.{}, observed.receiver()),
     );
-    try std.testing.expectEqual(sql.Limits.result_rows, rows);
+    try std.testing.expectEqual(sql.Limits.result_rows, observed.rows);
+}
 
-    rows = 0;
-    try std.testing.expectEqual(
-        sql.QueryOutcome.rejected,
-        capability.query("SELECT zeroblob(8388609)", &.{}, receiver),
-    );
-    try std.testing.expectEqual(@as(usize, 0), rows);
+test "TEXT NUL rejection covers parameters and rows without restricting BLOB" {
+    const database = try Database.create(std.testing.io, std.testing.allocator, .memory, &test_migrations);
+    defer database.destroy() catch unreachable;
+    var ignored: u8 = 0;
+    const receiver: sql.RowReceiver = .{ .context = &ignored, .receive_fn = ignoreRow };
+    try std.testing.expectEqual(sql.QueryOutcome.rejected, database.capability().query("SELECT ?", &.{.{ .text = "a\x00b" }}, receiver));
+    try std.testing.expectEqual(sql.MutationOutcome.rejected, database.capability().mutate(&.{.{ .statement = .{
+        .sql = "INSERT INTO storage_conformance(text_value) VALUES(?)",
+        .params = &.{.{ .text = "a\x00b" }},
+    } }}));
+    try std.testing.expectEqual(sql.QueryOutcome.rejected, database.capability().query("SELECT char(0)", &.{}, receiver));
+    try std.testing.expectEqual(sql.QueryOutcome.ok, database.capability().query("SELECT ?", &.{.{ .blob = "a\x00b" }}, receiver));
+    var observed: IntegerObservation = .{};
+    try std.testing.expectEqual(sql.QueryOutcome.rejected, database.capability().query("SELECT 1 UNION ALL SELECT char(0)", &.{}, observed.receiver()));
+    try std.testing.expectEqual(@as(usize, 1), observed.rows);
 }
 
 fn expectTextPragma(
@@ -1114,10 +1472,7 @@ fn expectTextPragma(
     const statement = try prepareOne(connection, text);
     defer _ = c.sqlite3_finalize(statement);
     try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(statement));
-    try std.testing.expect(std.ascii.eqlIgnoreCase(
-        columnText(statement, 0),
-        expected,
-    ));
+    try std.testing.expect(std.ascii.eqlIgnoreCase(columnText(statement, 0), expected));
     try std.testing.expectEqual(c.SQLITE_DONE, c.sqlite3_step(statement));
 }
 
@@ -1133,16 +1488,20 @@ fn expectIntegerPragma(
     try std.testing.expectEqual(c.SQLITE_DONE, c.sqlite3_step(statement));
 }
 
-fn expectCorruptUserVersion(path: []const u8, pragma: [*:0]const u8) !void {
-    const path_z = try std.testing.allocator.dupeZ(u8, path);
-    defer std.testing.allocator.free(path_z);
-    {
-        var connection = try Connection.open(path_z);
-        defer connection.close();
-        try connection.execRaw(pragma);
-    }
-    try std.testing.expectError(
-        error.Corrupt,
-        Database.open(std.testing.allocator, .{ .file = path }, &.{}),
+fn expectDatabaseConfig(
+    connection: *Connection,
+    operation: c_int,
+    expected: c_int,
+) !void {
+    var actual: c_int = -1;
+    try std.testing.expectEqual(
+        c.SQLITE_OK,
+        c.sqlite3_db_config(
+            connection.handle,
+            operation,
+            @as(c_int, -1),
+            &actual,
+        ),
     );
+    try std.testing.expectEqual(expected, actual);
 }
