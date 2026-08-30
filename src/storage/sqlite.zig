@@ -234,8 +234,7 @@ pub const Database = struct {
         self.connection.setAuthorizer(internalTransactionAuthorizer) catch |err|
             return mutationFailure(err);
         self.connection.execRaw("BEGIN IMMEDIATE;") catch |err| {
-            _ = self.restoreDeny();
-            return mutationFailure(err);
+            return self.finishKnownMutation(mutationFailure(err));
         };
         self.connection.setAuthorizer(mutationAuthorizer) catch |err|
             return self.rollbackMutation(mutationFailure(err));
@@ -257,41 +256,49 @@ pub const Database = struct {
     }
 
     fn commitMutation(self: *Database) sql.MutationOutcome {
-        if (builtin.is_test and self.test_hooks.fail_before_commit) {
-            self.test_hooks.fail_before_commit = false;
-            return self.rollbackMutation(.definite_io_failure);
-        }
         self.connection.setAuthorizer(internalTransactionAuthorizer) catch
             return self.unknownMutation();
-        self.connection.execRaw("COMMIT;") catch |err| {
+        self.attemptCommit() catch |err| {
             if (c.sqlite3_get_autocommit(self.connection.handle) != 0)
                 return self.unknownMutation();
             return self.rollbackMutation(mutationFailure(err));
         };
         if (c.sqlite3_get_autocommit(self.connection.handle) == 0)
             return self.unknownMutation();
+        return self.finishKnownMutation(.committed);
+    }
+
+    fn attemptCommit(self: *Database) SqlError!void {
+        // Inject at the engine-result boundary, so tests exercise the same
+        // autocommit/rollback classification as an actual COMMIT error.
+        if (builtin.is_test and self.test_hooks.fail_before_commit) {
+            self.test_hooks.fail_before_commit = false;
+            return error.IoFailed;
+        }
+        try self.connection.execRaw("COMMIT;");
         if (builtin.is_test and self.test_hooks.lose_ack_after_commit) {
             self.test_hooks.lose_ack_after_commit = false;
-            return self.unknownMutation();
+            return error.IoFailed;
         }
-        if (!self.restoreDeny()) return self.unknownMutation();
-        return .committed;
     }
 
     fn rollbackMutation(
         self: *Database,
         outcome: sql.MutationOutcome,
     ) sql.MutationOutcome {
-        if (builtin.is_test and self.test_hooks.fail_rollback) {
+        if (builtin.is_test and self.test_hooks.fail_rollback and
+            c.sqlite3_get_autocommit(self.connection.handle) == 0)
+        {
             self.test_hooks.fail_rollback = false;
             return self.unknownMutation();
         }
-        self.connection.setAuthorizer(internalTransactionAuthorizer) catch
-            return self.unknownMutation();
-        self.connection.execRaw("ROLLBACK;") catch return self.unknownMutation();
-        if (c.sqlite3_get_autocommit(self.connection.handle) == 0)
-            return self.unknownMutation();
-        if (!self.restoreDeny()) return self.unknownMutation();
+        if (!self.connection.rollbackConfirmed()) return self.unknownMutation();
+        return self.finishKnownMutation(outcome);
+    }
+
+    fn finishKnownMutation(self: *Database, outcome: sql.MutationOutcome) sql.MutationOutcome {
+        // Connection health is separate from a known commit/rollback result.
+        if (!self.restoreDeny()) self.markPoisoned();
         return outcome;
     }
 
@@ -615,6 +622,81 @@ test "exact change conflict rolls the complete mutation batch back" {
     try std.testing.expectEqual(@as(i64, 0), count.value);
 }
 
+test "automatic rollback preserves constraint outcome data and reuse after reopen" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const length = try temporary.dir.realPath(std.testing.io, &path_buffer);
+    const path = try std.fs.path.join(std.testing.allocator, &.{ path_buffer[0..length], "auto-rollback.db" });
+    defer std.testing.allocator.free(path);
+    {
+        const database = try Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &test_migrations);
+        defer database.destroy();
+        const capability = database.capability();
+        try std.testing.expectEqual(sql.MutationOutcome.committed, capability.mutate(&.{.{ .statement = .{ .sql = "INSERT INTO storage_conformance(id) VALUES(1)" } }}));
+        try std.testing.expectEqual(sql.MutationOutcome.constraint, capability.mutate(&.{
+            .{ .statement = .{ .sql = "INSERT INTO storage_conformance(id) VALUES(2)" } },
+            .{ .statement = .{ .sql = "INSERT OR ROLLBACK INTO storage_conformance(id) VALUES(1)" } },
+        }));
+        try std.testing.expectEqual(sql.MutationOutcome.committed, capability.mutate(&.{.{ .statement = .{ .sql = "INSERT INTO storage_conformance(id) VALUES(3)" } }}));
+    }
+    const reopened = try Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &test_migrations);
+    defer reopened.destroy();
+    var count: IntegerObservation = .{};
+    try std.testing.expectEqual(sql.QueryOutcome.ok, reopened.capability().query("SELECT count(*) FROM storage_conformance WHERE id IN (1,3)", &.{}, count.receiver()));
+    try std.testing.expectEqual(@as(i64, 2), count.value);
+    try std.testing.expectEqual(sql.QueryOutcome.ok, reopened.capability().query("SELECT count(*) FROM storage_conformance WHERE id=2", &.{}, count.receiver()));
+    try std.testing.expectEqual(@as(i64, 0), count.value);
+}
+
+test "real write interrupt automatically rolls back without poisoning" {
+    const database = try Database.create(std.testing.io, std.testing.allocator, .memory, &test_migrations);
+    defer database.destroy();
+    var blocker: BlockingReceiver = .{};
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_create_function_v2(database.connection.handle, "pause_write", 1, c.SQLITE_UTF8, &blocker, struct {
+        fn run(context: ?*c.sqlite3_context, _: c_int, args: [*c]?*c.sqlite3_value) callconv(.c) void {
+            const state = c.sqlite3_user_data(context).?;
+            BlockingReceiver.receive(state, undefined);
+            c.sqlite3_result_int64(context, c.sqlite3_value_int64(args[0]));
+        }
+    }.run, null, null, null));
+    var outcome: sql.MutationOutcome = .committed;
+    const thread = try std.Thread.spawn(.{}, struct {
+        fn run(capability: sql.Database, output: *sql.MutationOutcome) void {
+            output.* = capability.mutate(&.{.{ .statement = .{ .sql =
+                \\WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000)
+                \\INSERT INTO storage_conformance(id) SELECT pause_write(x) FROM n
+            } }});
+        }
+    }.run, .{ database.capability(), &outcome });
+    blocker.waitUntilEntered();
+    database.interrupt();
+    blocker.release();
+    thread.join();
+    try std.testing.expectEqual(sql.MutationOutcome.cancelled, outcome);
+    var count: IntegerObservation = .{};
+    try std.testing.expectEqual(sql.QueryOutcome.ok, database.capability().query("SELECT count(*) FROM storage_conformance", &.{}, count.receiver()));
+    try std.testing.expectEqual(@as(i64, 0), count.value);
+    try std.testing.expectEqual(sql.MutationOutcome.committed, database.capability().mutate(&.{.{ .statement = .{ .sql = "INSERT INTO storage_conformance(id) VALUES(7)" } }}));
+}
+
+test "deferred foreign key failure at COMMIT is definite and reusable" {
+    const migrations = [_]sql.Migration{.{ .version = 1, .name = "deferred FK", .sql =
+        \\CREATE TABLE parents(id INTEGER PRIMARY KEY);
+        \\CREATE TABLE children(parent INTEGER REFERENCES parents(id) DEFERRABLE INITIALLY DEFERRED);
+    }};
+    const database = try Database.create(std.testing.io, std.testing.allocator, .memory, &migrations);
+    defer database.destroy();
+    try std.testing.expectEqual(sql.MutationOutcome.constraint, database.capability().mutate(&.{.{ .statement = .{ .sql = "INSERT INTO children VALUES(1)" } }}));
+    var count: IntegerObservation = .{};
+    try std.testing.expectEqual(sql.QueryOutcome.ok, database.capability().query("SELECT count(*) FROM children", &.{}, count.receiver()));
+    try std.testing.expectEqual(@as(i64, 0), count.value);
+    try std.testing.expectEqual(sql.MutationOutcome.committed, database.capability().mutate(&.{
+        .{ .statement = .{ .sql = "INSERT INTO parents VALUES(1)" } },
+        .{ .statement = .{ .sql = "INSERT INTO children VALUES(1)" } },
+    }));
+}
+
 test "failure before commit is definite and leaves the instance usable" {
     const database = try Database.create(
         std.testing.io,
@@ -702,7 +784,7 @@ test "lost acknowledgement after commit returns unknown and poisons" {
     }
 }
 
-test "rollback and authorizer restore failures poison instead of guessing" {
+test "cleanup failures poison without changing known transaction outcomes" {
     {
         const database = try Database.create(
             std.testing.io,
@@ -736,7 +818,7 @@ test "rollback and authorizer restore failures poison instead of guessing" {
         );
         database.test_hooks.fail_authorizer_restore = true;
         try std.testing.expectEqual(
-            sql.MutationOutcome.outcome_unknown,
+            sql.MutationOutcome.committed,
             database.capability().mutate(&.{.{
                 .statement = .{ .sql = "INSERT INTO storage_conformance(id) VALUES(43)" },
             }}),
@@ -747,7 +829,19 @@ test "rollback and authorizer restore failures poison instead of guessing" {
                 .statement = .{ .sql = "DELETE FROM storage_conformance WHERE id=43" },
             }}),
         );
+        try database.connection.setAuthorizer(null);
+        try expectIntegerPragma(&database.connection, "SELECT count(*) FROM storage_conformance WHERE id=43", 1);
         database.destroy();
+    }
+    {
+        const database = try Database.create(std.testing.io, std.testing.allocator, .memory, &test_migrations);
+        defer database.destroy();
+        database.test_hooks.fail_before_commit = true;
+        database.test_hooks.fail_authorizer_restore = true;
+        try std.testing.expectEqual(sql.MutationOutcome.definite_io_failure, database.capability().mutate(&.{.{ .statement = .{ .sql = "INSERT INTO storage_conformance(id) VALUES(44)" } }}));
+        try std.testing.expectEqual(sql.MutationOutcome.unavailable, database.capability().mutate(&.{.{ .statement = .{ .sql = "INSERT INTO storage_conformance(id) VALUES(45)" } }}));
+        try database.connection.setAuthorizer(null);
+        try expectIntegerPragma(&database.connection, "SELECT count(*) FROM storage_conformance", 0);
     }
 }
 
@@ -945,6 +1039,27 @@ test "failed migrations roll back schema and identity together" {
     );
     defer database.destroy();
     try std.testing.expectEqual(@as(u32, 1), database.schemaVersion());
+}
+
+test "migration handles automatic rollback and COMMIT constraint failure" {
+    const failing = [_][]const u8{
+        "CREATE TABLE partial(id INTEGER); INSERT INTO partial VALUES(1); INSERT OR ROLLBACK INTO storage_conformance(id) VALUES(1),(1);",
+        "CREATE TABLE partial(id INTEGER REFERENCES storage_conformance(id) DEFERRABLE INITIALLY DEFERRED); INSERT INTO partial VALUES(99);",
+    };
+    for (failing) |text| {
+        var connection = try Connection.open(":memory:");
+        defer connection.close();
+        try initializeConnection(&connection, false);
+        _ = try applyMigrations(std.testing.allocator, &connection, &test_migrations);
+        const migrations = test_migrations ++ [_]sql.Migration{.{ .version = 2, .name = "failing", .sql = text }};
+        try std.testing.expectError(error.MigrationFailed, applyMigrations(std.testing.allocator, &connection, &migrations));
+        try std.testing.expect(c.sqlite3_get_autocommit(connection.handle) != 0);
+        try connection.setAuthorizer(null);
+        try expectIntegerPragma(&connection, "SELECT count(*) FROM _metawork_storage_migrations", 1);
+        try expectIntegerPragma(&connection, "SELECT count(*) FROM sqlite_schema WHERE name='partial'", 0);
+        const valid = test_migrations ++ [_]sql.Migration{.{ .version = 2, .name = "valid", .sql = "CREATE TABLE partial(id INTEGER);" }};
+        try std.testing.expectEqual(@as(u32, 2), try applyMigrations(std.testing.allocator, &connection, &valid));
+    }
 }
 
 test "file profile is FULL WAL and every setting is verified" {

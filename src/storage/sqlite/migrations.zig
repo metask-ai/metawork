@@ -16,9 +16,30 @@ pub fn apply(
         return migrationFailure(err);
     connection.execRaw("BEGIN IMMEDIATE;") catch |err|
         return migrationFailure(err);
-    var transaction_active = true;
-    errdefer if (transaction_active) rollback(connection);
 
+    const applied = applyPending(allocator, connection, migrations) catch |err| {
+        if (!connection.rollbackConfirmed()) return error.MigrationOutcomeUnknown;
+        return err;
+    };
+    connection.setAuthorizer(backend.internalTransactionAuthorizer) catch |err| {
+        if (!connection.rollbackConfirmed()) return error.MigrationOutcomeUnknown;
+        return migrationFailure(err);
+    };
+    connection.execRaw("COMMIT;") catch |err| {
+        // Once a failed COMMIT ended the transaction, rollback cannot prove
+        // whether it committed. Do not conflate this with statement rollback.
+        if (c.sqlite3_get_autocommit(connection.handle) != 0 or
+            !connection.rollbackConfirmed()) return error.MigrationOutcomeUnknown;
+        return migrationFailure(err);
+    };
+    if (c.sqlite3_get_autocommit(connection.handle) == 0) {
+        _ = connection.rollbackConfirmed();
+        return error.MigrationOutcomeUnknown;
+    }
+    return @intCast(applied);
+}
+
+fn applyPending(allocator: std.mem.Allocator, connection: *Connection, migrations: []const sql.Migration) backend.OpenError!usize {
     connection.setAuthorizer(backend.metadataAuthorizer) catch |err|
         return migrationFailure(err);
     connection.execRaw(
@@ -45,18 +66,7 @@ pub fn apply(
     const applied = try verifyPrefix(connection, migrations);
     if (applied != migrations.len) return error.Corrupt;
 
-    connection.setAuthorizer(backend.internalTransactionAuthorizer) catch
-        return error.MigrationOutcomeUnknown;
-    connection.execRaw("COMMIT;") catch |err| {
-        if (c.sqlite3_get_autocommit(connection.handle) != 0)
-            return error.MigrationOutcomeUnknown;
-        rollback(connection);
-        return migrationFailure(err);
-    };
-    transaction_active = false;
-    if (c.sqlite3_get_autocommit(connection.handle) == 0)
-        return error.MigrationOutcomeUnknown;
-    return @intCast(applied);
+    return applied;
 }
 
 fn verifyPrefix(
@@ -120,11 +130,6 @@ fn checksum(migration: sql.Migration, output: *[32]u8) void {
     hasher.update(&.{0});
     hasher.update(migration.sql);
     hasher.final(output);
-}
-
-fn rollback(connection: *Connection) void {
-    connection.setAuthorizer(backend.internalTransactionAuthorizer) catch return;
-    connection.execRaw("ROLLBACK;") catch {};
 }
 
 fn migrationFailure(err: backend.SqlError) backend.OpenError {

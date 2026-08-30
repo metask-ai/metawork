@@ -117,6 +117,8 @@ pub const MutationOutcome = enum {
 
 mutation 在 `COMMIT` 失败后结合 `sqlite3_get_autocommit` 和 rollback 结果分类：能够证明事务未提交时返回原始 definite outcome；无法证明 commit 或 rollback 最终状态时返回 `outcome_unknown`，poison 当前 instance，并拒绝后续 mutation。只有 SQLite backend 能观察这些事实，不能把该判断上移给 caller。
 
+statement 失败时 SQLite 可能已自动回滚（例如 `OR ROLLBACK`、写入取消或资源错误）；尚未尝试 `COMMIT` 且已确认事务结束时，保留原始 definite outcome，不再把重复 `ROLLBACK` 的失败当作结果未知。事务结果与连接健康分开：已确认提交或回滚后，恢复 idle authority 失败仍须 poison instance，但不得改写已知结果。
+
 ### 3.4 Limits
 
 - ordinary SQL text：64 KiB；migration SQL：1 MiB；

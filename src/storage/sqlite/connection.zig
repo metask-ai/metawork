@@ -74,6 +74,16 @@ pub const Connection = struct {
         const result = c.sqlite3_set_authorizer(self.handle, callback, null);
         if (result != c.SQLITE_OK) return sqlFailure(result);
     }
+
+    /// Used only after a failed statement or a failed COMMIT with an active
+    /// transaction. SQLite may already have rolled a statement's transaction
+    /// back (OR ROLLBACK, interrupt, or resource errors).
+    pub fn rollbackConfirmed(self: *Connection) bool {
+        if (c.sqlite3_get_autocommit(self.handle) != 0) return true;
+        self.setAuthorizer(internalTransactionAuthorizer) catch return false;
+        self.execRaw("ROLLBACK;") catch return false;
+        return c.sqlite3_get_autocommit(self.handle) != 0;
+    }
 };
 
 pub fn initialize(connection: *Connection, durable: bool) OpenError!void {
