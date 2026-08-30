@@ -58,6 +58,7 @@ candidate probe、真实桌面验收、签名、公证和发布验证不属于 `
 | 单个 Node / Renderer suite | `node --test scripts/<suite>.test.mjs` | 只用于单一失败模式 |
 | Agent / Product lifecycle | `node scripts/run-lifecycle-tests.mjs` | Session、Product、恢复、并发和 shutdown |
 | 单个 Native owner | `zig build <registered-test-step>` | 精确 step 由 `build.zig` 注册 |
+| Storage 基础层 | `zig build test-storage` | SQL conformance、SQLite backend 与 child-process WAL recovery；优化级别与平台要求见 [Storage 基础层验证](#storage-基础层验证) |
 | AgentCore staged candidate | `node scripts/verify-staged-agentcore-bundle.mjs` 后运行相关 `run-agentcore-*-probe.mjs` | verifier 证明接受条件，probe 证明候选行为；二者不能互换 |
 | Windows development baseline | `node scripts/run-windows-bringup.mjs` | Windows 真实 vertical 与关联回归的组合入口 |
 | macOS desktop vertical | `node scripts/test-agentcore-vertical-macos.mjs` | 只证明执行所绑定的目标平台与 artifact |
@@ -80,6 +81,28 @@ candidate probe、真实桌面验收、签名、公证和发布验证不属于 `
 | 签名、公证、安装器或分发合同 | 对应平台分发入口及合同要求的真实 artifact 验收 |
 
 artifact refresh、checksum 或 lock 更新本身不要求修改本文。精确 target identity 以 `build_support/agentcore-bundle.*.lock.json` 为准，ABI 接受语义以 [AgentCore ABI v1 合同](agentcore-abi-v1.md)为准；verifier 必须报告它实际读取的 identity，文档和脚本不得硬编码一份“当前值”。替换 artifact 后，旧 artifact 的行为证据、checkpoint 样本和平台通过结论不自动继承；必须对新 artifact 重新运行相关 verifier、probe 或 platform vertical。
+
+## Storage 基础层验证
+
+[Storage 架构](storage-architecture.md)拥有 SQL、权限、migration、事务结果和 lifecycle 合同；本节统一拥有其验证责任、入口与平台证据边界，不复制实现清单或测试数量。
+
+基础层验收必须覆盖以下失败模式，具体用例由当前 test graph 拥有：
+
+- backend-neutral fake conformance 与 memory SQLite integration，覆盖输入校验、借用 row 和 terminal failure 前的 provisional delivery；
+- 文件 reopen、WAL/FULL、profile 与 limits；设置未生效必须 fail closed；
+- transaction/savepoint、DDL、PRAGMA 和 metadata 越权，包括关联 schema 对象及持久化 trigger/view 的间接访问；
+- expected-changes conflict、完整 batch rollback、引擎自动回滚、真实写入取消和 COMMIT 阶段 constraint；同时验证已知事务结果与连接可用性，不以 poison 代替结果分类；
+- migration prefix/checksum、unknown version、非法 metadata、schema 与 identity 原子回滚，以及提交前持久化身份序列的后置条件；
+- busy、constraint、cancel、resource、corrupt 和 outcome-unknown 分类；故障注入不能替代能稳定触发的真实引擎失败；
+- blocking no-spin concurrency、排队 caller、callback 重入拒绝、并发 shutdown 与 interrupt 收敛，以及 destroy 前 caller quiescence；
+- child-process crash 后 reopen/hot-WAL recovery；
+- architecture guard 证明 Storage 没有进入 Application/Product graph。
+
+专用入口分别运行默认 Debug、`-Doptimize=ReleaseSafe` 与 `-Doptimize=ReleaseFast`。正式 Native graph 和 `test-storage` 必须复用同一 Storage runner 与 crash fixture；fixture 缺失必须失败，不得静默跳过。共享 owner 或 module graph 变化仍须运行正式 Native graph，专用入口不替代仓库级依赖验证。
+
+基础层交付要求 Windows 原生文件数据库 suite，以及 macOS arm64/x86_64 的 Storage test root 与 crash fixture 在上述优化级别的编译验证。macOS 原生文件数据库、并发、取消和 crash recovery 运行证据尚未完成，是非阻塞的后续平台验证，不阻塞本次基础层交付；交叉编译不得表述为原生运行已验证，也不得借此关闭其他 macOS 产品或分发 Gate。
+
+child-process 非正常退出证明进程终止后的 WAL 恢复，不是机器断电或磁盘故障实验。基础层结果也不证明 Application/Product 已接入、现有数据已迁移或产品恢复已验收。普通可重现结果绑定执行时的 revision，不在长期证据账本重复登记。
 
 ## Native SDK 兼容能力证据
 

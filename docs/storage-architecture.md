@@ -207,19 +207,6 @@ owner 在 `destroy` 前必须停止并 join 全部其他使用者，包括 gate 
 
 ## 8. 验证 Gate
 
-基础层完成至少需要：
-
-- backend-neutral fake conformance；
-- memory SQLite integration；
-- file reopen、WAL/FULL/profile/limit verification；
-- transaction/savepoint escape、DDL/PRAGMA/metadata authority negative tests；
-- expected-changes conflict 与完整 rollback；
-- migration prefix/checksum、unknown version、atomic rollback；
-- busy、constraint、cancel、resource、corrupt 和 outcome-unknown fault mapping；
-- blocking no-spin concurrency、shutdown/interrupt convergence；
-- child-process crash 后 reopen/hot-WAL recovery；
-- `test-storage` Debug、ReleaseSafe、ReleaseFast；正式 Native graph 与专用入口复用同一 Storage runner 和 crash fixture，fixture 缺失必须失败，不得静默跳过；
-- 当前 Windows 原生文件数据库 suite 与 macOS 双架构编译验证；macOS 原生运行是非阻塞的后续平台证据，不是本次基础层交付 Gate，且编译结果不得表述为原生运行已验证；
-- architecture guard 证明 Storage 没有进入 Application/Product graph。
+本合同的验证责任、标准入口、平台矩阵与未闭合证据统一由[验证规范的 Storage 基础层验证](validation.md#storage-基础层验证)定义。测试必须观察本合同中的权限隔离、持久化身份、事务结果与连接健康、借用生命周期和恢复不变量；测试数量或单次全绿不能替代这些证据。
 
 当前基础层仍不创建 production `app.db`，不改变任何 Workbench store、Account persistence、Application startup/shutdown 或 Product mutation path。
