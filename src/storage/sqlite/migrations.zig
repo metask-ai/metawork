@@ -40,6 +40,11 @@ pub fn apply(
             return migrationFailure(err);
     }
 
+    // SQLITE_DONE alone does not prove that an INSERT actually added a row.
+    // The version we publish must describe persisted identities, not inputs.
+    const applied = try verifyPrefix(connection, migrations);
+    if (applied != migrations.len) return error.Corrupt;
+
     connection.setAuthorizer(backend.internalTransactionAuthorizer) catch
         return error.MigrationOutcomeUnknown;
     connection.execRaw("COMMIT;") catch |err| {
@@ -51,7 +56,7 @@ pub fn apply(
     transaction_active = false;
     if (c.sqlite3_get_autocommit(connection.handle) == 0)
         return error.MigrationOutcomeUnknown;
-    return @intCast(migrations.len);
+    return @intCast(applied);
 }
 
 fn verifyPrefix(
@@ -68,6 +73,10 @@ fn verifyPrefix(
         c.SQLITE_DONE => return persisted,
         c.SQLITE_ROW => {
             if (persisted >= migrations.len) return error.VersionUnknown;
+            if (c.sqlite3_column_type(statement, 0) != c.SQLITE_INTEGER or
+                c.sqlite3_column_type(statement, 1) != c.SQLITE_TEXT or
+                c.sqlite3_column_type(statement, 2) != c.SQLITE_BLOB or
+                c.sqlite3_column_bytes(statement, 2) != 32) return error.Corrupt;
             const migration = migrations[persisted];
             const version = c.sqlite3_column_int64(statement, 0);
             if (version != @as(i64, migration.version)) return error.Corrupt;
@@ -98,6 +107,7 @@ fn insertIdentity(connection: *Connection, migration: sql.Migration) backend.Sql
     });
     const result = c.sqlite3_step(statement);
     if (result != c.SQLITE_DONE) return backend.sqlFailure(result);
+    if (c.sqlite3_changes64(connection.handle) != 1) return error.Corrupt;
 }
 
 fn checksum(migration: sql.Migration, output: *[32]u8) void {

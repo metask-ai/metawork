@@ -315,7 +315,9 @@ pub fn migrationAuthorizer(_: ?*anyopaque, action: c_int, first: [*c]const u8, s
     return authorize(.migration, action, first, second, database);
 }
 
-pub fn metadataAuthorizer(_: ?*anyopaque, action: c_int, first: [*c]const u8, second: [*c]const u8, database: [*c]const u8, _: [*c]const u8) callconv(.c) c_int {
+pub fn metadataAuthorizer(_: ?*anyopaque, action: c_int, first: [*c]const u8, second: [*c]const u8, database: [*c]const u8, source: [*c]const u8) callconv(.c) c_int {
+    // Metadata statements are authored here, never by a stored trigger/view.
+    if (source != null) return c.SQLITE_DENY;
     return authorize(.metadata, action, first, second, database);
 }
 
@@ -323,7 +325,7 @@ pub fn internalTransactionAuthorizer(_: ?*anyopaque, action: c_int, first: [*c]c
     return authorize(.transaction, action, first, second, database);
 }
 
-fn authorize(authority: Authority, action: c_int, first: [*c]const u8, _: [*c]const u8, database: [*c]const u8) c_int {
+fn authorize(authority: Authority, action: c_int, first: [*c]const u8, second: [*c]const u8, database: [*c]const u8) c_int {
     if (authority == .deny_all) return c.SQLITE_DENY;
     if (action == c.SQLITE_ATTACH or action == c.SQLITE_DETACH or
         action == c.SQLITE_SAVEPOINT or action == c.SQLITE_PRAGMA or
@@ -338,8 +340,46 @@ fn authorize(authority: Authority, action: c_int, first: [*c]const u8, _: [*c]co
             return c.SQLITE_DENY;
     }
     const object = if (first == null) "" else std.mem.span(first);
-    if (authority == .migration and
-        std.ascii.eqlIgnoreCase(object, migration_table)) return c.SQLITE_DENY;
+    const related = if (second == null) "" else std.mem.span(second);
+    if (authority == .migration) {
+        // SQLite action arguments have different meanings. In particular,
+        // indexes/triggers and ALTER name their table in the second argument.
+        const allowed = switch (action) {
+            c.SQLITE_SELECT, c.SQLITE_FUNCTION, c.SQLITE_RECURSIVE => true,
+            c.SQLITE_CREATE_INDEX,
+            c.SQLITE_DROP_INDEX,
+            c.SQLITE_CREATE_TRIGGER,
+            c.SQLITE_DROP_TRIGGER,
+            => !isMetadata(object) and !isMetadata(related),
+            c.SQLITE_ALTER_TABLE => std.ascii.eqlIgnoreCase(object, "main") and !isMetadata(related),
+            c.SQLITE_READ,
+            c.SQLITE_INSERT,
+            c.SQLITE_UPDATE,
+            c.SQLITE_DELETE,
+            c.SQLITE_CREATE_TABLE,
+            c.SQLITE_DROP_TABLE,
+            c.SQLITE_CREATE_VIEW,
+            c.SQLITE_DROP_VIEW,
+            c.SQLITE_CREATE_VTABLE,
+            c.SQLITE_DROP_VTABLE,
+            c.SQLITE_REINDEX,
+            c.SQLITE_ANALYZE,
+            => !isMetadata(object),
+            else => false,
+        };
+        return if (allowed) c.SQLITE_OK else c.SQLITE_DENY;
+    }
+    if (authority == .metadata) {
+        const allowed = switch (action) {
+            c.SQLITE_SELECT => true,
+            c.SQLITE_CREATE_TABLE => isMetadata(object),
+            c.SQLITE_READ, c.SQLITE_INSERT => isMetadata(object) or isCatalog(object),
+            c.SQLITE_UPDATE => isCatalog(object), // SQLite's CREATE TABLE bookkeeping.
+            c.SQLITE_FUNCTION => std.ascii.eqlIgnoreCase(related, "length"),
+            else => false,
+        };
+        return if (allowed) c.SQLITE_OK else c.SQLITE_DENY;
+    }
     if ((authority == .query or authority == .mutation) and
         protectedObject(object)) return c.SQLITE_DENY;
     return switch (authority) {
@@ -358,15 +398,21 @@ fn authorize(authority: Authority, action: c_int, first: [*c]const u8, _: [*c]co
             => c.SQLITE_OK,
             else => c.SQLITE_DENY,
         },
-        .migration, .metadata => c.SQLITE_OK,
-        .deny_all, .transaction => c.SQLITE_DENY,
+        .deny_all, .transaction, .migration, .metadata => c.SQLITE_DENY,
     };
 }
 
-fn protectedObject(name: []const u8) bool {
-    return std.ascii.eqlIgnoreCase(name, migration_table) or
-        std.ascii.eqlIgnoreCase(name, "sqlite_master") or
+fn isMetadata(name: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(name, migration_table);
+}
+
+fn isCatalog(name: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(name, "sqlite_master") or
         std.ascii.eqlIgnoreCase(name, "sqlite_schema");
+}
+
+fn protectedObject(name: []const u8) bool {
+    return isMetadata(name) or isCatalog(name);
 }
 
 fn temporarySchemaOperation(action: c_int) bool {

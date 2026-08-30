@@ -819,6 +819,101 @@ test "migration identity is an append-only checksummed prefix" {
     );
 }
 
+test "migration authority rejects metadata through associated schema objects" {
+    const forbidden = [_][]const u8{
+        "CREATE TRIGGER suppress_identity BEFORE INSERT ON _metawork_storage_migrations BEGIN SELECT RAISE(IGNORE); END;",
+        "CREATE INDEX identity_index ON _metawork_storage_migrations(name);",
+        "ALTER TABLE _metawork_storage_migrations ADD COLUMN injected TEXT;",
+        "CREATE VIEW identity_view AS SELECT * FROM _metawork_storage_migrations; SELECT * FROM identity_view;",
+    };
+    for (forbidden) |text| {
+        const migrations = [_]sql.Migration{.{ .version = 1, .name = "escape", .sql = text }};
+        const result = Database.create(std.testing.io, std.testing.allocator, .memory, &migrations);
+        if (result) |database| {
+            database.destroy();
+            return error.MetadataEscapeAccepted;
+        } else |err| try std.testing.expectEqual(error.MigrationFailed, err);
+    }
+}
+
+test "migration permits application DDL and persists exact identity after reopen" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const length = try temporary.dir.realPath(std.testing.io, &path_buffer);
+    const path = try std.fs.path.join(std.testing.allocator, &.{ path_buffer[0..length], "ddl.db" });
+    defer std.testing.allocator.free(path);
+    const migrations = [_]sql.Migration{
+        .{ .version = 1, .name = "create", .sql = "CREATE TABLE items(id INTEGER PRIMARY KEY); CREATE TABLE audit(id INTEGER);" },
+        .{ .version = 2, .name = "evolve", .sql =
+        \\ALTER TABLE items ADD COLUMN label TEXT;
+        \\CREATE INDEX item_label ON items(label);
+        \\CREATE TRIGGER item_audit AFTER INSERT ON items BEGIN INSERT INTO audit VALUES(new.id); END;
+        \\CREATE VIEW item_view AS SELECT id FROM items;
+        \\INSERT INTO items VALUES(7, 'seven');
+        },
+    };
+    for (0..2) |_| {
+        const database = try Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &migrations);
+        defer database.destroy();
+        try std.testing.expectEqual(@as(u32, 2), database.schemaVersion());
+        var observed: IntegerObservation = .{};
+        try std.testing.expectEqual(sql.QueryOutcome.ok, database.capability().query("SELECT id FROM audit", &.{}, observed.receiver()));
+        try std.testing.expectEqual(@as(i64, 7), observed.value);
+        try database.connection.setAuthorizer(null); // Test-only observation, not metadata authority.
+        try expectIntegerPragma(&database.connection, "SELECT count(*) FROM _metawork_storage_migrations", 2);
+    }
+}
+
+test "metadata authority rejects persisted trigger side effects" {
+    var connection = try Connection.open(":memory:");
+    defer connection.close();
+    try initializeConnection(&connection, false);
+    _ = try applyMigrations(std.testing.allocator, &connection, &.{});
+    try connection.setAuthorizer(null);
+    try connection.execRaw("CREATE TABLE illicit(id INTEGER); CREATE TRIGGER bad_identity BEFORE INSERT ON _metawork_storage_migrations BEGIN INSERT INTO illicit VALUES(1); SELECT RAISE(IGNORE); END;");
+    try std.testing.expectError(error.MigrationFailed, applyMigrations(std.testing.allocator, &connection, &test_migrations));
+    try connection.setAuthorizer(null);
+    try expectIntegerPragma(&connection, "SELECT count(*) FROM illicit", 0);
+    try expectIntegerPragma(&connection, "SELECT count(*) FROM _metawork_storage_migrations", 0);
+    try expectIntegerPragma(&connection, "SELECT count(*) FROM sqlite_schema WHERE name='storage_conformance'", 0);
+}
+
+test "denied migration rolls back file schema and keeps its original identity" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const length = try temporary.dir.realPath(std.testing.io, &path_buffer);
+    const path = try std.fs.path.join(std.testing.allocator, &.{ path_buffer[0..length], "denied.db" });
+    defer std.testing.allocator.free(path);
+    const initial = try Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &test_migrations);
+    initial.destroy();
+    const extended = test_migrations ++ [_]sql.Migration{.{
+        .version = 2,
+        .name = "denied",
+        .sql = "CREATE TABLE must_rollback(id INTEGER); CREATE INDEX stolen ON _metawork_storage_migrations(name);",
+    }};
+    try std.testing.expectError(error.MigrationFailed, Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &extended));
+    const reopened = try Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &test_migrations);
+    defer reopened.destroy();
+    try std.testing.expectEqual(@as(u32, 1), reopened.schemaVersion());
+    try reopened.connection.setAuthorizer(null);
+    try expectIntegerPragma(&reopened.connection, "SELECT count(*) FROM sqlite_schema WHERE name='must_rollback'", 0);
+    try expectIntegerPragma(&reopened.connection, "SELECT count(*) FROM _metawork_storage_migrations", 1);
+}
+
+test "migration metadata rejects coerced identity types" {
+    var connection = try Connection.open(":memory:");
+    defer connection.close();
+    try initializeConnection(&connection, false);
+    _ = try applyMigrations(std.testing.allocator, &connection, &test_migrations);
+    try connection.setAuthorizer(null);
+    // Same name bytes, wrong persisted storage class: implicit conversion
+    // must not hide malformed identity records.
+    try connection.execRaw("UPDATE _metawork_storage_migrations SET name=CAST(name AS BLOB);");
+    try std.testing.expectError(error.Corrupt, applyMigrations(std.testing.allocator, &connection, &test_migrations));
+}
+
 test "failed migrations roll back schema and identity together" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
