@@ -191,6 +191,7 @@ fn parameterBytes(params: []const Value, initial: usize) ?usize {
     for (params) |value| switch (value) {
         .text => |bytes| {
             if (!std.unicode.utf8ValidateSlice(bytes)) return null;
+            if (std.mem.indexOfScalar(u8, bytes, 0) != null) return null;
             total = std.math.add(usize, total, bytes.len) catch return null;
         },
         .blob => |bytes| total = std.math.add(usize, total, bytes.len) catch

@@ -247,6 +247,10 @@ test "SQL contract rejects invalid query input before backend dispatch" {
 
 test "SQL contract validates values and mutation batches" {
     try std.testing.expect(!sql.validParameters(
+        &.{.{ .text = "a\x00b" }},
+        sql.Limits.query_parameter_bytes,
+    ));
+    try std.testing.expect(!sql.validParameters(
         &.{.{ .real = std.math.inf(f64) }},
         sql.Limits.query_parameter_bytes,
     ));

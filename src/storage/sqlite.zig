@@ -36,6 +36,7 @@ pub const Target = union(enum) {
 };
 
 pub const OpenError = backend.OpenError;
+pub const LifecycleError = error{ReentrantOperation};
 
 const Lifecycle = enum { active, stopping, stopped, poisoned };
 const Admission = enum { entered, rejected, unavailable };
@@ -44,6 +45,7 @@ const TestHooks = if (builtin.is_test) struct {
     lose_ack_after_commit: bool = false,
     fail_rollback: bool = false,
     fail_authorizer_restore: bool = false,
+    waiting_callers: usize = 0,
 } else struct {};
 
 /// Stable concrete owner. create() allocates the instance so capabilities can
@@ -102,15 +104,16 @@ pub const Database = struct {
         return self;
     }
 
-    pub fn shutdown(self: *Database) void {
+    pub fn shutdown(self: *Database) LifecycleError!void {
         self.lock();
+        defer self.unlock();
+        if (self.operating and self.active_thread == std.Thread.getCurrentId())
+            return error.ReentrantOperation;
         if (self.lifecycle == .stopped) {
-            self.unlock();
             return;
         }
         if (self.lifecycle == .stopping) {
             while (self.lifecycle != .stopped) self.wait();
-            self.unlock();
             return;
         }
         self.lifecycle = .stopping;
@@ -120,11 +123,12 @@ pub const Database = struct {
         self.connection.close();
         self.lifecycle = .stopped;
         self.broadcast();
-        self.unlock();
     }
 
-    pub fn destroy(self: *Database) void {
-        self.shutdown();
+    /// The owner must first stop and join every other caller, including
+    /// admission waiters and concurrent shutdown callers, before destruction.
+    pub fn destroy(self: *Database) LifecycleError!void {
+        try self.shutdown();
         const allocator = self.allocator;
         allocator.destroy(self);
     }
@@ -321,6 +325,10 @@ pub const Database = struct {
         const thread_id = std.Thread.getCurrentId();
         self.lock();
         defer self.unlock();
+        var registered_waiter = false;
+        defer if (builtin.is_test and registered_waiter) {
+            self.test_hooks.waiting_callers -= 1;
+        };
         while (true) {
             if (self.lifecycle != .active) return .unavailable;
             if (!self.operating) {
@@ -329,6 +337,11 @@ pub const Database = struct {
                 return .entered;
             }
             if (self.active_thread == thread_id) return .rejected;
+            if (builtin.is_test and !registered_waiter) {
+                registered_waiter = true;
+                self.test_hooks.waiting_callers += 1;
+                self.broadcast();
+            }
             self.wait();
         }
     }
@@ -532,7 +545,7 @@ test "memory database has a stable owner and passes backend conformance" {
         .memory,
         &test_migrations,
     );
-    defer database.destroy();
+    defer database.destroy() catch unreachable;
     try std.testing.expectEqual(@as(u32, 1), database.schemaVersion());
     try conformance.expectBackendContract(database.capability());
 }
@@ -544,7 +557,7 @@ test "query and mutation authorities reject transaction and schema escape" {
         .memory,
         &test_migrations,
     );
-    defer database.destroy();
+    defer database.destroy() catch unreachable;
     const capability = database.capability();
     const ignored: sql.RowReceiver = .{ .context = database, .receive_fn = ignoreRow };
 
@@ -595,7 +608,7 @@ test "exact change conflict rolls the complete mutation batch back" {
         .memory,
         &test_migrations,
     );
-    defer database.destroy();
+    defer database.destroy() catch unreachable;
     const capability = database.capability();
     try std.testing.expectEqual(
         sql.MutationOutcome.conflict,
@@ -631,7 +644,7 @@ test "automatic rollback preserves constraint outcome data and reuse after reope
     defer std.testing.allocator.free(path);
     {
         const database = try Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &test_migrations);
-        defer database.destroy();
+        defer database.destroy() catch unreachable;
         const capability = database.capability();
         try std.testing.expectEqual(sql.MutationOutcome.committed, capability.mutate(&.{.{ .statement = .{ .sql = "INSERT INTO storage_conformance(id) VALUES(1)" } }}));
         try std.testing.expectEqual(sql.MutationOutcome.constraint, capability.mutate(&.{
@@ -641,7 +654,7 @@ test "automatic rollback preserves constraint outcome data and reuse after reope
         try std.testing.expectEqual(sql.MutationOutcome.committed, capability.mutate(&.{.{ .statement = .{ .sql = "INSERT INTO storage_conformance(id) VALUES(3)" } }}));
     }
     const reopened = try Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &test_migrations);
-    defer reopened.destroy();
+    defer reopened.destroy() catch unreachable;
     var count: IntegerObservation = .{};
     try std.testing.expectEqual(sql.QueryOutcome.ok, reopened.capability().query("SELECT count(*) FROM storage_conformance WHERE id IN (1,3)", &.{}, count.receiver()));
     try std.testing.expectEqual(@as(i64, 2), count.value);
@@ -651,7 +664,7 @@ test "automatic rollback preserves constraint outcome data and reuse after reope
 
 test "real write interrupt automatically rolls back without poisoning" {
     const database = try Database.create(std.testing.io, std.testing.allocator, .memory, &test_migrations);
-    defer database.destroy();
+    defer database.destroy() catch unreachable;
     var blocker: BlockingReceiver = .{};
     try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_create_function_v2(database.connection.handle, "pause_write", 1, c.SQLITE_UTF8, &blocker, struct {
         fn run(context: ?*c.sqlite3_context, _: c_int, args: [*c]?*c.sqlite3_value) callconv(.c) void {
@@ -686,7 +699,7 @@ test "deferred foreign key failure at COMMIT is definite and reusable" {
         \\CREATE TABLE children(parent INTEGER REFERENCES parents(id) DEFERRABLE INITIALLY DEFERRED);
     }};
     const database = try Database.create(std.testing.io, std.testing.allocator, .memory, &migrations);
-    defer database.destroy();
+    defer database.destroy() catch unreachable;
     try std.testing.expectEqual(sql.MutationOutcome.constraint, database.capability().mutate(&.{.{ .statement = .{ .sql = "INSERT INTO children VALUES(1)" } }}));
     var count: IntegerObservation = .{};
     try std.testing.expectEqual(sql.QueryOutcome.ok, database.capability().query("SELECT count(*) FROM children", &.{}, count.receiver()));
@@ -704,7 +717,7 @@ test "failure before commit is definite and leaves the instance usable" {
         .memory,
         &test_migrations,
     );
-    defer database.destroy();
+    defer database.destroy() catch unreachable;
     database.test_hooks.fail_before_commit = true;
     try std.testing.expectEqual(
         sql.MutationOutcome.definite_io_failure,
@@ -761,7 +774,7 @@ test "lost acknowledgement after commit returns unknown and poisons" {
                 .statement = .{ .sql = "DELETE FROM storage_conformance WHERE id=42" },
             }}),
         );
-        database.destroy();
+        try database.destroy();
     }
     {
         const database = try Database.create(
@@ -770,7 +783,7 @@ test "lost acknowledgement after commit returns unknown and poisons" {
             .{ .file = path },
             &test_migrations,
         );
-        defer database.destroy();
+        defer database.destroy() catch unreachable;
         var count: IntegerObservation = .{};
         try std.testing.expectEqual(
             sql.QueryOutcome.ok,
@@ -807,7 +820,7 @@ test "cleanup failures poison without changing known transaction outcomes" {
                 .{ .context = database, .receive_fn = ignoreRow },
             ),
         );
-        database.destroy();
+        try database.destroy();
     }
     {
         const database = try Database.create(
@@ -831,11 +844,11 @@ test "cleanup failures poison without changing known transaction outcomes" {
         );
         try database.connection.setAuthorizer(null);
         try expectIntegerPragma(&database.connection, "SELECT count(*) FROM storage_conformance WHERE id=43", 1);
-        database.destroy();
+        try database.destroy();
     }
     {
         const database = try Database.create(std.testing.io, std.testing.allocator, .memory, &test_migrations);
-        defer database.destroy();
+        defer database.destroy() catch unreachable;
         database.test_hooks.fail_before_commit = true;
         database.test_hooks.fail_authorizer_restore = true;
         try std.testing.expectEqual(sql.MutationOutcome.definite_io_failure, database.capability().mutate(&.{.{ .statement = .{ .sql = "INSERT INTO storage_conformance(id) VALUES(44)" } }}));
@@ -863,7 +876,7 @@ test "migration identity is an append-only checksummed prefix" {
             .{ .file = path },
             &test_migrations,
         );
-        database.destroy();
+        try database.destroy();
     }
     {
         const database = try Database.create(
@@ -872,7 +885,7 @@ test "migration identity is an append-only checksummed prefix" {
             .{ .file = path },
             &test_migrations,
         );
-        database.destroy();
+        try database.destroy();
     }
     const changed_name = [_]sql.Migration{.{
         .version = 1,
@@ -924,7 +937,7 @@ test "migration authority rejects metadata through associated schema objects" {
         const migrations = [_]sql.Migration{.{ .version = 1, .name = "escape", .sql = text }};
         const result = Database.create(std.testing.io, std.testing.allocator, .memory, &migrations);
         if (result) |database| {
-            database.destroy();
+            try database.destroy();
             return error.MetadataEscapeAccepted;
         } else |err| try std.testing.expectEqual(error.MigrationFailed, err);
     }
@@ -949,7 +962,7 @@ test "migration permits application DDL and persists exact identity after reopen
     };
     for (0..2) |_| {
         const database = try Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &migrations);
-        defer database.destroy();
+        defer database.destroy() catch unreachable;
         try std.testing.expectEqual(@as(u32, 2), database.schemaVersion());
         var observed: IntegerObservation = .{};
         try std.testing.expectEqual(sql.QueryOutcome.ok, database.capability().query("SELECT id FROM audit", &.{}, observed.receiver()));
@@ -981,7 +994,7 @@ test "denied migration rolls back file schema and keeps its original identity" {
     const path = try std.fs.path.join(std.testing.allocator, &.{ path_buffer[0..length], "denied.db" });
     defer std.testing.allocator.free(path);
     const initial = try Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &test_migrations);
-    initial.destroy();
+    try initial.destroy();
     const extended = test_migrations ++ [_]sql.Migration{.{
         .version = 2,
         .name = "denied",
@@ -989,7 +1002,7 @@ test "denied migration rolls back file schema and keeps its original identity" {
     }};
     try std.testing.expectError(error.MigrationFailed, Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &extended));
     const reopened = try Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &test_migrations);
-    defer reopened.destroy();
+    defer reopened.destroy() catch unreachable;
     try std.testing.expectEqual(@as(u32, 1), reopened.schemaVersion());
     try reopened.connection.setAuthorizer(null);
     try expectIntegerPragma(&reopened.connection, "SELECT count(*) FROM sqlite_schema WHERE name='must_rollback'", 0);
@@ -1037,7 +1050,7 @@ test "failed migrations roll back schema and identity together" {
         .{ .file = path },
         &recovered,
     );
-    defer database.destroy();
+    defer database.destroy() catch unreachable;
     try std.testing.expectEqual(@as(u32, 1), database.schemaVersion());
 }
 
@@ -1078,7 +1091,7 @@ test "file profile is FULL WAL and every setting is verified" {
         .{ .file = path },
         &test_migrations,
     );
-    defer database.destroy();
+    defer database.destroy() catch unreachable;
 
     try database.connection.setAuthorizer(null);
     defer database.connection.setAuthorizer(denyAllAuthorizer) catch {};
@@ -1116,6 +1129,77 @@ test "journal mode setter fails closed when SQLite returns another mode" {
     );
 }
 
+test "callback lifecycle reentry is rejected without changing the owner" {
+    const database = try Database.create(std.testing.io, std.testing.allocator, .memory, &test_migrations);
+    defer database.destroy() catch unreachable;
+    const Observation = struct {
+        database: *Database,
+        shutdown_error: ?LifecycleError = null,
+        destroy_error: ?LifecycleError = null,
+        fn receive(context: *anyopaque, _: sql.Row) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.database.shutdown() catch |err| {
+                self.shutdown_error = err;
+            };
+            self.database.destroy() catch |err| {
+                self.destroy_error = err;
+            };
+        }
+    };
+    var observation: Observation = .{ .database = database };
+    try std.testing.expectEqual(sql.QueryOutcome.ok, database.capability().query("SELECT 1", &.{}, .{ .context = &observation, .receive_fn = Observation.receive }));
+    try std.testing.expectEqual(error.ReentrantOperation, observation.shutdown_error.?);
+    try std.testing.expectEqual(error.ReentrantOperation, observation.destroy_error.?);
+    try std.testing.expectEqual(sql.MutationOutcome.committed, database.capability().mutate(&.{.{ .statement = .{ .sql = "INSERT INTO storage_conformance(id) VALUES(1)" } }}));
+}
+
+fn shutdownForTest(database: *Database) void {
+    database.shutdown() catch unreachable;
+}
+
+test "queued callers serialize normally and are released by shutdown" {
+    for ([_]bool{ false, true }) |stop| {
+        const database = try Database.create(std.testing.io, std.testing.allocator, .memory, &.{});
+        defer database.destroy() catch unreachable;
+        var blocker: BlockingReceiver = .{};
+        var first_outcome: sql.QueryOutcome = .ok;
+        const first = try std.Thread.spawn(.{}, struct {
+            fn run(db: sql.Database, receiver: sql.RowReceiver, output: *sql.QueryOutcome) void {
+                output.* = db.query("SELECT 1 UNION ALL SELECT 2", &.{}, receiver);
+            }
+        }.run, .{ database.capability(), blocker.receiver(), &first_outcome });
+        blocker.waitUntilEntered();
+        var second_outcome: sql.QueryOutcome = .ok;
+        const second = try std.Thread.spawn(.{}, struct {
+            fn run(db: *Database, output: *sql.QueryOutcome) void {
+                output.* = db.capability().query("SELECT 3", &.{}, .{ .context = db, .receive_fn = ignoreRow });
+            }
+        }.run, .{ database, &second_outcome });
+        database.lock();
+        while (database.test_hooks.waiting_callers == 0) database.wait();
+        database.unlock();
+        if (stop) {
+            const stopping = try std.Thread.spawn(.{}, shutdownForTest, .{database});
+            const also_stopping = try std.Thread.spawn(.{}, shutdownForTest, .{database});
+            // The queued call must finish while the active callback is still
+            // blocked. shutdown must not wait for it to become an operator.
+            second.join();
+            blocker.release();
+            first.join();
+            stopping.join();
+            also_stopping.join();
+            try std.testing.expectEqual(sql.QueryOutcome.unavailable, second_outcome);
+            try std.testing.expectEqual(Lifecycle.stopped, database.lifecycle);
+        } else {
+            blocker.release();
+            first.join();
+            second.join();
+            try std.testing.expectEqual(sql.QueryOutcome.ok, first_outcome);
+            try std.testing.expectEqual(sql.QueryOutcome.ok, second_outcome);
+        }
+    }
+}
+
 test "shutdown is idempotent and borrowed capability becomes unavailable" {
     const database = try Database.create(
         std.testing.io,
@@ -1124,8 +1208,8 @@ test "shutdown is idempotent and borrowed capability becomes unavailable" {
         &test_migrations,
     );
     const capability = database.capability();
-    database.shutdown();
-    database.shutdown();
+    try database.shutdown();
+    try database.shutdown();
     var ignored: IntegerObservation = .{};
     try std.testing.expectEqual(
         sql.QueryOutcome.unavailable,
@@ -1135,7 +1219,7 @@ test "shutdown is idempotent and borrowed capability becomes unavailable" {
         sql.MutationOutcome.unavailable,
         capability.mutate(&.{.{ .statement = .{ .sql = "DELETE FROM storage_conformance" } }}),
     );
-    database.destroy();
+    try database.destroy();
 }
 
 test "interrupt cancels the active query without poisoning the instance" {
@@ -1145,7 +1229,7 @@ test "interrupt cancels the active query without poisoning the instance" {
         .memory,
         &.{},
     );
-    defer database.destroy();
+    defer database.destroy() catch unreachable;
     var blocker: BlockingReceiver = .{};
     var outcome: sql.QueryOutcome = .ok;
     const thread = try std.Thread.spawn(.{}, struct {
@@ -1198,7 +1282,7 @@ test "shutdown interrupts an active callback and converges before close" {
         }
     }.run, .{ database.capability(), blocker.receiver(), &outcome });
     blocker.waitUntilEntered();
-    const shutdown_thread = try std.Thread.spawn(.{}, Database.shutdown, .{database});
+    const shutdown_thread = try std.Thread.spawn(.{}, shutdownForTest, .{database});
 
     database.lock();
     while (database.lifecycle != .stopping) database.wait();
@@ -1208,7 +1292,7 @@ test "shutdown interrupts an active callback and converges before close" {
     shutdown_thread.join();
     try std.testing.expectEqual(sql.QueryOutcome.cancelled, outcome);
     try std.testing.expectEqual(Lifecycle.stopped, database.lifecycle);
-    database.destroy();
+    try database.destroy();
 }
 
 test "file contention is busy rather than local gate contention" {
@@ -1227,14 +1311,14 @@ test "file contention is busy rather than local gate contention" {
         .{ .file = path },
         &test_migrations,
     );
-    defer first.destroy();
+    defer first.destroy() catch unreachable;
     const second = try Database.create(
         std.testing.io,
         std.testing.allocator,
         .{ .file = path },
         &test_migrations,
     );
-    defer second.destroy();
+    defer second.destroy() catch unreachable;
 
     try first.connection.setAuthorizer(internalTransactionAuthorizer);
     try first.connection.execRaw("BEGIN IMMEDIATE;");
@@ -1251,14 +1335,11 @@ test "file contention is busy rather than local gate contention" {
 }
 
 test "abrupt child exit leaves a WAL that reopens with committed data" {
-    const fixture = std.process.Environ.getAlloc(
+    const fixture = try std.process.Environ.getAlloc(
         std.testing.environ,
         std.testing.allocator,
         "METAWORK_STORAGE_CRASH_FIXTURE",
-    ) catch |err| switch (err) {
-        error.EnvironmentVariableMissing => return error.SkipZigTest,
-        else => return err,
-    };
+    );
     defer std.testing.allocator.free(fixture);
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
@@ -1276,7 +1357,7 @@ test "abrupt child exit leaves a WAL that reopens with committed data" {
             .{ .file = path },
             &test_migrations,
         );
-        database.destroy();
+        try database.destroy();
     }
 
     var environment = try std.process.Environ.createMap(
@@ -1308,7 +1389,7 @@ test "abrupt child exit leaves a WAL that reopens with committed data" {
         .{ .file = path },
         &test_migrations,
     );
-    defer database.destroy();
+    defer database.destroy() catch unreachable;
     var length: IntegerObservation = .{};
     try std.testing.expectEqual(
         sql.QueryOutcome.ok,
@@ -1353,7 +1434,7 @@ test "streaming query exposes provisional rows before terminal failure" {
         .memory,
         &.{},
     );
-    defer database.destroy();
+    defer database.destroy() catch unreachable;
     var observed: IntegerObservation = .{};
     try std.testing.expectEqual(
         sql.QueryOutcome.resource_exhausted,
@@ -1364,6 +1445,23 @@ test "streaming query exposes provisional rows before terminal failure" {
         , &.{}, observed.receiver()),
     );
     try std.testing.expectEqual(sql.Limits.result_rows, observed.rows);
+}
+
+test "TEXT NUL rejection covers parameters and rows without restricting BLOB" {
+    const database = try Database.create(std.testing.io, std.testing.allocator, .memory, &test_migrations);
+    defer database.destroy() catch unreachable;
+    var ignored: u8 = 0;
+    const receiver: sql.RowReceiver = .{ .context = &ignored, .receive_fn = ignoreRow };
+    try std.testing.expectEqual(sql.QueryOutcome.rejected, database.capability().query("SELECT ?", &.{.{ .text = "a\x00b" }}, receiver));
+    try std.testing.expectEqual(sql.MutationOutcome.rejected, database.capability().mutate(&.{.{ .statement = .{
+        .sql = "INSERT INTO storage_conformance(text_value) VALUES(?)",
+        .params = &.{.{ .text = "a\x00b" }},
+    } }}));
+    try std.testing.expectEqual(sql.QueryOutcome.rejected, database.capability().query("SELECT char(0)", &.{}, receiver));
+    try std.testing.expectEqual(sql.QueryOutcome.ok, database.capability().query("SELECT ?", &.{.{ .blob = "a\x00b" }}, receiver));
+    var observed: IntegerObservation = .{};
+    try std.testing.expectEqual(sql.QueryOutcome.rejected, database.capability().query("SELECT 1 UNION ALL SELECT char(0)", &.{}, observed.receiver()));
+    try std.testing.expectEqual(@as(usize, 1), observed.rows);
 }
 
 fn expectTextPragma(

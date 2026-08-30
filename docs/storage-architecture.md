@@ -87,7 +87,7 @@ pub const Mutation = struct {
 };
 ```
 
-动态值必须通过 parameter binding 传入。SQL、migration name 和 `TEXT` 不得包含 NUL；`TEXT` 必须是 UTF-8，`REAL` 必须 finite。
+动态值必须通过 parameter binding 传入。SQL、migration name 和 `TEXT` 不得包含 NUL；`TEXT` 必须是 UTF-8，`REAL` 必须 finite。Value 约束同时适用于输入参数和返回 row；SQL 表达式产生的非法 TEXT/REAL 必须在 callback 前拒绝。BLOB 不受 TEXT 的 NUL/UTF-8 限制。
 
 `Database.query` 只接受一个只读 statement。`Database.mutate` 将非空 mutation array 放入一个 `BEGIN IMMEDIATE` transaction；每条 statement 必须是无返回 row 的 DML。`exactly` 使用该 statement 的 `sqlite3_changes64` 结果校验，任一 mismatch 返回 `conflict` 并回滚完整 batch。
 
@@ -141,6 +141,8 @@ statement 失败时 SQLite 可能已自动回滚（例如 `OR ROLLBACK`、写入
 | metadata | migration metadata 的建表、读取和追加 | public caller 不可获得该 authority |
 | internal transaction | Storage 自己准备的 BEGIN/COMMIT/ROLLBACK | 其他 SQL action |
 
+authorizer 按 SQLite action 的真实参数语义检查目标对象及关联表；作用于 metadata 的 index、trigger、ALTER 等不能绕过隔离。metadata authority 只允许 Storage 自有 SQL 所需动作，不授予存储的 trigger/view，未知动作默认拒绝。
+
 authorizer 不是 SQL 文本关键字过滤器。`sqlite3_stmt_readonly` 和 statement shape 仍作为第二层检查，但不能单独承担 transaction control 隔离，因为 SQLite 会把部分 transaction statement 标记为 readonly。
 
 ## 5. Migration identity
@@ -161,6 +163,7 @@ migration version 从 1 严格连续。checksum 是 SHA-256，输入依次为 bi
 - version gap 或非法 metadata：`Corrupt`；
 - name 或 checksum 不同：`MigrationMismatch`；
 - pending migration SQL 与对应 metadata insert 在一个 `BEGIN IMMEDIATE` transaction 内提交；
+- identity insert 必须实际追加一条记录；提交前验证最终完整身份序列，公开版本必须与已验证记录一致，不能仅从输入数量推导；
 - 任一失败完整 rollback；无法确认 migration commit 结果时返回 `MigrationOutcomeUnknown`。
 
 普通 query/mutation 不能读取或修改 metadata table。当前没有多 Product owner schema registry；基础层只建立不可伪造的单一 migration 序列，未来 owner 组合必须另行决策。
@@ -196,9 +199,11 @@ Database.create(io, allocator, target, migrations) -> *Database
 
 instance 使用一个 `std.Io.Mutex` 和 `std.Io.Condition` 串行 operation，不持有 spinlock 执行 SQL。异线程调用等待 gate；同线程 callback 重入立即拒绝。
 
-`shutdown` 原子停止 admission，唤醒 waiting caller，调用 `sqlite3_interrupt` 取消 active operation，等待它离开，再关闭 connection。`shutdown` 幂等；`destroy` 先保证 shutdown，再释放 stable owner。caller 不得在 `destroy` 后使用 borrowed capability。
+`shutdown` 原子停止 admission，唤醒 waiting caller，调用 `sqlite3_interrupt` 请求取消 active operation，等待它离开，再关闭 connection。它允许异线程并发调用并保持幂等。同步 callback 不能等待自身退出，因此在 active operation 的同一线程调用 `shutdown` 或 `destroy`，必须立即返回 `error.ReentrantOperation`，且不改变 owner 状态。
 
-`interrupt` 只请求取消当前 operation；SQLite 返回 `SQLITE_INTERRUPT` 时映射为 `cancelled`。Storage 不创建 timer 或 deadline worker。
+owner 在 `destroy` 前必须停止并 join 全部其他使用者，包括 gate waiter、并发 shutdown caller 和其他 borrowed capability 使用者；通常顺序为 shutdown、收敛使用者、destroy。`destroy` 保证 shutdown 后释放 stable owner，不提供与其他 caller 并发销毁的隐式引用计数。caller 不得在 `destroy` 后使用 borrowed capability。
+
+`interrupt` 只请求取消当前 operation；SQLite 返回 `SQLITE_INTERRUPT` 时映射为 `cancelled`。取消是协作式请求，不强制中断 caller callback，也不保证胜过即将完成的提交；callback 必须自行返回，shutdown 才能完成。Storage 不创建 timer 或 deadline worker。
 
 ## 8. 验证 Gate
 
@@ -213,8 +218,8 @@ instance 使用一个 `std.Io.Mutex` 和 `std.Io.Condition` 串行 operation，�
 - busy、constraint、cancel、resource、corrupt 和 outcome-unknown fault mapping；
 - blocking no-spin concurrency、shutdown/interrupt convergence；
 - child-process crash 后 reopen/hot-WAL recovery；
-- `test-storage` Debug、ReleaseSafe、ReleaseFast；
-- Windows 与 macOS 原生文件数据库 suite；cross-compile 不能替代原生运行；
+- `test-storage` Debug、ReleaseSafe、ReleaseFast；正式 Native graph 与专用入口复用同一 Storage runner 和 crash fixture，fixture 缺失必须失败，不得静默跳过；
+- 当前 Windows 原生文件数据库 suite 与 macOS 双架构编译验证；macOS 原生运行是非阻塞的后续平台证据，不是本次基础层交付 Gate，且编译结果不得表述为原生运行已验证；
 - architecture guard 证明 Storage 没有进入 Application/Product graph。
 
 当前基础层仍不创建 production `app.db`，不改变任何 Workbench store、Account persistence、Application startup/shutdown 或 Product mutation path。

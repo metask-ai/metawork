@@ -254,6 +254,7 @@ pub fn rowBytes(
             c.SQLITE_TEXT => text: {
                 const value = columnText(statement, index);
                 if (!std.unicode.utf8ValidateSlice(value)) return error.Rejected;
+                if (std.mem.indexOfScalar(u8, value, 0) != null) return error.Rejected;
                 break :text value.len;
             },
             c.SQLITE_BLOB => columnBlob(statement, index).len,

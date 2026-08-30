@@ -95,7 +95,6 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-account-state", .root_module = test_modules.account_state },
         .{ .name = "metawork-account-runtime", .root_module = test_modules.account_runtime },
         .{ .name = "metawork-account", .root_module = test_modules.account },
-        .{ .name = "metawork-storage", .root_module = test_modules.storage },
         .{ .name = "metawork-app", .root_module = test_modules.app },
         .{ .name = "metawork-automation-enabled", .root_module = test_modules.automation_enabled },
         .{ .name = "metawork-bridge", .root_module = test_modules.bridge },
@@ -183,6 +182,7 @@ pub fn build(b: *std.Build) void {
         "METAWORK_STORAGE_CRASH_FIXTURE",
         b.getInstallPath(.bin, storage_crash_fixture_name),
     );
+    artifacts.tests.step.dependOn(&storage_tests_run.step);
     b.step(
         "test-storage",
         "Run the backend-independent Storage contract and SQLite backend tests",
