@@ -509,6 +509,22 @@ test "Agent terminal facts map into Product Task outcomes" {
     );
     terminal.termination_signal = null;
 
+    terminal.abi_status = .callback_failed;
+    terminal.raw_status_code = @intFromEnum(agent.Status.callback_failed);
+    terminal.stop_reason = null;
+    terminal.raw_stop_reason_code = null;
+    terminal.failure = .abi_status;
+    terminal.termination_signal = .permission_required;
+    try std.testing.expectEqual(
+        TerminalDecision{
+            .phase = .stopped,
+            .outcome = .stopped,
+            .cause = .permission_required,
+        },
+        classifyAgentTerminal(&terminal),
+    );
+    terminal.termination_signal = null;
+
     terminal.abi_status = .checkpoint_budget_required;
     terminal.raw_status_code = @intFromEnum(agent.Status.checkpoint_budget_required);
     terminal.stop_reason = null;

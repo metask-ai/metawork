@@ -1932,8 +1932,10 @@ pub const Session = struct {
             self.permission_stop_requested = true;
             self.broadcast();
             self.unlock();
-            _ = self.agent_runtime.notifyEventConsumer();
-            return wire.UI_UNAVAILABLE;
+            return if (self.agent_runtime.notifyEventConsumer() == .unavailable)
+                wire.UI_FATAL
+            else
+                wire.UI_UNAVAILABLE;
         }
         if (self.ui_request_id == std.math.maxInt(u64)) {
             self.dependency_contract_failure = true;

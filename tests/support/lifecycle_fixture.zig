@@ -282,6 +282,7 @@ pub const FakeCore = struct {
     allow_checkpoint_export: bool = false,
     ui_answered_callbacks: usize = 0,
     permission_callback_count: usize = 0,
+    ui_unavailable_callbacks: usize = 0,
     ui_fatal_callbacks: usize = 0,
     permission_response_valid: bool = false,
     callback_signal: ?*CallbackSignal = null,
@@ -1842,6 +1843,8 @@ pub fn sessionRunInput(
             fake_core.ui_answered_callbacks += 1;
         if (callback_status == wire.UI_ANSWERED)
             fake_core.permission_callback_count += 1;
+        if (callback_status == wire.UI_UNAVAILABLE)
+            fake_core.ui_unavailable_callbacks += 1;
         if (callback_status == wire.UI_FATAL)
             fake_core.ui_fatal_callbacks += 1;
         fake_core.unlock();

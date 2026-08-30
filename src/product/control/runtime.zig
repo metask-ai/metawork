@@ -2720,6 +2720,10 @@ pub const Runtime = struct {
         self.markTerminalRunsBeforeEventDrain();
         self.drainAgentEventPass(&first_projection_error);
         self.finalizeMarkedTerminalRunsAfterEventDrain();
+        // Agent readiness is a Product lifecycle wake, not a Renderer wake.
+        // Reconcile even when no Renderer is connected so background Runs can
+        // request termination and Schedules can consume their terminal facts.
+        self.syncLifecycle();
         if (first_projection_error) |err| return err;
     }
 

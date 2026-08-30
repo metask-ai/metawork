@@ -1845,6 +1845,21 @@ test "scheduled noninteractive permission request automatically stops the Produc
     });
     const task_id = try workbench.runScheduledTaskNow(schedule_id, 1);
 
+    for (0..10_000) |_| {
+        fake_core.lock();
+        const callback_seen = fake_core.ui_unavailable_callbacks == 1;
+        fake_core.unlock();
+        if (callback_seen) break;
+        std.Thread.yield() catch {};
+    } else return error.TestUnexpectedResult;
+    // This is the production wake consumer. The first abort must not depend
+    // on writeSnapshot/currentRevision or on a connected Renderer.
+    try workbench.drainAgentEvents();
+    fake_core.lock();
+    const abort_calls_after_drain = fake_core.abort_calls;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 1), abort_calls_after_drain);
+
     try waitControlSnapshot(&workbench, "\"lastRunOutcome\":\"stopped\"");
     var snapshot_storage: [128 * 1024]u8 = undefined;
     const snapshot = try workbench.writeSnapshot(&snapshot_storage);
@@ -1863,10 +1878,6 @@ test "scheduled noninteractive permission request automatically stops the Produc
         schedule_support.notification_kind,
     );
     try std.testing.expectEqual(task_id, schedule_support.notification_task_id);
-    fake_core.lock();
-    const abort_calls = fake_core.abort_calls;
-    fake_core.unlock();
-    try std.testing.expectEqual(@as(usize, 1), abort_calls);
 }
 
 test "bounded executor rejects overflow and close cancels a queued Run" {
