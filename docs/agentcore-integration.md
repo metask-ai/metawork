@@ -243,6 +243,16 @@ checkpoint restore 不进入既有 Session 状态机：它先占用 Runtime 的�
 
 Compact 的 `Queued / Compacting / Stopping` 不是由 Worker 直接覆盖同一个 phase atomic。Product Control record 分开保存 executor handoff、first-writer pending interruption 与三态 terminal publication；main thread 以 terminal 优先派生产品 phase。`published` 是 terminal linearization point，payload 与 diagnostic bytes 在 release-store 后不可修改；pending interruption 是 advisory control fact，在 terminal race 后即使被设置也不得改变真实 outcome。
 
+### Agent Session 图片输入
+
+Agent 的 `RunInput.multimodal` 接受有序 `InputPart`：非空 UTF-8 文本或带 `ImageFormat` 的非空图片文件字节。格式为 PNG、JPEG、GIF、WebP；调用方负责文件字节与声明格式相符。允许纯图片、多图和图文交错；既有 Text/Skill 语义保持不变。该入口不接受 URL、路径、file ID、调用方 Base64 或 Skill 与图片混合，也不开放 PDF、音视频或 Product/Renderer 附件能力。
+
+调用方只需保证输入 slice 和字节活到 `prepareRun` 返回。Agent 直接从 borrowed 图片字节编码到 owned 标准 Base64，不额外持有一份 raw 副本；通过官方 `textPart`、`imagePart` 和 `runMultimodal` 传入 Core。公共输入类型不暴露 SDK wire。Provider 协议编码和 Core 模型图片能力判断仍由 AgentCore 负责；Host 不导入 Account 元数据、不猜模型能力，也不丢图、自动重试或切换模型。
+
+单次输入的 parts 数、单图 Base64 上限和总 prompt 上限使用 canonical SDK 常量。Host 的总 prompt 核算包括文本、Base64 和 media type 字节；全部文本合计还受既有 `max_prompt_bytes` 限制。Runtime 的 `max_multimodal_input_bytes` 默认 64 MiB，约束 owned parts 数组与文本/Base64 storage 的总分配请求字节，包括尚未完成 admission 的并发准备；它不表示调用方、Core Conversation、allocator overhead 或进程整体内存上限。Runtime 预算耗尽返回 `RunInputBudgetExceeded`，单次输入超限返回 `RunInputTooLarge`；均在分配前失败。已开始执行的输入须在 Core 调用、相关 callback 和 abort 调用静止后释放。
+
+`image_input_unsupported` 仅在本次 Run 含图片时作为 typed admission 拒绝，Session 保持 reusable；文本-only multimodal、Text、Skill 或其他 operation 不因认识该 status 而放行。非 OK result 的可读边界由 ABI 合同规定。图片历史保持由 Core 所有；不解析或重写 opaque checkpoint，不静默扩大 checkpoint 预算，不删除图片以换取保存成功。调用方应显式配置足够的 checkpoint 限额，否则沿既有 typed failure 返回。
+
 ### 每 Session 规则
 
 - 至多一个 in-flight operation；Run、manual compact、model/Skill/permission mutation 与 destroy 互斥；
@@ -251,6 +261,7 @@ Compact 的 `Queued / Compacting / Stopping` 不是由 Worker 直接覆盖同一
 - run ID 单调且与 Session 绑定；
 - queued Run 不接触 AgentCore mutable state；
 - queued Text/Skill input 在复制前按 Host byte limit、catalog identity 和参数数量拒绝，保证 executor 有界时输入内存也有明确上限；
+- multimodal input 在任何 owned allocation 前校验 parts、文本和编码图片上限，并预留 Runtime 共享输入预算；预算覆盖并发 prepare、Queued 与 Running，失败回滚及终止释放均恰好一次；
 - active Run 独占 Session Conversation；
 - active compact 同样独占 Session Conversation；Host operation ID 在独立 compact ID space 中严格递增，pre-admission rejection 不消费 ID，admitted terminal path 消费 ID；
 - callback context 与 Session handle 具有独立 lifetime guard；

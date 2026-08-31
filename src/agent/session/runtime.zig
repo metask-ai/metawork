@@ -1,6 +1,7 @@
 //! Agent runtime lifecycle and shared execution helpers.
 
 const std = @import("std");
+const multimodal = @import("multimodal.zig");
 const sdk = @import("metask_agentcore");
 const wire = sdk.types;
 const event_pump = @import("event_pump");
@@ -66,6 +67,7 @@ pub const Runtime = struct {
     api: sdk.Api,
     runtime: ?*wire.RuntimeHandle,
     max_prompt_bytes: usize,
+    multimodal_input_budget: multimodal.Budget,
     max_event_bytes: usize,
     event_enqueue_timeout: std.Io.Duration,
     max_ui_request_bytes: usize,
@@ -121,7 +123,7 @@ pub const Runtime = struct {
         api: sdk.Api,
         limits: Limits,
     ) (Error || std.mem.Allocator.Error)!*Runtime {
-        if (limits.max_sessions == 0 or limits.max_prompt_bytes == 0 or limits.event_capacity == 0 or
+        if (limits.max_sessions == 0 or limits.max_prompt_bytes == 0 or limits.max_multimodal_input_bytes == 0 or limits.event_capacity == 0 or
             limits.event_bytes == 0 or limits.per_session_event_capacity == 0 or
             limits.per_session_event_bytes == 0 or limits.max_event_bytes == 0 or
             limits.event_enqueue_timeout.nanoseconds <= 0 or limits.max_ui_request_bytes == 0 or
@@ -199,6 +201,7 @@ pub const Runtime = struct {
             .api = api,
             .runtime = runtime,
             .max_prompt_bytes = limits.max_prompt_bytes,
+            .multimodal_input_budget = .{ .limit = limits.max_multimodal_input_bytes },
             .max_event_bytes = limits.max_event_bytes,
             .event_enqueue_timeout = limits.event_enqueue_timeout,
             .max_ui_request_bytes = limits.max_ui_request_bytes,
@@ -1342,6 +1345,7 @@ pub const Runtime = struct {
                 self.allocator.destroy(session);
             }
         }
+        std.debug.assert(self.multimodal_input_budget.used.load(.monotonic) == 0);
         self.events.deinit();
         self.mcp_servers.deinit();
         for (self.retired_mcp_servers.items) |*servers| servers.deinit();

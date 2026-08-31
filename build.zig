@@ -232,6 +232,7 @@ fn addLifecycleTests(
     );
     const roots = [_][]const u8{
         "tests/agent/lifecycle_test.zig",
+        "tests/agent/multimodal_test.zig",
         "tests/agent/event_pump_test.zig",
         "tests/product/control_lifecycle_test.zig",
         "tests/integration/lifecycle/lifecycle_test.zig",
@@ -251,7 +252,8 @@ fn addLifecycleTests(
         const run = b.addRunArtifact(artifact);
         step.dependOn(&run.step);
         default_step.dependOn(&run.step);
-        if (std.mem.eql(u8, root, "tests/agent/lifecycle_test.zig"))
+        if (std.mem.eql(u8, root, "tests/agent/lifecycle_test.zig") or
+            std.mem.eql(u8, root, "tests/agent/multimodal_test.zig"))
             agent_step.dependOn(&run.step);
     }
 

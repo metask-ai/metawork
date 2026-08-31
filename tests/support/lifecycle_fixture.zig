@@ -251,6 +251,8 @@ pub const FakeCore = struct {
     last_restored_protocol_kind_code: ?u32 = null,
     skill_run_seen: bool = false,
     skill_input_matches: bool = false,
+    expected_multimodal_parts: ?[]const wire.RunInputPartV1 = null,
+    multimodal_input_matches: bool = false,
     session_destroy_failures: usize = 0,
     runtime_destroy_failures: usize = 0,
     session_create_failures: usize = 0,
@@ -1676,6 +1678,25 @@ pub fn sessionRunInput(
     }));
     switch (typed_input.kind_code) {
         wire.RUN_INPUT_TEXT => {},
+        wire.RUN_INPUT_MULTIMODAL => {
+            const parts = (typed_input.parts orelse return wire.STATUS_INVALID_ARGUMENT)[0..@intCast(typed_input.part_count)];
+            fake_core.lock();
+            defer fake_core.unlock();
+            if (fake_core.expected_multimodal_parts) |expected| {
+                var matches = parts.len == expected.len and
+                    typed_input.text.len == 0 and typed_input.skill_id.len == 0 and
+                    typed_input.catalog_revision.len == 0 and typed_input.arguments_json.len == 0;
+                if (matches) for (parts, expected) |actual, wanted| {
+                    matches = matches and actual.struct_size == @sizeOf(wire.RunInputPartV1) and
+                        actual.kind_code == wanted.kind_code and
+                        std.mem.allEqual(u64, &actual.reserved, 0) and
+                        std.mem.eql(u8, sdk.borrowedBytes(actual.text) catch return wire.STATUS_INVALID_ARGUMENT, sdk.borrowedBytes(wanted.text) catch unreachable) and
+                        std.mem.eql(u8, sdk.borrowedBytes(actual.media_type) catch return wire.STATUS_INVALID_ARGUMENT, sdk.borrowedBytes(wanted.media_type) catch unreachable) and
+                        std.mem.eql(u8, sdk.borrowedBytes(actual.data) catch return wire.STATUS_INVALID_ARGUMENT, sdk.borrowedBytes(wanted.data) catch unreachable);
+                };
+                fake_core.multimodal_input_matches = matches;
+            }
+        },
         wire.RUN_INPUT_SKILL => {
             const skill_id = sdk.borrowedBytes(typed_input.skill_id) catch {
                 diagnostic(out_error);
@@ -1990,6 +2011,7 @@ pub fn sessionRunInput(
         return wire.STATUS_STALE_COMPACT;
     }
     if (plan == .image_input_unsupported_status) {
+        if (out_result) |result| @memset(std.mem.asBytes(result), 0xA5);
         diagnostic(out_error);
         return wire.STATUS_IMAGE_INPUT_UNSUPPORTED;
     }
