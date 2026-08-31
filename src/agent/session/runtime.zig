@@ -717,7 +717,8 @@ pub const Runtime = struct {
         options: SessionOpenOptions,
     ) (Error || std.mem.Allocator.Error)!SessionRoute {
         try validateWorkspace(options.workspace);
-        if (options.credential.len == 0 or options.model.len == 0)
+        if (!options.protocol.validFor(options.provider) or
+            options.credential.len == 0 or options.model.len == 0)
             return error.CoreCallFailed;
         if (options.canonical_user_home.len != 0)
             try validateCanonicalDirectory(
@@ -816,7 +817,7 @@ pub const Runtime = struct {
         callbacks.release_response = Session.releaseUiResponse;
         var host_config = std.mem.zeroes(wire.SessionHostConfigV1);
         host_config.struct_size = @sizeOf(wire.SessionHostConfigV1);
-        host_config.protocol_kind_code = wire.PROTOCOL_DEFAULT;
+        host_config.protocol_kind_code = session_wire.protocolKindCode(options.protocol);
         host_config.provider_kind_code = providerKindCode(options.provider);
         host_config.permission_mode_code = permissionModeCode(options.permission_mode);
         host_config.shell_policy_code = shellPolicyCode(options.shell_policy);
@@ -894,7 +895,8 @@ pub const Runtime = struct {
         const session_options = options.session;
         try validateWorkspace(session_options.workspace);
         try checkpoint.validateLimits(options.checkpoint_limits);
-        if (session_options.credential.len == 0 or
+        if (!session_options.protocol.validFor(session_options.provider) or
+            session_options.credential.len == 0 or
             session_options.model.len == 0 or
             !std.mem.eql(u8, session_options.model, options.expectation.model) or
             options.expectation.logical_session_id.len == 0 or
@@ -1049,7 +1051,7 @@ pub const Runtime = struct {
         callbacks.release_response = Session.releaseUiResponse;
         var host_config = std.mem.zeroes(wire.SessionHostConfigV1);
         host_config.struct_size = @sizeOf(wire.SessionHostConfigV1);
-        host_config.protocol_kind_code = wire.PROTOCOL_DEFAULT;
+        host_config.protocol_kind_code = session_wire.protocolKindCode(session_options.protocol);
         host_config.provider_kind_code = providerKindCode(session_options.provider);
         host_config.permission_mode_code = permissionModeCode(session_options.permission_mode);
         host_config.shell_policy_code = shellPolicyCode(session_options.shell_policy);

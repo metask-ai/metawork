@@ -4,9 +4,11 @@ const std = @import("std");
 const completion = @import("agent_completion");
 
 pub const ProviderKind = completion.ProviderKind;
+pub const Protocol = completion.Protocol;
 
 pub const Input = struct {
     provider: ProviderKind,
+    protocol: Protocol = .provider_default,
     credential: []const u8,
     model: []const u8,
     base_url: []const u8,
@@ -84,6 +86,7 @@ pub fn run(
     defer std.crypto.secureZero(u8, &secret_storage);
     const owner = completion.Completion.init(std.heap.c_allocator, network, .{
         .provider = input.provider,
+        .protocol = input.protocol,
         .credential = secret_storage[0..input.credential.len],
         .base_url = input.base_url,
         .model = input.model,
@@ -119,7 +122,8 @@ pub fn run(
 }
 
 fn validInput(input: Input) bool {
-    return input.credential.len != 0 and input.credential.len <= 4096 and
+    return input.protocol.validFor(input.provider) and
+        input.credential.len != 0 and input.credential.len <= 4096 and
         input.model.len != 0 and input.model.len <= 256 and
         input.base_url.len != 0 and input.base_url.len <= 2048 and
         std.unicode.utf8ValidateSlice(input.model) and
@@ -185,9 +189,21 @@ test "provider probe rejects invalid input before Transport" {
             .base_url = "https://api.openai.com/v1/chat/completions",
         }, &cancellation),
     );
+    for ([_]ProviderKind{ .anthropic, .gemini }) |kind| {
+        try std.testing.expectEqual(
+            Outcome{ .failed = .invalid_input },
+            run(std.testing.io, .{ .perform_fn = Fixture.perform }, .{
+                .provider = kind,
+                .protocol = .openai_responses,
+                .credential = "secret",
+                .model = "fixture-model",
+                .base_url = "https://example.test/endpoint",
+            }, &cancellation),
+        );
+    }
 }
 
-test "provider probe classifies a one-shot result" {
+test "provider probe selects the OpenAI protocol and requires a completed result" {
     const Fixture = struct {
         response: []const u8,
 
@@ -202,19 +218,38 @@ test "provider probe classifies a one-shot result" {
             return .{ .status = 200, .body = buffer[0..self.response.len] };
         }
     };
-    var fixture = Fixture{
-        .response = "{\"choices\":[{\"message\":{\"content\":\"OK\"},\"finish_reason\":\"stop\"}]}",
+    const text_item = "{\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"OK\"}]}";
+    const cases = [_]struct { protocol: Protocol, response: []const u8, expected: Outcome }{
+        .{
+            .protocol = .provider_default,
+            .response = "{\"choices\":[{\"message\":{\"content\":\"OK\"},\"finish_reason\":\"stop\"}]}",
+            .expected = .connected,
+        },
+        .{
+            .protocol = .openai_responses,
+            .response = "{\"status\":\"completed\",\"output\":[" ++ text_item ++ "]}",
+            .expected = .connected,
+        },
+        .{
+            .protocol = .openai_responses,
+            .response = "{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"output\":[" ++ text_item ++ "]}",
+            .expected = .{ .failed = .provider_rejected },
+        },
     };
-    var cancellation: Cancellation = .{};
-    try std.testing.expectEqual(
-        Outcome.connected,
-        run(std.testing.io, .{ .context = &fixture, .perform_fn = Fixture.perform }, .{
-            .provider = .openai,
-            .credential = "secret",
-            .model = "gpt-5",
-            .base_url = "https://api.openai.com/v1/chat/completions",
-        }, &cancellation),
-    );
+    for (cases) |case| {
+        var fixture = Fixture{ .response = case.response };
+        var cancellation: Cancellation = .{};
+        try std.testing.expectEqual(
+            case.expected,
+            run(std.testing.io, .{ .context = &fixture, .perform_fn = Fixture.perform }, .{
+                .provider = .openai,
+                .protocol = case.protocol,
+                .credential = "secret",
+                .model = "fixture-model",
+                .base_url = "https://example.test/endpoint",
+            }, &cancellation),
+        );
+    }
 }
 
 test "external cancellation wakes a blocked Provider probe" {

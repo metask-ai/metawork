@@ -168,6 +168,18 @@ pub fn providerKindCode(value: provider.ProviderKind) u32 {
     };
 }
 
+pub fn protocolKindCode(value: provider.Protocol) u32 {
+    return switch (value) {
+        .provider_default => wire.PROTOCOL_DEFAULT,
+        .openai_responses => wire.OPENAI_PROTOCOL_RESPONSES,
+    };
+}
+
+test "Session protocol selection maps to the canonical AgentCore ABI" {
+    try std.testing.expectEqual(wire.PROTOCOL_DEFAULT, protocolKindCode(.provider_default));
+    try std.testing.expectEqual(wire.OPENAI_PROTOCOL_RESPONSES, protocolKindCode(.openai_responses));
+}
+
 pub fn permissionModeCode(value: control.PermissionMode) u32 {
     return switch (value) {
         .default => wire.PERMISSION_DEFAULT,

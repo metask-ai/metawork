@@ -9,10 +9,12 @@ const types = @import("completion/types.zig");
 const transport = @import("completion/transport.zig");
 const codec = @import("completion/codec.zig");
 const openai = @import("completion/openai_codec.zig");
+const responses = @import("completion/openai_responses_codec.zig");
 const gemini = @import("completion/gemini_codec.zig");
 const anthropic = @import("completion/anthropic_codec.zig");
 
 pub const ProviderKind = provider.ProviderKind;
+pub const Protocol = provider.Protocol;
 pub const Transport = transport.Transport;
 pub const HttpRequest = transport.HttpRequest;
 pub const HttpHeader = transport.Header;
@@ -43,6 +45,7 @@ pub const Completion = struct {
     allocator: std.mem.Allocator,
     transport: Transport,
     provider: ProviderKind,
+    protocol: Protocol,
     credential: []u8,
     base_url: []u8,
     model: []u8,
@@ -67,6 +70,7 @@ pub const Completion = struct {
             .allocator = allocator,
             .transport = network,
             .provider = config.provider,
+            .protocol = config.protocol,
             .credential = credential,
             .base_url = base_url,
             .model = model,
@@ -95,11 +99,10 @@ pub const Completion = struct {
                 self.configView(),
                 request,
             ),
-            .openai => openai.encode(
-                self.allocator,
-                self.configView(),
-                request,
-            ),
+            .openai => switch (self.protocol) {
+                .provider_default => openai.encode(self.allocator, self.configView(), request),
+                .openai_responses => responses.encode(self.allocator, self.configView(), request),
+            },
             .gemini => gemini.encode(
                 self.allocator,
                 self.configView(),
@@ -130,7 +133,10 @@ pub const Completion = struct {
 
         const result = switch (self.provider) {
             .anthropic => anthropic.decode(self.allocator, response.body),
-            .openai => openai.decode(self.allocator, response.body),
+            .openai => switch (self.protocol) {
+                .provider_default => openai.decode(self.allocator, response.body),
+                .openai_responses => responses.decode(self.allocator, response.body),
+            },
             .gemini => gemini.decode(self.allocator, response.body),
         } catch |failure| return .{ .failure = codecFailure(failure) };
         return .{ .result = result };
@@ -149,6 +155,7 @@ pub const Completion = struct {
     fn configView(self: *const Completion) Config {
         return .{
             .provider = self.provider,
+            .protocol = self.protocol,
             .credential = self.credential,
             .base_url = self.base_url,
             .model = self.model,
@@ -157,6 +164,7 @@ pub const Completion = struct {
 };
 
 fn validateConfig(config: Config) InitError!void {
+    if (!config.protocol.validFor(config.provider)) return error.InvalidConfig;
     if (config.credential.len == 0 or config.base_url.len == 0 or
         config.model.len == 0 or !std.unicode.utf8ValidateSlice(config.base_url) or
         !std.unicode.utf8ValidateSlice(config.model))
@@ -223,7 +231,8 @@ const FakeTransport = struct {
     status: u16 = 200,
     perform_count: usize = 0,
     saw_sensitive_header: bool = false,
-    request_body_contains_stream: bool = false,
+    request_streaming: bool = false,
+    request_has_responses_input: bool = false,
 
     fn port(self: *FakeTransport) Transport {
         return .{ .context = self, .perform_fn = perform };
@@ -240,7 +249,12 @@ const FakeTransport = struct {
         if (cancellation.isRequested()) return error.Cancelled;
         for (request.headers) |header|
             self.saw_sensitive_header = self.saw_sensitive_header or header.sensitive;
-        self.request_body_contains_stream = std.mem.indexOf(u8, request.body, "\"stream\"") != null;
+        var parsed = std.json.parseFromSlice(std.json.Value, std.testing.allocator, request.body, .{}) catch
+            return error.Unexpected;
+        defer parsed.deinit();
+        const fields = parsed.value.object;
+        if (fields.get("stream")) |stream| self.request_streaming = stream.bool;
+        self.request_has_responses_input = fields.contains("input") and !fields.contains("messages");
         if (self.response.len > response_buffer.len) return error.ResponseTooLarge;
         @memcpy(response_buffer[0..self.response.len], self.response);
         return .{ .status = self.status, .body = response_buffer[0..self.response.len] };
@@ -254,6 +268,19 @@ test "invalid config and request fail before Transport" {
         fake.port(),
         .{ .provider = .openai, .credential = "", .base_url = "https://example.test", .model = "m" },
     ));
+    for ([_]ProviderKind{ .anthropic, .gemini }) |kind| {
+        try std.testing.expectError(error.InvalidConfig, Completion.init(
+            std.testing.allocator,
+            fake.port(),
+            .{
+                .provider = kind,
+                .protocol = .openai_responses,
+                .credential = "secret",
+                .base_url = "https://example.test/endpoint",
+                .model = "m",
+            },
+        ));
+    }
     const owner = try Completion.init(std.testing.allocator, fake.port(), .{
         .provider = .openai,
         .credential = "secret",
@@ -269,9 +296,10 @@ test "invalid config and request fail before Transport" {
     try std.testing.expectEqual(@as(usize, 0), fake.perform_count);
 }
 
-test "three providers complete through one non-streaming path" {
+test "providers and OpenAI protocols complete through one non-streaming path" {
     const Fixture = struct {
         provider: ProviderKind,
+        protocol: Protocol = .provider_default,
         base_url: []const u8,
         response: []const u8,
         expected: []const u8,
@@ -290,6 +318,14 @@ test "three providers complete through one non-streaming path" {
             .expected = "openai",
         },
         .{
+            .provider = .openai,
+            .protocol = .openai_responses,
+            // A custom endpoint must not select or rewrite the protocol.
+            .base_url = "https://example.test/custom-endpoint",
+            .response = "{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"responses\"}]}]}",
+            .expected = "responses",
+        },
+        .{
             .provider = .gemini,
             .base_url = "https://generativelanguage.googleapis.com",
             .response = "{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"gemini\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{}}",
@@ -300,6 +336,7 @@ test "three providers complete through one non-streaming path" {
         var fake = FakeTransport{ .response = fixture.response };
         const owner = try Completion.init(std.testing.allocator, fake.port(), .{
             .provider = fixture.provider,
+            .protocol = fixture.protocol,
             .credential = "secret",
             .base_url = fixture.base_url,
             .model = "model",
@@ -317,7 +354,9 @@ test "three providers complete through one non-streaming path" {
         try std.testing.expectEqualStrings(fixture.expected, result.text);
         try std.testing.expectEqual(StopReason.end_turn, result.stop_reason);
         try std.testing.expect(fake.saw_sensitive_header);
-        try std.testing.expect(!fake.request_body_contains_stream);
+        try std.testing.expect(!fake.request_streaming);
+        try std.testing.expectEqual(fixture.protocol == .openai_responses, fake.request_has_responses_input);
+        try std.testing.expectEqual(@as(usize, 1), fake.perform_count);
     }
 }
 

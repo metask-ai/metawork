@@ -77,6 +77,7 @@ pub const TerminationRequestResult = session_control.TerminationRequestResult;
 pub const EventReadyNotification = session_control.EventReadyNotification;
 pub const EventReadyNotifier = session_control.EventReadyNotifier;
 pub const ProviderKind = session_control.ProviderKind;
+pub const Protocol = @import("agent_provider").Protocol;
 pub const PermissionMode = session_control.PermissionMode;
 pub const ShellPolicy = session_control.ShellPolicy;
 
@@ -314,6 +315,7 @@ const OwnedRunInput = union(enum) {
 
 pub const SessionOpenOptions = struct {
     provider: ProviderKind,
+    protocol: Protocol = .provider_default,
     permission_mode: PermissionMode,
     shell_policy: ShellPolicy,
     permission_interaction: PermissionInteraction = .interactive,

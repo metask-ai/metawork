@@ -14,6 +14,7 @@ pub const Role = enum {
 
 pub const Config = struct {
     provider: provider.ProviderKind,
+    protocol: provider.Protocol = .provider_default,
     credential: []const u8,
     base_url: []const u8,
     model: []const u8,
