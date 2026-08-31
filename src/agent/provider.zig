@@ -7,17 +7,19 @@ pub const ProviderKind = enum {
     gemini,
 };
 
-/// Explicit protocol selection, independent of endpoint or model names.
+/// MetaWork's wire protocols. Callers select one explicitly; endpoint and
+/// model names never determine the protocol. AgentCore codes stay in Session.
 pub const Protocol = enum {
-    /// Anthropic Messages, OpenAI Chat Completions or Gemini Native, selected
-    /// by ProviderKind. This never infers a protocol from the configured URL.
-    provider_default,
     openai_responses,
+    openai_chat_completions,
+    anthropic_messages,
+    gemini_native,
 
     pub fn validFor(self: Protocol, kind: ProviderKind) bool {
         return switch (self) {
-            .provider_default => true,
-            .openai_responses => kind == .openai,
+            .openai_responses, .openai_chat_completions => kind == .openai,
+            .anthropic_messages => kind == .anthropic,
+            .gemini_native => kind == .gemini,
         };
     }
 };

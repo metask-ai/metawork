@@ -315,7 +315,7 @@ const OwnedRunInput = union(enum) {
 
 pub const SessionOpenOptions = struct {
     provider: ProviderKind,
-    protocol: Protocol = .provider_default,
+    protocol: Protocol,
     permission_mode: PermissionMode,
     shell_policy: ShellPolicy,
     permission_interaction: PermissionInteraction = .interactive,

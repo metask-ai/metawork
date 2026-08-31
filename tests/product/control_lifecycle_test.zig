@@ -45,6 +45,7 @@ fn taskSessionOpenOptions() lifecycle.SessionOpenOptions {
     const temporary_root = if (std.fs.path.sep == '\\') "C:\\tmp" else "/tmp";
     return .{
         .provider = .anthropic,
+        .protocol = .anthropic_messages,
         .permission_mode = .default,
         .shell_policy = .disabled,
         .credential = "fixture-secret",

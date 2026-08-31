@@ -79,6 +79,11 @@ const ModelConnectionProbeJob = struct {
                 .openai => .openai,
                 .gemini => .gemini,
             },
+            .protocol = switch (input.target.provider_kind) {
+                .anthropic => .anthropic_messages,
+                .openai => .openai_chat_completions,
+                .gemini => .gemini_native,
+            },
             .credential = input.api_key,
             .model = input.target.model,
             .base_url = input.target.base_url,

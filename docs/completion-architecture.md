@@ -21,19 +21,26 @@ Completion.complete(request, cancellation) -> Result | Failure
 
 ## 2. Owner 与配置
 
-- `src/agent` 拥有 Completion 请求、结果、错误、三个 Provider codec 和调用语义。
+- `src/agent` 拥有 Completion 请求、结果、错误、协议 codec 和调用语义。
 - `src/app` 只实现一次 buffered HTTP/TLS 请求及请求级取消。
 - Account 仍是 credential 与 ExecutionConfig owner。
 - Completion 使用与对应 Agent Run 相同、已冻结的 ExecutionConfig；不发现、选择或替换模型。
 - MetaWork 不修改 `metacodes`，也不要求 AgentCore 提供 Completion。
 
-## 3. Provider 范围
+## 3. Provider 与协议
 
-Provider 是固定 closed union：
+`ProviderKind` 表示 `openai | anthropic | gemini` 适配器类别，不表示实际服务商身份。MetaWork 独立定义 `Protocol`，Session、Completion 和 Provider Probe 都要求调用方显式提供，不提供隐含默认值，也不根据 URL 或模型名推断。
 
-- Anthropic Messages：非流式 `POST /v1/messages`；
-- OpenAI Chat Completions：非流式 `POST /v1/chat/completions`；
-- Gemini Native：非流式 `generateContent`。
+| Protocol | ProviderKind | Completion 接口 |
+| --- | --- | --- |
+| `openai_responses` | `openai` | 非流式 `POST /v1/responses` |
+| `openai_chat_completions` | `openai` | 非流式 `POST /v1/chat/completions` |
+| `anthropic_messages` | `anthropic` | 非流式 `POST /v1/messages` |
+| `gemini_native` | `gemini` | 非流式 `generateContent` |
+
+Provider 与协议组合不匹配时，在调用执行后端前拒绝。协议推荐和选择由 MetaWork 决定，OpenAI 新接入优先采用 Responses；已有连接仍使用其明确配置的协议。AgentCore 的协议码只在 Session 边界映射，不能成为 MetaWork 默认策略；Completion 直接按 `Protocol` 选择 codec，不消费 AgentCore enum。
+
+Responses Completion 固定 `stream: false`、`store: false`，仅返回最终文本，不返回或续传 reasoning items，不引入服务端会话状态。
 
 每个 codec 只支持无 Tool 的文本子集：
 
@@ -101,7 +108,7 @@ MetaWork 产品代码不调用或 re-export AgentCore Completion API，也不保
 
 最小充分验证包括：
 
-- 三个 Provider 的非流式请求和脱敏 JSON response fixture；
+- 各显式协议的非流式请求、脱敏 JSON response fixture，以及 Provider/Protocol 非法组合拒绝；
 - tool/function/未知 stop reason fail closed；
 - 非 2xx typed rejection；
 - 请求前取消及阻塞请求取消；

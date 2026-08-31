@@ -624,6 +624,7 @@ test "canonical AgentCore executes a selected Streamable HTTP tool" {
     defer std.testing.allocator.free(workspace_root);
     const session = try runtime.createSession(.{
         .provider = .anthropic,
+        .protocol = .anthropic_messages,
         .permission_mode = .full_access,
         .shell_policy = .unrestricted,
         .credential = "fixture-credential",
@@ -707,6 +708,7 @@ test "expired MCP authority is typed and the same model succeeds after refresh" 
     defer std.testing.allocator.free(workspace_root);
     const open_options: agent.SessionOpenOptions = .{
         .provider = .anthropic,
+        .protocol = .anthropic_messages,
         .permission_mode = .full_access,
         .shell_policy = .unrestricted,
         .credential = "fixture-credential",

@@ -170,14 +170,18 @@ pub fn providerKindCode(value: provider.ProviderKind) u32 {
 
 pub fn protocolKindCode(value: provider.Protocol) u32 {
     return switch (value) {
-        .provider_default => wire.PROTOCOL_DEFAULT,
         .openai_responses => wire.OPENAI_PROTOCOL_RESPONSES,
+        // ABI revision 15 uses code zero for these three explicit protocols.
+        // That wire encoding does not define a MetaWork protocol default.
+        .openai_chat_completions, .anthropic_messages, .gemini_native => wire.PROTOCOL_DEFAULT,
     };
 }
 
 test "Session protocol selection maps to the canonical AgentCore ABI" {
-    try std.testing.expectEqual(wire.PROTOCOL_DEFAULT, protocolKindCode(.provider_default));
     try std.testing.expectEqual(wire.OPENAI_PROTOCOL_RESPONSES, protocolKindCode(.openai_responses));
+    try std.testing.expectEqual(wire.PROTOCOL_DEFAULT, protocolKindCode(.openai_chat_completions));
+    try std.testing.expectEqual(wire.PROTOCOL_DEFAULT, protocolKindCode(.anthropic_messages));
+    try std.testing.expectEqual(wire.PROTOCOL_DEFAULT, protocolKindCode(.gemini_native));
 }
 
 pub fn permissionModeCode(value: control.PermissionMode) u32 {

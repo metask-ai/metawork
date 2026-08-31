@@ -8,7 +8,7 @@ pub const Protocol = completion.Protocol;
 
 pub const Input = struct {
     provider: ProviderKind,
-    protocol: Protocol = .provider_default,
+    protocol: Protocol,
     credential: []const u8,
     model: []const u8,
     base_url: []const u8,
@@ -184,6 +184,7 @@ test "provider probe rejects invalid input before Transport" {
         Outcome{ .failed = .invalid_input },
         run(std.testing.io, .{ .perform_fn = Fixture.perform }, .{
             .provider = .openai,
+            .protocol = .openai_responses,
             .credential = "",
             .model = "gpt-5",
             .base_url = "https://api.openai.com/v1/chat/completions",
@@ -221,7 +222,7 @@ test "provider probe selects the OpenAI protocol and requires a completed result
     const text_item = "{\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"OK\"}]}";
     const cases = [_]struct { protocol: Protocol, response: []const u8, expected: Outcome }{
         .{
-            .protocol = .provider_default,
+            .protocol = .openai_chat_completions,
             .response = "{\"choices\":[{\"message\":{\"content\":\"OK\"},\"finish_reason\":\"stop\"}]}",
             .expected = .connected,
         },
@@ -288,6 +289,7 @@ test "external cancellation wakes a blocked Provider probe" {
         fn runProbe(self: *@This()) void {
             self.outcome = run(std.testing.io, self.network, .{
                 .provider = .openai,
+                .protocol = .openai_chat_completions,
                 .credential = "secret",
                 .model = "gpt-5",
                 .base_url = "https://api.openai.com/v1/chat/completions",

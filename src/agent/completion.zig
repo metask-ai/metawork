@@ -93,21 +93,11 @@ pub const Completion = struct {
         } };
         if (cancellation.isRequested()) return .{ .failure = .cancelled };
 
-        var encoded = switch (self.provider) {
-            .anthropic => anthropic.encode(
-                self.allocator,
-                self.configView(),
-                request,
-            ),
-            .openai => switch (self.protocol) {
-                .provider_default => openai.encode(self.allocator, self.configView(), request),
-                .openai_responses => responses.encode(self.allocator, self.configView(), request),
-            },
-            .gemini => gemini.encode(
-                self.allocator,
-                self.configView(),
-                request,
-            ),
+        var encoded = switch (self.protocol) {
+            .openai_responses => responses.encode(self.allocator, self.configView(), request),
+            .openai_chat_completions => openai.encode(self.allocator, self.configView(), request),
+            .anthropic_messages => anthropic.encode(self.allocator, self.configView(), request),
+            .gemini_native => gemini.encode(self.allocator, self.configView(), request),
         } catch |failure| return .{ .failure = codecFailure(failure) };
         defer encoded.deinit();
         if (cancellation.isRequested()) return .{ .failure = .cancelled };
@@ -131,13 +121,11 @@ pub const Completion = struct {
             .provider_rejected = types.rejectionForStatus(response.status),
         } };
 
-        const result = switch (self.provider) {
-            .anthropic => anthropic.decode(self.allocator, response.body),
-            .openai => switch (self.protocol) {
-                .provider_default => openai.decode(self.allocator, response.body),
-                .openai_responses => responses.decode(self.allocator, response.body),
-            },
-            .gemini => gemini.decode(self.allocator, response.body),
+        const result = switch (self.protocol) {
+            .openai_responses => responses.decode(self.allocator, response.body),
+            .openai_chat_completions => openai.decode(self.allocator, response.body),
+            .anthropic_messages => anthropic.decode(self.allocator, response.body),
+            .gemini_native => gemini.decode(self.allocator, response.body),
         } catch |failure| return .{ .failure = codecFailure(failure) };
         return .{ .result = result };
     }
@@ -266,15 +254,25 @@ test "invalid config and request fail before Transport" {
     try std.testing.expectError(error.InvalidConfig, Completion.init(
         std.testing.allocator,
         fake.port(),
-        .{ .provider = .openai, .credential = "", .base_url = "https://example.test", .model = "m" },
+        .{ .provider = .openai, .protocol = .openai_responses, .credential = "", .base_url = "https://example.test", .model = "m" },
     ));
-    for ([_]ProviderKind{ .anthropic, .gemini }) |kind| {
+    const invalid_pairs = [_]struct { kind: ProviderKind, protocol: Protocol }{
+        .{ .kind = .anthropic, .protocol = .openai_responses },
+        .{ .kind = .anthropic, .protocol = .openai_chat_completions },
+        .{ .kind = .anthropic, .protocol = .gemini_native },
+        .{ .kind = .gemini, .protocol = .openai_responses },
+        .{ .kind = .gemini, .protocol = .openai_chat_completions },
+        .{ .kind = .gemini, .protocol = .anthropic_messages },
+        .{ .kind = .openai, .protocol = .anthropic_messages },
+        .{ .kind = .openai, .protocol = .gemini_native },
+    };
+    for (invalid_pairs) |pair| {
         try std.testing.expectError(error.InvalidConfig, Completion.init(
             std.testing.allocator,
             fake.port(),
             .{
-                .provider = kind,
-                .protocol = .openai_responses,
+                .provider = pair.kind,
+                .protocol = pair.protocol,
                 .credential = "secret",
                 .base_url = "https://example.test/endpoint",
                 .model = "m",
@@ -283,6 +281,7 @@ test "invalid config and request fail before Transport" {
     }
     const owner = try Completion.init(std.testing.allocator, fake.port(), .{
         .provider = .openai,
+        .protocol = .openai_chat_completions,
         .credential = "secret",
         .base_url = "https://example.test/v1/chat/completions",
         .model = "m",
@@ -299,7 +298,7 @@ test "invalid config and request fail before Transport" {
 test "providers and OpenAI protocols complete through one non-streaming path" {
     const Fixture = struct {
         provider: ProviderKind,
-        protocol: Protocol = .provider_default,
+        protocol: Protocol,
         base_url: []const u8,
         response: []const u8,
         expected: []const u8,
@@ -307,12 +306,14 @@ test "providers and OpenAI protocols complete through one non-streaming path" {
     const fixtures = [_]Fixture{
         .{
             .provider = .anthropic,
+            .protocol = .anthropic_messages,
             .base_url = "https://api.anthropic.com/v1/messages",
             .response = "{\"type\":\"message\",\"content\":[{\"type\":\"text\",\"text\":\"anthropic\"}],\"stop_reason\":\"end_turn\",\"usage\":{}}",
             .expected = "anthropic",
         },
         .{
             .provider = .openai,
+            .protocol = .openai_chat_completions,
             .base_url = "https://api.openai.com/v1/chat/completions",
             .response = "{\"choices\":[{\"message\":{\"content\":\"openai\"},\"finish_reason\":\"stop\"}],\"usage\":{}}",
             .expected = "openai",
@@ -327,6 +328,7 @@ test "providers and OpenAI protocols complete through one non-streaming path" {
         },
         .{
             .provider = .gemini,
+            .protocol = .gemini_native,
             .base_url = "https://generativelanguage.googleapis.com",
             .response = "{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"gemini\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{}}",
             .expected = "gemini",
@@ -364,8 +366,9 @@ test "cancellation and provider rejection are explicit outcomes" {
     var fake = FakeTransport{ .response = "{}", .status = 429 };
     const owner = try Completion.init(std.testing.allocator, fake.port(), .{
         .provider = .openai,
+        .protocol = .openai_responses,
         .credential = "secret",
-        .base_url = "https://example.test/v1/chat/completions",
+        .base_url = "https://example.test/v1/responses",
         .model = "m",
     });
     defer owner.deinit();
@@ -388,8 +391,9 @@ test "Completion clears its owned credential copy" {
     var fake = FakeTransport{ .response = "{}" };
     const owner = try Completion.init(fixed.allocator(), fake.port(), .{
         .provider = .openai,
+        .protocol = .openai_responses,
         .credential = "FIXTURE_SECRET",
-        .base_url = "https://example.test/v1/chat/completions",
+        .base_url = "https://example.test/v1/responses",
         .model = "m",
     });
     try std.testing.expect(std.mem.indexOf(u8, &storage, "FIXTURE_SECRET") != null);

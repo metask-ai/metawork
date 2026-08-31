@@ -91,6 +91,7 @@ fn restoreOptions(
     return .{
         .session = .{
             .provider = .anthropic,
+            .protocol = .anthropic_messages,
             .permission_mode = .default,
             .shell_policy = .disabled,
             .credential = "fixture-secret",
@@ -207,6 +208,7 @@ test "canonical AgentCore accepts an empty complete MCP Session replacement" {
     defer std.testing.allocator.free(workspace_root);
     const session = try runtime.createSession(.{
         .provider = .anthropic,
+        .protocol = .anthropic_messages,
         .permission_mode = .default,
         .shell_policy = .unrestricted,
         .credential = "fixture-secret",
@@ -431,6 +433,7 @@ test "MCP catalog refresh binds explicit Session selection and idle replacement"
     const temporary_root = if (std.fs.path.sep == '\\') "C:\\tmp" else "/tmp";
     const session = try runtime.createSession(.{
         .provider = .anthropic,
+        .protocol = .anthropic_messages,
         .permission_mode = .default,
         .shell_policy = .disabled,
         .credential = "fixture-secret",
@@ -480,6 +483,7 @@ test "MCP selection mutation preserves reusable and poison status contracts" {
     defer selection.deinit();
     const session = try runtime.createSession(.{
         .provider = .anthropic,
+        .protocol = .anthropic_messages,
         .permission_mode = .default,
         .shell_policy = .disabled,
         .credential = "fixture-secret",
@@ -850,6 +854,7 @@ test "Skill input is deep-copied and encoded only for the typed Core call" {
     defer acquisition.projection.deinit();
     const session = try runtime.createSession(.{
         .provider = .anthropic,
+        .protocol = .anthropic_messages,
         .permission_mode = .default,
         .shell_policy = .disabled,
         .credential = "fixture-secret",
@@ -942,6 +947,7 @@ test "Skill rejection statuses leave the Session reusable" {
         });
         const session = try runtime.createSession(.{
             .provider = .anthropic,
+            .protocol = .anthropic_messages,
             .permission_mode = .default,
             .shell_policy = .disabled,
             .credential = "fixture-secret",
@@ -1000,6 +1006,7 @@ test "Session catalog refresh binds explicit selection only while idle and rejec
     defer runtime.releaseSkillCatalog(current.lease) catch unreachable;
     const session = try runtime.createSession(.{
         .provider = .anthropic,
+        .protocol = .anthropic_messages,
         .permission_mode = .default,
         .shell_policy = .disabled,
         .credential = "fixture-secret",
@@ -1253,6 +1260,7 @@ test "Agent Runtime applies the fixed MetaWork built-in surface to Session" {
     const workspace_root = root_storage[0..root_len];
     const session = try runtime.createSession(.{
         .provider = .anthropic,
+        .protocol = .anthropic_messages,
         .permission_mode = .default,
         .shell_policy = .unrestricted,
         .credential = "fixture-secret",
@@ -1296,6 +1304,7 @@ test "Workspace requires an absolute temporary or explicit trusted root" {
     }
     try std.testing.expectError(error.InvalidWorkspace, runtime.createSession(.{
         .provider = .anthropic,
+        .protocol = .anthropic_messages,
         .permission_mode = .default,
         .shell_policy = .disabled,
         .credential = "fixture-secret",
@@ -1304,6 +1313,7 @@ test "Workspace requires an absolute temporary or explicit trusted root" {
     }));
     try std.testing.expectError(error.WorkspaceNotTrusted, runtime.createSession(.{
         .provider = .anthropic,
+        .protocol = .anthropic_messages,
         .permission_mode = .default,
         .shell_policy = .disabled,
         .credential = "fixture-secret",
@@ -1315,6 +1325,7 @@ test "Workspace requires an absolute temporary or explicit trusted root" {
     }));
     try std.testing.expectError(error.InvalidWorkspace, runtime.createSession(.{
         .provider = .anthropic,
+        .protocol = .anthropic_messages,
         .permission_mode = .default,
         .shell_policy = .disabled,
         .credential = "fixture-secret",
@@ -1727,6 +1738,7 @@ fn openNoninteractivePermissionSession(
     const temporary_root = if (std.fs.path.sep == '\\') "C:\\tmp" else "/tmp";
     return runtime.createSession(.{
         .provider = .anthropic,
+        .protocol = .anthropic_messages,
         .permission_mode = .accept_edits,
         .shell_policy = .unrestricted,
         .permission_interaction = .noninteractive,

@@ -2316,6 +2316,7 @@ pub fn openSession(runtime: *lifecycle.Runtime) !*lifecycle.Session {
     const temporary_root = if (std.fs.path.sep == '\\') "C:\\tmp" else "/tmp";
     return runtime.createSession(.{
         .provider = .anthropic,
+        .protocol = .anthropic_messages,
         .permission_mode = .default,
         .shell_policy = .disabled,
         .credential = "fixture-secret",

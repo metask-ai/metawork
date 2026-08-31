@@ -400,6 +400,11 @@ pub const Job = struct {
         var restored = agent_session.restore(self.runtime, .{
             .session = .{
                 .provider = self.attempt.provider,
+                .protocol = switch (self.attempt.provider) {
+                    .anthropic => .anthropic_messages,
+                    .openai => .openai_chat_completions,
+                    .gemini => .gemini_native,
+                },
                 .permission_mode = self.attempt.permission_mode,
                 .shell_policy = self.attempt.shell_policy,
                 .permission_interaction = self.attempt.permission_interaction,

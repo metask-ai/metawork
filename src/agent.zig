@@ -118,6 +118,7 @@ pub const McpHttpPerformOutcome = mcp_http.PerformOutcome;
 pub const McpHttpHeaderName = mcp_http.HeaderName;
 pub const mcpHttpReservedRequestHeaderNames = mcp_http.reserved_request_header_names;
 pub const ProviderKind = provider.ProviderKind;
+pub const Protocol = provider.Protocol;
 pub const Completion = completion.Completion;
 pub const CompletionTransport = completion.Transport;
 pub const CompletionHttpRequest = completion.HttpRequest;

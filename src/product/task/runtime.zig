@@ -778,6 +778,11 @@ pub const Runtime = struct {
         );
         var binding = try task_agent_session.Binding.open(input.agent_runtime, .{
             .provider = providerToAgent(input.provider),
+            .protocol = switch (input.provider) {
+                .anthropic => .anthropic_messages,
+                .openai => .openai_chat_completions,
+                .gemini => .gemini_native,
+            },
             .permission_mode = permission.mode,
             .shell_policy = permission.shell,
             .permission_interaction = permission.interaction,
