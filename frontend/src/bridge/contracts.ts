@@ -75,6 +75,38 @@ export type ModelConnectionView = {
   connectionGeneration: string;
 };
 
+/** Server declarations only; null means unknown, not unsupported. */
+export type ModelMetadata = {
+  maxInputTokens: string | null;
+  maxOutputTokens: string | null;
+  capabilities: {
+    imageInput: boolean | null;
+    pdfInput: boolean | null;
+    batch: boolean | null;
+    citations: boolean | null;
+    codeExecution: boolean | null;
+    structuredOutputs: boolean | null;
+    thinking: {
+      supported: boolean | null;
+      adaptive: boolean | null;
+      enabled: boolean | null;
+    };
+    effort: {
+      supported: boolean | null;
+      low: boolean | null;
+      medium: boolean | null;
+      high: boolean | null;
+      max: boolean | null;
+    };
+    contextManagement: {
+      supported: boolean | null;
+      clearThinking20251015: boolean | null;
+      clearToolUses20250919: boolean | null;
+      compact20260112: boolean | null;
+    };
+  };
+};
+
 export type AccountView = {
   state: AccountState;
   catalogState: CatalogState;
@@ -88,7 +120,11 @@ export type AccountView = {
     suffix: string;
     provider: Provider;
   }[];
-  models: { selectionId: string; displayName: string }[];
+  models: {
+    selectionId: string;
+    displayName: string;
+    metadata: ModelMetadata;
+  }[];
   selectedApiKeySelectionId: string;
   selectedModelSelectionId: string;
   candidateApiKeySelectionId: string;

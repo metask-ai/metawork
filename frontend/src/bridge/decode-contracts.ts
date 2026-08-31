@@ -4,6 +4,7 @@ import {
   runCauses,
   type AccountCommandResult,
   type AccountView,
+  type ModelMetadata,
   type ExecutionSource,
   type ModelConnectionCredentialStatus,
   type ModelConnectionProtocol,
@@ -776,6 +777,129 @@ function decodeSkillManagement(
   } as SkillManagementView;
 }
 
+function nullableBoolean(value: unknown, path: string): boolean | null {
+  return value === null ? null : booleanValue(value, path);
+}
+
+function modelTokenLimit(value: unknown, path: string): string | null {
+  if (value === null) return null;
+  const result = positiveWireId(value, path);
+  if (
+    result.length > 20 ||
+    (result.length === 20 && result > "18446744073709551615")
+  )
+    fail(path, "expected positive u64 token limit");
+  return result;
+}
+
+function decodeModelMetadata(value: unknown, path: string): ModelMetadata {
+  const item = object(value, path, [
+    "maxInputTokens",
+    "maxOutputTokens",
+    "capabilities",
+  ]);
+  const capsPath = `${path}.capabilities`;
+  const caps = object(item.capabilities, capsPath, [
+    "imageInput",
+    "pdfInput",
+    "batch",
+    "citations",
+    "codeExecution",
+    "structuredOutputs",
+    "thinking",
+    "effort",
+    "contextManagement",
+  ]);
+  const thinking = object(caps.thinking, `${capsPath}.thinking`, [
+    "supported",
+    "adaptive",
+    "enabled",
+  ]);
+  const effort = object(caps.effort, `${capsPath}.effort`, [
+    "supported",
+    "low",
+    "medium",
+    "high",
+    "max",
+  ]);
+  const contextManagement = object(
+    caps.contextManagement,
+    `${capsPath}.contextManagement`,
+    [
+      "supported",
+      "clearThinking20251015",
+      "clearToolUses20250919",
+      "compact20260112",
+    ],
+  );
+  return {
+    maxInputTokens: modelTokenLimit(
+      item.maxInputTokens,
+      `${path}.maxInputTokens`,
+    ),
+    maxOutputTokens: modelTokenLimit(
+      item.maxOutputTokens,
+      `${path}.maxOutputTokens`,
+    ),
+    capabilities: {
+      imageInput: nullableBoolean(caps.imageInput, `${capsPath}.imageInput`),
+      pdfInput: nullableBoolean(caps.pdfInput, `${capsPath}.pdfInput`),
+      batch: nullableBoolean(caps.batch, `${capsPath}.batch`),
+      citations: nullableBoolean(caps.citations, `${capsPath}.citations`),
+      codeExecution: nullableBoolean(
+        caps.codeExecution,
+        `${capsPath}.codeExecution`,
+      ),
+      structuredOutputs: nullableBoolean(
+        caps.structuredOutputs,
+        `${capsPath}.structuredOutputs`,
+      ),
+      thinking: {
+        supported: nullableBoolean(
+          thinking.supported,
+          `${capsPath}.thinking.supported`,
+        ),
+        adaptive: nullableBoolean(
+          thinking.adaptive,
+          `${capsPath}.thinking.adaptive`,
+        ),
+        enabled: nullableBoolean(
+          thinking.enabled,
+          `${capsPath}.thinking.enabled`,
+        ),
+      },
+      effort: {
+        supported: nullableBoolean(
+          effort.supported,
+          `${capsPath}.effort.supported`,
+        ),
+        low: nullableBoolean(effort.low, `${capsPath}.effort.low`),
+        medium: nullableBoolean(effort.medium, `${capsPath}.effort.medium`),
+        high: nullableBoolean(effort.high, `${capsPath}.effort.high`),
+        max: nullableBoolean(effort.max, `${capsPath}.effort.max`),
+      },
+      contextManagement: {
+        supported: nullableBoolean(
+          contextManagement.supported,
+          `${capsPath}.contextManagement.supported`,
+        ),
+        clearThinking20251015: nullableBoolean(
+          contextManagement.clearThinking20251015,
+          `${capsPath}.contextManagement.clearThinking20251015`,
+        ),
+        clearToolUses20250919: nullableBoolean(
+          contextManagement.clearToolUses20250919,
+          `${capsPath}.contextManagement.clearToolUses20250919`,
+        ),
+        compact20260112: nullableBoolean(
+          contextManagement.compact20260112,
+          `${capsPath}.contextManagement.compact20260112`,
+        ),
+      },
+    },
+  };
+}
+
 function decodeAccount(value: unknown, path: string): AccountView {
   const raw = record(value, path);
   const item = object(raw, path, [
@@ -823,10 +947,15 @@ function decodeAccount(value: unknown, path: string): AccountView {
     item.models,
     `${path}.models`,
     (value, itemPath) => {
-      const model = object(value, itemPath, ["selectionId", "displayName"]);
+      const model = object(value, itemPath, [
+        "selectionId",
+        "displayName",
+        "metadata",
+      ]);
       return {
         selectionId: stringValue(model.selectionId, `${itemPath}.selectionId`),
         displayName: stringValue(model.displayName, `${itemPath}.displayName`),
+        metadata: decodeModelMetadata(model.metadata, `${itemPath}.metadata`),
       };
     },
   );

@@ -333,7 +333,8 @@ const model_connection_snapshot_text_bytes: usize =
                 account_contract.Limits.model_display_name_bytes));
 const account_snapshot_overhead: usize = 1024 +
     account_contract.Limits.api_key_entries * 128 +
-    account_contract.Limits.model_entries * 128;
+    account_contract.Limits.model_entries * (128 + model_metadata_snapshot_bytes);
+const model_metadata_snapshot_bytes: usize = 1024;
 const model_connection_snapshot_overhead: usize = 1024 +
     account_contract.Limits.model_connection_entries * 256;
 const workspace_snapshot_overhead: usize = 512;
@@ -3403,6 +3404,40 @@ pub const Runtime = struct {
             return error.SnapshotTooLarge;
     }
 
+    fn writeModelMetadata(writer: *std.Io.Writer, metadata: account_contract.ModelMetadata) Error!void {
+        var input_buffer: [20]u8 = undefined;
+        var output_buffer: [20]u8 = undefined;
+        const input: ?[]const u8 = if (metadata.max_input_tokens) |limit|
+            std.fmt.bufPrint(&input_buffer, "{d}", .{limit}) catch unreachable
+        else
+            null;
+        const output: ?[]const u8 = if (metadata.max_output_tokens) |limit|
+            std.fmt.bufPrint(&output_buffer, "{d}", .{limit}) catch unreachable
+        else
+            null;
+        const caps = metadata.capabilities;
+        std.json.Stringify.value(.{
+            .maxInputTokens = input,
+            .maxOutputTokens = output,
+            .capabilities = .{
+                .imageInput = caps.image_input,
+                .pdfInput = caps.pdf_input,
+                .batch = caps.batch,
+                .citations = caps.citations,
+                .codeExecution = caps.code_execution,
+                .structuredOutputs = caps.structured_outputs,
+                .thinking = caps.thinking,
+                .effort = caps.effort,
+                .contextManagement = .{
+                    .supported = caps.context_management.supported,
+                    .clearThinking20251015 = caps.context_management.clear_thinking_20251015,
+                    .clearToolUses20250919 = caps.context_management.clear_tool_uses_20250919,
+                    .compact20260112 = caps.context_management.compact_20260112,
+                },
+            },
+        }, .{}, writer) catch return error.SnapshotTooLarge;
+    }
+
     fn writeAccount(
         self: *Runtime,
         writer: *std.Io.Writer,
@@ -3450,6 +3485,8 @@ pub const Runtime = struct {
             writer.writeAll(",\"displayName\":") catch
                 return error.SnapshotTooLarge;
             try self.projectedJsonValue(writer, model.display_name);
+            writer.writeAll(",\"metadata\":") catch return error.SnapshotTooLarge;
+            try writeModelMetadata(writer, model.metadata);
             writer.writeByte('}') catch return error.SnapshotTooLarge;
         }
         writer.writeAll("],\"selectedApiKeySelectionId\":") catch
@@ -6536,6 +6573,26 @@ fn installTestExecution(control: *Runtime) !void {
     const models = [_]account_contract.ModelView{.{
         .id = "fixture-model",
         .display_name = "Fixture model",
+        .metadata = .{
+            .max_input_tokens = 1048576,
+            .max_output_tokens = 64000,
+            .capabilities = .{
+                .image_input = false,
+                .pdf_input = false,
+                .batch = false,
+                .citations = false,
+                .code_execution = false,
+                .structured_outputs = true,
+                .thinking = .{ .supported = true, .adaptive = false, .enabled = true },
+                .effort = .{ .supported = false, .low = false, .medium = false, .high = false, .max = false },
+                .context_management = .{
+                    .supported = true,
+                    .clear_thinking_20251015 = false,
+                    .clear_tool_uses_20250919 = false,
+                    .compact_20260112 = true,
+                },
+            },
+        },
     }};
     control.commitAccountFactNoFail(.{
         .kind = .execution_changed,
@@ -7238,7 +7295,7 @@ test "Product Control snapshot serializer matches the Renderer contract fixture"
         CatalogAvailability.uninitialized,
         (try control.taskCatalog(3)).availability,
     );
-    var storage: [4096]u8 = undefined;
+    var storage: [8192]u8 = undefined;
     const snapshot = try control.writeSnapshot(&storage);
     const fixture = std.mem.trimEnd(
         u8,
@@ -10607,6 +10664,26 @@ fn installMaximumAccountProjection(control: *Runtime) !void {
         model.* = .{
             .id = id,
             .display_name = &model_name,
+            .metadata = .{
+                .max_input_tokens = std.math.maxInt(u64),
+                .max_output_tokens = std.math.maxInt(u64),
+                .capabilities = .{
+                    .image_input = false,
+                    .pdf_input = false,
+                    .batch = false,
+                    .citations = false,
+                    .code_execution = false,
+                    .structured_outputs = false,
+                    .thinking = .{ .supported = false, .adaptive = false, .enabled = false },
+                    .effort = .{ .supported = false, .low = false, .medium = false, .high = false, .max = false },
+                    .context_management = .{
+                        .supported = false,
+                        .clear_thinking_20251015 = false,
+                        .clear_tool_uses_20250919 = false,
+                        .compact_20260112 = false,
+                    },
+                },
+            },
         };
     }
     control.commitAccountFactNoFail(.{
