@@ -102,6 +102,9 @@ test "post-callback canonical pipeline failure aborts the routed Run as failed" 
     const session = try openSession(runtime);
     const run_id = try submitSession(session, "fail after callback returned");
     try session.waitForState(.running);
+    // This case interrupts an entered Core Run. Host Running alone also
+    // covers the handoff before Core admission, where abort may be too late.
+    fake_core.waitRunEntered();
     const session_id = session.snapshot().session_id;
     try runtime.requestRunTermination(
         session_id,
