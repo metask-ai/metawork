@@ -139,6 +139,12 @@ const checkpoint_export_limits: lifecycle.CheckpointLimits = .{
 };
 
 pub const Provider = product_task.Provider;
+pub const PermissionProfile = product_task.PermissionProfile;
+pub const PermissionInteraction = product_task.PermissionInteraction;
+// Flipped only when every admitted profile is complete across manual and
+// Scheduled Task execution. Bridge mutations and snapshot publication consume
+// this same gate so a hidden capability cannot remain callable.
+pub const permission_profiles_available = true;
 
 pub const TaskWorkspaceTrust = union(enum) {
     explicitly_trusted,
@@ -148,6 +154,12 @@ pub const TaskWorkspaceTrust = union(enum) {
 pub const TaskCreateInput = struct {
     workspace_root: []const u8,
     trust: TaskWorkspaceTrust,
+    permission_profile: ?PermissionProfile = null,
+};
+
+pub const TaskPermissionRequest = union(enum) {
+    interactive: ?PermissionProfile,
+    noninteractive: PermissionProfile,
 };
 
 pub const TaskWorkspaceRequest = union(enum) {
@@ -167,6 +179,7 @@ pub const ScheduledTaskDefinitionInput = struct {
     expected_execution_generation: u64,
     input: []const u8,
     recurrence: ScheduledTaskRecurrence,
+    permission_profile: PermissionProfile,
 };
 
 pub const WorkspaceAuthorization = product_workspace.Authorization;
@@ -774,6 +787,7 @@ pub const Runtime = struct {
     preview_executor_shutdown: bool = false,
     projection_bytes: usize = 0,
     revision: u64 = 0,
+    default_permission_profile: PermissionProfile = .approval_required,
     account_execution: account_execution.State,
     canonical_user_home: ?[]u8,
     model_connection_capabilities: ModelConnectionCapabilities,
@@ -1840,6 +1854,19 @@ pub const Runtime = struct {
         return self.task_runtime.taskWorkspaceId(task_id) orelse error.UnknownTask;
     }
 
+    pub fn taskPermissionProfile(self: *Runtime, task_id: u64) Error!PermissionProfile {
+        self.syncLifecycle();
+        return self.task_runtime.taskPermissionProfile(task_id) orelse error.UnknownTask;
+    }
+
+    pub fn taskPermissionInteraction(
+        self: *Runtime,
+        task_id: u64,
+    ) Error!PermissionInteraction {
+        self.syncLifecycle();
+        return self.task_runtime.taskPermissionInteraction(task_id) orelse error.UnknownTask;
+    }
+
     /// Copies the canonical Workspace projection without allocating. Hidden
     /// Manual Workspaces that are no longer registered remain omitted;
     /// Automatic Workspaces stay projected so
@@ -1932,6 +1959,7 @@ pub const Runtime = struct {
             self.account_execution.generation(),
             null,
             null,
+            .{ .interactive = input.permission_profile },
         );
     }
 
@@ -1942,6 +1970,7 @@ pub const Runtime = struct {
         expected_execution_generation: u64,
         expected_skill_catalog_revision: ?[]const u8,
         expected_skill_selection_revision: ?u64,
+        permission: TaskPermissionRequest,
     ) Error!u64 {
         return self.createTaskInWorkspaceInternal(
             workspace_id,
@@ -1949,6 +1978,7 @@ pub const Runtime = struct {
             expected_execution_generation,
             expected_skill_catalog_revision,
             expected_skill_selection_revision,
+            permission,
             false,
         );
     }
@@ -1959,6 +1989,7 @@ pub const Runtime = struct {
         expected_execution_generation: u64,
         expected_skill_catalog_revision: ?[]const u8,
         expected_skill_selection_revision: ?u64,
+        permission: TaskPermissionRequest,
     ) Error!u64 {
         return switch (request) {
             .manual => |manual| self.createTaskInWorkspace(
@@ -1967,11 +1998,13 @@ pub const Runtime = struct {
                 expected_execution_generation,
                 expected_skill_catalog_revision,
                 expected_skill_selection_revision,
+                permission,
             ),
             .automatic => self.createAutomaticTask(
                 expected_execution_generation,
                 expected_skill_catalog_revision,
                 expected_skill_selection_revision,
+                permission,
             ),
         };
     }
@@ -1983,6 +2016,7 @@ pub const Runtime = struct {
         expected_execution_generation: u64,
         expected_skill_catalog_revision: ?[]const u8,
         expected_skill_selection_revision: ?u64,
+        permission: TaskPermissionRequest,
         allow_unowned_automatic: bool,
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
@@ -2047,6 +2081,14 @@ pub const Runtime = struct {
                 skill.skill_id,
             );
         const execution_input = self.account_execution.executionInput().?;
+        const permission_profile: PermissionProfile = switch (permission) {
+            .interactive => |profile| profile orelse self.default_permission_profile,
+            .noninteractive => |profile| profile,
+        };
+        const permission_interaction: PermissionInteraction = switch (permission) {
+            .interactive => .interactive,
+            .noninteractive => .noninteractive,
+        };
         var order_preparation = if (workspace_view.kind == .manual)
             try self.workspace.prepareOrder(workspace_view.id)
         else
@@ -2062,6 +2104,8 @@ pub const Runtime = struct {
             .execution = execution_input,
             .provider = accountProvider(execution_input.target.provider_kind),
             .model = self.admissionModel(),
+            .permission_profile = permission_profile,
+            .permission_interaction = permission_interaction,
             .workspace_id = workspace_id,
             .workspace_epoch = workspace_view.epoch,
             .workspace_root = workspace_view.canonical_root,
@@ -2109,6 +2153,7 @@ pub const Runtime = struct {
         expected_execution_generation: u64,
         expected_skill_catalog_revision: ?[]const u8,
         expected_skill_selection_revision: ?u64,
+        permission: TaskPermissionRequest,
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
@@ -2134,6 +2179,7 @@ pub const Runtime = struct {
             expected_execution_generation,
             null,
             null,
+            permission,
             true,
         );
         self.workspace.setAutomaticOwner(workspace.id, task_id);
@@ -2581,6 +2627,30 @@ pub const Runtime = struct {
         return self.revision;
     }
 
+    pub fn defaultPermissionProfile(self: *const Runtime) PermissionProfile {
+        return self.default_permission_profile;
+    }
+
+    /// Changes only the default captured by future Tasks. Existing Task and
+    /// Session authority is immutable in this product slice.
+    pub fn setDefaultPermissionProfile(
+        self: *Runtime,
+        profile: PermissionProfile,
+    ) Error!bool {
+        self.syncLifecycle();
+        try self.requireTaskPersistenceMutation();
+        if (profile == self.default_permission_profile) return false;
+        const previous = self.default_permission_profile;
+        self.default_permission_profile = profile;
+        self.commitTaskStateIfConfigured() catch |err| {
+            if (err != error.TaskPersistenceOutcomeUnknown)
+                self.default_permission_profile = previous;
+            return err;
+        };
+        self.bumpRevision();
+        return true;
+    }
+
     pub fn checkpointStoreHealth(self: *const Runtime) checkpoint_store.Health {
         return self.checkpoint_store_health.load(.acquire);
     }
@@ -2609,6 +2679,7 @@ pub const Runtime = struct {
         changed = self.task_runtime.syncCloseCompletions(
             self.taskRuntimeReleaseEffects(),
         ) or changed;
+        changed = self.task_runtime.requestPermissionStops() or changed;
         const task_sync = self.task_runtime.syncOperationRecords();
         changed = task_sync.changed or changed;
         durable_changed = task_sync.durable_changed or durable_changed;
@@ -2649,6 +2720,10 @@ pub const Runtime = struct {
         self.markTerminalRunsBeforeEventDrain();
         self.drainAgentEventPass(&first_projection_error);
         self.finalizeMarkedTerminalRunsAfterEventDrain();
+        // Agent readiness is a Product lifecycle wake, not a Renderer wake.
+        // Reconcile even when no Renderer is connected so background Runs can
+        // request termination and Schedules can consume their terminal facts.
+        self.syncLifecycle();
         if (first_projection_error) |err| return err;
     }
 
@@ -3252,10 +3327,11 @@ pub const Runtime = struct {
             runtime.capabilities()
         else
             mcp_runtime.Capabilities{ .management = false, .host = .{} };
-        writer.print("{{\"revision\":\"{d}\",\"capabilities\":{{\"taskHistoryPersistence\":{},\"taskHistoryPersistenceHealth\":\"{s}\",\"conversationRecovery\":true,\"executionRebind\":false,\"structuredPlan\":false,\"typedOutputs\":false,\"typedFileChanges\":false,\"persistentWorkspacePermissions\":false,\"automaticWorkspaces\":{},\"scheduledTasks\":{},\"scheduledTaskPersistence\":{},\"scheduledTaskPersistenceHealth\":\"{s}\",\"backgroundScheduleWake\":{},\"localSkillManagement\":{},\"skillManagementHealth\":\"{s}\",\"modelConnectionManagement\":{},\"modelConnectionSecretCapture\":{},\"modelConnectionTest\":{},\"mcpManagement\":{},\"mcpConnectionApproval\":{},\"mcpSecretCapture\":{},\"mcpOAuth\":{}}},\"account\":", .{
+        writer.print("{{\"revision\":\"{d}\",\"capabilities\":{{\"taskHistoryPersistence\":{},\"taskHistoryPersistenceHealth\":\"{s}\",\"conversationRecovery\":true,\"executionRebind\":false,\"structuredPlan\":false,\"typedOutputs\":false,\"typedFileChanges\":false,\"persistentWorkspacePermissions\":false,\"permissionProfiles\":{},\"automaticWorkspaces\":{},\"scheduledTasks\":{},\"scheduledTaskPersistence\":{},\"scheduledTaskPersistenceHealth\":\"{s}\",\"backgroundScheduleWake\":{},\"localSkillManagement\":{},\"skillManagementHealth\":\"{s}\",\"modelConnectionManagement\":{},\"modelConnectionSecretCapture\":{},\"modelConnectionTest\":{},\"mcpManagement\":{},\"mcpConnectionApproval\":{},\"mcpSecretCapture\":{},\"mcpOAuth\":{}}},\"permissions\":{{\"availableProfiles\":", .{
             self.revision,
             task_persistence_ready,
             @tagName(self.task_persistence_health),
+            permission_profiles_available,
             self.workspace.automaticRootAvailable(),
             self.schedule.timerEnabled() and schedule_persistence_ready and
                 background_schedule_wake,
@@ -3273,6 +3349,14 @@ pub const Runtime = struct {
             mcp_capabilities.host.oauth,
         }) catch
             return error.SnapshotTooLarge;
+        if (permission_profiles_available)
+            writer.writeAll("[\"approval_required\",\"full_access\"]") catch
+                return error.SnapshotTooLarge
+        else
+            writer.writeAll("[]") catch return error.SnapshotTooLarge;
+        writer.print(",\"defaultProfile\":\"{s}\"}},\"account\":", .{
+            @tagName(self.default_permission_profile),
+        }) catch return error.SnapshotTooLarge;
         try self.writeAccount(&writer);
         writer.writeAll(",\"skillCatalog\":") catch
             return error.SnapshotTooLarge;
@@ -3891,6 +3975,7 @@ pub const Runtime = struct {
             input.execution_generation,
             null,
             null,
+            .{ .noninteractive = taskProfileFromSchedule(input.permission_profile) },
         ) catch |err| return .{ .rejected = .{
             .cause = err,
             .reason = scheduledFailure(err),
@@ -3919,11 +4004,14 @@ pub const Runtime = struct {
     fn scheduleTaskTerminal(
         context: *anyopaque,
         task_id: u64,
-    ) ?product_schedule.TaskOutcome {
+    ) ?product_schedule.TaskTerminal {
         const self: *Runtime = @ptrCast(@alignCast(context));
-        const outcome = self.task_runtime.lastTerminalOutcome(task_id) orelse
+        const terminal = self.task_runtime.lastTerminalSummary(task_id) orelse
             return null;
-        return scheduledTaskOutcome(outcome);
+        return .{
+            .outcome = scheduledTaskOutcome(terminal.outcome),
+            .permission_required = terminal.permission_required,
+        };
     }
 
     fn scheduleRedaction(self: *Runtime) product_schedule.Redaction {
@@ -4034,6 +4122,9 @@ pub const Runtime = struct {
                 self.account_execution.provider().?,
             )),
             .execution_model = self.admissionModel(),
+            .permission_profile = scheduledPermissionProfile(
+                input.permission_profile,
+            ),
             .input = scheduled_input,
             .recurrence = input.recurrence,
         };
@@ -4123,6 +4214,10 @@ pub const Runtime = struct {
             self.taskPersistenceLimits(),
         );
         defer recovered.deinit();
+        self.default_permission_profile = task_persistence.parseEnum(
+            PermissionProfile,
+            recovered.value.default_permission_profile,
+        ) orelse return error.TaskStoreCorrupt;
         for (recovered.value.failures) |failure|
             try self.recordTaskFailure(failure.task_id, failure.recent_order, failure.reason);
         for (recovered.value.workspaces) |workspace| {
@@ -4257,6 +4352,7 @@ pub const Runtime = struct {
             .allocated_tasks = task_frames.tasks,
             .allocated_failures = task_frames.failures,
             .state = .{
+                .default_permission_profile = @tagName(self.default_permission_profile),
                 .next_workspace_id = identity.next_id,
                 .next_workspace_recent_order = identity.next_recent_order,
                 .next_task_id = task_frames.next_task_id,
@@ -5837,6 +5933,24 @@ fn scheduledProvider(provider: Provider) product_schedule.Provider {
     };
 }
 
+fn scheduledPermissionProfile(
+    profile: PermissionProfile,
+) product_schedule.PermissionProfile {
+    return switch (profile) {
+        .approval_required => .approval_required,
+        .full_access => .full_access,
+    };
+}
+
+fn taskProfileFromSchedule(
+    profile: product_schedule.PermissionProfile,
+) PermissionProfile {
+    return switch (profile) {
+        .approval_required => .approval_required,
+        .full_access => .full_access,
+    };
+}
+
 fn scheduledTaskOutcome(
     outcome: RunOutcome,
 ) product_schedule.TaskOutcome {
@@ -6562,6 +6676,8 @@ fn testRuntime() !Runtime {
         .execution_generation = 1,
         .execution_provider = .anthropic,
         .execution_model = execution_model,
+        .permission_profile = .approval_required,
+        .permission_interaction = .interactive,
         .input = .{ .text = .{
             .value = try control.copyBounded(
                 "inspect",
@@ -6582,6 +6698,8 @@ fn testRuntime() !Runtime {
             .execution_generation = 1,
             .execution_provider = .anthropic,
             .execution_model = execution_model,
+            .permission_profile = .approval_required,
+            .permission_interaction = .interactive,
             .workspace_id = 1,
             .workspace_root = workspace,
             .title = try control.copyBounded("", control.limits.max_task_title_bytes),
@@ -6840,7 +6958,13 @@ test "automatic Workspace root is optional and reserved from user registration" 
     try installTestExecution(&unavailable);
     try std.testing.expectError(
         error.WorkspaceUnavailable,
-        unavailable.createTaskForWorkspace(.automatic, 1, null, null),
+        unavailable.createTaskForWorkspace(
+            .automatic,
+            1,
+            null,
+            null,
+            .{ .interactive = null },
+        ),
     );
     unavailable.deinit();
 
@@ -7679,6 +7803,7 @@ test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {
         control.createScheduledTask(.{
             .title = "Independent review",
             .expected_execution_generation = 1,
+            .permission_profile = .approval_required,
             .input = "Review current work",
             .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
         }),
@@ -7691,6 +7816,7 @@ test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {
     const id = try control.createScheduledTask(.{
         .title = "Review SECRET-KEY",
         .expected_execution_generation = 1,
+        .permission_profile = .full_access,
         .input = "Inspect SECRET-KEY usage",
         .recurrence = .{ .interval = .{
             .start_at_unix_seconds = 2_000,
@@ -7809,6 +7935,7 @@ test "execution replacement durably scrubs Schedule before ownership transfer" {
     const id = try control.createScheduledTask(.{
         .title = "Use NEXT-SECRET and TASK-SECRET",
         .expected_execution_generation = 1,
+        .permission_profile = .approval_required,
         .input = "Review NEXT-SECRET with TASK-SECRET",
         .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
     });
@@ -7857,6 +7984,7 @@ test "execution replacement durably scrubs Schedule before ownership transfer" {
     const blocked_id = try control.createScheduledTask(.{
         .title = "Use BLOCKED-SECRET",
         .expected_execution_generation = 2,
+        .permission_profile = .approval_required,
         .input = "Review BLOCKED-SECRET",
         .recurrence = .{ .once = .{ .at_unix_seconds = 3_000 } },
     });
@@ -7955,6 +8083,7 @@ test "Scheduled Task execution drift becomes needs attention without blocking Ac
     const id = try control.createScheduledTask(.{
         .title = "Review current work",
         .expected_execution_generation = 1,
+        .permission_profile = .approval_required,
         .input = "Review current work",
         .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
     });
@@ -8533,15 +8662,36 @@ test "mutation admission rejects stale execution and binding facts" {
 
     try std.testing.expectError(
         error.ExecutionGenerationMismatch,
-        control.createTaskInWorkspace(1, 1, 0, null, null),
+        control.createTaskInWorkspace(
+            1,
+            1,
+            0,
+            null,
+            null,
+            .{ .interactive = null },
+        ),
     );
     try std.testing.expectError(
         error.ExecutionGenerationMismatch,
-        control.createTaskInWorkspace(1, 1, 2, null, null),
+        control.createTaskInWorkspace(
+            1,
+            1,
+            2,
+            null,
+            null,
+            .{ .interactive = null },
+        ),
     );
     try std.testing.expectError(
         error.WorkspaceEpochMismatch,
-        control.createTaskInWorkspace(1, 2, 1, null, null),
+        control.createTaskInWorkspace(
+            1,
+            2,
+            1,
+            null,
+            null,
+            .{ .interactive = null },
+        ),
     );
     try std.testing.expectError(
         error.BindingEpochMismatch,
@@ -10571,6 +10721,8 @@ test "default snapshot budget contains the maximum structural projection" {
                 .execution_generation = 1,
                 .execution_provider = .anthropic,
                 .execution_model = execution_model,
+                .permission_profile = .approval_required,
+                .permission_interaction = .interactive,
                 .input = .{ .text = .{
                     .value = try control.copyBounded(
                         "x",
@@ -10624,6 +10776,8 @@ test "default snapshot budget contains the maximum structural projection" {
                 .execution_generation = 1,
                 .execution_provider = .anthropic,
                 .execution_model = execution_model,
+                .permission_profile = .approval_required,
+                .permission_interaction = .interactive,
                 .workspace_id = @intCast(task_index + 1),
                 .workspace_root = try control.copyBounded(root, limits.max_workspace_bytes),
                 .title = try control.copyBounded("", limits.max_task_title_bytes),
@@ -12216,7 +12370,14 @@ test "MCP startup health commits a safe degraded Runtime projection" {
     mcp_testing.installRefreshJob(&control.mcp.?, blocked_job);
     try std.testing.expectError(
         error.CatalogLoading,
-        control.createTaskInWorkspace(1, 1, 1, null, null),
+        control.createTaskInWorkspace(
+            1,
+            1,
+            1,
+            null,
+            null,
+            .{ .interactive = null },
+        ),
     );
     mcp_testing.state(&control.mcp.?).activation_failed = false;
     blocked_job.outcome = .unavailable;

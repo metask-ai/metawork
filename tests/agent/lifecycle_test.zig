@@ -1717,6 +1717,136 @@ test "UI request validates identity and close wakes a suspended callback" {
     try closeSession(cancelled, .session_close);
 }
 
+fn openNoninteractivePermissionSession(
+    runtime: *lifecycle.Runtime,
+) !*lifecycle.Session {
+    const workspace_root = if (std.fs.path.sep == '\\')
+        "C:\\tmp\\metawork-gate2"
+    else
+        "/tmp/metawork-gate2";
+    const temporary_root = if (std.fs.path.sep == '\\') "C:\\tmp" else "/tmp";
+    return runtime.createSession(.{
+        .provider = .anthropic,
+        .permission_mode = .accept_edits,
+        .shell_policy = .unrestricted,
+        .permission_interaction = .noninteractive,
+        .credential = "fixture-secret",
+        .model = "fixture-model",
+        .workspace = .{
+            .canonical_root = workspace_root,
+            .trust = .{ .temporary = temporary_root },
+        },
+    });
+}
+
+test "noninteractive permission request becomes a typed stop without pending UI" {
+    fake_core.reset();
+    fake_core.setNextPlan(.ui_wait);
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 1,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    const session = try openNoninteractivePermissionSession(runtime);
+
+    const run_id = try submitSession(session, "permission cannot suspend a schedule");
+    var observed_stop = false;
+    for (0..1000) |_| {
+        if (session.permissionStopRequest()) |stopped_run_id| {
+            try std.testing.expectEqual(run_id, stopped_run_id);
+            observed_stop = true;
+            break;
+        }
+        std.Io.Timeout.sleep(.{ .duration = .{
+            .raw = std.Io.Duration.fromMilliseconds(1),
+            .clock = .awake,
+        } }, std.testing.io) catch {};
+    }
+    try std.testing.expect(observed_stop);
+    try std.testing.expect(session.pendingUiRequest() == null);
+
+    // This Agent-level test uses user cancellation only to finish the fake
+    // Core Run after observing the stop fact. Product Control's automatic
+    // consumption and abort are covered by its own lifecycle test.
+    try cancelSession(session, run_id, .user_cancel);
+    try session.waitRun(run_id);
+    var terminal = takeTestTerminal(session, run_id);
+    defer terminal.deinit();
+    try std.testing.expectEqual(
+        lifecycle.TerminationSignal.permission_required,
+        terminal.termination_signal.?,
+    );
+    try std.testing.expect(session.pendingUiRequest() == null);
+    try closeSession(session, .session_close);
+}
+
+test "noninteractive permission notification failure terminates without Product abort" {
+    fake_core.reset();
+    fake_core.setNextPlan(.ui_wait);
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 1,
+        .event_ready_notifier = .{
+            .context = null,
+            .notify_fn = unavailableEventConsumer,
+        },
+        .event_ready_retry_interval = .fromNanoseconds(1),
+        .event_ready_timeout = .fromNanoseconds(2),
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    const session = try openNoninteractivePermissionSession(runtime);
+    const run_id = try submitSession(
+        session,
+        "permission stop wake cannot reach Product Control",
+    );
+    var fatal_observed = false;
+    for (0..1000) |_| {
+        fake_core.lock();
+        fatal_observed = fake_core.ui_fatal_callbacks == 1;
+        fake_core.unlock();
+        if (fatal_observed) break;
+        std.Io.Timeout.sleep(.{ .duration = .{
+            .raw = std.Io.Duration.fromMilliseconds(1),
+            .clock = .awake,
+        } }, std.testing.io) catch {};
+    }
+    if (!fatal_observed) {
+        try cancelSession(session, run_id, .user_cancel);
+        try session.waitRun(run_id);
+        return error.TestUnexpectedResult;
+    }
+
+    try session.waitRun(run_id);
+    var terminal = takeTestTerminal(session, run_id);
+    defer terminal.deinit();
+    try std.testing.expectEqual(
+        @as(?u32, wire.STATUS_CALLBACK_FAILED),
+        terminal.raw_status_code,
+    );
+    try std.testing.expectEqual(
+        lifecycle.TerminationSignal.permission_required,
+        terminal.termination_signal.?,
+    );
+    try std.testing.expectEqual(
+        lifecycle.SessionDisposition.poisoned,
+        terminal.session_disposition_at_completion,
+    );
+    try std.testing.expect(session.pendingUiRequest() == null);
+    fake_core.lock();
+    const abort_calls = fake_core.abort_calls;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 0), abort_calls);
+    try closeSession(session, .session_close);
+}
+
 test "MetaWork Agent rejects structured questions before product projection" {
     fake_core.reset();
     fake_core.setNextPlan(.ask_question);

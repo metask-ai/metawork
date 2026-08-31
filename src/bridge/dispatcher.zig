@@ -65,10 +65,6 @@ pub const Platform = struct {
         native_sdk.platform.OpenDialogOptions,
         []u8,
     ) anyerror!native_sdk.platform.OpenDialogResult,
-    show_message_dialog_fn: *const fn (
-        ?*anyopaque,
-        native_sdk.platform.MessageDialogOptions,
-    ) anyerror!native_sdk.platform.MessageDialogResult,
     window_chrome_connect_fn: *const fn (
         ?*anyopaque,
         native_sdk.platform.WindowId,
@@ -312,6 +308,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.model_connection_test, .function = modelConnectionTest },
             .{ .name = commands.model_connection_select_default, .function = modelConnectionSelectDefault },
             .{ .name = commands.account_logout, .function = accountLogout },
+            .{ .name = commands.set_default_permission_profile, .function = setDefaultPermissionProfile },
             .{ .name = commands.create_task, .function = createTask },
             .{ .name = commands.run, .function = runTask },
             .{ .name = commands.select_task_model, .function = selectTaskModel },
@@ -1264,22 +1261,6 @@ pub const Dispatcher = struct {
             if (selected.count != 1 or selected.paths.len == 0 or
                 selected.paths.len > workspace_path_capacity)
                 return error.InvalidWorkspace;
-            const visible_path = selected.paths[0..@min(
-                selected.paths.len,
-                native_sdk.platform.max_dialog_message_bytes,
-            )];
-            const decision = try self.platform.show_message_dialog_fn(
-                self.platform.context,
-                .{
-                    .style = .warning,
-                    .title = "Trust this workspace?",
-                    .message = "MetaWork can read and change files in this folder while you use it. Only choose a folder you trust.",
-                    .informative_text = visible_path,
-                    .primary_button = "Use this folder",
-                    .secondary_button = "Cancel",
-                },
-            );
-            if (decision != .primary) return "{\"selected\":false}";
             break :user selected.paths;
         };
         if (selected_path.len == 0 or selected_path.len > workspace_path_capacity)
@@ -1352,11 +1333,15 @@ pub const Dispatcher = struct {
         else
             null;
         const workbench = try self.requireProductControl();
+        const permission_profile = handlers.permissionProfile(
+            parsed.value.permissionProfile,
+        ) orelse return error.InvalidBridgePayload;
         const task_id = workbench.createTaskForWorkspace(
             workspace_request,
             execution_generation,
             parsed.value.expectedSkillCatalogRevision,
             skill_selection_revision,
+            .{ .interactive = permission_profile },
         ) catch |err| {
             if (taskCreateRejection(err)) |reason|
                 return encodeTaskCreateResult(output, false, null, null, reason);
@@ -1370,6 +1355,33 @@ pub const Dispatcher = struct {
             task_id,
             binding_epoch,
             null,
+        );
+    }
+
+    fn setDefaultPermissionProfile(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        if (!product_control.permission_profiles_available)
+            return error.CapabilityUnavailable;
+        var parsed = try handlers.parsePayload(
+            handlers.PermissionProfileSelection,
+            invocation.request.payload,
+        );
+        defer parsed.deinit();
+        const profile = handlers.permissionProfile(parsed.value.permissionProfile) orelse
+            return error.InvalidBridgePayload;
+        const changed = try (try self.requireProductControl()).setDefaultPermissionProfile(profile);
+        if (changed) self.notifyCommitted();
+        return std.fmt.bufPrint(
+            output,
+            "{{\"changed\":{},\"defaultProfile\":\"{s}\"}}",
+            .{ changed, @tagName(profile) },
         );
     }
 
@@ -2887,6 +2899,7 @@ pub const Dispatcher = struct {
         const definition = try scheduledTaskDefinition(
             parsed.value.title,
             parsed.value.expectedExecutionGeneration,
+            parsed.value.permissionProfile,
             instruction,
             parsed.value.recurrence,
         );
@@ -2925,6 +2938,7 @@ pub const Dispatcher = struct {
         const definition = try scheduledTaskDefinition(
             parsed.value.title,
             parsed.value.expectedExecutionGeneration,
+            parsed.value.permissionProfile,
             instruction,
             parsed.value.recurrence,
         );
@@ -3345,12 +3359,15 @@ fn encodeTaskCreateResult(
 fn scheduledTaskDefinition(
     title: []const u8,
     execution_generation_wire: []const u8,
+    permission_profile_wire: []const u8,
     instruction: []const u8,
     recurrence_value: std.json.Value,
 ) !product_control.ScheduledTaskDefinitionInput {
     return .{
         .title = title,
         .expected_execution_generation = try handlers.parseWireId(execution_generation_wire),
+        .permission_profile = handlers.permissionProfile(permission_profile_wire) orelse
+            return error.InvalidBridgePayload,
         .input = instruction,
         .recurrence = try handlers.parseScheduledTaskRecurrence(recurrence_value),
     };
@@ -3940,13 +3957,6 @@ test "Dispatcher validates authority before domain calls and preserves committed
             return .{ .paths = output[0..path.len], .count = 1 };
         }
 
-        fn confirm(
-            _: ?*anyopaque,
-            _: native_sdk.platform.MessageDialogOptions,
-        ) anyerror!native_sdk.platform.MessageDialogResult {
-            return .primary;
-        }
-
         fn chromeEnvironment() WindowChromePlatformEnvironment {
             return .{
                 .top = 52,
@@ -4094,7 +4104,6 @@ test "Dispatcher validates authority before domain calls and preserves committed
             .start_timer_fn = Harness.startTimer,
             .cancel_timer_fn = Harness.cancelTimer,
             .show_open_dialog_fn = Harness.open,
-            .show_message_dialog_fn = Harness.confirm,
             .window_chrome_connect_fn = Harness.connectWindowChrome,
             .window_chrome_sync_fn = Harness.syncWindowChrome,
             .window_chrome_begin_drag_fn = Harness.beginWindowChromeDrag,
@@ -4264,6 +4273,17 @@ test "Dispatcher validates authority before domain calls and preserves committed
         source,
         &response,
     );
+    const permission_default = native_dispatcher.dispatch(
+        "{\"id\":\"permission-default\",\"command\":\"metawork.permissions.setDefaultProfile\",\"payload\":{\"permissionProfile\":\"full_access\"}}",
+        source,
+        &response,
+    );
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        permission_default,
+        "\"changed\":true,\"defaultProfile\":\"full_access\"",
+    ) != null);
+    try std.testing.expectEqual(initial_revision + 1, workbench.currentRevision());
     const login = native_dispatcher.dispatch(
         "{\"id\":\"login\",\"command\":\"metawork.account.beginLogin\",\"payload\":{}}",
         source,
@@ -4388,7 +4408,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
 
     const stale_create = try std.fmt.bufPrint(
         &workspace_request_storage,
-        "{{\"id\":\"stale-create\",\"command\":\"metawork.tasks.create\",\"payload\":{{\"workspace\":{{\"kind\":\"manual\",\"workspaceId\":\"{d}\",\"expectedWorkspaceEpoch\":\"1\"}},\"expectedExecutionGeneration\":\"99\",\"expectedSkillCatalogRevision\":null,\"expectedSkillSelectionRevision\":null}}}}",
+        "{{\"id\":\"stale-create\",\"command\":\"metawork.tasks.create\",\"payload\":{{\"workspace\":{{\"kind\":\"manual\",\"workspaceId\":\"{d}\",\"expectedWorkspaceEpoch\":\"1\"}},\"expectedExecutionGeneration\":\"99\",\"expectedSkillCatalogRevision\":null,\"expectedSkillSelectionRevision\":null,\"permissionProfile\":\"approval_required\"}}}}",
         .{workspace_id},
     );
     const rejected_create = native_dispatcher.dispatch(
@@ -4403,7 +4423,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
     ) != null);
 
     const automatic_create = native_dispatcher.dispatch(
-        "{\"id\":\"automatic-create\",\"command\":\"metawork.tasks.create\",\"payload\":{\"workspace\":{\"kind\":\"automatic\"},\"expectedExecutionGeneration\":\"1\",\"expectedSkillCatalogRevision\":null,\"expectedSkillSelectionRevision\":null}}",
+        "{\"id\":\"automatic-create\",\"command\":\"metawork.tasks.create\",\"payload\":{\"workspace\":{\"kind\":\"automatic\"},\"expectedExecutionGeneration\":\"1\",\"expectedSkillCatalogRevision\":null,\"expectedSkillSelectionRevision\":null,\"permissionProfile\":\"approval_required\"}}",
         source,
         &response,
     );
@@ -4413,10 +4433,10 @@ test "Dispatcher validates authority before domain calls and preserves committed
         "\"reason\":\"workspace_unavailable\"",
     ) != null);
 
-    var request_storage: [256]u8 = undefined;
+    var request_storage: [384]u8 = undefined;
     const request = try std.fmt.bufPrint(
         &request_storage,
-        "{{\"id\":\"create\",\"command\":\"metawork.tasks.create\",\"payload\":{{\"workspace\":{{\"kind\":\"manual\",\"workspaceId\":\"{d}\",\"expectedWorkspaceEpoch\":\"1\"}},\"expectedExecutionGeneration\":\"1\",\"expectedSkillCatalogRevision\":null,\"expectedSkillSelectionRevision\":null}}}}",
+        "{{\"id\":\"create\",\"command\":\"metawork.tasks.create\",\"payload\":{{\"workspace\":{{\"kind\":\"manual\",\"workspaceId\":\"{d}\",\"expectedWorkspaceEpoch\":\"1\"}},\"expectedExecutionGeneration\":\"1\",\"expectedSkillCatalogRevision\":null,\"expectedSkillSelectionRevision\":null,\"permissionProfile\":\"approval_required\"}}}}",
         .{workspace_id},
     );
     var lost_response: [32]u8 = undefined;
@@ -4428,6 +4448,11 @@ test "Dispatcher validates authority before domain calls and preserves committed
     const snapshot = try workbench.writeSnapshot(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"workspaceRoot\":\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"workspaces\":[{") != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"permissionProfile\":\"approval_required\"",
+    ) != null);
 
     const generation = dispatcher.productDelivery().connectedGeneration().?;
     const unused_grant = try dispatcher.grants.issue(generation, source.window_id, "/tmp");

@@ -130,8 +130,9 @@ pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
         task.durable.recent_order,
     }) catch return error.SnapshotTooLarge;
     try input.text.writeJson(writer, task.durable.title);
-    writer.print(",\"workspaceId\":\"{d}\",\"binding\":{{\"epoch\":\"{d}\",\"availability\":\"{s}\",\"provider\":\"{s}\",\"model\":", .{
+    writer.print(",\"workspaceId\":\"{d}\",\"permissionProfile\":\"{s}\",\"binding\":{{\"epoch\":\"{d}\",\"availability\":\"{s}\",\"provider\":\"{s}\",\"model\":", .{
         task.durable.workspace_id,
+        @tagName(task.durable.permission_profile),
         task.durable.binding_epoch,
         if (task.runtime.executionConst() == null) "unavailable" else "available",
         @tagName(task.durable.execution_provider),
@@ -276,9 +277,11 @@ fn writeRun(
     projection: task_state.RunProjectionFacts,
 ) Error!void {
     const terminal = projection.terminal;
-    writer.print("{{\"id\":\"{d}\",\"phase\":\"{s}\",\"input\":", .{
+    writer.print("{{\"id\":\"{d}\",\"phase\":\"{s}\",\"permissionProfile\":\"{s}\",\"permissionInteraction\":\"{s}\",\"input\":", .{
         run.id,
         @tagName(projection.phase),
+        @tagName(run.permission_profile),
+        @tagName(run.permission_interaction),
     }) catch return error.SnapshotTooLarge;
     switch (run.input) {
         .text => |text| {

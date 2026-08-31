@@ -82,6 +82,8 @@ candidate probe、真实桌面验收、签名、公证和发布验证不属于 `
 
 artifact refresh、checksum 或 lock 更新本身不要求修改本文。精确 target identity 以 `build_support/agentcore-bundle.*.lock.json` 为准，ABI 接受语义以 [AgentCore ABI v1 合同](agentcore-abi-v1.md)为准；verifier 必须报告它实际读取的 identity，文档和脚本不得硬编码一份“当前值”。替换 artifact 后，旧 artifact 的行为证据、checkpoint 样本和平台通过结论不自动继承；必须对新 artifact 重新运行相关 verifier、probe 或 platform vertical。
 
+PermissionProfile 的最小充分证据必须跨越实际 owner：candidate probe 固定所采用 `PermissionMode + ShellPolicy` 的代表性 tool/effect 行为；Agent tests 固定配置编码、typed request/provenance、same-profile fresh/restore 与 noninteractive stop fact；Product lifecycle 固定默认值只影响新 Task、Task/Run provenance、archive/delete，以及 Scheduled occurrence 由生产 event consumer 自动 abort 后形成 `permission_required → needs_attention`；Renderer/Bridge tests 固定 capability gate、只读 effective profile、单次选择动作和合法历史 snapshot。Schedule definition update 只影响后续 occurrence，不能改写历史 Task profile 或使 Renderer 拒绝合法 snapshot。`standard` 在 typed risk/effect 和执行前 commit boundary 未经独立 fixture 证明前必须保持隐藏。
+
 ## Storage 基础层验证
 
 [Storage 架构](storage-architecture.md)拥有 SQL、权限、migration、事务结果和 lifecycle 合同；本节统一拥有其验证责任、入口与平台证据边界，不复制实现清单或测试数量。
@@ -153,6 +155,7 @@ macOS 的 AgentCore artifact、Native vertical、Keychain、secure input、windo
 | --- | --- | --- | --- |
 | AgentCore 独立 Worker、crash、async pending、suspend/resume、跨进程 in-flight recovery | 尚未实现 | Worker fault-domain 与恢复 lifecycle/vertical | [高层架构](architecture.md)、[产品需求](requirements.md) |
 | strict Workspace security、正式 Host tools、持久权限 | 尚未完成安全验收 | authority、process tree、filesystem、network 与跨平台安全证据 | [产品需求](requirements.md) |
+| PermissionProfile `standard` 与非 aarch64 macOS artifact 行为 | 两档产品切片已开放；`standard` 隐藏，其他 target 缺少同等 probe | typed risk/effect、执行前 commit boundary，以及各 target exact artifact probe | [产品需求](requirements.md)、[AgentCore 集成契约](agentcore-integration.md) |
 | File Preview 真实桌面体验 | 核心 wire、owner、bounded read 与 redaction 已自动化覆盖；人工验收待完成 | Windows/macOS Drawer 视觉、键盘、焦点和窄窗验收 | [产品需求](requirements.md)、[UI 设计规范](ui-design.md) |
 | FileChange、typed Output、plan/approval、custom UI | 尚未形成可开放产品能力 | 对应合同、owner、持久化、恢复、投影和 UI Gate | [产品需求](requirements.md)、[UI 设计规范](ui-design.md) |
 | Skill catalog 历史内容固定 | 外部合同证据不足 | body/resources lease 的独立合同或可复现实验 | [AgentCore 集成契约](agentcore-integration.md) |

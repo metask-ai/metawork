@@ -1,6 +1,7 @@
 import type {
   TaskCreateReason,
   TaskCreateResult,
+  PermissionProfile,
   TaskRestoreReason,
   TaskRunInput,
   TaskRunReason,
@@ -14,6 +15,7 @@ export type TaskSubmissionClient = {
     expectedExecutionGeneration: string,
     expectedSkillCatalogRevision: string | null,
     expectedSkillSelectionRevision: string | null,
+    permissionProfile: PermissionProfile,
   ) => Promise<TaskCreateResult>;
   run: (
     taskId: string,
@@ -57,6 +59,7 @@ export async function submitTaskInstruction({
   workspace,
   expectedExecutionGeneration,
   expectedBindingEpoch,
+  permissionProfile,
   input,
   continuationRecoveryAvailable = false,
   ensureContinuation,
@@ -67,6 +70,7 @@ export async function submitTaskInstruction({
   workspace: TaskWorkspaceIntent;
   expectedExecutionGeneration: string;
   expectedBindingEpoch: string | null;
+  permissionProfile: PermissionProfile;
   input: TaskRunInput;
   continuationRecoveryAvailable?: boolean;
   ensureContinuation?: (
@@ -85,6 +89,7 @@ export async function submitTaskInstruction({
         expectedExecutionGeneration,
         input.kind === "skill" ? input.catalogRevision : null,
         input.kind === "skill" ? input.selectionRevision : null,
+        permissionProfile,
       );
       if (!createdTask.accepted)
         return { kind: "create_rejected", reason: createdTask.reason };

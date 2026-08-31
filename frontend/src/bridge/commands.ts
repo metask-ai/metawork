@@ -52,6 +52,7 @@ export const commands = {
   modelConnectionTest: "metawork.modelConnections.test",
   modelConnectionSelectDefault: "metawork.modelConnections.selectDefault",
   accountLogout: "metawork.account.logout",
+  setDefaultPermissionProfile: "metawork.permissions.setDefaultProfile",
   createTask: "metawork.tasks.create",
   run: "metawork.tasks.run",
   selectTaskModel: "metawork.tasks.selectModel",

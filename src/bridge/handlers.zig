@@ -187,7 +187,9 @@ pub const TaskCreate = struct {
     expectedExecutionGeneration: []const u8,
     expectedSkillCatalogRevision: ?[]const u8,
     expectedSkillSelectionRevision: ?[]const u8,
+    permissionProfile: []const u8,
 };
+pub const PermissionProfileSelection = struct { permissionProfile: []const u8 };
 pub const TaskRun = struct {
     taskId: []const u8,
     expectedBindingEpoch: []const u8,
@@ -246,6 +248,7 @@ pub const TaskDelete = struct { taskId: []const u8 };
 pub const ScheduledTaskMutation = struct {
     title: []const u8,
     expectedExecutionGeneration: []const u8,
+    permissionProfile: []const u8,
     input: std.json.Value,
     recurrence: std.json.Value,
 };
@@ -254,6 +257,7 @@ pub const ScheduledTaskUpdate = struct {
     expectedEpoch: []const u8,
     title: []const u8,
     expectedExecutionGeneration: []const u8,
+    permissionProfile: []const u8,
     input: std.json.Value,
     recurrence: std.json.Value,
 };
@@ -289,6 +293,12 @@ pub fn parseWireId(value: []const u8) !u64 {
     if (value.len == 0 or (value.len > 1 and value[0] == '0')) return error.InvalidBridgeId;
     for (value) |byte| if (byte < '0' or byte > '9') return error.InvalidBridgeId;
     return std.fmt.parseInt(u64, value, 10) catch error.InvalidBridgeId;
+}
+
+pub fn permissionProfile(value: []const u8) ?product_control.PermissionProfile {
+    if (std.mem.eql(u8, value, "approval_required")) return .approval_required;
+    if (std.mem.eql(u8, value, "full_access")) return .full_access;
+    return null;
 }
 
 pub fn parseTaskRunInput(value: std.json.Value) !ParsedTaskRunInput {
@@ -472,11 +482,17 @@ test "Task Run input is an exact text or skill tagged object" {
 
 test "Task creation requires an explicit nullable catalog revision" {
     var text = try parsePayload(TaskCreate,
-        \\{"workspace":{"kind":"manual","workspaceId":"1","expectedWorkspaceEpoch":"2"},"expectedExecutionGeneration":"3","expectedSkillCatalogRevision":null,"expectedSkillSelectionRevision":null}
+        \\{"workspace":{"kind":"manual","workspaceId":"1","expectedWorkspaceEpoch":"2"},"expectedExecutionGeneration":"3","expectedSkillCatalogRevision":null,"expectedSkillSelectionRevision":null,"permissionProfile":"approval_required"}
     );
     defer text.deinit();
     try std.testing.expect(text.value.expectedSkillCatalogRevision == null);
     try std.testing.expect(text.value.expectedSkillSelectionRevision == null);
+    try std.testing.expectEqual(
+        product_control.PermissionProfile.approval_required,
+        permissionProfile(text.value.permissionProfile).?,
+    );
+    try std.testing.expect(permissionProfile("full_access") != null);
+    try std.testing.expect(permissionProfile("accept_edits") == null);
     try std.testing.expectError(
         error.InvalidBridgePayload,
         parsePayload(TaskCreate,

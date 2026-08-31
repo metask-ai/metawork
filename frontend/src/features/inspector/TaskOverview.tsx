@@ -304,10 +304,12 @@ function WorkProcess({
 
 export function TaskOverview({
   task,
+  permissionProfilesEnabled,
   focusRequest,
   onFocusPending,
 }: {
   task: TaskView;
+  permissionProfilesEnabled: boolean;
   focusRequest: InspectorFocusRequest;
   onFocusPending: () => void;
 }) {
@@ -347,6 +349,12 @@ export function TaskOverview({
     <div className="inspector-frame">
       <header className="inspector-header">
         <h2 id="task-inspector-title">{t("inspector.title")}</h2>
+        {permissionProfilesEnabled && (
+          <div className="inspector-permission-profile">
+            <span>{t("permission.task.label")}</span>
+            <strong>{t(`permission.profile.${task.permissionProfile}`)}</strong>
+          </div>
+        )}
       </header>
 
       <div className="inspector-sections">

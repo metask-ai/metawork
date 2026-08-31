@@ -66,6 +66,7 @@
             .{ .name = "metawork.modelConnections.remove", .origins = .{"zero://app"} },
             .{ .name = "metawork.modelConnections.test", .origins = .{"zero://app"} },
             .{ .name = "metawork.modelConnections.selectDefault", .origins = .{"zero://app"} },
+            .{ .name = "metawork.permissions.setDefaultProfile", .origins = .{"zero://app"} },
             .{ .name = "metawork.tasks.create", .origins = .{"zero://app"} },
             .{ .name = "metawork.tasks.run", .origins = .{"zero://app"} },
             .{ .name = "metawork.tasks.selectModel", .origins = .{"zero://app"} },

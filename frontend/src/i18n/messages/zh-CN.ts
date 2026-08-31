@@ -630,6 +630,7 @@ export const zhCN: Record<MessageId, string> = {
   "operation.task_restore": "恢复任务",
   "operation.task_delete": "删除任务记录",
   "operation.workspace_remove": "移除工作区",
+  "operation.permission_default": "更新权限默认策略",
   "operation.skill_catalog_refresh": "刷新 Skill 目录",
   "search.open": "搜索",
   "search.title": "搜索 MetaWork",
@@ -654,7 +655,25 @@ export const zhCN: Record<MessageId, string> = {
   "settings.sections": "设置分区",
   "settings.section_label": "设置",
   "settings.general": "通用",
+  "settings.permissions": "权限",
   "settings.account": "账号",
+  "permission.profile.approval_required": "请求批准",
+  "permission.profile.approval_required.help":
+    "常规工作区编辑自动执行；当前策略未覆盖的操作会先征求你的决定。",
+  "permission.profile.full_access": "完全访问",
+  "permission.profile.full_access.help":
+    "MetaWork 不为此 Task 提供工具权限保护。",
+  "permission.new_task.label": "权限策略",
+  "permission.new_task.help": "仅适用于此 Task，创建后不可更改。",
+  "permission.task.label": "权限策略",
+  "permission.default.label": "新 Task 默认策略",
+  "permission.default.help":
+    "只影响之后创建的 Task；已有 Task 保留创建时的策略。",
+  "permission.menu_help": "选择此 Task 如何处理当前权限之外的操作。",
+  "permission.full_access.boundary":
+    "完全访问仍受操作系统权限和外部服务访问范围约束；它不是 root 权限，也不是沙箱设置。",
+  "permission.default_updated": "已更新权限默认策略。",
+  "permission.default_update_failed": "MetaWork 无法更新权限默认策略。",
   "settings.execution_defaults": "执行默认配置",
   "settings.use_metask_default": "新任务改用 Metask",
   "settings.model_connections": "模型连接",
@@ -768,6 +787,7 @@ export const zhCN: Record<MessageId, string> = {
   "cause.skill_policy_violation": "Skill 未开始执行：当前任务不允许使用",
   "cause.skill_unavailable": "Skill 未开始执行：当前执行环境不支持该 Skill",
   "cause.resource_limit": "任务运行资源已达上限",
+  "cause.permission_required": "需要权限",
   "account.options_updated":
     "\u53ef\u7528\u9009\u9879\u5df2\u66f4\u65b0\uff0c\u8bf7\u91cd\u65b0\u9009\u62e9\u3002",
   "workspace.selection_unavailable":
@@ -820,6 +840,9 @@ export const zhCN: Record<MessageId, string> = {
   "scheduled.instruction": "任务指令",
   "scheduled.instruction_help":
     "如需使用某个全局 Skill，直接在任务指令中说明即可。",
+  "scheduled.permission": "权限",
+  "scheduled.permission_help":
+    "任务将无人值守运行；操作超出此权限范围时会停止，并等待你处理。",
   "scheduled.when": "运行时间",
   "scheduled.recurrence.once": "仅一次",
   "scheduled.recurrence.interval": "重复",

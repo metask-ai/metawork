@@ -12,6 +12,7 @@ const view = @import("product_task_view");
 const execution_binding = @import("product_task_execution_binding");
 
 pub const Runtime = runtime.Runtime;
+pub const TerminalSummary = runtime.TerminalSummary;
 pub const RunInput = runtime.RunInput;
 pub const PermissionChoice = runtime.PermissionChoice;
 pub const UiResponse = runtime.UiResponse;
@@ -35,6 +36,8 @@ pub const RecoveryExternalAuthority = runtime.RecoveryExternalAuthority;
 pub const RecoveryEffects = runtime.RecoveryEffects;
 
 pub const Provider = state.Provider;
+pub const PermissionProfile = state.PermissionProfile;
+pub const PermissionInteraction = state.PermissionInteraction;
 pub const RunOutcome = state.RunOutcome;
 pub const FileReferencePosition = state.FileReferencePositionView;
 pub const FileReferenceRange = state.FileReferenceRangeView;

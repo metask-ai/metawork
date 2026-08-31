@@ -127,6 +127,12 @@ function renderSettings(account) {
         secretCapture: false,
         connectionTest: false,
       },
+      permissionProfiles: {
+        enabled: false,
+        available: [],
+        defaultProfile: "approval_required",
+        busy: false,
+      },
       focusTarget: "title",
       disabled: false,
       cancelDisabled: false,
@@ -136,6 +142,7 @@ function renderSettings(account) {
       onTestModelConnection() {},
       onSelectModelConnection() {},
       onActivateMetask() {},
+      onSetDefaultPermissionProfile() {},
       ...callbacks,
     }),
   );

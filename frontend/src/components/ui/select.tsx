@@ -36,7 +36,9 @@ export function SelectField({
       }}
     >
       <Select.Trigger className={className} aria-label={ariaLabel}>
-        <Select.Value placeholder={placeholder} />
+        <Select.Value placeholder={placeholder}>
+          {options.find((option) => option.value === value)?.label}
+        </Select.Value>
         <Select.Icon>
           <Icon name="chevron" />
         </Select.Icon>

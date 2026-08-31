@@ -275,7 +275,7 @@ function renderCompletedSurface(
   );
 }
 
-function renderNewTaskView(composer = null) {
+function renderNewTaskView(composer = null, overrides = {}) {
   return renderToStaticMarkup(
     createElement(
       I18nContext.Provider,
@@ -289,6 +289,10 @@ function renderNewTaskView(composer = null) {
       createElement(NewTaskView, {
         hasWorkspace: true,
         composer,
+        permissionProfiles: [],
+        permissionProfile: "approval_required",
+        onPermissionProfileChange() {},
+        ...overrides,
       }),
     ),
   );
@@ -526,6 +530,17 @@ test("new Task places the Composer after the outcome prompt", () => {
   const composer = markup.indexOf('data-test="draft-composer"');
   assert.ok(prompt >= 0 && composer > prompt);
   assert.doesNotMatch(markup, /task-examples|task-example/);
+});
+
+test("new Task exposes one immutable permission choice without a trust prompt", () => {
+  const markup = renderNewTaskView(null, {
+    permissionProfiles: ["approval_required", "full_access"],
+    permissionProfile: "approval_required",
+  });
+  assert.match(markup, /Permission policy/);
+  assert.match(markup, /Request approval/);
+  assert.match(markup, /cannot be changed after it is created/);
+  assert.doesNotMatch(markup, /trust this workspace|alertdialog/i);
 });
 
 test("New task keeps the titlebar quiet while a real Task retains context", () => {

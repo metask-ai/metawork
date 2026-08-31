@@ -10,6 +10,7 @@ import type {
   McpHttpConnectionInput,
   McpSecretSlot,
   McpStdioConnectionInput,
+  PermissionProfile,
   ScheduledTaskMutation,
   TaskRunInput,
   TaskWorkspaceIntent,
@@ -53,6 +54,7 @@ import {
   decodeMcpConnectionTestResult,
   decodeMcpAuthorizationResult,
   decodeMcpAuthorizationCancelResult,
+  decodePermissionProfileMutationResult,
   decodeFilePreview,
 } from "./decode-contracts.ts";
 import { RendererBridgeContractError } from "./contract-error.ts";
@@ -612,6 +614,7 @@ export class BridgeClient {
     expectedExecutionGeneration: string,
     expectedSkillCatalogRevision: string | null,
     expectedSkillSelectionRevision: string | null,
+    permissionProfile: PermissionProfile,
   ) {
     return decodeTaskCreateResult(
       await this.invoke(commands.createTask, {
@@ -619,6 +622,15 @@ export class BridgeClient {
         expectedExecutionGeneration,
         expectedSkillCatalogRevision,
         expectedSkillSelectionRevision,
+        permissionProfile,
+      }),
+    );
+  }
+
+  async setDefaultPermissionProfile(permissionProfile: PermissionProfile) {
+    return decodePermissionProfileMutationResult(
+      await this.invoke(commands.setDefaultPermissionProfile, {
+        permissionProfile,
       }),
     );
   }

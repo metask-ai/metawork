@@ -39,7 +39,7 @@ MetaWork 当前不定义为：
 
 ### Workspace
 
-代表 Agent 工作所针对的本地目录和权限范围。Workspace 是独立产品对象，不得仅从已有 Task 的路径反向推导。Manual Workspace 由用户明确选择或重新授权，一个目录可以承载零个、一个或多个共享文件上下文的 Task；Automatic Workspace 由 Workbench 在调用方请求系统分配时创建，一个独立目录精确归属一个 Task。两者共用同一个 Workspace registry、Task 引用和 AgentCore admission，`kind` 只表达目录取得方式；Renderer 不得从路径或目录名推断 `kind`。Workspace 最终应成为文件访问、工具执行和 Task 归属的安全边界。当前同步 baseline 只在临时或用户明确 trusted 的 Workspace 中验证，不能据此宣称 strict Workspace security 已完成。
+代表 Agent 工作所针对的本地目录、任务上下文和授权身份。Workspace 是独立产品对象，不得仅从已有 Task 的路径反向推导。Manual Workspace 由用户通过 Host 原生目录选择器明确选择或重新授权；选择器确认本身就是该目录的产品授权，不追加 `trust`、`Use this folder` 或 Renderer boolean。一个 Manual Workspace 可以承载零个、一个或多个共享文件上下文的 Task；Automatic Workspace 由 Workbench 在调用方请求系统分配时创建，一个独立目录精确归属一个 Task。两者共用同一个 Workspace registry、Task 引用和 AgentCore admission，`kind` 只表达目录取得方式；Renderer 不得从路径或目录名推断 `kind`。Workspace 当前不是 OS sandbox 或 strict security 边界；未来只有文件、进程、network、symlink 与 TOCTOU enforcement 通过独立 Gate 后，才能扩大其安全承诺。
 
 ### Task 与内部 Agent Session
 
@@ -57,7 +57,7 @@ Turn 是用户提交的一次交互；Run 是 AgentCore 为该交互进行的一
 
 ### Approval / UI Request
 
-代表 Agent 继续工作前需要用户作出的选择。当前 MetaWork Agent 只开放同步工具 permission；AgentCore ABI v1 虽支持结构化问题回答，但该 built-in 不进入 MetaWork Agent 能力集合。需要补充信息时，Agent 以普通 Assistant 回复结束当前 Run，用户通过 Composer 继续。同步等待期间 Run 仍占用 executor slot，不形成可持久化挂起点。计划审批和自定义结构化交互只有在 AgentCore 发布相应控制协议并通过 MetaWork 产品验收后才进入产品范围。
+代表 Agent 继续工作前仍缺少的用户决定，不是 Tool 名称、Shell 语法或产品安全感的可视化。一个正式权限请求必须对应当前 authority 尚未覆盖、值得中断、可准确描述且执行层能兑现的具体能力或 effect；已由 Workspace picker、当前 Task authority、已配置服务或系统原生授权覆盖的决定不得重复询问。当前 MetaWork Agent 只开放 AgentCore 同步工具 permission；该请求仍是 compatibility baseline，不表示现有 payload 已具备上述完整 effect 语义。AgentCore ABI v1 虽支持结构化问题回答，但该 built-in 不进入 MetaWork Agent 能力集合。需要补充信息时，Agent 以普通 Assistant 回复结束当前 Run，用户通过 Composer 继续。同步等待期间 Run 仍占用 executor slot，不形成可持久化挂起点。计划审批、自定义结构化交互和 typed effect confirmation 只有在 AgentCore 发布相应控制协议并通过 MetaWork 产品验收后才进入产品范围。
 
 ### Account、模型连接与 ExecutionConfig
 
@@ -65,7 +65,7 @@ Account 是 MetaWork 的 Metask 账号控制面，负责 OAuth 登录、当前�
 
 ### Scheduled Task
 
-Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做什么、何时触发”。Task 是一次真实执行及其结果历史，Schedule 是触发规则，Skill 是独立的可复用执行方法；Scheduled Task 不保存 Skill identity、catalog revision 或参数，也不是 AgentCore Session、交互式 Task 草稿、Skill 子对象或第二套 automation 数据面。用户需要采用某个全局 Skill 时可以在任务指令中表达，但 occurrence 始终按普通 Text Run 重新经过 Account、Workspace、容量和 shutdown admission，成功后创建一个新的真实 Task，再通过现有 bounded Executor 启动。每个 occurrence 都请求新的 Automatic Workspace，Scheduled Task 界面不提供 Manual Workspace 选择。Scheduled Task 只持久化无 secret 的指令、触发游标和有界 occurrence 事实，不持有 API Key；默认执行配置或 Workspace authority 变化时不得静默改绑或重放。
+Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做什么、何时触发”。Task 是一次真实执行及其结果历史，Schedule 是触发规则，Skill 是独立的可复用执行方法；Scheduled Task 不保存 Skill identity、catalog revision 或参数，也不是 AgentCore Session、交互式 Task 草稿、Skill 子对象或第二套 automation 数据面。用户需要采用某个全局 Skill 时可以在任务指令中表达，但 occurrence 始终按普通 Text Run 重新经过 Account、Workspace、容量和 shutdown admission，成功后创建一个新的真实 Task，再通过现有 bounded Executor 启动。每个 occurrence 都请求新的 Automatic Workspace，Scheduled Task 界面不提供 Manual Workspace 选择。Scheduled Task 只持久化无 secret 的指令、固定 PermissionProfile、触发游标和有界 occurrence 事实，不持有 API Key；默认 profile、默认执行配置或 Workspace authority 变化时不得静默改绑或重放。occurrence 使用定义固定的非交互 authority，只能执行或以 typed reason 停止，不能进入同步 permission wait、临时升级或把通知当作远程审批通道。
 
 ## 5. 产品功能需求
 
@@ -78,7 +78,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - Workspace 记录 immutable `kind = manual | automatic`。Manual Workspace 可承载多个 Task；Automatic Workspace 精确归属一个 Task，两种 kind 不允许对同一 canonical root 相互转换；
 - Application 只通过 Native SDK `.data` 目录规则解析 `<MetaWork data dir>/workspaces` 并向 Workbench 注入可用或不可用 capability；Renderer、Bridge payload、cwd、home 和环境 fallback 都不能决定托管目录根；
 - 每个 automatic Task 使用 `<MetaWork data dir>/workspaces/<16 位随机小写 hex>` 独立目录，同一 Task 的后续 Run 复用该目录。分配必须 exclusive create、有界重试、校验 canonical containment；失败不能回退到共享目录；
-- automatic root 及其子目录是保留命名空间，不能注册为 Manual Workspace；用户明确选择 automatic root 的祖先仍服从当前 trust 语义，不因此获得 strict isolation；
+- automatic root 及其子目录是保留命名空间，不能注册为 Manual Workspace；用户通过原生 picker 明确选择 automatic root 的祖先仍只取得该 Manual Workspace authority，不因此获得 strict isolation；
 - Workbench projection 必须把 Workspace 作为独立对象发布，至少包含稳定 identity、kind、显示名称、规范路径、当前授权状态和可汇总的 Task 信号；每个被 Task 引用的 Automatic Workspace 必须出现在同一 canonical snapshot；
 - 没有 Task 的 Manual Workspace 仍然存在于 New task 的路径选择器中；最近使用与重新授权不能依赖 Renderer 从 Task 列表猜测。Automatic Workspace 不进入普通选择器、recent 或重新授权入口，但其 owning Task 仍可导航；
 - New task 路径控件负责选择、添加和重新授权；设置页不再承担 Workspace 生命周期管理。设置以覆盖 Workbench 内容区的长期 surface 呈现，保留窗口壳层和底层 Workbench 挂载，关闭后恢复原 Task、草稿、滚动和焦点；Renderer 不维护全局 active Workspace 镜像；
@@ -131,7 +131,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - 每个 Task 至多一个 active operation：当前可以是 non-terminal Run、manual compact 或 Conversation restore，包括 executor 中的 `queued` 状态；Run、compact 与 restore 互斥，当前 operation 结束前 Workbench 拒绝新的 Run、compact、restore 和其他 Session mutation，Renderer 只能保留未提交草稿；
 - Renderer 产品合同为 `metawork.renderer-bridge` 固定 revision 1：`connect` 精确协商后才开放产品路径，snapshot 根节点由严格的无 secret `capabilities`、`account`、`skillCatalog`、`skillManagement`、`mcp`、`workspaces`、`scheduledTasks` 与 `tasks` 组成且不维护第二个局部版本；Account 发布脱敏 catalog selection identifier 与 generation，Workspace 由 Host 独立发布，Task 固化 binding epoch 与显示事实；Renderer 只为 New task draft 保存可空 Manual Workspace identity，Host 不发布全局 selected Workspace；`tasks.create` 提交严格的 `automatic | manual(workspaceId, expectedWorkspaceEpoch)` Workspace intent，Account、Workspace 和 Task mutation 均提交对应 expected generation/epoch，Host 重新校验 window、ownership、catalog membership 与 admission；快速开发阶段的合同内容直接原地 hard cut，不接受或双写被取代的临时 payload；
 - 预期的 Task/Workspace admission 拒绝必须作为严格 typed result 返回并由 Renderer 映射为产品文案；非法 payload、伪造 ownership 与不可信 origin 仍 fail closed 为 Bridge error，不得把内部 error name 显示给用户；
-- 当前固定 revision 1 合同原子提供独立 Workspace projection 与 Task execution binding。一次性目录能力必须由选择命令在 Host 内创建并消费，Renderer 不接收路径授权 token，不从 Task 反推 Workspace，也不能通过可选字段继续发送被取代的临时 payload；
+- 当前固定 revision 1 合同原子提供独立 Workspace projection 与 Task execution binding。一次性目录能力必须由选择命令在 Host 内创建并消费；用户在 Host 原生目录选择器中确认目录即完成 Manual Workspace 授权，不再追加重复的 trust 确认。Renderer 不接收路径授权 token，不从 Task 反推 Workspace，也不能通过可选字段继续发送被取代的临时 payload；
 - 产品 Task identity 由 Workbench 独立、稳定地分配；内部 Agent/Gate 原始事件使用单独的 Session route identity 做路由，两者不得复用或假定数值相等。Session route identity 不进入产品 snapshot，Renderer 始终只看到唯一的产品 `taskId`。
 - credential 不得因 owner 释放而重新出现在任何 Renderer projection。Host 在安装新 credential 以及 secure-zero 旧默认或 Task-owned credential 之前，必须永久清洗既有 Workspace、Task、Run、tool 和 UI history 投影；同时存在前缀重叠 credential 时按最长匹配脱敏。
 
@@ -154,14 +154,20 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 
 ### 5.5 审批与输入
 
-- Agent Session 默认使用 `accept_edits`：只读操作与当前 Workspace 范围内的 Write/Edit 自动允许，Workspace 范围外的编辑及 Bash 等其他危险操作仍须明确授权；显式 ask/deny 规则继续优先且不得被该默认模式绕过；
-- 用户可以回答 Agent 问题；计划批准或拒绝只有在 AgentCore 发布 typed control capability 后才显示；
+- Authority、Interaction Policy 与 Sandbox 是三个独立维度：Authority 决定 Task 已取得的 Workspace、Shell、Skill、MCP 与系统能力；Interaction Policy 决定未覆盖操作是否询问；Sandbox 只描述执行时的物理约束。产品、UI 和验证不得把三者合并成一个“安全模式”；
+- 目标 `PermissionProfile` 是 MetaWork-owned 的产品策略，预设为 `approval_required | standard | full_access`。`approval_required` 表示常规 Workspace 编辑自动、其他当前策略未覆盖操作请求批准；`standard` 表示常规本地工作自动、只有具备可靠 typed risk/effect 的操作请求批准；`full_access` 表示不提供 MetaWork tool permission 保护，仍受操作系统权限约束。内部 AgentCore enum、ShellPolicy 和 rule schema 不得成为 Renderer 产品词汇；
+- 当前正式 Session 按 Task-owned profile 使用 `approval_required → accept_edits + unrestricted` 或 `full_access → full_access + unrestricted`；前者会自动执行 Workspace 内 Write/Edit，并对 Workspace 外 Write 与明确有副作用的 Bash 发布同步 permission request，后者不提供 MetaWork tool permission 保护。两者都不是 Sandbox 或运行不可信 Workspace 的安全保证；
+- 首个产品切片只开放 `approval_required | full_access`，默认保持 `approval_required`，用户可以在 Settings 改变后续新 Task 默认值，并在 New task 对本次 Task 覆盖；选择 `full_access` 的同一动作就是该 Task 的明确授权，不追加确认 modal。`standard` 在 typed risk/effect、执行前 commit boundary、Bash 限制说明和 fail-closed 验证完成前保持隐藏；产品不显示 disabled 空壳；
+- 首个切片中 profile 在 Task 创建后不可变：Task 保存 effective profile，每个 Run 保存 provenance，checkpoint restore 必须使用同一 profile；归档 Task 阻止新 Run，删除 Task 收口 Session 并永久移除该 profile authority。当前 AgentCore ABI 没有 idle permission-mode mutation，跨 mode restore 也不产生可消费的 typed report；因此不能用 Session-local shadow state、规则拼装或 checkpoint replacement 模拟切换。未来只有取得新的 canonical capability 并完成撤权生效点验证后，已有 idle Task 才可显示切换入口；
+- Shell 是广泛执行 authority。`unrestricted` 只表示获准 Bash 不经过 AgentCore file sandbox，不等于 root，也不决定是否询问；产品不得以 Bash 前缀、命令字符串分类或 `exact_arguments` Session grant 宣称可靠 effect 边界；
+- 用户在 Settings 或 New task 选择更宽松 profile 的动作本身构成相应默认或本次 Task 授权，不追加第二个确认 modal；Settings 改回更严格 profile 只影响后续 Task，既有 Task 可以归档以立即禁止新 Run，并通过删除永久撤销。当前 Task 不提供伪切换；
+- 用户可以响应当前 typed permission；结构化 Agent 问答、计划批准或拒绝只有在对应 built-in/control capability 进入 MetaWork 产品集合并通过验收后才显示；
 - 审批和回答必须绑定 Task、Run 和请求标识，拒绝过期或重复响应；
 - 同步等待必须支持 deadline、用户取消、Task close 和 Application shutdown 唤醒；
 - 同步等待区间发生 Host/Core crash 后，Run 标记 `interrupted`，工具不得自动执行；
 - 目标产品支持用户主动创建和撤销 Host-owned 持久权限规则，但 UI 只能在 Host 声明当前请求可形成安全、范围明确的规则时显示 `Always allow`；
 - 持久规则必须绑定稳定 Workspace identity、tool identity 与版本、operation 和规范化资源约束，并定义 Workspace、tool、脚本内容或安全能力变化时的失效规则；
-- strict Workspace security 和对应规则匹配/审计能力未通过验证前，不得开放 Workspace 级文件规则；受控进程、process tree、network 和 environment 边界未通过独立验证前，不得开放项目脚本、Bash、Network 或 `Full access` 持久授权；
+- strict Workspace security 和对应规则匹配/审计能力未通过验证前，不得开放 Workspace 级文件持久规则；受控进程、process tree、network 和 environment 边界未通过独立验证前，不得开放项目脚本、Bash 或 Network 持久规则。这里约束的是可复用的细粒度规则，不把目标 `full_access` profile 伪装成一组已验证的持久规则；
 - async pending、跨重启恢复和 subagent suspend 只有在 AgentCore 发布明确 capability 后才能进入产品范围。
 
 ### 5.6 命令执行
@@ -218,7 +224,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - Skill 管理资产与运行时 catalog 是两份不同真相。Workbench 拥有本地 package/inventory、安装 provenance、目标范围、安全文件事务和管理状态；AgentCore 继续独占 runtime discovery、canonical priority、winner/conflict、health 与 catalog revision。MetaWork 使用独立 `install_id` 管理资产，运行时身份仍是 `catalog_scope_id + skill_id`；Renderer 不从名称、路径或 invocation 猜测来源、范围、优先级或身份。MetaWork 未能在已授权 canonical Skill root 中解析并取得精确管理 authority 的现有 Skill 仍可按 AgentCore projection 展示，但必须标记为外部管理，隐藏导出、重新导入和卸载；
 - Skill 启用状态是 Workbench-owned 的 User/Manual Workspace policy，默认启用，只持久化 disabled `skill_policy_key` 与 Workspace override，以及单调 `selection_revision`；持久键精确使用 User policy 或 `workspace_id + workspace_epoch + skill_policy_key`，不使用易随内容变化的 concrete `skill_id`。mutation 同时校验 Workspace epoch、catalog revision 和 selection revision，成功后只影响对应 current policy；已经创建的 Task/Session 不热替换，只有 idle Task 显式刷新才采用新 policy。Host 重启恢复 Conversation 时不查询或隐式重绑 Skill catalog，恢复后的 Task catalog 为 uninitialized；Manual Task 只有在 idle 状态显式刷新后才采用 Workspace 当前 catalog 与 committed policy，Automatic Task 保持 Text-only；
 - 本地导入必须由 Host 原生文件/目录选择产生的一次性、window-bound staged capability 发起；Renderer 不提交任意物理路径。导入在目标范围外完成有界解压、路径/类型/容量检查和只读预览，经用户确认后原子发布到个人或指定 Manual Workspace 的 `.agents/skills`。明确属于候选 Skill 的 AgentCore definition/resource/conflict failure 必须回滚；catalog 暂时无法完成验证时保留已发布资产并进入 `pending_verification`，不能伪装成可用。替换或卸载不得与可能消费该范围的 active operation 并发，不得静默覆盖现有目录，并必须保留可恢复的事务前副本直到提交完成；
-- 用户创建或修改 Skill 仍通过普通 Text Run 与 AgentCore built-in Read/Edit 完成，不在 Skill 中心建立第二个创作或文件编辑器。Workspace 内的 `.agents/skills` 服从现有 Workspace authority；用户级目录只有在用户明确将目标 Skill 目录作为 trusted Workspace 授权后才能修改。Skill 中心可以导航到预填的普通 Text draft；项目 Skill 创建完成后通过显式 catalog refresh 出现，个人 Skill 通过受控本地导入发布。一次 Run 使用已绑定 snapshot，不热替换正在执行的 Skill；文件变化只在显式 catalog refresh 后影响后续选择与 Run；
+- 用户创建或修改 Skill 仍通过普通 Text Run 与 AgentCore built-in Read/Edit 完成，不在 Skill 中心建立第二个创作或文件编辑器。Workspace 内的 `.agents/skills` 服从现有 Workspace authority；用户级目录只有在用户通过原生 picker 明确把目标 Skill 目录授权为 Manual Workspace 后才能修改。Skill 中心可以导航到预填的普通 Text draft；项目 Skill 创建完成后通过显式 catalog refresh 出现，个人 Skill 通过受控本地导入发布。一次 Run 使用已绑定 snapshot，不热替换正在执行的 Skill；文件变化只在显式 catalog refresh 后影响后续选择与 Run；
 - Host 重启后恢复的历史 Task 先以 detached、可阅读状态出现；满足恢复资格时，用户选择左栏 Task 只看到已保存产品历史与普通 Composer，不显示恢复卡片、恢复按钮或专用 placeholder。用户首次发送新消息时，Renderer 在同一次发送意图内先提交 restore，等待 Host 确认 attachment 后再精确提交一次 Text Run；失败时保留草稿并显示可执行的失败说明，下一次普通发送可以重试。只有 source Task/binding、checkpoint ownership、Workspace/Task identity、Conversation、terminal state 与当前 execution target readiness 均可安全恢复后才允许该内部前置步骤；Skill/MCP/Permission continuity 缺失只产生 degraded 能力状态。历史 execution generation 不要求等于当前 generation：同 provider 且当前 authority 可承载 Task model 时，restore 必须以 durable adoption 同步推进 Task generation、binding epoch 与 checkpoint anchor 后再安装 attachment，并保留旧 Run 的逐 Run provenance。该窄 adoption 只连接同一 Task 的 source Conversation 与当前可执行 target，不允许切换 provider/model，也不构成通用 rebind；任意配置 rebind 或从历史创建新 Task 仍属于后续显式产品能力，当前实现不得用它们冒充恢复；
 - Run 中 AgentCore `tool_result.file_refs` 提供的结构化文件引用是 File Preview 的唯一入口。Renderer 按 `tool order → fileRefs order` 在对应 Run 回复后显示“相关文件”，用户显式选择后才通过精确 `taskId + runId + fileReferenceId` 请求 Host 读取 Workspace 中的当前文件内容；预览以右侧 Drawer 展示，明确说明不是 Run 时版本，不缓存、不持久化、不自动刷新，也不把 reference 的 kind、Tool 名称、普通文本或 Bash 输出解释为文件变更、Output 或 citation。Host 必须在独立有界 worker lane 中执行 no-follow、root-contained、regular-file-only 的最多 256 KiB UTF-8 文本读取，主线程在响应前重新校验 Task/Run/reference/Workspace authority，并以当前及历史 execution credential 做内容脱敏；非 ready 状态不得携带正文；
 - `Files changed` 表示实际文件变更集合，`Outputs` 表示用户关心的交付结果，两者不得用“新建文件”或 File Preview reference 自动等同；当前 AgentCore 已发布 typed `file_changes` observation，但 Product owner、持久化、恢复与 Renderer 投影尚未验收，typed Output 也尚未提供，因此两个模块都必须隐藏；
@@ -244,7 +250,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 
 - `定时任务` 是与 `新建任务`、`技能` 同级的独立页面，不属于 Skill 中心、交互式 Task 或某个 Workspace 的子页面；页面不显示或选择 Workspace，每次 occurrence 直接请求新的 Automatic Workspace；
 - 没有定义时，页面提供可采用的 Text 建议模板，并保留页首统一 `新建定时任务` 入口；不建立无法推导时间规则的伪自然语言快捷入口。Text 模板和普通定时任务都使用自动工作区，不要求用户先添加或选择 Manual Workspace。已有定义时切换为搜索工具栏，并按 `需要处理 / 进行中 / 已暂停 / 已完成` 组织。紧凑行显示名称、计划、下一次运行、最近结果及其真实 Task 链接，并提供编辑、暂停/恢复、立即运行和删除；
-- 创建流程按名称、任务说明、运行时间和确认摘要排列；不提供 Workspace 或 Skill 配置、catalog revision 或参数配置，不得让空页面先暴露 provider、generation、Unix seconds 或固定间隔秒数等工程字段；
+- 创建流程按名称、任务说明、权限、运行时间和确认摘要排列；权限默认采用当前新任务默认值，保存后固定在定义上；不提供 Workspace 或 Skill 配置、catalog revision 或参数配置，不得让空页面先暴露 provider、generation、Unix seconds 或固定间隔秒数等工程字段；
 - 首版支持一次性、每小时、每日、每周和由明确起点开始的固定间隔；Host 保存 canonical Unix time、locale-independent recurrence 与创建时 timezone identity，Renderer 只负责本地化显示和结构化编辑，不用本地 timer 推进产品状态；
 - 每次自动或手动触发创建一个新的真实 Task。计划定义不复用旧 Conversation、不把结果复制成第二份聊天历史，也不绕过既有 Task/Run admission；
 - 同一 Scheduled Task 的上一次 Task 仍有 non-terminal Run 时，自动触发必须跳过本次；不得并发重放同一计划或自动终止已有 Run；
@@ -252,6 +258,8 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - Scheduled Task 定义、触发游标和有界 occurrence history 由 Workbench 在产品数据目录原子持久化；损坏、commit 结果不确定或恢复校验失败必须 fail closed 并发布 typed persistence health，不得回退成空列表或继续使用可能重复的游标；
 - 主窗口关闭使用后台/托盘形态而不是销毁 Host；后台 Host 继续 timer、Run、通知与待处理事实，托盘提供重新打开和显式退出。显式退出可以停止本机后台执行，但下次启动仍恢复定义并执行上述单次 missed-run reconciliation；
 - 执行配置、Workspace authority、容量或 shutdown gate 不再满足时，计划进入明确的 `needs_attention`，停止继续计时并保留 typed 原因；用户必须编辑并确认当前事实后才能恢复；
+- Scheduled Task 定义必须固定一份可持久化、可恢复的非交互 `PermissionProfile`；默认值后续变化不得改写既有定义，编辑生效前必须重新经过 definition admission；
+- occurrence 不得进入同步 permission wait。若固定 profile 无法覆盖某个操作，当前 occurrence 以 typed `permission_required`（或经批准的等价产品原因）停止，并使定义进入 `needs_attention`；系统通知只能定位该真实 Task 和原因，不能承担远程批准、临时升级或继续原 Run 的职责；
 - Scheduled Task 和 occurrence 不保存 credential、Authorization header、OAuth URL 或 AgentCore handle；计划标题和 Text instruction 进入产品 projection 前执行与 Task history 相同的有界复制和 credential 清洗；
 - occurrence 完成、失败、跳过或等待用户时进入有界历史并发出系统通知；通知点击只定位真实 Task/请求，不携带 secret 或建立第二状态面；通知不可用不得改变 Run terminal cause；
 - AgentCore 只执行被 Workbench admission 后的单次 Run，不拥有 cron、时钟、timer、OS wake 或 Scheduled Task persistence。
@@ -303,8 +311,8 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 当前核心执行路径为：
 
 ```text
-临时或 trusted Workspace → Task（持有内部 Agent Session）→ 用户输入 → 同步 Agent Run
-→ 文本流 → Agent-owned 固定 built-in 集合 → 同步 permission
+Automatic Workspace 或经原生 picker 授权的 Manual Workspace → Task（持有内部 Agent Session）→ 用户输入 → 同步 Agent Run
+→ 文本流 → Agent-owned 固定 built-in 集合 → 当前 `approval_required` compatibility permission
 → 工具结果 → 最终回复 → 取消/关闭 → Renderer reload 视图重建
 ```
 
@@ -333,7 +341,7 @@ Windows x86_64 GNU 已进入当前开发 baseline；Windows arm64 GNU 已接入 
 
 ### 7.5 后续产品能力
 
-async pending、更完整的跨重启 execution rebind、strict Workspace security、正式 Host tools、typed Output/FileChange、plan progress/approval、custom UI、远程 artifact 发布与正式更新、独立 AgentCore Worker 和 Linux 接入按独立 capability 与阶段推进，不能反向伪装成当前 v1 已具备。
+`PermissionProfile` 的 Task-create owner、same-profile fresh/restore、Run provenance 与 Scheduled noninteractive 已进入当前产品；未来独立的 idle mutation、`standard` 所需的 typed risk/effect 和执行前 commit boundary，以及 async pending、更完整的跨重启 execution rebind、strict Workspace security、正式 Host tools、typed Output/FileChange、plan progress/approval、custom UI、远程 artifact 发布与正式更新、独立 AgentCore Worker 和 Linux 接入，均按独立 capability 与阶段推进，不能反向伪装成当前 v1 已具备。
 
 具体验证矩阵见 [当前验证规范](validation.md)。
 

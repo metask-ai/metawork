@@ -275,6 +275,7 @@ pub const Limits = struct {
 };
 
 pub const StateWire = struct {
+    default_permission_profile: []const u8 = "approval_required",
     next_workspace_id: u64,
     next_workspace_recent_order: u64,
     next_task_id: u64,
@@ -324,6 +325,8 @@ pub const TaskWire = struct {
     title: []const u8,
     title_redacted: bool,
     archived: bool,
+    permission_profile: []const u8,
+    permission_interaction: []const u8,
     binding: BindingWire,
     next_run_generation: u64,
     active_operation: ?OperationWire,
@@ -394,6 +397,8 @@ pub const RunWire = struct {
     execution_generation: u64,
     execution_provider: []const u8,
     execution_model: []const u8,
+    permission_profile: []const u8,
+    permission_interaction: []const u8,
     input: RunInputWire,
     assistant: []const u8,
     assistant_redacted: bool,
@@ -663,6 +668,8 @@ pub fn projectTask(
         .title = task.durable.title,
         .title_redacted = task.durable.title_redacted,
         .archived = task.durable.archived,
+        .permission_profile = @tagName(task.durable.permission_profile),
+        .permission_interaction = @tagName(task.durable.permission_interaction),
         .binding = .{
             .epoch = task.durable.binding_epoch,
             .execution_generation = task.durable.execution_generation,
@@ -801,6 +808,8 @@ fn projectRun(
         .execution_generation = run.execution_generation,
         .execution_provider = @tagName(run.execution_provider),
         .execution_model = run.execution_model,
+        .permission_profile = @tagName(run.permission_profile),
+        .permission_interaction = @tagName(run.permission_interaction),
         .input = input,
         .assistant = run.assistant.list.items[0..run.assistant.committed_len],
         .assistant_redacted = run.assistant_redacted,
@@ -954,6 +963,14 @@ pub fn restoreTask(
 
     const execution_provider = parseEnum(task_state.Provider, wire.binding.provider) orelse
         return error.TaskStoreCorrupt;
+    const permission_profile = parseEnum(
+        task_state.PermissionProfile,
+        wire.permission_profile,
+    ) orelse return error.TaskStoreCorrupt;
+    const permission_interaction = parseEnum(
+        task_state.PermissionInteraction,
+        wire.permission_interaction,
+    ) orelse return error.TaskStoreCorrupt;
     const execution_model = try projection.copy(
         wire.binding.model,
         projection.limits.max_execution_model_bytes,
@@ -1014,6 +1031,8 @@ pub fn restoreTask(
             .execution_generation = wire.binding.execution_generation,
             .execution_provider = execution_provider,
             .execution_model = execution_model,
+            .permission_profile = permission_profile,
+            .permission_interaction = permission_interaction,
             .binding_epoch = wire.binding.epoch,
             .workspace_id = wire.workspace_id,
             .workspace_epoch = wire.workspace_epoch,
@@ -1176,6 +1195,14 @@ fn restoreRun(projection: RestoreProjection, wire: RunWire) RestoreError!task_st
             return error.TaskStoreCorrupt,
         .execution_model = execution_model,
         .execution_model_owned = true,
+        .permission_profile = parseEnum(
+            task_state.PermissionProfile,
+            wire.permission_profile,
+        ) orelse return error.TaskStoreCorrupt,
+        .permission_interaction = parseEnum(
+            task_state.PermissionInteraction,
+            wire.permission_interaction,
+        ) orelse return error.TaskStoreCorrupt,
         .input = input,
         .assistant = assistant,
         .assistant_redacted = wire.assistant_redacted,
@@ -1511,6 +1538,7 @@ fn deinitRestoredCompact(
 }
 
 const MetaWire = struct {
+    default_permission_profile: []const u8,
     next_workspace_id: u64,
     next_workspace_recent_order: u64,
     next_task_id: u64,
@@ -1521,6 +1549,7 @@ pub fn encode(output: []u8, state: StateWire) Error![]const u8 {
     if (output.len == 0) return error.TaskStoreEncodeFailed;
     var offset: usize = 0;
     appendRecord(output, &offset, record_meta, 0, 0, MetaWire{
+        .default_permission_profile = state.default_permission_profile,
         .next_workspace_id = state.next_workspace_id,
         .next_workspace_recent_order = state.next_workspace_recent_order,
         .next_task_id = state.next_task_id,
@@ -1583,6 +1612,7 @@ pub fn decodeRecovering(
     var next_workspace_recent_order: u64 = 1;
     var next_task_id: u64 = 1;
     var next_task_recent_order: u64 = 1;
+    var default_permission_profile: []const u8 = "approval_required";
     var max_workspace_id: u64 = 0;
     var max_workspace_recent_order: u64 = 0;
     var max_task_id: u64 = 0;
@@ -1592,6 +1622,7 @@ pub fn decodeRecovering(
     var dropped_failures: usize = 0;
     var degraded = false;
     var metadata_seen = false;
+    var metadata_incompatible = false;
     var saw_frame = false;
     var offset: usize = 0;
     while (offset < input.len) {
@@ -1673,6 +1704,7 @@ pub fn decodeRecovering(
                     payload,
                     .{ .ignore_unknown_fields = false },
                 ) catch {
+                    metadata_incompatible = true;
                     degraded = true;
                     offset = payload_end;
                     continue;
@@ -1686,6 +1718,7 @@ pub fn decodeRecovering(
                     continue;
                 }
                 metadata_seen = true;
+                default_permission_profile = meta.default_permission_profile;
                 next_workspace_id = meta.next_workspace_id;
                 next_workspace_recent_order = meta.next_workspace_recent_order;
                 next_task_id = meta.next_task_id;
@@ -1780,7 +1813,7 @@ pub fn decodeRecovering(
     // record high-water marks when metadata is missing or damaged. A store
     // with no recognizable current-format frame remains an unknown/retired
     // format and is rejected rather than silently treated as empty.
-    if (!saw_frame) return error.TaskStoreCorrupt;
+    if (!saw_frame or metadata_incompatible) return error.TaskStoreCorrupt;
     const workspace_storage = workspace_values.items;
     const task_storage = task_values.items;
     var workspace_len: usize = 0;
@@ -1863,6 +1896,7 @@ pub fn decodeRecovering(
     task_len = filtered_task_len;
 
     const state = StateWire{
+        .default_permission_profile = default_permission_profile,
         .next_workspace_id = try nextFromHighWater(next_workspace_id, max_workspace_id),
         .next_workspace_recent_order = try nextFromHighWater(next_workspace_recent_order, max_workspace_recent_order),
         .next_task_id = try nextFromHighWater(next_task_id, max_task_id),
@@ -2012,7 +2046,8 @@ fn nextAfterTask(current: u64, tasks: []const TaskWire, ids: bool) u64 {
 }
 
 fn validate(state: *const StateWire, limits: Limits) !void {
-    if (state.next_workspace_id == 0 or state.next_workspace_recent_order == 0 or state.next_task_id == 0 or
+    if (!validPermissionProfile(state.default_permission_profile) or
+        state.next_workspace_id == 0 or state.next_workspace_recent_order == 0 or state.next_task_id == 0 or
         state.next_task_recent_order == 0 or state.workspaces.len > limits.max_workspaces or
         state.tasks.len > limits.max_tasks)
         return error.Invalid;
@@ -2042,6 +2077,8 @@ fn validate(state: *const StateWire, limits: Limits) !void {
         if (task.id == 0 or task.recent_order == 0 or task.workspace_id == 0 or task.workspace_epoch == 0 or
             !validText(task.workspace_root, limits.max_workspace_bytes, false) or
             !validText(task.title, limits.max_task_title_bytes, true) or
+            !validPermissionProfile(task.permission_profile) or
+            !validPermissionInteraction(task.permission_interaction) or
             task.binding.epoch == 0 or task.binding.execution_generation == 0 or
             !oneOf(task.binding.provider, &.{ "anthropic", "openai", "gemini" }) or
             !validBinding(task.binding, limits.max_execution_model_bytes) or
@@ -2082,6 +2119,10 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
         if (run.id == 0 or run.generation == 0 or run.execution_generation == 0 or
             !oneOf(run.execution_provider, &.{ "anthropic", "openai", "gemini" }) or
             !validText(run.execution_model, limits.max_execution_model_bytes, false) or
+            !validPermissionProfile(run.permission_profile) or
+            !validPermissionInteraction(run.permission_interaction) or
+            !std.mem.eql(u8, run.permission_profile, task.permission_profile) or
+            !std.mem.eql(u8, run.permission_interaction, task.permission_interaction) or
             !std.mem.eql(u8, run.execution_provider, task.binding.provider) or
             !validText(run.assistant, limits.max_assistant_message_bytes, true) or
             !validText(run.diagnostic, limits.max_terminal_diagnostic_bytes, true) or
@@ -2162,6 +2203,7 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
             "event_pipeline_failure",
             "queue_capacity_failure",
             "ui_pipeline_failure",
+            "permission_required",
             "agent_failure",
             "dependency_contract_failure",
             "stale_catalog",
@@ -2254,6 +2296,14 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
         }
         if (run.next_activity_order <= max_activity_order) return error.Invalid;
     }
+}
+
+fn validPermissionProfile(value: []const u8) bool {
+    return oneOf(value, &.{ "approval_required", "full_access" });
+}
+
+fn validPermissionInteraction(value: []const u8) bool {
+    return oneOf(value, &.{ "interactive", "noninteractive" });
 }
 
 fn validRunTerminalState(phase: []const u8, outcome: ?[]const u8) bool {
@@ -2349,6 +2399,27 @@ test "task store hard cut rejects retired JSON envelopes" {
     try std.testing.expectError(error.TaskStoreCorrupt, decode(std.testing.allocator, retired, testLimits()));
 }
 
+test "task store hard cut rejects metadata from before permission profiles" {
+    const RetiredMetaWire = struct {
+        next_workspace_id: u64,
+        next_workspace_recent_order: u64,
+        next_task_id: u64,
+        next_task_recent_order: u64,
+    };
+    var output: [1024]u8 = undefined;
+    var offset: usize = 0;
+    try appendRecord(&output, &offset, record_meta, 0, 0, RetiredMetaWire{
+        .next_workspace_id = 1,
+        .next_workspace_recent_order = 1,
+        .next_task_id = 1,
+        .next_task_recent_order = 1,
+    });
+    try std.testing.expectError(
+        error.TaskStoreCorrupt,
+        decodeRecovering(std.testing.allocator, output[0..offset], testLimits()),
+    );
+}
+
 test "task store preserves history bound to an older Workspace epoch" {
     var workspaces = [_]WorkspaceWire{.{
         .id = 1,
@@ -2368,6 +2439,8 @@ test "task store preserves history bound to an older Workspace epoch" {
         .title = "",
         .title_redacted = false,
         .archived = false,
+        .permission_profile = "approval_required",
+        .permission_interaction = "interactive",
         .binding = .{ .epoch = 1, .execution_generation = 1, .provider = "openai", .model = "m" },
         .next_run_generation = 0,
         .active_operation = null,
@@ -2409,6 +2482,8 @@ test "damaged metadata does not block valid Task recovery" {
         .title = "task",
         .title_redacted = false,
         .archived = false,
+        .permission_profile = "approval_required",
+        .permission_interaction = "interactive",
         .binding = .{ .epoch = 1, .execution_generation = 1, .provider = "openai", .model = "m" },
         .next_run_generation = 0,
         .active_operation = null,
@@ -2455,6 +2530,8 @@ test "damaged current-format frames recover an empty projection" {
         .title = "task",
         .title_redacted = false,
         .archived = false,
+        .permission_profile = "approval_required",
+        .permission_interaction = "interactive",
         .binding = .{ .epoch = 1, .execution_generation = 1, .provider = "openai", .model = "m" },
         .next_run_generation = 0,
         .active_operation = null,
@@ -2513,6 +2590,8 @@ test "one damaged Task frame does not poison surviving history" {
             .title = "first",
             .title_redacted = false,
             .archived = false,
+            .permission_profile = "approval_required",
+            .permission_interaction = "interactive",
             .binding = .{ .epoch = 1, .execution_generation = 1, .provider = "openai", .model = "m" },
             .next_run_generation = 0,
             .active_operation = null,
@@ -2529,6 +2608,8 @@ test "one damaged Task frame does not poison surviving history" {
             .title = "second",
             .title_redacted = false,
             .archived = false,
+            .permission_profile = "approval_required",
+            .permission_interaction = "interactive",
             .binding = .{ .epoch = 1, .execution_generation = 1, .provider = "openai", .model = "m" },
             .next_run_generation = 0,
             .active_operation = null,
@@ -2598,6 +2679,8 @@ test "corrupt Task identity cannot manufacture a global failure" {
         .title = "first",
         .title_redacted = false,
         .archived = false,
+        .permission_profile = "approval_required",
+        .permission_interaction = "interactive",
         .binding = .{ .epoch = 1, .execution_generation = 1, .provider = "openai", .model = "m" },
         .next_run_generation = 0,
         .active_operation = null,
@@ -2665,6 +2748,8 @@ test "task store round-trips per-run execution generations across binding adopti
         .execution_generation = 13,
         .execution_provider = "openai",
         .execution_model = "model",
+        .permission_profile = "approval_required",
+        .permission_interaction = "interactive",
         .input = .{
             .kind = "text",
             .text = "before adoption",
@@ -2711,6 +2796,8 @@ test "task store round-trips per-run execution generations across binding adopti
         .title = "task",
         .title_redacted = false,
         .archived = false,
+        .permission_profile = "approval_required",
+        .permission_interaction = "interactive",
         .binding = .{
             .epoch = 2,
             .execution_generation = 17,
@@ -2725,6 +2812,7 @@ test "task store round-trips per-run execution generations across binding adopti
     }};
     var output: [64 * 1024]u8 = undefined;
     const bytes = try encode(&output, .{
+        .default_permission_profile = "full_access",
         .next_workspace_id = 2,
         .next_workspace_recent_order = 2,
         .next_task_id = 2,
@@ -2734,6 +2822,26 @@ test "task store round-trips per-run execution generations across binding adopti
     });
     var decoded = try decode(std.testing.allocator, bytes, testLimits());
     defer decoded.deinit();
+    try std.testing.expectEqualStrings(
+        "full_access",
+        decoded.value.default_permission_profile,
+    );
+    try std.testing.expectEqualStrings(
+        "approval_required",
+        decoded.value.tasks[0].permission_profile,
+    );
+    try std.testing.expectEqualStrings(
+        "interactive",
+        decoded.value.tasks[0].permission_interaction,
+    );
+    try std.testing.expectEqualStrings(
+        "approval_required",
+        decoded.value.tasks[0].runs[0].permission_profile,
+    );
+    try std.testing.expectEqualStrings(
+        "interactive",
+        decoded.value.tasks[0].runs[0].permission_interaction,
+    );
     try std.testing.expectEqual(@as(u64, 17), decoded.value.tasks[0].binding.execution_generation);
     try std.testing.expectEqual(@as(u64, 13), decoded.value.tasks[0].runs[0].execution_generation);
     try std.testing.expectEqual(@as(u64, 17), decoded.value.tasks[0].runs[1].execution_generation);
@@ -2784,6 +2892,8 @@ test "task store rejects states that would violate the product contract" {
         .execution_generation = 1,
         .execution_provider = "openai",
         .execution_model = "model",
+        .permission_profile = "approval_required",
+        .permission_interaction = "interactive",
         .input = .{
             .kind = "text",
             .text = "inspect",
@@ -2852,6 +2962,8 @@ test "task store rejects states that would violate the product contract" {
         .title = "task",
         .title_redacted = false,
         .archived = false,
+        .permission_profile = "approval_required",
+        .permission_interaction = "interactive",
         .binding = .{
             .epoch = 1,
             .execution_generation = 1,

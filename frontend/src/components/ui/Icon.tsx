@@ -25,6 +25,8 @@ import {
   Download,
   Send,
   Settings,
+  ShieldCheck,
+  Info,
   Square,
   SquarePen,
   Sunrise,
@@ -51,6 +53,8 @@ type IconName =
   | "search"
   | "plus"
   | "settings"
+  | "shield"
+  | "info"
   | "arrow-left"
   | "close"
   | "warning"
@@ -89,6 +93,8 @@ const icons: Record<IconName, LucideIcon> = {
   search: Search,
   plus: Plus,
   settings: Settings,
+  shield: ShieldCheck,
+  info: Info,
   "arrow-left": ArrowLeft,
   close: X,
   warning: TriangleAlert,

@@ -264,6 +264,10 @@ pub const Access = struct {
         return self.get().pendingUiObservation();
     }
 
+    pub fn permissionStopRequest(self: *Access) ?u64 {
+        return self.get().permissionStopRequest();
+    }
+
     pub fn copyPendingUiRequest(
         self: *Access,
         allocator: std.mem.Allocator,

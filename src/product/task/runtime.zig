@@ -22,6 +22,10 @@ const recovery_job = @import("product_task_recovery_job");
 
 pub const DurableCommit = task_persistence.Commit;
 pub const RunOutcome = task_state.RunOutcome;
+pub const TerminalSummary = struct {
+    outcome: RunOutcome,
+    permission_required: bool,
+};
 pub const ContinuationCapability = task_state.ContinuationCapability;
 pub const ExecutionIdentity = struct {
     generation: u64,
@@ -378,6 +382,8 @@ pub const CreateCandidate = struct {
     execution_generation: u64,
     execution_provider: task_state.Provider,
     execution_model: []u8,
+    permission_profile: task_state.PermissionProfile,
+    permission_interaction: task_state.PermissionInteraction,
     workspace_id: u64,
     workspace_epoch: u64,
     workspace_root: []u8,
@@ -397,6 +403,8 @@ pub const CreateTaskInput = struct {
     execution: account_contract.ExecutionConfigInput,
     provider: task_state.Provider,
     model: []const u8,
+    permission_profile: task_state.PermissionProfile,
+    permission_interaction: task_state.PermissionInteraction,
     workspace_id: u64,
     workspace_epoch: u64,
     workspace_root: []const u8,
@@ -764,10 +772,15 @@ pub const Runtime = struct {
             "{d}",
             .{input.workspace_epoch},
         ) catch unreachable;
+        const permission = agentSessionPermission(
+            input.permission_profile,
+            input.permission_interaction,
+        );
         var binding = try task_agent_session.Binding.open(input.agent_runtime, .{
             .provider = providerToAgent(input.provider),
-            .permission_mode = .accept_edits,
-            .shell_policy = .unrestricted,
+            .permission_mode = permission.mode,
+            .shell_policy = permission.shell,
+            .permission_interaction = permission.interaction,
             .credential = input.execution.api_key,
             .model = input.model,
             .base_url = input.execution.target.base_url,
@@ -795,6 +808,8 @@ pub const Runtime = struct {
             .execution_generation = input.execution.execution_generation,
             .execution_provider = input.provider,
             .execution_model = execution_model,
+            .permission_profile = input.permission_profile,
+            .permission_interaction = input.permission_interaction,
             .workspace_id = input.workspace_id,
             .workspace_epoch = input.workspace_epoch,
             .workspace_root = projected_workspace.value,
@@ -862,6 +877,8 @@ pub const Runtime = struct {
                 .execution_generation = owned.execution_generation,
                 .execution_provider = owned.execution_provider,
                 .execution_model = owned.execution_model,
+                .permission_profile = owned.permission_profile,
+                .permission_interaction = owned.permission_interaction,
                 .workspace_id = owned.workspace_id,
                 .workspace_epoch = owned.workspace_epoch,
                 .workspace_root = owned.workspace_root,
@@ -1478,6 +1495,22 @@ pub const Runtime = struct {
         return task.durable.workspace_id;
     }
 
+    pub fn taskPermissionProfile(
+        self: *const Runtime,
+        task_id: u64,
+    ) ?task_state.PermissionProfile {
+        const task = self.findConst(task_id) orelse return null;
+        return task.durable.permission_profile;
+    }
+
+    pub fn taskPermissionInteraction(
+        self: *const Runtime,
+        task_id: u64,
+    ) ?task_state.PermissionInteraction {
+        const task = self.findConst(task_id) orelse return null;
+        return task.durable.permission_interaction;
+    }
+
     pub fn taskWorkspaceEpoch(self: *const Runtime, task_id: u64) ?u64 {
         const task = self.findConst(task_id) orelse return null;
         return task.durable.workspace_epoch;
@@ -1818,10 +1851,13 @@ pub const Runtime = struct {
         return task_policy.hasActiveOperation(task);
     }
 
-    pub fn lastTerminalOutcome(self: *const Runtime, task_id: u64) ?RunOutcome {
+    pub fn lastTerminalSummary(self: *const Runtime, task_id: u64) ?TerminalSummary {
         const task = self.findConst(task_id) orelse return null;
         const terminal = task_policy.lastTerminalFacts(task.durable.runs) orelse return null;
-        return terminal.outcome;
+        return .{
+            .outcome = terminal.outcome,
+            .permission_required = terminal.cause == .permission_required,
+        };
     }
 
     pub fn workspaceRemovalState(
@@ -2732,6 +2768,10 @@ pub const Runtime = struct {
         errdefer self.allocator.free(model);
         const job = try self.allocator.create(recovery_job.Job);
         errdefer self.allocator.destroy(job);
+        const permission = agentSessionPermission(
+            task.durable.permission_profile,
+            task.durable.permission_interaction,
+        );
         job.* = .{
             .allocator = self.allocator,
             .runtime = input.agent_runtime,
@@ -2755,6 +2795,9 @@ pub const Runtime = struct {
                 .target_execution_generation = input.execution.execution_generation,
                 .task_model = model,
                 .provider = providerToAgent(task.durable.execution_provider),
+                .permission_mode = permission.mode,
+                .shell_policy = permission.shell,
+                .permission_interaction = permission.interaction,
             },
         };
         checkpoint_live = false;
@@ -2975,6 +3018,48 @@ pub const Runtime = struct {
                 result.changed = true;
         }
         return result;
+    }
+
+    /// Turns the Agent-owned noninteractive permission stop observation into
+    /// a bounded Run-control effect. Terminal publication remains worker-owned
+    /// and is reconciled separately by `syncOperationRecords`.
+    pub fn requestPermissionStops(self: *Runtime) bool {
+        var changed = false;
+        for (self.tasks) |*entry| {
+            const task = &(entry.* orelse continue);
+            if (task.runtime.worker_references.load(.acquire) == 0 or
+                task.runtime.active_run_id == 0 or
+                task.runtime.cancel_requested)
+                continue;
+            const active_run_id = switch (task.runtime.active_operation) {
+                .run => |run_id| run_id,
+                .none, .compact, .restore => continue,
+            };
+            if (active_run_id != task.runtime.active_run_id) continue;
+            const run = task_state.findRun(
+                task.durable.runs,
+                active_run_id,
+            ) orelse continue;
+            if (task_state.terminalPayload(run) != null) continue;
+            var access = task.runtime.acquireAccess() catch continue;
+            defer access.deinit();
+            if (access.permissionStopRequest() != active_run_id) continue;
+            const dispatch = requestPermissionTermination(run);
+            const stopping = switch (dispatch) {
+                .requested, .already_requested => true,
+                .pending,
+                .already_finishing,
+                .already_terminal,
+                .stale_run,
+                .session_closing,
+                => false,
+            };
+            if (!stopping) continue;
+            task.runtime.cancel_requested = true;
+            changed = true;
+            if (task_state.setActivePhase(run, .stopping)) changed = true;
+        }
+        return changed;
     }
 
     pub fn syncCloseCompletions(
@@ -3902,6 +3987,32 @@ fn providerToAgent(provider: task_state.Provider) agent.ProviderKind {
     };
 }
 
+const AgentSessionPermission = struct {
+    mode: agent.PermissionMode,
+    shell: agent.ShellPolicy,
+    interaction: agent.PermissionInteraction,
+};
+
+/// The sole Product compiler from an admitted MetaWork profile to AgentCore
+/// execution configuration. Fresh create and checkpoint restore both consume
+/// this function; callers must not reconstruct the mapping independently.
+fn agentSessionPermission(
+    profile: task_state.PermissionProfile,
+    interaction: task_state.PermissionInteraction,
+) AgentSessionPermission {
+    return .{
+        .mode = switch (profile) {
+            .approval_required => .accept_edits,
+            .full_access => .full_access,
+        },
+        .shell = .unrestricted,
+        .interaction = switch (interaction) {
+            .interactive => .interactive,
+            .noninteractive => .noninteractive,
+        },
+    };
+}
+
 fn validateRunInput(
     task: *const task_state.Task,
     input: RunInput,
@@ -4082,6 +4193,8 @@ fn reserveRun(
         .execution_provider = task.durable.execution_provider,
         .execution_model = execution_model,
         .execution_model_owned = true,
+        .permission_profile = task.durable.permission_profile,
+        .permission_interaction = task.durable.permission_interaction,
         .input = input_record,
         .commentary_ends = commentary_ends,
         .tools = tools,
@@ -4230,6 +4343,27 @@ fn requestRunTermination(
     var lease = lease_value;
     defer lease.deinit();
     return switch (lease.requestTermination(task_policy.pendingTerminationSignal(run))) {
+        .requested => .requested,
+        .already_requested => .already_requested,
+        .already_terminal => .already_terminal,
+        .stale_run => .stale_run,
+        .session_closing => .session_closing,
+    };
+}
+
+fn requestPermissionTermination(
+    run: *task_state.RunRecord,
+) task_state.RunTerminationDispatch {
+    switch (run.agent_handoff.load(.acquire)) {
+        .queued, .starting => return .pending,
+        .finishing => return .already_finishing,
+        .running => {},
+    }
+    const lease_value = run.run_control.tryAcquireLease() orelse
+        return .already_finishing;
+    var lease = lease_value;
+    defer lease.deinit();
+    return switch (lease.requestTermination(.permission_required)) {
         .requested => .requested,
         .already_requested => .already_requested,
         .already_terminal => .already_terminal,

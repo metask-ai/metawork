@@ -22,6 +22,11 @@ pub const Provider = enum {
     gemini,
 };
 
+pub const PermissionProfile = enum {
+    approval_required,
+    full_access,
+};
+
 pub const Recurrence = union(enum) {
     once: struct {
         at_unix_seconds: u64,
@@ -119,6 +124,7 @@ pub const FailureReason = enum {
     timer_unavailable,
     persistence_failed,
     host_interrupted,
+    permission_required,
 };
 
 pub const OccurrenceSource = enum {
@@ -158,6 +164,7 @@ pub const Definition = struct {
     execution_generation: u64,
     execution_provider: Provider,
     execution_model: []const u8,
+    permission_profile: PermissionProfile,
     input: []const u8,
     recurrence: Recurrence,
 };
@@ -170,6 +177,7 @@ pub const Item = struct {
     execution_generation: u64,
     execution_provider: Provider,
     execution_model: []u8,
+    permission_profile: PermissionProfile,
     input: OwnedInput,
     recurrence: Recurrence,
     enabled: bool = true,
@@ -252,6 +260,7 @@ pub const Store = struct {
                     .execution_generation = item.execution_generation,
                     .execution_provider = item.execution_provider,
                     .execution_model = item.execution_model,
+                    .permission_profile = item.permission_profile,
                     .input = item.input.borrowed(),
                     .recurrence = item.recurrence,
                 },
@@ -526,12 +535,15 @@ pub const Store = struct {
     }
 
     pub fn finalizeOccurrenceTask(
-        _: *Store,
+        self: *Store,
         item: *Item,
         planned_at_unix_seconds: u64,
         source: OccurrenceSource,
         outcome: OccurrenceTaskOutcome,
+        reason: ?FailureReason,
     ) error{InvalidSchedule}!void {
+        if (reason != null and reason != .permission_required)
+            return error.InvalidSchedule;
         var index = item.occurrence_count;
         while (index != 0) {
             index -= 1;
@@ -542,6 +554,7 @@ pub const Store = struct {
             if (occurrence.task_outcome != null or occurrence.notification_sent)
                 return error.InvalidSchedule;
             occurrence.task_outcome = outcome;
+            occurrence.reason = reason;
             occurrence.notification_sent = true;
             if (item.last_occurrence != null and
                 item.last_occurrence.?.planned_at_unix_seconds ==
@@ -549,8 +562,10 @@ pub const Store = struct {
                 item.last_occurrence.?.source == source)
             {
                 item.last_occurrence.?.task_outcome = outcome;
+                item.last_occurrence.?.reason = reason;
                 item.last_occurrence.?.notification_sent = true;
             }
+            if (reason) |value| self.markNeedsAttention(item, value);
             return;
         }
         return error.InvalidSchedule;
@@ -640,6 +655,7 @@ pub const Store = struct {
             .execution_generation = definition.execution_generation,
             .execution_provider = definition.execution_provider,
             .execution_model = model,
+            .permission_profile = definition.permission_profile,
             .input = input,
             .recurrence = definition.recurrence,
             .next_run_at_unix_seconds = next_run,
@@ -758,7 +774,10 @@ fn validOccurrence(occurrence: Occurrence) bool {
     return switch (occurrence.result) {
         .claimed => occurrence.task_id == 0 and occurrence.reason == null and
             occurrence.task_outcome == null,
-        .submitted => occurrence.task_id != 0 and occurrence.reason == null,
+        .submitted => occurrence.task_id != 0 and
+            (occurrence.reason == null or
+                (occurrence.reason == .permission_required and
+                    occurrence.task_outcome != null)),
         .skipped => occurrence.task_id == 0 and occurrence.reason != null and
             occurrence.task_outcome == null,
         .rejected => occurrence.reason != null and
@@ -810,6 +829,7 @@ test "store updates optimistically and a one-time occurrence completes" {
         .execution_generation = 9,
         .execution_provider = .openai,
         .execution_model = "gpt-test",
+        .permission_profile = .approval_required,
         .input = "Summarize the project",
         .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
     }, 1_000);

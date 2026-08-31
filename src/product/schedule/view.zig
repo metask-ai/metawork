@@ -66,7 +66,9 @@ fn writeItem(
         .{ item.execution_generation, @tagName(item.execution_provider) },
     ) catch return error.SnapshotTooLarge;
     try text.writeJson(writer, item.execution_model);
-    writer.writeAll("},\"input\":{\"kind\":\"text\",\"text\":") catch
+    writer.print("}},\"permissionProfile\":\"{s}\",\"input\":{{\"kind\":\"text\",\"text\":", .{
+        @tagName(item.permission_profile),
+    }) catch
         return error.SnapshotTooLarge;
     try text.writeJson(writer, item.input.borrowed());
     writer.print(",\"redacted\":{}}}", .{item.input.redacted}) catch

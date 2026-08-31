@@ -74,6 +74,8 @@ Automatic admission 在完成上述证明后才创建候选目录、临时 Works
 
 每个 Task 在创建时取得 owned ExecutionConfig 和 immutable binding epoch。默认配置变化不热替换已有 Task；显式改变 Task execution 必须在 Task idle、authority 精确且持久化 candidate 可提交时形成新的 binding。Run、manual compact 与 Conversation recovery 共享 Task-owned active-operation 槽；删除和 Session replacement 是独立生命周期用例，必须与该槽互斥并等待已有 operation 收口，不能通过不同入口并发改变同一个 attachment。
 
+PermissionProfile 与 ExecutionConfig 分别拥有自己的产品事实：Product Control 只持后续新 Task 的默认值，并在 Task create admission 时复制；Product Task 持有创建后不可变的 effective profile、interaction fact 与逐 Run provenance。当前开放 `approval_required | full_access`，两者分别映射 AgentCore `accept_edits | full_access`，ShellPolicy 均保持 `unrestricted`；该映射不创建 Sandbox、Workspace trust 或持久 permission rule。默认值变化不改写已有 Task，fresh create 与 checkpoint restore 必须提交同一 profile；当前 ABI 没有可消费的 idle mode mutation，不能用规则拼装、Renderer preference 或跨 profile restore 模拟。
+
 Automatic Workspace record 只有在 owning Task 已物理删除且相关 Run event、worker、Session 和 catalog lease 全部 quiescent 后才能释放。真实目录不因 Task 删除、shutdown 或重启被递归删除，也不能通过扫描遗留目录猜测或恢复 Product record。
 
 ### 2.3 Scheduled Task
@@ -81,6 +83,8 @@ Automatic Workspace record 只有在 owning Task 已物理删除且相关 Run ev
 Schedule aggregate 拥有 Scheduled Task definition、触发游标、occurrence history、persistence health 与 occurrence reconciliation。Application 只提供持久化、wall clock、单一平台 timer、notification 和后台窗口生命周期 capability；它不决定 recurrence、missed occurrence 或 Task admission policy。
 
 到期 callback 只唤醒 Schedule reconciliation，不能直接调用 Agent。一个已接纳 occurrence 必须通过 Product Control 的既有 Task 创建、命名和 Run admission 形成真实 Task，并复用同一 Workspace、ExecutionConfig、Executor、Session、event pump、permission、persistence 与 snapshot 路径；不得建立绕过这些 Gate 的 schedule queue、worker 或 AgentCore 调用路径。
+
+Schedule definition 固定自己的 PermissionProfile；每个 occurrence 在 launch 时复制当时的 definition profile，并以 `noninteractive` interaction 创建 Task/Run。后续 definition update 只影响未来 occurrence，不改写历史 Task。Agent 遇到第一个未覆盖 permission request 时不得发布 pending UI 或等待 Renderer，而要提交 stop fact 并唤醒 canonical Product event consumer 请求中止；只有真实 Run 收口后才能发布 `permission_required`，Schedule 随后进入 `needs_attention`。
 
 Schedule 只持久化已提交的 occurrence 与 Task identity，不持有 Product Control capability、可变 Task 指针、API credential 或 live Session。Task launch 的明确失败按 occurrence transaction 收口；结果不确定时不得重放可能已经创建 Task 的 launch。系统通知只消费已提交的 occurrence/Task terminal fact，通知失败不能回滚产品事实或伪造 Run cause。
 

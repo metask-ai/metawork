@@ -242,6 +242,8 @@ pub const FakeCore = struct {
     skill_session_bound: bool = false,
     skill_policy_seen: bool = false,
     permission_rules_absent: bool = false,
+    last_permission_mode_code: ?u32 = null,
+    last_shell_policy_code: ?u32 = null,
     skill_run_seen: bool = false,
     skill_input_matches: bool = false,
     session_destroy_failures: usize = 0,
@@ -280,6 +282,7 @@ pub const FakeCore = struct {
     allow_checkpoint_export: bool = false,
     ui_answered_callbacks: usize = 0,
     permission_callback_count: usize = 0,
+    ui_unavailable_callbacks: usize = 0,
     ui_fatal_callbacks: usize = 0,
     permission_response_valid: bool = false,
     callback_signal: ?*CallbackSignal = null,
@@ -855,6 +858,8 @@ pub fn sessionCreate(
             fake_core.skill_session_bound = bound_catalog != null;
             fake_core.skill_policy_seen = bound_catalog != null and policy_valid;
             fake_core.permission_rules_absent = host.permission_rules == null;
+            fake_core.last_permission_mode_code = host.permission_mode_code;
+            fake_core.last_shell_policy_code = host.shell_policy_code;
             out_session.?.* = @ptrCast(session);
             return wire.STATUS_OK;
         }
@@ -1838,6 +1843,8 @@ pub fn sessionRunInput(
             fake_core.ui_answered_callbacks += 1;
         if (callback_status == wire.UI_ANSWERED)
             fake_core.permission_callback_count += 1;
+        if (callback_status == wire.UI_UNAVAILABLE)
+            fake_core.ui_unavailable_callbacks += 1;
         if (callback_status == wire.UI_FATAL)
             fake_core.ui_fatal_callbacks += 1;
         fake_core.unlock();

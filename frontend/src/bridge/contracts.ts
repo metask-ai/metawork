@@ -46,6 +46,10 @@ export type AccountErrorCode =
 
 export type Provider = "anthropic" | "openai" | "gemini";
 
+export const permissionProfiles = ["approval_required", "full_access"] as const;
+export type PermissionProfile = (typeof permissionProfiles)[number];
+export type PermissionInteraction = "interactive" | "noninteractive";
+
 export type ModelConnectionProtocol =
   "anthropic_messages" | "openai_chat_completions" | "gemini_native";
 
@@ -179,6 +183,7 @@ export type ScheduledTaskView = {
   epoch: string;
   title: string;
   titleRedacted: boolean;
+  permissionProfile: PermissionProfile;
   enabled: boolean;
   health: "ready" | "paused" | "needs_attention" | "completed";
   failureReason:
@@ -191,6 +196,7 @@ export type ScheduledTaskView = {
     | "timer_unavailable"
     | "persistence_failed"
     | "host_interrupted"
+    | "permission_required"
     | null;
   execution: {
     generation: string;
@@ -221,6 +227,7 @@ export type ScheduledTaskView = {
 export type ScheduledTaskMutation = {
   title: string;
   expectedExecutionGeneration: string;
+  permissionProfile: PermissionProfile;
   input: Extract<TaskRunInput, { kind: "text" }>;
   recurrence: ScheduledTaskRecurrence;
 };
@@ -249,6 +256,7 @@ export const runCauses = [
   "event_pipeline_failure",
   "queue_capacity_failure",
   "ui_pipeline_failure",
+  "permission_required",
   "agent_failure",
   "dependency_contract_failure",
   "stale_catalog",
@@ -291,6 +299,8 @@ export type RunActivity =
 export type RunView = {
   id: string;
   phase: RunPhase;
+  permissionProfile: PermissionProfile;
+  permissionInteraction: PermissionInteraction;
   input: RunInputView;
   output: RunOutput;
   activity: RunActivity | null;
@@ -434,6 +444,7 @@ export type TaskView = {
   recentOrder: string;
   title: string;
   workspaceId: string;
+  permissionProfile: PermissionProfile;
   binding: {
     epoch: string;
     availability: "available" | "unavailable";
@@ -496,6 +507,7 @@ export type WorkbenchSnapshot = {
     typedOutputs: boolean;
     typedFileChanges: boolean;
     persistentWorkspacePermissions: boolean;
+    permissionProfiles: boolean;
     automaticWorkspaces: boolean;
     scheduledTasks: boolean;
     scheduledTaskPersistence: boolean;
@@ -522,6 +534,10 @@ export type WorkbenchSnapshot = {
     mcpConnectionApproval: boolean;
     mcpSecretCapture: boolean;
     mcpOAuth: boolean;
+  };
+  permissions: {
+    availableProfiles: PermissionProfile[];
+    defaultProfile: PermissionProfile;
   };
   account: AccountView;
   skillCatalog: SkillCatalogView;
@@ -834,6 +850,11 @@ export type TaskCreateResult =
       bindingEpoch: null;
       reason: TaskCreateReason;
     };
+
+export type PermissionProfileMutationResult = {
+  changed: boolean;
+  defaultProfile: PermissionProfile;
+};
 
 export type TaskWorkspaceIntent =
   | { kind: "automatic" }

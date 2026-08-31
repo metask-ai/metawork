@@ -261,12 +261,14 @@ test("Scheduled Task projection decodes recurrence and occurrence without secret
   scheduled.capabilities.scheduledTaskPersistence = true;
   scheduled.capabilities.scheduledTaskPersistenceHealth = "ready";
   scheduled.capabilities.backgroundScheduleWake = true;
+  scheduled.tasks[0].runs[0].permissionInteraction = "noninteractive";
   scheduled.scheduledTasks = [
     {
       id: "8",
       epoch: "2",
       title: "Daily summary",
       titleRedacted: false,
+      permissionProfile: "approval_required",
       enabled: true,
       health: "ready",
       failureReason: null,
@@ -300,6 +302,26 @@ test("Scheduled Task projection decodes recurrence and occurrence without secret
     },
   ];
   assert.deepEqual(decodeWorkbenchSnapshot(scheduled), scheduled);
+
+  const updatedDefinitionProfile = clone(scheduled);
+  updatedDefinitionProfile.scheduledTasks[0].permissionProfile = "full_access";
+  assert.deepEqual(
+    decodeWorkbenchSnapshot(updatedDefinitionProfile),
+    updatedDefinitionProfile,
+  );
+
+  const permissionRequired = clone(scheduled);
+  permissionRequired.scheduledTasks[0].enabled = false;
+  permissionRequired.scheduledTasks[0].health = "needs_attention";
+  permissionRequired.scheduledTasks[0].failureReason = "permission_required";
+  permissionRequired.scheduledTasks[0].nextRunAtUnixSeconds = null;
+  permissionRequired.scheduledTasks[0].occurrences[0].reason =
+    "permission_required";
+  permissionRequired.scheduledTasks[0].occurrences[0].taskOutcome = "stopped";
+  assert.deepEqual(
+    decodeWorkbenchSnapshot(permissionRequired),
+    permissionRequired,
+  );
 
   const rejectedAfterTaskCreation = clone(scheduled);
   rejectedAfterTaskCreation.scheduledTasks[0].occurrences[0] = {
@@ -956,6 +978,37 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   const extraField = clone(fixture);
   extraField.compatibility = true;
   assert.throws(() => decodeWorkbenchSnapshot(extraField), /expected keys/);
+
+  const enabledPermissionProfiles = clone(fixture);
+  enabledPermissionProfiles.capabilities.permissionProfiles = true;
+  enabledPermissionProfiles.permissions.availableProfiles = [
+    "approval_required",
+    "full_access",
+  ];
+  assert.doesNotThrow(() => decodeWorkbenchSnapshot(enabledPermissionProfiles));
+
+  const hiddenPermissionLeak = clone(fixture);
+  hiddenPermissionLeak.permissions.availableProfiles = ["approval_required"];
+  assert.throws(
+    () => decodeWorkbenchSnapshot(hiddenPermissionLeak),
+    /profile capability and available profiles must agree/,
+  );
+
+  const mismatchedPermissionProvenance = clone(fixture);
+  mismatchedPermissionProvenance.tasks[0].runs[0].permissionProfile =
+    "full_access";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(mismatchedPermissionProvenance),
+    /permission provenance must match/,
+  );
+
+  const invalidPermissionInteraction = clone(fixture);
+  invalidPermissionInteraction.tasks[0].runs[0].permissionInteraction =
+    "background";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(invalidPermissionInteraction),
+    /unexpected value/,
+  );
 
   const invalidId = clone(fixture);
   invalidId.tasks[0].currentRunId = "07";

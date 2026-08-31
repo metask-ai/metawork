@@ -175,6 +175,14 @@ callback admission 只建立 lifetime 与当时的 identity 事实，不保证�
 
 Agent Session 的公开回答入口只有 choice-only `respondPermission`。调用方不能提交任意 SDK `UiResponse`：Permission 入口从 pending request 回填 request ID、policy generation 和 candidate rule ID；完整 SDK response 只在 Agent 私有 encoder 边界内构造并校验。AgentCore 独占 Session grant 匹配与 provenance，Workbench 只保存当前 permission occurrence 和有界审计摘要，不维护平行 grant cache 或规则 compiler。ABI decoder 仍识别 `ask_question`，但 Agent capability gate 在建立 pending UI 状态前返回 callback fatal，因此 Product Control、Bridge 与 Renderer 不拥有 answers 产品路径。
 
+当前同步 request 是外部执行层的 compatibility surface，不等于 MetaWork 已拥有完整的 effect 或风险语义。`tool_name`、display text、命令字符串和 `exact_arguments` candidate 都不能单独证明操作的真实文件、进程、网络或系统 effect；Product Control 不得据此编译第二套 Bash allowlist、推断“安全命令”或承诺跨 Session 的持久权限。
+
+当前 `PermissionProfile` 由 MetaWork 产品层拥有，与 AgentCore `PermissionMode`、`ShellPolicy` 和 permission rule schema 分离：Settings 只持有新 Task 默认值，Product Task 持有不可变的 effective profile，每个 Run 保存 provenance。Agent 只接受 Product Control 在 fresh create 或 same-profile restore 边界提交的精确执行配置，不拥有默认值、持久化或 UI 选择。首个切片只映射 `approval_required → accept_edits + unrestricted` 与 `full_access → full_access + unrestricted`；`auto` 对代表性 Write/Bash 仍请求 callback，不能冒充 `standard`，`dont_ask` 对同类 effect 直接拒绝且不构成产品级 typed stop。
+
+Manual Task 使用 interactive callback policy；Scheduled occurrence 创建的 Task 使用独立的 noninteractive interaction fact，但仍按定义固定的同一 PermissionProfile 映射 AgentCore mode。noninteractive callback 收到第一个 typed permission request 后不得建立 Renderer pending UI 或等待 response：先提交 Product stop fact，再立即返回 unavailable；canonical Agent event consumer 必须在没有 Renderer 的情况下驱动 Product lifecycle 请求中止当前 Run，最终只由真实 Run 收口提交 `permission_required` 与 Schedule `needs_attention`。若 stop fact 的 consumer wake 在有界重试后仍不可用，callback 必须 fatal fail closed，使 Run 自行退出且保留先提交的 `permission_required`，不得返回 unavailable 后等待一个无法被 Product 请求的 abort。这不是把 Session mode 替换为 `dont_ask`：后者会在 callback 前直接拒绝代表性 effect，无法提供同一 request/stop 边界，也不能被当作另一个产品 profile。
+
+当前 aarch64 macOS canonical bundle `0.1.0-dev+b66e3d4c11ab` 的 source-free probe 使用 realpath 后的同一 canonical Workspace，已证明以下外部事实：`accept_edits` 自动执行 Workspace 内 Write/Edit，并对 Workspace 外 Write 和明确有副作用的 Bash 发布同步 permission request；`full_access` 直接允许同一 Bash 和 Workspace 外 Write，但 `.git/config` 等 Core protected path 仍请求 callback；显式规则优先于 mode，重叠规则按 deny > ask > allow 收口，callback unavailable 不执行待决 effect；`allow_session` 的 `exact_arguments` grant 在同一 Session 复用并随 same-profile checkpoint restore 恢复，而未产生 grant 的 `full_access` restore 不伪造规则。`auto` 对代表性 Write/Bash 仍请求，`dont_ask` 不请求但拒绝 effect。跨 `accept_edits ↔ full_access` restore 虽返回 `STATUS_OK` 与 candidate，却产生 `health=degraded + issues=[]` 的非法 report，官方 decoder fail closed；MetaWork 必须销毁 candidate，不能据此实现 profile mutation。该证据只定义这个精确 artifact，不证明其他 target 或 Product profile lifecycle。
+
 ### Host tools
 
 当前锁定合同的 Host tool callback 同样携带 validated `RunContext`，但这只补齐 wire identity，不自动建立 MetaWork 的产品工具、安全与路由政策。当前产品 Runtime 配置仍必须保持 `host_tool_count = 0`；MetaWork Agent 在 Agent 模块中统一注册并允许固定 built-in 集合，Product Control 和 Application 不持有 profile 或 wire name。启用正式 Host tools 属于独立 capability Gate，不在本次 ABI 迁移中顺带开放。
@@ -238,6 +246,7 @@ Compact 的 `Queued / Compacting / Stopping` 不是由 Worker 直接覆盖同一
 ### 每 Session 规则
 
 - 至多一个 in-flight operation；Run、manual compact、model/Skill/permission mutation 与 destroy 互斥；
+- 未来 PermissionProfile mutation 只允许在 Task idle 且没有 queued Run、compact、pending UI 或 recovery operation 时进入；更严格 profile 的撤权必须在 admission 返回成功前真实作用于后续 Run，不能只更新产品投影；
 - 第二个 Run 明确排队或拒绝；
 - run ID 单调且与 Session 绑定；
 - queued Run 不接触 AgentCore mutable state；
@@ -505,10 +514,10 @@ Agent sink 同时累计 total bytes、chunk count 与实际 streamed bytes 的 S
 
 ### Workspace
 
-- Host 直接发起原生目录选择与原生 trust 确认，Bridge 签发绑定 window、`ProductDelivery` connection generation 和该次 Native picker 结果的一次性 grant；
-- Renderer 创建 Task 时只回传 grant，不得回传任意路径加 `trusted` boolean；Product Control 消费 grant 后使用标准 I/O 规范化并验证目录，再建立 Task/Agent Session。grant 在 disconnect、拒绝、替换或首次消费后失效；
+- Host 直接发起原生目录选择，用户确认 Native picker 的结果即构成显式授权；Bridge 在同一 `workspaces.choose` 命令内签发并消费绑定 window、`ProductDelivery` connection generation 和该次 picker 结果的一次性 grant，不追加 trust 确认；
+- Renderer 只接收完成注册后的 Workspace identity，不得接收 grant、回传任意路径或提交 `trusted` boolean；Product Control 使用 grant 中的路径执行规范化与目录验证。grant 在 disconnect、拒绝、替换或首次消费后失效；
 - lifecycle API 只接收 Product Control 已规范化的绝对路径，并再次拒绝空 component、`.`、`..`、尾随分隔符和临时根的词法逃逸；symlink/TOCTOU 仍不在此保证内；
-- 当前 v1 只运行临时 fixture 或用户明确 trusted 的 Workspace；
+- 当前 v1 只运行 Product Control 分配的 Automatic Workspace 或用户通过原生 picker 明确授权的 Manual Workspace；该选择建立路径 authority，不再追加“信任此工作区”产品状态；
 - 不以 `workspace_root` 字段存在为 strict security 证据；
 - symlink、路径逃逸、不存在写入目标、sandbox、process tree 和 TOCTOU 矩阵属于后续安全 Gate；
 - strict security 未完成前，UI 和文档不得宣称可以安全运行不可信 Workspace。
@@ -522,7 +531,7 @@ Agent sink 同时累计 total bytes、chunk count 与实际 streamed bytes 的 S
 - `WebSearch` 与 `WebFetch` 只是 AgentCore built-in 名称，MetaWork 不实现第二个 executor 或 provider-specific tool identity；
 - Runtime catalog 与 Session allowlist 共同限制可发布工具；
 - Provider 伪造未发布工具名必须 dispatch 失败；
-- 正式 Session 使用 `accept_edits`：当前 Workspace 范围内的 Write/Edit 由 AgentCore 自动允许，范围外编辑与 Bash 等其他危险操作仍经过同步 permission；
+- 正式 Session 按 Task-owned profile 使用 `accept_edits + unrestricted` 或 `full_access + unrestricted`；前者会自动执行 Workspace 内 Write/Edit，并对 Workspace 外 Write 与明确有副作用的 Bash 发布同步 permission request。这是当前 `approval_required` compatibility baseline，不是 strict security 或产品级 Sandbox；
 - 默认 Bash 是非交互 shell，不使用 PTY；
 - stdout/stderr/exit code 有界或通过后续对象引用展示。
 
@@ -561,6 +570,8 @@ Compact abort 同样不进入普通 FIFO；accepted cancellation 最终必须由
 生成期 `queue_message` 当前只进入 Host 有界 Session 输入队列，在当前 Run 结束后按确定规则形成下一 Run 输入。它不依赖未接通的 `UiBackend.poll()`。
 
 ## 14. Shell 边界
+
+`ShellPolicy` 只决定 AgentCore 如何提供 Bash 执行能力，不决定 MetaWork 是否询问用户。当前正式值 `.unrestricted` 表示获准的 Bash 不经过 AgentCore file sandbox；它不表示 root、不绕过操作系统授权，也不等于 `PermissionProfile.full_access`。当前 aarch64 macOS artifact probe 证明 `.disabled` 在 Bash 仍位于 Session allowlist 时以 `ShellToolDisabled` 拒绝建 Session，`.sandboxed` 允许 Bash 写 Workspace 内文件并阻止同一命令写向仓库中的 Workspace 外临时目录；这只是一个路径 effect 样本，不覆盖 symlink/TOCTOU、process tree、network、environment 或其他 target。官方 surface 存在这些值不代表 MetaWork 已产品化对应模式；完整安全矩阵完成前，Renderer 不得展示“沙箱”承诺，Product Control 也不得把该 enum 当作 Workspace trust level。
 
 | 能力                         | 当前 Bash baseline |
 | ---------------------------- | ------------------ |

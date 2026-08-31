@@ -1,5 +1,6 @@
 import {
   compactCauses,
+  permissionProfiles,
   runCauses,
   type AccountCommandResult,
   type AccountView,
@@ -12,6 +13,7 @@ import {
   type PendingUi,
   type PermissionHistory,
   type PermissionChoice,
+  type PermissionProfileMutationResult,
   type CatalogRefreshResult,
   type CompactView,
   type RunInputView,
@@ -138,6 +140,7 @@ const permissionChoices = [
   "allow_once",
   "allow_session",
 ] as const satisfies readonly PermissionChoice[];
+const permissionInteractions = ["interactive", "noninteractive"] as const;
 const maxCommentarySegmentsPerRun = 256;
 const accountStates = [
   "checking",
@@ -250,6 +253,7 @@ const scheduledTaskFailureReasons = [
   "timer_unavailable",
   "persistence_failed",
   "host_interrupted",
+  "permission_required",
 ] as const;
 const taskCreateReasons = [
   "execution_changed",
@@ -1223,6 +1227,8 @@ function decodeRun(value: unknown, path: string): RunView {
   const item = object(value, path, [
     "id",
     "phase",
+    "permissionProfile",
+    "permissionInteraction",
     "input",
     "output",
     "activity",
@@ -1297,6 +1303,16 @@ function decodeRun(value: unknown, path: string): RunView {
   return {
     id: positiveWireId(item.id, `${path}.id`),
     phase,
+    permissionProfile: enumValue(
+      item.permissionProfile,
+      `${path}.permissionProfile`,
+      permissionProfiles,
+    ),
+    permissionInteraction: enumValue(
+      item.permissionInteraction,
+      `${path}.permissionInteraction`,
+      permissionInteractions,
+    ),
     input: decodeRunInput(item.input, `${path}.input`),
     output,
     activity,
@@ -1668,6 +1684,7 @@ function decodeTask(value: unknown, path: string): TaskView {
     "recentOrder",
     "title",
     "workspaceId",
+    "permissionProfile",
     "binding",
     "skillCatalog",
     "lifecycle",
@@ -1727,6 +1744,16 @@ function decodeTask(value: unknown, path: string): TaskView {
     unavailableReason,
   };
   const runs = arrayValue(item.runs, `${path}.runs`, decodeRun);
+  const permissionProfile = enumValue(
+    item.permissionProfile,
+    `${path}.permissionProfile`,
+    permissionProfiles,
+  );
+  if (runs.some((run) => run.permissionProfile !== permissionProfile))
+    fail(
+      path,
+      "Run permission provenance must match its immutable Task profile",
+    );
   const context = decodeConversationContext(item.context, `${path}.context`);
   const compacts = arrayValue(item.compacts, `${path}.compacts`, decodeCompact);
   const lifecycle = enumValue(
@@ -1958,6 +1985,7 @@ function decodeTask(value: unknown, path: string): TaskView {
     recentOrder: positiveWireId(item.recentOrder, `${path}.recentOrder`),
     title: stringValue(item.title, `${path}.title`),
     workspaceId: positiveWireId(item.workspaceId, `${path}.workspaceId`),
+    permissionProfile,
     binding,
     skillCatalog: decodeSkillCatalog(item.skillCatalog, `${path}.skillCatalog`),
     lifecycle,
@@ -2060,6 +2088,7 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
     "epoch",
     "title",
     "titleRedacted",
+    "permissionProfile",
     "enabled",
     "health",
     "failureReason",
@@ -2185,10 +2214,15 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
         (taskId !== null || reason !== null || taskOutcome !== null)
       )
         fail(occurrencePath, "claimed occurrence cannot expose terminal facts");
-      if (result === "submitted" && (taskId === null || reason !== null))
+      if (
+        result === "submitted" &&
+        (taskId === null ||
+          (reason !== null &&
+            (reason !== "permission_required" || taskOutcome === null)))
+      )
         fail(
           occurrencePath,
-          "submitted occurrence requires a Task without a rejection reason",
+          "submitted occurrence requires a Task and only permits a terminal permission reason",
         );
       if (
         result === "skipped" &&
@@ -2224,6 +2258,11 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
     },
   );
   const health = enumValue(item.health, `${path}.health`, scheduledTaskHealth);
+  const failureReason = nullableEnum(
+    item.failureReason,
+    `${path}.failureReason`,
+    scheduledTaskFailureReasons,
+  );
   const enabled = booleanValue(item.enabled, `${path}.enabled`);
   const nextRunAtUnixSeconds =
     item.nextRunAtUnixSeconds === null
@@ -2234,18 +2273,21 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
         );
   if (enabled !== (health === "ready" && nextRunAtUnixSeconds !== null))
     fail(path, "enabled schedule must be ready and expose its next run");
+  if ((health === "needs_attention") !== (failureReason !== null))
+    fail(path, "Schedule attention and failure reason must agree");
   return {
     id: positiveWireId(item.id, `${path}.id`),
     epoch: positiveWireId(item.epoch, `${path}.epoch`),
     title: stringValue(item.title, `${path}.title`),
     titleRedacted: booleanValue(item.titleRedacted, `${path}.titleRedacted`),
+    permissionProfile: enumValue(
+      item.permissionProfile,
+      `${path}.permissionProfile`,
+      permissionProfiles,
+    ),
     enabled,
     health,
-    failureReason: nullableEnum(
-      item.failureReason,
-      `${path}.failureReason`,
-      scheduledTaskFailureReasons,
-    ),
+    failureReason,
     execution: {
       generation: positiveWireId(
         execution.generation,
@@ -2711,6 +2753,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
   const root = object(value, "$", [
     "revision",
     "capabilities",
+    "permissions",
     "account",
     "skillCatalog",
     "skillManagement",
@@ -2728,6 +2771,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     "typedOutputs",
     "typedFileChanges",
     "persistentWorkspacePermissions",
+    "permissionProfiles",
     "automaticWorkspaces",
     "scheduledTasks",
     "scheduledTaskPersistence",
@@ -2784,6 +2828,10 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     persistentWorkspacePermissions: booleanValue(
       capabilityItem.persistentWorkspacePermissions,
       "$.capabilities.persistentWorkspacePermissions",
+    ),
+    permissionProfiles: booleanValue(
+      capabilityItem.permissionProfiles,
+      "$.capabilities.permissionProfiles",
     ),
     automaticWorkspaces: booleanValue(
       capabilityItem.automaticWorkspaces,
@@ -2864,6 +2912,43 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
       "$.capabilities.taskHistoryPersistence",
       "Task history persistence availability and health must agree",
     );
+  const permissionItem = object(root.permissions, "$.permissions", [
+    "availableProfiles",
+    "defaultProfile",
+  ]);
+  const availableProfiles = arrayValue(
+    permissionItem.availableProfiles,
+    "$.permissions.availableProfiles",
+    (profile, profilePath) =>
+      enumValue(profile, profilePath, permissionProfiles),
+  );
+  if (new Set(availableProfiles).size !== availableProfiles.length)
+    fail("$.permissions.availableProfiles", "profiles must be unique");
+  if (
+    (!capabilities.permissionProfiles && availableProfiles.length !== 0) ||
+    (capabilities.permissionProfiles &&
+      availableProfiles.length !== permissionProfiles.length)
+  )
+    fail(
+      "$.permissions.availableProfiles",
+      "profile capability and available profiles must agree",
+    );
+  if (
+    capabilities.permissionProfiles &&
+    permissionProfiles.some((profile) => !availableProfiles.includes(profile))
+  )
+    fail(
+      "$.permissions.availableProfiles",
+      "enabled profile capability must expose the complete admitted set",
+    );
+  const permissions = {
+    availableProfiles,
+    defaultProfile: enumValue(
+      permissionItem.defaultProfile,
+      "$.permissions.defaultProfile",
+      permissionProfiles,
+    ),
+  };
   const workspaces = arrayValue(
     root.workspaces,
     "$.workspaces",
@@ -2914,6 +2999,23 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     scheduledTasks.length
   )
     fail("$.scheduledTasks", "scheduled Task identities must be unique");
+  const tasksById = new Map(tasks.map((task) => [task.id, task]));
+  for (const schedule of scheduledTasks) {
+    for (const occurrence of schedule.occurrences) {
+      if (occurrence.taskId === null) continue;
+      const occurrenceTask = tasksById.get(occurrence.taskId);
+      if (!occurrenceTask) continue;
+      if (
+        occurrenceTask.runs.some(
+          (run) => run.permissionInteraction !== "noninteractive",
+        )
+      )
+        fail(
+          "$.scheduledTasks",
+          "scheduled occurrence Runs must be noninteractive",
+        );
+    }
+  }
   for (const workspace of workspaces) {
     const taskCount = tasks.filter(
       (task) => task.workspaceId === workspace.id,
@@ -2927,6 +3029,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
   return {
     revision: wireId(root.revision, "$.revision"),
     capabilities,
+    permissions,
     account: decodeAccount(root.account, "$.account"),
     skillCatalog: decodeSkillCatalog(root.skillCatalog, "$.skillCatalog"),
     skillManagement: decodeSkillManagement(
@@ -2937,6 +3040,20 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     workspaces,
     scheduledTasks,
     tasks,
+  };
+}
+
+export function decodePermissionProfileMutationResult(
+  value: unknown,
+): PermissionProfileMutationResult {
+  const item = object(value, "$", ["changed", "defaultProfile"]);
+  return {
+    changed: booleanValue(item.changed, "$.changed"),
+    defaultProfile: enumValue(
+      item.defaultProfile,
+      "$.defaultProfile",
+      permissionProfiles,
+    ),
   };
 }
 
