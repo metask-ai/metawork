@@ -49,13 +49,6 @@ pub const FileReference = struct {
     range: ?FileRange,
 };
 
-pub const DurableMutationState = enum {
-    available,
-    /// The backing store may or may not contain the candidate. Further Task
-    /// mutation is forbidden because neither rollback nor retry is sound.
-    outcome_unknown,
-};
-
 pub const EventProjection = task_state.EventProjection;
 pub const EventEffects = struct {
     text: TextProjection,
@@ -376,6 +369,7 @@ pub const DeletionError = error{
 pub const DeletionSync = struct {
     changed: bool = false,
     failed_task_id: ?u64 = null,
+    failed_commit: ?DurableCommit = null,
 };
 
 pub const CreateCandidate = struct {
@@ -663,7 +657,6 @@ pub const Runtime = struct {
     late_terminal_event_count: u64 = 0,
     recovery_poisoned: bool = false,
     agent_runtime_shutdown_complete: bool = false,
-    durable_mutation_state: DurableMutationState = .available,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -909,7 +902,6 @@ pub const Runtime = struct {
         self.next_recent_order = previous_next_recent_order;
         deinitTask(self, &removed, release);
         if (outcome == .outcome_unknown) {
-            self.observeDurableCommit(.outcome_unknown);
             return error.TaskPersistenceOutcomeUnknown;
         }
         return error.TaskPersistenceFailed;
@@ -923,8 +915,6 @@ pub const Runtime = struct {
         workspace: WorkspaceOrderEffect,
         effects: OperationEffects,
     ) RunError!u64 {
-        if (!self.durableMutationAvailable())
-            return error.TaskPersistenceOutcomeUnknown;
         const task = self.find(task_id) orelse return error.UnknownTask;
         if (expected_binding_epoch == 0 or
             expected_binding_epoch != task.durable.binding_epoch)
@@ -1011,7 +1001,6 @@ pub const Runtime = struct {
                 task.durable.title_redacted = previous_title_redacted;
             }
             if (commit_outcome == .outcome_unknown) {
-                self.observeDurableCommit(.outcome_unknown);
                 return error.TaskPersistenceOutcomeUnknown;
             }
             return error.TaskPersistenceFailed;
@@ -1067,8 +1056,6 @@ pub const Runtime = struct {
         expected_binding_epoch: u64,
         effects: OperationEffects,
     ) CompactError!u64 {
-        if (!self.durableMutationAvailable())
-            return error.TaskPersistenceOutcomeUnknown;
         const task = self.find(task_id) orelse return error.UnknownTask;
         if (expected_binding_epoch == 0 or
             expected_binding_epoch != task.durable.binding_epoch)
@@ -1134,7 +1121,6 @@ pub const Runtime = struct {
             task.durable.recent_order = previous_recent_order;
             self.next_recent_order = previous_next_recent_order;
             if (commit_outcome == .outcome_unknown) {
-                self.observeDurableCommit(.outcome_unknown);
                 return error.TaskPersistenceOutcomeUnknown;
             }
             return error.TaskPersistenceFailed;
@@ -1253,8 +1239,6 @@ pub const Runtime = struct {
         response: UiResponse,
         effects: OperationEffects,
     ) ControlError!void {
-        if (!self.durableMutationAvailable())
-            return error.TaskPersistenceOutcomeUnknown;
         const task = self.find(task_id) orelse return error.UnknownTask;
         const run_record = task_state.findRun(task.durable.runs, run_id) orelse
             return error.NoSuchRun;
@@ -1295,7 +1279,6 @@ pub const Runtime = struct {
             );
             self.next_recent_order = previous_next_recent_order;
             if (commit_outcome == .outcome_unknown) {
-                self.observeDurableCommit(.outcome_unknown);
                 return error.TaskPersistenceOutcomeUnknown;
             }
             return error.TaskPersistenceFailed;
@@ -1333,8 +1316,6 @@ pub const Runtime = struct {
         durable: DurableEffect,
         max_model_id_bytes: usize,
     ) ModelError!bool {
-        if (!self.durableMutationAvailable())
-            return error.TaskPersistenceOutcomeUnknown;
         const task = self.find(task_id) orelse return error.UnknownTask;
         if (!std.mem.eql(u8, expected_model, task.durable.execution_model))
             return error.TaskModelMismatch;
@@ -1376,7 +1357,6 @@ pub const Runtime = struct {
             task.durable.execution_model = previous;
             if (!coherent) poisonAttachment(task);
             if (outcome == .outcome_unknown) {
-                self.observeDurableCommit(.outcome_unknown);
                 return error.TaskPersistenceOutcomeUnknown;
             }
             if (!coherent) return error.TaskClosing;
@@ -1651,8 +1631,6 @@ pub const Runtime = struct {
         text: TextProjection,
         durable: DurableEffect,
     ) MutationError!void {
-        if (!self.durableMutationAvailable())
-            return error.TaskPersistenceOutcomeUnknown;
         const task = self.find(task_id) orelse return error.UnknownTask;
         if (task.deletion == .deleting) return error.TaskBusy;
         const trimmed = std.mem.trim(u8, title, " \t\r\n");
@@ -1689,12 +1667,14 @@ pub const Runtime = struct {
                 self.next_recent_order = previous_next_recent_order;
                 return error.TaskPersistenceFailed;
             },
-            .outcome_unknown => self.observeDurableCommit(.outcome_unknown),
+            .outcome_unknown => {
+                text.discardPrevious(previous_title);
+                markAutomaticTitleUserOverride(task);
+                return error.TaskPersistenceOutcomeUnknown;
+            },
         }
         text.discardPrevious(previous_title);
         markAutomaticTitleUserOverride(task);
-        if (self.durable_mutation_state == .outcome_unknown)
-            return error.TaskPersistenceOutcomeUnknown;
     }
 
     pub fn setArchived(
@@ -1703,8 +1683,6 @@ pub const Runtime = struct {
         archived: bool,
         durable: DurableEffect,
     ) MutationError!bool {
-        if (!self.durableMutationAvailable())
-            return error.TaskPersistenceOutcomeUnknown;
         const task = self.find(task_id) orelse return error.UnknownTask;
         if (task.deletion == .deleting or
             task_policy.taskLifecycle(task) == .closing or
@@ -1727,7 +1705,6 @@ pub const Runtime = struct {
                 return error.TaskPersistenceFailed;
             },
             .outcome_unknown => {
-                self.observeDurableCommit(.outcome_unknown);
                 return error.TaskPersistenceOutcomeUnknown;
             },
         }
@@ -1735,8 +1712,6 @@ pub const Runtime = struct {
     }
 
     pub fn requestDeletion(self: *Runtime, task_id: u64) DeletionError!bool {
-        if (!self.durableMutationAvailable())
-            return error.TaskPersistenceOutcomeUnknown;
         const task = self.find(task_id) orelse return error.UnknownTask;
         if (!task.durable.archived) return error.TaskNotArchived;
         if (task.deletion == .deleting) return false;
@@ -1798,13 +1773,14 @@ pub const Runtime = struct {
                             entry.*.?.deletion = .failed;
                             result.changed = true;
                             result.failed_task_id = task_id;
+                            result.failed_commit = .failed;
                         },
                         .outcome_unknown => {
-                            self.observeDurableCommit(.outcome_unknown);
                             entry.* = removed;
                             entry.*.?.deletion = .failed;
                             result.changed = true;
                             result.failed_task_id = task_id;
+                            result.failed_commit = .outcome_unknown;
                         },
                     }
                 },
@@ -2010,21 +1986,6 @@ pub const Runtime = struct {
     pub fn noteLateTerminal(self: *Runtime) u64 {
         self.late_terminal_event_count +|= 1;
         return self.late_terminal_event_count;
-    }
-
-    /// Closes a Product Task durable transaction after composition has made
-    /// the one shared Workspace+Task history commit. A definite failure stays
-    /// retryable after caller rollback; an unknown outcome permanently freezes
-    /// this Runtime's mutation surface.
-    pub fn observeDurableCommit(self: *Runtime, outcome: DurableCommit) void {
-        switch (outcome) {
-            .committed, .failed => {},
-            .outcome_unknown => self.durable_mutation_state = .outcome_unknown,
-        }
-    }
-
-    pub fn durableMutationAvailable(self: *const Runtime) bool {
-        return self.durable_mutation_state == .available;
     }
 
     pub fn applyEvent(
@@ -2301,7 +2262,6 @@ pub const Runtime = struct {
                         return true;
                     },
                     .outcome_unknown => {
-                        self.observeDurableCommit(.outcome_unknown);
                         task.durable.checkpoint_attempt = .outcome_unknown;
                         postprocess.state.store(.store_outcome_unknown, .release);
                         return true;
@@ -4296,7 +4256,6 @@ fn applyPendingModel(
                 attached.health = .session_poisoned;
         }
         if (outcome == .outcome_unknown) {
-            self.observeDurableCommit(.outcome_unknown);
             return error.TaskPersistenceOutcomeUnknown;
         }
         if (!coherent) return error.TaskClosing;
@@ -4425,9 +4384,7 @@ fn cancelCompactRecord(
     return if (prior == null) .requested else .already_requested;
 }
 
-fn observeBestEffortCommit(self: *Runtime, outcome: DurableCommit) void {
-    if (outcome == .outcome_unknown) self.observeDurableCommit(.outcome_unknown);
-}
+fn observeBestEffortCommit(_: *Runtime, _: DurableCommit) void {}
 
 fn poisonAttachment(task: *task_state.Task) void {
     if (task.runtime.attached()) |attached|
@@ -4724,8 +4681,4 @@ test "Runtime owns bounded Task collection and monotonic process facts" {
     try std.testing.expectEqual(@as(u64, 1), runtime.takeRecentOrder());
     try std.testing.expectEqual(@as(u64, 2), runtime.next_recent_order);
     try std.testing.expectEqual(@as(u64, 1), runtime.noteLateTerminal());
-    runtime.observeDurableCommit(.failed);
-    try std.testing.expect(runtime.durableMutationAvailable());
-    runtime.observeDurableCommit(.outcome_unknown);
-    try std.testing.expect(!runtime.durableMutationAvailable());
 }

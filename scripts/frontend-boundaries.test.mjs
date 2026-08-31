@@ -201,16 +201,19 @@ test("transitional Account states never turn signed-out history into a security 
   );
 });
 
-test("Task persistence failure disables mutations without hiding Task history", async () => {
+test("Task persistence failure remains diagnostic without blocking mutations", async () => {
   const app = await readFile(resolve(sourceRoot, "app", "App.tsx"), "utf8");
+  const store = await readFile(
+    resolve(sourceRoot, "workbench", "store.ts"),
+    "utf8",
+  );
   const taskList = await readFile(
     resolve(sourceRoot, "features", "tasks", "TaskList.tsx"),
     "utf8",
   );
-  assert.match(
-    app,
-    /const workbenchMutationDisabled =\s*bridgeUnavailable \|\|\s*taskHistoryMutationBlocked\(/,
-  );
+  assert.match(app, /const workbenchMutationDisabled =\s*bridgeUnavailable;/);
+  assert.doesNotMatch(app, /taskHistoryMutationBlocked/);
+  assert.doesNotMatch(store, /taskHistoryMutationBlocked/);
   assert.match(
     app,
     /const taskMutationDisabled =\s*workbenchMutationDisabled \|\|/,
@@ -222,6 +225,7 @@ test("Task persistence failure disables mutations without hiding Task history", 
   assert.match(app, /<TaskList[\s\S]*tasks=\{navigableTaskItems\}/);
   assert.match(taskList, /className="task-list-item focus-ring"/);
   assert.match(taskList, /disabled=\{\s*taskMutationDisabled/);
+  assert.match(app, /className="task-persistence-error" role="status"/);
 });
 
 test("degraded Task history does not create a permanent sidebar alert", async () => {

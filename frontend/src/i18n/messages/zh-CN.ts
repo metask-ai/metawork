@@ -915,13 +915,14 @@ export const zhCN: Record<MessageId, string> = {
   "scheduled.persistence.outcome_unknown":
     "无法确认最近的更改是否保存。为避免重复运行，自动触发已停止。",
   "scheduled.persistence.ready": "定时任务存储已就绪。",
-  "task.persistence.read_failed": "无法读取已保存的任务历史。",
+  "task.persistence.read_failed":
+    "无法读取已保存的任务历史。你可以继续工作，但本次使用中的新内容不会保存。",
   "task.persistence.corrupt":
-    "已保存的任务历史无效。MetaWork 已保留原文件并禁用任务更改。",
+    "已保存的任务历史无效。MetaWork 已保留原文件；你可以继续工作，但本次使用中的新内容不会保存。",
   "task.persistence.write_failed":
-    "最近的任务更改未能保存，后续任务更改已禁用。",
+    "最近的任务更改未能保存。你可以继续工作，MetaWork 会在后续更改时再次尝试保存。",
   "task.persistence.outcome_unknown":
-    "无法确认最近的任务更改是否已保存，请重启应用后再继续更改。",
+    "无法确认最近的任务更改是否已保存。你可以继续工作，后续更改会再次尝试保存。",
   "mcp.mutation.busy": "此服务正在进行授权操作。",
   "mcp.mutation.cancelled": "已取消确认。",
   "mcp.mutation.capability_unavailable": "当前设备不支持此操作。",

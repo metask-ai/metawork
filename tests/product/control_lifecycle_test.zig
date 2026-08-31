@@ -1512,7 +1512,7 @@ test "definite descriptor failure preserves terminal history and leaves a recove
     try std.testing.expectError(error.BlobMissing, checkpoint_store.verify(identity));
 }
 
-test "unknown descriptor commit freezes checkpoint transaction until shutdown" {
+test "unknown descriptor commit remains retryable without freezing Product Task" {
     fake_core.reset();
     fake_core.controlNextCheckpointExport();
     const runtime = try createTestComposition(.{
@@ -1569,7 +1569,7 @@ test "unknown descriptor commit freezes checkpoint transaction until shutdown" {
         .digest = digest,
         .byte_size = "fixture-checkpoint".len,
     };
-    var transaction_frozen = false;
+    var outcome_observed = false;
     for (0..10_000) |_| {
         checkpoint_store.verify(identity) catch {
             std.Thread.yield() catch {};
@@ -1577,30 +1577,31 @@ test "unknown descriptor commit freezes checkpoint transaction until shutdown" {
         };
         const snapshot_json = try workbench.writeSnapshot(&snapshot);
         if (std.mem.indexOf(u8, snapshot_json, "\"taskHistoryPersistenceHealth\":\"outcome_unknown\"") != null) {
-            transaction_frozen = true;
+            outcome_observed = true;
             break;
         }
         std.Thread.yield() catch {};
     }
-    try std.testing.expect(transaction_frozen);
+    try std.testing.expect(outcome_observed);
     try checkpoint_store.verify(identity);
-    try std.testing.expectError(error.TaskPersistenceOutcomeUnknown, workbench.deleteTask(task_id));
-    try std.testing.expectError(
-        error.TaskPersistenceOutcomeUnknown,
-        workbench.setTaskArchived(task_id, true),
-    );
-    const frozen_revision = workbench.currentRevision();
-    for (0..3) |_| {
-        _ = try workbench.writeSnapshot(&snapshot);
-        try std.testing.expectEqual(frozen_revision, workbench.currentRevision());
-    }
+    try workbench.setTaskArchived(task_id, true);
+    try workbench.setTaskArchived(task_id, false);
+    try workbench.renameTask(task_id, "Still usable");
+    persistence.result = .committed;
+    try workbench.renameTask(task_id, "Saved after retry");
+    const healed_snapshot = try workbench.writeSnapshot(&snapshot);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        healed_snapshot,
+        "\"taskHistoryPersistenceHealth\":\"ready\"",
+    ) != null);
 
     workbench.deinit();
     initialized = false;
     try checkpoint_store.verify(identity);
 }
 
-test "untrusted Task history never opens checkpoint orphan cleanup" {
+test "untrusted Task history preserves checkpoint orphans without blocking a new interactive Task" {
     fake_core.reset();
     const runtime = try createTestComposition(.{
         .worker_count = 1,
@@ -1655,6 +1656,17 @@ test "untrusted Task history never opens checkpoint orphan cleanup" {
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
+        "\"taskHistoryPersistenceHealth\":\"corrupt\"",
+    ) != null);
+    try checkpoint_store.verify(identity);
+    try installControlExecution(&workbench);
+    const task_id = try workbench.createTask(productControlTaskInput());
+    _ = try workbench.runTask(task_id, .{ .text = "Continue without saved history" });
+    try waitControlSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
+    const continued = try workbench.writeSnapshot(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        continued,
         "\"taskHistoryPersistenceHealth\":\"corrupt\"",
     ) != null);
     try checkpoint_store.verify(identity);
@@ -1814,6 +1826,7 @@ test "scheduled noninteractive permission request automatically stops the Produc
     );
     defer automatic_root.deinit();
     var schedule_support: TestScheduleSupport = .{};
+    var task_persistence: TaskPersistenceProbe = .{};
     var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
@@ -1832,6 +1845,7 @@ test "scheduled noninteractive permission request automatically stops the Produc
             .schedule_timer = schedule_support.timer(),
             .schedule_persistence = schedule_support.persistence(),
             .schedule_notifier = schedule_support.notifier(),
+            .task_persistence = task_persistence.capability(),
         },
     );
     defer workbench.deinit();
@@ -1879,6 +1893,161 @@ test "scheduled noninteractive permission request automatically stops the Produc
         schedule_support.notification_kind,
     );
     try std.testing.expectEqual(task_id, schedule_support.notification_task_id);
+}
+
+test "scheduled admission rejects an unconfigured Task persistence capability" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 1,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
+    var automatic_root = try product_control.AutomaticWorkspaceRoot.open(
+        std.testing.io,
+        std.testing.allocator,
+        root_storage[0..root_len],
+    );
+    defer automatic_root.deinit();
+    var schedule_support: TestScheduleSupport = .{};
+    var workbench = try product_control.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 1,
+            .max_workspaces = 1,
+            .max_tasks = 1,
+            .max_scheduled_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        .{
+            .directories = .{ .automatic_workspace_root = &automatic_root },
+            .schedule_timer = schedule_support.timer(),
+            .schedule_persistence = schedule_support.persistence(),
+        },
+    );
+    defer workbench.deinit();
+    try installControlExecution(&workbench);
+
+    const schedule_id = try workbench.createScheduledTask(.{
+        .title = "Required durability",
+        .expected_execution_generation = 1,
+        .permission_profile = .approval_required,
+        .input = "Do not run without durable Task history",
+        .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
+    });
+    try std.testing.expectError(
+        error.TaskPersistenceFailed,
+        workbench.runScheduledTaskNow(schedule_id, 1),
+    );
+
+    fake_core.lock();
+    const run_calls = fake_core.run_calls;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 0), run_calls);
+    var snapshot_storage: [128 * 1024]u8 = undefined;
+    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"health\":\"needs_attention\",\"failureReason\":\"task_start_failed\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"tasks\":[]") != null);
+}
+
+test "scheduled durable admission failure does not block an interactive Product Task" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_sessions = 2,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
+    var automatic_root = try product_control.AutomaticWorkspaceRoot.open(
+        std.testing.io,
+        std.testing.allocator,
+        root_storage[0..root_len],
+    );
+    defer automatic_root.deinit();
+    var schedule_support: TestScheduleSupport = .{};
+    var task_persistence: TaskPersistenceProbe = .{ .result = .failed };
+    var workbench = try product_control.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 2,
+            .max_workspaces = 1,
+            .max_tasks = 2,
+            .max_scheduled_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        .{
+            .directories = .{ .automatic_workspace_root = &automatic_root },
+            .schedule_timer = schedule_support.timer(),
+            .schedule_persistence = schedule_support.persistence(),
+            .schedule_notifier = schedule_support.notifier(),
+            .task_persistence = task_persistence.capability(),
+        },
+    );
+    defer workbench.deinit();
+    try installControlExecution(&workbench);
+
+    const schedule_id = try workbench.createScheduledTask(.{
+        .title = "Durable automatic run",
+        .expected_execution_generation = 1,
+        .permission_profile = .approval_required,
+        .input = "Run only after durable admission",
+        .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
+    });
+    try std.testing.expectError(
+        error.TaskPersistenceFailed,
+        workbench.runScheduledTaskNow(schedule_id, 1),
+    );
+
+    var snapshot_storage: [128 * 1024]u8 = undefined;
+    const rejected = try workbench.writeSnapshot(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        rejected,
+        "\"health\":\"needs_attention\",\"failureReason\":\"task_start_failed\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(u8, rejected, "\"tasks\":[]") != null);
+
+    const task_id = try workbench.createTaskForWorkspace(
+        .automatic,
+        1,
+        null,
+        null,
+        .{ .interactive = null },
+    );
+    _ = try workbench.runTask(task_id, .{ .text = "Continue interactively" });
+    try waitControlSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
+    const continued = try workbench.writeSnapshot(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        continued,
+        "\"taskHistoryPersistenceHealth\":\"write_failed\"",
+    ) != null);
 }
 
 test "bounded executor rejects overflow and close cancels a queued Run" {
@@ -2088,7 +2257,7 @@ test "Workspace incomplete catalog refresh preserves the committed last-good aut
     try std.testing.expectEqualStrings(before.skills[0].skill_id, after.skills[0].skill_id);
 }
 
-test "Manual Task persistence failure rolls back Workspace recent order" {
+test "Manual Task persistence failure keeps Product Task usable in memory" {
     fake_core.reset();
     const runtime = try createTestComposition(.{
         .worker_count = 1,
@@ -2125,27 +2294,31 @@ test "Manual Task persistence failure rolls back Workspace recent order" {
     const epoch = before[0].epoch;
 
     persistence.result = .failed;
-    try std.testing.expectError(
-        error.TaskPersistenceFailed,
-        workbench.createTaskForWorkspace(
-            .{ .manual = .{
-                .workspace_id = workspace_id,
-                .expected_epoch = epoch,
-            } },
-            1,
-            null,
-            null,
-            .{ .interactive = null },
-        ),
+    const task_id = try workbench.createTaskForWorkspace(
+        .{ .manual = .{
+            .workspace_id = workspace_id,
+            .expected_epoch = epoch,
+        } },
+        1,
+        null,
+        null,
+        .{ .interactive = null },
     );
     const after = try workbench.copyWorkspaceProjections(&projection_storage);
-    try std.testing.expectEqual(recent_order, after[0].recent_order);
+    try std.testing.expect(after[0].recent_order > recent_order);
     var snapshot_storage: [128 * 1024]u8 = undefined;
     const snapshot = try workbench.writeSnapshot(&snapshot_storage);
-    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"tasks\":[]") != null);
+    var task_id_storage: [32]u8 = undefined;
+    const task_id_json = try std.fmt.bufPrint(&task_id_storage, "\"id\":\"{d}\"", .{task_id});
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, task_id_json) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"taskHistoryPersistenceHealth\":\"write_failed\"",
+    ) != null);
 }
 
-test "Idle Task model persistence failure restores Session and detaches on unknown outcome" {
+test "Idle Task model persistence failure keeps the selected model and Session usable" {
     fake_core.reset();
     const runtime = try createTestComposition(.{
         .worker_count = 1,
@@ -2187,14 +2360,11 @@ test "Idle Task model persistence failure restores Session and detaches on unkno
         const projection_before = workbench.projectionBytesForTest();
         try expectFakeSessionModel(0, "fixture-model");
         persistence.result = .failed;
-        try std.testing.expectError(
-            error.TaskPersistenceFailed,
-            workbench.selectTaskModel(task_id, before.model, 2, "fixture-model-2"),
-        );
+        try workbench.selectTaskModel(task_id, before.model, 2, "fixture-model-2");
         const after = try workbench.taskExecutionIdentity(task_id);
-        try std.testing.expectEqualStrings("fixture-model", after.model);
-        try expectFakeSessionModel(0, "fixture-model");
-        try std.testing.expectEqual(projection_before, workbench.projectionBytesForTest());
+        try std.testing.expectEqualStrings("fixture-model-2", after.model);
+        try expectFakeSessionModel(0, "fixture-model-2");
+        try std.testing.expect(workbench.projectionBytesForTest() >= projection_before);
     }
 
     persistence.result = .committed;
@@ -2222,21 +2392,11 @@ test "Idle Task model persistence failure restores Session and detaches on unkno
         const before = try workbench.taskExecutionIdentity(task_id);
         const projection_before = workbench.projectionBytesForTest();
         persistence.result = .outcome_unknown;
-        try std.testing.expectError(
-            error.TaskPersistenceOutcomeUnknown,
-            workbench.selectTaskModel(task_id, before.model, 2, "fixture-model-2"),
-        );
+        try workbench.selectTaskModel(task_id, before.model, 2, "fixture-model-2");
         const after = try workbench.taskExecutionIdentity(task_id);
-        try std.testing.expectEqualStrings("fixture-model", after.model);
-        try std.testing.expectEqual(projection_before, workbench.projectionBytesForTest());
-        try waitTaskSnapshot(
-            &workbench,
-            "\"id\":\"1\"",
-            "\"unavailableReason\":\"runtime_detached\"",
-        );
-        const replacement = try openSession(runtime);
-        try closeSession(replacement, .session_close);
-        try runtime.releaseClosedSession(replacement);
+        try std.testing.expectEqualStrings("fixture-model-2", after.model);
+        try expectFakeSessionModel(0, "fixture-model-2");
+        try std.testing.expect(workbench.projectionBytesForTest() >= projection_before);
     }
 }
 
@@ -2489,6 +2649,7 @@ test "Text schedule updates preserve historical Task profiles and create fresh a
     );
     defer automatic_root.deinit();
     var schedule_support: TestScheduleSupport = .{};
+    var task_persistence: TaskPersistenceProbe = .{};
     var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
@@ -2506,6 +2667,7 @@ test "Text schedule updates preserve historical Task profiles and create fresh a
             .directories = .{ .automatic_workspace_root = &automatic_root },
             .schedule_timer = schedule_support.timer(),
             .schedule_persistence = schedule_support.persistence(),
+            .task_persistence = task_persistence.capability(),
         },
     );
     defer workbench.deinit();
@@ -2650,6 +2812,7 @@ test "schedule rejection retains the automatic Task created before a full Run qu
     );
     defer automatic_root.deinit();
     var schedule_support: TestScheduleSupport = .{};
+    var task_persistence: TaskPersistenceProbe = .{};
     var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
@@ -2666,6 +2829,7 @@ test "schedule rejection retains the automatic Task created before a full Run qu
             .directories = .{ .automatic_workspace_root = &automatic_root },
             .schedule_timer = schedule_support.timer(),
             .schedule_persistence = schedule_support.persistence(),
+            .task_persistence = task_persistence.capability(),
         },
     );
     defer workbench.deinit();

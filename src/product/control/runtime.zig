@@ -1601,7 +1601,6 @@ pub const Runtime = struct {
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
-        try self.requireTaskPersistenceMutation();
         var preparation = try self.workspace.prepareOpen(
             input.workspace_root,
             switch (input.trust) {
@@ -1622,7 +1621,7 @@ pub const Runtime = struct {
         const skill_root = try self.allocator.dupe(u8, workspace.canonical_root);
         var skill_root_owned = true;
         defer if (skill_root_owned) self.allocator.free(skill_root);
-        self.commitTaskStateIfConfigured() catch |err| {
+        self.commitTaskStateBestEffort() catch |err| {
             self.workspace.rollbackOpen(&preparation, self.workspaceStorage());
             return err;
         };
@@ -1904,7 +1903,6 @@ pub const Runtime = struct {
         expected_workspace_epoch: u64,
     ) Error!void {
         self.syncLifecycle();
-        try self.requireTaskPersistenceMutation();
         var preparation = try self.workspace.prepareRemoval(
             workspace_id,
             expected_workspace_epoch,
@@ -1914,7 +1912,7 @@ pub const Runtime = struct {
         const skill_root = try self.allocator.dupe(u8, workspace.canonical_root);
         var skill_root_owned = true;
         defer if (skill_root_owned) self.allocator.free(skill_root);
-        self.commitTaskStateIfConfigured() catch |err| {
+        self.commitTaskStateBestEffort() catch |err| {
             self.workspace.rollbackRemoval(&preparation);
             return err;
         };
@@ -1981,6 +1979,7 @@ pub const Runtime = struct {
             expected_skill_catalog_revision,
             expected_skill_selection_revision,
             permission,
+            self.taskRuntimeDurableEffect(),
             false,
         );
     }
@@ -2007,6 +2006,7 @@ pub const Runtime = struct {
                 expected_skill_catalog_revision,
                 expected_skill_selection_revision,
                 permission,
+                self.taskRuntimeDurableEffect(),
             ),
         };
     }
@@ -2019,6 +2019,7 @@ pub const Runtime = struct {
         expected_skill_catalog_revision: ?[]const u8,
         expected_skill_selection_revision: ?u64,
         permission: TaskPermissionRequest,
+        durable: task_runtime.DurableEffect,
         allow_unowned_automatic: bool,
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
@@ -2026,7 +2027,6 @@ pub const Runtime = struct {
         if (self.mcp) |*mcp|
             if (mcp.blocksNewTaskAdmission())
                 return error.CatalogLoading;
-        try self.requireTaskPersistenceMutation();
         if (self.executionReplacementPending())
             return error.ExecutionInUse;
         if (!self.canCreateTask())
@@ -2134,7 +2134,7 @@ pub const Runtime = struct {
                 .rollback_fn = rollbackTaskWorkspaceOrder,
             },
             .text = self.taskRuntimeTextProjection(),
-            .durable = self.taskRuntimeDurableEffect(),
+            .durable = durable,
             .release = self.taskRuntimeReleaseEffects(),
         }) catch |err| switch (err) {
             error.SessionCapacity => return error.TaskCapacity,
@@ -2156,6 +2156,7 @@ pub const Runtime = struct {
         expected_skill_catalog_revision: ?[]const u8,
         expected_skill_selection_revision: ?u64,
         permission: TaskPermissionRequest,
+        durable: task_runtime.DurableEffect,
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
@@ -2182,6 +2183,7 @@ pub const Runtime = struct {
             null,
             null,
             permission,
+            durable,
             true,
         );
         self.workspace.setAutomaticOwner(workspace.id, task_id);
@@ -2282,7 +2284,6 @@ pub const Runtime = struct {
     ) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
-        try self.requireTaskPersistenceMutation();
         const identity = self.task_runtime.taskExecutionIdentity(task_id) orelse
             return error.UnknownTask;
         if (expected_model.len == 0 or model.len == 0 or
@@ -2324,9 +2325,23 @@ pub const Runtime = struct {
         expected_binding_epoch: u64,
         input: TaskRunInput,
     ) Error!u64 {
+        return self.runTaskAtBindingWithDurable(
+            task_id,
+            expected_binding_epoch,
+            input,
+            self.taskRuntimeDurableEffect(),
+        );
+    }
+
+    fn runTaskAtBindingWithDurable(
+        self: *Runtime,
+        task_id: u64,
+        expected_binding_epoch: u64,
+        input: TaskRunInput,
+        durable: task_runtime.DurableEffect,
+    ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
-        try self.requireTaskPersistenceMutation();
         const binding_epoch = self.task_runtime.taskBindingEpoch(task_id) orelse
             return error.UnknownTask;
         if (expected_binding_epoch == 0 or expected_binding_epoch != binding_epoch)
@@ -2366,7 +2381,7 @@ pub const Runtime = struct {
                 .apply_fn = applyTaskWorkspaceOrder,
                 .rollback_fn = rollbackTaskWorkspaceOrder,
             },
-            self.taskRuntimeOperationEffects(),
+            self.taskRuntimeOperationEffectsWithDurable(durable),
         );
         if (order_preparation.isActive())
             self.workspace.commitOrder(&order_preparation);
@@ -2381,7 +2396,6 @@ pub const Runtime = struct {
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
-        try self.requireTaskPersistenceMutation();
         const binding_epoch = self.task_runtime.taskBindingEpoch(task_id) orelse
             return error.UnknownTask;
         if (expected_binding_epoch == 0 or expected_binding_epoch != binding_epoch)
@@ -2460,7 +2474,6 @@ pub const Runtime = struct {
         response: UiResponse,
     ) Error!void {
         self.syncLifecycle();
-        try self.requireTaskPersistenceMutation();
         try self.task_runtime.respondUi(
             task_id,
             run_id,
@@ -2480,14 +2493,22 @@ pub const Runtime = struct {
     }
 
     pub fn renameTask(self: *Runtime, task_id: u64, title: []const u8) Error!void {
+        return self.renameTaskWithDurable(task_id, title, self.taskRuntimeDurableEffect());
+    }
+
+    fn renameTaskWithDurable(
+        self: *Runtime,
+        task_id: u64,
+        title: []const u8,
+        durable: task_runtime.DurableEffect,
+    ) Error!void {
         self.syncLifecycle();
-        try self.requireTaskPersistenceMutation();
         try self.task_runtime.renameTask(
             task_id,
             title,
             self.limits.max_task_title_bytes,
             self.taskRuntimeTextProjection(),
-            self.taskRuntimeDurableEffect(),
+            durable,
         );
         self.bumpRevision();
     }
@@ -2600,7 +2621,6 @@ pub const Runtime = struct {
 
     pub fn setTaskArchived(self: *Runtime, task_id: u64, archived: bool) Error!void {
         self.syncLifecycle();
-        try self.requireTaskPersistenceMutation();
         if (try self.task_runtime.setArchived(
             task_id,
             archived,
@@ -2610,7 +2630,6 @@ pub const Runtime = struct {
 
     pub fn deleteTask(self: *Runtime, task_id: u64) Error!void {
         self.syncLifecycle();
-        try self.requireTaskPersistenceMutation();
         const requested = try self.task_runtime.requestDeletion(task_id);
         const deletion = self.task_runtime.syncDeletions(
             self.checkpoint_store_health.load(.acquire) != .unavailable,
@@ -2618,7 +2637,7 @@ pub const Runtime = struct {
         );
         if (requested or deletion.changed) self.bumpRevision();
         if (deletion.failed_task_id == task_id) {
-            if (!self.task_runtime.durableMutationAvailable())
+            if (deletion.failed_commit == .outcome_unknown)
                 return error.TaskPersistenceOutcomeUnknown;
             return error.TaskPersistenceFailed;
         }
@@ -2640,13 +2659,11 @@ pub const Runtime = struct {
         profile: PermissionProfile,
     ) Error!bool {
         self.syncLifecycle();
-        try self.requireTaskPersistenceMutation();
         if (profile == self.default_permission_profile) return false;
         const previous = self.default_permission_profile;
         self.default_permission_profile = profile;
-        self.commitTaskStateIfConfigured() catch |err| {
-            if (err != error.TaskPersistenceOutcomeUnknown)
-                self.default_permission_profile = previous;
+        self.commitTaskStateBestEffort() catch |err| {
+            self.default_permission_profile = previous;
             return err;
         };
         self.bumpRevision();
@@ -3968,18 +3985,19 @@ pub const Runtime = struct {
         input: product_schedule.TaskLaunch,
     ) product_schedule.TaskLaunchOutcome {
         const self: *Runtime = @ptrCast(@alignCast(context));
-        const task_id = self.createTaskForWorkspace(
-            .automatic,
+        const required = self.taskRuntimeRequiredDurableEffect();
+        const task_id = self.createAutomaticTask(
             input.execution_generation,
             null,
             null,
             .{ .noninteractive = taskProfileFromSchedule(input.permission_profile) },
+            required,
         ) catch |err| return .{ .rejected = .{
             .cause = err,
             .reason = scheduledFailure(err),
             .task_id = 0,
         } };
-        self.renameTask(task_id, input.title) catch |err|
+        self.renameTaskWithDurable(task_id, input.title, required) catch |err|
             return .{ .rejected = .{
                 .cause = err,
                 .reason = .task_start_failed,
@@ -3987,10 +4005,11 @@ pub const Runtime = struct {
             } };
         const binding_epoch = self.task_runtime.taskBindingEpoch(task_id) orelse
             unreachable;
-        _ = self.runTaskAtBinding(
+        _ = self.runTaskAtBindingWithDurable(
             task_id,
             binding_epoch,
             .{ .text = input.input },
+            required,
         ) catch |err| return .{ .rejected = .{
             .cause = err,
             .reason = scheduledFailure(err),
@@ -4362,23 +4381,6 @@ pub const Runtime = struct {
         };
     }
 
-    fn requireTaskPersistenceMutation(self: *const Runtime) Error!void {
-        if (!self.task_runtime.durableMutationAvailable())
-            return error.TaskPersistenceOutcomeUnknown;
-        return switch (self.task_persistence_health) {
-            .ready => {},
-            .degraded => {},
-            // Unit-level Runtime users may deliberately omit persistence.
-            // Production startup converts every store initialization/read
-            // failure into a typed non-ready health instead.
-            .unavailable => if (self.task_persistence.restore_failed)
-                error.TaskPersistenceUnavailable
-            else {},
-            .outcome_unknown => error.TaskPersistenceOutcomeUnknown,
-            .read_failed, .corrupt, .write_failed => error.TaskPersistenceUnavailable,
-        };
-    }
-
     fn projectTaskRuntimeText(
         context: *anyopaque,
         value: []const u8,
@@ -4466,7 +4468,26 @@ pub const Runtime = struct {
     }
 
     fn taskRuntimeDurableEffect(self: *Runtime) task_runtime.DurableEffect {
-        return .{ .context = self, .commit_fn = commitTaskRuntimeCandidate };
+        return .{ .context = self, .commit_fn = commitTaskRuntimeCandidateBestEffort };
+    }
+
+    fn commitTaskRuntimeCandidateBestEffort(context: *anyopaque) task_runtime.DurableCommit {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        self.commitTaskStateBestEffort() catch return .failed;
+        return .committed;
+    }
+
+    fn taskRuntimeRequiredDurableEffect(self: *Runtime) task_runtime.DurableEffect {
+        return .{ .context = self, .commit_fn = commitRequiredTaskRuntimeCandidate };
+    }
+
+    fn commitRequiredTaskRuntimeCandidate(context: *anyopaque) task_runtime.DurableCommit {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        self.commitTaskState() catch |err| return switch (err) {
+            error.TaskPersistenceOutcomeUnknown => .outcome_unknown,
+            else => .failed,
+        };
+        return .committed;
     }
 
     fn commitTaskRuntimeCheckpoint(
@@ -4474,10 +4495,7 @@ pub const Runtime = struct {
         checkpoint_override: ?task_persistence.CheckpointPersistenceOverride,
     ) task_runtime.DurableCommit {
         const self: *Runtime = @ptrCast(@alignCast(context));
-        self.commitTaskStateWithCheckpoint(checkpoint_override) catch |err| return switch (err) {
-            error.TaskPersistenceOutcomeUnknown => .outcome_unknown,
-            else => .failed,
-        };
+        self.commitTaskStateWithCheckpoint(checkpoint_override) catch return .failed;
         return .committed;
     }
 
@@ -4584,9 +4602,18 @@ pub const Runtime = struct {
     }
 
     fn taskRuntimeOperationEffects(self: *Runtime) task_runtime.OperationEffects {
+        return self.taskRuntimeOperationEffectsWithDurable(
+            self.taskRuntimeDurableEffect(),
+        );
+    }
+
+    fn taskRuntimeOperationEffectsWithDurable(
+        self: *Runtime,
+        durable: task_runtime.DurableEffect,
+    ) task_runtime.OperationEffects {
         return .{
             .text = self.taskRuntimeTextProjection(),
-            .durable = self.taskRuntimeDurableEffect(),
+            .durable = durable,
             .release = self.taskRuntimeReleaseEffects(),
             .executor = .{
                 .context = self,
@@ -4692,6 +4719,16 @@ pub const Runtime = struct {
         return self.commitTaskState();
     }
 
+    fn commitTaskStateBestEffort(self: *Runtime) Error!void {
+        self.commitTaskStateIfConfigured() catch |err| return switch (err) {
+            error.TaskPersistenceOutcomeUnknown,
+            error.TaskPersistenceUnavailable,
+            error.TaskPersistenceFailed,
+            => {},
+            else => err,
+        };
+    }
+
     fn commitTaskStateNoFail(self: *Runtime) void {
         self.commitTaskStateIfConfigured() catch |err| switch (err) {
             error.TaskPersistenceOutcomeUnknown,
@@ -4722,39 +4759,39 @@ pub const Runtime = struct {
         checkpoint_override: ?CheckpointPersistenceOverride,
     ) Error!void {
         switch (self.task_persistence_health) {
-            .ready => {},
-            .degraded => {},
-            .outcome_unknown => return error.TaskPersistenceOutcomeUnknown,
-            .read_failed, .corrupt, .write_failed => return error.TaskPersistenceUnavailable,
-            .unavailable => return error.TaskPersistenceUnavailable,
+            .ready, .degraded, .write_failed, .outcome_unknown => {},
+            .read_failed, .corrupt, .unavailable => return error.TaskPersistenceUnavailable,
         }
-        var scratch = self.buildTaskStateWireWithCheckpoint(checkpoint_override) catch {
+        var scratch = self.buildTaskStateWireWithCheckpoint(checkpoint_override) catch |err| {
             self.markTaskPersistenceWriteFailed();
-            return error.TaskPersistenceFailed;
+            return err;
         };
         defer scratch.deinit();
-        const output = self.allocator.alloc(u8, task_persistence.max_store_bytes) catch {
+        const output = self.allocator.alloc(u8, task_persistence.max_store_bytes) catch |err| {
             self.markTaskPersistenceWriteFailed();
-            return error.TaskPersistenceFailed;
+            return err;
         };
         defer self.allocator.free(output);
-        const bytes = task_persistence.encode(output, scratch.state) catch {
+        const bytes = task_persistence.encode(output, scratch.state) catch |err| {
             self.markTaskPersistenceWriteFailed();
-            return error.TaskPersistenceFailed;
+            return err;
         };
         if (self.containsKnownCredential(bytes)) {
             self.markTaskPersistenceWriteFailed();
-            return error.TaskPersistenceFailed;
+            return error.TaskStoreEncodeFailed;
         }
         switch (self.task_persistence.commit(bytes)) {
-            .committed => self.task_runtime.observeDurableCommit(.committed),
+            .committed => {
+                if (self.task_persistence_health != .ready) {
+                    self.task_persistence_health = .ready;
+                    self.bumpRevision();
+                }
+            },
             .failed => {
-                self.task_runtime.observeDurableCommit(.failed);
                 self.markTaskPersistenceWriteFailed();
                 return error.TaskPersistenceFailed;
             },
             .outcome_unknown => {
-                self.task_runtime.observeDurableCommit(.outcome_unknown);
                 self.task_persistence_health = .outcome_unknown;
                 self.bumpRevision();
                 return error.TaskPersistenceOutcomeUnknown;
@@ -7083,7 +7120,7 @@ test "Workspace registry owns empty selection recent use authorization and capac
     );
 }
 
-test "Workspace upsert unknown outcome rolls back the candidate and freezes mutation" {
+test "Workspace upsert unknown outcome stays usable and heals on retry" {
     test_agent_runtime.io = std.testing.io;
     const root_path = try std.Io.Dir.cwd().realPathFileAlloc(
         std.testing.io,
@@ -7108,30 +7145,21 @@ test "Workspace upsert unknown outcome rolls back the candidate and freezes muta
         .{ .task_persistence = persistence.capability(null) },
     );
     defer control.deinit();
-    const next_workspace_id = control.workspace.identity().next_id;
-    const next_recent_order = control.workspace.identity().next_recent_order;
-
-    try std.testing.expectError(
-        error.TaskPersistenceOutcomeUnknown,
-        control.openWorkspace(.{
-            .workspace_root = root_path,
-            .trust = .explicitly_trusted,
-        }),
-    );
-    try std.testing.expectEqual(@as(usize, 0), control.workspace.count(.manual));
-    try std.testing.expectEqual(next_workspace_id, control.workspace.identity().next_id);
-    try std.testing.expectEqual(next_recent_order, control.workspace.identity().next_recent_order);
+    _ = try control.openWorkspace(.{
+        .workspace_root = root_path,
+        .trust = .explicitly_trusted,
+    });
+    try std.testing.expectEqual(@as(usize, 1), control.workspace.count(.manual));
     try std.testing.expectEqual(
         TaskPersistenceHealth.outcome_unknown,
         control.task_persistence_health,
     );
-    try std.testing.expectError(
-        error.TaskPersistenceOutcomeUnknown,
-        control.openWorkspace(.{
-            .workspace_root = root_path,
-            .trust = .explicitly_trusted,
-        }),
-    );
+    persistence.result = .committed;
+    _ = try control.openWorkspace(.{
+        .workspace_root = root_path,
+        .trust = .explicitly_trusted,
+    });
+    try std.testing.expectEqual(TaskPersistenceHealth.ready, control.task_persistence_health);
 }
 
 test "hidden Workspace record with Task history cannot be reused" {
@@ -7516,7 +7544,8 @@ test "one damaged Task record does not poison surviving history" {
     ) != null);
 
     try installTestExecution(&restored);
-    try restored.requireTaskPersistenceMutation();
+    try restored.renameTask(3, "Recovered history");
+    try std.testing.expectEqual(TaskPersistenceHealth.ready, restored.task_persistence_health);
 }
 
 test "Automatic Workspace history survives an unavailable allocator" {
@@ -7575,8 +7604,14 @@ test "Automatic Workspace history survives an unavailable allocator" {
     );
 }
 
-test "Task persistence restore failure blocks product mutations" {
+test "Task persistence restore failure remains diagnostic while product mutations continue" {
     test_agent_runtime.io = std.testing.io;
+    const root_path = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        ".",
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(root_path);
     var control = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
@@ -7587,16 +7622,14 @@ test "Task persistence restore failure blocks product mutations" {
     defer control.deinit();
     try installTestExecution(&control);
     try std.testing.expectEqual(TaskPersistenceHealth.read_failed, control.task_persistence_health);
-    try std.testing.expectError(
-        error.TaskPersistenceUnavailable,
-        control.openWorkspace(.{
-            .workspace_root = "/tmp/metawork-test",
-            .trust = .explicitly_trusted,
-        }),
-    );
+    _ = try control.openWorkspace(.{
+        .workspace_root = root_path,
+        .trust = .explicitly_trusted,
+    });
+    try std.testing.expectEqual(TaskPersistenceHealth.read_failed, control.task_persistence_health);
 }
 
-test "Task persistence failure rolls back metadata and closes mutation admission" {
+test "Task persistence failure publishes metadata and retries the next save" {
     const persistence_storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
     defer std.testing.allocator.free(persistence_storage);
     var persistence = TestTaskPersistence{
@@ -7607,24 +7640,16 @@ test "Task persistence failure rolls back metadata and closes mutation admission
     defer control.deinit();
     control.task_persistence = persistence.capability(null);
     control.task_persistence_health = .ready;
-    const previous_recent_order = control.task_runtime.tasks[0].?.durable.recent_order;
-    const previous_next_recent_order = control.task_runtime.next_recent_order;
-
-    try std.testing.expectError(
-        error.TaskPersistenceFailed,
-        control.renameTask(3, "must not publish"),
+    try control.renameTask(3, "published in memory");
+    try std.testing.expectEqualStrings(
+        "published in memory",
+        control.task_runtime.tasks[0].?.durable.title,
     );
-    try std.testing.expectEqualStrings("", control.task_runtime.tasks[0].?.durable.title);
-    try std.testing.expectEqual(
-        previous_recent_order,
-        control.task_runtime.tasks[0].?.durable.recent_order,
-    );
-    try std.testing.expectEqual(previous_next_recent_order, control.task_runtime.next_recent_order);
     try std.testing.expectEqual(TaskPersistenceHealth.write_failed, control.task_persistence_health);
-    try std.testing.expectError(
-        error.TaskPersistenceUnavailable,
-        control.setTaskArchived(3, true),
-    );
+    persistence.result = .committed;
+    try control.renameTask(3, "saved on retry");
+    try std.testing.expectEqualStrings("saved on retry", control.task_runtime.tasks[0].?.durable.title);
+    try std.testing.expectEqual(TaskPersistenceHealth.ready, control.task_persistence_health);
 }
 
 test "Task persistence failure rolls back deletion before physical release" {
@@ -7659,9 +7684,13 @@ test "Task persistence failure rolls back deletion before physical release" {
         snapshot,
         "\"deletionStatus\":\"failed\"",
     ) != null);
+    persistence.result = .committed;
+    try control.deleteTask(3);
+    try std.testing.expect(control.task_runtime.find(3) == null);
+    try std.testing.expectEqual(TaskPersistenceHealth.ready, control.task_persistence_health);
 }
 
-test "Task persistence failure rolls back Workspace upsert candidates" {
+test "Task persistence failure keeps Workspace state and retries later" {
     test_agent_runtime.io = std.testing.io;
     const root_path = try std.Io.Dir.cwd().realPathFileAlloc(
         std.testing.io,
@@ -7682,35 +7711,11 @@ test "Task persistence failure rolls back Workspace upsert candidates" {
         .result = .failed,
     };
 
-    {
-        var control = try Runtime.init(
-            std.testing.allocator,
-            std.testing.io,
-            &test_agent_runtime,
-            testLimits(),
-            .{ .task_persistence = persistence.capability(null) },
-        );
-        defer control.deinit();
-        const next_workspace_id = control.workspace.identity().next_id;
-        const next_recent_order = control.workspace.identity().next_recent_order;
-        try std.testing.expectError(
-            error.TaskPersistenceFailed,
-            control.openWorkspace(.{
-                .workspace_root = root_path,
-                .trust = .explicitly_trusted,
-            }),
-        );
-        try std.testing.expectEqual(@as(usize, 0), control.workspace.count(.manual));
-        try std.testing.expectEqual(next_workspace_id, control.workspace.identity().next_id);
-        try std.testing.expectEqual(next_recent_order, control.workspace.identity().next_recent_order);
-    }
-
-    persistence.result = .committed;
     var control = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &test_agent_runtime,
-        .{ .max_workspaces = 1 },
+        testLimits(),
         .{ .task_persistence = persistence.capability(null) },
     );
     defer control.deinit();
@@ -7718,29 +7723,15 @@ test "Task persistence failure rolls back Workspace upsert candidates" {
         .workspace_root = root_path,
         .trust = .explicitly_trusted,
     });
-    try control.removeWorkspace(root_id);
-    const hidden = control.workspace.facts(root_id) orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expect(!hidden.visible);
-    const hidden_epoch = hidden.epoch;
-    const next_workspace_id = control.workspace.identity().next_id;
-    const next_recent_order = control.workspace.identity().next_recent_order;
-    persistence.result = .failed;
-    try std.testing.expectError(
-        error.TaskPersistenceFailed,
-        control.openWorkspace(.{
-            .workspace_root = source_path,
-            .trust = .explicitly_trusted,
-        }),
-    );
-    const restored_hidden = control.workspace.facts(root_id) orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expect(!restored_hidden.visible);
-    try std.testing.expectEqual(hidden_epoch, restored_hidden.epoch);
-    try std.testing.expectEqualStrings(root_path, restored_hidden.canonical_root);
-    try std.testing.expect(control.workspace.findByRoot(source_path) == null);
-    try std.testing.expectEqual(next_workspace_id, control.workspace.identity().next_id);
-    try std.testing.expectEqual(next_recent_order, control.workspace.identity().next_recent_order);
+    try std.testing.expect(control.workspace.facts(root_id) != null);
+    try std.testing.expectEqual(TaskPersistenceHealth.write_failed, control.task_persistence_health);
+    persistence.result = .committed;
+    const source_id = try control.openWorkspace(.{
+        .workspace_root = source_path,
+        .trust = .explicitly_trusted,
+    });
+    try std.testing.expect(control.workspace.facts(source_id) != null);
+    try std.testing.expectEqual(TaskPersistenceHealth.ready, control.task_persistence_health);
 }
 
 test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {

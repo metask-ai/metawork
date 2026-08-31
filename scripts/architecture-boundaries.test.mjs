@@ -1322,8 +1322,11 @@ test("Product Task kernels have one physical home without taking the executor", 
   assert.match(taskRuntime, /next_task_id: u64/);
   assert.match(taskRuntime, /next_restore_attempt_id: u64/);
   assert.match(taskRuntime, /late_terminal_event_count: u64/);
-  assert.match(taskRuntime, /durable_mutation_state: DurableMutationState/);
-  assert.match(taskRuntime, /pub fn observeDurableCommit\(/);
+  assert.doesNotMatch(
+    taskRuntime,
+    /durable_mutation_state: DurableMutationState/,
+  );
+  assert.doesNotMatch(taskRuntime, /pub fn observeDurableCommit\(/);
   assert.doesNotMatch(
     taskRuntime,
     /Workbench|product_control_executor|@import\("(?:metawork_app|metawork_bridge|native_sdk|metask_agentcore)"\)/,
