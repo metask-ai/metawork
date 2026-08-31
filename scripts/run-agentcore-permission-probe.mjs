@@ -45,9 +45,9 @@ const bundle = await validateAgentCoreBundle(bundleRoot, {
   expectedManifest: lock.manifest,
   expectedManifestBytes: lock.bytes,
 });
-if (!bundle.target.startsWith("aarch64-macos"))
+if (!["aarch64-macos", "x86_64-macos"].includes(targetId))
   throw new Error(
-    `permission probe evidence is defined only for aarch64-macos, received ${bundle.target}`,
+    `permission probe evidence is defined only for macOS bundles, received ${bundle.target}`,
   );
 
 const scratch = await realpath(

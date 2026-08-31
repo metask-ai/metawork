@@ -61,8 +61,14 @@ export async function buildNative(
 }
 
 // The automation-enabled Debug artifact every real desktop harness runs against.
-export async function buildAutomationDebugArtifact(root = repositoryRoot) {
-  const bundle = await verifyStagedAgentCoreBundle(root);
+export async function buildAutomationDebugArtifact(
+  root = repositoryRoot,
+  { targetId } = {},
+) {
+  const bundle = await verifyStagedAgentCoreBundle(
+    root,
+    targetId ? { targetId } : undefined,
+  );
   await buildFrontend(root);
   await buildNative(root, {
     optimize: "Debug",

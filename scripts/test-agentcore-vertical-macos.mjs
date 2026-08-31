@@ -20,6 +20,17 @@ import { verifyAgentCoreRuntimeAssets } from "./agentcore-runtime-assets.mjs";
 
 const execFileAsync = promisify(execFile);
 const root = fileURLToPath(new URL("../", import.meta.url));
+const [targetId] = process.argv.slice(2);
+if (
+  process.argv.length > 3 ||
+  (targetId !== undefined &&
+    targetId !== "aarch64-macos" &&
+    targetId !== "x86_64-macos")
+)
+  throw new Error(
+    "usage: node scripts/test-agentcore-vertical-macos.mjs [aarch64-macos|x86_64-macos]",
+  );
+const bundleOptions = targetId ? { targetId } : undefined;
 const native = path.join(
   root,
   "node_modules",
@@ -61,8 +72,8 @@ const windowsWebViewFocusProbeScript = path.join(
 // builds the same artifact before importing this module and sets the flag so
 // the automation Debug build does not run twice.
 if (!process.env.METAWORK_VERTICAL_PREBUILT)
-  await buildAutomationDebugArtifact(root);
-const bundle = await verifyStagedAgentCoreBundle(root);
+  await buildAutomationDebugArtifact(root, bundleOptions);
+const bundle = await verifyStagedAgentCoreBundle(root, bundleOptions);
 await verifyAgentCoreRuntimeAssets(bundle, path.dirname(binary));
 // Exercise the shipped rg beside the Host, not an ambient development install.
 const appEnvironment = { ...process.env };

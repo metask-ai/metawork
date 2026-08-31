@@ -61,7 +61,7 @@ candidate probe、真实桌面验收、签名、公证和发布验证不属于 `
 | Storage 基础层 | `zig build test-storage` | SQL conformance、SQLite backend 与 child-process WAL recovery；优化级别与平台要求见 [Storage 基础层验证](#storage-基础层验证) |
 | AgentCore staged candidate | `node scripts/verify-staged-agentcore-bundle.mjs` 后运行相关 `run-agentcore-*-probe.mjs` | verifier 证明接受条件，probe 证明候选行为；二者不能互换 |
 | Windows development baseline | `node scripts/run-windows-bringup.mjs` | Windows 真实 vertical 与关联回归的组合入口 |
-| macOS desktop vertical | `node scripts/test-agentcore-vertical-macos.mjs` | 只证明执行所绑定的目标平台与 artifact |
+| macOS desktop vertical | `node scripts/test-agentcore-vertical-macos.mjs [aarch64-macos\|x86_64-macos]` | 无参数绑定当前 Host target；显式参数在 Rosetta 可用时分别证明所选 artifact，不替代 Intel 真机专项验收 |
 | macOS 分发 | `npm run package:macos` | 具体签名、公证和 artifact Gate 见 [macOS 分发](macos-distribution.md) |
 | Windows 分发 | `npm run package:windows` | 具体安装器、签名和 artifact Gate 见 [Windows 分发](windows-distribution.md) |
 
@@ -155,10 +155,9 @@ macOS 的 AgentCore artifact、Native vertical、Keychain、secure input、windo
 
 | 能力 | 状态 | 关闭所需证据 | 真源 |
 | --- | --- | --- | --- |
-| macOS arm64/x86_64 AgentCore r15 artifact | 尚未取得可接受的 exact bundle；旧 lock 不满足当前接受合同，build/test/package 必须失败 | 各 target clean bundle、严格 verifier、相关 probe 与平台 vertical | [AgentCore ABI v1 合同](agentcore-abi-v1.md) |
 | AgentCore 独立 Worker、crash、async pending、suspend/resume、跨进程 in-flight recovery | 尚未实现 | Worker fault-domain 与恢复 lifecycle/vertical | [高层架构](architecture.md)、[产品需求](requirements.md) |
 | strict Workspace security、正式 Host tools、持久权限 | 尚未完成安全验收 | authority、process tree、filesystem、network 与跨平台安全证据 | [产品需求](requirements.md) |
-| PermissionProfile `standard` 与非 aarch64 macOS artifact 行为 | 两档产品切片已开放；`standard` 隐藏，其他 target 缺少同等 probe | typed risk/effect、执行前 commit boundary，以及各 target exact artifact probe | [产品需求](requirements.md)、[AgentCore 集成契约](agentcore-integration.md) |
+| PermissionProfile `standard` 与其他平台 artifact 行为 | 两档产品切片已开放，macOS arm64/x86_64 exact artifact probe 已通过；`standard` 隐藏，Windows target 尚缺同等 probe | typed risk/effect、执行前 commit boundary，以及 Windows 各 target exact artifact probe | [产品需求](requirements.md)、[AgentCore 集成契约](agentcore-integration.md) |
 | File Preview 真实桌面体验 | 核心 wire、owner、bounded read 与 redaction 已自动化覆盖；人工验收待完成 | Windows/macOS Drawer 视觉、键盘、焦点和窄窗验收 | [产品需求](requirements.md)、[UI 设计规范](ui-design.md) |
 | FileChange、typed Output、plan/approval、custom UI | 尚未形成可开放产品能力 | 对应合同、owner、持久化、恢复、投影和 UI Gate | [产品需求](requirements.md)、[UI 设计规范](ui-design.md) |
 | Skill catalog 历史内容固定 | 外部合同证据不足 | body/resources lease 的独立合同或可复现实验 | [AgentCore 集成契约](agentcore-integration.md) |
