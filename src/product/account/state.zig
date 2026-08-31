@@ -2068,6 +2068,7 @@ test "manual key choice supersedes an in-flight automatic continuation" {
         try allocator.dupe(u8, contract.metask_anthropic_messages_url),
         9,
         try allocator.dupe(u8, "secret"),
+        "fixture-provider",
     );
     defer restored_execution.deinit();
     var restored = try TestSupport.prepareReady(
@@ -2151,6 +2152,7 @@ test "empty model catalog parks back in choosing with the key list intact" {
         try allocator.dupe(u8, contract.metask_anthropic_messages_url),
         9,
         try allocator.dupe(u8, "secret"),
+        "fixture-provider",
     );
     defer restored_execution.deinit();
     var restored = try TestSupport.prepareReady(
@@ -2338,6 +2340,7 @@ test "failed reconfiguration preserves the committed selection" {
         try allocator.dupe(u8, contract.metask_anthropic_messages_url),
         9,
         try allocator.dupe(u8, "secret"),
+        "fixture-provider",
     );
     defer restored_execution.deinit();
     var restored = try TestSupport.prepareReady(
@@ -2762,6 +2765,7 @@ test "login commits account-only before a separate catalog generation" {
             base_url,
             0x9e37_79b9_7f4a_7c15,
             secret,
+            "key-1",
         ) },
     };
     var ready_transition = switch (account.prepareCompletion(&ready)) {
@@ -2894,6 +2898,7 @@ test "cancel invalidates attempt and stale secret completion is destroyed" {
             base_url,
             1,
             secret,
+            "key-1",
         ) },
     };
     switch (account.prepareCompletion(&stale)) {

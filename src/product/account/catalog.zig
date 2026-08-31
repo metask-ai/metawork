@@ -296,7 +296,8 @@ pub const CatalogSession = struct {
             transferred_base_url,
             execution_generation,
             owned_secret,
-        ) catch return error.ExecutionTargetInvalid;
+            entry.id.view(),
+        ) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.ExecutionTargetInvalid;
     }
 
     pub fn writeApiKeyViews(

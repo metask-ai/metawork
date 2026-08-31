@@ -94,7 +94,7 @@ pub fn decode(allocator: std.mem.Allocator, body: []const u8) codec.Error!types.
 
 test "Responses Completion owns an explicit non-streaming stateless request" {
     var encoded = try encode(std.testing.allocator, .{
-        .provider = .openai,
+        .provider_id = "fixture-provider",
         .protocol = .openai_responses,
         .credential = "fixture-secret",
         .base_url = "https://example.test/custom-endpoint",
@@ -120,7 +120,7 @@ test "Responses request releases partial allocations on failure" {
     const Fixture = struct {
         fn run(allocator: std.mem.Allocator) !void {
             var encoded = try encode(allocator, .{
-                .provider = .openai,
+                .provider_id = "fixture-provider",
                 .protocol = .openai_responses,
                 .credential = "fixture-secret",
                 .base_url = "https://example.test/endpoint",

@@ -248,6 +248,7 @@ fn installExecution(workbench_value: *product_control.Runtime) !void {
         ),
         1,
         try std.testing.allocator.dupe(u8, "fixture-credential"),
+        "fixture-provider",
     );
     errdefer execution.deinit();
     try workbench_value.beginExecutionReplacement();
@@ -623,7 +624,7 @@ test "canonical AgentCore executes a selected Streamable HTTP tool" {
     );
     defer std.testing.allocator.free(workspace_root);
     const session = try runtime.createSession(.{
-        .provider = .anthropic,
+        .provider_id = "fixture-provider",
         .protocol = .anthropic_messages,
         .permission_mode = .full_access,
         .shell_policy = .unrestricted,
@@ -707,7 +708,7 @@ test "expired MCP authority is typed and the same model succeeds after refresh" 
     );
     defer std.testing.allocator.free(workspace_root);
     const open_options: agent.SessionOpenOptions = .{
-        .provider = .anthropic,
+        .provider_id = "fixture-provider",
         .protocol = .anthropic_messages,
         .permission_mode = .full_access,
         .shell_policy = .unrestricted,

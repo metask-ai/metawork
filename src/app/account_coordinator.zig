@@ -74,15 +74,11 @@ const ModelConnectionProbeJob = struct {
         const execution = &self.execution.?;
         const input = execution.input();
         self.succeeded = agent.runProviderProbe(self.io, self.completion_transport, .{
-            .provider = switch (input.target.provider_kind) {
-                .anthropic => .anthropic,
-                .openai => .openai,
-                .gemini => .gemini,
-            },
-            .protocol = switch (input.target.provider_kind) {
-                .anthropic => .anthropic_messages,
-                .openai => .openai_chat_completions,
-                .gemini => .gemini_native,
+            .provider_id = input.target.provider_id,
+            .protocol = switch (input.target.protocol) {
+                .anthropic_messages => .anthropic_messages,
+                .openai_chat_completions => .openai_chat_completions,
+                .gemini_native => .gemini_native,
             },
             .credential = input.api_key,
             .model = input.target.model,
@@ -723,6 +719,7 @@ test "Application coordinator commits Account Runtime facts into Workbench" {
         ),
         1,
         try std.testing.allocator.dupe(u8, "secret-key"),
+        "fixture-provider",
     );
     defer execution.deinit();
     const restored = coordinator.commitPrepared(
@@ -854,6 +851,7 @@ test "Application coordinator balances Workbench gate when Account effect admiss
         ),
         1,
         try std.testing.allocator.dupe(u8, "secret-key"),
+        "fixture-provider",
     );
     defer execution.deinit();
     const restored = coordinator.commitPrepared(

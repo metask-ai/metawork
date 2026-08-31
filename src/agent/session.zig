@@ -76,8 +76,7 @@ pub const CompactTerminalResult = session_control.CompactTerminalResult;
 pub const TerminationRequestResult = session_control.TerminationRequestResult;
 pub const EventReadyNotification = session_control.EventReadyNotification;
 pub const EventReadyNotifier = session_control.EventReadyNotifier;
-pub const ProviderKind = session_control.ProviderKind;
-pub const Protocol = @import("agent_provider").Protocol;
+pub const Protocol = @import("agent_protocol").Protocol;
 pub const PermissionMode = session_control.PermissionMode;
 pub const ShellPolicy = session_control.ShellPolicy;
 
@@ -91,7 +90,6 @@ pub const ParsedPermissionRequest = session_wire.ParsedPermissionRequest;
 pub const decodePermissionRequest = session_wire.decodePermissionRequest;
 const decodeUiRequest = session_wire.decodeUiRequest;
 pub const decodeCoreEvent = session_wire.decodeCoreEvent;
-const providerKindCode = session_wire.providerKindCode;
 const permissionModeCode = session_wire.permissionModeCode;
 const shellPolicyCode = session_wire.shellPolicyCode;
 pub const RunControl = session_binding.RunControl;
@@ -314,7 +312,8 @@ const OwnedRunInput = union(enum) {
 };
 
 pub const SessionOpenOptions = struct {
-    provider: ProviderKind,
+    /// Opaque service instance reference. Host-only, not part of the Core ABI.
+    provider_id: []const u8,
     protocol: Protocol,
     permission_mode: PermissionMode,
     shell_policy: ShellPolicy,
@@ -472,6 +471,8 @@ pub const CoreSessionIdentity = union(enum) {
 pub const Session = struct {
     agent_runtime: *Runtime,
     id: u64,
+    provider_id: []u8,
+    protocol: Protocol,
     raw: ?*wire.SessionHandle = null,
     workspace_root: []u8,
     workspace_home: []u8,
@@ -1803,6 +1804,7 @@ pub const Session = struct {
             self.agent_runtime.allocator.free(buffer);
         if (self.ui_request_json) |json| self.agent_runtime.allocator.free(json);
         if (self.ui_response_json) |json| self.agent_runtime.allocator.free(json);
+        self.agent_runtime.allocator.free(self.provider_id);
         self.agent_runtime.allocator.free(self.workspace_root);
         self.agent_runtime.allocator.free(self.workspace_home);
         self.agent_runtime.allocator.free(self.workspace_epoch);

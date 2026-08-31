@@ -87,6 +87,8 @@ Account 同时最多拥有两个 secret-free `PublicCatalog` slot：
 
 Model Connection registry 与 Metask identity/catalog 独立，继续使用自己的 committed candidate、credential vault 和 persistence health。连接 CRUD、测试状态和 credential cleanup 由 Account 拥有；默认 execution source 在 Metask 与 Model Connection 之间切换时，必须使用同一条显式 execution replacement 协议。
 
+Account 解析执行配置时同时保留服务实例引用与已选协议。实例引用由 execution source 和既有公开 ID 限定：Model Connection 使用 connection id，Metask 使用选中的 API Key id；它不包含 credential，不用协议类别或 execution generation 代替实例身份。该引用只存在于 Host 运行时配置，冷启动从原有 binding 重建，不增加持久化字段。Model Connection 的协议直接来自 binding，不能先压缩为 provider 类别再反推；Metask 使用其固定外部合同确定协议。用户可配置的协议范围仍以下表为准。
+
 用户创建 Model Connection 时必须显式选择已登记协议：
 
 | Protocol                | Agent provider | Endpoint contract                                             |

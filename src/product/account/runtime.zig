@@ -1108,11 +1108,12 @@ pub const Runtime = struct {
         )) orelse return error.CredentialNotFound;
         return try contract.OwnedExecutionConfig.initModelConnectionOwned(
             self.allocator,
-            contract.providerKindForProtocol(binding.protocol),
+            binding.protocol,
             try self.allocator.dupe(u8, binding.model_id),
             try self.allocator.dupe(u8, binding.normalized_base_url),
             binding.execution_generation,
             try self.allocator.dupe(u8, secret),
+            binding.connection_id,
         );
     }
 
@@ -1133,11 +1134,12 @@ pub const Runtime = struct {
         };
         return try contract.OwnedExecutionConfig.initModelConnectionOwned(
             self.allocator,
-            contract.providerKindForProtocol(binding.protocol),
+            binding.protocol,
             try self.allocator.dupe(u8, binding.model_id),
             try self.allocator.dupe(u8, binding.normalized_base_url),
             binding.execution_generation,
             try self.allocator.dupe(u8, secret),
+            binding.connection_id,
         );
     }
 
@@ -2750,6 +2752,10 @@ test "Account Runtime persists and restores a secure model connection default" {
         var execution = (try runtime.resolveDefaultModelConnectionExecution()) orelse
             return error.TestUnexpectedResult;
         defer execution.deinit();
+        var expected_provider: [contract.Limits.provider_id_bytes]u8 = undefined;
+        const expected_id = try std.fmt.bufPrint(&expected_provider, "model_connection:{s}", .{runtime.view().model_connections[0].id});
+        try std.testing.expectEqualStrings(expected_id, execution.input().target.provider_id);
+        try std.testing.expectEqual(contract.ModelConnectionProtocol.openai_chat_completions, execution.input().target.protocol);
         try std.testing.expectEqualStrings("provider-secret", execution.input().api_key);
         try std.testing.expectEqual(contract.ProviderKind.openai, execution.input().target.provider_kind);
         try std.testing.expectEqual(@as(u64, 17), execution.input().execution_generation);
@@ -2773,6 +2779,10 @@ test "Account Runtime persists and restores a secure model connection default" {
         var execution = (try runtime.resolveDefaultModelConnectionExecution()) orelse
             return error.TestUnexpectedResult;
         defer execution.deinit();
+        var expected_provider: [contract.Limits.provider_id_bytes]u8 = undefined;
+        const expected_id = try std.fmt.bufPrint(&expected_provider, "model_connection:{s}", .{runtime.view().model_connections[0].id});
+        try std.testing.expectEqualStrings(expected_id, execution.input().target.provider_id);
+        try std.testing.expectEqual(contract.ModelConnectionProtocol.openai_chat_completions, execution.input().target.protocol);
         try std.testing.expectEqualStrings("provider-secret", execution.input().api_key);
         try std.testing.expectEqualStrings("gpt-5", execution.input().target.model);
         try std.testing.expectEqual(@as(u64, 17), execution.input().execution_generation);
@@ -2860,6 +2870,7 @@ test "Account Runtime publishes the candidate catalog with first execution" {
         ),
         1,
         try std.testing.allocator.dupe(u8, "secret-key"),
+        "fixture-provider",
     );
     var completion: state_impl.WorkerCompletion = .{
         .attempt_id = 1,
@@ -3081,6 +3092,7 @@ fn commitReadyRestoreForTest(runtime: *Runtime) !void {
         ),
         1,
         try std.testing.allocator.dupe(u8, "secret-key"),
+        "fixture-provider",
     );
     var prepared = try TestSupport.prepareReadyRestore(runtime, &execution);
     execution.deinit();

@@ -7,6 +7,7 @@ pub const Limits = struct {
     pub const account_id_bytes: usize = 256;
     pub const display_name_bytes: usize = 256;
     pub const api_key_id_bytes: usize = 128;
+    pub const provider_id_bytes: usize = api_key_id_bytes + 17;
     pub const api_key_name_bytes: usize = 256;
     pub const api_key_suffix_bytes: usize = 32;
     pub const model_id_bytes: usize = 256;
@@ -218,6 +219,9 @@ pub const ModelView = struct {
 };
 
 pub const ExecutionTarget = struct {
+    /// Source-qualified service instance reference; never a wire adapter name.
+    provider_id: []const u8,
+    protocol: ModelConnectionProtocol,
     provider_kind: ProviderKind,
     model: []const u8,
     base_url: []const u8,
@@ -407,6 +411,8 @@ const OwnedBuffer = struct {
 /// Do not bit-copy this value. Transfer ownership only with
 /// `take`; every live owner must call `deinit`, which securely clears the key.
 pub const OwnedExecutionConfig = struct {
+    provider_id: OwnedBuffer,
+    protocol: ModelConnectionProtocol,
     provider_kind: ProviderKind,
     model: OwnedBuffer,
     base_url: OwnedBuffer,
@@ -421,42 +427,44 @@ pub const OwnedExecutionConfig = struct {
         owned_base_url: []u8,
         execution_generation: u64,
         owned_api_key: []u8,
-    ) error{InvalidExecutionConfig}!OwnedExecutionConfig {
-        const config_input: ExecutionConfigInput = .{
-            .target = .{
-                .provider_kind = provider_kind,
-                .model = owned_model,
-                .base_url = owned_base_url,
-            },
-            .api_key = owned_api_key,
-            .execution_generation = execution_generation,
-        };
-        validateExecutionConfig(config_input) catch {
-            allocator.free(owned_model);
-            allocator.free(owned_base_url);
-            secureFree(allocator, owned_api_key);
-            return error.InvalidExecutionConfig;
-        };
-        return .{
-            .provider_kind = provider_kind,
-            .model = .initOwned(allocator, owned_model),
-            .base_url = .initOwned(allocator, owned_base_url),
-            .execution_generation = execution_generation,
-            .secret = .initOwned(allocator, owned_api_key),
-            .model_connection = false,
-        };
+        api_key_id: []const u8,
+    ) (error{InvalidExecutionConfig} || std.mem.Allocator.Error)!OwnedExecutionConfig {
+        return init(allocator, provider_kind, protocolForProviderKind(provider_kind), owned_model, owned_base_url, execution_generation, owned_api_key, api_key_id, .metask);
     }
 
     pub fn initModelConnectionOwned(
         allocator: std.mem.Allocator,
-        provider_kind: ProviderKind,
+        protocol: ModelConnectionProtocol,
         owned_model: []u8,
         owned_base_url: []u8,
         execution_generation: u64,
         owned_api_key: []u8,
-    ) error{InvalidExecutionConfig}!OwnedExecutionConfig {
+        connection_id: []const u8,
+    ) (error{InvalidExecutionConfig} || std.mem.Allocator.Error)!OwnedExecutionConfig {
+        return init(allocator, providerKindForProtocol(protocol), protocol, owned_model, owned_base_url, execution_generation, owned_api_key, connection_id, .model_connection);
+    }
+
+    fn init(
+        allocator: std.mem.Allocator,
+        provider_kind: ProviderKind,
+        protocol: ModelConnectionProtocol,
+        owned_model: []u8,
+        owned_base_url: []u8,
+        execution_generation: u64,
+        owned_api_key: []u8,
+        instance_id: []const u8,
+        source: ExecutionSource,
+    ) (error{InvalidExecutionConfig} || std.mem.Allocator.Error)!OwnedExecutionConfig {
+        errdefer allocator.free(owned_model);
+        errdefer allocator.free(owned_base_url);
+        errdefer secureFree(allocator, owned_api_key);
+        validateRequired(instance_id, Limits.api_key_id_bytes) catch return error.InvalidExecutionConfig;
+        const provider_id = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ @tagName(source), instance_id });
+        errdefer allocator.free(provider_id);
         const config_input: ExecutionConfigInput = .{
             .target = .{
+                .provider_id = provider_id,
+                .protocol = protocol,
                 .provider_kind = provider_kind,
                 .model = owned_model,
                 .base_url = owned_base_url,
@@ -464,24 +472,27 @@ pub const OwnedExecutionConfig = struct {
             .api_key = owned_api_key,
             .execution_generation = execution_generation,
         };
-        validateModelConnectionExecutionConfig(config_input) catch {
-            allocator.free(owned_model);
-            allocator.free(owned_base_url);
-            secureFree(allocator, owned_api_key);
-            return error.InvalidExecutionConfig;
+        const validation = switch (source) {
+            .metask => validateExecutionConfig(config_input),
+            .model_connection => validateModelConnectionExecutionConfig(config_input),
         };
+        validation catch return error.InvalidExecutionConfig;
         return .{
+            .provider_id = .initOwned(allocator, provider_id),
+            .protocol = protocol,
             .provider_kind = provider_kind,
             .model = .initOwned(allocator, owned_model),
             .base_url = .initOwned(allocator, owned_base_url),
             .execution_generation = execution_generation,
             .secret = .initOwned(allocator, owned_api_key),
-            .model_connection = true,
+            .model_connection = source == .model_connection,
         };
     }
 
     pub fn take(self: *OwnedExecutionConfig) OwnedExecutionConfig {
         return .{
+            .provider_id = self.provider_id.take(),
+            .protocol = self.protocol,
             .provider_kind = self.provider_kind,
             .model = self.model.take(),
             .base_url = self.base_url.take(),
@@ -494,6 +505,8 @@ pub const OwnedExecutionConfig = struct {
     pub fn input(self: *const OwnedExecutionConfig) ExecutionConfigInput {
         return .{
             .target = .{
+                .provider_id = self.provider_id.view(),
+                .protocol = self.protocol,
                 .provider_kind = self.provider_kind,
                 .model = self.model.view(),
                 .base_url = self.base_url.view(),
@@ -504,10 +517,12 @@ pub const OwnedExecutionConfig = struct {
     }
 
     pub fn deinit(self: *OwnedExecutionConfig) void {
+        self.provider_id.deinit();
         self.model.deinit();
         self.base_url.deinit();
         self.secret.deinit();
         self.provider_kind = undefined;
+        self.protocol = undefined;
         self.execution_generation = 0;
         self.model_connection = false;
     }
@@ -733,6 +748,9 @@ pub fn validateCommand(command: AccountCommand) ValidationError!void {
 }
 
 pub fn validateExecutionConfig(input: ExecutionConfigInput) ValidationError!void {
+    try validateRequired(input.target.provider_id, Limits.provider_id_bytes);
+    if (input.target.protocol != protocolForProviderKind(input.target.provider_kind))
+        return error.UnsupportedProtocol;
     try validateRequired(input.target.model, Limits.model_id_bytes);
     try validateRequired(input.target.base_url, Limits.base_url_bytes);
     const expected_base_url: []const u8 = switch (input.target.provider_kind) {
@@ -751,7 +769,10 @@ pub fn validateModelConnectionExecutionConfig(
 ) ValidationError!void {
     try validateRequired(input.target.model, Limits.model_id_bytes);
     try validateRequired(input.target.base_url, Limits.base_url_bytes);
-    const protocol = protocolForProviderKind(input.target.provider_kind);
+    try validateRequired(input.target.provider_id, Limits.provider_id_bytes);
+    const protocol = input.target.protocol;
+    if (providerKindForProtocol(protocol) != input.target.provider_kind)
+        return error.UnsupportedProtocol;
     if (!modelConnectionProtocolAvailable(protocol))
         return error.UnsupportedProtocol;
     if (!validModelConnectionEndpoint(
@@ -1016,6 +1037,8 @@ test "AccountView accepts an unresolved model candidate while loading" {
 test "execution config requires typed HTTPS target and bounded secret" {
     try std.testing.expectError(error.InvalidBaseUrl, validateExecutionConfig(.{
         .target = .{
+            .provider_id = "metask:fixture-provider",
+            .protocol = .anthropic_messages,
             .provider_kind = .anthropic,
             .model = "metask-model",
             .base_url = "http://127.0.0.1/v1",
@@ -1028,6 +1051,8 @@ test "execution config requires typed HTTPS target and bounded secret" {
 test "execution config treats credential as bounded opaque bytes" {
     try validateExecutionConfig(.{
         .target = .{
+            .provider_id = "metask:fixture-provider",
+            .protocol = .anthropic_messages,
             .provider_kind = .anthropic,
             .model = "metask-model",
             .base_url = metask_anthropic_messages_url,
@@ -1208,11 +1233,14 @@ test "OwnedExecutionConfig moves one secret owner and securely releases it" {
         base_url,
         4,
         secret,
+        "fixture-provider",
     );
     var destination = source.take();
     try std.testing.expectEqualStrings("metask-model", destination.input().target.model);
     try std.testing.expectEqualStrings("test-secret", destination.input().api_key);
     source.deinit();
+    try std.testing.expectEqualStrings("metask:fixture-provider", destination.input().target.provider_id);
+    try std.testing.expectEqual(ModelConnectionProtocol.anthropic_messages, destination.input().target.protocol);
     destination.deinit();
 }
 
@@ -1230,6 +1258,7 @@ test "OwnedExecutionConfig consumes invalid owned secret on rejection" {
             base_url,
             4,
             secret,
+            "fixture-provider",
         ),
     );
 }
@@ -1326,6 +1355,7 @@ test "OwnedExecutionConfig preserves zeroing through allocator release" {
         base_url,
         1,
         secret,
+        "fixture-provider",
     );
     config.deinit();
 

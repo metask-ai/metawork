@@ -3,11 +3,10 @@
 const std = @import("std");
 const completion = @import("agent_completion");
 
-pub const ProviderKind = completion.ProviderKind;
 pub const Protocol = completion.Protocol;
 
 pub const Input = struct {
-    provider: ProviderKind,
+    provider_id: []const u8,
     protocol: Protocol,
     credential: []const u8,
     model: []const u8,
@@ -85,7 +84,7 @@ pub fn run(
     @memcpy(secret_storage[0..input.credential.len], input.credential);
     defer std.crypto.secureZero(u8, &secret_storage);
     const owner = completion.Completion.init(std.heap.c_allocator, network, .{
-        .provider = input.provider,
+        .provider_id = input.provider_id,
         .protocol = input.protocol,
         .credential = secret_storage[0..input.credential.len],
         .base_url = input.base_url,
@@ -122,7 +121,8 @@ pub fn run(
 }
 
 fn validInput(input: Input) bool {
-    return input.protocol.validFor(input.provider) and
+    return input.provider_id.len != 0 and input.provider_id.len <= 256 and
+        std.unicode.utf8ValidateSlice(input.provider_id) and
         input.credential.len != 0 and input.credential.len <= 4096 and
         input.model.len != 0 and input.model.len <= 256 and
         input.base_url.len != 0 and input.base_url.len <= 2048 and
@@ -183,25 +183,13 @@ test "provider probe rejects invalid input before Transport" {
     try std.testing.expectEqual(
         Outcome{ .failed = .invalid_input },
         run(std.testing.io, .{ .perform_fn = Fixture.perform }, .{
-            .provider = .openai,
+            .provider_id = "fixture-provider",
             .protocol = .openai_responses,
             .credential = "",
             .model = "gpt-5",
             .base_url = "https://api.openai.com/v1/chat/completions",
         }, &cancellation),
     );
-    for ([_]ProviderKind{ .anthropic, .gemini }) |kind| {
-        try std.testing.expectEqual(
-            Outcome{ .failed = .invalid_input },
-            run(std.testing.io, .{ .perform_fn = Fixture.perform }, .{
-                .provider = kind,
-                .protocol = .openai_responses,
-                .credential = "secret",
-                .model = "fixture-model",
-                .base_url = "https://example.test/endpoint",
-            }, &cancellation),
-        );
-    }
 }
 
 test "provider probe selects the OpenAI protocol and requires a completed result" {
@@ -243,7 +231,7 @@ test "provider probe selects the OpenAI protocol and requires a completed result
         try std.testing.expectEqual(
             case.expected,
             run(std.testing.io, .{ .context = &fixture, .perform_fn = Fixture.perform }, .{
-                .provider = .openai,
+                .provider_id = "fixture-provider",
                 .protocol = case.protocol,
                 .credential = "secret",
                 .model = "fixture-model",
@@ -288,7 +276,7 @@ test "external cancellation wakes a blocked Provider probe" {
 
         fn runProbe(self: *@This()) void {
             self.outcome = run(std.testing.io, self.network, .{
-                .provider = .openai,
+                .provider_id = "fixture-provider",
                 .protocol = .openai_chat_completions,
                 .credential = "secret",
                 .model = "gpt-5",

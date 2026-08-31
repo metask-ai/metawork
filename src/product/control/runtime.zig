@@ -1512,6 +1512,8 @@ pub const Runtime = struct {
         errdefer self.endExecutionReplacementNoFail();
         const execution_input: account_contract.ExecutionConfigInput = .{
             .target = .{
+                .provider_id = "metask:automation-key",
+                .protocol = account_contract.protocolForProviderKind(input.provider),
                 .provider_kind = input.provider,
                 .model = input.model,
                 .base_url = input.base_url,
@@ -3922,11 +3924,7 @@ pub const Runtime = struct {
         const input = self.account_execution.executionInput().?;
         return OwnedTaskExecution.clone(
             allocator,
-            input.target.provider_kind,
-            input.target.model,
-            input.target.base_url,
-            input.execution_generation,
-            input.api_key,
+            input,
         );
     }
 
@@ -4658,7 +4656,7 @@ pub const Runtime = struct {
         );
         const execution_exact = self.account_execution.recoveryAuthorityExact(
             query.target_execution_generation,
-            accountProviderFromAgent(query.provider),
+            query.provider,
             query.task_model,
         );
         return .{
@@ -5889,14 +5887,6 @@ fn noChangeNotification(_: ?*anyopaque) bool {
     return true;
 }
 
-fn agentProvider(provider: Provider) lifecycle.ProviderKind {
-    return switch (provider) {
-        .anthropic => .anthropic,
-        .openai => .openai,
-        .gemini => .gemini,
-    };
-}
-
 fn accountProviderKind(provider: Provider) account_contract.ProviderKind {
     return switch (provider) {
         .anthropic => .anthropic,
@@ -5908,16 +5898,6 @@ fn accountProviderKind(provider: Provider) account_contract.ProviderKind {
 fn accountProvider(
     provider: account_contract.ProviderKind,
 ) Provider {
-    return switch (provider) {
-        .anthropic => .anthropic,
-        .openai => .openai,
-        .gemini => .gemini,
-    };
-}
-
-fn accountProviderFromAgent(
-    provider: lifecycle.ProviderKind,
-) account_contract.ProviderKind {
     return switch (provider) {
         .anthropic => .anthropic,
         .openai => .openai,
@@ -6543,6 +6523,7 @@ fn installTestExecution(control: *Runtime) !void {
         ),
         1,
         try std.testing.allocator.dupe(u8, "SECRET-KEY"),
+        "fixture-provider",
     );
     errdefer execution.deinit();
     try control.beginExecutionReplacement();
@@ -6868,14 +6849,17 @@ fn replaceTaskCredentialForTest(
 ) !void {
     const live = task.runtime.live().?;
     live.execution.deinit();
-    var replacement = try OwnedTaskExecution.clone(
-        std.testing.allocator,
-        .anthropic,
-        "fixture-model",
-        account_contract.metask_anthropic_messages_url,
-        task.durable.execution_generation,
-        credential,
-    );
+    var replacement = try OwnedTaskExecution.clone(std.testing.allocator, .{
+        .target = .{
+            .provider_id = "metask:fixture-provider",
+            .protocol = .anthropic_messages,
+            .provider_kind = .anthropic,
+            .model = "fixture-model",
+            .base_url = account_contract.metask_anthropic_messages_url,
+        },
+        .execution_generation = task.durable.execution_generation,
+        .api_key = credential,
+    });
     live.execution = replacement.take();
     const redaction_secret = live.execution.input().api_key;
     for (task.durable.runs) |*run_entry| {
@@ -7960,6 +7944,7 @@ test "execution replacement durably scrubs Schedule before ownership transfer" {
         ),
         2,
         try std.testing.allocator.dupe(u8, "NEXT-SECRET"),
+        "fixture-provider",
     );
     errdefer replacement.deinit();
     try control.beginDefaultExecutionReplacement();
@@ -7998,6 +7983,7 @@ test "execution replacement durably scrubs Schedule before ownership transfer" {
         ),
         3,
         try std.testing.allocator.dupe(u8, "BLOCKED-SECRET"),
+        "fixture-provider",
     );
     var blocked_owned = true;
     defer if (blocked_owned) blocked.deinit();
@@ -8859,11 +8845,12 @@ test "Runtime publishes a user model connection as an independent execution sour
     });
     var execution = try account_contract.OwnedExecutionConfig.initModelConnectionOwned(
         std.testing.allocator,
-        .openai,
+        .openai_chat_completions,
         try std.testing.allocator.dupe(u8, "gpt-5"),
         try std.testing.allocator.dupe(u8, "https://api.openai.com/v1/chat/completions"),
         1,
         try std.testing.allocator.dupe(u8, "secret-key"),
+        "fixture-provider",
     );
     errdefer execution.deinit();
     var prepared_binding = try control.prepareModelConnectionBinding(
@@ -8924,6 +8911,7 @@ test "Account projection and execution install use preallocated no-fail storage"
         ),
         1,
         try std.testing.allocator.dupe(u8, "secret-key"),
+        "fixture-provider",
     );
     errdefer execution.deinit();
     const api_keys = [_]account_contract.ApiKeyView{.{
@@ -9033,6 +9021,7 @@ test "default replacement preserves Task generation and installs the next admiss
         ),
         2,
         try std.testing.allocator.dupe(u8, "metawork"),
+        "fixture-provider",
     );
     errdefer replacement.deinit();
     const replacement_api_keys = [_]account_contract.ApiKeyView{.{
@@ -10252,6 +10241,7 @@ test "Runtime shutdown releases current and Task-owned execution generations" {
         ),
         2,
         try std.testing.allocator.dupe(u8, "SECRET-KEY-2"),
+        "fixture-provider",
     );
     errdefer replacement.deinit();
     const replacement_api_keys = [_]account_contract.ApiKeyView{.{

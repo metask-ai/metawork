@@ -80,6 +80,17 @@ const checkpoint_test_limits: lifecycle.CheckpointLimits = .{
     .chunk_bytes = 512,
 };
 
+const session_protocol_cases = [_]struct {
+    protocol: lifecycle.Protocol,
+    provider_code: u32,
+    protocol_code: u32,
+}{
+    .{ .protocol = .openai_responses, .provider_code = wire.PROVIDER_OPENAI, .protocol_code = wire.OPENAI_PROTOCOL_RESPONSES },
+    .{ .protocol = .openai_chat_completions, .provider_code = wire.PROVIDER_OPENAI, .protocol_code = wire.PROTOCOL_DEFAULT },
+    .{ .protocol = .anthropic_messages, .provider_code = wire.PROVIDER_ANTHROPIC, .protocol_code = wire.PROTOCOL_DEFAULT },
+    .{ .protocol = .gemini_native, .provider_code = wire.PROVIDER_GEMINI, .protocol_code = wire.PROTOCOL_DEFAULT },
+};
+
 fn restoreOptions(
     source: lifecycle.CheckpointSource,
     logical_session_id: []const u8,
@@ -90,7 +101,7 @@ fn restoreOptions(
     const temporary_root = if (std.fs.path.sep == '\\') "C:\\tmp" else "/tmp";
     return .{
         .session = .{
-            .provider = .anthropic,
+            .provider_id = "fixture-provider",
             .protocol = .anthropic_messages,
             .permission_mode = .default,
             .shell_policy = .disabled,
@@ -207,7 +218,7 @@ test "canonical AgentCore accepts an empty complete MCP Session replacement" {
     );
     defer std.testing.allocator.free(workspace_root);
     const session = try runtime.createSession(.{
-        .provider = .anthropic,
+        .provider_id = "fixture-provider",
         .protocol = .anthropic_messages,
         .permission_mode = .default,
         .shell_policy = .unrestricted,
@@ -432,7 +443,7 @@ test "MCP catalog refresh binds explicit Session selection and idle replacement"
         "/tmp/metawork-mcp-selection";
     const temporary_root = if (std.fs.path.sep == '\\') "C:\\tmp" else "/tmp";
     const session = try runtime.createSession(.{
-        .provider = .anthropic,
+        .provider_id = "fixture-provider",
         .protocol = .anthropic_messages,
         .permission_mode = .default,
         .shell_policy = .disabled,
@@ -482,7 +493,7 @@ test "MCP selection mutation preserves reusable and poison status contracts" {
     const selection = try runtime.createMcpSelection(projection, &.{});
     defer selection.deinit();
     const session = try runtime.createSession(.{
-        .provider = .anthropic,
+        .provider_id = "fixture-provider",
         .protocol = .anthropic_messages,
         .permission_mode = .default,
         .shell_policy = .disabled,
@@ -853,7 +864,7 @@ test "Skill input is deep-copied and encoded only for the typed Core call" {
     });
     defer acquisition.projection.deinit();
     const session = try runtime.createSession(.{
-        .provider = .anthropic,
+        .provider_id = "fixture-provider",
         .protocol = .anthropic_messages,
         .permission_mode = .default,
         .shell_policy = .disabled,
@@ -946,7 +957,7 @@ test "Skill rejection statuses leave the Session reusable" {
             .workspace_epoch = "workspace-1",
         });
         const session = try runtime.createSession(.{
-            .provider = .anthropic,
+            .provider_id = "fixture-provider",
             .protocol = .anthropic_messages,
             .permission_mode = .default,
             .shell_policy = .disabled,
@@ -1005,7 +1016,7 @@ test "Session catalog refresh binds explicit selection only while idle and rejec
     defer current.projection.deinit();
     defer runtime.releaseSkillCatalog(current.lease) catch unreachable;
     const session = try runtime.createSession(.{
-        .provider = .anthropic,
+        .provider_id = "fixture-provider",
         .protocol = .anthropic_messages,
         .permission_mode = .default,
         .shell_policy = .disabled,
@@ -1242,6 +1253,41 @@ test "Agent Runtime creates and destroys an idle Session" {
     try std.testing.expectEqual(@as(usize, 1), fake_core.session_destroyed);
 }
 
+test "Session creation maps the selected protocol to the Core adapter and protocol codes" {
+    const workspace_root = if (std.fs.path.sep == '\\') "C:\\tmp\\metawork-protocol" else "/tmp/metawork-protocol";
+    const temporary_root = if (std.fs.path.sep == '\\') "C:\\tmp" else "/tmp";
+    for (session_protocol_cases) |case| {
+        fake_core.reset();
+        const runtime = try createTestRuntime(.{ .max_sessions = 1 });
+        defer {
+            runtime.shutdown() catch unreachable;
+            runtime.deinit();
+        }
+        var provider_id = "service-instance-a".*;
+        const session = try runtime.createSession(.{
+            .provider_id = &provider_id,
+            .protocol = case.protocol,
+            .permission_mode = .default,
+            .shell_policy = .disabled,
+            .credential = "fixture-secret",
+            .model = "fixture-model",
+            .workspace = .{
+                .canonical_root = workspace_root,
+                .trust = .{ .temporary = temporary_root },
+            },
+        });
+        @memset(&provider_id, 'x');
+        try std.testing.expectEqualStrings("service-instance-a", session.provider_id);
+        try std.testing.expectEqual(case.protocol, session.protocol);
+        try std.testing.expectEqual(@as(?u32, case.provider_code), fake_core.last_created_provider_kind_code);
+        try std.testing.expectEqual(@as(?u32, case.protocol_code), fake_core.last_created_protocol_kind_code);
+        try std.testing.expectEqual(@as(usize, 1), fake_core.session_created);
+        try std.testing.expectEqual(lifecycle.SessionState.idle, session.snapshot().state);
+        try session.close(.session_close);
+        try runtime.releaseClosedSession(session);
+    }
+}
+
 test "Agent Runtime applies the fixed MetaWork built-in surface to Session" {
     fake_core.reset();
     const runtime = try createTestComposition(.{
@@ -1259,7 +1305,7 @@ test "Agent Runtime applies the fixed MetaWork built-in surface to Session" {
     const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
     const workspace_root = root_storage[0..root_len];
     const session = try runtime.createSession(.{
-        .provider = .anthropic,
+        .provider_id = "fixture-provider",
         .protocol = .anthropic_messages,
         .permission_mode = .default,
         .shell_policy = .unrestricted,
@@ -1303,7 +1349,7 @@ test "Workspace requires an absolute temporary or explicit trusted root" {
         deinitTestComposition(runtime);
     }
     try std.testing.expectError(error.InvalidWorkspace, runtime.createSession(.{
-        .provider = .anthropic,
+        .provider_id = "fixture-provider",
         .protocol = .anthropic_messages,
         .permission_mode = .default,
         .shell_policy = .disabled,
@@ -1312,7 +1358,7 @@ test "Workspace requires an absolute temporary or explicit trusted root" {
         .workspace = .{ .canonical_root = "relative", .trust = .explicitly_trusted },
     }));
     try std.testing.expectError(error.WorkspaceNotTrusted, runtime.createSession(.{
-        .provider = .anthropic,
+        .provider_id = "fixture-provider",
         .protocol = .anthropic_messages,
         .permission_mode = .default,
         .shell_policy = .disabled,
@@ -1324,7 +1370,7 @@ test "Workspace requires an absolute temporary or explicit trusted root" {
         },
     }));
     try std.testing.expectError(error.InvalidWorkspace, runtime.createSession(.{
-        .provider = .anthropic,
+        .provider_id = "fixture-provider",
         .protocol = .anthropic_messages,
         .permission_mode = .default,
         .shell_policy = .disabled,
@@ -1737,7 +1783,7 @@ fn openNoninteractivePermissionSession(
         "/tmp/metawork-gate2";
     const temporary_root = if (std.fs.path.sep == '\\') "C:\\tmp" else "/tmp";
     return runtime.createSession(.{
-        .provider = .anthropic,
+        .provider_id = "fixture-provider",
         .protocol = .anthropic_messages,
         .permission_mode = .accept_edits,
         .shell_policy = .unrestricted,
@@ -2289,30 +2335,42 @@ test "checkpoint export streams bytes and accepts opaque generation zero" {
 }
 
 test "checkpoint restore installs one exact logical Session and continues identities" {
-    fake_core.reset();
-    fake_core.setCheckpointGeneration(3);
-    fake_core.setRestoreHistory(7, 2);
-    const runtime = try createTestRuntime(.{ .max_sessions = 2 });
-    defer {
-        runtime.shutdown() catch unreachable;
-        runtime.deinit();
+    for (session_protocol_cases) |case| {
+        fake_core.reset();
+        fake_core.setCheckpointGeneration(3);
+        fake_core.setRestoreHistory(7, 2);
+        const runtime = try createTestRuntime(.{ .max_sessions = 2 });
+        defer {
+            runtime.shutdown() catch unreachable;
+            runtime.deinit();
+        }
+        var source = CheckpointRestoreSource{ .bytes = "fixture-checkpoint" };
+        var options = restoreOptions(
+            source.source(),
+            "000000000000000000000001",
+            7,
+            2,
+        );
+        options.session.protocol = case.protocol;
+        var provider_id = "service-instance-b".*;
+        options.session.provider_id = &provider_id;
+        const route = try runtime.restoreSessionRoute(options);
+        @memset(&provider_id, 'x');
+        try std.testing.expectEqualStrings("service-instance-b", route.session.provider_id);
+        try std.testing.expectEqual(case.protocol, route.session.protocol);
+        try std.testing.expectEqual(@as(?u32, case.provider_code), fake_core.last_restored_provider_kind_code);
+        try std.testing.expectEqual(@as(?u32, case.protocol_code), fake_core.last_restored_protocol_kind_code);
+        try std.testing.expectEqual(@as(usize, 1), fake_core.checkpoint_restores);
+        try std.testing.expectEqual(@as(u64, 1), route.id);
+        try std.testing.expectEqual(lifecycle.CheckpointRestoreHealth.complete, route.report.health);
+        try std.testing.expectEqual(@as(u64, 3), route.report.checkpoint_generation);
+        try std.testing.expectEqual(source.bytes.len, source.offset);
+        const next_run_id = try route.session.prepareRun(.{ .text = "continue" });
+        try std.testing.expectEqual(@as(u64, 8), next_run_id);
+        try route.session.cancelPreparedRun(next_run_id);
+        try closeSession(route.session, .session_close);
+        try runtime.releaseClosedSession(route.session);
     }
-    var source = CheckpointRestoreSource{ .bytes = "fixture-checkpoint" };
-    const route = try runtime.restoreSessionRoute(restoreOptions(
-        source.source(),
-        "000000000000000000000001",
-        7,
-        2,
-    ));
-    try std.testing.expectEqual(@as(u64, 1), route.id);
-    try std.testing.expectEqual(lifecycle.CheckpointRestoreHealth.complete, route.report.health);
-    try std.testing.expectEqual(@as(u64, 3), route.report.checkpoint_generation);
-    try std.testing.expectEqual(source.bytes.len, source.offset);
-    const next_run_id = try route.session.prepareRun(.{ .text = "continue" });
-    try std.testing.expectEqual(@as(u64, 8), next_run_id);
-    try route.session.cancelPreparedRun(next_run_id);
-    try closeSession(route.session, .session_close);
-    try runtime.releaseClosedSession(route.session);
 }
 
 test "Runtime shutdown waits for restore and rejects its late candidate" {

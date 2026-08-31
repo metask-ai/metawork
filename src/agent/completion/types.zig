@@ -1,5 +1,5 @@
 const std = @import("std");
-const provider = @import("agent_provider");
+const Protocol = @import("agent_protocol").Protocol;
 
 pub const max_config_bytes: usize = 16 * 1024;
 pub const max_messages: usize = 4096;
@@ -13,8 +13,9 @@ pub const Role = enum {
 };
 
 pub const Config = struct {
-    provider: provider.ProviderKind,
-    protocol: provider.Protocol,
+    /// Opaque configured service instance reference, never sent to the model.
+    provider_id: []const u8,
+    protocol: Protocol,
     credential: []const u8,
     base_url: []const u8,
     model: []const u8,

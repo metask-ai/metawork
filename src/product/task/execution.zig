@@ -373,11 +373,11 @@ fn generateAutomaticTitle(job: *RunJob) void {
     const execution = &(job.title_execution orelse return);
     const config = execution.input();
     const owner = job.completion_factory.create(std.heap.c_allocator, .{
-        .provider = agentProvider(run.execution_provider),
-        .protocol = switch (run.execution_provider) {
-            .anthropic => .anthropic_messages,
-            .openai => .openai_chat_completions,
-            .gemini => .gemini_native,
+        .provider_id = config.target.provider_id,
+        .protocol = switch (config.target.protocol) {
+            .anthropic_messages => .anthropic_messages,
+            .openai_chat_completions => .openai_chat_completions,
+            .gemini_native => .gemini_native,
         },
         .credential = config.api_key,
         .base_url = config.target.base_url,
@@ -716,12 +716,4 @@ pub fn releaseCompactWorkerReference(
     if (!compact.worker_reference_held.swap(false, .acq_rel)) return;
     const previous = references.fetchSub(1, .release);
     std.debug.assert(previous != 0);
-}
-
-fn agentProvider(provider: state.Provider) agent.ProviderKind {
-    return switch (provider) {
-        .anthropic => .anthropic,
-        .openai => .openai,
-        .gemini => .gemini,
-    };
 }

@@ -5,6 +5,8 @@ const account_contract = @import("metawork_account_contract");
 
 pub const OwnedTaskExecution = struct {
     allocator: std.mem.Allocator,
+    provider_id: []u8,
+    protocol: account_contract.ModelConnectionProtocol,
     provider_kind: account_contract.ProviderKind,
     model: []u8,
     base_url: []u8,
@@ -14,16 +16,18 @@ pub const OwnedTaskExecution = struct {
 
     pub fn clone(
         allocator: std.mem.Allocator,
-        provider_kind: account_contract.ProviderKind,
-        model: []const u8,
-        base_url: []const u8,
-        execution_generation: u64,
-        api_key: []const u8,
+        source: account_contract.ExecutionConfigInput,
     ) std.mem.Allocator.Error!OwnedTaskExecution {
+        const model = source.target.model;
+        const base_url = source.target.base_url;
+        const api_key = source.api_key;
+        std.debug.assert(source.target.provider_id.len != 0);
         std.debug.assert(model.len != 0);
         std.debug.assert(base_url.len != 0);
-        std.debug.assert(execution_generation != 0);
+        std.debug.assert(source.execution_generation != 0);
         std.debug.assert(api_key.len != 0);
+        const provider_id = try allocator.dupe(u8, source.target.provider_id);
+        errdefer allocator.free(provider_id);
         const owned_model = try allocator.dupe(u8, model);
         errdefer allocator.free(owned_model);
         const owned_base_url = try allocator.dupe(u8, base_url);
@@ -35,10 +39,12 @@ pub const OwnedTaskExecution = struct {
         }
         return .{
             .allocator = allocator,
-            .provider_kind = provider_kind,
+            .provider_id = provider_id,
+            .protocol = source.target.protocol,
+            .provider_kind = source.target.provider_kind,
             .model = owned_model,
             .base_url = owned_base_url,
-            .execution_generation = execution_generation,
+            .execution_generation = source.execution_generation,
             .secret = owned_secret,
         };
     }
@@ -47,6 +53,7 @@ pub const OwnedTaskExecution = struct {
         std.debug.assert(self.owned);
         const result = self.*;
         self.owned = false;
+        self.provider_id = &.{};
         self.model = &.{};
         self.base_url = &.{};
         self.secret = &.{};
@@ -58,6 +65,8 @@ pub const OwnedTaskExecution = struct {
         std.debug.assert(self.owned);
         return .{
             .target = .{
+                .provider_id = self.provider_id,
+                .protocol = self.protocol,
                 .provider_kind = self.provider_kind,
                 .model = self.model,
                 .base_url = self.base_url,
@@ -73,7 +82,9 @@ pub const OwnedTaskExecution = struct {
         self.allocator.free(self.secret);
         self.allocator.free(self.base_url);
         self.allocator.free(self.model);
+        self.allocator.free(self.provider_id);
         self.owned = false;
+        self.provider_id = &.{};
         self.model = &.{};
         self.base_url = &.{};
         self.secret = &.{};
