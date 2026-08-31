@@ -36,6 +36,8 @@ Account resolve
 → Agent Session consumption
 ```
 
+执行配置交接必须一并保留 Account 解析出的服务实例引用、明确协议、endpoint、model、credential 和 execution generation。默认 execution、Task attachment 和后台任务各自持有所需的 owned copy；Session、恢复、连接测试及自动标题消费同一份解析结果，不根据 provider 类别重新选择协议。服务实例引用只用于 Host 执行关联，不进入 durable history 或 Renderer；恢复使用当前显式授权的执行配置，不从历史类别猜测服务实例。
+
 唯一 committed-state 写路径为：
 
 ```text

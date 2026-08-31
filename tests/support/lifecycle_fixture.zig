@@ -245,6 +245,10 @@ pub const FakeCore = struct {
     permission_rules_absent: bool = false,
     last_permission_mode_code: ?u32 = null,
     last_shell_policy_code: ?u32 = null,
+    last_created_provider_kind_code: ?u32 = null,
+    last_created_protocol_kind_code: ?u32 = null,
+    last_restored_provider_kind_code: ?u32 = null,
+    last_restored_protocol_kind_code: ?u32 = null,
     skill_run_seen: bool = false,
     skill_input_matches: bool = false,
     session_destroy_failures: usize = 0,
@@ -861,6 +865,8 @@ pub fn sessionCreate(
             fake_core.permission_rules_absent = host.permission_rules == null;
             fake_core.last_permission_mode_code = host.permission_mode_code;
             fake_core.last_shell_policy_code = host.shell_policy_code;
+            fake_core.last_created_provider_kind_code = host.provider_kind_code;
+            fake_core.last_created_protocol_kind_code = host.protocol_kind_code;
             out_session.?.* = @ptrCast(session);
             return wire.STATUS_OK;
         }
@@ -1231,6 +1237,8 @@ pub fn sessionRestore(
 
     fake_core.lock();
     fake_core.checkpoint_restores += 1;
+    fake_core.last_restored_provider_kind_code = host.provider_kind_code;
+    fake_core.last_restored_protocol_kind_code = host.protocol_kind_code;
     const forced_status = fake_core.forced_checkpoint_restore_status;
     fake_core.forced_checkpoint_restore_status = null;
     const restore_degraded = fake_core.forced_checkpoint_restore_degraded;
@@ -2315,7 +2323,8 @@ pub fn openSession(runtime: *lifecycle.Runtime) !*lifecycle.Session {
     const workspace_root = if (std.fs.path.sep == '\\') "C:\\tmp\\metawork-gate2" else "/tmp/metawork-gate2";
     const temporary_root = if (std.fs.path.sep == '\\') "C:\\tmp" else "/tmp";
     return runtime.createSession(.{
-        .provider = .anthropic,
+        .provider_id = "fixture-provider",
+        .protocol = .anthropic_messages,
         .permission_mode = .default,
         .shell_policy = .disabled,
         .credential = "fixture-secret",
@@ -2568,6 +2577,7 @@ pub fn installProductControlExecutionGeneration(
         ),
         generation,
         try std.testing.allocator.dupe(u8, "fixture-secret"),
+        "fixture-provider",
     );
     errdefer execution.deinit();
     const api_keys = [_]account_contract.ApiKeyView{.{

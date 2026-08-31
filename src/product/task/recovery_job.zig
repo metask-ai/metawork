@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const agent = @import("metawork_agent");
+const account_contract = @import("metawork_account_contract");
 const agent_session = @import("product_task_agent_session");
 const checkpoint_record = @import("product_task_checkpoint_record");
 const checkpoint_store = @import("product_task_checkpoint_store");
@@ -74,7 +75,7 @@ pub const PreparedAttempt = struct {
     source_execution_generation: u64,
     target_execution_generation: u64,
     task_model: []u8,
-    provider: agent.ProviderKind,
+    provider: account_contract.ProviderKind,
     permission_mode: agent.PermissionMode,
     shell_policy: agent.ShellPolicy,
     permission_interaction: agent.PermissionInteraction,
@@ -94,7 +95,7 @@ pub const CommitAuthority = struct {
     source_execution_generation: u64,
     target_execution_generation: u64,
     task_model: []const u8,
-    provider: agent.ProviderKind,
+    provider: account_contract.ProviderKind,
     active_attempt_id: ?u64,
     shutting_down: bool,
     archived: bool,
@@ -116,7 +117,7 @@ pub const AttemptAuthority = struct {
     source_execution_generation: u64,
     target_execution_generation: u64,
     task_model: []const u8,
-    provider: agent.ProviderKind,
+    provider: account_contract.ProviderKind,
 };
 
 /// A restore completion is publishable only while every authority token that
@@ -399,7 +400,12 @@ pub const Job = struct {
         const execution = self.attempt.execution.input();
         var restored = agent_session.restore(self.runtime, .{
             .session = .{
-                .provider = self.attempt.provider,
+                .provider_id = execution.target.provider_id,
+                .protocol = switch (execution.target.protocol) {
+                    .anthropic_messages => .anthropic_messages,
+                    .openai_chat_completions => .openai_chat_completions,
+                    .gemini_native => .gemini_native,
+                },
                 .permission_mode = self.attempt.permission_mode,
                 .shell_policy = self.attempt.shell_policy,
                 .permission_interaction = self.attempt.permission_interaction,

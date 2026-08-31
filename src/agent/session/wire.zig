@@ -8,7 +8,7 @@ const std = @import("std");
 const sdk = @import("metask_agentcore");
 const wire = sdk.types;
 const control = @import("control.zig");
-const provider = @import("agent_provider");
+const Protocol = @import("agent_protocol").Protocol;
 
 pub fn decodeUiRequest(
     allocator: std.mem.Allocator,
@@ -160,12 +160,29 @@ fn validUtf8(values: []const []const u8) bool {
     return true;
 }
 
-pub fn providerKindCode(value: provider.ProviderKind) u32 {
+/// Selects a Core execution adapter, not the identity of the configured service.
+pub fn providerKindCode(value: Protocol) u32 {
     return switch (value) {
-        .anthropic => wire.PROVIDER_ANTHROPIC,
-        .openai => wire.PROVIDER_OPENAI,
-        .gemini => wire.PROVIDER_GEMINI,
+        .anthropic_messages => wire.PROVIDER_ANTHROPIC,
+        .openai_responses, .openai_chat_completions => wire.PROVIDER_OPENAI,
+        .gemini_native => wire.PROVIDER_GEMINI,
     };
+}
+
+pub fn protocolKindCode(value: Protocol) u32 {
+    return switch (value) {
+        .openai_responses => wire.OPENAI_PROTOCOL_RESPONSES,
+        // ABI revision 15 uses code zero for these three explicit protocols.
+        // That wire encoding does not define a MetaWork protocol default.
+        .openai_chat_completions, .anthropic_messages, .gemini_native => wire.PROTOCOL_DEFAULT,
+    };
+}
+
+test "Session protocol selection maps to the canonical AgentCore ABI" {
+    try std.testing.expectEqual(wire.OPENAI_PROTOCOL_RESPONSES, protocolKindCode(.openai_responses));
+    try std.testing.expectEqual(wire.PROTOCOL_DEFAULT, protocolKindCode(.openai_chat_completions));
+    try std.testing.expectEqual(wire.PROTOCOL_DEFAULT, protocolKindCode(.anthropic_messages));
+    try std.testing.expectEqual(wire.PROTOCOL_DEFAULT, protocolKindCode(.gemini_native));
 }
 
 pub fn permissionModeCode(value: control.PermissionMode) u32 {

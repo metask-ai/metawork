@@ -11,6 +11,7 @@ const checkpoint = @import("agent_checkpoint");
 const checkpoint_restore = @import("agent_checkpoint_restore");
 const session_control = @import("control.zig");
 const session_wire = @import("wire.zig");
+const max_provider_id_bytes = @import("agent_protocol").max_provider_id_bytes;
 const capabilities = @import("../capabilities.zig");
 const session_binding = @import("binding.zig");
 // Intentional same-module cycle with session.zig; Runtime and Session retain
@@ -717,7 +718,9 @@ pub const Runtime = struct {
         options: SessionOpenOptions,
     ) (Error || std.mem.Allocator.Error)!SessionRoute {
         try validateWorkspace(options.workspace);
-        if (options.credential.len == 0 or options.model.len == 0)
+        if (options.provider_id.len == 0 or options.provider_id.len > max_provider_id_bytes or
+            !std.unicode.utf8ValidateSlice(options.provider_id) or
+            options.credential.len == 0 or options.model.len == 0)
             return error.CoreCallFailed;
         if (options.canonical_user_home.len != 0)
             try validateCanonicalDirectory(
@@ -780,6 +783,8 @@ pub const Runtime = struct {
         errdefer self.allocator.destroy(session);
         const control_block = try self.allocator.create(SessionControlBlock);
         errdefer self.allocator.destroy(control_block);
+        const provider_id = try self.allocator.dupe(u8, options.provider_id);
+        errdefer self.allocator.free(provider_id);
         const workspace_root = try self.allocator.dupe(u8, options.workspace.canonical_root);
         errdefer self.allocator.free(workspace_root);
         const workspace_home = try self.allocator.dupe(
@@ -795,6 +800,8 @@ pub const Runtime = struct {
         session.* = .{
             .agent_runtime = self,
             .id = session_id,
+            .provider_id = provider_id,
+            .protocol = options.protocol,
             .workspace_root = workspace_root,
             .workspace_home = workspace_home,
             .workspace_epoch = workspace_epoch,
@@ -816,8 +823,8 @@ pub const Runtime = struct {
         callbacks.release_response = Session.releaseUiResponse;
         var host_config = std.mem.zeroes(wire.SessionHostConfigV1);
         host_config.struct_size = @sizeOf(wire.SessionHostConfigV1);
-        host_config.protocol_kind_code = wire.PROTOCOL_DEFAULT;
-        host_config.provider_kind_code = providerKindCode(options.provider);
+        host_config.protocol_kind_code = session_wire.protocolKindCode(options.protocol);
+        host_config.provider_kind_code = providerKindCode(options.protocol);
         host_config.permission_mode_code = permissionModeCode(options.permission_mode);
         host_config.shell_policy_code = shellPolicyCode(options.shell_policy);
         host_config.api_key = sdk.bytesView(secret);
@@ -894,7 +901,9 @@ pub const Runtime = struct {
         const session_options = options.session;
         try validateWorkspace(session_options.workspace);
         try checkpoint.validateLimits(options.checkpoint_limits);
-        if (session_options.credential.len == 0 or
+        if (session_options.provider_id.len == 0 or session_options.provider_id.len > max_provider_id_bytes or
+            !std.unicode.utf8ValidateSlice(session_options.provider_id) or
+            session_options.credential.len == 0 or
             session_options.model.len == 0 or
             !std.mem.eql(u8, session_options.model, options.expectation.model) or
             options.expectation.logical_session_id.len == 0 or
@@ -939,6 +948,8 @@ pub const Runtime = struct {
         const session = try self.allocator.create(Session);
         var session_installed = false;
         defer if (!session_installed) self.allocator.destroy(session);
+        const provider_id = try self.allocator.dupe(u8, session_options.provider_id);
+        defer if (!session_installed) self.allocator.free(provider_id);
         const control_block = try self.allocator.create(SessionControlBlock);
         var control_installed = false;
         defer if (!control_installed) self.allocator.destroy(control_block);
@@ -1030,6 +1041,8 @@ pub const Runtime = struct {
         session.* = .{
             .agent_runtime = self,
             .id = route_id,
+            .provider_id = provider_id,
+            .protocol = session_options.protocol,
             .workspace_root = workspace_root,
             .workspace_home = workspace_home,
             .workspace_epoch = workspace_epoch,
@@ -1049,8 +1062,8 @@ pub const Runtime = struct {
         callbacks.release_response = Session.releaseUiResponse;
         var host_config = std.mem.zeroes(wire.SessionHostConfigV1);
         host_config.struct_size = @sizeOf(wire.SessionHostConfigV1);
-        host_config.protocol_kind_code = wire.PROTOCOL_DEFAULT;
-        host_config.provider_kind_code = providerKindCode(session_options.provider);
+        host_config.protocol_kind_code = session_wire.protocolKindCode(session_options.protocol);
+        host_config.provider_kind_code = providerKindCode(session_options.protocol);
         host_config.permission_mode_code = permissionModeCode(session_options.permission_mode);
         host_config.shell_policy_code = shellPolicyCode(session_options.shell_policy);
         host_config.api_key = sdk.bytesView(secret);

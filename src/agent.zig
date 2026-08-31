@@ -5,9 +5,11 @@ const session_impl = @import("agent_session");
 const mcp_connector = @import("agent_mcp_connector");
 const mcp_stdio = @import("agent_mcp_stdio");
 const mcp_http = @import("agent_mcp_http");
-const provider = @import("agent_provider");
+const protocol = @import("agent_protocol");
 const completion = @import("agent_completion");
 const provider_probe = @import("agent_provider_probe");
+
+pub const max_provider_id_bytes = protocol.max_provider_id_bytes;
 
 pub const OwnedCoreEvent = session_impl.OwnedCoreEvent;
 pub const Status = session_impl.Status;
@@ -117,7 +119,7 @@ pub const McpHttpFeedOutcome = mcp_http.FeedOutcome;
 pub const McpHttpPerformOutcome = mcp_http.PerformOutcome;
 pub const McpHttpHeaderName = mcp_http.HeaderName;
 pub const mcpHttpReservedRequestHeaderNames = mcp_http.reserved_request_header_names;
-pub const ProviderKind = provider.ProviderKind;
+pub const Protocol = protocol.Protocol;
 pub const Completion = completion.Completion;
 pub const CompletionTransport = completion.Transport;
 pub const CompletionHttpRequest = completion.HttpRequest;

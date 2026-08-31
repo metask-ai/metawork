@@ -304,6 +304,9 @@ const ActiveExecution = struct {
     credential_len: usize = 0,
     model_len: usize = 0,
     base_url_len: usize = 0,
+    provider_id_storage: [account.Limits.provider_id_bytes]u8 = undefined,
+    provider_id_len: usize = 0,
+    protocol: ?account.ModelConnectionProtocol = null,
     provider: ?account.ProviderKind = null,
     generation: u64 = 0,
 
@@ -337,24 +340,20 @@ const ActiveExecution = struct {
         else
             account.validateExecutionConfig(input);
         validation catch @panic("Account published an invalid ExecutionConfig");
-        self.installBytesNoFail(
-            input.target.provider_kind,
-            input.api_key,
-            input.target.model,
-            input.target.base_url,
-            input.execution_generation,
-        );
+        self.installBytesNoFail(input);
         execution.deinit();
     }
 
-    fn installBytesNoFail(
-        self: *ActiveExecution,
-        provider: account.ProviderKind,
-        credential_bytes: []const u8,
-        model_id: []const u8,
-        base_url: []const u8,
-        generation: u64,
-    ) void {
+    fn installBytesNoFail(self: *ActiveExecution, input: account.ExecutionConfigInput) void {
+        const provider = input.target.provider_kind;
+        const credential_bytes = input.api_key;
+        const model_id = input.target.model;
+        const base_url = input.target.base_url;
+        const generation = input.execution_generation;
+        std.debug.assert(input.target.provider_id.len <= self.provider_id_storage.len);
+        @memcpy(self.provider_id_storage[0..input.target.provider_id.len], input.target.provider_id);
+        self.provider_id_len = input.target.provider_id.len;
+        self.protocol = input.target.protocol;
         std.debug.assert(credential_bytes.len <= self.credential_storage.len);
         std.debug.assert(model_id.len <= self.model_storage.len);
         std.debug.assert(base_url.len <= self.base_url_storage.len);
@@ -375,9 +374,14 @@ const ActiveExecution = struct {
         self.model_len = 0;
         self.base_url_len = 0;
         self.provider = null;
+        self.protocol = null;
+        self.provider_id_len = 0;
         self.generation = 0;
     }
 
+    fn providerId(self: *const ActiveExecution) []const u8 {
+        return self.provider_id_storage[0..self.provider_id_len];
+    }
     fn credential(self: *const ActiveExecution) []const u8 {
         return self.credential_storage[0..self.credential_len];
     }
@@ -388,7 +392,8 @@ const ActiveExecution = struct {
         return self.base_url_storage[0..self.base_url_len];
     }
     fn ready(self: *const ActiveExecution) bool {
-        return self.generation != 0 and self.provider != null and
+        return self.generation != 0 and self.provider != null and self.protocol != null and
+            self.provider_id_len != 0 and
             self.credential_len != 0 and self.model_len != 0;
     }
 };
@@ -557,6 +562,8 @@ pub const State = struct {
     ) void {
         const execution_input: account.ExecutionConfigInput = .{
             .target = .{
+                .provider_id = "metask:automation-key",
+                .protocol = account.protocolForProviderKind(input.provider),
                 .provider_kind = input.provider,
                 .model = input.model,
                 .base_url = input.base_url,
@@ -569,13 +576,7 @@ pub const State = struct {
         redaction.apply(input.credential);
         if (self.custom_binding) |*binding| binding.deinit();
         self.custom_binding = null;
-        self.execution.installBytesNoFail(
-            input.provider,
-            input.credential,
-            input.model,
-            input.base_url,
-            input.generation,
-        );
+        self.execution.installBytesNoFail(execution_input);
     }
 
     pub fn clearNoFail(self: *State, redaction: ProjectionRedaction) void {
@@ -685,6 +686,8 @@ pub const State = struct {
         if (!self.execution.ready()) return null;
         return .{
             .target = .{
+                .provider_id = self.execution.providerId(),
+                .protocol = self.execution.protocol.?,
                 .provider_kind = self.execution.provider.?,
                 .model = self.execution.model(),
                 .base_url = self.execution.baseUrl(),
@@ -817,6 +820,7 @@ fn testExecution(
         owned_base_url,
         generation,
         owned_credential,
+        "fixture-provider",
     ) catch unreachable;
 }
 
@@ -832,11 +836,12 @@ fn testModelConnectionExecution() !account.OwnedExecutionConfig {
     errdefer secureFreeTest(owned_credential);
     return account.OwnedExecutionConfig.initModelConnectionOwned(
         std.testing.allocator,
-        .openai,
+        .openai_chat_completions,
         owned_model,
         owned_base_url,
         3,
         owned_credential,
+        "fixture-provider",
     ) catch unreachable;
 }
 
@@ -1004,6 +1009,9 @@ test "Model Connection execution never borrows Metask model authority" {
     state.endReplacementNoFail();
 
     try std.testing.expect(state.modelConnectionSelected());
+    const resolved = state.executionInput().?;
+    try std.testing.expectEqualStrings("model_connection:fixture-provider", resolved.target.provider_id);
+    try std.testing.expectEqual(account.ModelConnectionProtocol.openai_chat_completions, resolved.target.protocol);
     try std.testing.expect(!state.taskModelSelectionAuthorized(
         .{ .generation = 3, .provider = .openai },
         7,

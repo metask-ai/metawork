@@ -171,7 +171,8 @@ test "Gemini codec decodes one non-streaming text result" {
 
 test "Gemini request is non-streaming and keeps the credential out of the URL" {
     var encoded = try encode(std.testing.allocator, .{
-        .provider = .gemini,
+        .provider_id = "fixture-provider",
+        .protocol = .gemini_native,
         .credential = "SECRET",
         .base_url = "https://generativelanguage.googleapis.com",
         .model = "gemini/test",

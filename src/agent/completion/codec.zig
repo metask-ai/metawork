@@ -24,10 +24,8 @@ pub const EncodedRequest = struct {
         url: []const u8,
         body: []u8,
     ) Error!EncodedRequest {
-        if (body.len > types.max_request_bytes) {
-            allocator.free(body);
-            return error.ResourceLimit;
-        }
+        errdefer allocator.free(body);
+        if (body.len > types.max_request_bytes) return error.ResourceLimit;
         return .{
             .allocator = allocator,
             .url = try allocator.dupe(u8, url),

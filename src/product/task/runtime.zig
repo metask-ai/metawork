@@ -536,7 +536,7 @@ pub const RecoveryAuthorityQuery = struct {
     workspace_epoch: u64,
     target_execution_generation: u64,
     task_model: []const u8,
-    provider: agent.ProviderKind,
+    provider: account_contract.ProviderKind,
 };
 
 pub const RecoveryExternalAuthority = struct {
@@ -759,11 +759,7 @@ pub const Runtime = struct {
         errdefer if (title_live) input.text.discardCandidate(title);
         var execution = try owned_task_execution.OwnedTaskExecution.clone(
             self.allocator,
-            input.execution.target.provider_kind,
-            input.execution.target.model,
-            input.execution.target.base_url,
-            input.execution.execution_generation,
-            input.execution.api_key,
+            input.execution,
         );
         errdefer execution.deinit();
         var epoch_storage: [32]u8 = undefined;
@@ -777,7 +773,12 @@ pub const Runtime = struct {
             input.permission_interaction,
         );
         var binding = try task_agent_session.Binding.open(input.agent_runtime, .{
-            .provider = providerToAgent(input.provider),
+            .provider_id = input.execution.target.provider_id,
+            .protocol = switch (input.execution.target.protocol) {
+                .anthropic_messages => .anthropic_messages,
+                .openai_chat_completions => .openai_chat_completions,
+                .gemini_native => .gemini_native,
+            },
             .permission_mode = permission.mode,
             .shell_policy = permission.shell,
             .permission_interaction = permission.interaction,
@@ -961,11 +962,7 @@ pub const Runtime = struct {
         if (run_record.automatic_title.state.load(.acquire) == .pending) {
             job.title_execution = owned_task_execution.OwnedTaskExecution.clone(
                 self.allocator,
-                execution.target.provider_kind,
-                execution.target.model,
-                execution.target.base_url,
-                execution.execution_generation,
-                execution.api_key,
+                execution,
             ) catch null;
             if (job.title_execution == null)
                 run_record.automatic_title.state.store(.ready, .release);
@@ -2757,11 +2754,7 @@ pub const Runtime = struct {
         errdefer if (workspace_live) workspace.deinit();
         var execution = try owned_task_execution.OwnedTaskExecution.clone(
             self.allocator,
-            input.execution.target.provider_kind,
-            input.execution.target.model,
-            input.execution.target.base_url,
-            input.execution.execution_generation,
-            input.execution.api_key,
+            input.execution,
         );
         errdefer execution.deinit();
         const model = try self.allocator.dupe(u8, task.durable.execution_model);
@@ -2794,7 +2787,7 @@ pub const Runtime = struct {
                 .source_execution_generation = task.durable.execution_generation,
                 .target_execution_generation = input.execution.execution_generation,
                 .task_model = model,
-                .provider = providerToAgent(task.durable.execution_provider),
+                .provider = providerToAccount(task.durable.execution_provider),
                 .permission_mode = permission.mode,
                 .shell_policy = permission.shell,
                 .permission_interaction = permission.interaction,
@@ -3124,7 +3117,7 @@ pub const Runtime = struct {
                 .workspace_epoch = task.durable.workspace_epoch,
                 .target_execution_generation = job.attempt.target_execution_generation,
                 .task_model = task.durable.execution_model,
-                .provider = providerKind(task.durable.execution_provider),
+                .provider = providerToAccount(task.durable.execution_provider),
             });
             const active_attempt_id: ?u64 = switch (task.runtime.active_operation) {
                 .restore => |attempt| attempt.id,
@@ -3148,7 +3141,7 @@ pub const Runtime = struct {
                         .source_execution_generation = task.durable.execution_generation,
                         .target_execution_generation = external.target_execution_generation,
                         .task_model = task.durable.execution_model,
-                        .provider = providerKind(task.durable.execution_provider),
+                        .provider = providerToAccount(task.durable.execution_provider),
                         .active_attempt_id = active_attempt_id,
                         .shutting_down = external.shutting_down,
                         .archived = task.durable.archived,
@@ -3979,7 +3972,7 @@ fn providerFromAccount(provider: account_contract.ProviderKind) task_state.Provi
     };
 }
 
-fn providerToAgent(provider: task_state.Provider) agent.ProviderKind {
+fn providerToAccount(provider: task_state.Provider) account_contract.ProviderKind {
     return switch (provider) {
         .anthropic => .anthropic,
         .openai => .openai,
@@ -4694,19 +4687,34 @@ fn deinitTask(
     task.* = undefined;
 }
 
-fn providerKind(provider: task_state.Provider) agent.ProviderKind {
-    return switch (provider) {
-        .anthropic => .anthropic,
-        .openai => .openai,
-        .gemini => .gemini,
-    };
-}
-
 fn checkpointIdentityEqual(left: anytype, right: @TypeOf(left)) bool {
     return left.task_id == right.task_id and
         left.generation == right.generation and
         left.byte_size == right.byte_size and
         std.mem.eql(u8, &left.digest, &right.digest);
+}
+
+test "Task execution owns the provider reference and protocol across clone and transfer" {
+    var provider_id = "model_connection:service-a".*;
+    var owned = try owned_task_execution.OwnedTaskExecution.clone(std.testing.allocator, .{
+        .target = .{
+            .provider_id = &provider_id,
+            .protocol = .openai_chat_completions,
+            .provider_kind = .openai,
+            .model = "model",
+            .base_url = "https://example.test/v1/chat/completions",
+        },
+        .api_key = "fixture-secret",
+        .execution_generation = 7,
+    });
+    @memset(&provider_id, 'x');
+    var transferred = owned.take();
+    owned.deinit();
+    defer transferred.deinit();
+    const resolved = transferred.input();
+    try std.testing.expectEqualStrings("model_connection:service-a", resolved.target.provider_id);
+    try std.testing.expectEqual(account_contract.ModelConnectionProtocol.openai_chat_completions, resolved.target.protocol);
+    try std.testing.expectEqual(@as(u64, 7), resolved.execution_generation);
 }
 
 test "Runtime owns bounded Task collection and monotonic process facts" {

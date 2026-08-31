@@ -87,6 +87,10 @@ Account 同时最多拥有两个 secret-free `PublicCatalog` slot：
 
 Model Connection registry 与 Metask identity/catalog 独立，继续使用自己的 committed candidate、credential vault 和 persistence health。连接 CRUD、测试状态和 credential cleanup 由 Account 拥有；默认 execution source 在 Metask 与 Model Connection 之间切换时，必须使用同一条显式 execution replacement 协议。
 
+Account 解析执行配置时同时保留服务实例引用与已选协议。实例引用由 execution source 和既有公开 ID 限定：Model Connection 使用 connection id，Metask 使用选中的 API Key id；它不包含 credential，不用协议类别或 execution generation 代替实例身份。该引用只存在于 Host 运行时配置，冷启动从原有 binding 重建，不增加持久化字段。Model Connection 的协议直接来自 binding，不能先压缩为 provider 类别再反推；Metask 使用其固定外部合同确定协议。用户可配置的协议范围仍以下表为准。
+
+服务实例引用标识配置对象，而非 endpoint、模型或 credential 内容。其身份范围是所属 Account 配置命名空间：Model Connection 属于同一持久化 registry，Metask API Key 属于同一已验证账号的 catalog；source 前缀只区分两种来源，不建立跨账号、跨配置目录的全局唯一性。不同连接即使使用相同 credential 也保持不同身份。同一 Model Connection 更新名称、endpoint、protocol、credential 或选择模型时保留 connection id；相关 generation 按既有规则变化，实例引用不能替代 generation 的版本及授权校验。冷启动恢复既有 registry 保留原 ID；删除连接结束该实例的生命周期，正常新建流程重新生成 ID，不根据相同 endpoint 或 credential 恢复旧身份。Metask 实例身份沿用远端公开 API Key id 的生命周期。automation 验收的固定引用仅属于隔离的 fixture 命名空间，不承诺跨验收运行的身份连续性。
+
 用户创建 Model Connection 时必须显式选择已登记协议：
 
 | Protocol                | Agent provider | Endpoint contract                                             |
