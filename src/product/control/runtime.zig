@@ -4480,7 +4480,16 @@ pub const Runtime = struct {
     }
 
     fn taskRuntimeRequiredDurableEffect(self: *Runtime) task_runtime.DurableEffect {
-        return .{ .context = self, .commit_fn = commitTaskRuntimeCandidate };
+        return .{ .context = self, .commit_fn = commitRequiredTaskRuntimeCandidate };
+    }
+
+    fn commitRequiredTaskRuntimeCandidate(context: *anyopaque) task_runtime.DurableCommit {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        self.commitTaskState() catch |err| return switch (err) {
+            error.TaskPersistenceOutcomeUnknown => .outcome_unknown,
+            else => .failed,
+        };
+        return .committed;
     }
 
     fn commitTaskRuntimeCheckpoint(

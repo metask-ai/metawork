@@ -1825,6 +1825,7 @@ test "scheduled noninteractive permission request automatically stops the Produc
     );
     defer automatic_root.deinit();
     var schedule_support: TestScheduleSupport = .{};
+    var task_persistence: TaskPersistenceProbe = .{};
     var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
@@ -1843,6 +1844,7 @@ test "scheduled noninteractive permission request automatically stops the Produc
             .schedule_timer = schedule_support.timer(),
             .schedule_persistence = schedule_support.persistence(),
             .schedule_notifier = schedule_support.notifier(),
+            .task_persistence = task_persistence.capability(),
         },
     );
     defer workbench.deinit();
@@ -1890,6 +1892,76 @@ test "scheduled noninteractive permission request automatically stops the Produc
         schedule_support.notification_kind,
     );
     try std.testing.expectEqual(task_id, schedule_support.notification_task_id);
+}
+
+test "scheduled admission rejects an unconfigured Task persistence capability" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 1,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
+    var automatic_root = try product_control.AutomaticWorkspaceRoot.open(
+        std.testing.io,
+        std.testing.allocator,
+        root_storage[0..root_len],
+    );
+    defer automatic_root.deinit();
+    var schedule_support: TestScheduleSupport = .{};
+    var workbench = try product_control.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 1,
+            .max_workspaces = 1,
+            .max_tasks = 1,
+            .max_scheduled_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        .{
+            .directories = .{ .automatic_workspace_root = &automatic_root },
+            .schedule_timer = schedule_support.timer(),
+            .schedule_persistence = schedule_support.persistence(),
+        },
+    );
+    defer workbench.deinit();
+    try installControlExecution(&workbench);
+
+    const schedule_id = try workbench.createScheduledTask(.{
+        .title = "Required durability",
+        .expected_execution_generation = 1,
+        .permission_profile = .approval_required,
+        .input = "Do not run without durable Task history",
+        .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
+    });
+    try std.testing.expectError(
+        error.TaskPersistenceFailed,
+        workbench.runScheduledTaskNow(schedule_id, 1),
+    );
+
+    fake_core.lock();
+    const run_calls = fake_core.run_calls;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 0), run_calls);
+    var snapshot_storage: [128 * 1024]u8 = undefined;
+    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"health\":\"needs_attention\",\"failureReason\":\"task_start_failed\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"tasks\":[]") != null);
 }
 
 test "scheduled durable admission failure does not block an interactive Product Task" {
@@ -2576,6 +2648,7 @@ test "Text schedule updates preserve historical Task profiles and create fresh a
     );
     defer automatic_root.deinit();
     var schedule_support: TestScheduleSupport = .{};
+    var task_persistence: TaskPersistenceProbe = .{};
     var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
@@ -2593,6 +2666,7 @@ test "Text schedule updates preserve historical Task profiles and create fresh a
             .directories = .{ .automatic_workspace_root = &automatic_root },
             .schedule_timer = schedule_support.timer(),
             .schedule_persistence = schedule_support.persistence(),
+            .task_persistence = task_persistence.capability(),
         },
     );
     defer workbench.deinit();
@@ -2737,6 +2811,7 @@ test "schedule rejection retains the automatic Task created before a full Run qu
     );
     defer automatic_root.deinit();
     var schedule_support: TestScheduleSupport = .{};
+    var task_persistence: TaskPersistenceProbe = .{};
     var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
@@ -2753,6 +2828,7 @@ test "schedule rejection retains the automatic Task created before a full Run qu
             .directories = .{ .automatic_workspace_root = &automatic_root },
             .schedule_timer = schedule_support.timer(),
             .schedule_persistence = schedule_support.persistence(),
+            .task_persistence = task_persistence.capability(),
         },
     );
     defer workbench.deinit();
