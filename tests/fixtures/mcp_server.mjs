@@ -3,6 +3,8 @@ import { createServer } from "node:http";
 import { appendFileSync } from "node:fs";
 
 const options = parseOptions(process.argv.slice(2));
+const imageData =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a3V8AAAAASUVORK5CYII=";
 if (options.transport === "stdio") startStdio();
 else startHttp();
 
@@ -46,9 +48,9 @@ function startHttp() {
             direction: "request",
             message: payload,
           });
-          const mcpTools = payload.tools?.filter((tool) =>
-            tool.name.startsWith("mcp__"),
-          ) ?? [];
+          const mcpTools =
+            payload.tools?.filter((tool) => tool.name.startsWith("mcp__")) ??
+            [];
           const mcpTool = mcpTools[0];
           if (providerCalls === 0 && !mcpTool)
             throw new Error(
@@ -68,6 +70,32 @@ function startHttp() {
             throw new Error(
               "successful MCP tool result did not return to provider",
             );
+          if (providerCalls === 1 && options.resultKind === "image") {
+            const images = [];
+            const visit = (value) => {
+              if (!value || typeof value !== "object") return;
+              if (value.type === "image") images.push(value);
+              for (const child of Object.values(value)) visit(child);
+            };
+            visit(payload.messages);
+            // Characterize the pinned Core's current MCP boundary: payload
+            // survives, but is serialized tool text rather than visual input.
+            const opaque =
+              typeof toolResult.content === "string"
+                ? JSON.parse(toolResult.content)
+                : null;
+            const image = opaque?.content?.find(
+              (part) => part.type === "image",
+            );
+            if (
+              images.length !== 0 ||
+              image?.mimeType !== "image/png" ||
+              image?.data !== imageData
+            )
+              throw new Error(
+                "MCP image payload serialization changed; review visual-input support",
+              );
+          }
           const providerBody =
             providerCalls === 0
               ? providerToolSse("mcp-message-1", "mcp-call-1", mcpTool.name, {
@@ -300,7 +328,12 @@ async function handle(message, send) {
         send,
         message.id,
         result({
-          content: [{ type: "text", text: message.params.arguments.text }],
+          content: [
+            { type: "text", text: message.params.arguments.text },
+            ...(options.resultKind === "image"
+              ? [{ type: "image", mimeType: "image/png", data: imageData }]
+              : []),
+          ],
           isError: false,
         }),
       );
@@ -366,6 +399,7 @@ function parseOptions(args) {
   let transport = "stdio";
   let framing = "json";
   let ttlMs = 60_000;
+  let resultKind = "text";
   for (let index = 0; index < args.length; index += 1) {
     switch (args[index]) {
       case "--protocol":
@@ -386,6 +420,9 @@ function parseOptions(args) {
       case "--framing":
         framing = args[(index += 1)] ?? null;
         break;
+      case "--result-kind":
+        resultKind = args[(index += 1)] ?? null;
+        break;
       case "--ttl-ms":
         ttlMs = Number(args[(index += 1)] ?? "");
         break;
@@ -396,6 +433,7 @@ function parseOptions(args) {
   if (
     !["2026-07-28", "2025-11-25", "2025-06-18"].includes(protocolVersion) ||
     !["stdio", "http"].includes(transport) ||
+    !["text", "image"].includes(resultKind) ||
     !["json", "sse"].includes(framing) ||
     !Number.isSafeInteger(delayMs) ||
     delayMs < 0 ||
@@ -413,5 +451,6 @@ function parseOptions(args) {
     transport,
     framing,
     ttlMs,
+    resultKind,
   };
 }

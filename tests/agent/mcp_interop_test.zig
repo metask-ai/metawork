@@ -56,6 +56,16 @@ const HttpFixture = struct {
         trace_path: []const u8,
         ttl_ms: u64,
     ) !HttpFixture {
+        return startWithResult(protocol_version, framing, trace_path, ttl_ms, "text");
+    }
+
+    fn startWithResult(
+        protocol_version: []const u8,
+        framing: []const u8,
+        trace_path: []const u8,
+        ttl_ms: u64,
+        result_kind: []const u8,
+    ) !HttpFixture {
         var ttl_storage: [32]u8 = undefined;
         const ttl = try std.fmt.bufPrint(&ttl_storage, "{d}", .{ttl_ms});
         const arguments = [_][]const u8{
@@ -71,6 +81,8 @@ const HttpFixture = struct {
             trace_path,
             "--ttl-ms",
             ttl,
+            "--result-kind",
+            result_kind,
         };
         var child = try std.process.spawn(std.testing.io, .{
             .argv = &arguments,
@@ -580,6 +592,14 @@ test "canonical AgentCore AUTO downgrades a bare HTTP 400 probe" {
 }
 
 test "canonical AgentCore executes a selected Streamable HTTP tool" {
+    try expectSelectedHttpToolResult("text");
+}
+
+test "canonical AgentCore preserves MCP image payload as opaque tool-result text" {
+    try expectSelectedHttpToolResult("image");
+}
+
+fn expectSelectedHttpToolResult(result_kind: []const u8) !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_storage: [std.fs.max_path_bytes]u8 = undefined;
@@ -590,7 +610,7 @@ test "canonical AgentCore executes a selected Streamable HTTP tool" {
         "{s}/execution-trace.jsonl",
         .{root_storage[0..root_len]},
     );
-    var fixture = try HttpFixture.start("2026-07-28", "json", trace_path);
+    var fixture = try HttpFixture.startWithResult("2026-07-28", "json", trace_path, 60_000, result_kind);
     defer fixture.deinit();
     var preparation = try prepareHttpFixture(fixture.endpoint, "2026-07-28");
     defer preparation.deinit();
@@ -629,7 +649,7 @@ test "canonical AgentCore executes a selected Streamable HTTP tool" {
         .permission_mode = .full_access,
         .shell_policy = .unrestricted,
         .credential = "fixture-credential",
-        .model = "fixture-model",
+        .model = "claude-sonnet-4-20250514",
         .base_url = fixture.provider_endpoint,
         .workspace = .{
             .canonical_root = workspace_root,

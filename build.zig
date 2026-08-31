@@ -60,6 +60,20 @@ pub fn build(b: *std.Build) void {
         bundle.link_libc,
         &artifacts.tests.step,
     );
+    const multimodal_probe = b.addExecutable(.{
+        .name = "metawork-agent-multimodal-test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("scripts/probes/agent-multimodal-test.zig"),
+            .target = test_modules.agent.resolved_target,
+            .optimize = test_modules.agent.optimize,
+            .link_libc = bundle.link_libc,
+        }),
+    });
+    multimodal_probe.root_module.addImport("metawork_agent", test_modules.agent);
+    const multimodal_run = b.addRunArtifact(multimodal_probe);
+    if (b.args) |args| multimodal_run.addArgs(args);
+    b.step("test-agent-multimodal", "Run Agent image acceptance against the provider fixture")
+        .dependOn(&multimodal_run.step);
     addMcpConnectorTests(b, test_modules, bundle.link_libc);
     addMcpStdioTests(b, test_modules, bundle.link_libc);
     addMcpHttpTests(b, test_modules, bundle.link_libc);

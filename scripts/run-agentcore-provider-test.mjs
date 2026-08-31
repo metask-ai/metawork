@@ -27,10 +27,15 @@ const repositoryRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
 );
-const [mode] = process.argv.slice(2);
-if (process.argv.length > 3 || (mode !== undefined && mode !== "--staged"))
+const [mode, hostFlag] = process.argv.slice(2);
+const hostMode = hostFlag === "--host";
+if (
+  process.argv.length > 4 ||
+  (mode !== undefined && mode !== "--staged") ||
+  (hostFlag !== undefined && (!hostMode || mode !== "--staged"))
+)
   throw new Error(
-    "usage: node scripts/run-agentcore-provider-test.mjs [--staged]",
+    "usage: node scripts/run-agentcore-provider-test.mjs [--staged [--host]]",
   );
 const bundleRoot =
   mode === "--staged"
@@ -395,15 +400,30 @@ try {
   });
   const consumerRoot = path.join(scratch, "zig-consumer");
   await mkdir(consumerRoot);
-  await writeFile(path.join(consumerRoot, "image.b64"), largePng);
-  await symlink(
-    bundle.root,
-    path.join(consumerRoot, "bundle"),
-    process.platform === "win32" ? "junction" : "dir",
-  );
-  await writeFile(
-    path.join(consumerRoot, "build.zig.zon"),
-    `.{
+  if (hostMode) {
+    await writeFile(
+      path.join(consumerRoot, "image.png"),
+      Buffer.from(png, "base64"),
+    );
+    await writeFile(
+      path.join(consumerRoot, "image.gif"),
+      Buffer.from(gif, "base64"),
+    );
+    await writeFile(
+      path.join(consumerRoot, "large.png"),
+      Buffer.from(largePng, "base64"),
+    );
+  }
+  if (!hostMode) {
+    await writeFile(path.join(consumerRoot, "image.b64"), largePng);
+    await symlink(
+      bundle.root,
+      path.join(consumerRoot, "bundle"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    await writeFile(
+      path.join(consumerRoot, "build.zig.zon"),
+      `.{
     .name = .agentcore_provider_test,
     .fingerprint = 0x52ed_94bc_b822_003a,
     .version = "0.0.0",
@@ -412,10 +432,10 @@ try {
     .paths = .{ "build.zig", "build.zig.zon", "main.zig", "bundle" },
 }
 `,
-  );
-  await writeFile(
-    path.join(consumerRoot, "build.zig"),
-    `const std = @import("std");
+    );
+    await writeFile(
+      path.join(consumerRoot, "build.zig"),
+      `const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -428,16 +448,19 @@ pub fn build(b: *std.Build) void {
     b.step("run", "Test AgentCore provider contracts").dependOn(&run.step);
 }
 `,
-  );
-  const source = await readFile(
-    path.join(
-      repositoryRoot,
-      "scripts",
-      "probes",
-      "agentcore-provider-test.zig",
-    ),
-    "utf8",
-  );
+    );
+  }
+  const source = hostMode
+    ? ""
+    : await readFile(
+        path.join(
+          repositoryRoot,
+          "scripts",
+          "probes",
+          "agentcore-provider-test.zig",
+        ),
+        "utf8",
+      );
   const providerFailures = [];
   for (const provider of providers) {
     activeProvider = provider;
@@ -459,25 +482,46 @@ pub fn build(b: *std.Build) void {
       )
       .replaceAll("__API_KEY__", provider.apiKey)
       .replaceAll("__MODEL__", provider.model);
-    await writeFile(path.join(consumerRoot, "main.zig"), main);
+    if (!hostMode) await writeFile(path.join(consumerRoot, "main.zig"), main);
     try {
-      await runChild(
-        "zig",
-        [
-          "build",
-          "--cache-dir",
-          path.join(scratch, "sdk-cache"),
-          "--prefix",
-          path.join(scratch, "sdk-out"),
-          "run",
-          `-Dtarget=${bundle.target}`,
-          "-Doptimize=Debug",
-        ],
-        {
-          cwd: consumerRoot,
-          label: `AgentCore ${provider.name} provider test`,
-        },
-      );
+      if (hostMode) {
+        await runChild(
+          "zig",
+          [
+            "build",
+            "test-agent-multimodal",
+            `-Dtarget=${bundle.target}`,
+            "--",
+            provider.name,
+            baseUrl,
+            provider.apiKey,
+            provider.model,
+            consumerRoot,
+          ],
+          {
+            cwd: repositoryRoot,
+            label: `Agent Host ${provider.name} multimodal acceptance`,
+          },
+        );
+      } else {
+        await runChild(
+          "zig",
+          [
+            "build",
+            "--cache-dir",
+            path.join(scratch, "sdk-cache"),
+            "--prefix",
+            path.join(scratch, "sdk-out"),
+            "run",
+            `-Dtarget=${bundle.target}`,
+            "-Doptimize=Debug",
+          ],
+          {
+            cwd: consumerRoot,
+            label: `AgentCore ${provider.name} provider test`,
+          },
+        );
+      }
     } catch (error) {
       providerFailures.push(
         new Error(
@@ -496,7 +540,10 @@ pub fn build(b: *std.Build) void {
           `${provider.name}: expected six requests, got ${requestCount}`,
         ),
       );
-    else console.log(`AgentCore ${provider.name} provider contract passed`);
+    else
+      console.log(
+        `${hostMode ? "Agent Host" : "AgentCore"} ${provider.name} provider contract passed`,
+      );
   }
   if (providerFailures.length > 0)
     throw new AggregateError(
