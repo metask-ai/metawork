@@ -85,6 +85,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - 后台创建 Automatic Workspace 不修改 Manual Workspace recent order 或 Renderer New task draft scope；manual 与 automatic record 使用独立容量，后台 Task 不得耗尽用户打开 Workspace 的能力；
 - automatic root 无法初始化时只关闭 `automaticWorkspaces` capability，并对 automatic admission 返回 typed unavailable；Account、显式 Manual Workspace 和普通 Workbench 仍可运行；
 - bounded Task/Workspace 产品历史跨 Host 重启恢复，但恢复后的 Task 只读且不得伪造 Agent Session 或 Conversation；Run、Task 删除、shutdown 和重启后 Automatic Workspace 目录保留，但不扫描目录恢复或猜测 Task/Workspace，目录浏览和磁盘清理属于后续独立能力；
+- Task/Workspace 历史持久化是交互式主流程的 best-effort projection：历史读取、解码或写入失败时保留原文件与诊断，当前进程仍允许 Workspace 选择、新建 Task、Run、权限响应、取消与后续 mutation；读取或解码失败后本进程不覆盖不可信 store，明确写失败或结果不确定则在后续完整 snapshot 时重新尝试保存。只有 Task 物理删除和 Scheduled occurrence 等明确要求 durable-before-release/effect 的局部事务可以因本次提交失败而拒绝，拒绝不得冻结其他 Product Task 或整个 Workbench；
 - 文件和工具能力最终必须受 Workspace 与显式权限约束；
 - UI 能显示当前 Task 所属 Workspace；
 - strict Workspace security 未验证前，产品必须明确限制使用范围，不能制造虚假的安全承诺。

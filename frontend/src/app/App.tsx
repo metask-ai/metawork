@@ -126,11 +126,7 @@ import {
   type SearchResult,
 } from "../workbench/selectors.ts";
 import { chooseWorkspaceAndMigrateDraft } from "../features/workspaces/chooseWorkspace.ts";
-import {
-  initialWorkbenchState,
-  taskHistoryMutationBlocked,
-  workbenchReducer,
-} from "../workbench/store.ts";
+import { initialWorkbenchState, workbenchReducer } from "../workbench/store.ts";
 import { navigableTasks } from "../workbench/task-visibility.ts";
 import {
   accountMutationBlocksTaskAdmission,
@@ -478,11 +474,7 @@ export default function App() {
     snapshot.account.state,
   ]);
 
-  const workbenchMutationDisabled =
-    bridgeUnavailable ||
-    taskHistoryMutationBlocked(
-      snapshot.capabilities.taskHistoryPersistenceHealth,
-    );
+  const workbenchMutationDisabled = bridgeUnavailable;
   const currentTaskScope = activeTask ? `task:${activeTask.id}` : "new-task";
   const taskMutationDisabled =
     workbenchMutationDisabled || currentTaskScope in taskPending;
@@ -2506,7 +2498,7 @@ export default function App() {
                   "degraded" &&
                 snapshot.capabilities.taskHistoryPersistenceHealth !==
                   "unavailable" && (
-                  <div className="task-persistence-error" role="alert">
+                  <div className="task-persistence-error" role="status">
                     <Icon name="warning" />
                     <span>
                       {t(

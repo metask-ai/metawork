@@ -102,14 +102,6 @@ export const initialWorkbenchState: WorkbenchState = {
   draftWorkspaceId: null,
 };
 
-export function taskHistoryMutationBlocked(
-  health: WorkbenchSnapshot["capabilities"]["taskHistoryPersistenceHealth"],
-) {
-  return (
-    health !== "ready" && health !== "degraded" && health !== "unavailable"
-  );
-}
-
 export function workbenchReducer(
   state: WorkbenchState,
   action: WorkbenchAction,

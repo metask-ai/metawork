@@ -1005,13 +1005,14 @@ export const enUS = {
   "scheduled.persistence.outcome_unknown":
     "MetaWork cannot confirm whether the latest change was saved. Automatic runs are stopped to prevent duplicates.",
   "scheduled.persistence.ready": "Schedule storage is ready.",
-  "task.persistence.read_failed": "Saved task history could not be read.",
+  "task.persistence.read_failed":
+    "Saved task history could not be read. You can continue, but new work will not be saved in this session.",
   "task.persistence.corrupt":
-    "Saved task history is invalid. MetaWork kept the original file and disabled task changes.",
+    "Saved task history is invalid. MetaWork kept the original file; you can continue, but new work will not be saved in this session.",
   "task.persistence.write_failed":
-    "The latest task change could not be saved. Further task changes are disabled.",
+    "The latest task change could not be saved. You can keep working while MetaWork retries later changes.",
   "task.persistence.outcome_unknown":
-    "MetaWork could not confirm whether the latest task change was saved. Restart before making more changes.",
+    "MetaWork could not confirm whether the latest task change was saved. You can keep working while later changes retry the save.",
   "mcp.mutation.busy":
     "This server has an authorization operation in progress.",
   "mcp.mutation.cancelled": "The confirmation was cancelled.",
