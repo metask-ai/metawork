@@ -67,6 +67,19 @@ if (!HTMLElement.prototype.releasePointerCapture)
   HTMLElement.prototype.releasePointerCapture = () => undefined;
 if (!HTMLElement.prototype.scrollIntoView)
   HTMLElement.prototype.scrollIntoView = () => undefined;
+HTMLButtonElement.prototype.getBoundingClientRect = () => ({
+  x: 16,
+  y: 16,
+  width: 320,
+  height: 36,
+  top: 16,
+  right: 336,
+  bottom: 52,
+  left: 16,
+  toJSON() {
+    return this;
+  },
+});
 
 const { cleanup, fireEvent, render, screen, waitFor, within } =
   await import("@testing-library/react");
@@ -139,7 +152,7 @@ test("SelectionMenu uses combobox semantics and keyboard selection", async () =>
 
   const trigger = screen.getByRole("combobox", { name: "Switch workspace" });
   await user.click(trigger);
-  const listbox = screen.getByRole("listbox");
+  const listbox = await screen.findByRole("listbox");
   assert.equal(trigger.getAttribute("aria-expanded"), "true");
   assert.ok(listbox);
 
@@ -695,6 +708,7 @@ test("Settings changes only the future Task permission default in one action", a
     name: "Default for new Tasks",
   });
   await user.click(trigger);
+  await screen.findByRole("listbox");
   await user.keyboard("{ArrowDown}{Enter}");
   assert.deepEqual(selected, ["full_access"]);
   assert.equal(screen.queryByRole("alertdialog"), null);

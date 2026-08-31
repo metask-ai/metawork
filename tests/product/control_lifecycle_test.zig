@@ -2466,7 +2466,7 @@ test "automatic Workspace creation rolls back record and empty directory on Sess
     try std.testing.expectEqual(@as(usize, 0), try directoryEntryCount(tmp.dir));
 }
 
-test "Text schedule default creates a fresh automatic Workspace per occurrence" {
+test "Text schedule updates preserve historical Task profiles and create fresh automatic Workspaces" {
     fake_core.reset();
     const runtime = try createTestComposition(.{
         .worker_count = 1,
@@ -2540,11 +2540,65 @@ test "Text schedule default creates a fresh automatic Workspace per occurrence" 
         try workbench.workspaceKind(first_workspace),
     );
     try waitControlSnapshot(&workbench, "\"taskOutcome\":\"completed\"");
+    try std.testing.expectEqual(
+        product_control.PermissionProfile.full_access,
+        try workbench.taskPermissionProfile(first_task),
+    );
 
-    const second_task = try workbench.runScheduledTaskNow(default_schedule, 1);
+    try workbench.updateScheduledTask(default_schedule, 1, .{
+        .title = "Independent brief",
+        .expected_execution_generation = 1,
+        .permission_profile = .approval_required,
+        .input = "Summarize current work",
+        .recurrence = .{ .interval = .{
+            .start_at_unix_seconds = 2_000,
+            .every_seconds = 3_600,
+        } },
+    });
+    try std.testing.expectEqual(
+        @as(u64, 2),
+        try workbench.scheduledTaskEpoch(default_schedule),
+    );
+    var updated_snapshot_storage: [128 * 1024]u8 = undefined;
+    const updated_snapshot = try workbench.writeSnapshot(&updated_snapshot_storage);
+    const schedules_offset = std.mem.indexOf(
+        u8,
+        updated_snapshot,
+        "\"scheduledTasks\":[",
+    ) orelse return error.TestUnexpectedResult;
+    const tasks_relative_offset = std.mem.indexOf(
+        u8,
+        updated_snapshot[schedules_offset..],
+        "],\"tasks\":[",
+    ) orelse return error.TestUnexpectedResult;
+    const tasks_offset = schedules_offset + tasks_relative_offset;
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            updated_snapshot[schedules_offset..tasks_offset],
+            "\"permissionProfile\":\"approval_required\"",
+        ) != null,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            updated_snapshot[tasks_offset..],
+            "\"permissionProfile\":\"full_access\"",
+        ) != null,
+    );
+
+    const second_task = try workbench.runScheduledTaskNow(default_schedule, 2);
     const second_workspace = try workbench.taskWorkspaceId(second_task);
     try std.testing.expect(first_task != second_task);
     try std.testing.expect(first_workspace != second_workspace);
+    try std.testing.expectEqual(
+        product_control.PermissionProfile.full_access,
+        try workbench.taskPermissionProfile(first_task),
+    );
+    try std.testing.expectEqual(
+        product_control.PermissionProfile.approval_required,
+        try workbench.taskPermissionProfile(second_task),
+    );
     try std.testing.expectEqual(
         product_control.WorkspaceKind.automatic,
         try workbench.workspaceKind(second_workspace),

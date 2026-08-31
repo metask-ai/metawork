@@ -303,12 +303,11 @@ test("Scheduled Task projection decodes recurrence and occurrence without secret
   ];
   assert.deepEqual(decodeWorkbenchSnapshot(scheduled), scheduled);
 
-  const mismatchedPermissionProfile = clone(scheduled);
-  mismatchedPermissionProfile.scheduledTasks[0].permissionProfile =
-    "full_access";
-  assert.throws(
-    () => decodeWorkbenchSnapshot(mismatchedPermissionProfile),
-    /preserve its definition permission profile/,
+  const updatedDefinitionProfile = clone(scheduled);
+  updatedDefinitionProfile.scheduledTasks[0].permissionProfile = "full_access";
+  assert.deepEqual(
+    decodeWorkbenchSnapshot(updatedDefinitionProfile),
+    updatedDefinitionProfile,
   );
 
   const permissionRequired = clone(scheduled);

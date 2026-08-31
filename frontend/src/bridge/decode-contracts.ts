@@ -3005,11 +3005,6 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
       if (occurrence.taskId === null) continue;
       const occurrenceTask = tasksById.get(occurrence.taskId);
       if (!occurrenceTask) continue;
-      if (occurrenceTask.permissionProfile !== schedule.permissionProfile)
-        fail(
-          "$.scheduledTasks",
-          "scheduled occurrence Task must preserve its definition permission profile",
-        );
       if (
         occurrenceTask.runs.some(
           (run) => run.permissionInteraction !== "noninteractive",
