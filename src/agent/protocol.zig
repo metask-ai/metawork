@@ -9,3 +9,7 @@ pub const Protocol = enum {
     anthropic_messages,
     gemini_native,
 };
+
+/// Maximum UTF-8 byte length of the caller's opaque service instance reference.
+/// Shared by Session, Completion and Probe; Account may impose a tighter bound.
+pub const max_provider_id_bytes: usize = 256;

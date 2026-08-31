@@ -9,6 +9,8 @@ const protocol = @import("agent_protocol");
 const completion = @import("agent_completion");
 const provider_probe = @import("agent_provider_probe");
 
+pub const max_provider_id_bytes = protocol.max_provider_id_bytes;
+
 pub const OwnedCoreEvent = session_impl.OwnedCoreEvent;
 pub const Status = session_impl.Status;
 pub const StopReason = session_impl.StopReason;

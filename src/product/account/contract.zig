@@ -7,7 +7,7 @@ pub const Limits = struct {
     pub const account_id_bytes: usize = 256;
     pub const display_name_bytes: usize = 256;
     pub const api_key_id_bytes: usize = 128;
-    pub const provider_id_bytes: usize = api_key_id_bytes + 17;
+    pub const provider_id_bytes: usize = @tagName(ExecutionSource.model_connection).len + 1 + api_key_id_bytes;
     pub const api_key_name_bytes: usize = 256;
     pub const api_key_suffix_bytes: usize = 32;
     pub const model_id_bytes: usize = 256;
@@ -1242,6 +1242,43 @@ test "OwnedExecutionConfig moves one secret owner and securely releases it" {
     try std.testing.expectEqualStrings("metask:fixture-provider", destination.input().target.provider_id);
     try std.testing.expectEqual(ModelConnectionProtocol.anthropic_messages, destination.input().target.protocol);
     destination.deinit();
+}
+
+test "execution references distinguish connections and sources with identical credentials" {
+    const allocator = std.testing.allocator;
+    var first = try OwnedExecutionConfig.initModelConnectionOwned(
+        allocator,
+        .openai_chat_completions,
+        try allocator.dupe(u8, "model"),
+        try allocator.dupe(u8, metask_openai_chat_completions_url),
+        1,
+        try allocator.dupe(u8, "same-secret"),
+        "service-a",
+    );
+    defer first.deinit();
+    var second = try OwnedExecutionConfig.initModelConnectionOwned(
+        allocator,
+        .openai_chat_completions,
+        try allocator.dupe(u8, "model"),
+        try allocator.dupe(u8, metask_openai_chat_completions_url),
+        1,
+        try allocator.dupe(u8, "same-secret"),
+        "service-b",
+    );
+    defer second.deinit();
+    var managed = try OwnedExecutionConfig.initOwned(
+        allocator,
+        .openai,
+        try allocator.dupe(u8, "model"),
+        try allocator.dupe(u8, metask_openai_chat_completions_url),
+        1,
+        try allocator.dupe(u8, "same-secret"),
+        "service-a",
+    );
+    defer managed.deinit();
+    try std.testing.expectEqualStrings("model_connection:service-a", first.input().target.provider_id);
+    try std.testing.expectEqualStrings("model_connection:service-b", second.input().target.provider_id);
+    try std.testing.expectEqualStrings("metask:service-a", managed.input().target.provider_id);
 }
 
 test "OwnedExecutionConfig consumes invalid owned secret on rejection" {

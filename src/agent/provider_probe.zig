@@ -121,7 +121,7 @@ pub fn run(
 }
 
 fn validInput(input: Input) bool {
-    return input.provider_id.len != 0 and input.provider_id.len <= 256 and
+    return input.provider_id.len != 0 and input.provider_id.len <= completion.max_provider_id_bytes and
         std.unicode.utf8ValidateSlice(input.provider_id) and
         input.credential.len != 0 and input.credential.len <= 4096 and
         input.model.len != 0 and input.model.len <= 256 and

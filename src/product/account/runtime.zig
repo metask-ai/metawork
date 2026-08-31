@@ -2325,6 +2325,7 @@ const TestPlatform = struct {
     preference_commit_mode: PreferenceCommitMode = .normal,
     model_slot: [ports_impl.model_connection_slot_bytes]u8 = undefined,
     model_slot_len: usize = 0,
+    next_model_slot: u128 = 1,
     model_secret: [contract.Limits.api_key_bytes]u8 = undefined,
     model_secret_len: usize = 0,
     model_present: bool = false,
@@ -2411,12 +2412,15 @@ const TestPlatform = struct {
     fn cancelTimer(_: *anyopaque, _: u64) !void {}
 
     fn generateModelSlot(
-        _: *anyopaque,
+        context: *anyopaque,
         output: *[ports_impl.model_connection_slot_bytes]u8,
     ) credential_store.StoreError!void {
-        const slot = ports_impl.model_connection_slot_prefix ++
-            "00000000000000000000000000000001";
-        @memcpy(output, slot);
+        const self: *TestPlatform = @ptrCast(@alignCast(context));
+        _ = std.fmt.bufPrint(output, "{s}{x:0>32}", .{
+            ports_impl.model_connection_slot_prefix,
+            self.next_model_slot,
+        }) catch return error.WriteFailed;
+        self.next_model_slot += 1;
     }
 
     fn storeModelCredential(
@@ -2687,6 +2691,8 @@ test "Account Runtime persists and restores a secure model connection default" {
     const account_path = account_path_storage[0..account_path_len];
     var wake_context: u8 = 0;
     var fake: TestPlatform = .{};
+    var expected_provider: [contract.Limits.provider_id_bytes]u8 = undefined;
+    var expected_id: []const u8 = &.{};
 
     {
         var runtime = try Runtime.init(
@@ -2752,12 +2758,50 @@ test "Account Runtime persists and restores a secure model connection default" {
         var execution = (try runtime.resolveDefaultModelConnectionExecution()) orelse
             return error.TestUnexpectedResult;
         defer execution.deinit();
-        var expected_provider: [contract.Limits.provider_id_bytes]u8 = undefined;
-        const expected_id = try std.fmt.bufPrint(&expected_provider, "model_connection:{s}", .{runtime.view().model_connections[0].id});
+        expected_id = try std.fmt.bufPrint(&expected_provider, "model_connection:{s}", .{connection_id});
         try std.testing.expectEqualStrings(expected_id, execution.input().target.provider_id);
         try std.testing.expectEqual(contract.ModelConnectionProtocol.openai_chat_completions, execution.input().target.protocol);
         try std.testing.expectEqualStrings("provider-secret", execution.input().api_key);
         try std.testing.expectEqual(contract.ProviderKind.openai, execution.input().target.provider_kind);
+        try std.testing.expectEqual(@as(u64, 17), execution.input().execution_generation);
+
+        const updated = runtime.submitModelConnectionCommand(.{ .update = .{
+            .selection = .{ .connection_id = connection_id, .expected_connection_generation = 1 },
+            .spec = .{
+                .display_name = "Team gateway",
+                .protocol = .openai_chat_completions,
+                .normalized_base_url = "https://gateway.example.test/v1/chat/completions",
+            },
+        } });
+        try std.testing.expect(updated.accepted);
+        try std.testing.expectEqualStrings(connection_id, runtime.view().model_connections[0].id);
+        try std.testing.expectEqual(@as(u64, 2), runtime.view().model_connections[0].connection_generation);
+        try std.testing.expect((try runtime.resolveDefaultModelConnectionExecution()) == null);
+        const updated_selection: contract.ModelConnectionSelectionCommand = .{
+            .connection_id = connection_id,
+            .expected_connection_generation = 2,
+        };
+        try std.testing.expect(runtime.submitModelConnectionCommand(.{ .test_connection = .{
+            .selection = updated_selection,
+            .model_id = "gpt-5",
+        } }).accepted);
+        try std.testing.expect(runtime.completeModelConnectionTest(.{
+            .selection = updated_selection,
+            .model_id = "gpt-5",
+        }, true).accepted);
+        try std.testing.expect(runtime.submitModelConnectionCommandWithExecutionGeneration(.{ .select_default = .{
+            .selection = updated_selection,
+            .model_id = "gpt-5",
+        } }, 18).accepted);
+        var updated_execution = (try runtime.resolveDefaultModelConnectionExecution()) orelse
+            return error.TestUnexpectedResult;
+        defer updated_execution.deinit();
+        try std.testing.expectEqualStrings(expected_id, updated_execution.input().target.provider_id);
+        try std.testing.expectEqual(@as(u64, 18), updated_execution.input().execution_generation);
+        try std.testing.expectEqualStrings("https://gateway.example.test/v1/chat/completions", updated_execution.input().target.base_url);
+        // A frozen execution keeps its identity and configuration after replacement.
+        try std.testing.expectEqualStrings(expected_id, execution.input().target.provider_id);
+        try std.testing.expectEqualStrings("https://api.openai.com/v1/chat/completions", execution.input().target.base_url);
         try std.testing.expectEqual(@as(u64, 17), execution.input().execution_generation);
     }
 
@@ -2779,13 +2823,12 @@ test "Account Runtime persists and restores a secure model connection default" {
         var execution = (try runtime.resolveDefaultModelConnectionExecution()) orelse
             return error.TestUnexpectedResult;
         defer execution.deinit();
-        var expected_provider: [contract.Limits.provider_id_bytes]u8 = undefined;
-        const expected_id = try std.fmt.bufPrint(&expected_provider, "model_connection:{s}", .{runtime.view().model_connections[0].id});
         try std.testing.expectEqualStrings(expected_id, execution.input().target.provider_id);
         try std.testing.expectEqual(contract.ModelConnectionProtocol.openai_chat_completions, execution.input().target.protocol);
         try std.testing.expectEqualStrings("provider-secret", execution.input().api_key);
         try std.testing.expectEqualStrings("gpt-5", execution.input().target.model);
-        try std.testing.expectEqual(@as(u64, 17), execution.input().execution_generation);
+        try std.testing.expectEqual(@as(u64, 18), execution.input().execution_generation);
+        try std.testing.expectEqualStrings("https://gateway.example.test/v1/chat/completions", execution.input().target.base_url);
     }
 
     fake.model_present = false;
@@ -2823,6 +2866,20 @@ test "Account Runtime persists and restores a secure model connection default" {
         try std.testing.expect(removed.accepted);
         try std.testing.expectEqual(@as(usize, 0), runtime.view().model_connections.len);
         try std.testing.expect(!fake.model_present);
+        const recreated = runtime.createModelConnectionWithCredential("provider-secret", .{
+            .display_name = "Team gateway",
+            .protocol = .openai_chat_completions,
+            .normalized_base_url = "https://gateway.example.test/v1/chat/completions",
+        }, "gpt-5", "GPT-5");
+        try std.testing.expect(recreated.accepted);
+        const replacement = runtime.view().model_connections[0];
+        var replacement_execution = try runtime.resolveModelConnectionProbeExecution(.{
+            .connection_id = replacement.id,
+            .expected_connection_generation = replacement.connection_generation,
+        }, "gpt-5", 19);
+        defer replacement_execution.deinit();
+        try std.testing.expect(!std.mem.eql(u8, expected_id, replacement_execution.input().target.provider_id));
+        try std.testing.expectEqualStrings("provider-secret", replacement_execution.input().api_key);
     }
 }
 

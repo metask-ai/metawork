@@ -33,6 +33,8 @@ Provider 表示用户配置的模型服务实例，其身份与配置由 [Accoun
 
 MetaWork 独立定义 `Protocol`。Session、Completion 和 Provider Probe 同时接收服务实例引用 `provider_id`、明确协议、endpoint、credential 和 model。`provider_id` 是 Host 侧的不透明引用，不是服务商枚举或协议适配器；协议不能由该引用、URL 或模型名推断。Session 与 Completion 持有引用的 owned copy，不依赖调用方配置缓冲区的生命周期；该引用不进入模型请求、Core ABI、Bridge、event、snapshot 或产品历史。
 
+`provider_id` 作为执行元数据标识 Session 或 Completion 所绑定的服务配置来源；调用方负责提供正确引用，Agent 保留但不分配、解析或重新生成它。身份范围与生命周期由 Account 的服务实例合同定义，不由潜在的限流、遥测或 credential 分组用途改变。Agent 的接收上限由共享的 `max_provider_id_bytes` 定义，Account 可以采用更小的生成范围；Session fresh/restore、Completion 和 Probe 必须使用同一接收上限。
+
 | Protocol | Completion 接口 |
 | --- | --- |
 | `openai_responses` | 非流式 `POST /v1/responses` |

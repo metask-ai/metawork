@@ -13,6 +13,7 @@ const gemini = @import("completion/gemini_codec.zig");
 const anthropic = @import("completion/anthropic_codec.zig");
 
 pub const Protocol = @import("agent_protocol").Protocol;
+pub const max_provider_id_bytes = @import("agent_protocol").max_provider_id_bytes;
 pub const Transport = transport.Transport;
 pub const HttpRequest = transport.HttpRequest;
 pub const HttpHeader = transport.Header;
@@ -153,7 +154,7 @@ pub const Completion = struct {
 };
 
 fn validateConfig(config: Config) InitError!void {
-    if (config.provider_id.len == 0 or config.provider_id.len > 256 or
+    if (config.provider_id.len == 0 or config.provider_id.len > max_provider_id_bytes or
         !std.unicode.utf8ValidateSlice(config.provider_id)) return error.InvalidConfig;
     if (config.credential.len == 0 or config.base_url.len == 0 or
         config.model.len == 0 or !std.unicode.utf8ValidateSlice(config.base_url) or

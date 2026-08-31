@@ -11,6 +11,7 @@ const checkpoint = @import("agent_checkpoint");
 const checkpoint_restore = @import("agent_checkpoint_restore");
 const session_control = @import("control.zig");
 const session_wire = @import("wire.zig");
+const max_provider_id_bytes = @import("agent_protocol").max_provider_id_bytes;
 const capabilities = @import("../capabilities.zig");
 const session_binding = @import("binding.zig");
 // Intentional same-module cycle with session.zig; Runtime and Session retain
@@ -717,7 +718,7 @@ pub const Runtime = struct {
         options: SessionOpenOptions,
     ) (Error || std.mem.Allocator.Error)!SessionRoute {
         try validateWorkspace(options.workspace);
-        if (options.provider_id.len == 0 or options.provider_id.len > 256 or
+        if (options.provider_id.len == 0 or options.provider_id.len > max_provider_id_bytes or
             !std.unicode.utf8ValidateSlice(options.provider_id) or
             options.credential.len == 0 or options.model.len == 0)
             return error.CoreCallFailed;
@@ -900,7 +901,7 @@ pub const Runtime = struct {
         const session_options = options.session;
         try validateWorkspace(session_options.workspace);
         try checkpoint.validateLimits(options.checkpoint_limits);
-        if (session_options.provider_id.len == 0 or session_options.provider_id.len > 256 or
+        if (session_options.provider_id.len == 0 or session_options.provider_id.len > max_provider_id_bytes or
             !std.unicode.utf8ValidateSlice(session_options.provider_id) or
             session_options.credential.len == 0 or
             session_options.model.len == 0 or
