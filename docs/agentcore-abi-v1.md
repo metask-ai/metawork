@@ -13,6 +13,8 @@ MetaWork 接受 binary ABI version 1。各 target 的 toolchain、build、link�
 - [macOS arm64 lock](../build_support/agentcore-bundle.macos.lock.json)
 - [macOS x86_64 lock](../build_support/agentcore-bundle.macos-x86_64.lock.json)
 
+lock 只有满足当前 revision 接受规则时才可消费；尚未取得新 artifact 的 target 保持 fail closed，不得用旧 lock、其他 target 或伪造 manifest 补齐。
+
 本文不复制这些易变值。source commit 相同不证明不同 target 的 artifact bytes 可互换；每个 target 必须独立满足自己的完整 lock。
 
 ABI revision、function-table layout、required entry、symbol 或稳定外部格式发生变化时，必须先取得用户显式批准，再同步更新 lock、本文合同与对应验证。MetaWork 不保留旧 revision 分流、类型别名、shim、兼容 parser、双 bundle、target fallback 或静默降级。回退只能回退完整的 MetaWork 变更与对应 exact artifact，运行时没有旧 ABI 替代路径。
@@ -28,6 +30,10 @@ ABI revision、function-table layout、required entry、symbol 或稳定外部�
 - artifact 缺失、source dirty、unknown target、extra file、symlink、checksum、identity 或 ABI 不匹配都必须失败；
 - 禁止 implementation source dependency、源码复制、archive 直链、`latest`、可变 tag 与 source fallback。
 
+schema 1 manifest 必须包含 `runtime_assets`，当前精确接受一个 ripgrep declaration：`name/version/revision/path/upstream/license/role` 全部必填，不接受未知字段。Windows 路径为 `bin/rg.exe`，macOS 为 `bin/rg`；执行文件与 `bin/ripgrep-LICENSE-MIT` 必须同时在 `files` 中由 checksum 锁定。具体版本、revision 与 checksum 只由 manifest/lock 拥有。开发构建与正式 runtime package 必须部署这两份 payload，不从环境或其他源码树获取替代品。
+
+上游 Runtime 仍拥有 ripgrep resolver；其 `RG_BIN`、`PATH`、Host 同目录及系统位置选择语义不由 MetaWork 重实现。随包 checksum 证明部署身份，不证明在存在环境覆盖时实际执行的路径；当前 ABI 没有 Runtime-scoped 工具路径注入或所选路径证明。发布验证必须在不依赖外部 rg 的环境执行真实 Glob/Grep。MetaWork 不通过 Agent 改写进程全局环境，也不声称已实现运行时工具路径强制锁定。
+
 正式 `agent/` 只通过 bundle 的官方 `bindings/zig` package 获得 ABI types、typed protocol、module 与 link graph。MetaWork 不复制 header、raw enum、event tag、Permission/Skill/MCP schema、facade code 或 SDK validation；官方 SDK 是这些协议形状的唯一真源。bundle 散文不能放宽 manifest、lock、官方 header 或 bindings，互相冲突时按 dependency defect fail closed。
 
 ## 3. ABI identity 与 function table
@@ -35,7 +41,7 @@ ABI revision、function-table layout、required entry、symbol 或稳定外部�
 接受的 ABI identity 为：
 
 - `binary_abi_version = 1`；
-- `binary_abi_revision = 14`；
+- `binary_abi_revision = 15`；
 - discovery symbol 仅为 `metask_agentcore_get_api`；
 - root `binary_abi_table_size = 64`；
 - Runtime、Session、SessionControl、Skill、MCP 子表大小依次为 24、40、64、32、40 bytes；
@@ -53,6 +59,10 @@ ABI revision、function-table layout、required entry、symbol 或稳定外部�
 每个 required table、entry 与 reserved field 都必须通过官方 discovery 和 SDK validation。ABI 中存在 entry 只证明 Host 必须能正确理解该表面，不代表 MetaWork 产品已经开放对应能力。
 
 Runtime 只有一个 `create` entry，第二个参数是可空 `RuntimePluginConfigV1`；不得为不同 plugin 配置建立第二条 create ABI 路径。MCP `apply_configuration` 接受完整 declarative replacement：Host 必须使用非零 desired revision，并校验 status、report size、disposition、desired/active revision 与 reserved fields；只有 `APPLIED` 转移 replacement ownership，`SUPERSEDED` 或 `REJECTED` 不得取得该 ownership，malformed report 必须 fail closed。
+
+revision 15 的 `SessionHostConfigV1.protocol_kind_code` 取代旧 reserved slot。MetaWork fresh/restore 显式使用 `PROTOCOL_DEFAULT`，不推断或自动切换 OpenAI Responses。`RunInputV1` 的 parts/count 与 reserved layout 由官方 helper 构造；当前产品仍只提交 Text/Skill，不开放 multimodal。`image_input_unsupported` 只属于图片输入 admission 拒绝；在当前 Text/Skill、compact、mutation、export、describe 或 restore 路径出现时属于 dependency contract failure，不因 SDK 认识该值而放行。
+
+本次 revision hard cut 不提供旧 checkpoint 的兼容适配、迁移或跨 revision 恢复承诺；不主动删除或改写已有产品历史或 checkpoint，无法恢复时沿现有 typed failure 路径明确失败。当前 revision 的 export/restore 完整性与生命周期验证仍为必需。
 
 该 ABI 不包含 AgentCore Completion handle、request/result/event、stop reason、status 或 function entry。MetaWork 不为已删除表面保留 adapter、fixture slot、类型映射或 fallback；MetaWork-owned Completion 不是本 ABI 的一部分，其合同见 [Completion 架构](completion-architecture.md)。
 

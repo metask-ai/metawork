@@ -86,6 +86,7 @@ pub const Plan = enum {
     mismatched_checkpoint_outcome,
     unknown_status,
     stale_compact_status,
+    image_input_unsupported_status,
 };
 
 pub const FakeRuntime = struct {};
@@ -1979,6 +1980,10 @@ pub fn sessionRunInput(
     if (plan == .stale_compact_status) {
         diagnostic(out_error);
         return wire.STATUS_STALE_COMPACT;
+    }
+    if (plan == .image_input_unsupported_status) {
+        diagnostic(out_error);
+        return wire.STATUS_IMAGE_INPUT_UNSUPPORTED;
     }
     if (out_result) |result| {
         result.* = std.mem.zeroes(wire.RunResultV1);

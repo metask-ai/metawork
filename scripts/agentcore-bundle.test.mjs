@@ -18,6 +18,10 @@ import assert from "node:assert/strict";
 import { validateAgentCoreBundle } from "./agentcore-bundle.mjs";
 import { stageAgentCoreBundle } from "./stage-agentcore-bundle.mjs";
 import { verifyStagedAgentCoreBundle } from "./verify-staged-agentcore-bundle.mjs";
+import {
+  stageAgentCoreRuntimeAssets,
+  verifyAgentCoreRuntimeAssets,
+} from "./agentcore-runtime-assets.mjs";
 
 const fixtureFiles = [
   "lib/metask_agentcore.lib",
@@ -35,6 +39,8 @@ const fixtureFiles = [
   "bindings/rust/src/raw.rs",
   "bindings/rust/examples/link_probe.rs",
   "README.md",
+  "bin/rg.exe",
+  "bin/ripgrep-LICENSE-MIT",
 ];
 
 function digest(bytes) {
@@ -83,12 +89,28 @@ async function fixture(t, mutateManifest = () => {}) {
     contract: {
       binary_abi_status: "experimental",
       binary_abi_version: 1,
-      binary_abi_revision: 14,
+      binary_abi_revision: 15,
       binary_abi_table_size: 64,
     },
+    runtime_assets: [
+      {
+        name: "ripgrep",
+        version: "14.1.1",
+        revision: "4649aa9700",
+        path: "bin/rg.exe",
+        upstream: "https://github.com/BurntSushi/ripgrep",
+        license: "MIT OR Unlicense",
+        role: "Glob/Grep execution dependency",
+      },
+    ],
     files,
   };
   mutateManifest(manifest);
+  if (manifest.target.os === "macos") {
+    manifest.runtime_assets[0].path = "bin/rg";
+    manifest.files.find((file) => file.path === "bin/rg.exe").path = "bin/rg";
+    await rename(path.join(root, "bin/rg.exe"), path.join(root, "bin/rg"));
+  }
   await writeFile(path.join(root, "manifest.json"), JSON.stringify(manifest));
   return { root, manifest };
 }
@@ -261,6 +283,94 @@ test("rejects a checksum mismatch", async (t) => {
   );
 });
 
+test("requires the exact runtime asset declaration and checksum-pinned license", async (t) => {
+  for (const mutate of [
+    (manifest) => {
+      delete manifest.runtime_assets;
+    },
+    (manifest) => {
+      manifest.runtime_assets = [];
+    },
+    (manifest) => {
+      manifest.runtime_assets.push(manifest.runtime_assets[0]);
+    },
+    (manifest) => {
+      manifest.runtime_assets[0].path = "../rg.exe";
+    },
+    (manifest) => {
+      manifest.runtime_assets[0].unrecognized = true;
+    },
+    (manifest) => {
+      manifest.files = manifest.files.filter(
+        (file) => file.path !== "bin/ripgrep-LICENSE-MIT",
+      );
+    },
+    (manifest) => {
+      manifest.files = manifest.files.filter(
+        (file) => file.path !== "bin/rg.exe",
+      );
+    },
+  ]) {
+    const candidate = await fixture(t, mutate);
+    await assert.rejects(
+      validateAgentCoreBundle(candidate.root, injectedChecks),
+      /manifest contract|runtime.asset|checksum-pinned/,
+    );
+  }
+});
+
+test("deploys only pinned runtime assets and rejects missing or tampered deployment", async (t) => {
+  const candidate = await fixture(t);
+  const bundle = await validateAgentCoreBundle(candidate.root, injectedChecks);
+  const destination = await mkdtemp(
+    path.join(tmpdir(), "metawork-runtime-assets-"),
+  );
+  t.after(() => rm(destination, { recursive: true, force: true }));
+  await stageAgentCoreRuntimeAssets(bundle, destination);
+  assert.deepEqual((await readdir(destination)).sort(), [
+    "rg.exe",
+    "ripgrep-LICENSE-MIT",
+  ]);
+  await writeFile(path.join(destination, "rg.exe"), "tampered");
+  await assert.rejects(
+    verifyAgentCoreRuntimeAssets(bundle, destination),
+    /checksum mismatch/,
+  );
+  await stageAgentCoreRuntimeAssets(bundle, destination);
+  await rm(path.join(destination, "ripgrep-LICENSE-MIT"));
+  await assert.rejects(
+    verifyAgentCoreRuntimeAssets(bundle, destination),
+    /ENOENT/,
+  );
+  await writeFile(
+    path.join(candidate.root, "bin/rg.exe"),
+    "source changed after verification",
+  );
+  await assert.rejects(
+    stageAgentCoreRuntimeAssets(bundle, destination),
+    /checksum mismatch/,
+  );
+});
+
+test("staged preflight refuses a retired revision lock", async (t) => {
+  const candidate = await fixture(t);
+  const root = await repository(t, candidate.manifest);
+  await stageAgentCoreBundle({
+    repositoryRoot: root,
+    source: candidate.root,
+    validationOptions: injectedChecks,
+  });
+  candidate.manifest.contract.binary_abi_revision = 14;
+  await writeFile(
+    path.join(root, "build_support", "agentcore-bundle.windows.lock.json"),
+    JSON.stringify(candidate.manifest),
+  );
+  await assert.rejects(
+    verifyStagedAgentCoreBundle(root, injectedVerification),
+    /requires a revision 15 repository lock/,
+  );
+});
+
 test("rejects a self-consistent bundle that differs from the repository lock", async (t) => {
   const { root, manifest } = await fixture(t);
   const expectedManifest = structuredClone(manifest);
@@ -281,7 +391,7 @@ test("rejects a missing or legacy binary ABI revision", async (t) => {
   );
 
   const unsupported = await fixture(t, (manifest) => {
-    manifest.contract.binary_abi_revision = 6;
+    manifest.contract.binary_abi_revision = 14;
   });
   await assert.rejects(
     validateAgentCoreBundle(unsupported.root, injectedChecks),

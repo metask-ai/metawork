@@ -15,6 +15,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { buildAutomationDebugArtifact } from "./build.mjs";
+import { verifyStagedAgentCoreBundle } from "./verify-staged-agentcore-bundle.mjs";
+import { verifyAgentCoreRuntimeAssets } from "./agentcore-runtime-assets.mjs";
 
 const execFileAsync = promisify(execFile);
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -60,6 +62,26 @@ const windowsWebViewFocusProbeScript = path.join(
 // the automation Debug build does not run twice.
 if (!process.env.METAWORK_VERTICAL_PREBUILT)
   await buildAutomationDebugArtifact(root);
+const bundle = await verifyStagedAgentCoreBundle(root);
+await verifyAgentCoreRuntimeAssets(bundle, path.dirname(binary));
+// Exercise the shipped rg beside the Host, not an ambient development install.
+const appEnvironment = { ...process.env };
+for (const key of Object.keys(appEnvironment)) {
+  if (key.toUpperCase() === "PATH" || key.toUpperCase() === "RG_BIN")
+    delete appEnvironment[key];
+}
+appEnvironment.PATH =
+  process.platform === "win32"
+    ? [
+        path.join(process.env.SystemRoot ?? "C:\\Windows", "System32"),
+        path.join(
+          process.env.SystemRoot ?? "C:\\Windows",
+          "System32",
+          "WindowsPowerShell",
+          "v1.0",
+        ),
+      ].join(path.delimiter)
+    : "/usr/bin:/bin";
 
 const commandTimeoutMs = 20_000;
 const runTimeoutMs = 60_000;
@@ -833,7 +855,7 @@ function startApplication() {
   app = spawn(binary, [], {
     cwd: appCwd,
     env: {
-      ...process.env,
+      ...appEnvironment,
       ...isolatedPlatformEnv,
       METAWORK_AUTOMATION: "1",
       METAWORK_AUTOMATION_WORKSPACE: workspace,

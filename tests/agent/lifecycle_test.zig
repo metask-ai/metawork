@@ -684,7 +684,7 @@ test "malformed compact result poisons Session and queued compact can be cancell
     try closeSession(session, .session_close);
 }
 
-test "Runtime rejects missing revision 14 child tables and entries" {
+test "Runtime rejects missing revision 15 child tables and entries" {
     var api = fake_api;
     api.skill = null;
     try std.testing.expectError(
@@ -2159,6 +2159,7 @@ test "status is validated before RunResult and invalid results poison the Sessio
         .{ .plan = .checkpoint_budget_required_invalid_result, .expected_status = wire.STATUS_CHECKPOINT_BUDGET_REQUIRED, .expected_stop = null },
         .{ .plan = .unknown_status, .expected_status = 42, .expected_stop = null },
         .{ .plan = .stale_compact_status, .expected_status = wire.STATUS_STALE_COMPACT, .expected_stop = null },
+        .{ .plan = .image_input_unsupported_status, .expected_status = wire.STATUS_IMAGE_INPUT_UNSUPPORTED, .expected_stop = null },
     };
     for (cases) |case| {
         fake_core.setNextPlan(case.plan);
@@ -2493,7 +2494,7 @@ test "checkpoint IO and product limits keep Session reusable" {
     }
 }
 
-test "checkpoint Core fatal and entry-illegal budget status close Session admission" {
+test "checkpoint Core fatal and entry-illegal statuses close Session admission" {
     const statuses = [_]u32{
         wire.STATUS_OUT_OF_MEMORY,
         wire.STATUS_CORE_ERROR,
@@ -2502,6 +2503,7 @@ test "checkpoint Core fatal and entry-illegal budget status close Session admiss
         wire.STATUS_CHECKPOINT_UNSUPPORTED,
         wire.STATUS_CHECKPOINT_INCOMPATIBLE,
         wire.STATUS_LOGICAL_SESSION_CONFLICT,
+        wire.STATUS_IMAGE_INPUT_UNSUPPORTED,
     };
     for (statuses) |status| {
         fake_core.reset();
@@ -2528,7 +2530,8 @@ test "checkpoint Core fatal and entry-illegal budget status close Session admiss
                     status == wire.STATUS_CHECKPOINT_CORRUPT or
                     status == wire.STATUS_CHECKPOINT_UNSUPPORTED or
                     status == wire.STATUS_CHECKPOINT_INCOMPATIBLE or
-                    status == wire.STATUS_LOGICAL_SESSION_CONFLICT)
+                    status == wire.STATUS_LOGICAL_SESSION_CONFLICT or
+                    status == wire.STATUS_IMAGE_INPUT_UNSUPPORTED)
                     try std.testing.expectEqual(lifecycle.CheckpointFailureReason.dependency_contract, failure.reason)
                 else
                     try std.testing.expect(failure.reason == .out_of_memory or failure.reason == .core_error);

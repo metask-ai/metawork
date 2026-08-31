@@ -443,6 +443,7 @@ pub fn build(b: *std.Build) void {
     consumer.addImport("metask_agentcore", agentcore);
     const executable = b.addExecutable(.{ .name = "metawork-agentcore-permission-probe", .root_module = consumer });
     const run = b.addRunArtifact(executable);
+    run.setEnvironmentVariable("RG_BIN", b.pathFromRoot("bundle/${bundle.manifest.runtime_assets[0].path}"));
     b.step("run", "Probe AgentCore permission behavior").dependOn(&run.step);
 }
 `,

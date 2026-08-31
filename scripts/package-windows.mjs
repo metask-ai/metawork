@@ -16,6 +16,10 @@ import { readNativePackageManifest } from "./package-metadata.mjs";
 import { runChild } from "./run-child-process.mjs";
 import { verifyNativeAutomationIsolation } from "./verify-native-automation-isolation.mjs";
 import { verifyStagedAgentCoreBundle } from "./verify-staged-agentcore-bundle.mjs";
+import {
+  stageAgentCoreRuntimeAssets,
+  verifyAgentCoreRuntimeAssets,
+} from "./agentcore-runtime-assets.mjs";
 
 const packageManifest = readNativePackageManifest(repositoryRoot);
 
@@ -565,6 +569,10 @@ async function packageWindows() {
     },
   );
   verifyWindowsRuntimeStage(distribution.runtimeStagePath, distribution);
+  await stageAgentCoreRuntimeAssets(
+    bundle,
+    path.join(distribution.runtimeStagePath, "bin"),
+  );
   if (signing) {
     await signWindowsFile(
       signing,
@@ -582,6 +590,10 @@ async function packageWindows() {
     );
   }
 
+  await verifyAgentCoreRuntimeAssets(
+    bundle,
+    path.join(distribution.runtimeStagePath, "bin"),
+  );
   const installerStem = distribution.installerArtifactName.slice(
     0,
     -".exe".length,

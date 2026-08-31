@@ -816,6 +816,7 @@ pub const Runtime = struct {
         callbacks.release_response = Session.releaseUiResponse;
         var host_config = std.mem.zeroes(wire.SessionHostConfigV1);
         host_config.struct_size = @sizeOf(wire.SessionHostConfigV1);
+        host_config.protocol_kind_code = wire.PROTOCOL_DEFAULT;
         host_config.provider_kind_code = providerKindCode(options.provider);
         host_config.permission_mode_code = permissionModeCode(options.permission_mode);
         host_config.shell_policy_code = shellPolicyCode(options.shell_policy);
@@ -841,7 +842,7 @@ pub const Runtime = struct {
         else
             null;
         host_config.durable_budget = null;
-        // MetaWork persists finalized Conversation checkpoints. Revision 14's
+        // MetaWork persists finalized Conversation checkpoints. AgentCore's
         // active-Run journal remains disabled until a crash-recovery policy is
         // defined for its intent/result evidence.
         host_config.run_journal_mode_code = wire.RUN_JOURNAL_EPHEMERAL;
@@ -1048,6 +1049,7 @@ pub const Runtime = struct {
         callbacks.release_response = Session.releaseUiResponse;
         var host_config = std.mem.zeroes(wire.SessionHostConfigV1);
         host_config.struct_size = @sizeOf(wire.SessionHostConfigV1);
+        host_config.protocol_kind_code = wire.PROTOCOL_DEFAULT;
         host_config.provider_kind_code = providerKindCode(session_options.provider);
         host_config.permission_mode_code = permissionModeCode(session_options.permission_mode);
         host_config.shell_policy_code = shellPolicyCode(session_options.shell_policy);

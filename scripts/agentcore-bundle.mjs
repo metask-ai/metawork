@@ -9,6 +9,7 @@ const maxManifestBytes = 1024 * 1024;
 const maxPayloadBytes = 128 * 1024 * 1024;
 const maxPayloadFiles = 256;
 const supportedAbiVersion = 1;
+const supportedAbiRevision = 15;
 
 const targetPolicies = [
   {
@@ -22,7 +23,7 @@ const targetPolicies = [
     library: "lib/metask_agentcore.lib",
     optimize: "ReleaseSafe",
     systemLibraries: ["advapi32", "crypt32"],
-    abiRevision: 14,
+    abiRevision: supportedAbiRevision,
     abiTableSize: 64,
     lock: path.join(
       "build_support",
@@ -40,7 +41,7 @@ const targetPolicies = [
     library: "lib/metask_agentcore.lib",
     optimize: "ReleaseSafe",
     systemLibraries: ["advapi32", "crypt32"],
-    abiRevision: 14,
+    abiRevision: supportedAbiRevision,
     abiTableSize: 64,
     lock: path.join("build_support", "agentcore-bundle.windows.lock.json"),
   },
@@ -55,7 +56,7 @@ const targetPolicies = [
     library: "lib/libmetask_agentcore.a",
     optimize: "ReleaseSafe",
     systemLibraries: [],
-    abiRevision: 14,
+    abiRevision: supportedAbiRevision,
     abiTableSize: 64,
     lock: path.join("build_support", "agentcore-bundle.macos.lock.json"),
   },
@@ -70,7 +71,7 @@ const targetPolicies = [
     library: "lib/libmetask_agentcore.a",
     optimize: "ReleaseSafe",
     systemLibraries: [],
-    abiRevision: 14,
+    abiRevision: supportedAbiRevision,
     abiTableSize: 64,
     lock: path.join("build_support", "agentcore-bundle.macos-x86_64.lock.json"),
   },
@@ -194,7 +195,12 @@ export function stagedAgentCoreBundleRoot(repositoryRoot, targetId) {
 export async function loadLockedAgentCoreManifest(repositoryRoot, targetId) {
   const policy = policyForTargetId(targetId);
   const bytes = await readFile(path.join(repositoryRoot, policy.lock), "utf8");
-  return { bytes, manifest: JSON.parse(bytes), policy };
+  const manifest = JSON.parse(bytes);
+  requireValue(
+    manifest.contract?.binary_abi_revision === supportedAbiRevision,
+    `AgentCore ${targetId} requires a revision ${supportedAbiRevision} repository lock and clean bundle; the locked revision ${manifest.contract?.binary_abi_revision} is no longer accepted`,
+  );
+  return { bytes, manifest, policy };
 }
 
 export async function readAgentCoreBundleTargetId(bundleRoot) {
@@ -278,6 +284,7 @@ export async function validateAgentCoreBundle(bundleRoot, options = {}) {
       "build",
       "link",
       "contract",
+      "runtime_assets",
       "files",
     ],
     "manifest",
@@ -452,6 +459,38 @@ export async function validateAgentCoreBundle(bundleRoot, options = {}) {
     "AgentCore manifest contains a case-colliding payload path",
   );
 
+  requireValue(
+    Array.isArray(manifest.runtime_assets) &&
+      manifest.runtime_assets.length === 1,
+    "AgentCore runtime_assets must declare exactly one ripgrep asset",
+  );
+  const asset = manifest.runtime_assets[0];
+  requireExactKeys(
+    asset,
+    ["name", "version", "revision", "path", "upstream", "license", "role"],
+    "runtime_assets[0]",
+  );
+  for (const field of ["version", "revision"])
+    requireString(asset[field], `runtime_assets[0].${field}`);
+  requireValue(
+    asset.name === "ripgrep" &&
+      asset.path === (policy.os === "windows" ? "bin/rg.exe" : "bin/rg") &&
+      asset.upstream === "https://github.com/BurntSushi/ripgrep" &&
+      asset.license === "MIT OR Unlicense" &&
+      asset.role === "Glob/Grep execution dependency",
+    "unsupported AgentCore runtime asset contract",
+  );
+  const runtimeFiles = [asset.path, "bin/ripgrep-LICENSE-MIT"].map(
+    (assetPath) => {
+      const file = manifest.files.find((entry) => entry.path === assetPath);
+      requireValue(
+        file,
+        `AgentCore runtime asset must be checksum-pinned in files: ${assetPath}`,
+      );
+      return file;
+    },
+  );
+
   const actualEntries = (await listBundleEntries(root)).sort();
   requireValue(
     isDeepStrictEqual(actualEntries, expectedBundleEntries(declaredFiles)),
@@ -496,5 +535,6 @@ export async function validateAgentCoreBundle(bundleRoot, options = {}) {
     target: zigTarget,
     deploymentTarget: zigTargetMatch[1] ?? null,
     libraryPath: path.join(root, policy.library),
+    runtimeFiles,
   };
 }

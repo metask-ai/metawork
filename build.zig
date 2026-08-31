@@ -35,6 +35,10 @@ pub fn build(b: *std.Build) void {
     const target_id = agentCoreTargetId(app_target);
     const root = b.pathFromRoot(b.pathJoin(&.{ ".agentcore/bundles", target_id }));
     const bundle = agentcore_bundle.verify(b, root);
+    for (bundle.runtime_files) |file| {
+        const install = b.addInstallBinFile(.{ .cwd_relative = file }, std.fs.path.basename(file));
+        b.getInstallStep().dependOn(&install.step);
+    }
     const modules = wireAgentCore(b, artifacts.exe.root_module, bundle, artifact);
     const test_modules = if (artifacts.tests.root_module != artifacts.exe.root_module)
         wireAgentCore(b, artifacts.tests.root_module, bundle, artifact)

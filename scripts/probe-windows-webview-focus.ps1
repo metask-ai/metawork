@@ -51,11 +51,13 @@ function Find-MetaWorkComposerInput($window, $condition, [int]$waitMilliseconds)
     $deadline = (Get-Date).AddMilliseconds($waitMilliseconds)
     do {
         $root = [System.Windows.Automation.AutomationElement]::FromHandle($window)
-        $candidate = $root.FindFirst(
+        $candidates = $root.FindAll(
             [System.Windows.Automation.TreeScope]::Descendants,
             $condition
         )
-        if ($null -ne $candidate) {
+        # Header selectors can precede the Composer in the accessibility tree.
+        # An unrelated first Edit/ComboBox must not hide the editable input.
+        foreach ($candidate in $candidates) {
             $candidatePattern = $null
             if ($candidate.TryGetCurrentPattern(
                 [System.Windows.Automation.ValuePattern]::Pattern,

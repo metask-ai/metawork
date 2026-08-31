@@ -38,6 +38,15 @@ const Manifest = struct {
         binary_abi_revision: u32,
         binary_abi_table_size: u32,
     },
+    runtime_assets: []const struct {
+        name: []const u8,
+        version: []const u8,
+        revision: []const u8,
+        path: []const u8,
+        upstream: []const u8,
+        license: []const u8,
+        role: []const u8,
+    },
     files: []const ManifestFile,
 };
 
@@ -45,6 +54,7 @@ pub const Bundle = struct {
     deployment_target: ?std.SemanticVersion,
     link_libc: bool,
     sdk_dependency: SdkDependency,
+    runtime_files: [2][]const u8,
 };
 
 pub const SdkDependency = enum {
@@ -83,9 +93,9 @@ pub fn verify(b: *std.Build, root: []const u8) Bundle {
         lock.contract.binary_abi_version != 1 or
         !std.mem.eql(u8, lock.contract.binary_abi_status, "experimental"))
         @panic("unsupported locked AgentCore bundle contract");
-    if (lock.contract.binary_abi_revision != 14 or
+    if (lock.contract.binary_abi_revision != 15 or
         lock.contract.binary_abi_table_size != 64)
-        @panic("unsupported locked AgentCore revision 14 contract");
+        @panic("AgentCore requires a clean revision 15 bundle and matching repository lock");
     if (!std.mem.eql(u8, lock.build.optimize, "ReleaseSafe") or !lock.build.strip)
         @panic("unsupported locked AgentCore build identity");
     const target = validateTarget(lock);
@@ -97,10 +107,30 @@ pub fn verify(b: *std.Build, root: []const u8) Bundle {
         verifySha256(b, b.pathJoin(&.{ root, file.path }), file.sha256);
     }
 
+    if (lock.runtime_assets.len != 1)
+        @panic("AgentCore runtime_assets must declare exactly one ripgrep asset");
+    const asset = lock.runtime_assets[0];
+    const executable = if (std.mem.eql(u8, lock.target.os, "windows")) "bin/rg.exe" else "bin/rg";
+    if (!std.mem.eql(u8, asset.name, "ripgrep") or asset.version.len == 0 or asset.revision.len == 0 or
+        !std.mem.eql(u8, asset.path, executable) or
+        !std.mem.eql(u8, asset.upstream, "https://github.com/BurntSushi/ripgrep") or
+        !std.mem.eql(u8, asset.license, "MIT OR Unlicense") or
+        !std.mem.eql(u8, asset.role, "Glob/Grep execution dependency"))
+        @panic("unsupported AgentCore runtime asset contract");
+    const runtime_files = [2][]const u8{ executable, "bin/ripgrep-LICENSE-MIT" };
+    for (runtime_files) |runtime_file| {
+        var count: usize = 0;
+        for (lock.files) |file| {
+            if (std.mem.eql(u8, file.path, runtime_file)) count += 1;
+        }
+        if (count != 1) @panic("AgentCore runtime asset must be checksum-pinned exactly once");
+    }
+
     return .{
         .deployment_target = target.deployment_target,
         .link_libc = lock.link.requires_c_runtime,
         .sdk_dependency = target.sdk_dependency,
+        .runtime_files = .{ b.pathJoin(&.{ root, runtime_files[0] }), b.pathJoin(&.{ root, runtime_files[1] }) },
     };
 }
 

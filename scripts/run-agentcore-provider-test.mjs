@@ -264,6 +264,7 @@ pub fn build(b: *std.Build) void {
     consumer.addImport("metask_agentcore", agentcore);
     const executable = b.addExecutable(.{ .name = "metawork-agentcore-provider-test", .root_module = consumer });
     const run = b.addRunArtifact(executable);
+    run.setEnvironmentVariable("RG_BIN", b.pathFromRoot("bundle/${bundle.manifest.runtime_assets[0].path}"));
     b.step("run", "Test AgentCore provider contracts").dependOn(&run.step);
 }
 `,

@@ -2184,6 +2184,7 @@ fn compactStatusDisposition(status: sdk.Status) ?SessionStatusDisposition {
         .mcp_not_refreshed,
         .invalid_mcp_selection,
         .skill_catalog_incomplete,
+        .image_input_unsupported,
         => null,
     };
 }
@@ -2213,6 +2214,7 @@ fn isCompactAbortStatus(status: sdk.Status) bool {
         .mcp_not_refreshed,
         .invalid_mcp_selection,
         .skill_catalog_incomplete,
+        .image_input_unsupported,
         => false,
     };
 }
@@ -2247,6 +2249,7 @@ fn skillUpdateStatusDisposition(status: sdk.Status) ?SessionStatusDisposition {
         .mcp_not_refreshed,
         .invalid_mcp_selection,
         .skill_catalog_incomplete,
+        .image_input_unsupported,
         => null,
     };
 }
@@ -2282,6 +2285,7 @@ fn runStatusDisposition(status: sdk.Status) ?SessionStatusDisposition {
         .mcp_not_refreshed,
         .invalid_mcp_selection,
         .skill_catalog_incomplete,
+        .image_input_unsupported,
         => null,
     };
 }
@@ -2337,6 +2341,7 @@ fn isAbortStatus(status: sdk.Status) bool {
         .mcp_not_refreshed,
         .invalid_mcp_selection,
         .skill_catalog_incomplete,
+        .image_input_unsupported,
         => false,
     };
 }
@@ -2371,6 +2376,7 @@ fn isSessionDestroyStatus(status: sdk.Status) bool {
         .mcp_not_refreshed,
         .invalid_mcp_selection,
         .skill_catalog_incomplete,
+        .image_input_unsupported,
         => false,
     };
 }
@@ -2405,6 +2411,7 @@ pub fn mcpUpdateStatusDisposition(status: sdk.Status) ?SessionStatusDisposition 
         .checkpoint_io,
         .logical_session_conflict,
         .skill_catalog_incomplete,
+        .image_input_unsupported,
         => null,
     };
 }

@@ -35,7 +35,7 @@ Inno Setup 只负责把 Native SDK runtime stage 安装和卸载为一个 Window
 
 1. 在开始构建前解析参数并检查 Inno；signed mode 还必须先发现 Windows SDK SignTool、校验证书 thumbprint 和时间戳 URL，缺失时立即失败。
 2. 构建 Renderer，再以所选 x64 或 ARM64 target 和隔离 prefix 生成 Windows `ReleaseFast` 主程序并检查 release automation isolation。
-3. 调用 Native SDK 生成完整 runtime stage，验证版本、App ID、GUI subsystem、主程序与 WebView2 loader 的精确 PE machine、Renderer assets 与应用图标。
+3. 调用 Native SDK 生成完整 runtime stage，验证版本、App ID、GUI subsystem、主程序与 WebView2 loader 的精确 PE machine、Renderer assets 与应用图标；从已验证的 canonical AgentCore bundle 部署 rg 和许可证到 Host 同目录，并在编译安装器前再次核验 checksum。runtime asset 接受与解析边界由 [AgentCore ABI v1 合同](agentcore-abi-v1.md)定义。
 4. signed mode 签署 MetaWork 主程序并立即验证，同时验证 WebView2 loader 的微软原厂签名；unsigned mode 完整跳过签名身份读取。
 5. Inno Setup 将 runtime stage 编译为单 EXE；signed mode 由同一个 SignTool definition 签署卸载器模板和最终安装器。
 6. signed mode 验证最终安装器；随后统一检查安装器 PE identity、精确文件名与非空内容，并输出最终文件 SHA-256。
@@ -56,7 +56,7 @@ npm run package:windows -- arm64 --signing required
 
 签名入口只发现当前 Windows SDK 中版本最高的 x64 `signtool.exe`，不搜索 `PATH`，也不读取供应商附带的旧工具目录。非标准 SDK 位置可通过 `METAWORK_WINDOWS_SIGNTOOL` 显式指定绝对路径；RFC 3161 服务默认使用 `http://time.certum.pl`，需要切换供应商时通过 `METAWORK_WINDOWS_TIMESTAMP_URL` 显式替换。证书 thumbprint 和工具路径不是私钥；PIN、token、PFX 密码及云签名 credential 不得进入仓库、命令参数、日志或持久配置。
 
-signed path 使用 `/sha1` 在默认的当前用户个人证书库中精确选择由 SimplySign CSP 暴露的证书，固定 `/fd SHA256 /tr <URL> /td SHA256`。Native runtime stage 完成结构校验后只签署 MetaWork-owned `metawork.exe`，不覆盖 Microsoft 已签名的 `WebView2Loader.dll`；后者保留原厂签名并通过相同 Authenticode policy 验证。Inno Setup 使用同一 SignTool definition 生成签名卸载器并签署最终安装器。每个 MetaWork-owned 可执行文件签名后都必须运行 `signtool verify /pa /all /v`；任何签名、时间戳或验证失败都会终止 package，不允许退回未签名 artifact。最终 SHA-256 只在所有签名和验证完成后输出。
+signed path 使用 `/sha1` 在默认的当前用户个人证书库中精确选择由 SimplySign CSP 暴露的证书，固定 `/fd SHA256 /tr <URL> /td SHA256`。Native runtime stage 完成结构校验后只签署 MetaWork-owned `metawork.exe`，不覆盖 Microsoft 已签名的 `WebView2Loader.dll`；后者保留原厂签名并通过相同 Authenticode policy 验证。上游 rg 保留 bundle 原始 bytes，由 manifest checksum 验证，不作为 MetaWork-owned 二进制重签。Inno Setup 使用同一 SignTool definition 生成签名卸载器并签署最终安装器。每个 MetaWork-owned 可执行文件签名后都必须运行 `signtool verify /pa /all /v`；任何签名、时间戳或验证失败都会终止 package，不允许退回未签名 artifact。最终 SHA-256 只在所有签名和验证完成后输出。
 
 该入口只调用现有 Windows certificate provider，不安装、升级、登录或修改 SimplySign，不导入导出证书，也不改变 CSP/KSP、证书库或 PIN 设置。是否弹出 SimplySign 授权由现有 provider 和证书策略决定。
 
