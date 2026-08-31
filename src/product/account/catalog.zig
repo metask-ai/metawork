@@ -148,6 +148,7 @@ const ApiKeyEntry = struct {
 const ModelEntry = struct {
     id: ModelId,
     display_name: ModelDisplayName,
+    metadata: contract.ModelMetadata = .{},
 };
 
 pub const CatalogSession = struct {
@@ -331,6 +332,7 @@ pub const CatalogSession = struct {
             view.* = .{
                 .id = entry.id.view(),
                 .display_name = entry.display_name.view(),
+                .metadata = entry.metadata,
             };
         }
         return output[0..self.models.items.len];
@@ -431,6 +433,7 @@ const PublicApiKey = struct {
 const PublicModel = struct {
     id: PublicText(contract.Limits.model_id_bytes) = .{},
     display_name: PublicText(contract.Limits.model_display_name_bytes) = .{},
+    metadata: contract.ModelMetadata = .{},
 };
 
 /// Secret-free, fixed-capacity Account projection. Network workers mutate the
@@ -480,6 +483,7 @@ pub const PublicCatalog = struct {
         ) |source, *storage| {
             storage.id.set(source.id);
             storage.display_name.set(source.display_name);
+            storage.metadata = source.metadata;
         }
     }
 
@@ -515,6 +519,7 @@ pub const PublicCatalog = struct {
         self.model_count = 1;
         self.models[0].id.set(model_id);
         self.models[0].display_name.set("");
+        self.models[0].metadata = .{};
     }
 
     pub fn clear(self: *PublicCatalog) void {
@@ -556,6 +561,7 @@ pub const PublicCatalog = struct {
             model_view.* = .{
                 .id = storage.id.view(),
                 .display_name = storage.display_name.view(),
+                .metadata = storage.metadata,
             };
         }
         view.api_keys = self.api_key_views[0..self.api_key_count];
@@ -588,6 +594,7 @@ pub const TestSupport = if (builtin.is_test) struct {
             session.models.append(session.allocator, .{
                 .id = try .init(model.id),
                 .display_name = try .optional(model.display_name),
+                .metadata = model.metadata,
             }) catch return error.OutOfMemory;
         }
     }
@@ -627,6 +634,7 @@ pub const TestSupport = if (builtin.is_test) struct {
         for (models, catalog.models[0..models.len]) |source, *target| {
             target.id.set(source.id);
             target.display_name.set(source.display_name);
+            target.metadata = source.metadata;
         }
     }
 } else struct {};
@@ -740,7 +748,89 @@ const ModelWire = struct {
     object: []const u8,
     type: []const u8,
     display_name: ?[]const u8 = null,
+    max_input_tokens: std.json.Value = .null,
+    max_tokens: std.json.Value = .null,
+    capabilities: ?ModelCapabilitiesWire = null,
 };
+
+const CapabilityWire = struct { supported: ?bool = null };
+
+const ModelCapabilitiesWire = struct {
+    image_input: ?CapabilityWire = null,
+    pdf_input: ?CapabilityWire = null,
+    batch: ?CapabilityWire = null,
+    citations: ?CapabilityWire = null,
+    code_execution: ?CapabilityWire = null,
+    structured_outputs: ?CapabilityWire = null,
+    thinking: ?struct {
+        supported: ?bool = null,
+        types: ?struct {
+            adaptive: ?CapabilityWire = null,
+            enabled: ?CapabilityWire = null,
+        } = null,
+    } = null,
+    effort: ?struct {
+        supported: ?bool = null,
+        low: ?CapabilityWire = null,
+        medium: ?CapabilityWire = null,
+        high: ?CapabilityWire = null,
+        max: ?CapabilityWire = null,
+    } = null,
+    context_management: ?struct {
+        supported: ?bool = null,
+        clear_thinking_20251015: ?CapabilityWire = null,
+        clear_tool_uses_20250919: ?CapabilityWire = null,
+        compact_20260112: ?CapabilityWire = null,
+    } = null,
+
+    fn projection(self: ModelCapabilitiesWire) contract.ModelCapabilities {
+        var result: contract.ModelCapabilities = .{
+            .image_input = supported(self.image_input),
+            .pdf_input = supported(self.pdf_input),
+            .batch = supported(self.batch),
+            .citations = supported(self.citations),
+            .code_execution = supported(self.code_execution),
+            .structured_outputs = supported(self.structured_outputs),
+        };
+        if (self.thinking) |thinking| {
+            result.thinking.supported = thinking.supported;
+            if (thinking.types) |types| {
+                result.thinking.adaptive = supported(types.adaptive);
+                result.thinking.enabled = supported(types.enabled);
+            }
+        }
+        if (self.effort) |effort| result.effort = .{
+            .supported = effort.supported,
+            .low = supported(effort.low),
+            .medium = supported(effort.medium),
+            .high = supported(effort.high),
+            .max = supported(effort.max),
+        };
+        if (self.context_management) |context| result.context_management = .{
+            .supported = context.supported,
+            .clear_thinking_20251015 = supported(context.clear_thinking_20251015),
+            .clear_tool_uses_20250919 = supported(context.clear_tool_uses_20250919),
+            .compact_20260112 = supported(context.compact_20260112),
+        };
+        return result;
+    }
+};
+
+fn supported(capability: ?CapabilityWire) ?bool {
+    return if (capability) |value| value.supported else null;
+}
+
+fn tokenLimit(value: std.json.Value) Error!?u64 {
+    const number = switch (value) {
+        .null => return null,
+        .number_string => |text| blk: {
+            for (text) |byte| if (!std.ascii.isDigit(byte)) return error.ProtocolInvalid;
+            break :blk std.fmt.parseInt(u64, text, 10) catch return error.ProtocolInvalid;
+        },
+        else => return error.ProtocolInvalid,
+    };
+    return if (number == 0) null else number;
+}
 
 fn parseApiKeys(
     allocator: std.mem.Allocator,
@@ -834,6 +924,7 @@ fn parseModels(
         body,
         .{
             .ignore_unknown_fields = true,
+            .parse_numbers = false,
             .max_value_len = contract.Limits.model_display_name_bytes,
             .allocate = .alloc_if_needed,
         },
@@ -858,6 +949,11 @@ fn parseModels(
         result.entries.append(allocator, .{
             .id = id,
             .display_name = try .optional(model.display_name orelse ""),
+            .metadata = .{
+                .max_input_tokens = try tokenLimit(model.max_input_tokens),
+                .max_output_tokens = try tokenLimit(model.max_tokens),
+                .capabilities = if (model.capabilities) |value| value.projection() else .{},
+            },
         }) catch return error.OutOfMemory;
     }
     if (result.entries.items.len == 0) return error.NoModels;
@@ -966,6 +1062,112 @@ const model_fixture =
     \\"first_id":"model-1","last_id":"model-1","has_more":false,
     \\"remaining":0,"unit":"model"}
 ;
+
+const declared_model_fixture =
+    \\{"object":"list","has_more":false,"data":[{
+    \\"id":"model-1","object":"model","type":"model","display_name":"Model 1",
+    \\"max_input_tokens":1048576,"max_tokens":64000,"capabilities":{
+    \\"image_input":{"supported":false},"pdf_input":{"supported":false},
+    \\"batch":{"supported":false},"citations":{"supported":false},
+    \\"code_execution":{"supported":false},"structured_outputs":{"supported":true},
+    \\"thinking":{"supported":true,"types":{"adaptive":{"supported":false},"enabled":{"supported":true}}},
+    \\"effort":{"supported":false,"low":{"supported":false},"medium":{"supported":false},"high":{"supported":false},"max":{"supported":false}},
+    \\"context_management":{"supported":true,"clear_thinking_20251015":{"supported":false},"clear_tool_uses_20250919":{"supported":false},"compact_20260112":{"supported":true}},
+    \\"future_capability":{"supported":true}}}]}
+;
+
+test "model declarations survive owned catalog copies and never leak into a replacement" {
+    const expected: contract.ModelMetadata = .{
+        .max_input_tokens = 1048576,
+        .max_output_tokens = 64000,
+        .capabilities = .{
+            .image_input = false,
+            .pdf_input = false,
+            .batch = false,
+            .citations = false,
+            .code_execution = false,
+            .structured_outputs = true,
+            .thinking = .{ .supported = true, .adaptive = false, .enabled = true },
+            .effort = .{ .supported = false, .low = false, .medium = false, .high = false, .max = false },
+            .context_management = .{
+                .supported = true,
+                .clear_thinking_20251015 = false,
+                .clear_tool_uses_20250919 = false,
+                .compact_20260112 = true,
+            },
+        },
+    };
+    var session = CatalogSession.init(std.testing.allocator);
+    defer session.deinit();
+    var parsed = try parseModels(std.testing.allocator, declared_model_fixture);
+    session.models = parsed.entries;
+    parsed.entries = .empty;
+    var views: [contract.Limits.model_entries]contract.ModelView = undefined;
+    try std.testing.expectEqualDeep(expected, session.writeModelViews(&views)[0].metadata);
+
+    var candidate: PublicCatalog = .{};
+    candidate.replaceFromSession(&session);
+    var committed: PublicCatalog = .{};
+    committed.replaceFromPublic(&candidate);
+    session.reset();
+    candidate.replaceRestoredSelection("other-key", .openai, "model-1");
+    var view: contract.AccountView = .{
+        .state = .authenticated,
+        .catalog_state = .ready,
+    };
+    committed.decorate(&view);
+    try std.testing.expectEqualDeep(expected, view.models[0].metadata);
+
+    candidate.decorate(&view);
+    try std.testing.expectEqualDeep(contract.ModelMetadata{}, view.models[0].metadata);
+
+    parsed = try parseModels(std.testing.allocator, model_fixture);
+    session.models.deinit(session.allocator);
+    session.models = parsed.entries;
+    parsed.entries = .empty;
+    committed.replaceFromSession(&session);
+    committed.decorate(&view);
+    try std.testing.expectEqualDeep(contract.ModelMetadata{}, view.models[0].metadata);
+}
+
+test "model declarations distinguish unknown, supported, and unsupported without coercion" {
+    const prefix = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"m\",\"object\":\"model\",\"type\":\"model\"";
+    const cases = [_]struct { fields: []const u8, expected: contract.ModelMetadata }{
+        .{ .fields = "", .expected = .{} },
+        .{ .fields = ",\"max_input_tokens\":null,\"max_tokens\":0,\"capabilities\":null", .expected = .{} },
+        .{ .fields = ",\"capabilities\":{\"image_input\":null,\"pdf_input\":{},\"thinking\":{\"types\":null},\"effort\":null}", .expected = .{} },
+        .{ .fields = ",\"capabilities\":{\"image_input\":{\"supported\":true},\"pdf_input\":{\"supported\":false},\"batch\":{\"supported\":null}}", .expected = .{ .capabilities = .{ .image_input = true, .pdf_input = false } } },
+        .{ .fields = ",\"max_input_tokens\":18446744073709551615,\"max_tokens\":1", .expected = .{ .max_input_tokens = std.math.maxInt(u64), .max_output_tokens = 1 } },
+    };
+    for (cases) |case| {
+        const body = try std.fmt.allocPrint(std.testing.allocator, "{s}{s}}}]}}", .{ prefix, case.fields });
+        defer std.testing.allocator.free(body);
+        var models = try parseModels(std.testing.allocator, body);
+        defer models.deinit();
+        try std.testing.expectEqualDeep(case.expected, models.entries.items[0].metadata);
+    }
+    const invalid_fields = [_][]const u8{
+        ",\"max_input_tokens\":\"1024\"",
+        ",\"max_tokens\":-1",
+        ",\"max_input_tokens\":-0",
+        ",\"max_input_tokens\":1.5",
+        ",\"max_tokens\":1e3",
+        ",\"max_tokens\":18446744073709551616",
+        ",\"max_tokens\":true",
+        ",\"max_input_tokens\":{}",
+        ",\"capabilities\":false",
+        ",\"capabilities\":{\"image_input\":true}",
+        ",\"capabilities\":{\"pdf_input\":{\"supported\":1}}",
+        ",\"capabilities\":{\"thinking\":{\"types\":{\"adaptive\":{\"supported\":\"true\"}}}}",
+        ",\"capabilities\":{\"effort\":{\"low\":{\"supported\":[]}}}",
+        ",\"capabilities\":{\"context_management\":{\"compact_20260112\":{\"supported\":{}}}}",
+    };
+    for (invalid_fields) |fields| {
+        const body = try std.fmt.allocPrint(std.testing.allocator, "{s}{s}}}]}}", .{ prefix, fields });
+        defer std.testing.allocator.free(body);
+        try std.testing.expectError(error.ProtocolInvalid, parseModels(std.testing.allocator, body));
+    }
+}
 
 test "live-shape catalogs expose only masked views and move one key owner" {
     var keys = try parseApiKeys(std.testing.allocator, key_fixture);
@@ -1222,14 +1424,20 @@ test "failed model reload preserves the committed private catalog" {
         ) metask.TransportError!metask.Response {
             const self: *@This() = @ptrCast(@alignCast(context));
             if (request.kind != .models) return error.ProtocolFailed;
-            if (self.step != 0) return error.NetworkFailed;
+            const body = switch (self.step) {
+                0 => declared_model_fixture,
+                1 =>
+                \\{"object":"list","has_more":false,"data":[{"id":"model-1","object":"model","type":"model","max_tokens":"invalid"}]}
+                ,
+                else => return error.NetworkFailed,
+            };
             self.step += 1;
-            if (model_fixture.len > response_buffer.len)
+            if (body.len > response_buffer.len)
                 return error.ResponseTooLarge;
-            @memcpy(response_buffer[0..model_fixture.len], model_fixture);
+            @memcpy(response_buffer[0..body.len], body);
             return .{
                 .status = 200,
-                .body = response_buffer[0..model_fixture.len],
+                .body = response_buffer[0..body.len],
             };
         }
     };
@@ -1248,11 +1456,18 @@ test "failed model reload preserves the committed private catalog" {
 
     try session.loadModelsForApiKey("325", transport, null);
     try std.testing.expectEqualStrings("model-1", session.firstModelId().?);
+    const original_metadata = session.models.items[0].metadata;
+    try std.testing.expectError(
+        error.ProtocolInvalid,
+        session.loadModelsForApiKey("325", transport, null),
+    );
+    try std.testing.expectEqualDeep(original_metadata, session.models.items[0].metadata);
     try std.testing.expectError(
         error.ServiceUnavailable,
         session.loadModelsForApiKey("325", transport, null),
     );
     try std.testing.expectEqualStrings("model-1", session.firstModelId().?);
+    try std.testing.expectEqualDeep(original_metadata, session.models.items[0].metadata);
 }
 
 test "catalog enforces response and field bounds before publication" {

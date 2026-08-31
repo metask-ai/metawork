@@ -131,6 +131,10 @@ Metask catalog 使用以下固定路径：
 
 API Key catalog success 必须为 `code = 0`、`message = "success"` 和完整分页对象；model catalog success 必须为有界 list root 与 `data[]`。Account 在当前会话中以 token `account_id + API Key id` 证明 catalog 和 execution credential 归属，自动 refresh 与冷启动不得静默切换账号。
 
+Account 从 `/v1/models` 消费每个模型的 `max_input_tokens`、`max_tokens`（输出上限）与 `capabilities`，并随同一 API Key 的 catalog slot 发布无 secret 的 typed metadata。token 上限只接受 `u64` 范围内的 JSON 整数；缺失、null 或零表示未知，不推导总 context window。能力声明消费 `image_input`、`pdf_input`、`batch`、`citations`、`code_execution`、`structured_outputs` 的 `supported`，以及 `thinking.supported` 和 `thinking.types.{adaptive,enabled}.supported`、`effort.supported` 和 `effort.{low,medium,high,max}.supported`、`context_management.supported` 和 `context_management.{clear_thinking_20251015,clear_tool_uses_20250919,compact_20260112}.supported`。声明值只接受 boolean 或 null；缺失或 null 保持未知，不能转换成 false，已消费字段类型错误拒绝本次目录替换。
+
+这些值是服务端声明，不等同于已验证的运行能力、MetaWork 功能开放 gate 或 AgentCore 的执行预算；`structured_outputs` 不表示图像、音频等输出模态。元数据跟随 candidate/committed 目录原子替换，不按 model id 跨 API Key 复用，不新增持久化；最小恢复目录在刷新前保持未知。`owned_by`、`anthropic_family_tier`、日期以及 root 额度字段不用于推断模型厂商或能力。手工 Model Connection 的 model discovery 范围不因此改变。公开 wire shape 由 [Renderer Bridge 合同](renderer-bridge-contract.md) 定义。
+
 Metask managed `ExecutionTarget` 只从选中 API Key 的精确 `group.platform` 形成，不根据模型名、显示名或列表顺序推断：
 
 | `group.platform` | Provider    | Fixed target URL                                  |
