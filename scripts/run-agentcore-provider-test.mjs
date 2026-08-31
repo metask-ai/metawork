@@ -1,4 +1,7 @@
 import { createServer } from "node:http";
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { crc32 } from "node:zlib";
 import {
   mkdir,
   mkdtemp,
@@ -45,10 +48,85 @@ const bundle = await validateAgentCoreBundle(bundleRoot, {
 
 const providers = [
   {
+    name: "responses",
+    code: "wire.PROVIDER_OPENAI",
+    protocol: "wire.OPENAI_PROTOCOL_RESPONSES",
+    apiKey: "responses-provider-test-key",
+    model: "gpt-4o",
+    path: "/v1/responses",
+    baseUrlSuffix: "/v1/responses",
+    authorization: "Bearer responses-provider-test-key",
+    bodyOk(payload) {
+      return (
+        payload.model === this.model &&
+        payload.input?.some(
+          (message) =>
+            message.role === "user" &&
+            (message.content === "Reply with one short sentence." ||
+              message.content?.some(
+                (part) =>
+                  part.type === "input_text" &&
+                  part.text === "Reply with one short sentence.",
+              )),
+        )
+      );
+    },
+    response: [
+      {
+        type: "response.created",
+        response: { id: "resp_fixture", status: "in_progress" },
+      },
+      {
+        type: "response.output_item.added",
+        output_index: 0,
+        item: {
+          type: "message",
+          id: "msg_fixture",
+          role: "assistant",
+          content: [],
+        },
+      },
+      {
+        type: "response.content_part.added",
+        output_index: 0,
+        content_index: 0,
+        part: { type: "output_text", text: "", annotations: [] },
+      },
+      {
+        type: "response.output_text.delta",
+        output_index: 0,
+        content_index: 0,
+        delta: "responses provider test",
+      },
+      {
+        type: "response.completed",
+        response: {
+          id: "resp_fixture",
+          status: "completed",
+          output: [
+            {
+              type: "message",
+              id: "msg_fixture",
+              role: "assistant",
+              content: [
+                {
+                  type: "output_text",
+                  text: "responses provider test",
+                  annotations: [],
+                },
+              ],
+            },
+          ],
+          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        },
+      },
+    ],
+  },
+  {
     name: "anthropic",
     code: "wire.PROVIDER_ANTHROPIC",
     apiKey: "anthropic-provider-test-key",
-    model: "anthropic-provider-test-model",
+    model: "claude-sonnet-4-20250514",
     path: "/v1/messages",
     baseUrlSuffix: "/v1/messages",
     authorization: "Bearer anthropic-provider-test-key",
@@ -102,7 +180,7 @@ const providers = [
     name: "openai",
     code: "wire.PROVIDER_OPENAI",
     apiKey: "openai-provider-test-key",
-    model: "openai-provider-test-model",
+    model: "gpt-4o",
     path: "/v1/chat/completions",
     baseUrlSuffix: "/v1/chat/completions",
     authorization: "Bearer openai-provider-test-key",
@@ -127,8 +205,8 @@ const providers = [
     name: "gemini",
     code: "wire.PROVIDER_GEMINI",
     apiKey: "gemini-provider-test-key",
-    model: "gemini-provider-test-model",
-    path: "/v1beta/models/gemini-provider-test-model:streamGenerateContent?alt=sse",
+    model: "gemini-2.5-flash",
+    path: "/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse",
     baseUrlSuffix: "",
     googleKey: "gemini-provider-test-key",
     bodyOk(payload) {
@@ -158,6 +236,65 @@ const providers = [
     ],
   },
 ];
+
+// These are transport fixtures, not a test of a remote model's visual reasoning.
+const png =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
+const gif = "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
+// A valid PNG with a large ancillary text chunk exercises checkpoint string
+// limits without a large pixel allocation or a checked-in binary fixture.
+const pngBytes = Buffer.from(png, "base64");
+const ancillary = Buffer.concat([
+  Buffer.from("Comment\0"),
+  Buffer.alloc(800 * 1024, 65),
+]);
+const ancillaryHeader = Buffer.alloc(8);
+ancillaryHeader.writeUInt32BE(ancillary.length);
+ancillaryHeader.write("tEXt", 4);
+const ancillaryCrc = Buffer.alloc(4);
+ancillaryCrc.writeUInt32BE(
+  crc32(Buffer.concat([ancillaryHeader.subarray(4), ancillary])),
+);
+const largePng = Buffer.concat([
+  pngBytes.subarray(0, -12),
+  ancillaryHeader,
+  ancillary,
+  ancillaryCrc,
+  pngBytes.subarray(-12),
+]).toString("base64");
+function imageIdentity(mime, data) {
+  return {
+    mime,
+    bytes: data.length,
+    sha256: createHash("sha256").update(data).digest("hex"),
+  };
+}
+function userParts(provider, payload) {
+  const messages = payload.input ?? payload.messages ?? payload.contents;
+  return messages
+    .filter((message) => message.role === "user")
+    .map((message) => {
+      const parts = message.content ?? message.parts;
+      if (typeof parts === "string") return [{ text: parts }];
+      return parts.map((part) => {
+        if (typeof part.text === "string") return { text: part.text };
+        if (part.type === "image")
+          return imageIdentity(part.source.media_type, part.source.data);
+        if (part.type === "image_url" || part.type === "input_image") {
+          const url =
+            typeof part.image_url === "string"
+              ? part.image_url
+              : part.image_url.url;
+          const match = /^data:([^;]+);base64,(.+)$/.exec(url);
+          assert.ok(match, `${provider.name}: expected inline image`);
+          return imageIdentity(match[1], match[2]);
+        }
+        const inline = part.inlineData ?? part.inline_data;
+        assert.ok(inline, `${provider.name}: unexpected content part`);
+        return imageIdentity(inline.mimeType ?? inline.mime_type, inline.data);
+      });
+    });
+}
 
 function sseFor(provider) {
   return provider.response
@@ -205,10 +342,32 @@ const server = createServer((request, response) => {
           `${activeProvider.name} request must use application/json`,
         );
       const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-      if (!activeProvider.bodyOk(payload))
+      if (requestCount === 0 && !activeProvider.bodyOk(payload))
         throw new Error(
           `${activeProvider.name} request body was not serialized`,
         );
+      if (requestCount > 0) {
+        const users = userParts(activeProvider, payload);
+        assert.deepEqual(users[1], [
+          { text: "First image." },
+          imageIdentity("image/png", png),
+          { text: "Second image." },
+          imageIdentity("image/gif", gif),
+        ]);
+        if (requestCount > 1)
+          assert.deepEqual(users[2], [{ text: "Continue with the images." }]);
+        if (requestCount > 2)
+          assert.deepEqual(users[3], [imageIdentity("image/png", largePng)]);
+        if (requestCount > 3)
+          assert.deepEqual(users[4], [{ text: "Continue after restore." }]);
+        if (requestCount > 4)
+          assert.deepEqual(users[5], [{ text: "Continue after rejection." }]);
+        assert.equal(
+          users.length,
+          requestCount + 1,
+          "rejected input must not enter history",
+        );
+      }
       requestCount += 1;
       response.writeHead(200, {
         "content-type": "text/event-stream",
@@ -236,6 +395,7 @@ try {
   });
   const consumerRoot = path.join(scratch, "zig-consumer");
   await mkdir(consumerRoot);
+  await writeFile(path.join(consumerRoot, "image.b64"), largePng);
   await symlink(
     bundle.root,
     path.join(consumerRoot, "bundle"),
@@ -287,6 +447,16 @@ pub fn build(b: *std.Build) void {
     const main = source
       .replaceAll("__BASE_URL__", baseUrl)
       .replaceAll("__PROVIDER_CODE__", provider.code)
+      .replaceAll(
+        "__PROTOCOL_CODE__",
+        provider.protocol ?? "wire.PROTOCOL_DEFAULT",
+      )
+      .replaceAll("__PNG__", png)
+      .replaceAll("__GIF__", gif)
+      .replaceAll(
+        "__EXPECT_UNKNOWN_IMAGE_REJECTION__",
+        String(provider.name !== "gemini"),
+      )
       .replaceAll("__API_KEY__", provider.apiKey)
       .replaceAll("__MODEL__", provider.model);
     await writeFile(path.join(consumerRoot, "main.zig"), main);
@@ -309,17 +479,21 @@ pub fn build(b: *std.Build) void {
         },
       );
     } catch (error) {
-      providerFailures.push(new Error(`${provider.name}: ${error.message}`));
+      providerFailures.push(
+        new Error(
+          `${provider.name}: ${requestError?.message ?? error.message}`,
+        ),
+      );
       continue;
     }
     if (requestError)
       providerFailures.push(
         new Error(`${provider.name}: ${requestError.message}`),
       );
-    else if (requestCount !== 1)
+    else if (requestCount !== 6)
       providerFailures.push(
         new Error(
-          `${provider.name}: expected one request, got ${requestCount}`,
+          `${provider.name}: expected six requests, got ${requestCount}`,
         ),
       );
     else console.log(`AgentCore ${provider.name} provider contract passed`);
