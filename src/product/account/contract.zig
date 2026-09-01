@@ -562,12 +562,15 @@ pub const ValidationError = error{
     UnsupportedProtocol,
 };
 
-/// Product admission is narrower than AgentCore's wire enum. A protocol is
-/// exposed only after its staged native protocol contract passes.
+/// Product admission is explicit and exhaustive so adding another protocol
+/// cannot silently expose it to user-managed connections.
 pub fn modelConnectionProtocolAvailable(protocol: Protocol) bool {
     return switch (protocol) {
-        .openai_responses, .anthropic_messages => false,
-        .openai_chat_completions, .gemini_native => true,
+        .openai_responses,
+        .anthropic_messages,
+        .openai_chat_completions,
+        .gemini_native,
+        => true,
     };
 }
 
@@ -1069,6 +1072,16 @@ test "execution config treats credential as bounded opaque bytes" {
 
 test "user-managed model connection accepts only registered native endpoints" {
     try validateModelConnectionSpec(.{
+        .display_name = "OpenAI Responses",
+        .protocol = .openai_responses,
+        .normalized_base_url = "https://api.openai.com/v1/responses",
+    });
+    try validateModelConnectionSpec(.{
+        .display_name = "Anthropic",
+        .protocol = .anthropic_messages,
+        .normalized_base_url = "https://api.anthropic.com/v1/messages",
+    });
+    try validateModelConnectionSpec(.{
         .display_name = "My OpenAI",
         .protocol = .openai_chat_completions,
         .normalized_base_url = "https://api.example.com/v1/chat/completions",
@@ -1078,13 +1091,8 @@ test "user-managed model connection accepts only registered native endpoints" {
         .protocol = .gemini_native,
         .normalized_base_url = "http://127.0.0.1:9000",
     });
-    try std.testing.expectError(error.UnsupportedProtocol, validateModelConnectionSpec(.{
-        .display_name = "Anthropic pending AgentCore support",
-        .protocol = .anthropic_messages,
-        .normalized_base_url = "https://api.anthropic.com/v1/messages",
-    }));
     try std.testing.expectError(error.InvalidBaseUrl, validateModelConnectionSpec(.{
-        .display_name = "Responses is not registered",
+        .display_name = "Protocol path mismatch",
         .protocol = .openai_chat_completions,
         .normalized_base_url = "https://api.example.com/v1/responses",
     }));
@@ -1096,6 +1104,26 @@ test "user-managed model connection accepts only registered native endpoints" {
 }
 
 test "user-managed model connection endpoint normalization is deterministic" {
+    const responses = try normalizeModelConnectionEndpointAlloc(
+        std.testing.allocator,
+        .openai_responses,
+        "HTTPS://API.OpenAI.COM/v1/responses",
+    );
+    defer std.testing.allocator.free(responses);
+    try std.testing.expectEqualStrings(
+        "https://api.openai.com/v1/responses",
+        responses,
+    );
+    const anthropic = try normalizeModelConnectionEndpointAlloc(
+        std.testing.allocator,
+        .anthropic_messages,
+        "HTTPS://API.Anthropic.COM/v1/messages",
+    );
+    defer std.testing.allocator.free(anthropic);
+    try std.testing.expectEqualStrings(
+        "https://api.anthropic.com/v1/messages",
+        anthropic,
+    );
     const normalized = try normalizeModelConnectionEndpointAlloc(
         std.testing.allocator,
         .openai_chat_completions,
@@ -1116,11 +1144,6 @@ test "user-managed model connection endpoint normalization is deterministic" {
         "https://generativelanguage.googleapis.com",
         gemini,
     );
-    try std.testing.expectError(error.UnsupportedProtocol, normalizeModelConnectionEndpointAlloc(
-        std.testing.allocator,
-        .anthropic_messages,
-        "https://api.anthropic.com/v1/messages",
-    ));
     try std.testing.expectError(error.InvalidBaseUrl, normalizeModelConnectionEndpointAlloc(
         std.testing.allocator,
         .openai_chat_completions,

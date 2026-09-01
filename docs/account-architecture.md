@@ -95,9 +95,9 @@ Account 解析执行配置时同时保留服务实例引用与已选协议。实
 
 | Protocol                | Endpoint contract                                  | Current admission |
 | ----------------------- | -------------------------------------------------- | ----------------- |
-| OpenAI Responses        | 完整 `/v1/responses` endpoint                      | closed            |
+| OpenAI Responses        | 完整 `/v1/responses` endpoint                      | open              |
 | OpenAI Chat Completions | 完整 `/v1/chat/completions` endpoint               | open              |
-| Anthropic Messages      | 完整 `/v1/messages` endpoint                       | closed            |
+| Anthropic Messages      | 完整 `/v1/messages` endpoint                       | open              |
 | Gemini Native           | 服务 base URL；消费者追加 model 与 operation path | open              |
 
 连接 endpoint 只允许 HTTPS 或用户明确配置的 loopback HTTP，并拒绝 control character、userinfo、query/fragment credential、过长 URL 和未登记 protocol path；Renderer 不得直接拼接或覆盖规范化 endpoint。

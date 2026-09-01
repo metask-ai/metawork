@@ -873,6 +873,61 @@ test "registry hard cut rejects the retired provider field" {
     );
 }
 
+test "registry codec restores every admitted protocol" {
+    const cases = [_]struct {
+        connection_id: []const u8,
+        protocol: contract.Protocol,
+        endpoint: []const u8,
+        model_id: []const u8,
+    }{
+        .{
+            .connection_id = "responses-connection",
+            .protocol = .openai_responses,
+            .endpoint = "https://api.openai.com/v1/responses",
+            .model_id = "gpt-5",
+        },
+        .{
+            .connection_id = "anthropic-connection",
+            .protocol = .anthropic_messages,
+            .endpoint = "https://api.anthropic.com/v1/messages",
+            .model_id = "claude-sonnet-4-5",
+        },
+        .{
+            .connection_id = "chat-completions-connection",
+            .protocol = .openai_chat_completions,
+            .endpoint = "https://api.openai.com/v1/chat/completions",
+            .model_id = "gpt-4.1",
+        },
+        .{
+            .connection_id = "gemini-connection",
+            .protocol = .gemini_native,
+            .endpoint = "https://generativelanguage.googleapis.com",
+            .model_id = "gemini-2.5-flash",
+        },
+    };
+    for (cases) |case| {
+        var registry = Registry.init(std.testing.allocator);
+        defer registry.deinit();
+        try registry.create(.{
+            .connection_id = case.connection_id,
+            .spec = .{
+                .display_name = case.connection_id,
+                .protocol = case.protocol,
+                .normalized_base_url = case.endpoint,
+            },
+            .credential_slot = .{ .id = case.connection_id },
+            .model_id = case.model_id,
+        });
+        const encoded = try encodeAlloc(std.testing.allocator, &registry);
+        defer std.testing.allocator.free(encoded);
+        var restored = try decode(std.testing.allocator, encoded);
+        defer restored.deinit();
+        try std.testing.expectEqual(@as(usize, 1), restored.views().len);
+        try std.testing.expectEqual(case.protocol, restored.views()[0].protocol);
+        try std.testing.expectEqualStrings(case.endpoint, restored.views()[0].normalized_base_url);
+    }
+}
+
 test "registry rejects stale generation and unknown models" {
     var registry = Registry.init(std.testing.allocator);
     defer registry.deinit();

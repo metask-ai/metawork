@@ -206,6 +206,7 @@ const protocols = [
 ] as const;
 const executionSources = ["metask", "model_connection"] as const;
 const modelConnectionProtocols = [
+  "openai_responses",
   "anthropic_messages",
   "openai_chat_completions",
   "gemini_native",
