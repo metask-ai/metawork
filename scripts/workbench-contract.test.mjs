@@ -47,6 +47,21 @@ test("the canonical Workbench fixture decodes without normalization", () => {
     () => decodeWorkbenchSnapshot(inconsistentPersistence),
     /availability and health must agree/,
   );
+
+  const recoverableWithoutFileCapability = clone(fixture);
+  recoverableWithoutFileCapability.capabilities.taskHistoryPersistenceHealth =
+    "read_failed";
+  assert.deepEqual(
+    decodeWorkbenchSnapshot(recoverableWithoutFileCapability),
+    recoverableWithoutFileCapability,
+  );
+
+  const impossibleRecovery = clone(fixture);
+  impossibleRecovery.capabilities.taskHistoryRecoveryAvailable = true;
+  assert.throws(
+    () => decodeWorkbenchSnapshot(impossibleRecovery),
+    /recovery requires recoverable persistence health/,
+  );
 });
 
 test("Workbench snapshot hard cut rejects retired provider fields", () => {

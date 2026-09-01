@@ -20,6 +20,7 @@ export const initialWorkbenchState: WorkbenchState = {
     capabilities: {
       taskHistoryPersistence: false,
       taskHistoryPersistenceHealth: "unavailable",
+      taskHistoryRecoveryAvailable: false,
       conversationRecovery: false,
       executionRebind: false,
       structuredPlan: false,
@@ -31,6 +32,7 @@ export const initialWorkbenchState: WorkbenchState = {
       scheduledTasks: false,
       scheduledTaskPersistence: false,
       scheduledTaskPersistenceHealth: "unavailable",
+      scheduledTaskRecoveryAvailable: false,
       backgroundScheduleWake: false,
       localSkillManagement: false,
       skillManagementHealth: "unavailable",

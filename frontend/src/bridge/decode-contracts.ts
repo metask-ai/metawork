@@ -21,6 +21,7 @@ import {
   type RunActivity,
   type RunView,
   type ScheduledTaskView,
+  type PersistenceRecoveryOutcome,
   type SkillCatalogView,
   type SkillManagementView,
   type SkillEnablementResult,
@@ -2932,6 +2933,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
   const capabilityItem = object(root.capabilities, "$.capabilities", [
     "taskHistoryPersistence",
     "taskHistoryPersistenceHealth",
+    "taskHistoryRecoveryAvailable",
     "conversationRecovery",
     "executionRebind",
     "structuredPlan",
@@ -2943,6 +2945,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     "scheduledTasks",
     "scheduledTaskPersistence",
     "scheduledTaskPersistenceHealth",
+    "scheduledTaskRecoveryAvailable",
     "backgroundScheduleWake",
     "localSkillManagement",
     "skillManagementHealth",
@@ -2971,6 +2974,10 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
         "write_failed",
         "outcome_unknown",
       ] as const,
+    ),
+    taskHistoryRecoveryAvailable: booleanValue(
+      capabilityItem.taskHistoryRecoveryAvailable,
+      "$.capabilities.taskHistoryRecoveryAvailable",
     ),
     conversationRecovery: booleanValue(
       capabilityItem.conversationRecovery,
@@ -3023,6 +3030,10 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
         "write_failed",
         "outcome_unknown",
       ] as const,
+    ),
+    scheduledTaskRecoveryAvailable: booleanValue(
+      capabilityItem.scheduledTaskRecoveryAvailable,
+      "$.capabilities.scheduledTaskRecoveryAvailable",
     ),
     backgroundScheduleWake: booleanValue(
       capabilityItem.backgroundScheduleWake,
@@ -3078,6 +3089,26 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     fail(
       "$.capabilities.taskHistoryPersistence",
       "Task history persistence availability and health must agree",
+    );
+  if (
+    capabilities.taskHistoryRecoveryAvailable &&
+    !["read_failed", "corrupt", "write_failed", "outcome_unknown"].includes(
+      capabilities.taskHistoryPersistenceHealth,
+    )
+  )
+    fail(
+      "$.capabilities.taskHistoryRecoveryAvailable",
+      "Task history recovery requires recoverable persistence health",
+    );
+  if (
+    capabilities.scheduledTaskRecoveryAvailable &&
+    !["read_failed", "corrupt", "write_failed", "outcome_unknown"].includes(
+      capabilities.scheduledTaskPersistenceHealth,
+    )
+  )
+    fail(
+      "$.capabilities.scheduledTaskRecoveryAvailable",
+      "Scheduled Task recovery requires recoverable persistence health",
     );
   const permissionItem = object(root.permissions, "$.permissions", [
     "availableProfiles",
@@ -3908,6 +3939,23 @@ export function assertScheduledTaskDeleted(value: unknown, expectedId: string) {
     fail("$.scheduledTaskId", "response identity mismatch");
   if (!booleanValue(item.deleted, "$.deleted"))
     fail("$.deleted", "expected deletion confirmation");
+}
+
+const persistenceRecoveryOutcomes = [
+  "recovered",
+  "stale_revision",
+  "not_required",
+  "unavailable",
+  "failed",
+  "outcome_unknown",
+  "shutting_down",
+] as const satisfies readonly PersistenceRecoveryOutcome[];
+
+export function decodePersistenceRecoveryResult(value: unknown) {
+  const item = object(value, "$", ["outcome"]);
+  return {
+    outcome: enumValue(item.outcome, "$.outcome", persistenceRecoveryOutcomes),
+  };
 }
 
 export function decodeCatalogRefreshResult<

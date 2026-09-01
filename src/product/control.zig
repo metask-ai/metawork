@@ -37,6 +37,7 @@ pub const ScheduleTimer = runtime_impl.ScheduleTimer;
 pub const SchedulePersistence = runtime_impl.SchedulePersistence;
 pub const SchedulePersistenceCommit = runtime_impl.SchedulePersistenceCommit;
 pub const SchedulePersistenceHealth = runtime_impl.SchedulePersistenceHealth;
+pub const PersistenceRecoveryOutcome = runtime_impl.PersistenceRecoveryOutcome;
 pub const ScheduleNotification = runtime_impl.ScheduleNotification;
 pub const ScheduleNotificationKind = runtime_impl.ScheduleNotificationKind;
 pub const ScheduleNotifier = runtime_impl.ScheduleNotifier;

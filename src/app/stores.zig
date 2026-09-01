@@ -134,6 +134,20 @@ pub fn commitScheduledTaskStore(
     return .committed;
 }
 
+pub fn recoverScheduledTaskStore(
+    context: ?*anyopaque,
+    bytes: []const u8,
+) product_control.SchedulePersistenceCommit {
+    const store: *schedule_persistence.FileStore = @ptrCast(
+        @alignCast(context orelse return .failed),
+    );
+    store.recover(bytes) catch |err| return switch (err) {
+        error.PersistenceOutcomeUnknown => .outcome_unknown,
+        else => .failed,
+    };
+    return .committed;
+}
+
 pub fn commitTaskStore(
     context: ?*anyopaque,
     bytes: []const u8,
@@ -142,6 +156,20 @@ pub fn commitTaskStore(
         @alignCast(context orelse return .failed),
     );
     store.commit(bytes) catch |err| return switch (err) {
+        error.PersistenceOutcomeUnknown => .outcome_unknown,
+        else => .failed,
+    };
+    return .committed;
+}
+
+pub fn recoverTaskStore(
+    context: ?*anyopaque,
+    bytes: []const u8,
+) product_task.history.Commit {
+    const store: *product_task.history.FileStore = @ptrCast(
+        @alignCast(context orelse return .failed),
+    );
+    store.recover(bytes) catch |err| return switch (err) {
         error.PersistenceOutcomeUnknown => .outcome_unknown,
         else => .failed,
     };

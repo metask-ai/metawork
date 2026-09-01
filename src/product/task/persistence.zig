@@ -64,10 +64,19 @@ pub const Capability = struct {
         context: ?*anyopaque,
         bytes: []const u8,
     ) Commit = unsupportedCommit,
+    recover_fn: *const fn (
+        context: ?*anyopaque,
+        bytes: []const u8,
+    ) Commit = unsupportedCommit,
 
     pub fn commit(self: Capability, bytes: []const u8) Commit {
         if (!self.enabled) return .failed;
         return self.commit_fn(self.context, bytes);
+    }
+
+    pub fn recover(self: Capability, bytes: []const u8) Commit {
+        if (!self.enabled) return .failed;
+        return self.recover_fn(self.context, bytes);
     }
 
     fn unsupportedCommit(_: ?*anyopaque, _: []const u8) Commit {
@@ -176,6 +185,37 @@ pub const FileStore = struct {
             return error.WriteFailed;
         temp_exists = false;
         if (!self.syncCommit()) return error.PersistenceOutcomeUnknown;
+    }
+
+    /// Preserves the current canonical bytes under a unique quarantine name
+    /// before installing the Product-provided replacement. No recovery path
+    /// decodes, migrates, overwrites, or deletes the quarantined artifact.
+    pub fn recover(self: *FileStore, bytes: []const u8) FileStoreError!void {
+        if (bytes.len == 0 or bytes.len > max_store_bytes)
+            return error.WriteFailed;
+        try self.quarantineCanonical();
+        return self.commit(bytes);
+    }
+
+    fn quarantineCanonical(self: *FileStore) FileStoreError!void {
+        var random: [8]u8 = undefined;
+        std.Io.randomSecure(self.io, &random) catch return error.WriteFailed;
+        const random_hex = std.fmt.bytesToHex(random, .lower);
+        var quarantine_name_storage: [80]u8 = undefined;
+        var name_writer = std.Io.Writer.fixed(&quarantine_name_storage);
+        name_writer.print(
+            ".workbench-history.recovery.{s}.bak",
+            .{random_hex},
+        ) catch return error.WriteFailed;
+        self.dir.rename(
+            file_name,
+            self.dir,
+            name_writer.buffered(),
+            self.io,
+        ) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return error.WriteFailed,
+        };
     }
 
     fn syncCommit(self: *FileStore) bool {
@@ -3160,6 +3200,59 @@ test "task file store holds one writer and atomically replaces bytes" {
     const restored = (try first.loadAlloc(std.testing.allocator)).?;
     defer std.testing.allocator.free(restored);
     try std.testing.expectEqualStrings("{\"schema_version\":2}", restored);
+}
+
+test "task file store recovery quarantines the previous canonical bytes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var absolute_storage: [std.fs.max_path_bytes]u8 = undefined;
+    const absolute_len = try tmp.dir.realPath(std.testing.io, &absolute_storage);
+    var store = try FileStore.init(
+        std.testing.io,
+        absolute_storage[0..absolute_len],
+    );
+    defer store.deinit();
+    const previous = "{\"schema_version\":7}";
+    const replacement = "{\"schema_version\":1}";
+    try store.commit(previous);
+    try store.recover(replacement);
+
+    const restored = (try store.loadAlloc(std.testing.allocator)).?;
+    defer std.testing.allocator.free(restored);
+    try std.testing.expectEqualStrings(replacement, restored);
+
+    var iterable = try tmp.dir.openDir(
+        std.testing.io,
+        ".",
+        .{ .iterate = true, .follow_symlinks = false },
+    );
+    defer iterable.close(std.testing.io);
+    var iterator = iterable.iterate();
+    var quarantine_name: ?[]u8 = null;
+    defer if (quarantine_name) |name| std.testing.allocator.free(name);
+    while (try iterator.next(std.testing.io)) |entry| {
+        if (entry.kind == .file and std.mem.startsWith(
+            u8,
+            entry.name,
+            ".workbench-history.recovery.",
+        )) {
+            try std.testing.expect(quarantine_name == null);
+            quarantine_name = try std.testing.allocator.dupe(u8, entry.name);
+        }
+    }
+    const name = quarantine_name orelse return error.TestExpectedEqual;
+    var quarantine = try tmp.dir.openFile(
+        std.testing.io,
+        name,
+        .{ .follow_symlinks = false },
+    );
+    defer quarantine.close(std.testing.io);
+    var quarantine_bytes: [previous.len]u8 = undefined;
+    try std.testing.expectEqual(
+        @as(usize, previous.len),
+        try quarantine.readPositionalAll(std.testing.io, &quarantine_bytes, 0),
+    );
+    try std.testing.expectEqualStrings(previous, &quarantine_bytes);
 }
 
 test "task file store ignores the retired pre-release file" {

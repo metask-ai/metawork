@@ -24,6 +24,7 @@ import {
   connectionStatus,
 } from "./connection-status.ts";
 import { Icon } from "../components/ui/Icon.tsx";
+import { ConfirmationNotice } from "../components/ConfirmationNotice.tsx";
 import { AlertDialog } from "../components/ui/alert-dialog.tsx";
 import { Button } from "../components/ui/button.tsx";
 import { AccountIdentity } from "../features/account/AccountIdentity.tsx";
@@ -33,6 +34,7 @@ import {
   requiresAccountSetup,
 } from "../features/account/gating.ts";
 import { accountErrorMessageId } from "../i18n/account-error.ts";
+import { persistenceRecoveryErrorMessageId } from "../i18n/persistence-recovery.ts";
 import {
   SettingsPage,
   type SettingsFocusTarget,
@@ -2505,14 +2507,32 @@ export default function App() {
                   "degraded" &&
                 snapshot.capabilities.taskHistoryPersistenceHealth !==
                   "unavailable" && (
-                  <div className="task-persistence-error" role="status">
-                    <Icon name="warning" />
-                    <span>
-                      {t(
-                        `task.persistence.${snapshot.capabilities.taskHistoryPersistenceHealth}`,
-                      )}
-                    </span>
-                  </div>
+                  <ConfirmationNotice
+                    className="task-persistence-error"
+                    message={t(
+                      `task.persistence.${snapshot.capabilities.taskHistoryPersistenceHealth}`,
+                    )}
+                    detail={t("persistence.recovery.original_retained")}
+                    actionLabel={t("persistence.recovery.action")}
+                    dialogTitle={t("persistence.recovery.task.title")}
+                    dialogDescription={t("persistence.recovery.task.body")}
+                    cancelLabel={t("persistence.recovery.cancel")}
+                    confirmLabel={t("persistence.recovery.confirm")}
+                    pendingLabel={t("persistence.recovery.running")}
+                    failureMessage={t("persistence.recovery.failed")}
+                    actionAvailable={
+                      snapshot.capabilities.taskHistoryRecoveryAvailable
+                    }
+                    disabled={bridgeUnavailable}
+                    onConfirm={async () => {
+                      const result = await client.recoverTaskHistory(
+                        snapshot.revision,
+                      );
+                      return result.outcome === "recovered"
+                        ? null
+                        : t(persistenceRecoveryErrorMessageId(result.outcome));
+                    }}
+                  />
                 )}
               <TaskList
                 tasks={navigableTaskItems}
@@ -2752,6 +2772,7 @@ export default function App() {
         <ScheduledTasksPage
           snapshot={snapshot}
           disabled={bridgeUnavailable || !snapshot.capabilities.scheduledTasks}
+          recoveryDisabled={bridgeUnavailable}
           onCreate={(input) => client.createScheduledTask(input)}
           onUpdate={(id, epoch, input) =>
             client.updateScheduledTask(id, epoch, input)
@@ -2761,6 +2782,7 @@ export default function App() {
           }
           onRunNow={(id, epoch) => client.runScheduledTaskNow(id, epoch)}
           onDelete={(id, epoch) => client.deleteScheduledTask(id, epoch)}
+          onRecover={() => client.recoverScheduledTaskStore(snapshot.revision)}
           onOpenTask={(taskId) => {
             const task = snapshot.tasks.find((item) => item.id === taskId);
             if (!task) return;

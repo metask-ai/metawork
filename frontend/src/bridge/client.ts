@@ -42,6 +42,7 @@ import {
   decodeScheduledTaskMutationResult,
   decodeScheduledTaskEnabledResult,
   decodeScheduledTaskRunResult,
+  decodePersistenceRecoveryResult,
   assertScheduledTaskDeleted,
   decodeWorkspaceChoice,
   decodeSkillImportPreview,
@@ -765,6 +766,12 @@ export class BridgeClient {
     );
   }
 
+  async recoverTaskHistory(expectedRevision: string) {
+    return decodePersistenceRecoveryResult(
+      await this.invoke(commands.recoverTaskHistory, { expectedRevision }),
+    );
+  }
+
   async createScheduledTask(input: ScheduledTaskMutation) {
     return decodeScheduledTaskMutationResult(
       await this.invoke(commands.createScheduledTask, input),
@@ -819,6 +826,14 @@ export class BridgeClient {
         expectedEpoch,
       }),
       scheduledTaskId,
+    );
+  }
+
+  async recoverScheduledTaskStore(expectedRevision: string) {
+    return decodePersistenceRecoveryResult(
+      await this.invoke(commands.recoverScheduledTaskStore, {
+        expectedRevision,
+      }),
     );
   }
 }

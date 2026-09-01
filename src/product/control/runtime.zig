@@ -305,6 +305,16 @@ pub const McpRefreshTimer = mcp_runtime.McpRefreshTimer;
 pub const SchedulePersistenceCommit = product_schedule.PersistenceCommit;
 pub const SchedulePersistence = product_schedule.Persistence;
 pub const SchedulePersistenceHealth = product_schedule.PersistenceHealth;
+
+pub const PersistenceRecoveryOutcome = enum {
+    recovered,
+    stale_revision,
+    not_required,
+    unavailable,
+    failed,
+    outcome_unknown,
+    shutting_down,
+};
 pub const ScheduleNotificationKind = product_schedule.NotificationKind;
 pub const ScheduleNotification = product_schedule.Notification;
 pub const ScheduleNotifier = product_schedule.Notifier;
@@ -3096,6 +3106,78 @@ pub const Runtime = struct {
         return self.revision;
     }
 
+    pub fn taskHistoryRecoveryAvailable(self: *const Runtime) bool {
+        if (!self.task_persistence.enabled) return false;
+        return switch (self.task_persistence_health) {
+            .read_failed, .corrupt, .write_failed, .outcome_unknown => true,
+            .unavailable, .ready, .degraded => false,
+        };
+    }
+
+    pub fn scheduledTaskRecoveryAvailable(self: *const Runtime) bool {
+        return self.schedule.persistenceRecoveryAvailable();
+    }
+
+    pub fn recoverTaskHistory(
+        self: *Runtime,
+        expected_revision: u64,
+    ) PersistenceRecoveryOutcome {
+        self.syncLifecycle();
+        if (self.shutting_down) return .shutting_down;
+        if (expected_revision != self.revision) return .stale_revision;
+        if (!self.taskHistoryRecoveryAvailable()) return switch (self.task_persistence_health) {
+            .ready, .degraded => .not_required,
+            else => .unavailable,
+        };
+        var scratch = self.buildTaskStateWire() catch return .failed;
+        defer scratch.deinit();
+        const output = self.allocator.alloc(u8, task_persistence.max_store_bytes) catch
+            return .failed;
+        defer self.allocator.free(output);
+        const bytes = task_persistence.encode(output, scratch.state) catch
+            return .failed;
+        if (self.containsKnownCredential(bytes)) return .failed;
+        return switch (self.task_persistence.recover(bytes)) {
+            .committed => recovered: {
+                self.task_persistence_health = .ready;
+                self.bumpRevision();
+                break :recovered .recovered;
+            },
+            .failed => .failed,
+            .outcome_unknown => unknown: {
+                self.task_persistence_health = .outcome_unknown;
+                self.bumpRevision();
+                break :unknown .outcome_unknown;
+            },
+        };
+    }
+
+    pub fn recoverScheduledTaskStore(
+        self: *Runtime,
+        expected_revision: u64,
+    ) PersistenceRecoveryOutcome {
+        defer self.publishScheduleChangesNoFail();
+        self.syncLifecycle();
+        if (self.shutting_down) return .shutting_down;
+        if (expected_revision != self.revision) return .stale_revision;
+        if (!self.scheduledTaskRecoveryAvailable()) return switch (self.schedule.persistenceHealth()) {
+            .ready => .not_required,
+            else => .unavailable,
+        };
+        return switch (self.schedule.recoverPersistence(self.scheduleRedaction())) {
+            .recovered => recovered: {
+                _ = self.schedule.rearmNoFail(
+                    self.scheduleExecutionBinding(),
+                    self.scheduleRedaction(),
+                );
+                break :recovered .recovered;
+            },
+            .unavailable => .unavailable,
+            .failed => .failed,
+            .outcome_unknown => .outcome_unknown,
+        };
+    }
+
     pub fn defaultPermissionProfile(self: *const Runtime) PermissionProfile {
         return self.default_permission_profile;
     }
@@ -3794,16 +3876,18 @@ pub const Runtime = struct {
             runtime.capabilities()
         else
             mcp_runtime.Capabilities{ .management = false, .host = .{} };
-        writer.print("{{\"revision\":\"{d}\",\"capabilities\":{{\"taskHistoryPersistence\":{},\"taskHistoryPersistenceHealth\":\"{s}\",\"conversationRecovery\":true,\"executionRebind\":false,\"structuredPlan\":false,\"typedOutputs\":false,\"typedFileChanges\":false,\"persistentWorkspacePermissions\":false,\"permissionProfiles\":{},\"automaticWorkspaces\":{},\"scheduledTasks\":{},\"scheduledTaskPersistence\":{},\"scheduledTaskPersistenceHealth\":\"{s}\",\"backgroundScheduleWake\":{},\"localSkillManagement\":{},\"skillManagementHealth\":\"{s}\",\"modelConnectionManagement\":{},\"modelConnectionSecretCapture\":{},\"modelConnectionTest\":{},\"mcpManagement\":{},\"mcpConnectionApproval\":{},\"mcpSecretCapture\":{},\"mcpOAuth\":{}}},\"permissions\":{{\"availableProfiles\":", .{
+        writer.print("{{\"revision\":\"{d}\",\"capabilities\":{{\"taskHistoryPersistence\":{},\"taskHistoryPersistenceHealth\":\"{s}\",\"taskHistoryRecoveryAvailable\":{},\"conversationRecovery\":true,\"executionRebind\":false,\"structuredPlan\":false,\"typedOutputs\":false,\"typedFileChanges\":false,\"persistentWorkspacePermissions\":false,\"permissionProfiles\":{},\"automaticWorkspaces\":{},\"scheduledTasks\":{},\"scheduledTaskPersistence\":{},\"scheduledTaskPersistenceHealth\":\"{s}\",\"scheduledTaskRecoveryAvailable\":{},\"backgroundScheduleWake\":{},\"localSkillManagement\":{},\"skillManagementHealth\":\"{s}\",\"modelConnectionManagement\":{},\"modelConnectionSecretCapture\":{},\"modelConnectionTest\":{},\"mcpManagement\":{},\"mcpConnectionApproval\":{},\"mcpSecretCapture\":{},\"mcpOAuth\":{}}},\"permissions\":{{\"availableProfiles\":", .{
             self.revision,
             task_persistence_ready,
             @tagName(self.task_persistence_health),
+            self.taskHistoryRecoveryAvailable(),
             permission_profiles_available,
             self.workspace.automaticRootAvailable(),
             self.schedule.timerEnabled() and schedule_persistence_ready and
                 background_schedule_wake,
             schedule_persistence_ready,
             @tagName(self.schedule.persistenceHealth()),
+            self.scheduledTaskRecoveryAvailable(),
             background_schedule_wake,
             self.skill.managementHealth() == .ready,
             @tagName(self.skill.managementHealth()),
@@ -7364,6 +7448,7 @@ test "MCP refresh timer rearm preserves the absolute deadline" {
 
 const TestSchedulePersistence = struct {
     commits: usize = 0,
+    recoveries: usize = 0,
     result: SchedulePersistenceCommit = .committed,
     storage: ?[]u8 = null,
     len: usize = 0,
@@ -7390,7 +7475,17 @@ const TestSchedulePersistence = struct {
             .context = self,
             .enabled = true,
             .commit_fn = commit,
+            .recover_fn = recover,
         };
+    }
+
+    fn recover(
+        context: ?*anyopaque,
+        bytes: []const u8,
+    ) SchedulePersistenceCommit {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        self.recoveries += 1;
+        return commit(context, bytes);
     }
 };
 
@@ -7398,6 +7493,7 @@ const TestTaskPersistence = struct {
     storage: []u8,
     len: usize = 0,
     commits: usize = 0,
+    recoveries: usize = 0,
     result: TaskPersistenceCommit = .committed,
 
     fn commit(
@@ -7422,7 +7518,17 @@ const TestTaskPersistence = struct {
             .enabled = true,
             .restored_bytes = restored_bytes,
             .commit_fn = commit,
+            .recover_fn = recover,
         };
+    }
+
+    fn recover(
+        context: ?*anyopaque,
+        bytes: []const u8,
+    ) TaskPersistenceCommit {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        self.recoveries += 1;
+        return commit(context, bytes);
     }
 };
 
@@ -8174,6 +8280,56 @@ test "Task persistence restore failure remains diagnostic while product mutation
     try std.testing.expectEqual(TaskPersistenceHealth.read_failed, control.task_persistence_health);
 }
 
+test "explicit Task history recovery is revision bound and preserves live Product state" {
+    const persistence_storage = try std.testing.allocator.alloc(
+        u8,
+        task_persistence.max_store_bytes,
+    );
+    defer std.testing.allocator.free(persistence_storage);
+    var persistence = TestTaskPersistence{
+        .storage = persistence_storage,
+        .result = .outcome_unknown,
+    };
+    var control = try testRuntime();
+    defer control.deinit();
+    control.task_persistence = persistence.capability(null);
+    control.task_persistence_health = .corrupt;
+    const title_before = control.task_runtime.tasks[0].?.durable.title;
+    const revision = control.currentRevision();
+
+    try std.testing.expect(control.canCreateTask());
+    try std.testing.expect(control.taskHistoryRecoveryAvailable());
+    try std.testing.expectEqual(
+        PersistenceRecoveryOutcome.stale_revision,
+        control.recoverTaskHistory(revision + 1),
+    );
+    try std.testing.expectEqual(@as(usize, 0), persistence.recoveries);
+    try std.testing.expectEqual(
+        PersistenceRecoveryOutcome.outcome_unknown,
+        control.recoverTaskHistory(revision),
+    );
+    try std.testing.expectEqual(TaskPersistenceHealth.outcome_unknown, control.task_persistence_health);
+    try std.testing.expectEqualStrings(title_before, control.task_runtime.tasks[0].?.durable.title);
+    try std.testing.expect(control.canCreateTask());
+    try std.testing.expect(control.taskHistoryRecoveryAvailable());
+
+    persistence.result = .committed;
+    try std.testing.expectEqual(
+        PersistenceRecoveryOutcome.recovered,
+        control.recoverTaskHistory(control.currentRevision()),
+    );
+    try std.testing.expectEqual(TaskPersistenceHealth.ready, control.task_persistence_health);
+    try std.testing.expectEqual(@as(usize, 2), persistence.recoveries);
+    try std.testing.expectEqualStrings(title_before, control.task_runtime.tasks[0].?.durable.title);
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            persistence.storage[0..persistence.len],
+            "SECRET-KEY",
+        ) == null,
+    );
+}
+
 test "Task persistence failure publishes metadata and retries the next save" {
     const persistence_storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
     defer std.testing.allocator.free(persistence_storage);
@@ -8277,6 +8433,46 @@ test "Task persistence failure keeps Workspace state and retries later" {
     });
     try std.testing.expect(control.workspace.facts(source_id) != null);
     try std.testing.expectEqual(TaskPersistenceHealth.ready, control.task_persistence_health);
+}
+
+test "explicit Schedule recovery is revision bound and reopens only its Product store" {
+    const persistence_storage = try std.testing.allocator.alloc(
+        u8,
+        product_schedule.testing.max_store_bytes,
+    );
+    defer std.testing.allocator.free(persistence_storage);
+    var persistence: TestSchedulePersistence = .{
+        .storage = persistence_storage,
+    };
+    var control = try testRuntime();
+    defer control.deinit();
+    product_schedule.testing.configure(
+        &control.schedule,
+        .{},
+        persistence.capability(),
+        .corrupt,
+    );
+    defer product_schedule.testing.configure(
+        &control.schedule,
+        .{},
+        .{},
+        .unavailable,
+    );
+    const revision = control.currentRevision();
+
+    try std.testing.expect(control.scheduledTaskRecoveryAvailable());
+    try std.testing.expectEqual(
+        PersistenceRecoveryOutcome.stale_revision,
+        control.recoverScheduledTaskStore(revision + 1),
+    );
+    try std.testing.expectEqual(@as(usize, 0), persistence.recoveries);
+    try std.testing.expectEqual(
+        PersistenceRecoveryOutcome.recovered,
+        control.recoverScheduledTaskStore(revision),
+    );
+    try std.testing.expectEqual(SchedulePersistenceHealth.ready, control.schedule.persistenceHealth());
+    try std.testing.expectEqual(@as(usize, 1), persistence.recoveries);
+    try std.testing.expectEqual(TaskPersistenceHealth.unavailable, control.task_persistence_health);
 }
 
 test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {

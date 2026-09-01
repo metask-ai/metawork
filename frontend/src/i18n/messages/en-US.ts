@@ -1011,6 +1011,26 @@ export const enUS = {
     "The latest task change could not be saved. You can keep working while MetaWork retries later changes.",
   "task.persistence.outcome_unknown":
     "MetaWork could not confirm whether the latest task change was saved. You can keep working while later changes retry the save.",
+  "persistence.recovery.action": "Start with a clean store",
+  "persistence.recovery.original_retained":
+    "The current file will be retained as a recovery copy.",
+  "persistence.recovery.task.title": "Replace saved task history?",
+  "persistence.recovery.task.body":
+    "MetaWork will retain the current history file, then save the tasks and workspaces currently available in this session as the new history.",
+  "persistence.recovery.scheduled.title": "Replace saved schedules?",
+  "persistence.recovery.scheduled.body":
+    "MetaWork will retain the current schedule file, then save the schedules currently available in this session as the new schedule store.",
+  "persistence.recovery.cancel": "Keep current state",
+  "persistence.recovery.confirm": "Retain file and recover",
+  "persistence.recovery.running": "Recovering…",
+  "persistence.recovery.stale_revision":
+    "The Workbench changed. Review the current warning and try again.",
+  "persistence.recovery.outcome_unknown":
+    "MetaWork could not confirm the replacement. The recovery copy was not deleted; try again after reviewing the current state.",
+  "persistence.recovery.shutting_down":
+    "MetaWork is closing and cannot start recovery.",
+  "persistence.recovery.failed":
+    "The store could not be replaced. The current file was not deleted.",
   "mcp.mutation.busy":
     "This server has an authorization operation in progress.",
   "mcp.mutation.cancelled": "The confirmation was cancelled.",

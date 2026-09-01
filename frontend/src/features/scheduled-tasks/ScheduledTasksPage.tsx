@@ -7,12 +7,14 @@ import type {
   WorkbenchSnapshot,
 } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
+import { ConfirmationNotice } from "../../components/ConfirmationNotice.tsx";
 import { Button } from "../../components/ui/button.tsx";
 import { Drawer } from "../../components/ui/drawer.tsx";
 import { Input } from "../../components/ui/input.tsx";
 import { SelectField, type SelectOption } from "../../components/ui/select.tsx";
 import { Textarea } from "../../components/ui/textarea.tsx";
 import { useI18n } from "../../i18n/context.ts";
+import { persistenceRecoveryErrorMessageId } from "../../i18n/persistence-recovery.ts";
 
 type Draft = {
   title: string;
@@ -174,15 +176,18 @@ function formatDraftTime(value: string, locale: string) {
 export function ScheduledTasksPage({
   snapshot,
   disabled,
+  recoveryDisabled,
   onCreate,
   onUpdate,
   onSetEnabled,
   onRunNow,
   onDelete,
+  onRecover,
   onOpenTask,
 }: {
   snapshot: WorkbenchSnapshot;
   disabled: boolean;
+  recoveryDisabled: boolean;
   onCreate: (input: ScheduledTaskMutation) => Promise<unknown>;
   onUpdate: (
     id: string,
@@ -196,6 +201,9 @@ export function ScheduledTasksPage({
   ) => Promise<unknown>;
   onRunNow: (id: string, epoch: string) => Promise<{ taskId: string }>;
   onDelete: (id: string, epoch: string) => Promise<void>;
+  onRecover: () => Promise<{
+    outcome: import("../../bridge/contracts.ts").PersistenceRecoveryOutcome;
+  }>;
   onOpenTask: (taskId: string) => void;
 }) {
   const { locale, t } = useI18n();
@@ -458,14 +466,30 @@ export function ScheduledTasksPage({
         </header>
 
         {snapshot.capabilities.scheduledTaskPersistenceHealth !== "ready" && (
-          <div className="scheduled-capability-error" role="alert">
-            <Icon name="warning" />
-            <span>
-              {t(
-                `scheduled.persistence.${snapshot.capabilities.scheduledTaskPersistenceHealth}`,
-              )}
-            </span>
-          </div>
+          <ConfirmationNotice
+            className="scheduled-capability-error"
+            message={t(
+              `scheduled.persistence.${snapshot.capabilities.scheduledTaskPersistenceHealth}`,
+            )}
+            detail={t("persistence.recovery.original_retained")}
+            actionLabel={t("persistence.recovery.action")}
+            dialogTitle={t("persistence.recovery.scheduled.title")}
+            dialogDescription={t("persistence.recovery.scheduled.body")}
+            cancelLabel={t("persistence.recovery.cancel")}
+            confirmLabel={t("persistence.recovery.confirm")}
+            pendingLabel={t("persistence.recovery.running")}
+            failureMessage={t("persistence.recovery.failed")}
+            actionAvailable={
+              snapshot.capabilities.scheduledTaskRecoveryAvailable
+            }
+            disabled={recoveryDisabled}
+            onConfirm={async () => {
+              const result = await onRecover();
+              return result.outcome === "recovered"
+                ? null
+                : t(persistenceRecoveryErrorMessageId(result.outcome));
+            }}
+          />
         )}
 
         {!hasScheduledTasks ? (

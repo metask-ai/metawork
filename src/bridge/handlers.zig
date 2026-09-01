@@ -245,6 +245,7 @@ pub const FilePreviewRequest = struct {
 pub const TaskRename = struct { taskId: []const u8, title: []const u8 };
 pub const TaskArchive = struct { taskId: []const u8, archived: bool };
 pub const TaskDelete = struct { taskId: []const u8 };
+pub const PersistenceRecovery = struct { expectedRevision: []const u8 };
 pub const ScheduledTaskMutation = struct {
     title: []const u8,
     expectedExecutionGeneration: []const u8,

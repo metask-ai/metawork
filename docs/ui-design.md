@@ -215,7 +215,7 @@ Workspace
 - Composer 的工作目录控件只选择、添加或重新授权 New task 路径；设置页不提供 Workspace 生命周期管理。设置作为覆盖整个 Workbench 内容区的长期 surface 打开，保留窗口壳层和底层 Workbench 挂载，拥有自己的分区导航与内容滚动，关闭后恢复原工作面；
 - 再次打开历史 Task 只保证可浏览记录；需要访问原目录时重新选择或授权，能否继续执行还必须服从 §6.4 的 Conversation 与 execution binding 规则；
 - MetaWork 重启后，左栏直接使用 Workbench 恢复的 Task 列表和顺序；点击 Task 打开其已保存时间线，不自动创建新 Task、不重放最后一次输入，也不把恢复的 `interrupted` 显示成仍在运行；
-- `taskHistoryPersistenceHealth = degraded` 只表示少数已保存 Task 无法恢复；由于新 Task 和其他有效历史仍可用且没有用户可执行的恢复动作，左栏不为它显示常驻提示。`read_failed / corrupt / write_failed / outcome_unknown` 显示非阻塞保存提示，但不得禁用 Composer、Task 操作、Workspace 选择、权限响应或取消。历史读取失败或整体损坏不得覆盖原文件；Host 从空的内存历史继续运行，但本进程不再覆盖该 store。Renderer 不修复持久数据，也不把重启作为继续工作的前置条件；`write_failed / outcome_unknown` 的后续 mutation 由 Host 自动再次尝试完整 snapshot；
+- `taskHistoryPersistenceHealth = degraded` 只表示少数已保存 Task 无法恢复；由于新 Task 和其他有效历史仍可用且没有用户可执行的恢复动作，左栏不为它显示常驻提示。`read_failed / corrupt / write_failed / outcome_unknown` 显示非阻塞保存提示，但不得禁用 Composer、Task 操作、Workspace 选择、权限响应或取消。Host 发布 recovery available 时，提示内提供“使用新的存储继续”，并在就地确认中明确当前文件会保留为恢复副本；Renderer 只提交当前 snapshot revision，不选择路径或操作文件。取消不改变状态，失败保留提示，成功等待 Host snapshot 收口；
 - Task 行不保留可见的文字状态标签。运行中使用紫色旋转 loading 图标，需要处理或失败使用对应语义图标；完成使用醒目的实心提示点作为一次性未读提醒，颜色沿用主操作色。提醒身份绑定到最新完成 Run，后台完成时显示，用户打开该 Task 且其工作面可见后视为已读并隐藏；Task 再次完成新的 Run 时重新显示。
 - Task 的重命名、归档/恢复和删除从内容区标题栏移除，统一通过左侧 Task 行的右键菜单访问。停止当前运行仍保留在内容区作为即时运行控制；不存在独立的“结束任务”动作。
 

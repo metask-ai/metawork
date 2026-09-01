@@ -214,6 +214,10 @@ test("Task persistence failure remains diagnostic without blocking mutations", a
     resolve(sourceRoot, "features", "tasks", "TaskList.tsx"),
     "utf8",
   );
+  const confirmationNotice = await readFile(
+    resolve(sourceRoot, "components", "ConfirmationNotice.tsx"),
+    "utf8",
+  );
   assert.match(app, /const workbenchMutationDisabled =\s*bridgeUnavailable;/);
   assert.doesNotMatch(app, /taskHistoryMutationBlocked/);
   assert.doesNotMatch(store, /taskHistoryMutationBlocked/);
@@ -228,7 +232,11 @@ test("Task persistence failure remains diagnostic without blocking mutations", a
   assert.match(app, /<TaskList[\s\S]*tasks=\{navigableTaskItems\}/);
   assert.match(taskList, /className="task-list-item focus-ring"/);
   assert.match(taskList, /disabled=\{\s*taskMutationDisabled/);
-  assert.match(app, /className="task-persistence-error" role="status"/);
+  assert.match(
+    app,
+    /<ConfirmationNotice[\s\S]*?className="task-persistence-error"[\s\S]*?actionAvailable=\{/,
+  );
+  assert.match(confirmationNotice, /className=\{className\} role="alert"/);
 });
 
 test("degraded Task history does not create a permanent sidebar alert", async () => {

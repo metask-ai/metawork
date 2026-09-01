@@ -82,11 +82,13 @@ function scheduledElement(snapshot, overrides = {}) {
     createElement(ScheduledTasksPage, {
       snapshot,
       disabled: false,
+      recoveryDisabled: false,
       onCreate: async () => undefined,
       onUpdate: async () => undefined,
       onSetEnabled: async () => undefined,
       onRunNow: async () => ({ taskId: "3" }),
       onDelete: async () => undefined,
+      onRecover: async () => ({ outcome: "recovered" }),
       onOpenTask() {},
       ...overrides,
     }),
@@ -161,6 +163,46 @@ test("Empty scheduled tasks page offers actionable starter templates", () => {
   assert.doesNotMatch(html, /What should happen automatically/);
   assert.doesNotMatch(html, /Search scheduled tasks/);
   assert.doesNotMatch(html, /Nothing is scheduled/);
+});
+
+test("Schedule store recovery stays available when normal scheduling is blocked and requires confirmation", async () => {
+  const snapshot = structuredClone(fixture);
+  snapshot.capabilities.scheduledTasks = false;
+  snapshot.capabilities.scheduledTaskPersistence = false;
+  snapshot.capabilities.scheduledTaskPersistenceHealth = "corrupt";
+  snapshot.capabilities.scheduledTaskRecoveryAvailable = true;
+  let recoveries = 0;
+  renderDom(
+    scheduledElement(snapshot, {
+      disabled: true,
+      recoveryDisabled: false,
+      onRecover: async () => {
+        recoveries += 1;
+        return { outcome: "recovered" };
+      },
+    }),
+  );
+
+  const recovery = screen.getByRole("button", {
+    name: "Start with a clean store",
+  });
+  assert.equal(recovery.disabled, false);
+  fireEvent.click(recovery);
+  assert.ok(
+    screen.getByRole("alertdialog", { name: "Replace saved schedules?" }),
+  );
+  assert.match(
+    screen.getByText(/retain the current schedule file/).textContent,
+    /new schedule store/,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Keep current state" }));
+  assert.equal(recoveries, 0);
+
+  fireEvent.click(recovery);
+  fireEvent.click(
+    screen.getByRole("button", { name: "Retain file and recover" }),
+  );
+  await waitFor(() => assert.equal(recoveries, 1));
 });
 
 test("starter templates hide Workspace configuration and submit target-free automatic execution", async () => {

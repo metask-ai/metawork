@@ -556,6 +556,7 @@ export type WorkbenchSnapshot = {
       | "corrupt"
       | "write_failed"
       | "outcome_unknown";
+    taskHistoryRecoveryAvailable: boolean;
     conversationRecovery: boolean;
     executionRebind: boolean;
     structuredPlan: boolean;
@@ -573,6 +574,7 @@ export type WorkbenchSnapshot = {
       | "corrupt"
       | "write_failed"
       | "outcome_unknown";
+    scheduledTaskRecoveryAvailable: boolean;
     backgroundScheduleWake: boolean;
     localSkillManagement: boolean;
     skillManagementHealth:
@@ -603,6 +605,15 @@ export type WorkbenchSnapshot = {
   scheduledTasks: ScheduledTaskView[];
   tasks: TaskView[];
 };
+
+export type PersistenceRecoveryOutcome =
+  | "recovered"
+  | "stale_revision"
+  | "not_required"
+  | "unavailable"
+  | "failed"
+  | "outcome_unknown"
+  | "shutting_down";
 
 export type WorkspaceView = {
   id: string;
