@@ -892,12 +892,14 @@ Task overview 是当前 Task 的按需结构化摘要，不是固定存在的第
 
 ### 12.2 Files changed 与 Outputs
 
-> Capability：**未来**。AgentCore 已在当前 macOS package 发布 typed `file_changes` observation，但只有 Product owner、持久化、恢复与 Renderer 合同完成验收后才显示 Files changed；typed Output 仍等待上游能力。当前不能从 Tool 文本、文件后缀或 File Preview reference 推断。
+> Capability：File Changes **当前**；typed Output **未来**。File Changes 只消费 AgentCore typed `file_changes` observation，不能从 Tool 文本、Bash 输出、Git、文件后缀或 File Preview reference 推断。它是已记录副作用的审查视图，不承诺 Workspace 当前净状态。
 
-- `Files changed`：Agent 在 Workspace 中新增、修改或删除的全部文件；
-- `Outputs`：用户关心的最终交付文件、链接或结构化结果。
-
-Inspector 默认只列 Outputs，完整 Files changed 进入中间工具活动。不能仅凭“新建文件”自动判断它是 Output；需要 Agent 的结构化标记或用户明确标记。
+- 每个 Run 在 Assistant response 后显示紧凑的“文件更改”摘要。至少一条记录时显示唯一文件数、修改记录数和“审查更改”；`incomplete` 且零记录时只显示明确警告，不提供空 Drawer 动作；其他零记录状态不占位；
+- “审查更改”打开右侧 Drawer。桌面宽度下左侧为 changed-file 列表、右侧为记录详情；窄于约 720px 时纵向排列并使用全宽覆盖。关闭、Task/Run 切换或记录消失必须使旧 diff Promise stale，不能覆盖新选择；
+- Drawer 按 `displayPath` 视觉分组，同一路径多次修改保留独立子选择和稳定记录顺序；created、modified、deleted、moved 与 partial 使用文字和图标，moved 同时显示 `from → to`，不能只靠颜色；
+- diff 只通过 `metawork.files.diff` 按需读取 Product 已记录的 credential-safe unified diff。`diffComplete=false`、redacted、observation incomplete、not recorded、capacity、missing 与 corrupt 都显示明确说明；正文使用等宽文本并在自身区域横向滚动；
+- 第一版不合并为 Git 净 diff，不汇总可能失真的 Run 级增删行数，不扫描 Workspace，不重读当前文件，也不提供 Accept/Reject、revert、stage 或 Output 标记；
+- `Outputs` 仍指用户关心的最终交付文件、链接或结构化结果。不能仅凭 created 记录自动判断它是 Output；需要未来 typed Output 标记或用户明确标记。
 
 ### 12.3 Output 卡片
 
@@ -1302,7 +1304,8 @@ Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成
 - Edit diff；
 - one-time permission；
 - permission 请求只针对当前 authority 未覆盖且执行层能兑现的决定；Workspace picker、Task profile、MCP/Skill authority 与系统授权不重复请求；
-- capability 未验收时 Plan、plan approval、Always allow、Output 与 FileChange 完全不出现；
+- capability 未验收时 Plan、plan approval、Always allow 与 Output 完全不出现；File Changes 只在 Host `typedFileChanges=true` 时出现；
+- File Changes 覆盖 created/modified/deleted/moved、applied/partial、同路径多次修改、嵌套 Agent 记录、diff incomplete/redacted、observation incomplete、零记录丢失、missing/corrupt/capacity、Task 切换 stale response，以及宽窗/窄窗、键盘焦点和无颜色状态；
 - 对应 capability 未来验收后，Plan 创建/更新、计划确认、持久规则与 Output 的目标状态按各章节启用；
 - 后台 Task 通知；
 - Renderer reload 和视图重新同步。

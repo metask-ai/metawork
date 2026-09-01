@@ -55,6 +55,10 @@ Turn 是用户提交的一次交互；Run 是 AgentCore 为该交互进行的一
 
 代表 Agent 发起的一次工具调用，包含工具名、输入、进度、结果、错误和耗时。Tool Call 应通过结构化卡片展示，而不是依赖终端字符解析。
 
+### File Changes
+
+File Changes 是一次 Run 内由 AgentCore typed `file_changes` observation 记录的文件副作用审查事实，归属 Run 而不是单个 Tool。产品接纳 `created | modified | deleted | moved` 的 `applied | partial` 记录，包括嵌套 Agent 产生的记录；同一路径的多次修改保持多条稳定顺序。它不从 Tool 文本、Bash 输出、Git、Workspace 当前状态或 File Preview 反推，也不表示用户已经接受修改或文件仍保持当时内容。
+
 ### Approval / UI Request
 
 代表 Agent 继续工作前仍缺少的用户决定，不是 Tool 名称、Shell 语法或产品安全感的可视化。一个正式权限请求必须对应当前 authority 尚未覆盖、值得中断、可准确描述且执行层能兑现的具体能力或 effect；已由 Workspace picker、当前 Task authority、已配置服务或系统原生授权覆盖的决定不得重复询问。当前 MetaWork Agent 只开放 AgentCore 同步工具 permission；该请求仍是 compatibility baseline，不表示现有 payload 已具备上述完整 effect 语义。AgentCore ABI v1 虽支持结构化问题回答，但该 built-in 不进入 MetaWork Agent 能力集合。需要补充信息时，Agent 以普通 Assistant 回复结束当前 Run，用户通过 Composer 继续。同步等待期间 Run 仍占用 executor slot，不形成可持久化挂起点。计划审批、自定义结构化交互和 typed effect confirmation 只有在 AgentCore 发布相应控制协议并通过 MetaWork 产品验收后才进入产品范围。
@@ -146,6 +150,8 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - UI 以唯一 Current activity 展示 thinking、writing、tool、retry、context compact 与 finalizing，在 Task overview 展示真实 token usage、context warning 和最近 auto compact；
 - Agent 对话按 Run exchange 组织为用户输入、Assistant 过程叙事、唯一 live status、待处理请求、final/partial response、相关文件、按需技术过程和必要 terminal notice，不存在的部分不占位。每个 closed commentary group 使用独立 Markdown block 形成可连续阅读的主叙事，组间只以克制留白分隔，不做卡片、时间戳或 Tool 标签；可回滚 provisional 使用纯文本紧随其后。active status 始终位于当前过程底部并原位更新，不因 Tool 事件追加新的主阅读行。技术过程在 active 与 terminal Run 中都默认折叠，active 时与 live status 共用 process surface，terminal 后移到正式 response/file references 之后并只以弱化的操作数量摘要保留，不强调已被整个 Run 恢复的单个 Tool 失败。Renderer 不伪造 typed facts 之间不存在的严格时间线；具体 owner、槽位和迁移机制由 [UI 设计规范](ui-design.md#72-agent-对话渲染机制)定义；
 - 过程叙事密度只取决于 AgentCore 实际提交的 commentary 与其他 typed observation；产品不要求每个 Tool turn 都产生 commentary，也不从 Tool 名称、参数、结果、耗时或 Renderer 本地计时合成 Agent 发言、模型意图或伪进度。上游没有新的可见文本时，主阅读流只原位更新已有 canonical activity，不以重复状态行填充空白；
+- Host 为每个 Run 投影 typed File Changes 的 `collecting | complete | incomplete` 观测状态和有界记录；完整记录只表示已消费的 typed observation 没有已知丢失。oversized、队列或 Product 容量不足、非法 locator、diff 截断/存储失败和中断必须单调收口为 incomplete，但不得改变 Run 原有 outcome；
+- Run 有可见记录时在回复后显示文件/修改数量和“审查更改”入口；incomplete 即使没有保留下来的记录也必须显示警告。按需 Drawer 展示按路径分组但不合并的 recorded diff、create/modify/delete/move/partial、脱敏与缺失/损坏状态；第一版不提供 Accept/Reject、Git 净 diff、当前文件重读或 Output 推断；
 - 用户可以在已有 finalized Run 且 Task 可继续时显式压缩当前 Conversation；manual compact 是 Workbench-owned Task maintenance operation，不创建 Turn/Run，不产生用户消息，也不把 `/compact` 原文送入 Bridge 或模型；
 - manual compact 必须发布真实的 queued/compacting/stopping 与 terminal outcome；`compacted / no_change / degraded / aborted` 保持各自语义，before/after context token 只作为估算展示，compact provider usage 与 Run usage 分开记录；
 - 用户可以取消当前 Run；
@@ -342,7 +348,7 @@ Windows x86_64 GNU 已进入当前开发 baseline；Windows arm64 GNU 已接入 
 
 ### 7.5 后续产品能力
 
-`PermissionProfile` 的 Task-create owner、same-profile fresh/restore、Run provenance 与 Scheduled noninteractive 已进入当前产品；未来独立的 idle mutation、`standard` 所需的 typed risk/effect 和执行前 commit boundary，以及 async pending、更完整的跨重启 execution rebind、strict Workspace security、正式 Host tools、typed Output/FileChange、plan progress/approval、custom UI、远程 artifact 发布与正式更新、独立 AgentCore Worker 和 Linux 接入，均按独立 capability 与阶段推进，不能反向伪装成当前 v1 已具备。
+`PermissionProfile` 的 Task-create owner、same-profile fresh/restore、Run provenance 与 Scheduled noninteractive，以及 typed File Changes 审查已进入当前产品；未来独立的 idle mutation、`standard` 所需的 typed risk/effect 和执行前 commit boundary，以及 async pending、更完整的跨重启 execution rebind、strict Workspace security、正式 Host tools、typed Output、plan progress/approval、custom UI、远程 artifact 发布与正式更新、独立 AgentCore Worker 和 Linux 接入，均按独立 capability 与阶段推进，不能反向伪装成当前 v1 已具备。
 
 具体验证矩阵见 [当前验证规范](validation.md)。
 

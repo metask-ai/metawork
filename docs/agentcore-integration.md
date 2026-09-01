@@ -61,7 +61,7 @@ candidate probe 只用于证明锁定 artifact 与官方 Zig package 可以 sour
 | `tool_start` | 建立/更新 Tool record | 随 Run history 保存 |
 | `tool_progress` | 按 tool identity 更新进度 | 随 Run history 保存 |
 | `tool_result` | 完成 Tool record 与 file reference 投影 | durable boundary |
-| `file_changes` | Agent typed decode 后由 Product 显式消费；产品 capability 尚未验收 | 不保存、不投影 |
+| `file_changes` | Agent typed decode 后由 Product 显式消费；Agent 保留每条 kind/status/locator/bytes/diff/depth 与 event-level overflow/lost，Product 建立 Run-owned bounded observation | 只接纳 applied/partial，全部 agent depth 同等归属当前 Run；不从 Tool/Bash/Git 反推 |
 | `run_state` | 受 transition sequence 保护的 runtime observation | phase observation 不持久化 |
 | `progress` | 更新 executing-tools 状态 | 仅现有安全状态 |
 | `usage` | checked delta 累计 | 随 Run history 保存 |
@@ -361,6 +361,8 @@ RunControl / RunControlLease
 
 wire abort reason 只作为 AgentCore 中断机制。`TerminalResult` 同时保留 typed/raw ABI status、typed/raw StopReason、typed/raw abort status、最终 termination latch、completion-time Session disposition，以及 bounded owned diagnostic。产品 `RunOutcome` 与 durable cause 只由 Product Control 映射。Renderer transport 不是 active Run cause，不得写入 Agent termination latch。
 
+`TerminalResult.file_changes_lost` 是 monotonic、per-Session observation fact：只要任一 classifier-confirmed `file_changes` event 因单事件编码上限、decode-owned-copy 容量或 event-pump admission 容量未被完整保留，就置 true 并保持至 terminal publication。它不把成功 Run 改成失败，也不允许伪造或补采记录；Product 在固定 terminal drain 后据此把已有 `collecting` observation 收口为 `incomplete`。没有任何 typed observation 且没有已知丢失时继续投影 null；发生已知丢失时即使零记录也必须建立 incomplete observation。
+
 ### callback 内失败
 
 event validation、copy 或同步入队失败：
@@ -422,10 +424,13 @@ flowchart LR
 | `usage`                         | pump 逐项保留；Renderer projection 根据 AgentCore 事件语义累计或替换 |
 | diagnostics                     | 按明确配置采样                                                       |
 | tool start/result               | 不得静默丢失                                                         |
+| `file_changes`                  | 正常有界事件逐项保留；只有已确认该顶层类型的容量/尺寸失败可降级并设置 `file_changes_lost` |
 | UI request/response state       | 不得静默丢失                                                         |
 | run/error/cancel/terminal state | 不得静默丢失                                                         |
 
 当前没有完整最终 assistant snapshot 时，`text_chunk` 不能丢。队列不能接收关键事件时，可以有限阻塞 callback；达到 deadline 后返回 fatal，而不是无限等待。
+
+`file_changes` 是补充审查 observation，不是 Run correctness 或 Tool completion 的唯一事实。为避免协议合法但最坏可达约 16 MiB 的多文件 diff event 越过 Host 512 KiB 单事件上限并终止 Session，callback 先使用固定 1024-byte discriminator window 只确认一个完整顶层 JSON object 的 `type = file_changes`。确认后，单事件过大、owned decode 容量不足或 pump admission 容量不足可以丢弃该整个 event、单调设置 `file_changes_lost` 并返回非 fatal；malformed、ambiguous、unknown 或任何非 file_changes event 仍按关键事件合同 fatal，不能借该路径吞掉依赖违约。AgentCore 发射侧无需被假定存在 512 KiB 总事件保证；`diff_complete=false`、event `overflow/lost` 与 Host 本地丢失分别保留各自事实，最终都只使 Product observation incomplete。
 
 按 Session 公平轮转，单一高输出 Session 不得饿死其他 Session。控制容量不能被文本增量占满。
 
