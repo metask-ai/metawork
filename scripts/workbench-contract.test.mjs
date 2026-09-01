@@ -49,6 +49,85 @@ test("the canonical Workbench fixture decodes without normalization", () => {
   );
 });
 
+test("model metadata preserves nullable declarations and exact positive u64 limits", () => {
+  for (const declaration of [null, true, false]) {
+    const candidate = clone(fixture);
+    const metadata = candidate.account.models[0].metadata;
+    for (const [key, value] of Object.entries(metadata.capabilities)) {
+      if (value !== null && typeof value === "object") {
+        for (const child of Object.keys(value)) value[child] = declaration;
+      } else {
+        metadata.capabilities[key] = declaration;
+      }
+    }
+    metadata.maxInputTokens =
+      declaration === null ? null : "18446744073709551615";
+    metadata.maxOutputTokens = declaration === null ? null : "1";
+    assert.deepEqual(decodeWorkbenchSnapshot(candidate), candidate);
+  }
+});
+
+test("model metadata rejects missing fields, coercion and overflowing limits", () => {
+  const changes = [
+    (model) => {
+      delete model.metadata;
+    },
+    (model) => {
+      model.metadata = null;
+    },
+    (model) => {
+      model.metadata.unexpected = true;
+    },
+    (model) => {
+      model.metadata.capabilities.unexpected = true;
+    },
+  ];
+  for (const field of ["maxInputTokens", "maxOutputTokens"]) {
+    for (const value of [
+      undefined,
+      1024,
+      "0",
+      "-1",
+      "01",
+      "1.5",
+      "1e3",
+      "18446744073709551616",
+    ]) {
+      changes.push((model) => {
+        model.metadata[field] = value;
+      });
+    }
+  }
+  const caps = fixture.account.models[0].metadata.capabilities;
+  for (const [key, value] of Object.entries(caps)) {
+    for (const invalid of [undefined, null, true, []]) {
+      if (value !== null && typeof value === "object") {
+        changes.push((model) => {
+          model.metadata.capabilities[key] = invalid;
+        });
+      }
+    }
+    const paths =
+      value !== null && typeof value === "object"
+        ? Object.keys(value).map((child) => [key, child])
+        : [[key]];
+    for (const path of paths) {
+      for (const invalid of [undefined, "true", 0, {}]) {
+        changes.push((model) => {
+          let target = model.metadata.capabilities;
+          for (const segment of path.slice(0, -1)) target = target[segment];
+          target[path.at(-1)] = invalid;
+        });
+      }
+    }
+  }
+  for (const change of changes) {
+    const candidate = clone(fixture);
+    change(candidate.account.models[0]);
+    assert.throws(() => decodeWorkbenchSnapshot(candidate), /metadata/);
+  }
+});
+
 test("file references expose only preview identity and presentation", () => {
   const referenced = clone(fixture);
   referenced.tasks[0].runs[0].tools = [
@@ -1139,8 +1218,16 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
 
   const duplicateModel = clone(fixture);
   duplicateModel.account.models = [
-    { selectionId: "model-1", displayName: "One" },
-    { selectionId: "model-1", displayName: "Two" },
+    {
+      ...fixture.account.models[0],
+      selectionId: "model-1",
+      displayName: "One",
+    },
+    {
+      ...fixture.account.models[0],
+      selectionId: "model-1",
+      displayName: "Two",
+    },
   ];
   assert.throws(
     () => decodeWorkbenchSnapshot(duplicateModel),

@@ -3,6 +3,7 @@
 //! feed a bounded sink. No callback calls WebView or registers desktop tools.
 
 const std = @import("std");
+const multimodal = @import("session/multimodal.zig");
 const builtin = @import("builtin");
 const sdk = @import("metask_agentcore");
 const wire = sdk.types;
@@ -198,7 +199,12 @@ pub const WorkspaceInput = struct {
     trust: WorkspaceTrust,
 };
 
+pub const InputPart = multimodal.InputPart;
+pub const ImageFormat = multimodal.ImageFormat;
+
 pub const RunInput = union(enum) {
+    /// Ordered borrowed blocks, copied/encoded before prepareRun returns.
+    multimodal: []const InputPart,
     text: []const u8,
     skill: struct {
         skill_id: []const u8,
@@ -208,6 +214,7 @@ pub const RunInput = union(enum) {
 };
 
 const OwnedRunInput = union(enum) {
+    multimodal: multimodal.OwnedInput,
     text: []u8,
     skill: struct {
         skill_id: []u8,
@@ -220,8 +227,10 @@ const OwnedRunInput = union(enum) {
         allocator: std.mem.Allocator,
         input: RunInput,
         max_input_bytes: usize,
+        image_budget: *multimodal.Budget,
     ) (Error || std.mem.Allocator.Error)!OwnedRunInput {
         return switch (input) {
+            .multimodal => |parts| .{ .multimodal = try multimodal.OwnedInput.init(allocator, parts, max_input_bytes, image_budget) },
             .text => |text| {
                 if (text.len > max_input_bytes) return error.RunInputTooLarge;
                 if (!std.unicode.utf8ValidateSlice(text))
@@ -297,6 +306,7 @@ const OwnedRunInput = union(enum) {
 
     fn deinit(self: *OwnedRunInput, allocator: std.mem.Allocator) void {
         switch (self.*) {
+            .multimodal => |*parts| parts.deinit(allocator),
             .text => |text| allocator.free(text),
             .skill => |skill| {
                 allocator.free(skill.skill_id);
@@ -353,6 +363,8 @@ pub const Limits = struct {
     /// failures can select the ordinary empty Runtime path.
     mcp_input: ?*McpRuntimeInput = null,
     max_prompt_bytes: usize = 1024 * 1024,
+    /// Runtime-wide owned parts and encoded bytes, including concurrent prepareRun calls.
+    max_multimodal_input_bytes: usize = 64 * 1024 * 1024,
     event_capacity: usize = 512,
     event_bytes: usize = 8 * 1024 * 1024,
     per_session_event_capacity: usize = 128,
@@ -433,6 +445,7 @@ pub const Error = error{
     SessionClosing,
     InvalidRunInput,
     RunInputTooLarge,
+    RunInputBudgetExceeded,
     RunIdExhausted,
     RunGenerationExhausted,
     CompactIdExhausted,
@@ -549,6 +562,7 @@ pub const Session = struct {
             self.agent_runtime.allocator,
             input,
             self.agent_runtime.max_prompt_bytes,
+            &self.agent_runtime.multimodal_input_budget,
         );
         errdefer owned_input.deinit(self.agent_runtime.allocator);
         const terminal_diagnostic = try self.agent_runtime.allocator.alloc(
@@ -1449,6 +1463,7 @@ pub const Session = struct {
         }
         self.core_call_in_progress = true;
         const input = &self.run_input.?;
+        const has_images = input.* == .multimodal and input.multimodal.has_images;
         self.unlock();
 
         var options = std.mem.zeroes(wire.RunOptionsV1);
@@ -1460,6 +1475,14 @@ pub const Session = struct {
         var result = std.mem.zeroes(wire.RunResultV1);
         var diagnostic = emptyOwnedBytes();
         const status = switch (input.*) {
+            .multimodal => |parts| self.agent_runtime.api.session().runMultimodal(
+                self.raw,
+                run_id,
+                parts.parts,
+                &options,
+                &result,
+                &diagnostic,
+            ),
             .text => |text| self.agent_runtime.api.session().runText(
                 self.raw,
                 run_id,
@@ -1511,7 +1534,7 @@ pub const Session = struct {
             failure = .dependency_contract;
             self.state = .poisoned;
         } else if (typed_status) |known_status| {
-            const disposition = runStatusDisposition(known_status);
+            const disposition = runStatusDisposition(known_status, has_images);
             if (disposition == null) {
                 self.dependency_contract_failure = true;
                 failure = .dependency_contract;
@@ -2258,7 +2281,8 @@ fn skillUpdateStatusDisposition(status: sdk.Status) ?SessionStatusDisposition {
     };
 }
 
-fn runStatusDisposition(status: sdk.Status) ?SessionStatusDisposition {
+fn runStatusDisposition(status: sdk.Status, has_images: bool) ?SessionStatusDisposition {
+    if (status == .image_input_unsupported) return if (has_images) .reusable else null;
     return switch (status) {
         .out_of_memory,
         .invalid_state,
@@ -2459,6 +2483,7 @@ fn releaseOwned(api: sdk.Api, buffer: *wire.OwnedBytesV1) void {
 }
 
 test {
+    _ = multimodal;
     _ = session_wire;
     _ = session_control;
     _ = session_binding;

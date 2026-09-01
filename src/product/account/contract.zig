@@ -213,9 +213,46 @@ pub const ApiKeyView = struct {
     provider_kind: ProviderKind,
 };
 
+/// Server declarations, not MetaWork feature gates or verified runtime support.
+/// null means the server did not report the capability, never "unsupported".
+pub const ModelCapabilities = struct {
+    image_input: ?bool = null,
+    pdf_input: ?bool = null,
+    batch: ?bool = null,
+    citations: ?bool = null,
+    code_execution: ?bool = null,
+    structured_outputs: ?bool = null,
+    thinking: struct {
+        supported: ?bool = null,
+        adaptive: ?bool = null,
+        enabled: ?bool = null,
+    } = .{},
+    effort: struct {
+        supported: ?bool = null,
+        low: ?bool = null,
+        medium: ?bool = null,
+        high: ?bool = null,
+        max: ?bool = null,
+    } = .{},
+    context_management: struct {
+        supported: ?bool = null,
+        clear_thinking_20251015: ?bool = null,
+        clear_tool_uses_20250919: ?bool = null,
+        compact_20260112: ?bool = null,
+    } = .{},
+};
+
+pub const ModelMetadata = struct {
+    /// Positive server-reported limits. Missing/null/zero normalize to unknown.
+    max_input_tokens: ?u64 = null,
+    max_output_tokens: ?u64 = null,
+    capabilities: ModelCapabilities = .{},
+};
+
 pub const ModelView = struct {
     id: []const u8,
     display_name: []const u8,
+    metadata: ModelMetadata = .{},
 };
 
 pub const ExecutionTarget = struct {
@@ -821,6 +858,9 @@ pub fn validateView(view: AccountView) ValidationError!void {
     for (view.models, 0..) |model, model_index| {
         try validateRequired(model.id, Limits.model_id_bytes);
         try validateOptional(model.display_name, Limits.model_display_name_bytes);
+        if (model.metadata.max_input_tokens == 0 or
+            model.metadata.max_output_tokens == 0)
+            return error.InconsistentState;
         for (view.models[0..model_index]) |prior|
             if (std.mem.eql(u8, prior.id, model.id))
                 return error.InconsistentState;

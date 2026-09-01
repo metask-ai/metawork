@@ -248,6 +248,7 @@ const AccountProjection = struct {
             target_view.* = .{
                 .id = target.id.view(),
                 .display_name = target.display_name.view(),
+                .metadata = source.metadata,
             };
         }
         self.account_can_create_task = source_view.can_create_task;

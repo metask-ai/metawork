@@ -60,6 +60,20 @@ pub fn build(b: *std.Build) void {
         bundle.link_libc,
         &artifacts.tests.step,
     );
+    const multimodal_probe = b.addExecutable(.{
+        .name = "metawork-agent-multimodal-test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("scripts/probes/agent-multimodal-test.zig"),
+            .target = test_modules.agent.resolved_target,
+            .optimize = test_modules.agent.optimize,
+            .link_libc = bundle.link_libc,
+        }),
+    });
+    multimodal_probe.root_module.addImport("metawork_agent", test_modules.agent);
+    const multimodal_run = b.addRunArtifact(multimodal_probe);
+    if (b.args) |args| multimodal_run.addArgs(args);
+    b.step("test-agent-multimodal", "Run Agent image acceptance against the provider fixture")
+        .dependOn(&multimodal_run.step);
     addMcpConnectorTests(b, test_modules, bundle.link_libc);
     addMcpStdioTests(b, test_modules, bundle.link_libc);
     addMcpHttpTests(b, test_modules, bundle.link_libc);
@@ -232,6 +246,7 @@ fn addLifecycleTests(
     );
     const roots = [_][]const u8{
         "tests/agent/lifecycle_test.zig",
+        "tests/agent/multimodal_test.zig",
         "tests/agent/event_pump_test.zig",
         "tests/product/control_lifecycle_test.zig",
         "tests/integration/lifecycle/lifecycle_test.zig",
@@ -251,7 +266,8 @@ fn addLifecycleTests(
         const run = b.addRunArtifact(artifact);
         step.dependOn(&run.step);
         default_step.dependOn(&run.step);
-        if (std.mem.eql(u8, root, "tests/agent/lifecycle_test.zig"))
+        if (std.mem.eql(u8, root, "tests/agent/lifecycle_test.zig") or
+            std.mem.eql(u8, root, "tests/agent/multimodal_test.zig"))
             agent_step.dependOn(&run.step);
     }
 
