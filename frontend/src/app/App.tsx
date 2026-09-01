@@ -66,6 +66,10 @@ import {
   type FilePreviewDrawerState,
 } from "../features/files/FilePreviewDrawer.tsx";
 import {
+  FileChangesDrawer,
+  type FileChangesDrawerState,
+} from "../features/files/FileChangesDrawer.tsx";
+import {
   useNewTaskDrafts,
   useTaskDrafts,
 } from "../features/composer/useTaskDrafts.ts";
@@ -113,6 +117,9 @@ import type {
   TaskView,
   FilePreview,
   FileReferenceView,
+  FileChangeDiffResult,
+  FileChangeView,
+  RunFileChanges,
   PermissionProfile,
   WorkbenchSnapshot,
   UiResponsePayload,
@@ -180,6 +187,24 @@ type FilePreviewUiState =
   | (FilePreviewIdentity & { kind: "ready"; preview: FilePreview })
   | (FilePreviewIdentity & { kind: "failed"; preview: FilePreview });
 
+type FileChangesIdentity = {
+  taskId: string;
+  runId: string;
+  observation: RunFileChanges["observation"];
+  changes: FileChangeView[];
+  selected: FileChangeView;
+  requestGeneration: number;
+};
+
+type FileChangesUiState =
+  | { kind: "closed" }
+  | (FileChangesIdentity & { kind: "loading" })
+  | (FileChangesIdentity & {
+      kind: "settled";
+      diff: FileChangeDiffResult;
+    })
+  | (FileChangesIdentity & { kind: "failed" });
+
 export default function App() {
   const { t } = useI18n();
   const [workbench, dispatchWorkbench] = useReducer(
@@ -204,6 +229,10 @@ export default function App() {
     kind: "closed",
   });
   const filePreviewGeneration = useRef(0);
+  const [fileChanges, setFileChanges] = useState<FileChangesUiState>({
+    kind: "closed",
+  });
+  const fileChangesGeneration = useRef(0);
   const [statuses, setStatuses] = useState<ShellStatusState>(() =>
     publishStatus(
       {},
@@ -363,6 +392,7 @@ export default function App() {
       (candidate) => candidate.id === reference.id,
     );
     if (!selected) return;
+    closeFileChanges();
     requestFilePreview(taskId, runId, references, selected);
   }
 
@@ -386,9 +416,131 @@ export default function App() {
     );
   }
 
+  function closeFileChanges() {
+    fileChangesGeneration.current += 1;
+    setFileChanges({ kind: "closed" });
+  }
+
+  function requestFileChangeDiff(
+    taskId: string,
+    runId: string,
+    observation: RunFileChanges["observation"],
+    changes: FileChangeView[],
+    selected: FileChangeView,
+  ) {
+    const requestGeneration = fileChangesGeneration.current + 1;
+    fileChangesGeneration.current = requestGeneration;
+    const identity: FileChangesIdentity = {
+      taskId,
+      runId,
+      observation,
+      changes,
+      selected,
+      requestGeneration,
+    };
+    if (!selected.diffAvailable) {
+      setFileChanges({
+        ...identity,
+        kind: "settled",
+        diff: {
+          status: "unavailable",
+          reason: "not_recorded",
+          content: "",
+        },
+      });
+      return;
+    }
+    setFileChanges({ ...identity, kind: "loading" });
+    void client
+      .fileChangeDiff(taskId, runId, selected.id)
+      .then((diff) => {
+        if (
+          fileChangesGeneration.current !== requestGeneration ||
+          activeTaskIdRef.current !== taskId
+        )
+          return;
+        setFileChanges((current) => {
+          if (
+            current.kind === "closed" ||
+            current.requestGeneration !== requestGeneration ||
+            current.taskId !== taskId ||
+            current.runId !== runId ||
+            current.selected.id !== selected.id
+          )
+            return current;
+          return { ...current, kind: "settled", diff };
+        });
+      })
+      .catch(() => {
+        if (
+          fileChangesGeneration.current !== requestGeneration ||
+          activeTaskIdRef.current !== taskId
+        )
+          return;
+        setFileChanges((current) => {
+          if (
+            current.kind === "closed" ||
+            current.requestGeneration !== requestGeneration ||
+            current.taskId !== taskId ||
+            current.runId !== runId ||
+            current.selected.id !== selected.id
+          )
+            return current;
+          return { ...current, kind: "failed" };
+        });
+      });
+  }
+
+  function openFileChanges(taskId: string, runId: string) {
+    if (!snapshot.capabilities.typedFileChanges) return;
+    const task = snapshot.tasks.find((candidate) => candidate.id === taskId);
+    const run = task?.runs.find((candidate) => candidate.id === runId);
+    const recorded = run?.fileChanges;
+    if (
+      !task ||
+      !run ||
+      !recorded ||
+      recorded.changes.length === 0 ||
+      activeTaskIdRef.current !== taskId
+    )
+      return;
+    closeFilePreview();
+    requestFileChangeDiff(
+      taskId,
+      runId,
+      recorded.observation,
+      recorded.changes,
+      recorded.changes[0],
+    );
+  }
+
+  function selectFileChange(change: FileChangeView) {
+    if (fileChanges.kind === "closed") return;
+    requestFileChangeDiff(
+      fileChanges.taskId,
+      fileChanges.runId,
+      fileChanges.observation,
+      fileChanges.changes,
+      change,
+    );
+  }
+
+  function refreshFileChangeDiff() {
+    if (fileChanges.kind === "closed") return;
+    requestFileChangeDiff(
+      fileChanges.taskId,
+      fileChanges.runId,
+      fileChanges.observation,
+      fileChanges.changes,
+      fileChanges.selected,
+    );
+  }
+
   useEffect(() => {
     filePreviewGeneration.current += 1;
     setFilePreview({ kind: "closed" });
+    fileChangesGeneration.current += 1;
+    setFileChanges({ kind: "closed" });
   }, [activeTask?.id]);
 
   useEffect(() => {
@@ -409,6 +561,32 @@ export default function App() {
         return { kind: "closed" };
       }
       return { ...current, references, reference };
+    });
+  }, [snapshot.revision, snapshot.tasks]);
+
+  useEffect(() => {
+    setFileChanges((current) => {
+      if (current.kind === "closed") return current;
+      const task = snapshot.tasks.find(
+        (candidate) => candidate.id === current.taskId,
+      );
+      const run = task?.runs.find(
+        (candidate) => candidate.id === current.runId,
+      );
+      const recorded = run?.fileChanges;
+      const selected = recorded?.changes.find(
+        (candidate) => candidate.id === current.selected.id,
+      );
+      if (!task || !run || !recorded || !selected) {
+        fileChangesGeneration.current += 1;
+        return { kind: "closed" };
+      }
+      return {
+        ...current,
+        observation: recorded.observation,
+        changes: recorded.changes,
+        selected,
+      };
     });
   }, [snapshot.revision, snapshot.tasks]);
 
@@ -2333,6 +2511,21 @@ export default function App() {
           phase: filePreview.kind === "loading" ? "loading" : "settled",
           preview: filePreview.kind === "loading" ? null : filePreview.preview,
         };
+  const fileChangesDrawerState: FileChangesDrawerState | null =
+    fileChanges.kind === "closed"
+      ? null
+      : {
+          observation: fileChanges.observation,
+          changes: fileChanges.changes,
+          selected: fileChanges.selected,
+          phase:
+            fileChanges.kind === "loading"
+              ? "loading"
+              : fileChanges.kind === "failed"
+                ? "failed"
+                : "settled",
+          diff: fileChanges.kind === "settled" ? fileChanges.diff : null,
+        };
 
   return (
     <AppShell
@@ -2853,6 +3046,7 @@ export default function App() {
                 composerHasDraft={composerDraftHasContent(composerDraft)}
                 retryAvailable={taskCanCompose && !taskOperationInFlight}
                 responseDisabled={bridgeUnavailable}
+                fileChangesEnabled={snapshot.capabilities.typedFileChanges}
                 onPrepareRetry={prepareRetry}
                 onOpenTool={(runId, toolId, opener) =>
                   openInspectorSection("work_process", opener, {
@@ -2861,6 +3055,7 @@ export default function App() {
                   })
                 }
                 onPreviewFile={openFilePreview}
+                onReviewFileChanges={openFileChanges}
                 onRespond={(payload) => void respondUi(payload)}
                 renderPendingUi={(props) => {
                   const { taskId, ...panelProps } = props;
@@ -2898,6 +3093,14 @@ export default function App() {
           onSelect={selectFilePreview}
           onRefresh={refreshFilePreview}
           onClose={closeFilePreview}
+        />
+      )}
+      {fileChangesDrawerState && (
+        <FileChangesDrawer
+          state={fileChangesDrawerState}
+          onSelect={selectFileChange}
+          onRefresh={refreshFileChangeDiff}
+          onClose={closeFileChanges}
         />
       )}
     </AppShell>
