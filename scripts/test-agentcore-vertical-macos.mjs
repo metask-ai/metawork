@@ -434,7 +434,7 @@ try {
     "interrupted",
     "failed",
   ]);
-  const finalSnapshot = await poll(
+  let finalSnapshot = await poll(
     async () => {
       if (provider.error) throw provider.error;
       const current = await snapshot();
@@ -485,6 +485,34 @@ try {
     "AgentCore run",
   );
 
+  const fileChangesEvidence = await poll(
+    async () => {
+      const current = await snapshot();
+      const currentTask = current.tasks.find((item) => item.id === taskId);
+      const currentRun = currentTask?.runs.find((item) => item.id === runId);
+      const modified = currentRun?.fileChanges?.changes.find(
+        (item) =>
+          item.kind === "modified" &&
+          normalizedDisplayPath(item.displayPath).endsWith("/fixture.txt"),
+      );
+      if (
+        current.capabilities?.typedFileChanges !== true ||
+        currentRun?.fileChanges?.observation === "collecting" ||
+        !modified?.diffAvailable
+      )
+        return null;
+      return {
+        snapshot: current,
+        task: currentTask,
+        run: currentRun,
+        modified,
+      };
+    },
+    commandTimeoutMs,
+    "typed File Changes artifact",
+  );
+  finalSnapshot = fileChangesEvidence.snapshot;
+
   const task = finalSnapshot.tasks.find((item) => item.id === taskId);
   const run = task.runs.find((item) => item.id === runId);
   if (finalSnapshot.capabilities?.conversationRecovery !== true)
@@ -493,6 +521,22 @@ try {
     throw new Error("completed Task did not remain available for continuation");
   if (run.phase !== "completed" || run.outcome !== "completed")
     throw new Error(`run did not complete truthfully: ${JSON.stringify(run)}`);
+  assertFileChanges(run.fileChanges, process.platform === "win32");
+  const fileChangeDiff = await invokeBridge("metawork.files.diff", {
+    taskId,
+    runId,
+    fileChangeId: fileChangesEvidence.modified.id,
+  });
+  if (
+    fileChangeDiff?.status !== "ready" ||
+    fileChangeDiff.complete !== true ||
+    typeof fileChangeDiff.redacted !== "boolean" ||
+    !fileChangeDiff.content.includes("agentcore-vertical-before") ||
+    !fileChangeDiff.content.includes("agentcore-vertical-after")
+  )
+    throw new Error(
+      `typed File Changes diff was not served truthfully: ${JSON.stringify(fileChangeDiff)}`,
+    );
   assertLiveRunRevisions(
     observedRunRevisions,
     run,
@@ -843,8 +887,8 @@ try {
 
   process.stdout.write(
     process.platform === "win32"
-      ? "AgentCore Windows desktop vertical passed: real Skill/Text/compact checkpoints, hash/descriptor verification, missing-blob restart reconciliation, main-thread ProductDelivery, Runtime-owned tray routing, and clean shutdown; Windows Shell chrome/tray remain separate non-blocking gates.\n"
-      : "AgentCore macOS desktop vertical passed: real Skill/Text/compact checkpoints, hash/descriptor verification, missing-blob restart reconciliation, materialized arguments without raw slash, main-thread ProductDelivery, Read/Bash/Edit, permission UI, duplicate UI-response rejection, Task metadata lifecycle, Runtime-owned tray routing, and clean shutdown.\n",
+      ? "AgentCore Windows desktop vertical passed: real Skill/Text/compact checkpoints, typed File Changes/diff, hash/descriptor verification, missing-blob restart reconciliation, main-thread ProductDelivery, Runtime-owned tray routing, and clean shutdown; Windows Shell chrome/tray remain separate non-blocking gates.\n"
+      : "AgentCore macOS desktop vertical passed: real Skill/Text/compact checkpoints, typed File Changes/diff, hash/descriptor verification, missing-blob restart reconciliation, materialized arguments without raw slash, main-thread ProductDelivery, Read/Bash/Edit, permission UI, duplicate UI-response rejection, Task metadata lifecycle, Runtime-owned tray routing, and clean shutdown.\n",
   );
 } catch (error) {
   process.stderr.write(`${output}\n`);
@@ -1290,6 +1334,63 @@ async function readSnapshot() {
 
 function isWireId(value) {
   return typeof value === "string" && /^[1-9][0-9]*$/.test(value);
+}
+
+function normalizedDisplayPath(value) {
+  return `/${String(value).replaceAll("\\", "/").replace(/^\/+/, "")}`;
+}
+
+function assertFileChanges(fileChanges, requireCreated) {
+  if (fileChanges?.observation !== "complete")
+    throw new Error(
+      `typed File Changes observation did not close completely: ${JSON.stringify(fileChanges)}`,
+    );
+  if (!Array.isArray(fileChanges.changes) || fileChanges.changes.length === 0)
+    throw new Error("typed File Changes omitted its records");
+  const ids = new Set();
+  let previousOrder = 0n;
+  for (const change of fileChanges.changes) {
+    if (
+      typeof change.id !== "string" ||
+      change.id.length === 0 ||
+      ids.has(change.id) ||
+      !/^[1-9][0-9]*$/.test(change.order) ||
+      BigInt(change.order) <= previousOrder ||
+      !["created", "modified", "deleted", "moved"].includes(change.kind) ||
+      !["applied", "partial"].includes(change.status) ||
+      typeof change.displayPath !== "string" ||
+      !/^(0|[1-9][0-9]*)$/.test(change.beforeBytes) ||
+      !/^(0|[1-9][0-9]*)$/.test(change.afterBytes) ||
+      typeof change.diffAvailable !== "boolean" ||
+      typeof change.diffComplete !== "boolean" ||
+      typeof change.redacted !== "boolean" ||
+      (change.kind === "moved") !== (change.fromDisplayPath !== null)
+    )
+      throw new Error(
+        `typed File Changes record violated its wire contract: ${JSON.stringify(change)}`,
+      );
+    ids.add(change.id);
+    previousOrder = BigInt(change.order);
+  }
+  if (
+    !fileChanges.changes.some(
+      (change) =>
+        change.kind === "modified" &&
+        normalizedDisplayPath(change.displayPath).endsWith("/fixture.txt"),
+    )
+  )
+    throw new Error("typed File Changes omitted the real Edit record");
+  if (
+    requireCreated &&
+    !fileChanges.changes.some(
+      (change) =>
+        change.kind === "created" &&
+        normalizedDisplayPath(change.displayPath).endsWith(
+          "/agentcore-vertical-write.txt",
+        ),
+    )
+  )
+    throw new Error("typed File Changes omitted the real Write record");
 }
 
 function isOpaqueRevision(value) {
