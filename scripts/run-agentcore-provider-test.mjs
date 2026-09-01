@@ -451,7 +451,7 @@ pub fn build(b: *std.Build) void {
     );
   }
   const source = hostMode
-    ? ""
+    ? null
     : await readFile(
         path.join(
           repositoryRoot,
@@ -467,22 +467,24 @@ pub fn build(b: *std.Build) void {
     requestCount = 0;
     requestError = null;
     const baseUrl = `${serverRoot}${provider.baseUrlSuffix}`;
-    const main = source
-      .replaceAll("__BASE_URL__", baseUrl)
-      .replaceAll("__PROVIDER_CODE__", provider.code)
-      .replaceAll(
-        "__PROTOCOL_CODE__",
-        provider.protocol ?? "wire.PROTOCOL_DEFAULT",
-      )
-      .replaceAll("__PNG__", png)
-      .replaceAll("__GIF__", gif)
-      .replaceAll(
-        "__EXPECT_UNKNOWN_IMAGE_REJECTION__",
-        String(provider.name !== "gemini"),
-      )
-      .replaceAll("__API_KEY__", provider.apiKey)
-      .replaceAll("__MODEL__", provider.model);
-    if (!hostMode) await writeFile(path.join(consumerRoot, "main.zig"), main);
+    if (source !== null) {
+      const main = source
+        .replaceAll("__BASE_URL__", baseUrl)
+        .replaceAll("__PROVIDER_CODE__", provider.code)
+        .replaceAll(
+          "__PROTOCOL_CODE__",
+          provider.protocol ?? "wire.PROTOCOL_DEFAULT",
+        )
+        .replaceAll("__PNG__", png)
+        .replaceAll("__GIF__", gif)
+        .replaceAll(
+          "__EXPECT_UNKNOWN_IMAGE_REJECTION__",
+          String(provider.name !== "gemini"),
+        )
+        .replaceAll("__API_KEY__", provider.apiKey)
+        .replaceAll("__MODEL__", provider.model);
+      await writeFile(path.join(consumerRoot, "main.zig"), main);
+    }
     try {
       if (hostMode) {
         await runChild(
