@@ -528,7 +528,6 @@ pub fn build(b: *std.Build) void {
         )
         .replaceAll("__PNG__", png)
         .replaceAll("__GIF__", gif)
-        .replaceAll("__PDF__", pdf)
         .replaceAll(
           "__EXPECT_UNKNOWN_IMAGE_REJECTION__",
           String(provider.name !== "gemini"),
