@@ -129,7 +129,7 @@ child-process 非正常退出证明进程终止后的 WAL 恢复，不是机器�
 
 | 目标 | 状态 | 未闭合证据 |
 | --- | --- | --- |
-| macOS arm64 | 已验证（历史，`E-METASK-20260720-0810`）：真实 `.app`、Account 与 AgentCore Run | 受影响 revision/artifact 的 desktop、Keychain 跨重建授权、兼容能力、可访问性与正式分发仍按变更重新取证 |
+| macOS arm64 | 已验证（`E-MACOS-ARM64-PACKAGE-20260901`）：revision `93075d3` 的 desktop vertical 与 Developer ID signed/notarized DMG；历史真实 Metask Account 证据见 `E-METASK-20260720-0810` | DMG 拖拽安装与首次启动、Keychain 跨重建授权、兼容能力、可访问性和真实 UI 交互仍须分别取证 |
 | macOS x86_64 | 自动化已覆盖：target-specific artifact 接受由 lock 与 verifier 控制；人工验收待完成：真实 desktop | 真实 desktop vertical |
 | Windows x86_64 GNU | 已验证（历史，`E-WIN-COMPAT-20260820`、`E-WIN-SINGLE-20260828`、`E-WIN-X64-PACKAGE`）：development capability 与 signed installer 隔离安装/卸载 | 受影响 revision/artifact 的 development vertical，以及交互式安装、开始菜单、驻留升级与 Windows 10/11 矩阵 |
 | Windows arm64 GNU | 已验证（历史，`E-WIN-ARM64-PACKAGE`）：Native Release、安装包生成和签名；人工验收待完成：真实运行 | 真实 AgentCore vertical、安装启动与平台行为 |
@@ -147,6 +147,7 @@ macOS 的 AgentCore artifact、Native vertical、Keychain、secure input、windo
 | `E-WIN-SINGLE-20260828` | Windows single-instance process vertical | [高层架构](architecture.md) | `git show df8a9b2e798f5242491ace37400b09e495ae32d2:docs/validation.md`；`git show a858fcf96fa114cff56ab212b2c4fcc3ed66af87:docs/validation.md` | 2026-08-28 的真实多进程竞争、activation、restart、shutdown 与 crash recovery 子集；不证明交互失败、安装升级或后续 revision |
 | `E-MACOS-SINGLE-COMPILE-20260828` | macOS single-instance 交叉语义编译 | [高层架构](architecture.md) | `git show 331e77c101ed0e0ea7aba4b3399dcd76ebd10fca:docs/validation.md` | 2026-08-28 的 aarch64 macOS 交叉语义编译；不证明真实 socket、peer identity、activation、shutdown 或 crash recovery |
 | `E-MACOS-ICON-20260825` | macOS Icon Composer compile | [macOS 分发](macos-distribution.md) | `git show 7767629ee2fe8aaa4c85ac89afa1c6fa1887cdc5:docs/validation.md` | 2026-08-25 的本机 `actool` compile 证明当时工具链和输入能生成预期 icon resources；不证明后续输入、签名、公证或真实 UI 视觉 |
+| `E-MACOS-ARM64-PACKAGE-20260901` | macOS arm64 desktop vertical 与 notarized package | [产品需求](requirements.md)、[Product 架构](product-architecture.md)、[macOS 分发](macos-distribution.md) | 2026-09-01；MetaWork revision `93075d3736c28b6b8d37cab9778f0a49f9a7b733`；`node scripts/test-agentcore-vertical-macos.mjs`；`npm run package:macos -- arm64`；Apple notarization `11559e7a-92f0-4f7b-bbdf-e677db775359`；`metawork-0.1.5-macos-arm64.dmg` SHA-256 `e735080b52d0892d8b7386a8b80c2079d2427116d3e1ba46351abbe06f187506` | 精确 revision 的 isolated local-provider desktop vertical 通过 Skill/Text/compact checkpoint、ProductDelivery、工具、permission、恢复和 clean shutdown；同一 revision 的 arm64 artifact 通过 Developer ID 签名、公证、staple/validate、Gatekeeper、DMG 结构与 hash Gate。它不证明真实 Metask 服务或用户 Keychain、拖拽安装后首次启动、可访问性/视觉、x86_64 或后续构建 |
 | `E-WIN-X64-PACKAGE` | Windows x64 signed installer | [Windows 分发](windows-distribution.md) | `git show 48ba6c76522731cdbff5d11fe320f6dabb54faaa:docs/validation.md` | 当时的 signed x64 installer 完成隔离目录 silent install/uninstall 与 Authenticode 验证；不证明后续 artifact 或交互式安装 |
 | `E-WIN-ARM64-PACKAGE` | Windows ARM64 signed package | [Windows 分发](windows-distribution.md) | `git show 776e2c25d9bd4f6ec6ad89cf70d91fe8ba73e378:docs/validation.md`；2026-08-28 installer SHA-256 `830d524cb35000a342687658b5aaf561d003f6149a26775747aae8c810a732a5` | 当时的 ARM64 主程序与 installer 通过签名、时间戳和 PE identity 验证；不证明 ARM64 安装、启动或 AgentCore vertical |
 
