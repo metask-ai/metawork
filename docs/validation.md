@@ -60,7 +60,7 @@ candidate probe、真实桌面验收、签名、公证和发布验证不属于 `
 | 单个 Native owner | `zig build <registered-test-step>` | 精确 step 由 `build.zig` 注册 |
 | Storage 基础层 | `zig build test-storage` | SQL conformance、SQLite backend 与 child-process WAL recovery；优化级别与平台要求见 [Storage 基础层验证](#storage-基础层验证) |
 | AgentCore staged candidate | `node scripts/verify-staged-agentcore-bundle.mjs` 后运行相关 `run-agentcore-*-probe.mjs` | verifier 证明接受条件，probe 证明候选行为；二者不能互换 |
-| Agent Session 图片输入 | `node scripts/run-agentcore-provider-test.mjs --staged --host` | 真实 Host 消费 canonical bundle，验证 provider 图片块、连续历史、拒绝与 opaque checkpoint 恢复；不等于远端模型视觉质量验收 |
+| Agent Session 多模态输入 | `node scripts/run-agentcore-provider-test.mjs --staged --host` | 真实 Host 消费 canonical bundle，验证 provider 图片/PDF 块、连续历史、typed 拒绝与 opaque checkpoint 恢复；当前 fixture 中 Anthropic 接受 PDF，Responses、OpenAI Chat 与 Gemini 明确返回 `document_input_unsupported`；不等于远端模型视觉或文档理解质量验收 |
 | Windows development baseline | `node scripts/run-windows-bringup.mjs` | Windows 真实 vertical 与关联回归的组合入口 |
 | macOS desktop vertical | `node scripts/test-agentcore-vertical-macos.mjs [aarch64-macos\|x86_64-macos]` | 无参数绑定当前 Host target；显式参数在 Rosetta 可用时分别证明所选 artifact，不替代 Intel 真机专项验收 |
 | macOS 分发 | `npm run package:macos` | 具体签名、公证和 artifact Gate 见 [macOS 分发](macos-distribution.md) |
@@ -163,7 +163,7 @@ macOS 的 AgentCore artifact、Native vertical、Keychain、secure input、windo
 | FileChange、typed Output、plan/approval、custom UI | 尚未形成可开放产品能力 | 对应合同、owner、持久化、恢复、投影和 UI Gate | [产品需求](requirements.md)、[UI 设计规范](ui-design.md) |
 | Skill catalog 历史内容固定 | 外部合同证据不足 | body/resources lease 的独立合同或可复现实验 | [AgentCore 集成契约](agentcore-integration.md) |
 | execution rebind | 仅进程内 binding/model switch 有自动化 | 跨重启 epoch/history、竞态和恢复证据 | [产品需求](requirements.md)、[Product 架构](product-architecture.md) |
-| MCP 图片作为模型视觉输入 | 当前 canonical bundle 的 Streamable HTTP → Anthropic 验证仅保留序列化 tool-result 文本，不能认定模型收到图片块 | 上游支持后，验证标准 MCP image content 成为 provider 图片块，且连续历史与 checkpoint 保持；不得用 Base64 文本存在代替视觉证据 | [AgentCore 集成契约](agentcore-integration.md#agent-session-图片输入) |
+| MCP 图片作为模型视觉输入 | 当前 canonical bundle 的 Streamable HTTP → Anthropic 验证仅保留序列化 tool-result 文本，不能认定模型收到图片块 | 上游支持后，验证标准 MCP image content 成为 provider 图片块，且连续历史与 checkpoint 保持；不得用 Base64 文本存在代替视觉证据 | [AgentCore 集成契约](agentcore-integration.md#agent-session-多模态输入) |
 | MCP 真实外部环境 | 确定性 owner/事务回归不等于平台验收 | 第三方 server、credential、network、secure capture、browser/callback 与 issuer 的跨平台证据 | [产品需求](requirements.md) |
 | Scheduled Task 的 Host 外执行 | 尚未实现 | 系统关机、用户显式退出、登录前服务或远端调度的能力合同与 lifecycle 证据 | [产品需求](requirements.md)、[Product 架构](product-architecture.md) |
 | Windows 完整分发矩阵与更新、Linux | 部分平台证据或尚未开始 | 交互安装、启动、升级、Windows 10/11、更新策略，以及 Linux build/run/distribution | [产品需求](requirements.md)、[Windows 分发](windows-distribution.md) |

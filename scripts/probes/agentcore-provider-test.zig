@@ -201,11 +201,23 @@ pub fn main() !void {
     try expectOk(api, "multimodal", image_status);
     try validateResult(result);
     releaseOwned(api, &diagnostic);
-    try expectOk(api, "image_history", api.session().runText(raw_session, 3, agentcore.bytesView("Continue with the images."), &options, &result, &diagnostic));
+    const document_parts = [_]wire.RunInputPartV1{agentcore.documentPart("application/pdf", @embedFile("document.b64"), "")};
+    const events_before_document = provider_test.event_count;
+    const document_status = api.session().runMultimodal(raw_session, 3, &document_parts, &options, &result, &diagnostic);
+    if (__EXPECT_DOCUMENT_SUPPORT__) {
+        try expectOk(api, "document", document_status);
+        try validateResult(result);
+    } else if (document_status != wire.STATUS_DOCUMENT_INPUT_UNSUPPORTED or provider_test.event_count != events_before_document) {
+        return error.UnexpectedDocumentRejection;
+    }
+    releaseOwned(api, &diagnostic);
+    const history_run_id: u64 = if (__EXPECT_DOCUMENT_SUPPORT__) 4 else 3;
+    try expectOk(api, "multimodal_history", api.session().runText(raw_session, history_run_id, agentcore.bytesView("Continue with the images and document."), &options, &result, &diagnostic));
     try validateResult(result);
     releaseOwned(api, &diagnostic);
     const large_parts = [_]wire.RunInputPartV1{agentcore.imagePart("image/png", @embedFile("image.b64"))};
-    try expectOk(api, "large_image_only", api.session().runMultimodal(raw_session, 4, &large_parts, &options, &result, &diagnostic));
+    const large_run_id = history_run_id + 1;
+    try expectOk(api, "large_image_only", api.session().runMultimodal(raw_session, large_run_id, &large_parts, &options, &result, &diagnostic));
     try validateResult(result);
 
     const allocator = std.heap.page_allocator;
@@ -258,35 +270,42 @@ pub fn main() !void {
     defer decoded.deinit();
     if (decoded.value.health != .complete) return error.DegradedRestore;
     releaseOwned(api, &diagnostic);
-    try expectOk(api, "restored_image_history", api.session().runText(restored, 5, agentcore.bytesView("Continue after restore."), &options, &result, &diagnostic));
+    const restored_run_id = large_run_id + 1;
+    try expectOk(api, "restored_multimodal_history", api.session().runText(restored, restored_run_id, agentcore.bytesView("Continue after restore."), &options, &result, &diagnostic));
     try validateResult(result);
 
     if (__EXPECT_UNKNOWN_IMAGE_REJECTION__) {
         try expectOk(api, "set_unknown_model", api.sessionControl().setModel()(restored, agentcore.bytesView("unknown-provider-test-model"), null));
         const events_before = provider_test.event_count;
         releaseOwned(api, &diagnostic);
-        const rejected = api.session().runMultimodal(restored, 6, &parts, &options, &result, &diagnostic);
+        const rejected_run_id = restored_run_id + 1;
+        const rejected = api.session().runMultimodal(restored, rejected_run_id, &parts, &options, &result, &diagnostic);
         if (rejected != wire.STATUS_IMAGE_INPUT_UNSUPPORTED or provider_test.event_count != events_before)
             return error.UnexpectedImageRejection;
-        try expectOk(api, "restore_image_model", api.sessionControl().setModel()(restored, agentcore.bytesView("__MODEL__"), null));
+        releaseOwned(api, &diagnostic);
+        const document_rejected = api.session().runMultimodal(restored, rejected_run_id, &document_parts, &options, &result, &diagnostic);
+        if (document_rejected != wire.STATUS_DOCUMENT_INPUT_UNSUPPORTED or provider_test.event_count != events_before)
+            return error.UnexpectedDocumentRejection;
+        try expectOk(api, "restore_multimodal_model", api.sessionControl().setModel()(restored, agentcore.bytesView("__MODEL__"), null));
     } else {
         // Gemini's unknown-model defaults accept images; use a malformed input
         // to verify admission atomicity without asserting a nonexistent gate.
         const empty_parts = [_]wire.RunInputPartV1{agentcore.textPart("")};
         releaseOwned(api, &diagnostic);
-        if (api.session().runMultimodal(restored, 6, &empty_parts, &options, &result, &diagnostic) != wire.STATUS_INVALID_ARGUMENT)
+        if (api.session().runMultimodal(restored, restored_run_id + 1, &empty_parts, &options, &result, &diagnostic) != wire.STATUS_INVALID_ARGUMENT)
             return error.UnexpectedInvalidInputStatus;
     }
     releaseOwned(api, &diagnostic);
-    try expectOk(api, "rejection_history", api.session().runText(restored, 6, agentcore.bytesView("Continue after rejection."), &options, &result, &diagnostic));
+    const rejection_history_run_id = restored_run_id + 1;
+    try expectOk(api, "rejection_history", api.session().runText(restored, rejection_history_run_id, agentcore.bytesView("Continue after rejection."), &options, &result, &diagnostic));
     try validateResult(result);
     if (__EXPECT_UNKNOWN_IMAGE_REJECTION__) {
         try expectOk(api, "set_text_only_model_after_images", api.sessionControl().setModel()(restored, agentcore.bytesView("unknown-provider-test-model"), null));
         releaseOwned(api, &diagnostic);
-        try expectOk(api, "unsupported_history_status", api.session().runText(restored, 7, agentcore.bytesView("History cannot be sent to this model."), &options, &result, &diagnostic));
+        try expectOk(api, "unsupported_history_status", api.session().runText(restored, rejection_history_run_id + 1, agentcore.bytesView("History cannot be sent to this model."), &options, &result, &diagnostic));
         if (try agentcore.StopReason.fromCode(result.stop_reason_code) != .api_error)
             return error.UnexpectedHistoryFailure;
     }
     if (provider_test.max_event_bytes > 512 * 1024) return error.EventTooLarge;
-    std.debug.print("image events maximum bytes={d}\n", .{provider_test.max_event_bytes});
+    std.debug.print("multimodal events maximum bytes={d}\n", .{provider_test.max_event_bytes});
 }
