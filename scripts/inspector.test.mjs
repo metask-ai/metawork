@@ -61,6 +61,9 @@ const { TaskOverview } = await vite.ssrLoadModule(
 const { TaskContent } = await vite.ssrLoadModule(
   "/src/features/tasks/TaskContent.tsx",
 );
+const { FileChangesDrawer } = await vite.ssrLoadModule(
+  "/src/features/files/FileChangesDrawer.tsx",
+);
 const { RunProcess } = await vite.ssrLoadModule(
   "/src/features/tasks/RunProcess.tsx",
 );
@@ -186,9 +189,11 @@ function renderTaskContent(value, locale = "en-US") {
         composerHasDraft: false,
         retryAvailable: false,
         responseDisabled: false,
+        fileChangesEnabled: false,
         onPrepareRetry() {},
         onOpenTool() {},
         onPreviewFile() {},
+        onReviewFileChanges() {},
         onRespond() {},
         renderPendingUi() {
           return null;
@@ -220,9 +225,11 @@ function taskContentElement(value, revision = "1", overrides = {}) {
       composerHasDraft: false,
       retryAvailable: false,
       responseDisabled: false,
+      fileChangesEnabled: false,
       onPrepareRetry() {},
       onOpenTool() {},
       onPreviewFile() {},
+      onReviewFileChanges() {},
       onRespond() {},
       renderPendingUi() {
         return null;
@@ -1231,6 +1238,133 @@ test("Run file references render as preview entry without change semantics", () 
   assert.match(markup, />Referenced files</);
   assert.match(markup, /src\/main\.zig/);
   assert.doesNotMatch(markup, /Files changed|modified|Output/);
+});
+
+test("Run File Changes summary is capability-gated and preserves incomplete zero-record truth", () => {
+  const recorded = task({
+    runs: [
+      run({
+        fileChanges: {
+          observation: "complete",
+          changes: [
+            {
+              id: "change-1",
+              order: "1",
+              kind: "modified",
+              status: "applied",
+              displayPath: "src/main.zig",
+              fromDisplayPath: null,
+              beforeBytes: "12",
+              afterBytes: "14",
+              diffAvailable: true,
+              diffComplete: true,
+              redacted: false,
+            },
+          ],
+        },
+      }),
+    ],
+  });
+  const hidden = renderToStaticMarkup(taskContentElement(recorded));
+  assert.doesNotMatch(hidden, /File changes|Review changes/);
+
+  const visible = renderToStaticMarkup(
+    taskContentElement(recorded, "1", { fileChangesEnabled: true }),
+  );
+  assert.match(visible, />File changes</);
+  assert.match(visible, />1 files · 1 changes</);
+  assert.match(visible, />Review changes</);
+
+  const incomplete = task({
+    runs: [
+      run({
+        fileChanges: { observation: "incomplete", changes: [] },
+      }),
+    ],
+  });
+  const incompleteMarkup = renderToStaticMarkup(
+    taskContentElement(incomplete, "1", { fileChangesEnabled: true }),
+  );
+  assert.match(incompleteMarkup, /The file change record may be incomplete/);
+  assert.doesNotMatch(incompleteMarkup, />Review changes</);
+});
+
+test("File Changes Drawer keeps repeated records, typed warnings, and narrow-screen structure", async () => {
+  const changes = [
+    {
+      id: "change-1",
+      order: "1",
+      kind: "modified",
+      status: "applied",
+      displayPath: "src/main.zig",
+      fromDisplayPath: null,
+      beforeBytes: "12",
+      afterBytes: "14",
+      diffAvailable: true,
+      diffComplete: false,
+      redacted: true,
+    },
+    {
+      id: "change-2",
+      order: "2",
+      kind: "moved",
+      status: "partial",
+      displayPath: "src/main.zig",
+      fromDisplayPath: "src/old-main.zig",
+      beforeBytes: "14",
+      afterBytes: "14",
+      diffAvailable: false,
+      diffComplete: false,
+      redacted: false,
+    },
+  ];
+  let selected = null;
+  render(
+    localizedView(
+      createElement(FileChangesDrawer, {
+        state: {
+          observation: "incomplete",
+          changes,
+          selected: changes[0],
+          phase: "settled",
+          diff: {
+            status: "ready",
+            content: "@@ -1 +1 @@\n-secret\n+safe",
+            complete: false,
+            redacted: true,
+          },
+        },
+        onSelect(change) {
+          selected = change;
+        },
+        onRefresh() {},
+        onClose() {},
+      }),
+    ),
+  );
+
+  const dialog = screen.getByRole("dialog", { name: "Review changes" });
+  assert.match(dialog.className, /max-\[620px\]:w-full/);
+  assert.ok(
+    dialog.querySelector('[class*="max-[620px]:grid-cols-1"]'),
+    "Drawer did not retain its narrow-screen single-column layout",
+  );
+  assert.ok(screen.getByRole("navigation", { name: "Changed files" }));
+  assert.ok(screen.getByRole("status"));
+  assert.match(dialog.textContent, /Some file change records may be missing/);
+  assert.match(dialog.textContent, /Change 1/);
+  assert.match(dialog.textContent, /Change 2/);
+  assert.match(dialog.textContent, /Modified/);
+  assert.match(dialog.textContent, /Moved/);
+  assert.match(dialog.textContent, /Recorded diff is incomplete/);
+  assert.match(dialog.textContent, /Known sensitive content was hidden/);
+  assert.match(dialog.textContent, /-secret/);
+  assert.match(dialog.textContent, /\+safe/);
+  assert.doesNotMatch(dialog.textContent, /Accept|Reject|Revert|Stage/);
+
+  const user = userEvent.setup({ document: dom.window.document });
+  await user.click(screen.getByRole("button", { name: /Change 2 Moved/ }));
+  assert.equal(selected, changes[1]);
 });
 
 test("permission intervention never exposes internal Run identity", () => {
