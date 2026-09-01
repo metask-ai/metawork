@@ -130,6 +130,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-product-control", .root_module = test_modules.product_control_runtime },
         .{ .name = "metawork-product-control-executor", .root_module = test_modules.product_control_executor },
         .{ .name = "metawork-product-control-file-preview", .root_module = test_modules.product_control_file_preview },
+        .{ .name = "metawork-product-control-file-change-io", .root_module = test_modules.product_control_file_change_io },
         .{ .name = "metawork-product-workspace-automatic-root", .root_module = test_modules.product_workspace_automatic_root },
         .{ .name = "metawork-product-workspace", .root_module = test_modules.product_workspace_runtime },
         .{ .name = "metawork-product-workspace-view", .root_module = test_modules.product_workspace_view },
@@ -155,6 +156,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-mcp-oauth", .root_module = test_modules.mcp_oauth },
         .{ .name = "metawork-product-task-persistence", .root_module = test_modules.product_task_persistence },
         .{ .name = "metawork-product-task-checkpoint-store", .root_module = test_modules.product_task_checkpoint_store },
+        .{ .name = "metawork-product-task-file-change-store", .root_module = test_modules.product_task_file_change_store },
         .{ .name = "metawork-product-task-checkpoint-record", .root_module = test_modules.product_task_checkpoint_record },
         .{ .name = "metawork-product-task-agent-session", .root_module = test_modules.product_task_agent_session },
         .{ .name = "metawork-product-task-attachment", .root_module = test_modules.product_task_attachment },
@@ -323,6 +325,7 @@ const WiredModules = struct {
     product_control_runtime: *std.Build.Module,
     product_control_executor: *std.Build.Module,
     product_control_file_preview: *std.Build.Module,
+    product_control_file_change_io: *std.Build.Module,
     product_workspace_automatic_root: *std.Build.Module,
     product_workspace: *std.Build.Module,
     product_workspace_runtime: *std.Build.Module,
@@ -352,6 +355,7 @@ const WiredModules = struct {
     product_task: *std.Build.Module,
     product_task_persistence: *std.Build.Module,
     product_task_checkpoint_store: *std.Build.Module,
+    product_task_file_change_store: *std.Build.Module,
     product_task_checkpoint_record: *std.Build.Module,
     product_task_execution_binding: *std.Build.Module,
     product_task_agent_session: *std.Build.Module,
@@ -1059,6 +1063,17 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    const file_change_store = b.createModule(.{
+        .root_source_file = b.path("src/product/task/file_change_store.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    const file_change_io = b.createModule(.{
+        .root_source_file = b.path("src/product/control/file_change_io.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    file_change_io.addImport("product_task_file_change_store", file_change_store);
     const checkpoint_record = b.createModule(.{
         .root_source_file = b.path("src/product/task/checkpoint_record.zig"),
         .target = target,
@@ -1259,6 +1274,7 @@ fn wireAgentCore(
     });
     product_task.addImport("product_task_persistence", task_persistence);
     product_task.addImport("product_task_checkpoint_store", checkpoint_store);
+    product_task.addImport("product_task_file_change_store", file_change_store);
     product_task.addImport("product_task_execution_binding", owned_task_execution);
     product_task.addImport("product_task_agent_session", task_agent_session);
     product_task.addImport("product_task_attachment", task_attachment);
@@ -1386,6 +1402,7 @@ fn wireAgentCore(
     );
     product_control_runtime.addImport("product_control_executor", executor);
     product_control_runtime.addImport("product_control_file_preview", file_preview);
+    product_control_runtime.addImport("product_control_file_change_io", file_change_io);
     product_control_runtime.addImport("metawork_product_schedule", product_schedule);
     product_control_runtime.addImport("metawork_product_workspace", product_workspace);
     product_control_runtime.addImport("metawork_product_task", product_task);
@@ -1553,6 +1570,7 @@ fn wireAgentCore(
         .product_control_runtime = product_control_runtime,
         .product_control_executor = executor,
         .product_control_file_preview = file_preview,
+        .product_control_file_change_io = file_change_io,
         .product_workspace_automatic_root = product_workspace_automatic_root,
         .product_workspace = product_workspace,
         .product_workspace_runtime = product_workspace_runtime,
@@ -1582,6 +1600,7 @@ fn wireAgentCore(
         .product_task = product_task,
         .product_task_persistence = task_persistence,
         .product_task_checkpoint_store = checkpoint_store,
+        .product_task_file_change_store = file_change_store,
         .product_task_checkpoint_record = checkpoint_record,
         .product_task_execution_binding = owned_task_execution,
         .product_task_agent_session = task_agent_session,

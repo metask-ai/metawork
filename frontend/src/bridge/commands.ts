@@ -40,6 +40,7 @@ export const commands = {
   snapshot: "metawork.workbench.snapshot",
   snapshotChunk: "metawork.workbench.snapshot.chunk",
   previewFile: "metawork.files.preview",
+  fileChangeDiff: "metawork.files.diff",
   accountBeginLogin: "metawork.account.beginLogin",
   accountCancelOperation: "metawork.account.cancelOperation",
   accountRefreshCatalog: "metawork.account.refreshCatalog",

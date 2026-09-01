@@ -18,6 +18,7 @@ pub const PermissionChoice = runtime.PermissionChoice;
 pub const UiResponse = runtime.UiResponse;
 pub const FailureRecord = runtime.FailureRecord;
 pub const FileReference = runtime.FileReference;
+pub const FileChangeDiffAdmission = runtime.FileChangeDiffAdmission;
 pub const ProjectionAuthorityQuery = runtime.ProjectionAuthorityQuery;
 pub const ProjectionAuthority = runtime.ProjectionAuthority;
 pub const ProjectionEffects = runtime.ProjectionEffects;
@@ -45,6 +46,7 @@ pub const ProjectionError = view.Error;
 pub const ProjectionText = view.TextProjection;
 pub const history = @import("product_task_persistence");
 pub const checkpoint_store = @import("product_task_checkpoint_store");
+pub const file_change_store = @import("product_task_file_change_store");
 
 /// Test-only lifecycle seam. Production consumers cannot obtain Task's
 /// Session Binding implementation through the Product root.

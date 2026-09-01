@@ -5,6 +5,7 @@ const account_contract = @import("metawork_account_contract");
 const account_execution = @import("product_control_account_execution");
 const executor_impl = @import("product_control_executor");
 const file_preview = @import("product_control_file_preview");
+const file_change_io = @import("product_control_file_change_io");
 const product_workspace = @import("metawork_product_workspace");
 const product_schedule = @import("metawork_product_schedule");
 const skill_ports = @import("metawork_product_skill").ports;
@@ -15,6 +16,7 @@ const TaskPersistenceCommit = task_persistence.Commit;
 const TaskPersistence = task_persistence.Capability;
 const TaskPersistenceHealth = task_persistence.Health;
 const checkpoint_store = product_task.checkpoint_store;
+const file_change_store = product_task.file_change_store;
 const catalog_snapshot = @import("metawork_product_skill").catalog;
 const task_runtime = product_task;
 const task_testing = product_task.testing;
@@ -117,6 +119,9 @@ pub const Limits = struct {
     max_tool_field_bytes: usize = 256 * 1024,
     max_file_refs_per_tool: usize = 32,
     max_file_ref_field_bytes: usize = 8192,
+    max_file_changes_per_run: usize = 256,
+    max_file_change_field_bytes: usize = 4096,
+    max_file_change_diff_bytes: usize = 256 * 1024,
     max_file_preview_bytes: usize = 256 * 1024,
     max_file_preview_line_bytes: usize = 8192,
     max_file_preview_lines: usize = 5000,
@@ -237,6 +242,7 @@ pub const Configuration = struct {
     schedule_persistence: SchedulePersistence = .{},
     task_persistence: TaskPersistence = .{},
     checkpoint_store: CheckpointStoreConfiguration = .{},
+    file_change_store: FileChangeStoreConfiguration = .{},
     schedule_notifier: ScheduleNotifier = .{},
     skill_management: SkillManagementConfiguration = .{},
     skill_enablement: SkillEnablementConfiguration = .{},
@@ -273,6 +279,10 @@ pub const ModelConnectionCapabilities = struct {
 pub const CheckpointStoreConfiguration = struct {
     file_store: ?*checkpoint_store.FileStore = null,
     open_failed: bool = false,
+};
+
+pub const FileChangeStoreConfiguration = struct {
+    file_store: ?*file_change_store.FileStore = null,
 };
 
 pub const McpHostCapabilities = mcp_runtime.McpHostCapabilities;
@@ -467,6 +477,23 @@ fn filePreviewExecutor(executor: *executor_impl.Executor) file_preview.Executor 
         .context = executor,
         .enqueue_fn = enqueueFilePreviewJob,
     };
+}
+
+fn enqueueFileChangeJob(
+    context: *anyopaque,
+    job: file_change_io.ExecutorJob,
+) error{ ExecutorShuttingDown, QueueFull }!void {
+    const executor: *executor_impl.Executor = @ptrCast(@alignCast(context));
+    return executor.enqueue(.{
+        .identity = job.identity,
+        .context = job.context,
+        .execute_fn = job.execute_fn,
+        .cancel_fn = job.cancel_fn,
+    });
+}
+
+fn fileChangeExecutor(executor: *executor_impl.Executor) file_change_io.Executor {
+    return .{ .context = executor, .enqueue_fn = enqueueFileChangeJob };
 }
 
 fn enqueueMcpJob(
@@ -674,6 +701,38 @@ pub const FilePreviewSink = struct {
     complete_fn: *const fn (*anyopaque, FilePreviewResult) void,
 };
 
+pub const FileChangeDiffReason = enum {
+    not_recorded,
+    capacity,
+    missing,
+    corrupt,
+};
+
+pub const FileChangeDiffResult = union(enum) {
+    ready: struct {
+        completion_id: u64,
+        content: []const u8,
+        complete: bool,
+        redacted: bool,
+    },
+    unavailable: struct {
+        completion_id: u64,
+        reason: FileChangeDiffReason,
+    },
+};
+
+pub const FileChangeDiffSink = struct {
+    context: *anyopaque,
+    complete_fn: *const fn (*anyopaque, FileChangeDiffResult) void,
+};
+
+fn discardFileChangeDiffCompletion(_: *anyopaque, _: FileChangeDiffResult) void {}
+
+pub const FileChangeDiffAdmission = union(enum) {
+    queued,
+    immediate: FileChangeDiffReason,
+};
+
 const UsageView = if (builtin.is_test) task_test_state.UsageView else void;
 const EventProjectionFailure = if (builtin.is_test) task_test_state.EventProjectionFailure else void;
 const RunTerminationDispatch = if (builtin.is_test) task_test_state.RunTerminationDispatch else void;
@@ -783,9 +842,13 @@ pub const Runtime = struct {
     executor: *executor_impl.Executor,
     preview_executor: *executor_impl.Executor,
     preview_lane: *file_preview.Lane,
+    file_change_store: ?*file_change_store.FileStore,
+    file_change_executor: ?*executor_impl.Executor,
+    file_change_lane: ?*file_change_io.Lane,
     shutting_down: bool = false,
     executor_shutdown: bool = false,
     preview_executor_shutdown: bool = false,
+    file_change_executor_shutdown: bool = false,
     projection_bytes: usize = 0,
     revision: u64 = 0,
     default_permission_profile: PermissionProfile = .approval_required,
@@ -820,6 +883,9 @@ pub const Runtime = struct {
             limits.max_task_title_bytes == 0 or
             limits.max_user_message_bytes == 0 or limits.max_assistant_message_bytes == 0 or
             limits.max_tool_field_bytes == 0 or limits.max_pending_ui_json_bytes == 0 or
+            limits.max_file_changes_per_run == 0 or
+            limits.max_file_change_field_bytes == 0 or
+            limits.max_file_change_diff_bytes == 0 or
             limits.max_pending_ui_requests == 0 or
             limits.max_ui_history_per_task == 0 or
             limits.max_terminal_diagnostic_bytes == 0 or
@@ -902,6 +968,36 @@ pub const Runtime = struct {
             preview_executor.shutdown();
             preview_lane.deinit();
         };
+        var file_change_executor_value: ?*executor_impl.Executor = null;
+        var file_change_lane_value: ?*file_change_io.Lane = null;
+        var file_change_lane_owned = false;
+        errdefer if (file_change_lane_owned) {
+            if (file_change_lane_value) |lane| lane.stopAdmission();
+            file_change_executor_value.?.shutdown();
+            if (file_change_lane_value) |lane| lane.deinit();
+            file_change_executor_value.?.deinit();
+        };
+        if (configuration.file_change_store.file_store) |store| {
+            const file_executor = executor_impl.Executor.create(io, allocator, .{
+                .worker_count = 1,
+                .queue_capacity = file_change_io.max_in_flight,
+            }) catch |err| switch (err) {
+                error.InvalidLimits => unreachable,
+                else => return err,
+            };
+            file_change_executor_value = file_executor;
+            file_change_lane_owned = true;
+            file_change_lane_value = try file_change_io.Lane.create(
+                io,
+                allocator,
+                store,
+                .{
+                    .context = configuration.change_notifier.context,
+                    .wake_fn = configuration.change_notifier.wake,
+                },
+                fileChangeExecutor(file_executor),
+            );
+        }
         var skill = try skill_runtime.Runtime.init(
             io,
             allocator,
@@ -942,6 +1038,9 @@ pub const Runtime = struct {
             .executor = executor,
             .preview_executor = preview_executor,
             .preview_lane = preview_lane,
+            .file_change_store = configuration.file_change_store.file_store,
+            .file_change_executor = file_change_executor_value,
+            .file_change_lane = file_change_lane_value,
             .account_execution = account_execution_state,
             .canonical_user_home = canonical_user_home,
             .model_connection_capabilities = configuration.model_connections,
@@ -990,6 +1089,7 @@ pub const Runtime = struct {
             control.rearmMcpRefreshTimerNoFail();
         }
         preview_lane_owned = false;
+        file_change_lane_owned = false;
         return control;
     }
 
@@ -1133,6 +1233,124 @@ pub const Runtime = struct {
                 .truncated = truncated,
                 .redacted = redacted,
             });
+        }
+    }
+
+    fn enqueueFileChangeDiff(
+        raw_context: *anyopaque,
+        task_id: u64,
+        run_generation: u64,
+        change_order: u64,
+        content: []const u8,
+    ) task_runtime.FileChangeDiffAdmission {
+        const self: *Runtime = @ptrCast(@alignCast(raw_context));
+        const lane = self.file_change_lane orelse return .unavailable;
+        if (self.shutting_down or self.file_change_executor_shutdown or
+            content.len == 0 or content.len > self.limits.max_file_change_diff_bytes or
+            !std.unicode.utf8ValidateSlice(content))
+            return .unavailable;
+        var safe = self.allocator.alloc(u8, content.len) catch return .unavailable;
+        const projected = self.sanitizeFilePreviewInto(safe, content);
+        if (projected.len != safe.len) {
+            safe = self.allocator.realloc(safe, projected.len) catch {
+                std.crypto.secureZero(u8, safe);
+                self.allocator.free(safe);
+                return .unavailable;
+            };
+        }
+        lane.beginWrite(.{
+            .task_id = task_id,
+            .run_generation = run_generation,
+            .change_order = change_order,
+            .content = safe,
+            .redacted = projected.redacted,
+            .max_bytes = self.limits.max_file_change_diff_bytes,
+        }) catch {
+            std.crypto.secureZero(u8, safe);
+            self.allocator.free(safe);
+            return .unavailable;
+        };
+        return .{ .queued = .{ .redacted = projected.redacted } };
+    }
+
+    pub fn beginFileChangeDiff(
+        self: *Runtime,
+        completion_id: u64,
+        task_id: u64,
+        run_id: u64,
+        file_change_id: []const u8,
+    ) FileChangeDiffAdmission {
+        if (self.shutting_down or self.file_change_executor_shutdown)
+            return .{ .immediate = .capacity };
+        const lane = self.file_change_lane orelse
+            return .{ .immediate = .not_recorded };
+        const reference = self.task_runtime.fileChangeArtifact(
+            task_id,
+            run_id,
+            file_change_id,
+        ) orelse return .{ .immediate = .not_recorded };
+        lane.beginRead(.{
+            .completion_id = completion_id,
+            .identity = .{
+                .task_id = task_id,
+                .run_generation = reference.artifact.run_generation,
+                .change_order = reference.artifact.change_order,
+                .digest = reference.artifact.digest,
+                .byte_size = reference.artifact.byte_size,
+            },
+            .max_bytes = self.limits.max_file_change_diff_bytes,
+            .complete = reference.diff_complete,
+            .redacted = reference.redacted,
+        }) catch return .{ .immediate = .capacity };
+        return .queued;
+    }
+
+    pub fn drainFileChangeCompletions(
+        self: *Runtime,
+        sink: FileChangeDiffSink,
+    ) void {
+        const lane = self.file_change_lane orelse return;
+        while (lane.take()) |taken| {
+            defer lane.release(taken);
+            switch (taken.completion) {
+                .write => |write| {
+                    if (self.task_runtime.completeFileChangeArtifact(
+                        write.task_id,
+                        write.run_generation,
+                        write.change_order,
+                        if (write.identity) |identity| .{
+                            .run_generation = identity.run_generation,
+                            .change_order = identity.change_order,
+                            .digest = identity.digest,
+                            .byte_size = identity.byte_size,
+                        } else null,
+                        write.redacted,
+                    )) {
+                        self.commitTaskStateNoFail();
+                        self.bumpRevision();
+                    }
+                },
+                .read => |read| switch (read.state) {
+                    .ready => sink.complete_fn(sink.context, .{ .ready = .{
+                        .completion_id = read.completion_id,
+                        .content = read.content,
+                        .complete = read.complete,
+                        .redacted = read.redacted,
+                    } }),
+                    .missing => sink.complete_fn(sink.context, .{ .unavailable = .{
+                        .completion_id = read.completion_id,
+                        .reason = .missing,
+                    } }),
+                    .corrupt => sink.complete_fn(sink.context, .{ .unavailable = .{
+                        .completion_id = read.completion_id,
+                        .reason = .corrupt,
+                    } }),
+                    .failed => sink.complete_fn(sink.context, .{ .unavailable = .{
+                        .completion_id = read.completion_id,
+                        .reason = .capacity,
+                    } }),
+                },
+            }
         }
     }
 
@@ -2781,11 +2999,18 @@ pub const Runtime = struct {
             envelope,
             .{
                 .text = self.taskRuntimeTextProjection(),
+                .file_change_diff = .{
+                    .context = self,
+                    .enqueue_fn = enqueueFileChangeDiff,
+                },
                 .max_assistant_message_bytes = self.limits.max_assistant_message_bytes,
                 .max_commentary_segments_per_run = self.limits.max_commentary_segments_per_run,
                 .max_tool_field_bytes = self.limits.max_tool_field_bytes,
                 .max_file_refs_per_tool = self.limits.max_file_refs_per_tool,
                 .max_file_ref_field_bytes = self.limits.max_file_ref_field_bytes,
+                .max_file_changes_per_run = self.limits.max_file_changes_per_run,
+                .max_file_change_field_bytes = self.limits.max_file_change_field_bytes,
+                .max_file_change_diff_bytes = self.limits.max_file_change_diff_bytes,
             },
         ) catch |err| return @errorCast(err);
         switch (outcome) {
@@ -3651,6 +3876,8 @@ pub const Runtime = struct {
         self.executor.deinit();
         self.preview_lane.deinit();
         self.preview_executor.deinit();
+        if (self.file_change_lane) |lane| lane.deinit();
+        if (self.file_change_executor) |executor| executor.deinit();
         self.* = undefined;
     }
 
@@ -3665,8 +3892,20 @@ pub const Runtime = struct {
         self.preview_executor_shutdown = true;
     }
 
+    pub fn shutdownFileChangeExecutor(self: *Runtime) void {
+        if (self.file_change_executor_shutdown) return;
+        if (self.file_change_lane) |lane| lane.stopAdmission();
+        if (self.file_change_executor) |executor| executor.shutdown();
+        self.file_change_executor_shutdown = true;
+    }
+
     pub fn shutdownExecutor(self: *Runtime) void {
         self.shutdownFilePreviewExecutor();
+        self.shutdownFileChangeExecutor();
+        self.drainFileChangeCompletions(.{
+            .context = self,
+            .complete_fn = discardFileChangeDiffCompletion,
+        });
         if (self.executor_shutdown) return;
         self.shutting_down = true;
         if (self.mcp) |*runtime| runtime.beginShutdown();
@@ -4193,6 +4432,7 @@ pub const Runtime = struct {
             .max_tools_per_run = self.limits.max_tools_per_run,
             .max_commentary_segments_per_run = self.limits.max_commentary_segments_per_run,
             .max_file_refs_per_tool = self.limits.max_file_refs_per_tool,
+            .max_file_changes_per_run = self.limits.max_file_changes_per_run,
             .max_ui_history_per_task = self.limits.max_ui_history_per_task,
             .max_workspace_bytes = self.limits.max_workspace_bytes,
             .max_task_title_bytes = self.limits.max_task_title_bytes,
@@ -4200,6 +4440,8 @@ pub const Runtime = struct {
             .max_assistant_message_bytes = self.limits.max_assistant_message_bytes,
             .max_tool_field_bytes = self.limits.max_tool_field_bytes,
             .max_file_ref_field_bytes = self.limits.max_file_ref_field_bytes,
+            .max_file_change_field_bytes = self.limits.max_file_change_field_bytes,
+            .max_file_change_diff_bytes = self.limits.max_file_change_diff_bytes,
             .max_execution_model_bytes = account_contract.Limits.model_id_bytes,
             .max_terminal_diagnostic_bytes = self.limits.max_terminal_diagnostic_bytes,
         };
@@ -4680,6 +4922,7 @@ pub const Runtime = struct {
                 .max_tool_field_bytes = self.limits.max_tool_field_bytes,
                 .max_terminal_diagnostic_bytes = self.limits.max_terminal_diagnostic_bytes,
                 .max_tools_per_run = self.limits.max_tools_per_run,
+                .max_file_changes_per_run = self.limits.max_file_changes_per_run,
                 .max_commentary_segments_per_run = self.limits.max_commentary_segments_per_run,
                 .max_skill_arguments = self.limits.max_skill_arguments,
                 .max_task_title_bytes = self.limits.max_task_title_bytes,
@@ -6569,6 +6812,7 @@ fn testLimits() Limits {
         .max_scheduled_tasks = 2,
         .max_runs_per_task = 2,
         .max_tools_per_run = 2,
+        .max_file_changes_per_run = 2,
         .max_projection_bytes = 64 * 1024,
         .max_scheduled_task_projection_bytes = 4 * 1024,
         .max_workspace_bytes = 1024,
@@ -6688,13 +6932,17 @@ fn commitTestExecutionFact(control: *Runtime, generation: u64) void {
 }
 
 fn testRuntime() !Runtime {
+    return testRuntimeWith(.{});
+}
+
+fn testRuntimeWith(configuration: Configuration) !Runtime {
     test_agent_runtime.io = std.testing.io;
     var control = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &test_agent_runtime,
         testLimits(),
-        .{},
+        configuration,
     );
     try installTestExecution(&control);
     var task_execution = try control.cloneCurrentTaskExecution(control.allocator);
@@ -6741,6 +6989,11 @@ fn testRuntime() !Runtime {
     @memset(ui_history, null);
     const tools = try control.allocator.alloc(?ToolView, control.limits.max_tools_per_run);
     @memset(tools, null);
+    const file_changes = try control.allocator.alloc(
+        ?task_test_state.FileChangeView,
+        control.limits.max_file_changes_per_run,
+    );
+    @memset(file_changes, null);
     const commentary_ends = try control.allocator.alloc(
         u64,
         control.limits.max_commentary_segments_per_run,
@@ -6763,6 +7016,8 @@ fn testRuntime() !Runtime {
         .active_phase = .running,
         .agent_handoff = .init(.running),
         .tools = tools,
+        .file_change_observation = .collecting,
+        .file_changes = file_changes,
         .terminal_diagnostic = try control.allocTrackedCapacity(control.limits.max_terminal_diagnostic_bytes),
         .redaction_secret = control.account_execution.credential(),
     };
@@ -7425,6 +7680,7 @@ test "Task state round trip restores product history without fabricating a Sessi
         defer terminal_state.deinit();
         terminal_state.value.tasks[0].runs[0].phase = "completed";
         terminal_state.value.tasks[0].runs[0].outcome = "completed";
+        terminal_state.value.tasks[0].runs[0].file_change_observation = "complete";
         terminal_state.value.tasks[0].active_operation = null;
         const terminal_bytes = try task_persistence.encode(
             terminal_storage,
@@ -11125,6 +11381,112 @@ test "Runtime projects typed AgentCore file references into bounded tool entries
         8,
         "file-3-1-1-1",
     ) == null);
+}
+
+test "Runtime projects typed file changes without turning loss into Run failure" {
+    var control = try testRuntime();
+    defer control.deinit();
+
+    const modified =
+        "{\"file_changes\":{\"id\":\"tool-1\",\"name\":\"Edit\",\"changes\":[{\"locator\":{\"workspace_path\":\"src/main.zig\"},\"kind\":\"modified\",\"status\":\"applied\",\"tool\":\"Edit\",\"tool_use_id\":\"tool-1\",\"agent_depth\":0,\"before_bytes\":3,\"after_bytes\":4,\"diff_complete\":true}],\"overflow\":false,\"lost\":false}}";
+    var envelope = try testEnvelope(3, 7, modified);
+    defer envelope.deinit();
+    try control.applyEvent(&envelope);
+    // Replayed callback identity is idempotent.
+    try control.applyEvent(&envelope);
+
+    const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+    const change = &run.file_changes[0].?;
+    try std.testing.expectEqual(task_test_state.FileChangeObservation.collecting, run.file_change_observation.?);
+    try std.testing.expectEqual(task_test_state.FileChangeKind.modified, change.kind);
+    try std.testing.expectEqual(task_test_state.FileChangeStatus.applied, change.status);
+    try std.testing.expectEqualStrings("src/main.zig", change.display_path);
+    try std.testing.expectEqual(@as(u64, 3), change.before_bytes);
+    try std.testing.expectEqual(@as(u64, 4), change.after_bytes);
+    try std.testing.expect(run.file_changes[1] == null);
+
+    const invalid_and_lost =
+        "{\"file_changes\":{\"id\":\"tool-2\",\"name\":\"Edit\",\"changes\":[{\"locator\":{\"uri\":\"file:///outside\"},\"kind\":\"modified\",\"status\":\"partial\",\"tool\":\"Edit\",\"tool_use_id\":\"tool-2\",\"agent_depth\":2,\"before_bytes\":4,\"after_bytes\":5,\"diff_complete\":false}],\"overflow\":true,\"lost\":false}}";
+    var lost_envelope = try testEnvelope(3, 7, invalid_and_lost);
+    defer lost_envelope.deinit();
+    try control.applyEvent(&lost_envelope);
+    try std.testing.expectEqual(task_test_state.FileChangeObservation.incomplete, run.file_change_observation.?);
+    try std.testing.expect(run.file_changes[1] == null);
+    try std.testing.expect(run.event_projection_failure == null);
+}
+
+test "Runtime stores credential-safe file change diffs outside task history" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
+    var store = try file_change_store.FileStore.init(
+        std.testing.io,
+        root_storage[0..root_len],
+    );
+    defer store.deinit();
+    var control = try testRuntimeWith(.{
+        .file_change_store = .{ .file_store = &store },
+    });
+    defer control.deinit();
+
+    const encoded =
+        "{\"file_changes\":{\"id\":\"tool-diff\",\"name\":\"Edit\",\"changes\":[{\"locator\":{\"workspace_path\":\"src/main.zig\"},\"kind\":\"modified\",\"status\":\"applied\",\"tool\":\"Edit\",\"tool_use_id\":\"tool-diff\",\"agent_depth\":0,\"before_bytes\":3,\"after_bytes\":4,\"unified_diff\":\"@@ -1 +1 @@\\n-old\\n+SECRET-KEY\\n\",\"diff_complete\":true}],\"overflow\":false,\"lost\":false}}";
+    var envelope = try testEnvelope(3, 7, encoded);
+    defer envelope.deinit();
+    try control.applyEvent(&envelope);
+
+    const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+    try std.testing.expectEqual(@as(u32, 1), run.pending_file_change_artifacts);
+    for (0..1_000) |_| {
+        control.drainFileChangeCompletions(.{
+            .context = &control,
+            .complete_fn = discardFileChangeDiffCompletion,
+        });
+        if (run.pending_file_change_artifacts == 0) break;
+        std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
+    }
+    try std.testing.expectEqual(@as(u32, 0), run.pending_file_change_artifacts);
+    const change = &run.file_changes[0].?;
+    const artifact = change.artifact orelse return error.TestUnexpectedResult;
+    try std.testing.expect(change.redacted);
+    const restored = try store.readAlloc(
+        std.testing.allocator,
+        .{
+            .task_id = 3,
+            .run_generation = artifact.run_generation,
+            .change_order = artifact.change_order,
+            .digest = artifact.digest,
+            .byte_size = artifact.byte_size,
+        },
+        control.limits.max_file_change_diff_bytes,
+    );
+    defer std.testing.allocator.free(restored);
+    try std.testing.expect(std.mem.indexOf(u8, restored, "SECRET-KEY") == null);
+
+    var snapshot_storage: [96 * 1024]u8 = undefined;
+    const snapshot = try control.writeSnapshot(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"diffAvailable\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null);
+}
+
+test "completed terminal drain closes collecting file change observation" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+    try std.testing.expectEqual(task_test_state.FileChangeObservation.collecting, run.file_change_observation.?);
+    try std.testing.expect(commitTerminal(
+        run,
+        .completed,
+        .completed,
+        null,
+        .reusable,
+        "",
+        false,
+    ));
+    control.markTerminalRunsBeforeEventDrain();
+    control.finalizeMarkedTerminalRunsAfterEventDrain();
+    try std.testing.expectEqual(task_test_state.FileChangeObservation.complete, run.file_change_observation.?);
 }
 
 test "file reference ids use durable task and run identities" {

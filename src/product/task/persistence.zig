@@ -263,6 +263,7 @@ pub const Limits = struct {
     max_tools_per_run: usize,
     max_commentary_segments_per_run: usize,
     max_file_refs_per_tool: usize,
+    max_file_changes_per_run: usize = 256,
     max_ui_history_per_task: usize,
     max_workspace_bytes: usize,
     max_task_title_bytes: usize,
@@ -270,6 +271,8 @@ pub const Limits = struct {
     max_assistant_message_bytes: usize,
     max_tool_field_bytes: usize,
     max_file_ref_field_bytes: usize,
+    max_file_change_field_bytes: usize = 4096,
+    max_file_change_diff_bytes: usize = 256 * 1024,
     max_execution_model_bytes: usize,
     max_terminal_diagnostic_bytes: usize,
 };
@@ -410,6 +413,8 @@ pub const RunWire = struct {
     cause: ?[]const u8,
     usage: UsageWire,
     tools: []ToolWire,
+    file_change_observation: ?[]const u8 = null,
+    file_changes: ?[]FileChangeWire = null,
     diagnostic: []const u8,
     diagnostic_truncated: bool,
     diagnostic_redacted: bool,
@@ -463,6 +468,27 @@ pub const FileReferenceWire = struct {
     locator_kind: []const u8,
     locator: []const u8,
     range: ?FileReferenceRangeWire = null,
+};
+
+pub const FileChangeArtifactWire = struct {
+    run_generation: u64,
+    change_order: u64,
+    digest: []const u8,
+    byte_size: u64,
+};
+
+pub const FileChangeWire = struct {
+    id: []const u8,
+    order: u64,
+    kind: []const u8,
+    status: []const u8,
+    display_path: []const u8,
+    from_display_path: ?[]const u8,
+    before_bytes: u64,
+    after_bytes: u64,
+    artifact: ?FileChangeArtifactWire,
+    diff_complete: bool,
+    redacted: bool,
 };
 
 pub const UsageWire = struct {
@@ -544,6 +570,11 @@ pub fn deinitTaskWires(allocator: std.mem.Allocator, tasks: []TaskWire) void {
             for (run.tools) |tool|
                 if (tool.file_refs) |references| allocator.free(references);
             allocator.free(run.tools);
+            if (run.file_changes) |changes| {
+                for (changes) |change| if (change.artifact) |artifact|
+                    allocator.free(@constCast(artifact.digest));
+                allocator.free(changes);
+            }
         }
         allocator.free(task.runs);
         allocator.free(task.compacts);
@@ -592,6 +623,11 @@ pub fn projectTask(
         for (run.tools) |tool|
             if (tool.file_refs) |references| allocator.free(references);
         allocator.free(run.tools);
+        if (run.file_changes) |changes| {
+            for (changes) |change| if (change.artifact) |artifact|
+                allocator.free(@constCast(artifact.digest));
+            allocator.free(changes);
+        }
     };
     for (task.durable.runs) |*entry| {
         const run = &(entry.* orelse continue);
@@ -770,6 +806,49 @@ fn projectRun(
         tool_index += 1;
     }
 
+    const file_changes = if (run.file_change_observation != null) blk: {
+        const count = countPresent(task_state.FileChangeView, run.file_changes);
+        const changes = try allocator.alloc(FileChangeWire, count);
+        errdefer allocator.free(changes);
+        var change_index: usize = 0;
+        errdefer for (changes[0..change_index]) |change| if (change.artifact) |artifact|
+            allocator.free(@constCast(artifact.digest));
+        for (run.file_changes) |entry| {
+            const change = entry orelse continue;
+            const artifact = if (change.artifact) |value| artifact: {
+                const digest = try allocator.alloc(u8, value.digest.len * 2);
+                const encoded = std.fmt.bytesToHex(value.digest, .lower);
+                @memcpy(digest, &encoded);
+                break :artifact FileChangeArtifactWire{
+                    .run_generation = value.run_generation,
+                    .change_order = value.change_order,
+                    .digest = digest,
+                    .byte_size = value.byte_size,
+                };
+            } else null;
+            changes[change_index] = .{
+                .id = change.id,
+                .order = change.order,
+                .kind = @tagName(change.kind),
+                .status = @tagName(change.status),
+                .display_path = change.display_path,
+                .from_display_path = change.from_display_path,
+                .before_bytes = change.before_bytes,
+                .after_bytes = change.after_bytes,
+                .artifact = artifact,
+                .diff_complete = change.diff_complete,
+                .redacted = change.redacted,
+            };
+            change_index += 1;
+        }
+        break :blk changes;
+    } else null;
+    errdefer if (file_changes) |changes| {
+        for (changes) |change| if (change.artifact) |artifact|
+            allocator.free(@constCast(artifact.digest));
+        allocator.free(changes);
+    };
+
     var argument_values: ?[][]const u8 = null;
     errdefer if (argument_values) |values| allocator.free(values);
     const input: RunInputWire = switch (run.input) {
@@ -824,6 +903,11 @@ fn projectRun(
             null,
         .usage = usageWire(run.usage),
         .tools = tools,
+        .file_change_observation = if (run.file_change_observation) |value|
+            @tagName(value)
+        else
+            null,
+        .file_changes = file_changes,
         .diagnostic = if (terminal_payload) |payload|
             run.terminal_diagnostic[0..payload.diagnostic_len]
         else
@@ -1167,6 +1251,31 @@ fn restoreRun(projection: RestoreProjection, wire: RunWire) RestoreError!task_st
         tools[restored_tools] = try restoreTool(projection, tool);
         restored_tools += 1;
     }
+    const file_changes = try projection.allocator.alloc(
+        ?task_state.FileChangeView,
+        projection.limits.max_file_changes_per_run,
+    );
+    errdefer projection.allocator.free(file_changes);
+    @memset(file_changes, null);
+    var restored_file_changes: usize = 0;
+    errdefer for (file_changes[0..restored_file_changes]) |*entry| {
+        const change = &(entry.* orelse continue);
+        deinitRestoredFileChange(projection, change);
+    };
+    if ((wire.file_change_observation == null) != (wire.file_changes == null))
+        return error.TaskStoreCorrupt;
+    if (wire.file_changes) |changes| {
+        if (changes.len > projection.limits.max_file_changes_per_run)
+            return error.TaskStoreCorrupt;
+        for (changes) |change| {
+            file_changes[restored_file_changes] = try restoreFileChange(
+                projection,
+                wire.generation,
+                change,
+            );
+            restored_file_changes += 1;
+        }
+    }
     const phase: task_state.RunPhase = if (interrupted)
         .interrupted
     else
@@ -1212,6 +1321,18 @@ fn restoreRun(projection: RestoreProjection, wire: RunWire) RestoreError!task_st
         .assistant_output_start = assistant_output_start,
         .active_phase = .queued,
         .tools = tools,
+        .file_change_observation = if (wire.file_change_observation) |value|
+            if (interrupted)
+                .incomplete
+            else
+                parseEnum(task_state.FileChangeObservation, value) orelse
+                    return error.TaskStoreCorrupt
+        else
+            null,
+        .file_changes = file_changes,
+        .file_changes_known_loss = interrupted or
+            (wire.file_change_observation != null and
+                std.mem.eql(u8, wire.file_change_observation.?, "incomplete")),
         .usage = usageFromWire(wire.usage),
         .terminal_publication = .init(.published),
         .terminal_payload = .{
@@ -1369,6 +1490,56 @@ fn restoreFileReference(
     return reference;
 }
 
+fn restoreFileChange(
+    projection: RestoreProjection,
+    run_generation: u64,
+    wire: FileChangeWire,
+) RestoreError!task_state.FileChangeView {
+    const id = try projection.copy(wire.id, projection.limits.max_file_change_field_bytes);
+    errdefer projection.free(id);
+    const display_path = try projection.copy(
+        wire.display_path,
+        projection.limits.max_file_change_field_bytes,
+    );
+    errdefer projection.free(display_path);
+    const from_display_path = if (wire.from_display_path) |path|
+        try projection.copy(path, projection.limits.max_file_change_field_bytes)
+    else
+        null;
+    errdefer if (from_display_path) |path| projection.free(path);
+    const artifact: ?task_state.FileChangeArtifact = if (wire.artifact) |value| artifact: {
+        var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+        if (value.digest.len != digest.len * 2 or value.byte_size == 0 or
+            value.run_generation != run_generation or value.change_order != wire.order)
+            return error.TaskStoreCorrupt;
+        _ = std.fmt.hexToBytes(&digest, value.digest) catch return error.TaskStoreCorrupt;
+        const canonical = std.fmt.bytesToHex(digest, .lower);
+        if (!std.mem.eql(u8, &canonical, value.digest)) return error.TaskStoreCorrupt;
+        break :artifact .{
+            .run_generation = value.run_generation,
+            .change_order = value.change_order,
+            .digest = digest,
+            .byte_size = value.byte_size,
+        };
+    } else null;
+    return .{
+        .route_digest = [_]u8{0} ** task_state.file_change_route_digest_bytes,
+        .id = id,
+        .order = wire.order,
+        .kind = parseEnum(task_state.FileChangeKind, wire.kind) orelse
+            return error.TaskStoreCorrupt,
+        .status = parseEnum(task_state.FileChangeStatus, wire.status) orelse
+            return error.TaskStoreCorrupt,
+        .display_path = display_path,
+        .from_display_path = from_display_path,
+        .before_bytes = wire.before_bytes,
+        .after_bytes = wire.after_bytes,
+        .artifact = artifact,
+        .diff_complete = wire.diff_complete,
+        .redacted = wire.redacted,
+    };
+}
+
 fn restoreCompact(
     projection: RestoreProjection,
     wire: CompactWire,
@@ -1480,6 +1651,16 @@ fn deinitRestoredFileReference(
     reference.* = undefined;
 }
 
+fn deinitRestoredFileChange(
+    projection: RestoreProjection,
+    change: *task_state.FileChangeView,
+) void {
+    projection.free(change.id);
+    projection.free(change.display_path);
+    if (change.from_display_path) |path| projection.free(path);
+    change.* = undefined;
+}
+
 fn deinitRestoredTool(projection: RestoreProjection, tool: *task_state.ToolView) void {
     projection.free(tool.id);
     projection.free(tool.name);
@@ -1519,6 +1700,11 @@ fn deinitRestoredRun(projection: RestoreProjection, run: *task_state.RunRecord) 
         deinitRestoredTool(projection, tool);
     }
     projection.allocator.free(run.tools);
+    for (run.file_changes) |*entry| {
+        const change = &(entry.* orelse continue);
+        deinitRestoredFileChange(projection, change);
+    }
+    projection.allocator.free(run.file_changes);
     projection.allocator.free(run.commentary_ends);
     deinitRestoredRunInput(projection, &run.input);
     if (run.assistant.list.capacity != 0) projection.freeText(&run.assistant);
@@ -2185,14 +2371,60 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
                 if (std.mem.eql(u8, previous.id, tool.id) or previous.order == tool.order)
                     return error.Invalid;
         }
+        if ((run.file_change_observation == null) != (run.file_changes == null))
+            return error.Invalid;
+        if (run.file_change_observation) |observation| {
+            if (!oneOf(observation, &.{ "collecting", "complete", "incomplete" }) or
+                run.file_changes.?.len > limits.max_file_changes_per_run)
+                return error.Invalid;
+            for (run.file_changes.?, 0..) |change, change_index| {
+                if (!validText(change.id, limits.max_file_change_field_bytes, false) or
+                    change.order == 0 or change.order >= run.next_activity_order or
+                    !oneOf(change.kind, &.{ "created", "modified", "deleted", "moved" }) or
+                    !oneOf(change.status, &.{ "applied", "partial" }) or
+                    !validText(change.display_path, limits.max_file_change_field_bytes, false) or
+                    (change.from_display_path != null) != std.mem.eql(u8, change.kind, "moved"))
+                    return error.Invalid;
+                if (change.from_display_path) |from|
+                    if (!validText(from, limits.max_file_change_field_bytes, false))
+                        return error.Invalid;
+                if (change.artifact) |artifact| {
+                    if (artifact.run_generation != run.generation or
+                        artifact.change_order != change.order or
+                        artifact.byte_size == 0 or
+                        artifact.byte_size > limits.max_file_change_diff_bytes or
+                        artifact.digest.len != std.crypto.hash.sha2.Sha256.digest_length * 2 or
+                        !isLowerHex(artifact.digest))
+                        return error.Invalid;
+                    var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+                    _ = std.fmt.hexToBytes(&digest, artifact.digest) catch
+                        return error.Invalid;
+                    const canonical = std.fmt.bytesToHex(digest, .lower);
+                    if (!std.mem.eql(u8, &canonical, artifact.digest))
+                        return error.Invalid;
+                }
+                for (run.file_changes.?[0..change_index]) |previous|
+                    if (std.mem.eql(u8, previous.id, change.id) or
+                        previous.order == change.order)
+                        return error.Invalid;
+                for (run.tools) |tool|
+                    if (tool.order == change.order) return error.Invalid;
+            }
+        }
         const terminal = terminalRunPhase(run.phase);
         if (terminal) {
             if (!validRunTerminalState(run.phase, run.outcome))
                 return error.Invalid;
+            if (run.file_change_observation) |observation|
+                if (std.mem.eql(u8, observation, "collecting"))
+                    return error.Invalid;
         } else {
             if (!oneOf(run.phase, &.{ "queued", "running", "waiting_ui", "stopping" }) or
                 run.outcome != null or run.cause != null)
                 return error.Invalid;
+            if (run.file_change_observation) |observation|
+                if (std.mem.eql(u8, observation, "complete"))
+                    return error.Invalid;
             active_count += 1;
         }
         if (run.cause) |cause| if (!oneOf(cause, &.{
@@ -2367,6 +2599,12 @@ fn validCommentaryEnds(
 fn oneOf(value: []const u8, options: []const []const u8) bool {
     for (options) |option| if (std.mem.eql(u8, value, option)) return true;
     return false;
+}
+
+fn isLowerHex(value: []const u8) bool {
+    for (value) |byte| if (!std.ascii.isDigit(byte) and (byte < 'a' or byte > 'f'))
+        return false;
+    return true;
 }
 
 fn terminalRunPhase(phase: []const u8) bool {

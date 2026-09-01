@@ -242,6 +242,11 @@ pub const FilePreviewRequest = struct {
     runId: []const u8,
     fileReferenceId: []const u8,
 };
+pub const FileChangeDiffRequest = struct {
+    taskId: []const u8,
+    runId: []const u8,
+    fileChangeId: []const u8,
+};
 pub const TaskRename = struct { taskId: []const u8, title: []const u8 };
 pub const TaskArchive = struct { taskId: []const u8, archived: bool };
 pub const TaskDelete = struct { taskId: []const u8 };
@@ -522,6 +527,20 @@ test "file preview payload requires exact Task Run and reference identity" {
         error.InvalidBridgePayload,
         parsePayload(FilePreviewRequest,
             \\{"taskId":"1","runId":"2","fileReferenceId":"task:1:run:2:file:3","path":"src/main.zig"}
+        ),
+    );
+}
+
+test "file change diff payload requires exact Task Run and change identity" {
+    var request = try parsePayload(FileChangeDiffRequest,
+        \\{"taskId":"1","runId":"2","fileChangeId":"change-1-1-3"}
+    );
+    defer request.deinit();
+    try std.testing.expectEqualStrings("change-1-1-3", request.value.fileChangeId);
+    try std.testing.expectError(
+        error.InvalidBridgePayload,
+        parsePayload(FileChangeDiffRequest,
+            \\{"taskId":"1","runId":"2","fileChangeId":"change-1-1-3","path":"src/main.zig"}
         ),
     );
 }

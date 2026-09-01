@@ -160,6 +160,38 @@ export type FilePreview = {
   redacted: boolean;
 };
 
+export type FileChangeView = {
+  id: string;
+  order: string;
+  kind: "created" | "modified" | "deleted" | "moved";
+  status: "applied" | "partial";
+  displayPath: string;
+  fromDisplayPath: string | null;
+  beforeBytes: string;
+  afterBytes: string;
+  diffAvailable: boolean;
+  diffComplete: boolean;
+  redacted: boolean;
+};
+
+export type RunFileChanges = {
+  observation: "collecting" | "complete" | "incomplete";
+  changes: FileChangeView[];
+};
+
+export type FileChangeDiffResult =
+  | {
+      status: "ready";
+      content: string;
+      complete: boolean;
+      redacted: boolean;
+    }
+  | {
+      status: "unavailable";
+      reason: "not_recorded" | "capacity" | "missing" | "corrupt";
+      content: "";
+    };
+
 export type ToolView = {
   id: string;
   order: string;
@@ -356,6 +388,7 @@ export type RunView = {
     cacheCreation: string;
   };
   tools: ToolView[];
+  fileChanges: RunFileChanges | null;
 };
 
 export type ConversationContext = {

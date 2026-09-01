@@ -242,9 +242,12 @@ const App = struct {
         if (self.control) |control| {
             control.stopFilePreviewAdmission();
             control.shutdownFilePreviewExecutor();
+            control.shutdownFileChangeExecutor();
             if (self.dispatcher) |dispatcher| {
                 control.drainFilePreviewCompletions(dispatcher.filePreviewSink());
+                control.drainFileChangeCompletions(dispatcher.fileChangeDiffSink());
                 dispatcher.settleFilePreviewsForShutdown();
+                dispatcher.settleFileChangeDiffsForShutdown();
             }
         }
         if (self.dispatcher) |dispatcher| {
@@ -299,10 +302,14 @@ const App = struct {
                             refresh.reconcileTimer();
                 self.drainAgentEvents();
                 if (self.control) |control|
-                    if (self.dispatcher) |dispatcher|
+                    if (self.dispatcher) |dispatcher| {
                         control.drainFilePreviewCompletions(
                             dispatcher.filePreviewSink(),
                         );
+                        control.drainFileChangeCompletions(
+                            dispatcher.fileChangeDiffSink(),
+                        );
+                    };
                 if (self.dispatcher) |dispatcher| if (dispatcher.connectedWindow() != null) {
                     try dispatcher.emitProductChanged();
                 };
@@ -491,6 +498,9 @@ pub fn run(init: std.process.Init) !void {
         .checkpoint_store = .{
             .file_store = if (stores_state.checkpoint) |*store| store else null,
             .open_failed = stores_state.checkpoint_open_failed,
+        },
+        .file_change_store = .{
+            .file_store = if (stores_state.file_change) |*store| store else null,
         },
         .schedule_notifier = .{
             .context = &app.platform,
