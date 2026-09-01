@@ -23,10 +23,3 @@ export class PendingScopes {
     return this.active.delete(scope);
   }
 }
-
-export function accountMutationBlocksTaskAdmission(
-  newTaskDraftActive: boolean,
-  accountMutationPending: boolean,
-) {
-  return newTaskDraftActive && accountMutationPending;
-}

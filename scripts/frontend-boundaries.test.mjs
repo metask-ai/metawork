@@ -179,7 +179,10 @@ test("transitional Account states never turn signed-out history into a security 
     "utf8",
   );
   assert.match(app, /<AccountGate/);
-  assert.match(app, /requiresAccountGate\(snapshot\.account\)/);
+  assert.match(
+    app,
+    /requiresAccountGate\(\s*snapshot\.account,\s*snapshot\.execution,\s*\)/,
+  );
   assert.match(app, /selectAccountGateStatus\(statuses\)/);
   assert.match(
     gating,
@@ -188,7 +191,7 @@ test("transitional Account states never turn signed-out history into a security 
   assert.doesNotMatch(app, /workbenchEntered|setWorkbenchEntered/);
   assert.match(
     app,
-    /\(!newTaskDraftActive \|\| snapshot\.account\.canCreateTask\)/,
+    /\(!newTaskDraftActive \|\| snapshot\.execution\.taskCreationAvailable\)/,
   );
   assert.doesNotMatch(app, /setStatus\(\s*\{/);
   assert.doesNotMatch(app, /AccountPrerequisite|prerequisite=\{/);

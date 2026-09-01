@@ -632,7 +632,7 @@ pub const Runtime = struct {
                 if (selection.expected_catalog_generation !=
                     account_view.catalog_generation or
                     selection.expected_execution_generation !=
-                        account_view.execution_generation)
+                        account_view.metask_execution_generation)
                     return .{ .rejected = .generation_mismatch };
                 const member = for (account_view.api_keys) |candidate| {
                     if (std.mem.eql(
@@ -647,7 +647,7 @@ pub const Runtime = struct {
                 if (selection.expected_catalog_generation !=
                     account_view.catalog_generation or
                     selection.expected_execution_generation !=
-                        account_view.execution_generation)
+                        account_view.metask_execution_generation)
                     return .{ .rejected = .generation_mismatch };
                 const member = for (account_view.models) |candidate| {
                     if (std.mem.eql(
@@ -1328,12 +1328,12 @@ pub const Runtime = struct {
             identity.accountId(),
             self.effects.catalog.selectedApiKeyId(),
             model,
-            account_view.execution_generation,
+            account_view.metask_execution_generation,
         );
         const execution_generation = restored_generation orelse
             generateExecutionGeneration(
                 self.io,
-                account_view.execution_generation,
+                account_view.metask_execution_generation,
             ) catch {
             self.effects.publishCompletion(.{
                 .attempt_id = attempt_id,
@@ -1430,7 +1430,7 @@ pub const Runtime = struct {
             identity.accountId(),
             account_view.selected_api_key_id,
             model,
-            account_view.execution_generation,
+            account_view.metask_execution_generation,
         ) catch |err| {
             if (err == error.PersistenceOutcomeUnknown) {
                 self.effects.publishDefaultModelPersistenceUnknown(attempt_id);
@@ -1479,7 +1479,7 @@ pub const Runtime = struct {
             u8,
             preference.apiKeyId(),
             account_view.selected_api_key_id,
-        ) and preference.execution_generation == account_view.execution_generation;
+        ) and preference.execution_generation == account_view.metask_execution_generation;
         if (!same_tuple)
             return wrapPrepareResult(
                 self.account.prepareDefaultModelPersistenceInvalid(),
@@ -1510,7 +1510,7 @@ pub const Runtime = struct {
         catalog: *const catalog_impl.CatalogSession,
         account_view: contract.AccountView,
     ) ?[]const u8 {
-        if (account_view.execution_generation != 0) {
+        if (account_view.metask_execution_generation != 0) {
             if (account_view.candidate_api_key_id.len != 0) return null;
             if (catalog.hasApiKey(account_view.selected_api_key_id))
                 return account_view.selected_api_key_id;
@@ -1867,7 +1867,7 @@ fn accountSelectionCommand(
     return .{
         .selection_id = selection_id,
         .expected_catalog_generation = view.catalog_generation,
-        .expected_execution_generation = view.execution_generation,
+        .expected_execution_generation = view.metask_execution_generation,
     };
 }
 
@@ -2102,7 +2102,7 @@ test "Account Runtime owns automatic catalog selection policy" {
         .catalog_state = .loading,
         .selected_api_key_id = "key-current",
         .selected_model = "model-current",
-        .execution_generation = 1,
+        .metask_execution_generation = 1,
     };
     try std.testing.expectEqualStrings(
         "key-current",
@@ -2111,7 +2111,7 @@ test "Account Runtime owns automatic catalog selection policy" {
     var first_login_view = ready_view;
     first_login_view.selected_api_key_id = "";
     first_login_view.selected_model = "";
-    first_login_view.execution_generation = 0;
+    first_login_view.metask_execution_generation = 0;
     // First login without a saved preference defaults to the catalog's
     // first key; the user adjusts in settings afterwards.
     try std.testing.expectEqualStrings(
@@ -2554,7 +2554,7 @@ fn beginDefaultModelChangeForTest(
         .select_model = .{
             .selection_id = model_id,
             .expected_catalog_generation = account_view.catalog_generation,
-            .expected_execution_generation = account_view.execution_generation,
+            .expected_execution_generation = account_view.metask_execution_generation,
         },
     })) {
         .prepared => |value| value,
@@ -2616,7 +2616,7 @@ test "default-model outcome unknown commits the re-observed candidate" {
     );
     runtime.commit(&prepared);
     try std.testing.expectEqualStrings("model-2", runtime.view().selected_model);
-    try std.testing.expectEqual(@as(u64, 1), runtime.view().execution_generation);
+    try std.testing.expectEqual(@as(u64, 1), runtime.view().metask_execution_generation);
     try std.testing.expectEqualStrings(
         "model-2",
         runtime.saved_preference.?.modelId(),
@@ -2645,7 +2645,6 @@ test "default-model outcome unknown rolls back when disk kept the old value" {
         contract.ErrorCode.credential_store_write_failed,
         account_view.error_code,
     );
-    try std.testing.expect(account_view.can_create_task);
 }
 
 test "default-model outcome unknown revokes execution on a third disk state" {
@@ -2684,7 +2683,6 @@ test "default-model outcome unknown revokes execution on a third disk state" {
         contract.ErrorCode.recovery_state_invalid,
         account_view.error_code,
     );
-    try std.testing.expect(!account_view.can_create_task);
     try std.testing.expect(runtime.saved_preference == null);
     try std.testing.expect(runtime.savedExecutionGenerationFor(
         "account-1",
@@ -2803,5 +2801,4 @@ test "Account Runtime shutdown clears a ready public view" {
     try std.testing.expectEqual(contract.CatalogState.unavailable, view.catalog_state);
     try std.testing.expectEqual(@as(usize, 0), view.api_keys.len);
     try std.testing.expectEqual(@as(usize, 0), view.models.len);
-    try std.testing.expect(!view.can_create_task);
 }

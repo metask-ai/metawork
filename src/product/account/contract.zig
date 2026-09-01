@@ -144,14 +144,12 @@ pub const AccountView = struct {
     candidate_api_key_id: []const u8 = "",
     candidate_model: []const u8 = "",
     model_catalog_api_key_id: []const u8 = "",
-    can_create_task: bool = false,
     error_code: ErrorCode = .none,
     safe_diagnostic: []const u8 = "",
     catalog_generation: u64 = 0,
     /// The committed Metask execution generation, even when another source is
     /// currently selected for new Tasks.
     metask_execution_generation: u64 = 0,
-    execution_generation: u64 = 0,
 };
 
 pub const AccountFactKind = enum {
@@ -344,8 +342,6 @@ pub fn validateView(view: AccountView) ValidationError!void {
         }
         if (api_key_matches != 1 or model_matches != 1)
             return error.InconsistentState;
-    } else if (view.can_create_task) {
-        return error.InconsistentState;
     }
     if (view.models.len == 0) {
         if (view.model_catalog_api_key_id.len != 0 and
@@ -376,8 +372,7 @@ pub fn validateView(view: AccountView) ValidationError!void {
                 view.candidate_api_key_id.len != 0 or
                 view.candidate_model.len != 0 or
                 view.model_catalog_api_key_id.len != 0 or
-                view.metask_execution_generation != 0 or
-                view.execution_generation != 0 or view.can_create_task)
+                view.metask_execution_generation != 0)
                 return error.InconsistentState;
             if (view.state != .authorizing and view.can_cancel)
                 return error.InconsistentState;
@@ -391,8 +386,6 @@ pub fn validateView(view: AccountView) ValidationError!void {
                 return error.InconsistentState;
         },
     }
-    if (view.metask_execution_generation != view.execution_generation)
-        return error.InconsistentState;
 }
 
 fn validateRequired(value: []const u8, max_bytes: usize) ValidationError!void {
@@ -436,14 +429,13 @@ test "AccountCommandSink returns only public acceptance metadata" {
     try std.testing.expectEqual(@as(usize, 1), context.calls);
 }
 
-test "AccountView rejects ready execution without committed generation" {
+test "AccountView rejects ready Metask catalog without committed generation" {
     try std.testing.expectError(error.InconsistentState, validateView(.{
         .state = .authenticated,
         .catalog_state = .ready,
         .account_id = "account-1",
         .display_name = "User",
         .selected_model = "metask-model",
-        .can_create_task = true,
     }));
 }
 
@@ -466,7 +458,6 @@ test "AccountView accepts the published logout transition" {
         .selected_api_key_id = "key-1",
         .selected_model = "model-1",
         .metask_execution_generation = 7,
-        .execution_generation = 7,
     });
 }
 

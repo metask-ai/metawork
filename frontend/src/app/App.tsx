@@ -128,10 +128,7 @@ import {
 import { chooseWorkspaceAndMigrateDraft } from "../features/workspaces/chooseWorkspace.ts";
 import { initialWorkbenchState, workbenchReducer } from "../workbench/store.ts";
 import { navigableTasks } from "../workbench/task-visibility.ts";
-import {
-  accountMutationBlocksTaskAdmission,
-  PendingScopes,
-} from "../workbench/pendingScopes.ts";
+import { PendingScopes } from "../workbench/pendingScopes.ts";
 import { taskModelSelectionPolicy } from "./task-model-selection.ts";
 
 function errorText(error: unknown) {
@@ -440,8 +437,14 @@ export default function App() {
     ? newTaskDrafts.updateDraft
     : taskDrafts.updateDraft;
   const bridgeUnavailable = viewSyncFailed || !bridgeReady;
-  const accountGateRequired = requiresAccountGate(snapshot.account);
-  const accountSetupRequired = requiresAccountSetup(snapshot.account);
+  const accountGateRequired = requiresAccountGate(
+    snapshot.account,
+    snapshot.execution,
+  );
+  const accountSetupRequired = requiresAccountSetup(
+    snapshot.account,
+    snapshot.execution,
+  );
 
   useEffect(() => {
     if (accountSetupRedirected && snapshot.account.state !== "authenticated") {
@@ -458,7 +461,7 @@ export default function App() {
       accountSetupRequired ||
       route !== "workbench" ||
       snapshot.account.state !== "authenticated" ||
-      !snapshot.account.canCreateTask
+      !snapshot.execution.taskCreationAvailable
     )
       return;
     setAccountSetupRedirected(false);
@@ -470,8 +473,8 @@ export default function App() {
     accountSetupRequired,
     route,
     settingsOpen,
-    snapshot.account.canCreateTask,
     snapshot.account.state,
+    snapshot.execution.taskCreationAvailable,
   ]);
 
   const workbenchMutationDisabled = bridgeUnavailable;
@@ -516,9 +519,8 @@ export default function App() {
   const composerRunInput = composerDraftToRunInput(composerDraft);
   const canSubmit =
     taskCanCompose &&
-    (!newTaskDraftActive || snapshot.account.canCreateTask) &&
+    (!newTaskDraftActive || snapshot.execution.taskCreationAvailable) &&
     (!newTaskDraftActive || newTaskWorkspaceReady) &&
-    !accountMutationBlocksTaskAdmission(newTaskDraftActive, accountBusy) &&
     !taskOperationInFlight &&
     composerDraftHasContent(composerDraft) &&
     composerRunInput !== null &&
@@ -530,13 +532,13 @@ export default function App() {
   const selectedModel = snapshot.account.models.find(
     (model) => model.selectionId === snapshot.account.selectedModelSelectionId,
   );
-  const activeModelConnection = snapshot.account.modelConnections.find(
+  const activeModelConnection = snapshot.execution.modelConnections.find(
     (connection) =>
-      connection.id === snapshot.account.selectedModelConnectionId,
+      connection.id === snapshot.execution.selectedModelConnectionId,
   );
   const customModelId = activeModelConnection?.selectedModel ?? "";
   const customModelConnectionSelected =
-    snapshot.account.executionSource === "model_connection" &&
+    snapshot.execution.defaultSource === "model_connection" &&
     activeModelConnection !== undefined;
   const customModelConnectionContext = activeModelConnection
     ? `${activeModelConnection.displayName} · ${t(
@@ -585,6 +587,7 @@ export default function App() {
   const displayedTaskModelId = pendingTaskModelId ?? taskModelId;
   const taskModelPolicy = taskModelSelectionPolicy(
     snapshot.account,
+    snapshot.execution,
     activeTask,
   );
 
@@ -816,7 +819,7 @@ export default function App() {
 
   useEffect(() => {
     if (
-      !snapshot.account.canCreateTask ||
+      !snapshot.execution.taskCreationAvailable ||
       activeTask !== null ||
       workbench.draftOpen
     )
@@ -826,7 +829,11 @@ export default function App() {
       workspaceId: null,
     });
     window.requestAnimationFrame(() => composer.current?.focus());
-  }, [activeTask, snapshot.account.canCreateTask, workbench.draftOpen]);
+  }, [
+    activeTask,
+    snapshot.execution.taskCreationAvailable,
+    workbench.draftOpen,
+  ]);
 
   function focusPendingRequest() {
     const requestId = activeTask?.pendingUi?.requestId;
@@ -1334,7 +1341,7 @@ export default function App() {
         client,
         taskId: existingTaskId,
         workspace,
-        expectedExecutionGeneration: snapshot.account.executionGeneration,
+        expectedExecutionGeneration: snapshot.execution.activeGeneration,
         expectedBindingEpoch: activeTask?.binding.epoch ?? null,
         permissionProfile: newTaskPermissionProfile,
         input,
@@ -2555,6 +2562,7 @@ export default function App() {
         settingsOpen ? (
           <SettingsPage
             account={snapshot.account}
+            execution={snapshot.execution}
             permissionProfiles={{
               enabled: snapshot.capabilities.permissionProfiles,
               available: snapshot.permissions.availableProfiles,

@@ -25,12 +25,20 @@ const account = {
   candidateApiKeySelectionId: "",
   candidateModelSelectionId: "",
   modelCatalogApiKeySelectionId: "",
-  canCreateTask: false,
   errorCode: "none",
   safeDiagnostic: "",
   catalogGeneration: "0",
   metaskExecutionGeneration: "0",
-  executionGeneration: "0",
+};
+const execution = {
+  state: "unavailable",
+  defaultSource: null,
+  activeSource: null,
+  activeGeneration: "0",
+  taskCreationAvailable: false,
+  selectedModelConnectionId: "",
+  modelConnections: [],
+  errorCode: "none",
 };
 
 function pending(identity) {
@@ -86,6 +94,7 @@ function snapshot(tasks) {
       automaticWorkspaces: false,
     },
     account,
+    execution,
     workspaces: [
       {
         id: "1",

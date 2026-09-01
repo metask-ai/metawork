@@ -6,6 +6,15 @@ export type CatalogState =
 
 export type ExecutionSource = "metask" | "model_connection";
 
+export type ExecutionState = "unavailable" | "ready" | "replacing";
+
+export type ExecutionErrorCode =
+  | "none"
+  | "model_connection_persistence_unavailable"
+  | "credential_unavailable"
+  | "invalid_candidate"
+  | "resource_exhausted";
+
 export type AccountErrorCode =
   | "none"
   | "invalid_command"
@@ -111,7 +120,6 @@ export type ModelMetadata = {
 export type AccountView = {
   state: AccountState;
   catalogState: CatalogState;
-  executionSource: ExecutionSource;
   canCancel: boolean;
   accountId: string;
   displayName: string;
@@ -131,14 +139,21 @@ export type AccountView = {
   candidateApiKeySelectionId: string;
   candidateModelSelectionId: string;
   modelCatalogApiKeySelectionId: string;
-  modelConnections: ModelConnectionView[];
-  selectedModelConnectionId: string;
-  canCreateTask: boolean;
   errorCode: AccountErrorCode;
   safeDiagnostic: string;
   catalogGeneration: string;
   metaskExecutionGeneration: string;
-  executionGeneration: string;
+};
+
+export type ExecutionView = {
+  state: ExecutionState;
+  defaultSource: ExecutionSource | null;
+  activeSource: ExecutionSource | null;
+  activeGeneration: string;
+  taskCreationAvailable: boolean;
+  selectedModelConnectionId: string;
+  modelConnections: ModelConnectionView[];
+  errorCode: ExecutionErrorCode;
 };
 
 export type AccountCommandResult = {
@@ -577,6 +592,7 @@ export type WorkbenchSnapshot = {
     defaultProfile: PermissionProfile;
   };
   account: AccountView;
+  execution: ExecutionView;
   skillCatalog: SkillCatalogView;
   skillManagement: SkillManagementView;
   mcp: McpManagementView;

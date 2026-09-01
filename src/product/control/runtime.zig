@@ -1490,7 +1490,29 @@ pub const Runtime = struct {
     }
 
     pub fn accountView(self: *Runtime) account_contract.AccountView {
-        return self.execution_state.accountView(!self.shutting_down);
+        return self.execution_state.accountView();
+    }
+
+    pub fn executionView(self: *Runtime) execution_contract.ExecutionView {
+        const custom_default = self.model_connections.defaultBinding();
+        return .{
+            .state = self.execution_state.availability(),
+            .default_source = if (custom_default != null)
+                .model_connection
+            else if (self.execution_state.hasMetaskDefault())
+                .metask
+            else
+                null,
+            .active_source = self.execution_state.activeSource(),
+            .active_generation = self.execution_state.generation(),
+            .task_creation_available = self.canCreateTask(),
+            .selected_model_connection_id = if (custom_default) |binding|
+                binding.connection_id
+            else
+                "",
+            .model_connections = self.model_connections.views(),
+            .error_code = self.execution_state.availabilityError(),
+        };
     }
 
     pub fn startModelConnections(
@@ -1839,8 +1861,6 @@ pub const Runtime = struct {
                 .selected_api_key_id = "automation-key",
                 .selected_model = input.model,
                 .model_catalog_api_key_id = "automation-key",
-                .can_create_task = true,
-                .execution_generation = 1,
                 .metask_execution_generation = 1,
             },
         });
@@ -3669,6 +3689,8 @@ pub const Runtime = struct {
             @tagName(self.default_permission_profile),
         }) catch return error.SnapshotTooLarge;
         try self.writeAccount(&writer);
+        writer.writeAll(",\"execution\":") catch return error.SnapshotTooLarge;
+        try self.writeExecution(&writer);
         writer.writeAll(",\"skillCatalog\":") catch
             return error.SnapshotTooLarge;
         try skill_runtime.Runtime.writeCatalogProjection(
@@ -3752,11 +3774,10 @@ pub const Runtime = struct {
     ) Error!void {
         const view = self.accountView();
         writer.print(
-            "{{\"state\":\"{s}\",\"catalogState\":\"{s}\",\"executionSource\":\"{s}\",\"canCancel\":{},\"accountId\":",
+            "{{\"state\":\"{s}\",\"catalogState\":\"{s}\",\"canCancel\":{},\"accountId\":",
             .{
                 @tagName(view.state),
                 @tagName(view.catalog_state),
-                @tagName(self.execution_state.source()),
                 view.can_cancel,
             },
         ) catch return error.SnapshotTooLarge;
@@ -3812,9 +3833,34 @@ pub const Runtime = struct {
         writer.writeAll(",\"modelCatalogApiKeySelectionId\":") catch
             return error.SnapshotTooLarge;
         try self.projectedJsonValue(writer, view.model_catalog_api_key_id);
+        writer.print(",\"errorCode\":\"{s}\",\"safeDiagnostic\":", .{
+            @tagName(view.error_code),
+        }) catch return error.SnapshotTooLarge;
+        try self.projectedJsonValue(writer, view.safe_diagnostic);
+        writer.print(
+            ",\"catalogGeneration\":\"{d}\",\"metaskExecutionGeneration\":\"{d}\"}}",
+            .{ view.catalog_generation, view.metask_execution_generation },
+        ) catch return error.SnapshotTooLarge;
+    }
+
+    fn writeExecution(
+        self: *Runtime,
+        writer: *std.Io.Writer,
+    ) Error!void {
+        const view = self.executionView();
+        writer.print("{{\"state\":\"{s}\",\"defaultSource\":", .{@tagName(view.state)}) catch
+            return error.SnapshotTooLarge;
+        try writeOptionalExecutionSource(writer, view.default_source);
+        writer.writeAll(",\"activeSource\":") catch return error.SnapshotTooLarge;
+        try writeOptionalExecutionSource(writer, view.active_source);
+        writer.print(",\"activeGeneration\":\"{d}\",\"taskCreationAvailable\":{},\"selectedModelConnectionId\":", .{
+            view.active_generation,
+            view.task_creation_available,
+        }) catch return error.SnapshotTooLarge;
+        try self.projectedJsonValue(writer, view.selected_model_connection_id);
         writer.writeAll(",\"modelConnections\":[") catch
             return error.SnapshotTooLarge;
-        for (self.model_connections.views(), 0..) |connection, index| {
+        for (view.model_connections, 0..) |connection, index| {
             if (index != 0) writer.writeByte(',') catch
                 return error.SnapshotTooLarge;
             writer.writeAll("{\"id\":") catch return error.SnapshotTooLarge;
@@ -3845,27 +3891,19 @@ pub const Runtime = struct {
             }
             writer.writeAll("]}") catch return error.SnapshotTooLarge;
         }
-        writer.writeAll("],\"selectedModelConnectionId\":") catch
+        writer.print("],\"errorCode\":\"{s}\"}}", .{@tagName(view.error_code)}) catch
             return error.SnapshotTooLarge;
-        try self.projectedJsonValue(
-            writer,
-            self.execution_state.selectedModelConnectionId(),
-        );
-        writer.writeAll(",\"canCreateTask\":") catch
-            return error.SnapshotTooLarge;
-        writer.print(
-            "{},\"errorCode\":\"{s}\",\"safeDiagnostic\":",
-            .{ self.canCreateTask(), @tagName(view.error_code) },
-        ) catch return error.SnapshotTooLarge;
-        try self.projectedJsonValue(writer, view.safe_diagnostic);
-        writer.print(
-            ",\"catalogGeneration\":\"{d}\",\"metaskExecutionGeneration\":\"{d}\",\"executionGeneration\":\"{d}\"}}",
-            .{
-                view.catalog_generation,
-                view.metask_execution_generation,
-                self.execution_state.generation(),
-            },
-        ) catch return error.SnapshotTooLarge;
+    }
+
+    fn writeOptionalExecutionSource(
+        writer: *std.Io.Writer,
+        source: ?execution_contract.Source,
+    ) Error!void {
+        if (source) |value|
+            writer.print("\"{s}\"", .{@tagName(value)}) catch
+                return error.SnapshotTooLarge
+        else
+            writer.writeAll("null") catch return error.SnapshotTooLarge;
     }
 
     fn workspaceViewSignals(
@@ -6933,10 +6971,8 @@ fn installTestExecution(control: *Runtime) !void {
             .selected_api_key_id = "key-1",
             .selected_model = "fixture-model",
             .model_catalog_api_key_id = "key-1",
-            .can_create_task = true,
             .catalog_generation = 1,
             .metask_execution_generation = 1,
-            .execution_generation = 1,
         },
     });
     try account_contract.validateView(control.accountView());
@@ -6969,10 +7005,8 @@ fn commitTestExecutionFact(control: *Runtime, generation: u64) void {
             .selected_api_key_id = "key-1",
             .selected_model = "fixture-model",
             .model_catalog_api_key_id = "key-1",
-            .can_create_task = true,
             .catalog_generation = generation,
             .metask_execution_generation = generation,
-            .execution_generation = generation,
         },
     });
 }
@@ -9183,7 +9217,7 @@ test "Runtime publishes a user model connection as an independent execution sour
     prepared_binding_owned = false;
     control.endExecutionReplacementNoFail();
     const view = control.accountView();
-    try std.testing.expectEqual(execution_contract.Source.model_connection, control.execution_state.source());
+    try std.testing.expectEqual(execution_contract.Source.model_connection, control.execution_state.activeSource().?);
     try std.testing.expectEqual(account_contract.AccountState.checking, view.state);
     try std.testing.expectEqual(account_contract.CatalogState.unavailable, view.catalog_state);
     try std.testing.expect(control.canCreateTask());
@@ -9346,7 +9380,7 @@ test "Product Control atomically manages and installs a Model Connection default
 
     try std.testing.expectEqual(
         execution_contract.Source.model_connection,
-        control.execution_state.source(),
+        control.execution_state.activeSource().?,
     );
     try std.testing.expectEqualStrings(
         TestModelConnectionVault.slot,
@@ -9378,7 +9412,7 @@ test "Product Control atomically manages and installs a Model Connection default
     );
     try std.testing.expectEqual(
         execution_contract.Source.model_connection,
-        control.execution_state.source(),
+        control.execution_state.activeSource().?,
     );
     try std.testing.expectEqualStrings(
         TestModelConnectionVault.slot,
@@ -9515,7 +9549,7 @@ test "Metask activation clears durable custom default only after every fallible 
     try std.testing.expect(!control.modelConnectionExecutionSelected());
     try std.testing.expectEqual(
         execution_contract.Source.metask,
-        control.execution_state.source(),
+        control.execution_state.activeSource().?,
     );
     try std.testing.expectEqual(@as(u64, 19), control.execution_state.generation());
 }
@@ -9660,10 +9694,8 @@ test "Account projection and execution install use preallocated no-fail storage"
             .selected_api_key_id = "key-1",
             .selected_model = "model-1",
             .model_catalog_api_key_id = "key-1",
-            .can_create_task = true,
             .catalog_generation = 2,
             .metask_execution_generation = 1,
-            .execution_generation = 1,
         },
     });
     try control.prepareExecutionInstall(execution.input());
@@ -9672,7 +9704,7 @@ test "Account projection and execution install use preallocated no-fail storage"
     control.endExecutionReplacementNoFail();
     control.finishAccountCommitNoFail();
     const view = control.accountView();
-    try std.testing.expect(view.can_create_task);
+    try std.testing.expect(control.executionView().task_creation_available);
     try std.testing.expectEqualStrings("Primary", view.api_keys[0].name);
     try std.testing.expectEqualStrings("Model One", view.models[0].display_name);
     try std.testing.expectEqual(@as(u64, 1), control.currentRevision());
@@ -9780,9 +9812,7 @@ test "default replacement preserves Task generation and installs the next admiss
             .selected_api_key_id = "key-2",
             .selected_model = "fixture-model-2",
             .model_catalog_api_key_id = "key-2",
-            .can_create_task = true,
             .metask_execution_generation = 2,
-            .execution_generation = 2,
         },
     });
     try control.prepareExecutionInstall(replacement.input());
@@ -9881,9 +9911,7 @@ test "Account default model changes do not bump credentials" {
             .selected_api_key_id = "key-1",
             .selected_model = "fixture-model-2",
             .model_catalog_api_key_id = "key-1",
-            .can_create_task = true,
             .metask_execution_generation = 1,
-            .execution_generation = 1,
         },
     });
     control.finishAccountCommitNoFail();
@@ -9922,10 +9950,8 @@ test "busy Task model selection keeps only the last runtime pending model" {
             .selected_api_key_id = "key-1",
             .selected_model = "fixture-model",
             .model_catalog_api_key_id = "key-1",
-            .can_create_task = true,
             .catalog_generation = 2,
             .metask_execution_generation = 1,
-            .execution_generation = 1,
         },
     });
 
@@ -9972,10 +9998,8 @@ test "Task can leave a removed model only within its exact Metask authority" {
             .selected_api_key_id = "key-1",
             .selected_model = "fixture-model-2",
             .model_catalog_api_key_id = "key-1",
-            .can_create_task = true,
             .catalog_generation = 2,
             .metask_execution_generation = 1,
-            .execution_generation = 1,
         },
     });
 
@@ -10036,8 +10060,6 @@ test "clearing the admission default preserves active Task execution" {
         .view = .{
             .state = .signed_out,
             .catalog_state = .unavailable,
-            .can_create_task = false,
-            .execution_generation = 0,
         },
     });
     try control.prepareExecutionClear();
@@ -10046,7 +10068,7 @@ test "clearing the admission default preserves active Task execution" {
     control.finishAccountCommitNoFail();
 
     try std.testing.expect(!control.execution_state.ready());
-    try std.testing.expect(!control.accountView().can_create_task);
+    try std.testing.expect(!control.executionView().task_creation_available);
     const preserved = try control.task_runtime.testExecutionInput(task.durable.id);
     try std.testing.expectEqual(@as(u64, 1), preserved.execution_generation);
     try std.testing.expectEqualStrings("fixture-model", preserved.target.model);
@@ -10991,9 +11013,7 @@ test "Runtime shutdown releases current and Task-owned execution generations" {
             .selected_api_key_id = "key-2",
             .selected_model = "fixture-model-2",
             .model_catalog_api_key_id = "key-2",
-            .can_create_task = true,
             .metask_execution_generation = 2,
-            .execution_generation = 2,
         },
     });
     try control.prepareExecutionInstall(replacement.input());
@@ -11366,12 +11386,10 @@ fn installMaximumAccountProjection(control: *Runtime) !void {
             .selected_api_key_id = &api_key_ids[0],
             .selected_model = &model_ids[0],
             .model_catalog_api_key_id = &api_key_ids[0],
-            .can_create_task = false,
             .error_code = .invalid_state,
             .safe_diagnostic = &diagnostic,
             .catalog_generation = std.math.maxInt(u64),
             .metask_execution_generation = std.math.maxInt(u64),
-            .execution_generation = std.math.maxInt(u64),
         },
     });
     control.finishAccountCommitNoFail();

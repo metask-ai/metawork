@@ -2,6 +2,7 @@ const fixture = @import("lifecycle_fixture");
 const std = fixture.std;
 const lifecycle = fixture.lifecycle;
 const product_control = fixture.product_control;
+const execution_contract = fixture.execution_contract;
 const product_skill = fixture.product_skill;
 const product_task = fixture.product_task;
 const account_contract = fixture.account_contract;
@@ -217,10 +218,8 @@ fn installTwoModelCatalog(workbench: *product_control.Runtime) void {
             .selected_api_key_id = "key-1",
             .selected_model = "fixture-model",
             .model_catalog_api_key_id = "key-1",
-            .can_create_task = true,
             .catalog_generation = 2,
             .metask_execution_generation = 1,
-            .execution_generation = 1,
         },
     });
     workbench.finishAccountCommitNoFail();
@@ -1788,6 +1787,15 @@ const TestScheduleSupport = struct {
         };
     }
 
+    fn persistenceRestored(
+        self: *@This(),
+        restored_bytes: []const u8,
+    ) product_control.SchedulePersistence {
+        var result = self.persistence();
+        result.restored_bytes = restored_bytes;
+        return result;
+    }
+
     fn notify(
         context: ?*anyopaque,
         notification: product_control.ScheduleNotification,
@@ -1806,6 +1814,107 @@ const TestScheduleSupport = struct {
         };
     }
 };
+
+test "legacy Schedule data leaves Account ready and Execution unavailable as a valid snapshot" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 1,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var schedule_support: TestScheduleSupport = .{};
+    const legacy_schedule =
+        "{\"schema_version\":1,\"next_id\":2,\"items\":[{\"id\":1,\"epoch\":1,\"title\":\"retired provider\",\"execution_generation\":1,\"execution_provider\":\"openai\",\"execution_model\":\"gpt-test\",\"permission_profile\":\"approval_required\",\"input\":{\"kind\":\"text\",\"text\":\"inspect\"},\"recurrence\":{\"kind\":\"once\",\"at_unix_seconds\":2},\"enabled\":true,\"health\":\"ready\",\"failure_reason\":null,\"next_run_at_unix_seconds\":2,\"occurrences\":[]}]}";
+    var configuration = productControlConfiguration();
+    configuration.schedule_persistence = schedule_support.persistenceRestored(legacy_schedule);
+    var workbench = try product_control.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 1,
+            .max_tasks = 1,
+            .max_scheduled_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        configuration,
+    );
+    defer workbench.deinit();
+
+    const api_keys = [_]account_contract.ApiKeyView{.{
+        .id = "key-1",
+        .name = "Primary",
+        .suffix = "1234",
+        .protocol = .anthropic_messages,
+    }};
+    const models = [_]account_contract.ModelView{.{
+        .id = "fixture-model",
+        .display_name = "Fixture model",
+    }};
+    try workbench.beginExecutionReplacement();
+    workbench.commitAccountFactNoFail(.{
+        .kind = .execution_changed,
+        .view = .{
+            .state = .authenticated,
+            .catalog_state = .ready,
+            .account_id = "account-1",
+            .display_name = "Metask User",
+            .api_keys = &api_keys,
+            .models = &models,
+            .selected_api_key_id = "key-1",
+            .selected_model = "fixture-model",
+            .model_catalog_api_key_id = "key-1",
+            .catalog_generation = 1,
+            .metask_execution_generation = 1,
+        },
+    });
+    var execution = try execution_contract.OwnedConfig.initOwned(
+        std.testing.allocator,
+        .metask,
+        .anthropic_messages,
+        try std.testing.allocator.dupe(u8, "fixture-model"),
+        try std.testing.allocator.dupe(
+            u8,
+            account_contract.metask_anthropic_messages_url,
+        ),
+        1,
+        try std.testing.allocator.dupe(u8, "fixture-secret"),
+        "metask:key-1",
+    );
+    defer execution.deinit();
+    try std.testing.expectError(
+        error.ScheduledTaskPersistenceUnavailable,
+        workbench.prepareExecutionInstall(execution.input()),
+    );
+    workbench.endExecutionReplacementNoFail();
+    workbench.finishAccountCommitNoFail();
+
+    try account_contract.validateView(workbench.accountView());
+    const execution_view = workbench.executionView();
+    try std.testing.expect(execution_view.state == .unavailable);
+    try std.testing.expect(execution_view.default_source.? == .metask);
+    try std.testing.expect(execution_view.active_source == null);
+    try std.testing.expect(!execution_view.task_creation_available);
+
+    var snapshot_storage: [128 * 1024]u8 = undefined;
+    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"scheduledTaskPersistenceHealth\":\"corrupt\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"execution\":{\"state\":\"unavailable\",\"defaultSource\":\"metask\",\"activeSource\":null,\"activeGeneration\":\"0\",\"taskCreationAvailable\":false",
+    ) != null);
+}
 
 test "scheduled noninteractive permission request automatically stops the Product Run" {
     fake_core.reset();

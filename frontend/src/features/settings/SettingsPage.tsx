@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import type {
   AccountView,
+  ExecutionView,
   Protocol,
   PermissionProfile,
 } from "../../bridge/contracts.ts";
@@ -76,21 +77,21 @@ function modelConnectionProtocolLabel(
 }
 
 function modelConnectionCredentialLabel(
-  status: AccountView["modelConnections"][number]["credentialStatus"],
+  status: ExecutionView["modelConnections"][number]["credentialStatus"],
   t: ReturnType<typeof useI18n>["t"],
 ) {
   return t(`settings.model_connection_credential.${status}`);
 }
 
 function modelConnectionStateLabel(
-  state: AccountView["modelConnections"][number]["state"],
+  state: ExecutionView["modelConnections"][number]["state"],
   t: ReturnType<typeof useI18n>["t"],
 ) {
   return t(`settings.model_connection_state.${state}`);
 }
 
 function modelConnectionTestStatusLabel(
-  status: AccountView["modelConnections"][number]["testStatus"],
+  status: ExecutionView["modelConnections"][number]["testStatus"],
   t: ReturnType<typeof useI18n>["t"],
 ) {
   return t(`settings.model_connection_test_status.${status}`);
@@ -98,6 +99,7 @@ function modelConnectionTestStatusLabel(
 
 export function SettingsPage({
   account,
+  execution,
   modelConnectionCapabilities,
   permissionProfiles,
   focusTarget,
@@ -119,6 +121,7 @@ export function SettingsPage({
   onSetDefaultPermissionProfile,
 }: {
   account: AccountView;
+  execution: ExecutionView;
   modelConnectionCapabilities: {
     management: boolean;
     secretCapture: boolean;
@@ -453,7 +456,7 @@ export function SettingsPage({
   useEffect(() => {
     setModelConnectionEdit((current) => {
       if (!current) return null;
-      const connection = account.modelConnections.find(
+      const connection = execution.modelConnections.find(
         (candidate) => candidate.id === current.connectionId,
       );
       return connection?.connectionGeneration ===
@@ -463,7 +466,7 @@ export function SettingsPage({
     });
     setModelConnectionRemoval((current) => {
       if (!current) return null;
-      const connection = account.modelConnections.find(
+      const connection = execution.modelConnections.find(
         (candidate) => candidate.id === current.connectionId,
       );
       return connection?.connectionGeneration ===
@@ -471,7 +474,7 @@ export function SettingsPage({
         ? current
         : null;
     });
-  }, [account.modelConnections]);
+  }, [execution.modelConnections]);
 
   useEffect(() => {
     if (
@@ -824,7 +827,7 @@ export function SettingsPage({
                   {t("settings.execution_defaults")}
                 </h3>
                 <div className="settings-execution-actions">
-                  {account.executionSource === "model_connection" &&
+                  {execution.defaultSource === "model_connection" &&
                     authenticated &&
                     account.catalogState === "ready" && (
                       <Button
@@ -1266,13 +1269,13 @@ export function SettingsPage({
               <p className="settings-model-connections-empty">
                 {t("settings.model_connections_unavailable")}
               </p>
-            ) : account.modelConnections.length === 0 ? (
+            ) : execution.modelConnections.length === 0 ? (
               <p className="settings-model-connections-empty">
                 {t("settings.model_connections_empty")}
               </p>
             ) : (
               <div className="settings-model-connection-list">
-                {account.modelConnections.map((connection) => (
+                {execution.modelConnections.map((connection) => (
                   <div
                     className="settings-model-connection"
                     key={connection.id}
@@ -1322,7 +1325,7 @@ export function SettingsPage({
                       </button>
                       <SelectionMenu
                         value={
-                          account.selectedModelConnectionId === connection.id
+                          execution.selectedModelConnectionId === connection.id
                             ? connection.selectedModel
                             : ""
                         }
@@ -1357,7 +1360,7 @@ export function SettingsPage({
                         disabled={
                           disabled ||
                           mutatingModelConnection ||
-                          account.selectedModelConnectionId === connection.id
+                          execution.selectedModelConnectionId === connection.id
                         }
                         onClick={() => {
                           setModelConnectionRemoval(null);
@@ -1378,7 +1381,7 @@ export function SettingsPage({
                         disabled={
                           disabled ||
                           mutatingModelConnection ||
-                          account.selectedModelConnectionId === connection.id
+                          execution.selectedModelConnectionId === connection.id
                         }
                         onClick={() => {
                           setModelConnectionEdit(null);
@@ -1392,7 +1395,7 @@ export function SettingsPage({
                         {t("common.remove")}
                       </button>
                     </div>
-                    {account.selectedModelConnectionId === connection.id && (
+                    {execution.selectedModelConnectionId === connection.id && (
                       <p className="settings-model-connection-active-note">
                         {t("settings.model_connection_active_mutation_help")}
                       </p>

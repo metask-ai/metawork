@@ -172,7 +172,7 @@ preparing_execution
 
 “用户在模型加载期间重新选择 API”必须进入 `reloading_models`，不能用旁路布尔位附着在另一个阶段。是否存在 committed execution 由 committed default 是否存在直接表达；不能再用独立 `preparing | ready | reconfiguring` 状态与 transaction stage 重复编码。
 
-公开的 `AccountState`、`CatalogState`、`canCancel` 和 `canCreateTask` 都是 committed aggregate 与 transaction 的派生 projection，不是内部状态机的第二份真相。
+公开的 `AccountState`、`CatalogState`、`canCancel` 与 Metask catalog/generation 都是 committed aggregate 与 transaction 的派生 projection，不是内部状态机的第二份真相。新 Task admission、默认/active execution 与 replacement 状态由 Product Control 的 Execution projection 派生，Account 不发布也不缓存这些决定。
 
 ## 5. Prepare、effect 与 commit
 
@@ -309,7 +309,7 @@ credential-bearing execution persistence outcome unknown 风险更高：在重�
 - ready selection 在对应 public catalog 中精确出现一次；
 - model catalog owner 与 API selection 一致；
 - candidate 字段只来自当前 transaction；
-- generation、execution source 和 `canCreateTask` 自洽；
+- Metask catalog generation 与 credential execution generation 自洽；
 - signed-out/checking/authorizing projection 不泄漏 identity、catalog、selection 或 generation；
 - projection 永不包含 token、API Key secret、credential、PKCE、authorization code、header 或 locator。
 

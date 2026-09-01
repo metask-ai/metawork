@@ -106,7 +106,7 @@ Workspace
 - `Turn` 和 `Run` 通常不直接命名，用当前活动、排队、停止和结果表达。
 - 一项 Task 可以包含多次用户补充和多次执行；停止一次执行不会删除 Task。
 
-当前 Renderer 产品合同为 `metawork.renderer-bridge` 固定 revision 1：`connect` 精确协商后才开放产品路径，snapshot 根节点包含无 secret `capabilities`、`account`、`skillCatalog`、`skillManagement`、`mcp`、`workspaces`、`scheduledTasks` 与 `tasks` 且不维护局部版本；为保持既有 wire shape，Execution-owned Model Connection projection 位于 `account.modelConnections`，精确默认 identity 位于 `account.selectedModelConnectionId`，该 JSON namespace 不赋予 Account 产品 ownership。Account 只发布 Metask `state`、`catalogState`、`canCancel`、脱敏 catalog/selection 与 generation；Product Control 组合最终 `canCreateTask` 和 Model Connection projection。Workspace 独立于 Task 发布，durable Task 不携带 Account identity、API Key 元数据或 connection credential locator。快速开发阶段直接原地 hard cut 合同内容，不提供临时形态兼容层或可选字段退路；任何合同类版本标识的变更都必须先得到用户显式同意。Agent 内部 Session route identity 不属于 Renderer 产品模型。
+当前 Renderer 产品合同为 `metawork.renderer-bridge` 固定 revision 1：`connect` 精确协商后才开放产品路径，snapshot 根节点包含无 secret `capabilities`、`account`、`execution`、`skillCatalog`、`skillManagement`、`mcp`、`workspaces`、`scheduledTasks` 与 `tasks` 且不维护局部版本。Account 只发布 Metask `state`、`catalogState`、`canCancel`、脱敏 catalog/selection 与 generation；Product Control 在独立 `execution` 中发布默认/active source、active generation、新 Task admission 与 Model Connection。Account ready 与 Execution unavailable 可以同时展示：界面保留账号事实、历史 Task 与恢复动作，只禁用依赖当前默认 execution 的 New task 发送，不把它误报成账号失效或工作台合同错误。Workspace 独立于 Task 发布，durable Task 不携带 Account identity、API Key 元数据或 connection credential locator。快速开发阶段直接原地 hard cut 合同内容，不提供临时形态兼容层或可选字段退路；任何合同类版本标识的变更都必须先得到用户显式同意。Agent 内部 Session route identity 不属于 Renderer 产品模型。
 
 ### 3.2 规范术语
 

@@ -595,19 +595,19 @@ test "Application coordinator commits Account Runtime facts into Workbench" {
         account_contract.AccountState.authenticated,
         workbench.accountView().state,
     );
-    try std.testing.expect(workbench.accountView().can_create_task);
+    try std.testing.expect(workbench.executionView().task_creation_available);
 
     const login = coordinator.commandSink().submit(.begin_login);
     try std.testing.expect(login.accepted);
     try std.testing.expect(workbench.executionReplacementPending());
-    try std.testing.expect(!workbench.accountView().can_create_task);
+    try std.testing.expect(!workbench.executionView().task_creation_available);
     coordinator.drain();
     try std.testing.expectEqual(
         account_contract.AccountState.authenticated,
         account_runtime.view().state,
     );
     try std.testing.expect(!workbench.executionReplacementPending());
-    try std.testing.expect(workbench.accountView().can_create_task);
+    try std.testing.expect(workbench.executionView().task_creation_available);
 
     const cancelled_login = coordinator.commandSink().submit(.begin_login);
     try std.testing.expect(cancelled_login.accepted);
@@ -615,7 +615,7 @@ test "Application coordinator commits Account Runtime facts into Workbench" {
     const cancelled = coordinator.commandSink().submit(.cancel_operation);
     try std.testing.expect(cancelled.accepted);
     try std.testing.expect(!workbench.executionReplacementPending());
-    try std.testing.expect(workbench.accountView().can_create_task);
+    try std.testing.expect(workbench.executionView().task_creation_available);
     coordinator.drain();
     try std.testing.expectEqual(
         account_contract.AccountState.authenticated,
@@ -653,7 +653,7 @@ test "Application coordinator commits Account Runtime facts into Workbench" {
     );
     try std.testing.expectEqual(@as(usize, 0), workbench.accountView().api_keys.len);
     try std.testing.expectEqual(@as(usize, 0), workbench.accountView().models.len);
-    try std.testing.expect(!workbench.accountView().can_create_task);
+    try std.testing.expect(!workbench.executionView().task_creation_available);
 }
 
 test "Application coordinator balances Workbench gate when Account effect admission fails" {
@@ -728,7 +728,7 @@ test "Application coordinator balances Workbench gate when Account effect admiss
         account_contract.AccountState.authenticated,
         account_runtime.view().state,
     );
-    try std.testing.expect(workbench.accountView().can_create_task);
+    try std.testing.expect(workbench.executionView().task_creation_available);
     try std.testing.expectEqual(revision, workbench.currentRevision());
     try std.testing.expect(!workbench.executionReplacementPending());
 
@@ -752,7 +752,7 @@ test "Application coordinator balances Workbench gate when Account effect admiss
         account_runtime.view().error_code,
     );
     try std.testing.expect(!workbench.executionReplacementPending());
-    try std.testing.expect(!workbench.accountView().can_create_task);
+    try std.testing.expect(!workbench.executionView().task_creation_available);
     account_api.TestSupport.clearEffectQueue(&account_runtime);
     coordinator.shutdown();
 }
@@ -1026,14 +1026,14 @@ test "restored login drives automatic key and model defaults end to end" {
         "claude-sonnet-4-5",
         settled.selected_model,
     );
-    try std.testing.expect(settled.can_create_task);
+    try std.testing.expect(workbench.executionView().task_creation_available);
 
     // Phase 2: a manual key switch from the settled state must complete the
     // same continuation for the second key.
     const manual = coordinator.commandSink().submit(.{ .select_api_key = .{
         .selection_id = "2",
         .expected_catalog_generation = settled.catalog_generation,
-        .expected_execution_generation = settled.execution_generation,
+        .expected_execution_generation = settled.metask_execution_generation,
     } });
     try std.testing.expect(manual.accepted);
     const switched = pumpUntilReady(&coordinator, &account_runtime, "manual");
@@ -1043,17 +1043,17 @@ test "restored login drives automatic key and model defaults end to end" {
     );
     try std.testing.expectEqualStrings("2", switched.selected_api_key_id);
     try std.testing.expectEqualStrings("gpt-5.1", switched.selected_model);
-    try std.testing.expect(switched.can_create_task);
+    try std.testing.expect(workbench.executionView().task_creation_available);
 
     // Phase 3: changing only the default model on the committed GPT API is a
     // preference transaction. It must retain the committed catalog and the
     // credential generation, and the new default must be durable.
-    const switched_generation = switched.execution_generation;
+    const switched_generation = switched.metask_execution_generation;
     const select_gpt_model = coordinator.commandSink().submit(.{
         .select_model = .{
             .selection_id = "gpt-5.6-sol",
             .expected_catalog_generation = switched.catalog_generation,
-            .expected_execution_generation = switched.execution_generation,
+            .expected_execution_generation = switched.metask_execution_generation,
         },
     });
     try std.testing.expect(select_gpt_model.accepted);
@@ -1065,7 +1065,7 @@ test "restored login drives automatic key and model defaults end to end" {
     try account_contract.validateView(model_changed);
     try std.testing.expectEqualStrings("2", model_changed.selected_api_key_id);
     try std.testing.expectEqualStrings("gpt-5.6-sol", model_changed.selected_model);
-    try std.testing.expectEqual(switched_generation, model_changed.execution_generation);
+    try std.testing.expectEqual(switched_generation, model_changed.metask_execution_generation);
     try std.testing.expectEqual(@as(usize, 2), model_changed.api_keys.len);
     try std.testing.expectEqual(@as(usize, 2), model_changed.models.len);
     try std.testing.expectEqualStrings(
@@ -1190,7 +1190,7 @@ test "relaunch with persisted selection restores the saved execution" {
             settled.catalog_state,
         );
         try std.testing.expectEqualStrings("1", settled.selected_api_key_id);
-        try std.testing.expect(settled.can_create_task);
+        try std.testing.expect(workbench.executionView().task_creation_available);
 
         // The user's exact gesture: pick a key in settings right after the
         // relaunch settles.
@@ -1198,7 +1198,7 @@ test "relaunch with persisted selection restores the saved execution" {
             .select_api_key = .{
                 .selection_id = "2",
                 .expected_catalog_generation = settled.catalog_generation,
-                .expected_execution_generation = settled.execution_generation,
+                .expected_execution_generation = settled.metask_execution_generation,
             },
         });
         try std.testing.expect(manual.accepted);
@@ -1212,17 +1212,17 @@ test "relaunch with persisted selection restores the saved execution" {
             .select_model = .{
                 .selection_id = "gpt-5.6-sol",
                 .expected_catalog_generation = switched.catalog_generation,
-                .expected_execution_generation = switched.execution_generation,
+                .expected_execution_generation = switched.metask_execution_generation,
             },
         });
         try std.testing.expect(model_change.accepted);
         const changed = pumpUntilReady(&coordinator, &account_runtime, "boot2-model");
         try std.testing.expectEqualStrings("gpt-5.6-sol", changed.selected_model);
         try std.testing.expectEqual(
-            switched.execution_generation,
-            changed.execution_generation,
+            switched.metask_execution_generation,
+            changed.metask_execution_generation,
         );
-        persisted_generation = changed.execution_generation;
+        persisted_generation = changed.metask_execution_generation;
         coordinator.shutdown();
     }
 
@@ -1267,7 +1267,7 @@ test "relaunch with persisted selection restores the saved execution" {
         const restored = pumpUntilReady(&coordinator, &account_runtime, "boot3");
         try std.testing.expectEqualStrings("2", restored.selected_api_key_id);
         try std.testing.expectEqualStrings("gpt-5.6-sol", restored.selected_model);
-        try std.testing.expectEqual(persisted_generation, restored.execution_generation);
+        try std.testing.expectEqual(persisted_generation, restored.metask_execution_generation);
         coordinator.shutdown();
     }
 }
@@ -1337,7 +1337,7 @@ test "broken first key parks the catalog and a manual switch recovers" {
     const manual = coordinator.commandSink().submit(.{ .select_api_key = .{
         .selection_id = "2",
         .expected_catalog_generation = parked.catalog_generation,
-        .expected_execution_generation = parked.execution_generation,
+        .expected_execution_generation = parked.metask_execution_generation,
     } });
     try std.testing.expect(manual.accepted);
     const recovered = pumpUntilReady(&coordinator, &account_runtime, "recover");
@@ -1346,7 +1346,7 @@ test "broken first key parks the catalog and a manual switch recovers" {
         recovered.catalog_state,
     );
     try std.testing.expectEqualStrings("2", recovered.selected_api_key_id);
-    try std.testing.expect(recovered.can_create_task);
+    try std.testing.expect(workbench.executionView().task_creation_available);
 
     coordinator.shutdown();
 }

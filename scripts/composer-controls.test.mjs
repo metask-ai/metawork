@@ -301,7 +301,6 @@ test("SelectionMenu exposes a visible busy state without a false chevron", () =>
 const readySettingsAccount = {
   state: "authenticated",
   catalogState: "ready",
-  executionSource: "metask",
   canCancel: false,
   accountId: "account-1",
   displayName: "Metask User",
@@ -328,17 +327,24 @@ const readySettingsAccount = {
   candidateApiKeySelectionId: "",
   candidateModelSelectionId: "",
   modelCatalogApiKeySelectionId: "key-1",
-  modelConnections: [],
-  selectedModelConnectionId: "",
-  canCreateTask: true,
   errorCode: "none",
   safeDiagnostic: "",
   catalogGeneration: "1",
   metaskExecutionGeneration: "1",
-  executionGeneration: "1",
 };
 
-function settingsElement(account, overrides = {}) {
+const readySettingsExecution = {
+  state: "ready",
+  defaultSource: "metask",
+  activeSource: "metask",
+  activeGeneration: "1",
+  taskCreationAvailable: true,
+  selectedModelConnectionId: "",
+  modelConnections: [],
+  errorCode: "none",
+};
+
+function settingsElement(account, execution, overrides = {}) {
   return createElement(
     I18nContext.Provider,
     {
@@ -350,6 +356,7 @@ function settingsElement(account, overrides = {}) {
     },
     createElement(SettingsPage, {
       account,
+      execution,
       modelConnectionCapabilities: {
         management: true,
         secretCapture: false,
@@ -389,7 +396,11 @@ function settingsElement(account, overrides = {}) {
   );
 }
 
-function renderSettings(account, overrides = {}) {
+function renderSettings(
+  account,
+  overrides = {},
+  execution = readySettingsExecution,
+) {
   const selections = { api: [], model: [] };
   const callbacks = {
     onSelectApiKey(value) {
@@ -400,12 +411,12 @@ function renderSettings(account, overrides = {}) {
     },
     ...overrides,
   };
-  const view = render(settingsElement(account, callbacks));
+  const view = render(settingsElement(account, execution, callbacks));
   return {
     ...view,
     selections,
     rerenderAccount(nextAccount) {
-      view.rerender(settingsElement(nextAccount, callbacks));
+      view.rerender(settingsElement(nextAccount, execution, callbacks));
     },
   };
 }
@@ -427,7 +438,6 @@ test("Settings completes the API transaction before replacing committed defaults
     ...readySettingsAccount,
     catalogState: "loading",
     candidateApiKeySelectionId: "key-2",
-    canCreateTask: false,
     canCancel: true,
   });
   assert.match(screen.getByRole("status").textContent, /Preparing Backup/);
@@ -446,7 +456,6 @@ test("Settings completes the API transaction before replacing committed defaults
     candidateApiKeySelectionId: "key-2",
     modelCatalogApiKeySelectionId: "key-2",
     models: [],
-    canCreateTask: false,
     canCancel: true,
   });
 
@@ -463,7 +472,6 @@ test("Settings completes the API transaction before replacing committed defaults
     candidateApiKeySelectionId: "key-2",
     modelCatalogApiKeySelectionId: "key-2",
     models: [{ selectionId: "model-2", displayName: "Model Two" }],
-    canCreateTask: false,
     canCancel: true,
   });
   assert.match(
@@ -487,7 +495,6 @@ test("Settings completes the API transaction before replacing committed defaults
     candidateModelSelectionId: "model-2",
     modelCatalogApiKeySelectionId: "key-2",
     models: [{ selectionId: "model-2", displayName: "Model Two" }],
-    canCreateTask: false,
     canCancel: false,
   });
   assert.match(screen.getByRole("status").textContent, /Preparing Model Two/);
@@ -499,7 +506,7 @@ test("Settings completes the API transaction before replacing committed defaults
     selectedApiKeySelectionId: "key-2",
     selectedModelSelectionId: "model-2",
     modelCatalogApiKeySelectionId: "key-2",
-    executionGeneration: "2",
+    metaskExecutionGeneration: "2",
   });
   assert.match(
     screen.getByRole("combobox", { name: "Default API" }).textContent,
@@ -532,9 +539,16 @@ test("Settings keeps Metask available while a model connection is the default", 
   const user = userEvent.setup({ document: dom.window.document });
   let activations = 0;
   renderSettings(
+    readySettingsAccount,
     {
-      ...readySettingsAccount,
-      executionSource: "model_connection",
+      onActivateMetask() {
+        activations += 1;
+      },
+    },
+    {
+      ...readySettingsExecution,
+      defaultSource: "model_connection",
+      activeSource: "model_connection",
       modelConnections: [
         {
           id: "connection-1",
@@ -551,12 +565,7 @@ test("Settings keeps Metask available while a model connection is the default", 
         },
       ],
       selectedModelConnectionId: "connection-1",
-      executionGeneration: "9",
-    },
-    {
-      onActivateMetask() {
-        activations += 1;
-      },
+      activeGeneration: "9",
     },
   );
 
@@ -580,7 +589,6 @@ test("Settings limits API transaction locking and keeps a real cancel path", asy
       candidateApiKeySelectionId: "key-2",
       modelCatalogApiKeySelectionId: "key-2",
       models: [],
-      canCreateTask: false,
       canCancel: true,
     },
     {

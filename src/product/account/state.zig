@@ -428,15 +428,10 @@ const CommittedState = struct {
                 .logging_out => "",
                 else => self.selected_api_key_id.view(),
             },
-            .can_create_task = state == .authenticated and
-                catalog_state == .ready and self.execution_authority == .ready and
-                self.attemptKind() != .catalog and
-                self.operation() != .logging_out,
             .error_code = self.error_code,
             .safe_diagnostic = self.safe_diagnostic.view(),
             .catalog_generation = self.catalog_generation,
             .metask_execution_generation = if (publish_account) self.execution_generation else 0,
-            .execution_generation = if (publish_account) self.execution_generation else 0,
         };
     }
 
@@ -1912,7 +1907,7 @@ test "explicit login persists tokens before publishing identity" {
     try std.testing.expectEqual(contract.AccountState.authenticated, account.view().state);
     try std.testing.expectEqualStrings("account-2", account.view().account_id);
     try std.testing.expectEqualStrings("Other User", account.view().display_name);
-    try std.testing.expectEqual(@as(u64, 0), account.view().execution_generation);
+    try std.testing.expectEqual(@as(u64, 0), account.view().metask_execution_generation);
 }
 
 test "explicit login accepts the newly verified identity" {
@@ -2233,11 +2228,7 @@ test "empty model catalog parks back in choosing with the key list intact" {
     // The committed execution keeps working; nothing was torn down.
     try std.testing.expectEqualStrings("key-old", view.selected_api_key_id);
     try std.testing.expectEqualStrings("model-old", view.selected_model);
-    try std.testing.expectEqual(@as(u64, 9), view.execution_generation);
-    // Admission stays closed while the catalog transaction is open; it
-    // reopens when the user completes the re-pick. The point of parking is
-    // that the re-pick is possible at all.
-    try std.testing.expect(!view.can_create_task);
+    try std.testing.expectEqual(@as(u64, 9), view.metask_execution_generation);
 
     // Re-picking a key continues inside the same parked transaction.
     var reselect = switch (account.prepareCommand(.{
@@ -2438,7 +2429,7 @@ test "failed reconfiguration preserves the committed selection" {
     try std.testing.expectEqualStrings("key-old", account.view().selected_api_key_id);
     try std.testing.expectEqualStrings("", account.view().candidate_api_key_id);
     try std.testing.expectEqualStrings("", account.view().candidate_model);
-    try std.testing.expectEqual(@as(u64, 9), account.view().execution_generation);
+    try std.testing.expectEqual(@as(u64, 9), account.view().metask_execution_generation);
 
     var logout = switch (account.prepareCommand(.logout)) {
         .transition => |value| value,
@@ -2448,7 +2439,6 @@ test "failed reconfiguration preserves the committed selection" {
         logout.takeEffect().? == .delete_credential,
     );
     commitPrepared(&account, &logout);
-    try std.testing.expect(!account.view().can_create_task);
     try std.testing.expect(!account.view().can_cancel);
     switch (account.prepareCommand(.cancel_operation)) {
         .rejected => |error_code| try std.testing.expectEqual(
@@ -2467,7 +2457,7 @@ test "failed reconfiguration preserves the committed selection" {
     };
     try std.testing.expect(logout_done.takeEffect() == null);
     commitPrepared(&account, &logout_done);
-    try std.testing.expectEqual(@as(u64, 0), account.view().execution_generation);
+    try std.testing.expectEqual(@as(u64, 0), account.view().metask_execution_generation);
 }
 
 test "ready execution model selection updates the default without reconfiguration" {
@@ -2499,7 +2489,6 @@ test "ready execution model selection updates the default without reconfiguratio
     try std.testing.expectEqualStrings("key-new", view.candidate_api_key_id);
     try std.testing.expectEqualStrings("", view.candidate_model);
     try std.testing.expectEqualStrings("key-old", view.model_catalog_api_key_id);
-    try std.testing.expect(!view.can_create_task);
 
     var cancel = switch (account.prepareCommand(.cancel_operation)) {
         .transition => |value| value,
@@ -2526,8 +2515,7 @@ test "ready execution model selection updates the default without reconfiguratio
     try std.testing.expectEqualStrings("key-old", view.selected_api_key_id);
     try std.testing.expectEqualStrings("model-old", view.selected_model);
     try std.testing.expectEqualStrings("model-new", view.candidate_model);
-    try std.testing.expectEqual(@as(u64, 9), view.execution_generation);
-    try std.testing.expect(!view.can_create_task);
+    try std.testing.expectEqual(@as(u64, 9), view.metask_execution_generation);
 
     var persisted: WorkerCompletion = .{
         .attempt_id = account.activeAttempt().?,
@@ -2547,8 +2535,7 @@ test "ready execution model selection updates the default without reconfiguratio
     try std.testing.expectEqual(contract.CatalogState.ready, view.catalog_state);
     try std.testing.expectEqualStrings("key-old", view.selected_api_key_id);
     try std.testing.expectEqualStrings("model-new", view.selected_model);
-    try std.testing.expectEqual(@as(u64, 9), view.execution_generation);
-    try std.testing.expect(view.can_create_task);
+    try std.testing.expectEqual(@as(u64, 9), view.metask_execution_generation);
 }
 
 test "shutdown invalidates active attempt and requires effect consumption" {
@@ -2597,8 +2584,7 @@ test "shutdown revokes ready execution before publishing the terminal view" {
     try std.testing.expectEqual(contract.CatalogState.unavailable, view.catalog_state);
     try std.testing.expectEqualStrings("", view.selected_api_key_id);
     try std.testing.expectEqualStrings("", view.selected_model);
-    try std.testing.expectEqual(@as(u64, 0), view.execution_generation);
-    try std.testing.expect(!view.can_create_task);
+    try std.testing.expectEqual(@as(u64, 0), view.metask_execution_generation);
 }
 
 test "restore failure returns to sign-in without restart semantics" {
@@ -2688,7 +2674,6 @@ test "unknown execution persistence outcome clears old runtime identity" {
     );
     try std.testing.expectEqualStrings("", view.selected_api_key_id);
     try std.testing.expectEqualStrings("", view.selected_model);
-    try std.testing.expect(!view.can_create_task);
 }
 
 test "login commits account-only before a separate catalog generation" {
@@ -2805,10 +2790,9 @@ test "login commits account-only before a separate catalog generation" {
     try std.testing.expectEqual(@as(u64, 2), view.catalog_generation);
     try std.testing.expectEqual(
         @as(u64, 0x9e37_79b9_7f4a_7c15),
-        view.execution_generation,
+        view.metask_execution_generation,
     );
     try std.testing.expectEqualStrings("model-1", view.selected_model);
-    try std.testing.expect(view.can_create_task);
 }
 
 test "cancel invalidates attempt and stale secret completion is destroyed" {

@@ -283,7 +283,7 @@ try {
       `Workspace choice was not committed to the product snapshot: ${JSON.stringify(afterChoose.workspaces)}`,
     );
   const expectedWorkspaceEpoch = selectedWorkspace.epoch;
-  const expectedExecutionGeneration = afterChoose.account.executionGeneration;
+  const expectedExecutionGeneration = afterChoose.execution.activeGeneration;
   if (!isWireId(expectedExecutionGeneration))
     throw new Error("snapshot omitted the current execution generation");
   const catalogSnapshot = await poll(

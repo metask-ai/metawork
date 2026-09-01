@@ -86,6 +86,8 @@ Renderer reload、断连或命令 timeout 只影响交互与 resync，不能取�
 
 Identity replacement、default execution replacement 与 durable Task history 是三个边界。durable history 只保存解释执行来源所需的 protocol、model、不透明 execution generation 与 binding facts，不保存 Account identity、Model Connection identity、API Key metadata、credential locator、完整 ExecutionConfig 或可重建 secret 的信息。
 
+Canonical snapshot 同样保持 owner 边界：根 `account` 只投影 Account-owned Metask identity、catalog、selection、generation、取消能力与稳定错误；根 `execution` 由 Product Control 投影 durable default、process-local active source/generation、replacement/availability、新 Task admission 与 Model Connection。两者可以独立处于 ready/unavailable，例如 Account 已恢复而 Schedule 或 Execution 恢复失败时仍必须发布合法 snapshot，不能伪造 active Metask execution，也不能令整个 Workbench fail closed。新 Task 尚未存在，其 admission 由 Product Control 决定；Task 创建后，其 Run、Session、binding、阻塞与恢复只由 Product Task 自身事实决定，Account mutation 不构成全局 Task gate。
+
 `model-connections.json` 是 Execution aggregate 的独立原子 registry，继续位于既有产品数据目录并保持既有 wire shape；它只保存 connection id、display name、protocol、normalized endpoint、有界 model metadata、credential/test status、generation、默认 binding 和待完成 credential deletion tombstone。API credential 只进入系统安全存储；既有 Keychain/service identity 和以 connection id 派生的 account identity 保持不变。旧 `provider` 字段不读取、不迁移、不双写，包含旧 shape 的 registry fail closed 且不得被自动覆盖。
 
 连接删除先提交 credential cleanup tombstone，再删除系统 credential，最后原子清除 tombstone；创建先提交目标 id tombstone，再写 credential，最后以一次 registry commit 替换为完整连接。启动与后续 mutation 必须排空 tombstone。确认 credential 缺失时撤销对应 default 并持久化 `credential_status = missing`；安全存储暂时不可读不能被误写成已确认缺失。Execution 恢复与 Account identity 恢复相互独立，一方 unavailable 不得使另一方的持久化事实被清空或覆盖。
