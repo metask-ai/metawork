@@ -60,6 +60,42 @@ pub fn decodeCoreEvent(
     return parsed;
 }
 
+pub const DegradableCoreEvent = enum {
+    file_changes,
+    other,
+    invalid,
+};
+
+/// Classifies a borrowed callback payload without copying or materializing its
+/// value. This is only for deciding whether a supplemental `file_changes`
+/// observation may be dropped under local resource pressure. The canonical
+/// event envelope is exactly one top-level object field; malformed, ambiguous,
+/// or excessively nested input must remain fatal.
+pub fn classifyDegradableCoreEvent(encoded: []const u8) DegradableCoreEvent {
+    var stack_storage: [1024]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&stack_storage);
+    const allocator = fixed.allocator();
+    var scanner = std.json.Scanner.initCompleteInput(allocator, encoded);
+    defer scanner.deinit();
+
+    const begin = scanner.next() catch return .invalid;
+    if (begin != .object_begin) return .invalid;
+    const tag_token = scanner.nextAllocMax(allocator, .alloc_if_needed, 64) catch
+        return .invalid;
+    const tag = switch (tag_token) {
+        .string => |value| value,
+        .allocated_string => |value| value,
+        else => return .invalid,
+    };
+    const is_file_changes = std.mem.eql(u8, tag, "file_changes");
+    scanner.skipValue() catch return .invalid;
+    const object_end = scanner.next() catch return .invalid;
+    if (object_end != .object_end) return .invalid;
+    const document_end = scanner.next() catch return .invalid;
+    if (document_end != .end_of_document) return .invalid;
+    return if (is_file_changes) .file_changes else .other;
+}
+
 fn coreEventTextValid(event: sdk.DecodedCoreEvent) bool {
     return switch (event) {
         .unknown => |unknown| validUtf8(&.{ unknown.tag, unknown.payload_json }),
@@ -237,5 +273,36 @@ test "AgentCore JSON callbacks reject invalid UTF-8 at the ownership boundary" {
     try std.testing.expectError(
         error.InvalidPayload,
         decodeUiRequest(std.testing.allocator, invalid_ui),
+    );
+}
+
+test "degradable event classifier accepts only one valid file_changes envelope" {
+    try std.testing.expectEqual(
+        DegradableCoreEvent.file_changes,
+        classifyDegradableCoreEvent(
+            "{\"file_changes\":{\"changes\":[],\"overflow\":true,\"lost\":false}}",
+        ),
+    );
+    try std.testing.expectEqual(
+        DegradableCoreEvent.file_changes,
+        classifyDegradableCoreEvent(
+            "{\"file_\\u0063hanges\":{\"changes\":[]}}",
+        ),
+    );
+    try std.testing.expectEqual(
+        DegradableCoreEvent.other,
+        classifyDegradableCoreEvent("{\"text_chunk\":\"hello\"}"),
+    );
+    try std.testing.expectEqual(
+        DegradableCoreEvent.invalid,
+        classifyDegradableCoreEvent("{}"),
+    );
+    try std.testing.expectEqual(
+        DegradableCoreEvent.invalid,
+        classifyDegradableCoreEvent("{\"file_changes\":{},\"usage\":{}}"),
+    );
+    try std.testing.expectEqual(
+        DegradableCoreEvent.invalid,
+        classifyDegradableCoreEvent("{\"file_changes\":{}"),
     );
 }

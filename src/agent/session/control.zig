@@ -86,6 +86,9 @@ pub const TerminalResult = struct {
     abort_status: ?sdk.Status,
     raw_abort_status_code: ?u32,
     termination_signal: ?TerminationSignal,
+    /// Supplemental typed file-change observations were dropped locally.
+    /// This fact never changes the Agent terminal outcome.
+    file_changes_lost: bool = false,
     failure: ?TerminalFailure,
     session_disposition_at_completion: SessionDisposition,
     durable_budget: ?DurableBudgetObservation = null,

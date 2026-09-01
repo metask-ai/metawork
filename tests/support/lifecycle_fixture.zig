@@ -57,6 +57,7 @@ pub const Plan = enum {
     callback_failed,
     controlled_callback_failed,
     event_callback,
+    file_changes_callback,
     unknown_event_callback,
     malformed_event_callback,
     invalid_utf8_event_callback,
@@ -1771,7 +1772,8 @@ pub fn sessionRunInput(
         active_signal.waitUntilEntered();
     }
 
-    if (plan == .event_callback or plan == .unknown_event_callback or
+    if (plan == .event_callback or plan == .file_changes_callback or
+        plan == .unknown_event_callback or
         plan == .malformed_event_callback or plan == .invalid_utf8_event_callback or
         plan == .wrong_event_session_handle or
         plan == .wrong_event_run_id or plan == .same_run_session_id_mismatch or
@@ -1784,8 +1786,11 @@ pub fn sessionRunInput(
         var event_buffer = "{\"text_chunk\":\"typed event\"}".*;
         const invalid_utf8_event =
             "{\"tool_result\":{\"id\":\"tool-1\",\"name\":\"Bash\",\"input\":\"{}\",\"content\":[203],\"is_error\":false,\"elapsed_ms\":1}}";
+        const file_changes_event =
+            "{\"file_changes\":{\"id\":\"tool-1\",\"name\":\"Edit\",\"changes\":[{\"locator\":{\"workspace_path\":\"src/main.zig\"},\"kind\":\"modified\",\"status\":\"applied\",\"tool\":\"Edit\",\"tool_use_id\":\"tool-1\",\"agent_depth\":0,\"before_bytes\":1,\"after_bytes\":2,\"unified_diff\":\"-a\\n+b\\n\",\"diff_complete\":true}],\"overflow\":false,\"lost\":false}}";
         const event_json: []const u8 = switch (plan) {
             .event_callback => &event_buffer,
+            .file_changes_callback => file_changes_event,
             .unknown_event_callback => "{\"future_observation\":{\"answer\":42}}",
             .malformed_event_callback => "{}",
             .invalid_utf8_event_callback => invalid_utf8_event,
@@ -2373,6 +2378,8 @@ pub const TestCompositionLimits = struct {
     per_session_event_capacity: ?usize = null,
     control_reserved_capacity: ?usize = null,
     per_session_control_reserved_capacity: ?usize = null,
+    max_event_bytes: ?usize = null,
+    event_enqueue_timeout: ?std.Io.Duration = null,
     max_ui_response_bytes: ?usize = null,
     event_ready_notifier: ?lifecycle.EventReadyNotifier = null,
     event_ready_retry_interval: ?std.Io.Duration = null,
@@ -2386,6 +2393,8 @@ pub const TestCompositionLimits = struct {
         if (self.control_reserved_capacity) |value| limits.control_reserved_capacity = value;
         if (self.per_session_control_reserved_capacity) |value|
             limits.per_session_control_reserved_capacity = value;
+        if (self.max_event_bytes) |value| limits.max_event_bytes = value;
+        if (self.event_enqueue_timeout) |value| limits.event_enqueue_timeout = value;
         if (self.max_ui_response_bytes) |value| limits.max_ui_response_bytes = value;
         limits.event_ready_notifier = self.event_ready_notifier;
         if (self.event_ready_retry_interval) |value| limits.event_ready_retry_interval = value;
