@@ -10,6 +10,12 @@ const product_schedule = @import("metawork_product_schedule");
 const mcp = @import("metawork_product_mcp");
 const mcp_contract = mcp.contract;
 
+pub const MetaskExecutionOutcome = enum {
+    applied,
+    retained_model_connection,
+    failed,
+};
+
 /// Cross-owner handoff used only while committing Account facts and their
 /// resulting default-execution transition into Product Control.
 pub const AccountExecutionHandoff = struct {
@@ -17,14 +23,11 @@ pub const AccountExecutionHandoff = struct {
     commit_account_fact_fn: *const fn (*anyopaque, account.AccountFact) void,
     finish_account_commit_fn: *const fn (*anyopaque) void,
     metask_activation_available_fn: *const fn (*anyopaque) bool,
-    accept_metask_candidate_fn: *const fn (*anyopaque, bool) bool,
+    apply_metask_candidate_fn: *const fn (*anyopaque, *execution_contract.OwnedConfig, bool) MetaskExecutionOutcome,
+    apply_metask_clear_fn: *const fn (*anyopaque) MetaskExecutionOutcome,
     replacement_pending_fn: *const fn (*anyopaque) bool,
     begin_default_replacement_fn: *const fn (*anyopaque) anyerror!void,
     begin_replacement_fn: *const fn (*anyopaque) anyerror!void,
-    prepare_install_fn: *const fn (*anyopaque, execution_contract.ConfigInput) anyerror!void,
-    prepare_clear_fn: *const fn (*anyopaque) anyerror!void,
-    install_execution_fn: *const fn (*anyopaque, *execution_contract.OwnedConfig) void,
-    clear_execution_fn: *const fn (*anyopaque) void,
     end_replacement_fn: *const fn (*anyopaque) void,
 
     pub fn commitAccountFactNoFail(self: AccountExecutionHandoff, fact: account.AccountFact) void {
@@ -36,11 +39,21 @@ pub const AccountExecutionHandoff = struct {
     pub fn metaskActivationAvailable(self: AccountExecutionHandoff) bool {
         return self.metask_activation_available_fn(self.context);
     }
-    pub fn acceptMetaskExecutionCandidate(
+    pub fn applyMetaskExecutionCandidate(
         self: AccountExecutionHandoff,
+        execution: *execution_contract.OwnedConfig,
         explicit_activation: bool,
-    ) bool {
-        return self.accept_metask_candidate_fn(self.context, explicit_activation);
+    ) MetaskExecutionOutcome {
+        return self.apply_metask_candidate_fn(
+            self.context,
+            execution,
+            explicit_activation,
+        );
+    }
+    pub fn applyMetaskExecutionClear(
+        self: AccountExecutionHandoff,
+    ) MetaskExecutionOutcome {
+        return self.apply_metask_clear_fn(self.context);
     }
     pub fn executionReplacementPending(self: AccountExecutionHandoff) bool {
         return self.replacement_pending_fn(self.context);
@@ -50,18 +63,6 @@ pub const AccountExecutionHandoff = struct {
     }
     pub fn beginExecutionReplacement(self: AccountExecutionHandoff) anyerror!void {
         return self.begin_replacement_fn(self.context);
-    }
-    pub fn prepareExecutionInstall(self: AccountExecutionHandoff, input: execution_contract.ConfigInput) anyerror!void {
-        return self.prepare_install_fn(self.context, input);
-    }
-    pub fn prepareExecutionClear(self: AccountExecutionHandoff) anyerror!void {
-        return self.prepare_clear_fn(self.context);
-    }
-    pub fn installExecutionNoFail(self: AccountExecutionHandoff, execution: *execution_contract.OwnedConfig) void {
-        self.install_execution_fn(self.context, execution);
-    }
-    pub fn clearExecutionNoFail(self: AccountExecutionHandoff) void {
-        self.clear_execution_fn(self.context);
     }
     pub fn endExecutionReplacementNoFail(self: AccountExecutionHandoff) void {
         self.end_replacement_fn(self.context);

@@ -162,32 +162,24 @@ pub const Coordinator = struct {
         const prepared_attempt_id = prepared.attemptId();
         const activates_metask = prepared_attempt_id != null and
             prepared_attempt_id == self.metask_activation_attempt_id;
+        var execution_handoff_failed = false;
         self.control.commitAccountFactNoFail(fact);
         if (prepared.takeExecution()) |execution_value| {
             var execution = execution_value;
-            if (!self.control.acceptMetaskExecutionCandidate(activates_metask)) {
-                execution.deinit();
-            } else {
-                if (!self.control.executionReplacementPending()) {
-                    self.control.beginDefaultExecutionReplacement() catch
-                        unreachable;
-                }
-                if (self.control.prepareExecutionInstall(execution.input())) |_| {
-                    self.control.installExecutionNoFail(&execution);
-                } else |_| {
-                    execution.deinit();
-                }
+            if (!self.control.executionReplacementPending()) {
+                self.control.beginDefaultExecutionReplacement() catch
+                    unreachable;
             }
+            execution_handoff_failed = self.control.applyMetaskExecutionCandidate(
+                &execution,
+                activates_metask,
+            ) == .failed;
         } else if (prepared.executionIntent() == .clear) {
-            if (self.control.acceptMetaskExecutionCandidate(false)) {
-                if (!self.control.executionReplacementPending()) {
-                    self.control.beginDefaultExecutionReplacement() catch
-                        unreachable;
-                }
-                if (self.control.prepareExecutionClear()) |_| {
-                    self.control.clearExecutionNoFail();
-                } else |_| {}
+            if (!self.control.executionReplacementPending()) {
+                self.control.beginDefaultExecutionReplacement() catch
+                    unreachable;
             }
+            execution_handoff_failed = self.control.applyMetaskExecutionClear() == .failed;
         }
         self.runtime.commit(&prepared);
 
@@ -211,6 +203,16 @@ pub const Coordinator = struct {
             replacement == .startup) and
             self.control.executionReplacementPending())
             self.endActiveReplacementNoFail();
+        if (execution_handoff_failed) {
+            const failed = self.commitPrepared(
+                self.runtime.prepareCommittedPhaseFailure(
+                    .local_resource_exhausted,
+                ),
+                .none,
+            );
+            std.debug.assert(failed.accepted);
+            return .acceptedAttempt(prepared_attempt_id);
+        }
         self.control.finishAccountCommitNoFail();
 
         if (refresh_after_commit) {
@@ -299,6 +301,227 @@ test "Application maps identity replacement blockers precisely" {
         account_contract.ErrorCode.operation_in_progress,
         replacementErrorCode(error.ExecutionInUse),
     );
+}
+
+const FailedExecutionHandoff = struct {
+    replacement_pending: bool = true,
+    committed_facts: usize = 0,
+    applied_candidates: usize = 0,
+    applied_clears: usize = 0,
+    finished_commits: usize = 0,
+
+    fn port(self: *@This()) control_ports.AccountExecutionHandoff {
+        return .{
+            .context = self,
+            .commit_account_fact_fn = commitFact,
+            .finish_account_commit_fn = finishCommit,
+            .metask_activation_available_fn = activationAvailable,
+            .apply_metask_candidate_fn = applyCandidate,
+            .apply_metask_clear_fn = applyClear,
+            .replacement_pending_fn = replacementPending,
+            .begin_default_replacement_fn = beginReplacement,
+            .begin_replacement_fn = beginReplacement,
+            .end_replacement_fn = endReplacement,
+        };
+    }
+
+    fn owner(context: *anyopaque) *@This() {
+        return @ptrCast(@alignCast(context));
+    }
+    fn commitFact(context: *anyopaque, _: account_contract.AccountFact) void {
+        owner(context).committed_facts += 1;
+    }
+    fn finishCommit(context: *anyopaque) void {
+        owner(context).finished_commits += 1;
+    }
+    fn activationAvailable(_: *anyopaque) bool {
+        return true;
+    }
+    fn applyCandidate(
+        context: *anyopaque,
+        execution: *execution_contract.OwnedConfig,
+        _: bool,
+    ) control_ports.MetaskExecutionOutcome {
+        owner(context).applied_candidates += 1;
+        execution.deinit();
+        return .failed;
+    }
+    fn applyClear(context: *anyopaque) control_ports.MetaskExecutionOutcome {
+        owner(context).applied_clears += 1;
+        return .failed;
+    }
+    fn replacementPending(context: *anyopaque) bool {
+        return owner(context).replacement_pending;
+    }
+    fn beginReplacement(context: *anyopaque) anyerror!void {
+        const self = owner(context);
+        if (self.replacement_pending) return error.ExecutionInUse;
+        self.replacement_pending = true;
+    }
+    fn endReplacement(context: *anyopaque) void {
+        const self = owner(context);
+        std.debug.assert(self.replacement_pending);
+        self.replacement_pending = false;
+    }
+};
+
+test "Application preserves an observed Account execution after Metask handoff failure" {
+    const TestWake = struct {
+        fn notify(_: *anyopaque) void {}
+    };
+    var wake_context: u8 = 0;
+    var account_runtime = try account_api.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        std.Thread.getCurrentId(),
+        if (builtin.os.tag == .windows)
+            "C:\\metawork-account-handoff-failure-test"
+        else
+            "/tmp/metawork-account-handoff-failure-test",
+        testingTransport(),
+        account_api.TestSupport.loopbackEndpoint(),
+        .{ .context = &wake_context, .notify_fn = TestWake.notify },
+    );
+    defer account_runtime.deinit();
+    var handoff: FailedExecutionHandoff = .{};
+    var coordinator = Coordinator.init(
+        &account_runtime,
+        handoff.port(),
+        std.Thread.getCurrentId(),
+    );
+    coordinator.metask_activation_attempt_id = 1;
+    var execution = try execution_contract.OwnedConfig.initOwned(
+        std.testing.allocator,
+        .metask,
+        .anthropic_messages,
+        try std.testing.allocator.dupe(u8, "model-1"),
+        try std.testing.allocator.dupe(
+            u8,
+            account_contract.metask_anthropic_messages_url,
+        ),
+        1,
+        try std.testing.allocator.dupe(u8, "secret-key"),
+        "fixture-provider",
+    );
+    const result = coordinator.commitPrepared(
+        try account_api.TestSupport.prepareExecutionReady(
+            &account_runtime,
+            &execution,
+        ),
+        .none,
+    );
+    try std.testing.expect(result.accepted);
+    try std.testing.expectEqual(
+        account_contract.ErrorCode.local_resource_exhausted,
+        account_runtime.view().error_code,
+    );
+    try std.testing.expectEqual(
+        account_contract.AccountState.authenticated,
+        account_runtime.view().state,
+    );
+    try std.testing.expectEqual(
+        account_contract.CatalogState.ready,
+        account_runtime.view().catalog_state,
+    );
+    try std.testing.expectEqualStrings(
+        "model-1",
+        account_runtime.view().selected_model,
+    );
+    try std.testing.expectEqual(
+        @as(?u64, 1),
+        account_api.TestSupport.savedPreferenceExecutionGeneration(
+            &account_runtime,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), handoff.applied_candidates);
+    try std.testing.expectEqual(@as(usize, 2), handoff.committed_facts);
+    try std.testing.expectEqual(@as(usize, 1), handoff.finished_commits);
+    try std.testing.expect(!handoff.replacement_pending);
+    try std.testing.expect(coordinator.metask_activation_attempt_id == null);
+}
+
+test "Application preserves signed-out state after execution clear handoff failure" {
+    const TestWake = struct {
+        fn notify(_: *anyopaque) void {}
+    };
+    var wake_context: u8 = 0;
+    var account_runtime = try account_api.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        std.Thread.getCurrentId(),
+        if (builtin.os.tag == .windows)
+            "C:\\metawork-account-logout-handoff-failure-test"
+        else
+            "/tmp/metawork-account-logout-handoff-failure-test",
+        testingTransport(),
+        account_api.TestSupport.loopbackEndpoint(),
+        .{ .context = &wake_context, .notify_fn = TestWake.notify },
+    );
+    defer account_runtime.deinit();
+    var execution = try execution_contract.OwnedConfig.initOwned(
+        std.testing.allocator,
+        .metask,
+        .anthropic_messages,
+        try std.testing.allocator.dupe(u8, "model-1"),
+        try std.testing.allocator.dupe(
+            u8,
+            account_contract.metask_anthropic_messages_url,
+        ),
+        7,
+        try std.testing.allocator.dupe(u8, "secret-key"),
+        "fixture-provider",
+    );
+    var ready = try account_api.TestSupport.prepareExecutionReady(
+        &account_runtime,
+        &execution,
+    );
+    defer ready.deinit();
+    var installed = ready.takeExecution().?;
+    installed.deinit();
+    account_runtime.commit(&ready);
+    account_runtime.dispatchCommitted(&ready);
+    try std.testing.expectEqual(
+        @as(?u64, 7),
+        account_api.TestSupport.savedPreferenceExecutionGeneration(
+            &account_runtime,
+        ),
+    );
+
+    var handoff: FailedExecutionHandoff = .{};
+    var coordinator = Coordinator.init(
+        &account_runtime,
+        handoff.port(),
+        std.Thread.getCurrentId(),
+    );
+    const result = coordinator.commitPrepared(
+        account_api.TestSupport.prepareLoggedOutAfterExternalCommit(
+            &account_runtime,
+        ),
+        .none,
+    );
+    try std.testing.expect(result.accepted);
+    try std.testing.expectEqual(
+        account_contract.AccountState.signed_out,
+        account_runtime.view().state,
+    );
+    try std.testing.expectEqual(
+        account_contract.ErrorCode.local_resource_exhausted,
+        account_runtime.view().error_code,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        account_runtime.view().metask_execution_generation,
+    );
+    try std.testing.expect(
+        account_api.TestSupport.savedPreferenceExecutionGeneration(
+            &account_runtime,
+        ) == null,
+    );
+    try std.testing.expectEqual(@as(usize, 0), handoff.applied_candidates);
+    try std.testing.expectEqual(@as(usize, 1), handoff.applied_clears);
+    try std.testing.expectEqual(@as(usize, 2), handoff.committed_facts);
+    try std.testing.expectEqual(@as(usize, 1), handoff.finished_commits);
+    try std.testing.expect(!handoff.replacement_pending);
 }
 
 test "Application coordinator commits Account Runtime facts into Workbench" {

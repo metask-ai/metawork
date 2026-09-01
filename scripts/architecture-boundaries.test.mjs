@@ -792,10 +792,12 @@ test("Product Schedule owns its aggregate state and persistence", () => {
   assert.match(executionState, /fn consumeClearPreparation/);
   assert.match(runtime, /redactWithExecutionCredentialsNoFail/);
   assert.match(taskRuntime, /pub fn redactWithExecutionCredentialsNoFail/);
-  assert.match(ports, /pub fn prepareExecutionInstall/);
-  assert.match(ports, /pub fn prepareExecutionClear/);
-  assert.match(accountCoordinator, /prepareExecutionInstall/);
-  assert.match(accountCoordinator, /prepareExecutionClear/);
+  assert.match(ports, /pub fn applyMetaskExecutionCandidate/);
+  assert.match(ports, /pub fn applyMetaskExecutionClear/);
+  assert.doesNotMatch(
+    accountCoordinator,
+    /prepareExecutionInstall|prepareExecutionClear/,
+  );
 });
 
 test("Product Workspace owns the bounded registry without owning the shared commit", () => {
@@ -964,6 +966,84 @@ test("Application coordinators consume scoped Product Control capabilities", () 
   assert.doesNotMatch(
     platform,
     /@import\("metawork_product_control"\)|workbench_api|\*workbench/,
+  );
+});
+
+test("Product Control owns atomic default execution source replacement", () => {
+  const ports = read("src/product/control/ports.zig");
+  const control = read("src/product/control/runtime.zig");
+  const accountCoordinator = read("src/app/account_coordinator.zig");
+  const accountRuntime = read("src/product/account/runtime.zig");
+  const accountState = read("src/product/account/state.zig");
+
+  assert.match(ports, /pub const MetaskExecutionOutcome = enum/);
+  assert.match(ports, /apply_metask_candidate_fn:/);
+  assert.match(ports, /apply_metask_clear_fn:/);
+  assert.doesNotMatch(
+    ports,
+    /accept_metask_candidate_fn:|prepare_install_fn:|prepare_clear_fn:|install_execution_fn:|clear_execution_fn:/,
+  );
+
+  const availabilityStart = control.indexOf("pub fn metaskActivationAvailable");
+  const replacementStart = control.indexOf(
+    "pub fn applyMetaskExecutionCandidate",
+  );
+  const clearStart = control.indexOf("pub fn applyMetaskExecutionClear");
+  assert.ok(availabilityStart >= 0, "Metask availability policy must exist");
+  assert.ok(
+    replacementStart > availabilityStart,
+    "Metask replacement must exist",
+  );
+  assert.ok(clearStart > replacementStart, "Metask clear policy must exist");
+
+  const availability = control.slice(availabilityStart, replacementStart);
+  assert.match(availability, /modelConnectionDefaultBinding\(\)/);
+
+  const replacement = control.slice(replacementStart, clearStart);
+  const prepareAt = replacement.indexOf("self.prepareExecutionInstall");
+  const clearDefaultAt = replacement.indexOf(
+    "self.clearModelConnectionDefault()",
+  );
+  const installAt = replacement.indexOf("self.installExecutionNoFail");
+  assert.ok(prepareAt >= 0, "replacement must prepare all fallible effects");
+  assert.ok(
+    clearDefaultAt > prepareAt,
+    "durable custom default may clear only after preparation",
+  );
+  assert.ok(
+    installAt > clearDefaultAt,
+    "Metask installation must be the no-fail commit after durable clear",
+  );
+
+  assert.match(accountCoordinator, /applyMetaskExecutionCandidate/);
+  assert.match(accountCoordinator, /applyMetaskExecutionClear/);
+  assert.match(accountCoordinator, /prepareActiveAttemptFailure/);
+  assert.match(accountRuntime, /pub fn prepareCommittedPhaseFailure/);
+  assert.match(accountState, /pub fn prepareCommittedPhaseFailure/);
+  const observedAccountCommitAt = accountCoordinator.indexOf(
+    "self.runtime.commit(&prepared);",
+  );
+  const committedFailureAt = accountCoordinator.indexOf(
+    "self.runtime.prepareCommittedPhaseFailure",
+  );
+  const publishedCommitAt = accountCoordinator.indexOf(
+    "self.control.finishAccountCommitNoFail();",
+  );
+  assert.ok(
+    observedAccountCommitAt >= 0,
+    "Account commit must remain explicit",
+  );
+  assert.ok(
+    committedFailureAt > observedAccountCommitAt,
+    "handoff failure must derive from the observed committed Account phase",
+  );
+  assert.ok(
+    publishedCommitAt > committedFailureAt,
+    "the failed saga must publish only after its terminal Account fact",
+  );
+  assert.doesNotMatch(
+    accountCoordinator,
+    /acceptMetaskExecutionCandidate|clearModelConnectionDefault|prepareExecutionInstall|prepareExecutionClear|installExecutionNoFail|clearExecutionNoFail/,
   );
 });
 

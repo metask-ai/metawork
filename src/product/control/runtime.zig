@@ -1719,19 +1719,62 @@ pub const Runtime = struct {
     }
 
     pub fn metaskActivationAvailable(self: *const Runtime) bool {
-        return self.modelConnectionExecutionSelected();
+        return self.modelConnectionDefaultBinding() != null;
     }
 
-    /// Product-owned arbitration between the two default execution sources.
-    /// Passive Account restore cannot displace a user-selected connection;
-    /// explicit Metask activation must first durably clear that default.
-    pub fn acceptMetaskExecutionCandidate(
+    /// Atomically applies a Metask candidate at the Product-owned source
+    /// boundary. The durable Model Connection default is user intent; the
+    /// process-local custom binding is only readiness. All fallible schedule
+    /// redaction completes before an explicit activation clears that durable
+    /// default, after which installation is no-fail.
+    ///
+    /// This function always consumes `execution`.
+    pub fn applyMetaskExecutionCandidate(
         self: *Runtime,
+        execution: *execution_contract.OwnedConfig,
         explicit_activation: bool,
-    ) bool {
-        if (!self.modelConnectionExecutionSelected()) return true;
-        if (!explicit_activation) return false;
-        return self.clearModelConnectionDefault().accepted;
+    ) control_ports.MetaskExecutionOutcome {
+        std.debug.assert(self.executionReplacementPending());
+        const custom_default_selected = self.modelConnectionDefaultBinding() != null;
+        const custom_execution_active = self.modelConnectionExecutionSelected();
+        if (custom_execution_active and !custom_default_selected) {
+            execution.deinit();
+            return .failed;
+        }
+        if (custom_default_selected and !explicit_activation) {
+            execution.deinit();
+            return .retained_model_connection;
+        }
+        if (explicit_activation and !custom_default_selected) {
+            execution.deinit();
+            return .failed;
+        }
+        self.prepareExecutionInstall(execution.input()) catch {
+            execution.deinit();
+            return .failed;
+        };
+        if (custom_default_selected and
+            !self.clearModelConnectionDefault().accepted)
+        {
+            execution.deinit();
+            return .failed;
+        }
+        self.installExecutionNoFail(execution);
+        return .applied;
+    }
+
+    /// Applies an Account-originated execution clear without revoking an
+    /// independently selected Model Connection default.
+    pub fn applyMetaskExecutionClear(
+        self: *Runtime,
+    ) control_ports.MetaskExecutionOutcome {
+        std.debug.assert(self.executionReplacementPending());
+        if (self.modelConnectionDefaultBinding() != null)
+            return .retained_model_connection;
+        if (self.modelConnectionExecutionSelected()) return .failed;
+        self.prepareExecutionClear() catch return .failed;
+        self.clearExecutionNoFail();
+        return .applied;
     }
 
     pub fn executionGeneration(self: *const Runtime) u64 {
@@ -5864,14 +5907,11 @@ pub const Runtime = struct {
             .commit_account_fact_fn = controlCommitAccountFact,
             .finish_account_commit_fn = controlFinishAccountCommit,
             .metask_activation_available_fn = controlMetaskActivationAvailable,
-            .accept_metask_candidate_fn = controlAcceptMetaskCandidate,
+            .apply_metask_candidate_fn = controlApplyMetaskCandidate,
+            .apply_metask_clear_fn = controlApplyMetaskClear,
             .replacement_pending_fn = controlReplacementPending,
             .begin_default_replacement_fn = controlBeginDefaultReplacement,
             .begin_replacement_fn = controlBeginReplacement,
-            .prepare_install_fn = controlPrepareExecutionInstall,
-            .prepare_clear_fn = controlPrepareExecutionClear,
-            .install_execution_fn = controlInstallExecution,
-            .clear_execution_fn = controlClearExecution,
             .end_replacement_fn = controlEndReplacement,
         };
     }
@@ -5965,8 +6005,18 @@ fn controlFinishAccountCommit(context: *anyopaque) void {
 fn controlMetaskActivationAvailable(context: *anyopaque) bool {
     return controlOwner(context).metaskActivationAvailable();
 }
-fn controlAcceptMetaskCandidate(context: *anyopaque, explicit_activation: bool) bool {
-    return controlOwner(context).acceptMetaskExecutionCandidate(explicit_activation);
+fn controlApplyMetaskCandidate(
+    context: *anyopaque,
+    execution: *execution_contract.OwnedConfig,
+    explicit_activation: bool,
+) control_ports.MetaskExecutionOutcome {
+    return controlOwner(context).applyMetaskExecutionCandidate(
+        execution,
+        explicit_activation,
+    );
+}
+fn controlApplyMetaskClear(context: *anyopaque) control_ports.MetaskExecutionOutcome {
+    return controlOwner(context).applyMetaskExecutionClear();
 }
 fn controlReplacementPending(context: *anyopaque) bool {
     return controlOwner(context).executionReplacementPending();
@@ -5976,18 +6026,6 @@ fn controlBeginDefaultReplacement(context: *anyopaque) anyerror!void {
 }
 fn controlBeginReplacement(context: *anyopaque) anyerror!void {
     return controlOwner(context).beginExecutionReplacement();
-}
-fn controlPrepareExecutionInstall(context: *anyopaque, input: execution_contract.ConfigInput) anyerror!void {
-    return controlOwner(context).prepareExecutionInstall(input);
-}
-fn controlPrepareExecutionClear(context: *anyopaque) anyerror!void {
-    return controlOwner(context).prepareExecutionClear();
-}
-fn controlInstallExecution(context: *anyopaque, execution: *execution_contract.OwnedConfig) void {
-    controlOwner(context).installExecutionNoFail(execution);
-}
-fn controlClearExecution(context: *anyopaque) void {
-    controlOwner(context).clearExecutionNoFail();
 }
 fn controlEndReplacement(context: *anyopaque) void {
     controlOwner(context).endExecutionReplacementNoFail();
@@ -9163,63 +9201,117 @@ test "Runtime publishes a user model connection as an independent execution sour
     });
 }
 
-test "Product Control atomically manages and installs a Model Connection default" {
-    const TestVault = struct {
-        const slot = "model-connection-00000000000000000000000000000001";
+const TestModelConnectionVault = struct {
+    const slot = "model-connection-00000000000000000000000000000001";
 
-        secret: [execution_contract.Limits.credential_bytes]u8 = undefined,
-        secret_len: usize = 0,
-        present: bool = false,
+    secret: [execution_contract.Limits.credential_bytes]u8 = undefined,
+    secret_len: usize = 0,
+    present: bool = false,
+    read_fails: bool = false,
 
-        fn port(self: *@This()) execution_ports.CredentialVault {
-            return .{
-                .context = self,
-                .generate_slot_fn = generate,
-                .store_fn = store,
-                .get_fn = get,
-                .delete_fn = delete,
-            };
-        }
+    fn port(self: *@This()) execution_ports.CredentialVault {
+        return .{
+            .context = self,
+            .generate_slot_fn = generate,
+            .store_fn = store,
+            .get_fn = get,
+            .delete_fn = delete,
+        };
+    }
 
-        fn generate(
-            _: *anyopaque,
-            output: *[execution_ports.credential_slot_bytes]u8,
-        ) anyerror!void {
-            @memcpy(output, slot);
-        }
+    fn generate(
+        _: *anyopaque,
+        output: *[execution_ports.credential_slot_bytes]u8,
+    ) anyerror!void {
+        @memcpy(output, slot);
+    }
 
-        fn store(
-            context: *anyopaque,
-            _: []const u8,
-            secret: []const u8,
-        ) anyerror!void {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            if (secret.len > self.secret.len) return error.WriteFailed;
-            @memcpy(self.secret[0..secret.len], secret);
-            self.secret_len = secret.len;
-            self.present = true;
-        }
+    fn store(
+        context: *anyopaque,
+        _: []const u8,
+        secret: []const u8,
+    ) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        if (secret.len > self.secret.len) return error.WriteFailed;
+        @memcpy(self.secret[0..secret.len], secret);
+        self.secret_len = secret.len;
+        self.present = true;
+    }
 
-        fn get(
-            context: *anyopaque,
-            _: []const u8,
-            output: []u8,
-        ) anyerror!?[]const u8 {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            if (!self.present) return null;
-            if (self.secret_len > output.len) return error.ReadFailed;
-            @memcpy(output[0..self.secret_len], self.secret[0..self.secret_len]);
-            return output[0..self.secret_len];
-        }
+    fn get(
+        context: *anyopaque,
+        _: []const u8,
+        output: []u8,
+    ) anyerror!?[]const u8 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        if (self.read_fails) return error.ReadFailed;
+        if (!self.present) return null;
+        if (self.secret_len > output.len) return error.ReadFailed;
+        @memcpy(output[0..self.secret_len], self.secret[0..self.secret_len]);
+        return output[0..self.secret_len];
+    }
 
-        fn delete(context: *anyopaque, _: []const u8) anyerror!void {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            std.crypto.secureZero(u8, self.secret[0..self.secret_len]);
-            self.secret_len = 0;
-            self.present = false;
-        }
+    fn delete(context: *anyopaque, _: []const u8) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        std.crypto.secureZero(u8, self.secret[0..self.secret_len]);
+        self.secret_len = 0;
+        self.present = false;
+    }
+};
+
+fn createReadyTestModelConnection(
+    control: *Runtime,
+) !execution_contract.ModelConnectionSelectionCommand {
+    try std.testing.expect(control.createModelConnectionWithCredential(
+        "provider-secret",
+        .{
+            .display_name = "OpenAI",
+            .protocol = .openai_responses,
+            .normalized_base_url = "https://api.openai.com/v1/responses",
+        },
+        "gpt-5",
+        "GPT-5",
+    ).accepted);
+    const view = control.model_connections.views()[0];
+    const selection: execution_contract.ModelConnectionSelectionCommand = .{
+        .connection_id = TestModelConnectionVault.slot,
+        .expected_connection_generation = view.connection_generation,
     };
+    var probe = switch (control.beginModelConnectionProbe(.{
+        .selection = selection,
+        .model_id = "gpt-5",
+    })) {
+        .ready => |execution| execution,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    defer probe.deinit();
+    try std.testing.expect(control.completeModelConnectionTest(.{
+        .selection = selection,
+        .model_id = "gpt-5",
+    }, true).accepted);
+    return selection;
+}
 
+fn createTestMetaskExecution(
+    generation: u64,
+    credential: []const u8,
+) !execution_contract.OwnedConfig {
+    return execution_contract.OwnedConfig.initOwned(
+        std.testing.allocator,
+        .metask,
+        .anthropic_messages,
+        try std.testing.allocator.dupe(u8, "fixture-model"),
+        try std.testing.allocator.dupe(
+            u8,
+            account_contract.metask_anthropic_messages_url,
+        ),
+        generation,
+        try std.testing.allocator.dupe(u8, credential),
+        "fixture-provider",
+    );
+}
+
+test "Product Control atomically manages and installs a Model Connection default" {
     test_agent_runtime.io = std.testing.io;
     var control = try Runtime.init(
         std.testing.allocator,
@@ -9237,40 +9329,14 @@ test "Product Control atomically manages and installs a Model Connection default
     defer tmp.cleanup();
     var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
-    var vault: TestVault = .{};
+    var vault: TestModelConnectionVault = .{};
     try control.startModelConnections(
         directory_storage[0..directory_len],
         vault.port(),
     );
     defer control.stopModelConnections();
 
-    try std.testing.expect(control.createModelConnectionWithCredential(
-        "provider-secret",
-        .{
-            .display_name = "OpenAI",
-            .protocol = .openai_responses,
-            .normalized_base_url = "https://api.openai.com/v1/responses",
-        },
-        "gpt-5",
-        "GPT-5",
-    ).accepted);
-    const view = control.model_connections.views()[0];
-    const selection: execution_contract.ModelConnectionSelectionCommand = .{
-        .connection_id = TestVault.slot,
-        .expected_connection_generation = view.connection_generation,
-    };
-    var probe = switch (control.beginModelConnectionProbe(.{
-        .selection = selection,
-        .model_id = "gpt-5",
-    })) {
-        .ready => |execution| execution,
-        .rejected => return error.TestUnexpectedResult,
-    };
-    defer probe.deinit();
-    try std.testing.expect(control.completeModelConnectionTest(.{
-        .selection = selection,
-        .model_id = "gpt-5",
-    }, true).accepted);
+    const selection = try createReadyTestModelConnection(&control);
     try std.testing.expect(control.submitModelConnectionCommand(.{
         .select_default = .{
             .selection = selection,
@@ -9283,7 +9349,7 @@ test "Product Control atomically manages and installs a Model Connection default
         control.execution_state.source(),
     );
     try std.testing.expectEqualStrings(
-        TestVault.slot,
+        TestModelConnectionVault.slot,
         control.execution_state.selectedModelConnectionId(),
     );
     const rejected = control.submitModelConnectionCommand(.{ .update = .{
@@ -9315,9 +9381,232 @@ test "Product Control atomically manages and installs a Model Connection default
         control.execution_state.source(),
     );
     try std.testing.expectEqualStrings(
-        TestVault.slot,
+        TestModelConnectionVault.slot,
         control.execution_state.selectedModelConnectionId(),
     );
+}
+
+test "durable Model Connection default blocks passive Metask restore when credential read fails" {
+    test_agent_runtime.io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
+    const directory = directory_storage[0..directory_len];
+    var vault: TestModelConnectionVault = .{};
+
+    {
+        var control = try Runtime.init(
+            std.testing.allocator,
+            std.testing.io,
+            &test_agent_runtime,
+            .{
+                .max_tasks = 1,
+                .max_runs_per_task = 1,
+                .max_tools_per_run = 1,
+            },
+            .{},
+        );
+        defer control.deinit();
+        try control.startModelConnections(directory, vault.port());
+        const selection = try createReadyTestModelConnection(&control);
+        try std.testing.expect(control.submitModelConnectionCommand(.{
+            .select_default = .{
+                .selection = selection,
+                .model_id = "gpt-5",
+            },
+        }).accepted);
+        control.stopModelConnections();
+    }
+
+    vault.read_fails = true;
+    var restored = try Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        &test_agent_runtime,
+        .{
+            .max_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        .{},
+    );
+    defer restored.deinit();
+    try restored.startModelConnections(directory, vault.port());
+    defer restored.stopModelConnections();
+    try std.testing.expect(restored.modelConnectionDefaultBinding() != null);
+    try std.testing.expect(!restored.modelConnectionExecutionSelected());
+    try std.testing.expect(restored.metaskActivationAvailable());
+
+    var candidate = try createTestMetaskExecution(17, "METASK-SECRET");
+    try restored.beginDefaultExecutionReplacement();
+    commitTestExecutionFact(&restored, 17);
+    try std.testing.expectEqual(
+        control_ports.MetaskExecutionOutcome.retained_model_connection,
+        restored.applyMetaskExecutionCandidate(&candidate, false),
+    );
+    restored.endExecutionReplacementNoFail();
+    restored.finishExecutionCommitNoFail();
+    try std.testing.expect(restored.modelConnectionDefaultBinding() != null);
+    try std.testing.expect(restored.execution_state.executionInput() == null);
+}
+
+test "Metask activation clears durable custom default only after every fallible step" {
+    test_agent_runtime.io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
+    const directory = directory_storage[0..directory_len];
+    var vault: TestModelConnectionVault = .{};
+    var control = try Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        &test_agent_runtime,
+        .{
+            .max_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        .{},
+    );
+    defer control.deinit();
+    try control.startModelConnections(directory, vault.port());
+    var model_connections_started = true;
+    defer if (model_connections_started) control.stopModelConnections();
+    const selection = try createReadyTestModelConnection(&control);
+    try std.testing.expect(control.submitModelConnectionCommand(.{
+        .select_default = .{
+            .selection = selection,
+            .model_id = "gpt-5",
+        },
+    }).accepted);
+
+    control.stopModelConnections();
+    model_connections_started = false;
+    var blocked = try createTestMetaskExecution(18, "METASK-BLOCKED");
+    try control.beginDefaultExecutionReplacement();
+    commitTestExecutionFact(&control, 18);
+    try std.testing.expectEqual(
+        control_ports.MetaskExecutionOutcome.failed,
+        control.applyMetaskExecutionCandidate(&blocked, true),
+    );
+    control.endExecutionReplacementNoFail();
+    control.finishExecutionCommitNoFail();
+    try std.testing.expect(control.modelConnectionDefaultBinding() != null);
+    try std.testing.expect(control.modelConnectionExecutionSelected());
+    try std.testing.expectEqualStrings(
+        TestModelConnectionVault.slot,
+        control.execution_state.selectedModelConnectionId(),
+    );
+
+    try control.startModelConnections(directory, vault.port());
+    model_connections_started = true;
+    var accepted = try createTestMetaskExecution(19, "METASK-ACCEPTED");
+    try control.beginDefaultExecutionReplacement();
+    commitTestExecutionFact(&control, 19);
+    try std.testing.expectEqual(
+        control_ports.MetaskExecutionOutcome.applied,
+        control.applyMetaskExecutionCandidate(&accepted, true),
+    );
+    control.endExecutionReplacementNoFail();
+    control.finishExecutionCommitNoFail();
+    try std.testing.expect(control.modelConnectionDefaultBinding() == null);
+    try std.testing.expect(!control.modelConnectionExecutionSelected());
+    try std.testing.expectEqual(
+        execution_contract.Source.metask,
+        control.execution_state.source(),
+    );
+    try std.testing.expectEqual(@as(u64, 19), control.execution_state.generation());
+}
+
+test "Metask activation preserves custom default when Schedule scrub fails" {
+    var control = try testRuntime();
+    defer control.deinit();
+    var connection_tmp = std.testing.tmpDir(.{});
+    defer connection_tmp.cleanup();
+    var connection_directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const connection_directory_len = try connection_tmp.dir.realPath(
+        std.testing.io,
+        &connection_directory_storage,
+    );
+    var vault: TestModelConnectionVault = .{};
+    try control.startModelConnections(
+        connection_directory_storage[0..connection_directory_len],
+        vault.port(),
+    );
+    defer control.stopModelConnections();
+    const selection = try createReadyTestModelConnection(&control);
+    try std.testing.expect(control.submitModelConnectionCommand(.{
+        .select_default = .{
+            .selection = selection,
+            .model_id = "gpt-5",
+        },
+    }).accepted);
+
+    var automatic_tmp = std.testing.tmpDir(.{});
+    defer automatic_tmp.cleanup();
+    var automatic_root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const automatic_root_len = try automatic_tmp.dir.realPath(
+        std.testing.io,
+        &automatic_root_storage,
+    );
+    var automatic_root = try product_workspace.AutomaticRoot.open(
+        std.testing.io,
+        std.testing.allocator,
+        automatic_root_storage[0..automatic_root_len],
+    );
+    defer automatic_root.deinit();
+    product_workspace.testing.installAutomaticRoot(
+        &control.workspace,
+        &automatic_root,
+    );
+    var clock: TestScheduleClock = .{ .now = 1_000 };
+    const persistence_storage = try std.testing.allocator.alloc(
+        u8,
+        product_schedule.testing.max_store_bytes,
+    );
+    defer std.testing.allocator.free(persistence_storage);
+    var persistence: TestSchedulePersistence = .{
+        .storage = persistence_storage,
+    };
+    product_schedule.testing.configure(
+        &control.schedule,
+        clock.timer(),
+        persistence.capability(),
+        .ready,
+    );
+    defer product_schedule.testing.configure(
+        &control.schedule,
+        .{},
+        .{},
+        .unavailable,
+    );
+    const schedule_id = try control.createScheduledTask(.{
+        .title = "Review pending credential",
+        .expected_execution_generation = control.executionGeneration(),
+        .permission_profile = .approval_required,
+        .input = "Inspect METASK-SCRUB before activation",
+        .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
+    });
+    persistence.result = .failed;
+
+    var candidate = try createTestMetaskExecution(20, "METASK-SCRUB");
+    try control.beginDefaultExecutionReplacement();
+    commitTestExecutionFact(&control, 20);
+    try std.testing.expectEqual(
+        control_ports.MetaskExecutionOutcome.failed,
+        control.applyMetaskExecutionCandidate(&candidate, true),
+    );
+    control.endExecutionReplacementNoFail();
+    control.finishExecutionCommitNoFail();
+    try std.testing.expect(control.modelConnectionDefaultBinding() != null);
+    try std.testing.expect(control.modelConnectionExecutionSelected());
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        product_schedule.testing.item(&control.schedule, schedule_id).?.input,
+        "METASK-SCRUB",
+    ) != null);
 }
 
 test "Account projection and execution install use preallocated no-fail storage" {

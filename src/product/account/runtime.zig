@@ -725,6 +725,16 @@ pub const Runtime = struct {
         return preparedFromState(self.account.prepareCompletion(&completion));
     }
 
+    pub fn prepareCommittedPhaseFailure(
+        self: *Runtime,
+        error_code: contract.ErrorCode,
+    ) Prepared {
+        self.assertMainThread();
+        return preparedFromState(
+            self.account.prepareCommittedPhaseFailure(error_code),
+        );
+    }
+
     pub fn prepareShutdown(self: *Runtime) Prepared {
         self.assertMainThread();
         return .{ .transition = self.account.prepareShutdown() };
@@ -1747,6 +1757,85 @@ pub const TestSupport = if (builtin.is_test) struct {
             .attempt_id = runtime.account.activeAttempt() orelse
                 @panic("test Account has no active login"),
             .payload = .tokens_persisted,
+        };
+        return preparedFromState(runtime.account.prepareCompletion(&completion));
+    }
+
+    pub fn prepareExecutionReady(
+        runtime: *Runtime,
+        execution: *execution_contract.OwnedConfig,
+    ) !Prepared {
+        state_impl.TestSupport.installInitialExecutionPreparation(
+            &runtime.account,
+            "key-1",
+            execution.input().target.model,
+        );
+        try catalog_impl.TestSupport.replaceOwnedSelection(
+            &runtime.effects.catalog,
+            "account-1",
+            .{
+                .id = "key-1",
+                .name = "Primary",
+                .suffix = "1234",
+                .protocol = execution.input().target.protocol,
+            },
+            execution.input().api_key,
+            &.{.{
+                .id = execution.input().target.model,
+                .display_name = "Model",
+            }},
+        );
+        catalog_impl.TestSupport.replacePublic(
+            &runtime.candidate_public_catalog,
+            &.{.{
+                .id = "key-1",
+                .name = "Primary",
+                .suffix = "1234",
+                .protocol = execution.input().target.protocol,
+            }},
+            &.{.{
+                .id = execution.input().target.model,
+                .display_name = "Model",
+            }},
+        );
+        runtime.candidate_catalog_attempt_id = 1;
+        runtime.saved_preference = try .init(
+            "account-1",
+            "key-1",
+            execution.input().target.model,
+            execution.input().execution_generation,
+        );
+        var completion: state_impl.WorkerCompletion = .{
+            .attempt_id = 1,
+            .payload = .{ .execution_ready = execution.take() },
+        };
+        defer completion.deinit();
+        return preparedFromState(runtime.account.prepareCompletion(&completion));
+    }
+
+    pub fn savedPreferenceExecutionGeneration(runtime: *const Runtime) ?u64 {
+        const preference = runtime.saved_preference orelse return null;
+        return preference.execution_generation;
+    }
+
+    pub fn prepareLoggedOutAfterExternalCommit(runtime: *Runtime) Prepared {
+        var begin = switch (runtime.prepareCommand(.logout)) {
+            .prepared => |prepared| prepared,
+            else => @panic("test Account cannot begin logout"),
+        };
+        defer begin.deinit();
+        _ = begin.transition.takeEffect() orelse
+            @panic("test logout has no persistence effect");
+        runtime.commit(&begin);
+        runtime.saved_preference = null;
+        runtime.credentials.clear();
+        runtime.effects.clearCatalog();
+        runtime.candidate_public_catalog.clear();
+        runtime.candidate_catalog_attempt_id = null;
+        var completion: state_impl.WorkerCompletion = .{
+            .attempt_id = runtime.account.activeAttempt() orelse
+                @panic("test logout has no active attempt"),
+            .payload = .logged_out,
         };
         return preparedFromState(runtime.account.prepareCompletion(&completion));
     }

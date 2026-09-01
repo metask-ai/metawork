@@ -745,6 +745,24 @@ pub const Account = struct {
         return transitionNoAttempt(next, .operation_failed);
     }
 
+    /// Records a failure only after the transition that observed an external
+    /// effect has committed. The durable effect is not rollbackable here:
+    /// preserve the new identity, preference, catalog, and logout state while
+    /// publishing the failure from that committed phase.
+    pub fn prepareCommittedPhaseFailure(
+        self: *const Account,
+        error_code: contract.ErrorCode,
+    ) PrepareResult {
+        if (error_code == .none or
+            self.state.operation() != .none or
+            self.state.activeAttempt() != null)
+            return .{ .rejected = .invalid_state };
+        var next = self.state;
+        next.error_code = error_code;
+        next.safe_diagnostic.clear();
+        return transitionNoAttempt(next, .operation_failed);
+    }
+
     fn prepareBeginLogin(self: *const Account) PrepareResult {
         if ((self.state.session_state != .signed_out and
             self.state.session_state != .authenticated) or
