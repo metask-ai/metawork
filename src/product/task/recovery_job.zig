@@ -10,6 +10,7 @@ const agent_session = @import("product_task_agent_session");
 const checkpoint_record = @import("product_task_checkpoint_record");
 const checkpoint_store = @import("product_task_checkpoint_store");
 const owned_execution = @import("product_task_execution_binding");
+const agent_protocol = @import("product_agent_protocol_adapter");
 
 pub const Notifier = struct {
     context: ?*anyopaque = null,
@@ -401,12 +402,7 @@ pub const Job = struct {
         var restored = agent_session.restore(self.runtime, .{
             .session = .{
                 .provider_id = execution.target.provider_id,
-                .protocol = switch (execution.target.protocol) {
-                    .openai_responses => .openai_responses,
-                    .anthropic_messages => .anthropic_messages,
-                    .openai_chat_completions => .openai_chat_completions,
-                    .gemini_native => .gemini_native,
-                },
+                .protocol = agent_protocol.toAgent(execution.target.protocol),
                 .permission_mode = self.attempt.permission_mode,
                 .shell_policy = self.attempt.shell_policy,
                 .permission_interaction = self.attempt.permission_interaction,

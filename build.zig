@@ -99,6 +99,7 @@ pub fn build(b: *std.Build) void {
         root_module: *std.Build.Module,
     }{
         .{ .name = "metawork-product-execution-contract", .root_module = test_modules.execution_contract },
+        .{ .name = "metawork-product-agent-protocol-adapter", .root_module = test_modules.product_agent_protocol_adapter },
         .{ .name = "metawork-account-contract", .root_module = test_modules.account_contract },
         .{ .name = "metawork-account-oauth", .root_module = test_modules.account_oauth },
         .{ .name = "metawork-metask-client", .root_module = test_modules.metask_client },
@@ -287,6 +288,7 @@ fn addLifecycleTests(
 const WiredModules = struct {
     storage: *std.Build.Module,
     execution_contract: *std.Build.Module,
+    product_agent_protocol_adapter: *std.Build.Module,
     account: *std.Build.Module,
     account_runtime: *std.Build.Module,
     account_catalog: *std.Build.Module,
@@ -868,6 +870,16 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    const product_agent_protocol_adapter = b.createModule(.{
+        .root_source_file = b.path("src/product/agent_protocol_adapter.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    product_agent_protocol_adapter.addImport("metawork_agent", agent);
+    product_agent_protocol_adapter.addImport(
+        "metawork_product_execution_contract",
+        execution_contract,
+    );
     const account_contract = b.createModule(.{
         .root_source_file = b.path("src/product/account/contract.zig"),
         .target = target,
@@ -1218,6 +1230,10 @@ fn wireAgentCore(
     task_recovery_job.addImport("product_task_checkpoint_record", checkpoint_record);
     task_recovery_job.addImport("product_task_checkpoint_store", checkpoint_store);
     task_recovery_job.addImport("product_task_execution_binding", owned_task_execution);
+    task_recovery_job.addImport(
+        "product_agent_protocol_adapter",
+        product_agent_protocol_adapter,
+    );
     task_attachment.addImport("product_task_recovery_job", task_recovery_job);
     const task_state = b.createModule(.{
         .root_source_file = b.path("src/product/task/state.zig"),
@@ -1262,6 +1278,10 @@ fn wireAgentCore(
     task_runtime.addImport("product_task_recovery", task_recovery);
     task_runtime.addImport("product_task_agent_session", task_agent_session);
     task_runtime.addImport("product_task_execution_binding", owned_task_execution);
+    task_runtime.addImport(
+        "product_agent_protocol_adapter",
+        product_agent_protocol_adapter,
+    );
     const task_execution = b.createModule(.{
         .root_source_file = b.path("src/product/task/execution.zig"),
         .target = target,
@@ -1274,6 +1294,10 @@ fn wireAgentCore(
     task_execution.addImport("product_task_agent_session", task_agent_session);
     task_execution.addImport("product_task_state", task_state);
     task_execution.addImport("product_task_policy", task_policy);
+    task_execution.addImport(
+        "product_agent_protocol_adapter",
+        product_agent_protocol_adapter,
+    );
     task_runtime.addImport("product_task_execution", task_execution);
     const task_view = b.createModule(.{
         .root_source_file = b.path("src/product/task/view.zig"),
@@ -1540,6 +1564,10 @@ fn wireAgentCore(
     app.addImport("metawork_account_contract", account_contract);
     app.addImport("metawork_product_execution_contract", execution_contract);
     app.addImport("product_execution_ports", execution_ports);
+    app.addImport(
+        "product_agent_protocol_adapter",
+        product_agent_protocol_adapter,
+    );
     app.addImport("metawork_account", account);
     app.addImport("account_oauth", account_oauth);
     app.addImport("account_loopback", account_loopback);
@@ -1560,6 +1588,7 @@ fn wireAgentCore(
     return .{
         .storage = storage,
         .execution_contract = execution_contract,
+        .product_agent_protocol_adapter = product_agent_protocol_adapter,
         .account = account,
         .account_runtime = account_runtime,
         .account_catalog = account_catalog,

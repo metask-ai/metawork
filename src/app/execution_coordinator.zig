@@ -3,6 +3,7 @@ const agent = @import("metawork_agent");
 const execution_contract = @import("metawork_product_execution_contract");
 const execution_ports = @import("product_execution_ports");
 const control_ports = @import("metawork_product_control_ports");
+const agent_protocol = @import("product_agent_protocol_adapter");
 
 pub const ProbeNotifier = struct {
     context: *anyopaque,
@@ -76,12 +77,7 @@ const ProbeJob = struct {
         const input = execution.input();
         self.succeeded = agent.runProviderProbe(self.io, self.completion_transport, .{
             .provider_id = input.target.provider_id,
-            .protocol = switch (input.target.protocol) {
-                .openai_responses => .openai_responses,
-                .anthropic_messages => .anthropic_messages,
-                .openai_chat_completions => .openai_chat_completions,
-                .gemini_native => .gemini_native,
-            },
+            .protocol = agent_protocol.toAgent(input.target.protocol),
             .credential = input.api_key,
             .model = input.target.model,
             .base_url = input.target.base_url,

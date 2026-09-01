@@ -149,6 +149,7 @@ test("Product execution identity has one protocol axis and no ProviderKind", () 
     ...zigFiles("src/product/control/"),
     ...zigFiles("src/product/task/"),
     ...zigFiles("src/product/schedule/"),
+    "src/product/agent_protocol_adapter.zig",
     "src/product/account.zig",
     "src/product/control.zig",
     "src/product/task.zig",
@@ -197,6 +198,57 @@ test("Product execution identity has one protocol axis and no ProviderKind", () 
   assert.doesNotMatch(
     read("src/product/schedule/state.zig"),
     /\bexecution_provider\b/u,
+  );
+});
+
+test("Product maps admitted protocols to Agent at one exhaustive boundary", () => {
+  const build = read("build.zig");
+  const adapterPath = "src/product/agent_protocol_adapter.zig";
+  const adapter = read(adapterPath);
+  const consumers = [
+    "src/app/execution_coordinator.zig",
+    "src/product/task/execution.zig",
+    "src/product/task/recovery_job.zig",
+    "src/product/task/runtime.zig",
+  ];
+
+  assert.match(build, /src\/product\/agent_protocol_adapter\.zig/);
+  assert.match(build, /product_agent_protocol_adapter/);
+  assert.match(adapter, /@import\("metawork_agent"\)/);
+  assert.match(adapter, /@import\("metawork_product_execution_contract"\)/);
+  assert.match(
+    adapter,
+    /return switch \(protocol\) \{[\s\S]*\.openai_responses => \.openai_responses,[\s\S]*\.openai_chat_completions => \.openai_chat_completions,[\s\S]*\.anthropic_messages => \.anthropic_messages,[\s\S]*\.gemini_native => \.gemini_native,[\s\S]*\};/,
+  );
+  assert.doesNotMatch(
+    adapter,
+    /@tagName|stringToEnum|provider_id|base_url|normalized_base_url|\bmodel\b/,
+  );
+  for (const file of consumers) {
+    const source = read(file);
+    assert.match(source, /@import\("product_agent_protocol_adapter"\)/);
+    assert.match(source, /agent_protocol\.toAgent\(/);
+    assert.doesNotMatch(source, /\.protocol\s*=\s*switch\s*\(/);
+  }
+  const boundarySources = [
+    adapterPath,
+    ...zigFiles("src/product/"),
+    ...zigFiles("src/app/"),
+  ]
+    .filter((file, index, files) => files.indexOf(file) === index)
+    .map(read)
+    .join("\n");
+  assert.equal(
+    [
+      ...boundarySources.matchAll(
+        /\.(?:openai_responses|openai_chat_completions|anthropic_messages|gemini_native)\s*=>\s*\.(?:openai_responses|openai_chat_completions|anthropic_messages|gemini_native)/g,
+      ),
+    ].length,
+    4,
+  );
+  assertNoImports(
+    ["src/agent.zig", ...zigFiles("src/agent/")],
+    ["metawork_product_execution_contract", "product_agent_protocol_adapter"],
   );
 });
 

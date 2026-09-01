@@ -19,6 +19,7 @@ const task_agent_session = @import("product_task_agent_session");
 const owned_task_execution = @import("product_task_execution_binding");
 const product_skill = @import("metawork_product_skill");
 const recovery_job = @import("product_task_recovery_job");
+const agent_protocol = @import("product_agent_protocol_adapter");
 
 pub const DurableCommit = task_persistence.Commit;
 pub const RunOutcome = task_state.RunOutcome;
@@ -767,12 +768,7 @@ pub const Runtime = struct {
         );
         var binding = try task_agent_session.Binding.open(input.agent_runtime, .{
             .provider_id = input.execution.target.provider_id,
-            .protocol = switch (input.execution.target.protocol) {
-                .openai_responses => .openai_responses,
-                .anthropic_messages => .anthropic_messages,
-                .openai_chat_completions => .openai_chat_completions,
-                .gemini_native => .gemini_native,
-            },
+            .protocol = agent_protocol.toAgent(input.execution.target.protocol),
             .permission_mode = permission.mode,
             .shell_policy = permission.shell,
             .permission_interaction = permission.interaction,
