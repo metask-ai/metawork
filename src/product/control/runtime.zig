@@ -11692,6 +11692,51 @@ test "Runtime degrades file change record path and diff capacity without rejecti
     }
 }
 
+test "Runtime accepts only file change locators inside the owning workspace" {
+    var limits = testLimits();
+    limits.max_file_changes_per_run = 5;
+    var control = try testRuntimeWithLimits(limits, .{});
+    defer control.deinit();
+    const workspace_root = if (builtin.os.tag == .windows)
+        "C:\\workspace"
+    else
+        "/workspace";
+    try control.replaceTracked(
+        &control.task_runtime.tasks[0].?.durable.workspace_root,
+        workspace_root,
+        control.limits.max_workspace_bytes,
+    );
+    const encoded = if (builtin.os.tag == .windows)
+        "{\"file_changes\":{\"id\":\"tool-paths\",\"name\":\"Edit\",\"changes\":[" ++
+            "{\"locator\":{\"workspace_path\":\"src\\\\a.zig\"},\"kind\":\"modified\",\"status\":\"applied\",\"tool\":\"Edit\",\"tool_use_id\":\"tool-paths\",\"agent_depth\":0,\"before_bytes\":1,\"after_bytes\":2,\"diff_complete\":true}," ++
+            "{\"locator\":{\"workspace_path\":\"..\\\\escape.zig\"},\"kind\":\"modified\",\"status\":\"applied\",\"tool\":\"Edit\",\"tool_use_id\":\"tool-paths\",\"agent_depth\":0,\"before_bytes\":1,\"after_bytes\":2,\"diff_complete\":true}," ++
+            "{\"locator\":{\"absolute_path\":\"C:\\\\workspace\\\\src\\\\b.zig\"},\"kind\":\"created\",\"status\":\"applied\",\"tool\":\"Write\",\"tool_use_id\":\"tool-paths\",\"agent_depth\":0,\"before_bytes\":0,\"after_bytes\":1,\"diff_complete\":true}," ++
+            "{\"locator\":{\"absolute_path\":\"C:\\\\workspace-evil\\\\c.zig\"},\"kind\":\"created\",\"status\":\"applied\",\"tool\":\"Write\",\"tool_use_id\":\"tool-paths\",\"agent_depth\":0,\"before_bytes\":0,\"after_bytes\":1,\"diff_complete\":true}," ++
+            "{\"locator\":{\"uri\":\"file:///workspace/d.zig\"},\"kind\":\"modified\",\"status\":\"applied\",\"tool\":\"Edit\",\"tool_use_id\":\"tool-paths\",\"agent_depth\":0,\"before_bytes\":1,\"after_bytes\":2,\"diff_complete\":true}" ++
+            "],\"overflow\":false,\"lost\":false}}"
+    else
+        "{\"file_changes\":{\"id\":\"tool-paths\",\"name\":\"Edit\",\"changes\":[" ++
+            "{\"locator\":{\"workspace_path\":\"src/a.zig\"},\"kind\":\"modified\",\"status\":\"applied\",\"tool\":\"Edit\",\"tool_use_id\":\"tool-paths\",\"agent_depth\":0,\"before_bytes\":1,\"after_bytes\":2,\"diff_complete\":true}," ++
+            "{\"locator\":{\"workspace_path\":\"../escape.zig\"},\"kind\":\"modified\",\"status\":\"applied\",\"tool\":\"Edit\",\"tool_use_id\":\"tool-paths\",\"agent_depth\":0,\"before_bytes\":1,\"after_bytes\":2,\"diff_complete\":true}," ++
+            "{\"locator\":{\"absolute_path\":\"/workspace/src/b.zig\"},\"kind\":\"created\",\"status\":\"applied\",\"tool\":\"Write\",\"tool_use_id\":\"tool-paths\",\"agent_depth\":0,\"before_bytes\":0,\"after_bytes\":1,\"diff_complete\":true}," ++
+            "{\"locator\":{\"absolute_path\":\"/workspace-evil/c.zig\"},\"kind\":\"created\",\"status\":\"applied\",\"tool\":\"Write\",\"tool_use_id\":\"tool-paths\",\"agent_depth\":0,\"before_bytes\":0,\"after_bytes\":1,\"diff_complete\":true}," ++
+            "{\"locator\":{\"uri\":\"file:///workspace/d.zig\"},\"kind\":\"modified\",\"status\":\"applied\",\"tool\":\"Edit\",\"tool_use_id\":\"tool-paths\",\"agent_depth\":0,\"before_bytes\":1,\"after_bytes\":2,\"diff_complete\":true}" ++
+            "],\"overflow\":false,\"lost\":false}}";
+    var envelope = try testEnvelope(3, 7, encoded);
+    defer envelope.deinit();
+    try control.applyEvent(&envelope);
+
+    const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+    try std.testing.expectEqualStrings("src/a.zig", run.file_changes[0].?.display_path);
+    try std.testing.expectEqualStrings("src/b.zig", run.file_changes[1].?.display_path);
+    try std.testing.expect(run.file_changes[2] == null);
+    try std.testing.expectEqual(
+        task_test_state.FileChangeObservation.incomplete,
+        run.file_change_observation.?,
+    );
+    try std.testing.expect(run.event_projection_failure == null);
+}
+
 test "Runtime degrades saturated file change artifact admission without dropping metadata" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
