@@ -2,6 +2,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const contract = @import("metawork_account_contract");
+const execution_contract = @import("metawork_product_execution_contract");
 
 const AccountId = BoundedString(contract.Limits.account_id_bytes);
 const DisplayName = BoundedString(contract.Limits.display_name_bytes);
@@ -530,7 +531,6 @@ pub const Account = struct {
                 selection.selection_id,
             ),
             .activate_metask => self.prepareActivateMetask(),
-            .model_connection => .{ .rejected = .invalid_state },
             .logout => self.prepareLogout(),
         };
     }
@@ -1495,7 +1495,7 @@ pub const PreparedTransition = struct {
     fact_kind: contract.AccountFactKind,
     attempt_id: ?u64,
     effect: ?Effect = null,
-    execution: ?contract.OwnedExecutionConfig = null,
+    execution: ?execution_contract.OwnedConfig = null,
     catalog_intent: CatalogIntent = .committed,
     execution_intent: ExecutionIntent = .unchanged,
     preference_intent: PreferenceIntent = .unchanged,
@@ -1528,7 +1528,7 @@ pub const PreparedTransition = struct {
 
     pub fn takeExecution(
         self: *PreparedTransition,
-    ) ?contract.OwnedExecutionConfig {
+    ) ?execution_contract.OwnedConfig {
         if (self.execution) |*execution| {
             const result = execution.take();
             self.execution = null;
@@ -1563,7 +1563,7 @@ pub const TestSupport = if (builtin.is_test) struct {
         account: *const Account,
         identity: AccountIdentity,
         api_key_id: []const u8,
-        execution_value: *contract.OwnedExecutionConfig,
+        execution_value: *execution_contract.OwnedConfig,
     ) !PreparedTransition {
         if (account.state.session_state != .restoring or api_key_id.len == 0)
             return error.InvalidState;
@@ -1668,7 +1668,7 @@ pub const WorkerCompletion = struct {
         tokens_persisted,
         api_keys_loaded,
         models_loaded,
-        execution_ready: contract.OwnedExecutionConfig,
+        execution_ready: execution_contract.OwnedConfig,
         default_model_persisted,
         logged_out,
         failed: WorkerFailure,
@@ -2061,8 +2061,9 @@ test "refresh failure matrix distinguishes retryable and invalid credentials" {
 test "manual key choice supersedes an in-flight automatic continuation" {
     const allocator = std.testing.allocator;
     var account = Account.initRestoring();
-    var restored_execution = try contract.OwnedExecutionConfig.initOwned(
+    var restored_execution = try execution_contract.OwnedConfig.initOwned(
         allocator,
+        .metask,
         .anthropic_messages,
         try allocator.dupe(u8, "model-old"),
         try allocator.dupe(u8, contract.metask_anthropic_messages_url),
@@ -2145,8 +2146,9 @@ test "manual key choice supersedes an in-flight automatic continuation" {
 test "empty model catalog parks back in choosing with the key list intact" {
     const allocator = std.testing.allocator;
     var account = Account.initRestoring();
-    var restored_execution = try contract.OwnedExecutionConfig.initOwned(
+    var restored_execution = try execution_contract.OwnedConfig.initOwned(
         allocator,
+        .metask,
         .anthropic_messages,
         try allocator.dupe(u8, "model-old"),
         try allocator.dupe(u8, contract.metask_anthropic_messages_url),
@@ -2333,8 +2335,9 @@ test "model catalog service failure parks back in choosing the same way" {
 test "failed reconfiguration preserves the committed selection" {
     const allocator = std.testing.allocator;
     var account = Account.initRestoring();
-    var restored_execution = try contract.OwnedExecutionConfig.initOwned(
+    var restored_execution = try execution_contract.OwnedConfig.initOwned(
         allocator,
+        .metask,
         .anthropic_messages,
         try allocator.dupe(u8, "model-old"),
         try allocator.dupe(u8, contract.metask_anthropic_messages_url),
@@ -2760,6 +2763,7 @@ test "login commits account-only before a separate catalog generation" {
         .attempt_id = account.activeAttempt().?,
         .payload = .{ .execution_ready = try .initOwned(
             allocator,
+            .metask,
             .anthropic_messages,
             model,
             base_url,
@@ -2893,6 +2897,7 @@ test "cancel invalidates attempt and stale secret completion is destroyed" {
         .attempt_id = stale_attempt,
         .payload = .{ .execution_ready = try .initOwned(
             allocator,
+            .metask,
             .anthropic_messages,
             model,
             base_url,

@@ -6,7 +6,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const agent = @import("metawork_agent");
-const account_contract = @import("metawork_account_contract");
+const execution_contract = @import("metawork_product_execution_contract");
 const checkpoint_record = @import("product_task_checkpoint_record");
 const task_attachment = @import("product_task_attachment");
 const task_deletion = @import("product_task_deletion");
@@ -18,7 +18,7 @@ pub const permission_summary_field_capacity: usize = 128;
 pub const tool_route_digest_bytes = std.crypto.hash.sha2.Sha256.digest_length;
 pub const tool_product_id_capacity = "tool-".len + 20;
 
-pub const Protocol = account_contract.Protocol;
+pub const Protocol = execution_contract.Protocol;
 
 /// Product-owned execution permission policy. These values deliberately do
 /// not mirror every AgentCore PermissionMode: only profiles whose end-to-end

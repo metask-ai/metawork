@@ -1,4 +1,4 @@
-//! Product Account-owned registry for user-managed model services.
+//! Product Execution-owned registry for user-managed model services.
 //!
 //! This module stores only public connection metadata. The platform credential
 //! account is derived from the public connection identity; neither credential
@@ -6,7 +6,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const contract = @import("metawork_account_contract");
+const contract = @import("metawork_product_execution_contract");
 
 pub const max_store_bytes: usize = 64 * 1024;
 pub const store_file_name = "model-connections.json";
@@ -173,7 +173,7 @@ pub const Registry = struct {
                 return error.InvalidConnection;
 
         if (input.connection_id.len == 0 or
-            input.connection_id.len > contract.Limits.api_key_id_bytes or
+            input.connection_id.len > contract.Limits.instance_id_bytes or
             !std.mem.eql(u8, input.connection_id, input.credential_slot.id) or
             self.findIndex(input.connection_id) != null)
             return error.InvalidConnection;
@@ -225,7 +225,7 @@ pub const Registry = struct {
         connection_id: []const u8,
     ) (std.mem.Allocator.Error || Error)!void {
         if (connection_id.len == 0 or
-            connection_id.len > contract.Limits.api_key_id_bytes or
+            connection_id.len > contract.Limits.instance_id_bytes or
             self.findIndex(connection_id) != null or
             self.pending_credential_deletions.items.len >=
                 max_pending_credential_deletions)
@@ -672,7 +672,7 @@ pub fn decode(
         result.default_connection_id = try allocator.dupe(u8, wire.default_connection_id);
     for (wire.pending_credential_deletions, 0..) |connection_id, index| {
         if (connection_id.len == 0 or
-            connection_id.len > contract.Limits.api_key_id_bytes)
+            connection_id.len > contract.Limits.instance_id_bytes)
             return error.InvalidData;
         for (wire.pending_credential_deletions[0..index]) |prior|
             if (std.mem.eql(u8, prior, connection_id)) return error.InvalidData;
@@ -682,7 +682,7 @@ pub fn decode(
     }
     for (wire.connections) |connection_wire| {
         if (connection_wire.id.len == 0 or
-            connection_wire.id.len > contract.Limits.api_key_id_bytes or
+            connection_wire.id.len > contract.Limits.instance_id_bytes or
             connection_wire.connection_generation == 0 or
             connection_wire.models.len == 0 or
             connection_wire.models.len > contract.Limits.model_connection_model_entries)
@@ -741,9 +741,9 @@ pub const FileStore = struct {
     io: std.Io,
     dir: std.Io.Dir,
 
-    pub fn init(io: std.Io, absolute_account_dir: []const u8) FileStoreError!FileStore {
-        if (!std.fs.path.isAbsolute(absolute_account_dir)) return error.OpenFailed;
-        const dir = std.Io.Dir.cwd().createDirPathOpen(io, absolute_account_dir, .{
+    pub fn init(io: std.Io, absolute_directory: []const u8) FileStoreError!FileStore {
+        if (!std.fs.path.isAbsolute(absolute_directory)) return error.OpenFailed;
+        const dir = std.Io.Dir.cwd().createDirPathOpen(io, absolute_directory, .{
             .open_options = .{ .follow_symlinks = false },
             .permissions = directoryPermissions(),
         }) catch return error.OpenFailed;

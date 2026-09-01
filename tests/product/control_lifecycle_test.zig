@@ -1332,7 +1332,11 @@ test "automatic Task binding adoption survives another restart and admits a seco
         (try continued.taskCatalog(task_id)).availability,
     );
     _ = try continued.runTask(task_id, .{ .text = "automatic second run" });
-    try waitTaskSnapshot(&continued, "\"id\":\"2\"", "\"phase\":\"completed\"");
+    try waitTaskSnapshot(
+        &continued,
+        "\"id\":\"2\",\"phase\":\"completed\"",
+        "\"outcome\":\"completed\"",
+    );
     fake_core.lock();
     const restores = fake_core.checkpoint_restores;
     const runs = fake_core.run_calls;

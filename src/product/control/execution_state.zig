@@ -1,11 +1,11 @@
-//! Product Control's installed execution authority and secret-free Account
-//! read model. This is an internal kernel, not a Product aggregate or owner.
-//! It owns replacement/redaction ordering but retains no caller or aggregate
-//! capability beyond each synchronous call.
+//! Product Control-owned installed Execution state and secret-free Account
+//! projection. This aggregate owns replacement/redaction ordering and the
+//! process-local default execution authority consumed by Task and Schedule.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const account = @import("metawork_account_contract");
+const execution_contract = @import("metawork_product_execution_contract");
 
 fn FixedText(comptime capacity: usize) type {
     return struct {
@@ -31,28 +31,12 @@ const ApiKeyProjection = struct {
     id: FixedText(account.Limits.api_key_id_bytes) = .{},
     name: FixedText(account.Limits.api_key_name_bytes) = .{},
     suffix: FixedText(account.Limits.api_key_suffix_bytes) = .{},
-    protocol: account.Protocol = .anthropic_messages,
+    protocol: execution_contract.Protocol = .anthropic_messages,
 };
 
 const ModelProjection = struct {
     id: FixedText(account.Limits.model_id_bytes) = .{},
     display_name: FixedText(account.Limits.model_display_name_bytes) = .{},
-};
-
-const ModelConnectionProjection = struct {
-    id: FixedText(account.Limits.api_key_id_bytes) = .{},
-    display_name: FixedText(account.Limits.display_name_bytes) = .{},
-    normalized_base_url: FixedText(account.Limits.base_url_bytes) = .{},
-    protocol: account.Protocol = .anthropic_messages,
-    state: account.ModelConnectionState = .configuring,
-    test_status: account.ModelConnectionTestStatus = .untested,
-    credential_status: account.ModelConnectionCredentialStatus = .missing,
-    enabled: bool = false,
-    selected_model: FixedText(account.Limits.model_id_bytes) = .{},
-    connection_generation: u64 = 0,
-    models: []ModelProjection = &.{},
-    model_views: []account.ModelConnectionModelView = &.{},
-    model_count: usize = 0,
 };
 
 const AccountProjection = struct {
@@ -74,11 +58,6 @@ const AccountProjection = struct {
     models: []ModelProjection,
     model_views: []account.ModelView,
     model_count: usize = 0,
-    model_connections: []ModelConnectionProjection,
-    model_connection_models: []ModelProjection,
-    model_connection_views: []account.ModelConnectionView,
-    model_connection_model_views: []account.ModelConnectionModelView,
-    model_connection_count: usize = 0,
     account_can_create_task: bool = false,
     error_code: account.ErrorCode = .none,
     catalog_generation: u64 = 0,
@@ -96,54 +75,16 @@ const AccountProjection = struct {
         @memset(models, .{});
         const model_views = try allocator.alloc(account.ModelView, account.Limits.model_entries);
         errdefer allocator.free(model_views);
-        const model_connections = try allocator.alloc(
-            ModelConnectionProjection,
-            account.Limits.model_connection_entries,
-        );
-        errdefer allocator.free(model_connections);
-        @memset(model_connections, .{});
-        const connection_model_capacity = account.Limits.model_connection_entries *
-            account.Limits.model_connection_model_entries;
-        const model_connection_models = try allocator.alloc(
-            ModelProjection,
-            connection_model_capacity,
-        );
-        errdefer allocator.free(model_connection_models);
-        @memset(model_connection_models, .{});
-        const model_connection_views = try allocator.alloc(
-            account.ModelConnectionView,
-            account.Limits.model_connection_entries,
-        );
-        errdefer allocator.free(model_connection_views);
-        const model_connection_model_views = try allocator.alloc(
-            account.ModelConnectionModelView,
-            connection_model_capacity,
-        );
-        errdefer allocator.free(model_connection_model_views);
-        for (model_connections, 0..) |*connection, index| {
-            const start = index * account.Limits.model_connection_model_entries;
-            const end = start + account.Limits.model_connection_model_entries;
-            connection.models = model_connection_models[start..end];
-            connection.model_views = model_connection_model_views[start..end];
-        }
         return .{
             .allocator = allocator,
             .api_keys = api_keys,
             .api_key_views = api_key_views,
             .models = models,
             .model_views = model_views,
-            .model_connections = model_connections,
-            .model_connection_models = model_connection_models,
-            .model_connection_views = model_connection_views,
-            .model_connection_model_views = model_connection_model_views,
         };
     }
 
     fn deinit(self: *AccountProjection) void {
-        self.allocator.free(self.model_connection_model_views);
-        self.allocator.free(self.model_connection_views);
-        self.allocator.free(self.model_connection_models);
-        self.allocator.free(self.model_connections);
         self.allocator.free(self.model_views);
         self.allocator.free(self.models);
         self.allocator.free(self.api_key_views);
@@ -156,8 +97,6 @@ const AccountProjection = struct {
             @panic("Account published an invalid AccountView");
         std.debug.assert(source_view.api_keys.len <= self.api_keys.len);
         std.debug.assert(source_view.models.len <= self.models.len);
-        std.debug.assert(source_view.model_connections.len <= self.model_connections.len);
-        self.model_connection_count = 0;
         self.state = source_view.state;
         self.catalog_state = source_view.catalog_state;
         self.can_cancel = source_view.can_cancel;
@@ -186,57 +125,6 @@ const AccountProjection = struct {
                 .protocol = target.protocol,
             };
         }
-        for (
-            source_view.model_connections,
-            self.model_connections[0..source_view.model_connections.len],
-            self.model_connection_views[0..source_view.model_connections.len],
-        ) |source, *target, *target_view| {
-            const target_models = target.models;
-            const target_model_views = target.model_views;
-            target.* = .{
-                .protocol = source.protocol,
-                .state = source.state,
-                .test_status = source.test_status,
-                .credential_status = source.credential_status,
-                .enabled = source.enabled,
-                .connection_generation = source.connection_generation,
-                .models = target_models,
-                .model_views = target_model_views,
-                .model_count = source.models.len,
-            };
-            std.debug.assert(source.models.len <= target.models.len);
-            target.id.setNoFail(source.id);
-            target.display_name.setNoFail(source.display_name);
-            target.normalized_base_url.setNoFail(source.normalized_base_url);
-            target.selected_model.setNoFail(source.selected_model);
-            for (
-                source.models,
-                target.models[0..source.models.len],
-                target.model_views[0..source.models.len],
-            ) |model, *owned, *model_view| {
-                owned.* = .{};
-                owned.id.setNoFail(model.id);
-                owned.display_name.setNoFail(model.display_name);
-                model_view.* = .{
-                    .id = owned.id.view(),
-                    .display_name = owned.display_name.view(),
-                };
-            }
-            target_view.* = .{
-                .id = target.id.view(),
-                .display_name = target.display_name.view(),
-                .protocol = target.protocol,
-                .normalized_base_url = target.normalized_base_url.view(),
-                .state = target.state,
-                .test_status = target.test_status,
-                .credential_status = target.credential_status,
-                .enabled = target.enabled,
-                .models = target.model_views[0..target.model_count],
-                .selected_model = target.selected_model.view(),
-                .connection_generation = target.connection_generation,
-            };
-        }
-        self.model_connection_count = source_view.model_connections.len;
         self.model_count = source_view.models.len;
         for (
             source_view.models,
@@ -267,7 +155,6 @@ const AccountProjection = struct {
             .display_name = self.display_name.view(),
             .api_keys = self.api_key_views[0..self.api_key_count],
             .models = self.model_views[0..self.model_count],
-            .model_connections = self.model_connection_views[0..self.model_connection_count],
             .selected_api_key_id = self.selected_api_key_id.view(),
             .selected_model = self.selected_model.view(),
             .candidate_api_key_id = self.candidate_api_key_id.view(),
@@ -288,7 +175,7 @@ const AccountProjection = struct {
         return false;
     }
 
-    fn selectedProtocol(self: *const AccountProjection) ?account.Protocol {
+    fn selectedProtocol(self: *const AccountProjection) ?execution_contract.Protocol {
         for (self.api_key_views[0..self.api_key_count]) |api_key| {
             if (std.mem.eql(u8, api_key.id, self.selected_api_key_id.view()))
                 return api_key.protocol;
@@ -305,17 +192,17 @@ const ActiveExecution = struct {
     credential_len: usize = 0,
     model_len: usize = 0,
     base_url_len: usize = 0,
-    provider_id_storage: [account.Limits.provider_id_bytes]u8 = undefined,
+    provider_id_storage: [execution_contract.Limits.provider_id_bytes]u8 = undefined,
     provider_id_len: usize = 0,
-    protocol: ?account.Protocol = null,
+    protocol: ?execution_contract.Protocol = null,
     generation: u64 = 0,
 
     fn init(allocator: std.mem.Allocator) std.mem.Allocator.Error!ActiveExecution {
-        const credential_storage = try allocator.alloc(u8, account.Limits.api_key_bytes);
+        const credential_storage = try allocator.alloc(u8, execution_contract.Limits.credential_bytes);
         errdefer allocator.free(credential_storage);
-        const model_storage = try allocator.alloc(u8, account.Limits.model_id_bytes);
+        const model_storage = try allocator.alloc(u8, execution_contract.Limits.model_id_bytes);
         errdefer allocator.free(model_storage);
-        const base_url_storage = try allocator.alloc(u8, account.Limits.base_url_bytes);
+        const base_url_storage = try allocator.alloc(u8, execution_contract.Limits.base_url_bytes);
         errdefer allocator.free(base_url_storage);
         return .{
             .allocator = allocator,
@@ -333,10 +220,10 @@ const ActiveExecution = struct {
         self.* = undefined;
     }
 
-    fn installNoFail(self: *ActiveExecution, execution: *account.OwnedExecutionConfig) void {
+    fn installNoFail(self: *ActiveExecution, execution: *execution_contract.OwnedConfig) void {
         const input = execution.input();
-        const validation = if (execution.model_connection)
-            account.validateModelConnectionExecutionConfig(input)
+        const validation = if (execution.source == .model_connection)
+            execution_contract.validateModelConnectionExecutionConfig(input)
         else
             account.validateExecutionConfig(input);
         validation catch @panic("Account published an invalid ExecutionConfig");
@@ -344,7 +231,7 @@ const ActiveExecution = struct {
         execution.deinit();
     }
 
-    fn installBytesNoFail(self: *ActiveExecution, input: account.ExecutionConfigInput) void {
+    fn installBytesNoFail(self: *ActiveExecution, input: execution_contract.ConfigInput) void {
         const credential_bytes = input.api_key;
         const model_id = input.target.model;
         const base_url = input.target.base_url;
@@ -435,11 +322,11 @@ pub const PreparedModelConnectionBinding = struct {
 
 pub const ExecutionIdentity = struct {
     generation: u64,
-    protocol: account.Protocol,
+    protocol: execution_contract.Protocol,
 };
 
 pub const AutomationInput = struct {
-    protocol: account.Protocol,
+    protocol: execution_contract.Protocol,
     credential: []const u8,
     model: []const u8,
     base_url: []const u8,
@@ -500,7 +387,7 @@ pub const State = struct {
         self.redaction_preparation = .none;
     }
 
-    pub fn prepareInstall(self: *State, input: account.ExecutionConfigInput, durable: anytype) !void {
+    pub fn prepareInstall(self: *State, input: execution_contract.ConfigInput, durable: anytype) !void {
         std.debug.assert(self.replacement != .none);
         std.debug.assert(self.redaction_preparation == .none);
         try durable.apply(input.api_key);
@@ -520,7 +407,7 @@ pub const State = struct {
 
     pub fn installMetaskNoFail(
         self: *State,
-        execution: *account.OwnedExecutionConfig,
+        execution: *execution_contract.OwnedConfig,
         redaction: ProjectionRedaction,
     ) void {
         std.debug.assert(self.replacement != .none);
@@ -538,7 +425,7 @@ pub const State = struct {
 
     pub fn installModelConnectionNoFail(
         self: *State,
-        execution: *account.OwnedExecutionConfig,
+        execution: *execution_contract.OwnedConfig,
         prepared_binding: *PreparedModelConnectionBinding,
         redaction: ProjectionRedaction,
     ) void {
@@ -557,7 +444,7 @@ pub const State = struct {
         input: AutomationInput,
         redaction: ProjectionRedaction,
     ) void {
-        const execution_input: account.ExecutionConfigInput = .{
+        const execution_input: execution_contract.ConfigInput = .{
             .target = .{
                 .provider_id = "metask:automation-key",
                 .protocol = input.protocol,
@@ -585,7 +472,7 @@ pub const State = struct {
         self.custom_binding = null;
     }
 
-    fn consumeInstallPreparation(self: *State, input: account.ExecutionConfigInput) void {
+    fn consumeInstallPreparation(self: *State, input: execution_contract.ConfigInput) void {
         switch (self.redaction_preparation) {
             .install => |prepared| {
                 std.debug.assert(prepared.generation == input.execution_generation);
@@ -606,13 +493,9 @@ pub const State = struct {
     }
 
     pub fn accountView(self: *const State, owner_available: bool) account.AccountView {
-        var result = self.projection.view(self.canCreateTask(owner_available));
-        if (self.custom_binding) |binding| {
-            result.execution_source = .model_connection;
-            result.selected_model_connection_id = binding.connection_id;
-            result.execution_generation = self.execution.generation;
-        }
-        return result;
+        return self.projection.view(
+            owner_available and self.projection.account_can_create_task,
+        );
     }
 
     pub fn canCreateTask(self: *const State, owner_available: bool) bool {
@@ -648,7 +531,7 @@ pub const State = struct {
 
     pub fn supportsTaskExecution(
         self: *const State,
-        expected_protocol: account.Protocol,
+        expected_protocol: execution_contract.Protocol,
         model_id: []const u8,
     ) bool {
         return self.replacement == .none and self.execution.ready() and
@@ -666,7 +549,7 @@ pub const State = struct {
     pub fn recoveryAuthorityExact(
         self: *const State,
         execution_generation: u64,
-        expected_protocol: account.Protocol,
+        expected_protocol: execution_contract.Protocol,
         model_id: []const u8,
     ) bool {
         return execution_generation == self.execution.generation and
@@ -678,7 +561,7 @@ pub const State = struct {
             (self.custom_binding != null or execution_generation == self.projection.execution_generation);
     }
 
-    pub fn executionInput(self: *const State) ?account.ExecutionConfigInput {
+    pub fn executionInput(self: *const State) ?execution_contract.ConfigInput {
         if (!self.execution.ready()) return null;
         return .{
             .target = .{
@@ -708,7 +591,7 @@ pub const State = struct {
     pub fn catalogGeneration(self: *const State) u64 {
         return self.projection.catalog_generation;
     }
-    pub fn protocol(self: *const State) ?account.Protocol {
+    pub fn protocol(self: *const State) ?execution_contract.Protocol {
         return self.execution.protocol;
     }
     pub fn model(self: *const State) []const u8 {
@@ -732,6 +615,14 @@ pub const State = struct {
     }
     pub fn modelConnectionSelected(self: *const State) bool {
         return self.custom_binding != null;
+    }
+
+    pub fn source(self: *const State) execution_contract.Source {
+        return if (self.custom_binding == null) .metask else .model_connection;
+    }
+
+    pub fn selectedModelConnectionId(self: *const State) []const u8 {
+        return if (self.custom_binding) |binding| binding.connection_id else "";
     }
 };
 
@@ -794,11 +685,11 @@ fn secureFreeTest(bytes: []u8) void {
 }
 
 fn testExecution(
-    protocol: account.Protocol,
+    protocol: execution_contract.Protocol,
     model: []const u8,
     generation: u64,
     credential: []const u8,
-) !account.OwnedExecutionConfig {
+) !execution_contract.OwnedConfig {
     const owned_model = try std.testing.allocator.dupe(u8, model);
     errdefer std.testing.allocator.free(owned_model);
     const owned_base_url = try std.testing.allocator.dupe(
@@ -808,8 +699,9 @@ fn testExecution(
     errdefer std.testing.allocator.free(owned_base_url);
     const owned_credential = try std.testing.allocator.dupe(u8, credential);
     errdefer secureFreeTest(owned_credential);
-    return account.OwnedExecutionConfig.initOwned(
+    return execution_contract.OwnedConfig.initOwned(
         std.testing.allocator,
+        .metask,
         protocol,
         owned_model,
         owned_base_url,
@@ -819,7 +711,7 @@ fn testExecution(
     ) catch unreachable;
 }
 
-fn testModelConnectionExecution() !account.OwnedExecutionConfig {
+fn testModelConnectionExecution() !execution_contract.OwnedConfig {
     const owned_model = try std.testing.allocator.dupe(u8, "gpt-5");
     errdefer std.testing.allocator.free(owned_model);
     const owned_base_url = try std.testing.allocator.dupe(
@@ -829,8 +721,9 @@ fn testModelConnectionExecution() !account.OwnedExecutionConfig {
     errdefer std.testing.allocator.free(owned_base_url);
     const owned_credential = try std.testing.allocator.dupe(u8, "SECRET-TWO");
     errdefer secureFreeTest(owned_credential);
-    return account.OwnedExecutionConfig.initModelConnectionOwned(
+    return execution_contract.OwnedConfig.initOwned(
         std.testing.allocator,
+        .model_connection,
         .openai_chat_completions,
         owned_model,
         owned_base_url,
@@ -1006,7 +899,7 @@ test "Model Connection execution never borrows Metask model authority" {
     try std.testing.expect(state.modelConnectionSelected());
     const resolved = state.executionInput().?;
     try std.testing.expectEqualStrings("model_connection:fixture-provider", resolved.target.provider_id);
-    try std.testing.expectEqual(account.Protocol.openai_chat_completions, resolved.target.protocol);
+    try std.testing.expectEqual(execution_contract.Protocol.openai_chat_completions, resolved.target.protocol);
     try std.testing.expect(!state.taskModelSelectionAuthorized(
         .{ .generation = 3, .protocol = .openai_chat_completions },
         7,
@@ -1019,61 +912,16 @@ test "Account projection commit and view allocate nothing after initialization" 
     var state = try State.init(failing.allocator());
     defer state.deinit();
 
-    const connection_models = [_]account.ModelConnectionModelView{
-        .{ .id = "model-00", .display_name = "Model 00" },
-        .{ .id = "model-01", .display_name = "Model 01" },
-        .{ .id = "model-02", .display_name = "Model 02" },
-        .{ .id = "model-03", .display_name = "Model 03" },
-        .{ .id = "model-04", .display_name = "Model 04" },
-        .{ .id = "model-05", .display_name = "Model 05" },
-        .{ .id = "model-06", .display_name = "Model 06" },
-        .{ .id = "model-07", .display_name = "Model 07" },
-        .{ .id = "model-08", .display_name = "Model 08" },
-        .{ .id = "model-09", .display_name = "Model 09" },
-        .{ .id = "model-10", .display_name = "Model 10" },
-        .{ .id = "model-11", .display_name = "Model 11" },
-        .{ .id = "model-12", .display_name = "Model 12" },
-        .{ .id = "model-13", .display_name = "Model 13" },
-        .{ .id = "model-14", .display_name = "Model 14" },
-        .{ .id = "model-15", .display_name = "Model 15" },
-    };
-    var connection_id_storage: [account.Limits.model_connection_entries][32]u8 = undefined;
-    var connections: [account.Limits.model_connection_entries]account.ModelConnectionView = undefined;
-    for (&connections, 0..) |*connection, index| {
-        const id = try std.fmt.bufPrint(&connection_id_storage[index], "connection-{d}", .{index});
-        connection.* = .{
-            .id = id,
-            .display_name = id,
-            .protocol = .openai_chat_completions,
-            .normalized_base_url = "https://api.openai.com/v1/chat/completions",
-            .state = .ready,
-            .test_status = .connected,
-            .credential_status = .ready,
-            .enabled = true,
-            .models = &connection_models,
-            .selected_model = connection_models[0].id,
-            .connection_generation = @intCast(index + 1),
-        };
-    }
     const fact: account.AccountFact = .{
-        .kind = .model_connections_changed,
-        .view = .{
-            .state = .signed_out,
-            .catalog_state = .unavailable,
-            .model_connections = &connections,
-        },
+        .kind = .restored,
+        .view = .{ .state = .signed_out, .catalog_state = .unavailable },
     };
-
     const allocations_after_init = failing.alloc_index;
     failing.fail_index = allocations_after_init;
     state.commitAccountFactNoFail(fact);
     const first = state.accountView(true);
     try account.validateView(first);
-    try std.testing.expectEqual(account.Limits.model_connection_entries, first.model_connections.len);
-    try std.testing.expectEqual(
-        account.Limits.model_connection_model_entries,
-        first.model_connections[first.model_connections.len - 1].models.len,
-    );
+    try std.testing.expectEqual(account.AccountState.signed_out, first.state);
     state.commitAccountFactNoFail(fact);
     _ = state.accountView(true);
     try std.testing.expectEqual(allocations_after_init, failing.alloc_index);

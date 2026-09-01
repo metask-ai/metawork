@@ -11,6 +11,7 @@ const mcp_platform = @import("metawork_mcp_platform");
 const mcp_oauth = @import("metawork_mcp_oauth");
 const account_coordinator = @import("app/account_coordinator.zig");
 const account_platform_binding = @import("app/account_platform_binding.zig");
+const execution_platform_binding = @import("app/execution_platform_binding.zig");
 const metask_http_transport = @import("app/metask_http_transport.zig");
 const completion_http_transport = @import("app/completion_http_transport.zig");
 const oauth_loopback_transport = @import("oauth_loopback_transport");
@@ -49,6 +50,7 @@ const App = struct {
     completion_transport: completion_http_transport.Backend,
     account_path: []const u8 = "",
     account_platform_binding: ?account_platform_binding.Adapter = null,
+    execution_platform_binding: ?execution_platform_binding.Adapter = null,
     dispatcher: ?*bridge_api.Dispatcher = null,
     agent_runtime: ?*agent.Runtime = null,
     control: ?*product_control.Runtime = null,
@@ -217,6 +219,11 @@ const App = struct {
                 );
             }
         } else if (self.platform.services()) |services| {
+            self.execution_platform_binding = execution_platform_binding.Adapter.init(
+                services,
+                self.io,
+                self.main_thread_id,
+            );
             self.account_platform_binding = account_platform_binding.Adapter.init(
                 services,
                 self.io,
@@ -224,9 +231,16 @@ const App = struct {
                 self.account_path,
             ) catch null;
             if (self.account_platform_binding) |*binding| {
-                coordinator.start(binding.ports());
+                coordinator.start(
+                    binding.ports(),
+                    self.account_path,
+                    self.execution_platform_binding.?.ports(),
+                );
             } else {
-                coordinator.startUnavailable();
+                coordinator.startWithAccountUnavailable(
+                    self.account_path,
+                    self.execution_platform_binding.?.ports(),
+                );
             }
         } else {
             coordinator.startUnavailable();
@@ -263,6 +277,7 @@ const App = struct {
         };
         if (self.account_platform_binding) |*binding| binding.deinit();
         self.account_platform_binding = null;
+        self.execution_platform_binding = null;
         if (self.control) |control| control.shutdownExecutor();
         if (self.agent_runtime) |agent_runtime| {
             try agent_runtime.shutdown();
@@ -583,6 +598,7 @@ pub fn run(init: std.process.Init) !void {
         std.heap.c_allocator,
         &control,
         account_coordinator_state.commandSink(),
+        account_coordinator_state.modelConnectionCommandSink(),
         app.platform.dispatcherPlatform(),
         app.automation.dispatcherAuthority(),
         app_window.main_window_id,

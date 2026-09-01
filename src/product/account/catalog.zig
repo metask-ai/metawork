@@ -2,6 +2,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const contract = @import("metawork_account_contract");
+const execution_contract = @import("metawork_product_execution_contract");
 const metask = @import("metask_client");
 
 pub const api_keys_url = metask.api_keys_url;
@@ -136,7 +137,7 @@ const ApiKeyEntry = struct {
     id: ApiKeyId,
     name: ApiKeyName,
     suffix: ApiKeySuffix,
-    protocol: contract.Protocol,
+    protocol: execution_contract.Protocol,
     secret: Secret,
 
     fn deinit(self: *ApiKeyEntry) void {
@@ -262,7 +263,7 @@ pub const CatalogSession = struct {
         self: *CatalogSession,
         model_id: []const u8,
         execution_generation: u64,
-    ) Error!contract.OwnedExecutionConfig {
+    ) Error!execution_contract.OwnedConfig {
         if (execution_generation == 0)
             return error.ExecutionTargetInvalid;
         const key_index = self.selected_key_index orelse
@@ -290,8 +291,9 @@ pub const CatalogSession = struct {
         const transferred_base_url = owned_base_url.?;
         owned_model = null;
         owned_base_url = null;
-        return contract.OwnedExecutionConfig.initOwned(
+        var result = execution_contract.OwnedConfig.initOwned(
             self.allocator,
+            .metask,
             entry.protocol,
             transferred_model,
             transferred_base_url,
@@ -299,6 +301,10 @@ pub const CatalogSession = struct {
             owned_secret,
             entry.id.view(),
         ) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.ExecutionTargetInvalid;
+        errdefer result.deinit();
+        contract.validateExecutionConfig(result.input()) catch
+            return error.ExecutionTargetInvalid;
+        return result;
     }
 
     pub fn writeApiKeyViews(
@@ -427,7 +433,7 @@ const PublicApiKey = struct {
     id: PublicText(contract.Limits.api_key_id_bytes) = .{},
     name: PublicText(contract.Limits.api_key_name_bytes) = .{},
     suffix: PublicText(contract.Limits.api_key_suffix_bytes) = .{},
-    protocol: contract.Protocol = .anthropic_messages,
+    protocol: execution_contract.Protocol = .anthropic_messages,
 };
 
 const PublicModel = struct {
@@ -506,7 +512,7 @@ pub const PublicCatalog = struct {
     pub fn replaceRestoredSelection(
         self: *PublicCatalog,
         api_key_id: []const u8,
-        protocol: contract.Protocol,
+        protocol: execution_contract.Protocol,
         model_id: []const u8,
     ) void {
         std.debug.assert(api_key_id.len > 0);
@@ -960,7 +966,7 @@ fn parseModels(
     return result;
 }
 
-fn protocolForPlatform(platform: []const u8) ?contract.Protocol {
+fn protocolForPlatform(platform: []const u8) ?execution_contract.Protocol {
     if (std.mem.eql(u8, platform, "anthropic")) return .anthropic_messages;
     if (std.mem.eql(u8, platform, "openai")) return .openai_chat_completions;
     if (std.mem.eql(u8, platform, "gemini")) return .gemini_native;
@@ -975,7 +981,7 @@ fn jsonScratchSize(body_len: usize) usize {
     );
 }
 
-fn baseUrl(protocol: contract.Protocol) ?[]const u8 {
+fn baseUrl(protocol: execution_contract.Protocol) ?[]const u8 {
     return switch (protocol) {
         .openai_responses => null,
         .anthropic_messages => anthropic_messages_url,
@@ -1199,7 +1205,7 @@ test "live-shape catalogs expose only masked views and move one key owner" {
     var execution = try session.prepareExecution("model-1", 1);
     defer execution.deinit();
     try std.testing.expectEqual(
-        contract.Protocol.anthropic_messages,
+        execution_contract.Protocol.anthropic_messages,
         execution.input().target.protocol,
     );
     try std.testing.expectEqualStrings(
@@ -1249,7 +1255,7 @@ test "catalog maps Gemini platform to AgentCore Gemini target" {
     var execution = try session.prepareExecution("model-1", 1);
     defer execution.deinit();
     try std.testing.expectEqual(
-        contract.Protocol.gemini_native,
+        execution_contract.Protocol.gemini_native,
         execution.input().target.protocol,
     );
     try std.testing.expectEqualStrings(

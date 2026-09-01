@@ -6,12 +6,12 @@
 
 Product 由两个 named owner 组成，跨 owner 用例由 Application coordinator 编排：
 
-- Account 拥有 Metask identity、catalog、credential、Model Connection、默认选择及其内部事务与恢复；
-- Product Control 拥有已安装的 ExecutionConfig、Workspace、Task、Schedule、Skill、MCP、共享 Executor、跨 aggregate admission、canonical 产品 projection、revision、产品历史与关闭顺序。
+- Account 拥有 Metask identity、catalog、credential、Metask 默认选择及其内部事务与恢复；
+- Product Control 拥有 Execution aggregate、已安装的默认 ExecutionConfig、Workspace、Task、Schedule、Skill、MCP、共享 Executor、跨 aggregate admission、canonical 产品 projection、revision、产品历史与关闭顺序。Execution aggregate 独占通用 Protocol/ExecutionConfig 合同、user-managed Model Connection registry、credential vault port、测试状态、默认 binding、持久化与恢复。
 
 Agent 位于 Product 之外，拥有 MetaWork 对 AgentCore Runtime、Session、Conversation、callback、event pump 与 terminal execution fact 的集成生命周期。Product Control 只调用 Agent 的公共执行能力，不管理 Agent Runtime 生命周期、不读取其内部状态，也不借 Agent 获取通用 I/O。Application 创建和关闭 Agent、安排主线程 wake，并协调 Account 与 Product Control；它不持有领域运行状态，也不独立决定这些 owner 的 policy。
 
-Workspace、Task、Schedule、Skill 与 MCP 是 Product Control 持有的 aggregate，不形成新的顶层 Product owner。各 aggregate 独占自身状态机、局部事务与持久化 policy；Product Control 只拥有必须同时观察多个 aggregate、execution、publication 或生命周期事实的不变量，不能把局部 policy 重新吸收到组合层。
+Execution、Workspace、Task、Schedule、Skill 与 MCP 是 Product Control 持有的 aggregate，不形成新的顶层 Product owner。各 aggregate 独占自身状态机、局部事务与持久化 policy；Product Control 只拥有必须同时观察多个 aggregate、execution、publication 或生命周期事实的不变量，不能把局部 policy 重新吸收到组合层。
 
 Product 事务只使用三种机制：
 
@@ -23,22 +23,35 @@ Product 不建立统一事务引擎、通用 command bus 或 Product event bus�
 
 ## 2. 跨边界事务
 
-### 2.1 Account 与 ExecutionConfig
+### 2.1 Execution aggregate 与 Account handoff
 
-Account 和 Product Control 是同级 owner，彼此不导入对方 Runtime。Account 内部 identity、catalog、credential 和 Model Connection 合同只由[Account 架构](account-architecture.md)定义；本节只定义它们与 Product Control 的交接。
+Account 和 Product Control 是同级 owner，彼此不导入对方 Runtime。Product Execution 是 Product Control 持有的 aggregate，不是第三个顶层 owner；它发布不依赖 Account、Application、Bridge 或 Agent 的纯 `Protocol`、`ExecutionTarget`、`ExecutionConfig`、Model Connection command/view 和线性 owned config 合同。Account、Task、Schedule 与 Product Control 都只消费这份合同，不复制 enum，也不通过 Account 合同中转。
 
-ExecutionConfig 的唯一运行时数据流为：
+Metask execution 的运行时数据流为：
 
 ```text
-Account resolve
+Account resolve Metask selection
 → Application coordinator controlled transfer
-→ Product Control execution-scoped ownership
+→ Product Control installed-execution ownership
 → Agent Session consumption
 ```
 
-执行配置交接必须一并保留 Account 解析出的服务实例引用、明确 protocol、endpoint、model、credential 和 execution generation。默认 execution、Task attachment 和后台任务各自持有所需的 owned copy；Session、恢复、连接测试及自动标题消费同一份解析结果，不根据厂商、endpoint 或模型名重新选择 protocol。服务实例引用只用于 Host 执行关联，不进入 durable history 或 Renderer；恢复使用当前显式授权的执行配置，不从历史类别猜测服务实例。Product Control、Task 与 Schedule 共享 Account 发布的同一 `Protocol` 类型，不定义 `ProviderKind` 或平行 enum。
+Model Connection execution 的数据流为：
 
-唯一 committed-state 写路径为：
+```text
+Execution registry + Application credential vault
+→ Execution resolve
+→ Product Control installed-execution ownership
+→ Agent Session consumption
+```
+
+两条来源都必须产生同一份显式 protocol、endpoint、model、credential、execution generation 与服务实例引用。Metask 引用为 `metask:<api-key-id>`，Model Connection 引用为 `model_connection:<connection-id>`；引用标识配置对象，不包含 credential，也不能替代 generation。默认 execution、Task attachment 和后台任务各自持有所需的 owned copy；Session、恢复、连接测试及自动标题消费同一份解析结果，不根据厂商、endpoint、模型名或服务实例引用重新选择 protocol。服务实例引用不进入 durable history 或 Renderer。Product 层不定义 `ProviderKind`、厂商分类、协议反推或平行 enum；Agent 对 AgentCore ABI 的 provider code 映射仍是 Agent-owned transport 细节。
+
+Model Connection 使用显式的 `openai_responses | openai_chat_completions | anthropic_messages | gemini_native` protocol。前三者分别要求完整 `/v1/responses`、`/v1/chat/completions`、`/v1/messages` endpoint，Gemini Native 使用由消费者追加 model 与 operation path 的 base URL。endpoint 只允许 HTTPS 或用户明确配置的 loopback HTTP，并拒绝 control character、userinfo、query/fragment credential、过长 URL 和协议路径不匹配；Renderer 不能拼接或覆盖规范化 endpoint。当前不做 model discovery，用户提交有界 model id。
+
+Execution registry 与 Account identity/catalog 独立。不同连接即使 credential 相同也保持不同 connection id；更新名称、endpoint、protocol、credential 或模型保留 connection id，但 endpoint、protocol 或 credential 变化产生新的 connection generation。首次成功的 Agent-owned one-shot Completion test 使当前 generation ready；失败重测只更新 latest test status，不撤销已 ready generation、当前默认 execution 或跨重启 binding。同一 ready connection 选择模型只产生新的 opaque execution generation；既有 Task 与 Session 不热替换。
+
+Metask handoff 的 committed-state 写路径为：
 
 ```text
 Account prepare(command | completion)
@@ -49,15 +62,31 @@ Account prepare(command | completion)
 → dispatch committed Account effect
 ```
 
+Model Connection 设为默认的写路径为：
+
+```text
+Execution resolve candidate + credential
+→ Product Control begin replacement and complete all fallible durable scrub preparation
+→ Execution atomically commit registry default + execution generation
+→ Product Control no-fail install ExecutionConfig and binding
+→ publish canonical projection
+```
+
+registry commit 前的 scrub preparation 明确失败时，registry 与已安装 execution 都保持旧值；registry commit 明确失败时清除 preparation 并保持旧值；commit 成功后只允许 no-fail ownership transfer。Connection CRUD/test 不隐式改变默认 source。
+
 上述 commit 链在主线程同一 turn 内完成。外部 effect 只有在 committed swap 后才能启动；worker completion 必须回到主线程并重新进入同一条链。Product Control 安装或清除 execution 的步骤在进入 Account commit 前必须已经完成全部可能失败的验证、持久化 credential scrub 与 candidate preparation，实际所有权转移只能是 no-fail install。
 
 Product Control 的 replacement gate 只串行化本次默认 execution 交接与相关新 Task admission。已有 Task、Session、Run 和 worker 已经取得的 owned ExecutionConfig 按原生命周期收口，不热替换、不等待 Account identity 变化，也不被 logout 伪造为已撤权。只改变默认模型且不改变 credential authority 时，不产生新的 credential generation；是否允许已有 Task 改变模型必须由该 Task 精确持有的 protocol、generation 与当前 authoritative catalog 共同决定。
 
-Account prepare 后若 Product Control gate 拒绝，prepared transition 必须销毁，不能提交 Account fact、转移 credential 或启动 effect。effect admission 的明确失败保留旧 committed state 并清零 staged secret。外部 effect 已产生结果后，后续失败必须从已经观察到的 committed phase 收口，不能回滚成旧 identity、旧 credential 或旧默认 execution；结果不确定的 mutation 不得自动重放。
+Account prepare 或 Execution candidate 在 Product Control gate 拒绝后必须销毁，不能提交 Account fact/registry default、转移 credential 或启动 effect。effect admission 的明确失败保留旧 committed state 并清零 staged secret。外部 effect 已产生结果后，后续失败必须从已经观察到的 committed phase 收口，不能回滚成旧 identity、旧 credential 或旧默认 execution；结果不确定的 mutation 不得自动重放。
 
-Renderer reload、断连或命令 timeout 只影响交互与 resync，不能取消 Host 中的 deadline、mutation 或 terminal completion，也不能代表这条 commit 链失败。Renderer 只提交 Account 真源发布的无 secret identifier 与 expected generation，不参与 prepare、commit 或 credential transfer。
+Renderer reload、断连或命令 timeout 只影响交互与 resync，不能取消 Host 中的 deadline、mutation 或 terminal completion，也不能代表这条 commit 链失败。Renderer 只提交对应 Account 或 Execution projection 发布的无 secret identifier 与 expected generation，不参与 prepare、commit 或 credential transfer。
 
 Identity replacement、default execution replacement 与 durable Task history 是三个边界。durable history 只保存解释执行来源所需的 protocol、model、不透明 execution generation 与 binding facts，不保存 Account identity、Model Connection identity、API Key metadata、credential locator、完整 ExecutionConfig 或可重建 secret 的信息。
+
+`model-connections.json` 是 Execution aggregate 的独立原子 registry，继续位于既有产品数据目录并保持既有 wire shape；它只保存 connection id、display name、protocol、normalized endpoint、有界 model metadata、credential/test status、generation、默认 binding 和待完成 credential deletion tombstone。API credential 只进入系统安全存储；既有 Keychain/service identity 和以 connection id 派生的 account identity 保持不变。旧 `provider` 字段不读取、不迁移、不双写，包含旧 shape 的 registry fail closed 且不得被自动覆盖。
+
+连接删除先提交 credential cleanup tombstone，再删除系统 credential，最后原子清除 tombstone；创建先提交目标 id tombstone，再写 credential，最后以一次 registry commit 替换为完整连接。启动与后续 mutation 必须排空 tombstone。确认 credential 缺失时撤销对应 default 并持久化 `credential_status = missing`；安全存储暂时不可读不能被误写成已确认缺失。Execution 恢复与 Account identity 恢复相互独立，一方 unavailable 不得使另一方的持久化事实被清空或覆盖。
 
 ### 2.2 Workspace 与 Task admission
 
@@ -136,7 +165,7 @@ Credential redaction 是 owner 释放协议，而不是 snapshot 时的偶然过
 4. durable commit 成功后才能转移或 secure-zero 对应 credential ownership；
 5. serializer 继续扫描所有 live credential，作为提交前的第二道防线。
 
-Schedule scrub 明确失败或 outcome unknown 时不得转移默认 execution ownership。若 Account fact 已提交而 Product Control durable scrub 仍失败，保留旧 Product Control execution 并关闭新的 Task/Schedule admission，不回滚另一个 owner 已提交的 Account 事务。
+Schedule scrub 明确失败或 outcome unknown 时不得提交新的 Account/Execution default，也不得转移默认 execution ownership。所有可失败 scrub 必须位于来源默认值的 committed write 之前；committed write 之后只能执行 no-fail install。
 
 Credential 是 opaque bytes。redaction 必须覆盖流式跨 chunk 与 UTF-8 codepoint 边界；多个 credential 前缀重叠时采用最长匹配，不能因替换 secret 产生非法 UTF-8 产品事实。credential、locator、Authorization header 和可重建 secret 的 metadata 不进入 Bridge、Renderer、日志、产品历史或 checkpoint record。
 
@@ -159,7 +188,7 @@ Application 关闭 Product 路径时必须遵守以下顺序：
 3. 取消 queued/running Product jobs，join Executor，并等待 Task access、worker reference 与 aggregate completion quiescent；
 4. 停止 Product 对 Agent 的新调用，再由 Agent 执行其完整 Runtime shutdown；
 5. 完成最终 event drain 与 lifecycle sync，才释放残留 attachment、execution authority、aggregate 和 Product Control；
-6. Account committed shutdown effect 取消自身 timer、join attempt worker 并清空平台 port 后，Application 才释放对应平台 binding。
+6. Execution 停止新管理命令、join 连接测试并释放 credential vault port；Account committed shutdown effect 取消自身 timer、join attempt worker 并清空 Account 平台 port；随后 Application 才释放两个彼此独立的平台 binding。
 
 Agent Session、callback、UI request、event pump、close race、错误映射和 Agent Runtime 内部销毁顺序只由[AgentCore 集成契约](agentcore-integration.md)定义；Product/Application 不得拆开或替代 Agent-owned shutdown fence。
 

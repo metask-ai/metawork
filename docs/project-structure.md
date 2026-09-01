@@ -20,15 +20,16 @@
 | `src/app.zig`、`src/app/` | Application | Native SDK composition、平台 capability、资源生命周期和跨 owner 编排 |
 | `src/product/account.zig`、`src/product/account/` | Account | Account public module 与内部 aggregate |
 | `src/product/control.zig`、`src/product/control/` | Product Control | Product composition、shared execution 与跨 aggregate 编排 |
+| `src/product/execution/` | Product Control 持有的 Execution aggregate | Product 通用 Protocol/ExecutionConfig 纯合同、Model Connection registry、credential port 与恢复；不形成新的顶层 owner |
 | `src/product/{mcp,schedule,skill,task,workspace}.zig` 及同名目录 | Product Control 持有的 aggregate | 各自发布窄 public module，不形成新的顶层 owner |
 | `src/agent.zig`、`src/agent/` | Agent | AgentCore integration、Runtime、Session、Completion 与 callback/event boundary |
 | `src/bridge.zig`、`src/bridge/` | Bridge | Renderer command authority、wire decode 与 ProductDelivery transport |
 | `src/storage.zig`、`src/storage/` | Storage | backend-independent SQL contract、backend 与 conformance |
 | `src/automation.zig`、`src/automation/` | Automation capability | compile-time authority selection，不形成产品 owner |
 | `src/native_sdk_compat/` | Application | 已登记 Native SDK 缺口的窄 compatibility seam，不形成通用平台层 |
-| `src/product_identity.zig` | `app.zon`-derived shared leaf | 把 build-time artifact identity 投影给 Application 及 Account/MCP credential boundary，不形成领域 owner |
+| `src/product_identity.zig` | `app.zon`-derived shared leaf | 把 build-time artifact identity 投影给 Application 及 Execution/Account/MCP credential boundary，不形成领域 owner |
 
-`src/product/account/contract.zig` 是 Account 发布给相邻 owner 的纯合同，不是第三个产品 owner。`src/product/` 只是 Account、Product Control 及其 aggregate 的目录归属，不发布统一 Product facade。
+`src/product/execution/contract.zig` 是 Product Control 发布给 Account、Task、Schedule 与相邻边界的纯执行合同；`src/product/account/contract.zig` 只发布 Account 合同。二者都不是新的顶层产品 owner。`src/product/` 只是 Account、Product Control 及其 aggregate 的目录归属，不发布统一 Product facade。
 
 每个 `*.zig` module root 只显式发布消费者需要的类型、函数或窄 namespace。内部文件不得通过无边界 `usingnamespace`、barrel 或 forwarding facade 重新暴露；build graph 中为隔离测试或依赖形成的 leaf module 不因此取得新的 owner 身份。
 
@@ -72,9 +73,10 @@ application -> account, product control, agent, bridge, automation, Native SDK
 application -> native_sdk_compat
 application -> product identity
 bridge -> product control, account contract, Native SDK transport contract
-product control -> agent, account contract
-account -> account contract
-account credential boundary -> product identity
+product control -> agent, account contract, execution contract
+account -> account contract, execution contract
+task, schedule -> execution contract
+execution, account credential boundary -> product identity through Application adapters
 agent -> Metask AgentCore bundle SDK
 automation -> bridge policy, account contract, Native SDK policy types
 storage backend -> SQLite amalgamation
@@ -82,7 +84,7 @@ storage backend -> SQLite amalgamation
 
 Application 只做 composition、capability 注入、资源生命周期和跨 owner 调用顺序，不读取领域内部状态形成 policy。`app/`、`product/`、`agent/` 与 `bridge/` 的下层 owner 都不得反向导入 Application 实现。
 
-Product Control 可以消费 Agent 和 Account 的纯合同，但不得导入 AgentCore SDK、Account Runtime、Bridge 或 Renderer。Bridge 可以消费 Product Control public surface、Account 脱敏合同与 Native SDK transport contract，但不得持有 Account Runtime、AgentCore handle、`PlatformServices`、OS handle 或具体平台实现。Agent 不得导入 Product Control、Bridge、Application 或 Renderer。`product_identity.zig` 只消费 `app.zon` manifest 与 build-time artifact option；Application 和 Account/MCP credential boundary 可以读取其派生 identity，但它不得反向依赖领域模块。Storage contract 不依赖 Product、Application、Native SDK 或 SQLite C 类型；只有 concrete backend 可以依赖 SQLite。
+Product Control 可以消费 Agent、Account 与 Execution 的纯合同，但不得导入 AgentCore SDK、Account Runtime、Bridge 或 Renderer。Execution contract/registry/runtime 不得反向导入 Account；Task 与 Schedule 不得通过 Account 取得执行类型。Bridge 可以消费 Product Control public surface、Execution command/view、Account 脱敏合同与 Native SDK transport contract，但不得持有 Account Runtime、AgentCore handle、`PlatformServices`、OS handle 或具体平台实现。Agent 不得导入 Product Control、Bridge、Application 或 Renderer。`product_identity.zig` 只消费 `app.zon` manifest 与 build-time artifact option；Application 的 Execution/Account/MCP credential adapter 可以读取其派生 identity，但它不得反向依赖领域模块。Storage contract 不依赖 Product、Application、Native SDK 或 SQLite C 类型；只有 concrete backend 可以依赖 SQLite。
 
 `src/native_sdk_compat/` 中每项 seam 必须由 Application 显式组装，只暴露对应缺口所需的窄 capability。它不得成为 Native SDK adapter、Desktop Interface、通用 facade 或下层 owner 的反向依赖入口；SDK 提供等价正式能力并完成验收后，应删除对应 seam、allowlist 和专用验证。
 

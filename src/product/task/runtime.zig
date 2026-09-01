@@ -5,7 +5,7 @@
 
 const std = @import("std");
 const agent = @import("metawork_agent");
-const account_contract = @import("metawork_account_contract");
+const execution_contract = @import("metawork_product_execution_contract");
 const task_state = @import("product_task_state");
 const task_persistence = @import("product_task_persistence");
 const task_policy = @import("product_task_policy");
@@ -333,7 +333,7 @@ pub const RecoveryStartInput = struct {
     canonical_user_home: []const u8,
     workspace_trust: RecoveryWorkspaceTrust,
     workspace_kind: recovery_job.WorkspaceKind,
-    execution: account_contract.ExecutionConfigInput,
+    execution: execution_contract.ConfigInput,
     agent_runtime: *agent.Runtime,
     checkpoint_store: *checkpoint_store.FileStore,
     checkpoint_limits: agent.CheckpointLimits,
@@ -394,7 +394,7 @@ pub const CreateWorkspaceTrust = union(enum) {
 
 pub const CreateTaskInput = struct {
     agent_runtime: *agent.Runtime,
-    execution: account_contract.ExecutionConfigInput,
+    execution: execution_contract.ConfigInput,
     protocol: task_state.Protocol,
     model: []const u8,
     permission_profile: task_state.PermissionProfile,
@@ -530,7 +530,7 @@ pub const RecoveryAuthorityQuery = struct {
     workspace_epoch: u64,
     target_execution_generation: u64,
     task_model: []const u8,
-    protocol: account_contract.Protocol,
+    protocol: execution_contract.Protocol,
 };
 
 pub const RecoveryExternalAuthority = struct {
@@ -2510,7 +2510,7 @@ pub const Runtime = struct {
     pub fn testExecutionInput(
         self: *const Runtime,
         task_id: u64,
-    ) error{ UnknownTask, ExecutionUnavailable, ExecutionGenerationMismatch }!account_contract.ExecutionConfigInput {
+    ) error{ UnknownTask, ExecutionUnavailable, ExecutionGenerationMismatch }!execution_contract.ConfigInput {
         std.debug.assert(@import("builtin").is_test);
         const task = self.findConst(task_id) orelse return error.UnknownTask;
         return taskExecutionInput(task);
@@ -3914,7 +3914,7 @@ fn checkpointMutationPending(
 
 fn taskExecutionInput(
     task: *const task_state.Task,
-) error{ ExecutionUnavailable, ExecutionGenerationMismatch }!account_contract.ExecutionConfigInput {
+) error{ ExecutionUnavailable, ExecutionGenerationMismatch }!execution_contract.ConfigInput {
     const execution = task.runtime.executionConst() orelse
         return error.ExecutionUnavailable;
     const input = execution.input();
@@ -4653,7 +4653,7 @@ test "Task execution owns the service reference and protocol across clone and tr
     defer transferred.deinit();
     const resolved = transferred.input();
     try std.testing.expectEqualStrings("model_connection:service-a", resolved.target.provider_id);
-    try std.testing.expectEqual(account_contract.Protocol.openai_chat_completions, resolved.target.protocol);
+    try std.testing.expectEqual(execution_contract.Protocol.openai_chat_completions, resolved.target.protocol);
     try std.testing.expectEqual(@as(u64, 7), resolved.execution_generation);
 }
 

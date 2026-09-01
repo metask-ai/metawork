@@ -106,7 +106,7 @@ Workspace
 - `Turn` 和 `Run` 通常不直接命名，用当前活动、排队、停止和结果表达。
 - 一项 Task 可以包含多次用户补充和多次执行；停止一次执行不会删除 Task。
 
-当前 Renderer 产品合同为 `metawork.renderer-bridge` 固定 revision 1：`connect` 精确协商后才开放产品路径，snapshot 根节点包含无 secret `capabilities`、`account`、`skillCatalog`、`skillManagement`、`mcp`、`workspaces`、`scheduledTasks` 与 `tasks` 且不维护局部版本；Model Connection projection 位于 `account.modelConnections`，精确默认 identity 位于 `account.selectedModelConnectionId`。Account 只发布 `state`、`catalogState`、Host 判定的 `canCancel` / `canCreateTask`、脱敏 catalog/connection selection 与 generation。Workspace 独立于 Task 发布，durable Task 不携带 Account identity、API Key 元数据或 connection credential locator。快速开发阶段直接原地 hard cut 合同内容，不提供临时形态兼容层或可选字段退路；任何合同类版本标识的变更必须先得到用户显式同意。Agent 内部 Session route identity 不属于 Renderer 产品模型。
+当前 Renderer 产品合同为 `metawork.renderer-bridge` 固定 revision 1：`connect` 精确协商后才开放产品路径，snapshot 根节点包含无 secret `capabilities`、`account`、`skillCatalog`、`skillManagement`、`mcp`、`workspaces`、`scheduledTasks` 与 `tasks` 且不维护局部版本；为保持既有 wire shape，Execution-owned Model Connection projection 位于 `account.modelConnections`，精确默认 identity 位于 `account.selectedModelConnectionId`，该 JSON namespace 不赋予 Account 产品 ownership。Account 只发布 Metask `state`、`catalogState`、`canCancel`、脱敏 catalog/selection 与 generation；Product Control 组合最终 `canCreateTask` 和 Model Connection projection。Workspace 独立于 Task 发布，durable Task 不携带 Account identity、API Key 元数据或 connection credential locator。快速开发阶段直接原地 hard cut 合同内容，不提供临时形态兼容层或可选字段退路；任何合同类版本标识的变更都必须先得到用户显式同意。Agent 内部 Session route identity 不属于 Renderer 产品模型。
 
 ### 3.2 规范术语
 
@@ -661,7 +661,7 @@ New task 页面以 Composer 为绝对主视觉。其上方使用直接的行动�
 
 - New task 始终显示当前默认连接与模型；点击后只列出当前连接的 Host-validated 模型目录；
 - 弹层顶部显示当前连接的脱敏名称与 protocol，并提供 `模型连接设置…`；不得显示完整 secret；
-- 默认连接、Metask API/protocol/credential authority 或 ready Model Connection 的模型变化更新 Account 当前默认 execution generation；只有同一已提交 Metask API 下修改默认模型时才只更新 Account preference、保持 generation 不变。两类默认变化都不热替换已有 live Task；detached 历史 Task 可在 §6.4 的 Conversation restore 中采用同 protocol、可承载其 pinned model 的当前 credential authority，并通过窄 binding adoption 提交新 generation，任意 protocol/model 变化仍只能走未来的显式 rebind；
+- 默认连接、Metask API/protocol/credential authority 或 ready Model Connection 的模型变化更新 Product Control 当前默认 execution generation；只有同一已提交 Metask API 下修改默认模型时才只更新 Account preference、保持 generation 不变。两类默认变化都不热替换已有 live Task；detached 历史 Task 可在 §6.4 的 Conversation restore 中采用同 protocol、可承载其 pinned model 的当前 credential authority，并通过窄 binding adoption 提交新 generation，任意 protocol/model 变化仍只能走未来的显式 rebind；
 - 已有 Task 的 Composer 显示当前 binding epoch 的模型事实，历史按 epoch 保留原模型；exact Metask authority 成立时模型菜单列出该 catalog 的当前候选，即使 pinned model 已离开目录也允许切换到有效候选。authority 不一致或 Task 使用 Model Connection 时只显示 pinned model 和原因，不展示必然被 Host 拒绝的菜单；
 - 正在更新默认模型时只禁用相关选择和发送 admission，不冻结导航、历史阅读或其他 Task；
 - 模型不可用时说明原因并给出刷新或设置入口，不能留下永久 disabled selector。

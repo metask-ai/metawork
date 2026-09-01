@@ -3,12 +3,12 @@
 
 const std = @import("std");
 const native_sdk = @import("native_sdk");
-const account_contract = @import("metawork_account_contract");
+const execution_contract = @import("metawork_product_execution_contract");
 
 pub const enabled = false;
 
 pub const ExecutionFixture = struct {
-    protocol: account_contract.Protocol,
+    protocol: execution_contract.Protocol,
     credential: []const u8,
     model: []const u8,
     base_url: []const u8,

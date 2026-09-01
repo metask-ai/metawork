@@ -2,8 +2,9 @@ const std = @import("std");
 const builtin = @import("builtin");
 const agent = @import("metawork_agent");
 const account_contract = @import("metawork_account_contract");
+const execution_contract = @import("metawork_product_execution_contract");
 const account_api = @import("metawork_account");
-const account_ports = @import("account_ports");
+const execution_ports = @import("product_execution_ports");
 const account_store = @import("account_credential_store");
 const control_ports = @import("metawork_product_control_ports");
 const test_control = if (builtin.is_test) @import("lifecycle_fixture").product_control else struct {};
@@ -24,10 +25,10 @@ const ModelConnectionProbeJob = struct {
     io: std.Io,
     completion_transport: agent.CompletionTransport,
     notifier: ModelConnectionProbeNotifier,
-    selection: account_contract.ModelConnectionSelectionCommand,
+    selection: execution_contract.ModelConnectionSelectionCommand,
     connection_id: []u8,
     model_id: []u8,
-    execution: ?account_contract.OwnedExecutionConfig,
+    execution: ?execution_contract.OwnedConfig,
     cancellation: agent.ProviderProbeCancellation = .{},
     succeeded: bool = false,
     finished: std.atomic.Value(bool) = .init(false),
@@ -38,8 +39,8 @@ const ModelConnectionProbeJob = struct {
         io: std.Io,
         completion_transport: agent.CompletionTransport,
         notifier: ModelConnectionProbeNotifier,
-        command_value: account_contract.ModelConnectionTestCommand,
-        execution: *account_contract.OwnedExecutionConfig,
+        command_value: execution_contract.ModelConnectionTestCommand,
+        execution: *execution_contract.OwnedConfig,
     ) std.mem.Allocator.Error!*ModelConnectionProbeJob {
         const self = try allocator.create(ModelConnectionProbeJob);
         errdefer allocator.destroy(self);
@@ -111,7 +112,7 @@ const ModelConnectionProbeJob = struct {
         allocator.destroy(self);
     }
 
-    fn command(self: *const ModelConnectionProbeJob) account_contract.ModelConnectionTestCommand {
+    fn command(self: *const ModelConnectionProbeJob) execution_contract.ModelConnectionTestCommand {
         return .{
             .selection = .{
                 .connection_id = self.connection_id,
@@ -164,30 +165,39 @@ pub const Coordinator = struct {
         return .{ .context = self, .submit_fn = submitCommand };
     }
 
+    pub fn modelConnectionCommandSink(self: *Coordinator) execution_contract.CommandSink {
+        return .{ .context = self, .submit_fn = submitModelConnectionCommand };
+    }
+
+    fn submitModelConnectionCommand(
+        context: *anyopaque,
+        command: execution_contract.ModelConnectionCommand,
+    ) execution_contract.CommandResult {
+        const self: *Coordinator = @ptrCast(@alignCast(context));
+        return self.submitModelConnection(command);
+    }
+
     /// Application-only continuation after a trusted native secret capture.
     /// The secret is borrowed synchronously and never enters Bridge or a
-    /// product projection. Account owns the recoverable credential/registry
-    /// transaction; Workbench observes only the committed secret-free fact.
+    /// product projection. Product Execution owns the recoverable credential
+    /// and registry transaction; Product Control observes only its committed
+    /// secret-free projection.
     pub fn createModelConnectionWithCapturedCredential(
         self: *Coordinator,
         secret: []const u8,
-        spec: account_contract.ModelConnectionSpec,
+        spec: execution_contract.ModelConnectionSpec,
         model_id: []const u8,
         model_display_name: []const u8,
-    ) account_contract.AccountCommandResult {
+    ) execution_contract.CommandResult {
         self.assertMainThread();
-        const result = self.runtime.createModelConnectionWithCredential(
+        const result = self.control.createModelConnectionWithCredential(
             secret,
             spec,
             model_id,
             model_display_name,
         );
         if (!result.accepted) return result;
-        self.control.commitAccountFactNoFail(.{
-            .kind = .model_connections_changed,
-            .view = self.runtime.view(),
-        });
-        self.control.finishAccountCommitNoFail();
+        self.control.finishExecutionCommitNoFail();
         return result;
     }
 
@@ -197,8 +207,6 @@ pub const Coordinator = struct {
     ) account_contract.AccountCommandResult {
         const self: *Coordinator = @ptrCast(@alignCast(context));
         self.assertMainThread();
-        if (command == .model_connection)
-            return self.submitModelConnection(command.model_connection);
         if (command == .activate_metask and
             !self.control.modelConnectionExecutionSelected())
             return .rejected(.invalid_state);
@@ -216,8 +224,8 @@ pub const Coordinator = struct {
 
     fn submitModelConnection(
         self: *Coordinator,
-        command: account_contract.ModelConnectionCommand,
-    ) account_contract.AccountCommandResult {
+        command: execution_contract.ModelConnectionCommand,
+    ) execution_contract.CommandResult {
         const mutation_connection_id: ?[]const u8 = switch (command) {
             .update => |value| value.selection.connection_id,
             .remove => |value| value.connection_id,
@@ -230,10 +238,10 @@ pub const Coordinator = struct {
             return self.startModelConnectionProbe(command.test_connection);
         if (command == .select_default) {
             const value = command.select_default;
-            const execution_generation = self.runtime.nextExecutionGeneration(
-                self.control.accountView().execution_generation,
+            const execution_generation = self.control.nextExecutionGeneration(
+                self.control.executionGeneration(),
             ) catch return .rejected(.local_resource_exhausted);
-            var owned_execution = switch (self.runtime.prepareModelConnectionExecution(
+            var owned_execution = switch (self.control.prepareModelConnectionExecution(
                 value.selection,
                 value.model_id,
                 execution_generation,
@@ -251,28 +259,18 @@ pub const Coordinator = struct {
             if (self.control.executionReplacementPending())
                 return .rejected(.operation_in_progress);
             self.control.beginDefaultExecutionReplacement() catch |err|
-                return .rejected(replacementErrorCode(err));
+                return .rejected(replacementExecutionError(err));
             var replacement_started = true;
             defer if (replacement_started)
                 self.endActiveReplacementNoFail();
-            const result = self.runtime.submitModelConnectionCommandWithExecutionGeneration(
+            self.control.prepareExecutionInstall(
+                owned_execution.input(),
+            ) catch return .rejected(.persistence_unavailable);
+            const result = self.control.submitModelConnectionCommandWithExecutionGeneration(
                 command,
                 owned_execution.input().execution_generation,
             );
             if (!result.accepted) return result;
-            self.control.commitAccountFactNoFail(.{
-                .kind = .model_connections_changed,
-                .view = self.runtime.view(),
-            });
-            self.control.prepareExecutionInstall(
-                owned_execution.input(),
-            ) catch {
-                owned_execution.deinit();
-                replacement_started = false;
-                self.endActiveReplacementNoFail();
-                self.control.finishAccountCommitNoFail();
-                return result;
-            };
             self.control.installModelConnectionExecutionNoFail(
                 &owned_execution,
                 &prepared_binding,
@@ -280,37 +278,33 @@ pub const Coordinator = struct {
             prepared_binding_owned = false;
             replacement_started = false;
             self.endActiveReplacementNoFail();
-            self.control.finishAccountCommitNoFail();
+            self.control.finishExecutionCommitNoFail();
             return result;
         }
-        const result = self.runtime.submitModelConnectionCommand(command);
+        const result = self.control.submitModelConnectionCommand(command);
         if (!result.accepted) return result;
-        self.control.commitAccountFactNoFail(.{
-            .kind = .model_connections_changed,
-            .view = self.runtime.view(),
-        });
-        self.control.finishAccountCommitNoFail();
+        self.control.finishExecutionCommitNoFail();
         return result;
     }
 
     fn startModelConnectionProbe(
         self: *Coordinator,
-        command: account_contract.ModelConnectionTestCommand,
-    ) account_contract.AccountCommandResult {
+        command: execution_contract.ModelConnectionTestCommand,
+    ) execution_contract.CommandResult {
         const notifier = self.model_connection_probe_notifier orelse
-            return .rejected(.model_connection_test_unavailable);
+            return .rejected(.test_unavailable);
         const completion_transport = self.completion_transport orelse
-            return .rejected(.model_connection_test_unavailable);
+            return .rejected(.test_unavailable);
         if (self.model_connection_probe_job != null)
             return .rejected(.operation_in_progress);
-        const execution_generation = self.runtime.nextExecutionGeneration(
-            self.control.accountView().execution_generation,
+        const execution_generation = self.control.nextExecutionGeneration(
+            self.control.executionGeneration(),
         ) catch return .rejected(.local_resource_exhausted);
-        var execution = self.runtime.resolveModelConnectionProbeExecution(
+        var execution = self.control.resolveModelConnectionProbeExecution(
             command.selection,
             command.model_id,
             execution_generation,
-        ) catch return .rejected(.model_connection_test_unavailable);
+        ) catch return .rejected(.test_unavailable);
         var execution_owned = true;
         defer if (execution_owned) execution.deinit();
         const allocator = std.heap.c_allocator;
@@ -324,25 +318,17 @@ pub const Coordinator = struct {
         ) catch
             return .rejected(.local_resource_exhausted);
         execution_owned = false;
-        const result = self.runtime.submitModelConnectionCommand(.{
+        const result = self.control.submitModelConnectionCommand(.{
             .test_connection = job.command(),
         });
         if (!result.accepted) {
             job.deinit();
             return result;
         }
-        self.control.commitAccountFactNoFail(.{
-            .kind = .model_connections_changed,
-            .view = self.runtime.view(),
-        });
-        self.control.finishAccountCommitNoFail();
+        self.control.finishExecutionCommitNoFail();
         job.start() catch {
-            _ = self.runtime.completeModelConnectionTest(job.command(), false);
-            self.control.commitAccountFactNoFail(.{
-                .kind = .model_connections_changed,
-                .view = self.runtime.view(),
-            });
-            self.control.finishAccountCommitNoFail();
+            _ = self.control.completeModelConnectionTest(job.command(), false);
+            self.control.finishExecutionCommitNoFail();
             job.deinit();
             return .rejected(.local_resource_exhausted);
         };
@@ -353,8 +339,14 @@ pub const Coordinator = struct {
     pub fn start(
         self: *Coordinator,
         platform: account_api.PlatformPorts,
+        execution_directory: []const u8,
+        credential_vault: execution_ports.CredentialVault,
     ) void {
         self.assertMainThread();
+        self.control.startModelConnections(
+            execution_directory,
+            credential_vault,
+        ) catch self.control.startModelConnectionsUnavailable();
         const result = self.commitPrepared(
             self.runtime.prepareStart(platform),
             .none,
@@ -363,8 +355,19 @@ pub const Coordinator = struct {
         self.restoreModelConnectionDefaultNoFail();
     }
 
+    fn startAccountOnlyForTest(
+        self: *Coordinator,
+        platform: account_api.PlatformPorts,
+    ) void {
+        self.assertMainThread();
+        self.control.startModelConnectionsUnavailable();
+        const result = self.commitPrepared(self.runtime.prepareStart(platform), .none);
+        std.debug.assert(result.accepted);
+    }
+
     pub fn startAutomation(self: *Coordinator) void {
         self.assertMainThread();
+        self.control.startModelConnectionsUnavailable();
         const result = self.commitPrepared(
             self.runtime.prepareAutomationStart(),
             .startup,
@@ -374,6 +377,7 @@ pub const Coordinator = struct {
 
     pub fn startUnavailable(self: *Coordinator) void {
         self.assertMainThread();
+        self.control.startModelConnectionsUnavailable();
         const result = self.commitPrepared(
             self.runtime.prepareStartUnavailable(),
             .startup,
@@ -381,14 +385,28 @@ pub const Coordinator = struct {
         std.debug.assert(result.accepted);
     }
 
+    pub fn startWithAccountUnavailable(
+        self: *Coordinator,
+        execution_directory: []const u8,
+        credential_vault: execution_ports.CredentialVault,
+    ) void {
+        self.assertMainThread();
+        self.control.startModelConnections(
+            execution_directory,
+            credential_vault,
+        ) catch self.control.startModelConnectionsUnavailable();
+        const result = self.commitPrepared(
+            self.runtime.prepareStartUnavailable(),
+            .startup,
+        );
+        std.debug.assert(result.accepted);
+        self.restoreModelConnectionDefaultNoFail();
+    }
+
     fn restoreModelConnectionDefaultNoFail(self: *Coordinator) void {
-        const binding = self.runtime.modelConnectionDefaultBinding() orelse return;
-        var execution = (self.runtime.resolveDefaultModelConnectionExecution() catch return) orelse {
-            self.control.commitAccountFactNoFail(.{
-                .kind = .model_connections_changed,
-                .view = self.runtime.view(),
-            });
-            self.control.finishAccountCommitNoFail();
+        const binding = self.control.modelConnectionDefaultBinding() orelse return;
+        var execution = (self.control.resolveDefaultModelConnectionExecution() catch return) orelse {
+            self.control.finishExecutionCommitNoFail();
             return;
         };
         defer execution.deinit();
@@ -402,14 +420,10 @@ pub const Coordinator = struct {
         self.control.beginDefaultExecutionReplacement() catch return;
         var replacement_started = true;
         defer if (replacement_started) self.endActiveReplacementNoFail();
-        self.control.commitAccountFactNoFail(.{
-            .kind = .model_connections_changed,
-            .view = self.runtime.view(),
-        });
         self.control.prepareExecutionInstall(execution.input()) catch {
             replacement_started = false;
             self.endActiveReplacementNoFail();
-            self.control.finishAccountCommitNoFail();
+            self.control.finishExecutionCommitNoFail();
             return;
         };
         self.control.installModelConnectionExecutionNoFail(
@@ -419,7 +433,7 @@ pub const Coordinator = struct {
         prepared_binding_owned = false;
         replacement_started = false;
         self.endActiveReplacementNoFail();
-        self.control.finishAccountCommitNoFail();
+        self.control.finishExecutionCommitNoFail();
     }
 
     pub fn onTimer(self: *Coordinator, timer_id: u64) bool {
@@ -455,17 +469,11 @@ pub const Coordinator = struct {
         const job = self.model_connection_probe_job orelse return;
         if (!job.finished.load(.acquire)) return;
         job.join();
-        const result = self.runtime.completeModelConnectionTest(
+        const result = self.control.completeModelConnectionTest(
             job.command(),
             job.succeeded,
         );
-        if (result.accepted) {
-            self.control.commitAccountFactNoFail(.{
-                .kind = .model_connections_changed,
-                .view = self.runtime.view(),
-            });
-            self.control.finishAccountCommitNoFail();
-        }
+        if (result.accepted) self.control.finishExecutionCommitNoFail();
         self.model_connection_probe_job = null;
         job.deinit();
     }
@@ -527,7 +535,7 @@ pub const Coordinator = struct {
             {
                 execution.deinit();
             } else if (activates_metask and
-                !self.runtime.clearModelConnectionDefault().accepted)
+                !self.control.clearModelConnectionDefault().accepted)
             {
                 execution.deinit();
             } else {
@@ -621,6 +629,7 @@ pub const Coordinator = struct {
             .none,
         );
         std.debug.assert(result.accepted);
+        self.control.stopModelConnections();
     }
 
     fn assertMainThread(self: *const Coordinator) void {
@@ -632,6 +641,14 @@ fn replacementErrorCode(err: anyerror) account_contract.ErrorCode {
     return switch (err) {
         error.TaskRunning => .execution_in_use,
         error.TaskSessionInUse => .session_in_use,
+        error.ExecutionInUse => .operation_in_progress,
+        else => .local_resource_exhausted,
+    };
+}
+
+fn replacementExecutionError(err: anyerror) execution_contract.ManagementError {
+    return switch (err) {
+        error.TaskRunning => .execution_in_use,
         error.ExecutionInUse => .operation_in_progress,
         else => .local_resource_exhausted,
     };
@@ -710,8 +727,9 @@ test "Application coordinator commits Account Runtime facts into Workbench" {
         std.testing.io,
     );
 
-    var execution = try account_contract.OwnedExecutionConfig.initOwned(
+    var execution = try execution_contract.OwnedConfig.initOwned(
         std.testing.allocator,
+        .metask,
         .anthropic_messages,
         try std.testing.allocator.dupe(u8, "model-1"),
         try std.testing.allocator.dupe(
@@ -842,8 +860,9 @@ test "Application coordinator balances Workbench gate when Account effect admiss
         std.testing.io,
     );
 
-    var execution = try account_contract.OwnedExecutionConfig.initOwned(
+    var execution = try execution_contract.OwnedConfig.initOwned(
         std.testing.allocator,
+        .metask,
         .anthropic_messages,
         try std.testing.allocator.dupe(u8, "model-1"),
         try std.testing.allocator.dupe(
@@ -940,13 +959,6 @@ const FakePlatform = struct {
                 .start_fn = startTimer,
                 .cancel_fn = cancelTimer,
             },
-            .model_credentials = .{
-                .context = self,
-                .generate_slot_fn = generateModelSlot,
-                .store_fn = storeModelCredential,
-                .get_fn = getModelCredential,
-                .delete_fn = deleteModelCredential,
-            },
         };
     }
 
@@ -1005,34 +1017,6 @@ const FakePlatform = struct {
     fn cancelTimer(_: *anyopaque, _: u64) anyerror!void {}
 
     fn openExternalUrl(_: *anyopaque, _: []const u8) anyerror!void {}
-
-    fn generateModelSlot(
-        _: *anyopaque,
-        _: *[account_ports.model_connection_slot_bytes]u8,
-    ) account_store.StoreError!void {
-        return error.WriteFailed;
-    }
-
-    fn storeModelCredential(
-        _: *anyopaque,
-        _: []const u8,
-        _: []const u8,
-    ) account_store.StoreError!void {
-        return error.WriteFailed;
-    }
-
-    fn getModelCredential(
-        _: *anyopaque,
-        _: []const u8,
-        _: []u8,
-    ) account_store.StoreError!?[]const u8 {
-        return null;
-    }
-
-    fn deleteModelCredential(
-        _: *anyopaque,
-        _: []const u8,
-    ) account_store.StoreError!void {}
 };
 
 const FakeMetask = struct {
@@ -1189,7 +1173,7 @@ test "restored login drives automatic key and model defaults end to end" {
 
     var fake_platform: FakePlatform = .{};
     fake_platform.seed("stored-refresh-token");
-    coordinator.start(fake_platform.ports());
+    coordinator.startAccountOnlyForTest(fake_platform.ports());
 
     // Phase 1: the automatic continuation must land the first key and the
     // first model without any user action.
@@ -1314,7 +1298,7 @@ test "relaunch with persisted selection restores the saved execution" {
             std.Thread.getCurrentId(),
             std.testing.io,
         );
-        coordinator.start(fake_platform.ports());
+        coordinator.startAccountOnlyForTest(fake_platform.ports());
         const settled = pumpUntilReady(&coordinator, &account_runtime, "boot1");
         try std.testing.expectEqual(
             account_contract.CatalogState.ready,
@@ -1362,7 +1346,7 @@ test "relaunch with persisted selection restores the saved execution" {
             std.Thread.getCurrentId(),
             std.testing.io,
         );
-        coordinator.start(fake_platform.ports());
+        coordinator.startAccountOnlyForTest(fake_platform.ports());
         const settled = pumpUntilReady(&coordinator, &account_runtime, "boot2");
         try std.testing.expectEqual(
             account_contract.AccountState.authenticated,
@@ -1447,7 +1431,7 @@ test "relaunch with persisted selection restores the saved execution" {
             std.Thread.getCurrentId(),
             std.testing.io,
         );
-        coordinator.start(fake_platform.ports());
+        coordinator.startAccountOnlyForTest(fake_platform.ports());
         const restored = pumpUntilReady(&coordinator, &account_runtime, "boot3");
         try std.testing.expectEqualStrings("2", restored.selected_api_key_id);
         try std.testing.expectEqualStrings("gpt-5.6-sol", restored.selected_model);
@@ -1508,7 +1492,7 @@ test "broken first key parks the catalog and a manual switch recovers" {
         std.Thread.getCurrentId(),
         std.testing.io,
     );
-    coordinator.start(fake_platform.ports());
+    coordinator.startAccountOnlyForTest(fake_platform.ports());
 
     // The automatic continuation picks key 1 whose model catalog fails.
     const parked = pumpUntilReady(&coordinator, &account_runtime, "broken");
