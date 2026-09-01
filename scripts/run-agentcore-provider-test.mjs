@@ -6,6 +6,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   symlink,
   writeFile,
@@ -388,8 +389,8 @@ const server = createServer((request, response) => {
   });
 });
 
-const scratch = await mkdtemp(
-  path.join(tmpdir(), "metawork-agentcore-provider-test-"),
+const scratch = await realpath(
+  await mkdtemp(path.join(tmpdir(), "metawork-agentcore-provider-test-")),
 );
 try {
   const serverRoot = await new Promise((resolve, reject) => {
