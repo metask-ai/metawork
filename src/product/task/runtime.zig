@@ -3927,6 +3927,12 @@ fn recordEventFileChanges(
             continue;
         };
         owned_path = path_projection.value;
+        if (path_projection.truncated) {
+            context.effects.text.discardCandidate(owned_path.?);
+            context.effects.text.discardCandidate(owned_id.?);
+            changed = markFileChangesIncomplete(run) or changed;
+            continue;
+        }
         var from_redacted = false;
         if (from_display_path) |from| {
             const from_projection = context.effects.text.project(
@@ -3941,6 +3947,13 @@ fn recordEventFileChanges(
                 continue;
             };
             owned_from = from_projection.value;
+            if (from_projection.truncated) {
+                context.effects.text.discardCandidate(owned_from.?);
+                context.effects.text.discardCandidate(owned_path.?);
+                context.effects.text.discardCandidate(owned_id.?);
+                changed = markFileChangesIncomplete(run) or changed;
+                continue;
+            }
             from_redacted = from_projection.redacted;
         }
         run.file_changes[slot] = .{

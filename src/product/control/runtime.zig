@@ -6867,6 +6867,31 @@ fn testLimits() Limits {
     };
 }
 
+fn testTaskPersistenceLimits() task_persistence.Limits {
+    const limits = testLimits();
+    return .{
+        .max_workspaces = limits.max_workspaces,
+        .max_tasks = limits.max_tasks,
+        .max_runs_per_task = limits.max_runs_per_task,
+        .max_compacts_per_task = limits.max_compacts_per_task,
+        .max_tools_per_run = limits.max_tools_per_run,
+        .max_commentary_segments_per_run = limits.max_commentary_segments_per_run,
+        .max_file_refs_per_tool = limits.max_file_refs_per_tool,
+        .max_file_changes_per_run = limits.max_file_changes_per_run,
+        .max_ui_history_per_task = limits.max_ui_history_per_task,
+        .max_workspace_bytes = limits.max_workspace_bytes,
+        .max_task_title_bytes = limits.max_task_title_bytes,
+        .max_user_message_bytes = limits.max_user_message_bytes,
+        .max_assistant_message_bytes = limits.max_assistant_message_bytes,
+        .max_tool_field_bytes = limits.max_tool_field_bytes,
+        .max_file_ref_field_bytes = limits.max_file_ref_field_bytes,
+        .max_file_change_field_bytes = limits.max_file_change_field_bytes,
+        .max_file_change_diff_bytes = limits.max_file_change_diff_bytes,
+        .max_execution_model_bytes = account_contract.Limits.model_id_bytes,
+        .max_terminal_diagnostic_bytes = limits.max_terminal_diagnostic_bytes,
+    };
+}
+
 fn installTestExecution(control: *Runtime) !void {
     var execution = try account_contract.OwnedExecutionConfig.initOwned(
         std.testing.allocator,
@@ -7686,11 +7711,19 @@ test "Task state round trip restores product history without fabricating a Sessi
         defer tool_result.deinit();
         try source.applyEvent(&tool_result);
         try std.testing.expectEqual(@as(usize, 2), persistence.commits);
+        var file_changes = try testEnvelope(
+            3,
+            7,
+            "{\"file_changes\":{\"id\":\"tool-restore\",\"name\":\"Edit\",\"changes\":[{\"locator\":{\"workspace_path\":\"src/restored.zig\"},\"kind\":\"modified\",\"status\":\"applied\",\"tool\":\"Edit\",\"tool_use_id\":\"tool-restore\",\"agent_depth\":0,\"before_bytes\":1,\"after_bytes\":2,\"diff_complete\":true}],\"overflow\":false,\"lost\":false}}",
+        );
+        defer file_changes.deinit();
+        try source.applyEvent(&file_changes);
+        try std.testing.expectEqual(@as(usize, 3), persistence.commits);
         const persisted_run = &source.task_runtime.tasks[0].?.durable.runs[0].?;
         persisted_run.assistant_output_kind = .final;
         persisted_run.assistant_output_start = 0;
         try source.commitTaskState();
-        try std.testing.expectEqual(@as(usize, 3), persistence.commits);
+        try std.testing.expectEqual(@as(usize, 4), persistence.commits);
         try std.testing.expect(persistence.len != 0);
         var verified = try task_persistence.decode(
             std.testing.allocator,
@@ -7783,6 +7816,43 @@ test "Task state round trip restores product history without fabricating a Sessi
         );
     }
 
+    const source_history = try std.testing.allocator.dupe(
+        u8,
+        persistence.storage[0..persistence.len],
+    );
+    defer std.testing.allocator.free(source_history);
+    {
+        const legacy_storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
+        defer std.testing.allocator.free(legacy_storage);
+        var legacy_state = try task_persistence.decode(
+            std.testing.allocator,
+            source_history,
+            testTaskPersistenceLimits(),
+        );
+        defer legacy_state.deinit();
+        const previous_observation = legacy_state.value.tasks[0].runs[0].file_change_observation;
+        const previous_changes = legacy_state.value.tasks[0].runs[0].file_changes;
+        legacy_state.value.tasks[0].runs[0].file_change_observation = null;
+        legacy_state.value.tasks[0].runs[0].file_changes = null;
+        const legacy_bytes = try task_persistence.encode(legacy_storage, legacy_state.value);
+        legacy_state.value.tasks[0].runs[0].file_change_observation = previous_observation;
+        legacy_state.value.tasks[0].runs[0].file_changes = previous_changes;
+        var legacy_restore = try Runtime.init(
+            std.testing.allocator,
+            std.testing.io,
+            &test_agent_runtime,
+            testLimits(),
+            .{ .task_persistence = persistence.capability(legacy_bytes) },
+        );
+        defer legacy_restore.deinit();
+        const legacy_task = legacy_restore.task_runtime.find(3) orelse
+            return error.TestUnexpectedResult;
+        const legacy_run = findRun(legacy_task.durable.runs, 7) orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expect(legacy_run.file_change_observation == null);
+        for (legacy_run.file_changes) |change| try std.testing.expect(change == null);
+    }
+
     var restored = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
@@ -7790,7 +7860,7 @@ test "Task state round trip restores product history without fabricating a Sessi
         testLimits(),
         .{
             .task_persistence = persistence.capability(
-                persistence.storage[0..persistence.len],
+                source_history,
             ),
         },
     );
@@ -7813,6 +7883,11 @@ test "Task state round trip restores product history without fabricating a Sessi
     const run = findRun(task.durable.runs, 7) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(RunPhase.interrupted, runPhase(run));
     try std.testing.expectEqual(RunOutcome.interrupted, productTerminalFacts(run).?.outcome);
+    try std.testing.expectEqual(
+        task_test_state.FileChangeObservation.incomplete,
+        run.file_change_observation.?,
+    );
+    try std.testing.expect(run.file_changes_known_loss);
     try std.testing.expectEqual(task_test_state.AssistantOutputKind.final, run.assistant_output_kind.?);
     try std.testing.expectEqual(@as(?usize, 0), run.assistant_output_start);
     try std.testing.expectEqual(null, run.event_projection_failure);
@@ -11539,6 +11614,143 @@ test "Runtime explicitly ignores non-visible file change statuses without loss" 
     try std.testing.expect(run.file_changes[0] == null);
 }
 
+test "Runtime degrades file change record path and diff capacity without rejecting the Run" {
+    {
+        var limits = testLimits();
+        limits.max_file_change_field_bytes = 8;
+        var control = try testRuntimeWithLimits(limits, .{});
+        defer control.deinit();
+        const encoded =
+            "{\"file_changes\":{\"id\":\"tool-path\",\"name\":\"Edit\",\"changes\":[{\"locator\":{\"workspace_path\":\"src/a-long-name.zig\"},\"kind\":\"modified\",\"status\":\"applied\",\"tool\":\"Edit\",\"tool_use_id\":\"tool-path\",\"agent_depth\":0,\"before_bytes\":1,\"after_bytes\":2,\"diff_complete\":true}],\"overflow\":false,\"lost\":false}}";
+        var envelope = try testEnvelope(3, 7, encoded);
+        defer envelope.deinit();
+        try control.applyEvent(&envelope);
+        const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+        try std.testing.expectEqual(
+            task_test_state.FileChangeObservation.incomplete,
+            run.file_change_observation.?,
+        );
+        try std.testing.expect(run.file_changes[0] == null);
+        try std.testing.expect(run.event_projection_failure == null);
+        control.task_runtime.tasks[0].?.runtime.active_run_id = 0;
+        _ = commitTerminal(run, .completed, .completed, null, .reusable, "", false);
+        finalizeTestTerminalEvents(&control);
+        try std.testing.expectEqual(task_test_state.RunOutcome.completed, run.terminal_payload.outcome);
+    }
+
+    {
+        var control = try testRuntime();
+        defer control.deinit();
+        const encoded =
+            "{\"file_changes\":{\"id\":\"tool-records\",\"name\":\"Edit\",\"changes\":[" ++
+            "{\"locator\":{\"workspace_path\":\"a\"},\"kind\":\"created\",\"status\":\"applied\",\"tool\":\"Write\",\"tool_use_id\":\"tool-records\",\"agent_depth\":0,\"before_bytes\":0,\"after_bytes\":1,\"diff_complete\":true}," ++
+            "{\"locator\":{\"workspace_path\":\"b\"},\"kind\":\"modified\",\"status\":\"applied\",\"tool\":\"Edit\",\"tool_use_id\":\"tool-records\",\"agent_depth\":0,\"before_bytes\":1,\"after_bytes\":2,\"diff_complete\":true}," ++
+            "{\"locator\":{\"workspace_path\":\"c\"},\"kind\":\"deleted\",\"status\":\"applied\",\"tool\":\"Delete\",\"tool_use_id\":\"tool-records\",\"agent_depth\":0,\"before_bytes\":1,\"after_bytes\":0,\"diff_complete\":true}" ++
+            "],\"overflow\":false,\"lost\":false}}";
+        var envelope = try testEnvelope(3, 7, encoded);
+        defer envelope.deinit();
+        try control.applyEvent(&envelope);
+        const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+        try std.testing.expect(run.file_changes[0] != null);
+        try std.testing.expect(run.file_changes[1] != null);
+        try std.testing.expectEqual(
+            task_test_state.FileChangeObservation.incomplete,
+            run.file_change_observation.?,
+        );
+        try std.testing.expect(run.event_projection_failure == null);
+    }
+
+    {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
+        var store = try file_change_store.FileStore.init(
+            std.testing.io,
+            root_storage[0..root_len],
+        );
+        defer store.deinit();
+        var limits = testLimits();
+        limits.max_file_change_diff_bytes = 8;
+        var control = try testRuntimeWithLimits(limits, .{
+            .file_change_store = .{ .file_store = &store },
+        });
+        defer control.deinit();
+        const encoded =
+            "{\"file_changes\":{\"id\":\"tool-diff-limit\",\"name\":\"Edit\",\"changes\":[{\"locator\":{\"workspace_path\":\"a\"},\"kind\":\"modified\",\"status\":\"applied\",\"tool\":\"Edit\",\"tool_use_id\":\"tool-diff-limit\",\"agent_depth\":0,\"before_bytes\":1,\"after_bytes\":2,\"unified_diff\":\"123456789\",\"diff_complete\":false}],\"overflow\":false,\"lost\":false}}";
+        var envelope = try testEnvelope(3, 7, encoded);
+        defer envelope.deinit();
+        try control.applyEvent(&envelope);
+        const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+        try std.testing.expect(run.file_changes[0] != null);
+        try std.testing.expect(run.file_changes[0].?.artifact == null);
+        try std.testing.expectEqual(
+            task_test_state.FileChangeObservation.incomplete,
+            run.file_change_observation.?,
+        );
+        try std.testing.expect(run.event_projection_failure == null);
+    }
+}
+
+test "Runtime degrades saturated file change artifact admission without dropping metadata" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
+    var store = try file_change_store.FileStore.init(
+        std.testing.io,
+        root_storage[0..root_len],
+    );
+    defer store.deinit();
+    var limits = testLimits();
+    limits.max_file_changes_per_run = file_change_io.max_in_flight + 1;
+    var control = try testRuntimeWithLimits(limits, .{
+        .file_change_store = .{ .file_store = &store },
+    });
+    defer control.deinit();
+
+    var encoded_storage: [32 * 1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&encoded_storage);
+    try writer.writeAll(
+        "{\"file_changes\":{\"id\":\"tool-artifact-capacity\",\"name\":\"Edit\",\"changes\":[",
+    );
+    for (0..file_change_io.max_in_flight + 1) |index| {
+        if (index != 0) try writer.writeByte(',');
+        try writer.print(
+            "{{\"locator\":{{\"workspace_path\":\"src/{d}.zig\"}},\"kind\":\"modified\",\"status\":\"applied\",\"tool\":\"Edit\",\"tool_use_id\":\"tool-artifact-capacity\",\"agent_depth\":0,\"before_bytes\":1,\"after_bytes\":2,\"unified_diff\":\"diff-{d}\",\"diff_complete\":true}}",
+            .{ index, index },
+        );
+    }
+    try writer.writeAll("],\"overflow\":false,\"lost\":false}}");
+    var envelope = try testEnvelope(3, 7, writer.buffered());
+    defer envelope.deinit();
+    try control.applyEvent(&envelope);
+
+    const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+    try std.testing.expectEqual(
+        @as(u32, file_change_io.max_in_flight),
+        run.pending_file_change_artifacts,
+    );
+    try std.testing.expect(run.file_changes[file_change_io.max_in_flight] != null);
+    try std.testing.expect(run.file_changes[file_change_io.max_in_flight].?.artifact == null);
+    try std.testing.expectEqual(
+        task_test_state.FileChangeObservation.incomplete,
+        run.file_change_observation.?,
+    );
+    try std.testing.expect(run.event_projection_failure == null);
+
+    control.shutdownFileChangeExecutor();
+    control.drainFileChangeCompletions(.{
+        .context = &control,
+        .complete_fn = discardFileChangeDiffCompletion,
+    });
+    try std.testing.expectEqual(@as(u32, 0), run.pending_file_change_artifacts);
+    try std.testing.expectEqual(
+        task_test_state.FileChangeObservation.incomplete,
+        run.file_change_observation.?,
+    );
+}
+
 test "Runtime stores credential-safe file change diffs outside task history" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -11639,8 +11851,68 @@ test "Runtime stores credential-safe file change diffs outside task history" {
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"diffAvailable\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null);
 
+    const stored_identity: file_change_store.Identity = .{
+        .task_id = 3,
+        .run_generation = artifact.run_generation,
+        .change_order = artifact.change_order,
+        .digest = artifact.digest,
+        .byte_size = artifact.byte_size,
+    };
+    store.delete(stored_identity, control.limits.max_file_change_diff_bytes);
     capture = .{};
     switch (control.beginFileChangeDiff(10, 3, 7, change.id)) {
+        .queued => {},
+        .immediate => return error.TestUnexpectedResult,
+    }
+    for (0..1_000) |_| {
+        control.drainFileChangeCompletions(.{
+            .context = &capture,
+            .complete_fn = Capture.receive,
+        });
+        if (capture.calls != 0) break;
+        std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
+    }
+    try std.testing.expectEqual(FileChangeDiffReason.missing, capture.unavailable.?);
+
+    var task_dir = try store.root.openDir(std.testing.io, "3", .{
+        .follow_symlinks = false,
+    });
+    defer task_dir.close(std.testing.io);
+    var blob_name_storage: [160]u8 = undefined;
+    const digest_hex = std.fmt.bytesToHex(stored_identity.digest, .lower);
+    const blob_name = try std.fmt.bufPrint(&blob_name_storage, "{d}-{d}-{s}.diff", .{
+        stored_identity.run_generation,
+        stored_identity.change_order,
+        digest_hex,
+    });
+    var corrupt = try task_dir.createFile(std.testing.io, blob_name, .{
+        .exclusive = true,
+        .resolve_beneath = true,
+    });
+    var corrupt_storage = [_]u8{'x'} ** 1024;
+    try corrupt.writeStreamingAll(
+        std.testing.io,
+        corrupt_storage[0..@intCast(stored_identity.byte_size)],
+    );
+    try corrupt.sync(std.testing.io);
+    corrupt.close(std.testing.io);
+    capture = .{};
+    switch (control.beginFileChangeDiff(11, 3, 7, change.id)) {
+        .queued => {},
+        .immediate => return error.TestUnexpectedResult,
+    }
+    for (0..1_000) |_| {
+        control.drainFileChangeCompletions(.{
+            .context = &capture,
+            .complete_fn = Capture.receive,
+        });
+        if (capture.calls != 0) break;
+        std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
+    }
+    try std.testing.expectEqual(FileChangeDiffReason.corrupt, capture.unavailable.?);
+
+    capture = .{};
+    switch (control.beginFileChangeDiff(12, 3, 7, change.id)) {
         .queued => {},
         .immediate => return error.TestUnexpectedResult,
     }
