@@ -2,7 +2,10 @@ const std = @import("std");
 const builtin = @import("builtin");
 const lifecycle = @import("metawork_agent");
 const account_contract = @import("metawork_account_contract");
-const account_execution = @import("product_control_account_execution");
+const execution_contract = @import("metawork_product_execution_contract");
+const execution_ports = @import("product_execution_ports");
+const execution_runtime = @import("product_execution_runtime");
+const execution_state = @import("product_control_execution_state");
 const executor_impl = @import("product_control_executor");
 const file_preview = @import("product_control_file_preview");
 const product_workspace = @import("metawork_product_workspace");
@@ -138,7 +141,7 @@ const checkpoint_export_limits: lifecycle.CheckpointLimits = .{
     .chunk_bytes = 256 * 1024,
 };
 
-pub const Provider = product_task.Provider;
+pub const Protocol = product_task.Protocol;
 pub const PermissionProfile = product_task.PermissionProfile;
 pub const PermissionInteraction = product_task.PermissionInteraction;
 // Flipped only when every admitted profile is complete across manual and
@@ -198,12 +201,12 @@ pub const CatalogProjection = catalog_snapshot.CatalogProjection;
 
 pub const ExecutionIdentity = struct {
     generation: u64,
-    provider: Provider,
+    protocol: Protocol,
     model: []const u8,
 };
 
 pub const AutomationExecutionInput = struct {
-    provider: account_contract.ProviderKind,
+    protocol: execution_contract.Protocol,
     credential: []const u8,
     model: []const u8,
     base_url: []const u8,
@@ -323,20 +326,20 @@ const account_snapshot_text_bytes: usize =
         (account_contract.Limits.model_id_bytes +
             account_contract.Limits.model_display_name_bytes);
 const model_connection_snapshot_text_bytes: usize =
-    account_contract.Limits.model_connection_entries *
-    (account_contract.Limits.api_key_id_bytes +
-        account_contract.Limits.display_name_bytes +
-        account_contract.Limits.base_url_bytes +
-        account_contract.Limits.model_id_bytes +
-        account_contract.Limits.model_connection_model_entries *
-            (account_contract.Limits.model_id_bytes +
-                account_contract.Limits.model_display_name_bytes));
+    execution_contract.Limits.model_connection_entries *
+    (execution_contract.Limits.instance_id_bytes +
+        execution_contract.Limits.display_name_bytes +
+        execution_contract.Limits.base_url_bytes +
+        execution_contract.Limits.model_id_bytes +
+        execution_contract.Limits.model_connection_model_entries *
+            (execution_contract.Limits.model_id_bytes +
+                execution_contract.Limits.model_display_name_bytes));
 const account_snapshot_overhead: usize = 1024 +
     account_contract.Limits.api_key_entries * 128 +
     account_contract.Limits.model_entries * (128 + model_metadata_snapshot_bytes);
 const model_metadata_snapshot_bytes: usize = 1024;
 const model_connection_snapshot_overhead: usize = 1024 +
-    account_contract.Limits.model_connection_entries * 256;
+    execution_contract.Limits.model_connection_entries * 256;
 const workspace_snapshot_overhead: usize = 512;
 const task_snapshot_overhead: usize = 1024;
 const scheduled_task_snapshot_overhead: usize = 1024;
@@ -761,7 +764,7 @@ const CatalogSnapshot = catalog_snapshot.Snapshot;
 const McpRefreshTestJob = if (builtin.is_test) mcp_testing.RefreshJob else struct {};
 
 pub const PreparedModelConnectionBinding =
-    account_execution.PreparedModelConnectionBinding;
+    execution_state.PreparedModelConnectionBinding;
 
 pub const Runtime = struct {
     allocator: std.mem.Allocator,
@@ -789,7 +792,8 @@ pub const Runtime = struct {
     projection_bytes: usize = 0,
     revision: u64 = 0,
     default_permission_profile: PermissionProfile = .approval_required,
-    account_execution: account_execution.State,
+    execution_state: execution_state.State,
+    model_connections: execution_runtime.Runtime,
     canonical_user_home: ?[]u8,
     model_connection_capabilities: ModelConnectionCapabilities,
     completion_factory: CompletionFactory,
@@ -826,8 +830,14 @@ pub const Runtime = struct {
             limits.max_snapshot_bytes == 0 or
             (worstCaseSnapshotBytes(limits) orelse return error.ProjectionCapacity) > limits.max_snapshot_bytes)
             return error.ProjectionCapacity;
-        var account_execution_state = try account_execution.State.init(allocator);
-        errdefer account_execution_state.deinit();
+        var execution_state_state = try execution_state.State.init(allocator);
+        errdefer execution_state_state.deinit();
+        var model_connections = execution_runtime.Runtime.init(
+            allocator,
+            io,
+            std.Thread.getCurrentId(),
+        );
+        errdefer model_connections.deinit();
         const canonical_user_home = if (configuration.directories.canonical_user_home) |home| home_copy: {
             if (home.len == 0 or !std.fs.path.isAbsolute(home) or
                 !std.unicode.utf8ValidateSlice(home))
@@ -942,7 +952,8 @@ pub const Runtime = struct {
             .executor = executor,
             .preview_executor = preview_executor,
             .preview_lane = preview_lane,
-            .account_execution = account_execution_state,
+            .execution_state = execution_state_state,
+            .model_connections = model_connections,
             .canonical_user_home = canonical_user_home,
             .model_connection_capabilities = configuration.model_connections,
             .completion_factory = configuration.completion_factory,
@@ -1201,7 +1212,7 @@ pub const Runtime = struct {
         value: []const u8,
         codepoint_start: usize,
     ) bool {
-        const current = self.account_execution.credential();
+        const current = self.execution_state.credential();
         if (credentialMayContinueAtCodepoint(value, codepoint_start, current))
             return true;
         const codepoint_len = utf8CodepointLen(value, codepoint_start);
@@ -1368,7 +1379,7 @@ pub const Runtime = struct {
 
     fn executionProjectionRedaction(
         self: *Runtime,
-    ) account_execution.ProjectionRedaction {
+    ) execution_state.ProjectionRedaction {
         return .{
             .context = self,
             .apply_fn = redactExecutionProjection,
@@ -1387,14 +1398,14 @@ pub const Runtime = struct {
         self: *Runtime,
         fact: account_contract.AccountFact,
     ) void {
-        self.account_execution.commitAccountFactNoFail(fact);
+        self.execution_state.commitAccountFactNoFail(fact);
     }
 
     pub fn installExecutionNoFail(
         self: *Runtime,
-        execution: *account_contract.OwnedExecutionConfig,
+        execution: *execution_contract.OwnedConfig,
     ) void {
-        self.account_execution.installMetaskNoFail(
+        self.execution_state.installMetaskNoFail(
             execution,
             self.executionProjectionRedaction(),
         );
@@ -1418,10 +1429,10 @@ pub const Runtime = struct {
 
     pub fn installModelConnectionExecutionNoFail(
         self: *Runtime,
-        execution: *account_contract.OwnedExecutionConfig,
+        execution: *execution_contract.OwnedConfig,
         prepared_binding: *PreparedModelConnectionBinding,
     ) void {
-        self.account_execution.installModelConnectionNoFail(
+        self.execution_state.installModelConnectionNoFail(
             execution,
             prepared_binding,
             self.executionProjectionRedaction(),
@@ -1429,7 +1440,7 @@ pub const Runtime = struct {
     }
 
     pub fn clearExecutionNoFail(self: *Runtime) void {
-        self.account_execution.clearNoFail(self.executionProjectionRedaction());
+        self.execution_state.clearNoFail(self.executionProjectionRedaction());
     }
 
     /// Durably removes every credential that the candidate execution could
@@ -1439,10 +1450,10 @@ pub const Runtime = struct {
     /// admission through the generation mismatch.
     pub fn prepareExecutionInstall(
         self: *Runtime,
-        input: account_contract.ExecutionConfigInput,
+        input: execution_contract.ConfigInput,
     ) Error!void {
         defer self.publishScheduleChangesNoFail();
-        try self.account_execution.prepareInstall(
+        try self.execution_state.prepareInstall(
             input,
             ScheduleCredentialRedaction{ .owner = self },
         );
@@ -1452,12 +1463,16 @@ pub const Runtime = struct {
     /// credential can be cleared and secure-zeroed.
     pub fn prepareExecutionClear(self: *Runtime) Error!void {
         defer self.publishScheduleChangesNoFail();
-        try self.account_execution.prepareClear(
+        try self.execution_state.prepareClear(
             ScheduleCredentialRedaction{ .owner = self },
         );
     }
 
     pub fn finishAccountCommitNoFail(self: *Runtime) void {
+        self.finishDefaultExecutionCommitNoFail();
+    }
+
+    fn finishDefaultExecutionCommitNoFail(self: *Runtime) void {
         if (self.canCreateTask()) {
             _ = self.schedule.refreshBindingNoFail(
                 self.scheduleExecutionBinding(),
@@ -1474,22 +1489,299 @@ pub const Runtime = struct {
         self.bumpRevision();
     }
 
-    pub fn accountView(self: *const Runtime) account_contract.AccountView {
-        return self.account_execution.accountView(!self.shutting_down);
+    pub fn accountView(self: *Runtime) account_contract.AccountView {
+        return self.execution_state.accountView(!self.shutting_down);
+    }
+
+    pub fn startModelConnections(
+        self: *Runtime,
+        absolute_directory: []const u8,
+        vault: execution_ports.CredentialVault,
+    ) execution_runtime.StartError!void {
+        try self.model_connections.start(absolute_directory, vault);
+        self.restoreModelConnectionDefaultNoFail();
+    }
+
+    pub fn startModelConnectionsUnavailable(self: *Runtime) void {
+        self.model_connections.startUnavailable();
+    }
+
+    pub fn stopModelConnections(self: *Runtime) void {
+        self.model_connections.stop();
+    }
+
+    pub fn submitModelConnectionCommand(
+        self: *Runtime,
+        command: execution_contract.ModelConnectionCommand,
+    ) execution_contract.CommandResult {
+        const mutation_connection_id: ?[]const u8 = switch (command) {
+            .update => |value| value.selection.connection_id,
+            .remove => |value| value.connection_id,
+            .create, .test_connection, .select_default => null,
+        };
+        if (mutation_connection_id) |connection_id|
+            if (self.modelConnectionExecutionActive(connection_id))
+                return .rejected(.execution_in_use);
+        if (command == .test_connection)
+            return .rejected(.test_unavailable);
+        if (command == .select_default)
+            return self.selectModelConnectionDefault(command);
+        const result = self.model_connections.submitCommand(command);
+        if (result.accepted) self.finishExecutionCommitNoFail();
+        return result;
+    }
+
+    fn selectModelConnectionDefault(
+        self: *Runtime,
+        command: execution_contract.ModelConnectionCommand,
+    ) execution_contract.CommandResult {
+        const value = command.select_default;
+        const execution_generation = self.nextExecutionGeneration(
+            self.executionGeneration(),
+        ) catch return .rejected(.local_resource_exhausted);
+        var owned_execution = switch (self.prepareModelConnectionExecution(
+            value.selection,
+            value.model_id,
+            execution_generation,
+        )) {
+            .ready => |execution| execution,
+            .rejected => |error_code| return .rejected(error_code),
+        };
+        defer owned_execution.deinit();
+        var prepared_binding = self.prepareModelConnectionBinding(
+            value.selection.connection_id,
+            value.model_id,
+        ) catch return .rejected(.local_resource_exhausted);
+        var prepared_binding_owned = true;
+        defer if (prepared_binding_owned) prepared_binding.deinit();
+        if (self.executionReplacementPending())
+            return .rejected(.operation_in_progress);
+        self.beginDefaultExecutionReplacement() catch |err|
+            return .rejected(replacementExecutionError(err));
+        var replacement_started = true;
+        defer if (replacement_started) self.endExecutionReplacementNoFail();
+        self.prepareExecutionInstall(owned_execution.input()) catch
+            return .rejected(.persistence_unavailable);
+        const result = self.model_connections.submitCommandWithExecutionGeneration(
+            command,
+            owned_execution.input().execution_generation,
+        );
+        if (!result.accepted) return result;
+        self.installModelConnectionExecutionNoFail(
+            &owned_execution,
+            &prepared_binding,
+        );
+        prepared_binding_owned = false;
+        replacement_started = false;
+        self.endExecutionReplacementNoFail();
+        self.finishExecutionCommitNoFail();
+        return result;
+    }
+
+    pub fn beginModelConnectionProbe(
+        self: *Runtime,
+        command: execution_contract.ModelConnectionTestCommand,
+    ) execution_contract.Preparation {
+        const execution_generation = self.nextExecutionGeneration(
+            self.executionGeneration(),
+        ) catch return .{ .rejected = .local_resource_exhausted };
+        var execution = self.resolveModelConnectionProbeExecution(
+            command.selection,
+            command.model_id,
+            execution_generation,
+        ) catch return .{ .rejected = .test_unavailable };
+        const result = self.model_connections.submitCommand(.{
+            .test_connection = command,
+        });
+        if (!result.accepted) {
+            execution.deinit();
+            return .{ .rejected = result.error_code.? };
+        }
+        self.finishExecutionCommitNoFail();
+        return .{ .ready = execution };
+    }
+
+    pub fn completeModelConnectionTest(
+        self: *Runtime,
+        command: execution_contract.ModelConnectionTestCommand,
+        succeeded: bool,
+    ) execution_contract.CommandResult {
+        const result = self.model_connections.completeTest(command, succeeded);
+        if (result.accepted) self.finishExecutionCommitNoFail();
+        return result;
+    }
+
+    pub fn createModelConnectionWithCredential(
+        self: *Runtime,
+        secret: []const u8,
+        spec: execution_contract.ModelConnectionSpec,
+        model_id: []const u8,
+        model_display_name: []const u8,
+    ) execution_contract.CommandResult {
+        const result = self.model_connections.createWithCredential(
+            secret,
+            spec,
+            model_id,
+            model_display_name,
+        );
+        if (result.accepted) self.finishExecutionCommitNoFail();
+        return result;
+    }
+
+    pub fn modelConnectionDefaultBinding(
+        self: *const Runtime,
+    ) ?execution_contract.DefaultBinding {
+        const binding = self.model_connections.defaultBinding() orelse return null;
+        return .{
+            .connection_id = binding.connection_id,
+            .model_id = binding.model_id,
+        };
+    }
+
+    pub fn clearModelConnectionDefault(self: *Runtime) execution_contract.CommandResult {
+        return self.model_connections.clearDefault();
+    }
+
+    pub fn nextExecutionGeneration(self: *Runtime, current: u64) !u64 {
+        return self.model_connections.nextGeneration(current);
+    }
+
+    pub fn prepareModelConnectionExecution(
+        self: *Runtime,
+        selection: execution_contract.ModelConnectionSelectionCommand,
+        model_id: []const u8,
+        generation: u64,
+    ) execution_contract.Preparation {
+        return self.model_connections.prepareExecution(selection, model_id, generation);
+    }
+
+    pub fn resolveModelConnectionProbeExecution(
+        self: *Runtime,
+        selection: execution_contract.ModelConnectionSelectionCommand,
+        model_id: []const u8,
+        generation: u64,
+    ) !execution_contract.OwnedConfig {
+        return self.model_connections.resolveProbeExecution(selection, model_id, generation);
+    }
+
+    pub fn resolveDefaultModelConnectionExecution(
+        self: *Runtime,
+    ) !?execution_contract.OwnedConfig {
+        return self.model_connections.resolveDefaultExecution();
+    }
+
+    fn restoreModelConnectionDefaultNoFail(self: *Runtime) void {
+        const binding = self.modelConnectionDefaultBinding() orelse return;
+        var execution = (self.resolveDefaultModelConnectionExecution() catch return) orelse {
+            self.finishExecutionCommitNoFail();
+            return;
+        };
+        defer execution.deinit();
+        var prepared_binding = self.prepareModelConnectionBinding(
+            binding.connection_id,
+            binding.model_id,
+        ) catch return;
+        var prepared_binding_owned = true;
+        defer if (prepared_binding_owned) prepared_binding.deinit();
+        if (self.executionReplacementPending()) return;
+        self.beginDefaultExecutionReplacement() catch return;
+        var replacement_started = true;
+        defer if (replacement_started) self.endExecutionReplacementNoFail();
+        self.prepareExecutionInstall(execution.input()) catch {
+            replacement_started = false;
+            self.endExecutionReplacementNoFail();
+            self.finishExecutionCommitNoFail();
+            return;
+        };
+        self.installModelConnectionExecutionNoFail(
+            &execution,
+            &prepared_binding,
+        );
+        prepared_binding_owned = false;
+        replacement_started = false;
+        self.endExecutionReplacementNoFail();
+        self.finishExecutionCommitNoFail();
+    }
+
+    pub fn finishExecutionCommitNoFail(self: *Runtime) void {
+        self.finishDefaultExecutionCommitNoFail();
     }
 
     pub fn modelConnectionExecutionActive(
         self: *const Runtime,
         connection_id: []const u8,
     ) bool {
-        return self.account_execution.modelConnectionActive(connection_id);
+        return self.execution_state.modelConnectionActive(connection_id);
     }
 
     pub fn modelConnectionExecutionSelected(self: *const Runtime) bool {
-        return self.account_execution.modelConnectionSelected();
+        return self.execution_state.modelConnectionSelected();
     }
 
-    /// The AgentCore vertical fixture keeps its local provider outside the production Account
+    pub fn metaskActivationAvailable(self: *const Runtime) bool {
+        return self.modelConnectionDefaultBinding() != null;
+    }
+
+    /// Atomically applies a Metask candidate at the Product-owned source
+    /// boundary. The durable Model Connection default is user intent; the
+    /// process-local custom binding is only readiness. All fallible schedule
+    /// redaction completes before an explicit activation clears that durable
+    /// default, after which installation is no-fail.
+    ///
+    /// This function always consumes `execution`.
+    pub fn applyMetaskExecutionCandidate(
+        self: *Runtime,
+        execution: *execution_contract.OwnedConfig,
+        explicit_activation: bool,
+    ) control_ports.MetaskExecutionOutcome {
+        std.debug.assert(self.executionReplacementPending());
+        const custom_default_selected = self.modelConnectionDefaultBinding() != null;
+        const custom_execution_active = self.modelConnectionExecutionSelected();
+        if (custom_execution_active and !custom_default_selected) {
+            execution.deinit();
+            return .failed;
+        }
+        if (custom_default_selected and !explicit_activation) {
+            execution.deinit();
+            return .retained_model_connection;
+        }
+        if (explicit_activation and !custom_default_selected) {
+            execution.deinit();
+            return .failed;
+        }
+        self.prepareExecutionInstall(execution.input()) catch {
+            execution.deinit();
+            return .failed;
+        };
+        if (custom_default_selected and
+            !self.clearModelConnectionDefault().accepted)
+        {
+            execution.deinit();
+            return .failed;
+        }
+        self.installExecutionNoFail(execution);
+        return .applied;
+    }
+
+    /// Applies an Account-originated execution clear without revoking an
+    /// independently selected Model Connection default.
+    pub fn applyMetaskExecutionClear(
+        self: *Runtime,
+    ) control_ports.MetaskExecutionOutcome {
+        std.debug.assert(self.executionReplacementPending());
+        if (self.modelConnectionDefaultBinding() != null)
+            return .retained_model_connection;
+        if (self.modelConnectionExecutionSelected()) return .failed;
+        self.prepareExecutionClear() catch return .failed;
+        self.clearExecutionNoFail();
+        return .applied;
+    }
+
+    pub fn executionGeneration(self: *const Runtime) u64 {
+        return self.execution_state.generation();
+    }
+
+    /// The AgentCore vertical fixture keeps its local protocol outside the production Execution
     /// contract. This path is compiled only into `-Dautomation=true` builds;
     /// release builds reject it before observing any input.
     pub fn installAutomationExecution(
@@ -1500,29 +1792,28 @@ pub const Runtime = struct {
         if (!build_options.automation)
             return error.InvalidAutomationExecution;
         if (input.credential.len == 0 or
-            input.credential.len > account_contract.Limits.api_key_bytes or
+            input.credential.len > execution_contract.Limits.credential_bytes or
             input.model.len == 0 or
-            input.model.len > account_contract.Limits.model_id_bytes or
+            input.model.len > execution_contract.Limits.model_id_bytes or
             input.base_url.len == 0 or
-            input.base_url.len > account_contract.Limits.base_url_bytes or
+            input.base_url.len > execution_contract.Limits.base_url_bytes or
             !std.unicode.utf8ValidateSlice(input.model) or
             !std.unicode.utf8ValidateSlice(input.base_url) or
             std.mem.indexOfAny(u8, input.base_url, "\r\n") != null)
             return error.InvalidAutomationExecution;
         try self.beginExecutionReplacement();
         errdefer self.endExecutionReplacementNoFail();
-        const execution_input: account_contract.ExecutionConfigInput = .{
+        const execution_input: execution_contract.ConfigInput = .{
             .target = .{
                 .provider_id = "metask:automation-key",
-                .protocol = account_contract.protocolForProviderKind(input.provider),
-                .provider_kind = input.provider,
+                .protocol = input.protocol,
                 .model = input.model,
                 .base_url = input.base_url,
             },
             .api_key = input.credential,
             .execution_generation = 1,
         };
-        try self.account_execution.prepareInstall(
+        try self.execution_state.prepareInstall(
             execution_input,
             ScheduleCredentialRedaction{ .owner = self },
         );
@@ -1530,7 +1821,7 @@ pub const Runtime = struct {
             .id = "automation-key",
             .name = "Automation",
             .suffix = "",
-            .provider_kind = input.provider,
+            .protocol = input.protocol,
         }};
         const models = [_]account_contract.ModelView{.{
             .id = input.model,
@@ -1553,8 +1844,8 @@ pub const Runtime = struct {
                 .metask_execution_generation = 1,
             },
         });
-        self.account_execution.installAutomationNoFail(.{
-            .provider = input.provider,
+        self.execution_state.installAutomationNoFail(.{
+            .protocol = input.protocol,
             .credential = input.credential,
             .model = input.model,
             .base_url = input.base_url,
@@ -1570,29 +1861,29 @@ pub const Runtime = struct {
         // Identity replacement changes only Account-owned admission defaults.
         // Live Tasks keep their owned ExecutionConfig until their own runtime
         // lifecycle releases it, so their references cannot block this gate.
-        try self.account_execution.beginIdentityReplacement();
+        try self.execution_state.beginIdentityReplacement();
     }
 
     pub fn beginDefaultExecutionReplacement(self: *Runtime) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
-        try self.account_execution.beginDefaultReplacement();
+        try self.execution_state.beginDefaultReplacement();
     }
 
     pub fn endExecutionReplacementNoFail(self: *Runtime) void {
-        self.account_execution.endReplacementNoFail();
+        self.execution_state.endReplacementNoFail();
     }
 
     pub fn executionReplacementPending(self: *const Runtime) bool {
-        return self.account_execution.replacementPending();
+        return self.execution_state.replacementPending();
     }
 
     pub fn identityReplacementPending(self: *const Runtime) bool {
-        return self.account_execution.identityReplacementPending();
+        return self.execution_state.identityReplacementPending();
     }
 
     pub fn defaultExecutionReplacementPending(self: *const Runtime) bool {
-        return self.account_execution.defaultReplacementPending();
+        return self.execution_state.defaultReplacementPending();
     }
 
     /// Registers or reauthorizes a manually selected Workspace.
@@ -1608,7 +1899,7 @@ pub const Runtime = struct {
                 .explicitly_trusted => .explicitly_trusted,
                 .temporary => |root| .{ .temporary = root },
             },
-            self.account_execution.credential(),
+            self.execution_state.credential(),
             self.workspaceStorage(),
             .{
                 .context = self,
@@ -1638,7 +1929,7 @@ pub const Runtime = struct {
         }, self.skillProjectionBudget());
         skill_root_owned = false;
         self.workspace.redactNoFail(
-            self.account_execution.credential(),
+            self.execution_state.credential(),
             self.workspaceStorage(),
         );
         self.reconcileSkillEnablementNoFail();
@@ -1957,7 +2248,7 @@ pub const Runtime = struct {
         return self.createTaskInWorkspace(
             workspace_id,
             (self.workspace.facts(workspace_id) orelse return error.UnknownWorkspace).epoch,
-            self.account_execution.generation(),
+            self.execution_state.generation(),
             null,
             null,
             .{ .interactive = input.permission_profile },
@@ -2083,7 +2374,7 @@ pub const Runtime = struct {
                 self.allocator,
                 skill.skill_id,
             );
-        const execution_input = self.account_execution.executionInput().?;
+        const execution_input = self.execution_state.executionInput().?;
         const permission_profile: PermissionProfile = switch (permission) {
             .interactive => |profile| profile orelse self.default_permission_profile,
             .noninteractive => |profile| profile,
@@ -2105,7 +2396,7 @@ pub const Runtime = struct {
         const task_id = self.task_runtime.openTask(.{
             .agent_runtime = self.agent_runtime,
             .execution = execution_input,
-            .provider = accountProvider(execution_input.target.provider_kind),
+            .protocol = execution_input.target.protocol,
             .model = self.admissionModel(),
             .permission_profile = permission_profile,
             .permission_interaction = permission_interaction,
@@ -2123,7 +2414,7 @@ pub const Runtime = struct {
             .pinned_catalog = &pinned_catalog,
             .max_workspace_bytes = self.limits.max_workspace_bytes,
             .max_title_bytes = self.limits.max_task_title_bytes,
-            .max_model_id_bytes = account_contract.Limits.model_id_bytes,
+            .max_model_id_bytes = execution_contract.Limits.model_id_bytes,
             .max_runs = self.limits.max_runs_per_task,
             .max_compacts = self.limits.max_compacts_per_task,
             .max_ui_history = self.limits.max_ui_history_per_task,
@@ -2224,7 +2515,7 @@ pub const Runtime = struct {
                 .manual => .manual,
                 .automatic => .automatic,
             },
-            .execution = self.account_execution.executionInput().?,
+            .execution = self.execution_state.executionInput().?,
             .agent_runtime = self.agent_runtime,
             .checkpoint_store = store,
             .checkpoint_limits = checkpoint_export_limits,
@@ -2295,9 +2586,9 @@ pub const Runtime = struct {
             return error.InvalidTaskModel;
         if (!std.mem.eql(u8, expected_model, identity.model))
             return error.TaskModelMismatch;
-        if (!self.account_execution.taskModelSelectionAuthorized(.{
+        if (!self.execution_state.taskModelSelectionAuthorized(.{
             .generation = identity.generation,
-            .provider = accountProviderKind(identity.provider),
+            .protocol = identity.protocol,
         }, expected_catalog_generation, model))
             return error.StaleCatalog;
         _ = self.task_runtime.selectModel(
@@ -2436,7 +2727,7 @@ pub const Runtime = struct {
     ) Error!ExecutionIdentity {
         const value = self.task_runtime.taskExecutionIdentity(task_id) orelse
             return error.UnknownTask;
-        return .{ .generation = value.generation, .provider = value.provider, .model = value.model };
+        return .{ .generation = value.generation, .protocol = value.protocol, .model = value.model };
     }
 
     pub fn runExecutionIdentity(
@@ -2448,7 +2739,7 @@ pub const Runtime = struct {
             return error.UnknownTask;
         const value = self.task_runtime.runExecutionIdentity(task_id, run_id) orelse
             return error.NoSuchRun;
-        return .{ .generation = value.generation, .provider = value.provider, .model = value.model };
+        return .{ .generation = value.generation, .protocol = value.protocol, .model = value.model };
     }
 
     /// Lifecycle tests use this read-only counter to verify ownership rollback
@@ -3465,7 +3756,7 @@ pub const Runtime = struct {
             .{
                 @tagName(view.state),
                 @tagName(view.catalog_state),
-                @tagName(view.execution_source),
+                @tagName(self.execution_state.source()),
                 view.can_cancel,
             },
         ) catch return error.SnapshotTooLarge;
@@ -3487,7 +3778,7 @@ pub const Runtime = struct {
             writer.writeAll(",\"suffix\":") catch
                 return error.SnapshotTooLarge;
             try self.projectedJsonValue(writer, api_key.suffix);
-            writer.print(",\"provider\":\"{s}\"", .{@tagName(api_key.provider_kind)}) catch
+            writer.print(",\"protocol\":\"{s}\"", .{@tagName(api_key.protocol)}) catch
                 return error.SnapshotTooLarge;
             writer.writeByte('}') catch return error.SnapshotTooLarge;
         }
@@ -3523,7 +3814,7 @@ pub const Runtime = struct {
         try self.projectedJsonValue(writer, view.model_catalog_api_key_id);
         writer.writeAll(",\"modelConnections\":[") catch
             return error.SnapshotTooLarge;
-        for (view.model_connections, 0..) |connection, index| {
+        for (self.model_connections.views(), 0..) |connection, index| {
             if (index != 0) writer.writeByte(',') catch
                 return error.SnapshotTooLarge;
             writer.writeAll("{\"id\":") catch return error.SnapshotTooLarge;
@@ -3556,12 +3847,15 @@ pub const Runtime = struct {
         }
         writer.writeAll("],\"selectedModelConnectionId\":") catch
             return error.SnapshotTooLarge;
-        try self.projectedJsonValue(writer, view.selected_model_connection_id);
+        try self.projectedJsonValue(
+            writer,
+            self.execution_state.selectedModelConnectionId(),
+        );
         writer.writeAll(",\"canCreateTask\":") catch
             return error.SnapshotTooLarge;
         writer.print(
             "{},\"errorCode\":\"{s}\",\"safeDiagnostic\":",
-            .{ view.can_create_task, @tagName(view.error_code) },
+            .{ self.canCreateTask(), @tagName(view.error_code) },
         ) catch return error.SnapshotTooLarge;
         try self.projectedJsonValue(writer, view.safe_diagnostic);
         writer.print(
@@ -3569,7 +3863,7 @@ pub const Runtime = struct {
             .{
                 view.catalog_generation,
                 view.metask_execution_generation,
-                view.execution_generation,
+                self.execution_state.generation(),
             },
         ) catch return error.SnapshotTooLarge;
     }
@@ -3646,7 +3940,8 @@ pub const Runtime = struct {
         self.skill.deinit();
         if (self.canonical_user_home) |home| self.allocator.free(home);
         if (self.mcp) |*mcp| mcp.deinit();
-        self.account_execution.deinit();
+        self.model_connections.deinit();
+        self.execution_state.deinit();
         std.debug.assert(self.projection_bytes == 0);
         self.executor.deinit();
         self.preview_lane.deinit();
@@ -3858,8 +4153,8 @@ pub const Runtime = struct {
             query.workspace_root,
             query.task_id,
         );
-        const execution_available = self.account_execution.supportsTaskExecution(
-            accountProviderKind(query.execution_provider),
+        const execution_available = self.execution_state.supportsTaskExecution(
+            query.execution_protocol,
             query.execution_model,
         );
         return .{
@@ -3968,14 +4263,14 @@ pub const Runtime = struct {
     }
 
     fn canCreateTask(self: *const Runtime) bool {
-        return self.account_execution.canCreateTask(!self.shutting_down);
+        return self.execution_state.canCreateTask(!self.shutting_down);
     }
 
     fn cloneCurrentTaskExecution(
         self: *const Runtime,
         allocator: std.mem.Allocator,
     ) std.mem.Allocator.Error!OwnedTaskExecution {
-        const input = self.account_execution.executionInput().?;
+        const input = self.execution_state.executionInput().?;
         return OwnedTaskExecution.clone(
             allocator,
             input,
@@ -3983,21 +4278,18 @@ pub const Runtime = struct {
     }
 
     fn validExecutionGeneration(self: *const Runtime, generation: u64) bool {
-        return self.account_execution.validExecutionGeneration(generation);
+        return self.execution_state.validExecutionGeneration(generation);
     }
 
     fn admissionModel(self: *const Runtime) []const u8 {
-        return self.account_execution.admissionModel();
+        return self.execution_state.admissionModel();
     }
 
     fn scheduleExecutionBinding(self: *const Runtime) product_schedule.ExecutionBinding {
         return .{
             .available = self.canCreateTask(),
-            .generation = self.account_execution.generation(),
-            .provider = if (self.account_execution.provider()) |provider|
-                scheduledProvider(accountProvider(provider))
-            else
-                null,
+            .generation = self.execution_state.generation(),
+            .protocol = self.execution_state.protocol(),
             .model = self.admissionModel(),
             .automatic_workspace_available = self.workspace.automaticRootAvailable(),
         };
@@ -4083,7 +4375,7 @@ pub const Runtime = struct {
     ) bool {
         const self: *Runtime = @ptrCast(@alignCast(context));
         var changed = false;
-        const current_credential = self.account_execution.credential();
+        const current_credential = self.execution_state.credential();
         if (current_credential.len != 0) {
             const title_changed = redactFixedWidthNoFail(
                 projection.title,
@@ -4171,10 +4463,8 @@ pub const Runtime = struct {
             return error.InvalidScheduledTaskInput;
         return .{
             .title = title,
-            .execution_generation = self.account_execution.generation(),
-            .execution_provider = scheduledProvider(accountProvider(
-                self.account_execution.provider().?,
-            )),
+            .execution_generation = self.execution_state.generation(),
+            .execution_protocol = self.execution_state.protocol().?,
             .execution_model = self.admissionModel(),
             .permission_profile = scheduledPermissionProfile(
                 input.permission_profile,
@@ -4200,7 +4490,7 @@ pub const Runtime = struct {
             .max_assistant_message_bytes = self.limits.max_assistant_message_bytes,
             .max_tool_field_bytes = self.limits.max_tool_field_bytes,
             .max_file_ref_field_bytes = self.limits.max_file_ref_field_bytes,
-            .max_execution_model_bytes = account_contract.Limits.model_id_bytes,
+            .max_execution_model_bytes = execution_contract.Limits.model_id_bytes,
             .max_terminal_diagnostic_bytes = self.limits.max_terminal_diagnostic_bytes,
         };
     }
@@ -4683,7 +4973,7 @@ pub const Runtime = struct {
                 .max_commentary_segments_per_run = self.limits.max_commentary_segments_per_run,
                 .max_skill_arguments = self.limits.max_skill_arguments,
                 .max_task_title_bytes = self.limits.max_task_title_bytes,
-                .max_model_id_bytes = account_contract.Limits.model_id_bytes,
+                .max_model_id_bytes = execution_contract.Limits.model_id_bytes,
             },
         };
     }
@@ -4718,9 +5008,9 @@ pub const Runtime = struct {
             null,
             query.task_id,
         );
-        const execution_exact = self.account_execution.recoveryAuthorityExact(
+        const execution_exact = self.execution_state.recoveryAuthorityExact(
             query.target_execution_generation,
-            query.provider,
+            query.protocol,
             query.task_model,
         );
         return .{
@@ -4729,8 +5019,8 @@ pub const Runtime = struct {
                 .manual => .manual,
                 .automatic => .automatic,
             },
-            .target_execution_generation = if (self.account_execution.ready())
-                self.account_execution.generation()
+            .target_execution_generation = if (self.execution_state.ready())
+                self.execution_state.generation()
             else
                 0,
             .shutting_down = self.shutting_down,
@@ -4850,7 +5140,7 @@ pub const Runtime = struct {
         errdefer self.allocator.free(skill_root);
         const workspace = try self.workspace.registerAutomatic(
             canonical_root,
-            self.account_execution.credential(),
+            self.execution_state.credential(),
             self.workspaceStorage(),
         );
         self.skill.registerWorkspaceOwned(.{
@@ -5381,7 +5671,7 @@ pub const Runtime = struct {
     }
 
     fn containsKnownCredential(self: *const Runtime, value: []const u8) bool {
-        const current = self.account_execution.credential();
+        const current = self.execution_state.credential();
         if (containsKnownSecret(value, current)) return true;
         return self.task_runtime.containsExecutionCredential(value);
     }
@@ -5391,7 +5681,7 @@ pub const Runtime = struct {
         value: []const u8,
     ) usize {
         var longest: usize = 0;
-        const current = self.account_execution.credential();
+        const current = self.execution_state.credential();
         if (current.len != 0 and std.mem.startsWith(u8, value, current))
             longest = current.len;
         longest = @max(longest, self.task_runtime.matchedExecutionCredentialPrefix(value));
@@ -5611,24 +5901,31 @@ pub const Runtime = struct {
         self.allocator.free(value);
     }
 
-    pub fn executionHandoff(self: *Runtime) control_ports.ExecutionHandoff {
+    pub fn accountExecutionHandoff(self: *Runtime) control_ports.AccountExecutionHandoff {
         return .{
             .context = self,
             .commit_account_fact_fn = controlCommitAccountFact,
             .finish_account_commit_fn = controlFinishAccountCommit,
-            .account_view_fn = controlAccountView,
-            .model_connection_active_fn = controlModelConnectionActive,
-            .model_connection_selected_fn = controlModelConnectionSelected,
-            .prepare_model_connection_fn = controlPrepareModelConnection,
+            .metask_activation_available_fn = controlMetaskActivationAvailable,
+            .apply_metask_candidate_fn = controlApplyMetaskCandidate,
+            .apply_metask_clear_fn = controlApplyMetaskClear,
             .replacement_pending_fn = controlReplacementPending,
             .begin_default_replacement_fn = controlBeginDefaultReplacement,
             .begin_replacement_fn = controlBeginReplacement,
-            .prepare_install_fn = controlPrepareExecutionInstall,
-            .prepare_clear_fn = controlPrepareExecutionClear,
-            .install_model_connection_fn = controlInstallModelConnection,
-            .install_execution_fn = controlInstallExecution,
-            .clear_execution_fn = controlClearExecution,
             .end_replacement_fn = controlEndReplacement,
+        };
+    }
+
+    pub fn executionManagement(self: *Runtime) control_ports.ExecutionManagement {
+        return .{
+            .context = self,
+            .start_model_connections_fn = controlStartModelConnections,
+            .start_model_connections_unavailable_fn = controlStartModelConnectionsUnavailable,
+            .stop_model_connections_fn = controlStopModelConnections,
+            .create_model_connection_fn = controlCreateModelConnection,
+            .submit_model_connection_fn = controlSubmitModelConnection,
+            .begin_model_connection_probe_fn = controlBeginModelConnectionProbe,
+            .complete_model_connection_test_fn = controlCompleteModelConnectionTest,
         };
     }
 
@@ -5705,17 +6002,21 @@ fn controlCommitAccountFact(context: *anyopaque, fact: account_contract.AccountF
 fn controlFinishAccountCommit(context: *anyopaque) void {
     controlOwner(context).finishAccountCommitNoFail();
 }
-fn controlAccountView(context: *anyopaque) account_contract.AccountView {
-    return controlOwner(context).accountView();
+fn controlMetaskActivationAvailable(context: *anyopaque) bool {
+    return controlOwner(context).metaskActivationAvailable();
 }
-fn controlModelConnectionActive(context: *anyopaque, id: []const u8) bool {
-    return controlOwner(context).modelConnectionExecutionActive(id);
+fn controlApplyMetaskCandidate(
+    context: *anyopaque,
+    execution: *execution_contract.OwnedConfig,
+    explicit_activation: bool,
+) control_ports.MetaskExecutionOutcome {
+    return controlOwner(context).applyMetaskExecutionCandidate(
+        execution,
+        explicit_activation,
+    );
 }
-fn controlModelConnectionSelected(context: *anyopaque) bool {
-    return controlOwner(context).modelConnectionExecutionSelected();
-}
-fn controlPrepareModelConnection(context: *anyopaque, connection_id: []const u8, model_id: []const u8) anyerror!PreparedModelConnectionBinding {
-    return controlOwner(context).prepareModelConnectionBinding(connection_id, model_id);
+fn controlApplyMetaskClear(context: *anyopaque) control_ports.MetaskExecutionOutcome {
+    return controlOwner(context).applyMetaskExecutionClear();
 }
 fn controlReplacementPending(context: *anyopaque) bool {
     return controlOwner(context).executionReplacementPending();
@@ -5726,23 +6027,29 @@ fn controlBeginDefaultReplacement(context: *anyopaque) anyerror!void {
 fn controlBeginReplacement(context: *anyopaque) anyerror!void {
     return controlOwner(context).beginExecutionReplacement();
 }
-fn controlPrepareExecutionInstall(context: *anyopaque, input: account_contract.ExecutionConfigInput) anyerror!void {
-    return controlOwner(context).prepareExecutionInstall(input);
-}
-fn controlPrepareExecutionClear(context: *anyopaque) anyerror!void {
-    return controlOwner(context).prepareExecutionClear();
-}
-fn controlInstallModelConnection(context: *anyopaque, execution: *account_contract.OwnedExecutionConfig, binding: *PreparedModelConnectionBinding) void {
-    controlOwner(context).installModelConnectionExecutionNoFail(execution, binding);
-}
-fn controlInstallExecution(context: *anyopaque, execution: *account_contract.OwnedExecutionConfig) void {
-    controlOwner(context).installExecutionNoFail(execution);
-}
-fn controlClearExecution(context: *anyopaque) void {
-    controlOwner(context).clearExecutionNoFail();
-}
 fn controlEndReplacement(context: *anyopaque) void {
     controlOwner(context).endExecutionReplacementNoFail();
+}
+fn controlStartModelConnections(context: *anyopaque, directory: []const u8, vault: execution_ports.CredentialVault) anyerror!void {
+    try controlOwner(context).startModelConnections(directory, vault);
+}
+fn controlStartModelConnectionsUnavailable(context: *anyopaque) void {
+    controlOwner(context).startModelConnectionsUnavailable();
+}
+fn controlStopModelConnections(context: *anyopaque) void {
+    controlOwner(context).stopModelConnections();
+}
+fn controlCreateModelConnection(context: *anyopaque, secret: []const u8, spec: execution_contract.ModelConnectionSpec, model_id: []const u8, display_name: []const u8) execution_contract.CommandResult {
+    return controlOwner(context).createModelConnectionWithCredential(secret, spec, model_id, display_name);
+}
+fn controlSubmitModelConnection(context: *anyopaque, command: execution_contract.ModelConnectionCommand) execution_contract.CommandResult {
+    return controlOwner(context).submitModelConnectionCommand(command);
+}
+fn controlBeginModelConnectionProbe(context: *anyopaque, command: execution_contract.ModelConnectionTestCommand) execution_contract.Preparation {
+    return controlOwner(context).beginModelConnectionProbe(command);
+}
+fn controlCompleteModelConnectionTest(context: *anyopaque, command: execution_contract.ModelConnectionTestCommand, succeeded: bool) execution_contract.CommandResult {
+    return controlOwner(context).completeModelConnectionTest(command, succeeded);
 }
 fn controlDrainAgentEvents(context: *anyopaque) anyerror!void {
     return controlOwner(context).drainAgentEvents();
@@ -5961,32 +6268,6 @@ fn noChangeNotification(_: ?*anyopaque) bool {
     return true;
 }
 
-fn accountProviderKind(provider: Provider) account_contract.ProviderKind {
-    return switch (provider) {
-        .anthropic => .anthropic,
-        .openai => .openai,
-        .gemini => .gemini,
-    };
-}
-
-fn accountProvider(
-    provider: account_contract.ProviderKind,
-) Provider {
-    return switch (provider) {
-        .anthropic => .anthropic,
-        .openai => .openai,
-        .gemini => .gemini,
-    };
-}
-
-fn scheduledProvider(provider: Provider) product_schedule.Provider {
-    return switch (provider) {
-        .anthropic => .anthropic,
-        .openai => .openai,
-        .gemini => .gemini,
-    };
-}
-
 fn scheduledPermissionProfile(
     profile: PermissionProfile,
 ) product_schedule.PermissionProfile {
@@ -6002,6 +6283,14 @@ fn taskProfileFromSchedule(
     return switch (profile) {
         .approval_required => .approval_required,
         .full_access => .full_access,
+    };
+}
+
+fn replacementExecutionError(err: anyerror) execution_contract.ManagementError {
+    return switch (err) {
+        error.TaskRunning => .execution_in_use,
+        error.ExecutionInUse => .operation_in_progress,
+        else => .local_resource_exhausted,
     };
 }
 
@@ -6587,9 +6876,10 @@ fn testLimits() Limits {
 }
 
 fn installTestExecution(control: *Runtime) !void {
-    var execution = try account_contract.OwnedExecutionConfig.initOwned(
+    var execution = try execution_contract.OwnedConfig.initOwned(
         std.testing.allocator,
-        .anthropic,
+        .metask,
+        .anthropic_messages,
         try std.testing.allocator.dupe(u8, "fixture-model"),
         try std.testing.allocator.dupe(
             u8,
@@ -6605,7 +6895,7 @@ fn installTestExecution(control: *Runtime) !void {
         .id = "key-1",
         .name = "Primary",
         .suffix = "1234",
-        .provider_kind = .anthropic,
+        .protocol = .anthropic_messages,
     }};
     const models = [_]account_contract.ModelView{.{
         .id = "fixture-model",
@@ -6661,7 +6951,7 @@ fn commitTestExecutionFact(control: *Runtime, generation: u64) void {
         .id = "key-1",
         .name = "Primary",
         .suffix = "1234",
-        .provider_kind = .anthropic,
+        .protocol = .anthropic_messages,
     }};
     const models = [_]account_contract.ModelView{.{
         .id = "fixture-model",
@@ -6727,7 +7017,7 @@ fn testRuntime() !Runtime {
     product_workspace.testing.setIdentity(&control.workspace, 2, 2);
     control.task_runtime.next_task_id = 4;
     const execution_model = try control.copyBounded(
-        control.account_execution.model(),
+        control.execution_state.model(),
         account_contract.Limits.model_id_bytes,
     );
     const runs = try control.allocator.alloc(?TestRunRecord, control.limits.max_runs_per_task);
@@ -6749,7 +7039,7 @@ fn testRuntime() !Runtime {
         .id = 7,
         .generation = 1,
         .execution_generation = 1,
-        .execution_provider = .anthropic,
+        .execution_protocol = .anthropic_messages,
         .execution_model = execution_model,
         .permission_profile = .approval_required,
         .permission_interaction = .interactive,
@@ -6764,14 +7054,14 @@ fn testRuntime() !Runtime {
         .agent_handoff = .init(.running),
         .tools = tools,
         .terminal_diagnostic = try control.allocTrackedCapacity(control.limits.max_terminal_diagnostic_bytes),
-        .redaction_secret = control.account_execution.credential(),
+        .redaction_secret = control.execution_state.credential(),
     };
     control.task_runtime.tasks[0] = .{
         .durable = .{
             .id = 3,
             .recent_order = 1,
             .execution_generation = 1,
-            .execution_provider = .anthropic,
+            .execution_protocol = .anthropic_messages,
             .execution_model = execution_model,
             .permission_profile = .approval_required,
             .permission_interaction = .interactive,
@@ -6947,7 +7237,6 @@ fn replaceTaskCredentialForTest(
         .target = .{
             .provider_id = "metask:fixture-provider",
             .protocol = .anthropic_messages,
-            .provider_kind = .anthropic,
             .model = "fixture-model",
             .base_url = account_contract.metask_anthropic_messages_url,
         },
@@ -7982,9 +8271,10 @@ test "execution replacement durably scrubs Schedule before ownership transfer" {
         "NEXT-SECRET",
     ) != null);
 
-    var replacement = try account_contract.OwnedExecutionConfig.initOwned(
+    var replacement = try execution_contract.OwnedConfig.initOwned(
         std.testing.allocator,
-        .anthropic,
+        .metask,
+        .anthropic_messages,
         try std.testing.allocator.dupe(u8, "fixture-model"),
         try std.testing.allocator.dupe(
             u8,
@@ -8012,7 +8302,7 @@ test "execution replacement durably scrubs Schedule before ownership transfer" {
     control.installExecutionNoFail(&replacement);
     control.endExecutionReplacementNoFail();
     control.finishAccountCommitNoFail();
-    try std.testing.expectEqual(@as(u64, 2), control.account_execution.generation());
+    try std.testing.expectEqual(@as(u64, 2), control.execution_state.generation());
 
     const blocked_id = try control.createScheduledTask(.{
         .title = "Use BLOCKED-SECRET",
@@ -8021,9 +8311,10 @@ test "execution replacement durably scrubs Schedule before ownership transfer" {
         .input = "Review BLOCKED-SECRET",
         .recurrence = .{ .once = .{ .at_unix_seconds = 3_000 } },
     });
-    var blocked = try account_contract.OwnedExecutionConfig.initOwned(
+    var blocked = try execution_contract.OwnedConfig.initOwned(
         std.testing.allocator,
-        .anthropic,
+        .metask,
+        .anthropic_messages,
         try std.testing.allocator.dupe(u8, "fixture-model"),
         try std.testing.allocator.dupe(
             u8,
@@ -8042,7 +8333,7 @@ test "execution replacement durably scrubs Schedule before ownership transfer" {
         error.ScheduledTaskPersistenceFailed,
         control.prepareExecutionInstall(blocked.input()),
     );
-    try std.testing.expectEqual(@as(u64, 2), control.account_execution.generation());
+    try std.testing.expectEqual(@as(u64, 2), control.execution_state.generation());
     try std.testing.expect(std.mem.indexOf(
         u8,
         product_schedule.testing.item(&control.schedule, blocked_id).?.input,
@@ -8050,7 +8341,7 @@ test "execution replacement durably scrubs Schedule before ownership transfer" {
     ) != null);
     control.endExecutionReplacementNoFail();
     control.finishAccountCommitNoFail();
-    try std.testing.expect(!control.accountView().can_create_task);
+    try std.testing.expect(!control.canCreateTask());
     try std.testing.expectEqual(
         SchedulePersistenceHealth.write_failed,
         control.schedule.persistenceHealth(),
@@ -8082,7 +8373,7 @@ test "execution replacement durably scrubs Schedule before ownership transfer" {
     control.clearExecutionNoFail();
     control.endExecutionReplacementNoFail();
     control.finishAccountCommitNoFail();
-    try std.testing.expect(!control.account_execution.ready());
+    try std.testing.expect(!control.execution_state.ready());
 }
 
 test "Scheduled Task execution drift becomes needs attention without blocking Account" {
@@ -8123,7 +8414,7 @@ test "Scheduled Task execution drift becomes needs attention without blocking Ac
     });
     try std.testing.expectEqual(@as(u64, 2_000), clock.armed_at.?);
 
-    account_execution.testing.setGenerationAlignment(&control.account_execution, 2);
+    execution_state.testing.setGenerationAlignment(&control.execution_state, 2);
     try std.testing.expect(control.schedule.refreshBindingNoFail(
         control.scheduleExecutionBinding(),
         control.scheduleRedaction(),
@@ -8668,7 +8959,7 @@ test "credential release permanently scrubs catalog and every Skill history fiel
     run.input = history_input;
 
     control.redactAllProductProjectionsNoFail("SECRET-KEY");
-    account_execution.testing.clearExecutionNoFail(&control.account_execution);
+    execution_state.testing.clearExecutionNoFail(&control.execution_state);
     var detached = task.runtime.detach(.cold_start);
     var detached_execution = detached.execution;
     detached_execution.deinit();
@@ -8807,8 +9098,8 @@ test "Run admission reserves a stable generation and rolls back every fallible a
         task.durable.runs[slot].?.execution_generation,
     );
     try std.testing.expectEqual(
-        task.durable.execution_provider,
-        task.durable.runs[slot].?.execution_provider,
+        task.durable.execution_protocol,
+        task.durable.runs[slot].?.execution_protocol,
     );
     try std.testing.expectEqualStrings(
         task.durable.execution_model,
@@ -8866,33 +9157,9 @@ test "Runtime publishes a user model connection as an independent execution sour
         .{},
     );
     defer control.deinit();
-    const models = [_]account_contract.ModelConnectionModelView{.{
-        .id = "gpt-5",
-        .display_name = "GPT-5",
-    }};
-    const connections = [_]account_contract.ModelConnectionView{.{
-        .id = "connection-1",
-        .display_name = "Team OpenAI",
-        .protocol = .openai_chat_completions,
-        .normalized_base_url = "https://api.openai.com/v1/chat/completions",
-        .state = .ready,
-        .test_status = .connected,
-        .credential_status = .ready,
-        .enabled = true,
-        .models = &models,
-        .selected_model = "gpt-5",
-        .connection_generation = 1,
-    }};
-    control.commitAccountFactNoFail(.{
-        .kind = .model_connections_changed,
-        .view = .{
-            .state = .signed_out,
-            .catalog_state = .unavailable,
-            .model_connections = &connections,
-        },
-    });
-    var execution = try account_contract.OwnedExecutionConfig.initModelConnectionOwned(
+    var execution = try execution_contract.OwnedConfig.initOwned(
         std.testing.allocator,
+        .model_connection,
         .openai_chat_completions,
         try std.testing.allocator.dupe(u8, "gpt-5"),
         try std.testing.allocator.dupe(u8, "https://api.openai.com/v1/chat/completions"),
@@ -8916,23 +9183,430 @@ test "Runtime publishes a user model connection as an independent execution sour
     prepared_binding_owned = false;
     control.endExecutionReplacementNoFail();
     const view = control.accountView();
-    try std.testing.expectEqual(account_contract.ExecutionSource.model_connection, view.execution_source);
-    try std.testing.expectEqual(account_contract.AccountState.signed_out, view.state);
+    try std.testing.expectEqual(execution_contract.Source.model_connection, control.execution_state.source());
+    try std.testing.expectEqual(account_contract.AccountState.checking, view.state);
     try std.testing.expectEqual(account_contract.CatalogState.unavailable, view.catalog_state);
-    try std.testing.expect(view.can_create_task);
+    try std.testing.expect(control.canCreateTask());
     try std.testing.expectEqualStrings("", view.selected_model);
-    try std.testing.expectEqualStrings("gpt-5", view.model_connections[0].selected_model);
     try std.testing.expectEqualStrings(
         "connection-1",
-        view.selected_model_connection_id,
+        control.execution_state.selectedModelConnectionId(),
     );
     try std.testing.expect(control.modelConnectionExecutionActive("connection-1"));
     try std.testing.expect(!control.modelConnectionExecutionActive("connection-2"));
-    try account_contract.validateModelConnectionSpec(.{
+    try execution_contract.validateModelConnectionSpec(.{
         .display_name = "Team OpenAI",
         .protocol = .openai_chat_completions,
         .normalized_base_url = "https://api.openai.com/v1/chat/completions",
     });
+}
+
+const TestModelConnectionVault = struct {
+    const slot = "model-connection-00000000000000000000000000000001";
+
+    secret: [execution_contract.Limits.credential_bytes]u8 = undefined,
+    secret_len: usize = 0,
+    present: bool = false,
+    read_fails: bool = false,
+
+    fn port(self: *@This()) execution_ports.CredentialVault {
+        return .{
+            .context = self,
+            .generate_slot_fn = generate,
+            .store_fn = store,
+            .get_fn = get,
+            .delete_fn = delete,
+        };
+    }
+
+    fn generate(
+        _: *anyopaque,
+        output: *[execution_ports.credential_slot_bytes]u8,
+    ) anyerror!void {
+        @memcpy(output, slot);
+    }
+
+    fn store(
+        context: *anyopaque,
+        _: []const u8,
+        secret: []const u8,
+    ) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        if (secret.len > self.secret.len) return error.WriteFailed;
+        @memcpy(self.secret[0..secret.len], secret);
+        self.secret_len = secret.len;
+        self.present = true;
+    }
+
+    fn get(
+        context: *anyopaque,
+        _: []const u8,
+        output: []u8,
+    ) anyerror!?[]const u8 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        if (self.read_fails) return error.ReadFailed;
+        if (!self.present) return null;
+        if (self.secret_len > output.len) return error.ReadFailed;
+        @memcpy(output[0..self.secret_len], self.secret[0..self.secret_len]);
+        return output[0..self.secret_len];
+    }
+
+    fn delete(context: *anyopaque, _: []const u8) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        std.crypto.secureZero(u8, self.secret[0..self.secret_len]);
+        self.secret_len = 0;
+        self.present = false;
+    }
+};
+
+fn createReadyTestModelConnection(
+    control: *Runtime,
+) !execution_contract.ModelConnectionSelectionCommand {
+    try std.testing.expect(control.createModelConnectionWithCredential(
+        "provider-secret",
+        .{
+            .display_name = "OpenAI",
+            .protocol = .openai_responses,
+            .normalized_base_url = "https://api.openai.com/v1/responses",
+        },
+        "gpt-5",
+        "GPT-5",
+    ).accepted);
+    const view = control.model_connections.views()[0];
+    const selection: execution_contract.ModelConnectionSelectionCommand = .{
+        .connection_id = TestModelConnectionVault.slot,
+        .expected_connection_generation = view.connection_generation,
+    };
+    var probe = switch (control.beginModelConnectionProbe(.{
+        .selection = selection,
+        .model_id = "gpt-5",
+    })) {
+        .ready => |execution| execution,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    defer probe.deinit();
+    try std.testing.expect(control.completeModelConnectionTest(.{
+        .selection = selection,
+        .model_id = "gpt-5",
+    }, true).accepted);
+    return selection;
+}
+
+fn createTestMetaskExecution(
+    generation: u64,
+    credential: []const u8,
+) !execution_contract.OwnedConfig {
+    return execution_contract.OwnedConfig.initOwned(
+        std.testing.allocator,
+        .metask,
+        .anthropic_messages,
+        try std.testing.allocator.dupe(u8, "fixture-model"),
+        try std.testing.allocator.dupe(
+            u8,
+            account_contract.metask_anthropic_messages_url,
+        ),
+        generation,
+        try std.testing.allocator.dupe(u8, credential),
+        "fixture-provider",
+    );
+}
+
+test "Product Control atomically manages and installs a Model Connection default" {
+    test_agent_runtime.io = std.testing.io;
+    var control = try Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        &test_agent_runtime,
+        .{
+            .max_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        .{},
+    );
+    defer control.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
+    var vault: TestModelConnectionVault = .{};
+    try control.startModelConnections(
+        directory_storage[0..directory_len],
+        vault.port(),
+    );
+    defer control.stopModelConnections();
+
+    const selection = try createReadyTestModelConnection(&control);
+    try std.testing.expect(control.submitModelConnectionCommand(.{
+        .select_default = .{
+            .selection = selection,
+            .model_id = "gpt-5",
+        },
+    }).accepted);
+
+    try std.testing.expectEqual(
+        execution_contract.Source.model_connection,
+        control.execution_state.source(),
+    );
+    try std.testing.expectEqualStrings(
+        TestModelConnectionVault.slot,
+        control.execution_state.selectedModelConnectionId(),
+    );
+    const rejected = control.submitModelConnectionCommand(.{ .update = .{
+        .selection = selection,
+        .spec = .{
+            .display_name = "Renamed",
+            .protocol = .openai_responses,
+            .normalized_base_url = "https://api.openai.com/v1/responses",
+        },
+    } });
+    try std.testing.expect(!rejected.accepted);
+    try std.testing.expectEqual(
+        execution_contract.ManagementError.execution_in_use,
+        rejected.error_code.?,
+    );
+
+    try control.beginDefaultExecutionReplacement();
+    try control.prepareExecutionClear();
+    control.clearExecutionNoFail();
+    control.endExecutionReplacementNoFail();
+    control.finishExecutionCommitNoFail();
+    control.stopModelConnections();
+    try control.startModelConnections(
+        directory_storage[0..directory_len],
+        vault.port(),
+    );
+    try std.testing.expectEqual(
+        execution_contract.Source.model_connection,
+        control.execution_state.source(),
+    );
+    try std.testing.expectEqualStrings(
+        TestModelConnectionVault.slot,
+        control.execution_state.selectedModelConnectionId(),
+    );
+}
+
+test "durable Model Connection default blocks passive Metask restore when credential read fails" {
+    test_agent_runtime.io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
+    const directory = directory_storage[0..directory_len];
+    var vault: TestModelConnectionVault = .{};
+
+    {
+        var control = try Runtime.init(
+            std.testing.allocator,
+            std.testing.io,
+            &test_agent_runtime,
+            .{
+                .max_tasks = 1,
+                .max_runs_per_task = 1,
+                .max_tools_per_run = 1,
+            },
+            .{},
+        );
+        defer control.deinit();
+        try control.startModelConnections(directory, vault.port());
+        const selection = try createReadyTestModelConnection(&control);
+        try std.testing.expect(control.submitModelConnectionCommand(.{
+            .select_default = .{
+                .selection = selection,
+                .model_id = "gpt-5",
+            },
+        }).accepted);
+        control.stopModelConnections();
+    }
+
+    vault.read_fails = true;
+    var restored = try Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        &test_agent_runtime,
+        .{
+            .max_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        .{},
+    );
+    defer restored.deinit();
+    try restored.startModelConnections(directory, vault.port());
+    defer restored.stopModelConnections();
+    try std.testing.expect(restored.modelConnectionDefaultBinding() != null);
+    try std.testing.expect(!restored.modelConnectionExecutionSelected());
+    try std.testing.expect(restored.metaskActivationAvailable());
+
+    var candidate = try createTestMetaskExecution(17, "METASK-SECRET");
+    try restored.beginDefaultExecutionReplacement();
+    commitTestExecutionFact(&restored, 17);
+    try std.testing.expectEqual(
+        control_ports.MetaskExecutionOutcome.retained_model_connection,
+        restored.applyMetaskExecutionCandidate(&candidate, false),
+    );
+    restored.endExecutionReplacementNoFail();
+    restored.finishExecutionCommitNoFail();
+    try std.testing.expect(restored.modelConnectionDefaultBinding() != null);
+    try std.testing.expect(restored.execution_state.executionInput() == null);
+}
+
+test "Metask activation clears durable custom default only after every fallible step" {
+    test_agent_runtime.io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
+    const directory = directory_storage[0..directory_len];
+    var vault: TestModelConnectionVault = .{};
+    var control = try Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        &test_agent_runtime,
+        .{
+            .max_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        .{},
+    );
+    defer control.deinit();
+    try control.startModelConnections(directory, vault.port());
+    var model_connections_started = true;
+    defer if (model_connections_started) control.stopModelConnections();
+    const selection = try createReadyTestModelConnection(&control);
+    try std.testing.expect(control.submitModelConnectionCommand(.{
+        .select_default = .{
+            .selection = selection,
+            .model_id = "gpt-5",
+        },
+    }).accepted);
+
+    control.stopModelConnections();
+    model_connections_started = false;
+    var blocked = try createTestMetaskExecution(18, "METASK-BLOCKED");
+    try control.beginDefaultExecutionReplacement();
+    commitTestExecutionFact(&control, 18);
+    try std.testing.expectEqual(
+        control_ports.MetaskExecutionOutcome.failed,
+        control.applyMetaskExecutionCandidate(&blocked, true),
+    );
+    control.endExecutionReplacementNoFail();
+    control.finishExecutionCommitNoFail();
+    try std.testing.expect(control.modelConnectionDefaultBinding() != null);
+    try std.testing.expect(control.modelConnectionExecutionSelected());
+    try std.testing.expectEqualStrings(
+        TestModelConnectionVault.slot,
+        control.execution_state.selectedModelConnectionId(),
+    );
+
+    try control.startModelConnections(directory, vault.port());
+    model_connections_started = true;
+    var accepted = try createTestMetaskExecution(19, "METASK-ACCEPTED");
+    try control.beginDefaultExecutionReplacement();
+    commitTestExecutionFact(&control, 19);
+    try std.testing.expectEqual(
+        control_ports.MetaskExecutionOutcome.applied,
+        control.applyMetaskExecutionCandidate(&accepted, true),
+    );
+    control.endExecutionReplacementNoFail();
+    control.finishExecutionCommitNoFail();
+    try std.testing.expect(control.modelConnectionDefaultBinding() == null);
+    try std.testing.expect(!control.modelConnectionExecutionSelected());
+    try std.testing.expectEqual(
+        execution_contract.Source.metask,
+        control.execution_state.source(),
+    );
+    try std.testing.expectEqual(@as(u64, 19), control.execution_state.generation());
+}
+
+test "Metask activation preserves custom default when Schedule scrub fails" {
+    var control = try testRuntime();
+    defer control.deinit();
+    var connection_tmp = std.testing.tmpDir(.{});
+    defer connection_tmp.cleanup();
+    var connection_directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const connection_directory_len = try connection_tmp.dir.realPath(
+        std.testing.io,
+        &connection_directory_storage,
+    );
+    var vault: TestModelConnectionVault = .{};
+    try control.startModelConnections(
+        connection_directory_storage[0..connection_directory_len],
+        vault.port(),
+    );
+    defer control.stopModelConnections();
+    const selection = try createReadyTestModelConnection(&control);
+    try std.testing.expect(control.submitModelConnectionCommand(.{
+        .select_default = .{
+            .selection = selection,
+            .model_id = "gpt-5",
+        },
+    }).accepted);
+
+    var automatic_tmp = std.testing.tmpDir(.{});
+    defer automatic_tmp.cleanup();
+    var automatic_root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const automatic_root_len = try automatic_tmp.dir.realPath(
+        std.testing.io,
+        &automatic_root_storage,
+    );
+    var automatic_root = try product_workspace.AutomaticRoot.open(
+        std.testing.io,
+        std.testing.allocator,
+        automatic_root_storage[0..automatic_root_len],
+    );
+    defer automatic_root.deinit();
+    product_workspace.testing.installAutomaticRoot(
+        &control.workspace,
+        &automatic_root,
+    );
+    var clock: TestScheduleClock = .{ .now = 1_000 };
+    const persistence_storage = try std.testing.allocator.alloc(
+        u8,
+        product_schedule.testing.max_store_bytes,
+    );
+    defer std.testing.allocator.free(persistence_storage);
+    var persistence: TestSchedulePersistence = .{
+        .storage = persistence_storage,
+    };
+    product_schedule.testing.configure(
+        &control.schedule,
+        clock.timer(),
+        persistence.capability(),
+        .ready,
+    );
+    defer product_schedule.testing.configure(
+        &control.schedule,
+        .{},
+        .{},
+        .unavailable,
+    );
+    const schedule_id = try control.createScheduledTask(.{
+        .title = "Review pending credential",
+        .expected_execution_generation = control.executionGeneration(),
+        .permission_profile = .approval_required,
+        .input = "Inspect METASK-SCRUB before activation",
+        .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
+    });
+    persistence.result = .failed;
+
+    var candidate = try createTestMetaskExecution(20, "METASK-SCRUB");
+    try control.beginDefaultExecutionReplacement();
+    commitTestExecutionFact(&control, 20);
+    try std.testing.expectEqual(
+        control_ports.MetaskExecutionOutcome.failed,
+        control.applyMetaskExecutionCandidate(&candidate, true),
+    );
+    control.endExecutionReplacementNoFail();
+    control.finishExecutionCommitNoFail();
+    try std.testing.expect(control.modelConnectionDefaultBinding() != null);
+    try std.testing.expect(control.modelConnectionExecutionSelected());
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        product_schedule.testing.item(&control.schedule, schedule_id).?.input,
+        "METASK-SCRUB",
+    ) != null);
 }
 
 test "Account projection and execution install use preallocated no-fail storage" {
@@ -8949,9 +9623,10 @@ test "Account projection and execution install use preallocated no-fail storage"
         .{},
     );
     defer control.deinit();
-    var execution = try account_contract.OwnedExecutionConfig.initOwned(
+    var execution = try execution_contract.OwnedConfig.initOwned(
         std.testing.allocator,
-        .openai,
+        .metask,
+        .openai_chat_completions,
         try std.testing.allocator.dupe(u8, "model-1"),
         try std.testing.allocator.dupe(
             u8,
@@ -8966,7 +9641,7 @@ test "Account projection and execution install use preallocated no-fail storage"
         .id = "key-1",
         .name = "Primary",
         .suffix = "1234",
-        .provider_kind = .openai,
+        .protocol = .openai_chat_completions,
     }};
     const models = [_]account_contract.ModelView{.{
         .id = "model-1",
@@ -8993,7 +9668,7 @@ test "Account projection and execution install use preallocated no-fail storage"
     });
     try control.prepareExecutionInstall(execution.input());
     control.installExecutionNoFail(&execution);
-    try std.testing.expect(!control.accountView().can_create_task);
+    try std.testing.expect(!control.canCreateTask());
     control.endExecutionReplacementNoFail();
     control.finishAccountCommitNoFail();
     const view = control.accountView();
@@ -9008,7 +9683,7 @@ test "identity replacement does not disturb live Task runtime references" {
     defer control.deinit();
     try control.beginDefaultExecutionReplacement();
     try std.testing.expect(control.executionReplacementPending());
-    try std.testing.expect(!control.accountView().can_create_task);
+    try std.testing.expect(!control.canCreateTask());
     control.endExecutionReplacementNoFail();
     const task = &control.task_runtime.tasks[0].?;
     const route_id = task.runtime.routeId();
@@ -9039,9 +9714,9 @@ test "identity replacement does not disturb live Task runtime references" {
     try std.testing.expectEqual(execution, task.runtime.executionConst().?);
     try std.testing.expectEqual(TaskLifecycle.open, taskLifecycle(task));
     try std.testing.expectEqualStrings("fixture-model", task.durable.execution_model);
-    try std.testing.expect(!control.accountView().can_create_task);
+    try std.testing.expect(!control.canCreateTask());
     control.endExecutionReplacementNoFail();
-    try std.testing.expect(control.accountView().can_create_task);
+    try std.testing.expect(control.canCreateTask());
     task.runtime.worker_references.store(0, .release);
 }
 
@@ -9059,9 +9734,10 @@ test "default replacement preserves Task generation and installs the next admiss
     try std.testing.expectEqual(@as(u64, 1), old_input.execution_generation);
     try std.testing.expectEqualStrings("SECRET-KEY", old_input.api_key);
 
-    var replacement = try account_contract.OwnedExecutionConfig.initOwned(
+    var replacement = try execution_contract.OwnedConfig.initOwned(
         std.testing.allocator,
-        .openai,
+        .metask,
+        .openai_chat_completions,
         try std.testing.allocator.dupe(u8, "fixture-model-2"),
         try std.testing.allocator.dupe(
             u8,
@@ -9076,7 +9752,7 @@ test "default replacement preserves Task generation and installs the next admiss
         .id = "key-2",
         .name = "Secondary",
         .suffix = "5678",
-        .provider_kind = .openai,
+        .protocol = .openai_chat_completions,
     }};
     const replacement_models = [_]account_contract.ModelView{.{
         .id = "fixture-model-2",
@@ -9091,7 +9767,7 @@ test "default replacement preserves Task generation and installs the next admiss
         @as(u64, 1),
         (try control.task_runtime.testExecutionInput(task.durable.id)).execution_generation,
     );
-    try std.testing.expect(!control.accountView().can_create_task);
+    try std.testing.expect(!control.canCreateTask());
     control.commitAccountFactNoFail(.{
         .kind = .execution_changed,
         .view = .{
@@ -9118,15 +9794,15 @@ test "default replacement preserves Task generation and installs the next admiss
     try std.testing.expectEqual(@as(u64, 1), preserved.execution_generation);
     try std.testing.expectEqualStrings("fixture-model", preserved.target.model);
     try std.testing.expectEqualStrings("SECRET-KEY", preserved.api_key);
-    try std.testing.expectEqual(@as(u64, 2), control.account_execution.generation());
-    try std.testing.expectEqualStrings("fixture-model-2", control.account_execution.model());
+    try std.testing.expectEqual(@as(u64, 2), control.execution_state.generation());
+    try std.testing.expectEqualStrings("fixture-model-2", control.execution_state.model());
     try std.testing.expectEqualStrings("fixture-model", task.durable.execution_model);
     try std.testing.expectError(
         error.StaleCatalog,
         control.selectTaskModel(
             task.durable.id,
             "fixture-model",
-            control.account_execution.catalogGeneration(),
+            control.execution_state.catalogGeneration(),
             "fixture-model-2",
         ),
     );
@@ -9187,7 +9863,7 @@ test "Account default model changes do not bump credentials" {
         .id = "key-1",
         .name = "Primary",
         .suffix = "1234",
-        .provider_kind = .anthropic,
+        .protocol = .anthropic_messages,
     }};
     const models = [_]account_contract.ModelView{
         .{ .id = "fixture-model", .display_name = "Fixture model" },
@@ -9212,7 +9888,7 @@ test "Account default model changes do not bump credentials" {
     });
     control.finishAccountCommitNoFail();
 
-    try std.testing.expectEqual(@as(u64, 1), control.account_execution.generation());
+    try std.testing.expectEqual(@as(u64, 1), control.execution_state.generation());
     try std.testing.expectEqualStrings(
         "fixture-model-2",
         control.accountView().selected_model,
@@ -9227,7 +9903,7 @@ test "busy Task model selection keeps only the last runtime pending model" {
         .id = "key-1",
         .name = "Primary",
         .suffix = "1234",
-        .provider_kind = .anthropic,
+        .protocol = .anthropic_messages,
     }};
     const models = [_]account_contract.ModelView{
         .{ .id = "fixture-model", .display_name = "Fixture model" },
@@ -9278,7 +9954,7 @@ test "Task can leave a removed model only within its exact Metask authority" {
         .id = "key-1",
         .name = "Primary",
         .suffix = "1234",
-        .provider_kind = .anthropic,
+        .protocol = .anthropic_messages,
     }};
     const models = [_]account_contract.ModelView{.{
         .id = "fixture-model-2",
@@ -9325,22 +10001,22 @@ test "user Model Connection cannot consume the current Metask catalog" {
         "connection-1",
         "fixture-model",
     );
-    account_execution.testing.installModelConnectionBinding(
-        &control.account_execution,
+    execution_state.testing.installModelConnectionBinding(
+        &control.execution_state,
         &binding,
     );
 
     const task = &control.task_runtime.tasks[0].?;
-    try std.testing.expect(!control.account_execution.taskModelSelectionAuthorized(.{
+    try std.testing.expect(!control.execution_state.taskModelSelectionAuthorized(.{
         .generation = task.durable.execution_generation,
-        .provider = accountProviderKind(task.durable.execution_provider),
-    }, control.account_execution.catalogGeneration(), task.durable.execution_model));
+        .protocol = task.durable.execution_protocol,
+    }, control.execution_state.catalogGeneration(), task.durable.execution_model));
     try std.testing.expectError(
         error.StaleCatalog,
         control.selectTaskModel(
             task.durable.id,
             task.durable.execution_model,
-            control.account_execution.catalogGeneration(),
+            control.execution_state.catalogGeneration(),
             task.durable.execution_model,
         ),
     );
@@ -9369,7 +10045,7 @@ test "clearing the admission default preserves active Task execution" {
     control.endExecutionReplacementNoFail();
     control.finishAccountCommitNoFail();
 
-    try std.testing.expect(!control.account_execution.ready());
+    try std.testing.expect(!control.execution_state.ready());
     try std.testing.expect(!control.accountView().can_create_task);
     const preserved = try control.task_runtime.testExecutionInput(task.durable.id);
     try std.testing.expectEqual(@as(u64, 1), preserved.execution_generation);
@@ -9502,7 +10178,7 @@ test "clearing the last default execution scrubs its credential before secure ze
     control.endExecutionReplacementNoFail();
     control.finishAccountCommitNoFail();
 
-    try std.testing.expectEqual(@as(usize, 0), control.account_execution.credential().len);
+    try std.testing.expectEqual(@as(usize, 0), control.execution_state.credential().len);
     var snapshot_storage: [96 * 1024]u8 = undefined;
     const snapshot = try control.writeSnapshot(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null);
@@ -9511,8 +10187,8 @@ test "clearing the last default execution scrubs its credential before secure ze
 test "known credential matching chooses the longest overlapping secret" {
     var control = try testRuntime();
     defer control.deinit();
-    account_execution.testing.setCredentialBytes(
-        &control.account_execution,
+    execution_state.testing.setCredentialBytes(
+        &control.execution_state,
         "SECRET",
     );
 
@@ -9534,8 +10210,8 @@ test "known credential matching chooses the longest overlapping secret" {
 test "opaque credential redaction preserves UTF-8 projection validity" {
     var control = try testRuntime();
     defer control.deinit();
-    account_execution.testing.setCredentialBytes(
-        &control.account_execution,
+    execution_state.testing.setCredentialBytes(
+        &control.execution_state,
         &[_]u8{0xa9},
     );
 
@@ -10138,7 +10814,7 @@ test "AgentCore RunState refines typed activity without owning RunPhase and reje
     try std.testing.expectEqual(host_phase, run.active_phase);
 }
 
-test "provider retry is replaced by the next forward activity" {
+test "protocol retry is replaced by the next forward activity" {
     var control = try testRuntime();
     defer control.deinit();
     const task = &control.task_runtime.tasks[0].?;
@@ -10279,9 +10955,10 @@ test "event projection failure routes by Agent Session identity not product Task
 test "Runtime shutdown releases current and Task-owned execution generations" {
     var control = try testRuntime();
     try control.beginDefaultExecutionReplacement();
-    var replacement = try account_contract.OwnedExecutionConfig.initOwned(
+    var replacement = try execution_contract.OwnedConfig.initOwned(
         std.testing.allocator,
-        .anthropic,
+        .metask,
+        .anthropic_messages,
         try std.testing.allocator.dupe(u8, "fixture-model-2"),
         try std.testing.allocator.dupe(
             u8,
@@ -10296,7 +10973,7 @@ test "Runtime shutdown releases current and Task-owned execution generations" {
         .id = "key-2",
         .name = "Secondary",
         .suffix = "5678",
-        .provider_kind = .anthropic,
+        .protocol = .anthropic_messages,
     }};
     const replacement_models = [_]account_contract.ModelView{.{
         .id = "fixture-model-2",
@@ -10632,7 +11309,7 @@ fn installMaximumAccountProjection(control: *Runtime) !void {
             .id = id,
             .name = &api_key_name,
             .suffix = &api_key_suffix,
-            .provider_kind = .anthropic,
+            .protocol = .anthropic_messages,
         };
     }
     const models = try std.testing.allocator.alloc(
@@ -10777,7 +11454,7 @@ test "default snapshot budget contains the maximum structural projection" {
                 .id = @intCast(run_index + 1),
                 .generation = @intCast(run_index + 1),
                 .execution_generation = 1,
-                .execution_provider = .anthropic,
+                .execution_protocol = .anthropic_messages,
                 .execution_model = execution_model,
                 .permission_profile = .approval_required,
                 .permission_interaction = .interactive,
@@ -10832,7 +11509,7 @@ test "default snapshot budget contains the maximum structural projection" {
                 .id = @intCast(task_index + 1),
                 .recent_order = @intCast(task_index + 1),
                 .execution_generation = 1,
-                .execution_provider = .anthropic,
+                .execution_protocol = .anthropic_messages,
                 .execution_model = execution_model,
                 .permission_profile = .approval_required,
                 .permission_interaction = .interactive,
@@ -11247,13 +11924,13 @@ test "assistant credential redaction finalizes ordinary chunks without rescannin
 
     for (0..4096) |_| {
         try control.appendTrackedText(assistant, "x", control.limits.max_assistant_message_bytes);
-        try std.testing.expect(!control.redactTrackedText(assistant, control.account_execution.credential()));
+        try std.testing.expect(!control.redactTrackedText(assistant, control.execution_state.credential()));
         try std.testing.expectEqual(assistant.list.items.len, assistant.committed_len);
     }
     try std.testing.expectEqual(@as(usize, 4096), assistant.list.items.len);
 
     try control.appendTrackedText(assistant, "SECRET-", control.limits.max_assistant_message_bytes);
-    try std.testing.expect(!control.redactTrackedText(assistant, control.account_execution.credential()));
+    try std.testing.expect(!control.redactTrackedText(assistant, control.execution_state.credential()));
     try std.testing.expectEqual(assistant.list.items.len - "SECRET-".len, assistant.committed_len);
     const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
     run.commentary_count = 1;
@@ -11264,13 +11941,13 @@ test "assistant credential redaction finalizes ordinary chunks without rescannin
     try std.testing.expect(std.mem.indexOf(u8, pending_snapshot, "SECRET-") == null);
 
     try control.appendTrackedText(assistant, "KEY", control.limits.max_assistant_message_bytes);
-    try std.testing.expect(control.redactTrackedText(assistant, control.account_execution.credential()));
+    try std.testing.expect(control.redactTrackedText(assistant, control.execution_state.credential()));
     try std.testing.expectEqual(assistant.list.items.len, assistant.committed_len);
     try std.testing.expect(std.mem.endsWith(u8, assistant.list.items, "***"));
     run.commentary_ends[0] = @intCast(assistant.committed_len);
 
     try control.appendTrackedText(assistant, " tail SECRET-", control.limits.max_assistant_message_bytes);
-    try std.testing.expect(!control.redactTrackedText(assistant, control.account_execution.credential()));
+    try std.testing.expect(!control.redactTrackedText(assistant, control.execution_state.credential()));
     run.commentary_ends[0] = @intCast(assistant.committed_len);
     try std.testing.expect(commitTerminal(
         run,
@@ -11544,7 +12221,7 @@ test "tool projection truncates on UTF-8 boundaries and records bounded UI histo
     const projected = try control.copyProjected(
         long,
         control.limits.max_tool_field_bytes,
-        control.account_execution.credential(),
+        control.execution_state.credential(),
     );
     defer control.freeTracked(projected.value);
     try std.testing.expect(projected.truncated);

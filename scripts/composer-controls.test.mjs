@@ -310,13 +310,13 @@ const readySettingsAccount = {
       selectionId: "key-1",
       name: "Primary",
       suffix: "1234",
-      provider: "anthropic",
+      protocol: "anthropic_messages",
     },
     {
       selectionId: "key-2",
       name: "Backup",
       suffix: "5678",
-      provider: "openai",
+      protocol: "openai_chat_completions",
     },
   ],
   models: [

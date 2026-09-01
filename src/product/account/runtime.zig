@@ -2,6 +2,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const contract = @import("metawork_account_contract");
+const execution_contract = @import("metawork_product_execution_contract");
 const state_impl = @import("account_state");
 const metask_client = @import("metask_client");
 const credential_store = @import("account_credential_store");
@@ -11,34 +12,11 @@ const login_attempt = @import("account_login_attempt");
 const catalog_impl = @import("account_catalog");
 const credentials_impl = @import("account_credentials_runtime");
 const network_attempt = @import("account_network_attempt");
-const model_connections_impl = @import("account_model_connections");
 
 const refresh_timer_id: u64 = 0x4d57_4143_4354_5246;
 const refresh_skew_seconds: i64 = 60;
 const refresh_retry_ns: u64 = 30 * std.time.ns_per_s;
 const account_path_capacity = 4096;
-
-fn modelConnectionErrorCode(err: anyerror) contract.ErrorCode {
-    return switch (err) {
-        error.ConnectionNotFound => .model_connection_not_found,
-        error.GenerationMismatch => .generation_mismatch,
-        error.ModelNotFound => .no_models,
-        error.Capacity => .local_resource_exhausted,
-        error.InvalidConnection => .model_connection_invalid,
-        error.OutOfMemory => .local_resource_exhausted,
-        else => .model_connection_invalid,
-    };
-}
-
-fn modelConnectionResolutionErrorCode(err: anyerror) contract.ErrorCode {
-    return switch (err) {
-        error.ConnectionNotFound => .model_connection_not_found,
-        error.GenerationMismatch => .generation_mismatch,
-        error.ModelNotFound => .no_models,
-        error.OutOfMemory => .local_resource_exhausted,
-        else => .model_connection_capture_unavailable,
-    };
-}
 
 pub const WakeSink = struct {
     context: *anyopaque,
@@ -505,7 +483,7 @@ pub const Prepared = struct {
 
     pub fn takeExecution(
         self: *Prepared,
-    ) ?contract.OwnedExecutionConfig {
+    ) ?execution_contract.OwnedConfig {
         return self.transition.takeExecution();
     }
 
@@ -533,11 +511,6 @@ pub const Prepared = struct {
         self.schedule_refresh_after_commit = false;
         self.retry_refresh_after_commit = false;
     }
-};
-
-pub const ModelConnectionExecutionPreparation = union(enum) {
-    ready: contract.OwnedExecutionConfig,
-    rejected: contract.ErrorCode,
 };
 
 pub const PrepareResult = union(enum) {
@@ -569,9 +542,6 @@ pub const Runtime = struct {
         attempt_id: u64,
         value: credential_store.Preference,
     } = null,
-    model_connections: model_connections_impl.Registry,
-    model_connection_store: ?model_connections_impl.FileStore = null,
-    model_connection_store_healthy: bool = false,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -598,7 +568,6 @@ pub const Runtime = struct {
                 loopback_endpoint,
                 wake,
             ),
-            .model_connections = model_connections_impl.Registry.init(allocator),
         };
         @memcpy(runtime.account_path_storage[0..account_path.len], account_path);
         return runtime;
@@ -607,11 +576,8 @@ pub const Runtime = struct {
     pub fn deinit(self: *Runtime) void {
         self.assertMainThread();
         std.debug.assert(self.platform == null);
-        if (self.model_connection_store) |*store| store.deinit();
-        self.model_connection_store = null;
         self.effects.deinit();
         self.credentials.deinit();
-        self.model_connections.deinit();
         self.saved_preference = null;
         self.pending_default_preference = null;
         self.committed_public_catalog.clear();
@@ -627,7 +593,6 @@ pub const Runtime = struct {
         self.assertMainThread();
         std.debug.assert(self.platform == null);
         self.platform = platform;
-        self.restoreModelConnections();
         return self.prepareRestore();
     }
 
@@ -760,6 +725,16 @@ pub const Runtime = struct {
         return preparedFromState(self.account.prepareCompletion(&completion));
     }
 
+    pub fn prepareCommittedPhaseFailure(
+        self: *Runtime,
+        error_code: contract.ErrorCode,
+    ) Prepared {
+        self.assertMainThread();
+        return preparedFromState(
+            self.account.prepareCommittedPhaseFailure(error_code),
+        );
+    }
+
     pub fn prepareShutdown(self: *Runtime) Prepared {
         self.assertMainThread();
         return .{ .transition = self.account.prepareShutdown() };
@@ -824,323 +799,9 @@ pub const Runtime = struct {
         self.assertMainThread();
         var result = self.account.view();
         self.decorateView(&result);
-        result.model_connections = self.model_connections.views();
         contract.validateView(result) catch
             @panic("Account Runtime produced an invalid canonical AccountView");
         return result;
-    }
-
-    /// Synchronous metadata mutation port for the Account-owned user model
-    /// registry. Secret capture and execution installation remain separate
-    /// Host/Workbench operations; this port accepts only an opaque slot.
-    pub fn submitModelConnectionCommand(
-        self: *Runtime,
-        command: contract.ModelConnectionCommand,
-    ) contract.AccountCommandResult {
-        return self.submitModelConnectionCommandWithExecutionGeneration(
-            command,
-            null,
-        );
-    }
-
-    pub fn submitModelConnectionCommandWithExecutionGeneration(
-        self: *Runtime,
-        command: contract.ModelConnectionCommand,
-        execution_generation: ?u64,
-    ) contract.AccountCommandResult {
-        self.assertMainThread();
-        contract.validateModelConnectionCommand(command) catch
-            return .rejected(.model_connection_invalid);
-        if (!self.model_connection_store_healthy)
-            return .rejected(.model_connection_persistence_unavailable);
-        var candidate = self.model_connections.clone() catch |err|
-            return .rejected(modelConnectionErrorCode(err));
-        defer candidate.deinit();
-        switch (command) {
-            .create => |value| candidate.create(value) catch |err|
-                return .rejected(modelConnectionErrorCode(err)),
-            .update => |value| candidate.update(value) catch |err|
-                return .rejected(modelConnectionErrorCode(err)),
-            .remove => |value| candidate.remove(value) catch |err|
-                return .rejected(modelConnectionErrorCode(err)),
-            .test_connection => |value| candidate.markTesting(
-                value.selection,
-                value.model_id,
-            ) catch |err| return .rejected(modelConnectionErrorCode(err)),
-            .select_default => |value| candidate.selectDefault(
-                value.selection,
-                value.model_id,
-                execution_generation orelse return .rejected(.model_connection_invalid),
-            ) catch |err| return .rejected(modelConnectionErrorCode(err)),
-        }
-        const encoded = model_connections_impl.encodeAlloc(
-            self.allocator,
-            &candidate,
-        ) catch |err| return .rejected(modelConnectionErrorCode(err));
-        defer self.allocator.free(encoded);
-        const store = if (self.model_connection_store) |*value| value else return .rejected(.model_connection_persistence_unavailable);
-        store.commit(encoded) catch |err| {
-            if (err == error.PersistenceOutcomeUnknown)
-                self.model_connection_store_healthy = false;
-            return .rejected(.model_connection_persistence_unavailable);
-        };
-        self.model_connections.replace(&candidate);
-        self.drainModelConnectionCredentialCleanup();
-        return .acceptedAttempt(null);
-    }
-
-    pub fn completeModelConnectionTest(
-        self: *Runtime,
-        command: contract.ModelConnectionTestCommand,
-        succeeded: bool,
-    ) contract.AccountCommandResult {
-        self.assertMainThread();
-        if (!self.model_connection_store_healthy)
-            return .rejected(.model_connection_persistence_unavailable);
-        var candidate = self.model_connections.clone() catch |err|
-            return .rejected(modelConnectionErrorCode(err));
-        defer candidate.deinit();
-        candidate.completeTest(
-            command.selection,
-            command.model_id,
-            succeeded,
-        ) catch |err| return .rejected(modelConnectionErrorCode(err));
-        const encoded = model_connections_impl.encodeAlloc(
-            self.allocator,
-            &candidate,
-        ) catch |err| return .rejected(modelConnectionErrorCode(err));
-        defer self.allocator.free(encoded);
-        const store = if (self.model_connection_store) |*value| value else return .rejected(.model_connection_persistence_unavailable);
-        store.commit(encoded) catch |err| {
-            if (err == error.PersistenceOutcomeUnknown)
-                self.model_connection_store_healthy = false;
-            return .rejected(.model_connection_persistence_unavailable);
-        };
-        self.model_connections.replace(&candidate);
-        return .acceptedAttempt(null);
-    }
-
-    pub fn modelConnectionDefaultBinding(
-        self: *const Runtime,
-    ) ?model_connections_impl.Registry.DefaultBinding {
-        self.assertMainThread();
-        return self.model_connections.defaultBinding();
-    }
-
-    pub fn clearModelConnectionDefault(self: *Runtime) contract.AccountCommandResult {
-        self.assertMainThread();
-        if (!self.model_connection_store_healthy)
-            return .rejected(.model_connection_persistence_unavailable);
-        var candidate = self.model_connections.clone() catch |err|
-            return .rejected(modelConnectionErrorCode(err));
-        defer candidate.deinit();
-        if (!candidate.clearDefault()) return .acceptedAttempt(null);
-        const encoded = model_connections_impl.encodeAlloc(
-            self.allocator,
-            &candidate,
-        ) catch |err| return .rejected(modelConnectionErrorCode(err));
-        defer self.allocator.free(encoded);
-        const store = if (self.model_connection_store) |*value| value else return .rejected(.model_connection_persistence_unavailable);
-        store.commit(encoded) catch |err| {
-            if (err == error.PersistenceOutcomeUnknown)
-                self.model_connection_store_healthy = false;
-            return .rejected(.model_connection_persistence_unavailable);
-        };
-        self.model_connections.replace(&candidate);
-        return .acceptedAttempt(null);
-    }
-
-    /// Creates a connection across the non-secret registry and platform
-    /// credential store without exposing an intermediate slot. A persisted
-    /// deletion tombstone precedes the credential write and is removed in the
-    /// same registry commit that publishes the connection. Definite failures
-    /// drain the tombstone immediately; outcome-unknown failures recover on
-    /// restart and never install a new default execution.
-    pub fn createModelConnectionWithCredential(
-        self: *Runtime,
-        secret: []const u8,
-        spec: contract.ModelConnectionSpec,
-        model_id: []const u8,
-        model_display_name: []const u8,
-    ) contract.AccountCommandResult {
-        self.assertMainThread();
-        if (!self.model_connection_store_healthy)
-            return .rejected(.model_connection_persistence_unavailable);
-        contract.validateModelConnectionSpec(spec) catch
-            return .rejected(.model_connection_invalid);
-        if (model_id.len == 0 or model_id.len > contract.Limits.model_id_bytes or
-            model_display_name.len > contract.Limits.model_display_name_bytes or
-            secret.len == 0 or secret.len > contract.Limits.api_key_bytes or
-            !std.unicode.utf8ValidateSlice(model_id) or
-            !std.unicode.utf8ValidateSlice(model_display_name))
-            return .rejected(.model_connection_invalid);
-        const platform = self.platform orelse return .rejected(.model_connection_capture_unavailable);
-        var slot_storage: [ports_impl.model_connection_slot_bytes]u8 = undefined;
-        const slot_id = platform.model_credentials.generateSlot(
-            &slot_storage,
-        ) catch return .rejected(.credential_store_write_failed);
-
-        var reserved = self.model_connections.clone() catch |err|
-            return .rejected(modelConnectionErrorCode(err));
-        defer reserved.deinit();
-        reserved.reserveCredentialDeletion(slot_id) catch |err|
-            return .rejected(modelConnectionErrorCode(err));
-        const reserved_bytes = model_connections_impl.encodeAlloc(
-            self.allocator,
-            &reserved,
-        ) catch |err| return .rejected(modelConnectionErrorCode(err));
-        defer self.allocator.free(reserved_bytes);
-        const store = if (self.model_connection_store) |*value| value else return .rejected(.model_connection_persistence_unavailable);
-        store.commit(reserved_bytes) catch |err| {
-            if (err == error.PersistenceOutcomeUnknown)
-                self.model_connection_store_healthy = false;
-            return .rejected(.model_connection_persistence_unavailable);
-        };
-        self.model_connections.replace(&reserved);
-
-        platform.model_credentials.store(slot_id, secret) catch {
-            self.drainModelConnectionCredentialCleanup();
-            return .rejected(.credential_store_write_failed);
-        };
-
-        var committed = self.model_connections.clone() catch |err| {
-            self.drainModelConnectionCredentialCleanup();
-            return .rejected(modelConnectionErrorCode(err));
-        };
-        defer committed.deinit();
-        committed.create(.{
-            .connection_id = slot_id,
-            .spec = spec,
-            .credential_slot = .{ .id = slot_id },
-            .model_id = model_id,
-            .model_display_name = model_display_name,
-        }) catch |err| {
-            self.drainModelConnectionCredentialCleanup();
-            return .rejected(modelConnectionErrorCode(err));
-        };
-        committed.completeCredentialDeletion(slot_id) catch {
-            self.drainModelConnectionCredentialCleanup();
-            return .rejected(.model_connection_invalid);
-        };
-        const committed_bytes = model_connections_impl.encodeAlloc(
-            self.allocator,
-            &committed,
-        ) catch |err| {
-            self.drainModelConnectionCredentialCleanup();
-            return .rejected(modelConnectionErrorCode(err));
-        };
-        defer self.allocator.free(committed_bytes);
-        store.commit(committed_bytes) catch |err| {
-            if (err == error.PersistenceOutcomeUnknown) {
-                self.model_connection_store_healthy = false;
-            } else {
-                self.drainModelConnectionCredentialCleanup();
-            }
-            return .rejected(.model_connection_persistence_unavailable);
-        };
-        self.model_connections.replace(&committed);
-        return .acceptedAttempt(null);
-    }
-
-    pub fn resolveModelConnectionExecution(
-        self: *Runtime,
-        selection: contract.ModelConnectionSelectionCommand,
-        model_id: []const u8,
-        execution_generation: u64,
-    ) !contract.OwnedExecutionConfig {
-        self.assertMainThread();
-        const binding = try self.model_connections.executionBinding(
-            selection,
-            model_id,
-            execution_generation,
-        );
-        return self.resolveModelConnectionBinding(binding);
-    }
-
-    pub fn nextExecutionGeneration(
-        self: *Runtime,
-        current_generation: u64,
-    ) !u64 {
-        self.assertMainThread();
-        return generateExecutionGeneration(self.io, current_generation);
-    }
-
-    pub fn prepareModelConnectionExecution(
-        self: *Runtime,
-        selection: contract.ModelConnectionSelectionCommand,
-        model_id: []const u8,
-        execution_generation: u64,
-    ) ModelConnectionExecutionPreparation {
-        return .{ .ready = self.resolveModelConnectionExecution(
-            selection,
-            model_id,
-            execution_generation,
-        ) catch |err| return .{
-            .rejected = modelConnectionResolutionErrorCode(err),
-        } };
-    }
-
-    pub fn resolveModelConnectionProbeExecution(
-        self: *Runtime,
-        selection: contract.ModelConnectionSelectionCommand,
-        model_id: []const u8,
-        execution_generation: u64,
-    ) !contract.OwnedExecutionConfig {
-        self.assertMainThread();
-        const binding = try self.model_connections.probeBinding(
-            selection,
-            model_id,
-            execution_generation,
-        );
-        return self.resolveModelConnectionBinding(binding);
-    }
-
-    fn resolveModelConnectionBinding(
-        self: *Runtime,
-        binding: model_connections_impl.Registry.DefaultBinding,
-    ) !contract.OwnedExecutionConfig {
-        const platform = self.platform orelse return error.CredentialStoreUnavailable;
-        var secret_storage: [contract.Limits.api_key_bytes]u8 = undefined;
-        defer std.crypto.secureZero(u8, &secret_storage);
-        const secret = (try platform.model_credentials.get(
-            binding.connection_id,
-            &secret_storage,
-        )) orelse return error.CredentialNotFound;
-        return try contract.OwnedExecutionConfig.initModelConnectionOwned(
-            self.allocator,
-            binding.protocol,
-            try self.allocator.dupe(u8, binding.model_id),
-            try self.allocator.dupe(u8, binding.normalized_base_url),
-            binding.execution_generation,
-            try self.allocator.dupe(u8, secret),
-            binding.connection_id,
-        );
-    }
-
-    pub fn resolveDefaultModelConnectionExecution(
-        self: *Runtime,
-    ) !?contract.OwnedExecutionConfig {
-        self.assertMainThread();
-        const binding = self.model_connections.defaultBinding() orelse return null;
-        const platform = self.platform orelse return error.CredentialStoreUnavailable;
-        var secret_storage: [contract.Limits.api_key_bytes]u8 = undefined;
-        defer std.crypto.secureZero(u8, &secret_storage);
-        const secret = (try platform.model_credentials.get(
-            binding.connection_id,
-            &secret_storage,
-        )) orelse {
-            self.markModelConnectionCredentialMissing(binding);
-            return null;
-        };
-        return try contract.OwnedExecutionConfig.initModelConnectionOwned(
-            self.allocator,
-            binding.protocol,
-            try self.allocator.dupe(u8, binding.model_id),
-            try self.allocator.dupe(u8, binding.normalized_base_url),
-            binding.execution_generation,
-            try self.allocator.dupe(u8, secret),
-            binding.connection_id,
-        );
     }
 
     pub fn preparedFact(
@@ -1528,9 +1189,6 @@ pub const Runtime = struct {
             .shutdown => {
                 self.cancelRefreshTimer();
                 self.effects.cancelJoinAndDiscard();
-                if (self.model_connection_store) |*store| store.deinit();
-                self.model_connection_store = null;
-                self.model_connection_store_healthy = false;
                 self.platform = null;
             },
             .refresh_token => {
@@ -1616,96 +1274,6 @@ pub const Runtime = struct {
                 argument orelse
                     @panic("execution effect has no model"),
             ),
-        }
-    }
-
-    fn restoreModelConnections(self: *Runtime) void {
-        std.debug.assert(self.model_connection_store == null);
-        self.model_connection_store = model_connections_impl.FileStore.init(
-            self.io,
-            self.account_path_storage[0..self.account_path_len],
-        ) catch return;
-        self.model_connection_store_healthy = true;
-        const bytes_optional = self.model_connection_store.?.loadAlloc(
-            self.allocator,
-        ) catch {
-            self.model_connection_store_healthy = false;
-            return;
-        };
-        const bytes = bytes_optional orelse return;
-        defer self.allocator.free(bytes);
-        var restored = model_connections_impl.decode(
-            self.allocator,
-            bytes,
-        ) catch {
-            self.model_connection_store_healthy = false;
-            return;
-        };
-        if (restored.reconcileInterruptedTests()) {
-            const reconciled = model_connections_impl.encodeAlloc(
-                self.allocator,
-                &restored,
-            ) catch {
-                self.model_connection_store_healthy = false;
-                self.model_connections.replace(&restored);
-                restored.deinit();
-                return;
-            };
-            defer self.allocator.free(reconciled);
-            self.model_connection_store.?.commit(reconciled) catch {
-                self.model_connection_store_healthy = false;
-            };
-        }
-        self.model_connections.replace(&restored);
-        restored.deinit();
-        self.drainModelConnectionCredentialCleanup();
-    }
-
-    fn markModelConnectionCredentialMissing(
-        self: *Runtime,
-        binding: model_connections_impl.Registry.DefaultBinding,
-    ) void {
-        self.model_connections.markCredentialMissing(.{
-            .connection_id = binding.connection_id,
-            .expected_connection_generation = binding.connection_generation,
-        }) catch return;
-        const encoded = model_connections_impl.encodeAlloc(
-            self.allocator,
-            &self.model_connections,
-        ) catch {
-            self.model_connection_store_healthy = false;
-            return;
-        };
-        defer self.allocator.free(encoded);
-        const store = if (self.model_connection_store) |*value| value else {
-            self.model_connection_store_healthy = false;
-            return;
-        };
-        store.commit(encoded) catch {
-            self.model_connection_store_healthy = false;
-        };
-    }
-
-    fn drainModelConnectionCredentialCleanup(self: *Runtime) void {
-        if (!self.model_connection_store_healthy) return;
-        const platform = self.platform orelse return;
-        while (self.model_connections.nextCredentialDeletion()) |connection_id| {
-            platform.model_credentials.delete(connection_id) catch return;
-            var candidate = self.model_connections.clone() catch return;
-            defer candidate.deinit();
-            candidate.completeCredentialDeletion(connection_id) catch return;
-            const encoded = model_connections_impl.encodeAlloc(
-                self.allocator,
-                &candidate,
-            ) catch return;
-            defer self.allocator.free(encoded);
-            const store = if (self.model_connection_store) |*value| value else return;
-            store.commit(encoded) catch |err| {
-                if (err == error.PersistenceOutcomeUnknown)
-                    self.model_connection_store_healthy = false;
-                return;
-            };
-            self.model_connections.replace(&candidate);
         }
     }
 
@@ -2144,12 +1712,12 @@ pub const TestSupport = if (builtin.is_test) struct {
 
     pub fn prepareReadyRestore(
         runtime: *Runtime,
-        execution: *contract.OwnedExecutionConfig,
+        execution: *execution_contract.OwnedConfig,
     ) !Prepared {
         const input = execution.input();
         runtime.committed_public_catalog.replaceRestoredSelection(
             "key-1",
-            input.target.provider_kind,
+            input.target.protocol,
             input.target.model,
         );
         return .{ .transition = try state_impl.TestSupport.prepareReady(
@@ -2192,6 +1760,85 @@ pub const TestSupport = if (builtin.is_test) struct {
         };
         return preparedFromState(runtime.account.prepareCompletion(&completion));
     }
+
+    pub fn prepareExecutionReady(
+        runtime: *Runtime,
+        execution: *execution_contract.OwnedConfig,
+    ) !Prepared {
+        state_impl.TestSupport.installInitialExecutionPreparation(
+            &runtime.account,
+            "key-1",
+            execution.input().target.model,
+        );
+        try catalog_impl.TestSupport.replaceOwnedSelection(
+            &runtime.effects.catalog,
+            "account-1",
+            .{
+                .id = "key-1",
+                .name = "Primary",
+                .suffix = "1234",
+                .protocol = execution.input().target.protocol,
+            },
+            execution.input().api_key,
+            &.{.{
+                .id = execution.input().target.model,
+                .display_name = "Model",
+            }},
+        );
+        catalog_impl.TestSupport.replacePublic(
+            &runtime.candidate_public_catalog,
+            &.{.{
+                .id = "key-1",
+                .name = "Primary",
+                .suffix = "1234",
+                .protocol = execution.input().target.protocol,
+            }},
+            &.{.{
+                .id = execution.input().target.model,
+                .display_name = "Model",
+            }},
+        );
+        runtime.candidate_catalog_attempt_id = 1;
+        runtime.saved_preference = try .init(
+            "account-1",
+            "key-1",
+            execution.input().target.model,
+            execution.input().execution_generation,
+        );
+        var completion: state_impl.WorkerCompletion = .{
+            .attempt_id = 1,
+            .payload = .{ .execution_ready = execution.take() },
+        };
+        defer completion.deinit();
+        return preparedFromState(runtime.account.prepareCompletion(&completion));
+    }
+
+    pub fn savedPreferenceExecutionGeneration(runtime: *const Runtime) ?u64 {
+        const preference = runtime.saved_preference orelse return null;
+        return preference.execution_generation;
+    }
+
+    pub fn prepareLoggedOutAfterExternalCommit(runtime: *Runtime) Prepared {
+        var begin = switch (runtime.prepareCommand(.logout)) {
+            .prepared => |prepared| prepared,
+            else => @panic("test Account cannot begin logout"),
+        };
+        defer begin.deinit();
+        _ = begin.transition.takeEffect() orelse
+            @panic("test logout has no persistence effect");
+        runtime.commit(&begin);
+        runtime.saved_preference = null;
+        runtime.credentials.clear();
+        runtime.effects.clearCatalog();
+        runtime.candidate_public_catalog.clear();
+        runtime.candidate_catalog_attempt_id = null;
+        var completion: state_impl.WorkerCompletion = .{
+            .attempt_id = runtime.account.activeAttempt() orelse
+                @panic("test logout has no active attempt"),
+            .payload = .logged_out,
+        };
+        return preparedFromState(runtime.account.prepareCompletion(&completion));
+    }
 } else struct {};
 
 fn wrapPrepareResult(result: state_impl.PrepareResult) PrepareResult {
@@ -2225,7 +1872,7 @@ fn accountSelectionCommand(
 }
 
 const CatalogExecutionPreparation = union(enum) {
-    ready: contract.OwnedExecutionConfig,
+    ready: execution_contract.OwnedConfig,
     rejected: contract.ErrorCode,
 };
 
@@ -2323,12 +1970,6 @@ const TestPlatform = struct {
     refresh_token: ?[]const u8 = null,
     preference: ?credential_store.Preference = null,
     preference_commit_mode: PreferenceCommitMode = .normal,
-    model_slot: [ports_impl.model_connection_slot_bytes]u8 = undefined,
-    model_slot_len: usize = 0,
-    next_model_slot: u128 = 1,
-    model_secret: [contract.Limits.api_key_bytes]u8 = undefined,
-    model_secret_len: usize = 0,
-    model_present: bool = false,
 
     fn platform(self: *TestPlatform) ports_impl.Platform {
         return .{
@@ -2349,13 +1990,6 @@ const TestPlatform = struct {
                 .context = self,
                 .start_fn = startTimer,
                 .cancel_fn = cancelTimer,
-            },
-            .model_credentials = .{
-                .context = self,
-                .generate_slot_fn = generateModelSlot,
-                .store_fn = storeModelCredential,
-                .get_fn = getModelCredential,
-                .delete_fn = deleteModelCredential,
             },
         };
     }
@@ -2410,57 +2044,6 @@ const TestPlatform = struct {
     fn openAuthorizationUrl(_: *anyopaque, _: []const u8) !void {}
     fn startTimer(_: *anyopaque, _: u64, _: u64, _: bool) !void {}
     fn cancelTimer(_: *anyopaque, _: u64) !void {}
-
-    fn generateModelSlot(
-        context: *anyopaque,
-        output: *[ports_impl.model_connection_slot_bytes]u8,
-    ) credential_store.StoreError!void {
-        const self: *TestPlatform = @ptrCast(@alignCast(context));
-        _ = std.fmt.bufPrint(output, "{s}{x:0>32}", .{
-            ports_impl.model_connection_slot_prefix,
-            self.next_model_slot,
-        }) catch return error.WriteFailed;
-        self.next_model_slot += 1;
-    }
-
-    fn storeModelCredential(
-        context: *anyopaque,
-        slot: []const u8,
-        secret: []const u8,
-    ) credential_store.StoreError!void {
-        const self: *TestPlatform = @ptrCast(@alignCast(context));
-        if (slot.len > self.model_slot.len or secret.len > self.model_secret.len)
-            return error.WriteFailed;
-        @memcpy(self.model_slot[0..slot.len], slot);
-        @memcpy(self.model_secret[0..secret.len], secret);
-        self.model_slot_len = slot.len;
-        self.model_secret_len = secret.len;
-        self.model_present = true;
-    }
-
-    fn getModelCredential(
-        context: *anyopaque,
-        slot: []const u8,
-        output: []u8,
-    ) credential_store.StoreError!?[]const u8 {
-        const self: *TestPlatform = @ptrCast(@alignCast(context));
-        if (!self.model_present or
-            !std.mem.eql(u8, slot, self.model_slot[0..self.model_slot_len]))
-            return null;
-        if (self.model_secret_len > output.len) return error.ReadFailed;
-        @memcpy(output[0..self.model_secret_len], self.model_secret[0..self.model_secret_len]);
-        return output[0..self.model_secret_len];
-    }
-
-    fn deleteModelCredential(
-        context: *anyopaque,
-        slot: []const u8,
-    ) credential_store.StoreError!void {
-        const self: *TestPlatform = @ptrCast(@alignCast(context));
-        if (self.model_present and
-            std.mem.eql(u8, slot, self.model_slot[0..self.model_slot_len]))
-            self.model_present = false;
-    }
 };
 
 fn testingPerform(
@@ -2496,7 +2079,7 @@ test "Account Runtime owns automatic catalog selection policy" {
             .id = "key-current",
             .name = "Current",
             .suffix = "1234",
-            .provider_kind = .anthropic,
+            .protocol = .anthropic_messages,
         },
         "secret",
         &.{
@@ -2510,7 +2093,7 @@ test "Account Runtime owns automatic catalog selection policy" {
             .id = "key-other",
             .name = "Other",
             .suffix = "5678",
-            .provider_kind = .openai,
+            .protocol = .openai_chat_completions,
         },
         "other-secret",
     );
@@ -2602,7 +2185,7 @@ fn installExecutionPreparationForTest(runtime: *Runtime) !void {
             .id = "key-1",
             .name = "Primary",
             .suffix = "1234",
-            .provider_kind = .anthropic,
+            .protocol = .anthropic_messages,
         },
         "secret-key",
         &.{.{ .id = "model-1", .display_name = "Model 1" }},
@@ -2680,209 +2263,6 @@ test "Account Runtime persists a nonzero nonce for a new execution" {
     );
 }
 
-test "Account Runtime persists and restores a secure model connection default" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var account_path_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const account_path_len = try tmp.dir.realPath(
-        std.testing.io,
-        &account_path_storage,
-    );
-    const account_path = account_path_storage[0..account_path_len];
-    var wake_context: u8 = 0;
-    var fake: TestPlatform = .{};
-    var expected_provider: [contract.Limits.provider_id_bytes]u8 = undefined;
-    var expected_id: []const u8 = &.{};
-
-    {
-        var runtime = try Runtime.init(
-            std.testing.allocator,
-            std.testing.io,
-            std.Thread.getCurrentId(),
-            account_path,
-            testingTransport(),
-            TestSupport.loopbackEndpoint(),
-            .{ .context = &wake_context, .notify_fn = testingWake },
-        );
-        defer runtime.deinit();
-        defer runtime.platform = null;
-        var startup = runtime.prepareStart(fake.platform());
-        defer startup.deinit();
-        const created = runtime.createModelConnectionWithCredential(
-            "provider-secret",
-            .{
-                .display_name = "OpenAI",
-                .protocol = .openai_chat_completions,
-                .normalized_base_url = "https://api.openai.com/v1/chat/completions",
-            },
-            "gpt-5",
-            "GPT-5",
-        );
-        try std.testing.expect(created.accepted);
-        const created_connection_id = runtime.view().model_connections[0].id;
-        var connection_id_storage: [ports_impl.model_connection_slot_bytes]u8 = undefined;
-        @memcpy(
-            connection_id_storage[0..created_connection_id.len],
-            created_connection_id,
-        );
-        const connection_id = connection_id_storage[0..created_connection_id.len];
-        const testing_started = runtime.submitModelConnectionCommand(.{
-            .test_connection = .{
-                .selection = .{
-                    .connection_id = connection_id,
-                    .expected_connection_generation = 1,
-                },
-                .model_id = "gpt-5",
-            },
-        });
-        try std.testing.expect(testing_started.accepted);
-        const tested = runtime.completeModelConnectionTest(.{
-            .selection = .{
-                .connection_id = connection_id,
-                .expected_connection_generation = 1,
-            },
-            .model_id = "gpt-5",
-        }, true);
-        try std.testing.expect(tested.accepted);
-        const selected = runtime.submitModelConnectionCommandWithExecutionGeneration(
-            .{ .select_default = .{
-                .selection = .{
-                    .connection_id = connection_id,
-                    .expected_connection_generation = 1,
-                },
-                .model_id = "gpt-5",
-            } },
-            17,
-        );
-        try std.testing.expect(selected.accepted);
-        var execution = (try runtime.resolveDefaultModelConnectionExecution()) orelse
-            return error.TestUnexpectedResult;
-        defer execution.deinit();
-        expected_id = try std.fmt.bufPrint(&expected_provider, "model_connection:{s}", .{connection_id});
-        try std.testing.expectEqualStrings(expected_id, execution.input().target.provider_id);
-        try std.testing.expectEqual(contract.ModelConnectionProtocol.openai_chat_completions, execution.input().target.protocol);
-        try std.testing.expectEqualStrings("provider-secret", execution.input().api_key);
-        try std.testing.expectEqual(contract.ProviderKind.openai, execution.input().target.provider_kind);
-        try std.testing.expectEqual(@as(u64, 17), execution.input().execution_generation);
-
-        const updated = runtime.submitModelConnectionCommand(.{ .update = .{
-            .selection = .{ .connection_id = connection_id, .expected_connection_generation = 1 },
-            .spec = .{
-                .display_name = "Team gateway",
-                .protocol = .openai_chat_completions,
-                .normalized_base_url = "https://gateway.example.test/v1/chat/completions",
-            },
-        } });
-        try std.testing.expect(updated.accepted);
-        try std.testing.expectEqualStrings(connection_id, runtime.view().model_connections[0].id);
-        try std.testing.expectEqual(@as(u64, 2), runtime.view().model_connections[0].connection_generation);
-        try std.testing.expect((try runtime.resolveDefaultModelConnectionExecution()) == null);
-        const updated_selection: contract.ModelConnectionSelectionCommand = .{
-            .connection_id = connection_id,
-            .expected_connection_generation = 2,
-        };
-        try std.testing.expect(runtime.submitModelConnectionCommand(.{ .test_connection = .{
-            .selection = updated_selection,
-            .model_id = "gpt-5",
-        } }).accepted);
-        try std.testing.expect(runtime.completeModelConnectionTest(.{
-            .selection = updated_selection,
-            .model_id = "gpt-5",
-        }, true).accepted);
-        try std.testing.expect(runtime.submitModelConnectionCommandWithExecutionGeneration(.{ .select_default = .{
-            .selection = updated_selection,
-            .model_id = "gpt-5",
-        } }, 18).accepted);
-        var updated_execution = (try runtime.resolveDefaultModelConnectionExecution()) orelse
-            return error.TestUnexpectedResult;
-        defer updated_execution.deinit();
-        try std.testing.expectEqualStrings(expected_id, updated_execution.input().target.provider_id);
-        try std.testing.expectEqual(@as(u64, 18), updated_execution.input().execution_generation);
-        try std.testing.expectEqualStrings("https://gateway.example.test/v1/chat/completions", updated_execution.input().target.base_url);
-        // A frozen execution keeps its identity and configuration after replacement.
-        try std.testing.expectEqualStrings(expected_id, execution.input().target.provider_id);
-        try std.testing.expectEqualStrings("https://api.openai.com/v1/chat/completions", execution.input().target.base_url);
-        try std.testing.expectEqual(@as(u64, 17), execution.input().execution_generation);
-    }
-
-    {
-        var runtime = try Runtime.init(
-            std.testing.allocator,
-            std.testing.io,
-            std.Thread.getCurrentId(),
-            account_path,
-            testingTransport(),
-            TestSupport.loopbackEndpoint(),
-            .{ .context = &wake_context, .notify_fn = testingWake },
-        );
-        defer runtime.deinit();
-        defer runtime.platform = null;
-        var startup = runtime.prepareStart(fake.platform());
-        defer startup.deinit();
-        try std.testing.expectEqual(@as(usize, 1), runtime.view().model_connections.len);
-        var execution = (try runtime.resolveDefaultModelConnectionExecution()) orelse
-            return error.TestUnexpectedResult;
-        defer execution.deinit();
-        try std.testing.expectEqualStrings(expected_id, execution.input().target.provider_id);
-        try std.testing.expectEqual(contract.ModelConnectionProtocol.openai_chat_completions, execution.input().target.protocol);
-        try std.testing.expectEqualStrings("provider-secret", execution.input().api_key);
-        try std.testing.expectEqualStrings("gpt-5", execution.input().target.model);
-        try std.testing.expectEqual(@as(u64, 18), execution.input().execution_generation);
-        try std.testing.expectEqualStrings("https://gateway.example.test/v1/chat/completions", execution.input().target.base_url);
-    }
-
-    fake.model_present = false;
-
-    {
-        var runtime = try Runtime.init(
-            std.testing.allocator,
-            std.testing.io,
-            std.Thread.getCurrentId(),
-            account_path,
-            testingTransport(),
-            TestSupport.loopbackEndpoint(),
-            .{ .context = &wake_context, .notify_fn = testingWake },
-        );
-        defer runtime.deinit();
-        defer runtime.platform = null;
-        var startup = runtime.prepareStart(fake.platform());
-        defer startup.deinit();
-        try std.testing.expect((try runtime.resolveDefaultModelConnectionExecution()) == null);
-        const missing = runtime.view().model_connections[0];
-        try std.testing.expectEqual(
-            contract.ModelConnectionCredentialStatus.missing,
-            missing.credential_status,
-        );
-        try std.testing.expectEqual(
-            contract.ModelConnectionState.configuring,
-            missing.state,
-        );
-        try std.testing.expect(runtime.modelConnectionDefaultBinding() == null);
-        const connection = runtime.view().model_connections[0];
-        const removed = runtime.submitModelConnectionCommand(.{ .remove = .{
-            .connection_id = connection.id,
-            .expected_connection_generation = connection.connection_generation,
-        } });
-        try std.testing.expect(removed.accepted);
-        try std.testing.expectEqual(@as(usize, 0), runtime.view().model_connections.len);
-        try std.testing.expect(!fake.model_present);
-        const recreated = runtime.createModelConnectionWithCredential("provider-secret", .{
-            .display_name = "Team gateway",
-            .protocol = .openai_chat_completions,
-            .normalized_base_url = "https://gateway.example.test/v1/chat/completions",
-        }, "gpt-5", "GPT-5");
-        try std.testing.expect(recreated.accepted);
-        const replacement = runtime.view().model_connections[0];
-        var replacement_execution = try runtime.resolveModelConnectionProbeExecution(.{
-            .connection_id = replacement.id,
-            .expected_connection_generation = replacement.connection_generation,
-        }, "gpt-5", 19);
-        defer replacement_execution.deinit();
-        try std.testing.expect(!std.mem.eql(u8, expected_id, replacement_execution.input().target.provider_id));
-        try std.testing.expectEqualStrings("provider-secret", replacement_execution.input().api_key);
-    }
-}
-
 test "Account Runtime publishes the candidate catalog with first execution" {
     var wake_context: u8 = 0;
     var runtime = try initRuntimeForTest(&wake_context);
@@ -2900,7 +2280,7 @@ test "Account Runtime publishes the candidate catalog with first execution" {
             .id = "key-1",
             .name = "Primary",
             .suffix = "1234",
-            .provider_kind = .anthropic,
+            .protocol = .anthropic_messages,
         },
         "secret-key",
         &.{.{ .id = "model-1", .display_name = "Model 1" }},
@@ -2911,15 +2291,16 @@ test "Account Runtime publishes the candidate catalog with first execution" {
             .id = "key-1",
             .name = "Primary",
             .suffix = "1234",
-            .provider_kind = .anthropic,
+            .protocol = .anthropic_messages,
         }},
         &.{.{ .id = "model-1", .display_name = "Model 1" }},
     );
     runtime.candidate_catalog_attempt_id = 1;
 
-    var execution = try contract.OwnedExecutionConfig.initOwned(
+    var execution = try execution_contract.OwnedConfig.initOwned(
         std.testing.allocator,
-        .anthropic,
+        .metask,
+        .anthropic_messages,
         try std.testing.allocator.dupe(u8, "model-1"),
         try std.testing.allocator.dupe(
             u8,
@@ -2988,14 +2369,14 @@ test "Account Runtime catalog cancel discards candidate identity and secrets" {
             .id = "key-1",
             .name = "Primary",
             .suffix = "1234",
-            .provider_kind = .anthropic,
+            .protocol = .anthropic_messages,
         },
         "secret-key",
         &.{.{ .id = "model-1", .display_name = "Model 1" }},
     );
     runtime.candidate_public_catalog.replaceRestoredSelection(
         "key-1",
-        .anthropic,
+        .anthropic_messages,
         "model-1",
     );
     runtime.candidate_catalog_attempt_id = refresh.attemptId();
@@ -3083,7 +2464,7 @@ test "Account Runtime rejects cross-API model selection before persistence" {
             .id = "key-b",
             .name = "Secondary",
             .suffix = "5678",
-            .provider_kind = .anthropic,
+            .protocol = .anthropic_messages,
         },
         "secret-key-b",
         &.{.{ .id = "same-model", .display_name = "Same model id" }},
@@ -3139,9 +2520,10 @@ fn commitAutomationRestoreForTest(runtime: *Runtime) void {
 }
 
 fn commitReadyRestoreForTest(runtime: *Runtime) !void {
-    var execution = try contract.OwnedExecutionConfig.initOwned(
+    var execution = try execution_contract.OwnedConfig.initOwned(
         std.testing.allocator,
-        .anthropic,
+        .metask,
+        .anthropic_messages,
         try std.testing.allocator.dupe(u8, "model-1"),
         try std.testing.allocator.dupe(
             u8,
@@ -3196,7 +2578,7 @@ fn prepareDefaultModelTest(
             .id = "key-1",
             .name = "Primary",
             .suffix = "1234",
-            .provider_kind = .anthropic,
+            .protocol = .anthropic_messages,
         }},
         &.{
             .{ .id = "model-1", .display_name = "Model 1" },

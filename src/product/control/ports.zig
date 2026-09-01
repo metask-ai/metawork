@@ -4,76 +4,102 @@
 
 const agent = @import("metawork_agent");
 const account = @import("metawork_account_contract");
-const account_execution = @import("product_control_account_execution");
+const execution_contract = @import("metawork_product_execution_contract");
+const execution_ports = @import("product_execution_ports");
 const product_schedule = @import("metawork_product_schedule");
 const mcp = @import("metawork_product_mcp");
 const mcp_contract = mcp.contract;
 
-pub const PreparedModelConnectionBinding =
-    account_execution.PreparedModelConnectionBinding;
+pub const MetaskExecutionOutcome = enum {
+    applied,
+    retained_model_connection,
+    failed,
+};
 
-pub const ExecutionHandoff = struct {
+/// Cross-owner handoff used only while committing Account facts and their
+/// resulting default-execution transition into Product Control.
+pub const AccountExecutionHandoff = struct {
     context: *anyopaque,
     commit_account_fact_fn: *const fn (*anyopaque, account.AccountFact) void,
     finish_account_commit_fn: *const fn (*anyopaque) void,
-    account_view_fn: *const fn (*anyopaque) account.AccountView,
-    model_connection_active_fn: *const fn (*anyopaque, []const u8) bool,
-    model_connection_selected_fn: *const fn (*anyopaque) bool,
-    prepare_model_connection_fn: *const fn (*anyopaque, []const u8, []const u8) anyerror!PreparedModelConnectionBinding,
+    metask_activation_available_fn: *const fn (*anyopaque) bool,
+    apply_metask_candidate_fn: *const fn (*anyopaque, *execution_contract.OwnedConfig, bool) MetaskExecutionOutcome,
+    apply_metask_clear_fn: *const fn (*anyopaque) MetaskExecutionOutcome,
     replacement_pending_fn: *const fn (*anyopaque) bool,
     begin_default_replacement_fn: *const fn (*anyopaque) anyerror!void,
     begin_replacement_fn: *const fn (*anyopaque) anyerror!void,
-    prepare_install_fn: *const fn (*anyopaque, account.ExecutionConfigInput) anyerror!void,
-    prepare_clear_fn: *const fn (*anyopaque) anyerror!void,
-    install_model_connection_fn: *const fn (*anyopaque, *account.OwnedExecutionConfig, *PreparedModelConnectionBinding) void,
-    install_execution_fn: *const fn (*anyopaque, *account.OwnedExecutionConfig) void,
-    clear_execution_fn: *const fn (*anyopaque) void,
     end_replacement_fn: *const fn (*anyopaque) void,
 
-    pub fn commitAccountFactNoFail(self: ExecutionHandoff, fact: account.AccountFact) void {
+    pub fn commitAccountFactNoFail(self: AccountExecutionHandoff, fact: account.AccountFact) void {
         self.commit_account_fact_fn(self.context, fact);
     }
-    pub fn finishAccountCommitNoFail(self: ExecutionHandoff) void {
+    pub fn finishAccountCommitNoFail(self: AccountExecutionHandoff) void {
         self.finish_account_commit_fn(self.context);
     }
-    pub fn accountView(self: ExecutionHandoff) account.AccountView {
-        return self.account_view_fn(self.context);
+    pub fn metaskActivationAvailable(self: AccountExecutionHandoff) bool {
+        return self.metask_activation_available_fn(self.context);
     }
-    pub fn modelConnectionExecutionActive(self: ExecutionHandoff, id: []const u8) bool {
-        return self.model_connection_active_fn(self.context, id);
+    pub fn applyMetaskExecutionCandidate(
+        self: AccountExecutionHandoff,
+        execution: *execution_contract.OwnedConfig,
+        explicit_activation: bool,
+    ) MetaskExecutionOutcome {
+        return self.apply_metask_candidate_fn(
+            self.context,
+            execution,
+            explicit_activation,
+        );
     }
-    pub fn modelConnectionExecutionSelected(self: ExecutionHandoff) bool {
-        return self.model_connection_selected_fn(self.context);
+    pub fn applyMetaskExecutionClear(
+        self: AccountExecutionHandoff,
+    ) MetaskExecutionOutcome {
+        return self.apply_metask_clear_fn(self.context);
     }
-    pub fn prepareModelConnectionBinding(self: ExecutionHandoff, connection_id: []const u8, model_id: []const u8) anyerror!PreparedModelConnectionBinding {
-        return self.prepare_model_connection_fn(self.context, connection_id, model_id);
-    }
-    pub fn executionReplacementPending(self: ExecutionHandoff) bool {
+    pub fn executionReplacementPending(self: AccountExecutionHandoff) bool {
         return self.replacement_pending_fn(self.context);
     }
-    pub fn beginDefaultExecutionReplacement(self: ExecutionHandoff) anyerror!void {
+    pub fn beginDefaultExecutionReplacement(self: AccountExecutionHandoff) anyerror!void {
         return self.begin_default_replacement_fn(self.context);
     }
-    pub fn beginExecutionReplacement(self: ExecutionHandoff) anyerror!void {
+    pub fn beginExecutionReplacement(self: AccountExecutionHandoff) anyerror!void {
         return self.begin_replacement_fn(self.context);
     }
-    pub fn prepareExecutionInstall(self: ExecutionHandoff, input: account.ExecutionConfigInput) anyerror!void {
-        return self.prepare_install_fn(self.context, input);
-    }
-    pub fn prepareExecutionClear(self: ExecutionHandoff) anyerror!void {
-        return self.prepare_clear_fn(self.context);
-    }
-    pub fn installModelConnectionExecutionNoFail(self: ExecutionHandoff, execution: *account.OwnedExecutionConfig, binding: *PreparedModelConnectionBinding) void {
-        self.install_model_connection_fn(self.context, execution, binding);
-    }
-    pub fn installExecutionNoFail(self: ExecutionHandoff, execution: *account.OwnedExecutionConfig) void {
-        self.install_execution_fn(self.context, execution);
-    }
-    pub fn clearExecutionNoFail(self: ExecutionHandoff) void {
-        self.clear_execution_fn(self.context);
-    }
-    pub fn endExecutionReplacementNoFail(self: ExecutionHandoff) void {
+    pub fn endExecutionReplacementNoFail(self: AccountExecutionHandoff) void {
         self.end_replacement_fn(self.context);
+    }
+};
+
+/// Application-facing capability for Execution lifecycle and effects. Product
+/// Control keeps registry/default-selection transactions behind these calls.
+pub const ExecutionManagement = struct {
+    context: *anyopaque,
+    start_model_connections_fn: *const fn (*anyopaque, []const u8, execution_ports.CredentialVault) anyerror!void,
+    start_model_connections_unavailable_fn: *const fn (*anyopaque) void,
+    stop_model_connections_fn: *const fn (*anyopaque) void,
+    create_model_connection_fn: *const fn (*anyopaque, []const u8, execution_contract.ModelConnectionSpec, []const u8, []const u8) execution_contract.CommandResult,
+    submit_model_connection_fn: *const fn (*anyopaque, execution_contract.ModelConnectionCommand) execution_contract.CommandResult,
+    begin_model_connection_probe_fn: *const fn (*anyopaque, execution_contract.ModelConnectionTestCommand) execution_contract.Preparation,
+    complete_model_connection_test_fn: *const fn (*anyopaque, execution_contract.ModelConnectionTestCommand, bool) execution_contract.CommandResult,
+    pub fn startModelConnections(self: ExecutionManagement, directory: []const u8, vault: execution_ports.CredentialVault) anyerror!void {
+        try self.start_model_connections_fn(self.context, directory, vault);
+    }
+    pub fn startModelConnectionsUnavailable(self: ExecutionManagement) void {
+        self.start_model_connections_unavailable_fn(self.context);
+    }
+    pub fn stopModelConnections(self: ExecutionManagement) void {
+        self.stop_model_connections_fn(self.context);
+    }
+    pub fn createModelConnectionWithCredential(self: ExecutionManagement, secret: []const u8, spec: execution_contract.ModelConnectionSpec, model_id: []const u8, display_name: []const u8) execution_contract.CommandResult {
+        return self.create_model_connection_fn(self.context, secret, spec, model_id, display_name);
+    }
+    pub fn submitModelConnectionCommand(self: ExecutionManagement, command: execution_contract.ModelConnectionCommand) execution_contract.CommandResult {
+        return self.submit_model_connection_fn(self.context, command);
+    }
+    pub fn beginModelConnectionProbe(self: ExecutionManagement, command: execution_contract.ModelConnectionTestCommand) execution_contract.Preparation {
+        return self.begin_model_connection_probe_fn(self.context, command);
+    }
+    pub fn completeModelConnectionTest(self: ExecutionManagement, command: execution_contract.ModelConnectionTestCommand, succeeded: bool) execution_contract.CommandResult {
+        return self.complete_model_connection_test_fn(self.context, command, succeeded);
     }
 };
 

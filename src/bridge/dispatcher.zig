@@ -5,6 +5,7 @@
 const std = @import("std");
 const native_sdk = @import("native_sdk");
 const account_contract = @import("metawork_account_contract");
+const execution_contract = @import("metawork_product_execution_contract");
 const product_control = @import("metawork_product_control");
 const mcp_configuration = @import("metawork_product_mcp").contract;
 const skill_management = @import("metawork_product_skill").management;
@@ -149,11 +150,11 @@ pub const McpSecretSlot = union(enum) {
 };
 
 /// Host-owned create transaction. Its owner must complete secure capture,
-/// credential persistence, Account registry commit, and definite-failure
+/// credential persistence, Execution registry commit, and definite-failure
 /// rollback before returning. Bridge never receives either the secret or an
 /// intermediate credential slot that it could commit separately.
 pub const ModelConnectionCreateOutcome = union(enum) {
-    submitted: account_contract.AccountCommandResult,
+    submitted: execution_contract.CommandResult,
     cancelled,
     unavailable,
 };
@@ -162,7 +163,7 @@ pub const ModelConnectionHost = struct {
     context: *anyopaque,
     create_fn: *const fn (
         *anyopaque,
-        account_contract.ModelConnectionSpec,
+        execution_contract.ModelConnectionSpec,
         []const u8,
         []const u8,
     ) ModelConnectionCreateOutcome,
@@ -191,6 +192,7 @@ pub const Dispatcher = struct {
 
     control: ?*product_control.Runtime,
     account_commands: account_contract.AccountCommandSink,
+    model_connection_commands: execution_contract.CommandSink,
     platform: Platform,
     automation: AutomationAuthority,
     mcp_management_host: ?McpManagementHost = null,
@@ -213,6 +215,7 @@ pub const Dispatcher = struct {
         allocator: std.mem.Allocator,
         control: *product_control.Runtime,
         account_commands: account_contract.AccountCommandSink,
+        model_connection_commands: execution_contract.CommandSink,
         platform: Platform,
         automation: AutomationAuthority,
         bootstrap_window_id: native_sdk.platform.WindowId,
@@ -221,6 +224,7 @@ pub const Dispatcher = struct {
         return .{
             .control = control,
             .account_commands = account_commands,
+            .model_connection_commands = model_connection_commands,
             .platform = platform,
             .automation = automation,
             .bootstrap_window_id = bootstrap_window_id,
@@ -972,7 +976,7 @@ pub const Dispatcher = struct {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
         var callback = try self.callbacks.enter();
         defer callback.deinit();
-        try self.requireAccountAuthority(invocation.source.window_id);
+        try self.requireManagementAuthority(invocation.source.window_id);
         var parsed = try handlers.parsePayload(
             handlers.Empty,
             invocation.request.payload,
@@ -992,7 +996,7 @@ pub const Dispatcher = struct {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
         var callback = try self.callbacks.enter();
         defer callback.deinit();
-        try self.requireAccountAuthority(invocation.source.window_id);
+        try self.requireManagementAuthority(invocation.source.window_id);
         var parsed = try handlers.parsePayload(
             handlers.AccountSelection,
             invocation.request.payload,
@@ -1025,7 +1029,7 @@ pub const Dispatcher = struct {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
         var callback = try self.callbacks.enter();
         defer callback.deinit();
-        try self.requireAccountAuthority(invocation.source.window_id);
+        try self.requireManagementAuthority(invocation.source.window_id);
         var parsed = try handlers.parsePayload(
             handlers.AccountSelection,
             invocation.request.payload,
@@ -1058,7 +1062,7 @@ pub const Dispatcher = struct {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
         var callback = try self.callbacks.enter();
         defer callback.deinit();
-        try self.requireAccountAuthority(invocation.source.window_id);
+        try self.requireManagementAuthority(invocation.source.window_id);
         var parsed = try handlers.parsePayload(
             handlers.AccountActivation,
             invocation.request.payload,
@@ -1085,37 +1089,37 @@ pub const Dispatcher = struct {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
         var callback = try self.callbacks.enter();
         defer callback.deinit();
-        try self.requireAccountAuthority(invocation.source.window_id);
+        try self.requireManagementAuthority(invocation.source.window_id);
         var parsed = try handlers.parsePayload(handlers.ModelConnectionCreate, invocation.request.payload);
         defer parsed.deinit();
-        const protocol = parseModelConnectionProtocol(parsed.value.protocol) orelse
+        const protocol = parseProtocol(parsed.value.protocol) orelse
             return error.InvalidBridgePayload;
-        const normalized_base_url = account_contract.normalizeModelConnectionEndpointAlloc(
+        const normalized_base_url = execution_contract.normalizeModelConnectionEndpointAlloc(
             std.heap.c_allocator,
             protocol,
             parsed.value.normalizedBaseUrl,
         ) catch return error.InvalidBridgePayload;
         defer std.heap.c_allocator.free(normalized_base_url);
         if (parsed.value.displayName.len == 0 or
-            parsed.value.displayName.len > account_contract.Limits.display_name_bytes or
+            parsed.value.displayName.len > execution_contract.Limits.display_name_bytes or
             parsed.value.normalizedBaseUrl.len == 0 or
-            parsed.value.normalizedBaseUrl.len > account_contract.Limits.base_url_bytes or
+            parsed.value.normalizedBaseUrl.len > execution_contract.Limits.base_url_bytes or
             parsed.value.modelId.len == 0 or
-            parsed.value.modelId.len > account_contract.Limits.model_id_bytes)
+            parsed.value.modelId.len > execution_contract.Limits.model_id_bytes)
             return error.InvalidBridgePayload;
-        const spec: account_contract.ModelConnectionSpec = .{
+        const spec: execution_contract.ModelConnectionSpec = .{
             .display_name = parsed.value.displayName,
             .protocol = protocol,
             .normalized_base_url = normalized_base_url,
         };
-        account_contract.validateModelConnectionSpec(spec) catch
+        execution_contract.validateModelConnectionSpec(spec) catch
             return error.InvalidBridgePayload;
         const host = self.model_connection_host orelse
-            return encodeAccountResult(
+            return encodeExecutionResult(
                 output,
-                .rejected(.model_connection_capture_unavailable),
+                .rejected(.capture_unavailable),
             );
-        return encodeAccountResult(output, switch (host.create_fn(
+        return encodeExecutionResult(output, switch (host.create_fn(
             host.context,
             spec,
             parsed.value.modelId,
@@ -1123,7 +1127,7 @@ pub const Dispatcher = struct {
         )) {
             .submitted => |result| result,
             .cancelled => .rejected(.user_cancelled),
-            .unavailable => .rejected(.model_connection_capture_unavailable),
+            .unavailable => .rejected(.capture_unavailable),
         });
     }
 
@@ -1135,26 +1139,26 @@ pub const Dispatcher = struct {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
         var callback = try self.callbacks.enter();
         defer callback.deinit();
-        try self.requireAccountAuthority(invocation.source.window_id);
+        try self.requireManagementAuthority(invocation.source.window_id);
         var parsed = try handlers.parsePayload(handlers.ModelConnectionUpdate, invocation.request.payload);
         defer parsed.deinit();
-        const protocol = parseModelConnectionProtocol(parsed.value.protocol) orelse
+        const protocol = parseProtocol(parsed.value.protocol) orelse
             return error.InvalidBridgePayload;
-        const normalized_base_url = account_contract.normalizeModelConnectionEndpointAlloc(
+        const normalized_base_url = execution_contract.normalizeModelConnectionEndpointAlloc(
             std.heap.c_allocator,
             protocol,
             parsed.value.normalizedBaseUrl,
         ) catch return error.InvalidBridgePayload;
         defer std.heap.c_allocator.free(normalized_base_url);
-        const spec: account_contract.ModelConnectionSpec = .{
+        const spec: execution_contract.ModelConnectionSpec = .{
             .display_name = parsed.value.displayName,
             .protocol = protocol,
             .normalized_base_url = normalized_base_url,
         };
-        account_contract.validateModelConnectionSpec(spec) catch
+        execution_contract.validateModelConnectionSpec(spec) catch
             return error.InvalidBridgePayload;
-        return encodeAccountResult(output, self.account_commands.submit(.{
-            .model_connection = .{ .update = .{
+        return encodeExecutionResult(output, self.model_connection_commands.submit(.{
+            .update = .{
                 .selection = .{
                     .connection_id = parsed.value.connectionId,
                     .expected_connection_generation = try handlers.parseWireId(
@@ -1162,7 +1166,7 @@ pub const Dispatcher = struct {
                     ),
                 },
                 .spec = spec,
-            } },
+            },
         }));
     }
 
@@ -1174,14 +1178,14 @@ pub const Dispatcher = struct {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
         var callback = try self.callbacks.enter();
         defer callback.deinit();
-        try self.requireAccountAuthority(invocation.source.window_id);
+        try self.requireManagementAuthority(invocation.source.window_id);
         var parsed = try handlers.parsePayload(handlers.ModelConnectionSelection, invocation.request.payload);
         defer parsed.deinit();
-        return encodeAccountResult(output, self.account_commands.submit(.{
-            .model_connection = .{ .remove = .{
+        return encodeExecutionResult(output, self.model_connection_commands.submit(.{
+            .remove = .{
                 .connection_id = parsed.value.connectionId,
                 .expected_connection_generation = try handlers.parseWireId(parsed.value.expectedConnectionGeneration),
-            } },
+            },
         }));
     }
 
@@ -1210,10 +1214,10 @@ pub const Dispatcher = struct {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
         var callback = try self.callbacks.enter();
         defer callback.deinit();
-        try self.requireAccountAuthority(invocation.source.window_id);
+        try self.requireManagementAuthority(invocation.source.window_id);
         var parsed = try handlers.parsePayload(handlers.ModelConnectionModelSelection, invocation.request.payload);
         defer parsed.deinit();
-        const command: account_contract.ModelConnectionCommand = if (select_default)
+        const command: execution_contract.ModelConnectionCommand = if (select_default)
             .{ .select_default = .{
                 .selection = .{
                     .connection_id = parsed.value.connectionId,
@@ -1229,11 +1233,11 @@ pub const Dispatcher = struct {
                 },
                 .model_id = parsed.value.modelId,
             } };
-        return encodeAccountResult(output, self.account_commands.submit(.{ .model_connection = command }));
+        return encodeExecutionResult(output, self.model_connection_commands.submit(command));
     }
 
-    fn parseModelConnectionProtocol(value: []const u8) ?account_contract.ModelConnectionProtocol {
-        return std.meta.stringToEnum(account_contract.ModelConnectionProtocol, value);
+    fn parseProtocol(value: []const u8) ?execution_contract.Protocol {
+        return std.meta.stringToEnum(execution_contract.Protocol, value);
     }
 
     fn chooseWorkspace(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
@@ -3049,7 +3053,7 @@ pub const Dispatcher = struct {
             return error.EventWindowMismatch;
     }
 
-    fn requireAccountAuthority(
+    fn requireManagementAuthority(
         self: *const Dispatcher,
         window_id: native_sdk.platform.WindowId,
     ) !void {
@@ -3137,6 +3141,34 @@ fn encodeAccountResult(
     else
         writer.writeAll("null") catch return error.NoSpaceLeft;
     writer.writeByte('}') catch return error.NoSpaceLeft;
+    return writer.buffered();
+}
+
+fn encodeExecutionResult(
+    output: []u8,
+    result: execution_contract.CommandResult,
+) ![]const u8 {
+    const error_code: []const u8 = if (result.accepted)
+        "none"
+    else switch (result.error_code.?) {
+        .invalid_connection => "model_connection_invalid",
+        .connection_not_found => "model_connection_not_found",
+        .generation_mismatch => "generation_mismatch",
+        .model_not_found => "no_models",
+        .capacity, .local_resource_exhausted => "local_resource_exhausted",
+        .persistence_unavailable => "model_connection_persistence_unavailable",
+        .capture_unavailable => "model_connection_capture_unavailable",
+        .test_unavailable => "model_connection_test_unavailable",
+        .credential_write_failed => "credential_store_write_failed",
+        .execution_in_use => "execution_in_use",
+        .operation_in_progress => "operation_in_progress",
+        .user_cancelled => "user_cancelled",
+    };
+    var writer = std.Io.Writer.fixed(output);
+    writer.print(
+        "{{\"accepted\":{},\"errorCode\":\"{s}\",\"attemptId\":null}}",
+        .{ result.accepted, error_code },
+    ) catch return error.NoSpaceLeft;
     return writer.buffered();
 }
 
@@ -3842,6 +3874,44 @@ test "Account command response encoding rejects inconsistent attempt metadata" {
     );
 }
 
+test "Execution command responses preserve the existing Bridge error vocabulary" {
+    var output: [256]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "{\"accepted\":true,\"errorCode\":\"none\",\"attemptId\":null}",
+        try encodeExecutionResult(&output, .acceptedResult()),
+    );
+    inline for (.{
+        .{ execution_contract.ManagementError.invalid_connection, "model_connection_invalid" },
+        .{ execution_contract.ManagementError.connection_not_found, "model_connection_not_found" },
+        .{ execution_contract.ManagementError.generation_mismatch, "generation_mismatch" },
+        .{ execution_contract.ManagementError.model_not_found, "no_models" },
+        .{ execution_contract.ManagementError.capacity, "local_resource_exhausted" },
+        .{ execution_contract.ManagementError.persistence_unavailable, "model_connection_persistence_unavailable" },
+        .{ execution_contract.ManagementError.capture_unavailable, "model_connection_capture_unavailable" },
+        .{ execution_contract.ManagementError.credential_write_failed, "credential_store_write_failed" },
+        .{ execution_contract.ManagementError.execution_in_use, "execution_in_use" },
+        .{ execution_contract.ManagementError.operation_in_progress, "operation_in_progress" },
+        .{ execution_contract.ManagementError.test_unavailable, "model_connection_test_unavailable" },
+        .{ execution_contract.ManagementError.user_cancelled, "user_cancelled" },
+        .{ execution_contract.ManagementError.local_resource_exhausted, "local_resource_exhausted" },
+    }) |case| {
+        const encoded = try encodeExecutionResult(&output, .rejected(case[0]));
+        var parsed = try std.json.parseFromSlice(
+            std.json.Value,
+            std.testing.allocator,
+            encoded,
+            .{},
+        );
+        defer parsed.deinit();
+        try std.testing.expect(!parsed.value.object.get("accepted").?.bool);
+        try std.testing.expectEqualStrings(
+            case[1],
+            parsed.value.object.get("errorCode").?.string,
+        );
+        try std.testing.expect(parsed.value.object.get("attemptId").? == .null);
+    }
+}
+
 test "mutation response encoders reject every inconsistent success and rejection shape" {
     var output: [256]u8 = undefined;
     try std.testing.expectError(
@@ -4072,9 +4142,20 @@ test "Dispatcher validates authority before domain calls and preserves committed
                     self.last_execution_generation =
                         activation.expected_execution_generation;
                 },
-                .model_connection => {},
             }
             return self.account_result;
+        }
+
+        fn submitModelConnection(
+            context: *anyopaque,
+            _: execution_contract.ModelConnectionCommand,
+        ) execution_contract.CommandResult {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.account_calls += 1;
+            return if (self.account_result.accepted)
+                .acceptedResult()
+            else
+                .rejected(.invalid_connection);
         }
     };
 
@@ -4096,6 +4177,10 @@ test "Dispatcher validates authority before domain calls and preserves committed
         .{
             .context = &harness,
             .submit_fn = Harness.submitAccount,
+        },
+        .{
+            .context = &harness,
+            .submit_fn = Harness.submitModelConnection,
         },
         .{
             .context = &harness,

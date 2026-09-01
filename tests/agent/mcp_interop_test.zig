@@ -1,5 +1,6 @@
 const std = @import("std");
 const account_contract = @import("metawork_account_contract");
+const execution_contract = @import("metawork_product_execution_contract");
 const agent = @import("metawork_agent");
 const mcp_platform = @import("metawork_mcp_platform");
 const options = @import("mcp_interop_options");
@@ -250,9 +251,10 @@ fn managementConfiguration(
 }
 
 fn installExecution(workbench_value: *product_control.Runtime) !void {
-    var execution = try account_contract.OwnedExecutionConfig.initOwned(
+    var execution = try execution_contract.OwnedConfig.initOwned(
         std.testing.allocator,
-        .anthropic,
+        .metask,
+        .anthropic_messages,
         try std.testing.allocator.dupe(u8, "fixture-model"),
         try std.testing.allocator.dupe(
             u8,
@@ -268,7 +270,7 @@ fn installExecution(workbench_value: *product_control.Runtime) !void {
         .id = "key-1",
         .name = "Fixture",
         .suffix = "",
-        .provider_kind = .anthropic,
+        .protocol = .anthropic_messages,
     }};
     const models = [_]account_contract.ModelView{.{
         .id = "fixture-model",

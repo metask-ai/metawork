@@ -1,193 +1,38 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const agent = @import("metawork_agent");
+const agent = if (builtin.is_test) @import("metawork_agent") else struct {};
 const account_contract = @import("metawork_account_contract");
+const execution_contract = if (builtin.is_test)
+    @import("metawork_product_execution_contract")
+else
+    struct {};
 const account_api = @import("metawork_account");
-const account_ports = @import("account_ports");
 const account_store = @import("account_credential_store");
 const control_ports = @import("metawork_product_control_ports");
 const test_control = if (builtin.is_test) @import("lifecycle_fixture").product_control else struct {};
 
 const ExecutionReplacement = enum { none, startup, default, identity };
 
-pub const ModelConnectionProbeNotifier = struct {
-    context: *anyopaque,
-    notify_fn: *const fn (*anyopaque) void,
-
-    fn notify(self: ModelConnectionProbeNotifier) void {
-        self.notify_fn(self.context);
-    }
-};
-
-const ModelConnectionProbeJob = struct {
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    completion_transport: agent.CompletionTransport,
-    notifier: ModelConnectionProbeNotifier,
-    selection: account_contract.ModelConnectionSelectionCommand,
-    connection_id: []u8,
-    model_id: []u8,
-    execution: ?account_contract.OwnedExecutionConfig,
-    cancellation: agent.ProviderProbeCancellation = .{},
-    succeeded: bool = false,
-    finished: std.atomic.Value(bool) = .init(false),
-    thread: ?std.Thread = null,
-
-    fn create(
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        completion_transport: agent.CompletionTransport,
-        notifier: ModelConnectionProbeNotifier,
-        command_value: account_contract.ModelConnectionTestCommand,
-        execution: *account_contract.OwnedExecutionConfig,
-    ) std.mem.Allocator.Error!*ModelConnectionProbeJob {
-        const self = try allocator.create(ModelConnectionProbeJob);
-        errdefer allocator.destroy(self);
-        const connection_id = try allocator.dupe(
-            u8,
-            command_value.selection.connection_id,
-        );
-        errdefer allocator.free(connection_id);
-        const model_id = try allocator.dupe(u8, command_value.model_id);
-        errdefer allocator.free(model_id);
-        self.* = .{
-            .allocator = allocator,
-            .io = io,
-            .completion_transport = completion_transport,
-            .notifier = notifier,
-            .selection = .{
-                .connection_id = connection_id,
-                .expected_connection_generation = command_value.selection.expected_connection_generation,
-            },
-            .connection_id = connection_id,
-            .model_id = model_id,
-            .execution = execution.take(),
-        };
-        return self;
-    }
-
-    fn start(self: *ModelConnectionProbeJob) std.Thread.SpawnError!void {
-        self.thread = try std.Thread.spawn(.{}, run, .{self});
-    }
-
-    fn run(self: *ModelConnectionProbeJob) void {
-        const execution = &self.execution.?;
-        const input = execution.input();
-        self.succeeded = agent.runProviderProbe(self.io, self.completion_transport, .{
-            .provider_id = input.target.provider_id,
-            .protocol = switch (input.target.protocol) {
-                .anthropic_messages => .anthropic_messages,
-                .openai_chat_completions => .openai_chat_completions,
-                .gemini_native => .gemini_native,
-            },
-            .credential = input.api_key,
-            .model = input.target.model,
-            .base_url = input.target.base_url,
-        }, &self.cancellation) == .connected;
-        execution.deinit();
-        self.execution = null;
-        self.finished.store(true, .release);
-        self.notifier.notify();
-    }
-
-    fn join(self: *ModelConnectionProbeJob) void {
-        const thread = self.thread orelse return;
-        thread.join();
-        self.thread = null;
-    }
-
-    fn cancel(self: *ModelConnectionProbeJob) void {
-        self.cancellation.request();
-    }
-
-    fn deinit(self: *ModelConnectionProbeJob) void {
-        std.debug.assert(self.thread == null);
-        if (self.execution) |*execution| execution.deinit();
-        self.allocator.free(self.model_id);
-        self.allocator.free(self.connection_id);
-        const allocator = self.allocator;
-        self.* = undefined;
-        allocator.destroy(self);
-    }
-
-    fn command(self: *const ModelConnectionProbeJob) account_contract.ModelConnectionTestCommand {
-        return .{
-            .selection = .{
-                .connection_id = self.connection_id,
-                .expected_connection_generation = self.selection.expected_connection_generation,
-            },
-            .model_id = self.model_id,
-        };
-    }
-};
-
 pub const Coordinator = struct {
-    io: std.Io,
     runtime: *account_api.Runtime,
-    control: control_ports.ExecutionHandoff,
+    control: control_ports.AccountExecutionHandoff,
     main_thread_id: std.Thread.Id,
-    model_connection_probe_notifier: ?ModelConnectionProbeNotifier = null,
-    completion_transport: ?agent.CompletionTransport = null,
-    model_connection_probe_job: ?*ModelConnectionProbeJob = null,
     metask_activation_attempt_id: ?u64 = null,
 
     pub fn init(
         runtime: *account_api.Runtime,
-        control: control_ports.ExecutionHandoff,
+        control: control_ports.AccountExecutionHandoff,
         main_thread_id: std.Thread.Id,
-        io: std.Io,
     ) Coordinator {
         return .{
-            .io = io,
             .runtime = runtime,
             .control = control,
             .main_thread_id = main_thread_id,
         };
     }
 
-    pub fn setModelConnectionProbeNotifier(
-        self: *Coordinator,
-        notifier: ?ModelConnectionProbeNotifier,
-    ) void {
-        self.model_connection_probe_notifier = notifier;
-    }
-
-    pub fn setCompletionTransport(
-        self: *Coordinator,
-        network: agent.CompletionTransport,
-    ) void {
-        self.completion_transport = network;
-    }
-
     pub fn commandSink(self: *Coordinator) account_contract.AccountCommandSink {
         return .{ .context = self, .submit_fn = submitCommand };
-    }
-
-    /// Application-only continuation after a trusted native secret capture.
-    /// The secret is borrowed synchronously and never enters Bridge or a
-    /// product projection. Account owns the recoverable credential/registry
-    /// transaction; Workbench observes only the committed secret-free fact.
-    pub fn createModelConnectionWithCapturedCredential(
-        self: *Coordinator,
-        secret: []const u8,
-        spec: account_contract.ModelConnectionSpec,
-        model_id: []const u8,
-        model_display_name: []const u8,
-    ) account_contract.AccountCommandResult {
-        self.assertMainThread();
-        const result = self.runtime.createModelConnectionWithCredential(
-            secret,
-            spec,
-            model_id,
-            model_display_name,
-        );
-        if (!result.accepted) return result;
-        self.control.commitAccountFactNoFail(.{
-            .kind = .model_connections_changed,
-            .view = self.runtime.view(),
-        });
-        self.control.finishAccountCommitNoFail();
-        return result;
     }
 
     fn submitCommand(
@@ -196,10 +41,8 @@ pub const Coordinator = struct {
     ) account_contract.AccountCommandResult {
         const self: *Coordinator = @ptrCast(@alignCast(context));
         self.assertMainThread();
-        if (command == .model_connection)
-            return self.submitModelConnection(command.model_connection);
         if (command == .activate_metask and
-            !self.control.modelConnectionExecutionSelected())
+            !self.control.metaskActivationAvailable())
             return .rejected(.invalid_state);
         return switch (self.runtime.prepareCommand(command)) {
             .prepared => |prepared| result: {
@@ -213,142 +56,6 @@ pub const Coordinator = struct {
         };
     }
 
-    fn submitModelConnection(
-        self: *Coordinator,
-        command: account_contract.ModelConnectionCommand,
-    ) account_contract.AccountCommandResult {
-        const mutation_connection_id: ?[]const u8 = switch (command) {
-            .update => |value| value.selection.connection_id,
-            .remove => |value| value.connection_id,
-            .create, .test_connection, .select_default => null,
-        };
-        if (mutation_connection_id) |connection_id|
-            if (self.control.modelConnectionExecutionActive(connection_id))
-                return .rejected(.execution_in_use);
-        if (command == .test_connection)
-            return self.startModelConnectionProbe(command.test_connection);
-        if (command == .select_default) {
-            const value = command.select_default;
-            const execution_generation = self.runtime.nextExecutionGeneration(
-                self.control.accountView().execution_generation,
-            ) catch return .rejected(.local_resource_exhausted);
-            var owned_execution = switch (self.runtime.prepareModelConnectionExecution(
-                value.selection,
-                value.model_id,
-                execution_generation,
-            )) {
-                .ready => |execution| execution,
-                .rejected => |error_code| return .rejected(error_code),
-            };
-            errdefer owned_execution.deinit();
-            var prepared_binding = self.control.prepareModelConnectionBinding(
-                value.selection.connection_id,
-                value.model_id,
-            ) catch return .rejected(.local_resource_exhausted);
-            var prepared_binding_owned = true;
-            defer if (prepared_binding_owned) prepared_binding.deinit();
-            if (self.control.executionReplacementPending())
-                return .rejected(.operation_in_progress);
-            self.control.beginDefaultExecutionReplacement() catch |err|
-                return .rejected(replacementErrorCode(err));
-            var replacement_started = true;
-            defer if (replacement_started)
-                self.endActiveReplacementNoFail();
-            const result = self.runtime.submitModelConnectionCommandWithExecutionGeneration(
-                command,
-                owned_execution.input().execution_generation,
-            );
-            if (!result.accepted) return result;
-            self.control.commitAccountFactNoFail(.{
-                .kind = .model_connections_changed,
-                .view = self.runtime.view(),
-            });
-            self.control.prepareExecutionInstall(
-                owned_execution.input(),
-            ) catch {
-                owned_execution.deinit();
-                replacement_started = false;
-                self.endActiveReplacementNoFail();
-                self.control.finishAccountCommitNoFail();
-                return result;
-            };
-            self.control.installModelConnectionExecutionNoFail(
-                &owned_execution,
-                &prepared_binding,
-            );
-            prepared_binding_owned = false;
-            replacement_started = false;
-            self.endActiveReplacementNoFail();
-            self.control.finishAccountCommitNoFail();
-            return result;
-        }
-        const result = self.runtime.submitModelConnectionCommand(command);
-        if (!result.accepted) return result;
-        self.control.commitAccountFactNoFail(.{
-            .kind = .model_connections_changed,
-            .view = self.runtime.view(),
-        });
-        self.control.finishAccountCommitNoFail();
-        return result;
-    }
-
-    fn startModelConnectionProbe(
-        self: *Coordinator,
-        command: account_contract.ModelConnectionTestCommand,
-    ) account_contract.AccountCommandResult {
-        const notifier = self.model_connection_probe_notifier orelse
-            return .rejected(.model_connection_test_unavailable);
-        const completion_transport = self.completion_transport orelse
-            return .rejected(.model_connection_test_unavailable);
-        if (self.model_connection_probe_job != null)
-            return .rejected(.operation_in_progress);
-        const execution_generation = self.runtime.nextExecutionGeneration(
-            self.control.accountView().execution_generation,
-        ) catch return .rejected(.local_resource_exhausted);
-        var execution = self.runtime.resolveModelConnectionProbeExecution(
-            command.selection,
-            command.model_id,
-            execution_generation,
-        ) catch return .rejected(.model_connection_test_unavailable);
-        var execution_owned = true;
-        defer if (execution_owned) execution.deinit();
-        const allocator = std.heap.c_allocator;
-        const job = ModelConnectionProbeJob.create(
-            allocator,
-            self.io,
-            completion_transport,
-            notifier,
-            command,
-            &execution,
-        ) catch
-            return .rejected(.local_resource_exhausted);
-        execution_owned = false;
-        const result = self.runtime.submitModelConnectionCommand(.{
-            .test_connection = job.command(),
-        });
-        if (!result.accepted) {
-            job.deinit();
-            return result;
-        }
-        self.control.commitAccountFactNoFail(.{
-            .kind = .model_connections_changed,
-            .view = self.runtime.view(),
-        });
-        self.control.finishAccountCommitNoFail();
-        job.start() catch {
-            _ = self.runtime.completeModelConnectionTest(job.command(), false);
-            self.control.commitAccountFactNoFail(.{
-                .kind = .model_connections_changed,
-                .view = self.runtime.view(),
-            });
-            self.control.finishAccountCommitNoFail();
-            job.deinit();
-            return .rejected(.local_resource_exhausted);
-        };
-        self.model_connection_probe_job = job;
-        return result;
-    }
-
     pub fn start(
         self: *Coordinator,
         platform: account_api.PlatformPorts,
@@ -359,7 +66,6 @@ pub const Coordinator = struct {
             .none,
         );
         std.debug.assert(result.accepted);
-        self.restoreModelConnectionDefaultNoFail();
     }
 
     pub fn startAutomation(self: *Coordinator) void {
@@ -380,47 +86,6 @@ pub const Coordinator = struct {
         std.debug.assert(result.accepted);
     }
 
-    fn restoreModelConnectionDefaultNoFail(self: *Coordinator) void {
-        const binding = self.runtime.modelConnectionDefaultBinding() orelse return;
-        var execution = (self.runtime.resolveDefaultModelConnectionExecution() catch return) orelse {
-            self.control.commitAccountFactNoFail(.{
-                .kind = .model_connections_changed,
-                .view = self.runtime.view(),
-            });
-            self.control.finishAccountCommitNoFail();
-            return;
-        };
-        defer execution.deinit();
-        var prepared_binding = self.control.prepareModelConnectionBinding(
-            binding.connection_id,
-            binding.model_id,
-        ) catch return;
-        var prepared_binding_owned = true;
-        defer if (prepared_binding_owned) prepared_binding.deinit();
-        if (self.control.executionReplacementPending()) return;
-        self.control.beginDefaultExecutionReplacement() catch return;
-        var replacement_started = true;
-        defer if (replacement_started) self.endActiveReplacementNoFail();
-        self.control.commitAccountFactNoFail(.{
-            .kind = .model_connections_changed,
-            .view = self.runtime.view(),
-        });
-        self.control.prepareExecutionInstall(execution.input()) catch {
-            replacement_started = false;
-            self.endActiveReplacementNoFail();
-            self.control.finishAccountCommitNoFail();
-            return;
-        };
-        self.control.installModelConnectionExecutionNoFail(
-            &execution,
-            &prepared_binding,
-        );
-        prepared_binding_owned = false;
-        replacement_started = false;
-        self.endActiveReplacementNoFail();
-        self.control.finishAccountCommitNoFail();
-    }
-
     pub fn onTimer(self: *Coordinator, timer_id: u64) bool {
         self.assertMainThread();
         const prepared_result = self.runtime.prepareTimer(timer_id) orelse
@@ -437,7 +102,6 @@ pub const Coordinator = struct {
 
     pub fn drain(self: *Coordinator) void {
         self.assertMainThread();
-        self.drainModelConnectionProbe();
         while (self.runtime.prepareNextCompletion()) |result| {
             switch (result) {
                 .prepared => |prepared| {
@@ -447,26 +111,6 @@ pub const Coordinator = struct {
                 .rejected, .ignored_stale => {},
             }
         }
-        self.drainModelConnectionProbe();
-    }
-
-    fn drainModelConnectionProbe(self: *Coordinator) void {
-        const job = self.model_connection_probe_job orelse return;
-        if (!job.finished.load(.acquire)) return;
-        job.join();
-        const result = self.runtime.completeModelConnectionTest(
-            job.command(),
-            job.succeeded,
-        );
-        if (result.accepted) {
-            self.control.commitAccountFactNoFail(.{
-                .kind = .model_connections_changed,
-                .view = self.runtime.view(),
-            });
-            self.control.finishAccountCommitNoFail();
-        }
-        self.model_connection_probe_job = null;
-        job.deinit();
     }
 
     fn commitPrepared(
@@ -518,38 +162,24 @@ pub const Coordinator = struct {
         const prepared_attempt_id = prepared.attemptId();
         const activates_metask = prepared_attempt_id != null and
             prepared_attempt_id == self.metask_activation_attempt_id;
+        var execution_handoff_failed = false;
         self.control.commitAccountFactNoFail(fact);
         if (prepared.takeExecution()) |execution_value| {
             var execution = execution_value;
-            if (self.control.modelConnectionExecutionSelected() and
-                !activates_metask)
-            {
-                execution.deinit();
-            } else if (activates_metask and
-                !self.runtime.clearModelConnectionDefault().accepted)
-            {
-                execution.deinit();
-            } else {
-                if (!self.control.executionReplacementPending()) {
-                    self.control.beginDefaultExecutionReplacement() catch
-                        unreachable;
-                }
-                if (self.control.prepareExecutionInstall(execution.input())) |_| {
-                    self.control.installExecutionNoFail(&execution);
-                } else |_| {
-                    execution.deinit();
-                }
+            if (!self.control.executionReplacementPending()) {
+                self.control.beginDefaultExecutionReplacement() catch
+                    unreachable;
             }
+            execution_handoff_failed = self.control.applyMetaskExecutionCandidate(
+                &execution,
+                activates_metask,
+            ) == .failed;
         } else if (prepared.executionIntent() == .clear) {
-            if (!self.control.modelConnectionExecutionSelected()) {
-                if (!self.control.executionReplacementPending()) {
-                    self.control.beginDefaultExecutionReplacement() catch
-                        unreachable;
-                }
-                if (self.control.prepareExecutionClear()) |_| {
-                    self.control.clearExecutionNoFail();
-                } else |_| {}
+            if (!self.control.executionReplacementPending()) {
+                self.control.beginDefaultExecutionReplacement() catch
+                    unreachable;
             }
+            execution_handoff_failed = self.control.applyMetaskExecutionClear() == .failed;
         }
         self.runtime.commit(&prepared);
 
@@ -573,6 +203,16 @@ pub const Coordinator = struct {
             replacement == .startup) and
             self.control.executionReplacementPending())
             self.endActiveReplacementNoFail();
+        if (execution_handoff_failed) {
+            const failed = self.commitPrepared(
+                self.runtime.prepareCommittedPhaseFailure(
+                    .local_resource_exhausted,
+                ),
+                .none,
+            );
+            std.debug.assert(failed.accepted);
+            return .acceptedAttempt(prepared_attempt_id);
+        }
         self.control.finishAccountCommitNoFail();
 
         if (refresh_after_commit) {
@@ -610,11 +250,6 @@ pub const Coordinator = struct {
 
     pub fn shutdown(self: *Coordinator) void {
         self.assertMainThread();
-        if (self.model_connection_probe_job) |job| {
-            job.cancel();
-            job.join();
-            self.drainModelConnectionProbe();
-        }
         const result = self.commitPrepared(
             self.runtime.prepareShutdown(),
             .none,
@@ -668,6 +303,227 @@ test "Application maps identity replacement blockers precisely" {
     );
 }
 
+const FailedExecutionHandoff = struct {
+    replacement_pending: bool = true,
+    committed_facts: usize = 0,
+    applied_candidates: usize = 0,
+    applied_clears: usize = 0,
+    finished_commits: usize = 0,
+
+    fn port(self: *@This()) control_ports.AccountExecutionHandoff {
+        return .{
+            .context = self,
+            .commit_account_fact_fn = commitFact,
+            .finish_account_commit_fn = finishCommit,
+            .metask_activation_available_fn = activationAvailable,
+            .apply_metask_candidate_fn = applyCandidate,
+            .apply_metask_clear_fn = applyClear,
+            .replacement_pending_fn = replacementPending,
+            .begin_default_replacement_fn = beginReplacement,
+            .begin_replacement_fn = beginReplacement,
+            .end_replacement_fn = endReplacement,
+        };
+    }
+
+    fn owner(context: *anyopaque) *@This() {
+        return @ptrCast(@alignCast(context));
+    }
+    fn commitFact(context: *anyopaque, _: account_contract.AccountFact) void {
+        owner(context).committed_facts += 1;
+    }
+    fn finishCommit(context: *anyopaque) void {
+        owner(context).finished_commits += 1;
+    }
+    fn activationAvailable(_: *anyopaque) bool {
+        return true;
+    }
+    fn applyCandidate(
+        context: *anyopaque,
+        execution: *execution_contract.OwnedConfig,
+        _: bool,
+    ) control_ports.MetaskExecutionOutcome {
+        owner(context).applied_candidates += 1;
+        execution.deinit();
+        return .failed;
+    }
+    fn applyClear(context: *anyopaque) control_ports.MetaskExecutionOutcome {
+        owner(context).applied_clears += 1;
+        return .failed;
+    }
+    fn replacementPending(context: *anyopaque) bool {
+        return owner(context).replacement_pending;
+    }
+    fn beginReplacement(context: *anyopaque) anyerror!void {
+        const self = owner(context);
+        if (self.replacement_pending) return error.ExecutionInUse;
+        self.replacement_pending = true;
+    }
+    fn endReplacement(context: *anyopaque) void {
+        const self = owner(context);
+        std.debug.assert(self.replacement_pending);
+        self.replacement_pending = false;
+    }
+};
+
+test "Application preserves an observed Account execution after Metask handoff failure" {
+    const TestWake = struct {
+        fn notify(_: *anyopaque) void {}
+    };
+    var wake_context: u8 = 0;
+    var account_runtime = try account_api.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        std.Thread.getCurrentId(),
+        if (builtin.os.tag == .windows)
+            "C:\\metawork-account-handoff-failure-test"
+        else
+            "/tmp/metawork-account-handoff-failure-test",
+        testingTransport(),
+        account_api.TestSupport.loopbackEndpoint(),
+        .{ .context = &wake_context, .notify_fn = TestWake.notify },
+    );
+    defer account_runtime.deinit();
+    var handoff: FailedExecutionHandoff = .{};
+    var coordinator = Coordinator.init(
+        &account_runtime,
+        handoff.port(),
+        std.Thread.getCurrentId(),
+    );
+    coordinator.metask_activation_attempt_id = 1;
+    var execution = try execution_contract.OwnedConfig.initOwned(
+        std.testing.allocator,
+        .metask,
+        .anthropic_messages,
+        try std.testing.allocator.dupe(u8, "model-1"),
+        try std.testing.allocator.dupe(
+            u8,
+            account_contract.metask_anthropic_messages_url,
+        ),
+        1,
+        try std.testing.allocator.dupe(u8, "secret-key"),
+        "fixture-provider",
+    );
+    const result = coordinator.commitPrepared(
+        try account_api.TestSupport.prepareExecutionReady(
+            &account_runtime,
+            &execution,
+        ),
+        .none,
+    );
+    try std.testing.expect(result.accepted);
+    try std.testing.expectEqual(
+        account_contract.ErrorCode.local_resource_exhausted,
+        account_runtime.view().error_code,
+    );
+    try std.testing.expectEqual(
+        account_contract.AccountState.authenticated,
+        account_runtime.view().state,
+    );
+    try std.testing.expectEqual(
+        account_contract.CatalogState.ready,
+        account_runtime.view().catalog_state,
+    );
+    try std.testing.expectEqualStrings(
+        "model-1",
+        account_runtime.view().selected_model,
+    );
+    try std.testing.expectEqual(
+        @as(?u64, 1),
+        account_api.TestSupport.savedPreferenceExecutionGeneration(
+            &account_runtime,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), handoff.applied_candidates);
+    try std.testing.expectEqual(@as(usize, 2), handoff.committed_facts);
+    try std.testing.expectEqual(@as(usize, 1), handoff.finished_commits);
+    try std.testing.expect(!handoff.replacement_pending);
+    try std.testing.expect(coordinator.metask_activation_attempt_id == null);
+}
+
+test "Application preserves signed-out state after execution clear handoff failure" {
+    const TestWake = struct {
+        fn notify(_: *anyopaque) void {}
+    };
+    var wake_context: u8 = 0;
+    var account_runtime = try account_api.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        std.Thread.getCurrentId(),
+        if (builtin.os.tag == .windows)
+            "C:\\metawork-account-logout-handoff-failure-test"
+        else
+            "/tmp/metawork-account-logout-handoff-failure-test",
+        testingTransport(),
+        account_api.TestSupport.loopbackEndpoint(),
+        .{ .context = &wake_context, .notify_fn = TestWake.notify },
+    );
+    defer account_runtime.deinit();
+    var execution = try execution_contract.OwnedConfig.initOwned(
+        std.testing.allocator,
+        .metask,
+        .anthropic_messages,
+        try std.testing.allocator.dupe(u8, "model-1"),
+        try std.testing.allocator.dupe(
+            u8,
+            account_contract.metask_anthropic_messages_url,
+        ),
+        7,
+        try std.testing.allocator.dupe(u8, "secret-key"),
+        "fixture-provider",
+    );
+    var ready = try account_api.TestSupport.prepareExecutionReady(
+        &account_runtime,
+        &execution,
+    );
+    defer ready.deinit();
+    var installed = ready.takeExecution().?;
+    installed.deinit();
+    account_runtime.commit(&ready);
+    account_runtime.dispatchCommitted(&ready);
+    try std.testing.expectEqual(
+        @as(?u64, 7),
+        account_api.TestSupport.savedPreferenceExecutionGeneration(
+            &account_runtime,
+        ),
+    );
+
+    var handoff: FailedExecutionHandoff = .{};
+    var coordinator = Coordinator.init(
+        &account_runtime,
+        handoff.port(),
+        std.Thread.getCurrentId(),
+    );
+    const result = coordinator.commitPrepared(
+        account_api.TestSupport.prepareLoggedOutAfterExternalCommit(
+            &account_runtime,
+        ),
+        .none,
+    );
+    try std.testing.expect(result.accepted);
+    try std.testing.expectEqual(
+        account_contract.AccountState.signed_out,
+        account_runtime.view().state,
+    );
+    try std.testing.expectEqual(
+        account_contract.ErrorCode.local_resource_exhausted,
+        account_runtime.view().error_code,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        account_runtime.view().metask_execution_generation,
+    );
+    try std.testing.expect(
+        account_api.TestSupport.savedPreferenceExecutionGeneration(
+            &account_runtime,
+        ) == null,
+    );
+    try std.testing.expectEqual(@as(usize, 0), handoff.applied_candidates);
+    try std.testing.expectEqual(@as(usize, 1), handoff.applied_clears);
+    try std.testing.expectEqual(@as(usize, 2), handoff.committed_facts);
+    try std.testing.expectEqual(@as(usize, 1), handoff.finished_commits);
+    try std.testing.expect(!handoff.replacement_pending);
+}
+
 test "Application coordinator commits Account Runtime facts into Workbench" {
     const TestWake = struct {
         fn notify(_: *anyopaque) void {}
@@ -704,14 +560,14 @@ test "Application coordinator commits Account Runtime facts into Workbench" {
     defer workbench.deinit();
     var coordinator = Coordinator.init(
         &account_runtime,
-        workbench.executionHandoff(),
+        workbench.accountExecutionHandoff(),
         std.Thread.getCurrentId(),
-        std.testing.io,
     );
 
-    var execution = try account_contract.OwnedExecutionConfig.initOwned(
+    var execution = try execution_contract.OwnedConfig.initOwned(
         std.testing.allocator,
-        .anthropic,
+        .metask,
+        .anthropic_messages,
         try std.testing.allocator.dupe(u8, "model-1"),
         try std.testing.allocator.dupe(
             u8,
@@ -836,14 +692,14 @@ test "Application coordinator balances Workbench gate when Account effect admiss
     defer workbench.deinit();
     var coordinator = Coordinator.init(
         &account_runtime,
-        workbench.executionHandoff(),
+        workbench.accountExecutionHandoff(),
         std.Thread.getCurrentId(),
-        std.testing.io,
     );
 
-    var execution = try account_contract.OwnedExecutionConfig.initOwned(
+    var execution = try execution_contract.OwnedConfig.initOwned(
         std.testing.allocator,
-        .anthropic,
+        .metask,
+        .anthropic_messages,
         try std.testing.allocator.dupe(u8, "model-1"),
         try std.testing.allocator.dupe(
             u8,
@@ -939,13 +795,6 @@ const FakePlatform = struct {
                 .start_fn = startTimer,
                 .cancel_fn = cancelTimer,
             },
-            .model_credentials = .{
-                .context = self,
-                .generate_slot_fn = generateModelSlot,
-                .store_fn = storeModelCredential,
-                .get_fn = getModelCredential,
-                .delete_fn = deleteModelCredential,
-            },
         };
     }
 
@@ -1004,34 +853,6 @@ const FakePlatform = struct {
     fn cancelTimer(_: *anyopaque, _: u64) anyerror!void {}
 
     fn openExternalUrl(_: *anyopaque, _: []const u8) anyerror!void {}
-
-    fn generateModelSlot(
-        _: *anyopaque,
-        _: *[account_ports.model_connection_slot_bytes]u8,
-    ) account_store.StoreError!void {
-        return error.WriteFailed;
-    }
-
-    fn storeModelCredential(
-        _: *anyopaque,
-        _: []const u8,
-        _: []const u8,
-    ) account_store.StoreError!void {
-        return error.WriteFailed;
-    }
-
-    fn getModelCredential(
-        _: *anyopaque,
-        _: []const u8,
-        _: []u8,
-    ) account_store.StoreError!?[]const u8 {
-        return null;
-    }
-
-    fn deleteModelCredential(
-        _: *anyopaque,
-        _: []const u8,
-    ) account_store.StoreError!void {}
 };
 
 const FakeMetask = struct {
@@ -1181,9 +1002,8 @@ test "restored login drives automatic key and model defaults end to end" {
     defer workbench.deinit();
     var coordinator = Coordinator.init(
         &account_runtime,
-        workbench.executionHandoff(),
+        workbench.accountExecutionHandoff(),
         std.Thread.getCurrentId(),
-        std.testing.io,
     );
 
     var fake_platform: FakePlatform = .{};
@@ -1309,9 +1129,8 @@ test "relaunch with persisted selection restores the saved execution" {
         defer workbench.deinit();
         var coordinator = Coordinator.init(
             &account_runtime,
-            workbench.executionHandoff(),
+            workbench.accountExecutionHandoff(),
             std.Thread.getCurrentId(),
-            std.testing.io,
         );
         coordinator.start(fake_platform.ports());
         const settled = pumpUntilReady(&coordinator, &account_runtime, "boot1");
@@ -1357,9 +1176,8 @@ test "relaunch with persisted selection restores the saved execution" {
         defer workbench.deinit();
         var coordinator = Coordinator.init(
             &account_runtime,
-            workbench.executionHandoff(),
+            workbench.accountExecutionHandoff(),
             std.Thread.getCurrentId(),
-            std.testing.io,
         );
         coordinator.start(fake_platform.ports());
         const settled = pumpUntilReady(&coordinator, &account_runtime, "boot2");
@@ -1442,9 +1260,8 @@ test "relaunch with persisted selection restores the saved execution" {
         defer workbench.deinit();
         var coordinator = Coordinator.init(
             &account_runtime,
-            workbench.executionHandoff(),
+            workbench.accountExecutionHandoff(),
             std.Thread.getCurrentId(),
-            std.testing.io,
         );
         coordinator.start(fake_platform.ports());
         const restored = pumpUntilReady(&coordinator, &account_runtime, "boot3");
@@ -1503,9 +1320,8 @@ test "broken first key parks the catalog and a manual switch recovers" {
     defer workbench.deinit();
     var coordinator = Coordinator.init(
         &account_runtime,
-        workbench.executionHandoff(),
+        workbench.accountExecutionHandoff(),
         std.Thread.getCurrentId(),
-        std.testing.io,
     );
     coordinator.start(fake_platform.ports());
 

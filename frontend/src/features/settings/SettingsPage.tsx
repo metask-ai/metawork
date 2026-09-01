@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import type {
   AccountView,
-  ModelConnectionProtocol,
+  Protocol,
   PermissionProfile,
 } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
@@ -25,7 +25,7 @@ type RequestedSelection = {
 };
 type ModelConnectionDraft = {
   displayName: string;
-  protocol: ModelConnectionProtocol;
+  protocol: Protocol;
   normalizedBaseUrl: string;
   modelId: string;
 };
@@ -38,12 +38,12 @@ type ModelConnectionRemoval = {
   expectedConnectionGeneration: string;
 };
 
-const modelConnectionEndpointDefaults: Record<ModelConnectionProtocol, string> =
-  {
-    anthropic_messages: "https://api.anthropic.com/v1/messages",
-    openai_chat_completions: "https://api.openai.com/v1/chat/completions",
-    gemini_native: "https://generativelanguage.googleapis.com",
-  };
+const modelConnectionEndpointDefaults: Record<Protocol, string> = {
+  openai_responses: "https://api.openai.com/v1/responses",
+  anthropic_messages: "https://api.anthropic.com/v1/messages",
+  openai_chat_completions: "https://api.openai.com/v1/chat/completions",
+  gemini_native: "https://generativelanguage.googleapis.com",
+};
 
 function newModelConnectionDraft(): ModelConnectionDraft {
   return {
@@ -52,13 +52,6 @@ function newModelConnectionDraft(): ModelConnectionDraft {
     normalizedBaseUrl: modelConnectionEndpointDefaults.openai_chat_completions,
     modelId: "",
   };
-}
-
-function providerLabel(
-  provider: AccountView["apiKeys"][number]["provider"],
-  t: ReturnType<typeof useI18n>["t"],
-) {
-  return t(`provider.${provider}`);
 }
 
 function apiLabel(
@@ -76,7 +69,7 @@ function modelLabel(
 }
 
 function modelConnectionProtocolLabel(
-  protocol: AccountView["modelConnections"][number]["protocol"],
+  protocol: Protocol,
   t: ReturnType<typeof useI18n>["t"],
 ) {
   return t(`settings.model_connection_protocol.${protocol}`);
@@ -263,7 +256,7 @@ export function SettingsPage({
       account.apiKeys.map((key) => ({
         value: key.selectionId,
         label: apiLabel(key, t),
-        description: providerLabel(key.provider, t),
+        description: modelConnectionProtocolLabel(key.protocol, t),
         descriptionKind: "text",
         trailing: key.suffix ? `•••• ${key.suffix}` : undefined,
       })),
@@ -1194,7 +1187,7 @@ export function SettingsPage({
                     disabled={disabled || creatingModelConnection}
                     triggerClassName="settings-control"
                     onValueChange={(value) => {
-                      const protocol = value as ModelConnectionProtocol;
+                      const protocol = value as Protocol;
                       setModelConnectionDraft((current) =>
                         current
                           ? {
@@ -1444,7 +1437,7 @@ export function SettingsPage({
                             disabled={disabled || mutatingModelConnection}
                             triggerClassName="settings-control"
                             onValueChange={(value) => {
-                              const protocol = value as ModelConnectionProtocol;
+                              const protocol = value as Protocol;
                               setModelConnectionEdit((current) =>
                                 current
                                   ? {

@@ -35,7 +35,7 @@ pub const RecoveryAuthorityQuery = runtime.RecoveryAuthorityQuery;
 pub const RecoveryExternalAuthority = runtime.RecoveryExternalAuthority;
 pub const RecoveryEffects = runtime.RecoveryEffects;
 
-pub const Provider = state.Provider;
+pub const Protocol = state.Protocol;
 pub const PermissionProfile = state.PermissionProfile;
 pub const PermissionInteraction = state.PermissionInteraction;
 pub const RunOutcome = state.RunOutcome;

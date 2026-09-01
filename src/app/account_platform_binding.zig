@@ -4,8 +4,6 @@ const native_sdk = @import("native_sdk");
 const ports_api = @import("account_ports");
 const store = @import("account_credential_store");
 
-const model_connection_service = store.service ++ ".model-connections";
-
 pub const InitError = error{
     WrongThread,
     AccountDirectoryUnavailable,
@@ -73,13 +71,6 @@ pub const Adapter = struct {
                 .context = self,
                 .start_fn = startTimer,
                 .cancel_fn = cancelTimer,
-            },
-            .model_credentials = .{
-                .context = self,
-                .generate_slot_fn = generateModelConnectionCredentialSlot,
-                .store_fn = storeModelConnectionCredentialAtSlot,
-                .get_fn = getModelConnectionCredential,
-                .delete_fn = deleteModelConnectionCredential,
             },
         };
     }
@@ -243,70 +234,6 @@ pub const Adapter = struct {
             store.preference_name,
         ) catch |err| switch (err) {
             error.FileNotFound => {},
-            else => return error.DeleteFailed,
-        };
-    }
-
-    fn generateModelConnectionCredentialSlot(
-        context: *anyopaque,
-        output: *[ports_api.model_connection_slot_bytes]u8,
-    ) store.StoreError!void {
-        const self: *Adapter = @ptrCast(@alignCast(context));
-        self.assertMainThread() catch return error.WriteFailed;
-        var random: [16]u8 = undefined;
-        defer std.crypto.secureZero(u8, &random);
-        std.Io.randomSecure(self.io, &random) catch return error.WriteFailed;
-        @memcpy(
-            output[0..ports_api.model_connection_slot_prefix.len],
-            ports_api.model_connection_slot_prefix,
-        );
-        const hex = std.fmt.bytesToHex(random, .lower);
-        @memcpy(output[ports_api.model_connection_slot_prefix.len..], &hex);
-    }
-
-    fn storeModelConnectionCredentialAtSlot(
-        context: *anyopaque,
-        slot: []const u8,
-        secret: []const u8,
-    ) store.StoreError!void {
-        const self: *Adapter = @ptrCast(@alignCast(context));
-        self.assertMainThread() catch return error.WriteFailed;
-        if (secret.len > native_sdk.platform.max_credential_secret_bytes)
-            return error.WriteFailed;
-        self.services.setCredential(.{
-            .service = model_connection_service,
-            .account = slot,
-            .secret = secret,
-        }) catch return error.WriteFailed;
-    }
-
-    fn getModelConnectionCredential(
-        context: *anyopaque,
-        slot: []const u8,
-        output: []u8,
-    ) store.StoreError!?[]const u8 {
-        const self: *Adapter = @ptrCast(@alignCast(context));
-        self.assertMainThread() catch return error.ReadFailed;
-        return self.services.getCredential(.{
-            .service = model_connection_service,
-            .account = slot,
-        }, output) catch |err| switch (err) {
-            error.CredentialNotFound => null,
-            else => error.ReadFailed,
-        };
-    }
-
-    fn deleteModelConnectionCredential(
-        context: *anyopaque,
-        slot: []const u8,
-    ) store.StoreError!void {
-        const self: *Adapter = @ptrCast(@alignCast(context));
-        self.assertMainThread() catch return error.DeleteFailed;
-        self.services.deleteCredential(.{
-            .service = model_connection_service,
-            .account = slot,
-        }) catch |err| switch (err) {
-            error.CredentialNotFound => {},
             else => return error.DeleteFailed,
         };
     }

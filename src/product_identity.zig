@@ -21,6 +21,10 @@ pub const automation_data_directory_name = "MetaWork Automation";
 pub const automation_runner_bundle_id = bundle_id ++ ".automation";
 pub const development_account_credential_service = bundle_id ++ ".account";
 pub const automation_account_credential_service = bundle_id ++ ".automation.account";
+pub const development_model_connection_credential_service =
+    development_account_credential_service ++ ".model-connections";
+pub const automation_model_connection_credential_service =
+    automation_account_credential_service ++ ".model-connections";
 pub const development_mcp_credential_service = bundle_id ++ ".mcp";
 pub const automation_mcp_credential_service = bundle_id ++ ".automation.mcp";
 
@@ -59,8 +63,24 @@ pub fn mcpCredentialService() []const u8 {
     };
 }
 
+pub fn modelConnectionCredentialService() []const u8 {
+    return switch (artifact_kind) {
+        .development => development_model_connection_credential_service,
+        .automation => automation_model_connection_credential_service,
+        .release => @compileError("MetaWork release Model Connection credential service is not configured"),
+    };
+}
+
 test "MCP credentials use a product-owned service" {
     try std.testing.expect(std.mem.endsWith(u8, mcpCredentialService(), ".mcp"));
+}
+
+test "Model Connection credentials preserve their product-owned service identity" {
+    try std.testing.expect(std.mem.endsWith(
+        u8,
+        modelConnectionCredentialService(),
+        ".account.model-connections",
+    ));
 }
 
 test "artifact namespaces preserve development and isolate automation" {

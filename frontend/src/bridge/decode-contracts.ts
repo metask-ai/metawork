@@ -7,7 +7,7 @@ import {
   type ModelMetadata,
   type ExecutionSource,
   type ModelConnectionCredentialStatus,
-  type ModelConnectionProtocol,
+  type Protocol,
   type ModelConnectionState,
   type ModelConnectionTestStatus,
   type HostSignal,
@@ -198,9 +198,15 @@ const rendererBridgeConnectErrors = [
   "identity_mismatch",
   "revision_mismatch",
 ] as const;
-const providers = ["anthropic", "openai", "gemini"] as const;
+const protocols = [
+  "openai_responses",
+  "anthropic_messages",
+  "openai_chat_completions",
+  "gemini_native",
+] as const;
 const executionSources = ["metask", "model_connection"] as const;
 const modelConnectionProtocols = [
+  "openai_responses",
   "anthropic_messages",
   "openai_chat_completions",
   "gemini_native",
@@ -933,13 +939,13 @@ function decodeAccount(value: unknown, path: string): AccountView {
         "selectionId",
         "name",
         "suffix",
-        "provider",
+        "protocol",
       ]);
       return {
         selectionId: stringValue(key.selectionId, `${itemPath}.selectionId`),
         name: stringValue(key.name, `${itemPath}.name`),
         suffix: stringValue(key.suffix, `${itemPath}.suffix`),
-        provider: enumValue(key.provider, `${itemPath}.provider`, providers),
+        protocol: enumValue(key.protocol, `${itemPath}.protocol`, protocols),
       };
     },
   );
@@ -1000,7 +1006,7 @@ function decodeAccount(value: unknown, path: string): AccountView {
           connection.protocol,
           `${itemPath}.protocol`,
           modelConnectionProtocols,
-        ) as ModelConnectionProtocol,
+        ) as Protocol,
         normalizedBaseUrl: stringValue(
           connection.normalizedBaseUrl,
           `${itemPath}.normalizedBaseUrl`,
@@ -1837,7 +1843,7 @@ function decodeTask(value: unknown, path: string): TaskView {
   const bindingItem = object(item.binding, `${path}.binding`, [
     "epoch",
     "availability",
-    "provider",
+    "protocol",
     "model",
     "executionGeneration",
     "unavailableReason",
@@ -1860,10 +1866,10 @@ function decodeTask(value: unknown, path: string): TaskView {
   const binding = {
     epoch: positiveWireId(bindingItem.epoch, `${path}.binding.epoch`),
     availability,
-    provider: enumValue(
-      bindingItem.provider,
-      `${path}.binding.provider`,
-      providers,
+    protocol: enumValue(
+      bindingItem.protocol,
+      `${path}.binding.protocol`,
+      protocols,
     ),
     model: stringValue(bindingItem.model, `${path}.binding.model`),
     executionGeneration: positiveWireId(
@@ -2229,7 +2235,7 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
   ]);
   const execution = object(item.execution, `${path}.execution`, [
     "generation",
-    "provider",
+    "protocol",
     "model",
   ]);
   if (
@@ -2422,10 +2428,10 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
         execution.generation,
         `${path}.execution.generation`,
       ),
-      provider: enumValue(
-        execution.provider,
-        `${path}.execution.provider`,
-        providers,
+      protocol: enumValue(
+        execution.protocol,
+        `${path}.execution.protocol`,
+        protocols,
       ),
       model: stringValue(execution.model, `${path}.execution.model`),
     },

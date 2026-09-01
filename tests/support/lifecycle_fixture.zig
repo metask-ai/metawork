@@ -4,6 +4,7 @@ pub const product_control = @import("metawork_product_control");
 pub const product_skill = @import("metawork_product_skill");
 pub const product_task = @import("metawork_product_task");
 pub const account_contract = @import("metawork_account_contract");
+pub const execution_contract = @import("metawork_product_execution_contract");
 pub const event_pump = @import("event_pump");
 pub const product_control_executor = @import("product_control_executor");
 pub const sdk = @import("metask_agentcore");
@@ -2595,9 +2596,10 @@ pub fn installProductControlExecutionGeneration(
     generation: u64,
 ) !void {
     if (generation == 0) return error.InvalidExecutionGeneration;
-    var execution = try account_contract.OwnedExecutionConfig.initOwned(
+    var execution = try execution_contract.OwnedConfig.initOwned(
         std.testing.allocator,
-        .anthropic,
+        .metask,
+        .anthropic_messages,
         try std.testing.allocator.dupe(u8, "fixture-model"),
         try std.testing.allocator.dupe(
             u8,
@@ -2612,7 +2614,7 @@ pub fn installProductControlExecutionGeneration(
         .id = "key-1",
         .name = "Fixture API",
         .suffix = "ture",
-        .provider_kind = .anthropic,
+        .protocol = .anthropic_messages,
     }};
     const models = [_]account_contract.ModelView{.{
         .id = "fixture-model",

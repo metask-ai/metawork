@@ -11,6 +11,8 @@ const mcp_platform = @import("metawork_mcp_platform");
 const mcp_oauth = @import("metawork_mcp_oauth");
 const account_coordinator = @import("app/account_coordinator.zig");
 const account_platform_binding = @import("app/account_platform_binding.zig");
+const execution_coordinator = @import("app/execution_coordinator.zig");
+const execution_platform_binding = @import("app/execution_platform_binding.zig");
 const metask_http_transport = @import("app/metask_http_transport.zig");
 const completion_http_transport = @import("app/completion_http_transport.zig");
 const oauth_loopback_transport = @import("oauth_loopback_transport");
@@ -49,13 +51,16 @@ const App = struct {
     completion_transport: completion_http_transport.Backend,
     account_path: []const u8 = "",
     account_platform_binding: ?account_platform_binding.Adapter = null,
+    execution_platform_binding: ?execution_platform_binding.Adapter = null,
     dispatcher: ?*bridge_api.Dispatcher = null,
     agent_runtime: ?*agent.Runtime = null,
     control: ?*product_control.Runtime = null,
     agent_shutdown: bool = false,
     agent_events: agent_event_coordinator.Coordinator = .{},
     account_coordinator: ?*account_coordinator.Coordinator = null,
+    execution_coordinator: ?*execution_coordinator.Coordinator = null,
     account_started: bool = false,
+    execution_started: bool = false,
     control_storage: ?*product_control.Runtime = null,
     control_configuration: product_control.Configuration = .{},
     control_initialized: bool = false,
@@ -196,19 +201,23 @@ const App = struct {
             mcp_oauth_coordinator.platformHost(&self.platform),
         );
         self.mcp_oauth_refresh.?.start();
-        const coordinator = self.account_coordinator orelse
+        const account = self.account_coordinator orelse
             @panic("Account coordinator is not composed");
-        coordinator.setModelConnectionProbeNotifier(.{
+        const execution_management = self.execution_coordinator orelse
+            @panic("Execution coordinator is not composed");
+        execution_management.setProbeNotifier(.{
             .context = &self.platform,
             .notify_fn = app_platform.Adapter.notifyRequired,
         });
         if (self.automation.active()) {
-            coordinator.startAutomation();
+            execution_management.startUnavailable();
+            self.execution_started = true;
+            account.startAutomation();
             if (self.automation.executionFixture()) |execution| {
                 const control = self.control orelse
                     @panic("Product Control is not composed");
                 control.installAutomationExecution(.{
-                    .provider = execution.provider,
+                    .protocol = execution.protocol,
                     .credential = execution.credential,
                     .model = execution.model,
                     .base_url = execution.base_url,
@@ -217,19 +226,31 @@ const App = struct {
                 );
             }
         } else if (self.platform.services()) |services| {
+            self.execution_platform_binding = execution_platform_binding.Adapter.init(
+                services,
+                self.io,
+                self.main_thread_id,
+            );
             self.account_platform_binding = account_platform_binding.Adapter.init(
                 services,
                 self.io,
                 self.main_thread_id,
                 self.account_path,
             ) catch null;
+            execution_management.start(
+                self.account_path,
+                self.execution_platform_binding.?.ports(),
+            );
+            self.execution_started = true;
             if (self.account_platform_binding) |*binding| {
-                coordinator.start(binding.ports());
+                account.start(binding.ports());
             } else {
-                coordinator.startUnavailable();
+                account.startUnavailable();
             }
         } else {
-            coordinator.startUnavailable();
+            execution_management.startUnavailable();
+            self.execution_started = true;
+            account.startUnavailable();
         }
         self.account_started = true;
         (self.dispatcher orelse @panic("Bridge Dispatcher is not composed")).startIngress();
@@ -257,12 +278,17 @@ const App = struct {
         }
         if (self.mcp_management) |*coordinator| coordinator.shutdown();
         if (self.mcp_oauth_refresh) |*coordinator| coordinator.shutdown();
+        if (self.execution_started) if (self.execution_coordinator) |coordinator| {
+            coordinator.shutdown();
+            coordinator.drain();
+        };
         if (self.account_started) if (self.account_coordinator) |coordinator| {
             coordinator.shutdown();
             coordinator.drain();
         };
         if (self.account_platform_binding) |*binding| binding.deinit();
         self.account_platform_binding = null;
+        self.execution_platform_binding = null;
         if (self.control) |control| control.shutdownExecutor();
         if (self.agent_runtime) |agent_runtime| {
             try agent_runtime.shutdown();
@@ -276,6 +302,7 @@ const App = struct {
         self.platform.stop(native_runtime);
         self.control = null;
         self.account_started = false;
+        self.execution_started = false;
     }
 
     fn event(
@@ -290,6 +317,8 @@ const App = struct {
                 if (self.single_instance) |coordinator|
                     if (coordinator.drain()) self.platform.activateMainWindow();
                 if (self.account_coordinator) |coordinator|
+                    coordinator.drain();
+                if (self.execution_coordinator) |coordinator|
                     coordinator.drain();
                 if (self.mcp_oauth_refresh) |*coordinator|
                     if (!coordinator.drain()) coordinator.reconcileTimer();
@@ -566,15 +595,21 @@ pub fn run(init: std.process.Init) !void {
     );
     var account_coordinator_state = account_coordinator.Coordinator.init(
         &account_runtime,
-        control.executionHandoff(),
+        control.accountExecutionHandoff(),
+        app.main_thread_id,
+    );
+    var execution_coordinator_state = execution_coordinator.Coordinator.init(
+        control.executionManagement(),
         app.main_thread_id,
         init.io,
     );
-    account_coordinator_state.setCompletionTransport(
+    execution_coordinator_state.setCompletionTransport(
         app.completion_transport.transport(),
     );
     app.account_coordinator = &account_coordinator_state;
+    app.execution_coordinator = &execution_coordinator_state;
     defer {
+        app.execution_coordinator = null;
         app.account_coordinator = null;
         account_runtime.deinit();
     }
@@ -583,6 +618,7 @@ pub fn run(init: std.process.Init) !void {
         std.heap.c_allocator,
         &control,
         account_coordinator_state.commandSink(),
+        execution_coordinator_state.commandSink(),
         app.platform.dispatcherPlatform(),
         app.automation.dispatcherAuthority(),
         app_window.main_window_id,

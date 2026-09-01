@@ -44,14 +44,15 @@ export type AccountErrorCode =
   | "model_connection_persistence_unavailable"
   | "model_connection_test_unavailable";
 
-export type Provider = "anthropic" | "openai" | "gemini";
+export type Protocol =
+  | "openai_responses"
+  | "anthropic_messages"
+  | "openai_chat_completions"
+  | "gemini_native";
 
 export const permissionProfiles = ["approval_required", "full_access"] as const;
 export type PermissionProfile = (typeof permissionProfiles)[number];
 export type PermissionInteraction = "interactive" | "noninteractive";
-
-export type ModelConnectionProtocol =
-  "anthropic_messages" | "openai_chat_completions" | "gemini_native";
 
 export type ModelConnectionState = "configuring" | "ready" | "disabled";
 
@@ -64,7 +65,7 @@ export type ModelConnectionCredentialStatus =
 export type ModelConnectionView = {
   id: string;
   displayName: string;
-  protocol: ModelConnectionProtocol;
+  protocol: Protocol;
   normalizedBaseUrl: string;
   state: ModelConnectionState;
   testStatus: ModelConnectionTestStatus;
@@ -118,7 +119,7 @@ export type AccountView = {
     selectionId: string;
     name: string;
     suffix: string;
-    provider: Provider;
+    protocol: Protocol;
   }[];
   models: {
     selectionId: string;
@@ -236,7 +237,7 @@ export type ScheduledTaskView = {
     | null;
   execution: {
     generation: string;
-    provider: Provider;
+    protocol: Protocol;
     model: string;
   };
   input: { kind: "text"; text: string; redacted: boolean };
@@ -484,7 +485,7 @@ export type TaskView = {
   binding: {
     epoch: string;
     availability: "available" | "unavailable";
-    provider: Provider;
+    protocol: Protocol;
     model: string;
     executionGeneration: string;
     unavailableReason: "runtime_detached" | null;

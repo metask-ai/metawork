@@ -30,7 +30,7 @@ function account(overrides = {}) {
         selectionId: "key-1",
         name: "Primary",
         suffix: "1234",
-        provider: "openai",
+        protocol: "openai_chat_completions",
       },
     ],
     models: [{ selectionId: "gpt-5", displayName: "GPT-5" }],
@@ -45,7 +45,7 @@ function account(overrides = {}) {
 function task(overrides = {}) {
   return {
     binding: {
-      provider: "openai",
+      protocol: "openai_chat_completions",
       model: "removed-model",
       executionGeneration: "7",
       ...overrides,
@@ -67,14 +67,14 @@ test("catalog loading preserves authority but disables selection", () => {
   );
 });
 
-test("credential generation, provider, and execution source are exact", () => {
+test("credential generation, protocol, and execution source are exact", () => {
   assert.equal(
     taskModelSelectionPolicy(account(), task({ executionGeneration: "6" }))
       .authorityExact,
     false,
   );
   assert.equal(
-    taskModelSelectionPolicy(account(), task({ provider: "gemini" }))
+    taskModelSelectionPolicy(account(), task({ protocol: "gemini_native" }))
       .authorityExact,
     false,
   );

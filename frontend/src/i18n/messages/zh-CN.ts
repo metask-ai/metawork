@@ -646,9 +646,6 @@ export const zhCN: Record<MessageId, string> = {
   "account.logout_short": "退出登录…",
   "account.api_fallback": "Metask API",
   "account.model_fallback": "可用模型",
-  "provider.anthropic": "Anthropic",
-  "provider.openai": "OpenAI",
-  "provider.gemini": "Gemini",
   "settings.title": "设置",
   "settings.back": "返回工作台",
   "settings.intro": "管理 MetaWork 开始新任务时使用的默认配置。",
@@ -687,7 +684,7 @@ export const zhCN: Record<MessageId, string> = {
   "settings.model_connection_adding": "正在添加…",
   "settings.model_connection_name": "连接名称",
   "settings.model_connection_name_placeholder": "我的 OpenAI 服务",
-  "settings.model_connection_protocol": "Provider 协议",
+  "settings.model_connection_protocol": "协议",
   "settings.model_connection_endpoint": "服务地址",
   "settings.model_connection_model_id": "模型 ID",
   "settings.model_connection_model_id_placeholder": "gpt-5",
@@ -714,6 +711,7 @@ export const zhCN: Record<MessageId, string> = {
   "settings.model_connection_test_status.testing": "正在测试",
   "settings.model_connection_test_status.connected": "最近测试通过",
   "settings.model_connection_test_status.failed": "最近测试失败",
+  "settings.model_connection_protocol.openai_responses": "OpenAI Responses",
   "settings.model_connection_protocol.anthropic_messages": "Anthropic Messages",
   "settings.model_connection_protocol.openai_chat_completions":
     "OpenAI Chat Completions",
@@ -730,7 +728,7 @@ export const zhCN: Record<MessageId, string> = {
     "切换 API 后会加载由该 Metask API 提供的模型目录。",
   "settings.only_api_help":
     "Metask 当前只返回这一个可用 API；其他 API 会在下次同步后出现。",
-  "settings.api_menu_help": "Provider 由 Metask 提供，此处仅用于识别。",
+  "settings.api_menu_help": "协议由 Metask 提供，此处仅用于识别。",
   "settings.default_model": "默认模型",
   "settings.default_model_help":
     "用于新建任务；已有任务继续使用创建时绑定的模型。",

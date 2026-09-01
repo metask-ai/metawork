@@ -385,7 +385,7 @@ test "checkpoint wire contains only blob, session binding, and commit anchor" {
 pub const BindingWire = struct {
     epoch: u64,
     execution_generation: u64,
-    provider: []const u8,
+    protocol: []const u8,
     model: []const u8,
 };
 
@@ -395,7 +395,7 @@ pub const RunWire = struct {
     id: u64,
     generation: u64,
     execution_generation: u64,
-    execution_provider: []const u8,
+    execution_protocol: []const u8,
     execution_model: []const u8,
     permission_profile: []const u8,
     permission_interaction: []const u8,
@@ -673,7 +673,7 @@ pub fn projectTask(
         .binding = .{
             .epoch = task.durable.binding_epoch,
             .execution_generation = task.durable.execution_generation,
-            .provider = @tagName(task.durable.execution_provider),
+            .protocol = @tagName(task.durable.execution_protocol),
             .model = task.durable.execution_model,
         },
         .next_run_generation = task.durable.next_run_generation,
@@ -806,7 +806,7 @@ fn projectRun(
         .id = run.id,
         .generation = run.generation,
         .execution_generation = run.execution_generation,
-        .execution_provider = @tagName(run.execution_provider),
+        .execution_protocol = @tagName(run.execution_protocol),
         .execution_model = run.execution_model,
         .permission_profile = @tagName(run.permission_profile),
         .permission_interaction = @tagName(run.permission_interaction),
@@ -961,7 +961,7 @@ pub fn restoreTask(
         if (!terminal_found) return error.TaskStoreCorrupt;
     }
 
-    const execution_provider = parseEnum(task_state.Provider, wire.binding.provider) orelse
+    const execution_protocol = parseEnum(task_state.Protocol, wire.binding.protocol) orelse
         return error.TaskStoreCorrupt;
     const permission_profile = parseEnum(
         task_state.PermissionProfile,
@@ -1029,7 +1029,7 @@ pub fn restoreTask(
             .id = wire.id,
             .recent_order = wire.recent_order,
             .execution_generation = wire.binding.execution_generation,
-            .execution_provider = execution_provider,
+            .execution_protocol = execution_protocol,
             .execution_model = execution_model,
             .permission_profile = permission_profile,
             .permission_interaction = permission_interaction,
@@ -1191,7 +1191,7 @@ fn restoreRun(projection: RestoreProjection, wire: RunWire) RestoreError!task_st
         .id = wire.id,
         .generation = wire.generation,
         .execution_generation = wire.execution_generation,
-        .execution_provider = parseEnum(task_state.Provider, wire.execution_provider) orelse
+        .execution_protocol = parseEnum(task_state.Protocol, wire.execution_protocol) orelse
             return error.TaskStoreCorrupt,
         .execution_model = execution_model,
         .execution_model_owned = true,
@@ -2007,7 +2007,7 @@ fn validateRecoveredTask(
         !validText(task.workspace_root, limits.max_workspace_bytes, false) or
         !validText(task.title, limits.max_task_title_bytes, true) or
         task.binding.epoch == 0 or task.binding.execution_generation == 0 or
-        !oneOf(task.binding.provider, &.{ "anthropic", "openai", "gemini" }) or
+        !oneOf(task.binding.protocol, &.{ "openai_responses", "anthropic_messages", "openai_chat_completions", "gemini_native" }) or
         !validBinding(task.binding, limits.max_tool_field_bytes) or
         task.runs.len > limits.max_runs_per_task or
         task.compacts.len > limits.max_compacts_per_task or
@@ -2080,7 +2080,7 @@ fn validate(state: *const StateWire, limits: Limits) !void {
             !validPermissionProfile(task.permission_profile) or
             !validPermissionInteraction(task.permission_interaction) or
             task.binding.epoch == 0 or task.binding.execution_generation == 0 or
-            !oneOf(task.binding.provider, &.{ "anthropic", "openai", "gemini" }) or
+            !oneOf(task.binding.protocol, &.{ "openai_responses", "anthropic_messages", "openai_chat_completions", "gemini_native" }) or
             !validBinding(task.binding, limits.max_execution_model_bytes) or
             task.runs.len > limits.max_runs_per_task or
             task.compacts.len > limits.max_compacts_per_task or
@@ -2117,13 +2117,13 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
     var active_count: usize = 0;
     for (task.runs, 0..) |run, index| {
         if (run.id == 0 or run.generation == 0 or run.execution_generation == 0 or
-            !oneOf(run.execution_provider, &.{ "anthropic", "openai", "gemini" }) or
+            !oneOf(run.execution_protocol, &.{ "openai_responses", "anthropic_messages", "openai_chat_completions", "gemini_native" }) or
             !validText(run.execution_model, limits.max_execution_model_bytes, false) or
             !validPermissionProfile(run.permission_profile) or
             !validPermissionInteraction(run.permission_interaction) or
             !std.mem.eql(u8, run.permission_profile, task.permission_profile) or
             !std.mem.eql(u8, run.permission_interaction, task.permission_interaction) or
-            !std.mem.eql(u8, run.execution_provider, task.binding.provider) or
+            !std.mem.eql(u8, run.execution_protocol, task.binding.protocol) or
             !validText(run.assistant, limits.max_assistant_message_bytes, true) or
             !validText(run.diagnostic, limits.max_terminal_diagnostic_bytes, true) or
             run.tools.len > limits.max_tools_per_run or run.next_activity_order == 0)
@@ -2399,6 +2399,84 @@ test "task store hard cut rejects retired JSON envelopes" {
     try std.testing.expectError(error.TaskStoreCorrupt, decode(std.testing.allocator, retired, testLimits()));
 }
 
+test "task store hard cut rejects the retired provider binding" {
+    var workspaces = [_]WorkspaceWire{.{
+        .id = 1,
+        .epoch = 1,
+        .kind = "manual",
+        .canonical_root = "/tmp/repo",
+        .display_name = "repo",
+        .visible = true,
+        .recent_order = 1,
+    }};
+    var tasks = [_]TaskWire{.{
+        .id = 1,
+        .recent_order = 1,
+        .workspace_id = 1,
+        .workspace_epoch = 1,
+        .workspace_root = "/tmp/repo",
+        .title = "task",
+        .title_redacted = false,
+        .archived = false,
+        .permission_profile = "approval_required",
+        .permission_interaction = "interactive",
+        .binding = .{
+            .epoch = 1,
+            .execution_generation = 1,
+            .protocol = "openai_chat_completions",
+            .model = "gpt-test",
+        },
+        .next_run_generation = 0,
+        .active_operation = null,
+        .runs = &.{},
+        .compacts = &.{},
+        .ui_history = &.{},
+    }};
+    var bytes: [64 * 1024]u8 = undefined;
+    const encoded = try encode(&bytes, .{
+        .next_workspace_id = 2,
+        .next_workspace_recent_order = 2,
+        .next_task_id = 2,
+        .next_task_recent_order = 2,
+        .workspaces = &workspaces,
+        .tasks = &tasks,
+    });
+    const protocol_field = "\"protocol\"";
+    const provider_field = "\"provider\"";
+    const field_index = std.mem.indexOf(u8, encoded, protocol_field) orelse
+        return error.TestUnexpectedResult;
+    @memcpy(
+        bytes[field_index .. field_index + protocol_field.len],
+        provider_field,
+    );
+
+    var frame_offset: usize = 0;
+    var task_frame_found = false;
+    while (frame_offset + frame_header_bytes <= encoded.len) {
+        const header: *[frame_header_bytes]u8 = @ptrCast(&bytes[frame_offset]);
+        const payload_len = std.mem.readInt(u32, header[24..28], .little);
+        const payload_start = frame_offset + frame_header_bytes;
+        const payload_end = payload_start + payload_len;
+        if (field_index >= payload_start and field_index < payload_end) {
+            try std.testing.expectEqual(record_task, header[5]);
+            std.mem.writeInt(
+                u32,
+                header[32..36],
+                std.hash.Crc32.hash(bytes[payload_start..payload_end]),
+                .little,
+            );
+            task_frame_found = true;
+            break;
+        }
+        frame_offset = payload_end;
+    }
+    try std.testing.expect(task_frame_found);
+    try std.testing.expectError(
+        error.TaskStoreCorrupt,
+        decode(std.testing.allocator, bytes[0..encoded.len], testLimits()),
+    );
+}
+
 test "task store hard cut rejects metadata from before permission profiles" {
     const RetiredMetaWire = struct {
         next_workspace_id: u64,
@@ -2441,7 +2519,7 @@ test "task store preserves history bound to an older Workspace epoch" {
         .archived = false,
         .permission_profile = "approval_required",
         .permission_interaction = "interactive",
-        .binding = .{ .epoch = 1, .execution_generation = 1, .provider = "openai", .model = "m" },
+        .binding = .{ .epoch = 1, .execution_generation = 1, .protocol = "openai_chat_completions", .model = "m" },
         .next_run_generation = 0,
         .active_operation = null,
         .runs = &.{},
@@ -2484,7 +2562,7 @@ test "damaged metadata does not block valid Task recovery" {
         .archived = false,
         .permission_profile = "approval_required",
         .permission_interaction = "interactive",
-        .binding = .{ .epoch = 1, .execution_generation = 1, .provider = "openai", .model = "m" },
+        .binding = .{ .epoch = 1, .execution_generation = 1, .protocol = "openai_chat_completions", .model = "m" },
         .next_run_generation = 0,
         .active_operation = null,
         .runs = &.{},
@@ -2532,7 +2610,7 @@ test "damaged current-format frames recover an empty projection" {
         .archived = false,
         .permission_profile = "approval_required",
         .permission_interaction = "interactive",
-        .binding = .{ .epoch = 1, .execution_generation = 1, .provider = "openai", .model = "m" },
+        .binding = .{ .epoch = 1, .execution_generation = 1, .protocol = "openai_chat_completions", .model = "m" },
         .next_run_generation = 0,
         .active_operation = null,
         .runs = &.{},
@@ -2592,7 +2670,7 @@ test "one damaged Task frame does not poison surviving history" {
             .archived = false,
             .permission_profile = "approval_required",
             .permission_interaction = "interactive",
-            .binding = .{ .epoch = 1, .execution_generation = 1, .provider = "openai", .model = "m" },
+            .binding = .{ .epoch = 1, .execution_generation = 1, .protocol = "openai_chat_completions", .model = "m" },
             .next_run_generation = 0,
             .active_operation = null,
             .runs = &.{},
@@ -2610,7 +2688,7 @@ test "one damaged Task frame does not poison surviving history" {
             .archived = false,
             .permission_profile = "approval_required",
             .permission_interaction = "interactive",
-            .binding = .{ .epoch = 1, .execution_generation = 1, .provider = "openai", .model = "m" },
+            .binding = .{ .epoch = 1, .execution_generation = 1, .protocol = "openai_chat_completions", .model = "m" },
             .next_run_generation = 0,
             .active_operation = null,
             .runs = &.{},
@@ -2681,7 +2759,7 @@ test "corrupt Task identity cannot manufacture a global failure" {
         .archived = false,
         .permission_profile = "approval_required",
         .permission_interaction = "interactive",
-        .binding = .{ .epoch = 1, .execution_generation = 1, .provider = "openai", .model = "m" },
+        .binding = .{ .epoch = 1, .execution_generation = 1, .protocol = "openai_chat_completions", .model = "m" },
         .next_run_generation = 0,
         .active_operation = null,
         .runs = &.{},
@@ -2746,7 +2824,7 @@ test "task store round-trips per-run execution generations across binding adopti
         .id = 1,
         .generation = 1,
         .execution_generation = 13,
-        .execution_provider = "openai",
+        .execution_protocol = "openai_chat_completions",
         .execution_model = "model",
         .permission_profile = "approval_required",
         .permission_interaction = "interactive",
@@ -2801,7 +2879,7 @@ test "task store round-trips per-run execution generations across binding adopti
         .binding = .{
             .epoch = 2,
             .execution_generation = 17,
-            .provider = "openai",
+            .protocol = "openai_chat_completions",
             .model = "model",
         },
         .next_run_generation = 2,
@@ -2890,7 +2968,7 @@ test "task store rejects states that would violate the product contract" {
         .id = 1,
         .generation = 1,
         .execution_generation = 1,
-        .execution_provider = "openai",
+        .execution_protocol = "openai_chat_completions",
         .execution_model = "model",
         .permission_profile = "approval_required",
         .permission_interaction = "interactive",
@@ -2967,7 +3045,7 @@ test "task store rejects states that would violate the product contract" {
         .binding = .{
             .epoch = 1,
             .execution_generation = 1,
-            .provider = "openai",
+            .protocol = "openai_chat_completions",
             .model = "model",
         },
         .next_run_generation = 1,

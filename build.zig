@@ -98,11 +98,15 @@ pub fn build(b: *std.Build) void {
         name: []const u8,
         root_module: *std.Build.Module,
     }{
+        .{ .name = "metawork-product-execution-contract", .root_module = test_modules.execution_contract },
+        .{ .name = "metawork-product-agent-protocol-adapter", .root_module = test_modules.product_agent_protocol_adapter },
         .{ .name = "metawork-account-contract", .root_module = test_modules.account_contract },
         .{ .name = "metawork-account-oauth", .root_module = test_modules.account_oauth },
         .{ .name = "metawork-metask-client", .root_module = test_modules.metask_client },
         .{ .name = "metawork-account-credential-store", .root_module = test_modules.account_credential_store },
-        .{ .name = "metawork-account-model-connections", .root_module = test_modules.account_model_connections },
+        .{ .name = "metawork-product-execution-model-connections", .root_module = test_modules.execution_model_connections },
+        .{ .name = "metawork-product-execution-ports", .root_module = test_modules.execution_ports },
+        .{ .name = "metawork-product-execution-runtime", .root_module = test_modules.execution_runtime },
         .{ .name = "metawork-account-ports", .root_module = test_modules.account_ports },
         .{ .name = "metawork-account-loopback", .root_module = test_modules.account_loopback },
         .{ .name = "metawork-oauth-loopback-transport", .root_module = test_modules.oauth_loopback_transport },
@@ -283,11 +287,15 @@ fn addLifecycleTests(
 
 const WiredModules = struct {
     storage: *std.Build.Module,
+    execution_contract: *std.Build.Module,
+    product_agent_protocol_adapter: *std.Build.Module,
     account: *std.Build.Module,
     account_runtime: *std.Build.Module,
     account_catalog: *std.Build.Module,
     account_credentials_runtime: *std.Build.Module,
-    account_model_connections: *std.Build.Module,
+    execution_model_connections: *std.Build.Module,
+    execution_ports: *std.Build.Module,
+    execution_runtime: *std.Build.Module,
     account_contract: *std.Build.Module,
     account_credential_store: *std.Build.Module,
     account_loopback: *std.Build.Module,
@@ -319,7 +327,7 @@ const WiredModules = struct {
     event_pump: *std.Build.Module,
     sdk: *std.Build.Module,
     product_control: *std.Build.Module,
-    product_control_account_execution: *std.Build.Module,
+    product_control_execution_state: *std.Build.Module,
     product_control_runtime: *std.Build.Module,
     product_control_executor: *std.Build.Module,
     product_control_file_preview: *std.Build.Module,
@@ -382,6 +390,7 @@ fn createLifecycleFixture(
     fixture.addImport("metawork_product_skill", modules.product_skill);
     fixture.addImport("metawork_product_task", modules.product_task);
     fixture.addImport("metawork_account_contract", modules.account_contract);
+    fixture.addImport("metawork_product_execution_contract", modules.execution_contract);
     fixture.addImport("event_pump", modules.event_pump);
     fixture.addImport("metask_agentcore", modules.sdk);
     fixture.addImport("product_control_executor", modules.product_control_executor);
@@ -666,6 +675,7 @@ fn addMcpInteropTests(
     });
     cases.addImport("metawork_agent", modules.agent);
     cases.addImport("metawork_account_contract", modules.account_contract);
+    cases.addImport("metawork_product_execution_contract", modules.execution_contract);
     cases.addImport("metawork_mcp_platform", modules.mcp_platform);
     cases.addImport("metawork_product_control", modules.product_control);
     cases.addImport("metawork_product_mcp", modules.product_mcp);
@@ -855,17 +865,34 @@ fn wireAgentCore(
     });
     agent_provider_probe.addImport("agent_completion", agent_completion);
     agent.addImport("agent_provider_probe", agent_provider_probe);
+    const execution_contract = b.createModule(.{
+        .root_source_file = b.path("src/product/execution/contract.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    const product_agent_protocol_adapter = b.createModule(.{
+        .root_source_file = b.path("src/product/agent_protocol_adapter.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    product_agent_protocol_adapter.addImport("metawork_agent", agent);
+    product_agent_protocol_adapter.addImport(
+        "metawork_product_execution_contract",
+        execution_contract,
+    );
     const account_contract = b.createModule(.{
         .root_source_file = b.path("src/product/account/contract.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
+    account_contract.addImport("metawork_product_execution_contract", execution_contract);
     const account_state = b.createModule(.{
         .root_source_file = b.path("src/product/account/state.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     account_state.addImport("metawork_account_contract", account_contract);
+    account_state.addImport("metawork_product_execution_contract", execution_contract);
     const account_oauth = b.createModule(.{
         .root_source_file = b.path("src/product/account/oauth.zig"),
         .target = target,
@@ -909,6 +936,7 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
     });
     account_catalog.addImport("metawork_account_contract", account_contract);
+    account_catalog.addImport("metawork_product_execution_contract", execution_contract);
     account_catalog.addImport("metask_client", metask_client);
     const account_credentials_runtime = b.createModule(.{
         .root_source_file = b.path("src/product/account/credentials.zig"),
@@ -920,12 +948,28 @@ fn wireAgentCore(
     account_credentials_runtime.addImport("metawork_account_contract", account_contract);
     account_credentials_runtime.addImport("metask_client", metask_client);
     account_credentials_runtime.addImport("account_catalog", account_catalog);
-    const account_model_connections = b.createModule(.{
-        .root_source_file = b.path("src/product/account/model_connections.zig"),
+    const execution_model_connections = b.createModule(.{
+        .root_source_file = b.path("src/product/execution/model_connections.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
-    account_model_connections.addImport("metawork_account_contract", account_contract);
+    execution_model_connections.addImport(
+        "metawork_product_execution_contract",
+        execution_contract,
+    );
+    const execution_ports = b.createModule(.{
+        .root_source_file = b.path("src/product/execution/ports.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    const execution_runtime = b.createModule(.{
+        .root_source_file = b.path("src/product/execution/runtime.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    execution_runtime.addImport("metawork_product_execution_contract", execution_contract);
+    execution_runtime.addImport("product_execution_ports", execution_ports);
+    execution_runtime.addImport("product_execution_model_connections", execution_model_connections);
     const account_network_attempt = b.createModule(.{
         .root_source_file = b.path("src/product/account/network_attempt.zig"),
         .target = target,
@@ -958,6 +1002,7 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
     });
     account_runtime.addImport("metawork_account_contract", account_contract);
+    account_runtime.addImport("metawork_product_execution_contract", execution_contract);
     account_runtime.addImport("account_state", account_state);
     account_runtime.addImport("metask_client", metask_client);
     account_runtime.addImport("account_credential_store", account_credential_store);
@@ -967,7 +1012,6 @@ fn wireAgentCore(
     account_runtime.addImport("account_catalog", account_catalog);
     account_runtime.addImport("account_credentials_runtime", account_credentials_runtime);
     account_runtime.addImport("account_network_attempt", account_network_attempt);
-    account_runtime.addImport("account_model_connections", account_model_connections);
     const account = b.createModule(.{
         .root_source_file = b.path("src/product/account.zig"),
         .target = target,
@@ -1004,6 +1048,7 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    product_schedule_state.addImport("metawork_product_execution_contract", execution_contract);
     const product_schedule_persistence = b.createModule(.{
         .root_source_file = b.path("src/product/schedule/persistence.zig"),
         .target = target,
@@ -1148,7 +1193,7 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
-    owned_task_execution.addImport("metawork_account_contract", account_contract);
+    owned_task_execution.addImport("metawork_product_execution_contract", execution_contract);
     const task_agent_session = b.createModule(.{
         .root_source_file = b.path("src/product/task/agent_session.zig"),
         .target = target,
@@ -1180,11 +1225,15 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
     });
     task_recovery_job.addImport("metawork_agent", agent);
-    task_recovery_job.addImport("metawork_account_contract", account_contract);
+    task_recovery_job.addImport("metawork_product_execution_contract", execution_contract);
     task_recovery_job.addImport("product_task_agent_session", task_agent_session);
     task_recovery_job.addImport("product_task_checkpoint_record", checkpoint_record);
     task_recovery_job.addImport("product_task_checkpoint_store", checkpoint_store);
     task_recovery_job.addImport("product_task_execution_binding", owned_task_execution);
+    task_recovery_job.addImport(
+        "product_agent_protocol_adapter",
+        product_agent_protocol_adapter,
+    );
     task_attachment.addImport("product_task_recovery_job", task_recovery_job);
     const task_state = b.createModule(.{
         .root_source_file = b.path("src/product/task/state.zig"),
@@ -1192,6 +1241,7 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
     });
     task_state.addImport("metawork_agent", agent);
+    task_state.addImport("metawork_product_execution_contract", execution_contract);
     task_state.addImport("product_task_checkpoint_record", checkpoint_record);
     task_state.addImport("product_task_attachment", task_attachment);
     task_state.addImport("product_task_deletion", task_deletion);
@@ -1218,7 +1268,7 @@ fn wireAgentCore(
     task_runtime.addImport("product_task_state", task_state);
     task_runtime.addImport("product_task_persistence", task_persistence);
     task_runtime.addImport("metawork_agent", agent);
-    task_runtime.addImport("metawork_account_contract", account_contract);
+    task_runtime.addImport("metawork_product_execution_contract", execution_contract);
     task_runtime.addImport("product_task_policy", task_policy);
     task_runtime.addImport("metawork_product_skill", product_skill);
     task_runtime.addImport("product_task_recovery_job", task_recovery_job);
@@ -1228,6 +1278,10 @@ fn wireAgentCore(
     task_runtime.addImport("product_task_recovery", task_recovery);
     task_runtime.addImport("product_task_agent_session", task_agent_session);
     task_runtime.addImport("product_task_execution_binding", owned_task_execution);
+    task_runtime.addImport(
+        "product_agent_protocol_adapter",
+        product_agent_protocol_adapter,
+    );
     const task_execution = b.createModule(.{
         .root_source_file = b.path("src/product/task/execution.zig"),
         .target = target,
@@ -1240,6 +1294,10 @@ fn wireAgentCore(
     task_execution.addImport("product_task_agent_session", task_agent_session);
     task_execution.addImport("product_task_state", task_state);
     task_execution.addImport("product_task_policy", task_policy);
+    task_execution.addImport(
+        "product_agent_protocol_adapter",
+        product_agent_protocol_adapter,
+    );
     task_runtime.addImport("product_task_execution", task_execution);
     const task_view = b.createModule(.{
         .root_source_file = b.path("src/product/task/view.zig"),
@@ -1329,14 +1387,18 @@ fn wireAgentCore(
     product_mcp_runtime.addImport("product_mcp_refresh_job", product_mcp_refresh_job);
     product_mcp.addImport("product_mcp_ports", product_mcp_ports);
     product_mcp.addImport("product_mcp_runtime", product_mcp_runtime);
-    const product_control_account_execution = b.createModule(.{
-        .root_source_file = b.path("src/product/control/account_execution.zig"),
+    const product_control_execution_state = b.createModule(.{
+        .root_source_file = b.path("src/product/control/execution_state.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
-    product_control_account_execution.addImport(
+    product_control_execution_state.addImport(
         "metawork_account_contract",
         account_contract,
+    );
+    product_control_execution_state.addImport(
+        "metawork_product_execution_contract",
+        execution_contract,
     );
     const product_control_ports = b.createModule(.{
         .root_source_file = b.path("src/product/control/ports.zig"),
@@ -1345,9 +1407,11 @@ fn wireAgentCore(
     });
     product_control_ports.addImport("metawork_agent", agent);
     product_control_ports.addImport("metawork_account_contract", account_contract);
+    product_control_ports.addImport("metawork_product_execution_contract", execution_contract);
+    product_control_ports.addImport("product_execution_ports", execution_ports);
     product_control_ports.addImport(
-        "product_control_account_execution",
-        product_control_account_execution,
+        "product_control_execution_state",
+        product_control_execution_state,
     );
     product_control_ports.addImport("metawork_product_mcp", product_mcp);
     product_control_ports.addImport("metawork_product_schedule", product_schedule);
@@ -1380,9 +1444,12 @@ fn wireAgentCore(
     });
     product_control_runtime.addImport("metawork_agent", agent);
     product_control_runtime.addImport("metawork_account_contract", account_contract);
+    product_control_runtime.addImport("metawork_product_execution_contract", execution_contract);
+    product_control_runtime.addImport("product_execution_runtime", execution_runtime);
+    product_control_runtime.addImport("product_execution_ports", execution_ports);
     product_control_runtime.addImport(
-        "product_control_account_execution",
-        product_control_account_execution,
+        "product_control_execution_state",
+        product_control_execution_state,
     );
     product_control_runtime.addImport("product_control_executor", executor);
     product_control_runtime.addImport("product_control_file_preview", file_preview);
@@ -1425,6 +1492,7 @@ fn wireAgentCore(
     });
     bridge.addImport("native_sdk", existingImport(root_module, "native_sdk"));
     bridge.addImport("metawork_account_contract", account_contract);
+    bridge.addImport("metawork_product_execution_contract", execution_contract);
     bridge.addImport("metawork_product_control", product_control);
     bridge.addImport("metawork_product_mcp", product_mcp);
     bridge.addImport("metawork_product_skill", product_skill);
@@ -1436,7 +1504,7 @@ fn wireAgentCore(
     });
     automation_disabled.addImport("native_sdk", existingImport(root_module, "native_sdk"));
     automation_disabled.addImport("metawork_bridge", bridge);
-    automation_disabled.addImport("metawork_account_contract", account_contract);
+    automation_disabled.addImport("metawork_product_execution_contract", execution_contract);
     const automation_enabled = b.createModule(.{
         .root_source_file = b.path("src/automation/enabled.zig"),
         .target = target,
@@ -1444,7 +1512,7 @@ fn wireAgentCore(
     });
     automation_enabled.addImport("native_sdk", existingImport(root_module, "native_sdk"));
     automation_enabled.addImport("metawork_bridge", bridge);
-    automation_enabled.addImport("metawork_account_contract", account_contract);
+    automation_enabled.addImport("metawork_product_execution_contract", execution_contract);
     const automation = b.createModule(.{
         .root_source_file = b.path("src/automation.zig"),
         .target = target,
@@ -1494,6 +1562,12 @@ fn wireAgentCore(
     app.addImport("metawork_bridge", bridge);
     app.addImport("metawork_automation", automation);
     app.addImport("metawork_account_contract", account_contract);
+    app.addImport("metawork_product_execution_contract", execution_contract);
+    app.addImport("product_execution_ports", execution_ports);
+    app.addImport(
+        "product_agent_protocol_adapter",
+        product_agent_protocol_adapter,
+    );
     app.addImport("metawork_account", account);
     app.addImport("account_oauth", account_oauth);
     app.addImport("account_loopback", account_loopback);
@@ -1513,11 +1587,15 @@ fn wireAgentCore(
     root_module.link_libc = bundle.link_libc;
     return .{
         .storage = storage,
+        .execution_contract = execution_contract,
+        .product_agent_protocol_adapter = product_agent_protocol_adapter,
         .account = account,
         .account_runtime = account_runtime,
         .account_catalog = account_catalog,
         .account_credentials_runtime = account_credentials_runtime,
-        .account_model_connections = account_model_connections,
+        .execution_model_connections = execution_model_connections,
+        .execution_ports = execution_ports,
+        .execution_runtime = execution_runtime,
         .account_contract = account_contract,
         .account_credential_store = account_credential_store,
         .account_loopback = account_loopback,
@@ -1549,7 +1627,7 @@ fn wireAgentCore(
         .event_pump = event_pump,
         .sdk = sdk,
         .product_control = product_control,
-        .product_control_account_execution = product_control_account_execution,
+        .product_control_execution_state = product_control_execution_state,
         .product_control_runtime = product_control_runtime,
         .product_control_executor = executor,
         .product_control_file_preview = file_preview,

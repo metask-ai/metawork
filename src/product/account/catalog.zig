@@ -2,6 +2,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const contract = @import("metawork_account_contract");
+const execution_contract = @import("metawork_product_execution_contract");
 const metask = @import("metask_client");
 
 pub const api_keys_url = metask.api_keys_url;
@@ -136,7 +137,7 @@ const ApiKeyEntry = struct {
     id: ApiKeyId,
     name: ApiKeyName,
     suffix: ApiKeySuffix,
-    provider_kind: contract.ProviderKind,
+    protocol: execution_contract.Protocol,
     secret: Secret,
 
     fn deinit(self: *ApiKeyEntry) void {
@@ -262,7 +263,7 @@ pub const CatalogSession = struct {
         self: *CatalogSession,
         model_id: []const u8,
         execution_generation: u64,
-    ) Error!contract.OwnedExecutionConfig {
+    ) Error!execution_contract.OwnedConfig {
         if (execution_generation == 0)
             return error.ExecutionTargetInvalid;
         const key_index = self.selected_key_index orelse
@@ -270,7 +271,7 @@ pub const CatalogSession = struct {
         if (self.findModel(model_id) == null)
             return error.ModelNotFound;
         const entry = &self.api_keys.items[key_index];
-        const base_url = baseUrl(entry.provider_kind) orelse
+        const base_url = baseUrl(entry.protocol) orelse
             return error.UnsupportedProvider;
         if (entry.secret.view().len == 0)
             return error.ApiKeyNotFound;
@@ -290,15 +291,20 @@ pub const CatalogSession = struct {
         const transferred_base_url = owned_base_url.?;
         owned_model = null;
         owned_base_url = null;
-        return contract.OwnedExecutionConfig.initOwned(
+        var result = execution_contract.OwnedConfig.initOwned(
             self.allocator,
-            entry.provider_kind,
+            .metask,
+            entry.protocol,
             transferred_model,
             transferred_base_url,
             execution_generation,
             owned_secret,
             entry.id.view(),
         ) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.ExecutionTargetInvalid;
+        errdefer result.deinit();
+        contract.validateExecutionConfig(result.input()) catch
+            return error.ExecutionTargetInvalid;
+        return result;
     }
 
     pub fn writeApiKeyViews(
@@ -314,7 +320,7 @@ pub const CatalogSession = struct {
                 .id = entry.id.view(),
                 .name = entry.name.view(),
                 .suffix = entry.suffix.view(),
-                .provider_kind = entry.provider_kind,
+                .protocol = entry.protocol,
             };
         }
         return output[0..self.api_keys.items.len];
@@ -427,7 +433,7 @@ const PublicApiKey = struct {
     id: PublicText(contract.Limits.api_key_id_bytes) = .{},
     name: PublicText(contract.Limits.api_key_name_bytes) = .{},
     suffix: PublicText(contract.Limits.api_key_suffix_bytes) = .{},
-    provider_kind: contract.ProviderKind = .anthropic,
+    protocol: execution_contract.Protocol = .anthropic_messages,
 };
 
 const PublicModel = struct {
@@ -469,7 +475,7 @@ pub const PublicCatalog = struct {
             storage.id.set(source.id);
             storage.name.set(source.name);
             storage.suffix.set(source.suffix);
-            storage.provider_kind = source.provider_kind;
+            storage.protocol = source.protocol;
         }
 
         var model_views: [contract.Limits.model_entries]contract.ModelView =
@@ -506,7 +512,7 @@ pub const PublicCatalog = struct {
     pub fn replaceRestoredSelection(
         self: *PublicCatalog,
         api_key_id: []const u8,
-        provider_kind: contract.ProviderKind,
+        protocol: execution_contract.Protocol,
         model_id: []const u8,
     ) void {
         std.debug.assert(api_key_id.len > 0);
@@ -515,7 +521,7 @@ pub const PublicCatalog = struct {
         self.api_keys[0].id.set(api_key_id);
         self.api_keys[0].name.set("");
         self.api_keys[0].suffix.set("");
-        self.api_keys[0].provider_kind = provider_kind;
+        self.api_keys[0].protocol = protocol;
         self.model_count = 1;
         self.models[0].id.set(model_id);
         self.models[0].display_name.set("");
@@ -551,7 +557,7 @@ pub const PublicCatalog = struct {
                 .id = storage.id.view(),
                 .name = storage.name.view(),
                 .suffix = storage.suffix.view(),
-                .provider_kind = storage.provider_kind,
+                .protocol = storage.protocol,
             };
         }
         for (
@@ -585,7 +591,7 @@ pub const TestSupport = if (builtin.is_test) struct {
             .id = try .init(api_key.id),
             .name = try .init(api_key.name),
             .suffix = try .init(api_key.suffix),
-            .provider_kind = api_key.provider_kind,
+            .protocol = api_key.protocol,
             .secret = secret,
         }) catch return error.OutOfMemory;
         secret = .{};
@@ -610,7 +616,7 @@ pub const TestSupport = if (builtin.is_test) struct {
             .id = try .init(api_key.id),
             .name = try .init(api_key.name),
             .suffix = try .init(api_key.suffix),
-            .provider_kind = api_key.provider_kind,
+            .protocol = api_key.protocol,
             .secret = secret,
         }) catch return error.OutOfMemory;
         secret = .{};
@@ -628,7 +634,7 @@ pub const TestSupport = if (builtin.is_test) struct {
             target.id.set(source.id);
             target.name.set(source.name);
             target.suffix.set(source.suffix);
-            target.provider_kind = source.provider_kind;
+            target.protocol = source.protocol;
         }
         catalog.model_count = models.len;
         for (models, catalog.models[0..models.len]) |source, *target| {
@@ -875,7 +881,7 @@ fn parseApiKeys(
             continue;
         if (item.group_id != item.group.id)
             return error.ProtocolInvalid;
-        const provider_kind = providerKind(item.group.platform) orelse
+        const protocol = protocolForPlatform(item.group.platform) orelse
             return error.UnsupportedProvider;
         var id_storage: [contract.Limits.api_key_id_bytes]u8 = undefined;
         const id = std.fmt.bufPrint(&id_storage, "{d}", .{item.id}) catch
@@ -892,7 +898,7 @@ fn parseApiKeys(
             .suffix = try .init(
                 item.key[item.key.len - Limits.api_key_suffix_bytes ..],
             ),
-            .provider_kind = provider_kind,
+            .protocol = protocol,
             .secret = try .init(allocator, item.key),
         };
         errdefer entry.deinit();
@@ -960,10 +966,10 @@ fn parseModels(
     return result;
 }
 
-fn providerKind(platform: []const u8) ?contract.ProviderKind {
-    if (std.mem.eql(u8, platform, "anthropic")) return .anthropic;
-    if (std.mem.eql(u8, platform, "openai")) return .openai;
-    if (std.mem.eql(u8, platform, "gemini")) return .gemini;
+fn protocolForPlatform(platform: []const u8) ?execution_contract.Protocol {
+    if (std.mem.eql(u8, platform, "anthropic")) return .anthropic_messages;
+    if (std.mem.eql(u8, platform, "openai")) return .openai_chat_completions;
+    if (std.mem.eql(u8, platform, "gemini")) return .gemini_native;
     return null;
 }
 
@@ -975,11 +981,12 @@ fn jsonScratchSize(body_len: usize) usize {
     );
 }
 
-fn baseUrl(provider_kind: contract.ProviderKind) ?[]const u8 {
-    return switch (provider_kind) {
-        .anthropic => anthropic_messages_url,
-        .openai => openai_chat_completions_url,
-        .gemini => gemini_base_url,
+fn baseUrl(protocol: execution_contract.Protocol) ?[]const u8 {
+    return switch (protocol) {
+        .openai_responses => null,
+        .anthropic_messages => anthropic_messages_url,
+        .openai_chat_completions => openai_chat_completions_url,
+        .gemini_native => gemini_base_url,
     };
 }
 
@@ -1110,7 +1117,7 @@ test "model declarations survive owned catalog copies and never leak into a repl
     var committed: PublicCatalog = .{};
     committed.replaceFromPublic(&candidate);
     session.reset();
-    candidate.replaceRestoredSelection("other-key", .openai, "model-1");
+    candidate.replaceRestoredSelection("other-key", .openai_chat_completions, "model-1");
     var view: contract.AccountView = .{
         .state = .authenticated,
         .catalog_state = .ready,
@@ -1198,8 +1205,8 @@ test "live-shape catalogs expose only masked views and move one key owner" {
     var execution = try session.prepareExecution("model-1", 1);
     defer execution.deinit();
     try std.testing.expectEqual(
-        contract.ProviderKind.anthropic,
-        execution.input().target.provider_kind,
+        execution_contract.Protocol.anthropic_messages,
+        execution.input().target.protocol,
     );
     try std.testing.expectEqualStrings(
         anthropic_messages_url,
@@ -1248,8 +1255,8 @@ test "catalog maps Gemini platform to AgentCore Gemini target" {
     var execution = try session.prepareExecution("model-1", 1);
     defer execution.deinit();
     try std.testing.expectEqual(
-        contract.ProviderKind.gemini,
-        execution.input().target.provider_kind,
+        execution_contract.Protocol.gemini_native,
+        execution.input().target.protocol,
     );
     try std.testing.expectEqualStrings(
         gemini_base_url,

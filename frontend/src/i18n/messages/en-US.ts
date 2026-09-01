@@ -699,9 +699,6 @@ export const enUS = {
   "account.logout_short": "Sign out…",
   "account.api_fallback": "Metask API",
   "account.model_fallback": "Available model",
-  "provider.anthropic": "Anthropic",
-  "provider.openai": "OpenAI",
-  "provider.gemini": "Gemini",
   "settings.title": "Settings",
   "settings.back": "Back to workbench",
   "settings.intro":
@@ -735,7 +732,7 @@ export const enUS = {
   "settings.use_metask_default": "Use Metask for new tasks",
   "settings.model_connections": "Model connections",
   "settings.model_connections_help":
-    "Use a provider account you manage yourself. Connections are separate from Metask sign-in and apply to new tasks only.",
+    "Use a model service connection you manage yourself. Connections are separate from Metask sign-in and apply to new tasks only.",
   "settings.model_connections_empty": "No user-managed model connections yet.",
   "settings.model_connections_unavailable":
     "Model connection management is unavailable in this build.",
@@ -745,7 +742,7 @@ export const enUS = {
   "settings.model_connection_adding": "Adding…",
   "settings.model_connection_name": "Connection name",
   "settings.model_connection_name_placeholder": "My OpenAI service",
-  "settings.model_connection_protocol": "Provider protocol",
+  "settings.model_connection_protocol": "Protocol",
   "settings.model_connection_endpoint": "Service endpoint",
   "settings.model_connection_model_id": "Model ID",
   "settings.model_connection_model_id_placeholder": "gpt-5",
@@ -772,6 +769,7 @@ export const enUS = {
   "settings.model_connection_test_status.testing": "Testing",
   "settings.model_connection_test_status.connected": "Last test passed",
   "settings.model_connection_test_status.failed": "Last test failed",
+  "settings.model_connection_protocol.openai_responses": "OpenAI Responses",
   "settings.model_connection_protocol.anthropic_messages": "Anthropic Messages",
   "settings.model_connection_protocol.openai_chat_completions":
     "OpenAI Chat Completions",
@@ -789,7 +787,7 @@ export const enUS = {
   "settings.only_api_help":
     "Metask currently returns only this API. Other APIs appear after the next sync.",
   "settings.api_menu_help":
-    "Provider is supplied by Metask and shown for reference.",
+    "Protocol is supplied by Metask and shown for reference.",
   "settings.default_model": "Default model",
   "settings.default_model_help":
     "Used when you create a new task. Existing tasks keep their own model.",

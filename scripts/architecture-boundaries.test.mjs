@@ -96,6 +96,14 @@ test("artifact identities preserve development and isolate automation namespaces
   );
   assert.match(
     identity,
+    /development_model_connection_credential_service =[\s\S]*development_account_credential_service \+\+ "\.model-connections"/,
+  );
+  assert.match(
+    identity,
+    /automation_model_connection_credential_service =[\s\S]*automation_account_credential_service \+\+ "\.model-connections"/,
+  );
+  assert.match(
+    identity,
     /development_mcp_credential_service = bundle_id \+\+ "\.mcp"/,
   );
   assert.match(
@@ -132,6 +140,198 @@ test("the root test entry discovers Node tests and reaches the Native graph", ()
   assert.doesNotMatch(JSON.stringify(packageJson.scripts), /\.test\.mjs/);
   assert.match(runner, /name\.endsWith\("\.test\.mjs"\)/);
   assert.match(runner, /nativeCli, "test", "\."/);
+});
+
+test("Product execution identity has one protocol axis and no ProviderKind", () => {
+  const productProtocolOwners = [
+    ...zigFiles("src/product/execution/"),
+    ...zigFiles("src/product/account/"),
+    ...zigFiles("src/product/control/"),
+    ...zigFiles("src/product/task/"),
+    ...zigFiles("src/product/schedule/"),
+    "src/product/agent_protocol_adapter.zig",
+    "src/product/account.zig",
+    "src/product/control.zig",
+    "src/product/task.zig",
+    "src/product/schedule.zig",
+    "src/automation/enabled.zig",
+    "src/automation/disabled.zig",
+    "frontend/src/bridge/contracts.ts",
+    "frontend/src/bridge/decode-contracts.ts",
+  ];
+  const retiredIdentifiers =
+    /\bProviderKind\b|\bModelConnectionProtocol\b|\bprovider_kind\b|\bproviderKindForProtocol\b|\bprotocolForProviderKind\b/u;
+
+  for (const file of productProtocolOwners) {
+    assert.doesNotMatch(
+      read(file),
+      retiredIdentifiers,
+      `${file} reintroduces a retired Product provider category`,
+    );
+  }
+
+  const executionContract = read("src/product/execution/contract.zig");
+  assert.match(
+    executionContract,
+    /pub const Protocol = enum \{[\s\S]*openai_responses,[\s\S]*anthropic_messages,[\s\S]*openai_chat_completions,[\s\S]*gemini_native,[\s\S]*\};/u,
+  );
+  assert.doesNotMatch(
+    read("src/product/account/contract.zig"),
+    /pub const Protocol = enum/u,
+  );
+  assert.match(
+    read("src/product/task/state.zig"),
+    /pub const Protocol = execution_contract\.Protocol;/u,
+  );
+  assert.match(
+    read("src/product/schedule/state.zig"),
+    /pub const Protocol = execution_contract\.Protocol;/u,
+  );
+  assertNoImports(
+    [...zigFiles("src/product/task/"), ...zigFiles("src/product/schedule/")],
+    ["metawork_account_contract"],
+  );
+  assert.doesNotMatch(
+    read("src/product/task/state.zig"),
+    /\bexecution_provider\b/u,
+  );
+  assert.doesNotMatch(
+    read("src/product/schedule/state.zig"),
+    /\bexecution_provider\b/u,
+  );
+});
+
+test("Product maps admitted protocols to Agent at one exhaustive boundary", () => {
+  const build = read("build.zig");
+  const adapterPath = "src/product/agent_protocol_adapter.zig";
+  const adapter = read(adapterPath);
+  const consumers = [
+    "src/app/execution_coordinator.zig",
+    "src/product/task/execution.zig",
+    "src/product/task/recovery_job.zig",
+    "src/product/task/runtime.zig",
+  ];
+
+  assert.match(build, /src\/product\/agent_protocol_adapter\.zig/);
+  assert.match(build, /product_agent_protocol_adapter/);
+  assert.match(adapter, /@import\("metawork_agent"\)/);
+  assert.match(adapter, /@import\("metawork_product_execution_contract"\)/);
+  assert.match(
+    adapter,
+    /return switch \(protocol\) \{[\s\S]*\.openai_responses => \.openai_responses,[\s\S]*\.openai_chat_completions => \.openai_chat_completions,[\s\S]*\.anthropic_messages => \.anthropic_messages,[\s\S]*\.gemini_native => \.gemini_native,[\s\S]*\};/,
+  );
+  assert.doesNotMatch(
+    adapter,
+    /@tagName|stringToEnum|provider_id|base_url|normalized_base_url|\bmodel\b/,
+  );
+  for (const file of consumers) {
+    const source = read(file);
+    assert.match(source, /@import\("product_agent_protocol_adapter"\)/);
+    assert.match(source, /agent_protocol\.toAgent\(/);
+    assert.doesNotMatch(source, /\.protocol\s*=\s*switch\s*\(/);
+  }
+  const boundarySources = [
+    adapterPath,
+    ...zigFiles("src/product/"),
+    ...zigFiles("src/app/"),
+  ]
+    .filter((file, index, files) => files.indexOf(file) === index)
+    .map(read)
+    .join("\n");
+  assert.equal(
+    [
+      ...boundarySources.matchAll(
+        /\.(?:openai_responses|openai_chat_completions|anthropic_messages|gemini_native)\s*=>\s*\.(?:openai_responses|openai_chat_completions|anthropic_messages|gemini_native)/g,
+      ),
+    ].length,
+    4,
+  );
+  assertNoImports(
+    ["src/agent.zig", ...zigFiles("src/agent/")],
+    ["metawork_product_execution_contract", "product_agent_protocol_adapter"],
+  );
+});
+
+test("Product Execution owns model connections independently of Account", () => {
+  const executionContract = read("src/product/execution/contract.zig");
+  const executionRuntime = read("src/product/execution/runtime.zig");
+  const executionRegistry = read("src/product/execution/model_connections.zig");
+  const accountContract = read("src/product/account/contract.zig");
+  const accountRuntime = read("src/product/account/runtime.zig");
+  const accountPorts = read("src/product/account/ports.zig");
+  const accountBinding = read("src/app/account_platform_binding.zig");
+  const executionBinding = read("src/app/execution_platform_binding.zig");
+  const coordinator = read("src/app/execution_coordinator.zig");
+  const control = read("src/product/control/runtime.zig");
+  const app = read("src/app.zig");
+  const identity = read("src/product_identity.zig");
+
+  assertNoImports(
+    [
+      "src/product/execution/contract.zig",
+      "src/product/execution/model_connections.zig",
+      "src/product/execution/ports.zig",
+      "src/product/execution/runtime.zig",
+    ],
+    [
+      "metawork_account_contract",
+      "metawork_account",
+      "metawork_product_control",
+      "metawork_app",
+      "metawork_bridge",
+    ],
+  );
+  assert.match(executionContract, /pub const ModelConnectionCommand = union/);
+  assert.match(executionRuntime, /registry: registry_impl\.Registry/);
+  assert.match(
+    executionRegistry,
+    /store_file_name = "model-connections\.json"/,
+  );
+  assert.doesNotMatch(accountRuntime, /ModelConnection|model_connections/);
+  assert.doesNotMatch(
+    accountPorts,
+    /ModelConnection|CredentialVault|model_connection/,
+  );
+  const accountView = accountContract.match(
+    /pub const AccountView = struct \{([\s\S]*?)\n\};/,
+  )?.[1];
+  const accountCommand = accountContract.match(
+    /pub const AccountCommand = union\(enum\) \{([\s\S]*?)\n\};/,
+  )?.[1];
+  assert.ok(accountView, "AccountView must remain inspectable");
+  assert.ok(accountCommand, "AccountCommand must remain inspectable");
+  assert.doesNotMatch(accountView, /ModelConnection|model_connection/);
+  assert.doesNotMatch(accountCommand, /ModelConnection|model_connection/);
+  assert.doesNotMatch(
+    accountContract,
+    /model_connection_(?:invalid|not_found|capture_unavailable|persistence_unavailable|test_unavailable)/,
+  );
+  assert.doesNotMatch(
+    accountBinding,
+    /CredentialVault|model_connection|executionPorts/,
+  );
+  assert.match(executionBinding, /product_execution_ports/);
+  assert.match(executionBinding, /modelConnectionCredentialService/);
+  assert.match(identity, /pub fn modelConnectionCredentialService/);
+  const selectDefault = control.indexOf("fn selectModelConnectionDefault(");
+  const scrubPreparation = control.indexOf(
+    "self.prepareExecutionInstall(",
+    selectDefault,
+  );
+  const registryCommit = control.indexOf(
+    "self.model_connections.submitCommandWithExecutionGeneration(",
+    selectDefault,
+  );
+  assert.ok(selectDefault >= 0 && scrubPreparation > selectDefault);
+  assert.ok(
+    registryCommit > scrubPreparation,
+    "fallible durable scrub must precede the Execution registry default commit",
+  );
+  assert.match(app, /execution_platform_binding\.Adapter\.init/);
+  assert.match(app, /execution_management\.start\(/);
+  assert.doesNotMatch(app, /startWithAccountUnavailable/);
+  assert.match(coordinator, /control_ports\.ExecutionManagement/);
+  assert.doesNotMatch(coordinator, /metawork_account|AccountExecutionHandoff/);
 });
 
 test("named module roots exist and lower owners cannot import composition", () => {
@@ -199,7 +399,7 @@ test("named module roots exist and lower owners cannot import composition", () =
     true,
   );
   assert.equal(
-    existsSync(new URL("src/product/control/account_execution.zig", root)),
+    existsSync(new URL("src/product/control/execution_state.zig", root)),
     true,
   );
   assert.equal(
@@ -413,7 +613,7 @@ test("Product Control is the only composition owner identity", () => {
   const build = read("build.zig");
   const control = read("src/product/control.zig");
   const runtime = read("src/product/control/runtime.zig");
-  const accountExecution = read("src/product/control/account_execution.zig");
+  const executionState = read("src/product/control/execution_state.zig");
   const ports = read("src/product/control/ports.zig");
   const executor = read("src/product/control/executor.zig");
   const filePreview = read("src/product/control/file_preview.zig");
@@ -423,7 +623,10 @@ test("Product Control is the only composition owner identity", () => {
 
   assert.match(build, /src\/product\/control\.zig/);
   assert.match(build, /src\/product\/control\/runtime\.zig/);
-  assert.match(build, /src\/product\/control\/account_execution\.zig/);
+  assert.match(build, /src\/product\/control\/execution_state\.zig/);
+  assert.match(build, /src\/product\/execution\/contract\.zig/);
+  assert.match(build, /src\/product\/execution\/model_connections\.zig/);
+  assert.match(build, /src\/product\/execution\/runtime\.zig/);
   assert.match(build, /src\/product\/control\/executor\.zig/);
   assert.match(build, /src\/product\/control\/file_preview\.zig/);
   assert.match(build, /src\/product\/schedule\.zig/);
@@ -431,22 +634,28 @@ test("Product Control is the only composition owner identity", () => {
   assert.match(build, /src\/product\/schedule\/view\.zig/);
   assert.match(build, /metawork_product_control/);
   assert.match(build, /product_control_executor/);
-  assert.match(build, /product_control_account_execution/);
+  assert.match(build, /product_control_execution_state/);
+  assert.match(build, /metawork_product_execution_contract/);
+  assert.match(build, /product_execution_runtime/);
   assert.match(build, /product_control_file_preview/);
   assert.match(build, /metawork_product_schedule/);
   assert.match(build, /product_schedule_runtime/);
   assert.match(control, /pub const Runtime = runtime_impl\.Runtime/);
   assert.match(runtime, /pub const Runtime = struct/);
-  assert.match(runtime, /@import\("product_control_account_execution"\)/);
-  assert.match(runtime, /account_execution: account_execution\.State/);
-  assert.match(accountExecution, /@import\("metawork_account_contract"\)/);
-  assert.match(accountExecution, /pub const State = struct/);
-  assert.match(accountExecution, /pub const ProjectionRedaction = struct/);
-  assert.match(accountExecution, /const AccountProjection = struct/);
-  assert.match(accountExecution, /const ActiveExecution = struct/);
-  assert.match(accountExecution, /pub const testing = if \(builtin\.is_test\)/);
+  assert.match(runtime, /@import\("product_control_execution_state"\)/);
+  assert.match(runtime, /execution_state: execution_state\.State/);
+  assert.match(executionState, /@import\("metawork_account_contract"\)/);
+  assert.match(
+    executionState,
+    /@import\("metawork_product_execution_contract"\)/,
+  );
+  assert.match(executionState, /pub const State = struct/);
+  assert.match(executionState, /pub const ProjectionRedaction = struct/);
+  assert.match(executionState, /const AccountProjection = struct/);
+  assert.match(executionState, /const ActiveExecution = struct/);
+  assert.match(executionState, /pub const testing = if \(builtin\.is_test\)/);
   assertNoImports(
-    ["src/product/control/account_execution.zig"],
+    ["src/product/control/execution_state.zig"],
     [
       "metawork_product_control",
       "metawork_product_task",
@@ -462,7 +671,7 @@ test("Product Control is the only composition owner identity", () => {
     ],
   );
   assert.doesNotMatch(
-    accountExecution,
+    executionState,
     /std\.Thread|product_control_executor|rawState|rawExecution|\*Runtime|\*Control/,
   );
   assert.doesNotMatch(
@@ -470,16 +679,16 @@ test("Product Control is the only composition owner identity", () => {
     /const AccountProjection = struct|const ActiveExecution = struct|const ReplacementKind = enum|const RedactionPreparation = union|custom_execution_binding:|execution_replacement:|execution_redaction_preparation:/,
   );
   assert.match(
-    ports,
-    /pub const PreparedModelConnectionBinding\s*=\s*account_execution\.PreparedModelConnectionBinding/,
+    runtime,
+    /pub const PreparedModelConnectionBinding\s*=\s*[\s\S]*execution_state\.PreparedModelConnectionBinding/,
   );
   assert.doesNotMatch(
     ports,
-    /pub const PreparedModelConnectionBinding = struct|account_execution\.State|AccountProjection|ActiveExecution/,
+    /PreparedModelConnectionBinding|execution_state\.State|AccountProjection|ActiveExecution/,
   );
   assert.doesNotMatch(
     control,
-    /account_execution|AccountProjection|ActiveExecution/,
+    /execution_state|AccountProjection|ActiveExecution/,
   );
   assert.doesNotMatch(runtime, /\bworkbench(?:\b|_)/);
   assert.doesNotMatch(build, /metawork_workbench|workbench_projection/);
@@ -516,7 +725,7 @@ test("Product Schedule owns its aggregate state and persistence", () => {
   const build = read("build.zig");
   const control = read("src/product/control.zig");
   const runtime = read("src/product/control/runtime.zig");
-  const accountExecution = read("src/product/control/account_execution.zig");
+  const executionState = read("src/product/control/execution_state.zig");
   const scheduleRoot = read("src/product/schedule.zig");
   const scheduleRuntime = read("src/product/schedule/runtime.zig");
   const scheduleState = read("src/product/schedule/state.zig");
@@ -577,16 +786,18 @@ test("Product Schedule owns its aggregate state and persistence", () => {
   assert.match(runtime, /schedule\.reconcileNoFail/);
   assert.match(runtime, /product_schedule\.TaskEffects/);
   assert.match(runtime, /schedule\.writeProjection/);
-  assert.match(runtime, /account_execution\.prepareInstall/);
-  assert.match(runtime, /account_execution\.prepareClear/);
-  assert.match(accountExecution, /fn consumeInstallPreparation/);
-  assert.match(accountExecution, /fn consumeClearPreparation/);
+  assert.match(runtime, /execution_state\.prepareInstall/);
+  assert.match(runtime, /execution_state\.prepareClear/);
+  assert.match(executionState, /fn consumeInstallPreparation/);
+  assert.match(executionState, /fn consumeClearPreparation/);
   assert.match(runtime, /redactWithExecutionCredentialsNoFail/);
   assert.match(taskRuntime, /pub fn redactWithExecutionCredentialsNoFail/);
-  assert.match(ports, /pub fn prepareExecutionInstall/);
-  assert.match(ports, /pub fn prepareExecutionClear/);
-  assert.match(accountCoordinator, /prepareExecutionInstall/);
-  assert.match(accountCoordinator, /prepareExecutionClear/);
+  assert.match(ports, /pub fn applyMetaskExecutionCandidate/);
+  assert.match(ports, /pub fn applyMetaskExecutionClear/);
+  assert.doesNotMatch(
+    accountCoordinator,
+    /prepareExecutionInstall|prepareExecutionClear/,
+  );
 });
 
 test("Product Workspace owns the bounded registry without owning the shared commit", () => {
@@ -690,6 +901,7 @@ test("Application coordinators consume scoped Product Control capabilities", () 
   const ports = read("src/product/control/ports.zig");
   const projection = read("src/product/control/runtime.zig");
   const accountCoordinator = read("src/app/account_coordinator.zig");
+  const executionCoordinator = read("src/app/execution_coordinator.zig");
   const agentEvents = read("src/app/agent_event_coordinator.zig");
   const mcpManagement = read("src/app/mcp_management_coordinator.zig");
   const mcpOauth = read("src/app/mcp_oauth_coordinator.zig");
@@ -699,7 +911,8 @@ test("Application coordinators consume scoped Product Control capabilities", () 
   assert.match(build, /src\/product\/control\/ports\.zig/);
   assert.match(build, /metawork_product_control_ports/);
   for (const name of [
-    "ExecutionHandoff",
+    "AccountExecutionHandoff",
+    "ExecutionManagement",
     "AgentEventConsumer",
     "McpManagementPort",
     "McpOauthPort",
@@ -712,19 +925,36 @@ test("Application coordinators consume scoped Product Control capabilities", () 
     ports,
     /Workbench|product_control\.Runtime|rawRuntime|rawOwner/,
   );
-  assert.match(projection, /pub fn executionHandoff/);
+  assert.match(projection, /pub fn accountExecutionHandoff/);
+  assert.match(projection, /pub fn executionManagement/);
   assert.match(projection, /pub fn agentEventConsumer/);
   assert.match(projection, /pub fn mcpManagementPort/);
   assert.match(projection, /pub fn mcpOauthPort/);
   assert.match(projection, /pub fn scheduleHost/);
 
-  for (const source of [accountCoordinator, mcpManagement, mcpOauth]) {
+  for (const source of [
+    accountCoordinator,
+    executionCoordinator,
+    mcpManagement,
+    mcpOauth,
+  ]) {
     const coordinator = source.match(
       /pub const Coordinator = struct \{([\s\S]*?)\n    pub fn init/,
     )?.[1];
     assert.ok(coordinator, "coordinator state must be inspectable");
     assert.doesNotMatch(coordinator, /Workbench|workbench_owner|\*workbench/);
   }
+  const accountState = accountCoordinator.match(
+    /pub const Coordinator = struct \{([\s\S]*?)\n    pub fn init/,
+  )?.[1];
+  assert.doesNotMatch(
+    accountState,
+    /CompletionTransport|ProbeJob|ExecutionManagement|CredentialVault/,
+  );
+  assert.doesNotMatch(
+    accountCoordinator,
+    /ModelConnection|model_connection|startModelConnections|stopModelConnections/,
+  );
   assert.doesNotMatch(
     agentEvents,
     /@import\("metawork_product_control"\)|\*workbench/,
@@ -736,6 +966,84 @@ test("Application coordinators consume scoped Product Control capabilities", () 
   assert.doesNotMatch(
     platform,
     /@import\("metawork_product_control"\)|workbench_api|\*workbench/,
+  );
+});
+
+test("Product Control owns atomic default execution source replacement", () => {
+  const ports = read("src/product/control/ports.zig");
+  const control = read("src/product/control/runtime.zig");
+  const accountCoordinator = read("src/app/account_coordinator.zig");
+  const accountRuntime = read("src/product/account/runtime.zig");
+  const accountState = read("src/product/account/state.zig");
+
+  assert.match(ports, /pub const MetaskExecutionOutcome = enum/);
+  assert.match(ports, /apply_metask_candidate_fn:/);
+  assert.match(ports, /apply_metask_clear_fn:/);
+  assert.doesNotMatch(
+    ports,
+    /accept_metask_candidate_fn:|prepare_install_fn:|prepare_clear_fn:|install_execution_fn:|clear_execution_fn:/,
+  );
+
+  const availabilityStart = control.indexOf("pub fn metaskActivationAvailable");
+  const replacementStart = control.indexOf(
+    "pub fn applyMetaskExecutionCandidate",
+  );
+  const clearStart = control.indexOf("pub fn applyMetaskExecutionClear");
+  assert.ok(availabilityStart >= 0, "Metask availability policy must exist");
+  assert.ok(
+    replacementStart > availabilityStart,
+    "Metask replacement must exist",
+  );
+  assert.ok(clearStart > replacementStart, "Metask clear policy must exist");
+
+  const availability = control.slice(availabilityStart, replacementStart);
+  assert.match(availability, /modelConnectionDefaultBinding\(\)/);
+
+  const replacement = control.slice(replacementStart, clearStart);
+  const prepareAt = replacement.indexOf("self.prepareExecutionInstall");
+  const clearDefaultAt = replacement.indexOf(
+    "self.clearModelConnectionDefault()",
+  );
+  const installAt = replacement.indexOf("self.installExecutionNoFail");
+  assert.ok(prepareAt >= 0, "replacement must prepare all fallible effects");
+  assert.ok(
+    clearDefaultAt > prepareAt,
+    "durable custom default may clear only after preparation",
+  );
+  assert.ok(
+    installAt > clearDefaultAt,
+    "Metask installation must be the no-fail commit after durable clear",
+  );
+
+  assert.match(accountCoordinator, /applyMetaskExecutionCandidate/);
+  assert.match(accountCoordinator, /applyMetaskExecutionClear/);
+  assert.match(accountCoordinator, /prepareActiveAttemptFailure/);
+  assert.match(accountRuntime, /pub fn prepareCommittedPhaseFailure/);
+  assert.match(accountState, /pub fn prepareCommittedPhaseFailure/);
+  const observedAccountCommitAt = accountCoordinator.indexOf(
+    "self.runtime.commit(&prepared);",
+  );
+  const committedFailureAt = accountCoordinator.indexOf(
+    "self.runtime.prepareCommittedPhaseFailure",
+  );
+  const publishedCommitAt = accountCoordinator.indexOf(
+    "self.control.finishAccountCommitNoFail();",
+  );
+  assert.ok(
+    observedAccountCommitAt >= 0,
+    "Account commit must remain explicit",
+  );
+  assert.ok(
+    committedFailureAt > observedAccountCommitAt,
+    "handoff failure must derive from the observed committed Account phase",
+  );
+  assert.ok(
+    publishedCommitAt > committedFailureAt,
+    "the failed saga must publish only after its terminal Account fact",
+  );
+  assert.doesNotMatch(
+    accountCoordinator,
+    /acceptMetaskExecutionCandidate|clearModelConnectionDefault|prepareExecutionInstall|prepareExecutionClear|installExecutionNoFail|clearExecutionNoFail/,
   );
 });
 
@@ -1659,7 +1967,7 @@ test("Account owns platform ports while Application binds Native SDK effects", (
   assert.match(ports, /credentials: credential_store\.Backend/);
   assert.match(ports, /authorization_url: AuthorizationUrl/);
   assert.match(ports, /timer: Timer/);
-  assert.match(ports, /model_credentials: ModelCredentialVault/);
+  assert.doesNotMatch(ports, /ModelCredentialVault|model_credentials/);
   assert.match(runtime, /@import\("account_ports"\)/);
   assert.match(binding, /native_sdk\.platform\.PlatformServices/);
   assert.match(binding, /pub fn ports\(self: \*Adapter\) ports_api\.Platform/);

@@ -53,7 +53,7 @@ function task(identity, pendingUi = pending(identity)) {
     binding: {
       epoch: "1",
       availability: "available",
-      provider: "anthropic",
+      protocol: "anthropic_messages",
       model: "model-1",
       executionGeneration: "1",
       unavailableReason: null,

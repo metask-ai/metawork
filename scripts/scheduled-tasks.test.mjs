@@ -116,7 +116,7 @@ test("Scheduled tasks is a truthful independent management page", () => {
       failureReason: null,
       execution: {
         generation: "1",
-        provider: "anthropic",
+        protocol: "anthropic_messages",
         model: "fixture-model",
       },
       input: {

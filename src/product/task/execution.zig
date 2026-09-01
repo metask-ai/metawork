@@ -11,6 +11,7 @@ const execution_binding = @import("product_task_execution_binding");
 const agent_session = @import("product_task_agent_session");
 const state = @import("product_task_state");
 const policy = @import("product_task_policy");
+const agent_protocol = @import("product_agent_protocol_adapter");
 
 pub const Notifier = struct {
     context: ?*anyopaque = null,
@@ -374,11 +375,7 @@ fn generateAutomaticTitle(job: *RunJob) void {
     const config = execution.input();
     const owner = job.completion_factory.create(std.heap.c_allocator, .{
         .provider_id = config.target.provider_id,
-        .protocol = switch (config.target.protocol) {
-            .anthropic_messages => .anthropic_messages,
-            .openai_chat_completions => .openai_chat_completions,
-            .gemini_native => .gemini_native,
-        },
+        .protocol = agent_protocol.toAgent(config.target.protocol),
         .credential = config.api_key,
         .base_url = config.target.base_url,
         .model = config.target.model,
