@@ -2063,7 +2063,7 @@ test "manual key choice supersedes an in-flight automatic continuation" {
     var account = Account.initRestoring();
     var restored_execution = try contract.OwnedExecutionConfig.initOwned(
         allocator,
-        .anthropic,
+        .anthropic_messages,
         try allocator.dupe(u8, "model-old"),
         try allocator.dupe(u8, contract.metask_anthropic_messages_url),
         9,
@@ -2147,7 +2147,7 @@ test "empty model catalog parks back in choosing with the key list intact" {
     var account = Account.initRestoring();
     var restored_execution = try contract.OwnedExecutionConfig.initOwned(
         allocator,
-        .anthropic,
+        .anthropic_messages,
         try allocator.dupe(u8, "model-old"),
         try allocator.dupe(u8, contract.metask_anthropic_messages_url),
         9,
@@ -2335,7 +2335,7 @@ test "failed reconfiguration preserves the committed selection" {
     var account = Account.initRestoring();
     var restored_execution = try contract.OwnedExecutionConfig.initOwned(
         allocator,
-        .anthropic,
+        .anthropic_messages,
         try allocator.dupe(u8, "model-old"),
         try allocator.dupe(u8, contract.metask_anthropic_messages_url),
         9,
@@ -2760,7 +2760,7 @@ test "login commits account-only before a separate catalog generation" {
         .attempt_id = account.activeAttempt().?,
         .payload = .{ .execution_ready = try .initOwned(
             allocator,
-            .anthropic,
+            .anthropic_messages,
             model,
             base_url,
             0x9e37_79b9_7f4a_7c15,
@@ -2893,7 +2893,7 @@ test "cancel invalidates attempt and stale secret completion is destroyed" {
         .attempt_id = stale_attempt,
         .payload = .{ .execution_ready = try .initOwned(
             allocator,
-            .anthropic,
+            .anthropic_messages,
             model,
             base_url,
             1,

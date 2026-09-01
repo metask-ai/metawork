@@ -31,7 +31,7 @@ const ApiKeyProjection = struct {
     id: FixedText(account.Limits.api_key_id_bytes) = .{},
     name: FixedText(account.Limits.api_key_name_bytes) = .{},
     suffix: FixedText(account.Limits.api_key_suffix_bytes) = .{},
-    provider_kind: account.ProviderKind = .anthropic,
+    protocol: account.Protocol = .anthropic_messages,
 };
 
 const ModelProjection = struct {
@@ -43,7 +43,7 @@ const ModelConnectionProjection = struct {
     id: FixedText(account.Limits.api_key_id_bytes) = .{},
     display_name: FixedText(account.Limits.display_name_bytes) = .{},
     normalized_base_url: FixedText(account.Limits.base_url_bytes) = .{},
-    protocol: account.ModelConnectionProtocol = .anthropic_messages,
+    protocol: account.Protocol = .anthropic_messages,
     state: account.ModelConnectionState = .configuring,
     test_status: account.ModelConnectionTestStatus = .untested,
     credential_status: account.ModelConnectionCredentialStatus = .missing,
@@ -178,12 +178,12 @@ const AccountProjection = struct {
             target.id.setNoFail(source.id);
             target.name.setNoFail(source.name);
             target.suffix.setNoFail(source.suffix);
-            target.provider_kind = source.provider_kind;
+            target.protocol = source.protocol;
             target_view.* = .{
                 .id = target.id.view(),
                 .name = target.name.view(),
                 .suffix = target.suffix.view(),
-                .provider_kind = target.provider_kind,
+                .protocol = target.protocol,
             };
         }
         for (
@@ -288,10 +288,10 @@ const AccountProjection = struct {
         return false;
     }
 
-    fn selectedProvider(self: *const AccountProjection) ?account.ProviderKind {
+    fn selectedProtocol(self: *const AccountProjection) ?account.Protocol {
         for (self.api_key_views[0..self.api_key_count]) |api_key| {
             if (std.mem.eql(u8, api_key.id, self.selected_api_key_id.view()))
-                return api_key.provider_kind;
+                return api_key.protocol;
         }
         return null;
     }
@@ -307,8 +307,7 @@ const ActiveExecution = struct {
     base_url_len: usize = 0,
     provider_id_storage: [account.Limits.provider_id_bytes]u8 = undefined,
     provider_id_len: usize = 0,
-    protocol: ?account.ModelConnectionProtocol = null,
-    provider: ?account.ProviderKind = null,
+    protocol: ?account.Protocol = null,
     generation: u64 = 0,
 
     fn init(allocator: std.mem.Allocator) std.mem.Allocator.Error!ActiveExecution {
@@ -346,7 +345,6 @@ const ActiveExecution = struct {
     }
 
     fn installBytesNoFail(self: *ActiveExecution, input: account.ExecutionConfigInput) void {
-        const provider = input.target.provider_kind;
         const credential_bytes = input.api_key;
         const model_id = input.target.model;
         const base_url = input.target.base_url;
@@ -365,7 +363,6 @@ const ActiveExecution = struct {
         self.credential_len = credential_bytes.len;
         self.model_len = model_id.len;
         self.base_url_len = base_url.len;
-        self.provider = provider;
         self.generation = generation;
     }
 
@@ -374,7 +371,6 @@ const ActiveExecution = struct {
         self.credential_len = 0;
         self.model_len = 0;
         self.base_url_len = 0;
-        self.provider = null;
         self.protocol = null;
         self.provider_id_len = 0;
         self.generation = 0;
@@ -393,7 +389,7 @@ const ActiveExecution = struct {
         return self.base_url_storage[0..self.base_url_len];
     }
     fn ready(self: *const ActiveExecution) bool {
-        return self.generation != 0 and self.provider != null and self.protocol != null and
+        return self.generation != 0 and self.protocol != null and
             self.provider_id_len != 0 and
             self.credential_len != 0 and self.model_len != 0;
     }
@@ -439,11 +435,11 @@ pub const PreparedModelConnectionBinding = struct {
 
 pub const ExecutionIdentity = struct {
     generation: u64,
-    provider: account.ProviderKind,
+    protocol: account.Protocol,
 };
 
 pub const AutomationInput = struct {
-    provider: account.ProviderKind,
+    protocol: account.Protocol,
     credential: []const u8,
     model: []const u8,
     base_url: []const u8,
@@ -564,8 +560,7 @@ pub const State = struct {
         const execution_input: account.ExecutionConfigInput = .{
             .target = .{
                 .provider_id = "metask:automation-key",
-                .protocol = account.protocolForProviderKind(input.provider),
-                .provider_kind = input.provider,
+                .protocol = input.protocol,
                 .model = input.model,
                 .base_url = input.base_url,
             },
@@ -646,18 +641,18 @@ pub const State = struct {
             self.projection.execution_generation == self.execution.generation and
             self.projection.metask_execution_generation == self.execution.generation and
             identity.generation == self.execution.generation and
-            identity.provider == self.execution.provider.? and
-            self.projection.selectedProvider() == identity.provider and
+            identity.protocol == self.execution.protocol.? and
+            self.projection.selectedProtocol() == identity.protocol and
             self.projection.hasModel(model_id);
     }
 
     pub fn supportsTaskExecution(
         self: *const State,
-        provider_kind: account.ProviderKind,
+        expected_protocol: account.Protocol,
         model_id: []const u8,
     ) bool {
         return self.replacement == .none and self.execution.ready() and
-            provider_kind == self.execution.provider.? and
+            expected_protocol == self.execution.protocol.? and
             if (self.custom_binding) |binding|
                 std.mem.eql(u8, binding.model_id, self.execution.model()) and
                     std.mem.eql(u8, model_id, binding.model_id)
@@ -671,11 +666,11 @@ pub const State = struct {
     pub fn recoveryAuthorityExact(
         self: *const State,
         execution_generation: u64,
-        provider_kind: account.ProviderKind,
+        expected_protocol: account.Protocol,
         model_id: []const u8,
     ) bool {
         return execution_generation == self.execution.generation and
-            self.supportsTaskExecution(provider_kind, model_id);
+            self.supportsTaskExecution(expected_protocol, model_id);
     }
 
     pub fn validExecutionGeneration(self: *const State, execution_generation: u64) bool {
@@ -689,7 +684,6 @@ pub const State = struct {
             .target = .{
                 .provider_id = self.execution.providerId(),
                 .protocol = self.execution.protocol.?,
-                .provider_kind = self.execution.provider.?,
                 .model = self.execution.model(),
                 .base_url = self.execution.baseUrl(),
             },
@@ -714,8 +708,8 @@ pub const State = struct {
     pub fn catalogGeneration(self: *const State) u64 {
         return self.projection.catalog_generation;
     }
-    pub fn provider(self: *const State) ?account.ProviderKind {
-        return self.execution.provider;
+    pub fn protocol(self: *const State) ?account.Protocol {
+        return self.execution.protocol;
     }
     pub fn model(self: *const State) []const u8 {
         return self.execution.model();
@@ -800,7 +794,7 @@ fn secureFreeTest(bytes: []u8) void {
 }
 
 fn testExecution(
-    provider: account.ProviderKind,
+    protocol: account.Protocol,
     model: []const u8,
     generation: u64,
     credential: []const u8,
@@ -816,7 +810,7 @@ fn testExecution(
     errdefer secureFreeTest(owned_credential);
     return account.OwnedExecutionConfig.initOwned(
         std.testing.allocator,
-        provider,
+        protocol,
         owned_model,
         owned_base_url,
         generation,
@@ -854,7 +848,7 @@ test "Task model mutation requires the exact installed Metask authority" {
         .id = "key-1",
         .name = "Primary",
         .suffix = "1234",
-        .provider_kind = .anthropic,
+        .protocol = .anthropic_messages,
     }};
     const initial_models = [_]account.ModelView{
         .{ .id = "model-old", .display_name = "Old" },
@@ -878,7 +872,7 @@ test "Task model mutation requires the exact installed Metask authority" {
             .execution_generation = 1,
         },
     });
-    var execution = try testExecution(.anthropic, "model-old", 1, "SECRET-ONE");
+    var execution = try testExecution(.anthropic_messages, "model-old", 1, "SECRET-ONE");
     var execution_owned = true;
     defer if (execution_owned) execution.deinit();
     try state.beginDefaultReplacement();
@@ -917,34 +911,34 @@ test "Task model mutation requires the exact installed Metask authority" {
         },
     });
     try std.testing.expect(state.taskModelSelectionAuthorized(
-        .{ .generation = 1, .provider = .anthropic },
+        .{ .generation = 1, .protocol = .anthropic_messages },
         2,
         "model-next",
     ));
     try std.testing.expect(!state.taskModelSelectionAuthorized(
-        .{ .generation = 1, .provider = .anthropic },
+        .{ .generation = 1, .protocol = .anthropic_messages },
         1,
         "model-next",
     ));
     try std.testing.expect(!state.taskModelSelectionAuthorized(
-        .{ .generation = 2, .provider = .anthropic },
+        .{ .generation = 2, .protocol = .anthropic_messages },
         2,
         "model-next",
     ));
     try std.testing.expect(!state.taskModelSelectionAuthorized(
-        .{ .generation = 1, .provider = .openai },
+        .{ .generation = 1, .protocol = .openai_chat_completions },
         2,
         "model-next",
     ));
     try std.testing.expect(!state.taskModelSelectionAuthorized(
-        .{ .generation = 1, .provider = .anthropic },
+        .{ .generation = 1, .protocol = .anthropic_messages },
         2,
         "model-old",
     ));
 
     try state.beginDefaultReplacement();
     try std.testing.expect(!state.taskModelSelectionAuthorized(
-        .{ .generation = 1, .provider = .anthropic },
+        .{ .generation = 1, .protocol = .anthropic_messages },
         2,
         "model-next",
     ));
@@ -959,7 +953,7 @@ test "Model Connection execution never borrows Metask model authority" {
         .id = "key-1",
         .name = "Primary",
         .suffix = "1234",
-        .provider_kind = .anthropic,
+        .protocol = .anthropic_messages,
     }};
     const metask_models = [_]account.ModelView{.{
         .id = "gpt-5",
@@ -1012,9 +1006,9 @@ test "Model Connection execution never borrows Metask model authority" {
     try std.testing.expect(state.modelConnectionSelected());
     const resolved = state.executionInput().?;
     try std.testing.expectEqualStrings("model_connection:fixture-provider", resolved.target.provider_id);
-    try std.testing.expectEqual(account.ModelConnectionProtocol.openai_chat_completions, resolved.target.protocol);
+    try std.testing.expectEqual(account.Protocol.openai_chat_completions, resolved.target.protocol);
     try std.testing.expect(!state.taskModelSelectionAuthorized(
-        .{ .generation = 3, .provider = .openai },
+        .{ .generation = 3, .protocol = .openai_chat_completions },
         7,
         "gpt-5",
     ));

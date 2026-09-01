@@ -8,7 +8,7 @@ const account_contract = @import("metawork_account_contract");
 pub const enabled = false;
 
 pub const ExecutionFixture = struct {
-    provider: account_contract.ProviderKind,
+    protocol: account_contract.Protocol,
     credential: []const u8,
     model: []const u8,
     base_url: []const u8,

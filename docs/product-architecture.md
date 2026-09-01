@@ -36,7 +36,7 @@ Account resolve
 → Agent Session consumption
 ```
 
-执行配置交接必须一并保留 Account 解析出的服务实例引用、明确协议、endpoint、model、credential 和 execution generation。默认 execution、Task attachment 和后台任务各自持有所需的 owned copy；Session、恢复、连接测试及自动标题消费同一份解析结果，不根据 provider 类别重新选择协议。服务实例引用只用于 Host 执行关联，不进入 durable history 或 Renderer；恢复使用当前显式授权的执行配置，不从历史类别猜测服务实例。
+执行配置交接必须一并保留 Account 解析出的服务实例引用、明确 protocol、endpoint、model、credential 和 execution generation。默认 execution、Task attachment 和后台任务各自持有所需的 owned copy；Session、恢复、连接测试及自动标题消费同一份解析结果，不根据厂商、endpoint 或模型名重新选择 protocol。服务实例引用只用于 Host 执行关联，不进入 durable history 或 Renderer；恢复使用当前显式授权的执行配置，不从历史类别猜测服务实例。Product Control、Task 与 Schedule 共享 Account 发布的同一 `Protocol` 类型，不定义 `ProviderKind` 或平行 enum。
 
 唯一 committed-state 写路径为：
 
@@ -51,13 +51,13 @@ Account prepare(command | completion)
 
 上述 commit 链在主线程同一 turn 内完成。外部 effect 只有在 committed swap 后才能启动；worker completion 必须回到主线程并重新进入同一条链。Product Control 安装或清除 execution 的步骤在进入 Account commit 前必须已经完成全部可能失败的验证、持久化 credential scrub 与 candidate preparation，实际所有权转移只能是 no-fail install。
 
-Product Control 的 replacement gate 只串行化本次默认 execution 交接与相关新 Task admission。已有 Task、Session、Run 和 worker 已经取得的 owned ExecutionConfig 按原生命周期收口，不热替换、不等待 Account identity 变化，也不被 logout 伪造为已撤权。只改变默认模型且不改变 credential authority 时，不产生新的 credential generation；是否允许已有 Task 改变模型必须由该 Task 精确持有的 provider、generation 与当前 authoritative catalog 共同决定。
+Product Control 的 replacement gate 只串行化本次默认 execution 交接与相关新 Task admission。已有 Task、Session、Run 和 worker 已经取得的 owned ExecutionConfig 按原生命周期收口，不热替换、不等待 Account identity 变化，也不被 logout 伪造为已撤权。只改变默认模型且不改变 credential authority 时，不产生新的 credential generation；是否允许已有 Task 改变模型必须由该 Task 精确持有的 protocol、generation 与当前 authoritative catalog 共同决定。
 
 Account prepare 后若 Product Control gate 拒绝，prepared transition 必须销毁，不能提交 Account fact、转移 credential 或启动 effect。effect admission 的明确失败保留旧 committed state 并清零 staged secret。外部 effect 已产生结果后，后续失败必须从已经观察到的 committed phase 收口，不能回滚成旧 identity、旧 credential 或旧默认 execution；结果不确定的 mutation 不得自动重放。
 
 Renderer reload、断连或命令 timeout 只影响交互与 resync，不能取消 Host 中的 deadline、mutation 或 terminal completion，也不能代表这条 commit 链失败。Renderer 只提交 Account 真源发布的无 secret identifier 与 expected generation，不参与 prepare、commit 或 credential transfer。
 
-Identity replacement、default execution replacement 与 durable Task history 是三个边界。durable history 只保存解释执行来源所需的 provider、model、不透明 execution generation 与 binding facts，不保存 Account identity、Model Connection identity、API Key metadata、credential locator、完整 ExecutionConfig 或可重建 secret 的信息。
+Identity replacement、default execution replacement 与 durable Task history 是三个边界。durable history 只保存解释执行来源所需的 protocol、model、不透明 execution generation 与 binding facts，不保存 Account identity、Model Connection identity、API Key metadata、credential locator、完整 ExecutionConfig 或可重建 secret 的信息。
 
 ### 2.2 Workspace 与 Task admission
 
@@ -179,7 +179,7 @@ Task 删除是跨持久化、checkpoint、event、Session 和 worker reference �
 
 `<MetaWork data dir>/workbench/workbench-history.store` 是 Workspace 与 Task 产品历史的 canonical 本地 store，不是 AgentCore checkpoint、缓存或通用 Storage SQL backend。Application 在 restore 前取得其进程级 OS writer lock，并把有界 load 与 atomic commit capability 注入 Product；Product 拥有 codec、跨记录校验、恢复 policy 和 persistence health。
 
-当前合同只接受 canonical framed store，不读取、不迁移、不双写旧 JSON envelope 或被替代的开发期 frame shape。store 不存在表示首次启动。Workspace 与 Task record 独立校验；单条可隔离损坏进入 `degraded` 并保留其他有效历史。store 无法打开或全局结构不可信时不得覆盖原文件，Product 从空的内存历史继续运行并发布诊断；明确写失败或 commit outcome unknown 只表示当前内存历史尚未可靠保存，后续 mutation 必须重新尝试完整 snapshot。上述状态都不是 Product Task、Workspace 或 Renderer 的全局 admission gate。
+当前合同只接受 canonical framed store，不读取、不迁移、不双写旧 JSON envelope、被替代的开发期 frame shape，或仍以 `provider` 表达 execution binding 的 record；Task 与 Run 只接受 `protocol` / `execution_protocol`。store 不存在表示首次启动。Workspace 与 Task record 独立校验；单条可隔离损坏进入 `degraded` 并保留其他有效历史。store 无法打开或全局结构不可信时不得覆盖原文件，Product 从空的内存历史继续运行并发布诊断；明确写失败或 commit outcome unknown 只表示当前内存历史尚未可靠保存，后续 mutation 必须重新尝试完整 snapshot。上述状态都不是 Product Task、Workspace 或 Renderer 的全局 admission gate。
 
 交互式 Product Task mutation 以内存 Runtime 为当前进程真源，持久化是 best-effort projection；保存失败不得回滚已经接纳的新建、Run、模型选择、权限响应、重命名、归档、取消或 Workspace 导航 mutation。Schedule occurrence 是独立的无人值守边界：Product Control 必须为其 Task create、命名与 Run intent 注入 required durable effect，任一步未可靠提交都拒绝本次 occurrence，Schedule 按既有 transaction 进入可诊断状态，但不得冻结其他 Product Task。Task 物理删除仍遵守 §4.1 的 commit-before-release 边界。
 
@@ -207,7 +207,7 @@ Conversation recovery 是 detached Task 的 attachment 重建事务，不是 tra
 
 - source Task、binding、checkpoint 与 terminal anchor 未变化；
 - Workspace identity、kind、epoch、root、authorization 与 Automatic owner 精确；
-- target ExecutionConfig provider 兼容、能够承载 Task model，且其 generation 在 start 到 commit 期间保持不变；
+- target ExecutionConfig protocol 相同、能够承载 Task model，且其 generation 在 start 到 commit 期间保持不变；
 - persistence、checkpoint store 与 Agent Runtime 可用；
 - Task 未归档、删除、运行其他 operation、replacement 或 shutdown；
 - 当前 recovery attempt 和 poison 状态允许进入。

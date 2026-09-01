@@ -252,7 +252,7 @@ fn managementConfiguration(
 fn installExecution(workbench_value: *product_control.Runtime) !void {
     var execution = try account_contract.OwnedExecutionConfig.initOwned(
         std.testing.allocator,
-        .anthropic,
+        .anthropic_messages,
         try std.testing.allocator.dupe(u8, "fixture-model"),
         try std.testing.allocator.dupe(
             u8,
@@ -268,7 +268,7 @@ fn installExecution(workbench_value: *product_control.Runtime) !void {
         .id = "key-1",
         .name = "Fixture",
         .suffix = "",
-        .provider_kind = .anthropic,
+        .protocol = .anthropic_messages,
     }};
     const models = [_]account_contract.ModelView{.{
         .id = "fixture-model",

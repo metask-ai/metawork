@@ -6,6 +6,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const agent = @import("metawork_agent");
+const account_contract = @import("metawork_account_contract");
 const checkpoint_record = @import("product_task_checkpoint_record");
 const task_attachment = @import("product_task_attachment");
 const task_deletion = @import("product_task_deletion");
@@ -17,11 +18,7 @@ pub const permission_summary_field_capacity: usize = 128;
 pub const tool_route_digest_bytes = std.crypto.hash.sha2.Sha256.digest_length;
 pub const tool_product_id_capacity = "tool-".len + 20;
 
-pub const Provider = enum {
-    anthropic,
-    openai,
-    gemini,
-};
+pub const Protocol = account_contract.Protocol;
 
 /// Product-owned execution permission policy. These values deliberately do
 /// not mirror every AgentCore PermissionMode: only profiles whose end-to-end
@@ -419,7 +416,7 @@ pub const RunRecord = struct {
     id: u64,
     generation: u64,
     execution_generation: u64,
-    execution_provider: Provider,
+    execution_protocol: Protocol,
     execution_model: []const u8,
     execution_model_owned: bool = false,
     permission_profile: PermissionProfile,
@@ -533,7 +530,7 @@ pub const DurableTaskRecord = struct {
     id: u64,
     recent_order: u64,
     execution_generation: u64,
-    execution_provider: Provider,
+    execution_protocol: Protocol,
     execution_model: []u8,
     permission_profile: PermissionProfile,
     permission_interaction: PermissionInteraction,
@@ -1408,7 +1405,7 @@ test "event drain withholds terminal facts and assistant suffix until finalizati
         .id = 7,
         .generation = 1,
         .execution_generation = 1,
-        .execution_provider = .anthropic,
+        .execution_protocol = .anthropic_messages,
         .execution_model = "model",
         .permission_profile = .approval_required,
         .permission_interaction = .interactive,
@@ -1425,7 +1422,7 @@ test "event drain withholds terminal facts and assistant suffix until finalizati
             .id = 3,
             .recent_order = 1,
             .execution_generation = 1,
-            .execution_provider = .anthropic,
+            .execution_protocol = .anthropic_messages,
             .execution_model = @constCast("model"),
             .permission_profile = .approval_required,
             .permission_interaction = .interactive,
@@ -1472,7 +1469,7 @@ test "event drain fails closed when an output segment remains unresolved" {
         .id = 7,
         .generation = 1,
         .execution_generation = 1,
-        .execution_provider = .anthropic,
+        .execution_protocol = .anthropic_messages,
         .execution_model = "model",
         .permission_profile = .approval_required,
         .permission_interaction = .interactive,
@@ -1490,7 +1487,7 @@ test "event drain fails closed when an output segment remains unresolved" {
             .id = 3,
             .recent_order = 1,
             .execution_generation = 1,
-            .execution_provider = .anthropic,
+            .execution_protocol = .anthropic_messages,
             .execution_model = @constCast("model"),
             .permission_profile = .approval_required,
             .permission_interaction = .interactive,

@@ -20,7 +20,7 @@ const agentcore_vertical_credential = "metawork-agentcore-vertical-fixture-key";
 const agentcore_vertical_model = "metawork-agentcore-vertical-fixture-model";
 
 pub const ExecutionFixture = struct {
-    provider: account_contract.ProviderKind,
+    protocol: account_contract.Protocol,
     credential: []const u8,
     model: []const u8,
     base_url: []const u8,
@@ -52,7 +52,7 @@ pub const Runtime = struct {
             agentcore_vertical_provider_base_url_env,
         ) orelse return null;
         return .{
-            .provider = .anthropic,
+            .protocol = .anthropic_messages,
             .credential = agentcore_vertical_credential,
             .model = agentcore_vertical_model,
             .base_url = base_url,

@@ -76,6 +76,7 @@ const ModelConnectionProbeJob = struct {
         self.succeeded = agent.runProviderProbe(self.io, self.completion_transport, .{
             .provider_id = input.target.provider_id,
             .protocol = switch (input.target.protocol) {
+                .openai_responses => .openai_responses,
                 .anthropic_messages => .anthropic_messages,
                 .openai_chat_completions => .openai_chat_completions,
                 .gemini_native => .gemini_native,
@@ -711,7 +712,7 @@ test "Application coordinator commits Account Runtime facts into Workbench" {
 
     var execution = try account_contract.OwnedExecutionConfig.initOwned(
         std.testing.allocator,
-        .anthropic,
+        .anthropic_messages,
         try std.testing.allocator.dupe(u8, "model-1"),
         try std.testing.allocator.dupe(
             u8,
@@ -843,7 +844,7 @@ test "Application coordinator balances Workbench gate when Account effect admiss
 
     var execution = try account_contract.OwnedExecutionConfig.initOwned(
         std.testing.allocator,
-        .anthropic,
+        .anthropic_messages,
         try std.testing.allocator.dupe(u8, "model-1"),
         try std.testing.allocator.dupe(
             u8,

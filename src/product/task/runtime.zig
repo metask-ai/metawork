@@ -29,7 +29,7 @@ pub const TerminalSummary = struct {
 pub const ContinuationCapability = task_state.ContinuationCapability;
 pub const ExecutionIdentity = struct {
     generation: u64,
-    provider: task_state.Provider,
+    protocol: task_state.Protocol,
     model: []const u8,
 };
 
@@ -374,7 +374,7 @@ pub const DeletionSync = struct {
 
 pub const CreateCandidate = struct {
     execution_generation: u64,
-    execution_provider: task_state.Provider,
+    execution_protocol: task_state.Protocol,
     execution_model: []u8,
     permission_profile: task_state.PermissionProfile,
     permission_interaction: task_state.PermissionInteraction,
@@ -395,7 +395,7 @@ pub const CreateWorkspaceTrust = union(enum) {
 pub const CreateTaskInput = struct {
     agent_runtime: *agent.Runtime,
     execution: account_contract.ExecutionConfigInput,
-    provider: task_state.Provider,
+    protocol: task_state.Protocol,
     model: []const u8,
     permission_profile: task_state.PermissionProfile,
     permission_interaction: task_state.PermissionInteraction,
@@ -530,7 +530,7 @@ pub const RecoveryAuthorityQuery = struct {
     workspace_epoch: u64,
     target_execution_generation: u64,
     task_model: []const u8,
-    provider: account_contract.ProviderKind,
+    protocol: account_contract.Protocol,
 };
 
 pub const RecoveryExternalAuthority = struct {
@@ -570,7 +570,7 @@ pub const ProjectionAuthorityQuery = struct {
     workspace_id: u64,
     workspace_epoch: u64,
     workspace_root: []const u8,
-    execution_provider: task_state.Provider,
+    execution_protocol: task_state.Protocol,
     execution_model: []const u8,
 };
 
@@ -768,6 +768,7 @@ pub const Runtime = struct {
         var binding = try task_agent_session.Binding.open(input.agent_runtime, .{
             .provider_id = input.execution.target.provider_id,
             .protocol = switch (input.execution.target.protocol) {
+                .openai_responses => .openai_responses,
                 .anthropic_messages => .anthropic_messages,
                 .openai_chat_completions => .openai_chat_completions,
                 .gemini_native => .gemini_native,
@@ -800,7 +801,7 @@ pub const Runtime = struct {
         input.pinned_catalog.* = null;
         var candidate = CreateCandidate{
             .execution_generation = input.execution.execution_generation,
-            .execution_provider = input.provider,
+            .execution_protocol = input.protocol,
             .execution_model = execution_model,
             .permission_profile = input.permission_profile,
             .permission_interaction = input.permission_interaction,
@@ -869,7 +870,7 @@ pub const Runtime = struct {
                 .id = task_id,
                 .recent_order = self.takeRecentOrder(),
                 .execution_generation = owned.execution_generation,
-                .execution_provider = owned.execution_provider,
+                .execution_protocol = owned.execution_protocol,
                 .execution_model = owned.execution_model,
                 .permission_profile = owned.permission_profile,
                 .permission_interaction = owned.permission_interaction,
@@ -1514,7 +1515,7 @@ pub const Runtime = struct {
         const task = self.findConst(task_id) orelse return null;
         return .{
             .generation = task.durable.execution_generation,
-            .provider = task.durable.execution_provider,
+            .protocol = task.durable.execution_protocol,
             .model = task.durable.execution_model,
         };
     }
@@ -1528,7 +1529,7 @@ pub const Runtime = struct {
         const run = task_state.findRun(task.durable.runs, run_id) orelse return null;
         return .{
             .generation = run.execution_generation,
-            .provider = run.execution_provider,
+            .protocol = run.execution_protocol,
             .model = run.execution_model,
         };
     }
@@ -2682,8 +2683,7 @@ pub const Runtime = struct {
         const checkpoint = task.durable.checkpoint orelse
             return error.RecoveryUnavailable;
         if (input.execution.execution_generation == 0 or
-            providerFromAccount(input.execution.target.provider_kind) !=
-                task.durable.execution_provider)
+            input.execution.target.protocol != task.durable.execution_protocol)
             return error.RecoveryUnavailable;
         if (task.runtime.active_operation != .none or
             task.runtime.liveConst() != null)
@@ -2747,7 +2747,7 @@ pub const Runtime = struct {
                 .source_execution_generation = task.durable.execution_generation,
                 .target_execution_generation = input.execution.execution_generation,
                 .task_model = model,
-                .provider = providerToAccount(task.durable.execution_provider),
+                .protocol = task.durable.execution_protocol,
                 .permission_mode = permission.mode,
                 .shell_policy = permission.shell,
                 .permission_interaction = permission.interaction,
@@ -3077,7 +3077,7 @@ pub const Runtime = struct {
                 .workspace_epoch = task.durable.workspace_epoch,
                 .target_execution_generation = job.attempt.target_execution_generation,
                 .task_model = task.durable.execution_model,
-                .provider = providerToAccount(task.durable.execution_provider),
+                .protocol = task.durable.execution_protocol,
             });
             const active_attempt_id: ?u64 = switch (task.runtime.active_operation) {
                 .restore => |attempt| attempt.id,
@@ -3101,7 +3101,7 @@ pub const Runtime = struct {
                         .source_execution_generation = task.durable.execution_generation,
                         .target_execution_generation = external.target_execution_generation,
                         .task_model = task.durable.execution_model,
-                        .provider = providerToAccount(task.durable.execution_provider),
+                        .protocol = task.durable.execution_protocol,
                         .active_attempt_id = active_attempt_id,
                         .shutting_down = external.shutting_down,
                         .archived = task.durable.archived,
@@ -3223,7 +3223,7 @@ fn projectionAuthorityQuery(
         .workspace_id = task.durable.workspace_id,
         .workspace_epoch = task.durable.workspace_epoch,
         .workspace_root = task.durable.workspace_root,
-        .execution_provider = task.durable.execution_provider,
+        .execution_protocol = task.durable.execution_protocol,
         .execution_model = task.durable.execution_model,
     };
 }
@@ -3919,25 +3919,9 @@ fn taskExecutionInput(
         return error.ExecutionUnavailable;
     const input = execution.input();
     if (input.execution_generation != task.durable.execution_generation or
-        providerFromAccount(input.target.provider_kind) != task.durable.execution_provider)
+        input.target.protocol != task.durable.execution_protocol)
         return error.ExecutionGenerationMismatch;
     return input;
-}
-
-fn providerFromAccount(provider: account_contract.ProviderKind) task_state.Provider {
-    return switch (provider) {
-        .anthropic => .anthropic,
-        .openai => .openai,
-        .gemini => .gemini,
-    };
-}
-
-fn providerToAccount(provider: task_state.Provider) account_contract.ProviderKind {
-    return switch (provider) {
-        .anthropic => .anthropic,
-        .openai => .openai,
-        .gemini => .gemini,
-    };
 }
 
 const AgentSessionPermission = struct {
@@ -4143,7 +4127,7 @@ fn reserveRun(
         .id = 0,
         .generation = task.durable.next_run_generation,
         .execution_generation = task.durable.execution_generation,
-        .execution_provider = task.durable.execution_provider,
+        .execution_protocol = task.durable.execution_protocol,
         .execution_model = execution_model,
         .execution_model_owned = true,
         .permission_profile = task.durable.permission_profile,
@@ -4651,13 +4635,12 @@ fn checkpointIdentityEqual(left: anytype, right: @TypeOf(left)) bool {
         std.mem.eql(u8, &left.digest, &right.digest);
 }
 
-test "Task execution owns the provider reference and protocol across clone and transfer" {
+test "Task execution owns the service reference and protocol across clone and transfer" {
     var provider_id = "model_connection:service-a".*;
     var owned = try owned_task_execution.OwnedTaskExecution.clone(std.testing.allocator, .{
         .target = .{
             .provider_id = &provider_id,
             .protocol = .openai_chat_completions,
-            .provider_kind = .openai,
             .model = "model",
             .base_url = "https://example.test/v1/chat/completions",
         },
@@ -4670,7 +4653,7 @@ test "Task execution owns the provider reference and protocol across clone and t
     defer transferred.deinit();
     const resolved = transferred.input();
     try std.testing.expectEqualStrings("model_connection:service-a", resolved.target.provider_id);
-    try std.testing.expectEqual(account_contract.ModelConnectionProtocol.openai_chat_completions, resolved.target.protocol);
+    try std.testing.expectEqual(account_contract.Protocol.openai_chat_completions, resolved.target.protocol);
     try std.testing.expectEqual(@as(u64, 7), resolved.execution_generation);
 }
 

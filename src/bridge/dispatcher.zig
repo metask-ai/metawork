@@ -1088,7 +1088,7 @@ pub const Dispatcher = struct {
         try self.requireAccountAuthority(invocation.source.window_id);
         var parsed = try handlers.parsePayload(handlers.ModelConnectionCreate, invocation.request.payload);
         defer parsed.deinit();
-        const protocol = parseModelConnectionProtocol(parsed.value.protocol) orelse
+        const protocol = parseProtocol(parsed.value.protocol) orelse
             return error.InvalidBridgePayload;
         const normalized_base_url = account_contract.normalizeModelConnectionEndpointAlloc(
             std.heap.c_allocator,
@@ -1138,7 +1138,7 @@ pub const Dispatcher = struct {
         try self.requireAccountAuthority(invocation.source.window_id);
         var parsed = try handlers.parsePayload(handlers.ModelConnectionUpdate, invocation.request.payload);
         defer parsed.deinit();
-        const protocol = parseModelConnectionProtocol(parsed.value.protocol) orelse
+        const protocol = parseProtocol(parsed.value.protocol) orelse
             return error.InvalidBridgePayload;
         const normalized_base_url = account_contract.normalizeModelConnectionEndpointAlloc(
             std.heap.c_allocator,
@@ -1232,8 +1232,8 @@ pub const Dispatcher = struct {
         return encodeAccountResult(output, self.account_commands.submit(.{ .model_connection = command }));
     }
 
-    fn parseModelConnectionProtocol(value: []const u8) ?account_contract.ModelConnectionProtocol {
-        return std.meta.stringToEnum(account_contract.ModelConnectionProtocol, value);
+    fn parseProtocol(value: []const u8) ?account_contract.Protocol {
+        return std.meta.stringToEnum(account_contract.Protocol, value);
     }
 
     fn chooseWorkspace(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {

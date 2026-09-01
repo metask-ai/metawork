@@ -6,8 +6,7 @@ const account_contract = @import("metawork_account_contract");
 pub const OwnedTaskExecution = struct {
     allocator: std.mem.Allocator,
     provider_id: []u8,
-    protocol: account_contract.ModelConnectionProtocol,
-    provider_kind: account_contract.ProviderKind,
+    protocol: account_contract.Protocol,
     model: []u8,
     base_url: []u8,
     execution_generation: u64,
@@ -41,7 +40,6 @@ pub const OwnedTaskExecution = struct {
             .allocator = allocator,
             .provider_id = provider_id,
             .protocol = source.target.protocol,
-            .provider_kind = source.target.provider_kind,
             .model = owned_model,
             .base_url = owned_base_url,
             .execution_generation = source.execution_generation,
@@ -67,7 +65,6 @@ pub const OwnedTaskExecution = struct {
             .target = .{
                 .provider_id = self.provider_id,
                 .protocol = self.protocol,
-                .provider_kind = self.provider_kind,
                 .model = self.model,
                 .base_url = self.base_url,
             },

@@ -2149,7 +2149,7 @@ pub const TestSupport = if (builtin.is_test) struct {
         const input = execution.input();
         runtime.committed_public_catalog.replaceRestoredSelection(
             "key-1",
-            input.target.provider_kind,
+            input.target.protocol,
             input.target.model,
         );
         return .{ .transition = try state_impl.TestSupport.prepareReady(
@@ -2496,7 +2496,7 @@ test "Account Runtime owns automatic catalog selection policy" {
             .id = "key-current",
             .name = "Current",
             .suffix = "1234",
-            .provider_kind = .anthropic,
+            .protocol = .anthropic_messages,
         },
         "secret",
         &.{
@@ -2510,7 +2510,7 @@ test "Account Runtime owns automatic catalog selection policy" {
             .id = "key-other",
             .name = "Other",
             .suffix = "5678",
-            .provider_kind = .openai,
+            .protocol = .openai_chat_completions,
         },
         "other-secret",
     );
@@ -2602,7 +2602,7 @@ fn installExecutionPreparationForTest(runtime: *Runtime) !void {
             .id = "key-1",
             .name = "Primary",
             .suffix = "1234",
-            .provider_kind = .anthropic,
+            .protocol = .anthropic_messages,
         },
         "secret-key",
         &.{.{ .id = "model-1", .display_name = "Model 1" }},
@@ -2760,9 +2760,8 @@ test "Account Runtime persists and restores a secure model connection default" {
         defer execution.deinit();
         expected_id = try std.fmt.bufPrint(&expected_provider, "model_connection:{s}", .{connection_id});
         try std.testing.expectEqualStrings(expected_id, execution.input().target.provider_id);
-        try std.testing.expectEqual(contract.ModelConnectionProtocol.openai_chat_completions, execution.input().target.protocol);
+        try std.testing.expectEqual(contract.Protocol.openai_chat_completions, execution.input().target.protocol);
         try std.testing.expectEqualStrings("provider-secret", execution.input().api_key);
-        try std.testing.expectEqual(contract.ProviderKind.openai, execution.input().target.provider_kind);
         try std.testing.expectEqual(@as(u64, 17), execution.input().execution_generation);
 
         const updated = runtime.submitModelConnectionCommand(.{ .update = .{
@@ -2824,7 +2823,7 @@ test "Account Runtime persists and restores a secure model connection default" {
             return error.TestUnexpectedResult;
         defer execution.deinit();
         try std.testing.expectEqualStrings(expected_id, execution.input().target.provider_id);
-        try std.testing.expectEqual(contract.ModelConnectionProtocol.openai_chat_completions, execution.input().target.protocol);
+        try std.testing.expectEqual(contract.Protocol.openai_chat_completions, execution.input().target.protocol);
         try std.testing.expectEqualStrings("provider-secret", execution.input().api_key);
         try std.testing.expectEqualStrings("gpt-5", execution.input().target.model);
         try std.testing.expectEqual(@as(u64, 18), execution.input().execution_generation);
@@ -2900,7 +2899,7 @@ test "Account Runtime publishes the candidate catalog with first execution" {
             .id = "key-1",
             .name = "Primary",
             .suffix = "1234",
-            .provider_kind = .anthropic,
+            .protocol = .anthropic_messages,
         },
         "secret-key",
         &.{.{ .id = "model-1", .display_name = "Model 1" }},
@@ -2911,7 +2910,7 @@ test "Account Runtime publishes the candidate catalog with first execution" {
             .id = "key-1",
             .name = "Primary",
             .suffix = "1234",
-            .provider_kind = .anthropic,
+            .protocol = .anthropic_messages,
         }},
         &.{.{ .id = "model-1", .display_name = "Model 1" }},
     );
@@ -2919,7 +2918,7 @@ test "Account Runtime publishes the candidate catalog with first execution" {
 
     var execution = try contract.OwnedExecutionConfig.initOwned(
         std.testing.allocator,
-        .anthropic,
+        .anthropic_messages,
         try std.testing.allocator.dupe(u8, "model-1"),
         try std.testing.allocator.dupe(
             u8,
@@ -2988,14 +2987,14 @@ test "Account Runtime catalog cancel discards candidate identity and secrets" {
             .id = "key-1",
             .name = "Primary",
             .suffix = "1234",
-            .provider_kind = .anthropic,
+            .protocol = .anthropic_messages,
         },
         "secret-key",
         &.{.{ .id = "model-1", .display_name = "Model 1" }},
     );
     runtime.candidate_public_catalog.replaceRestoredSelection(
         "key-1",
-        .anthropic,
+        .anthropic_messages,
         "model-1",
     );
     runtime.candidate_catalog_attempt_id = refresh.attemptId();
@@ -3083,7 +3082,7 @@ test "Account Runtime rejects cross-API model selection before persistence" {
             .id = "key-b",
             .name = "Secondary",
             .suffix = "5678",
-            .provider_kind = .anthropic,
+            .protocol = .anthropic_messages,
         },
         "secret-key-b",
         &.{.{ .id = "same-model", .display_name = "Same model id" }},
@@ -3141,7 +3140,7 @@ fn commitAutomationRestoreForTest(runtime: *Runtime) void {
 fn commitReadyRestoreForTest(runtime: *Runtime) !void {
     var execution = try contract.OwnedExecutionConfig.initOwned(
         std.testing.allocator,
-        .anthropic,
+        .anthropic_messages,
         try std.testing.allocator.dupe(u8, "model-1"),
         try std.testing.allocator.dupe(
             u8,
@@ -3196,7 +3195,7 @@ fn prepareDefaultModelTest(
             .id = "key-1",
             .name = "Primary",
             .suffix = "1234",
-            .provider_kind = .anthropic,
+            .protocol = .anthropic_messages,
         }},
         &.{
             .{ .id = "model-1", .display_name = "Model 1" },

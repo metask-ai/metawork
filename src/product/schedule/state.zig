@@ -1,6 +1,7 @@
 //! Product Schedule-owned bounded state and occurrence transitions.
 
 const std = @import("std");
+const account_contract = @import("metawork_account_contract");
 
 pub const minimum_interval_seconds: u64 = 60;
 pub const max_occurrence_history: usize = 16;
@@ -16,11 +17,7 @@ pub const Error = std.mem.Allocator.Error || error{
     ProjectionCapacity,
 };
 
-pub const Provider = enum {
-    anthropic,
-    openai,
-    gemini,
-};
+pub const Protocol = account_contract.Protocol;
 
 pub const PermissionProfile = enum {
     approval_required,
@@ -162,7 +159,7 @@ pub const Occurrence = struct {
 pub const Definition = struct {
     title: []const u8,
     execution_generation: u64,
-    execution_provider: Provider,
+    execution_protocol: Protocol,
     execution_model: []const u8,
     permission_profile: PermissionProfile,
     input: []const u8,
@@ -175,7 +172,7 @@ pub const Item = struct {
     title: []u8,
     title_redacted: bool = false,
     execution_generation: u64,
-    execution_provider: Provider,
+    execution_protocol: Protocol,
     execution_model: []u8,
     permission_profile: PermissionProfile,
     input: OwnedInput,
@@ -258,7 +255,7 @@ pub const Store = struct {
                 .definition = .{
                     .title = item.title,
                     .execution_generation = item.execution_generation,
-                    .execution_provider = item.execution_provider,
+                    .execution_protocol = item.execution_protocol,
                     .execution_model = item.execution_model,
                     .permission_profile = item.permission_profile,
                     .input = item.input.borrowed(),
@@ -653,7 +650,7 @@ pub const Store = struct {
             .epoch = epoch,
             .title = title,
             .execution_generation = definition.execution_generation,
-            .execution_provider = definition.execution_provider,
+            .execution_protocol = definition.execution_protocol,
             .execution_model = model,
             .permission_profile = definition.permission_profile,
             .input = input,
@@ -827,7 +824,7 @@ test "store updates optimistically and a one-time occurrence completes" {
     const id = try store.create(.{
         .title = "Daily summary",
         .execution_generation = 9,
-        .execution_provider = .openai,
+        .execution_protocol = .openai_chat_completions,
         .execution_model = "gpt-test",
         .permission_profile = .approval_required,
         .input = "Summarize the project",

@@ -30,7 +30,7 @@ export function taskModelSelectionPolicy(
     account.executionGeneration !== "0" &&
     account.executionGeneration === account.metaskExecutionGeneration &&
     task.binding.executionGeneration === account.executionGeneration &&
-    selectedApi?.provider === task.binding.provider;
+    selectedApi?.protocol === task.binding.protocol;
 
   return {
     authorityExact,

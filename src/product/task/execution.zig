@@ -375,6 +375,7 @@ fn generateAutomaticTitle(job: *RunJob) void {
     const owner = job.completion_factory.create(std.heap.c_allocator, .{
         .provider_id = config.target.provider_id,
         .protocol = switch (config.target.protocol) {
+            .openai_responses => .openai_responses,
             .anthropic_messages => .anthropic_messages,
             .openai_chat_completions => .openai_chat_completions,
             .gemini_native => .gemini_native,

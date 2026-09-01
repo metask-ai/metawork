@@ -75,7 +75,7 @@ pub const PreparedAttempt = struct {
     source_execution_generation: u64,
     target_execution_generation: u64,
     task_model: []u8,
-    provider: account_contract.ProviderKind,
+    protocol: account_contract.Protocol,
     permission_mode: agent.PermissionMode,
     shell_policy: agent.ShellPolicy,
     permission_interaction: agent.PermissionInteraction,
@@ -95,7 +95,7 @@ pub const CommitAuthority = struct {
     source_execution_generation: u64,
     target_execution_generation: u64,
     task_model: []const u8,
-    provider: account_contract.ProviderKind,
+    protocol: account_contract.Protocol,
     active_attempt_id: ?u64,
     shutting_down: bool,
     archived: bool,
@@ -117,7 +117,7 @@ pub const AttemptAuthority = struct {
     source_execution_generation: u64,
     target_execution_generation: u64,
     task_model: []const u8,
-    provider: account_contract.ProviderKind,
+    protocol: account_contract.Protocol,
 };
 
 /// A restore completion is publishable only while every authority token that
@@ -138,7 +138,7 @@ pub fn commitAllowed(
         .source_execution_generation = attempt.source_execution_generation,
         .target_execution_generation = attempt.target_execution_generation,
         .task_model = attempt.task_model,
-        .provider = attempt.provider,
+        .protocol = attempt.protocol,
     }, authority);
 }
 
@@ -164,7 +164,7 @@ pub fn authorityExact(
         authority.source_execution_generation == attempt.source_execution_generation and
         authority.target_execution_generation == attempt.target_execution_generation and
         std.mem.eql(u8, authority.task_model, attempt.task_model) and
-        authority.provider == attempt.provider;
+        authority.protocol == attempt.protocol;
 }
 
 test "restore authority rejects every stale asynchronous dimension" {
@@ -179,7 +179,7 @@ test "restore authority rejects every stale asynchronous dimension" {
         .source_execution_generation = 13,
         .target_execution_generation = 17,
         .task_model = "model-a",
-        .provider = .anthropic,
+        .protocol = .anthropic_messages,
     };
     const current: CommitAuthority = .{
         .task_id = 7,
@@ -191,7 +191,7 @@ test "restore authority rejects every stale asynchronous dimension" {
         .source_execution_generation = 13,
         .target_execution_generation = 17,
         .task_model = "model-a",
-        .provider = .anthropic,
+        .protocol = .anthropic_messages,
         .active_attempt_id = 11,
         .shutting_down = false,
         .archived = false,
@@ -402,6 +402,7 @@ pub const Job = struct {
             .session = .{
                 .provider_id = execution.target.provider_id,
                 .protocol = switch (execution.target.protocol) {
+                    .openai_responses => .openai_responses,
                     .anthropic_messages => .anthropic_messages,
                     .openai_chat_completions => .openai_chat_completions,
                     .gemini_native => .gemini_native,

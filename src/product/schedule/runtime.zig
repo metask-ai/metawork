@@ -11,7 +11,7 @@ const persistence = @import("product_schedule_persistence");
 const view = @import("product_schedule_view");
 
 pub const Recurrence = state.Recurrence;
-pub const Provider = state.Provider;
+pub const Protocol = state.Protocol;
 pub const PermissionProfile = state.PermissionProfile;
 pub const Definition = state.Definition;
 const Occurrence = state.Occurrence;
@@ -156,7 +156,7 @@ pub const Redaction = struct {
 pub const ExecutionBinding = struct {
     available: bool,
     generation: u64 = 0,
-    provider: ?Provider = null,
+    protocol: ?Protocol = null,
     model: []const u8 = "",
     automatic_workspace_available: bool,
 };
@@ -949,8 +949,8 @@ fn reconcileBindingsInStore(
         if (!item.enabled or item.health != .ready) continue;
         const reason: ?FailureReason = if (!binding.available or
             item.execution_generation != binding.generation or
-            binding.provider == null or
-            item.execution_provider != binding.provider.? or
+            binding.protocol == null or
+            item.execution_protocol != binding.protocol.? or
             !std.mem.eql(u8, item.execution_model, binding.model))
             .execution_changed
         else if (!binding.automatic_workspace_available)
@@ -1070,7 +1070,7 @@ fn testBinding() ExecutionBinding {
     return .{
         .available = true,
         .generation = 1,
-        .provider = .anthropic,
+        .protocol = .anthropic_messages,
         .model = "model",
         .automatic_workspace_available = true,
     };
@@ -1080,7 +1080,7 @@ fn testDefinition(title: []const u8, input: []const u8) Definition {
     return .{
         .title = title,
         .execution_generation = 1,
-        .execution_provider = .anthropic,
+        .execution_protocol = .anthropic_messages,
         .execution_model = "model",
         .permission_profile = .approval_required,
         .input = input,

@@ -44,7 +44,7 @@ const OwnedConnection = struct {
     id: []u8,
     display_name: []u8,
     normalized_base_url: []u8,
-    protocol: contract.ModelConnectionProtocol,
+    protocol: contract.Protocol,
     state: contract.ModelConnectionState = .configuring,
     test_status: contract.ModelConnectionTestStatus = .untested,
     credential_status: contract.ModelConnectionCredentialStatus = .ready,
@@ -379,7 +379,7 @@ pub const Registry = struct {
     pub const DefaultBinding = struct {
         connection_id: []const u8,
         model_id: []const u8,
-        protocol: contract.ModelConnectionProtocol,
+        protocol: contract.Protocol,
         normalized_base_url: []const u8,
         connection_generation: u64,
         execution_generation: u64,
@@ -589,7 +589,7 @@ const ConnectionWire = struct {
     id: []const u8,
     display_name: []const u8,
     normalized_base_url: []const u8,
-    protocol: contract.ModelConnectionProtocol,
+    protocol: contract.Protocol,
     state: contract.ModelConnectionState,
     test_status: contract.ModelConnectionTestStatus,
     credential_status: contract.ModelConnectionCredentialStatus,
@@ -861,6 +861,16 @@ test "registry creates and selects a native model connection" {
     try std.testing.expectEqualStrings("slot-1", values[0].id);
     try std.testing.expectEqualStrings("gpt-5", values[0].selected_model);
     try contract.validateModelConnectionView(values[0]);
+}
+
+test "registry hard cut rejects the retired provider field" {
+    const retired =
+        \\{"default_connection_id":"","default_execution_generation":0,"pending_credential_deletions":[],"connections":[{"id":"slot-1","display_name":"OpenAI","normalized_base_url":"https://api.openai.com/v1/chat/completions","provider":"openai","state":"configuring","test_status":"untested","credential_status":"ready","enabled":true,"connection_generation":1,"models":[{"id":"gpt-5","display_name":""}],"selected_model":"gpt-5"}]}
+    ;
+    try std.testing.expectError(
+        error.InvalidData,
+        decode(std.testing.allocator, retired),
+    );
 }
 
 test "registry rejects stale generation and unknown models" {

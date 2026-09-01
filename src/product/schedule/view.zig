@@ -62,8 +62,8 @@ fn writeItem(
     else
         writer.writeAll("null") catch return error.SnapshotTooLarge;
     writer.print(
-        ",\"execution\":{{\"generation\":\"{d}\",\"provider\":\"{s}\",\"model\":",
-        .{ item.execution_generation, @tagName(item.execution_provider) },
+        ",\"execution\":{{\"generation\":\"{d}\",\"protocol\":\"{s}\",\"model\":",
+        .{ item.execution_generation, @tagName(item.execution_protocol) },
     ) catch return error.SnapshotTooLarge;
     try text.writeJson(writer, item.execution_model);
     writer.print("}},\"permissionProfile\":\"{s}\",\"input\":{{\"kind\":\"text\",\"text\":", .{

@@ -61,7 +61,7 @@ const ready = {
       selectionId: "key-1",
       name: "Primary",
       suffix: "1234",
-      provider: "anthropic",
+      protocol: "anthropic_messages",
     },
   ],
   models: [{ selectionId: "model-1", displayName: "Model One" }],

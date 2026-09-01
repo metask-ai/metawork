@@ -130,12 +130,12 @@ pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
         task.durable.recent_order,
     }) catch return error.SnapshotTooLarge;
     try input.text.writeJson(writer, task.durable.title);
-    writer.print(",\"workspaceId\":\"{d}\",\"permissionProfile\":\"{s}\",\"binding\":{{\"epoch\":\"{d}\",\"availability\":\"{s}\",\"provider\":\"{s}\",\"model\":", .{
+    writer.print(",\"workspaceId\":\"{d}\",\"permissionProfile\":\"{s}\",\"binding\":{{\"epoch\":\"{d}\",\"availability\":\"{s}\",\"protocol\":\"{s}\",\"model\":", .{
         task.durable.workspace_id,
         @tagName(task.durable.permission_profile),
         task.durable.binding_epoch,
         if (task.runtime.executionConst() == null) "unavailable" else "available",
-        @tagName(task.durable.execution_provider),
+        @tagName(task.durable.execution_protocol),
     }) catch return error.SnapshotTooLarge;
     try input.text.writeJson(writer, task.durable.execution_model);
     writer.print(",\"executionGeneration\":\"{d}\",\"unavailableReason\":", .{task.durable.execution_generation}) catch

@@ -208,7 +208,7 @@ const App = struct {
                 const control = self.control orelse
                     @panic("Product Control is not composed");
                 control.installAutomationExecution(.{
-                    .provider = execution.provider,
+                    .protocol = execution.protocol,
                     .credential = execution.credential,
                     .model = execution.model,
                     .base_url = execution.base_url,

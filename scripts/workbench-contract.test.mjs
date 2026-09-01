@@ -49,6 +49,18 @@ test("the canonical Workbench fixture decodes without normalization", () => {
   );
 });
 
+test("Workbench snapshot hard cut rejects retired provider fields", () => {
+  const retiredApiKey = clone(fixture);
+  retiredApiKey.account.apiKeys[0].provider = "anthropic";
+  delete retiredApiKey.account.apiKeys[0].protocol;
+  assert.throws(() => decodeWorkbenchSnapshot(retiredApiKey), /expected keys/);
+
+  const retiredBinding = clone(fixture);
+  retiredBinding.tasks[0].binding.provider = "anthropic";
+  delete retiredBinding.tasks[0].binding.protocol;
+  assert.throws(() => decodeWorkbenchSnapshot(retiredBinding), /expected keys/);
+});
+
 test("model metadata preserves nullable declarations and exact positive u64 limits", () => {
   for (const declaration of [null, true, false]) {
     const candidate = clone(fixture);
@@ -353,7 +365,7 @@ test("Scheduled Task projection decodes recurrence and occurrence without secret
       failureReason: null,
       execution: {
         generation: "1",
-        provider: "anthropic",
+        protocol: "anthropic_messages",
         model: "fixture-model",
       },
       input: {

@@ -5,7 +5,7 @@ const product_workspace = @import("metawork_product_workspace");
 
 pub const Error = runtime_impl.Error;
 pub const Limits = runtime_impl.Limits;
-pub const Provider = runtime_impl.Provider;
+pub const Protocol = runtime_impl.Protocol;
 pub const PermissionProfile = runtime_impl.PermissionProfile;
 pub const PermissionInteraction = runtime_impl.PermissionInteraction;
 pub const permission_profiles_available = runtime_impl.permission_profiles_available;

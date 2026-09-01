@@ -176,7 +176,7 @@ const ItemWire = struct {
     epoch: u64,
     title: []const u8,
     execution_generation: u64,
-    execution_provider: []const u8,
+    execution_protocol: []const u8,
     execution_model: []const u8,
     permission_profile: []const u8,
     input: InputWire,
@@ -275,9 +275,9 @@ pub fn decode(
             .definition = .{
                 .title = wire.title,
                 .execution_generation = wire.execution_generation,
-                .execution_provider = parseEnum(
-                    scheduled.Provider,
-                    wire.execution_provider,
+                .execution_protocol = parseEnum(
+                    scheduled.Protocol,
+                    wire.execution_protocol,
                 ) orelse return error.ScheduledTaskStoreCorrupt,
                 .execution_model = wire.execution_model,
                 .permission_profile = parseEnum(
@@ -311,10 +311,10 @@ fn encodeItem(writer: *std.Io.Writer, item: *const scheduled.Item) !void {
     );
     try jsonString(writer, item.title);
     try writer.print(
-        ",\"execution_generation\":{d},\"execution_provider\":",
+        ",\"execution_generation\":{d},\"execution_protocol\":",
         .{item.execution_generation},
     );
-    try jsonString(writer, @tagName(item.execution_provider));
+    try jsonString(writer, @tagName(item.execution_protocol));
     try writer.writeAll(",\"execution_model\":");
     try jsonString(writer, item.execution_model);
     try writer.writeAll(",\"permission_profile\":");
@@ -460,7 +460,7 @@ test "scheduled task store round trips bounded occurrence history" {
     const id = try store.create(.{
         .title = "Daily brief",
         .execution_generation = 9,
-        .execution_provider = .openai,
+        .execution_protocol = .openai_chat_completions,
         .execution_model = "gpt-test",
         .permission_profile = .full_access,
         .input = "Summarize today's work",
@@ -475,7 +475,7 @@ test "scheduled task store round trips bounded occurrence history" {
     const default_id = try store.create(.{
         .title = "Independent brief",
         .execution_generation = 9,
-        .execution_provider = .openai,
+        .execution_protocol = .openai_chat_completions,
         .execution_model = "gpt-test",
         .permission_profile = .approval_required,
         .input = "Summarize current work",
@@ -543,7 +543,7 @@ test "scheduled task store rejects unknown fields and revisions" {
         error.ScheduledTaskStoreCorrupt,
         decode(
             std.testing.allocator,
-            "{\"schema_version\":1,\"next_id\":2,\"items\":[{\"id\":1,\"epoch\":1,\"title\":\"missing profile\",\"execution_generation\":1,\"execution_provider\":\"openai\",\"execution_model\":\"gpt-test\",\"input\":{\"kind\":\"text\",\"text\":\"inspect\"},\"recurrence\":{\"kind\":\"once\",\"at_unix_seconds\":2},\"enabled\":true,\"health\":\"ready\",\"failure_reason\":null,\"next_run_at_unix_seconds\":2,\"occurrences\":[]}]}",
+            "{\"schema_version\":1,\"next_id\":2,\"items\":[{\"id\":1,\"epoch\":1,\"title\":\"retired provider\",\"execution_generation\":1,\"execution_provider\":\"openai\",\"execution_model\":\"gpt-test\",\"permission_profile\":\"approval_required\",\"input\":{\"kind\":\"text\",\"text\":\"inspect\"},\"recurrence\":{\"kind\":\"once\",\"at_unix_seconds\":2},\"enabled\":true,\"health\":\"ready\",\"failure_reason\":null,\"next_run_at_unix_seconds\":2,\"occurrences\":[]}]}",
             limits,
         ),
     );
@@ -551,7 +551,7 @@ test "scheduled task store rejects unknown fields and revisions" {
         error.ScheduledTaskStoreCorrupt,
         decode(
             std.testing.allocator,
-            "{\"schema_version\":1,\"next_id\":2,\"items\":[{\"id\":1,\"epoch\":1,\"title\":\"legacy\",\"workspace_id\":7,\"workspace_epoch\":3,\"execution_generation\":1,\"execution_provider\":\"openai\",\"execution_model\":\"gpt-test\",\"input\":{\"kind\":\"text\",\"text\":\"legacy\"},\"recurrence\":{\"kind\":\"once\",\"at_unix_seconds\":2},\"enabled\":true,\"health\":\"ready\",\"failure_reason\":null,\"next_run_at_unix_seconds\":2,\"occurrences\":[]}]}",
+            "{\"schema_version\":1,\"next_id\":2,\"items\":[{\"id\":1,\"epoch\":1,\"title\":\"missing profile\",\"execution_generation\":1,\"execution_protocol\":\"openai_chat_completions\",\"execution_model\":\"gpt-test\",\"input\":{\"kind\":\"text\",\"text\":\"inspect\"},\"recurrence\":{\"kind\":\"once\",\"at_unix_seconds\":2},\"enabled\":true,\"health\":\"ready\",\"failure_reason\":null,\"next_run_at_unix_seconds\":2,\"occurrences\":[]}]}",
             limits,
         ),
     );
@@ -559,7 +559,7 @@ test "scheduled task store rejects unknown fields and revisions" {
         error.ScheduledTaskStoreCorrupt,
         decode(
             std.testing.allocator,
-            "{\"schema_version\":1,\"next_id\":2,\"items\":[{\"id\":1,\"epoch\":1,\"title\":\"configured target\",\"target\":{\"kind\":\"default\"},\"execution_generation\":1,\"execution_provider\":\"openai\",\"execution_model\":\"gpt-test\",\"input\":{\"kind\":\"text\",\"text\":\"inspect\"},\"recurrence\":{\"kind\":\"once\",\"at_unix_seconds\":2},\"enabled\":true,\"health\":\"ready\",\"failure_reason\":null,\"next_run_at_unix_seconds\":2,\"occurrences\":[]}]}",
+            "{\"schema_version\":1,\"next_id\":2,\"items\":[{\"id\":1,\"epoch\":1,\"title\":\"legacy\",\"workspace_id\":7,\"workspace_epoch\":3,\"execution_generation\":1,\"execution_protocol\":\"openai_chat_completions\",\"execution_model\":\"gpt-test\",\"input\":{\"kind\":\"text\",\"text\":\"legacy\"},\"recurrence\":{\"kind\":\"once\",\"at_unix_seconds\":2},\"enabled\":true,\"health\":\"ready\",\"failure_reason\":null,\"next_run_at_unix_seconds\":2,\"occurrences\":[]}]}",
             limits,
         ),
     );
@@ -567,7 +567,15 @@ test "scheduled task store rejects unknown fields and revisions" {
         error.ScheduledTaskStoreCorrupt,
         decode(
             std.testing.allocator,
-            "{\"schema_version\":1,\"next_id\":2,\"items\":[{\"id\":1,\"epoch\":1,\"title\":\"configured skill\",\"execution_generation\":1,\"execution_provider\":\"openai\",\"execution_model\":\"gpt-test\",\"input\":{\"kind\":\"skill\",\"skill_id\":\"builtin.summary\",\"catalog_revision\":\"4\",\"argument_values\":[]},\"recurrence\":{\"kind\":\"once\",\"at_unix_seconds\":2},\"enabled\":true,\"health\":\"ready\",\"failure_reason\":null,\"next_run_at_unix_seconds\":2,\"occurrences\":[]}]}",
+            "{\"schema_version\":1,\"next_id\":2,\"items\":[{\"id\":1,\"epoch\":1,\"title\":\"configured target\",\"target\":{\"kind\":\"default\"},\"execution_generation\":1,\"execution_protocol\":\"openai_chat_completions\",\"execution_model\":\"gpt-test\",\"input\":{\"kind\":\"text\",\"text\":\"inspect\"},\"recurrence\":{\"kind\":\"once\",\"at_unix_seconds\":2},\"enabled\":true,\"health\":\"ready\",\"failure_reason\":null,\"next_run_at_unix_seconds\":2,\"occurrences\":[]}]}",
+            limits,
+        ),
+    );
+    try std.testing.expectError(
+        error.ScheduledTaskStoreCorrupt,
+        decode(
+            std.testing.allocator,
+            "{\"schema_version\":1,\"next_id\":2,\"items\":[{\"id\":1,\"epoch\":1,\"title\":\"configured skill\",\"execution_generation\":1,\"execution_protocol\":\"openai_chat_completions\",\"execution_model\":\"gpt-test\",\"input\":{\"kind\":\"skill\",\"skill_id\":\"builtin.summary\",\"catalog_revision\":\"4\",\"argument_values\":[]},\"recurrence\":{\"kind\":\"once\",\"at_unix_seconds\":2},\"enabled\":true,\"health\":\"ready\",\"failure_reason\":null,\"next_run_at_unix_seconds\":2,\"occurrences\":[]}]}",
             limits,
         ),
     );

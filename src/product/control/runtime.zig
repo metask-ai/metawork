@@ -138,7 +138,7 @@ const checkpoint_export_limits: lifecycle.CheckpointLimits = .{
     .chunk_bytes = 256 * 1024,
 };
 
-pub const Provider = product_task.Provider;
+pub const Protocol = product_task.Protocol;
 pub const PermissionProfile = product_task.PermissionProfile;
 pub const PermissionInteraction = product_task.PermissionInteraction;
 // Flipped only when every admitted profile is complete across manual and
@@ -198,12 +198,12 @@ pub const CatalogProjection = catalog_snapshot.CatalogProjection;
 
 pub const ExecutionIdentity = struct {
     generation: u64,
-    provider: Provider,
+    protocol: Protocol,
     model: []const u8,
 };
 
 pub const AutomationExecutionInput = struct {
-    provider: account_contract.ProviderKind,
+    protocol: account_contract.Protocol,
     credential: []const u8,
     model: []const u8,
     base_url: []const u8,
@@ -1489,7 +1489,7 @@ pub const Runtime = struct {
         return self.account_execution.modelConnectionSelected();
     }
 
-    /// The AgentCore vertical fixture keeps its local provider outside the production Account
+    /// The AgentCore vertical fixture keeps its local protocol outside the production Account
     /// contract. This path is compiled only into `-Dautomation=true` builds;
     /// release builds reject it before observing any input.
     pub fn installAutomationExecution(
@@ -1514,8 +1514,7 @@ pub const Runtime = struct {
         const execution_input: account_contract.ExecutionConfigInput = .{
             .target = .{
                 .provider_id = "metask:automation-key",
-                .protocol = account_contract.protocolForProviderKind(input.provider),
-                .provider_kind = input.provider,
+                .protocol = input.protocol,
                 .model = input.model,
                 .base_url = input.base_url,
             },
@@ -1530,7 +1529,7 @@ pub const Runtime = struct {
             .id = "automation-key",
             .name = "Automation",
             .suffix = "",
-            .provider_kind = input.provider,
+            .protocol = input.protocol,
         }};
         const models = [_]account_contract.ModelView{.{
             .id = input.model,
@@ -1554,7 +1553,7 @@ pub const Runtime = struct {
             },
         });
         self.account_execution.installAutomationNoFail(.{
-            .provider = input.provider,
+            .protocol = input.protocol,
             .credential = input.credential,
             .model = input.model,
             .base_url = input.base_url,
@@ -2105,7 +2104,7 @@ pub const Runtime = struct {
         const task_id = self.task_runtime.openTask(.{
             .agent_runtime = self.agent_runtime,
             .execution = execution_input,
-            .provider = accountProvider(execution_input.target.provider_kind),
+            .protocol = execution_input.target.protocol,
             .model = self.admissionModel(),
             .permission_profile = permission_profile,
             .permission_interaction = permission_interaction,
@@ -2297,7 +2296,7 @@ pub const Runtime = struct {
             return error.TaskModelMismatch;
         if (!self.account_execution.taskModelSelectionAuthorized(.{
             .generation = identity.generation,
-            .provider = accountProviderKind(identity.provider),
+            .protocol = identity.protocol,
         }, expected_catalog_generation, model))
             return error.StaleCatalog;
         _ = self.task_runtime.selectModel(
@@ -2436,7 +2435,7 @@ pub const Runtime = struct {
     ) Error!ExecutionIdentity {
         const value = self.task_runtime.taskExecutionIdentity(task_id) orelse
             return error.UnknownTask;
-        return .{ .generation = value.generation, .provider = value.provider, .model = value.model };
+        return .{ .generation = value.generation, .protocol = value.protocol, .model = value.model };
     }
 
     pub fn runExecutionIdentity(
@@ -2448,7 +2447,7 @@ pub const Runtime = struct {
             return error.UnknownTask;
         const value = self.task_runtime.runExecutionIdentity(task_id, run_id) orelse
             return error.NoSuchRun;
-        return .{ .generation = value.generation, .provider = value.provider, .model = value.model };
+        return .{ .generation = value.generation, .protocol = value.protocol, .model = value.model };
     }
 
     /// Lifecycle tests use this read-only counter to verify ownership rollback
@@ -3487,7 +3486,7 @@ pub const Runtime = struct {
             writer.writeAll(",\"suffix\":") catch
                 return error.SnapshotTooLarge;
             try self.projectedJsonValue(writer, api_key.suffix);
-            writer.print(",\"provider\":\"{s}\"", .{@tagName(api_key.provider_kind)}) catch
+            writer.print(",\"protocol\":\"{s}\"", .{@tagName(api_key.protocol)}) catch
                 return error.SnapshotTooLarge;
             writer.writeByte('}') catch return error.SnapshotTooLarge;
         }
@@ -3859,7 +3858,7 @@ pub const Runtime = struct {
             query.task_id,
         );
         const execution_available = self.account_execution.supportsTaskExecution(
-            accountProviderKind(query.execution_provider),
+            query.execution_protocol,
             query.execution_model,
         );
         return .{
@@ -3994,10 +3993,7 @@ pub const Runtime = struct {
         return .{
             .available = self.canCreateTask(),
             .generation = self.account_execution.generation(),
-            .provider = if (self.account_execution.provider()) |provider|
-                scheduledProvider(accountProvider(provider))
-            else
-                null,
+            .protocol = self.account_execution.protocol(),
             .model = self.admissionModel(),
             .automatic_workspace_available = self.workspace.automaticRootAvailable(),
         };
@@ -4172,9 +4168,7 @@ pub const Runtime = struct {
         return .{
             .title = title,
             .execution_generation = self.account_execution.generation(),
-            .execution_provider = scheduledProvider(accountProvider(
-                self.account_execution.provider().?,
-            )),
+            .execution_protocol = self.account_execution.protocol().?,
             .execution_model = self.admissionModel(),
             .permission_profile = scheduledPermissionProfile(
                 input.permission_profile,
@@ -4720,7 +4714,7 @@ pub const Runtime = struct {
         );
         const execution_exact = self.account_execution.recoveryAuthorityExact(
             query.target_execution_generation,
-            query.provider,
+            query.protocol,
             query.task_model,
         );
         return .{
@@ -5961,32 +5955,6 @@ fn noChangeNotification(_: ?*anyopaque) bool {
     return true;
 }
 
-fn accountProviderKind(provider: Provider) account_contract.ProviderKind {
-    return switch (provider) {
-        .anthropic => .anthropic,
-        .openai => .openai,
-        .gemini => .gemini,
-    };
-}
-
-fn accountProvider(
-    provider: account_contract.ProviderKind,
-) Provider {
-    return switch (provider) {
-        .anthropic => .anthropic,
-        .openai => .openai,
-        .gemini => .gemini,
-    };
-}
-
-fn scheduledProvider(provider: Provider) product_schedule.Provider {
-    return switch (provider) {
-        .anthropic => .anthropic,
-        .openai => .openai,
-        .gemini => .gemini,
-    };
-}
-
 fn scheduledPermissionProfile(
     profile: PermissionProfile,
 ) product_schedule.PermissionProfile {
@@ -6589,7 +6557,7 @@ fn testLimits() Limits {
 fn installTestExecution(control: *Runtime) !void {
     var execution = try account_contract.OwnedExecutionConfig.initOwned(
         std.testing.allocator,
-        .anthropic,
+        .anthropic_messages,
         try std.testing.allocator.dupe(u8, "fixture-model"),
         try std.testing.allocator.dupe(
             u8,
@@ -6605,7 +6573,7 @@ fn installTestExecution(control: *Runtime) !void {
         .id = "key-1",
         .name = "Primary",
         .suffix = "1234",
-        .provider_kind = .anthropic,
+        .protocol = .anthropic_messages,
     }};
     const models = [_]account_contract.ModelView{.{
         .id = "fixture-model",
@@ -6661,7 +6629,7 @@ fn commitTestExecutionFact(control: *Runtime, generation: u64) void {
         .id = "key-1",
         .name = "Primary",
         .suffix = "1234",
-        .provider_kind = .anthropic,
+        .protocol = .anthropic_messages,
     }};
     const models = [_]account_contract.ModelView{.{
         .id = "fixture-model",
@@ -6749,7 +6717,7 @@ fn testRuntime() !Runtime {
         .id = 7,
         .generation = 1,
         .execution_generation = 1,
-        .execution_provider = .anthropic,
+        .execution_protocol = .anthropic_messages,
         .execution_model = execution_model,
         .permission_profile = .approval_required,
         .permission_interaction = .interactive,
@@ -6771,7 +6739,7 @@ fn testRuntime() !Runtime {
             .id = 3,
             .recent_order = 1,
             .execution_generation = 1,
-            .execution_provider = .anthropic,
+            .execution_protocol = .anthropic_messages,
             .execution_model = execution_model,
             .permission_profile = .approval_required,
             .permission_interaction = .interactive,
@@ -6947,7 +6915,6 @@ fn replaceTaskCredentialForTest(
         .target = .{
             .provider_id = "metask:fixture-provider",
             .protocol = .anthropic_messages,
-            .provider_kind = .anthropic,
             .model = "fixture-model",
             .base_url = account_contract.metask_anthropic_messages_url,
         },
@@ -7984,7 +7951,7 @@ test "execution replacement durably scrubs Schedule before ownership transfer" {
 
     var replacement = try account_contract.OwnedExecutionConfig.initOwned(
         std.testing.allocator,
-        .anthropic,
+        .anthropic_messages,
         try std.testing.allocator.dupe(u8, "fixture-model"),
         try std.testing.allocator.dupe(
             u8,
@@ -8023,7 +7990,7 @@ test "execution replacement durably scrubs Schedule before ownership transfer" {
     });
     var blocked = try account_contract.OwnedExecutionConfig.initOwned(
         std.testing.allocator,
-        .anthropic,
+        .anthropic_messages,
         try std.testing.allocator.dupe(u8, "fixture-model"),
         try std.testing.allocator.dupe(
             u8,
@@ -8807,8 +8774,8 @@ test "Run admission reserves a stable generation and rolls back every fallible a
         task.durable.runs[slot].?.execution_generation,
     );
     try std.testing.expectEqual(
-        task.durable.execution_provider,
-        task.durable.runs[slot].?.execution_provider,
+        task.durable.execution_protocol,
+        task.durable.runs[slot].?.execution_protocol,
     );
     try std.testing.expectEqualStrings(
         task.durable.execution_model,
@@ -8951,7 +8918,7 @@ test "Account projection and execution install use preallocated no-fail storage"
     defer control.deinit();
     var execution = try account_contract.OwnedExecutionConfig.initOwned(
         std.testing.allocator,
-        .openai,
+        .openai_chat_completions,
         try std.testing.allocator.dupe(u8, "model-1"),
         try std.testing.allocator.dupe(
             u8,
@@ -8966,7 +8933,7 @@ test "Account projection and execution install use preallocated no-fail storage"
         .id = "key-1",
         .name = "Primary",
         .suffix = "1234",
-        .provider_kind = .openai,
+        .protocol = .openai_chat_completions,
     }};
     const models = [_]account_contract.ModelView{.{
         .id = "model-1",
@@ -9061,7 +9028,7 @@ test "default replacement preserves Task generation and installs the next admiss
 
     var replacement = try account_contract.OwnedExecutionConfig.initOwned(
         std.testing.allocator,
-        .openai,
+        .openai_chat_completions,
         try std.testing.allocator.dupe(u8, "fixture-model-2"),
         try std.testing.allocator.dupe(
             u8,
@@ -9076,7 +9043,7 @@ test "default replacement preserves Task generation and installs the next admiss
         .id = "key-2",
         .name = "Secondary",
         .suffix = "5678",
-        .provider_kind = .openai,
+        .protocol = .openai_chat_completions,
     }};
     const replacement_models = [_]account_contract.ModelView{.{
         .id = "fixture-model-2",
@@ -9187,7 +9154,7 @@ test "Account default model changes do not bump credentials" {
         .id = "key-1",
         .name = "Primary",
         .suffix = "1234",
-        .provider_kind = .anthropic,
+        .protocol = .anthropic_messages,
     }};
     const models = [_]account_contract.ModelView{
         .{ .id = "fixture-model", .display_name = "Fixture model" },
@@ -9227,7 +9194,7 @@ test "busy Task model selection keeps only the last runtime pending model" {
         .id = "key-1",
         .name = "Primary",
         .suffix = "1234",
-        .provider_kind = .anthropic,
+        .protocol = .anthropic_messages,
     }};
     const models = [_]account_contract.ModelView{
         .{ .id = "fixture-model", .display_name = "Fixture model" },
@@ -9278,7 +9245,7 @@ test "Task can leave a removed model only within its exact Metask authority" {
         .id = "key-1",
         .name = "Primary",
         .suffix = "1234",
-        .provider_kind = .anthropic,
+        .protocol = .anthropic_messages,
     }};
     const models = [_]account_contract.ModelView{.{
         .id = "fixture-model-2",
@@ -9333,7 +9300,7 @@ test "user Model Connection cannot consume the current Metask catalog" {
     const task = &control.task_runtime.tasks[0].?;
     try std.testing.expect(!control.account_execution.taskModelSelectionAuthorized(.{
         .generation = task.durable.execution_generation,
-        .provider = accountProviderKind(task.durable.execution_provider),
+        .protocol = task.durable.execution_protocol,
     }, control.account_execution.catalogGeneration(), task.durable.execution_model));
     try std.testing.expectError(
         error.StaleCatalog,
@@ -10138,7 +10105,7 @@ test "AgentCore RunState refines typed activity without owning RunPhase and reje
     try std.testing.expectEqual(host_phase, run.active_phase);
 }
 
-test "provider retry is replaced by the next forward activity" {
+test "protocol retry is replaced by the next forward activity" {
     var control = try testRuntime();
     defer control.deinit();
     const task = &control.task_runtime.tasks[0].?;
@@ -10281,7 +10248,7 @@ test "Runtime shutdown releases current and Task-owned execution generations" {
     try control.beginDefaultExecutionReplacement();
     var replacement = try account_contract.OwnedExecutionConfig.initOwned(
         std.testing.allocator,
-        .anthropic,
+        .anthropic_messages,
         try std.testing.allocator.dupe(u8, "fixture-model-2"),
         try std.testing.allocator.dupe(
             u8,
@@ -10296,7 +10263,7 @@ test "Runtime shutdown releases current and Task-owned execution generations" {
         .id = "key-2",
         .name = "Secondary",
         .suffix = "5678",
-        .provider_kind = .anthropic,
+        .protocol = .anthropic_messages,
     }};
     const replacement_models = [_]account_contract.ModelView{.{
         .id = "fixture-model-2",
@@ -10632,7 +10599,7 @@ fn installMaximumAccountProjection(control: *Runtime) !void {
             .id = id,
             .name = &api_key_name,
             .suffix = &api_key_suffix,
-            .provider_kind = .anthropic,
+            .protocol = .anthropic_messages,
         };
     }
     const models = try std.testing.allocator.alloc(
@@ -10777,7 +10744,7 @@ test "default snapshot budget contains the maximum structural projection" {
                 .id = @intCast(run_index + 1),
                 .generation = @intCast(run_index + 1),
                 .execution_generation = 1,
-                .execution_provider = .anthropic,
+                .execution_protocol = .anthropic_messages,
                 .execution_model = execution_model,
                 .permission_profile = .approval_required,
                 .permission_interaction = .interactive,
@@ -10832,7 +10799,7 @@ test "default snapshot budget contains the maximum structural projection" {
                 .id = @intCast(task_index + 1),
                 .recent_order = @intCast(task_index + 1),
                 .execution_generation = 1,
-                .execution_provider = .anthropic,
+                .execution_protocol = .anthropic_messages,
                 .execution_model = execution_model,
                 .permission_profile = .approval_required,
                 .permission_interaction = .interactive,

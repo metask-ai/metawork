@@ -1004,6 +1004,7 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    product_schedule_state.addImport("metawork_account_contract", account_contract);
     const product_schedule_persistence = b.createModule(.{
         .root_source_file = b.path("src/product/schedule/persistence.zig"),
         .target = target,
@@ -1192,6 +1193,7 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
     });
     task_state.addImport("metawork_agent", agent);
+    task_state.addImport("metawork_account_contract", account_contract);
     task_state.addImport("product_task_checkpoint_record", checkpoint_record);
     task_state.addImport("product_task_attachment", task_attachment);
     task_state.addImport("product_task_deletion", task_deletion);

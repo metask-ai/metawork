@@ -11,6 +11,7 @@ import type {
   McpSecretSlot,
   McpStdioConnectionInput,
   PermissionProfile,
+  Protocol,
   ScheduledTaskMutation,
   TaskRunInput,
   TaskWorkspaceIntent,
@@ -539,8 +540,7 @@ export class BridgeClient {
 
   async createModelConnection(input: {
     displayName: string;
-    protocol:
-      "anthropic_messages" | "openai_chat_completions" | "gemini_native";
+    protocol: Protocol;
     normalizedBaseUrl: string;
     modelId: string;
     modelDisplayName?: string;
@@ -554,8 +554,7 @@ export class BridgeClient {
     connectionId: string;
     expectedConnectionGeneration: string;
     displayName: string;
-    protocol:
-      "anthropic_messages" | "openai_chat_completions" | "gemini_native";
+    protocol: Protocol;
     normalizedBaseUrl: string;
   }) {
     return decodeAccountCommandResult(

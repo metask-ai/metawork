@@ -134,6 +134,55 @@ test("the root test entry discovers Node tests and reaches the Native graph", ()
   assert.match(runner, /nativeCli, "test", "\."/);
 });
 
+test("Product execution identity has one protocol axis and no ProviderKind", () => {
+  const productProtocolOwners = [
+    ...zigFiles("src/product/account/"),
+    ...zigFiles("src/product/control/"),
+    ...zigFiles("src/product/task/"),
+    ...zigFiles("src/product/schedule/"),
+    "src/product/account.zig",
+    "src/product/control.zig",
+    "src/product/task.zig",
+    "src/product/schedule.zig",
+    "src/automation/enabled.zig",
+    "src/automation/disabled.zig",
+    "frontend/src/bridge/contracts.ts",
+    "frontend/src/bridge/decode-contracts.ts",
+  ];
+  const retiredIdentifiers =
+    /\bProviderKind\b|\bModelConnectionProtocol\b|\bprovider_kind\b|\bproviderKindForProtocol\b|\bprotocolForProviderKind\b/u;
+
+  for (const file of productProtocolOwners) {
+    assert.doesNotMatch(
+      read(file),
+      retiredIdentifiers,
+      `${file} reintroduces a retired Product provider category`,
+    );
+  }
+
+  const accountContract = read("src/product/account/contract.zig");
+  assert.match(
+    accountContract,
+    /pub const Protocol = enum \{[\s\S]*openai_responses,[\s\S]*anthropic_messages,[\s\S]*openai_chat_completions,[\s\S]*gemini_native,[\s\S]*\};/u,
+  );
+  assert.match(
+    read("src/product/task/state.zig"),
+    /pub const Protocol = account_contract\.Protocol;/u,
+  );
+  assert.match(
+    read("src/product/schedule/state.zig"),
+    /pub const Protocol = account_contract\.Protocol;/u,
+  );
+  assert.doesNotMatch(
+    read("src/product/task/state.zig"),
+    /\bexecution_provider\b/u,
+  );
+  assert.doesNotMatch(
+    read("src/product/schedule/state.zig"),
+    /\bexecution_provider\b/u,
+  );
+});
+
 test("named module roots exist and lower owners cannot import composition", () => {
   for (const path of [
     "src/app.zig",

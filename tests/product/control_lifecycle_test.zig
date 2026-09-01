@@ -199,7 +199,7 @@ fn installTwoModelCatalog(workbench: *product_control.Runtime) void {
         .id = "key-1",
         .name = "Fixture API",
         .suffix = "ture",
-        .provider_kind = .anthropic,
+        .protocol = .anthropic_messages,
     }};
     const models = [_]account_contract.ModelView{
         .{ .id = "fixture-model", .display_name = "Fixture model" },
@@ -917,8 +917,8 @@ test "restart recovery revalidates live authority and continues the same Convers
     _ = try restored.runTask(task_id, .{ .text = "continue after restart" });
     try waitTaskSnapshot(
         &restored,
-        "\"id\":\"2\"",
-        "\"phase\":\"completed\"",
+        "\"id\":\"2\",\"phase\":\"completed\"",
+        "\"outcome\":\"completed\"",
     );
     fake_core.lock();
     const restore_calls = fake_core.checkpoint_restores;

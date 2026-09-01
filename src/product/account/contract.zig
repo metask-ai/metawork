@@ -42,17 +42,10 @@ pub const ExecutionSource = enum {
     model_connection,
 };
 
-pub const ProviderKind = enum {
-    anthropic,
-    openai,
-    gemini,
-};
-
-/// A user-managed connection uses one exact provider-native protocol.
-/// This deliberately does not include OpenAI Responses or an arbitrary HTTP
-/// adapter; AgentCore owns Agent Run transport, while Agent-owned Completion
-/// separately consumes the same frozen execution selection.
-pub const ModelConnectionProtocol = enum {
+/// Exact wire protocol selected for one model-service connection. Product
+/// state never compresses this fact into a vendor or provider category.
+pub const Protocol = enum {
+    openai_responses,
     anthropic_messages,
     openai_chat_completions,
     gemini_native,
@@ -92,7 +85,7 @@ pub const ModelConnectionModelView = struct {
 pub const ModelConnectionView = struct {
     id: []const u8,
     display_name: []const u8,
-    protocol: ModelConnectionProtocol,
+    protocol: Protocol,
     normalized_base_url: []const u8,
     state: ModelConnectionState,
     test_status: ModelConnectionTestStatus,
@@ -105,7 +98,7 @@ pub const ModelConnectionView = struct {
 
 pub const ModelConnectionSpec = struct {
     display_name: []const u8,
-    protocol: ModelConnectionProtocol,
+    protocol: Protocol,
     normalized_base_url: []const u8,
 };
 
@@ -210,7 +203,7 @@ pub const ApiKeyView = struct {
     id: []const u8,
     name: []const u8,
     suffix: []const u8,
-    provider_kind: ProviderKind,
+    protocol: Protocol,
 };
 
 /// Server declarations, not MetaWork feature gates or verified runtime support.
@@ -258,8 +251,7 @@ pub const ModelView = struct {
 pub const ExecutionTarget = struct {
     /// Source-qualified service instance reference; never a wire adapter name.
     provider_id: []const u8,
-    protocol: ModelConnectionProtocol,
-    provider_kind: ProviderKind,
+    protocol: Protocol,
     model: []const u8,
     base_url: []const u8,
 };
@@ -449,8 +441,7 @@ const OwnedBuffer = struct {
 /// `take`; every live owner must call `deinit`, which securely clears the key.
 pub const OwnedExecutionConfig = struct {
     provider_id: OwnedBuffer,
-    protocol: ModelConnectionProtocol,
-    provider_kind: ProviderKind,
+    protocol: Protocol,
     model: OwnedBuffer,
     base_url: OwnedBuffer,
     execution_generation: u64,
@@ -459,32 +450,31 @@ pub const OwnedExecutionConfig = struct {
 
     pub fn initOwned(
         allocator: std.mem.Allocator,
-        provider_kind: ProviderKind,
+        protocol: Protocol,
         owned_model: []u8,
         owned_base_url: []u8,
         execution_generation: u64,
         owned_api_key: []u8,
         api_key_id: []const u8,
     ) (error{InvalidExecutionConfig} || std.mem.Allocator.Error)!OwnedExecutionConfig {
-        return init(allocator, provider_kind, protocolForProviderKind(provider_kind), owned_model, owned_base_url, execution_generation, owned_api_key, api_key_id, .metask);
+        return init(allocator, protocol, owned_model, owned_base_url, execution_generation, owned_api_key, api_key_id, .metask);
     }
 
     pub fn initModelConnectionOwned(
         allocator: std.mem.Allocator,
-        protocol: ModelConnectionProtocol,
+        protocol: Protocol,
         owned_model: []u8,
         owned_base_url: []u8,
         execution_generation: u64,
         owned_api_key: []u8,
         connection_id: []const u8,
     ) (error{InvalidExecutionConfig} || std.mem.Allocator.Error)!OwnedExecutionConfig {
-        return init(allocator, providerKindForProtocol(protocol), protocol, owned_model, owned_base_url, execution_generation, owned_api_key, connection_id, .model_connection);
+        return init(allocator, protocol, owned_model, owned_base_url, execution_generation, owned_api_key, connection_id, .model_connection);
     }
 
     fn init(
         allocator: std.mem.Allocator,
-        provider_kind: ProviderKind,
-        protocol: ModelConnectionProtocol,
+        protocol: Protocol,
         owned_model: []u8,
         owned_base_url: []u8,
         execution_generation: u64,
@@ -502,7 +492,6 @@ pub const OwnedExecutionConfig = struct {
             .target = .{
                 .provider_id = provider_id,
                 .protocol = protocol,
-                .provider_kind = provider_kind,
                 .model = owned_model,
                 .base_url = owned_base_url,
             },
@@ -517,7 +506,6 @@ pub const OwnedExecutionConfig = struct {
         return .{
             .provider_id = .initOwned(allocator, provider_id),
             .protocol = protocol,
-            .provider_kind = provider_kind,
             .model = .initOwned(allocator, owned_model),
             .base_url = .initOwned(allocator, owned_base_url),
             .execution_generation = execution_generation,
@@ -530,7 +518,6 @@ pub const OwnedExecutionConfig = struct {
         return .{
             .provider_id = self.provider_id.take(),
             .protocol = self.protocol,
-            .provider_kind = self.provider_kind,
             .model = self.model.take(),
             .base_url = self.base_url.take(),
             .execution_generation = self.execution_generation,
@@ -544,7 +531,6 @@ pub const OwnedExecutionConfig = struct {
             .target = .{
                 .provider_id = self.provider_id.view(),
                 .protocol = self.protocol,
-                .provider_kind = self.provider_kind,
                 .model = self.model.view(),
                 .base_url = self.base_url.view(),
             },
@@ -558,7 +544,6 @@ pub const OwnedExecutionConfig = struct {
         self.model.deinit();
         self.base_url.deinit();
         self.secret.deinit();
-        self.provider_kind = undefined;
         self.protocol = undefined;
         self.execution_generation = 0;
         self.model_connection = false;
@@ -578,27 +563,11 @@ pub const ValidationError = error{
 };
 
 /// Product admission is narrower than AgentCore's wire enum. A protocol is
-/// exposed only after its staged native provider contract passes.
-pub fn modelConnectionProtocolAvailable(protocol: ModelConnectionProtocol) bool {
+/// exposed only after its staged native protocol contract passes.
+pub fn modelConnectionProtocolAvailable(protocol: Protocol) bool {
     return switch (protocol) {
-        .anthropic_messages => false,
+        .openai_responses, .anthropic_messages => false,
         .openai_chat_completions, .gemini_native => true,
-    };
-}
-
-pub fn providerKindForProtocol(protocol: ModelConnectionProtocol) ProviderKind {
-    return switch (protocol) {
-        .anthropic_messages => .anthropic,
-        .openai_chat_completions => .openai,
-        .gemini_native => .gemini,
-    };
-}
-
-pub fn protocolForProviderKind(provider: ProviderKind) ModelConnectionProtocol {
-    return switch (provider) {
-        .anthropic => .anthropic_messages,
-        .openai => .openai_chat_completions,
-        .gemini => .gemini_native,
     };
 }
 
@@ -655,7 +624,7 @@ pub fn validateModelConnectionSpec(spec: ModelConnectionSpec) ValidationError!vo
 }
 
 pub fn validModelConnectionEndpoint(
-    protocol: ModelConnectionProtocol,
+    protocol: Protocol,
     value: []const u8,
 ) bool {
     if (value.len == 0 or value.len > Limits.base_url_bytes or
@@ -675,6 +644,7 @@ pub fn validModelConnectionEndpoint(
         .raw, .percent_encoded => |bytes| bytes,
     };
     return switch (protocol) {
+        .openai_responses => std.mem.eql(u8, path, "/v1/responses"),
         .anthropic_messages => std.mem.eql(u8, path, "/v1/messages"),
         .openai_chat_completions => std.mem.eql(u8, path, "/v1/chat/completions"),
         .gemini_native => path.len == 0 or std.mem.eql(u8, path, "/"),
@@ -687,7 +657,7 @@ pub fn validModelConnectionEndpoint(
 /// percent-encoded authorities are rejected before allocation.
 pub fn normalizeModelConnectionEndpointAlloc(
     allocator: std.mem.Allocator,
-    protocol: ModelConnectionProtocol,
+    protocol: Protocol,
     value: []const u8,
 ) (std.mem.Allocator.Error || ValidationError)![]u8 {
     if (!modelConnectionProtocolAvailable(protocol))
@@ -786,14 +756,13 @@ pub fn validateCommand(command: AccountCommand) ValidationError!void {
 
 pub fn validateExecutionConfig(input: ExecutionConfigInput) ValidationError!void {
     try validateRequired(input.target.provider_id, Limits.provider_id_bytes);
-    if (input.target.protocol != protocolForProviderKind(input.target.provider_kind))
-        return error.UnsupportedProtocol;
     try validateRequired(input.target.model, Limits.model_id_bytes);
     try validateRequired(input.target.base_url, Limits.base_url_bytes);
-    const expected_base_url: []const u8 = switch (input.target.provider_kind) {
-        .anthropic => metask_anthropic_messages_url,
-        .openai => metask_openai_chat_completions_url,
-        .gemini => metask_gemini_base_url,
+    const expected_base_url: []const u8 = switch (input.target.protocol) {
+        .openai_responses => return error.UnsupportedProtocol,
+        .anthropic_messages => metask_anthropic_messages_url,
+        .openai_chat_completions => metask_openai_chat_completions_url,
+        .gemini_native => metask_gemini_base_url,
     };
     if (!std.mem.eql(u8, input.target.base_url, expected_base_url))
         return error.InvalidBaseUrl;
@@ -808,8 +777,6 @@ pub fn validateModelConnectionExecutionConfig(
     try validateRequired(input.target.base_url, Limits.base_url_bytes);
     try validateRequired(input.target.provider_id, Limits.provider_id_bytes);
     const protocol = input.target.protocol;
-    if (providerKindForProtocol(protocol) != input.target.provider_kind)
-        return error.UnsupportedProtocol;
     if (!modelConnectionProtocolAvailable(protocol))
         return error.UnsupportedProtocol;
     if (!validModelConnectionEndpoint(
@@ -1060,7 +1027,7 @@ test "AccountView accepts an unresolved model candidate while loading" {
         .id = "key-1",
         .name = "Primary",
         .suffix = "1234",
-        .provider_kind = .anthropic,
+        .protocol = .anthropic_messages,
     }};
     try validateView(.{
         .state = .authenticated,
@@ -1079,7 +1046,6 @@ test "execution config requires typed HTTPS target and bounded secret" {
         .target = .{
             .provider_id = "metask:fixture-provider",
             .protocol = .anthropic_messages,
-            .provider_kind = .anthropic,
             .model = "metask-model",
             .base_url = "http://127.0.0.1/v1",
         },
@@ -1093,7 +1059,6 @@ test "execution config treats credential as bounded opaque bytes" {
         .target = .{
             .provider_id = "metask:fixture-provider",
             .protocol = .anthropic_messages,
-            .provider_kind = .anthropic,
             .model = "metask-model",
             .base_url = metask_anthropic_messages_url,
         },
@@ -1268,7 +1233,7 @@ test "OwnedExecutionConfig moves one secret owner and securely releases it" {
     const secret = try allocator.dupe(u8, "test-secret");
     var source = try OwnedExecutionConfig.initOwned(
         allocator,
-        .anthropic,
+        .anthropic_messages,
         model,
         base_url,
         4,
@@ -1280,7 +1245,7 @@ test "OwnedExecutionConfig moves one secret owner and securely releases it" {
     try std.testing.expectEqualStrings("test-secret", destination.input().api_key);
     source.deinit();
     try std.testing.expectEqualStrings("metask:fixture-provider", destination.input().target.provider_id);
-    try std.testing.expectEqual(ModelConnectionProtocol.anthropic_messages, destination.input().target.protocol);
+    try std.testing.expectEqual(Protocol.anthropic_messages, destination.input().target.protocol);
     destination.deinit();
 }
 
@@ -1308,7 +1273,7 @@ test "execution references distinguish connections and sources with identical cr
     defer second.deinit();
     var managed = try OwnedExecutionConfig.initOwned(
         allocator,
-        .openai,
+        .openai_chat_completions,
         try allocator.dupe(u8, "model"),
         try allocator.dupe(u8, metask_openai_chat_completions_url),
         1,
@@ -1330,7 +1295,7 @@ test "OwnedExecutionConfig consumes invalid owned secret on rejection" {
         error.InvalidExecutionConfig,
         OwnedExecutionConfig.initOwned(
             allocator,
-            .anthropic,
+            .anthropic_messages,
             model,
             base_url,
             4,
@@ -1427,7 +1392,7 @@ test "OwnedExecutionConfig preserves zeroing through allocator release" {
 
     var config = try OwnedExecutionConfig.initOwned(
         allocator,
-        .anthropic,
+        .anthropic_messages,
         model,
         base_url,
         1,
