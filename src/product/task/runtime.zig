@@ -2141,6 +2141,29 @@ pub const Runtime = struct {
         return null;
     }
 
+    pub fn ownsFileChangeArtifact(
+        self: *const Runtime,
+        identity: task_state.FileChangeArtifact,
+        task_id: u64,
+    ) bool {
+        const task = self.findConst(task_id) orelse return false;
+        for (task.durable.runs) |*entry| {
+            const run = &(entry.* orelse continue);
+            if (run.generation != identity.run_generation) continue;
+            for (run.file_changes) |change_entry| {
+                const change = change_entry orelse continue;
+                if (change.order != identity.change_order) continue;
+                const artifact = change.artifact orelse return false;
+                return artifact.run_generation == identity.run_generation and
+                    artifact.change_order == identity.change_order and
+                    artifact.byte_size == identity.byte_size and
+                    std.mem.eql(u8, &artifact.digest, &identity.digest);
+            }
+            return false;
+        }
+        return false;
+    }
+
     pub fn recordEventProjectionFailure(
         self: *Runtime,
         route_id: u64,

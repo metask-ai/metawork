@@ -56,6 +56,7 @@ pub const ReadState = enum { ready, missing, corrupt, failed };
 
 pub const ReadCompletion = struct {
     completion_id: u64,
+    identity: store.Identity,
     state: ReadState,
     content: []const u8,
     complete: bool,
@@ -143,6 +144,7 @@ const Job = struct {
             } },
             .read => |read| .{ .read = .{
                 .completion_id = read.completion_id,
+                .identity = read.identity,
                 .state = read.state,
                 .content = read.content,
                 .complete = read.complete,

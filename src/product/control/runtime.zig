@@ -1330,25 +1330,39 @@ pub const Runtime = struct {
                         self.bumpRevision();
                     }
                 },
-                .read => |read| switch (read.state) {
-                    .ready => sink.complete_fn(sink.context, .{ .ready = .{
-                        .completion_id = read.completion_id,
-                        .content = read.content,
-                        .complete = read.complete,
-                        .redacted = read.redacted,
-                    } }),
-                    .missing => sink.complete_fn(sink.context, .{ .unavailable = .{
-                        .completion_id = read.completion_id,
-                        .reason = .missing,
-                    } }),
-                    .corrupt => sink.complete_fn(sink.context, .{ .unavailable = .{
-                        .completion_id = read.completion_id,
-                        .reason = .corrupt,
-                    } }),
-                    .failed => sink.complete_fn(sink.context, .{ .unavailable = .{
-                        .completion_id = read.completion_id,
-                        .reason = .capacity,
-                    } }),
+                .read => |read| {
+                    if (!self.task_runtime.ownsFileChangeArtifact(.{
+                        .run_generation = read.identity.run_generation,
+                        .change_order = read.identity.change_order,
+                        .digest = read.identity.digest,
+                        .byte_size = read.identity.byte_size,
+                    }, read.identity.task_id)) {
+                        sink.complete_fn(sink.context, .{ .unavailable = .{
+                            .completion_id = read.completion_id,
+                            .reason = .not_recorded,
+                        } });
+                        continue;
+                    }
+                    switch (read.state) {
+                        .ready => sink.complete_fn(sink.context, .{ .ready = .{
+                            .completion_id = read.completion_id,
+                            .content = read.content,
+                            .complete = read.complete,
+                            .redacted = read.redacted,
+                        } }),
+                        .missing => sink.complete_fn(sink.context, .{ .unavailable = .{
+                            .completion_id = read.completion_id,
+                            .reason = .missing,
+                        } }),
+                        .corrupt => sink.complete_fn(sink.context, .{ .unavailable = .{
+                            .completion_id = read.completion_id,
+                            .reason = .corrupt,
+                        } }),
+                        .failed => sink.complete_fn(sink.context, .{ .unavailable = .{
+                            .completion_id = read.completion_id,
+                            .reason = .capacity,
+                        } }),
+                    }
                 },
             }
         }
@@ -11464,10 +11478,73 @@ test "Runtime stores credential-safe file change diffs outside task history" {
     defer std.testing.allocator.free(restored);
     try std.testing.expect(std.mem.indexOf(u8, restored, "SECRET-KEY") == null);
 
+    const Capture = struct {
+        calls: usize = 0,
+        content: [1024]u8 = undefined,
+        content_len: usize = 0,
+        complete: bool = false,
+        redacted: bool = false,
+        unavailable: ?FileChangeDiffReason = null,
+
+        fn receive(context: *anyopaque, result: FileChangeDiffResult) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            switch (result) {
+                .ready => |ready| {
+                    std.debug.assert(ready.content.len <= self.content.len);
+                    @memcpy(self.content[0..ready.content.len], ready.content);
+                    self.content_len = ready.content.len;
+                    self.complete = ready.complete;
+                    self.redacted = ready.redacted;
+                },
+                .unavailable => |unavailable| self.unavailable = unavailable.reason,
+            }
+        }
+    };
+    var capture = Capture{};
+    switch (control.beginFileChangeDiff(9, 3, 7, change.id)) {
+        .queued => {},
+        .immediate => return error.TestUnexpectedResult,
+    }
+    for (0..1_000) |_| {
+        control.drainFileChangeCompletions(.{
+            .context = &capture,
+            .complete_fn = Capture.receive,
+        });
+        if (capture.calls != 0) break;
+        std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
+    }
+    try std.testing.expectEqual(@as(usize, 1), capture.calls);
+    try std.testing.expect(capture.unavailable == null);
+    try std.testing.expect(capture.complete);
+    try std.testing.expect(capture.redacted);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        capture.content[0..capture.content_len],
+        "SECRET-KEY",
+    ) == null);
+
     var snapshot_storage: [96 * 1024]u8 = undefined;
     const snapshot = try control.writeSnapshot(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"diffAvailable\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null);
+
+    capture = .{};
+    switch (control.beginFileChangeDiff(10, 3, 7, change.id)) {
+        .queued => {},
+        .immediate => return error.TestUnexpectedResult,
+    }
+    change.artifact = null;
+    for (0..1_000) |_| {
+        control.drainFileChangeCompletions(.{
+            .context = &capture,
+            .complete_fn = Capture.receive,
+        });
+        if (capture.calls != 0) break;
+        std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
+    }
+    try std.testing.expectEqual(@as(usize, 1), capture.calls);
+    try std.testing.expectEqual(FileChangeDiffReason.not_recorded, capture.unavailable.?);
 }
 
 test "completed terminal drain closes collecting file change observation" {

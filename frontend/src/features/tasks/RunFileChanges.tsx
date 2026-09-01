@@ -16,8 +16,8 @@ export function RunFileChangesSummary({
     fileChanges.changes.map((change) => change.displayPath),
   ).size;
   if (
-    fileChanges.observation === "complete" &&
-    fileChanges.changes.length === 0
+    fileChanges.changes.length === 0 &&
+    fileChanges.observation !== "incomplete"
   )
     return null;
 
