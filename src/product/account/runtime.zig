@@ -511,6 +511,10 @@ pub const Prepared = struct {
         return self.transition.replacementIntent();
     }
 
+    pub fn finishesAttempt(self: *const Prepared) bool {
+        return self.transition.finishesAttempt();
+    }
+
     pub fn executionIntent(self: *const Prepared) state_impl.ExecutionIntent {
         return self.transition.executionIntent();
     }
@@ -743,6 +747,14 @@ pub const Runtime = struct {
             .payload = .{ .failed = .fromCode(error_code) },
         };
         return preparedFromState(self.account.prepareCompletion(&completion));
+    }
+
+    pub fn preparedContinuesActiveAttempt(
+        self: *const Runtime,
+        prepared: *const Prepared,
+    ) bool {
+        const attempt_id = prepared.attemptId() orelse return false;
+        return self.account.activeAttempt() == attempt_id;
     }
 
     pub fn prepareShutdown(self: *Runtime) Prepared {
@@ -1853,6 +1865,52 @@ pub const TestSupport = if (builtin.is_test) struct {
             .payload = .tokens_persisted,
         };
         return preparedFromState(runtime.account.prepareCompletion(&completion));
+    }
+
+    pub fn prepareLoadModelsAfterRefresh(
+        runtime: *Runtime,
+    ) !Prepared {
+        var refresh = switch (runtime.prepareCommand(.refresh_catalog)) {
+            .prepared => |prepared| prepared,
+            else => return error.TestUnexpectedResult,
+        };
+        defer refresh.deinit();
+        _ = refresh.transition.takeEffect() orelse
+            return error.TestUnexpectedResult;
+        runtime.commit(&refresh);
+
+        try catalog_impl.TestSupport.replaceOwnedSelection(
+            &runtime.effects.catalog,
+            "account-1",
+            .{
+                .id = "key-1",
+                .name = "Primary",
+                .suffix = "1234",
+                .protocol = .anthropic_messages,
+            },
+            "secret-key",
+            &.{},
+        );
+        var completion: state_impl.WorkerCompletion = .{
+            .attempt_id = runtime.account.activeAttempt() orelse
+                return error.TestUnexpectedResult,
+            .payload = .api_keys_loaded,
+        };
+        var keys_loaded = switch (runtime.prepareWorkerCompletion(
+            &completion,
+            false,
+        )) {
+            .prepared => |prepared| prepared,
+            else => return error.TestUnexpectedResult,
+        };
+        defer keys_loaded.deinit();
+        runtime.commit(&keys_loaded);
+        const follow_up = runtime.takeFollowUpCommand(&keys_loaded) orelse
+            return error.TestUnexpectedResult;
+        return switch (runtime.prepareCommand(follow_up)) {
+            .prepared => |prepared| prepared,
+            else => error.TestUnexpectedResult,
+        };
     }
 
     pub fn prepareExecutionReady(

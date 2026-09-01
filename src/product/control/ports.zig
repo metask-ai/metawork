@@ -14,17 +14,9 @@ pub const MetaskStageToken = struct {
     value: u64,
 };
 
-pub const MetaskStageError = enum {
-    invalid_state,
-    resource_exhausted,
-    schedule_persistence_unavailable,
-    schedule_persistence_failed,
-    schedule_persistence_outcome_unknown,
-};
-
 pub const MetaskStageResult = union(enum) {
     staged: MetaskStageToken,
-    rejected: MetaskStageError,
+    rejected,
 };
 
 /// Cross-owner handoff used only while committing Account facts and their
@@ -38,10 +30,9 @@ pub const AccountExecutionHandoff = struct {
     prepare_metask_clear_fn: *const fn (*anyopaque) MetaskStageResult,
     finalize_metask_stage_fn: *const fn (*anyopaque, MetaskStageToken, account.AccountFact) void,
     abort_metask_stage_fn: *const fn (*anyopaque, MetaskStageToken) void,
-    replacement_pending_fn: *const fn (*anyopaque) bool,
-    begin_default_replacement_fn: *const fn (*anyopaque) anyerror!void,
-    begin_replacement_fn: *const fn (*anyopaque) anyerror!void,
-    end_replacement_fn: *const fn (*anyopaque) void,
+    identity_replacement_pending_fn: *const fn (*anyopaque) bool,
+    begin_identity_replacement_fn: *const fn (*anyopaque) anyerror!void,
+    end_identity_replacement_fn: *const fn (*anyopaque) void,
 
     pub fn commitAccountFactNoFail(self: AccountExecutionHandoff, fact: account.AccountFact) void {
         self.commit_account_fact_fn(self.context, fact);
@@ -81,17 +72,14 @@ pub const AccountExecutionHandoff = struct {
     ) void {
         self.abort_metask_stage_fn(self.context, token);
     }
-    pub fn executionReplacementPending(self: AccountExecutionHandoff) bool {
-        return self.replacement_pending_fn(self.context);
+    pub fn identityReplacementPending(self: AccountExecutionHandoff) bool {
+        return self.identity_replacement_pending_fn(self.context);
     }
-    pub fn beginDefaultExecutionReplacement(self: AccountExecutionHandoff) anyerror!void {
-        return self.begin_default_replacement_fn(self.context);
+    pub fn beginIdentityReplacement(self: AccountExecutionHandoff) anyerror!void {
+        return self.begin_identity_replacement_fn(self.context);
     }
-    pub fn beginExecutionReplacement(self: AccountExecutionHandoff) anyerror!void {
-        return self.begin_replacement_fn(self.context);
-    }
-    pub fn endExecutionReplacementNoFail(self: AccountExecutionHandoff) void {
-        self.end_replacement_fn(self.context);
+    pub fn endIdentityReplacementNoFail(self: AccountExecutionHandoff) void {
+        self.end_identity_replacement_fn(self.context);
     }
 };
 

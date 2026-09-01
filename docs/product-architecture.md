@@ -68,6 +68,8 @@ Account worker construct candidate (no preference write)
 
 Product Control 是唯一 staged `ExecutionConfig` owner；Application coordinator 只持有绑定 Account attempt 的 opaque token，不得持有、读取或复制 credential-bearing config。preference 明确失败、effect admission 失败、旧值重读、stale、cancel 或 shutdown 必须调用 Product abort，清除 preparation 并 secure-zero candidate；完整 candidate 重读才能 finalize，第三种值进入 recovery。finalize 后不再允许 fallible I/O，也不存在 `failed → local_resource_exhausted` 的通用压平或已提交 Account fact 后补写第二个失败 revision。
 
+是否需要 default replacement 只由 Product Control 根据当前 execution source 与操作类型决定，Account 不发布 replacement policy，Application coordinator 也不预先开启 default replacement。当前 Model Connection 为默认 source 时，普通 Metask catalog/preference mutation 只更新 Account-owned preference，Product 消费并销毁候选但不阻塞 Task admission、不改动 active execution；显式 `activateMetask` 则只重建已提交 Metask tuple，不重写 preference，Product 在全部 candidate/Schedule preparation 成功后 durable 清除 custom default，并以同一 Product stage no-fail 安装 Metask。该 durable clear 失败或结果不可确认时不安装候选，当前进程继续保留已安装 custom execution，并通过 Execution projection 发布精确错误。
+
 Model Connection 设为默认的写路径为：
 
 ```text

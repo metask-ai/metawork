@@ -198,13 +198,17 @@ CatalogIntent =
   | discard_candidate
   | clear_all
 
-ExecutionIntent = unchanged | install | clear
+ExecutionIntent =
+  unchanged
+  | stage_install
+  | install_committed
+  | finalize_install
+  | clear
 
 PreferenceIntent = unchanged | commit_pending | clear
 
 ReplacementIntent =
   none
-  | begin_default
   | begin_identity
   | finish
 ```
@@ -260,6 +264,8 @@ load/validate candidate catalog
 ```
 
 Account candidate construction 与 preference persistence 是两个独立阶段；构造 worker 不得写 preference。Product prepare 成功前 preference writer 必须保持未调用，Coordinator 只持 opaque token，不得取得 `ExecutionConfig`。只有 ownership、catalog membership、Product preparation 和 persistence 全部成功后才能进行 no-fail finalize 并提交新默认值。任何明确失败都 abort/secure-zero staged candidate 并保留旧 committed default；persistence outcome unknown 按 §7 精确重新观察持久化真相。
+
+`activateMetask` 是独立的 Account catalog-resolution attempt，不是 preference mutation：它只能按当前 committed API、model 与 execution generation 重建候选，不能选择新 tuple、生成新 generation 或调用 preference writer。Account 不判断当前 active source，也不发布 default replacement intent；Product 决定该候选是仅验证后销毁，还是用于显式 source activation。
 
 ### 6.4 同一 API Key 下修改默认模型
 

@@ -527,6 +527,14 @@ pub const State = struct {
         self.availability_error = error_code;
     }
 
+    pub fn recordAvailabilityErrorNoFail(
+        self: *State,
+        error_code: execution_contract.AvailabilityError,
+    ) void {
+        std.debug.assert(error_code != .none);
+        self.availability_error = error_code;
+    }
+
     pub fn abortReplacementPreparationNoFail(self: *State) void {
         std.debug.assert(self.replacement != .none);
         self.redaction_preparation = .none;

@@ -990,6 +990,10 @@ test("Product Control owns atomic default execution source replacement", () => {
   assert.doesNotMatch(ports, /MetaskExecutionOutcome|apply_metask_/);
   assert.doesNotMatch(
     ports,
+    /begin_default_replacement_fn|beginDefaultExecutionReplacement|MetaskStageError/,
+  );
+  assert.doesNotMatch(
+    ports,
     /accept_metask_candidate_fn:|prepare_install_fn:|prepare_clear_fn:|install_execution_fn:|clear_execution_fn:/,
   );
 
@@ -1011,6 +1015,7 @@ test("Product Control owns atomic default execution source replacement", () => {
   assert.match(availability, /modelConnectionDefaultBinding\(\)/);
 
   const replacement = control.slice(replacementStart, clearStart);
+  assert.match(replacement, /self\.beginDefaultExecutionReplacement\(\)/);
   const prepareAt = replacement.indexOf("self.prepareExecutionInstall");
   const clearDefaultAt = replacement.indexOf(
     "self.clearModelConnectionDefault()",
@@ -1036,6 +1041,7 @@ test("Product Control owns atomic default execution source replacement", () => {
     /prepareAndPersistExecution|prepareCommittedPhaseFailure/,
   );
   assert.doesNotMatch(accountState, /prepareCommittedPhaseFailure/);
+  assert.doesNotMatch(accountState, /begin_default/);
   assert.match(accountState, /persist_execution_preference/);
   const prepareAtCoordinator = accountCoordinator.indexOf(
     "self.control.prepareMetaskExecutionCandidate",
@@ -1050,7 +1056,12 @@ test("Product Control owns atomic default execution source replacement", () => {
   assert.ok(accountCommitAt > admissionAt);
   assert.doesNotMatch(
     accountCoordinator,
-    /acceptMetaskExecutionCandidate|clearModelConnectionDefault|prepareExecutionInstall|prepareExecutionClear|installExecutionNoFail|clearExecutionNoFail/,
+    /acceptMetaskExecutionCandidate|clearModelConnectionDefault|prepareExecutionInstall|prepareExecutionClear|installExecutionNoFail|clearExecutionNoFail|beginDefaultExecutionReplacement/,
+  );
+  assert.match(accountState, /AttemptKind = enum \{[\s\S]*activation/);
+  assert.match(
+    accountState,
+    /attemptKind\(\) == \.activation[\s\S]*execution_intent = \.install_committed/,
   );
 });
 
