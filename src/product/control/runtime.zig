@@ -6950,12 +6950,16 @@ fn testRuntime() !Runtime {
 }
 
 fn testRuntimeWith(configuration: Configuration) !Runtime {
+    return testRuntimeWithLimits(testLimits(), configuration);
+}
+
+fn testRuntimeWithLimits(limits: Limits, configuration: Configuration) !Runtime {
     test_agent_runtime.io = std.testing.io;
     var control = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &test_agent_runtime,
-        testLimits(),
+        limits,
         configuration,
     );
     try installTestExecution(&control);
@@ -11427,6 +11431,89 @@ test "Runtime projects typed file changes without turning loss into Run failure"
     try std.testing.expectEqual(task_test_state.FileChangeObservation.incomplete, run.file_change_observation.?);
     try std.testing.expect(run.file_changes[1] == null);
     try std.testing.expect(run.event_projection_failure == null);
+}
+
+test "Runtime preserves the complete visible file change protocol matrix" {
+    var limits = testLimits();
+    limits.max_file_changes_per_run = 8;
+    var control = try testRuntimeWithLimits(limits, .{});
+    defer control.deinit();
+
+    const encoded =
+        "{\"file_changes\":{\"id\":\"tool-matrix\",\"name\":\"Edit\",\"changes\":[" ++
+        "{\"locator\":{\"workspace_path\":\"src/new.zig\"},\"kind\":\"created\",\"status\":\"applied\",\"tool\":\"Write\",\"tool_use_id\":\"tool-matrix\",\"agent_depth\":1,\"before_bytes\":0,\"after_bytes\":10,\"diff_complete\":true}," ++
+        "{\"locator\":{\"workspace_path\":\"src/repeat.zig\"},\"kind\":\"modified\",\"status\":\"applied\",\"tool\":\"Edit\",\"tool_use_id\":\"tool-matrix\",\"agent_depth\":2,\"before_bytes\":10,\"after_bytes\":11,\"diff_complete\":true}," ++
+        "{\"locator\":{\"workspace_path\":\"src/repeat.zig\"},\"kind\":\"modified\",\"status\":\"partial\",\"tool\":\"Edit\",\"tool_use_id\":\"tool-matrix\",\"agent_depth\":3,\"before_bytes\":11,\"after_bytes\":12,\"diff_complete\":false}," ++
+        "{\"locator\":{\"workspace_path\":\"src/old.zig\"},\"kind\":\"deleted\",\"status\":\"applied\",\"tool\":\"Delete\",\"tool_use_id\":\"tool-matrix\",\"agent_depth\":4,\"before_bytes\":9,\"after_bytes\":0,\"diff_complete\":true}," ++
+        "{\"locator\":{\"workspace_path\":\"src/to.zig\"},\"from_locator\":{\"workspace_path\":\"src/from.zig\"},\"kind\":\"moved\",\"status\":\"partial\",\"tool\":\"Move\",\"tool_use_id\":\"tool-matrix\",\"agent_depth\":5,\"before_bytes\":7,\"after_bytes\":7,\"diff_complete\":true}" ++
+        "],\"overflow\":true,\"lost\":true}}";
+    var envelope = try testEnvelope(3, 7, encoded);
+    defer envelope.deinit();
+    try control.applyEvent(&envelope);
+    try control.applyEvent(&envelope);
+
+    const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+    try std.testing.expectEqual(
+        task_test_state.FileChangeObservation.incomplete,
+        run.file_change_observation.?,
+    );
+    const expected_kinds = [_]task_test_state.FileChangeKind{
+        .created,
+        .modified,
+        .modified,
+        .deleted,
+        .moved,
+    };
+    for (expected_kinds, 0..) |kind, index| {
+        const change = &run.file_changes[index].?;
+        try std.testing.expectEqual(kind, change.kind);
+        try std.testing.expectEqual(@as(u64, index + 1), change.order);
+    }
+    try std.testing.expect(run.file_changes[5] == null);
+    try std.testing.expectEqualStrings(
+        "src/repeat.zig",
+        run.file_changes[1].?.display_path,
+    );
+    try std.testing.expectEqualStrings(
+        "src/repeat.zig",
+        run.file_changes[2].?.display_path,
+    );
+    try std.testing.expectEqual(
+        task_test_state.FileChangeStatus.partial,
+        run.file_changes[2].?.status,
+    );
+    try std.testing.expect(!run.file_changes[2].?.diff_complete);
+    try std.testing.expectEqualStrings(
+        "src/from.zig",
+        run.file_changes[4].?.from_display_path.?,
+    );
+    try std.testing.expectEqualStrings(
+        "src/to.zig",
+        run.file_changes[4].?.display_path,
+    );
+}
+
+test "Runtime explicitly ignores non-visible file change statuses without loss" {
+    var control = try testRuntime();
+    defer control.deinit();
+
+    const encoded =
+        "{\"file_changes\":{\"id\":\"tool-hidden\",\"name\":\"Edit\",\"changes\":[" ++
+        "{\"locator\":{\"workspace_path\":\"src/a.zig\"},\"kind\":\"modified\",\"status\":\"no_change\",\"tool\":\"Edit\",\"tool_use_id\":\"tool-hidden\",\"agent_depth\":1,\"before_bytes\":1,\"after_bytes\":1,\"diff_complete\":true}," ++
+        "{\"locator\":{\"workspace_path\":\"src/b.zig\"},\"kind\":\"created\",\"status\":\"failed\",\"tool\":\"Write\",\"tool_use_id\":\"tool-hidden\",\"agent_depth\":2,\"before_bytes\":0,\"after_bytes\":0,\"diff_complete\":true}," ++
+        "{\"locator\":{\"workspace_path\":\"src/c.zig\"},\"kind\":\"deleted\",\"status\":\"rejected\",\"tool\":\"Delete\",\"tool_use_id\":\"tool-hidden\",\"agent_depth\":3,\"before_bytes\":1,\"after_bytes\":1,\"diff_complete\":true}" ++
+        "],\"overflow\":false,\"lost\":false}}";
+    var envelope = try testEnvelope(3, 7, encoded);
+    defer envelope.deinit();
+    try control.applyEvent(&envelope);
+
+    const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+    try std.testing.expectEqual(
+        task_test_state.FileChangeObservation.collecting,
+        run.file_change_observation.?,
+    );
+    try std.testing.expect(!run.file_changes_known_loss);
+    try std.testing.expect(run.file_changes[0] == null);
 }
 
 test "Runtime stores credential-safe file change diffs outside task history" {
