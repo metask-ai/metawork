@@ -1064,6 +1064,7 @@ pub const Runtime = struct {
             };
         }
         control.reconcileCheckpointStoreNoFail();
+        control.cleanupFileChangeStoreNoFail();
         control.reconcileSkillEnablementNoFail();
         _ = control.schedule.recoverInterruptedNoFail(
             control.scheduleRedaction(),
@@ -1314,7 +1315,7 @@ pub const Runtime = struct {
             defer lane.release(taken);
             switch (taken.completion) {
                 .write => |write| {
-                    if (self.task_runtime.completeFileChangeArtifact(
+                    const retained = self.task_runtime.completeFileChangeArtifact(
                         write.task_id,
                         write.run_generation,
                         write.change_order,
@@ -1325,9 +1326,15 @@ pub const Runtime = struct {
                             .byte_size = identity.byte_size,
                         } else null,
                         write.redacted,
-                    )) {
+                    );
+                    if (retained) {
                         self.commitTaskStateNoFail();
                         self.bumpRevision();
+                    } else if (write.identity) |identity| {
+                        if (self.file_change_store) |store| store.delete(
+                            identity,
+                            self.limits.max_file_change_diff_bytes,
+                        );
                     }
                 },
                 .read => |read| {
@@ -4610,6 +4617,16 @@ pub const Runtime = struct {
             self.taskRuntimeDurableEffect(),
         );
     }
+
+    fn cleanupFileChangeStoreNoFail(self: *Runtime) void {
+        if (self.task_persistence_health != .ready) return;
+        const store = self.file_change_store orelse return;
+        self.task_runtime.cleanupFileChangeStoreNoFail(
+            store,
+            self.limits.max_file_change_diff_bytes,
+        );
+    }
+
     fn clearRestoredTaskStateNoFail(self: *Runtime) void {
         self.task_runtime.deinitTasks(self.taskRuntimeReleaseEffects());
         for (0..self.workspace.slotCount()) |index| {
@@ -4851,12 +4868,18 @@ pub const Runtime = struct {
         if (self.checkpoint_store) |store| store.deleteTask(task_id);
     }
 
+    fn deleteTaskRuntimeFileChanges(context: *anyopaque, task_id: u64) void {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        if (self.file_change_store) |store| store.deleteTask(task_id);
+    }
+
     fn taskRuntimeDeletionEffects(self: *Runtime) task_runtime.DeletionEffects {
         return .{
             .context = self,
             .release_session_fn = releaseTaskRuntimeSession,
             .commit_without_task_fn = commitTaskRuntimeWithoutTask,
             .delete_checkpoint_task_fn = deleteTaskRuntimeCheckpointTask,
+            .delete_file_change_task_fn = deleteTaskRuntimeFileChanges,
             .release = self.taskRuntimeReleaseEffects(),
         };
     }
@@ -11632,6 +11655,106 @@ test "Runtime stores credential-safe file change diffs outside task history" {
     }
     try std.testing.expectEqual(@as(usize, 1), capture.calls);
     try std.testing.expectEqual(FileChangeDiffReason.not_recorded, capture.unavailable.?);
+}
+
+test "Runtime cleans file change orphans only from healthy task history" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
+    var store = try file_change_store.FileStore.init(
+        std.testing.io,
+        root_storage[0..root_len],
+    );
+    defer store.deinit();
+
+    const orphan = try store.put(44, 1, 1, "orphan", 1024);
+    var history_storage: [256 * 1024]u8 = undefined;
+    var history = TestTaskPersistence{ .storage = &history_storage };
+    var healthy = try testRuntimeWith(.{
+        .task_persistence = history.capability(null),
+        .file_change_store = .{ .file_store = &store },
+    });
+    healthy.deinit();
+    try std.testing.expectError(
+        error.BlobMissing,
+        store.readAlloc(std.testing.allocator, orphan, 1024),
+    );
+
+    const preserved = try store.put(45, 1, 1, "preserved", 1024);
+    var unavailable = try testRuntimeWith(.{
+        .file_change_store = .{ .file_store = &store },
+    });
+    unavailable.deinit();
+    const restored = try store.readAlloc(std.testing.allocator, preserved, 1024);
+    defer std.testing.allocator.free(restored);
+    try std.testing.expectEqualStrings("preserved", restored);
+}
+
+test "Task deletion removes installed and late file change artifacts" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
+    var store = try file_change_store.FileStore.init(
+        std.testing.io,
+        root_storage[0..root_len],
+    );
+    defer store.deinit();
+    var control = try testRuntimeWith(.{
+        .file_change_store = .{ .file_store = &store },
+    });
+    defer control.deinit();
+
+    const diff = "@@ -1 +1 @@\n-old\n+new\n";
+    const encoded =
+        "{\"file_changes\":{\"id\":\"tool-delete\",\"name\":\"Edit\",\"changes\":[{\"locator\":{\"workspace_path\":\"src/main.zig\"},\"kind\":\"modified\",\"status\":\"applied\",\"tool\":\"Edit\",\"tool_use_id\":\"tool-delete\",\"agent_depth\":0,\"before_bytes\":3,\"after_bytes\":4,\"unified_diff\":\"@@ -1 +1 @@\\n-old\\n+new\\n\",\"diff_complete\":true}],\"overflow\":false,\"lost\":false}}";
+    var envelope = try testEnvelope(3, 7, encoded);
+    defer envelope.deinit();
+    try control.applyEvent(&envelope);
+
+    const task = &control.task_runtime.tasks[0].?;
+    const run = &task.durable.runs[0].?;
+    const change_order = run.file_changes[0].?.order;
+    var digest: [file_change_store.digest_bytes]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(diff, &digest, .{});
+    const expected: file_change_store.Identity = .{
+        .task_id = 3,
+        .run_generation = run.generation,
+        .change_order = change_order,
+        .digest = digest,
+        .byte_size = diff.len,
+    };
+
+    task.runtime.active_run_id = 0;
+    _ = commitTerminal(
+        run,
+        .completed,
+        .completed,
+        null,
+        .reusable,
+        "",
+        false,
+    );
+    finalizeTestTerminalEvents(&control);
+    try control.setTaskArchived(3, true);
+    control.releaseTaskAttachmentNoFail(task, .cold_start);
+    try control.deleteTask(3);
+    try std.testing.expect(control.task_runtime.tasks[0] == null);
+
+    control.shutdownFileChangeExecutor();
+    control.drainFileChangeCompletions(.{
+        .context = &control,
+        .complete_fn = discardFileChangeDiffCompletion,
+    });
+    try std.testing.expectError(
+        error.BlobMissing,
+        store.readAlloc(
+            std.testing.allocator,
+            expected,
+            control.limits.max_file_change_diff_bytes,
+        ),
+    );
 }
 
 test "completed terminal drain closes collecting file change observation" {

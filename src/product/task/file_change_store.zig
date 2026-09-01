@@ -7,6 +7,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 pub const digest_bytes = std.crypto.hash.sha2.Sha256.digest_length;
+pub const max_task_directories: usize = 4096;
+pub const max_blobs_per_task: usize = 16 * 1024;
 const lock_file_name = ".file-change-store.lock";
 
 pub const Error = error{
@@ -203,6 +205,104 @@ pub const FileStore = struct {
         self.root.deleteTree(self.io, name) catch return;
         _ = syncDirectory(self.io, self.root, null);
     }
+
+    pub fn cleanupOrphans(
+        self: *FileStore,
+        allocator: std.mem.Allocator,
+        referenced: []const Identity,
+        max_bytes: usize,
+    ) Error!void {
+        const capacity = max_task_directories * max_blobs_per_task;
+        var entries: std.ArrayList(StoredEntry) = .empty;
+        defer entries.deinit(allocator);
+        var task_ids: std.ArrayList(u64) = .empty;
+        defer task_ids.deinit(allocator);
+        var root_iterable = self.root.openDir(self.io, ".", .{
+            .iterate = true,
+            .follow_symlinks = false,
+        }) catch return error.DirectoryUnavailable;
+        defer root_iterable.close(self.io);
+        var root_iterator = root_iterable.iterate();
+        var task_count: usize = 0;
+        while (root_iterator.next(self.io) catch return error.DirectoryUnavailable) |entry| {
+            if (entry.kind == .file and std.mem.eql(u8, entry.name, lock_file_name))
+                continue;
+            if (entry.kind != .directory or task_count == max_task_directories)
+                return error.ResourceLimit;
+            const task_id = parseTaskDirectory(entry.name) orelse
+                return error.InvalidIdentity;
+            task_count += 1;
+            try task_ids.append(allocator, task_id);
+            var task_dir = self.root.openDir(self.io, entry.name, .{
+                .iterate = true,
+                .follow_symlinks = false,
+            }) catch return error.DirectoryUnavailable;
+            defer task_dir.close(self.io);
+            var iterator = task_dir.iterate();
+            var task_entries: usize = 0;
+            while (iterator.next(self.io) catch return error.DirectoryUnavailable) |blob_entry| {
+                if (blob_entry.kind != .file or
+                    task_entries == max_blobs_per_task or
+                    entries.items.len == capacity)
+                    return error.ResourceLimit;
+                task_entries += 1;
+                try entries.append(allocator, try parseStoredEntry(
+                    self.io,
+                    task_dir,
+                    task_id,
+                    blob_entry.name,
+                    max_bytes,
+                ));
+            }
+        }
+        for (entries.items) |stored| {
+            if (!stored.temporary and identityReferenced(stored.identity, referenced))
+                continue;
+            var task_name_storage: [32]u8 = undefined;
+            const task_name = try taskDirectoryName(
+                stored.identity.task_id,
+                &task_name_storage,
+            );
+            var task_dir = self.root.openDir(self.io, task_name, .{
+                .follow_symlinks = false,
+            }) catch return error.DirectoryUnavailable;
+            defer task_dir.close(self.io);
+            task_dir.deleteFile(self.io, stored.name()) catch return error.WriteFailed;
+            if (!syncDirectory(self.io, task_dir, null))
+                return error.PersistenceOutcomeUnknown;
+        }
+        for (task_ids.items) |task_id| try self.deleteTaskDirectoryIfEmpty(task_id);
+    }
+
+    fn deleteTaskDirectoryIfEmpty(self: *FileStore, task_id: u64) Error!void {
+        var task_name_storage: [32]u8 = undefined;
+        const task_name = try taskDirectoryName(task_id, &task_name_storage);
+        var task_dir = self.root.openDir(self.io, task_name, .{
+            .iterate = true,
+            .follow_symlinks = false,
+        }) catch return error.DirectoryUnavailable;
+        var iterator = task_dir.iterate();
+        const empty = (iterator.next(self.io) catch {
+            task_dir.close(self.io);
+            return error.DirectoryUnavailable;
+        }) == null;
+        task_dir.close(self.io);
+        if (!empty) return;
+        self.root.deleteDir(self.io, task_name) catch return error.WriteFailed;
+        if (!syncDirectory(self.io, self.root, null))
+            return error.PersistenceOutcomeUnknown;
+    }
+};
+
+const StoredEntry = struct {
+    identity: Identity,
+    file_name: [160]u8,
+    file_name_len: usize,
+    temporary: bool,
+
+    fn name(self: *const StoredEntry) []const u8 {
+        return self.file_name[0..self.file_name_len];
+    }
 };
 
 fn validateIdentity(identity: Identity, max_bytes: usize) Error!void {
@@ -218,6 +318,14 @@ fn taskDirectoryName(task_id: u64, storage: []u8) Error![]const u8 {
         error.InvalidIdentity;
 }
 
+fn parseTaskDirectory(name: []const u8) ?u64 {
+    const task_id = std.fmt.parseInt(u64, name, 10) catch return null;
+    if (task_id == 0) return null;
+    var canonical_storage: [32]u8 = undefined;
+    const canonical = taskDirectoryName(task_id, &canonical_storage) catch return null;
+    return if (std.mem.eql(u8, canonical, name)) task_id else null;
+}
+
 fn blobName(identity: Identity, storage: []u8) Error![]const u8 {
     const digest = std.fmt.bytesToHex(identity.digest, .lower);
     return std.fmt.bufPrint(storage, "{d}-{d}-{s}.diff", .{
@@ -225,6 +333,91 @@ fn blobName(identity: Identity, storage: []u8) Error![]const u8 {
         identity.change_order,
         digest,
     }) catch error.InvalidIdentity;
+}
+
+fn parseStoredEntry(
+    io: std.Io,
+    task_dir: std.Io.Dir,
+    task_id: u64,
+    name: []const u8,
+    max_bytes: usize,
+) Error!StoredEntry {
+    if (name.len > 160) return error.InvalidIdentity;
+    var file_name = [_]u8{0} ** 160;
+    @memcpy(file_name[0..name.len], name);
+    if (std.mem.startsWith(u8, name, ".file-change.") and
+        std.mem.endsWith(u8, name, ".tmp") and
+        name.len == ".file-change.".len + 16 + ".tmp".len and
+        isLowerHex(name[".file-change.".len .. name.len - ".tmp".len]))
+        return .{
+            .identity = .{
+                .task_id = task_id,
+                .run_generation = 0,
+                .change_order = 0,
+                .digest = [_]u8{0} ** digest_bytes,
+                .byte_size = 0,
+            },
+            .file_name = file_name,
+            .file_name_len = name.len,
+            .temporary = true,
+        };
+    if (!std.mem.endsWith(u8, name, ".diff")) return error.InvalidIdentity;
+    const stem = name[0 .. name.len - ".diff".len];
+    const first = std.mem.indexOfScalar(u8, stem, '-') orelse
+        return error.InvalidIdentity;
+    const second_relative = std.mem.indexOfScalar(u8, stem[first + 1 ..], '-') orelse
+        return error.InvalidIdentity;
+    const second = first + 1 + second_relative;
+    if (first == 0 or second == first + 1 or stem.len - second - 1 != digest_bytes * 2)
+        return error.InvalidIdentity;
+    const run_generation = std.fmt.parseInt(u64, stem[0..first], 10) catch
+        return error.InvalidIdentity;
+    const change_order = std.fmt.parseInt(u64, stem[first + 1 .. second], 10) catch
+        return error.InvalidIdentity;
+    var digest: [digest_bytes]u8 = undefined;
+    _ = std.fmt.hexToBytes(&digest, stem[second + 1 ..]) catch
+        return error.InvalidIdentity;
+    var file = task_dir.openFile(io, name, .{
+        .follow_symlinks = false,
+        .resolve_beneath = true,
+    }) catch return error.DirectoryUnavailable;
+    defer file.close(io);
+    const length = file.length(io) catch return error.DirectoryUnavailable;
+    const identity: Identity = .{
+        .task_id = task_id,
+        .run_generation = run_generation,
+        .change_order = change_order,
+        .digest = digest,
+        .byte_size = length,
+    };
+    try validateIdentity(identity, max_bytes);
+    var canonical_storage: [160]u8 = undefined;
+    const canonical = try blobName(identity, &canonical_storage);
+    if (!std.mem.eql(u8, canonical, name)) return error.InvalidIdentity;
+    return .{
+        .identity = identity,
+        .file_name = file_name,
+        .file_name_len = name.len,
+        .temporary = false,
+    };
+}
+
+fn identityReferenced(identity: Identity, referenced: []const Identity) bool {
+    for (referenced) |candidate| {
+        if (candidate.task_id == identity.task_id and
+            candidate.run_generation == identity.run_generation and
+            candidate.change_order == identity.change_order and
+            candidate.byte_size == identity.byte_size and
+            std.mem.eql(u8, &candidate.digest, &identity.digest))
+            return true;
+    }
+    return false;
+}
+
+fn isLowerHex(value: []const u8) bool {
+    for (value) |byte| if (!std.ascii.isDigit(byte) and (byte < 'a' or byte > 'f'))
+        return false;
+    return true;
 }
 
 fn openOrCreateLock(io: std.Io, dir: std.Io.Dir) !std.Io.File {
@@ -307,5 +500,31 @@ test "file change store writes immutable verified diffs" {
     try std.testing.expectError(
         error.BlobMissing,
         store.readAlloc(std.testing.allocator, identity, 1024),
+    );
+}
+
+test "file change store cleans only unreferenced blobs and empty task directories" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
+    var store = try FileStore.init(std.testing.io, root_storage[0..root_len]);
+    defer store.deinit();
+
+    const retained = try store.put(7, 2, 3, "retained", 1024);
+    const orphan = try store.put(7, 2, 4, "orphan", 1024);
+    const other_task = try store.put(8, 1, 1, "other", 1024);
+    try store.cleanupOrphans(std.testing.allocator, &.{retained}, 1024);
+
+    const restored = try store.readAlloc(std.testing.allocator, retained, 1024);
+    defer std.testing.allocator.free(restored);
+    try std.testing.expectEqualStrings("retained", restored);
+    try std.testing.expectError(
+        error.BlobMissing,
+        store.readAlloc(std.testing.allocator, orphan, 1024),
+    );
+    try std.testing.expectError(
+        error.BlobMissing,
+        store.readAlloc(std.testing.allocator, other_task, 1024),
     );
 }

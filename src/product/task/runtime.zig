@@ -11,6 +11,7 @@ const task_persistence = @import("product_task_persistence");
 const task_policy = @import("product_task_policy");
 const task_view = @import("product_task_view");
 const checkpoint_store = @import("product_task_checkpoint_store");
+const file_change_store = @import("product_task_file_change_store");
 const task_execution = @import("product_task_execution");
 const task_attachment = @import("product_task_attachment");
 const task_deletion = @import("product_task_deletion");
@@ -550,6 +551,7 @@ pub const DeletionEffects = struct {
     release_session_fn: *const fn (*anyopaque, u64) SessionReleaseOutcome,
     commit_without_task_fn: *const fn (*anyopaque, u64) DurableCommit,
     delete_checkpoint_task_fn: *const fn (*anyopaque, u64) void,
+    delete_file_change_task_fn: *const fn (*anyopaque, u64) void,
     release: ReleaseEffects,
 
     fn releaseSession(self: DeletionEffects, task_id: u64) SessionReleaseOutcome {
@@ -562,6 +564,10 @@ pub const DeletionEffects = struct {
 
     fn deleteCheckpointTask(self: DeletionEffects, task_id: u64) void {
         self.delete_checkpoint_task_fn(self.context, task_id);
+    }
+
+    fn deleteFileChangeTask(self: DeletionEffects, task_id: u64) void {
+        self.delete_file_change_task_fn(self.context, task_id);
     }
 };
 
@@ -1806,6 +1812,7 @@ pub const Runtime = struct {
                     switch (effects.commitWithoutTask(workspace_id)) {
                         .committed => {
                             effects.deleteCheckpointTask(task_id);
+                            effects.deleteFileChangeTask(task_id);
                             deinitTask(self, &removed, effects.release);
                             result.changed = true;
                         },
@@ -2371,6 +2378,49 @@ pub const Runtime = struct {
                 .release,
             );
         };
+    }
+
+    pub fn cleanupFileChangeStoreNoFail(
+        self: *Runtime,
+        store: *file_change_store.FileStore,
+        max_bytes: usize,
+    ) void {
+        var reference_count: usize = 0;
+        for (self.tasks) |entry| {
+            const task = entry orelse continue;
+            for (task.durable.runs) |run_entry| {
+                const run = run_entry orelse continue;
+                for (run.file_changes) |change_entry| {
+                    const change = change_entry orelse continue;
+                    if (change.artifact != null) reference_count += 1;
+                }
+            }
+        }
+        const references = self.allocator.alloc(
+            file_change_store.Identity,
+            reference_count,
+        ) catch return;
+        defer self.allocator.free(references);
+        var index: usize = 0;
+        for (self.tasks) |entry| {
+            const task = entry orelse continue;
+            for (task.durable.runs) |run_entry| {
+                const run = run_entry orelse continue;
+                for (run.file_changes) |change_entry| {
+                    const change = change_entry orelse continue;
+                    const artifact = change.artifact orelse continue;
+                    references[index] = .{
+                        .task_id = task.durable.id,
+                        .run_generation = artifact.run_generation,
+                        .change_order = artifact.change_order,
+                        .digest = artifact.digest,
+                        .byte_size = artifact.byte_size,
+                    };
+                    index += 1;
+                }
+            }
+        }
+        store.cleanupOrphans(self.allocator, references, max_bytes) catch return;
     }
 
     fn syncCheckpointPostprocess(

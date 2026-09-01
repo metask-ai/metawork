@@ -1238,6 +1238,7 @@ fn wireAgentCore(
     task_runtime.addImport("metawork_product_skill", product_skill);
     task_runtime.addImport("product_task_recovery_job", task_recovery_job);
     task_runtime.addImport("product_task_checkpoint_store", checkpoint_store);
+    task_runtime.addImport("product_task_file_change_store", file_change_store);
     task_runtime.addImport("product_task_attachment", task_attachment);
     task_runtime.addImport("product_task_deletion", task_deletion);
     task_runtime.addImport("product_task_recovery", task_recovery);
