@@ -369,6 +369,7 @@ fn exportCheckpoint(
         .invalid_mcp_selection,
         .skill_catalog_incomplete,
         .image_input_unsupported,
+        .document_input_unsupported,
         .ok,
         => dependencyFailure(.checkpoint_export),
     } };
@@ -431,6 +432,7 @@ pub fn describe(
             .invalid_mcp_selection,
             .skill_catalog_incomplete,
             .image_input_unsupported,
+            .document_input_unsupported,
             => dependencyFailure(.describe),
         } };
     }

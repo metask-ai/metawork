@@ -87,6 +87,7 @@ pub const Plan = enum {
     unknown_status,
     stale_compact_status,
     image_input_unsupported_status,
+    document_input_unsupported_status,
 };
 
 pub const FakeRuntime = struct {};
@@ -2014,6 +2015,11 @@ pub fn sessionRunInput(
         if (out_result) |result| @memset(std.mem.asBytes(result), 0xA5);
         diagnostic(out_error);
         return wire.STATUS_IMAGE_INPUT_UNSUPPORTED;
+    }
+    if (plan == .document_input_unsupported_status) {
+        if (out_result) |result| @memset(std.mem.asBytes(result), 0xA5);
+        diagnostic(out_error);
+        return wire.STATUS_DOCUMENT_INPUT_UNSUPPORTED;
     }
     if (out_result) |result| {
         result.* = std.mem.zeroes(wire.RunResultV1);

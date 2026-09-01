@@ -9,7 +9,7 @@ const maxManifestBytes = 1024 * 1024;
 const maxPayloadBytes = 128 * 1024 * 1024;
 const maxPayloadFiles = 256;
 const supportedAbiVersion = 1;
-const supportedAbiRevision = 15;
+const supportedAbiRevision = 16;
 
 const targetPolicies = [
   {

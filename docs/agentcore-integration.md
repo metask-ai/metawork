@@ -251,7 +251,7 @@ Agent 的 `RunInput.multimodal` 接受有序 `InputPart`：非空 UTF-8 文本�
 
 单次输入的 parts 数、单图 Base64 上限和总 prompt 上限使用 canonical SDK 常量。Host 的总 prompt 核算包括文本、Base64 和 media type 字节；全部文本合计还受既有 `max_prompt_bytes` 限制。Runtime 的 `max_multimodal_input_bytes` 默认 64 MiB，约束 owned parts 数组与文本/Base64 storage 的总分配请求字节，包括尚未完成 admission 的并发准备；它不表示调用方、Core Conversation、allocator overhead 或进程整体内存上限。Runtime 预算耗尽返回 `RunInputBudgetExceeded`，单次输入超限返回 `RunInputTooLarge`；均在分配前失败。已开始执行的输入须在 Core 调用、相关 callback 和 abort 调用静止后释放。
 
-`image_input_unsupported` 仅在本次 Run 含图片时作为 typed admission 拒绝，Session 保持 reusable；文本-only multimodal、Text、Skill 或其他 operation 不因认识该 status 而放行。非 OK result 的可读边界由 ABI 合同规定。图片历史保持由 Core 所有；不解析或重写 opaque checkpoint，不静默扩大 checkpoint 预算，不删除图片以换取保存成功。调用方应显式配置足够的 checkpoint 限额，否则沿既有 typed failure 返回。
+`image_input_unsupported` 仅在本次 Run 含图片时作为 typed admission 拒绝，Session 保持 reusable；文本-only multimodal、Text、Skill 或其他 operation 不因认识该 status 而放行。revision 16 虽定义 `document_input_unsupported`，但当前公共输入不构造 document part，因此该 status 在全部 operation 中均按 dependency contract failure 收口。非 OK result 的可读边界由 ABI 合同规定。图片历史保持由 Core 所有；不解析或重写 opaque checkpoint，不静默扩大 checkpoint 预算，不删除图片以换取保存成功。调用方应显式配置足够的 checkpoint 限额，否则沿既有 typed failure 返回。
 
 ### 每 Session 规则
 

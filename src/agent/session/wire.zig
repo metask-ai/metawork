@@ -172,7 +172,7 @@ pub fn providerKindCode(value: Protocol) u32 {
 pub fn protocolKindCode(value: Protocol) u32 {
     return switch (value) {
         .openai_responses => wire.OPENAI_PROTOCOL_RESPONSES,
-        // ABI revision 15 uses code zero for these three explicit protocols.
+        // ABI revision 16 uses code zero for these three explicit protocols.
         // That wire encoding does not define a MetaWork protocol default.
         .openai_chat_completions, .anthropic_messages, .gemini_native => wire.PROTOCOL_DEFAULT,
     };

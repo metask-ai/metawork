@@ -89,7 +89,7 @@ async function fixture(t, mutateManifest = () => {}) {
     contract: {
       binary_abi_status: "experimental",
       binary_abi_version: 1,
-      binary_abi_revision: 15,
+      binary_abi_revision: 16,
       binary_abi_table_size: 64,
     },
     runtime_assets: [
@@ -367,7 +367,7 @@ test("staged preflight refuses a retired revision lock", async (t) => {
   );
   await assert.rejects(
     verifyStagedAgentCoreBundle(root, injectedVerification),
-    /requires a revision 15 repository lock/,
+    /requires a revision 16 repository lock/,
   );
 });
 

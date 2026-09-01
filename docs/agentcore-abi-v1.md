@@ -41,7 +41,7 @@ schema 1 manifest 必须包含 `runtime_assets`，当前精确接受一个 ripgr
 接受的 ABI identity 为：
 
 - `binary_abi_version = 1`；
-- `binary_abi_revision = 15`；
+- `binary_abi_revision = 16`；
 - discovery symbol 仅为 `metask_agentcore_get_api`；
 - root `binary_abi_table_size = 64`；
 - Runtime、Session、SessionControl、Skill、MCP 子表大小依次为 24、40、64、32、40 bytes；
@@ -60,7 +60,9 @@ schema 1 manifest 必须包含 `runtime_assets`，当前精确接受一个 ripgr
 
 Runtime 只有一个 `create` entry，第二个参数是可空 `RuntimePluginConfigV1`；不得为不同 plugin 配置建立第二条 create ABI 路径。MCP `apply_configuration` 接受完整 declarative replacement：Host 必须使用非零 desired revision，并校验 status、report size、disposition、desired/active revision 与 reserved fields；只有 `APPLIED` 转移 replacement ownership，`SUPERSEDED` 或 `REJECTED` 不得取得该 ownership，malformed report 必须 fail closed。
 
-revision 15 的 `SessionHostConfigV1.protocol_kind_code` 取代旧 reserved slot。MetaWork fresh/restore 将调用方明确选择的协议映射为对应 ABI 编码：`openai_responses` 使用 `OPENAI_PROTOCOL_RESPONSES`；`openai_chat_completions`、`anthropic_messages` 和 `gemini_native` 使用 `PROTOCOL_DEFAULT`。这里的 `PROTOCOL_DEFAULT` 只表示 ABI 编码，不定义 MetaWork 的默认协议；协议选择合同见 [Completion 架构](completion-architecture.md#3-provider-与协议)。`RunInputV1` 的 parts/count 与 reserved layout 由官方 helper 构造；Agent Session 接受有序图文输入，公共输入、ownership 和预算合同见 [AgentCore 集成契约](agentcore-integration.md#agent-session-图片输入)，Product 入口仍只提交 Text/Skill。`image_input_unsupported` 只属于本次 Run 含图片时的 admission 拒绝，此时 Session 保持 reusable；在 Text、Skill、仅文本 parts、compact、mutation、export、describe 或 restore 路径出现时属于 dependency contract failure，不因 SDK 认识该值而放行。
+当前 `SessionHostConfigV1.protocol_kind_code` 将调用方明确选择的协议映射为对应 ABI 编码：`openai_responses` 使用 `OPENAI_PROTOCOL_RESPONSES`；`openai_chat_completions`、`anthropic_messages` 和 `gemini_native` 使用 `PROTOCOL_DEFAULT`。这里的 `PROTOCOL_DEFAULT` 只表示 ABI 编码，不定义 MetaWork 的默认协议；协议选择合同见 [Completion 架构](completion-architecture.md#3-provider-与协议)。`RunInputV1` 的 parts/count 与 reserved layout 由官方 helper 构造；revision 16 新增 `RUN_INPUT_PART_DOCUMENT`、`MAX_RUN_INPUT_DOCUMENT_DATA_BYTES_V1` 与 `document_input_unsupported`，但不改变 `RunInputPartV1` layout 或 function table。Agent Session 当前仍只接受有序图文输入，公共输入、ownership 和预算合同见 [AgentCore 集成契约](agentcore-integration.md#agent-session-图片输入)，Product 入口仍只提交 Text/Skill。
+
+`image_input_unsupported` 只属于本次 Run 含图片时的 admission 拒绝，此时 Session 保持 reusable；在 Text、Skill、仅文本 parts、compact、mutation、export、describe 或 restore 路径出现时属于 dependency contract failure。MetaWork 当前不会构造 document part，因此 `document_input_unsupported` 在全部 operation 中均属于 dependency contract failure；不能因为 SDK 认识这些值就在错误的 operation 或输入形状上放行。
 
 本次 revision hard cut 不提供旧 checkpoint 的兼容适配、迁移或跨 revision 恢复承诺；不主动删除或改写已有产品历史或 checkpoint，无法恢复时沿现有 typed failure 路径明确失败。当前 revision 的 export/restore 完整性与生命周期验证仍为必需。
 
