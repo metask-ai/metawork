@@ -12093,6 +12093,55 @@ test "completed terminal drain closes collecting file change observation" {
     try std.testing.expectEqual(task_test_state.FileChangeObservation.complete, run.file_change_observation.?);
 }
 
+test "terminal persistence degrades pending file change observation without mutating the live Run" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+    run.pending_file_change_artifacts = 1;
+    try std.testing.expect(commitTerminal(
+        run,
+        .completed,
+        .completed,
+        null,
+        .reusable,
+        "",
+        false,
+    ));
+    control.markTerminalRunsBeforeEventDrain();
+    control.finalizeMarkedTerminalRunsAfterEventDrain();
+    control.task_runtime.tasks[0].?.runtime.active_operation = .none;
+    try std.testing.expectEqual(
+        task_test_state.FileChangeObservation.collecting,
+        run.file_change_observation.?,
+    );
+
+    var scratch = try control.buildTaskStateWire();
+    defer scratch.deinit();
+    try std.testing.expectEqualStrings(
+        "incomplete",
+        scratch.state.tasks[0].runs[0].file_change_observation.?,
+    );
+
+    const storage = try std.testing.allocator.alloc(u8, task_persistence.max_store_bytes);
+    defer std.testing.allocator.free(storage);
+    const encoded = try task_persistence.encode(storage, scratch.state);
+    var decoded = try task_persistence.decode(
+        std.testing.allocator,
+        encoded,
+        testTaskPersistenceLimits(),
+    );
+    defer decoded.deinit();
+    try std.testing.expectEqual(@as(usize, 1), decoded.value.tasks.len);
+    try std.testing.expectEqualStrings(
+        "incomplete",
+        decoded.value.tasks[0].runs[0].file_change_observation.?,
+    );
+    try std.testing.expectEqual(
+        task_test_state.FileChangeObservation.collecting,
+        run.file_change_observation.?,
+    );
+}
+
 test "file reference ids use durable task and run identities" {
     var first_storage: [96]u8 = undefined;
     var second_storage: [96]u8 = undefined;

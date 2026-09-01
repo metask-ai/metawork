@@ -881,6 +881,13 @@ fn projectRun(
     const projection = task_state.runProjectionFacts(run);
     const terminal = projection.terminal;
     const terminal_payload = if (terminal != null) task_state.terminalPayload(run) else null;
+    const file_change_observation = if (run.file_change_observation) |value|
+        if (terminal != null and value == .collecting)
+            task_state.FileChangeObservation.incomplete
+        else
+            value
+    else
+        null;
     return .{
         .id = run.id,
         .generation = run.generation,
@@ -903,7 +910,7 @@ fn projectRun(
             null,
         .usage = usageWire(run.usage),
         .tools = tools,
-        .file_change_observation = if (run.file_change_observation) |value|
+        .file_change_observation = if (file_change_observation) |value|
             @tagName(value)
         else
             null,
