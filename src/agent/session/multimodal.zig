@@ -2,6 +2,8 @@
 const std = @import("std");
 const sdk = @import("metask_agentcore");
 
+const document_media_type = "application/pdf";
+
 pub const ImageFormat = enum {
     png,
     jpeg,
@@ -24,6 +26,14 @@ pub const InputPart = union(enum) {
         format: ImageFormat,
         /// Encoded image-file bytes, not pixels or Base64. Borrowed until
         /// prepareRun returns; the caller owns format/content correctness.
+        bytes: []const u8,
+    },
+    document: struct {
+        /// Optional stable UTF-8 title, such as a file name. It must not be a
+        /// local path. Borrowed until prepareRun returns.
+        title: []const u8 = "",
+        /// Encoded PDF-file bytes, not Base64. Borrowed until prepareRun
+        /// returns; AgentCore owns PDF structure, encryption, and page limits.
         bytes: []const u8,
     },
 };
@@ -52,6 +62,7 @@ pub const OwnedInput = struct {
     parts: []sdk.types.RunInputPartV1,
     storage: []u8,
     has_images: bool,
+    has_documents: bool,
     budget: *Budget,
     reserved_bytes: usize,
 
@@ -67,6 +78,7 @@ pub const OwnedInput = struct {
         var storage_bytes: usize = 0;
         var prompt_bytes: usize = 0;
         var has_images = false;
+        var has_documents = false;
         for (input) |part| {
             const size = switch (part) {
                 .text => |value| text: {
@@ -77,13 +89,26 @@ pub const OwnedInput = struct {
                     break :text value.len;
                 },
                 .image => |value| image: {
-                    if (value.bytes.len == 0) return error.InvalidRunInput;
-                    // Bound raw input before calculating Base64 size or allocating.
-                    if (value.bytes.len > sdk.types.MAX_RUN_INPUT_IMAGE_DATA_BYTES_V1 / 4 * 3)
-                        return error.RunInputTooLarge;
+                    const encoded_size = try base64EncodedSize(
+                        value.bytes.len,
+                        sdk.types.MAX_RUN_INPUT_IMAGE_DATA_BYTES_V1,
+                    );
                     has_images = true;
                     prompt_bytes = try add(prompt_bytes, value.format.mediaType().len);
-                    break :image std.base64.standard.Encoder.calcSize(value.bytes.len);
+                    break :image encoded_size;
+                },
+                .document => |value| document: {
+                    if (!std.unicode.utf8ValidateSlice(value.title))
+                        return error.InvalidRunInput;
+                    text_bytes = try add(text_bytes, value.title.len);
+                    if (text_bytes > max_text_bytes) return error.RunInputTooLarge;
+                    const encoded_size = try base64EncodedSize(
+                        value.bytes.len,
+                        sdk.types.MAX_RUN_INPUT_DOCUMENT_DATA_BYTES_V1,
+                    );
+                    has_documents = true;
+                    prompt_bytes = try add(prompt_bytes, document_media_type.len);
+                    break :document try add(value.title.len, encoded_size);
                 },
             };
             storage_bytes = try add(storage_bytes, size);
@@ -114,12 +139,22 @@ pub const OwnedInput = struct {
                     owned.* = sdk.imagePart(value.format.mediaType(), encoded);
                     offset += size;
                 },
+                .document => |value| {
+                    const title = storage[offset..][0..value.title.len];
+                    @memcpy(title, value.title);
+                    offset += title.len;
+                    const size = std.base64.standard.Encoder.calcSize(value.bytes.len);
+                    const encoded = std.base64.standard.Encoder.encode(storage[offset..][0..size], value.bytes);
+                    owned.* = sdk.documentPart(document_media_type, encoded, title);
+                    offset += size;
+                },
             }
         }
         return .{
             .parts = parts,
             .storage = storage,
             .has_images = has_images,
+            .has_documents = has_documents,
             .budget = budget,
             .reserved_bytes = reserved_bytes,
         };
@@ -135,4 +170,50 @@ pub const OwnedInput = struct {
 
 fn add(a: usize, b: usize) Error!usize {
     return std.math.add(usize, a, b) catch error.RunInputTooLarge;
+}
+
+fn base64EncodedSize(raw_bytes: usize, max_encoded_bytes: usize) Error!usize {
+    if (raw_bytes == 0) return error.InvalidRunInput;
+    std.debug.assert(max_encoded_bytes % 4 == 0);
+    // Bound raw input before calculating Base64 size or allocating.
+    if (raw_bytes > max_encoded_bytes / 4 * 3) return error.RunInputTooLarge;
+    return std.base64.standard.Encoder.calcSize(raw_bytes);
+}
+
+test "document input owns title and PDF bytes in the canonical SDK shape" {
+    var title = "report.pdf".*;
+    var bytes = "%PDF".*;
+    var budget = Budget{ .limit = 1024 };
+    var input = try OwnedInput.init(
+        std.testing.allocator,
+        &.{.{ .document = .{ .title = &title, .bytes = &bytes } }},
+        1024,
+        &budget,
+    );
+    defer input.deinit(std.testing.allocator);
+
+    @memset(&title, 'x');
+    @memset(&bytes, 0);
+    try std.testing.expect(!input.has_images);
+    try std.testing.expect(input.has_documents);
+    try std.testing.expectEqualStrings("report.pdf", try sdk.borrowedBytes(input.parts[0].text));
+    try std.testing.expectEqualStrings(document_media_type, try sdk.borrowedBytes(input.parts[0].media_type));
+    try std.testing.expectEqualStrings("JVBERg==", try sdk.borrowedBytes(input.parts[0].data));
+}
+
+test "document input rejects empty bytes invalid titles and encoded overflow" {
+    var budget = Budget{ .limit = std.math.maxInt(usize) };
+    try std.testing.expectError(
+        error.InvalidRunInput,
+        OwnedInput.init(std.testing.allocator, &.{.{ .document = .{ .bytes = "" } }}, 1024, &budget),
+    );
+    try std.testing.expectError(
+        error.InvalidRunInput,
+        OwnedInput.init(std.testing.allocator, &.{.{ .document = .{ .title = "\xff", .bytes = "pdf" } }}, 1024, &budget),
+    );
+    try std.testing.expectError(
+        error.RunInputTooLarge,
+        base64EncodedSize(sdk.types.MAX_RUN_INPUT_DOCUMENT_DATA_BYTES_V1 / 4 * 3 + 1, sdk.types.MAX_RUN_INPUT_DOCUMENT_DATA_BYTES_V1),
+    );
+    try std.testing.expectEqual(0, budget.used.load(.monotonic));
 }
