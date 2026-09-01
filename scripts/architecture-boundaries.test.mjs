@@ -209,7 +209,8 @@ test("Product Execution owns model connections independently of Account", () => 
   const accountPorts = read("src/product/account/ports.zig");
   const accountBinding = read("src/app/account_platform_binding.zig");
   const executionBinding = read("src/app/execution_platform_binding.zig");
-  const coordinator = read("src/app/account_coordinator.zig");
+  const coordinator = read("src/app/execution_coordinator.zig");
+  const control = read("src/product/control/runtime.zig");
   const app = read("src/app.zig");
   const identity = read("src/product_identity.zig");
 
@@ -260,13 +261,13 @@ test("Product Execution owns model connections independently of Account", () => 
   assert.match(executionBinding, /product_execution_ports/);
   assert.match(executionBinding, /modelConnectionCredentialService/);
   assert.match(identity, /pub fn modelConnectionCredentialService/);
-  const selectDefault = coordinator.indexOf("if (command == .select_default)");
-  const scrubPreparation = coordinator.indexOf(
-    "self.control.prepareExecutionInstall(",
+  const selectDefault = control.indexOf("fn selectModelConnectionDefault(");
+  const scrubPreparation = control.indexOf(
+    "self.prepareExecutionInstall(",
     selectDefault,
   );
-  const registryCommit = coordinator.indexOf(
-    "self.control.submitModelConnectionCommandWithExecutionGeneration(",
+  const registryCommit = control.indexOf(
+    "self.model_connections.submitCommandWithExecutionGeneration(",
     selectDefault,
   );
   assert.ok(selectDefault >= 0 && scrubPreparation > selectDefault);
@@ -275,7 +276,10 @@ test("Product Execution owns model connections independently of Account", () => 
     "fallible durable scrub must precede the Execution registry default commit",
   );
   assert.match(app, /execution_platform_binding\.Adapter\.init/);
-  assert.match(app, /startWithAccountUnavailable/);
+  assert.match(app, /execution_management\.start\(/);
+  assert.doesNotMatch(app, /startWithAccountUnavailable/);
+  assert.match(coordinator, /control_ports\.ExecutionManagement/);
+  assert.doesNotMatch(coordinator, /metawork_account|AccountExecutionHandoff/);
 });
 
 test("named module roots exist and lower owners cannot import composition", () => {
@@ -623,12 +627,12 @@ test("Product Control is the only composition owner identity", () => {
     /const AccountProjection = struct|const ActiveExecution = struct|const ReplacementKind = enum|const RedactionPreparation = union|custom_execution_binding:|execution_replacement:|execution_redaction_preparation:/,
   );
   assert.match(
-    ports,
+    runtime,
     /pub const PreparedModelConnectionBinding\s*=\s*[\s\S]*execution_state\.PreparedModelConnectionBinding/,
   );
   assert.doesNotMatch(
     ports,
-    /pub const PreparedModelConnectionBinding = struct|execution_state\.State|AccountProjection|ActiveExecution/,
+    /PreparedModelConnectionBinding|execution_state\.State|AccountProjection|ActiveExecution/,
   );
   assert.doesNotMatch(
     control,
@@ -843,6 +847,7 @@ test("Application coordinators consume scoped Product Control capabilities", () 
   const ports = read("src/product/control/ports.zig");
   const projection = read("src/product/control/runtime.zig");
   const accountCoordinator = read("src/app/account_coordinator.zig");
+  const executionCoordinator = read("src/app/execution_coordinator.zig");
   const agentEvents = read("src/app/agent_event_coordinator.zig");
   const mcpManagement = read("src/app/mcp_management_coordinator.zig");
   const mcpOauth = read("src/app/mcp_oauth_coordinator.zig");
@@ -852,7 +857,8 @@ test("Application coordinators consume scoped Product Control capabilities", () 
   assert.match(build, /src\/product\/control\/ports\.zig/);
   assert.match(build, /metawork_product_control_ports/);
   for (const name of [
-    "ExecutionHandoff",
+    "AccountExecutionHandoff",
+    "ExecutionManagement",
     "AgentEventConsumer",
     "McpManagementPort",
     "McpOauthPort",
@@ -865,19 +871,36 @@ test("Application coordinators consume scoped Product Control capabilities", () 
     ports,
     /Workbench|product_control\.Runtime|rawRuntime|rawOwner/,
   );
-  assert.match(projection, /pub fn executionHandoff/);
+  assert.match(projection, /pub fn accountExecutionHandoff/);
+  assert.match(projection, /pub fn executionManagement/);
   assert.match(projection, /pub fn agentEventConsumer/);
   assert.match(projection, /pub fn mcpManagementPort/);
   assert.match(projection, /pub fn mcpOauthPort/);
   assert.match(projection, /pub fn scheduleHost/);
 
-  for (const source of [accountCoordinator, mcpManagement, mcpOauth]) {
+  for (const source of [
+    accountCoordinator,
+    executionCoordinator,
+    mcpManagement,
+    mcpOauth,
+  ]) {
     const coordinator = source.match(
       /pub const Coordinator = struct \{([\s\S]*?)\n    pub fn init/,
     )?.[1];
     assert.ok(coordinator, "coordinator state must be inspectable");
     assert.doesNotMatch(coordinator, /Workbench|workbench_owner|\*workbench/);
   }
+  const accountState = accountCoordinator.match(
+    /pub const Coordinator = struct \{([\s\S]*?)\n    pub fn init/,
+  )?.[1];
+  assert.doesNotMatch(
+    accountState,
+    /CompletionTransport|ProbeJob|ExecutionManagement|CredentialVault/,
+  );
+  assert.doesNotMatch(
+    accountCoordinator,
+    /ModelConnection|model_connection|startModelConnections|stopModelConnections/,
+  );
   assert.doesNotMatch(
     agentEvents,
     /@import\("metawork_product_control"\)|\*workbench/,

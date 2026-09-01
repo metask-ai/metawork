@@ -4,12 +4,14 @@
 
 ## 1. Owner 与事务模型
 
-Product 由两个 named owner 组成，跨 owner 用例由 Application coordinator 编排：
+Product 由两个 named owner 组成，跨 owner 用例由对应的 Application coordinator 编排：
 
 - Account 拥有 Metask identity、catalog、credential、Metask 默认选择及其内部事务与恢复；
 - Product Control 拥有 Execution aggregate、已安装的默认 ExecutionConfig、Workspace、Task、Schedule、Skill、MCP、共享 Executor、跨 aggregate admission、canonical 产品 projection、revision、产品历史与关闭顺序。Execution aggregate 独占通用 Protocol/ExecutionConfig 合同、user-managed Model Connection registry、credential vault port、测试状态、默认 binding、持久化与恢复。
 
 Agent 位于 Product 之外，拥有 MetaWork 对 AgentCore Runtime、Session、Conversation、callback、event pump 与 terminal execution fact 的集成生命周期。Product Control 只调用 Agent 的公共执行能力，不管理 Agent Runtime 生命周期、不读取其内部状态，也不借 Agent 获取通用 I/O。Application 创建和关闭 Agent、安排主线程 wake，并协调 Account 与 Product Control；它不持有领域运行状态，也不独立决定这些 owner 的 policy。
+
+Application 必须分别组装 Account coordinator 与 Execution coordinator。前者只编排 Account Runtime 及 Metask execution 的跨 owner handoff；后者只绑定 Execution credential vault、Agent-owned connection probe 与 Execution 管理生命周期。Execution registry 的 CRUD、默认选择、恢复和已安装 execution 交接属于 Product Control 内部事务，不得由任一 Application coordinator 通过公开的 `begin/prepare/commit/install/end` 步骤重新拼装。Account unavailable 与 Execution unavailable 必须独立启动、降级和关闭。
 
 Execution、Workspace、Task、Schedule、Skill 与 MCP 是 Product Control 持有的 aggregate，不形成新的顶层 Product owner。各 aggregate 独占自身状态机、局部事务与持久化 policy；Product Control 只拥有必须同时观察多个 aggregate、execution、publication 或生命周期事实的不变量，不能把局部 policy 重新吸收到组合层。
 

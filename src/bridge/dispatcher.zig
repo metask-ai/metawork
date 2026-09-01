@@ -976,7 +976,7 @@ pub const Dispatcher = struct {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
         var callback = try self.callbacks.enter();
         defer callback.deinit();
-        try self.requireAccountAuthority(invocation.source.window_id);
+        try self.requireManagementAuthority(invocation.source.window_id);
         var parsed = try handlers.parsePayload(
             handlers.Empty,
             invocation.request.payload,
@@ -996,7 +996,7 @@ pub const Dispatcher = struct {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
         var callback = try self.callbacks.enter();
         defer callback.deinit();
-        try self.requireAccountAuthority(invocation.source.window_id);
+        try self.requireManagementAuthority(invocation.source.window_id);
         var parsed = try handlers.parsePayload(
             handlers.AccountSelection,
             invocation.request.payload,
@@ -1029,7 +1029,7 @@ pub const Dispatcher = struct {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
         var callback = try self.callbacks.enter();
         defer callback.deinit();
-        try self.requireAccountAuthority(invocation.source.window_id);
+        try self.requireManagementAuthority(invocation.source.window_id);
         var parsed = try handlers.parsePayload(
             handlers.AccountSelection,
             invocation.request.payload,
@@ -1062,7 +1062,7 @@ pub const Dispatcher = struct {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
         var callback = try self.callbacks.enter();
         defer callback.deinit();
-        try self.requireAccountAuthority(invocation.source.window_id);
+        try self.requireManagementAuthority(invocation.source.window_id);
         var parsed = try handlers.parsePayload(
             handlers.AccountActivation,
             invocation.request.payload,
@@ -1089,7 +1089,7 @@ pub const Dispatcher = struct {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
         var callback = try self.callbacks.enter();
         defer callback.deinit();
-        try self.requireAccountAuthority(invocation.source.window_id);
+        try self.requireManagementAuthority(invocation.source.window_id);
         var parsed = try handlers.parsePayload(handlers.ModelConnectionCreate, invocation.request.payload);
         defer parsed.deinit();
         const protocol = parseProtocol(parsed.value.protocol) orelse
@@ -1101,11 +1101,11 @@ pub const Dispatcher = struct {
         ) catch return error.InvalidBridgePayload;
         defer std.heap.c_allocator.free(normalized_base_url);
         if (parsed.value.displayName.len == 0 or
-            parsed.value.displayName.len > account_contract.Limits.display_name_bytes or
+            parsed.value.displayName.len > execution_contract.Limits.display_name_bytes or
             parsed.value.normalizedBaseUrl.len == 0 or
-            parsed.value.normalizedBaseUrl.len > account_contract.Limits.base_url_bytes or
+            parsed.value.normalizedBaseUrl.len > execution_contract.Limits.base_url_bytes or
             parsed.value.modelId.len == 0 or
-            parsed.value.modelId.len > account_contract.Limits.model_id_bytes)
+            parsed.value.modelId.len > execution_contract.Limits.model_id_bytes)
             return error.InvalidBridgePayload;
         const spec: execution_contract.ModelConnectionSpec = .{
             .display_name = parsed.value.displayName,
@@ -1139,7 +1139,7 @@ pub const Dispatcher = struct {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
         var callback = try self.callbacks.enter();
         defer callback.deinit();
-        try self.requireAccountAuthority(invocation.source.window_id);
+        try self.requireManagementAuthority(invocation.source.window_id);
         var parsed = try handlers.parsePayload(handlers.ModelConnectionUpdate, invocation.request.payload);
         defer parsed.deinit();
         const protocol = parseProtocol(parsed.value.protocol) orelse
@@ -1178,7 +1178,7 @@ pub const Dispatcher = struct {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
         var callback = try self.callbacks.enter();
         defer callback.deinit();
-        try self.requireAccountAuthority(invocation.source.window_id);
+        try self.requireManagementAuthority(invocation.source.window_id);
         var parsed = try handlers.parsePayload(handlers.ModelConnectionSelection, invocation.request.payload);
         defer parsed.deinit();
         return encodeExecutionResult(output, self.model_connection_commands.submit(.{
@@ -1214,7 +1214,7 @@ pub const Dispatcher = struct {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
         var callback = try self.callbacks.enter();
         defer callback.deinit();
-        try self.requireAccountAuthority(invocation.source.window_id);
+        try self.requireManagementAuthority(invocation.source.window_id);
         var parsed = try handlers.parsePayload(handlers.ModelConnectionModelSelection, invocation.request.payload);
         defer parsed.deinit();
         const command: execution_contract.ModelConnectionCommand = if (select_default)
@@ -3053,7 +3053,7 @@ pub const Dispatcher = struct {
             return error.EventWindowMismatch;
     }
 
-    fn requireAccountAuthority(
+    fn requireManagementAuthority(
         self: *const Dispatcher,
         window_id: native_sdk.platform.WindowId,
     ) !void {

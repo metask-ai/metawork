@@ -1469,6 +1469,10 @@ pub const Runtime = struct {
     }
 
     pub fn finishAccountCommitNoFail(self: *Runtime) void {
+        self.finishDefaultExecutionCommitNoFail();
+    }
+
+    fn finishDefaultExecutionCommitNoFail(self: *Runtime) void {
         if (self.canCreateTask()) {
             _ = self.schedule.refreshBindingNoFail(
                 self.scheduleExecutionBinding(),
@@ -1495,6 +1499,7 @@ pub const Runtime = struct {
         vault: execution_ports.CredentialVault,
     ) execution_runtime.StartError!void {
         try self.model_connections.start(absolute_directory, vault);
+        self.restoreModelConnectionDefaultNoFail();
     }
 
     pub fn startModelConnectionsUnavailable(self: *Runtime) void {
@@ -1509,15 +1514,91 @@ pub const Runtime = struct {
         self: *Runtime,
         command: execution_contract.ModelConnectionCommand,
     ) execution_contract.CommandResult {
-        return self.model_connections.submitCommand(command);
+        const mutation_connection_id: ?[]const u8 = switch (command) {
+            .update => |value| value.selection.connection_id,
+            .remove => |value| value.connection_id,
+            .create, .test_connection, .select_default => null,
+        };
+        if (mutation_connection_id) |connection_id|
+            if (self.modelConnectionExecutionActive(connection_id))
+                return .rejected(.execution_in_use);
+        if (command == .test_connection)
+            return .rejected(.test_unavailable);
+        if (command == .select_default)
+            return self.selectModelConnectionDefault(command);
+        const result = self.model_connections.submitCommand(command);
+        if (result.accepted) self.finishExecutionCommitNoFail();
+        return result;
     }
 
-    pub fn submitModelConnectionCommandWithExecutionGeneration(
+    fn selectModelConnectionDefault(
         self: *Runtime,
         command: execution_contract.ModelConnectionCommand,
-        generation: u64,
     ) execution_contract.CommandResult {
-        return self.model_connections.submitCommandWithExecutionGeneration(command, generation);
+        const value = command.select_default;
+        const execution_generation = self.nextExecutionGeneration(
+            self.executionGeneration(),
+        ) catch return .rejected(.local_resource_exhausted);
+        var owned_execution = switch (self.prepareModelConnectionExecution(
+            value.selection,
+            value.model_id,
+            execution_generation,
+        )) {
+            .ready => |execution| execution,
+            .rejected => |error_code| return .rejected(error_code),
+        };
+        defer owned_execution.deinit();
+        var prepared_binding = self.prepareModelConnectionBinding(
+            value.selection.connection_id,
+            value.model_id,
+        ) catch return .rejected(.local_resource_exhausted);
+        var prepared_binding_owned = true;
+        defer if (prepared_binding_owned) prepared_binding.deinit();
+        if (self.executionReplacementPending())
+            return .rejected(.operation_in_progress);
+        self.beginDefaultExecutionReplacement() catch |err|
+            return .rejected(replacementExecutionError(err));
+        var replacement_started = true;
+        defer if (replacement_started) self.endExecutionReplacementNoFail();
+        self.prepareExecutionInstall(owned_execution.input()) catch
+            return .rejected(.persistence_unavailable);
+        const result = self.model_connections.submitCommandWithExecutionGeneration(
+            command,
+            owned_execution.input().execution_generation,
+        );
+        if (!result.accepted) return result;
+        self.installModelConnectionExecutionNoFail(
+            &owned_execution,
+            &prepared_binding,
+        );
+        prepared_binding_owned = false;
+        replacement_started = false;
+        self.endExecutionReplacementNoFail();
+        self.finishExecutionCommitNoFail();
+        return result;
+    }
+
+    pub fn beginModelConnectionProbe(
+        self: *Runtime,
+        command: execution_contract.ModelConnectionTestCommand,
+    ) execution_contract.Preparation {
+        const execution_generation = self.nextExecutionGeneration(
+            self.executionGeneration(),
+        ) catch return .{ .rejected = .local_resource_exhausted };
+        var execution = self.resolveModelConnectionProbeExecution(
+            command.selection,
+            command.model_id,
+            execution_generation,
+        ) catch return .{ .rejected = .test_unavailable };
+        const result = self.model_connections.submitCommand(.{
+            .test_connection = command,
+        });
+        if (!result.accepted) {
+            execution.deinit();
+            return .{ .rejected = result.error_code.? };
+        }
+        self.finishExecutionCommitNoFail();
+        return .{ .ready = execution };
     }
 
     pub fn completeModelConnectionTest(
@@ -1525,7 +1606,9 @@ pub const Runtime = struct {
         command: execution_contract.ModelConnectionTestCommand,
         succeeded: bool,
     ) execution_contract.CommandResult {
-        return self.model_connections.completeTest(command, succeeded);
+        const result = self.model_connections.completeTest(command, succeeded);
+        if (result.accepted) self.finishExecutionCommitNoFail();
+        return result;
     }
 
     pub fn createModelConnectionWithCredential(
@@ -1535,12 +1618,14 @@ pub const Runtime = struct {
         model_id: []const u8,
         model_display_name: []const u8,
     ) execution_contract.CommandResult {
-        return self.model_connections.createWithCredential(
+        const result = self.model_connections.createWithCredential(
             secret,
             spec,
             model_id,
             model_display_name,
         );
+        if (result.accepted) self.finishExecutionCommitNoFail();
+        return result;
     }
 
     pub fn modelConnectionDefaultBinding(
@@ -1585,8 +1670,41 @@ pub const Runtime = struct {
         return self.model_connections.resolveDefaultExecution();
     }
 
+    fn restoreModelConnectionDefaultNoFail(self: *Runtime) void {
+        const binding = self.modelConnectionDefaultBinding() orelse return;
+        var execution = (self.resolveDefaultModelConnectionExecution() catch return) orelse {
+            self.finishExecutionCommitNoFail();
+            return;
+        };
+        defer execution.deinit();
+        var prepared_binding = self.prepareModelConnectionBinding(
+            binding.connection_id,
+            binding.model_id,
+        ) catch return;
+        var prepared_binding_owned = true;
+        defer if (prepared_binding_owned) prepared_binding.deinit();
+        if (self.executionReplacementPending()) return;
+        self.beginDefaultExecutionReplacement() catch return;
+        var replacement_started = true;
+        defer if (replacement_started) self.endExecutionReplacementNoFail();
+        self.prepareExecutionInstall(execution.input()) catch {
+            replacement_started = false;
+            self.endExecutionReplacementNoFail();
+            self.finishExecutionCommitNoFail();
+            return;
+        };
+        self.installModelConnectionExecutionNoFail(
+            &execution,
+            &prepared_binding,
+        );
+        prepared_binding_owned = false;
+        replacement_started = false;
+        self.endExecutionReplacementNoFail();
+        self.finishExecutionCommitNoFail();
+    }
+
     pub fn finishExecutionCommitNoFail(self: *Runtime) void {
-        self.finishAccountCommitNoFail();
+        self.finishDefaultExecutionCommitNoFail();
     }
 
     pub fn modelConnectionExecutionActive(
@@ -1598,6 +1716,22 @@ pub const Runtime = struct {
 
     pub fn modelConnectionExecutionSelected(self: *const Runtime) bool {
         return self.execution_state.modelConnectionSelected();
+    }
+
+    pub fn metaskActivationAvailable(self: *const Runtime) bool {
+        return self.modelConnectionExecutionSelected();
+    }
+
+    /// Product-owned arbitration between the two default execution sources.
+    /// Passive Account restore cannot displace a user-selected connection;
+    /// explicit Metask activation must first durably clear that default.
+    pub fn acceptMetaskExecutionCandidate(
+        self: *Runtime,
+        explicit_activation: bool,
+    ) bool {
+        if (!self.modelConnectionExecutionSelected()) return true;
+        if (!explicit_activation) return false;
+        return self.clearModelConnectionDefault().accepted;
     }
 
     pub fn executionGeneration(self: *const Runtime) u64 {
@@ -5724,39 +5858,34 @@ pub const Runtime = struct {
         self.allocator.free(value);
     }
 
-    pub fn executionHandoff(self: *Runtime) control_ports.ExecutionHandoff {
+    pub fn accountExecutionHandoff(self: *Runtime) control_ports.AccountExecutionHandoff {
         return .{
             .context = self,
             .commit_account_fact_fn = controlCommitAccountFact,
             .finish_account_commit_fn = controlFinishAccountCommit,
-            .account_view_fn = controlAccountView,
-            .model_connection_active_fn = controlModelConnectionActive,
-            .model_connection_selected_fn = controlModelConnectionSelected,
-            .execution_generation_fn = controlExecutionGeneration,
-            .prepare_model_connection_fn = controlPrepareModelConnection,
+            .metask_activation_available_fn = controlMetaskActivationAvailable,
+            .accept_metask_candidate_fn = controlAcceptMetaskCandidate,
             .replacement_pending_fn = controlReplacementPending,
             .begin_default_replacement_fn = controlBeginDefaultReplacement,
             .begin_replacement_fn = controlBeginReplacement,
             .prepare_install_fn = controlPrepareExecutionInstall,
             .prepare_clear_fn = controlPrepareExecutionClear,
-            .install_model_connection_fn = controlInstallModelConnection,
             .install_execution_fn = controlInstallExecution,
             .clear_execution_fn = controlClearExecution,
             .end_replacement_fn = controlEndReplacement,
+        };
+    }
+
+    pub fn executionManagement(self: *Runtime) control_ports.ExecutionManagement {
+        return .{
+            .context = self,
             .start_model_connections_fn = controlStartModelConnections,
             .start_model_connections_unavailable_fn = controlStartModelConnectionsUnavailable,
             .stop_model_connections_fn = controlStopModelConnections,
             .create_model_connection_fn = controlCreateModelConnection,
             .submit_model_connection_fn = controlSubmitModelConnection,
-            .submit_model_connection_generation_fn = controlSubmitModelConnectionGeneration,
+            .begin_model_connection_probe_fn = controlBeginModelConnectionProbe,
             .complete_model_connection_test_fn = controlCompleteModelConnectionTest,
-            .model_connection_default_fn = controlModelConnectionDefault,
-            .clear_model_connection_default_fn = controlClearModelConnectionDefault,
-            .next_execution_generation_fn = controlNextExecutionGeneration,
-            .prepare_model_connection_execution_fn = controlPrepareModelConnectionExecution,
-            .resolve_model_connection_probe_fn = controlResolveModelConnectionProbe,
-            .resolve_default_model_connection_fn = controlResolveDefaultModelConnection,
-            .finish_execution_commit_fn = controlFinishExecutionCommit,
         };
     }
 
@@ -5833,20 +5962,11 @@ fn controlCommitAccountFact(context: *anyopaque, fact: account_contract.AccountF
 fn controlFinishAccountCommit(context: *anyopaque) void {
     controlOwner(context).finishAccountCommitNoFail();
 }
-fn controlAccountView(context: *anyopaque) account_contract.AccountView {
-    return controlOwner(context).accountView();
+fn controlMetaskActivationAvailable(context: *anyopaque) bool {
+    return controlOwner(context).metaskActivationAvailable();
 }
-fn controlModelConnectionActive(context: *anyopaque, id: []const u8) bool {
-    return controlOwner(context).modelConnectionExecutionActive(id);
-}
-fn controlModelConnectionSelected(context: *anyopaque) bool {
-    return controlOwner(context).modelConnectionExecutionSelected();
-}
-fn controlExecutionGeneration(context: *anyopaque) u64 {
-    return controlOwner(context).executionGeneration();
-}
-fn controlPrepareModelConnection(context: *anyopaque, connection_id: []const u8, model_id: []const u8) anyerror!PreparedModelConnectionBinding {
-    return controlOwner(context).prepareModelConnectionBinding(connection_id, model_id);
+fn controlAcceptMetaskCandidate(context: *anyopaque, explicit_activation: bool) bool {
+    return controlOwner(context).acceptMetaskExecutionCandidate(explicit_activation);
 }
 fn controlReplacementPending(context: *anyopaque) bool {
     return controlOwner(context).executionReplacementPending();
@@ -5862,9 +5982,6 @@ fn controlPrepareExecutionInstall(context: *anyopaque, input: execution_contract
 }
 fn controlPrepareExecutionClear(context: *anyopaque) anyerror!void {
     return controlOwner(context).prepareExecutionClear();
-}
-fn controlInstallModelConnection(context: *anyopaque, execution: *execution_contract.OwnedConfig, binding: *PreparedModelConnectionBinding) void {
-    controlOwner(context).installModelConnectionExecutionNoFail(execution, binding);
 }
 fn controlInstallExecution(context: *anyopaque, execution: *execution_contract.OwnedConfig) void {
     controlOwner(context).installExecutionNoFail(execution);
@@ -5890,32 +6007,11 @@ fn controlCreateModelConnection(context: *anyopaque, secret: []const u8, spec: e
 fn controlSubmitModelConnection(context: *anyopaque, command: execution_contract.ModelConnectionCommand) execution_contract.CommandResult {
     return controlOwner(context).submitModelConnectionCommand(command);
 }
-fn controlSubmitModelConnectionGeneration(context: *anyopaque, command: execution_contract.ModelConnectionCommand, generation: u64) execution_contract.CommandResult {
-    return controlOwner(context).submitModelConnectionCommandWithExecutionGeneration(command, generation);
+fn controlBeginModelConnectionProbe(context: *anyopaque, command: execution_contract.ModelConnectionTestCommand) execution_contract.Preparation {
+    return controlOwner(context).beginModelConnectionProbe(command);
 }
 fn controlCompleteModelConnectionTest(context: *anyopaque, command: execution_contract.ModelConnectionTestCommand, succeeded: bool) execution_contract.CommandResult {
     return controlOwner(context).completeModelConnectionTest(command, succeeded);
-}
-fn controlModelConnectionDefault(context: *anyopaque) ?execution_contract.DefaultBinding {
-    return controlOwner(context).modelConnectionDefaultBinding();
-}
-fn controlClearModelConnectionDefault(context: *anyopaque) execution_contract.CommandResult {
-    return controlOwner(context).clearModelConnectionDefault();
-}
-fn controlNextExecutionGeneration(context: *anyopaque, current: u64) anyerror!u64 {
-    return controlOwner(context).nextExecutionGeneration(current);
-}
-fn controlPrepareModelConnectionExecution(context: *anyopaque, selection: execution_contract.ModelConnectionSelectionCommand, model_id: []const u8, generation: u64) execution_contract.Preparation {
-    return controlOwner(context).prepareModelConnectionExecution(selection, model_id, generation);
-}
-fn controlResolveModelConnectionProbe(context: *anyopaque, selection: execution_contract.ModelConnectionSelectionCommand, model_id: []const u8, generation: u64) anyerror!execution_contract.OwnedConfig {
-    return controlOwner(context).resolveModelConnectionProbeExecution(selection, model_id, generation);
-}
-fn controlResolveDefaultModelConnection(context: *anyopaque) anyerror!?execution_contract.OwnedConfig {
-    return controlOwner(context).resolveDefaultModelConnectionExecution();
-}
-fn controlFinishExecutionCommit(context: *anyopaque) void {
-    controlOwner(context).finishExecutionCommitNoFail();
 }
 fn controlDrainAgentEvents(context: *anyopaque) anyerror!void {
     return controlOwner(context).drainAgentEvents();
@@ -6149,6 +6245,14 @@ fn taskProfileFromSchedule(
     return switch (profile) {
         .approval_required => .approval_required,
         .full_access => .full_access,
+    };
+}
+
+fn replacementExecutionError(err: anyerror) execution_contract.ManagementError {
+    return switch (err) {
+        error.TaskRunning => .execution_in_use,
+        error.ExecutionInUse => .operation_in_progress,
+        else => .local_resource_exhausted,
     };
 }
 
@@ -9057,6 +9161,163 @@ test "Runtime publishes a user model connection as an independent execution sour
         .protocol = .openai_chat_completions,
         .normalized_base_url = "https://api.openai.com/v1/chat/completions",
     });
+}
+
+test "Product Control atomically manages and installs a Model Connection default" {
+    const TestVault = struct {
+        const slot = "model-connection-00000000000000000000000000000001";
+
+        secret: [execution_contract.Limits.credential_bytes]u8 = undefined,
+        secret_len: usize = 0,
+        present: bool = false,
+
+        fn port(self: *@This()) execution_ports.CredentialVault {
+            return .{
+                .context = self,
+                .generate_slot_fn = generate,
+                .store_fn = store,
+                .get_fn = get,
+                .delete_fn = delete,
+            };
+        }
+
+        fn generate(
+            _: *anyopaque,
+            output: *[execution_ports.credential_slot_bytes]u8,
+        ) anyerror!void {
+            @memcpy(output, slot);
+        }
+
+        fn store(
+            context: *anyopaque,
+            _: []const u8,
+            secret: []const u8,
+        ) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (secret.len > self.secret.len) return error.WriteFailed;
+            @memcpy(self.secret[0..secret.len], secret);
+            self.secret_len = secret.len;
+            self.present = true;
+        }
+
+        fn get(
+            context: *anyopaque,
+            _: []const u8,
+            output: []u8,
+        ) anyerror!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (!self.present) return null;
+            if (self.secret_len > output.len) return error.ReadFailed;
+            @memcpy(output[0..self.secret_len], self.secret[0..self.secret_len]);
+            return output[0..self.secret_len];
+        }
+
+        fn delete(context: *anyopaque, _: []const u8) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            std.crypto.secureZero(u8, self.secret[0..self.secret_len]);
+            self.secret_len = 0;
+            self.present = false;
+        }
+    };
+
+    test_agent_runtime.io = std.testing.io;
+    var control = try Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        &test_agent_runtime,
+        .{
+            .max_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        .{},
+    );
+    defer control.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
+    var vault: TestVault = .{};
+    try control.startModelConnections(
+        directory_storage[0..directory_len],
+        vault.port(),
+    );
+    defer control.stopModelConnections();
+
+    try std.testing.expect(control.createModelConnectionWithCredential(
+        "provider-secret",
+        .{
+            .display_name = "OpenAI",
+            .protocol = .openai_responses,
+            .normalized_base_url = "https://api.openai.com/v1/responses",
+        },
+        "gpt-5",
+        "GPT-5",
+    ).accepted);
+    const view = control.model_connections.views()[0];
+    const selection: execution_contract.ModelConnectionSelectionCommand = .{
+        .connection_id = TestVault.slot,
+        .expected_connection_generation = view.connection_generation,
+    };
+    var probe = switch (control.beginModelConnectionProbe(.{
+        .selection = selection,
+        .model_id = "gpt-5",
+    })) {
+        .ready => |execution| execution,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    defer probe.deinit();
+    try std.testing.expect(control.completeModelConnectionTest(.{
+        .selection = selection,
+        .model_id = "gpt-5",
+    }, true).accepted);
+    try std.testing.expect(control.submitModelConnectionCommand(.{
+        .select_default = .{
+            .selection = selection,
+            .model_id = "gpt-5",
+        },
+    }).accepted);
+
+    try std.testing.expectEqual(
+        execution_contract.Source.model_connection,
+        control.execution_state.source(),
+    );
+    try std.testing.expectEqualStrings(
+        TestVault.slot,
+        control.execution_state.selectedModelConnectionId(),
+    );
+    const rejected = control.submitModelConnectionCommand(.{ .update = .{
+        .selection = selection,
+        .spec = .{
+            .display_name = "Renamed",
+            .protocol = .openai_responses,
+            .normalized_base_url = "https://api.openai.com/v1/responses",
+        },
+    } });
+    try std.testing.expect(!rejected.accepted);
+    try std.testing.expectEqual(
+        execution_contract.ManagementError.execution_in_use,
+        rejected.error_code.?,
+    );
+
+    try control.beginDefaultExecutionReplacement();
+    try control.prepareExecutionClear();
+    control.clearExecutionNoFail();
+    control.endExecutionReplacementNoFail();
+    control.finishExecutionCommitNoFail();
+    control.stopModelConnections();
+    try control.startModelConnections(
+        directory_storage[0..directory_len],
+        vault.port(),
+    );
+    try std.testing.expectEqual(
+        execution_contract.Source.model_connection,
+        control.execution_state.source(),
+    );
+    try std.testing.expectEqualStrings(
+        TestVault.slot,
+        control.execution_state.selectedModelConnectionId(),
+    );
 }
 
 test "Account projection and execution install use preallocated no-fail storage" {

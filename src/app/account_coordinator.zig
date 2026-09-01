@@ -1,204 +1,38 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const agent = @import("metawork_agent");
+const agent = if (builtin.is_test) @import("metawork_agent") else struct {};
 const account_contract = @import("metawork_account_contract");
-const execution_contract = @import("metawork_product_execution_contract");
+const execution_contract = if (builtin.is_test)
+    @import("metawork_product_execution_contract")
+else
+    struct {};
 const account_api = @import("metawork_account");
-const execution_ports = @import("product_execution_ports");
 const account_store = @import("account_credential_store");
 const control_ports = @import("metawork_product_control_ports");
 const test_control = if (builtin.is_test) @import("lifecycle_fixture").product_control else struct {};
 
 const ExecutionReplacement = enum { none, startup, default, identity };
 
-pub const ModelConnectionProbeNotifier = struct {
-    context: *anyopaque,
-    notify_fn: *const fn (*anyopaque) void,
-
-    fn notify(self: ModelConnectionProbeNotifier) void {
-        self.notify_fn(self.context);
-    }
-};
-
-const ModelConnectionProbeJob = struct {
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    completion_transport: agent.CompletionTransport,
-    notifier: ModelConnectionProbeNotifier,
-    selection: execution_contract.ModelConnectionSelectionCommand,
-    connection_id: []u8,
-    model_id: []u8,
-    execution: ?execution_contract.OwnedConfig,
-    cancellation: agent.ProviderProbeCancellation = .{},
-    succeeded: bool = false,
-    finished: std.atomic.Value(bool) = .init(false),
-    thread: ?std.Thread = null,
-
-    fn create(
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        completion_transport: agent.CompletionTransport,
-        notifier: ModelConnectionProbeNotifier,
-        command_value: execution_contract.ModelConnectionTestCommand,
-        execution: *execution_contract.OwnedConfig,
-    ) std.mem.Allocator.Error!*ModelConnectionProbeJob {
-        const self = try allocator.create(ModelConnectionProbeJob);
-        errdefer allocator.destroy(self);
-        const connection_id = try allocator.dupe(
-            u8,
-            command_value.selection.connection_id,
-        );
-        errdefer allocator.free(connection_id);
-        const model_id = try allocator.dupe(u8, command_value.model_id);
-        errdefer allocator.free(model_id);
-        self.* = .{
-            .allocator = allocator,
-            .io = io,
-            .completion_transport = completion_transport,
-            .notifier = notifier,
-            .selection = .{
-                .connection_id = connection_id,
-                .expected_connection_generation = command_value.selection.expected_connection_generation,
-            },
-            .connection_id = connection_id,
-            .model_id = model_id,
-            .execution = execution.take(),
-        };
-        return self;
-    }
-
-    fn start(self: *ModelConnectionProbeJob) std.Thread.SpawnError!void {
-        self.thread = try std.Thread.spawn(.{}, run, .{self});
-    }
-
-    fn run(self: *ModelConnectionProbeJob) void {
-        const execution = &self.execution.?;
-        const input = execution.input();
-        self.succeeded = agent.runProviderProbe(self.io, self.completion_transport, .{
-            .provider_id = input.target.provider_id,
-            .protocol = switch (input.target.protocol) {
-                .openai_responses => .openai_responses,
-                .anthropic_messages => .anthropic_messages,
-                .openai_chat_completions => .openai_chat_completions,
-                .gemini_native => .gemini_native,
-            },
-            .credential = input.api_key,
-            .model = input.target.model,
-            .base_url = input.target.base_url,
-        }, &self.cancellation) == .connected;
-        execution.deinit();
-        self.execution = null;
-        self.finished.store(true, .release);
-        self.notifier.notify();
-    }
-
-    fn join(self: *ModelConnectionProbeJob) void {
-        const thread = self.thread orelse return;
-        thread.join();
-        self.thread = null;
-    }
-
-    fn cancel(self: *ModelConnectionProbeJob) void {
-        self.cancellation.request();
-    }
-
-    fn deinit(self: *ModelConnectionProbeJob) void {
-        std.debug.assert(self.thread == null);
-        if (self.execution) |*execution| execution.deinit();
-        self.allocator.free(self.model_id);
-        self.allocator.free(self.connection_id);
-        const allocator = self.allocator;
-        self.* = undefined;
-        allocator.destroy(self);
-    }
-
-    fn command(self: *const ModelConnectionProbeJob) execution_contract.ModelConnectionTestCommand {
-        return .{
-            .selection = .{
-                .connection_id = self.connection_id,
-                .expected_connection_generation = self.selection.expected_connection_generation,
-            },
-            .model_id = self.model_id,
-        };
-    }
-};
-
 pub const Coordinator = struct {
-    io: std.Io,
     runtime: *account_api.Runtime,
-    control: control_ports.ExecutionHandoff,
+    control: control_ports.AccountExecutionHandoff,
     main_thread_id: std.Thread.Id,
-    model_connection_probe_notifier: ?ModelConnectionProbeNotifier = null,
-    completion_transport: ?agent.CompletionTransport = null,
-    model_connection_probe_job: ?*ModelConnectionProbeJob = null,
     metask_activation_attempt_id: ?u64 = null,
 
     pub fn init(
         runtime: *account_api.Runtime,
-        control: control_ports.ExecutionHandoff,
+        control: control_ports.AccountExecutionHandoff,
         main_thread_id: std.Thread.Id,
-        io: std.Io,
     ) Coordinator {
         return .{
-            .io = io,
             .runtime = runtime,
             .control = control,
             .main_thread_id = main_thread_id,
         };
     }
 
-    pub fn setModelConnectionProbeNotifier(
-        self: *Coordinator,
-        notifier: ?ModelConnectionProbeNotifier,
-    ) void {
-        self.model_connection_probe_notifier = notifier;
-    }
-
-    pub fn setCompletionTransport(
-        self: *Coordinator,
-        network: agent.CompletionTransport,
-    ) void {
-        self.completion_transport = network;
-    }
-
     pub fn commandSink(self: *Coordinator) account_contract.AccountCommandSink {
         return .{ .context = self, .submit_fn = submitCommand };
-    }
-
-    pub fn modelConnectionCommandSink(self: *Coordinator) execution_contract.CommandSink {
-        return .{ .context = self, .submit_fn = submitModelConnectionCommand };
-    }
-
-    fn submitModelConnectionCommand(
-        context: *anyopaque,
-        command: execution_contract.ModelConnectionCommand,
-    ) execution_contract.CommandResult {
-        const self: *Coordinator = @ptrCast(@alignCast(context));
-        return self.submitModelConnection(command);
-    }
-
-    /// Application-only continuation after a trusted native secret capture.
-    /// The secret is borrowed synchronously and never enters Bridge or a
-    /// product projection. Product Execution owns the recoverable credential
-    /// and registry transaction; Product Control observes only its committed
-    /// secret-free projection.
-    pub fn createModelConnectionWithCapturedCredential(
-        self: *Coordinator,
-        secret: []const u8,
-        spec: execution_contract.ModelConnectionSpec,
-        model_id: []const u8,
-        model_display_name: []const u8,
-    ) execution_contract.CommandResult {
-        self.assertMainThread();
-        const result = self.control.createModelConnectionWithCredential(
-            secret,
-            spec,
-            model_id,
-            model_display_name,
-        );
-        if (!result.accepted) return result;
-        self.control.finishExecutionCommitNoFail();
-        return result;
     }
 
     fn submitCommand(
@@ -208,7 +42,7 @@ pub const Coordinator = struct {
         const self: *Coordinator = @ptrCast(@alignCast(context));
         self.assertMainThread();
         if (command == .activate_metask and
-            !self.control.modelConnectionExecutionSelected())
+            !self.control.metaskActivationAvailable())
             return .rejected(.invalid_state);
         return switch (self.runtime.prepareCommand(command)) {
             .prepared => |prepared| result: {
@@ -222,152 +56,20 @@ pub const Coordinator = struct {
         };
     }
 
-    fn submitModelConnection(
-        self: *Coordinator,
-        command: execution_contract.ModelConnectionCommand,
-    ) execution_contract.CommandResult {
-        const mutation_connection_id: ?[]const u8 = switch (command) {
-            .update => |value| value.selection.connection_id,
-            .remove => |value| value.connection_id,
-            .create, .test_connection, .select_default => null,
-        };
-        if (mutation_connection_id) |connection_id|
-            if (self.control.modelConnectionExecutionActive(connection_id))
-                return .rejected(.execution_in_use);
-        if (command == .test_connection)
-            return self.startModelConnectionProbe(command.test_connection);
-        if (command == .select_default) {
-            const value = command.select_default;
-            const execution_generation = self.control.nextExecutionGeneration(
-                self.control.executionGeneration(),
-            ) catch return .rejected(.local_resource_exhausted);
-            var owned_execution = switch (self.control.prepareModelConnectionExecution(
-                value.selection,
-                value.model_id,
-                execution_generation,
-            )) {
-                .ready => |execution| execution,
-                .rejected => |error_code| return .rejected(error_code),
-            };
-            errdefer owned_execution.deinit();
-            var prepared_binding = self.control.prepareModelConnectionBinding(
-                value.selection.connection_id,
-                value.model_id,
-            ) catch return .rejected(.local_resource_exhausted);
-            var prepared_binding_owned = true;
-            defer if (prepared_binding_owned) prepared_binding.deinit();
-            if (self.control.executionReplacementPending())
-                return .rejected(.operation_in_progress);
-            self.control.beginDefaultExecutionReplacement() catch |err|
-                return .rejected(replacementExecutionError(err));
-            var replacement_started = true;
-            defer if (replacement_started)
-                self.endActiveReplacementNoFail();
-            self.control.prepareExecutionInstall(
-                owned_execution.input(),
-            ) catch return .rejected(.persistence_unavailable);
-            const result = self.control.submitModelConnectionCommandWithExecutionGeneration(
-                command,
-                owned_execution.input().execution_generation,
-            );
-            if (!result.accepted) return result;
-            self.control.installModelConnectionExecutionNoFail(
-                &owned_execution,
-                &prepared_binding,
-            );
-            prepared_binding_owned = false;
-            replacement_started = false;
-            self.endActiveReplacementNoFail();
-            self.control.finishExecutionCommitNoFail();
-            return result;
-        }
-        const result = self.control.submitModelConnectionCommand(command);
-        if (!result.accepted) return result;
-        self.control.finishExecutionCommitNoFail();
-        return result;
-    }
-
-    fn startModelConnectionProbe(
-        self: *Coordinator,
-        command: execution_contract.ModelConnectionTestCommand,
-    ) execution_contract.CommandResult {
-        const notifier = self.model_connection_probe_notifier orelse
-            return .rejected(.test_unavailable);
-        const completion_transport = self.completion_transport orelse
-            return .rejected(.test_unavailable);
-        if (self.model_connection_probe_job != null)
-            return .rejected(.operation_in_progress);
-        const execution_generation = self.control.nextExecutionGeneration(
-            self.control.executionGeneration(),
-        ) catch return .rejected(.local_resource_exhausted);
-        var execution = self.control.resolveModelConnectionProbeExecution(
-            command.selection,
-            command.model_id,
-            execution_generation,
-        ) catch return .rejected(.test_unavailable);
-        var execution_owned = true;
-        defer if (execution_owned) execution.deinit();
-        const allocator = std.heap.c_allocator;
-        const job = ModelConnectionProbeJob.create(
-            allocator,
-            self.io,
-            completion_transport,
-            notifier,
-            command,
-            &execution,
-        ) catch
-            return .rejected(.local_resource_exhausted);
-        execution_owned = false;
-        const result = self.control.submitModelConnectionCommand(.{
-            .test_connection = job.command(),
-        });
-        if (!result.accepted) {
-            job.deinit();
-            return result;
-        }
-        self.control.finishExecutionCommitNoFail();
-        job.start() catch {
-            _ = self.control.completeModelConnectionTest(job.command(), false);
-            self.control.finishExecutionCommitNoFail();
-            job.deinit();
-            return .rejected(.local_resource_exhausted);
-        };
-        self.model_connection_probe_job = job;
-        return result;
-    }
-
     pub fn start(
         self: *Coordinator,
         platform: account_api.PlatformPorts,
-        execution_directory: []const u8,
-        credential_vault: execution_ports.CredentialVault,
     ) void {
         self.assertMainThread();
-        self.control.startModelConnections(
-            execution_directory,
-            credential_vault,
-        ) catch self.control.startModelConnectionsUnavailable();
         const result = self.commitPrepared(
             self.runtime.prepareStart(platform),
             .none,
         );
         std.debug.assert(result.accepted);
-        self.restoreModelConnectionDefaultNoFail();
-    }
-
-    fn startAccountOnlyForTest(
-        self: *Coordinator,
-        platform: account_api.PlatformPorts,
-    ) void {
-        self.assertMainThread();
-        self.control.startModelConnectionsUnavailable();
-        const result = self.commitPrepared(self.runtime.prepareStart(platform), .none);
-        std.debug.assert(result.accepted);
     }
 
     pub fn startAutomation(self: *Coordinator) void {
         self.assertMainThread();
-        self.control.startModelConnectionsUnavailable();
         const result = self.commitPrepared(
             self.runtime.prepareAutomationStart(),
             .startup,
@@ -377,63 +79,11 @@ pub const Coordinator = struct {
 
     pub fn startUnavailable(self: *Coordinator) void {
         self.assertMainThread();
-        self.control.startModelConnectionsUnavailable();
         const result = self.commitPrepared(
             self.runtime.prepareStartUnavailable(),
             .startup,
         );
         std.debug.assert(result.accepted);
-    }
-
-    pub fn startWithAccountUnavailable(
-        self: *Coordinator,
-        execution_directory: []const u8,
-        credential_vault: execution_ports.CredentialVault,
-    ) void {
-        self.assertMainThread();
-        self.control.startModelConnections(
-            execution_directory,
-            credential_vault,
-        ) catch self.control.startModelConnectionsUnavailable();
-        const result = self.commitPrepared(
-            self.runtime.prepareStartUnavailable(),
-            .startup,
-        );
-        std.debug.assert(result.accepted);
-        self.restoreModelConnectionDefaultNoFail();
-    }
-
-    fn restoreModelConnectionDefaultNoFail(self: *Coordinator) void {
-        const binding = self.control.modelConnectionDefaultBinding() orelse return;
-        var execution = (self.control.resolveDefaultModelConnectionExecution() catch return) orelse {
-            self.control.finishExecutionCommitNoFail();
-            return;
-        };
-        defer execution.deinit();
-        var prepared_binding = self.control.prepareModelConnectionBinding(
-            binding.connection_id,
-            binding.model_id,
-        ) catch return;
-        var prepared_binding_owned = true;
-        defer if (prepared_binding_owned) prepared_binding.deinit();
-        if (self.control.executionReplacementPending()) return;
-        self.control.beginDefaultExecutionReplacement() catch return;
-        var replacement_started = true;
-        defer if (replacement_started) self.endActiveReplacementNoFail();
-        self.control.prepareExecutionInstall(execution.input()) catch {
-            replacement_started = false;
-            self.endActiveReplacementNoFail();
-            self.control.finishExecutionCommitNoFail();
-            return;
-        };
-        self.control.installModelConnectionExecutionNoFail(
-            &execution,
-            &prepared_binding,
-        );
-        prepared_binding_owned = false;
-        replacement_started = false;
-        self.endActiveReplacementNoFail();
-        self.control.finishExecutionCommitNoFail();
     }
 
     pub fn onTimer(self: *Coordinator, timer_id: u64) bool {
@@ -452,7 +102,6 @@ pub const Coordinator = struct {
 
     pub fn drain(self: *Coordinator) void {
         self.assertMainThread();
-        self.drainModelConnectionProbe();
         while (self.runtime.prepareNextCompletion()) |result| {
             switch (result) {
                 .prepared => |prepared| {
@@ -462,20 +111,6 @@ pub const Coordinator = struct {
                 .rejected, .ignored_stale => {},
             }
         }
-        self.drainModelConnectionProbe();
-    }
-
-    fn drainModelConnectionProbe(self: *Coordinator) void {
-        const job = self.model_connection_probe_job orelse return;
-        if (!job.finished.load(.acquire)) return;
-        job.join();
-        const result = self.control.completeModelConnectionTest(
-            job.command(),
-            job.succeeded,
-        );
-        if (result.accepted) self.control.finishExecutionCommitNoFail();
-        self.model_connection_probe_job = null;
-        job.deinit();
     }
 
     fn commitPrepared(
@@ -530,13 +165,7 @@ pub const Coordinator = struct {
         self.control.commitAccountFactNoFail(fact);
         if (prepared.takeExecution()) |execution_value| {
             var execution = execution_value;
-            if (self.control.modelConnectionExecutionSelected() and
-                !activates_metask)
-            {
-                execution.deinit();
-            } else if (activates_metask and
-                !self.control.clearModelConnectionDefault().accepted)
-            {
+            if (!self.control.acceptMetaskExecutionCandidate(activates_metask)) {
                 execution.deinit();
             } else {
                 if (!self.control.executionReplacementPending()) {
@@ -550,7 +179,7 @@ pub const Coordinator = struct {
                 }
             }
         } else if (prepared.executionIntent() == .clear) {
-            if (!self.control.modelConnectionExecutionSelected()) {
+            if (self.control.acceptMetaskExecutionCandidate(false)) {
                 if (!self.control.executionReplacementPending()) {
                     self.control.beginDefaultExecutionReplacement() catch
                         unreachable;
@@ -619,17 +248,11 @@ pub const Coordinator = struct {
 
     pub fn shutdown(self: *Coordinator) void {
         self.assertMainThread();
-        if (self.model_connection_probe_job) |job| {
-            job.cancel();
-            job.join();
-            self.drainModelConnectionProbe();
-        }
         const result = self.commitPrepared(
             self.runtime.prepareShutdown(),
             .none,
         );
         std.debug.assert(result.accepted);
-        self.control.stopModelConnections();
     }
 
     fn assertMainThread(self: *const Coordinator) void {
@@ -641,14 +264,6 @@ fn replacementErrorCode(err: anyerror) account_contract.ErrorCode {
     return switch (err) {
         error.TaskRunning => .execution_in_use,
         error.TaskSessionInUse => .session_in_use,
-        error.ExecutionInUse => .operation_in_progress,
-        else => .local_resource_exhausted,
-    };
-}
-
-fn replacementExecutionError(err: anyerror) execution_contract.ManagementError {
-    return switch (err) {
-        error.TaskRunning => .execution_in_use,
         error.ExecutionInUse => .operation_in_progress,
         else => .local_resource_exhausted,
     };
@@ -722,9 +337,8 @@ test "Application coordinator commits Account Runtime facts into Workbench" {
     defer workbench.deinit();
     var coordinator = Coordinator.init(
         &account_runtime,
-        workbench.executionHandoff(),
+        workbench.accountExecutionHandoff(),
         std.Thread.getCurrentId(),
-        std.testing.io,
     );
 
     var execution = try execution_contract.OwnedConfig.initOwned(
@@ -855,9 +469,8 @@ test "Application coordinator balances Workbench gate when Account effect admiss
     defer workbench.deinit();
     var coordinator = Coordinator.init(
         &account_runtime,
-        workbench.executionHandoff(),
+        workbench.accountExecutionHandoff(),
         std.Thread.getCurrentId(),
-        std.testing.io,
     );
 
     var execution = try execution_contract.OwnedConfig.initOwned(
@@ -1166,14 +779,13 @@ test "restored login drives automatic key and model defaults end to end" {
     defer workbench.deinit();
     var coordinator = Coordinator.init(
         &account_runtime,
-        workbench.executionHandoff(),
+        workbench.accountExecutionHandoff(),
         std.Thread.getCurrentId(),
-        std.testing.io,
     );
 
     var fake_platform: FakePlatform = .{};
     fake_platform.seed("stored-refresh-token");
-    coordinator.startAccountOnlyForTest(fake_platform.ports());
+    coordinator.start(fake_platform.ports());
 
     // Phase 1: the automatic continuation must land the first key and the
     // first model without any user action.
@@ -1294,11 +906,10 @@ test "relaunch with persisted selection restores the saved execution" {
         defer workbench.deinit();
         var coordinator = Coordinator.init(
             &account_runtime,
-            workbench.executionHandoff(),
+            workbench.accountExecutionHandoff(),
             std.Thread.getCurrentId(),
-            std.testing.io,
         );
-        coordinator.startAccountOnlyForTest(fake_platform.ports());
+        coordinator.start(fake_platform.ports());
         const settled = pumpUntilReady(&coordinator, &account_runtime, "boot1");
         try std.testing.expectEqual(
             account_contract.CatalogState.ready,
@@ -1342,11 +953,10 @@ test "relaunch with persisted selection restores the saved execution" {
         defer workbench.deinit();
         var coordinator = Coordinator.init(
             &account_runtime,
-            workbench.executionHandoff(),
+            workbench.accountExecutionHandoff(),
             std.Thread.getCurrentId(),
-            std.testing.io,
         );
-        coordinator.startAccountOnlyForTest(fake_platform.ports());
+        coordinator.start(fake_platform.ports());
         const settled = pumpUntilReady(&coordinator, &account_runtime, "boot2");
         try std.testing.expectEqual(
             account_contract.AccountState.authenticated,
@@ -1427,11 +1037,10 @@ test "relaunch with persisted selection restores the saved execution" {
         defer workbench.deinit();
         var coordinator = Coordinator.init(
             &account_runtime,
-            workbench.executionHandoff(),
+            workbench.accountExecutionHandoff(),
             std.Thread.getCurrentId(),
-            std.testing.io,
         );
-        coordinator.startAccountOnlyForTest(fake_platform.ports());
+        coordinator.start(fake_platform.ports());
         const restored = pumpUntilReady(&coordinator, &account_runtime, "boot3");
         try std.testing.expectEqualStrings("2", restored.selected_api_key_id);
         try std.testing.expectEqualStrings("gpt-5.6-sol", restored.selected_model);
@@ -1488,11 +1097,10 @@ test "broken first key parks the catalog and a manual switch recovers" {
     defer workbench.deinit();
     var coordinator = Coordinator.init(
         &account_runtime,
-        workbench.executionHandoff(),
+        workbench.accountExecutionHandoff(),
         std.Thread.getCurrentId(),
-        std.testing.io,
     );
-    coordinator.startAccountOnlyForTest(fake_platform.ports());
+    coordinator.start(fake_platform.ports());
 
     // The automatic continuation picks key 1 whose model catalog fails.
     const parked = pumpUntilReady(&coordinator, &account_runtime, "broken");
