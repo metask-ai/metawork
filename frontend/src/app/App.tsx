@@ -23,16 +23,13 @@ import {
   connectionFailurePresentation,
   connectionStatus,
 } from "./connection-status.ts";
+import { accountSurfacePolicy } from "./account-surface-policy.ts";
 import { Icon } from "../components/ui/Icon.tsx";
 import { ConfirmationNotice } from "../components/ConfirmationNotice.tsx";
 import { AlertDialog } from "../components/ui/alert-dialog.tsx";
 import { Button } from "../components/ui/button.tsx";
 import { AccountIdentity } from "../features/account/AccountIdentity.tsx";
 import { AccountGate } from "../features/account/AccountGate.tsx";
-import {
-  requiresAccountGate,
-  requiresAccountSetup,
-} from "../features/account/gating.ts";
 import { accountErrorMessageId } from "../i18n/account-error.ts";
 import { persistenceRecoveryErrorMessageId } from "../i18n/persistence-recovery.ts";
 import {
@@ -439,16 +436,22 @@ export default function App() {
     ? newTaskDrafts.updateDraft
     : taskDrafts.updateDraft;
   const bridgeUnavailable = viewSyncFailed || !bridgeReady;
-  const accountGateRequired = requiresAccountGate(
+  const hasTasks = snapshot.tasks.length !== 0;
+  const accountSurface = accountSurfacePolicy(
     snapshot.account,
     snapshot.execution,
+    hasTasks,
   );
-  const accountSetupRequired = requiresAccountSetup(
-    snapshot.account,
-    snapshot.execution,
-  );
+  const accountGateRequired = accountSurface.gateRequired;
+  const accountSetupRequired = accountSurface.setupRequired;
 
   useEffect(() => {
+    if (accountSetupRedirected && hasTasks) {
+      setAccountSetupRedirected(false);
+      setSettingsFocus("title");
+      setSettingsOpen(false);
+      return;
+    }
     if (accountSetupRedirected && snapshot.account.state !== "authenticated") {
       setAccountSetupRedirected(false);
       return;
@@ -473,6 +476,7 @@ export default function App() {
   }, [
     accountSetupRedirected,
     accountSetupRequired,
+    hasTasks,
     route,
     settingsOpen,
     snapshot.account.state,

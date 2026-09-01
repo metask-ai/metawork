@@ -1745,6 +1745,7 @@ fn directoryEntryCount(dir: std.Io.Dir) !usize {
 const TestScheduleSupport = struct {
     now: u64 = 1_000,
     commits: usize = 0,
+    recoveries: usize = 0,
     notification_kind: ?product_control.ScheduleNotificationKind = null,
     notification_task_id: u64 = 0,
 
@@ -1769,6 +1770,15 @@ const TestScheduleSupport = struct {
         return .committed;
     }
 
+    fn recover(
+        context: ?*anyopaque,
+        bytes: []const u8,
+    ) product_control.SchedulePersistenceCommit {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        self.recoveries += 1;
+        return commit(context, bytes);
+    }
+
     fn timer(self: *@This()) product_control.ScheduleTimer {
         return .{
             .context = self,
@@ -1784,6 +1794,7 @@ const TestScheduleSupport = struct {
             .context = self,
             .enabled = true,
             .commit_fn = commit,
+            .recover_fn = recover,
         };
     }
 
@@ -1887,7 +1898,8 @@ test "legacy Schedule data leaves Account ready and Execution unavailable as a v
         try std.testing.allocator.dupe(u8, "fixture-secret"),
         "metask:key-1",
     );
-    defer execution.deinit();
+    var execution_owned = true;
+    defer if (execution_owned) execution.deinit();
     try std.testing.expectError(
         error.ScheduledTaskPersistenceUnavailable,
         workbench.prepareExecutionInstall(execution.input()),
@@ -1914,6 +1926,30 @@ test "legacy Schedule data leaves Account ready and Execution unavailable as a v
         snapshot,
         "\"execution\":{\"state\":\"unavailable\",\"defaultSource\":\"metask\",\"activeSource\":null,\"activeGeneration\":\"0\",\"taskCreationAvailable\":false",
     ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"scheduledTaskRecoveryAvailable\":true",
+    ) != null);
+
+    try std.testing.expectEqual(
+        product_control.PersistenceRecoveryOutcome.recovered,
+        workbench.recoverScheduledTaskStore(workbench.currentRevision()),
+    );
+    try std.testing.expectEqual(@as(usize, 1), schedule_support.recoveries);
+    const recovered_snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        recovered_snapshot,
+        "\"scheduledTaskPersistenceHealth\":\"ready\",\"scheduledTaskRecoveryAvailable\":false",
+    ) != null);
+    try workbench.beginExecutionReplacement();
+    try workbench.prepareExecutionInstall(execution.input());
+    workbench.installExecutionNoFail(&execution);
+    execution_owned = false;
+    workbench.endExecutionReplacementNoFail();
+    workbench.finishAccountCommitNoFail();
+    try std.testing.expect(workbench.executionView().task_creation_available);
 }
 
 test "scheduled noninteractive permission request automatically stops the Product Run" {

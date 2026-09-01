@@ -21,6 +21,9 @@ const { SettingsPage } = await vite.ssrLoadModule(
 const { requiresAccountGate, requiresAccountSetup } = await vite.ssrLoadModule(
   "/src/features/account/gating.ts",
 );
+const { accountSurfacePolicy } = await vite.ssrLoadModule(
+  "/src/app/account-surface-policy.ts",
+);
 const { accountErrorMessageId } = await vite.ssrLoadModule(
   "/src/i18n/account-error.ts",
 );
@@ -165,7 +168,7 @@ function renderSettings(account, execution = readyExecution) {
   );
 }
 
-test("only checking and authorizing replace the Workbench surface", () => {
+test("only checking and authorizing request the Account onboarding surface", () => {
   assert.equal(
     requiresAccountGate({ state: "checking" }, { defaultSource: "metask" }),
     true,
@@ -232,6 +235,35 @@ test("unresolved authenticated catalog opens account setup", () => {
     ),
     false,
   );
+});
+
+test("Account onboarding never replaces a Workbench that already owns Tasks", () => {
+  const checking = accountSurfacePolicy(
+    { ...signedOut, state: "checking" },
+    { defaultSource: "metask", taskCreationAvailable: false },
+    true,
+  );
+  assert.deepEqual(checking, {
+    gateRequired: false,
+    setupRequired: false,
+  });
+
+  const unresolved = accountSurfacePolicy(
+    { ...signedOut, state: "authenticated", catalogState: "failed" },
+    { defaultSource: "metask", taskCreationAvailable: false },
+    true,
+  );
+  assert.deepEqual(unresolved, {
+    gateRequired: false,
+    setupRequired: false,
+  });
+
+  const empty = accountSurfacePolicy(
+    { ...signedOut, state: "checking" },
+    { defaultSource: "metask", taskCreationAvailable: false },
+    false,
+  );
+  assert.equal(empty.gateRequired, true);
 });
 
 test("Account runtime blockers keep running tasks distinct from idle sessions", () => {

@@ -174,14 +174,27 @@ test("central conversation paths use only the shared AI UI vocabulary", async ()
 
 test("transitional Account states never turn signed-out history into a security gate", async () => {
   const app = await readFile(resolve(sourceRoot, "app", "App.tsx"), "utf8");
+  const accountSurfacePolicy = await readFile(
+    resolve(sourceRoot, "app", "account-surface-policy.ts"),
+    "utf8",
+  );
   const gating = await readFile(
     resolve(sourceRoot, "features", "account", "gating.ts"),
     "utf8",
   );
   assert.match(app, /<AccountGate/);
+  assert.match(app, /const hasTasks = snapshot\.tasks\.length !== 0;/);
   assert.match(
     app,
-    /requiresAccountGate\(\s*snapshot\.account,\s*snapshot\.execution,\s*\)/,
+    /accountSurfacePolicy\(\s*snapshot\.account,\s*snapshot\.execution,\s*hasTasks,\s*\)/,
+  );
+  assert.match(
+    accountSurfacePolicy,
+    /if \(hasTasks\) return \{ gateRequired: false, setupRequired: false \};/,
+  );
+  assert.match(
+    app,
+    /if \(accountSetupRedirected && hasTasks\) \{[\s\S]*?setSettingsOpen\(false\);/,
   );
   assert.match(app, /selectAccountGateStatus\(statuses\)/);
   assert.match(
