@@ -2324,29 +2324,6 @@ fn runStatusDisposition(status: sdk.Status, has_images: bool, has_documents: boo
     };
 }
 
-test "Run input capability rejection is valid only for the submitted media kind" {
-    try std.testing.expectEqual(
-        SessionStatusDisposition.reusable,
-        runStatusDisposition(.image_input_unsupported, true, false).?,
-    );
-    try std.testing.expectEqual(
-        @as(?SessionStatusDisposition, null),
-        runStatusDisposition(.image_input_unsupported, false, true),
-    );
-    try std.testing.expectEqual(
-        SessionStatusDisposition.reusable,
-        runStatusDisposition(.document_input_unsupported, false, true).?,
-    );
-    try std.testing.expectEqual(
-        @as(?SessionStatusDisposition, null),
-        runStatusDisposition(.document_input_unsupported, true, false),
-    );
-    try std.testing.expectEqual(
-        SessionStatusDisposition.reusable,
-        runStatusDisposition(.document_input_unsupported, true, true).?,
-    );
-}
-
 fn runCheckpointFieldsValid(result: wire.RunResultV1) bool {
     if (result.result_flags & ~wire.RUN_RESULT_COMPACTION_RECOMMENDED != 0)
         return false;

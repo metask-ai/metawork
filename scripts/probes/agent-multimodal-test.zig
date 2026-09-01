@@ -61,6 +61,8 @@ pub fn main(init: std.process.Init) !void {
     const endpoint = args.next() orelse return error.MissingEndpoint;
     const key = args.next() orelse return error.MissingFixtureKey;
     const model = args.next() orelse return error.MissingModel;
+    const document_supported_arg = args.next() orelse return error.MissingDocumentSupport;
+    const document_supported = if (std.mem.eql(u8, document_supported_arg, "true")) true else if (std.mem.eql(u8, document_supported_arg, "false")) false else return error.InvalidDocumentSupport;
     const fixture_root = args.next() orelse return error.MissingFixtureDirectory;
     if (args.next() != null) return error.UnexpectedArgument;
     const protocol: agent.Protocol = if (std.mem.eql(u8, provider, "responses")) .openai_responses else if (std.mem.eql(u8, provider, "anthropic")) .anthropic_messages else if (std.mem.eql(u8, provider, "openai")) .openai_chat_completions else if (std.mem.eql(u8, provider, "gemini")) .gemini_native else return error.UnknownProvider;
@@ -72,6 +74,8 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(gif);
     const large_png = try dir.readFileAlloc(init.io, "large.png", allocator, .limited(4 * 1024 * 1024));
     defer allocator.free(large_png);
+    const pdf = try dir.readFileAlloc(init.io, "document.pdf", allocator, .limited(12 * 1024 * 1024));
+    defer allocator.free(pdf);
     const runtime = try agent.Runtime.init(init.io, allocator, .{ .max_sessions = 1 });
     defer {
         runtime.shutdown() catch unreachable;
@@ -98,7 +102,17 @@ pub fn main(init: std.process.Init) !void {
         .{ .text = "Second image." },
         .{ .image = .{ .format = .gif, .bytes = gif } },
     } });
-    _ = try success(runtime, session, .{ .text = "Continue with the images." });
+    if (document_supported) {
+        _ = try success(runtime, session, .{ .multimodal = &.{.{ .document = .{ .bytes = pdf } }} });
+    } else {
+        var rejected = try execute(session, .{ .multimodal = &.{.{ .document = .{ .bytes = pdf } }} });
+        defer rejected.deinit();
+        if (rejected.abi_status != .document_input_unsupported or rejected.failure != .abi_status or
+            rejected.stop_reason != null or rejected.durable_budget != null or
+            session.snapshot().state != .idle)
+            return error.InvalidDocumentRejection;
+    }
+    _ = try success(runtime, session, .{ .text = "Continue with the images and document." });
     const last_run = try success(runtime, session, .{ .multimodal = &.{.{ .image = .{ .format = .png, .bytes = large_png } }} });
 
     var checkpoint = Checkpoint{ .bytes = try allocator.alloc(u8, 16 * 1024 * 1024) };
@@ -146,6 +160,12 @@ pub fn main(init: std.process.Init) !void {
             rejected.stop_reason != null or rejected.durable_budget != null or
             restored.session.snapshot().state != .idle)
             return error.InvalidImageRejection;
+        var document_rejected = try execute(restored.session, .{ .multimodal = &.{.{ .document = .{ .bytes = pdf } }} });
+        defer document_rejected.deinit();
+        if (document_rejected.abi_status != .document_input_unsupported or document_rejected.failure != .abi_status or
+            document_rejected.stop_reason != null or document_rejected.durable_budget != null or
+            restored.session.snapshot().state != .idle)
+            return error.InvalidDocumentRejection;
         try restored.session.setModel(model);
     } else {
         if (restored.session.prepareRun(.{ .multimodal = &.{.{ .text = "" }} })) |_| {
@@ -153,5 +173,5 @@ pub fn main(init: std.process.Init) !void {
         } else |err| if (err != error.InvalidRunInput) return err;
     }
     _ = try success(runtime, restored.session, .{ .text = "Continue after rejection." });
-    std.debug.print("Host image history and checkpoint acceptance passed: {s}\n", .{provider});
+    std.debug.print("Host multimodal history and checkpoint acceptance passed: {s}\n", .{provider});
 }

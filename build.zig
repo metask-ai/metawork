@@ -72,7 +72,7 @@ pub fn build(b: *std.Build) void {
     multimodal_probe.root_module.addImport("metawork_agent", test_modules.agent);
     const multimodal_run = b.addRunArtifact(multimodal_probe);
     if (b.args) |args| multimodal_run.addArgs(args);
-    b.step("test-agent-multimodal", "Run Agent image acceptance against the provider fixture")
+    b.step("test-agent-multimodal", "Run Agent multimodal acceptance against the provider fixture")
         .dependOn(&multimodal_run.step);
     addMcpConnectorTests(b, test_modules, bundle.link_libc);
     addMcpStdioTests(b, test_modules, bundle.link_libc);

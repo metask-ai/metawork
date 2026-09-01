@@ -4,7 +4,9 @@ const agent = fixture.lifecycle;
 const sdk = fixture.sdk;
 
 const image = agent.InputPart{ .image = .{ .format = .png, .bytes = "abc" } };
+const document = agent.InputPart{ .document = .{ .bytes = "pdf" } };
 const image_cost = @sizeOf(sdk.types.RunInputPartV1) + 4;
+const document_cost = @sizeOf(sdk.types.RunInputPartV1) + 4;
 
 fn destroy(runtime: *agent.Runtime) void {
     runtime.shutdown() catch unreachable;
@@ -22,28 +24,32 @@ fn execute(session: *agent.Session, input: agent.RunInput) !agent.TerminalResult
     return run.execute();
 }
 
-test "multimodal owns ordered text and every image format before caller buffers change" {
+test "multimodal owns ordered text image and document parts before caller buffers change" {
     fixture.fake_core.reset();
     const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
     defer destroy(runtime);
     const session = try fixture.openSession(runtime);
     var text = "before".*;
     var raw = [_]u8{ 0, 0xff, 1, 2 };
+    var pdf = "%PDF".*;
     var parts = [_]agent.InputPart{
         .{ .text = &text },
         .{ .image = .{ .format = .png, .bytes = raw[0..1] } },
         .{ .text = "between" },
         .{ .image = .{ .format = .jpeg, .bytes = raw[0..2] } },
+        .{ .document = .{ .bytes = &pdf } },
         .{ .image = .{ .format = .gif, .bytes = raw[0..3] } },
         .{ .image = .{ .format = .webp, .bytes = &raw } },
     };
     const expected = [_]sdk.types.RunInputPartV1{
-        sdk.textPart("before"),              sdk.imagePart("image/png", "AA=="), sdk.textPart("between"),
-        sdk.imagePart("image/jpeg", "AP8="), sdk.imagePart("image/gif", "AP8B"), sdk.imagePart("image/webp", "AP8BAg=="),
+        sdk.textPart("before"),                  sdk.imagePart("image/png", "AA=="),                  sdk.textPart("between"),
+        sdk.imagePart("image/jpeg", "AP8="),     sdk.documentPart("application/pdf", "JVBERg==", ""), sdk.imagePart("image/gif", "AP8B"),
+        sdk.imagePart("image/webp", "AP8BAg=="),
     };
     fixture.fake_core.expected_multimodal_parts = &expected;
     const id = try session.prepareRun(.{ .multimodal = &parts });
     @memset(&raw, 0);
+    @memset(&pdf, 0);
     @memset(&text, 'x');
     @memset(&parts, .{ .text = "changed" });
     var run = try session.beginRun(id);
@@ -61,8 +67,8 @@ test "multimodal rejects malformed and excessive input without reserving or cons
     defer destroy(runtime);
     const session = try fixture.openSession(runtime);
     const invalid = [_][]const agent.InputPart{
-        &.{},                                               &.{.{ .text = "" }}, &.{.{ .text = "\xff" }},
-        &.{.{ .image = .{ .format = .png, .bytes = "" } }},
+        &.{},                                               &.{.{ .text = "" }},                   &.{.{ .text = "\xff" }},
+        &.{.{ .image = .{ .format = .png, .bytes = "" } }}, &.{.{ .document = .{ .bytes = "" } }},
     };
     for (invalid) |parts| try std.testing.expectError(error.InvalidRunInput, session.prepareRun(.{ .multimodal = parts }));
     try std.testing.expectError(error.RunInputTooLarge, session.prepareRun(.{ .multimodal = &.{ .{ .text = "abc" }, .{ .text = "de" } } }));
@@ -72,6 +78,12 @@ test "multimodal rejects malformed and excessive input without reserving or cons
     defer std.testing.allocator.free(large);
     @memset(large, 0);
     try std.testing.expectError(error.RunInputTooLarge, session.prepareRun(.{ .multimodal = &.{.{ .image = .{ .format = .png, .bytes = large } }} }));
+    {
+        const large_document = try std.testing.allocator.alloc(u8, sdk.types.MAX_RUN_INPUT_DOCUMENT_DATA_BYTES_V1 / 4 * 3 + 1);
+        defer std.testing.allocator.free(large_document);
+        @memset(large_document, 0);
+        try std.testing.expectError(error.RunInputTooLarge, session.prepareRun(.{ .multimodal = &.{.{ .document = .{ .bytes = large_document } }} }));
+    }
     const maximum_image = agent.InputPart{ .image = .{ .format = .png, .bytes = large[0 .. large.len - 1] } };
     const total_too_large = [_]agent.InputPart{maximum_image} ** 4;
     try std.testing.expectError(error.RunInputTooLarge, session.prepareRun(.{ .multimodal = &total_too_large }));
@@ -85,17 +97,17 @@ test "multimodal rejects malformed and excessive input without reserving or cons
     try std.testing.expectEqual(0, used(runtime));
 }
 
-test "multimodal budget covers queued inputs across sessions and rolls back failed admission" {
+test "multimodal budget is shared by queued image and document inputs" {
     fixture.fake_core.reset();
-    const runtime = try fixture.createTestRuntime(.{ .max_sessions = 2, .max_multimodal_input_bytes = image_cost * 2 });
+    const runtime = try fixture.createTestRuntime(.{ .max_sessions = 2, .max_multimodal_input_bytes = image_cost + document_cost });
     defer destroy(runtime);
     const first = try fixture.openSession(runtime);
     const second = try fixture.openSession(runtime);
     const id = try first.prepareRun(.{ .multimodal = &.{image} });
     try std.testing.expectError(error.SessionNotIdle, first.prepareRun(.{ .multimodal = &.{image} }));
     try std.testing.expectEqual(image_cost, used(runtime));
-    const other = try second.prepareRun(.{ .multimodal = &.{image} });
-    try std.testing.expectEqual(image_cost * 2, used(runtime));
+    const other = try second.prepareRun(.{ .multimodal = &.{document} });
+    try std.testing.expectEqual(image_cost + document_cost, used(runtime));
     try std.testing.expectError(error.RunInputBudgetExceeded, second.prepareRun(.{ .multimodal = &.{image} }));
     try second.cancelPreparedRun(other);
     try first.cancelPreparedRun(id);
@@ -137,22 +149,36 @@ test "multimodal shared budget rejects before any allocation" {
     try first.cancelPreparedRun(id);
 }
 
-test "multimodal unsupported status is reusable only for an input containing images" {
-    for ([_]bool{ true, false }) |has_image| {
-        fixture.fake_core.reset();
-        fixture.fake_core.setNextPlan(.image_input_unsupported_status);
-        const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
-        defer destroy(runtime);
-        const session = try fixture.openSession(runtime);
-        var terminal = try execute(session, .{ .multimodal = if (has_image) &.{image} else &.{.{ .text = "text only" }} });
-        defer terminal.deinit();
-        try std.testing.expectEqual(agent.Status.image_input_unsupported, terminal.abi_status.?);
-        try std.testing.expectEqual(@as(?agent.StopReason, null), terminal.stop_reason);
-        try std.testing.expectEqual(@as(?agent.DurableBudgetObservation, null), terminal.durable_budget);
-        try std.testing.expectEqual(if (has_image) agent.TerminalFailure.abi_status else .dependency_contract, terminal.failure.?);
-        try std.testing.expectEqual(if (has_image) agent.SessionState.idle else .poisoned, session.snapshot().state);
-        try std.testing.expectEqual(0, used(runtime));
-        if (has_image) try session.cancelPreparedRun(try session.prepareRun(.{ .text = "retry" }));
+test "multimodal capability rejection matches the submitted media kinds" {
+    const Shape = enum { text, image, document, mixed };
+    const cases = [_]struct { plan: fixture.Plan, status: agent.Status, media: Shape }{
+        .{ .plan = .image_input_unsupported_status, .status = .image_input_unsupported, .media = .image },
+        .{ .plan = .document_input_unsupported_status, .status = .document_input_unsupported, .media = .document },
+    };
+    for (cases) |case| {
+        for ([_]Shape{ .text, .image, .document, .mixed }) |shape| {
+            fixture.fake_core.reset();
+            fixture.fake_core.setNextPlan(case.plan);
+            const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
+            defer destroy(runtime);
+            const session = try fixture.openSession(runtime);
+            const input: agent.RunInput = .{ .multimodal = switch (shape) {
+                .text => &.{.{ .text = "text only" }},
+                .image => &.{image},
+                .document => &.{document},
+                .mixed => &.{ image, document },
+            } };
+            const matches = shape == case.media or shape == .mixed;
+            var terminal = try execute(session, input);
+            defer terminal.deinit();
+            try std.testing.expectEqual(case.status, terminal.abi_status.?);
+            try std.testing.expectEqual(@as(?agent.StopReason, null), terminal.stop_reason);
+            try std.testing.expectEqual(@as(?agent.DurableBudgetObservation, null), terminal.durable_budget);
+            try std.testing.expectEqual(if (matches) agent.TerminalFailure.abi_status else .dependency_contract, terminal.failure.?);
+            try std.testing.expectEqual(if (matches) agent.SessionState.idle else .poisoned, session.snapshot().state);
+            try std.testing.expectEqual(0, used(runtime));
+            if (matches) try session.cancelPreparedRun(try session.prepareRun(.{ .text = "retry" }));
+        }
     }
 }
 
