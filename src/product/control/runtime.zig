@@ -766,6 +766,30 @@ const McpRefreshTestJob = if (builtin.is_test) mcp_testing.RefreshJob else struc
 pub const PreparedModelConnectionBinding =
     execution_state.PreparedModelConnectionBinding;
 
+const StagedMetaskAction = union(enum) {
+    install: execution_contract.OwnedConfig,
+    clear,
+    retain_model_connection,
+
+    fn deinit(self: *StagedMetaskAction) void {
+        switch (self.*) {
+            .install => |*execution| execution.deinit(),
+            .clear, .retain_model_connection => {},
+        }
+        self.* = .clear;
+    }
+};
+
+const StagedMetaskExecution = struct {
+    token: control_ports.MetaskStageToken,
+    action: StagedMetaskAction,
+
+    fn deinit(self: *StagedMetaskExecution) void {
+        self.action.deinit();
+        self.* = undefined;
+    }
+};
+
 pub const Runtime = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -794,6 +818,8 @@ pub const Runtime = struct {
     default_permission_profile: PermissionProfile = .approval_required,
     execution_state: execution_state.State,
     model_connections: execution_runtime.Runtime,
+    staged_metask_execution: ?StagedMetaskExecution = null,
+    next_metask_stage_token: u64 = 1,
     canonical_user_home: ?[]u8,
     model_connection_capabilities: ModelConnectionCapabilities,
     completion_factory: CompletionFactory,
@@ -1744,59 +1770,117 @@ pub const Runtime = struct {
         return self.modelConnectionDefaultBinding() != null;
     }
 
-    /// Atomically applies a Metask candidate at the Product-owned source
-    /// boundary. The durable Model Connection default is user intent; the
-    /// process-local custom binding is only readiness. All fallible schedule
-    /// redaction completes before an explicit activation clears that durable
-    /// default, after which installation is no-fail.
-    ///
-    /// This function always consumes `execution`.
-    pub fn applyMetaskExecutionCandidate(
+    /// Product-owned prepare half of the Metask handoff. The transfer is
+    /// consumed synchronously; a successful result leaves the candidate and
+    /// its credential exclusively inside Product until finalize or abort.
+    pub fn prepareMetaskExecutionCandidate(
         self: *Runtime,
-        execution: *execution_contract.OwnedConfig,
+        transfer: execution_contract.OwnedConfigTransfer,
         explicit_activation: bool,
-    ) control_ports.MetaskExecutionOutcome {
+    ) control_ports.MetaskStageResult {
         std.debug.assert(self.executionReplacementPending());
+        var execution = transfer.take();
+        var execution_owned = true;
+        defer if (execution_owned) execution.deinit();
+        if (self.staged_metask_execution != null)
+            return self.rejectMetaskStage(.invalid_state);
         const custom_default_selected = self.modelConnectionDefaultBinding() != null;
         const custom_execution_active = self.modelConnectionExecutionSelected();
-        if (custom_execution_active and !custom_default_selected) {
-            execution.deinit();
-            return .failed;
-        }
+        if (custom_execution_active and !custom_default_selected)
+            return self.rejectMetaskStage(.invalid_state);
         if (custom_default_selected and !explicit_activation) {
-            execution.deinit();
-            return .retained_model_connection;
+            return self.stageMetaskAction(.retain_model_connection);
         }
-        if (explicit_activation and !custom_default_selected) {
-            execution.deinit();
-            return .failed;
-        }
-        self.prepareExecutionInstall(execution.input()) catch {
-            execution.deinit();
-            return .failed;
-        };
+        if (explicit_activation and !custom_default_selected)
+            return self.rejectMetaskStage(.invalid_state);
+        self.prepareExecutionInstall(execution.input()) catch |err|
+            return self.rejectMetaskStage(metaskStageError(err));
         if (custom_default_selected and
             !self.clearModelConnectionDefault().accepted)
         {
-            execution.deinit();
-            return .failed;
+            self.execution_state.abortReplacementPreparationNoFail();
+            return self.rejectMetaskStage(.invalid_state);
         }
-        self.installExecutionNoFail(execution);
-        return .applied;
+        const result = self.stageMetaskAction(.{ .install = execution.take() });
+        execution_owned = false;
+        return result;
     }
 
     /// Applies an Account-originated execution clear without revoking an
     /// independently selected Model Connection default.
-    pub fn applyMetaskExecutionClear(
+    pub fn prepareMetaskExecutionClear(
         self: *Runtime,
-    ) control_ports.MetaskExecutionOutcome {
+    ) control_ports.MetaskStageResult {
         std.debug.assert(self.executionReplacementPending());
+        if (self.staged_metask_execution != null)
+            return self.rejectMetaskStage(.invalid_state);
         if (self.modelConnectionDefaultBinding() != null)
-            return .retained_model_connection;
-        if (self.modelConnectionExecutionSelected()) return .failed;
-        self.prepareExecutionClear() catch return .failed;
-        self.clearExecutionNoFail();
-        return .applied;
+            return self.stageMetaskAction(.retain_model_connection);
+        if (self.modelConnectionExecutionSelected())
+            return self.rejectMetaskStage(.invalid_state);
+        self.prepareExecutionClear() catch |err|
+            return self.rejectMetaskStage(metaskStageError(err));
+        return self.stageMetaskAction(.clear);
+    }
+
+    fn stageMetaskAction(
+        self: *Runtime,
+        action: StagedMetaskAction,
+    ) control_ports.MetaskStageResult {
+        const value = self.next_metask_stage_token;
+        if (value == 0 or value == std.math.maxInt(u64)) {
+            var rejected_action = action;
+            rejected_action.deinit();
+            return self.rejectMetaskStage(.resource_exhausted);
+        }
+        self.next_metask_stage_token = value + 1;
+        const token: control_ports.MetaskStageToken = .{ .value = value };
+        self.staged_metask_execution = .{ .token = token, .action = action };
+        return .{ .staged = token };
+    }
+
+    fn rejectMetaskStage(
+        self: *Runtime,
+        error_code: control_ports.MetaskStageError,
+    ) control_ports.MetaskStageResult {
+        self.execution_state.rejectReplacementNoFail(switch (error_code) {
+            .invalid_state => .invalid_candidate,
+            .resource_exhausted => .resource_exhausted,
+            .schedule_persistence_unavailable => .schedule_persistence_unavailable,
+            .schedule_persistence_failed => .schedule_persistence_failed,
+            .schedule_persistence_outcome_unknown => .schedule_persistence_outcome_unknown,
+        });
+        return .{ .rejected = error_code };
+    }
+
+    pub fn finalizeMetaskStageNoFail(
+        self: *Runtime,
+        token: control_ports.MetaskStageToken,
+        fact: account_contract.AccountFact,
+    ) void {
+        var stage = self.staged_metask_execution orelse
+            @panic("Product has no staged Metask execution");
+        std.debug.assert(stage.token.value == token.value);
+        self.staged_metask_execution = null;
+        self.commitAccountFactNoFail(fact);
+        switch (stage.action) {
+            .install => |*execution| self.installExecutionNoFail(execution),
+            .clear => self.clearExecutionNoFail(),
+            .retain_model_connection => {},
+        }
+        stage.deinit();
+    }
+
+    pub fn abortMetaskStageNoFail(
+        self: *Runtime,
+        token: control_ports.MetaskStageToken,
+    ) void {
+        var stage = self.staged_metask_execution orelse
+            @panic("Product has no staged Metask execution");
+        std.debug.assert(stage.token.value == token.value);
+        self.staged_metask_execution = null;
+        self.execution_state.abortReplacementPreparationNoFail();
+        stage.deinit();
     }
 
     pub fn executionGeneration(self: *const Runtime) u64 {
@@ -3964,6 +4048,8 @@ pub const Runtime = struct {
 
     pub fn deinit(self: *Runtime) void {
         self.shutdownExecutor();
+        if (self.staged_metask_execution) |*stage| stage.deinit();
+        self.staged_metask_execution = null;
         self.task_runtime.deinitTasks(self.taskRuntimeReleaseEffects());
         self.task_runtime.deinitStorage();
         for (0..self.workspace.slotCount()) |index| {
@@ -5945,8 +6031,10 @@ pub const Runtime = struct {
             .commit_account_fact_fn = controlCommitAccountFact,
             .finish_account_commit_fn = controlFinishAccountCommit,
             .metask_activation_available_fn = controlMetaskActivationAvailable,
-            .apply_metask_candidate_fn = controlApplyMetaskCandidate,
-            .apply_metask_clear_fn = controlApplyMetaskClear,
+            .prepare_metask_candidate_fn = controlPrepareMetaskCandidate,
+            .prepare_metask_clear_fn = controlPrepareMetaskClear,
+            .finalize_metask_stage_fn = controlFinalizeMetaskStage,
+            .abort_metask_stage_fn = controlAbortMetaskStage,
             .replacement_pending_fn = controlReplacementPending,
             .begin_default_replacement_fn = controlBeginDefaultReplacement,
             .begin_replacement_fn = controlBeginReplacement,
@@ -6043,18 +6131,31 @@ fn controlFinishAccountCommit(context: *anyopaque) void {
 fn controlMetaskActivationAvailable(context: *anyopaque) bool {
     return controlOwner(context).metaskActivationAvailable();
 }
-fn controlApplyMetaskCandidate(
+fn controlPrepareMetaskCandidate(
     context: *anyopaque,
-    execution: *execution_contract.OwnedConfig,
+    transfer: execution_contract.OwnedConfigTransfer,
     explicit_activation: bool,
-) control_ports.MetaskExecutionOutcome {
-    return controlOwner(context).applyMetaskExecutionCandidate(
-        execution,
+) control_ports.MetaskStageResult {
+    return controlOwner(context).prepareMetaskExecutionCandidate(
+        transfer,
         explicit_activation,
     );
 }
-fn controlApplyMetaskClear(context: *anyopaque) control_ports.MetaskExecutionOutcome {
-    return controlOwner(context).applyMetaskExecutionClear();
+fn controlPrepareMetaskClear(context: *anyopaque) control_ports.MetaskStageResult {
+    return controlOwner(context).prepareMetaskExecutionClear();
+}
+fn controlFinalizeMetaskStage(
+    context: *anyopaque,
+    token: control_ports.MetaskStageToken,
+    fact: account_contract.AccountFact,
+) void {
+    controlOwner(context).finalizeMetaskStageNoFail(token, fact);
+}
+fn controlAbortMetaskStage(
+    context: *anyopaque,
+    token: control_ports.MetaskStageToken,
+) void {
+    controlOwner(context).abortMetaskStageNoFail(token);
 }
 fn controlReplacementPending(context: *anyopaque) bool {
     return controlOwner(context).executionReplacementPending();
@@ -6329,6 +6430,16 @@ fn replacementExecutionError(err: anyerror) execution_contract.ManagementError {
         error.TaskRunning => .execution_in_use,
         error.ExecutionInUse => .operation_in_progress,
         else => .local_resource_exhausted,
+    };
+}
+
+fn metaskStageError(err: anyerror) control_ports.MetaskStageError {
+    return switch (err) {
+        error.ScheduledTaskPersistenceUnavailable => .schedule_persistence_unavailable,
+        error.ScheduledTaskPersistenceFailed => .schedule_persistence_failed,
+        error.ScheduledTaskPersistenceOutcomeUnknown => .schedule_persistence_outcome_unknown,
+        error.OutOfMemory => .resource_exhausted,
+        else => .invalid_state,
     };
 }
 
@@ -6982,33 +7093,38 @@ fn installTestExecution(control: *Runtime) !void {
     control.finishAccountCommitNoFail();
 }
 
-fn commitTestExecutionFact(control: *Runtime, generation: u64) void {
-    const api_keys = [_]account_contract.ApiKeyView{.{
-        .id = "key-1",
-        .name = "Primary",
-        .suffix = "1234",
-        .protocol = .anthropic_messages,
-    }};
-    const models = [_]account_contract.ModelView{.{
-        .id = "fixture-model",
-        .display_name = "Fixture model",
-    }};
-    control.commitAccountFactNoFail(.{
+const test_execution_api_keys = [_]account_contract.ApiKeyView{.{
+    .id = "key-1",
+    .name = "Primary",
+    .suffix = "1234",
+    .protocol = .anthropic_messages,
+}};
+const test_execution_models = [_]account_contract.ModelView{.{
+    .id = "fixture-model",
+    .display_name = "Fixture model",
+}};
+
+fn testExecutionFact(generation: u64) account_contract.AccountFact {
+    return .{
         .kind = .execution_changed,
         .view = .{
             .state = .authenticated,
             .catalog_state = .ready,
             .account_id = "account-1",
             .display_name = "Metask User",
-            .api_keys = &api_keys,
-            .models = &models,
+            .api_keys = &test_execution_api_keys,
+            .models = &test_execution_models,
             .selected_api_key_id = "key-1",
             .selected_model = "fixture-model",
             .model_catalog_api_key_id = "key-1",
             .catalog_generation = generation,
             .metask_execution_generation = generation,
         },
-    });
+    };
+}
+
+fn commitTestExecutionFact(control: *Runtime, generation: u64) void {
+    control.commitAccountFactNoFail(testExecutionFact(generation));
 }
 
 fn testRuntime() !Runtime {
@@ -9345,6 +9461,19 @@ fn createTestMetaskExecution(
     );
 }
 
+fn testExecutionTransfer(
+    execution: *execution_contract.OwnedConfig,
+) execution_contract.OwnedConfigTransfer {
+    const Take = struct {
+        fn take(context: *anyopaque) execution_contract.OwnedConfig {
+            const source: *execution_contract.OwnedConfig =
+                @ptrCast(@alignCast(context));
+            return source.take();
+        }
+    };
+    return .{ .context = execution, .take_fn = Take.take };
+}
+
 test "Product Control atomically manages and installs a Model Connection default" {
     test_agent_runtime.io = std.testing.io;
     var control = try Runtime.init(
@@ -9475,10 +9604,14 @@ test "durable Model Connection default blocks passive Metask restore when creden
     var candidate = try createTestMetaskExecution(17, "METASK-SECRET");
     try restored.beginDefaultExecutionReplacement();
     commitTestExecutionFact(&restored, 17);
-    try std.testing.expectEqual(
-        control_ports.MetaskExecutionOutcome.retained_model_connection,
-        restored.applyMetaskExecutionCandidate(&candidate, false),
-    );
+    const retained_token = switch (restored.prepareMetaskExecutionCandidate(
+        testExecutionTransfer(&candidate),
+        false,
+    )) {
+        .staged => |token| token,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    restored.finalizeMetaskStageNoFail(retained_token, testExecutionFact(17));
     restored.endExecutionReplacementNoFail();
     restored.finishExecutionCommitNoFail();
     try std.testing.expect(restored.modelConnectionDefaultBinding() != null);
@@ -9522,8 +9655,14 @@ test "Metask activation clears durable custom default only after every fallible 
     try control.beginDefaultExecutionReplacement();
     commitTestExecutionFact(&control, 18);
     try std.testing.expectEqual(
-        control_ports.MetaskExecutionOutcome.failed,
-        control.applyMetaskExecutionCandidate(&blocked, true),
+        control_ports.MetaskStageError.invalid_state,
+        switch (control.prepareMetaskExecutionCandidate(
+            testExecutionTransfer(&blocked),
+            true,
+        )) {
+            .rejected => |error_code| error_code,
+            .staged => return error.TestUnexpectedResult,
+        },
     );
     control.endExecutionReplacementNoFail();
     control.finishExecutionCommitNoFail();
@@ -9539,10 +9678,14 @@ test "Metask activation clears durable custom default only after every fallible 
     var accepted = try createTestMetaskExecution(19, "METASK-ACCEPTED");
     try control.beginDefaultExecutionReplacement();
     commitTestExecutionFact(&control, 19);
-    try std.testing.expectEqual(
-        control_ports.MetaskExecutionOutcome.applied,
-        control.applyMetaskExecutionCandidate(&accepted, true),
-    );
+    const accepted_token = switch (control.prepareMetaskExecutionCandidate(
+        testExecutionTransfer(&accepted),
+        true,
+    )) {
+        .staged => |token| token,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    control.finalizeMetaskStageNoFail(accepted_token, testExecutionFact(19));
     control.endExecutionReplacementNoFail();
     control.finishExecutionCommitNoFail();
     try std.testing.expect(control.modelConnectionDefaultBinding() == null);
@@ -9629,8 +9772,14 @@ test "Metask activation preserves custom default when Schedule scrub fails" {
     try control.beginDefaultExecutionReplacement();
     commitTestExecutionFact(&control, 20);
     try std.testing.expectEqual(
-        control_ports.MetaskExecutionOutcome.failed,
-        control.applyMetaskExecutionCandidate(&candidate, true),
+        control_ports.MetaskStageError.schedule_persistence_failed,
+        switch (control.prepareMetaskExecutionCandidate(
+            testExecutionTransfer(&candidate),
+            true,
+        )) {
+            .rejected => |error_code| error_code,
+            .staged => return error.TestUnexpectedResult,
+        },
     );
     control.endExecutionReplacementNoFail();
     control.finishExecutionCommitNoFail();
@@ -9641,6 +9790,41 @@ test "Metask activation preserves custom default when Schedule scrub fails" {
         product_schedule.testing.item(&control.schedule, schedule_id).?.input,
         "METASK-SCRUB",
     ) != null);
+}
+
+test "aborting a staged Metask candidate preserves the old execution" {
+    var control = try testRuntime();
+    defer control.deinit();
+
+    var old_execution = try createTestMetaskExecution(31, "OLD-SECRET");
+    try control.beginDefaultExecutionReplacement();
+    commitTestExecutionFact(&control, 31);
+    try control.prepareExecutionInstall(old_execution.input());
+    control.installExecutionNoFail(&old_execution);
+    control.endExecutionReplacementNoFail();
+    control.finishExecutionCommitNoFail();
+
+    var candidate = try createTestMetaskExecution(32, "STAGED-SECRET");
+    try control.beginDefaultExecutionReplacement();
+    const token = switch (control.prepareMetaskExecutionCandidate(
+        testExecutionTransfer(&candidate),
+        false,
+    )) {
+        .staged => |value| value,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(control.staged_metask_execution != null);
+    try std.testing.expectEqual(@as(u64, 31), control.executionGeneration());
+
+    control.abortMetaskStageNoFail(token);
+    control.endExecutionReplacementNoFail();
+    control.finishExecutionCommitNoFail();
+    try std.testing.expect(control.staged_metask_execution == null);
+    try std.testing.expectEqual(@as(u64, 31), control.executionGeneration());
+    try std.testing.expectEqual(
+        execution_contract.Source.metask,
+        control.execution_state.activeSource().?,
+    );
 }
 
 test "Account projection and execution install use preallocated no-fail storage" {

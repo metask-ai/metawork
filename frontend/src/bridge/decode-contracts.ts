@@ -212,6 +212,9 @@ const executionErrorCodes = [
   "credential_unavailable",
   "invalid_candidate",
   "resource_exhausted",
+  "schedule_persistence_unavailable",
+  "schedule_persistence_failed",
+  "schedule_persistence_outcome_unknown",
 ] as const;
 const modelConnectionProtocols = [
   "openai_responses",

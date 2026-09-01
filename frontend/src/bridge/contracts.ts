@@ -13,7 +13,10 @@ export type ExecutionErrorCode =
   | "model_connection_persistence_unavailable"
   | "credential_unavailable"
   | "invalid_candidate"
-  | "resource_exhausted";
+  | "resource_exhausted"
+  | "schedule_persistence_unavailable"
+  | "schedule_persistence_failed"
+  | "schedule_persistence_outcome_unknown";
 
 export type AccountErrorCode =
   | "none"

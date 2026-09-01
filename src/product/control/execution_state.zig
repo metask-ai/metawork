@@ -374,12 +374,14 @@ pub const State = struct {
         if (self.replacement != .none) return error.ExecutionInUse;
         std.debug.assert(self.redaction_preparation == .none);
         self.replacement = .identity;
+        self.availability_error = .none;
     }
 
     pub fn beginDefaultReplacement(self: *State) error{ExecutionInUse}!void {
         if (self.replacement != .none) return error.ExecutionInUse;
         std.debug.assert(self.redaction_preparation == .none);
         self.replacement = .default;
+        self.availability_error = .none;
     }
 
     pub fn endReplacementNoFail(self: *State) void {
@@ -513,6 +515,21 @@ pub const State = struct {
 
     pub fn availabilityError(self: *const State) execution_contract.AvailabilityError {
         return self.availability_error;
+    }
+
+    pub fn rejectReplacementNoFail(
+        self: *State,
+        error_code: execution_contract.AvailabilityError,
+    ) void {
+        std.debug.assert(error_code != .none);
+        std.debug.assert(self.replacement != .none);
+        self.redaction_preparation = .none;
+        self.availability_error = error_code;
+    }
+
+    pub fn abortReplacementPreparationNoFail(self: *State) void {
+        std.debug.assert(self.replacement != .none);
+        self.redaction_preparation = .none;
     }
 
     pub fn hasMetaskDefault(self: *const State) bool {

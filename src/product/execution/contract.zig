@@ -37,6 +37,9 @@ pub const AvailabilityError = enum {
     credential_unavailable,
     invalid_candidate,
     resource_exhausted,
+    schedule_persistence_unavailable,
+    schedule_persistence_failed,
+    schedule_persistence_outcome_unknown,
 };
 
 /// Exact request/response wire dialect. This is not a vendor category.
@@ -369,6 +372,18 @@ pub const OwnedConfig = struct {
         self.protocol = undefined;
         self.execution_generation = 0;
         self.source = undefined;
+    }
+};
+
+/// Opaque, synchronous ownership handoff for an execution candidate. The
+/// sequencing owner may route this capability, but only the receiving
+/// execution owner can materialize the credential-bearing configuration.
+pub const OwnedConfigTransfer = struct {
+    context: *anyopaque,
+    take_fn: *const fn (*anyopaque) OwnedConfig,
+
+    pub fn take(self: OwnedConfigTransfer) OwnedConfig {
+        return self.take_fn(self.context);
     }
 };
 

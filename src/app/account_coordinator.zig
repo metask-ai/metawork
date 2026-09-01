@@ -12,12 +12,17 @@ const control_ports = @import("metawork_product_control_ports");
 const test_control = if (builtin.is_test) @import("lifecycle_fixture").product_control else struct {};
 
 const ExecutionReplacement = enum { none, startup, default, identity };
+const PendingMetaskStage = struct {
+    attempt_id: u64,
+    token: control_ports.MetaskStageToken,
+};
 
 pub const Coordinator = struct {
     runtime: *account_api.Runtime,
     control: control_ports.AccountExecutionHandoff,
     main_thread_id: std.Thread.Id,
     metask_activation_attempt_id: ?u64 = null,
+    pending_metask_stage: ?PendingMetaskStage = null,
 
     pub fn init(
         runtime: *account_api.Runtime,
@@ -148,8 +153,71 @@ pub const Coordinator = struct {
                 started_replacement = true;
             },
         }
+        if ((prepared.executionIntent() == .stage_install or
+            prepared.executionIntent() == .install_committed or
+            prepared.executionIntent() == .clear) and
+            !self.control.executionReplacementPending())
+        {
+            self.control.beginDefaultExecutionReplacement() catch |err|
+                return .rejected(replacementErrorCode(err));
+            started_replacement = true;
+        }
+        const fact = self.runtime.preparedFact(&prepared);
+        const prepared_attempt_id = prepared.attemptId();
+        const activates_metask = prepared_attempt_id != null and
+            prepared_attempt_id == self.metask_activation_attempt_id;
+        var new_stage_token: ?control_ports.MetaskStageToken = null;
+        switch (prepared.executionIntent()) {
+            .stage_install, .install_committed => {
+                const transfer = prepared.executionTransfer() orelse
+                    @panic("Account install stage has no execution candidate");
+                switch (self.control.prepareMetaskExecutionCandidate(
+                    transfer,
+                    activates_metask,
+                )) {
+                    .staged => |token| new_stage_token = token,
+                    .rejected => |error_code| {
+                        if (prepared.executionIntent() == .install_committed) {
+                            prepared.discardExecutionNoFail();
+                            self.endActiveReplacementNoFail();
+                        } else {
+                            if (started_replacement or
+                                self.control.executionReplacementPending())
+                                self.endActiveReplacementNoFail();
+                            return self.commitPrepared(
+                                self.runtime.prepareActiveAttemptFailure(
+                                    metaskStageAccountError(error_code),
+                                ),
+                                .none,
+                            );
+                        }
+                    },
+                }
+            },
+            .clear => switch (self.control.prepareMetaskExecutionClear()) {
+                .staged => |token| new_stage_token = token,
+                .rejected => {
+                    prepared.discardExecutionNoFail();
+                    self.endActiveReplacementNoFail();
+                },
+            },
+            .unchanged, .finalize_install => {},
+        }
+
         const effect_admitted = self.runtime.admitEffect(&prepared);
         if (!effect_admitted) {
+            if (new_stage_token) |token|
+                self.control.abortMetaskStageNoFail(token);
+            if (prepared.executionIntent() == .stage_install) {
+                if (self.control.executionReplacementPending())
+                    self.endActiveReplacementNoFail();
+                return self.commitPrepared(
+                    self.runtime.prepareActiveAttemptFailure(
+                        .local_resource_exhausted,
+                    ),
+                    .none,
+                );
+            }
             if (started_replacement) {
                 self.endActiveReplacementNoFail();
                 return .rejected(.local_resource_exhausted);
@@ -158,30 +226,49 @@ pub const Coordinator = struct {
                 return .rejected(.local_resource_exhausted);
         }
 
-        const fact = self.runtime.preparedFact(&prepared);
-        const prepared_attempt_id = prepared.attemptId();
-        const activates_metask = prepared_attempt_id != null and
-            prepared_attempt_id == self.metask_activation_attempt_id;
-        var execution_handoff_failed = false;
-        self.control.commitAccountFactNoFail(fact);
-        if (prepared.takeExecution()) |execution_value| {
-            var execution = execution_value;
-            if (!self.control.executionReplacementPending()) {
-                self.control.beginDefaultExecutionReplacement() catch
-                    unreachable;
+        if (self.pending_metask_stage) |pending| {
+            if (prepared_attempt_id == pending.attempt_id and
+                prepared.executionIntent() != .finalize_install and
+                prepared.replacementIntent() == .finish)
+            {
+                self.control.abortMetaskStageNoFail(pending.token);
+                self.pending_metask_stage = null;
             }
-            execution_handoff_failed = self.control.applyMetaskExecutionCandidate(
-                &execution,
-                activates_metask,
-            ) == .failed;
-        } else if (prepared.executionIntent() == .clear) {
-            if (!self.control.executionReplacementPending()) {
-                self.control.beginDefaultExecutionReplacement() catch
-                    unreachable;
-            }
-            execution_handoff_failed = self.control.applyMetaskExecutionClear() == .failed;
+        }
+        switch (prepared.executionIntent()) {
+            .finalize_install => {
+                const pending = self.pending_metask_stage orelse
+                    @panic("Account finalized without a Product stage");
+                std.debug.assert(prepared_attempt_id == pending.attempt_id);
+                self.control.finalizeMetaskStageNoFail(pending.token, fact);
+                self.pending_metask_stage = null;
+            },
+            .clear => {
+                const token = new_stage_token orelse
+                    @panic("Account clear has no Product stage");
+                self.control.finalizeMetaskStageNoFail(token, fact);
+                new_stage_token = null;
+            },
+            .install_committed => {
+                const token = new_stage_token orelse
+                    @panic("Committed Account install has no Product stage");
+                self.control.finalizeMetaskStageNoFail(token, fact);
+                new_stage_token = null;
+            },
+            .stage_install, .unchanged => self.control.commitAccountFactNoFail(fact),
         }
         self.runtime.commit(&prepared);
+        if (prepared.executionIntent() == .stage_install) {
+            const attempt_id = prepared_attempt_id orelse
+                @panic("Account execution stage has no attempt");
+            std.debug.assert(self.pending_metask_stage == null);
+            self.pending_metask_stage = .{
+                .attempt_id = attempt_id,
+                .token = new_stage_token orelse
+                    @panic("Product did not return a stage token"),
+            };
+            new_stage_token = null;
+        }
 
         // A continuation effect can fail admission only after its preceding
         // external step has completed. Commit that observed step first, then
@@ -203,16 +290,6 @@ pub const Coordinator = struct {
             replacement == .startup) and
             self.control.executionReplacementPending())
             self.endActiveReplacementNoFail();
-        if (execution_handoff_failed) {
-            const failed = self.commitPrepared(
-                self.runtime.prepareCommittedPhaseFailure(
-                    .local_resource_exhausted,
-                ),
-                .none,
-            );
-            std.debug.assert(failed.accepted);
-            return .acceptedAttempt(prepared_attempt_id);
-        }
         self.control.finishAccountCommitNoFail();
 
         if (refresh_after_commit) {
@@ -250,6 +327,12 @@ pub const Coordinator = struct {
 
     pub fn shutdown(self: *Coordinator) void {
         self.assertMainThread();
+        if (self.pending_metask_stage) |pending| {
+            self.control.abortMetaskStageNoFail(pending.token);
+            self.pending_metask_stage = null;
+            if (self.control.executionReplacementPending())
+                self.endActiveReplacementNoFail();
+        }
         const result = self.commitPrepared(
             self.runtime.prepareShutdown(),
             .none,
@@ -268,6 +351,19 @@ fn replacementErrorCode(err: anyerror) account_contract.ErrorCode {
         error.TaskSessionInUse => .session_in_use,
         error.ExecutionInUse => .operation_in_progress,
         else => .local_resource_exhausted,
+    };
+}
+
+fn metaskStageAccountError(
+    error_code: control_ports.MetaskStageError,
+) account_contract.ErrorCode {
+    return switch (error_code) {
+        .invalid_state => .execution_config_invalid,
+        .resource_exhausted => .local_resource_exhausted,
+        .schedule_persistence_unavailable,
+        .schedule_persistence_failed,
+        .schedule_persistence_outcome_unknown,
+        => .dependency_contract_invalid,
     };
 }
 
@@ -316,8 +412,10 @@ const FailedExecutionHandoff = struct {
             .commit_account_fact_fn = commitFact,
             .finish_account_commit_fn = finishCommit,
             .metask_activation_available_fn = activationAvailable,
-            .apply_metask_candidate_fn = applyCandidate,
-            .apply_metask_clear_fn = applyClear,
+            .prepare_metask_candidate_fn = prepareCandidate,
+            .prepare_metask_clear_fn = prepareClear,
+            .finalize_metask_stage_fn = finalizeStage,
+            .abort_metask_stage_fn = abortStage,
             .replacement_pending_fn = replacementPending,
             .begin_default_replacement_fn = beginReplacement,
             .begin_replacement_fn = beginReplacement,
@@ -337,18 +435,25 @@ const FailedExecutionHandoff = struct {
     fn activationAvailable(_: *anyopaque) bool {
         return true;
     }
-    fn applyCandidate(
+    fn prepareCandidate(
         context: *anyopaque,
-        execution: *execution_contract.OwnedConfig,
+        transfer: execution_contract.OwnedConfigTransfer,
         _: bool,
-    ) control_ports.MetaskExecutionOutcome {
+    ) control_ports.MetaskStageResult {
         owner(context).applied_candidates += 1;
+        var execution = transfer.take();
         execution.deinit();
-        return .failed;
+        return .{ .rejected = .invalid_state };
     }
-    fn applyClear(context: *anyopaque) control_ports.MetaskExecutionOutcome {
+    fn prepareClear(context: *anyopaque) control_ports.MetaskStageResult {
         owner(context).applied_clears += 1;
-        return .failed;
+        return .{ .rejected = .invalid_state };
+    }
+    fn finalizeStage(_: *anyopaque, _: control_ports.MetaskStageToken, _: account_contract.AccountFact) void {
+        unreachable;
+    }
+    fn abortStage(_: *anyopaque, _: control_ports.MetaskStageToken) void {
+        unreachable;
     }
     fn replacementPending(context: *anyopaque) bool {
         return owner(context).replacement_pending;
@@ -365,7 +470,7 @@ const FailedExecutionHandoff = struct {
     }
 };
 
-test "Application preserves an observed Account execution after Metask handoff failure" {
+test "Application rejects Account candidate before preference persistence when Product prepare fails" {
     const TestWake = struct {
         fn notify(_: *anyopaque) void {}
     };
@@ -412,9 +517,79 @@ test "Application preserves an observed Account execution after Metask handoff f
     );
     try std.testing.expect(result.accepted);
     try std.testing.expectEqual(
-        account_contract.ErrorCode.local_resource_exhausted,
+        account_contract.ErrorCode.execution_config_invalid,
         account_runtime.view().error_code,
     );
+    try std.testing.expectEqual(
+        account_contract.AccountState.authenticated,
+        account_runtime.view().state,
+    );
+    try std.testing.expectEqual(
+        account_contract.CatalogState.failed,
+        account_runtime.view().catalog_state,
+    );
+    try std.testing.expectEqualStrings(
+        "",
+        account_runtime.view().selected_model,
+    );
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        account_api.TestSupport.savedPreferenceExecutionGeneration(
+            &account_runtime,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), handoff.applied_candidates);
+    try std.testing.expectEqual(@as(usize, 1), handoff.committed_facts);
+    try std.testing.expectEqual(@as(usize, 1), handoff.finished_commits);
+    try std.testing.expect(!handoff.replacement_pending);
+    try std.testing.expect(coordinator.metask_activation_attempt_id == null);
+}
+
+test "Application preserves a restored Account fact when Product prepare is unavailable" {
+    const TestWake = struct {
+        fn notify(_: *anyopaque) void {}
+    };
+    var wake_context: u8 = 0;
+    var account_runtime = try account_api.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        std.Thread.getCurrentId(),
+        if (builtin.os.tag == .windows)
+            "C:\\metawork-account-restored-handoff-failure-test"
+        else
+            "/tmp/metawork-account-restored-handoff-failure-test",
+        testingTransport(),
+        account_api.TestSupport.loopbackEndpoint(),
+        .{ .context = &wake_context, .notify_fn = TestWake.notify },
+    );
+    defer account_runtime.deinit();
+    var handoff: FailedExecutionHandoff = .{};
+    var coordinator = Coordinator.init(
+        &account_runtime,
+        handoff.port(),
+        std.Thread.getCurrentId(),
+    );
+    var execution = try execution_contract.OwnedConfig.initOwned(
+        std.testing.allocator,
+        .metask,
+        .anthropic_messages,
+        try std.testing.allocator.dupe(u8, "model-1"),
+        try std.testing.allocator.dupe(
+            u8,
+            account_contract.metask_anthropic_messages_url,
+        ),
+        11,
+        try std.testing.allocator.dupe(u8, "secret-key"),
+        "fixture-provider",
+    );
+    const result = coordinator.commitPrepared(
+        try account_api.TestSupport.prepareReadyRestore(
+            &account_runtime,
+            &execution,
+        ),
+        .none,
+    );
+    try std.testing.expect(result.accepted);
     try std.testing.expectEqual(
         account_contract.AccountState.authenticated,
         account_runtime.view().state,
@@ -423,21 +598,12 @@ test "Application preserves an observed Account execution after Metask handoff f
         account_contract.CatalogState.ready,
         account_runtime.view().catalog_state,
     );
-    try std.testing.expectEqualStrings(
-        "model-1",
-        account_runtime.view().selected_model,
-    );
-    try std.testing.expectEqual(
-        @as(?u64, 1),
-        account_api.TestSupport.savedPreferenceExecutionGeneration(
-            &account_runtime,
-        ),
-    );
+    try std.testing.expectEqual(account_contract.ErrorCode.none, account_runtime.view().error_code);
+    try std.testing.expectEqualStrings("model-1", account_runtime.view().selected_model);
     try std.testing.expectEqual(@as(usize, 1), handoff.applied_candidates);
-    try std.testing.expectEqual(@as(usize, 2), handoff.committed_facts);
+    try std.testing.expectEqual(@as(usize, 1), handoff.committed_facts);
     try std.testing.expectEqual(@as(usize, 1), handoff.finished_commits);
     try std.testing.expect(!handoff.replacement_pending);
-    try std.testing.expect(coordinator.metask_activation_attempt_id == null);
 }
 
 test "Application preserves signed-out state after execution clear handoff failure" {
@@ -471,7 +637,7 @@ test "Application preserves signed-out state after execution clear handoff failu
         try std.testing.allocator.dupe(u8, "secret-key"),
         "fixture-provider",
     );
-    var ready = try account_api.TestSupport.prepareExecutionReady(
+    var ready = try account_api.TestSupport.prepareReadyRestore(
         &account_runtime,
         &execution,
     );
@@ -505,7 +671,7 @@ test "Application preserves signed-out state after execution clear handoff failu
         account_runtime.view().state,
     );
     try std.testing.expectEqual(
-        account_contract.ErrorCode.local_resource_exhausted,
+        account_contract.ErrorCode.none,
         account_runtime.view().error_code,
     );
     try std.testing.expectEqual(
@@ -519,7 +685,7 @@ test "Application preserves signed-out state after execution clear handoff failu
     );
     try std.testing.expectEqual(@as(usize, 0), handoff.applied_candidates);
     try std.testing.expectEqual(@as(usize, 1), handoff.applied_clears);
-    try std.testing.expectEqual(@as(usize, 2), handoff.committed_facts);
+    try std.testing.expectEqual(@as(usize, 1), handoff.committed_facts);
     try std.testing.expectEqual(@as(usize, 1), handoff.finished_commits);
     try std.testing.expect(!handoff.replacement_pending);
 }

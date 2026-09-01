@@ -56,13 +56,17 @@ Execution registry 与 Account identity/catalog 独立。不同连接即使 cred
 Metask handoff 的 committed-state 写路径为：
 
 ```text
-Account prepare(command | completion)
-→ Account effect admission
-→ Product Control commit Account fact
-→ Product Control install or clear default ExecutionConfig  [可选]
-→ Account commit prepared transition
-→ dispatch committed Account effect
+Account worker construct candidate (no preference write)
+→ Product Control consume opaque transfer and prepare staged candidate
+→ Product Control complete candidate validation + durable Schedule scrub
+→ Account preference effect admission and durable write
+→ exact reread on outcome unknown (candidate | old | third value)
+→ Product Control no-fail finalize opaque stage + Account fact
+→ Account commit terminal state/catalog/preference intents
+→ publish one terminal Product revision
 ```
+
+Product Control 是唯一 staged `ExecutionConfig` owner；Application coordinator 只持有绑定 Account attempt 的 opaque token，不得持有、读取或复制 credential-bearing config。preference 明确失败、effect admission 失败、旧值重读、stale、cancel 或 shutdown 必须调用 Product abort，清除 preparation 并 secure-zero candidate；完整 candidate 重读才能 finalize，第三种值进入 recovery。finalize 后不再允许 fallible I/O，也不存在 `failed → local_resource_exhausted` 的通用压平或已提交 Account fact 后补写第二个失败 revision。
 
 Model Connection 设为默认的写路径为：
 
@@ -76,11 +80,11 @@ Execution resolve candidate + credential
 
 registry commit 前的 scrub preparation 明确失败时，registry 与已安装 execution 都保持旧值；registry commit 明确失败时清除 preparation 并保持旧值；commit 成功后只允许 no-fail ownership transfer。Connection CRUD/test 不隐式改变默认 source。
 
-上述 commit 链在主线程同一 turn 内完成。外部 effect 只有在 committed swap 后才能启动；worker completion 必须回到主线程并重新进入同一条链。Product Control 安装或清除 execution 的步骤在进入 Account commit 前必须已经完成全部可能失败的验证、持久化 credential scrub 与 candidate preparation，实际所有权转移只能是 no-fail install。
+每个 prepared transition 的 commit 仍在主线程单一 turn 内完成；candidate construction、Product prepare、preference effect 和 terminal finalize 可以跨 worker completion，但只能由同一 attempt/token 串接。外部 effect 只有在承载它的 staged Account transition committed 后才能启动；Product prepare 拒绝时该 transition 不得 commit 或 dispatch。实际 execution 所有权安装只能发生在 preference 已确认后的 no-fail finalize。
 
 Product Control 的 replacement gate 只串行化本次默认 execution 交接与相关新 Task admission。已有 Task、Session、Run 和 worker 已经取得的 owned ExecutionConfig 按原生命周期收口，不热替换、不等待 Account identity 变化，也不被 logout 伪造为已撤权。只改变默认模型且不改变 credential authority 时，不产生新的 credential generation；是否允许已有 Task 改变模型必须由该 Task 精确持有的 protocol、generation 与当前 authoritative catalog 共同决定。
 
-Account prepare 或 Execution candidate 在 Product Control gate 拒绝后必须销毁，不能提交 Account fact/registry default、转移 credential 或启动 effect。effect admission 的明确失败保留旧 committed state 并清零 staged secret。外部 effect 已产生结果后，后续失败必须从已经观察到的 committed phase 收口，不能回滚成旧 identity、旧 credential 或旧默认 execution；结果不确定的 mutation 不得自动重放。
+Account prepare 或 Execution candidate 在 Product Control gate 拒绝后必须销毁，不能提交 candidate Account fact/registry default、转移 credential 或启动 preference effect。effect admission、preference 明确失败和旧值重读都保留旧 committed default 并清零 staged secret；第三种持久化观察进入显式 recovery。已经 durable commit 的 identity/token rotation 等 Account effect 仍从已观察 phase 收口，不能伪造回滚；结果不确定的 mutation一律精确重读且不得自动重放。
 
 Renderer reload、断连或命令 timeout 只影响交互与 resync，不能取消 Host 中的 deadline、mutation 或 terminal completion，也不能代表这条 commit 链失败。Renderer 只提交对应 Account 或 Execution projection 发布的无 secret identifier 与 expected generation，不参与 prepare、commit 或 credential transfer。
 
