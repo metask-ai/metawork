@@ -1,8 +1,13 @@
 export type AccountState =
   "checking" | "signed_out" | "authorizing" | "authenticated";
 
-export type CatalogState =
-  "unavailable" | "loading" | "choosing" | "ready" | "failed";
+export type ModelsCatalogState =
+  | "needs_authentication"
+  | "loading"
+  | "choosing"
+  | "ready"
+  | "failed"
+  | "unavailable";
 
 export type ExecutionSource = "metask" | "model_connection";
 
@@ -35,10 +40,6 @@ export type AccountErrorCode =
   | "metask_rate_limited"
   | "metask_service_unavailable"
   | "metask_protocol_invalid"
-  | "catalog_too_large"
-  | "catalog_field_too_large"
-  | "no_api_keys"
-  | "no_models"
   | "metask_platform_unsupported"
   | "credential_store_read_failed"
   | "credential_store_write_failed"
@@ -56,7 +57,6 @@ export type ExecutionCommandErrorCode =
   | "no_models"
   | "local_resource_exhausted"
   | "credential_store_write_failed"
-  | "execution_in_use"
   | "model_connection_invalid"
   | "model_connection_not_found"
   | "model_connection_capture_unavailable"
@@ -93,6 +93,13 @@ export type ModelConnectionView = {
   models: { id: string; displayName: string }[];
   selectedModel: string;
   connectionGeneration: string;
+  sourceGeneration: string;
+  catalogGeneration: string;
+};
+
+export type ModelRef = {
+  sourceId: string;
+  modelId: string;
 };
 
 /** Server declarations only; null means unknown, not unsupported. */
@@ -129,29 +136,60 @@ export type ModelMetadata = {
 
 export type AccountView = {
   state: AccountState;
-  catalogState: CatalogState;
   canCancel: boolean;
   accountId: string;
   displayName: string;
-  apiKeys: {
-    selectionId: string;
-    name: string;
-    suffix: string;
-    protocol: Protocol;
-  }[];
-  models: {
-    selectionId: string;
-    displayName: string;
-    metadata: ModelMetadata;
-  }[];
-  selectedApiKeySelectionId: string;
-  selectedModelSelectionId: string;
-  candidateApiKeySelectionId: string;
-  candidateModelSelectionId: string;
-  modelCatalogApiKeySelectionId: string;
   errorCode: AccountErrorCode;
   safeDiagnostic: string;
-  catalogGeneration: string;
+};
+
+export type ModelsErrorCode =
+  | "none"
+  | "authorization_unavailable"
+  | "persistence_unavailable"
+  | "migration_required"
+  | "catalog_unavailable"
+  | "catalog_invalid"
+  | "catalog_too_large"
+  | "no_api_keys"
+  | "no_models"
+  | "operation_in_progress"
+  | "local_resource_exhausted";
+
+export type ModelsView = {
+  availability: ModelsCatalogState;
+  persistenceHealth:
+    "ready" | "migration_required" | "recovery_required" | "unavailable";
+  providers: {
+    id: string;
+    displayName: string;
+    recommended: boolean;
+    catalogState: ModelsCatalogState;
+    principalRef: string;
+    apiKeys: {
+      id: string;
+      name: string;
+      suffix: string;
+      protocol: Protocol;
+    }[];
+    models: {
+      id: string;
+      displayName: string;
+      metadata: ModelMetadata;
+    }[];
+    selectedApiKeyId: string;
+    catalogGeneration: string;
+    sourceGeneration: string;
+    errorCode: ModelsErrorCode;
+    safeDiagnostic: string;
+  }[];
+  metaskSelection: ModelRef | null;
+  metaskSelectionRevision: string;
+  defaultSelection: ModelRef | null;
+  selectionRevision: string;
+  operation: "idle" | "refreshing_catalog";
+  errorCode: ModelsErrorCode;
+  connections: ModelConnectionView[];
 };
 
 export type ExecutionView = {
@@ -160,8 +198,6 @@ export type ExecutionView = {
   activeSource: ExecutionSource | null;
   activeGeneration: string;
   taskCreationAvailable: boolean;
-  selectedModelConnectionId: string;
-  modelConnections: ModelConnectionView[];
   errorCode: ExecutionErrorCode;
 };
 
@@ -642,6 +678,7 @@ export type WorkbenchSnapshot = {
     defaultProfile: PermissionProfile;
   };
   account: AccountView;
+  models: ModelsView;
   execution: ExecutionView;
   skillCatalog: SkillCatalogView;
   skillManagement: SkillManagementView;

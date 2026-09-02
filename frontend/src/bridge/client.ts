@@ -510,33 +510,32 @@ export class BridgeClient {
     );
   }
 
-  async refreshAccountCatalog() {
-    return decodeAccountCommandResult(
-      await this.invoke(commands.accountRefreshCatalog, {}),
-    );
-  }
-
-  async selectApiKey(selectionId: string, expectedCatalogGeneration: string) {
-    return decodeAccountCommandResult(
-      await this.invoke(commands.accountSelectApiKey, {
-        selectionId,
-        expectedCatalogGeneration,
-      }),
-    );
-  }
-
-  async selectModel(selectionId: string, expectedCatalogGeneration: string) {
-    return decodeAccountCommandResult(
-      await this.invoke(commands.accountSelectModel, {
-        selectionId,
-        expectedCatalogGeneration,
-      }),
-    );
-  }
-
-  async selectMetaskDefault() {
+  async refreshModelsCatalog() {
     return decodeExecutionCommandResult(
-      await this.invoke(commands.selectMetaskDefault, {}),
+      await this.invoke(commands.modelsRefreshCatalog, {}),
+    );
+  }
+
+  async configureMetaskSelection(input: {
+    sourceId: string;
+    modelId: string;
+    expectedMetaskSelectionRevision: string;
+    expectedCatalogGeneration: string;
+  }) {
+    return decodeExecutionCommandResult(
+      await this.invoke(commands.configureMetaskSelection, input),
+    );
+  }
+
+  async selectModelsDefault(input: {
+    sourceId: string;
+    modelId: string;
+    expectedSelectionRevision: string;
+    expectedSourceGeneration: string;
+    expectedCatalogGeneration: string;
+  }) {
+    return decodeExecutionCommandResult(
+      await this.invoke(commands.selectModelsDefault, input),
     );
   }
 
@@ -583,20 +582,6 @@ export class BridgeClient {
   ) {
     return decodeExecutionCommandResult(
       await this.invoke(commands.modelConnectionTest, {
-        connectionId,
-        expectedConnectionGeneration,
-        modelId,
-      }),
-    );
-  }
-
-  async selectDefaultModelConnection(
-    connectionId: string,
-    expectedConnectionGeneration: string,
-    modelId: string,
-  ) {
-    return decodeExecutionCommandResult(
-      await this.invoke(commands.modelConnectionSelectDefault, {
         connectionId,
         expectedConnectionGeneration,
         modelId,

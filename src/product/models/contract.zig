@@ -14,8 +14,28 @@ pub const Limits = struct {
     pub const model_display_name_bytes: usize = 256;
     pub const base_url_bytes: usize = 2048;
     pub const credential_bytes: usize = 4096;
+    pub const principal_ref_bytes: usize = 256;
+    pub const api_key_id_bytes: usize = 128;
+    pub const api_key_name_bytes: usize = 256;
+    pub const api_key_suffix_bytes: usize = 32;
+    pub const safe_diagnostic_bytes: usize = 512;
+    pub const api_key_entries: usize = 256;
+    pub const model_entries: usize = 512;
     pub const model_connection_entries: usize = 8;
     pub const model_connection_model_entries: usize = 16;
+};
+
+pub const metask_source_id = "metask";
+pub const metask_anthropic_messages_url =
+    "https://napi.metask-ai.com/v1/messages";
+pub const metask_openai_chat_completions_url =
+    "https://napi.metask-ai.com/v1/chat/completions";
+pub const metask_gemini_base_url =
+    "https://generativelanguage.googleapis.com";
+
+pub const ModelRef = struct {
+    source_id: []const u8,
+    model_id: []const u8,
 };
 
 pub const Source = enum {
@@ -48,6 +68,129 @@ pub const Protocol = enum {
     anthropic_messages,
     openai_chat_completions,
     gemini_native,
+};
+
+pub const CatalogState = enum {
+    needs_authentication,
+    loading,
+    choosing,
+    ready,
+    failed,
+    unavailable,
+};
+
+pub const PersistenceHealth = enum {
+    ready,
+    migration_required,
+    recovery_required,
+    unavailable,
+};
+
+pub const ModelsOperation = enum {
+    idle,
+    refreshing_catalog,
+};
+
+pub const ModelsError = enum {
+    none,
+    authorization_unavailable,
+    persistence_unavailable,
+    migration_required,
+    catalog_unavailable,
+    catalog_invalid,
+    catalog_too_large,
+    no_api_keys,
+    no_models,
+    operation_in_progress,
+    local_resource_exhausted,
+};
+
+pub const ApiKeyView = struct {
+    id: []const u8,
+    name: []const u8,
+    suffix: []const u8,
+    protocol: Protocol,
+};
+
+/// Provider declarations, not MetaWork feature gates. null means unknown.
+pub const ModelCapabilities = struct {
+    image_input: ?bool = null,
+    pdf_input: ?bool = null,
+    batch: ?bool = null,
+    citations: ?bool = null,
+    code_execution: ?bool = null,
+    structured_outputs: ?bool = null,
+    thinking: struct {
+        supported: ?bool = null,
+        adaptive: ?bool = null,
+        enabled: ?bool = null,
+    } = .{},
+    effort: struct {
+        supported: ?bool = null,
+        low: ?bool = null,
+        medium: ?bool = null,
+        high: ?bool = null,
+        max: ?bool = null,
+    } = .{},
+    context_management: struct {
+        supported: ?bool = null,
+        clear_thinking_20251015: ?bool = null,
+        clear_tool_uses_20250919: ?bool = null,
+        compact_20260112: ?bool = null,
+    } = .{},
+};
+
+pub const ModelMetadata = struct {
+    max_input_tokens: ?u64 = null,
+    max_output_tokens: ?u64 = null,
+    capabilities: ModelCapabilities = .{},
+};
+
+pub const ModelView = struct {
+    id: []const u8,
+    display_name: []const u8,
+    metadata: ModelMetadata = .{},
+};
+
+pub const ProviderView = struct {
+    id: []const u8,
+    display_name: []const u8,
+    recommended: bool,
+    catalog_state: CatalogState,
+    principal_ref: []const u8 = "",
+    api_keys: []const ApiKeyView = &.{},
+    models: []const ModelView = &.{},
+    selected_api_key_id: []const u8 = "",
+    catalog_generation: u64 = 0,
+    source_generation: u64 = 0,
+    error_code: ModelsError = .none,
+    safe_diagnostic: []const u8 = "",
+};
+
+pub const ModelsView = struct {
+    availability: CatalogState,
+    persistence_health: PersistenceHealth,
+    providers: []const ProviderView = &.{},
+    metask_selection: ?ModelRef = null,
+    metask_selection_revision: u64 = 0,
+    default_selection: ?ModelRef = null,
+    selection_revision: u64 = 0,
+    operation: ModelsOperation = .idle,
+    error_code: ModelsError = .none,
+    model_connections: []const ModelConnectionView = &.{},
+};
+
+pub const CatalogRefreshPreparation = struct {
+    attempt_id: u64,
+    principal_ref: []const u8,
+    authorization_generation: u64,
+    preferred_api_key_id: []const u8,
+    preferred_model_id: []const u8,
+};
+
+pub const CatalogRefreshPrepareResult = union(enum) {
+    ready: CatalogRefreshPreparation,
+    rejected: ModelsError,
 };
 
 pub const Target = struct {
@@ -111,6 +254,8 @@ pub const ModelConnectionView = struct {
     models: []const ModelConnectionModelView = &.{},
     selected_model: []const u8 = "",
     connection_generation: u64,
+    source_generation: u64,
+    catalog_generation: u64,
 };
 
 /// Borrowed, secret-free Product Control projection. The default source is
@@ -161,20 +306,42 @@ pub const ModelConnectionTestCommand = struct {
     model_id: []const u8,
 };
 
+pub const ConfigureMetaskSelectionCommand = struct {
+    selection: ModelRef,
+    expected_metask_selection_revision: u64,
+    expected_catalog_generation: u64,
+};
+
+pub const SelectDefaultCommand = struct {
+    selection: ModelRef,
+    expected_selection_revision: u64,
+    expected_source_generation: u64,
+    expected_catalog_generation: u64,
+};
+
+/// Borrowed durable default identity published by Models for Product Control
+/// reconciliation. This describes desired authority only and carries no
+/// credential or Product binding generation.
+pub const DefaultSelectionAuthority = struct {
+    selection: ModelRef,
+    source: Source,
+    source_generation: u64,
+    selection_revision: u64,
+    protocol: Protocol,
+};
+
 pub const ModelConnectionCommand = union(enum) {
     create: ModelConnectionCreateCommand,
     update: ModelConnectionUpdateCommand,
     remove: ModelConnectionSelectionCommand,
     test_connection: ModelConnectionTestCommand,
-    select_default: struct {
-        selection: ModelConnectionSelectionCommand,
-        model_id: []const u8,
-    },
 };
 
-/// Product-internal management result. Bridge adapters may map these stable
-/// execution-domain failures onto their existing wire error vocabulary.
+/// Product-internal Models management result. Bridge adapters may map these
+/// stable failures onto the Renderer wire error vocabulary.
 pub const ManagementError = enum {
+    authorization_unavailable,
+    catalog_unavailable,
     invalid_connection,
     connection_not_found,
     generation_mismatch,
@@ -183,7 +350,6 @@ pub const ManagementError = enum {
     persistence_unavailable,
     capture_unavailable,
     credential_write_failed,
-    execution_in_use,
     operation_in_progress,
     test_unavailable,
     user_cancelled,
@@ -549,12 +715,6 @@ pub fn validateModelConnectionCommand(command: ModelConnectionCommand) Validatio
                 return error.InvalidGeneration;
             try validateRequired(value.model_id, Limits.model_id_bytes);
         },
-        .select_default => |value| {
-            try validateRequired(value.selection.connection_id, Limits.instance_id_bytes);
-            if (value.selection.expected_connection_generation == 0)
-                return error.InvalidGeneration;
-            try validateRequired(value.model_id, Limits.model_id_bytes);
-        },
     }
 }
 
@@ -675,6 +835,22 @@ pub fn validateSourceCandidateStructure(input: SourceCandidateInput) ValidationE
     try validateRequired(input.target.base_url, Limits.base_url_bytes);
     try validateOpaqueRequired(input.api_key, Limits.credential_bytes);
     if (input.source_generation == 0) return error.InvalidGeneration;
+}
+
+pub fn validateMetaskSourceCandidate(input: SourceCandidateInput) ValidationError!void {
+    try validateSourceCandidateStructure(input);
+    const prefix = @tagName(Source.metask) ++ ":";
+    if (!std.mem.startsWith(u8, input.target.provider_id, prefix) or
+        input.target.provider_id.len == prefix.len)
+        return error.InconsistentState;
+    const expected_endpoint: []const u8 = switch (input.target.protocol) {
+        .openai_responses => return error.UnsupportedProtocol,
+        .anthropic_messages => metask_anthropic_messages_url,
+        .openai_chat_completions => metask_openai_chat_completions_url,
+        .gemini_native => metask_gemini_base_url,
+    };
+    if (!std.mem.eql(u8, input.target.base_url, expected_endpoint))
+        return error.InvalidBaseUrl;
 }
 
 pub fn validateModelConnectionExecutionConfig(input: ConfigInput) ValidationError!void {
@@ -962,6 +1138,8 @@ test "ready model connection view requires a ready credential and selected model
         .enabled = true,
         .models = &models,
         .connection_generation = 1,
+        .source_generation = 2,
+        .catalog_generation = 3,
     }));
     try validateModelConnectionView(.{
         .id = "connection-1",
@@ -975,5 +1153,7 @@ test "ready model connection view requires a ready credential and selected model
         .models = &models,
         .selected_model = "gemini-2.5-flash",
         .connection_generation = 1,
+        .source_generation = 2,
+        .catalog_generation = 3,
     });
 }

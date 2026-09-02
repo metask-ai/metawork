@@ -7,6 +7,7 @@ const runtime_module = @import("product_models_runtime");
 
 pub const Runtime = runtime_module.Runtime;
 pub const StartError = runtime_module.StartError;
+pub const TestSupport = runtime_module.TestSupport;
 
 test {
     _ = runtime_module;

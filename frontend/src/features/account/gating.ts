@@ -1,4 +1,8 @@
-import type { AccountView, ExecutionView } from "../../bridge/contracts.ts";
+import type {
+  AccountView,
+  ExecutionView,
+  ModelsView,
+} from "../../bridge/contracts.ts";
 
 export function requiresAccountGate(
   account: Pick<AccountView, "state">,
@@ -11,19 +15,21 @@ export function requiresAccountGate(
 }
 
 /**
- * An authenticated account that needs a user decision must use the Host-owned
- * account settings surface: `choosing` requires an API/model pick and `failed`
- * owns the retry action. `loading` is deliberately excluded — post-login
+ * A Metask provider that needs a user decision must use the Host-owned Models
+ * settings surface: `choosing` requires an API/model pick and `failed` owns the
+ * retry action. `loading` is deliberately excluded — post-login
  * continuation resolves it automatically, and redirecting on a transient
  * state flashes the settings page on every startup while the catalog loads.
  */
 export function requiresAccountSetup(
-  account: Pick<AccountView, "state" | "catalogState">,
+  account: Pick<AccountView, "state">,
+  models: Pick<ModelsView, "providers">,
   execution: Pick<ExecutionView, "defaultSource">,
 ): boolean {
+  const metask = models.providers.find((provider) => provider.id === "metask");
   return (
     account.state === "authenticated" &&
     execution.defaultSource !== "model_connection" &&
-    (account.catalogState === "choosing" || account.catalogState === "failed")
+    (metask?.catalogState === "choosing" || metask?.catalogState === "failed")
   );
 }

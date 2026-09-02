@@ -29,6 +29,7 @@ pub const PermissionChoice = runtime_impl.PermissionChoice;
 pub const UiResponse = runtime_impl.UiResponse;
 pub const Configuration = runtime_impl.Configuration;
 pub const Runtime = runtime_impl.Runtime;
+pub const TestSupport = runtime_impl.TestSupport;
 pub const ChangeNotifier = runtime_impl.ChangeNotifier;
 pub const FilePreviewState = runtime_impl.FilePreviewState;
 pub const FilePreviewResult = runtime_impl.FilePreviewResult;

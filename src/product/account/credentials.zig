@@ -1,9 +1,9 @@
 //! Product Account runtime credential ownership.
 const std = @import("std");
+const contract = @import("metawork_account_contract");
 const state = @import("account_state");
 const oauth = @import("account_oauth");
 const metask = @import("metask_client");
-const catalog = @import("account_catalog");
 
 /// Opaque refreshed OAuth generation. App may persist and atomically install
 /// it, but token bytes remain owned and interpreted by Account.
@@ -156,22 +156,20 @@ pub const CredentialOwner = struct {
         return metask.fetchIdentity(transport, current, control);
     }
 
-    pub fn loadApiKeys(
+    pub fn authorizationLease(
         self: *const CredentialOwner,
-        session: *catalog.CatalogSession,
-        transport: metask.Transport,
-        identity: state.AccountIdentity,
-        control: ?metask.RequestControl,
-    ) catalog.Error!void {
-        const current = if (self.tokens) |*value|
-            value
-        else
+        allocator: std.mem.Allocator,
+        principal_ref: []const u8,
+        authorization_generation: u64,
+    ) !contract.OwnedAuthorizationLease {
+        const current = if (self.tokens) |*value| value else return error.Unauthorized;
+        if (!std.mem.eql(u8, current.accountId(), principal_ref))
             return error.Unauthorized;
-        try session.loadApiKeys(
-            transport,
+        return contract.OwnedAuthorizationLease.init(
+            allocator,
+            principal_ref,
             current.access_token.view(),
-            identity.accountId(),
-            control,
+            authorization_generation,
         );
     }
 
@@ -230,6 +228,32 @@ test "CredentialOwner can restore a refresh-only session" {
     try std.testing.expect(!owner.available());
     owner.clear();
     try std.testing.expect(!owner.refreshAvailable());
+}
+
+test "CredentialOwner issues a bounded authorization lease for its principal" {
+    var owner: CredentialOwner = .{};
+    defer owner.deinit();
+    try owner.installStored(
+        std.testing.allocator,
+        "access-token",
+        "refresh-token",
+        10,
+        "account-1",
+    );
+
+    var lease = try owner.authorizationLease(
+        std.testing.allocator,
+        "account-1",
+        7,
+    );
+    defer lease.deinit();
+    try std.testing.expectEqualStrings("account-1", lease.principal_ref);
+    try std.testing.expectEqualStrings("access-token", lease.access_token);
+    try std.testing.expectEqual(@as(u64, 7), lease.authorization_generation);
+    try std.testing.expectError(
+        error.Unauthorized,
+        owner.authorizationLease(std.testing.allocator, "account-2", 8),
+    );
 }
 
 test "refresh rotation is available before strict identity lookup" {

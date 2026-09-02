@@ -1,4 +1,8 @@
-import type { AccountView, ExecutionView } from "../bridge/contracts.ts";
+import type {
+  AccountView,
+  ExecutionView,
+  ModelsView,
+} from "../bridge/contracts.ts";
 import {
   requiresAccountGate,
   requiresAccountSetup,
@@ -15,13 +19,14 @@ export type AccountSurfacePolicy = {
  * independent Execution fact.
  */
 export function accountSurfacePolicy(
-  account: Pick<AccountView, "state" | "catalogState">,
+  account: Pick<AccountView, "state">,
+  models: Pick<ModelsView, "providers">,
   execution: Pick<ExecutionView, "defaultSource">,
   hasTasks: boolean,
 ): AccountSurfacePolicy {
   if (hasTasks) return { gateRequired: false, setupRequired: false };
   return {
     gateRequired: requiresAccountGate(account, execution),
-    setupRequired: requiresAccountSetup(account, execution),
+    setupRequired: requiresAccountSetup(account, models, execution),
   };
 }

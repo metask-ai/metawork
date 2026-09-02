@@ -44,15 +44,13 @@ pub const preview_file = "metawork.files.preview";
 pub const diff_file = "metawork.files.diff";
 pub const account_begin_login = "metawork.account.beginLogin";
 pub const account_cancel_operation = "metawork.account.cancelOperation";
-pub const account_refresh_catalog = "metawork.account.refreshCatalog";
-pub const account_select_api_key = "metawork.account.selectApiKey";
-pub const account_select_model = "metawork.account.selectModel";
-pub const select_metask_default = "metawork.modelSources.selectMetaskDefault";
-pub const model_connection_create = "metawork.modelConnections.create";
-pub const model_connection_update = "metawork.modelConnections.update";
-pub const model_connection_remove = "metawork.modelConnections.remove";
-pub const model_connection_test = "metawork.modelConnections.test";
-pub const model_connection_select_default = "metawork.modelConnections.selectDefault";
+pub const models_refresh_catalog = "metawork.models.refreshCatalog";
+pub const models_configure_metask_selection = "metawork.models.configureMetaskSelection";
+pub const models_select_default = "metawork.models.selectDefault";
+pub const model_connection_create = "metawork.models.connections.create";
+pub const model_connection_update = "metawork.models.connections.update";
+pub const model_connection_remove = "metawork.models.connections.remove";
+pub const model_connection_test = "metawork.models.connections.test";
 pub const account_logout = "metawork.account.logout";
 pub const set_default_permission_profile = "metawork.permissions.setDefaultProfile";
 pub const create_task = "metawork.tasks.create";
@@ -117,15 +115,13 @@ pub const product = [_][]const u8{
     diff_file,
     account_begin_login,
     account_cancel_operation,
-    account_refresh_catalog,
-    account_select_api_key,
-    account_select_model,
-    select_metask_default,
+    models_refresh_catalog,
+    models_configure_metask_selection,
+    models_select_default,
     model_connection_create,
     model_connection_update,
     model_connection_remove,
     model_connection_test,
-    model_connection_select_default,
     account_logout,
     set_default_permission_profile,
     create_task,

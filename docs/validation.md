@@ -78,6 +78,7 @@ candidate probe、真实桌面验收、签名、公证和发布验证不属于 `
 | Bridge wire 或跨语言合同 | Renderer/Host 两侧 fixture、合同测试与相关类型检查 |
 | 单一 Zig owner 内部实现 | 对应 test root；共享 owner 或 module graph 变化追加正式 Native graph |
 | owner、依赖方向、allowlist 或 test graph | architecture guard 与能命中该违规的正式 test root |
+| Account / Models owner 边界 | architecture guard 证明 Account 与 Models 不互相 import；Models/Account 各自的 Native test root，并以组合测试证明 Account 授权丢失只使 Metask provider 对新 catalog/resolve 进入 `needs_authentication`，不影响 custom source 或既有 Task/Run binding |
 | AgentCore ABI 接受政策或 candidate artifact | staged verifier、相关 probe；行为或 artifact 变化时追加受影响目标平台 vertical |
 | lifecycle、异步队列、真实 ProductDelivery 或平台能力 | 对应 lifecycle/vertical；存在独立平台失败模式时分别取证 |
 | 签名、公证、安装器或分发合同 | 对应平台分发入口及合同要求的真实 artifact 验收 |

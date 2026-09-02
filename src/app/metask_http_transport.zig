@@ -1,6 +1,7 @@
 const std = @import("std");
 const oauth = @import("account_oauth");
-const metask = @import("metask_client");
+const account_metask = @import("metask_client");
+const models_metask = @import("product_models_metask");
 
 /// Application-owned network adapter for the Account-defined Metask
 /// transport port. Account retains request kinds, response classification,
@@ -30,7 +31,7 @@ pub const Adapter = struct {
         cancelled,
     };
 
-    pub fn transport(self: *Adapter) metask.Transport {
+    pub fn transport(self: *Adapter) account_metask.Transport {
         return .{
             .context = self,
             .perform_fn = perform,
@@ -39,9 +40,9 @@ pub const Adapter = struct {
 
     fn perform(
         context: *anyopaque,
-        request: metask.Request,
+        request: account_metask.Request,
         response_buffer: []u8,
-    ) metask.TransportError!metask.Response {
+    ) account_metask.TransportError!account_metask.Response {
         const self: *Adapter = @ptrCast(@alignCast(context));
         const deadline = if (request.control) |control|
             control.deadline
@@ -106,7 +107,7 @@ pub const Adapter = struct {
 
     fn fetch(
         self: *Adapter,
-        request: metask.Request,
+        request: account_metask.Request,
         response_buffer: []u8,
     ) FetchResult {
         var response_writer = std.Io.Writer.fixed(response_buffer);
@@ -135,9 +136,9 @@ pub const Adapter = struct {
 
         const endpoint, const method: std.http.Method = switch (request.kind) {
             .exchange_code, .refresh_token => .{ oauth.token_url, .POST },
-            .current_user => .{ metask.current_user_url, .GET },
-            .keys => .{ metask.api_keys_url, .GET },
-            .models => .{ metask.models_url, .GET },
+            .current_user => .{ account_metask.current_user_url, .GET },
+            .keys => .{ models_metask.api_keys_url, .GET },
+            .models => .{ models_metask.models_url, .GET },
         };
         var headers: [4]std.http.Header = undefined;
         var header_count: usize = 0;
@@ -187,7 +188,7 @@ pub const Adapter = struct {
         deadline.wait(io) catch {};
     }
 
-    fn waitCancellation(cancellation: *const metask.Cancellation) void {
+    fn waitCancellation(cancellation: *const account_metask.Cancellation) void {
         cancellation.wait();
     }
 };

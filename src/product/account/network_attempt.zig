@@ -4,7 +4,6 @@ const contract = @import("metawork_account_contract");
 const state = @import("account_state");
 const oauth = @import("account_oauth");
 const metask = @import("metask_client");
-const catalog = @import("account_catalog");
 const credentials = @import("account_credentials_runtime");
 
 pub const Result = union(enum) {
@@ -68,8 +67,6 @@ pub const NetworkAttempt = struct {
     const Kind = enum {
         refresh,
         load_identity,
-        load_api_keys,
-        load_models,
     };
 
     allocator: std.mem.Allocator = undefined,
@@ -78,10 +75,6 @@ pub const NetworkAttempt = struct {
     kind: Kind = undefined,
     transport: metask.Transport = undefined,
     credential_owner: ?*const credentials.CredentialOwner = null,
-    identity: ?state.AccountIdentity = null,
-    catalog_session: ?*catalog.CatalogSession = null,
-    api_key_storage: [contract.Limits.api_key_id_bytes]u8 = undefined,
-    api_key_len: usize = 0,
     now_unix_seconds: i64 = 0,
     sink: ResultSink = undefined,
     cancellation: metask.Cancellation = undefined,
@@ -107,9 +100,6 @@ pub const NetworkAttempt = struct {
             .refresh,
             transport,
             credential_owner,
-            null,
-            null,
-            "",
             sink,
             now_unix_seconds,
         );
@@ -131,63 +121,6 @@ pub const NetworkAttempt = struct {
             .load_identity,
             transport,
             credential_owner,
-            null,
-            null,
-            "",
-            sink,
-            0,
-        );
-    }
-
-    pub fn startLoadApiKeys(
-        self: *NetworkAttempt,
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        attempt_id: u64,
-        transport: metask.Transport,
-        credential_owner: *const credentials.CredentialOwner,
-        identity: state.AccountIdentity,
-        catalog_session: *catalog.CatalogSession,
-        sink: ResultSink,
-    ) !void {
-        try self.start(
-            allocator,
-            io,
-            attempt_id,
-            .load_api_keys,
-            transport,
-            credential_owner,
-            identity,
-            catalog_session,
-            "",
-            sink,
-            0,
-        );
-    }
-
-    pub fn startLoadModels(
-        self: *NetworkAttempt,
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        attempt_id: u64,
-        transport: metask.Transport,
-        catalog_session: *catalog.CatalogSession,
-        api_key_id: []const u8,
-        sink: ResultSink,
-    ) !void {
-        if (api_key_id.len == 0 or
-            api_key_id.len > self.api_key_storage.len)
-            return error.InvalidArgument;
-        try self.start(
-            allocator,
-            io,
-            attempt_id,
-            .load_models,
-            transport,
-            null,
-            null,
-            catalog_session,
-            api_key_id,
             sink,
             0,
         );
@@ -213,7 +146,6 @@ pub const NetworkAttempt = struct {
             return;
         }
         std.debug.assert(self.joined);
-        std.crypto.secureZero(u8, &self.api_key_storage);
         self.* = .{};
     }
 
@@ -229,9 +161,6 @@ pub const NetworkAttempt = struct {
         kind: Kind,
         transport: metask.Transport,
         credential_owner: ?*const credentials.CredentialOwner,
-        identity: ?state.AccountIdentity,
-        catalog_session: ?*catalog.CatalogSession,
-        api_key_id: []const u8,
         sink: ResultSink,
         now_unix_seconds: i64,
     ) !void {
@@ -245,16 +174,12 @@ pub const NetworkAttempt = struct {
             .kind = kind,
             .transport = transport,
             .credential_owner = credential_owner,
-            .identity = identity,
-            .catalog_session = catalog_session,
             .now_unix_seconds = now_unix_seconds,
             .sink = sink,
             .cancellation = .init(io),
             .deadline = std.Io.Clock.Timestamp.fromNow(io, timeout),
             .started = true,
         };
-        @memcpy(self.api_key_storage[0..api_key_id.len], api_key_id);
-        self.api_key_len = api_key_id.len;
         errdefer self.started = false;
         self.thread = std.Thread.spawn(.{}, workerMain, .{self}) catch
             return error.ThreadSpawnFailed;
@@ -290,36 +215,6 @@ pub const NetworkAttempt = struct {
                 };
                 self.publishCompletion(.{ .identity_loaded = identity });
             },
-            .load_api_keys => {
-                self.credential_owner.?.loadApiKeys(
-                    self.catalog_session.?,
-                    self.transport,
-                    self.identity.?,
-                    control,
-                ) catch |err| {
-                    self.publishCatalogFailure(
-                        "keys",
-                        catalog.errorCode(err),
-                    );
-                    return;
-                };
-                self.publishCompletion(.api_keys_loaded);
-            },
-            .load_models => {
-                const session = self.catalog_session.?;
-                session.loadModelsForApiKey(
-                    self.api_key_storage[0..self.api_key_len],
-                    self.transport,
-                    control,
-                ) catch |err| {
-                    self.publishCatalogFailure(
-                        "models",
-                        catalog.errorCode(err),
-                    );
-                    return;
-                };
-                self.publishCompletion(.models_loaded);
-            },
         }
     }
 
@@ -339,26 +234,6 @@ pub const NetworkAttempt = struct {
         error_code: contract.ErrorCode,
     ) void {
         self.publishCompletion(.{ .failed = .fromCode(error_code) });
-    }
-
-    /// Catalog failures carry the request name and HTTP status so a refused
-    /// key or endpoint is diagnosable from the banner instead of a guess.
-    fn publishCatalogFailure(
-        self: *NetworkAttempt,
-        request_name: []const u8,
-        error_code: contract.ErrorCode,
-    ) void {
-        const status = self.catalog_session.?.last_http_status;
-        if (status == 0) return self.publishFailure(error_code);
-        var buffer: [64]u8 = undefined;
-        const text = std.fmt.bufPrint(
-            &buffer,
-            "{s} HTTP {d}",
-            .{ request_name, status },
-        ) catch return self.publishFailure(error_code);
-        const failure = state.WorkerFailure.init(error_code, text) catch
-            return self.publishFailure(error_code);
-        self.publishCompletion(.{ .failed = failure });
     }
 };
 

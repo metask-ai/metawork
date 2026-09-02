@@ -1,14 +1,85 @@
 //! Product Models runtime owned by Product Control.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const contract = @import("metawork_product_models_contract");
 const ports = @import("product_models_ports");
 const registry_impl = @import("product_models_connections");
+const metask_provider = @import("product_models_metask");
 
-pub const StartError = error{ModelConnectionsDirectoryUnavailable};
+pub const StartError = error{
+    ModelConnectionsDirectoryUnavailable,
+    ModelsStateUnavailable,
+};
 pub const DefaultBinding = registry_impl.Registry.DefaultBinding;
 
 pub const Preparation = contract.Preparation;
+
+pub const TestSupport = if (builtin.is_test) struct {
+    pub fn installMetaskDefault(
+        runtime: *Runtime,
+        principal_ref: []const u8,
+        api_key: contract.ApiKeyView,
+        secret: []const u8,
+        models: []const contract.ModelView,
+        selected_model: []const u8,
+        source_generation: u64,
+        metask_selection_revision: u64,
+        default_selection_revision: u64,
+        catalog_generation: u64,
+    ) !void {
+        runtime.assertMainThread();
+        runtime.metask_catalog.deinit();
+        runtime.metask_catalog = metask_provider.CatalogSession.init(runtime.allocator);
+        try metask_provider.TestSupport.replaceOwnedSelection(
+            &runtime.metask_catalog,
+            principal_ref,
+            api_key,
+            secret,
+            models,
+        );
+        if (!runtime.metask_catalog.hasModel(selected_model))
+            return error.InvalidTestModel;
+        try runtime.registry.configureMetask(
+            principal_ref,
+            api_key.id,
+            selected_model,
+            api_key.protocol,
+            source_generation,
+            metask_selection_revision,
+        );
+        try runtime.registry.selectMetaskDefault(default_selection_revision);
+        runtime.metask_catalog_state = .ready;
+        runtime.metask_catalog_generation = catalog_generation;
+        runtime.metask_error = .none;
+        runtime.store_healthy = true;
+        if (runtime.metask_public_catalog == null) {
+            const public_catalog = try runtime.allocator.create(metask_provider.PublicCatalog);
+            public_catalog.* = .{};
+            runtime.metask_public_catalog = public_catalog;
+        }
+        runtime.metask_public_catalog.?.replaceFromSession(&runtime.metask_catalog);
+    }
+} else struct {};
+
+fn FixedText(comptime capacity: usize) type {
+    return struct {
+        bytes: [capacity]u8 = undefined,
+        len: usize = 0,
+
+        fn set(self: *@This(), value: []const u8) bool {
+            if (value.len > capacity or !std.unicode.utf8ValidateSlice(value))
+                return false;
+            if (value.len != 0) @memcpy(self.bytes[0..value.len], value);
+            self.len = value.len;
+            return true;
+        }
+
+        fn view(self: *const @This()) []const u8 {
+            return self.bytes[0..self.len];
+        }
+    };
+}
 
 pub const Runtime = struct {
     allocator: std.mem.Allocator,
@@ -18,6 +89,20 @@ pub const Runtime = struct {
     store: ?registry_impl.FileStore = null,
     store_healthy: bool = false,
     credential_vault: ?ports.CredentialVault = null,
+    metask_catalog: metask_provider.CatalogSession,
+    metask_public_catalog: ?*metask_provider.PublicCatalog = null,
+    metask_catalog_state: contract.CatalogState = .needs_authentication,
+    metask_catalog_generation: u64 = 0,
+    metask_error: contract.ModelsError = .none,
+    metask_safe_diagnostic: FixedText(contract.Limits.safe_diagnostic_bytes) = .{},
+    metask_source_id: FixedText("metask:".len + contract.Limits.api_key_id_bytes) = .{},
+    provider_views: [1]contract.ProviderView = undefined,
+    catalog_attempt: ?struct {
+        id: u64,
+        principal_ref: FixedText(contract.Limits.principal_ref_bytes),
+        authorization_generation: u64,
+    } = null,
+    next_catalog_attempt_id: u64 = 1,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, main_thread_id: std.Thread.Id) Runtime {
         return .{
@@ -25,13 +110,17 @@ pub const Runtime = struct {
             .io = io,
             .main_thread_id = main_thread_id,
             .registry = registry_impl.Registry.init(allocator),
+            .metask_catalog = metask_provider.CatalogSession.init(allocator),
         };
     }
 
     pub fn deinit(self: *Runtime) void {
         self.assertMainThread();
         std.debug.assert(self.credential_vault == null);
+        if (self.metask_public_catalog) |public_catalog|
+            self.allocator.destroy(public_catalog);
         if (self.store) |*store| store.deinit();
+        self.metask_catalog.deinit();
         self.registry.deinit();
         self.* = undefined;
     }
@@ -41,6 +130,10 @@ pub const Runtime = struct {
         std.debug.assert(self.store == null and self.credential_vault == null);
         if (absolute_directory.len == 0 or !std.fs.path.isAbsolute(absolute_directory))
             return error.ModelConnectionsDirectoryUnavailable;
+        const public_catalog = self.allocator.create(metask_provider.PublicCatalog) catch
+            return error.ModelsStateUnavailable;
+        public_catalog.* = .{};
+        self.metask_public_catalog = public_catalog;
         self.credential_vault = vault;
         self.restore(absolute_directory);
     }
@@ -56,6 +149,11 @@ pub const Runtime = struct {
         self.store = null;
         self.store_healthy = false;
         self.credential_vault = null;
+        self.clearMetaskRuntime(.needs_authentication, .authorization_unavailable);
+        if (self.metask_public_catalog) |public_catalog| {
+            self.allocator.destroy(public_catalog);
+            self.metask_public_catalog = null;
+        }
     }
 
     pub fn views(self: *Runtime) []const contract.ModelConnectionView {
@@ -63,20 +161,457 @@ pub const Runtime = struct {
         return self.registry.views();
     }
 
+    pub fn view(self: *Runtime) contract.ModelsView {
+        self.assertMainThread();
+        const intent = self.registry.metaskIntent();
+        var metask_selection: ?contract.ModelRef = null;
+        if (intent) |value| {
+            const source_id = std.fmt.bufPrint(
+                &self.metask_source_id.bytes,
+                "metask:{s}",
+                .{value.api_key_id},
+            ) catch "";
+            self.metask_source_id.len = source_id.len;
+            if (source_id.len != 0) metask_selection = .{
+                .source_id = self.metask_source_id.view(),
+                .model_id = value.model_id,
+            };
+        } else {
+            self.metask_source_id.len = 0;
+        }
+        self.provider_views[0] = .{
+            .id = contract.metask_source_id,
+            .display_name = "Metask",
+            .recommended = true,
+            .catalog_state = self.metask_catalog_state,
+            .principal_ref = if (intent) |value| value.principal_ref else "",
+            .api_keys = if (self.metask_public_catalog) |public_catalog|
+                public_catalog.apiKeyViews()
+            else
+                &.{},
+            .models = if (self.metask_public_catalog) |public_catalog|
+                public_catalog.modelViews()
+            else
+                &.{},
+            .selected_api_key_id = if (intent) |value| value.api_key_id else "",
+            .catalog_generation = self.metask_catalog_generation,
+            .source_generation = if (intent) |value| value.source_generation else 0,
+            .error_code = self.metask_error,
+            .safe_diagnostic = self.metask_safe_diagnostic.view(),
+        };
+        return .{
+            .availability = if (self.store_healthy) .ready else .unavailable,
+            .persistence_health = if (self.store_healthy) .ready else .unavailable,
+            .providers = self.provider_views[0..],
+            .metask_selection = metask_selection,
+            .metask_selection_revision = if (intent) |value| value.selection_revision else 0,
+            .default_selection = self.registry.defaultSelection(),
+            .selection_revision = self.registry.selection_revision,
+            .operation = if (self.catalog_attempt == null) .idle else .refreshing_catalog,
+            .error_code = if (!self.store_healthy) .persistence_unavailable else self.metask_error,
+            .model_connections = self.registry.views(),
+        };
+    }
+
+    pub fn prepareMetaskCatalogRefresh(
+        self: *Runtime,
+        principal_ref: []const u8,
+        authorization_generation: u64,
+    ) contract.CatalogRefreshPrepareResult {
+        self.assertMainThread();
+        if (!self.store_healthy) return .{ .rejected = .persistence_unavailable };
+        if (self.catalog_attempt != null) return .{ .rejected = .operation_in_progress };
+        if (principal_ref.len == 0 or
+            principal_ref.len > contract.Limits.principal_ref_bytes or
+            authorization_generation == 0 or
+            !std.unicode.utf8ValidateSlice(principal_ref))
+            return .{ .rejected = .authorization_unavailable };
+        var principal: FixedText(contract.Limits.principal_ref_bytes) = .{};
+        if (!principal.set(principal_ref))
+            return .{ .rejected = .authorization_unavailable };
+        const attempt_id = self.next_catalog_attempt_id;
+        self.next_catalog_attempt_id +%= 1;
+        if (self.next_catalog_attempt_id == 0) self.next_catalog_attempt_id = 1;
+        self.catalog_attempt = .{
+            .id = attempt_id,
+            .principal_ref = principal,
+            .authorization_generation = authorization_generation,
+        };
+        self.metask_catalog_state = .loading;
+        self.metask_error = .none;
+        self.metask_safe_diagnostic.len = 0;
+        const intent = self.registry.metaskIntent();
+        const same_principal = if (intent) |value|
+            std.mem.eql(u8, value.principal_ref, principal_ref)
+        else
+            false;
+        return .{ .ready = .{
+            .attempt_id = attempt_id,
+            .principal_ref = self.catalog_attempt.?.principal_ref.view(),
+            .authorization_generation = authorization_generation,
+            .preferred_api_key_id = if (same_principal) intent.?.api_key_id else "",
+            .preferred_model_id = if (same_principal) intent.?.model_id else "",
+        } };
+    }
+
+    pub fn completeMetaskCatalogRefresh(
+        self: *Runtime,
+        attempt_id: u64,
+        authorization_generation: u64,
+        completion: *metask_provider.OwnedCatalogCompletion,
+    ) contract.ModelsError {
+        self.assertMainThread();
+        defer completion.deinit();
+        const session = &completion.session;
+        const selected_model_id = completion.selected_model_id;
+        const attempt = self.catalog_attempt orelse return .catalog_invalid;
+        self.catalog_attempt = null;
+        if (attempt.id != attempt_id or
+            attempt.authorization_generation != authorization_generation or
+            !std.mem.eql(u8, attempt.principal_ref.view(), session.ownerAccountId()))
+        {
+            self.metask_catalog_state = .needs_authentication;
+            self.metask_error = .authorization_unavailable;
+            return self.metask_error;
+        }
+        const api_key_id = session.selectedApiKeyId();
+        const protocol = session.selectedProtocol() orelse {
+            self.metask_catalog_state = .failed;
+            self.metask_error = .catalog_invalid;
+            return self.metask_error;
+        };
+        if (api_key_id.len == 0 or !session.hasModel(selected_model_id)) {
+            self.metask_catalog_state = .failed;
+            self.metask_error = .catalog_invalid;
+            return self.metask_error;
+        }
+
+        var candidate = self.registry.clone() catch {
+            self.metask_catalog_state = .failed;
+            self.metask_error = .local_resource_exhausted;
+            return self.metask_error;
+        };
+        defer candidate.deinit();
+        const current = candidate.metaskIntent();
+        const same_selection = if (current) |value|
+            std.mem.eql(u8, value.principal_ref, attempt.principal_ref.view()) and
+                std.mem.eql(u8, value.api_key_id, api_key_id) and
+                std.mem.eql(u8, value.model_id, selected_model_id)
+        else
+            false;
+        const same_authority = if (current) |value|
+            std.mem.eql(u8, value.principal_ref, attempt.principal_ref.view()) and
+                std.mem.eql(u8, value.api_key_id, api_key_id) and
+                value.protocol == protocol and value.source_generation != 0
+        else
+            false;
+        const source_generation = if (same_authority)
+            current.?.source_generation
+        else
+            self.freshGeneration(if (current) |value| value.source_generation else 0) catch {
+                self.metask_catalog_state = .failed;
+                self.metask_error = .local_resource_exhausted;
+                return self.metask_error;
+            };
+        const selection_revision = if (same_selection and current.?.selection_revision != 0)
+            current.?.selection_revision
+        else
+            self.freshGeneration(if (current) |value| value.selection_revision else 0) catch {
+                self.metask_catalog_state = .failed;
+                self.metask_error = .local_resource_exhausted;
+                return self.metask_error;
+            };
+        // Finish all fallible generation allocation before committing durable
+        // intent. A catalog refresh must not persist a new selection and then
+        // fail to install the matching in-memory catalog generation.
+        const catalog_generation = self.freshGeneration(self.metask_catalog_generation) catch {
+            self.metask_catalog_state = .failed;
+            self.metask_error = .local_resource_exhausted;
+            return self.metask_error;
+        };
+        candidate.configureMetask(
+            attempt.principal_ref.view(),
+            api_key_id,
+            selected_model_id,
+            protocol,
+            source_generation,
+            selection_revision,
+        ) catch {
+            self.metask_catalog_state = .failed;
+            self.metask_error = .catalog_invalid;
+            return self.metask_error;
+        };
+        const committed = self.commitCandidate(&candidate, true);
+        if (!committed.accepted) {
+            self.metask_catalog_state = .failed;
+            self.metask_error = .persistence_unavailable;
+            return self.metask_error;
+        }
+        self.metask_catalog.deinit();
+        self.metask_catalog = session.take();
+        const public_catalog = self.metask_public_catalog orelse {
+            self.metask_catalog.deinit();
+            self.metask_catalog = metask_provider.CatalogSession.init(self.allocator);
+            self.metask_catalog_state = .unavailable;
+            self.metask_error = .persistence_unavailable;
+            return self.metask_error;
+        };
+        public_catalog.replaceFromSession(&self.metask_catalog);
+        self.metask_catalog_generation = catalog_generation;
+        self.metask_catalog_state = .ready;
+        self.metask_error = .none;
+        return .none;
+    }
+
+    pub fn failMetaskCatalogRefresh(
+        self: *Runtime,
+        attempt_id: u64,
+        authorization_generation: u64,
+        error_code: contract.ModelsError,
+        safe_diagnostic: []const u8,
+    ) void {
+        self.assertMainThread();
+        const attempt = self.catalog_attempt orelse return;
+        if (attempt.id != attempt_id or
+            attempt.authorization_generation != authorization_generation)
+            return;
+        self.catalog_attempt = null;
+        self.metask_catalog_state = if (error_code == .authorization_unavailable)
+            .needs_authentication
+        else
+            .failed;
+        self.metask_error = if (error_code == .none) .catalog_invalid else error_code;
+        if (!self.metask_safe_diagnostic.set(safe_diagnostic))
+            self.metask_safe_diagnostic.len = 0;
+    }
+
+    pub fn setMetaskAuthorizationUnavailable(self: *Runtime) void {
+        self.assertMainThread();
+        self.clearMetaskRuntime(.needs_authentication, .authorization_unavailable);
+    }
+
+    pub fn configureMetaskSelection(
+        self: *Runtime,
+        command: contract.ConfigureMetaskSelectionCommand,
+    ) contract.CommandResult {
+        self.assertMainThread();
+        if (!self.store_healthy) return .rejected(.persistence_unavailable);
+        if (self.catalog_attempt != null) return .rejected(.operation_in_progress);
+        if (self.metask_catalog_state != .ready or
+            self.metask_catalog_generation == 0 or
+            command.expected_catalog_generation != self.metask_catalog_generation)
+            return .rejected(.generation_mismatch);
+        const current = self.registry.metaskIntent();
+        const current_revision = if (current) |value| value.selection_revision else 0;
+        if (command.expected_metask_selection_revision != current_revision)
+            return .rejected(.generation_mismatch);
+        const api_key_id = self.metask_catalog.selectedApiKeyId();
+        const protocol = self.metask_catalog.selectedProtocol() orelse
+            return .rejected(.invalid_connection);
+        if (!metaskSourceMatches(command.selection.source_id, api_key_id) or
+            !self.metask_catalog.hasModel(command.selection.model_id))
+            return .rejected(.model_not_found);
+        const principal_ref = self.metask_catalog.ownerAccountId();
+        if (principal_ref.len == 0) return .rejected(.invalid_connection);
+        if (current) |value| {
+            if (std.mem.eql(u8, value.principal_ref, principal_ref) and
+                std.mem.eql(u8, value.api_key_id, api_key_id) and
+                std.mem.eql(u8, value.model_id, command.selection.model_id) and
+                value.protocol == protocol and value.source_generation != 0)
+                return .acceptedResult();
+        }
+
+        var candidate = self.registry.clone() catch
+            return .rejected(.local_resource_exhausted);
+        defer candidate.deinit();
+        const old_default_is_metask = registryDefaultIsMetask(&candidate);
+        const same_authority = if (current) |value|
+            std.mem.eql(u8, value.principal_ref, principal_ref) and
+                std.mem.eql(u8, value.api_key_id, api_key_id) and
+                value.protocol == protocol and value.source_generation != 0
+        else
+            false;
+        const source_generation = if (same_authority)
+            current.?.source_generation
+        else
+            self.freshGeneration(if (current) |value| value.source_generation else 0) catch
+                return .rejected(.local_resource_exhausted);
+        const metask_selection_revision = self.freshGeneration(current_revision) catch
+            return .rejected(.local_resource_exhausted);
+        candidate.configureMetask(
+            principal_ref,
+            api_key_id,
+            command.selection.model_id,
+            protocol,
+            source_generation,
+            metask_selection_revision,
+        ) catch |err| return .rejected(mapRegistryError(err));
+        if (old_default_is_metask) {
+            const selection_revision = self.freshGeneration(candidate.selection_revision) catch
+                return .rejected(.local_resource_exhausted);
+            candidate.selectMetaskDefault(selection_revision) catch |err|
+                return .rejected(mapRegistryError(err));
+        }
+        return self.commitCandidate(&candidate, true);
+    }
+
+    pub fn selectMetaskDefault(
+        self: *Runtime,
+        command: contract.SelectDefaultCommand,
+    ) contract.CommandResult {
+        self.assertMainThread();
+        if (!self.store_healthy) return .rejected(.persistence_unavailable);
+        if (self.catalog_attempt != null) return .rejected(.operation_in_progress);
+        const intent = self.registry.metaskIntent() orelse
+            return .rejected(.invalid_connection);
+        if (command.expected_selection_revision != self.registry.selection_revision or
+            command.expected_source_generation != intent.source_generation or
+            command.expected_catalog_generation != self.metask_catalog_generation or
+            self.metask_catalog_state != .ready or
+            !metaskSourceMatches(command.selection.source_id, intent.api_key_id) or
+            !std.mem.eql(u8, command.selection.model_id, intent.model_id) or
+            !self.metask_catalog.ownsSourceSelection(
+                intent.principal_ref,
+                intent.api_key_id,
+                intent.model_id,
+            ))
+            return .rejected(.generation_mismatch);
+        if (self.registry.defaultSelection()) |current| {
+            if (std.mem.eql(u8, current.source_id, command.selection.source_id) and
+                std.mem.eql(u8, current.model_id, command.selection.model_id))
+                return .acceptedResult();
+        }
+        var candidate = self.registry.clone() catch
+            return .rejected(.local_resource_exhausted);
+        defer candidate.deinit();
+        const selection_revision = self.freshGeneration(candidate.selection_revision) catch
+            return .rejected(.local_resource_exhausted);
+        candidate.selectMetaskDefault(selection_revision) catch |err|
+            return .rejected(mapRegistryError(err));
+        return self.commitCandidate(&candidate, true);
+    }
+
+    /// Selects the global default by source-qualified model identity. Models
+    /// validates every supplied generation against its current projection;
+    /// callers never translate this command into provider-local mutations.
+    pub fn selectDefault(
+        self: *Runtime,
+        command: contract.SelectDefaultCommand,
+    ) contract.CommandResult {
+        self.assertMainThread();
+        if (command.selection.source_id.len == 0 or
+            command.selection.source_id.len > contract.Limits.provider_id_bytes or
+            command.selection.model_id.len == 0 or
+            command.selection.model_id.len > contract.Limits.model_id_bytes or
+            command.expected_source_generation == 0 or
+            command.expected_catalog_generation == 0)
+            return .rejected(.invalid_connection);
+        if (std.mem.startsWith(u8, command.selection.source_id, "metask:"))
+            return self.selectMetaskDefault(command);
+        if (!self.store_healthy) return .rejected(.persistence_unavailable);
+        if (command.expected_selection_revision != self.registry.selection_revision)
+            return .rejected(.generation_mismatch);
+        const connection = for (self.registry.views()) |value| {
+            if (std.mem.eql(u8, value.id, command.selection.source_id))
+                break value;
+        } else return .rejected(.invalid_connection);
+        if (connection.source_generation != command.expected_source_generation or
+            connection.catalog_generation != command.expected_catalog_generation)
+            return .rejected(.generation_mismatch);
+        if (self.registry.defaultSelection()) |current| {
+            if (std.mem.eql(u8, current.source_id, command.selection.source_id) and
+                std.mem.eql(u8, current.model_id, command.selection.model_id))
+                return .acceptedResult();
+        }
+        var candidate = self.registry.clone() catch
+            return .rejected(.local_resource_exhausted);
+        defer candidate.deinit();
+        const selection_revision = self.freshGeneration(candidate.selection_revision) catch
+            return .rejected(.local_resource_exhausted);
+        candidate.selectDefault(.{
+            .connection_id = connection.id,
+            .expected_connection_generation = connection.connection_generation,
+        }, command.selection.model_id, selection_revision) catch |err|
+            return .rejected(mapRegistryError(err));
+        return self.commitCandidate(&candidate, true);
+    }
+
     pub fn defaultBinding(self: *const Runtime) ?DefaultBinding {
         self.assertMainThread();
         return self.registry.defaultBinding();
     }
 
-    pub fn submitCommand(self: *Runtime, command: contract.ModelConnectionCommand) contract.CommandResult {
-        return self.submitCommandWithExecutionGeneration(command, null);
+    pub fn defaultAuthority(self: *const Runtime) ?contract.DefaultSelectionAuthority {
+        self.assertMainThread();
+        const selection = self.registry.defaultSelection() orelse return null;
+        if (self.registry.metaskIntent()) |intent| {
+            var source_storage: ["metask:".len + contract.Limits.api_key_id_bytes]u8 = undefined;
+            const source_id = std.fmt.bufPrint(
+                &source_storage,
+                "metask:{s}",
+                .{intent.api_key_id},
+            ) catch return null;
+            if (std.mem.eql(u8, selection.source_id, source_id)) {
+                const protocol = intent.protocol orelse return null;
+                if (intent.source_generation == 0 or self.registry.selection_revision == 0)
+                    return null;
+                return .{
+                    .selection = selection,
+                    .source = .metask,
+                    .source_generation = intent.source_generation,
+                    .selection_revision = self.registry.selection_revision,
+                    .protocol = protocol,
+                };
+            }
+        }
+        const binding = self.registry.desiredDefaultBinding() orelse return null;
+        if (binding.source_generation == 0 or self.registry.selection_revision == 0)
+            return null;
+        return .{
+            .selection = selection,
+            .source = .model_connection,
+            .source_generation = binding.source_generation,
+            .selection_revision = self.registry.selection_revision,
+            .protocol = binding.protocol,
+        };
     }
 
-    pub fn submitCommandWithExecutionGeneration(
-        self: *Runtime,
-        command: contract.ModelConnectionCommand,
-        execution_generation: ?u64,
-    ) contract.CommandResult {
+    pub fn defaultResolvable(self: *const Runtime) bool {
+        self.assertMainThread();
+        if (!self.store_healthy) return false;
+        const authority = self.defaultAuthority() orelse return false;
+        return switch (authority.source) {
+            .metask => blk: {
+                const intent = self.registry.metaskIntent() orelse break :blk false;
+                break :blk self.metask_catalog_state == .ready and
+                    self.metask_catalog.ownsSourceSelection(
+                        intent.principal_ref,
+                        intent.api_key_id,
+                        intent.model_id,
+                    ) and self.metask_catalog.selectedProtocol() == intent.protocol;
+            },
+            .model_connection => self.credential_vault != null and
+                self.registry.defaultBinding() != null,
+        };
+    }
+
+    pub fn metaskModelAvailable(
+        self: *const Runtime,
+        expected_catalog_generation: ?u64,
+        protocol: contract.Protocol,
+        model_id: []const u8,
+    ) bool {
+        self.assertMainThread();
+        if (self.metask_catalog_state != .ready or
+            self.metask_catalog.selectedProtocol() != protocol or
+            !self.metask_catalog.hasModel(model_id))
+            return false;
+        if (expected_catalog_generation) |expected|
+            return expected != 0 and expected == self.metask_catalog_generation;
+        return true;
+    }
+
+    pub fn submitCommand(self: *Runtime, command: contract.ModelConnectionCommand) contract.CommandResult {
         self.assertMainThread();
         contract.validateModelConnectionCommand(command) catch
             return .rejected(.invalid_connection);
@@ -84,16 +619,49 @@ pub const Runtime = struct {
         var candidate = self.registry.clone() catch |err| return .rejected(mapRegistryError(err));
         defer candidate.deinit();
         switch (command) {
-            .create => |value| candidate.create(value) catch |err| return .rejected(mapRegistryError(err)),
-            .update => |value| candidate.update(value) catch |err| return .rejected(mapRegistryError(err)),
-            .remove => |value| candidate.remove(value) catch |err| return .rejected(mapRegistryError(err)),
+            .create => |value| {
+                const connection_revision = self.freshGeneration(0) catch
+                    return .rejected(.local_resource_exhausted);
+                const source_generation = self.freshGeneration(connection_revision) catch
+                    return .rejected(.local_resource_exhausted);
+                const catalog_generation = self.freshGeneration(source_generation) catch
+                    return .rejected(.local_resource_exhausted);
+                candidate.create(value, connection_revision, source_generation, catalog_generation) catch |err|
+                    return .rejected(mapRegistryError(err));
+            },
+            .update => |value| {
+                const current = findConnectionView(candidate.views(), value.selection.connection_id) orelse
+                    return .rejected(.connection_not_found);
+                const authority_changed = current.protocol != value.spec.protocol or
+                    !std.mem.eql(u8, current.normalized_base_url, value.spec.normalized_base_url) or
+                    value.credential_slot != null;
+                const connection_revision = self.freshGeneration(current.connection_generation) catch
+                    return .rejected(.local_resource_exhausted);
+                const source_generation = if (authority_changed)
+                    self.freshGeneration(candidate.sourceGenerationForConnection(current.id) orelse
+                        return .rejected(.connection_not_found)) catch
+                        return .rejected(.local_resource_exhausted)
+                else
+                    null;
+                const selection_revision = if (authority_changed and isDefaultConnection(&candidate, current.id))
+                    self.freshGeneration(candidate.selection_revision) catch
+                        return .rejected(.local_resource_exhausted)
+                else
+                    null;
+                candidate.update(value, connection_revision, source_generation, selection_revision) catch |err|
+                    return .rejected(mapRegistryError(err));
+            },
+            .remove => |value| {
+                const selection_revision = if (isDefaultConnection(&candidate, value.connection_id))
+                    self.freshGeneration(candidate.selection_revision) catch
+                        return .rejected(.local_resource_exhausted)
+                else
+                    null;
+                candidate.remove(value, selection_revision) catch |err|
+                    return .rejected(mapRegistryError(err));
+            },
             .test_connection => |value| candidate.markTesting(value.selection, value.model_id) catch |err|
                 return .rejected(mapRegistryError(err)),
-            .select_default => |value| candidate.selectDefault(
-                value.selection,
-                value.model_id,
-                execution_generation orelse return .rejected(.invalid_connection),
-            ) catch |err| return .rejected(mapRegistryError(err)),
         }
         return self.commitCandidate(&candidate, true);
     }
@@ -117,7 +685,10 @@ pub const Runtime = struct {
         if (!self.store_healthy) return .rejected(.persistence_unavailable);
         var candidate = self.registry.clone() catch |err| return .rejected(mapRegistryError(err));
         defer candidate.deinit();
-        if (!candidate.clearDefault()) return .acceptedResult();
+        if (candidate.defaultSelection() == null) return .acceptedResult();
+        const selection_revision = self.freshGeneration(candidate.selection_revision) catch
+            return .rejected(.local_resource_exhausted);
+        if (!candidate.clearDefault(selection_revision)) return .acceptedResult();
         return self.commitCandidate(&candidate, true);
     }
 
@@ -157,13 +728,25 @@ pub const Runtime = struct {
             return .rejected(mapRegistryError(err));
         };
         defer committed.deinit();
+        const connection_revision = self.freshGeneration(0) catch {
+            self.drainCredentialCleanup();
+            return .rejected(.local_resource_exhausted);
+        };
+        const source_generation = self.freshGeneration(connection_revision) catch {
+            self.drainCredentialCleanup();
+            return .rejected(.local_resource_exhausted);
+        };
+        const catalog_generation = self.freshGeneration(source_generation) catch {
+            self.drainCredentialCleanup();
+            return .rejected(.local_resource_exhausted);
+        };
         committed.create(.{
             .connection_id = slot_id,
             .spec = spec,
             .credential_slot = .{ .id = slot_id },
             .model_id = model_id,
             .model_display_name = model_display_name,
-        }) catch |err| {
+        }, connection_revision, source_generation, catalog_generation) catch |err| {
             self.drainCredentialCleanup();
             return .rejected(mapRegistryError(err));
         };
@@ -177,6 +760,10 @@ pub const Runtime = struct {
     }
 
     pub fn nextGeneration(self: *Runtime, current_generation: u64) !u64 {
+        return self.freshGeneration(current_generation);
+    }
+
+    fn freshGeneration(self: *Runtime, current_generation: u64) !u64 {
         self.assertMainThread();
         while (true) {
             var bytes: [@sizeOf(u64)]u8 = undefined;
@@ -184,6 +771,21 @@ pub const Runtime = struct {
             const generation = std.mem.readInt(u64, &bytes, .big);
             if (generation != 0 and generation != current_generation) return generation;
         }
+    }
+
+    fn clearMetaskRuntime(
+        self: *Runtime,
+        state: contract.CatalogState,
+        error_code: contract.ModelsError,
+    ) void {
+        self.catalog_attempt = null;
+        self.metask_catalog.deinit();
+        self.metask_catalog = metask_provider.CatalogSession.init(self.allocator);
+        if (self.metask_public_catalog) |public_catalog| public_catalog.clear();
+        self.metask_catalog_generation = 0;
+        self.metask_catalog_state = state;
+        self.metask_error = error_code;
+        self.metask_safe_diagnostic.len = 0;
     }
 
     pub fn prepareExecution(
@@ -203,13 +805,55 @@ pub const Runtime = struct {
         execution_generation: u64,
     ) !contract.OwnedConfig {
         self.assertMainThread();
-        return self.resolveBinding(try self.registry.probeBinding(selection, model_id, execution_generation));
+        return self.resolveBinding(
+            try self.registry.probeBinding(selection, model_id),
+            execution_generation,
+        );
     }
 
-    pub fn resolveDefaultExecution(self: *Runtime) !?contract.OwnedConfig {
+    pub fn resolveDefaultExecution(self: *Runtime, execution_generation: u64) !?contract.OwnedConfig {
         self.assertMainThread();
+        if (execution_generation == 0) return error.InvalidConnection;
+        var candidate = (try self.resolveDefaultCandidate()) orelse return null;
+        defer candidate.deinit();
+        return try candidate.intoConfig(execution_generation);
+    }
+
+    /// Resolves the current durable Models default without assigning a
+    /// Product binding generation. Product Control owns that installation
+    /// identity and may accept, replace, or destroy this candidate.
+    pub fn resolveDefaultCandidate(self: *Runtime) !?contract.OwnedSourceCandidate {
+        self.assertMainThread();
+        const selection = self.registry.defaultSelection() orelse return null;
+        if (self.registry.metaskIntent()) |intent| {
+            var source_storage: ["metask:".len + contract.Limits.api_key_id_bytes]u8 = undefined;
+            const source_id = std.fmt.bufPrint(
+                &source_storage,
+                "metask:{s}",
+                .{intent.api_key_id},
+            ) catch return error.InvalidConnection;
+            if (std.mem.eql(u8, selection.source_id, source_id)) {
+                if (!std.mem.eql(u8, selection.model_id, intent.model_id) or
+                    intent.protocol == null or intent.source_generation == 0 or
+                    self.metask_catalog_state != .ready or
+                    !self.metask_catalog.ownsSourceSelection(
+                        intent.principal_ref,
+                        intent.api_key_id,
+                        intent.model_id,
+                    ) or self.metask_catalog.selectedProtocol() != intent.protocol)
+                    return null;
+                return self.metask_catalog.prepareSourceCandidate(
+                    intent.model_id,
+                    intent.source_generation,
+                ) catch |err| return switch (err) {
+                    error.OutOfMemory => error.OutOfMemory,
+                    else => error.InvalidConnection,
+                };
+            }
+        }
+
         const binding = self.registry.defaultBinding() orelse return null;
-        return self.resolveBinding(binding) catch |err| {
+        return self.resolveBindingCandidate(binding) catch |err| {
             if (err == error.CredentialNotFound) {
                 self.markCredentialMissing(binding);
                 return null;
@@ -224,22 +868,39 @@ pub const Runtime = struct {
         model_id: []const u8,
         execution_generation: u64,
     ) !contract.OwnedConfig {
-        return self.resolveBinding(try self.registry.executionBinding(selection, model_id, execution_generation));
+        return self.resolveBinding(
+            try self.registry.executionBinding(selection, model_id),
+            execution_generation,
+        );
     }
 
-    fn resolveBinding(self: *Runtime, binding: registry_impl.Registry.DefaultBinding) !contract.OwnedConfig {
+    fn resolveBinding(
+        self: *Runtime,
+        binding: registry_impl.Registry.DefaultBinding,
+        execution_generation: u64,
+    ) !contract.OwnedConfig {
+        if (execution_generation == 0) return error.InvalidConnection;
+        var candidate = try self.resolveBindingCandidate(binding);
+        defer candidate.deinit();
+        return try candidate.intoConfig(execution_generation);
+    }
+
+    fn resolveBindingCandidate(
+        self: *Runtime,
+        binding: registry_impl.Registry.DefaultBinding,
+    ) !contract.OwnedSourceCandidate {
         const vault = self.credential_vault orelse return error.CredentialStoreUnavailable;
         var secret_storage: [contract.Limits.credential_bytes]u8 = undefined;
         defer std.crypto.secureZero(u8, &secret_storage);
         const secret = (try vault.get(binding.connection_id, &secret_storage)) orelse
             return error.CredentialNotFound;
-        return contract.OwnedConfig.initOwned(
+        return contract.OwnedSourceCandidate.initOwned(
             self.allocator,
             .model_connection,
             binding.protocol,
             try self.allocator.dupe(u8, binding.model_id),
             try self.allocator.dupe(u8, binding.normalized_base_url),
-            binding.execution_generation,
+            binding.source_generation,
             try self.allocator.dupe(u8, secret),
             binding.connection_id,
         );
@@ -270,33 +931,191 @@ pub const Runtime = struct {
             self.store_healthy = false;
             return;
         };
-        const bytes = bytes_optional orelse return;
+        const bytes = bytes_optional orelse {
+            self.migrateLegacyStores();
+            return;
+        };
         defer self.allocator.free(bytes);
         var restored = registry_impl.decode(self.allocator, bytes) catch {
             self.store_healthy = false;
             return;
         };
+        self.installRestored(&restored);
+    }
+
+    fn installRestored(self: *Runtime, restored: *registry_impl.Registry) void {
         if (restored.reconcileInterruptedTests()) {
-            const reconciled = registry_impl.encodeAlloc(self.allocator, &restored) catch {
+            const reconciled = registry_impl.encodeAlloc(self.allocator, restored) catch {
                 self.store_healthy = false;
-                self.registry.replace(&restored);
+                self.registry.replace(restored);
                 restored.deinit();
                 return;
             };
             defer self.allocator.free(reconciled);
-            self.store.?.commit(reconciled) catch {
+            if (!self.commitVerified(reconciled)) {
                 self.store_healthy = false;
-            };
+            }
         }
-        self.registry.replace(&restored);
+        self.registry.replace(restored);
         restored.deinit();
         self.drainCredentialCleanup();
+    }
+
+    fn migrateLegacyStores(self: *Runtime) void {
+        var candidate = registry_impl.Registry.init(self.allocator);
+        defer candidate.deinit();
+        const store = if (self.store) |*value| value else {
+            self.store_healthy = false;
+            return;
+        };
+
+        var connection_sector_valid = false;
+        const connection_bytes = store.loadNamedAlloc(
+            self.allocator,
+            registry_impl.legacy_connection_store_file_name,
+            registry_impl.max_store_bytes,
+        ) catch blk: {
+            candidate.connections_recovery_required = true;
+            break :blk null;
+        };
+        if (connection_bytes) |bytes| {
+            defer self.allocator.free(bytes);
+            var legacy: ?registry_impl.Registry = legacy_decode: {
+                const decoded = registry_impl.decodeLegacy(self.allocator, bytes) catch {
+                    candidate.connections_recovery_required = true;
+                    break :legacy_decode null;
+                };
+                break :legacy_decode decoded;
+            };
+            if (legacy) |*decoded| {
+                candidate.replace(decoded);
+                decoded.deinit();
+                connection_sector_valid = true;
+            }
+        }
+
+        var prior_generation: u64 = 0;
+        for (0..candidate.connectionCount()) |index| {
+            const source_generation = self.freshGeneration(prior_generation) catch {
+                self.store_healthy = false;
+                return;
+            };
+            const catalog_generation = self.freshGeneration(source_generation) catch {
+                self.store_healthy = false;
+                return;
+            };
+            candidate.reseedLegacyConnection(index, source_generation, catalog_generation) catch {
+                self.store_healthy = false;
+                return;
+            };
+            prior_generation = catalog_generation;
+        }
+
+        var preference_sector_valid = false;
+        const preference_bytes = store.loadNamedAlloc(
+            self.allocator,
+            registry_impl.legacy_preference_store_file_name,
+            registry_impl.legacy_preference_bytes,
+        ) catch blk: {
+            candidate.preference_recovery_required = true;
+            break :blk null;
+        };
+        if (preference_bytes) |bytes| {
+            defer self.allocator.free(bytes);
+            var preference: ?registry_impl.LegacyPreference = preference_decode: {
+                const decoded = registry_impl.decodeLegacyPreference(self.allocator, bytes) catch {
+                    candidate.preference_recovery_required = true;
+                    break :preference_decode null;
+                };
+                break :preference_decode decoded;
+            };
+            if (preference) |*value| {
+                defer value.deinit();
+                const metask_selection_revision = self.freshGeneration(prior_generation) catch {
+                    self.store_healthy = false;
+                    return;
+                };
+                candidate.configureMetask(
+                    value.principal_ref,
+                    value.api_key_id,
+                    value.model_id,
+                    null,
+                    0,
+                    metask_selection_revision,
+                ) catch {
+                    self.store_healthy = false;
+                    return;
+                };
+                prior_generation = metask_selection_revision;
+                preference_sector_valid = true;
+            }
+        }
+
+        if (candidate.defaultSelection() != null) {
+            const revision = self.freshGeneration(prior_generation) catch {
+                self.store_healthy = false;
+                return;
+            };
+            candidate.activateMigratedDefault(revision) catch {
+                self.store_healthy = false;
+                return;
+            };
+        } else if (preference_sector_valid and !candidate.connections_recovery_required) {
+            const revision = self.freshGeneration(prior_generation) catch {
+                self.store_healthy = false;
+                return;
+            };
+            candidate.selectMetaskDefault(revision) catch {
+                self.store_healthy = false;
+                return;
+            };
+        } else if (candidate.preference_recovery_required or
+            candidate.connections_recovery_required)
+        {
+            candidate.default_migration_required = true;
+            candidate.selection_revision = self.freshGeneration(prior_generation) catch {
+                self.store_healthy = false;
+                return;
+            };
+        }
+
+        const encoded = registry_impl.encodeAlloc(self.allocator, &candidate) catch {
+            self.store_healthy = false;
+            return;
+        };
+        defer self.allocator.free(encoded);
+        if (!self.commitVerified(encoded)) {
+            self.store_healthy = false;
+            return;
+        }
+        self.registry.replace(&candidate);
+        if (connection_sector_valid) store.archiveLegacy(
+            registry_impl.legacy_connection_store_file_name,
+            registry_impl.legacy_connection_store_file_name ++ ".migrated",
+        );
+        if (preference_sector_valid) store.archiveLegacy(
+            registry_impl.legacy_preference_store_file_name,
+            registry_impl.legacy_preference_store_file_name ++ ".migrated",
+        );
+        self.drainCredentialCleanup();
+    }
+
+    fn commitVerified(self: *Runtime, bytes: []const u8) bool {
+        const store = if (self.store) |*value| value else return false;
+        store.commit(bytes) catch |err| {
+            if (err != error.PersistenceOutcomeUnknown) return false;
+            const loaded = store.loadAlloc(self.allocator) catch return false;
+            const actual = loaded orelse return false;
+            defer self.allocator.free(actual);
+            return std.mem.eql(u8, actual, bytes);
+        };
+        return true;
     }
 
     fn markCredentialMissing(self: *Runtime, binding: registry_impl.Registry.DefaultBinding) void {
         self.registry.markCredentialMissing(.{
             .connection_id = binding.connection_id,
-            .expected_connection_generation = binding.connection_generation,
+            .expected_connection_generation = binding.connection_revision,
         }) catch return;
         const encoded = registry_impl.encodeAlloc(self.allocator, &self.registry) catch {
             self.store_healthy = false;
@@ -350,6 +1169,36 @@ fn mapResolutionError(err: anyerror) contract.ManagementError {
         error.CredentialStoreUnavailable, error.CredentialNotFound => .capture_unavailable,
         else => .capture_unavailable,
     };
+}
+
+fn findConnectionView(
+    views: []const contract.ModelConnectionView,
+    connection_id: []const u8,
+) ?contract.ModelConnectionView {
+    for (views) |view|
+        if (std.mem.eql(u8, view.id, connection_id)) return view;
+    return null;
+}
+
+fn isDefaultConnection(registry: *const registry_impl.Registry, connection_id: []const u8) bool {
+    const selection = registry.defaultSelection() orelse return false;
+    return std.mem.eql(u8, selection.source_id, connection_id);
+}
+
+fn metaskSourceMatches(source_id: []const u8, api_key_id: []const u8) bool {
+    var storage: ["metask:".len + contract.Limits.api_key_id_bytes]u8 = undefined;
+    const expected = std.fmt.bufPrint(
+        &storage,
+        "metask:{s}",
+        .{api_key_id},
+    ) catch return false;
+    return std.mem.eql(u8, source_id, expected);
+}
+
+fn registryDefaultIsMetask(registry: *const registry_impl.Registry) bool {
+    const selection = registry.defaultSelection() orelse return false;
+    const intent = registry.metaskIntent() orelse return false;
+    return metaskSourceMatches(selection.source_id, intent.api_key_id);
 }
 
 const TestVault = struct {
@@ -439,13 +1288,21 @@ test "Execution Runtime owns durable model connections and credential resolution
             .selection = selection,
             .model_id = "gpt-5",
         }, true).accepted);
-        try std.testing.expect(runtime.submitCommandWithExecutionGeneration(.{
-            .select_default = .{
-                .selection = selection,
-                .model_id = "gpt-5",
-            },
-        }, 17).accepted);
-        var execution = (try runtime.resolveDefaultExecution()) orelse
+        const connection = runtime.views()[0];
+        try std.testing.expect(runtime.selectDefault(.{
+            .selection = .{ .source_id = selection.connection_id, .model_id = "gpt-5" },
+            .expected_selection_revision = runtime.view().selection_revision,
+            .expected_source_generation = connection.source_generation,
+            .expected_catalog_generation = connection.catalog_generation,
+        }).accepted);
+        const authority = runtime.defaultAuthority() orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expectEqual(contract.Source.model_connection, authority.source);
+        try std.testing.expectEqualStrings(TestVault.slot, authority.selection.source_id);
+        try std.testing.expectEqualStrings("gpt-5", authority.selection.model_id);
+        try std.testing.expect(authority.source_generation != 0);
+        try std.testing.expect(authority.selection_revision != 0);
+        var execution = (try runtime.resolveDefaultExecution(17)) orelse
             return error.TestUnexpectedResult;
         defer execution.deinit();
         try std.testing.expectEqualStrings("provider-secret", execution.input().api_key);
@@ -461,10 +1318,294 @@ test "Execution Runtime owns durable model connections and credential resolution
             restored.deinit();
         }
         try std.testing.expectEqual(@as(usize, 1), restored.views().len);
-        var execution = (try restored.resolveDefaultExecution()) orelse
+        var execution = (try restored.resolveDefaultExecution(23)) orelse
             return error.TestUnexpectedResult;
         defer execution.deinit();
         try std.testing.expectEqualStrings("provider-secret", execution.input().api_key);
         try std.testing.expectEqualStrings("model_connection:" ++ TestVault.slot, execution.input().target.provider_id);
     }
+}
+
+test "Models owns Metask catalog authority without changing global default" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
+    const directory = directory_storage[0..directory_len];
+    var vault: TestVault = .{};
+    var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
+    try runtime.start(directory, vault.port());
+    defer {
+        runtime.stop();
+        runtime.deinit();
+    }
+
+    const prepared = switch (runtime.prepareMetaskCatalogRefresh("principal-1", 5)) {
+        .ready => |value| value,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    var catalog = metask_provider.CatalogSession.init(std.testing.allocator);
+    try metask_provider.TestSupport.replaceOwnedSelection(
+        &catalog,
+        "principal-1",
+        .{
+            .id = "api-1",
+            .name = "Primary",
+            .suffix = "1234",
+            .protocol = .anthropic_messages,
+        },
+        "model-secret",
+        &.{.{ .id = "model-1", .display_name = "Model One" }},
+    );
+    var completion = try metask_provider.OwnedCatalogCompletion.init(
+        std.testing.allocator,
+        &catalog,
+        "model-1",
+    );
+    try std.testing.expectEqual(
+        contract.ModelsError.none,
+        runtime.completeMetaskCatalogRefresh(
+            prepared.attempt_id,
+            prepared.authorization_generation,
+            &completion,
+        ),
+    );
+
+    const first = runtime.view();
+    try std.testing.expectEqual(contract.CatalogState.ready, first.providers[0].catalog_state);
+    try std.testing.expectEqualStrings("principal-1", first.providers[0].principal_ref);
+    try std.testing.expectEqualStrings("api-1", first.providers[0].selected_api_key_id);
+    try std.testing.expectEqualStrings("model-1", first.metask_selection.?.model_id);
+    try std.testing.expect(first.providers[0].source_generation != 0);
+    try std.testing.expect(first.metask_selection_revision != 0);
+    try std.testing.expect(first.default_selection == null);
+    const first_source_generation = first.providers[0].source_generation;
+    const first_selection_revision = first.metask_selection_revision;
+    const first_catalog_generation = first.providers[0].catalog_generation;
+
+    const refreshed = switch (runtime.prepareMetaskCatalogRefresh("principal-1", 6)) {
+        .ready => |value| value,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqualStrings("api-1", refreshed.preferred_api_key_id);
+    try std.testing.expectEqualStrings("model-1", refreshed.preferred_model_id);
+    var same_catalog = metask_provider.CatalogSession.init(std.testing.allocator);
+    try metask_provider.TestSupport.replaceOwnedSelection(
+        &same_catalog,
+        "principal-1",
+        .{
+            .id = "api-1",
+            .name = "Primary",
+            .suffix = "1234",
+            .protocol = .anthropic_messages,
+        },
+        "rotated-model-secret",
+        &.{.{ .id = "model-1", .display_name = "Model One" }},
+    );
+    var refreshed_completion = try metask_provider.OwnedCatalogCompletion.init(
+        std.testing.allocator,
+        &same_catalog,
+        "model-1",
+    );
+    try std.testing.expectEqual(
+        contract.ModelsError.none,
+        runtime.completeMetaskCatalogRefresh(
+            refreshed.attempt_id,
+            refreshed.authorization_generation,
+            &refreshed_completion,
+        ),
+    );
+    const second = runtime.view();
+    try std.testing.expectEqual(first_source_generation, second.providers[0].source_generation);
+    try std.testing.expectEqual(first_selection_revision, second.metask_selection_revision);
+    try std.testing.expect(first_catalog_generation != second.providers[0].catalog_generation);
+
+    try std.testing.expect(runtime.selectMetaskDefault(.{
+        .selection = .{
+            .source_id = "metask:api-1",
+            .model_id = "model-1",
+        },
+        .expected_selection_revision = second.selection_revision,
+        .expected_source_generation = second.providers[0].source_generation,
+        .expected_catalog_generation = second.providers[0].catalog_generation,
+    }).accepted);
+    const default_authority = runtime.defaultAuthority() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(contract.Source.metask, default_authority.source);
+    try std.testing.expectEqualStrings(
+        "metask:api-1",
+        default_authority.selection.source_id,
+    );
+    try std.testing.expectEqualStrings("model-1", default_authority.selection.model_id);
+    try std.testing.expectEqual(first_source_generation, default_authority.source_generation);
+    var first_candidate = (try runtime.resolveDefaultCandidate()) orelse
+        return error.TestUnexpectedResult;
+    defer first_candidate.deinit();
+    var second_candidate = (try runtime.resolveDefaultCandidate()) orelse
+        return error.TestUnexpectedResult;
+    defer second_candidate.deinit();
+    try std.testing.expectEqualStrings(
+        "rotated-model-secret",
+        first_candidate.input().api_key,
+    );
+    try std.testing.expectEqualStrings(
+        "rotated-model-secret",
+        second_candidate.input().api_key,
+    );
+    try std.testing.expectEqual(
+        first_source_generation,
+        second_candidate.input().source_generation,
+    );
+
+    runtime.setMetaskAuthorizationUnavailable();
+    const unavailable = runtime.view();
+    try std.testing.expectEqual(
+        contract.CatalogState.needs_authentication,
+        unavailable.providers[0].catalog_state,
+    );
+    try std.testing.expectEqual(@as(usize, 0), unavailable.providers[0].models.len);
+    try std.testing.expectEqualStrings("model-1", unavailable.metask_selection.?.model_id);
+}
+
+test "Models bootstrap migrates both legacy stores with custom default precedence" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
+    const directory = directory_storage[0..directory_len];
+
+    var legacy = registry_impl.Registry.init(std.testing.allocator);
+    defer legacy.deinit();
+    try legacy.create(.{
+        .connection_id = "legacy-slot",
+        .spec = .{
+            .display_name = "Legacy",
+            .protocol = .openai_responses,
+            .normalized_base_url = "https://api.openai.com/v1/responses",
+        },
+        .credential_slot = .{ .id = "legacy-slot" },
+        .model_id = "gpt-5",
+    }, 7, 8, 9);
+    const legacy_selection: contract.ModelConnectionSelectionCommand = .{
+        .connection_id = "legacy-slot",
+        .expected_connection_generation = 7,
+    };
+    try legacy.markTesting(legacy_selection, "gpt-5");
+    try legacy.completeTest(legacy_selection, "gpt-5", true);
+    try legacy.selectDefault(legacy_selection, "gpt-5", 11);
+    const connection_bytes = try registry_impl.encodeLegacyAlloc(std.testing.allocator, &legacy);
+    defer std.testing.allocator.free(connection_bytes);
+    try writeTestFile(&tmp.dir, registry_impl.legacy_connection_store_file_name, connection_bytes);
+    try writeTestFile(
+        &tmp.dir,
+        registry_impl.legacy_preference_store_file_name,
+        "{\"selection_owner_account_id\":\"principal-1\",\"api_key_id\":\"api-1\",\"model_id\":\"metask-model\",\"metask_source_generation\":13}",
+    );
+
+    var vault: TestVault = .{};
+    var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
+    try runtime.start(directory, vault.port());
+    defer {
+        runtime.stop();
+        runtime.deinit();
+    }
+    try std.testing.expect(runtime.store_healthy);
+    const default_selection = runtime.registry.defaultSelection() orelse
+        return error.TestExpectedEqual;
+    try std.testing.expectEqualStrings("legacy-slot", default_selection.source_id);
+    try std.testing.expectEqualStrings("gpt-5", default_selection.model_id);
+    const metask = runtime.registry.metaskIntent() orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualStrings("principal-1", metask.principal_ref);
+    try std.testing.expectEqualStrings("api-1", metask.api_key_id);
+    try std.testing.expect(metask.protocol == null);
+    try std.testing.expectEqual(@as(u64, 0), metask.source_generation);
+    try std.testing.expect(runtime.registry.sourceGenerationForConnection("legacy-slot").? != 7);
+    try std.testing.expect(!runtime.registry.preference_recovery_required);
+    try std.testing.expect(!runtime.registry.connections_recovery_required);
+    try std.testing.expect(!runtime.registry.default_migration_required);
+}
+
+test "Models bootstrap isolates damaged connection sector from valid Metask intent" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
+    const directory = directory_storage[0..directory_len];
+    try writeTestFile(
+        &tmp.dir,
+        registry_impl.legacy_connection_store_file_name,
+        "not-json",
+    );
+    try writeTestFile(
+        &tmp.dir,
+        registry_impl.legacy_preference_store_file_name,
+        "{\"selection_owner_account_id\":\"principal-1\",\"api_key_id\":\"api-1\",\"model_id\":\"metask-model\",\"metask_source_generation\":13}",
+    );
+
+    var vault: TestVault = .{};
+    var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
+    try runtime.start(directory, vault.port());
+    defer {
+        runtime.stop();
+        runtime.deinit();
+    }
+    try std.testing.expect(runtime.store_healthy);
+    try std.testing.expect(runtime.registry.metaskIntent() != null);
+    try std.testing.expect(runtime.registry.defaultSelection() == null);
+    try std.testing.expect(runtime.registry.connections_recovery_required);
+    try std.testing.expect(!runtime.registry.preference_recovery_required);
+    try std.testing.expect(runtime.registry.default_migration_required);
+    try std.testing.expect(runtime.registry.selection_revision != 0);
+}
+
+test "Models bootstrap preserves proven custom default when preference sector is damaged" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
+    const directory = directory_storage[0..directory_len];
+
+    var legacy = registry_impl.Registry.init(std.testing.allocator);
+    defer legacy.deinit();
+    try legacy.create(.{
+        .connection_id = "legacy-slot",
+        .spec = .{
+            .display_name = "Legacy",
+            .protocol = .openai_responses,
+            .normalized_base_url = "https://api.openai.com/v1/responses",
+        },
+        .credential_slot = .{ .id = "legacy-slot" },
+        .model_id = "gpt-5",
+    }, 7, 8, 9);
+    const legacy_selection: contract.ModelConnectionSelectionCommand = .{
+        .connection_id = "legacy-slot",
+        .expected_connection_generation = 7,
+    };
+    try legacy.markTesting(legacy_selection, "gpt-5");
+    try legacy.completeTest(legacy_selection, "gpt-5", true);
+    try legacy.selectDefault(legacy_selection, "gpt-5", 11);
+    const connection_bytes = try registry_impl.encodeLegacyAlloc(std.testing.allocator, &legacy);
+    defer std.testing.allocator.free(connection_bytes);
+    try writeTestFile(&tmp.dir, registry_impl.legacy_connection_store_file_name, connection_bytes);
+    try writeTestFile(&tmp.dir, registry_impl.legacy_preference_store_file_name, "not-json");
+
+    var vault: TestVault = .{};
+    var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
+    try runtime.start(directory, vault.port());
+    defer {
+        runtime.stop();
+        runtime.deinit();
+    }
+    try std.testing.expect(runtime.store_healthy);
+    try std.testing.expect(runtime.registry.defaultSelection() != null);
+    try std.testing.expect(runtime.registry.preference_recovery_required);
+    try std.testing.expect(!runtime.registry.connections_recovery_required);
+    try std.testing.expect(!runtime.registry.default_migration_required);
+}
+
+fn writeTestFile(dir: *std.Io.Dir, name: []const u8, bytes: []const u8) !void {
+    const file = try dir.createFile(std.testing.io, name, .{ .exclusive = true });
+    defer file.close(std.testing.io);
+    try file.writeStreamingAll(std.testing.io, bytes);
+    try file.sync(std.testing.io);
 }

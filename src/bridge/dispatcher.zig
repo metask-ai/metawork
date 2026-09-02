@@ -170,6 +170,16 @@ pub const ModelConnectionHost = struct {
     ) ModelConnectionCreateOutcome,
 };
 
+/// Application-owned Models effects that cannot run inside Product Control.
+pub const ModelsHost = struct {
+    context: *anyopaque,
+    refresh_catalog_fn: *const fn (*anyopaque) models_contract.CommandResult,
+
+    fn refreshCatalog(self: ModelsHost) models_contract.CommandResult {
+        return self.refresh_catalog_fn(self.context);
+    }
+};
+
 /// Narrow Application effect port. It grants only the MCP management
 /// sequences owned by the Application coordinator, never platform authority.
 pub const McpManagementHost = struct {
@@ -198,6 +208,7 @@ pub const Dispatcher = struct {
     platform: Platform,
     automation: AutomationAuthority,
     mcp_management_host: ?McpManagementHost = null,
+    models_host: ?ModelsHost = null,
     model_connection_host: ?ModelConnectionHost = null,
     bootstrap_window_id: native_sdk.platform.WindowId,
     delivery: product_delivery.Delivery,
@@ -257,6 +268,10 @@ pub const Dispatcher = struct {
         self.model_connection_host = host;
     }
 
+    pub fn setModelsHost(self: *Dispatcher, host: ?ModelsHost) void {
+        self.models_host = host;
+    }
+
     /// Registers the complete product command table. Automation may change
     /// authority in controlled builds, but it does not add a parallel protocol.
     pub fn register(
@@ -306,15 +321,13 @@ pub const Dispatcher = struct {
             .{ .name = commands.snapshot_chunk, .function = fetchSnapshotChunk },
             .{ .name = commands.account_begin_login, .function = accountBeginLogin },
             .{ .name = commands.account_cancel_operation, .function = accountCancelOperation },
-            .{ .name = commands.account_refresh_catalog, .function = accountRefreshCatalog },
-            .{ .name = commands.account_select_api_key, .function = accountSelectApiKey },
-            .{ .name = commands.account_select_model, .function = accountSelectModel },
-            .{ .name = commands.select_metask_default, .function = selectMetaskDefault },
+            .{ .name = commands.models_refresh_catalog, .function = modelsRefreshCatalog },
+            .{ .name = commands.models_configure_metask_selection, .function = configureMetaskSelection },
+            .{ .name = commands.models_select_default, .function = selectModelsDefault },
             .{ .name = commands.model_connection_create, .function = modelConnectionCreate },
             .{ .name = commands.model_connection_update, .function = modelConnectionUpdate },
             .{ .name = commands.model_connection_remove, .function = modelConnectionRemove },
             .{ .name = commands.model_connection_test, .function = modelConnectionTest },
-            .{ .name = commands.model_connection_select_default, .function = modelConnectionSelectDefault },
             .{ .name = commands.account_logout, .function = accountLogout },
             .{ .name = commands.set_default_permission_profile, .function = setDefaultPermissionProfile },
             .{ .name = commands.create_task, .function = createTask },
@@ -1128,19 +1141,6 @@ pub const Dispatcher = struct {
         );
     }
 
-    fn accountRefreshCatalog(
-        context: *anyopaque,
-        invocation: native_sdk.bridge.Invocation,
-        output: []u8,
-    ) anyerror![]const u8 {
-        return submitEmptyAccountCommand(
-            context,
-            invocation,
-            output,
-            .refresh_catalog,
-        );
-    }
-
     fn accountLogout(
         context: *anyopaque,
         invocation: native_sdk.bridge.Invocation,
@@ -1175,7 +1175,7 @@ pub const Dispatcher = struct {
         );
     }
 
-    fn accountSelectApiKey(
+    fn modelsRefreshCatalog(
         context: *anyopaque,
         invocation: native_sdk.bridge.Invocation,
         output: []u8,
@@ -1184,28 +1184,14 @@ pub const Dispatcher = struct {
         var callback = try self.callbacks.enter();
         defer callback.deinit();
         try self.requireManagementAuthority(invocation.source.window_id);
-        var parsed = try handlers.parsePayload(
-            handlers.AccountSelection,
-            invocation.request.payload,
-        );
+        var parsed = try handlers.parsePayload(handlers.Empty, invocation.request.payload);
         defer parsed.deinit();
-        if (parsed.value.selectionId.len == 0 or
-            parsed.value.selectionId.len > account_contract.Limits.api_key_id_bytes)
-            return error.InvalidBridgePayload;
-        return encodeAccountResult(
-            output,
-            self.account_commands.submit(.{
-                .select_api_key = .{
-                    .selection_id = parsed.value.selectionId,
-                    .expected_catalog_generation = try handlers.parseWireId(
-                        parsed.value.expectedCatalogGeneration,
-                    ),
-                },
-            }),
-        );
+        const host = self.models_host orelse
+            return encodeExecutionResult(output, .rejected(.catalog_unavailable));
+        return encodeExecutionResult(output, host.refreshCatalog());
     }
 
-    fn accountSelectModel(
+    fn configureMetaskSelection(
         context: *anyopaque,
         invocation: native_sdk.bridge.Invocation,
         output: []u8,
@@ -1215,27 +1201,31 @@ pub const Dispatcher = struct {
         defer callback.deinit();
         try self.requireManagementAuthority(invocation.source.window_id);
         var parsed = try handlers.parsePayload(
-            handlers.AccountSelection,
+            handlers.ConfigureMetaskSelection,
             invocation.request.payload,
         );
         defer parsed.deinit();
-        if (parsed.value.selectionId.len == 0 or
-            parsed.value.selectionId.len > account_contract.Limits.model_id_bytes)
+        if (parsed.value.sourceId.len == 0 or
+            parsed.value.sourceId.len > models_contract.Limits.provider_id_bytes or
+            parsed.value.modelId.len == 0 or
+            parsed.value.modelId.len > models_contract.Limits.model_id_bytes)
             return error.InvalidBridgePayload;
-        return encodeAccountResult(
-            output,
-            self.account_commands.submit(.{
-                .select_model = .{
-                    .selection_id = parsed.value.selectionId,
-                    .expected_catalog_generation = try handlers.parseWireId(
-                        parsed.value.expectedCatalogGeneration,
-                    ),
-                },
-            }),
-        );
+        const control = self.control orelse return error.DispatcherUnavailable;
+        return encodeExecutionResult(output, control.configureMetaskSelection(.{
+            .selection = .{
+                .source_id = parsed.value.sourceId,
+                .model_id = parsed.value.modelId,
+            },
+            .expected_metask_selection_revision = try handlers.parseWireId(
+                parsed.value.expectedMetaskSelectionRevision,
+            ),
+            .expected_catalog_generation = try handlers.parseWireId(
+                parsed.value.expectedCatalogGeneration,
+            ),
+        }));
     }
 
-    fn selectMetaskDefault(
+    fn selectModelsDefault(
         context: *anyopaque,
         invocation: native_sdk.bridge.Invocation,
         output: []u8,
@@ -1245,14 +1235,33 @@ pub const Dispatcher = struct {
         defer callback.deinit();
         try self.requireManagementAuthority(invocation.source.window_id);
         var parsed = try handlers.parsePayload(
-            handlers.Empty,
+            handlers.ModelDefaultSelection,
             invocation.request.payload,
         );
         defer parsed.deinit();
+        if (parsed.value.sourceId.len == 0 or
+            parsed.value.sourceId.len > models_contract.Limits.provider_id_bytes or
+            parsed.value.modelId.len == 0 or
+            parsed.value.modelId.len > models_contract.Limits.model_id_bytes)
+            return error.InvalidBridgePayload;
         const control = self.control orelse return error.DispatcherUnavailable;
         return encodeExecutionResult(
             output,
-            control.selectMetaskDefault(self.account_commands),
+            control.selectModelsDefault(.{
+                .selection = .{
+                    .source_id = parsed.value.sourceId,
+                    .model_id = parsed.value.modelId,
+                },
+                .expected_selection_revision = try handlers.parseWireId(
+                    parsed.value.expectedSelectionRevision,
+                ),
+                .expected_source_generation = try handlers.parseWireId(
+                    parsed.value.expectedSourceGeneration,
+                ),
+                .expected_catalog_generation = try handlers.parseWireId(
+                    parsed.value.expectedCatalogGeneration,
+                ),
+            }),
         );
     }
 
@@ -1369,46 +1378,21 @@ pub const Dispatcher = struct {
         invocation: native_sdk.bridge.Invocation,
         output: []u8,
     ) anyerror![]const u8 {
-        return submitModelConnectionModelCommand(context, invocation, output, false);
-    }
-
-    fn modelConnectionSelectDefault(
-        context: *anyopaque,
-        invocation: native_sdk.bridge.Invocation,
-        output: []u8,
-    ) anyerror![]const u8 {
-        return submitModelConnectionModelCommand(context, invocation, output, true);
-    }
-
-    fn submitModelConnectionModelCommand(
-        context: *anyopaque,
-        invocation: native_sdk.bridge.Invocation,
-        output: []u8,
-        select_default: bool,
-    ) anyerror![]const u8 {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
         var callback = try self.callbacks.enter();
         defer callback.deinit();
         try self.requireManagementAuthority(invocation.source.window_id);
         var parsed = try handlers.parsePayload(handlers.ModelConnectionModelSelection, invocation.request.payload);
         defer parsed.deinit();
-        const command: models_contract.ModelConnectionCommand = if (select_default)
-            .{ .select_default = .{
+        return encodeExecutionResult(output, self.model_connection_commands.submit(.{
+            .test_connection = .{
                 .selection = .{
                     .connection_id = parsed.value.connectionId,
                     .expected_connection_generation = try handlers.parseWireId(parsed.value.expectedConnectionGeneration),
                 },
                 .model_id = parsed.value.modelId,
-            } }
-        else
-            .{ .test_connection = .{
-                .selection = .{
-                    .connection_id = parsed.value.connectionId,
-                    .expected_connection_generation = try handlers.parseWireId(parsed.value.expectedConnectionGeneration),
-                },
-                .model_id = parsed.value.modelId,
-            } };
-        return encodeExecutionResult(output, self.model_connection_commands.submit(command));
+            },
+        }));
     }
 
     fn parseProtocol(value: []const u8) ?models_contract.Protocol {
@@ -1629,10 +1613,10 @@ pub const Dispatcher = struct {
         );
         defer parsed.deinit();
         if (parsed.value.expectedModel.len == 0 or
-            parsed.value.expectedModel.len > account_contract.Limits.model_id_bytes or
+            parsed.value.expectedModel.len > models_contract.Limits.model_id_bytes or
             !std.unicode.utf8ValidateSlice(parsed.value.expectedModel) or
             parsed.value.selectionId.len == 0 or
-            parsed.value.selectionId.len > account_contract.Limits.model_id_bytes or
+            parsed.value.selectionId.len > models_contract.Limits.model_id_bytes or
             !std.unicode.utf8ValidateSlice(parsed.value.selectionId))
             return error.InvalidBridgePayload;
         const task_id = try handlers.parseWireId(parsed.value.taskId);
@@ -3385,6 +3369,8 @@ fn encodeExecutionResult(
     const error_code: []const u8 = if (result.accepted)
         "none"
     else switch (result.error_code.?) {
+        .authorization_unavailable => "authorization_unavailable",
+        .catalog_unavailable => "catalog_unavailable",
         .invalid_connection => "model_connection_invalid",
         .connection_not_found => "model_connection_not_found",
         .generation_mismatch => "generation_mismatch",
@@ -3394,7 +3380,6 @@ fn encodeExecutionResult(
         .capture_unavailable => "model_connection_capture_unavailable",
         .test_unavailable => "model_connection_test_unavailable",
         .credential_write_failed => "credential_store_write_failed",
-        .execution_in_use => "execution_in_use",
         .operation_in_progress => "operation_in_progress",
         .user_cancelled => "user_cancelled",
     };
@@ -4196,7 +4181,6 @@ test "Execution command responses preserve the existing Bridge error vocabulary"
         .{ models_contract.ManagementError.persistence_unavailable, "model_connection_persistence_unavailable" },
         .{ models_contract.ManagementError.capture_unavailable, "model_connection_capture_unavailable" },
         .{ models_contract.ManagementError.credential_write_failed, "credential_store_write_failed" },
-        .{ models_contract.ManagementError.execution_in_use, "execution_in_use" },
         .{ models_contract.ManagementError.operation_in_progress, "operation_in_progress" },
         .{ models_contract.ManagementError.test_unavailable, "model_connection_test_unavailable" },
         .{ models_contract.ManagementError.user_cancelled, "user_cancelled" },
@@ -4304,15 +4288,16 @@ test "Dispatcher validates authority before domain calls and preserves committed
     const Harness = struct {
         wake_calls: usize = 0,
         account_calls: usize = 0,
+        models_calls: usize = 0,
         chrome_connect_calls: usize = 0,
         chrome_sync_calls: usize = 0,
         chrome_drag_calls: usize = 0,
         chrome_control_calls: usize = 0,
         chrome_disconnect_calls: usize = 0,
         on_main_thread: bool = true,
-        last_catalog_generation: u64 = 0,
         account_result: account_contract.AccountCommandResult =
             .acceptedAttempt(41),
+        models_result: models_contract.CommandResult = .acceptedResult(),
 
         fn wake(context: ?*anyopaque) anyerror!void {
             const self: *@This() = @ptrCast(@alignCast(context.?));
@@ -4432,15 +4417,8 @@ test "Dispatcher validates authority before domain calls and preserves committed
             switch (command) {
                 .begin_login,
                 .cancel_operation,
-                .refresh_catalog,
                 .logout,
                 => {},
-                .select_api_key, .select_model => |selection| {
-                    std.debug.assert(selection.selection_id.len != 0);
-                    self.last_catalog_generation =
-                        selection.expected_catalog_generation;
-                },
-                .resolve_source_candidate => {},
             }
             return self.account_result;
         }
@@ -4455,6 +4433,12 @@ test "Dispatcher validates authority before domain calls and preserves committed
                 .acceptedResult()
             else
                 .rejected(.invalid_connection);
+        }
+
+        fn refreshModels(context: *anyopaque) models_contract.CommandResult {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.models_calls += 1;
+            return self.models_result;
         }
     };
 
@@ -4506,6 +4490,10 @@ test "Dispatcher validates authority before domain calls and preserves committed
         workbench.deinit();
         runtime.deinit();
     }
+    dispatcher.setModelsHost(.{
+        .context = &harness,
+        .refresh_catalog_fn = Harness.refreshModels,
+    });
     const native_dispatcher = dispatcher.register(
         @import("policy.zig").product(.release),
     );
@@ -4751,7 +4739,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
     );
     try std.testing.expectEqual(@as(usize, 1), harness.account_calls);
     const empty_model = native_dispatcher.dispatch(
-        "{\"id\":\"empty-model\",\"command\":\"metawork.account.selectModel\",\"payload\":{\"selectionId\":\"\",\"expectedCatalogGeneration\":\"0\"}}",
+        "{\"id\":\"empty-model\",\"command\":\"metawork.models.configureMetaskSelection\",\"payload\":{\"sourceId\":\"\",\"modelId\":\"\",\"expectedMetaskSelectionRevision\":\"0\",\"expectedSourceGeneration\":\"0\",\"expectedCatalogGeneration\":\"0\"}}",
         source,
         &response,
     );
@@ -4760,7 +4748,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
     );
     try std.testing.expectEqual(@as(usize, 1), harness.account_calls);
     const forwarded_selection = native_dispatcher.dispatch(
-        "{\"id\":\"select-key\",\"command\":\"metawork.account.selectApiKey\",\"payload\":{\"selectionId\":\"key-1\",\"expectedCatalogGeneration\":\"0\"}}",
+        "{\"id\":\"refresh-models\",\"command\":\"metawork.models.refreshCatalog\",\"payload\":{}}",
         source,
         &response,
     );
@@ -4769,23 +4757,23 @@ test "Dispatcher validates authority before domain calls and preserves committed
         forwarded_selection,
         "\"accepted\":true",
     ) != null);
-    try std.testing.expectEqual(@as(usize, 2), harness.account_calls);
-    try std.testing.expectEqual(@as(u64, 0), harness.last_catalog_generation);
+    try std.testing.expectEqual(@as(usize, 1), harness.account_calls);
+    try std.testing.expectEqual(@as(usize, 1), harness.models_calls);
     harness.on_main_thread = false;
     _ = native_dispatcher.dispatch(
         "{\"id\":\"wrong-thread\",\"command\":\"metawork.account.logout\",\"payload\":{}}",
         source,
         &response,
     );
-    try std.testing.expectEqual(@as(usize, 2), harness.account_calls);
+    try std.testing.expectEqual(@as(usize, 1), harness.account_calls);
     harness.on_main_thread = true;
     harness.account_result = .rejected(.invalid_state);
     const rejected = native_dispatcher.dispatch(
-        "{\"id\":\"state-rejected\",\"command\":\"metawork.account.refreshCatalog\",\"payload\":{}}",
+        "{\"id\":\"state-rejected\",\"command\":\"metawork.account.logout\",\"payload\":{}}",
         source,
         &response,
     );
-    try std.testing.expectEqual(@as(usize, 3), harness.account_calls);
+    try std.testing.expectEqual(@as(usize, 2), harness.account_calls);
     try std.testing.expect(
         std.mem.indexOf(
             u8,
@@ -4872,17 +4860,18 @@ test "Dispatcher validates authority before domain calls and preserves committed
 
     harness.account_result = .acceptedAttempt(57);
     const metask_default = native_dispatcher.dispatch(
-        "{\"id\":\"metask-default\",\"command\":\"metawork.modelSources.selectMetaskDefault\",\"payload\":{}}",
+        "{\"id\":\"models-refresh\",\"command\":\"metawork.models.refreshCatalog\",\"payload\":{}}",
         source,
         &response,
     );
-    // Product owns this command and rejects a switch when no custom default is
-    // active, without manufacturing an Account operation or attempt identity.
-    try std.testing.expectEqual(@as(usize, 3), harness.account_calls);
+    // Models commands are routed through the Models host and never manufacture
+    // an Account attempt identity.
+    try std.testing.expectEqual(@as(usize, 2), harness.account_calls);
+    try std.testing.expectEqual(@as(usize, 2), harness.models_calls);
     try std.testing.expect(std.mem.indexOf(
         u8,
         metask_default,
-        "\"accepted\":false,\"errorCode\":\"model_connection_invalid\",\"attemptId\":null",
+        "\"accepted\":true,\"errorCode\":\"none\"",
     ) != null);
     try std.testing.expect(std.mem.indexOf(u8, metask_default, "\"57\"") == null);
 

@@ -35,6 +35,24 @@ function assertNoImports(files, forbidden) {
   }
 }
 
+function moduleImportEdges(buildSource) {
+  return [
+    ...buildSource.matchAll(
+      /\b([A-Za-z_]\w*)\.addImport\(\s*"([^"]+)"\s*,\s*([A-Za-z_]\w*)\s*\)/g,
+    ),
+  ].map((match) => ({ owner: match[1], name: match[2], target: match[3] }));
+}
+
+function assertNoModuleTargets(buildSource, owners, forbiddenTargets) {
+  for (const edge of moduleImportEdges(buildSource)) {
+    if (!owners.includes(edge.owner) || !forbiddenTargets.includes(edge.target))
+      continue;
+    assert.fail(
+      `${edge.owner} imports forbidden build module ${edge.target} as ${edge.name}`,
+    );
+  }
+}
+
 function externSymbols(source, libraries) {
   const libraryPattern = libraries.join("|");
   return [
@@ -264,6 +282,7 @@ test("Product maps admitted protocols to Agent at one exhaustive boundary", () =
 });
 
 test("Product Models owns model connections independently of Account", () => {
+  const build = read("build.zig");
   const modelsRoot = read("src/product/models.zig");
   const modelsContract = read("src/product/models/contract.zig");
   const modelsRuntime = read("src/product/models/runtime.zig");
@@ -287,6 +306,7 @@ test("Product Models owns model connections independently of Account", () => {
       "src/product/models/connections.zig",
       "src/product/models/ports.zig",
       "src/product/models/runtime.zig",
+      "src/product/models/metask.zig",
     ],
     [
       "metawork_account_contract",
@@ -306,7 +326,11 @@ test("Product Models owns model connections independently of Account", () => {
   );
   assert.match(modelsContract, /pub const ModelConnectionCommand = union/);
   assert.match(modelsRuntime, /registry: registry_impl\.Registry/);
-  assert.match(modelsRegistry, /store_file_name = "model-connections\.json"/);
+  assert.match(modelsRegistry, /store_file_name = "models\.json"/);
+  assert.match(
+    modelsRegistry,
+    /legacy_connection_store_file_name = "model-connections\.json"/,
+  );
   assert.doesNotMatch(accountRuntime, /ModelConnection|model_connections/);
   assert.doesNotMatch(
     accountPorts,
@@ -316,12 +340,47 @@ test("Product Models owns model connections independently of Account", () => {
     /pub const AccountView = struct \{([\s\S]*?)\n\};/,
   )?.[1];
   const accountCommand = accountContract.match(
-    /pub const AccountCommand = union\(enum\) \{([\s\S]*?)\n\};/,
+    /pub const AccountCommand = enum \{([\s\S]*?)\n\};/,
   )?.[1];
   assert.ok(accountView, "AccountView must remain inspectable");
   assert.ok(accountCommand, "AccountCommand must remain inspectable");
   assert.doesNotMatch(accountView, /ModelConnection|model_connection/);
   assert.doesNotMatch(accountCommand, /ModelConnection|model_connection/);
+  assertNoImports(
+    ["src/product/account.zig", ...zigFiles("src/product/account/")],
+    [
+      "metawork_product_models",
+      "metawork_product_models_contract",
+      "product_models_ports",
+      "product_models_runtime",
+      "product_models_connections",
+      "product_models_metask",
+    ],
+  );
+  assertNoModuleTargets(
+    build,
+    [
+      "account",
+      "account_contract",
+      "account_state",
+      "account_runtime",
+      "account_credentials_runtime",
+      "account_network_attempt",
+    ],
+    [
+      "models",
+      "models_contract",
+      "models_ports",
+      "models_runtime",
+      "models_connections",
+      "models_metask",
+    ],
+  );
+  assertNoModuleTargets(
+    build,
+    ["models", "models_runtime", "models_connections", "models_metask"],
+    ["account", "account_contract", "account_runtime"],
+  );
   assert.doesNotMatch(
     accountContract,
     /model_connection_(?:invalid|not_found|capture_unavailable|persistence_unavailable|test_unavailable)/,
@@ -350,27 +409,38 @@ test("Product Models owns model connections independently of Account", () => {
   );
   assert.match(windowsBringup, /test-model-connection-readiness-windows\.mjs/);
   assert.match(identity, /pub fn modelConnectionCredentialService/);
-  const selectDefault = control.indexOf("fn selectModelConnectionDefault(");
-  const scrubPreparation = control.indexOf(
-    "self.prepareExecutionInstall(",
-    selectDefault,
-  );
+  const selectDefault = control.indexOf("pub fn selectModelsDefault(");
   const registryCommit = control.indexOf(
-    "self.model_connections.submitCommandWithExecutionGeneration(",
+    "self.model_connections.selectDefault(command)",
     selectDefault,
   );
-  assert.ok(selectDefault >= 0 && scrubPreparation > selectDefault);
-  assert.ok(
-    registryCommit > scrubPreparation,
-    "fallible durable scrub must precede the Models registry default commit",
+  const reconcile = control.indexOf(
+    "self.reconcileModelsDefaultNoFail(false, false)",
+    registryCommit,
   );
+  assert.ok(selectDefault >= 0 && registryCommit > selectDefault);
+  assert.ok(
+    reconcile > registryCommit,
+    "Models desired state must commit before consumer reconciliation",
+  );
+  const reconcileOwner = control.indexOf("fn reconcileModelsDefaultNoFail(");
+  const scrubPreparation = control.indexOf(
+    "self.execution_state.prepareInstall(",
+    reconcileOwner,
+  );
+  const activeInstall = control.indexOf(
+    "self.execution_state.installMetaskNoFail(",
+    scrubPreparation,
+  );
+  assert.ok(reconcileOwner >= 0 && scrubPreparation > reconcileOwner);
+  assert.ok(activeInstall > scrubPreparation);
   assert.match(app, /models_platform_binding\.Adapter\.init/);
   assert.match(app, /models_management\.start\(/);
   assert.doesNotMatch(app, /startWithAccountUnavailable/);
   assert.match(modelsCoordinator, /control_ports\.ModelsManagement/);
   assert.doesNotMatch(
     modelsCoordinator,
-    /metawork_account|AccountExecutionHandoff/,
+    /AccountExecutionHandoff|OwnedSourceCandidate|ModelView|ModelMetadata/,
   );
 });
 
@@ -694,21 +764,12 @@ test("Product Control is the only composition owner identity", () => {
   assert.match(runtime, /account_projection: account_projection\.Projection/);
   assert.match(runtime, /execution_state: execution_state\.State/);
   assert.match(accountProjection, /@import\("metawork_account_contract"\)/);
-  assert.match(
-    accountProjection,
-    /@import\("metawork_product_models_contract"\)/,
-  );
+  assert.doesNotMatch(accountProjection, /metawork_product_models/);
   assert.match(accountProjection, /pub const Projection = struct/);
-  const authorityStart = accountProjection.indexOf("pub fn authorityMatches");
-  assert.ok(
-    authorityStart >= 0,
-    "Account authority projection must be explicit",
+  assert.doesNotMatch(
+    accountProjection,
+    /authority_protocol|metask_source_generation|catalog_state|selected_model/,
   );
-  const authorityEnd = accountProjection.indexOf("\n};", authorityStart);
-  const authorityMatch = accountProjection.slice(authorityStart, authorityEnd);
-  assert.match(authorityMatch, /authority_protocol/);
-  assert.match(authorityMatch, /metask_source_generation/);
-  assert.doesNotMatch(authorityMatch, /catalog_state/);
   assert.doesNotMatch(
     executionState,
     /metawork_account_contract|AccountProjection|AccountFact|AccountView|account_id|catalog_generation|selected_model/,
@@ -1059,51 +1120,26 @@ test("Application coordinators consume scoped Product Control capabilities", () 
   );
 });
 
-test("Product Control owns post-Account source reconciliation", () => {
+test("Account authorization and Models provider state remain separate owners", () => {
   const ports = read("src/product/control/ports.zig");
   const control = read("src/product/control/runtime.zig");
-  const modelsContract = read("src/product/models/contract.zig");
   const accountCoordinator = read("src/app/account_coordinator.zig");
+  const modelsCoordinator = read("src/app/models_coordinator.zig");
   const accountRuntime = read("src/product/account/runtime.zig");
   const accountState = read("src/product/account/state.zig");
   const accountContract = read("src/product/account/contract.zig");
-  const accountCatalog = read("src/product/account/catalog.zig");
+  const modelsRuntime = read("src/product/models/runtime.zig");
 
   assert.match(ports, /pub const AccountCommitSink = struct/);
-  assert.match(ports, /OwnedSourceCandidateTransfer/);
-  assert.match(modelsContract, /pub const OwnedSourceCandidateTransfer/);
-  assert.doesNotMatch(modelsContract, /OwnedConfigTransfer/);
   assert.doesNotMatch(
     ports,
-    /MetaskStageToken|MetaskStageResult|prepare_metask_|finalize_metask_|abort_metask_|begin_default_replacement_fn/,
+    /OwnedSourceCandidateTransfer|source_candidate|Account.*Models|Models.*Account/,
   );
-
   const commitStart = control.indexOf("pub fn commitAccountChangeNoFail");
-  const reconcileStart = control.indexOf("fn reconcileMetaskCandidateNoFail");
-  const clearStart = control.indexOf("fn reconcileMetaskClearNoFail");
-  assert.ok(commitStart >= 0, "Account commit sink must exist");
-  assert.ok(reconcileStart > commitStart, "Metask reconciliation must exist");
-  assert.ok(
-    clearStart > reconcileStart,
-    "Metask clear reconciliation must exist",
-  );
-  const commit = control.slice(commitStart, reconcileStart);
-  assert.match(commit, /self\.commitAccountFactNoFail\(fact\)/);
-  assert.match(commit, /self\.reconcileMetaskCandidateNoFail/);
-  const replacement = control.slice(reconcileStart, clearStart);
-  const prepareAt = replacement.indexOf("self.execution_state.prepareInstall");
-  const clearDefaultAt = replacement.indexOf(
-    "self.clearModelConnectionDefault()",
-  );
-  assert.ok(prepareAt >= 0, "replacement must prepare all fallible effects");
-  assert.ok(
-    clearDefaultAt > prepareAt,
-    "durable custom default may clear only after preparation",
-  );
-  assert.match(replacement, /self\.execution_state.installMetaskNoFail/);
-
-  assert.match(control, /metask_default_selection_attempt_id: \?u64/);
-  assert.doesNotMatch(control, /metask_default_selection_requested/);
+  const nextMethod = control.indexOf("\n    pub fn ", commitStart + 1);
+  const accountCommit = control.slice(commitStart, nextMethod);
+  assert.match(accountCommit, /self\.commitAccountFactNoFail\(commit\.fact\)/);
+  assert.doesNotMatch(accountCommit, /model|Model|source|Source|credential/);
 
   const accountCommitAt = accountCoordinator.indexOf(
     "self.runtime.commit(&prepared);",
@@ -1112,21 +1148,19 @@ test("Product Control owns post-Account source reconciliation", () => {
     "self.control.commitNoFail",
   );
   assert.ok(accountCommitAt >= 0 && productCommitAt > accountCommitAt);
-  assert.doesNotMatch(
-    accountCoordinator,
-    /prepareMetaskExecutionCandidate|prepareMetaskExecutionClear|finalizeMetaskStageNoFail|abortMetaskStageNoFail|prepareExecutionInstall|prepareExecutionClear/,
+  const observerAt = accountCoordinator.indexOf("observer.notify();");
+  assert.ok(observerAt > productCommitAt);
+  assert.match(accountRuntime, /pub fn authorizationLease/);
+  assert.match(modelsCoordinator, /self\.account\.authorizationLease\(\)/);
+  assert.match(
+    modelsCoordinator,
+    /self\.management\.setMetaskAuthorizationUnavailable\(\)/,
   );
+  assert.match(modelsRuntime, /pub fn setMetaskAuthorizationUnavailable/);
+  assert.match(modelsRuntime, /clearMetaskRuntime\(\.needs_authentication/);
   assert.doesNotMatch(
-    accountRuntime,
-    /prepareAndPersistExecution|prepareCommittedPhaseFailure/,
-  );
-  assert.doesNotMatch(accountState, /prepareCommittedPhaseFailure/);
-  assert.doesNotMatch(accountState, /begin_default/);
-  assert.match(accountState, /AttemptKind = enum \{[\s\S]*source_resolution/);
-  assert.doesNotMatch(accountState, /activation/);
-  assert.doesNotMatch(
-    [accountContract, accountCatalog, accountRuntime, accountState].join("\n"),
-    /ExecutionIntent|ReplacementIntent|execution_intent|replacement_intent|ExecutionTargetInvalid|ownsExecutionSelection|resolve_metask_source|dependency_contract_invalid|execution_target_invalid|session_in_use|execution_in_use/,
+    [accountContract, accountRuntime, accountState].join("\n"),
+    /ModelView|ModelMetadata|CatalogState|source_resolution|selected_model|OwnedSourceCandidate|execution_generation/,
   );
 });
 
@@ -2054,9 +2088,10 @@ test("Account owns platform ports while Application binds Native SDK effects", (
   assert.match(runtime, /@import\("account_ports"\)/);
   assert.match(binding, /native_sdk\.platform\.PlatformServices/);
   assert.match(binding, /pub fn ports\(self: \*Adapter\) ports_api\.Platform/);
-  assert.match(binding, /\.load_preference_fn = loadPreference/);
-  assert.match(binding, /\.commit_preference_fn = commitPreference/);
-  assert.match(binding, /\.delete_preference_fn = deletePreference/);
+  assert.doesNotMatch(binding, /preference|Preference|model|Model/);
+  assert.match(binding, /\.set_refresh_token_fn = setRefreshToken/);
+  assert.match(binding, /\.get_refresh_token_fn = getRefreshToken/);
+  assert.match(binding, /\.delete_refresh_token_fn = deleteRefreshToken/);
   assert.match(app, /account_platform_binding\.Adapter\.init/);
   assert.match(
     app,

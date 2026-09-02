@@ -2604,58 +2604,11 @@ pub fn installProductControlExecutionGeneration(
     workbench: *product_control.Runtime,
     generation: u64,
 ) !void {
-    if (generation == 0) return error.InvalidExecutionGeneration;
-    var execution = try models_contract.OwnedConfig.initOwned(
-        std.testing.allocator,
-        .metask,
-        .anthropic_messages,
-        try std.testing.allocator.dupe(u8, "fixture-model"),
-        try std.testing.allocator.dupe(
-            u8,
-            account_contract.metask_anthropic_messages_url,
-        ),
+    try product_control.TestSupport.installMetaskExecutionWithCredential(
+        workbench,
         generation,
-        try std.testing.allocator.dupe(u8, "fixture-secret"),
-        "fixture-provider",
+        "fixture-secret",
     );
-    errdefer execution.deinit();
-    const api_keys = [_]account_contract.ApiKeyView{.{
-        .id = "key-1",
-        .name = "Fixture API",
-        .suffix = "ture",
-        .protocol = .anthropic_messages,
-    }};
-    const models = [_]account_contract.ModelView{.{
-        .id = "fixture-model",
-        .display_name = "Fixture model",
-    }};
-    try workbench.beginExecutionReplacement();
-    workbench.commitAccountFactNoFail(.{
-        .kind = .source_authority_changed,
-        .view = .{
-            .state = .authenticated,
-            .catalog_state = .ready,
-            .account_id = "account-1",
-            .display_name = "Fixture User",
-            .api_keys = &api_keys,
-            .models = &models,
-            .selected_api_key_id = "key-1",
-            .selected_model = "fixture-model",
-            .model_catalog_api_key_id = "key-1",
-            .catalog_generation = 1,
-        },
-        .authority = .{
-            .account_id = "account-1",
-            .api_key_id = "key-1",
-            .model_id = "fixture-model",
-            .protocol = .anthropic_messages,
-            .source_generation = generation,
-        },
-    });
-    try workbench.prepareExecutionInstall(execution.input());
-    workbench.installExecutionNoFail(&execution);
-    workbench.endExecutionReplacementNoFail();
-    workbench.finishAccountCommitNoFail();
 }
 
 pub fn productControlTaskInput() product_control.TaskCreateInput {

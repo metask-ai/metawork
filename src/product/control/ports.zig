@@ -7,18 +7,18 @@ const agent = @import("metawork_agent");
 const account = @import("metawork_account_contract");
 const models_contract = @import("metawork_product_models_contract");
 const models_ports = @import("product_models_ports");
+const models_metask = @import("product_models_metask");
 const product_schedule = @import("metawork_product_schedule");
 const mcp = @import("metawork_product_mcp");
 const mcp_contract = mcp.contract;
 
 /// One committed Account revision delivered to Product Control. Attempt
-/// identity is explicit so Product never infers operation lifetime from a
-/// transient Account view such as `catalog_state`.
+/// identity remains explicit for Account command lifecycle observation; model
+/// availability is owned and delivered independently by Models.
 pub const AccountCommit = struct {
     fact: account.AccountFact,
     attempt_id: ?u64,
     attempt_terminal: bool,
-    candidate: ?models_contract.OwnedSourceCandidateTransfer = null,
 
     pub fn assertValid(self: AccountCommit) void {
         account.validateFact(self.fact) catch
@@ -27,9 +27,8 @@ pub const AccountCommit = struct {
     }
 };
 
-/// Narrow no-fail sink for a committed Account revision and its optional
-/// linear source candidate. Product Control owns every reconciliation decision
-/// after this call; no result flows back into Account.
+/// Narrow no-fail sink for a committed Account revision. No model catalog,
+/// selection, source candidate, or credential crosses this identity boundary.
 pub const AccountCommitSink = struct {
     context: *anyopaque,
     commit_fn: *const fn (*anyopaque, AccountCommit) void,
@@ -51,6 +50,10 @@ pub const ModelsManagement = struct {
     submit_model_connection_fn: *const fn (*anyopaque, models_contract.ModelConnectionCommand) models_contract.CommandResult,
     begin_model_connection_probe_fn: *const fn (*anyopaque, models_contract.ModelConnectionTestCommand) models_contract.Preparation,
     complete_model_connection_test_fn: *const fn (*anyopaque, models_contract.ModelConnectionTestCommand, bool) models_contract.CommandResult,
+    prepare_metask_catalog_refresh_fn: *const fn (*anyopaque, []const u8, u64) models_contract.CatalogRefreshPrepareResult,
+    complete_metask_catalog_refresh_fn: *const fn (*anyopaque, u64, u64, *models_metask.OwnedCatalogCompletion) models_contract.ModelsError,
+    fail_metask_catalog_refresh_fn: *const fn (*anyopaque, u64, u64, models_contract.ModelsError, []const u8) void,
+    metask_authorization_unavailable_fn: *const fn (*anyopaque) void,
     pub fn startModelConnections(self: ModelsManagement, directory: []const u8, vault: models_ports.CredentialVault) anyerror!void {
         try self.start_model_connections_fn(self.context, directory, vault);
     }
@@ -71,6 +74,18 @@ pub const ModelsManagement = struct {
     }
     pub fn completeModelConnectionTest(self: ModelsManagement, command: models_contract.ModelConnectionTestCommand, succeeded: bool) models_contract.CommandResult {
         return self.complete_model_connection_test_fn(self.context, command, succeeded);
+    }
+    pub fn prepareMetaskCatalogRefresh(self: ModelsManagement, principal_ref: []const u8, authorization_generation: u64) models_contract.CatalogRefreshPrepareResult {
+        return self.prepare_metask_catalog_refresh_fn(self.context, principal_ref, authorization_generation);
+    }
+    pub fn completeMetaskCatalogRefresh(self: ModelsManagement, attempt_id: u64, authorization_generation: u64, completion: *models_metask.OwnedCatalogCompletion) models_contract.ModelsError {
+        return self.complete_metask_catalog_refresh_fn(self.context, attempt_id, authorization_generation, completion);
+    }
+    pub fn failMetaskCatalogRefresh(self: ModelsManagement, attempt_id: u64, authorization_generation: u64, error_code: models_contract.ModelsError, safe_diagnostic: []const u8) void {
+        self.fail_metask_catalog_refresh_fn(self.context, attempt_id, authorization_generation, error_code, safe_diagnostic);
+    }
+    pub fn setMetaskAuthorizationUnavailable(self: ModelsManagement) void {
+        self.metask_authorization_unavailable_fn(self.context);
     }
 };
 

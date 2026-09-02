@@ -196,39 +196,15 @@ fn expectFakeSessionModel(index: usize, expected: []const u8) !void {
 }
 
 fn installTwoModelCatalog(workbench: *product_control.Runtime) void {
-    const api_keys = [_]account_contract.ApiKeyView{.{
-        .id = "key-1",
-        .name = "Fixture API",
-        .suffix = "ture",
-        .protocol = .anthropic_messages,
-    }};
-    const models = [_]account_contract.ModelView{
+    const models = [_]models_contract.ModelView{
         .{ .id = "fixture-model", .display_name = "Fixture model" },
         .{ .id = "fixture-model-2", .display_name = "Fixture model 2" },
     };
-    workbench.commitAccountFactNoFail(.{
-        .kind = .catalog_changed,
-        .view = .{
-            .state = .authenticated,
-            .catalog_state = .ready,
-            .account_id = "account-1",
-            .display_name = "Fixture User",
-            .api_keys = &api_keys,
-            .models = &models,
-            .selected_api_key_id = "key-1",
-            .selected_model = "fixture-model",
-            .model_catalog_api_key_id = "key-1",
-            .catalog_generation = 2,
-        },
-        .authority = .{
-            .account_id = "account-1",
-            .api_key_id = "key-1",
-            .model_id = "fixture-model",
-            .protocol = .anthropic_messages,
-            .source_generation = 1,
-        },
-    });
-    workbench.finishAccountCommitNoFail();
+    product_control.TestSupport.replaceMetaskCatalog(
+        workbench,
+        &models,
+        "fixture-model",
+    ) catch unreachable;
 }
 
 fn waitCatalogReady(
@@ -1864,39 +1840,8 @@ test "retired Schedule data leaves Account ready and Execution unavailable as a 
     );
     defer workbench.deinit();
 
-    const api_keys = [_]account_contract.ApiKeyView{.{
-        .id = "key-1",
-        .name = "Primary",
-        .suffix = "1234",
-        .protocol = .anthropic_messages,
-    }};
-    const models = [_]account_contract.ModelView{.{
-        .id = "fixture-model",
-        .display_name = "Fixture model",
-    }};
+    try product_control.TestSupport.prepareMetaskDefault(&workbench, 1);
     try workbench.beginExecutionReplacement();
-    workbench.commitAccountFactNoFail(.{
-        .kind = .source_authority_changed,
-        .view = .{
-            .state = .authenticated,
-            .catalog_state = .ready,
-            .account_id = "account-1",
-            .display_name = "Metask User",
-            .api_keys = &api_keys,
-            .models = &models,
-            .selected_api_key_id = "key-1",
-            .selected_model = "fixture-model",
-            .model_catalog_api_key_id = "key-1",
-            .catalog_generation = 1,
-        },
-        .authority = .{
-            .account_id = "account-1",
-            .api_key_id = "key-1",
-            .model_id = "fixture-model",
-            .protocol = .anthropic_messages,
-            .source_generation = 1,
-        },
-    });
     var execution = try models_contract.OwnedConfig.initOwned(
         std.testing.allocator,
         .metask,
@@ -1904,11 +1849,11 @@ test "retired Schedule data leaves Account ready and Execution unavailable as a 
         try std.testing.allocator.dupe(u8, "fixture-model"),
         try std.testing.allocator.dupe(
             u8,
-            account_contract.metask_anthropic_messages_url,
+            models_contract.metask_anthropic_messages_url,
         ),
         1,
         try std.testing.allocator.dupe(u8, "fixture-secret"),
-        "metask:key-1",
+        "key-1",
     );
     var execution_owned = true;
     defer if (execution_owned) execution.deinit();
@@ -1958,6 +1903,9 @@ test "retired Schedule data leaves Account ready and Execution unavailable as a 
     try workbench.beginExecutionReplacement();
     try workbench.prepareExecutionInstall(execution.input());
     workbench.installExecutionNoFail(&execution);
+    workbench.execution_state.recordDefaultAuthorityNoFail(
+        workbench.model_connections.defaultAuthority().?,
+    );
     execution_owned = false;
     workbench.endExecutionReplacementNoFail();
     workbench.finishAccountCommitNoFail();
@@ -2521,7 +2469,12 @@ test "Idle Task model persistence failure keeps the selected model and Session u
         const projection_before = workbench.projectionBytesForTest();
         try expectFakeSessionModel(0, "fixture-model");
         persistence.result = .failed;
-        try workbench.selectTaskModel(task_id, before.model, 2, "fixture-model-2");
+        try workbench.selectTaskModel(
+            task_id,
+            before.model,
+            workbench.modelsView().providers[0].catalog_generation,
+            "fixture-model-2",
+        );
         const after = try workbench.taskExecutionIdentity(task_id);
         try std.testing.expectEqualStrings("fixture-model-2", after.model);
         try expectFakeSessionModel(0, "fixture-model-2");
@@ -2553,7 +2506,12 @@ test "Idle Task model persistence failure keeps the selected model and Session u
         const before = try workbench.taskExecutionIdentity(task_id);
         const projection_before = workbench.projectionBytesForTest();
         persistence.result = .outcome_unknown;
-        try workbench.selectTaskModel(task_id, before.model, 2, "fixture-model-2");
+        try workbench.selectTaskModel(
+            task_id,
+            before.model,
+            workbench.modelsView().providers[0].catalog_generation,
+            "fixture-model-2",
+        );
         const after = try workbench.taskExecutionIdentity(task_id);
         try std.testing.expectEqualStrings("fixture-model-2", after.model);
         try expectFakeSessionModel(0, "fixture-model-2");

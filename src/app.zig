@@ -4,6 +4,7 @@ const native_sdk = @import("native_sdk");
 const bridge_api = @import("metawork_bridge");
 const agent = @import("metawork_agent");
 const product_control = @import("metawork_product_control");
+const models_contract = @import("metawork_product_models_contract");
 const mcp_configuration = @import("metawork_product_mcp").contract;
 const account_api = @import("metawork_account");
 const product_identity = @import("metawork_product_identity");
@@ -262,6 +263,10 @@ const App = struct {
             else
                 null,
         );
+        (self.dispatcher orelse @panic("Bridge Dispatcher is not composed")).setModelsHost(.{
+            .context = models_management,
+            .refresh_catalog_fn = refreshModelsCatalog,
+        });
         (self.dispatcher orelse @panic("Bridge Dispatcher is not composed")).startIngress();
     }
 
@@ -288,6 +293,7 @@ const App = struct {
             dispatcher.breakConnection();
             dispatcher.detachProductControl();
             dispatcher.setModelConnectionHost(null);
+            dispatcher.setModelsHost(null);
         }
         if (self.mcp_management) |*coordinator| coordinator.shutdown();
         if (self.mcp_oauth_refresh) |*coordinator| coordinator.shutdown();
@@ -620,6 +626,8 @@ pub fn run(init: std.process.Init) !void {
         app.main_thread_id,
     );
     var models_coordinator_state = models_coordinator.Coordinator.init(
+        &account_runtime,
+        account_http.transport(),
         control.modelsManagement(),
         app.main_thread_id,
         init.io,
@@ -627,6 +635,10 @@ pub fn run(init: std.process.Init) !void {
     models_coordinator_state.setCompletionTransport(
         app.completion_transport.transport(),
     );
+    account_coordinator_state.setCommitObserver(.{
+        .context = &models_coordinator_state,
+        .notify_fn = notifyModelsAuthorizationChanged,
+    });
     var model_connection_host_state = model_connection_host.Host.init(
         &app.platform,
         &models_coordinator_state,
@@ -671,6 +683,16 @@ pub fn run(init: std.process.Init) !void {
             },
         },
     }, init);
+}
+
+fn notifyModelsAuthorizationChanged(context: *anyopaque) void {
+    const coordinator: *models_coordinator.Coordinator = @ptrCast(@alignCast(context));
+    coordinator.authorizationChanged();
+}
+
+fn refreshModelsCatalog(context: *anyopaque) models_contract.CommandResult {
+    const coordinator: *models_coordinator.Coordinator = @ptrCast(@alignCast(context));
+    return coordinator.refreshCatalog();
 }
 
 test "Application remains a composition root with explicit platform limits" {

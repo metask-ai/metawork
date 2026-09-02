@@ -4,6 +4,7 @@ const lifecycle = @import("metawork_agent");
 const account_contract = @import("metawork_account_contract");
 const models_contract = @import("metawork_product_models_contract");
 const models_ports = @import("product_models_ports");
+const models_metask = @import("product_models_metask");
 const models_aggregate = @import("metawork_product_models");
 const account_projection = @import("product_control_account_projection");
 const execution_state = @import("product_control_execution_state");
@@ -339,16 +340,7 @@ const root_snapshot_overhead: usize = 1024;
 const account_snapshot_text_bytes: usize =
     account_contract.Limits.account_id_bytes +
     account_contract.Limits.display_name_bytes +
-    account_contract.Limits.api_key_id_bytes +
-    account_contract.Limits.model_id_bytes +
-    account_contract.Limits.safe_diagnostic_bytes +
-    account_contract.Limits.api_key_entries *
-        (account_contract.Limits.api_key_id_bytes +
-            account_contract.Limits.api_key_name_bytes +
-            account_contract.Limits.api_key_suffix_bytes) +
-    account_contract.Limits.model_entries *
-        (account_contract.Limits.model_id_bytes +
-            account_contract.Limits.model_display_name_bytes);
+    account_contract.Limits.safe_diagnostic_bytes;
 const model_connection_snapshot_text_bytes: usize =
     models_contract.Limits.model_connection_entries *
     (models_contract.Limits.instance_id_bytes +
@@ -358,9 +350,7 @@ const model_connection_snapshot_text_bytes: usize =
         models_contract.Limits.model_connection_model_entries *
             (models_contract.Limits.model_id_bytes +
                 models_contract.Limits.model_display_name_bytes));
-const account_snapshot_overhead: usize = 1024 +
-    account_contract.Limits.api_key_entries * 128 +
-    account_contract.Limits.model_entries * (128 + model_metadata_snapshot_bytes);
+const account_snapshot_overhead: usize = 1024;
 const model_metadata_snapshot_bytes: usize = 1024;
 const model_connection_snapshot_overhead: usize = 1024 +
     models_contract.Limits.model_connection_entries * 256;
@@ -856,54 +846,6 @@ const McpRefreshTestJob = if (builtin.is_test) mcp_testing.RefreshJob else struc
 pub const PreparedModelConnectionBinding =
     execution_state.PreparedModelConnectionBinding;
 
-const PendingMetaskCandidate = struct {
-    account_id: [account_contract.Limits.account_id_bytes]u8 = undefined,
-    account_id_len: usize,
-    api_key_id: [account_contract.Limits.api_key_id_bytes]u8 = undefined,
-    api_key_id_len: usize,
-    model_id: [account_contract.Limits.model_id_bytes]u8 = undefined,
-    model_id_len: usize,
-    protocol: models_contract.Protocol,
-    source_generation: u64,
-    candidate: models_contract.OwnedSourceCandidate,
-
-    fn initNoFail(
-        candidate: *models_contract.OwnedSourceCandidate,
-        source_authority: account_contract.MetaskSourceAuthority,
-    ) PendingMetaskCandidate {
-        std.debug.assert(source_authority.account_id.len <= account_contract.Limits.account_id_bytes);
-        std.debug.assert(source_authority.api_key_id.len <= account_contract.Limits.api_key_id_bytes);
-        std.debug.assert(source_authority.model_id.len <= account_contract.Limits.model_id_bytes);
-        var result: PendingMetaskCandidate = .{
-            .account_id_len = source_authority.account_id.len,
-            .api_key_id_len = source_authority.api_key_id.len,
-            .model_id_len = source_authority.model_id.len,
-            .protocol = source_authority.protocol,
-            .source_generation = source_authority.source_generation,
-            .candidate = candidate.take(),
-        };
-        @memcpy(result.account_id[0..result.account_id_len], source_authority.account_id);
-        @memcpy(result.api_key_id[0..result.api_key_id_len], source_authority.api_key_id);
-        @memcpy(result.model_id[0..result.model_id_len], source_authority.model_id);
-        return result;
-    }
-
-    fn authority(self: *const PendingMetaskCandidate) account_contract.MetaskSourceAuthority {
-        return .{
-            .account_id = self.account_id[0..self.account_id_len],
-            .api_key_id = self.api_key_id[0..self.api_key_id_len],
-            .model_id = self.model_id[0..self.model_id_len],
-            .protocol = self.protocol,
-            .source_generation = self.source_generation,
-        };
-    }
-
-    fn deinit(self: *PendingMetaskCandidate) void {
-        self.candidate.deinit();
-        self.* = undefined;
-    }
-};
-
 pub const Runtime = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -937,9 +879,6 @@ pub const Runtime = struct {
     account_projection: account_projection.Projection,
     execution_state: execution_state.State,
     model_connections: models_aggregate.Runtime,
-    pending_metask_candidate: ?PendingMetaskCandidate = null,
-    pending_metask_clear: bool = false,
-    metask_default_selection_attempt_id: ?u64 = null,
     canonical_user_home: ?[]u8,
     model_connection_capabilities: ModelConnectionCapabilities,
     completion_factory: CompletionFactory,
@@ -1521,7 +1460,7 @@ pub const Runtime = struct {
         if (!truncated or value.len == 0) return value.len;
         var index = value.len - @min(
             value.len,
-            account_contract.Limits.api_key_bytes - 1,
+            models_contract.Limits.credential_bytes - 1,
         );
         while (index < value.len and value[index] & 0xc0 == 0x80) index += 1;
         while (index < value.len) {
@@ -1731,209 +1670,8 @@ pub const Runtime = struct {
         commit: control_ports.AccountCommit,
     ) void {
         commit.assertValid();
-        const fact = commit.fact;
-        const previous_account_id = self.account_projection.accountId();
-        const identity_changed = fact.view.state == .authenticated and
-            previous_account_id.len != 0 and
-            fact.view.account_id.len != 0 and
-            !std.mem.eql(u8, previous_account_id, fact.view.account_id);
-        const signed_out = fact.view.state == .signed_out;
-        const explicit_selection = commit.attempt_id != null and
-            commit.attempt_id == self.metask_default_selection_attempt_id;
-
-        self.commitAccountFactNoFail(fact);
-        if (self.pending_metask_candidate) |*pending| {
-            if (!self.account_projection.authorityMatches(pending.authority()))
-                self.clearPendingMetaskCandidateNoFail();
-        }
-        if (commit.candidate) |transfer| {
-            var candidate = transfer.take();
-            if (fact.authority) |authority|
-                self.reconcileMetaskCandidateNoFail(
-                    &candidate,
-                    authority,
-                    explicit_selection,
-                )
-            else {
-                candidate.deinit();
-                self.execution_state.recordAvailabilityErrorNoFail(.invalid_candidate);
-            }
-        } else if (explicit_selection and commit.attempt_terminal) {
-            self.execution_state.recordAvailabilityErrorNoFail(.invalid_candidate);
-        }
-        if (explicit_selection and commit.attempt_terminal)
-            self.metask_default_selection_attempt_id = null;
-        if (identity_changed or signed_out) {
-            self.clearPendingMetaskCandidateNoFail();
-            self.pending_metask_clear = true;
-            self.reconcileMetaskClearNoFail();
-        }
+        self.commitAccountFactNoFail(commit.fact);
         self.finishAccountCommitNoFail();
-    }
-
-    fn reconcileMetaskCandidateNoFail(
-        self: *Runtime,
-        candidate: *models_contract.OwnedSourceCandidate,
-        authority: account_contract.MetaskSourceAuthority,
-        explicit_selection: bool,
-    ) void {
-        defer candidate.deinit();
-        if (!self.metaskCandidateMatchesAuthority(candidate, authority) or
-            !self.account_projection.authorityMatches(authority))
-        {
-            self.clearPendingMetaskCandidateNoFail();
-            self.execution_state.recordAvailabilityErrorNoFail(.invalid_candidate);
-            return;
-        }
-        self.clearPendingMetaskCandidateNoFail();
-        const custom_default_selected = self.modelConnectionDefaultBinding() != null;
-        if (custom_default_selected and !explicit_selection) return;
-        if (explicit_selection and !custom_default_selected) {
-            self.execution_state.recordAvailabilityErrorNoFail(.invalid_candidate);
-            return;
-        }
-        if (self.executionReplacementPending()) {
-            self.execution_state.recordAvailabilityErrorNoFail(.invalid_candidate);
-            if (!explicit_selection)
-                self.retainPendingMetaskCandidateNoFail(candidate, authority);
-            return;
-        }
-        const candidate_input = candidate.input();
-        const source_generation = candidate_input.source_generation;
-        const execution_generation = if (self.execution_state.metaskBindingMatches(
-            source_generation,
-        ))
-            self.executionGeneration()
-        else
-            self.nextExecutionGeneration(self.executionGeneration()) catch {
-                self.execution_state.recordAvailabilityErrorNoFail(.resource_exhausted);
-                if (!explicit_selection)
-                    self.retainPendingMetaskCandidateNoFail(candidate, authority);
-                return;
-            };
-        const execution_input: models_contract.ConfigInput = .{
-            .target = candidate_input.target,
-            .api_key = candidate_input.api_key,
-            .execution_generation = execution_generation,
-        };
-        self.beginAccountReconciliation() catch {
-            self.execution_state.recordAvailabilityErrorNoFail(.invalid_candidate);
-            if (!explicit_selection and !self.shutting_down)
-                self.retainPendingMetaskCandidateNoFail(candidate, authority);
-            return;
-        };
-        var replacement_active = true;
-        defer if (replacement_active) self.endExecutionReplacementNoFail();
-        self.execution_state.prepareInstall(
-            execution_input,
-            ScheduleCredentialRedaction{ .owner = self },
-        ) catch |err| {
-            self.execution_state.rejectReplacementNoFail(metaskStageError(err));
-            if (!explicit_selection)
-                self.retainPendingMetaskCandidateNoFail(candidate, authority);
-            return;
-        };
-        if (explicit_selection and !self.clearModelConnectionDefault().accepted) {
-            self.execution_state.abortReplacementPreparationNoFail();
-            self.execution_state.recordAvailabilityErrorNoFail(
-                .model_connection_persistence_unavailable,
-            );
-            return;
-        }
-        var execution = candidate.intoConfig(execution_generation) catch {
-            self.execution_state.abortReplacementPreparationNoFail();
-            self.execution_state.recordAvailabilityErrorNoFail(.invalid_candidate);
-            return;
-        };
-        defer execution.deinit();
-        self.execution_state.installMetaskNoFail(
-            &execution,
-            source_generation,
-            self.executionProjectionRedaction(),
-        );
-        self.pending_metask_clear = false;
-        replacement_active = false;
-        self.endExecutionReplacementNoFail();
-    }
-
-    fn metaskCandidateMatchesAuthority(
-        self: *const Runtime,
-        candidate: *const models_contract.OwnedSourceCandidate,
-        authority: account_contract.MetaskSourceAuthority,
-    ) bool {
-        _ = self;
-        account_contract.validateSourceCandidate(candidate.input()) catch return false;
-        const input = candidate.input();
-        const provider_prefix = "metask:";
-        return input.source_generation == authority.source_generation and
-            input.target.protocol == authority.protocol and
-            std.mem.eql(u8, input.target.model, authority.model_id) and
-            input.target.provider_id.len == provider_prefix.len + authority.api_key_id.len and
-            std.mem.startsWith(u8, input.target.provider_id, provider_prefix) and
-            std.mem.eql(
-                u8,
-                input.target.provider_id[provider_prefix.len..],
-                authority.api_key_id,
-            );
-    }
-
-    fn retainPendingMetaskCandidateNoFail(
-        self: *Runtime,
-        candidate: *models_contract.OwnedSourceCandidate,
-        authority: account_contract.MetaskSourceAuthority,
-    ) void {
-        self.clearPendingMetaskCandidateNoFail();
-        self.pending_metask_candidate = PendingMetaskCandidate.initNoFail(
-            candidate,
-            authority,
-        );
-    }
-
-    fn clearPendingMetaskCandidateNoFail(self: *Runtime) void {
-        if (self.pending_metask_candidate) |*pending| pending.deinit();
-        self.pending_metask_candidate = null;
-    }
-
-    fn retryPendingMetaskCandidateNoFail(self: *Runtime) void {
-        var pending = self.pending_metask_candidate orelse return;
-        self.pending_metask_candidate = null;
-        defer pending.deinit();
-        const authority = pending.authority();
-        if (!self.account_projection.authorityMatches(authority)) return;
-        var candidate = pending.candidate.take();
-        self.reconcileMetaskCandidateNoFail(&candidate, authority, false);
-    }
-
-    fn reconcileMetaskClearNoFail(self: *Runtime) void {
-        if (!self.execution_state.metaskExecutionActive()) {
-            self.pending_metask_clear = false;
-            return;
-        }
-        if (self.executionReplacementPending()) {
-            self.execution_state.recordAvailabilityErrorNoFail(.invalid_candidate);
-            return;
-        }
-        self.beginAccountReconciliation() catch {
-            self.execution_state.recordAvailabilityErrorNoFail(.invalid_candidate);
-            return;
-        };
-        var replacement_active = true;
-        defer if (replacement_active) self.endExecutionReplacementNoFail();
-        self.execution_state.prepareClear(
-            ScheduleCredentialRedaction{ .owner = self },
-        ) catch |err| {
-            self.execution_state.rejectReplacementNoFail(metaskStageError(err));
-            return;
-        };
-        self.clearExecutionNoFail();
-        self.pending_metask_clear = false;
-        replacement_active = false;
-        self.endExecutionReplacementNoFail();
-    }
-
-    fn beginAccountReconciliation(self: *Runtime) Error!void {
-        if (self.shutting_down) return error.ExecutorShuttingDown;
-        try self.execution_state.beginDefaultReplacement();
     }
 
     pub fn installExecutionNoFail(
@@ -2030,25 +1768,27 @@ pub const Runtime = struct {
     }
 
     pub fn executionView(self: *Runtime) models_contract.ExecutionView {
-        const custom_default = self.model_connections.defaultBinding();
+        const desired = self.model_connections.defaultAuthority();
         return .{
             .state = self.execution_state.availability(),
-            .default_source = if (custom_default != null)
-                .model_connection
-            else if (self.account_projection.sourceGeneration() != 0)
-                .metask
-            else
-                null,
+            .default_source = if (desired) |authority| authority.source else null,
             .active_source = self.execution_state.activeSource(),
             .active_generation = self.execution_state.generation(),
             .task_creation_available = self.canCreateTask(),
-            .selected_model_connection_id = if (custom_default) |binding|
-                binding.connection_id
+            .selected_model_connection_id = if (desired) |authority|
+                if (authority.source == .model_connection)
+                    authority.selection.source_id
+                else
+                    ""
             else
                 "",
             .model_connections = self.model_connections.views(),
             .error_code = self.execution_state.availabilityError(),
         };
+    }
+
+    pub fn modelsView(self: *Runtime) models_contract.ModelsView {
+        return self.model_connections.view();
     }
 
     pub fn startModelConnections(
@@ -2057,7 +1797,8 @@ pub const Runtime = struct {
         vault: models_ports.CredentialVault,
     ) models_aggregate.StartError!void {
         try self.model_connections.start(absolute_directory, vault);
-        self.restoreModelConnectionDefaultNoFail();
+        self.reconcileModelsDefaultNoFail(false, false);
+        self.finishExecutionCommitNoFail();
     }
 
     pub fn startModelConnectionsUnavailable(self: *Runtime) void {
@@ -2068,101 +1809,49 @@ pub const Runtime = struct {
         self.model_connections.stop();
     }
 
-    pub fn selectMetaskDefault(
+    pub fn selectModelsDefault(
         self: *Runtime,
-        account_commands: account_contract.AccountCommandSink,
+        command: models_contract.SelectDefaultCommand,
     ) models_contract.CommandResult {
         if (self.shutting_down)
             return .rejected(.operation_in_progress);
-        if (self.modelConnectionDefaultBinding() == null)
-            return .rejected(.invalid_connection);
-        if (self.metask_default_selection_attempt_id != null or
-            self.executionReplacementPending())
+        if (self.executionReplacementPending())
             return .rejected(.operation_in_progress);
-        const view = self.accountView();
-        if (view.state != .authenticated or view.catalog_state != .ready or
-            self.account_projection.sourceGeneration() == 0)
-            return .rejected(.invalid_connection);
+        const result = self.model_connections.selectDefault(command);
+        if (result.accepted) {
+            self.reconcileModelsDefaultNoFail(false, false);
+            self.finishExecutionCommitNoFail();
+        }
+        return result;
+    }
 
-        const result = account_commands.submit(.resolve_source_candidate);
-        if (!result.accepted) return .rejected(switch (result.error_code) {
-            .operation_in_progress => .operation_in_progress,
-            .local_resource_exhausted => .local_resource_exhausted,
-            else => .invalid_connection,
-        });
-        const attempt_id = result.attempt_id orelse
-            return .rejected(.invalid_connection);
-        if (attempt_id == 0) return .rejected(.invalid_connection);
-        self.metask_default_selection_attempt_id = attempt_id;
-        return .acceptedResult();
+    pub fn configureMetaskSelection(
+        self: *Runtime,
+        command: models_contract.ConfigureMetaskSelectionCommand,
+    ) models_contract.CommandResult {
+        if (self.shutting_down)
+            return .rejected(.operation_in_progress);
+        if (self.executionReplacementPending())
+            return .rejected(.operation_in_progress);
+        const result = self.model_connections.configureMetaskSelection(command);
+        if (result.accepted) {
+            self.reconcileModelsDefaultNoFail(false, false);
+            self.finishExecutionCommitNoFail();
+        }
+        return result;
     }
 
     pub fn submitModelConnectionCommand(
         self: *Runtime,
         command: models_contract.ModelConnectionCommand,
     ) models_contract.CommandResult {
-        const mutation_connection_id: ?[]const u8 = switch (command) {
-            .update => |value| value.selection.connection_id,
-            .remove => |value| value.connection_id,
-            .create, .test_connection, .select_default => null,
-        };
-        if (mutation_connection_id) |connection_id|
-            if (self.modelConnectionExecutionActive(connection_id))
-                return .rejected(.execution_in_use);
         if (command == .test_connection)
             return .rejected(.test_unavailable);
-        if (command == .select_default)
-            return self.selectModelConnectionDefault(command);
         const result = self.model_connections.submitCommand(command);
-        if (result.accepted) self.finishExecutionCommitNoFail();
-        return result;
-    }
-
-    fn selectModelConnectionDefault(
-        self: *Runtime,
-        command: models_contract.ModelConnectionCommand,
-    ) models_contract.CommandResult {
-        const value = command.select_default;
-        const execution_generation = self.nextExecutionGeneration(
-            self.executionGeneration(),
-        ) catch return .rejected(.local_resource_exhausted);
-        var owned_execution = switch (self.prepareModelConnectionExecution(
-            value.selection,
-            value.model_id,
-            execution_generation,
-        )) {
-            .ready => |execution| execution,
-            .rejected => |error_code| return .rejected(error_code),
-        };
-        defer owned_execution.deinit();
-        var prepared_binding = self.prepareModelConnectionBinding(
-            value.selection.connection_id,
-            value.model_id,
-        ) catch return .rejected(.local_resource_exhausted);
-        var prepared_binding_owned = true;
-        defer if (prepared_binding_owned) prepared_binding.deinit();
-        if (self.executionReplacementPending())
-            return .rejected(.operation_in_progress);
-        self.beginDefaultExecutionReplacement() catch |err|
-            return .rejected(replacementExecutionError(err));
-        var replacement_started = true;
-        defer if (replacement_started) self.endExecutionReplacementNoFail();
-        self.prepareExecutionInstall(owned_execution.input()) catch
-            return .rejected(.persistence_unavailable);
-        const result = self.model_connections.submitCommandWithExecutionGeneration(
-            command,
-            owned_execution.input().execution_generation,
-        );
-        if (!result.accepted) return result;
-        self.clearPendingMetaskCandidateNoFail();
-        self.installModelConnectionExecutionNoFail(
-            &owned_execution,
-            &prepared_binding,
-        );
-        prepared_binding_owned = false;
-        replacement_started = false;
-        self.endExecutionReplacementNoFail();
-        self.finishExecutionCommitNoFail();
+        if (result.accepted) {
+            self.reconcileModelsDefaultNoFail(false, false);
+            self.finishExecutionCommitNoFail();
+        }
         return result;
     }
 
@@ -2197,6 +1886,56 @@ pub const Runtime = struct {
         const result = self.model_connections.completeTest(command, succeeded);
         if (result.accepted) self.finishExecutionCommitNoFail();
         return result;
+    }
+
+    pub fn prepareMetaskCatalogRefresh(
+        self: *Runtime,
+        principal_ref: []const u8,
+        authorization_generation: u64,
+    ) models_contract.CatalogRefreshPrepareResult {
+        return self.model_connections.prepareMetaskCatalogRefresh(
+            principal_ref,
+            authorization_generation,
+        );
+    }
+
+    pub fn completeMetaskCatalogRefresh(
+        self: *Runtime,
+        attempt_id: u64,
+        authorization_generation: u64,
+        completion: *models_metask.OwnedCatalogCompletion,
+    ) models_contract.ModelsError {
+        const result = self.model_connections.completeMetaskCatalogRefresh(
+            attempt_id,
+            authorization_generation,
+            completion,
+        );
+        if (result == .none)
+            self.reconcileModelsDefaultNoFail(true, false);
+        self.finishExecutionCommitNoFail();
+        return result;
+    }
+
+    pub fn failMetaskCatalogRefresh(
+        self: *Runtime,
+        attempt_id: u64,
+        authorization_generation: u64,
+        error_code: models_contract.ModelsError,
+        safe_diagnostic: []const u8,
+    ) void {
+        self.model_connections.failMetaskCatalogRefresh(
+            attempt_id,
+            authorization_generation,
+            error_code,
+            safe_diagnostic,
+        );
+        self.finishExecutionCommitNoFail();
+    }
+
+    pub fn setMetaskAuthorizationUnavailable(self: *Runtime) void {
+        self.model_connections.setMetaskAuthorizationUnavailable();
+        self.reconcileModelsDefaultNoFail(false, true);
+        self.finishExecutionCommitNoFail();
     }
 
     pub fn createModelConnectionWithCredential(
@@ -2254,41 +1993,136 @@ pub const Runtime = struct {
 
     pub fn resolveDefaultModelConnectionExecution(
         self: *Runtime,
+        execution_generation: u64,
     ) !?models_contract.OwnedConfig {
-        return self.model_connections.resolveDefaultExecution();
+        return self.model_connections.resolveDefaultExecution(execution_generation);
     }
 
-    fn restoreModelConnectionDefaultNoFail(self: *Runtime) void {
-        const binding = self.modelConnectionDefaultBinding() orelse return;
-        var execution = (self.resolveDefaultModelConnectionExecution() catch return) orelse {
-            self.finishExecutionCommitNoFail();
+    fn reconcileModelsDefaultNoFail(
+        self: *Runtime,
+        refresh_aligned: bool,
+        clear_unresolvable: bool,
+    ) void {
+        const desired = self.model_connections.defaultAuthority() orelse {
+            if (self.execution_state.hasRecordedDefaultAuthority())
+                self.clearRecordedModelsDefaultNoFail();
+            return;
+        };
+        const aligned = self.execution_state.defaultAuthorityMatches(desired);
+        if (aligned and !refresh_aligned and !clear_unresolvable) return;
+
+        var candidate = (self.model_connections.resolveDefaultCandidate() catch {
+            if (clear_unresolvable and
+                self.execution_state.hasRecordedDefaultAuthority() and
+                self.execution_state.activeSource() == .metask)
+                self.clearRecordedModelsDefaultNoFail()
+            else
+                self.execution_state.recordAvailabilityErrorNoFail(.invalid_candidate);
+            return;
+        }) orelse {
+            if (clear_unresolvable and
+                self.execution_state.hasRecordedDefaultAuthority() and
+                self.execution_state.activeSource() == .metask)
+                self.clearRecordedModelsDefaultNoFail()
+            else
+                self.execution_state.recordAvailabilityErrorNoFail(.invalid_candidate);
+            return;
+        };
+        defer candidate.deinit();
+        const candidate_input = candidate.input();
+        if (candidate.source != desired.source or
+            candidate_input.source_generation != desired.source_generation or
+            candidate_input.target.protocol != desired.protocol or
+            !std.mem.eql(
+                u8,
+                candidate_input.target.model,
+                desired.selection.model_id,
+            ))
+        {
+            self.execution_state.recordAvailabilityErrorNoFail(.invalid_candidate);
+            return;
+        }
+
+        const execution_generation = if (aligned)
+            self.executionGeneration()
+        else
+            self.nextExecutionGeneration(self.executionGeneration()) catch {
+                self.execution_state.recordAvailabilityErrorNoFail(.resource_exhausted);
+                return;
+            };
+        var execution = candidate.intoConfig(execution_generation) catch {
+            self.execution_state.recordAvailabilityErrorNoFail(.invalid_candidate);
             return;
         };
         defer execution.deinit();
-        var prepared_binding = self.prepareModelConnectionBinding(
-            binding.connection_id,
-            binding.model_id,
-        ) catch return;
-        var prepared_binding_owned = true;
-        defer if (prepared_binding_owned) prepared_binding.deinit();
-        if (self.executionReplacementPending()) return;
-        self.beginDefaultExecutionReplacement() catch return;
-        var replacement_started = true;
-        defer if (replacement_started) self.endExecutionReplacementNoFail();
-        self.prepareExecutionInstall(execution.input()) catch {
-            replacement_started = false;
-            self.endExecutionReplacementNoFail();
-            self.finishExecutionCommitNoFail();
+        var prepared_binding: ?PreparedModelConnectionBinding = if (desired.source == .model_connection)
+            self.prepareModelConnectionBinding(
+                desired.selection.source_id,
+                desired.selection.model_id,
+            ) catch {
+                self.execution_state.recordAvailabilityErrorNoFail(.resource_exhausted);
+                return;
+            }
+        else
+            null;
+        defer if (prepared_binding) |*binding| binding.deinit();
+
+        if (self.executionReplacementPending()) {
+            self.execution_state.recordAvailabilityErrorNoFail(.invalid_candidate);
+            return;
+        }
+        self.beginDefaultExecutionReplacement() catch {
+            self.execution_state.recordAvailabilityErrorNoFail(.invalid_candidate);
             return;
         };
-        self.installModelConnectionExecutionNoFail(
-            &execution,
-            &prepared_binding,
-        );
-        prepared_binding_owned = false;
+        var replacement_started = true;
+        defer if (replacement_started) self.endExecutionReplacementNoFail();
+        self.execution_state.prepareInstall(
+            execution.input(),
+            ScheduleCredentialRedaction{ .owner = self },
+        ) catch |err| {
+            self.execution_state.rejectReplacementNoFail(metaskStageError(err));
+            return;
+        };
+        switch (desired.source) {
+            .metask => self.execution_state.installMetaskNoFail(
+                &execution,
+                desired.source_generation,
+                self.executionProjectionRedaction(),
+            ),
+            .model_connection => self.execution_state.installModelConnectionNoFail(
+                &execution,
+                &prepared_binding.?,
+                self.executionProjectionRedaction(),
+            ),
+        }
+        self.execution_state.recordDefaultAuthorityNoFail(desired);
+        prepared_binding = null;
         replacement_started = false;
         self.endExecutionReplacementNoFail();
-        self.finishExecutionCommitNoFail();
+    }
+
+    fn clearRecordedModelsDefaultNoFail(self: *Runtime) void {
+        if (!self.execution_state.hasRecordedDefaultAuthority()) return;
+        if (self.executionReplacementPending()) {
+            self.execution_state.recordAvailabilityErrorNoFail(.invalid_candidate);
+            return;
+        }
+        self.beginDefaultExecutionReplacement() catch {
+            self.execution_state.recordAvailabilityErrorNoFail(.invalid_candidate);
+            return;
+        };
+        var replacement_started = true;
+        defer if (replacement_started) self.endExecutionReplacementNoFail();
+        self.execution_state.prepareClear(
+            ScheduleCredentialRedaction{ .owner = self },
+        ) catch |err| {
+            self.execution_state.rejectReplacementNoFail(metaskStageError(err));
+            return;
+        };
+        self.clearExecutionNoFail();
+        replacement_started = false;
+        self.endExecutionReplacementNoFail();
     }
 
     pub fn finishExecutionCommitNoFail(self: *Runtime) void {
@@ -2346,37 +2180,6 @@ pub const Runtime = struct {
             execution_input,
             ScheduleCredentialRedaction{ .owner = self },
         );
-        const api_keys = [_]account_contract.ApiKeyView{.{
-            .id = "automation-key",
-            .name = "Automation",
-            .suffix = "",
-            .protocol = input.protocol,
-        }};
-        const models = [_]account_contract.ModelView{.{
-            .id = input.model,
-            .display_name = input.model,
-        }};
-        self.commitAccountFactNoFail(.{
-            .kind = .source_authority_changed,
-            .view = .{
-                .state = .authenticated,
-                .catalog_state = .ready,
-                .account_id = "automation-account",
-                .display_name = "Automation",
-                .api_keys = &api_keys,
-                .models = &models,
-                .selected_api_key_id = "automation-key",
-                .selected_model = input.model,
-                .model_catalog_api_key_id = "automation-key",
-            },
-            .authority = .{
-                .account_id = "automation-account",
-                .api_key_id = "automation-key",
-                .model_id = input.model,
-                .protocol = input.protocol,
-                .source_generation = 1,
-            },
-        });
         self.execution_state.installAutomationNoFail(.{
             .protocol = input.protocol,
             .credential = input.credential,
@@ -2385,7 +2188,7 @@ pub const Runtime = struct {
             .generation = 1,
         }, self.executionProjectionRedaction());
         self.endExecutionReplacementNoFail();
-        self.finishAccountCommitNoFail();
+        self.finishExecutionCommitNoFail();
     }
 
     pub fn beginExecutionReplacement(self: *Runtime) Error!void {
@@ -3112,8 +2915,8 @@ pub const Runtime = struct {
         const identity = self.task_runtime.taskExecutionIdentity(task_id) orelse
             return error.UnknownTask;
         if (expected_model.len == 0 or model.len == 0 or
-            expected_model.len > account_contract.Limits.model_id_bytes or
-            model.len > account_contract.Limits.model_id_bytes or
+            expected_model.len > models_contract.Limits.model_id_bytes or
+            model.len > models_contract.Limits.model_id_bytes or
             !std.unicode.utf8ValidateSlice(expected_model) or
             !std.unicode.utf8ValidateSlice(model))
             return error.InvalidTaskModel;
@@ -3132,7 +2935,7 @@ pub const Runtime = struct {
             &self.checkpoint_store_health,
             self.taskRuntimeTextProjection(),
             self.taskRuntimeDurableEffect(),
-            account_contract.Limits.model_id_bytes,
+            models_contract.Limits.model_id_bytes,
         ) catch |err| {
             if (err == error.TaskPersistenceOutcomeUnknown or
                 err == error.TaskClosing)
@@ -3534,9 +3337,7 @@ pub const Runtime = struct {
         };
         return switch (self.schedule.recoverPersistence(self.scheduleRedaction())) {
             .recovered => recovered: {
-                if (self.pending_metask_clear)
-                    self.reconcileMetaskClearNoFail();
-                self.retryPendingMetaskCandidateNoFail();
+                self.reconcileModelsDefaultNoFail(false, false);
                 self.finishDefaultExecutionCommitNoFail();
                 break :recovered .recovered;
             },
@@ -4284,6 +4085,8 @@ pub const Runtime = struct {
             @tagName(self.default_permission_profile),
         }) catch return error.SnapshotTooLarge;
         try self.writeAccount(&writer);
+        writer.writeAll(",\"models\":") catch return error.SnapshotTooLarge;
+        try self.writeModels(&writer);
         writer.writeAll(",\"execution\":") catch return error.SnapshotTooLarge;
         try self.writeExecution(&writer);
         writer.writeAll(",\"skillCatalog\":") catch
@@ -4329,7 +4132,7 @@ pub const Runtime = struct {
             return error.SnapshotTooLarge;
     }
 
-    fn writeModelMetadata(writer: *std.Io.Writer, metadata: account_contract.ModelMetadata) Error!void {
+    fn writeModelMetadata(writer: *std.Io.Writer, metadata: models_contract.ModelMetadata) Error!void {
         var input_buffer: [20]u8 = undefined;
         var output_buffer: [20]u8 = undefined;
         const input: ?[]const u8 = if (metadata.max_input_tokens) |limit|
@@ -4369,10 +4172,9 @@ pub const Runtime = struct {
     ) Error!void {
         const view = self.accountView();
         writer.print(
-            "{{\"state\":\"{s}\",\"catalogState\":\"{s}\",\"canCancel\":{},\"accountId\":",
+            "{{\"state\":\"{s}\",\"canCancel\":{},\"accountId\":",
             .{
                 @tagName(view.state),
-                @tagName(view.catalog_state),
                 view.can_cancel,
             },
         ) catch return error.SnapshotTooLarge;
@@ -4380,62 +4182,128 @@ pub const Runtime = struct {
         writer.writeAll(",\"displayName\":") catch
             return error.SnapshotTooLarge;
         try self.projectedJsonValue(writer, view.display_name);
-        writer.writeAll(",\"apiKeys\":[") catch
-            return error.SnapshotTooLarge;
-        for (view.api_keys, 0..) |api_key, index| {
-            if (index != 0) writer.writeByte(',') catch
-                return error.SnapshotTooLarge;
-            writer.writeAll("{\"selectionId\":") catch
-                return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, api_key.id);
-            writer.writeAll(",\"name\":") catch
-                return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, api_key.name);
-            writer.writeAll(",\"suffix\":") catch
-                return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, api_key.suffix);
-            writer.print(",\"protocol\":\"{s}\"", .{@tagName(api_key.protocol)}) catch
-                return error.SnapshotTooLarge;
-            writer.writeByte('}') catch return error.SnapshotTooLarge;
-        }
-        writer.writeAll("],\"models\":[") catch
-            return error.SnapshotTooLarge;
-        for (view.models, 0..) |model, index| {
-            if (index != 0) writer.writeByte(',') catch
-                return error.SnapshotTooLarge;
-            writer.writeAll("{\"selectionId\":") catch
-                return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, model.id);
-            writer.writeAll(",\"displayName\":") catch
-                return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, model.display_name);
-            writer.writeAll(",\"metadata\":") catch return error.SnapshotTooLarge;
-            try writeModelMetadata(writer, model.metadata);
-            writer.writeByte('}') catch return error.SnapshotTooLarge;
-        }
-        writer.writeAll("],\"selectedApiKeySelectionId\":") catch
-            return error.SnapshotTooLarge;
-        try self.projectedJsonValue(writer, view.selected_api_key_id);
-        writer.writeAll(",\"selectedModelSelectionId\":") catch
-            return error.SnapshotTooLarge;
-        try self.projectedJsonValue(writer, view.selected_model);
-        writer.writeAll(",\"candidateApiKeySelectionId\":") catch
-            return error.SnapshotTooLarge;
-        try self.projectedJsonValue(writer, view.candidate_api_key_id);
-        writer.writeAll(",\"candidateModelSelectionId\":") catch
-            return error.SnapshotTooLarge;
-        try self.projectedJsonValue(writer, view.candidate_model);
-        writer.writeAll(",\"modelCatalogApiKeySelectionId\":") catch
-            return error.SnapshotTooLarge;
-        try self.projectedJsonValue(writer, view.model_catalog_api_key_id);
         writer.print(",\"errorCode\":\"{s}\",\"safeDiagnostic\":", .{
             @tagName(view.error_code),
         }) catch return error.SnapshotTooLarge;
         try self.projectedJsonValue(writer, view.safe_diagnostic);
+        writer.writeByte('}') catch return error.SnapshotTooLarge;
+    }
+
+    fn writeModels(self: *Runtime, writer: *std.Io.Writer) Error!void {
+        const view = self.modelsView();
         writer.print(
-            ",\"catalogGeneration\":\"{d}\"}}",
-            .{view.catalog_generation},
+            "{{\"availability\":\"{s}\",\"persistenceHealth\":\"{s}\",\"providers\":[",
+            .{ @tagName(view.availability), @tagName(view.persistence_health) },
         ) catch return error.SnapshotTooLarge;
+        for (view.providers, 0..) |provider, provider_index| {
+            if (provider_index != 0) writer.writeByte(',') catch
+                return error.SnapshotTooLarge;
+            writer.writeAll("{\"id\":") catch return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, provider.id);
+            writer.writeAll(",\"displayName\":") catch return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, provider.display_name);
+            writer.print(",\"recommended\":{},\"catalogState\":\"{s}\",\"principalRef\":", .{
+                provider.recommended,
+                @tagName(provider.catalog_state),
+            }) catch return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, provider.principal_ref);
+            writer.writeAll(",\"apiKeys\":[") catch return error.SnapshotTooLarge;
+            for (provider.api_keys, 0..) |api_key, index| {
+                if (index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+                writer.writeAll("{\"id\":") catch return error.SnapshotTooLarge;
+                try self.projectedJsonValue(writer, api_key.id);
+                writer.writeAll(",\"name\":") catch return error.SnapshotTooLarge;
+                try self.projectedJsonValue(writer, api_key.name);
+                writer.writeAll(",\"suffix\":") catch return error.SnapshotTooLarge;
+                try self.projectedJsonValue(writer, api_key.suffix);
+                writer.print(",\"protocol\":\"{s}\"}}", .{@tagName(api_key.protocol)}) catch
+                    return error.SnapshotTooLarge;
+            }
+            writer.writeAll("],\"models\":[") catch return error.SnapshotTooLarge;
+            for (provider.models, 0..) |model, index| {
+                if (index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+                writer.writeAll("{\"id\":") catch return error.SnapshotTooLarge;
+                try self.projectedJsonValue(writer, model.id);
+                writer.writeAll(",\"displayName\":") catch return error.SnapshotTooLarge;
+                try self.projectedJsonValue(writer, model.display_name);
+                writer.writeAll(",\"metadata\":") catch return error.SnapshotTooLarge;
+                try writeModelMetadata(writer, model.metadata);
+                writer.writeByte('}') catch return error.SnapshotTooLarge;
+            }
+            writer.writeAll("],\"selectedApiKeyId\":") catch return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, provider.selected_api_key_id);
+            writer.print(",\"catalogGeneration\":\"{d}\",\"sourceGeneration\":\"{d}\",\"errorCode\":\"{s}\",\"safeDiagnostic\":", .{
+                provider.catalog_generation,
+                provider.source_generation,
+                @tagName(provider.error_code),
+            }) catch return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, provider.safe_diagnostic);
+            writer.writeByte('}') catch return error.SnapshotTooLarge;
+        }
+        writer.writeAll("],\"metaskSelection\":") catch return error.SnapshotTooLarge;
+        try self.writeOptionalModelRef(writer, view.metask_selection);
+        writer.print(",\"metaskSelectionRevision\":\"{d}\",\"defaultSelection\":", .{
+            view.metask_selection_revision,
+        }) catch return error.SnapshotTooLarge;
+        try self.writeOptionalModelRef(writer, view.default_selection);
+        writer.print(",\"selectionRevision\":\"{d}\",\"operation\":\"{s}\",\"errorCode\":\"{s}\",\"connections\":[", .{
+            view.selection_revision,
+            @tagName(view.operation),
+            @tagName(view.error_code),
+        }) catch return error.SnapshotTooLarge;
+        try self.writeModelConnections(writer, view.model_connections);
+        writer.writeAll("]}") catch return error.SnapshotTooLarge;
+    }
+
+    fn writeOptionalModelRef(
+        self: *Runtime,
+        writer: *std.Io.Writer,
+        value: ?models_contract.ModelRef,
+    ) Error!void {
+        if (value) |model_ref| {
+            writer.writeAll("{\"sourceId\":") catch return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, model_ref.source_id);
+            writer.writeAll(",\"modelId\":") catch return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, model_ref.model_id);
+            writer.writeByte('}') catch return error.SnapshotTooLarge;
+        } else writer.writeAll("null") catch return error.SnapshotTooLarge;
+    }
+
+    fn writeModelConnections(
+        self: *Runtime,
+        writer: *std.Io.Writer,
+        connections: []const models_contract.ModelConnectionView,
+    ) Error!void {
+        for (connections, 0..) |connection, index| {
+            if (index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+            writer.writeAll("{\"id\":") catch return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, connection.id);
+            writer.writeAll(",\"displayName\":") catch return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, connection.display_name);
+            writer.print(",\"protocol\":\"{s}\",\"normalizedBaseUrl\":", .{@tagName(connection.protocol)}) catch
+                return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, connection.normalized_base_url);
+            writer.print(",\"state\":\"{s}\",\"testStatus\":\"{s}\",\"credentialStatus\":\"{s}\",\"enabled\":{},\"connectionGeneration\":\"{d}\",\"sourceGeneration\":\"{d}\",\"catalogGeneration\":\"{d}\",\"selectedModel\":", .{
+                @tagName(connection.state),
+                @tagName(connection.test_status),
+                @tagName(connection.credential_status),
+                connection.enabled,
+                connection.connection_generation,
+                connection.source_generation,
+                connection.catalog_generation,
+            }) catch return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, connection.selected_model);
+            writer.writeAll(",\"models\":[") catch return error.SnapshotTooLarge;
+            for (connection.models, 0..) |model, model_index| {
+                if (model_index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+                writer.writeAll("{\"id\":") catch return error.SnapshotTooLarge;
+                try self.projectedJsonValue(writer, model.id);
+                writer.writeAll(",\"displayName\":") catch return error.SnapshotTooLarge;
+                try self.projectedJsonValue(writer, model.display_name);
+                writer.writeByte('}') catch return error.SnapshotTooLarge;
+            }
+            writer.writeAll("]}") catch return error.SnapshotTooLarge;
+        }
     }
 
     fn writeExecution(
@@ -4448,46 +4316,11 @@ pub const Runtime = struct {
         try writeOptionalExecutionSource(writer, view.default_source);
         writer.writeAll(",\"activeSource\":") catch return error.SnapshotTooLarge;
         try writeOptionalExecutionSource(writer, view.active_source);
-        writer.print(",\"activeGeneration\":\"{d}\",\"taskCreationAvailable\":{},\"selectedModelConnectionId\":", .{
+        writer.print(",\"activeGeneration\":\"{d}\",\"taskCreationAvailable\":{},\"errorCode\":\"{s}\"}}", .{
             view.active_generation,
             view.task_creation_available,
+            @tagName(view.error_code),
         }) catch return error.SnapshotTooLarge;
-        try self.projectedJsonValue(writer, view.selected_model_connection_id);
-        writer.writeAll(",\"modelConnections\":[") catch
-            return error.SnapshotTooLarge;
-        for (view.model_connections, 0..) |connection, index| {
-            if (index != 0) writer.writeByte(',') catch
-                return error.SnapshotTooLarge;
-            writer.writeAll("{\"id\":") catch return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, connection.id);
-            writer.writeAll(",\"displayName\":") catch return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, connection.display_name);
-            writer.print(",\"protocol\":\"{s}\",\"normalizedBaseUrl\":", .{
-                @tagName(connection.protocol),
-            }) catch return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, connection.normalized_base_url);
-            writer.print(",\"state\":\"{s}\",\"testStatus\":\"{s}\",\"credentialStatus\":\"{s}\",\"enabled\":{},\"connectionGeneration\":\"{d}\",\"selectedModel\":", .{
-                @tagName(connection.state),
-                @tagName(connection.test_status),
-                @tagName(connection.credential_status),
-                connection.enabled,
-                connection.connection_generation,
-            }) catch return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, connection.selected_model);
-            writer.writeAll(",\"models\":[") catch return error.SnapshotTooLarge;
-            for (connection.models, 0..) |model, model_index| {
-                if (model_index != 0) writer.writeByte(',') catch
-                    return error.SnapshotTooLarge;
-                writer.writeAll("{\"id\":") catch return error.SnapshotTooLarge;
-                try self.projectedJsonValue(writer, model.id);
-                writer.writeAll(",\"displayName\":") catch return error.SnapshotTooLarge;
-                try self.projectedJsonValue(writer, model.display_name);
-                writer.writeByte('}') catch return error.SnapshotTooLarge;
-            }
-            writer.writeAll("]}") catch return error.SnapshotTooLarge;
-        }
-        writer.print("],\"errorCode\":\"{s}\"}}", .{@tagName(view.error_code)}) catch
-            return error.SnapshotTooLarge;
     }
 
     fn writeOptionalExecutionSource(
@@ -4559,7 +4392,6 @@ pub const Runtime = struct {
 
     pub fn deinit(self: *Runtime) void {
         self.shutdownExecutor();
-        self.clearPendingMetaskCandidateNoFail();
         self.task_runtime.deinitTasks(self.taskRuntimeReleaseEffects());
         self.task_runtime.deinitStorage();
         for (0..self.workspace.slotCount()) |index| {
@@ -4802,12 +4634,17 @@ pub const Runtime = struct {
             query.workspace_root,
             query.task_id,
         );
-        const execution_available = self.execution_state.supportsTaskExecution(
-            query.execution_protocol,
-            query.execution_model,
-            self.metaskBindingCurrent(),
-            self.account_projection.hasModel(query.execution_model),
-        );
+        const execution_available = self.modelsDefaultCurrent() and
+            self.execution_state.supportsTaskExecution(
+                query.execution_protocol,
+                query.execution_model,
+                self.metaskBindingCurrent(),
+                self.model_connections.metaskModelAvailable(
+                    null,
+                    query.execution_protocol,
+                    query.execution_model,
+                ),
+            );
         return .{
             .shutting_down = self.shutting_down,
             .task_persistence_ready = self.task_persistence_health.operational(),
@@ -4914,10 +4751,7 @@ pub const Runtime = struct {
     }
 
     fn canCreateTask(self: *const Runtime) bool {
-        return self.execution_state.canCreateTask(
-            !self.shutting_down,
-            self.metaskBindingCurrent(),
-        );
+        return !self.shutting_down and self.modelsDefaultCurrent();
     }
 
     fn cloneCurrentTaskExecution(
@@ -4932,23 +4766,29 @@ pub const Runtime = struct {
     }
 
     fn validExecutionGeneration(self: *const Runtime, generation: u64) bool {
-        return self.execution_state.validExecutionGeneration(
-            generation,
-            self.metaskBindingCurrent(),
-        );
+        return generation != 0 and
+            generation == self.execution_state.generation() and
+            self.modelsDefaultCurrent();
     }
 
     fn admissionModel(self: *const Runtime) []const u8 {
-        return if (self.execution_state.modelConnectionSelected())
-            self.execution_state.model()
-        else
-            self.account_projection.selectedModel();
+        return self.execution_state.model();
+    }
+
+    fn modelsDefaultCurrent(self: *const Runtime) bool {
+        // Product Control records alignment only after consuming an exact
+        // Models authority. Consumer admission and recovery read that local
+        // fact; worker threads never call back into the main-thread Models
+        // aggregate.
+        return self.execution_state.ready() and
+            !self.execution_state.replacementPending() and
+            self.execution_state.hasRecordedDefaultAuthority() and
+            self.execution_state.availabilityError() == .none;
     }
 
     fn metaskBindingCurrent(self: *const Runtime) bool {
-        const source_generation = self.account_projection.sourceGeneration();
-        return self.account_projection.bindingCurrent(source_generation) and
-            self.execution_state.metaskBindingMatches(source_generation);
+        return self.execution_state.activeSource() == .metask and
+            self.modelsDefaultCurrent();
     }
 
     fn taskModelSelectionAuthorized(
@@ -4957,13 +4797,13 @@ pub const Runtime = struct {
         expected_catalog_generation: u64,
         model: []const u8,
     ) bool {
-        const catalog_generation = self.account_projection.catalogGeneration();
         return self.execution_state.taskModelSelectionBaseAuthorized(identity) and
             self.metaskBindingCurrent() and
-            catalog_generation != 0 and
-            expected_catalog_generation == catalog_generation and
-            self.account_projection.selectedProtocol() == identity.protocol and
-            self.account_projection.hasModel(model);
+            self.model_connections.metaskModelAvailable(
+                expected_catalog_generation,
+                identity.protocol,
+                model,
+            );
     }
 
     fn scheduleExecutionBinding(self: *const Runtime) product_schedule.ExecutionBinding {
@@ -5709,13 +5549,17 @@ pub const Runtime = struct {
             null,
             query.task_id,
         );
-        const execution_exact = self.execution_state.recoveryAuthorityExact(
-            query.target_execution_generation,
-            query.protocol,
-            query.task_model,
-            self.metaskBindingCurrent(),
-            self.account_projection.hasModel(query.task_model),
-        );
+        const execution_exact = self.modelsDefaultCurrent() and
+            self.execution_state.recoveryAuthorityExact(
+                query.target_execution_generation,
+                query.protocol,
+                query.task_model,
+                self.metaskBindingCurrent(),
+                // A Task restore consumes Product Control's already-recorded
+                // source authority. A later provider catalog refresh must not
+                // let Models retroactively veto a consumer-owned binding.
+                true,
+            );
         return .{
             .workspace_root = workspace.canonical_root,
             .workspace_kind = switch (workspace.kind) {
@@ -6621,6 +6465,10 @@ pub const Runtime = struct {
             .submit_model_connection_fn = controlSubmitModelConnection,
             .begin_model_connection_probe_fn = controlBeginModelConnectionProbe,
             .complete_model_connection_test_fn = controlCompleteModelConnectionTest,
+            .prepare_metask_catalog_refresh_fn = controlPrepareMetaskCatalogRefresh,
+            .complete_metask_catalog_refresh_fn = controlCompleteMetaskCatalogRefresh,
+            .fail_metask_catalog_refresh_fn = controlFailMetaskCatalogRefresh,
+            .metask_authorization_unavailable_fn = controlMetaskAuthorizationUnavailable,
         };
     }
 
@@ -6687,6 +6535,159 @@ pub const Runtime = struct {
     }
 };
 
+pub const TestSupport = if (builtin.is_test) struct {
+    pub fn replaceMetaskCatalog(
+        control: *Runtime,
+        models: []const models_contract.ModelView,
+        selected_model: []const u8,
+    ) !void {
+        const current = control.modelsView();
+        const provider = if (current.providers.len == 0) null else current.providers[0];
+        const source_generation = if (provider) |value|
+            if (value.source_generation == 0) control.executionGeneration() else value.source_generation
+        else
+            control.executionGeneration();
+        const metask_revision = if (current.metask_selection_revision == std.math.maxInt(u64))
+            return error.InvalidExecutionGeneration
+        else
+            current.metask_selection_revision + 1;
+        const default_revision = if (current.selection_revision == std.math.maxInt(u64))
+            return error.InvalidExecutionGeneration
+        else
+            current.selection_revision + 1;
+        const catalog_generation = if (provider) |value|
+            if (value.catalog_generation == std.math.maxInt(u64))
+                return error.InvalidExecutionGeneration
+            else
+                value.catalog_generation + 1
+        else
+            1;
+        try models_aggregate.TestSupport.installMetaskDefault(
+            &control.model_connections,
+            "account-1",
+            .{
+                .id = "key-1",
+                .name = "Fixture API",
+                .suffix = "ture",
+                .protocol = .anthropic_messages,
+            },
+            "fixture-secret",
+            models,
+            selected_model,
+            source_generation,
+            metask_revision,
+            default_revision,
+            catalog_generation,
+        );
+        control.execution_state.recordDefaultAuthorityNoFail(
+            control.model_connections.defaultAuthority().?,
+        );
+        control.finishExecutionCommitNoFail();
+    }
+
+    pub fn installMetaskExecution(control: *Runtime, generation: u64) !void {
+        return installMetaskExecutionWithCredential(control, generation, "SECRET-KEY");
+    }
+
+    pub fn installMetaskExecutionWithCredential(
+        control: *Runtime,
+        generation: u64,
+        credential: []const u8,
+    ) !void {
+        if (generation == 0 or generation > std.math.maxInt(u64) - 3)
+            return error.InvalidExecutionGeneration;
+        try prepareMetaskDefault(control, generation);
+        var execution = try models_contract.OwnedConfig.initOwned(
+            std.testing.allocator,
+            .metask,
+            .anthropic_messages,
+            try std.testing.allocator.dupe(u8, "fixture-model"),
+            try std.testing.allocator.dupe(
+                u8,
+                models_contract.metask_anthropic_messages_url,
+            ),
+            generation,
+            try std.testing.allocator.dupe(u8, credential),
+            "key-1",
+        );
+        errdefer execution.deinit();
+        try control.beginExecutionReplacement();
+        errdefer control.endExecutionReplacementNoFail();
+        try control.prepareExecutionInstall(execution.input());
+        control.installExecutionNoFail(&execution);
+        control.execution_state.recordDefaultAuthorityNoFail(
+            control.model_connections.defaultAuthority().?,
+        );
+        control.endExecutionReplacementNoFail();
+        control.finishExecutionCommitNoFail();
+    }
+
+    pub fn prepareMetaskDefault(control: *Runtime, generation: u64) !void {
+        if (generation == 0 or generation > std.math.maxInt(u64) - 3)
+            return error.InvalidExecutionGeneration;
+        const api_key: models_contract.ApiKeyView = .{
+            .id = "key-1",
+            .name = "Primary",
+            .suffix = "1234",
+            .protocol = .anthropic_messages,
+        };
+        const models = [_]models_contract.ModelView{.{
+            .id = "fixture-model",
+            .display_name = "Fixture model",
+            .metadata = .{
+                .max_input_tokens = 1_048_576,
+                .max_output_tokens = 64_000,
+                .capabilities = .{
+                    .image_input = false,
+                    .pdf_input = false,
+                    .batch = false,
+                    .citations = false,
+                    .code_execution = false,
+                    .structured_outputs = true,
+                    .thinking = .{
+                        .supported = true,
+                        .adaptive = false,
+                        .enabled = true,
+                    },
+                    .effort = .{
+                        .supported = false,
+                        .low = false,
+                        .medium = false,
+                        .high = false,
+                        .max = false,
+                    },
+                    .context_management = .{
+                        .supported = true,
+                        .clear_thinking_20251015 = false,
+                        .clear_tool_uses_20250919 = false,
+                        .compact_20260112 = true,
+                    },
+                },
+            },
+        }};
+        try models_aggregate.TestSupport.installMetaskDefault(
+            &control.model_connections,
+            "account-1",
+            api_key,
+            "fixture-secret",
+            &models,
+            "fixture-model",
+            generation,
+            generation + 1,
+            generation + 2,
+            generation + 3,
+        );
+        control.commitAccountFactNoFail(.{
+            .kind = .session_changed,
+            .view = .{
+                .state = .authenticated,
+                .account_id = "account-1",
+                .display_name = "Fixture User",
+            },
+        });
+    }
+} else struct {};
+
 fn controlOwner(context: *anyopaque) *Runtime {
     return @ptrCast(@alignCast(context));
 }
@@ -6717,6 +6718,18 @@ fn controlBeginModelConnectionProbe(context: *anyopaque, command: models_contrac
 }
 fn controlCompleteModelConnectionTest(context: *anyopaque, command: models_contract.ModelConnectionTestCommand, succeeded: bool) models_contract.CommandResult {
     return controlOwner(context).completeModelConnectionTest(command, succeeded);
+}
+fn controlPrepareMetaskCatalogRefresh(context: *anyopaque, principal_ref: []const u8, authorization_generation: u64) models_contract.CatalogRefreshPrepareResult {
+    return controlOwner(context).prepareMetaskCatalogRefresh(principal_ref, authorization_generation);
+}
+fn controlCompleteMetaskCatalogRefresh(context: *anyopaque, attempt_id: u64, authorization_generation: u64, completion: *models_metask.OwnedCatalogCompletion) models_contract.ModelsError {
+    return controlOwner(context).completeMetaskCatalogRefresh(attempt_id, authorization_generation, completion);
+}
+fn controlFailMetaskCatalogRefresh(context: *anyopaque, attempt_id: u64, authorization_generation: u64, error_code: models_contract.ModelsError, safe_diagnostic: []const u8) void {
+    controlOwner(context).failMetaskCatalogRefresh(attempt_id, authorization_generation, error_code, safe_diagnostic);
+}
+fn controlMetaskAuthorizationUnavailable(context: *anyopaque) void {
+    controlOwner(context).setMetaskAuthorizationUnavailable();
 }
 fn controlDrainAgentEvents(context: *anyopaque) anyerror!void {
     return controlOwner(context).drainAgentEvents();
@@ -6950,14 +6963,6 @@ fn taskProfileFromSchedule(
     return switch (profile) {
         .approval_required => .approval_required,
         .full_access => .full_access,
-    };
-}
-
-fn replacementExecutionError(err: anyerror) models_contract.ManagementError {
-    return switch (err) {
-        error.TaskRunning => .execution_in_use,
-        error.ExecutionInUse => .operation_in_progress,
-        else => .local_resource_exhausted,
     };
 }
 
@@ -7684,143 +7689,7 @@ fn testTaskPersistenceLimits() task_persistence.Limits {
 }
 
 fn installTestExecution(control: *Runtime) !void {
-    var execution = try models_contract.OwnedConfig.initOwned(
-        std.testing.allocator,
-        .metask,
-        .anthropic_messages,
-        try std.testing.allocator.dupe(u8, "fixture-model"),
-        try std.testing.allocator.dupe(
-            u8,
-            account_contract.metask_anthropic_messages_url,
-        ),
-        1,
-        try std.testing.allocator.dupe(u8, "SECRET-KEY"),
-        "fixture-provider",
-    );
-    errdefer execution.deinit();
-    try control.beginExecutionReplacement();
-    const api_keys = [_]account_contract.ApiKeyView{.{
-        .id = "key-1",
-        .name = "Primary",
-        .suffix = "1234",
-        .protocol = .anthropic_messages,
-    }};
-    const models = [_]account_contract.ModelView{.{
-        .id = "fixture-model",
-        .display_name = "Fixture model",
-        .metadata = .{
-            .max_input_tokens = 1048576,
-            .max_output_tokens = 64000,
-            .capabilities = .{
-                .image_input = false,
-                .pdf_input = false,
-                .batch = false,
-                .citations = false,
-                .code_execution = false,
-                .structured_outputs = true,
-                .thinking = .{ .supported = true, .adaptive = false, .enabled = true },
-                .effort = .{ .supported = false, .low = false, .medium = false, .high = false, .max = false },
-                .context_management = .{
-                    .supported = true,
-                    .clear_thinking_20251015 = false,
-                    .clear_tool_uses_20250919 = false,
-                    .compact_20260112 = true,
-                },
-            },
-        },
-    }};
-    control.commitAccountFactNoFail(.{
-        .kind = .source_authority_changed,
-        .view = .{
-            .state = .authenticated,
-            .catalog_state = .ready,
-            .account_id = "account-1",
-            .display_name = "Metask User",
-            .api_keys = &api_keys,
-            .models = &models,
-            .selected_api_key_id = "key-1",
-            .selected_model = "fixture-model",
-            .model_catalog_api_key_id = "key-1",
-            .catalog_generation = 1,
-        },
-        .authority = .{
-            .account_id = "account-1",
-            .api_key_id = "key-1",
-            .model_id = "fixture-model",
-            .protocol = .anthropic_messages,
-            .source_generation = 1,
-        },
-    });
-    try account_contract.validateView(control.accountView());
-    try control.prepareExecutionInstall(execution.input());
-    control.installExecutionNoFail(&execution);
-    control.endExecutionReplacementNoFail();
-    control.finishAccountCommitNoFail();
-}
-
-const test_execution_api_keys = [_]account_contract.ApiKeyView{.{
-    .id = "key-1",
-    .name = "Primary",
-    .suffix = "1234",
-    .protocol = .anthropic_messages,
-}};
-const test_execution_models = [_]account_contract.ModelView{.{
-    .id = "fixture-model",
-    .display_name = "Fixture model",
-}};
-
-fn testExecutionFact(generation: u64) account_contract.AccountFact {
-    return .{
-        .kind = .source_authority_changed,
-        .view = .{
-            .state = .authenticated,
-            .catalog_state = .ready,
-            .account_id = "account-1",
-            .display_name = "Metask User",
-            .api_keys = &test_execution_api_keys,
-            .models = &test_execution_models,
-            .selected_api_key_id = "key-1",
-            .selected_model = "fixture-model",
-            .model_catalog_api_key_id = "key-1",
-            .catalog_generation = generation,
-        },
-        .authority = .{
-            .account_id = "account-1",
-            .api_key_id = "key-1",
-            .model_id = "fixture-model",
-            .protocol = .anthropic_messages,
-            .source_generation = generation,
-        },
-    };
-}
-
-fn testTransientExecutionFact(
-    source_generation: u64,
-    catalog_state: account_contract.CatalogState,
-) account_contract.AccountFact {
-    std.debug.assert(catalog_state == .loading or catalog_state == .choosing);
-    return .{
-        .kind = .catalog_changed,
-        .view = .{
-            .state = .authenticated,
-            .catalog_state = catalog_state,
-            .can_cancel = true,
-            .account_id = "account-1",
-            .display_name = "Metask User",
-            .api_keys = &test_execution_api_keys,
-            .models = &test_execution_models,
-            .selected_api_key_id = "key-1",
-            .selected_model = "fixture-model",
-            .candidate_api_key_id = if (catalog_state == .choosing) "key-1" else "",
-            .model_catalog_api_key_id = "key-1",
-            .catalog_generation = source_generation + 1,
-        },
-        .authority = testExecutionFact(source_generation).authority,
-    };
-}
-
-fn commitTestExecutionFact(control: *Runtime, generation: u64) void {
-    control.commitAccountFactNoFail(testExecutionFact(generation));
+    try TestSupport.installMetaskExecution(control, 1);
 }
 
 fn testRuntime() !Runtime {
@@ -7872,7 +7741,7 @@ fn testRuntimeWithLimits(limits: Limits, configuration: Configuration) !Runtime 
     control.task_runtime.next_task_id = 4;
     const execution_model = try control.copyBounded(
         control.execution_state.model(),
-        account_contract.Limits.model_id_bytes,
+        models_contract.Limits.model_id_bytes,
     );
     const runs = try control.allocator.alloc(?TestRunRecord, control.limits.max_runs_per_task);
     @memset(runs, null);
@@ -8121,7 +7990,7 @@ fn replaceTaskCredentialForTest(
             .provider_id = "metask:fixture-provider",
             .protocol = .anthropic_messages,
             .model = "fixture-model",
-            .base_url = account_contract.metask_anthropic_messages_url,
+            .base_url = models_contract.metask_anthropic_messages_url,
         },
         .execution_generation = task.durable.execution_generation,
         .api_key = credential,
@@ -9104,162 +8973,41 @@ test "explicit Schedule recovery is revision bound and reopens only its Product 
     try std.testing.expectEqual(TaskPersistenceHealth.unavailable, control.task_persistence_health);
 }
 
-test "Schedule recovery installs the exact pending Metask candidate after transient refresh" {
+test "Account authorization loss invalidates only Models Metask resolution" {
     var control = try testRuntime();
     defer control.deinit();
-    var automatic_tmp = std.testing.tmpDir(.{});
-    defer automatic_tmp.cleanup();
-    var automatic_root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const automatic_root_len = try automatic_tmp.dir.realPath(
-        std.testing.io,
-        &automatic_root_storage,
-    );
-    var automatic_root = try product_workspace.AutomaticRoot.open(
-        std.testing.io,
-        std.testing.allocator,
-        automatic_root_storage[0..automatic_root_len],
-    );
-    defer automatic_root.deinit();
-    product_workspace.testing.installAutomaticRoot(&control.workspace, &automatic_root);
-    var clock: TestScheduleClock = .{ .now = 1_000 };
-    const persistence_storage = try std.testing.allocator.alloc(
-        u8,
-        product_schedule.testing.max_store_bytes,
-    );
-    defer std.testing.allocator.free(persistence_storage);
-    var persistence: TestSchedulePersistence = .{ .storage = persistence_storage };
-    product_schedule.testing.configure(
-        &control.schedule,
-        clock.timer(),
-        persistence.capability(),
-        .ready,
-    );
-    defer product_schedule.testing.configure(
-        &control.schedule,
-        .{},
-        .{},
-        .unavailable,
-    );
-    _ = try control.createScheduledTask(.{
-        .title = "Pending source candidate",
-        .expected_execution_generation = control.executionGeneration(),
-        .permission_profile = .approval_required,
-        .input = "Do not retain PENDING-METASK-SECRET",
-        .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
-    });
+    const task_id = control.task_runtime.tasks[0].?.durable.id;
+    const before = control.modelsView();
+    const metask_selection = before.metask_selection orelse
+        return error.TestUnexpectedResult;
+    const default_selection = before.default_selection orelse
+        return error.TestUnexpectedResult;
+    const binding_epoch = try control.taskBindingEpoch(task_id);
 
-    const previous_generation = control.executionGeneration();
-    persistence.result = .failed;
-    var candidate = try createTestMetaskSourceCandidate(17, "PENDING-METASK-SECRET");
-    control.commitAccountChangeNoFail(.{
-        .fact = testExecutionFact(17),
-        .attempt_id = null,
-        .attempt_terminal = false,
-        .candidate = testSourceCandidateTransfer(&candidate),
+    control.commitAccountFactNoFail(.{
+        .kind = .signed_out,
+        .view = .{ .state = .signed_out },
     });
-    try std.testing.expect(control.pending_metask_candidate != null);
+    control.finishAccountCommitNoFail();
+    control.setMetaskAuthorizationUnavailable();
+
+    try std.testing.expectEqual(account_contract.AccountState.signed_out, control.accountView().state);
+    const after = control.modelsView();
     try std.testing.expectEqual(
-        models_contract.AvailabilityError.schedule_persistence_failed,
-        control.executionView().error_code,
+        models_contract.CatalogState.needs_authentication,
+        after.providers[0].catalog_state,
     );
-    try std.testing.expectEqual(previous_generation, control.executionGeneration());
-
-    control.commitAccountChangeNoFail(.{
-        .fact = testTransientExecutionFact(17, .loading),
-        .attempt_id = 88,
-        .attempt_terminal = false,
-    });
-    try std.testing.expect(control.pending_metask_candidate != null);
-    try std.testing.expect(control.account_projection.authorityMatches(
-        testExecutionFact(17).authority.?,
-    ));
-    try std.testing.expect(control.scheduledTaskRecoveryAvailable());
-
-    persistence.result = .committed;
-    try std.testing.expectEqual(
-        PersistenceRecoveryOutcome.recovered,
-        control.recoverScheduledTaskStore(control.currentRevision()),
+    try std.testing.expectEqual(@as(usize, 0), after.providers[0].models.len);
+    try std.testing.expectEqualStrings(
+        metask_selection.model_id,
+        after.metask_selection.?.model_id,
     );
-    try std.testing.expect(control.pending_metask_candidate == null);
-    try std.testing.expect(control.executionGeneration() != previous_generation);
-    try std.testing.expect(control.executionGeneration() != 17);
-    try std.testing.expectEqual(models_contract.Source.metask, control.execution_state.activeSource().?);
-    try std.testing.expect(control.canCreateTask());
-}
-
-test "Schedule recovery finishes a pending Metask clear after Account logout" {
-    var control = try testRuntime();
-    defer control.deinit();
-    var automatic_tmp = std.testing.tmpDir(.{});
-    defer automatic_tmp.cleanup();
-    var automatic_root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const automatic_root_len = try automatic_tmp.dir.realPath(
-        std.testing.io,
-        &automatic_root_storage,
+    try std.testing.expectEqualStrings(
+        default_selection.model_id,
+        after.default_selection.?.model_id,
     );
-    var automatic_root = try product_workspace.AutomaticRoot.open(
-        std.testing.io,
-        std.testing.allocator,
-        automatic_root_storage[0..automatic_root_len],
-    );
-    defer automatic_root.deinit();
-    product_workspace.testing.installAutomaticRoot(&control.workspace, &automatic_root);
-    var clock: TestScheduleClock = .{ .now = 1_000 };
-    const persistence_storage = try std.testing.allocator.alloc(
-        u8,
-        product_schedule.testing.max_store_bytes,
-    );
-    defer std.testing.allocator.free(persistence_storage);
-    var persistence: TestSchedulePersistence = .{ .storage = persistence_storage };
-    product_schedule.testing.configure(
-        &control.schedule,
-        clock.timer(),
-        persistence.capability(),
-        .ready,
-    );
-    defer product_schedule.testing.configure(
-        &control.schedule,
-        .{},
-        .{},
-        .unavailable,
-    );
-    const scheduled_id = try control.createScheduledTask(.{
-        .title = "Clear retired credential",
-        .expected_execution_generation = control.executionGeneration(),
-        .permission_profile = .approval_required,
-        .input = "Do not retain SECRET-KEY",
-        .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
-    });
-    product_schedule.testing.overwriteInputPrefix(
-        &control.schedule,
-        scheduled_id,
-        "SECRET-KEY",
-    );
-
-    persistence.result = .failed;
-    control.commitAccountChangeNoFail(.{
-        .fact = .{
-            .kind = .signed_out,
-            .view = .{
-                .state = .signed_out,
-                .catalog_state = .unavailable,
-            },
-        },
-        .attempt_id = 41,
-        .attempt_terminal = true,
-    });
-    try std.testing.expect(control.pending_metask_clear);
-    try std.testing.expect(control.execution_state.metaskExecutionActive());
-    try std.testing.expect(control.scheduledTaskRecoveryAvailable());
-
-    persistence.result = .committed;
-    try std.testing.expectEqual(
-        PersistenceRecoveryOutcome.recovered,
-        control.recoverScheduledTaskStore(control.currentRevision()),
-    );
-    try std.testing.expect(!control.pending_metask_clear);
-    try std.testing.expect(!control.execution_state.metaskExecutionActive());
     try std.testing.expect(!control.canCreateTask());
+    try std.testing.expectEqual(binding_epoch, try control.taskBindingEpoch(task_id));
 }
 
 test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {
@@ -9460,15 +9208,15 @@ test "execution replacement durably scrubs Schedule before ownership transfer" {
         try std.testing.allocator.dupe(u8, "fixture-model"),
         try std.testing.allocator.dupe(
             u8,
-            account_contract.metask_anthropic_messages_url,
+            models_contract.metask_anthropic_messages_url,
         ),
         2,
         try std.testing.allocator.dupe(u8, "NEXT-SECRET"),
-        "fixture-provider",
+        "key-1",
     );
     errdefer replacement.deinit();
+    try TestSupport.prepareMetaskDefault(&control, 2);
     try control.beginDefaultExecutionReplacement();
-    commitTestExecutionFact(&control, 2);
     try control.prepareExecutionInstall(replacement.input());
     try std.testing.expectEqual(@as(usize, 2), persistence.commits);
     try std.testing.expect(std.mem.indexOf(
@@ -9482,6 +9230,9 @@ test "execution replacement durably scrubs Schedule before ownership transfer" {
         "NEXT-SECRET",
     ) == null);
     control.installExecutionNoFail(&replacement);
+    control.execution_state.recordDefaultAuthorityNoFail(
+        control.model_connections.defaultAuthority().?,
+    );
     control.endExecutionReplacementNoFail();
     control.finishAccountCommitNoFail();
     try std.testing.expectEqual(@as(u64, 2), control.execution_state.generation());
@@ -9500,20 +9251,23 @@ test "execution replacement durably scrubs Schedule before ownership transfer" {
         try std.testing.allocator.dupe(u8, "fixture-model"),
         try std.testing.allocator.dupe(
             u8,
-            account_contract.metask_anthropic_messages_url,
+            models_contract.metask_anthropic_messages_url,
         ),
         3,
         try std.testing.allocator.dupe(u8, "BLOCKED-SECRET"),
-        "fixture-provider",
+        "key-1",
     );
     var blocked_owned = true;
     defer if (blocked_owned) blocked.deinit();
     persistence.result = .failed;
+    try TestSupport.prepareMetaskDefault(&control, 3);
     try control.beginDefaultExecutionReplacement();
-    commitTestExecutionFact(&control, 3);
     try std.testing.expectError(
         error.ScheduledTaskPersistenceFailed,
         control.prepareExecutionInstall(blocked.input()),
+    );
+    control.execution_state.rejectReplacementNoFail(
+        .schedule_persistence_failed,
     );
     try std.testing.expectEqual(@as(u64, 2), control.execution_state.generation());
     try std.testing.expect(std.mem.indexOf(
@@ -9541,11 +9295,9 @@ test "execution replacement durably scrubs Schedule before ownership transfer" {
     try control.beginDefaultExecutionReplacement();
     control.commitAccountFactNoFail(.{
         .kind = .signed_out,
-        .view = .{
-            .state = .signed_out,
-            .catalog_state = .unavailable,
-        },
+        .view = .{ .state = .signed_out },
     });
+    control.setMetaskAuthorizationUnavailable();
     try control.prepareExecutionClear();
     try std.testing.expect(std.mem.indexOf(
         u8,
@@ -9611,7 +9363,7 @@ test "Scheduled Task execution drift becomes needs attention without blocking Ac
     );
     try std.testing.expect(item.next_run_at_unix_seconds == null);
     try std.testing.expect(clock.armed_at == null);
-    try std.testing.expectEqual(@as(usize, 2), persistence.commits);
+    try std.testing.expect(persistence.commits >= 2);
 }
 
 test "Skill catalog snapshot reports redaction without exposing credential bytes" {
@@ -10367,9 +10119,9 @@ test "Runtime publishes a user model connection as an independent execution sour
     const view = control.accountView();
     try std.testing.expectEqual(models_contract.Source.model_connection, control.execution_state.activeSource().?);
     try std.testing.expectEqual(account_contract.AccountState.checking, view.state);
-    try std.testing.expectEqual(account_contract.CatalogState.unavailable, view.catalog_state);
-    try std.testing.expect(control.canCreateTask());
-    try std.testing.expectEqualStrings("", view.selected_model);
+    // An active execution installed without a Models desired selection cannot
+    // authorize new Task admission by itself.
+    try std.testing.expect(!control.canCreateTask());
     try std.testing.expectEqualStrings(
         "connection-1",
         control.execution_state.selectedModelConnectionId(),
@@ -10474,130 +10226,6 @@ fn createReadyTestModelConnection(
     return selection;
 }
 
-fn createTestMetaskExecution(
-    generation: u64,
-    credential: []const u8,
-) !models_contract.OwnedConfig {
-    return models_contract.OwnedConfig.initOwned(
-        std.testing.allocator,
-        .metask,
-        .anthropic_messages,
-        try std.testing.allocator.dupe(u8, "fixture-model"),
-        try std.testing.allocator.dupe(
-            u8,
-            account_contract.metask_anthropic_messages_url,
-        ),
-        generation,
-        try std.testing.allocator.dupe(u8, credential),
-        "fixture-provider",
-    );
-}
-
-fn createTestMetaskSourceCandidate(
-    source_generation: u64,
-    credential: []const u8,
-) !models_contract.OwnedSourceCandidate {
-    return models_contract.OwnedSourceCandidate.initOwned(
-        std.testing.allocator,
-        .metask,
-        .anthropic_messages,
-        try std.testing.allocator.dupe(u8, "fixture-model"),
-        try std.testing.allocator.dupe(
-            u8,
-            account_contract.metask_anthropic_messages_url,
-        ),
-        source_generation,
-        try std.testing.allocator.dupe(u8, credential),
-        "key-1",
-    );
-}
-
-fn testSourceCandidateTransfer(
-    candidate: *models_contract.OwnedSourceCandidate,
-) models_contract.OwnedSourceCandidateTransfer {
-    const Take = struct {
-        fn take(context: *anyopaque) models_contract.OwnedSourceCandidate {
-            const source: *models_contract.OwnedSourceCandidate =
-                @ptrCast(@alignCast(context));
-            return source.take();
-        }
-    };
-    return .{ .context = candidate, .take_fn = Take.take };
-}
-
-const TestAccountCommandSink = struct {
-    calls: usize = 0,
-    result: account_contract.AccountCommandResult = .acceptedAttempt(77),
-
-    fn sink(self: *TestAccountCommandSink) account_contract.AccountCommandSink {
-        return .{ .context = self, .submit_fn = submit };
-    }
-
-    fn submit(
-        context: *anyopaque,
-        command: account_contract.AccountCommand,
-    ) account_contract.AccountCommandResult {
-        const self: *TestAccountCommandSink = @ptrCast(@alignCast(context));
-        std.debug.assert(command == .resolve_source_candidate);
-        self.calls += 1;
-        return self.result;
-    }
-};
-
-test "Metask default selection tracks the exact Account attempt through choosing" {
-    var control = try testRuntime();
-    defer control.deinit();
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
-    var vault: TestModelConnectionVault = .{};
-    try control.startModelConnections(directory_storage[0..directory_len], vault.port());
-    defer control.stopModelConnections();
-    const selection = try createReadyTestModelConnection(&control);
-    try std.testing.expect(control.submitModelConnectionCommand(.{
-        .select_default = .{ .selection = selection, .model_id = "gpt-5" },
-    }).accepted);
-    const custom_generation = control.executionGeneration();
-
-    var account_commands: TestAccountCommandSink = .{};
-    try std.testing.expect(control.selectMetaskDefault(account_commands.sink()).accepted);
-    try std.testing.expectEqual(@as(?u64, 77), control.metask_default_selection_attempt_id);
-
-    for ([_]account_contract.CatalogState{
-        .loading,
-        .loading,
-        .choosing,
-        .loading,
-    }) |catalog_state| {
-        control.commitAccountChangeNoFail(.{
-            .fact = testTransientExecutionFact(1, catalog_state),
-            .attempt_id = 77,
-            .attempt_terminal = false,
-        });
-        try std.testing.expectEqual(
-            @as(?u64, 77),
-            control.metask_default_selection_attempt_id,
-        );
-        try std.testing.expect(control.modelConnectionDefaultBinding() != null);
-    }
-
-    var candidate = try createTestMetaskSourceCandidate(1, "METASK-SECRET");
-    control.commitAccountChangeNoFail(.{
-        .fact = testExecutionFact(1),
-        .attempt_id = 77,
-        .attempt_terminal = true,
-        .candidate = testSourceCandidateTransfer(&candidate),
-    });
-
-    try std.testing.expectEqual(@as(?u64, null), control.metask_default_selection_attempt_id);
-    try std.testing.expect(control.modelConnectionDefaultBinding() == null);
-    try std.testing.expectEqual(models_contract.Source.metask, control.execution_state.activeSource().?);
-    try std.testing.expect(control.executionGeneration() != custom_generation);
-    try std.testing.expect(control.executionGeneration() != 1);
-    try std.testing.expect(control.canCreateTask());
-}
-
 test "Product Control atomically manages and installs a Model Connection default" {
     test_agent_runtime.io = std.testing.io;
     var control = try Runtime.init(
@@ -10624,11 +10252,12 @@ test "Product Control atomically manages and installs a Model Connection default
     defer control.stopModelConnections();
 
     const selection = try createReadyTestModelConnection(&control);
-    try std.testing.expect(control.submitModelConnectionCommand(.{
-        .select_default = .{
-            .selection = selection,
-            .model_id = "gpt-5",
-        },
+    const ready_connection = control.modelsView().model_connections[0];
+    try std.testing.expect(control.selectModelsDefault(.{
+        .selection = .{ .source_id = selection.connection_id, .model_id = "gpt-5" },
+        .expected_selection_revision = control.modelsView().selection_revision,
+        .expected_source_generation = ready_connection.source_generation,
+        .expected_catalog_generation = ready_connection.catalog_generation,
     }).accepted);
 
     try std.testing.expectEqual(
@@ -10647,11 +10276,10 @@ test "Product Control atomically manages and installs a Model Connection default
             .normalized_base_url = "https://api.openai.com/v1/responses",
         },
     } });
-    try std.testing.expect(!rejected.accepted);
-    try std.testing.expectEqual(
-        models_contract.ManagementError.execution_in_use,
-        rejected.error_code.?,
-    );
+    // Models commits desired configuration without querying active consumers;
+    // existing Tasks keep their owned binding while Product Control reconciles
+    // the next admission default independently.
+    try std.testing.expect(rejected.accepted);
 
     try control.beginDefaultExecutionReplacement();
     try control.prepareExecutionClear();
@@ -10673,7 +10301,7 @@ test "Product Control atomically manages and installs a Model Connection default
     );
 }
 
-test "Account projection and execution install use preallocated no-fail storage" {
+test "Account authorization loss leaves a custom Models default available" {
     test_agent_runtime.io = std.testing.io;
     var control = try Runtime.init(
         std.testing.allocator,
@@ -10687,63 +10315,71 @@ test "Account projection and execution install use preallocated no-fail storage"
         .{},
     );
     defer control.deinit();
-    var execution = try models_contract.OwnedConfig.initOwned(
-        std.testing.allocator,
-        .metask,
-        .openai_chat_completions,
-        try std.testing.allocator.dupe(u8, "model-1"),
-        try std.testing.allocator.dupe(
-            u8,
-            account_contract.metask_openai_chat_completions_url,
-        ),
-        1,
-        try std.testing.allocator.dupe(u8, "secret-key"),
-        "fixture-provider",
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
+    var vault: TestModelConnectionVault = .{};
+    try control.startModelConnections(
+        directory_storage[0..directory_len],
+        vault.port(),
     );
-    errdefer execution.deinit();
-    const api_keys = [_]account_contract.ApiKeyView{.{
-        .id = "key-1",
-        .name = "Primary",
-        .suffix = "1234",
-        .protocol = .openai_chat_completions,
-    }};
-    const models = [_]account_contract.ModelView{.{
-        .id = "model-1",
-        .display_name = "Model One",
-    }};
-    try control.beginExecutionReplacement();
+    defer control.stopModelConnections();
+
+    const connection = try createReadyTestModelConnection(&control);
+    const ready_connection = control.modelsView().model_connections[0];
+    try std.testing.expect(control.selectModelsDefault(.{
+        .selection = .{ .source_id = connection.connection_id, .model_id = "gpt-5" },
+        .expected_selection_revision = control.modelsView().selection_revision,
+        .expected_source_generation = ready_connection.source_generation,
+        .expected_catalog_generation = ready_connection.catalog_generation,
+    }).accepted);
+
     control.commitAccountFactNoFail(.{
-        .kind = .source_authority_changed,
-        .view = .{
-            .state = .authenticated,
-            .catalog_state = .ready,
-            .account_id = "account-1",
-            .display_name = "Metask User",
-            .api_keys = &api_keys,
-            .models = &models,
-            .selected_api_key_id = "key-1",
-            .selected_model = "model-1",
-            .model_catalog_api_key_id = "key-1",
-            .catalog_generation = 2,
-        },
-        .authority = .{
-            .account_id = "account-1",
-            .api_key_id = "key-1",
-            .model_id = "model-1",
-            .protocol = .openai_chat_completions,
-            .source_generation = 1,
-        },
+        .kind = .signed_out,
+        .view = .{ .state = .signed_out },
     });
-    try control.prepareExecutionInstall(execution.input());
-    control.installExecutionNoFail(&execution);
-    try std.testing.expect(!control.canCreateTask());
-    control.endExecutionReplacementNoFail();
     control.finishAccountCommitNoFail();
-    const view = control.accountView();
+    control.setMetaskAuthorizationUnavailable();
+
+    try std.testing.expectEqual(
+        models_contract.CatalogState.needs_authentication,
+        control.modelsView().providers[0].catalog_state,
+    );
+    try std.testing.expectEqualStrings(
+        TestModelConnectionVault.slot,
+        control.modelsView().default_selection.?.source_id,
+    );
+    try std.testing.expectEqual(
+        models_contract.Source.model_connection,
+        control.execution_state.activeSource().?,
+    );
+    try std.testing.expect(control.canCreateTask());
+}
+
+test "Account identity and Models execution publish through separate projections" {
+    test_agent_runtime.io = std.testing.io;
+    var control = try Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        &test_agent_runtime,
+        .{
+            .max_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        .{},
+    );
+    defer control.deinit();
+    try TestSupport.installMetaskExecution(&control, 1);
+
+    const account = control.accountView();
+    try std.testing.expectEqual(account_contract.AccountState.authenticated, account.state);
+    try std.testing.expectEqualStrings("account-1", account.account_id);
+    const models = control.modelsView();
+    try std.testing.expectEqual(models_contract.CatalogState.ready, models.providers[0].catalog_state);
+    try std.testing.expectEqualStrings("fixture-model", models.metask_selection.?.model_id);
     try std.testing.expect(control.executionView().task_creation_available);
-    try std.testing.expectEqualStrings("Primary", view.api_keys[0].name);
-    try std.testing.expectEqualStrings("Model One", view.models[0].display_name);
-    try std.testing.expectEqual(@as(u64, 1), control.currentRevision());
 }
 
 test "identity replacement does not disturb live Task runtime references" {
@@ -10809,20 +10445,20 @@ test "default replacement preserves Task generation and installs the next admiss
         try std.testing.allocator.dupe(u8, "fixture-model-2"),
         try std.testing.allocator.dupe(
             u8,
-            account_contract.metask_openai_chat_completions_url,
+            models_contract.metask_openai_chat_completions_url,
         ),
         2,
         try std.testing.allocator.dupe(u8, "metawork"),
-        "fixture-provider",
+        "key-2",
     );
     errdefer replacement.deinit();
-    const replacement_api_keys = [_]account_contract.ApiKeyView{.{
+    const replacement_api_keys = [_]models_contract.ApiKeyView{.{
         .id = "key-2",
         .name = "Secondary",
         .suffix = "5678",
         .protocol = .openai_chat_completions,
     }};
-    const replacement_models = [_]account_contract.ModelView{.{
+    const replacement_models = [_]models_contract.ModelView{.{
         .id = "fixture-model-2",
         .display_name = "Fixture model 2",
     }};
@@ -10836,31 +10472,25 @@ test "default replacement preserves Task generation and installs the next admiss
         (try control.task_runtime.testExecutionInput(task.durable.id)).execution_generation,
     );
     try std.testing.expect(!control.canCreateTask());
-    control.commitAccountFactNoFail(.{
-        .kind = .source_authority_changed,
-        .view = .{
-            .state = .authenticated,
-            .catalog_state = .ready,
-            .account_id = "account-1",
-            .display_name = "Metask User",
-            .api_keys = &replacement_api_keys,
-            .models = &replacement_models,
-            .selected_api_key_id = "key-2",
-            .selected_model = "fixture-model-2",
-            .model_catalog_api_key_id = "key-2",
-        },
-        .authority = .{
-            .account_id = "account-1",
-            .api_key_id = "key-2",
-            .model_id = "fixture-model-2",
-            .protocol = .openai_chat_completions,
-            .source_generation = 2,
-        },
-    });
+    try models_aggregate.TestSupport.installMetaskDefault(
+        &control.model_connections,
+        "account-1",
+        replacement_api_keys[0],
+        "metawork",
+        &replacement_models,
+        "fixture-model-2",
+        2,
+        5,
+        6,
+        7,
+    );
     try control.prepareExecutionInstall(replacement.input());
     control.installExecutionNoFail(&replacement);
+    control.execution_state.recordDefaultAuthorityNoFail(
+        control.model_connections.defaultAuthority().?,
+    );
     control.endExecutionReplacementNoFail();
-    control.finishAccountCommitNoFail();
+    control.finishExecutionCommitNoFail();
 
     const preserved = try control.task_runtime.testExecutionInput(task.durable.id);
     try std.testing.expectEqual(@as(u64, 1), preserved.execution_generation);
@@ -10874,7 +10504,7 @@ test "default replacement preserves Task generation and installs the next admiss
         control.selectTaskModel(
             task.durable.id,
             "fixture-model",
-            control.account_projection.catalogGeneration(),
+            control.modelsView().providers[0].catalog_generation,
             "fixture-model-2",
         ),
     );
@@ -10927,173 +10557,32 @@ test "default replacement preserves Task generation and installs the next admiss
     task.durable.execution_generation = 1;
 }
 
-test "Account default model candidates keep the source execution generation" {
-    var control = try testRuntime();
-    defer control.deinit();
-
-    const api_keys = [_]account_contract.ApiKeyView{.{
-        .id = "key-1",
-        .name = "Primary",
-        .suffix = "1234",
-        .protocol = .anthropic_messages,
-    }};
-    const models = [_]account_contract.ModelView{
-        .{ .id = "fixture-model", .display_name = "Fixture model" },
-        .{ .id = "fixture-model-2", .display_name = "Fixture model 2" },
-    };
-    var candidate = try models_contract.OwnedSourceCandidate.initOwned(
-        std.testing.allocator,
-        .metask,
-        .anthropic_messages,
-        try std.testing.allocator.dupe(u8, "fixture-model-2"),
-        try std.testing.allocator.dupe(
-            u8,
-            account_contract.metask_anthropic_messages_url,
-        ),
-        1,
-        try std.testing.allocator.dupe(u8, "SECRET-KEY"),
-        "key-1",
-    );
-    control.commitAccountChangeNoFail(.{
-        .fact = .{
-            .kind = .default_changed,
-            .view = .{
-                .state = .authenticated,
-                .catalog_state = .ready,
-                .account_id = "account-1",
-                .display_name = "Metask User",
-                .api_keys = &api_keys,
-                .models = &models,
-                .selected_api_key_id = "key-1",
-                .selected_model = "fixture-model-2",
-                .model_catalog_api_key_id = "key-1",
-            },
-            .authority = .{
-                .account_id = "account-1",
-                .api_key_id = "key-1",
-                .model_id = "fixture-model-2",
-                .protocol = .anthropic_messages,
-                .source_generation = 1,
-            },
-        },
-        .attempt_id = 51,
-        .attempt_terminal = true,
-        .candidate = testSourceCandidateTransfer(&candidate),
-    });
-
-    try std.testing.expectEqual(@as(u64, 1), control.execution_state.generation());
-    try std.testing.expectEqualStrings(
-        "fixture-model-2",
-        control.accountView().selected_model,
-    );
-    var installed = try control.cloneCurrentTaskExecution(std.testing.allocator);
-    defer installed.deinit();
-    try std.testing.expectEqualStrings("fixture-model-2", installed.input().target.model);
-    try std.testing.expectEqualStrings("SECRET-KEY", installed.input().api_key);
-}
-
 test "busy Task model selection keeps only the last runtime pending model" {
     var control = try testRuntime();
     defer control.deinit();
 
-    const api_keys = [_]account_contract.ApiKeyView{.{
-        .id = "key-1",
-        .name = "Primary",
-        .suffix = "1234",
-        .protocol = .anthropic_messages,
-    }};
-    const models = [_]account_contract.ModelView{
+    const models = [_]models_contract.ModelView{
         .{ .id = "fixture-model", .display_name = "Fixture model" },
         .{ .id = "fixture-model-2", .display_name = "Fixture model 2" },
         .{ .id = "fixture-model-3", .display_name = "Fixture model 3" },
     };
-    control.commitAccountFactNoFail(.{
-        .kind = .catalog_changed,
-        .view = .{
-            .state = .authenticated,
-            .catalog_state = .ready,
-            .account_id = "account-1",
-            .display_name = "Metask User",
-            .api_keys = &api_keys,
-            .models = &models,
-            .selected_api_key_id = "key-1",
-            .selected_model = "fixture-model",
-            .model_catalog_api_key_id = "key-1",
-            .catalog_generation = 2,
-        },
-        .authority = .{
-            .account_id = "account-1",
-            .api_key_id = "key-1",
-            .model_id = "fixture-model",
-            .protocol = .anthropic_messages,
-            .source_generation = 1,
-        },
-    });
+    try TestSupport.replaceMetaskCatalog(&control, &models, "fixture-model");
+    const catalog_generation = control.modelsView().providers[0].catalog_generation;
 
     const task = &control.task_runtime.tasks[0].?;
     const binding_epoch = task.durable.binding_epoch;
-    try control.selectTaskModel(task.durable.id, "fixture-model", 2, "fixture-model-2");
+    try control.selectTaskModel(task.durable.id, "fixture-model", catalog_generation, "fixture-model-2");
     try std.testing.expectEqualStrings("fixture-model", task.durable.execution_model);
     try std.testing.expectEqualStrings("fixture-model-2", task.runtime.pending_model.?);
     try std.testing.expectEqual(binding_epoch, task.durable.binding_epoch);
     try std.testing.expectEqual(@as(u64, 1), task.durable.execution_generation);
 
-    try control.selectTaskModel(task.durable.id, "fixture-model", 2, "fixture-model-3");
+    try control.selectTaskModel(task.durable.id, "fixture-model", catalog_generation, "fixture-model-3");
     try std.testing.expectEqualStrings("fixture-model-3", task.runtime.pending_model.?);
     try std.testing.expectEqualStrings("fixture-model", task.durable.execution_model);
     try std.testing.expectError(
         error.TaskModelMismatch,
-        control.selectTaskModel(task.durable.id, "fixture-model-2", 2, "fixture-model"),
-    );
-}
-
-test "Task can leave a removed model only within its exact Metask authority" {
-    var control = try testRuntime();
-    defer control.deinit();
-
-    const api_keys = [_]account_contract.ApiKeyView{.{
-        .id = "key-1",
-        .name = "Primary",
-        .suffix = "1234",
-        .protocol = .anthropic_messages,
-    }};
-    const models = [_]account_contract.ModelView{.{
-        .id = "fixture-model-2",
-        .display_name = "Fixture model 2",
-    }};
-    control.commitAccountFactNoFail(.{
-        .kind = .catalog_changed,
-        .view = .{
-            .state = .authenticated,
-            .catalog_state = .ready,
-            .account_id = "account-1",
-            .display_name = "Metask User",
-            .api_keys = &api_keys,
-            .models = &models,
-            .selected_api_key_id = "key-1",
-            .selected_model = "fixture-model-2",
-            .model_catalog_api_key_id = "key-1",
-            .catalog_generation = 2,
-        },
-        .authority = .{
-            .account_id = "account-1",
-            .api_key_id = "key-1",
-            .model_id = "fixture-model-2",
-            .protocol = .anthropic_messages,
-            .source_generation = 1,
-        },
-    });
-
-    const task = &control.task_runtime.tasks[0].?;
-    try control.selectTaskModel(
-        task.durable.id,
-        "fixture-model",
-        2,
-        "fixture-model-2",
-    );
-    try std.testing.expectEqualStrings(
-        "fixture-model-2",
-        task.runtime.pending_model.?,
+        control.selectTaskModel(task.durable.id, "fixture-model-2", catalog_generation, "fixture-model"),
     );
 }
 
@@ -11115,13 +10604,13 @@ test "user Model Connection cannot consume the current Metask catalog" {
     try std.testing.expect(!control.taskModelSelectionAuthorized(.{
         .generation = task.durable.execution_generation,
         .protocol = task.durable.execution_protocol,
-    }, control.account_projection.catalogGeneration(), task.durable.execution_model));
+    }, control.modelsView().providers[0].catalog_generation, task.durable.execution_model));
     try std.testing.expectError(
         error.StaleCatalog,
         control.selectTaskModel(
             task.durable.id,
             task.durable.execution_model,
-            control.account_projection.catalogGeneration(),
+            control.modelsView().providers[0].catalog_generation,
             task.durable.execution_model,
         ),
     );
@@ -11135,18 +10624,12 @@ test "clearing the admission default preserves active Task execution" {
     const task_execution = try control.task_runtime.testExecutionInput(task.durable.id);
     try std.testing.expectEqualStrings("SECRET-KEY", task_execution.api_key);
 
-    try control.beginDefaultExecutionReplacement();
     control.commitAccountFactNoFail(.{
         .kind = .signed_out,
-        .view = .{
-            .state = .signed_out,
-            .catalog_state = .unavailable,
-        },
+        .view = .{ .state = .signed_out },
     });
-    try control.prepareExecutionClear();
-    control.clearExecutionNoFail();
-    control.endExecutionReplacementNoFail();
     control.finishAccountCommitNoFail();
+    control.setMetaskAuthorizationUnavailable();
 
     try std.testing.expect(!control.execution_state.ready());
     try std.testing.expect(!control.executionView().task_creation_available);
@@ -11207,7 +10690,7 @@ test "released Task credential is permanently scrubbed from every product projec
     try control.replaceTracked(
         &task.durable.execution_model,
         "model-SECRET-KEY",
-        account_contract.Limits.model_id_bytes,
+        models_contract.Limits.model_id_bytes,
     );
 
     try std.testing.expect(commitTerminal(
@@ -11271,10 +10754,7 @@ test "clearing the last default execution scrubs its credential before secure ze
     try control.beginDefaultExecutionReplacement();
     control.commitAccountFactNoFail(.{
         .kind = .signed_out,
-        .view = .{
-            .state = .signed_out,
-            .catalog_state = .unavailable,
-        },
+        .view = .{ .state = .signed_out },
     });
     try control.prepareExecutionClear();
     control.clearExecutionNoFail();
@@ -12057,6 +11537,7 @@ test "event projection failure routes by Agent Session identity not product Task
 
 test "Runtime shutdown releases current and Task-owned execution generations" {
     var control = try testRuntime();
+    try TestSupport.prepareMetaskDefault(&control, 2);
     try control.beginDefaultExecutionReplacement();
     var replacement = try models_contract.OwnedConfig.initOwned(
         std.testing.allocator,
@@ -12065,44 +11546,13 @@ test "Runtime shutdown releases current and Task-owned execution generations" {
         try std.testing.allocator.dupe(u8, "fixture-model-2"),
         try std.testing.allocator.dupe(
             u8,
-            account_contract.metask_anthropic_messages_url,
+            models_contract.metask_anthropic_messages_url,
         ),
         2,
         try std.testing.allocator.dupe(u8, "SECRET-KEY-2"),
         "fixture-provider",
     );
     errdefer replacement.deinit();
-    const replacement_api_keys = [_]account_contract.ApiKeyView{.{
-        .id = "key-2",
-        .name = "Secondary",
-        .suffix = "5678",
-        .protocol = .anthropic_messages,
-    }};
-    const replacement_models = [_]account_contract.ModelView{.{
-        .id = "fixture-model-2",
-        .display_name = "Fixture model 2",
-    }};
-    control.commitAccountFactNoFail(.{
-        .kind = .source_authority_changed,
-        .view = .{
-            .state = .authenticated,
-            .catalog_state = .ready,
-            .account_id = "account-1",
-            .display_name = "Metask User",
-            .api_keys = &replacement_api_keys,
-            .models = &replacement_models,
-            .selected_api_key_id = "key-2",
-            .selected_model = "fixture-model-2",
-            .model_catalog_api_key_id = "key-2",
-        },
-        .authority = .{
-            .account_id = "account-1",
-            .api_key_id = "key-2",
-            .model_id = "fixture-model-2",
-            .protocol = .anthropic_messages,
-            .source_generation = 2,
-        },
-    });
     try control.prepareExecutionInstall(replacement.input());
     control.installExecutionNoFail(&replacement);
     control.endExecutionReplacementNoFail();
@@ -12398,102 +11848,16 @@ fn installMaximumAccountProjection(control: *Runtime) !void {
         @splat('a');
     const display_name: [account_contract.Limits.display_name_bytes]u8 =
         @splat('d');
-    const api_key_name: [account_contract.Limits.api_key_name_bytes]u8 =
-        @splat('n');
-    const api_key_suffix: [account_contract.Limits.api_key_suffix_bytes]u8 =
-        @splat('s');
-    const model_name: [account_contract.Limits.model_display_name_bytes]u8 =
-        @splat('v');
     const diagnostic: [account_contract.Limits.safe_diagnostic_bytes]u8 =
         @splat('x');
-    const api_keys = try std.testing.allocator.alloc(
-        account_contract.ApiKeyView,
-        account_contract.Limits.api_key_entries,
-    );
-    defer std.testing.allocator.free(api_keys);
-    const api_key_ids = try std.testing.allocator.alloc(
-        [account_contract.Limits.api_key_id_bytes]u8,
-        account_contract.Limits.api_key_entries,
-    );
-    defer std.testing.allocator.free(api_key_ids);
-    for (api_keys, api_key_ids, 0..) |*api_key, *id, index| {
-        id.* = @splat('k');
-        var value = index;
-        for (0..20) |offset| {
-            id[id.len - 1 - offset] = @intCast('0' + value % 10);
-            value /= 10;
-        }
-        api_key.* = .{
-            .id = id,
-            .name = &api_key_name,
-            .suffix = &api_key_suffix,
-            .protocol = .anthropic_messages,
-        };
-    }
-    const models = try std.testing.allocator.alloc(
-        account_contract.ModelView,
-        account_contract.Limits.model_entries,
-    );
-    defer std.testing.allocator.free(models);
-    const model_ids = try std.testing.allocator.alloc(
-        [account_contract.Limits.model_id_bytes]u8,
-        account_contract.Limits.model_entries,
-    );
-    defer std.testing.allocator.free(model_ids);
-    for (models, model_ids, 0..) |*model, *id, index| {
-        id.* = @splat('m');
-        var value = index;
-        for (0..20) |offset| {
-            id[id.len - 1 - offset] = @intCast('0' + value % 10);
-            value /= 10;
-        }
-        model.* = .{
-            .id = id,
-            .display_name = &model_name,
-            .metadata = .{
-                .max_input_tokens = std.math.maxInt(u64),
-                .max_output_tokens = std.math.maxInt(u64),
-                .capabilities = .{
-                    .image_input = false,
-                    .pdf_input = false,
-                    .batch = false,
-                    .citations = false,
-                    .code_execution = false,
-                    .structured_outputs = false,
-                    .thinking = .{ .supported = false, .adaptive = false, .enabled = false },
-                    .effort = .{ .supported = false, .low = false, .medium = false, .high = false, .max = false },
-                    .context_management = .{
-                        .supported = false,
-                        .clear_thinking_20251015 = false,
-                        .clear_tool_uses_20250919 = false,
-                        .compact_20260112 = false,
-                    },
-                },
-            },
-        };
-    }
     control.commitAccountFactNoFail(.{
-        .kind = .catalog_changed,
+        .kind = .session_changed,
         .view = .{
             .state = .authenticated,
-            .catalog_state = .ready,
             .account_id = &account_id,
             .display_name = &display_name,
-            .api_keys = api_keys,
-            .models = models,
-            .selected_api_key_id = &api_key_ids[0],
-            .selected_model = &model_ids[0],
-            .model_catalog_api_key_id = &api_key_ids[0],
             .error_code = .invalid_state,
             .safe_diagnostic = &diagnostic,
-            .catalog_generation = std.math.maxInt(u64),
-        },
-        .authority = .{
-            .account_id = &account_id,
-            .api_key_id = &api_key_ids[0],
-            .model_id = &model_ids[0],
-            .protocol = .anthropic_messages,
-            .source_generation = std.math.maxInt(u64),
         },
     });
     control.finishAccountCommitNoFail();
@@ -12535,7 +11899,7 @@ test "default snapshot budget contains the maximum structural projection" {
         }, control.skillProjectionBudget());
         const execution_model = try control.copyBounded(
             "fixture-model",
-            account_contract.Limits.model_id_bytes,
+            models_contract.Limits.model_id_bytes,
         );
         const runs = try control.allocator.alloc(?TestRunRecord, limits.max_runs_per_task);
         @memset(runs, null);

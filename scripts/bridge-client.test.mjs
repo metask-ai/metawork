@@ -316,13 +316,13 @@ test("MCP management uses only typed revision 1 commands", async () => {
   ]);
 });
 
-test("the fixed revision 1 contract keeps Account selection separate from Product execution identity", async () => {
+test("the fixed revision 1 contract keeps Models selection separate from Product execution identity", async () => {
   const calls = [];
   const client = new BridgeClient({
     bridge: bridgeWith(async (command, payload) => {
       calls.push({ command, payload });
-      if (command === "metawork.account.selectModel")
-        return { accepted: true, errorCode: "none", attemptId: "5" };
+      if (command === "metawork.models.configureMetaskSelection")
+        return { accepted: true, errorCode: "none", attemptId: null };
       if (command === "metawork.tasks.create")
         return {
           accepted: true,
@@ -375,7 +375,12 @@ test("the fixed revision 1 contract keeps Account selection separate from Produc
     }),
   });
 
-  await client.selectModel("model-3", "19");
+  await client.configureMetaskSelection({
+    sourceId: "metask:key-1",
+    modelId: "model-3",
+    expectedMetaskSelectionRevision: "17",
+    expectedCatalogGeneration: "19",
+  });
   assert.deepEqual(
     await client.createTask(
       {
@@ -457,9 +462,11 @@ test("the fixed revision 1 contract keeps Account selection separate from Produc
   });
   assert.deepEqual(calls, [
     {
-      command: "metawork.account.selectModel",
+      command: "metawork.models.configureMetaskSelection",
       payload: {
-        selectionId: "model-3",
+        sourceId: "metask:key-1",
+        modelId: "model-3",
+        expectedMetaskSelectionRevision: "17",
         expectedCatalogGeneration: "19",
       },
     },

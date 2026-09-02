@@ -3,89 +3,17 @@ const std = @import("std");
 const contract = @import("metawork_account_contract");
 const state = @import("account_state");
 const oauth = @import("account_oauth");
+const transport_api = @import("metask_transport");
 
-pub const api_keys_url =
-    "https://napi.metask-ai.com/api/v1/keys?page=1&page_size=100";
-pub const models_url = "https://napi.metask-ai.com/v1/models";
 pub const current_user_url = "https://napi.metask-ai.com/api/v1/auth/me";
 
-pub const RequestKind = enum {
-    exchange_code,
-    refresh_token,
-    current_user,
-    keys,
-    models,
-};
-
-pub const Request = struct {
-    kind: RequestKind,
-    body: []const u8 = "",
-    bearer: ?[]const u8 = null,
-    control: ?RequestControl = null,
-};
-
-pub const Response = struct {
-    status: u16,
-    body: []const u8,
-};
-
-pub const TransportError = error{
-    NetworkFailed,
-    ResponseTooLarge,
-    ProtocolFailed,
-    Cancelled,
-    DeadlineExceeded,
-};
-
-pub const Cancellation = struct {
-    io: std.Io,
-    state: std.atomic.Value(u32) = .init(0),
-
-    pub fn init(io: std.Io) Cancellation {
-        return .{ .io = io };
-    }
-
-    pub fn cancel(self: *Cancellation) void {
-        self.state.store(1, .release);
-        self.io.futexWake(u32, &self.state.raw, std.math.maxInt(u32));
-    }
-
-    pub fn isCancelled(self: *const Cancellation) bool {
-        return self.state.load(.acquire) != 0;
-    }
-
-    pub fn wait(self: *const Cancellation) void {
-        while (!self.isCancelled()) {
-            self.io.futexWait(
-                u32,
-                &self.state.raw,
-                0,
-            ) catch return;
-        }
-    }
-};
-
-pub const RequestControl = struct {
-    cancellation: *const Cancellation,
-    deadline: std.Io.Clock.Timestamp,
-};
-
-pub const Transport = struct {
-    context: *anyopaque,
-    perform_fn: *const fn (
-        context: *anyopaque,
-        request: Request,
-        response_buffer: []u8,
-    ) TransportError!Response,
-
-    pub fn perform(
-        self: Transport,
-        request: Request,
-        response_buffer: []u8,
-    ) TransportError!Response {
-        return self.perform_fn(self.context, request, response_buffer);
-    }
-};
+pub const RequestKind = transport_api.RequestKind;
+pub const Request = transport_api.Request;
+pub const Response = transport_api.Response;
+pub const TransportError = transport_api.TransportError;
+pub const Cancellation = transport_api.Cancellation;
+pub const RequestControl = transport_api.RequestControl;
+pub const Transport = transport_api.Transport;
 
 pub const ClientError = error{
     OAuthExchangeFailed,

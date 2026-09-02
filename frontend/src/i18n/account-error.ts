@@ -3,10 +3,6 @@ import type { MessageId, useI18n } from "./context.ts";
 
 export function accountErrorMessageId(code: AccountErrorCode): MessageId {
   switch (code) {
-    case "no_api_keys":
-      return "account.error.no_api_keys";
-    case "no_models":
-      return "account.error.no_models";
     case "deadline_exceeded":
       return "account.error.deadline";
     case "oauth_browser_open_failed":

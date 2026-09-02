@@ -619,6 +619,7 @@ export default function App() {
   const hasTasks = snapshot.tasks.length !== 0;
   const accountSurface = accountSurfacePolicy(
     snapshot.account,
+    snapshot.models,
     snapshot.execution,
     hasTasks,
   );
@@ -713,12 +714,20 @@ export default function App() {
     (composerDraft.kind === "text" || !skillCatalogBusy) &&
     !taskMutationDisabled &&
     !workspaceBusy;
-  const selectedModel = snapshot.account.models.find(
-    (model) => model.selectionId === snapshot.account.selectedModelSelectionId,
+  const metaskProvider = snapshot.models.providers.find(
+    (provider) => provider.id === "metask",
   );
-  const activeModelConnection = snapshot.execution.modelConnections.find(
+  const metaskModelOptions = (metaskProvider?.models ?? []).map((model) => ({
+    selectionId: model.id,
+    displayName: model.displayName,
+    metadata: model.metadata,
+  }));
+  const selectedModel = metaskProvider?.models.find(
+    (model) => model.id === snapshot.models.metaskSelection?.modelId,
+  );
+  const activeModelConnection = snapshot.models.connections.find(
     (connection) =>
-      connection.id === snapshot.execution.selectedModelConnectionId,
+      connection.id === snapshot.models.defaultSelection?.sourceId,
   );
   const customModelId = activeModelConnection?.selectedModel ?? "";
   const customModelConnectionSelected =
@@ -741,36 +750,34 @@ export default function App() {
     : [];
   const newTaskModelOptions = customModelConnectionSelected
     ? customModelOptions
-    : snapshot.account.models;
+    : metaskModelOptions;
   const selectedModelLabel = customModelConnectionSelected
     ? customModelOptions.find((model) => model.selectionId === customModelId)
         ?.displayName || customModelId
     : selectedModel?.displayName ||
-      selectedModel?.selectionId ||
+      selectedModel?.id ||
       t("account.choose_model");
   const selectedModelId = customModelConnectionSelected
     ? customModelId
-    : selectedModel?.selectionId || "";
+    : selectedModel?.id || "";
   const taskModelId = activeTask?.binding.model ?? "";
   const pendingTaskModelId = activeTask
     ? (pendingTaskModels[activeTask.id] ?? null)
     : null;
   const pendingTaskModel = pendingTaskModelId
-    ? snapshot.account.models.find(
-        (model) => model.selectionId === pendingTaskModelId,
-      )
+    ? metaskProvider?.models.find((model) => model.id === pendingTaskModelId)
     : null;
   const taskModelLabel = pendingTaskModelId
     ? t("task.model_pending", {
         model:
           pendingTaskModel?.displayName ||
-          pendingTaskModel?.selectionId ||
+          pendingTaskModel?.id ||
           pendingTaskModelId,
       })
     : (activeTask?.binding.model ?? selectedModelLabel);
   const displayedTaskModelId = pendingTaskModelId ?? taskModelId;
   const taskModelPolicy = taskModelSelectionPolicy(
-    snapshot.account,
+    snapshot.models,
     snapshot.execution,
     activeTask,
   );
@@ -1243,7 +1250,7 @@ export default function App() {
       const result = await client.selectTaskModel(
         task.id,
         task.binding.model,
-        snapshot.account.catalogGeneration,
+        metaskProvider?.catalogGeneration ?? "0",
         selectionId,
       );
       if (!result.accepted) {
@@ -2462,7 +2469,7 @@ export default function App() {
         newTaskDraftActive
           ? newTaskModelOptions
           : taskModelPolicy.authorityExact
-            ? snapshot.account.models
+            ? metaskModelOptions
             : []
       }
       selectedModelId={
@@ -2475,13 +2482,13 @@ export default function App() {
         (newTaskDraftActive
           ? newTaskModelOptions.length === 0 ||
             (!customModelConnectionSelected &&
-              snapshot.account.catalogState === "loading")
+              snapshot.models.operation === "refreshing_catalog")
           : !taskModelPolicy.catalogUsable)
       }
       modelSelectionPending={
         (customModelConnectionSelected ? executionBusy : accountBusy) ||
         (!newTaskDraftActive || !customModelConnectionSelected
-          ? snapshot.account.catalogState === "loading"
+          ? snapshot.models.operation === "refreshing_catalog"
           : false)
       }
       modelContextTitle={
@@ -2526,15 +2533,27 @@ export default function App() {
         newTaskDraftActive
           ? customModelConnectionSelected && activeModelConnection
             ? void runExecutionCommand(() =>
-                client.selectDefaultModelConnection(
-                  activeModelConnection.id,
-                  activeModelConnection.connectionGeneration,
-                  id,
-                ),
+                client.selectModelsDefault({
+                  sourceId: activeModelConnection.id,
+                  modelId: id,
+                  expectedSelectionRevision: snapshot.models.selectionRevision,
+                  expectedSourceGeneration:
+                    activeModelConnection.sourceGeneration,
+                  expectedCatalogGeneration:
+                    activeModelConnection.catalogGeneration,
+                }),
               )
-            : void runAccountCommand(() =>
-                client.selectModel(id, snapshot.account.catalogGeneration),
-              )
+            : metaskProvider
+              ? void runExecutionCommand(() =>
+                  client.configureMetaskSelection({
+                    sourceId: `metask:${metaskProvider.selectedApiKeyId}`,
+                    modelId: id,
+                    expectedMetaskSelectionRevision:
+                      snapshot.models.metaskSelectionRevision,
+                    expectedCatalogGeneration: metaskProvider.catalogGeneration,
+                  }),
+                )
+              : undefined
           : void selectModelForTask(id)
       }
     />
@@ -2803,6 +2822,7 @@ export default function App() {
         settingsOpen ? (
           <SettingsPage
             account={snapshot.account}
+            models={snapshot.models}
             execution={snapshot.execution}
             permissionProfiles={{
               enabled: snapshot.capabilities.permissionProfiles,
@@ -2822,21 +2842,40 @@ export default function App() {
             cancelDisabled={viewSyncFailed || !bridgeReady || accountCancelBusy}
             onBack={closeSettings}
             onRefresh={() =>
-              void runAccountCommand(() => client.refreshAccountCatalog())
+              void runExecutionCommand(() => client.refreshModelsCatalog())
             }
             onCancel={() => void cancelAccountOperation()}
-            onSelectApiKey={(id) =>
-              void runAccountCommand(() =>
-                client.selectApiKey(id, snapshot.account.catalogGeneration),
-              )
+            onSelectApiKey={() =>
+              void runExecutionCommand(() => client.refreshModelsCatalog())
             }
             onSelectModel={(id) =>
-              void runAccountCommand(() =>
-                client.selectModel(id, snapshot.account.catalogGeneration),
-              )
+              metaskProvider
+                ? void runExecutionCommand(() =>
+                    client.configureMetaskSelection({
+                      sourceId: `metask:${metaskProvider.selectedApiKeyId}`,
+                      modelId: id,
+                      expectedMetaskSelectionRevision:
+                        snapshot.models.metaskSelectionRevision,
+                      expectedCatalogGeneration:
+                        metaskProvider.catalogGeneration,
+                    }),
+                  )
+                : undefined
             }
             onActivateMetask={() =>
-              void runExecutionCommand(() => client.selectMetaskDefault())
+              snapshot.models.metaskSelection && metaskProvider
+                ? void runExecutionCommand(() =>
+                    client.selectModelsDefault({
+                      sourceId: snapshot.models.metaskSelection!.sourceId,
+                      modelId: snapshot.models.metaskSelection!.modelId,
+                      expectedSelectionRevision:
+                        snapshot.models.selectionRevision,
+                      expectedSourceGeneration: metaskProvider.sourceGeneration,
+                      expectedCatalogGeneration:
+                        metaskProvider.catalogGeneration,
+                    }),
+                  )
+                : undefined
             }
             onCreateModelConnection={(input) =>
               runExecutionCommand(() => client.createModelConnection(input))
@@ -2856,11 +2895,19 @@ export default function App() {
             }
             onSelectModelConnection={(connectionId, generation, modelId) =>
               void runExecutionCommand(() =>
-                client.selectDefaultModelConnection(
-                  connectionId,
-                  generation,
+                client.selectModelsDefault({
+                  sourceId: connectionId,
                   modelId,
-                ),
+                  expectedSelectionRevision: snapshot.models.selectionRevision,
+                  expectedSourceGeneration:
+                    snapshot.models.connections.find(
+                      (connection) => connection.id === connectionId,
+                    )?.sourceGeneration ?? "0",
+                  expectedCatalogGeneration:
+                    snapshot.models.connections.find(
+                      (connection) => connection.id === connectionId,
+                    )?.catalogGeneration ?? "0",
+                }),
               )
             }
             onBeginLogin={() =>

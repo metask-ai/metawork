@@ -740,6 +740,10 @@ export const enUS = {
   "settings.general": "General",
   "settings.permissions": "Permissions",
   "settings.account": "Account",
+  "settings.models": "Models",
+  "settings.models_error": "Model configuration needs attention",
+  "settings.models_error_help":
+    "Refresh the Metask catalog or review the saved model configuration.",
   "permission.profile.approval_required": "Request approval",
   "permission.profile.approval_required.help":
     "Routine workspace edits run automatically. MetaWork asks before operations the current policy does not cover.",
@@ -860,7 +864,7 @@ export const enUS = {
     "Default changes apply only to new tasks. Existing task bindings and history remain unchanged.",
   "settings.signout_title": "Sign out on this device",
   "settings.signout_help":
-    "This clears Metask credentials from this device. Task records and workspace files are preserved; live work may need to finish first.",
+    "This clears Metask credentials from this device. New Metask model use becomes unavailable; custom models, task records, workspace files, and existing task bindings are preserved.",
   "settings.task_binding_model":
     "This task keeps its pinned execution. The current default cannot safely change its model.",
   "settings.task_model_help": "Choose the model for this task's next run.",

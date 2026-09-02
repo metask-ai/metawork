@@ -97,7 +97,7 @@ try {
       "signed-out profile admitted Task creation before a default source",
     );
 
-  const createResponse = invokeBridge("metawork.modelConnections.create", {
+  const createResponse = invokeBridge("metawork.models.connections.create", {
     displayName: "Readiness provider",
     protocol: "openai_chat_completions",
     normalizedBaseUrl: endpoint,
@@ -162,7 +162,7 @@ try {
   const created = await poll(
     async () => {
       const current = await snapshot();
-      const connection = current.execution?.modelConnections?.find(
+      const connection = current.models?.connections?.find(
         (item) => item.displayName === "Readiness provider",
       );
       return connection ? { current, connection } : null;
@@ -183,7 +183,7 @@ try {
     );
   credentialTarget = nativeCredentialTarget(service, connection.id);
 
-  const registryPath = path.join(dataRoot, "account", "model-connections.json");
+  const registryPath = path.join(dataRoot, "account", "models.json");
   const registryBytes = await readFile(registryPath);
   if (registryBytes.includes(Buffer.from(credential)))
     throw new Error(
@@ -203,7 +203,7 @@ try {
     );
 
   assertAccepted(
-    await invokeBridge("metawork.modelConnections.test", {
+    await invokeBridge("metawork.models.connections.test", {
       connectionId: connection.id,
       expectedConnectionGeneration: connection.connectionGeneration,
       modelId: model,
@@ -213,7 +213,7 @@ try {
   const connected = await poll(
     async () => {
       const current = await snapshot();
-      const item = current.execution?.modelConnections?.find(
+      const item = current.models?.connections?.find(
         (candidate) => candidate.id === connection.id,
       );
       return item?.testStatus === "connected" ? { current, item } : null;
@@ -227,18 +227,21 @@ try {
     );
 
   assertAccepted(
-    await invokeBridge("metawork.modelConnections.selectDefault", {
-      connectionId: connection.id,
-      expectedConnectionGeneration: connection.connectionGeneration,
+    await invokeBridge("metawork.models.selectDefault", {
+      sourceId: connection.id,
       modelId: model,
+      expectedSelectionRevision: connected.current.models.selectionRevision,
+      expectedSourceGeneration: connection.sourceGeneration,
+      expectedCatalogGeneration: connection.catalogGeneration,
     }),
     "Model Connection default selection",
   );
   const selected = await poll(
     async () => {
       const current = await snapshot();
-      return current.execution?.activeSource === "model_connection" &&
-        current.execution?.selectedModelConnectionId === connection.id &&
+      return current.models?.defaultSelection?.sourceId === connection.id &&
+        current.models?.defaultSelection?.modelId === model &&
+        current.execution?.activeSource === "model_connection" &&
         current.execution?.taskCreationAvailable === true
         ? current
         : null;
