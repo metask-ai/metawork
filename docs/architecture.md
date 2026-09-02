@@ -182,7 +182,7 @@ Product 在 Renderer 生命周期之外拥有产品状态。WebView reload 通�
 - Renderer 和所有 Bridge payload 都按不可信输入处理；command 默认拒绝，dev/release origin 分离，Host 重新校验 window、identity、ownership、generation、membership、资源范围与时效；
 - trusted Workspace 只能由 Host 原生选择和确认产生的 capability 授权；Renderer 不能提交路径、boolean 或显示名称自行建立 trust；
 - credential 和 secret 只能存在于对应 Product owner、系统 credential storage 和执行所需的 Application-owned bounded copy；不得进入 Renderer、Bridge、event、snapshot、日志、raw diagnostic、产品历史或 checkpoint record，所有 owner 在释放前 secure-zero；
-- production protocol、endpoint、model 与 credential authority 只能来自 Product Execution、Account/MCP 等对应合同和 Host-owned projection，不能从环境变量、自由文本或 Renderer payload 直接注入；
+- production protocol、endpoint、model 与 credential authority 只能来自 Product Models、Account/MCP 等对应合同和 Host-owned projection，不能从环境变量、自由文本或 Renderer payload 直接注入；
 - Host 在形成 projection 前执行 schema-aware filtering、credential redaction、UTF-8 与容量验证；Renderer 不是 secret 过滤边界；
 - permission 是 Product/Agent 协作的安全事实，不是 Renderer preference 或平行 AgentCore protocol。持久规则必须绑定 stable Workspace、tool/version、operation、canonical resource constraint 与 rule schema；相关 authority 变化时 fail closed；
 - 外部依赖只从 canonical、已验证输入消费；source copy、可变版本、静默 fallback 和绕过 verifier 的替代路径均不构成有效能力；

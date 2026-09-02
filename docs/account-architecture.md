@@ -6,7 +6,7 @@
 
 ## 1. 文档职责
 
-本文定义 `src/product/account.zig` 与 `src/product/account/` 的内部职责、领域状态、事务、effect、持久化提交、恢复、并发和生命周期，同时锁定 MetaWork 实际消费的 Metask OAuth、HTTP catalog 及 Account persistence 合同。Account 产出的 `Protocol`、`ExecutionTarget` 与 `ExecutionConfig` 使用 Product Execution 发布的纯合同；其通用语义和 Model Connection owner 由 [Product 架构](product-architecture.md)定义。以下事实由其他规范独占：
+本文定义 `src/product/account.zig` 与 `src/product/account/` 的内部职责、领域状态、事务、effect、持久化提交、恢复、并发和生命周期，同时锁定 MetaWork 实际消费的 Metask OAuth、HTTP catalog 及 Account persistence 合同。Account 产出的 `Protocol`、`ExecutionTarget` 与 `ExecutionConfig` 使用 Product Models 发布的纯合同；其通用语义和 Model Connection owner 由 [Product 架构](product-architecture.md)定义。以下事实由其他规范独占：
 
 - 产品可见行为、默认模型与 Task 的关系见[产品需求](requirements.md)；
 - Account 与 Application、Workbench、Bridge、Agent 的跨 owner 协作见[Product 架构](product-architecture.md)；
@@ -31,14 +31,14 @@ Account 不拥有：
 
 - Native SDK、窗口、WebView、socket listener、平台 timer 实现或文件系统具体实现；这些由 Application 通过 `ports.zig` 注入窄 capability；
 - Product 默认来源、active `ExecutionConfig`、Product execution generation、replacement、Schedule scrub、Workspace、Task、Run、Session admission 或历史；
-- user-managed Model Connection registry、credential vault、connection generation、测试状态、默认 binding 和 persistence health；这些属于 Product Control 持有的 Execution aggregate；
+- user-managed Model Connection registry、credential vault、connection generation、测试状态、默认 binding 和 persistence health；这些属于 Product Control 持有的 Models aggregate；
 - AgentCore Runtime、Session、Conversation、provider transport 和协议解析；
 - Bridge transport、Renderer 临时状态或 UI continuation policy。
 
 依赖方向固定为：
 
 ```text
-contract.zig                 Account 脱敏合同；消费 Product Execution 纯合同
+contract.zig                 Account 脱敏合同；消费 Product Models 纯合同
 catalog/credential/*         Account-owned Metask 领域值与持久化策略
 state.zig                    纯事务状态与 transition decision
 runtime.zig                  aggregate、effect admission、completion 与 commit
@@ -47,7 +47,7 @@ ports.zig                    Account 所需的窄平台 capability
 Application adapter → Account ports
 Application coordinator → Account Runtime + Workbench public API
 Workbench / Bridge → Account contract
-Product Execution contract → Account catalog adapter
+Product Models contract → Account catalog adapter
 ```
 
 `runtime.zig` 可以组合 Account 子模块，但不得成为 Application facade；`state.zig` 不调用平台、Workbench、Bridge 或 AgentCore。
@@ -85,9 +85,9 @@ Account 同时最多拥有两个 secret-free `PublicCatalog` slot：
 
 `committed` 与 `candidate` 必须由 Account aggregate 共同拥有。每个 `PublicCatalog` slot 同时拥有自己的 `model_catalog_api_key_id`；copy、promotion、restore、clear 与 projection 必须原子维护该 owner，禁止从 transaction phase 或 selected state 重新推导。effect driver 只执行 I/O，不拥有 committed 产品目录。candidate 必须携带 attempt identity；陈旧 completion 不能覆盖、提升或清除另一个 attempt 的 slot。
 
-### 3.4 Product Execution boundary
+### 3.4 Product Models boundary
 
-Account 只把已验证的 Metask API Key、catalog selection 和外部 `group.platform` 解析为 Product Execution 合同中的线性 `OwnedSourceCandidate`：显式 protocol、固定 endpoint、model、credential、Account source generation 与 `metask:<api-key-id>` 服务实例引用。candidate 不含 Product execution generation。Account 不定义通用 protocol enum，不发布 Model Connection command/view，不保存 Model Connection registry，也不拥有其 credential capability。
+Account 只把已验证的 Metask API Key、catalog selection 和外部 `group.platform` 解析为 Product Models 合同中的线性 `OwnedSourceCandidate`：显式 protocol、固定 endpoint、model、credential、Account source generation 与 `metask:<api-key-id>` 服务实例引用。candidate 不含 Product execution generation。Account 不定义通用 protocol enum，不发布 Model Connection command/view，不保存 Model Connection registry，也不拥有其 credential capability。
 
 默认 execution source 的选择、Model Connection 生命周期、两种 source 的 replacement 和服务实例引用通用语义由 [Product 架构 §2.1](product-architecture.md)独占。Account 不定义、保存或发布厂商类别，也不存在 `ProviderKind`、协议反推或双重校验路径。
 
@@ -213,7 +213,7 @@ PreferenceIntent = unchanged | commit_pending | clear
 - prepared transition 被拒绝或 effect admission 失败时不得修改 committed aggregate；
 - completion 产生的下一 effect admission 失败时，先提交已经观察到的外部结果，再从该 committed phase 产生唯一 terminal failure。
 
-主线程跨 owner 顺序由 [Product 架构](product-architecture.md#21-execution-aggregate-与-account-handoff)定义。Account 内部 terminal commit 必须一次应用 state、catalog intent 和 preference shadow；本地构造的 credential-bearing candidate 在 preference durable commit 与 Account terminal commit 成功后，通过 no-fail sink 线性转移给 Product。Coordinator 不得读取、复制或持有具体配置，Product 的 scrub/install 结果也不得回写 Account。
+主线程跨 owner 顺序由 [Product 架构](product-architecture.md#21-models-aggregate-与-account-handoff)定义。Account 内部 terminal commit 必须一次应用 state、catalog intent 和 preference shadow；本地构造的 credential-bearing candidate 在 preference durable commit 与 Account terminal commit 成功后，通过 no-fail sink 线性转移给 Product。Coordinator 不得读取、复制或持有具体配置，Product 的 scrub/install 结果也不得回写 Account。
 
 ## 6. 关键事务
 

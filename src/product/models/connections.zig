@@ -1,4 +1,4 @@
-//! Product Execution-owned registry for user-managed model services.
+//! Product Models-owned registry for user-managed model services.
 //!
 //! This module stores only public connection metadata. The platform credential
 //! account is derived from the public connection identity; neither credential
@@ -6,7 +6,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const contract = @import("metawork_product_execution_contract");
+const contract = @import("metawork_product_models_contract");
 
 pub const max_store_bytes: usize = 64 * 1024;
 pub const store_file_name = "model-connections.json";

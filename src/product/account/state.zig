@@ -2,7 +2,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const contract = @import("metawork_account_contract");
-const execution_contract = @import("metawork_product_execution_contract");
+const models_contract = @import("metawork_product_models_contract");
 
 const AccountId = BoundedString(contract.Limits.account_id_bytes);
 const DisplayName = BoundedString(contract.Limits.display_name_bytes);
@@ -1732,7 +1732,7 @@ pub const PreparedTransition = struct {
     fact_kind: contract.AccountFactKind,
     attempt_id: ?u64,
     effect: ?Effect = null,
-    source_candidate: ?execution_contract.OwnedSourceCandidate = null,
+    source_candidate: ?models_contract.OwnedSourceCandidate = null,
     catalog_intent: CatalogIntent = .committed,
     preference_intent: PreferenceIntent = .unchanged,
     committed: bool = false,
@@ -1767,7 +1767,7 @@ pub const PreparedTransition = struct {
 
     pub fn takeSourceCandidate(
         self: *PreparedTransition,
-    ) ?execution_contract.OwnedSourceCandidate {
+    ) ?models_contract.OwnedSourceCandidate {
         if (self.source_candidate) |*source_candidate| {
             const result = source_candidate.take();
             self.source_candidate = null;
@@ -1778,7 +1778,7 @@ pub const PreparedTransition = struct {
 
     pub fn sourceCandidateTransfer(
         self: *PreparedTransition,
-    ) ?execution_contract.OwnedSourceCandidateTransfer {
+    ) ?models_contract.OwnedSourceCandidateTransfer {
         if (self.source_candidate == null) return null;
         return .{
             .context = self,
@@ -1788,7 +1788,7 @@ pub const PreparedTransition = struct {
 
     pub fn attachSourceCandidate(
         self: *PreparedTransition,
-        source_candidate: execution_contract.OwnedSourceCandidate,
+        source_candidate: models_contract.OwnedSourceCandidate,
     ) void {
         std.debug.assert(!self.committed);
         std.debug.assert(self.source_candidate == null);
@@ -1797,7 +1797,7 @@ pub const PreparedTransition = struct {
 
     fn takeTransferredSourceCandidate(
         context: *anyopaque,
-    ) execution_contract.OwnedSourceCandidate {
+    ) models_contract.OwnedSourceCandidate {
         const self: *PreparedTransition = @ptrCast(@alignCast(context));
         return self.takeSourceCandidate() orelse
             @panic("Account source candidate was already transferred");
@@ -1828,7 +1828,7 @@ pub const TestSupport = if (builtin.is_test) struct {
         account: *const Account,
         identity: AccountIdentity,
         api_key_id: []const u8,
-        source_candidate_value: *execution_contract.OwnedSourceCandidate,
+        source_candidate_value: *models_contract.OwnedSourceCandidate,
     ) !PreparedTransition {
         if (account.state.session_state != .restoring or api_key_id.len == 0)
             return error.InvalidState;
@@ -1941,7 +1941,7 @@ pub const WorkerCompletion = struct {
         tokens_persisted,
         api_keys_loaded,
         models_loaded,
-        source_candidate_ready: execution_contract.OwnedSourceCandidate,
+        source_candidate_ready: models_contract.OwnedSourceCandidate,
         source_preference_persisted,
         default_model_persisted,
         logged_out,
@@ -2336,7 +2336,7 @@ test "refresh failure matrix distinguishes retryable and invalid credentials" {
 test "manual key choice supersedes an in-flight automatic continuation" {
     const allocator = std.testing.allocator;
     var account = Account.initRestoring();
-    var restored_candidate = try execution_contract.OwnedSourceCandidate.initOwned(
+    var restored_candidate = try models_contract.OwnedSourceCandidate.initOwned(
         allocator,
         .metask,
         .anthropic_messages,
@@ -2421,7 +2421,7 @@ test "manual key choice supersedes an in-flight automatic continuation" {
 test "Metask source resolution rebuilds the committed candidate without a preference write" {
     const allocator = std.testing.allocator;
     var account = Account.initRestoring();
-    var restored_candidate = try execution_contract.OwnedSourceCandidate.initOwned(
+    var restored_candidate = try models_contract.OwnedSourceCandidate.initOwned(
         allocator,
         .metask,
         .anthropic_messages,
@@ -2485,7 +2485,7 @@ test "Metask source resolution rebuilds the committed candidate without a prefer
     );
     commitPrepared(&account, &prepare_source_candidate);
 
-    var candidate = try execution_contract.OwnedSourceCandidate.initOwned(
+    var candidate = try models_contract.OwnedSourceCandidate.initOwned(
         allocator,
         .metask,
         .anthropic_messages,
@@ -2518,7 +2518,7 @@ test "Metask source resolution rebuilds the committed candidate without a prefer
 test "empty model catalog parks back in choosing with the key list intact" {
     const allocator = std.testing.allocator;
     var account = Account.initRestoring();
-    var restored_candidate = try execution_contract.OwnedSourceCandidate.initOwned(
+    var restored_candidate = try models_contract.OwnedSourceCandidate.initOwned(
         allocator,
         .metask,
         .anthropic_messages,
@@ -2703,7 +2703,7 @@ test "model catalog service failure parks back in choosing the same way" {
 test "failed reconfiguration preserves the committed selection" {
     const allocator = std.testing.allocator;
     var account = Account.initRestoring();
-    var restored_candidate = try execution_contract.OwnedSourceCandidate.initOwned(
+    var restored_candidate = try models_contract.OwnedSourceCandidate.initOwned(
         allocator,
         .metask,
         .anthropic_messages,
@@ -2903,7 +2903,7 @@ test "ready source model selection updates the default without changing authorit
     );
     commitPrepared(&account, &prepare_candidate);
 
-    var candidate = try execution_contract.OwnedSourceCandidate.initOwned(
+    var candidate = try models_contract.OwnedSourceCandidate.initOwned(
         std.testing.allocator,
         .metask,
         .anthropic_messages,
@@ -3069,7 +3069,7 @@ test "third source preference observation preserves old recovery identity" {
     };
     _ = select_model.takeEffect();
     commitPrepared(&account, &select_model);
-    var candidate = try execution_contract.OwnedSourceCandidate.initOwned(
+    var candidate = try models_contract.OwnedSourceCandidate.initOwned(
         allocator,
         .metask,
         .anthropic_messages,

@@ -1,4 +1,4 @@
-//! Product Execution effect ports. Credential bytes remain Host-owned and
+//! Product Models effect ports. Credential bytes remain Host-owned and
 //! are borrowed only for bounded synchronous resolution.
 
 const std = @import("std");

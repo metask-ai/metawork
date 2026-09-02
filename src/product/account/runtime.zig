@@ -2,7 +2,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const contract = @import("metawork_account_contract");
-const execution_contract = @import("metawork_product_execution_contract");
+const models_contract = @import("metawork_product_models_contract");
 const state_impl = @import("account_state");
 const metask_client = @import("metask_client");
 const credential_store = @import("account_credential_store");
@@ -493,13 +493,13 @@ pub const Prepared = struct {
 
     pub fn takeSourceCandidate(
         self: *Prepared,
-    ) ?execution_contract.OwnedSourceCandidate {
+    ) ?models_contract.OwnedSourceCandidate {
         return self.transition.takeSourceCandidate();
     }
 
     pub fn sourceCandidateTransfer(
         self: *Prepared,
-    ) ?execution_contract.OwnedSourceCandidateTransfer {
+    ) ?models_contract.OwnedSourceCandidateTransfer {
         return self.transition.sourceCandidateTransfer();
     }
 
@@ -556,7 +556,7 @@ pub const Runtime = struct {
     } = null,
     pending_source_candidate: ?struct {
         attempt_id: u64,
-        value: execution_contract.OwnedSourceCandidate,
+        value: models_contract.OwnedSourceCandidate,
     } = null,
 
     pub fn init(
@@ -1110,7 +1110,7 @@ pub const Runtime = struct {
     fn storePendingSourceCandidate(
         self: *Runtime,
         attempt_id: u64,
-        candidate: execution_contract.OwnedSourceCandidate,
+        candidate: models_contract.OwnedSourceCandidate,
     ) void {
         std.debug.assert(self.pending_source_candidate == null);
         self.pending_source_candidate = .{
@@ -1122,7 +1122,7 @@ pub const Runtime = struct {
     fn takePendingSourceCandidate(
         self: *Runtime,
         attempt_id: u64,
-    ) ?execution_contract.OwnedSourceCandidate {
+    ) ?models_contract.OwnedSourceCandidate {
         const pending = self.pending_source_candidate orelse return null;
         if (pending.attempt_id != attempt_id) return null;
         self.pending_source_candidate = null;
@@ -1926,7 +1926,7 @@ pub const TestSupport = if (builtin.is_test) struct {
 
     pub fn prepareReadyRestore(
         runtime: *Runtime,
-        source_candidate: *execution_contract.OwnedSourceCandidate,
+        source_candidate: *models_contract.OwnedSourceCandidate,
     ) !Prepared {
         const input = source_candidate.input();
         runtime.committed_public_catalog.replaceRestoredSelection(
@@ -2029,7 +2029,7 @@ pub const TestSupport = if (builtin.is_test) struct {
 
     pub fn prepareSourceCandidateReady(
         runtime: *Runtime,
-        source_candidate: *execution_contract.OwnedSourceCandidate,
+        source_candidate: *models_contract.OwnedSourceCandidate,
     ) !Prepared {
         state_impl.TestSupport.installInitialSourcePreparation(
             &runtime.account,
@@ -2135,7 +2135,7 @@ fn accountSelectionCommand(
 }
 
 const CatalogSourcePreparation = union(enum) {
-    ready: execution_contract.OwnedSourceCandidate,
+    ready: models_contract.OwnedSourceCandidate,
     rejected: contract.ErrorCode,
 };
 
@@ -2672,7 +2672,7 @@ test "Account Runtime stages the candidate catalog before preference persistence
     );
     runtime.candidate_catalog_attempt_id = 1;
 
-    var source_candidate = try execution_contract.OwnedSourceCandidate.initOwned(
+    var source_candidate = try models_contract.OwnedSourceCandidate.initOwned(
         std.testing.allocator,
         .metask,
         .anthropic_messages,
@@ -2792,7 +2792,7 @@ test "Account Runtime keeps committed authority during catalog refresh" {
     try std.testing.expectEqualStrings("model-1", authority.model_id);
     try std.testing.expectEqual(@as(u64, 1), authority.source_generation);
     try std.testing.expectEqual(
-        execution_contract.Protocol.anthropic_messages,
+        models_contract.Protocol.anthropic_messages,
         authority.protocol,
     );
 }
@@ -2916,7 +2916,7 @@ fn commitAutomationRestoreForTest(runtime: *Runtime) void {
 }
 
 fn commitReadyRestoreForTest(runtime: *Runtime) !void {
-    var source_candidate = try execution_contract.OwnedSourceCandidate.initOwned(
+    var source_candidate = try models_contract.OwnedSourceCandidate.initOwned(
         std.testing.allocator,
         .metask,
         .anthropic_messages,

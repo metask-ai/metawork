@@ -5,7 +5,7 @@
 
 const std = @import("std");
 const native_sdk = @import("native_sdk");
-const execution_contract = @import("metawork_product_execution_contract");
+const models_contract = @import("metawork_product_models_contract");
 const bridge = @import("metawork_bridge");
 
 pub const enabled = true;
@@ -20,7 +20,7 @@ const agentcore_vertical_credential = "metawork-agentcore-vertical-fixture-key";
 const agentcore_vertical_model = "metawork-agentcore-vertical-fixture-model";
 
 pub const ExecutionFixture = struct {
-    protocol: execution_contract.Protocol,
+    protocol: models_contract.Protocol,
     credential: []const u8,
     model: []const u8,
     base_url: []const u8,

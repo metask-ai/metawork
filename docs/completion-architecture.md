@@ -23,17 +23,17 @@ Completion.complete(request, cancellation) -> Result | Failure
 
 - `src/agent` 拥有 Completion 请求、结果、错误、协议 codec 和调用语义。
 - `src/app` 只实现一次 buffered HTTP/TLS 请求及请求级取消。
-- Product Execution 合同拥有通用 Protocol/ExecutionConfig；Account 只拥有 Metask credential authority，Execution aggregate 独立拥有 Model Connection credential authority，Completion 不拥有任一服务实例或 credential。
+- Product Models 合同拥有通用 Protocol/ExecutionConfig；Account 只拥有 Metask credential authority，Models aggregate 独立拥有 Model Connection credential authority，Completion 不拥有任一服务实例或 credential。
 - Completion 使用与对应 Agent Run 相同、已冻结的 ExecutionConfig；不发现、选择或替换模型。
 - MetaWork 不修改 `metacodes`，也不要求 AgentCore 提供 Completion。
 
 ## 3. Provider 与协议
 
-Provider 表示 Product execution source 配置的模型服务实例，其身份、配置与 credential authority 由 [Product Execution 与对应 source](product-architecture.md#21-execution-aggregate-与-account-handoff)拥有；不同服务实例可以使用相同协议，不能通过协议推导服务身份。Agent 不建立额外的 Provider 类别或继承层次。
+Provider 表示 Product execution source 配置的模型服务实例，其身份、配置与 credential authority 由 [Product Models 与对应 source](product-architecture.md#21-models-aggregate-与-account-handoff)拥有；不同服务实例可以使用相同协议，不能通过协议推导服务身份。Agent 不建立额外的 Provider 类别或继承层次。
 
-Product Execution 与 Agent 分别拥有产品已开放的 `Protocol` 和可执行 codec `Protocol`。唯一的 Product-owned outbound adapter 对已开放集合做穷举编译期映射；两侧不共享 enum，不使用字符串转换，也不因 Agent 新增 codec 自动扩大产品能力。Session、Completion 和 Provider Probe 同时接收服务实例引用 `provider_id`、明确协议、endpoint、credential 和 model。`provider_id` 是 Host 侧的不透明引用，不是服务商枚举或协议适配器；协议不能由该引用、URL 或模型名推断。Session 与 Completion 持有引用的 owned copy，不依赖调用方配置缓冲区的生命周期；该引用不进入模型请求、Core ABI、Bridge、event、snapshot 或产品历史。
+Product Models 与 Agent 分别拥有产品已开放的 `Protocol` 和可执行 codec `Protocol`。唯一的 Product-owned outbound adapter 对已开放集合做穷举编译期映射；两侧不共享 enum，不使用字符串转换，也不因 Agent 新增 codec 自动扩大产品能力。Session、Completion 和 Provider Probe 同时接收服务实例引用 `provider_id`、明确协议、endpoint、credential 和 model。`provider_id` 是 Host 侧的不透明引用，不是服务商枚举或协议适配器；协议不能由该引用、URL 或模型名推断。Session 与 Completion 持有引用的 owned copy，不依赖调用方配置缓冲区的生命周期；该引用不进入模型请求、Core ABI、Bridge、event、snapshot 或产品历史。
 
-`provider_id` 作为执行元数据标识 Session 或 Completion 所绑定的服务配置来源；调用方负责提供正确引用，Agent 保留但不分配、解析或重新生成它。身份范围与生命周期由 Product Execution source 合同定义，不由潜在的限流、遥测或 credential 分组用途改变。Agent 的接收上限由 `max_provider_id_bytes` 定义，Product Execution 可以采用更小的生成范围；Session fresh/restore、Completion 和 Probe 必须使用同一 Agent 接收上限。
+`provider_id` 作为执行元数据标识 Session 或 Completion 所绑定的服务配置来源；调用方负责提供正确引用，Agent 保留但不分配、解析或重新生成它。身份范围与生命周期由 Product Models source 合同定义，不由潜在的限流、遥测或 credential 分组用途改变。Agent 的接收上限由 `max_provider_id_bytes` 定义，Product Models 可以采用更小的生成范围；Session fresh/restore、Completion 和 Probe 必须使用同一 Agent 接收上限。
 
 | Protocol | Completion 接口 |
 | --- | --- |

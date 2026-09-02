@@ -5,7 +5,7 @@
 
 const std = @import("std");
 const account = @import("metawork_account_contract");
-const execution_contract = @import("metawork_product_execution_contract");
+const models_contract = @import("metawork_product_models_contract");
 
 fn FixedText(comptime capacity: usize) type {
     return struct {
@@ -31,7 +31,7 @@ const ApiKeyProjection = struct {
     id: FixedText(account.Limits.api_key_id_bytes) = .{},
     name: FixedText(account.Limits.api_key_name_bytes) = .{},
     suffix: FixedText(account.Limits.api_key_suffix_bytes) = .{},
-    protocol: execution_contract.Protocol = .anthropic_messages,
+    protocol: models_contract.Protocol = .anthropic_messages,
 };
 
 const ModelProjection = struct {
@@ -55,7 +55,7 @@ pub const Projection = struct {
     authority_account_id: FixedText(account.Limits.account_id_bytes) = .{},
     authority_api_key_id: FixedText(account.Limits.api_key_id_bytes) = .{},
     authority_model_id: FixedText(account.Limits.model_id_bytes) = .{},
-    authority_protocol: ?execution_contract.Protocol = null,
+    authority_protocol: ?models_contract.Protocol = null,
     api_keys: []ApiKeyProjection,
     api_key_views: []account.ApiKeyView,
     api_key_count: usize = 0,
@@ -191,7 +191,7 @@ pub const Projection = struct {
         return false;
     }
 
-    pub fn selectedProtocol(self: *const Projection) ?execution_contract.Protocol {
+    pub fn selectedProtocol(self: *const Projection) ?models_contract.Protocol {
         for (self.api_key_views[0..self.api_key_count]) |api_key| {
             if (std.mem.eql(u8, api_key.id, self.selected_api_key_id.view()))
                 return api_key.protocol;

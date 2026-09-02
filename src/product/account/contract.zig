@@ -1,6 +1,6 @@
 //! Product Account public contract.
 const std = @import("std");
-const execution = @import("metawork_product_execution_contract");
+const execution = @import("metawork_product_models_contract");
 
 /// Compile-time bounds shared by Account, Workbench, and Bridge. Network
 /// clients may use tighter limits, but may never widen these product bounds.

@@ -1,7 +1,7 @@
 const std = @import("std");
 const agent = @import("metawork_agent");
-const execution_contract = @import("metawork_product_execution_contract");
-const execution_ports = @import("product_execution_ports");
+const models_contract = @import("metawork_product_models_contract");
+const models_ports = @import("product_models_ports");
 const control_ports = @import("metawork_product_control_ports");
 const agent_protocol = @import("product_agent_protocol_adapter");
 
@@ -19,10 +19,10 @@ const ProbeJob = struct {
     io: std.Io,
     completion_transport: agent.CompletionTransport,
     notifier: ProbeNotifier,
-    selection: execution_contract.ModelConnectionSelectionCommand,
+    selection: models_contract.ModelConnectionSelectionCommand,
     connection_id: []u8,
     model_id: []u8,
-    execution: ?execution_contract.OwnedConfig = null,
+    execution: ?models_contract.OwnedConfig = null,
     cancellation: agent.ProviderProbeCancellation = .{},
     succeeded: bool = false,
     finished: std.atomic.Value(bool) = .init(false),
@@ -33,7 +33,7 @@ const ProbeJob = struct {
         io: std.Io,
         completion_transport: agent.CompletionTransport,
         notifier: ProbeNotifier,
-        command_value: execution_contract.ModelConnectionTestCommand,
+        command_value: models_contract.ModelConnectionTestCommand,
     ) std.mem.Allocator.Error!*ProbeJob {
         const self = try allocator.create(ProbeJob);
         errdefer allocator.destroy(self);
@@ -61,7 +61,7 @@ const ProbeJob = struct {
 
     fn installExecution(
         self: *ProbeJob,
-        execution: *execution_contract.OwnedConfig,
+        execution: *models_contract.OwnedConfig,
     ) void {
         std.debug.assert(self.execution == null);
         self.execution = execution.take();
@@ -98,7 +98,7 @@ const ProbeJob = struct {
         self.cancellation.request();
     }
 
-    fn command(self: *const ProbeJob) execution_contract.ModelConnectionTestCommand {
+    fn command(self: *const ProbeJob) models_contract.ModelConnectionTestCommand {
         return .{
             .selection = .{
                 .connection_id = self.connection_id,
@@ -119,19 +119,19 @@ const ProbeJob = struct {
     }
 };
 
-/// Application coordinator for Execution-only effects. Product Control owns
+/// Application coordinator for Models-only effects. Product Control owns
 /// registry/default-selection policy; this type only binds platform and Agent
 /// effects to its scoped management capability.
 pub const Coordinator = struct {
     io: std.Io,
-    management: control_ports.ExecutionManagement,
+    management: control_ports.ModelsManagement,
     main_thread_id: std.Thread.Id,
     probe_notifier: ?ProbeNotifier = null,
     completion_transport: ?agent.CompletionTransport = null,
     probe_job: ?*ProbeJob = null,
 
     pub fn init(
-        management: control_ports.ExecutionManagement,
+        management: control_ports.ModelsManagement,
         main_thread_id: std.Thread.Id,
         io: std.Io,
     ) Coordinator {
@@ -153,14 +153,14 @@ pub const Coordinator = struct {
         self.completion_transport = transport;
     }
 
-    pub fn commandSink(self: *Coordinator) execution_contract.CommandSink {
+    pub fn commandSink(self: *Coordinator) models_contract.CommandSink {
         return .{ .context = self, .submit_fn = submitCommand };
     }
 
     fn submitCommand(
         context: *anyopaque,
-        command: execution_contract.ModelConnectionCommand,
-    ) execution_contract.CommandResult {
+        command: models_contract.ModelConnectionCommand,
+    ) models_contract.CommandResult {
         const self: *Coordinator = @ptrCast(@alignCast(context));
         self.assertMainThread();
         if (command == .test_connection)
@@ -173,10 +173,10 @@ pub const Coordinator = struct {
     pub fn createWithCapturedCredential(
         self: *Coordinator,
         secret: []const u8,
-        spec: execution_contract.ModelConnectionSpec,
+        spec: models_contract.ModelConnectionSpec,
         model_id: []const u8,
         model_display_name: []const u8,
-    ) execution_contract.CommandResult {
+    ) models_contract.CommandResult {
         self.assertMainThread();
         return self.management.createModelConnectionWithCredential(
             secret,
@@ -188,8 +188,8 @@ pub const Coordinator = struct {
 
     fn startProbe(
         self: *Coordinator,
-        command: execution_contract.ModelConnectionTestCommand,
-    ) execution_contract.CommandResult {
+        command: models_contract.ModelConnectionTestCommand,
+    ) models_contract.CommandResult {
         const notifier = self.probe_notifier orelse
             return .rejected(.test_unavailable);
         const completion_transport = self.completion_transport orelse
@@ -225,7 +225,7 @@ pub const Coordinator = struct {
     pub fn start(
         self: *Coordinator,
         directory: []const u8,
-        vault: execution_ports.CredentialVault,
+        vault: models_ports.CredentialVault,
     ) void {
         self.assertMainThread();
         self.management.startModelConnections(directory, vault) catch

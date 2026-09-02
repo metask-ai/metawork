@@ -1,7 +1,7 @@
 //! Product Schedule-owned bounded state and occurrence transitions.
 
 const std = @import("std");
-const execution_contract = @import("metawork_product_execution_contract");
+const models_contract = @import("metawork_product_models_contract");
 
 pub const minimum_interval_seconds: u64 = 60;
 pub const max_occurrence_history: usize = 16;
@@ -17,7 +17,7 @@ pub const Error = std.mem.Allocator.Error || error{
     ProjectionCapacity,
 };
 
-pub const Protocol = execution_contract.Protocol;
+pub const Protocol = models_contract.Protocol;
 
 pub const PermissionProfile = enum {
     approval_required,

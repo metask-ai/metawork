@@ -3,8 +3,8 @@ const builtin = @import("builtin");
 const account_contract = @import("metawork_account_contract");
 const account_api = @import("metawork_account");
 const control_ports = @import("metawork_product_control_ports");
-const execution_contract = if (builtin.is_test)
-    @import("metawork_product_execution_contract")
+const models_contract = if (builtin.is_test)
+    @import("metawork_product_models_contract")
 else
     struct {};
 
@@ -255,8 +255,8 @@ fn initRuntimeForTest(path: []const u8) !account_api.Runtime {
 
 fn testSourceCandidate(
     source_generation: u64,
-) !execution_contract.OwnedSourceCandidate {
-    return execution_contract.OwnedSourceCandidate.initOwned(
+) !models_contract.OwnedSourceCandidate {
+    return models_contract.OwnedSourceCandidate.initOwned(
         std.testing.allocator,
         .metask,
         .anthropic_messages,

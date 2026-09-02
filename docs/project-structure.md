@@ -20,7 +20,7 @@
 | `src/app.zig`、`src/app/` | Application | Native SDK composition、平台 capability、资源生命周期和跨 owner 编排 |
 | `src/product/account.zig`、`src/product/account/` | Account | Account public module 与内部 aggregate |
 | `src/product/control.zig`、`src/product/control/` | Product Control | Product composition、shared execution 与跨 aggregate 编排 |
-| `src/product/execution/` | Product Control 持有的 Execution aggregate | Product 通用 Protocol/ExecutionConfig 纯合同、Model Connection registry、credential port 与恢复；不形成新的顶层 owner |
+| `src/product/models.zig`、`src/product/models/` | Product Control 持有的 Models aggregate | Product 通用 Protocol/ExecutionConfig 纯合同、Model Connection registry、credential port 与恢复；不形成新的顶层 owner |
 | `src/product/agent_protocol_adapter.zig` | Product Control 的 Agent outbound boundary | Product 已开放 Protocol 到 Agent codec Protocol 的唯一穷举映射；无状态且不形成共享 enum 或新 owner |
 | `src/product/{mcp,schedule,skill,task,workspace}.zig` 及同名目录 | Product Control 持有的 aggregate | 各自发布窄 public module，不形成新的顶层 owner |
 | `src/agent.zig`、`src/agent/` | Agent | AgentCore integration、Runtime、Session、Completion 与 callback/event boundary |
@@ -29,9 +29,9 @@
 | `src/automation.zig`、`src/automation/` | Automation capability | compile-time authority selection，不形成产品 owner |
 | `src/oauth/` | OAuth shared leaf | 只提供 PKCE、secret lifetime、严格 callback 解析与 loopback byte-pump 合同；不拥有 callback path、issuer/resource 接受、limit policy、响应文案或领域错误映射 |
 | `src/native_sdk_compat/` | Application | 已登记 Native SDK 缺口的窄 compatibility seam，不形成通用平台层 |
-| `src/product_identity.zig` | `app.zon`-derived shared leaf | 把 build-time artifact identity 投影给 Application 及 Execution/Account/MCP credential boundary，不形成领域 owner |
+| `src/product_identity.zig` | `app.zon`-derived shared leaf | 把 build-time artifact identity 投影给 Application 及 Models/Account/MCP credential boundary，不形成领域 owner |
 
-`src/product/execution/contract.zig` 是 Product Control 发布给 Account、Task、Schedule 与相邻边界的纯执行合同；`src/product/account/contract.zig` 只发布 Account 合同。`src/product/agent_protocol_adapter.zig` 只拥有 Product 到 Agent 的穷举协议映射，不能承载 execution 配置、推断或通用转换。三者都不是新的顶层产品 owner。`src/product/` 只是 Account、Product Control 及其 aggregate 的目录归属，不发布统一 Product facade。
+`src/product/models/contract.zig` 是 Models 发布给 Account、Task、Schedule 与相邻边界的纯模型执行合同；`src/product/account/contract.zig` 只发布 Account 合同。`src/product/agent_protocol_adapter.zig` 只拥有 Product 到 Agent 的穷举协议映射，不能承载模型执行配置、推断或通用转换。三者都不是新的顶层产品 owner。`src/product/` 只是 Account、Product Control 及其 aggregate 的目录归属，不发布统一 Product facade。
 
 每个 `*.zig` module root 只显式发布消费者需要的类型、函数或窄 namespace。内部文件不得通过无边界 `usingnamespace`、barrel 或 forwarding facade 重新暴露；build graph 中为隔离测试或依赖形成的 leaf module 不因此取得新的 owner 身份。
 

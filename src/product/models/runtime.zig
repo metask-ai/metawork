@@ -1,9 +1,9 @@
-//! Product Control-owned Model Connection runtime.
+//! Product Models runtime owned by Product Control.
 
 const std = @import("std");
-const contract = @import("metawork_product_execution_contract");
-const ports = @import("product_execution_ports");
-const registry_impl = @import("product_execution_model_connections");
+const contract = @import("metawork_product_models_contract");
+const ports = @import("product_models_ports");
+const registry_impl = @import("product_models_connections");
 
 pub const StartError = error{ExecutionDirectoryUnavailable};
 pub const DefaultBinding = registry_impl.Registry.DefaultBinding;

@@ -4,7 +4,7 @@ pub const product_control = @import("metawork_product_control");
 pub const product_skill = @import("metawork_product_skill");
 pub const product_task = @import("metawork_product_task");
 pub const account_contract = @import("metawork_account_contract");
-pub const execution_contract = @import("metawork_product_execution_contract");
+pub const models_contract = @import("metawork_product_models_contract");
 pub const event_pump = @import("event_pump");
 pub const product_control_executor = @import("product_control_executor");
 pub const sdk = @import("metask_agentcore");
@@ -2605,7 +2605,7 @@ pub fn installProductControlExecutionGeneration(
     generation: u64,
 ) !void {
     if (generation == 0) return error.InvalidExecutionGeneration;
-    var execution = try execution_contract.OwnedConfig.initOwned(
+    var execution = try models_contract.OwnedConfig.initOwned(
         std.testing.allocator,
         .metask,
         .anthropic_messages,

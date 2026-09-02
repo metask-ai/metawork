@@ -5,8 +5,8 @@
 const std = @import("std");
 const agent = @import("metawork_agent");
 const account = @import("metawork_account_contract");
-const execution_contract = @import("metawork_product_execution_contract");
-const execution_ports = @import("product_execution_ports");
+const models_contract = @import("metawork_product_models_contract");
+const models_ports = @import("product_models_ports");
 const product_schedule = @import("metawork_product_schedule");
 const mcp = @import("metawork_product_mcp");
 const mcp_contract = mcp.contract;
@@ -18,7 +18,7 @@ pub const AccountCommit = struct {
     fact: account.AccountFact,
     attempt_id: ?u64,
     attempt_terminal: bool,
-    candidate: ?execution_contract.OwnedSourceCandidateTransfer = null,
+    candidate: ?models_contract.OwnedSourceCandidateTransfer = null,
 
     pub fn assertValid(self: AccountCommit) void {
         account.validateFact(self.fact) catch
@@ -40,36 +40,36 @@ pub const AccountCommitSink = struct {
     }
 };
 
-/// Application-facing capability for Execution lifecycle and effects. Product
+/// Application-facing capability for Models lifecycle and effects. Product
 /// Control keeps registry/default-selection transactions behind these calls.
-pub const ExecutionManagement = struct {
+pub const ModelsManagement = struct {
     context: *anyopaque,
-    start_model_connections_fn: *const fn (*anyopaque, []const u8, execution_ports.CredentialVault) anyerror!void,
+    start_model_connections_fn: *const fn (*anyopaque, []const u8, models_ports.CredentialVault) anyerror!void,
     start_model_connections_unavailable_fn: *const fn (*anyopaque) void,
     stop_model_connections_fn: *const fn (*anyopaque) void,
-    create_model_connection_fn: *const fn (*anyopaque, []const u8, execution_contract.ModelConnectionSpec, []const u8, []const u8) execution_contract.CommandResult,
-    submit_model_connection_fn: *const fn (*anyopaque, execution_contract.ModelConnectionCommand) execution_contract.CommandResult,
-    begin_model_connection_probe_fn: *const fn (*anyopaque, execution_contract.ModelConnectionTestCommand) execution_contract.Preparation,
-    complete_model_connection_test_fn: *const fn (*anyopaque, execution_contract.ModelConnectionTestCommand, bool) execution_contract.CommandResult,
-    pub fn startModelConnections(self: ExecutionManagement, directory: []const u8, vault: execution_ports.CredentialVault) anyerror!void {
+    create_model_connection_fn: *const fn (*anyopaque, []const u8, models_contract.ModelConnectionSpec, []const u8, []const u8) models_contract.CommandResult,
+    submit_model_connection_fn: *const fn (*anyopaque, models_contract.ModelConnectionCommand) models_contract.CommandResult,
+    begin_model_connection_probe_fn: *const fn (*anyopaque, models_contract.ModelConnectionTestCommand) models_contract.Preparation,
+    complete_model_connection_test_fn: *const fn (*anyopaque, models_contract.ModelConnectionTestCommand, bool) models_contract.CommandResult,
+    pub fn startModelConnections(self: ModelsManagement, directory: []const u8, vault: models_ports.CredentialVault) anyerror!void {
         try self.start_model_connections_fn(self.context, directory, vault);
     }
-    pub fn startModelConnectionsUnavailable(self: ExecutionManagement) void {
+    pub fn startModelConnectionsUnavailable(self: ModelsManagement) void {
         self.start_model_connections_unavailable_fn(self.context);
     }
-    pub fn stopModelConnections(self: ExecutionManagement) void {
+    pub fn stopModelConnections(self: ModelsManagement) void {
         self.stop_model_connections_fn(self.context);
     }
-    pub fn createModelConnectionWithCredential(self: ExecutionManagement, secret: []const u8, spec: execution_contract.ModelConnectionSpec, model_id: []const u8, display_name: []const u8) execution_contract.CommandResult {
+    pub fn createModelConnectionWithCredential(self: ModelsManagement, secret: []const u8, spec: models_contract.ModelConnectionSpec, model_id: []const u8, display_name: []const u8) models_contract.CommandResult {
         return self.create_model_connection_fn(self.context, secret, spec, model_id, display_name);
     }
-    pub fn submitModelConnectionCommand(self: ExecutionManagement, command: execution_contract.ModelConnectionCommand) execution_contract.CommandResult {
+    pub fn submitModelConnectionCommand(self: ModelsManagement, command: models_contract.ModelConnectionCommand) models_contract.CommandResult {
         return self.submit_model_connection_fn(self.context, command);
     }
-    pub fn beginModelConnectionProbe(self: ExecutionManagement, command: execution_contract.ModelConnectionTestCommand) execution_contract.Preparation {
+    pub fn beginModelConnectionProbe(self: ModelsManagement, command: models_contract.ModelConnectionTestCommand) models_contract.Preparation {
         return self.begin_model_connection_probe_fn(self.context, command);
     }
-    pub fn completeModelConnectionTest(self: ExecutionManagement, command: execution_contract.ModelConnectionTestCommand, succeeded: bool) execution_contract.CommandResult {
+    pub fn completeModelConnectionTest(self: ModelsManagement, command: models_contract.ModelConnectionTestCommand, succeeded: bool) models_contract.CommandResult {
         return self.complete_model_connection_test_fn(self.context, command, succeeded);
     }
 };

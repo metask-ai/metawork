@@ -1,4 +1,4 @@
-//! Product Control-owned execution value contract.
+//! Product Models value contract.
 //!
 //! This leaf owns the protocol axis, frozen execution configuration, and
 //! user-managed model-connection values. It has no runtime, Account, Agent,
@@ -29,7 +29,7 @@ pub const Availability = enum {
     replacing,
 };
 
-/// Stable Product Execution availability cause. Command rejection remains a
+/// Stable Product Models availability cause. Command rejection remains a
 /// separate result and Account never publishes these failures.
 pub const AvailabilityError = enum {
     none,

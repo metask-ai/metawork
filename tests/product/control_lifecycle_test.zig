@@ -2,7 +2,7 @@ const fixture = @import("lifecycle_fixture");
 const std = fixture.std;
 const lifecycle = fixture.lifecycle;
 const product_control = fixture.product_control;
-const execution_contract = fixture.execution_contract;
+const models_contract = fixture.models_contract;
 const product_skill = fixture.product_skill;
 const product_task = fixture.product_task;
 const account_contract = fixture.account_contract;
@@ -1897,7 +1897,7 @@ test "retired Schedule data leaves Account ready and Execution unavailable as a 
             .source_generation = 1,
         },
     });
-    var execution = try execution_contract.OwnedConfig.initOwned(
+    var execution = try models_contract.OwnedConfig.initOwned(
         std.testing.allocator,
         .metask,
         .anthropic_messages,

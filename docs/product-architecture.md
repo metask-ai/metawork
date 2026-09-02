@@ -7,13 +7,13 @@
 Product 由两个 named owner 组成，跨 owner 用例由对应的 Application coordinator 编排：
 
 - Account 拥有 Metask identity、catalog、credential、Metask preference、source generation、source candidate 构造及其内部事务与恢复；
-- Product Control 拥有全局默认来源、Execution aggregate、Product execution generation、已安装的默认 ExecutionConfig、Schedule credential scrub、pending candidate、Workspace、Task、Skill、MCP、共享 Executor、跨 aggregate admission、canonical 产品 projection、revision、产品历史与关闭顺序。Execution aggregate 独占通用 Protocol/ExecutionConfig/source-candidate 合同、user-managed Model Connection registry、credential vault port、测试状态、默认 binding、持久化与恢复。
+- Product Control 拥有全局默认来源、Models aggregate、Product execution generation、已安装的默认 ExecutionConfig、Schedule credential scrub、pending candidate、Workspace、Task、Skill、MCP、共享 Executor、跨 aggregate admission、canonical 产品 projection、revision、产品历史与关闭顺序。Models aggregate 独占通用 Protocol/ExecutionConfig/source-candidate 合同、user-managed Model Connection registry、credential vault port、测试状态、默认 binding、持久化与恢复。
 
 Agent 位于 Product 之外，拥有 MetaWork 对 AgentCore Runtime、Session、Conversation、callback、event pump 与 terminal execution fact 的集成生命周期。Product Control 只调用 Agent 的公共执行能力，不管理 Agent Runtime 生命周期、不读取其内部状态，也不借 Agent 获取通用 I/O。Application 创建和关闭 Agent、安排主线程 wake，并协调 Account 与 Product Control；它不持有领域运行状态，也不独立决定这些 owner 的 policy。
 
-Application 必须分别组装 Account coordinator 与 Execution coordinator。前者只编排 Account Runtime terminal commit 与 optional Metask source candidate 的线性 no-fail handoff；后者只绑定 Execution credential vault、Agent-owned connection probe 与 Execution 管理生命周期。Execution registry 的 CRUD、默认来源选择、恢复、Schedule scrub 和已安装 execution 交接属于 Product Control 内部事务，不得由任一 Application coordinator 通过公开的 `begin/prepare/commit/install/end` 步骤重新拼装。Account unavailable 与 Execution unavailable 必须独立启动、降级和关闭。
+Application 必须分别组装 Account coordinator 与 Models coordinator。前者只编排 Account Runtime terminal commit 与 optional Metask source candidate 的线性 no-fail handoff；后者只绑定 Models credential vault、Agent-owned connection probe 与 Models 管理生命周期。Models registry 的 CRUD、默认来源选择、恢复、Schedule scrub 和已安装 execution 交接属于 Product Control 内部事务，不得由任一 Application coordinator 通过公开的 `begin/prepare/commit/install/end` 步骤重新拼装。Account unavailable 与 Models unavailable 必须独立启动、降级和关闭。
 
-Execution、Workspace、Task、Schedule、Skill 与 MCP 是 Product Control 持有的 aggregate，不形成新的顶层 Product owner。各 aggregate 独占自身状态机、局部事务与持久化 policy；Product Control 只拥有必须同时观察多个 aggregate、execution、publication 或生命周期事实的不变量，不能把局部 policy 重新吸收到组合层。
+Models、Workspace、Task、Schedule、Skill 与 MCP 是 Product Control 持有的 aggregate，不形成新的顶层 Product owner。各 aggregate 独占自身状态机、局部事务与持久化 policy；Product Control 只拥有必须同时观察多个 aggregate、execution、publication 或生命周期事实的不变量，不能把局部 policy 重新吸收到组合层。
 
 Product 事务只使用三种机制：
 
@@ -25,9 +25,9 @@ Product 不建立统一事务引擎、通用 command bus 或 Product event bus�
 
 ## 2. 跨边界事务
 
-### 2.1 Execution aggregate 与 Account handoff
+### 2.1 Models aggregate 与 Account handoff
 
-Account 和 Product Control 是同级 owner，彼此不导入对方 Runtime。Product Execution 是 Product Control 持有的 aggregate，不是第三个顶层 owner；它发布不依赖 Account、Application、Bridge 或 Agent 的纯 `Protocol`、`ExecutionTarget`、`OwnedSourceCandidate`、`ExecutionConfig`、Model Connection command/view 和线性 owned config 合同。Account、Task、Schedule 与 Product Control 都只消费这份合同，不复制 enum，也不通过 Account 合同中转。
+Account 和 Product Control 是同级 owner，彼此不导入对方 Runtime。Models 是 Product Control 持有的 aggregate，不是第三个顶层 owner；它发布不依赖 Account、Application、Bridge 或 Agent 的纯 `Protocol`、`ExecutionTarget`、`OwnedSourceCandidate`、`ExecutionConfig`、Model Connection command/view 和线性 owned config 合同。Account、Task、Schedule 与 Product Control 都只消费这份合同，不复制 enum，也不通过 Account 合同中转。
 
 Metask execution 的运行时数据流为：
 
@@ -97,7 +97,7 @@ Canonical snapshot 同样保持 owner 边界：根 `account` 只投影 Account-o
 
 Product 对每个 Metask authority 最多持有一个 pending candidate，绑定 `account_id + api_key_id + model_id + source_generation`。任一绑定事实变化、默认来源切换到 Model Connection、logout、shutdown 或新 candidate 取代旧 candidate时必须 secure-zero。Schedule store 不可信或 scrub 失败时不得安装 candidate；若存在待退役 active credential，Product 保留其 owner直到 scrub/clear 明确提交。pending candidate 不持久化：冷启动由 Account 恢复 committed preference 后重新解析 candidate，Product 再次 scrub；store 仍不可信时发布 recovery 并等待 canonical hard reset，不回滚 Account preference或跳过 scrub。
 
-`model-connections.json` 是 Execution aggregate 的独立原子 registry，继续位于既有产品数据目录并保持既有 wire shape；它只保存 connection id、display name、protocol、normalized endpoint、有界 model metadata、credential/test status、generation、默认 binding 和待完成 credential deletion tombstone。API credential 只进入系统安全存储；既有 Keychain/service identity 和以 connection id 派生的 account identity 保持不变。旧 `provider` 字段不读取、不迁移、不双写，包含旧 shape 的 registry fail closed 且不得被自动覆盖。
+`model-connections.json` 是 Models aggregate 的独立原子 registry，继续位于既有产品数据目录并保持既有 wire shape；它只保存 connection id、display name、protocol、normalized endpoint、有界 model metadata、credential/test status、generation、默认 binding 和待完成 credential deletion tombstone。API credential 只进入系统安全存储；既有 Keychain/service identity 和以 connection id 派生的 account identity 保持不变。旧 `provider` 字段不读取、不迁移、不双写，包含旧 shape 的 registry fail closed 且不得被自动覆盖。
 
 连接删除先提交 credential cleanup tombstone，再删除系统 credential，最后原子清除 tombstone；创建先提交目标 id tombstone，再写 credential，最后以一次 registry commit 替换为完整连接。启动与后续 mutation 必须排空 tombstone。确认 credential 缺失时撤销对应 default 并持久化 `credential_status = missing`；安全存储暂时不可读不能被误写成已确认缺失。Execution 恢复与 Account identity 恢复相互独立，一方 unavailable 不得使另一方的持久化事实被清空或覆盖。
 
@@ -180,7 +180,7 @@ Credential redaction 是 owner 释放协议，而不是 snapshot 时的偶然过
 4. durable commit 成功后才能转移或 secure-zero 对应 credential ownership；
 5. serializer 继续扫描所有 live credential，作为提交前的第二道防线。
 
-Schedule scrub 明确失败或 outcome unknown 时不得提交新的 Product Execution default，也不得转移默认 execution ownership。Account preference 由 Account 独立 durable commit，不等待 Product scrub；Account terminal commit 后，Product 以 no-fail sink 接收 candidate，再执行可失败 scrub。scrub 未提交时 Product 保留唯一 pending candidate 与旧 active credential owner、关闭不匹配的新 Task admission并发布 Execution recovery；恢复成功后同进程重试，不回滚或重写 Account fact。
+Schedule scrub 明确失败或 outcome unknown 时不得提交新的 Models default，也不得转移默认 execution ownership。Account preference 由 Account 独立 durable commit，不等待 Product scrub；Account terminal commit 后，Product 以 no-fail sink 接收 candidate，再执行可失败 scrub。scrub 未提交时 Product 保留唯一 pending candidate 与旧 active credential owner、关闭不匹配的新 Task admission并发布 Execution recovery；恢复成功后同进程重试，不回滚或重写 Account fact。
 
 Credential 是 opaque bytes。redaction 必须覆盖流式跨 chunk 与 UTF-8 codepoint 边界；多个 credential 前缀重叠时采用最长匹配，不能因替换 secret 产生非法 UTF-8 产品事实。credential、locator、Authorization header 和可重建 secret 的 metadata 不进入 Bridge、Renderer、日志、产品历史或 checkpoint record。
 

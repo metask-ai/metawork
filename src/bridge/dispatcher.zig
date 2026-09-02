@@ -5,7 +5,7 @@
 const std = @import("std");
 const native_sdk = @import("native_sdk");
 const account_contract = @import("metawork_account_contract");
-const execution_contract = @import("metawork_product_execution_contract");
+const models_contract = @import("metawork_product_models_contract");
 const product_control = @import("metawork_product_control");
 const mcp_configuration = @import("metawork_product_mcp").contract;
 const skill_management = @import("metawork_product_skill").management;
@@ -155,7 +155,7 @@ pub const McpSecretSlot = union(enum) {
 /// rollback before returning. Bridge never receives either the secret or an
 /// intermediate credential slot that it could commit separately.
 pub const ModelConnectionCreateOutcome = union(enum) {
-    submitted: execution_contract.CommandResult,
+    submitted: models_contract.CommandResult,
     cancelled,
     unavailable,
 };
@@ -164,7 +164,7 @@ pub const ModelConnectionHost = struct {
     context: *anyopaque,
     create_fn: *const fn (
         *anyopaque,
-        execution_contract.ModelConnectionSpec,
+        models_contract.ModelConnectionSpec,
         []const u8,
         []const u8,
     ) ModelConnectionCreateOutcome,
@@ -194,7 +194,7 @@ pub const Dispatcher = struct {
 
     control: ?*product_control.Runtime,
     account_commands: account_contract.AccountCommandSink,
-    model_connection_commands: execution_contract.CommandSink,
+    model_connection_commands: models_contract.CommandSink,
     platform: Platform,
     automation: AutomationAuthority,
     mcp_management_host: ?McpManagementHost = null,
@@ -219,7 +219,7 @@ pub const Dispatcher = struct {
         allocator: std.mem.Allocator,
         control: *product_control.Runtime,
         account_commands: account_contract.AccountCommandSink,
-        model_connection_commands: execution_contract.CommandSink,
+        model_connection_commands: models_contract.CommandSink,
         platform: Platform,
         automation: AutomationAuthority,
         bootstrap_window_id: native_sdk.platform.WindowId,
@@ -1269,25 +1269,25 @@ pub const Dispatcher = struct {
         defer parsed.deinit();
         const protocol = parseProtocol(parsed.value.protocol) orelse
             return error.InvalidBridgePayload;
-        const normalized_base_url = execution_contract.normalizeModelConnectionEndpointAlloc(
+        const normalized_base_url = models_contract.normalizeModelConnectionEndpointAlloc(
             std.heap.c_allocator,
             protocol,
             parsed.value.normalizedBaseUrl,
         ) catch return error.InvalidBridgePayload;
         defer std.heap.c_allocator.free(normalized_base_url);
         if (parsed.value.displayName.len == 0 or
-            parsed.value.displayName.len > execution_contract.Limits.display_name_bytes or
+            parsed.value.displayName.len > models_contract.Limits.display_name_bytes or
             parsed.value.normalizedBaseUrl.len == 0 or
-            parsed.value.normalizedBaseUrl.len > execution_contract.Limits.base_url_bytes or
+            parsed.value.normalizedBaseUrl.len > models_contract.Limits.base_url_bytes or
             parsed.value.modelId.len == 0 or
-            parsed.value.modelId.len > execution_contract.Limits.model_id_bytes)
+            parsed.value.modelId.len > models_contract.Limits.model_id_bytes)
             return error.InvalidBridgePayload;
-        const spec: execution_contract.ModelConnectionSpec = .{
+        const spec: models_contract.ModelConnectionSpec = .{
             .display_name = parsed.value.displayName,
             .protocol = protocol,
             .normalized_base_url = normalized_base_url,
         };
-        execution_contract.validateModelConnectionSpec(spec) catch
+        models_contract.validateModelConnectionSpec(spec) catch
             return error.InvalidBridgePayload;
         const host = self.model_connection_host orelse
             return encodeExecutionResult(
@@ -1319,18 +1319,18 @@ pub const Dispatcher = struct {
         defer parsed.deinit();
         const protocol = parseProtocol(parsed.value.protocol) orelse
             return error.InvalidBridgePayload;
-        const normalized_base_url = execution_contract.normalizeModelConnectionEndpointAlloc(
+        const normalized_base_url = models_contract.normalizeModelConnectionEndpointAlloc(
             std.heap.c_allocator,
             protocol,
             parsed.value.normalizedBaseUrl,
         ) catch return error.InvalidBridgePayload;
         defer std.heap.c_allocator.free(normalized_base_url);
-        const spec: execution_contract.ModelConnectionSpec = .{
+        const spec: models_contract.ModelConnectionSpec = .{
             .display_name = parsed.value.displayName,
             .protocol = protocol,
             .normalized_base_url = normalized_base_url,
         };
-        execution_contract.validateModelConnectionSpec(spec) catch
+        models_contract.validateModelConnectionSpec(spec) catch
             return error.InvalidBridgePayload;
         return encodeExecutionResult(output, self.model_connection_commands.submit(.{
             .update = .{
@@ -1392,7 +1392,7 @@ pub const Dispatcher = struct {
         try self.requireManagementAuthority(invocation.source.window_id);
         var parsed = try handlers.parsePayload(handlers.ModelConnectionModelSelection, invocation.request.payload);
         defer parsed.deinit();
-        const command: execution_contract.ModelConnectionCommand = if (select_default)
+        const command: models_contract.ModelConnectionCommand = if (select_default)
             .{ .select_default = .{
                 .selection = .{
                     .connection_id = parsed.value.connectionId,
@@ -1411,8 +1411,8 @@ pub const Dispatcher = struct {
         return encodeExecutionResult(output, self.model_connection_commands.submit(command));
     }
 
-    fn parseProtocol(value: []const u8) ?execution_contract.Protocol {
-        return std.meta.stringToEnum(execution_contract.Protocol, value);
+    fn parseProtocol(value: []const u8) ?models_contract.Protocol {
+        return std.meta.stringToEnum(models_contract.Protocol, value);
     }
 
     fn chooseWorkspace(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
@@ -3380,7 +3380,7 @@ fn encodeAccountResult(
 
 fn encodeExecutionResult(
     output: []u8,
-    result: execution_contract.CommandResult,
+    result: models_contract.CommandResult,
 ) ![]const u8 {
     const error_code: []const u8 = if (result.accepted)
         "none"
@@ -4188,19 +4188,19 @@ test "Execution command responses preserve the existing Bridge error vocabulary"
         try encodeExecutionResult(&output, .acceptedResult()),
     );
     inline for (.{
-        .{ execution_contract.ManagementError.invalid_connection, "model_connection_invalid" },
-        .{ execution_contract.ManagementError.connection_not_found, "model_connection_not_found" },
-        .{ execution_contract.ManagementError.generation_mismatch, "generation_mismatch" },
-        .{ execution_contract.ManagementError.model_not_found, "no_models" },
-        .{ execution_contract.ManagementError.capacity, "local_resource_exhausted" },
-        .{ execution_contract.ManagementError.persistence_unavailable, "model_connection_persistence_unavailable" },
-        .{ execution_contract.ManagementError.capture_unavailable, "model_connection_capture_unavailable" },
-        .{ execution_contract.ManagementError.credential_write_failed, "credential_store_write_failed" },
-        .{ execution_contract.ManagementError.execution_in_use, "execution_in_use" },
-        .{ execution_contract.ManagementError.operation_in_progress, "operation_in_progress" },
-        .{ execution_contract.ManagementError.test_unavailable, "model_connection_test_unavailable" },
-        .{ execution_contract.ManagementError.user_cancelled, "user_cancelled" },
-        .{ execution_contract.ManagementError.local_resource_exhausted, "local_resource_exhausted" },
+        .{ models_contract.ManagementError.invalid_connection, "model_connection_invalid" },
+        .{ models_contract.ManagementError.connection_not_found, "model_connection_not_found" },
+        .{ models_contract.ManagementError.generation_mismatch, "generation_mismatch" },
+        .{ models_contract.ManagementError.model_not_found, "no_models" },
+        .{ models_contract.ManagementError.capacity, "local_resource_exhausted" },
+        .{ models_contract.ManagementError.persistence_unavailable, "model_connection_persistence_unavailable" },
+        .{ models_contract.ManagementError.capture_unavailable, "model_connection_capture_unavailable" },
+        .{ models_contract.ManagementError.credential_write_failed, "credential_store_write_failed" },
+        .{ models_contract.ManagementError.execution_in_use, "execution_in_use" },
+        .{ models_contract.ManagementError.operation_in_progress, "operation_in_progress" },
+        .{ models_contract.ManagementError.test_unavailable, "model_connection_test_unavailable" },
+        .{ models_contract.ManagementError.user_cancelled, "user_cancelled" },
+        .{ models_contract.ManagementError.local_resource_exhausted, "local_resource_exhausted" },
     }) |case| {
         const encoded = try encodeExecutionResult(&output, .rejected(case[0]));
         var parsed = try std.json.parseFromSlice(
@@ -4447,8 +4447,8 @@ test "Dispatcher validates authority before domain calls and preserves committed
 
         fn submitModelConnection(
             context: *anyopaque,
-            _: execution_contract.ModelConnectionCommand,
-        ) execution_contract.CommandResult {
+            _: models_contract.ModelConnectionCommand,
+        ) models_contract.CommandResult {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.account_calls += 1;
             return if (self.account_result.accepted)

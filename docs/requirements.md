@@ -65,7 +65,7 @@ File Changes 是一次 Run 内由 AgentCore typed `file_changes` observation 记
 
 ### Account、模型连接与 ExecutionConfig
 
-Account 是 MetaWork 的 Metask 账号控制面，负责 OAuth 登录、当前已验证 identity、Metask API Key/模型目录、凭据安全存储、Metask preference 与 source authority；它可以在自身事实完整时构造不含 Product generation 的一次性 source candidate。Product Control 的 Execution aggregate 拥有全局默认来源、Product execution generation、Schedule credential scrub、安装/recovery、新 Task admission和用户管理的 Model Connection registry，并发布两种来源共用的 `Protocol`、`ExecutionTarget`、source candidate 与 `ExecutionConfig` 合同。Product Control 持有一个当前默认 `ExecutionConfig`，来源可以是 Metask managed connection 或 user-managed Model Connection；配置包含 typed `protocol + model + base_url`、API credential 和 `execution_generation`，Task 为实际运行取得 owned copy。durable Task 与历史记录不是 Account identity、Model Connection identity 或 credential 的副本，只保存解释历史所需的 Workspace、protocol、model、opaque execution generation 和 binding facts。
+Account 是 MetaWork 的 Metask 账号控制面，负责 OAuth 登录、当前已验证 identity、Metask API Key/模型目录、凭据安全存储、Metask preference 与 source authority；它可以在自身事实完整时构造不含 Product generation 的一次性 source candidate。Product Control 的 Models aggregate 拥有全局默认来源、Product execution generation、Schedule credential scrub、安装/recovery、新 Task admission和用户管理的 Model Connection registry，并发布两种来源共用的 `Protocol`、`ExecutionTarget`、source candidate 与 `ExecutionConfig` 合同。Product Control 持有一个当前默认 `ExecutionConfig`，来源可以是 Metask managed connection 或 user-managed Model Connection；配置包含 typed `protocol + model + base_url`、API credential 和 `execution_generation`，Task 为实际运行取得 owned copy。durable Task 与历史记录不是 Account identity、Model Connection identity 或 credential 的副本，只保存解释历史所需的 Workspace、protocol、model、opaque execution generation 和 binding facts。
 
 ### Scheduled Task
 
@@ -104,7 +104,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 
 - 普通用户通过 Metask OAuth 登录，不需要手工填写 protocol、model、base URL 或 API Key；
 - Metask managed connection 继续遵循 OAuth、API Key catalog 和 fixed protocol/base URL 合同；用户管理的 Model Connection 不要求 Metask 登录，但必须先显式创建、验证并安装到 Host-owned execution registry；
-- `AccountView` 只发布 Metask 的 `state`、`catalogState`、脱敏 identity/catalog/selection、`catalogGeneration`、`canCancel` 和稳定错误；Account source generation 只进入 Host 内部 authority fact/candidate，不进入 Renderer。Account 不发布默认执行来源、已安装 execution generation、新 Task admission 或 Model Connection。Product Execution 以独立的 `ExecutionView` 发布默认/当前来源、安装状态、新 Task admission、active generation 与脱敏 Model Connection projection；不得把 custom connection、Schedule/Product failure 或 Product Task 状态塞进 Metask OAuth 状态机；
+- `AccountView` 只发布 Metask 的 `state`、`catalogState`、脱敏 identity/catalog/selection、`catalogGeneration`、`canCancel` 和稳定错误；Account source generation 只进入 Host 内部 authority fact/candidate，不进入 Renderer。Account 不发布默认执行来源、已安装 execution generation、新 Task admission 或 Model Connection。Product Models 以独立的 `ExecutionView` 发布默认/当前来源、安装状态、新 Task admission、active generation 与脱敏 Model Connection projection；不得把 custom connection、Schedule/Product failure 或 Product Task 状态塞进 Metask OAuth 状态机；
 - `checking` 与 `authorizing` 可以暂时占用登录表面；`signed_out` 在没有 ready user-managed Model Connection 时禁止新 Task admission，但不隐藏 Workspace、durable Task 或历史记录。Model Connection 设置入口在 management、secure capture、连接测试等产品能力形成完整 gate 前整体隐藏；已有 live Task 仍必须可查看和停止；
 - 登录无效即进入 `signed_out`。Renderer 只提供统一的 `beginLogin`，不保留“重新认证”“重新打开登录页”“匹配上次账号”等分支；
 - OAuth 浏览器授权、identity 提交和执行目录准备不得暴露内部 C1/C2、operation、generation 或凭据存储步骤；
@@ -126,7 +126,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - durable Task 和 Run 不保存 account id、Metask API Key id/name/suffix、完整 custom credential、credential locator 或 Model Connection identity。恢复记录只保存 Workspace binding、protocol、model、opaque execution generation 和其他无 secret binding facts；运行时配置不可恢复时必须显式进入 `runtime_detached`/恢复路径，不得伪造 Session、secret 或可继续执行能力；
 - 显式重新登录、切换账号、退出登录或清除设备凭据只按 Account 自身 identity/credential transaction 收口，不得等待 Product replacement、Schedule scrub、Task、Session、Run、executor job 或 worker reference。既有 Task/Session 已拥有的 ExecutionConfig 继续按原生命周期收口；成功退出清除 Account-owned 设备凭据和 Metask preference，不宣称撤销已经交付给 live Task 的运行时配置，也不得撤销独立的 user-managed Model Connection 默认。Product 随后观察 Account authority 变化，独立处理 active Metask credential、default binding、Schedule scrub 与 admission；失败只进入 Execution/Schedule recovery，不回滚 logout。OAuth 成功后以本次 token 返回的 `account_id` 替换本机账号，旧缓存 identity 不得否决显式登录；
 - refresh token 成功轮换后必须先原子提交新 token，后续 catalog 失败不得回滚到已作废的旧 token；明确鉴权无效关闭新的执行 admission，但已被 live Run 拥有的配置按其生命周期正常收口；
-- New Task 尚未形成自身 aggregate，其 admission 只由 Product Control 根据 Product Execution 与 Workspace authority 决定：Metask default 要求 committed Account authority 与 Product active binding 精确一致且 Schedule persistence 可用，user-managed Model Connection 要求 ready 且已安装所选 connection generation；两者都要求 Workspace intent 可解析且 Product reconciliation/replacement 未阻塞。Account 只提供 Metask 事实，不能直接允许或阻塞 Product Task；Automatic intent 要求 automatic root capability，Manual intent 要求目标 Manual Workspace grant 与 epoch 有效；
+- New Task 尚未形成自身 aggregate，其 admission 只由 Product Control 根据 Models execution readiness 与 Workspace authority 决定：Metask default 要求 committed Account authority 与 Product active binding 精确一致且 Schedule persistence 可用，user-managed Model Connection 要求 ready 且已安装所选 connection generation；两者都要求 Workspace intent 可解析且 Product reconciliation/replacement 未阻塞。Account 只提供 Metask 事实，不能直接允许或阻塞 Product Task；Automatic intent 要求 automatic root capability，Manual intent 要求目标 Manual Workspace grant 与 epoch 有效；
 - production Account 接入、Metask 消费合同、内部状态、事务和提交必须符合 [Account 架构](account-architecture.md)。C1 OAuth/login 先独立提交 token rotation，再以严格 `/me` 交付 authenticated identity；C2 使用无 Profile header 的 OAuth API Key catalog 与直接 API Key model catalog，并从精确 `group.platform` 形成 fixed source candidate。Account preference terminal commit 不等待 Product/Schedule；Product 在 candidate 完成 scrub/install 且 active binding 与 committed authority 一致前拒绝相关新 Task，但不能隐藏 durable history。既有 live Task 的后续 Run 只服从其自身 binding、ExecutionConfig、Session 与 active-operation gate，不因 Account mutation 或当前默认 generation 漂移而被统一阻塞。
 
 ### 5.3 Task
@@ -284,7 +284,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - Renderer 按不可信调用方处理；
 - Host 命令默认拒绝，只开放白名单；
 - 校验来源、payload、Workspace、Task/Run 归属和权限；
-- production 执行配置只由 Account 的 Metask adapter 或 Product Execution registry 生成，并经主线程一致性提交链安装到 Product Control；禁止环境默认值、Renderer 字段或 Bridge payload 直接注入 protocol/base URL/credential。Renderer 只可提交 Account 当前脱敏 catalog 或 Model Connection projection 中的稳定 API/model/connection identifier；对应 owner 必须重新校验并从锁定合同生成配置；
+- production 执行配置只由 Account 的 Metask adapter 或 Product Models registry 生成，并经主线程一致性提交链安装到 Product Control；禁止环境默认值、Renderer 字段或 Bridge payload 直接注入 protocol/base URL/credential。Renderer 只可提交 Account 当前脱敏 catalog 或 Model Connection projection 中的稳定 API/model/connection identifier；对应 owner 必须重新校验并从锁定合同生成配置；
 - API credential 不得进入 Renderer、Bridge、日志、事件或视图 snapshot；
 - OAuth token、PKCE verifier、authorization code、完整 API Key 和 Authorization header 必须使用单 owner secret buffer，所有失败、取消、过期 completion、replacement 和 shutdown 路径都先不可消除地清零再释放；
 - Host 必须在形成产品 projection 前移除已知 Host-held credential 和 schema 标记的 secret 字段，并对命令与工具输出设置明确上限和 truncation 状态；不得把秘密过滤责任推给 Renderer；

@@ -2,7 +2,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const contract = @import("metawork_account_contract");
-const execution_contract = @import("metawork_product_execution_contract");
+const models_contract = @import("metawork_product_models_contract");
 const metask = @import("metask_client");
 
 pub const api_keys_url = metask.api_keys_url;
@@ -137,7 +137,7 @@ const ApiKeyEntry = struct {
     id: ApiKeyId,
     name: ApiKeyName,
     suffix: ApiKeySuffix,
-    protocol: execution_contract.Protocol,
+    protocol: models_contract.Protocol,
     secret: Secret,
 
     fn deinit(self: *ApiKeyEntry) void {
@@ -263,7 +263,7 @@ pub const CatalogSession = struct {
         self: *CatalogSession,
         model_id: []const u8,
         metask_source_generation: u64,
-    ) Error!execution_contract.OwnedSourceCandidate {
+    ) Error!models_contract.OwnedSourceCandidate {
         if (metask_source_generation == 0)
             return error.SourceCandidateInvalid;
         const key_index = self.selected_key_index orelse
@@ -291,7 +291,7 @@ pub const CatalogSession = struct {
         const transferred_base_url = owned_base_url.?;
         owned_model = null;
         owned_base_url = null;
-        var result = execution_contract.OwnedSourceCandidate.initOwned(
+        var result = models_contract.OwnedSourceCandidate.initOwned(
             self.allocator,
             .metask,
             entry.protocol,
@@ -433,7 +433,7 @@ const PublicApiKey = struct {
     id: PublicText(contract.Limits.api_key_id_bytes) = .{},
     name: PublicText(contract.Limits.api_key_name_bytes) = .{},
     suffix: PublicText(contract.Limits.api_key_suffix_bytes) = .{},
-    protocol: execution_contract.Protocol = .anthropic_messages,
+    protocol: models_contract.Protocol = .anthropic_messages,
 };
 
 const PublicModel = struct {
@@ -515,7 +515,7 @@ pub const PublicCatalog = struct {
     pub fn replaceRestoredSelection(
         self: *PublicCatalog,
         api_key_id: []const u8,
-        protocol: execution_contract.Protocol,
+        protocol: models_contract.Protocol,
         model_id: []const u8,
     ) void {
         std.debug.assert(api_key_id.len > 0);
@@ -547,7 +547,7 @@ pub const PublicCatalog = struct {
     pub fn protocolForApiKey(
         self: *const PublicCatalog,
         id: []const u8,
-    ) ?execution_contract.Protocol {
+    ) ?models_contract.Protocol {
         for (self.api_keys[0..self.api_key_count]) |*entry|
             if (std.mem.eql(u8, entry.id.view(), id)) return entry.protocol;
         return null;
@@ -984,7 +984,7 @@ fn parseModels(
     return result;
 }
 
-fn protocolForPlatform(platform: []const u8) ?execution_contract.Protocol {
+fn protocolForPlatform(platform: []const u8) ?models_contract.Protocol {
     if (std.mem.eql(u8, platform, "anthropic")) return .anthropic_messages;
     if (std.mem.eql(u8, platform, "openai")) return .openai_chat_completions;
     if (std.mem.eql(u8, platform, "gemini")) return .gemini_native;
@@ -999,7 +999,7 @@ fn jsonScratchSize(body_len: usize) usize {
     );
 }
 
-fn baseUrl(protocol: execution_contract.Protocol) ?[]const u8 {
+fn baseUrl(protocol: models_contract.Protocol) ?[]const u8 {
     return switch (protocol) {
         .openai_responses => null,
         .anthropic_messages => anthropic_messages_url,
@@ -1223,7 +1223,7 @@ test "live-shape catalogs expose only masked views and move one key owner" {
     var candidate = try session.prepareSourceCandidate("model-1", 1);
     defer candidate.deinit();
     try std.testing.expectEqual(
-        execution_contract.Protocol.anthropic_messages,
+        models_contract.Protocol.anthropic_messages,
         candidate.input().target.protocol,
     );
     try std.testing.expectEqualStrings(
@@ -1273,7 +1273,7 @@ test "catalog maps Gemini platform to AgentCore Gemini target" {
     var candidate = try session.prepareSourceCandidate("model-1", 1);
     defer candidate.deinit();
     try std.testing.expectEqual(
-        execution_contract.Protocol.gemini_native,
+        models_contract.Protocol.gemini_native,
         candidate.input().target.protocol,
     );
     try std.testing.expectEqualStrings(
