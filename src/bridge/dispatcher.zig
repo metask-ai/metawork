@@ -104,6 +104,7 @@ pub const AutomationAuthority = struct {
     context: ?*anyopaque = null,
     active_fn: *const fn (?*anyopaque) bool = inactive,
     workspace_root_fn: *const fn (?*anyopaque) ?[]const u8 = noAutomationWorkspace,
+    attachment_paths_fn: *const fn (?*anyopaque) ?[]const u8 = noAutomationAttachments,
 
     fn active(self: AutomationAuthority) bool {
         return self.active_fn(self.context);
@@ -111,6 +112,10 @@ pub const AutomationAuthority = struct {
 
     fn workspaceRoot(self: AutomationAuthority) ?[]const u8 {
         return self.workspace_root_fn(self.context);
+    }
+
+    fn attachmentPaths(self: AutomationAuthority) ?[]const u8 {
+        return self.attachment_paths_fn(self.context);
     }
 };
 
@@ -1000,18 +1005,33 @@ pub const Dispatcher = struct {
             .name = "Images and PDF documents",
             .extensions = &.{ "png", "jpg", "jpeg", "webp", "pdf" },
         }};
-        const selected = self.platform.show_open_dialog_fn(
-            self.platform.context,
-            .{
-                .title = "Choose images or PDF documents",
-                .filters = &filters,
-                .allow_directories = false,
-                .allow_multiple = true,
-            },
-            &dialog_storage,
-        ) catch {
-            respondAttachmentRejected(responder, invocation.request.id, .read_failed);
-            return;
+        const selected = if (self.automation.active()) automation: {
+            const paths = self.automation.attachmentPaths() orelse {
+                respondAttachmentRejected(responder, invocation.request.id, .read_failed);
+                return;
+            };
+            const count = countAutomationAttachmentPaths(paths) orelse {
+                respondAttachmentRejected(responder, invocation.request.id, .read_failed);
+                return;
+            };
+            break :automation native_sdk.platform.OpenDialogResult{
+                .paths = paths,
+                .count = count,
+            };
+        } else user: {
+            break :user self.platform.show_open_dialog_fn(
+                self.platform.context,
+                .{
+                    .title = "Choose images or PDF documents",
+                    .filters = &filters,
+                    .allow_directories = false,
+                    .allow_multiple = true,
+                },
+                &dialog_storage,
+            ) catch {
+                respondAttachmentRejected(responder, invocation.request.id, .read_failed);
+                return;
+            };
         };
         if (selected.count == 0) {
             respondAttachmentCancelled(responder, invocation.request.id);
@@ -4639,6 +4659,32 @@ fn unavailableRandom(_: ?*anyopaque, _: []u8) bool {
 
 fn noAutomationWorkspace(_: ?*anyopaque) ?[]const u8 {
     return null;
+}
+
+fn noAutomationAttachments(_: ?*anyopaque) ?[]const u8 {
+    return null;
+}
+
+fn countAutomationAttachmentPaths(paths: []const u8) ?usize {
+    if (paths.len == 0) return null;
+    var count: usize = 0;
+    var split = std.mem.splitScalar(u8, paths, '\n');
+    while (split.next()) |path| {
+        if (path.len == 0) return null;
+        count += 1;
+    }
+    return count;
+}
+
+test "automation attachment path batches preserve platform selection cardinality" {
+    try std.testing.expectEqual(
+        @as(?usize, 2),
+        countAutomationAttachmentPaths("/tmp/one.png\n/tmp/two.pdf"),
+    );
+    try std.testing.expectEqual(@as(?usize, 1), countAutomationAttachmentPaths("/tmp/one.png"));
+    try std.testing.expectEqual(@as(?usize, null), countAutomationAttachmentPaths(""));
+    try std.testing.expectEqual(@as(?usize, null), countAutomationAttachmentPaths("/tmp/one.png\n"));
+    try std.testing.expectEqual(@as(?usize, null), countAutomationAttachmentPaths("\n/tmp/two.pdf"));
 }
 
 test "Dispatcher validates authority before domain calls and preserves committed state on response loss" {

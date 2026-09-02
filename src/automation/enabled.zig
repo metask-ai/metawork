@@ -12,12 +12,13 @@ pub const enabled = true;
 
 const activation_env = "METAWORK_AUTOMATION";
 const workspace_env = "METAWORK_AUTOMATION_WORKSPACE";
+const attachments_env = "METAWORK_AUTOMATION_ATTACHMENTS";
 const inline_origin = "zero://inline";
 const allowed_origins = [_][]const u8{ "zero://app", inline_origin };
 const agentcore_vertical_provider_base_url_env =
     "METAWORK_AGENTCORE_VERTICAL_PROVIDER_BASE_URL";
 const agentcore_vertical_credential = "metawork-agentcore-vertical-fixture-key";
-const agentcore_vertical_model = "metawork-agentcore-vertical-fixture-model";
+const agentcore_vertical_model = "claude-sonnet-4-20250514";
 
 pub const ExecutionFixture = struct {
     protocol: execution_contract.Protocol,
@@ -67,6 +68,16 @@ pub const Runtime = struct {
         const env_map = self.env_map orelse return null;
         const root = env_map.get(workspace_env) orelse return null;
         return if (root.len == 0) null else root;
+    }
+
+    /// Returns the paths selected by the desktop vertical harness. The
+    /// Dispatcher feeds them through the ordinary `attachments.choose`
+    /// command, including Product validation and grant issuance.
+    pub fn attachmentPaths(self: *const Runtime) ?[]const u8 {
+        if (!self.active()) return null;
+        const env_map = self.env_map orelse return null;
+        const paths = env_map.get(attachments_env) orelse return null;
+        return if (paths.len == 0) null else paths;
     }
 
     /// Keeps AgentCore personal-source discovery inside the same temporary
@@ -147,5 +158,23 @@ test "automation workspace is an explicit activation-scoped capability" {
     try std.testing.expectEqualStrings(
         "/tmp/metawork-automation",
         runtime.canonicalUserHome().?,
+    );
+}
+
+test "automation attachments are an explicit activation-scoped capability" {
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    var runtime = Runtime.init(&env);
+    defer runtime.deinit();
+
+    try std.testing.expectEqual(@as(?[]const u8, null), runtime.attachmentPaths());
+    try env.put(activation_env, "1");
+    try std.testing.expectEqual(@as(?[]const u8, null), runtime.attachmentPaths());
+    try env.put(attachments_env, "");
+    try std.testing.expectEqual(@as(?[]const u8, null), runtime.attachmentPaths());
+    try env.put(attachments_env, "/tmp/one.png\n/tmp/two.pdf");
+    try std.testing.expectEqualStrings(
+        "/tmp/one.png\n/tmp/two.pdf",
+        runtime.attachmentPaths().?,
     );
 }
