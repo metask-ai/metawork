@@ -259,12 +259,12 @@ pub const CatalogSession = struct {
         self.selected_key_index = index;
     }
 
-    pub fn prepareExecution(
+    pub fn prepareSourceCandidate(
         self: *CatalogSession,
         model_id: []const u8,
-        execution_generation: u64,
-    ) Error!execution_contract.OwnedConfig {
-        if (execution_generation == 0)
+        metask_source_generation: u64,
+    ) Error!execution_contract.OwnedSourceCandidate {
+        if (metask_source_generation == 0)
             return error.ExecutionTargetInvalid;
         const key_index = self.selected_key_index orelse
             return error.ApiKeyNotFound;
@@ -291,18 +291,18 @@ pub const CatalogSession = struct {
         const transferred_base_url = owned_base_url.?;
         owned_model = null;
         owned_base_url = null;
-        var result = execution_contract.OwnedConfig.initOwned(
+        var result = execution_contract.OwnedSourceCandidate.initOwned(
             self.allocator,
             .metask,
             entry.protocol,
             transferred_model,
             transferred_base_url,
-            execution_generation,
+            metask_source_generation,
             owned_secret,
             entry.id.view(),
         ) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.ExecutionTargetInvalid;
         errdefer result.deinit();
-        contract.validateExecutionConfig(result.input()) catch
+        contract.validateSourceCandidate(result.input()) catch
             return error.ExecutionTargetInvalid;
         return result;
     }
@@ -449,6 +449,7 @@ const PublicModel = struct {
 /// state changes read only those secret-free caches, so cancel and shutdown
 /// never race worker-owned secrets.
 pub const PublicCatalog = struct {
+    model_catalog_api_key_id: PublicText(contract.Limits.api_key_id_bytes) = .{},
     api_keys: [contract.Limits.api_key_entries]PublicApiKey =
         @splat(.{}),
     api_key_views: [contract.Limits.api_key_entries]contract.ApiKeyView =
@@ -463,6 +464,7 @@ pub const PublicCatalog = struct {
         self: *PublicCatalog,
         session: *const CatalogSession,
     ) void {
+        self.model_catalog_api_key_id.set(session.selectedApiKeyId());
         var api_key_views: [contract.Limits.api_key_entries]contract.ApiKeyView =
             undefined;
         const source_api_keys = session.writeApiKeyViews(&api_key_views);
@@ -501,6 +503,7 @@ pub const PublicCatalog = struct {
             self.api_keys[index] = key;
         for (source.models[0..source.model_count], 0..) |model, index|
             self.models[index] = model;
+        self.model_catalog_api_key_id = source.model_catalog_api_key_id;
         self.api_key_count = source.api_key_count;
         self.model_count = source.model_count;
     }
@@ -518,6 +521,7 @@ pub const PublicCatalog = struct {
         std.debug.assert(api_key_id.len > 0);
         std.debug.assert(model_id.len > 0);
         self.api_key_count = 1;
+        self.model_catalog_api_key_id.set(api_key_id);
         self.api_keys[0].id.set(api_key_id);
         self.api_keys[0].name.set("");
         self.api_keys[0].suffix.set("");
@@ -529,6 +533,7 @@ pub const PublicCatalog = struct {
     }
 
     pub fn clear(self: *PublicCatalog) void {
+        self.model_catalog_api_key_id.set("");
         self.api_key_count = 0;
         self.model_count = 0;
     }
@@ -537,6 +542,15 @@ pub const PublicCatalog = struct {
         for (self.api_keys[0..self.api_key_count]) |*entry|
             if (std.mem.eql(u8, entry.id.view(), id)) return true;
         return false;
+    }
+
+    pub fn protocolForApiKey(
+        self: *const PublicCatalog,
+        id: []const u8,
+    ) ?execution_contract.Protocol {
+        for (self.api_keys[0..self.api_key_count]) |*entry|
+            if (std.mem.eql(u8, entry.id.view(), id)) return entry.protocol;
+        return null;
     }
 
     pub fn hasModel(self: *const PublicCatalog, id: []const u8) bool {
@@ -572,6 +586,7 @@ pub const PublicCatalog = struct {
         }
         view.api_keys = self.api_key_views[0..self.api_key_count];
         view.models = self.model_views[0..self.model_count];
+        view.model_catalog_api_key_id = self.model_catalog_api_key_id.view();
     }
 };
 
@@ -629,6 +644,9 @@ pub const TestSupport = if (builtin.is_test) struct {
     ) void {
         std.debug.assert(api_keys.len <= catalog.api_keys.len);
         std.debug.assert(models.len <= catalog.models.len);
+        catalog.model_catalog_api_key_id.set(
+            if (models.len == 0 or api_keys.len == 0) "" else api_keys[0].id,
+        );
         catalog.api_key_count = api_keys.len;
         for (api_keys, catalog.api_keys[0..api_keys.len]) |source, *target| {
             target.id.set(source.id);
@@ -1202,7 +1220,7 @@ test "live-shape catalogs expose only masked views and move one key owner" {
     var public_catalog: PublicCatalog = .{};
     public_catalog.replaceFromSession(&session);
 
-    var execution = try session.prepareExecution("model-1", 1);
+    var execution = try session.prepareSourceCandidate("model-1", 1);
     defer execution.deinit();
     try std.testing.expectEqual(
         execution_contract.Protocol.anthropic_messages,
@@ -1218,7 +1236,7 @@ test "live-shape catalogs expose only masked views and move one key owner" {
     );
     try std.testing.expectError(
         error.ApiKeyNotFound,
-        session.prepareExecution("model-1", 2),
+        session.prepareSourceCandidate("model-1", 2),
     );
     session.reset();
     var public_view: contract.AccountView = .{
@@ -1252,7 +1270,7 @@ test "catalog maps Gemini platform to AgentCore Gemini target" {
     var models = try parseModels(std.testing.allocator, model_fixture);
     session.models = models.entries;
     models.entries = .empty;
-    var execution = try session.prepareExecution("model-1", 1);
+    var execution = try session.prepareSourceCandidate("model-1", 1);
     defer execution.deinit();
     try std.testing.expectEqual(
         execution_contract.Protocol.gemini_native,

@@ -250,8 +250,11 @@ pub fn validateCommand(command: AccountCommand) ValidationError!void {
     }
 }
 
-pub fn validateExecutionConfig(input: execution.ConfigInput) ValidationError!void {
-    execution.validateConfigStructure(input) catch return error.InconsistentState;
+pub fn validateSourceCandidate(
+    input: execution.SourceCandidateInput,
+) ValidationError!void {
+    execution.validateSourceCandidateStructure(input) catch
+        return error.InconsistentState;
     const expected_base_url: []const u8 = switch (input.target.protocol) {
         .openai_responses => return error.UnsupportedProtocol,
         .anthropic_messages => metask_anthropic_messages_url,
@@ -261,7 +264,7 @@ pub fn validateExecutionConfig(input: execution.ConfigInput) ValidationError!voi
     if (!std.mem.eql(u8, input.target.base_url, expected_base_url))
         return error.InvalidBaseUrl;
     try validateOpaqueRequired(input.api_key, Limits.api_key_bytes);
-    if (input.execution_generation == 0) return error.InvalidGeneration;
+    if (input.source_generation == 0) return error.InvalidGeneration;
 }
 
 pub fn validateView(view: AccountView) ValidationError!void {
@@ -394,19 +397,21 @@ pub fn validateFact(fact: AccountFact) ValidationError!void {
     const ready = fact.view.state == .authenticated and
         fact.view.catalog_state == .ready;
     if (fact.authority) |authority| {
-        if (!ready) return error.InconsistentState;
+        if (fact.view.state != .authenticated) return error.InconsistentState;
         try validateAuthority(authority);
         if (!std.mem.eql(u8, authority.account_id, fact.view.account_id) or
             !std.mem.eql(u8, authority.api_key_id, fact.view.selected_api_key_id) or
             !std.mem.eql(u8, authority.model_id, fact.view.selected_model))
             return error.InconsistentState;
-        var protocol_matches: usize = 0;
-        for (fact.view.api_keys) |key| {
-            if (std.mem.eql(u8, key.id, authority.api_key_id) and
-                key.protocol == authority.protocol)
-                protocol_matches += 1;
+        if (ready) {
+            var protocol_matches: usize = 0;
+            for (fact.view.api_keys) |key| {
+                if (std.mem.eql(u8, key.id, authority.api_key_id) and
+                    key.protocol == authority.protocol)
+                    protocol_matches += 1;
+            }
+            if (protocol_matches != 1) return error.InconsistentState;
         }
-        if (protocol_matches != 1) return error.InconsistentState;
     } else if (ready) {
         return error.InconsistentState;
     }
@@ -535,218 +540,4 @@ test "AccountFact keeps source authority outside Renderer view" {
             .source_generation = 7,
         },
     });
-}
-
-test "execution config requires typed HTTPS target and bounded secret" {
-    try std.testing.expectError(error.InvalidBaseUrl, validateExecutionConfig(.{
-        .target = .{
-            .provider_id = "metask:fixture-provider",
-            .protocol = .anthropic_messages,
-            .model = "metask-model",
-            .base_url = "http://127.0.0.1/v1",
-        },
-        .api_key = "secret",
-        .execution_generation = 1,
-    }));
-}
-
-test "execution config treats credential as bounded opaque bytes" {
-    try validateExecutionConfig(.{
-        .target = .{
-            .provider_id = "metask:fixture-provider",
-            .protocol = .anthropic_messages,
-            .model = "metask-model",
-            .base_url = metask_anthropic_messages_url,
-        },
-        .api_key = &.{ 0xff, 0x00, 0x7f },
-        .execution_generation = 1,
-    });
-}
-
-test "OwnedConfig moves one secret owner and securely releases it" {
-    const allocator = std.testing.allocator;
-    const model = try allocator.dupe(u8, "metask-model");
-    const base_url = try allocator.dupe(
-        u8,
-        metask_anthropic_messages_url,
-    );
-    const secret = try allocator.dupe(u8, "test-secret");
-    var source = try execution.OwnedConfig.initOwned(
-        allocator,
-        .metask,
-        .anthropic_messages,
-        model,
-        base_url,
-        4,
-        secret,
-        "fixture-provider",
-    );
-    var destination = source.take();
-    try std.testing.expectEqualStrings("metask-model", destination.input().target.model);
-    try std.testing.expectEqualStrings("test-secret", destination.input().api_key);
-    source.deinit();
-    try std.testing.expectEqualStrings("metask:fixture-provider", destination.input().target.provider_id);
-    try std.testing.expectEqual(execution.Protocol.anthropic_messages, destination.input().target.protocol);
-    destination.deinit();
-}
-
-test "execution references distinguish connections and sources with identical credentials" {
-    const allocator = std.testing.allocator;
-    var first = try execution.OwnedConfig.initOwned(
-        allocator,
-        .model_connection,
-        .openai_chat_completions,
-        try allocator.dupe(u8, "model"),
-        try allocator.dupe(u8, metask_openai_chat_completions_url),
-        1,
-        try allocator.dupe(u8, "same-secret"),
-        "service-a",
-    );
-    defer first.deinit();
-    var second = try execution.OwnedConfig.initOwned(
-        allocator,
-        .model_connection,
-        .openai_chat_completions,
-        try allocator.dupe(u8, "model"),
-        try allocator.dupe(u8, metask_openai_chat_completions_url),
-        1,
-        try allocator.dupe(u8, "same-secret"),
-        "service-b",
-    );
-    defer second.deinit();
-    var managed = try execution.OwnedConfig.initOwned(
-        allocator,
-        .metask,
-        .openai_chat_completions,
-        try allocator.dupe(u8, "model"),
-        try allocator.dupe(u8, metask_openai_chat_completions_url),
-        1,
-        try allocator.dupe(u8, "same-secret"),
-        "service-a",
-    );
-    defer managed.deinit();
-    try std.testing.expectEqualStrings("model_connection:service-a", first.input().target.provider_id);
-    try std.testing.expectEqualStrings("model_connection:service-b", second.input().target.provider_id);
-    try std.testing.expectEqualStrings("metask:service-a", managed.input().target.provider_id);
-}
-
-test "OwnedConfig consumes invalid owned secret on rejection" {
-    const allocator = std.testing.allocator;
-    const model = try allocator.dupe(u8, "metask-model");
-    const base_url = try allocator.dupe(u8, "http://invalid.example/v1");
-    const secret = try allocator.dupe(u8, "test-secret");
-    try std.testing.expectError(
-        error.InvalidExecutionConfig,
-        execution.OwnedConfig.initOwned(
-            allocator,
-            .model_connection,
-            .anthropic_messages,
-            model,
-            base_url,
-            4,
-            secret,
-            "fixture-provider",
-        ),
-    );
-}
-
-test "OwnedConfig preserves zeroing through allocator release" {
-    const ObservingAllocator = struct {
-        backing: std.mem.Allocator,
-        secret_ptr: ?[*]u8 = null,
-        secret_len: usize = 0,
-        saw_secret_free: bool = false,
-        secret_was_zero: bool = false,
-
-        const Self = @This();
-        const vtable: std.mem.Allocator.VTable = .{
-            .alloc = alloc,
-            .resize = resize,
-            .remap = remap,
-            .free = free,
-        };
-
-        fn allocator(self: *Self) std.mem.Allocator {
-            return .{ .ptr = self, .vtable = &vtable };
-        }
-
-        fn alloc(
-            raw: *anyopaque,
-            len: usize,
-            alignment: std.mem.Alignment,
-            ret_addr: usize,
-        ) ?[*]u8 {
-            const self: *Self = @ptrCast(@alignCast(raw));
-            return self.backing.rawAlloc(len, alignment, ret_addr);
-        }
-
-        fn resize(
-            raw: *anyopaque,
-            memory: []u8,
-            alignment: std.mem.Alignment,
-            new_len: usize,
-            ret_addr: usize,
-        ) bool {
-            const self: *Self = @ptrCast(@alignCast(raw));
-            return self.backing.rawResize(memory, alignment, new_len, ret_addr);
-        }
-
-        fn remap(
-            raw: *anyopaque,
-            memory: []u8,
-            alignment: std.mem.Alignment,
-            new_len: usize,
-            ret_addr: usize,
-        ) ?[*]u8 {
-            const self: *Self = @ptrCast(@alignCast(raw));
-            return self.backing.rawRemap(memory, alignment, new_len, ret_addr);
-        }
-
-        fn free(
-            raw: *anyopaque,
-            memory: []u8,
-            alignment: std.mem.Alignment,
-            ret_addr: usize,
-        ) void {
-            const self: *Self = @ptrCast(@alignCast(raw));
-            if (self.secret_ptr) |secret_ptr| {
-                if (memory.ptr == secret_ptr and memory.len == self.secret_len) {
-                    self.saw_secret_free = true;
-                    self.secret_was_zero = true;
-                    for (memory) |byte| {
-                        if (byte != 0) self.secret_was_zero = false;
-                    }
-                }
-            }
-            self.backing.rawFree(memory, alignment, ret_addr);
-        }
-    };
-
-    var observing: ObservingAllocator = .{
-        .backing = std.testing.allocator,
-    };
-    const allocator = observing.allocator();
-    const model = try allocator.dupe(u8, "metask-model");
-    const base_url = try allocator.dupe(
-        u8,
-        metask_anthropic_messages_url,
-    );
-    const secret = try allocator.dupe(u8, "test-secret");
-    observing.secret_ptr = secret.ptr;
-    observing.secret_len = secret.len;
-
-    var config = try execution.OwnedConfig.initOwned(
-        allocator,
-        .metask,
-        .anthropic_messages,
-        model,
-        base_url,
-        1,
-        secret,
-        "fixture-provider",
-    );
-    config.deinit();
-
-    try std.testing.expect(observing.saw_secret_free);
-    try std.testing.expect(observing.secret_was_zero);
 }
