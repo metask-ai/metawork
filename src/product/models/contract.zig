@@ -127,10 +127,18 @@ pub const ModelMetadata = struct {
     capabilities: ModelCapabilities = .{},
 };
 
+pub const ModelMetadataProvenance = enum {
+    unknown,
+    user_declared,
+    provider_declared,
+    runtime_verified,
+};
+
 pub const ModelView = struct {
     id: []const u8,
     display_name: []const u8,
     metadata: ModelMetadata = .{},
+    metadata_provenance: ModelMetadataProvenance = .provider_declared,
 };
 
 pub const ProviderView = struct {
@@ -221,6 +229,12 @@ pub const ModelConnectionCredentialStatus = enum {
 pub const ModelConnectionModelView = struct {
     id: []const u8,
     display_name: []const u8 = "",
+    metadata: ModelMetadata = .{},
+    metadata_provenance: ModelMetadataProvenance = .unknown,
+    test_status: ModelConnectionTestStatus = .untested,
+    /// A successful probe for the current source authority exists. A later
+    /// failed retry updates test_status without revoking that proof.
+    ready: bool = false,
 };
 
 pub const ModelConnectionView = struct {
@@ -234,7 +248,7 @@ pub const ModelConnectionView = struct {
     enabled: bool,
     models: []const ModelConnectionModelView = &.{},
     selected_model: []const u8 = "",
-    connection_generation: u64,
+    connection_revision: u64,
     source_generation: u64,
     catalog_generation: u64,
 };
@@ -250,16 +264,21 @@ pub const ModelConnectionCredentialSlot = struct {
 };
 
 pub const ModelConnectionSelectionCommand = struct {
-    connection_id: []const u8,
-    expected_connection_generation: u64,
+    source_id: []const u8,
+    expected_connection_revision: u64,
+};
+
+pub const CustomModelInput = struct {
+    id: []const u8,
+    display_name: []const u8 = "",
+    metadata: ModelMetadata = .{},
 };
 
 pub const ModelConnectionCreateCommand = struct {
     connection_id: []const u8,
     spec: ModelConnectionSpec,
     credential_slot: ModelConnectionCredentialSlot,
-    model_id: []const u8,
-    model_display_name: []const u8 = "",
+    model: CustomModelInput,
 };
 
 pub const ModelConnectionUpdateCommand = struct {
@@ -269,8 +288,30 @@ pub const ModelConnectionUpdateCommand = struct {
 };
 
 pub const ModelConnectionTestCommand = struct {
-    selection: ModelConnectionSelectionCommand,
-    model_id: []const u8,
+    model: ModelRef,
+    expected_connection_revision: u64,
+    expected_source_generation: u64,
+    expected_catalog_generation: u64,
+};
+
+pub const CustomModelAddCommand = struct {
+    source_id: []const u8,
+    expected_connection_revision: u64,
+    expected_catalog_generation: u64,
+    model: CustomModelInput,
+};
+
+pub const CustomModelReplaceCommand = struct {
+    selection: ModelRef,
+    expected_connection_revision: u64,
+    expected_catalog_generation: u64,
+    replacement: CustomModelInput,
+};
+
+pub const CustomModelRemoveCommand = struct {
+    selection: ModelRef,
+    expected_connection_revision: u64,
+    expected_catalog_generation: u64,
 };
 
 pub const ConfigureMetaskSelectionCommand = struct {
@@ -302,6 +343,9 @@ pub const ModelConnectionCommand = union(enum) {
     update: ModelConnectionUpdateCommand,
     remove: ModelConnectionSelectionCommand,
     test_connection: ModelConnectionTestCommand,
+    add_custom_model: CustomModelAddCommand,
+    replace_custom_model: CustomModelReplaceCommand,
+    remove_custom_model: CustomModelRemoveCommand,
 };
 
 /// Product-internal Models management result. Bridge adapters may map these
@@ -362,6 +406,7 @@ pub const ValidationError = error{
     InvalidGeneration,
     InvalidBaseUrl,
     InvalidEncoding,
+    InvalidMetadata,
     InconsistentState,
     SecretExposed,
     UnsupportedProtocol,
@@ -660,29 +705,60 @@ pub fn validateModelConnectionCommand(command: ModelConnectionCommand) Validatio
             try validateRequired(value.connection_id, Limits.instance_id_bytes);
             try validateModelConnectionSpec(value.spec);
             try validateRequired(value.credential_slot.id, Limits.instance_id_bytes);
-            try validateRequired(value.model_id, Limits.model_id_bytes);
-            try validateOptional(value.model_display_name, Limits.model_display_name_bytes);
+            try validateCustomModelInput(value.model);
         },
         .update => |value| {
-            try validateRequired(value.selection.connection_id, Limits.instance_id_bytes);
-            if (value.selection.expected_connection_generation == 0)
+            try validateRequired(value.selection.source_id, Limits.instance_id_bytes);
+            if (value.selection.expected_connection_revision == 0)
                 return error.InvalidGeneration;
             try validateModelConnectionSpec(value.spec);
             if (value.credential_slot) |slot|
                 try validateRequired(slot.id, Limits.instance_id_bytes);
         },
         .remove => |value| {
-            try validateRequired(value.connection_id, Limits.instance_id_bytes);
-            if (value.expected_connection_generation == 0)
+            try validateRequired(value.source_id, Limits.instance_id_bytes);
+            if (value.expected_connection_revision == 0)
                 return error.InvalidGeneration;
         },
         .test_connection => |value| {
-            try validateRequired(value.selection.connection_id, Limits.instance_id_bytes);
-            if (value.selection.expected_connection_generation == 0)
+            try validateRequired(value.model.source_id, Limits.instance_id_bytes);
+            try validateRequired(value.model.model_id, Limits.model_id_bytes);
+            if (value.expected_connection_revision == 0 or
+                value.expected_source_generation == 0 or
+                value.expected_catalog_generation == 0)
                 return error.InvalidGeneration;
-            try validateRequired(value.model_id, Limits.model_id_bytes);
+        },
+        .add_custom_model => |value| {
+            try validateRequired(value.source_id, Limits.instance_id_bytes);
+            if (value.expected_connection_revision == 0 or
+                value.expected_catalog_generation == 0)
+                return error.InvalidGeneration;
+            try validateCustomModelInput(value.model);
+        },
+        .replace_custom_model => |value| {
+            try validateRequired(value.selection.source_id, Limits.instance_id_bytes);
+            try validateRequired(value.selection.model_id, Limits.model_id_bytes);
+            if (value.expected_connection_revision == 0 or
+                value.expected_catalog_generation == 0)
+                return error.InvalidGeneration;
+            try validateCustomModelInput(value.replacement);
+        },
+        .remove_custom_model => |value| {
+            try validateRequired(value.selection.source_id, Limits.instance_id_bytes);
+            try validateRequired(value.selection.model_id, Limits.model_id_bytes);
+            if (value.expected_connection_revision == 0 or
+                value.expected_catalog_generation == 0)
+                return error.InvalidGeneration;
         },
     }
+}
+
+pub fn validateCustomModelInput(model: CustomModelInput) ValidationError!void {
+    try validateRequired(model.id, Limits.model_id_bytes);
+    try validateOptional(model.display_name, Limits.model_display_name_bytes);
+    if ((model.metadata.max_input_tokens orelse 1) == 0 or
+        (model.metadata.max_output_tokens orelse 1) == 0)
+        return error.InvalidMetadata;
 }
 
 pub fn validateModelConnectionSpec(spec: ModelConnectionSpec) ValidationError!void {
@@ -761,30 +837,42 @@ pub fn validateModelConnectionView(view: ModelConnectionView) ValidationError!vo
         return error.UnsupportedProtocol;
     if (!validModelConnectionEndpoint(view.protocol, view.normalized_base_url))
         return error.InvalidBaseUrl;
-    if (view.connection_generation == 0) return error.InvalidGeneration;
-    if (view.models.len > Limits.model_connection_model_entries)
+    if (view.connection_revision == 0 or view.source_generation == 0 or
+        view.catalog_generation == 0)
+        return error.InvalidGeneration;
+    if (view.models.len == 0 or
+        view.models.len > Limits.model_connection_model_entries)
         return error.CollectionTooLarge;
-    if (view.selected_model.len != 0)
-        try validateRequired(view.selected_model, Limits.model_id_bytes);
+    try validateRequired(view.selected_model, Limits.model_id_bytes);
+    var ready_models: usize = 0;
+    var selected_test_status: ?ModelConnectionTestStatus = null;
     for (view.models, 0..) |model, index| {
-        try validateRequired(model.id, Limits.model_id_bytes);
-        try validateOptional(model.display_name, Limits.model_display_name_bytes);
+        try validateCustomModelInput(.{
+            .id = model.id,
+            .display_name = model.display_name,
+            .metadata = model.metadata,
+        });
+        if (model.ready) ready_models += 1;
+        if ((model.test_status == .connected and !model.ready) or
+            (model.ready and model.test_status == .untested))
+            return error.InconsistentState;
+        if (std.mem.eql(u8, model.id, view.selected_model))
+            selected_test_status = model.test_status;
         for (view.models[0..index]) |prior|
             if (std.mem.eql(u8, prior.id, model.id))
                 return error.InconsistentState;
     }
-    if (view.selected_model.len != 0) {
-        var matches: usize = 0;
-        for (view.models) |model| {
-            if (std.mem.eql(u8, model.id, view.selected_model)) matches += 1;
-        }
-        if (matches != 1) return error.InconsistentState;
+    var matches: usize = 0;
+    for (view.models) |model| {
+        if (std.mem.eql(u8, model.id, view.selected_model)) matches += 1;
     }
-    if (view.state == .ready and
-        (view.credential_status != .ready or !view.enabled or
-            view.selected_model.len == 0 or view.test_status == .untested))
+    if (matches != 1) return error.InconsistentState;
+    if (selected_test_status.? != view.test_status)
         return error.InconsistentState;
-    if (view.state != .ready and view.test_status == .connected)
+    if (view.state == .ready and
+        (view.credential_status != .ready or !view.enabled or ready_models == 0))
+        return error.InconsistentState;
+    if (view.state != .ready and ready_models != 0)
         return error.InconsistentState;
 }
 
@@ -1092,8 +1180,12 @@ test "model connection endpoint normalization is deterministic" {
     ));
 }
 
-test "ready model connection view requires a ready credential and selected model" {
-    const models = [_]ModelConnectionModelView{.{ .id = "gemini-2.5-flash" }};
+test "ready model connection view requires a ready credential and exact model proof" {
+    const models = [_]ModelConnectionModelView{.{
+        .id = "gemini-2.5-flash",
+        .test_status = .connected,
+        .ready = true,
+    }};
     try std.testing.expectError(error.InconsistentState, validateModelConnectionView(.{
         .id = "connection-1",
         .display_name = "Gemini",
@@ -1104,7 +1196,8 @@ test "ready model connection view requires a ready credential and selected model
         .credential_status = .capture_unavailable,
         .enabled = true,
         .models = &models,
-        .connection_generation = 1,
+        .selected_model = "gemini-2.5-flash",
+        .connection_revision = 1,
         .source_generation = 2,
         .catalog_generation = 3,
     }));
@@ -1119,7 +1212,7 @@ test "ready model connection view requires a ready credential and selected model
         .enabled = true,
         .models = &models,
         .selected_model = "gemini-2.5-flash",
-        .connection_generation = 1,
+        .connection_revision = 1,
         .source_generation = 2,
         .catalog_generation = 3,
     });

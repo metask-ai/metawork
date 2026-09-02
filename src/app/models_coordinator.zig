@@ -23,9 +23,11 @@ const ProbeJob = struct {
     io: std.Io,
     completion_transport: agent.CompletionTransport,
     notifier: ProbeNotifier,
-    selection: models_contract.ModelConnectionSelectionCommand,
-    connection_id: []u8,
+    source_id: []u8,
     model_id: []u8,
+    expected_connection_revision: u64,
+    expected_source_generation: u64,
+    expected_catalog_generation: u64,
     execution: ?models_contract.OwnedConfig = null,
     cancellation: agent.ProviderProbeCancellation = .{},
     succeeded: bool = false,
@@ -41,24 +43,23 @@ const ProbeJob = struct {
     ) std.mem.Allocator.Error!*ProbeJob {
         const self = try allocator.create(ProbeJob);
         errdefer allocator.destroy(self);
-        const connection_id = try allocator.dupe(
+        const source_id = try allocator.dupe(
             u8,
-            command_value.selection.connection_id,
+            command_value.model.source_id,
         );
-        errdefer allocator.free(connection_id);
-        const model_id = try allocator.dupe(u8, command_value.model_id);
+        errdefer allocator.free(source_id);
+        const model_id = try allocator.dupe(u8, command_value.model.model_id);
         errdefer allocator.free(model_id);
         self.* = .{
             .allocator = allocator,
             .io = io,
             .completion_transport = completion_transport,
             .notifier = notifier,
-            .selection = .{
-                .connection_id = connection_id,
-                .expected_connection_generation = command_value.selection.expected_connection_generation,
-            },
-            .connection_id = connection_id,
+            .source_id = source_id,
             .model_id = model_id,
+            .expected_connection_revision = command_value.expected_connection_revision,
+            .expected_source_generation = command_value.expected_source_generation,
+            .expected_catalog_generation = command_value.expected_catalog_generation,
         };
         return self;
     }
@@ -104,11 +105,13 @@ const ProbeJob = struct {
 
     fn command(self: *const ProbeJob) models_contract.ModelConnectionTestCommand {
         return .{
-            .selection = .{
-                .connection_id = self.connection_id,
-                .expected_connection_generation = self.selection.expected_connection_generation,
+            .model = .{
+                .source_id = self.source_id,
+                .model_id = self.model_id,
             },
-            .model_id = self.model_id,
+            .expected_connection_revision = self.expected_connection_revision,
+            .expected_source_generation = self.expected_source_generation,
+            .expected_catalog_generation = self.expected_catalog_generation,
         };
     }
 
@@ -116,7 +119,7 @@ const ProbeJob = struct {
         std.debug.assert(self.thread == null);
         if (self.execution) |*execution| execution.deinit();
         self.allocator.free(self.model_id);
-        self.allocator.free(self.connection_id);
+        self.allocator.free(self.source_id);
         const allocator = self.allocator;
         self.* = undefined;
         allocator.destroy(self);
@@ -320,15 +323,13 @@ pub const Coordinator = struct {
         self: *Coordinator,
         secret: []const u8,
         spec: models_contract.ModelConnectionSpec,
-        model_id: []const u8,
-        model_display_name: []const u8,
+        model: models_contract.CustomModelInput,
     ) models_contract.CommandResult {
         self.assertMainThread();
         return self.management.createModelConnectionWithCredential(
             secret,
             spec,
-            model_id,
-            model_display_name,
+            model,
         );
     }
 

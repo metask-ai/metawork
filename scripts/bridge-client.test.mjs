@@ -147,6 +147,110 @@ test("Task model selection carries source-qualified authority", async () => {
   ]);
 });
 
+test("Models connection commands carry split source-qualified revisions", async () => {
+  const calls = [];
+  const client = new BridgeClient({
+    bridge: bridgeWith(async (command, payload) => {
+      calls.push({ command, payload });
+      return { accepted: true, errorCode: "none", attemptId: null };
+    }),
+  });
+
+  await client.createModelConnection({
+    displayName: "Provider",
+    protocol: "openai_responses",
+    normalizedBaseUrl: "https://api.example.com/v1/responses",
+    modelId: "model-a",
+  });
+  await client.updateModelConnection({
+    sourceId: "source-1",
+    expectedConnectionRevision: "2",
+    displayName: "Provider 2",
+    protocol: "openai_responses",
+    normalizedBaseUrl: "https://api.example.com/v1/responses",
+  });
+  await client.testModelConnection("source-1", "3", "model-a", "5", "7");
+  await client.addCustomModel({
+    sourceId: "source-1",
+    expectedConnectionRevision: "3",
+    expectedCatalogGeneration: "7",
+    model: { id: "model-b" },
+  });
+  await client.replaceCustomModel({
+    selection: { sourceId: "source-1", modelId: "model-b" },
+    expectedConnectionRevision: "11",
+    expectedCatalogGeneration: "13",
+    replacement: { id: "model-c" },
+  });
+  await client.removeCustomModel({
+    selection: { sourceId: "source-1", modelId: "model-c" },
+    expectedConnectionRevision: "17",
+    expectedCatalogGeneration: "19",
+  });
+  await client.removeModelConnection("source-1", "23");
+
+  assert.deepEqual(calls, [
+    {
+      command: "metawork.models.connections.create",
+      payload: {
+        displayName: "Provider",
+        protocol: "openai_responses",
+        normalizedBaseUrl: "https://api.example.com/v1/responses",
+        model: { id: "model-a", displayName: "" },
+      },
+    },
+    {
+      command: "metawork.models.connections.update",
+      payload: {
+        sourceId: "source-1",
+        expectedConnectionRevision: "2",
+        displayName: "Provider 2",
+        protocol: "openai_responses",
+        normalizedBaseUrl: "https://api.example.com/v1/responses",
+      },
+    },
+    {
+      command: "metawork.models.connections.test",
+      payload: {
+        model: { sourceId: "source-1", modelId: "model-a" },
+        expectedConnectionRevision: "3",
+        expectedSourceGeneration: "5",
+        expectedCatalogGeneration: "7",
+      },
+    },
+    {
+      command: "metawork.models.customModels.add",
+      payload: {
+        sourceId: "source-1",
+        expectedConnectionRevision: "3",
+        expectedCatalogGeneration: "7",
+        model: { id: "model-b" },
+      },
+    },
+    {
+      command: "metawork.models.customModels.replace",
+      payload: {
+        selection: { sourceId: "source-1", modelId: "model-b" },
+        expectedConnectionRevision: "11",
+        expectedCatalogGeneration: "13",
+        replacement: { id: "model-c" },
+      },
+    },
+    {
+      command: "metawork.models.customModels.remove",
+      payload: {
+        selection: { sourceId: "source-1", modelId: "model-c" },
+        expectedConnectionRevision: "17",
+        expectedCatalogGeneration: "19",
+      },
+    },
+    {
+      command: "metawork.models.connections.remove",
+      payload: { sourceId: "source-1", expectedConnectionRevision: "23" },
+    },
+  ]);
+});
+
 test("native shortcut events stay behind the Bridge client boundary", () => {
   let listener = null;
   let removed = false;

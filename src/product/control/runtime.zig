@@ -1862,10 +1862,8 @@ pub const Runtime = struct {
         const execution_generation = self.nextExecutionGeneration(
             self.executionGeneration(),
         ) catch return .{ .rejected = .local_resource_exhausted };
-        var candidate = self.model_connections.resolveProbeCandidate(
-            command.selection,
-            command.model_id,
-        ) catch return .{ .rejected = .test_unavailable };
+        var candidate = self.model_connections.resolveProbeCandidate(command) catch
+            return .{ .rejected = .test_unavailable };
         defer candidate.deinit();
         var execution = candidate.intoConfig(execution_generation) catch
             return .{ .rejected = .test_unavailable };
@@ -1944,14 +1942,12 @@ pub const Runtime = struct {
         self: *Runtime,
         secret: []const u8,
         spec: models_contract.ModelConnectionSpec,
-        model_id: []const u8,
-        model_display_name: []const u8,
+        model: models_contract.CustomModelInput,
     ) models_contract.CommandResult {
         const result = self.model_connections.createWithCredential(
             secret,
             spec,
-            model_id,
-            model_display_name,
+            model,
         );
         if (result.accepted) self.finishExecutionCommitNoFail();
         return result;
@@ -4211,6 +4207,9 @@ pub const Runtime = struct {
                 try self.projectedJsonValue(writer, model.display_name);
                 writer.writeAll(",\"metadata\":") catch return error.SnapshotTooLarge;
                 try writeModelMetadata(writer, model.metadata);
+                writer.print(",\"metadataProvenance\":\"{s}\"", .{
+                    @tagName(model.metadata_provenance),
+                }) catch return error.SnapshotTooLarge;
                 writer.writeByte('}') catch return error.SnapshotTooLarge;
             }
             writer.writeAll("],\"selectedApiKeyId\":") catch return error.SnapshotTooLarge;
@@ -4266,12 +4265,12 @@ pub const Runtime = struct {
             writer.print(",\"protocol\":\"{s}\",\"normalizedBaseUrl\":", .{@tagName(connection.protocol)}) catch
                 return error.SnapshotTooLarge;
             try self.projectedJsonValue(writer, connection.normalized_base_url);
-            writer.print(",\"state\":\"{s}\",\"testStatus\":\"{s}\",\"credentialStatus\":\"{s}\",\"enabled\":{},\"connectionGeneration\":\"{d}\",\"sourceGeneration\":\"{d}\",\"catalogGeneration\":\"{d}\",\"selectedModel\":", .{
+            writer.print(",\"state\":\"{s}\",\"testStatus\":\"{s}\",\"credentialStatus\":\"{s}\",\"enabled\":{},\"connectionRevision\":\"{d}\",\"sourceGeneration\":\"{d}\",\"catalogGeneration\":\"{d}\",\"selectedModel\":", .{
                 @tagName(connection.state),
                 @tagName(connection.test_status),
                 @tagName(connection.credential_status),
                 connection.enabled,
-                connection.connection_generation,
+                connection.connection_revision,
                 connection.source_generation,
                 connection.catalog_generation,
             }) catch return error.SnapshotTooLarge;
@@ -4283,6 +4282,13 @@ pub const Runtime = struct {
                 try self.projectedJsonValue(writer, model.id);
                 writer.writeAll(",\"displayName\":") catch return error.SnapshotTooLarge;
                 try self.projectedJsonValue(writer, model.display_name);
+                writer.writeAll(",\"metadata\":") catch return error.SnapshotTooLarge;
+                try writeModelMetadata(writer, model.metadata);
+                writer.print(",\"metadataProvenance\":\"{s}\",\"testStatus\":\"{s}\",\"ready\":{}", .{
+                    @tagName(model.metadata_provenance),
+                    @tagName(model.test_status),
+                    model.ready,
+                }) catch return error.SnapshotTooLarge;
                 writer.writeByte('}') catch return error.SnapshotTooLarge;
             }
             writer.writeAll("]}") catch return error.SnapshotTooLarge;
@@ -6683,8 +6689,8 @@ fn controlStartModelConnectionsUnavailable(context: *anyopaque) void {
 fn controlStopModelConnections(context: *anyopaque) void {
     controlOwner(context).stopModelConnections();
 }
-fn controlCreateModelConnection(context: *anyopaque, secret: []const u8, spec: models_contract.ModelConnectionSpec, model_id: []const u8, display_name: []const u8) models_contract.CommandResult {
-    return controlOwner(context).createModelConnectionWithCredential(secret, spec, model_id, display_name);
+fn controlCreateModelConnection(context: *anyopaque, secret: []const u8, spec: models_contract.ModelConnectionSpec, model: models_contract.CustomModelInput) models_contract.CommandResult {
+    return controlOwner(context).createModelConnectionWithCredential(secret, spec, model);
 }
 fn controlSubmitModelConnection(context: *anyopaque, command: models_contract.ModelConnectionCommand) models_contract.CommandResult {
     return controlOwner(context).submitModelConnectionCommand(command);
@@ -10198,26 +10204,30 @@ fn createReadyTestModelConnection(
             .protocol = .openai_responses,
             .normalized_base_url = "https://api.openai.com/v1/responses",
         },
-        "gpt-5",
-        "GPT-5",
+        .{ .id = "gpt-5", .display_name = "GPT-5" },
     ).accepted);
     const view = control.model_connections.views()[0];
     const selection: models_contract.ModelConnectionSelectionCommand = .{
-        .connection_id = TestModelConnectionVault.slot,
-        .expected_connection_generation = view.connection_generation,
+        .source_id = TestModelConnectionVault.slot,
+        .expected_connection_revision = view.connection_revision,
+    };
+    const probe_command: models_contract.ModelConnectionTestCommand = .{
+        .model = .{ .source_id = selection.source_id, .model_id = "gpt-5" },
+        .expected_connection_revision = selection.expected_connection_revision,
+        .expected_source_generation = view.source_generation,
+        .expected_catalog_generation = view.catalog_generation,
     };
     var probe = switch (control.beginModelConnectionProbe(.{
-        .selection = selection,
-        .model_id = "gpt-5",
+        .model = probe_command.model,
+        .expected_connection_revision = probe_command.expected_connection_revision,
+        .expected_source_generation = probe_command.expected_source_generation,
+        .expected_catalog_generation = probe_command.expected_catalog_generation,
     })) {
         .ready => |execution| execution,
         .rejected => return error.TestUnexpectedResult,
     };
     defer probe.deinit();
-    try std.testing.expect(control.completeModelConnectionTest(.{
-        .selection = selection,
-        .model_id = "gpt-5",
-    }, true).accepted);
+    try std.testing.expect(control.completeModelConnectionTest(probe_command, true).accepted);
     return selection;
 }
 
@@ -10249,7 +10259,7 @@ test "Product Control atomically manages and installs a Model Connection default
     const selection = try createReadyTestModelConnection(&control);
     const ready_connection = control.modelsView().model_connections[0];
     try std.testing.expect(control.selectModelsDefault(.{
-        .selection = .{ .source_id = selection.connection_id, .model_id = "gpt-5" },
+        .selection = .{ .source_id = selection.source_id, .model_id = "gpt-5" },
         .expected_selection_revision = control.modelsView().selection_revision,
         .expected_source_generation = ready_connection.source_generation,
         .expected_catalog_generation = ready_connection.catalog_generation,
@@ -10324,7 +10334,7 @@ test "Account authorization loss leaves a custom Models default available" {
     const connection = try createReadyTestModelConnection(&control);
     const ready_connection = control.modelsView().model_connections[0];
     try std.testing.expect(control.selectModelsDefault(.{
-        .selection = .{ .source_id = connection.connection_id, .model_id = "gpt-5" },
+        .selection = .{ .source_id = connection.source_id, .model_id = "gpt-5" },
         .expected_selection_revision = control.modelsView().selection_revision,
         .expected_source_generation = ready_connection.source_generation,
         .expected_catalog_generation = ready_connection.catalog_generation,

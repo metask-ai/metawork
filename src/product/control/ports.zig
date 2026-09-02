@@ -46,7 +46,7 @@ pub const ModelsManagement = struct {
     start_model_connections_fn: *const fn (*anyopaque, []const u8, models_ports.CredentialVault) anyerror!void,
     start_model_connections_unavailable_fn: *const fn (*anyopaque) void,
     stop_model_connections_fn: *const fn (*anyopaque) void,
-    create_model_connection_fn: *const fn (*anyopaque, []const u8, models_contract.ModelConnectionSpec, []const u8, []const u8) models_contract.CommandResult,
+    create_model_connection_fn: *const fn (*anyopaque, []const u8, models_contract.ModelConnectionSpec, models_contract.CustomModelInput) models_contract.CommandResult,
     submit_model_connection_fn: *const fn (*anyopaque, models_contract.ModelConnectionCommand) models_contract.CommandResult,
     begin_model_connection_probe_fn: *const fn (*anyopaque, models_contract.ModelConnectionTestCommand) models_contract.Preparation,
     complete_model_connection_test_fn: *const fn (*anyopaque, models_contract.ModelConnectionTestCommand, bool) models_contract.CommandResult,
@@ -63,8 +63,8 @@ pub const ModelsManagement = struct {
     pub fn stopModelConnections(self: ModelsManagement) void {
         self.stop_model_connections_fn(self.context);
     }
-    pub fn createModelConnectionWithCredential(self: ModelsManagement, secret: []const u8, spec: models_contract.ModelConnectionSpec, model_id: []const u8, display_name: []const u8) models_contract.CommandResult {
-        return self.create_model_connection_fn(self.context, secret, spec, model_id, display_name);
+    pub fn createModelConnectionWithCredential(self: ModelsManagement, secret: []const u8, spec: models_contract.ModelConnectionSpec, model: models_contract.CustomModelInput) models_contract.CommandResult {
+        return self.create_model_connection_fn(self.context, secret, spec, model);
     }
     pub fn submitModelConnectionCommand(self: ModelsManagement, command: models_contract.ModelConnectionCommand) models_contract.CommandResult {
         return self.submit_model_connection_fn(self.context, command);

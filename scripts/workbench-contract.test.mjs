@@ -847,6 +847,7 @@ test("Model Connection readiness survives an isolated failed retest", () => {
     errorCode: "none",
     safeDiagnostic: "",
   };
+  const customMetadata = clone(snapshot.models.providers[0].models[0].metadata);
   snapshot.models = {
     ...snapshot.models,
     availability: "ready",
@@ -863,11 +864,20 @@ test("Model Connection readiness survives an isolated failed retest", () => {
         testStatus: "failed",
         credentialStatus: "ready",
         enabled: true,
-        connectionGeneration: "1",
+        connectionRevision: "1",
         sourceGeneration: "2",
         catalogGeneration: "3",
         selectedModel: "gpt-5",
-        models: [{ id: "gpt-5", displayName: "GPT-5" }],
+        models: [
+          {
+            id: "gpt-5",
+            displayName: "GPT-5",
+            metadata: customMetadata,
+            metadataProvenance: "user_declared",
+            testStatus: "failed",
+            ready: true,
+          },
+        ],
       },
     ],
   };
@@ -882,7 +892,7 @@ test("Model Connection readiness survives an isolated failed retest", () => {
   assert.doesNotThrow(() => decodeWorkbenchSnapshot(snapshot));
 
   const neverVerified = clone(snapshot);
-  neverVerified.models.connections[0].testStatus = "untested";
+  neverVerified.models.connections[0].models[0].ready = false;
   assert.throws(
     () => decodeWorkbenchSnapshot(neverVerified),
     /ready connection must be verified/,
@@ -893,7 +903,7 @@ test("Model Connection readiness survives an isolated failed retest", () => {
   impossibleConnected.models.connections[0].testStatus = "connected";
   assert.throws(
     () => decodeWorkbenchSnapshot(impossibleConnected),
-    /only a ready connection can have a connected test/,
+    /only a ready connection can retain model readiness/,
   );
 });
 

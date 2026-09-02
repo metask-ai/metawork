@@ -30,11 +30,11 @@ type ModelConnectionDraft = {
 };
 type ModelConnectionEditDraft = Omit<ModelConnectionDraft, "modelId"> & {
   connectionId: string;
-  expectedConnectionGeneration: string;
+  expectedConnectionRevision: string;
 };
 type ModelConnectionRemoval = {
   connectionId: string;
-  expectedConnectionGeneration: string;
+  expectedConnectionRevision: string;
 };
 
 const modelConnectionEndpointDefaults: Record<Protocol, string> = {
@@ -150,16 +150,18 @@ export function SettingsPage({
   ) => Promise<boolean>;
   onRemoveModelConnection: (
     connectionId: string,
-    expectedConnectionGeneration: string,
+    expectedConnectionRevision: string,
   ) => Promise<boolean>;
   onTestModelConnection: (
     connectionId: string,
-    connectionGeneration: string,
+    connectionRevision: string,
     modelId: string,
+    sourceGeneration: string,
+    catalogGeneration: string,
   ) => void;
   onSelectModelConnection: (
     connectionId: string,
-    connectionGeneration: string,
+    connectionRevision: string,
     modelId: string,
   ) => void;
   onBeginLogin: () => void;
@@ -430,8 +432,8 @@ export function SettingsPage({
       const connection = models.connections.find(
         (candidate) => candidate.id === current.connectionId,
       );
-      return connection?.connectionGeneration ===
-        current.expectedConnectionGeneration
+      return connection?.connectionRevision ===
+        current.expectedConnectionRevision
         ? current
         : null;
     });
@@ -440,8 +442,8 @@ export function SettingsPage({
       const connection = models.connections.find(
         (candidate) => candidate.id === current.connectionId,
       );
-      return connection?.connectionGeneration ===
-        current.expectedConnectionGeneration
+      return connection?.connectionRevision ===
+        current.expectedConnectionRevision
         ? current
         : null;
     });
@@ -510,7 +512,7 @@ export function SettingsPage({
       if (
         await onRemoveModelConnection(
           modelConnectionRemoval.connectionId,
-          modelConnectionRemoval.expectedConnectionGeneration,
+          modelConnectionRemoval.expectedConnectionRevision,
         )
       )
         setModelConnectionRemoval(null);
@@ -1330,8 +1332,10 @@ export function SettingsPage({
                         onClick={() =>
                           onTestModelConnection(
                             connection.id,
-                            connection.connectionGeneration,
+                            connection.connectionRevision,
                             connection.selectedModel,
+                            connection.sourceGeneration,
+                            connection.catalogGeneration,
                           )
                         }
                       >
@@ -1342,12 +1346,13 @@ export function SettingsPage({
                       <SelectionMenu
                         value={
                           models.defaultSelection?.sourceId === connection.id
-                            ? connection.selectedModel
+                            ? models.defaultSelection.modelId
                             : ""
                         }
                         options={connection.models.map((model) => ({
                           value: model.id,
                           label: model.displayName || model.id,
+                          disabled: !model.ready,
                         }))}
                         placeholder={t("settings.model_connection_set_default")}
                         ariaLabel={t(
@@ -1367,7 +1372,7 @@ export function SettingsPage({
                         onValueChange={(modelId) =>
                           onSelectModelConnection(
                             connection.id,
-                            connection.connectionGeneration,
+                            connection.connectionRevision,
                             modelId,
                           )
                         }
@@ -1384,8 +1389,8 @@ export function SettingsPage({
                           setModelConnectionRemoval(null);
                           setModelConnectionEdit({
                             connectionId: connection.id,
-                            expectedConnectionGeneration:
-                              connection.connectionGeneration,
+                            expectedConnectionRevision:
+                              connection.connectionRevision,
                             displayName: connection.displayName,
                             protocol: connection.protocol,
                             normalizedBaseUrl: connection.normalizedBaseUrl,
@@ -1406,8 +1411,8 @@ export function SettingsPage({
                           setModelConnectionEdit(null);
                           setModelConnectionRemoval({
                             connectionId: connection.id,
-                            expectedConnectionGeneration:
-                              connection.connectionGeneration,
+                            expectedConnectionRevision:
+                              connection.connectionRevision,
                           });
                         }}
                       >

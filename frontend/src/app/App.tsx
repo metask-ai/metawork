@@ -728,7 +728,7 @@ export default function App() {
     (connection) =>
       connection.id === snapshot.models.defaultSelection?.sourceId,
   );
-  const customModelId = activeModelConnection?.selectedModel ?? "";
+  const customModelId = snapshot.models.defaultSelection?.modelId ?? "";
   const customModelConnectionSelected = activeModelConnection !== undefined;
   const customModelConnectionContext = activeModelConnection
     ? `${activeModelConnection.displayName} · ${t(
@@ -736,14 +736,16 @@ export default function App() {
       )}`
     : "";
   const customModelOptions = activeModelConnection
-    ? activeModelConnection.models.map((model) => {
-        const displayName = model.displayName || model.id;
-        return {
-          selectionId: model.id,
-          displayName,
-          triggerLabel: `${activeModelConnection.displayName} · ${displayName}`,
-        };
-      })
+    ? activeModelConnection.models
+        .filter((model) => model.ready)
+        .map((model) => {
+          const displayName = model.displayName || model.id;
+          return {
+            selectionId: model.id,
+            displayName,
+            triggerLabel: `${activeModelConnection.displayName} · ${displayName}`,
+          };
+        })
     : [];
   const newTaskModelOptions = customModelConnectionSelected
     ? customModelOptions
@@ -2878,16 +2880,36 @@ export default function App() {
               runExecutionCommand(() => client.createModelConnection(input))
             }
             onUpdateModelConnection={(input) =>
-              runExecutionCommand(() => client.updateModelConnection(input))
+              runExecutionCommand(() =>
+                client.updateModelConnection({
+                  sourceId: input.connectionId,
+                  expectedConnectionRevision: input.expectedConnectionRevision,
+                  displayName: input.displayName,
+                  protocol: input.protocol,
+                  normalizedBaseUrl: input.normalizedBaseUrl,
+                }),
+              )
             }
             onRemoveModelConnection={(connectionId, generation) =>
               runExecutionCommand(() =>
                 client.removeModelConnection(connectionId, generation),
               )
             }
-            onTestModelConnection={(connectionId, generation, modelId) =>
+            onTestModelConnection={(
+              connectionId,
+              revision,
+              modelId,
+              sourceGeneration,
+              catalogGeneration,
+            ) =>
               void runExecutionCommand(() =>
-                client.testModelConnection(connectionId, generation, modelId),
+                client.testModelConnection(
+                  connectionId,
+                  revision,
+                  modelId,
+                  sourceGeneration,
+                  catalogGeneration,
+                ),
               )
             }
             onSelectModelConnection={(connectionId, generation, modelId) =>

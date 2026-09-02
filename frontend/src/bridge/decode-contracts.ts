@@ -8,6 +8,7 @@ import {
   type ModelsView,
   type NewTaskAdmissionView,
   type ModelMetadata,
+  type ModelMetadataProvenance,
   type ModelConnectionCredentialStatus,
   type Protocol,
   type ModelConnectionState,
@@ -247,6 +248,12 @@ const modelConnectionTestStatuses = [
   "testing",
   "connected",
   "failed",
+] as const;
+const modelMetadataProvenances = [
+  "unknown",
+  "user_declared",
+  "provider_declared",
+  "runtime_verified",
 ] as const;
 const modelConnectionCredentialStatuses = [
   "missing",
@@ -995,7 +1002,7 @@ function decodeModelConnections(value: unknown, path: string) {
       "testStatus",
       "credentialStatus",
       "enabled",
-      "connectionGeneration",
+      "connectionRevision",
       "sourceGeneration",
       "catalogGeneration",
       "selectedModel",
@@ -1005,13 +1012,35 @@ function decodeModelConnections(value: unknown, path: string) {
       connection.models,
       `${itemPath}.models`,
       (modelValue, modelPath) => {
-        const model = object(modelValue, modelPath, ["id", "displayName"]);
+        const model = object(modelValue, modelPath, [
+          "id",
+          "displayName",
+          "metadata",
+          "metadataProvenance",
+          "testStatus",
+          "ready",
+        ]);
         return {
           id: stringValue(model.id, `${modelPath}.id`),
           displayName: stringValue(
             model.displayName,
             `${modelPath}.displayName`,
           ),
+          metadata: decodeModelMetadata(
+            model.metadata,
+            `${modelPath}.metadata`,
+          ),
+          metadataProvenance: enumValue(
+            model.metadataProvenance,
+            `${modelPath}.metadataProvenance`,
+            modelMetadataProvenances,
+          ) as ModelMetadataProvenance,
+          testStatus: enumValue(
+            model.testStatus,
+            `${modelPath}.testStatus`,
+            modelConnectionTestStatuses,
+          ) as ModelConnectionTestStatus,
+          ready: booleanValue(model.ready, `${modelPath}.ready`),
         };
       },
     );
@@ -1046,9 +1075,9 @@ function decodeModelConnections(value: unknown, path: string) {
         modelConnectionCredentialStatuses,
       ) as ModelConnectionCredentialStatus,
       enabled: booleanValue(connection.enabled, `${itemPath}.enabled`),
-      connectionGeneration: wireId(
-        connection.connectionGeneration,
-        `${itemPath}.connectionGeneration`,
+      connectionRevision: wireId(
+        connection.connectionRevision,
+        `${itemPath}.connectionRevision`,
       ),
       sourceGeneration: wireId(
         connection.sourceGeneration,
@@ -1087,12 +1116,17 @@ function decodeModelConnections(value: unknown, path: string) {
       connection.state === "ready" &&
       (connection.credentialStatus !== "ready" ||
         !connection.enabled ||
-        connection.selectedModel.length === 0 ||
-        connection.testStatus === "untested")
+        !connection.models.some((model) => model.ready))
     )
       fail(connectionPath, "a ready connection must be verified and usable");
-    if (connection.state !== "ready" && connection.testStatus === "connected")
-      fail(connectionPath, "only a ready connection can have a connected test");
+    if (
+      connection.state !== "ready" &&
+      connection.models.some((model) => model.ready)
+    )
+      fail(
+        connectionPath,
+        "only a ready connection can retain model readiness",
+      );
   }
   return modelConnections;
 }
@@ -1154,6 +1188,7 @@ function decodeModels(value: unknown, path: string): ModelsView {
             "id",
             "displayName",
             "metadata",
+            "metadataProvenance",
           ]);
           return {
             id: stringValue(model.id, `${modelPath}.id`),
@@ -1165,6 +1200,11 @@ function decodeModels(value: unknown, path: string): ModelsView {
               model.metadata,
               `${modelPath}.metadata`,
             ),
+            metadataProvenance: enumValue(
+              model.metadataProvenance,
+              `${modelPath}.metadataProvenance`,
+              modelMetadataProvenances,
+            ) as ModelMetadataProvenance,
           };
         },
       );

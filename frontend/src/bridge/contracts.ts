@@ -79,6 +79,9 @@ export type ModelConnectionTestStatus =
 export type ModelConnectionCredentialStatus =
   "missing" | "ready" | "invalid" | "capture_unavailable";
 
+export type ModelMetadataProvenance =
+  "unknown" | "user_declared" | "provider_declared" | "runtime_verified";
+
 export type ModelConnectionView = {
   id: string;
   displayName: string;
@@ -88,9 +91,16 @@ export type ModelConnectionView = {
   testStatus: ModelConnectionTestStatus;
   credentialStatus: ModelConnectionCredentialStatus;
   enabled: boolean;
-  models: { id: string; displayName: string }[];
+  models: {
+    id: string;
+    displayName: string;
+    metadata: ModelMetadata;
+    metadataProvenance: ModelMetadataProvenance;
+    testStatus: ModelConnectionTestStatus;
+    ready: boolean;
+  }[];
   selectedModel: string;
-  connectionGeneration: string;
+  connectionRevision: string;
   sourceGeneration: string;
   catalogGeneration: string;
 };
@@ -174,6 +184,7 @@ export type ModelsView = {
       id: string;
       displayName: string;
       metadata: ModelMetadata;
+      metadataProvenance: ModelMetadataProvenance;
     }[];
     selectedApiKeyId: string;
     catalogGeneration: string;

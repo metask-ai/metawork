@@ -101,8 +101,7 @@ try {
     displayName: "Readiness provider",
     protocol: "openai_chat_completions",
     normalizedBaseUrl: endpoint,
-    modelId: model,
-    modelDisplayName: "Readiness model",
+    model: { id: model, displayName: "Readiness model" },
   }).then(
     (value) => ({ value, error: null }),
     (error) => ({ value: null, error }),
@@ -172,7 +171,7 @@ try {
   );
   const { connection } = created;
   if (
-    !isWireId(connection.connectionGeneration) ||
+    !isWireId(connection.connectionRevision) ||
     connection.protocol !== "openai_chat_completions" ||
     connection.credentialStatus !== "ready" ||
     connection.state !== "configuring" ||
@@ -204,9 +203,10 @@ try {
 
   assertAccepted(
     await invokeBridge("metawork.models.connections.test", {
-      connectionId: connection.id,
-      expectedConnectionGeneration: connection.connectionGeneration,
-      modelId: model,
+      model: { sourceId: connection.id, modelId: model },
+      expectedConnectionRevision: connection.connectionRevision,
+      expectedSourceGeneration: connection.sourceGeneration,
+      expectedCatalogGeneration: connection.catalogGeneration,
     }),
     "Model Connection test",
   );

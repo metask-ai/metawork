@@ -19,6 +19,7 @@ import type {
   WorkspaceChoice,
   FilePreview,
   FileChangeDiffResult,
+  ModelMetadata,
 } from "./contracts.ts";
 import {
   assertCancelAccepted,
@@ -547,13 +548,18 @@ export class BridgeClient {
     modelDisplayName?: string;
   }) {
     return decodeExecutionCommandResult(
-      await this.invoke(commands.modelConnectionCreate, input),
+      await this.invoke(commands.modelConnectionCreate, {
+        displayName: input.displayName,
+        protocol: input.protocol,
+        normalizedBaseUrl: input.normalizedBaseUrl,
+        model: { id: input.modelId, displayName: input.modelDisplayName ?? "" },
+      }),
     );
   }
 
   async updateModelConnection(input: {
-    connectionId: string;
-    expectedConnectionGeneration: string;
+    sourceId: string;
+    expectedConnectionRevision: string;
     displayName: string;
     protocol: Protocol;
     normalizedBaseUrl: string;
@@ -564,28 +570,63 @@ export class BridgeClient {
   }
 
   async removeModelConnection(
-    connectionId: string,
-    expectedConnectionGeneration: string,
+    sourceId: string,
+    expectedConnectionRevision: string,
   ) {
     return decodeExecutionCommandResult(
       await this.invoke(commands.modelConnectionRemove, {
-        connectionId,
-        expectedConnectionGeneration,
+        sourceId,
+        expectedConnectionRevision,
       }),
     );
   }
 
   async testModelConnection(
-    connectionId: string,
-    expectedConnectionGeneration: string,
+    sourceId: string,
+    expectedConnectionRevision: string,
     modelId: string,
+    expectedSourceGeneration: string,
+    expectedCatalogGeneration: string,
   ) {
     return decodeExecutionCommandResult(
       await this.invoke(commands.modelConnectionTest, {
-        connectionId,
-        expectedConnectionGeneration,
-        modelId,
+        model: { sourceId, modelId },
+        expectedConnectionRevision,
+        expectedSourceGeneration,
+        expectedCatalogGeneration,
       }),
+    );
+  }
+
+  async addCustomModel(input: {
+    sourceId: string;
+    expectedConnectionRevision: string;
+    expectedCatalogGeneration: string;
+    model: { id: string; displayName?: string; metadata?: ModelMetadata };
+  }) {
+    return decodeExecutionCommandResult(
+      await this.invoke(commands.customModelAdd, input),
+    );
+  }
+
+  async replaceCustomModel(input: {
+    selection: { sourceId: string; modelId: string };
+    expectedConnectionRevision: string;
+    expectedCatalogGeneration: string;
+    replacement: { id: string; displayName?: string; metadata?: ModelMetadata };
+  }) {
+    return decodeExecutionCommandResult(
+      await this.invoke(commands.customModelReplace, input),
+    );
+  }
+
+  async removeCustomModel(input: {
+    selection: { sourceId: string; modelId: string };
+    expectedConnectionRevision: string;
+    expectedCatalogGeneration: string;
+  }) {
+    return decodeExecutionCommandResult(
+      await this.invoke(commands.customModelRemove, input),
     );
   }
 

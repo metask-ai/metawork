@@ -1061,7 +1061,7 @@ Account与 Models状态在设置中分别投影：Account只按 `checking | sign
 - 第一版由用户明确填写 bounded model ID，不提供自动模型发现；连接没有可用模型时不能成为默认连接；
 - 默认来源与模型作为一笔 Models-owned、source-qualified desired transaction提交；切换连接后只允许选择该连接的模型目录，不把不同连接的 model id混在一个列表里。Product Control随后独立 reconcile active binding，处理中只关闭相关新 Task admission，不回滚已提交 desired selection；
 - Metask provider catalog与当前 custom default同时投影；custom default生效时模型设置仍可查看 Metask API/模型，并通过显式 `新任务改用 Metask` 提交同一个 global default command。Account只决定 Metask provider当前能否授权，不参与默认来源选择；
-- 编辑连接使用同一 typed 表单，秘密永不回填；secure capture 不可用时整个 Model Connection 设置入口隐藏，不提供局部编辑路径。endpoint 或 protocol 变化生成新的 connection generation，并回到待测试状态；
+- 编辑连接使用同一 typed 表单，秘密永不回填；secure capture 不可用时整个 Model Connection 设置入口隐藏，不提供局部编辑路径。endpoint、protocol 或 credential authority 变化推进 source generation并使该连接全部模型回到待验证状态；普通 display/metadata 编辑只推进对应 connection revision/catalog generation。首版表单仍一次创建一个模型，不把底层有界多模型集合伪装成单模型身份；
 - Models按 exact connection identity与 expected connection revision校验编辑/删除，不查询 live Session、Run、job或 worker，也不以 consumer usage拒绝 mutation。若 mutation使当前 desired default不可解析，Product Control独立关闭新 admission并进入 reconciliation；既有 Task/Run保持自己的 owned binding，不静默改绑，历史仍保留；
 - 连接页只管理连接本身和默认连接/模型，不提供 Workspace、权限策略、Task 历史或 AgentCore 内部状态。
 

@@ -527,8 +527,8 @@ pub const Runtime = struct {
         const selection_revision = self.freshGeneration(candidate.selection_revision) catch
             return .rejected(.local_resource_exhausted);
         candidate.selectDefault(.{
-            .connection_id = connection.id,
-            .expected_connection_generation = connection.connection_generation,
+            .source_id = connection.id,
+            .expected_connection_revision = connection.connection_revision,
         }, command.selection.model_id, selection_revision) catch |err|
             return .rejected(mapRegistryError(err));
         return self.commitCandidate(&candidate, true);
@@ -657,12 +657,12 @@ pub const Runtime = struct {
                     return .rejected(mapRegistryError(err));
             },
             .update => |value| {
-                const current = findConnectionView(candidate.views(), value.selection.connection_id) orelse
+                const current = findConnectionView(candidate.views(), value.selection.source_id) orelse
                     return .rejected(.connection_not_found);
                 const authority_changed = current.protocol != value.spec.protocol or
                     !std.mem.eql(u8, current.normalized_base_url, value.spec.normalized_base_url) or
                     value.credential_slot != null;
-                const connection_revision = self.freshGeneration(current.connection_generation) catch
+                const connection_revision = self.freshGeneration(current.connection_revision) catch
                     return .rejected(.local_resource_exhausted);
                 const source_generation = if (authority_changed)
                     self.freshGeneration(candidate.sourceGenerationForConnection(current.id) orelse
@@ -679,7 +679,7 @@ pub const Runtime = struct {
                     return .rejected(mapRegistryError(err));
             },
             .remove => |value| {
-                const selection_revision = if (isDefaultConnection(&candidate, value.connection_id))
+                const selection_revision = if (isDefaultConnection(&candidate, value.source_id))
                     self.freshGeneration(candidate.selection_revision) catch
                         return .rejected(.local_resource_exhausted)
                 else
@@ -687,8 +687,60 @@ pub const Runtime = struct {
                 candidate.remove(value, selection_revision) catch |err|
                     return .rejected(mapRegistryError(err));
             },
-            .test_connection => |value| candidate.markTesting(value.selection, value.model_id) catch |err|
+            .test_connection => |value| candidate.markTesting(value) catch |err|
                 return .rejected(mapRegistryError(err)),
+            .add_custom_model => |value| {
+                const current = findConnectionView(candidate.views(), value.source_id) orelse
+                    return .rejected(.connection_not_found);
+                const connection_revision = self.freshGeneration(current.connection_revision) catch
+                    return .rejected(.local_resource_exhausted);
+                const catalog_generation = self.freshGeneration(current.catalog_generation) catch
+                    return .rejected(.local_resource_exhausted);
+                candidate.addCustomModel(value, connection_revision, catalog_generation) catch |err|
+                    return .rejected(mapRegistryError(err));
+            },
+            .replace_custom_model => |value| {
+                const current = findConnectionView(candidate.views(), value.selection.source_id) orelse
+                    return .rejected(.connection_not_found);
+                const connection_revision = self.freshGeneration(current.connection_revision) catch
+                    return .rejected(.local_resource_exhausted);
+                const catalog_generation = self.freshGeneration(current.catalog_generation) catch
+                    return .rejected(.local_resource_exhausted);
+                const selection_revision = if (!std.mem.eql(
+                    u8,
+                    value.selection.model_id,
+                    value.replacement.id,
+                ) and isDefaultModel(&candidate, value.selection))
+                    self.freshGeneration(candidate.selection_revision) catch
+                        return .rejected(.local_resource_exhausted)
+                else
+                    null;
+                candidate.replaceCustomModel(
+                    value,
+                    connection_revision,
+                    catalog_generation,
+                    selection_revision,
+                ) catch |err| return .rejected(mapRegistryError(err));
+            },
+            .remove_custom_model => |value| {
+                const current = findConnectionView(candidate.views(), value.selection.source_id) orelse
+                    return .rejected(.connection_not_found);
+                const connection_revision = self.freshGeneration(current.connection_revision) catch
+                    return .rejected(.local_resource_exhausted);
+                const catalog_generation = self.freshGeneration(current.catalog_generation) catch
+                    return .rejected(.local_resource_exhausted);
+                const selection_revision = if (isDefaultModel(&candidate, value.selection))
+                    self.freshGeneration(candidate.selection_revision) catch
+                        return .rejected(.local_resource_exhausted)
+                else
+                    null;
+                candidate.removeCustomModel(
+                    value,
+                    connection_revision,
+                    catalog_generation,
+                    selection_revision,
+                ) catch |err| return .rejected(mapRegistryError(err));
+            },
         }
         return self.commitCandidate(&candidate, true);
     }
@@ -702,7 +754,7 @@ pub const Runtime = struct {
         if (!self.store_healthy) return .rejected(.persistence_unavailable);
         var candidate = self.registry.clone() catch |err| return .rejected(mapRegistryError(err));
         defer candidate.deinit();
-        candidate.completeTest(command.selection, command.model_id, succeeded) catch |err|
+        candidate.completeTest(command, succeeded) catch |err|
             return .rejected(mapRegistryError(err));
         return self.commitCandidate(&candidate, true);
     }
@@ -723,17 +775,14 @@ pub const Runtime = struct {
         self: *Runtime,
         secret: []const u8,
         spec: contract.ModelConnectionSpec,
-        model_id: []const u8,
-        model_display_name: []const u8,
+        model: contract.CustomModelInput,
     ) contract.CommandResult {
         self.assertMainThread();
         if (!self.store_healthy) return .rejected(.persistence_unavailable);
         contract.validateModelConnectionSpec(spec) catch return .rejected(.invalid_connection);
-        if (model_id.len == 0 or model_id.len > contract.Limits.model_id_bytes or
-            model_display_name.len > contract.Limits.model_display_name_bytes or
-            secret.len == 0 or secret.len > contract.Limits.credential_bytes or
-            !std.unicode.utf8ValidateSlice(model_id) or
-            !std.unicode.utf8ValidateSlice(model_display_name))
+        contract.validateCustomModelInput(model) catch
+            return .rejected(.invalid_connection);
+        if (secret.len == 0 or secret.len > contract.Limits.credential_bytes)
             return .rejected(.invalid_connection);
         const vault = self.credential_vault orelse return .rejected(.capture_unavailable);
         var slot_storage: [ports.credential_slot_bytes]u8 = undefined;
@@ -771,8 +820,7 @@ pub const Runtime = struct {
             .connection_id = slot_id,
             .spec = spec,
             .credential_slot = .{ .id = slot_id },
-            .model_id = model_id,
-            .model_display_name = model_display_name,
+            .model = model,
         }, connection_revision, source_generation, catalog_generation) catch |err| {
             self.drainCredentialCleanup();
             return .rejected(mapRegistryError(err));
@@ -817,12 +865,11 @@ pub const Runtime = struct {
 
     pub fn resolveProbeCandidate(
         self: *Runtime,
-        selection: contract.ModelConnectionSelectionCommand,
-        model_id: []const u8,
+        command: contract.ModelConnectionTestCommand,
     ) !contract.OwnedSourceCandidate {
         self.assertMainThread();
         return self.resolveBindingCandidate(
-            try self.registry.probeBinding(selection, model_id),
+            try self.registry.probeBinding(command),
         );
     }
 
@@ -1098,8 +1145,8 @@ pub const Runtime = struct {
 
     fn markCredentialMissing(self: *Runtime, binding: registry_impl.Registry.DefaultBinding) void {
         self.registry.markCredentialMissing(.{
-            .connection_id = binding.connection_id,
-            .expected_connection_generation = binding.connection_revision,
+            .source_id = binding.connection_id,
+            .expected_connection_revision = binding.connection_revision,
         }) catch return;
         const encoded = registry_impl.encodeAlloc(self.allocator, &self.registry) catch {
             self.store_healthy = false;
@@ -1156,6 +1203,12 @@ fn findConnectionView(
 fn isDefaultConnection(registry: *const registry_impl.Registry, connection_id: []const u8) bool {
     const selection = registry.defaultSelection() orelse return false;
     return std.mem.eql(u8, selection.source_id, connection_id);
+}
+
+fn isDefaultModel(registry: *const registry_impl.Registry, model: contract.ModelRef) bool {
+    const selection = registry.defaultSelection() orelse return false;
+    return std.mem.eql(u8, selection.source_id, model.source_id) and
+        std.mem.eql(u8, selection.model_id, model.model_id);
 }
 
 fn metaskSourceMatches(source_id: []const u8, api_key_id: []const u8) bool {
@@ -1241,8 +1294,7 @@ test "Models Runtime owns durable model connections and source resolution" {
                 .protocol = .openai_responses,
                 .normalized_base_url = "https://api.openai.com/v1/responses",
             },
-            "gpt-5",
-            "GPT-5",
+            .{ .id = "gpt-5", .display_name = "GPT-5" },
         ).accepted);
         const view = runtime.views()[0];
         try std.testing.expectEqualStrings(TestVault.slot, view.id);
@@ -1250,20 +1302,24 @@ test "Models Runtime owns durable model connections and source resolution" {
             // Registry views are borrowed until the next committed mutation.
             // Commands arrive with independently owned request bytes in
             // production, so keep this test selection independently stable.
-            .connection_id = TestVault.slot,
-            .expected_connection_generation = view.connection_generation,
+            .source_id = TestVault.slot,
+            .expected_connection_revision = view.connection_revision,
         };
         try std.testing.expect(runtime.submitCommand(.{ .test_connection = .{
-            .selection = selection,
-            .model_id = "gpt-5",
+            .model = .{ .source_id = selection.source_id, .model_id = "gpt-5" },
+            .expected_connection_revision = selection.expected_connection_revision,
+            .expected_source_generation = view.source_generation,
+            .expected_catalog_generation = view.catalog_generation,
         } }).accepted);
         try std.testing.expect(runtime.completeTest(.{
-            .selection = selection,
-            .model_id = "gpt-5",
+            .model = .{ .source_id = selection.source_id, .model_id = "gpt-5" },
+            .expected_connection_revision = selection.expected_connection_revision,
+            .expected_source_generation = view.source_generation,
+            .expected_catalog_generation = view.catalog_generation,
         }, true).accepted);
         const connection = runtime.views()[0];
         try std.testing.expect(runtime.selectDefault(.{
-            .selection = .{ .source_id = selection.connection_id, .model_id = "gpt-5" },
+            .selection = .{ .source_id = selection.source_id, .model_id = "gpt-5" },
             .expected_selection_revision = runtime.view().selection_revision,
             .expected_source_generation = connection.source_generation,
             .expected_catalog_generation = connection.catalog_generation,
@@ -1438,6 +1494,8 @@ test "Models owns Metask catalog authority without changing global default" {
     );
     try std.testing.expectEqual(@as(usize, 0), unavailable.providers[0].models.len);
     try std.testing.expectEqualStrings("model-1", unavailable.metask_selection.?.model_id);
+    try std.testing.expect(!runtime.defaultResolvable());
+    try std.testing.expect((try runtime.resolveDefault()) == null);
 }
 
 test "Models bootstrap migrates both legacy stores with custom default precedence" {
@@ -1457,14 +1515,20 @@ test "Models bootstrap migrates both legacy stores with custom default precedenc
             .normalized_base_url = "https://api.openai.com/v1/responses",
         },
         .credential_slot = .{ .id = "legacy-slot" },
-        .model_id = "gpt-5",
+        .model = .{ .id = "gpt-5" },
     }, 7, 8, 9);
     const legacy_selection: contract.ModelConnectionSelectionCommand = .{
-        .connection_id = "legacy-slot",
-        .expected_connection_generation = 7,
+        .source_id = "legacy-slot",
+        .expected_connection_revision = 7,
     };
-    try legacy.markTesting(legacy_selection, "gpt-5");
-    try legacy.completeTest(legacy_selection, "gpt-5", true);
+    const legacy_probe: contract.ModelConnectionTestCommand = .{
+        .model = .{ .source_id = "legacy-slot", .model_id = "gpt-5" },
+        .expected_connection_revision = 7,
+        .expected_source_generation = 8,
+        .expected_catalog_generation = 9,
+    };
+    try legacy.markTesting(legacy_probe);
+    try legacy.completeTest(legacy_probe, true);
     try legacy.selectDefault(legacy_selection, "gpt-5", 11);
     const connection_bytes = try registry_impl.encodeLegacyAlloc(std.testing.allocator, &legacy);
     defer std.testing.allocator.free(connection_bytes);
@@ -1548,14 +1612,20 @@ test "Models bootstrap preserves proven custom default when preference sector is
             .normalized_base_url = "https://api.openai.com/v1/responses",
         },
         .credential_slot = .{ .id = "legacy-slot" },
-        .model_id = "gpt-5",
+        .model = .{ .id = "gpt-5" },
     }, 7, 8, 9);
     const legacy_selection: contract.ModelConnectionSelectionCommand = .{
-        .connection_id = "legacy-slot",
-        .expected_connection_generation = 7,
+        .source_id = "legacy-slot",
+        .expected_connection_revision = 7,
     };
-    try legacy.markTesting(legacy_selection, "gpt-5");
-    try legacy.completeTest(legacy_selection, "gpt-5", true);
+    const legacy_probe: contract.ModelConnectionTestCommand = .{
+        .model = .{ .source_id = "legacy-slot", .model_id = "gpt-5" },
+        .expected_connection_revision = 7,
+        .expected_source_generation = 8,
+        .expected_catalog_generation = 9,
+    };
+    try legacy.markTesting(legacy_probe);
+    try legacy.completeTest(legacy_probe, true);
     try legacy.selectDefault(legacy_selection, "gpt-5", 11);
     const connection_bytes = try registry_impl.encodeLegacyAlloc(std.testing.allocator, &legacy);
     defer std.testing.allocator.free(connection_bytes);

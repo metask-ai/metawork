@@ -165,8 +165,7 @@ pub const ModelConnectionHost = struct {
     create_fn: *const fn (
         *anyopaque,
         models_contract.ModelConnectionSpec,
-        []const u8,
-        []const u8,
+        models_contract.CustomModelInput,
     ) ModelConnectionCreateOutcome,
 };
 
@@ -328,6 +327,9 @@ pub const Dispatcher = struct {
             .{ .name = commands.model_connection_update, .function = modelConnectionUpdate },
             .{ .name = commands.model_connection_remove, .function = modelConnectionRemove },
             .{ .name = commands.model_connection_test, .function = modelConnectionTest },
+            .{ .name = commands.custom_model_add, .function = customModelAdd },
+            .{ .name = commands.custom_model_replace, .function = customModelReplace },
+            .{ .name = commands.custom_model_remove, .function = customModelRemove },
             .{ .name = commands.account_logout, .function = accountLogout },
             .{ .name = commands.set_default_permission_profile, .function = setDefaultPermissionProfile },
             .{ .name = commands.create_task, .function = createTask },
@@ -1288,9 +1290,10 @@ pub const Dispatcher = struct {
             parsed.value.displayName.len > models_contract.Limits.display_name_bytes or
             parsed.value.normalizedBaseUrl.len == 0 or
             parsed.value.normalizedBaseUrl.len > models_contract.Limits.base_url_bytes or
-            parsed.value.modelId.len == 0 or
-            parsed.value.modelId.len > models_contract.Limits.model_id_bytes)
+            parsed.value.model.id.len == 0 or
+            parsed.value.model.id.len > models_contract.Limits.model_id_bytes)
             return error.InvalidBridgePayload;
+        const model = try parseCustomModel(parsed.value.model);
         const spec: models_contract.ModelConnectionSpec = .{
             .display_name = parsed.value.displayName,
             .protocol = protocol,
@@ -1306,8 +1309,7 @@ pub const Dispatcher = struct {
         return encodeExecutionResult(output, switch (host.create_fn(
             host.context,
             spec,
-            parsed.value.modelId,
-            parsed.value.modelDisplayName,
+            model,
         )) {
             .submitted => |result| result,
             .cancelled => .rejected(.user_cancelled),
@@ -1344,9 +1346,9 @@ pub const Dispatcher = struct {
         return encodeExecutionResult(output, self.model_connection_commands.submit(.{
             .update = .{
                 .selection = .{
-                    .connection_id = parsed.value.connectionId,
-                    .expected_connection_generation = try handlers.parseWireId(
-                        parsed.value.expectedConnectionGeneration,
+                    .source_id = parsed.value.sourceId,
+                    .expected_connection_revision = try handlers.parseWireId(
+                        parsed.value.expectedConnectionRevision,
                     ),
                 },
                 .spec = spec,
@@ -1367,8 +1369,8 @@ pub const Dispatcher = struct {
         defer parsed.deinit();
         return encodeExecutionResult(output, self.model_connection_commands.submit(.{
             .remove = .{
-                .connection_id = parsed.value.connectionId,
-                .expected_connection_generation = try handlers.parseWireId(parsed.value.expectedConnectionGeneration),
+                .source_id = parsed.value.sourceId,
+                .expected_connection_revision = try handlers.parseWireId(parsed.value.expectedConnectionRevision),
             },
         }));
     }
@@ -1382,17 +1384,151 @@ pub const Dispatcher = struct {
         var callback = try self.callbacks.enter();
         defer callback.deinit();
         try self.requireManagementAuthority(invocation.source.window_id);
-        var parsed = try handlers.parsePayload(handlers.ModelConnectionModelSelection, invocation.request.payload);
+        var parsed = try handlers.parsePayload(handlers.ModelConnectionTest, invocation.request.payload);
         defer parsed.deinit();
         return encodeExecutionResult(output, self.model_connection_commands.submit(.{
             .test_connection = .{
-                .selection = .{
-                    .connection_id = parsed.value.connectionId,
-                    .expected_connection_generation = try handlers.parseWireId(parsed.value.expectedConnectionGeneration),
+                .model = .{
+                    .source_id = parsed.value.model.sourceId,
+                    .model_id = parsed.value.model.modelId,
                 },
-                .model_id = parsed.value.modelId,
+                .expected_connection_revision = try handlers.parseWireId(
+                    parsed.value.expectedConnectionRevision,
+                ),
+                .expected_source_generation = try handlers.parseWireId(
+                    parsed.value.expectedSourceGeneration,
+                ),
+                .expected_catalog_generation = try handlers.parseWireId(
+                    parsed.value.expectedCatalogGeneration,
+                ),
             },
         }));
+    }
+
+    fn customModelAdd(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireManagementAuthority(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(handlers.CustomModelAdd, invocation.request.payload);
+        defer parsed.deinit();
+        return encodeExecutionResult(output, self.model_connection_commands.submit(.{
+            .add_custom_model = .{
+                .source_id = parsed.value.sourceId,
+                .expected_connection_revision = try handlers.parseWireId(
+                    parsed.value.expectedConnectionRevision,
+                ),
+                .expected_catalog_generation = try handlers.parseWireId(
+                    parsed.value.expectedCatalogGeneration,
+                ),
+                .model = try parseCustomModel(parsed.value.model),
+            },
+        }));
+    }
+
+    fn customModelReplace(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireManagementAuthority(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(handlers.CustomModelReplace, invocation.request.payload);
+        defer parsed.deinit();
+        return encodeExecutionResult(output, self.model_connection_commands.submit(.{
+            .replace_custom_model = .{
+                .selection = .{
+                    .source_id = parsed.value.selection.sourceId,
+                    .model_id = parsed.value.selection.modelId,
+                },
+                .expected_connection_revision = try handlers.parseWireId(
+                    parsed.value.expectedConnectionRevision,
+                ),
+                .expected_catalog_generation = try handlers.parseWireId(
+                    parsed.value.expectedCatalogGeneration,
+                ),
+                .replacement = try parseCustomModel(parsed.value.replacement),
+            },
+        }));
+    }
+
+    fn customModelRemove(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireManagementAuthority(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(handlers.CustomModelRemove, invocation.request.payload);
+        defer parsed.deinit();
+        return encodeExecutionResult(output, self.model_connection_commands.submit(.{
+            .remove_custom_model = .{
+                .selection = .{
+                    .source_id = parsed.value.selection.sourceId,
+                    .model_id = parsed.value.selection.modelId,
+                },
+                .expected_connection_revision = try handlers.parseWireId(
+                    parsed.value.expectedConnectionRevision,
+                ),
+                .expected_catalog_generation = try handlers.parseWireId(
+                    parsed.value.expectedCatalogGeneration,
+                ),
+            },
+        }));
+    }
+
+    fn parseCustomModel(value: handlers.CustomModel) !models_contract.CustomModelInput {
+        const model: models_contract.CustomModelInput = .{
+            .id = value.id,
+            .display_name = value.displayName,
+            .metadata = .{
+                .max_input_tokens = if (value.metadata.maxInputTokens) |token_count|
+                    try handlers.parseWireId(token_count)
+                else
+                    null,
+                .max_output_tokens = if (value.metadata.maxOutputTokens) |token_count|
+                    try handlers.parseWireId(token_count)
+                else
+                    null,
+                .capabilities = .{
+                    .image_input = value.metadata.capabilities.imageInput,
+                    .pdf_input = value.metadata.capabilities.pdfInput,
+                    .batch = value.metadata.capabilities.batch,
+                    .citations = value.metadata.capabilities.citations,
+                    .code_execution = value.metadata.capabilities.codeExecution,
+                    .structured_outputs = value.metadata.capabilities.structuredOutputs,
+                    .thinking = .{
+                        .supported = value.metadata.capabilities.thinking.supported,
+                        .adaptive = value.metadata.capabilities.thinking.adaptive,
+                        .enabled = value.metadata.capabilities.thinking.enabled,
+                    },
+                    .effort = .{
+                        .supported = value.metadata.capabilities.effort.supported,
+                        .low = value.metadata.capabilities.effort.low,
+                        .medium = value.metadata.capabilities.effort.medium,
+                        .high = value.metadata.capabilities.effort.high,
+                        .max = value.metadata.capabilities.effort.max,
+                    },
+                    .context_management = .{
+                        .supported = value.metadata.capabilities.contextManagement.supported,
+                        .clear_thinking_20251015 = value.metadata.capabilities.contextManagement.clearThinking20251015,
+                        .clear_tool_uses_20250919 = value.metadata.capabilities.contextManagement.clearToolUses20250919,
+                        .compact_20260112 = value.metadata.capabilities.contextManagement.compact20260112,
+                    },
+                },
+            },
+        };
+        models_contract.validateCustomModelInput(model) catch
+            return error.InvalidBridgePayload;
+        return model;
     }
 
     fn parseProtocol(value: []const u8) ?models_contract.Protocol {

@@ -54,28 +54,85 @@ pub const ConfigureMetaskSelection = struct {
     expectedMetaskSelectionRevision: []const u8,
     expectedCatalogGeneration: []const u8,
 };
+pub const ModelCapabilities = struct {
+    imageInput: ?bool = null,
+    pdfInput: ?bool = null,
+    batch: ?bool = null,
+    citations: ?bool = null,
+    codeExecution: ?bool = null,
+    structuredOutputs: ?bool = null,
+    thinking: struct {
+        supported: ?bool = null,
+        adaptive: ?bool = null,
+        enabled: ?bool = null,
+    } = .{},
+    effort: struct {
+        supported: ?bool = null,
+        low: ?bool = null,
+        medium: ?bool = null,
+        high: ?bool = null,
+        max: ?bool = null,
+    } = .{},
+    contextManagement: struct {
+        supported: ?bool = null,
+        clearThinking20251015: ?bool = null,
+        clearToolUses20250919: ?bool = null,
+        compact20260112: ?bool = null,
+    } = .{},
+};
+pub const ModelMetadata = struct {
+    maxInputTokens: ?[]const u8 = null,
+    maxOutputTokens: ?[]const u8 = null,
+    capabilities: ModelCapabilities = .{},
+};
+pub const CustomModel = struct {
+    id: []const u8,
+    displayName: []const u8 = "",
+    metadata: ModelMetadata = .{},
+};
+pub const ModelRef = struct {
+    sourceId: []const u8,
+    modelId: []const u8,
+};
 pub const ModelConnectionCreate = struct {
     displayName: []const u8,
     protocol: []const u8,
     normalizedBaseUrl: []const u8,
-    modelId: []const u8,
-    modelDisplayName: []const u8 = "",
+    model: CustomModel,
 };
 pub const ModelConnectionUpdate = struct {
-    connectionId: []const u8,
-    expectedConnectionGeneration: []const u8,
+    sourceId: []const u8,
+    expectedConnectionRevision: []const u8,
     displayName: []const u8,
     protocol: []const u8,
     normalizedBaseUrl: []const u8,
 };
 pub const ModelConnectionSelection = struct {
-    connectionId: []const u8,
-    expectedConnectionGeneration: []const u8,
+    sourceId: []const u8,
+    expectedConnectionRevision: []const u8,
 };
-pub const ModelConnectionModelSelection = struct {
-    connectionId: []const u8,
-    expectedConnectionGeneration: []const u8,
-    modelId: []const u8,
+pub const ModelConnectionTest = struct {
+    model: ModelRef,
+    expectedConnectionRevision: []const u8,
+    expectedSourceGeneration: []const u8,
+    expectedCatalogGeneration: []const u8,
+};
+pub const CustomModelAdd = struct {
+    sourceId: []const u8,
+    expectedConnectionRevision: []const u8,
+    expectedCatalogGeneration: []const u8,
+    model: CustomModel,
+};
+pub const CustomModelReplace = struct {
+    selection: ModelRef,
+    expectedConnectionRevision: []const u8,
+    expectedCatalogGeneration: []const u8,
+    replacement: CustomModel,
+};
+pub const CustomModelRemove = struct {
+    selection: ModelRef,
+    expectedConnectionRevision: []const u8,
+    expectedCatalogGeneration: []const u8,
 };
 pub const WorkspaceIdentity = struct {
     workspaceId: []const u8,

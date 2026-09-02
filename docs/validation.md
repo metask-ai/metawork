@@ -85,6 +85,8 @@ candidate probe、真实桌面验收、签名、公证和发布验证不属于 `
 
 AgentCore runtime assets 的验证必须覆盖 manifest declaration、执行文件和许可证缺失/篡改、构建和 runtime package 部署，以及不依赖开发机外部 rg 的真实 Glob/Grep。source-free probe 显式绑定候选 bundle 自带的 rg；桌面 vertical 验证 Host 同目录部署，不能让环境中的 rg 掩盖漏包。
 
+Model Connection的最小充分证据必须覆盖：有界非空custom model集合的add/replace/remove及最后成员拒绝；source-qualified identity与connection/source/catalog revision漂移；probe开始后metadata/catalog变化使completion stale；成功proof后的失败重测不撤销同一source generation readiness；authority变化清除全部旧proof；canonical store恢复metadata/provenance/per-model readiness；Renderer revision 1严格拒绝旧混合generation payload。首版UI继续只验证单模型创建表单，不以未开放的多模型编辑界面替代底层与wire验证。
+
 artifact refresh、checksum 或 lock 更新本身不要求修改本文。精确 target identity 以 `build_support/agentcore-bundle.*.lock.json` 为准，ABI 接受语义以 [AgentCore ABI v1 合同](agentcore-abi-v1.md)为准；verifier 必须报告它实际读取的 identity，文档和脚本不得硬编码一份“当前值”。替换 artifact 后，旧 artifact 的行为证据、checkpoint 样本和平台通过结论不自动继承；必须对新 artifact 重新运行相关 verifier、probe 或 platform vertical。
 
 PermissionProfile 的最小充分证据必须跨越实际 owner：candidate probe 固定所采用 `PermissionMode + ShellPolicy` 的代表性 tool/effect 行为；Agent tests 固定配置编码、typed request/provenance、same-profile fresh/restore 与 noninteractive stop fact；Product lifecycle 固定默认值只影响新 Task、Task/Run provenance、archive/delete，以及 Scheduled occurrence 由生产 event consumer 自动 abort 后形成 `permission_required → needs_attention`；Renderer/Bridge tests 固定 capability gate、只读 effective profile、单次选择动作和合法历史 snapshot。Schedule definition update 只影响后续 occurrence，不能改写历史 Task profile 或使 Renderer 拒绝合法 snapshot。`standard` 在 typed risk/effect 和执行前 commit boundary 未经独立 fixture 证明前必须保持隐藏。

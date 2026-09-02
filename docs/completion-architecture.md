@@ -14,7 +14,7 @@ Completion.complete(request, cancellation) -> Result | Failure
 
 当前消费者只有：
 
-- Model Connection Probe；
+- Model Connection Probe；每次 preparation 精确绑定 `ModelRef + connection revision + source generation + catalog generation`，完成时任一 token 过期都只销毁结果，不提交 Models 状态；
 - 首个 Run 的自动标题生成。
 
 两者都只消费最终文本，不消费 token delta、thinking delta 或其他流式事件。因此 Completion 使用 Provider 的非流式 JSON 接口，不提供 `Stream`、`next()` 或 SSE。
