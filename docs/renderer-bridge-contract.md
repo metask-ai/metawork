@@ -88,7 +88,47 @@ response 是以下 closed union：
 
 Product Control 使用 File Changes 专用 bounded artifact lane 按 reference 读取，不扫描 Workspace 或 Git。异步 completion 在跨 Bridge 前重新校验 Task、Run、change 与 artifact identity 仍一致；Task/Run 切换、删除、shutdown 或 reference replacement 后的旧结果只能返回 `not_recorded`。任一已接纳请求必须恰好一次 terminal response；正文和 retained payload 必须落在 Native SDK async response 与 shutdown 上界内，不进入 Snapshot、Task persistence、日志或 Renderer 缓存。
 
-当前 `metawork.tasks.run` 只有 `input.kind = text | skill` 的 tagged payload，旧 `prompt` 不兼容；Skill input 精确为 `{ kind, skillId, catalogRevision, selectionRevision, argumentValues }`。`tasks.create` 必须携带 `workspace = { kind: "automatic" } | { kind: "manual", workspaceId, expectedWorkspaceEpoch }`、nullable `expectedSkillCatalogRevision`、nullable `expectedSkillSelectionRevision` 和 `permissionProfile = approval_required | full_access`；Text 两个 revision 均为 `null`，Skill 两者均非空，混合状态 fail closed。Bridge 与 Product Control 直接使用同一组 `manual | automatic` admission 语义；混合、缺字段或未知 kind/profile 的 payload 一律 fail closed。不存在 `workspaces.select` 命令或 Snapshot 级 selected Workspace；Manual 选择只属于 Renderer New task draft，真正的 epoch、authorization 与 recent order 在 `tasks.create(manual)` 事务中校验和提交。`automaticWorkspaces` 只声明新 Automatic Workspace 的分配能力；capability 不可用时，已恢复的 Automatic Workspace 与 owning Task 历史仍可出现在 snapshot 中。Skill 没有 `runSkill` 第二入口。Workspace/Task catalog、typed Run history 和 Skill terminal cause 只从 Product Control snapshot 发布；显式 catalog refresh 也只通过 Bridge 调用 Product Control transaction，Bridge 不持有 catalog lease、不解析 slash、不读取 Skill body。
+## 图片与 PDF attachment commands
+
+根 `capabilities.attachments` 精确为 `{ enabled, imageFormats, pdf, maxFiles, maxImageBytes, maxPdfBytes, maxStagedBytes }`。`enabled` 为 boolean，`imageFormats` 在开放时精确为有序 `png | jpeg | webp` 数组，其他 limit 是 canonical decimal `u64` string；关闭时 formats 为空、pdf=false，其余 limit 仍发布 Host canonical policy。Renderer 只用该对象解释选择器和本地 admission，Host 对 command 重新执行全部限制。
+
+`metawork.attachments.choose` 是 revision 1 async command，只接受空对象。Application 在当前 source/window authority 下打开原生多选 picker，随后由 Product Control attachment lane 完成整批 staging。结果严格为以下三种之一：
+
+```json
+{ "status": "cancelled" }
+```
+
+```json
+{
+  "status": "ready",
+  "attachments": [
+    {
+      "token": "opaque",
+      "kind": "image",
+      "format": "png",
+      "displayName": "diagram.png",
+      "sizeBytes": "42"
+    }
+  ]
+}
+```
+
+```json
+{
+  "status": "rejected",
+  "reason": "unsupported_type | file_too_large | too_many_files | staging_capacity | read_failed | file_changed | shutting_down"
+}
+```
+
+`attachments` 在 ready 时非空且保持 picker 顺序；PDF entry 精确使用 `kind=pdf, format=pdf`，image 只接受已发布 format。token 是 Bridge-owned、不可猜、connection/window/document-generation-bound 的一次性 grant，不是 Product identity 或路径。整批任一候选失败只能返回单一 rejected 并释放全部 candidate，不返回 ready 与 rejected 混合集合。
+
+`metawork.attachments.release` 是同步 revision 1 command，payload 精确为 `{ token }`，返回 `{ released }`。它只撤销当前 connection 拥有且尚未 borrowed/consumed 的 grant；未知、stale 或已经释放的 token 返回 released=false，不泄露其他 connection 的存在性。disconnect、document generation replacement 与 shutdown 必须等价释放该 connection 全部 grant。
+
+`metawork.tasks.run` 在既有 `text | skill` 上原地 hard cut 增加 `{ kind: "multimodal", text, attachmentTokens }`。`text` 是 string，允许为空；`attachmentTokens` 必须为非空、有界、无重复的 string array。非空 text 成为第一个 Agent part，后续 part 按 token 数组顺序；Skill 字段和 multimodal 字段不能混合。Bridge 只校验 wire 与 grant authority，Product 决定 Task/Session admission和 token 的 borrow/consume transaction。Run 接纳前失败保留 ready grant；接纳后即使 history save、enqueue、transport 或 Agent terminal 失败也不得恢复或自动重放。
+
+Run snapshot 的 `input` 对 multimodal 精确发布 `{ kind, text, attachments, redacted }`。`text` 为 nullable string；`attachments[]` entry 精确为 `{ kind, format, displayName, sizeBytes, redacted }`，顺序与已接纳 input 一致。Snapshot 与 persistence 不含 token、路径、raw bytes、Base64、digest 或 provider wire。旧 history record 没有 attachment 字段时只解释为 text/skill 旧 Run，不从正文或文件引用猜测媒体。
+
+当前 `metawork.tasks.run` 使用 `input.kind = text | skill | multimodal` 的唯一 tagged payload，旧 `prompt` 不兼容；Skill input 精确为 `{ kind, skillId, catalogRevision, selectionRevision, argumentValues }`，multimodal 精确遵守上节 token 合同。`tasks.create` 必须携带 `workspace = { kind: "automatic" } | { kind: "manual", workspaceId, expectedWorkspaceEpoch }`、nullable `expectedSkillCatalogRevision`、nullable `expectedSkillSelectionRevision` 和 `permissionProfile = approval_required | full_access`；Text 与 multimodal 的两个 Skill revision 均为 `null`，Skill 两者均非空，混合状态 fail closed。Bridge 与 Product Control 直接使用同一组 `manual | automatic` admission 语义；混合、缺字段或未知 kind/profile 的 payload 一律 fail closed。不存在 `workspaces.select` 命令或 Snapshot 级 selected Workspace；Manual 选择只属于 Renderer New task draft，真正的 epoch、authorization 与 recent order 在 `tasks.create(manual)` 事务中校验和提交。`automaticWorkspaces` 只声明新 Automatic Workspace 的分配能力；capability 不可用时，已恢复的 Automatic Workspace 与 owning Task 历史仍可出现在 snapshot 中。Skill 没有 `runSkill` 第二入口。Workspace/Task catalog、typed Run history 和 Skill terminal cause 只从 Product Control snapshot 发布；显式 catalog refresh 也只通过 Bridge 调用 Product Control transaction，Bridge 不持有 catalog lease、不解析 slash、不读取 Skill body。
 
 权限策略沿用同一 revision 1 合同原地 hard cut。根 `capabilities.permissionProfiles` 与根 `permissions = { availableProfiles, defaultProfile }` 必须一致：关闭时 available 只能为空，开放时必须精确发布 `approval_required`、`full_access` 完整集合；default 始终是其中之一。`metawork.permissions.setDefaultProfile` payload 精确为 `{ permissionProfile }`，结果精确为 `{ changed, defaultProfile }`，只修改之后新建 Task 的默认值。每个 Task 必须发布创建时固定的 `permissionProfile`，每个 Run 必须发布同一 profile 和 `permissionInteraction = interactive | noninteractive`；Renderer 必须拒绝 Run 与 owning Task profile 不一致的 snapshot。已有 Task 不提供改写命令。Scheduled Task projection 同样必须发布当前定义固定的 `permissionProfile`；create/update mutation 必须携带该字段，每次 occurrence 对应的 Task/Run 必须复制 launch 时的定义 profile 并使用 `noninteractive`。后续定义 update 不改写历史 Task，Renderer 不得将历史 Task profile 与当前定义 profile 比较。Schedule failure/occurrence reason 增加 `permission_required`，此时 definition 必须为 `needs_attention`。`permission_required` 是非交互 Run 遇到未覆盖 effect 时的 typed terminal cause，不得转化为 pending UI 或后台弹窗。
 
