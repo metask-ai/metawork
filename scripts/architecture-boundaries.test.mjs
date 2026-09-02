@@ -792,8 +792,10 @@ test("Product Schedule owns its aggregate state and persistence", () => {
   assert.match(executionState, /fn consumeClearPreparation/);
   assert.match(runtime, /redactWithExecutionCredentialsNoFail/);
   assert.match(taskRuntime, /pub fn redactWithExecutionCredentialsNoFail/);
-  assert.match(ports, /pub fn applyMetaskExecutionCandidate/);
-  assert.match(ports, /pub fn applyMetaskExecutionClear/);
+  assert.match(ports, /pub fn prepareMetaskExecutionCandidate/);
+  assert.match(ports, /pub fn prepareMetaskExecutionClear/);
+  assert.match(ports, /pub fn finalizeMetaskStageNoFail/);
+  assert.match(ports, /pub fn abortMetaskStageNoFail/);
   assert.doesNotMatch(
     accountCoordinator,
     /prepareExecutionInstall|prepareExecutionClear/,
@@ -973,12 +975,23 @@ test("Product Control owns atomic default execution source replacement", () => {
   const ports = read("src/product/control/ports.zig");
   const control = read("src/product/control/runtime.zig");
   const accountCoordinator = read("src/app/account_coordinator.zig");
+  const accountCoordinatorProduction = accountCoordinator.split(
+    "var testing_transport_context",
+  )[0];
   const accountRuntime = read("src/product/account/runtime.zig");
   const accountState = read("src/product/account/state.zig");
 
-  assert.match(ports, /pub const MetaskExecutionOutcome = enum/);
-  assert.match(ports, /apply_metask_candidate_fn:/);
-  assert.match(ports, /apply_metask_clear_fn:/);
+  assert.match(ports, /pub const MetaskStageToken = struct/);
+  assert.match(ports, /pub const MetaskStageResult = union\(enum\)/);
+  assert.match(ports, /prepare_metask_candidate_fn:/);
+  assert.match(ports, /prepare_metask_clear_fn:/);
+  assert.match(ports, /finalize_metask_stage_fn:/);
+  assert.match(ports, /abort_metask_stage_fn:/);
+  assert.doesNotMatch(ports, /MetaskExecutionOutcome|apply_metask_/);
+  assert.doesNotMatch(
+    ports,
+    /begin_default_replacement_fn|beginDefaultExecutionReplacement|MetaskStageError/,
+  );
   assert.doesNotMatch(
     ports,
     /accept_metask_candidate_fn:|prepare_install_fn:|prepare_clear_fn:|install_execution_fn:|clear_execution_fn:/,
@@ -986,64 +999,69 @@ test("Product Control owns atomic default execution source replacement", () => {
 
   const availabilityStart = control.indexOf("pub fn metaskActivationAvailable");
   const replacementStart = control.indexOf(
-    "pub fn applyMetaskExecutionCandidate",
+    "pub fn prepareMetaskExecutionCandidate",
   );
-  const clearStart = control.indexOf("pub fn applyMetaskExecutionClear");
+  const clearStart = control.indexOf("pub fn prepareMetaskExecutionClear");
+  const finalizeStart = control.indexOf("pub fn finalizeMetaskStageNoFail");
   assert.ok(availabilityStart >= 0, "Metask availability policy must exist");
   assert.ok(
     replacementStart > availabilityStart,
     "Metask replacement must exist",
   );
   assert.ok(clearStart > replacementStart, "Metask clear policy must exist");
+  assert.ok(finalizeStart > clearStart, "Metask finalize policy must exist");
 
   const availability = control.slice(availabilityStart, replacementStart);
   assert.match(availability, /modelConnectionDefaultBinding\(\)/);
 
   const replacement = control.slice(replacementStart, clearStart);
+  assert.match(replacement, /self\.beginDefaultExecutionReplacement\(\)/);
   const prepareAt = replacement.indexOf("self.prepareExecutionInstall");
   const clearDefaultAt = replacement.indexOf(
     "self.clearModelConnectionDefault()",
   );
-  const installAt = replacement.indexOf("self.installExecutionNoFail");
   assert.ok(prepareAt >= 0, "replacement must prepare all fallible effects");
   assert.ok(
     clearDefaultAt > prepareAt,
     "durable custom default may clear only after preparation",
   );
-  assert.ok(
-    installAt > clearDefaultAt,
-    "Metask installation must be the no-fail commit after durable clear",
-  );
+  assert.doesNotMatch(replacement, /installExecutionNoFail/);
+  const finalize = control.slice(finalizeStart);
+  assert.match(finalize, /self\.commitAccountFactNoFail\(fact\)/);
+  assert.match(finalize, /self\.installExecutionNoFail\(execution\)/);
 
-  assert.match(accountCoordinator, /applyMetaskExecutionCandidate/);
-  assert.match(accountCoordinator, /applyMetaskExecutionClear/);
+  assert.match(accountCoordinator, /prepareMetaskExecutionCandidate/);
+  assert.match(accountCoordinator, /prepareMetaskExecutionClear/);
+  assert.match(accountCoordinator, /finalizeMetaskStageNoFail/);
+  assert.match(accountCoordinator, /abortMetaskStageNoFail/);
   assert.match(accountCoordinator, /prepareActiveAttemptFailure/);
-  assert.match(accountRuntime, /pub fn prepareCommittedPhaseFailure/);
-  assert.match(accountState, /pub fn prepareCommittedPhaseFailure/);
-  const observedAccountCommitAt = accountCoordinator.indexOf(
+  assert.doesNotMatch(accountCoordinatorProduction, /OwnedConfig/);
+  assert.doesNotMatch(
+    accountRuntime,
+    /prepareAndPersistExecution|prepareCommittedPhaseFailure/,
+  );
+  assert.doesNotMatch(accountState, /prepareCommittedPhaseFailure/);
+  assert.doesNotMatch(accountState, /begin_default/);
+  assert.match(accountState, /persist_execution_preference/);
+  const prepareAtCoordinator = accountCoordinator.indexOf(
+    "self.control.prepareMetaskExecutionCandidate",
+  );
+  const admissionAt = accountCoordinator.indexOf(
+    "self.runtime.admitEffect(&prepared)",
+  );
+  const accountCommitAt = accountCoordinator.indexOf(
     "self.runtime.commit(&prepared);",
   );
-  const committedFailureAt = accountCoordinator.indexOf(
-    "self.runtime.prepareCommittedPhaseFailure",
-  );
-  const publishedCommitAt = accountCoordinator.indexOf(
-    "self.control.finishAccountCommitNoFail();",
-  );
-  assert.ok(
-    observedAccountCommitAt >= 0,
-    "Account commit must remain explicit",
-  );
-  assert.ok(
-    committedFailureAt > observedAccountCommitAt,
-    "handoff failure must derive from the observed committed Account phase",
-  );
-  assert.ok(
-    publishedCommitAt > committedFailureAt,
-    "the failed saga must publish only after its terminal Account fact",
-  );
+  assert.ok(prepareAtCoordinator >= 0 && admissionAt > prepareAtCoordinator);
+  assert.ok(accountCommitAt > admissionAt);
   assert.doesNotMatch(
     accountCoordinator,
-    /acceptMetaskExecutionCandidate|clearModelConnectionDefault|prepareExecutionInstall|prepareExecutionClear|installExecutionNoFail|clearExecutionNoFail/,
+    /acceptMetaskExecutionCandidate|clearModelConnectionDefault|prepareExecutionInstall|prepareExecutionClear|installExecutionNoFail|clearExecutionNoFail|beginDefaultExecutionReplacement/,
+  );
+  assert.match(accountState, /AttemptKind = enum \{[\s\S]*activation/);
+  assert.match(
+    accountState,
+    /attemptKind\(\) == \.activation[\s\S]*execution_intent = \.install_committed/,
   );
 });
 

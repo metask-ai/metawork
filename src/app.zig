@@ -511,18 +511,19 @@ pub fn run(init: std.process.Init) !void {
         },
         .schedule_persistence = .{
             .context = if (stores_state.scheduled_task) |*store| store else null,
-            .enabled = stores_state.scheduled_task != null and
-                !stores_state.scheduled_task_restore_failed,
+            .enabled = stores_state.scheduled_task != null,
             .restored_bytes = stores_state.scheduled_task_restored_bytes,
             .restore_failed = stores_state.scheduled_task_restore_failed,
             .commit_fn = app_stores.commitScheduledTaskStore,
+            .recover_fn = app_stores.recoverScheduledTaskStore,
         },
         .task_persistence = .{
             .context = if (stores_state.task) |*store| store else null,
-            .enabled = stores_state.task != null and !stores_state.task_restore_failed,
+            .enabled = stores_state.task != null,
             .restored_bytes = stores_state.task_restored_bytes,
             .restore_failed = stores_state.task_restore_failed,
             .commit_fn = app_stores.commitTaskStore,
+            .recover_fn = app_stores.recoverTaskStore,
         },
         .checkpoint_store = .{
             .file_store = if (stores_state.checkpoint) |*store| store else null,

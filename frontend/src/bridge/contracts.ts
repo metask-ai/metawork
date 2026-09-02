@@ -6,6 +6,18 @@ export type CatalogState =
 
 export type ExecutionSource = "metask" | "model_connection";
 
+export type ExecutionState = "unavailable" | "ready" | "replacing";
+
+export type ExecutionErrorCode =
+  | "none"
+  | "model_connection_persistence_unavailable"
+  | "credential_unavailable"
+  | "invalid_candidate"
+  | "resource_exhausted"
+  | "schedule_persistence_unavailable"
+  | "schedule_persistence_failed"
+  | "schedule_persistence_outcome_unknown";
+
 export type AccountErrorCode =
   | "none"
   | "invalid_command"
@@ -111,7 +123,6 @@ export type ModelMetadata = {
 export type AccountView = {
   state: AccountState;
   catalogState: CatalogState;
-  executionSource: ExecutionSource;
   canCancel: boolean;
   accountId: string;
   displayName: string;
@@ -131,14 +142,21 @@ export type AccountView = {
   candidateApiKeySelectionId: string;
   candidateModelSelectionId: string;
   modelCatalogApiKeySelectionId: string;
-  modelConnections: ModelConnectionView[];
-  selectedModelConnectionId: string;
-  canCreateTask: boolean;
   errorCode: AccountErrorCode;
   safeDiagnostic: string;
   catalogGeneration: string;
   metaskExecutionGeneration: string;
-  executionGeneration: string;
+};
+
+export type ExecutionView = {
+  state: ExecutionState;
+  defaultSource: ExecutionSource | null;
+  activeSource: ExecutionSource | null;
+  activeGeneration: string;
+  taskCreationAvailable: boolean;
+  selectedModelConnectionId: string;
+  modelConnections: ModelConnectionView[];
+  errorCode: ExecutionErrorCode;
 };
 
 export type AccountCommandResult = {
@@ -571,6 +589,7 @@ export type WorkbenchSnapshot = {
       | "corrupt"
       | "write_failed"
       | "outcome_unknown";
+    taskHistoryRecoveryAvailable: boolean;
     conversationRecovery: boolean;
     executionRebind: boolean;
     structuredPlan: boolean;
@@ -588,6 +607,7 @@ export type WorkbenchSnapshot = {
       | "corrupt"
       | "write_failed"
       | "outcome_unknown";
+    scheduledTaskRecoveryAvailable: boolean;
     backgroundScheduleWake: boolean;
     localSkillManagement: boolean;
     skillManagementHealth:
@@ -610,6 +630,7 @@ export type WorkbenchSnapshot = {
     defaultProfile: PermissionProfile;
   };
   account: AccountView;
+  execution: ExecutionView;
   skillCatalog: SkillCatalogView;
   skillManagement: SkillManagementView;
   mcp: McpManagementView;
@@ -617,6 +638,15 @@ export type WorkbenchSnapshot = {
   scheduledTasks: ScheduledTaskView[];
   tasks: TaskView[];
 };
+
+export type PersistenceRecoveryOutcome =
+  | "recovered"
+  | "stale_revision"
+  | "not_required"
+  | "unavailable"
+  | "failed"
+  | "outcome_unknown"
+  | "shutting_down";
 
 export type WorkspaceView = {
   id: string;

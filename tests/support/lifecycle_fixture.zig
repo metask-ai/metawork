@@ -2642,10 +2642,8 @@ pub fn installProductControlExecutionGeneration(
             .selected_api_key_id = "key-1",
             .selected_model = "fixture-model",
             .model_catalog_api_key_id = "key-1",
-            .can_create_task = true,
             .catalog_generation = 1,
             .metask_execution_generation = generation,
-            .execution_generation = generation,
         },
     });
     try workbench.prepareExecutionInstall(execution.input());

@@ -949,6 +949,23 @@ export const zhCN: Record<MessageId, string> = {
     "最近的任务更改未能保存。你可以继续工作，MetaWork 会在后续更改时再次尝试保存。",
   "task.persistence.outcome_unknown":
     "无法确认最近的任务更改是否已保存。你可以继续工作，后续更改会再次尝试保存。",
+  "persistence.recovery.action": "使用新的存储继续",
+  "persistence.recovery.original_retained": "当前文件会保留为恢复副本。",
+  "persistence.recovery.task.title": "替换已保存的任务历史？",
+  "persistence.recovery.task.body":
+    "MetaWork 会保留当前历史文件，再将本次使用中仍可用的任务和工作区保存为新的任务历史。",
+  "persistence.recovery.scheduled.title": "替换已保存的定时任务？",
+  "persistence.recovery.scheduled.body":
+    "MetaWork 会保留当前定时任务文件，再将本次使用中仍可用的定时任务保存为新的存储。",
+  "persistence.recovery.cancel": "保留当前状态",
+  "persistence.recovery.confirm": "保留文件并恢复",
+  "persistence.recovery.running": "正在恢复…",
+  "persistence.recovery.stale_revision":
+    "工作台状态已经变化，请确认当前提示后重试。",
+  "persistence.recovery.outcome_unknown":
+    "无法确认替换是否完成。恢复副本没有被删除，请确认当前状态后重试。",
+  "persistence.recovery.shutting_down": "MetaWork 正在退出，无法开始恢复。",
+  "persistence.recovery.failed": "未能替换存储，当前文件没有被删除。",
   "mcp.mutation.busy": "此服务正在进行授权操作。",
   "mcp.mutation.cancelled": "已取消确认。",
   "mcp.mutation.capability_unavailable": "当前设备不支持此操作。",

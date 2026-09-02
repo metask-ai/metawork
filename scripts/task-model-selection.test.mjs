@@ -22,9 +22,7 @@ test.after(async () => {
 function account(overrides = {}) {
   return {
     state: "authenticated",
-    canCreateTask: true,
     catalogState: "ready",
-    executionSource: "metask",
     apiKeys: [
       {
         selectionId: "key-1",
@@ -37,7 +35,20 @@ function account(overrides = {}) {
     selectedApiKeySelectionId: "key-1",
     catalogGeneration: "9",
     metaskExecutionGeneration: "7",
-    executionGeneration: "7",
+    ...overrides,
+  };
+}
+
+function execution(overrides = {}) {
+  return {
+    state: "ready",
+    defaultSource: "metask",
+    activeSource: "metask",
+    activeGeneration: "7",
+    taskCreationAvailable: true,
+    selectedModelConnectionId: "",
+    modelConnections: [],
+    errorCode: "none",
     ...overrides,
   };
 }
@@ -54,7 +65,7 @@ function task(overrides = {}) {
 }
 
 test("exact Metask authority can replace a model removed from the current catalog", () => {
-  assert.deepEqual(taskModelSelectionPolicy(account(), task()), {
+  assert.deepEqual(taskModelSelectionPolicy(account(), execution(), task()), {
     authorityExact: true,
     catalogUsable: true,
   });
@@ -62,32 +73,46 @@ test("exact Metask authority can replace a model removed from the current catalo
 
 test("catalog loading preserves authority but disables selection", () => {
   assert.deepEqual(
-    taskModelSelectionPolicy(account({ catalogState: "loading" }), task()),
+    taskModelSelectionPolicy(
+      account({ catalogState: "loading" }),
+      execution(),
+      task(),
+    ),
     { authorityExact: true, catalogUsable: false },
   );
 });
 
 test("credential generation, protocol, and execution source are exact", () => {
   assert.equal(
-    taskModelSelectionPolicy(account(), task({ executionGeneration: "6" }))
-      .authorityExact,
-    false,
-  );
-  assert.equal(
-    taskModelSelectionPolicy(account(), task({ protocol: "gemini_native" }))
-      .authorityExact,
+    taskModelSelectionPolicy(
+      account(),
+      execution(),
+      task({ executionGeneration: "6" }),
+    ).authorityExact,
     false,
   );
   assert.equal(
     taskModelSelectionPolicy(
-      account({ executionSource: "model_connection" }),
+      account(),
+      execution(),
+      task({ protocol: "gemini_native" }),
+    ).authorityExact,
+    false,
+  );
+  assert.equal(
+    taskModelSelectionPolicy(
+      account(),
+      execution({ activeSource: "model_connection" }),
       task(),
     ).authorityExact,
     false,
   );
   assert.equal(
-    taskModelSelectionPolicy(account({ canCreateTask: false }), task())
-      .authorityExact,
+    taskModelSelectionPolicy(
+      account(),
+      execution({ taskCreationAvailable: false }),
+      task(),
+    ).authorityExact,
     false,
   );
 });

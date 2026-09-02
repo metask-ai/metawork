@@ -1,10 +1,11 @@
-import type { AccountView } from "../../bridge/contracts.ts";
+import type { AccountView, ExecutionView } from "../../bridge/contracts.ts";
 
 export function requiresAccountGate(
-  account: Pick<AccountView, "state" | "executionSource">,
+  account: Pick<AccountView, "state">,
+  execution: Pick<ExecutionView, "defaultSource">,
 ): boolean {
   return (
-    account.executionSource === "metask" &&
+    execution.defaultSource !== "model_connection" &&
     (account.state === "checking" || account.state === "authorizing")
   );
 }
@@ -17,11 +18,13 @@ export function requiresAccountGate(
  * state flashes the settings page on every startup while the catalog loads.
  */
 export function requiresAccountSetup(
-  account: Pick<AccountView, "state" | "catalogState" | "canCreateTask">,
+  account: Pick<AccountView, "state" | "catalogState">,
+  execution: Pick<ExecutionView, "defaultSource" | "taskCreationAvailable">,
 ): boolean {
   return (
     account.state === "authenticated" &&
-    !account.canCreateTask &&
+    execution.defaultSource !== "model_connection" &&
+    !execution.taskCreationAvailable &&
     (account.catalogState === "choosing" || account.catalogState === "failed")
   );
 }

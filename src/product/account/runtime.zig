@@ -18,6 +18,16 @@ const refresh_skew_seconds: i64 = 60;
 const refresh_retry_ns: u64 = 30 * std.time.ns_per_s;
 const account_path_capacity = 4096;
 
+fn preferencesEqual(
+    left: credential_store.Preference,
+    right: credential_store.Preference,
+) bool {
+    return std.mem.eql(u8, left.ownerAccountId(), right.ownerAccountId()) and
+        std.mem.eql(u8, left.apiKeyId(), right.apiKeyId()) and
+        std.mem.eql(u8, left.modelId(), right.modelId()) and
+        left.execution_generation == right.execution_generation;
+}
+
 pub const WakeSink = struct {
     context: *anyopaque,
     notify_fn: *const fn (context: *anyopaque) void,
@@ -487,6 +497,12 @@ pub const Prepared = struct {
         return self.transition.takeExecution();
     }
 
+    pub fn executionTransfer(
+        self: *Prepared,
+    ) ?execution_contract.OwnedConfigTransfer {
+        return self.transition.executionTransfer();
+    }
+
     pub fn attemptId(self: *const Prepared) ?u64 {
         return self.transition.attempt_id;
     }
@@ -495,8 +511,16 @@ pub const Prepared = struct {
         return self.transition.replacementIntent();
     }
 
+    pub fn finishesAttempt(self: *const Prepared) bool {
+        return self.transition.finishesAttempt();
+    }
+
     pub fn executionIntent(self: *const Prepared) state_impl.ExecutionIntent {
         return self.transition.executionIntent();
+    }
+
+    pub fn discardExecutionNoFail(self: *Prepared) void {
+        self.transition.discardExecutionNoFail();
     }
 
     pub fn preferenceIntent(self: *const Prepared) state_impl.PreferenceIntent {
@@ -632,7 +656,7 @@ pub const Runtime = struct {
                 if (selection.expected_catalog_generation !=
                     account_view.catalog_generation or
                     selection.expected_execution_generation !=
-                        account_view.execution_generation)
+                        account_view.metask_execution_generation)
                     return .{ .rejected = .generation_mismatch };
                 const member = for (account_view.api_keys) |candidate| {
                     if (std.mem.eql(
@@ -647,7 +671,7 @@ pub const Runtime = struct {
                 if (selection.expected_catalog_generation !=
                     account_view.catalog_generation or
                     selection.expected_execution_generation !=
-                        account_view.execution_generation)
+                        account_view.metask_execution_generation)
                     return .{ .rejected = .generation_mismatch };
                 const member = for (account_view.models) |candidate| {
                     if (std.mem.eql(
@@ -725,14 +749,12 @@ pub const Runtime = struct {
         return preparedFromState(self.account.prepareCompletion(&completion));
     }
 
-    pub fn prepareCommittedPhaseFailure(
-        self: *Runtime,
-        error_code: contract.ErrorCode,
-    ) Prepared {
-        self.assertMainThread();
-        return preparedFromState(
-            self.account.prepareCommittedPhaseFailure(error_code),
-        );
+    pub fn preparedContinuesActiveAttempt(
+        self: *const Runtime,
+        prepared: *const Prepared,
+    ) bool {
+        const attempt_id = prepared.attemptId() orelse return false;
+        return self.account.activeAttempt() == attempt_id;
     }
 
     pub fn prepareShutdown(self: *Runtime) Prepared {
@@ -788,9 +810,7 @@ pub const Runtime = struct {
                 completion,
                 collision,
             ),
-            .execution_persistence_unknown => wrapPrepareResult(
-                self.account.prepareExecutionPersistenceUnknown(),
-            ),
+            .execution_persistence_unknown => |attempt_id| self.prepareExecutionPersistenceUnknown(attempt_id),
             .default_model_persistence_unknown => |attempt_id| self.prepareDefaultModelPersistenceUnknown(attempt_id),
         };
     }
@@ -1268,11 +1288,18 @@ pub const Runtime = struct {
                 argument orelse
                     @panic("model catalog effect has no API Key"),
             ),
-            .prepare_execution => self.prepareAndPersistExecution(
+            .prepare_execution => self.prepareExecutionCandidate(
                 entry.attempt_id orelse
                     @panic("execution persistence effect has no attempt"),
                 argument orelse
                     @panic("execution effect has no model"),
+            ),
+            .persist_execution_preference => |preference| self.persistExecutionPreference(
+                entry.attempt_id orelse
+                    @panic("execution preference effect has no attempt"),
+                argument orelse
+                    @panic("execution preference effect has no model"),
+                preference.execution_generation,
             ),
         }
     }
@@ -1308,7 +1335,7 @@ pub const Runtime = struct {
         });
     }
 
-    fn prepareAndPersistExecution(
+    fn prepareExecutionCandidate(
         self: *Runtime,
         attempt_id: u64,
         model: []const u8,
@@ -1328,12 +1355,12 @@ pub const Runtime = struct {
             identity.accountId(),
             self.effects.catalog.selectedApiKeyId(),
             model,
-            account_view.execution_generation,
+            account_view.metask_execution_generation,
         );
         const execution_generation = restored_generation orelse
             generateExecutionGeneration(
                 self.io,
-                account_view.execution_generation,
+                account_view.metask_execution_generation,
             ) catch {
             self.effects.publishCompletion(.{
                 .attempt_id = attempt_id,
@@ -1360,44 +1387,56 @@ pub const Runtime = struct {
             },
         };
         defer execution.deinit();
-        if (restored_generation == null) {
-            const platform = self.platform orelse {
-                self.effects.publishCompletion(.{
-                    .attempt_id = attempt_id,
-                    .payload = .{ .failed = .fromCode(
-                        .credential_store_write_failed,
-                    ) },
-                });
-                return;
-            };
-            self.saved_preference = credential_store.commitPreference(
-                platform.credentials,
-                identity.accountId(),
-                self.effects.catalog.selectedApiKeyId(),
-                model,
-                execution_generation,
-            ) catch |err| {
-                if (err == error.PersistenceOutcomeUnknown) {
-                    self.committed_public_catalog.clear();
-                    self.candidate_public_catalog.clear();
-                    self.candidate_catalog_attempt_id = null;
-                    self.effects.publishPersistenceUnknown(
-                        attempt_id,
-                    );
-                    return;
-                }
-                self.effects.publishCompletion(.{
-                    .attempt_id = attempt_id,
-                    .payload = .{ .failed = .fromCode(
-                        accountStoreError(err),
-                    ) },
-                });
-                return;
-            };
-        }
         self.effects.publishCompletion(.{
             .attempt_id = attempt_id,
             .payload = .{ .execution_ready = execution.take() },
+        });
+    }
+
+    fn persistExecutionPreference(
+        self: *Runtime,
+        attempt_id: u64,
+        model: []const u8,
+        execution_generation: u64,
+    ) void {
+        const identity = self.account.currentIdentity() orelse {
+            self.effects.publishCompletion(.{
+                .attempt_id = attempt_id,
+                .payload = .{ .failed = .fromCode(.dependency_contract_invalid) },
+            });
+            return;
+        };
+        const platform = self.platform orelse {
+            self.effects.publishCompletion(.{
+                .attempt_id = attempt_id,
+                .payload = .{ .failed = .fromCode(.credential_store_write_failed) },
+            });
+            return;
+        };
+        const preference = credential_store.commitPreference(
+            platform.credentials,
+            identity.accountId(),
+            self.account.view().model_catalog_api_key_id,
+            model,
+            execution_generation,
+        ) catch |err| {
+            if (err == error.PersistenceOutcomeUnknown) {
+                self.effects.publishPersistenceUnknown(attempt_id);
+                return;
+            }
+            self.effects.publishCompletion(.{
+                .attempt_id = attempt_id,
+                .payload = .{ .failed = .fromCode(accountStoreError(err)) },
+            });
+            return;
+        };
+        self.pending_default_preference = .{
+            .attempt_id = attempt_id,
+            .value = preference,
+        };
+        self.effects.publishCompletion(.{
+            .attempt_id = attempt_id,
+            .payload = .execution_preference_persisted,
         });
     }
 
@@ -1430,7 +1469,7 @@ pub const Runtime = struct {
             identity.accountId(),
             account_view.selected_api_key_id,
             model,
-            account_view.execution_generation,
+            account_view.metask_execution_generation,
         ) catch |err| {
             if (err == error.PersistenceOutcomeUnknown) {
                 self.effects.publishDefaultModelPersistenceUnknown(attempt_id);
@@ -1450,6 +1489,67 @@ pub const Runtime = struct {
             .attempt_id = attempt_id,
             .payload = .default_model_persisted,
         });
+    }
+
+    fn prepareExecutionPersistenceUnknown(
+        self: *Runtime,
+        attempt_id: u64,
+    ) PrepareResult {
+        if (self.account.activeAttempt() != attempt_id)
+            return .ignored_stale;
+        const account_view = self.account.view();
+        const platform = self.platform orelse
+            return wrapPrepareResult(
+                self.account.prepareExecutionPersistenceInvalid(),
+            );
+        const observed = platform.credentials.loadPreference() catch
+            return wrapPrepareResult(
+                self.account.prepareExecutionPersistenceInvalid(),
+            );
+        if (observed) |preference| {
+            const is_candidate = std.mem.eql(
+                u8,
+                preference.ownerAccountId(),
+                account_view.account_id,
+            ) and std.mem.eql(
+                u8,
+                preference.apiKeyId(),
+                account_view.model_catalog_api_key_id,
+            ) and std.mem.eql(
+                u8,
+                preference.modelId(),
+                account_view.candidate_model,
+            ) and preference.execution_generation ==
+                self.account.pendingExecutionGeneration();
+            if (is_candidate) {
+                self.pending_default_preference = .{
+                    .attempt_id = attempt_id,
+                    .value = preference,
+                };
+                var completion: state_impl.WorkerCompletion = .{
+                    .attempt_id = attempt_id,
+                    .payload = .execution_preference_persisted,
+                };
+                return wrapPrepareResult(
+                    self.account.prepareCompletion(&completion),
+                );
+            }
+            if (self.saved_preference) |saved| {
+                if (preferencesEqual(preference, saved))
+                    return self.prepareFailure(
+                        attempt_id,
+                        .credential_store_write_failed,
+                    );
+            }
+        } else if (self.saved_preference == null) {
+            return self.prepareFailure(
+                attempt_id,
+                .credential_store_write_failed,
+            );
+        }
+        return wrapPrepareResult(
+            self.account.prepareExecutionPersistenceInvalid(),
+        );
     }
 
     fn prepareDefaultModelPersistenceUnknown(
@@ -1479,7 +1579,7 @@ pub const Runtime = struct {
             u8,
             preference.apiKeyId(),
             account_view.selected_api_key_id,
-        ) and preference.execution_generation == account_view.execution_generation;
+        ) and preference.execution_generation == account_view.metask_execution_generation;
         if (!same_tuple)
             return wrapPrepareResult(
                 self.account.prepareDefaultModelPersistenceInvalid(),
@@ -1510,7 +1610,7 @@ pub const Runtime = struct {
         catalog: *const catalog_impl.CatalogSession,
         account_view: contract.AccountView,
     ) ?[]const u8 {
-        if (account_view.execution_generation != 0) {
+        if (account_view.metask_execution_generation != 0) {
             if (account_view.candidate_api_key_id.len != 0) return null;
             if (catalog.hasApiKey(account_view.selected_api_key_id))
                 return account_view.selected_api_key_id;
@@ -1720,6 +1820,12 @@ pub const TestSupport = if (builtin.is_test) struct {
             input.target.protocol,
             input.target.model,
         );
+        runtime.saved_preference = try .init(
+            "account-1",
+            "key-1",
+            input.target.model,
+            input.execution_generation,
+        );
         return .{ .transition = try state_impl.TestSupport.prepareReady(
             &runtime.account,
             try .init("account-1", "Metask User"),
@@ -1761,6 +1867,52 @@ pub const TestSupport = if (builtin.is_test) struct {
         return preparedFromState(runtime.account.prepareCompletion(&completion));
     }
 
+    pub fn prepareLoadModelsAfterRefresh(
+        runtime: *Runtime,
+    ) !Prepared {
+        var refresh = switch (runtime.prepareCommand(.refresh_catalog)) {
+            .prepared => |prepared| prepared,
+            else => return error.TestUnexpectedResult,
+        };
+        defer refresh.deinit();
+        _ = refresh.transition.takeEffect() orelse
+            return error.TestUnexpectedResult;
+        runtime.commit(&refresh);
+
+        try catalog_impl.TestSupport.replaceOwnedSelection(
+            &runtime.effects.catalog,
+            "account-1",
+            .{
+                .id = "key-1",
+                .name = "Primary",
+                .suffix = "1234",
+                .protocol = .anthropic_messages,
+            },
+            "secret-key",
+            &.{},
+        );
+        var completion: state_impl.WorkerCompletion = .{
+            .attempt_id = runtime.account.activeAttempt() orelse
+                return error.TestUnexpectedResult,
+            .payload = .api_keys_loaded,
+        };
+        var keys_loaded = switch (runtime.prepareWorkerCompletion(
+            &completion,
+            false,
+        )) {
+            .prepared => |prepared| prepared,
+            else => return error.TestUnexpectedResult,
+        };
+        defer keys_loaded.deinit();
+        runtime.commit(&keys_loaded);
+        const follow_up = runtime.takeFollowUpCommand(&keys_loaded) orelse
+            return error.TestUnexpectedResult;
+        return switch (runtime.prepareCommand(follow_up)) {
+            .prepared => |prepared| prepared,
+            else => error.TestUnexpectedResult,
+        };
+    }
+
     pub fn prepareExecutionReady(
         runtime: *Runtime,
         execution: *execution_contract.OwnedConfig,
@@ -1799,12 +1951,6 @@ pub const TestSupport = if (builtin.is_test) struct {
             }},
         );
         runtime.candidate_catalog_attempt_id = 1;
-        runtime.saved_preference = try .init(
-            "account-1",
-            "key-1",
-            execution.input().target.model,
-            execution.input().execution_generation,
-        );
         var completion: state_impl.WorkerCompletion = .{
             .attempt_id = 1,
             .payload = .{ .execution_ready = execution.take() },
@@ -1867,7 +2013,7 @@ fn accountSelectionCommand(
     return .{
         .selection_id = selection_id,
         .expected_catalog_generation = view.catalog_generation,
-        .expected_execution_generation = view.execution_generation,
+        .expected_execution_generation = view.metask_execution_generation,
     };
 }
 
@@ -1970,6 +2116,7 @@ const TestPlatform = struct {
     refresh_token: ?[]const u8 = null,
     preference: ?credential_store.Preference = null,
     preference_commit_mode: PreferenceCommitMode = .normal,
+    preference_commit_calls: usize = 0,
 
     fn platform(self: *TestPlatform) ports_impl.Platform {
         return .{
@@ -2025,6 +2172,7 @@ const TestPlatform = struct {
         value: credential_store.Preference,
     ) credential_store.StoreError!void {
         const self: *TestPlatform = @ptrCast(@alignCast(context));
+        self.preference_commit_calls += 1;
         if (self.preference_commit_mode == .unknown_without_write) {
             self.preference_commit_mode = .normal;
             return error.PersistenceOutcomeUnknown;
@@ -2102,7 +2250,7 @@ test "Account Runtime owns automatic catalog selection policy" {
         .catalog_state = .loading,
         .selected_api_key_id = "key-current",
         .selected_model = "model-current",
-        .execution_generation = 1,
+        .metask_execution_generation = 1,
     };
     try std.testing.expectEqualStrings(
         "key-current",
@@ -2111,7 +2259,7 @@ test "Account Runtime owns automatic catalog selection policy" {
     var first_login_view = ready_view;
     first_login_view.selected_api_key_id = "";
     first_login_view.selected_model = "";
-    first_login_view.execution_generation = 0;
+    first_login_view.metask_execution_generation = 0;
     // First login without a saved preference defaults to the catalog's
     // first key; the user adjusts in settings afterwards.
     try std.testing.expectEqualStrings(
@@ -2190,6 +2338,37 @@ fn installExecutionPreparationForTest(runtime: *Runtime) !void {
         "secret-key",
         &.{.{ .id = "model-1", .display_name = "Model 1" }},
     );
+    catalog_impl.TestSupport.replacePublic(
+        &runtime.candidate_public_catalog,
+        &.{.{
+            .id = "key-1",
+            .name = "Primary",
+            .suffix = "1234",
+            .protocol = .anthropic_messages,
+        }},
+        &.{.{ .id = "model-1", .display_name = "Model 1" }},
+    );
+    runtime.candidate_catalog_attempt_id = 1;
+}
+
+fn stageExecutionPreferenceForTest(runtime: *Runtime) !u64 {
+    runtime.prepareExecutionCandidate(1, "model-1");
+    var mailbox = runtime.effects.takeMailbox() orelse
+        return error.TestUnexpectedResult;
+    defer mailbox.deinit();
+    var staged = switch (mailbox) {
+        .completion => |*completion| preparedFromState(
+            runtime.account.prepareCompletion(completion),
+        ),
+        else => return error.TestUnexpectedResult,
+    };
+    defer staged.deinit();
+    var execution = staged.executionTransfer().?.take();
+    const generation = execution.input().execution_generation;
+    execution.deinit();
+    _ = staged.transition.takeEffect();
+    runtime.commit(&staged);
+    return generation;
 }
 
 test "Account Runtime restores an exact persisted execution nonce" {
@@ -2204,7 +2383,7 @@ test "Account Runtime restores an exact persisted execution nonce" {
     );
     try installExecutionPreparationForTest(&runtime);
 
-    runtime.prepareAndPersistExecution(1, "model-1");
+    runtime.prepareExecutionCandidate(1, "model-1");
     var mailbox = runtime.effects.takeMailbox() orelse
         return error.TestUnexpectedResult;
     defer mailbox.deinit();
@@ -2239,23 +2418,38 @@ test "Account Runtime persists a nonzero nonce for a new execution" {
         .{ .context = &wake_context, .notify_fn = testingWake },
     );
     defer runtime.deinit();
-    defer runtime.platform = null;
     var fake: TestPlatform = .{};
+    defer runtime.platform = null;
     var startup = runtime.prepareStart(fake.platform());
     defer startup.deinit();
     try installExecutionPreparationForTest(&runtime);
 
-    runtime.prepareAndPersistExecution(1, "model-1");
+    runtime.prepareExecutionCandidate(1, "model-1");
     var mailbox = runtime.effects.takeMailbox() orelse
         return error.TestUnexpectedResult;
     defer mailbox.deinit();
-    const generation = switch (mailbox) {
-        .completion => |completion| switch (completion.payload) {
-            .execution_ready => |execution| execution.input().execution_generation,
-            else => return error.TestUnexpectedResult,
-        },
+    var staged = switch (mailbox) {
+        .completion => |*completion| preparedFromState(
+            runtime.account.prepareCompletion(completion),
+        ),
         else => return error.TestUnexpectedResult,
     };
+    defer staged.deinit();
+    var staged_execution = staged.executionTransfer().?.take();
+    const generation = staged_execution.input().execution_generation;
+    staged_execution.deinit();
+    try std.testing.expectEqual(@as(usize, 0), fake.preference_commit_calls);
+    try std.testing.expect(runtime.admitEffect(&staged));
+    runtime.commit(&staged);
+    try std.testing.expectEqual(@as(usize, 0), fake.preference_commit_calls);
+    runtime.dispatchCommitted(&staged);
+    try std.testing.expectEqual(@as(usize, 1), fake.preference_commit_calls);
+    var persisted = switch (runtime.prepareNextCompletion().?) {
+        .prepared => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer persisted.deinit();
+    runtime.commit(&persisted);
     try std.testing.expect(generation != 0);
     try std.testing.expectEqual(
         generation,
@@ -2263,7 +2457,85 @@ test "Account Runtime persists a nonzero nonce for a new execution" {
     );
 }
 
-test "Account Runtime publishes the candidate catalog with first execution" {
+test "execution preference outcome unknown finalizes only an exact candidate reread" {
+    var wake_context: u8 = 0;
+    var runtime = try initRuntimeForTest(&wake_context);
+    defer runtime.deinit();
+    var platform: TestPlatform = .{};
+    runtime.platform = platform.platform();
+    defer runtime.platform = null;
+    try installExecutionPreparationForTest(&runtime);
+    const generation = try stageExecutionPreferenceForTest(&runtime);
+    platform.preference = try .init(
+        "account-1",
+        "key-1",
+        "model-1",
+        generation,
+    );
+
+    var prepared = switch (runtime.prepareExecutionPersistenceUnknown(1)) {
+        .prepared => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer prepared.deinit();
+    try std.testing.expectEqual(
+        state_impl.ExecutionIntent.finalize_install,
+        prepared.executionIntent(),
+    );
+    runtime.commit(&prepared);
+    try std.testing.expectEqual(
+        @as(?u64, generation),
+        TestSupport.savedPreferenceExecutionGeneration(&runtime),
+    );
+}
+
+test "execution preference outcome unknown distinguishes old and third values" {
+    for ([_]bool{ false, true }) |third_value| {
+        var wake_context: u8 = 0;
+        var runtime = try initRuntimeForTest(&wake_context);
+        defer runtime.deinit();
+        var platform: TestPlatform = .{};
+        runtime.platform = platform.platform();
+        defer runtime.platform = null;
+        const old = try credential_store.Preference.init(
+            "account-1",
+            "key-old",
+            "model-old",
+            9,
+        );
+        runtime.saved_preference = old;
+        try installExecutionPreparationForTest(&runtime);
+        _ = try stageExecutionPreferenceForTest(&runtime);
+        platform.preference = if (third_value)
+            try .init("account-1", "key-third", "model-third", 10)
+        else
+            old;
+
+        var prepared = switch (runtime.prepareExecutionPersistenceUnknown(1)) {
+            .prepared => |value| value,
+            else => return error.TestUnexpectedResult,
+        };
+        defer prepared.deinit();
+        try std.testing.expectEqual(
+            state_impl.ExecutionIntent.unchanged,
+            prepared.executionIntent(),
+        );
+        runtime.commit(&prepared);
+        try std.testing.expectEqual(
+            if (third_value)
+                contract.ErrorCode.recovery_state_invalid
+            else
+                contract.ErrorCode.credential_store_write_failed,
+            runtime.view().error_code,
+        );
+        try std.testing.expectEqual(
+            !third_value,
+            runtime.saved_preference != null,
+        );
+    }
+}
+
+test "Account Runtime stages the candidate catalog before preference persistence" {
     var wake_context: u8 = 0;
     var runtime = try initRuntimeForTest(&wake_context);
     defer runtime.deinit();
@@ -2328,24 +2600,21 @@ test "Account Runtime publishes the candidate catalog with first execution" {
         var committed_execution = execution_value;
         committed_execution.deinit();
     }
+    _ = prepared.transition.takeEffect();
     runtime.commit(&prepared);
     try std.testing.expect(runtime.effects.catalog.firstApiKeyId() != null);
     runtime.dispatchCommitted(&prepared);
 
     const committed_view = runtime.view();
     try contract.validateView(committed_view);
-    try std.testing.expectEqualStrings(
-        "key-1",
-        committed_view.selected_api_key_id,
-    );
-    try std.testing.expectEqualStrings("model-1", committed_view.selected_model);
+    try std.testing.expectEqualStrings("", committed_view.selected_api_key_id);
+    try std.testing.expectEqualStrings("", committed_view.selected_model);
+    try std.testing.expectEqualStrings("key-1", committed_view.candidate_api_key_id);
+    try std.testing.expectEqualStrings("model-1", committed_view.candidate_model);
     try std.testing.expectEqual(@as(usize, 1), committed_view.api_keys.len);
     try std.testing.expectEqual(@as(usize, 1), committed_view.models.len);
-    try std.testing.expect(runtime.effects.catalog.firstApiKeyId() == null);
-    try std.testing.expectEqualStrings(
-        "",
-        runtime.effects.catalog.ownerAccountId(),
-    );
+    try std.testing.expect(runtime.effects.catalog.firstApiKeyId() != null);
+    try std.testing.expectEqualStrings("account-1", runtime.effects.catalog.ownerAccountId());
 }
 
 test "Account Runtime catalog cancel discards candidate identity and secrets" {
@@ -2554,7 +2823,7 @@ fn beginDefaultModelChangeForTest(
         .select_model = .{
             .selection_id = model_id,
             .expected_catalog_generation = account_view.catalog_generation,
-            .expected_execution_generation = account_view.execution_generation,
+            .expected_execution_generation = account_view.metask_execution_generation,
         },
     })) {
         .prepared => |value| value,
@@ -2616,7 +2885,7 @@ test "default-model outcome unknown commits the re-observed candidate" {
     );
     runtime.commit(&prepared);
     try std.testing.expectEqualStrings("model-2", runtime.view().selected_model);
-    try std.testing.expectEqual(@as(u64, 1), runtime.view().execution_generation);
+    try std.testing.expectEqual(@as(u64, 1), runtime.view().metask_execution_generation);
     try std.testing.expectEqualStrings(
         "model-2",
         runtime.saved_preference.?.modelId(),
@@ -2645,7 +2914,6 @@ test "default-model outcome unknown rolls back when disk kept the old value" {
         contract.ErrorCode.credential_store_write_failed,
         account_view.error_code,
     );
-    try std.testing.expect(account_view.can_create_task);
 }
 
 test "default-model outcome unknown revokes execution on a third disk state" {
@@ -2684,7 +2952,6 @@ test "default-model outcome unknown revokes execution on a third disk state" {
         contract.ErrorCode.recovery_state_invalid,
         account_view.error_code,
     );
-    try std.testing.expect(!account_view.can_create_task);
     try std.testing.expect(runtime.saved_preference == null);
     try std.testing.expect(runtime.savedExecutionGenerationFor(
         "account-1",
@@ -2803,5 +3070,4 @@ test "Account Runtime shutdown clears a ready public view" {
     try std.testing.expectEqual(contract.CatalogState.unavailable, view.catalog_state);
     try std.testing.expectEqual(@as(usize, 0), view.api_keys.len);
     try std.testing.expectEqual(@as(usize, 0), view.models.len);
-    try std.testing.expect(!view.can_create_task);
 }

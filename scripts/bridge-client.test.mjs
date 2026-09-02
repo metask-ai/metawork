@@ -77,6 +77,33 @@ test("Renderer Bridge mismatch and malformed acceptance are terminal contract fa
   }
 });
 
+test("Product store recovery uses revision-bound typed commands", async () => {
+  const calls = [];
+  const client = new BridgeClient({
+    bridge: bridgeWith(async (command, payload) => {
+      calls.push({ command, payload });
+      return { outcome: "recovered" };
+    }),
+  });
+
+  assert.deepEqual(await client.recoverTaskHistory("17"), {
+    outcome: "recovered",
+  });
+  assert.deepEqual(await client.recoverScheduledTaskStore("18"), {
+    outcome: "recovered",
+  });
+  assert.deepEqual(calls, [
+    {
+      command: "metawork.tasks.recoverHistory",
+      payload: { expectedRevision: "17" },
+    },
+    {
+      command: "metawork.scheduledTasks.recoverStore",
+      payload: { expectedRevision: "18" },
+    },
+  ]);
+});
+
 test("native shortcut events stay behind the Bridge client boundary", () => {
   let listener = null;
   let removed = false;

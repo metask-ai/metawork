@@ -329,11 +329,13 @@ pub const Dispatcher = struct {
             .{ .name = commands.rename_task, .function = renameTask },
             .{ .name = commands.archive_task, .function = archiveTask },
             .{ .name = commands.delete_task, .function = deleteTask },
+            .{ .name = commands.recover_task_history, .function = recoverTaskHistory },
             .{ .name = commands.create_scheduled_task, .function = createScheduledTask },
             .{ .name = commands.update_scheduled_task, .function = updateScheduledTask },
             .{ .name = commands.set_scheduled_task_enabled, .function = setScheduledTaskEnabled },
             .{ .name = commands.run_scheduled_task_now, .function = runScheduledTaskNow },
             .{ .name = commands.delete_scheduled_task, .function = deleteScheduledTask },
+            .{ .name = commands.recover_scheduled_task_store, .function = recoverScheduledTaskStore },
         };
         inline for (product_specs, 0..) |spec, index| self.registered_handlers[index] = .{
             .name = spec.name,
@@ -3067,6 +3069,30 @@ pub const Dispatcher = struct {
         return std.fmt.bufPrint(output, "{{\"taskId\":\"{d}\",\"deleting\":true}}", .{task_id});
     }
 
+    fn recoverTaskHistory(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(
+            handlers.PersistenceRecovery,
+            invocation.request.payload,
+        );
+        defer parsed.deinit();
+        const expected_revision = try handlers.parseWireId(
+            parsed.value.expectedRevision,
+        );
+        const outcome = (try self.requireProductControl()).recoverTaskHistory(
+            expected_revision,
+        );
+        self.notifyCommitted();
+        return encodePersistenceRecoveryOutcome(output, outcome);
+    }
+
     fn createScheduledTask(
         context: *anyopaque,
         invocation: native_sdk.bridge.Invocation,
@@ -3223,6 +3249,41 @@ pub const Dispatcher = struct {
             output,
             "{{\"scheduledTaskId\":\"{d}\",\"deleted\":true}}",
             .{id},
+        );
+    }
+
+    fn recoverScheduledTaskStore(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(
+            handlers.PersistenceRecovery,
+            invocation.request.payload,
+        );
+        defer parsed.deinit();
+        const expected_revision = try handlers.parseWireId(
+            parsed.value.expectedRevision,
+        );
+        const outcome = (try self.requireProductControl()).recoverScheduledTaskStore(
+            expected_revision,
+        );
+        self.notifyCommitted();
+        return encodePersistenceRecoveryOutcome(output, outcome);
+    }
+
+    fn encodePersistenceRecoveryOutcome(
+        output: []u8,
+        outcome: product_control.PersistenceRecoveryOutcome,
+    ) ![]const u8 {
+        return std.fmt.bufPrint(
+            output,
+            "{{\"outcome\":\"{s}\"}}",
+            .{@tagName(outcome)},
         );
     }
 
@@ -4618,6 +4679,37 @@ test "Dispatcher validates authority before domain calls and preserves committed
         source,
         &response,
     );
+    var recovery_request_storage: [256]u8 = undefined;
+    const task_recovery_request = try std.fmt.bufPrint(
+        &recovery_request_storage,
+        "{{\"id\":\"recover-task-history\",\"command\":\"metawork.tasks.recoverHistory\",\"payload\":{{\"expectedRevision\":\"{d}\"}}}}",
+        .{initial_revision},
+    );
+    const task_recovery = native_dispatcher.dispatch(
+        task_recovery_request,
+        source,
+        &response,
+    );
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        task_recovery,
+        "\"outcome\":\"unavailable\"",
+    ) != null);
+    const schedule_recovery_request = try std.fmt.bufPrint(
+        &recovery_request_storage,
+        "{{\"id\":\"recover-schedule-store\",\"command\":\"metawork.scheduledTasks.recoverStore\",\"payload\":{{\"expectedRevision\":\"{d}\"}}}}",
+        .{initial_revision},
+    );
+    const schedule_recovery = native_dispatcher.dispatch(
+        schedule_recovery_request,
+        source,
+        &response,
+    );
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        schedule_recovery,
+        "\"outcome\":\"unavailable\"",
+    ) != null);
     const permission_default = native_dispatcher.dispatch(
         "{\"id\":\"permission-default\",\"command\":\"metawork.permissions.setDefaultProfile\",\"payload\":{\"permissionProfile\":\"full_access\"}}",
         source,

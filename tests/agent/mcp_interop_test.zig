@@ -288,10 +288,8 @@ fn installExecution(workbench_value: *product_control.Runtime) !void {
             .selected_api_key_id = "key-1",
             .selected_model = "fixture-model",
             .model_catalog_api_key_id = "key-1",
-            .can_create_task = true,
             .catalog_generation = 1,
             .metask_execution_generation = 1,
-            .execution_generation = 1,
         },
     });
     try workbench_value.prepareExecutionInstall(execution.input());

@@ -44,10 +44,16 @@ pub const Persistence = struct {
     restored_bytes: ?[]const u8 = null,
     restore_failed: bool = false,
     commit_fn: *const fn (?*anyopaque, []const u8) PersistenceCommit = unsupportedCommit,
+    recover_fn: *const fn (?*anyopaque, []const u8) PersistenceCommit = unsupportedCommit,
 
     fn commit(self: Persistence, bytes: []const u8) PersistenceCommit {
         if (!self.enabled) return .failed;
         return self.commit_fn(self.context, bytes);
+    }
+
+    fn recover(self: Persistence, bytes: []const u8) PersistenceCommit {
+        if (!self.enabled) return .failed;
+        return self.recover_fn(self.context, bytes);
     }
 
     fn unsupportedCommit(_: ?*anyopaque, _: []const u8) PersistenceCommit {
@@ -61,6 +67,13 @@ pub const PersistenceHealth = enum {
     read_failed,
     corrupt,
     write_failed,
+    outcome_unknown,
+};
+
+pub const PersistenceRecoveryOutcome = enum {
+    recovered,
+    unavailable,
+    failed,
     outcome_unknown,
 };
 
@@ -302,6 +315,44 @@ pub const Runtime = struct {
 
     pub fn persistenceHealth(self: *const Runtime) PersistenceHealth {
         return self.persistence_health;
+    }
+
+    pub fn persistenceRecoveryAvailable(self: *const Runtime) bool {
+        if (!self.persistence.enabled) return false;
+        return switch (self.persistence_health) {
+            .read_failed, .corrupt, .write_failed, .outcome_unknown => true,
+            .unavailable, .ready => false,
+        };
+    }
+
+    pub fn recoverPersistence(
+        self: *Runtime,
+        redaction: Redaction,
+    ) PersistenceRecoveryOutcome {
+        if (!self.persistenceRecoveryAvailable()) return .unavailable;
+        var candidate = self.store.clone(self.allocator) catch return .failed;
+        var owned = true;
+        defer if (owned) candidate.deinit();
+        _ = redactStore(&candidate, redaction, "");
+        const output = self.allocator.alloc(u8, persistence.max_store_bytes) catch
+            return .failed;
+        defer self.allocator.free(output);
+        const bytes = persistence.encode(output, &candidate) catch return .failed;
+        if (redaction.contains(bytes)) return .failed;
+        switch (self.persistence.recover(bytes)) {
+            .committed => {
+                self.persistence_health = .ready;
+                self.replace(&candidate);
+                owned = false;
+                return .recovered;
+            },
+            .failed => return .failed,
+            .outcome_unknown => {
+                self.persistence_health = .outcome_unknown;
+                self.changed = true;
+                return .outcome_unknown;
+            },
+        }
     }
 
     pub fn backgroundAvailable(self: *const Runtime) bool {
@@ -968,6 +1019,8 @@ fn reconcileBindingsInStore(
 const TestEffects = struct {
     now: u64 = 100,
     commit_result: PersistenceCommit = .committed,
+    recovery_result: PersistenceCommit = .committed,
+    recoveries: usize = 0,
     notification_kind: ?NotificationKind = null,
     notification_task_id: u64 = 0,
 
@@ -987,6 +1040,12 @@ const TestEffects = struct {
         return self.commit_result;
     }
 
+    fn recover(context: ?*anyopaque, _: []const u8) PersistenceCommit {
+        const self: *TestEffects = @ptrCast(@alignCast(context.?));
+        self.recoveries += 1;
+        return self.recovery_result;
+    }
+
     fn timer(self: *TestEffects) Timer {
         return .{
             .context = self,
@@ -1002,6 +1061,7 @@ const TestEffects = struct {
             .context = self,
             .enabled = true,
             .commit_fn = commit,
+            .recover_fn = recover,
         };
     }
 
@@ -1147,6 +1207,50 @@ test "persistence health failure remains observable through change latch" {
     try std.testing.expectEqual(PersistenceHealth.write_failed, runtime.persistenceHealth());
     try std.testing.expect(runtime.takeChanged());
     try std.testing.expect(!runtime.takeChanged());
+}
+
+test "explicit Schedule recovery preserves memory and only reopens committed persistence" {
+    var effects: TestEffects = .{};
+    var runtime = try Runtime.init(std.testing.allocator, .{
+        .max_items = 1,
+        .max_projection_bytes = 4096,
+    }, .{
+        .timer = effects.timer(),
+        .persistence = effects.persistence(),
+    });
+    defer runtime.deinit();
+    const id = try runtime.create(
+        testDefinition("retained", "current memory"),
+        testBinding(),
+        testRedaction(&effects),
+    );
+    testing.setPersistenceHealth(&runtime, .corrupt);
+    try std.testing.expect(runtime.persistenceRecoveryAvailable());
+
+    effects.recovery_result = .failed;
+    try std.testing.expectEqual(
+        PersistenceRecoveryOutcome.failed,
+        runtime.recoverPersistence(testRedaction(&effects)),
+    );
+    try std.testing.expectEqual(PersistenceHealth.corrupt, runtime.persistenceHealth());
+    try std.testing.expect(testing.item(&runtime, id) != null);
+
+    effects.recovery_result = .outcome_unknown;
+    try std.testing.expectEqual(
+        PersistenceRecoveryOutcome.outcome_unknown,
+        runtime.recoverPersistence(testRedaction(&effects)),
+    );
+    try std.testing.expectEqual(PersistenceHealth.outcome_unknown, runtime.persistenceHealth());
+    try std.testing.expect(testing.item(&runtime, id) != null);
+
+    effects.recovery_result = .committed;
+    try std.testing.expectEqual(
+        PersistenceRecoveryOutcome.recovered,
+        runtime.recoverPersistence(testRedaction(&effects)),
+    );
+    try std.testing.expectEqual(PersistenceHealth.ready, runtime.persistenceHealth());
+    try std.testing.expect(testing.item(&runtime, id) != null);
+    try std.testing.expectEqual(@as(usize, 3), effects.recoveries);
 }
 
 test "permission-required scheduled occurrence stops without waiting for UI" {

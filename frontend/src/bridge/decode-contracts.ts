@@ -4,8 +4,8 @@ import {
   runCauses,
   type AccountCommandResult,
   type AccountView,
+  type ExecutionView,
   type ModelMetadata,
-  type ExecutionSource,
   type ModelConnectionCredentialStatus,
   type Protocol,
   type ModelConnectionState,
@@ -21,6 +21,7 @@ import {
   type RunActivity,
   type RunView,
   type ScheduledTaskView,
+  type PersistenceRecoveryOutcome,
   type SkillCatalogView,
   type SkillManagementView,
   type SkillEnablementResult,
@@ -206,6 +207,17 @@ const protocols = [
   "gemini_native",
 ] as const;
 const executionSources = ["metask", "model_connection"] as const;
+const executionStates = ["unavailable", "ready", "replacing"] as const;
+const executionErrorCodes = [
+  "none",
+  "model_connection_persistence_unavailable",
+  "credential_unavailable",
+  "invalid_candidate",
+  "resource_exhausted",
+  "schedule_persistence_unavailable",
+  "schedule_persistence_failed",
+  "schedule_persistence_outcome_unknown",
+] as const;
 const modelConnectionProtocols = [
   "openai_responses",
   "anthropic_messages",
@@ -912,7 +924,6 @@ function decodeAccount(value: unknown, path: string): AccountView {
   const item = object(raw, path, [
     "state",
     "catalogState",
-    "executionSource",
     "canCancel",
     "accountId",
     "displayName",
@@ -923,14 +934,10 @@ function decodeAccount(value: unknown, path: string): AccountView {
     "candidateApiKeySelectionId",
     "candidateModelSelectionId",
     "modelCatalogApiKeySelectionId",
-    "modelConnections",
-    "selectedModelConnectionId",
-    "canCreateTask",
     "errorCode",
     "safeDiagnostic",
     "catalogGeneration",
     "metaskExecutionGeneration",
-    "executionGeneration",
   ]);
   const apiKeys = arrayValue(
     item.apiKeys,
@@ -966,124 +973,16 @@ function decodeAccount(value: unknown, path: string): AccountView {
       };
     },
   );
-  const modelConnections = arrayValue(
-    item.modelConnections,
-    `${path}.modelConnections`,
-    (value, itemPath) => {
-      const connection = object(value, itemPath, [
-        "id",
-        "displayName",
-        "protocol",
-        "normalizedBaseUrl",
-        "state",
-        "testStatus",
-        "credentialStatus",
-        "enabled",
-        "connectionGeneration",
-        "selectedModel",
-        "models",
-      ]);
-      const connectionModels = arrayValue(
-        connection.models,
-        `${itemPath}.models`,
-        (modelValue, modelPath) => {
-          const model = object(modelValue, modelPath, ["id", "displayName"]);
-          return {
-            id: stringValue(model.id, `${modelPath}.id`),
-            displayName: stringValue(
-              model.displayName,
-              `${modelPath}.displayName`,
-            ),
-          };
-        },
-      );
-      return {
-        id: stringValue(connection.id, `${itemPath}.id`),
-        displayName: stringValue(
-          connection.displayName,
-          `${itemPath}.displayName`,
-        ),
-        protocol: enumValue(
-          connection.protocol,
-          `${itemPath}.protocol`,
-          modelConnectionProtocols,
-        ) as Protocol,
-        normalizedBaseUrl: stringValue(
-          connection.normalizedBaseUrl,
-          `${itemPath}.normalizedBaseUrl`,
-        ),
-        state: enumValue(
-          connection.state,
-          `${itemPath}.state`,
-          modelConnectionStates,
-        ) as ModelConnectionState,
-        testStatus: enumValue(
-          connection.testStatus,
-          `${itemPath}.testStatus`,
-          modelConnectionTestStatuses,
-        ) as ModelConnectionTestStatus,
-        credentialStatus: enumValue(
-          connection.credentialStatus,
-          `${itemPath}.credentialStatus`,
-          modelConnectionCredentialStatuses,
-        ) as ModelConnectionCredentialStatus,
-        enabled: booleanValue(connection.enabled, `${itemPath}.enabled`),
-        connectionGeneration: wireId(
-          connection.connectionGeneration,
-          `${itemPath}.connectionGeneration`,
-        ),
-        selectedModel: stringValue(
-          connection.selectedModel,
-          `${itemPath}.selectedModel`,
-        ),
-        models: connectionModels,
-      };
-    },
-  );
   if (new Set(apiKeys.map((key) => key.selectionId)).size !== apiKeys.length)
     fail(`${path}.apiKeys`, "API Key identities must be unique");
   if (new Set(models.map((model) => model.selectionId)).size !== models.length)
     fail(`${path}.models`, "model identities must be unique");
-  if (
-    new Set(modelConnections.map((connection) => connection.id)).size !==
-    modelConnections.length
-  )
-    fail(`${path}.modelConnections`, "connection identities must be unique");
-  for (const [index, connection] of modelConnections.entries()) {
-    const connectionPath = `${path}.modelConnections[${index}]`;
-    if (
-      new Set(connection.models.map((model) => model.id)).size !==
-      connection.models.length
-    )
-      fail(`${connectionPath}.models`, "model identities must be unique");
-    if (
-      connection.selectedModel.length > 0 &&
-      connection.models.filter((model) => model.id === connection.selectedModel)
-        .length !== 1
-    )
-      fail(connectionPath, "the selected model must belong to the connection");
-    if (
-      connection.state === "ready" &&
-      (connection.credentialStatus !== "ready" ||
-        !connection.enabled ||
-        connection.selectedModel.length === 0 ||
-        connection.testStatus === "untested")
-    )
-      fail(connectionPath, "a ready connection must be verified and usable");
-    if (connection.state !== "ready" && connection.testStatus === "connected")
-      fail(connectionPath, "only a ready connection can have a connected test");
-  }
   const state = enumValue(item.state, `${path}.state`, accountStates);
   const catalogState = enumValue(
     item.catalogState,
     `${path}.catalogState`,
     catalogStates,
   );
-  const executionSource = enumValue(
-    item.executionSource,
-    `${path}.executionSource`,
-    executionSources,
-  ) as ExecutionSource;
   const canCancel = booleanValue(item.canCancel, `${path}.canCancel`);
   const accountId = stringValue(item.accountId, `${path}.accountId`);
   const displayName = stringValue(item.displayName, `${path}.displayName`);
@@ -1107,51 +1006,14 @@ function decodeAccount(value: unknown, path: string): AccountView {
     item.modelCatalogApiKeySelectionId,
     `${path}.modelCatalogApiKeySelectionId`,
   );
-  const selectedModelConnectionId = stringValue(
-    item.selectedModelConnectionId,
-    `${path}.selectedModelConnectionId`,
-  );
-  const canCreateTask = booleanValue(
-    item.canCreateTask,
-    `${path}.canCreateTask`,
-  );
   const catalogGeneration = wireId(
     item.catalogGeneration,
     `${path}.catalogGeneration`,
-  );
-  const executionGeneration = wireId(
-    item.executionGeneration,
-    `${path}.executionGeneration`,
   );
   const metaskExecutionGeneration = wireId(
     item.metaskExecutionGeneration,
     `${path}.metaskExecutionGeneration`,
   );
-  if (executionSource === "model_connection") {
-    if (
-      canCreateTask &&
-      (executionGeneration === "0" || selectedModelConnectionId.length === 0)
-    )
-      fail(
-        path,
-        "a model connection execution requires a selected model and generation",
-      );
-    if (
-      canCreateTask &&
-      !modelConnections.some(
-        (connection) =>
-          connection.id === selectedModelConnectionId &&
-          connection.state === "ready" &&
-          connection.credentialStatus === "ready" &&
-          connection.selectedModel.length > 0,
-      )
-    )
-      fail(path, "the selected model must belong to a ready model connection");
-  }
-  if (executionSource === "metask" && selectedModelConnectionId.length > 0)
-    fail(path, "a Metask execution cannot name a model connection");
-  if (executionSource === "metask" && catalogState !== "ready" && canCreateTask)
-    fail(path, "a non-ready catalog cannot admit Tasks");
   if (
     catalogState === "ready" &&
     (accountId.length === 0 ||
@@ -1217,9 +1079,7 @@ function decodeAccount(value: unknown, path: string): AccountView {
       candidateApiKeySelectionId.length !== 0 ||
       candidateModelSelectionId.length !== 0 ||
       modelCatalogApiKeySelectionId.length !== 0 ||
-      metaskExecutionGeneration !== "0" ||
-      (executionSource === "metask" &&
-        (executionGeneration !== "0" || canCreateTask)))
+      metaskExecutionGeneration !== "0")
   )
     fail(path, "a non-authenticated Account must hide identity and catalog");
   if (state === "authenticated" && accountId.length === 0)
@@ -1235,15 +1095,9 @@ function decodeAccount(value: unknown, path: string): AccountView {
     fail(path, "cancellation requires active authorization or catalog work");
   if (catalogState === "choosing" && apiKeys.length === 0)
     fail(path, "catalog choice requires at least one API");
-  if (
-    executionSource === "metask" &&
-    metaskExecutionGeneration !== executionGeneration
-  )
-    fail(path, "a Metask execution must publish its committed generation");
   return {
     state,
     catalogState,
-    executionSource,
     canCancel,
     accountId,
     displayName,
@@ -1254,9 +1108,6 @@ function decodeAccount(value: unknown, path: string): AccountView {
     candidateApiKeySelectionId,
     candidateModelSelectionId,
     modelCatalogApiKeySelectionId,
-    modelConnections,
-    selectedModelConnectionId,
-    canCreateTask,
     errorCode: enumValue(
       item.errorCode,
       `${path}.errorCode`,
@@ -1265,7 +1116,188 @@ function decodeAccount(value: unknown, path: string): AccountView {
     safeDiagnostic: stringValue(item.safeDiagnostic, `${path}.safeDiagnostic`),
     catalogGeneration,
     metaskExecutionGeneration,
-    executionGeneration,
+  };
+}
+
+function decodeExecution(value: unknown, path: string): ExecutionView {
+  const item = object(value, path, [
+    "state",
+    "defaultSource",
+    "activeSource",
+    "activeGeneration",
+    "taskCreationAvailable",
+    "selectedModelConnectionId",
+    "modelConnections",
+    "errorCode",
+  ]);
+  const modelConnections = arrayValue(
+    item.modelConnections,
+    `${path}.modelConnections`,
+    (value, itemPath) => {
+      const connection = object(value, itemPath, [
+        "id",
+        "displayName",
+        "protocol",
+        "normalizedBaseUrl",
+        "state",
+        "testStatus",
+        "credentialStatus",
+        "enabled",
+        "connectionGeneration",
+        "selectedModel",
+        "models",
+      ]);
+      const models = arrayValue(
+        connection.models,
+        `${itemPath}.models`,
+        (modelValue, modelPath) => {
+          const model = object(modelValue, modelPath, ["id", "displayName"]);
+          return {
+            id: stringValue(model.id, `${modelPath}.id`),
+            displayName: stringValue(
+              model.displayName,
+              `${modelPath}.displayName`,
+            ),
+          };
+        },
+      );
+      return {
+        id: stringValue(connection.id, `${itemPath}.id`),
+        displayName: stringValue(
+          connection.displayName,
+          `${itemPath}.displayName`,
+        ),
+        protocol: enumValue(
+          connection.protocol,
+          `${itemPath}.protocol`,
+          modelConnectionProtocols,
+        ) as Protocol,
+        normalizedBaseUrl: stringValue(
+          connection.normalizedBaseUrl,
+          `${itemPath}.normalizedBaseUrl`,
+        ),
+        state: enumValue(
+          connection.state,
+          `${itemPath}.state`,
+          modelConnectionStates,
+        ) as ModelConnectionState,
+        testStatus: enumValue(
+          connection.testStatus,
+          `${itemPath}.testStatus`,
+          modelConnectionTestStatuses,
+        ) as ModelConnectionTestStatus,
+        credentialStatus: enumValue(
+          connection.credentialStatus,
+          `${itemPath}.credentialStatus`,
+          modelConnectionCredentialStatuses,
+        ) as ModelConnectionCredentialStatus,
+        enabled: booleanValue(connection.enabled, `${itemPath}.enabled`),
+        connectionGeneration: wireId(
+          connection.connectionGeneration,
+          `${itemPath}.connectionGeneration`,
+        ),
+        selectedModel: stringValue(
+          connection.selectedModel,
+          `${itemPath}.selectedModel`,
+        ),
+        models,
+      };
+    },
+  );
+  if (
+    new Set(modelConnections.map((connection) => connection.id)).size !==
+    modelConnections.length
+  )
+    fail(`${path}.modelConnections`, "connection identities must be unique");
+  for (const [index, connection] of modelConnections.entries()) {
+    const connectionPath = `${path}.modelConnections[${index}]`;
+    if (
+      new Set(connection.models.map((model) => model.id)).size !==
+      connection.models.length
+    )
+      fail(`${connectionPath}.models`, "model identities must be unique");
+    if (
+      connection.selectedModel.length > 0 &&
+      connection.models.filter((model) => model.id === connection.selectedModel)
+        .length !== 1
+    )
+      fail(connectionPath, "the selected model must belong to the connection");
+    if (
+      connection.state === "ready" &&
+      (connection.credentialStatus !== "ready" ||
+        !connection.enabled ||
+        connection.selectedModel.length === 0 ||
+        connection.testStatus === "untested")
+    )
+      fail(connectionPath, "a ready connection must be verified and usable");
+    if (connection.state !== "ready" && connection.testStatus === "connected")
+      fail(connectionPath, "only a ready connection can have a connected test");
+  }
+
+  const state = enumValue(item.state, `${path}.state`, executionStates);
+  const defaultSource = nullableEnum(
+    item.defaultSource,
+    `${path}.defaultSource`,
+    executionSources,
+  ) as ExecutionView["defaultSource"];
+  const activeSource = nullableEnum(
+    item.activeSource,
+    `${path}.activeSource`,
+    executionSources,
+  ) as ExecutionView["activeSource"];
+  const activeGeneration = wireId(
+    item.activeGeneration,
+    `${path}.activeGeneration`,
+  );
+  const taskCreationAvailable = booleanValue(
+    item.taskCreationAvailable,
+    `${path}.taskCreationAvailable`,
+  );
+  const selectedModelConnectionId = stringValue(
+    item.selectedModelConnectionId,
+    `${path}.selectedModelConnectionId`,
+  );
+
+  if ((activeSource === null) !== (activeGeneration === "0"))
+    fail(path, "active source and generation must be present together");
+  if (state === "unavailable" && activeSource !== null)
+    fail(path, "an unavailable execution cannot publish an active source");
+  if (state === "ready" && activeSource === null)
+    fail(path, "a ready execution requires an active source");
+  if (state === "replacing" && taskCreationAvailable)
+    fail(path, "a replacing execution cannot admit new Tasks");
+  if (taskCreationAvailable && state !== "ready")
+    fail(path, "Task creation requires a ready execution");
+  if (defaultSource === "model_connection") {
+    const selected = modelConnections.find(
+      (connection) => connection.id === selectedModelConnectionId,
+    );
+    if (!selected)
+      fail(path, "a Model Connection default requires its selected identity");
+    if (
+      taskCreationAvailable &&
+      (activeSource !== "model_connection" ||
+        selected.state !== "ready" ||
+        selected.credentialStatus !== "ready")
+    )
+      fail(path, "a usable Model Connection default must be active and ready");
+  } else if (selectedModelConnectionId.length !== 0) {
+    fail(path, "only a Model Connection default can name a connection");
+  }
+
+  return {
+    state,
+    defaultSource,
+    activeSource,
+    activeGeneration,
+    taskCreationAvailable,
+    selectedModelConnectionId,
+    modelConnections,
+    errorCode: enumValue(
+      item.errorCode,
+      `${path}.errorCode`,
+      executionErrorCodes,
+    ),
   };
 }
 
@@ -3000,6 +3032,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     "capabilities",
     "permissions",
     "account",
+    "execution",
     "skillCatalog",
     "skillManagement",
     "mcp",
@@ -3010,6 +3043,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
   const capabilityItem = object(root.capabilities, "$.capabilities", [
     "taskHistoryPersistence",
     "taskHistoryPersistenceHealth",
+    "taskHistoryRecoveryAvailable",
     "conversationRecovery",
     "executionRebind",
     "structuredPlan",
@@ -3021,6 +3055,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     "scheduledTasks",
     "scheduledTaskPersistence",
     "scheduledTaskPersistenceHealth",
+    "scheduledTaskRecoveryAvailable",
     "backgroundScheduleWake",
     "localSkillManagement",
     "skillManagementHealth",
@@ -3049,6 +3084,10 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
         "write_failed",
         "outcome_unknown",
       ] as const,
+    ),
+    taskHistoryRecoveryAvailable: booleanValue(
+      capabilityItem.taskHistoryRecoveryAvailable,
+      "$.capabilities.taskHistoryRecoveryAvailable",
     ),
     conversationRecovery: booleanValue(
       capabilityItem.conversationRecovery,
@@ -3101,6 +3140,10 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
         "write_failed",
         "outcome_unknown",
       ] as const,
+    ),
+    scheduledTaskRecoveryAvailable: booleanValue(
+      capabilityItem.scheduledTaskRecoveryAvailable,
+      "$.capabilities.scheduledTaskRecoveryAvailable",
     ),
     backgroundScheduleWake: booleanValue(
       capabilityItem.backgroundScheduleWake,
@@ -3156,6 +3199,26 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     fail(
       "$.capabilities.taskHistoryPersistence",
       "Task history persistence availability and health must agree",
+    );
+  if (
+    capabilities.taskHistoryRecoveryAvailable &&
+    !["read_failed", "corrupt", "write_failed", "outcome_unknown"].includes(
+      capabilities.taskHistoryPersistenceHealth,
+    )
+  )
+    fail(
+      "$.capabilities.taskHistoryRecoveryAvailable",
+      "Task history recovery requires recoverable persistence health",
+    );
+  if (
+    capabilities.scheduledTaskRecoveryAvailable &&
+    !["read_failed", "corrupt", "write_failed", "outcome_unknown"].includes(
+      capabilities.scheduledTaskPersistenceHealth,
+    )
+  )
+    fail(
+      "$.capabilities.scheduledTaskRecoveryAvailable",
+      "Scheduled Task recovery requires recoverable persistence health",
     );
   const permissionItem = object(root.permissions, "$.permissions", [
     "availableProfiles",
@@ -3276,6 +3339,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     capabilities,
     permissions,
     account: decodeAccount(root.account, "$.account"),
+    execution: decodeExecution(root.execution, "$.execution"),
     skillCatalog: decodeSkillCatalog(root.skillCatalog, "$.skillCatalog"),
     skillManagement: decodeSkillManagement(
       root.skillManagement,
@@ -3985,6 +4049,23 @@ export function assertScheduledTaskDeleted(value: unknown, expectedId: string) {
     fail("$.scheduledTaskId", "response identity mismatch");
   if (!booleanValue(item.deleted, "$.deleted"))
     fail("$.deleted", "expected deletion confirmation");
+}
+
+const persistenceRecoveryOutcomes = [
+  "recovered",
+  "stale_revision",
+  "not_required",
+  "unavailable",
+  "failed",
+  "outcome_unknown",
+  "shutting_down",
+] as const satisfies readonly PersistenceRecoveryOutcome[];
+
+export function decodePersistenceRecoveryResult(value: unknown) {
+  const item = object(value, "$", ["outcome"]);
+  return {
+    outcome: enumValue(item.outcome, "$.outcome", persistenceRecoveryOutcomes),
+  };
 }
 
 export function decodeCatalogRefreshResult<

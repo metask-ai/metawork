@@ -172,7 +172,7 @@ preparing_execution
 
 “用户在模型加载期间重新选择 API”必须进入 `reloading_models`，不能用旁路布尔位附着在另一个阶段。是否存在 committed execution 由 committed default 是否存在直接表达；不能再用独立 `preparing | ready | reconfiguring` 状态与 transaction stage 重复编码。
 
-公开的 `AccountState`、`CatalogState`、`canCancel` 和 `canCreateTask` 都是 committed aggregate 与 transaction 的派生 projection，不是内部状态机的第二份真相。
+公开的 `AccountState`、`CatalogState`、`canCancel` 与 Metask catalog/generation 都是 committed aggregate 与 transaction 的派生 projection，不是内部状态机的第二份真相。新 Task admission、默认/active execution 与 replacement 状态由 Product Control 的 Execution projection 派生，Account 不发布也不缓存这些决定。
 
 ## 5. Prepare、effect 与 commit
 
@@ -198,13 +198,17 @@ CatalogIntent =
   | discard_candidate
   | clear_all
 
-ExecutionIntent = unchanged | install | clear
+ExecutionIntent =
+  unchanged
+  | stage_install
+  | install_committed
+  | finalize_install
+  | clear
 
 PreferenceIntent = unchanged | commit_pending | clear
 
 ReplacementIntent =
   none
-  | begin_default
   | begin_identity
   | finish
 ```
@@ -220,7 +224,7 @@ ReplacementIntent =
 - prepared transition 被拒绝或 effect admission 失败时不得修改 committed aggregate；
 - completion 产生的下一 effect admission 失败时，先提交已经观察到的外部结果，再从该 committed phase 产生唯一 terminal failure。
 
-主线程跨 owner 顺序由 [Product 架构](product-architecture.md#21-execution-aggregate-与-account-handoff)定义。Account 内部 commit 必须一次应用 state、catalog intent 和 preference shadow；owned execution payload 由 Coordinator 按 `ExecutionIntent` 精确转移一次，并在 Account commit 前安装或销毁。不得发布只有 state 或只有 catalog 已更新的中间事实。
+主线程跨 owner 顺序由 [Product 架构](product-architecture.md#21-execution-aggregate-与-account-handoff)定义。Account 内部 terminal commit 必须一次应用 state、catalog intent 和 preference shadow；credential-bearing payload 通过 opaque transfer 由 Product 在 preference effect admission 前接管，Coordinator 不得持有具体配置。Account 只发布 staged persistence 所需的 pending fact；新的 selected state/catalog/generation 只能与 Product no-fail finalize 同一 terminal turn 提交，不得发布 generation mismatch 的中间事实。
 
 ## 6. 关键事务
 
@@ -249,14 +253,19 @@ credential-bearing default replacement 是完整 transaction：
 ```text
 load/validate candidate catalog
 → select API and model
-→ prepare typed ExecutionTarget and credential
+→ construct typed ExecutionTarget and credential without persistence
 → generate new credential execution generation
+→ transfer candidate opaquely to Product staged owner
+→ Product validates candidate and durably scrubs Schedule
 → durable preference commit
-→ Workbench install
-→ promote candidate catalog
+→ exact reread when outcome is unknown
+→ Product no-fail finalize
+→ atomically promote Account state, catalog intent and preference shadow
 ```
 
-只有 ownership、catalog membership、persistence 和 Workbench install 全部成功后才能提交新默认值。任何明确失败都保留旧 committed default；persistence outcome unknown 按 §7 fail closed 并重新观察持久化真相。
+Account candidate construction 与 preference persistence 是两个独立阶段；构造 worker 不得写 preference。Product prepare 成功前 preference writer 必须保持未调用，Coordinator 只持 opaque token，不得取得 `ExecutionConfig`。只有 ownership、catalog membership、Product preparation 和 persistence 全部成功后才能进行 no-fail finalize 并提交新默认值。任何明确失败都 abort/secure-zero staged candidate 并保留旧 committed default；persistence outcome unknown 按 §7 精确重新观察持久化真相。
+
+`activateMetask` 是独立的 Account catalog-resolution attempt，不是 preference mutation：它只能按当前 committed API、model 与 execution generation 重建候选，不能选择新 tuple、生成新 generation 或调用 preference writer。Account 不判断当前 active source，也不发布 default replacement intent；Product 决定该候选是仅验证后销毁，还是用于显式 source activation。
 
 ### 6.4 同一 API Key 下修改默认模型
 
@@ -298,6 +307,8 @@ Account persistence effect 区分以下结果：
 
 credential-bearing execution persistence outcome unknown 风险更高：在重新观察并精确证明唯一 generation 前，不得发布或安装 candidate execution。不得自动重放非幂等 persistence。
 
+credential-bearing preference 的重读同样只有三个结果：完整 candidate tuple（owner、API、model、generation 全部一致）允许 terminal finalize；完整旧 tuple 明确 abort 并保留旧 default；缺失、损坏或第三种 tuple 必须 abort 并进入 recovery。任何路径都只能产生一个 terminal Account/Product revision。
+
 `saved_preference` 只能是已观察持久化真相的 Account-owned shadow，不能与 committed selection 分别更新。恢复成功、提交成功和明确清除必须由 prepared transition 的显式 `PreferenceIntent` 在同一个 Account commit 中同步两者；进入 preference recovery 时必须清除不再受磁盘观察证明的旧 shadow，后续同 owner 登录不得复用该值。
 
 ## 8. Projection 与安全
@@ -309,7 +320,7 @@ credential-bearing execution persistence outcome unknown 风险更高：在重�
 - ready selection 在对应 public catalog 中精确出现一次；
 - model catalog owner 与 API selection 一致；
 - candidate 字段只来自当前 transaction；
-- generation、execution source 和 `canCreateTask` 自洽；
+- Metask catalog generation 与 credential execution generation 自洽；
 - signed-out/checking/authorizing projection 不泄漏 identity、catalog、selection 或 generation；
 - projection 永不包含 token、API Key secret、credential、PKCE、authorization code、header 或 locator。
 

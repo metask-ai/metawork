@@ -174,12 +174,28 @@ test("central conversation paths use only the shared AI UI vocabulary", async ()
 
 test("transitional Account states never turn signed-out history into a security gate", async () => {
   const app = await readFile(resolve(sourceRoot, "app", "App.tsx"), "utf8");
+  const accountSurfacePolicy = await readFile(
+    resolve(sourceRoot, "app", "account-surface-policy.ts"),
+    "utf8",
+  );
   const gating = await readFile(
     resolve(sourceRoot, "features", "account", "gating.ts"),
     "utf8",
   );
   assert.match(app, /<AccountGate/);
-  assert.match(app, /requiresAccountGate\(snapshot\.account\)/);
+  assert.match(app, /const hasTasks = snapshot\.tasks\.length !== 0;/);
+  assert.match(
+    app,
+    /accountSurfacePolicy\(\s*snapshot\.account,\s*snapshot\.execution,\s*hasTasks,\s*\)/,
+  );
+  assert.match(
+    accountSurfacePolicy,
+    /if \(hasTasks\) return \{ gateRequired: false, setupRequired: false \};/,
+  );
+  assert.match(
+    app,
+    /if \(accountSetupRedirected && hasTasks\) \{[\s\S]*?setSettingsOpen\(false\);/,
+  );
   assert.match(app, /selectAccountGateStatus\(statuses\)/);
   assert.match(
     gating,
@@ -188,7 +204,7 @@ test("transitional Account states never turn signed-out history into a security 
   assert.doesNotMatch(app, /workbenchEntered|setWorkbenchEntered/);
   assert.match(
     app,
-    /\(!newTaskDraftActive \|\| snapshot\.account\.canCreateTask\)/,
+    /\(!newTaskDraftActive \|\| snapshot\.execution\.taskCreationAvailable\)/,
   );
   assert.doesNotMatch(app, /setStatus\(\s*\{/);
   assert.doesNotMatch(app, /AccountPrerequisite|prerequisite=\{/);
@@ -211,6 +227,10 @@ test("Task persistence failure remains diagnostic without blocking mutations", a
     resolve(sourceRoot, "features", "tasks", "TaskList.tsx"),
     "utf8",
   );
+  const confirmationNotice = await readFile(
+    resolve(sourceRoot, "components", "ConfirmationNotice.tsx"),
+    "utf8",
+  );
   assert.match(app, /const workbenchMutationDisabled =\s*bridgeUnavailable;/);
   assert.doesNotMatch(app, /taskHistoryMutationBlocked/);
   assert.doesNotMatch(store, /taskHistoryMutationBlocked/);
@@ -225,7 +245,11 @@ test("Task persistence failure remains diagnostic without blocking mutations", a
   assert.match(app, /<TaskList[\s\S]*tasks=\{navigableTaskItems\}/);
   assert.match(taskList, /className="task-list-item focus-ring"/);
   assert.match(taskList, /disabled=\{\s*taskMutationDisabled/);
-  assert.match(app, /className="task-persistence-error" role="status"/);
+  assert.match(
+    app,
+    /<ConfirmationNotice[\s\S]*?className="task-persistence-error"[\s\S]*?actionAvailable=\{/,
+  );
+  assert.match(confirmationNotice, /className=\{className\} role="alert"/);
 });
 
 test("degraded Task history does not create a permanent sidebar alert", async () => {

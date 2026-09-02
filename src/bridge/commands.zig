@@ -67,11 +67,13 @@ pub const respond_ui = "metawork.tasks.respondUi";
 pub const rename_task = "metawork.tasks.rename";
 pub const archive_task = "metawork.tasks.archive";
 pub const delete_task = "metawork.tasks.delete";
+pub const recover_task_history = "metawork.tasks.recoverHistory";
 pub const create_scheduled_task = "metawork.scheduledTasks.create";
 pub const update_scheduled_task = "metawork.scheduledTasks.update";
 pub const set_scheduled_task_enabled = "metawork.scheduledTasks.setEnabled";
 pub const run_scheduled_task_now = "metawork.scheduledTasks.runNow";
 pub const delete_scheduled_task = "metawork.scheduledTasks.delete";
+pub const recover_scheduled_task_store = "metawork.scheduledTasks.recoverStore";
 
 pub const product = [_][]const u8{
     ping,
@@ -138,9 +140,11 @@ pub const product = [_][]const u8{
     rename_task,
     archive_task,
     delete_task,
+    recover_task_history,
     create_scheduled_task,
     update_scheduled_task,
     set_scheduled_task_enabled,
     run_scheduled_task_now,
     delete_scheduled_task,
+    recover_scheduled_task_store,
 };

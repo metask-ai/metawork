@@ -23,6 +23,25 @@ pub const Source = enum {
     model_connection,
 };
 
+pub const Availability = enum {
+    unavailable,
+    ready,
+    replacing,
+};
+
+/// Stable Product Execution availability cause. Command rejection remains a
+/// separate result and Account never publishes these failures.
+pub const AvailabilityError = enum {
+    none,
+    model_connection_persistence_unavailable,
+    credential_unavailable,
+    invalid_candidate,
+    resource_exhausted,
+    schedule_persistence_unavailable,
+    schedule_persistence_failed,
+    schedule_persistence_outcome_unknown,
+};
+
 /// Exact request/response wire dialect. This is not a vendor category.
 pub const Protocol = enum {
     openai_responses,
@@ -82,6 +101,20 @@ pub const ModelConnectionView = struct {
     models: []const ModelConnectionModelView = &.{},
     selected_model: []const u8 = "",
     connection_generation: u64,
+};
+
+/// Borrowed, secret-free Product Control projection. The default source is
+/// durable user intent; the active source is the process-local installed
+/// execution and may be absent independently.
+pub const ExecutionView = struct {
+    state: Availability,
+    default_source: ?Source = null,
+    active_source: ?Source = null,
+    active_generation: u64 = 0,
+    task_creation_available: bool = false,
+    selected_model_connection_id: []const u8 = "",
+    model_connections: []const ModelConnectionView = &.{},
+    error_code: AvailabilityError = .none,
 };
 
 pub const ModelConnectionSpec = struct {
@@ -339,6 +372,18 @@ pub const OwnedConfig = struct {
         self.protocol = undefined;
         self.execution_generation = 0;
         self.source = undefined;
+    }
+};
+
+/// Opaque, synchronous ownership handoff for an execution candidate. The
+/// sequencing owner may route this capability, but only the receiving
+/// execution owner can materialize the credential-bearing configuration.
+pub const OwnedConfigTransfer = struct {
+    context: *anyopaque,
+    take_fn: *const fn (*anyopaque) OwnedConfig,
+
+    pub fn take(self: OwnedConfigTransfer) OwnedConfig {
+        return self.take_fn(self.context);
     }
 };
 

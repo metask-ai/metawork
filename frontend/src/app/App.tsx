@@ -23,16 +23,15 @@ import {
   connectionFailurePresentation,
   connectionStatus,
 } from "./connection-status.ts";
+import { accountSurfacePolicy } from "./account-surface-policy.ts";
 import { Icon } from "../components/ui/Icon.tsx";
+import { ConfirmationNotice } from "../components/ConfirmationNotice.tsx";
 import { AlertDialog } from "../components/ui/alert-dialog.tsx";
 import { Button } from "../components/ui/button.tsx";
 import { AccountIdentity } from "../features/account/AccountIdentity.tsx";
 import { AccountGate } from "../features/account/AccountGate.tsx";
-import {
-  requiresAccountGate,
-  requiresAccountSetup,
-} from "../features/account/gating.ts";
 import { accountErrorMessageId } from "../i18n/account-error.ts";
+import { persistenceRecoveryErrorMessageId } from "../i18n/persistence-recovery.ts";
 import {
   SettingsPage,
   type SettingsFocusTarget,
@@ -135,10 +134,7 @@ import {
 import { chooseWorkspaceAndMigrateDraft } from "../features/workspaces/chooseWorkspace.ts";
 import { initialWorkbenchState, workbenchReducer } from "../workbench/store.ts";
 import { navigableTasks } from "../workbench/task-visibility.ts";
-import {
-  accountMutationBlocksTaskAdmission,
-  PendingScopes,
-} from "../workbench/pendingScopes.ts";
+import { PendingScopes } from "../workbench/pendingScopes.ts";
 import { taskModelSelectionPolicy } from "./task-model-selection.ts";
 
 function errorText(error: unknown) {
@@ -618,10 +614,22 @@ export default function App() {
     ? newTaskDrafts.updateDraft
     : taskDrafts.updateDraft;
   const bridgeUnavailable = viewSyncFailed || !bridgeReady;
-  const accountGateRequired = requiresAccountGate(snapshot.account);
-  const accountSetupRequired = requiresAccountSetup(snapshot.account);
+  const hasTasks = snapshot.tasks.length !== 0;
+  const accountSurface = accountSurfacePolicy(
+    snapshot.account,
+    snapshot.execution,
+    hasTasks,
+  );
+  const accountGateRequired = accountSurface.gateRequired;
+  const accountSetupRequired = accountSurface.setupRequired;
 
   useEffect(() => {
+    if (accountSetupRedirected && hasTasks) {
+      setAccountSetupRedirected(false);
+      setSettingsFocus("title");
+      setSettingsOpen(false);
+      return;
+    }
     if (accountSetupRedirected && snapshot.account.state !== "authenticated") {
       setAccountSetupRedirected(false);
       return;
@@ -636,7 +644,7 @@ export default function App() {
       accountSetupRequired ||
       route !== "workbench" ||
       snapshot.account.state !== "authenticated" ||
-      !snapshot.account.canCreateTask
+      !snapshot.execution.taskCreationAvailable
     )
       return;
     setAccountSetupRedirected(false);
@@ -646,10 +654,11 @@ export default function App() {
   }, [
     accountSetupRedirected,
     accountSetupRequired,
+    hasTasks,
     route,
     settingsOpen,
-    snapshot.account.canCreateTask,
     snapshot.account.state,
+    snapshot.execution.taskCreationAvailable,
   ]);
 
   const workbenchMutationDisabled = bridgeUnavailable;
@@ -694,9 +703,8 @@ export default function App() {
   const composerRunInput = composerDraftToRunInput(composerDraft);
   const canSubmit =
     taskCanCompose &&
-    (!newTaskDraftActive || snapshot.account.canCreateTask) &&
+    (!newTaskDraftActive || snapshot.execution.taskCreationAvailable) &&
     (!newTaskDraftActive || newTaskWorkspaceReady) &&
-    !accountMutationBlocksTaskAdmission(newTaskDraftActive, accountBusy) &&
     !taskOperationInFlight &&
     composerDraftHasContent(composerDraft) &&
     composerRunInput !== null &&
@@ -708,13 +716,13 @@ export default function App() {
   const selectedModel = snapshot.account.models.find(
     (model) => model.selectionId === snapshot.account.selectedModelSelectionId,
   );
-  const activeModelConnection = snapshot.account.modelConnections.find(
+  const activeModelConnection = snapshot.execution.modelConnections.find(
     (connection) =>
-      connection.id === snapshot.account.selectedModelConnectionId,
+      connection.id === snapshot.execution.selectedModelConnectionId,
   );
   const customModelId = activeModelConnection?.selectedModel ?? "";
   const customModelConnectionSelected =
-    snapshot.account.executionSource === "model_connection" &&
+    snapshot.execution.defaultSource === "model_connection" &&
     activeModelConnection !== undefined;
   const customModelConnectionContext = activeModelConnection
     ? `${activeModelConnection.displayName} · ${t(
@@ -763,6 +771,7 @@ export default function App() {
   const displayedTaskModelId = pendingTaskModelId ?? taskModelId;
   const taskModelPolicy = taskModelSelectionPolicy(
     snapshot.account,
+    snapshot.execution,
     activeTask,
   );
 
@@ -994,7 +1003,7 @@ export default function App() {
 
   useEffect(() => {
     if (
-      !snapshot.account.canCreateTask ||
+      !snapshot.execution.taskCreationAvailable ||
       activeTask !== null ||
       workbench.draftOpen
     )
@@ -1004,7 +1013,11 @@ export default function App() {
       workspaceId: null,
     });
     window.requestAnimationFrame(() => composer.current?.focus());
-  }, [activeTask, snapshot.account.canCreateTask, workbench.draftOpen]);
+  }, [
+    activeTask,
+    snapshot.execution.taskCreationAvailable,
+    workbench.draftOpen,
+  ]);
 
   function focusPendingRequest() {
     const requestId = activeTask?.pendingUi?.requestId;
@@ -1512,7 +1525,7 @@ export default function App() {
         client,
         taskId: existingTaskId,
         workspace,
-        expectedExecutionGeneration: snapshot.account.executionGeneration,
+        expectedExecutionGeneration: snapshot.execution.activeGeneration,
         expectedBindingEpoch: activeTask?.binding.epoch ?? null,
         permissionProfile: newTaskPermissionProfile,
         input,
@@ -2691,14 +2704,32 @@ export default function App() {
                   "degraded" &&
                 snapshot.capabilities.taskHistoryPersistenceHealth !==
                   "unavailable" && (
-                  <div className="task-persistence-error" role="status">
-                    <Icon name="warning" />
-                    <span>
-                      {t(
-                        `task.persistence.${snapshot.capabilities.taskHistoryPersistenceHealth}`,
-                      )}
-                    </span>
-                  </div>
+                  <ConfirmationNotice
+                    className="task-persistence-error"
+                    message={t(
+                      `task.persistence.${snapshot.capabilities.taskHistoryPersistenceHealth}`,
+                    )}
+                    detail={t("persistence.recovery.original_retained")}
+                    actionLabel={t("persistence.recovery.action")}
+                    dialogTitle={t("persistence.recovery.task.title")}
+                    dialogDescription={t("persistence.recovery.task.body")}
+                    cancelLabel={t("persistence.recovery.cancel")}
+                    confirmLabel={t("persistence.recovery.confirm")}
+                    pendingLabel={t("persistence.recovery.running")}
+                    failureMessage={t("persistence.recovery.failed")}
+                    actionAvailable={
+                      snapshot.capabilities.taskHistoryRecoveryAvailable
+                    }
+                    disabled={bridgeUnavailable}
+                    onConfirm={async () => {
+                      const result = await client.recoverTaskHistory(
+                        snapshot.revision,
+                      );
+                      return result.outcome === "recovered"
+                        ? null
+                        : t(persistenceRecoveryErrorMessageId(result.outcome));
+                    }}
+                  />
                 )}
               <TaskList
                 tasks={navigableTaskItems}
@@ -2748,6 +2779,7 @@ export default function App() {
         settingsOpen ? (
           <SettingsPage
             account={snapshot.account}
+            execution={snapshot.execution}
             permissionProfiles={{
               enabled: snapshot.capabilities.permissionProfiles,
               available: snapshot.permissions.availableProfiles,
@@ -2937,6 +2969,7 @@ export default function App() {
         <ScheduledTasksPage
           snapshot={snapshot}
           disabled={bridgeUnavailable || !snapshot.capabilities.scheduledTasks}
+          recoveryDisabled={bridgeUnavailable}
           onCreate={(input) => client.createScheduledTask(input)}
           onUpdate={(id, epoch, input) =>
             client.updateScheduledTask(id, epoch, input)
@@ -2946,6 +2979,7 @@ export default function App() {
           }
           onRunNow={(id, epoch) => client.runScheduledTaskNow(id, epoch)}
           onDelete={(id, epoch) => client.deleteScheduledTask(id, epoch)}
+          onRecover={() => client.recoverScheduledTaskStore(snapshot.revision)}
           onOpenTask={(taskId) => {
             const task = snapshot.tasks.find((item) => item.id === taskId);
             if (!task) return;

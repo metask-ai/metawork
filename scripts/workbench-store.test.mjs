@@ -5,10 +5,7 @@ import {
   initialWorkbenchState,
   workbenchReducer,
 } from "../frontend/src/workbench/store.ts";
-import {
-  accountMutationBlocksTaskAdmission,
-  PendingScopes,
-} from "../frontend/src/workbench/pendingScopes.ts";
+import { PendingScopes } from "../frontend/src/workbench/pendingScopes.ts";
 import { navigableTasks } from "../frontend/src/workbench/task-visibility.ts";
 
 function task(id, workspaceId, archived = false) {
@@ -50,6 +47,7 @@ function snapshot(revision, tasks, workspaceIds = null) {
     revision,
     capabilities: initialWorkbenchState.snapshot.capabilities,
     account: initialWorkbenchState.snapshot.account,
+    execution: initialWorkbenchState.snapshot.execution,
     workspaces: ids.map((id) => workspace(id)),
     tasks,
   };
@@ -72,12 +70,6 @@ test("pending scopes isolate unrelated mutations and reject duplicate admission"
   assert.equal(pending.end("task:3"), true);
   assert.equal(pending.has("task:4"), true);
   assert.equal(pending.end("task:4"), true);
-});
-
-test("account mutations block only New task admission", () => {
-  assert.equal(accountMutationBlocksTaskAdmission(true, true), true);
-  assert.equal(accountMutationBlocksTaskAdmission(false, true), false);
-  assert.equal(accountMutationBlocksTaskAdmission(true, false), false);
 });
 
 test("a signed-out Host snapshot restores an active Run instead of hiding it", () => {
@@ -104,7 +96,7 @@ test("a signed-out Host snapshot restores an active Run instead of hiding it", (
   });
 
   assert.equal(signedOut.activeTaskId, null);
-  assert.equal(signedOut.snapshot.account.canCreateTask, false);
+  assert.equal(signedOut.snapshot.execution.taskCreationAvailable, false);
   assert.equal(signedOut.snapshot.tasks[0]?.currentRunPhase, "running");
   assert.deepEqual(signedOut.snapshot.tasks[0]?.activeOperation, {
     kind: "run",

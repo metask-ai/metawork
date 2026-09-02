@@ -462,11 +462,29 @@ summary::-webkit-details-marker {
   background: color-mix(in srgb, var(--metask-state-warning) 6%, transparent);
   font-size: var(--text-label);
   line-height: 1.45;
+  flex-wrap: wrap;
 }
 
 .task-persistence-error svg {
   flex: 0 0 auto;
   margin-top: 1px;
+}
+
+.confirmation-notice-copy {
+  display: grid;
+  min-width: 0;
+  flex: 1 1 160px;
+  gap: 3px;
+}
+
+.confirmation-notice-copy small {
+  color: var(--ui-content-muted);
+  font-size: var(--text-caption);
+  line-height: 1.4;
+}
+
+.task-persistence-error > button {
+  margin-left: 28px;
 }
 
 .sidebar-navigation .task-list {
@@ -4730,6 +4748,11 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   background: color-mix(in srgb, var(--metask-state-warning) 6%, transparent);
   font-size: var(--text-control);
   line-height: 1.45;
+}
+
+.scheduled-capability-error > button {
+  flex: 0 0 auto;
+  margin-left: auto;
 }
 
 .scheduled-toolbar {

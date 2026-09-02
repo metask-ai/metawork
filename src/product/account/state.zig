@@ -76,6 +76,7 @@ pub const Effect = union(enum) {
     load_api_keys,
     load_models: ApiKeyId,
     prepare_execution: ModelId,
+    persist_execution_preference: ExecutionPreference,
     persist_default_model: ModelId,
     cancel_attempt: u64,
     delete_credential,
@@ -85,9 +86,15 @@ pub const Effect = union(enum) {
         return switch (self.*) {
             .load_models => |*id| id.view(),
             .prepare_execution, .persist_default_model => |*model| model.view(),
+            .persist_execution_preference => |*preference| preference.model.view(),
             else => null,
         };
     }
+};
+
+pub const ExecutionPreference = struct {
+    model: ModelId,
+    execution_generation: u64,
 };
 
 const AttemptKind = enum {
@@ -95,18 +102,22 @@ const AttemptKind = enum {
     login,
     refresh_token,
     catalog,
+    activation,
     model_preference,
     logout,
 };
 
 const IdentityAttemptKind = enum { login, refresh_token };
+const CatalogAttemptKind = enum { preference, activation };
 const ModelPreferenceSource = enum { catalog, preference };
 const PendingFacts = struct {
     api_key_id: ApiKeyId = .{},
     model: ModelId = .{},
+    execution_generation: u64 = 0,
 };
 const CatalogAttempt = struct {
     attempt_id: u64,
+    kind: CatalogAttemptKind = .preference,
     pending: PendingFacts = .{},
 };
 
@@ -166,7 +177,10 @@ const Transaction = union(enum) {
             .reloading_models,
             .selecting_model,
             .persisting_execution,
-            => .catalog,
+            => |value| switch (value.kind) {
+                .preference => .catalog,
+                .activation => .activation,
+            },
             .persisting_model => |value| switch (value.source) {
                 .catalog => .catalog,
                 .preference => .model_preference,
@@ -276,6 +290,11 @@ const CommittedState = struct {
         return pending.model.view();
     }
 
+    fn pendingExecutionGeneration(self: *const CommittedState) u64 {
+        const pending = self.transaction.pending() orelse return 0;
+        return pending.execution_generation;
+    }
+
     fn setPendingApiKeyId(
         self: *CommittedState,
         value: []const u8,
@@ -294,6 +313,16 @@ const CommittedState = struct {
         try pending.model.set(value);
     }
 
+    fn setPendingExecutionGeneration(
+        self: *CommittedState,
+        value: u64,
+    ) contract.ValidationError!void {
+        if (value == 0) return error.InconsistentState;
+        const pending = self.transaction.pendingMut() orelse
+            return error.InconsistentState;
+        pending.execution_generation = value;
+    }
+
     fn clearPendingApiKeyId(self: *CommittedState) void {
         const pending = self.transaction.pendingMut() orelse return;
         pending.api_key_id.clear();
@@ -302,6 +331,7 @@ const CommittedState = struct {
     fn clearPendingModel(self: *CommittedState) void {
         const pending = self.transaction.pendingMut() orelse return;
         pending.model.clear();
+        pending.execution_generation = 0;
     }
 
     fn markReloadingModels(self: *CommittedState) void {
@@ -346,24 +376,44 @@ const CommittedState = struct {
                     else => unreachable,
                 },
             } },
-            .loading_keys => if (attempt_kind == .catalog)
-                .{ .loading_keys = .{ .attempt_id = attempt_id, .pending = pending } }
+            .loading_keys => if (attempt_kind == .catalog or attempt_kind == .activation)
+                .{ .loading_keys = .{
+                    .attempt_id = attempt_id,
+                    .kind = if (attempt_kind == .activation) .activation else .preference,
+                    .pending = pending,
+                } }
             else
                 unreachable,
-            .selecting_key => if (attempt_kind == .catalog)
-                .{ .selecting_key = .{ .attempt_id = attempt_id, .pending = pending } }
+            .selecting_key => if (attempt_kind == .catalog or attempt_kind == .activation)
+                .{ .selecting_key = .{
+                    .attempt_id = attempt_id,
+                    .kind = if (attempt_kind == .activation) .activation else .preference,
+                    .pending = pending,
+                } }
             else
                 unreachable,
-            .loading_models => if (attempt_kind == .catalog)
-                .{ .loading_models = .{ .attempt_id = attempt_id, .pending = pending } }
+            .loading_models => if (attempt_kind == .catalog or attempt_kind == .activation)
+                .{ .loading_models = .{
+                    .attempt_id = attempt_id,
+                    .kind = if (attempt_kind == .activation) .activation else .preference,
+                    .pending = pending,
+                } }
             else
                 unreachable,
-            .selecting_model => if (attempt_kind == .catalog)
-                .{ .selecting_model = .{ .attempt_id = attempt_id, .pending = pending } }
+            .selecting_model => if (attempt_kind == .catalog or attempt_kind == .activation)
+                .{ .selecting_model = .{
+                    .attempt_id = attempt_id,
+                    .kind = if (attempt_kind == .activation) .activation else .preference,
+                    .pending = pending,
+                } }
             else
                 unreachable,
-            .persisting => if (attempt_kind == .catalog)
-                .{ .persisting_execution = .{ .attempt_id = attempt_id, .pending = pending } }
+            .persisting => if (attempt_kind == .catalog or attempt_kind == .activation)
+                .{ .persisting_execution = .{
+                    .attempt_id = attempt_id,
+                    .kind = if (attempt_kind == .activation) .activation else .preference,
+                    .pending = pending,
+                } }
             else
                 unreachable,
             .persisting_model => .{ .persisting_model = .{
@@ -428,15 +478,10 @@ const CommittedState = struct {
                 .logging_out => "",
                 else => self.selected_api_key_id.view(),
             },
-            .can_create_task = state == .authenticated and
-                catalog_state == .ready and self.execution_authority == .ready and
-                self.attemptKind() != .catalog and
-                self.operation() != .logging_out,
             .error_code = self.error_code,
             .safe_diagnostic = self.safe_diagnostic.view(),
             .catalog_generation = self.catalog_generation,
             .metask_execution_generation = if (publish_account) self.execution_generation else 0,
-            .execution_generation = if (publish_account) self.execution_generation else 0,
         };
     }
 
@@ -450,7 +495,7 @@ const CommittedState = struct {
         return switch (self.attemptKind()) {
             .login => self.session_state == .authorizing and
                 self.operation() == .oauth_callback,
-            .catalog => self.session_state == .authenticated and switch (self.operation()) {
+            .catalog, .activation => self.session_state == .authenticated and switch (self.operation()) {
                 .loading_keys, .selecting_key, .loading_models, .selecting_model => true,
                 else => false,
             },
@@ -485,7 +530,8 @@ pub const Account = struct {
     }
 
     pub fn catalogAttemptActive(self: *const Account) bool {
-        return self.state.attemptKind() == .catalog;
+        return self.state.attemptKind() == .catalog or
+            self.state.attemptKind() == .activation;
     }
 
     /// True while a catalog attempt is loading models for a selected key.
@@ -494,7 +540,8 @@ pub const Account = struct {
     /// holds those keys' secrets — resetting it would make every re-pick
     /// dispatch a model load that cannot resolve its key.
     pub fn catalogModelsLoadInFlight(self: *const Account) bool {
-        return self.state.attemptKind() == .catalog and
+        return (self.state.attemptKind() == .catalog or
+            self.state.attemptKind() == .activation) and
             self.state.operation() == .loading_models;
     }
 
@@ -574,9 +621,15 @@ pub const Account = struct {
         return transitionNoAttempt(next, .operation_failed);
     }
 
-    /// A preference rename whose outcome cannot be observed invalidates the
-    /// in-process default execution until the next startup.
-    pub fn prepareExecutionPersistenceUnknown(
+    pub fn pendingExecutionGeneration(self: *const Account) u64 {
+        return self.state.pendingExecutionGeneration();
+    }
+
+    /// The preference store was re-observed after an indeterminate execution
+    /// preference write and contained neither the old nor candidate value.
+    /// Preserve an existing execution as recovery-only; a first install has
+    /// no safe authority to preserve and closes the Account fail-closed.
+    pub fn prepareExecutionPersistenceInvalid(
         self: *const Account,
     ) PrepareResult {
         if (self.state.attemptKind() != .catalog or
@@ -586,11 +639,15 @@ pub const Account = struct {
             return .{ .rejected = .invalid_state };
         const attempt_id = self.state.activeAttempt().?;
         var next = self.state;
-        next.session_state = .shutting_down;
-        next.execution_authority = .none;
-        next.selected_api_key_id.clear();
-        next.selected_model.clear();
-        next.execution_generation = 0;
+        if (next.execution_authority == .ready) {
+            next.execution_authority = .recovery;
+        } else {
+            next.session_state = .shutting_down;
+            next.execution_authority = .none;
+            next.selected_api_key_id.clear();
+            next.selected_model.clear();
+            next.execution_generation = 0;
+        }
         next.clearTransaction();
         next.error_code = .recovery_state_invalid;
         next.safe_diagnostic.clear();
@@ -599,9 +656,11 @@ pub const Account = struct {
             .operation_failed,
             attempt_id,
         );
-        result.transition.catalog_intent = .clear_all;
-        result.transition.execution_intent = .clear;
-        result.transition.replacement_intent = .finish;
+        result.transition.catalog_intent = if (next.session_state == .shutting_down)
+            .clear_all
+        else
+            .discard_candidate;
+        result.transition.preference_intent = .clear;
         return result;
     }
 
@@ -692,6 +751,7 @@ pub const Account = struct {
             .api_keys_loaded => self.prepareApiKeysLoaded(),
             .models_loaded => self.prepareModelsLoaded(),
             .execution_ready => self.prepareExecutionReady(completion),
+            .execution_preference_persisted => self.prepareExecutionPreferencePersisted(),
             .default_model_persisted => self.prepareDefaultModelPersisted(),
             .logged_out => self.prepareLoggedOut(),
             .failed => |failure| self.prepareFailure(failure),
@@ -745,24 +805,6 @@ pub const Account = struct {
         return transitionNoAttempt(next, .operation_failed);
     }
 
-    /// Records a failure only after the transition that observed an external
-    /// effect has committed. The durable effect is not rollbackable here:
-    /// preserve the new identity, preference, catalog, and logout state while
-    /// publishing the failure from that committed phase.
-    pub fn prepareCommittedPhaseFailure(
-        self: *const Account,
-        error_code: contract.ErrorCode,
-    ) PrepareResult {
-        if (error_code == .none or
-            self.state.operation() != .none or
-            self.state.activeAttempt() != null)
-            return .{ .rejected = .invalid_state };
-        var next = self.state;
-        next.error_code = error_code;
-        next.safe_diagnostic.clear();
-        return transitionNoAttempt(next, .operation_failed);
-    }
-
     fn prepareBeginLogin(self: *const Account) PrepareResult {
         if ((self.state.session_state != .signed_out and
             self.state.session_state != .authenticated) or
@@ -790,7 +832,7 @@ pub const Account = struct {
         next.session_state = switch (next.attemptKind()) {
             .login => if (next.account_id.len == 0) .signed_out else .authenticated,
             .refresh_token => .authenticated,
-            .catalog, .model_preference => .authenticated,
+            .catalog, .activation, .model_preference => .authenticated,
             .logout, .none => next.session_state,
         };
         next.clearTransaction();
@@ -805,7 +847,8 @@ pub const Account = struct {
         if (self.state.attemptKind() == .login or
             self.state.attemptKind() == .logout)
             result.transition.replacement_intent = .finish;
-        if (self.state.attemptKind() == .catalog)
+        if (self.state.attemptKind() == .catalog or
+            self.state.attemptKind() == .activation)
             result.transition.catalog_intent = .discard_candidate;
         return result;
     }
@@ -905,6 +948,27 @@ pub const Account = struct {
     fn prepareSelectModel(self: *const Account, model: []const u8) PrepareResult {
         if (self.state.session_state != .authenticated)
             return .{ .rejected = .invalid_state };
+        if (self.state.attemptKind() == .activation) {
+            if (self.state.operation() != .selecting_model or
+                self.state.activeAttempt() == null or
+                !std.mem.eql(u8, self.state.pendingApiKeyId(), self.state.selected_api_key_id.view()) or
+                !std.mem.eql(u8, model, self.state.selected_model.view()))
+                return .{ .rejected = .invalid_state };
+            var next = self.state;
+            next.setPendingModel(model) catch
+                return .{ .rejected = .invalid_command };
+            next.setTransaction(.persisting, .activation, next.activeAttempt().?);
+            next.clearError();
+            var result = transition(
+                next,
+                .execution_changed,
+                next.activeAttempt().?,
+                .{ .prepare_execution = ModelId.init(model) catch
+                    return .{ .rejected = .invalid_command } },
+            );
+            result.transition.catalog_intent = .candidate;
+            return result;
+        }
         if (self.state.operation() == .none and
             self.state.execution_authority == .ready)
         {
@@ -995,14 +1059,32 @@ pub const Account = struct {
             .{ .prepare_execution = effect_model },
         );
         result.transition.catalog_intent = .candidate;
-        result.transition.replacement_intent = .begin_default;
         return result;
     }
 
     fn prepareActivateMetask(self: *const Account) PrepareResult {
-        if (self.state.selected_api_key_id.len == 0)
+        if (self.state.session_state != .authenticated or
+            self.state.operation() != .none or
+            self.state.execution_authority != .ready or
+            self.state.selected_api_key_id.len == 0 or
+            self.state.selected_model.len == 0 or
+            self.state.execution_generation == 0)
             return .{ .rejected = .invalid_state };
-        return self.prepareSelectApiKey(self.state.selected_api_key_id.view());
+        const attempt = nextAttempt(self.state.next_attempt_id) orelse
+            return .{ .rejected = .generation_mismatch };
+        var next = self.state;
+        next.setTransaction(.loading_keys, .activation, attempt.current);
+        next.setPendingApiKeyId(next.selected_api_key_id.view()) catch
+            return .{ .rejected = .invalid_command };
+        next.clearPendingModel();
+        next.next_attempt_id = attempt.next;
+        next.clearError();
+        return transition(
+            next,
+            .session_changed,
+            attempt.current,
+            .load_api_keys,
+        );
     }
 
     fn prepareLogout(self: *const Account) PrepareResult {
@@ -1097,14 +1179,16 @@ pub const Account = struct {
 
     fn prepareApiKeysLoaded(self: *const Account) PrepareResult {
         if (self.state.operation() != .loading_keys or
-            self.state.attemptKind() != .catalog)
+            (self.state.attemptKind() != .catalog and
+                self.state.attemptKind() != .activation))
             return .{ .rejected = .invalid_state };
+        const attempt_kind = self.state.attemptKind();
         const generation = incrementGeneration(self.state.catalog_generation) orelse
             return .{ .rejected = .generation_mismatch };
         var next = self.state;
         next.catalog_generation = generation;
         if (next.pendingApiKeyId().len != 0) {
-            next.setTransaction(.loading_models, .catalog, next.activeAttempt().?);
+            next.setTransaction(.loading_models, attempt_kind, next.activeAttempt().?);
             next.clearError();
             const effect_id = ApiKeyId.init(next.pendingApiKeyId()) catch
                 return .{ .rejected = .invalid_command };
@@ -1126,8 +1210,10 @@ pub const Account = struct {
 
     fn prepareModelsLoaded(self: *const Account) PrepareResult {
         if (self.state.operation() != .loading_models or
-            self.state.attemptKind() != .catalog)
+            (self.state.attemptKind() != .catalog and
+                self.state.attemptKind() != .activation))
             return .{ .rejected = .invalid_state };
+        const attempt_kind = self.state.attemptKind();
         const generation = incrementGeneration(self.state.catalog_generation) orelse
             return .{ .rejected = .generation_mismatch };
         var next = self.state;
@@ -1136,7 +1222,7 @@ pub const Account = struct {
             // The loaded models belong to a key the user superseded while the
             // load was in flight. Drop the stale result and reload for the
             // queued key.
-            next.setTransaction(.loading_models, .catalog, next.activeAttempt().?);
+            next.setTransaction(.loading_models, attempt_kind, next.activeAttempt().?);
             next.clearError();
             const effect_id = ApiKeyId.init(next.pendingApiKeyId()) catch
                 return .{ .rejected = .invalid_command };
@@ -1150,7 +1236,7 @@ pub const Account = struct {
             return result;
         }
         if (next.pendingModel().len != 0) {
-            next.setTransaction(.persisting, .catalog, next.activeAttempt().?);
+            next.setTransaction(.persisting, attempt_kind, next.activeAttempt().?);
             next.clearError();
             const effect_model = ModelId.init(next.pendingModel()) catch
                 return .{ .rejected = .invalid_command };
@@ -1161,10 +1247,9 @@ pub const Account = struct {
                 .{ .prepare_execution = effect_model },
             );
             result.transition.catalog_intent = .candidate;
-            result.transition.replacement_intent = .begin_default;
             return result;
         }
-        next.setTransaction(.selecting_model, .catalog, next.activeAttempt().?);
+        next.setTransaction(.selecting_model, attempt_kind, next.activeAttempt().?);
         next.clearError();
         var result = transitionNoEffect(next, .catalog_changed, next.activeAttempt().?);
         result.transition.catalog_intent = .candidate;
@@ -1176,7 +1261,8 @@ pub const Account = struct {
         completion: *WorkerCompletion,
     ) PrepareResult {
         if (self.state.operation() != .persisting or
-            self.state.attemptKind() != .catalog)
+            (self.state.attemptKind() != .catalog and
+                self.state.attemptKind() != .activation))
             return .{ .rejected = .invalid_state };
         var execution = switch (completion.payload) {
             .execution_ready => |*owned| owned.take(),
@@ -1192,23 +1278,72 @@ pub const Account = struct {
             return .{ .rejected = .generation_mismatch };
         }
 
+        if (self.state.attemptKind() == .activation) {
+            if (input.execution_generation != self.state.execution_generation or
+                !std.mem.eql(u8, self.state.pendingApiKeyId(), self.state.selected_api_key_id.view()) or
+                !std.mem.eql(u8, self.state.pendingModel(), self.state.selected_model.view()))
+            {
+                execution.deinit();
+                completion.payload = dependencyFailure();
+                return .{ .rejected = .generation_mismatch };
+            }
+            var next = self.state;
+            next.clearTransaction();
+            next.clearError();
+            completion.payload = dependencyFailure();
+            return .{ .transition = .{
+                .next = next,
+                .fact_kind = .catalog_changed,
+                .attempt_id = completion.attempt_id,
+                .execution = execution,
+                .catalog_intent = .promote_candidate,
+                .execution_intent = .install_committed,
+            } };
+        }
+
         var next = self.state;
-        next.execution_authority = .ready;
-        next.execution_generation = input.execution_generation;
-        next.selected_api_key_id.set(next.pendingApiKeyId()) catch unreachable;
-        next.selected_model.set(next.pendingModel()) catch unreachable;
-        next.clearTransaction();
+        next.setPendingExecutionGeneration(input.execution_generation) catch
+            unreachable;
         next.clearError();
         completion.payload = dependencyFailure();
         return .{ .transition = .{
             .next = next,
             .fact_kind = .execution_changed,
             .attempt_id = completion.attempt_id,
+            .effect = .{ .persist_execution_preference = .{
+                .model = ModelId.init(input.target.model) catch unreachable,
+                .execution_generation = input.execution_generation,
+            } },
             .execution = execution,
-            .catalog_intent = .promote_candidate,
-            .execution_intent = .install,
-            .replacement_intent = .finish,
+            .catalog_intent = .candidate,
+            .execution_intent = .stage_install,
         } };
+    }
+
+    fn prepareExecutionPreferencePersisted(self: *const Account) PrepareResult {
+        if (self.state.operation() != .persisting or
+            self.state.attemptKind() != .catalog or
+            self.state.activeAttempt() == null or
+            self.state.pendingApiKeyId().len == 0 or
+            self.state.pendingModel().len == 0 or
+            self.state.pendingExecutionGeneration() == 0)
+            return .{ .rejected = .invalid_state };
+        var next = self.state;
+        next.execution_authority = .ready;
+        next.execution_generation = next.pendingExecutionGeneration();
+        next.selected_api_key_id.set(next.pendingApiKeyId()) catch unreachable;
+        next.selected_model.set(next.pendingModel()) catch unreachable;
+        next.clearTransaction();
+        next.clearError();
+        var result = transitionNoEffect(
+            next,
+            .execution_changed,
+            self.state.activeAttempt().?,
+        );
+        result.transition.catalog_intent = .promote_candidate;
+        result.transition.execution_intent = .finalize_install;
+        result.transition.preference_intent = .commit_pending;
+        return result;
     }
 
     fn prepareDefaultModelPersisted(self: *const Account) PrepareResult {
@@ -1317,7 +1452,7 @@ pub const Account = struct {
                 .signed_out
             else
                 .authenticated,
-            .catalog, .model_preference, .logout, .none => next.session_state,
+            .catalog, .activation, .model_preference, .logout, .none => next.session_state,
         };
         const authentication_invalid = self.state.attemptKind() == .refresh_token and
             (normalized_failure.error_code == .metask_unauthorized or
@@ -1343,7 +1478,8 @@ pub const Account = struct {
             .operation_failed,
             self.state.activeAttempt().?,
         );
-        result.transition.catalog_intent = if (self.state.attemptKind() == .catalog)
+        result.transition.catalog_intent = if (self.state.attemptKind() == .catalog or
+            self.state.attemptKind() == .activation)
             .discard_candidate
         else if (next.session_state == .signed_out)
             .clear_all
@@ -1351,8 +1487,7 @@ pub const Account = struct {
             .committed;
         if (next.session_state == .signed_out)
             result.transition.execution_intent = .clear;
-        if (self.state.operation() == .persisting or
-            self.state.attemptKind() == .login or
+        if (self.state.attemptKind() == .login or
             self.state.attemptKind() == .logout)
             result.transition.replacement_intent = .finish;
         return result;
@@ -1431,6 +1566,9 @@ fn stateIsValid(state: *const CommittedState) bool {
         return false;
     if (state.activeAttempt() != null and state.operation() == .none)
         return false;
+    if (state.pendingExecutionGeneration() != 0 and
+        (state.operation() != .persisting or state.attemptKind() != .catalog))
+        return false;
 
     switch (state.session_state) {
         .restoring, .signed_out, .shutting_down => {
@@ -1491,7 +1629,9 @@ pub const CatalogIntent = enum {
 
 pub const ExecutionIntent = enum {
     unchanged,
-    install,
+    stage_install,
+    install_committed,
+    finalize_install,
     clear,
 };
 
@@ -1503,7 +1643,6 @@ pub const PreferenceIntent = enum {
 
 pub const ReplacementIntent = enum {
     none,
-    begin_default,
     begin_identity,
     finish,
 };
@@ -1544,6 +1683,15 @@ pub const PreparedTransition = struct {
         return self.replacement_intent;
     }
 
+    pub fn finishesAttempt(self: *const PreparedTransition) bool {
+        return self.attempt_id != null and self.next.activeAttempt() == null;
+    }
+
+    pub fn discardExecutionNoFail(self: *PreparedTransition) void {
+        std.debug.assert(!self.committed);
+        self.execution_intent = .unchanged;
+    }
+
     pub fn takeExecution(
         self: *PreparedTransition,
     ) ?execution_contract.OwnedConfig {
@@ -1553,6 +1701,22 @@ pub const PreparedTransition = struct {
             return result;
         }
         return null;
+    }
+
+    pub fn executionTransfer(
+        self: *PreparedTransition,
+    ) ?execution_contract.OwnedConfigTransfer {
+        if (self.execution == null) return null;
+        return .{
+            .context = self,
+            .take_fn = takeTransferredExecution,
+        };
+    }
+
+    fn takeTransferredExecution(context: *anyopaque) execution_contract.OwnedConfig {
+        const self: *PreparedTransition = @ptrCast(@alignCast(context));
+        return self.takeExecution() orelse
+            @panic("Account execution candidate was already transferred");
     }
 
     pub fn takeEffect(self: *PreparedTransition) ?Effect {
@@ -1603,7 +1767,7 @@ pub const TestSupport = if (builtin.is_test) struct {
             .fact_kind = .restored,
             .attempt_id = null,
             .execution = execution,
-            .execution_intent = .install,
+            .execution_intent = .install_committed,
         };
     }
 
@@ -1687,6 +1851,7 @@ pub const WorkerCompletion = struct {
         api_keys_loaded,
         models_loaded,
         execution_ready: execution_contract.OwnedConfig,
+        execution_preference_persisted,
         default_model_persisted,
         logged_out,
         failed: WorkerFailure,
@@ -1823,6 +1988,7 @@ test "fake browser client and store observe only committed effects" {
                 .refresh_token, .load_identity => self.client_calls += 1,
                 .load_api_keys, .load_models => self.client_calls += 1,
                 .prepare_execution,
+                .persist_execution_preference,
                 .persist_default_model,
                 .delete_credential,
                 => self.store_calls += 1,
@@ -1912,7 +2078,7 @@ test "explicit login persists tokens before publishing identity" {
     try std.testing.expectEqual(contract.AccountState.authenticated, account.view().state);
     try std.testing.expectEqualStrings("account-2", account.view().account_id);
     try std.testing.expectEqualStrings("Other User", account.view().display_name);
-    try std.testing.expectEqual(@as(u64, 0), account.view().execution_generation);
+    try std.testing.expectEqual(@as(u64, 0), account.view().metask_execution_generation);
 }
 
 test "explicit login accepts the newly verified identity" {
@@ -2161,6 +2327,102 @@ test "manual key choice supersedes an in-flight automatic continuation" {
     );
 }
 
+test "Metask activation rebuilds the committed execution without a preference write" {
+    const allocator = std.testing.allocator;
+    var account = Account.initRestoring();
+    var restored_execution = try execution_contract.OwnedConfig.initOwned(
+        allocator,
+        .metask,
+        .anthropic_messages,
+        try allocator.dupe(u8, "model-1"),
+        try allocator.dupe(u8, contract.metask_anthropic_messages_url),
+        9,
+        try allocator.dupe(u8, "secret"),
+        "fixture-provider",
+    );
+    var restored = try TestSupport.prepareReady(
+        &account,
+        try .init("account-1", "Metask User"),
+        "key-1",
+        &restored_execution,
+    );
+    var installed = restored.takeExecution().?;
+    installed.deinit();
+    commitPrepared(&account, &restored);
+
+    var activation = switch (account.prepareCommand(.{ .activate_metask = .{
+        .expected_catalog_generation = 1,
+        .expected_execution_generation = 9,
+    } })) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(activation.takeEffect().? == .load_api_keys);
+    commitPrepared(&account, &activation);
+    const attempt_id = account.activeAttempt().?;
+
+    var keys_loaded: WorkerCompletion = .{
+        .attempt_id = attempt_id,
+        .payload = .api_keys_loaded,
+    };
+    var load_models = switch (account.prepareCompletion(&keys_loaded)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(load_models.takeEffect().? == .load_models);
+    commitPrepared(&account, &load_models);
+
+    var models_loaded: WorkerCompletion = .{
+        .attempt_id = attempt_id,
+        .payload = .models_loaded,
+    };
+    var select_model = switch (account.prepareCompletion(&models_loaded)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(select_model.takeEffect() == null);
+    commitPrepared(&account, &select_model);
+
+    var prepare_execution = switch (account.prepareCommand(.{
+        .select_model = testSelection("model-1"),
+    })) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(prepare_execution.takeEffect().? == .prepare_execution);
+    commitPrepared(&account, &prepare_execution);
+
+    var candidate = try execution_contract.OwnedConfig.initOwned(
+        allocator,
+        .metask,
+        .anthropic_messages,
+        try allocator.dupe(u8, "model-1"),
+        try allocator.dupe(u8, contract.metask_anthropic_messages_url),
+        9,
+        try allocator.dupe(u8, "secret"),
+        "fixture-provider",
+    );
+    var execution_ready: WorkerCompletion = .{
+        .attempt_id = attempt_id,
+        .payload = .{ .execution_ready = candidate.take() },
+    };
+    defer execution_ready.deinit();
+    var terminal = switch (account.prepareCompletion(&execution_ready)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(terminal.takeEffect() == null);
+    try std.testing.expectEqual(ExecutionIntent.install_committed, terminal.executionIntent());
+    try std.testing.expectEqual(PreferenceIntent.unchanged, terminal.preferenceIntent());
+    try std.testing.expect(terminal.finishesAttempt());
+    var transferred = terminal.takeExecution().?;
+    transferred.deinit();
+    commitPrepared(&account, &terminal);
+    try std.testing.expectEqualStrings("key-1", account.view().selected_api_key_id);
+    try std.testing.expectEqualStrings("model-1", account.view().selected_model);
+    try std.testing.expectEqual(@as(u64, 9), account.view().metask_execution_generation);
+}
+
 test "empty model catalog parks back in choosing with the key list intact" {
     const allocator = std.testing.allocator;
     var account = Account.initRestoring();
@@ -2233,11 +2495,7 @@ test "empty model catalog parks back in choosing with the key list intact" {
     // The committed execution keeps working; nothing was torn down.
     try std.testing.expectEqualStrings("key-old", view.selected_api_key_id);
     try std.testing.expectEqualStrings("model-old", view.selected_model);
-    try std.testing.expectEqual(@as(u64, 9), view.execution_generation);
-    // Admission stays closed while the catalog transaction is open; it
-    // reopens when the user completes the re-pick. The point of parking is
-    // that the re-pick is possible at all.
-    try std.testing.expect(!view.can_create_task);
+    try std.testing.expectEqual(@as(u64, 9), view.metask_execution_generation);
 
     // Re-picking a key continues inside the same parked transaction.
     var reselect = switch (account.prepareCommand(.{
@@ -2438,7 +2696,7 @@ test "failed reconfiguration preserves the committed selection" {
     try std.testing.expectEqualStrings("key-old", account.view().selected_api_key_id);
     try std.testing.expectEqualStrings("", account.view().candidate_api_key_id);
     try std.testing.expectEqualStrings("", account.view().candidate_model);
-    try std.testing.expectEqual(@as(u64, 9), account.view().execution_generation);
+    try std.testing.expectEqual(@as(u64, 9), account.view().metask_execution_generation);
 
     var logout = switch (account.prepareCommand(.logout)) {
         .transition => |value| value,
@@ -2448,7 +2706,6 @@ test "failed reconfiguration preserves the committed selection" {
         logout.takeEffect().? == .delete_credential,
     );
     commitPrepared(&account, &logout);
-    try std.testing.expect(!account.view().can_create_task);
     try std.testing.expect(!account.view().can_cancel);
     switch (account.prepareCommand(.cancel_operation)) {
         .rejected => |error_code| try std.testing.expectEqual(
@@ -2467,7 +2724,7 @@ test "failed reconfiguration preserves the committed selection" {
     };
     try std.testing.expect(logout_done.takeEffect() == null);
     commitPrepared(&account, &logout_done);
-    try std.testing.expectEqual(@as(u64, 0), account.view().execution_generation);
+    try std.testing.expectEqual(@as(u64, 0), account.view().metask_execution_generation);
 }
 
 test "ready execution model selection updates the default without reconfiguration" {
@@ -2499,7 +2756,6 @@ test "ready execution model selection updates the default without reconfiguratio
     try std.testing.expectEqualStrings("key-new", view.candidate_api_key_id);
     try std.testing.expectEqualStrings("", view.candidate_model);
     try std.testing.expectEqualStrings("key-old", view.model_catalog_api_key_id);
-    try std.testing.expect(!view.can_create_task);
 
     var cancel = switch (account.prepareCommand(.cancel_operation)) {
         .transition => |value| value,
@@ -2526,8 +2782,7 @@ test "ready execution model selection updates the default without reconfiguratio
     try std.testing.expectEqualStrings("key-old", view.selected_api_key_id);
     try std.testing.expectEqualStrings("model-old", view.selected_model);
     try std.testing.expectEqualStrings("model-new", view.candidate_model);
-    try std.testing.expectEqual(@as(u64, 9), view.execution_generation);
-    try std.testing.expect(!view.can_create_task);
+    try std.testing.expectEqual(@as(u64, 9), view.metask_execution_generation);
 
     var persisted: WorkerCompletion = .{
         .attempt_id = account.activeAttempt().?,
@@ -2547,8 +2802,7 @@ test "ready execution model selection updates the default without reconfiguratio
     try std.testing.expectEqual(contract.CatalogState.ready, view.catalog_state);
     try std.testing.expectEqualStrings("key-old", view.selected_api_key_id);
     try std.testing.expectEqualStrings("model-new", view.selected_model);
-    try std.testing.expectEqual(@as(u64, 9), view.execution_generation);
-    try std.testing.expect(view.can_create_task);
+    try std.testing.expectEqual(@as(u64, 9), view.metask_execution_generation);
 }
 
 test "shutdown invalidates active attempt and requires effect consumption" {
@@ -2597,8 +2851,7 @@ test "shutdown revokes ready execution before publishing the terminal view" {
     try std.testing.expectEqual(contract.CatalogState.unavailable, view.catalog_state);
     try std.testing.expectEqualStrings("", view.selected_api_key_id);
     try std.testing.expectEqualStrings("", view.selected_model);
-    try std.testing.expectEqual(@as(u64, 0), view.execution_generation);
-    try std.testing.expect(!view.can_create_task);
+    try std.testing.expectEqual(@as(u64, 0), view.metask_execution_generation);
 }
 
 test "restore failure returns to sign-in without restart semantics" {
@@ -2621,7 +2874,8 @@ test "restore failure returns to sign-in without restart semantics" {
     );
 }
 
-test "unknown execution persistence outcome clears old runtime identity" {
+test "third execution preference observation preserves old recovery identity" {
+    const allocator = std.testing.allocator;
     var account = Account{ .state = .{
         .session_state = .authenticated,
         .execution_authority = .ready,
@@ -2671,7 +2925,30 @@ test "unknown execution persistence outcome clears old runtime identity" {
     };
     _ = select_model.takeEffect();
     commitPrepared(&account, &select_model);
-    var unknown = switch (account.prepareExecutionPersistenceUnknown()) {
+    var execution = try execution_contract.OwnedConfig.initOwned(
+        allocator,
+        .metask,
+        .anthropic_messages,
+        try allocator.dupe(u8, "model-new"),
+        try allocator.dupe(u8, "https://example.invalid/v1/messages"),
+        7,
+        try allocator.dupe(u8, "secret"),
+        "fixture-provider",
+    );
+    var completion: WorkerCompletion = .{
+        .attempt_id = account.activeAttempt().?,
+        .payload = .{ .execution_ready = execution.take() },
+    };
+    defer completion.deinit();
+    var staged = switch (account.prepareCompletion(&completion)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    _ = staged.takeEffect();
+    var staged_execution = staged.takeExecution().?;
+    staged_execution.deinit();
+    commitPrepared(&account, &staged);
+    var unknown = switch (account.prepareExecutionPersistenceInvalid()) {
         .transition => |value| value,
         else => return error.TestUnexpectedResult,
     };
@@ -2679,16 +2956,15 @@ test "unknown execution persistence outcome clears old runtime identity" {
 
     const view = account.view();
     try std.testing.expectEqual(
-        contract.AccountState.signed_out,
+        contract.AccountState.authenticated,
         view.state,
     );
     try std.testing.expectEqual(
-        contract.CatalogState.unavailable,
+        contract.CatalogState.failed,
         view.catalog_state,
     );
-    try std.testing.expectEqualStrings("", view.selected_api_key_id);
-    try std.testing.expectEqualStrings("", view.selected_model);
-    try std.testing.expect(!view.can_create_task);
+    try std.testing.expectEqualStrings("key-old", view.selected_api_key_id);
+    try std.testing.expectEqualStrings("model-old", view.selected_model);
 }
 
 test "login commits account-only before a separate catalog generation" {
@@ -2796,8 +3072,20 @@ test "login commits account-only before a separate catalog generation" {
     };
     var execution = ready_transition.takeExecution().?;
     defer execution.deinit();
+    _ = ready_transition.takeEffect();
     ready_transition.commit(&account);
     ready_transition.deinit();
+
+    var execution_preference_persisted: WorkerCompletion = .{
+        .attempt_id = account.activeAttempt().?,
+        .payload = .execution_preference_persisted,
+    };
+    var persisted_transition = switch (account.prepareCompletion(&execution_preference_persisted)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    persisted_transition.commit(&account);
+    persisted_transition.deinit();
 
     const view = account.view();
     try std.testing.expectEqual(contract.AccountState.authenticated, view.state);
@@ -2805,10 +3093,9 @@ test "login commits account-only before a separate catalog generation" {
     try std.testing.expectEqual(@as(u64, 2), view.catalog_generation);
     try std.testing.expectEqual(
         @as(u64, 0x9e37_79b9_7f4a_7c15),
-        view.execution_generation,
+        view.metask_execution_generation,
     );
     try std.testing.expectEqualStrings("model-1", view.selected_model);
-    try std.testing.expect(view.can_create_task);
 }
 
 test "cancel invalidates attempt and stale secret completion is destroyed" {

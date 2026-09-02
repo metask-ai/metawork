@@ -21,6 +21,9 @@ const { SettingsPage } = await vite.ssrLoadModule(
 const { requiresAccountGate, requiresAccountSetup } = await vite.ssrLoadModule(
   "/src/features/account/gating.ts",
 );
+const { accountSurfacePolicy } = await vite.ssrLoadModule(
+  "/src/app/account-surface-policy.ts",
+);
 const { accountErrorMessageId } = await vite.ssrLoadModule(
   "/src/i18n/account-error.ts",
 );
@@ -42,12 +45,30 @@ const signedOut = {
   candidateApiKeySelectionId: "",
   candidateModelSelectionId: "",
   modelCatalogApiKeySelectionId: "",
-  canCreateTask: false,
   errorCode: "none",
   safeDiagnostic: "",
   catalogGeneration: "0",
   metaskExecutionGeneration: "0",
-  executionGeneration: "0",
+};
+
+const unavailableExecution = {
+  state: "unavailable",
+  defaultSource: null,
+  activeSource: null,
+  activeGeneration: "0",
+  taskCreationAvailable: false,
+  selectedModelConnectionId: "",
+  modelConnections: [],
+  errorCode: "none",
+};
+
+const readyExecution = {
+  ...unavailableExecution,
+  state: "ready",
+  defaultSource: "metask",
+  activeSource: "metask",
+  activeGeneration: "1",
+  taskCreationAvailable: true,
 };
 
 const ready = {
@@ -68,10 +89,8 @@ const ready = {
   selectedApiKeySelectionId: "key-1",
   selectedModelSelectionId: "model-1",
   modelCatalogApiKeySelectionId: "key-1",
-  canCreateTask: true,
   catalogGeneration: "1",
   metaskExecutionGeneration: "1",
-  executionGeneration: "1",
 };
 
 const callbacks = {
@@ -118,10 +137,11 @@ function renderGate(account, props = {}) {
   );
 }
 
-function renderSettings(account) {
+function renderSettings(account, execution = readyExecution) {
   return withI18n(
     createElement(SettingsPage, {
       account,
+      execution,
       modelConnectionCapabilities: {
         management: false,
         secretCapture: false,
@@ -148,78 +168,102 @@ function renderSettings(account) {
   );
 }
 
-test("only checking and authorizing replace the Workbench surface", () => {
+test("only checking and authorizing request the Account onboarding surface", () => {
   assert.equal(
-    requiresAccountGate({ state: "checking", executionSource: "metask" }),
+    requiresAccountGate({ state: "checking" }, { defaultSource: "metask" }),
     true,
   );
   assert.equal(
-    requiresAccountGate({ state: "authorizing", executionSource: "metask" }),
+    requiresAccountGate({ state: "authorizing" }, { defaultSource: "metask" }),
     true,
   );
   assert.equal(
-    requiresAccountGate({ state: "signed_out", executionSource: "metask" }),
+    requiresAccountGate({ state: "signed_out" }, { defaultSource: "metask" }),
     false,
   );
   assert.equal(
-    requiresAccountGate({
-      state: "authenticated",
-      executionSource: "metask",
-    }),
+    requiresAccountGate(
+      { state: "authenticated" },
+      { defaultSource: "metask" },
+    ),
     false,
   );
   assert.equal(
-    requiresAccountGate({
-      state: "checking",
-      executionSource: "model_connection",
-    }),
+    requiresAccountGate(
+      { state: "checking" },
+      { defaultSource: "model_connection" },
+    ),
     false,
   );
 });
 
 test("unresolved authenticated catalog opens account setup", () => {
   assert.equal(
-    requiresAccountSetup({
-      state: "authenticated",
-      catalogState: "choosing",
-      canCreateTask: false,
-    }),
+    requiresAccountSetup(
+      { state: "authenticated", catalogState: "choosing" },
+      { defaultSource: "metask", taskCreationAvailable: false },
+    ),
     true,
   );
   assert.equal(
-    requiresAccountSetup({
-      state: "authenticated",
-      catalogState: "failed",
-      canCreateTask: false,
-    }),
+    requiresAccountSetup(
+      { state: "authenticated", catalogState: "failed" },
+      { defaultSource: "metask", taskCreationAvailable: false },
+    ),
     true,
   );
   // Transient loading resolves through the automatic post-login
   // continuation; redirecting on it flashes settings on every startup.
   assert.equal(
-    requiresAccountSetup({
-      state: "authenticated",
-      catalogState: "loading",
-      canCreateTask: false,
-    }),
+    requiresAccountSetup(
+      { state: "authenticated", catalogState: "loading" },
+      { defaultSource: "metask", taskCreationAvailable: false },
+    ),
     false,
   );
   assert.equal(
-    requiresAccountSetup({
-      state: "authenticated",
-      catalogState: "ready",
-      canCreateTask: true,
-    }),
+    requiresAccountSetup(
+      { state: "authenticated", catalogState: "ready" },
+      { defaultSource: "metask", taskCreationAvailable: true },
+    ),
     false,
   );
   assert.equal(
-    requiresAccountSetup({
-      state: "authenticated",
-      catalogState: "ready",
-      canCreateTask: false,
-    }),
+    requiresAccountSetup(
+      { state: "authenticated", catalogState: "ready" },
+      { defaultSource: "metask", taskCreationAvailable: false },
+    ),
     false,
   );
+});
+
+test("Account onboarding never replaces a Workbench that already owns Tasks", () => {
+  const checking = accountSurfacePolicy(
+    { ...signedOut, state: "checking" },
+    { defaultSource: "metask", taskCreationAvailable: false },
+    true,
+  );
+  assert.deepEqual(checking, {
+    gateRequired: false,
+    setupRequired: false,
+  });
+
+  const unresolved = accountSurfacePolicy(
+    { ...signedOut, state: "authenticated", catalogState: "failed" },
+    { defaultSource: "metask", taskCreationAvailable: false },
+    true,
+  );
+  assert.deepEqual(unresolved, {
+    gateRequired: false,
+    setupRequired: false,
+  });
+
+  const empty = accountSurfacePolicy(
+    { ...signedOut, state: "checking" },
+    { defaultSource: "metask", taskCreationAvailable: false },
+    false,
+  );
+  assert.equal(empty.gateRequired, true);
 });
 
 test("Account runtime blockers keep running tasks distinct from idle sessions", () => {
@@ -267,7 +311,6 @@ test("catalog failure remains an authenticated retryable settings state", () => 
   const markup = renderSettings({
     ...ready,
     catalogState: "failed",
-    canCreateTask: false,
     errorCode: "metask_service_unavailable",
   });
   assert.match(markup, /Account action needs attention/);

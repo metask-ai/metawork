@@ -56,13 +56,19 @@ Execution registry 与 Account identity/catalog 独立。不同连接即使 cred
 Metask handoff 的 committed-state 写路径为：
 
 ```text
-Account prepare(command | completion)
-→ Account effect admission
-→ Product Control commit Account fact
-→ Product Control install or clear default ExecutionConfig  [可选]
-→ Account commit prepared transition
-→ dispatch committed Account effect
+Account worker construct candidate (no preference write)
+→ Product Control consume opaque transfer and prepare staged candidate
+→ Product Control complete candidate validation + durable Schedule scrub
+→ Account preference effect admission and durable write
+→ exact reread on outcome unknown (candidate | old | third value)
+→ Product Control no-fail finalize opaque stage + Account fact
+→ Account commit terminal state/catalog/preference intents
+→ publish one terminal Product revision
 ```
+
+Product Control 是唯一 staged `ExecutionConfig` owner；Application coordinator 只持有绑定 Account attempt 的 opaque token，不得持有、读取或复制 credential-bearing config。preference 明确失败、effect admission 失败、旧值重读、stale、cancel 或 shutdown 必须调用 Product abort，清除 preparation 并 secure-zero candidate；完整 candidate 重读才能 finalize，第三种值进入 recovery。finalize 后不再允许 fallible I/O，也不存在 `failed → local_resource_exhausted` 的通用压平或已提交 Account fact 后补写第二个失败 revision。
+
+是否需要 default replacement 只由 Product Control 根据当前 execution source 与操作类型决定，Account 不发布 replacement policy，Application coordinator 也不预先开启 default replacement。当前 Model Connection 为默认 source 时，普通 Metask catalog/preference mutation 只更新 Account-owned preference，Product 消费并销毁候选但不阻塞 Task admission、不改动 active execution；显式 `activateMetask` 则只重建已提交 Metask tuple，不重写 preference，Product 在全部 candidate/Schedule preparation 成功后 durable 清除 custom default，并以同一 Product stage no-fail 安装 Metask。该 durable clear 失败或结果不可确认时不安装候选，当前进程继续保留已安装 custom execution，并通过 Execution projection 发布精确错误。
 
 Model Connection 设为默认的写路径为：
 
@@ -76,15 +82,17 @@ Execution resolve candidate + credential
 
 registry commit 前的 scrub preparation 明确失败时，registry 与已安装 execution 都保持旧值；registry commit 明确失败时清除 preparation 并保持旧值；commit 成功后只允许 no-fail ownership transfer。Connection CRUD/test 不隐式改变默认 source。
 
-上述 commit 链在主线程同一 turn 内完成。外部 effect 只有在 committed swap 后才能启动；worker completion 必须回到主线程并重新进入同一条链。Product Control 安装或清除 execution 的步骤在进入 Account commit 前必须已经完成全部可能失败的验证、持久化 credential scrub 与 candidate preparation，实际所有权转移只能是 no-fail install。
+每个 prepared transition 的 commit 仍在主线程单一 turn 内完成；candidate construction、Product prepare、preference effect 和 terminal finalize 可以跨 worker completion，但只能由同一 attempt/token 串接。外部 effect 只有在承载它的 staged Account transition committed 后才能启动；Product prepare 拒绝时该 transition 不得 commit 或 dispatch。实际 execution 所有权安装只能发生在 preference 已确认后的 no-fail finalize。
 
 Product Control 的 replacement gate 只串行化本次默认 execution 交接与相关新 Task admission。已有 Task、Session、Run 和 worker 已经取得的 owned ExecutionConfig 按原生命周期收口，不热替换、不等待 Account identity 变化，也不被 logout 伪造为已撤权。只改变默认模型且不改变 credential authority 时，不产生新的 credential generation；是否允许已有 Task 改变模型必须由该 Task 精确持有的 protocol、generation 与当前 authoritative catalog 共同决定。
 
-Account prepare 或 Execution candidate 在 Product Control gate 拒绝后必须销毁，不能提交 Account fact/registry default、转移 credential 或启动 effect。effect admission 的明确失败保留旧 committed state 并清零 staged secret。外部 effect 已产生结果后，后续失败必须从已经观察到的 committed phase 收口，不能回滚成旧 identity、旧 credential 或旧默认 execution；结果不确定的 mutation 不得自动重放。
+Account prepare 或 Execution candidate 在 Product Control gate 拒绝后必须销毁，不能提交 candidate Account fact/registry default、转移 credential 或启动 preference effect。effect admission、preference 明确失败和旧值重读都保留旧 committed default 并清零 staged secret；第三种持久化观察进入显式 recovery。已经 durable commit 的 identity/token rotation 等 Account effect 仍从已观察 phase 收口，不能伪造回滚；结果不确定的 mutation一律精确重读且不得自动重放。
 
 Renderer reload、断连或命令 timeout 只影响交互与 resync，不能取消 Host 中的 deadline、mutation 或 terminal completion，也不能代表这条 commit 链失败。Renderer 只提交对应 Account 或 Execution projection 发布的无 secret identifier 与 expected generation，不参与 prepare、commit 或 credential transfer。
 
 Identity replacement、default execution replacement 与 durable Task history 是三个边界。durable history 只保存解释执行来源所需的 protocol、model、不透明 execution generation 与 binding facts，不保存 Account identity、Model Connection identity、API Key metadata、credential locator、完整 ExecutionConfig 或可重建 secret 的信息。
+
+Canonical snapshot 同样保持 owner 边界：根 `account` 只投影 Account-owned Metask identity、catalog、selection、generation、取消能力与稳定错误；根 `execution` 由 Product Control 投影 durable default、process-local active source/generation、replacement/availability、新 Task admission 与 Model Connection。两者可以独立处于 ready/unavailable，例如 Account 已恢复而 Schedule 或 Execution 恢复失败时仍必须发布合法 snapshot，不能伪造 active Metask execution，也不能令整个 Workbench fail closed。新 Task 尚未存在，其 admission 由 Product Control 决定；Task 创建后，其 Run、Session、binding、阻塞与恢复只由 Product Task 自身事实决定，Account mutation 不构成全局 Task gate。
 
 `model-connections.json` 是 Execution aggregate 的独立原子 registry，继续位于既有产品数据目录并保持既有 wire shape；它只保存 connection id、display name、protocol、normalized endpoint、有界 model metadata、credential/test status、generation、默认 binding 和待完成 credential deletion tombstone。API credential 只进入系统安全存储；既有 Keychain/service identity 和以 connection id 派生的 account identity 保持不变。旧 `provider` 字段不读取、不迁移、不双写，包含旧 shape 的 registry fail closed 且不得被自动覆盖。
 
@@ -122,6 +130,8 @@ Schedule definition 固定自己的 PermissionProfile；每个 occurrence 在 la
 Schedule 只持久化已提交的 occurrence 与 Task identity，不持有 Product Control capability、可变 Task 指针、API credential 或 live Session。Task launch 的明确失败按 occurrence transaction 收口；结果不确定时不得重放可能已经创建 Task 的 launch。系统通知只消费已提交的 occurrence/Task terminal fact，通知失败不能回滚产品事实或伪造 Run cause。
 
 Schedule 引用的 execution authority 在触发时必须重新校验；不能用历史 generation 猜测或恢复 credential。Schedule store 是独立持久化边界，其 credential scrub 必须作为 durable candidate commit 完成，不能只修改内存 projection。
+
+Schedule persistence recovery 仍由 Schedule aggregate 决策：只有 typed non-ready health 才发布 action，命令必须校验全局 revision。Schedule 先对当前内存 store 执行 credential scrub 并编码 canonical candidate；Application 只执行 `quarantine current canonical → atomic replace candidate`。明确失败保持旧 health 与内存 store，outcome unknown 保持 timer fail-closed；只有 committed 才转为 ready 并重新 arm。quarantine artifact 不进入 projection，也不得被自动删除。
 
 ### 2.4 Skill authority 与本地资产
 
@@ -212,6 +222,8 @@ Task 删除是跨持久化、checkpoint、event、Session 和 worker reference �
 `<MetaWork data dir>/workbench/workbench-history.store` 是 Workspace 与 Task 产品历史的 canonical 本地 store，不是 AgentCore checkpoint、缓存或通用 Storage SQL backend。Application 在 restore 前取得其进程级 OS writer lock，并把有界 load 与 atomic commit capability 注入 Product；Product 拥有 codec、跨记录校验、恢复 policy 和 persistence health。
 
 当前合同只接受 canonical framed store，不读取、不迁移、不双写旧 JSON envelope、被替代的开发期 frame shape，或仍以 `provider` 表达 execution binding 的 record；Task 与 Run 只接受 `protocol` / `execution_protocol`。store 不存在表示首次启动。Workspace 与 Task record 独立校验；单条可隔离损坏进入 `degraded` 并保留其他有效历史。store 无法打开或全局结构不可信时不得覆盖原文件，Product 从空的内存历史继续运行并发布诊断；明确写失败或 commit outcome unknown 只表示当前内存历史尚未可靠保存，后续 mutation 必须重新尝试完整 snapshot。上述状态都不是 Product Task、Workspace 或 Renderer 的全局 admission gate。
+
+非健康 history store 的显式 recovery 必须校验全局 revision，并由 Product 编码当前内存 Workspace/Task snapshot；Application 只能把当前 canonical 文件改名为唯一 quarantine artifact，再通过既有 durable atomic replace 安装该 candidate。读取/codec 失败时当前内存为空，因此形成 canonical empty history；write failure 或 outcome unknown 时保存当前进程仍持有的有效历史。失败不得清空内存或删除原文件，outcome unknown 继续发布 typed health；只有 committed 才恢复 ready。Renderer 不接触文件名、路径或 bytes，quarantine artifact 不进入 snapshot、日志或自动清理。
 
 交互式 Product Task mutation 以内存 Runtime 为当前进程真源，持久化是 best-effort projection；保存失败不得回滚已经接纳的新建、Run、模型选择、权限响应、重命名、归档、取消或 Workspace 导航 mutation。Schedule occurrence 是独立的无人值守边界：Product Control 必须为其 Task create、命名与 Run intent 注入 required durable effect，任一步未可靠提交都拒绝本次 occurrence，Schedule 按既有 transaction 进入可诊断状态，但不得冻结其他 Product Task。Task 物理删除仍遵守 §4.1 的 commit-before-release 边界。
 

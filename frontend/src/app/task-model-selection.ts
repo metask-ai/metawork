@@ -1,4 +1,8 @@
-import type { AccountView, TaskView } from "../bridge/contracts.ts";
+import type {
+  AccountView,
+  ExecutionView,
+  TaskView,
+} from "../bridge/contracts.ts";
 
 export type TaskModelSelectionPolicy = {
   authorityExact: boolean;
@@ -12,6 +16,7 @@ export type TaskModelSelectionPolicy = {
  */
 export function taskModelSelectionPolicy(
   account: AccountView,
+  execution: ExecutionView,
   task: TaskView | null,
 ): TaskModelSelectionPolicy {
   if (task === null)
@@ -25,11 +30,11 @@ export function taskModelSelectionPolicy(
   );
   const authorityExact =
     account.state === "authenticated" &&
-    account.canCreateTask &&
-    account.executionSource === "metask" &&
-    account.executionGeneration !== "0" &&
-    account.executionGeneration === account.metaskExecutionGeneration &&
-    task.binding.executionGeneration === account.executionGeneration &&
+    execution.taskCreationAvailable &&
+    execution.activeSource === "metask" &&
+    execution.activeGeneration !== "0" &&
+    execution.activeGeneration === account.metaskExecutionGeneration &&
+    task.binding.executionGeneration === execution.activeGeneration &&
     selectedApi?.protocol === task.binding.protocol;
 
   return {

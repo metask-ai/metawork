@@ -47,6 +47,21 @@ test("the canonical Workbench fixture decodes without normalization", () => {
     () => decodeWorkbenchSnapshot(inconsistentPersistence),
     /availability and health must agree/,
   );
+
+  const recoverableWithoutFileCapability = clone(fixture);
+  recoverableWithoutFileCapability.capabilities.taskHistoryPersistenceHealth =
+    "read_failed";
+  assert.deepEqual(
+    decodeWorkbenchSnapshot(recoverableWithoutFileCapability),
+    recoverableWithoutFileCapability,
+  );
+
+  const impossibleRecovery = clone(fixture);
+  impossibleRecovery.capabilities.taskHistoryRecoveryAvailable = true;
+  assert.throws(
+    () => decodeWorkbenchSnapshot(impossibleRecovery),
+    /recovery requires recoverable persistence health/,
+  );
 });
 
 test("Workbench snapshot hard cut rejects retired provider fields", () => {
@@ -778,7 +793,6 @@ test("Model Connection readiness survives an isolated failed retest", () => {
   snapshot.account = {
     state: "signed_out",
     catalogState: "unavailable",
-    executionSource: "model_connection",
     canCancel: false,
     accountId: "",
     displayName: "",
@@ -789,6 +803,17 @@ test("Model Connection readiness survives an isolated failed retest", () => {
     candidateApiKeySelectionId: "",
     candidateModelSelectionId: "",
     modelCatalogApiKeySelectionId: "",
+    errorCode: "none",
+    safeDiagnostic: "",
+    catalogGeneration: "0",
+    metaskExecutionGeneration: "0",
+  };
+  snapshot.execution = {
+    state: "ready",
+    defaultSource: "model_connection",
+    activeSource: "model_connection",
+    activeGeneration: "9",
+    taskCreationAvailable: true,
     modelConnections: [
       {
         id: "connection-1",
@@ -805,25 +830,20 @@ test("Model Connection readiness survives an isolated failed retest", () => {
       },
     ],
     selectedModelConnectionId: "connection-1",
-    canCreateTask: true,
     errorCode: "none",
-    safeDiagnostic: "",
-    catalogGeneration: "0",
-    metaskExecutionGeneration: "0",
-    executionGeneration: "9",
   };
   assert.doesNotThrow(() => decodeWorkbenchSnapshot(snapshot));
 
   const neverVerified = clone(snapshot);
-  neverVerified.account.modelConnections[0].testStatus = "untested";
+  neverVerified.execution.modelConnections[0].testStatus = "untested";
   assert.throws(
     () => decodeWorkbenchSnapshot(neverVerified),
     /ready connection must be verified/,
   );
 
   const impossibleConnected = clone(snapshot);
-  impossibleConnected.account.modelConnections[0].state = "configuring";
-  impossibleConnected.account.modelConnections[0].testStatus = "connected";
+  impossibleConnected.execution.modelConnections[0].state = "configuring";
+  impossibleConnected.execution.modelConnections[0].testStatus = "connected";
   assert.throws(
     () => decodeWorkbenchSnapshot(impossibleConnected),
     /only a ready connection can have a connected test/,
@@ -1123,10 +1143,24 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
 
   const invalidReadyAccount = clone(fixture);
   invalidReadyAccount.account.metaskExecutionGeneration = "0";
-  invalidReadyAccount.account.executionGeneration = "0";
   assert.throws(
     () => decodeWorkbenchSnapshot(invalidReadyAccount),
     /ready catalog requires/,
+  );
+
+  const readyAccountWithoutInstalledExecution = clone(fixture);
+  readyAccountWithoutInstalledExecution.execution = {
+    state: "unavailable",
+    defaultSource: "metask",
+    activeSource: null,
+    activeGeneration: "0",
+    taskCreationAvailable: false,
+    selectedModelConnectionId: "",
+    modelConnections: [],
+    errorCode: "none",
+  };
+  assert.doesNotThrow(() =>
+    decodeWorkbenchSnapshot(readyAccountWithoutInstalledExecution),
   );
 
   const keyOutsideCatalog = clone(fixture);
@@ -1152,7 +1186,8 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
 
   const persistenceCommitted = clone(fixture);
   persistenceCommitted.account.catalogState = "loading";
-  persistenceCommitted.account.canCreateTask = false;
+  persistenceCommitted.execution.state = "replacing";
+  persistenceCommitted.execution.taskCreationAvailable = false;
   persistenceCommitted.account.candidateApiKeySelectionId = "key-1";
   persistenceCommitted.account.candidateModelSelectionId = "fixture-model";
   assert.doesNotThrow(() => decodeWorkbenchSnapshot(persistenceCommitted));
@@ -1171,7 +1206,8 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   const unresolvedCandidate = clone(fixture);
   unresolvedCandidate.account.catalogState = "loading";
   unresolvedCandidate.account.canCancel = true;
-  unresolvedCandidate.account.canCreateTask = false;
+  unresolvedCandidate.execution.state = "replacing";
+  unresolvedCandidate.execution.taskCreationAvailable = false;
   unresolvedCandidate.account.candidateApiKeySelectionId = "key-pending";
   assert.doesNotThrow(() => decodeWorkbenchSnapshot(unresolvedCandidate));
 
@@ -1182,7 +1218,8 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   const emptyKeyChoice = clone(fixture);
   emptyKeyChoice.account.catalogState = "choosing";
   emptyKeyChoice.account.canCancel = true;
-  emptyKeyChoice.account.canCreateTask = false;
+  emptyKeyChoice.execution.state = "replacing";
+  emptyKeyChoice.execution.taskCreationAvailable = false;
   emptyKeyChoice.account.apiKeys = [];
   emptyKeyChoice.account.models = [];
   emptyKeyChoice.account.modelCatalogApiKeySelectionId = "";
@@ -1199,7 +1236,8 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
 
   const loadingModelCandidate = clone(fixture);
   loadingModelCandidate.account.catalogState = "loading";
-  loadingModelCandidate.account.canCreateTask = false;
+  loadingModelCandidate.execution.state = "replacing";
+  loadingModelCandidate.execution.taskCreationAvailable = false;
   loadingModelCandidate.account.models = [];
   loadingModelCandidate.account.candidateApiKeySelectionId = "key-1";
   loadingModelCandidate.account.candidateModelSelectionId = "model-pending";
@@ -1216,16 +1254,24 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   loadingIdentity.account.selectedApiKeySelectionId = "";
   loadingIdentity.account.selectedModelSelectionId = "";
   loadingIdentity.account.modelCatalogApiKeySelectionId = "";
-  loadingIdentity.account.canCreateTask = false;
   loadingIdentity.account.metaskExecutionGeneration = "0";
-  loadingIdentity.account.executionGeneration = "0";
+  loadingIdentity.execution = {
+    state: "unavailable",
+    defaultSource: null,
+    activeSource: null,
+    activeGeneration: "0",
+    taskCreationAvailable: false,
+    selectedModelConnectionId: "",
+    modelConnections: [],
+    errorCode: "none",
+  };
   assert.doesNotThrow(() => decodeWorkbenchSnapshot(loadingIdentity));
 
   const loggingOut = clone(fixture);
   loggingOut.account.catalogState = "unavailable";
   loggingOut.account.models = [];
   loggingOut.account.modelCatalogApiKeySelectionId = "";
-  loggingOut.account.canCreateTask = false;
+  loggingOut.execution.taskCreationAvailable = false;
   assert.doesNotThrow(() => decodeWorkbenchSnapshot(loggingOut));
 
   const duplicateModel = clone(fixture);
