@@ -11,15 +11,6 @@ const product_schedule = @import("metawork_product_schedule");
 const mcp = @import("metawork_product_mcp");
 const mcp_contract = mcp.contract;
 
-pub const MetaskStageToken = struct {
-    value: u64,
-};
-
-pub const MetaskStageResult = union(enum) {
-    staged: MetaskStageToken,
-    rejected,
-};
-
 /// One committed Account revision delivered to Product Control. Attempt
 /// identity is explicit so Product never infers operation lifetime from a
 /// transient Account view such as `catalog_state`.

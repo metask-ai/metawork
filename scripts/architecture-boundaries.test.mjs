@@ -613,6 +613,7 @@ test("Product Control is the only composition owner identity", () => {
   const build = read("build.zig");
   const control = read("src/product/control.zig");
   const runtime = read("src/product/control/runtime.zig");
+  const accountProjection = read("src/product/control/account_projection.zig");
   const executionState = read("src/product/control/execution_state.zig");
   const ports = read("src/product/control/ports.zig");
   const executor = read("src/product/control/executor.zig");
@@ -623,6 +624,7 @@ test("Product Control is the only composition owner identity", () => {
 
   assert.match(build, /src\/product\/control\.zig/);
   assert.match(build, /src\/product\/control\/runtime\.zig/);
+  assert.match(build, /src\/product\/control\/account_projection\.zig/);
   assert.match(build, /src\/product\/control\/execution_state\.zig/);
   assert.match(build, /src\/product\/execution\/contract\.zig/);
   assert.match(build, /src\/product\/execution\/model_connections\.zig/);
@@ -634,6 +636,7 @@ test("Product Control is the only composition owner identity", () => {
   assert.match(build, /src\/product\/schedule\/view\.zig/);
   assert.match(build, /metawork_product_control/);
   assert.match(build, /product_control_executor/);
+  assert.match(build, /product_control_account_projection/);
   assert.match(build, /product_control_execution_state/);
   assert.match(build, /metawork_product_execution_contract/);
   assert.match(build, /product_execution_runtime/);
@@ -642,20 +645,54 @@ test("Product Control is the only composition owner identity", () => {
   assert.match(build, /product_schedule_runtime/);
   assert.match(control, /pub const Runtime = runtime_impl\.Runtime/);
   assert.match(runtime, /pub const Runtime = struct/);
+  assert.match(runtime, /@import\("product_control_account_projection"\)/);
   assert.match(runtime, /@import\("product_control_execution_state"\)/);
+  assert.match(runtime, /account_projection: account_projection\.Projection/);
   assert.match(runtime, /execution_state: execution_state\.State/);
-  assert.match(executionState, /@import\("metawork_account_contract"\)/);
+  assert.match(accountProjection, /@import\("metawork_account_contract"\)/);
+  assert.match(
+    accountProjection,
+    /@import\("metawork_product_execution_contract"\)/,
+  );
+  assert.match(accountProjection, /pub const Projection = struct/);
+  const authorityStart = accountProjection.indexOf("pub fn authorityMatches");
+  assert.ok(authorityStart >= 0, "Account authority projection must be explicit");
+  const authorityEnd = accountProjection.indexOf("\n};", authorityStart);
+  const authorityMatch = accountProjection.slice(authorityStart, authorityEnd);
+  assert.match(authorityMatch, /authority_protocol/);
+  assert.match(authorityMatch, /metask_source_generation/);
+  assert.doesNotMatch(authorityMatch, /catalog_state/);
+  assert.doesNotMatch(
+    executionState,
+    /metawork_account_contract|AccountProjection|AccountFact|AccountView|account_id|catalog_generation|selected_model/,
+  );
   assert.match(
     executionState,
     /@import\("metawork_product_execution_contract"\)/,
   );
   assert.match(executionState, /pub const State = struct/);
   assert.match(executionState, /pub const ProjectionRedaction = struct/);
-  assert.match(executionState, /const AccountProjection = struct/);
   assert.match(executionState, /const ActiveExecution = struct/);
   assert.match(executionState, /pub const testing = if \(builtin\.is_test\)/);
   assertNoImports(
     ["src/product/control/execution_state.zig"],
+    [
+      "metawork_product_control",
+      "metawork_product_task",
+      "metawork_product_skill",
+      "metawork_product_mcp",
+      "metawork_product_schedule",
+      "metawork_product_workspace",
+      "metawork_account_contract",
+      "metawork_agent",
+      "metawork_app",
+      "metawork_bridge",
+      "metask_agentcore",
+      "native_sdk",
+    ],
+  );
+  assertNoImports(
+    ["src/product/control/account_projection.zig"],
     [
       "metawork_product_control",
       "metawork_product_task",
@@ -792,10 +829,12 @@ test("Product Schedule owns its aggregate state and persistence", () => {
   assert.match(executionState, /fn consumeClearPreparation/);
   assert.match(runtime, /redactWithExecutionCredentialsNoFail/);
   assert.match(taskRuntime, /pub fn redactWithExecutionCredentialsNoFail/);
-  assert.match(ports, /pub fn prepareMetaskExecutionCandidate/);
-  assert.match(ports, /pub fn prepareMetaskExecutionClear/);
-  assert.match(ports, /pub fn finalizeMetaskStageNoFail/);
-  assert.match(ports, /pub fn abortMetaskStageNoFail/);
+  assert.match(ports, /pub const AccountCommitSink = struct/);
+  assert.match(ports, /commit_fn:/);
+  assert.doesNotMatch(
+    ports,
+    /prepareMetaskExecutionCandidate|prepareMetaskExecutionClear|finalizeMetaskStageNoFail|abortMetaskStageNoFail/,
+  );
   assert.doesNotMatch(
     accountCoordinator,
     /prepareExecutionInstall|prepareExecutionClear/,
@@ -913,7 +952,7 @@ test("Application coordinators consume scoped Product Control capabilities", () 
   assert.match(build, /src\/product\/control\/ports\.zig/);
   assert.match(build, /metawork_product_control_ports/);
   for (const name of [
-    "AccountExecutionHandoff",
+    "AccountCommitSink",
     "ExecutionManagement",
     "AgentEventConsumer",
     "McpManagementPort",
@@ -927,7 +966,7 @@ test("Application coordinators consume scoped Product Control capabilities", () 
     ports,
     /Workbench|product_control\.Runtime|rawRuntime|rawOwner/,
   );
-  assert.match(projection, /pub fn accountExecutionHandoff/);
+  assert.match(projection, /pub fn accountCommitSink/);
   assert.match(projection, /pub fn executionManagement/);
   assert.match(projection, /pub fn agentEventConsumer/);
   assert.match(projection, /pub fn mcpManagementPort/);
@@ -971,52 +1010,37 @@ test("Application coordinators consume scoped Product Control capabilities", () 
   );
 });
 
-test("Product Control owns atomic default execution source replacement", () => {
+test("Product Control owns post-Account source reconciliation", () => {
   const ports = read("src/product/control/ports.zig");
   const control = read("src/product/control/runtime.zig");
+  const executionContract = read("src/product/execution/contract.zig");
   const accountCoordinator = read("src/app/account_coordinator.zig");
-  const accountCoordinatorProduction = accountCoordinator.split(
-    "var testing_transport_context",
-  )[0];
   const accountRuntime = read("src/product/account/runtime.zig");
   const accountState = read("src/product/account/state.zig");
 
-  assert.match(ports, /pub const MetaskStageToken = struct/);
-  assert.match(ports, /pub const MetaskStageResult = union\(enum\)/);
-  assert.match(ports, /prepare_metask_candidate_fn:/);
-  assert.match(ports, /prepare_metask_clear_fn:/);
-  assert.match(ports, /finalize_metask_stage_fn:/);
-  assert.match(ports, /abort_metask_stage_fn:/);
-  assert.doesNotMatch(ports, /MetaskExecutionOutcome|apply_metask_/);
+  assert.match(ports, /pub const AccountCommitSink = struct/);
+  assert.match(ports, /OwnedSourceCandidateTransfer/);
+  assert.match(executionContract, /pub const OwnedSourceCandidateTransfer/);
+  assert.doesNotMatch(executionContract, /OwnedConfigTransfer/);
   assert.doesNotMatch(
     ports,
-    /begin_default_replacement_fn|beginDefaultExecutionReplacement|MetaskStageError/,
-  );
-  assert.doesNotMatch(
-    ports,
-    /accept_metask_candidate_fn:|prepare_install_fn:|prepare_clear_fn:|install_execution_fn:|clear_execution_fn:/,
+    /MetaskStageToken|MetaskStageResult|prepare_metask_|finalize_metask_|abort_metask_|begin_default_replacement_fn/,
   );
 
-  const availabilityStart = control.indexOf("pub fn metaskActivationAvailable");
-  const replacementStart = control.indexOf(
-    "pub fn prepareMetaskExecutionCandidate",
-  );
-  const clearStart = control.indexOf("pub fn prepareMetaskExecutionClear");
-  const finalizeStart = control.indexOf("pub fn finalizeMetaskStageNoFail");
-  assert.ok(availabilityStart >= 0, "Metask availability policy must exist");
+  const commitStart = control.indexOf("pub fn commitAccountChangeNoFail");
+  const reconcileStart = control.indexOf("fn reconcileMetaskCandidateNoFail");
+  const clearStart = control.indexOf("fn reconcileMetaskClearNoFail");
+  assert.ok(commitStart >= 0, "Account commit sink must exist");
+  assert.ok(reconcileStart > commitStart, "Metask reconciliation must exist");
   assert.ok(
-    replacementStart > availabilityStart,
-    "Metask replacement must exist",
+    clearStart > reconcileStart,
+    "Metask clear reconciliation must exist",
   );
-  assert.ok(clearStart > replacementStart, "Metask clear policy must exist");
-  assert.ok(finalizeStart > clearStart, "Metask finalize policy must exist");
-
-  const availability = control.slice(availabilityStart, replacementStart);
-  assert.match(availability, /modelConnectionDefaultBinding\(\)/);
-
-  const replacement = control.slice(replacementStart, clearStart);
-  assert.match(replacement, /self\.beginDefaultExecutionReplacement\(\)/);
-  const prepareAt = replacement.indexOf("self.prepareExecutionInstall");
+  const commit = control.slice(commitStart, reconcileStart);
+  assert.match(commit, /self\.commitAccountFactNoFail\(fact\)/);
+  assert.match(commit, /self\.reconcileMetaskCandidateNoFail/);
+  const replacement = control.slice(reconcileStart, clearStart);
+  const prepareAt = replacement.indexOf("self.execution_state.prepareInstall");
   const clearDefaultAt = replacement.indexOf(
     "self.clearModelConnectionDefault()",
   );
@@ -1025,43 +1049,32 @@ test("Product Control owns atomic default execution source replacement", () => {
     clearDefaultAt > prepareAt,
     "durable custom default may clear only after preparation",
   );
-  assert.doesNotMatch(replacement, /installExecutionNoFail/);
-  const finalize = control.slice(finalizeStart);
-  assert.match(finalize, /self\.commitAccountFactNoFail\(fact\)/);
-  assert.match(finalize, /self\.installExecutionNoFail\(execution\)/);
+  assert.match(replacement, /self\.execution_state.installMetaskNoFail/);
 
-  assert.match(accountCoordinator, /prepareMetaskExecutionCandidate/);
-  assert.match(accountCoordinator, /prepareMetaskExecutionClear/);
-  assert.match(accountCoordinator, /finalizeMetaskStageNoFail/);
-  assert.match(accountCoordinator, /abortMetaskStageNoFail/);
-  assert.match(accountCoordinator, /prepareActiveAttemptFailure/);
-  assert.doesNotMatch(accountCoordinatorProduction, /OwnedConfig/);
+  assert.match(control, /metask_default_selection_attempt_id: \?u64/);
+  assert.doesNotMatch(control, /metask_default_selection_requested/);
+
+  const accountCommitAt = accountCoordinator.indexOf(
+    "self.runtime.commit(&prepared);",
+  );
+  const productCommitAt = accountCoordinator.indexOf(
+    "self.control.commitNoFail",
+  );
+  assert.ok(accountCommitAt >= 0 && productCommitAt > accountCommitAt);
+  assert.doesNotMatch(
+    accountCoordinator,
+    /prepareMetaskExecutionCandidate|prepareMetaskExecutionClear|finalizeMetaskStageNoFail|abortMetaskStageNoFail|prepareExecutionInstall|prepareExecutionClear/,
+  );
   assert.doesNotMatch(
     accountRuntime,
     /prepareAndPersistExecution|prepareCommittedPhaseFailure/,
   );
   assert.doesNotMatch(accountState, /prepareCommittedPhaseFailure/);
   assert.doesNotMatch(accountState, /begin_default/);
-  assert.match(accountState, /persist_execution_preference/);
-  const prepareAtCoordinator = accountCoordinator.indexOf(
-    "self.control.prepareMetaskExecutionCandidate",
-  );
-  const admissionAt = accountCoordinator.indexOf(
-    "self.runtime.admitEffect(&prepared)",
-  );
-  const accountCommitAt = accountCoordinator.indexOf(
-    "self.runtime.commit(&prepared);",
-  );
-  assert.ok(prepareAtCoordinator >= 0 && admissionAt > prepareAtCoordinator);
-  assert.ok(accountCommitAt > admissionAt);
-  assert.doesNotMatch(
-    accountCoordinator,
-    /acceptMetaskExecutionCandidate|clearModelConnectionDefault|prepareExecutionInstall|prepareExecutionClear|installExecutionNoFail|clearExecutionNoFail|beginDefaultExecutionReplacement/,
-  );
   assert.match(accountState, /AttemptKind = enum \{[\s\S]*activation/);
-  assert.match(
+  assert.doesNotMatch(
     accountState,
-    /attemptKind\(\) == \.activation[\s\S]*execution_intent = \.install_committed/,
+    /ExecutionIntent|ReplacementIntent|execution_intent|replacement_intent/,
   );
 });
 

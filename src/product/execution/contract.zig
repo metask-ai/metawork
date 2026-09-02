@@ -499,18 +499,6 @@ pub const OwnedConfig = struct {
     }
 };
 
-/// Opaque, synchronous ownership handoff for an execution candidate. The
-/// sequencing owner may route this capability, but only the receiving
-/// execution owner can materialize the credential-bearing configuration.
-pub const OwnedConfigTransfer = struct {
-    context: *anyopaque,
-    take_fn: *const fn (*anyopaque) OwnedConfig,
-
-    pub fn take(self: OwnedConfigTransfer) OwnedConfig {
-        return self.take_fn(self.context);
-    }
-};
-
 /// Opaque, synchronous ownership handoff for a source candidate. The source
 /// authority stays distinct from the Product execution generation assigned by
 /// the receiving owner.
@@ -725,6 +713,158 @@ fn validateOpaqueRequired(value: []const u8, max_bytes: usize) ValidationError!v
 fn validateOptional(value: []const u8, max_bytes: usize) ValidationError!void {
     if (value.len > max_bytes) return error.FieldTooLarge;
     if (!std.unicode.utf8ValidateSlice(value)) return error.InvalidEncoding;
+}
+
+const ObservingAllocator = struct {
+    backing: std.mem.Allocator,
+    secret_ptr: ?[*]u8 = null,
+    secret_len: usize = 0,
+    saw_secret_free: bool = false,
+    secret_was_zero: bool = false,
+
+    const Self = @This();
+    const vtable: std.mem.Allocator.VTable = .{
+        .alloc = alloc,
+        .resize = resize,
+        .remap = remap,
+        .free = free,
+    };
+
+    fn allocator(self: *Self) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    fn observe(self: *Self, secret: []u8) void {
+        self.secret_ptr = secret.ptr;
+        self.secret_len = secret.len;
+        self.saw_secret_free = false;
+        self.secret_was_zero = false;
+    }
+
+    fn alloc(
+        raw: *anyopaque,
+        len: usize,
+        alignment: std.mem.Alignment,
+        ret_addr: usize,
+    ) ?[*]u8 {
+        const self: *Self = @ptrCast(@alignCast(raw));
+        return self.backing.rawAlloc(len, alignment, ret_addr);
+    }
+
+    fn resize(
+        raw: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ret_addr: usize,
+    ) bool {
+        const self: *Self = @ptrCast(@alignCast(raw));
+        return self.backing.rawResize(memory, alignment, new_len, ret_addr);
+    }
+
+    fn remap(
+        raw: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ret_addr: usize,
+    ) ?[*]u8 {
+        const self: *Self = @ptrCast(@alignCast(raw));
+        return self.backing.rawRemap(memory, alignment, new_len, ret_addr);
+    }
+
+    fn free(
+        raw: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        ret_addr: usize,
+    ) void {
+        const self: *Self = @ptrCast(@alignCast(raw));
+        if (self.secret_ptr) |secret_ptr| {
+            if (memory.ptr == secret_ptr and memory.len == self.secret_len) {
+                self.saw_secret_free = true;
+                self.secret_was_zero = true;
+                for (memory) |byte| if (byte != 0) {
+                    self.secret_was_zero = false;
+                    break;
+                };
+            }
+        }
+        self.backing.rawFree(memory, alignment, ret_addr);
+    }
+};
+
+fn observingSourceCandidate(
+    allocator: std.mem.Allocator,
+    secret: []u8,
+) !OwnedSourceCandidate {
+    return OwnedSourceCandidate.initOwned(
+        allocator,
+        .metask,
+        .anthropic_messages,
+        try allocator.dupe(u8, "metask-model"),
+        try allocator.dupe(u8, "https://napi.metask-ai.com/v1/messages"),
+        7,
+        secret,
+        "key-1",
+    );
+}
+
+test "source candidate secure-zeroes rejected and released owned secrets" {
+    var observing: ObservingAllocator = .{ .backing = std.testing.allocator };
+    const allocator = observing.allocator();
+
+    const rejected_secret = try allocator.dupe(u8, "rejected-secret");
+    observing.observe(rejected_secret);
+    try std.testing.expectError(
+        error.InvalidSourceCandidate,
+        OwnedSourceCandidate.initOwned(
+            allocator,
+            .metask,
+            .anthropic_messages,
+            try allocator.dupe(u8, "metask-model"),
+            try allocator.dupe(u8, "https://napi.metask-ai.com/v1/messages"),
+            0,
+            rejected_secret,
+            "key-1",
+        ),
+    );
+    try std.testing.expect(observing.saw_secret_free);
+    try std.testing.expect(observing.secret_was_zero);
+
+    const released_secret = try allocator.dupe(u8, "released-secret");
+    observing.observe(released_secret);
+    var candidate = try observingSourceCandidate(allocator, released_secret);
+    var moved = candidate.take();
+    candidate.deinit();
+    moved.deinit();
+    try std.testing.expect(observing.saw_secret_free);
+    try std.testing.expect(observing.secret_was_zero);
+}
+
+test "source candidate secure-zero survives intoConfig success and failure" {
+    var observing: ObservingAllocator = .{ .backing = std.testing.allocator };
+    const allocator = observing.allocator();
+
+    const success_secret = try allocator.dupe(u8, "success-secret");
+    observing.observe(success_secret);
+    var success_candidate = try observingSourceCandidate(allocator, success_secret);
+    var config = try success_candidate.intoConfig(29);
+    success_candidate.deinit();
+    config.deinit();
+    try std.testing.expect(observing.saw_secret_free);
+    try std.testing.expect(observing.secret_was_zero);
+
+    const failed_secret = try allocator.dupe(u8, "failed-secret");
+    observing.observe(failed_secret);
+    var failed_candidate = try observingSourceCandidate(allocator, failed_secret);
+    try std.testing.expectError(
+        error.InvalidExecutionConfig,
+        failed_candidate.intoConfig(0),
+    );
+    failed_candidate.deinit();
+    try std.testing.expect(observing.saw_secret_free);
+    try std.testing.expect(observing.secret_was_zero);
 }
 
 test "source candidate keeps source and execution generations independent" {

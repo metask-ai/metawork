@@ -329,6 +329,7 @@ const WiredModules = struct {
     event_pump: *std.Build.Module,
     sdk: *std.Build.Module,
     product_control: *std.Build.Module,
+    product_control_account_projection: *std.Build.Module,
     product_control_execution_state: *std.Build.Module,
     product_control_runtime: *std.Build.Module,
     product_control_executor: *std.Build.Module,
@@ -1404,15 +1405,24 @@ fn wireAgentCore(
     product_mcp_runtime.addImport("product_mcp_refresh_job", product_mcp_refresh_job);
     product_mcp.addImport("product_mcp_ports", product_mcp_ports);
     product_mcp.addImport("product_mcp_runtime", product_mcp_runtime);
+    const product_control_account_projection = b.createModule(.{
+        .root_source_file = b.path("src/product/control/account_projection.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    product_control_account_projection.addImport(
+        "metawork_account_contract",
+        account_contract,
+    );
+    product_control_account_projection.addImport(
+        "metawork_product_execution_contract",
+        execution_contract,
+    );
     const product_control_execution_state = b.createModule(.{
         .root_source_file = b.path("src/product/control/execution_state.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
-    product_control_execution_state.addImport(
-        "metawork_account_contract",
-        account_contract,
-    );
     product_control_execution_state.addImport(
         "metawork_product_execution_contract",
         execution_contract,
@@ -1426,10 +1436,6 @@ fn wireAgentCore(
     product_control_ports.addImport("metawork_account_contract", account_contract);
     product_control_ports.addImport("metawork_product_execution_contract", execution_contract);
     product_control_ports.addImport("product_execution_ports", execution_ports);
-    product_control_ports.addImport(
-        "product_control_execution_state",
-        product_control_execution_state,
-    );
     product_control_ports.addImport("metawork_product_mcp", product_mcp);
     product_control_ports.addImport("metawork_product_schedule", product_schedule);
     const product_workspace_runtime = b.createModule(.{
@@ -1464,6 +1470,10 @@ fn wireAgentCore(
     product_control_runtime.addImport("metawork_product_execution_contract", execution_contract);
     product_control_runtime.addImport("product_execution_runtime", execution_runtime);
     product_control_runtime.addImport("product_execution_ports", execution_ports);
+    product_control_runtime.addImport(
+        "product_control_account_projection",
+        product_control_account_projection,
+    );
     product_control_runtime.addImport(
         "product_control_execution_state",
         product_control_execution_state,
@@ -1645,6 +1655,7 @@ fn wireAgentCore(
         .event_pump = event_pump,
         .sdk = sdk,
         .product_control = product_control,
+        .product_control_account_projection = product_control_account_projection,
         .product_control_execution_state = product_control_execution_state,
         .product_control_runtime = product_control_runtime,
         .product_control_executor = executor,
