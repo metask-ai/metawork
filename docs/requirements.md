@@ -118,7 +118,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - 用户管理连接的 API credential 只由 Host 写入系统安全存储，metadata 以独立、无 secret 的 registry 原子持久化。Renderer 只能提交 connection mutation 和 opaque connection identifier，不能提交完整 credential、Authorization header 或把 arbitrary URL 直接注入 Run；
 - 连接测试通过 Agent-owned Completion 发起一次有界的非流式请求，复用当前设置选择冻结的 ExecutionConfig，并由 MetaWork 的 Anthropic/OpenAI/Gemini 无 Tool codec 解析最终 JSON 响应；它不调用 AgentCore Completion，也不创建产品 Task、Run history 或持久 Conversation。第一版由用户明确提交 bounded model id，Host 保存其模型 metadata；自动模型发现不在当前范围；
 - 当前模型必须显示在 New task Composer 附近，并显示为 `连接 · 模型`。默认连接/模型只影响后续新 Task；已有 Task 显示当前 binding epoch 的 protocol、opaque execution generation 和模型，历史按 epoch 保留原事实。只有 §4 已定义的 exact Metask authority 允许为下一轮修改 Session 模型；authority 不一致时显示 pinned model 与只读原因，不提供跨 credential 或跨连接的虚假热切换；
-- 进入 `账号` 设置时，显式导航动作自动请求 Host 同步 Metask catalog；未来重新开放 `模型连接` 设置时才读取 Execution-owned registry，connection health 只由用户显式执行 `测试连接` 更新。已有默认配置必须直接投影，不能要求用户先重新选择或切换；
+- 进入 `账号` 设置只读取 Host 已提交的 Metask catalog，不触发隐藏 mutation；用户显式点击 `重新同步` 时才请求 Host 刷新目录。未来重新开放 `模型连接` 设置时才读取 Execution-owned registry，connection health 只由用户显式执行 `测试连接` 更新。已有默认配置必须直接投影，不能要求用户先重新选择或切换；
 - 登录后无已存偏好时，Host 自动选择目录中的第一个 API Key 完成默认配置；选择 API 后模型按 当前已选（若仍在目录）→ 已存偏好 → 目录首项 自动回退，用户随后可在设置中调整。重配置中已选 API Key 从账号消失时不自动切换凭证，停在选择态由用户显式决定。离开设置页视为放弃未完成的重配置：Host 取消停驻事务并恢复原有执行配置；首次配置无可回退项时保持设置页驻留 API 才能修改默认模型。页面直接使用 Host 已发布的脱敏目录和提交态，手动重新同步只作为网络失败、页面持续打开期间 Metask 外部目录变化等恢复动作。设置页同时提供可独立修改的默认 API、默认模型和与错误语义匹配的恢复动作；后续通用、通知、外观和高级设置共享同一设置框架，Workspace 生命周期仍由 New task 路径控件负责；
 - OAuth token 只访问 Metask 账号 API；选定 API Key 才作为 AgentCore 模型调用凭据；
 - Renderer 只能看到脱敏账号、Key 尾号、模型、稳定错误码和状态，不得接触 OAuth token、完整 API Key、Authorization header、临时 OAuth URL 或凭据存储 locator；

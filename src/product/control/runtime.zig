@@ -857,41 +857,42 @@ pub const PreparedModelConnectionBinding =
     execution_state.PreparedModelConnectionBinding;
 
 const PendingMetaskCandidate = struct {
-    allocator: std.mem.Allocator,
-    account_id: []u8,
-    api_key_id: []u8,
-    model_id: []u8,
+    account_id: [account_contract.Limits.account_id_bytes]u8 = undefined,
+    account_id_len: usize,
+    api_key_id: [account_contract.Limits.api_key_id_bytes]u8 = undefined,
+    api_key_id_len: usize,
+    model_id: [account_contract.Limits.model_id_bytes]u8 = undefined,
+    model_id_len: usize,
     protocol: execution_contract.Protocol,
     source_generation: u64,
     candidate: execution_contract.OwnedSourceCandidate,
 
-    fn init(
-        allocator: std.mem.Allocator,
+    fn initNoFail(
         candidate: *execution_contract.OwnedSourceCandidate,
         source_authority: account_contract.MetaskSourceAuthority,
-    ) std.mem.Allocator.Error!PendingMetaskCandidate {
-        const account_id = try allocator.dupe(u8, source_authority.account_id);
-        errdefer allocator.free(account_id);
-        const api_key_id = try allocator.dupe(u8, source_authority.api_key_id);
-        errdefer allocator.free(api_key_id);
-        const model_id = try allocator.dupe(u8, source_authority.model_id);
-        errdefer allocator.free(model_id);
-        return .{
-            .allocator = allocator,
-            .account_id = account_id,
-            .api_key_id = api_key_id,
-            .model_id = model_id,
+    ) PendingMetaskCandidate {
+        std.debug.assert(source_authority.account_id.len <= account_contract.Limits.account_id_bytes);
+        std.debug.assert(source_authority.api_key_id.len <= account_contract.Limits.api_key_id_bytes);
+        std.debug.assert(source_authority.model_id.len <= account_contract.Limits.model_id_bytes);
+        var result: PendingMetaskCandidate = .{
+            .account_id_len = source_authority.account_id.len,
+            .api_key_id_len = source_authority.api_key_id.len,
+            .model_id_len = source_authority.model_id.len,
             .protocol = source_authority.protocol,
             .source_generation = source_authority.source_generation,
             .candidate = candidate.take(),
         };
+        @memcpy(result.account_id[0..result.account_id_len], source_authority.account_id);
+        @memcpy(result.api_key_id[0..result.api_key_id_len], source_authority.api_key_id);
+        @memcpy(result.model_id[0..result.model_id_len], source_authority.model_id);
+        return result;
     }
 
     fn authority(self: *const PendingMetaskCandidate) account_contract.MetaskSourceAuthority {
         return .{
-            .account_id = self.account_id,
-            .api_key_id = self.api_key_id,
-            .model_id = self.model_id,
+            .account_id = self.account_id[0..self.account_id_len],
+            .api_key_id = self.api_key_id[0..self.api_key_id_len],
+            .model_id = self.model_id[0..self.model_id_len],
             .protocol = self.protocol,
             .source_generation = self.source_generation,
         };
@@ -899,9 +900,6 @@ const PendingMetaskCandidate = struct {
 
     fn deinit(self: *PendingMetaskCandidate) void {
         self.candidate.deinit();
-        self.allocator.free(self.model_id);
-        self.allocator.free(self.api_key_id);
-        self.allocator.free(self.account_id);
         self.* = undefined;
     }
 };
@@ -940,6 +938,7 @@ pub const Runtime = struct {
     execution_state: execution_state.State,
     model_connections: execution_runtime.Runtime,
     pending_metask_candidate: ?PendingMetaskCandidate = null,
+    pending_metask_clear: bool = false,
     metask_default_selection_attempt_id: ?u64 = null,
     canonical_user_home: ?[]u8,
     model_connection_capabilities: ModelConnectionCapabilities,
@@ -1766,6 +1765,7 @@ pub const Runtime = struct {
             self.metask_default_selection_attempt_id = null;
         if (identity_changed or signed_out) {
             self.clearPendingMetaskCandidateNoFail();
+            self.pending_metask_clear = true;
             self.reconcileMetaskClearNoFail();
         }
         self.finishAccountCommitNoFail();
@@ -1795,19 +1795,22 @@ pub const Runtime = struct {
         if (self.executionReplacementPending()) {
             self.execution_state.recordAvailabilityErrorNoFail(.invalid_candidate);
             if (!explicit_selection)
-                _ = self.retainPendingMetaskCandidateNoFail(candidate, authority);
+                self.retainPendingMetaskCandidateNoFail(candidate, authority);
             return;
         }
         const candidate_input = candidate.input();
         const source_generation = candidate_input.source_generation;
-        const execution_generation = self.nextExecutionGeneration(
-            self.executionGeneration(),
-        ) catch {
-            self.execution_state.recordAvailabilityErrorNoFail(.resource_exhausted);
-            if (!explicit_selection)
-                _ = self.retainPendingMetaskCandidateNoFail(candidate, authority);
-            return;
-        };
+        const execution_generation = if (self.execution_state.metaskBindingMatches(
+            source_generation,
+        ))
+            self.executionGeneration()
+        else
+            self.nextExecutionGeneration(self.executionGeneration()) catch {
+                self.execution_state.recordAvailabilityErrorNoFail(.resource_exhausted);
+                if (!explicit_selection)
+                    self.retainPendingMetaskCandidateNoFail(candidate, authority);
+                return;
+            };
         const execution_input: execution_contract.ConfigInput = .{
             .target = candidate_input.target,
             .api_key = candidate_input.api_key,
@@ -1816,7 +1819,7 @@ pub const Runtime = struct {
         self.beginAccountReconciliation() catch {
             self.execution_state.recordAvailabilityErrorNoFail(.invalid_candidate);
             if (!explicit_selection and !self.shutting_down)
-                _ = self.retainPendingMetaskCandidateNoFail(candidate, authority);
+                self.retainPendingMetaskCandidateNoFail(candidate, authority);
             return;
         };
         var replacement_active = true;
@@ -1827,7 +1830,7 @@ pub const Runtime = struct {
         ) catch |err| {
             self.execution_state.rejectReplacementNoFail(metaskStageError(err));
             if (!explicit_selection)
-                _ = self.retainPendingMetaskCandidateNoFail(candidate, authority);
+                self.retainPendingMetaskCandidateNoFail(candidate, authority);
             return;
         };
         if (explicit_selection and !self.clearModelConnectionDefault().accepted) {
@@ -1848,6 +1851,7 @@ pub const Runtime = struct {
             source_generation,
             self.executionProjectionRedaction(),
         );
+        self.pending_metask_clear = false;
         replacement_active = false;
         self.endExecutionReplacementNoFail();
     }
@@ -1877,14 +1881,12 @@ pub const Runtime = struct {
         self: *Runtime,
         candidate: *execution_contract.OwnedSourceCandidate,
         authority: account_contract.MetaskSourceAuthority,
-    ) bool {
+    ) void {
         self.clearPendingMetaskCandidateNoFail();
-        self.pending_metask_candidate = PendingMetaskCandidate.init(
-            self.allocator,
+        self.pending_metask_candidate = PendingMetaskCandidate.initNoFail(
             candidate,
             authority,
-        ) catch return false;
-        return true;
+        );
     }
 
     fn clearPendingMetaskCandidateNoFail(self: *Runtime) void {
@@ -1903,7 +1905,10 @@ pub const Runtime = struct {
     }
 
     fn reconcileMetaskClearNoFail(self: *Runtime) void {
-        if (!self.execution_state.metaskExecutionActive()) return;
+        if (!self.execution_state.metaskExecutionActive()) {
+            self.pending_metask_clear = false;
+            return;
+        }
         if (self.executionReplacementPending()) {
             self.execution_state.recordAvailabilityErrorNoFail(.invalid_candidate);
             return;
@@ -1921,6 +1926,7 @@ pub const Runtime = struct {
             return;
         };
         self.clearExecutionNoFail();
+        self.pending_metask_clear = false;
         replacement_active = false;
         self.endExecutionReplacementNoFail();
     }
@@ -3528,6 +3534,8 @@ pub const Runtime = struct {
         };
         return switch (self.schedule.recoverPersistence(self.scheduleRedaction())) {
             .recovered => recovered: {
+                if (self.pending_metask_clear)
+                    self.reconcileMetaskClearNoFail();
                 self.retryPendingMetaskCandidateNoFail();
                 self.finishDefaultExecutionCommitNoFail();
                 break :recovered .recovered;
@@ -9179,6 +9187,81 @@ test "Schedule recovery installs the exact pending Metask candidate after transi
     try std.testing.expect(control.canCreateTask());
 }
 
+test "Schedule recovery finishes a pending Metask clear after Account logout" {
+    var control = try testRuntime();
+    defer control.deinit();
+    var automatic_tmp = std.testing.tmpDir(.{});
+    defer automatic_tmp.cleanup();
+    var automatic_root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const automatic_root_len = try automatic_tmp.dir.realPath(
+        std.testing.io,
+        &automatic_root_storage,
+    );
+    var automatic_root = try product_workspace.AutomaticRoot.open(
+        std.testing.io,
+        std.testing.allocator,
+        automatic_root_storage[0..automatic_root_len],
+    );
+    defer automatic_root.deinit();
+    product_workspace.testing.installAutomaticRoot(&control.workspace, &automatic_root);
+    var clock: TestScheduleClock = .{ .now = 1_000 };
+    const persistence_storage = try std.testing.allocator.alloc(
+        u8,
+        product_schedule.testing.max_store_bytes,
+    );
+    defer std.testing.allocator.free(persistence_storage);
+    var persistence: TestSchedulePersistence = .{ .storage = persistence_storage };
+    product_schedule.testing.configure(
+        &control.schedule,
+        clock.timer(),
+        persistence.capability(),
+        .ready,
+    );
+    defer product_schedule.testing.configure(
+        &control.schedule,
+        .{},
+        .{},
+        .unavailable,
+    );
+    const scheduled_id = try control.createScheduledTask(.{
+        .title = "Clear retired credential",
+        .expected_execution_generation = control.executionGeneration(),
+        .permission_profile = .approval_required,
+        .input = "Do not retain SECRET-KEY",
+        .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
+    });
+    product_schedule.testing.overwriteInputPrefix(
+        &control.schedule,
+        scheduled_id,
+        "SECRET-KEY",
+    );
+
+    persistence.result = .failed;
+    control.commitAccountChangeNoFail(.{
+        .fact = .{
+            .kind = .signed_out,
+            .view = .{
+                .state = .signed_out,
+                .catalog_state = .unavailable,
+            },
+        },
+        .attempt_id = 41,
+        .attempt_terminal = true,
+    });
+    try std.testing.expect(control.pending_metask_clear);
+    try std.testing.expect(control.execution_state.metaskExecutionActive());
+    try std.testing.expect(control.scheduledTaskRecoveryAvailable());
+
+    persistence.result = .committed;
+    try std.testing.expectEqual(
+        PersistenceRecoveryOutcome.recovered,
+        control.recoverScheduledTaskStore(control.currentRevision()),
+    );
+    try std.testing.expect(!control.pending_metask_clear);
+    try std.testing.expect(!control.execution_state.metaskExecutionActive());
+    try std.testing.expect(!control.canCreateTask());
+}
+
 test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {
     var control = try testRuntime();
     defer control.deinit();
@@ -10844,7 +10927,7 @@ test "default replacement preserves Task generation and installs the next admiss
     task.durable.execution_generation = 1;
 }
 
-test "Account default model changes do not bump credentials" {
+test "Account default model candidates keep the source execution generation" {
     var control = try testRuntime();
     defer control.deinit();
 
@@ -10858,34 +10941,55 @@ test "Account default model changes do not bump credentials" {
         .{ .id = "fixture-model", .display_name = "Fixture model" },
         .{ .id = "fixture-model-2", .display_name = "Fixture model 2" },
     };
-    control.commitAccountFactNoFail(.{
-        .kind = .catalog_changed,
-        .view = .{
-            .state = .authenticated,
-            .catalog_state = .ready,
-            .account_id = "account-1",
-            .display_name = "Metask User",
-            .api_keys = &api_keys,
-            .models = &models,
-            .selected_api_key_id = "key-1",
-            .selected_model = "fixture-model-2",
-            .model_catalog_api_key_id = "key-1",
+    var candidate = try execution_contract.OwnedSourceCandidate.initOwned(
+        std.testing.allocator,
+        .metask,
+        .anthropic_messages,
+        try std.testing.allocator.dupe(u8, "fixture-model-2"),
+        try std.testing.allocator.dupe(
+            u8,
+            account_contract.metask_anthropic_messages_url,
+        ),
+        1,
+        try std.testing.allocator.dupe(u8, "SECRET-KEY"),
+        "key-1",
+    );
+    control.commitAccountChangeNoFail(.{
+        .fact = .{
+            .kind = .default_changed,
+            .view = .{
+                .state = .authenticated,
+                .catalog_state = .ready,
+                .account_id = "account-1",
+                .display_name = "Metask User",
+                .api_keys = &api_keys,
+                .models = &models,
+                .selected_api_key_id = "key-1",
+                .selected_model = "fixture-model-2",
+                .model_catalog_api_key_id = "key-1",
+            },
+            .authority = .{
+                .account_id = "account-1",
+                .api_key_id = "key-1",
+                .model_id = "fixture-model-2",
+                .protocol = .anthropic_messages,
+                .source_generation = 1,
+            },
         },
-        .authority = .{
-            .account_id = "account-1",
-            .api_key_id = "key-1",
-            .model_id = "fixture-model-2",
-            .protocol = .anthropic_messages,
-            .source_generation = 1,
-        },
+        .attempt_id = 51,
+        .attempt_terminal = true,
+        .candidate = testSourceCandidateTransfer(&candidate),
     });
-    control.finishAccountCommitNoFail();
 
     try std.testing.expectEqual(@as(u64, 1), control.execution_state.generation());
     try std.testing.expectEqualStrings(
         "fixture-model-2",
         control.accountView().selected_model,
     );
+    var installed = try control.cloneCurrentTaskExecution(std.testing.allocator);
+    defer installed.deinit();
+    try std.testing.expectEqualStrings("fixture-model-2", installed.input().target.model);
+    try std.testing.expectEqualStrings("SECRET-KEY", installed.input().api_key);
 }
 
 test "busy Task model selection keeps only the last runtime pending model" {

@@ -980,7 +980,10 @@ pub const Runtime = struct {
             completion.payload == .source_candidate_ready;
         const source_preference_persisted =
             completion.payload == .source_preference_persisted;
+        const default_model_persisted =
+            completion.payload == .default_model_persisted;
         const catalog_attempt = self.account.catalogAttemptActive();
+        const public_catalog_attempt = self.account.publicCatalogAttemptActive();
         const recovery_catalog_refresh =
             self.account.recoveryCatalogRefreshActive();
         const refresh_attempt = self.account.refreshInFlight();
@@ -1056,7 +1059,9 @@ pub const Runtime = struct {
             )) |id| .{ .model = id } else .none,
             else => .none,
         };
-        if (self.account.activeAttempt() == completion.attempt_id) {
+        if (public_catalog_attempt and
+            self.account.activeAttempt() == completion.attempt_id)
+        {
             switch (completion.payload) {
                 .api_keys_loaded, .models_loaded => {
                     self.candidate_public_catalog.replaceFromSession(
@@ -1078,7 +1083,7 @@ pub const Runtime = struct {
                         candidate,
                     );
                 }
-                if (source_preference_persisted) {
+                if (source_preference_persisted or default_model_persisted) {
                     const candidate = self.takePendingSourceCandidate(
                         transition.attempt_id.?,
                     ) orelse @panic(
@@ -1374,11 +1379,12 @@ pub const Runtime = struct {
                 argument orelse
                     @panic("model catalog effect has no API Key"),
             ),
-            .prepare_source_candidate => self.prepareSourceCandidate(
+            .prepare_source_candidate => |preference| self.prepareSourceCandidate(
                 entry.attempt_id orelse
                     @panic("source persistence effect has no attempt"),
                 argument orelse
                     @panic("source candidate effect has no model"),
+                preference.metask_source_generation,
             ),
             .persist_source_preference => |preference| self.persistSourcePreference(
                 entry.attempt_id orelse
@@ -1425,6 +1431,7 @@ pub const Runtime = struct {
         self: *Runtime,
         attempt_id: u64,
         model: []const u8,
+        requested_source_generation: u64,
     ) void {
         const identity = self.account.currentIdentity() orelse {
             self.effects.publishCompletion(.{
@@ -1436,25 +1443,26 @@ pub const Runtime = struct {
             return;
         };
         defer self.effects.catalog.reset();
-        const restored_generation = self.savedSourceGenerationFor(
-            identity.accountId(),
-            self.effects.catalog.selectedApiKeyId(),
-            model,
-            self.account.sourceGeneration(),
-        );
-        const metask_source_generation = restored_generation orelse
-            generateSourceGeneration(
+        const metask_source_generation = if (requested_source_generation != 0)
+            requested_source_generation
+        else
+            self.savedSourceGenerationFor(
+                identity.accountId(),
+                self.effects.catalog.selectedApiKeyId(),
+                model,
+                self.account.sourceGeneration(),
+            ) orelse generateSourceGeneration(
                 self.io,
                 self.account.sourceGeneration(),
             ) catch {
-            self.effects.publishCompletion(.{
-                .attempt_id = attempt_id,
-                .payload = .{ .failed = .fromCode(
-                    .local_resource_exhausted,
-                ) },
-            });
-            return;
-        };
+                self.effects.publishCompletion(.{
+                    .attempt_id = attempt_id,
+                    .payload = .{ .failed = .fromCode(
+                        .local_resource_exhausted,
+                    ) },
+                });
+                return;
+            };
         var source_candidate = switch (prepareCatalogSourceCandidate(
             &self.effects.catalog,
             &identity,
@@ -1615,7 +1623,7 @@ pub const Runtime = struct {
                     .attempt_id = attempt_id,
                     .payload = .source_preference_persisted,
                 };
-                return self.wrapSourcePreferencePersisted(
+                return self.wrapPersistedCandidate(
                     self.account.prepareCompletion(&completion),
                 );
             }
@@ -1637,7 +1645,7 @@ pub const Runtime = struct {
         );
     }
 
-    fn wrapSourcePreferencePersisted(
+    fn wrapPersistedCandidate(
         self: *Runtime,
         result: state_impl.PrepareResult,
     ) PrepareResult {
@@ -1697,7 +1705,9 @@ pub const Runtime = struct {
                 .attempt_id = attempt_id,
                 .payload = .default_model_persisted,
             };
-            return wrapPrepareResult(self.account.prepareCompletion(&completion));
+            return self.wrapPersistedCandidate(
+                self.account.prepareCompletion(&completion),
+            );
         }
         if (std.mem.eql(u8, preference.modelId(), account_view.selected_model))
             return self.prepareFailure(
@@ -2457,7 +2467,7 @@ fn installSourcePreparationForTest(runtime: *Runtime) !void {
 }
 
 fn stageSourcePreferenceForTest(runtime: *Runtime) !u64 {
-    runtime.prepareSourceCandidate(1, "model-1");
+    runtime.prepareSourceCandidate(1, "model-1", 0);
     var staged = switch (runtime.prepareNextCompletion() orelse
         return error.TestUnexpectedResult) {
         .prepared => |prepared| prepared,
@@ -2483,7 +2493,7 @@ test "Account Runtime restores an exact persisted source generation" {
     );
     try installSourcePreparationForTest(&runtime);
 
-    runtime.prepareSourceCandidate(1, "model-1");
+    runtime.prepareSourceCandidate(1, "model-1", 0);
     var mailbox = runtime.effects.takeMailbox() orelse
         return error.TestUnexpectedResult;
     defer mailbox.deinit();
@@ -2524,7 +2534,7 @@ test "Account Runtime persists a nonzero generation for a new source authority" 
     defer startup.deinit();
     try installSourcePreparationForTest(&runtime);
 
-    runtime.prepareSourceCandidate(1, "model-1");
+    runtime.prepareSourceCandidate(1, "model-1", 0);
     var staged = switch (runtime.prepareNextCompletion() orelse
         return error.TestUnexpectedResult) {
         .prepared => |prepared| prepared,
@@ -3014,9 +3024,64 @@ fn beginDefaultModelChangeForTest(
         else => return error.TestUnexpectedResult,
     };
     defer prepared.deinit();
-    try std.testing.expect(runtime.admitEffect(&prepared));
+    try std.testing.expect(prepared.transition.takeEffect().? == .load_api_keys);
     runtime.commit(&prepared);
-    runtime.dispatchCommitted(&prepared);
+    const attempt_id = runtime.account.activeAttempt().?;
+
+    try catalog_impl.TestSupport.replaceOwnedSelection(
+        &runtime.effects.catalog,
+        "account-1",
+        .{
+            .id = "key-1",
+            .name = "Primary",
+            .suffix = "1234",
+            .protocol = .anthropic_messages,
+        },
+        "secret-key",
+        &.{
+            .{ .id = "model-1", .display_name = "Model 1" },
+            .{ .id = "model-2", .display_name = "Model 2" },
+            .{ .id = "model-third", .display_name = "Third" },
+        },
+    );
+    runtime.effects.publishCompletion(.{
+        .attempt_id = attempt_id,
+        .payload = .api_keys_loaded,
+    });
+    var keys = switch (runtime.prepareNextCompletion().?) {
+        .prepared => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer keys.deinit();
+    try std.testing.expect(keys.transition.takeEffect().? == .load_models);
+    runtime.commit(&keys);
+
+    runtime.effects.publishCompletion(.{
+        .attempt_id = attempt_id,
+        .payload = .models_loaded,
+    });
+    var models = switch (runtime.prepareNextCompletion().?) {
+        .prepared => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer models.deinit();
+    const candidate_effect = models.transition.takeEffect().?;
+    try std.testing.expect(candidate_effect == .prepare_source_candidate);
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        candidate_effect.prepare_source_candidate.metask_source_generation,
+    );
+    runtime.commit(&models);
+    runtime.prepareSourceCandidate(attempt_id, model_id, 1);
+
+    var candidate = switch (runtime.prepareNextCompletion().?) {
+        .prepared => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer candidate.deinit();
+    try std.testing.expect(runtime.admitEffect(&candidate));
+    runtime.commit(&candidate);
+    runtime.dispatchCommitted(&candidate);
 }
 
 fn prepareDefaultModelTest(

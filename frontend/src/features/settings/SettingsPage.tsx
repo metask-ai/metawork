@@ -236,8 +236,11 @@ export function SettingsPage({
   const apiBusy = account.catalogState === "loading";
   const modelBusy = account.catalogState === "loading";
   const authenticated = account.state === "authenticated";
-  const canChooseApi = authenticated && account.catalogState !== "loading";
-  const canChooseModel = authenticated && account.catalogState !== "loading";
+  const preferenceRecovery = account.errorCode === "recovery_state_invalid";
+  const canChooseApi =
+    authenticated && !preferenceRecovery && account.catalogState !== "loading";
+  const canChooseModel =
+    authenticated && !preferenceRecovery && account.catalogState !== "loading";
   const languageOptions = useMemo<SelectionMenuOption[]>(
     () => [
       { value: "en-US", label: t("app.language.en-US") },
@@ -809,7 +812,7 @@ export function SettingsPage({
                     : t("account.sign_in_required.body")}
                 </span>
               </div>
-              {!authenticated && (
+              {(!authenticated || preferenceRecovery) && (
                 <Button
                   variant="secondary"
                   size="sm"

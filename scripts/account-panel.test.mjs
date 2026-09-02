@@ -297,6 +297,16 @@ test("Account errors stay inside the Account failure domain", () => {
   );
 });
 
+test("Account preference recovery exposes the canonical login repair and freezes selectors", () => {
+  const markup = renderSettings({
+    ...ready,
+    errorCode: "recovery_state_invalid",
+  });
+  assert.match(markup, /Sign in with Metask/);
+  assert.match(markup, /id="settings-api"[^>]*disabled/);
+  assert.match(markup, /id="settings-model"[^>]*disabled/);
+});
+
 test("Execution commands never enter the Account busy or error scope", () => {
   assert.doesNotMatch(
     appSource,

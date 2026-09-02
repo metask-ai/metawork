@@ -1010,7 +1010,7 @@ Workspace 生命周期不属于 Settings surface。New task 路径控件负责�
 
 `Account` 规则：
 
-- 进入该设置 route 的显式导航动作自动请求 Host 同步一次最新 API/模型目录；已有默认配置且 API 仍有效时，Host 自动沿用该 API 并加载其模型目录，默认模型下拉框不依赖一次 API 修改才能启用。已提交默认值在同步期间保持可读，手动 `重新同步` 只用于失败恢复或页面保持打开期间发生的 Metask 外部变更，不能成为打开下拉框或切换默认值的前置步骤；
+- 进入该设置 route 只渲染 Host 已提交的 API/模型目录，不触发隐藏同步；用户显式点击 `重新同步` 时，Host 沿用仍有效的已提交 API 并加载其模型目录。已提交默认值在同步期间保持可读，`重新同步` 只用于失败恢复或页面保持打开期间发生的 Metask 外部变更，不能成为打开下拉框或切换默认值的前置步骤；
 - API 列表显示 Metask 名称、protocol、尾号和可用/需要处理状态；不显示完整 secret；
 - protocol 是 Host 从 API catalog 确定的只读技术事实，只作为 API 名称下的次级元数据展示；Renderer 不提供 protocol、base URL 或 credential 编辑入口；
 - 切换默认 API 后加载其模型目录，并明确它只更新默认选择、不改写 durable Task 历史或正在运行的 Session；

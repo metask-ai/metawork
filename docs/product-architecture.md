@@ -180,7 +180,7 @@ Credential redaction 是 owner 释放协议，而不是 snapshot 时的偶然过
 4. durable commit 成功后才能转移或 secure-zero 对应 credential ownership；
 5. serializer 继续扫描所有 live credential，作为提交前的第二道防线。
 
-Schedule scrub 明确失败或 outcome unknown 时不得提交新的 Account/Execution default，也不得转移默认 execution ownership。所有可失败 scrub 必须位于来源默认值的 committed write 之前；committed write 之后只能执行 no-fail install。
+Schedule scrub 明确失败或 outcome unknown 时不得提交新的 Product Execution default，也不得转移默认 execution ownership。Account preference 由 Account 独立 durable commit，不等待 Product scrub；Account terminal commit 后，Product 以 no-fail sink 接收 candidate，再执行可失败 scrub。scrub 未提交时 Product 保留唯一 pending candidate 与旧 active credential owner、关闭不匹配的新 Task admission并发布 Execution recovery；恢复成功后同进程重试，不回滚或重写 Account fact。
 
 Credential 是 opaque bytes。redaction 必须覆盖流式跨 chunk 与 UTF-8 codepoint 边界；多个 credential 前缀重叠时采用最长匹配，不能因替换 secret 产生非法 UTF-8 产品事实。credential、locator、Authorization header 和可重建 secret 的 metadata 不进入 Bridge、Renderer、日志、产品历史或 checkpoint record。
 

@@ -75,7 +75,7 @@ pub const Effect = union(enum) {
     load_identity,
     load_api_keys,
     load_models: ApiKeyId,
-    prepare_source_candidate: ModelId,
+    prepare_source_candidate: SourcePreference,
     persist_source_preference: SourcePreference,
     persist_default_model: ModelId,
     cancel_attempt: u64,
@@ -85,7 +85,8 @@ pub const Effect = union(enum) {
     pub fn argument(self: *const Effect) ?[]const u8 {
         return switch (self.*) {
             .load_models => |*id| id.view(),
-            .prepare_source_candidate, .persist_default_model => |*model| model.view(),
+            .prepare_source_candidate => |*preference| preference.model.view(),
+            .persist_default_model => |*model| model.view(),
             .persist_source_preference => |*preference| preference.model.view(),
             else => null,
         };
@@ -109,8 +110,13 @@ const AttemptKind = enum {
 };
 
 const IdentityAttemptKind = enum { login, refresh_token };
-const CatalogAttemptKind = enum { preference, refresh_only, source_resolution };
-const ModelPreferenceSource = enum { catalog, preference };
+const CatalogAttemptKind = enum {
+    preference,
+    refresh_only,
+    source_resolution,
+    model_preference,
+};
+const ModelPreferenceSource = enum { catalog, preference, resolved };
 const PendingFacts = struct {
     api_key_id: ApiKeyId = .{},
     model: ModelId = .{},
@@ -182,10 +188,11 @@ const Transaction = union(enum) {
                 .preference => .catalog,
                 .refresh_only => .catalog_refresh,
                 .source_resolution => .source_resolution,
+                .model_preference => .model_preference,
             },
             .persisting_model => |value| switch (value.source) {
                 .catalog => .catalog,
-                .preference => .model_preference,
+                .preference, .resolved => .model_preference,
             },
             .logging_out => .logout,
         };
@@ -431,11 +438,11 @@ const CommittedState = struct {
         return switch (self.attemptKind()) {
             .login => self.session_state == .authorizing and
                 self.operation() == .oauth_callback,
-            .catalog, .catalog_refresh, .source_resolution => self.session_state == .authenticated and switch (self.operation()) {
+            .catalog, .catalog_refresh, .source_resolution, .model_preference => self.session_state == .authenticated and switch (self.operation()) {
                 .loading_keys, .selecting_key, .loading_models, .selecting_model => true,
                 else => false,
             },
-            .refresh_token, .model_preference, .logout, .none => false,
+            .refresh_token, .logout, .none => false,
         };
     }
 };
@@ -466,6 +473,13 @@ pub const Account = struct {
     }
 
     pub fn catalogAttemptActive(self: *const Account) bool {
+        return self.state.attemptKind() == .catalog or
+            self.state.attemptKind() == .catalog_refresh or
+            self.state.attemptKind() == .source_resolution or
+            self.state.attemptKind() == .model_preference;
+    }
+
+    pub fn publicCatalogAttemptActive(self: *const Account) bool {
         return self.state.attemptKind() == .catalog or
             self.state.attemptKind() == .catalog_refresh or
             self.state.attemptKind() == .source_resolution;
@@ -629,10 +643,10 @@ pub const Account = struct {
         next.error_code = .recovery_state_invalid;
         next.safe_diagnostic.clear();
         var result = transitionNoEffect(next, .operation_failed, attempt_id);
-        result.transition.catalog_intent = if (self.state.attemptKind() == .catalog)
-            .discard_candidate
-        else
-            .committed;
+        result.transition.catalog_intent = switch (self.state.transaction.persisting_model.source) {
+            .catalog => .discard_candidate,
+            .preference, .resolved => .committed,
+        };
         result.transition.preference_intent = .clear;
         return result;
     }
@@ -924,8 +938,11 @@ pub const Account = struct {
                 next,
                 .source_authority_changed,
                 next.activeAttempt().?,
-                .{ .prepare_source_candidate = ModelId.init(model) catch
-                    return .{ .rejected = .invalid_command } },
+                .{ .prepare_source_candidate = .{
+                    .model = ModelId.init(model) catch
+                        return .{ .rejected = .invalid_command },
+                    .metask_source_generation = next.metask_source_generation,
+                } },
             );
             result.transition.catalog_intent = .candidate;
             return result;
@@ -938,10 +955,10 @@ pub const Account = struct {
             const attempt = nextAttempt(self.state.next_attempt_id) orelse
                 return .{ .rejected = .generation_mismatch };
             var next = self.state;
-            next.transaction = next.modelPreferenceAttempt(
+            next.transaction = .{ .loading_keys = next.catalogAttempt(
                 attempt.current,
-                .preference,
-            );
+                .model_preference,
+            ) };
             next.setPendingApiKeyId(next.selected_api_key_id.view()) catch
                 return .{ .rejected = .invalid_command };
             next.setPendingModel(model) catch
@@ -952,8 +969,7 @@ pub const Account = struct {
                 next,
                 .session_changed,
                 attempt.current,
-                .{ .persist_default_model = tryModelId(model) orelse
-                    return .{ .rejected = .invalid_command } },
+                .load_api_keys,
             );
         }
         if (self.state.operation() != .selecting_model or
@@ -989,17 +1005,20 @@ pub const Account = struct {
         {
             next.setPendingModel(model) catch
                 return .{ .rejected = .invalid_command };
-            next.transaction = next.modelPreferenceAttempt(
+            next.transaction = .{ .persisting_source = next.catalogAttempt(
                 next.activeAttempt().?,
-                .catalog,
-            );
+                .model_preference,
+            ) };
             next.clearError();
             var result = transition(
                 next,
-                .session_changed,
+                .source_authority_changed,
                 self.state.activeAttempt().?,
-                .{ .persist_default_model = tryModelId(model) orelse
-                    return .{ .rejected = .invalid_command } },
+                .{ .prepare_source_candidate = .{
+                    .model = tryModelId(model) orelse
+                        return .{ .rejected = .invalid_command },
+                    .metask_source_generation = next.metask_source_generation,
+                } },
             );
             result.transition.catalog_intent = .candidate;
             return result;
@@ -1017,7 +1036,10 @@ pub const Account = struct {
             next,
             .source_authority_changed,
             next.activeAttempt().?,
-            .{ .prepare_source_candidate = effect_model },
+            .{ .prepare_source_candidate = .{
+                .model = effect_model,
+                .metask_source_generation = 0,
+            } },
         );
         result.transition.catalog_intent = .candidate;
         return result;
@@ -1145,11 +1167,15 @@ pub const Account = struct {
         if (self.state.operation() != .loading_keys or
             (self.state.attemptKind() != .catalog and
                 self.state.attemptKind() != .catalog_refresh and
-                self.state.attemptKind() != .source_resolution))
+                self.state.attemptKind() != .source_resolution and
+                self.state.attemptKind() != .model_preference))
             return .{ .rejected = .invalid_state };
         const attempt_kind = self.state.attemptKind();
-        const generation = incrementGeneration(self.state.catalog_generation) orelse
-            return .{ .rejected = .generation_mismatch };
+        const generation = if (attempt_kind == .model_preference)
+            self.state.catalog_generation
+        else
+            incrementGeneration(self.state.catalog_generation) orelse
+                return .{ .rejected = .generation_mismatch };
         var next = self.state;
         next.catalog_generation = generation;
         if (next.pendingApiKeyId().len != 0) {
@@ -1158,6 +1184,7 @@ pub const Account = struct {
                 switch (attempt_kind) {
                     .source_resolution => .source_resolution,
                     .catalog_refresh => .refresh_only,
+                    .model_preference => .model_preference,
                     else => .preference,
                 },
             ) };
@@ -1170,7 +1197,10 @@ pub const Account = struct {
                 next.activeAttempt().?,
                 .{ .load_models = effect_id },
             );
-            result.transition.catalog_intent = .candidate;
+            result.transition.catalog_intent = if (attempt_kind == .model_preference)
+                .committed
+            else
+                .candidate;
             return result;
         }
         next.transaction = .{ .selecting_key = next.catalogAttempt(
@@ -1187,11 +1217,15 @@ pub const Account = struct {
         if (self.state.operation() != .loading_models or
             (self.state.attemptKind() != .catalog and
                 self.state.attemptKind() != .catalog_refresh and
-                self.state.attemptKind() != .source_resolution))
+                self.state.attemptKind() != .source_resolution and
+                self.state.attemptKind() != .model_preference))
             return .{ .rejected = .invalid_state };
         const attempt_kind = self.state.attemptKind();
-        const generation = incrementGeneration(self.state.catalog_generation) orelse
-            return .{ .rejected = .generation_mismatch };
+        const generation = if (attempt_kind == .model_preference)
+            self.state.catalog_generation
+        else
+            incrementGeneration(self.state.catalog_generation) orelse
+                return .{ .rejected = .generation_mismatch };
         var next = self.state;
         next.catalog_generation = generation;
         if (attempt_kind == .catalog_refresh) {
@@ -1210,7 +1244,11 @@ pub const Account = struct {
             // queued key.
             next.transaction = .{ .loading_models = next.catalogAttempt(
                 next.activeAttempt().?,
-                if (attempt_kind == .source_resolution) .source_resolution else .preference,
+                switch (attempt_kind) {
+                    .source_resolution => .source_resolution,
+                    .model_preference => .model_preference,
+                    else => .preference,
+                },
             ) };
             next.clearError();
             const effect_id = ApiKeyId.init(next.pendingApiKeyId()) catch
@@ -1221,13 +1259,20 @@ pub const Account = struct {
                 next.activeAttempt().?,
                 .{ .load_models = effect_id },
             );
-            result.transition.catalog_intent = .candidate;
+            result.transition.catalog_intent = if (attempt_kind == .model_preference)
+                .committed
+            else
+                .candidate;
             return result;
         }
         if (next.pendingModel().len != 0) {
             next.transaction = .{ .persisting_source = next.catalogAttempt(
                 next.activeAttempt().?,
-                if (attempt_kind == .source_resolution) .source_resolution else .preference,
+                switch (attempt_kind) {
+                    .source_resolution => .source_resolution,
+                    .model_preference => .model_preference,
+                    else => .preference,
+                },
             ) };
             next.clearError();
             const effect_model = ModelId.init(next.pendingModel()) catch
@@ -1236,18 +1281,34 @@ pub const Account = struct {
                 next,
                 .source_authority_changed,
                 next.activeAttempt().?,
-                .{ .prepare_source_candidate = effect_model },
+                .{ .prepare_source_candidate = .{
+                    .model = effect_model,
+                    .metask_source_generation = if (attempt_kind == .catalog)
+                        0
+                    else
+                        next.metask_source_generation,
+                } },
             );
-            result.transition.catalog_intent = .candidate;
+            result.transition.catalog_intent = if (attempt_kind == .model_preference)
+                .committed
+            else
+                .candidate;
             return result;
         }
         next.transaction = .{ .selecting_model = next.catalogAttempt(
             next.activeAttempt().?,
-            if (attempt_kind == .source_resolution) .source_resolution else .preference,
+            switch (attempt_kind) {
+                .source_resolution => .source_resolution,
+                .model_preference => .model_preference,
+                else => .preference,
+            },
         ) };
         next.clearError();
         var result = transitionNoEffect(next, .catalog_changed, next.activeAttempt().?);
-        result.transition.catalog_intent = .candidate;
+        result.transition.catalog_intent = if (attempt_kind == .model_preference)
+            .committed
+        else
+            .candidate;
         return result;
     }
 
@@ -1257,7 +1318,8 @@ pub const Account = struct {
     ) PrepareResult {
         if (self.state.operation() != .persisting or
             (self.state.attemptKind() != .catalog and
-                self.state.attemptKind() != .source_resolution))
+                self.state.attemptKind() != .source_resolution and
+                self.state.attemptKind() != .model_preference))
             return .{ .rejected = .invalid_state };
         var source_candidate = switch (completion.payload) {
             .source_candidate_ready => |*owned| owned.take(),
@@ -1292,6 +1354,33 @@ pub const Account = struct {
                 .attempt_id = completion.attempt_id,
                 .source_candidate = source_candidate,
                 .catalog_intent = .promote_candidate,
+            } };
+        }
+
+        if (self.state.attemptKind() == .model_preference) {
+            if (input.source_generation != self.state.metask_source_generation or
+                !std.mem.eql(u8, self.state.pendingApiKeyId(), self.state.selected_api_key_id.view()))
+            {
+                source_candidate.deinit();
+                completion.payload = dependencyFailure();
+                return .{ .rejected = .generation_mismatch };
+            }
+            var next = self.state;
+            next.transaction = next.modelPreferenceAttempt(
+                next.activeAttempt().?,
+                .resolved,
+            );
+            next.clearError();
+            completion.payload = dependencyFailure();
+            return .{ .transition = .{
+                .next = next,
+                .fact_kind = .source_authority_changed,
+                .attempt_id = completion.attempt_id,
+                .effect = .{ .persist_default_model = ModelId.init(
+                    input.target.model,
+                ) catch unreachable },
+                .source_candidate = source_candidate,
+                .catalog_intent = .committed,
             } };
         }
 
@@ -1360,10 +1449,10 @@ pub const Account = struct {
             .default_changed,
             self.state.activeAttempt().?,
         );
-        result.transition.catalog_intent = if (self.state.attemptKind() == .catalog)
-            .promote_candidate
-        else
-            .committed;
+        result.transition.catalog_intent = switch (self.state.transaction.persisting_model.source) {
+            .catalog => .promote_candidate,
+            .preference, .resolved => .committed,
+        };
         result.transition.preference_intent = .commit_pending;
         return result;
     }
@@ -2016,7 +2105,10 @@ test "fake browser client and store observe only committed effects" {
     prepared.commit(&account);
     try std.testing.expect(sink.submit(1, .load_api_keys));
     try std.testing.expect(sink.submit(1, .{
-        .prepare_source_candidate = try .init("model-1"),
+        .prepare_source_candidate = .{
+            .model = try .init("model-1"),
+            .metask_source_generation = 0,
+        },
     }));
     try std.testing.expectEqual(@as(usize, 1), dependencies.browser_calls);
     try std.testing.expectEqual(@as(usize, 1), dependencies.client_calls);
@@ -2385,7 +2477,12 @@ test "Metask source resolution rebuilds the committed candidate without a prefer
         .transition => |value| value,
         else => return error.TestUnexpectedResult,
     };
-    try std.testing.expect(prepare_source_candidate.takeEffect().? == .prepare_source_candidate);
+    const resolution_effect = prepare_source_candidate.takeEffect().?;
+    try std.testing.expect(resolution_effect == .prepare_source_candidate);
+    try std.testing.expectEqual(
+        @as(u64, 9),
+        resolution_effect.prepare_source_candidate.metask_source_generation,
+    );
     commitPrepared(&account, &prepare_source_candidate);
 
     var candidate = try execution_contract.OwnedSourceCandidate.initOwned(
@@ -2769,15 +2866,66 @@ test "ready source model selection updates the default without changing authorit
         .transition => |value| value,
         else => return error.TestUnexpectedResult,
     };
-    try std.testing.expect(select_model.takeEffect().? == .persist_default_model);
+    try std.testing.expect(select_model.takeEffect().? == .load_api_keys);
     commitPrepared(&account, &select_model);
     view = account.view();
-    try std.testing.expectEqual(OperationKind.persisting_model, account.state.operation());
+    try std.testing.expectEqual(OperationKind.loading_keys, account.state.operation());
     try std.testing.expectEqual(contract.CatalogState.loading, view.catalog_state);
     try std.testing.expectEqualStrings("key-old", view.selected_api_key_id);
     try std.testing.expectEqualStrings("model-old", view.selected_model);
     try std.testing.expectEqualStrings("model-new", view.candidate_model);
     try std.testing.expectEqual(@as(u64, 9), account.sourceGeneration());
+
+    var keys_loaded: WorkerCompletion = .{
+        .attempt_id = account.activeAttempt().?,
+        .payload = .api_keys_loaded,
+    };
+    var load_models = switch (account.prepareCompletion(&keys_loaded)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(load_models.takeEffect().? == .load_models);
+    commitPrepared(&account, &load_models);
+
+    var models_loaded: WorkerCompletion = .{
+        .attempt_id = account.activeAttempt().?,
+        .payload = .models_loaded,
+    };
+    var prepare_candidate = switch (account.prepareCompletion(&models_loaded)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    const candidate_effect = prepare_candidate.takeEffect().?;
+    try std.testing.expect(candidate_effect == .prepare_source_candidate);
+    try std.testing.expectEqual(
+        @as(u64, 9),
+        candidate_effect.prepare_source_candidate.metask_source_generation,
+    );
+    commitPrepared(&account, &prepare_candidate);
+
+    var candidate = try execution_contract.OwnedSourceCandidate.initOwned(
+        std.testing.allocator,
+        .metask,
+        .anthropic_messages,
+        try std.testing.allocator.dupe(u8, "model-new"),
+        try std.testing.allocator.dupe(u8, contract.metask_anthropic_messages_url),
+        9,
+        try std.testing.allocator.dupe(u8, "secret"),
+        "fixture-provider",
+    );
+    var candidate_ready: WorkerCompletion = .{
+        .attempt_id = account.activeAttempt().?,
+        .payload = .{ .source_candidate_ready = candidate.take() },
+    };
+    defer candidate_ready.deinit();
+    var persist_model = switch (account.prepareCompletion(&candidate_ready)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    var staged_candidate = persist_model.takeSourceCandidate().?;
+    defer staged_candidate.deinit();
+    try std.testing.expect(persist_model.takeEffect().? == .persist_default_model);
+    commitPrepared(&account, &persist_model);
 
     var persisted: WorkerCompletion = .{
         .attempt_id = account.activeAttempt().?,
@@ -2791,6 +2939,7 @@ test "ready source model selection updates the default without changing authorit
         PreferenceIntent.commit_pending,
         completed.preferenceIntent(),
     );
+    try std.testing.expectEqual(CatalogIntent.committed, completed.catalogIntent());
     commitPrepared(&account, &completed);
     view = account.view();
     try std.testing.expectEqual(OperationKind.none, account.state.operation());
