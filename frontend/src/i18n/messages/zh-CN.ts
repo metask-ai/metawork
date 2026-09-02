@@ -87,11 +87,16 @@ export const zhCN: Record<MessageId, string> = {
     "该账号操作已不可用，MetaWork 已保留最新账号状态。",
   "account.command_failed":
     "MetaWork 无法完成该账号操作，请使用此处显示的恢复操作。",
+  "execution.command_rejected": "默认模型来源未更新，请刷新执行状态后重试。",
+  "execution.command_failed":
+    "MetaWork 无法完成默认模型来源操作，请使用执行区域显示的恢复操作。",
   "account.cancel_rejected": "该账号操作已经结束，MetaWork 已检查最新状态。",
   "account.cancel_failed":
     "MetaWork 无法取消该账号操作；Host 仍会在截止时间到达时自动收口。",
   "account.updated": "Metask 账号已更新。",
+  "execution.updated": "默认模型来源已更新。",
   "operation.account": "更新 Metask 账号",
+  "operation.execution": "更新默认模型来源",
   "operation.account_cancel": "取消 Metask 账号操作",
   "command.timeout_reconciled":
     "{operation}等待时间超出预期。MetaWork 已核对 Host 当前状态，且没有重复执行该操作。",

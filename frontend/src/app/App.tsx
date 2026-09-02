@@ -236,6 +236,7 @@ export default function App() {
     ),
   );
   const [accountBusy, setAccountBusy] = useState(false);
+  const [executionBusy, setExecutionBusy] = useState(false);
   const [workspaceBusy, setWorkspaceBusy] = useState(false);
   const [permissionBusy, setPermissionBusy] = useState(false);
   const [newTaskPermissionOverride, setNewTaskPermissionOverride] =
@@ -267,6 +268,7 @@ export default function App() {
   const taskPendingScopes = useRef(new PendingScopes());
   const cancelPendingTasks = useRef(new PendingScopes());
   const accountBusyRef = useRef(false);
+  const executionBusyRef = useRef(false);
   const accountCancelBusyRef = useRef(false);
   const workspaceBusyRef = useRef(false);
   const connectionBusyRef = useRef(false);
@@ -643,8 +645,7 @@ export default function App() {
       !accountSetupRedirected ||
       accountSetupRequired ||
       route !== "workbench" ||
-      snapshot.account.state !== "authenticated" ||
-      !snapshot.execution.taskCreationAvailable
+      snapshot.account.state !== "authenticated"
     )
       return;
     setAccountSetupRedirected(false);
@@ -658,7 +659,6 @@ export default function App() {
     route,
     settingsOpen,
     snapshot.account.state,
-    snapshot.execution.taskCreationAvailable,
   ]);
 
   const workbenchMutationDisabled = bridgeUnavailable;
@@ -1191,6 +1191,48 @@ export default function App() {
     }
   }
 
+  async function runExecutionCommand(
+    invoke: () => Promise<{
+      accepted: boolean;
+      errorCode: string;
+    }>,
+  ) {
+    if (bridgeUnavailable || executionBusyRef.current) return false;
+    executionBusyRef.current = true;
+    setExecutionBusy(true);
+    try {
+      const result = await invoke();
+      if (!result.accepted) {
+        await refreshSnapshot().catch(() => undefined);
+        setStatus(
+          attentionStatus("execution.command_rejected", {
+            scope: "execution",
+          }),
+        );
+        return false;
+      }
+      await refreshAfterCommit("execution.updated", "operation.execution", {
+        scope: "execution",
+      });
+      return true;
+    } catch (error) {
+      if (
+        await reconcileCommandTimeout(error, "operation.execution", {
+          scope: "execution",
+        })
+      )
+        return false;
+      await refreshSnapshot().catch(() => undefined);
+      setStatus(
+        attentionStatus("execution.command_failed", { scope: "execution" }),
+      );
+      return false;
+    } finally {
+      executionBusyRef.current = false;
+      setExecutionBusy(false);
+    }
+  }
+
   async function selectModelForTask(selectionId: string) {
     const task = activeTask;
     if (!task || bridgeUnavailable) return;
@@ -1416,16 +1458,6 @@ export default function App() {
     }
     setSettingsFocus(target);
     setSettingsOpen(true);
-    const refreshesMetaskAccount = target === "account";
-    if (
-      !refreshesMetaskAccount ||
-      bridgeUnavailable ||
-      accountBusyRef.current ||
-      snapshot.account.state !== "authenticated" ||
-      snapshot.account.catalogState === "loading"
-    )
-      return;
-    void runAccountCommand(() => client.refreshAccountCatalog());
   }
 
   function closeSettings() {
@@ -2439,7 +2471,7 @@ export default function App() {
       modelEditable={newTaskDraftActive || taskModelPolicy.authorityExact}
       modelSelectionDisabled={
         bridgeUnavailable ||
-        accountBusy ||
+        (customModelConnectionSelected ? executionBusy : accountBusy) ||
         (newTaskDraftActive
           ? newTaskModelOptions.length === 0 ||
             (!customModelConnectionSelected &&
@@ -2447,7 +2479,7 @@ export default function App() {
           : !taskModelPolicy.catalogUsable)
       }
       modelSelectionPending={
-        accountBusy ||
+        (customModelConnectionSelected ? executionBusy : accountBusy) ||
         (!newTaskDraftActive || !customModelConnectionSelected
           ? snapshot.account.catalogState === "loading"
           : false)
@@ -2493,7 +2525,7 @@ export default function App() {
       onSelectModel={(id) =>
         newTaskDraftActive
           ? customModelConnectionSelected && activeModelConnection
-            ? void runAccountCommand(() =>
+            ? void runExecutionCommand(() =>
                 client.selectDefaultModelConnection(
                   activeModelConnection.id,
                   activeModelConnection.connectionGeneration,
@@ -2784,7 +2816,9 @@ export default function App() {
               connectionTest: snapshot.capabilities.modelConnectionTest,
             }}
             focusTarget={settingsFocus}
-            disabled={bridgeUnavailable || accountBusy}
+            disabled={bridgeUnavailable}
+            accountDisabled={accountBusy}
+            executionDisabled={executionBusy}
             cancelDisabled={viewSyncFailed || !bridgeReady || accountCancelBusy}
             onBack={closeSettings}
             onRefresh={() =>
@@ -2802,26 +2836,26 @@ export default function App() {
               )
             }
             onActivateMetask={() =>
-              void runAccountCommand(() => client.selectMetaskDefault())
+              void runExecutionCommand(() => client.selectMetaskDefault())
             }
             onCreateModelConnection={(input) =>
-              runAccountCommand(() => client.createModelConnection(input))
+              runExecutionCommand(() => client.createModelConnection(input))
             }
             onUpdateModelConnection={(input) =>
-              runAccountCommand(() => client.updateModelConnection(input))
+              runExecutionCommand(() => client.updateModelConnection(input))
             }
             onRemoveModelConnection={(connectionId, generation) =>
-              runAccountCommand(() =>
+              runExecutionCommand(() =>
                 client.removeModelConnection(connectionId, generation),
               )
             }
             onTestModelConnection={(connectionId, generation, modelId) =>
-              void runAccountCommand(() =>
+              void runExecutionCommand(() =>
                 client.testModelConnection(connectionId, generation, modelId),
               )
             }
             onSelectModelConnection={(connectionId, generation, modelId) =>
-              void runAccountCommand(() =>
+              void runExecutionCommand(() =>
                 client.selectDefaultModelConnection(
                   connectionId,
                   generation,

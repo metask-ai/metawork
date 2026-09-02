@@ -93,12 +93,18 @@ export const enUS = {
     "That account action is no longer available. MetaWork kept the latest account state.",
   "account.command_failed":
     "MetaWork could not complete that account action. Use the recovery action shown here.",
+  "execution.command_rejected":
+    "The default model source was not updated. Refresh execution state and try again.",
+  "execution.command_failed":
+    "MetaWork could not complete the default model source action. Use the recovery action shown in Execution.",
   "account.cancel_rejected":
     "That account action has already finished. MetaWork checked the latest state.",
   "account.cancel_failed":
     "MetaWork could not cancel the account action. It will still stop at its Host deadline.",
   "account.updated": "Metask account updated.",
+  "execution.updated": "Default model source updated.",
   "operation.account": "Updating the Metask account",
+  "operation.execution": "Updating the default model source",
   "operation.account_cancel": "Cancelling the Metask account action",
   "command.timeout_reconciled":
     "{operation} took longer than expected. MetaWork checked the current Host state and did not repeat the action.",

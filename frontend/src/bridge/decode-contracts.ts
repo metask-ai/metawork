@@ -3,6 +3,7 @@ import {
   permissionProfiles,
   runCauses,
   type AccountCommandResult,
+  type ExecutionCommandResult,
   type AccountView,
   type ExecutionView,
   type ModelMetadata,
@@ -187,6 +188,16 @@ const accountErrorCodes = [
   "recovery_state_invalid",
   "local_resource_exhausted",
   "account_operation_failed",
+] as const;
+const executionCommandErrorCodes = [
+  "none",
+  "operation_in_progress",
+  "user_cancelled",
+  "generation_mismatch",
+  "no_models",
+  "local_resource_exhausted",
+  "credential_store_write_failed",
+  "execution_in_use",
   "model_connection_invalid",
   "model_connection_not_found",
   "model_connection_capture_unavailable",
@@ -3370,6 +3381,22 @@ export function decodeAccountCommandResult(
   if (!accepted && attemptId !== null)
     fail("$", "a rejected command cannot expose an attempt");
   return { accepted, errorCode, attemptId };
+}
+
+export function decodeExecutionCommandResult(
+  value: unknown,
+): ExecutionCommandResult {
+  const item = object(value, "$", ["accepted", "errorCode", "attemptId"]);
+  const accepted = booleanValue(item.accepted, "$.accepted");
+  const errorCode = enumValue(
+    item.errorCode,
+    "$.errorCode",
+    executionCommandErrorCodes,
+  );
+  if (item.attemptId !== null) fail("$.attemptId", "expected null");
+  if (accepted !== (errorCode === "none"))
+    fail("$", "accepted and errorCode must agree");
+  return { accepted, errorCode, attemptId: null };
 }
 
 export function decodeRendererBridgeConnect(value: unknown) {

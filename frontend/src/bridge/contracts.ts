@@ -46,7 +46,17 @@ export type AccountErrorCode =
   | "generation_mismatch"
   | "recovery_state_invalid"
   | "local_resource_exhausted"
-  | "account_operation_failed"
+  | "account_operation_failed";
+
+export type ExecutionCommandErrorCode =
+  | "none"
+  | "operation_in_progress"
+  | "user_cancelled"
+  | "generation_mismatch"
+  | "no_models"
+  | "local_resource_exhausted"
+  | "credential_store_write_failed"
+  | "execution_in_use"
   | "model_connection_invalid"
   | "model_connection_not_found"
   | "model_connection_capture_unavailable"
@@ -159,6 +169,12 @@ export type AccountCommandResult = {
   accepted: boolean;
   errorCode: AccountErrorCode;
   attemptId: string | null;
+};
+
+export type ExecutionCommandResult = {
+  accepted: boolean;
+  errorCode: ExecutionCommandErrorCode;
+  attemptId: null;
 };
 
 export type FileReferenceView = {

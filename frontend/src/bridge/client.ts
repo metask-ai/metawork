@@ -29,6 +29,7 @@ import {
   assertTaskFlag,
   assertUiResponseAccepted,
   decodeAccountCommandResult,
+  decodeExecutionCommandResult,
   decodeCatalogRefreshResult,
   decodeSkillCatalogRefreshResult,
   decodeHostSignalEvent,
@@ -515,10 +516,7 @@ export class BridgeClient {
     );
   }
 
-  async selectApiKey(
-    selectionId: string,
-    expectedCatalogGeneration: string,
-  ) {
+  async selectApiKey(selectionId: string, expectedCatalogGeneration: string) {
     return decodeAccountCommandResult(
       await this.invoke(commands.accountSelectApiKey, {
         selectionId,
@@ -527,10 +525,7 @@ export class BridgeClient {
     );
   }
 
-  async selectModel(
-    selectionId: string,
-    expectedCatalogGeneration: string,
-  ) {
+  async selectModel(selectionId: string, expectedCatalogGeneration: string) {
     return decodeAccountCommandResult(
       await this.invoke(commands.accountSelectModel, {
         selectionId,
@@ -540,7 +535,7 @@ export class BridgeClient {
   }
 
   async selectMetaskDefault() {
-    return decodeAccountCommandResult(
+    return decodeExecutionCommandResult(
       await this.invoke(commands.selectMetaskDefault, {}),
     );
   }
@@ -552,7 +547,7 @@ export class BridgeClient {
     modelId: string;
     modelDisplayName?: string;
   }) {
-    return decodeAccountCommandResult(
+    return decodeExecutionCommandResult(
       await this.invoke(commands.modelConnectionCreate, input),
     );
   }
@@ -564,7 +559,7 @@ export class BridgeClient {
     protocol: Protocol;
     normalizedBaseUrl: string;
   }) {
-    return decodeAccountCommandResult(
+    return decodeExecutionCommandResult(
       await this.invoke(commands.modelConnectionUpdate, input),
     );
   }
@@ -573,7 +568,7 @@ export class BridgeClient {
     connectionId: string,
     expectedConnectionGeneration: string,
   ) {
-    return decodeAccountCommandResult(
+    return decodeExecutionCommandResult(
       await this.invoke(commands.modelConnectionRemove, {
         connectionId,
         expectedConnectionGeneration,
@@ -586,7 +581,7 @@ export class BridgeClient {
     expectedConnectionGeneration: string,
     modelId: string,
   ) {
-    return decodeAccountCommandResult(
+    return decodeExecutionCommandResult(
       await this.invoke(commands.modelConnectionTest, {
         connectionId,
         expectedConnectionGeneration,
@@ -600,7 +595,7 @@ export class BridgeClient {
     expectedConnectionGeneration: string,
     modelId: string,
   ) {
-    return decodeAccountCommandResult(
+    return decodeExecutionCommandResult(
       await this.invoke(commands.modelConnectionSelectDefault, {
         connectionId,
         expectedConnectionGeneration,

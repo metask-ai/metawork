@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   assertDisconnected,
   decodeAccountCommandResult,
+  decodeExecutionCommandResult,
   assertSignalAcknowledged,
   assertTaskArchived,
   assertTaskFlag,
@@ -672,6 +673,39 @@ test("Account command acknowledgements preserve state-machine and attempt identi
   );
 });
 
+test("Execution command acknowledgements stay outside the Account error domain", () => {
+  assert.deepEqual(
+    decodeExecutionCommandResult({
+      accepted: false,
+      errorCode: "model_connection_persistence_unavailable",
+      attemptId: null,
+    }),
+    {
+      accepted: false,
+      errorCode: "model_connection_persistence_unavailable",
+      attemptId: null,
+    },
+  );
+  assert.throws(
+    () =>
+      decodeAccountCommandResult({
+        accepted: false,
+        errorCode: "model_connection_persistence_unavailable",
+        attemptId: null,
+      }),
+    /unexpected value/,
+  );
+  assert.throws(
+    () =>
+      decodeExecutionCommandResult({
+        accepted: false,
+        errorCode: "model_connection_invalid",
+        attemptId: "41",
+      }),
+    /expected null/,
+  );
+});
+
 test("Task metadata mutation acknowledgements are identity-checked and exact", () => {
   assert.deepEqual(
     decodeTaskCreateResult({
@@ -806,7 +840,6 @@ test("Model Connection readiness survives an isolated failed retest", () => {
     errorCode: "none",
     safeDiagnostic: "",
     catalogGeneration: "0",
-    metaskExecutionGeneration: "0",
   };
   snapshot.execution = {
     state: "ready",
@@ -1141,11 +1174,11 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   delete legacyRunInput.tasks[0].runs[0].input;
   assert.throws(() => decodeWorkbenchSnapshot(legacyRunInput), /expected keys/);
 
-  const invalidReadyAccount = clone(fixture);
-  invalidReadyAccount.account.metaskExecutionGeneration = "0";
+  const legacyAccountGeneration = clone(fixture);
+  legacyAccountGeneration.account.metaskExecutionGeneration = "0";
   assert.throws(
-    () => decodeWorkbenchSnapshot(invalidReadyAccount),
-    /ready catalog requires/,
+    () => decodeWorkbenchSnapshot(legacyAccountGeneration),
+    /expected keys/,
   );
 
   const readyAccountWithoutInstalledExecution = clone(fixture);
@@ -1254,7 +1287,6 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   loadingIdentity.account.selectedApiKeySelectionId = "";
   loadingIdentity.account.selectedModelSelectionId = "";
   loadingIdentity.account.modelCatalogApiKeySelectionId = "";
-  loadingIdentity.account.metaskExecutionGeneration = "0";
   loadingIdentity.execution = {
     state: "unavailable",
     defaultSource: null,

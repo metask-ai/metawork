@@ -34,7 +34,6 @@ function account(overrides = {}) {
     models: [{ selectionId: "gpt-5", displayName: "GPT-5" }],
     selectedApiKeySelectionId: "key-1",
     catalogGeneration: "9",
-    metaskExecutionGeneration: "7",
     ...overrides,
   };
 }

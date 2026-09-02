@@ -1249,9 +1249,10 @@ pub const Dispatcher = struct {
             invocation.request.payload,
         );
         defer parsed.deinit();
-        return encodeAccountResult(
+        const control = self.control orelse return error.DispatcherUnavailable;
+        return encodeExecutionResult(
             output,
-            self.account_commands.submit(.resolve_metask_source),
+            control.selectMetaskDefault(self.account_commands),
         );
     }
 
@@ -4868,6 +4869,22 @@ test "Dispatcher validates authority before domain calls and preserves committed
         snapshot,
         "\"permissionProfile\":\"approval_required\"",
     ) != null);
+
+    harness.account_result = .acceptedAttempt(57);
+    const metask_default = native_dispatcher.dispatch(
+        "{\"id\":\"metask-default\",\"command\":\"metawork.modelSources.selectMetaskDefault\",\"payload\":{}}",
+        source,
+        &response,
+    );
+    // Product owns this command and rejects a switch when no custom default is
+    // active, without manufacturing an Account operation or attempt identity.
+    try std.testing.expectEqual(@as(usize, 3), harness.account_calls);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        metask_default,
+        "\"accepted\":false,\"errorCode\":\"model_connection_invalid\",\"attemptId\":null",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(u8, metask_default, "\"57\"") == null);
 
     const generation = dispatcher.productDelivery().connectedGeneration().?;
     const unused_grant = try dispatcher.grants.issue(generation, source.window_id, "/tmp");

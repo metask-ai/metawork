@@ -330,7 +330,6 @@ const readySettingsAccount = {
   errorCode: "none",
   safeDiagnostic: "",
   catalogGeneration: "1",
-  metaskExecutionGeneration: "1",
 };
 
 const readySettingsExecution = {
@@ -370,6 +369,8 @@ function settingsElement(account, execution, overrides = {}) {
       },
       focusTarget: "title",
       disabled: false,
+      accountDisabled: false,
+      executionDisabled: false,
       cancelDisabled: false,
       onBack() {},
       onRefresh() {},
@@ -506,7 +507,6 @@ test("Settings completes the API transaction before replacing committed defaults
     selectedApiKeySelectionId: "key-2",
     selectedModelSelectionId: "model-2",
     modelCatalogApiKeySelectionId: "key-2",
-    metaskExecutionGeneration: "2",
   });
   assert.match(
     screen.getByRole("combobox", { name: "Default API" }).textContent,
