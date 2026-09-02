@@ -11,6 +11,7 @@ const task_persistence = @import("product_task_persistence");
 const task_policy = @import("product_task_policy");
 const task_view = @import("product_task_view");
 const checkpoint_store = @import("product_task_checkpoint_store");
+const file_change_store = @import("product_task_file_change_store");
 const task_execution = @import("product_task_execution");
 const task_attachment = @import("product_task_attachment");
 const task_deletion = @import("product_task_deletion");
@@ -50,14 +51,54 @@ pub const FileReference = struct {
     range: ?FileRange,
 };
 
+pub const FileChangeArtifactReference = struct {
+    artifact: task_state.FileChangeArtifact,
+    diff_complete: bool,
+    redacted: bool,
+};
+
 pub const EventProjection = task_state.EventProjection;
+pub const FileChangeDiffAdmission = union(enum) {
+    queued: struct { redacted: bool },
+    unavailable,
+};
+pub const FileChangeDiffEffects = struct {
+    context: *anyopaque,
+    enqueue_fn: *const fn (
+        *anyopaque,
+        u64,
+        u64,
+        u64,
+        []const u8,
+    ) FileChangeDiffAdmission,
+
+    fn enqueue(
+        self: FileChangeDiffEffects,
+        task_id: u64,
+        run_generation: u64,
+        change_order: u64,
+        content: []const u8,
+    ) FileChangeDiffAdmission {
+        return self.enqueue_fn(
+            self.context,
+            task_id,
+            run_generation,
+            change_order,
+            content,
+        );
+    }
+};
 pub const EventEffects = struct {
     text: TextProjection,
+    file_change_diff: FileChangeDiffEffects,
     max_assistant_message_bytes: usize,
     max_commentary_segments_per_run: usize,
     max_tool_field_bytes: usize,
     max_file_refs_per_tool: usize,
     max_file_ref_field_bytes: usize,
+    max_file_changes_per_run: usize = 256,
+    max_file_change_field_bytes: usize = 4096,
+    max_file_change_diff_bytes: usize = 256 * 1024,
 };
 pub const EventOutcome = union(enum) {
     unknown,
@@ -184,6 +225,7 @@ pub const OperationLimits = struct {
     max_tool_field_bytes: usize,
     max_terminal_diagnostic_bytes: usize,
     max_tools_per_run: usize,
+    max_file_changes_per_run: usize = 256,
     max_commentary_segments_per_run: usize,
     max_skill_arguments: usize,
     max_task_title_bytes: usize,
@@ -510,6 +552,7 @@ pub const DeletionEffects = struct {
     release_session_fn: *const fn (*anyopaque, u64) SessionReleaseOutcome,
     commit_without_task_fn: *const fn (*anyopaque, u64) DurableCommit,
     delete_checkpoint_task_fn: *const fn (*anyopaque, u64) void,
+    delete_file_change_task_fn: *const fn (*anyopaque, u64) void,
     release: ReleaseEffects,
 
     fn releaseSession(self: DeletionEffects, task_id: u64) SessionReleaseOutcome {
@@ -522,6 +565,10 @@ pub const DeletionEffects = struct {
 
     fn deleteCheckpointTask(self: DeletionEffects, task_id: u64) void {
         self.delete_checkpoint_task_fn(self.context, task_id);
+    }
+
+    fn deleteFileChangeTask(self: DeletionEffects, task_id: u64) void {
+        self.delete_file_change_task_fn(self.context, task_id);
     }
 };
 
@@ -1762,6 +1809,7 @@ pub const Runtime = struct {
                     switch (effects.commitWithoutTask(workspace_id)) {
                         .committed => {
                             effects.deleteCheckpointTask(task_id);
+                            effects.deleteFileChangeTask(task_id);
                             deinitTask(self, &removed, effects.release);
                             result.changed = true;
                         },
@@ -2003,6 +2051,7 @@ pub const Runtime = struct {
             .replace_text_fn = replaceEventText,
             .find_or_create_tool_fn = findOrCreateEventTool,
             .replace_file_references_fn = replaceEventFileReferences,
+            .record_file_changes_fn = recordEventFileChanges,
         };
         return switch (try task_state.applyEvent(task, envelope, projection)) {
             .unknown => .unknown,
@@ -2015,6 +2064,108 @@ pub const Runtime = struct {
                 .durable_boundary = application.durable_boundary,
             } },
         };
+    }
+
+    pub fn completeFileChangeArtifact(
+        self: *Runtime,
+        task_id: u64,
+        run_generation: u64,
+        change_order: u64,
+        identity: ?task_state.FileChangeArtifact,
+        redacted: bool,
+    ) bool {
+        const task = self.find(task_id) orelse return false;
+        var run: ?*task_state.RunRecord = null;
+        for (task.durable.runs) |*entry| {
+            const candidate = &(entry.* orelse continue);
+            if (candidate.generation == run_generation) {
+                run = candidate;
+                break;
+            }
+        }
+        const target_run = run orelse return false;
+        var target: ?*task_state.FileChangeView = null;
+        for (target_run.file_changes) |*entry| {
+            const change = &(entry.* orelse continue);
+            if (change.order == change_order) {
+                target = change;
+                break;
+            }
+        }
+        if (target_run.pending_file_change_artifacts == 0) return false;
+        target_run.pending_file_change_artifacts -= 1;
+        const change = target orelse {
+            _ = markFileChangesIncomplete(target_run);
+            return true;
+        };
+        if (identity) |artifact| {
+            if (artifact.run_generation == run_generation and
+                artifact.change_order == change_order)
+                change.artifact = artifact
+            else
+                _ = markFileChangesIncomplete(target_run);
+        } else _ = markFileChangesIncomplete(target_run);
+        change.redacted = change.redacted or redacted;
+        if (target_run.event_stream_finalized and
+            target_run.pending_file_change_artifacts == 0 and
+            target_run.file_change_observation == .collecting)
+        {
+            const terminal = task_state.terminalPayload(target_run).?;
+            target_run.file_change_observation = if (terminal.phase == .completed and !target_run.file_changes_known_loss) .complete else .incomplete;
+        }
+        task.durable.recent_order = self.takeRecentOrder();
+        return true;
+    }
+
+    pub fn fileChangeArtifact(
+        self: *const Runtime,
+        task_id: u64,
+        run_id: u64,
+        file_change_id: []const u8,
+    ) ?FileChangeArtifactReference {
+        const task = self.findConst(task_id) orelse return null;
+        var run: ?*const task_state.RunRecord = null;
+        for (task.durable.runs) |*entry| {
+            const candidate = &(entry.* orelse continue);
+            if (candidate.id == run_id) {
+                run = candidate;
+                break;
+            }
+        }
+        const target_run = run orelse return null;
+        for (target_run.file_changes) |entry| {
+            const change = entry orelse continue;
+            if (!std.mem.eql(u8, change.id, file_change_id)) continue;
+            return .{
+                .artifact = change.artifact orelse return null,
+                .diff_complete = change.diff_complete,
+                .redacted = change.redacted,
+            };
+        }
+        return null;
+    }
+
+    pub fn ownsFileChangeArtifact(
+        self: *const Runtime,
+        identity: task_state.FileChangeArtifact,
+        task_id: u64,
+    ) bool {
+        const task = self.findConst(task_id) orelse return false;
+        for (task.durable.runs) |*entry| {
+            const run = &(entry.* orelse continue);
+            if (run.generation != identity.run_generation) continue;
+            for (run.file_changes) |change_entry| {
+                const change = change_entry orelse continue;
+                if (change.order != identity.change_order) continue;
+                const artifact = change.artifact orelse return false;
+                return artifact.run_generation == identity.run_generation and
+                    artifact.change_order == identity.change_order and
+                    artifact.byte_size == identity.byte_size and
+                    std.mem.eql(u8, &artifact.digest, &identity.digest);
+            }
+            return false;
+        }
+        return false;
     }
 
     pub fn recordEventProjectionFailure(
@@ -2224,6 +2375,49 @@ pub const Runtime = struct {
                 .release,
             );
         };
+    }
+
+    pub fn cleanupFileChangeStoreNoFail(
+        self: *Runtime,
+        store: *file_change_store.FileStore,
+        max_bytes: usize,
+    ) void {
+        var reference_count: usize = 0;
+        for (self.tasks) |entry| {
+            const task = entry orelse continue;
+            for (task.durable.runs) |run_entry| {
+                const run = run_entry orelse continue;
+                for (run.file_changes) |change_entry| {
+                    const change = change_entry orelse continue;
+                    if (change.artifact != null) reference_count += 1;
+                }
+            }
+        }
+        const references = self.allocator.alloc(
+            file_change_store.Identity,
+            reference_count,
+        ) catch return;
+        defer self.allocator.free(references);
+        var index: usize = 0;
+        for (self.tasks) |entry| {
+            const task = entry orelse continue;
+            for (task.durable.runs) |run_entry| {
+                const run = run_entry orelse continue;
+                for (run.file_changes) |change_entry| {
+                    const change = change_entry orelse continue;
+                    const artifact = change.artifact orelse continue;
+                    references[index] = .{
+                        .task_id = task.durable.id,
+                        .run_generation = artifact.run_generation,
+                        .change_order = artifact.change_order,
+                        .digest = artifact.digest,
+                        .byte_size = artifact.byte_size,
+                    };
+                    index += 1;
+                }
+            }
+        }
+        store.cleanupOrphans(self.allocator, references, max_bytes) catch return;
     }
 
     fn syncCheckpointPostprocess(
@@ -3636,6 +3830,258 @@ fn clearEventFileReferences(context: *EventContext, tool: *task_state.ToolView) 
     }
 }
 
+fn recordEventFileChanges(
+    raw_context: *anyopaque,
+    run: *task_state.RunRecord,
+    envelope: *const agent.OwnedCoreEvent,
+    task_id: u64,
+    workspace_root: []const u8,
+) bool {
+    const context: *EventContext = @ptrCast(@alignCast(raw_context));
+    const event = switch (envelope.event.value) {
+        .unknown => unreachable,
+        .known => |known| known,
+    };
+    const observation = switch (event) {
+        .file_changes => |value| value,
+        else => unreachable,
+    };
+    var changed = false;
+    if (observation.overflow or observation.lost)
+        changed = markFileChangesIncomplete(run) or changed;
+    for (observation.changes, 0..) |change, index| {
+        const status: task_state.FileChangeStatus = switch (change.status) {
+            .applied => .applied,
+            .partial => .partial,
+            .no_change, .failed, .rejected => continue,
+        };
+        const kind: task_state.FileChangeKind = switch (change.kind) {
+            .created => .created,
+            .modified => .modified,
+            .deleted => .deleted,
+            .moved => .moved,
+        };
+        const route_digest = fileChangeRouteDigest(observation.id, index);
+        if (findFileChangeByRouteDigest(run.file_changes, route_digest) != null)
+            continue;
+        const slot = findEmptyFileChange(run.file_changes) orelse {
+            changed = markFileChangesIncomplete(run) or changed;
+            break;
+        };
+        var path_storage: [4096]u8 = undefined;
+        const display_path = normalizedFileChangePath(
+            change.locator,
+            workspace_root,
+            &path_storage,
+        ) orelse {
+            changed = markFileChangesIncomplete(run) or changed;
+            continue;
+        };
+        var from_storage: [4096]u8 = undefined;
+        const from_display_path = if (kind == .moved) blk: {
+            const from = change.from_locator orelse {
+                changed = markFileChangesIncomplete(run) or changed;
+                continue;
+            };
+            break :blk normalizedFileChangePath(
+                from,
+                workspace_root,
+                &from_storage,
+            ) orelse {
+                changed = markFileChangesIncomplete(run) or changed;
+                continue;
+            };
+        } else null;
+        const order = run.next_activity_order;
+        var id_storage: [task_state.file_change_product_id_capacity]u8 = undefined;
+        const product_id = std.fmt.bufPrint(
+            &id_storage,
+            "change-{d}-{d}-{d}",
+            .{ task_id, run.generation, order },
+        ) catch unreachable;
+        var owned_id: ?[]u8 = null;
+        var owned_path: ?[]u8 = null;
+        var owned_from: ?[]u8 = null;
+        const id_projection = context.effects.text.project(
+            product_id,
+            product_id.len,
+            &.{},
+            0,
+        ) catch {
+            changed = markFileChangesIncomplete(run) or changed;
+            continue;
+        };
+        owned_id = id_projection.value;
+        const path_projection = context.effects.text.project(
+            display_path,
+            context.effects.max_file_change_field_bytes,
+            run.redaction_secret,
+            0,
+        ) catch {
+            context.effects.text.discardCandidate(owned_id.?);
+            changed = markFileChangesIncomplete(run) or changed;
+            continue;
+        };
+        owned_path = path_projection.value;
+        if (path_projection.truncated) {
+            context.effects.text.discardCandidate(owned_path.?);
+            context.effects.text.discardCandidate(owned_id.?);
+            changed = markFileChangesIncomplete(run) or changed;
+            continue;
+        }
+        var from_redacted = false;
+        if (from_display_path) |from| {
+            const from_projection = context.effects.text.project(
+                from,
+                context.effects.max_file_change_field_bytes,
+                run.redaction_secret,
+                0,
+            ) catch {
+                context.effects.text.discardCandidate(owned_path.?);
+                context.effects.text.discardCandidate(owned_id.?);
+                changed = markFileChangesIncomplete(run) or changed;
+                continue;
+            };
+            owned_from = from_projection.value;
+            if (from_projection.truncated) {
+                context.effects.text.discardCandidate(owned_from.?);
+                context.effects.text.discardCandidate(owned_path.?);
+                context.effects.text.discardCandidate(owned_id.?);
+                changed = markFileChangesIncomplete(run) or changed;
+                continue;
+            }
+            from_redacted = from_projection.redacted;
+        }
+        run.file_changes[slot] = .{
+            .route_digest = route_digest,
+            .id = owned_id.?,
+            .order = takeActivityOrder(run),
+            .kind = kind,
+            .status = status,
+            .display_path = owned_path.?,
+            .from_display_path = owned_from,
+            .before_bytes = change.before_bytes,
+            .after_bytes = change.after_bytes,
+            .diff_complete = change.diff_complete,
+            .redacted = path_projection.redacted or from_redacted,
+        };
+        std.debug.assert(run.file_changes[slot].?.order == order);
+        if (change.unified_diff) |diff| if (diff.len != 0) {
+            switch (context.effects.file_change_diff.enqueue(
+                task_id,
+                run.generation,
+                order,
+                diff,
+            )) {
+                .queued => |queued| {
+                    run.pending_file_change_artifacts += 1;
+                    run.file_changes[slot].?.redacted =
+                        run.file_changes[slot].?.redacted or queued.redacted;
+                },
+                .unavailable => changed = markFileChangesIncomplete(run) or changed,
+            }
+        };
+        changed = true;
+    }
+    return changed;
+}
+
+fn markFileChangesIncomplete(run: *task_state.RunRecord) bool {
+    run.file_changes_known_loss = true;
+    if (run.file_change_observation == .incomplete) return false;
+    run.file_change_observation = .incomplete;
+    return true;
+}
+
+fn fileChangeRouteDigest(
+    event_id: []const u8,
+    index: usize,
+) [task_state.file_change_route_digest_bytes]u8 {
+    var digest = std.crypto.hash.sha2.Sha256.init(.{});
+    digest.update(event_id);
+    digest.update(&.{0});
+    var index_bytes: [8]u8 = undefined;
+    std.mem.writeInt(u64, &index_bytes, @intCast(index), .big);
+    digest.update(&index_bytes);
+    var result: [task_state.file_change_route_digest_bytes]u8 = undefined;
+    digest.final(&result);
+    return result;
+}
+
+fn findFileChangeByRouteDigest(
+    changes: []?task_state.FileChangeView,
+    digest: [task_state.file_change_route_digest_bytes]u8,
+) ?*task_state.FileChangeView {
+    for (changes) |*entry| if (entry.*) |*change|
+        if (std.mem.eql(u8, &change.route_digest, &digest)) return change;
+    return null;
+}
+
+fn findEmptyFileChange(changes: []?task_state.FileChangeView) ?usize {
+    for (changes, 0..) |entry, index| if (entry == null) return index;
+    return null;
+}
+
+fn normalizedFileChangePath(
+    locator: anytype,
+    workspace_root: []const u8,
+    storage: []u8,
+) ?[]const u8 {
+    const source = switch (locator) {
+        .workspace_path => |path| path,
+        .absolute_path => |absolute| absoluteInsideWorkspace(
+            workspace_root,
+            absolute,
+        ) orelse return null,
+        .uri => return null,
+    };
+    if (source.len == 0 or source.len > storage.len or std.fs.path.isAbsolute(source))
+        return null;
+    var written: usize = 0;
+    var component_start: usize = 0;
+    var index: usize = 0;
+    while (index <= source.len) : (index += 1) {
+        if (index != source.len and source[index] != '/' and source[index] != '\\')
+            continue;
+        const component = source[component_start..index];
+        if (component.len == 0 or std.mem.eql(u8, component, ".") or
+            std.mem.eql(u8, component, "..") or
+            std.mem.indexOfScalar(u8, component, 0) != null or
+            (@import("builtin").os.tag == .windows and
+                std.mem.indexOfScalar(u8, component, ':') != null))
+            return null;
+        if (written != 0) {
+            if (written == storage.len) return null;
+            storage[written] = '/';
+            written += 1;
+        }
+        if (component.len > storage.len - written) return null;
+        @memcpy(storage[written..][0..component.len], component);
+        written += component.len;
+        component_start = index + 1;
+    }
+    return storage[0..written];
+}
+
+fn absoluteInsideWorkspace(root: []const u8, absolute: []const u8) ?[]const u8 {
+    if (!std.fs.path.isAbsolute(absolute)) return null;
+    var root_len = root.len;
+    while (root_len > 1 and (root[root_len - 1] == '/' or root[root_len - 1] == '\\'))
+        root_len -= 1;
+    if (absolute.len <= root_len) return null;
+    for (root[0..root_len], absolute[0..root_len]) |left, right| {
+        const same_separator = (left == '/' or left == '\\') and
+            (right == '/' or right == '\\');
+        const same = if (@import("builtin").os.tag == .windows)
+            std.ascii.toLower(left) == std.ascii.toLower(right)
+        else
+            left == right;
+        if (!same and !same_separator) return null;
+    }
+    if (absolute[root_len] != '/' and absolute[root_len] != '\\') return null;
+    return absolute[root_len + 1 ..];
+}
+
 fn findEmptyTool(entries: []?task_state.ToolView) ?usize {
     for (entries, 0..) |entry, index| if (entry == null) return index;
     return null;
@@ -3837,6 +4283,18 @@ fn deinitFileReference(
     releaseProjectedSlice(self, effects, reference.kind);
     releaseProjectedSlice(self, effects, reference.locator);
     reference.* = undefined;
+}
+
+fn deinitFileChange(
+    self: *Runtime,
+    effects: ReleaseEffects,
+    change: *task_state.FileChangeView,
+) void {
+    releaseProjectedSlice(self, effects, change.id);
+    releaseProjectedSlice(self, effects, change.display_path);
+    if (change.from_display_path) |path|
+        releaseProjectedSlice(self, effects, path);
+    change.* = undefined;
 }
 
 fn deinitTool(
@@ -4104,6 +4562,12 @@ fn reserveRun(
         effects.limits.max_commentary_segments_per_run,
     );
     errdefer self.allocator.free(commentary_ends);
+    const file_changes = try self.allocator.alloc(
+        ?task_state.FileChangeView,
+        effects.limits.max_file_changes_per_run,
+    );
+    errdefer self.allocator.free(file_changes);
+    @memset(file_changes, null);
     const diagnostic = try effects.text.allocateCapacity(
         effects.limits.max_terminal_diagnostic_bytes,
     );
@@ -4131,6 +4595,8 @@ fn reserveRun(
         .input = input_record,
         .commentary_ends = commentary_ends,
         .tools = tools,
+        .file_change_observation = .collecting,
+        .file_changes = file_changes,
         .terminal_diagnostic = diagnostic,
         .redaction_secret = execution.api_key,
         .automatic_title = title,
@@ -4530,6 +4996,9 @@ fn deinitRun(
     for (run.tools) |*entry| if (entry.*) |*tool|
         deinitTool(self, effects, tool);
     self.allocator.free(run.tools);
+    for (run.file_changes) |*entry| if (entry.*) |*change|
+        deinitFileChange(self, effects, change);
+    if (run.file_changes.len != 0) self.allocator.free(run.file_changes);
     self.allocator.free(run.commentary_ends);
     deinitRunInput(self, effects, &run.input);
     releaseTrackedText(self, effects, &run.assistant);

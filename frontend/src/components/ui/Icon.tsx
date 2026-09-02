@@ -10,6 +10,7 @@ import {
   Folder,
   FolderUp,
   FileText,
+  FileDiff,
   Layers3,
   LoaderCircle,
   Minus,
@@ -66,6 +67,7 @@ type IconName =
   | "new-task"
   | "skills"
   | "skill-file"
+  | "file-diff"
   | "upload"
   | "folder-up"
   | "package"
@@ -106,6 +108,7 @@ const icons: Record<IconName, LucideIcon> = {
   "new-task": SquarePen,
   skills: Puzzle,
   "skill-file": FileText,
+  "file-diff": FileDiff,
   upload: FolderUp,
   "folder-up": FolderUp,
   package: Package,

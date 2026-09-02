@@ -55,6 +55,10 @@ Turn 是用户提交的一次交互；Run 是 AgentCore 为该交互进行的一
 
 代表 Agent 发起的一次工具调用，包含工具名、输入、进度、结果、错误和耗时。Tool Call 应通过结构化卡片展示，而不是依赖终端字符解析。
 
+### File Changes
+
+File Changes 是一次 Run 内由 AgentCore typed `file_changes` observation 记录的文件副作用审查事实，归属 Run 而不是单个 Tool。产品接纳 `created | modified | deleted | moved` 的 `applied | partial` 记录，包括嵌套 Agent 产生的记录；同一路径的多次修改保持多条稳定顺序。它不从 Tool 文本、Bash 输出、Git、Workspace 当前状态或 File Preview 反推，也不表示用户已经接受修改或文件仍保持当时内容。
+
 ### Approval / UI Request
 
 代表 Agent 继续工作前仍缺少的用户决定，不是 Tool 名称、Shell 语法或产品安全感的可视化。一个正式权限请求必须对应当前 authority 尚未覆盖、值得中断、可准确描述且执行层能兑现的具体能力或 effect；已由 Workspace picker、当前 Task authority、已配置服务或系统原生授权覆盖的决定不得重复询问。当前 MetaWork Agent 只开放 AgentCore 同步工具 permission；该请求仍是 compatibility baseline，不表示现有 payload 已具备上述完整 effect 语义。AgentCore ABI v1 虽支持结构化问题回答，但该 built-in 不进入 MetaWork Agent 能力集合。需要补充信息时，Agent 以普通 Assistant 回复结束当前 Run，用户通过 Composer 继续。同步等待期间 Run 仍占用 executor slot，不形成可持久化挂起点。计划审批、自定义结构化交互和 typed effect confirmation 只有在 AgentCore 发布相应控制协议并通过 MetaWork 产品验收后才进入产品范围。
@@ -146,6 +150,8 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - UI 以唯一 Current activity 展示 thinking、writing、tool、retry、context compact 与 finalizing，在 Task overview 展示真实 token usage、context warning 和最近 auto compact；
 - Agent 对话按 Run exchange 组织为用户输入、Assistant 过程叙事、唯一 live status、待处理请求、final/partial response、相关文件、按需技术过程和必要 terminal notice，不存在的部分不占位。每个 closed commentary group 使用独立 Markdown block 形成可连续阅读的主叙事，组间只以克制留白分隔，不做卡片、时间戳或 Tool 标签；可回滚 provisional 使用纯文本紧随其后。active status 始终位于当前过程底部并原位更新，不因 Tool 事件追加新的主阅读行。技术过程在 active 与 terminal Run 中都默认折叠，active 时与 live status 共用 process surface，terminal 后移到正式 response/file references 之后并只以弱化的操作数量摘要保留，不强调已被整个 Run 恢复的单个 Tool 失败。Renderer 不伪造 typed facts 之间不存在的严格时间线；具体 owner、槽位和迁移机制由 [UI 设计规范](ui-design.md#72-agent-对话渲染机制)定义；
 - 过程叙事密度只取决于 AgentCore 实际提交的 commentary 与其他 typed observation；产品不要求每个 Tool turn 都产生 commentary，也不从 Tool 名称、参数、结果、耗时或 Renderer 本地计时合成 Agent 发言、模型意图或伪进度。上游没有新的可见文本时，主阅读流只原位更新已有 canonical activity，不以重复状态行填充空白；
+- Host 为每个 Run 投影 typed File Changes 的 `collecting | complete | incomplete` 观测状态和有界记录；完整记录只表示已消费的 typed observation 没有已知丢失。oversized、队列或 Product 容量不足、非法 locator、diff 截断/存储失败和中断必须单调收口为 incomplete，但不得改变 Run 原有 outcome；
+- Run 有可见记录时在回复后显示文件/修改数量和“审查更改”入口；incomplete 即使没有保留下来的记录也必须显示警告。按需 Drawer 展示按路径分组但不合并的 recorded diff、create/modify/delete/move/partial、脱敏与缺失/损坏状态；第一版不提供 Accept/Reject、Git 净 diff、当前文件重读或 Output 推断；
 - 用户可以在已有 finalized Run 且 Task 可继续时显式压缩当前 Conversation；manual compact 是 Workbench-owned Task maintenance operation，不创建 Turn/Run，不产生用户消息，也不把 `/compact` 原文送入 Bridge 或模型；
 - manual compact 必须发布真实的 queued/compacting/stopping 与 terminal outcome；`compacted / no_change / degraded / aborted` 保持各自语义，before/after context token 只作为估算展示，compact provider usage 与 Run usage 分开记录；
 - 用户可以取消当前 Run；
@@ -228,7 +234,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - 用户创建或修改 Skill 仍通过普通 Text Run 与 AgentCore built-in Read/Edit 完成，不在 Skill 中心建立第二个创作或文件编辑器。Workspace 内的 `.agents/skills` 服从现有 Workspace authority；用户级目录只有在用户通过原生 picker 明确把目标 Skill 目录授权为 Manual Workspace 后才能修改。Skill 中心可以导航到预填的普通 Text draft；项目 Skill 创建完成后通过显式 catalog refresh 出现，个人 Skill 通过受控本地导入发布。一次 Run 使用已绑定 snapshot，不热替换正在执行的 Skill；文件变化只在显式 catalog refresh 后影响后续选择与 Run；
 - Host 重启后恢复的历史 Task 先以 detached、可阅读状态出现；满足恢复资格时，用户选择左栏 Task 只看到已保存产品历史与普通 Composer，不显示恢复卡片、恢复按钮或专用 placeholder。用户首次发送新消息时，Renderer 在同一次发送意图内先提交 restore，等待 Host 确认 attachment 后再精确提交一次 Text Run；失败时保留草稿并显示可执行的失败说明，下一次普通发送可以重试。只有 source Task/binding、checkpoint ownership、Workspace/Task identity、Conversation、terminal state 与当前 execution target readiness 均可安全恢复后才允许该内部前置步骤；Skill/MCP/Permission continuity 缺失只产生 degraded 能力状态。历史 execution generation 不要求等于当前 generation：同 protocol 且当前 authority 可承载 Task model 时，restore 必须以 durable adoption 同步推进 Task generation、binding epoch 与 checkpoint anchor 后再安装 attachment，并保留旧 Run 的逐 Run provenance。该窄 adoption 只连接同一 Task 的 source Conversation 与当前可执行 target，不允许切换 protocol/model，也不构成通用 rebind；任意配置 rebind 或从历史创建新 Task 仍属于后续显式产品能力，当前实现不得用它们冒充恢复；
 - Run 中 AgentCore `tool_result.file_refs` 提供的结构化文件引用是 File Preview 的唯一入口。Renderer 按 `tool order → fileRefs order` 在对应 Run 回复后显示“相关文件”，用户显式选择后才通过精确 `taskId + runId + fileReferenceId` 请求 Host 读取 Workspace 中的当前文件内容；预览以右侧 Drawer 展示，明确说明不是 Run 时版本，不缓存、不持久化、不自动刷新，也不把 reference 的 kind、Tool 名称、普通文本或 Bash 输出解释为文件变更、Output 或 citation。Host 必须在独立有界 worker lane 中执行 no-follow、root-contained、regular-file-only 的最多 256 KiB UTF-8 文本读取，主线程在响应前重新校验 Task/Run/reference/Workspace authority，并以当前及历史 execution credential 做内容脱敏；非 ready 状态不得携带正文；
-- `Files changed` 表示实际文件变更集合，`Outputs` 表示用户关心的交付结果，两者不得用“新建文件”或 File Preview reference 自动等同；当前 AgentCore 已发布 typed `file_changes` observation，但 Product owner、持久化、恢复与 Renderer 投影尚未验收，typed Output 也尚未提供，因此两个模块都必须隐藏；
+- `Files changed` 表示实际文件变更集合，`Outputs` 表示用户关心的交付结果，两者不得用“新建文件”或 File Preview reference 自动等同；File Changes 只消费 AgentCore typed `file_changes` observation，typed Output 尚未提供，因此 Outputs 模块必须继续隐藏；
 - Task 归档只隐藏日常列表且可恢复；归档、删除 Task 或移除 Workspace 前必须先终止其 queued/running/waiting/stopping Run。删除只允许已归档 Task；Workbench 接受一次删除意图后负责收口仍存活的 Session，并在 executor stable record reference、checkpoint 与全部资源 quiescent 后原子提交和物理释放，不要求用户为正常推进重复提交。删除进度以 runtime-only 的 `idle | deleting | failed` 产品事实发布，不持久化、不混入 Task lifecycle 或 Agent Session 状态；明确失败必须保留归档 Task 并等待用户显式重试，不能伪造成功、静默回弹或自动形成重试循环。若失败后 attachment 已恢复到可用状态，用户显式恢复归档表示放弃该次删除，Workbench 必须把删除状态原子重置为 `idle`；仍在 closing 的 Task 不开放恢复归档。删除 Task 记录不删除 Workspace 中的真实文件；移除 Workspace 先原子进入 `removing` 并推进 Workspace epoch、拒绝新 admission，全部 Task 收口后撤销当前 Host authorization 并退出活动导航；
 - 全局搜索覆盖 Task、用户指令、完成消息和 Output 文件名；Workspace 只作为 Task 与 New task 的路径上下文，不作为独立导航结果；工具原始日志默认不进入普通搜索；
 - `en-US` 是规范产品文案和回退语言，`zh-CN` 是首个完整 locale；Host 传递 structured code 与参数，Renderer 负责本地化。
@@ -342,7 +348,7 @@ Windows x86_64 GNU 已进入当前开发 baseline；Windows arm64 GNU 已接入 
 
 ### 7.5 后续产品能力
 
-`PermissionProfile` 的 Task-create owner、same-profile fresh/restore、Run provenance 与 Scheduled noninteractive 已进入当前产品；未来独立的 idle mutation、`standard` 所需的 typed risk/effect 和执行前 commit boundary，以及 async pending、更完整的跨重启 execution rebind、strict Workspace security、正式 Host tools、typed Output/FileChange、plan progress/approval、custom UI、远程 artifact 发布与正式更新、独立 AgentCore Worker 和 Linux 接入，均按独立 capability 与阶段推进，不能反向伪装成当前 v1 已具备。
+`PermissionProfile` 的 Task-create owner、same-profile fresh/restore、Run provenance 与 Scheduled noninteractive，以及 typed File Changes 审查已进入当前产品；未来独立的 idle mutation、`standard` 所需的 typed risk/effect 和执行前 commit boundary，以及 async pending、更完整的跨重启 execution rebind、strict Workspace security、正式 Host tools、typed Output、plan progress/approval、custom UI、远程 artifact 发布与正式更新、独立 AgentCore Worker 和 Linux 接入，均按独立 capability 与阶段推进，不能反向伪装成当前 v1 已具备。
 
 具体验证矩阵见 [当前验证规范](validation.md)。
 

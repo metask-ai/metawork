@@ -14,6 +14,7 @@ pub const Paths = struct {
     account_buffer: [path_capacity]u8 = undefined,
     workbench_buffer: [path_capacity]u8 = undefined,
     checkpoints_buffer: [path_capacity]u8 = undefined,
+    file_change_blobs_buffer: [path_capacity]u8 = undefined,
     skill_staging_buffer: [path_capacity]u8 = undefined,
     mcp_buffer: [path_capacity]u8 = undefined,
     data_len: usize = 0,
@@ -21,6 +22,7 @@ pub const Paths = struct {
     account_len: usize = 0,
     workbench_len: usize = 0,
     checkpoints_len: usize = 0,
+    file_change_blobs_len: usize = 0,
     skill_staging_len: usize = 0,
     mcp_len: usize = 0,
     canonical_user_home: ?[]u8 = null,
@@ -82,6 +84,11 @@ pub const Paths = struct {
             &self.checkpoints_buffer,
             &.{ self.workbenchDir(), "checkpoints" },
         )).len;
+        self.file_change_blobs_len = (try native_sdk.app_dirs.join(
+            native_sdk.app_dirs.currentPlatform(),
+            &self.file_change_blobs_buffer,
+            &.{ self.workbenchDir(), "file-change-blobs" },
+        )).len;
         self.skill_staging_len = (try native_sdk.app_dirs.join(
             native_sdk.app_dirs.currentPlatform(),
             &self.skill_staging_buffer,
@@ -127,6 +134,10 @@ pub const Paths = struct {
 
     pub fn checkpointsDir(self: *const Paths) []const u8 {
         return self.checkpoints_buffer[0..self.checkpoints_len];
+    }
+
+    pub fn fileChangeBlobsDir(self: *const Paths) []const u8 {
+        return self.file_change_blobs_buffer[0..self.file_change_blobs_len];
     }
 
     pub fn mcpDir(self: *const Paths) []const u8 {

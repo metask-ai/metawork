@@ -17,8 +17,9 @@ const workspace_grant = @import("workspace_grant.zig");
 const skill_grant = @import("skill_grant.zig");
 
 const product_handler_count = commands.product.len;
-const sync_product_handler_count = product_handler_count - 1;
+const sync_product_handler_count = product_handler_count - 2;
 const max_preview_in_flight: usize = 8;
+const max_diff_in_flight: usize = 8;
 const workspace_path_capacity = workspace_grant.max_path_bytes;
 const event_name = "metawork:host-signal";
 
@@ -189,6 +190,7 @@ pub const Dispatcher = struct {
         request_id_storage: [native_sdk.bridge.max_id_bytes]u8 = undefined,
         request_id_len: usize = 0,
     };
+    const DiffInFlight = PreviewInFlight;
 
     control: ?*product_control.Runtime,
     account_commands: account_contract.AccountCommandSink,
@@ -207,9 +209,11 @@ pub const Dispatcher = struct {
     sequence: u64 = 0,
     acknowledged_sequence: u64 = 0,
     registered_handlers: [sync_product_handler_count]native_sdk.bridge.Handler = undefined,
-    registered_async_handlers: [1]native_sdk.bridge.AsyncHandler = undefined,
+    registered_async_handlers: [2]native_sdk.bridge.AsyncHandler = undefined,
     preview_in_flight: [max_preview_in_flight]PreviewInFlight = @splat(.{}),
     next_preview_completion_id: u64 = 1,
+    diff_in_flight: [max_diff_in_flight]DiffInFlight = @splat(.{}),
+    next_diff_completion_id: u64 = 1,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -340,6 +344,11 @@ pub const Dispatcher = struct {
             .name = commands.preview_file,
             .context = self,
             .invoke_fn = previewFile,
+        };
+        self.registered_async_handlers[1] = .{
+            .name = commands.diff_file,
+            .context = self,
+            .invoke_fn = diffFile,
         };
         return .{
             .policy = policy,
@@ -913,6 +922,182 @@ pub const Dispatcher = struct {
             return;
         };
         responder.success(request_id, writer.buffered()) catch {};
+    }
+
+    fn diffFile(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        responder: native_sdk.bridge.AsyncResponder,
+    ) anyerror!void {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = self.callbacks.enter() catch {
+            respondFileChangeDiffUnavailable(responder, invocation.request.id, .capacity);
+            return;
+        };
+        defer callback.deinit();
+        self.requireWindow(invocation.source.window_id) catch {
+            respondFileChangeDiffUnavailable(responder, invocation.request.id, .not_recorded);
+            return;
+        };
+        var parsed = handlers.parsePayload(
+            handlers.FileChangeDiffRequest,
+            invocation.request.payload,
+        ) catch {
+            respondFileChangeDiffUnavailable(responder, invocation.request.id, .not_recorded);
+            return;
+        };
+        defer parsed.deinit();
+        if (parsed.value.fileChangeId.len == 0 or parsed.value.fileChangeId.len > 128) {
+            respondFileChangeDiffUnavailable(responder, invocation.request.id, .not_recorded);
+            return;
+        }
+        const task_id = handlers.parseWireId(parsed.value.taskId) catch {
+            respondFileChangeDiffUnavailable(responder, invocation.request.id, .not_recorded);
+            return;
+        };
+        const run_id = handlers.parseWireId(parsed.value.runId) catch {
+            respondFileChangeDiffUnavailable(responder, invocation.request.id, .not_recorded);
+            return;
+        };
+        const workbench = self.requireProductControl() catch {
+            respondFileChangeDiffUnavailable(responder, invocation.request.id, .capacity);
+            return;
+        };
+        const completion_id = self.reserveFileChangeDiff(
+            responder,
+            invocation.request.id,
+        ) orelse {
+            respondFileChangeDiffUnavailable(responder, invocation.request.id, .capacity);
+            return;
+        };
+        switch (workbench.beginFileChangeDiff(
+            completion_id,
+            task_id,
+            run_id,
+            parsed.value.fileChangeId,
+        )) {
+            .queued => {},
+            .immediate => |reason| self.completeFileChangeDiff(.{ .unavailable = .{
+                .completion_id = completion_id,
+                .reason = reason,
+            } }),
+        }
+    }
+
+    fn reserveFileChangeDiff(
+        self: *Dispatcher,
+        responder: native_sdk.bridge.AsyncResponder,
+        request_id: []const u8,
+    ) ?u64 {
+        if (self.next_diff_completion_id == std.math.maxInt(u64)) return null;
+        for (&self.diff_in_flight) |*slot| {
+            if (slot.active) continue;
+            const completion_id = self.next_diff_completion_id;
+            self.next_diff_completion_id += 1;
+            @memcpy(slot.request_id_storage[0..request_id.len], request_id);
+            slot.active = true;
+            slot.completion_id = completion_id;
+            slot.responder = responder;
+            slot.request_id_len = request_id.len;
+            return completion_id;
+        }
+        return null;
+    }
+
+    pub fn fileChangeDiffSink(self: *Dispatcher) product_control.FileChangeDiffSink {
+        return .{ .context = self, .complete_fn = completeFileChangeDiffFromSink };
+    }
+
+    fn completeFileChangeDiffFromSink(
+        context: *anyopaque,
+        result: product_control.FileChangeDiffResult,
+    ) void {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        self.completeFileChangeDiff(result);
+    }
+
+    fn completeFileChangeDiff(
+        self: *Dispatcher,
+        result: product_control.FileChangeDiffResult,
+    ) void {
+        const completion_id = switch (result) {
+            .ready => |ready| ready.completion_id,
+            .unavailable => |unavailable| unavailable.completion_id,
+        };
+        for (&self.diff_in_flight) |*slot| {
+            if (!slot.active or slot.completion_id != completion_id) continue;
+            const responder = slot.responder;
+            var request_id_storage: [native_sdk.bridge.max_id_bytes]u8 = undefined;
+            @memcpy(
+                request_id_storage[0..slot.request_id_len],
+                slot.request_id_storage[0..slot.request_id_len],
+            );
+            const request_id = request_id_storage[0..slot.request_id_len];
+            slot.* = .{};
+            respondFileChangeDiff(responder, request_id, result);
+            return;
+        }
+    }
+
+    pub fn settleFileChangeDiffsForShutdown(self: *Dispatcher) void {
+        for (&self.diff_in_flight) |*slot| {
+            if (!slot.active) continue;
+            const responder = slot.responder;
+            var request_id_storage: [native_sdk.bridge.max_id_bytes]u8 = undefined;
+            @memcpy(
+                request_id_storage[0..slot.request_id_len],
+                slot.request_id_storage[0..slot.request_id_len],
+            );
+            const request_id = request_id_storage[0..slot.request_id_len];
+            slot.* = .{};
+            respondFileChangeDiffUnavailable(responder, request_id, .capacity);
+        }
+    }
+
+    fn respondFileChangeDiff(
+        responder: native_sdk.bridge.AsyncResponder,
+        request_id: []const u8,
+        result: product_control.FileChangeDiffResult,
+    ) void {
+        var result_buffer: [native_sdk.bridge.max_result_bytes]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&result_buffer);
+        switch (result) {
+            .ready => |ready| {
+                writer.writeAll("{\"status\":\"ready\",\"content\":") catch
+                    return respondFileChangeDiffEncodingFailure(responder, request_id);
+                std.json.Stringify.value(ready.content, .{}, &writer) catch
+                    return respondFileChangeDiffEncodingFailure(responder, request_id);
+                writer.print(",\"complete\":{},\"redacted\":{}}}", .{
+                    ready.complete,
+                    ready.redacted,
+                }) catch return respondFileChangeDiffEncodingFailure(responder, request_id);
+            },
+            .unavailable => |unavailable| {
+                writer.print(
+                    "{{\"status\":\"unavailable\",\"reason\":\"{s}\",\"content\":\"\"}}",
+                    .{@tagName(unavailable.reason)},
+                ) catch return respondFileChangeDiffEncodingFailure(responder, request_id);
+            },
+        }
+        responder.success(request_id, writer.buffered()) catch {};
+    }
+
+    fn respondFileChangeDiffUnavailable(
+        responder: native_sdk.bridge.AsyncResponder,
+        request_id: []const u8,
+        reason: product_control.FileChangeDiffReason,
+    ) void {
+        respondFileChangeDiff(responder, request_id, .{ .unavailable = .{
+            .completion_id = 0,
+            .reason = reason,
+        } });
+    }
+
+    fn respondFileChangeDiffEncodingFailure(
+        responder: native_sdk.bridge.AsyncResponder,
+        request_id: []const u8,
+    ) void {
+        responder.fail(request_id, .internal_error, "File change diff encoding failed") catch {};
     }
 
     fn accountBeginLogin(
@@ -3847,6 +4032,79 @@ test "file preview async response preserves the exact bounded wire shape" {
     try std.testing.expect(!restricted_result.get("redacted").?.bool);
 }
 
+test "file change diff async response preserves the strict wire variants" {
+    const Capture = struct {
+        allocator: std.mem.Allocator,
+        response: ?[]u8 = null,
+
+        fn receive(
+            context: *anyopaque,
+            _: native_sdk.bridge.Source,
+            response: []const u8,
+        ) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.response) |previous| self.allocator.free(previous);
+            self.response = try self.allocator.dupe(u8, response);
+        }
+
+        fn reset(self: *@This()) void {
+            if (self.response) |response| self.allocator.free(response);
+            self.response = null;
+        }
+    };
+    var capture = Capture{ .allocator = std.testing.allocator };
+    defer capture.reset();
+    const responder: native_sdk.bridge.AsyncResponder = .{
+        .context = &capture,
+        .source = .{ .origin = "zero://app", .window_id = 3 },
+        .respond_fn = Capture.receive,
+    };
+
+    Dispatcher.respondFileChangeDiff(responder, "diff-1", .{ .ready = .{
+        .completion_id = 1,
+        .content = "@@ -1 +1 @@\n-old\n+new\n",
+        .complete = false,
+        .redacted = true,
+    } });
+    var ready = try std.json.parseFromSlice(
+        std.json.Value,
+        std.testing.allocator,
+        capture.response.?,
+        .{},
+    );
+    defer ready.deinit();
+    const ready_result = ready.value.object.get("result").?.object;
+    try std.testing.expectEqual(@as(usize, 4), ready_result.count());
+    try std.testing.expectEqualStrings("ready", ready_result.get("status").?.string);
+    try std.testing.expectEqualStrings(
+        "@@ -1 +1 @@\n-old\n+new\n",
+        ready_result.get("content").?.string,
+    );
+    try std.testing.expect(!ready_result.get("complete").?.bool);
+    try std.testing.expect(ready_result.get("redacted").?.bool);
+
+    capture.reset();
+    Dispatcher.respondFileChangeDiff(responder, "diff-2", .{ .unavailable = .{
+        .completion_id = 2,
+        .reason = .missing,
+    } });
+    var unavailable = try std.json.parseFromSlice(
+        std.json.Value,
+        std.testing.allocator,
+        capture.response.?,
+        .{},
+    );
+    defer unavailable.deinit();
+    const unavailable_result = unavailable.value.object.get("result").?.object;
+    try std.testing.expectEqual(@as(usize, 3), unavailable_result.count());
+    try std.testing.expectEqualStrings(
+        "unavailable",
+        unavailable_result.get("status").?.string,
+    );
+    try std.testing.expectEqualStrings("missing", unavailable_result.get("reason").?.string);
+    try std.testing.expectEqualStrings("", unavailable_result.get("content").?.string);
+}
+
 test "Account command response encoding rejects inconsistent attempt metadata" {
     var output: [256]u8 = undefined;
     try std.testing.expectError(
@@ -4212,6 +4470,8 @@ test "Dispatcher validates authority before domain calls and preserves committed
     );
     try std.testing.expect(native_dispatcher.registry.find(commands.preview_file) == null);
     try std.testing.expect(native_dispatcher.async_registry.find(commands.preview_file) != null);
+    try std.testing.expect(native_dispatcher.registry.find(commands.diff_file) == null);
+    try std.testing.expect(native_dispatcher.async_registry.find(commands.diff_file) != null);
     const source = native_sdk.bridge.Source{ .origin = "zero://app", .window_id = 3 };
     var response: [4096]u8 = undefined;
 

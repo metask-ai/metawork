@@ -1492,6 +1492,69 @@ test "malformed Core events fail the Run instead of entering the bounded sink" {
     try std.testing.expectEqual(@as(usize, 1), releases);
 }
 
+test "oversized file changes degrade without terminating the Run" {
+    fake_core.reset();
+    fake_core.setNextPlan(.file_changes_callback);
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 1,
+        .max_event_bytes = 64,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    const session = try openSession(runtime);
+    const run_id = try submitSession(session, "drop oversized supplemental changes");
+    try session.waitRun(run_id);
+    var terminal = takeTestTerminal(session, run_id);
+    defer terminal.deinit();
+    try std.testing.expectEqual(@as(?u32, wire.STATUS_OK), terminal.raw_status_code);
+    try std.testing.expectEqual(@as(?sdk.StopReason, .end_turn), terminal.stop_reason);
+    try std.testing.expect(terminal.termination_signal == null);
+    try std.testing.expect(terminal.file_changes_lost);
+    try std.testing.expectEqual(lifecycle.SessionState.idle, session.snapshot().state);
+    try std.testing.expect(runtime.takeEvent() == null);
+
+    fake_core.setSessionPlan(.event_callback);
+    const next_run_id = try submitSession(session, "loss state is per Run");
+    try session.waitRun(next_run_id);
+    var next_terminal = takeTestTerminal(session, next_run_id);
+    defer next_terminal.deinit();
+    try std.testing.expect(!next_terminal.file_changes_lost);
+    var retained = runtime.takeEvent() orelse return error.ExpectedOwnedEvent;
+    retained.deinit();
+    try closeSession(session, .session_close);
+}
+
+test "oversized non-file event remains fatal" {
+    fake_core.reset();
+    fake_core.setNextPlan(.event_callback);
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 1,
+        .max_event_bytes = 8,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    const session = try openSession(runtime);
+    const run_id = try submitSession(session, "oversized control remains fatal");
+    try session.waitRun(run_id);
+    var terminal = takeTestTerminal(session, run_id);
+    defer terminal.deinit();
+    try std.testing.expectEqual(@as(?u32, wire.STATUS_CALLBACK_FAILED), terminal.raw_status_code);
+    try std.testing.expectEqual(
+        lifecycle.TerminationSignal{ .event_pump_failure = .event_too_large },
+        terminal.termination_signal.?,
+    );
+    try std.testing.expect(!terminal.file_changes_lost);
+    try closeSession(session, .session_close);
+}
+
 test "non-UTF-8 Core events fail the Run before entering the bounded sink" {
     fake_core.reset();
     fake_core.setNextPlan(.invalid_utf8_event_callback);
@@ -1710,6 +1773,47 @@ test "bounded event sink overflow returns callback fatal and preserves the pump 
     );
     var retained = runtime.takeEvent().?;
     retained.deinit();
+    try closeSession(session, .session_close);
+}
+
+test "file changes capacity rejection degrades and preserves the original Run result" {
+    fake_core.reset();
+    fake_core.setNextPlan(.file_changes_callback);
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 1,
+        .event_capacity = 1,
+        .per_session_event_capacity = 1,
+        .control_reserved_capacity = 0,
+        .per_session_control_reserved_capacity = 0,
+        .event_enqueue_timeout = .fromNanoseconds(1),
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    const session = try openSession(runtime);
+    const first_run = try submitSession(session, "retain first file changes event");
+    try session.waitRun(first_run);
+    var first_terminal = takeTestTerminal(session, first_run);
+    defer first_terminal.deinit();
+    try std.testing.expect(!first_terminal.file_changes_lost);
+
+    const second_run = try submitSession(session, "degrade rejected file changes event");
+    try session.waitRun(second_run);
+    var second_terminal = takeTestTerminal(session, second_run);
+    defer second_terminal.deinit();
+    try std.testing.expectEqual(@as(?u32, wire.STATUS_OK), second_terminal.raw_status_code);
+    try std.testing.expectEqual(@as(?sdk.StopReason, .end_turn), second_terminal.stop_reason);
+    try std.testing.expect(second_terminal.termination_signal == null);
+    try std.testing.expect(second_terminal.file_changes_lost);
+    try std.testing.expectEqual(lifecycle.SessionState.idle, session.snapshot().state);
+
+    var retained = runtime.takeEvent() orelse return error.ExpectedOwnedEvent;
+    try std.testing.expectEqual(first_run, retained.run_id);
+    retained.deinit();
+    try std.testing.expect(runtime.takeEvent() == null);
     try closeSession(session, .session_close);
 }
 

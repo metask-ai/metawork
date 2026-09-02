@@ -18,6 +18,7 @@ import {
 import { Icon } from "../../components/ui/Icon.tsx";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
 import { RunProcess } from "./RunProcess.tsx";
+import { RunFileChangesSummary } from "./RunFileChanges.tsx";
 import {
   deriveRunPresentation,
   observeRunProcessDisclosure,
@@ -139,9 +140,11 @@ export function TaskContent({
   composerHasDraft,
   retryAvailable,
   responseDisabled,
+  fileChangesEnabled,
   onPrepareRetry,
   onOpenTool,
   onPreviewFile,
+  onReviewFileChanges,
   onRespond,
   renderPendingUi,
 }: {
@@ -150,6 +153,7 @@ export function TaskContent({
   composerHasDraft: boolean;
   retryAvailable: boolean;
   responseDisabled: boolean;
+  fileChangesEnabled: boolean;
   onPrepareRetry: (input: RunInputView) => void;
   onOpenTool: (
     runId: string,
@@ -161,6 +165,7 @@ export function TaskContent({
     runId: string,
     reference: FileReferenceView,
   ) => void;
+  onReviewFileChanges: (taskId: string, runId: string) => void;
   onRespond: (payload: UiResponsePayload) => void;
   renderPendingUi: (props: {
     taskId: string;
@@ -293,14 +298,22 @@ export function TaskContent({
               </Message>
             )}
             {presentation.active && (
-              <RunProcess
-                presentation={presentation}
-                expanded={disclosure.expanded}
-                onExpandedChange={setProcessExpanded}
-                onOpenTool={(tool: ToolView, opener) =>
-                  onOpenTool(run.id, tool.id, opener)
-                }
-              />
+              <>
+                <RunProcess
+                  presentation={presentation}
+                  expanded={disclosure.expanded}
+                  onExpandedChange={setProcessExpanded}
+                  onOpenTool={(tool: ToolView, opener) =>
+                    onOpenTool(run.id, tool.id, opener)
+                  }
+                />
+                {fileChangesEnabled && run.fileChanges && (
+                  <RunFileChangesSummary
+                    fileChanges={run.fileChanges}
+                    onReview={() => onReviewFileChanges(task.id, run.id)}
+                  />
+                )}
+              </>
             )}
             {isCurrent && task.pendingUi && (
               <div className="ai-exchange-intervention">
@@ -349,14 +362,22 @@ export function TaskContent({
               </footer>
             )}
             {!presentation.active && (
-              <RunProcess
-                presentation={presentation}
-                expanded={disclosure.expanded}
-                onExpandedChange={setProcessExpanded}
-                onOpenTool={(tool: ToolView, opener) =>
-                  onOpenTool(run.id, tool.id, opener)
-                }
-              />
+              <>
+                <RunProcess
+                  presentation={presentation}
+                  expanded={disclosure.expanded}
+                  onExpandedChange={setProcessExpanded}
+                  onOpenTool={(tool: ToolView, opener) =>
+                    onOpenTool(run.id, tool.id, opener)
+                  }
+                />
+                {fileChangesEnabled && run.fileChanges && (
+                  <RunFileChangesSummary
+                    fileChanges={run.fileChanges}
+                    onReview={() => onReviewFileChanges(task.id, run.id)}
+                  />
+                )}
+              </>
             )}
             {presentation.showTerminalNotice && run.outcome && (
               <Activity

@@ -17,6 +17,8 @@ pub const ui_record_detail_capacity: usize = 512;
 pub const permission_summary_field_capacity: usize = 128;
 pub const tool_route_digest_bytes = std.crypto.hash.sha2.Sha256.digest_length;
 pub const tool_product_id_capacity = "tool-".len + 20;
+pub const file_change_route_digest_bytes = std.crypto.hash.sha2.Sha256.digest_length;
+pub const file_change_product_id_capacity = "change-".len + (20 * 3) + 2;
 
 pub const Protocol = execution_contract.Protocol;
 
@@ -244,6 +246,48 @@ pub const FileReferenceView = struct {
     range: ?FileReferenceRangeView = null,
 };
 
+pub const FileChangeObservation = enum {
+    collecting,
+    complete,
+    incomplete,
+};
+
+pub const FileChangeKind = enum {
+    created,
+    modified,
+    deleted,
+    moved,
+};
+
+pub const FileChangeStatus = enum {
+    applied,
+    partial,
+};
+
+pub const FileChangeArtifact = struct {
+    run_generation: u64,
+    change_order: u64,
+    digest: [std.crypto.hash.sha2.Sha256.digest_length]u8,
+    byte_size: u64,
+};
+
+pub const FileChangeView = struct {
+    /// One-way correlation key over Agent event id plus record index. Raw Tool
+    /// and event ids never enter Product history.
+    route_digest: [file_change_route_digest_bytes]u8,
+    id: []u8,
+    order: u64,
+    kind: FileChangeKind,
+    status: FileChangeStatus,
+    display_path: []u8,
+    from_display_path: ?[]u8 = null,
+    before_bytes: u64,
+    after_bytes: u64,
+    artifact: ?FileChangeArtifact = null,
+    diff_complete: bool,
+    redacted: bool = false,
+};
+
 pub const ToolView = struct {
     /// One-way correlation key for Agent event correlation. The raw tool ID is
     /// never retained in product history.
@@ -461,6 +505,11 @@ pub const RunRecord = struct {
     agent_in_flight_tools: u32 = 0,
     agent_observation_degraded: bool = false,
     permission_provenance: ?PermissionSummary = null,
+    /// Null is reserved for history written before typed File Changes existed.
+    file_change_observation: ?FileChangeObservation = null,
+    file_changes: []?FileChangeView = &.{},
+    file_changes_known_loss: bool = false,
+    pending_file_change_artifacts: u32 = 0,
     terminal_publication: std.atomic.Value(TerminalPublication) = .init(.open),
     terminal_payload: TerminalPayload = undefined,
     terminal_observed: bool = false,
@@ -735,6 +784,16 @@ pub fn finalizeMarkedTerminalRunsAfterEventDrain(task: *Task) bool {
         run.output_retry_group = null;
         run.event_stream_finalized = true;
         run.assistant.committed_len = run.assistant.list.items.len;
+        if (run.file_change_observation == .collecting and
+            run.pending_file_change_artifacts == 0)
+        {
+            const terminal = terminalPayload(run).?;
+            run.file_change_observation = if (terminal.phase == .completed and
+                !run.file_changes_known_loss)
+                .complete
+            else
+                .incomplete;
+        }
         changed = true;
     }
     return changed;
@@ -811,6 +870,13 @@ pub const EventProjection = struct {
         task_id: u64,
         run_generation: u64,
     ) EventProjectionError!void,
+    record_file_changes_fn: *const fn (
+        context: *anyopaque,
+        run: *RunRecord,
+        envelope: *const agent.OwnedCoreEvent,
+        task_id: u64,
+        workspace_root: []const u8,
+    ) bool,
 
     fn appendAssistant(
         self: EventProjection,
@@ -887,6 +953,22 @@ pub const EventProjection = struct {
             credential,
             task_id,
             run_generation,
+        );
+    }
+
+    fn recordFileChanges(
+        self: EventProjection,
+        run: *RunRecord,
+        envelope: *const agent.OwnedCoreEvent,
+        task_id: u64,
+        workspace_root: []const u8,
+    ) bool {
+        return self.record_file_changes_fn(
+            self.context,
+            run,
+            envelope,
+            task_id,
+            workspace_root,
         );
     }
 };
@@ -1063,10 +1145,13 @@ pub fn applyEvent(
             durable_boundary = true;
         },
         .file_changes => {
-            // AgentCore now publishes this typed observation, but Product
-            // File Changes remains capability-gated. Consume it explicitly
-            // without deriving or exposing a partial product contract.
-            return .unchanged;
+            if (!projection.recordFileChanges(
+                run,
+                envelope,
+                task.durable.id,
+                task.durable.workspace_root,
+            )) return .unchanged;
+            durable_boundary = true;
         },
         .usage => |usage| {
             run.usage.input_tokens = try addU64(run.usage.input_tokens, usage.input_tokens);

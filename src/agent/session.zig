@@ -521,6 +521,7 @@ pub const Session = struct {
     abort_status: ?sdk.Status = null,
     raw_abort_status_code: ?u32 = null,
     dependency_contract_failure: bool = false,
+    file_changes_lost: std.atomic.Value(bool) = .init(false),
     permission_interaction: PermissionInteraction = .interactive,
     permission_stop_requested: bool = false,
     core_session_identity: CoreSessionIdentity = .unbound,
@@ -618,6 +619,7 @@ pub const Session = struct {
         self.abort_status = null;
         self.raw_abort_status_code = null;
         self.dependency_contract_failure = false;
+        self.file_changes_lost.store(false, .release);
         self.permission_stop_requested = false;
         self.cancel_requested = false;
         self.state = .queued;
@@ -1797,6 +1799,7 @@ pub const Session = struct {
             .abort_status = self.abort_status,
             .raw_abort_status_code = self.raw_abort_status_code,
             .termination_signal = self.termination_signal,
+            .file_changes_lost = self.file_changes_lost.load(.acquire),
             .failure = if (self.dependency_contract_failure)
                 .dependency_contract
             else
@@ -1847,10 +1850,20 @@ pub const Session = struct {
             return wire.EVENT_FATAL;
         };
         if (encoded.len > self.agent_runtime.max_event_bytes) {
+            if (session_wire.classifyDegradableCoreEvent(encoded) == .file_changes) {
+                self.file_changes_lost.store(true, .release);
+                return wire.EVENT_CONTINUE;
+            }
             self.recordTerminationSignal(.{ .event_pump_failure = .event_too_large });
             return wire.EVENT_FATAL;
         }
-        var parsed = decodeCoreEvent(self.agent_runtime.allocator, encoded) catch {
+        var parsed = decodeCoreEvent(self.agent_runtime.allocator, encoded) catch |err| {
+            if (err == error.OutOfMemory and
+                session_wire.classifyDegradableCoreEvent(encoded) == .file_changes)
+            {
+                self.file_changes_lost.store(true, .release);
+                return wire.EVENT_CONTINUE;
+            }
             self.recordTerminationSignal(.{ .event_pump_failure = .invalid_event });
             return wire.EVENT_FATAL;
         };
@@ -1861,8 +1874,16 @@ pub const Session = struct {
                 return wire.EVENT_CONTINUE;
             },
         }
+        const is_file_changes = switch (parsed.value) {
+            .unknown => false,
+            .known => |known| std.meta.activeTag(known) == .file_changes,
+        };
         const owned_json = self.agent_runtime.allocator.dupe(u8, encoded) catch {
             parsed.deinit();
+            if (is_file_changes) {
+                self.file_changes_lost.store(true, .release);
+                return wire.EVENT_CONTINUE;
+            }
             self.recordTerminationSignal(.{ .event_pump_failure = .allocation });
             return wire.EVENT_FATAL;
         };
@@ -1876,6 +1897,17 @@ pub const Session = struct {
         };
         self.agent_runtime.events.enqueueWithDeadline(envelope, self.agent_runtime.event_enqueue_timeout) catch |err| {
             envelope.deinit();
+            if (is_file_changes and switch (err) {
+                error.GlobalCapacity,
+                error.SessionCapacity,
+                error.SessionSlotCapacity,
+                error.DeadlineExceeded,
+                => true,
+                else => false,
+            }) {
+                self.file_changes_lost.store(true, .release);
+                return wire.EVENT_CONTINUE;
+            }
             self.recordTerminationSignal(.{ .event_pump_failure = switch (err) {
                 error.EventTooLarge => .event_too_large,
                 error.InvalidIdentity,

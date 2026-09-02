@@ -180,6 +180,7 @@ Credential 是 opaque bytes。redaction 必须覆盖流式跨 chunk 与 UTF-8 co
 - queued cancel、worker completion、terminal publication 与 worker reference 必须各自 exactly once 收口。terminal fact 在通知、释放引用或触发外部 owner 前完成 write-once publication；
 - Bridge/main thread 不执行长耗时 Agent 调用，也不等待 permission。Renderer response、snapshot failure 与 transport disconnect 只作为 typed transport fact 进入 Product policy，默认不能中止后台 Run 或覆盖 terminal cause；
 - File Preview 使用独立于 Run、catalog、restore 与 MCP 的 bounded execution lane。worker 只接收深拷贝的 root-relative locator 和读取上限；完成回主线程后重新校验 Task、Run、Workspace authority 并执行 credential redaction。raw bytes 不进入 Product history、Snapshot、持久化或日志；
+- File Changes 使用独立单 worker、有界 in-flight 的 artifact lane。diff 在入队前按当前及历史 Task credential 脱敏，worker 只持有 immutable Task/run/change identity、owned diff 和专用 store capability；完成回主线程后重新校验 Product artifact ownership。stale 或 Task 已删除的成功写入立即回收，读取结果在跨 Bridge 前再次校验引用仍属于同一 Task/Run/change；
 - async completion 必须按开始时冻结的 attempt、object identity、epoch/generation、attachment 与 shutdown token 全量重新校验。任一 token stale 都只销毁 candidate，不安装、不自动重放原请求；
 - capability 只在同步调用或明确的 worker lifetime 内借用；关闭开始后不得建立新的 job、timer、callback 或 responder 对 owner 的引用。
 
@@ -198,7 +199,7 @@ Agent Session、callback、UI request、event pump、close race、错误映射�
 
 ### 4.1 Durable history 与 runtime attachment
 
-Product history 保存用户可观察且跨重启仍有意义的 Workspace、Task、用户消息、已提交 assistant 输出、Tool 结果、UI 决策、Run/compact terminal fact、execution provenance 与 checkpoint reference。完整产品范围以[产品需求](requirements.md)为准。
+Product history 保存用户可观察且跨重启仍有意义的 Workspace、Task、用户消息、已提交 assistant 输出、Tool 结果、File Changes metadata/artifact reference、UI 决策、Run/compact terminal fact、execution provenance 与 checkpoint reference。完整产品范围以[产品需求](requirements.md)为准。
 
 Durable Task record 与 runtime attachment 必须分离。durable record 不保存 live Agent Session、catalog lease、pointer、atomic、worker/control payload、credential 或 `closed` 产品终态；runtime attachment 线性拥有 Agent Binding、ExecutionConfig 与必要 lease 的唯一使用和归还责任。Task detach 或 replacement 必须先关闭并归还 live Binding，不能丢弃或复制所有权。
 
@@ -216,9 +217,17 @@ Task 删除是跨持久化、checkpoint、event、Session 和 worker reference �
 
 store 读取上限为 16 MiB。commit 必须在同一目录完成 durable atomic replace，并区分 `committed | failed | outcome_unknown`；临时文件命名、frame header、checksum 算法和 codec 内部布局由唯一实现与测试拥有，不在本文镜像。
 
-Host 重启从通过校验的 store 重建 durable history 和 detached attachment。没有 live owner 的 non-terminal Run/compact 保守收口为 interrupted，不重放输入、工具、permission 或结果不确定 mutation；未完成 Tool 不进入恢复 projection，已经 durable 完成的 Tool result 保留。
+Host 重启从通过校验的 store 重建 durable history 和 detached attachment。没有 live owner 的 non-terminal Run/compact 保守收口为 interrupted，不重放输入、工具、permission 或结果不确定 mutation；其 File Changes `collecting` 若存在必须收口为 `incomplete` 并保留已记录项。旧历史缺少 File Changes 字段时恢复为 `null`，不能伪造空观测。未完成 Tool 不进入恢复 projection，已经 durable 完成的 Tool result 保留。
 
-### 4.3 Checkpoint transaction
+### 4.3 File Changes artifact transaction
+
+`<MetaWork data dir>/workbench/file-change-blobs/` 是 Product Task 专用的 credential-safe unified-diff store，不是 checkpoint 目录、当前 Workspace 镜像或通用 Artifact Framework。Application 持有进程级 writer lock 和 store/lane 生命周期；Product Task history 只保存 Task、run generation、change order、size 与 SHA-256 identity，不保存完整 diff 或物理路径。
+
+写入先完成 no-follow、resolve-beneath、私有权限、文件 sync 与同目录原子 rename，成功 completion 重新校验 owner 后才把 reference 安装进 history。队列满、diff/record/path/projection 容量不足、存储失败或 shutdown 只使现有 metadata 保留、diff unavailable 且 observation 单调变成 incomplete；这些补充审查失败不得产生 generic consumer rejection、终止 Session 或改写 Run outcome。
+
+可信启动只在 Task history health 为 ready 时根据完整 reference 集合删除临时文件和明确 orphan；history 不可用、degraded 或不可信时禁止 orphan cleanup。读取必须重新校验 identity、size、digest 和 UTF-8，missing/corrupt 作为 typed unavailable 结果返回。Task record 只有在 durable history 删除提交成功后才删除对应 artifact 目录；删除期间迟到的异步成功写入因无 Product owner 而立即回收。
+
+### 4.4 Checkpoint transaction
 
 AgentCore checkpoint blob 与 Product checkpoint record 是两个提交边界。每个成功收口且 Session 可复用的 Run/compact 可以在 terminal product fact 发布后导出 checkpoint；blob 必须先 durable commit，随后 Product 才能把引用它的 checkpoint record 提交进 Task history。
 
@@ -232,7 +241,7 @@ checkpoint record 只保存：
 
 新 blob 明确成功但 history record 明确失败时，blob 可以暂时成为孤儿；record commit outcome unknown 时必须把相关 blob 当作可能的 orphan 保留，但不能冻结 Product Task，后续完整 history commit 可以建立新的 canonical snapshot。可信启动先校验 record 引用 blob 的 identity，再清除明确失效的 record，最后反向删除无 record 的 orphan。Product history degraded 或 checkpoint store 不可信时不得执行孤儿清理，以免删除未知 Task 的有效数据。
 
-### 4.4 Conversation attachment recovery
+### 4.5 Conversation attachment recovery
 
 Conversation recovery 是 detached Task 的 attachment 重建事务，不是 transcript 重放、Task 克隆或新的 Product owner。恢复资格必须同时证明：
 

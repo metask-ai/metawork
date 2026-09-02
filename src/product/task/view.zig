@@ -237,6 +237,46 @@ pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
     writer.writeAll("]}") catch return error.SnapshotTooLarge;
 }
 
+fn writeFileChanges(
+    writer: *std.Io.Writer,
+    text: TextProjection,
+    run: *const task_state.RunRecord,
+) Error!void {
+    const observation = run.file_change_observation orelse {
+        writer.writeAll("null") catch return error.SnapshotTooLarge;
+        return;
+    };
+    writer.print("{{\"observation\":\"{s}\",\"changes\":[", .{@tagName(observation)}) catch
+        return error.SnapshotTooLarge;
+    var count: usize = 0;
+    for (run.file_changes) |*entry| {
+        const change = &(entry.* orelse continue);
+        if (count != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+        count += 1;
+        writer.writeAll("{\"id\":") catch return error.SnapshotTooLarge;
+        try text.writeJson(writer, change.id);
+        writer.print(",\"order\":\"{d}\",\"kind\":\"{s}\",\"status\":\"{s}\",\"displayPath\":", .{
+            change.order,
+            @tagName(change.kind),
+            @tagName(change.status),
+        }) catch return error.SnapshotTooLarge;
+        try text.writeJson(writer, change.display_path);
+        writer.writeAll(",\"fromDisplayPath\":") catch return error.SnapshotTooLarge;
+        if (change.from_display_path) |path|
+            try text.writeJson(writer, path)
+        else
+            writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.print(",\"beforeBytes\":\"{d}\",\"afterBytes\":\"{d}\",\"diffAvailable\":{},\"diffComplete\":{},\"redacted\":{}}}", .{
+            change.before_bytes,
+            change.after_bytes,
+            change.artifact != null,
+            change.diff_complete,
+            change.redacted,
+        }) catch return error.SnapshotTooLarge;
+    }
+    writer.writeAll("]}") catch return error.SnapshotTooLarge;
+}
+
 pub fn writePendingUi(
     writer: *std.Io.Writer,
     text: TextProjection,
@@ -378,7 +418,9 @@ fn writeRun(
         };
         writer.writeAll("]}") catch return error.SnapshotTooLarge;
     }
-    writer.writeAll("]}") catch return error.SnapshotTooLarge;
+    writer.writeAll("],\"fileChanges\":") catch return error.SnapshotTooLarge;
+    try writeFileChanges(writer, text_projection, run);
+    writer.writeByte('}') catch return error.SnapshotTooLarge;
 }
 
 fn writeRunOutput(

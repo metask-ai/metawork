@@ -53,6 +53,7 @@ import {
   type ToolView,
   type FileReferenceView,
   type FilePreview,
+  type FileChangeDiffResult,
   type UiRecord,
   type WorkbenchSnapshot,
   type WorkspaceChoice,
@@ -1305,6 +1306,46 @@ export function decodeFilePreview(value: unknown): FilePreview {
   };
 }
 
+export function decodeFileChangeDiff(value: unknown): FileChangeDiffResult {
+  const recordValue = record(value, "$fileChangeDiff");
+  const status = enumValue(recordValue.status, "$fileChangeDiff.status", [
+    "ready",
+    "unavailable",
+  ] as const);
+  if (status === "ready") {
+    const item = object(value, "$fileChangeDiff", [
+      "status",
+      "content",
+      "complete",
+      "redacted",
+    ]);
+    return {
+      status,
+      content: stringValue(item.content, "$fileChangeDiff.content"),
+      complete: booleanValue(item.complete, "$fileChangeDiff.complete"),
+      redacted: booleanValue(item.redacted, "$fileChangeDiff.redacted"),
+    };
+  }
+  const item = object(value, "$fileChangeDiff", [
+    "status",
+    "reason",
+    "content",
+  ]);
+  const content = stringValue(item.content, "$fileChangeDiff.content");
+  if (content !== "")
+    fail("$fileChangeDiff.content", "must be empty when unavailable");
+  return {
+    status,
+    reason: enumValue(item.reason, "$fileChangeDiff.reason", [
+      "not_recorded",
+      "capacity",
+      "missing",
+      "corrupt",
+    ] as const),
+    content: "",
+  };
+}
+
 function decodeTool(value: unknown, path: string): ToolView {
   const item = object(value, path, [
     "id",
@@ -1371,6 +1412,7 @@ function decodeRun(value: unknown, path: string): RunView {
     "cause",
     "usage",
     "tools",
+    "fileChanges",
   ]);
   const usage = object(item.usage, `${path}.usage`, [
     "input",
@@ -1460,7 +1502,75 @@ function decodeRun(value: unknown, path: string): RunView {
       cacheCreation: wireId(usage.cacheCreation, `${path}.usage.cacheCreation`),
     },
     tools: arrayValue(item.tools, `${path}.tools`, decodeTool),
+    fileChanges: decodeRunFileChanges(item.fileChanges, `${path}.fileChanges`),
   };
+}
+
+function decodeRunFileChanges(
+  value: unknown,
+  path: string,
+): RunView["fileChanges"] {
+  if (value === null) return null;
+  const item = object(value, path, ["observation", "changes"]);
+  const observation = enumValue(item.observation, `${path}.observation`, [
+    "collecting",
+    "complete",
+    "incomplete",
+  ] as const);
+  const changes = arrayValue(
+    item.changes,
+    `${path}.changes`,
+    (value, itemPath) => {
+      const change = object(value, itemPath, [
+        "id",
+        "order",
+        "kind",
+        "status",
+        "displayPath",
+        "fromDisplayPath",
+        "beforeBytes",
+        "afterBytes",
+        "diffAvailable",
+        "diffComplete",
+        "redacted",
+      ]);
+      const kind = enumValue(change.kind, `${itemPath}.kind`, [
+        "created",
+        "modified",
+        "deleted",
+        "moved",
+      ] as const);
+      const fromDisplayPath =
+        change.fromDisplayPath === null
+          ? null
+          : stringValue(change.fromDisplayPath, `${itemPath}.fromDisplayPath`);
+      if ((kind === "moved") !== (fromDisplayPath !== null))
+        fail(itemPath, "moved changes alone require a source path");
+      return {
+        id: stringValue(change.id, `${itemPath}.id`),
+        order: positiveWireId(change.order, `${itemPath}.order`),
+        kind,
+        status: enumValue(change.status, `${itemPath}.status`, [
+          "applied",
+          "partial",
+        ] as const),
+        displayPath: stringValue(change.displayPath, `${itemPath}.displayPath`),
+        fromDisplayPath,
+        beforeBytes: wireId(change.beforeBytes, `${itemPath}.beforeBytes`),
+        afterBytes: wireId(change.afterBytes, `${itemPath}.afterBytes`),
+        diffAvailable: booleanValue(
+          change.diffAvailable,
+          `${itemPath}.diffAvailable`,
+        ),
+        diffComplete: booleanValue(
+          change.diffComplete,
+          `${itemPath}.diffComplete`,
+        ),
+        redacted: booleanValue(change.redacted, `${itemPath}.redacted`),
+      };
+    },
+  );
+  return { observation, changes };
 }
 
 function decodeRunActivity(value: unknown, path: string): RunActivity | null {

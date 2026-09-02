@@ -87,6 +87,8 @@ artifact refresh、checksum 或 lock 更新本身不要求修改本文。精确 
 
 PermissionProfile 的最小充分证据必须跨越实际 owner：candidate probe 固定所采用 `PermissionMode + ShellPolicy` 的代表性 tool/effect 行为；Agent tests 固定配置编码、typed request/provenance、same-profile fresh/restore 与 noninteractive stop fact；Product lifecycle 固定默认值只影响新 Task、Task/Run provenance、archive/delete，以及 Scheduled occurrence 由生产 event consumer 自动 abort 后形成 `permission_required → needs_attention`；Renderer/Bridge tests 固定 capability gate、只读 effective profile、单次选择动作和合法历史 snapshot。Schedule definition update 只影响后续 occurrence，不能改写历史 Task profile 或使 Renderer 拒绝合法 snapshot。`standard` 在 typed risk/effect 和执行前 commit boundary 未经独立 fixture 证明前必须保持隐藏。
 
+File Changes 的最小充分证据必须跨越实际 owner：Agent lifecycle 固定 oversized/capacity degradation 只命中 classifier-confirmed `file_changes` 并发布 monotonic loss fact；Product lifecycle 固定协议矩阵、stable order/dedup、depth、容量、redaction、artifact identity、恢复/orphan/delete/shutdown；Bridge/Renderer 固定严格 DTO、capability gate、异步 stale response 和响应式审查视图；真实 AgentCore desktop vertical 必须由 canonical bundle 的 Edit/Write 产生 typed observation，并通过 `metawork.files.diff` 读回已记录 diff。静态 fixture、Tool 文本、Workspace 扫描或 Git diff 不能替代该纵向证据。
+
 ## Storage 基础层验证
 
 [Storage 架构](storage-architecture.md)拥有 SQL、权限、migration、事务结果和 lifecycle 合同；本节统一拥有其验证责任、入口与平台证据边界，不复制实现清单或测试数量。
@@ -160,7 +162,8 @@ macOS 的 AgentCore artifact、Native vertical、Keychain、secure input、windo
 | strict Workspace security、正式 Host tools、持久权限 | 尚未完成安全验收 | authority、process tree、filesystem、network 与跨平台安全证据 | [产品需求](requirements.md) |
 | PermissionProfile `standard` 与其他平台 artifact 行为 | 两档产品切片已开放，macOS arm64/x86_64 exact artifact probe 已通过；`standard` 隐藏，Windows target 尚缺同等 probe | typed risk/effect、执行前 commit boundary，以及 Windows 各 target exact artifact probe | [产品需求](requirements.md)、[AgentCore 集成契约](agentcore-integration.md) |
 | File Preview 真实桌面体验 | 核心 wire、owner、bounded read 与 redaction 已自动化覆盖；人工验收待完成 | Windows/macOS Drawer 视觉、键盘、焦点和窄窗验收 | [产品需求](requirements.md)、[UI 设计规范](ui-design.md) |
-| FileChange、typed Output、plan/approval、custom UI | 尚未形成可开放产品能力 | 对应合同、owner、持久化、恢复、投影和 UI Gate | [产品需求](requirements.md)、[UI 设计规范](ui-design.md) |
+| File Changes 真实桌面体验 | typed owner、持久化/恢复、Bridge/Renderer 和 canonical AgentCore desktop vertical 已自动化覆盖；人工验收待完成 | Windows/macOS Drawer 视觉、键盘、焦点、屏幕阅读器和窄窗验收 | [产品需求](requirements.md)、[UI 设计规范](ui-design.md) |
+| typed Output、plan/approval、custom UI | 尚未形成可开放产品能力 | 对应合同、owner、持久化、恢复、投影和 UI Gate | [产品需求](requirements.md)、[UI 设计规范](ui-design.md) |
 | Skill catalog 历史内容固定 | 外部合同证据不足 | body/resources lease 的独立合同或可复现实验 | [AgentCore 集成契约](agentcore-integration.md) |
 | execution rebind | 仅进程内 binding/model switch 有自动化 | 跨重启 epoch/history、竞态和恢复证据 | [产品需求](requirements.md)、[Product 架构](product-architecture.md) |
 | MCP 图片作为模型视觉输入 | 当前 canonical bundle 的 Streamable HTTP → Anthropic 验证仅保留序列化 tool-result 文本，不能认定模型收到图片块 | 上游支持后，验证标准 MCP image content 成为 provider 图片块，且连续历史与 checkpoint 保持；不得用 Base64 文本存在代替视觉证据 | [AgentCore 集成契约](agentcore-integration.md#agent-session-多模态输入) |

@@ -18,6 +18,7 @@ import type {
   UiResponsePayload,
   WorkspaceChoice,
   FilePreview,
+  FileChangeDiffResult,
 } from "./contracts.ts";
 import {
   assertCancelAccepted,
@@ -57,6 +58,7 @@ import {
   decodeMcpAuthorizationCancelResult,
   decodePermissionProfileMutationResult,
   decodeFilePreview,
+  decodeFileChangeDiff,
 } from "./decode-contracts.ts";
 import { RendererBridgeContractError } from "./contract-error.ts";
 import { fetchWorkbenchSnapshot } from "./snapshot/snapshot-client.ts";
@@ -206,6 +208,20 @@ export class BridgeClient {
         taskId,
         runId,
         fileReferenceId,
+      }),
+    );
+  }
+
+  async fileChangeDiff(
+    taskId: string,
+    runId: string,
+    fileChangeId: string,
+  ): Promise<FileChangeDiffResult> {
+    return decodeFileChangeDiff(
+      await this.invoke(commands.fileChangeDiff, {
+        taskId,
+        runId,
+        fileChangeId,
       }),
     );
   }

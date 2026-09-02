@@ -469,6 +469,10 @@ pub fn commitRunTerminal(
 }
 
 fn commitAgentTerminal(projector: TextProjector, run: *state.RunRecord, result: *const agent.TerminalResult) bool {
+    if (result.file_changes_lost and run.file_change_observation != null) {
+        run.file_changes_known_loss = true;
+        run.file_change_observation = .incomplete;
+    }
     const decision = policy.classifyAgentTerminal(result);
     return commitRunTerminal(
         projector,

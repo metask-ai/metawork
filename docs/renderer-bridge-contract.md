@@ -29,13 +29,15 @@ Renderer Bridge 使用独立合同身份 `metawork.renderer-bridge`，快速开�
 
 Run snapshot 已在 revision 1 内原地 hard cut 删除自由文本 `assistant`、`assistantRedacted` 与 `status`。每个 Run 精确发布 `output + activity`：`output = { commentary, response, responseKind, provisional, redacted, provisionalRedacted }`，其中 `commentary` 是最多 256 项的有序 string array，每一项对应一个非空、已闭合的 Product commentary group；数组顺序只表达 Run 内的稳定叙事顺序，不运输时间戳、CoreEvent identity、Tool 关联或 raw event timeline。credential 清洗跨整个 canonical output 一次完成，可以使个别投影项为空，但不得改变项数或泄漏跨边界 credential。`responseKind = final | partial | null`；null 时 response 必须为空，分类后的 response 不得同时保留 provisional，terminal Run 的 provisional 必须为空。全部 commentary 项、response 与 provisional 来自同一个 Host output byte budget；provisional 只包含 open/continued buffer 中 credential-safe committed bytes，discard 后必须消失。`activity` 是 nullable discriminated union：简单 kind 为 `queued | starting | waiting_model | thinking | writing_response | waiting_user | compacting_context | finalizing | stopping`；`executing_tools.inFlight` 为 nullable canonical decimal wire integer string，非空时必须为正数；`retrying_provider.attempt/max/delayMs` 要么全部为空、要么都是 canonical decimal wire integer string，attempt/max 为正数、delayMs 可为零且 attempt 不超过 max。非 terminal Run 必须有 activity，terminal Run 必须为 null；queued、waiting_ui、stopping phase 分别只接受 queued、waiting_user、stopping activity。
 
+每个 Run 另精确发布 `fileChanges = null | { observation, changes }`。null 表示没有建立 typed observation，不能解释为“确认没有修改”；observation 只取 `collecting | complete | incomplete`。`changes[]` entry 精确为 `{ id, order, kind, status, displayPath, fromDisplayPath, beforeBytes, afterBytes, diffAvailable, diffComplete, redacted }`：id 是 Run 内 opaque identity，order、beforeBytes、afterBytes 是 canonical decimal `u64` string；kind 只取 `created | modified | deleted | moved`，status 只取 `applied | partial`，fromDisplayPath 只在 moved 时非空，其余安全标志均为 boolean。同一 Run 的 id 和 order 必须唯一并按 order 严格递增；同路径多次记录不得合并。该投影不运输 raw locator、absolute path、AgentCore handle、agent depth、unified diff、credential 或文件当前内容。根 capability `typedFileChanges` 为 true 时 Renderer 才可消费此字段。
+
 每个 Task 精确发布 `context = { pressure, lastAutoCompact }`。pressure 为 null，或 `{ sourceRunId, currentTokens, warningThreshold, autoCompactThreshold, blockingLimit, severity }`；lastAutoCompact 为 null，或 `{ sourceRunId, dropped, kept, beforeTokens, afterTokens }`。所有计量使用 canonical decimal wire integer，sourceRunId 必须引用同一 Task 的 Run history；threshold 顺序、severity 与 token 数必须一致。context 属于当前 attached Conversation，可跨同一 Session 的 Run 保留，但 Task detach/replacement/restart 后两项均为空，且 detached Task 不得发布 observation。该 surface 不运输 raw CoreEvent tag、transition sequence、private reasoning、provider diagnostic 或 `file_changes`。
 
 `output`、`activity`、`tools` 与 `context` 只定义 Renderer 可消费的产品事实和 fail-closed 边界，不规定最终组件、布局、展开策略或更新节奏。当前 Agent 对话的 owner 链、Run exchange 槽位、active→terminal process surface 迁移和 full Snapshot 渲染机制由 [UI 设计规范](ui-design.md#72-agent-对话渲染机制)定义；wire 字段存在、scripted Provider vertical 或静态 DOM 通过都不能替代真实 Provider cadence 与长任务阅读体验的独立验收。后续纯呈现调整仍可在不改变 revision 1 wire 语义的前提下进行。
 
 ## File preview command
 
-`metawork.files.preview` 是 revision 1 command catalog 中唯一的异步 command，原地 hard cut 使用 Native SDK async registry；它不出现在同步 handler registry。request 精确为：
+`metawork.files.preview` 是 revision 1 command catalog 中的异步 command，原地 hard cut 使用 Native SDK async registry；它不出现在同步 handler registry。request 精确为：
 
 ```json
 {
@@ -63,6 +65,24 @@ response result 精确为：
 Product Control 使用独立 2-worker、最多 8 个 in-flight 的 File Preview lane 执行 no-follow、root-contained、regular-file-only 的有界读取；worker 不持有 Product Control/Bridge/Renderer，不向 Bridge 发布 raw bytes。主线程 completion 在序列化前重新校验 Task、Run、reference、Workspace id/epoch/root/authorization，并扫描当前及历史 Task execution credential（含截断边界前缀）；安全内容只在 callback 期间借给 Bridge，随后 secure-zero。正文不进入 Snapshot、Task persistence、日志或缓存。
 
 Snapshot `tools[].fileRefs[]` entry 精确只含 `{ id, title, displayPath }`。AgentCore 可能提供的 kind/range 只可作为 Host 内部历史事实，不进入当前 Renderer wire，Renderer 也不得将其解释为 Files Changed。
+
+## File changes diff command
+
+`metawork.files.diff` 是 revision 1 command catalog 中的异步 command，不出现在同步 handler registry。request 精确为 `{ "taskId": "17", "runId": "23", "fileChangeId": "task:17:run:23:change:1" }`；三个字段均不可省略，Task/Run 必须是 canonical decimal `u64`，change id 必须是 1–128 bytes opaque identity。Renderer 不提交路径、artifact locator、digest、range 或读取上限；Host 只在精确 Task + Run 内解析 change id。
+
+response 是以下 closed union：
+
+```json
+{ "status": "ready", "content": "...", "complete": true, "redacted": false }
+```
+
+```json
+{ "status": "unavailable", "reason": "not_recorded | capacity | missing | corrupt", "content": "" }
+```
+
+只有 `ready` 携带 credential-safe unified diff。`complete` 只说明 AgentCore 对该条 diff 没有声明截断，不等价于 Run observation complete；`redacted` 表示 Host 已替换至少一个 credential。`not_recorded` 覆盖没有 artifact reference、请求 identity 已 stale 或 owner 已消失；`capacity` 表示有界读取 lane 没有接纳请求；`missing/corrupt` 分别表示已记录 artifact 不存在或 identity/size/digest/UTF-8 校验失败。unavailable 不得携带部分正文。
+
+Product Control 使用 File Changes 专用 bounded artifact lane 按 reference 读取，不扫描 Workspace 或 Git。异步 completion 在跨 Bridge 前重新校验 Task、Run、change 与 artifact identity 仍一致；Task/Run 切换、删除、shutdown 或 reference replacement 后的旧结果只能返回 `not_recorded`。任一已接纳请求必须恰好一次 terminal response；正文和 retained payload 必须落在 Native SDK async response 与 shutdown 上界内，不进入 Snapshot、Task persistence、日志或 Renderer 缓存。
 
 当前 `metawork.tasks.run` 只有 `input.kind = text | skill` 的 tagged payload，旧 `prompt` 不兼容；Skill input 精确为 `{ kind, skillId, catalogRevision, selectionRevision, argumentValues }`。`tasks.create` 必须携带 `workspace = { kind: "automatic" } | { kind: "manual", workspaceId, expectedWorkspaceEpoch }`、nullable `expectedSkillCatalogRevision`、nullable `expectedSkillSelectionRevision` 和 `permissionProfile = approval_required | full_access`；Text 两个 revision 均为 `null`，Skill 两者均非空，混合状态 fail closed。Bridge 与 Product Control 直接使用同一组 `manual | automatic` admission 语义；混合、缺字段或未知 kind/profile 的 payload 一律 fail closed。不存在 `workspaces.select` 命令或 Snapshot 级 selected Workspace；Manual 选择只属于 Renderer New task draft，真正的 epoch、authorization 与 recent order 在 `tasks.create(manual)` 事务中校验和提交。`automaticWorkspaces` 只声明新 Automatic Workspace 的分配能力；capability 不可用时，已恢复的 Automatic Workspace 与 owning Task 历史仍可出现在 snapshot 中。Skill 没有 `runSkill` 第二入口。Workspace/Task catalog、typed Run history 和 Skill terminal cause 只从 Product Control snapshot 发布；显式 catalog refresh 也只通过 Bridge 调用 Product Control transaction，Bridge 不持有 catalog lease、不解析 slash、不读取 Skill body。
 
