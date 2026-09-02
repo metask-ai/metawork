@@ -317,7 +317,10 @@ pub const ScheduleNotification = product_schedule.Notification;
 pub const ScheduleNotifier = product_schedule.Notifier;
 
 const json_string_expansion: usize = 6;
-const pending_ui_reencode_expansion: usize = 2;
+// A pending request's raw JSON already contains the escaped arguments string.
+// The snapshot publishes a strict subset of that request; fixed identity and
+// choice fields are covered by pending_ui_snapshot_overhead below.
+const pending_ui_reencode_expansion: usize = 1;
 const root_snapshot_overhead: usize = 1024;
 const account_snapshot_text_bytes: usize =
     account_contract.Limits.account_id_bytes +
@@ -359,6 +362,23 @@ const catalog_skill_snapshot_overhead: usize = 256;
 const catalog_argument_snapshot_overhead: usize = 16;
 const catalog_issue_snapshot_overhead: usize = 128;
 const tool_snapshot_overhead: usize = 512;
+const tool_min_projection_bytes: usize = "tool-1".len + 1;
+// writeFileChanges emits at most this much non-projected JSON per collection
+// and record. The global projection allowance below already pays six bytes for
+// every retained text byte, so the record allowance only adds structure after
+// removing that deliberate overestimate for the canonical ASCII product id.
+const file_change_collection_snapshot_overhead: usize = 64;
+const file_change_record_snapshot_overhead: usize = 251;
+const file_change_min_display_path_bytes: usize = 1;
+const file_change_id_min_bytes: usize = "change-1-1-1".len;
+const file_change_id_next_bytes: usize = file_change_id_min_bytes + 1;
+const file_change_id_remaining_bytes: usize = file_change_id_next_bytes + 1;
+const one_digit_positive_values: usize = 9;
+const two_digit_positive_values: usize = 90;
+const file_change_min_id_capacity: usize =
+    one_digit_positive_values * one_digit_positive_values * one_digit_positive_values;
+const file_change_next_id_capacity: usize =
+    3 * two_digit_positive_values * one_digit_positive_values * one_digit_positive_values;
 const pending_ui_snapshot_overhead: usize = 8 * 1024;
 const ui_record_detail_capacity = if (builtin.is_test) task_test_state.ui_record_detail_capacity else 0;
 const ui_record_snapshot_overhead: usize = 1024;
@@ -6653,6 +6673,106 @@ fn workspaceRecordCapacity(limits: Limits) ?usize {
         null;
 }
 
+fn accountFileChangeSnapshotTier(
+    total: *usize,
+    remaining_slots: *usize,
+    remaining_projection: *usize,
+    tier_capacity: usize,
+    id_bytes: usize,
+) bool {
+    const projected_bytes = std.math.add(
+        usize,
+        id_bytes,
+        file_change_min_display_path_bytes,
+    ) catch return false;
+    const count = @min(
+        remaining_slots.*,
+        @min(tier_capacity, remaining_projection.* / projected_bytes),
+    );
+    const id_escape_overestimate = std.math.mul(
+        usize,
+        id_bytes,
+        json_string_expansion - 1,
+    ) catch return false;
+    if (id_escape_overestimate > file_change_record_snapshot_overhead)
+        return false;
+    total.* = std.math.add(
+        usize,
+        total.*,
+        std.math.mul(
+            usize,
+            count,
+            file_change_record_snapshot_overhead - id_escape_overestimate,
+        ) catch return false,
+    ) catch return false;
+    remaining_slots.* -= count;
+    remaining_projection.* -= count * projected_bytes;
+    return true;
+}
+
+fn fileChangeSnapshotAdditionalBytes(limits: Limits) ?usize {
+    const runs = std.math.mul(
+        usize,
+        limits.max_tasks,
+        limits.max_runs_per_task,
+    ) catch return null;
+    var remaining_slots = std.math.mul(
+        usize,
+        runs,
+        limits.max_file_changes_per_run,
+    ) catch return null;
+    const tools = std.math.mul(
+        usize,
+        runs,
+        limits.max_tools_per_run,
+    ) catch return null;
+    const tool_projection_floor = std.math.mul(
+        usize,
+        tools,
+        tool_min_projection_bytes,
+    ) catch return null;
+    // The structural bound below already reserves 512 bytes for every Tool.
+    // A present Tool necessarily retains at least `tool-1` and a non-empty
+    // name. If a Tool slot is absent, its 512-byte structural reservation is
+    // larger than the File Change structure that those seven released text
+    // bytes could admit, so retaining the floor is still conservative.
+    var remaining_projection = limits.max_projection_bytes -|
+        @min(limits.max_projection_bytes, tool_projection_floor);
+    var total = std.math.mul(
+        usize,
+        runs,
+        file_change_collection_snapshot_overhead,
+    ) catch return null;
+
+    // File change ids are exactly change-{task}-{generation}-{order}. Across
+    // all live records only 9^3 ids can use three one-digit components, and
+    // only 3*90*9^2 more can have exactly one two-digit component. All other
+    // ids are at least two bytes longer than the absolute minimum. Restore
+    // validates the same canonical identity before admitting persisted state.
+    if (!accountFileChangeSnapshotTier(
+        &total,
+        &remaining_slots,
+        &remaining_projection,
+        file_change_min_id_capacity,
+        file_change_id_min_bytes,
+    )) return null;
+    if (!accountFileChangeSnapshotTier(
+        &total,
+        &remaining_slots,
+        &remaining_projection,
+        file_change_next_id_capacity,
+        file_change_id_next_bytes,
+    )) return null;
+    if (!accountFileChangeSnapshotTier(
+        &total,
+        &remaining_slots,
+        &remaining_projection,
+        remaining_slots,
+        file_change_id_remaining_bytes,
+    )) return null;
+    return total;
+}
+
 fn worstCaseSnapshotBytes(limits: Limits) ?usize {
     var total = std.math.mul(usize, limits.max_projection_bytes, json_string_expansion) catch return null;
     total = std.math.add(
@@ -6778,6 +6898,11 @@ fn worstCaseSnapshotBytes(limits: Limits) ?usize {
         usize,
         total,
         std.math.mul(usize, runs, run_snapshot_overhead) catch return null,
+    ) catch return null;
+    total = std.math.add(
+        usize,
+        total,
+        fileChangeSnapshotAdditionalBytes(limits) orelse return null,
     ) catch return null;
     const commentary_segments = std.math.mul(
         usize,
@@ -10946,6 +11071,11 @@ test "Runtime snapshot budget includes JSON escaping and structural overhead" {
     try std.testing.expect(worst_case > 1024 * 1024);
     try std.testing.expectEqual(@as(usize, 1536 * 1024), limits.max_projection_bytes);
     try std.testing.expectEqual(@as(usize, 16), limits.max_runs_per_task);
+    const file_change_budget = fileChangeSnapshotAdditionalBytes(limits).?;
+    try std.testing.expect(file_change_budget >
+        limits.max_tasks * limits.max_runs_per_task *
+            file_change_collection_snapshot_overhead);
+    try std.testing.expect(worst_case >= file_change_budget);
     const single_pending_budget = limits.max_pending_ui_json_bytes * pending_ui_reencode_expansion + pending_ui_snapshot_overhead;
     try std.testing.expect(worst_case >= single_pending_budget * limits.max_pending_ui_requests);
 
@@ -10968,6 +11098,12 @@ test "Runtime snapshot budget includes JSON escaping and structural overhead" {
     defer std.testing.allocator.free(snapshot_storage);
     const snapshot = try control.writeSnapshot(snapshot_storage);
     try std.testing.expect(snapshot.len > controls.len * 5);
+}
+
+test "production pending UI concurrency fits the snapshot store with file changes" {
+    var limits = Limits{};
+    limits.max_pending_ui_requests = 16;
+    try std.testing.expect(worstCaseSnapshotBytes(limits).? <= limits.max_snapshot_bytes);
 }
 
 fn installMaximumAccountProjection(control: *Runtime) !void {
@@ -11122,6 +11258,11 @@ test "default snapshot budget contains the maximum structural projection" {
         for (0..limits.max_runs_per_task) |run_index| {
             const tools = try control.allocator.alloc(?ToolView, limits.max_tools_per_run);
             @memset(tools, null);
+            const file_changes = try control.allocator.alloc(
+                ?task_test_state.FileChangeView,
+                limits.max_file_changes_per_run,
+            );
+            @memset(file_changes, null);
             const commentary_ends = try control.allocator.alloc(
                 u64,
                 limits.max_commentary_segments_per_run,
@@ -11145,6 +11286,32 @@ test "default snapshot budget contains the maximum structural projection" {
                     .elapsed_ms = std.math.maxInt(u64),
                 };
             }
+            const change_order = limits.max_tools_per_run +
+                limits.max_ui_history_per_task + 1;
+            var change_id_storage: [task_test_state.file_change_product_id_capacity]u8 = undefined;
+            const change_id = try std.fmt.bufPrint(
+                &change_id_storage,
+                "change-{d}-{d}-{d}",
+                .{ task_index + 1, run_index + 1, change_order },
+            );
+            file_changes[0] = .{
+                .route_digest = [_]u8{0} ** task_test_state.file_change_route_digest_bytes,
+                .id = try control.copyBounded(
+                    change_id,
+                    limits.max_file_change_field_bytes,
+                ),
+                .order = @intCast(change_order),
+                .kind = .modified,
+                .status = .applied,
+                .display_path = try control.copyBounded(
+                    "maximum.zig",
+                    limits.max_file_change_field_bytes,
+                ),
+                .before_bytes = std.math.maxInt(u64),
+                .after_bytes = std.math.maxInt(u64),
+                .diff_complete = false,
+                .redacted = false,
+            };
             runs[run_index] = .{
                 .id = @intCast(run_index + 1),
                 .generation = @intCast(run_index + 1),
@@ -11161,6 +11328,8 @@ test "default snapshot budget contains the maximum structural projection" {
                 } },
                 .commentary_ends = commentary_ends,
                 .tools = tools,
+                .file_change_observation = .complete,
+                .file_changes = file_changes,
                 .terminal_publication = .init(.published),
                 .terminal_payload = .{
                     .phase = .completed,
@@ -11171,9 +11340,7 @@ test "default snapshot budget contains the maximum structural projection" {
                 .terminal_observed = true,
                 .event_stream_finalized = true,
                 .terminal_diagnostic = try control.allocTrackedCapacity(limits.max_terminal_diagnostic_bytes),
-                .next_activity_order = @intCast(
-                    limits.max_tools_per_run + limits.max_ui_history_per_task + 1,
-                ),
+                .next_activity_order = @intCast(change_order + 1),
             };
         }
         for (0..limits.max_compacts_per_task) |compact_index| {

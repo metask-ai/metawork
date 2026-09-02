@@ -2385,7 +2385,7 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
                 run.file_changes.?.len > limits.max_file_changes_per_run)
                 return error.Invalid;
             for (run.file_changes.?, 0..) |change, change_index| {
-                if (!validText(change.id, limits.max_file_change_field_bytes, false) or
+                if (!validFileChangeId(change.id, task.id, run.generation, change.order) or
                     change.order == 0 or change.order >= run.next_activity_order or
                     !oneOf(change.kind, &.{ "created", "modified", "deleted", "moved" }) or
                     !oneOf(change.status, &.{ "applied", "partial" }) or
@@ -2585,6 +2585,27 @@ fn validBinding(binding: BindingWire, max: usize) bool {
 fn validText(value: []const u8, max: usize, allow_empty: bool) bool {
     return (allow_empty or value.len != 0) and value.len <= max and
         std.unicode.utf8ValidateSlice(value);
+}
+
+fn validFileChangeId(
+    value: []const u8,
+    task_id: u64,
+    run_generation: u64,
+    order: u64,
+) bool {
+    var storage: [task_state.file_change_product_id_capacity]u8 = undefined;
+    const expected = std.fmt.bufPrint(
+        &storage,
+        "change-{d}-{d}-{d}",
+        .{ task_id, run_generation, order },
+    ) catch return false;
+    return std.mem.eql(u8, value, expected);
+}
+
+test "persisted file change identity must match its product route" {
+    try std.testing.expect(validFileChangeId("change-7-3-19", 7, 3, 19));
+    try std.testing.expect(!validFileChangeId("change-7-3-18", 7, 3, 19));
+    try std.testing.expect(!validFileChangeId("opaque", 7, 3, 19));
 }
 
 fn validCommentaryEnds(
