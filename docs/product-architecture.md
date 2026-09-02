@@ -207,7 +207,23 @@ Agent Session、callback、UI request、event pump、close race、错误映射�
 
 ## 4. 产品历史、持久化与恢复
 
-### 4.1 Durable history 与 runtime attachment
+### 4.1 持久化权威、状态与恢复通则
+
+本节只统一 Product Control store 的状态语义；Account persistence 由[高层架构](architecture.md#37-持久化权威与故障语义)和 [Account 架构](account-architecture.md)定义。
+
+每个 Product Control store 必须分别建模三条轴，禁止再用单一 `corrupt` 或 `fail closed` 推导全部行为：
+
+| 轴 | 稳定语义 |
+| --- | --- |
+| 数据观察 | `absent` 表示 owner 能证明没有当前 store；`ready` 表示完整当前格式；`degraded` 表示当前格式中可隔离的局部记录失效；无法识别的格式、当前格式损坏和物理读取失败是不同事实 |
+| commit 结果 | `committed` 表示 durable candidate 已成为 canonical；`failed` 表示能够证明没有提交；`outcome_unknown` 表示无法证明新旧哪一方 canonical，必须重观察，不能自动重放可能产生外部 effect 的原 intent |
+| 产品可用性 | interactive mutation、durable save、自动执行、权限/approval admission、cleanup 与显式 recovery 分别由 owner 决定；其中一个不可用不能伪造其他能力不可用，也不能冻结无关 aggregate |
+
+对外 wire 可以在不需要不同用户动作时合并内部诊断，但不得用更强的词误导用户；一旦不同事实需要不同迁移、文案或恢复动作，Bridge 必须先增加相应 typed contract，Renderer 不从诊断文本或文件名猜测。`unavailable` 表示能力或物理 store 没有建立，不等于空数据、损坏或首次启动。
+
+具体格式演进、迁移、恢复单位和 replace transaction 只由各 aggregate 的既有章节与实现拥有；本节不建立跨 owner 的通用恢复算法。尚未形成一致合同或真实能力的机制登记在[验证规范](validation.md)中，不得从本节推导新的 wire、磁盘布局或用户操作。
+
+### 4.2 Durable history 与 runtime attachment
 
 Product history 保存用户可观察且跨重启仍有意义的 Workspace、Task、用户消息、已提交 assistant 输出、Tool 结果、File Changes metadata/artifact reference、UI 决策、Run/compact terminal fact、execution provenance 与 checkpoint reference。完整产品范围以[产品需求](requirements.md)为准。
 
@@ -217,7 +233,7 @@ Run/compact 的 terminal result 由 Agent 以自包含事实返回，Product 在
 
 Task 删除是跨持久化、checkpoint、event、Session 和 worker reference 的独立 Product 生命周期用例，不占用 active-operation 槽；其 `idle | deleting | failed` 状态只存在于当前 Runtime，不进入 durable Task record。删除意图可以先进入 `deleting`，但只有相关 active operation、checkpoint、terminal event、Session access 和 worker reference 全部收口且 durable history commit 成功后才能物理移除 record。明确失败或结果不确定只使本次删除进入可诊断失败；用户可以重试删除，Task 的其他可用操作与整个 Workbench 不得因此冻结。
 
-### 4.2 `workbench-history.store`
+### 4.3 `workbench-history.store`
 
 `<MetaWork data dir>/workbench/workbench-history.store` 是 Workspace 与 Task 产品历史的 canonical 本地 store，不是 AgentCore checkpoint、缓存或通用 Storage SQL backend。Application 在 restore 前取得其进程级 OS writer lock，并把有界 load 与 atomic commit capability 注入 Product；Product 拥有 codec、跨记录校验、恢复 policy 和 persistence health。
 
@@ -225,13 +241,13 @@ Task 删除是跨持久化、checkpoint、event、Session 和 worker reference �
 
 非健康 history store 的显式 recovery 必须校验全局 revision，并由 Product 编码当前内存 Workspace/Task snapshot；Application 只能把当前 canonical 文件改名为唯一 quarantine artifact，再通过既有 durable atomic replace 安装该 candidate。读取/codec 失败时当前内存为空，因此形成 canonical empty history；write failure 或 outcome unknown 时保存当前进程仍持有的有效历史。失败不得清空内存或删除原文件，outcome unknown 继续发布 typed health；只有 committed 才恢复 ready。Renderer 不接触文件名、路径或 bytes，quarantine artifact 不进入 snapshot、日志或自动清理。
 
-交互式 Product Task mutation 以内存 Runtime 为当前进程真源，持久化是 best-effort projection；保存失败不得回滚已经接纳的新建、Run、模型选择、权限响应、重命名、归档、取消或 Workspace 导航 mutation。Schedule occurrence 是独立的无人值守边界：Product Control 必须为其 Task create、命名与 Run intent 注入 required durable effect，任一步未可靠提交都拒绝本次 occurrence，Schedule 按既有 transaction 进入可诊断状态，但不得冻结其他 Product Task。Task 物理删除仍遵守 §4.1 的 commit-before-release 边界。
+交互式 Product Task mutation 以内存 Runtime 为当前进程真源，持久化是 best-effort projection；保存失败不得回滚已经接纳的新建、Run、模型选择、权限响应、重命名、归档、取消或 Workspace 导航 mutation。Schedule occurrence 是独立的无人值守边界：Product Control 必须为其 Task create、命名与 Run intent 注入 required durable effect，任一步未可靠提交都拒绝本次 occurrence，Schedule 按既有 transaction 进入可诊断状态，但不得冻结其他 Product Task。Task 物理删除仍遵守 §4.2 的 commit-before-release 边界。
 
 store 读取上限为 16 MiB。commit 必须在同一目录完成 durable atomic replace，并区分 `committed | failed | outcome_unknown`；临时文件命名、frame header、checksum 算法和 codec 内部布局由唯一实现与测试拥有，不在本文镜像。
 
 Host 重启从通过校验的 store 重建 durable history 和 detached attachment。没有 live owner 的 non-terminal Run/compact 保守收口为 interrupted，不重放输入、工具、permission 或结果不确定 mutation；其 File Changes `collecting` 若存在必须收口为 `incomplete` 并保留已记录项。旧历史缺少 File Changes 字段时恢复为 `null`，不能伪造空观测。未完成 Tool 不进入恢复 projection，已经 durable 完成的 Tool result 保留。
 
-### 4.3 File Changes artifact transaction
+### 4.4 File Changes artifact transaction
 
 `<MetaWork data dir>/workbench/file-change-blobs/` 是 Product Task 专用的 credential-safe unified-diff store，不是 checkpoint 目录、当前 Workspace 镜像或通用 Artifact Framework。Application 持有进程级 writer lock 和 store/lane 生命周期；Product Task history 只保存 Task、run generation、change order、size 与 SHA-256 identity，不保存完整 diff 或物理路径。
 
@@ -239,7 +255,7 @@ Host 重启从通过校验的 store 重建 durable history 和 detached attachme
 
 可信启动只在 Task history health 为 ready 时根据完整 reference 集合删除临时文件和明确 orphan；history 不可用、degraded 或不可信时禁止 orphan cleanup。读取必须重新校验 identity、size、digest 和 UTF-8，missing/corrupt 作为 typed unavailable 结果返回。Task record 只有在 durable history 删除提交成功后才删除对应 artifact 目录；删除期间迟到的异步成功写入因无 Product owner 而立即回收。
 
-### 4.4 Checkpoint transaction
+### 4.5 Checkpoint transaction
 
 AgentCore checkpoint blob 与 Product checkpoint record 是两个提交边界。每个成功收口且 Session 可复用的 Run/compact 可以在 terminal product fact 发布后导出 checkpoint；blob 必须先 durable commit，随后 Product 才能把引用它的 checkpoint record 提交进 Task history。
 
@@ -253,7 +269,7 @@ checkpoint record 只保存：
 
 新 blob 明确成功但 history record 明确失败时，blob 可以暂时成为孤儿；record commit outcome unknown 时必须把相关 blob 当作可能的 orphan 保留，但不能冻结 Product Task，后续完整 history commit 可以建立新的 canonical snapshot。可信启动先校验 record 引用 blob 的 identity，再清除明确失效的 record，最后反向删除无 record 的 orphan。Product history degraded 或 checkpoint store 不可信时不得执行孤儿清理，以免删除未知 Task 的有效数据。
 
-### 4.5 Conversation attachment recovery
+### 4.6 Conversation attachment recovery
 
 Conversation recovery 是 detached Task 的 attachment 重建事务，不是 transcript 重放、Task 克隆或新的 Product owner。恢复资格必须同时证明：
 

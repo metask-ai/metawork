@@ -167,6 +167,7 @@ macOS 的 AgentCore artifact、Native vertical、Keychain、secure input、windo
 | typed Output、plan/approval、custom UI | 尚未形成可开放产品能力 | 对应合同、owner、持久化、恢复、投影和 UI Gate | [产品需求](requirements.md)、[UI 设计规范](ui-design.md) |
 | Skill catalog 历史内容固定 | 外部合同证据不足 | body/resources lease 的独立合同或可复现实验 | [AgentCore 集成契约](agentcore-integration.md) |
 | execution rebind | 仅进程内 binding/model switch 有自动化 | 跨重启 epoch/history、竞态和恢复证据 | [产品需求](requirements.md)、[Product 架构](product-architecture.md) |
+| Product 持久化格式演进与恢复策略 | 当前各 owner 的格式识别、迁移和恢复能力尚未形成统一、已实现的产品策略；Task/Schedule recovery 文件测试在 Windows 仍有崩溃 | 另行完成 owner-specific 决策、实现与对应原生文件验证后，再更新相关领域真源 | [高层架构](architecture.md)、[Product 架构](product-architecture.md)、[Account 架构](account-architecture.md) |
 | MCP 图片作为模型视觉输入 | 当前 canonical bundle 的 Streamable HTTP → Anthropic 验证仅保留序列化 tool-result 文本，不能认定模型收到图片块 | 上游支持后，验证标准 MCP image content 成为 provider 图片块，且连续历史与 checkpoint 保持；不得用 Base64 文本存在代替视觉证据 | [AgentCore 集成契约](agentcore-integration.md#agent-session-多模态输入) |
 | MCP 真实外部环境 | 确定性 owner/事务回归不等于平台验收 | 第三方 server、credential、network、secure capture、browser/callback 与 issuer 的跨平台证据 | [产品需求](requirements.md) |
 | Scheduled Task 的 Host 外执行 | 尚未实现 | 系统关机、用户显式退出、登录前服务或远端调度的能力合同与 lifecycle 证据 | [产品需求](requirements.md)、[Product 架构](product-architecture.md) |

@@ -282,7 +282,7 @@ Account candidate construction 与 preference persistence 是两个独立阶段�
 
 ## 7. Persistence 与恢复
 
-Account persistence 使用无版本 hard cut，不读取、迁移、清理或兼容旧 manifest、slot、`account.json` 或旧 credential family：
+Account persistence 服从[高层架构的持久化权威与故障语义](architecture.md#37-持久化权威与故障语义)。当前实现使用无版本 hard cut，不读取、迁移或兼容旧 manifest、slot、`account.json` 或旧 credential family；无法识别的既有数据不进入当前 Account state，也不被描述为已经迁移，具体清理由本节既有冷启动规则决定：
 
 - secure credential service identity 为产品 Bundle ID 加 `.account`，automation 构建在编译期使用 `.automation.account`；Metask refresh token 的固定 account name 是 `metask-refresh-token`；
 - 数据目录中的 `preferences.json` 精确保存 `selection_owner_account_id`、`api_key_id`、`model_id` 和非零 `execution_generation`；它不保存 display name、access token、API credential、protocol、base URL 或完整 `ExecutionConfig`；

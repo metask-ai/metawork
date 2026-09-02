@@ -71,6 +71,12 @@ Account 是 MetaWork 的 Metask 账号控制面，负责 OAuth 登录、当前�
 
 Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做什么、何时触发”。Task 是一次真实执行及其结果历史，Schedule 是触发规则，Skill 是独立的可复用执行方法；Scheduled Task 不保存 Skill identity、catalog revision 或参数，也不是 AgentCore Session、交互式 Task 草稿、Skill 子对象或第二套 automation 数据面。用户需要采用某个全局 Skill 时可以在任务指令中表达，但 occurrence 始终按普通 Text Run 重新经过当前 Execution、Workspace、容量和 shutdown admission，成功后创建一个新的真实 Task，再通过现有 bounded Executor 启动。每个 occurrence 都请求新的 Automatic Workspace，Scheduled Task 界面不提供 Manual Workspace 选择。Scheduled Task 只持久化无 secret 的指令、固定 PermissionProfile、触发游标和有界 occurrence 事实，不持有 API Key；默认 profile、默认执行配置或 Workspace authority 变化时不得静默改绑或重放。occurrence 使用定义固定的非交互 authority，只能执行或以 typed reason 停止，不能进入同步 permission wait、临时升级或把通知当作远程审批通道。
 
+### 持久数据与恢复
+
+当前代码与合同决定新写入接受的格式；无法识别、损坏、读取失败、明确写失败和提交结果不确定是不同事实，不能相互冒充。旧磁盘内容不能仅因当前版本不接受就被描述为当前数据或已经迁移；是否保留或清理，以及具体迁移和恢复能力，均由对应 Product owner 的现有合同与真实能力决定，未闭合机制只登记为验证缺口。
+
+交互式历史持久化异常不得冻结整个 Workbench，但 UI 必须持续可见地说明当前更改尚未确认保存。会控制重复外部 effect、权限或 credential 生命周期的持久 authority 不可信时，只对相关能力 fail closed，不得扩大到无关 Task。
+
 ## 5. 产品功能需求
 
 以下是目标产品需求，不代表当前 ABI v1 baseline 已全部实现。
