@@ -168,7 +168,17 @@ MCP apply、OAuth operation、refresh、运行时 reauthorization 与新 Task ad
 
 freshness failure 必须使旧 Admission fail closed 并触发现有异步 refresh；原 Task create、restore 或 mutation 不自动重放。refresh、apply 或 OAuth 已占用执行边界时必须保留 pending 事实，不能丢弃触发。关闭时先停止 MCP management、OAuth/refresh timer 与新 Task admission，再 settle/join worker，释放 Admission 与 Activation，最后由 Agent owner 释放 transport 与 Runtime。
 
-### 2.6 Identity 与 credential redaction
+### 2.6 图片与 PDF attachment staging
+
+Attachment staging 是 Product Control 内部、非持久、无用户 identity 的候选资源 owner，不形成新的顶层 Product owner 或 Renderer 产品对象。Application 只通过 Native SDK 原生 picker 取得用户选择，并把完成一次有界读取所需的窄 selected-file capability 注入 Product；Bridge 只拥有 source/window/connection authority 以及 Renderer opaque token 到 Product staging identity 的 grant，不能持有 raw bytes、路径或 Product 内部指针。Renderer 只持 token 与安全 display metadata。
+
+Product Control 使用独立于 Run、File Preview、catalog、restore 与 MCP 的 bounded attachment lane。一次多选按批次原子 staging：worker 只读取普通非空文件，按文件签名校验 PNG、JPEG、WebP 或 PDF，并同时服从 canonical AgentCore 单文件限制、Product 文件数和 raw staging 总预算；任一候选失败必须清零本批已经读取的字节且不发布部分 token。选择路径只活到 worker 建立 owned bytes，不能进入日志、Snapshot、持久化或后续发送时重读。Application/SDK 无法提供满足 no-follow 与稳定读取语义的 capability 时必须明确拒绝，不得回退到 Renderer upload 或主线程无界读取。
+
+staging 状态精确为 `staging | ready | borrowed | consumed | released | failed`。Bridge 在 `tasks.run` 前校验 token 属于当前 connection/window、均为 ready 且不重复；Product Task 在同一 admission 内 borrow bytes、构造有序 Agent `RunInput.multimodal` 并完成 `prepareRun`。Run 写入当前进程 Product Runtime 的接纳点是 token 消费 linearization point：此前失败恢复全部 staging 为 ready，此后无论 history save、enqueue、transport 或 Agent terminal 如何收口都不得恢复或自动重放 token。Agent 在 `prepareRun` 返回后已拥有编码输入，Product 必须清零 raw staging；enqueue 失败形成既有 pre-execution interrupted Run。
+
+用户移除、Bridge disconnect/document generation replacement、明确 release、Product shutdown 和未被接纳的 owner 释放都必须 exactly-once 清零 raw bytes。staging 不使用 wall-clock TTL；每 connection slot、每文件和全局 raw byte budget 保证资源有界。Task durable history 只保存 attachment 的 redacted basename、kind、format、size 与顺序；不保存 token、路径、raw bytes、Base64、digest 或 provider wire。AgentCore checkpoint 继续独占 Conversation 媒体历史。
+
+### 2.7 Identity 与 credential redaction
 
 Product Task identity、Agent Session route identity、execution generation、Workspace identity、Skill policy identity 和 MCP server identity 各自属于对应 owner，不共享生成器，也不能依赖数值相等。跨边界只传递完成当前校验所需的稳定 identity 和 generation，不传递内部指针或 secret-bearing owner。
 
@@ -192,6 +202,7 @@ Credential 是 opaque bytes。redaction 必须覆盖流式跨 chunk 与 UTF-8 co
 - worker job 只持 owned payload、稳定 record reference、scoped Agent Session access 和完成本次工作所需的窄 capability，不保存 Product Control、aggregate Runtime 或主线程可变状态指针；
 - queued cancel、worker completion、terminal publication 与 worker reference 必须各自 exactly once 收口。terminal fact 在通知、释放引用或触发外部 owner 前完成 write-once publication；
 - Bridge/main thread 不执行长耗时 Agent 调用，也不等待 permission。Renderer response、snapshot failure 与 transport disconnect 只作为 typed transport fact 进入 Product policy，默认不能中止后台 Run 或覆盖 terminal cause；
+- Attachment staging 使用独立 bounded execution lane；native picker 返回后，文件读取、签名校验和 owned raw bytes 建立都在 worker 执行。completion 回主线程后必须重新校验 batch、connection/window grant、shutdown token 与 staging identity；stale completion 只清零 candidate。raw bytes 只在 Product staging 与 `prepareRun` 的 borrowed lifetime 内存在；
 - File Preview 使用独立于 Run、catalog、restore 与 MCP 的 bounded execution lane。worker 只接收深拷贝的 root-relative locator 和读取上限；完成回主线程后重新校验 Task、Run、Workspace authority 并执行 credential redaction。raw bytes 不进入 Product history、Snapshot、持久化或日志；
 - File Changes 使用独立单 worker、有界 in-flight 的 artifact lane。diff 在入队前按当前及历史 Task credential 脱敏，worker 只持有 immutable Task/run/change identity、owned diff 和专用 store capability；完成回主线程后重新校验 Product artifact ownership。stale 或 Task 已删除的成功写入立即回收，读取结果在跨 Bridge 前再次校验引用仍属于同一 Task/Run/change；
 - async completion 必须按开始时冻结的 attempt、object identity、epoch/generation、attachment 与 shutdown token 全量重新校验。任一 token stale 都只销毁 candidate，不安装、不自动重放原请求；

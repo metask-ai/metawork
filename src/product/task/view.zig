@@ -331,6 +331,29 @@ fn writeRun(
             writer.print(",\"redacted\":{}}}", .{text.redacted}) catch
                 return error.SnapshotTooLarge;
         },
+        .multimodal => |multimodal| {
+            writer.writeAll("{\"kind\":\"multimodal\",\"text\":") catch
+                return error.SnapshotTooLarge;
+            if (multimodal.text) |text|
+                try text_projection.writeJson(writer, text)
+            else
+                writer.writeAll("null") catch return error.SnapshotTooLarge;
+            writer.writeAll(",\"attachments\":[") catch return error.SnapshotTooLarge;
+            for (multimodal.attachments, 0..) |item, index| {
+                if (index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+                writer.print("{{\"kind\":\"{s}\",\"format\":\"{s}\",\"displayName\":", .{
+                    @tagName(item.kind),
+                    @tagName(item.format),
+                }) catch return error.SnapshotTooLarge;
+                try text_projection.writeJson(writer, item.display_name);
+                writer.print(",\"sizeBytes\":\"{d}\",\"redacted\":{}}}", .{
+                    item.size_bytes,
+                    item.redacted,
+                }) catch return error.SnapshotTooLarge;
+            }
+            writer.print("],\"redacted\":{}}}", .{multimodal.redacted}) catch
+                return error.SnapshotTooLarge;
+        },
         .skill => |skill| {
             writer.writeAll("{\"kind\":\"skill\",\"skillId\":") catch
                 return error.SnapshotTooLarge;

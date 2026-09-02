@@ -308,6 +308,7 @@ pub const Limits = struct {
     max_workspace_bytes: usize,
     max_task_title_bytes: usize,
     max_user_message_bytes: usize,
+    max_attachments_per_run: usize = 8,
     max_assistant_message_bytes: usize,
     max_tool_field_bytes: usize,
     max_file_ref_field_bytes: usize,
@@ -470,6 +471,15 @@ pub const RunInputWire = struct {
     invocation_name: ?[]const u8,
     display_name: ?[]const u8,
     argument_values: ?[][]const u8,
+    attachments: ?[]AttachmentWire = null,
+    redacted: bool,
+};
+
+pub const AttachmentWire = struct {
+    kind: []const u8,
+    format: []const u8,
+    display_name: []const u8,
+    size_bytes: u64,
     redacted: bool,
 };
 
@@ -607,6 +617,7 @@ pub fn deinitTaskWires(allocator: std.mem.Allocator, tasks: []TaskWire) void {
     for (tasks) |task| {
         for (task.runs) |run| {
             if (run.input.argument_values) |values| allocator.free(values);
+            if (run.input.attachments) |items| allocator.free(items);
             for (run.tools) |tool|
                 if (tool.file_refs) |references| allocator.free(references);
             allocator.free(run.tools);
@@ -660,6 +671,7 @@ pub fn projectTask(
     var run_index: usize = 0;
     errdefer for (runs[0..run_index]) |run| {
         if (run.input.argument_values) |values| allocator.free(values);
+        if (run.input.attachments) |items| allocator.free(items);
         for (run.tools) |tool|
             if (tool.file_refs) |references| allocator.free(references);
         allocator.free(run.tools);
@@ -891,6 +903,8 @@ fn projectRun(
 
     var argument_values: ?[][]const u8 = null;
     errdefer if (argument_values) |values| allocator.free(values);
+    var attachments: ?[]AttachmentWire = null;
+    errdefer if (attachments) |items| allocator.free(items);
     const input: RunInputWire = switch (run.input) {
         .text => |text| .{
             .kind = "text",
@@ -900,7 +914,30 @@ fn projectRun(
             .invocation_name = null,
             .display_name = null,
             .argument_values = null,
+            .attachments = null,
             .redacted = text.redacted,
+        },
+        .multimodal => |multimodal| input: {
+            const items = try allocator.alloc(AttachmentWire, multimodal.attachments.len);
+            for (items, multimodal.attachments) |*target, item| target.* = .{
+                .kind = @tagName(item.kind),
+                .format = @tagName(item.format),
+                .display_name = item.display_name,
+                .size_bytes = item.size_bytes,
+                .redacted = item.redacted,
+            };
+            attachments = items;
+            break :input .{
+                .kind = "multimodal",
+                .text = multimodal.text,
+                .skill_id = null,
+                .catalog_revision = null,
+                .invocation_name = null,
+                .display_name = null,
+                .argument_values = null,
+                .attachments = items,
+                .redacted = multimodal.redacted,
+            };
         },
         .skill => |skill| input: {
             const values = try allocator.alloc([]const u8, skill.argument_values.len);
@@ -914,6 +951,7 @@ fn projectRun(
                 .invocation_name = skill.invocation_name,
                 .display_name = skill.display_name,
                 .argument_values = values,
+                .attachments = null,
                 .redacted = skill.redacted,
             };
         },
@@ -1414,6 +1452,43 @@ fn restoreRunInput(
         ),
         .redacted = wire.redacted,
     } };
+    if (std.mem.eql(u8, wire.kind, "multimodal")) {
+        const wire_items = wire.attachments orelse return error.TaskStoreCorrupt;
+        const items = try projection.allocator.alloc(
+            task_state.AttachmentRecord,
+            wire_items.len,
+        );
+        errdefer projection.allocator.free(items);
+        var initialized: usize = 0;
+        errdefer for (items[0..initialized]) |item| projection.free(item.display_name);
+        for (wire_items, items) |wire_item, *item| {
+            const kind = parseEnum(task_state.AttachmentKind, wire_item.kind) orelse
+                return error.TaskStoreCorrupt;
+            const format = parseEnum(task_state.AttachmentFormat, wire_item.format) orelse
+                return error.TaskStoreCorrupt;
+            item.* = .{
+                .kind = kind,
+                .format = format,
+                .display_name = try projection.copy(
+                    wire_item.display_name,
+                    projection.limits.max_tool_field_bytes,
+                ),
+                .size_bytes = wire_item.size_bytes,
+                .redacted = wire_item.redacted,
+            };
+            initialized += 1;
+        }
+        const text = if (wire.text) |value|
+            try projection.copy(value, projection.limits.max_user_message_bytes)
+        else
+            null;
+        return .{ .multimodal = .{
+            .text = text,
+            .attachments = items,
+            .redacted = wire.redacted,
+        } };
+    }
+    if (!std.mem.eql(u8, wire.kind, "skill")) return error.TaskStoreCorrupt;
     const values_wire = wire.argument_values orelse return error.TaskStoreCorrupt;
     const values = try projection.allocator.alloc([]u8, values_wire.len);
     errdefer projection.allocator.free(values);
@@ -1728,6 +1803,11 @@ fn deinitRestoredRunInput(
 ) void {
     switch (input.*) {
         .text => |text| projection.free(text.value),
+        .multimodal => |multimodal| {
+            if (multimodal.text) |text| projection.free(text);
+            for (multimodal.attachments) |item| projection.free(item.display_name);
+            projection.allocator.free(multimodal.attachments);
+        },
         .skill => |skill| {
             projection.free(skill.skill_id);
             projection.free(skill.catalog_revision);
@@ -2598,13 +2678,35 @@ fn validateRunInput(input: RunInputWire, limits: Limits) !void {
     if (std.mem.eql(u8, input.kind, "text")) {
         if (input.skill_id != null or input.catalog_revision != null or
             input.invocation_name != null or input.display_name != null or
-            input.argument_values != null)
+            input.argument_values != null or input.attachments != null)
             return error.Invalid;
         if (!validText(input.text orelse return error.Invalid, limits.max_user_message_bytes, false))
             return error.Invalid;
         return;
     }
-    if (!std.mem.eql(u8, input.kind, "skill") or input.text != null)
+    if (std.mem.eql(u8, input.kind, "multimodal")) {
+        if (input.skill_id != null or input.catalog_revision != null or
+            input.invocation_name != null or input.display_name != null or
+            input.argument_values != null)
+            return error.Invalid;
+        if (input.text) |text|
+            if (!validText(text, limits.max_user_message_bytes, false))
+                return error.Invalid;
+        const items = input.attachments orelse return error.Invalid;
+        if (items.len == 0 or items.len > limits.max_attachments_per_run)
+            return error.Invalid;
+        for (items) |item| {
+            if (!validText(item.display_name, limits.max_tool_field_bytes, false) or
+                item.size_bytes == 0 or
+                !oneOf(item.kind, &.{ "image", "pdf" }) or
+                !oneOf(item.format, &.{ "png", "jpeg", "webp", "pdf" }) or
+                (std.mem.eql(u8, item.kind, "pdf") != std.mem.eql(u8, item.format, "pdf")))
+                return error.Invalid;
+        }
+        return;
+    }
+    if (!std.mem.eql(u8, input.kind, "skill") or input.text != null or
+        input.attachments != null)
         return error.Invalid;
     if (!validText(input.skill_id orelse return error.Invalid, limits.max_tool_field_bytes, false) or
         !validText(input.catalog_revision orelse return error.Invalid, limits.max_tool_field_bytes, false) or

@@ -496,6 +496,29 @@ export const zhCN: Record<MessageId, string> = {
   "run.start_failed": "未能开始工作，请检查连接后重试。",
   "run.stop_failed": "未能确认停止请求，请刷新后重试。",
   "run.stop_requested": "正在停止当前工作…",
+  "attachment.add": "添加图片或 PDF",
+  "attachment.selected": "已选择的附件",
+  "attachment.remove": "移除 {name}",
+  "attachment.type.image": "图片",
+  "attachment.type.pdf": "PDF",
+  "attachment.reload_required":
+    "附件不会在重新载入后保留，请重新添加后再发送。",
+  "attachment.skill_conflict":
+    "请先移除附件再选择 Skill，或将开头的斜杠改写为普通文本。",
+  "attachment.model_warning.image":
+    "此模型声明不支持图片输入；仍可发送，并以实际返回结果为准。",
+  "attachment.model_warning.pdf":
+    "此模型声明不支持 PDF 输入；仍可发送，并以实际返回结果为准。",
+  "attachment.model_warning.both":
+    "此模型声明不支持图片和 PDF 输入；仍可发送，并以实际返回结果为准。",
+  "attachment.error.unsupported_type": "请选择 PNG、JPEG、WebP 或 PDF 文件。",
+  "attachment.error.file_too_large": "所选文件中有文件超过大小限制。",
+  "attachment.error.too_many_files": "最多可添加 8 个文件。",
+  "attachment.error.staging_capacity": "附件暂存空间不足，请移除文件后重试。",
+  "attachment.error.read_failed": "无法读取所选文件中的某个文件。",
+  "attachment.error.file_changed": "添加期间文件发生了变化，请重新选择。",
+  "attachment.error.shutting_down": "MetaWork 正在关闭，暂时无法添加附件。",
+  "attachment.error.generic": "无法添加所选文件。",
   "run.terminal.completed": "工作已完成",
   "run.no_final_response": "工作已经结束，但 Agent 没有返回最终说明。",
   "run.terminal.stopped": "工作已停止",

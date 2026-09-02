@@ -218,6 +218,31 @@ test("Workbench connection publishes only synchronized snapshots", async () => {
   await connection.stop();
 });
 
+test("Workbench connection publishes generation establishment and teardown", async () => {
+  const generations = [];
+  const client = {
+    available: () => true,
+    onWorkbenchRevision: () => () => undefined,
+    onHostSignal: () => () => undefined,
+    connect: async () => "42",
+    disconnect: async () => undefined,
+    fetchSnapshot: async () => snapshot("1"),
+    ping: async () => ({ sequence: 1 }),
+  };
+  const connection = new WorkbenchConnection(client, {
+    onSnapshot: () => undefined,
+    onStatus: () => undefined,
+    onReady: () => undefined,
+    onViewSyncFailed: () => undefined,
+    onGeneration: (generation) => generations.push(generation),
+  });
+
+  await connection.start();
+  await connection.stop();
+
+  assert.deepEqual(generations, ["42", "0"]);
+});
+
 test("explicit recovery replaces a generation whose snapshots stay unavailable", async () => {
   const generations = ["1", "2"];
   const disconnected = [];

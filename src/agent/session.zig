@@ -22,6 +22,8 @@ const session_binding = @import("session/binding.zig");
 const session_runtime = @import("session/runtime.zig");
 
 pub const OwnedCoreEvent = event_pump.OwnedCoreEvent;
+pub const MultimodalInputLimits = multimodal.InputLimits;
+pub const multimodal_input_limits = multimodal.input_limits;
 pub const Status = sdk.Status;
 pub const StopReason = sdk.StopReason;
 const UiRequest = sdk.UiRequest;

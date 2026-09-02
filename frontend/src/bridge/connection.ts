@@ -12,6 +12,7 @@ export type WorkbenchConnectionCallbacks = {
   onStatus: (status: WorkbenchConnectionStatus) => void;
   onReady: (ready: boolean) => void;
   onViewSyncFailed: (failed: boolean) => void;
+  onGeneration?: (generation: string) => void;
 };
 
 export type WorkbenchConnectionStatus =
@@ -208,6 +209,7 @@ export class WorkbenchConnection {
       return;
     }
     this.generation = next;
+    this.callbacks.onGeneration?.(next);
     this.demand.beginGeneration(next);
     this.callbacks.onViewSyncFailed(false);
     try {
@@ -224,6 +226,7 @@ export class WorkbenchConnection {
 
   private markDisconnected() {
     this.generation = "0";
+    this.callbacks.onGeneration?.("0");
     this.demand.beginGeneration("0");
     this.callbacks.onReady(false);
   }

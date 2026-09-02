@@ -1,4 +1,5 @@
 import { execFile, spawn } from "node:child_process";
+import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import {
@@ -122,13 +123,22 @@ if (
   path.isAbsolute(relativeDataRoot)
 )
   throw new Error(`vertical data root escaped its fixture: ${dataRoot}`);
-const fixturePath = join(workspace, "fixture.txt");
+const fixturePath = join(canonicalWorkspace, "fixture.txt");
 await writeFile(fixturePath, "agentcore-vertical-before\n", { mode: 0o600 });
+const attachmentPngBytes = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+  "base64",
+);
+const attachmentPdfBytes = minimalPdf();
+const attachmentPngPath = join(canonicalWorkspace, "reference.png");
+const attachmentPdfPath = join(canonicalWorkspace, "brief.pdf");
+await writeFile(attachmentPngPath, attachmentPngBytes, { mode: 0o600 });
+await writeFile(attachmentPdfPath, attachmentPdfBytes, { mode: 0o600 });
 // This fixture targets an AgentCore-owned canonical project source. No
 // MetaWork product module reads, configures, or exposes this physical path.
 const skillSourceDirectory = ".agents";
 const skillDirectory = join(
-  workspace,
+  canonicalWorkspace,
   skillSourceDirectory,
   "skills",
   "review",
@@ -153,7 +163,7 @@ await writeFile(
 );
 await rm(automationDir, { recursive: true, force: true });
 
-const writtenPath = join(workspace, "agentcore-vertical-write.txt");
+const writtenPath = join(canonicalWorkspace, "agentcore-vertical-write.txt");
 const responses = [
   streamedSse(
     toolSse(
@@ -196,11 +206,11 @@ const responses = [
         }),
         toolSse("m5", "glob-1", "Glob", {
           pattern: "*.txt",
-          path: workspace,
+          path: canonicalWorkspace,
         }),
         toolSse("m6", "grep-1", "Grep", {
           pattern: "agentcore-vertical-after",
-          path: workspace,
+          path: canonicalWorkspace,
         }),
         toolSse("m7", "bash-background-1", "Bash", {
           command: 'powershell -NoProfile -Command "Start-Sleep -Seconds 30"',
@@ -216,12 +226,24 @@ const responses = [
     process.platform === "win32" ? "m10" : "m4",
     "metawork agentcore vertical complete",
   ),
+  (payload) => {
+    assertMultimodalProviderRequest(
+      payload,
+      "Compare the reference image with the PDF brief.",
+      attachmentPngBytes,
+      attachmentPdfBytes,
+    );
+    return textSse(
+      process.platform === "win32" ? "m11" : "m5",
+      "metawork multimodal checkpoint complete",
+    );
+  },
   textSse(
-    process.platform === "win32" ? "m11" : "m5",
+    process.platform === "win32" ? "m12" : "m6",
     "metawork text checkpoint complete",
   ),
   textSse(
-    process.platform === "win32" ? "m13" : "m7",
+    process.platform === "win32" ? "m14" : "m8",
     "metawork compact checkpoint complete",
   ),
 ];
@@ -655,7 +677,129 @@ try {
       `Edit did not update the workspace: ${JSON.stringify(edited)}`,
     );
 
-  const priorRunIds = new Set(task.runs.map((run) => run.id));
+  const attachmentChoice = await invokeBridge(
+    "metawork.attachments.choose",
+    {},
+  );
+  assertAttachmentChoice(attachmentChoice, [
+    {
+      kind: "image",
+      format: "png",
+      displayName: path.basename(attachmentPngPath),
+      sizeBytes: String(attachmentPngBytes.length),
+    },
+    {
+      kind: "pdf",
+      format: "pdf",
+      displayName: path.basename(attachmentPdfPath),
+      sizeBytes: String(attachmentPdfBytes.length),
+    },
+  ]);
+  const attachmentTokens = attachmentChoice.attachments.map(
+    (attachment) => attachment.token,
+  );
+  const beforeMultimodalRunIds = new Set(task.runs.map((item) => item.id));
+  const multimodalRunResult = await invokeBridge("metawork.tasks.run", {
+    taskId,
+    expectedBindingEpoch,
+    input: {
+      kind: "multimodal",
+      text: "Compare the reference image with the PDF brief.",
+      attachmentTokens,
+    },
+  });
+  if (
+    multimodalRunResult !== null &&
+    (multimodalRunResult.accepted !== true ||
+      multimodalRunResult.taskId !== taskId ||
+      !isWireId(multimodalRunResult.runId))
+  )
+    throw new Error(
+      `Multimodal Run was not accepted: ${JSON.stringify(multimodalRunResult)}`,
+    );
+  for (const token of attachmentTokens) {
+    const released = await invokeBridge("metawork.attachments.release", {
+      token,
+    });
+    if (released?.released !== false)
+      throw new Error(
+        `consumed attachment grant remained releasable: ${JSON.stringify(released)}`,
+      );
+  }
+  const acceptedMultimodalRunId = multimodalRunResult?.runId ?? null;
+  const multimodalTerminal = await poll(
+    async () => {
+      if (provider.error) throw provider.error;
+      const current = await snapshot();
+      const currentRun = current.tasks
+        .find((item) => item.id === taskId)
+        ?.runs.find((item) =>
+          acceptedMultimodalRunId
+            ? item.id === acceptedMultimodalRunId
+            : !beforeMultimodalRunIds.has(item.id),
+        );
+      return currentRun && terminal.has(currentRun.phase)
+        ? { current, run: currentRun }
+        : null;
+    },
+    runTimeoutMs,
+    "Multimodal Run",
+  );
+  const multimodalRunId = multimodalTerminal.run.id;
+  if (provider.error) throw provider.error;
+  if (
+    multimodalTerminal.run.phase !== "completed" ||
+    !(
+      multimodalTerminal.run.output.commentary.join("") +
+      multimodalTerminal.run.output.response
+    ).includes("metawork multimodal checkpoint complete")
+  )
+    throw new Error(
+      `Multimodal Run did not complete: ${JSON.stringify(multimodalTerminal.run)}`,
+    );
+  assertMultimodalHistory(multimodalTerminal, attachmentTokens, [
+    {
+      kind: "image",
+      format: "png",
+      displayName: path.basename(attachmentPngPath),
+      sizeBytes: String(attachmentPngBytes.length),
+    },
+    {
+      kind: "pdf",
+      format: "pdf",
+      displayName: path.basename(attachmentPdfPath),
+      sizeBytes: String(attachmentPdfBytes.length),
+    },
+  ]);
+  const multimodalCheckpointObservedAt = Date.now();
+  const multimodalCheckpoint = await poll(
+    async () =>
+      readCheckpointEvidence(
+        taskId,
+        "run",
+        multimodalRunId,
+        expectedBindingEpoch,
+      ),
+    commandTimeoutMs,
+    "Multimodal durable checkpoint descriptor",
+  );
+  multimodalCheckpoint.descriptorLatencyMs =
+    Date.now() - multimodalCheckpointObservedAt;
+  await expectMissing(checkpointEvidence.blobPath);
+  process.stdout.write(
+    `AgentCore checkpoint evidence: ${JSON.stringify({
+      kind: "multimodal",
+      byteSize: multimodalCheckpoint.byteSize,
+      generation: multimodalCheckpoint.generation,
+      descriptorLatencyMs: multimodalCheckpoint.descriptorLatencyMs,
+      historyByteSize: multimodalCheckpoint.historyByteSize,
+    })}\n`,
+  );
+
+  const currentTask = multimodalTerminal.current.tasks.find(
+    (item) => item.id === taskId,
+  );
+  const priorRunIds = new Set(currentTask.runs.map((item) => item.id));
   const textRunResult = await invokeBridge("metawork.tasks.run", {
     taskId,
     expectedBindingEpoch,
@@ -724,7 +868,7 @@ try {
     "Text durable checkpoint descriptor",
   );
   textCheckpoint.descriptorLatencyMs = Date.now() - textCheckpointObservedAt;
-  await expectMissing(checkpointEvidence.blobPath);
+  await expectMissing(multimodalCheckpoint.blobPath);
   process.stdout.write(
     `AgentCore checkpoint evidence: ${JSON.stringify({
       kind: "text",
@@ -797,9 +941,13 @@ try {
       historyByteSize: compactCheckpoint.historyByteSize,
     })}\n`,
   );
-  if (provider.served !== responses.length)
+  const expectedProviderResponses =
+    compactTerminal.phase === "no_change"
+      ? responses.length - 1
+      : responses.length;
+  if (provider.served !== expectedProviderResponses)
     throw new Error(
-      `provider served ${provider.served}/${responses.length} responses`,
+      `provider served ${provider.served}/${expectedProviderResponses} expected responses`,
     );
   if (provider.titleCompletions !== 1)
     throw new Error(
@@ -857,12 +1005,35 @@ try {
   if (
     restoredSnapshot.capabilities?.conversationRecovery !== true ||
     restoredTask?.lifecycle !== "open" ||
-    restoredTask.runs.length !== 2 ||
+    restoredTask.runs.length !== 3 ||
     restoredTask.compacts.length !== 1
   )
     throw new Error(
       `checkpoint restart changed product history or recovery gate: ${JSON.stringify({ restoredTask, tasks: restoredSnapshot.tasks, capabilities: restoredSnapshot.capabilities })}`,
     );
+  const restoredMultimodalRun = restoredTask.runs.find(
+    (item) => item.id === multimodalRunId,
+  );
+  if (!restoredMultimodalRun)
+    throw new Error("checkpoint restart lost the multimodal Run");
+  assertMultimodalHistory(
+    { current: restoredSnapshot, run: restoredMultimodalRun },
+    attachmentTokens,
+    [
+      {
+        kind: "image",
+        format: "png",
+        displayName: path.basename(attachmentPngPath),
+        sizeBytes: String(attachmentPngBytes.length),
+      },
+      {
+        kind: "pdf",
+        format: "pdf",
+        displayName: path.basename(attachmentPdfPath),
+        sizeBytes: String(attachmentPdfBytes.length),
+      },
+    ],
+  );
   await poll(
     async () => {
       const health = await readCheckpointHealth(taskId);
@@ -887,8 +1058,8 @@ try {
 
   process.stdout.write(
     process.platform === "win32"
-      ? "AgentCore Windows desktop vertical passed: real Skill/Text/compact checkpoints, typed File Changes/diff, hash/descriptor verification, missing-blob restart reconciliation, main-thread ProductDelivery, Runtime-owned tray routing, and clean shutdown; Windows Shell chrome/tray remain separate non-blocking gates.\n"
-      : "AgentCore macOS desktop vertical passed: real Skill/Text/compact checkpoints, typed File Changes/diff, hash/descriptor verification, missing-blob restart reconciliation, materialized arguments without raw slash, main-thread ProductDelivery, Read/Bash/Edit, permission UI, duplicate UI-response rejection, Task metadata lifecycle, Runtime-owned tray routing, and clean shutdown.\n",
+      ? "AgentCore Windows desktop vertical passed: real Skill/multimodal/Text/compact checkpoints, ordered image/PDF provider input, metadata-only attachment history, typed File Changes/diff, hash/descriptor verification, missing-blob restart reconciliation, main-thread ProductDelivery, Runtime-owned tray routing, and clean shutdown; Windows Shell chrome/tray remain separate non-blocking gates.\n"
+      : "AgentCore macOS desktop vertical passed: real Skill/multimodal/Text/compact checkpoints, ordered image/PDF provider input, metadata-only attachment history, typed File Changes/diff, hash/descriptor verification, missing-blob restart reconciliation, materialized arguments without raw slash, main-thread ProductDelivery, Read/Bash/Edit, permission UI, duplicate UI-response rejection, Task metadata lifecycle, Runtime-owned tray routing, and clean shutdown.\n",
   );
 } catch (error) {
   process.stderr.write(`${output}\n`);
@@ -913,7 +1084,11 @@ function startApplication() {
       ...appEnvironment,
       ...isolatedPlatformEnv,
       METAWORK_AUTOMATION: "1",
-      METAWORK_AUTOMATION_WORKSPACE: workspace,
+      METAWORK_AUTOMATION_WORKSPACE: canonicalWorkspace,
+      METAWORK_AUTOMATION_ATTACHMENTS: [
+        attachmentPngPath,
+        attachmentPdfPath,
+      ].join("\n"),
       METAWORK_AGENTCORE_VERTICAL_PROVIDER_BASE_URL: baseUrl,
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -994,6 +1169,117 @@ function crc32(bytes) {
       crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
   }
   return (crc ^ 0xffffffff) >>> 0;
+}
+
+function minimalPdf() {
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << >> /Contents 4 0 R >>",
+    "<< /Length 0 >>\nstream\n\nendstream",
+  ];
+  let source = "%PDF-1.4\n";
+  const offsets = [0];
+  for (const [index, object] of objects.entries()) {
+    offsets.push(Buffer.byteLength(source));
+    source += `${index + 1} 0 obj\n${object}\nendobj\n`;
+  }
+  const xrefOffset = Buffer.byteLength(source);
+  source += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  source += offsets
+    .slice(1)
+    .map((offset) => `${String(offset).padStart(10, "0")} 00000 n \n`)
+    .join("");
+  source += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`;
+  return Buffer.from(source, "ascii");
+}
+
+function assertAttachmentChoice(actual, expected) {
+  if (actual?.status !== "ready" || !Array.isArray(actual.attachments))
+    throw new Error(
+      `attachment choice did not return a ready batch: ${JSON.stringify(actual)}`,
+    );
+  assert.equal(actual.attachments.length, expected.length);
+  assert.equal(
+    new Set(actual.attachments.map((item) => item.token)).size,
+    expected.length,
+  );
+  for (const [index, attachment] of actual.attachments.entries()) {
+    assert.match(attachment.token, /^[0-9a-f]{48}$/);
+    assert.deepEqual(
+      {
+        kind: attachment.kind,
+        format: attachment.format,
+        displayName: attachment.displayName,
+        sizeBytes: attachment.sizeBytes,
+      },
+      expected[index],
+    );
+  }
+}
+
+function assertMultimodalProviderRequest(payload, text, pngBytes, pdfBytes) {
+  const lastUser = payload.messages
+    ?.filter((message) => message.role === "user")
+    .at(-1);
+  assert.deepEqual(lastUser?.content, [
+    { type: "text", text },
+    {
+      type: "image",
+      source: {
+        type: "base64",
+        media_type: "image/png",
+        data: pngBytes.toString("base64"),
+      },
+    },
+    {
+      type: "document",
+      source: {
+        type: "base64",
+        media_type: "application/pdf",
+        data: pdfBytes.toString("base64"),
+      },
+    },
+  ]);
+}
+
+function assertMultimodalHistory(result, attachmentTokens, expected) {
+  assert.deepEqual(result.run.input, {
+    kind: "multimodal",
+    text: "Compare the reference image with the PDF brief.",
+    attachments: expected.map((attachment) => ({
+      ...attachment,
+      redacted: false,
+    })),
+    redacted: false,
+  });
+  const encoded = JSON.stringify(result.current);
+  for (const token of attachmentTokens)
+    assert.equal(
+      encoded.includes(token),
+      false,
+      "snapshot retained grant token",
+    );
+  assert.equal(
+    encoded.includes(attachmentPngPath),
+    false,
+    "snapshot retained attachment path",
+  );
+  assert.equal(
+    encoded.includes(attachmentPdfPath),
+    false,
+    "snapshot retained attachment path",
+  );
+  assert.equal(
+    encoded.includes(attachmentPngBytes.toString("base64")),
+    false,
+    "snapshot retained attachment bytes",
+  );
+  assert.equal(
+    encoded.includes(attachmentPdfBytes.toString("base64")),
+    false,
+    "snapshot retained attachment bytes",
+  );
 }
 
 async function readCheckpointHealth(taskId) {
@@ -1604,7 +1890,7 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
               "metawork-agentcore-vertical-fixture-key" ||
             request.headers.authorization !== undefined ||
             request.headers["anthropic-version"] !== "2023-06-01" ||
-            payload.model !== "metawork-agentcore-vertical-fixture-model" ||
+            payload.model !== "claude-sonnet-4-20250514" ||
             typeof payload.system !== "string" ||
             !payload.system.startsWith("Generate a concise title") ||
             !Array.isArray(payload.messages) ||
@@ -1638,7 +1924,7 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
             `Host credential did not reach AgentCore correctly (${describeAuthorizationHeader(request.headers.authorization)}, x-api-key=${request.headers["x-api-key"] === undefined ? "absent" : "present"})`,
           );
         requests.push(payload);
-        if (payload.model !== "metawork-agentcore-vertical-fixture-model")
+        if (payload.model !== "claude-sonnet-4-20250514")
           throw new Error("Host model did not reach AgentCore correctly");
         const queued = queue[served];
         const fixture =

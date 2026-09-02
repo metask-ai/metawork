@@ -104,6 +104,37 @@ test("Product store recovery uses revision-bound typed commands", async () => {
   ]);
 });
 
+test("attachment commands use only opaque grant payloads", async () => {
+  const calls = [];
+  const token = "a".repeat(48);
+  const client = new BridgeClient({
+    bridge: bridgeWith(async (command, payload) => {
+      calls.push({ command, payload });
+      if (command === "metawork.attachments.choose")
+        return {
+          status: "ready",
+          attachments: [
+            {
+              token,
+              kind: "image",
+              format: "png",
+              displayName: "diagram.png",
+              sizeBytes: "128",
+            },
+          ],
+        };
+      return { released: true };
+    }),
+  });
+
+  assert.equal((await client.chooseAttachments()).status, "ready");
+  assert.deepEqual(await client.releaseAttachment(token), { released: true });
+  assert.deepEqual(calls, [
+    { command: "metawork.attachments.choose", payload: {} },
+    { command: "metawork.attachments.release", payload: { token } },
+  ]);
+});
+
 test("native shortcut events stay behind the Bridge client boundary", () => {
   let listener = null;
   let removed = false;
@@ -162,6 +193,36 @@ test("a native Workspace picker remains user-controlled instead of command-timed
   });
 
   assert.deepEqual(await client.chooseWorkspace(), { selected: false });
+});
+
+test("a native attachment picker remains user-controlled instead of command-timed", async () => {
+  const token = "a".repeat(48);
+  const client = new BridgeClient({
+    bridge: bridgeWith(
+      () =>
+        new Promise((resolve) =>
+          setTimeout(
+            () =>
+              resolve({
+                status: "ready",
+                attachments: [
+                  {
+                    token,
+                    kind: "image",
+                    format: "png",
+                    displayName: "diagram.png",
+                    sizeBytes: "128",
+                  },
+                ],
+              }),
+            25,
+          ),
+        ),
+    ),
+    commandTimeoutMs: 5,
+  });
+
+  assert.equal((await client.chooseAttachments()).status, "ready");
 });
 
 test("product BridgeClient exposes no native window actions or state", () => {

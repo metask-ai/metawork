@@ -456,6 +456,26 @@ test("Composer drafts survive a WebView reload scope and fail safely when storag
     text: "Follow up after this run",
   });
   writeTaskDraft("8", { kind: "text", text: "Stale draft" });
+  writeTaskDraft("media", {
+    kind: "multimodal",
+    text: "Keep only this text",
+    attachments: [
+      {
+        token: "a".repeat(48),
+        kind: "image",
+        format: "png",
+        displayName: "secret-name.png",
+        sizeBytes: "128",
+      },
+    ],
+  });
+  const persistedMedia = values.get("metawork.task-draft.v1.media");
+  assert.doesNotMatch(persistedMedia, /secret-name|aaaaaaaa/);
+  assert.deepEqual(readTaskDraft("media"), {
+    kind: "text",
+    text: "Keep only this text",
+    attachmentsReloadRequired: true,
+  });
   writeNewTaskDraft(unscopedNewTaskDraftId, {
     kind: "text",
     text: "First instruction",

@@ -2211,6 +2211,182 @@ test "scheduled durable admission failure does not block an interactive Product 
     ) != null);
 }
 
+test "interactive Product Task remains accepted when history commit outcome is unknown" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_sessions = 1,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
+    var automatic_root = try product_control.AutomaticWorkspaceRoot.open(
+        std.testing.io,
+        std.testing.allocator,
+        root_storage[0..root_len],
+    );
+    defer automatic_root.deinit();
+    var task_persistence: TaskPersistenceProbe = .{ .result = .outcome_unknown };
+    var workbench = try product_control.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 2,
+            .max_workspaces = 1,
+            .max_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        .{
+            .directories = .{ .automatic_workspace_root = &automatic_root },
+            .task_persistence = task_persistence.capability(),
+        },
+    );
+    defer workbench.deinit();
+    try installControlExecution(&workbench);
+
+    const task_id = try workbench.createTaskForWorkspace(
+        .automatic,
+        1,
+        null,
+        null,
+        .{ .interactive = null },
+    );
+    _ = try workbench.runTask(task_id, .{ .text = "Remain accepted" });
+    try waitControlSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
+
+    fake_core.lock();
+    const run_calls = fake_core.run_calls;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 1), run_calls);
+    var snapshot_storage: [128 * 1024]u8 = undefined;
+    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"taskHistoryPersistenceHealth\":\"outcome_unknown\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"tasks\":[]") == null);
+}
+
+test "Product multimodal admission consumes staging and publishes metadata-only history" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_sessions = 1,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
+    var automatic_root = try product_control.AutomaticWorkspaceRoot.open(
+        std.testing.io,
+        std.testing.allocator,
+        root_storage[0..root_len],
+    );
+    defer automatic_root.deinit();
+    var workbench = try product_control.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 2,
+            .max_workspaces = 1,
+            .max_tasks = 1,
+            .max_runs_per_task = 2,
+            .max_tools_per_run = 1,
+        },
+        .{ .directories = .{ .automatic_workspace_root = &automatic_root } },
+    );
+    defer workbench.deinit();
+    try installControlExecution(&workbench);
+
+    const candidates = [_]product_control.AttachmentCandidate{
+        .{ .display_name = "diagram.png", .format = .png, .bytes = "\x89PNG\r\n\x1a\nbody" },
+        .{ .display_name = "brief.pdf", .format = .pdf, .bytes = "%PDF-1.7\nbody" },
+    };
+    var descriptor_storage: [2]product_control.AttachmentDescriptor = undefined;
+    const descriptors = try workbench.stageAttachments(&candidates, &descriptor_storage);
+    const ids = [_]u64{ descriptors[0].id, descriptors[1].id };
+    const Acceptance = struct {
+        count: usize = 0,
+        fn accept(context: ?*anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.count += 1;
+        }
+    };
+    var acceptance = Acceptance{};
+    const task_id = try workbench.createTaskForWorkspace(
+        .automatic,
+        1,
+        null,
+        null,
+        .{ .interactive = null },
+    );
+    _ = try workbench.runTask(task_id, .{ .multimodal = .{
+        .text = "Compare these",
+        .attachment_ids = &ids,
+        .acceptance = .{ .context = &acceptance, .accept_fn = Acceptance.accept },
+    } });
+    try std.testing.expectEqual(@as(usize, 1), acceptance.count);
+    try std.testing.expect(!workbench.releaseAttachment(ids[0]));
+    try std.testing.expect(!workbench.releaseAttachment(ids[1]));
+    try waitControlSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
+
+    var snapshot_storage: [128 * 1024]u8 = undefined;
+    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"input\":{\"kind\":\"multimodal\",\"text\":\"Compare these\",\"attachments\":[{\"kind\":\"image\",\"format\":\"png\",\"displayName\":\"diagram.png\",\"sizeBytes\":\"12\",\"redacted\":false},{\"kind\":\"pdf\",\"format\":\"pdf\",\"displayName\":\"brief.pdf\",\"sizeBytes\":\"13\",\"redacted\":false}],\"redacted\":false}",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "attachmentTokens") == null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "PNG\\r\\n") == null);
+
+    const pure_media = [_]product_control.AttachmentCandidate{.{
+        .display_name = "photo.jpg",
+        .format = .jpeg,
+        .bytes = "\xff\xd8\xffbody",
+    }};
+    var pure_descriptor_storage: [1]product_control.AttachmentDescriptor = undefined;
+    const pure_descriptors = try workbench.stageAttachments(
+        &pure_media,
+        &pure_descriptor_storage,
+    );
+    const pure_ids = [_]u64{pure_descriptors[0].id};
+    const pure_run_id = try workbench.runTask(task_id, .{ .multimodal = .{
+        .text = "",
+        .attachment_ids = &pure_ids,
+    } });
+    var terminal_needle: [96]u8 = undefined;
+    const terminal = try std.fmt.bufPrint(
+        &terminal_needle,
+        "\"id\":\"{d}\",\"phase\":\"completed\"",
+        .{pure_run_id},
+    );
+    try waitControlSnapshot(&workbench, terminal);
+    const pure_snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        pure_snapshot,
+        "\"input\":{\"kind\":\"multimodal\",\"text\":null,\"attachments\":[{\"kind\":\"image\",\"format\":\"jpeg\",\"displayName\":\"photo.jpg\",\"sizeBytes\":\"7\",\"redacted\":false}],\"redacted\":false}",
+    ) != null);
+}
+
 test "bounded executor rejects overflow and close cancels a queued Run" {
     fake_core.reset();
     fake_core.setNextPlan(.controlled);

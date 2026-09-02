@@ -14,6 +14,7 @@ const execution_binding = @import("product_task_execution_binding");
 pub const Runtime = runtime.Runtime;
 pub const TerminalSummary = runtime.TerminalSummary;
 pub const RunInput = runtime.RunInput;
+pub const MultimodalAttachment = runtime.MultimodalAttachment;
 pub const PermissionChoice = runtime.PermissionChoice;
 pub const UiResponse = runtime.UiResponse;
 pub const FailureRecord = runtime.FailureRecord;

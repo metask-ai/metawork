@@ -30,6 +30,10 @@ pub const Adapter = struct {
         return self.runtime.workspaceRoot();
     }
 
+    pub fn attachmentPaths(self: *const Adapter) ?[]const u8 {
+        return self.runtime.attachmentPaths();
+    }
+
     pub fn canonicalUserHome(self: *const Adapter) ?[]const u8 {
         return self.runtime.canonicalUserHome();
     }
@@ -60,6 +64,7 @@ pub const Adapter = struct {
             .context = self,
             .active_fn = activeCallback,
             .workspace_root_fn = workspaceRootCallback,
+            .attachment_paths_fn = attachmentPathsCallback,
         };
     }
 
@@ -71,5 +76,10 @@ pub const Adapter = struct {
     fn workspaceRootCallback(context: ?*anyopaque) ?[]const u8 {
         const self: *Adapter = @ptrCast(@alignCast(context.?));
         return self.workspaceRoot();
+    }
+
+    fn attachmentPathsCallback(context: ?*anyopaque) ?[]const u8 {
+        const self: *Adapter = @ptrCast(@alignCast(context.?));
+        return self.attachmentPaths();
     }
 };

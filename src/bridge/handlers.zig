@@ -216,13 +216,20 @@ pub const TaskRunInput = union(enum) {
         selection_revision: u64,
         argument_values: []const []const u8,
     },
+    multimodal: struct {
+        text: []const u8,
+        attachment_tokens: []const []const u8,
+    },
 };
 pub const ParsedTaskRunInput = struct {
     value: TaskRunInput,
     owned_argument_values: ?[][]const u8 = null,
+    owned_attachment_tokens: ?[][]const u8 = null,
 
     pub fn deinit(self: *ParsedTaskRunInput) void {
         if (self.owned_argument_values) |values|
+            std.heap.c_allocator.free(values);
+        if (self.owned_attachment_tokens) |values|
             std.heap.c_allocator.free(values);
         self.* = undefined;
     }
@@ -242,6 +249,7 @@ pub const FileChangeDiffRequest = struct {
     runId: []const u8,
     fileChangeId: []const u8,
 };
+pub const AttachmentRelease = struct { token: []const u8 };
 pub const TaskRename = struct { taskId: []const u8, title: []const u8 };
 pub const TaskArchive = struct { taskId: []const u8, archived: bool };
 pub const TaskDelete = struct { taskId: []const u8 };
@@ -322,6 +330,33 @@ pub fn parseTaskRunInput(value: std.json.Value) !ParsedTaskRunInput {
         };
         return .{ .value = .{ .text = text } };
     }
+    if (std.mem.eql(u8, kind_text, "multimodal")) {
+        if (object.count() != 3) return error.InvalidBridgePayload;
+        const text = switch (object.get("text") orelse return error.InvalidBridgePayload) {
+            .string => |text| text,
+            else => return error.InvalidBridgePayload,
+        };
+        const token_values = switch (object.get("attachmentTokens") orelse
+            return error.InvalidBridgePayload) {
+            .array => |values| values,
+            else => return error.InvalidBridgePayload,
+        };
+        if (token_values.items.len == 0 or token_values.items.len > 8)
+            return error.InvalidBridgePayload;
+        const tokens = try std.heap.c_allocator.alloc([]const u8, token_values.items.len);
+        errdefer std.heap.c_allocator.free(tokens);
+        for (token_values.items, tokens) |token_value, *token| token.* = switch (token_value) {
+            .string => |token_text| if (validAttachmentToken(token_text)) token_text else return error.InvalidBridgePayload,
+            else => return error.InvalidBridgePayload,
+        };
+        return .{
+            .value = .{ .multimodal = .{
+                .text = text,
+                .attachment_tokens = tokens,
+            } },
+            .owned_attachment_tokens = tokens,
+        };
+    }
     if (!std.mem.eql(u8, kind_text, "skill") or object.count() != 5)
         return error.InvalidBridgePayload;
     const skill_id = switch (object.get("skillId") orelse
@@ -365,6 +400,12 @@ pub fn parseTaskRunInput(value: std.json.Value) !ParsedTaskRunInput {
         } },
         .owned_argument_values = argument_values,
     };
+}
+
+pub fn validAttachmentToken(token: []const u8) bool {
+    if (token.len != 48) return false;
+    for (token) |byte| if (!std.ascii.isHex(byte) or std.ascii.isUpper(byte)) return false;
+    return true;
 }
 
 pub fn parseScheduledTaskInstruction(value: std.json.Value) ![]const u8 {
@@ -441,7 +482,7 @@ pub fn permissionChoice(value: []const u8) ?PermissionChoice {
     return null;
 }
 
-test "Task Run input is an exact text or skill tagged object" {
+test "Task Run input is an exact text skill or multimodal tagged object" {
     var text_payload = try parsePayload(TaskRun,
         \\{"taskId":"1","expectedBindingEpoch":"2","input":{"kind":"text","text":"inspect"}}
     );
@@ -462,6 +503,19 @@ test "Task Run input is an exact text or skill tagged object" {
     );
     try std.testing.expectEqual(@as(usize, 2), skill_input.value.skill.argument_values.len);
 
+    var multimodal_payload = try parsePayload(TaskRun,
+        \\{"taskId":"1","expectedBindingEpoch":"2","input":{"kind":"multimodal","text":"","attachmentTokens":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]}}
+    );
+    defer multimodal_payload.deinit();
+    var multimodal_input = try parseTaskRunInput(multimodal_payload.value.input);
+    defer multimodal_input.deinit();
+    try std.testing.expectEqualStrings("", multimodal_input.value.multimodal.text);
+    try std.testing.expectEqual(@as(usize, 2), multimodal_input.value.multimodal.attachment_tokens.len);
+    try std.testing.expectEqualStrings(
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        multimodal_input.value.multimodal.attachment_tokens[0],
+    );
+
     var legacy = try std.json.parseFromSlice(std.json.Value, std.testing.allocator,
         \\{"kind":"text","prompt":"inspect"}
     , .{});
@@ -479,6 +533,28 @@ test "Task Run input is an exact text or skill tagged object" {
         error.InvalidBridgePayload,
         parseTaskRunInput(mixed.value),
     );
+
+    const invalid_multimodal = [_][]const u8{
+        \\{"kind":"multimodal","text":"","attachmentTokens":[]}
+        ,
+        \\{"kind":"multimodal","text":"","attachmentTokens":["physical/path.png"]}
+        ,
+        \\{"kind":"multimodal","text":"","attachmentTokens":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],"skillId":"review"}
+        ,
+    };
+    for (invalid_multimodal) |encoded| {
+        var parsed = try std.json.parseFromSlice(
+            std.json.Value,
+            std.testing.allocator,
+            encoded,
+            .{},
+        );
+        defer parsed.deinit();
+        try std.testing.expectError(
+            error.InvalidBridgePayload,
+            parseTaskRunInput(parsed.value),
+        );
+    }
 }
 
 test "Task creation requires an explicit nullable catalog revision" {

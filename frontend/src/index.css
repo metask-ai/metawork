@@ -1948,6 +1948,56 @@ summary::-webkit-details-marker {
   white-space: pre-wrap;
 }
 
+.task-multimodal-input {
+  display: grid;
+  gap: 10px;
+}
+
+.task-input-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.task-input-attachment {
+  display: grid;
+  min-width: 0;
+  max-width: 260px;
+  padding: 6px 9px;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  column-gap: 7px;
+  border: 1px solid
+    color-mix(in srgb, var(--ui-action-primary) 18%, var(--ui-border));
+  border-left: 2px solid var(--ui-action-primary);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--ui-surface-panel) 82%, transparent);
+}
+
+.task-input-attachment > span {
+  grid-row: 1 / 3;
+  color: var(--ui-action-primary);
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
+  font-weight: 720;
+}
+
+.task-input-attachment strong,
+.task-input-attachment small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-input-attachment strong {
+  font-size: var(--text-label);
+}
+
+.task-input-attachment small {
+  color: var(--ui-content-muted);
+  font-size: var(--text-micro);
+}
+
 .ai-message[data-role="assistant"] {
   margin-top: 20px;
 }
@@ -6922,6 +6972,120 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   font-size: var(--text-micro);
 }
 
+.composer-attachments {
+  display: flex;
+  padding: 3px 5px 0;
+  overflow-x: auto;
+  gap: 7px;
+  scrollbar-width: thin;
+}
+
+.composer-attachment {
+  display: grid;
+  min-width: 172px;
+  max-width: 248px;
+  padding: 6px 5px 6px 8px;
+  grid-template-columns: auto minmax(0, 1fr) 24px;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--ui-border);
+  border-left: 2px solid var(--ui-action-primary);
+  border-radius: 8px;
+  background: var(--ui-surface-panel-2);
+}
+
+.composer-attachment-kind {
+  color: var(--ui-action-primary);
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
+  font-weight: 760;
+}
+
+.composer-attachment-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.composer-attachment-copy strong,
+.composer-attachment-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-attachment-copy strong {
+  font-size: var(--text-label);
+  font-weight: 650;
+}
+
+.composer-attachment-copy small {
+  color: var(--ui-content-muted);
+  font-size: var(--text-micro);
+}
+
+.composer-attachment-remove,
+.composer-attachment-add {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: 7px;
+  color: var(--ui-content-muted);
+  background: transparent;
+}
+
+.composer-attachment-remove:hover:not(:disabled),
+.composer-attachment-add:hover:not(:disabled) {
+  color: var(--ui-action-primary);
+  background: color-mix(in srgb, var(--metask-primary-soft) 58%, transparent);
+}
+
+.composer-attachment-add:focus-visible,
+.composer-attachment-remove:focus-visible {
+  outline: 2px solid var(--ui-action-primary);
+  outline-offset: 2px;
+}
+
+.composer-attachment-add[data-busy="true"] {
+  color: var(--ui-action-primary);
+}
+
+.composer-attachment-add[data-busy="true"] svg {
+  animation: composer-attachment-spin 800ms linear infinite;
+}
+
+@keyframes composer-attachment-spin {
+  to {
+    transform: rotate(1turn);
+  }
+}
+
+.composer-attachment-notice,
+.composer-attachment-capability,
+.composer-attachment-error {
+  margin: 0;
+  padding: 0 8px;
+  font-size: var(--text-micro);
+  line-height: 1.4;
+}
+
+.composer-attachment-notice {
+  color: var(--ui-content-warning);
+}
+
+.composer-attachment-capability {
+  color: var(--ui-content-muted);
+}
+
+.composer-attachment-error {
+  margin-top: 6px;
+  color: var(--ui-content-danger);
+}
+
 .ai-composer-toolbar {
   display: flex;
   min-height: 34px;
@@ -6929,6 +7093,13 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   align-items: center;
   justify-content: space-between;
   gap: 14px;
+}
+
+.composer-context-actions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
 }
 
 .composer-model-context {
@@ -7111,6 +7282,10 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 @media (prefers-reduced-motion: reduce) {
   .slash-menu {
+    animation: none;
+  }
+
+  .composer-attachment-add[data-busy="true"] svg {
     animation: none;
   }
 }

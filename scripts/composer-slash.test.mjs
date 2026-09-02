@@ -117,6 +117,54 @@ test("Run input conversion rejects unresolved Slash outside the UI layer", () =>
       argumentValues: ["src/main.zig"],
     },
   );
+  const attachments = [
+    {
+      token: "a".repeat(48),
+      kind: "image",
+      format: "png",
+      displayName: "diagram.png",
+      sizeBytes: "128",
+    },
+    {
+      token: "b".repeat(48),
+      kind: "pdf",
+      format: "pdf",
+      displayName: "brief.pdf",
+      sizeBytes: "256",
+    },
+  ];
+  assert.deepEqual(
+    composerDraftToRunInput({
+      kind: "multimodal",
+      text: "Explain these",
+      attachments,
+    }),
+    {
+      kind: "multimodal",
+      text: "Explain these",
+      attachmentTokens: ["a".repeat(48), "b".repeat(48)],
+    },
+  );
+  assert.deepEqual(
+    composerDraftToRunInput({
+      kind: "multimodal",
+      text: "",
+      attachments: [attachments[0]],
+    }),
+    {
+      kind: "multimodal",
+      text: "",
+      attachmentTokens: ["a".repeat(48)],
+    },
+  );
+  assert.equal(
+    composerDraftToRunInput({
+      kind: "multimodal",
+      text: "/review",
+      attachments,
+    }),
+    null,
+  );
 });
 
 test("desktop Command registry is explicit and excludes CLI session controls", () => {

@@ -22,6 +22,8 @@ import {
   decodeMcpMutationResult,
   decodeMcpRefreshResult,
   decodeFilePreview,
+  decodeAttachmentChooseResult,
+  decodeAttachmentReleaseResult,
   decodeWorkbenchSnapshot,
 } from "../frontend/src/bridge/decode-contracts.ts";
 
@@ -62,6 +64,95 @@ test("the canonical Workbench fixture decodes without normalization", () => {
   assert.throws(
     () => decodeWorkbenchSnapshot(impossibleRecovery),
     /recovery requires recoverable persistence health/,
+  );
+});
+
+test("attachment results enforce opaque grants and atomic typed outcomes", () => {
+  const ready = {
+    status: "ready",
+    attachments: [
+      {
+        token: "a".repeat(48),
+        kind: "image",
+        format: "webp",
+        displayName: "reference.webp",
+        sizeBytes: "2048",
+      },
+      {
+        token: "b".repeat(48),
+        kind: "pdf",
+        format: "pdf",
+        displayName: "spec.pdf",
+        sizeBytes: "4096",
+      },
+    ],
+  };
+  assert.deepEqual(decodeAttachmentChooseResult(ready), ready);
+  assert.deepEqual(decodeAttachmentChooseResult({ status: "cancelled" }), {
+    status: "cancelled",
+  });
+  assert.deepEqual(
+    decodeAttachmentChooseResult({
+      status: "rejected",
+      reason: "file_too_large",
+    }),
+    { status: "rejected", reason: "file_too_large" },
+  );
+  assert.throws(
+    () =>
+      decodeAttachmentChooseResult({
+        ...ready,
+        attachments: [{ ...ready.attachments[0], token: "physical/path.png" }],
+      }),
+    /invalid attachment token/,
+  );
+  assert.throws(
+    () =>
+      decodeAttachmentChooseResult({
+        ...ready,
+        attachments: [{ ...ready.attachments[1], kind: "image" }],
+      }),
+    /kind and format must agree/,
+  );
+  assert.deepEqual(decodeAttachmentReleaseResult({ released: true }), {
+    released: true,
+  });
+});
+
+test("multimodal Run history keeps only ordered safe attachment metadata", () => {
+  const snapshot = clone(fixture);
+  snapshot.tasks[0].runs[0].input = {
+    kind: "multimodal",
+    text: "Compare these",
+    attachments: [
+      {
+        kind: "image",
+        format: "png",
+        displayName: "diagram.png",
+        sizeBytes: "128",
+        redacted: false,
+      },
+      {
+        kind: "pdf",
+        format: "pdf",
+        displayName: "brief.pdf",
+        sizeBytes: "256",
+        redacted: false,
+      },
+    ],
+    redacted: false,
+  };
+  assert.deepEqual(decodeWorkbenchSnapshot(snapshot), snapshot);
+
+  const leaked = clone(snapshot);
+  leaked.tasks[0].runs[0].input.attachments[0].path = "/tmp/diagram.png";
+  assert.throws(() => decodeWorkbenchSnapshot(leaked), /expected keys/);
+
+  const mismatched = clone(snapshot);
+  mismatched.tasks[0].runs[0].input.attachments[1].kind = "image";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(mismatched),
+    /kind and format must agree/,
   );
 });
 

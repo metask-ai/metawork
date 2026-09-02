@@ -2,6 +2,7 @@
 
 const runtime_impl = @import("product_control_runtime");
 const product_workspace = @import("metawork_product_workspace");
+const product_attachment = @import("metawork_product_attachment");
 
 pub const Error = runtime_impl.Error;
 pub const Limits = runtime_impl.Limits;
@@ -15,6 +16,10 @@ pub const TaskWorkspaceTrust = runtime_impl.TaskWorkspaceTrust;
 pub const TaskCreateInput = runtime_impl.TaskCreateInput;
 pub const TaskWorkspaceRequest = runtime_impl.TaskWorkspaceRequest;
 pub const TaskRunInput = runtime_impl.TaskRunInput;
+pub const AttachmentFormat = product_attachment.Format;
+pub const AttachmentKind = product_attachment.Kind;
+pub const AttachmentCandidate = product_attachment.Candidate;
+pub const AttachmentDescriptor = product_attachment.Descriptor;
 pub const WorkspaceKind = runtime_impl.WorkspaceKind;
 pub const WorkspaceProjection = runtime_impl.WorkspaceProjection;
 pub const ScheduledTaskRecurrence = runtime_impl.ScheduledTaskRecurrence;
@@ -33,6 +38,10 @@ pub const ChangeNotifier = runtime_impl.ChangeNotifier;
 pub const FilePreviewState = runtime_impl.FilePreviewState;
 pub const FilePreviewResult = runtime_impl.FilePreviewResult;
 pub const FilePreviewSink = runtime_impl.FilePreviewSink;
+pub const AttachmentAcceptance = runtime_impl.AttachmentAcceptance;
+pub const AttachmentStagingRejection = runtime_impl.AttachmentStagingRejection;
+pub const AttachmentStagingResult = runtime_impl.AttachmentStagingResult;
+pub const AttachmentStagingSink = runtime_impl.AttachmentStagingSink;
 pub const FileChangeDiffReason = runtime_impl.FileChangeDiffReason;
 pub const FileChangeDiffResult = runtime_impl.FileChangeDiffResult;
 pub const FileChangeDiffSink = runtime_impl.FileChangeDiffSink;

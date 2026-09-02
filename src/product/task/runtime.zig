@@ -200,6 +200,15 @@ pub const DurableEffect = struct {
     }
 };
 
+pub const AttachmentKind = task_state.AttachmentKind;
+pub const AttachmentFormat = task_state.AttachmentFormat;
+pub const MultimodalAttachment = struct {
+    kind: AttachmentKind,
+    format: AttachmentFormat,
+    display_name: []const u8,
+    bytes: []const u8,
+};
+
 pub const RunInput = union(enum) {
     text: []const u8,
     skill: struct {
@@ -208,7 +217,23 @@ pub const RunInput = union(enum) {
         selection_revision: u64,
         argument_values: []const []const u8,
     },
+    multimodal: struct {
+        text: []const u8,
+        attachments: []const MultimodalAttachment,
+    },
 };
+
+pub const RunAcceptanceEffect = struct {
+    context: ?*anyopaque = null,
+    accept_fn: *const fn (?*anyopaque) void = ignoreRunAcceptance,
+    irreversible: bool = false,
+
+    fn accept(self: RunAcceptanceEffect) void {
+        self.accept_fn(self.context);
+    }
+};
+
+fn ignoreRunAcceptance(_: ?*anyopaque) void {}
 
 pub const PermissionChoice = enum {
     allow_once,
@@ -296,6 +321,7 @@ pub const OperationEffects = struct {
     executor: ExecutorPort,
     worker: WorkerResources,
     limits: OperationLimits,
+    run_acceptance: RunAcceptanceEffect = .{},
 };
 
 pub const RunError = agent.Error || std.mem.Allocator.Error || error{
@@ -1030,6 +1056,7 @@ pub const Runtime = struct {
         task.runtime.cancel_requested = false;
         task.durable.recent_order = self.takeRecentOrder();
         workspace.apply();
+        effects.run_acceptance.accept();
         const commit_outcome = effects.durable.commit();
         if (commit_outcome != .committed) {
             task.runtime.active_run_id = previous_active_run_id;
@@ -1086,7 +1113,11 @@ pub const Runtime = struct {
             task.runtime.active_operation = .none;
             _ = effects.durable.commit();
             record_owned = false;
-            return err;
+            // Admission already consumed the prepared Agent input and any
+            // attachment grants. Preserve that linearization point: queue
+            // failure is an accepted, interrupted Run, not a submit failure
+            // whose draft can be replayed.
+            return if (effects.run_acceptance.irreversible) run_id else err;
         };
         job_owned = false;
         prepared = false;
@@ -3432,6 +3463,17 @@ fn redactTaskProjection(
         switch (run.input) {
             .text => |*text| text.redacted = effects.redact(text.value, credential) or
                 text.redacted,
+            .multimodal => |*multimodal| {
+                var redacted = false;
+                if (multimodal.text) |text|
+                    redacted = effects.redact(text, credential);
+                for (multimodal.attachments) |*item| {
+                    item.redacted = effects.redact(item.display_name, credential) or
+                        item.redacted;
+                    redacted = redacted or item.redacted;
+                }
+                multimodal.redacted = redacted or multimodal.redacted;
+            },
             .skill => |*skill| {
                 var redacted = effects.redact(skill.skill_id, credential);
                 redacted = effects.redact(skill.catalog_revision, credential) or redacted;
@@ -4322,6 +4364,12 @@ fn deinitRunInput(
 ) void {
     switch (input.*) {
         .text => |text| releaseProjectedSlice(self, effects, text.value),
+        .multimodal => |multimodal| {
+            if (multimodal.text) |text| releaseProjectedSlice(self, effects, text);
+            for (multimodal.attachments) |item|
+                releaseProjectedSlice(self, effects, item.display_name);
+            self.allocator.free(multimodal.attachments);
+        },
         .skill => |skill| {
             releaseProjectedSlice(self, effects, skill.skill_id);
             releaseProjectedSlice(self, effects, skill.catalog_revision);
@@ -4411,6 +4459,36 @@ fn validateRunInput(
 ) RunError!agent.RunInput {
     return switch (input) {
         .text => |value| .{ .text = value },
+        .multimodal => |multimodal| blk: {
+            if (multimodal.attachments.len == 0) return error.InvalidRunInput;
+            var parts: [agent.multimodal_input_limits.max_parts]agent.InputPart = undefined;
+            var part_count: usize = 0;
+            if (multimodal.text.len != 0) {
+                parts[part_count] = .{ .text = multimodal.text };
+                part_count += 1;
+            }
+            if (multimodal.attachments.len > parts.len - part_count)
+                return error.RunInputTooLarge;
+            for (multimodal.attachments) |item| {
+                parts[part_count] = switch (item.kind) {
+                    .image => .{ .image = .{
+                        .format = switch (item.format) {
+                            .png => .png,
+                            .jpeg => .jpeg,
+                            .webp => .webp,
+                            .pdf => return error.InvalidRunInput,
+                        },
+                        .bytes = item.bytes,
+                    } },
+                    .pdf => if (item.format == .pdf)
+                        .{ .document = .{ .bytes = item.bytes } }
+                    else
+                        return error.InvalidRunInput,
+                };
+                part_count += 1;
+            }
+            break :blk .{ .multimodal = parts[0..part_count] };
+        },
         .skill => |skill_input| blk: {
             const pinned = task.runtime.pinnedCatalogConst() orelse
                 return error.CatalogUnavailable;
@@ -4468,6 +4546,53 @@ fn copyRunInput(
             break :blk .{ .text = .{
                 .value = projected.value,
                 .redacted = projected.redacted,
+            } };
+        },
+        .multimodal => |multimodal| blk: {
+            if (multimodal.text.len > effects.limits.max_user_message_bytes)
+                return error.ProjectionCapacity;
+            var text: ?[]u8 = null;
+            var redacted = false;
+            if (multimodal.text.len != 0) {
+                const projected = try effects.text.project(
+                    multimodal.text,
+                    effects.limits.max_user_message_bytes,
+                    credential,
+                    0,
+                );
+                text = projected.value;
+                redacted = projected.redacted;
+            }
+            errdefer if (text) |value| effects.text.discardCandidate(value);
+            const records = try self.allocator.alloc(
+                task_state.AttachmentRecord,
+                multimodal.attachments.len,
+            );
+            errdefer self.allocator.free(records);
+            var initialized: usize = 0;
+            errdefer for (records[0..initialized]) |record|
+                effects.text.discardCandidate(record.display_name);
+            for (multimodal.attachments, records) |item, *record| {
+                const display = try effects.text.project(
+                    item.display_name,
+                    effects.limits.max_tool_field_bytes,
+                    credential,
+                    0,
+                );
+                record.* = .{
+                    .kind = item.kind,
+                    .format = item.format,
+                    .display_name = display.value,
+                    .size_bytes = item.bytes.len,
+                    .redacted = display.redacted,
+                };
+                initialized += 1;
+                redacted = redacted or display.redacted;
+            }
+            break :blk .{ .multimodal = .{
+                .text = text,
+                .attachments = records,
+                .redacted = redacted,
             } };
         },
         .skill => |skill_input| blk: {

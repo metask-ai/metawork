@@ -51,23 +51,23 @@ candidate probe 只用于证明锁定 artifact 与官方 Zig package 可以 sour
 
 当前十六种公开 observation 的消费审计如下；“持久化”均指 Product Task 派生事实，不保存 raw CoreEvent：
 
-| CoreEvent | Product Task 消费 | 持久化边界 |
-| --- | --- | --- |
-| `output_segment_begin/end` | 校验 index/turn/group/bytes，驱动 group 定性 | 保存 final/partial 分类与安全 assistant 正文起点 |
-| `text_chunk` | 写入当前 open segment | 已闭合可见 group 进入既有 assistant history |
-| `thinking_chunk` | 只更新安全状态 | 不保存 reasoning 正文 |
-| `stream_done` | 更新为 Finishing，不作为完成信号 | 仅现有安全状态 |
-| `retry_notice` | 更新 typed retry activity；后续有效 forward activity 或 terminal 使其失效 | 不持久化 |
-| `tool_start` | 建立/更新 Tool record | 随 Run history 保存 |
-| `tool_progress` | 按 tool identity 更新进度 | 随 Run history 保存 |
-| `tool_result` | 完成 Tool record 与 file reference 投影 | durable boundary |
-| `file_changes` | Agent typed decode 后由 Product 显式消费；Agent 保留每条 kind/status/locator/bytes/diff/depth 与 event-level overflow/lost，Product 建立 Run-owned bounded observation | 只接纳 applied/partial，全部 agent depth 同等归属当前 Run；不从 Tool/Bash/Git 反推 |
-| `run_state` | 受 transition sequence 保护的 runtime observation | phase observation 不持久化 |
-| `progress` | 更新 executing-tools 状态 | 仅现有安全状态 |
-| `usage` | checked delta 累计 | 随 Run history 保存 |
-| `context_warning` | 更新当前 attached Conversation 的 context pressure | 不持久化，不跨 attachment |
-| `auto_compact` | 清除 pressure 并记录当前 Conversation 最近一次 compact observation | 不持久化，不跨 attachment |
-| `permission_provenance` | 更新 Run/UI permission summary | 随对应 UI history 保存 |
+| CoreEvent                  | Product Task 消费                                                                                                                                                      | 持久化边界                                                                         |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `output_segment_begin/end` | 校验 index/turn/group/bytes，驱动 group 定性                                                                                                                           | 保存 final/partial 分类与安全 assistant 正文起点                                   |
+| `text_chunk`               | 写入当前 open segment                                                                                                                                                  | 已闭合可见 group 进入既有 assistant history                                        |
+| `thinking_chunk`           | 只更新安全状态                                                                                                                                                         | 不保存 reasoning 正文                                                              |
+| `stream_done`              | 更新为 Finishing，不作为完成信号                                                                                                                                       | 仅现有安全状态                                                                     |
+| `retry_notice`             | 更新 typed retry activity；后续有效 forward activity 或 terminal 使其失效                                                                                              | 不持久化                                                                           |
+| `tool_start`               | 建立/更新 Tool record                                                                                                                                                  | 随 Run history 保存                                                                |
+| `tool_progress`            | 按 tool identity 更新进度                                                                                                                                              | 随 Run history 保存                                                                |
+| `tool_result`              | 完成 Tool record 与 file reference 投影                                                                                                                                | durable boundary                                                                   |
+| `file_changes`             | Agent typed decode 后由 Product 显式消费；Agent 保留每条 kind/status/locator/bytes/diff/depth 与 event-level overflow/lost，Product 建立 Run-owned bounded observation | 只接纳 applied/partial，全部 agent depth 同等归属当前 Run；不从 Tool/Bash/Git 反推 |
+| `run_state`                | 受 transition sequence 保护的 runtime observation                                                                                                                      | phase observation 不持久化                                                         |
+| `progress`                 | 更新 executing-tools 状态                                                                                                                                              | 仅现有安全状态                                                                     |
+| `usage`                    | checked delta 累计                                                                                                                                                     | 随 Run history 保存                                                                |
+| `context_warning`          | 更新当前 attached Conversation 的 context pressure                                                                                                                     | 不持久化，不跨 attachment                                                          |
+| `auto_compact`             | 清除 pressure 并记录当前 Conversation 最近一次 compact observation                                                                                                     | 不持久化，不跨 attachment                                                          |
+| `permission_provenance`    | 更新 Run/UI permission summary                                                                                                                                         | 随对应 UI history 保存                                                             |
 
 unknown observation 继续走官方 unknown 分支并被忽略，不由 MetaWork 猜测其 payload。
 
@@ -85,19 +85,19 @@ unknown observation 继续走官方 unknown 分支并被忽略，不由 MetaWork
 
 ## 3. 当前协议表面
 
-| 类型              | 方向        | 当前 ABI v1 语义                                                                                                                    |
-| ----------------- | ----------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `RunContext`      | Core → Host | callback-scoped borrowed identity；包含 Session handle、run ID 和稳定 session ID                                                    |
-| `CoreEvent` JSON  | Core → Host | callback-scoped borrowed bytes；与同次 callback 的 `RunContext` 绑定                                                                |
-| `UiRequest` JSON  | Core → Host | 同步 callback 请求；与同次 callback 的 `RunContext` 绑定                                                                            |
-| `UiResponse` JSON | Host → Core | 同一 callback 内 answered response；或 unavailable/fatal                                                                            |
-| ABI status        | Core → Host | function 调用层错误，独立于有效 Run 结果                                                                                            |
-| `RunResult`       | Core → Host | status OK 时完整有效；checkpoint budget pre-admission status 只定义 budget 字段                                                     |
-| abort             | Host → Core | 按 Session/Run 的 user/timeout 中断机制                                                                                             |
-| manual compact    | 双向        | Host 分配严格递增 operation ID；Core 返回 typed compact result                                                                      |
-| compact abort     | Host → Core | 只按 active compact operation ID 请求取消，不等待 provider I/O response                                                             |
-| Skill descriptor  | Core → Host | query-scoped owned bytes；由 SDK 解码后立即释放                                                                                     |
-| Skill catalog     | 双向借用    | Runtime query 返回 opaque handle；Session create/idle update 同步借用                                                               |
+| 类型              | 方向        | 当前 ABI v1 语义                                                                                                                     |
+| ----------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `RunContext`      | Core → Host | callback-scoped borrowed identity；包含 Session handle、run ID 和稳定 session ID                                                     |
+| `CoreEvent` JSON  | Core → Host | callback-scoped borrowed bytes；与同次 callback 的 `RunContext` 绑定                                                                 |
+| `UiRequest` JSON  | Core → Host | 同步 callback 请求；与同次 callback 的 `RunContext` 绑定                                                                             |
+| `UiResponse` JSON | Host → Core | 同一 callback 内 answered response；或 unavailable/fatal                                                                             |
+| ABI status        | Core → Host | function 调用层错误，独立于有效 Run 结果                                                                                             |
+| `RunResult`       | Core → Host | status OK 时完整有效；checkpoint budget pre-admission status 只定义 budget 字段                                                      |
+| abort             | Host → Core | 按 Session/Run 的 user/timeout 中断机制                                                                                              |
+| manual compact    | 双向        | Host 分配严格递增 operation ID；Core 返回 typed compact result                                                                       |
+| compact abort     | Host → Core | 只按 active compact operation ID 请求取消，不等待 provider I/O response                                                              |
+| Skill descriptor  | Core → Host | query-scoped owned bytes；由 SDK 解码后立即释放                                                                                      |
+| Skill catalog     | 双向借用    | Runtime query 返回 opaque handle；Session create/idle update 同步借用                                                                |
 | Skill policy      | Host → Core | fresh Session create 与 idle update 显式传入完整 replacement；Conversation restore 固定传 null，后续 Manual Task 显式 refresh 再绑定 |
 
 `UiEvent` / `UiBackend.poll()` 虽然存在于 Metask AgentCore native 协议中，但当前生产 agent loop 未证明消费。MetaWork 不依赖它完成 stop、生成期 queue message 或 steering。
@@ -245,7 +245,7 @@ Compact 的 `Queued / Compacting / Stopping` 不是由 Worker 直接覆盖同一
 
 ### Agent Session 多模态输入
 
-Agent 的 `RunInput.multimodal` 接受有序 `InputPart`：非空 UTF-8 文本、带 `ImageFormat` 的非空图片文件字节，或非空 PDF 文件字节。图片格式为 PNG、JPEG、GIF、WebP；document media type 固定为 `application/pdf`，MetaWork 不向 AgentCore 提交 document title。调用方负责图片文件字节与声明格式相符；PDF 结构、加密与页数 admission 由 AgentCore 拥有。允许纯图片、纯 PDF、图片与 PDF 混合及图文交错；既有 Text/Skill 语义保持不变。该入口不接受 URL、路径、file ID、调用方 Base64、Skill 与媒体混合或音视频，也不开放 Product/Renderer 附件能力。
+Agent 的 `RunInput.multimodal` 接受有序 `InputPart`：非空 UTF-8 文本、带 `ImageFormat` 的非空图片文件字节，或非空 PDF 文件字节。图片格式为 PNG、JPEG、GIF、WebP；document media type 固定为 `application/pdf`，MetaWork 不向 AgentCore 提交 document title。调用方负责图片文件字节与声明格式相符；PDF 结构、加密与页数 admission 由 AgentCore 拥有。允许纯图片、纯 PDF、图片与 PDF 混合及图文交错；既有 Text/Skill 语义保持不变。该入口不接受 URL、路径、file ID、调用方 Base64、Skill 与媒体混合或音视频。Product 首版附件能力只消费其中 PNG、JPEG、WebP 与 PDF，并固定为可空文字 part 后接 attachment chip 顺序；GIF 与正文内图文交错仍只属于 Agent 公共能力，不据此宣称 Renderer 已开放。
 
 调用方只需保证输入 slice 和字节活到 `prepareRun` 返回。Agent 直接从 borrowed 图片/PDF 字节编码到 owned 标准 Base64，不额外持有一份 raw 副本；通过官方 `textPart`、`imagePart`、`documentPart` 和 `runMultimodal` 传入 Core。公共输入类型不暴露 SDK wire。Provider 协议编码和 Core 模型媒体能力判断仍由 AgentCore 负责；Host 不导入 Account 元数据、不猜模型能力，也不丢弃媒体、自动重试或切换模型。
 
@@ -290,7 +290,7 @@ Automatic Workspace 复用同一个 Agent Session workspace 合同，不形成 A
 
 Product Control 的 typed Skill admission 在 `Session.prepareRun` 前同时验证 pinned catalog revision、pinned selection revision、skill identity、enabled 状态、参数数量、UTF-8、Workspace/Task epoch 和容量。RunRecord 保存 admission 时的稳定 Skill 身份、invocation/display 与参数副本；disabled Skill 在进入 AgentCore 前以 `skill_unavailable` 拒绝，AgentCore 的五类 Skill rejection 继续映射为独立产品 cause，不 poison Session、不自动刷新和不重放用户动作。
 
-Renderer Bridge revision 1 原地 hard cut 后，`metawork.tasks.run` 只接受 `input.kind = text | skill` 的 tagged payload，旧 `prompt` 字段必然解码失败；Skill input 同时携带 `catalogRevision + selectionRevision`。`tasks.create` 必须显式传成对 nullable 的 `expectedSkillCatalogRevision + expectedSkillSelectionRevision`，Text 两者均为 `null`，Skill 两者均为选择时 revision。Workspace current catalog/selection、Task pinned catalog/selection 与 Run typed input 由同一 Product Control snapshot 投影；Bridge 只严格解码、路由和编码，不解析 slash、归档或 AgentCore raw catalog。`workspaces.refreshSkillCatalog` 与 `tasks.refreshSkillCatalog` 分别只调用 Product Control 的 Workspace query transaction 与 idle Task binding transaction。`skills.setEnabled` 使用 Workspace epoch 与双 revision CAS 更新 Product Control policy；`skills.refreshCatalog` 更新顶层管理 catalog/inventory reconciliation，不改变 Task 或 Session binding。Skill preview/detail 只发布 Product Control 已做容量与内容边界处理的文本，file picker 返回的一次性 staged handle 和 Host-only physical path 都不得进入 snapshot。Import/export/reimport/uninstall mutation 沿同一 Dispatcher authority、expected generation/Workspace epoch 与 ProductDelivery resync 路径返回 typed result，不形成第二条执行路线。
+Renderer Bridge revision 1 原地 hard cut 后，`metawork.tasks.run` 只接受 `input.kind = text | skill | multimodal` 的 tagged payload，旧 `prompt` 字段必然解码失败；Skill input 同时携带 `catalogRevision + selectionRevision`，multimodal input 只携带可空文字与 Bridge connection-bound attachment token。`tasks.create` 必须显式传成对 nullable 的 `expectedSkillCatalogRevision + expectedSkillSelectionRevision`，Text/Multimodal 两者均为 `null`，Skill 两者均为选择时 revision。Workspace current catalog/selection、Task pinned catalog/selection 与 Run typed input 由同一 Product Control snapshot 投影；Bridge 只严格解码、路由和编码，不解析 slash、归档或 AgentCore raw catalog。`workspaces.refreshSkillCatalog` 与 `tasks.refreshSkillCatalog` 分别只调用 Product Control 的 Workspace query transaction 与 idle Task binding transaction。`skills.setEnabled` 使用 Workspace epoch 与双 revision CAS 更新 Product Control policy；`skills.refreshCatalog` 更新顶层管理 catalog/inventory reconciliation，不改变 Task 或 Session binding。Skill preview/detail 只发布 Product Control 已做容量与内容边界处理的文本，file picker 返回的一次性 staged handle 和 Host-only physical path 都不得进入 snapshot。Import/export/reimport/uninstall mutation 沿同一 Dispatcher authority、expected generation/Workspace epoch 与 ProductDelivery resync 路径返回 typed result，不形成第二条执行路线。
 
 每个 Session 拥有独立分配、存活到 Session release 的 `SessionControlBlock`。`RunControlLease` 用 closed-bit + atomic reference count 保活该 control block，并携带单调 `run_generation`；旧 lease 在下一 Run 复用执行槽后返回 `stale_run`，Run 自然完成后返回 `already_terminal`。Session close 先关闭 lease acquisition gate，再等待 Run、callback 和全部 control lease 归零；该 quiescence wait 不持有 Session/Product Control lock。`Run.execute()` 返回 immutable `TerminalResult`，worker 在释放 execution base lease 前将它提交到 Product Control admission 时预留的 write-once terminal payload。Product Control executor worker 入队前取得的 Task-owned stable record reference 归零前，所属 Task 即使已经归档也不得物理删除；Product Control 保留已受理的删除意图并在引用归零后完成事务；不存在只被测试消费的第二套公开 record-reference 协议。
 
@@ -417,16 +417,16 @@ flowchart LR
 
 ### 过载语义
 
-| 数据                            | 允许策略                                                             |
-| ------------------------------- | -------------------------------------------------------------------- |
-| `text_chunk`                    | 当前逐项保留；若后续按 Session/Run 合并，最终字节必须一致            |
-| `tool_progress`                 | pump 逐项保留；Renderer projection 按同一 tool 覆盖旧进度            |
-| `usage`                         | pump 逐项保留；Renderer projection 根据 AgentCore 事件语义累计或替换 |
-| diagnostics                     | 按明确配置采样                                                       |
-| tool start/result               | 不得静默丢失                                                         |
+| 数据                            | 允许策略                                                                                  |
+| ------------------------------- | ----------------------------------------------------------------------------------------- |
+| `text_chunk`                    | 当前逐项保留；若后续按 Session/Run 合并，最终字节必须一致                                 |
+| `tool_progress`                 | pump 逐项保留；Renderer projection 按同一 tool 覆盖旧进度                                 |
+| `usage`                         | pump 逐项保留；Renderer projection 根据 AgentCore 事件语义累计或替换                      |
+| diagnostics                     | 按明确配置采样                                                                            |
+| tool start/result               | 不得静默丢失                                                                              |
 | `file_changes`                  | 正常有界事件逐项保留；只有已确认该顶层类型的容量/尺寸失败可降级并设置 `file_changes_lost` |
-| UI request/response state       | 不得静默丢失                                                         |
-| run/error/cancel/terminal state | 不得静默丢失                                                         |
+| UI request/response state       | 不得静默丢失                                                                              |
+| run/error/cancel/terminal state | 不得静默丢失                                                                              |
 
 当前没有完整最终 assistant snapshot 时，`text_chunk` 不能丢。队列不能接收关键事件时，可以有限阻塞 callback；达到 deadline 后返回 fatal，而不是无限等待。
 
@@ -493,16 +493,16 @@ call ABI
 → exhaustive Host mapping
 ```
 
-| StopReason                    | 当前 Host 状态                                                                           |
-| ----------------------------- | ---------------------------------------------------------------------------------------- |
-| `end_turn`                    | completed                                                                                |
-| `max_turns`                   | stopped / awaiting_user                                                                  |
+| StopReason                    | 当前 Host 状态                                                                                 |
+| ----------------------------- | ---------------------------------------------------------------------------------------------- |
+| `end_turn`                    | completed                                                                                      |
+| `max_turns`                   | stopped / awaiting_user                                                                        |
 | `aborted`                     | `TerminalResult.termination_signal` 由 Product Control 映射为 cancelled / interrupted / failed |
-| `tool_error`                  | failed                                                                                   |
-| `api_error`                   | failed                                                                                   |
-| `tool_loop`                   | stopped / awaiting_user                                                                  |
-| `checkpoint_budget_exhausted` | stopped / resource_limit                                                                 |
-| `checkpoint_resource_limit`   | stopped / resource_limit                                                                 |
+| `tool_error`                  | failed                                                                                         |
+| `api_error`                   | failed                                                                                         |
+| `tool_loop`                   | stopped / awaiting_user                                                                        |
+| `checkpoint_budget_exhausted` | stopped / resource_limit                                                                       |
+| `checkpoint_resource_limit`   | stopped / resource_limit                                                                       |
 
 MetaWork 对 bundle SDK 的 typed StopReason 使用无 `else` switch。unknown raw code 必须在 SDK validation 层失败，并在 diagnostic 中保留 raw value。
 

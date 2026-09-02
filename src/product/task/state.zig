@@ -375,6 +375,21 @@ pub const RunInputRecord = union(enum) {
         argument_values: [][]u8,
         redacted: bool = false,
     },
+    multimodal: struct {
+        text: ?[]u8,
+        attachments: []AttachmentRecord,
+        redacted: bool = false,
+    },
+};
+
+pub const AttachmentKind = enum { image, pdf };
+pub const AttachmentFormat = enum { png, jpeg, webp, pdf };
+pub const AttachmentRecord = struct {
+    kind: AttachmentKind,
+    format: AttachmentFormat,
+    display_name: []u8,
+    size_bytes: u64,
+    redacted: bool = false,
 };
 
 /// Immutable checkpoint description facts captured before executor handoff.

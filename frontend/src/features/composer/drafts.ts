@@ -52,7 +52,11 @@ export function prepareRetryDraft(
 }
 
 function draftHasContent(draft: ComposerDraft) {
-  return draft.kind === "skill" || draft.text.trim().length > 0;
+  return (
+    draft.kind === "skill" ||
+    draft.text.trim().length > 0 ||
+    (draft.kind === "multimodal" && draft.attachments.length > 0)
+  );
 }
 
 function exactKeys(value: Record<string, unknown>, keys: readonly string[]) {
@@ -181,11 +185,20 @@ function decodeTaggedDraft(value: string | null): ComposerDraft {
     const draft = parsed as Record<string, unknown>;
     if (
       draft.kind === "text" &&
-      exactKeys(draft, ["kind", "text"]) &&
+      (exactKeys(draft, ["kind", "text"]) ||
+        exactKeys(draft, ["kind", "text", "attachmentsReloadRequired"])) &&
       typeof draft.text === "string" &&
-      draft.text.length <= maxComposerCharacters
+      draft.text.length <= maxComposerCharacters &&
+      (draft.attachmentsReloadRequired === undefined ||
+        draft.attachmentsReloadRequired === true)
     )
-      return { kind: "text", text: draft.text };
+      return {
+        kind: "text",
+        text: draft.text,
+        ...(draft.attachmentsReloadRequired === true
+          ? { attachmentsReloadRequired: true as const }
+          : {}),
+      };
     const skill = decodeSkillDraft(draft);
     if (skill) return skill;
   } catch {
@@ -205,6 +218,14 @@ function decodeLegacyTextDraft(value: string | null): ComposerDraft {
 }
 
 function encodeDraft(value: ComposerDraft): string | null {
+  if (value.kind === "multimodal") {
+    const encoded = JSON.stringify({
+      kind: "text",
+      text: value.text,
+      attachmentsReloadRequired: true,
+    });
+    return utf8ByteLength(encoded) <= maxPersistedDraftBytes ? encoded : null;
+  }
   if (value.kind === "text") {
     if (value.text.length > maxComposerCharacters) return null;
   } else if (!skillDraftPersistable(value)) return null;

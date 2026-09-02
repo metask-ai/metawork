@@ -15,11 +15,13 @@ const callback_gate = @import("callback_gate.zig");
 const product_delivery = @import("product_delivery.zig");
 const workspace_grant = @import("workspace_grant.zig");
 const skill_grant = @import("skill_grant.zig");
+const attachment_grant = @import("attachment_grant.zig");
 
 const product_handler_count = commands.product.len;
-const sync_product_handler_count = product_handler_count - 2;
+const sync_product_handler_count = product_handler_count - 3;
 const max_preview_in_flight: usize = 8;
 const max_diff_in_flight: usize = 8;
+const max_attachment_in_flight: usize = 4;
 const workspace_path_capacity = workspace_grant.max_path_bytes;
 const event_name = "metawork:host-signal";
 
@@ -67,6 +69,7 @@ pub const Platform = struct {
         native_sdk.platform.OpenDialogOptions,
         []u8,
     ) anyerror!native_sdk.platform.OpenDialogResult,
+    random_fn: *const fn (?*anyopaque, []u8) bool = unavailableRandom,
     window_chrome_connect_fn: *const fn (
         ?*anyopaque,
         native_sdk.platform.WindowId,
@@ -101,6 +104,7 @@ pub const AutomationAuthority = struct {
     context: ?*anyopaque = null,
     active_fn: *const fn (?*anyopaque) bool = inactive,
     workspace_root_fn: *const fn (?*anyopaque) ?[]const u8 = noAutomationWorkspace,
+    attachment_paths_fn: *const fn (?*anyopaque) ?[]const u8 = noAutomationAttachments,
 
     fn active(self: AutomationAuthority) bool {
         return self.active_fn(self.context);
@@ -108,6 +112,10 @@ pub const AutomationAuthority = struct {
 
     fn workspaceRoot(self: AutomationAuthority) ?[]const u8 {
         return self.workspace_root_fn(self.context);
+    }
+
+    fn attachmentPaths(self: AutomationAuthority) ?[]const u8 {
+        return self.attachment_paths_fn(self.context);
     }
 };
 
@@ -191,6 +199,21 @@ pub const Dispatcher = struct {
         request_id_len: usize = 0,
     };
     const DiffInFlight = PreviewInFlight;
+    const AttachmentInFlight = struct {
+        active: bool = false,
+        completion_id: u64 = 0,
+        generation: u64 = 0,
+        window_id: native_sdk.platform.WindowId = 0,
+        responder: native_sdk.bridge.AsyncResponder = undefined,
+        request_id_storage: [native_sdk.bridge.max_id_bytes]u8 = undefined,
+        request_id_len: usize = 0,
+    };
+    const AttachmentGrantAcceptance = struct {
+        dispatcher: *Dispatcher,
+        tokens: []const []const u8,
+        generation: u64,
+        window_id: native_sdk.platform.WindowId,
+    };
 
     control: ?*product_control.Runtime,
     account_commands: account_contract.AccountCommandSink,
@@ -204,16 +227,19 @@ pub const Dispatcher = struct {
     callbacks: callback_gate.State = .{},
     grants: workspace_grant.State = .{},
     skill_grants: skill_grant.State = .{},
+    attachment_grants: attachment_grant.State = .{},
     window_chrome_generation: u64 = 0,
     window_chrome_connected: bool = false,
     sequence: u64 = 0,
     acknowledged_sequence: u64 = 0,
     registered_handlers: [sync_product_handler_count]native_sdk.bridge.Handler = undefined,
-    registered_async_handlers: [2]native_sdk.bridge.AsyncHandler = undefined,
+    registered_async_handlers: [3]native_sdk.bridge.AsyncHandler = undefined,
     preview_in_flight: [max_preview_in_flight]PreviewInFlight = @splat(.{}),
     next_preview_completion_id: u64 = 1,
     diff_in_flight: [max_diff_in_flight]DiffInFlight = @splat(.{}),
     next_diff_completion_id: u64 = 1,
+    attachment_in_flight: [max_attachment_in_flight]AttachmentInFlight = @splat(.{}),
+    next_attachment_completion_id: u64 = 1,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -242,6 +268,7 @@ pub const Dispatcher = struct {
         self.delivery.breakConnection(self.transport());
         self.grants.invalidate();
         self.skill_grants.invalidate();
+        self.releaseAllAttachmentGrants();
         self.window_chrome_connected = false;
         self.control = null;
         self.delivery.deinitOwnedBuffers();
@@ -319,6 +346,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.set_default_permission_profile, .function = setDefaultPermissionProfile },
             .{ .name = commands.create_task, .function = createTask },
             .{ .name = commands.run, .function = runTask },
+            .{ .name = commands.release_attachment, .function = releaseAttachment },
             .{ .name = commands.select_task_model, .function = selectTaskModel },
             .{ .name = commands.restore_task, .function = restoreTask },
             .{ .name = commands.compact, .function = compactTask },
@@ -351,6 +379,11 @@ pub const Dispatcher = struct {
             .name = commands.diff_file,
             .context = self,
             .invoke_fn = diffFile,
+        };
+        self.registered_async_handlers[2] = .{
+            .name = commands.choose_attachments,
+            .context = self,
+            .invoke_fn = chooseAttachments,
         };
         return .{
             .policy = policy,
@@ -392,6 +425,22 @@ pub const Dispatcher = struct {
         self.delivery.breakConnection(self.transport());
         self.grants.invalidate();
         self.skill_grants.invalidate();
+        self.releaseAllAttachmentGrants();
+    }
+
+    fn releaseAllAttachmentGrants(self: *Dispatcher) void {
+        var ids: [attachment_grant.max_grants]u64 = undefined;
+        const taken = self.attachment_grants.takeAll(&ids);
+        const workbench = self.control orelse return;
+        for (taken) |id| _ = workbench.releaseAttachment(id);
+    }
+
+    fn releaseAttachmentDescriptors(
+        self: *Dispatcher,
+        descriptors: []const product_control.AttachmentDescriptor,
+    ) void {
+        const workbench = self.control orelse return;
+        for (descriptors) |descriptor| _ = workbench.releaseAttachment(descriptor.id);
     }
 
     pub fn connectedWindow(self: *const Dispatcher) ?native_sdk.platform.WindowId {
@@ -511,6 +560,7 @@ pub const Dispatcher = struct {
         const generation = try self.delivery.connect(invocation.source.window_id, self.transport());
         self.grants.invalidate();
         self.skill_grants.invalidate();
+        self.releaseAllAttachmentGrants();
         try self.platform.wake_fn(self.platform.context);
         return std.fmt.bufPrint(
             output,
@@ -529,7 +579,7 @@ pub const Dispatcher = struct {
         try self.delivery.validateConnection(generation, invocation.source.window_id);
         defer self.grants.invalidate();
         defer self.skill_grants.invalidate();
-        defer self.delivery.breakConnection(self.transport());
+        defer self.breakConnection();
         return std.fmt.bufPrint(output, "{{\"generation\":\"{d}\",\"detached\":true}}", .{generation});
     }
 
@@ -924,6 +974,249 @@ pub const Dispatcher = struct {
             return;
         };
         responder.success(request_id, writer.buffered()) catch {};
+    }
+
+    fn chooseAttachments(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        responder: native_sdk.bridge.AsyncResponder,
+    ) anyerror!void {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = self.callbacks.enter() catch {
+            respondAttachmentRejected(responder, invocation.request.id, .shutting_down);
+            return;
+        };
+        defer callback.deinit();
+        self.requireWindow(invocation.source.window_id) catch {
+            respondAttachmentRejected(responder, invocation.request.id, .shutting_down);
+            return;
+        };
+        var parsed = handlers.parsePayload(handlers.Empty, invocation.request.payload) catch {
+            respondAttachmentRejected(responder, invocation.request.id, .read_failed);
+            return;
+        };
+        defer parsed.deinit();
+        const generation = self.delivery.connectedGeneration() orelse {
+            respondAttachmentRejected(responder, invocation.request.id, .shutting_down);
+            return;
+        };
+        var dialog_storage: [native_sdk.platform.max_dialog_paths_bytes]u8 = undefined;
+        const filters = [_]native_sdk.platform.FileFilter{.{
+            .name = "Images and PDF documents",
+            .extensions = &.{ "png", "jpg", "jpeg", "webp", "pdf" },
+        }};
+        const selected = if (self.automation.active()) automation: {
+            const paths = self.automation.attachmentPaths() orelse {
+                respondAttachmentRejected(responder, invocation.request.id, .read_failed);
+                return;
+            };
+            const count = countAutomationAttachmentPaths(paths) orelse {
+                respondAttachmentRejected(responder, invocation.request.id, .read_failed);
+                return;
+            };
+            break :automation native_sdk.platform.OpenDialogResult{
+                .paths = paths,
+                .count = count,
+            };
+        } else user: {
+            break :user self.platform.show_open_dialog_fn(
+                self.platform.context,
+                .{
+                    .title = "Choose images or PDF documents",
+                    .filters = &filters,
+                    .allow_directories = false,
+                    .allow_multiple = true,
+                },
+                &dialog_storage,
+            ) catch {
+                respondAttachmentRejected(responder, invocation.request.id, .read_failed);
+                return;
+            };
+        };
+        if (selected.count == 0) {
+            respondAttachmentCancelled(responder, invocation.request.id);
+            return;
+        }
+        if (selected.count > attachment_grant.max_grants or selected.paths.len == 0) {
+            respondAttachmentRejected(responder, invocation.request.id, .too_many_files);
+            return;
+        }
+        const completion_id = self.reserveAttachmentStaging(
+            responder,
+            invocation.request.id,
+            generation,
+            invocation.source.window_id,
+        ) orelse {
+            respondAttachmentRejected(responder, invocation.request.id, .staging_capacity);
+            return;
+        };
+        (self.requireProductControl() catch {
+            self.completeAttachmentRejected(completion_id, .shutting_down);
+            return;
+        }).beginAttachmentStaging(completion_id, selected.count, selected.paths) catch |err| {
+            self.completeAttachmentRejected(completion_id, switch (err) {
+                error.ShuttingDown => .shutting_down,
+                error.Capacity, error.OutOfMemory => .staging_capacity,
+                else => .read_failed,
+            });
+        };
+    }
+
+    fn reserveAttachmentStaging(
+        self: *Dispatcher,
+        responder: native_sdk.bridge.AsyncResponder,
+        request_id: []const u8,
+        generation: u64,
+        window_id: native_sdk.platform.WindowId,
+    ) ?u64 {
+        if (self.next_attachment_completion_id == std.math.maxInt(u64)) return null;
+        for (&self.attachment_in_flight) |*slot| {
+            if (slot.active) continue;
+            const completion_id = self.next_attachment_completion_id;
+            self.next_attachment_completion_id += 1;
+            @memcpy(slot.request_id_storage[0..request_id.len], request_id);
+            slot.* = .{
+                .active = true,
+                .completion_id = completion_id,
+                .generation = generation,
+                .window_id = window_id,
+                .responder = responder,
+                .request_id_storage = slot.request_id_storage,
+                .request_id_len = request_id.len,
+            };
+            return completion_id;
+        }
+        return null;
+    }
+
+    pub fn attachmentStagingSink(self: *Dispatcher) product_control.AttachmentStagingSink {
+        return .{ .context = self, .complete_fn = completeAttachmentStagingFromSink };
+    }
+
+    fn completeAttachmentStagingFromSink(
+        context: *anyopaque,
+        completion_id: u64,
+        result: product_control.AttachmentStagingResult,
+    ) void {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        self.completeAttachmentStaging(completion_id, result);
+    }
+
+    fn completeAttachmentStaging(
+        self: *Dispatcher,
+        completion_id: u64,
+        result: product_control.AttachmentStagingResult,
+    ) void {
+        for (&self.attachment_in_flight) |*slot| {
+            if (!slot.active or slot.completion_id != completion_id) continue;
+            const responder = slot.responder;
+            const generation = slot.generation;
+            const window_id = slot.window_id;
+            var request_id_storage: [native_sdk.bridge.max_id_bytes]u8 = undefined;
+            @memcpy(request_id_storage[0..slot.request_id_len], slot.request_id_storage[0..slot.request_id_len]);
+            const request_id = request_id_storage[0..slot.request_id_len];
+            slot.* = .{};
+            switch (result) {
+                .rejected => |reason| respondAttachmentRejected(responder, request_id, reason),
+                .ready => |descriptors| {
+                    if (self.delivery.connectedGeneration() != generation or
+                        self.delivery.connectedWindow() != window_id)
+                    {
+                        self.releaseAttachmentDescriptors(descriptors);
+                        respondAttachmentRejected(responder, request_id, .shutting_down);
+                        return;
+                    }
+                    var ids: [attachment_grant.max_grants]u64 = undefined;
+                    for (descriptors, 0..) |descriptor, index| ids[index] = descriptor.id;
+                    var issued_storage: [attachment_grant.max_grants]attachment_grant.Issued = undefined;
+                    const issued = self.attachment_grants.issueBatch(
+                        generation,
+                        window_id,
+                        ids[0..descriptors.len],
+                        &issued_storage,
+                        self.platform.context,
+                        self.platform.random_fn,
+                    ) catch {
+                        self.releaseAttachmentDescriptors(descriptors);
+                        respondAttachmentRejected(responder, request_id, .staging_capacity);
+                        return;
+                    };
+                    respondAttachmentsReady(responder, request_id, descriptors, issued);
+                },
+            }
+            return;
+        }
+        if (result == .ready) self.releaseAttachmentDescriptors(result.ready);
+    }
+
+    fn completeAttachmentRejected(
+        self: *Dispatcher,
+        completion_id: u64,
+        reason: product_control.AttachmentStagingRejection,
+    ) void {
+        self.completeAttachmentStaging(completion_id, .{ .rejected = reason });
+    }
+
+    pub fn settleAttachmentStagingForShutdown(self: *Dispatcher) void {
+        for (&self.attachment_in_flight) |*slot| {
+            if (!slot.active) continue;
+            const responder = slot.responder;
+            var request_id_storage: [native_sdk.bridge.max_id_bytes]u8 = undefined;
+            @memcpy(request_id_storage[0..slot.request_id_len], slot.request_id_storage[0..slot.request_id_len]);
+            const request_id = request_id_storage[0..slot.request_id_len];
+            slot.* = .{};
+            respondAttachmentRejected(responder, request_id, .shutting_down);
+        }
+    }
+
+    fn respondAttachmentCancelled(
+        responder: native_sdk.bridge.AsyncResponder,
+        request_id: []const u8,
+    ) void {
+        responder.success(request_id, "{\"status\":\"cancelled\"}") catch {};
+    }
+
+    fn respondAttachmentRejected(
+        responder: native_sdk.bridge.AsyncResponder,
+        request_id: []const u8,
+        reason: product_control.AttachmentStagingRejection,
+    ) void {
+        var buffer: [256]u8 = undefined;
+        const value = std.fmt.bufPrint(&buffer, "{{\"status\":\"rejected\",\"reason\":\"{s}\"}}", .{@tagName(reason)}) catch {
+            responder.fail(request_id, .internal_error, "Attachment result encoding failed") catch {};
+            return;
+        };
+        responder.success(request_id, value) catch {};
+    }
+
+    fn respondAttachmentsReady(
+        responder: native_sdk.bridge.AsyncResponder,
+        request_id: []const u8,
+        descriptors: []const product_control.AttachmentDescriptor,
+        issued: []const attachment_grant.Issued,
+    ) void {
+        var buffer: [native_sdk.bridge.max_result_bytes]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        writer.writeAll("{\"status\":\"ready\",\"attachments\":[") catch return responderEncodingFailure(responder, request_id);
+        for (descriptors, issued, 0..) |descriptor, grant, index| {
+            if (index != 0) writer.writeByte(',') catch return responderEncodingFailure(responder, request_id);
+            writer.print("{{\"token\":\"{s}\",\"kind\":\"{s}\",\"format\":\"{s}\",\"displayName\":", .{
+                grant.token,
+                @tagName(descriptor.kind),
+                @tagName(descriptor.format),
+            }) catch return responderEncodingFailure(responder, request_id);
+            std.json.Stringify.value(descriptor.display_name, .{}, &writer) catch return responderEncodingFailure(responder, request_id);
+            writer.print(",\"sizeBytes\":\"{d}\"}}", .{descriptor.size_bytes}) catch return responderEncodingFailure(responder, request_id);
+        }
+        writer.writeAll("]}") catch return responderEncodingFailure(responder, request_id);
+        responder.success(request_id, writer.buffered()) catch {};
+    }
+
+    fn responderEncodingFailure(
+        responder: native_sdk.bridge.AsyncResponder,
+        request_id: []const u8,
+    ) void {
+        responder.fail(request_id, .internal_error, "Attachment result encoding failed") catch {};
     }
 
     fn diffFile(
@@ -1579,6 +1872,9 @@ pub const Dispatcher = struct {
         defer input.deinit();
         const task_id = try handlers.parseWireId(parsed.value.taskId);
         const binding_epoch = try handlers.parseWireId(parsed.value.expectedBindingEpoch);
+        const generation = self.delivery.connectedGeneration() orelse return error.NoConnection;
+        var attachment_ids: [attachment_grant.max_grants]u64 = undefined;
+        var attachment_acceptance: AttachmentGrantAcceptance = undefined;
         const workbench_input: product_control.TaskRunInput = switch (input.value) {
             .text => |text| text_input: {
                 if (text.len == 0) return error.EmptyPrompt;
@@ -1592,6 +1888,30 @@ pub const Dispatcher = struct {
                     .catalog_revision = skill.catalog_revision,
                     .selection_revision = skill.selection_revision,
                     .argument_values = skill.argument_values,
+                } };
+            },
+            .multimodal => |multimodal| multimodal_input: {
+                if (multimodal.text.len > 64 * 1024)
+                    return error.InvalidBridgePayload;
+                const ids = self.attachment_grants.resolve(
+                    multimodal.attachment_tokens,
+                    generation,
+                    invocation.source.window_id,
+                    &attachment_ids,
+                ) catch return error.InvalidBridgePayload;
+                attachment_acceptance = .{
+                    .dispatcher = self,
+                    .tokens = multimodal.attachment_tokens,
+                    .generation = generation,
+                    .window_id = invocation.source.window_id,
+                };
+                break :multimodal_input .{ .multimodal = .{
+                    .text = multimodal.text,
+                    .attachment_ids = ids,
+                    .acceptance = .{
+                        .context = &attachment_acceptance,
+                        .accept_fn = acceptAttachmentGrants,
+                    },
                 } };
             },
         };
@@ -1612,6 +1932,44 @@ pub const Dispatcher = struct {
             run_id,
             null,
         );
+    }
+
+    fn acceptAttachmentGrants(context: ?*anyopaque) void {
+        const acceptance: *AttachmentGrantAcceptance = @ptrCast(@alignCast(context.?));
+        acceptance.dispatcher.attachment_grants.consume(
+            acceptance.tokens,
+            acceptance.generation,
+            acceptance.window_id,
+        );
+    }
+
+    fn releaseAttachment(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(
+            handlers.AttachmentRelease,
+            invocation.request.payload,
+        );
+        defer parsed.deinit();
+        if (!handlers.validAttachmentToken(parsed.value.token))
+            return error.InvalidBridgePayload;
+        const generation = self.delivery.connectedGeneration() orelse return error.NoConnection;
+        const id = self.attachment_grants.release(
+            parsed.value.token,
+            generation,
+            invocation.source.window_id,
+        );
+        const released = if (id) |attachment_id|
+            (try self.requireProductControl()).releaseAttachment(attachment_id)
+        else
+            false;
+        return std.fmt.bufPrint(output, "{{\"released\":{}}}", .{released});
     }
 
     fn selectTaskModel(
@@ -4295,8 +4653,38 @@ fn inactive(_: ?*anyopaque) bool {
     return false;
 }
 
+fn unavailableRandom(_: ?*anyopaque, _: []u8) bool {
+    return false;
+}
+
 fn noAutomationWorkspace(_: ?*anyopaque) ?[]const u8 {
     return null;
+}
+
+fn noAutomationAttachments(_: ?*anyopaque) ?[]const u8 {
+    return null;
+}
+
+fn countAutomationAttachmentPaths(paths: []const u8) ?usize {
+    if (paths.len == 0) return null;
+    var count: usize = 0;
+    var split = std.mem.splitScalar(u8, paths, '\n');
+    while (split.next()) |path| {
+        if (path.len == 0) return null;
+        count += 1;
+    }
+    return count;
+}
+
+test "automation attachment path batches preserve platform selection cardinality" {
+    try std.testing.expectEqual(
+        @as(?usize, 2),
+        countAutomationAttachmentPaths("/tmp/one.png\n/tmp/two.pdf"),
+    );
+    try std.testing.expectEqual(@as(?usize, 1), countAutomationAttachmentPaths("/tmp/one.png"));
+    try std.testing.expectEqual(@as(?usize, null), countAutomationAttachmentPaths(""));
+    try std.testing.expectEqual(@as(?usize, null), countAutomationAttachmentPaths("/tmp/one.png\n"));
+    try std.testing.expectEqual(@as(?usize, null), countAutomationAttachmentPaths("\n/tmp/two.pdf"));
 }
 
 test "Dispatcher validates authority before domain calls and preserves committed state on response loss" {

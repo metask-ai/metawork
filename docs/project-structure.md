@@ -22,7 +22,7 @@
 | `src/product/control.zig`、`src/product/control/` | Product Control | Product composition、shared execution 与跨 aggregate 编排 |
 | `src/product/execution/` | Product Control 持有的 Execution aggregate | Product 通用 Protocol/ExecutionConfig 纯合同、Model Connection registry、credential port 与恢复；不形成新的顶层 owner |
 | `src/product/agent_protocol_adapter.zig` | Product Control 的 Agent outbound boundary | Product 已开放 Protocol 到 Agent codec Protocol 的唯一穷举映射；无状态且不形成共享 enum 或新 owner |
-| `src/product/{mcp,schedule,skill,task,workspace}.zig` 及同名目录 | Product Control 持有的 aggregate | 各自发布窄 public module，不形成新的顶层 owner |
+| `src/product/{attachment,mcp,schedule,skill,task,workspace}.zig` 及同名目录 | Product Control 持有的 aggregate | Attachment 只拥有 transient staged raw bytes、预算与线性消费；其余 aggregate 各自发布窄 public module，均不形成新的顶层 owner |
 | `src/agent.zig`、`src/agent/` | Agent | AgentCore integration、Runtime、Session、Completion 与 callback/event boundary |
 | `src/bridge.zig`、`src/bridge/` | Bridge | Renderer command authority、wire decode 与 ProductDelivery transport |
 | `src/storage.zig`、`src/storage/` | Storage | backend-independent SQL contract、backend 与 conformance |
@@ -37,31 +37,31 @@
 
 ### Renderer
 
-| 稳定根 | Owner | 边界 |
-| --- | --- | --- |
-| `frontend/src/app/` | Renderer composition | React composition、窗口级协调与产品 action wiring |
-| `frontend/src/bridge/` | Renderer Bridge client | `window.zero` 的唯一 browser-side adapter、runtime decode 与 connection/snapshot transport |
-| `frontend/src/workbench/` | Renderer projection | canonical Host snapshot、selector 与无副作用派生状态 |
-| `frontend/src/features/` | 用户可见 feature | 按产品能力分区的交互与呈现，不拥有 Host 领域状态 |
-| `frontend/src/components/ui/` | Foundation UI | 无产品语义的基础交互 primitive |
-| `frontend/src/components/ai/` | AI presentation | 复用 Foundation UI 的对话呈现 primitive，不拥有 Task、Run 或 AgentCore 语义 |
-| `frontend/src/i18n/` | Renderer localization | message catalog、formatter 与 locale runtime |
-| `frontend/src/platform/` | Renderer-local capability | browser-side 本地偏好，不拥有原生平台能力 |
+| 稳定根                        | Owner                     | 边界                                                                                       |
+| ----------------------------- | ------------------------- | ------------------------------------------------------------------------------------------ |
+| `frontend/src/app/`           | Renderer composition      | React composition、窗口级协调与产品 action wiring                                          |
+| `frontend/src/bridge/`        | Renderer Bridge client    | `window.zero` 的唯一 browser-side adapter、runtime decode 与 connection/snapshot transport |
+| `frontend/src/workbench/`     | Renderer projection       | canonical Host snapshot、selector 与无副作用派生状态                                       |
+| `frontend/src/features/`      | 用户可见 feature          | 按产品能力分区的交互与呈现，不拥有 Host 领域状态                                           |
+| `frontend/src/components/ui/` | Foundation UI             | 无产品语义的基础交互 primitive                                                             |
+| `frontend/src/components/ai/` | AI presentation           | 复用 Foundation UI 的对话呈现 primitive，不拥有 Task、Run 或 AgentCore 语义                |
+| `frontend/src/i18n/`          | Renderer localization     | message catalog、formatter 与 locale runtime                                               |
+| `frontend/src/platform/`      | Renderer-local capability | browser-side 本地偏好，不拥有原生平台能力                                                  |
 
 React component 不得直接访问 `window.zero`、拼装 Bridge wire payload、解析 AgentCore raw data 或拥有 Host lifecycle。feature 可以消费 `workbench/` selector、`bridge/` typed surface 与共享 component，不得导入其他 feature 的内部文件。`components/ai/` 可以向下依赖 Foundation UI 和共享 Renderer 工具，不得反向导入 `features/`、`workbench/`、`bridge/` 或 `app/`。
 
 ### 支撑根
 
-| 稳定根 | Owner / purpose |
-| --- | --- |
-| `tests/agent/`、`tests/product/` | 对应 owner 的 external Zig test root |
-| `tests/integration/` | 无法归属单一 owner 的跨边界失败模式 |
-| `tests/support/` | test-only fake 与 fixture，不形成产品 owner |
-| `tests/fixtures/` | 由测试或 probe 启动的外部进程与协议 fixture，不形成产品 owner |
-| `scripts/` | 工程编排、回归和 artifact 工具，不形成产品协议 |
-| `build_support/` | 正式 build graph helper、AgentCore verifier 与 target lock |
-| `packaging/` | 平台分发输入；具体合同归平台分发文档 |
-| `assets/` | 品牌与平台用途源资产；语义归 UI 与平台分发文档 |
+| 稳定根                           | Owner / purpose                                               |
+| -------------------------------- | ------------------------------------------------------------- |
+| `tests/agent/`、`tests/product/` | 对应 owner 的 external Zig test root                          |
+| `tests/integration/`             | 无法归属单一 owner 的跨边界失败模式                           |
+| `tests/support/`                 | test-only fake 与 fixture，不形成产品 owner                   |
+| `tests/fixtures/`                | 由测试或 probe 启动的外部进程与协议 fixture，不形成产品 owner |
+| `scripts/`                       | 工程编排、回归和 artifact 工具，不形成产品协议                |
+| `build_support/`                 | 正式 build graph helper、AgentCore verifier 与 target lock    |
+| `packaging/`                     | 平台分发输入；具体合同归平台分发文档                          |
+| `assets/`                        | 品牌与平台用途源资产；语义归 UI 与平台分发文档                |
 
 生成目录、缓存、stage、candidate consumer 和临时 probe 不是源码 root，也不得成为依赖真源。canonical `.agentcore/bundles/<target-id>` 是已验证的外部依赖 stage；正式产品只有 Agent module 可以消费其中的官方 SDK。
 

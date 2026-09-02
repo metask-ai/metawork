@@ -61,6 +61,8 @@ import {
   decodePermissionProfileMutationResult,
   decodeFilePreview,
   decodeFileChangeDiff,
+  decodeAttachmentChooseResult,
+  decodeAttachmentReleaseResult,
 } from "./decode-contracts.ts";
 import { RendererBridgeContractError } from "./contract-error.ts";
 import { fetchWorkbenchSnapshot } from "./snapshot/snapshot-client.ts";
@@ -640,6 +642,21 @@ export class BridgeClient {
     return decodeTaskRunResult(
       await this.invoke(commands.run, { taskId, expectedBindingEpoch, input }),
       taskId,
+    );
+  }
+
+  async chooseAttachments() {
+    // Like Workspace and Skill pickers, this command includes a user-controlled
+    // native modal. A fixed Bridge timeout would abandon a valid selection and
+    // leave the resulting staged grants without a Renderer consumer.
+    return decodeAttachmentChooseResult(
+      await this.bridge().invoke(commands.chooseAttachments, {}),
+    );
+  }
+
+  async releaseAttachment(token: string) {
+    return decodeAttachmentReleaseResult(
+      await this.invoke(commands.releaseAttachment, { token }),
     );
   }
 

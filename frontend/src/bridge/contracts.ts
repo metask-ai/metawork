@@ -267,6 +267,34 @@ export type TaskRunInput =
       catalogRevision: string;
       selectionRevision: string;
       argumentValues: string[];
+    }
+  | {
+      kind: "multimodal";
+      text: string;
+      attachmentTokens: string[];
+    };
+
+export type AttachmentDescriptor = {
+  token: string;
+  kind: "image" | "pdf";
+  format: "png" | "jpeg" | "webp" | "pdf";
+  displayName: string;
+  sizeBytes: string;
+};
+
+export type AttachmentChooseResult =
+  | { status: "cancelled" }
+  | { status: "ready"; attachments: AttachmentDescriptor[] }
+  | {
+      status: "rejected";
+      reason:
+        | "unsupported_type"
+        | "file_too_large"
+        | "too_many_files"
+        | "staging_capacity"
+        | "read_failed"
+        | "file_changed"
+        | "shutting_down";
     };
 
 export type ScheduledTaskRecurrence =
@@ -344,6 +372,18 @@ export type RunInputView =
       invocationName: string;
       displayName: string;
       argumentValues: string[];
+      redacted: boolean;
+    }
+  | {
+      kind: "multimodal";
+      text: string | null;
+      attachments: Array<{
+        kind: "image" | "pdf";
+        format: "png" | "jpeg" | "webp" | "pdf";
+        displayName: string;
+        sizeBytes: string;
+        redacted: boolean;
+      }>;
       redacted: boolean;
     };
 
@@ -636,6 +676,15 @@ export type WorkbenchSnapshot = {
     mcpConnectionApproval: boolean;
     mcpSecretCapture: boolean;
     mcpOAuth: boolean;
+    attachments: {
+      enabled: boolean;
+      imageFormats: Array<"png" | "jpeg" | "webp">;
+      pdf: boolean;
+      maxFiles: string;
+      maxImageBytes: string;
+      maxPdfBytes: string;
+      maxStagedBytes: string;
+    };
   };
   permissions: {
     availableProfiles: PermissionProfile[];
