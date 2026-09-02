@@ -9,7 +9,9 @@ const account_projection = @import("product_control_account_projection");
 const execution_state = @import("product_control_execution_state");
 const executor_impl = @import("product_control_executor");
 const file_preview = @import("product_control_file_preview");
+const attachment_staging = @import("product_control_attachment_staging");
 const file_change_io = @import("product_control_file_change_io");
+const product_attachment = @import("metawork_product_attachment");
 const product_workspace = @import("metawork_product_workspace");
 const product_schedule = @import("metawork_product_schedule");
 const skill_ports = @import("metawork_product_skill").ports;
@@ -41,7 +43,7 @@ const mcp_testing = product_mcp.testing;
 const contract_fixture = @import("product_control_contract_fixture");
 const build_options = @import("build_options");
 
-pub const Error = lifecycle.Error || product_schedule.Error || skill_runtime.MutationError || skill_runtime.EnablementError || skill_runtime.EnablementFileStoreError || task_persistence.Error || std.mem.Allocator.Error || std.Thread.SpawnError || error{
+pub const Error = lifecycle.Error || product_attachment.Error || product_schedule.Error || skill_runtime.MutationError || skill_runtime.EnablementError || skill_runtime.EnablementFileStoreError || task_persistence.Error || std.mem.Allocator.Error || std.Thread.SpawnError || error{
     ProjectionCapacity,
     RunCapacity,
     CompactCapacity,
@@ -119,6 +121,11 @@ pub const Limits = struct {
     max_skill_arguments: usize = 64,
     max_task_title_bytes: usize = 512,
     max_user_message_bytes: usize = 64 * 1024,
+    max_attachments_per_draft: usize = 8,
+    max_attachment_display_name_bytes: usize = 512,
+    max_image_attachment_bytes: usize = lifecycle.multimodal_input_limits.max_image_raw_bytes,
+    max_pdf_attachment_bytes: usize = lifecycle.multimodal_input_limits.max_document_raw_bytes,
+    max_staged_attachment_bytes: usize = 32 * 1024 * 1024,
     max_assistant_message_bytes: usize = 256 * 1024,
     max_tool_field_bytes: usize = 256 * 1024,
     max_file_refs_per_tool: usize = 32,
@@ -179,7 +186,36 @@ pub const TaskWorkspaceRequest = union(enum) {
     automatic,
 };
 
-pub const TaskRunInput = task_runtime.RunInput;
+pub const AttachmentAcceptance = struct {
+    context: ?*anyopaque = null,
+    accept_fn: *const fn (?*anyopaque) void = ignoreAttachmentAcceptance,
+
+    fn accept(self: AttachmentAcceptance) void {
+        self.accept_fn(self.context);
+    }
+};
+
+fn ignoreAttachmentAcceptance(_: ?*anyopaque) void {}
+
+const AttachmentRunAcceptanceContext = struct {
+    borrow: *product_attachment.Borrow,
+    external: AttachmentAcceptance,
+};
+
+pub const TaskRunInput = union(enum) {
+    text: []const u8,
+    skill: struct {
+        skill_id: []const u8,
+        catalog_revision: []const u8,
+        selection_revision: u64,
+        argument_values: []const []const u8,
+    },
+    multimodal: struct {
+        text: []const u8,
+        attachment_ids: []const u64,
+        acceptance: AttachmentAcceptance = .{},
+    },
+};
 
 pub const ScheduledTaskRecurrence = product_schedule.Recurrence;
 
@@ -513,6 +549,23 @@ fn filePreviewExecutor(executor: *executor_impl.Executor) file_preview.Executor 
     };
 }
 
+fn enqueueAttachmentStagingJob(
+    context: *anyopaque,
+    job: attachment_staging.ExecutorJob,
+) error{ ExecutorShuttingDown, QueueFull }!void {
+    const executor: *executor_impl.Executor = @ptrCast(@alignCast(context));
+    return executor.enqueue(.{
+        .identity = job.identity,
+        .context = job.context,
+        .execute_fn = job.execute_fn,
+        .cancel_fn = job.cancel_fn,
+    });
+}
+
+fn attachmentStagingExecutor(executor: *executor_impl.Executor) attachment_staging.Executor {
+    return .{ .context = executor, .enqueue_fn = enqueueAttachmentStagingJob };
+}
+
 fn enqueueFileChangeJob(
     context: *anyopaque,
     job: file_change_io.ExecutorJob,
@@ -735,6 +788,16 @@ pub const FilePreviewSink = struct {
     complete_fn: *const fn (*anyopaque, FilePreviewResult) void,
 };
 
+pub const AttachmentStagingRejection = attachment_staging.Rejection;
+pub const AttachmentStagingResult = union(enum) {
+    ready: []const product_attachment.Descriptor,
+    rejected: AttachmentStagingRejection,
+};
+pub const AttachmentStagingSink = struct {
+    context: *anyopaque,
+    complete_fn: *const fn (*anyopaque, u64, AttachmentStagingResult) void,
+};
+
 pub const FileChangeDiffReason = enum {
     not_recorded,
     capacity,
@@ -910,6 +973,7 @@ pub const Runtime = struct {
     agent_runtime: *lifecycle.Runtime,
     limits: Limits,
     workspace: product_workspace.Runtime,
+    attachments: product_attachment.Runtime,
     task_runtime: task_runtime.Runtime,
     task_persistence: TaskPersistence,
     task_persistence_health: TaskPersistenceHealth,
@@ -922,6 +986,8 @@ pub const Runtime = struct {
     skill: skill_runtime.Runtime,
     change_notifier: ChangeNotifier,
     executor: *executor_impl.Executor,
+    attachment_executor: *executor_impl.Executor,
+    attachment_lane: *attachment_staging.Lane,
     preview_executor: *executor_impl.Executor,
     preview_lane: *file_preview.Lane,
     file_change_store: ?*file_change_store.FileStore,
@@ -929,6 +995,7 @@ pub const Runtime = struct {
     file_change_lane: ?*file_change_io.Lane,
     shutting_down: bool = false,
     executor_shutdown: bool = false,
+    attachment_executor_shutdown: bool = false,
     preview_executor_shutdown: bool = false,
     file_change_executor_shutdown: bool = false,
     projection_bytes: usize = 0,
@@ -968,6 +1035,12 @@ pub const Runtime = struct {
             limits.max_catalog_issues == 0 or
             limits.max_skill_arguments == 0 or
             limits.max_task_title_bytes == 0 or
+            limits.max_attachments_per_draft == 0 or
+            limits.max_attachments_per_draft >= lifecycle.multimodal_input_limits.max_parts or
+            limits.max_attachment_display_name_bytes == 0 or
+            limits.max_image_attachment_bytes == 0 or
+            limits.max_pdf_attachment_bytes == 0 or
+            limits.max_staged_attachment_bytes == 0 or
             limits.max_user_message_bytes == 0 or limits.max_assistant_message_bytes == 0 or
             limits.max_tool_field_bytes == 0 or limits.max_pending_ui_json_bytes == 0 or
             limits.max_file_changes_per_run == 0 or
@@ -1014,6 +1087,14 @@ pub const Runtime = struct {
             configuration.directories.automatic_workspace_root,
         );
         errdefer workspace.deinitEmpty();
+        var attachments = try product_attachment.Runtime.init(allocator, .{
+            .max_files = limits.max_attachments_per_draft,
+            .max_display_name_bytes = limits.max_attachment_display_name_bytes,
+            .max_image_bytes = limits.max_image_attachment_bytes,
+            .max_pdf_bytes = limits.max_pdf_attachment_bytes,
+            .max_staged_bytes = limits.max_staged_attachment_bytes,
+        });
+        errdefer attachments.deinit();
         var product_tasks = try task_runtime.Runtime.init(allocator, limits.max_tasks);
         errdefer product_tasks.deinitStorage();
         var task_persistence_health: TaskPersistenceHealth =
@@ -1053,6 +1134,26 @@ pub const Runtime = struct {
         };
         var preview_executor_owned = true;
         errdefer if (preview_executor_owned) preview_executor.deinit();
+        const attachment_executor = executor_impl.Executor.create(io, allocator, .{
+            .worker_count = attachment_staging.worker_count,
+            .queue_capacity = attachment_staging.max_in_flight,
+        }) catch |err| switch (err) {
+            error.InvalidLimits => unreachable,
+            else => return err,
+        };
+        var attachment_executor_owned = true;
+        errdefer if (attachment_executor_owned) attachment_executor.deinit();
+        const attachment_lane = try attachment_staging.Lane.create(io, allocator, .{
+            .context = configuration.change_notifier.context,
+            .wake_fn = configuration.change_notifier.wake,
+        }, attachmentStagingExecutor(attachment_executor));
+        var attachment_lane_owned = true;
+        errdefer if (attachment_lane_owned) {
+            attachment_lane.stopAdmission();
+            attachment_executor.shutdown();
+            while (attachment_lane.take()) |taken| attachment_lane.release(taken);
+            attachment_lane.deinit();
+        };
         const preview_lane = try file_preview.Lane.create(io, allocator, .{
             .context = configuration.change_notifier.context,
             .wake_fn = configuration.change_notifier.wake,
@@ -1122,6 +1223,7 @@ pub const Runtime = struct {
             .agent_runtime = agent_runtime,
             .limits = limits,
             .workspace = workspace,
+            .attachments = attachments,
             .task_runtime = product_tasks,
             .task_persistence = configuration.task_persistence,
             .task_persistence_health = task_persistence_health,
@@ -1131,6 +1233,8 @@ pub const Runtime = struct {
             .skill = skill,
             .change_notifier = configuration.change_notifier,
             .executor = executor,
+            .attachment_executor = attachment_executor,
+            .attachment_lane = attachment_lane,
             .preview_executor = preview_executor,
             .preview_lane = preview_lane,
             .file_change_store = configuration.file_change_store.file_store,
@@ -1145,6 +1249,8 @@ pub const Runtime = struct {
         };
         skill_owned = false;
         executor_owned = false;
+        attachment_executor_owned = false;
+        attachment_lane_owned = false;
         preview_executor_owned = false;
         if ((control.task_persistence_health == .ready or
             control.task_persistence_health == .degraded) and
@@ -1205,6 +1311,55 @@ pub const Runtime = struct {
         queued,
         immediate: FilePreviewState,
     };
+
+    pub fn beginAttachmentStaging(
+        self: *Runtime,
+        completion_id: u64,
+        path_count: usize,
+        paths: []const u8,
+    ) attachment_staging.Error!void {
+        if (self.shutting_down) return error.ShuttingDown;
+        return self.attachment_lane.begin(.{
+            .completion_id = completion_id,
+            .path_count = path_count,
+            .paths = paths,
+            .limits = .{
+                .max_files = self.limits.max_attachments_per_draft,
+                .max_display_name_bytes = self.limits.max_attachment_display_name_bytes,
+                .max_image_bytes = self.limits.max_image_attachment_bytes,
+                .max_pdf_bytes = self.limits.max_pdf_attachment_bytes,
+                .max_staged_bytes = self.limits.max_staged_attachment_bytes,
+            },
+        });
+    }
+
+    /// Main-thread transfer from worker-owned bytes to Product-owned staging.
+    /// Candidate buffers are always erased as soon as the callback returns.
+    pub fn drainAttachmentStagingCompletions(
+        self: *Runtime,
+        sink: AttachmentStagingSink,
+    ) void {
+        while (self.attachment_lane.take()) |taken| {
+            defer self.attachment_lane.release(taken);
+            const raw = taken.completion;
+            if (raw.rejection) |rejection| {
+                sink.complete_fn(sink.context, raw.completion_id, .{ .rejected = rejection });
+                continue;
+            }
+            var descriptors: [lifecycle.multimodal_input_limits.max_parts]product_attachment.Descriptor = undefined;
+            const staged = self.attachments.stageBatch(raw.candidates, &descriptors) catch |err| {
+                const rejection: AttachmentStagingRejection = switch (err) {
+                    error.TooManyFiles => .too_many_files,
+                    error.FileTooLarge => .file_too_large,
+                    error.StagingCapacity, error.OutOfMemory => .staging_capacity,
+                    else => .unsupported_type,
+                };
+                sink.complete_fn(sink.context, raw.completion_id, .{ .rejected = rejection });
+                continue;
+            };
+            sink.complete_fn(sink.context, raw.completion_id, .{ .ready = staged });
+        }
+    }
 
     /// Performs only bounded identity/authority work on the main thread and
     /// submits immutable Host-only input to the preview lane. File I/O never
@@ -1682,6 +1837,19 @@ pub const Runtime = struct {
     }
     pub fn automaticWorkspacesAvailable(self: *const Runtime) bool {
         return self.workspace.automaticRootAvailable();
+    }
+
+    pub fn stageAttachments(
+        self: *Runtime,
+        candidates: []const product_attachment.Candidate,
+        output: []product_attachment.Descriptor,
+    ) Error![]const product_attachment.Descriptor {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        return self.attachments.stageBatch(candidates, output);
+    }
+
+    pub fn releaseAttachment(self: *Runtime, id: u64) bool {
+        return self.attachments.release(id);
     }
 
     pub fn hasEnabledScheduledTasks(self: *Runtime) bool {
@@ -2317,6 +2485,8 @@ pub const Runtime = struct {
         self: *Runtime,
         input: AutomationExecutionInput,
     ) Error!void {
+        const execution_generation: u64 = 1;
+        const source_generation: u64 = 1;
         defer self.publishScheduleChangesNoFail();
         if (!build_options.automation)
             return error.InvalidAutomationExecution;
@@ -2340,7 +2510,7 @@ pub const Runtime = struct {
                 .base_url = input.base_url,
             },
             .api_key = input.credential,
-            .execution_generation = 1,
+            .execution_generation = execution_generation,
         };
         try self.execution_state.prepareInstall(
             execution_input,
@@ -2374,7 +2544,7 @@ pub const Runtime = struct {
                 .api_key_id = "automation-key",
                 .model_id = input.model,
                 .protocol = input.protocol,
-                .source_generation = 1,
+                .source_generation = source_generation,
             },
         });
         self.execution_state.installAutomationNoFail(.{
@@ -2382,7 +2552,8 @@ pub const Runtime = struct {
             .credential = input.credential,
             .model = input.model,
             .base_url = input.base_url,
-            .generation = 1,
+            .execution_generation = execution_generation,
+            .source_generation = source_generation,
         }, self.executionProjectionRedaction());
         self.endExecutionReplacementNoFail();
         self.finishAccountCommitNoFail();
@@ -3186,6 +3357,54 @@ pub const Runtime = struct {
         );
         if (workspace.kind == .automatic and input == .skill)
             return error.CatalogUnavailable;
+        var borrowed_parts: [lifecycle.multimodal_input_limits.max_parts]product_attachment.BorrowedPart = undefined;
+        var borrowed_indices: [lifecycle.multimodal_input_limits.max_parts]usize = undefined;
+        var multimodal_items: [lifecycle.multimodal_input_limits.max_parts]task_runtime.MultimodalAttachment = undefined;
+        var attachment_borrow: ?product_attachment.Borrow = null;
+        var acceptance_context: AttachmentRunAcceptanceContext = undefined;
+        var external_acceptance: AttachmentAcceptance = .{};
+        defer if (attachment_borrow) |*borrow| borrow.rollback();
+        const task_input: task_runtime.RunInput = switch (input) {
+            .text => |text| .{ .text = text },
+            .skill => |skill| .{ .skill = .{
+                .skill_id = skill.skill_id,
+                .catalog_revision = skill.catalog_revision,
+                .selection_revision = skill.selection_revision,
+                .argument_values = skill.argument_values,
+            } },
+            .multimodal => |multimodal| input: {
+                external_acceptance = multimodal.acceptance;
+                if (multimodal.attachment_ids.len == 0 or
+                    multimodal.attachment_ids.len > self.limits.max_attachments_per_draft)
+                    return error.TooManyFiles;
+                attachment_borrow = try self.attachments.borrow(
+                    multimodal.attachment_ids,
+                    &borrowed_parts,
+                    &borrowed_indices,
+                );
+                for (borrowed_parts[0..multimodal.attachment_ids.len], 0..) |part, index| {
+                    const descriptor = self.attachments.descriptorFor(part.id) orelse unreachable;
+                    multimodal_items[index] = .{
+                        .kind = switch (descriptor.kind) {
+                            .image => .image,
+                            .pdf => .pdf,
+                        },
+                        .format = switch (descriptor.format) {
+                            .png => .png,
+                            .jpeg => .jpeg,
+                            .webp => .webp,
+                            .pdf => .pdf,
+                        },
+                        .display_name = descriptor.display_name,
+                        .bytes = part.bytes,
+                    };
+                }
+                break :input .{ .multimodal = .{
+                    .text = multimodal.text,
+                    .attachments = multimodal_items[0..multimodal.attachment_ids.len],
+                } };
+            },
+        };
         var order_preparation = if (workspace.kind == .manual)
             try self.workspace.prepareOrder(workspace.id)
         else
@@ -3196,10 +3415,22 @@ pub const Runtime = struct {
             .workspace = &self.workspace,
             .preparation = &order_preparation,
         };
+        var operation_effects = self.taskRuntimeOperationEffectsWithDurable(durable);
+        if (attachment_borrow != null) {
+            acceptance_context = .{
+                .borrow = &attachment_borrow.?,
+                .external = external_acceptance,
+            };
+            operation_effects.run_acceptance = .{
+                .context = &acceptance_context,
+                .accept_fn = consumeAttachmentBorrow,
+                .irreversible = true,
+            };
+        }
         const run_id = try self.task_runtime.startRun(
             task_id,
             expected_binding_epoch,
-            input,
+            task_input,
             .{
                 .context = &order_context,
                 .manual = workspace.kind == .manual,
@@ -3207,7 +3438,7 @@ pub const Runtime = struct {
                 .apply_fn = applyTaskWorkspaceOrder,
                 .rollback_fn = rollbackTaskWorkspaceOrder,
             },
-            self.taskRuntimeOperationEffectsWithDurable(durable),
+            operation_effects,
         );
         if (order_preparation.isActive())
             self.workspace.commitOrder(&order_preparation);
@@ -4251,7 +4482,7 @@ pub const Runtime = struct {
             runtime.capabilities()
         else
             mcp_runtime.Capabilities{ .management = false, .host = .{} };
-        writer.print("{{\"revision\":\"{d}\",\"capabilities\":{{\"taskHistoryPersistence\":{},\"taskHistoryPersistenceHealth\":\"{s}\",\"taskHistoryRecoveryAvailable\":{},\"conversationRecovery\":true,\"executionRebind\":false,\"structuredPlan\":false,\"typedOutputs\":false,\"typedFileChanges\":true,\"persistentWorkspacePermissions\":false,\"permissionProfiles\":{},\"automaticWorkspaces\":{},\"scheduledTasks\":{},\"scheduledTaskPersistence\":{},\"scheduledTaskPersistenceHealth\":\"{s}\",\"scheduledTaskRecoveryAvailable\":{},\"backgroundScheduleWake\":{},\"localSkillManagement\":{},\"skillManagementHealth\":\"{s}\",\"modelConnectionManagement\":{},\"modelConnectionSecretCapture\":{},\"modelConnectionTest\":{},\"mcpManagement\":{},\"mcpConnectionApproval\":{},\"mcpSecretCapture\":{},\"mcpOAuth\":{}}},\"permissions\":{{\"availableProfiles\":", .{
+        writer.print("{{\"revision\":\"{d}\",\"capabilities\":{{\"taskHistoryPersistence\":{},\"taskHistoryPersistenceHealth\":\"{s}\",\"taskHistoryRecoveryAvailable\":{},\"conversationRecovery\":true,\"executionRebind\":false,\"structuredPlan\":false,\"typedOutputs\":false,\"typedFileChanges\":true,\"persistentWorkspacePermissions\":false,\"permissionProfiles\":{},\"automaticWorkspaces\":{},\"scheduledTasks\":{},\"scheduledTaskPersistence\":{},\"scheduledTaskPersistenceHealth\":\"{s}\",\"scheduledTaskRecoveryAvailable\":{},\"backgroundScheduleWake\":{},\"localSkillManagement\":{},\"skillManagementHealth\":\"{s}\",\"modelConnectionManagement\":{},\"modelConnectionSecretCapture\":{},\"modelConnectionTest\":{},\"mcpManagement\":{},\"mcpConnectionApproval\":{},\"mcpSecretCapture\":{},\"mcpOAuth\":{},\"attachments\":{{\"enabled\":true,\"imageFormats\":[\"png\",\"jpeg\",\"webp\"],\"pdf\":true,\"maxFiles\":\"{d}\",\"maxImageBytes\":\"{d}\",\"maxPdfBytes\":\"{d}\",\"maxStagedBytes\":\"{d}\"}}}},\"permissions\":{{\"availableProfiles\":", .{
             self.revision,
             task_persistence_ready,
             @tagName(self.task_persistence_health),
@@ -4273,6 +4504,10 @@ pub const Runtime = struct {
             mcp_capabilities.host.connection_approval,
             mcp_capabilities.host.secret_capture,
             mcp_capabilities.host.oauth,
+            self.limits.max_attachments_per_draft,
+            self.limits.max_image_attachment_bytes,
+            self.limits.max_pdf_attachment_bytes,
+            self.limits.max_staged_attachment_bytes,
         }) catch
             return error.SnapshotTooLarge;
         if (permission_profiles_available)
@@ -4562,6 +4797,7 @@ pub const Runtime = struct {
         self.clearPendingMetaskCandidateNoFail();
         self.task_runtime.deinitTasks(self.taskRuntimeReleaseEffects());
         self.task_runtime.deinitStorage();
+        self.attachments.deinit();
         for (0..self.workspace.slotCount()) |index| {
             const workspace = self.workspace.factsAt(index) orelse continue;
             std.debug.assert(self.skill.unregisterWorkspace(
@@ -4581,6 +4817,8 @@ pub const Runtime = struct {
         self.executor.deinit();
         self.preview_lane.deinit();
         self.preview_executor.deinit();
+        self.attachment_lane.deinit();
+        self.attachment_executor.deinit();
         if (self.file_change_lane) |lane| lane.deinit();
         if (self.file_change_executor) |executor| executor.deinit();
         self.* = undefined;
@@ -4597,6 +4835,14 @@ pub const Runtime = struct {
         self.preview_executor_shutdown = true;
     }
 
+    pub fn shutdownAttachmentStagingExecutor(self: *Runtime) void {
+        if (self.attachment_executor_shutdown) return;
+        self.attachment_lane.stopAdmission();
+        self.attachment_executor.shutdown();
+        while (self.attachment_lane.take()) |taken| self.attachment_lane.release(taken);
+        self.attachment_executor_shutdown = true;
+    }
+
     pub fn shutdownFileChangeExecutor(self: *Runtime) void {
         if (self.file_change_executor_shutdown) return;
         if (self.file_change_lane) |lane| lane.stopAdmission();
@@ -4605,6 +4851,7 @@ pub const Runtime = struct {
     }
 
     pub fn shutdownExecutor(self: *Runtime) void {
+        self.shutdownAttachmentStagingExecutor();
         self.shutdownFilePreviewExecutor();
         self.shutdownFileChangeExecutor();
         self.drainFileChangeCompletions(.{
@@ -5169,6 +5416,7 @@ pub const Runtime = struct {
             .max_workspace_bytes = self.limits.max_workspace_bytes,
             .max_task_title_bytes = self.limits.max_task_title_bytes,
             .max_user_message_bytes = self.limits.max_user_message_bytes,
+            .max_attachments_per_run = self.limits.max_attachments_per_draft,
             .max_assistant_message_bytes = self.limits.max_assistant_message_bytes,
             .max_tool_field_bytes = self.limits.max_tool_field_bytes,
             .max_file_ref_field_bytes = self.limits.max_file_ref_field_bytes,
@@ -5626,6 +5874,12 @@ pub const Runtime = struct {
         const value: *TaskWorkspaceOrderContext = @ptrCast(@alignCast(context));
         std.debug.assert(value.preparation.recentOrder() == recent_order);
         value.workspace.rollbackOrder(value.preparation);
+    }
+
+    fn consumeAttachmentBorrow(context: ?*anyopaque) void {
+        const acceptance: *AttachmentRunAcceptanceContext = @ptrCast(@alignCast(context.?));
+        acceptance.borrow.consume();
+        acceptance.external.accept();
     }
 
     fn taskRuntimeOperationEffects(self: *Runtime) task_runtime.OperationEffects {
@@ -6190,9 +6444,19 @@ pub const Runtime = struct {
         task: *TestTask,
         input: TaskRunInput,
     ) Error!usize {
+        const runtime_input: task_runtime.RunInput = switch (input) {
+            .text => |text| .{ .text = text },
+            .skill => |skill| .{ .skill = .{
+                .skill_id = skill.skill_id,
+                .catalog_revision = skill.catalog_revision,
+                .selection_revision = skill.selection_revision,
+                .argument_values = skill.argument_values,
+            } },
+            .multimodal => return error.InvalidRunInput,
+        };
         return self.task_runtime.testReserveRun(
             task.durable.id,
-            input,
+            runtime_input,
             self.taskRuntimeOperationEffects(),
         );
     }
@@ -7673,6 +7937,7 @@ fn testTaskPersistenceLimits() task_persistence.Limits {
         .max_workspace_bytes = limits.max_workspace_bytes,
         .max_task_title_bytes = limits.max_task_title_bytes,
         .max_user_message_bytes = limits.max_user_message_bytes,
+        .max_attachments_per_run = limits.max_attachments_per_draft,
         .max_assistant_message_bytes = limits.max_assistant_message_bytes,
         .max_tool_field_bytes = limits.max_tool_field_bytes,
         .max_file_ref_field_bytes = limits.max_file_ref_field_bytes,

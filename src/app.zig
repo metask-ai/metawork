@@ -261,12 +261,14 @@ const App = struct {
         if (self.single_instance) |coordinator| coordinator.stopIngress();
         if (self.dispatcher) |dispatcher| dispatcher.stopIngress();
         if (self.control) |control| {
+            control.shutdownAttachmentStagingExecutor();
             control.stopFilePreviewAdmission();
             control.shutdownFilePreviewExecutor();
             control.shutdownFileChangeExecutor();
             if (self.dispatcher) |dispatcher| {
                 control.drainFilePreviewCompletions(dispatcher.filePreviewSink());
                 control.drainFileChangeCompletions(dispatcher.fileChangeDiffSink());
+                dispatcher.settleAttachmentStagingForShutdown();
                 dispatcher.settleFilePreviewsForShutdown();
                 dispatcher.settleFileChangeDiffsForShutdown();
             }
@@ -334,6 +336,9 @@ const App = struct {
                     if (self.dispatcher) |dispatcher| {
                         control.drainFilePreviewCompletions(
                             dispatcher.filePreviewSink(),
+                        );
+                        control.drainAttachmentStagingCompletions(
+                            dispatcher.attachmentStagingSink(),
                         );
                         control.drainFileChangeCompletions(
                             dispatcher.fileChangeDiffSink(),

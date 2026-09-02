@@ -153,7 +153,8 @@ pub const AutomationInput = struct {
     credential: []const u8,
     model: []const u8,
     base_url: []const u8,
-    generation: u64,
+    execution_generation: u64,
+    source_generation: u64,
 };
 
 pub const ProjectionRedaction = struct {
@@ -263,6 +264,7 @@ pub const State = struct {
         input: AutomationInput,
         redaction: ProjectionRedaction,
     ) void {
+        std.debug.assert(input.source_generation != 0);
         const execution_input: execution_contract.ConfigInput = .{
             .target = .{
                 .provider_id = "metask:automation-key",
@@ -271,7 +273,7 @@ pub const State = struct {
                 .base_url = input.base_url,
             },
             .api_key = input.credential,
-            .execution_generation = input.generation,
+            .execution_generation = input.execution_generation,
         };
         self.consumeInstallPreparation(execution_input);
         redaction.apply(self.execution.credential());
@@ -279,7 +281,7 @@ pub const State = struct {
         if (self.custom_binding) |*binding| binding.deinit();
         self.custom_binding = null;
         self.execution.installBytesNoFail(execution_input);
-        self.metask_source_binding_generation = 0;
+        self.metask_source_binding_generation = input.source_generation;
     }
 
     pub fn clearNoFail(self: *State, redaction: ProjectionRedaction) void {
@@ -650,4 +652,43 @@ test "Model Connection execution never borrows Metask model authority" {
         .protocol = .openai_chat_completions,
     }));
     try std.testing.expect(state.canCreateTask(true, false));
+}
+
+test "Automation installation keeps execution and source generations distinct" {
+    var state = try State.init(std.testing.allocator);
+    defer state.deinit();
+    const automation: AutomationInput = .{
+        .protocol = .anthropic_messages,
+        .credential = "AUTOMATION-SECRET",
+        .model = "automation-model",
+        .base_url = "http://127.0.0.1:4321/v1/messages",
+        .execution_generation = 7,
+        .source_generation = 11,
+    };
+    const execution_input: execution_contract.ConfigInput = .{
+        .target = .{
+            .provider_id = "metask:automation-key",
+            .protocol = automation.protocol,
+            .model = automation.model,
+            .base_url = automation.base_url,
+        },
+        .api_key = automation.credential,
+        .execution_generation = automation.execution_generation,
+    };
+    try state.beginIdentityReplacement();
+    var durable_calls: usize = 0;
+    try state.prepareInstall(
+        execution_input,
+        TestDurableRedaction{ .calls = &durable_calls },
+    );
+    var projection_redaction: TestProjectionRedaction = .{};
+    state.installAutomationNoFail(automation, projection_redaction.capability());
+    state.endReplacementNoFail();
+
+    try std.testing.expectEqual(@as(usize, 1), durable_calls);
+    try std.testing.expectEqual(@as(usize, 2), projection_redaction.calls);
+    try std.testing.expectEqual(@as(u64, 7), state.generation());
+    try std.testing.expect(state.metaskBindingMatches(11));
+    try std.testing.expect(!state.metaskBindingMatches(7));
+    try std.testing.expect(state.canCreateTask(true, true));
 }

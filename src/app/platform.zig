@@ -151,6 +151,7 @@ pub const Adapter = struct {
             .start_timer_fn = startTimer,
             .cancel_timer_fn = cancelTimer,
             .show_open_dialog_fn = showOpenDialog,
+            .random_fn = random,
             .window_chrome_connect_fn = windowChromeConnect,
             .window_chrome_sync_fn = windowChromeSync,
             .window_chrome_begin_drag_fn = windowChromeBeginDrag,
@@ -374,6 +375,12 @@ pub const Adapter = struct {
             options,
             output,
         );
+    }
+
+    fn random(context: ?*anyopaque, output: []u8) bool {
+        const self: *Adapter = @ptrCast(@alignCast(context.?));
+        self.io.random(output);
+        return true;
     }
 
     fn showMessageDialog(
