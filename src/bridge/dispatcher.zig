@@ -4440,7 +4440,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
                     self.last_catalog_generation =
                         selection.expected_catalog_generation;
                 },
-                .resolve_metask_source => {},
+                .resolve_source_candidate => {},
             }
             return self.account_result;
         }

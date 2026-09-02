@@ -1050,19 +1050,21 @@ export const enUS = {
   "persistence.recovery.task.body":
     "MetaWork will retain the current history file, then save the tasks and workspaces currently available in this session as the new history.",
   "persistence.recovery.scheduled.title": "Replace saved schedules?",
+  "persistence.recovery.scheduled.hard_cut":
+    "The current scheduled task file will be permanently deleted.",
   "persistence.recovery.scheduled.body":
-    "MetaWork will retain the current schedule file, then save the schedules currently available in this session as the new schedule store.",
+    "MetaWork will permanently delete the current scheduled task file and write the schedules still available in this session as a clean store. Retired formats are not preserved.",
+  "persistence.recovery.scheduled.confirm": "Delete file and reset",
   "persistence.recovery.cancel": "Keep current state",
   "persistence.recovery.confirm": "Retain file and recover",
   "persistence.recovery.running": "Recovering…",
   "persistence.recovery.stale_revision":
     "The Workbench changed. Review the current warning and try again.",
   "persistence.recovery.outcome_unknown":
-    "MetaWork could not confirm the replacement. The recovery copy was not deleted; try again after reviewing the current state.",
+    "MetaWork could not confirm the replacement. Review the current state before trying again.",
   "persistence.recovery.shutting_down":
     "MetaWork is closing and cannot start recovery.",
-  "persistence.recovery.failed":
-    "The store could not be replaced. The current file was not deleted.",
+  "persistence.recovery.failed": "The store could not be replaced.",
   "mcp.mutation.busy":
     "This server has an authorization operation in progress.",
   "mcp.mutation.cancelled": "The confirmation was cancelled.",

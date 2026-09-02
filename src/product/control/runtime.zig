@@ -2078,7 +2078,7 @@ pub const Runtime = struct {
             self.account_projection.sourceGeneration() == 0)
             return .rejected(.invalid_connection);
 
-        const result = account_commands.submit(.resolve_metask_source);
+        const result = account_commands.submit(.resolve_source_candidate);
         if (!result.accepted) return .rejected(switch (result.error_code) {
             .operation_in_progress => .operation_in_progress,
             .local_resource_exhausted => .local_resource_exhausted,
@@ -2351,7 +2351,7 @@ pub const Runtime = struct {
             .display_name = input.model,
         }};
         self.commitAccountFactNoFail(.{
-            .kind = .execution_changed,
+            .kind = .source_authority_changed,
             .view = .{
                 .state = .authenticated,
                 .catalog_state = .ready,
@@ -7722,7 +7722,7 @@ fn installTestExecution(control: *Runtime) !void {
         },
     }};
     control.commitAccountFactNoFail(.{
-        .kind = .execution_changed,
+        .kind = .source_authority_changed,
         .view = .{
             .state = .authenticated,
             .catalog_state = .ready,
@@ -7763,7 +7763,7 @@ const test_execution_models = [_]account_contract.ModelView{.{
 
 fn testExecutionFact(generation: u64) account_contract.AccountFact {
     return .{
-        .kind = .execution_changed,
+        .kind = .source_authority_changed,
         .view = .{
             .state = .authenticated,
             .catalog_state = .ready,
@@ -10455,7 +10455,7 @@ const TestAccountCommandSink = struct {
         command: account_contract.AccountCommand,
     ) account_contract.AccountCommandResult {
         const self: *TestAccountCommandSink = @ptrCast(@alignCast(context));
-        std.debug.assert(command == .resolve_metask_source);
+        std.debug.assert(command == .resolve_source_candidate);
         self.calls += 1;
         return self.result;
     }
@@ -10630,7 +10630,7 @@ test "Account projection and execution install use preallocated no-fail storage"
     }};
     try control.beginExecutionReplacement();
     control.commitAccountFactNoFail(.{
-        .kind = .execution_changed,
+        .kind = .source_authority_changed,
         .view = .{
             .state = .authenticated,
             .catalog_state = .ready,
@@ -10754,7 +10754,7 @@ test "default replacement preserves Task generation and installs the next admiss
     );
     try std.testing.expect(!control.canCreateTask());
     control.commitAccountFactNoFail(.{
-        .kind = .execution_changed,
+        .kind = .source_authority_changed,
         .view = .{
             .state = .authenticated,
             .catalog_state = .ready,
@@ -11979,7 +11979,7 @@ test "Runtime shutdown releases current and Task-owned execution generations" {
         .display_name = "Fixture model 2",
     }};
     control.commitAccountFactNoFail(.{
-        .kind = .execution_changed,
+        .kind = .source_authority_changed,
         .view = .{
             .state = .authenticated,
             .catalog_state = .ready,

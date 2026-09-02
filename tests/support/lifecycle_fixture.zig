@@ -2631,7 +2631,7 @@ pub fn installProductControlExecutionGeneration(
     }};
     try workbench.beginExecutionReplacement();
     workbench.commitAccountFactNoFail(.{
-        .kind = .execution_changed,
+        .kind = .source_authority_changed,
         .view = .{
             .state = .authenticated,
             .catalog_state = .ready,

@@ -471,12 +471,12 @@ export function ScheduledTasksPage({
             message={t(
               `scheduled.persistence.${snapshot.capabilities.scheduledTaskPersistenceHealth}`,
             )}
-            detail={t("persistence.recovery.original_retained")}
+            detail={t("persistence.recovery.scheduled.hard_cut")}
             actionLabel={t("persistence.recovery.action")}
             dialogTitle={t("persistence.recovery.scheduled.title")}
             dialogDescription={t("persistence.recovery.scheduled.body")}
             cancelLabel={t("persistence.recovery.cancel")}
-            confirmLabel={t("persistence.recovery.confirm")}
+            confirmLabel={t("persistence.recovery.scheduled.confirm")}
             pendingLabel={t("persistence.recovery.running")}
             failureMessage={t("persistence.recovery.failed")}
             actionAvailable={

@@ -33,7 +33,7 @@ pub const Error = error{
     ApiKeyNotFound,
     ModelNotFound,
     UnsupportedProvider,
-    ExecutionTargetInvalid,
+    SourceCandidateInvalid,
     OutOfMemory,
 };
 
@@ -51,7 +51,7 @@ pub fn errorCode(err: Error) contract.ErrorCode {
         error.NoModels => .no_models,
         error.ApiKeyNotFound, error.ModelNotFound => .invalid_command,
         error.UnsupportedProvider,
-        error.ExecutionTargetInvalid,
+        error.SourceCandidateInvalid,
         => .metask_platform_unsupported,
         error.OutOfMemory => .local_resource_exhausted,
     };
@@ -265,7 +265,7 @@ pub const CatalogSession = struct {
         metask_source_generation: u64,
     ) Error!execution_contract.OwnedSourceCandidate {
         if (metask_source_generation == 0)
-            return error.ExecutionTargetInvalid;
+            return error.SourceCandidateInvalid;
         const key_index = self.selected_key_index orelse
             return error.ApiKeyNotFound;
         if (self.findModel(model_id) == null)
@@ -300,10 +300,10 @@ pub const CatalogSession = struct {
             metask_source_generation,
             owned_secret,
             entry.id.view(),
-        ) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.ExecutionTargetInvalid;
+        ) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.SourceCandidateInvalid;
         errdefer result.deinit();
         contract.validateSourceCandidate(result.input()) catch
-            return error.ExecutionTargetInvalid;
+            return error.SourceCandidateInvalid;
         return result;
     }
 
@@ -351,7 +351,7 @@ pub const CatalogSession = struct {
         return self.api_keys.items[index].id.view();
     }
 
-    pub fn ownsExecutionSelection(
+    pub fn ownsSourceSelection(
         self: *const CatalogSession,
         account_id: []const u8,
         api_key_id: []const u8,
@@ -445,7 +445,7 @@ const PublicModel = struct {
 /// Secret-free, fixed-capacity Account projection. Network workers mutate the
 /// private candidate CatalogSession, then the App main thread snapshots a
 /// successful stage here. The composition root keeps committed and candidate
-/// PublicCatalog slots separate until execution persistence succeeds. Other
+/// PublicCatalog slots stay separate until source preference persistence succeeds. Other
 /// state changes read only those secret-free caches, so cancel and shutdown
 /// never race worker-owned secrets.
 pub const PublicCatalog = struct {
@@ -508,7 +508,7 @@ pub const PublicCatalog = struct {
         self.model_count = source.model_count;
     }
 
-    /// Restored execution persistence contains the selected catalog identities
+    /// A restored source preference contains the selected catalog identities
     /// but no complete Metask catalog. Publish the smallest truthful catalog
     /// until the authenticated catalog refresh replaces it. This keeps a ready
     /// AccountView internally consistent without inventing display metadata.
@@ -1220,19 +1220,19 @@ test "live-shape catalogs expose only masked views and move one key owner" {
     var public_catalog: PublicCatalog = .{};
     public_catalog.replaceFromSession(&session);
 
-    var execution = try session.prepareSourceCandidate("model-1", 1);
-    defer execution.deinit();
+    var candidate = try session.prepareSourceCandidate("model-1", 1);
+    defer candidate.deinit();
     try std.testing.expectEqual(
         execution_contract.Protocol.anthropic_messages,
-        execution.input().target.protocol,
+        candidate.input().target.protocol,
     );
     try std.testing.expectEqualStrings(
         anthropic_messages_url,
-        execution.input().target.base_url,
+        candidate.input().target.base_url,
     );
     try std.testing.expectEqualStrings(
         "test-api-key-1234",
-        execution.input().api_key,
+        candidate.input().api_key,
     );
     try std.testing.expectError(
         error.ApiKeyNotFound,
@@ -1270,15 +1270,15 @@ test "catalog maps Gemini platform to AgentCore Gemini target" {
     var models = try parseModels(std.testing.allocator, model_fixture);
     session.models = models.entries;
     models.entries = .empty;
-    var execution = try session.prepareSourceCandidate("model-1", 1);
-    defer execution.deinit();
+    var candidate = try session.prepareSourceCandidate("model-1", 1);
+    defer candidate.deinit();
     try std.testing.expectEqual(
         execution_contract.Protocol.gemini_native,
-        execution.input().target.protocol,
+        candidate.input().target.protocol,
     );
     try std.testing.expectEqualStrings(
         gemini_base_url,
-        execution.input().target.base_url,
+        candidate.input().target.base_url,
     );
 }
 

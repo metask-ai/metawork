@@ -671,7 +671,7 @@ pub const Runtime = struct {
                 } else false;
                 if (!member) return .{ .rejected = .invalid_command };
             },
-            .resolve_metask_source => {
+            .resolve_source_candidate => {
                 if (account_view.state != .authenticated or
                     account_view.catalog_state != .ready)
                     return .{ .rejected = .generation_mismatch };
@@ -1376,15 +1376,15 @@ pub const Runtime = struct {
             ),
             .prepare_source_candidate => self.prepareSourceCandidate(
                 entry.attempt_id orelse
-                    @panic("execution persistence effect has no attempt"),
+                    @panic("source persistence effect has no attempt"),
                 argument orelse
-                    @panic("execution effect has no model"),
+                    @panic("source candidate effect has no model"),
             ),
             .persist_source_preference => |preference| self.persistSourcePreference(
                 entry.attempt_id orelse
-                    @panic("execution preference effect has no attempt"),
+                    @panic("source preference effect has no attempt"),
                 argument orelse
-                    @panic("execution preference effect has no model"),
+                    @panic("source preference effect has no model"),
                 preference.metask_source_generation,
             ),
         }
@@ -1455,7 +1455,7 @@ pub const Runtime = struct {
             });
             return;
         };
-        var execution = switch (prepareCatalogSourceCandidate(
+        var source_candidate = switch (prepareCatalogSourceCandidate(
             &self.effects.catalog,
             &identity,
             self.effects.catalog.selectedApiKeyId(),
@@ -1471,10 +1471,10 @@ pub const Runtime = struct {
                 return;
             },
         };
-        defer execution.deinit();
+        defer source_candidate.deinit();
         self.effects.publishCompletion(.{
             .attempt_id = attempt_id,
-            .payload = .{ .source_candidate_ready = execution.take() },
+            .payload = .{ .source_candidate_ready = source_candidate.take() },
         });
     }
 
@@ -2021,7 +2021,7 @@ pub const TestSupport = if (builtin.is_test) struct {
         runtime: *Runtime,
         source_candidate: *execution_contract.OwnedSourceCandidate,
     ) !Prepared {
-        state_impl.TestSupport.installInitialExecutionPreparation(
+        state_impl.TestSupport.installInitialSourcePreparation(
             &runtime.account,
             "key-1",
             source_candidate.input().target.model,
@@ -2138,7 +2138,7 @@ fn prepareCatalogSourceCandidate(
 ) CatalogSourcePreparation {
     if (!std.mem.eql(u8, catalog.ownerAccountId(), identity.accountId()))
         return .{ .rejected = .metask_unauthorized };
-    if (!catalog.ownsExecutionSelection(
+    if (!catalog.ownsSourceSelection(
         identity.accountId(),
         model_catalog_api_key_id,
         model,
@@ -2425,8 +2425,8 @@ test "Account Runtime owns automatic catalog selection policy" {
     );
 }
 
-fn installExecutionPreparationForTest(runtime: *Runtime) !void {
-    state_impl.TestSupport.installInitialExecutionPreparation(
+fn installSourcePreparationForTest(runtime: *Runtime) !void {
+    state_impl.TestSupport.installInitialSourcePreparation(
         &runtime.account,
         "key-1",
         "model-1",
@@ -2471,7 +2471,7 @@ fn stageSourcePreferenceForTest(runtime: *Runtime) !u64 {
     return generation;
 }
 
-test "Account Runtime restores an exact persisted execution nonce" {
+test "Account Runtime restores an exact persisted source generation" {
     var wake_context: u8 = 0;
     var runtime = try initRuntimeForTest(&wake_context);
     defer runtime.deinit();
@@ -2481,7 +2481,7 @@ test "Account Runtime restores an exact persisted execution nonce" {
         "model-1",
         0x1020_3040_5060_7080,
     );
-    try installExecutionPreparationForTest(&runtime);
+    try installSourcePreparationForTest(&runtime);
 
     runtime.prepareSourceCandidate(1, "model-1");
     var mailbox = runtime.effects.takeMailbox() orelse
@@ -2489,9 +2489,9 @@ test "Account Runtime restores an exact persisted execution nonce" {
     defer mailbox.deinit();
     switch (mailbox) {
         .completion => |completion| switch (completion.payload) {
-            .source_candidate_ready => |execution| try std.testing.expectEqual(
+            .source_candidate_ready => |candidate| try std.testing.expectEqual(
                 @as(u64, 0x1020_3040_5060_7080),
-                execution.input().source_generation,
+                candidate.input().source_generation,
             ),
             else => return error.TestUnexpectedResult,
         },
@@ -2499,7 +2499,7 @@ test "Account Runtime restores an exact persisted execution nonce" {
     }
 }
 
-test "Account Runtime persists a nonzero nonce for a new execution" {
+test "Account Runtime persists a nonzero generation for a new source authority" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var account_path_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -2522,7 +2522,7 @@ test "Account Runtime persists a nonzero nonce for a new execution" {
     defer runtime.platform = null;
     var startup = runtime.prepareStart(fake.platform());
     defer startup.deinit();
-    try installExecutionPreparationForTest(&runtime);
+    try installSourcePreparationForTest(&runtime);
 
     runtime.prepareSourceCandidate(1, "model-1");
     var staged = switch (runtime.prepareNextCompletion() orelse
@@ -2558,14 +2558,14 @@ test "Account Runtime persists a nonzero nonce for a new execution" {
     );
 }
 
-test "execution preference outcome unknown finalizes only an exact candidate reread" {
+test "source preference outcome unknown finalizes only an exact candidate reread" {
     var wake_context: u8 = 0;
     var runtime = try initRuntimeForTest(&wake_context);
     defer runtime.deinit();
     var platform: TestPlatform = .{};
     runtime.platform = platform.platform();
     defer runtime.platform = null;
-    try installExecutionPreparationForTest(&runtime);
+    try installSourcePreparationForTest(&runtime);
     const generation = try stageSourcePreferenceForTest(&runtime);
     platform.preference = try .init(
         "account-1",
@@ -2586,7 +2586,7 @@ test "execution preference outcome unknown finalizes only an exact candidate rer
     );
 }
 
-test "execution preference outcome unknown distinguishes old and third values" {
+test "source preference outcome unknown distinguishes old and third values" {
     for ([_]bool{ false, true }) |third_value| {
         var wake_context: u8 = 0;
         var runtime = try initRuntimeForTest(&wake_context);
@@ -2601,7 +2601,7 @@ test "execution preference outcome unknown distinguishes old and third values" {
             9,
         );
         runtime.saved_preference = old;
-        try installExecutionPreparationForTest(&runtime);
+        try installSourcePreparationForTest(&runtime);
         _ = try stageSourcePreferenceForTest(&runtime);
         platform.preference = if (third_value)
             try .init("account-1", "key-third", "model-third", 10)
@@ -2633,7 +2633,7 @@ test "Account Runtime stages the candidate catalog before preference persistence
     var runtime = try initRuntimeForTest(&wake_context);
     defer runtime.deinit();
 
-    state_impl.TestSupport.installInitialExecutionPreparation(
+    state_impl.TestSupport.installInitialSourcePreparation(
         &runtime.account,
         "key-1",
         "model-1",
@@ -2662,7 +2662,7 @@ test "Account Runtime stages the candidate catalog before preference persistence
     );
     runtime.candidate_catalog_attempt_id = 1;
 
-    var execution = try execution_contract.OwnedSourceCandidate.initOwned(
+    var source_candidate = try execution_contract.OwnedSourceCandidate.initOwned(
         std.testing.allocator,
         .metask,
         .anthropic_messages,
@@ -2677,7 +2677,7 @@ test "Account Runtime stages the candidate catalog before preference persistence
     );
     var completion: state_impl.WorkerCompletion = .{
         .attempt_id = 1,
-        .payload = .{ .source_candidate_ready = execution.take() },
+        .payload = .{ .source_candidate_ready = source_candidate.take() },
     };
     defer completion.deinit();
     var prepared = preparedFromState(
@@ -2689,9 +2689,9 @@ test "Account Runtime stages the candidate catalog before preference persistence
     try contract.validateView(fact.view);
     try std.testing.expectEqual(@as(usize, 1), fact.view.api_keys.len);
     try std.testing.expectEqual(@as(usize, 1), fact.view.models.len);
-    if (prepared.takeSourceCandidate()) |execution_value| {
-        var committed_execution = execution_value;
-        committed_execution.deinit();
+    if (prepared.takeSourceCandidate()) |candidate_value| {
+        var committed_candidate = candidate_value;
+        committed_candidate.deinit();
     }
     _ = prepared.transition.takeEffect();
     runtime.commit(&prepared);
@@ -2878,12 +2878,12 @@ test "Account Runtime rejects cross-API model selection before persistence" {
         },
     }
 
-    try std.testing.expect(candidate.ownsExecutionSelection(
+    try std.testing.expect(candidate.ownsSourceSelection(
         "account-1",
         "key-b",
         "same-model",
     ));
-    var execution = switch (prepareCatalogSourceCandidate(
+    var source_candidate = switch (prepareCatalogSourceCandidate(
         &candidate,
         &identity,
         "key-b",
@@ -2893,8 +2893,8 @@ test "Account Runtime rejects cross-API model selection before persistence" {
         .ready => |owned| owned,
         .rejected => return error.TestUnexpectedResult,
     };
-    defer execution.deinit();
-    try std.testing.expectEqualStrings("secret-key-b", execution.input().api_key);
+    defer source_candidate.deinit();
+    try std.testing.expectEqualStrings("secret-key-b", source_candidate.input().api_key);
 }
 
 fn commitAutomationRestoreForTest(runtime: *Runtime) void {
@@ -2906,7 +2906,7 @@ fn commitAutomationRestoreForTest(runtime: *Runtime) void {
 }
 
 fn commitReadyRestoreForTest(runtime: *Runtime) !void {
-    var execution = try execution_contract.OwnedSourceCandidate.initOwned(
+    var source_candidate = try execution_contract.OwnedSourceCandidate.initOwned(
         std.testing.allocator,
         .metask,
         .anthropic_messages,
@@ -2919,13 +2919,13 @@ fn commitReadyRestoreForTest(runtime: *Runtime) !void {
         try std.testing.allocator.dupe(u8, "secret-key"),
         "fixture-provider",
     );
-    var prepared = try TestSupport.prepareReadyRestore(runtime, &execution);
-    execution.deinit();
+    var prepared = try TestSupport.prepareReadyRestore(runtime, &source_candidate);
+    source_candidate.deinit();
     defer prepared.deinit();
     try std.testing.expect(runtime.admitEffect(&prepared));
-    if (prepared.takeSourceCandidate()) |execution_value| {
-        var committed_execution = execution_value;
-        committed_execution.deinit();
+    if (prepared.takeSourceCandidate()) |candidate_value| {
+        var committed_candidate = candidate_value;
+        committed_candidate.deinit();
     }
     runtime.commit(&prepared);
     runtime.dispatchCommitted(&prepared);
@@ -3100,7 +3100,7 @@ test "default-model outcome unknown rolls back when disk kept the old value" {
     );
 }
 
-test "default-model outcome unknown revokes execution on a third disk state" {
+test "default-model outcome unknown revokes source authority on a third disk state" {
     var wake_context: u8 = 0;
     var runtime = try initRuntimeForTest(&wake_context);
     defer runtime.deinit();

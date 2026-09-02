@@ -134,7 +134,7 @@ Schedule 只持久化已提交的 occurrence 与 Task identity，不持有 Produ
 
 Schedule 引用的 execution authority 在触发时必须重新校验；不能用历史 generation 猜测或恢复 credential。Schedule store 是独立持久化边界，其 credential scrub 必须作为 durable candidate commit 完成，不能只修改内存 projection。
 
-Schedule persistence recovery 仍由 Schedule aggregate 决策：只有 typed non-ready health 才发布 action，命令必须校验全局 revision。Schedule 先对当前内存 store 执行 credential scrub 并编码 canonical candidate；Application 只执行 `quarantine current canonical → atomic replace candidate`。明确失败保持旧 health 与内存 store，outcome unknown 保持 timer fail-closed；只有 committed 才转为 ready 并重新 arm。quarantine artifact 不进入 projection，也不得被自动删除。
+Schedule persistence recovery 仍由 Schedule aggregate 决策：只有 typed non-ready health 才发布 action，命令必须校验全局 revision。Schedule 先对当前内存 store 执行 credential scrub 并编码 canonical candidate；Application 对旧 canonical 执行 hard delete，再以 durable atomic replace 写入 candidate，不生成 backup、quarantine 或 migration artifact。明确失败保持旧 health 与内存 store，outcome unknown 保持 timer fail-closed；只有 committed 才转为 ready 并重新 arm。
 
 ### 2.4 Skill authority 与本地资产
 

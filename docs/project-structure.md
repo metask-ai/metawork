@@ -27,6 +27,7 @@
 | `src/bridge.zig`、`src/bridge/` | Bridge | Renderer command authority、wire decode 与 ProductDelivery transport |
 | `src/storage.zig`、`src/storage/` | Storage | backend-independent SQL contract、backend 与 conformance |
 | `src/automation.zig`、`src/automation/` | Automation capability | compile-time authority selection，不形成产品 owner |
+| `src/oauth/` | OAuth shared leaf | 只提供 PKCE、secret lifetime、严格 callback 解析与 loopback byte-pump 合同；不拥有 callback path、issuer/resource 接受、limit policy、响应文案或领域错误映射 |
 | `src/native_sdk_compat/` | Application | 已登记 Native SDK 缺口的窄 compatibility seam，不形成通用平台层 |
 | `src/product_identity.zig` | `app.zon`-derived shared leaf | 把 build-time artifact identity 投影给 Application 及 Execution/Account/MCP credential boundary，不形成领域 owner |
 
@@ -73,6 +74,7 @@ main -> application
 application -> account, product control, agent, bridge, automation, Native SDK
 application -> native_sdk_compat
 application -> product identity
+application, account -> OAuth shared mechanics and loopback contract
 bridge -> product control, account contract, Native SDK transport contract
 product control -> agent through product agent protocol adapter, account contract, execution contract
 account -> account contract, execution contract
@@ -86,6 +88,8 @@ storage backend -> SQLite amalgamation
 Application 只做 composition、capability 注入、资源生命周期和跨 owner 调用顺序，不读取领域内部状态形成 policy。`app/`、`product/`、`agent/` 与 `bridge/` 的下层 owner 都不得反向导入 Application 实现。
 
 Product Control 可以消费 Agent、Account 与 Execution 的纯合同，但不得导入 AgentCore SDK、Account Runtime、Bridge 或 Renderer。Execution contract/registry/runtime 不得反向导入 Account；Task 与 Schedule 不得通过 Account 取得执行类型。Bridge 可以消费 Product Control public surface、Execution command/view、Account 脱敏合同与 Native SDK transport contract，但不得持有 Account Runtime、AgentCore handle、`PlatformServices`、OS handle 或具体平台实现。Agent 不得导入 Product Control、Bridge、Application 或 Renderer。`product_identity.zig` 只消费 `app.zon` manifest 与 build-time artifact option；Application 的 Execution/Account/MCP credential adapter 可以读取其派生 identity，但它不得反向依赖领域模块。Storage contract 不依赖 Product、Application、Native SDK 或 SQLite C 类型；只有 concrete backend 可以依赖 SQLite。
+
+OAuth shared leaf 不发布统一 OAuth flow 或业务 policy。Account 与 Application MCP OAuth 可以消费其 mechanics/loopback contract，但必须各自拥有 callback path、redirect/issuer/resource 接受规则、大小和 invalid-request budget、用户响应与错误映射；MCP 不得导入 Account 私有 OAuth 或 loopback policy。
 
 `src/native_sdk_compat/` 中每项 seam 必须由 Application 显式组装，只暴露对应缺口所需的窄 capability。它不得成为 Native SDK adapter、Desktop Interface、通用 facade 或下层 owner 的反向依赖入口；SDK 提供等价正式能力并完成验收后，应删除对应 seam、allowlist 和专用验证。
 

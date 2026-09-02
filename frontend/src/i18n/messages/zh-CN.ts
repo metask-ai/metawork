@@ -956,17 +956,19 @@ export const zhCN: Record<MessageId, string> = {
   "persistence.recovery.task.body":
     "MetaWork 会保留当前历史文件，再将本次使用中仍可用的任务和工作区保存为新的任务历史。",
   "persistence.recovery.scheduled.title": "替换已保存的定时任务？",
+  "persistence.recovery.scheduled.hard_cut": "当前定时任务文件将被永久删除。",
   "persistence.recovery.scheduled.body":
-    "MetaWork 会保留当前定时任务文件，再将本次使用中仍可用的定时任务保存为新的存储。",
+    "MetaWork 会永久删除当前定时任务文件，并将本次使用中仍可用的定时任务写入全新存储；已淘汰格式不会保留。",
+  "persistence.recovery.scheduled.confirm": "删除文件并重置",
   "persistence.recovery.cancel": "保留当前状态",
   "persistence.recovery.confirm": "保留文件并恢复",
   "persistence.recovery.running": "正在恢复…",
   "persistence.recovery.stale_revision":
     "工作台状态已经变化，请确认当前提示后重试。",
   "persistence.recovery.outcome_unknown":
-    "无法确认替换是否完成。恢复副本没有被删除，请确认当前状态后重试。",
+    "无法确认替换是否完成，请确认当前状态后再重试。",
   "persistence.recovery.shutting_down": "MetaWork 正在退出，无法开始恢复。",
-  "persistence.recovery.failed": "未能替换存储，当前文件没有被删除。",
+  "persistence.recovery.failed": "未能替换存储。",
   "mcp.mutation.busy": "此服务正在进行授权操作。",
   "mcp.mutation.cancelled": "已取消确认。",
   "mcp.mutation.capability_unavailable": "当前设备不支持此操作。",

@@ -277,7 +277,7 @@ fn installExecution(workbench_value: *product_control.Runtime) !void {
         .display_name = "Fixture model",
     }};
     workbench_value.commitAccountFactNoFail(.{
-        .kind = .execution_changed,
+        .kind = .source_authority_changed,
         .view = .{
             .state = .authenticated,
             .catalog_state = .ready,

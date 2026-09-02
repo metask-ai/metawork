@@ -126,38 +126,19 @@ pub const FileStore = struct {
         if (!self.syncCommit()) return error.PersistenceOutcomeUnknown;
     }
 
-    /// Moves the current canonical store to a unique quarantine artifact and
-    /// installs Product-owned canonical bytes. The quarantined file is never
-    /// decoded, overwritten, or deleted by this recovery operation.
+    /// Hard-resets the current canonical store and installs Product-owned
+    /// canonical bytes. Retired formats are deliberately not retained.
     pub fn recover(
         self: *FileStore,
         bytes: []const u8,
     ) FileStoreError!void {
         if (bytes.len == 0 or bytes.len > max_store_bytes)
             return error.WriteFailed;
-        try self.quarantineCanonical();
-        return self.commit(bytes);
-    }
-
-    fn quarantineCanonical(self: *FileStore) FileStoreError!void {
-        var random: [8]u8 = undefined;
-        std.Io.randomSecure(self.io, &random) catch return error.WriteFailed;
-        const random_hex = std.fmt.bytesToHex(random, .lower);
-        var quarantine_name_storage: [80]u8 = undefined;
-        var name_writer = std.Io.Writer.fixed(&quarantine_name_storage);
-        name_writer.print(
-            ".scheduled-tasks.recovery.{s}.bak",
-            .{random_hex},
-        ) catch return error.WriteFailed;
-        self.dir.rename(
-            file_name,
-            self.dir,
-            name_writer.buffered(),
-            self.io,
-        ) catch |err| switch (err) {
+        self.dir.deleteFile(self.io, file_name) catch |err| switch (err) {
             error.FileNotFound => {},
             else => return error.WriteFailed,
         };
+        return self.commit(bytes);
     }
 
     fn syncCommit(self: *FileStore) bool {
@@ -636,7 +617,7 @@ test "scheduled task file store atomically replaces and restores bytes" {
     );
 }
 
-test "scheduled task file store recovery quarantines the previous canonical bytes" {
+test "scheduled task file store recovery hard-resets the previous canonical bytes" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var file_store: FileStore = .{
@@ -659,29 +640,11 @@ test "scheduled task file store recovery quarantines the previous canonical byte
     );
     defer iterable.close(std.testing.io);
     var iterator = iterable.iterate();
-    var quarantine_name: ?[]u8 = null;
-    defer if (quarantine_name) |name| std.testing.allocator.free(name);
+    var files: usize = 0;
     while (try iterator.next(std.testing.io)) |entry| {
-        if (entry.kind == .file and std.mem.startsWith(
-            u8,
-            entry.name,
-            ".scheduled-tasks.recovery.",
-        )) {
-            try std.testing.expect(quarantine_name == null);
-            quarantine_name = try std.testing.allocator.dupe(u8, entry.name);
-        }
+        if (entry.kind != .file) continue;
+        files += 1;
+        try std.testing.expectEqualStrings(file_name, entry.name);
     }
-    const name = quarantine_name orelse return error.TestExpectedEqual;
-    var quarantine = try tmp.dir.openFile(
-        std.testing.io,
-        name,
-        .{ .follow_symlinks = false },
-    );
-    defer quarantine.close(std.testing.io);
-    var quarantine_bytes: [previous.len]u8 = undefined;
-    try std.testing.expectEqual(
-        @as(usize, previous.len),
-        try quarantine.readPositionalAll(std.testing.io, &quarantine_bytes, 0),
-    );
-    try std.testing.expectEqualStrings(previous, &quarantine_bytes);
+    try std.testing.expectEqual(@as(usize, 1), files);
 }

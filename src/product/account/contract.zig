@@ -149,7 +149,7 @@ pub const AccountView = struct {
 pub const AccountFactKind = enum {
     restored,
     session_changed,
-    execution_changed,
+    source_authority_changed,
     default_changed,
     catalog_changed,
     operation_failed,
@@ -187,7 +187,7 @@ pub const AccountCommand = union(enum) {
     select_model: AccountSelectionCommand,
     /// Product-internal source resolution. Renderer has no Account command for
     /// selecting the global default source.
-    resolve_metask_source,
+    resolve_source_candidate,
     logout,
 };
 

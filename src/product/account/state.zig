@@ -103,13 +103,13 @@ const AttemptKind = enum {
     refresh_token,
     catalog,
     catalog_refresh,
-    activation,
+    source_resolution,
     model_preference,
     logout,
 };
 
 const IdentityAttemptKind = enum { login, refresh_token };
-const CatalogAttemptKind = enum { preference, refresh_only, activation };
+const CatalogAttemptKind = enum { preference, refresh_only, source_resolution };
 const ModelPreferenceSource = enum { catalog, preference };
 const PendingFacts = struct {
     api_key_id: ApiKeyId = .{},
@@ -181,7 +181,7 @@ const Transaction = union(enum) {
             => |value| switch (value.kind) {
                 .preference => .catalog,
                 .refresh_only => .catalog_refresh,
-                .activation => .activation,
+                .source_resolution => .source_resolution,
             },
             .persisting_model => |value| switch (value.source) {
                 .catalog => .catalog,
@@ -431,7 +431,7 @@ const CommittedState = struct {
         return switch (self.attemptKind()) {
             .login => self.session_state == .authorizing and
                 self.operation() == .oauth_callback,
-            .catalog, .catalog_refresh, .activation => self.session_state == .authenticated and switch (self.operation()) {
+            .catalog, .catalog_refresh, .source_resolution => self.session_state == .authenticated and switch (self.operation()) {
                 .loading_keys, .selecting_key, .loading_models, .selecting_model => true,
                 else => false,
             },
@@ -468,7 +468,7 @@ pub const Account = struct {
     pub fn catalogAttemptActive(self: *const Account) bool {
         return self.state.attemptKind() == .catalog or
             self.state.attemptKind() == .catalog_refresh or
-            self.state.attemptKind() == .activation;
+            self.state.attemptKind() == .source_resolution;
     }
 
     pub fn recoveryCatalogRefreshActive(self: *const Account) bool {
@@ -483,7 +483,7 @@ pub const Account = struct {
     /// dispatch a model load that cannot resolve its key.
     pub fn catalogModelsLoadInFlight(self: *const Account) bool {
         return (self.state.attemptKind() == .catalog or
-            self.state.attemptKind() == .activation) and
+            self.state.attemptKind() == .source_resolution) and
             self.state.operation() == .loading_models;
     }
 
@@ -519,7 +519,7 @@ pub const Account = struct {
             .select_model => |selection| self.prepareSelectModel(
                 selection.selection_id,
             ),
-            .resolve_metask_source => self.prepareResolveMetaskSource(),
+            .resolve_source_candidate => self.prepareResolveSourceCandidate(),
             .logout => self.prepareLogout(),
         };
     }
@@ -571,9 +571,9 @@ pub const Account = struct {
         return self.state.metask_source_generation;
     }
 
-    /// The preference store was re-observed after an indeterminate execution
+    /// The preference store was re-observed after an indeterminate source
     /// preference write and contained neither the old nor candidate value.
-    /// Preserve an existing execution as recovery-only; a first install has
+    /// Preserve an existing source authority as recovery-only; a first install has
     /// no safe authority to preserve and closes the Account fail-closed.
     pub fn prepareSourcePreferencePersistenceInvalid(
         self: *const Account,
@@ -613,7 +613,7 @@ pub const Account = struct {
     /// The preference store was re-observed after an indeterminate write and
     /// contained neither the committed value nor the candidate value. Keep
     /// the last committed selection and in-process credential owner intact,
-    /// but revoke new Task admission until a later transaction repairs it.
+    /// but mark source authority recovery-only until a later transaction repairs it.
     pub fn prepareDefaultModelPersistenceInvalid(
         self: *const Account,
     ) PrepareResult {
@@ -679,7 +679,7 @@ pub const Account = struct {
     }
 
     /// Consumes secret ownership in `completion` on stale, rejected, and
-    /// execution-transfer paths. Callers may always call `deinit` afterwards.
+    /// source-candidate transfer paths. Callers may always call `deinit` afterwards.
     pub fn prepareCompletion(
         self: *const Account,
         completion: *WorkerCompletion,
@@ -773,7 +773,7 @@ pub const Account = struct {
         next.session_state = switch (next.attemptKind()) {
             .login => if (next.account_id.len == 0) .signed_out else .authenticated,
             .refresh_token => .authenticated,
-            .catalog, .catalog_refresh, .activation, .model_preference => .authenticated,
+            .catalog, .catalog_refresh, .source_resolution, .model_preference => .authenticated,
             .logout, .none => next.session_state,
         };
         next.clearTransaction();
@@ -787,7 +787,7 @@ pub const Account = struct {
         );
         if (self.state.attemptKind() == .catalog or
             self.state.attemptKind() == .catalog_refresh or
-            self.state.attemptKind() == .activation)
+            self.state.attemptKind() == .source_resolution)
             result.transition.catalog_intent = .discard_candidate;
         return result;
     }
@@ -906,7 +906,7 @@ pub const Account = struct {
     fn prepareSelectModel(self: *const Account, model: []const u8) PrepareResult {
         if (self.state.session_state != .authenticated)
             return .{ .rejected = .invalid_state };
-        if (self.state.attemptKind() == .activation) {
+        if (self.state.attemptKind() == .source_resolution) {
             if (self.state.operation() != .selecting_model or
                 self.state.activeAttempt() == null or
                 !std.mem.eql(u8, self.state.pendingApiKeyId(), self.state.selected_api_key_id.view()) or
@@ -917,12 +917,12 @@ pub const Account = struct {
                 return .{ .rejected = .invalid_command };
             next.transaction = .{ .persisting_source = next.catalogAttempt(
                 next.activeAttempt().?,
-                .activation,
+                .source_resolution,
             ) };
             next.clearError();
             var result = transition(
                 next,
-                .execution_changed,
+                .source_authority_changed,
                 next.activeAttempt().?,
                 .{ .prepare_source_candidate = ModelId.init(model) catch
                     return .{ .rejected = .invalid_command } },
@@ -978,9 +978,8 @@ pub const Account = struct {
             result.transition.catalog_intent = .promote_candidate;
             return result;
         }
-        // A model-only change updates the Account default for future Tasks.
-        // It must not create a new credential execution generation or replace
-        // the Workbench's live credential owner.
+        // A model-only change updates the Account-owned default preference.
+        // It must not create a new credential source generation.
         if (next.source_authority == .ready and
             std.mem.eql(
                 u8,
@@ -1016,7 +1015,7 @@ pub const Account = struct {
             return .{ .rejected = .invalid_command };
         var result = transition(
             next,
-            .execution_changed,
+            .source_authority_changed,
             next.activeAttempt().?,
             .{ .prepare_source_candidate = effect_model },
         );
@@ -1024,7 +1023,7 @@ pub const Account = struct {
         return result;
     }
 
-    fn prepareResolveMetaskSource(self: *const Account) PrepareResult {
+    fn prepareResolveSourceCandidate(self: *const Account) PrepareResult {
         if (self.state.session_state != .authenticated or
             self.state.operation() != .none or
             self.state.source_authority != .ready or
@@ -1037,7 +1036,7 @@ pub const Account = struct {
         var next = self.state;
         next.transaction = .{ .loading_keys = next.catalogAttempt(
             attempt.current,
-            .activation,
+            .source_resolution,
         ) };
         next.setPendingApiKeyId(next.selected_api_key_id.view()) catch
             return .{ .rejected = .invalid_command };
@@ -1146,7 +1145,7 @@ pub const Account = struct {
         if (self.state.operation() != .loading_keys or
             (self.state.attemptKind() != .catalog and
                 self.state.attemptKind() != .catalog_refresh and
-                self.state.attemptKind() != .activation))
+                self.state.attemptKind() != .source_resolution))
             return .{ .rejected = .invalid_state };
         const attempt_kind = self.state.attemptKind();
         const generation = incrementGeneration(self.state.catalog_generation) orelse
@@ -1157,7 +1156,7 @@ pub const Account = struct {
             next.transaction = .{ .loading_models = next.catalogAttempt(
                 next.activeAttempt().?,
                 switch (attempt_kind) {
-                    .activation => .activation,
+                    .source_resolution => .source_resolution,
                     .catalog_refresh => .refresh_only,
                     else => .preference,
                 },
@@ -1188,7 +1187,7 @@ pub const Account = struct {
         if (self.state.operation() != .loading_models or
             (self.state.attemptKind() != .catalog and
                 self.state.attemptKind() != .catalog_refresh and
-                self.state.attemptKind() != .activation))
+                self.state.attemptKind() != .source_resolution))
             return .{ .rejected = .invalid_state };
         const attempt_kind = self.state.attemptKind();
         const generation = incrementGeneration(self.state.catalog_generation) orelse
@@ -1211,7 +1210,7 @@ pub const Account = struct {
             // queued key.
             next.transaction = .{ .loading_models = next.catalogAttempt(
                 next.activeAttempt().?,
-                if (attempt_kind == .activation) .activation else .preference,
+                if (attempt_kind == .source_resolution) .source_resolution else .preference,
             ) };
             next.clearError();
             const effect_id = ApiKeyId.init(next.pendingApiKeyId()) catch
@@ -1228,14 +1227,14 @@ pub const Account = struct {
         if (next.pendingModel().len != 0) {
             next.transaction = .{ .persisting_source = next.catalogAttempt(
                 next.activeAttempt().?,
-                if (attempt_kind == .activation) .activation else .preference,
+                if (attempt_kind == .source_resolution) .source_resolution else .preference,
             ) };
             next.clearError();
             const effect_model = ModelId.init(next.pendingModel()) catch
                 return .{ .rejected = .invalid_command };
             var result = transition(
                 next,
-                .execution_changed,
+                .source_authority_changed,
                 next.activeAttempt().?,
                 .{ .prepare_source_candidate = effect_model },
             );
@@ -1244,7 +1243,7 @@ pub const Account = struct {
         }
         next.transaction = .{ .selecting_model = next.catalogAttempt(
             next.activeAttempt().?,
-            if (attempt_kind == .activation) .activation else .preference,
+            if (attempt_kind == .source_resolution) .source_resolution else .preference,
         ) };
         next.clearError();
         var result = transitionNoEffect(next, .catalog_changed, next.activeAttempt().?);
@@ -1258,7 +1257,7 @@ pub const Account = struct {
     ) PrepareResult {
         if (self.state.operation() != .persisting or
             (self.state.attemptKind() != .catalog and
-                self.state.attemptKind() != .activation))
+                self.state.attemptKind() != .source_resolution))
             return .{ .rejected = .invalid_state };
         var source_candidate = switch (completion.payload) {
             .source_candidate_ready => |*owned| owned.take(),
@@ -1274,7 +1273,7 @@ pub const Account = struct {
             return .{ .rejected = .generation_mismatch };
         }
 
-        if (self.state.attemptKind() == .activation) {
+        if (self.state.attemptKind() == .source_resolution) {
             if (input.source_generation != self.state.metask_source_generation or
                 !std.mem.eql(u8, self.state.pendingApiKeyId(), self.state.selected_api_key_id.view()) or
                 !std.mem.eql(u8, self.state.pendingModel(), self.state.selected_model.view()))
@@ -1303,7 +1302,7 @@ pub const Account = struct {
         completion.payload = dependencyFailure();
         return .{ .transition = .{
             .next = next,
-            .fact_kind = .execution_changed,
+            .fact_kind = .source_authority_changed,
             .attempt_id = completion.attempt_id,
             .effect = .{ .persist_source_preference = .{
                 .model = ModelId.init(input.target.model) catch unreachable,
@@ -1331,7 +1330,7 @@ pub const Account = struct {
         next.clearError();
         var result = transitionNoEffect(
             next,
-            .execution_changed,
+            .source_authority_changed,
             self.state.activeAttempt().?,
         );
         result.transition.catalog_intent = .promote_candidate;
@@ -1455,7 +1454,7 @@ pub const Account = struct {
                 .signed_out
             else
                 .authenticated,
-            .catalog, .catalog_refresh, .activation, .model_preference, .logout, .none => next.session_state,
+            .catalog, .catalog_refresh, .source_resolution, .model_preference, .logout, .none => next.session_state,
         };
         const authentication_invalid = self.state.attemptKind() == .refresh_token and
             (normalized_failure.error_code == .metask_unauthorized or
@@ -1482,7 +1481,7 @@ pub const Account = struct {
             self.state.activeAttempt().?,
         );
         result.transition.catalog_intent = if (self.state.attemptKind() == .catalog or
-            self.state.attemptKind() == .activation)
+            self.state.attemptKind() == .source_resolution)
             .discard_candidate
         else if (next.session_state == .signed_out)
             .clear_all
@@ -1765,7 +1764,7 @@ pub const TestSupport = if (builtin.is_test) struct {
         };
     }
 
-    pub fn installInitialExecutionPreparation(
+    pub fn installInitialSourcePreparation(
         account: *Account,
         api_key_id: []const u8,
         model_id: []const u8,
@@ -1862,7 +1861,7 @@ pub const WorkerCompletion = struct {
 
     pub fn deinit(self: *WorkerCompletion) void {
         switch (self.payload) {
-            .source_candidate_ready => |*execution| execution.deinit(),
+            .source_candidate_ready => |*candidate| candidate.deinit(),
             else => {},
         }
         self.payload = dependencyFailure();
@@ -2117,7 +2116,7 @@ test "explicit login accepts the newly verified identity" {
     try std.testing.expectEqualStrings("New User", account.view().display_name);
 }
 
-test "failed replacement before token commit preserves the current identity" {
+test "failed refresh before token commit preserves the current identity" {
     var account = Account{ .state = .{
         .session_state = .authenticated,
         .account_id = try .init("account-1"),
@@ -2245,7 +2244,7 @@ test "refresh failure matrix distinguishes retryable and invalid credentials" {
 test "manual key choice supersedes an in-flight automatic continuation" {
     const allocator = std.testing.allocator;
     var account = Account.initRestoring();
-    var restored_execution = try execution_contract.OwnedSourceCandidate.initOwned(
+    var restored_candidate = try execution_contract.OwnedSourceCandidate.initOwned(
         allocator,
         .metask,
         .anthropic_messages,
@@ -2255,12 +2254,12 @@ test "manual key choice supersedes an in-flight automatic continuation" {
         try allocator.dupe(u8, "secret"),
         "fixture-provider",
     );
-    defer restored_execution.deinit();
+    defer restored_candidate.deinit();
     var restored = try TestSupport.prepareReady(
         &account,
         try .init("account-1", "Metask User"),
         "key-old",
-        &restored_execution,
+        &restored_candidate,
     );
     var installed = restored.takeSourceCandidate().?;
     installed.deinit();
@@ -2327,10 +2326,10 @@ test "manual key choice supersedes an in-flight automatic continuation" {
     );
 }
 
-test "Metask activation rebuilds the committed execution without a preference write" {
+test "Metask source resolution rebuilds the committed candidate without a preference write" {
     const allocator = std.testing.allocator;
     var account = Account.initRestoring();
-    var restored_execution = try execution_contract.OwnedSourceCandidate.initOwned(
+    var restored_candidate = try execution_contract.OwnedSourceCandidate.initOwned(
         allocator,
         .metask,
         .anthropic_messages,
@@ -2344,18 +2343,18 @@ test "Metask activation rebuilds the committed execution without a preference wr
         &account,
         try .init("account-1", "Metask User"),
         "key-1",
-        &restored_execution,
+        &restored_candidate,
     );
     var installed = restored.takeSourceCandidate().?;
     installed.deinit();
     commitPrepared(&account, &restored);
 
-    var activation = switch (account.prepareCommand(.resolve_metask_source)) {
+    var resolution = switch (account.prepareCommand(.resolve_source_candidate)) {
         .transition => |value| value,
         else => return error.TestUnexpectedResult,
     };
-    try std.testing.expect(activation.takeEffect().? == .load_api_keys);
-    commitPrepared(&account, &activation);
+    try std.testing.expect(resolution.takeEffect().? == .load_api_keys);
+    commitPrepared(&account, &resolution);
     const attempt_id = account.activeAttempt().?;
 
     var keys_loaded: WorkerCompletion = .{
@@ -2422,7 +2421,7 @@ test "Metask activation rebuilds the committed execution without a preference wr
 test "empty model catalog parks back in choosing with the key list intact" {
     const allocator = std.testing.allocator;
     var account = Account.initRestoring();
-    var restored_execution = try execution_contract.OwnedSourceCandidate.initOwned(
+    var restored_candidate = try execution_contract.OwnedSourceCandidate.initOwned(
         allocator,
         .metask,
         .anthropic_messages,
@@ -2432,12 +2431,12 @@ test "empty model catalog parks back in choosing with the key list intact" {
         try allocator.dupe(u8, "secret"),
         "fixture-provider",
     );
-    defer restored_execution.deinit();
+    defer restored_candidate.deinit();
     var restored = try TestSupport.prepareReady(
         &account,
         try .init("account-1", "Metask User"),
         "key-old",
-        &restored_execution,
+        &restored_candidate,
     );
     var installed = restored.takeSourceCandidate().?;
     installed.deinit();
@@ -2488,7 +2487,7 @@ test "empty model catalog parks back in choosing with the key list intact" {
     try std.testing.expectEqual(contract.ErrorCode.no_models, view.error_code);
     try std.testing.expect(account.activeAttempt() != null);
     try std.testing.expect(view.can_cancel);
-    // The committed execution keeps working; nothing was torn down.
+    // The committed source authority remains unchanged.
     try std.testing.expectEqualStrings("key-old", view.selected_api_key_id);
     try std.testing.expectEqualStrings("model-old", view.selected_model);
     try std.testing.expectEqual(@as(u64, 9), account.sourceGeneration());
@@ -2607,7 +2606,7 @@ test "model catalog service failure parks back in choosing the same way" {
 test "failed reconfiguration preserves the committed selection" {
     const allocator = std.testing.allocator;
     var account = Account.initRestoring();
-    var restored_execution = try execution_contract.OwnedSourceCandidate.initOwned(
+    var restored_candidate = try execution_contract.OwnedSourceCandidate.initOwned(
         allocator,
         .metask,
         .anthropic_messages,
@@ -2617,12 +2616,12 @@ test "failed reconfiguration preserves the committed selection" {
         try allocator.dupe(u8, "secret"),
         "fixture-provider",
     );
-    defer restored_execution.deinit();
+    defer restored_candidate.deinit();
     var restored = try TestSupport.prepareReady(
         &account,
         try .init("account-1", "Metask User"),
         "key-old",
-        &restored_execution,
+        &restored_candidate,
     );
     var installed = restored.takeSourceCandidate().?;
     installed.deinit();
@@ -2723,7 +2722,7 @@ test "failed reconfiguration preserves the committed selection" {
     try std.testing.expectEqual(@as(u64, 0), account.sourceGeneration());
 }
 
-test "ready execution model selection updates the default without reconfiguration" {
+test "ready source model selection updates the default without changing authority" {
     var account: Account = .{ .state = .{
         .session_state = .authenticated,
         .source_authority = .ready,
@@ -2823,7 +2822,7 @@ test "shutdown invalidates active attempt and requires effect consumption" {
     );
 }
 
-test "shutdown revokes ready execution before publishing the terminal view" {
+test "shutdown revokes ready source authority before publishing the terminal view" {
     var account = Account{ .state = .{
         .session_state = .authenticated,
         .source_authority = .ready,
@@ -2870,7 +2869,7 @@ test "restore failure returns to sign-in without restart semantics" {
     );
 }
 
-test "third execution preference observation preserves old recovery identity" {
+test "third source preference observation preserves old recovery identity" {
     const allocator = std.testing.allocator;
     var account = Account{ .state = .{
         .session_state = .authenticated,
@@ -2921,7 +2920,7 @@ test "third execution preference observation preserves old recovery identity" {
     };
     _ = select_model.takeEffect();
     commitPrepared(&account, &select_model);
-    var execution = try execution_contract.OwnedSourceCandidate.initOwned(
+    var candidate = try execution_contract.OwnedSourceCandidate.initOwned(
         allocator,
         .metask,
         .anthropic_messages,
@@ -2933,7 +2932,7 @@ test "third execution preference observation preserves old recovery identity" {
     );
     var completion: WorkerCompletion = .{
         .attempt_id = account.activeAttempt().?,
-        .payload = .{ .source_candidate_ready = execution.take() },
+        .payload = .{ .source_candidate_ready = candidate.take() },
     };
     defer completion.deinit();
     var staged = switch (account.prepareCompletion(&completion)) {
@@ -2941,8 +2940,8 @@ test "third execution preference observation preserves old recovery identity" {
         else => return error.TestUnexpectedResult,
     };
     _ = staged.takeEffect();
-    var staged_execution = staged.takeSourceCandidate().?;
-    staged_execution.deinit();
+    var staged_candidate = staged.takeSourceCandidate().?;
+    staged_candidate.deinit();
     commitPrepared(&account, &staged);
     var unknown = switch (account.prepareSourcePreferencePersistenceInvalid()) {
         .transition => |value| value,
@@ -2980,7 +2979,7 @@ test "third execution preference observation preserves old recovery identity" {
         ),
         else => return error.TestUnexpectedResult,
     }
-    switch (account.prepareCommand(.resolve_metask_source)) {
+    switch (account.prepareCommand(.resolve_source_candidate)) {
         .rejected => |code| try std.testing.expectEqual(
             contract.ErrorCode.invalid_state,
             code,
@@ -3166,8 +3165,8 @@ test "login commits account-only before a separate catalog generation" {
         .transition => |value| value,
         else => return error.TestUnexpectedResult,
     };
-    var execution = ready_transition.takeSourceCandidate().?;
-    defer execution.deinit();
+    var candidate = ready_transition.takeSourceCandidate().?;
+    defer candidate.deinit();
     _ = ready_transition.takeEffect();
     ready_transition.commit(&account);
     ready_transition.deinit();

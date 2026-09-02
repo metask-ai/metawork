@@ -1,6 +1,7 @@
 //! Product Account OAuth policy and value types.
 const std = @import("std");
 const contract = @import("metawork_account_contract");
+const mechanics = @import("oauth_mechanics");
 
 pub const authority = "https://napi.metask-ai.com";
 pub const authorize_url = authority ++ "/oauth/authorize";
@@ -17,6 +18,8 @@ pub const Limits = struct {
     pub const challenge_bytes: usize = 43;
     pub const authorization_url_bytes: usize = 4096;
     pub const callback_target_bytes: usize = 8192;
+    pub const callback_error_bytes: usize = 256;
+    pub const callback_error_description_bytes: usize = 4096;
     pub const token_body_bytes: usize = 16 * 1024;
     pub const current_user_body_bytes: usize = 16 * 1024;
     pub const scope_bytes: usize = 256;
@@ -73,65 +76,10 @@ pub const Secret = struct {
     }
 };
 
-pub const AttemptMaterial = struct {
-    verifier: [Limits.verifier_bytes]u8,
-    state: [Limits.state_bytes]u8,
-    challenge: [Limits.challenge_bytes]u8,
-
-    pub fn generate(
-        io: std.Io,
-        output: *AttemptMaterial,
-    ) !void {
-        var verifier_seed: [32]u8 = undefined;
-        var state_seed: [32]u8 = undefined;
-        defer std.crypto.secureZero(u8, &verifier_seed);
-        defer std.crypto.secureZero(u8, &state_seed);
-        try std.Io.randomSecure(io, &verifier_seed);
-        try std.Io.randomSecure(io, &state_seed);
-        fillFromSeeds(output, &verifier_seed, &state_seed);
-    }
-
-    pub fn fromSeeds(verifier_seed: [32]u8, state_seed: [32]u8) AttemptMaterial {
-        var result: AttemptMaterial = undefined;
-        fillFromSeeds(&result, &verifier_seed, &state_seed);
-        return result;
-    }
-
-    fn fillFromSeeds(
-        result: *AttemptMaterial,
-        verifier_seed: *const [32]u8,
-        state_seed: *const [32]u8,
-    ) void {
-        _ = std.base64.url_safe_no_pad.Encoder.encode(
-            &result.verifier,
-            verifier_seed,
-        );
-        _ = std.base64.url_safe_no_pad.Encoder.encode(
-            &result.state,
-            state_seed,
-        );
-        var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
-        defer std.crypto.secureZero(u8, &digest);
-        std.crypto.hash.sha2.Sha256.hash(&result.verifier, &digest, .{});
-        _ = std.base64.url_safe_no_pad.Encoder.encode(
-            &result.challenge,
-            &digest,
-        );
-    }
-
-    pub fn deinit(self: *AttemptMaterial) void {
-        std.crypto.secureZero(u8, &self.verifier);
-        std.crypto.secureZero(u8, &self.state);
-        std.crypto.secureZero(u8, &self.challenge);
-    }
-};
+pub const AttemptMaterial = mechanics.AttemptMaterial;
 
 pub fn writeRedirectUri(writer: *std.Io.Writer, port: u16) !void {
-    if (port == 0) return error.InvalidCallback;
-    try writer.print(
-        "http://127.0.0.1:{d}" ++ callback_path,
-        .{port},
-    );
+    try mechanics.writeLoopbackRedirectUri(writer, port, callback_path);
 }
 
 pub fn buildAuthorizeUrl(
@@ -199,101 +147,39 @@ pub const CallbackValidation = struct {
     issuer_required: bool = false,
 };
 
+const CallbackMechanics = mechanics.CallbackParser(.{
+    .secret_bytes = Limits.secret_bytes,
+    .state_bytes = Limits.state_bytes,
+    .target_bytes = Limits.callback_target_bytes,
+    .issuer_bytes = Limits.authorization_url_bytes,
+    .error_bytes = Limits.callback_error_bytes,
+    .error_description_bytes = Limits.callback_error_description_bytes,
+});
+
 pub fn parseCallbackTargetValidated(
     allocator: std.mem.Allocator,
     target: []const u8,
     expected_state: []const u8,
     validation: CallbackValidation,
 ) (ProtocolError || std.mem.Allocator.Error)!Callback {
-    if (validation.issuer_required and validation.expected_issuer == null)
-        return error.InvalidCallback;
-    if (target.len == 0 or target.len > Limits.callback_target_bytes)
-        return error.InvalidCallback;
-    const query_index = std.mem.indexOfScalar(u8, target, '?') orelse
-        return error.InvalidCallback;
-    if (!std.mem.eql(u8, target[0..query_index], callback_path))
-        return error.InvalidCallback;
-    const query = target[query_index + 1 ..];
-    if (query.len == 0 or std.mem.indexOfScalar(u8, query, '#') != null)
-        return error.InvalidCallback;
-
-    var code_storage: [Limits.secret_bytes]u8 = undefined;
-    defer std.crypto.secureZero(u8, &code_storage);
-    var state_storage: [Limits.state_bytes]u8 = undefined;
-    defer std.crypto.secureZero(u8, &state_storage);
-    var issuer_storage: [Limits.authorization_url_bytes]u8 = undefined;
-    defer std.crypto.secureZero(u8, &issuer_storage);
-    var error_seen = false;
-    var error_description_seen = false;
-    var code: ?[]const u8 = null;
-    var state_value: ?[]const u8 = null;
-    var issuer_value: ?[]const u8 = null;
-
-    var pairs = std.mem.splitScalar(u8, query, '&');
-    while (pairs.next()) |pair| {
-        if (pair.len == 0) return error.InvalidCallback;
-        const equals = std.mem.indexOfScalar(u8, pair, '=') orelse
-            return error.InvalidCallback;
-        const key = pair[0..equals];
-        const value = pair[equals + 1 ..];
-        if (std.mem.eql(u8, key, "code")) {
-            if (code != null) return error.InvalidCallback;
-            code = try percentDecode(value, &code_storage);
-        } else if (std.mem.eql(u8, key, "state")) {
-            if (state_value != null) return error.InvalidCallback;
-            state_value = try percentDecode(value, &state_storage);
-        } else if (std.mem.eql(u8, key, "iss")) {
-            if (validation.expected_issuer != null) {
-                if (issuer_value != null) return error.InvalidCallback;
-                issuer_value = try percentDecode(value, &issuer_storage);
-            }
-        } else if (std.mem.eql(u8, key, "error")) {
-            if (error_seen) return error.InvalidCallback;
-            var error_storage: [256]u8 = undefined;
-            defer std.crypto.secureZero(u8, &error_storage);
-            const decoded = try percentDecode(value, &error_storage);
-            if (decoded.len == 0) return error.InvalidCallback;
-            error_seen = true;
-        } else if (std.mem.eql(u8, key, "error_description")) {
-            if (error_description_seen) return error.InvalidCallback;
-            // The description is deliberately ignored and never logged.
-            error_description_seen = true;
-        } else {
-            return error.InvalidCallback;
-        }
-    }
-
-    const actual_state = state_value orelse return error.StateMismatch;
-    if (expected_state.len != Limits.state_bytes or
-        actual_state.len != Limits.state_bytes)
-        return error.StateMismatch;
-    if (!std.crypto.timing_safe.eql(
-        [Limits.state_bytes]u8,
-        paddedState(expected_state),
-        paddedState(actual_state),
-    )) return error.StateMismatch;
-    if (issuer_value) |actual_issuer| {
-        if (!std.mem.eql(u8, validation.expected_issuer.?, actual_issuer))
-            return error.InvalidCallback;
-    } else if (validation.issuer_required) return error.InvalidCallback;
-    if (error_seen) {
-        if (code != null) return error.InvalidCallback;
-        return .rejected;
-    }
-    if (error_description_seen) return error.InvalidCallback;
-    return .{
-        .code = try Secret.init(
-            allocator,
-            code orelse return error.InvalidCallback,
-        ),
+    var parsed = try CallbackMechanics.parse(
+        allocator,
+        target,
+        expected_state,
+        .{
+            .callback_path = callback_path,
+            .expected_issuer = validation.expected_issuer,
+            .issuer_required = validation.issuer_required,
+            // Metask does not request or interpret RFC 9207 `iss`, but it is
+            // a known additive response parameter under the Account policy.
+            .allow_unvalidated_issuer = true,
+        },
+    );
+    defer parsed.deinit();
+    return switch (parsed) {
+        .code => |code| .{ .code = try Secret.init(allocator, code.view()) },
+        .rejected => .rejected,
     };
-}
-
-fn paddedState(value: []const u8) [Limits.state_bytes]u8 {
-    var padded: [Limits.state_bytes]u8 = @splat(0);
-    const len = @min(value.len, padded.len);
-    @memcpy(padded[0..len], value[0..len]);
-    return padded;
 }
 
 pub const TokenSet = struct {
@@ -545,40 +431,6 @@ fn percentEncode(writer: *std.Io.Writer, input: []const u8) !void {
     }
 }
 
-fn percentDecode(input: []const u8, output: []u8) ProtocolError![]const u8 {
-    var read_index: usize = 0;
-    var write_index: usize = 0;
-    while (read_index < input.len) {
-        if (write_index == output.len) return error.FieldTooLarge;
-        const byte = input[read_index];
-        if (byte == '%') {
-            if (read_index + 2 >= input.len) return error.InvalidEncoding;
-            const high = hexValue(input[read_index + 1]) orelse
-                return error.InvalidEncoding;
-            const low = hexValue(input[read_index + 2]) orelse
-                return error.InvalidEncoding;
-            output[write_index] = (high << 4) | low;
-            read_index += 3;
-        } else {
-            output[write_index] = if (byte == '+') ' ' else byte;
-            read_index += 1;
-        }
-        write_index += 1;
-    }
-    if (!std.unicode.utf8ValidateSlice(output[0..write_index]))
-        return error.InvalidEncoding;
-    return output[0..write_index];
-}
-
-fn hexValue(byte: u8) ?u8 {
-    return switch (byte) {
-        '0'...'9' => byte - '0',
-        'a'...'f' => byte - 'a' + 10,
-        'A'...'F' => byte - 'A' + 10,
-        else => null,
-    };
-}
-
 test "PKCE uses RFC 7636 S256 shape and authorize URL is fixed origin" {
     const material = AttemptMaterial.fromSeeds(
         @splat(0x11),
@@ -682,14 +534,14 @@ test "callback parser validates RFC 9207 issuer without normalization" {
             .{ .expected_issuer = issuer },
         ),
     );
-    var legacy = try parseCallbackTarget(
+    var callback_without_issuer_policy = try parseCallbackTarget(
         std.testing.allocator,
         callback_path ++
             "?code=secret-code&state=" ++ expected_state ++
             "&iss=https%3A%2F%2Fauth.example.test%2Ftenant",
         expected_state,
     );
-    legacy.deinit();
+    callback_without_issuer_policy.deinit();
 }
 
 test "token decoder validates consumed fields and tolerates additive metadata" {

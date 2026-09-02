@@ -1832,7 +1832,7 @@ const TestScheduleSupport = struct {
     }
 };
 
-test "legacy Schedule data leaves Account ready and Execution unavailable as a valid snapshot" {
+test "retired Schedule data leaves Account ready and Execution unavailable as a valid snapshot" {
     fake_core.reset();
     const runtime = try createTestComposition(.{
         .worker_count = 1,
@@ -1844,10 +1844,10 @@ test "legacy Schedule data leaves Account ready and Execution unavailable as a v
         deinitTestComposition(runtime);
     }
     var schedule_support: TestScheduleSupport = .{};
-    const legacy_schedule =
+    const retired_schedule =
         "{\"schema_version\":1,\"next_id\":2,\"items\":[{\"id\":1,\"epoch\":1,\"title\":\"retired provider\",\"execution_generation\":1,\"execution_provider\":\"openai\",\"execution_model\":\"gpt-test\",\"permission_profile\":\"approval_required\",\"input\":{\"kind\":\"text\",\"text\":\"inspect\"},\"recurrence\":{\"kind\":\"once\",\"at_unix_seconds\":2},\"enabled\":true,\"health\":\"ready\",\"failure_reason\":null,\"next_run_at_unix_seconds\":2,\"occurrences\":[]}]}";
     var configuration = productControlConfiguration();
-    configuration.schedule_persistence = schedule_support.persistenceRestored(legacy_schedule);
+    configuration.schedule_persistence = schedule_support.persistenceRestored(retired_schedule);
     var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
@@ -1876,7 +1876,7 @@ test "legacy Schedule data leaves Account ready and Execution unavailable as a v
     }};
     try workbench.beginExecutionReplacement();
     workbench.commitAccountFactNoFail(.{
-        .kind = .execution_changed,
+        .kind = .source_authority_changed,
         .view = .{
             .state = .authenticated,
             .catalog_state = .ready,

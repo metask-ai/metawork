@@ -656,7 +656,10 @@ test("Product Control is the only composition owner identity", () => {
   );
   assert.match(accountProjection, /pub const Projection = struct/);
   const authorityStart = accountProjection.indexOf("pub fn authorityMatches");
-  assert.ok(authorityStart >= 0, "Account authority projection must be explicit");
+  assert.ok(
+    authorityStart >= 0,
+    "Account authority projection must be explicit",
+  );
   const authorityEnd = accountProjection.indexOf("\n};", authorityStart);
   const authorityMatch = accountProjection.slice(authorityStart, authorityEnd);
   assert.match(authorityMatch, /authority_protocol/);
@@ -784,6 +787,11 @@ test("Product Schedule owns its aggregate state and persistence", () => {
   assert.match(scheduleRuntime, /@import\("product_schedule_view"\)/);
   assert.match(scheduleView, /@import\("product_schedule_state"\)/);
   assert.match(persistence, /@import\("product_schedule_state"\)/);
+  assert.match(persistence, /deleteFile\(self\.io, file_name\)/);
+  assert.doesNotMatch(
+    persistence,
+    /quarantine|\.scheduled-tasks\.recovery|\.bak/,
+  );
   assert.match(stores, /@import\("product_schedule_persistence"\)/);
   assert.doesNotMatch(
     control,
@@ -1017,6 +1025,8 @@ test("Product Control owns post-Account source reconciliation", () => {
   const accountCoordinator = read("src/app/account_coordinator.zig");
   const accountRuntime = read("src/product/account/runtime.zig");
   const accountState = read("src/product/account/state.zig");
+  const accountContract = read("src/product/account/contract.zig");
+  const accountCatalog = read("src/product/account/catalog.zig");
 
   assert.match(ports, /pub const AccountCommitSink = struct/);
   assert.match(ports, /OwnedSourceCandidateTransfer/);
@@ -1071,10 +1081,11 @@ test("Product Control owns post-Account source reconciliation", () => {
   );
   assert.doesNotMatch(accountState, /prepareCommittedPhaseFailure/);
   assert.doesNotMatch(accountState, /begin_default/);
-  assert.match(accountState, /AttemptKind = enum \{[\s\S]*activation/);
+  assert.match(accountState, /AttemptKind = enum \{[\s\S]*source_resolution/);
+  assert.doesNotMatch(accountState, /activation/);
   assert.doesNotMatch(
-    accountState,
-    /ExecutionIntent|ReplacementIntent|execution_intent|replacement_intent/,
+    [accountContract, accountCatalog, accountRuntime, accountState].join("\n"),
+    /ExecutionIntent|ReplacementIntent|execution_intent|replacement_intent|ExecutionTargetInvalid|ownsExecutionSelection|resolve_metask_source|dependency_contract_invalid|execution_target_invalid|session_in_use|execution_in_use/,
   );
 });
 
@@ -2012,7 +2023,7 @@ test("Account owns platform ports while Application binds Native SDK effects", (
   );
 });
 
-test("Account owns OAuth callback policy while Application owns loopback sockets", () => {
+test("OAuth mechanics are neutral while callers own policy and Application owns sockets", () => {
   const accountSource = [
     "src/product/account.zig",
     ...zigFiles("src/product/account/"),
@@ -2023,12 +2034,15 @@ test("Account owns OAuth callback policy while Application owns loopback sockets
   const transport = read("src/app/oauth_loopback_transport.zig");
   const loginAttempt = read("src/product/account/login_attempt.zig");
   const mcpOauth = read("src/app/mcp_oauth.zig");
+  const oauthMechanics = read("src/oauth/mechanics.zig");
+  const oauthLoopback = read("src/oauth/loopback.zig");
+  const build = read("build.zig");
 
   assert.doesNotMatch(
     accountSource,
     /std\.Io\.net\.Server|\.listen\(|\.accept\(|std\.http\.Server/,
   );
-  assert.match(policy, /pub const RequestSink = struct/);
+  assert.match(policy, /pub const RequestSink = mechanics\.RequestSink/);
   assert.match(policy, /pub const CallbackPolicy = struct/);
   assert.match(policy, /oauth\.parseCallbackTargetValidated/);
   assert.match(transport, /listener: std\.Io\.net\.Server/);
@@ -2036,6 +2050,21 @@ test("Account owns OAuth callback policy while Application owns loopback sockets
   assert.match(transport, /sink\.handle/);
   assert.match(loginAttempt, /loopback_endpoint: loopback\.Endpoint/);
   assert.match(mcpOauth, /oauth_loopback_transport\.Server/);
+  assert.match(oauthMechanics, /pub const AttemptMaterial = struct/);
+  assert.match(oauthMechanics, /std\.crypto\.timing_safe\.eql/);
+  assert.match(oauthLoopback, /pub const RequestSink = struct/);
+  assert.match(mcpOauth, /const CallbackPolicy = struct/);
+  assert.match(mcpOauth, /const callback_path = "\/auth\/callback"/);
+  assert.doesNotMatch(
+    [mcpOauth, transport].join("\n"),
+    /@import\("account_(?:oauth|loopback)"\)/,
+  );
+  assert.doesNotMatch(
+    build,
+    /mcp_oauth\.addImport\("account_(?:oauth|loopback)"/,
+  );
+  assert.match(build, /mcp_oauth\.addImport\("oauth_mechanics"/);
+  assert.match(build, /mcp_oauth\.addImport\("oauth_loopback"/);
 });
 
 test("Storage owns SQLite without entering the Product or Application graph", () => {

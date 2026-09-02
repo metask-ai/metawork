@@ -1,6 +1,5 @@
 const std = @import("std");
-const policy = @import("account_loopback");
-const oauth = @import("account_oauth");
+const loopback = @import("oauth_loopback");
 
 const request_head_bytes: usize = 16 * 1024;
 const response_bytes: usize = 4096;
@@ -15,7 +14,7 @@ pub const Server = struct {
     stop_requested: std.atomic.Value(u32) = .init(0),
     listener_closed: std.atomic.Value(bool) = .init(false),
 
-    pub fn init(io: std.Io) policy.ServerError!Server {
+    pub fn init(io: std.Io) loopback.ServerError!Server {
         const address: std.Io.net.IpAddress = .{
             .ip4 = .loopback(0),
         };
@@ -42,9 +41,9 @@ pub const Server = struct {
 
     pub fn wait(
         self: *Server,
-        sink: policy.RequestSink,
+        sink: loopback.RequestSink,
         deadline: std.Io.Clock.Timestamp,
-    ) policy.ServerError!void {
+    ) loopback.ServerError!void {
         errdefer self.finish();
         while (true) {
             if (self.isStopRequested()) return error.Cancelled;
@@ -130,7 +129,7 @@ pub const Server = struct {
     fn acceptUntil(
         self: *Server,
         deadline: std.Io.Clock.Timestamp,
-    ) policy.ServerError!std.Io.net.Stream {
+    ) loopback.ServerError!std.Io.net.Stream {
         var outcome_storage: [3]AcceptOutcome = undefined;
         var selection = std.Io.Select(AcceptOutcome).init(
             self.io,
@@ -215,7 +214,7 @@ pub const Server = struct {
         self: *Server,
         http_server: *std.http.Server,
         deadline: std.Io.Clock.Timestamp,
-    ) policy.ServerError!std.http.Server.Request {
+    ) loopback.ServerError!std.http.Server.Request {
         var outcome_storage: [3]ReceiveOutcome = undefined;
         var selection = std.Io.Select(ReceiveOutcome).init(
             self.io,
@@ -280,7 +279,7 @@ pub const Adapter = struct {
         self.* = undefined;
     }
 
-    pub fn endpoint(self: *Adapter) policy.Endpoint {
+    pub fn endpoint(self: *Adapter) loopback.Endpoint {
         return .{
             .context = self,
             .open_fn = open,
@@ -290,7 +289,7 @@ pub const Adapter = struct {
         };
     }
 
-    fn open(context: *anyopaque) policy.ServerError!u16 {
+    fn open(context: *anyopaque) loopback.ServerError!u16 {
         const self: *Adapter = @ptrCast(@alignCast(context));
         if (self.server != null) return error.BindFailed;
         self.server = try Server.init(self.io);
@@ -299,9 +298,9 @@ pub const Adapter = struct {
 
     fn waitForCallback(
         context: *anyopaque,
-        sink: policy.RequestSink,
+        sink: loopback.RequestSink,
         deadline: std.Io.Clock.Timestamp,
-    ) policy.ServerError!void {
+    ) loopback.ServerError!void {
         const self: *Adapter = @ptrCast(@alignCast(context));
         const server = if (self.server) |*value| value else return error.BindFailed;
         return server.wait(sink, deadline);
@@ -321,7 +320,7 @@ pub const Adapter = struct {
 
 fn respond(
     request: *std.http.Server.Request,
-    response: policy.Response,
+    response: loopback.Response,
 ) !void {
     try request.respond(response.body, .{
         .status = switch (response.status) {
@@ -340,9 +339,9 @@ fn respond(
 
 const WaitContext = struct {
     server: *Server,
-    sink: policy.RequestSink,
+    sink: loopback.RequestSink,
     deadline: std.Io.Clock.Timestamp,
-    failure: ?policy.ServerError = null,
+    failure: ?loopback.ServerError = null,
 
     fn run(self: *WaitContext) void {
         self.server.wait(self.sink, self.deadline) catch |err| {
@@ -351,16 +350,53 @@ const WaitContext = struct {
     }
 };
 
-test "Application loopback pump and Account callback policy compose" {
+const TestPolicy = struct {
+    completed: bool = false,
+    invalid_count: usize = 0,
+
+    fn sink(self: *TestPolicy) loopback.RequestSink {
+        return .{
+            .context = self,
+            .invalid_fn = invalid,
+            .handle_fn = handle,
+        };
+    }
+
+    fn invalid(context: *anyopaque) loopback.ServerError!void {
+        const self: *TestPolicy = @ptrCast(@alignCast(context));
+        try self.recordInvalid();
+    }
+
+    fn recordInvalid(self: *TestPolicy) loopback.ServerError!void {
+        self.invalid_count += 1;
+        if (self.invalid_count >= 4) return error.TooManyInvalidRequests;
+    }
+
+    fn handle(
+        context: *anyopaque,
+        request: loopback.Request,
+    ) loopback.ServerError!loopback.Response {
+        const self: *TestPolicy = @ptrCast(@alignCast(context));
+        if (request.method != .get or request.has_content_length or
+            request.has_transfer_encoding or
+            !std.mem.eql(u8, request.target, "/callback?accepted=1"))
+        {
+            try self.recordInvalid();
+            return .{
+                .status = .bad_request,
+                .body = "invalid",
+                .complete = false,
+            };
+        }
+        self.completed = true;
+        return .{ .status = .ok, .body = "complete", .complete = true };
+    }
+};
+
+test "Application loopback pump composes with a caller-owned callback policy" {
     var server = try Server.init(std.testing.io);
     defer server.deinit();
-    const expected_state = "0123456789012345678901234567890123456789012";
-    var callback_policy = policy.CallbackPolicy.init(
-        std.testing.allocator,
-        expected_state,
-        .{},
-    );
-    defer callback_policy.deinit();
+    var callback_policy: TestPolicy = .{};
     var context: WaitContext = .{
         .server = &server,
         .sink = callback_policy.sink(),
@@ -380,28 +416,20 @@ test "Application loopback pump and Account callback policy compose" {
     var write_buffer: [2048]u8 = undefined;
     var writer = stream.writer(std.testing.io, &write_buffer);
     try writer.interface.print(
-        "GET " ++ oauth.callback_path ++
-            "?code=authorization-code&state={s} HTTP/1.1\r\n" ++
+        "GET /callback?accepted=1 HTTP/1.1\r\n" ++
             "Host: 127.0.0.1:{d}\r\nConnection: close\r\n\r\n",
-        .{ expected_state, server.port() },
+        .{server.port()},
     );
     try writer.interface.flush();
     thread.join();
-    try std.testing.expectEqual(@as(?policy.ServerError, null), context.failure);
-    var callback = callback_policy.take() orelse return error.TestUnexpectedResult;
-    defer callback.deinit();
-    try std.testing.expectEqualStrings("authorization-code", callback.code.view());
+    try std.testing.expectEqual(@as(?loopback.ServerError, null), context.failure);
+    try std.testing.expect(callback_policy.completed);
 }
 
 test "cancel closes the Application listener and wakes blocked accept" {
     var server = try Server.init(std.testing.io);
     defer server.deinit();
-    var callback_policy = policy.CallbackPolicy.init(
-        std.testing.allocator,
-        "0123456789012345678901234567890123456789012",
-        .{},
-    );
-    defer callback_policy.deinit();
+    var callback_policy: TestPolicy = .{};
     var context: WaitContext = .{
         .server = &server,
         .sink = callback_policy.sink(),
@@ -419,12 +447,7 @@ test "cancel closes the Application listener and wakes blocked accept" {
 test "deadline closes the Application listener" {
     var server = try Server.init(std.testing.io);
     defer server.deinit();
-    var callback_policy = policy.CallbackPolicy.init(
-        std.testing.allocator,
-        "0123456789012345678901234567890123456789012",
-        .{},
-    );
-    defer callback_policy.deinit();
+    var callback_policy: TestPolicy = .{};
     try std.testing.expectError(
         error.DeadlineExceeded,
         server.wait(
@@ -440,12 +463,7 @@ test "deadline closes the Application listener" {
 test "cancel interrupts an accepted partial callback request" {
     var server = try Server.init(std.testing.io);
     defer server.deinit();
-    var callback_policy = policy.CallbackPolicy.init(
-        std.testing.allocator,
-        "0123456789012345678901234567890123456789012",
-        .{},
-    );
-    defer callback_policy.deinit();
+    var callback_policy: TestPolicy = .{};
     var context: WaitContext = .{
         .server = &server,
         .sink = callback_policy.sink(),
@@ -473,12 +491,7 @@ test "cancel interrupts an accepted partial callback request" {
 test "deadline interrupts an accepted partial callback request" {
     var server = try Server.init(std.testing.io);
     defer server.deinit();
-    var callback_policy = policy.CallbackPolicy.init(
-        std.testing.allocator,
-        "0123456789012345678901234567890123456789012",
-        .{},
-    );
-    defer callback_policy.deinit();
+    var callback_policy: TestPolicy = .{};
     var context: WaitContext = .{
         .server = &server,
         .sink = callback_policy.sink(),
