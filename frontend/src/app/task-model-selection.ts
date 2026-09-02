@@ -1,6 +1,6 @@
 import type {
-  ExecutionView,
   ModelsView,
+  NewTaskAdmissionView,
   TaskView,
 } from "../bridge/contracts.ts";
 
@@ -16,7 +16,7 @@ export type TaskModelSelectionPolicy = {
  */
 export function taskModelSelectionPolicy(
   models: ModelsView,
-  execution: ExecutionView,
+  admission: NewTaskAdmissionView,
   task: TaskView | null,
 ): TaskModelSelectionPolicy {
   if (task === null)
@@ -30,10 +30,11 @@ export function taskModelSelectionPolicy(
     (candidate) => candidate.id === metask.selectedApiKeyId,
   );
   const authorityExact =
-    execution.taskCreationAvailable &&
-    execution.activeSource === "metask" &&
-    execution.activeGeneration !== "0" &&
-    task.binding.executionGeneration === execution.activeGeneration &&
+    admission.available &&
+    admission.activeModelRef?.sourceId === models.metaskSelection?.sourceId &&
+    admission.activeGeneration !== "0" &&
+    admission.activeSelectionRevision === models.selectionRevision &&
+    task.binding.executionGeneration === admission.activeGeneration &&
     selectedApi?.protocol === task.binding.protocol;
 
   return {

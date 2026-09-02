@@ -6,7 +6,7 @@ import {
   type ExecutionCommandResult,
   type AccountView,
   type ModelsView,
-  type ExecutionView,
+  type NewTaskAdmissionView,
   type ModelMetadata,
   type ModelConnectionCredentialStatus,
   type Protocol,
@@ -224,9 +224,8 @@ const protocols = [
   "openai_chat_completions",
   "gemini_native",
 ] as const;
-const executionSources = ["metask", "model_connection"] as const;
-const executionStates = ["unavailable", "ready", "replacing"] as const;
-const executionErrorCodes = [
+const newTaskAdmissionStates = ["unavailable", "ready", "replacing"] as const;
+const newTaskAdmissionReasons = [
   "none",
   "model_connection_persistence_unavailable",
   "credential_unavailable",
@@ -1291,56 +1290,52 @@ function decodeModels(value: unknown, path: string): ModelsView {
   };
 }
 
-function decodeExecution(value: unknown, path: string): ExecutionView {
+function decodeNewTaskAdmission(
+  value: unknown,
+  path: string,
+): NewTaskAdmissionView {
   const item = object(value, path, [
-    "state",
-    "defaultSource",
-    "activeSource",
+    "available",
+    "reason",
+    "activeModelRef",
     "activeGeneration",
-    "taskCreationAvailable",
-    "errorCode",
+    "activeSelectionRevision",
+    "state",
   ]);
 
-  const state = enumValue(item.state, `${path}.state`, executionStates);
-  const defaultSource = nullableEnum(
-    item.defaultSource,
-    `${path}.defaultSource`,
-    executionSources,
-  ) as ExecutionView["defaultSource"];
-  const activeSource = nullableEnum(
-    item.activeSource,
-    `${path}.activeSource`,
-    executionSources,
-  ) as ExecutionView["activeSource"];
+  const state = enumValue(item.state, `${path}.state`, newTaskAdmissionStates);
+  const activeModelRef = decodeModelRef(
+    item.activeModelRef,
+    `${path}.activeModelRef`,
+  );
   const activeGeneration = wireId(
     item.activeGeneration,
     `${path}.activeGeneration`,
   );
-  const taskCreationAvailable = booleanValue(
-    item.taskCreationAvailable,
-    `${path}.taskCreationAvailable`,
+  const activeSelectionRevision = wireId(
+    item.activeSelectionRevision,
+    `${path}.activeSelectionRevision`,
   );
-  if ((activeSource === null) !== (activeGeneration === "0"))
-    fail(path, "active source and generation must be present together");
-  if (state === "unavailable" && activeSource !== null)
-    fail(path, "an unavailable execution cannot publish an active source");
-  if (state === "ready" && activeSource === null)
-    fail(path, "a ready execution requires an active source");
-  if (state === "replacing" && taskCreationAvailable)
-    fail(path, "a replacing execution cannot admit new Tasks");
-  if (taskCreationAvailable && state !== "ready")
-    fail(path, "Task creation requires a ready execution");
+  const available = booleanValue(item.available, `${path}.available`);
+  if ((activeModelRef === null) !== (activeGeneration === "0"))
+    fail(path, "active model and generation must be present together");
+  if (activeModelRef === null && activeSelectionRevision !== "0")
+    fail(path, "an absent active model cannot publish a selection revision");
+  if (state === "unavailable" && activeModelRef !== null)
+    fail(path, "an unavailable admission cannot publish an active model");
+  if (state === "ready" && activeModelRef === null)
+    fail(path, "a ready admission requires an active model");
+  if (state === "replacing" && available)
+    fail(path, "a replacing admission cannot admit new Tasks");
+  if (available && state !== "ready")
+    fail(path, "Task admission requires ready installed authority");
   return {
-    state,
-    defaultSource,
-    activeSource,
+    available,
+    reason: enumValue(item.reason, `${path}.reason`, newTaskAdmissionReasons),
+    activeModelRef,
     activeGeneration,
-    taskCreationAvailable,
-    errorCode: enumValue(
-      item.errorCode,
-      `${path}.errorCode`,
-      executionErrorCodes,
-    ),
+    activeSelectionRevision,
+    state,
   };
 }
 
@@ -3076,7 +3071,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     "permissions",
     "account",
     "models",
-    "execution",
+    "newTaskAdmission",
     "skillCatalog",
     "skillManagement",
     "mcp",
@@ -3384,7 +3379,10 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     permissions,
     account: decodeAccount(root.account, "$.account"),
     models: decodeModels(root.models, "$.models"),
-    execution: decodeExecution(root.execution, "$.execution"),
+    newTaskAdmission: decodeNewTaskAdmission(
+      root.newTaskAdmission,
+      "$.newTaskAdmission",
+    ),
     skillCatalog: decodeSkillCatalog(root.skillCatalog, "$.skillCatalog"),
     skillManagement: decodeSkillManagement(
       root.skillManagement,

@@ -29,15 +29,13 @@ const account = {
   safeDiagnostic: "",
   catalogGeneration: "0",
 };
-const execution = {
-  state: "unavailable",
-  defaultSource: null,
-  activeSource: null,
+const newTaskAdmission = {
+  available: false,
+  reason: "none",
+  activeModelRef: null,
   activeGeneration: "0",
-  taskCreationAvailable: false,
-  selectedModelConnectionId: "",
-  modelConnections: [],
-  errorCode: "none",
+  activeSelectionRevision: "0",
+  state: "unavailable",
 };
 
 function pending(identity) {
@@ -93,7 +91,7 @@ function snapshot(tasks) {
       automaticWorkspaces: false,
     },
     account,
-    execution,
+    newTaskAdmission,
     workspaces: [
       {
         id: "1",

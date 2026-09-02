@@ -622,34 +622,6 @@ pub const Registry = struct {
         return desired;
     }
 
-    pub fn executionBinding(
-        self: *const Registry,
-        selection: contract.ModelConnectionSelectionCommand,
-        model_id: []const u8,
-    ) Error!DefaultBinding {
-        const index = self.findIndex(selection.connection_id) orelse
-            return error.ConnectionNotFound;
-        const connection = self.connections.items[index];
-        if (connection.connection_revision != selection.expected_connection_generation)
-            return error.GenerationMismatch;
-        if (connection.state != .ready or connection.credential_status != .ready or
-            !connection.enabled)
-            return error.InvalidConnection;
-        var matches: usize = 0;
-        for (connection.models.items) |model| {
-            if (std.mem.eql(u8, model.id, model_id)) matches += 1;
-        }
-        if (matches != 1) return error.ModelNotFound;
-        return .{
-            .connection_id = connection.id,
-            .model_id = model_id,
-            .protocol = connection.protocol,
-            .normalized_base_url = connection.normalized_base_url,
-            .connection_revision = connection.connection_revision,
-            .source_generation = connection.source_generation,
-        };
-    }
-
     pub fn probeBinding(
         self: *const Registry,
         selection: contract.ModelConnectionSelectionCommand,

@@ -9,11 +9,9 @@ export type ModelsCatalogState =
   | "failed"
   | "unavailable";
 
-export type ExecutionSource = "metask" | "model_connection";
+export type NewTaskAdmissionState = "unavailable" | "ready" | "replacing";
 
-export type ExecutionState = "unavailable" | "ready" | "replacing";
-
-export type ExecutionErrorCode =
+export type NewTaskAdmissionReason =
   | "none"
   | "model_connection_persistence_unavailable"
   | "credential_unavailable"
@@ -192,13 +190,13 @@ export type ModelsView = {
   connections: ModelConnectionView[];
 };
 
-export type ExecutionView = {
-  state: ExecutionState;
-  defaultSource: ExecutionSource | null;
-  activeSource: ExecutionSource | null;
+export type NewTaskAdmissionView = {
+  available: boolean;
+  reason: NewTaskAdmissionReason;
+  activeModelRef: ModelRef | null;
   activeGeneration: string;
-  taskCreationAvailable: boolean;
-  errorCode: ExecutionErrorCode;
+  activeSelectionRevision: string;
+  state: NewTaskAdmissionState;
 };
 
 export type AccountCommandResult = {
@@ -679,7 +677,7 @@ export type WorkbenchSnapshot = {
   };
   account: AccountView;
   models: ModelsView;
-  execution: ExecutionView;
+  newTaskAdmission: NewTaskAdmissionView;
   skillCatalog: SkillCatalogView;
   skillManagement: SkillManagementView;
   mcp: McpManagementView;

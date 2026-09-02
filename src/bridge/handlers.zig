@@ -202,8 +202,13 @@ pub const TaskRun = struct {
 pub const TaskModelSelection = struct {
     taskId: []const u8,
     expectedModel: []const u8,
+    expectedExecutionGeneration: []const u8,
+    targetModelRef: struct {
+        sourceId: []const u8,
+        modelId: []const u8,
+    },
+    expectedSourceGeneration: []const u8,
     expectedCatalogGeneration: []const u8,
-    selectionId: []const u8,
 };
 pub const TaskRestore = struct {
     taskId: []const u8,

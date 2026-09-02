@@ -68,13 +68,13 @@ export const initialWorkbenchState: WorkbenchState = {
       errorCode: "none",
       connections: [],
     },
-    execution: {
-      state: "unavailable",
-      defaultSource: null,
-      activeSource: null,
+    newTaskAdmission: {
+      available: false,
+      reason: "none",
+      activeModelRef: null,
       activeGeneration: "0",
-      taskCreationAvailable: false,
-      errorCode: "none",
+      activeSelectionRevision: "0",
+      state: "unavailable",
     },
     skillCatalog: {
       availability: "uninitialized",

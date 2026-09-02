@@ -106,7 +106,7 @@ Workspace
 - `Turn` 和 `Run` 通常不直接命名，用当前活动、排队、停止和结果表达。
 - 一项 Task 可以包含多次用户补充和多次执行；停止一次执行不会删除 Task。
 
-当前 Renderer 产品合同为 `metawork.renderer-bridge` 固定 revision 1：`connect`精确协商后才开放产品路径，snapshot根节点包含无 secret `capabilities`、`account`、`models`、`execution`、`skillCatalog`、`skillManagement`、`mcp`、`workspaces`、`scheduledTasks`与 `tasks`且不维护局部版本。Account只发布 Metask identity/authorization状态；Models独立发布 provider catalog、Provider-local/global selection、persistence health与 Model Connection；Product Control在 `execution`中发布 desired/active来源类别、active generation与新 Task admission。三者可以形成合法的独立状态组合：界面保留账号、模型 intent、历史 Task与恢复动作，只禁用依赖当前 active execution的 New task发送，不把 Models或 Execution失败误报成账号失效。Workspace独立于 Task发布，durable Task不携带 Account identity、API Key元数据或 connection credential locator。快速开发阶段直接原地 hard cut合同内容，不提供临时形态兼容层或可选字段退路；任何合同类版本标识的变更都必须先得到用户显式同意。Agent内部 Session route identity不属于 Renderer产品模型。
+当前 Renderer 产品合同为 `metawork.renderer-bridge` 固定 revision 1：`connect`精确协商后才开放产品路径，snapshot根节点包含无 secret `capabilities`、`account`、`models`、`newTaskAdmission`、`skillCatalog`、`skillManagement`、`mcp`、`workspaces`、`scheduledTasks`与 `tasks`且不维护局部版本。Account只发布 Metask identity/authorization状态；Models独立发布 provider catalog、Provider-local/global selection、persistence health与 Model Connection；Product Control在 `newTaskAdmission`中发布当前安装的 active `ModelRef`、generation、selection revision与新 Task admission。三者可以形成合法的独立状态组合：界面保留账号、模型 intent、历史 Task与恢复动作，只禁用依赖当前 active execution的 New task发送，不把 Models或 Product admission失败误报成账号失效。Workspace独立于 Task发布，durable Task不携带 Account identity、API Key元数据或 connection credential locator。快速开发阶段直接原地 hard cut合同内容，不提供临时形态兼容层或可选字段退路；任何合同类版本标识的变更都必须先得到用户显式同意。Agent内部 Session route identity不属于 Renderer产品模型。
 
 ### 3.2 规范术语
 

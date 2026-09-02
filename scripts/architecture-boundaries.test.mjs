@@ -326,6 +326,10 @@ test("Product Models owns model connections independently of Account", () => {
   );
   assert.match(modelsContract, /pub const ModelConnectionCommand = union/);
   assert.match(modelsRuntime, /registry: registry_impl\.Registry/);
+  assert.doesNotMatch(
+    modelsRuntime,
+    /\bexecution_generation\b|resolve(?:Default|Probe)Execution|prepareExecution/,
+  );
   assert.match(modelsRegistry, /store_file_name = "models\.json"/);
   assert.match(
     modelsRegistry,
@@ -379,7 +383,27 @@ test("Product Models owns model connections independently of Account", () => {
   assertNoModuleTargets(
     build,
     ["models", "models_runtime", "models_connections", "models_metask"],
-    ["account", "account_contract", "account_runtime"],
+    [
+      "account",
+      "account_contract",
+      "account_runtime",
+      "product_control",
+      "product_task",
+      "task_runtime",
+      "product_schedule",
+      "product_schedule_runtime",
+      "agent",
+      "bridge",
+    ],
+  );
+  assert.throws(
+    () =>
+      assertNoModuleTargets(
+        `${build}\nmodels_runtime.addImport("consumer", product_task);`,
+        ["models", "models_runtime", "models_connections", "models_metask"],
+        ["product_task"],
+      ),
+    /models_runtime imports forbidden build module product_task as consumer/,
   );
   assert.doesNotMatch(
     accountContract,

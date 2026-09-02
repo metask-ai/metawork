@@ -7,6 +7,34 @@ const std = @import("std");
 const builtin = @import("builtin");
 const models_contract = @import("metawork_product_models_contract");
 
+pub const AdmissionState = enum {
+    unavailable,
+    ready,
+    replacing,
+};
+
+pub const AdmissionReason = enum {
+    none,
+    model_connection_persistence_unavailable,
+    credential_unavailable,
+    invalid_candidate,
+    resource_exhausted,
+    schedule_persistence_unavailable,
+    schedule_persistence_failed,
+    schedule_persistence_outcome_unknown,
+};
+
+/// Product Control-owned process-local admission projection. Models publishes
+/// desired source intent; this view only describes the installed authority.
+pub const NewTaskAdmissionView = struct {
+    available: bool,
+    reason: AdmissionReason,
+    active_model_ref: ?models_contract.ModelRef = null,
+    active_generation: u64 = 0,
+    active_selection_revision: u64 = 0,
+    state: AdmissionState,
+};
+
 const ActiveExecution = struct {
     allocator: std.mem.Allocator,
     credential_storage: []u8,
@@ -172,7 +200,7 @@ pub const State = struct {
     redaction_preparation: RedactionPreparation = .none,
     custom_binding: ?PreparedModelConnectionBinding = null,
     default_selection_revision: u64 = 0,
-    availability_error: models_contract.AvailabilityError = .none,
+    availability_error: AdmissionReason = .none,
 
     pub fn init(allocator: std.mem.Allocator) std.mem.Allocator.Error!State {
         return .{
@@ -333,18 +361,18 @@ pub const State = struct {
                 metask_authority_current;
     }
 
-    pub fn availability(self: *const State) models_contract.Availability {
+    pub fn availability(self: *const State) AdmissionState {
         if (self.replacement != .none) return .replacing;
         return if (self.execution.ready()) .ready else .unavailable;
     }
 
-    pub fn availabilityError(self: *const State) models_contract.AvailabilityError {
+    pub fn availabilityError(self: *const State) AdmissionReason {
         return self.availability_error;
     }
 
     pub fn rejectReplacementNoFail(
         self: *State,
-        error_code: models_contract.AvailabilityError,
+        error_code: AdmissionReason,
     ) void {
         std.debug.assert(error_code != .none);
         std.debug.assert(self.replacement != .none);
@@ -354,7 +382,7 @@ pub const State = struct {
 
     pub fn recordAvailabilityErrorNoFail(
         self: *State,
-        error_code: models_contract.AvailabilityError,
+        error_code: AdmissionReason,
     ) void {
         std.debug.assert(error_code != .none);
         self.availability_error = error_code;
@@ -534,6 +562,25 @@ pub const State = struct {
     pub fn activeSource(self: *const State) ?models_contract.Source {
         if (!self.execution.ready()) return null;
         return if (self.custom_binding == null) .metask else .model_connection;
+    }
+
+    pub fn activeModelRef(self: *const State) ?models_contract.ModelRef {
+        if (!self.execution.ready()) return null;
+        return .{
+            .source_id = if (self.custom_binding) |binding|
+                binding.connection_id
+            else
+                self.execution.providerId(),
+            .model_id = self.execution.model(),
+        };
+    }
+
+    pub fn activeSelectionRevision(self: *const State) u64 {
+        return self.default_selection_revision;
+    }
+
+    pub fn metaskSourceGeneration(self: *const State) u64 {
+        return self.metask_source_binding_generation;
     }
 
     pub fn selectedModelConnectionId(self: *const State) []const u8 {

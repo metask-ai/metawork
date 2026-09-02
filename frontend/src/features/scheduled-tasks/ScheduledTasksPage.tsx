@@ -135,7 +135,7 @@ function toMutation(
     return null;
   return {
     title: draft.title.trim(),
-    expectedExecutionGeneration: snapshot.execution.activeGeneration,
+    expectedExecutionGeneration: snapshot.newTaskAdmission.activeGeneration,
     permissionProfile: draft.permissionProfile,
     input: { kind: "text", text: draft.text.trim() },
     recurrence:

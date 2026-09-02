@@ -75,6 +75,21 @@ test("Workbench snapshot hard cut rejects retired provider fields", () => {
   retiredBinding.tasks[0].binding.provider = "anthropic";
   delete retiredBinding.tasks[0].binding.protocol;
   assert.throws(() => decodeWorkbenchSnapshot(retiredBinding), /expected keys/);
+
+  const retiredExecutionRoot = clone(fixture);
+  retiredExecutionRoot.execution = {
+    state: "ready",
+    defaultSource: "metask",
+    activeSource: "metask",
+    activeGeneration: "1",
+    taskCreationAvailable: true,
+    errorCode: "none",
+  };
+  delete retiredExecutionRoot.newTaskAdmission;
+  assert.throws(
+    () => decodeWorkbenchSnapshot(retiredExecutionRoot),
+    /expected keys/,
+  );
 });
 
 test("model metadata preserves nullable declarations and exact positive u64 limits", () => {
@@ -856,13 +871,13 @@ test("Model Connection readiness survives an isolated failed retest", () => {
       },
     ],
   };
-  snapshot.execution = {
-    state: "ready",
-    defaultSource: "model_connection",
-    activeSource: "model_connection",
+  snapshot.newTaskAdmission = {
+    available: true,
+    reason: "none",
+    activeModelRef: { sourceId: "connection-1", modelId: "gpt-5" },
     activeGeneration: "9",
-    taskCreationAvailable: true,
-    errorCode: "none",
+    activeSelectionRevision: snapshot.models.selectionRevision,
+    state: "ready",
   };
   assert.doesNotThrow(() => decodeWorkbenchSnapshot(snapshot));
 
@@ -1181,13 +1196,13 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   );
 
   const readyAccountWithoutInstalledExecution = clone(fixture);
-  readyAccountWithoutInstalledExecution.execution = {
-    state: "unavailable",
-    defaultSource: "metask",
-    activeSource: null,
+  readyAccountWithoutInstalledExecution.newTaskAdmission = {
+    available: false,
+    reason: "none",
+    activeModelRef: null,
     activeGeneration: "0",
-    taskCreationAvailable: false,
-    errorCode: "none",
+    activeSelectionRevision: "0",
+    state: "unavailable",
   };
   assert.doesNotThrow(() =>
     decodeWorkbenchSnapshot(readyAccountWithoutInstalledExecution),
@@ -1218,8 +1233,8 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   refreshingCatalog.models.operation = "refreshing_catalog";
   refreshingCatalog.models.availability = "loading";
   refreshingCatalog.models.providers[0].catalogState = "loading";
-  refreshingCatalog.execution.state = "replacing";
-  refreshingCatalog.execution.taskCreationAvailable = false;
+  refreshingCatalog.newTaskAdmission.state = "replacing";
+  refreshingCatalog.newTaskAdmission.available = false;
   assert.doesNotThrow(() => decodeWorkbenchSnapshot(refreshingCatalog));
 
   const signedOut = clone(fixture);
@@ -1240,10 +1255,11 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   signedOut.models.providers[0].catalogGeneration = "0";
   signedOut.models.providers[0].sourceGeneration = "0";
   signedOut.models.providers[0].errorCode = "authorization_unavailable";
-  signedOut.execution.state = "unavailable";
-  signedOut.execution.activeSource = null;
-  signedOut.execution.activeGeneration = "0";
-  signedOut.execution.taskCreationAvailable = false;
+  signedOut.newTaskAdmission.state = "unavailable";
+  signedOut.newTaskAdmission.activeModelRef = null;
+  signedOut.newTaskAdmission.activeGeneration = "0";
+  signedOut.newTaskAdmission.activeSelectionRevision = "0";
+  signedOut.newTaskAdmission.available = false;
   assert.doesNotThrow(() => decodeWorkbenchSnapshot(signedOut));
 
   const duplicateModel = clone(fixture);

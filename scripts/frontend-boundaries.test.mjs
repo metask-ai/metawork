@@ -186,7 +186,7 @@ test("transitional Account states never turn signed-out history into a security 
   assert.match(app, /const hasTasks = snapshot\.tasks\.length !== 0;/);
   assert.match(
     app,
-    /accountSurfacePolicy\(\s*snapshot\.account,\s*snapshot\.models,\s*snapshot\.execution,\s*hasTasks,\s*\)/,
+    /accountSurfacePolicy\(\s*snapshot\.account,\s*snapshot\.models,\s*hasTasks,\s*\)/,
   );
   assert.match(
     accountSurfacePolicy,
@@ -204,7 +204,7 @@ test("transitional Account states never turn signed-out history into a security 
   assert.doesNotMatch(app, /workbenchEntered|setWorkbenchEntered/);
   assert.match(
     app,
-    /\(!newTaskDraftActive \|\| snapshot\.execution\.taskCreationAvailable\)/,
+    /\(!newTaskDraftActive \|\| snapshot\.newTaskAdmission\.available\)/,
   );
   assert.doesNotMatch(app, /setStatus\(\s*\{/);
   assert.doesNotMatch(app, /AccountPrerequisite|prerequisite=\{/);

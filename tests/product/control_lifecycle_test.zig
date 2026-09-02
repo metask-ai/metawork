@@ -207,6 +207,25 @@ fn installTwoModelCatalog(workbench: *product_control.Runtime) void {
     ) catch unreachable;
 }
 
+fn taskModelSelectionInput(
+    workbench: *product_control.Runtime,
+    expected_model: []const u8,
+    expected_execution_generation: u64,
+    target_model: []const u8,
+) product_control.TaskModelSelectionInput {
+    const models = workbench.modelsView();
+    return .{
+        .expected_model = expected_model,
+        .expected_execution_generation = expected_execution_generation,
+        .target = .{
+            .source_id = models.metask_selection.?.source_id,
+            .model_id = target_model,
+        },
+        .expected_source_generation = models.providers[0].source_generation,
+        .expected_catalog_generation = models.providers[0].catalog_generation,
+    };
+}
+
 fn waitCatalogReady(
     workbench: *product_control.Runtime,
     workspace_id: u64,
@@ -1808,7 +1827,7 @@ const TestScheduleSupport = struct {
     }
 };
 
-test "retired Schedule data leaves Account ready and Execution unavailable as a valid snapshot" {
+test "retired Schedule data leaves Account ready and New Task admission unavailable" {
     fake_core.reset();
     const runtime = try createTestComposition(.{
         .worker_count = 1,
@@ -1865,11 +1884,10 @@ test "retired Schedule data leaves Account ready and Execution unavailable as a 
     workbench.finishAccountCommitNoFail();
 
     try account_contract.validateView(workbench.accountView());
-    const execution_view = workbench.executionView();
-    try std.testing.expect(execution_view.state == .unavailable);
-    try std.testing.expect(execution_view.default_source.? == .metask);
-    try std.testing.expect(execution_view.active_source == null);
-    try std.testing.expect(!execution_view.task_creation_available);
+    const admission = workbench.newTaskAdmissionView();
+    try std.testing.expect(admission.state == .unavailable);
+    try std.testing.expect(admission.active_model_ref == null);
+    try std.testing.expect(!admission.available);
 
     var snapshot_storage: [128 * 1024]u8 = undefined;
     const snapshot = try workbench.writeSnapshot(&snapshot_storage);
@@ -1881,7 +1899,7 @@ test "retired Schedule data leaves Account ready and Execution unavailable as a 
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
-        "\"execution\":{\"state\":\"unavailable\",\"defaultSource\":\"metask\",\"activeSource\":null,\"activeGeneration\":\"0\",\"taskCreationAvailable\":false",
+        "\"newTaskAdmission\":{\"available\":false,\"reason\":\"none\",\"activeModelRef\":null,\"activeGeneration\":\"0\",\"activeSelectionRevision\":\"0\",\"state\":\"unavailable\"}",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
@@ -1909,7 +1927,7 @@ test "retired Schedule data leaves Account ready and Execution unavailable as a 
     execution_owned = false;
     workbench.endExecutionReplacementNoFail();
     workbench.finishAccountCommitNoFail();
-    try std.testing.expect(workbench.executionView().task_creation_available);
+    try std.testing.expect(workbench.newTaskAdmissionView().available);
 }
 
 test "scheduled noninteractive permission request automatically stops the Product Run" {
@@ -2471,9 +2489,12 @@ test "Idle Task model persistence failure keeps the selected model and Session u
         persistence.result = .failed;
         try workbench.selectTaskModel(
             task_id,
-            before.model,
-            workbench.modelsView().providers[0].catalog_generation,
-            "fixture-model-2",
+            taskModelSelectionInput(
+                &workbench,
+                before.model,
+                before.generation,
+                "fixture-model-2",
+            ),
         );
         const after = try workbench.taskExecutionIdentity(task_id);
         try std.testing.expectEqualStrings("fixture-model-2", after.model);
@@ -2508,9 +2529,12 @@ test "Idle Task model persistence failure keeps the selected model and Session u
         persistence.result = .outcome_unknown;
         try workbench.selectTaskModel(
             task_id,
-            before.model,
-            workbench.modelsView().providers[0].catalog_generation,
-            "fixture-model-2",
+            taskModelSelectionInput(
+                &workbench,
+                before.model,
+                before.generation,
+                "fixture-model-2",
+            ),
         );
         const after = try workbench.taskExecutionIdentity(task_id);
         try std.testing.expectEqualStrings("fixture-model-2", after.model);

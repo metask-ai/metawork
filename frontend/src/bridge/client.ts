@@ -631,15 +631,19 @@ export class BridgeClient {
   async selectTaskModel(
     taskId: string,
     expectedModel: string,
+    expectedExecutionGeneration: string,
+    targetModelRef: { sourceId: string; modelId: string },
+    expectedSourceGeneration: string,
     expectedCatalogGeneration: string,
-    selectionId: string,
   ) {
     return decodeTaskModelSelectionResult(
       await this.invoke(commands.selectTaskModel, {
         taskId,
         expectedModel,
+        expectedExecutionGeneration,
+        targetModelRef,
+        expectedSourceGeneration,
         expectedCatalogGeneration,
-        selectionId,
       }),
       taskId,
     );

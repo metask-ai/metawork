@@ -75,24 +75,6 @@ const unavailableModels = {
   connections: [],
 };
 
-const unavailableExecution = {
-  state: "unavailable",
-  defaultSource: null,
-  activeSource: null,
-  activeGeneration: "0",
-  taskCreationAvailable: false,
-  errorCode: "none",
-};
-
-const readyExecution = {
-  ...unavailableExecution,
-  state: "ready",
-  defaultSource: "metask",
-  activeSource: "metask",
-  activeGeneration: "1",
-  taskCreationAvailable: true,
-};
-
 const readyAccount = {
   ...signedOut,
   state: "authenticated",
@@ -123,9 +105,9 @@ const readyModels = {
       errorCode: "none",
     },
   ],
-  metaskSelection: { sourceId: "metask", modelId: "model-1" },
+  metaskSelection: { sourceId: "metask:key-1", modelId: "model-1" },
   metaskSelectionRevision: "1",
-  defaultSelection: { sourceId: "metask", modelId: "model-1" },
+  defaultSelection: { sourceId: "metask:key-1", modelId: "model-1" },
   selectionRevision: "1",
   errorCode: "none",
 };
@@ -174,16 +156,11 @@ function renderGate(account, props = {}) {
   );
 }
 
-function renderSettings(
-  account,
-  models = readyModels,
-  execution = readyExecution,
-) {
+function renderSettings(account, models = readyModels) {
   return withI18n(
     createElement(SettingsPage, {
       account,
       models,
-      execution,
       modelConnectionCapabilities: {
         management: false,
         secretCapture: false,
@@ -214,28 +191,27 @@ function renderSettings(
 
 test("only checking and authorizing request the Account onboarding surface", () => {
   assert.equal(
-    requiresAccountGate({ state: "checking" }, { defaultSource: "metask" }),
+    requiresAccountGate({ state: "checking" }, unavailableModels),
     true,
   );
   assert.equal(
-    requiresAccountGate({ state: "authorizing" }, { defaultSource: "metask" }),
+    requiresAccountGate({ state: "authorizing" }, unavailableModels),
     true,
   );
   assert.equal(
-    requiresAccountGate({ state: "signed_out" }, { defaultSource: "metask" }),
+    requiresAccountGate({ state: "signed_out" }, unavailableModels),
     false,
   );
   assert.equal(
-    requiresAccountGate(
-      { state: "authenticated" },
-      { defaultSource: "metask" },
-    ),
+    requiresAccountGate({ state: "authenticated" }, readyModels),
     false,
   );
   assert.equal(
     requiresAccountGate(
       { state: "checking" },
-      { defaultSource: "model_connection" },
+      {
+        defaultSelection: { sourceId: "connection-1", modelId: "model-1" },
+      },
     ),
     false,
   );
@@ -247,8 +223,8 @@ test("unresolved authenticated catalog opens account setup", () => {
       { state: "authenticated" },
       {
         providers: [{ ...readyModels.providers[0], catalogState: "choosing" }],
+        defaultSelection: readyModels.defaultSelection,
       },
-      { defaultSource: "metask", taskCreationAvailable: false },
     ),
     true,
   );
@@ -257,8 +233,8 @@ test("unresolved authenticated catalog opens account setup", () => {
       { state: "authenticated" },
       {
         providers: [{ ...readyModels.providers[0], catalogState: "failed" }],
+        defaultSelection: readyModels.defaultSelection,
       },
-      { defaultSource: "metask", taskCreationAvailable: false },
     ),
     true,
   );
@@ -269,42 +245,29 @@ test("unresolved authenticated catalog opens account setup", () => {
       { state: "authenticated" },
       {
         providers: [{ ...readyModels.providers[0], catalogState: "loading" }],
+        defaultSelection: readyModels.defaultSelection,
       },
-      { defaultSource: "metask", taskCreationAvailable: false },
     ),
     false,
   );
   assert.equal(
-    requiresAccountSetup({ state: "authenticated" }, readyModels, {
-      defaultSource: "metask",
-      taskCreationAvailable: true,
-    }),
+    requiresAccountSetup({ state: "authenticated" }, readyModels),
     false,
   );
   assert.equal(
-    requiresAccountSetup({ state: "authenticated" }, readyModels, {
-      defaultSource: "metask",
-      taskCreationAvailable: false,
-    }),
+    requiresAccountSetup({ state: "authenticated" }, readyModels),
     false,
   );
 });
 
 test("Product execution failure never opens Account setup", () => {
   assert.equal(
-    requiresAccountSetup({ state: "authenticated" }, readyModels, {
-      defaultSource: "metask",
-      taskCreationAvailable: false,
-    }),
+    requiresAccountSetup({ state: "authenticated" }, readyModels),
     false,
   );
   assert.equal(
-    accountSurfacePolicy(
-      { state: "authenticated" },
-      readyModels,
-      { defaultSource: "metask", taskCreationAvailable: false },
-      false,
-    ).setupRequired,
+    accountSurfacePolicy({ state: "authenticated" }, readyModels, false)
+      .setupRequired,
     false,
   );
 });
@@ -313,7 +276,6 @@ test("Account onboarding never replaces a Workbench that already owns Tasks", ()
   const checking = accountSurfacePolicy(
     { ...signedOut, state: "checking" },
     unavailableModels,
-    { defaultSource: "metask", taskCreationAvailable: false },
     true,
   );
   assert.deepEqual(checking, {
@@ -327,7 +289,6 @@ test("Account onboarding never replaces a Workbench that already owns Tasks", ()
       ...readyModels,
       providers: [{ ...readyModels.providers[0], catalogState: "failed" }],
     },
-    { defaultSource: "metask", taskCreationAvailable: false },
     true,
   );
   assert.deepEqual(unresolved, {
@@ -338,7 +299,6 @@ test("Account onboarding never replaces a Workbench that already owns Tasks", ()
   const empty = accountSurfacePolicy(
     { ...signedOut, state: "checking" },
     unavailableModels,
-    { defaultSource: "metask", taskCreationAvailable: false },
     false,
   );
   assert.equal(empty.gateRequired, true);

@@ -13,8 +13,6 @@ pub const StartError = error{
 };
 pub const DefaultBinding = registry_impl.Registry.DefaultBinding;
 
-pub const Preparation = contract.Preparation;
-
 pub const TestSupport = if (builtin.is_test) struct {
     pub fn installMetaskDefault(
         runtime: *Runtime,
@@ -611,6 +609,35 @@ pub const Runtime = struct {
         return true;
     }
 
+    /// Validates one source-qualified member of the current Metask catalog.
+    /// This is provider state only; callers decide what consumer operation the
+    /// validated model may be used for.
+    pub fn metaskSourceModelAvailable(
+        self: *const Runtime,
+        target: contract.ModelRef,
+        expected_source_generation: u64,
+        expected_catalog_generation: u64,
+        protocol: contract.Protocol,
+    ) bool {
+        self.assertMainThread();
+        const intent = self.registry.metaskIntent() orelse return false;
+        if (intent.source_generation == 0 or
+            intent.source_generation != expected_source_generation)
+            return false;
+        var source_storage: ["metask:".len + contract.Limits.api_key_id_bytes]u8 = undefined;
+        const source_id = std.fmt.bufPrint(
+            &source_storage,
+            "metask:{s}",
+            .{intent.api_key_id},
+        ) catch return false;
+        return std.mem.eql(u8, target.source_id, source_id) and
+            self.metaskModelAvailable(
+                expected_catalog_generation,
+                protocol,
+                target.model_id,
+            );
+    }
+
     pub fn submitCommand(self: *Runtime, command: contract.ModelConnectionCommand) contract.CommandResult {
         self.assertMainThread();
         contract.validateModelConnectionCommand(command) catch
@@ -788,41 +815,21 @@ pub const Runtime = struct {
         self.metask_safe_diagnostic.len = 0;
     }
 
-    pub fn prepareExecution(
+    pub fn resolveProbeCandidate(
         self: *Runtime,
         selection: contract.ModelConnectionSelectionCommand,
         model_id: []const u8,
-        execution_generation: u64,
-    ) Preparation {
-        return .{ .ready = self.resolveExecution(selection, model_id, execution_generation) catch |err|
-            return .{ .rejected = mapResolutionError(err) } };
-    }
-
-    pub fn resolveProbeExecution(
-        self: *Runtime,
-        selection: contract.ModelConnectionSelectionCommand,
-        model_id: []const u8,
-        execution_generation: u64,
-    ) !contract.OwnedConfig {
+    ) !contract.OwnedSourceCandidate {
         self.assertMainThread();
-        return self.resolveBinding(
+        return self.resolveBindingCandidate(
             try self.registry.probeBinding(selection, model_id),
-            execution_generation,
         );
-    }
-
-    pub fn resolveDefaultExecution(self: *Runtime, execution_generation: u64) !?contract.OwnedConfig {
-        self.assertMainThread();
-        if (execution_generation == 0) return error.InvalidConnection;
-        var candidate = (try self.resolveDefaultCandidate()) orelse return null;
-        defer candidate.deinit();
-        return try candidate.intoConfig(execution_generation);
     }
 
     /// Resolves the current durable Models default without assigning a
     /// Product binding generation. Product Control owns that installation
     /// identity and may accept, replace, or destroy this candidate.
-    pub fn resolveDefaultCandidate(self: *Runtime) !?contract.OwnedSourceCandidate {
+    pub fn resolveDefault(self: *Runtime) !?contract.OwnedSourceCandidate {
         self.assertMainThread();
         const selection = self.registry.defaultSelection() orelse return null;
         if (self.registry.metaskIntent()) |intent| {
@@ -860,29 +867,6 @@ pub const Runtime = struct {
             }
             return err;
         };
-    }
-
-    fn resolveExecution(
-        self: *Runtime,
-        selection: contract.ModelConnectionSelectionCommand,
-        model_id: []const u8,
-        execution_generation: u64,
-    ) !contract.OwnedConfig {
-        return self.resolveBinding(
-            try self.registry.executionBinding(selection, model_id),
-            execution_generation,
-        );
-    }
-
-    fn resolveBinding(
-        self: *Runtime,
-        binding: registry_impl.Registry.DefaultBinding,
-        execution_generation: u64,
-    ) !contract.OwnedConfig {
-        if (execution_generation == 0) return error.InvalidConnection;
-        var candidate = try self.resolveBindingCandidate(binding);
-        defer candidate.deinit();
-        return try candidate.intoConfig(execution_generation);
     }
 
     fn resolveBindingCandidate(
@@ -1160,17 +1144,6 @@ fn mapRegistryError(err: anyerror) contract.ManagementError {
     };
 }
 
-fn mapResolutionError(err: anyerror) contract.ManagementError {
-    return switch (err) {
-        error.ConnectionNotFound => .connection_not_found,
-        error.GenerationMismatch => .generation_mismatch,
-        error.ModelNotFound => .model_not_found,
-        error.OutOfMemory => .local_resource_exhausted,
-        error.CredentialStoreUnavailable, error.CredentialNotFound => .capture_unavailable,
-        else => .capture_unavailable,
-    };
-}
-
 fn findConnectionView(
     views: []const contract.ModelConnectionView,
     connection_id: []const u8,
@@ -1246,7 +1219,7 @@ const TestVault = struct {
     }
 };
 
-test "Execution Runtime owns durable model connections and credential resolution" {
+test "Models Runtime owns durable model connections and source resolution" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -1302,12 +1275,12 @@ test "Execution Runtime owns durable model connections and credential resolution
         try std.testing.expectEqualStrings("gpt-5", authority.selection.model_id);
         try std.testing.expect(authority.source_generation != 0);
         try std.testing.expect(authority.selection_revision != 0);
-        var execution = (try runtime.resolveDefaultExecution(17)) orelse
+        var candidate = (try runtime.resolveDefault()) orelse
             return error.TestUnexpectedResult;
-        defer execution.deinit();
-        try std.testing.expectEqualStrings("provider-secret", execution.input().api_key);
-        try std.testing.expectEqual(contract.Protocol.openai_responses, execution.input().target.protocol);
-        try std.testing.expectEqual(@as(u64, 17), execution.input().execution_generation);
+        defer candidate.deinit();
+        try std.testing.expectEqualStrings("provider-secret", candidate.input().api_key);
+        try std.testing.expectEqual(contract.Protocol.openai_responses, candidate.input().target.protocol);
+        try std.testing.expectEqual(authority.source_generation, candidate.input().source_generation);
     }
 
     {
@@ -1318,11 +1291,11 @@ test "Execution Runtime owns durable model connections and credential resolution
             restored.deinit();
         }
         try std.testing.expectEqual(@as(usize, 1), restored.views().len);
-        var execution = (try restored.resolveDefaultExecution(23)) orelse
+        var candidate = (try restored.resolveDefault()) orelse
             return error.TestUnexpectedResult;
-        defer execution.deinit();
-        try std.testing.expectEqualStrings("provider-secret", execution.input().api_key);
-        try std.testing.expectEqualStrings("model_connection:" ++ TestVault.slot, execution.input().target.provider_id);
+        defer candidate.deinit();
+        try std.testing.expectEqualStrings("provider-secret", candidate.input().api_key);
+        try std.testing.expectEqualStrings("model_connection:" ++ TestVault.slot, candidate.input().target.provider_id);
     }
 }
 
@@ -1438,10 +1411,10 @@ test "Models owns Metask catalog authority without changing global default" {
     );
     try std.testing.expectEqualStrings("model-1", default_authority.selection.model_id);
     try std.testing.expectEqual(first_source_generation, default_authority.source_generation);
-    var first_candidate = (try runtime.resolveDefaultCandidate()) orelse
+    var first_candidate = (try runtime.resolveDefault()) orelse
         return error.TestUnexpectedResult;
     defer first_candidate.deinit();
-    var second_candidate = (try runtime.resolveDefaultCandidate()) orelse
+    var second_candidate = (try runtime.resolveDefault()) orelse
         return error.TestUnexpectedResult;
     defer second_candidate.deinit();
     try std.testing.expectEqualStrings(

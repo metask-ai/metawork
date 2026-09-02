@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import type {
   AccountView,
-  ExecutionView,
   ModelsView,
   Protocol,
   PermissionProfile,
@@ -99,7 +98,6 @@ function modelConnectionTestStatusLabel(
 export function SettingsPage({
   account,
   models,
-  execution,
   modelConnectionCapabilities,
   permissionProfiles,
   focusTarget,
@@ -124,7 +122,6 @@ export function SettingsPage({
 }: {
   account: AccountView;
   models: ModelsView;
-  execution: ExecutionView;
   modelConnectionCapabilities: {
     management: boolean;
     secretCapture: boolean;
@@ -210,6 +207,9 @@ export function SettingsPage({
     metaskProvider?.catalogState ?? "needs_authentication";
   const selectedApiId = metaskProvider?.selectedApiKeyId ?? "";
   const selectedModelId = models.metaskSelection?.modelId ?? "";
+  const customDefaultSelected = models.connections.some(
+    (connection) => connection.id === models.defaultSelection?.sourceId,
+  );
   const committedApi = metaskApiKeys.find((key) => key.id === selectedApiId);
   const committedModel = metaskModels.find(
     (model) => model.id === selectedModelId,
@@ -914,7 +914,7 @@ export function SettingsPage({
                   {t("settings.execution_defaults")}
                 </h3>
                 <div className="settings-execution-actions">
-                  {execution.defaultSource === "model_connection" &&
+                  {customDefaultSelected &&
                     authenticated &&
                     metaskCatalogState === "ready" && (
                       <Button

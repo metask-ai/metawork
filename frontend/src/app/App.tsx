@@ -620,7 +620,6 @@ export default function App() {
   const accountSurface = accountSurfacePolicy(
     snapshot.account,
     snapshot.models,
-    snapshot.execution,
     hasTasks,
   );
   const accountGateRequired = accountSurface.gateRequired;
@@ -704,7 +703,7 @@ export default function App() {
   const composerRunInput = composerDraftToRunInput(composerDraft);
   const canSubmit =
     taskCanCompose &&
-    (!newTaskDraftActive || snapshot.execution.taskCreationAvailable) &&
+    (!newTaskDraftActive || snapshot.newTaskAdmission.available) &&
     (!newTaskDraftActive || newTaskWorkspaceReady) &&
     !taskOperationInFlight &&
     composerDraftHasContent(composerDraft) &&
@@ -730,9 +729,7 @@ export default function App() {
       connection.id === snapshot.models.defaultSelection?.sourceId,
   );
   const customModelId = activeModelConnection?.selectedModel ?? "";
-  const customModelConnectionSelected =
-    snapshot.execution.defaultSource === "model_connection" &&
-    activeModelConnection !== undefined;
+  const customModelConnectionSelected = activeModelConnection !== undefined;
   const customModelConnectionContext = activeModelConnection
     ? `${activeModelConnection.displayName} · ${t(
         `settings.model_connection_protocol.${activeModelConnection.protocol}`,
@@ -778,7 +775,7 @@ export default function App() {
   const displayedTaskModelId = pendingTaskModelId ?? taskModelId;
   const taskModelPolicy = taskModelSelectionPolicy(
     snapshot.models,
-    snapshot.execution,
+    snapshot.newTaskAdmission,
     activeTask,
   );
 
@@ -1010,7 +1007,7 @@ export default function App() {
 
   useEffect(() => {
     if (
-      !snapshot.execution.taskCreationAvailable ||
+      !snapshot.newTaskAdmission.available ||
       activeTask !== null ||
       workbench.draftOpen
     )
@@ -1020,11 +1017,7 @@ export default function App() {
       workspaceId: null,
     });
     window.requestAnimationFrame(() => composer.current?.focus());
-  }, [
-    activeTask,
-    snapshot.execution.taskCreationAvailable,
-    workbench.draftOpen,
-  ]);
+  }, [activeTask, snapshot.newTaskAdmission.available, workbench.draftOpen]);
 
   function focusPendingRequest() {
     const requestId = activeTask?.pendingUi?.requestId;
@@ -1250,8 +1243,13 @@ export default function App() {
       const result = await client.selectTaskModel(
         task.id,
         task.binding.model,
+        task.binding.executionGeneration,
+        {
+          sourceId: snapshot.models.metaskSelection?.sourceId ?? "",
+          modelId: selectionId,
+        },
+        metaskProvider?.sourceGeneration ?? "0",
         metaskProvider?.catalogGeneration ?? "0",
-        selectionId,
       );
       if (!result.accepted) {
         await refreshSnapshot().catch(() => undefined);
@@ -1560,7 +1558,7 @@ export default function App() {
         client,
         taskId: existingTaskId,
         workspace,
-        expectedExecutionGeneration: snapshot.execution.activeGeneration,
+        expectedExecutionGeneration: snapshot.newTaskAdmission.activeGeneration,
         expectedBindingEpoch: activeTask?.binding.epoch ?? null,
         permissionProfile: newTaskPermissionProfile,
         input,
@@ -2823,7 +2821,6 @@ export default function App() {
           <SettingsPage
             account={snapshot.account}
             models={snapshot.models}
-            execution={snapshot.execution}
             permissionProfiles={{
               enabled: snapshot.capabilities.permissionProfiles,
               available: snapshot.permissions.availableProfiles,

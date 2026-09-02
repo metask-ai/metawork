@@ -104,6 +104,49 @@ test("Product store recovery uses revision-bound typed commands", async () => {
   ]);
 });
 
+test("Task model selection carries source-qualified authority", async () => {
+  const calls = [];
+  const client = new BridgeClient({
+    bridge: bridgeWith(async (command, payload) => {
+      calls.push({ command, payload });
+      return {
+        accepted: true,
+        taskId: "11",
+        model: "model-2",
+        reason: null,
+      };
+    }),
+  });
+
+  assert.deepEqual(
+    await client.selectTaskModel(
+      "11",
+      "model-1",
+      "17",
+      { sourceId: "metask:key-1", modelId: "model-2" },
+      "19",
+      "23",
+    ),
+    { accepted: true, taskId: "11", model: "model-2", reason: null },
+  );
+  assert.deepEqual(calls, [
+    {
+      command: "metawork.tasks.selectModel",
+      payload: {
+        taskId: "11",
+        expectedModel: "model-1",
+        expectedExecutionGeneration: "17",
+        targetModelRef: {
+          sourceId: "metask:key-1",
+          modelId: "model-2",
+        },
+        expectedSourceGeneration: "19",
+        expectedCatalogGeneration: "23",
+      },
+    },
+  ]);
+});
+
 test("native shortcut events stay behind the Bridge client boundary", () => {
   let listener = null;
   let removed = false;

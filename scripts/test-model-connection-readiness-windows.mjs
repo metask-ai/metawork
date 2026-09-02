@@ -92,7 +92,7 @@ try {
     throw new Error(
       `Windows Host did not publish the complete Model Connection gate: ${JSON.stringify(initial.capabilities)}`,
     );
-  if (initial.execution?.taskCreationAvailable !== false)
+  if (initial.newTaskAdmission?.available !== false)
     throw new Error(
       "signed-out profile admitted Task creation before a default source",
     );
@@ -241,8 +241,8 @@ try {
       const current = await snapshot();
       return current.models?.defaultSelection?.sourceId === connection.id &&
         current.models?.defaultSelection?.modelId === model &&
-        current.execution?.activeSource === "model_connection" &&
-        current.execution?.taskCreationAvailable === true
+        current.newTaskAdmission?.activeModelRef?.sourceId === connection.id &&
+        current.newTaskAdmission?.available === true
         ? current
         : null;
     },
@@ -288,7 +288,7 @@ try {
       expectedWorkspaceEpoch: workspaceReady.item.epoch,
     },
     expectedExecutionGeneration:
-      workspaceReady.current.execution.activeGeneration,
+      workspaceReady.current.newTaskAdmission.activeGeneration,
     expectedSkillCatalogRevision: workspaceReady.catalog.revision,
     expectedSkillSelectionRevision: workspaceReady.catalog.selectionRevision,
     permissionProfile: "approval_required",

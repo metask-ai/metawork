@@ -1,8 +1,4 @@
-import type {
-  AccountView,
-  ExecutionView,
-  ModelsView,
-} from "../bridge/contracts.ts";
+import type { AccountView, ModelsView } from "../bridge/contracts.ts";
 import {
   requiresAccountGate,
   requiresAccountSetup,
@@ -16,17 +12,16 @@ export type AccountSurfacePolicy = {
 /**
  * Account onboarding may replace an empty Workbench, but it never becomes a
  * global gate once Product owns durable Tasks. New Task admission remains an
- * independent Execution fact.
+ * independent Product Control fact.
  */
 export function accountSurfacePolicy(
   account: Pick<AccountView, "state">,
-  models: Pick<ModelsView, "providers">,
-  execution: Pick<ExecutionView, "defaultSource">,
+  models: Pick<ModelsView, "providers" | "defaultSelection">,
   hasTasks: boolean,
 ): AccountSurfacePolicy {
   if (hasTasks) return { gateRequired: false, setupRequired: false };
   return {
-    gateRequired: requiresAccountGate(account, execution),
-    setupRequired: requiresAccountSetup(account, models, execution),
+    gateRequired: requiresAccountGate(account, models),
+    setupRequired: requiresAccountSetup(account, models),
   };
 }

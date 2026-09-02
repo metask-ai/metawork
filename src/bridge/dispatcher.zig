@@ -1615,19 +1615,39 @@ pub const Dispatcher = struct {
         if (parsed.value.expectedModel.len == 0 or
             parsed.value.expectedModel.len > models_contract.Limits.model_id_bytes or
             !std.unicode.utf8ValidateSlice(parsed.value.expectedModel) or
-            parsed.value.selectionId.len == 0 or
-            parsed.value.selectionId.len > models_contract.Limits.model_id_bytes or
-            !std.unicode.utf8ValidateSlice(parsed.value.selectionId))
+            parsed.value.targetModelRef.sourceId.len == 0 or
+            parsed.value.targetModelRef.sourceId.len > models_contract.Limits.provider_id_bytes or
+            !std.unicode.utf8ValidateSlice(parsed.value.targetModelRef.sourceId) or
+            parsed.value.targetModelRef.modelId.len == 0 or
+            parsed.value.targetModelRef.modelId.len > models_contract.Limits.model_id_bytes or
+            !std.unicode.utf8ValidateSlice(parsed.value.targetModelRef.modelId))
             return error.InvalidBridgePayload;
         const task_id = try handlers.parseWireId(parsed.value.taskId);
+        const execution_generation = try handlers.parseWireId(
+            parsed.value.expectedExecutionGeneration,
+        );
+        const source_generation = try handlers.parseWireId(
+            parsed.value.expectedSourceGeneration,
+        );
         const catalog_generation = try handlers.parseWireId(
             parsed.value.expectedCatalogGeneration,
         );
+        if (execution_generation == 0 or
+            source_generation == 0 or
+            catalog_generation == 0)
+            return error.InvalidBridgePayload;
         (try self.requireProductControl()).selectTaskModel(
             task_id,
-            parsed.value.expectedModel,
-            catalog_generation,
-            parsed.value.selectionId,
+            .{
+                .expected_model = parsed.value.expectedModel,
+                .expected_execution_generation = execution_generation,
+                .target = .{
+                    .source_id = parsed.value.targetModelRef.sourceId,
+                    .model_id = parsed.value.targetModelRef.modelId,
+                },
+                .expected_source_generation = source_generation,
+                .expected_catalog_generation = catalog_generation,
+            },
         ) catch |err| {
             if (taskModelSelectionRejection(err)) |reason|
                 return encodeTaskModelSelectionResult(
@@ -1644,7 +1664,7 @@ pub const Dispatcher = struct {
             output,
             true,
             task_id,
-            parsed.value.selectionId,
+            parsed.value.targetModelRef.modelId,
             null,
         );
     }

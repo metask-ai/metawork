@@ -359,16 +359,7 @@ function settingsModels(provider = {}, view = {}) {
   };
 }
 
-const readySettingsExecution = {
-  state: "ready",
-  defaultSource: "metask",
-  activeSource: "metask",
-  activeGeneration: "1",
-  taskCreationAvailable: true,
-  errorCode: "none",
-};
-
-function settingsElement(account, execution, overrides = {}) {
+function settingsElement(account, overrides = {}) {
   return createElement(
     I18nContext.Provider,
     {
@@ -381,7 +372,6 @@ function settingsElement(account, execution, overrides = {}) {
     createElement(SettingsPage, {
       account,
       models: readySettingsModels,
-      execution,
       modelConnectionCapabilities: {
         management: true,
         secretCapture: false,
@@ -423,11 +413,7 @@ function settingsElement(account, execution, overrides = {}) {
   );
 }
 
-function renderSettings(
-  account,
-  overrides = {},
-  execution = readySettingsExecution,
-) {
+function renderSettings(account, overrides = {}) {
   const selections = { api: [], model: [] };
   const callbacks = {
     onSelectApiKey(value) {
@@ -438,16 +424,16 @@ function renderSettings(
     },
     ...overrides,
   };
-  const view = render(settingsElement(account, execution, callbacks));
+  const view = render(settingsElement(account, callbacks));
   return {
     ...view,
     selections,
     rerenderAccount(nextAccount) {
-      view.rerender(settingsElement(nextAccount, execution, callbacks));
+      view.rerender(settingsElement(nextAccount, callbacks));
     },
     rerenderModels(nextModels) {
       view.rerender(
-        settingsElement(account, execution, {
+        settingsElement(account, {
           ...callbacks,
           models: nextModels,
         }),
@@ -465,7 +451,7 @@ test("Settings exposes Model connections only for the complete Host gate", () =>
   incomplete.unmount();
 
   render(
-    settingsElement(readySettingsAccount, readySettingsExecution, {
+    settingsElement(readySettingsAccount, {
       modelConnectionCapabilities: {
         management: true,
         secretCapture: true,
@@ -594,41 +580,32 @@ test("Settings keeps a model choice visibly pending without declaring it committ
 test("Settings keeps Metask available while a model connection is the default", async () => {
   const user = userEvent.setup({ document: dom.window.document });
   let activations = 0;
-  renderSettings(
-    readySettingsAccount,
-    {
-      models: {
-        ...readySettingsModels,
-        defaultSelection: { sourceId: "connection-1", modelId: "gpt-5" },
-        connections: [
-          {
-            id: "connection-1",
-            displayName: "Team OpenAI",
-            protocol: "openai_chat_completions",
-            normalizedBaseUrl: "https://api.openai.com/v1/chat/completions",
-            state: "ready",
-            testStatus: "connected",
-            credentialStatus: "ready",
-            enabled: true,
-            models: [{ id: "gpt-5", displayName: "GPT-5" }],
-            selectedModel: "gpt-5",
-            connectionGeneration: "1",
-            sourceGeneration: "1",
-            catalogGeneration: "1",
-          },
-        ],
-      },
-      onActivateMetask() {
-        activations += 1;
-      },
+  renderSettings(readySettingsAccount, {
+    models: {
+      ...readySettingsModels,
+      defaultSelection: { sourceId: "connection-1", modelId: "gpt-5" },
+      connections: [
+        {
+          id: "connection-1",
+          displayName: "Team OpenAI",
+          protocol: "openai_chat_completions",
+          normalizedBaseUrl: "https://api.openai.com/v1/chat/completions",
+          state: "ready",
+          testStatus: "connected",
+          credentialStatus: "ready",
+          enabled: true,
+          models: [{ id: "gpt-5", displayName: "GPT-5" }],
+          selectedModel: "gpt-5",
+          connectionGeneration: "1",
+          sourceGeneration: "1",
+          catalogGeneration: "1",
+        },
+      ],
     },
-    {
-      ...readySettingsExecution,
-      defaultSource: "model_connection",
-      activeSource: "model_connection",
-      activeGeneration: "9",
+    onActivateMetask() {
+      activations += 1;
     },
-  );
+  });
 
   assert.match(
     screen.getByRole("combobox", { name: "Default model" }).textContent,

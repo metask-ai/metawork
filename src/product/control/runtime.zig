@@ -182,6 +182,14 @@ pub const TaskWorkspaceRequest = union(enum) {
 
 pub const TaskRunInput = task_runtime.RunInput;
 
+pub const TaskModelSelectionInput = struct {
+    expected_model: []const u8,
+    expected_execution_generation: u64,
+    target: models_contract.ModelRef,
+    expected_source_generation: u64,
+    expected_catalog_generation: u64,
+};
+
 pub const ScheduledTaskRecurrence = product_schedule.Recurrence;
 
 pub const ScheduledTaskDefinitionInput = struct {
@@ -205,6 +213,7 @@ pub const CatalogAvailability = catalog_snapshot.CatalogAvailability;
 pub const SkillProjection = catalog_snapshot.SkillProjection;
 pub const CatalogIssueProjection = catalog_snapshot.CatalogIssueProjection;
 pub const CatalogProjection = catalog_snapshot.CatalogProjection;
+pub const NewTaskAdmissionView = execution_state.NewTaskAdmissionView;
 
 pub const ExecutionIdentity = struct {
     generation: u64,
@@ -1767,23 +1776,14 @@ pub const Runtime = struct {
         return self.account_projection.view();
     }
 
-    pub fn executionView(self: *Runtime) models_contract.ExecutionView {
-        const desired = self.model_connections.defaultAuthority();
+    pub fn newTaskAdmissionView(self: *Runtime) execution_state.NewTaskAdmissionView {
         return .{
-            .state = self.execution_state.availability(),
-            .default_source = if (desired) |authority| authority.source else null,
-            .active_source = self.execution_state.activeSource(),
+            .available = self.canCreateTask(),
+            .reason = self.execution_state.availabilityError(),
+            .active_model_ref = self.execution_state.activeModelRef(),
             .active_generation = self.execution_state.generation(),
-            .task_creation_available = self.canCreateTask(),
-            .selected_model_connection_id = if (desired) |authority|
-                if (authority.source == .model_connection)
-                    authority.selection.source_id
-                else
-                    ""
-            else
-                "",
-            .model_connections = self.model_connections.views(),
-            .error_code = self.execution_state.availabilityError(),
+            .active_selection_revision = self.execution_state.activeSelectionRevision(),
+            .state = self.execution_state.availability(),
         };
     }
 
@@ -1862,11 +1862,13 @@ pub const Runtime = struct {
         const execution_generation = self.nextExecutionGeneration(
             self.executionGeneration(),
         ) catch return .{ .rejected = .local_resource_exhausted };
-        var execution = self.resolveModelConnectionProbeExecution(
+        var candidate = self.model_connections.resolveProbeCandidate(
             command.selection,
             command.model_id,
-            execution_generation,
         ) catch return .{ .rejected = .test_unavailable };
+        defer candidate.deinit();
+        var execution = candidate.intoConfig(execution_generation) catch
+            return .{ .rejected = .test_unavailable };
         const result = self.model_connections.submitCommand(.{
             .test_connection = command,
         });
@@ -1973,31 +1975,6 @@ pub const Runtime = struct {
         return self.model_connections.nextGeneration(current);
     }
 
-    pub fn prepareModelConnectionExecution(
-        self: *Runtime,
-        selection: models_contract.ModelConnectionSelectionCommand,
-        model_id: []const u8,
-        generation: u64,
-    ) models_contract.Preparation {
-        return self.model_connections.prepareExecution(selection, model_id, generation);
-    }
-
-    pub fn resolveModelConnectionProbeExecution(
-        self: *Runtime,
-        selection: models_contract.ModelConnectionSelectionCommand,
-        model_id: []const u8,
-        generation: u64,
-    ) !models_contract.OwnedConfig {
-        return self.model_connections.resolveProbeExecution(selection, model_id, generation);
-    }
-
-    pub fn resolveDefaultModelConnectionExecution(
-        self: *Runtime,
-        execution_generation: u64,
-    ) !?models_contract.OwnedConfig {
-        return self.model_connections.resolveDefaultExecution(execution_generation);
-    }
-
     fn reconcileModelsDefaultNoFail(
         self: *Runtime,
         refresh_aligned: bool,
@@ -2011,7 +1988,7 @@ pub const Runtime = struct {
         const aligned = self.execution_state.defaultAuthorityMatches(desired);
         if (aligned and !refresh_aligned and !clear_unresolvable) return;
 
-        var candidate = (self.model_connections.resolveDefaultCandidate() catch {
+        var candidate = (self.model_connections.resolveDefault() catch {
             if (clear_unresolvable and
                 self.execution_state.hasRecordedDefaultAuthority() and
                 self.execution_state.activeSource() == .metask)
@@ -2906,32 +2883,38 @@ pub const Runtime = struct {
     pub fn selectTaskModel(
         self: *Runtime,
         task_id: u64,
-        expected_model: []const u8,
-        expected_catalog_generation: u64,
-        model: []const u8,
+        input: TaskModelSelectionInput,
     ) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
         const identity = self.task_runtime.taskExecutionIdentity(task_id) orelse
             return error.UnknownTask;
-        if (expected_model.len == 0 or model.len == 0 or
-            expected_model.len > models_contract.Limits.model_id_bytes or
-            model.len > models_contract.Limits.model_id_bytes or
-            !std.unicode.utf8ValidateSlice(expected_model) or
-            !std.unicode.utf8ValidateSlice(model))
+        if (input.expected_model.len == 0 or input.target.source_id.len == 0 or
+            input.target.model_id.len == 0 or
+            input.expected_model.len > models_contract.Limits.model_id_bytes or
+            input.target.source_id.len > models_contract.Limits.provider_id_bytes or
+            input.target.model_id.len > models_contract.Limits.model_id_bytes or
+            input.expected_execution_generation == 0 or
+            input.expected_source_generation == 0 or
+            input.expected_catalog_generation == 0 or
+            !std.unicode.utf8ValidateSlice(input.expected_model) or
+            !std.unicode.utf8ValidateSlice(input.target.source_id) or
+            !std.unicode.utf8ValidateSlice(input.target.model_id))
             return error.InvalidTaskModel;
-        if (!std.mem.eql(u8, expected_model, identity.model))
+        if (!std.mem.eql(u8, input.expected_model, identity.model) or
+            input.expected_execution_generation != identity.generation)
             return error.TaskModelMismatch;
         if (!self.taskModelSelectionAuthorized(
             .{ .generation = identity.generation, .protocol = identity.protocol },
-            expected_catalog_generation,
-            model,
+            input.target,
+            input.expected_source_generation,
+            input.expected_catalog_generation,
         ))
             return error.StaleCatalog;
         _ = self.task_runtime.selectModel(
             task_id,
-            expected_model,
-            model,
+            input.expected_model,
+            input.target.model_id,
             &self.checkpoint_store_health,
             self.taskRuntimeTextProjection(),
             self.taskRuntimeDurableEffect(),
@@ -4087,8 +4070,8 @@ pub const Runtime = struct {
         try self.writeAccount(&writer);
         writer.writeAll(",\"models\":") catch return error.SnapshotTooLarge;
         try self.writeModels(&writer);
-        writer.writeAll(",\"execution\":") catch return error.SnapshotTooLarge;
-        try self.writeExecution(&writer);
+        writer.writeAll(",\"newTaskAdmission\":") catch return error.SnapshotTooLarge;
+        try self.writeNewTaskAdmission(&writer);
         writer.writeAll(",\"skillCatalog\":") catch
             return error.SnapshotTooLarge;
         try skill_runtime.Runtime.writeCatalogProjection(
@@ -4306,32 +4289,22 @@ pub const Runtime = struct {
         }
     }
 
-    fn writeExecution(
+    fn writeNewTaskAdmission(
         self: *Runtime,
         writer: *std.Io.Writer,
     ) Error!void {
-        const view = self.executionView();
-        writer.print("{{\"state\":\"{s}\",\"defaultSource\":", .{@tagName(view.state)}) catch
+        const view = self.newTaskAdmissionView();
+        writer.print("{{\"available\":{},\"reason\":\"{s}\",\"activeModelRef\":", .{
+            view.available,
+            @tagName(view.reason),
+        }) catch
             return error.SnapshotTooLarge;
-        try writeOptionalExecutionSource(writer, view.default_source);
-        writer.writeAll(",\"activeSource\":") catch return error.SnapshotTooLarge;
-        try writeOptionalExecutionSource(writer, view.active_source);
-        writer.print(",\"activeGeneration\":\"{d}\",\"taskCreationAvailable\":{},\"errorCode\":\"{s}\"}}", .{
+        try self.writeOptionalModelRef(writer, view.active_model_ref);
+        writer.print(",\"activeGeneration\":\"{d}\",\"activeSelectionRevision\":\"{d}\",\"state\":\"{s}\"}}", .{
             view.active_generation,
-            view.task_creation_available,
-            @tagName(view.error_code),
+            view.active_selection_revision,
+            @tagName(view.state),
         }) catch return error.SnapshotTooLarge;
-    }
-
-    fn writeOptionalExecutionSource(
-        writer: *std.Io.Writer,
-        source: ?models_contract.Source,
-    ) Error!void {
-        if (source) |value|
-            writer.print("\"{s}\"", .{@tagName(value)}) catch
-                return error.SnapshotTooLarge
-        else
-            writer.writeAll("null") catch return error.SnapshotTooLarge;
     }
 
     fn workspaceViewSignals(
@@ -4794,15 +4767,18 @@ pub const Runtime = struct {
     fn taskModelSelectionAuthorized(
         self: *const Runtime,
         identity: execution_state.ExecutionIdentity,
+        target: models_contract.ModelRef,
+        expected_source_generation: u64,
         expected_catalog_generation: u64,
-        model: []const u8,
     ) bool {
         return self.execution_state.taskModelSelectionBaseAuthorized(identity) and
             self.metaskBindingCurrent() and
-            self.model_connections.metaskModelAvailable(
+            self.execution_state.metaskSourceGeneration() == expected_source_generation and
+            self.model_connections.metaskSourceModelAvailable(
+                target,
+                expected_source_generation,
                 expected_catalog_generation,
                 identity.protocol,
-                model,
             );
     }
 
@@ -6966,7 +6942,7 @@ fn taskProfileFromSchedule(
     };
 }
 
-fn metaskStageError(err: anyerror) models_contract.AvailabilityError {
+fn metaskStageError(err: anyerror) execution_state.AdmissionReason {
     return switch (err) {
         error.ScheduledTaskPersistenceUnavailable => .schedule_persistence_unavailable,
         error.ScheduledTaskPersistenceFailed => .schedule_persistence_failed,
@@ -7694,6 +7670,25 @@ fn installTestExecution(control: *Runtime) !void {
 
 fn testRuntime() !Runtime {
     return testRuntimeWith(.{});
+}
+
+fn testTaskModelSelectionInput(
+    control: *Runtime,
+    expected_model: []const u8,
+    expected_execution_generation: u64,
+    target_model: []const u8,
+) TaskModelSelectionInput {
+    const models = control.modelsView();
+    return .{
+        .expected_model = expected_model,
+        .expected_execution_generation = expected_execution_generation,
+        .target = .{
+            .source_id = models.metask_selection.?.source_id,
+            .model_id = target_model,
+        },
+        .expected_source_generation = models.providers[0].source_generation,
+        .expected_catalog_generation = models.providers[0].catalog_generation,
+    };
 }
 
 fn testRuntimeWith(configuration: Configuration) !Runtime {
@@ -10379,7 +10374,7 @@ test "Account identity and Models execution publish through separate projections
     const models = control.modelsView();
     try std.testing.expectEqual(models_contract.CatalogState.ready, models.providers[0].catalog_state);
     try std.testing.expectEqualStrings("fixture-model", models.metask_selection.?.model_id);
-    try std.testing.expect(control.executionView().task_creation_available);
+    try std.testing.expect(control.newTaskAdmissionView().available);
 }
 
 test "identity replacement does not disturb live Task runtime references" {
@@ -10503,9 +10498,12 @@ test "default replacement preserves Task generation and installs the next admiss
         error.StaleCatalog,
         control.selectTaskModel(
             task.durable.id,
-            "fixture-model",
-            control.modelsView().providers[0].catalog_generation,
-            "fixture-model-2",
+            testTaskModelSelectionInput(
+                &control,
+                "fixture-model",
+                task.durable.execution_generation,
+                "fixture-model-2",
+            ),
         ),
     );
     try std.testing.expectEqualStrings("fixture-model", task.durable.execution_model);
@@ -10567,22 +10565,55 @@ test "busy Task model selection keeps only the last runtime pending model" {
         .{ .id = "fixture-model-3", .display_name = "Fixture model 3" },
     };
     try TestSupport.replaceMetaskCatalog(&control, &models, "fixture-model");
-    const catalog_generation = control.modelsView().providers[0].catalog_generation;
-
     const task = &control.task_runtime.tasks[0].?;
     const binding_epoch = task.durable.binding_epoch;
-    try control.selectTaskModel(task.durable.id, "fixture-model", catalog_generation, "fixture-model-2");
+    var cross_source = testTaskModelSelectionInput(
+        &control,
+        "fixture-model",
+        task.durable.execution_generation,
+        "fixture-model-2",
+    );
+    cross_source.target.source_id = "connection-1";
+    try std.testing.expectError(
+        error.StaleCatalog,
+        control.selectTaskModel(task.durable.id, cross_source),
+    );
+    try control.selectTaskModel(
+        task.durable.id,
+        testTaskModelSelectionInput(
+            &control,
+            "fixture-model",
+            task.durable.execution_generation,
+            "fixture-model-2",
+        ),
+    );
     try std.testing.expectEqualStrings("fixture-model", task.durable.execution_model);
     try std.testing.expectEqualStrings("fixture-model-2", task.runtime.pending_model.?);
     try std.testing.expectEqual(binding_epoch, task.durable.binding_epoch);
     try std.testing.expectEqual(@as(u64, 1), task.durable.execution_generation);
 
-    try control.selectTaskModel(task.durable.id, "fixture-model", catalog_generation, "fixture-model-3");
+    try control.selectTaskModel(
+        task.durable.id,
+        testTaskModelSelectionInput(
+            &control,
+            "fixture-model",
+            task.durable.execution_generation,
+            "fixture-model-3",
+        ),
+    );
     try std.testing.expectEqualStrings("fixture-model-3", task.runtime.pending_model.?);
     try std.testing.expectEqualStrings("fixture-model", task.durable.execution_model);
     try std.testing.expectError(
         error.TaskModelMismatch,
-        control.selectTaskModel(task.durable.id, "fixture-model-2", catalog_generation, "fixture-model"),
+        control.selectTaskModel(
+            task.durable.id,
+            testTaskModelSelectionInput(
+                &control,
+                "fixture-model-2",
+                task.durable.execution_generation,
+                "fixture-model",
+            ),
+        ),
     );
 }
 
@@ -10604,14 +10635,20 @@ test "user Model Connection cannot consume the current Metask catalog" {
     try std.testing.expect(!control.taskModelSelectionAuthorized(.{
         .generation = task.durable.execution_generation,
         .protocol = task.durable.execution_protocol,
-    }, control.modelsView().providers[0].catalog_generation, task.durable.execution_model));
+    }, .{
+        .source_id = control.modelsView().metask_selection.?.source_id,
+        .model_id = task.durable.execution_model,
+    }, control.modelsView().providers[0].source_generation, control.modelsView().providers[0].catalog_generation));
     try std.testing.expectError(
         error.StaleCatalog,
         control.selectTaskModel(
             task.durable.id,
-            task.durable.execution_model,
-            control.modelsView().providers[0].catalog_generation,
-            task.durable.execution_model,
+            testTaskModelSelectionInput(
+                &control,
+                task.durable.execution_model,
+                task.durable.execution_generation,
+                task.durable.execution_model,
+            ),
         ),
     );
 }
@@ -10632,7 +10669,7 @@ test "clearing the admission default preserves active Task execution" {
     control.setMetaskAuthorizationUnavailable();
 
     try std.testing.expect(!control.execution_state.ready());
-    try std.testing.expect(!control.executionView().task_creation_available);
+    try std.testing.expect(!control.newTaskAdmissionView().available);
     const preserved = try control.task_runtime.testExecutionInput(task.durable.id);
     try std.testing.expectEqual(@as(u64, 1), preserved.execution_generation);
     try std.testing.expectEqualStrings("fixture-model", preserved.target.model);

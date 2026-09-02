@@ -1,15 +1,20 @@
-import type {
-  AccountView,
-  ExecutionView,
-  ModelsView,
-} from "../../bridge/contracts.ts";
+import type { AccountView, ModelsView } from "../../bridge/contracts.ts";
+
+function metaskIsDefault(
+  models: Pick<ModelsView, "defaultSelection">,
+): boolean {
+  return (
+    models.defaultSelection === null ||
+    models.defaultSelection.sourceId.startsWith("metask:")
+  );
+}
 
 export function requiresAccountGate(
   account: Pick<AccountView, "state">,
-  execution: Pick<ExecutionView, "defaultSource">,
+  models: Pick<ModelsView, "defaultSelection">,
 ): boolean {
   return (
-    execution.defaultSource !== "model_connection" &&
+    metaskIsDefault(models) &&
     (account.state === "checking" || account.state === "authorizing")
   );
 }
@@ -23,13 +28,12 @@ export function requiresAccountGate(
  */
 export function requiresAccountSetup(
   account: Pick<AccountView, "state">,
-  models: Pick<ModelsView, "providers">,
-  execution: Pick<ExecutionView, "defaultSource">,
+  models: Pick<ModelsView, "providers" | "defaultSelection">,
 ): boolean {
   const metask = models.providers.find((provider) => provider.id === "metask");
   return (
     account.state === "authenticated" &&
-    execution.defaultSource !== "model_connection" &&
+    metaskIsDefault(models) &&
     (metask?.catalogState === "choosing" || metask?.catalogState === "failed")
   );
 }
