@@ -133,9 +133,11 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-agent-catalog", .root_module = test_modules.agent_catalog },
         .{ .name = "metawork-agent-checkpoint", .root_module = test_modules.agent_checkpoint },
         .{ .name = "metawork-agent-session", .root_module = test_modules.agent_session },
+        .{ .name = "metawork-product-attachment", .root_module = test_modules.product_attachment },
         .{ .name = "metawork-product-control", .root_module = test_modules.product_control_runtime },
         .{ .name = "metawork-product-control-executor", .root_module = test_modules.product_control_executor },
         .{ .name = "metawork-product-control-file-preview", .root_module = test_modules.product_control_file_preview },
+        .{ .name = "metawork-product-control-attachment-staging", .root_module = test_modules.product_control_attachment_staging },
         .{ .name = "metawork-product-control-file-change-io", .root_module = test_modules.product_control_file_change_io },
         .{ .name = "metawork-product-workspace-automatic-root", .root_module = test_modules.product_workspace_automatic_root },
         .{ .name = "metawork-product-workspace", .root_module = test_modules.product_workspace_runtime },
@@ -334,10 +336,12 @@ const WiredModules = struct {
     sdk: *std.Build.Module,
     product_control: *std.Build.Module,
     product_control_account_projection: *std.Build.Module,
+    product_attachment: *std.Build.Module,
     product_control_execution_state: *std.Build.Module,
     product_control_runtime: *std.Build.Module,
     product_control_executor: *std.Build.Module,
     product_control_file_preview: *std.Build.Module,
+    product_control_attachment_staging: *std.Build.Module,
     product_control_file_change_io: *std.Build.Module,
     product_workspace_automatic_root: *std.Build.Module,
     product_workspace: *std.Build.Module,
@@ -1053,6 +1057,17 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    const product_attachment = b.createModule(.{
+        .root_source_file = b.path("src/product/attachment.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    const attachment_staging = b.createModule(.{
+        .root_source_file = b.path("src/product/control/attachment_staging.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    attachment_staging.addImport("metawork_product_attachment", product_attachment);
     const file_preview = b.createModule(.{
         .root_source_file = b.path("src/product/control/file_preview.zig"),
         .target = target,
@@ -1494,6 +1509,8 @@ fn wireAgentCore(
         product_control_execution_state,
     );
     product_control_runtime.addImport("product_control_executor", executor);
+    product_control_runtime.addImport("metawork_product_attachment", product_attachment);
+    product_control_runtime.addImport("product_control_attachment_staging", attachment_staging);
     product_control_runtime.addImport("product_control_file_preview", file_preview);
     product_control_runtime.addImport("product_control_file_change_io", file_change_io);
     product_control_runtime.addImport("metawork_product_schedule", product_schedule);
@@ -1525,6 +1542,7 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
     });
     product_control.addImport("product_control_runtime", product_control_runtime);
+    product_control.addImport("metawork_product_attachment", product_attachment);
     product_control.addImport("metawork_product_workspace", product_workspace);
     product_control.addImport("metawork_product_skill", product_skill);
 
@@ -1673,10 +1691,12 @@ fn wireAgentCore(
         .sdk = sdk,
         .product_control = product_control,
         .product_control_account_projection = product_control_account_projection,
+        .product_attachment = product_attachment,
         .product_control_execution_state = product_control_execution_state,
         .product_control_runtime = product_control_runtime,
         .product_control_executor = executor,
         .product_control_file_preview = file_preview,
+        .product_control_attachment_staging = attachment_staging,
         .product_control_file_change_io = file_change_io,
         .product_workspace_automatic_root = product_workspace_automatic_root,
         .product_workspace = product_workspace,
