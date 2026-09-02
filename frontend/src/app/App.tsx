@@ -242,6 +242,8 @@ export default function App() {
   const [newTaskPermissionOverride, setNewTaskPermissionOverride] =
     useState<PermissionProfile | null>(null);
   const [skillCatalogBusy, setSkillCatalogBusy] = useState(false);
+  const [attachmentBusy, setAttachmentBusy] = useState(false);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [taskPending, setTaskPending] = useState<Record<string, string>>({});
   const [pendingTaskModels, setPendingTaskModels] = useState<
     Record<string, string>
@@ -252,6 +254,7 @@ export default function App() {
   const [inspectorFocusRequest, setInspectorFocusRequest] =
     useState<InspectorFocusRequest>(null);
   const [bridgeReady, setBridgeReady] = useState(false);
+  const [bridgeGeneration, setBridgeGeneration] = useState("0");
   const [viewSyncFailed, setViewSyncFailed] = useState(false);
   const {
     states: uiResponseStates,
@@ -615,6 +618,27 @@ export default function App() {
   const updateComposerDraft = newTaskDraftActive
     ? newTaskDrafts.updateDraft
     : taskDrafts.updateDraft;
+  const composerDraftRef = useRef(composerDraft);
+  composerDraftRef.current = composerDraft;
+  const composerDraftScope = newTaskDraftActive
+    ? `new-task:${newTaskDraftId ?? unscopedNewTaskDraftId}`
+    : `task:${activeTask?.id ?? "missing"}`;
+  const composerDraftScopeRef = useRef(composerDraftScope);
+  composerDraftScopeRef.current = composerDraftScope;
+  useEffect(() => setAttachmentError(null), [composerDraftScope]);
+  const previousBridgeGeneration = useRef(bridgeGeneration);
+  useEffect(() => {
+    const previous = previousBridgeGeneration.current;
+    previousBridgeGeneration.current = bridgeGeneration;
+    if (previous === "0" || previous === bridgeGeneration) return;
+    taskDrafts.invalidateAttachments();
+    newTaskDrafts.invalidateAttachments();
+    setAttachmentError(null);
+  }, [
+    bridgeGeneration,
+    newTaskDrafts.invalidateAttachments,
+    taskDrafts.invalidateAttachments,
+  ]);
   const bridgeUnavailable = viewSyncFailed || !bridgeReady;
   const hasTasks = snapshot.tasks.length !== 0;
   const accountSurface = accountSurfacePolicy(
@@ -710,7 +734,8 @@ export default function App() {
     composerRunInput !== null &&
     composerDraftWithinLimits(composerDraft) &&
     skillDraftCurrent &&
-    (composerDraft.kind === "text" || !skillCatalogBusy) &&
+    (composerDraft.kind !== "skill" || !skillCatalogBusy) &&
+    !attachmentBusy &&
     !taskMutationDisabled &&
     !workspaceBusy;
   const selectedModel = snapshot.account.models.find(
@@ -724,6 +749,29 @@ export default function App() {
   const customModelConnectionSelected =
     snapshot.execution.defaultSource === "model_connection" &&
     activeModelConnection !== undefined;
+  const composerModelMetadata = newTaskDraftActive
+    ? customModelConnectionSelected
+      ? null
+      : (selectedModel?.metadata ?? null)
+    : (snapshot.account.models.find(
+        (model) => model.selectionId === activeTask?.binding.model,
+      )?.metadata ?? null);
+  const imageDeclaredUnsupported =
+    composerDraft.kind === "multimodal" &&
+    composerModelMetadata?.capabilities.imageInput === false &&
+    composerDraft.attachments.some((attachment) => attachment.kind === "image");
+  const pdfDeclaredUnsupported =
+    composerDraft.kind === "multimodal" &&
+    composerModelMetadata?.capabilities.pdfInput === false &&
+    composerDraft.attachments.some((attachment) => attachment.kind === "pdf");
+  const attachmentModelWarning =
+    imageDeclaredUnsupported && pdfDeclaredUnsupported
+      ? ("both" as const)
+      : imageDeclaredUnsupported
+        ? ("image" as const)
+        : pdfDeclaredUnsupported
+          ? ("pdf" as const)
+          : null;
   const customModelConnectionContext = activeModelConnection
     ? `${activeModelConnection.displayName} · ${t(
         `settings.model_connection_protocol.${activeModelConnection.protocol}`,
@@ -904,10 +952,14 @@ export default function App() {
           observeContinuationSnapshot(next);
           observeUiResponseSnapshot(next);
           const projectedTaskIds = next.tasks.map((task) => task.id);
-          taskDrafts.pruneDrafts([
+          const discardedAttachments = taskDrafts.pruneDrafts([
             ...projectedTaskIds,
             ...pendingTaskDraftRetention.current,
           ]);
+          for (const attachment of discardedAttachments)
+            void client
+              .releaseAttachment(attachment.token)
+              .catch(() => undefined);
           for (const taskId of projectedTaskIds)
             pendingTaskDraftRetention.current.delete(taskId);
           dispatchWorkbench({ type: "snapshot.accepted", snapshot: next });
@@ -929,6 +981,9 @@ export default function App() {
       },
       onReady: (ready) => {
         if (!cancelled) setBridgeReady(ready);
+      },
+      onGeneration: (generation) => {
+        if (!cancelled) setBridgeGeneration(generation);
       },
       onViewSyncFailed: (failed) => {
         if (!cancelled) setViewSyncFailed(failed);
@@ -1678,6 +1733,68 @@ export default function App() {
     }
   }
 
+  async function chooseAttachments() {
+    if (
+      attachmentBusy ||
+      bridgeUnavailable ||
+      !snapshot.capabilities.attachments.enabled ||
+      composerDraftRef.current.kind === "skill"
+    )
+      return;
+    const requestedScope = composerDraftScopeRef.current;
+    setAttachmentBusy(true);
+    setAttachmentError(null);
+    try {
+      const result = await client.chooseAttachments();
+      if (result.status === "cancelled") return;
+      if (result.status === "rejected") {
+        setAttachmentError(result.reason);
+        return;
+      }
+      if (composerDraftScopeRef.current !== requestedScope) {
+        await Promise.allSettled(
+          result.attachments.map((attachment) =>
+            client.releaseAttachment(attachment.token),
+          ),
+        );
+        return;
+      }
+      const current = composerDraftRef.current as ComposerDraft;
+      if (current.kind === "skill") {
+        await Promise.allSettled(
+          result.attachments.map((attachment) =>
+            client.releaseAttachment(attachment.token),
+          ),
+        );
+        return;
+      }
+      const existing = current.kind === "multimodal" ? current.attachments : [];
+      updateComposerDraft({
+        kind: "multimodal",
+        text: current.text,
+        attachments: [...existing, ...result.attachments],
+      });
+    } catch (error) {
+      setAttachmentError(errorText(error));
+    } finally {
+      setAttachmentBusy(false);
+    }
+  }
+
+  async function removeAttachment(token: string) {
+    const current = composerDraftRef.current;
+    if (current.kind !== "multimodal") return;
+    await client.releaseAttachment(token).catch(() => undefined);
+    const attachments = current.attachments.filter(
+      (attachment) => attachment.token !== token,
+    );
+    updateComposerDraft(
+      attachments.length === 0
+        ? { kind: "text", text: current.text }
+        : { ...current, attachments },
+    );
+  }
+
   async function cancelRun() {
     if (
       viewSyncFailed ||
@@ -1823,6 +1940,12 @@ export default function App() {
   ): ComposerDraft | null {
     if (input.redacted) return null;
     if (input.kind === "text") return { kind: "text", text: input.text };
+    if (input.kind === "multimodal")
+      return {
+        kind: "text",
+        text: input.text ?? "",
+        attachmentsReloadRequired: true,
+      };
     const descriptor = skillCatalog.skills.find(
       (skill) => skill.skillId === input.skillId,
     );
@@ -2253,6 +2376,27 @@ export default function App() {
       }
       return;
     }
+    if (input.kind === "multimodal") {
+      if (composerDraftHasContent(composerDraft)) {
+        setStatus(
+          quietStatus("run.draft_preserved", {
+            scope: "task",
+            taskId: activeTask.id,
+          }),
+        );
+      } else {
+        const reusable = composerDraftFromRunInput(input);
+        if (reusable) updateComposerDraft(reusable);
+        setStatus(
+          quietStatus("run.retry_prepared", {
+            scope: "task",
+            taskId: activeTask.id,
+          }),
+        );
+      }
+      window.requestAnimationFrame(() => composer.current?.focus());
+      return;
+    }
     const prepared = prepareRetryDraft(composerDraft, input.text);
     switch (prepared.kind) {
       case "prepared":
@@ -2404,6 +2548,10 @@ export default function App() {
       )}
       unavailableReason={activeTask?.continuationUnavailableReason ?? null}
       draft={composerDraft}
+      attachmentsEnabled={snapshot.capabilities.attachments.enabled}
+      attachmentBusy={attachmentBusy}
+      attachmentError={attachmentError}
+      attachmentModelWarning={attachmentModelWarning}
       skillCatalog={skillCatalog}
       slashCommands={slashCommands}
       composeDisabled={!taskCanCompose || taskMutationDisabled}
@@ -2512,6 +2660,8 @@ export default function App() {
         )
       }
       onDraftChange={updateComposerDraft}
+      onChooseAttachments={() => void chooseAttachments()}
+      onRemoveAttachment={(token) => void removeAttachment(token)}
       onSubmit={() => void submitRun()}
       onStop={() =>
         void (activeTask?.activeOperation?.kind === "compact"

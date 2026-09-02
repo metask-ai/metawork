@@ -646,8 +646,11 @@ export class BridgeClient {
   }
 
   async chooseAttachments() {
+    // Like Workspace and Skill pickers, this command includes a user-controlled
+    // native modal. A fixed Bridge timeout would abandon a valid selection and
+    // leave the resulting staged grants without a Renderer consumer.
     return decodeAttachmentChooseResult(
-      await this.invoke(commands.chooseAttachments, {}),
+      await this.bridge().invoke(commands.chooseAttachments, {}),
     );
   }
 

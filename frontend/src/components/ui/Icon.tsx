@@ -19,6 +19,7 @@ import {
   Plus,
   Puzzle,
   Package,
+  Paperclip,
   Plug,
   Radar,
   RefreshCw,
@@ -71,6 +72,7 @@ type IconName =
   | "upload"
   | "folder-up"
   | "package"
+  | "paperclip"
   | "download"
   | "trash"
   | "scheduled-tasks"
@@ -112,6 +114,7 @@ const icons: Record<IconName, LucideIcon> = {
   upload: FolderUp,
   "folder-up": FolderUp,
   package: Package,
+  paperclip: Paperclip,
   download: Download,
   trash: Trash2,
   "scheduled-tasks": Clock3,

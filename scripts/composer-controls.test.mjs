@@ -81,7 +81,7 @@ HTMLButtonElement.prototype.getBoundingClientRect = () => ({
   },
 });
 
-const { cleanup, fireEvent, render, screen, waitFor, within } =
+const { act, cleanup, fireEvent, render, screen, waitFor, within } =
   await import("@testing-library/react");
 const { default: userEvent } = await import("@testing-library/user-event");
 
@@ -737,6 +737,7 @@ test("Settings closes on Escape at the surface boundary", () => {
 function renderComposer(overrides = {}) {
   const textareaRef = createRef();
   let submissions = 0;
+  let setDraftFromTest = null;
   const initialDraft = overrides.draft ?? {
     kind: "text",
     text: "请检查当前实现",
@@ -744,6 +745,7 @@ function renderComposer(overrides = {}) {
   const externalOnDraftChange = overrides.onDraftChange;
   function ComposerHarness() {
     const [draft, setDraft] = useState(initialDraft);
+    setDraftFromTest = setDraft;
     return createElement(ComposerFooter, {
       textareaRef,
       archived: false,
@@ -752,6 +754,10 @@ function renderComposer(overrides = {}) {
       unavailable: false,
       unavailableReason: null,
       draft,
+      attachmentsEnabled: false,
+      attachmentBusy: false,
+      attachmentError: null,
+      attachmentModelWarning: null,
       skillCatalog: {
         availability: "ready",
         redacted: false,
@@ -782,6 +788,8 @@ function renderComposer(overrides = {}) {
       onSubmit() {
         submissions += 1;
       },
+      onChooseAttachments() {},
+      onRemoveAttachment() {},
       onSlashCommand() {},
       onRefreshSkillCatalog() {},
       onConfirmAccess() {},
@@ -811,6 +819,10 @@ function renderComposer(overrides = {}) {
   return {
     textarea: textareaRef.current,
     submissions: () => submissions,
+    setDraft(value) {
+      assert.ok(setDraftFromTest);
+      setDraftFromTest(value);
+    },
   };
 }
 
@@ -1087,4 +1099,101 @@ test("variadic Skills expose unnamed argument slots up to maxValues", () => {
       maxValues: 3,
     },
   ]);
+});
+
+test("multimodal drafts expose ordered removable chips and preserve keyboard focus", async () => {
+  const removed = [];
+  let composer;
+  composer = renderComposer({
+    attachmentsEnabled: true,
+    attachmentModelWarning: "image",
+    draft: {
+      kind: "multimodal",
+      text: "Compare these files",
+      attachments: [
+        {
+          token: "a".repeat(48),
+          kind: "image",
+          format: "png",
+          displayName: "diagram.png",
+          sizeBytes: "1536",
+        },
+        {
+          token: "b".repeat(48),
+          kind: "pdf",
+          format: "pdf",
+          displayName: "brief.pdf",
+          sizeBytes: "2048",
+        },
+      ],
+    },
+    onRemoveAttachment(token) {
+      removed.push(token);
+    },
+  });
+  assert.equal(composer.textarea.value, "Compare these files");
+  assert.equal(screen.getAllByRole("listitem").length, 2);
+  assert.match(
+    screen.getByText("diagram.png").parentElement.textContent,
+    /2 KB/,
+  );
+  assert.match(
+    screen.getByRole("status").textContent,
+    /image input is unsupported/,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Remove diagram.png" }));
+  assert.deepEqual(removed, ["a".repeat(48)]);
+  act(() =>
+    composer.setDraft({
+      kind: "multimodal",
+      text: "Compare these files",
+      attachments: [
+        {
+          token: "b".repeat(48),
+          kind: "pdf",
+          format: "pdf",
+          displayName: "brief.pdf",
+          sizeBytes: "2048",
+        },
+      ],
+    }),
+  );
+  await new Promise((resolve) => window.requestAnimationFrame(resolve));
+  assert.equal(
+    document.activeElement,
+    screen.getByRole("button", { name: "Remove brief.pdf" }),
+  );
+});
+
+test("removing the last attachment returns keyboard focus to the picker", async () => {
+  const removed = [];
+  let composer;
+  composer = renderComposer({
+    attachmentsEnabled: true,
+    draft: {
+      kind: "multimodal",
+      text: "",
+      attachments: [
+        {
+          token: "a".repeat(48),
+          kind: "image",
+          format: "png",
+          displayName: "diagram.png",
+          sizeBytes: "1536",
+        },
+      ],
+    },
+    onRemoveAttachment(token) {
+      removed.push(token);
+    },
+  });
+
+  fireEvent.click(screen.getByRole("button", { name: "Remove diagram.png" }));
+  assert.deepEqual(removed, ["a".repeat(48)]);
+  act(() => composer.setDraft({ kind: "text", text: "" }));
+  await new Promise((resolve) => window.requestAnimationFrame(resolve));
+  assert.equal(
+    document.activeElement,
+    screen.getByRole("button", { name: "Add images or PDFs" }),
+  );
 });

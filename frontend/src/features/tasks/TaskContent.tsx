@@ -28,6 +28,14 @@ import {
 
 type ReadingState = { scrollTop: number; followingLatest: boolean };
 
+function formatAttachmentSize(value: string) {
+  const bytes = Number(value);
+  if (!Number.isSafeInteger(bytes) || bytes <= 0) return value;
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.ceil(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 function outcomeMessage(outcome: NonNullable<RunView["outcome"]>): MessageId {
   switch (outcome) {
     case "completed":
@@ -108,7 +116,7 @@ function TaskInput({ input }: { input: RunInputView }) {
   const content =
     input.kind === "text" ? (
       <p className="task-input-copy">{input.text}</p>
-    ) : (
+    ) : input.kind === "skill" ? (
       <div className="task-skill-input">
         <span className="task-skill-token">
           /{input.invocationName}
@@ -121,6 +129,32 @@ function TaskInput({ input }: { input: RunInputView }) {
             ))}
           </span>
         )}
+      </div>
+    ) : (
+      <div className="task-multimodal-input">
+        {input.text && <p className="task-input-copy">{input.text}</p>}
+        <div className="task-input-attachments" role="list">
+          {input.attachments.map((attachment, index) => (
+            <span
+              className="task-input-attachment"
+              role="listitem"
+              key={`${attachment.displayName}:${index}`}
+            >
+              <span aria-hidden="true">
+                {attachment.kind === "pdf"
+                  ? "PDF"
+                  : attachment.format.toUpperCase()}
+              </span>
+              <strong dir="auto">{attachment.displayName}</strong>
+              <small>
+                {attachment.kind === "pdf"
+                  ? t("attachment.type.pdf")
+                  : `${t("attachment.type.image")} · ${attachment.format.toUpperCase()}`}
+                {` · ${formatAttachmentSize(attachment.sizeBytes)}`}
+              </small>
+            </span>
+          ))}
+        </div>
       </div>
     );
 

@@ -145,6 +145,18 @@ test("Run input conversion rejects unresolved Slash outside the UI layer", () =>
       attachmentTokens: ["a".repeat(48), "b".repeat(48)],
     },
   );
+  assert.deepEqual(
+    composerDraftToRunInput({
+      kind: "multimodal",
+      text: "",
+      attachments: [attachments[0]],
+    }),
+    {
+      kind: "multimodal",
+      text: "",
+      attachmentTokens: ["a".repeat(48)],
+    },
+  );
   assert.equal(
     composerDraftToRunInput({
       kind: "multimodal",

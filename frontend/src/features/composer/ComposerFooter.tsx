@@ -14,7 +14,7 @@ import { Icon } from "../../components/ui/Icon.tsx";
 import { Button } from "../../components/ui/button.tsx";
 import { Input } from "../../components/ui/input.tsx";
 import { Textarea } from "../../components/ui/textarea.tsx";
-import { useI18n } from "../../i18n/context.ts";
+import { useI18n, type MessageId } from "../../i18n/context.ts";
 import { maxComposerCharacters } from "./drafts.ts";
 import { ModelSelector } from "./ModelSelector.tsx";
 import { SlashMenu } from "./SlashMenu.tsx";
@@ -27,6 +27,7 @@ import {
   skillDraftFromCandidate,
   skillDraftVisibleArgumentCount,
   type ComposerDraft,
+  type ComposerAttachment,
   type ComposerSkillDraft,
   type SlashCandidate,
   type SlashCommandName,
@@ -42,6 +43,36 @@ function resizeComposerTextarea(textarea: HTMLTextAreaElement) {
     textarea.scrollHeight > maxHeight ? "auto" : "hidden";
 }
 
+function formatAttachmentSize(value: string) {
+  const bytes = Number(value);
+  if (!Number.isSafeInteger(bytes) || bytes <= 0) return value;
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.ceil(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function attachmentTypeLabel(
+  attachment: ComposerAttachment,
+  t: ReturnType<typeof useI18n>["t"],
+) {
+  return attachment.kind === "pdf"
+    ? t("attachment.type.pdf")
+    : t("attachment.type.image");
+}
+
+function attachmentErrorMessage(reason: string): MessageId {
+  const messages: Record<string, MessageId> = {
+    unsupported_type: "attachment.error.unsupported_type",
+    file_too_large: "attachment.error.file_too_large",
+    too_many_files: "attachment.error.too_many_files",
+    staging_capacity: "attachment.error.staging_capacity",
+    read_failed: "attachment.error.read_failed",
+    file_changed: "attachment.error.file_changed",
+    shutting_down: "attachment.error.shutting_down",
+  };
+  return messages[reason] ?? "attachment.error.generic";
+}
+
 export function ComposerFooter({
   textareaRef,
   archived,
@@ -49,6 +80,10 @@ export function ComposerFooter({
   unavailable,
   unavailableReason,
   draft,
+  attachmentsEnabled,
+  attachmentBusy,
+  attachmentError,
+  attachmentModelWarning,
   skillCatalog,
   slashCommands,
   composeDisabled,
@@ -72,6 +107,8 @@ export function ComposerFooter({
   stopAction,
   stopDisabled,
   onDraftChange,
+  onChooseAttachments,
+  onRemoveAttachment,
   onSubmit,
   onStop,
   onSlashCommand,
@@ -86,6 +123,10 @@ export function ComposerFooter({
   unavailable: boolean;
   unavailableReason: TaskView["continuationUnavailableReason"];
   draft: ComposerDraft;
+  attachmentsEnabled: boolean;
+  attachmentBusy: boolean;
+  attachmentError: string | null;
+  attachmentModelWarning: "image" | "pdf" | "both" | null;
   skillCatalog: SkillCatalogView;
   slashCommands: readonly SlashCommandState[];
   composeDisabled: boolean;
@@ -119,6 +160,8 @@ export function ComposerFooter({
   stopAction: "run" | "compact" | null;
   stopDisabled: boolean;
   onDraftChange: (value: ComposerDraft) => void;
+  onChooseAttachments: () => void;
+  onRemoveAttachment: (token: string) => void;
   onSubmit: () => void;
   onStop: () => void;
   onSlashCommand: (command: SlashCommandName) => void;
@@ -137,16 +180,24 @@ export function ComposerFooter({
   const skillRemoveButtonRef = useRef<HTMLButtonElement>(null);
   const sendButtonRef = useRef<HTMLButtonElement>(null);
   const stopButtonRef = useRef<HTMLButtonElement>(null);
-  const text = draft.kind === "text" ? draft.text : "";
+  const attachmentButtonRef = useRef<HTMLButtonElement>(null);
+  const attachmentRemoveRefs = useRef(new Map<string, HTMLElement>());
+  const pendingAttachmentFocusRef = useRef<{
+    removedToken: string;
+    adjacentToken: string | null;
+  } | null>(null);
+  const text = draft.kind === "skill" ? "" : draft.text;
   const draftFocusIdentity =
     draft.kind === "skill"
       ? `skill:${draft.skillId}:${draft.catalogRevision}:${draft.selectionRevision}`
-      : "text";
+      : draft.kind;
   const previousDraftFocusIdentity = useRef(draftFocusIdentity);
   const slashInput = useMemo(
     () => (draft.kind === "text" ? parseSlashInput(draft.text) : null),
     [draft],
   );
+  const attachmentSkillConflict =
+    draft.kind === "multimodal" && parseSlashInput(draft.text) !== null;
   const menuOpen = Boolean(slashInput && !menuDismissed && !composing);
   const sendEnabled = canSubmit && slashInput === null;
   const skillDraftCurrent =
@@ -186,6 +237,7 @@ export function ComposerFooter({
   useEffect(() => {
     if (previousDraftFocusIdentity.current === draftFocusIdentity) return;
     previousDraftFocusIdentity.current = draftFocusIdentity;
+    if (pendingAttachmentFocusRef.current) return;
     const frame = window.requestAnimationFrame(() => {
       const firstArgument = firstSkillArgumentRef.current;
       const sendButton = sendButtonRef.current;
@@ -205,6 +257,27 @@ export function ComposerFooter({
     });
     return () => window.cancelAnimationFrame(frame);
   }, [draft.kind, draftFocusIdentity, textareaRef]);
+
+  useEffect(() => {
+    const pending = pendingAttachmentFocusRef.current;
+    if (!pending) return;
+    if (
+      draft.kind === "multimodal" &&
+      draft.attachments.some(
+        (attachment) => attachment.token === pending.removedToken,
+      )
+    )
+      return;
+    const frame = window.requestAnimationFrame(() => {
+      if (pendingAttachmentFocusRef.current !== pending) return;
+      const target = pending.adjacentToken
+        ? attachmentRemoveRefs.current.get(pending.adjacentToken)
+        : attachmentButtonRef.current;
+      target?.focus();
+      pendingAttachmentFocusRef.current = null;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [draft]);
 
   useEffect(() => {
     const textarea = textareaRef.current;
@@ -262,6 +335,32 @@ export function ComposerFooter({
     }
   }
 
+  function updateText(value: string) {
+    if (draft.kind === "multimodal") {
+      onDraftChange({ ...draft, text: value });
+      return;
+    }
+    onDraftChange({
+      kind: "text",
+      text: value,
+      ...(draft.kind === "text" && draft.attachmentsReloadRequired
+        ? { attachmentsReloadRequired: true as const }
+        : {}),
+    });
+  }
+
+  function removeAttachment(attachment: ComposerAttachment, index: number) {
+    const adjacent =
+      draft.kind === "multimodal"
+        ? (draft.attachments[index + 1] ?? draft.attachments[index - 1])
+        : undefined;
+    pendingAttachmentFocusRef.current = {
+      removedToken: attachment.token,
+      adjacentToken: adjacent?.token ?? null,
+    };
+    onRemoveAttachment(attachment.token);
+  }
+
   function updateSkillArgument(
     skill: ComposerSkillDraft,
     index: number,
@@ -314,53 +413,124 @@ export function ComposerFooter({
                 : "normal"
           }
         >
-          {draft.kind === "text" ? (
-            <Textarea
-              ref={textareaRef}
-              value={draft.text}
-              maxLength={maxComposerCharacters}
-              disabled={composeDisabled}
-              role="combobox"
-              aria-autocomplete="list"
-              aria-expanded={menuOpen}
-              aria-controls={menuOpen ? "composer-slash-menu" : undefined}
-              aria-activedescendant={
-                menuOpen && activeCandidate
-                  ? `slash-option-${activeCandidate.key.replaceAll(":", "-")}`
-                  : undefined
-              }
-              placeholder={
-                closing
-                  ? t("run.placeholder_closing")
-                  : unavailable
-                    ? t(
-                        unavailableReason === "session_recovery_required" ||
-                          unavailableReason ===
-                            "session_recovery_in_progress" ||
-                          unavailableReason === "session_recovery_failed"
-                          ? "run.placeholder"
-                          : unavailableReason === "execution_rebind_required"
-                            ? "run.placeholder_execution_rebind_required"
-                            : "run.placeholder_unavailable",
-                      )
-                    : archived
-                      ? t("run.placeholder_archived")
-                      : t("run.placeholder")
-              }
-              onCompositionStart={() => setComposing(true)}
-              onCompositionEnd={(event) => {
-                setComposing(false);
-                onDraftChange({
-                  kind: "text",
-                  text: event.currentTarget.value,
-                });
-              }}
-              onChange={(event) => {
-                setMenuDismissed(false);
-                onDraftChange({ kind: "text", text: event.target.value });
-              }}
-              onKeyDown={handleTextKeyDown}
-            />
+          {draft.kind !== "skill" ? (
+            <>
+              {draft.kind === "multimodal" && (
+                <div
+                  className="composer-attachments"
+                  role="list"
+                  aria-label={t("attachment.selected")}
+                >
+                  {draft.attachments.map((attachment, index) => (
+                    <div
+                      className="composer-attachment"
+                      role="listitem"
+                      key={attachment.token}
+                    >
+                      <span
+                        className="composer-attachment-kind"
+                        aria-hidden="true"
+                      >
+                        {attachment.kind === "pdf"
+                          ? "PDF"
+                          : attachment.format.toUpperCase()}
+                      </span>
+                      <span className="composer-attachment-copy">
+                        <strong dir="auto" title={attachment.displayName}>
+                          {attachment.displayName}
+                        </strong>
+                        <small>
+                          {attachmentTypeLabel(attachment, t)} ·{" "}
+                          {formatAttachmentSize(attachment.sizeBytes)}
+                        </small>
+                      </span>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        ref={(node) => {
+                          if (node)
+                            attachmentRemoveRefs.current.set(
+                              attachment.token,
+                              node,
+                            );
+                          else
+                            attachmentRemoveRefs.current.delete(
+                              attachment.token,
+                            );
+                        }}
+                        className="composer-attachment-remove"
+                        aria-label={t("attachment.remove", {
+                          name: attachment.displayName,
+                        })}
+                        disabled={composeDisabled || attachmentBusy}
+                        onClick={() => removeAttachment(attachment, index)}
+                      >
+                        <Icon name="close" />
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {draft.kind === "text" && draft.attachmentsReloadRequired && (
+                <p className="composer-attachment-notice" role="status">
+                  {t("attachment.reload_required")}
+                </p>
+              )}
+              {attachmentSkillConflict && (
+                <p className="composer-attachment-notice" role="status">
+                  {t("attachment.skill_conflict")}
+                </p>
+              )}
+              {attachmentModelWarning && (
+                <p className="composer-attachment-capability" role="status">
+                  {t(`attachment.model_warning.${attachmentModelWarning}`)}
+                </p>
+              )}
+              <Textarea
+                ref={textareaRef}
+                value={draft.text}
+                maxLength={maxComposerCharacters}
+                disabled={composeDisabled}
+                role="combobox"
+                aria-autocomplete="list"
+                aria-expanded={menuOpen}
+                aria-controls={menuOpen ? "composer-slash-menu" : undefined}
+                aria-activedescendant={
+                  menuOpen && activeCandidate
+                    ? `slash-option-${activeCandidate.key.replaceAll(":", "-")}`
+                    : undefined
+                }
+                placeholder={
+                  closing
+                    ? t("run.placeholder_closing")
+                    : unavailable
+                      ? t(
+                          unavailableReason === "session_recovery_required" ||
+                            unavailableReason ===
+                              "session_recovery_in_progress" ||
+                            unavailableReason === "session_recovery_failed"
+                            ? "run.placeholder"
+                            : unavailableReason === "execution_rebind_required"
+                              ? "run.placeholder_execution_rebind_required"
+                              : "run.placeholder_unavailable",
+                        )
+                      : archived
+                        ? t("run.placeholder_archived")
+                        : t("run.placeholder")
+                }
+                onCompositionStart={() => setComposing(true)}
+                onCompositionEnd={(event) => {
+                  setComposing(false);
+                  updateText(event.currentTarget.value);
+                }}
+                onChange={(event) => {
+                  setMenuDismissed(false);
+                  updateText(event.target.value);
+                }}
+                onKeyDown={handleTextKeyDown}
+              />
+            </>
           ) : (
             <div className="skill-draft">
               <div className="skill-draft-identity">
@@ -476,21 +646,39 @@ export function ComposerFooter({
             role="group"
             aria-label={t("run.context")}
           >
-            {modelLabel && (
-              <span className="composer-model-context">
-                <span className="sr-only">{t("account.model")}</span>
-                <ModelSelector
-                  label={modelLabel}
-                  options={modelOptions}
-                  selectedId={selectedModelId}
-                  editable={modelEditable}
-                  disabled={modelSelectionDisabled}
-                  pending={modelSelectionPending}
-                  contextTitle={modelContextTitle}
-                  onSelect={onSelectModel}
-                />
-              </span>
-            )}
+            <div className="composer-context-actions">
+              {attachmentsEnabled && draft.kind !== "skill" && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  ref={attachmentButtonRef}
+                  className="composer-attachment-add"
+                  data-busy={attachmentBusy || undefined}
+                  aria-label={t("attachment.add")}
+                  title={t("attachment.add")}
+                  disabled={composeDisabled || attachmentBusy}
+                  onClick={onChooseAttachments}
+                >
+                  <Icon name={attachmentBusy ? "loading" : "paperclip"} />
+                </Button>
+              )}
+              {modelLabel && (
+                <span className="composer-model-context">
+                  <span className="sr-only">{t("account.model")}</span>
+                  <ModelSelector
+                    label={modelLabel}
+                    options={modelOptions}
+                    selectedId={selectedModelId}
+                    editable={modelEditable}
+                    disabled={modelSelectionDisabled}
+                    pending={modelSelectionPending}
+                    contextTitle={modelContextTitle}
+                    onSelect={onSelectModel}
+                  />
+                </span>
+              )}
+            </div>
             {stopAction ? (
               <Button
                 type="button"
@@ -526,6 +714,11 @@ export function ComposerFooter({
             )}
           </div>
         </Composer>
+        {attachmentError && (
+          <p className="composer-attachment-error" role="alert">
+            {t(attachmentErrorMessage(attachmentError))}
+          </p>
+        )}
         <WorkspaceContextSelector
           accessRequired={accessRequired}
           missing={workspaceMissing}

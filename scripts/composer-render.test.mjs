@@ -41,6 +41,10 @@ const base = {
   unavailable: false,
   unavailableReason: null,
   draft: { kind: "text", text: "" },
+  attachmentsEnabled: false,
+  attachmentBusy: false,
+  attachmentError: null,
+  attachmentModelWarning: null,
   skillCatalog: {
     availability: "ready",
     redacted: false,
@@ -79,6 +83,8 @@ const base = {
   stopAction: null,
   stopDisabled: false,
   onDraftChange() {},
+  onChooseAttachments() {},
+  onRemoveAttachment() {},
   onSubmit() {},
   onStop() {},
   onSlashCommand() {},
@@ -482,6 +488,38 @@ test("Task content preserves typed Skill identity and positional arguments", () 
   assert.match(markup, /task-skill-token/);
   assert.match(markup, />\/review/);
   assert.match(markup, />src\/main\.zig</);
+});
+
+test("Task content renders multimodal history as metadata-only attachment chips", () => {
+  const markup = renderCompletedSurface("Analysis complete", {
+    kind: "multimodal",
+    text: "Inspect these files",
+    attachments: [
+      {
+        kind: "image",
+        format: "png",
+        displayName: "diagram.png",
+        mediaType: "image/png",
+        sizeBytes: "2048",
+        redacted: false,
+      },
+      {
+        kind: "pdf",
+        format: "pdf",
+        displayName: "brief.pdf",
+        mediaType: "application/pdf",
+        sizeBytes: "4096",
+        redacted: false,
+      },
+    ],
+    redacted: false,
+  });
+
+  assert.match(markup, /task-input-attachments/);
+  assert.match(markup, /diagram\.png/);
+  assert.match(markup, /brief\.pdf/);
+  assert.match(markup, /2 KB/);
+  assert.doesNotMatch(markup, /attachmentToken|token|file:\/\/|\/Users\//);
 });
 
 test("Task content marks redacted Text and Skill inputs consistently", () => {
