@@ -1,86 +1,18 @@
 //! Product Account OAuth callback policy and loopback endpoint contract.
 const std = @import("std");
 const oauth = @import("account_oauth");
+const mechanics = @import("oauth_loopback");
 
 pub const Limits = struct {
     pub const invalid_requests: usize = 4;
 };
 
-pub const ServerError = error{
-    BindFailed,
-    PortUnavailable,
-    Cancelled,
-    DeadlineExceeded,
-    RequestInvalid,
-    TooManyInvalidRequests,
-    IoFailed,
-};
-
-pub const Method = enum { get, other };
-
-/// Callback-scoped request metadata. The target is borrowed only for the
-/// duration of `RequestSink.handle`; Product policy must copy any retained
-/// value before returning.
-pub const Request = struct {
-    method: Method,
-    target: []const u8,
-    has_content_length: bool,
-    has_transfer_encoding: bool,
-};
-
-pub const Response = struct {
-    status: enum { ok, bad_request },
-    body: []const u8,
-    complete: bool,
-};
-
-pub const RequestSink = struct {
-    context: *anyopaque,
-    invalid_fn: *const fn (*anyopaque) ServerError!void,
-    handle_fn: *const fn (*anyopaque, Request) ServerError!Response,
-
-    pub fn invalid(self: RequestSink) ServerError!void {
-        return self.invalid_fn(self.context);
-    }
-
-    pub fn handle(self: RequestSink, request: Request) ServerError!Response {
-        return self.handle_fn(self.context, request);
-    }
-};
-
-/// Account-owned capability port. The concrete listener, connections,
-/// cancellation race, deadlines and byte pump remain behind Application.
-pub const Endpoint = struct {
-    context: *anyopaque,
-    open_fn: *const fn (*anyopaque) ServerError!u16,
-    wait_fn: *const fn (
-        *anyopaque,
-        RequestSink,
-        std.Io.Clock.Timestamp,
-    ) ServerError!void,
-    cancel_fn: *const fn (*anyopaque) void,
-    close_fn: *const fn (*anyopaque) void,
-
-    pub fn open(self: Endpoint) ServerError!u16 {
-        return self.open_fn(self.context);
-    }
-
-    pub fn wait(
-        self: Endpoint,
-        sink: RequestSink,
-        deadline: std.Io.Clock.Timestamp,
-    ) ServerError!void {
-        return self.wait_fn(self.context, sink, deadline);
-    }
-
-    pub fn cancel(self: Endpoint) void {
-        self.cancel_fn(self.context);
-    }
-
-    pub fn close(self: Endpoint) void {
-        self.close_fn(self.context);
-    }
-};
+pub const ServerError = mechanics.ServerError;
+pub const Method = mechanics.Method;
+pub const Request = mechanics.Request;
+pub const Response = mechanics.Response;
+pub const RequestSink = mechanics.RequestSink;
+pub const Endpoint = mechanics.Endpoint;
 
 /// OAuth callback policy and owned result collector. It knows state, issuer,
 /// code/error semantics and the invalid-request budget, but no socket or HTTP

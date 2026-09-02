@@ -98,6 +98,8 @@ pub fn build(b: *std.Build) void {
         name: []const u8,
         root_module: *std.Build.Module,
     }{
+        .{ .name = "metawork-oauth-mechanics", .root_module = test_modules.oauth_mechanics },
+        .{ .name = "metawork-oauth-loopback", .root_module = test_modules.oauth_loopback },
         .{ .name = "metawork-product-execution-contract", .root_module = test_modules.execution_contract },
         .{ .name = "metawork-product-agent-protocol-adapter", .root_module = test_modules.product_agent_protocol_adapter },
         .{ .name = "metawork-account-contract", .root_module = test_modules.account_contract },
@@ -289,6 +291,8 @@ fn addLifecycleTests(
 
 const WiredModules = struct {
     storage: *std.Build.Module,
+    oauth_mechanics: *std.Build.Module,
+    oauth_loopback: *std.Build.Module,
     execution_contract: *std.Build.Module,
     product_agent_protocol_adapter: *std.Build.Module,
     account: *std.Build.Module,
@@ -329,6 +333,7 @@ const WiredModules = struct {
     event_pump: *std.Build.Module,
     sdk: *std.Build.Module,
     product_control: *std.Build.Module,
+    product_control_account_projection: *std.Build.Module,
     product_control_execution_state: *std.Build.Module,
     product_control_runtime: *std.Build.Module,
     product_control_executor: *std.Build.Module,
@@ -897,25 +902,36 @@ fn wireAgentCore(
     });
     account_state.addImport("metawork_account_contract", account_contract);
     account_state.addImport("metawork_product_execution_contract", execution_contract);
+    const oauth_mechanics = b.createModule(.{
+        .root_source_file = b.path("src/oauth/mechanics.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    const oauth_loopback = b.createModule(.{
+        .root_source_file = b.path("src/oauth/loopback.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
     const account_oauth = b.createModule(.{
         .root_source_file = b.path("src/product/account/oauth.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     account_oauth.addImport("metawork_account_contract", account_contract);
+    account_oauth.addImport("oauth_mechanics", oauth_mechanics);
     const account_loopback = b.createModule(.{
         .root_source_file = b.path("src/product/account/loopback.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     account_loopback.addImport("account_oauth", account_oauth);
+    account_loopback.addImport("oauth_loopback", oauth_loopback);
     const oauth_loopback_transport = b.createModule(.{
         .root_source_file = b.path("src/app/oauth_loopback_transport.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
-    oauth_loopback_transport.addImport("account_oauth", account_oauth);
-    oauth_loopback_transport.addImport("account_loopback", account_loopback);
+    oauth_loopback_transport.addImport("oauth_loopback", oauth_loopback);
     const metask_client = b.createModule(.{
         .root_source_file = b.path("src/product/account/metask_client.zig"),
         .target = target,
@@ -1404,15 +1420,24 @@ fn wireAgentCore(
     product_mcp_runtime.addImport("product_mcp_refresh_job", product_mcp_refresh_job);
     product_mcp.addImport("product_mcp_ports", product_mcp_ports);
     product_mcp.addImport("product_mcp_runtime", product_mcp_runtime);
+    const product_control_account_projection = b.createModule(.{
+        .root_source_file = b.path("src/product/control/account_projection.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    product_control_account_projection.addImport(
+        "metawork_account_contract",
+        account_contract,
+    );
+    product_control_account_projection.addImport(
+        "metawork_product_execution_contract",
+        execution_contract,
+    );
     const product_control_execution_state = b.createModule(.{
         .root_source_file = b.path("src/product/control/execution_state.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
-    product_control_execution_state.addImport(
-        "metawork_account_contract",
-        account_contract,
-    );
     product_control_execution_state.addImport(
         "metawork_product_execution_contract",
         execution_contract,
@@ -1426,10 +1451,6 @@ fn wireAgentCore(
     product_control_ports.addImport("metawork_account_contract", account_contract);
     product_control_ports.addImport("metawork_product_execution_contract", execution_contract);
     product_control_ports.addImport("product_execution_ports", execution_ports);
-    product_control_ports.addImport(
-        "product_control_execution_state",
-        product_control_execution_state,
-    );
     product_control_ports.addImport("metawork_product_mcp", product_mcp);
     product_control_ports.addImport("metawork_product_schedule", product_schedule);
     const product_workspace_runtime = b.createModule(.{
@@ -1464,6 +1485,10 @@ fn wireAgentCore(
     product_control_runtime.addImport("metawork_product_execution_contract", execution_contract);
     product_control_runtime.addImport("product_execution_runtime", execution_runtime);
     product_control_runtime.addImport("product_execution_ports", execution_ports);
+    product_control_runtime.addImport(
+        "product_control_account_projection",
+        product_control_account_projection,
+    );
     product_control_runtime.addImport(
         "product_control_execution_state",
         product_control_execution_state,
@@ -1554,8 +1579,8 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
-    mcp_oauth.addImport("account_oauth", account_oauth);
-    mcp_oauth.addImport("account_loopback", account_loopback);
+    mcp_oauth.addImport("oauth_mechanics", oauth_mechanics);
+    mcp_oauth.addImport("oauth_loopback", oauth_loopback);
     mcp_oauth.addImport("oauth_loopback_transport", oauth_loopback_transport);
     mcp_platform.addImport("metawork_mcp_oauth", mcp_oauth);
 
@@ -1605,6 +1630,8 @@ fn wireAgentCore(
     root_module.link_libc = bundle.link_libc;
     return .{
         .storage = storage,
+        .oauth_mechanics = oauth_mechanics,
+        .oauth_loopback = oauth_loopback,
         .execution_contract = execution_contract,
         .product_agent_protocol_adapter = product_agent_protocol_adapter,
         .account = account,
@@ -1645,6 +1672,7 @@ fn wireAgentCore(
         .event_pump = event_pump,
         .sdk = sdk,
         .product_control = product_control,
+        .product_control_account_projection = product_control_account_projection,
         .product_control_execution_state = product_control_execution_state,
         .product_control_runtime = product_control_runtime,
         .product_control_executor = executor,

@@ -2,7 +2,7 @@
 
 > 状态：Account Product owner、其消费的 Metask 合同与持久化边界的 source of truth。
 >
-> 当前实现已按本文完成 Account transaction kernel 硬切；后续变更必须继续满足本文不变量，不得恢复历史组合状态或隐式提交判断。
+> 本文定义 Account 语义收敛后的目标合同；实现必须以一次性 hard cut 收口，不得保留旧 execution/replacement 路径、兼容字段或隐式提交判断。
 
 ## 1. 文档职责
 
@@ -22,14 +22,15 @@ Account 是独立 Product owner，拥有：
 
 - OAuth/refresh token 生命周期和当前已验证 Metask identity；
 - Metask private catalog attempt、secret-free committed/candidate catalog 与默认 API/model selection；
-- Metask credential execution generation、默认选择 preference 及其 commit/recovery；
+- Metask credential/source generation、默认选择 preference 及其 commit/recovery；
+- 在自身事实完整时构造一次性的 credential-bearing Metask source candidate；
 - Account command/completion 合法性、attempt identity、deadline/cancel 语义、effect queue 和 mailbox；
 - 唯一 canonical、无 secret 的 `AccountView` 与 `AccountFact`。
 
 Account 不拥有：
 
 - Native SDK、窗口、WebView、socket listener、平台 timer 实现或文件系统具体实现；这些由 Application 通过 `ports.zig` 注入窄 capability；
-- Workbench 默认 ExecutionConfig、replacement gate、Workspace、Task、Run、Session admission 或历史；
+- Product 默认来源、active `ExecutionConfig`、Product execution generation、replacement、Schedule scrub、Workspace、Task、Run、Session admission 或历史；
 - user-managed Model Connection registry、credential vault、connection generation、测试状态、默认 binding 和 persistence health；这些属于 Product Control 持有的 Execution aggregate；
 - AgentCore Runtime、Session、Conversation、provider transport 和协议解析；
 - Bridge transport、Renderer 临时状态或 UI continuation policy。
@@ -59,17 +60,17 @@ Product Execution contract → Account catalog adapter
 
 显式登录替换、refresh 和 logout 是 identity transaction。新 token rotation 一旦 durable 提交，后续失败不得恢复已作废 token；新 identity 未验证前不得覆盖 committed identity。
 
-### 3.2 Committed Metask default
+### 3.2 Committed Metask preference 与 source authority
 
 已提交 Metask 默认值由以下事实组成：
 
 ```text
 api_key_id
 default_model
-credential_execution_generation
+metask_source_generation
 ```
 
-`credential_execution_generation` 是 protocol、base URL 和 credential authority 的非零不透明 identity，只用于相等比较。它不表达顺序，也不因同一 API Key 下的默认模型变化而改变。
+`metask_source_generation` 是 account、API Key、credential、protocol 与 endpoint authority 的非零不透明 identity，只用于相等比较。它不表达顺序，也不因同一 source 下的默认模型变化而改变。它不是 Product execution generation，不进入 Renderer `AccountView`，也不能直接写入 Task binding。
 
 默认模型是 Account preference，只影响之后创建的 Task。Task 当前模型及历史 Run 模型归 Workbench；Account 不改写既有 Task。
 
@@ -82,11 +83,11 @@ Account 同时最多拥有两个 secret-free `PublicCatalog` slot：
 
 含完整 API Key secret 的 `CatalogSession` 只属于当前 private catalog attempt，不进入 `AccountView`，也不等同于任一 public slot。
 
-`committed` 与 `candidate` 必须由 Account aggregate 共同拥有。effect driver 只执行 I/O，不拥有 committed 产品目录。candidate 必须携带 attempt identity；陈旧 completion 不能覆盖、提升或清除另一个 attempt 的 slot。
+`committed` 与 `candidate` 必须由 Account aggregate 共同拥有。每个 `PublicCatalog` slot 同时拥有自己的 `model_catalog_api_key_id`；copy、promotion、restore、clear 与 projection 必须原子维护该 owner，禁止从 transaction phase 或 selected state 重新推导。effect driver 只执行 I/O，不拥有 committed 产品目录。candidate 必须携带 attempt identity；陈旧 completion 不能覆盖、提升或清除另一个 attempt 的 slot。
 
 ### 3.4 Product Execution boundary
 
-Account 只把已验证的 Metask API Key、catalog selection 和外部 `group.platform` 解析为 Product Execution 合同中的显式 protocol、固定 endpoint、model、credential、execution generation 与 `metask:<api-key-id>` 服务实例引用。Account 不定义通用 protocol enum，不发布 Model Connection command/view，不保存 Model Connection registry，也不拥有其 credential capability。
+Account 只把已验证的 Metask API Key、catalog selection 和外部 `group.platform` 解析为 Product Execution 合同中的线性 `OwnedSourceCandidate`：显式 protocol、固定 endpoint、model、credential、Account source generation 与 `metask:<api-key-id>` 服务实例引用。candidate 不含 Product execution generation。Account 不定义通用 protocol enum，不发布 Model Connection command/view，不保存 Model Connection registry，也不拥有其 credential capability。
 
 默认 execution source 的选择、Model Connection 生命周期、两种 source 的 replacement 和服务实例引用通用语义由 [Product 架构 §2.1](product-architecture.md)独占。Account 不定义、保存或发布厂商类别，也不存在 `ProviderKind`、协议反推或双重校验路径。
 
@@ -94,17 +95,17 @@ Account 只把已验证的 Metask API Key、catalog selection 和外部 `group.p
 
 MetaWork 是 Metask Account API 的消费方，不拥有或修改 Metask 服务端实现。正式客户端只接受以下固定 OAuth public-client 合同：
 
-| 项目      | 固定值                                                       |
-| --------- | ------------------------------------------------------------ |
-| Flow      | OAuth 2.0 Authorization Code + PKCE S256                     |
-| Authority | `https://napi.metask-ai.com`                                 |
-| Authorize | `https://napi.metask-ai.com/oauth/authorize`                 |
-| Token     | `https://napi.metask-ai.com/oauth/token`                     |
-| Revoke    | `https://napi.metask-ai.com/oauth/revoke`                    |
-| Client ID | `metawork-app`，无 `client_secret`                           |
-| Scope     | `metawork:use`                                               |
-| Redirect  | `http://127.0.0.1:{dynamic_port}/auth/callback`              |
-| Identity  | bearer `GET https://napi.metask-ai.com/api/v1/auth/me`       |
+| 项目      | 固定值                                                 |
+| --------- | ------------------------------------------------------ |
+| Flow      | OAuth 2.0 Authorization Code + PKCE S256               |
+| Authority | `https://napi.metask-ai.com`                           |
+| Authorize | `https://napi.metask-ai.com/oauth/authorize`           |
+| Token     | `https://napi.metask-ai.com/oauth/token`               |
+| Revoke    | `https://napi.metask-ai.com/oauth/revoke`              |
+| Client ID | `metawork-app`，无 `client_secret`                     |
+| Scope     | `metawork:use`                                         |
+| Redirect  | `http://127.0.0.1:{dynamic_port}/auth/callback`        |
+| Identity  | bearer `GET https://napi.metask-ai.com/api/v1/auth/me` |
 
 Account 只生成 CSPRNG `state` 与 PKCE verifier，只接受 S256 challenge。callback 只绑定 IPv4 loopback 动态端口，不依赖 `localhost` DNS、不绑定 wildcard，只接受一次精确路径的 `GET`，严格解析 query、拒绝重复或 unknown 参数，并以 constant-time 比较 `state`。token response 必须有界解码并包含非空 `access_token`、每次必需的新 `refresh_token`、Bearer `token_type`、正整数 `expires_in`、精确 scope 与非空 `account_id`；服务端可以增加未消费 metadata。refresh token 每次成功刷新都轮换，rotation durable commit 后不得恢复旧 token。
 
@@ -146,7 +147,7 @@ Transaction =
   | token_refresh(RefreshTransaction)
   | catalog(CatalogTransaction)
   | default_model(DefaultModelTransaction)
-  | execution_source(ExecutionSourceTransaction)
+  | source_resolution(SourceResolutionTransaction)
   | logout(LogoutTransaction)
 ```
 
@@ -157,7 +158,7 @@ Transaction =
 - 是否存在 worker/effect、是否仍允许取消；
 - 成功、明确失败、取消、deadline 和 outcome unknown 的 terminal 规则。
 
-当前 Zig 实现将 transaction kind 与阶段扁平为一个封闭 tagged union；catalog/default-model variant 直接携带 attempt identity 与 bounded pending facts，`reloading_models` 是独立 variant。`OperationKind`/`AttemptKind` 只是在纯 projection helper 中返回的派生标签，不是可独立写入的状态。committed execution authority 只表达 `none | ready | recovery`；准备或替换阶段只由 transaction variant 表达。
+Zig 实现必须把 transaction kind 与阶段表达为一个封闭 tagged union；catalog/default-model variant 直接携带 attempt identity 与 bounded pending facts，`reloading_models` 是独立 variant。transaction 写入必须直接构造具体 variant 或调用 variant-specific constructor；`OperationKind`/`AttemptKind` 只能作为派生 projection，禁止以二元组重新拼装 union。committed preference authority 可以表达 `none | ready | recovery`，但 recovery 只冻结新的 preference/default mutation；token refresh、纯 catalog refresh 与 logout 仍可 terminal 收口，recovery catalog refresh 不得自动选择、写 preference 或产生 candidate。
 
 Catalog transaction 使用封闭阶段：
 
@@ -172,7 +173,7 @@ preparing_execution
 
 “用户在模型加载期间重新选择 API”必须进入 `reloading_models`，不能用旁路布尔位附着在另一个阶段。是否存在 committed execution 由 committed default 是否存在直接表达；不能再用独立 `preparing | ready | reconfiguring` 状态与 transaction stage 重复编码。
 
-公开的 `AccountState`、`CatalogState`、`canCancel` 与 Metask catalog/generation 都是 committed aggregate 与 transaction 的派生 projection，不是内部状态机的第二份真相。新 Task admission、默认/active execution 与 replacement 状态由 Product Control 的 Execution projection 派生，Account 不发布也不缓存这些决定。
+公开的 `AccountState`、`CatalogState`、`canCancel` 与 Metask catalog 都是 committed aggregate 与 transaction 的派生 projection，不是内部状态机的第二份真相。`catalog_generation` 只用于 Renderer selection optimistic concurrency；任何使 selection 输入失效的 account、catalog owner 或 catalog contents 变化都必须提升它。Account source generation 只进入 secret-free authority fact 与 source candidate。新 Task admission、默认/active execution 与 replacement 状态由 Product Control 的 Execution projection 派生，Account 不发布也不缓存这些决定。
 
 ## 5. Prepare、effect 与 commit
 
@@ -183,9 +184,9 @@ next aggregate state
 canonical AccountFact
 optional effect
 CatalogIntent
-ExecutionIntent
 PreferenceIntent
-ReplacementIntent
+optional Account source authority fact
+optional owned source candidate
 ```
 
 显式 intent 为封闭类型：
@@ -198,33 +199,21 @@ CatalogIntent =
   | discard_candidate
   | clear_all
 
-ExecutionIntent =
-  unchanged
-  | stage_install
-  | install_committed
-  | finalize_install
-  | clear
-
 PreferenceIntent = unchanged | commit_pending | clear
-
-ReplacementIntent =
-  none
-  | begin_identity
-  | finish
 ```
 
 精确 symbol 可以随实现调整，但以下约束不可改变：
 
 - State/Account aggregate 是 intent 的唯一决策者；
 - Runtime 不从 `AccountFactKind`、公开 `CatalogState`、operation 名称或 effect tag 反推 catalog commit；
-- Coordinator 不从 Renderer command 名称或 Account effect tag 反推 Workbench replacement；
+- Coordinator 不从 Renderer command 名称或 Account effect tag 反推 Product replacement；
 - `AccountFactKind` 只描述已观察事实，不控制 slot、persistence 或 execution 提交；
 - preference shadow 只按显式 `PreferenceIntent` 提交或清除，不得从 fact kind、effect tag 或 pending 值存在性推断；
 - `CatalogIntent.candidate` 保留当前 attempt 的私有 catalog session；`promote_candidate`、`discard_candidate` 和 `clear_all` 都是 terminal intent，Runtime 必须在已接纳的 terminal effect 完成 dispatch、cancel/join 达到 quiescence 后销毁其中的 API Key secret，并在本次 Account commit handoff 返回前完成；
 - prepared transition 被拒绝或 effect admission 失败时不得修改 committed aggregate；
 - completion 产生的下一 effect admission 失败时，先提交已经观察到的外部结果，再从该 committed phase 产生唯一 terminal failure。
 
-主线程跨 owner 顺序由 [Product 架构](product-architecture.md#21-execution-aggregate-与-account-handoff)定义。Account 内部 terminal commit 必须一次应用 state、catalog intent 和 preference shadow；credential-bearing payload 通过 opaque transfer 由 Product 在 preference effect admission 前接管，Coordinator 不得持有具体配置。Account 只发布 staged persistence 所需的 pending fact；新的 selected state/catalog/generation 只能与 Product no-fail finalize 同一 terminal turn 提交，不得发布 generation mismatch 的中间事实。
+主线程跨 owner 顺序由 [Product 架构](product-architecture.md#21-execution-aggregate-与-account-handoff)定义。Account 内部 terminal commit 必须一次应用 state、catalog intent 和 preference shadow；本地构造的 credential-bearing candidate 在 preference durable commit 与 Account terminal commit 成功后，通过 no-fail sink 线性转移给 Product。Coordinator 不得读取、复制或持有具体配置，Product 的 scrub/install 结果也不得回写 Account。
 
 ## 6. 关键事务
 
@@ -236,56 +225,55 @@ ReplacementIntent =
 2. refresh token durable commit；
 3. 使用当前 token 验证 `/me`；
 4. 原子提交 identity；
-5. 以独立 catalog transaction 准备默认执行配置。
+5. 以独立 catalog transaction 恢复或请求 Metask preference，并在完整时构造 source candidate。
 
 第 2 步成功后不能回滚旧 token。第 4 步成功但 catalog 失败时保持 authenticated identity，并发布可恢复 catalog failure。显式替换 identity 时，旧 credential execution 不得与新 identity 混用。
 
 ### 6.2 Catalog refresh
 
-普通 refresh 从新的 private `CatalogSession` 构造 candidate public catalog。若 committed API/model 仍有效，则以 `promote_candidate` 提交新目录，不写 preference、不改变 credential generation、不替换 Workbench execution。
+普通 refresh 从新的 private `CatalogSession` 构造 candidate public catalog。若 committed API/model 仍有效，则以 `promote_candidate` 提交新目录，不写 preference、不改变 source generation，也不决定 Product 是否替换 execution。
 
 若 committed API 或模型已离开目录，transaction 停在对应选择阶段；不得自动切换到另一 credential authority。取消或明确失败使用 `discard_candidate` 返回 committed default。
 
 ### 6.3 API Key 或 credential authority 变化
 
-credential-bearing default replacement 是完整 transaction：
+credential-bearing Account preference mutation 是完整 Account transaction；本节明确取消旧合同中 Product scrub 对 Account preference commit 的前置 admission：
 
 ```text
 load/validate candidate catalog
 → select API and model
-→ construct typed ExecutionTarget and credential without persistence
-→ generate new credential execution generation
-→ transfer candidate opaquely to Product staged owner
-→ Product validates candidate and durably scrubs Schedule
+→ construct complete owned source candidate without persistence
+→ generate new Metask source generation
 → durable preference commit
 → exact reread when outcome is unknown
-→ Product no-fail finalize
 → atomically promote Account state, catalog intent and preference shadow
+→ publish secret-free authority fact
+→ no-fail transfer candidate ownership to Product
 ```
 
-Account candidate construction 与 preference persistence 是两个独立阶段；构造 worker 不得写 preference。Product prepare 成功前 preference writer 必须保持未调用，Coordinator 只持 opaque token，不得取得 `ExecutionConfig`。只有 ownership、catalog membership、Product preparation 和 persistence 全部成功后才能进行 no-fail finalize 并提交新默认值。任何明确失败都 abort/secure-zero staged candidate 并保留旧 committed default；persistence outcome unknown 按 §7 精确重新观察持久化真相。
+Account candidate construction 与 preference persistence 是两个独立阶段；构造 worker 不得写 preference。candidate 构造、catalog membership 和 Account persistence 任一明确失败都由 Account secure-zero candidate 并保留旧 committed preference；persistence outcome unknown 按 §7 精确重新观察持久化真相。Account terminal commit 之后的 Product sink 必须 no-fail 接管 candidate；Schedule scrub、Product generation 分配、安装、pending/recovery 与 Task admission 全由 Product 决定，任何失败都不回滚 preference 或补写 Account error。
 
-`activateMetask` 是独立的 Account catalog-resolution attempt，不是 preference mutation：它只能按当前 committed API、model 与 execution generation 重建候选，不能选择新 tuple、生成新 generation 或调用 preference writer。Account 不判断当前 active source，也不发布 default replacement intent；Product 决定该候选是仅验证后销毁，还是用于显式 source activation。
+Bridge 不发布由 Account 拥有的默认来源切换 command。Product-owned “使用 Metask” command 可以请求一个非 Bridge 的 Account source-resolution operation；它只能按当前 committed API、model 与 source generation 重建 candidate，不能选择新 tuple、生成新 generation、调用 preference writer或读取 Product state。Product 决定 candidate 是安装、暂存还是销毁。
 
 ### 6.4 同一 API Key 下修改默认模型
 
 默认模型变化是独立 preference transaction，不是 catalog transaction，也不是 credential execution replacement：
 
-1. 使用 committed catalog 和 expected generation 校验目标模型；
+1. 使用 committed catalog 和 expected catalog generation 校验目标模型；
 2. transaction 保存 pending model，committed selection 不变；
-3. 原子写入同一 owner、API Key 和 credential generation，仅替换 `model_id`；
+3. 原子写入同一 owner、API Key 和 source generation，仅替换 `model_id`；
 4. 写入成功后提交默认模型；
 5. 明确失败丢弃 pending model；
 6. outcome unknown 重新读取 preference 后决定提交、回滚或进入 recovery。
 
-该 transaction 不提升或清空 candidate catalog，不打开 Workbench default-execution replacement，不替换 credential。提交期间暂停新 Task admission，既有 Task、Run、历史阅读和导航不受影响。重复选择当前模型是幂等 no-op。
+该 transaction 不提升或清空 candidate catalog，不决定 Product replacement，也不替换 credential。Account 提交后发布新的 authority fact 与同 source candidate；Product 根据 desired/active binding 独立决定新 Task admission。既有 Task、Run、历史阅读和导航不受影响。重复选择当前模型是幂等 no-op。
 
 ## 7. Persistence 与恢复
 
 Account persistence 服从[高层架构的持久化权威与故障语义](architecture.md#37-持久化权威与故障语义)。当前实现使用无版本 hard cut，不读取、迁移或兼容旧 manifest、slot、`account.json` 或旧 credential family；无法识别的既有数据不进入当前 Account state，也不被描述为已经迁移，具体清理由本节既有冷启动规则决定：
 
 - secure credential service identity 为产品 Bundle ID 加 `.account`，automation 构建在编译期使用 `.automation.account`；Metask refresh token 的固定 account name 是 `metask-refresh-token`；
-- 数据目录中的 `preferences.json` 精确保存 `selection_owner_account_id`、`api_key_id`、`model_id` 和非零 `execution_generation`；它不保存 display name、access token、API credential、protocol、base URL 或完整 `ExecutionConfig`；
+- 数据目录中的 `preferences.json` 精确保存 `selection_owner_account_id`、`api_key_id`、`model_id` 和非零 `metask_source_generation`；它不保存 display name、access token、API credential、protocol、base URL 或完整 `ExecutionConfig`；包含旧 `execution_generation` 的文件无条件失效并按冷启动规则清除，不迁移、不备份、不 alias decode；
 - production 与 automation 的数据根和 Account credential service 在编译期隔离；任何一侧不得读取另一侧的 preference 或 credential；
 - preference 写入使用同目录临时文件、文件 sync、原子 rename 和提交确认；不存在双写、运行时 fallback 或隐式迁移。
 
@@ -303,11 +291,9 @@ Account persistence effect 区分以下结果：
 
 - 读取到完整新 preference：提交 pending model；
 - 读取到完整旧 preference：回滚 pending model；
-- 缺失、损坏、owner/API/generation 不匹配或第三种值：进入 preference recovery，禁止新的默认 mutation 和新 Task admission，但不销毁仍受当前进程证明的 credential，也不停止既有 Task。
+- 缺失、损坏、owner/API/generation 不匹配或第三种值：进入 preference recovery，禁止新的 preference/default mutation；token refresh、纯 catalog refresh 与 logout 仍可执行。Account 不决定新 Task admission，也不停止既有 Task。
 
-credential-bearing execution persistence outcome unknown 风险更高：在重新观察并精确证明唯一 generation 前，不得发布或安装 candidate execution。不得自动重放非幂等 persistence。
-
-credential-bearing preference 的重读同样只有三个结果：完整 candidate tuple（owner、API、model、generation 全部一致）允许 terminal finalize；完整旧 tuple 明确 abort 并保留旧 default；缺失、损坏或第三种 tuple 必须 abort 并进入 recovery。任何路径都只能产生一个 terminal Account/Product revision。
+credential-bearing preference 的重读同样只有三个结果：完整 candidate tuple（owner、API、model、source generation 全部一致）允许 Account terminal commit；完整旧 tuple 明确 abort 并保留旧 preference；缺失、损坏或第三种 tuple 必须 abort、secure-zero candidate 并进入 recovery。不得自动重放非幂等 persistence；任何路径都只能产生一个 terminal Account revision。
 
 `saved_preference` 只能是已观察持久化真相的 Account-owned shadow，不能与 committed selection 分别更新。恢复成功、提交成功和明确清除必须由 prepared transition 的显式 `PreferenceIntent` 在同一个 Account commit 中同步两者；进入 preference recovery 时必须清除不再受磁盘观察证明的旧 shadow，后续同 owner 登录不得复用该值。
 
@@ -320,8 +306,8 @@ credential-bearing preference 的重读同样只有三个结果：完整 candida
 - ready selection 在对应 public catalog 中精确出现一次；
 - model catalog owner 与 API selection 一致；
 - candidate 字段只来自当前 transaction；
-- Metask catalog generation 与 credential execution generation 自洽；
-- signed-out/checking/authorizing projection 不泄漏 identity、catalog、selection 或 generation；
+- catalog slot owner 与 `catalog_generation` 自洽；
+- signed-out/checking/authorizing projection 不泄漏 identity、catalog 或 selection；
 - projection 永不包含 token、API Key secret、credential、PKCE、authorization code、header 或 locator。
 
 Renderer acknowledgement 不是 committed fact。Renderer reload、Bridge disconnect 或本地 timeout 不取消 Host transaction；恢复后只消费最新 canonical snapshot。
@@ -334,6 +320,7 @@ Renderer acknowledgement 不是 committed fact。Renderer reload、Bridge discon
 - credential 与 open-browser effect 只经 Application 注入的 Native SDK 主线程 capability 执行；网络、OAuth loopback wait、deadline 与 cancellation 在有界 Account worker 和 Application byte-transport port 上收口；
 - 取消只在 transaction 明确允许的阶段进入；credential/preference persistence 一旦可能提交即跨过取消边界；
 - mailbox collision、notification failure和 malformed completion 必须收口为当前 attempt 的明确失败，不能永久 wedged；
+- `metask_platform_unsupported` 只表示已验证 catalog 中的 Metask platform 无法映射到受支持协议；无法进一步归类但必须终止当前 Account attempt 的 Account-owned mailbox、平台 capability 或 effect 失败使用 `account_operation_failed`。Account error space 不包含 Task/Session/Execution 占用语义；
 - shutdown 先停止新 command、取消 timer、cancel/join attempt、消费或销毁 mailbox、清空 private secret，再清 committed/candidate catalog 和 Runtime-owned credential，最后断开 ports；
 - Account `deinit` 不执行仍依赖平台 capability 的 effect。
 
@@ -345,11 +332,13 @@ Account inline tests 覆盖纯 transaction transition、intent、projection、co
 - GLM 默认 → GPT API → 自动模型 → 同 API 下选择另一 GPT 模型不 crash；
 - 模型 preference 成功、明确失败、outcome unknown 三类结果；
 - preference recovery 清除旧 shadow，避免同 owner 重新登录恢复出未经磁盘证明的默认值；
-- 纯模型变化不改变 credential generation、不安装 Workbench execution，重启后恢复新模型；
-- Metask API Key 或 credential authority 变化生成新 generation，并只在完整成功后提升 candidate；
+- 纯模型变化不改变 source generation，重启后恢复新模型；
+- Metask account、API Key、credential、protocol 或 endpoint authority 变化生成新 source generation，并只在完整 Account 成功后发布；
 - catalog refresh、取消、park/reload 和 stale completion 的 slot 行为；
+- candidate model-load failure park 后再次 reload/fail 仍发布合法 view，catalog owner 不从 transaction 推导；
+- preference recovery 中 token refresh、纯 catalog refresh 与 logout 可 terminal 收口，refresh 不自动写 preference 或产生 candidate；
 - identity replacement、effect admission failure、deadline 和 shutdown 在所有终止路径平衡 gate、attempt、secret 和 catalog；
 - catalog promote/discard/clear terminal handoff 在 effect quiescence 后清除私有 secret session，catalog cancel 同步丢弃 candidate slot 与 attempt identity；
 - 每个 prepared/committed `AccountView` 都通过 runtime decode 等价的合同校验。
 
-实现收口基线：`Transaction` 是唯一可写事务状态；Runtime 直接拥有 committed/candidate public catalog 与 candidate attempt identity；默认模型使用独立 durable preference transaction；Coordinator 只消费显式 execution/replacement intent。`fact.kind` catalog completion、effect-driver committed catalog、ready 模型直接 mutation、command/effect gate 推断、`candidateCatalogActive` 和组合 operation/attempt 字段均已删除，后续不得以兼容或 fallback 名义恢复。
+实现收口基线：`Transaction` 是唯一可写事务状态；Runtime 直接拥有 committed/candidate public catalog 与 candidate attempt identity；每个 public slot 自己拥有 model catalog owner；默认模型使用独立 durable preference transaction；Account prepared output 不含 Product execution/replacement intent。`fact.kind` catalog completion、effect-driver committed catalog、ready 模型直接 mutation、command/effect gate 推断、`candidateCatalogActive`、组合 operation/attempt 写入 API和 Product failure → Account error 路径均不得以兼容或 fallback 名义存在。

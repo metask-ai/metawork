@@ -192,15 +192,15 @@ test("Schedule store recovery stays available when normal scheduling is blocked 
     screen.getByRole("alertdialog", { name: "Replace saved schedules?" }),
   );
   assert.match(
-    screen.getByText(/retain the current schedule file/).textContent,
-    /new schedule store/,
+    screen.getByText(/write the schedules still available/).textContent,
+    /Retired formats are not preserved/,
   );
   fireEvent.click(screen.getByRole("button", { name: "Keep current state" }));
   assert.equal(recoveries, 0);
 
   fireEvent.click(recovery);
   fireEvent.click(
-    screen.getByRole("button", { name: "Retain file and recover" }),
+    screen.getByRole("button", { name: "Delete file and reset" }),
   );
   await waitFor(() => assert.equal(recoveries, 1));
 });

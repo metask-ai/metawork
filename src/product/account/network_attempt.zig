@@ -18,7 +18,7 @@ pub const Result = union(enum) {
             .completion => |*completion| result: {
                 const value = completion.*;
                 completion.payload = .{ .failed = .fromCode(
-                    .dependency_contract_invalid,
+                    .account_operation_failed,
                 ) };
                 break :result .{ .completion = value };
             },

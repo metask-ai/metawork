@@ -85,17 +85,18 @@ export const zhCN: Record<MessageId, string> = {
     "这会清除这台设备上的 Metask 登录凭据，本地任务和历史记录会保留。是否继续？",
   "account.command_rejected":
     "该账号操作已不可用，MetaWork 已保留最新账号状态。",
-  "account.task_running":
-    "仍有任务正在运行。请等待任务结束后再重新登录或退出账号。",
-  "account.session_in_use":
-    "仍有任务持有活动会话。请先关闭该任务，再重新登录或退出账号。",
   "account.command_failed":
     "MetaWork 无法完成该账号操作，请使用此处显示的恢复操作。",
+  "execution.command_rejected": "默认模型来源未更新，请刷新执行状态后重试。",
+  "execution.command_failed":
+    "MetaWork 无法完成默认模型来源操作，请使用执行区域显示的恢复操作。",
   "account.cancel_rejected": "该账号操作已经结束，MetaWork 已检查最新状态。",
   "account.cancel_failed":
     "MetaWork 无法取消该账号操作；Host 仍会在截止时间到达时自动收口。",
   "account.updated": "Metask 账号已更新。",
+  "execution.updated": "默认模型来源已更新。",
   "operation.account": "更新 Metask 账号",
+  "operation.execution": "更新默认模型来源",
   "operation.account_cancel": "取消 Metask 账号操作",
   "command.timeout_reconciled":
     "{operation}等待时间超出预期。MetaWork 已核对 Host 当前状态，且没有重复执行该操作。",
@@ -955,17 +956,19 @@ export const zhCN: Record<MessageId, string> = {
   "persistence.recovery.task.body":
     "MetaWork 会保留当前历史文件，再将本次使用中仍可用的任务和工作区保存为新的任务历史。",
   "persistence.recovery.scheduled.title": "替换已保存的定时任务？",
+  "persistence.recovery.scheduled.hard_cut": "当前定时任务文件将被永久删除。",
   "persistence.recovery.scheduled.body":
-    "MetaWork 会保留当前定时任务文件，再将本次使用中仍可用的定时任务保存为新的存储。",
+    "MetaWork 会永久删除当前定时任务文件，并将本次使用中仍可用的定时任务写入全新存储；已淘汰格式不会保留。",
+  "persistence.recovery.scheduled.confirm": "删除文件并重置",
   "persistence.recovery.cancel": "保留当前状态",
   "persistence.recovery.confirm": "保留文件并恢复",
   "persistence.recovery.running": "正在恢复…",
   "persistence.recovery.stale_revision":
     "工作台状态已经变化，请确认当前提示后重试。",
   "persistence.recovery.outcome_unknown":
-    "无法确认替换是否完成。恢复副本没有被删除，请确认当前状态后重试。",
+    "无法确认替换是否完成，请确认当前状态后再重试。",
   "persistence.recovery.shutting_down": "MetaWork 正在退出，无法开始恢复。",
-  "persistence.recovery.failed": "未能替换存储，当前文件没有被删除。",
+  "persistence.recovery.failed": "未能替换存储。",
   "mcp.mutation.busy": "此服务正在进行授权操作。",
   "mcp.mutation.cancelled": "已取消确认。",
   "mcp.mutation.capability_unavailable": "当前设备不支持此操作。",

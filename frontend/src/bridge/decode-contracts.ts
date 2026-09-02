@@ -3,6 +3,7 @@ import {
   permissionProfiles,
   runCauses,
   type AccountCommandResult,
+  type ExecutionCommandResult,
   type AccountView,
   type ExecutionView,
   type ModelMetadata,
@@ -163,8 +164,6 @@ const accountErrorCodes = [
   "invalid_command",
   "invalid_state",
   "operation_in_progress",
-  "execution_in_use",
-  "session_in_use",
   "oauth_bind_failed",
   "oauth_browser_open_failed",
   "oauth_callback_rejected",
@@ -181,15 +180,24 @@ const accountErrorCodes = [
   "catalog_field_too_large",
   "no_api_keys",
   "no_models",
-  "execution_target_invalid",
-  "execution_config_invalid",
+  "metask_platform_unsupported",
   "credential_store_read_failed",
   "credential_store_write_failed",
   "credential_store_delete_failed",
   "generation_mismatch",
   "recovery_state_invalid",
   "local_resource_exhausted",
-  "dependency_contract_invalid",
+  "account_operation_failed",
+] as const;
+const executionCommandErrorCodes = [
+  "none",
+  "operation_in_progress",
+  "user_cancelled",
+  "generation_mismatch",
+  "no_models",
+  "local_resource_exhausted",
+  "credential_store_write_failed",
+  "execution_in_use",
   "model_connection_invalid",
   "model_connection_not_found",
   "model_connection_capture_unavailable",
@@ -937,7 +945,6 @@ function decodeAccount(value: unknown, path: string): AccountView {
     "errorCode",
     "safeDiagnostic",
     "catalogGeneration",
-    "metaskExecutionGeneration",
   ]);
   const apiKeys = arrayValue(
     item.apiKeys,
@@ -1010,18 +1017,13 @@ function decodeAccount(value: unknown, path: string): AccountView {
     item.catalogGeneration,
     `${path}.catalogGeneration`,
   );
-  const metaskExecutionGeneration = wireId(
-    item.metaskExecutionGeneration,
-    `${path}.metaskExecutionGeneration`,
-  );
   if (
     catalogState === "ready" &&
     (accountId.length === 0 ||
       selectedApiKeySelectionId.length === 0 ||
-      selectedModelSelectionId.length === 0 ||
-      metaskExecutionGeneration === "0")
+      selectedModelSelectionId.length === 0)
   )
-    fail(path, "a ready catalog requires selected identities and generation");
+    fail(path, "a ready catalog requires selected identities");
   const candidateAllowed =
     state === "authenticated" &&
     (catalogState === "loading" || catalogState === "choosing");
@@ -1078,8 +1080,7 @@ function decodeAccount(value: unknown, path: string): AccountView {
       selectedModelSelectionId.length !== 0 ||
       candidateApiKeySelectionId.length !== 0 ||
       candidateModelSelectionId.length !== 0 ||
-      modelCatalogApiKeySelectionId.length !== 0 ||
-      metaskExecutionGeneration !== "0")
+      modelCatalogApiKeySelectionId.length !== 0)
   )
     fail(path, "a non-authenticated Account must hide identity and catalog");
   if (state === "authenticated" && accountId.length === 0)
@@ -1115,7 +1116,6 @@ function decodeAccount(value: unknown, path: string): AccountView {
     ),
     safeDiagnostic: stringValue(item.safeDiagnostic, `${path}.safeDiagnostic`),
     catalogGeneration,
-    metaskExecutionGeneration,
   };
 }
 
@@ -3381,6 +3381,22 @@ export function decodeAccountCommandResult(
   if (!accepted && attemptId !== null)
     fail("$", "a rejected command cannot expose an attempt");
   return { accepted, errorCode, attemptId };
+}
+
+export function decodeExecutionCommandResult(
+  value: unknown,
+): ExecutionCommandResult {
+  const item = object(value, "$", ["accepted", "errorCode", "attemptId"]);
+  const accepted = booleanValue(item.accepted, "$.accepted");
+  const errorCode = enumValue(
+    item.errorCode,
+    "$.errorCode",
+    executionCommandErrorCodes,
+  );
+  if (item.attemptId !== null) fail("$.attemptId", "expected null");
+  if (accepted !== (errorCode === "none"))
+    fail("$", "accepted and errorCode must agree");
+  return { accepted, errorCode, attemptId: null };
 }
 
 export function decodeRendererBridgeConnect(value: unknown) {

@@ -25,7 +25,7 @@ fn preferencesEqual(
     return std.mem.eql(u8, left.ownerAccountId(), right.ownerAccountId()) and
         std.mem.eql(u8, left.apiKeyId(), right.apiKeyId()) and
         std.mem.eql(u8, left.modelId(), right.modelId()) and
-        left.execution_generation == right.execution_generation;
+        left.metask_source_generation == right.metask_source_generation;
 }
 
 pub const WakeSink = struct {
@@ -78,7 +78,7 @@ const Effects = struct {
             rotation: credentials_impl.CredentialRotation,
         },
         completion: state_impl.WorkerCompletion,
-        execution_persistence_unknown: u64,
+        source_preference_persistence_unknown: u64,
         default_model_persistence_unknown: u64,
 
         fn deinit(self: *MailboxResult) void {
@@ -86,7 +86,7 @@ const Effects = struct {
                 .login => |*entry| entry.result.deinit(),
                 .refresh => |*entry| entry.rotation.deinit(),
                 .completion => |*completion| completion.deinit(),
-                .execution_persistence_unknown,
+                .source_preference_persistence_unknown,
                 .default_model_persistence_unknown,
                 => {},
             }
@@ -97,7 +97,7 @@ const Effects = struct {
                 .login => |entry| entry.attempt_id,
                 .refresh => |entry| entry.attempt_id,
                 .completion => |completion| completion.attempt_id,
-                .execution_persistence_unknown,
+                .source_preference_persistence_unknown,
                 .default_model_persistence_unknown,
                 => |attempt_id| attempt_id,
             };
@@ -191,7 +191,7 @@ const Effects = struct {
             self.unlockMailbox();
             return;
         }
-        self.mailbox = .{ .execution_persistence_unknown = attempt_id };
+        self.mailbox = .{ .source_preference_persistence_unknown = attempt_id };
         self.unlockMailbox();
         self.notify();
     }
@@ -491,36 +491,24 @@ pub const Prepared = struct {
         return self.transition.factKind();
     }
 
-    pub fn takeExecution(
+    pub fn takeSourceCandidate(
         self: *Prepared,
-    ) ?execution_contract.OwnedConfig {
-        return self.transition.takeExecution();
+    ) ?execution_contract.OwnedSourceCandidate {
+        return self.transition.takeSourceCandidate();
     }
 
-    pub fn executionTransfer(
+    pub fn sourceCandidateTransfer(
         self: *Prepared,
-    ) ?execution_contract.OwnedConfigTransfer {
-        return self.transition.executionTransfer();
+    ) ?execution_contract.OwnedSourceCandidateTransfer {
+        return self.transition.sourceCandidateTransfer();
     }
 
     pub fn attemptId(self: *const Prepared) ?u64 {
         return self.transition.attempt_id;
     }
 
-    pub fn replacementIntent(self: *const Prepared) state_impl.ReplacementIntent {
-        return self.transition.replacementIntent();
-    }
-
     pub fn finishesAttempt(self: *const Prepared) bool {
         return self.transition.finishesAttempt();
-    }
-
-    pub fn executionIntent(self: *const Prepared) state_impl.ExecutionIntent {
-        return self.transition.executionIntent();
-    }
-
-    pub fn discardExecutionNoFail(self: *Prepared) void {
-        self.transition.discardExecutionNoFail();
     }
 
     pub fn preferenceIntent(self: *const Prepared) state_impl.PreferenceIntent {
@@ -566,6 +554,10 @@ pub const Runtime = struct {
         attempt_id: u64,
         value: credential_store.Preference,
     } = null,
+    pending_source_candidate: ?struct {
+        attempt_id: u64,
+        value: execution_contract.OwnedSourceCandidate,
+    } = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -602,6 +594,7 @@ pub const Runtime = struct {
         std.debug.assert(self.platform == null);
         self.effects.deinit();
         self.credentials.deinit();
+        self.clearPendingSourceCandidate();
         self.saved_preference = null;
         self.pending_default_preference = null;
         self.committed_public_catalog.clear();
@@ -654,9 +647,7 @@ pub const Runtime = struct {
         switch (command) {
             .select_api_key => |selection| {
                 if (selection.expected_catalog_generation !=
-                    account_view.catalog_generation or
-                    selection.expected_execution_generation !=
-                        account_view.metask_execution_generation)
+                    account_view.catalog_generation)
                     return .{ .rejected = .generation_mismatch };
                 const member = for (account_view.api_keys) |candidate| {
                     if (std.mem.eql(
@@ -669,9 +660,7 @@ pub const Runtime = struct {
             },
             .select_model => |selection| {
                 if (selection.expected_catalog_generation !=
-                    account_view.catalog_generation or
-                    selection.expected_execution_generation !=
-                        account_view.metask_execution_generation)
+                    account_view.catalog_generation)
                     return .{ .rejected = .generation_mismatch };
                 const member = for (account_view.models) |candidate| {
                     if (std.mem.eql(
@@ -682,12 +671,8 @@ pub const Runtime = struct {
                 } else false;
                 if (!member) return .{ .rejected = .invalid_command };
             },
-            .activate_metask => |activation| {
-                if (activation.expected_catalog_generation !=
-                    account_view.catalog_generation or
-                    activation.expected_execution_generation !=
-                        account_view.metask_execution_generation or
-                    account_view.state != .authenticated or
+            .resolve_source_candidate => {
+                if (account_view.state != .authenticated or
                     account_view.catalog_state != .ready)
                     return .{ .rejected = .generation_mismatch };
             },
@@ -776,7 +761,7 @@ pub const Runtime = struct {
                 if (collision)
                     break :result self.prepareFailure(
                         entry.attempt_id,
-                        .dependency_contract_invalid,
+                        .account_operation_failed,
                     );
                 break :result switch (entry.result) {
                     .authorized => |*tokens| self.prepareAuthorizedLogin(
@@ -799,7 +784,7 @@ pub const Runtime = struct {
                 if (collision)
                     break :result self.prepareFailure(
                         entry.attempt_id,
-                        .dependency_contract_invalid,
+                        .account_operation_failed,
                     );
                 break :result self.prepareRefreshedTokens(
                     entry.attempt_id,
@@ -810,7 +795,7 @@ pub const Runtime = struct {
                 completion,
                 collision,
             ),
-            .execution_persistence_unknown => |attempt_id| self.prepareExecutionPersistenceUnknown(attempt_id),
+            .source_preference_persistence_unknown => |attempt_id| self.prepareSourcePreferencePersistenceUnknown(attempt_id),
             .default_model_persistence_unknown => |attempt_id| self.prepareDefaultModelPersistenceUnknown(attempt_id),
         };
     }
@@ -842,8 +827,26 @@ pub const Runtime = struct {
             };
             catalog.decorate(&fact.view);
         }
-        contract.validateView(fact.view) catch
-            @panic("Account Runtime prepared an invalid canonical AccountView");
+        if (fact.view.state == .authenticated and
+            prepared.transition.sourceAuthorityReady())
+        {
+            const authority_catalog = switch (prepared.transition.catalogIntent()) {
+                .promote_candidate => &self.candidate_public_catalog,
+                .candidate, .committed, .discard_candidate, .clear_all => &self.committed_public_catalog,
+            };
+            const protocol = authority_catalog.protocolForApiKey(
+                fact.view.selected_api_key_id,
+            ) orelse @panic("Account source authority has no selected API protocol");
+            fact.authority = .{
+                .account_id = fact.view.account_id,
+                .api_key_id = fact.view.selected_api_key_id,
+                .model_id = fact.view.selected_model,
+                .protocol = protocol,
+                .source_generation = prepared.transition.sourceGeneration(),
+            };
+        }
+        contract.validateFact(fact) catch
+            @panic("Account Runtime prepared an invalid canonical AccountFact");
         return fact;
     }
 
@@ -902,6 +905,8 @@ pub const Runtime = struct {
             if (prepared.attemptId() == pending.attempt_id)
                 self.pending_default_preference = null;
         }
+        if (prepared.finishesAttempt())
+            self.clearPendingSourceCandidateFor(prepared.attemptId().?);
         prepared.transition.commit(&self.account);
     }
 
@@ -971,7 +976,16 @@ pub const Runtime = struct {
         completion: *state_impl.WorkerCompletion,
         collision: bool,
     ) PrepareResult {
+        const source_candidate_ready =
+            completion.payload == .source_candidate_ready;
+        const source_preference_persisted =
+            completion.payload == .source_preference_persisted;
+        const default_model_persisted =
+            completion.payload == .default_model_persisted;
         const catalog_attempt = self.account.catalogAttemptActive();
+        const public_catalog_attempt = self.account.publicCatalogAttemptActive();
+        const recovery_catalog_refresh =
+            self.account.recoveryCatalogRefreshActive();
         const refresh_attempt = self.account.refreshInFlight();
         self.effects.joinNetwork(completion.attempt_id);
         if (collision and
@@ -981,7 +995,7 @@ pub const Runtime = struct {
             completion.* = .{
                 .attempt_id = completion.attempt_id,
                 .payload = .{ .failed = .fromCode(
-                    .dependency_contract_invalid,
+                    .account_operation_failed,
                 ) },
             };
         }
@@ -1015,7 +1029,26 @@ pub const Runtime = struct {
         }
 
         const current_view = self.account.view();
-        const automatic_selection: AutomaticSelection = switch (completion.payload) {
+        if (recovery_catalog_refresh) switch (completion.payload) {
+            .api_keys_loaded => if (!self.effects.catalog.hasApiKey(
+                current_view.selected_api_key_id,
+            )) {
+                completion.payload = .{ .failed = .fromCode(
+                    .recovery_state_invalid,
+                ) };
+            },
+            .models_loaded => if (!self.effects.catalog.hasModel(
+                current_view.selected_model,
+            )) {
+                completion.payload = .{ .failed = .fromCode(
+                    .recovery_state_invalid,
+                ) };
+            },
+            else => {},
+        };
+        const automatic_selection: AutomaticSelection = if (recovery_catalog_refresh)
+            .none
+        else switch (completion.payload) {
             .api_keys_loaded => if (self.automaticApiSelection(
                 &self.effects.catalog,
                 current_view,
@@ -1026,7 +1059,9 @@ pub const Runtime = struct {
             )) |id| .{ .model = id } else .none,
             else => .none,
         };
-        if (self.account.activeAttempt() == completion.attempt_id) {
+        if (public_catalog_attempt and
+            self.account.activeAttempt() == completion.attempt_id)
+        {
             switch (completion.payload) {
                 .api_keys_loaded, .models_loaded => {
                     self.candidate_public_catalog.replaceFromSession(
@@ -1038,19 +1073,75 @@ pub const Runtime = struct {
             }
         }
         return switch (self.account.prepareCompletion(completion)) {
-            .transition => |transition| .{ .prepared = .{
-                .transition = transition,
-                .automatic_selection = automatic_selection,
-                .follow_up = if (loaded_identity != null)
-                    .refresh_catalog
-                else
-                    null,
-                .schedule_refresh_after_commit = loaded_identity != null,
-                .retry_refresh_after_commit = retry_refresh,
-            } },
+            .transition => |transition_value| result: {
+                var transition = transition_value;
+                if (source_candidate_ready and !transition.finishesAttempt()) {
+                    const candidate = transition.takeSourceCandidate() orelse
+                        @panic("Account source preparation lost its candidate");
+                    self.storePendingSourceCandidate(
+                        transition.attempt_id.?,
+                        candidate,
+                    );
+                }
+                if (source_preference_persisted or default_model_persisted) {
+                    const candidate = self.takePendingSourceCandidate(
+                        transition.attempt_id.?,
+                    ) orelse @panic(
+                        "Account preference committed without its source candidate",
+                    );
+                    transition.attachSourceCandidate(candidate);
+                }
+                break :result .{ .prepared = .{
+                    .transition = transition,
+                    .automatic_selection = automatic_selection,
+                    .follow_up = if (loaded_identity != null)
+                        .refresh_catalog
+                    else
+                        null,
+                    .schedule_refresh_after_commit = loaded_identity != null,
+                    .retry_refresh_after_commit = retry_refresh,
+                } };
+            },
             .rejected => |error_code| .{ .rejected = error_code },
             .ignored_stale => .ignored_stale,
         };
+    }
+
+    fn storePendingSourceCandidate(
+        self: *Runtime,
+        attempt_id: u64,
+        candidate: execution_contract.OwnedSourceCandidate,
+    ) void {
+        std.debug.assert(self.pending_source_candidate == null);
+        self.pending_source_candidate = .{
+            .attempt_id = attempt_id,
+            .value = candidate,
+        };
+    }
+
+    fn takePendingSourceCandidate(
+        self: *Runtime,
+        attempt_id: u64,
+    ) ?execution_contract.OwnedSourceCandidate {
+        const pending = self.pending_source_candidate orelse return null;
+        if (pending.attempt_id != attempt_id) return null;
+        self.pending_source_candidate = null;
+        return pending.value;
+    }
+
+    fn clearPendingSourceCandidateFor(
+        self: *Runtime,
+        attempt_id: u64,
+    ) void {
+        const pending = self.pending_source_candidate orelse return;
+        if (pending.attempt_id != attempt_id) return;
+        self.clearPendingSourceCandidate();
+    }
+
+    fn clearPendingSourceCandidate(self: *Runtime) void {
+        if (self.pending_source_candidate) |*pending|
+            pending.value.deinit();
+        self.pending_source_candidate = null;
     }
 
     fn deleteInvalidCredential(self: *Runtime) contract.ErrorCode {
@@ -1183,7 +1274,7 @@ pub const Runtime = struct {
                     self.effects.publishCompletion(.{
                         .attempt_id = attempt_id,
                         .payload = .{ .failed = .fromCode(
-                            .dependency_contract_invalid,
+                            .account_operation_failed,
                         ) },
                     });
                     return;
@@ -1227,7 +1318,7 @@ pub const Runtime = struct {
                     self.effects.publishCompletion(.{
                         .attempt_id = attempt_id,
                         .payload = .{ .failed = .fromCode(
-                            .dependency_contract_invalid,
+                            .account_operation_failed,
                         ) },
                     });
                     return;
@@ -1271,7 +1362,7 @@ pub const Runtime = struct {
                     self.effects.publishCompletion(.{
                         .attempt_id = attempt_id,
                         .payload = .{ .failed = .fromCode(
-                            .dependency_contract_invalid,
+                            .account_operation_failed,
                         ) },
                     });
                     return;
@@ -1288,18 +1379,19 @@ pub const Runtime = struct {
                 argument orelse
                     @panic("model catalog effect has no API Key"),
             ),
-            .prepare_execution => self.prepareExecutionCandidate(
+            .prepare_source_candidate => |preference| self.prepareSourceCandidate(
                 entry.attempt_id orelse
-                    @panic("execution persistence effect has no attempt"),
+                    @panic("source persistence effect has no attempt"),
                 argument orelse
-                    @panic("execution effect has no model"),
+                    @panic("source candidate effect has no model"),
+                preference.metask_source_generation,
             ),
-            .persist_execution_preference => |preference| self.persistExecutionPreference(
+            .persist_source_preference => |preference| self.persistSourcePreference(
                 entry.attempt_id orelse
-                    @panic("execution preference effect has no attempt"),
+                    @panic("source preference effect has no attempt"),
                 argument orelse
-                    @panic("execution preference effect has no model"),
-                preference.execution_generation,
+                    @panic("source preference effect has no model"),
+                preference.metask_source_generation,
             ),
         }
     }
@@ -1335,47 +1427,48 @@ pub const Runtime = struct {
         });
     }
 
-    fn prepareExecutionCandidate(
+    fn prepareSourceCandidate(
         self: *Runtime,
         attempt_id: u64,
         model: []const u8,
+        requested_source_generation: u64,
     ) void {
         const identity = self.account.currentIdentity() orelse {
             self.effects.publishCompletion(.{
                 .attempt_id = attempt_id,
                 .payload = .{ .failed = .fromCode(
-                    .dependency_contract_invalid,
+                    .account_operation_failed,
                 ) },
             });
             return;
         };
-        const account_view = self.account.view();
         defer self.effects.catalog.reset();
-        const restored_generation = self.savedExecutionGenerationFor(
-            identity.accountId(),
-            self.effects.catalog.selectedApiKeyId(),
-            model,
-            account_view.metask_execution_generation,
-        );
-        const execution_generation = restored_generation orelse
-            generateExecutionGeneration(
+        const metask_source_generation = if (requested_source_generation != 0)
+            requested_source_generation
+        else
+            self.savedSourceGenerationFor(
+                identity.accountId(),
+                self.effects.catalog.selectedApiKeyId(),
+                model,
+                self.account.sourceGeneration(),
+            ) orelse generateSourceGeneration(
                 self.io,
-                account_view.metask_execution_generation,
+                self.account.sourceGeneration(),
             ) catch {
-            self.effects.publishCompletion(.{
-                .attempt_id = attempt_id,
-                .payload = .{ .failed = .fromCode(
-                    .local_resource_exhausted,
-                ) },
-            });
-            return;
-        };
-        var execution = switch (prepareCatalogExecution(
+                self.effects.publishCompletion(.{
+                    .attempt_id = attempt_id,
+                    .payload = .{ .failed = .fromCode(
+                        .local_resource_exhausted,
+                    ) },
+                });
+                return;
+            };
+        var source_candidate = switch (prepareCatalogSourceCandidate(
             &self.effects.catalog,
             &identity,
-            account_view.model_catalog_api_key_id,
+            self.effects.catalog.selectedApiKeyId(),
             model,
-            execution_generation,
+            metask_source_generation,
         )) {
             .ready => |owned| owned,
             .rejected => |error_code| {
@@ -1386,23 +1479,23 @@ pub const Runtime = struct {
                 return;
             },
         };
-        defer execution.deinit();
+        defer source_candidate.deinit();
         self.effects.publishCompletion(.{
             .attempt_id = attempt_id,
-            .payload = .{ .execution_ready = execution.take() },
+            .payload = .{ .source_candidate_ready = source_candidate.take() },
         });
     }
 
-    fn persistExecutionPreference(
+    fn persistSourcePreference(
         self: *Runtime,
         attempt_id: u64,
         model: []const u8,
-        execution_generation: u64,
+        metask_source_generation: u64,
     ) void {
         const identity = self.account.currentIdentity() orelse {
             self.effects.publishCompletion(.{
                 .attempt_id = attempt_id,
-                .payload = .{ .failed = .fromCode(.dependency_contract_invalid) },
+                .payload = .{ .failed = .fromCode(.account_operation_failed) },
             });
             return;
         };
@@ -1416,9 +1509,9 @@ pub const Runtime = struct {
         const preference = credential_store.commitPreference(
             platform.credentials,
             identity.accountId(),
-            self.account.view().model_catalog_api_key_id,
+            self.view().model_catalog_api_key_id,
             model,
-            execution_generation,
+            metask_source_generation,
         ) catch |err| {
             if (err == error.PersistenceOutcomeUnknown) {
                 self.effects.publishPersistenceUnknown(attempt_id);
@@ -1436,7 +1529,7 @@ pub const Runtime = struct {
         };
         self.effects.publishCompletion(.{
             .attempt_id = attempt_id,
-            .payload = .execution_preference_persisted,
+            .payload = .source_preference_persisted,
         });
     }
 
@@ -1449,7 +1542,7 @@ pub const Runtime = struct {
             self.effects.publishCompletion(.{
                 .attempt_id = attempt_id,
                 .payload = .{ .failed = .fromCode(
-                    .dependency_contract_invalid,
+                    .account_operation_failed,
                 ) },
             });
             return;
@@ -1463,13 +1556,13 @@ pub const Runtime = struct {
             });
             return;
         };
-        const account_view = self.account.view();
+        const account_view = self.view();
         const preference = credential_store.commitPreference(
             platform.credentials,
             identity.accountId(),
             account_view.selected_api_key_id,
             model,
-            account_view.metask_execution_generation,
+            self.account.sourceGeneration(),
         ) catch |err| {
             if (err == error.PersistenceOutcomeUnknown) {
                 self.effects.publishDefaultModelPersistenceUnknown(attempt_id);
@@ -1491,20 +1584,20 @@ pub const Runtime = struct {
         });
     }
 
-    fn prepareExecutionPersistenceUnknown(
+    fn prepareSourcePreferencePersistenceUnknown(
         self: *Runtime,
         attempt_id: u64,
     ) PrepareResult {
         if (self.account.activeAttempt() != attempt_id)
             return .ignored_stale;
-        const account_view = self.account.view();
+        const account_view = self.view();
         const platform = self.platform orelse
             return wrapPrepareResult(
-                self.account.prepareExecutionPersistenceInvalid(),
+                self.account.prepareSourcePreferencePersistenceInvalid(),
             );
         const observed = platform.credentials.loadPreference() catch
             return wrapPrepareResult(
-                self.account.prepareExecutionPersistenceInvalid(),
+                self.account.prepareSourcePreferencePersistenceInvalid(),
             );
         if (observed) |preference| {
             const is_candidate = std.mem.eql(
@@ -1519,8 +1612,8 @@ pub const Runtime = struct {
                 u8,
                 preference.modelId(),
                 account_view.candidate_model,
-            ) and preference.execution_generation ==
-                self.account.pendingExecutionGeneration();
+            ) and preference.metask_source_generation ==
+                self.account.pendingSourceGeneration();
             if (is_candidate) {
                 self.pending_default_preference = .{
                     .attempt_id = attempt_id,
@@ -1528,9 +1621,9 @@ pub const Runtime = struct {
                 };
                 var completion: state_impl.WorkerCompletion = .{
                     .attempt_id = attempt_id,
-                    .payload = .execution_preference_persisted,
+                    .payload = .source_preference_persisted,
                 };
-                return wrapPrepareResult(
+                return self.wrapPersistedCandidate(
                     self.account.prepareCompletion(&completion),
                 );
             }
@@ -1548,8 +1641,27 @@ pub const Runtime = struct {
             );
         }
         return wrapPrepareResult(
-            self.account.prepareExecutionPersistenceInvalid(),
+            self.account.prepareSourcePreferencePersistenceInvalid(),
         );
+    }
+
+    fn wrapPersistedCandidate(
+        self: *Runtime,
+        result: state_impl.PrepareResult,
+    ) PrepareResult {
+        return switch (result) {
+            .transition => |transition_value| blk: {
+                var transition = transition_value;
+                const attempt_id = transition.attempt_id orelse
+                    @panic("Account preference terminal has no attempt");
+                const candidate = self.takePendingSourceCandidate(attempt_id) orelse
+                    @panic("Account preference terminal lost its source candidate");
+                transition.attachSourceCandidate(candidate);
+                break :blk .{ .prepared = .{ .transition = transition } };
+            },
+            .rejected => |error_code| .{ .rejected = error_code },
+            .ignored_stale => .ignored_stale,
+        };
     }
 
     fn prepareDefaultModelPersistenceUnknown(
@@ -1579,7 +1691,7 @@ pub const Runtime = struct {
             u8,
             preference.apiKeyId(),
             account_view.selected_api_key_id,
-        ) and preference.execution_generation == account_view.metask_execution_generation;
+        ) and preference.metask_source_generation == self.account.sourceGeneration();
         if (!same_tuple)
             return wrapPrepareResult(
                 self.account.prepareDefaultModelPersistenceInvalid(),
@@ -1593,7 +1705,9 @@ pub const Runtime = struct {
                 .attempt_id = attempt_id,
                 .payload = .default_model_persisted,
             };
-            return wrapPrepareResult(self.account.prepareCompletion(&completion));
+            return self.wrapPersistedCandidate(
+                self.account.prepareCompletion(&completion),
+            );
         }
         if (std.mem.eql(u8, preference.modelId(), account_view.selected_model))
             return self.prepareFailure(
@@ -1610,7 +1724,7 @@ pub const Runtime = struct {
         catalog: *const catalog_impl.CatalogSession,
         account_view: contract.AccountView,
     ) ?[]const u8 {
-        if (account_view.metask_execution_generation != 0) {
+        if (account_view.selected_api_key_id.len != 0) {
             if (account_view.candidate_api_key_id.len != 0) return null;
             if (catalog.hasApiKey(account_view.selected_api_key_id))
                 return account_view.selected_api_key_id;
@@ -1674,18 +1788,18 @@ pub const Runtime = struct {
         return saved;
     }
 
-    fn savedExecutionGenerationFor(
+    fn savedSourceGenerationFor(
         self: *const Runtime,
         account_id: []const u8,
         api_key_id: []const u8,
         model_id: []const u8,
-        current_execution_generation: u64,
+        current_metask_source_generation: u64,
     ) ?u64 {
-        if (current_execution_generation != 0) return null;
+        if (current_metask_source_generation != 0) return null;
         const saved = self.savedPreferenceFor(account_id) orelse return null;
         if (!std.mem.eql(u8, saved.apiKeyId(), api_key_id) or
             !std.mem.eql(u8, saved.modelId(), model_id)) return null;
-        return saved.execution_generation;
+        return saved.metask_source_generation;
     }
 
     fn discardForeignPreference(
@@ -1769,7 +1883,7 @@ pub const Runtime = struct {
     }
 };
 
-fn generateExecutionGeneration(
+fn generateSourceGeneration(
     io: std.Io,
     current_generation: u64,
 ) !u64 {
@@ -1812,9 +1926,9 @@ pub const TestSupport = if (builtin.is_test) struct {
 
     pub fn prepareReadyRestore(
         runtime: *Runtime,
-        execution: *execution_contract.OwnedConfig,
+        source_candidate: *execution_contract.OwnedSourceCandidate,
     ) !Prepared {
-        const input = execution.input();
+        const input = source_candidate.input();
         runtime.committed_public_catalog.replaceRestoredSelection(
             "key-1",
             input.target.protocol,
@@ -1824,13 +1938,13 @@ pub const TestSupport = if (builtin.is_test) struct {
             "account-1",
             "key-1",
             input.target.model,
-            input.execution_generation,
+            input.source_generation,
         );
         return .{ .transition = try state_impl.TestSupport.prepareReady(
             &runtime.account,
             try .init("account-1", "Metask User"),
             "key-1",
-            execution,
+            source_candidate,
         ) };
     }
 
@@ -1913,14 +2027,14 @@ pub const TestSupport = if (builtin.is_test) struct {
         };
     }
 
-    pub fn prepareExecutionReady(
+    pub fn prepareSourceCandidateReady(
         runtime: *Runtime,
-        execution: *execution_contract.OwnedConfig,
+        source_candidate: *execution_contract.OwnedSourceCandidate,
     ) !Prepared {
-        state_impl.TestSupport.installInitialExecutionPreparation(
+        state_impl.TestSupport.installInitialSourcePreparation(
             &runtime.account,
             "key-1",
-            execution.input().target.model,
+            source_candidate.input().target.model,
         );
         try catalog_impl.TestSupport.replaceOwnedSelection(
             &runtime.effects.catalog,
@@ -1929,11 +2043,11 @@ pub const TestSupport = if (builtin.is_test) struct {
                 .id = "key-1",
                 .name = "Primary",
                 .suffix = "1234",
-                .protocol = execution.input().target.protocol,
+                .protocol = source_candidate.input().target.protocol,
             },
-            execution.input().api_key,
+            source_candidate.input().api_key,
             &.{.{
-                .id = execution.input().target.model,
+                .id = source_candidate.input().target.model,
                 .display_name = "Model",
             }},
         );
@@ -1943,25 +2057,29 @@ pub const TestSupport = if (builtin.is_test) struct {
                 .id = "key-1",
                 .name = "Primary",
                 .suffix = "1234",
-                .protocol = execution.input().target.protocol,
+                .protocol = source_candidate.input().target.protocol,
             }},
             &.{.{
-                .id = execution.input().target.model,
+                .id = source_candidate.input().target.model,
                 .display_name = "Model",
             }},
         );
         runtime.candidate_catalog_attempt_id = 1;
         var completion: state_impl.WorkerCompletion = .{
             .attempt_id = 1,
-            .payload = .{ .execution_ready = execution.take() },
+            .payload = .{ .source_candidate_ready = source_candidate.take() },
         };
         defer completion.deinit();
         return preparedFromState(runtime.account.prepareCompletion(&completion));
     }
 
-    pub fn savedPreferenceExecutionGeneration(runtime: *const Runtime) ?u64 {
+    pub fn savedPreferenceSourceGeneration(runtime: *const Runtime) ?u64 {
         const preference = runtime.saved_preference orelse return null;
-        return preference.execution_generation;
+        return preference.metask_source_generation;
+    }
+
+    pub fn sourceGeneration(runtime: *const Runtime) u64 {
+        return runtime.account.sourceGeneration();
     }
 
     pub fn prepareLoggedOutAfterExternalCommit(runtime: *Runtime) Prepared {
@@ -2013,32 +2131,31 @@ fn accountSelectionCommand(
     return .{
         .selection_id = selection_id,
         .expected_catalog_generation = view.catalog_generation,
-        .expected_execution_generation = view.metask_execution_generation,
     };
 }
 
-const CatalogExecutionPreparation = union(enum) {
-    ready: execution_contract.OwnedConfig,
+const CatalogSourcePreparation = union(enum) {
+    ready: execution_contract.OwnedSourceCandidate,
     rejected: contract.ErrorCode,
 };
 
-fn prepareCatalogExecution(
+fn prepareCatalogSourceCandidate(
     catalog: *catalog_impl.CatalogSession,
     identity: *const state_impl.AccountIdentity,
     model_catalog_api_key_id: []const u8,
     model: []const u8,
-    execution_generation: u64,
-) CatalogExecutionPreparation {
+    metask_source_generation: u64,
+) CatalogSourcePreparation {
     if (!std.mem.eql(u8, catalog.ownerAccountId(), identity.accountId()))
         return .{ .rejected = .metask_unauthorized };
-    if (!catalog.ownsExecutionSelection(
+    if (!catalog.ownsSourceSelection(
         identity.accountId(),
         model_catalog_api_key_id,
         model,
-    )) return .{ .rejected = .dependency_contract_invalid };
-    return .{ .ready = catalog.prepareExecution(
+    )) return .{ .rejected = .account_operation_failed };
+    return .{ .ready = catalog.prepareSourceCandidate(
         model,
-        execution_generation,
+        metask_source_generation,
     ) catch |err| return .{
         .rejected = catalog_impl.errorCode(err),
     } };
@@ -2056,7 +2173,7 @@ fn accountRestoreError(err: anyerror) contract.ErrorCode {
         => .recovery_state_invalid,
         error.WrongThread,
         error.WriteFailed,
-        => .dependency_contract_invalid,
+        => .account_operation_failed,
         else => .recovery_state_invalid,
     };
 }
@@ -2071,7 +2188,7 @@ fn accountStoreError(err: anyerror) contract.ErrorCode {
         error.InvalidData,
         error.VerificationFailed,
         => .recovery_state_invalid,
-        else => .dependency_contract_invalid,
+        else => .account_operation_failed,
     };
 }
 
@@ -2083,7 +2200,7 @@ fn loginStartError(err: login_attempt.StartError) contract.ErrorCode {
         error.RandomFailed,
         error.InvalidAttempt,
         error.AlreadyStarted,
-        => .dependency_contract_invalid,
+        => .account_operation_failed,
     };
 }
 
@@ -2250,7 +2367,6 @@ test "Account Runtime owns automatic catalog selection policy" {
         .catalog_state = .loading,
         .selected_api_key_id = "key-current",
         .selected_model = "model-current",
-        .metask_execution_generation = 1,
     };
     try std.testing.expectEqualStrings(
         "key-current",
@@ -2259,7 +2375,6 @@ test "Account Runtime owns automatic catalog selection policy" {
     var first_login_view = ready_view;
     first_login_view.selected_api_key_id = "";
     first_login_view.selected_model = "";
-    first_login_view.metask_execution_generation = 0;
     // First login without a saved preference defaults to the catalog's
     // first key; the user adjusts in settings afterwards.
     try std.testing.expectEqualStrings(
@@ -2282,26 +2397,26 @@ test "Account Runtime owns automatic catalog selection policy" {
     );
     try std.testing.expectEqual(
         @as(?u64, 0x1020_3040_5060_7080),
-        runtime.savedExecutionGenerationFor(
+        runtime.savedSourceGenerationFor(
             "account-1",
             "key-current",
             "model-current",
             0,
         ),
     );
-    try std.testing.expect(runtime.savedExecutionGenerationFor(
+    try std.testing.expect(runtime.savedSourceGenerationFor(
         "account-2",
         "key-current",
         "model-current",
         0,
     ) == null);
-    try std.testing.expect(runtime.savedExecutionGenerationFor(
+    try std.testing.expect(runtime.savedSourceGenerationFor(
         "account-1",
         "key-current",
         "model-other",
         0,
     ) == null);
-    try std.testing.expect(runtime.savedExecutionGenerationFor(
+    try std.testing.expect(runtime.savedSourceGenerationFor(
         "account-1",
         "key-current",
         "model-current",
@@ -2320,8 +2435,8 @@ test "Account Runtime owns automatic catalog selection policy" {
     );
 }
 
-fn installExecutionPreparationForTest(runtime: *Runtime) !void {
-    state_impl.TestSupport.installInitialExecutionPreparation(
+fn installSourcePreparationForTest(runtime: *Runtime) !void {
+    state_impl.TestSupport.installInitialSourcePreparation(
         &runtime.account,
         "key-1",
         "model-1",
@@ -2351,27 +2466,22 @@ fn installExecutionPreparationForTest(runtime: *Runtime) !void {
     runtime.candidate_catalog_attempt_id = 1;
 }
 
-fn stageExecutionPreferenceForTest(runtime: *Runtime) !u64 {
-    runtime.prepareExecutionCandidate(1, "model-1");
-    var mailbox = runtime.effects.takeMailbox() orelse
-        return error.TestUnexpectedResult;
-    defer mailbox.deinit();
-    var staged = switch (mailbox) {
-        .completion => |*completion| preparedFromState(
-            runtime.account.prepareCompletion(completion),
-        ),
+fn stageSourcePreferenceForTest(runtime: *Runtime) !u64 {
+    runtime.prepareSourceCandidate(1, "model-1", 0);
+    var staged = switch (runtime.prepareNextCompletion() orelse
+        return error.TestUnexpectedResult) {
+        .prepared => |prepared| prepared,
         else => return error.TestUnexpectedResult,
     };
     defer staged.deinit();
-    var execution = staged.executionTransfer().?.take();
-    const generation = execution.input().execution_generation;
-    execution.deinit();
+    const generation = runtime.pending_source_candidate.?.value.input().source_generation;
+    try std.testing.expect(staged.takeSourceCandidate() == null);
     _ = staged.transition.takeEffect();
     runtime.commit(&staged);
     return generation;
 }
 
-test "Account Runtime restores an exact persisted execution nonce" {
+test "Account Runtime restores an exact persisted source generation" {
     var wake_context: u8 = 0;
     var runtime = try initRuntimeForTest(&wake_context);
     defer runtime.deinit();
@@ -2381,17 +2491,17 @@ test "Account Runtime restores an exact persisted execution nonce" {
         "model-1",
         0x1020_3040_5060_7080,
     );
-    try installExecutionPreparationForTest(&runtime);
+    try installSourcePreparationForTest(&runtime);
 
-    runtime.prepareExecutionCandidate(1, "model-1");
+    runtime.prepareSourceCandidate(1, "model-1", 0);
     var mailbox = runtime.effects.takeMailbox() orelse
         return error.TestUnexpectedResult;
     defer mailbox.deinit();
     switch (mailbox) {
         .completion => |completion| switch (completion.payload) {
-            .execution_ready => |execution| try std.testing.expectEqual(
+            .source_candidate_ready => |candidate| try std.testing.expectEqual(
                 @as(u64, 0x1020_3040_5060_7080),
-                execution.input().execution_generation,
+                candidate.input().source_generation,
             ),
             else => return error.TestUnexpectedResult,
         },
@@ -2399,7 +2509,7 @@ test "Account Runtime restores an exact persisted execution nonce" {
     }
 }
 
-test "Account Runtime persists a nonzero nonce for a new execution" {
+test "Account Runtime persists a nonzero generation for a new source authority" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var account_path_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -2422,22 +2532,17 @@ test "Account Runtime persists a nonzero nonce for a new execution" {
     defer runtime.platform = null;
     var startup = runtime.prepareStart(fake.platform());
     defer startup.deinit();
-    try installExecutionPreparationForTest(&runtime);
+    try installSourcePreparationForTest(&runtime);
 
-    runtime.prepareExecutionCandidate(1, "model-1");
-    var mailbox = runtime.effects.takeMailbox() orelse
-        return error.TestUnexpectedResult;
-    defer mailbox.deinit();
-    var staged = switch (mailbox) {
-        .completion => |*completion| preparedFromState(
-            runtime.account.prepareCompletion(completion),
-        ),
+    runtime.prepareSourceCandidate(1, "model-1", 0);
+    var staged = switch (runtime.prepareNextCompletion() orelse
+        return error.TestUnexpectedResult) {
+        .prepared => |prepared| prepared,
         else => return error.TestUnexpectedResult,
     };
     defer staged.deinit();
-    var staged_execution = staged.executionTransfer().?.take();
-    const generation = staged_execution.input().execution_generation;
-    staged_execution.deinit();
+    const generation = runtime.pending_source_candidate.?.value.input().source_generation;
+    try std.testing.expect(staged.takeSourceCandidate() == null);
     try std.testing.expectEqual(@as(usize, 0), fake.preference_commit_calls);
     try std.testing.expect(runtime.admitEffect(&staged));
     runtime.commit(&staged);
@@ -2450,22 +2555,28 @@ test "Account Runtime persists a nonzero nonce for a new execution" {
     };
     defer persisted.deinit();
     runtime.commit(&persisted);
+    var terminal_candidate = persisted.takeSourceCandidate().?;
+    defer terminal_candidate.deinit();
+    try std.testing.expectEqual(
+        generation,
+        terminal_candidate.input().source_generation,
+    );
     try std.testing.expect(generation != 0);
     try std.testing.expectEqual(
         generation,
-        runtime.saved_preference.?.execution_generation,
+        runtime.saved_preference.?.metask_source_generation,
     );
 }
 
-test "execution preference outcome unknown finalizes only an exact candidate reread" {
+test "source preference outcome unknown finalizes only an exact candidate reread" {
     var wake_context: u8 = 0;
     var runtime = try initRuntimeForTest(&wake_context);
     defer runtime.deinit();
     var platform: TestPlatform = .{};
     runtime.platform = platform.platform();
     defer runtime.platform = null;
-    try installExecutionPreparationForTest(&runtime);
-    const generation = try stageExecutionPreferenceForTest(&runtime);
+    try installSourcePreparationForTest(&runtime);
+    const generation = try stageSourcePreferenceForTest(&runtime);
     platform.preference = try .init(
         "account-1",
         "key-1",
@@ -2473,23 +2584,19 @@ test "execution preference outcome unknown finalizes only an exact candidate rer
         generation,
     );
 
-    var prepared = switch (runtime.prepareExecutionPersistenceUnknown(1)) {
+    var prepared = switch (runtime.prepareSourcePreferencePersistenceUnknown(1)) {
         .prepared => |value| value,
         else => return error.TestUnexpectedResult,
     };
     defer prepared.deinit();
-    try std.testing.expectEqual(
-        state_impl.ExecutionIntent.finalize_install,
-        prepared.executionIntent(),
-    );
     runtime.commit(&prepared);
     try std.testing.expectEqual(
         @as(?u64, generation),
-        TestSupport.savedPreferenceExecutionGeneration(&runtime),
+        TestSupport.savedPreferenceSourceGeneration(&runtime),
     );
 }
 
-test "execution preference outcome unknown distinguishes old and third values" {
+test "source preference outcome unknown distinguishes old and third values" {
     for ([_]bool{ false, true }) |third_value| {
         var wake_context: u8 = 0;
         var runtime = try initRuntimeForTest(&wake_context);
@@ -2504,22 +2611,18 @@ test "execution preference outcome unknown distinguishes old and third values" {
             9,
         );
         runtime.saved_preference = old;
-        try installExecutionPreparationForTest(&runtime);
-        _ = try stageExecutionPreferenceForTest(&runtime);
+        try installSourcePreparationForTest(&runtime);
+        _ = try stageSourcePreferenceForTest(&runtime);
         platform.preference = if (third_value)
             try .init("account-1", "key-third", "model-third", 10)
         else
             old;
 
-        var prepared = switch (runtime.prepareExecutionPersistenceUnknown(1)) {
+        var prepared = switch (runtime.prepareSourcePreferencePersistenceUnknown(1)) {
             .prepared => |value| value,
             else => return error.TestUnexpectedResult,
         };
         defer prepared.deinit();
-        try std.testing.expectEqual(
-            state_impl.ExecutionIntent.unchanged,
-            prepared.executionIntent(),
-        );
         runtime.commit(&prepared);
         try std.testing.expectEqual(
             if (third_value)
@@ -2540,7 +2643,7 @@ test "Account Runtime stages the candidate catalog before preference persistence
     var runtime = try initRuntimeForTest(&wake_context);
     defer runtime.deinit();
 
-    state_impl.TestSupport.installInitialExecutionPreparation(
+    state_impl.TestSupport.installInitialSourcePreparation(
         &runtime.account,
         "key-1",
         "model-1",
@@ -2569,7 +2672,7 @@ test "Account Runtime stages the candidate catalog before preference persistence
     );
     runtime.candidate_catalog_attempt_id = 1;
 
-    var execution = try execution_contract.OwnedConfig.initOwned(
+    var source_candidate = try execution_contract.OwnedSourceCandidate.initOwned(
         std.testing.allocator,
         .metask,
         .anthropic_messages,
@@ -2584,7 +2687,7 @@ test "Account Runtime stages the candidate catalog before preference persistence
     );
     var completion: state_impl.WorkerCompletion = .{
         .attempt_id = 1,
-        .payload = .{ .execution_ready = execution.take() },
+        .payload = .{ .source_candidate_ready = source_candidate.take() },
     };
     defer completion.deinit();
     var prepared = preparedFromState(
@@ -2596,9 +2699,9 @@ test "Account Runtime stages the candidate catalog before preference persistence
     try contract.validateView(fact.view);
     try std.testing.expectEqual(@as(usize, 1), fact.view.api_keys.len);
     try std.testing.expectEqual(@as(usize, 1), fact.view.models.len);
-    if (prepared.takeExecution()) |execution_value| {
-        var committed_execution = execution_value;
-        committed_execution.deinit();
+    if (prepared.takeSourceCandidate()) |candidate_value| {
+        var committed_candidate = candidate_value;
+        committed_candidate.deinit();
     }
     _ = prepared.transition.takeEffect();
     runtime.commit(&prepared);
@@ -2668,6 +2771,30 @@ test "Account Runtime catalog cancel discards candidate identity and secrets" {
     try std.testing.expect(!runtime.candidate_public_catalog.hasApiKey("key-1"));
     try std.testing.expect(runtime.effects.catalog.firstApiKeyId() == null);
     try contract.validateView(runtime.view());
+}
+
+test "Account Runtime keeps committed authority during catalog refresh" {
+    var wake_context: u8 = 0;
+    var runtime = try initRuntimeForTest(&wake_context);
+    defer runtime.deinit();
+    try commitReadyRestoreForTest(&runtime);
+
+    var refresh = switch (runtime.prepareCommand(.refresh_catalog)) {
+        .prepared => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer refresh.deinit();
+    const fact = runtime.preparedFact(&refresh);
+    try std.testing.expectEqual(contract.CatalogState.loading, fact.view.catalog_state);
+    const authority = fact.authority orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("account-1", authority.account_id);
+    try std.testing.expectEqualStrings("key-1", authority.api_key_id);
+    try std.testing.expectEqualStrings("model-1", authority.model_id);
+    try std.testing.expectEqual(@as(u64, 1), authority.source_generation);
+    try std.testing.expectEqual(
+        execution_contract.Protocol.anthropic_messages,
+        authority.protocol,
+    );
 }
 
 test "Account Runtime mailbox transfers ownership and reports collision" {
@@ -2743,7 +2870,7 @@ test "Account Runtime rejects cross-API model selection before persistence" {
         "Metask User",
     );
 
-    switch (prepareCatalogExecution(
+    switch (prepareCatalogSourceCandidate(
         &candidate,
         &identity,
         "key-a",
@@ -2751,7 +2878,7 @@ test "Account Runtime rejects cross-API model selection before persistence" {
         2,
     )) {
         .rejected => |error_code| try std.testing.expectEqual(
-            contract.ErrorCode.dependency_contract_invalid,
+            contract.ErrorCode.account_operation_failed,
             error_code,
         ),
         .ready => |unexpected_value| {
@@ -2761,12 +2888,12 @@ test "Account Runtime rejects cross-API model selection before persistence" {
         },
     }
 
-    try std.testing.expect(candidate.ownsExecutionSelection(
+    try std.testing.expect(candidate.ownsSourceSelection(
         "account-1",
         "key-b",
         "same-model",
     ));
-    var execution = switch (prepareCatalogExecution(
+    var source_candidate = switch (prepareCatalogSourceCandidate(
         &candidate,
         &identity,
         "key-b",
@@ -2776,8 +2903,8 @@ test "Account Runtime rejects cross-API model selection before persistence" {
         .ready => |owned| owned,
         .rejected => return error.TestUnexpectedResult,
     };
-    defer execution.deinit();
-    try std.testing.expectEqualStrings("secret-key-b", execution.input().api_key);
+    defer source_candidate.deinit();
+    try std.testing.expectEqualStrings("secret-key-b", source_candidate.input().api_key);
 }
 
 fn commitAutomationRestoreForTest(runtime: *Runtime) void {
@@ -2789,7 +2916,7 @@ fn commitAutomationRestoreForTest(runtime: *Runtime) void {
 }
 
 fn commitReadyRestoreForTest(runtime: *Runtime) !void {
-    var execution = try execution_contract.OwnedConfig.initOwned(
+    var source_candidate = try execution_contract.OwnedSourceCandidate.initOwned(
         std.testing.allocator,
         .metask,
         .anthropic_messages,
@@ -2802,16 +2929,84 @@ fn commitReadyRestoreForTest(runtime: *Runtime) !void {
         try std.testing.allocator.dupe(u8, "secret-key"),
         "fixture-provider",
     );
-    var prepared = try TestSupport.prepareReadyRestore(runtime, &execution);
-    execution.deinit();
+    var prepared = try TestSupport.prepareReadyRestore(runtime, &source_candidate);
+    source_candidate.deinit();
     defer prepared.deinit();
     try std.testing.expect(runtime.admitEffect(&prepared));
-    if (prepared.takeExecution()) |execution_value| {
-        var committed_execution = execution_value;
-        committed_execution.deinit();
+    if (prepared.takeSourceCandidate()) |candidate_value| {
+        var committed_candidate = candidate_value;
+        committed_candidate.deinit();
     }
     runtime.commit(&prepared);
     runtime.dispatchCommitted(&prepared);
+}
+
+test "preference recovery refreshes the exact catalog without automatic mutation" {
+    var wake_context: u8 = 0;
+    var runtime = try initRuntimeForTest(&wake_context);
+    defer runtime.deinit();
+    try commitReadyRestoreForTest(&runtime);
+    state_impl.TestSupport.enterPreferenceRecovery(&runtime.account);
+
+    var begin = switch (runtime.prepareCommand(.refresh_catalog)) {
+        .prepared => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer begin.deinit();
+    _ = begin.transition.takeEffect();
+    runtime.commit(&begin);
+
+    try catalog_impl.TestSupport.replaceOwnedSelection(
+        &runtime.effects.catalog,
+        "account-1",
+        .{
+            .id = "key-1",
+            .name = "Primary",
+            .suffix = "1234",
+            .protocol = .anthropic_messages,
+        },
+        "secret-key",
+        &.{.{ .id = "model-1", .display_name = "Model 1" }},
+    );
+    runtime.effects.publishCompletion(.{
+        .attempt_id = runtime.account.activeAttempt().?,
+        .payload = .api_keys_loaded,
+    });
+    var keys = switch (runtime.prepareNextCompletion().?) {
+        .prepared => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer keys.deinit();
+    const keys_fact = runtime.preparedFact(&keys);
+    try std.testing.expectEqualStrings(
+        "key-1",
+        keys_fact.view.model_catalog_api_key_id,
+    );
+    try std.testing.expect(runtime.takeFollowUpCommand(&keys) == null);
+    _ = keys.transition.takeEffect();
+    runtime.commit(&keys);
+
+    runtime.effects.publishCompletion(.{
+        .attempt_id = runtime.account.activeAttempt().?,
+        .payload = .models_loaded,
+    });
+    var models = switch (runtime.prepareNextCompletion().?) {
+        .prepared => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer models.deinit();
+    const models_fact = runtime.preparedFact(&models);
+    try std.testing.expectEqualStrings(
+        "key-1",
+        models_fact.view.model_catalog_api_key_id,
+    );
+    try std.testing.expect(models.takeSourceCandidate() == null);
+    try std.testing.expect(runtime.takeFollowUpCommand(&models) == null);
+    runtime.commit(&models);
+    try std.testing.expectEqual(
+        contract.ErrorCode.recovery_state_invalid,
+        runtime.view().error_code,
+    );
 }
 
 fn beginDefaultModelChangeForTest(
@@ -2823,16 +3018,70 @@ fn beginDefaultModelChangeForTest(
         .select_model = .{
             .selection_id = model_id,
             .expected_catalog_generation = account_view.catalog_generation,
-            .expected_execution_generation = account_view.metask_execution_generation,
         },
     })) {
         .prepared => |value| value,
         else => return error.TestUnexpectedResult,
     };
     defer prepared.deinit();
-    try std.testing.expect(runtime.admitEffect(&prepared));
+    try std.testing.expect(prepared.transition.takeEffect().? == .load_api_keys);
     runtime.commit(&prepared);
-    runtime.dispatchCommitted(&prepared);
+    const attempt_id = runtime.account.activeAttempt().?;
+
+    try catalog_impl.TestSupport.replaceOwnedSelection(
+        &runtime.effects.catalog,
+        "account-1",
+        .{
+            .id = "key-1",
+            .name = "Primary",
+            .suffix = "1234",
+            .protocol = .anthropic_messages,
+        },
+        "secret-key",
+        &.{
+            .{ .id = "model-1", .display_name = "Model 1" },
+            .{ .id = "model-2", .display_name = "Model 2" },
+            .{ .id = "model-third", .display_name = "Third" },
+        },
+    );
+    runtime.effects.publishCompletion(.{
+        .attempt_id = attempt_id,
+        .payload = .api_keys_loaded,
+    });
+    var keys = switch (runtime.prepareNextCompletion().?) {
+        .prepared => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer keys.deinit();
+    try std.testing.expect(keys.transition.takeEffect().? == .load_models);
+    runtime.commit(&keys);
+
+    runtime.effects.publishCompletion(.{
+        .attempt_id = attempt_id,
+        .payload = .models_loaded,
+    });
+    var models = switch (runtime.prepareNextCompletion().?) {
+        .prepared => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer models.deinit();
+    const candidate_effect = models.transition.takeEffect().?;
+    try std.testing.expect(candidate_effect == .prepare_source_candidate);
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        candidate_effect.prepare_source_candidate.metask_source_generation,
+    );
+    runtime.commit(&models);
+    runtime.prepareSourceCandidate(attempt_id, model_id, 1);
+
+    var candidate = switch (runtime.prepareNextCompletion().?) {
+        .prepared => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer candidate.deinit();
+    try std.testing.expect(runtime.admitEffect(&candidate));
+    runtime.commit(&candidate);
+    runtime.dispatchCommitted(&candidate);
 }
 
 fn prepareDefaultModelTest(
@@ -2885,7 +3134,7 @@ test "default-model outcome unknown commits the re-observed candidate" {
     );
     runtime.commit(&prepared);
     try std.testing.expectEqualStrings("model-2", runtime.view().selected_model);
-    try std.testing.expectEqual(@as(u64, 1), runtime.view().metask_execution_generation);
+    try std.testing.expectEqual(@as(u64, 1), runtime.account.sourceGeneration());
     try std.testing.expectEqualStrings(
         "model-2",
         runtime.saved_preference.?.modelId(),
@@ -2916,7 +3165,7 @@ test "default-model outcome unknown rolls back when disk kept the old value" {
     );
 }
 
-test "default-model outcome unknown revokes execution on a third disk state" {
+test "default-model outcome unknown revokes source authority on a third disk state" {
     var wake_context: u8 = 0;
     var runtime = try initRuntimeForTest(&wake_context);
     defer runtime.deinit();
@@ -2938,10 +3187,6 @@ test "default-model outcome unknown revokes execution on a third disk state" {
     };
     defer prepared.deinit();
     try std.testing.expectEqual(
-        state_impl.ExecutionIntent.unchanged,
-        prepared.executionIntent(),
-    );
-    try std.testing.expectEqual(
         state_impl.PreferenceIntent.clear,
         prepared.preferenceIntent(),
     );
@@ -2953,7 +3198,7 @@ test "default-model outcome unknown revokes execution on a third disk state" {
         account_view.error_code,
     );
     try std.testing.expect(runtime.saved_preference == null);
-    try std.testing.expect(runtime.savedExecutionGenerationFor(
+    try std.testing.expect(runtime.savedSourceGenerationFor(
         "account-1",
         "key-1",
         "model-1",

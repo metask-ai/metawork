@@ -3,11 +3,11 @@
 //! Workbench remains the owner of durable product state and operation markers.
 
 const std = @import("std");
-const account_oauth = @import("account_oauth");
-const account_loopback = @import("account_loopback");
+const oauth_mechanics = @import("oauth_mechanics");
+const oauth_loopback = @import("oauth_loopback");
 const oauth_loopback_transport = @import("oauth_loopback_transport");
 
-pub const AuthorizationCode = account_oauth.Secret;
+const callback_path = "/auth/callback";
 
 pub const Limits = struct {
     pub const url_bytes: usize = 4096;
@@ -21,7 +21,22 @@ pub const Limits = struct {
     pub const scope_bytes: usize = 256;
     pub const client_id_bytes: usize = 4096;
     pub const secret_bytes: usize = 16 * 1024;
+    pub const callback_target_bytes: usize = 8192;
+    pub const callback_error_bytes: usize = 256;
+    pub const callback_error_description_bytes: usize = 16 * 1024;
+    pub const callback_invalid_requests: usize = 4;
 };
+
+const CallbackMechanics = oauth_mechanics.CallbackParser(.{
+    .secret_bytes = Limits.secret_bytes,
+    .state_bytes = oauth_mechanics.pkce_encoded_bytes,
+    .target_bytes = Limits.callback_target_bytes,
+    .issuer_bytes = Limits.url_bytes,
+    .error_bytes = Limits.callback_error_bytes,
+    .error_description_bytes = Limits.callback_error_description_bytes,
+});
+
+pub const AuthorizationCode = CallbackMechanics.Secret;
 
 pub const Method = enum { get, post };
 
@@ -451,11 +466,113 @@ pub const TokenSet = struct {
 
 pub const AuthorizationCallback = struct {
     attempt_id: u64,
-    callback: account_oauth.Callback,
+    callback: CallbackMechanics.Callback,
 
     pub fn deinit(self: *AuthorizationCallback) void {
         self.callback.deinit();
         self.* = undefined;
+    }
+};
+
+const CallbackPolicy = struct {
+    allocator: std.mem.Allocator,
+    expected_state: []const u8,
+    expected_issuer: []const u8,
+    issuer_required: bool,
+    invalid_count: usize = 0,
+    callback: ?CallbackMechanics.Callback = null,
+
+    fn init(
+        allocator: std.mem.Allocator,
+        expected_state: []const u8,
+        expected_issuer: []const u8,
+        issuer_required: bool,
+    ) CallbackPolicy {
+        return .{
+            .allocator = allocator,
+            .expected_state = expected_state,
+            .expected_issuer = expected_issuer,
+            .issuer_required = issuer_required,
+        };
+    }
+
+    fn deinit(self: *CallbackPolicy) void {
+        if (self.callback) |*callback| callback.deinit();
+        self.callback = null;
+    }
+
+    fn sink(self: *CallbackPolicy) oauth_loopback.RequestSink {
+        return .{
+            .context = self,
+            .invalid_fn = invalidRequest,
+            .handle_fn = handleRequest,
+        };
+    }
+
+    fn take(self: *CallbackPolicy) ?CallbackMechanics.Callback {
+        const callback = self.callback;
+        self.callback = null;
+        return callback;
+    }
+
+    fn invalidRequest(context: *anyopaque) oauth_loopback.ServerError!void {
+        const self: *CallbackPolicy = @ptrCast(@alignCast(context));
+        try self.recordInvalid();
+    }
+
+    fn handleRequest(
+        context: *anyopaque,
+        request: oauth_loopback.Request,
+    ) oauth_loopback.ServerError!oauth_loopback.Response {
+        const self: *CallbackPolicy = @ptrCast(@alignCast(context));
+        if (request.method != .get or request.has_content_length or
+            request.has_transfer_encoding)
+        {
+            try self.recordInvalid();
+            return invalidCallbackResponse();
+        }
+        const callback = CallbackMechanics.parse(
+            self.allocator,
+            request.target,
+            self.expected_state,
+            .{
+                .callback_path = callback_path,
+                .expected_issuer = self.expected_issuer,
+                .issuer_required = self.issuer_required,
+            },
+        ) catch {
+            try self.recordInvalid();
+            return invalidCallbackResponse();
+        };
+        std.debug.assert(self.callback == null);
+        const response: oauth_loopback.Response = switch (callback) {
+            .code => .{
+                .status = .ok,
+                .body = "Authorization returned to MetaWork. You may close this window and wait for the MCP connection to finish.",
+                .complete = true,
+            },
+            .rejected => .{
+                .status = .bad_request,
+                .body = "MCP authorization was not completed. You may close this window and return to MetaWork.",
+                .complete = true,
+            },
+        };
+        self.callback = callback;
+        return response;
+    }
+
+    fn recordInvalid(self: *CallbackPolicy) oauth_loopback.ServerError!void {
+        self.invalid_count += 1;
+        if (self.invalid_count >= Limits.callback_invalid_requests)
+            return error.TooManyInvalidRequests;
+    }
+
+    fn invalidCallbackResponse() oauth_loopback.Response {
+        return .{
+            .status = .bad_request,
+            .body = "Invalid MCP OAuth callback.",
+            .complete = false,
+        };
     }
 };
 
@@ -465,14 +582,13 @@ pub const AuthorizationCallback = struct {
 pub const AuthorizationAttempt = struct {
     attempt_id: u64 = 0,
     server: oauth_loopback_transport.Server = undefined,
-    material: account_oauth.AttemptMaterial = undefined,
+    material: oauth_mechanics.AttemptMaterial = undefined,
     redirect_storage: [128]u8 = undefined,
     redirect_len: usize = 0,
     issuer_storage: [Limits.url_bytes]u8 = undefined,
     issuer_len: usize = 0,
     issuer_required: bool = false,
-    authorization_url_storage: [account_oauth.Limits.authorization_url_bytes]u8 =
-        undefined,
+    authorization_url_storage: [Limits.url_bytes]u8 = undefined,
     authorization_url_len: usize = 0,
     active: bool = false,
 
@@ -481,13 +597,17 @@ pub const AuthorizationAttempt = struct {
         if (attempt_id == 0) return error.InvalidAuthorizationRequest;
         self.* = .{};
         self.attempt_id = attempt_id;
-        account_oauth.AttemptMaterial.generate(io, &self.material) catch
+        oauth_mechanics.AttemptMaterial.generate(io, &self.material) catch
             return error.InvalidAuthorizationRequest;
         errdefer self.material.deinit();
         self.server = oauth_loopback_transport.Server.init(io) catch |err| return err;
         errdefer self.server.deinit();
         var writer = std.Io.Writer.fixed(&self.redirect_storage);
-        account_oauth.writeRedirectUri(&writer, self.server.port()) catch
+        oauth_mechanics.writeLoopbackRedirectUri(
+            &writer,
+            self.server.port(),
+            callback_path,
+        ) catch
             return error.InvalidAuthorizationRequest;
         self.redirect_len = writer.buffered().len;
         self.active = true;
@@ -506,7 +626,7 @@ pub const AuthorizationAttempt = struct {
         server_id: []const u8,
         resource: *const ResourceDiscovery,
         server: *const AuthorizationServer,
-    ) (Error || StateError || account_loopback.ServerError)!void {
+    ) (Error || StateError || oauth_loopback.ServerError)!void {
         try self.start(io, attempt_id);
         errdefer self.deinit();
         try self.bind(state.authorizationPort(), server_id, resource, server);
@@ -566,15 +686,13 @@ pub const AuthorizationAttempt = struct {
         self: *AuthorizationAttempt,
         allocator: std.mem.Allocator,
         deadline: std.Io.Clock.Timestamp,
-    ) account_loopback.ServerError!AuthorizationCallback {
+    ) oauth_loopback.ServerError!AuthorizationCallback {
         std.debug.assert(self.active);
-        var callback_policy = account_loopback.CallbackPolicy.init(
+        var callback_policy = CallbackPolicy.init(
             allocator,
             &self.material.state,
-            .{
-                .expected_issuer = self.issuer_storage[0..self.issuer_len],
-                .issuer_required = self.issuer_required,
-            },
+            self.issuer_storage[0..self.issuer_len],
+            self.issuer_required,
         );
         defer callback_policy.deinit();
         try self.server.wait(callback_policy.sink(), deadline);
@@ -895,7 +1013,7 @@ pub fn buildAuthorizationUrl(
     redirect_uri: []const u8,
     resource: []const u8,
     scopes: []const []const u8,
-    material: *const account_oauth.AttemptMaterial,
+    material: *const oauth_mechanics.AttemptMaterial,
 ) Error![]const u8 {
     if (!validClientId(client_id) or !validLoopbackRedirect(redirect_uri) or
         !validHttpsUrl(resource) or scopes.len > Limits.scopes)
@@ -927,7 +1045,7 @@ pub fn buildAuthorizationUrl(
         .{ "code_challenge_method", "S256" },
         .{ "resource", resource },
     }) catch return error.InvalidAuthorizationRequest;
-    if (writer.buffered().len > account_oauth.Limits.authorization_url_bytes)
+    if (writer.buffered().len > Limits.url_bytes)
         return error.InvalidAuthorizationRequest;
     return writer.buffered();
 }
@@ -1172,7 +1290,7 @@ pub fn performCodeExchange(
     server_id: []const u8,
     server: *const AuthorizationServer,
     client_secret: ?[]const u8,
-    code: *const account_oauth.Secret,
+    code: *const AuthorizationCode,
     verifier: []const u8,
     now_unix_ms: u64,
 ) (Error || StateError || std.mem.Allocator.Error)!FlowOutcome {
@@ -1336,14 +1454,14 @@ pub fn exchangeAuthorizationCodeEffect(
     client_id: []const u8,
     client_secret: ?[]const u8,
     auth_method: TokenEndpointAuthMethod,
-    code: *const account_oauth.Secret,
+    code: *const AuthorizationCode,
     verifier: []const u8,
     redirect_uri: []const u8,
     resource: []const u8,
     now_unix_ms: u64,
 ) (Error || std.mem.Allocator.Error)!TokenSet {
     if (!validClientId(client_id) or !validLoopbackRedirect(redirect_uri) or
-        !validHttpsUrl(resource) or verifier.len != account_oauth.Limits.verifier_bytes or
+        !validHttpsUrl(resource) or verifier.len != oauth_mechanics.pkce_encoded_bytes or
         ((auth_method == .none) != (client_secret == null)) or
         !containsAuthMethod(server.token_endpoint_auth_methods, auth_method))
         return error.InvalidAuthorizationRequest;
@@ -1750,14 +1868,14 @@ fn validHttpsIssuer(value: []const u8) bool {
 fn validLoopbackRedirect(value: []const u8) bool {
     if (value.len == 0 or value.len > Limits.url_bytes or
         !std.mem.startsWith(u8, value, "http://127.0.0.1:") or
-        !std.mem.endsWith(u8, value, account_oauth.callback_path) or
+        !std.mem.endsWith(u8, value, callback_path) or
         std.mem.indexOfAny(u8, value, "?#\\@%") != null)
         return false;
     const uri = std.Uri.parse(value) catch return false;
     const authority_start = "http://".len;
     const path_start = std.mem.indexOfScalarPos(u8, value, authority_start, '/') orelse
         return false;
-    return std.mem.eql(u8, value[path_start..], account_oauth.callback_path) and
+    return std.mem.eql(u8, value[path_start..], callback_path) and
         uri.host != null and uri.port != null and uri.port.? != 0 and
         uri.user == null and uri.password == null and uri.query == null and
         uri.fragment == null;
@@ -2023,11 +2141,11 @@ test "MCP OAuth discovery validates resource issuer PKCE and exact metadata" {
         TokenEndpointAuthMethod.none,
         server.dynamicRegistrationAuthMethod().?,
     );
-    const material = account_oauth.AttemptMaterial.fromSeeds(
+    const material = oauth_mechanics.AttemptMaterial.fromSeeds(
         @splat(0x11),
         @splat(0x22),
     );
-    var url_storage: [account_oauth.Limits.authorization_url_bytes]u8 = undefined;
+    var url_storage: [Limits.url_bytes]u8 = undefined;
     const url = try buildAuthorizationUrl(
         &url_storage,
         &server,
@@ -2152,7 +2270,7 @@ test "MCP OAuth DCR and code exchange are bounded and secret owned" {
     defer registration.deinit();
     try std.testing.expectEqualStrings("issued-client", registration.client_id);
     try std.testing.expect(registration.client_secret == null);
-    var code = try account_oauth.Secret.init(std.testing.allocator, "auth-code");
+    var code = try AuthorizationCode.init(std.testing.allocator, "auth-code");
     defer code.deinit();
     var tokens = try exchangeAuthorizationCodeEffect(
         std.testing.allocator,
@@ -2270,7 +2388,7 @@ test "MCP OAuth binds confidential DCR results to token authentication" {
             "issued-secret",
             registration.client_secret.?.view(),
         );
-        var code = try account_oauth.Secret.init(std.testing.allocator, "auth-code");
+        var code = try AuthorizationCode.init(std.testing.allocator, "auth-code");
         defer code.deinit();
         var tokens = try exchangeAuthorizationCodeEffect(
             std.testing.allocator,
@@ -2590,7 +2708,7 @@ test "MCP OAuth flow commits marker before every non-idempotent POST" {
             },
         ),
     );
-    var code = try account_oauth.Secret.init(std.testing.allocator, "auth-code");
+    var code = try AuthorizationCode.init(std.testing.allocator, "auth-code");
     defer code.deinit();
     try std.testing.expectEqual(
         FlowOutcome.completed,
@@ -2667,7 +2785,7 @@ test "MCP OAuth never treats malformed success as a replayable failure" {
         ),
     );
     fake.mode = .token;
-    var code = try account_oauth.Secret.init(std.testing.allocator, "auth-code");
+    var code = try AuthorizationCode.init(std.testing.allocator, "auth-code");
     defer code.deinit();
     try std.testing.expectError(
         error.TokenOutcomeUnknown,

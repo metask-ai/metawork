@@ -64,6 +64,16 @@ pub const ConfigInput = struct {
     execution_generation: u64,
 };
 
+/// Credential-bearing input produced by a source owner before Product Control
+/// assigns an execution generation. `source_generation` identifies the source
+/// authority only; it must never be copied into `execution_generation` by
+/// convention or assumed to share its numeric value.
+pub const SourceCandidateInput = struct {
+    target: Target,
+    api_key: []const u8,
+    source_generation: u64,
+};
+
 pub const ModelConnectionState = enum {
     configuring,
     ready,
@@ -282,6 +292,120 @@ const OwnedBuffer = struct {
     }
 };
 
+/// Linear candidate transferred from an execution source into Product
+/// Control. It deliberately has no Product execution generation.
+pub const OwnedSourceCandidate = struct {
+    provider_id: OwnedBuffer,
+    protocol: Protocol,
+    model: OwnedBuffer,
+    base_url: OwnedBuffer,
+    source_generation: u64,
+    secret: SecretBuffer,
+    source: Source,
+
+    pub fn initOwned(
+        allocator: std.mem.Allocator,
+        source: Source,
+        protocol: Protocol,
+        owned_model: []u8,
+        owned_base_url: []u8,
+        source_generation: u64,
+        owned_api_key: []u8,
+        instance_id: []const u8,
+    ) (error{InvalidSourceCandidate} || std.mem.Allocator.Error)!OwnedSourceCandidate {
+        errdefer allocator.free(owned_model);
+        errdefer allocator.free(owned_base_url);
+        errdefer secureFree(allocator, owned_api_key);
+        validateRequired(instance_id, Limits.instance_id_bytes) catch
+            return error.InvalidSourceCandidate;
+        const provider_id = try std.fmt.allocPrint(
+            allocator,
+            "{s}:{s}",
+            .{ @tagName(source), instance_id },
+        );
+        errdefer allocator.free(provider_id);
+        const candidate_input: SourceCandidateInput = .{
+            .target = .{
+                .provider_id = provider_id,
+                .protocol = protocol,
+                .model = owned_model,
+                .base_url = owned_base_url,
+            },
+            .api_key = owned_api_key,
+            .source_generation = source_generation,
+        };
+        validateSourceCandidateStructure(candidate_input) catch
+            return error.InvalidSourceCandidate;
+        return .{
+            .provider_id = .initOwned(allocator, provider_id),
+            .protocol = protocol,
+            .model = .initOwned(allocator, owned_model),
+            .base_url = .initOwned(allocator, owned_base_url),
+            .source_generation = source_generation,
+            .secret = .initOwned(allocator, owned_api_key),
+            .source = source,
+        };
+    }
+
+    pub fn take(self: *OwnedSourceCandidate) OwnedSourceCandidate {
+        return .{
+            .provider_id = self.provider_id.take(),
+            .protocol = self.protocol,
+            .model = self.model.take(),
+            .base_url = self.base_url.take(),
+            .source_generation = self.source_generation,
+            .secret = self.secret.take(),
+            .source = self.source,
+        };
+    }
+
+    pub fn input(self: *const OwnedSourceCandidate) SourceCandidateInput {
+        return .{
+            .target = .{
+                .provider_id = self.provider_id.view(),
+                .protocol = self.protocol,
+                .model = self.model.view(),
+                .base_url = self.base_url.view(),
+            },
+            .api_key = self.secret.view(),
+            .source_generation = self.source_generation,
+        };
+    }
+
+    /// Product Control is the only caller allowed to assign this generation.
+    pub fn intoConfig(
+        self: *OwnedSourceCandidate,
+        execution_generation: u64,
+    ) error{InvalidExecutionConfig}!OwnedConfig {
+        if (execution_generation == 0) return error.InvalidExecutionConfig;
+        var result: OwnedConfig = .{
+            .provider_id = self.provider_id.take(),
+            .protocol = self.protocol,
+            .model = self.model.take(),
+            .base_url = self.base_url.take(),
+            .execution_generation = execution_generation,
+            .secret = self.secret.take(),
+            .source = self.source,
+        };
+        self.source_generation = 0;
+        validateConfigStructure(result.input()) catch {
+            result.deinit();
+            return error.InvalidExecutionConfig;
+        };
+        return result;
+    }
+
+    pub fn deinit(self: *OwnedSourceCandidate) void {
+        self.provider_id.deinit();
+        self.model.deinit();
+        self.base_url.deinit();
+        self.secret.deinit();
+        self.protocol = undefined;
+        self.source_generation = 0;
+        self.source = undefined;
+    }
+};
+
 /// Linear owned configuration transferred from a Product execution source
 /// into Product Control and then into Task-owned execution attachments.
 pub const OwnedConfig = struct {
@@ -375,14 +499,14 @@ pub const OwnedConfig = struct {
     }
 };
 
-/// Opaque, synchronous ownership handoff for an execution candidate. The
-/// sequencing owner may route this capability, but only the receiving
-/// execution owner can materialize the credential-bearing configuration.
-pub const OwnedConfigTransfer = struct {
+/// Opaque, synchronous ownership handoff for a source candidate. The source
+/// authority stays distinct from the Product execution generation assigned by
+/// the receiving owner.
+pub const OwnedSourceCandidateTransfer = struct {
     context: *anyopaque,
-    take_fn: *const fn (*anyopaque) OwnedConfig,
+    take_fn: *const fn (*anyopaque) OwnedSourceCandidate,
 
-    pub fn take(self: OwnedConfigTransfer) OwnedConfig {
+    pub fn take(self: OwnedSourceCandidateTransfer) OwnedSourceCandidate {
         return self.take_fn(self.context);
     }
 };
@@ -545,6 +669,14 @@ pub fn validateConfigStructure(input: ConfigInput) ValidationError!void {
     if (input.execution_generation == 0) return error.InvalidGeneration;
 }
 
+pub fn validateSourceCandidateStructure(input: SourceCandidateInput) ValidationError!void {
+    try validateRequired(input.target.provider_id, Limits.provider_id_bytes);
+    try validateRequired(input.target.model, Limits.model_id_bytes);
+    try validateRequired(input.target.base_url, Limits.base_url_bytes);
+    try validateOpaqueRequired(input.api_key, Limits.credential_bytes);
+    if (input.source_generation == 0) return error.InvalidGeneration;
+}
+
 pub fn validateModelConnectionExecutionConfig(input: ConfigInput) ValidationError!void {
     try validateConfigStructure(input);
     if (!modelConnectionProtocolAvailable(input.target.protocol))
@@ -581,6 +713,180 @@ fn validateOpaqueRequired(value: []const u8, max_bytes: usize) ValidationError!v
 fn validateOptional(value: []const u8, max_bytes: usize) ValidationError!void {
     if (value.len > max_bytes) return error.FieldTooLarge;
     if (!std.unicode.utf8ValidateSlice(value)) return error.InvalidEncoding;
+}
+
+const ObservingAllocator = struct {
+    backing: std.mem.Allocator,
+    secret_ptr: ?[*]u8 = null,
+    secret_len: usize = 0,
+    saw_secret_free: bool = false,
+    secret_was_zero: bool = false,
+
+    const Self = @This();
+    const vtable: std.mem.Allocator.VTable = .{
+        .alloc = alloc,
+        .resize = resize,
+        .remap = remap,
+        .free = free,
+    };
+
+    fn allocator(self: *Self) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    fn observe(self: *Self, secret: []u8) void {
+        self.secret_ptr = secret.ptr;
+        self.secret_len = secret.len;
+        self.saw_secret_free = false;
+        self.secret_was_zero = false;
+    }
+
+    fn alloc(
+        raw: *anyopaque,
+        len: usize,
+        alignment: std.mem.Alignment,
+        ret_addr: usize,
+    ) ?[*]u8 {
+        const self: *Self = @ptrCast(@alignCast(raw));
+        return self.backing.rawAlloc(len, alignment, ret_addr);
+    }
+
+    fn resize(
+        raw: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ret_addr: usize,
+    ) bool {
+        const self: *Self = @ptrCast(@alignCast(raw));
+        return self.backing.rawResize(memory, alignment, new_len, ret_addr);
+    }
+
+    fn remap(
+        raw: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ret_addr: usize,
+    ) ?[*]u8 {
+        const self: *Self = @ptrCast(@alignCast(raw));
+        return self.backing.rawRemap(memory, alignment, new_len, ret_addr);
+    }
+
+    fn free(
+        raw: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        ret_addr: usize,
+    ) void {
+        const self: *Self = @ptrCast(@alignCast(raw));
+        if (self.secret_ptr) |secret_ptr| {
+            if (memory.ptr == secret_ptr and memory.len == self.secret_len) {
+                self.saw_secret_free = true;
+                self.secret_was_zero = true;
+                for (memory) |byte| if (byte != 0) {
+                    self.secret_was_zero = false;
+                    break;
+                };
+            }
+        }
+        self.backing.rawFree(memory, alignment, ret_addr);
+    }
+};
+
+fn observingSourceCandidate(
+    allocator: std.mem.Allocator,
+    secret: []u8,
+) !OwnedSourceCandidate {
+    return OwnedSourceCandidate.initOwned(
+        allocator,
+        .metask,
+        .anthropic_messages,
+        try allocator.dupe(u8, "metask-model"),
+        try allocator.dupe(u8, "https://napi.metask-ai.com/v1/messages"),
+        7,
+        secret,
+        "key-1",
+    );
+}
+
+test "source candidate secure-zeroes rejected and released owned secrets" {
+    var observing: ObservingAllocator = .{ .backing = std.testing.allocator };
+    const allocator = observing.allocator();
+
+    const rejected_secret = try allocator.dupe(u8, "rejected-secret");
+    observing.observe(rejected_secret);
+    try std.testing.expectError(
+        error.InvalidSourceCandidate,
+        OwnedSourceCandidate.initOwned(
+            allocator,
+            .metask,
+            .anthropic_messages,
+            try allocator.dupe(u8, "metask-model"),
+            try allocator.dupe(u8, "https://napi.metask-ai.com/v1/messages"),
+            0,
+            rejected_secret,
+            "key-1",
+        ),
+    );
+    try std.testing.expect(observing.saw_secret_free);
+    try std.testing.expect(observing.secret_was_zero);
+
+    const released_secret = try allocator.dupe(u8, "released-secret");
+    observing.observe(released_secret);
+    var candidate = try observingSourceCandidate(allocator, released_secret);
+    var moved = candidate.take();
+    candidate.deinit();
+    moved.deinit();
+    try std.testing.expect(observing.saw_secret_free);
+    try std.testing.expect(observing.secret_was_zero);
+}
+
+test "source candidate secure-zero survives intoConfig success and failure" {
+    var observing: ObservingAllocator = .{ .backing = std.testing.allocator };
+    const allocator = observing.allocator();
+
+    const success_secret = try allocator.dupe(u8, "success-secret");
+    observing.observe(success_secret);
+    var success_candidate = try observingSourceCandidate(allocator, success_secret);
+    var config = try success_candidate.intoConfig(29);
+    success_candidate.deinit();
+    config.deinit();
+    try std.testing.expect(observing.saw_secret_free);
+    try std.testing.expect(observing.secret_was_zero);
+
+    const failed_secret = try allocator.dupe(u8, "failed-secret");
+    observing.observe(failed_secret);
+    var failed_candidate = try observingSourceCandidate(allocator, failed_secret);
+    try std.testing.expectError(
+        error.InvalidExecutionConfig,
+        failed_candidate.intoConfig(0),
+    );
+    failed_candidate.deinit();
+    try std.testing.expect(observing.saw_secret_free);
+    try std.testing.expect(observing.secret_was_zero);
+}
+
+test "source candidate keeps source and execution generations independent" {
+    const allocator = std.testing.allocator;
+    var candidate = try OwnedSourceCandidate.initOwned(
+        allocator,
+        .metask,
+        .anthropic_messages,
+        try allocator.dupe(u8, "metask-model"),
+        try allocator.dupe(u8, "https://napi.metask-ai.com/v1/messages"),
+        7,
+        try allocator.dupe(u8, "secret"),
+        "key-1",
+    );
+    defer candidate.deinit();
+
+    try std.testing.expectEqual(@as(u64, 7), candidate.input().source_generation);
+    var config = try candidate.intoConfig(29);
+    defer config.deinit();
+    try std.testing.expectEqual(@as(u64, 29), config.input().execution_generation);
+    try std.testing.expectEqualStrings("metask:key-1", config.input().target.provider_id);
+    try std.testing.expectEqualStrings("secret", config.input().api_key);
 }
 
 test "model connection protocols have exact endpoint contracts" {

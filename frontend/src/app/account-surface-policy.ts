@@ -16,7 +16,7 @@ export type AccountSurfacePolicy = {
  */
 export function accountSurfacePolicy(
   account: Pick<AccountView, "state" | "catalogState">,
-  execution: Pick<ExecutionView, "defaultSource" | "taskCreationAvailable">,
+  execution: Pick<ExecutionView, "defaultSource">,
   hasTasks: boolean,
 ): AccountSurfacePolicy {
   if (hasTasks) return { gateRequired: false, setupRequired: false };

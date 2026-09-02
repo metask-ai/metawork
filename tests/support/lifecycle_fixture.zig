@@ -2631,7 +2631,7 @@ pub fn installProductControlExecutionGeneration(
     }};
     try workbench.beginExecutionReplacement();
     workbench.commitAccountFactNoFail(.{
-        .kind = .execution_changed,
+        .kind = .source_authority_changed,
         .view = .{
             .state = .authenticated,
             .catalog_state = .ready,
@@ -2643,7 +2643,13 @@ pub fn installProductControlExecutionGeneration(
             .selected_model = "fixture-model",
             .model_catalog_api_key_id = "key-1",
             .catalog_generation = 1,
-            .metask_execution_generation = generation,
+        },
+        .authority = .{
+            .account_id = "account-1",
+            .api_key_id = "key-1",
+            .model_id = "fixture-model",
+            .protocol = .anthropic_messages,
+            .source_generation = generation,
         },
     });
     try workbench.prepareExecutionInstall(execution.input());

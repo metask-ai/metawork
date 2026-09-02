@@ -104,6 +104,8 @@ export function SettingsPage({
   permissionProfiles,
   focusTarget,
   disabled,
+  accountDisabled,
+  executionDisabled,
   cancelDisabled,
   onBack,
   onRefresh,
@@ -135,6 +137,8 @@ export function SettingsPage({
   };
   focusTarget: SettingsFocusTarget;
   disabled: boolean;
+  accountDisabled: boolean;
+  executionDisabled: boolean;
   cancelDisabled: boolean;
   onBack: () => void;
   onRefresh: () => void;
@@ -232,8 +236,11 @@ export function SettingsPage({
   const apiBusy = account.catalogState === "loading";
   const modelBusy = account.catalogState === "loading";
   const authenticated = account.state === "authenticated";
-  const canChooseApi = authenticated && account.catalogState !== "loading";
-  const canChooseModel = authenticated && account.catalogState !== "loading";
+  const preferenceRecovery = account.errorCode === "recovery_state_invalid";
+  const canChooseApi =
+    authenticated && !preferenceRecovery && account.catalogState !== "loading";
+  const canChooseModel =
+    authenticated && !preferenceRecovery && account.catalogState !== "loading";
   const languageOptions = useMemo<SelectionMenuOption[]>(
     () => [
       { value: "en-US", label: t("app.language.en-US") },
@@ -805,11 +812,11 @@ export function SettingsPage({
                     : t("account.sign_in_required.body")}
                 </span>
               </div>
-              {!authenticated && (
+              {(!authenticated || preferenceRecovery) && (
                 <Button
                   variant="secondary"
                   size="sm"
-                  disabled={disabled}
+                  disabled={disabled || accountDisabled}
                   onClick={onBeginLogin}
                 >
                   {t("account.login")}
@@ -833,7 +840,7 @@ export function SettingsPage({
                       <Button
                         variant="secondary"
                         size="sm"
-                        disabled={disabled}
+                        disabled={disabled || executionDisabled}
                         onClick={onActivateMetask}
                       >
                         {t("settings.use_metask_default")}
@@ -847,7 +854,9 @@ export function SettingsPage({
                   </span>
                   <button
                     className="settings-refresh-button focus-ring"
-                    disabled={disabled || !authenticated || apiBusy}
+                    disabled={
+                      disabled || accountDisabled || !authenticated || apiBusy
+                    }
                     onClick={onRefresh}
                   >
                     <Icon name="refresh" />
@@ -888,7 +897,10 @@ export function SettingsPage({
                           : "settings.choose_selection",
                     )}
                     disabled={
-                      disabled || !canChooseApi || account.apiKeys.length === 0
+                      disabled ||
+                      accountDisabled ||
+                      !canChooseApi ||
+                      account.apiKeys.length === 0
                     }
                     busy={apiBusy}
                     valueLayout="detailed"
@@ -956,7 +968,10 @@ export function SettingsPage({
                           : "settings.choose_selection",
                     )}
                     disabled={
-                      disabled || !canChooseModel || account.models.length === 0
+                      disabled ||
+                      accountDisabled ||
+                      !canChooseModel ||
+                      account.models.length === 0
                     }
                     busy={modelBusy}
                     leading={<Icon name="model" />}
@@ -1060,7 +1075,11 @@ export function SettingsPage({
                     variant="danger"
                     size="sm"
                     ref={signOut}
-                    disabled={disabled || account.catalogState === "loading"}
+                    disabled={
+                      disabled ||
+                      accountDisabled ||
+                      account.catalogState === "loading"
+                    }
                     onClick={() => setConfirmSignOut(true)}
                   >
                     {t("account.logout_short")}
@@ -1093,7 +1112,9 @@ export function SettingsPage({
                         variant="danger"
                         size="sm"
                         disabled={
-                          disabled || account.catalogState === "loading"
+                          disabled ||
+                          accountDisabled ||
+                          account.catalogState === "loading"
                         }
                         onClick={onLogout}
                       >
@@ -1128,7 +1149,9 @@ export function SettingsPage({
                 <Button
                   variant="secondary"
                   size="sm"
-                  disabled={disabled || creatingModelConnection}
+                  disabled={
+                    disabled || executionDisabled || creatingModelConnection
+                  }
                   onClick={() =>
                     setModelConnectionDraft((current) =>
                       current ? null : newModelConnectionDraft(),
@@ -1170,7 +1193,9 @@ export function SettingsPage({
                     placeholder={t(
                       "settings.model_connection_name_placeholder",
                     )}
-                    disabled={disabled || creatingModelConnection}
+                    disabled={
+                      disabled || executionDisabled || creatingModelConnection
+                    }
                     onChange={(event) =>
                       setModelConnectionDraft((current) =>
                         current
@@ -1187,7 +1212,9 @@ export function SettingsPage({
                     options={modelConnectionProtocolOptions}
                     placeholder={t("settings.model_connection_protocol")}
                     ariaLabel={t("settings.model_connection_protocol")}
-                    disabled={disabled || creatingModelConnection}
+                    disabled={
+                      disabled || executionDisabled || creatingModelConnection
+                    }
                     triggerClassName="settings-control"
                     onValueChange={(value) => {
                       const protocol = value as Protocol;
@@ -1212,7 +1239,9 @@ export function SettingsPage({
                     inputMode="url"
                     maxLength={2048}
                     value={modelConnectionDraft.normalizedBaseUrl}
-                    disabled={disabled || creatingModelConnection}
+                    disabled={
+                      disabled || executionDisabled || creatingModelConnection
+                    }
                     onChange={(event) =>
                       setModelConnectionDraft((current) =>
                         current
@@ -1235,7 +1264,9 @@ export function SettingsPage({
                     placeholder={t(
                       "settings.model_connection_model_id_placeholder",
                     )}
-                    disabled={disabled || creatingModelConnection}
+                    disabled={
+                      disabled || executionDisabled || creatingModelConnection
+                    }
                     onChange={(event) =>
                       setModelConnectionDraft((current) =>
                         current
@@ -1252,6 +1283,7 @@ export function SettingsPage({
                     size="sm"
                     disabled={
                       disabled ||
+                      executionDisabled ||
                       creatingModelConnection ||
                       !modelConnectionDraft.displayName.trim() ||
                       !modelConnectionDraft.normalizedBaseUrl.trim() ||
@@ -1306,6 +1338,7 @@ export function SettingsPage({
                         className="text-button focus-ring"
                         disabled={
                           disabled ||
+                          executionDisabled ||
                           !modelConnectionCapabilities.connectionTest ||
                           connection.testStatus === "testing" ||
                           connection.credentialStatus !== "ready" ||
@@ -1342,6 +1375,7 @@ export function SettingsPage({
                         )}
                         disabled={
                           disabled ||
+                          executionDisabled ||
                           connection.state !== "ready" ||
                           connection.credentialStatus !== "ready" ||
                           connection.models.length === 0
@@ -1359,6 +1393,7 @@ export function SettingsPage({
                         className="text-button focus-ring"
                         disabled={
                           disabled ||
+                          executionDisabled ||
                           mutatingModelConnection ||
                           execution.selectedModelConnectionId === connection.id
                         }
@@ -1380,6 +1415,7 @@ export function SettingsPage({
                         className="text-button settings-model-connection-remove focus-ring"
                         disabled={
                           disabled ||
+                          executionDisabled ||
                           mutatingModelConnection ||
                           execution.selectedModelConnectionId === connection.id
                         }
@@ -1415,7 +1451,11 @@ export function SettingsPage({
                             autoComplete="off"
                             maxLength={256}
                             value={modelConnectionEdit.displayName}
-                            disabled={disabled || mutatingModelConnection}
+                            disabled={
+                              disabled ||
+                              executionDisabled ||
+                              mutatingModelConnection
+                            }
                             onChange={(event) =>
                               setModelConnectionEdit((current) =>
                                 current
@@ -1437,7 +1477,11 @@ export function SettingsPage({
                               "settings.model_connection_protocol",
                             )}
                             ariaLabel={t("settings.model_connection_protocol")}
-                            disabled={disabled || mutatingModelConnection}
+                            disabled={
+                              disabled ||
+                              executionDisabled ||
+                              mutatingModelConnection
+                            }
                             triggerClassName="settings-control"
                             onValueChange={(value) => {
                               const protocol = value as Protocol;
@@ -1464,7 +1508,11 @@ export function SettingsPage({
                             inputMode="url"
                             maxLength={2048}
                             value={modelConnectionEdit.normalizedBaseUrl}
-                            disabled={disabled || mutatingModelConnection}
+                            disabled={
+                              disabled ||
+                              executionDisabled ||
+                              mutatingModelConnection
+                            }
                             onChange={(event) =>
                               setModelConnectionEdit((current) =>
                                 current
@@ -1493,6 +1541,7 @@ export function SettingsPage({
                             size="sm"
                             disabled={
                               disabled ||
+                              executionDisabled ||
                               mutatingModelConnection ||
                               !modelConnectionEdit.displayName.trim() ||
                               !modelConnectionEdit.normalizedBaseUrl.trim()
@@ -1525,7 +1574,11 @@ export function SettingsPage({
                         <Button
                           variant="danger"
                           size="sm"
-                          disabled={disabled || mutatingModelConnection}
+                          disabled={
+                            disabled ||
+                            executionDisabled ||
+                            mutatingModelConnection
+                          }
                           onClick={() => void removeModelConnection()}
                         >
                           {mutatingModelConnection

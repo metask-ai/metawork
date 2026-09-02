@@ -3,6 +3,7 @@ import type { MessageId } from "../i18n/context.ts";
 export type StatusAudience =
   | { scope: "connection" }
   | { scope: "account" }
+  | { scope: "execution" }
   | { scope: "skills" }
   | { scope: "workspace"; workspaceId: string | null }
   | { scope: "task"; taskId: string };
@@ -45,7 +46,11 @@ export function attentionStatus(
 }
 
 export function statusKey(audience: StatusAudience): string {
-  if (audience.scope === "connection" || audience.scope === "account")
+  if (
+    audience.scope === "connection" ||
+    audience.scope === "account" ||
+    audience.scope === "execution"
+  )
     return audience.scope;
   if (audience.scope === "skills") return audience.scope;
   if (audience.scope === "workspace")
@@ -75,6 +80,7 @@ export function statusVisibleInCommandBar(
   if (status.tone !== "attention") return false;
   if (status.audience.scope === "connection") return true;
   if (status.audience.scope === "account") return true;
+  if (status.audience.scope === "execution") return true;
   if (status.audience.scope === "skills")
     return !context.settingsOpen && context.route === "skills";
   if (status.audience.scope === "workspace")
@@ -99,9 +105,9 @@ export function selectCommandBarStatus(
   context: ShellStatusContext,
 ): ShellStatus | null {
   const candidates = context.settingsOpen
-    ? [state.connection, state.account]
+    ? [state.connection, state.execution, state.account]
     : context.route === "skills"
-      ? [state.connection, state.skills, state.account]
+      ? [state.connection, state.skills, state.execution, state.account]
       : [
           state.connection,
           context.taskId === null ? undefined : state[`task:${context.taskId}`],
@@ -109,6 +115,7 @@ export function selectCommandBarStatus(
             ? undefined
             : state[`workspace:${context.workspaceId}`],
           state["workspace:*"],
+          state.execution,
           state.account,
         ];
   return (

@@ -91,18 +91,20 @@ export const enUS = {
     "This removes the Metask sign-in credentials from this device. Your local tasks and history will remain. Continue?",
   "account.command_rejected":
     "That account action is no longer available. MetaWork kept the latest account state.",
-  "account.task_running":
-    "A task is still running. Wait for it to finish before signing in again or signing out.",
-  "account.session_in_use":
-    "A task still has an active session. Close that task before signing in again or signing out.",
   "account.command_failed":
     "MetaWork could not complete that account action. Use the recovery action shown here.",
+  "execution.command_rejected":
+    "The default model source was not updated. Refresh execution state and try again.",
+  "execution.command_failed":
+    "MetaWork could not complete the default model source action. Use the recovery action shown in Execution.",
   "account.cancel_rejected":
     "That account action has already finished. MetaWork checked the latest state.",
   "account.cancel_failed":
     "MetaWork could not cancel the account action. It will still stop at its Host deadline.",
   "account.updated": "Metask account updated.",
+  "execution.updated": "Default model source updated.",
   "operation.account": "Updating the Metask account",
+  "operation.execution": "Updating the default model source",
   "operation.account_cancel": "Cancelling the Metask account action",
   "command.timeout_reconciled":
     "{operation} took longer than expected. MetaWork checked the current Host state and did not repeat the action.",
@@ -1048,19 +1050,21 @@ export const enUS = {
   "persistence.recovery.task.body":
     "MetaWork will retain the current history file, then save the tasks and workspaces currently available in this session as the new history.",
   "persistence.recovery.scheduled.title": "Replace saved schedules?",
+  "persistence.recovery.scheduled.hard_cut":
+    "The current scheduled task file will be permanently deleted.",
   "persistence.recovery.scheduled.body":
-    "MetaWork will retain the current schedule file, then save the schedules currently available in this session as the new schedule store.",
+    "MetaWork will permanently delete the current scheduled task file and write the schedules still available in this session as a clean store. Retired formats are not preserved.",
+  "persistence.recovery.scheduled.confirm": "Delete file and reset",
   "persistence.recovery.cancel": "Keep current state",
   "persistence.recovery.confirm": "Retain file and recover",
   "persistence.recovery.running": "Recovering…",
   "persistence.recovery.stale_revision":
     "The Workbench changed. Review the current warning and try again.",
   "persistence.recovery.outcome_unknown":
-    "MetaWork could not confirm the replacement. The recovery copy was not deleted; try again after reviewing the current state.",
+    "MetaWork could not confirm the replacement. Review the current state before trying again.",
   "persistence.recovery.shutting_down":
     "MetaWork is closing and cannot start recovery.",
-  "persistence.recovery.failed":
-    "The store could not be replaced. The current file was not deleted.",
+  "persistence.recovery.failed": "The store could not be replaced.",
   "mcp.mutation.busy":
     "This server has an authorization operation in progress.",
   "mcp.mutation.cancelled": "The confirmation was cancelled.",

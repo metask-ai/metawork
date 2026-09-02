@@ -64,7 +64,6 @@ export const initialWorkbenchState: WorkbenchState = {
       errorCode: "none",
       safeDiagnostic: "",
       catalogGeneration: "0",
-      metaskExecutionGeneration: "0",
     },
     execution: {
       state: "unavailable",

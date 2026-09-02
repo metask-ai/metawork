@@ -19,12 +19,11 @@ export function requiresAccountGate(
  */
 export function requiresAccountSetup(
   account: Pick<AccountView, "state" | "catalogState">,
-  execution: Pick<ExecutionView, "defaultSource" | "taskCreationAvailable">,
+  execution: Pick<ExecutionView, "defaultSource">,
 ): boolean {
   return (
     account.state === "authenticated" &&
     execution.defaultSource !== "model_connection" &&
-    !execution.taskCreationAvailable &&
     (account.catalogState === "choosing" || account.catalogState === "failed")
   );
 }

@@ -316,7 +316,7 @@ test("MCP management uses only typed revision 1 commands", async () => {
   ]);
 });
 
-test("the fixed revision 1 contract carries Host-owned Workspace and generation identities", async () => {
+test("the fixed revision 1 contract keeps Account selection separate from Product execution identity", async () => {
   const calls = [];
   const client = new BridgeClient({
     bridge: bridgeWith(async (command, payload) => {
@@ -375,7 +375,7 @@ test("the fixed revision 1 contract carries Host-owned Workspace and generation 
     }),
   });
 
-  await client.selectModel("model-3", "19", "23");
+  await client.selectModel("model-3", "19");
   assert.deepEqual(
     await client.createTask(
       {
@@ -461,7 +461,6 @@ test("the fixed revision 1 contract carries Host-owned Workspace and generation 
       payload: {
         selectionId: "model-3",
         expectedCatalogGeneration: "19",
-        expectedExecutionGeneration: "23",
       },
     },
     {

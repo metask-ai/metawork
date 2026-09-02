@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -30,6 +31,11 @@ const { accountErrorMessageId } = await vite.ssrLoadModule(
 const { I18nContext } = await vite.ssrLoadModule("/src/i18n/context.ts");
 const { translate } = await vite.ssrLoadModule("/src/i18n/runtime.ts");
 
+const appSource = readFileSync(
+  new URL("../frontend/src/app/App.tsx", import.meta.url),
+  "utf8",
+);
+
 test.after(async () => vite.close());
 
 const signedOut = {
@@ -48,7 +54,6 @@ const signedOut = {
   errorCode: "none",
   safeDiagnostic: "",
   catalogGeneration: "0",
-  metaskExecutionGeneration: "0",
 };
 
 const unavailableExecution = {
@@ -90,7 +95,6 @@ const ready = {
   selectedModelSelectionId: "model-1",
   modelCatalogApiKeySelectionId: "key-1",
   catalogGeneration: "1",
-  metaskExecutionGeneration: "1",
 };
 
 const callbacks = {
@@ -155,6 +159,8 @@ function renderSettings(account, execution = readyExecution) {
       },
       focusTarget: "title",
       disabled: false,
+      accountDisabled: false,
+      executionDisabled: false,
       cancelDisabled: false,
       onCreateModelConnection: async () => false,
       onUpdateModelConnection: async () => false,
@@ -237,6 +243,24 @@ test("unresolved authenticated catalog opens account setup", () => {
   );
 });
 
+test("Product execution failure never opens Account setup", () => {
+  assert.equal(
+    requiresAccountSetup(
+      { state: "authenticated", catalogState: "ready" },
+      { defaultSource: "metask", taskCreationAvailable: false },
+    ),
+    false,
+  );
+  assert.equal(
+    accountSurfacePolicy(
+      { state: "authenticated", catalogState: "ready" },
+      { defaultSource: "metask", taskCreationAvailable: false },
+      false,
+    ).setupRequired,
+    false,
+  );
+});
+
 test("Account onboarding never replaces a Workbench that already owns Tasks", () => {
   const checking = accountSurfacePolicy(
     { ...signedOut, state: "checking" },
@@ -266,14 +290,38 @@ test("Account onboarding never replaces a Workbench that already owns Tasks", ()
   assert.equal(empty.gateRequired, true);
 });
 
-test("Account runtime blockers keep running tasks distinct from idle sessions", () => {
+test("Account errors stay inside the Account failure domain", () => {
   assert.equal(
-    accountErrorMessageId("execution_in_use"),
-    "account.task_running",
+    accountErrorMessageId("account_operation_failed"),
+    "account.error.generic",
   );
-  assert.equal(
-    accountErrorMessageId("session_in_use"),
-    "account.session_in_use",
+});
+
+test("Account preference recovery exposes the canonical login repair and freezes selectors", () => {
+  const markup = renderSettings({
+    ...ready,
+    errorCode: "recovery_state_invalid",
+  });
+  assert.match(markup, /Sign in with Metask/);
+  assert.match(markup, /id="settings-api"[^>]*disabled/);
+  assert.match(markup, /id="settings-model"[^>]*disabled/);
+});
+
+test("Execution commands never enter the Account busy or error scope", () => {
+  assert.doesNotMatch(
+    appSource,
+    /runAccountCommand\(\(\) =>\s*client\.(?:selectMetaskDefault|selectDefaultModelConnection|createModelConnection|updateModelConnection|removeModelConnection|testModelConnection)/,
+  );
+  assert.match(
+    appSource,
+    /runExecutionCommand\(\(\) =>\s*client\.selectDefaultModelConnection/,
+  );
+});
+
+test("opening Account settings has no hidden catalog mutation", () => {
+  assert.doesNotMatch(
+    appSource,
+    /function openSettings[\s\S]*?runAccountCommand\(\(\) => client\.refreshAccountCatalog\(\)\)[\s\S]*?function closeSettings/,
   );
 });
 

@@ -436,7 +436,7 @@ Metask 已连接
 退出登录
 ```
 
-- 账号菜单中的退出登录在当前 Workbench 上直接打开危险操作确认框，不先导航到设置；确认文案说明本机凭据会被清除、本地 Task 与历史记录会保留，确认后仍走 Host execution replacement gate，不能只清 Renderer 状态。账号设置可以保留同一 Host 命令的独立退出入口，但不是账号菜单退出的必经路径；
+- 账号菜单中的退出登录在当前 Workbench 上直接打开危险操作确认框，不先导航到设置；确认文案说明本机 Account 凭据会被清除、本地 Task 与历史记录会保留。Account logout 不等待 Product execution replacement 或 Schedule scrub；后续 Product cleanup 失败由 Execution/Schedule recovery surface 表达，不能补写 Account error。账号设置可以保留同一 Host 命令的独立退出入口，但不是账号菜单退出的必经路径；
 - 账号菜单只负责身份和导航；Metask API 目录进入账号设置，用户管理的服务进入模型连接设置；
 - 未登录时保留本地 Workbench 历史，并把左栏账号入口切换成登录动作。
 
@@ -546,16 +546,16 @@ AgentCore typed CoreEvent
 
 每个 Run exchange 使用以下条件槽位，而不是为每类事件创建节点：
 
-| 槽位 | 出现条件 | 更新方式 |
-| --- | --- | --- |
-| User instruction | Run 存在 | 历史稳定，不随 activity 更新 |
-| Process narrative | 至少一个非空 commentary、provisional 或必要 redaction note | closed commentary 只追加稳定 block；provisional 原位增长、迁移或回滚 |
-| Active process surface | Run 为 queued/running/waiting UI/stopping | 唯一 live status 原位替换；存在 Tool 时同一 surface 才可展开技术行 |
-| Intervention | 当前 Run 存在 pending UI | 只显示唯一可操作控件，不伪装成 Assistant 文本 |
-| Response | Host 已发布非空 final/partial response | 安全 Markdown；出现不等于正式 Product terminal 已发布 |
-| File references | Host 发布可预览 reference | 属于该 Run 的结果上下文，不推断 FileChange/Output |
-| Terminal process surface | Run 已 terminal 且存在 Tool record | 位于 response/reference 之后，弱化为默认折叠的“工作过程 · N 项操作” |
-| Terminal notice | partial、非 completed outcome 或完成但无 response | 与 partial 合并为唯一准确提示，不重复成功结果 |
+| 槽位                     | 出现条件                                                   | 更新方式                                                             |
+| ------------------------ | ---------------------------------------------------------- | -------------------------------------------------------------------- |
+| User instruction         | Run 存在                                                   | 历史稳定，不随 activity 更新                                         |
+| Process narrative        | 至少一个非空 commentary、provisional 或必要 redaction note | closed commentary 只追加稳定 block；provisional 原位增长、迁移或回滚 |
+| Active process surface   | Run 为 queued/running/waiting UI/stopping                  | 唯一 live status 原位替换；存在 Tool 时同一 surface 才可展开技术行   |
+| Intervention             | 当前 Run 存在 pending UI                                   | 只显示唯一可操作控件，不伪装成 Assistant 文本                        |
+| Response                 | Host 已发布非空 final/partial response                     | 安全 Markdown；出现不等于正式 Product terminal 已发布                |
+| File references          | Host 发布可预览 reference                                  | 属于该 Run 的结果上下文，不推断 FileChange/Output                    |
+| Terminal process surface | Run 已 terminal 且存在 Tool record                         | 位于 response/reference 之后，弱化为默认折叠的“工作过程 · N 项操作”  |
+| Terminal notice          | partial、非 completed outcome 或完成但无 response          | 与 partial 合并为唯一准确提示，不重复成功结果                        |
 
 `RunProcess` 是 active 与 terminal 共用的同一 presentation surface，但生命周期位置和职责不同：
 
@@ -581,15 +581,15 @@ active→terminal 时，live activity 必须消失，technical evidence 移到�
 
 Renderer 每次只读取当前完整 `RunOutput`，不在本地累积 text chunk：
 
-| Host output 状态 | Renderer 行为 |
-| --- | --- |
-| open/continued segment 有安全 committed bytes | 作为 commentary 后的纯文本 provisional 原位显示 |
-| segment 关闭为 commentary | provisional 对应内容迁入新的稳定 commentary Markdown block |
-| segment 关闭为 final/partial | provisional 清空，内容进入独立 response Markdown 槽位 |
-| segment 关闭为 discarded | provisional 从下一 Snapshot 消失，不保留撤回占位 |
-| closed commentary 已持久化 | terminal、reload 后仍按原 group 顺序恢复 |
-| response 已定性但 terminal 尚未发布 | response 可以显示，同时 active process surface 保持 finalizing |
-| formal terminal 已发布 | activity 必须为 null；未决 provisional 必须为空 |
+| Host output 状态                              | Renderer 行为                                                  |
+| --------------------------------------------- | -------------------------------------------------------------- |
+| open/continued segment 有安全 committed bytes | 作为 commentary 后的纯文本 provisional 原位显示                |
+| segment 关闭为 commentary                     | provisional 对应内容迁入新的稳定 commentary Markdown block     |
+| segment 关闭为 final/partial                  | provisional 清空，内容进入独立 response Markdown 槽位          |
+| segment 关闭为 discarded                      | provisional 从下一 Snapshot 消失，不保留撤回占位               |
+| closed commentary 已持久化                    | terminal、reload 后仍按原 group 顺序恢复                       |
+| response 已定性但 terminal 尚未发布           | response 可以显示，同时 active process surface 保持 finalizing |
+| formal terminal 已发布                        | activity 必须为 null；未决 provisional 必须为空                |
 
 因此 provisional 在 DOM 中迁移或消失是 output-segment 协议的产品语义，不是 Renderer 自行重排历史；commentary array index、Run identity 和 Tool product identity 才是稳定渲染 key。credential 清理可能使某个 commentary item 为空，但 Renderer 不合并相邻 item，也不改变后续边界。
 
@@ -969,7 +969,7 @@ Workspace 只作为 Task 与 New task 的路径上下文，不生成独立搜索
 3. 等待期间提供 `重新打开登录页面` 与 `取消登录`，Host deadline 必须最终收口；
 4. OAuth 成功后立即显示已连接 identity，并由 Host 自动恢复或加载 API Key 与模型；
 5. 历史默认命中时自动恢复，唯一候选自动采用；只有无法由合同决定的真实 API/模型歧义才在同一首次启动界面请求选择；
-6. 形成并安装 ready ExecutionConfig 后进入 Workbench New task；在此之前不显示 Workspace 侧栏、Task 列表、Composer 或空 Inspector。
+6. 形成并安装 ready ExecutionConfig 后进入 Workbench New task；Account 已 authenticated 但 Product/Schedule recovery 尚未完成时，进入保留历史与全局 recovery action 的 Workbench shell，关闭相关 New task admission，不得自动跳到账号设置或用 Account surface 遮住恢复入口。
 
 ```text
 MetaWork
@@ -980,7 +980,7 @@ MetaWork
 [ 使用 Metask 登录 ]
 ```
 
-首次启动不显示四步进度条，不要求用户点击“加载 API Key”，不出现 C1/C2、protocol target、generation 或 Keychain 等技术术语。`checking` 只显示稳定的品牌与检查状态；`authorizing` 只显示等待和取消，不提供“重新打开登录页”。OAuth 已成功而目录准备失败时保持当前 identity，在设置中提供重试。登录无效直接成为 `signed_out`，进入 Workbench shell 后左下角账号入口显示统一登录动作；当前模型连接设置入口保持隐藏，不显示已保存账号、重新认证、账号不匹配或上一次登录信息。
+首次启动不显示四步进度条，不要求用户点击“加载 API Key”，不出现 C1/C2、protocol target、generation 或 Keychain 等技术术语。`checking` 只显示稳定的品牌与检查状态；`authorizing` 只显示等待和取消，不提供“重新打开登录页”。OAuth 已成功而目录准备失败时保持当前 identity，在账号设置中提供目录重试；Account 目录已就绪而 Schedule/Execution 不可用时保持 Account ready，在 Product recovery surface 提供恢复。登录无效直接成为 `signed_out`，进入 Workbench shell 后左下角账号入口显示统一登录动作；当前模型连接设置入口保持隐藏，不显示已保存账号、重新认证、账号不匹配或上一次登录信息。
 
 冷启动检查或 OAuth 授权期间使用稳定的品牌状态。确认 `signed_out` 后进入 Workbench shell 并保留本地历史；如果没有 ready Model Connection，只关闭 New task admission，不暴露尚未形成完整 capability gate 的模型连接设置。确认 `authenticated` 后继续目录准备。任何 live Task 若仍在运行，必须继续可查看和停止。
 
@@ -1010,7 +1010,7 @@ Workspace 生命周期不属于 Settings surface。New task 路径控件负责�
 
 `Account` 规则：
 
-- 进入该设置 route 的显式导航动作自动请求 Host 同步一次最新 API/模型目录；已有默认配置且 API 仍有效时，Host 自动沿用该 API 并加载其模型目录，默认模型下拉框不依赖一次 API 修改才能启用。已提交默认值在同步期间保持可读，手动 `重新同步` 只用于失败恢复或页面保持打开期间发生的 Metask 外部变更，不能成为打开下拉框或切换默认值的前置步骤；
+- 进入该设置 route 只渲染 Host 已提交的 API/模型目录，不触发隐藏同步；用户显式点击 `重新同步` 时，Host 沿用仍有效的已提交 API 并加载其模型目录。已提交默认值在同步期间保持可读，`重新同步` 只用于失败恢复或页面保持打开期间发生的 Metask 外部变更，不能成为打开下拉框或切换默认值的前置步骤；
 - API 列表显示 Metask 名称、protocol、尾号和可用/需要处理状态；不显示完整 secret；
 - protocol 是 Host 从 API catalog 确定的只读技术事实，只作为 API 名称下的次级元数据展示；Renderer 不提供 protocol、base URL 或 credential 编辑入口；
 - 切换默认 API 后加载其模型目录，并明确它只更新默认选择、不改写 durable Task 历史或正在运行的 Session；
@@ -1030,7 +1030,7 @@ Workspace 生命周期不属于 Settings surface。New task 路径控件负责�
 - compact 选择器只显示一个短值；API 使用 detailed 选择器，以 API 名称为主信息，以 protocol 为次级说明，以脱敏尾号为尾部数据。protocol 和尾号不得表现成可编辑字段；
 - API 与模型控件在同一个“执行默认配置”工作面中以带步骤标记和连接线的连续配置链呈现，明确表达 `API → 该 API 的模型目录 → 默认模型`，不能退化为两个互不相关的普通表单行；
 - API 切换开始后只冻结相关配置组；模型目录加载、选择和持久化不得冻结语言、导航、历史阅读或取消仍被 Host 接受的操作；
-- 设置页把每次默认配置 mutation 表现为一笔 Host-owned 事务：API/credential 变化使用候选 API/模型并在完整验证后原子替换 execution；同一已提交 API 下的默认模型变化只持久化模型 preference。已提交 API/模型始终是当前真值，进行中的值只显示为“待应用更改”或“正在保存”。Renderer 可在 command acknowledgement 前短暂回显用户刚发出的请求，但收到 snapshot 后必须以 Host projection 为准；页面重建、取消、失败和成功都不得依赖 Renderer 临时状态恢复事务；
+- 设置页把每次 Account preference mutation 表现为一笔 Host-owned Account 事务：API/credential 变化先完整验证并构造 source candidate，再 durable 提交 Account preference；同一已提交 API 下的默认模型变化只持久化 model preference。Account 成功后立即以新 API/模型为真，Product 后续 scrub/install 失败时另行显示 desired/active mismatch 与 recovery，不回滚 Account，也不把 Product failure 显示成 Account mutation 失败。Renderer 可在 command acknowledgement 前短暂回显用户刚发出的请求，但收到 snapshot 后必须以 Host projection 为准；页面重建、取消、失败和成功都不得依赖 Renderer 临时状态恢复事务；
 - 常规桌面宽度下只让右侧设置内容列滚动，页面标题和左侧分区导航保持稳定；分区高亮跟随右侧内容的阅读位置。窄窗口改为顶部横向分区导航，但仍不让导航与内容共享滚动层；
 - 浮层只在打开时使用克制的透明度与位置过渡；loading 指示只出现在真实运行的配置项，`prefers-reduced-motion` 下移除非必要动画；
 - 当前分区导航必须有持续可见的选中态和 `aria-current`，不能只在 hover 时出现；focus ring、菜单选中勾选、状态色和文字共同表达状态。
@@ -1211,7 +1211,7 @@ Foundation 组件只消费 `--ui-*`；只有直接表现品牌或状态本身时
 3. 用户可以采取什么动作；
 4. 技术详情入口。
 
-Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成时提供取消；已认证后的目录失败保持 `authenticated` 并提供重试；凭据失效直接进入 `signed_out`，由普通登录建立新 identity。错误动作必须与当前四态合同一致，普通异常不能留下无动作 spinner。
+Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成时提供取消；已认证后的目录失败保持 `authenticated` 并提供重试；凭据失效直接进入 `signed_out`，由普通登录建立新 identity。Product/Schedule error 不得进入 Account error 或触发 Account 设置 redirect；对应 recovery action 必须在 Account ready 时仍可见、可操作。错误动作必须与当前四态合同一致，普通异常不能留下无动作 spinner。
 
 工具失败但 Agent 已恢复时不能把整个 Task 标记为失败。任务级失败才进入左栏 Failed 状态。
 
@@ -1280,7 +1280,7 @@ Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成
 - catalog timeout/有限重试、OAuth exchange 失败、持久化确定失败与结果不确定；
 - 无 API Key、无模型以及 Host 未提供管理入口时的可理解恢复文案；
 - Bridge invoke timeout 后释放 busy、snapshot resync 后恢复 Host 动作；
-- ready 后进入 Workbench，左下角显示 identity；重认证、设置、退出与 execution replacement gate 行为正确。
+- ready 后进入 Workbench，左下角显示 identity；重认证、设置和退出只按 Account busy/error scope 收口，Product execution/Schedule recovery 使用独立 scope；Account ready + Execution unavailable 时 recovery action 可见且不会被账号设置 redirect 遮挡。
 
 ### 19.5 Workspace、模型与设置
 
