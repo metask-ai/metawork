@@ -606,7 +606,7 @@ pub fn run(init: std.process.Init) !void {
     );
     var account_coordinator_state = account_coordinator.Coordinator.init(
         &account_runtime,
-        control.accountExecutionHandoff(),
+        control.accountCommitSink(),
         app.main_thread_id,
     );
     var execution_coordinator_state = execution_coordinator.Coordinator.init(

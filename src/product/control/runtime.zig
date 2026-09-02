@@ -1697,6 +1697,19 @@ pub const Runtime = struct {
         self.execution_state.commitAccountFactNoFail(fact);
     }
 
+    pub fn commitAccountChangeNoFail(
+        self: *Runtime,
+        commit: control_ports.AccountCommit,
+    ) void {
+        commit.assertValid();
+        self.commitAccountFactNoFail(commit.fact);
+        if (commit.candidate) |transfer| {
+            var candidate = transfer.take();
+            candidate.deinit();
+        }
+        self.finishAccountCommitNoFail();
+    }
+
     pub fn installExecutionNoFail(
         self: *Runtime,
         execution: *execution_contract.OwnedConfig,
@@ -6467,19 +6480,10 @@ pub const Runtime = struct {
         self.allocator.free(value);
     }
 
-    pub fn accountExecutionHandoff(self: *Runtime) control_ports.AccountExecutionHandoff {
+    pub fn accountCommitSink(self: *Runtime) control_ports.AccountCommitSink {
         return .{
             .context = self,
-            .commit_account_fact_fn = controlCommitAccountFact,
-            .finish_account_commit_fn = controlFinishAccountCommit,
-            .metask_activation_available_fn = controlMetaskActivationAvailable,
-            .prepare_metask_candidate_fn = controlPrepareMetaskCandidate,
-            .prepare_metask_clear_fn = controlPrepareMetaskClear,
-            .finalize_metask_stage_fn = controlFinalizeMetaskStage,
-            .abort_metask_stage_fn = controlAbortMetaskStage,
-            .identity_replacement_pending_fn = controlIdentityReplacementPending,
-            .begin_identity_replacement_fn = controlBeginIdentityReplacement,
-            .end_identity_replacement_fn = controlEndIdentityReplacement,
+            .commit_fn = controlCommitAccountChange,
         };
     }
 
@@ -6563,50 +6567,11 @@ fn controlOwner(context: *anyopaque) *Runtime {
     return @ptrCast(@alignCast(context));
 }
 
-fn controlCommitAccountFact(context: *anyopaque, fact: account_contract.AccountFact) void {
-    controlOwner(context).commitAccountFactNoFail(fact);
-}
-fn controlFinishAccountCommit(context: *anyopaque) void {
-    controlOwner(context).finishAccountCommitNoFail();
-}
-fn controlMetaskActivationAvailable(context: *anyopaque) bool {
-    return controlOwner(context).metaskActivationAvailable();
-}
-fn controlPrepareMetaskCandidate(
+fn controlCommitAccountChange(
     context: *anyopaque,
-    transfer: execution_contract.OwnedConfigTransfer,
-    explicit_activation: bool,
-) control_ports.MetaskStageResult {
-    return controlOwner(context).prepareMetaskExecutionCandidate(
-        transfer,
-        explicit_activation,
-    );
-}
-fn controlPrepareMetaskClear(context: *anyopaque) control_ports.MetaskStageResult {
-    return controlOwner(context).prepareMetaskExecutionClear();
-}
-fn controlFinalizeMetaskStage(
-    context: *anyopaque,
-    token: control_ports.MetaskStageToken,
-    fact: account_contract.AccountFact,
+    commit: control_ports.AccountCommit,
 ) void {
-    controlOwner(context).finalizeMetaskStageNoFail(token, fact);
-}
-fn controlAbortMetaskStage(
-    context: *anyopaque,
-    token: control_ports.MetaskStageToken,
-) void {
-    controlOwner(context).abortMetaskStageNoFail(token);
-}
-fn controlIdentityReplacementPending(context: *anyopaque) bool {
-    return controlOwner(context).identityReplacementPending();
-}
-fn controlBeginIdentityReplacement(context: *anyopaque) anyerror!void {
-    return controlOwner(context).beginExecutionReplacement();
-}
-fn controlEndIdentityReplacement(context: *anyopaque) void {
-    std.debug.assert(controlOwner(context).identityReplacementPending());
-    controlOwner(context).endExecutionReplacementNoFail();
+    controlOwner(context).commitAccountChangeNoFail(commit);
 }
 fn controlStartModelConnections(context: *anyopaque, directory: []const u8, vault: execution_ports.CredentialVault) anyerror!void {
     try controlOwner(context).startModelConnections(directory, vault);

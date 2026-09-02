@@ -2,6 +2,7 @@
 //! The opaque context deliberately makes the owner type unreachable to
 //! coordinators; these values are callback-scoped and must not enter jobs.
 
+const std = @import("std");
 const agent = @import("metawork_agent");
 const account = @import("metawork_account_contract");
 const execution_contract = @import("metawork_product_execution_contract");
@@ -19,67 +20,32 @@ pub const MetaskStageResult = union(enum) {
     rejected,
 };
 
-/// Cross-owner handoff used only while committing Account facts and their
-/// resulting default-execution transition into Product Control.
-pub const AccountExecutionHandoff = struct {
-    context: *anyopaque,
-    commit_account_fact_fn: *const fn (*anyopaque, account.AccountFact) void,
-    finish_account_commit_fn: *const fn (*anyopaque) void,
-    metask_activation_available_fn: *const fn (*anyopaque) bool,
-    prepare_metask_candidate_fn: *const fn (*anyopaque, execution_contract.OwnedConfigTransfer, bool) MetaskStageResult,
-    prepare_metask_clear_fn: *const fn (*anyopaque) MetaskStageResult,
-    finalize_metask_stage_fn: *const fn (*anyopaque, MetaskStageToken, account.AccountFact) void,
-    abort_metask_stage_fn: *const fn (*anyopaque, MetaskStageToken) void,
-    identity_replacement_pending_fn: *const fn (*anyopaque) bool,
-    begin_identity_replacement_fn: *const fn (*anyopaque) anyerror!void,
-    end_identity_replacement_fn: *const fn (*anyopaque) void,
+/// One committed Account revision delivered to Product Control. Attempt
+/// identity is explicit so Product never infers operation lifetime from a
+/// transient Account view such as `catalog_state`.
+pub const AccountCommit = struct {
+    fact: account.AccountFact,
+    attempt_id: ?u64,
+    attempt_terminal: bool,
+    candidate: ?execution_contract.OwnedSourceCandidateTransfer = null,
 
-    pub fn commitAccountFactNoFail(self: AccountExecutionHandoff, fact: account.AccountFact) void {
-        self.commit_account_fact_fn(self.context, fact);
+    pub fn assertValid(self: AccountCommit) void {
+        account.validateFact(self.fact) catch
+            @panic("Account commit sink received an invalid Account fact");
+        std.debug.assert(!self.attempt_terminal or self.attempt_id != null);
     }
-    pub fn finishAccountCommitNoFail(self: AccountExecutionHandoff) void {
-        self.finish_account_commit_fn(self.context);
-    }
-    pub fn metaskActivationAvailable(self: AccountExecutionHandoff) bool {
-        return self.metask_activation_available_fn(self.context);
-    }
-    pub fn prepareMetaskExecutionCandidate(
-        self: AccountExecutionHandoff,
-        transfer: execution_contract.OwnedConfigTransfer,
-        explicit_activation: bool,
-    ) MetaskStageResult {
-        return self.prepare_metask_candidate_fn(
-            self.context,
-            transfer,
-            explicit_activation,
-        );
-    }
-    pub fn prepareMetaskExecutionClear(
-        self: AccountExecutionHandoff,
-    ) MetaskStageResult {
-        return self.prepare_metask_clear_fn(self.context);
-    }
-    pub fn finalizeMetaskStageNoFail(
-        self: AccountExecutionHandoff,
-        token: MetaskStageToken,
-        fact: account.AccountFact,
-    ) void {
-        self.finalize_metask_stage_fn(self.context, token, fact);
-    }
-    pub fn abortMetaskStageNoFail(
-        self: AccountExecutionHandoff,
-        token: MetaskStageToken,
-    ) void {
-        self.abort_metask_stage_fn(self.context, token);
-    }
-    pub fn identityReplacementPending(self: AccountExecutionHandoff) bool {
-        return self.identity_replacement_pending_fn(self.context);
-    }
-    pub fn beginIdentityReplacement(self: AccountExecutionHandoff) anyerror!void {
-        return self.begin_identity_replacement_fn(self.context);
-    }
-    pub fn endIdentityReplacementNoFail(self: AccountExecutionHandoff) void {
-        self.end_identity_replacement_fn(self.context);
+};
+
+/// Narrow no-fail sink for a committed Account revision and its optional
+/// linear source candidate. Product Control owns every reconciliation decision
+/// after this call; no result flows back into Account.
+pub const AccountCommitSink = struct {
+    context: *anyopaque,
+    commit_fn: *const fn (*anyopaque, AccountCommit) void,
+
+    pub fn commitNoFail(self: AccountCommitSink, commit: AccountCommit) void {
+        commit.assertValid();
+        self.commit_fn(self.context, commit);
     }
 };
 

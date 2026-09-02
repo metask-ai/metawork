@@ -497,6 +497,12 @@ pub const Prepared = struct {
         return self.transition.takeSourceCandidate();
     }
 
+    pub fn sourceCandidateTransfer(
+        self: *Prepared,
+    ) ?execution_contract.OwnedSourceCandidateTransfer {
+        return self.transition.sourceCandidateTransfer();
+    }
+
     pub fn attemptId(self: *const Prepared) ?u64 {
         return self.transition.attempt_id;
     }

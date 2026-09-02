@@ -1688,6 +1688,16 @@ pub const PreparedTransition = struct {
         return null;
     }
 
+    pub fn sourceCandidateTransfer(
+        self: *PreparedTransition,
+    ) ?execution_contract.OwnedSourceCandidateTransfer {
+        if (self.source_candidate == null) return null;
+        return .{
+            .context = self,
+            .take_fn = takeTransferredSourceCandidate,
+        };
+    }
+
     pub fn attachSourceCandidate(
         self: *PreparedTransition,
         source_candidate: execution_contract.OwnedSourceCandidate,
@@ -1695,6 +1705,14 @@ pub const PreparedTransition = struct {
         std.debug.assert(!self.committed);
         std.debug.assert(self.source_candidate == null);
         self.source_candidate = source_candidate;
+    }
+
+    fn takeTransferredSourceCandidate(
+        context: *anyopaque,
+    ) execution_contract.OwnedSourceCandidate {
+        const self: *PreparedTransition = @ptrCast(@alignCast(context));
+        return self.takeSourceCandidate() orelse
+            @panic("Account source candidate was already transferred");
     }
 
     pub fn takeEffect(self: *PreparedTransition) ?Effect {

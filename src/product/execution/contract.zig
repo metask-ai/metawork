@@ -511,6 +511,18 @@ pub const OwnedConfigTransfer = struct {
     }
 };
 
+/// Opaque, synchronous ownership handoff for a source candidate. The source
+/// authority stays distinct from the Product execution generation assigned by
+/// the receiving owner.
+pub const OwnedSourceCandidateTransfer = struct {
+    context: *anyopaque,
+    take_fn: *const fn (*anyopaque) OwnedSourceCandidate,
+
+    pub fn take(self: OwnedSourceCandidateTransfer) OwnedSourceCandidate {
+        return self.take_fn(self.context);
+    }
+};
+
 pub fn modelConnectionProtocolAvailable(protocol: Protocol) bool {
     return switch (protocol) {
         .openai_responses,
