@@ -1100,6 +1100,7 @@ fn wireAgentCore(
     product_schedule_runtime.addImport("product_schedule_state", product_schedule_state);
     product_schedule_runtime.addImport("product_schedule_persistence", product_schedule_persistence);
     product_schedule_runtime.addImport("product_schedule_view", product_schedule_view);
+    product_schedule_runtime.addImport("metawork_product_models_contract", models_contract);
     const product_schedule = b.createModule(.{
         .root_source_file = b.path("src/product/schedule.zig"),
         .target = target,

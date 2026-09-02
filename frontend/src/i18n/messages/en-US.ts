@@ -1029,6 +1029,8 @@ export const enUS = {
   "scheduled.occurrence.skipped": "Skipped",
   "scheduled.occurrence.rejected": "Could not start",
   "scheduled.occurrence.starting": "Starting",
+  "scheduled.binding_migration_required":
+    "This schedule uses an older model binding. Saving it will explicitly bind it to your current default model.",
   "scheduled.persistence.unavailable":
     "Durable schedules are not available on this device.",
   "scheduled.persistence.read_failed": "Saved schedules could not be read.",
@@ -1036,6 +1038,10 @@ export const enUS = {
     "Schedule data is damaged. Automatic runs are stopped to prevent duplicates.",
   "scheduled.persistence.write_failed":
     "The latest change could not be saved. Automatic runs are stopped.",
+  "scheduled.persistence.migration_failed":
+    "Saved schedules could not be upgraded. The original data was kept and automatic runs are stopped.",
+  "scheduled.persistence.migration_failed_detail":
+    "Restart MetaWork to retry the upgrade. The original schedule store will not be overwritten.",
   "scheduled.persistence.outcome_unknown":
     "MetaWork cannot confirm whether the latest change was saved. Automatic runs are stopped to prevent duplicates.",
   "scheduled.persistence.ready": "Schedule storage is ready.",

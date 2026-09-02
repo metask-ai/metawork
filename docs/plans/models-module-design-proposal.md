@@ -293,7 +293,7 @@ Account OAuth token 只用于访问公司账号服务，是 Account credential�
 Account logout 后：
 
 - Account 清除自己的 token；
-- Models 撤销新的 Metask resolve capability并清零未转移的 Metask credential；
+- Models 立即使 `provider=metask` 的可用模型目录失效，撤销新的 Metask resolve capability并清零未转移的 Metask credential；
 - Models 保留非 secret 的 Metask Provider-local selection intent 和全局默认选择意图，并把对应 source 标记为 `needs_authentication`；
 - 自定义 source 和其默认选择不受影响；
 - 已交付给 Task/Completion 的 owned binding 不被 Models 主动撤回；
@@ -581,7 +581,7 @@ schema 2 的 `ModelRef` 只消除裸 model id 歧义，不开放 Schedule 独立
 
 任一步失败都进入现有 `execution_changed`/needs-attention 路径，不静默改绑。相同 Metask authority 的冷启动可以安装新的 Product binding generation而不使 Schedule 失效；default selection、source authority、protocol 或 store incarnation 改变则必须重新确认。
 
-迁移必须整库严格 decode、构造 schema 2 candidate、同目录 temp + sync + atomic rename。decode/read 失败保留原文件并进入 `corrupt/read_failed`；明确写失败保持 schema 1 canonical 且本次不提交内存迁移；outcome unknown 重读只接受完整 schema 1 或完整 schema 2，第三种状态进入 Schedule recovery。运行时不存在 schema 1 launch fallback。
+迁移必须整库严格 decode、构造 schema 2 candidate、同目录 temp + sync + atomic rename。decode/read 失败保留原文件并进入 `corrupt/read_failed`。明确写失败，或 outcome unknown 后重读确认 canonical 仍精确等于原 schema 1 bytes，均保持原文件、本次不提交迁移内存并发布 `migration_failed`；该状态不开放 hard-reset recovery，只允许重启后重新尝试。重读精确等于 schema 2 candidate 时接纳迁移；既不等于完整旧 canonical 也不等于完整新 candidate 时发布 `outcome_unknown` 并进入 Schedule recovery。运行时不存在 schema 1 launch fallback。
 
 ### 10.4 Task、Run 与 checkpoint
 

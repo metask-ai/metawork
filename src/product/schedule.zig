@@ -25,6 +25,7 @@ pub const Redaction = runtime_impl.Redaction;
 pub const MutableProjection = runtime_impl.MutableProjection;
 pub const Persistence = runtime_impl.Persistence;
 pub const PersistenceCommit = runtime_impl.PersistenceCommit;
+pub const PersistenceObservation = runtime_impl.PersistenceObservation;
 pub const PersistenceHealth = runtime_impl.PersistenceHealth;
 pub const Timer = runtime_impl.Timer;
 pub const Notifier = runtime_impl.Notifier;

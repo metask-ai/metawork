@@ -532,6 +532,7 @@ pub fn run(init: std.process.Init) !void {
             .restore_failed = stores_state.scheduled_task_restore_failed,
             .commit_fn = app_stores.commitScheduledTaskStore,
             .recover_fn = app_stores.recoverScheduledTaskStore,
+            .observe_fn = app_stores.observeScheduledTaskStore,
         },
         .task_persistence = .{
             .context = if (stores_state.task) |*store| store else null,

@@ -322,6 +322,24 @@ export type ScheduledTaskRecurrence =
       everySeconds: string;
     };
 
+export type ScheduledTaskBinding = {
+  modelRef: ModelRef;
+  sourceGeneration: string;
+  selectionRevision: string;
+  protocol: Protocol;
+};
+
+export type ScheduledTaskStoredBinding =
+  | ({ status: "bound" } & ScheduledTaskBinding)
+  | {
+      status: "migration_required";
+      legacyExecution: {
+        generation: string;
+        protocol: Protocol;
+        model: string;
+      };
+    };
+
 export type ScheduledTaskView = {
   id: string;
   epoch: string;
@@ -341,12 +359,9 @@ export type ScheduledTaskView = {
     | "persistence_failed"
     | "host_interrupted"
     | "permission_required"
+    | "binding_migration_required"
     | null;
-  execution: {
-    generation: string;
-    protocol: Protocol;
-    model: string;
-  };
+  binding: ScheduledTaskStoredBinding;
   input: { kind: "text"; text: string; redacted: boolean };
   recurrence: ScheduledTaskRecurrence;
   nextRunAtUnixSeconds: string | null;
@@ -370,7 +385,7 @@ export type ScheduledTaskView = {
 
 export type ScheduledTaskMutation = {
   title: string;
-  expectedExecutionGeneration: string;
+  binding: ScheduledTaskBinding;
   permissionProfile: PermissionProfile;
   input: Extract<TaskRunInput, { kind: "text" }>;
   recurrence: ScheduledTaskRecurrence;
@@ -663,6 +678,7 @@ export type WorkbenchSnapshot = {
       | "read_failed"
       | "corrupt"
       | "write_failed"
+      | "migration_failed"
       | "outcome_unknown";
     scheduledTaskRecoveryAvailable: boolean;
     backgroundScheduleWake: boolean;

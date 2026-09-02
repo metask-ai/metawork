@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import type {
   PermissionProfile,
+  ScheduledTaskBinding,
   ScheduledTaskMutation,
   ScheduledTaskView,
   WorkbenchSnapshot,
@@ -111,6 +112,76 @@ function draftFromTask(task: ScheduledTaskView): Draft {
   };
 }
 
+function sameModelRef(
+  left: { sourceId: string; modelId: string } | null,
+  right: { sourceId: string; modelId: string } | null,
+) {
+  return (
+    left !== null &&
+    right !== null &&
+    left.sourceId === right.sourceId &&
+    left.modelId === right.modelId
+  );
+}
+
+function currentBinding(
+  snapshot: WorkbenchSnapshot,
+): ScheduledTaskBinding | null {
+  const selection = snapshot.models.defaultSelection;
+  if (
+    !snapshot.newTaskAdmission.available ||
+    !sameModelRef(selection, snapshot.newTaskAdmission.activeModelRef) ||
+    snapshot.models.selectionRevision === "0"
+  )
+    return null;
+  const custom = snapshot.models.connections.find(
+    (connection) => connection.id === selection!.sourceId,
+  );
+  if (custom) {
+    const model = custom.models.find(
+      (candidate) => candidate.id === selection!.modelId,
+    );
+    if (
+      !custom.enabled ||
+      custom.state !== "ready" ||
+      custom.credentialStatus !== "ready" ||
+      custom.sourceGeneration === "0" ||
+      !model?.ready
+    )
+      return null;
+    return {
+      modelRef: selection!,
+      sourceGeneration: custom.sourceGeneration,
+      selectionRevision: snapshot.models.selectionRevision,
+      protocol: custom.protocol,
+    };
+  }
+  const metask = snapshot.models.providers.find(
+    (provider) => provider.id === "metask",
+  );
+  const apiKey = metask?.apiKeys.find(
+    (candidate) => "metask:" + candidate.id === selection!.sourceId,
+  );
+  const model = metask?.models.find(
+    (candidate) => candidate.id === selection!.modelId,
+  );
+  if (
+    !metask ||
+    metask.catalogState !== "ready" ||
+    metask.sourceGeneration === "0" ||
+    !apiKey ||
+    !model ||
+    !sameModelRef(snapshot.models.metaskSelection, selection)
+  )
+    return null;
+  return {
+    modelRef: selection!,
+    sourceGeneration: metask.sourceGeneration,
+    selectionRevision: snapshot.models.selectionRevision,
+    protocol: apiKey.protocol,
+  };
+}
+
 function toMutation(
   snapshot: WorkbenchSnapshot,
   draft: Draft,
@@ -133,9 +204,11 @@ function toMutation(
     (!Number.isSafeInteger(every) || every <= 0)
   )
     return null;
+  const binding = currentBinding(snapshot);
+  if (!binding) return null;
   return {
     title: draft.title.trim(),
-    expectedExecutionGeneration: snapshot.newTaskAdmission.activeGeneration,
+    binding,
     permissionProfile: draft.permissionProfile,
     input: { kind: "text", text: draft.text.trim() },
     recurrence:
@@ -471,7 +544,12 @@ export function ScheduledTasksPage({
             message={t(
               `scheduled.persistence.${snapshot.capabilities.scheduledTaskPersistenceHealth}`,
             )}
-            detail={t("persistence.recovery.scheduled.hard_cut")}
+            detail={t(
+              snapshot.capabilities.scheduledTaskPersistenceHealth ===
+                "migration_failed"
+                ? "scheduled.persistence.migration_failed_detail"
+                : "persistence.recovery.scheduled.hard_cut",
+            )}
             actionLabel={t("persistence.recovery.action")}
             dialogTitle={t("persistence.recovery.scheduled.title")}
             dialogDescription={t("persistence.recovery.scheduled.body")}
@@ -624,7 +702,11 @@ export function ScheduledTasksPage({
                               <button
                                 type="button"
                                 className="text-button focus-ring"
-                                disabled={disabled || busy}
+                                disabled={
+                                  disabled ||
+                                  busy ||
+                                  task.health === "needs_attention"
+                                }
                                 onClick={() =>
                                   void action(async () => {
                                     const result = await onRunNow(
@@ -743,6 +825,12 @@ export function ScheduledTasksPage({
                     <strong>{t(`scheduled.health.${selected.health}`)}</strong>
                   </div>
                 </section>
+              )}
+
+              {selected?.binding.status === "migration_required" && (
+                <p className="scheduled-error">
+                  {t("scheduled.binding_migration_required")}
+                </p>
               )}
 
               <section
@@ -925,7 +1013,9 @@ export function ScheduledTasksPage({
                   <button
                     type="button"
                     className="danger-text-button focus-ring"
-                    disabled={disabled || busy}
+                    disabled={
+                      disabled || busy || selected.health === "needs_attention"
+                    }
                     onClick={() =>
                       void action(async () => {
                         await onDelete(selected.id, selected.epoch);

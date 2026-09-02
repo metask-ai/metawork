@@ -394,10 +394,12 @@ test("Scheduled Task projection decodes recurrence and occurrence without secret
       enabled: true,
       health: "ready",
       failureReason: null,
-      execution: {
-        generation: "1",
+      binding: {
+        status: "bound",
+        modelRef: { sourceId: "metask:key-1", modelId: "fixture-model" },
+        sourceGeneration: "1",
+        selectionRevision: "3",
         protocol: "anthropic_messages",
-        model: "fixture-model",
       },
       input: {
         kind: "text",
@@ -424,6 +426,25 @@ test("Scheduled Task projection decodes recurrence and occurrence without secret
     },
   ];
   assert.deepEqual(decodeWorkbenchSnapshot(scheduled), scheduled);
+
+  const migrationRequired = clone(scheduled);
+  migrationRequired.scheduledTasks[0].enabled = false;
+  migrationRequired.scheduledTasks[0].health = "needs_attention";
+  migrationRequired.scheduledTasks[0].failureReason =
+    "binding_migration_required";
+  migrationRequired.scheduledTasks[0].binding = {
+    status: "migration_required",
+    legacyExecution: {
+      generation: "19",
+      protocol: "anthropic_messages",
+      model: "legacy-model",
+    },
+  };
+  migrationRequired.scheduledTasks[0].nextRunAtUnixSeconds = null;
+  assert.deepEqual(
+    decodeWorkbenchSnapshot(migrationRequired),
+    migrationRequired,
+  );
 
   const updatedDefinitionProfile = clone(scheduled);
   updatedDefinitionProfile.scheduledTasks[0].permissionProfile = "full_access";

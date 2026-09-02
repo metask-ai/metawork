@@ -319,7 +319,7 @@ pub const TaskDelete = struct { taskId: []const u8 };
 pub const PersistenceRecovery = struct { expectedRevision: []const u8 };
 pub const ScheduledTaskMutation = struct {
     title: []const u8,
-    expectedExecutionGeneration: []const u8,
+    binding: ScheduledTaskBinding,
     permissionProfile: []const u8,
     input: std.json.Value,
     recurrence: std.json.Value,
@@ -328,10 +328,16 @@ pub const ScheduledTaskUpdate = struct {
     scheduledTaskId: []const u8,
     expectedEpoch: []const u8,
     title: []const u8,
-    expectedExecutionGeneration: []const u8,
+    binding: ScheduledTaskBinding,
     permissionProfile: []const u8,
     input: std.json.Value,
     recurrence: std.json.Value,
+};
+pub const ScheduledTaskBinding = struct {
+    modelRef: ModelRef,
+    sourceGeneration: []const u8,
+    selectionRevision: []const u8,
+    protocol: []const u8,
 };
 pub const ScheduledTaskIdentity = struct {
     scheduledTaskId: []const u8,
@@ -652,6 +658,19 @@ test "Scheduled Task recurrence is exact and uses wire integers" {
 }
 
 test "Scheduled Task payload rejects Workspace and Skill configuration" {
+    var current = try parsePayload(ScheduledTaskMutation,
+        \\{"title":"Current","binding":{"modelRef":{"sourceId":"metask:key-1","modelId":"model-1"},"sourceGeneration":"7","selectionRevision":"9","protocol":"anthropic_messages"},"permissionProfile":"approval_required","input":{"kind":"text","text":"inspect"},"recurrence":{"kind":"once","atUnixSeconds":"2"}}
+    );
+    defer current.deinit();
+    try std.testing.expectEqualStrings(
+        "metask:key-1",
+        current.value.binding.modelRef.sourceId,
+    );
+    try std.testing.expectEqualStrings("model-1", current.value.binding.modelRef.modelId);
+    try std.testing.expectEqualStrings("7", current.value.binding.sourceGeneration);
+    try std.testing.expectEqualStrings("9", current.value.binding.selectionRevision);
+    try std.testing.expectEqualStrings("anthropic_messages", current.value.binding.protocol);
+
     try std.testing.expectError(
         error.InvalidBridgePayload,
         parsePayload(ScheduledTaskMutation,

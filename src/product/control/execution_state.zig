@@ -196,6 +196,7 @@ pub const ProjectionRedaction = struct {
 pub const State = struct {
     execution: ActiveExecution,
     metask_source_binding_generation: u64 = 0,
+    default_source_generation: u64 = 0,
     replacement: ReplacementKind = .none,
     redaction_preparation: RedactionPreparation = .none,
     custom_binding: ?PreparedModelConnectionBinding = null,
@@ -320,6 +321,7 @@ pub const State = struct {
         redaction.apply(self.execution.credential());
         self.execution.clearNoFail();
         self.metask_source_binding_generation = 0;
+        self.default_source_generation = 0;
         self.default_selection_revision = 0;
         if (self.custom_binding) |*binding| binding.deinit();
         self.custom_binding = null;
@@ -509,6 +511,7 @@ pub const State = struct {
                 ));
             },
         }
+        self.default_source_generation = authority.source_generation;
         self.default_selection_revision = authority.selection_revision;
     }
 
@@ -518,6 +521,7 @@ pub const State = struct {
     ) bool {
         if (!self.execution.ready() or
             self.replacement != .none or
+            self.default_source_generation != authority.source_generation or
             self.default_selection_revision != authority.selection_revision or
             self.execution.protocol.? != authority.protocol or
             !std.mem.eql(u8, self.execution.model(), authority.selection.model_id))
@@ -577,6 +581,10 @@ pub const State = struct {
 
     pub fn activeSelectionRevision(self: *const State) u64 {
         return self.default_selection_revision;
+    }
+
+    pub fn activeSourceGeneration(self: *const State) u64 {
+        return self.default_source_generation;
     }
 
     pub fn metaskSourceGeneration(self: *const State) u64 {

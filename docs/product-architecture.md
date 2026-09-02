@@ -141,9 +141,11 @@ Schedule definition 固定自己的 PermissionProfile；每个 occurrence 在 la
 
 Schedule 只持久化已提交的 occurrence 与 Task identity，不持有 Product Control capability、可变 Task 指针、API credential 或 live Session。Task launch 的明确失败按 occurrence transaction 收口；结果不确定时不得重放可能已经创建 Task 的 launch。系统通知只消费已提交的 occurrence/Task terminal fact，通知失败不能回滚产品事实或伪造 Run cause。
 
-Schedule 引用的 execution authority 在触发时必须重新校验；不能用历史 generation 猜测或恢复 credential。Schedule store 是独立持久化边界，其 credential scrub 必须作为 durable candidate commit 完成，不能只修改内存 projection。
+Schedule 的可执行定义保存 Models-owned `ModelRef + source_generation + selection_revision + protocol`。每次触发先精确比较当前 Models default 与 Product Control 已安装 authority，再由 Product Control 当次 resolve 并把当前进程内 generation 交给新 Task；Schedule 不保存或比较该 Product generation。因此同一 source authority 的冷启动 generation 变化不使计划失效，而 selection revision 会阻止 A→B→A 静默复用。Metask authorization 丢失只使依赖 Metask 的新触发不可解析；custom source 与已经交付给 Task/Run 的 owned binding 不被追溯撤销。Schedule store 是独立持久化边界，其 credential scrub 必须作为 durable candidate commit 完成，不能只修改内存 projection。
 
 Schedule persistence recovery 仍由 Schedule aggregate 决策：只有 typed non-ready health 才发布 action，命令必须校验全局 revision。Schedule 先对当前内存 store 执行 credential scrub 并编码 canonical candidate；Application 对旧 canonical 执行 hard delete，再以 durable atomic replace 写入 candidate，不生成 backup、quarantine 或 migration artifact。明确失败保持旧 health 与内存 store，outcome unknown 保持 timer fail-closed；只有 committed 才转为 ready 并重新 arm。
+
+启动时 schema 1→2 migration 是独立于普通 recovery 的原子事务。schema 1 definition 因缺少 source identity，只能保留旧 execution 显示事实并转成 disabled `binding_migration_required`；不得查询当前 default 推断归属。新 schema 2 candidate committed，或 outcome unknown 后重读精确确认新 canonical，才接纳迁移内存；明确失败或确认仍是旧 canonical 发布 `migration_failed`、保留原文件且不开放 hard-reset action，重启后可重试。既非完整旧 canonical 也非完整新 canonical 时发布 `outcome_unknown`，沿用显式 recovery。运行时没有 schema 1 launch fallback。
 
 ### 2.4 Skill authority 与本地资产
 

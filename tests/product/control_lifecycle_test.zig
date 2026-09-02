@@ -20,6 +20,12 @@ const waitControlSnapshot = fixture.waitProductControlSnapshot;
 const installControlExecution = fixture.installProductControlExecution;
 const installControlExecutionGeneration = fixture.installProductControlExecutionGeneration;
 
+fn scheduledBinding(
+    workbench: *product_control.Runtime,
+) product_control.ScheduledTaskBindingInput {
+    return product_control.TestSupport.scheduledBinding(workbench);
+}
+
 const ShutdownContext = struct {
     workbench: *product_control.Runtime,
 
@@ -1980,7 +1986,7 @@ test "scheduled noninteractive permission request automatically stops the Produc
 
     const schedule_id = try workbench.createScheduledTask(.{
         .title = "Permission boundary",
-        .expected_execution_generation = 1,
+        .binding = scheduledBinding(&workbench),
         .permission_profile = .approval_required,
         .input = "Perform an operation requiring permission",
         .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
@@ -2068,7 +2074,7 @@ test "scheduled admission rejects an unconfigured Task persistence capability" {
 
     const schedule_id = try workbench.createScheduledTask(.{
         .title = "Required durability",
-        .expected_execution_generation = 1,
+        .binding = scheduledBinding(&workbench),
         .permission_profile = .approval_required,
         .input = "Do not run without durable Task history",
         .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
@@ -2141,7 +2147,7 @@ test "scheduled durable admission failure does not block an interactive Product 
 
     const schedule_id = try workbench.createScheduledTask(.{
         .title = "Durable automatic run",
-        .expected_execution_generation = 1,
+        .binding = scheduledBinding(&workbench),
         .permission_profile = .approval_required,
         .input = "Run only after durable admission",
         .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
@@ -2818,7 +2824,7 @@ test "Text schedule updates preserve historical Task profiles and create fresh a
 
     const default_schedule = try workbench.createScheduledTask(.{
         .title = "Independent brief",
-        .expected_execution_generation = 1,
+        .binding = scheduledBinding(&workbench),
         .permission_profile = .full_access,
         .input = "Summarize current work",
         .recurrence = .{ .interval = .{
@@ -2831,7 +2837,7 @@ test "Text schedule updates preserve historical Task profiles and create fresh a
         error.InvalidScheduledTaskInput,
         workbench.createScheduledTask(.{
             .title = "Empty schedule input",
-            .expected_execution_generation = 1,
+            .binding = scheduledBinding(&workbench),
             .permission_profile = .approval_required,
             .input = "",
             .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
@@ -2853,7 +2859,7 @@ test "Text schedule updates preserve historical Task profiles and create fresh a
 
     try workbench.updateScheduledTask(default_schedule, 1, .{
         .title = "Independent brief",
-        .expected_execution_generation = 1,
+        .binding = scheduledBinding(&workbench),
         .permission_profile = .approval_required,
         .input = "Summarize current work",
         .recurrence = .{ .interval = .{
@@ -2980,7 +2986,7 @@ test "schedule rejection retains the automatic Task created before a full Run qu
 
     const schedule_id = try workbench.createScheduledTask(.{
         .title = "Queued brief",
-        .expected_execution_generation = 1,
+        .binding = scheduledBinding(&workbench),
         .permission_profile = .approval_required,
         .input = "Summarize current work",
         .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
