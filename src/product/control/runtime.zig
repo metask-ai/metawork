@@ -4,7 +4,7 @@ const lifecycle = @import("metawork_agent");
 const account_contract = @import("metawork_account_contract");
 const models_contract = @import("metawork_product_models_contract");
 const models_ports = @import("product_models_ports");
-const models_runtime = @import("metawork_product_models");
+const models_aggregate = @import("metawork_product_models");
 const account_projection = @import("product_control_account_projection");
 const execution_state = @import("product_control_execution_state");
 const executor_impl = @import("product_control_executor");
@@ -936,7 +936,7 @@ pub const Runtime = struct {
     default_permission_profile: PermissionProfile = .approval_required,
     account_projection: account_projection.Projection,
     execution_state: execution_state.State,
-    model_connections: models_runtime.Runtime,
+    model_connections: models_aggregate.Runtime,
     pending_metask_candidate: ?PendingMetaskCandidate = null,
     pending_metask_clear: bool = false,
     metask_default_selection_attempt_id: ?u64 = null,
@@ -983,7 +983,7 @@ pub const Runtime = struct {
         errdefer account_projection_state.deinit();
         var execution_state_state = try execution_state.State.init(allocator);
         errdefer execution_state_state.deinit();
-        var model_connections = models_runtime.Runtime.init(
+        var model_connections = models_aggregate.Runtime.init(
             allocator,
             io,
             std.Thread.getCurrentId(),
@@ -2055,7 +2055,7 @@ pub const Runtime = struct {
         self: *Runtime,
         absolute_directory: []const u8,
         vault: models_ports.CredentialVault,
-    ) models_runtime.StartError!void {
+    ) models_aggregate.StartError!void {
         try self.model_connections.start(absolute_directory, vault);
         self.restoreModelConnectionDefaultNoFail();
     }
@@ -6611,7 +6611,7 @@ pub const Runtime = struct {
         };
     }
 
-    pub fn executionManagement(self: *Runtime) control_ports.ModelsManagement {
+    pub fn modelsManagement(self: *Runtime) control_ports.ModelsManagement {
         return .{
             .context = self,
             .start_model_connections_fn = controlStartModelConnections,

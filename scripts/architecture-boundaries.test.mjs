@@ -297,9 +297,11 @@ test("Product Models owns model connections independently of Account", () => {
       "metawork_agent",
     ],
   );
-  assert.match(modelsRoot, /@import\("metawork_product_models_contract"\)/);
   assert.match(modelsRoot, /@import\("product_models_runtime"\)/);
-  assert.match(modelsRoot, /@import\("product_models_ports"\)/);
+  assert.doesNotMatch(
+    modelsRoot,
+    /@import\("(?:metawork_product_models_contract|product_models_ports)"\)/,
+  );
   assert.match(modelsContract, /pub const ModelConnectionCommand = union/);
   assert.match(modelsRuntime, /registry: registry_impl\.Registry/);
   assert.match(modelsRegistry, /store_file_name = "model-connections\.json"/);
@@ -995,7 +997,7 @@ test("Application coordinators consume scoped Product Control capabilities", () 
     /Workbench|product_control\.Runtime|rawRuntime|rawOwner/,
   );
   assert.match(projection, /pub fn accountCommitSink/);
-  assert.match(projection, /pub fn executionManagement/);
+  assert.match(projection, /pub fn modelsManagement/);
   assert.match(projection, /pub fn agentEventConsumer/);
   assert.match(projection, /pub fn mcpManagementPort/);
   assert.match(projection, /pub fn mcpOauthPort/);

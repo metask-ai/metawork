@@ -5,7 +5,7 @@ const contract = @import("metawork_product_models_contract");
 const ports = @import("product_models_ports");
 const registry_impl = @import("product_models_connections");
 
-pub const StartError = error{ExecutionDirectoryUnavailable};
+pub const StartError = error{ModelConnectionsDirectoryUnavailable};
 pub const DefaultBinding = registry_impl.Registry.DefaultBinding;
 
 pub const Preparation = contract.Preparation;
@@ -40,7 +40,7 @@ pub const Runtime = struct {
         self.assertMainThread();
         std.debug.assert(self.store == null and self.credential_vault == null);
         if (absolute_directory.len == 0 or !std.fs.path.isAbsolute(absolute_directory))
-            return error.ExecutionDirectoryUnavailable;
+            return error.ModelConnectionsDirectoryUnavailable;
         self.credential_vault = vault;
         self.restore(absolute_directory);
     }

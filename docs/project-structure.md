@@ -20,7 +20,7 @@
 | `src/app.zig`、`src/app/` | Application | Native SDK composition、平台 capability、资源生命周期和跨 owner 编排 |
 | `src/product/account.zig`、`src/product/account/` | Account | Account public module 与内部 aggregate |
 | `src/product/control.zig`、`src/product/control/` | Product Control | Product composition、shared execution 与跨 aggregate 编排 |
-| `src/product/models.zig`、`src/product/models/` | Product Control 持有的 Models aggregate | Product 通用 Protocol/ExecutionConfig 纯合同、Model Connection registry、credential port 与恢复；不形成新的顶层 owner |
+| `src/product/models.zig`、`src/product/models/` | Product Control 持有的 Models aggregate | Product 通用 Protocol/ExecutionConfig 纯合同、Model Connection registry、credential port 与恢复；aggregate root 只发布 runtime API，不形成新的顶层 owner |
 | `src/product/agent_protocol_adapter.zig` | Product Control 的 Agent outbound boundary | Product 已开放 Protocol 到 Agent codec Protocol 的唯一穷举映射；无状态且不形成共享 enum 或新 owner |
 | `src/product/{mcp,schedule,skill,task,workspace}.zig` 及同名目录 | Product Control 持有的 aggregate | 各自发布窄 public module，不形成新的顶层 owner |
 | `src/agent.zig`、`src/agent/` | Agent | AgentCore integration、Runtime、Session、Completion 与 callback/event boundary |
@@ -31,7 +31,7 @@
 | `src/native_sdk_compat/` | Application | 已登记 Native SDK 缺口的窄 compatibility seam，不形成通用平台层 |
 | `src/product_identity.zig` | `app.zon`-derived shared leaf | 把 build-time artifact identity 投影给 Application 及 Models/Account/MCP credential boundary，不形成领域 owner |
 
-`src/product/models/contract.zig` 是 Models 发布给 Account、Task、Schedule 与相邻边界的纯模型执行合同；`src/product/account/contract.zig` 只发布 Account 合同。`src/product/agent_protocol_adapter.zig` 只拥有 Product 到 Agent 的穷举协议映射，不能承载模型执行配置、推断或通用转换。三者都不是新的顶层产品 owner。`src/product/` 只是 Account、Product Control 及其 aggregate 的目录归属，不发布统一 Product facade。
+`src/product/models.zig` 是 Product Control 构造并持有 Models aggregate 的 runtime root，只发布 `Runtime`、启动错误等 aggregate API；Product Control 可按需要同时精确导入该 root、`src/product/models/contract.zig` 的纯模型合同和 `src/product/models/ports.zig` 的窄 effect port。Application adapter 只直接消费 contract/port，Task 与 Schedule 只消费 contract，三条路线不经 root 转发。`src/product/account/contract.zig` 只发布 Account 合同。`src/product/agent_protocol_adapter.zig` 只拥有 Product 到 Agent 的穷举协议映射，不能承载模型执行配置、推断或通用转换。它们都不是新的顶层产品 owner。`src/product/` 只是 Account、Product Control 及其 aggregate 的目录归属，不发布统一 Product facade。
 
 每个 `*.zig` module root 只显式发布消费者需要的类型、函数或窄 namespace。内部文件不得通过无边界 `usingnamespace`、barrel 或 forwarding facade 重新暴露；build graph 中为隔离测试或依赖形成的 leaf module 不因此取得新的 owner 身份。
 
@@ -87,7 +87,7 @@ storage backend -> SQLite amalgamation
 
 Application 只做 composition、capability 注入、资源生命周期和跨 owner 调用顺序，不读取领域内部状态形成 policy。`app/`、`product/`、`agent/` 与 `bridge/` 的下层 owner 都不得反向导入 Application 实现。
 
-Product Control 可以消费 Agent、Account 与 Execution 的纯合同，但不得导入 AgentCore SDK、Account Runtime、Bridge 或 Renderer。Execution contract/registry/runtime 不得反向导入 Account；Task 与 Schedule 不得通过 Account 取得执行类型。Bridge 可以消费 Product Control public surface、Execution command/view、Account 脱敏合同与 Native SDK transport contract，但不得持有 Account Runtime、AgentCore handle、`PlatformServices`、OS handle 或具体平台实现。Agent 不得导入 Product Control、Bridge、Application 或 Renderer。`product_identity.zig` 只消费 `app.zon` manifest 与 build-time artifact option；Application 的 Execution/Account/MCP credential adapter 可以读取其派生 identity，但它不得反向依赖领域模块。Storage contract 不依赖 Product、Application、Native SDK 或 SQLite C 类型；只有 concrete backend 可以依赖 SQLite。
+Product Control 可以消费 Agent、Account 与 Models 的纯合同，并可构造 Models aggregate，但不得导入 AgentCore SDK、Account Runtime、Bridge 或 Renderer。Models contract/registry/runtime 不得反向导入 Account 或消费方；Task 与 Schedule 不得通过 Account 取得模型执行类型，也不得导入 Models runtime/root/ports。Bridge 可以消费 Product Control public surface、Models command/view、Account 脱敏合同与 Native SDK transport contract，但不得持有 Account Runtime、AgentCore handle、`PlatformServices`、OS handle 或具体平台实现。Agent 不得导入 Product Control、Models、Bridge、Application 或 Renderer。`product_identity.zig` 只消费 `app.zon` manifest 与 build-time artifact option；Application 的 Models/Account/MCP credential adapter 可以读取其派生 identity，但它不得反向依赖领域模块。Storage contract 不依赖 Product、Application、Native SDK 或 SQLite C 类型；只有 concrete backend 可以依赖 SQLite。
 
 OAuth shared leaf 不发布统一 OAuth flow 或业务 policy。Account 与 Application MCP OAuth 可以消费其 mechanics/loopback contract，但必须各自拥有 callback path、redirect/issuer/resource 接受规则、大小和 invalid-request budget、用户响应与错误映射；MCP 不得导入 Account 私有 OAuth 或 loopback policy。
 

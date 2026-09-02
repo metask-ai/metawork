@@ -997,8 +997,6 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
-    models.addImport("metawork_product_models_contract", models_contract);
-    models.addImport("product_models_ports", models_ports);
     models.addImport("product_models_runtime", models_runtime);
     const account_network_attempt = b.createModule(.{
         .root_source_file = b.path("src/product/account/network_attempt.zig"),

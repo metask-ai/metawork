@@ -610,7 +610,7 @@ pub fn run(init: std.process.Init) !void {
         app.main_thread_id,
     );
     var models_coordinator_state = models_coordinator.Coordinator.init(
-        control.executionManagement(),
+        control.modelsManagement(),
         app.main_thread_id,
         init.io,
     );
