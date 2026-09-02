@@ -2485,8 +2485,6 @@ pub const Runtime = struct {
         self: *Runtime,
         input: AutomationExecutionInput,
     ) Error!void {
-        const execution_generation: u64 = 1;
-        const source_generation: u64 = 1;
         defer self.publishScheduleChangesNoFail();
         if (!build_options.automation)
             return error.InvalidAutomationExecution;
@@ -2510,7 +2508,7 @@ pub const Runtime = struct {
                 .base_url = input.base_url,
             },
             .api_key = input.credential,
-            .execution_generation = execution_generation,
+            .execution_generation = 1,
         };
         try self.execution_state.prepareInstall(
             execution_input,
@@ -2544,7 +2542,7 @@ pub const Runtime = struct {
                 .api_key_id = "automation-key",
                 .model_id = input.model,
                 .protocol = input.protocol,
-                .source_generation = source_generation,
+                .source_generation = 1,
             },
         });
         self.execution_state.installAutomationNoFail(.{
@@ -2552,8 +2550,7 @@ pub const Runtime = struct {
             .credential = input.credential,
             .model = input.model,
             .base_url = input.base_url,
-            .execution_generation = execution_generation,
-            .source_generation = source_generation,
+            .generation = 1,
         }, self.executionProjectionRedaction());
         self.endExecutionReplacementNoFail();
         self.finishAccountCommitNoFail();
