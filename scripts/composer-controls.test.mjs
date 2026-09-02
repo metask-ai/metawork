@@ -422,6 +422,27 @@ function renderSettings(
   };
 }
 
+test("Settings exposes Model connections only for the complete Host gate", () => {
+  const incomplete = renderSettings(readySettingsAccount);
+  assert.equal(
+    screen.queryByRole("heading", { name: "Model connections" }),
+    null,
+  );
+  incomplete.unmount();
+
+  render(
+    settingsElement(readySettingsAccount, readySettingsExecution, {
+      modelConnectionCapabilities: {
+        management: true,
+        secretCapture: true,
+        connectionTest: true,
+      },
+    }),
+  );
+  assert.ok(screen.getByRole("heading", { name: "Model connections" }));
+  assert.ok(screen.getByRole("button", { name: "Add connection" }));
+});
+
 test("Settings completes the API transaction before replacing committed defaults", async () => {
   const user = userEvent.setup({ document: dom.window.document });
   const view = renderSettings(readySettingsAccount);

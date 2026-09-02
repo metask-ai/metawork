@@ -273,9 +273,11 @@ test("Product Models owns model connections independently of Account", () => {
   const accountPorts = read("src/product/account/ports.zig");
   const accountBinding = read("src/app/account_platform_binding.zig");
   const modelsBinding = read("src/app/models_platform_binding.zig");
+  const modelConnectionHost = read("src/app/model_connection_host.zig");
   const modelsCoordinator = read("src/app/models_coordinator.zig");
   const control = read("src/product/control/runtime.zig");
   const app = read("src/app.zig");
+  const windowsBringup = read("scripts/run-windows-bringup.mjs");
   const identity = read("src/product_identity.zig");
 
   assertNoImports(
@@ -330,6 +332,23 @@ test("Product Models owns model connections independently of Account", () => {
   );
   assert.match(modelsBinding, /product_models_ports/);
   assert.match(modelsBinding, /modelConnectionCredentialService/);
+  assert.match(modelConnectionHost, /std\.crypto\.secureZero/);
+  assert.match(modelConnectionHost, /platform\.supportsSecureInput\(\)/);
+  assert.match(modelConnectionHost, /createWithCapturedCredential/);
+  assert.doesNotMatch(
+    modelConnectionHost,
+    /frontend|Renderer|ModelConnectionCreate\s*=/,
+  );
+  assert.match(app, /setModelConnectionHost/);
+  assert.match(
+    app,
+    /\.management = model_connection_capability_available,[\s\S]*\.secret_capture = model_connection_capability_available,[\s\S]*\.connection_test = model_connection_capability_available/,
+  );
+  assert.doesNotMatch(
+    read("frontend/src/features/settings/SettingsPage.tsx"),
+    /MODEL_CONNECTION_SETTINGS_ENABLED/,
+  );
+  assert.match(windowsBringup, /test-model-connection-readiness-windows\.mjs/);
   assert.match(identity, /pub fn modelConnectionCredentialService/);
   const selectDefault = control.indexOf("fn selectModelConnectionDefault(");
   const scrubPreparation = control.indexOf(
@@ -2320,6 +2339,8 @@ test("Native compatibility seams have exact owners and symbol allowlists", () =>
     "src/native_sdk_compat/system_webview_startup_window/windows.zig";
   const securePath = "src/native_sdk_compat/secure_input.zig";
   const secureWindowsPath = "src/native_sdk_compat/secure_input/windows.zig";
+  const secureWindowsUiaPath =
+    "src/native_sdk_compat/secure_input/windows_uia.zig";
   const secureMacosPath = "src/native_sdk_compat/secure_input/macos.zig";
   const instancePath = "src/native_sdk_compat/app_single_instance.zig";
   const instanceWindowsPath =
@@ -2419,6 +2440,32 @@ test("Native compatibility seams have exact owners and symbol allowlists", () =>
       "UpdateWindow",
       "WideCharToMultiByte",
     ].sort(),
+  );
+  assert.deepEqual(
+    zigFiles("src/").filter((file) =>
+      read(file).includes('@import("windows_uia.zig")'),
+    ),
+    [secureWindowsPath],
+  );
+  assert.deepEqual(
+    externSymbols(read(secureWindowsUiaPath), [
+      "user32",
+      "kernel32",
+      "uiautomationcore",
+    ]),
+    [
+      "CallWindowProcW",
+      "DefWindowProcW",
+      "GetLastError",
+      "SetLastError",
+      "SetWindowLongPtrW",
+      "UiaHostProviderFromHwnd",
+      "UiaReturnRawElementProvider",
+    ].sort(),
+  );
+  assert.match(
+    read("build.zig"),
+    /target\.result\.os\.tag == \.windows[\s\S]*app\.linkSystemLibrary\("uiautomationcore"/u,
   );
   assert.deepEqual(
     externSymbols(read(startupWindowsPath), ["user32", "kernel32", "comctl32"]),

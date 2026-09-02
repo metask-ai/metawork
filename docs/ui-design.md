@@ -980,9 +980,9 @@ MetaWork
 [ 使用 Metask 登录 ]
 ```
 
-首次启动不显示四步进度条，不要求用户点击“加载 API Key”，不出现 C1/C2、protocol target、generation 或 Keychain 等技术术语。`checking` 只显示稳定的品牌与检查状态；`authorizing` 只显示等待和取消，不提供“重新打开登录页”。OAuth 已成功而目录准备失败时保持当前 identity，在账号设置中提供目录重试；Account 目录已就绪而 Schedule/Execution 不可用时保持 Account ready，在 Product recovery surface 提供恢复。登录无效直接成为 `signed_out`，进入 Workbench shell 后左下角账号入口显示统一登录动作；当前模型连接设置入口保持隐藏，不显示已保存账号、重新认证、账号不匹配或上一次登录信息。
+首次启动不显示四步进度条，不要求用户点击“加载 API Key”，不出现 C1/C2、protocol target、generation 或 Keychain 等技术术语。`checking` 只显示稳定的品牌与检查状态；`authorizing` 只显示等待和取消，不提供“重新打开登录页”。OAuth 已成功而目录准备失败时保持当前 identity，在账号设置中提供目录重试；Account 目录已就绪而 Schedule/Execution 不可用时保持 Account ready，在 Product recovery surface 提供恢复。登录无效直接成为 `signed_out`，进入 Workbench shell 后左下角账号入口显示统一登录动作；模型连接设置是否出现只取决于完整 Host capability gate，不显示已保存账号、重新认证、账号不匹配或上一次登录信息。
 
-冷启动检查或 OAuth 授权期间使用稳定的品牌状态。确认 `signed_out` 后进入 Workbench shell 并保留本地历史；如果没有 ready Model Connection，只关闭 New task admission，不暴露尚未形成完整 capability gate 的模型连接设置。确认 `authenticated` 后继续目录准备。任何 live Task 若仍在运行，必须继续可查看和停止。
+冷启动检查或 OAuth 授权期间使用稳定的品牌状态。确认 `signed_out` 后进入 Workbench shell 并保留本地历史；如果没有 ready Model Connection，只关闭 New task admission。完整 Model Connection capability gate 已成立的平台仍显示模型连接设置，使用户可以在不登录 Metask 时创建并验证自定义来源；Gate 未成立的平台隐藏整个入口。确认 `authenticated` 后继续目录准备。任何 live Task 若仍在运行，必须继续可查看和停止。
 
 ### 14.2 设置结构
 
@@ -1004,7 +1004,7 @@ Account
 
 当前设置树包含独立 `Permissions` 分区，但只提供“新 Task 默认策略”；它不管理当前 Workspace、已有 Task 或 AgentCore 内部 enum。该分区只列 Host capability projection 支持的真实选项，不显示未实现的 `Standard`、假开关或“即将推出”。已有 Task 的 effective profile 只在 Task 自身 surface 展示；当前没有 idle mutation，因此保持只读。
 
-`Model connections` 当前不进入设置树，也不出现在左下角账号菜单。只有 management、Host-owned secure capture、protocol connection test、默认 execution transaction 和已开放 protocol admission 共同通过产品 gate 后才能整体恢复入口；不能只显示不可完成的空壳或“能力不可用”页面。
+`Model connections` 只有在 management、Host-owned secure capture、protocol connection test、默认 execution transaction 和已开放 protocol admission 共同通过产品 gate 时才整体进入设置树；不能只显示不可完成的空壳或“能力不可用”页面。Windows 当前由 Host 在三项运行能力同时可用时开放；macOS 在原生 modal reentrancy、VoiceOver 明文检查与 shutdown Gate 完成前保持整体隐藏。
 
 Workspace 生命周期不属于 Settings surface。New task 路径控件负责选择、添加和重新授权 Manual Workspace；Automatic Workspace 只随 owning Task 导航。Renderer 只在当前 draft 内保存 Manual Workspace identity，不维护 `activeWorkspaceId` 或其他全局活动 Workspace 镜像。
 
@@ -1047,9 +1047,9 @@ Account 状态在设置中的投影只遵循公开合同：
 
 `Model connections` 规则：
 
-> 当前入口关闭。以下规则保留为重新开放时必须同时满足的产品合同，不代表 Renderer 现在可以导航到该页面。
+> 该入口按完整 Host capability gate 开放：当前 Windows 实现满足 gate 时可以导航，macOS 在独立平台验收完成前保持关闭。
 
-- Renderer 分别消费 `modelConnectionManagement`、`modelConnectionSecretCapture` 与 `modelConnectionTest` 三个 Host capability；management 不代表可以采集 secret。当前 Native SDK 缺少 trusted secure text-input 时，连接列表、测试和默认选择可以继续工作，但 Add/替换 credential 动作必须隐藏并显示能力不可用说明，不得回退到 DOM 密码框；
+- Renderer 同时校验 `modelConnectionManagement`、`modelConnectionSecretCapture` 与 `modelConnectionTest` 三个 Host capability；只有三者均为 true 才显示整个设置入口。Host 在 Windows 只发布全 true 或全 false，在 macOS Gate 完成前只发布全 false；不得提供局部连接页、DOM 密码框或“稍后补齐 credential”的半成品路径；
 - 页面显示连接名称、protocol、脱敏服务地址、credential 状态、模型目录状态和可用动作；不显示完整 API Key，不回填秘密字段；
 - `Add connection` 先选择协议，再填写连接名称、API Base URL 和模型 ID；API Key 通过 Host-owned secure capture 单独采集，不作为普通 Bridge 字段回传。协议选择精确开放 OpenAI Responses、OpenAI Chat Completions、Anthropic Messages 与 Gemini Native，Host 对四者分别执行已登记的 endpoint 和 codec admission；
 - Host 在提交时规范化 endpoint、校验 scheme/host/path/长度和控制字符，并根据 protocol 生成 AgentCore 所需的 normalized base URL；Renderer 不能把 arbitrary URL 或 query credential 直接交给 Run；
@@ -1057,7 +1057,7 @@ Account 状态在设置中的投影只遵循公开合同：
 - 第一版由用户明确填写 bounded model ID，不提供自动模型发现；连接没有可用模型时不能成为默认连接；
 - 默认连接与默认模型作为同一笔 Host-owned execution transaction 提交；切换连接后只允许选择该连接的模型目录，不把不同连接的 model id 混在一个列表里；
 - Metask identity/catalog 与当前 custom default 同时投影；custom default 生效时账号设置仍可查看 Metask API/模型，并通过显式 `新任务改用 Metask` 触发重建。Host 只有在 Metask execution 与 custom-default 清除都提交成功后才切换来源，失败时继续使用原连接；
-- 编辑连接使用同一 typed 表单，秘密永不回填；当前无 secure capture 时只允许编辑名称、协议和 endpoint，不显示伪造的“替换 API Key”动作。endpoint 或 protocol 变化生成新的 connection generation，并回到待测试状态；
+- 编辑连接使用同一 typed 表单，秘密永不回填；secure capture 不可用时整个 Model Connection 设置入口隐藏，不提供局部编辑路径。endpoint 或 protocol 变化生成新的 connection generation，并回到待测试状态；
 - 删除或禁用连接前，Host 检查 live Session、Run、job 和 worker 引用。当前默认连接必须先切换到其他 ready 连接，Renderer 禁用其编辑/删除并解释操作顺序，Host 仍以 exact connection identity、generation 和 `execution_in_use` 做最终校验。既有 Task 不静默改绑；不可继续的 Task 显示 `需要重新选择模型连接`，历史仍保留；
 - 连接页只管理连接本身和默认连接/模型，不提供 Workspace、权限策略、Task 历史或 AgentCore 内部状态。
 

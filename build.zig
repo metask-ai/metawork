@@ -1633,6 +1633,9 @@ fn wireAgentCore(
     );
     app.addImport("metawork_mcp_platform", mcp_platform);
     app.addImport("metawork_mcp_oauth", mcp_oauth);
+    if (target.result.os.tag == .windows) {
+        app.linkSystemLibrary("uiautomationcore", .{});
+    }
 
     root_module.addImport("metawork_app", app);
     root_module.link_libc = bundle.link_libc;

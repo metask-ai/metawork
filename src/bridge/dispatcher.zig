@@ -151,7 +151,7 @@ pub const McpSecretSlot = union(enum) {
 };
 
 /// Host-owned create transaction. Its owner must complete secure capture,
-/// credential persistence, Execution registry commit, and definite-failure
+/// credential persistence, Models registry commit, and definite-failure
 /// rollback before returning. Bridge never receives either the secret or an
 /// intermediate credential slot that it could commit separately.
 pub const ModelConnectionCreateOutcome = union(enum) {
@@ -248,8 +248,8 @@ pub const Dispatcher = struct {
         self.* = undefined;
     }
 
-    /// Installs the Application-owned secure capture seam. Production keeps
-    /// this unset until Native SDK provides a secure text-input capability.
+    /// Installs the Application-owned secure capture sequence only when the
+    /// complete Model Connection capability gate is available.
     pub fn setModelConnectionHost(
         self: *Dispatcher,
         host: ?ModelConnectionHost,

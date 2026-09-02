@@ -15,8 +15,6 @@ import {
 import { useI18n, type Locale } from "../../i18n/context.ts";
 import { accountErrorText } from "../../i18n/account-error.ts";
 
-const MODEL_CONNECTION_SETTINGS_ENABLED: boolean = false;
-
 export type SettingsFocusTarget = "title" | "account" | "model_connections";
 type SettingsSection =
   "general" | "permissions" | "account" | "model_connections";
@@ -170,7 +168,6 @@ export function SettingsPage({
 }) {
   const { locale, setLocale, t } = useI18n();
   const modelConnectionSettingsAvailable =
-    MODEL_CONNECTION_SETTINGS_ENABLED &&
     modelConnectionCapabilities.management &&
     modelConnectionCapabilities.secretCapture &&
     modelConnectionCapabilities.connectionTest;

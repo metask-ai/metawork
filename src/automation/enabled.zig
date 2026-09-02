@@ -11,6 +11,8 @@ const bridge = @import("metawork_bridge");
 pub const enabled = true;
 
 const activation_env = "METAWORK_AUTOMATION";
+const model_connection_readiness_env =
+    "METAWORK_MODEL_CONNECTION_READINESS";
 const workspace_env = "METAWORK_AUTOMATION_WORKSPACE";
 const inline_origin = "zero://inline";
 const allowed_origins = [_][]const u8{ "zero://app", inline_origin };
@@ -45,6 +47,21 @@ pub const Runtime = struct {
         return std.mem.eql(u8, value, "1");
     }
 
+    /// Enables only the automation transport and an injected Workspace for
+    /// the real Windows Model Connection readiness harness. Unlike `active`,
+    /// this mode does not install fixture Account/Models state and therefore
+    /// exercises normal platform services, secure input and credential vaults.
+    pub fn modelConnectionReadinessActive(self: *const Runtime) bool {
+        const env_map = self.env_map orelse return false;
+        const value = env_map.get(model_connection_readiness_env) orelse
+            return false;
+        return std.mem.eql(u8, value, "1");
+    }
+
+    pub fn bridgeHarnessActive(self: *const Runtime) bool {
+        return self.active() or self.modelConnectionReadinessActive();
+    }
+
     pub fn executionFixture(self: *const Runtime) ?ExecutionFixture {
         if (!self.active()) return null;
         const env_map = self.env_map orelse return null;
@@ -63,7 +80,7 @@ pub const Runtime = struct {
     /// harness. The Dispatcher consumes it through the ordinary
     /// `workspaces.choose` command; it is never a Task-create escape hatch.
     pub fn workspaceRoot(self: *const Runtime) ?[]const u8 {
-        if (!self.active()) return null;
+        if (!self.bridgeHarnessActive()) return null;
         const env_map = self.env_map orelse return null;
         const root = env_map.get(workspace_env) orelse return null;
         return if (root.len == 0) null else root;
@@ -77,7 +94,7 @@ pub const Runtime = struct {
     }
 
     pub fn productPolicy(self: *Runtime, base: native_sdk.BridgePolicy) native_sdk.BridgePolicy {
-        if (!self.active()) return base;
+        if (!self.bridgeHarnessActive()) return base;
         std.debug.assert(base.commands.len == self.policy_commands.len);
         for (base.commands, 0..) |command, index| {
             self.policy_commands[index] = command;
@@ -91,7 +108,7 @@ pub const Runtime = struct {
     }
 
     pub fn builtinPolicy(self: *Runtime, base: native_sdk.BridgePolicy) native_sdk.BridgePolicy {
-        if (!self.active()) return base;
+        if (!self.bridgeHarnessActive()) return base;
         if (comptime bridge.policy.builtin_command_count == 0) return base;
         std.debug.assert(base.commands.len == self.builtin_commands.len);
         for (base.commands, 0..) |command, index| {
@@ -106,7 +123,7 @@ pub const Runtime = struct {
     }
 
     pub fn allowedOrigins(self: *const Runtime, base: []const []const u8) []const []const u8 {
-        return if (self.active()) &allowed_origins else base;
+        return if (self.bridgeHarnessActive()) &allowed_origins else base;
     }
 };
 
@@ -148,4 +165,26 @@ test "automation workspace is an explicit activation-scoped capability" {
         "/tmp/metawork-automation",
         runtime.canonicalUserHome().?,
     );
+}
+
+test "Model Connection readiness opens only harness transport and Workspace" {
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try env.put(model_connection_readiness_env, "1");
+    try env.put(workspace_env, "/tmp/metawork-model-connection-readiness");
+    var runtime = Runtime.init(&env);
+    defer runtime.deinit();
+
+    try std.testing.expect(!runtime.active());
+    try std.testing.expect(runtime.modelConnectionReadinessActive());
+    try std.testing.expect(runtime.bridgeHarnessActive());
+    try std.testing.expect(runtime.executionFixture() == null);
+    try std.testing.expectEqualStrings(
+        "/tmp/metawork-model-connection-readiness",
+        runtime.workspaceRoot().?,
+    );
+    const policy = runtime.productPolicy(
+        @import("metawork_bridge").policy.product(.release),
+    );
+    try std.testing.expectEqualStrings(inline_origin, policy.commands[0].origins[1]);
 }

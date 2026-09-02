@@ -12,6 +12,7 @@ const mcp_oauth = @import("metawork_mcp_oauth");
 const account_coordinator = @import("app/account_coordinator.zig");
 const account_platform_binding = @import("app/account_platform_binding.zig");
 const models_coordinator = @import("app/models_coordinator.zig");
+const model_connection_host = @import("app/model_connection_host.zig");
 const models_platform_binding = @import("app/models_platform_binding.zig");
 const metask_http_transport = @import("app/metask_http_transport.zig");
 const completion_http_transport = @import("app/completion_http_transport.zig");
@@ -59,6 +60,7 @@ const App = struct {
     agent_events: agent_event_coordinator.Coordinator = .{},
     account_coordinator: ?*account_coordinator.Coordinator = null,
     models_coordinator: ?*models_coordinator.Coordinator = null,
+    model_connection_host: ?*model_connection_host.Host = null,
     account_started: bool = false,
     models_started: bool = false,
     control_storage: ?*product_control.Runtime = null,
@@ -127,13 +129,14 @@ const App = struct {
         const control_storage = self.control_storage orelse
             @panic("Product Control storage is not composed");
         var configuration = self.control_configuration;
-        const model_connection_platform_available = self.platform.services() != null;
+        const model_connection_capability_available =
+            !self.automation.active() and
+            self.platform.services() != null and
+            if (self.model_connection_host) |host| host.available() else false;
         configuration.model_connections = .{
-            .management = model_connection_platform_available,
-            // Native SDK currently exposes no trusted secret text-input
-            // surface. Keep create/credential replacement fail closed.
-            .secret_capture = false,
-            .connection_test = model_connection_platform_available,
+            .management = model_connection_capability_available,
+            .secret_capture = model_connection_capability_available,
+            .connection_test = model_connection_capability_available,
         };
         configuration.mcp = .{
             .preparation = &preparation,
@@ -204,7 +207,7 @@ const App = struct {
         const account = self.account_coordinator orelse
             @panic("Account coordinator is not composed");
         const models_management = self.models_coordinator orelse
-            @panic("Execution coordinator is not composed");
+            @panic("Models coordinator is not composed");
         models_management.setProbeNotifier(.{
             .context = &self.platform,
             .notify_fn = app_platform.Adapter.notifyRequired,
@@ -253,6 +256,12 @@ const App = struct {
             account.startUnavailable();
         }
         self.account_started = true;
+        (self.dispatcher orelse @panic("Bridge Dispatcher is not composed")).setModelConnectionHost(
+            if (model_connection_capability_available)
+                self.model_connection_host.?.bridgeHost()
+            else
+                null,
+        );
         (self.dispatcher orelse @panic("Bridge Dispatcher is not composed")).startIngress();
     }
 
@@ -278,6 +287,7 @@ const App = struct {
             dispatcher.assertQuiescent();
             dispatcher.breakConnection();
             dispatcher.detachProductControl();
+            dispatcher.setModelConnectionHost(null);
         }
         if (self.mcp_management) |*coordinator| coordinator.shutdown();
         if (self.mcp_oauth_refresh) |*coordinator| coordinator.shutdown();
@@ -617,9 +627,15 @@ pub fn run(init: std.process.Init) !void {
     models_coordinator_state.setCompletionTransport(
         app.completion_transport.transport(),
     );
+    var model_connection_host_state = model_connection_host.Host.init(
+        &app.platform,
+        &models_coordinator_state,
+    );
     app.account_coordinator = &account_coordinator_state;
     app.models_coordinator = &models_coordinator_state;
+    app.model_connection_host = &model_connection_host_state;
     defer {
+        app.model_connection_host = null;
         app.models_coordinator = null;
         app.account_coordinator = null;
         account_runtime.deinit();

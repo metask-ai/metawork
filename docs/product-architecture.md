@@ -11,7 +11,7 @@ Product 由两个 named owner 组成，跨 owner 用例由对应的 Application 
 
 Agent 位于 Product 之外，拥有 MetaWork 对 AgentCore Runtime、Session、Conversation、callback、event pump 与 terminal execution fact 的集成生命周期。Product Control 只调用 Agent 的公共执行能力，不管理 Agent Runtime 生命周期、不读取其内部状态，也不借 Agent 获取通用 I/O。Application 创建和关闭 Agent、安排主线程 wake，并协调 Account 与 Product Control；它不持有领域运行状态，也不独立决定这些 owner 的 policy。
 
-Application 必须分别组装 Account coordinator 与 Models coordinator。前者只编排 Account Runtime terminal commit 与 optional Metask source candidate 的线性 no-fail handoff；后者只绑定 Models credential vault、Agent-owned connection probe 与 Models 管理生命周期。Models registry 的 CRUD、默认来源选择、恢复、Schedule scrub 和已安装 execution 交接属于 Product Control 内部事务，不得由任一 Application coordinator 通过公开的 `begin/prepare/commit/install/end` 步骤重新拼装。Account unavailable 与 Models unavailable 必须独立启动、降级和关闭。
+Application 必须分别组装 Account coordinator 与 Models coordinator。前者只编排 Account Runtime terminal commit 与 optional Metask source candidate 的线性 no-fail handoff；后者只绑定 Models credential vault、Agent-owned connection probe 与 Models 管理生命周期。Application 另以窄 Model Connection Host sequence 把原生 secure capture 的调用期 plaintext 直接交给 Models credential mutation capability，并在提交、取消、失败和 shutdown 路径清零唯一缓冲区；Bridge、Renderer 和 generic command 永远不取得 secret。Models registry 的 CRUD、默认来源选择、恢复、Schedule scrub 和已安装 execution 交接属于 Product Control 内部事务，不得由任一 Application coordinator 通过公开的 `begin/prepare/commit/install/end` 步骤重新拼装。Account unavailable 与 Models unavailable 必须独立启动、降级和关闭。
 
 Models、Workspace、Task、Schedule、Skill 与 MCP 是 Product Control 持有的 aggregate，不形成新的顶层 Product owner。各 aggregate 独占自身状态机、局部事务与持久化 policy；Product Control 只拥有必须同时观察多个 aggregate、execution、publication 或生命周期事实的不变量，不能把局部 policy 重新吸收到组合层。
 
@@ -41,8 +41,9 @@ Account resolve Metask selection
 Model Connection execution 的数据流为：
 
 ```text
-Execution registry + Application credential vault
-→ Execution resolve
+Application native secure capture → Models credential mutation
+→ Models credential vault + registry
+→ Models resolve
 → Product Control installed-execution ownership
 → Agent Session consumption
 ```

@@ -77,7 +77,7 @@ Bridge 不决定 Task admission、Workspace authority、Agent cancellation、cre
 
 Product 是产品事实与行为的逻辑边界。Bridge 把 typed 产品命令交给内部对应 owner；这些 owner 执行 admission、事务、持久化与恢复，并共同生成 canonical 产品 projection。Product policy 不依赖 Renderer component state、DOM、WebView URL 或 Application 平台实现。
 
-Account 与 Product Control 是 Product 的两个 named owner。Execution、Workspace、Task、Schedule、Skill 与 MCP 是 Product Control 持有的 aggregate，不形成新的顶层 owner；其中 Execution 发布 Product 通用 protocol/config 合同并拥有 user-managed Model Connection，Account 只拥有 Metask identity/catalog 及其默认选择。Product Control 只通过 Agent 公共执行表面消费 Agent 能力；Application 只执行平台 effect、生命周期和跨 owner coordination。内部事务、authority 和失败语义只由[Product 架构](product-architecture.md)与[Account 架构](account-architecture.md)定义。
+Account 与 Product Control 是 Product 的两个 named owner。Models、Workspace、Task、Schedule、Skill 与 MCP 是 Product Control 持有的 aggregate，不形成新的顶层 owner；其中 Models 发布 Product 通用 protocol/config 合同并拥有 user-managed Model Connection，Account 只拥有 Metask identity/catalog 及其默认选择。Product Control 只通过 Agent 公共执行表面消费 Agent 能力；Application 只执行平台 effect、生命周期和跨 owner coordination。内部事务、authority 和失败语义只由[Product 架构](product-architecture.md)与[Account 架构](account-architecture.md)定义。
 
 ### 3.4 Agent 与 AgentCore
 
