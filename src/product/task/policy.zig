@@ -14,6 +14,12 @@ const automatic_title_max_codepoints: usize = 32;
 pub fn automaticTitleCandidate(input: *const task_state.RunInputRecord) ?[]const u8 {
     return switch (input.*) {
         .text => |text| firstAutomaticTitleLine(text.value),
+        .multimodal => |multimodal| if (multimodal.text) |text|
+            firstAutomaticTitleLine(text)
+        else if (multimodal.attachments.len != 0)
+            firstAutomaticTitleLine(multimodal.attachments[0].display_name)
+        else
+            null,
         .skill => |skill| blk: {
             const display_name = std.mem.trim(u8, skill.display_name, " \t\r\n");
             if (display_name.len == 0 or !validAutomaticTitleText(display_name))
@@ -26,6 +32,11 @@ pub fn automaticTitleCandidate(input: *const task_state.RunInputRecord) ?[]const
 pub fn automaticTitleCompletionInput(input: *const task_state.RunInputRecord) ?[]const u8 {
     const value = switch (input.*) {
         .text => |text| text.value,
+        .multimodal => |multimodal| multimodal.text orelse
+            if (multimodal.attachments.len != 0)
+                multimodal.attachments[0].display_name
+            else
+                "",
         .skill => |skill| skill.display_name,
     };
     const trimmed = std.mem.trim(u8, value, " \t\r\n");

@@ -4,6 +4,18 @@ const sdk = @import("metask_agentcore");
 
 const document_media_type = "application/pdf";
 
+pub const InputLimits = struct {
+    max_parts: usize,
+    max_image_raw_bytes: usize,
+    max_document_raw_bytes: usize,
+};
+
+pub const input_limits: InputLimits = .{
+    .max_parts = sdk.types.MAX_RUN_INPUT_PARTS_V1,
+    .max_image_raw_bytes = sdk.types.MAX_RUN_INPUT_IMAGE_DATA_BYTES_V1 / 4 * 3,
+    .max_document_raw_bytes = sdk.types.MAX_RUN_INPUT_DOCUMENT_DATA_BYTES_V1 / 4 * 3,
+};
+
 pub const ImageFormat = enum {
     png,
     jpeg,

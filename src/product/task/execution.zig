@@ -428,6 +428,11 @@ fn generateAutomaticTitle(job: *RunJob) void {
 fn automaticTitleCompletionInput(input: *const state.RunInputRecord) ?[]const u8 {
     const value = switch (input.*) {
         .text => |text| text.value,
+        .multimodal => |multimodal| multimodal.text orelse
+            if (multimodal.attachments.len != 0)
+                multimodal.attachments[0].display_name
+            else
+                "",
         .skill => |skill| skill.display_name,
     };
     const trimmed = std.mem.trim(u8, value, " \t\r\n");
