@@ -21,6 +21,7 @@ import {
   type RunInputView,
   type RunActivity,
   type RunView,
+  type AttachmentChooseResult,
   type ScheduledTaskView,
   type PersistenceRecoveryOutcome,
   type SkillCatalogView,
@@ -468,12 +469,70 @@ function decodeRunInput(value: unknown, path: string): RunInputView {
   const kind = enumValue((value as JsonObject).kind, `${path}.kind`, [
     "text",
     "skill",
+    "multimodal",
   ] as const);
   if (kind === "text") {
     const item = object(value, path, ["kind", "text", "redacted"]);
     return {
       kind,
       text: stringValue(item.text, `${path}.text`),
+      redacted: booleanValue(item.redacted, `${path}.redacted`),
+    };
+  }
+  if (kind === "multimodal") {
+    const item = object(value, path, [
+      "kind",
+      "text",
+      "attachments",
+      "redacted",
+    ]);
+    const attachments = arrayValue(
+      item.attachments,
+      `${path}.attachments`,
+      (attachmentValue, attachmentPath) => {
+        const attachment = object(attachmentValue, attachmentPath, [
+          "kind",
+          "format",
+          "displayName",
+          "sizeBytes",
+          "redacted",
+        ]);
+        const attachmentKind = enumValue(
+          attachment.kind,
+          `${attachmentPath}.kind`,
+          ["image", "pdf"] as const,
+        );
+        const format = enumValue(
+          attachment.format,
+          `${attachmentPath}.format`,
+          ["png", "jpeg", "webp", "pdf"] as const,
+        );
+        if ((attachmentKind === "pdf") !== (format === "pdf"))
+          fail(attachmentPath, "attachment kind and format must agree");
+        return {
+          kind: attachmentKind,
+          format,
+          displayName: nonEmptyString(
+            attachment.displayName,
+            `${attachmentPath}.displayName`,
+          ),
+          sizeBytes: positiveWireId(
+            attachment.sizeBytes,
+            `${attachmentPath}.sizeBytes`,
+          ),
+          redacted: booleanValue(
+            attachment.redacted,
+            `${attachmentPath}.redacted`,
+          ),
+        };
+      },
+    );
+    if (attachments.length === 0)
+      fail(`${path}.attachments`, "multimodal input requires attachments");
+    return {
+      kind,
+      text: item.text === null ? null : stringValue(item.text, `${path}.text`),
+      attachments,
       redacted: booleanValue(item.redacted, `${path}.redacted`),
     };
   }
@@ -3066,7 +3125,21 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     "mcpConnectionApproval",
     "mcpSecretCapture",
     "mcpOAuth",
+    "attachments",
   ]);
+  const attachmentCapability = object(
+    capabilityItem.attachments,
+    "$.capabilities.attachments",
+    [
+      "enabled",
+      "imageFormats",
+      "pdf",
+      "maxFiles",
+      "maxImageBytes",
+      "maxPdfBytes",
+      "maxStagedBytes",
+    ],
+  );
   const capabilities = {
     taskHistoryPersistence: booleanValue(
       capabilityItem.taskHistoryPersistence,
@@ -3190,7 +3263,50 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
       "$.capabilities.mcpSecretCapture",
     ),
     mcpOAuth: booleanValue(capabilityItem.mcpOAuth, "$.capabilities.mcpOAuth"),
+    attachments: {
+      enabled: booleanValue(
+        attachmentCapability.enabled,
+        "$.capabilities.attachments.enabled",
+      ),
+      imageFormats: arrayValue(
+        attachmentCapability.imageFormats,
+        "$.capabilities.attachments.imageFormats",
+        (format, formatPath) =>
+          enumValue(format, formatPath, ["png", "jpeg", "webp"] as const),
+      ),
+      pdf: booleanValue(
+        attachmentCapability.pdf,
+        "$.capabilities.attachments.pdf",
+      ),
+      maxFiles: positiveWireId(
+        attachmentCapability.maxFiles,
+        "$.capabilities.attachments.maxFiles",
+      ),
+      maxImageBytes: positiveWireId(
+        attachmentCapability.maxImageBytes,
+        "$.capabilities.attachments.maxImageBytes",
+      ),
+      maxPdfBytes: positiveWireId(
+        attachmentCapability.maxPdfBytes,
+        "$.capabilities.attachments.maxPdfBytes",
+      ),
+      maxStagedBytes: positiveWireId(
+        attachmentCapability.maxStagedBytes,
+        "$.capabilities.attachments.maxStagedBytes",
+      ),
+    },
   };
+  if (
+    capabilities.attachments.enabled !==
+      (capabilities.attachments.pdf &&
+        capabilities.attachments.imageFormats.length === 3) ||
+    (capabilities.attachments.enabled &&
+      capabilities.attachments.imageFormats.join(",") !== "png,jpeg,webp")
+  )
+    fail(
+      "$.capabilities.attachments",
+      "attachment formats must match the enabled policy",
+    );
   if (
     capabilities.taskHistoryPersistence !==
     (capabilities.taskHistoryPersistenceHealth === "ready" ||
@@ -4177,4 +4293,88 @@ export function assertTaskArchived(
     booleanValue(item.archived, "$.archived") !== archived
   )
     fail("$", "archive response mismatch");
+}
+
+export function decodeAttachmentChooseResult(
+  value: unknown,
+): AttachmentChooseResult {
+  const root = value as JsonObject;
+  const status = enumValue(root?.status, "$.status", [
+    "cancelled",
+    "ready",
+    "rejected",
+  ] as const);
+  if (status === "cancelled") {
+    object(value, "$", ["status"]);
+    return { status };
+  }
+  if (status === "rejected") {
+    const item = object(value, "$", ["status", "reason"]);
+    return {
+      status,
+      reason: enumValue(item.reason, "$.reason", [
+        "unsupported_type",
+        "file_too_large",
+        "too_many_files",
+        "staging_capacity",
+        "read_failed",
+        "file_changed",
+        "shutting_down",
+      ] as const),
+    };
+  }
+  const item = object(value, "$", ["status", "attachments"]);
+  const attachments = arrayValue(
+    item.attachments,
+    "$.attachments",
+    (attachmentValue, path) => {
+      const attachment = object(attachmentValue, path, [
+        "token",
+        "kind",
+        "format",
+        "displayName",
+        "sizeBytes",
+      ]);
+      const kind = enumValue(attachment.kind, `${path}.kind`, [
+        "image",
+        "pdf",
+      ] as const);
+      const format = enumValue(attachment.format, `${path}.format`, [
+        "png",
+        "jpeg",
+        "webp",
+        "pdf",
+      ] as const);
+      const token = stringValue(attachment.token, `${path}.token`);
+      if (!/^[0-9a-f]{48}$/.test(token))
+        fail(`${path}.token`, "invalid attachment token");
+      if ((kind === "pdf") !== (format === "pdf"))
+        fail(path, "attachment kind and format must agree");
+      return {
+        token,
+        kind,
+        format,
+        displayName: nonEmptyString(
+          attachment.displayName,
+          `${path}.displayName`,
+        ),
+        sizeBytes: positiveWireId(attachment.sizeBytes, `${path}.sizeBytes`),
+      };
+    },
+  );
+  if (attachments.length === 0)
+    fail("$.attachments", "ready attachment result must not be empty");
+  if (attachments.length > 8)
+    fail("$.attachments", "ready attachment result exceeds the file limit");
+  if (
+    new Set(attachments.map((attachment) => attachment.token)).size !==
+    attachments.length
+  )
+    fail("$.attachments", "attachment tokens must be unique");
+  return { status, attachments };
+}
+
+export function decodeAttachmentReleaseResult(value: unknown) {
+  const item = object(value, "$", ["released"]);
+  return { released: booleanValue(item.released, "$.released") };
 }

@@ -3,6 +3,21 @@ import type { SkillCatalogView, TaskRunInput } from "../../bridge/contracts.ts";
 export type ComposerTextDraft = {
   kind: "text";
   text: string;
+  attachmentsReloadRequired?: true;
+};
+
+export type ComposerAttachment = {
+  token: string;
+  kind: "image" | "pdf";
+  format: "png" | "jpeg" | "webp" | "pdf";
+  displayName: string;
+  sizeBytes: string;
+};
+
+export type ComposerMultimodalDraft = {
+  kind: "multimodal";
+  text: string;
+  attachments: ComposerAttachment[];
 };
 
 export type ComposerSkillDraft = {
@@ -17,7 +32,8 @@ export type ComposerSkillDraft = {
   maxValues: number;
 };
 
-export type ComposerDraft = ComposerTextDraft | ComposerSkillDraft;
+export type ComposerDraft =
+  ComposerTextDraft | ComposerSkillDraft | ComposerMultimodalDraft;
 
 export const maxComposerCharacters = 16 * 1024;
 export const maxSkillArguments = 64;
@@ -29,7 +45,11 @@ export const emptyComposerDraft = (): ComposerDraft => ({
 });
 
 export function composerDraftHasContent(draft: ComposerDraft) {
-  return draft.kind === "skill" || draft.text.trim().length > 0;
+  return (
+    draft.kind === "skill" ||
+    draft.text.trim().length > 0 ||
+    (draft.kind === "multimodal" && draft.attachments.length > 0)
+  );
 }
 
 function utf8ByteLength(value: string) {
@@ -37,7 +57,8 @@ function utf8ByteLength(value: string) {
 }
 
 export function composerDraftWithinLimits(draft: ComposerDraft) {
-  if (draft.kind === "text") return draft.text.length <= maxComposerCharacters;
+  if (draft.kind === "text" || draft.kind === "multimodal")
+    return draft.text.length <= maxComposerCharacters;
   if (
     !Number.isInteger(draft.maxValues) ||
     draft.maxValues < 0 ||
@@ -65,6 +86,16 @@ export function composerDraftToRunInput(
     return parseSlashInput(draft.text)
       ? null
       : { kind: "text", text: draft.text };
+  if (draft.kind === "multimodal")
+    return draft.attachments.length === 0 || parseSlashInput(draft.text)
+      ? null
+      : {
+          kind: "multimodal",
+          text: draft.text,
+          attachmentTokens: draft.attachments.map(
+            (attachment) => attachment.token,
+          ),
+        };
   return {
     kind: "skill",
     skillId: draft.skillId,

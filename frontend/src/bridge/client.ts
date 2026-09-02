@@ -61,6 +61,8 @@ import {
   decodePermissionProfileMutationResult,
   decodeFilePreview,
   decodeFileChangeDiff,
+  decodeAttachmentChooseResult,
+  decodeAttachmentReleaseResult,
 } from "./decode-contracts.ts";
 import { RendererBridgeContractError } from "./contract-error.ts";
 import { fetchWorkbenchSnapshot } from "./snapshot/snapshot-client.ts";
@@ -640,6 +642,18 @@ export class BridgeClient {
     return decodeTaskRunResult(
       await this.invoke(commands.run, { taskId, expectedBindingEpoch, input }),
       taskId,
+    );
+  }
+
+  async chooseAttachments() {
+    return decodeAttachmentChooseResult(
+      await this.invoke(commands.chooseAttachments, {}),
+    );
+  }
+
+  async releaseAttachment(token: string) {
+    return decodeAttachmentReleaseResult(
+      await this.invoke(commands.releaseAttachment, { token }),
     );
   }
 

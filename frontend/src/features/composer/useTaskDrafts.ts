@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 
 import {
   clearNewTaskDraft,
@@ -10,7 +10,11 @@ import {
   writeNewTaskDraft,
   writeTaskDraft,
 } from "./drafts.ts";
-import { emptyComposerDraft, type ComposerDraft } from "./slash.ts";
+import {
+  emptyComposerDraft,
+  type ComposerAttachment,
+  type ComposerDraft,
+} from "./slash.ts";
 
 function useDrafts(
   activeId: string | null,
@@ -19,6 +23,8 @@ function useDrafts(
   clearStoredDraft: (id: string) => void,
 ) {
   const [drafts, setDrafts] = useState<Record<string, ComposerDraft>>({});
+  const draftsRef = useRef(drafts);
+  draftsRef.current = drafts;
   const draft = activeId
     ? (drafts[activeId] ?? readDraft(activeId))
     : emptyComposerDraft();
@@ -56,8 +62,8 @@ function useDrafts(
   const moveDraft = useCallback(
     (from: string, to: string) => {
       if (from === to) return "same" as const;
-      const source = readDraft(from);
-      const target = readDraft(to);
+      const source = drafts[from] ?? readDraft(from);
+      const target = drafts[to] ?? readDraft(to);
       const decision = newTaskDraftMoveDecision(source, target);
       if (decision === "preserve_both") return decision;
       setDrafts((current) => {
@@ -70,15 +76,39 @@ function useDrafts(
       if (decision === "move") writeDraft(to, source);
       return decision;
     },
-    [clearStoredDraft, readDraft, writeDraft],
+    [clearStoredDraft, drafts, readDraft, writeDraft],
   );
 
   const pruneDraftCache = useCallback((validIds: ReadonlySet<string>) => {
+    const discarded: ComposerAttachment[] = [];
+    for (const [id, draft] of Object.entries(draftsRef.current)) {
+      if (validIds.has(id) || draft.kind !== "multimodal") continue;
+      discarded.push(...draft.attachments);
+    }
     setDrafts((current) =>
       Object.fromEntries(
         Object.entries(current).filter(([id]) => validIds.has(id)),
       ),
     );
+    return discarded;
+  }, []);
+
+  const invalidateAttachments = useCallback(() => {
+    setDrafts((current) => {
+      let changed = false;
+      const next = { ...current };
+      for (const [id, value] of Object.entries(current)) {
+        if (value.kind !== "multimodal") continue;
+        const replacement: ComposerDraft = {
+          kind: "text",
+          text: value.text,
+          attachmentsReloadRequired: true,
+        };
+        next[id] = replacement;
+        changed = true;
+      }
+      return changed ? next : current;
+    });
   }, []);
 
   return {
@@ -88,6 +118,7 @@ function useDrafts(
     clearDraft,
     moveDraft,
     pruneDraftCache,
+    invalidateAttachments,
   };
 }
 
@@ -103,7 +134,7 @@ export function useTaskDrafts(activeTaskId: string | null) {
     (validTaskIds: readonly string[]) => {
       const valid = new Set(validTaskIds);
       pruneTaskDrafts(valid);
-      drafts.pruneDraftCache(valid);
+      return drafts.pruneDraftCache(valid);
     },
     [drafts.pruneDraftCache],
   );

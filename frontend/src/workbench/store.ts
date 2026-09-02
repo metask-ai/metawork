@@ -43,6 +43,15 @@ export const initialWorkbenchState: WorkbenchState = {
       mcpConnectionApproval: false,
       mcpSecretCapture: false,
       mcpOAuth: false,
+      attachments: {
+        enabled: false,
+        imageFormats: [],
+        pdf: false,
+        maxFiles: "8",
+        maxImageBytes: "3750000",
+        maxPdfBytes: "12000000",
+        maxStagedBytes: "33554432",
+      },
     },
     permissions: {
       availableProfiles: [],
