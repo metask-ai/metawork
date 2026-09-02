@@ -481,7 +481,6 @@ const CommittedState = struct {
             .error_code = self.error_code,
             .safe_diagnostic = self.safe_diagnostic.view(),
             .catalog_generation = self.catalog_generation,
-            .metask_execution_generation = if (publish_account) self.execution_generation else 0,
         };
     }
 
@@ -577,7 +576,7 @@ pub const Account = struct {
             .select_model => |selection| self.prepareSelectModel(
                 selection.selection_id,
             ),
-            .activate_metask => self.prepareActivateMetask(),
+            .resolve_metask_source => self.prepareResolveMetaskSource(),
             .logout => self.prepareLogout(),
         };
     }
@@ -623,6 +622,10 @@ pub const Account = struct {
 
     pub fn pendingExecutionGeneration(self: *const Account) u64 {
         return self.state.pendingExecutionGeneration();
+    }
+
+    pub fn sourceGeneration(self: *const Account) u64 {
+        return self.state.execution_generation;
     }
 
     /// The preference store was re-observed after an indeterminate execution
@@ -1062,7 +1065,7 @@ pub const Account = struct {
         return result;
     }
 
-    fn prepareActivateMetask(self: *const Account) PrepareResult {
+    fn prepareResolveMetaskSource(self: *const Account) PrepareResult {
         if (self.state.session_state != .authenticated or
             self.state.operation() != .none or
             self.state.execution_authority != .ready or
@@ -1407,7 +1410,7 @@ pub const Account = struct {
         failure: WorkerFailure,
     ) PrepareResult {
         const normalized_failure = if (failure.error_code == .none)
-            WorkerFailure.fromCode(.dependency_contract_invalid)
+            WorkerFailure.fromCode(.account_operation_failed)
         else
             failure;
         // A model-catalog failure — empty catalog, quota exhaustion, server
@@ -1515,7 +1518,7 @@ fn incrementGeneration(current: u64) ?u64 {
 
 fn dependencyFailure() WorkerCompletion.Payload {
     return .{ .failed = .{
-        .error_code = .dependency_contract_invalid,
+        .error_code = .account_operation_failed,
     } };
 }
 
@@ -1661,6 +1664,10 @@ pub const PreparedTransition = struct {
 
     pub fn view(self: *const PreparedTransition) contract.AccountView {
         return self.next.view();
+    }
+
+    pub fn sourceGeneration(self: *const PreparedTransition) u64 {
+        return self.next.execution_generation;
     }
 
     pub fn factKind(self: *const PreparedTransition) contract.AccountFactKind {
@@ -1890,7 +1897,6 @@ fn testSelection(selection_id: []const u8) contract.AccountSelectionCommand {
     return .{
         .selection_id = selection_id,
         .expected_catalog_generation = 0,
-        .expected_execution_generation = 0,
     };
 }
 
@@ -2078,7 +2084,7 @@ test "explicit login persists tokens before publishing identity" {
     try std.testing.expectEqual(contract.AccountState.authenticated, account.view().state);
     try std.testing.expectEqualStrings("account-2", account.view().account_id);
     try std.testing.expectEqualStrings("Other User", account.view().display_name);
-    try std.testing.expectEqual(@as(u64, 0), account.view().metask_execution_generation);
+    try std.testing.expectEqual(@as(u64, 0), account.sourceGeneration());
 }
 
 test "explicit login accepts the newly verified identity" {
@@ -2350,10 +2356,7 @@ test "Metask activation rebuilds the committed execution without a preference wr
     installed.deinit();
     commitPrepared(&account, &restored);
 
-    var activation = switch (account.prepareCommand(.{ .activate_metask = .{
-        .expected_catalog_generation = 1,
-        .expected_execution_generation = 9,
-    } })) {
+    var activation = switch (account.prepareCommand(.resolve_metask_source)) {
         .transition => |value| value,
         else => return error.TestUnexpectedResult,
     };
@@ -2420,7 +2423,7 @@ test "Metask activation rebuilds the committed execution without a preference wr
     commitPrepared(&account, &terminal);
     try std.testing.expectEqualStrings("key-1", account.view().selected_api_key_id);
     try std.testing.expectEqualStrings("model-1", account.view().selected_model);
-    try std.testing.expectEqual(@as(u64, 9), account.view().metask_execution_generation);
+    try std.testing.expectEqual(@as(u64, 9), account.sourceGeneration());
 }
 
 test "empty model catalog parks back in choosing with the key list intact" {
@@ -2495,7 +2498,7 @@ test "empty model catalog parks back in choosing with the key list intact" {
     // The committed execution keeps working; nothing was torn down.
     try std.testing.expectEqualStrings("key-old", view.selected_api_key_id);
     try std.testing.expectEqualStrings("model-old", view.selected_model);
-    try std.testing.expectEqual(@as(u64, 9), view.metask_execution_generation);
+    try std.testing.expectEqual(@as(u64, 9), account.sourceGeneration());
 
     // Re-picking a key continues inside the same parked transaction.
     var reselect = switch (account.prepareCommand(.{
@@ -2696,7 +2699,7 @@ test "failed reconfiguration preserves the committed selection" {
     try std.testing.expectEqualStrings("key-old", account.view().selected_api_key_id);
     try std.testing.expectEqualStrings("", account.view().candidate_api_key_id);
     try std.testing.expectEqualStrings("", account.view().candidate_model);
-    try std.testing.expectEqual(@as(u64, 9), account.view().metask_execution_generation);
+    try std.testing.expectEqual(@as(u64, 9), account.sourceGeneration());
 
     var logout = switch (account.prepareCommand(.logout)) {
         .transition => |value| value,
@@ -2724,7 +2727,7 @@ test "failed reconfiguration preserves the committed selection" {
     };
     try std.testing.expect(logout_done.takeEffect() == null);
     commitPrepared(&account, &logout_done);
-    try std.testing.expectEqual(@as(u64, 0), account.view().metask_execution_generation);
+    try std.testing.expectEqual(@as(u64, 0), account.sourceGeneration());
 }
 
 test "ready execution model selection updates the default without reconfiguration" {
@@ -2782,7 +2785,7 @@ test "ready execution model selection updates the default without reconfiguratio
     try std.testing.expectEqualStrings("key-old", view.selected_api_key_id);
     try std.testing.expectEqualStrings("model-old", view.selected_model);
     try std.testing.expectEqualStrings("model-new", view.candidate_model);
-    try std.testing.expectEqual(@as(u64, 9), view.metask_execution_generation);
+    try std.testing.expectEqual(@as(u64, 9), account.sourceGeneration());
 
     var persisted: WorkerCompletion = .{
         .attempt_id = account.activeAttempt().?,
@@ -2802,7 +2805,7 @@ test "ready execution model selection updates the default without reconfiguratio
     try std.testing.expectEqual(contract.CatalogState.ready, view.catalog_state);
     try std.testing.expectEqualStrings("key-old", view.selected_api_key_id);
     try std.testing.expectEqualStrings("model-new", view.selected_model);
-    try std.testing.expectEqual(@as(u64, 9), view.metask_execution_generation);
+    try std.testing.expectEqual(@as(u64, 9), account.sourceGeneration());
 }
 
 test "shutdown invalidates active attempt and requires effect consumption" {
@@ -2851,7 +2854,7 @@ test "shutdown revokes ready execution before publishing the terminal view" {
     try std.testing.expectEqual(contract.CatalogState.unavailable, view.catalog_state);
     try std.testing.expectEqualStrings("", view.selected_api_key_id);
     try std.testing.expectEqualStrings("", view.selected_model);
-    try std.testing.expectEqual(@as(u64, 0), view.metask_execution_generation);
+    try std.testing.expectEqual(@as(u64, 0), account.sourceGeneration());
 }
 
 test "restore failure returns to sign-in without restart semantics" {
@@ -3093,7 +3096,7 @@ test "login commits account-only before a separate catalog generation" {
     try std.testing.expectEqual(@as(u64, 2), view.catalog_generation);
     try std.testing.expectEqual(
         @as(u64, 0x9e37_79b9_7f4a_7c15),
-        view.metask_execution_generation,
+        account.sourceGeneration(),
     );
     try std.testing.expectEqualStrings("model-1", view.selected_model);
 }

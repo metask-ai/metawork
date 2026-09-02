@@ -60,7 +60,7 @@
             .{ .name = "metawork.account.refreshCatalog", .origins = .{"zero://app"} },
             .{ .name = "metawork.account.selectApiKey", .origins = .{"zero://app"} },
             .{ .name = "metawork.account.selectModel", .origins = .{"zero://app"} },
-            .{ .name = "metawork.account.activateMetask", .origins = .{"zero://app"} },
+            .{ .name = "metawork.modelSources.selectMetaskDefault", .origins = .{"zero://app"} },
             .{ .name = "metawork.account.logout", .origins = .{"zero://app"} },
             .{ .name = "metawork.modelConnections.create", .origins = .{"zero://app"} },
             .{ .name = "metawork.modelConnections.update", .origins = .{"zero://app"} },

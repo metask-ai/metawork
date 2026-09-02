@@ -44,11 +44,6 @@ pub const WindowChromeDisconnect = struct { generation: []const u8 };
 pub const AccountSelection = struct {
     selectionId: []const u8,
     expectedCatalogGeneration: []const u8,
-    expectedExecutionGeneration: []const u8,
-};
-pub const AccountActivation = struct {
-    expectedCatalogGeneration: []const u8,
-    expectedExecutionGeneration: []const u8,
 };
 pub const ModelConnectionCreate = struct {
     displayName: []const u8,

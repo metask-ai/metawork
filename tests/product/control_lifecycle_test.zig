@@ -219,7 +219,13 @@ fn installTwoModelCatalog(workbench: *product_control.Runtime) void {
             .selected_model = "fixture-model",
             .model_catalog_api_key_id = "key-1",
             .catalog_generation = 2,
-            .metask_execution_generation = 1,
+        },
+        .authority = .{
+            .account_id = "account-1",
+            .api_key_id = "key-1",
+            .model_id = "fixture-model",
+            .protocol = .anthropic_messages,
+            .source_generation = 1,
         },
     });
     workbench.finishAccountCommitNoFail();
@@ -1882,7 +1888,13 @@ test "legacy Schedule data leaves Account ready and Execution unavailable as a v
             .selected_model = "fixture-model",
             .model_catalog_api_key_id = "key-1",
             .catalog_generation = 1,
-            .metask_execution_generation = 1,
+        },
+        .authority = .{
+            .account_id = "account-1",
+            .api_key_id = "key-1",
+            .model_id = "fixture-model",
+            .protocol = .anthropic_messages,
+            .source_generation = 1,
         },
     });
     var execution = try execution_contract.OwnedConfig.initOwned(

@@ -1163,11 +1163,7 @@ export default function App() {
           attentionStatus(
             result.errorCode === "generation_mismatch"
               ? "account.options_updated"
-              : result.errorCode === "execution_in_use"
-                ? "account.task_running"
-                : result.errorCode === "session_in_use"
-                  ? "account.session_in_use"
-                  : "account.command_rejected",
+              : "account.command_rejected",
             { scope: "account" },
           ),
         );
@@ -2505,11 +2501,7 @@ export default function App() {
                 ),
               )
             : void runAccountCommand(() =>
-                client.selectModel(
-                  id,
-                  snapshot.account.catalogGeneration,
-                  snapshot.account.metaskExecutionGeneration,
-                ),
+                client.selectModel(id, snapshot.account.catalogGeneration),
               )
           : void selectModelForTask(id)
       }
@@ -2801,29 +2793,16 @@ export default function App() {
             onCancel={() => void cancelAccountOperation()}
             onSelectApiKey={(id) =>
               void runAccountCommand(() =>
-                client.selectApiKey(
-                  id,
-                  snapshot.account.catalogGeneration,
-                  snapshot.account.metaskExecutionGeneration,
-                ),
+                client.selectApiKey(id, snapshot.account.catalogGeneration),
               )
             }
             onSelectModel={(id) =>
               void runAccountCommand(() =>
-                client.selectModel(
-                  id,
-                  snapshot.account.catalogGeneration,
-                  snapshot.account.metaskExecutionGeneration,
-                ),
+                client.selectModel(id, snapshot.account.catalogGeneration),
               )
             }
             onActivateMetask={() =>
-              void runAccountCommand(() =>
-                client.activateMetask(
-                  snapshot.account.catalogGeneration,
-                  snapshot.account.metaskExecutionGeneration,
-                ),
-              )
+              void runAccountCommand(() => client.selectMetaskDefault())
             }
             onCreateModelConnection={(input) =>
               runAccountCommand(() => client.createModelConnection(input))

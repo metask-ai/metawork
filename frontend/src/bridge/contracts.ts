@@ -23,8 +23,6 @@ export type AccountErrorCode =
   | "invalid_command"
   | "invalid_state"
   | "operation_in_progress"
-  | "execution_in_use"
-  | "session_in_use"
   | "oauth_bind_failed"
   | "oauth_browser_open_failed"
   | "oauth_callback_rejected"
@@ -41,15 +39,14 @@ export type AccountErrorCode =
   | "catalog_field_too_large"
   | "no_api_keys"
   | "no_models"
-  | "execution_target_invalid"
-  | "execution_config_invalid"
+  | "metask_platform_unsupported"
   | "credential_store_read_failed"
   | "credential_store_write_failed"
   | "credential_store_delete_failed"
   | "generation_mismatch"
   | "recovery_state_invalid"
   | "local_resource_exhausted"
-  | "dependency_contract_invalid"
+  | "account_operation_failed"
   | "model_connection_invalid"
   | "model_connection_not_found"
   | "model_connection_capture_unavailable"
@@ -145,7 +142,6 @@ export type AccountView = {
   errorCode: AccountErrorCode;
   safeDiagnostic: string;
   catalogGeneration: string;
-  metaskExecutionGeneration: string;
 };
 
 export type ExecutionView = {

@@ -33,7 +33,6 @@ export function taskModelSelectionPolicy(
     execution.taskCreationAvailable &&
     execution.activeSource === "metask" &&
     execution.activeGeneration !== "0" &&
-    execution.activeGeneration === account.metaskExecutionGeneration &&
     task.binding.executionGeneration === execution.activeGeneration &&
     selectedApi?.protocol === task.binding.protocol;
 

@@ -45,13 +45,13 @@ pub const Coordinator = struct {
     ) account_contract.AccountCommandResult {
         const self: *Coordinator = @ptrCast(@alignCast(context));
         self.assertMainThread();
-        if (command == .activate_metask and
+        if (command == .resolve_metask_source and
             !self.control.metaskActivationAvailable())
             return .rejected(.invalid_state);
         return switch (self.runtime.prepareCommand(command)) {
             .prepared => |prepared| result: {
                 const result = self.commitPrepared(prepared);
-                if (command == .activate_metask and result.accepted)
+                if (command == .resolve_metask_source and result.accepted)
                     self.metask_activation_attempt_id = result.attempt_id;
                 break :result result;
             },
@@ -143,7 +143,7 @@ pub const Coordinator = struct {
                         } else {
                             return self.commitPrepared(
                                 self.runtime.prepareActiveAttemptFailure(
-                                    .dependency_contract_invalid,
+                                    .account_operation_failed,
                                 ),
                             );
                         }
@@ -286,8 +286,6 @@ pub const Coordinator = struct {
 
 fn replacementErrorCode(err: anyerror) account_contract.ErrorCode {
     return switch (err) {
-        error.TaskRunning => .execution_in_use,
-        error.TaskSessionInUse => .session_in_use,
         error.ExecutionInUse => .operation_in_progress,
         else => .local_resource_exhausted,
     };
@@ -310,15 +308,7 @@ fn testingPerform(
     return error.NetworkFailed;
 }
 
-test "Application maps identity replacement blockers precisely" {
-    try std.testing.expectEqual(
-        account_contract.ErrorCode.execution_in_use,
-        replacementErrorCode(error.TaskRunning),
-    );
-    try std.testing.expectEqual(
-        account_contract.ErrorCode.session_in_use,
-        replacementErrorCode(error.TaskSessionInUse),
-    );
+test "Application maps identity replacement overlap to Account operation state" {
     try std.testing.expectEqual(
         account_contract.ErrorCode.operation_in_progress,
         replacementErrorCode(error.ExecutionInUse),
@@ -441,7 +431,7 @@ test "Application rejects Account candidate before preference persistence when P
     );
     try std.testing.expect(result.accepted);
     try std.testing.expectEqual(
-        account_contract.ErrorCode.dependency_contract_invalid,
+        account_contract.ErrorCode.account_operation_failed,
         account_runtime.view().error_code,
     );
     try std.testing.expectEqual(
@@ -458,7 +448,7 @@ test "Application rejects Account candidate before preference persistence when P
     );
     try std.testing.expectEqual(
         @as(?u64, null),
-        account_api.TestSupport.savedPreferenceExecutionGeneration(
+        account_api.TestSupport.savedPreferenceSourceGeneration(
             &account_runtime,
         ),
     );
@@ -571,7 +561,7 @@ test "Application preserves signed-out state after execution clear handoff failu
     account_runtime.dispatchCommitted(&ready);
     try std.testing.expectEqual(
         @as(?u64, 7),
-        account_api.TestSupport.savedPreferenceExecutionGeneration(
+        account_api.TestSupport.savedPreferenceSourceGeneration(
             &account_runtime,
         ),
     );
@@ -598,10 +588,10 @@ test "Application preserves signed-out state after execution clear handoff failu
     );
     try std.testing.expectEqual(
         @as(u64, 0),
-        account_runtime.view().metask_execution_generation,
+        account_api.TestSupport.sourceGeneration(&account_runtime),
     );
     try std.testing.expect(
-        account_api.TestSupport.savedPreferenceExecutionGeneration(
+        account_api.TestSupport.savedPreferenceSourceGeneration(
             &account_runtime,
         ) == null,
     );
@@ -1181,7 +1171,6 @@ test "restored login drives automatic key and model defaults end to end" {
     const manual = coordinator.commandSink().submit(.{ .select_api_key = .{
         .selection_id = "2",
         .expected_catalog_generation = settled.catalog_generation,
-        .expected_execution_generation = settled.metask_execution_generation,
     } });
     try std.testing.expect(manual.accepted);
     const switched = pumpUntilReady(&coordinator, &account_runtime, "manual");
@@ -1196,12 +1185,13 @@ test "restored login drives automatic key and model defaults end to end" {
     // Phase 3: changing only the default model on the committed GPT API is a
     // preference transaction. It must retain the committed catalog and the
     // credential generation, and the new default must be durable.
-    const switched_generation = switched.metask_execution_generation;
+    const switched_generation = account_api.TestSupport.sourceGeneration(
+        &account_runtime,
+    );
     const select_gpt_model = coordinator.commandSink().submit(.{
         .select_model = .{
             .selection_id = "gpt-5.6-sol",
             .expected_catalog_generation = switched.catalog_generation,
-            .expected_execution_generation = switched.metask_execution_generation,
         },
     });
     try std.testing.expect(select_gpt_model.accepted);
@@ -1213,7 +1203,10 @@ test "restored login drives automatic key and model defaults end to end" {
     try account_contract.validateView(model_changed);
     try std.testing.expectEqualStrings("2", model_changed.selected_api_key_id);
     try std.testing.expectEqualStrings("gpt-5.6-sol", model_changed.selected_model);
-    try std.testing.expectEqual(switched_generation, model_changed.metask_execution_generation);
+    try std.testing.expectEqual(
+        switched_generation,
+        account_api.TestSupport.sourceGeneration(&account_runtime),
+    );
     try std.testing.expectEqual(@as(usize, 2), model_changed.api_keys.len);
     try std.testing.expectEqual(@as(usize, 2), model_changed.models.len);
     try std.testing.expectEqualStrings(
@@ -1222,7 +1215,7 @@ test "restored login drives automatic key and model defaults end to end" {
     );
     try std.testing.expectEqual(
         switched_generation,
-        fake_platform.preference.?.execution_generation,
+        fake_platform.preference.?.metask_source_generation,
     );
 
     coordinator.shutdown();
@@ -1346,7 +1339,6 @@ test "relaunch with persisted selection restores the saved execution" {
             .select_api_key = .{
                 .selection_id = "2",
                 .expected_catalog_generation = settled.catalog_generation,
-                .expected_execution_generation = settled.metask_execution_generation,
             },
         });
         try std.testing.expect(manual.accepted);
@@ -1360,17 +1352,16 @@ test "relaunch with persisted selection restores the saved execution" {
             .select_model = .{
                 .selection_id = "gpt-5.6-sol",
                 .expected_catalog_generation = switched.catalog_generation,
-                .expected_execution_generation = switched.metask_execution_generation,
             },
         });
         try std.testing.expect(model_change.accepted);
         const changed = pumpUntilReady(&coordinator, &account_runtime, "boot2-model");
         try std.testing.expectEqualStrings("gpt-5.6-sol", changed.selected_model);
         try std.testing.expectEqual(
-            switched.metask_execution_generation,
-            changed.metask_execution_generation,
+            fake_platform.preference.?.metask_source_generation,
+            account_api.TestSupport.sourceGeneration(&account_runtime),
         );
-        persisted_generation = changed.metask_execution_generation;
+        persisted_generation = fake_platform.preference.?.metask_source_generation;
         coordinator.shutdown();
     }
 
@@ -1415,7 +1406,10 @@ test "relaunch with persisted selection restores the saved execution" {
         const restored = pumpUntilReady(&coordinator, &account_runtime, "boot3");
         try std.testing.expectEqualStrings("2", restored.selected_api_key_id);
         try std.testing.expectEqualStrings("gpt-5.6-sol", restored.selected_model);
-        try std.testing.expectEqual(persisted_generation, restored.metask_execution_generation);
+        try std.testing.expectEqual(
+            persisted_generation,
+            account_api.TestSupport.sourceGeneration(&account_runtime),
+        );
         coordinator.shutdown();
     }
 }
@@ -1485,7 +1479,6 @@ test "broken first key parks the catalog and a manual switch recovers" {
     const manual = coordinator.commandSink().submit(.{ .select_api_key = .{
         .selection_id = "2",
         .expected_catalog_generation = parked.catalog_generation,
-        .expected_execution_generation = parked.metask_execution_generation,
     } });
     try std.testing.expect(manual.accepted);
     const recovered = pumpUntilReady(&coordinator, &account_runtime, "recover");

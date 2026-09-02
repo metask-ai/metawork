@@ -518,13 +518,11 @@ export class BridgeClient {
   async selectApiKey(
     selectionId: string,
     expectedCatalogGeneration: string,
-    expectedExecutionGeneration: string,
   ) {
     return decodeAccountCommandResult(
       await this.invoke(commands.accountSelectApiKey, {
         selectionId,
         expectedCatalogGeneration,
-        expectedExecutionGeneration,
       }),
     );
   }
@@ -532,26 +530,18 @@ export class BridgeClient {
   async selectModel(
     selectionId: string,
     expectedCatalogGeneration: string,
-    expectedExecutionGeneration: string,
   ) {
     return decodeAccountCommandResult(
       await this.invoke(commands.accountSelectModel, {
         selectionId,
         expectedCatalogGeneration,
-        expectedExecutionGeneration,
       }),
     );
   }
 
-  async activateMetask(
-    expectedCatalogGeneration: string,
-    expectedExecutionGeneration: string,
-  ) {
+  async selectMetaskDefault() {
     return decodeAccountCommandResult(
-      await this.invoke(commands.accountActivateMetask, {
-        expectedCatalogGeneration,
-        expectedExecutionGeneration,
-      }),
+      await this.invoke(commands.selectMetaskDefault, {}),
     );
   }
 

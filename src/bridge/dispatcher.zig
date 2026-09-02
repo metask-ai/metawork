@@ -309,7 +309,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.account_refresh_catalog, .function = accountRefreshCatalog },
             .{ .name = commands.account_select_api_key, .function = accountSelectApiKey },
             .{ .name = commands.account_select_model, .function = accountSelectModel },
-            .{ .name = commands.account_activate_metask, .function = accountActivateMetask },
+            .{ .name = commands.select_metask_default, .function = selectMetaskDefault },
             .{ .name = commands.model_connection_create, .function = modelConnectionCreate },
             .{ .name = commands.model_connection_update, .function = modelConnectionUpdate },
             .{ .name = commands.model_connection_remove, .function = modelConnectionRemove },
@@ -1200,9 +1200,6 @@ pub const Dispatcher = struct {
                     .expected_catalog_generation = try handlers.parseWireId(
                         parsed.value.expectedCatalogGeneration,
                     ),
-                    .expected_execution_generation = try handlers.parseWireId(
-                        parsed.value.expectedExecutionGeneration,
-                    ),
                 },
             }),
         );
@@ -1233,15 +1230,12 @@ pub const Dispatcher = struct {
                     .expected_catalog_generation = try handlers.parseWireId(
                         parsed.value.expectedCatalogGeneration,
                     ),
-                    .expected_execution_generation = try handlers.parseWireId(
-                        parsed.value.expectedExecutionGeneration,
-                    ),
                 },
             }),
         );
     }
 
-    fn accountActivateMetask(
+    fn selectMetaskDefault(
         context: *anyopaque,
         invocation: native_sdk.bridge.Invocation,
         output: []u8,
@@ -1251,20 +1245,13 @@ pub const Dispatcher = struct {
         defer callback.deinit();
         try self.requireManagementAuthority(invocation.source.window_id);
         var parsed = try handlers.parsePayload(
-            handlers.AccountActivation,
+            handlers.Empty,
             invocation.request.payload,
         );
         defer parsed.deinit();
         return encodeAccountResult(
             output,
-            self.account_commands.submit(.{ .activate_metask = .{
-                .expected_catalog_generation = try handlers.parseWireId(
-                    parsed.value.expectedCatalogGeneration,
-                ),
-                .expected_execution_generation = try handlers.parseWireId(
-                    parsed.value.expectedExecutionGeneration,
-                ),
-            } }),
+            self.account_commands.submit(.resolve_metask_source),
         );
     }
 
@@ -4323,7 +4310,6 @@ test "Dispatcher validates authority before domain calls and preserves committed
         chrome_disconnect_calls: usize = 0,
         on_main_thread: bool = true,
         last_catalog_generation: u64 = 0,
-        last_execution_generation: u64 = 0,
         account_result: account_contract.AccountCommandResult =
             .acceptedAttempt(41),
 
@@ -4452,15 +4438,8 @@ test "Dispatcher validates authority before domain calls and preserves committed
                     std.debug.assert(selection.selection_id.len != 0);
                     self.last_catalog_generation =
                         selection.expected_catalog_generation;
-                    self.last_execution_generation =
-                        selection.expected_execution_generation;
                 },
-                .activate_metask => |activation| {
-                    self.last_catalog_generation =
-                        activation.expected_catalog_generation;
-                    self.last_execution_generation =
-                        activation.expected_execution_generation;
-                },
+                .resolve_metask_source => {},
             }
             return self.account_result;
         }
@@ -4771,7 +4750,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
     );
     try std.testing.expectEqual(@as(usize, 1), harness.account_calls);
     const empty_model = native_dispatcher.dispatch(
-        "{\"id\":\"empty-model\",\"command\":\"metawork.account.selectModel\",\"payload\":{\"selectionId\":\"\",\"expectedCatalogGeneration\":\"0\",\"expectedExecutionGeneration\":\"1\"}}",
+        "{\"id\":\"empty-model\",\"command\":\"metawork.account.selectModel\",\"payload\":{\"selectionId\":\"\",\"expectedCatalogGeneration\":\"0\"}}",
         source,
         &response,
     );
@@ -4780,7 +4759,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
     );
     try std.testing.expectEqual(@as(usize, 1), harness.account_calls);
     const forwarded_selection = native_dispatcher.dispatch(
-        "{\"id\":\"select-key\",\"command\":\"metawork.account.selectApiKey\",\"payload\":{\"selectionId\":\"key-1\",\"expectedCatalogGeneration\":\"0\",\"expectedExecutionGeneration\":\"0\"}}",
+        "{\"id\":\"select-key\",\"command\":\"metawork.account.selectApiKey\",\"payload\":{\"selectionId\":\"key-1\",\"expectedCatalogGeneration\":\"0\"}}",
         source,
         &response,
     );
@@ -4791,7 +4770,6 @@ test "Dispatcher validates authority before domain calls and preserves committed
     ) != null);
     try std.testing.expectEqual(@as(usize, 2), harness.account_calls);
     try std.testing.expectEqual(@as(u64, 0), harness.last_catalog_generation);
-    try std.testing.expectEqual(@as(u64, 0), harness.last_execution_generation);
     harness.on_main_thread = false;
     _ = native_dispatcher.dispatch(
         "{\"id\":\"wrong-thread\",\"command\":\"metawork.account.logout\",\"payload\":{}}",

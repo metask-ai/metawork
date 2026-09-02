@@ -51,8 +51,6 @@ pub const ErrorCode = enum {
     invalid_command,
     invalid_state,
     operation_in_progress,
-    execution_in_use,
-    session_in_use,
     oauth_bind_failed,
     oauth_browser_open_failed,
     oauth_callback_rejected,
@@ -69,15 +67,14 @@ pub const ErrorCode = enum {
     catalog_field_too_large,
     no_api_keys,
     no_models,
-    execution_target_invalid,
-    execution_config_invalid,
+    metask_platform_unsupported,
     credential_store_read_failed,
     credential_store_write_failed,
     credential_store_delete_failed,
     generation_mismatch,
     recovery_state_invalid,
     local_resource_exhausted,
-    dependency_contract_invalid,
+    account_operation_failed,
 };
 
 pub const ApiKeyView = struct {
@@ -147,9 +144,6 @@ pub const AccountView = struct {
     error_code: ErrorCode = .none,
     safe_diagnostic: []const u8 = "",
     catalog_generation: u64 = 0,
-    /// The committed Metask execution generation, even when another source is
-    /// currently selected for new Tasks.
-    metask_execution_generation: u64 = 0,
 };
 
 pub const AccountFactKind = enum {
@@ -162,22 +156,27 @@ pub const AccountFactKind = enum {
     signed_out,
 };
 
+/// Secret-free authority published to Product Control. This is not part of
+/// AccountView and never crosses the Renderer Bridge.
+pub const MetaskSourceAuthority = struct {
+    account_id: []const u8,
+    api_key_id: []const u8,
+    model_id: []const u8,
+    protocol: execution.Protocol,
+    source_generation: u64,
+};
+
 /// A canonical, secret-free fact prepared by Account and installed by
 /// Workbench without allocating or calling back into Account.
 pub const AccountFact = struct {
     kind: AccountFactKind,
     view: AccountView,
+    authority: ?MetaskSourceAuthority = null,
 };
 
 pub const AccountSelectionCommand = struct {
     selection_id: []const u8,
     expected_catalog_generation: u64,
-    expected_execution_generation: u64,
-};
-
-pub const AccountActivationCommand = struct {
-    expected_catalog_generation: u64,
-    expected_execution_generation: u64,
 };
 
 pub const AccountCommand = union(enum) {
@@ -186,7 +185,9 @@ pub const AccountCommand = union(enum) {
     refresh_catalog,
     select_api_key: AccountSelectionCommand,
     select_model: AccountSelectionCommand,
-    activate_metask: AccountActivationCommand,
+    /// Product-internal source resolution. Renderer has no Account command for
+    /// selecting the global default source.
+    resolve_metask_source,
     logout,
 };
 
@@ -245,11 +246,6 @@ pub fn validateCommand(command: AccountCommand) ValidationError!void {
             selection.selection_id,
             Limits.model_id_bytes,
         ),
-        .activate_metask => |activation| {
-            if (activation.expected_catalog_generation == 0 or
-                activation.expected_execution_generation == 0)
-                return error.InvalidGeneration;
-        },
         else => {},
     }
 }
@@ -325,8 +321,7 @@ pub fn validateView(view: AccountView) ValidationError!void {
     }
 
     if (view.catalog_state == .ready) {
-        if (view.metask_execution_generation == 0 or
-            view.account_id.len == 0 or
+        if (view.account_id.len == 0 or
             view.selected_api_key_id.len == 0 or
             view.selected_model.len == 0)
             return error.InconsistentState;
@@ -371,8 +366,7 @@ pub fn validateView(view: AccountView) ValidationError!void {
                 view.selected_model.len != 0 or
                 view.candidate_api_key_id.len != 0 or
                 view.candidate_model.len != 0 or
-                view.model_catalog_api_key_id.len != 0 or
-                view.metask_execution_generation != 0)
+                view.model_catalog_api_key_id.len != 0)
                 return error.InconsistentState;
             if (view.state != .authorizing and view.can_cancel)
                 return error.InconsistentState;
@@ -385,6 +379,36 @@ pub fn validateView(view: AccountView) ValidationError!void {
             if (view.catalog_state == .failed and view.error_code == .none)
                 return error.InconsistentState;
         },
+    }
+}
+
+pub fn validateAuthority(authority: MetaskSourceAuthority) ValidationError!void {
+    try validateRequired(authority.account_id, Limits.account_id_bytes);
+    try validateRequired(authority.api_key_id, Limits.api_key_id_bytes);
+    try validateRequired(authority.model_id, Limits.model_id_bytes);
+    if (authority.source_generation == 0) return error.InvalidGeneration;
+}
+
+pub fn validateFact(fact: AccountFact) ValidationError!void {
+    try validateView(fact.view);
+    const ready = fact.view.state == .authenticated and
+        fact.view.catalog_state == .ready;
+    if (fact.authority) |authority| {
+        if (!ready) return error.InconsistentState;
+        try validateAuthority(authority);
+        if (!std.mem.eql(u8, authority.account_id, fact.view.account_id) or
+            !std.mem.eql(u8, authority.api_key_id, fact.view.selected_api_key_id) or
+            !std.mem.eql(u8, authority.model_id, fact.view.selected_model))
+            return error.InconsistentState;
+        var protocol_matches: usize = 0;
+        for (fact.view.api_keys) |key| {
+            if (std.mem.eql(u8, key.id, authority.api_key_id) and
+                key.protocol == authority.protocol)
+                protocol_matches += 1;
+        }
+        if (protocol_matches != 1) return error.InconsistentState;
+    } else if (ready) {
+        return error.InconsistentState;
     }
 }
 
@@ -429,7 +453,7 @@ test "AccountCommandSink returns only public acceptance metadata" {
     try std.testing.expectEqual(@as(usize, 1), context.calls);
 }
 
-test "AccountView rejects ready Metask catalog without committed generation" {
+test "AccountView rejects ready Metask catalog without selected membership" {
     try std.testing.expectError(error.InconsistentState, validateView(.{
         .state = .authenticated,
         .catalog_state = .ready,
@@ -457,7 +481,6 @@ test "AccountView accepts the published logout transition" {
         .display_name = "User",
         .selected_api_key_id = "key-1",
         .selected_model = "model-1",
-        .metask_execution_generation = 7,
     });
 }
 
@@ -477,6 +500,40 @@ test "AccountView accepts an unresolved model candidate while loading" {
         .candidate_api_key_id = "key-1",
         .candidate_model = "model-pending",
         .model_catalog_api_key_id = "key-1",
+    });
+}
+
+test "AccountFact keeps source authority outside Renderer view" {
+    const api_keys = [_]ApiKeyView{.{
+        .id = "key-1",
+        .name = "Primary",
+        .suffix = "1234",
+        .protocol = .anthropic_messages,
+    }};
+    const models = [_]ModelView{.{
+        .id = "model-1",
+        .display_name = "Model One",
+    }};
+    try validateFact(.{
+        .kind = .default_changed,
+        .view = .{
+            .state = .authenticated,
+            .catalog_state = .ready,
+            .account_id = "account-1",
+            .display_name = "User",
+            .api_keys = &api_keys,
+            .models = &models,
+            .selected_api_key_id = "key-1",
+            .selected_model = "model-1",
+            .model_catalog_api_key_id = "key-1",
+        },
+        .authority = .{
+            .account_id = "account-1",
+            .api_key_id = "key-1",
+            .model_id = "model-1",
+            .protocol = .anthropic_messages,
+            .source_generation = 7,
+        },
     });
 }
 

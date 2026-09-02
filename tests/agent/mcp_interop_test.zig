@@ -289,7 +289,13 @@ fn installExecution(workbench_value: *product_control.Runtime) !void {
             .selected_model = "fixture-model",
             .model_catalog_api_key_id = "key-1",
             .catalog_generation = 1,
-            .metask_execution_generation = 1,
+        },
+        .authority = .{
+            .account_id = "account-1",
+            .api_key_id = "key-1",
+            .model_id = "fixture-model",
+            .protocol = .anthropic_messages,
+            .source_generation = 1,
         },
     });
     try workbench_value.prepareExecutionInstall(execution.input());

@@ -91,10 +91,6 @@ export const enUS = {
     "This removes the Metask sign-in credentials from this device. Your local tasks and history will remain. Continue?",
   "account.command_rejected":
     "That account action is no longer available. MetaWork kept the latest account state.",
-  "account.task_running":
-    "A task is still running. Wait for it to finish before signing in again or signing out.",
-  "account.session_in_use":
-    "A task still has an active session. Close that task before signing in again or signing out.",
   "account.command_failed":
     "MetaWork could not complete that account action. Use the recovery action shown here.",
   "account.cancel_rejected":

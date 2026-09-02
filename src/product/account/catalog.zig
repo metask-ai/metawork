@@ -52,7 +52,7 @@ pub fn errorCode(err: Error) contract.ErrorCode {
         error.ApiKeyNotFound, error.ModelNotFound => .invalid_command,
         error.UnsupportedProvider,
         error.ExecutionTargetInvalid,
-        => .execution_target_invalid,
+        => .metask_platform_unsupported,
         error.OutOfMemory => .local_resource_exhausted,
     };
 }

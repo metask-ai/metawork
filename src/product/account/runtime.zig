@@ -25,7 +25,7 @@ fn preferencesEqual(
     return std.mem.eql(u8, left.ownerAccountId(), right.ownerAccountId()) and
         std.mem.eql(u8, left.apiKeyId(), right.apiKeyId()) and
         std.mem.eql(u8, left.modelId(), right.modelId()) and
-        left.execution_generation == right.execution_generation;
+        left.metask_source_generation == right.metask_source_generation;
 }
 
 pub const WakeSink = struct {
@@ -654,9 +654,7 @@ pub const Runtime = struct {
         switch (command) {
             .select_api_key => |selection| {
                 if (selection.expected_catalog_generation !=
-                    account_view.catalog_generation or
-                    selection.expected_execution_generation !=
-                        account_view.metask_execution_generation)
+                    account_view.catalog_generation)
                     return .{ .rejected = .generation_mismatch };
                 const member = for (account_view.api_keys) |candidate| {
                     if (std.mem.eql(
@@ -669,9 +667,7 @@ pub const Runtime = struct {
             },
             .select_model => |selection| {
                 if (selection.expected_catalog_generation !=
-                    account_view.catalog_generation or
-                    selection.expected_execution_generation !=
-                        account_view.metask_execution_generation)
+                    account_view.catalog_generation)
                     return .{ .rejected = .generation_mismatch };
                 const member = for (account_view.models) |candidate| {
                     if (std.mem.eql(
@@ -682,12 +678,8 @@ pub const Runtime = struct {
                 } else false;
                 if (!member) return .{ .rejected = .invalid_command };
             },
-            .activate_metask => |activation| {
-                if (activation.expected_catalog_generation !=
-                    account_view.catalog_generation or
-                    activation.expected_execution_generation !=
-                        account_view.metask_execution_generation or
-                    account_view.state != .authenticated or
+            .resolve_metask_source => {
+                if (account_view.state != .authenticated or
                     account_view.catalog_state != .ready)
                     return .{ .rejected = .generation_mismatch };
             },
@@ -776,7 +768,7 @@ pub const Runtime = struct {
                 if (collision)
                     break :result self.prepareFailure(
                         entry.attempt_id,
-                        .dependency_contract_invalid,
+                        .account_operation_failed,
                     );
                 break :result switch (entry.result) {
                     .authorized => |*tokens| self.prepareAuthorizedLogin(
@@ -799,7 +791,7 @@ pub const Runtime = struct {
                 if (collision)
                     break :result self.prepareFailure(
                         entry.attempt_id,
-                        .dependency_contract_invalid,
+                        .account_operation_failed,
                     );
                 break :result self.prepareRefreshedTokens(
                     entry.attempt_id,
@@ -842,8 +834,23 @@ pub const Runtime = struct {
             };
             catalog.decorate(&fact.view);
         }
-        contract.validateView(fact.view) catch
-            @panic("Account Runtime prepared an invalid canonical AccountView");
+        if (fact.view.state == .authenticated and
+            fact.view.catalog_state == .ready)
+        {
+            const protocol = for (fact.view.api_keys) |key| {
+                if (std.mem.eql(u8, key.id, fact.view.selected_api_key_id))
+                    break key.protocol;
+            } else @panic("Account ready fact has no selected API protocol");
+            fact.authority = .{
+                .account_id = fact.view.account_id,
+                .api_key_id = fact.view.selected_api_key_id,
+                .model_id = fact.view.selected_model,
+                .protocol = protocol,
+                .source_generation = prepared.transition.sourceGeneration(),
+            };
+        }
+        contract.validateFact(fact) catch
+            @panic("Account Runtime prepared an invalid canonical AccountFact");
         return fact;
     }
 
@@ -981,7 +988,7 @@ pub const Runtime = struct {
             completion.* = .{
                 .attempt_id = completion.attempt_id,
                 .payload = .{ .failed = .fromCode(
-                    .dependency_contract_invalid,
+                    .account_operation_failed,
                 ) },
             };
         }
@@ -1183,7 +1190,7 @@ pub const Runtime = struct {
                     self.effects.publishCompletion(.{
                         .attempt_id = attempt_id,
                         .payload = .{ .failed = .fromCode(
-                            .dependency_contract_invalid,
+                            .account_operation_failed,
                         ) },
                     });
                     return;
@@ -1227,7 +1234,7 @@ pub const Runtime = struct {
                     self.effects.publishCompletion(.{
                         .attempt_id = attempt_id,
                         .payload = .{ .failed = .fromCode(
-                            .dependency_contract_invalid,
+                            .account_operation_failed,
                         ) },
                     });
                     return;
@@ -1271,7 +1278,7 @@ pub const Runtime = struct {
                     self.effects.publishCompletion(.{
                         .attempt_id = attempt_id,
                         .payload = .{ .failed = .fromCode(
-                            .dependency_contract_invalid,
+                            .account_operation_failed,
                         ) },
                     });
                     return;
@@ -1344,7 +1351,7 @@ pub const Runtime = struct {
             self.effects.publishCompletion(.{
                 .attempt_id = attempt_id,
                 .payload = .{ .failed = .fromCode(
-                    .dependency_contract_invalid,
+                    .account_operation_failed,
                 ) },
             });
             return;
@@ -1355,12 +1362,12 @@ pub const Runtime = struct {
             identity.accountId(),
             self.effects.catalog.selectedApiKeyId(),
             model,
-            account_view.metask_execution_generation,
+            self.account.sourceGeneration(),
         );
         const execution_generation = restored_generation orelse
             generateExecutionGeneration(
                 self.io,
-                account_view.metask_execution_generation,
+                self.account.sourceGeneration(),
             ) catch {
             self.effects.publishCompletion(.{
                 .attempt_id = attempt_id,
@@ -1402,7 +1409,7 @@ pub const Runtime = struct {
         const identity = self.account.currentIdentity() orelse {
             self.effects.publishCompletion(.{
                 .attempt_id = attempt_id,
-                .payload = .{ .failed = .fromCode(.dependency_contract_invalid) },
+                .payload = .{ .failed = .fromCode(.account_operation_failed) },
             });
             return;
         };
@@ -1449,7 +1456,7 @@ pub const Runtime = struct {
             self.effects.publishCompletion(.{
                 .attempt_id = attempt_id,
                 .payload = .{ .failed = .fromCode(
-                    .dependency_contract_invalid,
+                    .account_operation_failed,
                 ) },
             });
             return;
@@ -1469,7 +1476,7 @@ pub const Runtime = struct {
             identity.accountId(),
             account_view.selected_api_key_id,
             model,
-            account_view.metask_execution_generation,
+            self.account.sourceGeneration(),
         ) catch |err| {
             if (err == error.PersistenceOutcomeUnknown) {
                 self.effects.publishDefaultModelPersistenceUnknown(attempt_id);
@@ -1519,7 +1526,7 @@ pub const Runtime = struct {
                 u8,
                 preference.modelId(),
                 account_view.candidate_model,
-            ) and preference.execution_generation ==
+            ) and preference.metask_source_generation ==
                 self.account.pendingExecutionGeneration();
             if (is_candidate) {
                 self.pending_default_preference = .{
@@ -1579,7 +1586,7 @@ pub const Runtime = struct {
             u8,
             preference.apiKeyId(),
             account_view.selected_api_key_id,
-        ) and preference.execution_generation == account_view.metask_execution_generation;
+        ) and preference.metask_source_generation == self.account.sourceGeneration();
         if (!same_tuple)
             return wrapPrepareResult(
                 self.account.prepareDefaultModelPersistenceInvalid(),
@@ -1610,7 +1617,7 @@ pub const Runtime = struct {
         catalog: *const catalog_impl.CatalogSession,
         account_view: contract.AccountView,
     ) ?[]const u8 {
-        if (account_view.metask_execution_generation != 0) {
+        if (account_view.selected_api_key_id.len != 0) {
             if (account_view.candidate_api_key_id.len != 0) return null;
             if (catalog.hasApiKey(account_view.selected_api_key_id))
                 return account_view.selected_api_key_id;
@@ -1685,7 +1692,7 @@ pub const Runtime = struct {
         const saved = self.savedPreferenceFor(account_id) orelse return null;
         if (!std.mem.eql(u8, saved.apiKeyId(), api_key_id) or
             !std.mem.eql(u8, saved.modelId(), model_id)) return null;
-        return saved.execution_generation;
+        return saved.metask_source_generation;
     }
 
     fn discardForeignPreference(
@@ -1959,9 +1966,13 @@ pub const TestSupport = if (builtin.is_test) struct {
         return preparedFromState(runtime.account.prepareCompletion(&completion));
     }
 
-    pub fn savedPreferenceExecutionGeneration(runtime: *const Runtime) ?u64 {
+    pub fn savedPreferenceSourceGeneration(runtime: *const Runtime) ?u64 {
         const preference = runtime.saved_preference orelse return null;
-        return preference.execution_generation;
+        return preference.metask_source_generation;
+    }
+
+    pub fn sourceGeneration(runtime: *const Runtime) u64 {
+        return runtime.account.sourceGeneration();
     }
 
     pub fn prepareLoggedOutAfterExternalCommit(runtime: *Runtime) Prepared {
@@ -2013,7 +2024,6 @@ fn accountSelectionCommand(
     return .{
         .selection_id = selection_id,
         .expected_catalog_generation = view.catalog_generation,
-        .expected_execution_generation = view.metask_execution_generation,
     };
 }
 
@@ -2035,7 +2045,7 @@ fn prepareCatalogExecution(
         identity.accountId(),
         model_catalog_api_key_id,
         model,
-    )) return .{ .rejected = .dependency_contract_invalid };
+    )) return .{ .rejected = .account_operation_failed };
     return .{ .ready = catalog.prepareExecution(
         model,
         execution_generation,
@@ -2056,7 +2066,7 @@ fn accountRestoreError(err: anyerror) contract.ErrorCode {
         => .recovery_state_invalid,
         error.WrongThread,
         error.WriteFailed,
-        => .dependency_contract_invalid,
+        => .account_operation_failed,
         else => .recovery_state_invalid,
     };
 }
@@ -2071,7 +2081,7 @@ fn accountStoreError(err: anyerror) contract.ErrorCode {
         error.InvalidData,
         error.VerificationFailed,
         => .recovery_state_invalid,
-        else => .dependency_contract_invalid,
+        else => .account_operation_failed,
     };
 }
 
@@ -2083,7 +2093,7 @@ fn loginStartError(err: login_attempt.StartError) contract.ErrorCode {
         error.RandomFailed,
         error.InvalidAttempt,
         error.AlreadyStarted,
-        => .dependency_contract_invalid,
+        => .account_operation_failed,
     };
 }
 
@@ -2250,7 +2260,6 @@ test "Account Runtime owns automatic catalog selection policy" {
         .catalog_state = .loading,
         .selected_api_key_id = "key-current",
         .selected_model = "model-current",
-        .metask_execution_generation = 1,
     };
     try std.testing.expectEqualStrings(
         "key-current",
@@ -2259,7 +2268,6 @@ test "Account Runtime owns automatic catalog selection policy" {
     var first_login_view = ready_view;
     first_login_view.selected_api_key_id = "";
     first_login_view.selected_model = "";
-    first_login_view.metask_execution_generation = 0;
     // First login without a saved preference defaults to the catalog's
     // first key; the user adjusts in settings afterwards.
     try std.testing.expectEqualStrings(
@@ -2453,7 +2461,7 @@ test "Account Runtime persists a nonzero nonce for a new execution" {
     try std.testing.expect(generation != 0);
     try std.testing.expectEqual(
         generation,
-        runtime.saved_preference.?.execution_generation,
+        runtime.saved_preference.?.metask_source_generation,
     );
 }
 
@@ -2485,7 +2493,7 @@ test "execution preference outcome unknown finalizes only an exact candidate rer
     runtime.commit(&prepared);
     try std.testing.expectEqual(
         @as(?u64, generation),
-        TestSupport.savedPreferenceExecutionGeneration(&runtime),
+        TestSupport.savedPreferenceSourceGeneration(&runtime),
     );
 }
 
@@ -2751,7 +2759,7 @@ test "Account Runtime rejects cross-API model selection before persistence" {
         2,
     )) {
         .rejected => |error_code| try std.testing.expectEqual(
-            contract.ErrorCode.dependency_contract_invalid,
+            contract.ErrorCode.account_operation_failed,
             error_code,
         ),
         .ready => |unexpected_value| {
@@ -2823,7 +2831,6 @@ fn beginDefaultModelChangeForTest(
         .select_model = .{
             .selection_id = model_id,
             .expected_catalog_generation = account_view.catalog_generation,
-            .expected_execution_generation = account_view.metask_execution_generation,
         },
     })) {
         .prepared => |value| value,
@@ -2885,7 +2892,7 @@ test "default-model outcome unknown commits the re-observed candidate" {
     );
     runtime.commit(&prepared);
     try std.testing.expectEqualStrings("model-2", runtime.view().selected_model);
-    try std.testing.expectEqual(@as(u64, 1), runtime.view().metask_execution_generation);
+    try std.testing.expectEqual(@as(u64, 1), runtime.account.sourceGeneration());
     try std.testing.expectEqualStrings(
         "model-2",
         runtime.saved_preference.?.modelId(),

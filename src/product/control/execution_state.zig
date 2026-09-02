@@ -60,7 +60,7 @@ const AccountProjection = struct {
     model_count: usize = 0,
     error_code: account.ErrorCode = .none,
     catalog_generation: u64 = 0,
-    metask_execution_generation: u64 = 0,
+    metask_source_generation: u64 = 0,
 
     fn init(allocator: std.mem.Allocator) std.mem.Allocator.Error!AccountProjection {
         const api_keys = try allocator.alloc(ApiKeyProjection, account.Limits.api_key_entries);
@@ -90,7 +90,8 @@ const AccountProjection = struct {
         self.* = undefined;
     }
 
-    fn commitNoFail(self: *AccountProjection, source_view: account.AccountView) void {
+    fn commitNoFail(self: *AccountProjection, fact: account.AccountFact) void {
+        const source_view = fact.view;
         account.validateView(source_view) catch
             @panic("Account published an invalid AccountView");
         std.debug.assert(source_view.api_keys.len <= self.api_keys.len);
@@ -139,7 +140,10 @@ const AccountProjection = struct {
         }
         self.error_code = source_view.error_code;
         self.catalog_generation = source_view.catalog_generation;
-        self.metask_execution_generation = source_view.metask_execution_generation;
+        self.metask_source_generation = if (fact.authority) |authority|
+            authority.source_generation
+        else
+            0;
     }
 
     fn view(self: *const AccountProjection) account.AccountView {
@@ -159,14 +163,13 @@ const AccountProjection = struct {
             .error_code = self.error_code,
             .safe_diagnostic = self.safe_diagnostic.view(),
             .catalog_generation = self.catalog_generation,
-            .metask_execution_generation = self.metask_execution_generation,
         };
     }
 
     fn metaskReady(self: *const AccountProjection) bool {
         return self.state == .authenticated and
             self.catalog_state == .ready and
-            self.metask_execution_generation != 0;
+            self.metask_source_generation != 0;
     }
 
     fn hasModel(self: *const AccountProjection, model: []const u8) bool {
@@ -367,7 +370,9 @@ pub const State = struct {
     }
 
     pub fn commitAccountFactNoFail(self: *State, fact: account.AccountFact) void {
-        self.projection.commitNoFail(fact.view);
+        account.validateFact(fact) catch
+            @panic("Account published an invalid AccountFact");
+        self.projection.commitNoFail(fact);
     }
 
     pub fn beginIdentityReplacement(self: *State) error{ExecutionInUse}!void {
@@ -416,7 +421,7 @@ pub const State = struct {
         std.debug.assert(self.replacement != .none);
         const input = execution.input();
         std.debug.assert(self.projection.catalog_state == .ready);
-        std.debug.assert(self.projection.metask_execution_generation == input.execution_generation);
+        std.debug.assert(self.projection.metask_source_generation == input.execution_generation);
         std.debug.assert(std.mem.eql(u8, self.projection.selected_model.view(), input.target.model));
         self.consumeInstallPreparation(input);
         redaction.apply(self.execution.credential());
@@ -467,7 +472,7 @@ pub const State = struct {
 
     pub fn clearNoFail(self: *State, redaction: ProjectionRedaction) void {
         std.debug.assert(self.replacement != .none);
-        std.debug.assert(self.projection.metask_execution_generation == 0);
+        std.debug.assert(self.projection.metask_source_generation == 0);
         self.consumeClearPreparation(self.execution.generation);
         redaction.apply(self.execution.credential());
         self.execution.clearNoFail();
@@ -505,7 +510,7 @@ pub const State = struct {
                 true
             else
                 self.projection.metaskReady() and
-                    self.projection.metask_execution_generation == self.execution.generation;
+                    self.projection.metask_source_generation == self.execution.generation;
     }
 
     pub fn availability(self: *const State) execution_contract.Availability {
@@ -541,7 +546,7 @@ pub const State = struct {
     }
 
     pub fn hasMetaskDefault(self: *const State) bool {
-        return self.projection.metask_execution_generation != 0;
+        return self.projection.metask_source_generation != 0;
     }
 
     pub fn taskModelSelectionAuthorized(
@@ -556,7 +561,7 @@ pub const State = struct {
             self.projection.metaskReady() and
             self.projection.catalog_generation != 0 and
             expected_catalog_generation == self.projection.catalog_generation and
-            self.projection.metask_execution_generation == self.execution.generation and
+            self.projection.metask_source_generation == self.execution.generation and
             identity.generation == self.execution.generation and
             identity.protocol == self.execution.protocol.? and
             self.projection.selectedProtocol() == identity.protocol and
@@ -575,7 +580,7 @@ pub const State = struct {
                     std.mem.eql(u8, model_id, binding.model_id)
             else
                 self.projection.metaskReady() and
-                    self.projection.metask_execution_generation == self.execution.generation and
+                    self.projection.metask_source_generation == self.execution.generation and
                     self.projection.hasModel(model_id);
     }
 
@@ -591,7 +596,7 @@ pub const State = struct {
 
     pub fn validExecutionGeneration(self: *const State, execution_generation: u64) bool {
         return execution_generation != 0 and execution_generation == self.execution.generation and
-            (self.custom_binding != null or execution_generation == self.projection.metask_execution_generation);
+            (self.custom_binding != null or execution_generation == self.projection.metask_source_generation);
     }
 
     pub fn executionInput(self: *const State) ?execution_contract.ConfigInput {
@@ -667,7 +672,7 @@ pub const testing = if (builtin.is_test) struct {
 
     pub fn setGenerationAlignment(state: *State, generation: u64) void {
         state.execution.generation = generation;
-        state.projection.metask_execution_generation = generation;
+        state.projection.metask_source_generation = generation;
     }
 
     pub fn setCredentialBytes(state: *State, credential: []const u8) void {
@@ -794,7 +799,13 @@ test "Task model mutation requires the exact installed Metask authority" {
             .selected_model = "model-old",
             .model_catalog_api_key_id = "key-1",
             .catalog_generation = 1,
-            .metask_execution_generation = 1,
+        },
+        .authority = .{
+            .account_id = "account-1",
+            .api_key_id = "key-1",
+            .model_id = "model-old",
+            .protocol = .anthropic_messages,
+            .source_generation = 1,
         },
     });
     var execution = try testExecution(.anthropic_messages, "model-old", 1, "SECRET-ONE");
@@ -830,7 +841,13 @@ test "Task model mutation requires the exact installed Metask authority" {
             .selected_model = "model-next",
             .model_catalog_api_key_id = "key-1",
             .catalog_generation = 2,
-            .metask_execution_generation = 1,
+        },
+        .authority = .{
+            .account_id = "account-1",
+            .api_key_id = "key-1",
+            .model_id = "model-next",
+            .protocol = .anthropic_messages,
+            .source_generation = 1,
         },
     });
     try std.testing.expect(state.taskModelSelectionAuthorized(
@@ -895,7 +912,13 @@ test "Model Connection execution never borrows Metask model authority" {
             .selected_model = "gpt-5",
             .model_catalog_api_key_id = "key-1",
             .catalog_generation = 7,
-            .metask_execution_generation = 3,
+        },
+        .authority = .{
+            .account_id = "account-1",
+            .api_key_id = "key-1",
+            .model_id = "gpt-5",
+            .protocol = .anthropic_messages,
+            .source_generation = 3,
         },
     });
     var execution = try testModelConnectionExecution();

@@ -42,16 +42,16 @@ pub const Preference = struct {
     selection_owner_account_id: PublicText(contract.Limits.account_id_bytes) = .{},
     api_key_id: PublicText(contract.Limits.api_key_id_bytes) = .{},
     model_id: PublicText(contract.Limits.model_id_bytes) = .{},
-    execution_generation: u64 = 0,
+    metask_source_generation: u64 = 0,
 
     pub fn init(
         owner_account_id: []const u8,
         api_key_id: []const u8,
         model_id: []const u8,
-        execution_generation: u64,
+        metask_source_generation: u64,
     ) StoreError!Preference {
-        if (execution_generation == 0) return error.InvalidData;
-        var result: Preference = .{ .execution_generation = execution_generation };
+        if (metask_source_generation == 0) return error.InvalidData;
+        var result: Preference = .{ .metask_source_generation = metask_source_generation };
         try result.selection_owner_account_id.set(owner_account_id);
         try result.api_key_id.set(api_key_id);
         try result.model_id.set(model_id);
@@ -63,7 +63,7 @@ pub const Preference = struct {
             self.ownerAccountId(),
             self.apiKeyId(),
             self.modelId(),
-            self.execution_generation,
+            self.metask_source_generation,
         );
     }
 
@@ -84,7 +84,7 @@ const PreferenceWire = struct {
     selection_owner_account_id: []const u8,
     api_key_id: []const u8,
     model_id: []const u8,
-    execution_generation: u64,
+    metask_source_generation: u64,
 };
 
 pub fn encodePreference(
@@ -96,7 +96,7 @@ pub fn encodePreference(
         .selection_owner_account_id = preference.ownerAccountId(),
         .api_key_id = preference.apiKeyId(),
         .model_id = preference.modelId(),
-        .execution_generation = preference.execution_generation,
+        .metask_source_generation = preference.metask_source_generation,
     };
     var writer = std.Io.Writer.fixed(output);
     try std.json.Stringify.value(wire, .{}, &writer);
@@ -119,7 +119,7 @@ pub fn decodePreference(input: []const u8) StoreError!Preference {
         parsed.value.selection_owner_account_id,
         parsed.value.api_key_id,
         parsed.value.model_id,
-        parsed.value.execution_generation,
+        parsed.value.metask_source_generation,
     );
 }
 
@@ -224,13 +224,13 @@ pub fn commitPreference(
     owner_account_id: []const u8,
     api_key_id: []const u8,
     model_id: []const u8,
-    execution_generation: u64,
+    metask_source_generation: u64,
 ) StoreError!Preference {
     const preference = try Preference.init(
         owner_account_id,
         api_key_id,
         model_id,
-        execution_generation,
+        metask_source_generation,
     );
     try backend.commitPreference(preference);
     return preference;
@@ -396,20 +396,26 @@ test "preference codec is strict, unversioned, and secret-free" {
     try std.testing.expectEqualStrings("account-1", decoded.ownerAccountId());
     try std.testing.expectEqualStrings("api-1", decoded.apiKeyId());
     try std.testing.expectEqualStrings("model-1", decoded.modelId());
-    try std.testing.expectEqual(@as(u64, 9), decoded.execution_generation);
+    try std.testing.expectEqual(@as(u64, 9), decoded.metask_source_generation);
 }
 
-test "preference codec rejects unknown fields and zero generation" {
+test "preference codec rejects old fields, unknown fields and zero generation" {
     try std.testing.expectError(
         error.InvalidData,
         decodePreference(
-            "{\"selection_owner_account_id\":\"account-1\",\"api_key_id\":\"api-1\",\"model_id\":\"model-1\",\"execution_generation\":1,\"schema\":1}",
+            "{\"selection_owner_account_id\":\"account-1\",\"api_key_id\":\"api-1\",\"model_id\":\"model-1\",\"metask_source_generation\":1,\"schema\":1}",
         ),
     );
     try std.testing.expectError(
         error.InvalidData,
         decodePreference(
-            "{\"selection_owner_account_id\":\"account-1\",\"api_key_id\":\"api-1\",\"model_id\":\"model-1\",\"execution_generation\":0}",
+            "{\"selection_owner_account_id\":\"account-1\",\"api_key_id\":\"api-1\",\"model_id\":\"model-1\",\"metask_source_generation\":0}",
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidData,
+        decodePreference(
+            "{\"selection_owner_account_id\":\"account-1\",\"api_key_id\":\"api-1\",\"model_id\":\"model-1\",\"execution_generation\":1}",
         ),
     );
 }

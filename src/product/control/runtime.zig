@@ -2266,7 +2266,13 @@ pub const Runtime = struct {
                 .selected_api_key_id = "automation-key",
                 .selected_model = input.model,
                 .model_catalog_api_key_id = "automation-key",
-                .metask_execution_generation = 1,
+            },
+            .authority = .{
+                .account_id = "automation-account",
+                .api_key_id = "automation-key",
+                .model_id = input.model,
+                .protocol = input.protocol,
+                .source_generation = 1,
             },
         });
         self.execution_state.installAutomationNoFail(.{
@@ -4324,8 +4330,8 @@ pub const Runtime = struct {
         }) catch return error.SnapshotTooLarge;
         try self.projectedJsonValue(writer, view.safe_diagnostic);
         writer.print(
-            ",\"catalogGeneration\":\"{d}\",\"metaskExecutionGeneration\":\"{d}\"}}",
-            .{ view.catalog_generation, view.metask_execution_generation },
+            ",\"catalogGeneration\":\"{d}\"}}",
+            .{view.catalog_generation},
         ) catch return error.SnapshotTooLarge;
     }
 
@@ -7647,7 +7653,13 @@ fn installTestExecution(control: *Runtime) !void {
             .selected_model = "fixture-model",
             .model_catalog_api_key_id = "key-1",
             .catalog_generation = 1,
-            .metask_execution_generation = 1,
+        },
+        .authority = .{
+            .account_id = "account-1",
+            .api_key_id = "key-1",
+            .model_id = "fixture-model",
+            .protocol = .anthropic_messages,
+            .source_generation = 1,
         },
     });
     try account_contract.validateView(control.accountView());
@@ -7682,7 +7694,13 @@ fn testExecutionFact(generation: u64) account_contract.AccountFact {
             .selected_model = "fixture-model",
             .model_catalog_api_key_id = "key-1",
             .catalog_generation = generation,
-            .metask_execution_generation = generation,
+        },
+        .authority = .{
+            .account_id = "account-1",
+            .api_key_id = "key-1",
+            .model_id = "fixture-model",
+            .protocol = .anthropic_messages,
+            .source_generation = generation,
         },
     };
 }
@@ -10663,7 +10681,13 @@ test "Account projection and execution install use preallocated no-fail storage"
             .selected_model = "model-1",
             .model_catalog_api_key_id = "key-1",
             .catalog_generation = 2,
-            .metask_execution_generation = 1,
+        },
+        .authority = .{
+            .account_id = "account-1",
+            .api_key_id = "key-1",
+            .model_id = "model-1",
+            .protocol = .openai_chat_completions,
+            .source_generation = 1,
         },
     });
     try control.prepareExecutionInstall(execution.input());
@@ -10780,7 +10804,13 @@ test "default replacement preserves Task generation and installs the next admiss
             .selected_api_key_id = "key-2",
             .selected_model = "fixture-model-2",
             .model_catalog_api_key_id = "key-2",
-            .metask_execution_generation = 2,
+        },
+        .authority = .{
+            .account_id = "account-1",
+            .api_key_id = "key-2",
+            .model_id = "fixture-model-2",
+            .protocol = .openai_chat_completions,
+            .source_generation = 2,
         },
     });
     try control.prepareExecutionInstall(replacement.input());
@@ -10879,7 +10909,13 @@ test "Account default model changes do not bump credentials" {
             .selected_api_key_id = "key-1",
             .selected_model = "fixture-model-2",
             .model_catalog_api_key_id = "key-1",
-            .metask_execution_generation = 1,
+        },
+        .authority = .{
+            .account_id = "account-1",
+            .api_key_id = "key-1",
+            .model_id = "fixture-model-2",
+            .protocol = .anthropic_messages,
+            .source_generation = 1,
         },
     });
     control.finishAccountCommitNoFail();
@@ -10919,7 +10955,13 @@ test "busy Task model selection keeps only the last runtime pending model" {
             .selected_model = "fixture-model",
             .model_catalog_api_key_id = "key-1",
             .catalog_generation = 2,
-            .metask_execution_generation = 1,
+        },
+        .authority = .{
+            .account_id = "account-1",
+            .api_key_id = "key-1",
+            .model_id = "fixture-model",
+            .protocol = .anthropic_messages,
+            .source_generation = 1,
         },
     });
 
@@ -10967,7 +11009,13 @@ test "Task can leave a removed model only within its exact Metask authority" {
             .selected_model = "fixture-model-2",
             .model_catalog_api_key_id = "key-1",
             .catalog_generation = 2,
-            .metask_execution_generation = 1,
+        },
+        .authority = .{
+            .account_id = "account-1",
+            .api_key_id = "key-1",
+            .model_id = "fixture-model-2",
+            .protocol = .anthropic_messages,
+            .source_generation = 1,
         },
     });
 
@@ -11981,7 +12029,13 @@ test "Runtime shutdown releases current and Task-owned execution generations" {
             .selected_api_key_id = "key-2",
             .selected_model = "fixture-model-2",
             .model_catalog_api_key_id = "key-2",
-            .metask_execution_generation = 2,
+        },
+        .authority = .{
+            .account_id = "account-1",
+            .api_key_id = "key-2",
+            .model_id = "fixture-model-2",
+            .protocol = .anthropic_messages,
+            .source_generation = 2,
         },
     });
     try control.prepareExecutionInstall(replacement.input());
@@ -12368,7 +12422,13 @@ fn installMaximumAccountProjection(control: *Runtime) !void {
             .error_code = .invalid_state,
             .safe_diagnostic = &diagnostic,
             .catalog_generation = std.math.maxInt(u64),
-            .metask_execution_generation = std.math.maxInt(u64),
+        },
+        .authority = .{
+            .account_id = &account_id,
+            .api_key_id = &api_key_ids[0],
+            .model_id = &model_ids[0],
+            .protocol = .anthropic_messages,
+            .source_generation = std.math.maxInt(u64),
         },
     });
     control.finishAccountCommitNoFail();

@@ -64,6 +64,16 @@ pub const ConfigInput = struct {
     execution_generation: u64,
 };
 
+/// Credential-bearing input produced by a source owner before Product Control
+/// assigns an execution generation. `source_generation` identifies the source
+/// authority only; it must never be copied into `execution_generation` by
+/// convention or assumed to share its numeric value.
+pub const SourceCandidateInput = struct {
+    target: Target,
+    api_key: []const u8,
+    source_generation: u64,
+};
+
 pub const ModelConnectionState = enum {
     configuring,
     ready,
@@ -279,6 +289,120 @@ const OwnedBuffer = struct {
         if (!self.owned) return;
         self.allocator.free(self.bytes);
         self.* = .{};
+    }
+};
+
+/// Linear candidate transferred from an execution source into Product
+/// Control. It deliberately has no Product execution generation.
+pub const OwnedSourceCandidate = struct {
+    provider_id: OwnedBuffer,
+    protocol: Protocol,
+    model: OwnedBuffer,
+    base_url: OwnedBuffer,
+    source_generation: u64,
+    secret: SecretBuffer,
+    source: Source,
+
+    pub fn initOwned(
+        allocator: std.mem.Allocator,
+        source: Source,
+        protocol: Protocol,
+        owned_model: []u8,
+        owned_base_url: []u8,
+        source_generation: u64,
+        owned_api_key: []u8,
+        instance_id: []const u8,
+    ) (error{InvalidSourceCandidate} || std.mem.Allocator.Error)!OwnedSourceCandidate {
+        errdefer allocator.free(owned_model);
+        errdefer allocator.free(owned_base_url);
+        errdefer secureFree(allocator, owned_api_key);
+        validateRequired(instance_id, Limits.instance_id_bytes) catch
+            return error.InvalidSourceCandidate;
+        const provider_id = try std.fmt.allocPrint(
+            allocator,
+            "{s}:{s}",
+            .{ @tagName(source), instance_id },
+        );
+        errdefer allocator.free(provider_id);
+        const candidate_input: SourceCandidateInput = .{
+            .target = .{
+                .provider_id = provider_id,
+                .protocol = protocol,
+                .model = owned_model,
+                .base_url = owned_base_url,
+            },
+            .api_key = owned_api_key,
+            .source_generation = source_generation,
+        };
+        validateSourceCandidateStructure(candidate_input) catch
+            return error.InvalidSourceCandidate;
+        return .{
+            .provider_id = .initOwned(allocator, provider_id),
+            .protocol = protocol,
+            .model = .initOwned(allocator, owned_model),
+            .base_url = .initOwned(allocator, owned_base_url),
+            .source_generation = source_generation,
+            .secret = .initOwned(allocator, owned_api_key),
+            .source = source,
+        };
+    }
+
+    pub fn take(self: *OwnedSourceCandidate) OwnedSourceCandidate {
+        return .{
+            .provider_id = self.provider_id.take(),
+            .protocol = self.protocol,
+            .model = self.model.take(),
+            .base_url = self.base_url.take(),
+            .source_generation = self.source_generation,
+            .secret = self.secret.take(),
+            .source = self.source,
+        };
+    }
+
+    pub fn input(self: *const OwnedSourceCandidate) SourceCandidateInput {
+        return .{
+            .target = .{
+                .provider_id = self.provider_id.view(),
+                .protocol = self.protocol,
+                .model = self.model.view(),
+                .base_url = self.base_url.view(),
+            },
+            .api_key = self.secret.view(),
+            .source_generation = self.source_generation,
+        };
+    }
+
+    /// Product Control is the only caller allowed to assign this generation.
+    pub fn intoConfig(
+        self: *OwnedSourceCandidate,
+        execution_generation: u64,
+    ) error{InvalidExecutionConfig}!OwnedConfig {
+        if (execution_generation == 0) return error.InvalidExecutionConfig;
+        var result: OwnedConfig = .{
+            .provider_id = self.provider_id.take(),
+            .protocol = self.protocol,
+            .model = self.model.take(),
+            .base_url = self.base_url.take(),
+            .execution_generation = execution_generation,
+            .secret = self.secret.take(),
+            .source = self.source,
+        };
+        self.source_generation = 0;
+        validateConfigStructure(result.input()) catch {
+            result.deinit();
+            return error.InvalidExecutionConfig;
+        };
+        return result;
+    }
+
+    pub fn deinit(self: *OwnedSourceCandidate) void {
+        self.provider_id.deinit();
+        self.model.deinit();
+        self.base_url.deinit();
+        self.secret.deinit();
+        self.protocol = undefined;
+        self.source_generation = 0;
+        self.source = undefined;
     }
 };
 
@@ -545,6 +669,14 @@ pub fn validateConfigStructure(input: ConfigInput) ValidationError!void {
     if (input.execution_generation == 0) return error.InvalidGeneration;
 }
 
+pub fn validateSourceCandidateStructure(input: SourceCandidateInput) ValidationError!void {
+    try validateRequired(input.target.provider_id, Limits.provider_id_bytes);
+    try validateRequired(input.target.model, Limits.model_id_bytes);
+    try validateRequired(input.target.base_url, Limits.base_url_bytes);
+    try validateOpaqueRequired(input.api_key, Limits.credential_bytes);
+    if (input.source_generation == 0) return error.InvalidGeneration;
+}
+
 pub fn validateModelConnectionExecutionConfig(input: ConfigInput) ValidationError!void {
     try validateConfigStructure(input);
     if (!modelConnectionProtocolAvailable(input.target.protocol))
@@ -581,6 +713,28 @@ fn validateOpaqueRequired(value: []const u8, max_bytes: usize) ValidationError!v
 fn validateOptional(value: []const u8, max_bytes: usize) ValidationError!void {
     if (value.len > max_bytes) return error.FieldTooLarge;
     if (!std.unicode.utf8ValidateSlice(value)) return error.InvalidEncoding;
+}
+
+test "source candidate keeps source and execution generations independent" {
+    const allocator = std.testing.allocator;
+    var candidate = try OwnedSourceCandidate.initOwned(
+        allocator,
+        .metask,
+        .anthropic_messages,
+        try allocator.dupe(u8, "metask-model"),
+        try allocator.dupe(u8, "https://napi.metask-ai.com/v1/messages"),
+        7,
+        try allocator.dupe(u8, "secret"),
+        "key-1",
+    );
+    defer candidate.deinit();
+
+    try std.testing.expectEqual(@as(u64, 7), candidate.input().source_generation);
+    var config = try candidate.intoConfig(29);
+    defer config.deinit();
+    try std.testing.expectEqual(@as(u64, 29), config.input().execution_generation);
+    try std.testing.expectEqualStrings("metask:key-1", config.input().target.provider_id);
+    try std.testing.expectEqualStrings("secret", config.input().api_key);
 }
 
 test "model connection protocols have exact endpoint contracts" {
