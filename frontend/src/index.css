@@ -7201,30 +7201,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
     transform 120ms ease;
 }
 
-.composer-send-group {
-  display: inline-flex;
-  min-width: 0;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
-.composer-default-recovery {
-  display: inline-flex;
-  max-width: min(360px, 48vw);
-  align-items: center;
-  gap: 8px;
-  color: var(--ui-content-warning);
-  font-size: var(--text-label);
-  line-height: 1.3;
-}
-
-.composer-default-recovery > span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .composer-send:hover:not(:disabled) {
   background: var(--ui-action-primary-hover);
 }

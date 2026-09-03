@@ -735,8 +735,7 @@ export const zhCN: Record<MessageId, string> = {
   "permission.default_updated": "已更新权限默认策略。",
   "permission.default_update_failed": "MetaWork 无法更新权限默认策略。",
   "settings.execution_defaults": "执行默认配置",
-  "settings.default_selection_missing": "未设置可执行的默认模型",
-  "settings.use_metask_default": "新任务改用 Metask",
+  "settings.use_metask_default": "设为新任务默认",
   "settings.model_connections": "模型连接",
   "settings.model_connections_help":
     "接入你自己管理的模型服务。模型连接独立于 Metask 登录，并且只影响新建任务。",

@@ -1364,6 +1364,31 @@ export default function App() {
     }
   }
 
+  async function selectMetaskModel(modelId: string) {
+    const provider = metaskProvider;
+    if (!provider) return;
+    const shouldSetDefault = snapshot.models.defaultSelection === null;
+    const configured = await runExecutionCommand(() =>
+      client.configureMetaskSelection({
+        sourceId: `metask:${provider.selectedApiKeyId}`,
+        modelId,
+        expectedMetaskSelectionRevision:
+          snapshot.models.metaskSelectionRevision,
+        expectedCatalogGeneration: provider.catalogGeneration,
+      }),
+    );
+    if (!configured || !shouldSetDefault) return;
+    await runExecutionCommand(() =>
+      client.selectModelsDefault({
+        sourceId: `metask:${provider.selectedApiKeyId}`,
+        modelId,
+        expectedSelectionRevision: snapshot.models.selectionRevision,
+        expectedSourceGeneration: provider.sourceGeneration,
+        expectedCatalogGeneration: provider.catalogGeneration,
+      }),
+    );
+  }
+
   async function cancelAccountOperation() {
     if (
       viewSyncFailed ||
@@ -2693,11 +2718,6 @@ export default function App() {
               ? t("settings.task_model_help")
               : t("settings.task_binding_model")
       }
-      defaultSelectionMissing={Boolean(
-        newTaskDraftActive &&
-        snapshot.models.defaultSelection === null &&
-        !snapshot.newTaskAdmission.available,
-      )}
       actionDisabled={workbenchMutationDisabled || workspaceBusy}
       stopAction={
         activeTask?.activeOperation?.kind === "run" ||
@@ -2743,20 +2763,9 @@ export default function App() {
                     activeModelConnection.catalogGeneration,
                 }),
               )
-            : metaskProvider
-              ? void runExecutionCommand(() =>
-                  client.configureMetaskSelection({
-                    sourceId: `metask:${metaskProvider.selectedApiKeyId}`,
-                    modelId: id,
-                    expectedMetaskSelectionRevision:
-                      snapshot.models.metaskSelectionRevision,
-                    expectedCatalogGeneration: metaskProvider.catalogGeneration,
-                  }),
-                )
-              : undefined
+            : void selectMetaskModel(id)
           : void selectModelForTask(id)
       }
-      onActivateMetask={() => void activateMetaskDefault()}
     />
   );
   const filePreviewDrawerState: FilePreviewDrawerState | null =
@@ -3060,20 +3069,7 @@ export default function App() {
                   )
                 : undefined
             }
-            onSelectModel={(id) =>
-              metaskProvider
-                ? void runExecutionCommand(() =>
-                    client.configureMetaskSelection({
-                      sourceId: `metask:${metaskProvider.selectedApiKeyId}`,
-                      modelId: id,
-                      expectedMetaskSelectionRevision:
-                        snapshot.models.metaskSelectionRevision,
-                      expectedCatalogGeneration:
-                        metaskProvider.catalogGeneration,
-                    }),
-                  )
-                : undefined
-            }
+            onSelectModel={(id) => void selectMetaskModel(id)}
             onActivateMetask={() => void activateMetaskDefault()}
             onCreateModelConnection={(input) =>
               runExecutionCommand(() => client.createModelConnection(input))

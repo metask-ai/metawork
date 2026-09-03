@@ -671,7 +671,7 @@ New task 页面以 Composer 为绝对主视觉。其上方使用直接的行动�
 Composer 布局与输入规则：
 
 - 模型控件位于输入框内部左下角，发送位于右下角；textarea 与底部工具带共同组成一个完整圆角容器，不得拆成相互竞争的表单块。Workspace 位于容器外下方的轻量 breadcrumb 行，不能做成第二个有边框卡片，也不能放回输入框上方形成第二条上下文栏；
-- New task 的 Models `defaultSelection` 为空且 `newTaskAdmission.available = false` 时，Composer 在发送位置显示“未设置可执行的默认模型”和“新任务改用 Metask”恢复动作；发送按钮保持禁用。存在正常 custom default 时不显示该恢复提示；Settings 仍可在 Metask selection 已准备好且当前 global default 不是该 selection 时提供同一显式切换动作；Renderer 不新增 Bridge 状态或自行推断 admission 原因；
+- New task 没有可执行默认模型时，Composer 只通过模型控件引导用户选择模型；不要在发送位置追加恢复提示、来源切换按钮或内部 admission 状态。选择模型后由 Host 按既有 Models desired commit 与 Product Control reconcile 流程完成可执行配置；失败时沿用统一的命令状态反馈。存在正常 custom default 时 Composer 不显示 Metask 切换动作；Settings 的来源切换仍是独立的显式设置操作；
 - New task 的 Workspace breadcrumb 默认选中“默认”，并可以在 Automatic 与已授权 Manual Workspace 之间切换，也可以打开原生目录选择器添加或重新授权；已有 Task 只显示其绑定 Workspace 事实，不提供虚假的切换；
 - 输入框不允许用户拖拽改变大小。它随内容自动增高，达到约 7–8 行或视口高度的 28% 后改为内部滚动；
 - Automatic intent 不是 Workspace 缺失；`automaticWorkspaces` 可用时普通 Text 可以直接发送。只有所选 Manual Workspace 缺失或授权失效时发送才保持禁用，并在 breadcrumb 中提供明确恢复动作；Workspace 选择和发送是两个独立动作。
@@ -1076,7 +1076,7 @@ Account与 Models状态在设置中分别投影：Account只按 `checking | sign
 - `Test connection` 只通过 Host/AgentCore 发起有界流式请求，不创建 Task、历史 Run 或持久 Conversation；页面分别显示 generation readiness 和最新测试状态。已成为默认连接后仍可重测，失败只显示“最近测试失败”，不能把正在使用的 ready generation、默认选择或新 Task admission 静默撤销；
 - 第一版由用户明确填写 bounded model ID，不提供自动模型发现；连接没有可用模型时不能成为默认连接；
 - 默认来源与模型作为一笔 Models-owned、source-qualified desired transaction提交；切换连接后只允许选择该连接的模型目录，不把不同连接的 model id混在一个列表里。Product Control随后独立 reconcile active binding，处理中只关闭相关新 Task admission，不回滚已提交 desired selection；
-- Metask provider catalog与当前 custom default同时投影；custom default生效时模型设置仍可查看 Metask API/模型，并通过显式 `新任务改用 Metask` 提交同一个 global default command。Account只决定 Metask provider当前能否授权，不参与默认来源选择；
+- Metask provider catalog与当前 custom default同时投影；custom default生效时模型设置仍可查看 Metask API/模型，并通过显式“设为新任务默认”提交同一个 global default command。Account只决定 Metask provider当前能否授权，不参与默认来源选择；
 - 编辑连接使用同一 typed 表单，秘密永不回填；secure capture 不可用时整个 Model Connection 设置入口隐藏，不提供局部编辑路径。endpoint、protocol 或 credential authority 变化推进 source generation并使该连接全部模型回到待验证状态；普通 display/metadata 编辑只推进对应 connection revision/catalog generation。首版表单仍一次创建一个模型，不把底层有界多模型集合伪装成单模型身份；
 - Models按 exact connection identity与 expected connection revision校验编辑/删除，不查询 live Session、Run、job或 worker，也不以 consumer usage拒绝 mutation。若 mutation使当前 desired default不可解析，Product Control独立关闭新 admission并进入 reconciliation；既有 Task/Run保持自己的 owned binding，不静默改绑，历史仍保留；
 - 连接页只管理连接本身和默认连接/模型，不提供 Workspace、权限策略、Task 历史或 AgentCore 内部状态。
