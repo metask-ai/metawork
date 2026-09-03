@@ -1133,6 +1133,7 @@ test "model connection protocols have exact endpoint contracts" {
     inline for (.{
         .{ Protocol.openai_responses, "https://api.openai.com/v1/responses" },
         .{ Protocol.anthropic_messages, "https://api.anthropic.com/v1/messages" },
+        .{ Protocol.anthropic_messages, "http://127.0.0.1:43123/v1/messages" },
         .{ Protocol.openai_chat_completions, "https://api.openai.com/v1/chat/completions" },
         .{ Protocol.gemini_native, "https://generativelanguage.googleapis.com" },
     }) |case| try std.testing.expect(validModelConnectionEndpoint(case[0], case[1]));
@@ -1150,6 +1151,11 @@ test "model connection protocols have exact endpoint contracts" {
         .display_name = "Remote HTTP is not allowed",
         .protocol = .gemini_native,
         .normalized_base_url = "http://api.example.com",
+    }));
+    try std.testing.expectError(error.InvalidBaseUrl, validateModelConnectionSpec(.{
+        .display_name = "Automation path must remain exact",
+        .protocol = .anthropic_messages,
+        .normalized_base_url = "http://127.0.0.1:43123/v1/messages?fixture=true",
     }));
 }
 

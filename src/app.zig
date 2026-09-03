@@ -5,6 +5,7 @@ const bridge_api = @import("metawork_bridge");
 const agent = @import("metawork_agent");
 const product_control = @import("metawork_product_control");
 const models_contract = @import("metawork_product_models_contract");
+const models_ports = @import("product_models_ports");
 const mcp_configuration = @import("metawork_product_mcp").contract;
 const account_api = @import("metawork_account");
 const product_identity = @import("metawork_product_identity");
@@ -13,6 +14,7 @@ const mcp_oauth = @import("metawork_mcp_oauth");
 const account_coordinator = @import("app/account_coordinator.zig");
 const account_platform_binding = @import("app/account_platform_binding.zig");
 const models_coordinator = @import("app/models_coordinator.zig");
+const models_automation_vault = @import("app/models_automation_vault.zig");
 const model_connection_host = @import("app/model_connection_host.zig");
 const models_platform_binding = @import("app/models_platform_binding.zig");
 const metask_http_transport = @import("app/metask_http_transport.zig");
@@ -61,6 +63,7 @@ const App = struct {
     agent_events: agent_event_coordinator.Coordinator = .{},
     account_coordinator: ?*account_coordinator.Coordinator = null,
     models_coordinator: ?*models_coordinator.Coordinator = null,
+    automation_models_vault: ?*models_automation_vault.Vault = null,
     model_connection_host: ?*model_connection_host.Host = null,
     account_started: bool = false,
     models_started: bool = false,
@@ -214,7 +217,9 @@ const App = struct {
             .notify_fn = app_platform.Adapter.notifyRequired,
         });
         if (self.automation.active()) {
-            models_management.startUnavailable();
+            const vault = self.automation_models_vault orelse
+                @panic("automation Models vault is not composed");
+            models_management.start(self.account_path, vault.port());
             self.models_started = true;
             account.startAutomation();
             if (self.automation.executionFixture()) |execution| {
@@ -637,6 +642,19 @@ pub fn run(init: std.process.Init) !void {
         app.main_thread_id,
         init.io,
     );
+    var automation_models_vault_state: models_automation_vault.Vault = .{};
+    app.automation_models_vault = &automation_models_vault_state;
+    defer {
+        // The vault contains borrowed execution authority. Stop Models before
+        // zeroing it, including when Native startup fails before App.stop.
+        if (app.models_started) {
+            models_coordinator_state.shutdown();
+            models_coordinator_state.drain();
+            app.models_started = false;
+        }
+        app.automation_models_vault = null;
+        automation_models_vault_state.deinit();
+    }
     models_coordinator_state.setCompletionTransport(
         app.completion_transport.transport(),
     );
@@ -724,4 +742,34 @@ test "MCP Application composition imports the startup owner" {
 
 test {
     std.testing.refAllDecls(account_coordinator);
+    std.testing.refAllDecls(models_automation_vault);
+}
+
+test "automation Models vault is bounded, overwrites securely, and deletes idempotently" {
+    var vault: models_automation_vault.Vault = .{};
+    defer vault.deinit();
+    const port = vault.port();
+
+    var slot_storage: [models_ports.credential_slot_bytes]u8 = undefined;
+    const generated = try port.generateSlot(&slot_storage);
+    try std.testing.expectEqualStrings(models_automation_vault.Vault.slot, generated);
+
+    try port.store(generated, "fixture-secret-long");
+    try port.store(generated, "short");
+    try std.testing.expectEqualSlices(
+        u8,
+        &([_]u8{0} ** ("fixture-secret-long".len - "short".len)),
+        vault.secret["short".len.."fixture-secret-long".len],
+    );
+
+    var output: [models_contract.Limits.credential_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings("short", (try port.get(generated, &output)).?);
+    try port.delete(generated);
+    try std.testing.expect((try port.get(generated, &output)) == null);
+    try std.testing.expectEqualSlices(
+        u8,
+        &([_]u8{0} ** "short".len),
+        vault.secret[0.."short".len],
+    );
+    try port.delete(generated);
 }
