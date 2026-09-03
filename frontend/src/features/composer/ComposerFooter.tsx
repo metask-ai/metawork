@@ -103,6 +103,7 @@ export function ComposerFooter({
   modelSelectionDisabled,
   modelSelectionPending,
   modelContextTitle,
+  defaultSelectionMissing,
   actionDisabled,
   stopAction,
   stopDisabled,
@@ -116,6 +117,7 @@ export function ComposerFooter({
   onConfirmAccess,
   onSelectWorkspace,
   onSelectModel,
+  onActivateMetask,
 }: {
   textareaRef: RefObject<HTMLTextAreaElement | null>;
   archived: boolean;
@@ -156,6 +158,7 @@ export function ComposerFooter({
   modelSelectionDisabled: boolean;
   modelSelectionPending: boolean;
   modelContextTitle: string;
+  defaultSelectionMissing: boolean;
   actionDisabled: boolean;
   stopAction: "run" | "compact" | null;
   stopDisabled: boolean;
@@ -169,6 +172,7 @@ export function ComposerFooter({
   onConfirmAccess: () => void;
   onSelectWorkspace: (workspaceId: string) => void;
   onSelectModel: (id: string) => void;
+  onActivateMetask: () => void;
 }) {
   const { t } = useI18n();
   const [menuDismissed, setMenuDismissed] = useState(false);
@@ -698,19 +702,35 @@ export function ComposerFooter({
                 <Icon name="stop" />
               </Button>
             ) : (
-              <Button
-                type="button"
-                variant="primary"
-                size="icon"
-                ref={sendButtonRef}
-                className="composer-send"
-                aria-label={t("run.submit")}
-                title={t("run.submit")}
-                disabled={!sendEnabled}
-                onClick={onSubmit}
-              >
-                <Icon name="send" />
-              </Button>
+              <div className="composer-send-group">
+                {defaultSelectionMissing && (
+                  <span className="composer-default-recovery" role="status">
+                    <span>{t("settings.default_selection_missing")}</span>
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      disabled={actionDisabled}
+                      onClick={onActivateMetask}
+                    >
+                      {t("settings.use_metask_default")}
+                    </Button>
+                  </span>
+                )}
+                <Button
+                  type="button"
+                  variant="primary"
+                  size="icon"
+                  ref={sendButtonRef}
+                  className="composer-send"
+                  aria-label={t("run.submit")}
+                  title={t("run.submit")}
+                  disabled={!sendEnabled}
+                  onClick={onSubmit}
+                >
+                  <Icon name="send" />
+                </Button>
+              </div>
             )}
           </div>
         </Composer>

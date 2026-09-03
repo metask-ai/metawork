@@ -671,6 +671,7 @@ New task 页面以 Composer 为绝对主视觉。其上方使用直接的行动�
 Composer 布局与输入规则：
 
 - 模型控件位于输入框内部左下角，发送位于右下角；textarea 与底部工具带共同组成一个完整圆角容器，不得拆成相互竞争的表单块。Workspace 位于容器外下方的轻量 breadcrumb 行，不能做成第二个有边框卡片，也不能放回输入框上方形成第二条上下文栏；
+- New task 的 Models `defaultSelection` 为空且 `newTaskAdmission.available = false` 时，Composer 在发送位置显示“未设置可执行的默认模型”和“新任务改用 Metask”恢复动作；发送按钮保持禁用。存在正常 custom default 时不显示该恢复提示；Settings 仍可在 Metask selection 已准备好且当前 global default 不是该 selection 时提供同一显式切换动作；Renderer 不新增 Bridge 状态或自行推断 admission 原因；
 - New task 的 Workspace breadcrumb 默认选中“默认”，并可以在 Automatic 与已授权 Manual Workspace 之间切换，也可以打开原生目录选择器添加或重新授权；已有 Task 只显示其绑定 Workspace 事实，不提供虚假的切换；
 - 输入框不允许用户拖拽改变大小。它随内容自动增高，达到约 7–8 行或视口高度的 28% 后改为内部滚动；
 - Automatic intent 不是 Workspace 缺失；`automaticWorkspaces` 可用时普通 Text 可以直接发送。只有所选 Manual Workspace 缺失或授权失效时发送才保持禁用，并在 breadcrumb 中提供明确恢复动作；Workspace 选择和发送是两个独立动作。

@@ -216,9 +216,10 @@ export function SettingsPage({
     metaskProvider?.catalogState ?? "needs_authentication";
   const selectedApiId = metaskProvider?.selectedApiKeyId ?? "";
   const selectedModelId = models.metaskSelection?.modelId ?? "";
-  const customDefaultSelected = models.connections.some(
-    (connection) => connection.id === models.defaultSelection?.sourceId,
-  );
+  const metaskDefaultSelected =
+    models.metaskSelection !== null &&
+    models.defaultSelection?.sourceId === models.metaskSelection.sourceId &&
+    models.defaultSelection?.modelId === models.metaskSelection.modelId;
   const committedApi = metaskApiKeys.find((key) => key.id === selectedApiId);
   const committedModel = metaskModels.find(
     (model) => model.id === selectedModelId,
@@ -909,9 +910,10 @@ export function SettingsPage({
                 >
                   <div className="settings-execution-header">
                     <div className="settings-execution-actions">
-                      {customDefaultSelected &&
+                      {models.metaskSelection &&
                         authenticated &&
-                        metaskCatalogState === "ready" && (
+                        metaskCatalogState === "ready" &&
+                        !metaskDefaultSelected && (
                           <Button
                             variant="secondary"
                             size="sm"

@@ -799,6 +799,8 @@ export const enUS = {
   "permission.default_update_failed":
     "MetaWork could not update the permission default.",
   "settings.execution_defaults": "Execution defaults",
+  "settings.default_selection_missing":
+    "No executable default model is selected",
   "settings.use_metask_default": "Use Metask for new tasks",
   "settings.model_connections": "Model connections",
   "settings.model_connections_help":

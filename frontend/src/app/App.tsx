@@ -1295,6 +1295,20 @@ export default function App() {
     }
   }
 
+  function activateMetaskDefault() {
+    const selection = snapshot.models.metaskSelection;
+    if (!selection || !metaskProvider) return;
+    return runExecutionCommand(() =>
+      client.selectModelsDefault({
+        sourceId: selection.sourceId,
+        modelId: selection.modelId,
+        expectedSelectionRevision: snapshot.models.selectionRevision,
+        expectedSourceGeneration: metaskProvider.sourceGeneration,
+        expectedCatalogGeneration: metaskProvider.catalogGeneration,
+      }),
+    );
+  }
+
   async function selectModelForTask(selectionId: string) {
     const task = activeTask;
     if (!task || bridgeUnavailable) return;
@@ -2679,6 +2693,11 @@ export default function App() {
               ? t("settings.task_model_help")
               : t("settings.task_binding_model")
       }
+      defaultSelectionMissing={Boolean(
+        newTaskDraftActive &&
+        snapshot.models.defaultSelection === null &&
+        !snapshot.newTaskAdmission.available,
+      )}
       actionDisabled={workbenchMutationDisabled || workspaceBusy}
       stopAction={
         activeTask?.activeOperation?.kind === "run" ||
@@ -2737,6 +2756,7 @@ export default function App() {
               : undefined
           : void selectModelForTask(id)
       }
+      onActivateMetask={() => void activateMetaskDefault()}
     />
   );
   const filePreviewDrawerState: FilePreviewDrawerState | null =
@@ -3054,21 +3074,7 @@ export default function App() {
                   )
                 : undefined
             }
-            onActivateMetask={() =>
-              snapshot.models.metaskSelection && metaskProvider
-                ? void runExecutionCommand(() =>
-                    client.selectModelsDefault({
-                      sourceId: snapshot.models.metaskSelection!.sourceId,
-                      modelId: snapshot.models.metaskSelection!.modelId,
-                      expectedSelectionRevision:
-                        snapshot.models.selectionRevision,
-                      expectedSourceGeneration: metaskProvider.sourceGeneration,
-                      expectedCatalogGeneration:
-                        metaskProvider.catalogGeneration,
-                    }),
-                  )
-                : undefined
-            }
+            onActivateMetask={() => void activateMetaskDefault()}
             onCreateModelConnection={(input) =>
               runExecutionCommand(() => client.createModelConnection(input))
             }

@@ -1376,12 +1376,7 @@ function decodeModels(value: unknown, path: string): ModelsView {
     persistenceHealth: enumValue(
       item.persistenceHealth,
       `${path}.persistenceHealth`,
-      [
-        "ready",
-        "migration_required",
-        "recovery_required",
-        "unavailable",
-      ] as const,
+      ["ready", "recovery_required", "unavailable"] as const,
     ),
     providers,
     metaskSelection,
