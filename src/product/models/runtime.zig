@@ -854,6 +854,34 @@ pub const Runtime = struct {
         return self.commitCandidate(&candidate, true);
     }
 
+    /// Explicitly replaces the Models canonical store with the current empty
+    /// schema. This is the supported recovery path for a damaged or
+    /// otherwise unreadable `models.json`; it never decodes or migrates the
+    /// previous bytes. Host-owned custom credentials are represented as
+    /// pending deletions and scrubbed after the durable empty commit.
+    pub fn resetStore(self: *Runtime) contract.CommandResult {
+        self.assertMainThread();
+        if (self.catalog_attempt != null)
+            return .rejected(.operation_in_progress);
+        var candidate = self.registry.resetCandidate() catch |err|
+            return .rejected(mapRegistryError(err));
+        defer candidate.deinit();
+        const encoded = registry_impl.encodeAlloc(self.allocator, &candidate) catch |err|
+            return .rejected(mapRegistryError(err));
+        defer self.allocator.free(encoded);
+        const store = if (self.store) |*value| value else
+            return .rejected(.persistence_unavailable);
+        store.commit(encoded) catch |err| {
+            if (err == error.PersistenceOutcomeUnknown) self.store_healthy = false;
+            return .rejected(.persistence_unavailable);
+        };
+        self.registry.replace(&candidate);
+        self.store_healthy = true;
+        self.clearMetaskRuntime(.needs_authentication, .none);
+        self.drainCredentialCleanup();
+        return .acceptedResult();
+    }
+
     pub fn createWithCredential(
         self: *Runtime,
         secret: []const u8,
@@ -1867,6 +1895,68 @@ test "Models bootstrap rejects retired and damaged canonical shapes" {
         defer std.testing.allocator.free(bytes);
         try std.testing.expectEqualStrings(input, bytes);
     }
+}
+
+test "Models reset replaces damaged canonical bytes with current empty schema" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
+    try writeTestFile(
+        &tmp.dir,
+        registry_impl.store_file_name,
+        "{\"migration\":{\"execution_generation\":7}}",
+    );
+
+    var vault: TestVault = .{};
+    var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
+    try runtime.start(directory_storage[0..directory_len], vault.port());
+    defer {
+        runtime.stop();
+        runtime.deinit();
+    }
+    try std.testing.expect(!runtime.store_healthy);
+    try std.testing.expect(runtime.resetStore().accepted);
+    try std.testing.expect(runtime.store_healthy);
+    try std.testing.expectEqual(@as(usize, 0), runtime.views().len);
+    try std.testing.expect(runtime.view().metask_selection == null);
+    try std.testing.expect(runtime.view().default_selection == null);
+    const bytes = (try runtime.store.?.loadAlloc(std.testing.allocator)) orelse
+        return error.TestExpectedEqual;
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings(
+        "{\"schema\":1,\"metask\":null,\"default_selection\":null,\"selection_revision\":0,\"pending_credential_deletions\":[],\"connections\":[]}",
+        bytes,
+    );
+}
+
+test "Models reset scrubs custom credentials and clears selections" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
+    var vault: TestVault = .{};
+    var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
+    try runtime.start(directory_storage[0..directory_len], vault.port());
+    defer {
+        runtime.stop();
+        runtime.deinit();
+    }
+    try std.testing.expect(runtime.createWithCredential(
+        "reset-secret",
+        .{
+            .display_name = "Reset me",
+            .protocol = .openai_responses,
+            .normalized_base_url = "https://api.openai.com/v1/responses",
+        },
+        .{ .id = "gpt-5", .display_name = "GPT-5" },
+    ).accepted);
+    try std.testing.expect(vault.present);
+    try std.testing.expect(runtime.resetStore().accepted);
+    try std.testing.expect(!vault.present);
+    try std.testing.expectEqual(@as(usize, 0), runtime.views().len);
+    try std.testing.expect(runtime.view().default_selection == null);
+    try std.testing.expect(runtime.registry.nextCredentialDeletion() == null);
 }
 
 fn writeTestFile(dir: *std.Io.Dir, name: []const u8, bytes: []const u8) !void {

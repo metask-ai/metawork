@@ -291,6 +291,28 @@ pub const Registry = struct {
         try self.pending_credential_deletions.append(self.allocator, owned);
     }
 
+    /// Builds the current-format empty registry used by the explicit Models
+    /// recovery command. Every credential slot still represented by the
+    /// healthy in-memory registry is carried as a pending deletion so the
+    /// runtime can scrub Host-owned secrets after the canonical commit.
+    pub fn resetCandidate(self: *const Registry) (std.mem.Allocator.Error || Error)!Registry {
+        var result = Registry.init(self.allocator);
+        errdefer result.deinit();
+        for (self.pending_credential_deletions.items) |connection_id| {
+            try result.reserveCredentialDeletion(connection_id);
+        }
+        for (self.connections.items) |connection| {
+            var duplicate = false;
+            for (result.pending_credential_deletions.items) |pending|
+                if (std.mem.eql(u8, pending, connection.id)) {
+                    duplicate = true;
+                    break;
+                };
+            if (!duplicate) try result.reserveCredentialDeletion(connection.id);
+        }
+        return result;
+    }
+
     pub fn nextCredentialDeletion(self: *const Registry) ?[]const u8 {
         if (self.pending_credential_deletions.items.len == 0) return null;
         return self.pending_credential_deletions.items[0];
