@@ -36,9 +36,6 @@ public static class MetaWorkSecureInputProbe {
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern int GetClassName(IntPtr window, System.Text.StringBuilder value, int capacity);
 
-    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    public static extern bool SetWindowText(IntPtr window, string value);
-
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern IntPtr FindWindowEx(
         IntPtr parent,
@@ -55,6 +52,9 @@ public static class MetaWorkSecureInputProbe {
 
     [DllImport("user32.dll")]
     public static extern IntPtr SendMessage(IntPtr window, uint message, IntPtr wparam, IntPtr lparam);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "SendMessageW")]
+    public static extern IntPtr SendTextMessage(IntPtr window, uint message, IntPtr wparam, string lparam);
 
     public static IntPtr FindTopLevelWindow(int processId, string className) {
         IntPtr found = IntPtr.Zero;
@@ -110,7 +110,12 @@ if ($dialogHandle -eq [IntPtr]::Zero -or $editHandle -eq [IntPtr]::Zero) {
 }
 [MetaWorkSecureInputProbe]::SetForegroundWindow($dialogHandle) | Out-Null
 [MetaWorkSecureInputProbe]::SetFocus($editHandle) | Out-Null
-if (-not [MetaWorkSecureInputProbe]::SetWindowText($editHandle, $credential)) {
+if ([MetaWorkSecureInputProbe]::SendTextMessage(
+    $editHandle,
+    0x000C,
+    [IntPtr]::Zero,
+    $credential
+).ToInt64() -eq 0) {
     throw 'secure input Edit control rejected bounded text input'
 }
 $passwordCharacter = [MetaWorkSecureInputProbe]::SendMessage(
