@@ -197,7 +197,10 @@ pub const Runtime = struct {
                 public_catalog.modelViews()
             else
                 &.{},
-            .selected_api_key_id = if (intent) |value| value.api_key_id else "",
+            .selected_api_key_id = if (self.metask_public_catalog) |public_catalog|
+                public_catalog.catalogApiKeyId()
+            else
+                "",
             .catalog_generation = self.metask_catalog_generation,
             .source_generation = if (intent) |value| value.source_generation else 0,
             .error_code = self.metask_error,
@@ -1791,7 +1794,9 @@ test "Models owns Metask catalog authority without changing global default" {
         contract.CatalogState.needs_authentication,
         unavailable.providers[0].catalog_state,
     );
+    try std.testing.expectEqual(@as(usize, 0), unavailable.providers[0].api_keys.len);
     try std.testing.expectEqual(@as(usize, 0), unavailable.providers[0].models.len);
+    try std.testing.expectEqualStrings("", unavailable.providers[0].selected_api_key_id);
     try std.testing.expectEqualStrings("model-1", unavailable.metask_selection.?.model_id);
     try std.testing.expect(!runtime.defaultResolvable());
     try std.testing.expect((try runtime.resolveDefault()) == null);
@@ -1910,6 +1915,13 @@ test "Metask catalog drift keeps a tracked global default durable" {
         }
         try std.testing.expect(restarted.store_healthy);
         const restored = restarted.view();
+        try std.testing.expectEqual(
+            contract.CatalogState.needs_authentication,
+            restored.providers[0].catalog_state,
+        );
+        try std.testing.expectEqual(@as(usize, 0), restored.providers[0].api_keys.len);
+        try std.testing.expectEqual(@as(usize, 0), restored.providers[0].models.len);
+        try std.testing.expectEqualStrings("", restored.providers[0].selected_api_key_id);
         try std.testing.expectEqualStrings("metask:api-2", restored.metask_selection.?.source_id);
         try std.testing.expectEqualStrings("model-2", restored.metask_selection.?.model_id);
         try std.testing.expectEqualStrings("metask:api-2", restored.default_selection.?.source_id);

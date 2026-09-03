@@ -9337,7 +9337,7 @@ test "explicit Schedule recovery is revision bound and reopens only its Product 
     try std.testing.expectEqual(TaskPersistenceHealth.unavailable, control.task_persistence_health);
 }
 
-test "Account authorization loss invalidates only Models Metask resolution" {
+test "Product Control snapshot serializer keeps durable Metask intent after authorization loss" {
     var control = try testRuntime();
     defer control.deinit();
     const task_id = control.task_runtime.tasks[0].?.durable.id;
@@ -9362,6 +9362,8 @@ test "Account authorization loss invalidates only Models Metask resolution" {
         after.providers[0].catalog_state,
     );
     try std.testing.expectEqual(@as(usize, 0), after.providers[0].models.len);
+    try std.testing.expectEqual(@as(usize, 0), after.providers[0].api_keys.len);
+    try std.testing.expectEqualStrings("", after.providers[0].selected_api_key_id);
     try std.testing.expectEqualStrings(
         metask_selection.model_id,
         after.metask_selection.?.model_id,
@@ -9372,6 +9374,16 @@ test "Account authorization loss invalidates only Models Metask resolution" {
     );
     try std.testing.expect(!control.canCreateTask());
     try std.testing.expectEqual(binding_epoch, try control.taskBindingEpoch(task_id));
+
+    var models_storage: [4096]u8 = undefined;
+    var models_writer = std.Io.Writer.fixed(&models_storage);
+    try control.writeModels(&models_writer);
+    const models_fixture = std.mem.trimEnd(
+        u8,
+        contract_fixture.models_unavailable,
+        "\r\n",
+    );
+    try std.testing.expectEqualStrings(models_fixture, models_writer.buffered());
 }
 
 test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {

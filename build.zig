@@ -1586,6 +1586,11 @@ fn wireAgentCore(
         "snapshot",
         @embedFile("frontend/src/bridge/__fixtures__/workbench-snapshot.fixture"),
     );
+    product_control_contract_fixture.addOption(
+        []const u8,
+        "models_unavailable",
+        @embedFile("frontend/src/bridge/__fixtures__/models-unavailable.fixture"),
+    );
     product_control_runtime.addOptions(
         "product_control_contract_fixture",
         product_control_contract_fixture,
