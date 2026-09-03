@@ -7,6 +7,7 @@ import { useI18n, type Locale, type MessageId } from "../../i18n/context.ts";
 
 type Props = {
   account: AccountView;
+  beginLoginDisabled: boolean;
   cancelDisabled: boolean;
   connectionFailed: boolean;
   connectionRetryable: boolean;
@@ -17,11 +18,13 @@ type Props = {
   reconnecting: boolean;
   notice: string;
   onReconnect: () => void;
+  onBeginLogin: () => void;
   onCancel: () => void;
 };
 
 export function AccountGate({
   account,
+  beginLoginDisabled,
   cancelDisabled,
   connectionFailed,
   connectionRetryable,
@@ -32,16 +35,22 @@ export function AccountGate({
   reconnecting,
   notice,
   onReconnect,
+  onBeginLogin,
   onCancel,
 }: Props) {
   const { locale, setLocale, t } = useI18n();
   const authorizing = account.state === "authorizing";
-  const title = authorizing
-    ? t("account.authorizing.title")
-    : t("account.checking.title");
-  const body = authorizing
-    ? t("account.authorizing.body")
-    : t("account.checking.body");
+  const signedOut = account.state === "signed_out";
+  const title = signedOut
+    ? t("account.sign_in_required.title")
+    : authorizing
+      ? t("account.authorizing.title")
+      : t("account.checking.title");
+  const body = signedOut
+    ? t("account.sign_in_required.body")
+    : authorizing
+      ? t("account.authorizing.body")
+      : t("account.checking.body");
 
   return (
     <main className="account-gate" data-readiness={account.state}>
@@ -117,6 +126,17 @@ export function AccountGate({
                 {reconnecting
                   ? t("connection.retrying")
                   : t("connection.retry")}
+              </Button>
+            ) : signedOut ? (
+              <Button
+                autoFocus
+                type="button"
+                variant="primary"
+                size="lg"
+                disabled={beginLoginDisabled}
+                onClick={onBeginLogin}
+              >
+                {t("account.login")}
               </Button>
             ) : (
               authorizing &&

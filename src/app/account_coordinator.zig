@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const account_contract = @import("metawork_account_contract");
 const account_api = @import("metawork_account");
 const control_ports = @import("metawork_product_control_ports");
@@ -256,12 +255,11 @@ fn testingPerform(
 
 fn testingWake(_: *anyopaque) void {}
 
-fn initRuntimeForTest(path: []const u8) !account_api.Runtime {
+fn initRuntimeForTest() !account_api.Runtime {
     return account_api.Runtime.init(
         std.testing.allocator,
         std.testing.io,
         std.Thread.getCurrentId(),
-        path,
         testingTransport(),
         account_api.TestSupport.loopbackEndpoint(),
         .{ .context = &testing_wake_context, .notify_fn = testingWake },
@@ -269,10 +267,7 @@ fn initRuntimeForTest(path: []const u8) !account_api.Runtime {
 }
 
 test "Account coordinator commits identity before notifying Product" {
-    var runtime = try initRuntimeForTest(if (builtin.os.tag == .windows)
-        "C:\\metawork-account-coordinator-order-test"
-    else
-        "/tmp/metawork-account-coordinator-order-test");
+    var runtime = try initRuntimeForTest();
     defer runtime.deinit();
     var sink: RecordingSink = .{ .runtime = &runtime };
     var coordinator = Coordinator.init(
@@ -300,10 +295,7 @@ test "Account coordinator commits identity before notifying Product" {
 }
 
 test "Account coordinator publishes explicit terminal attempt metadata" {
-    var runtime = try initRuntimeForTest(if (builtin.os.tag == .windows)
-        "C:\\metawork-account-coordinator-attempt-test"
-    else
-        "/tmp/metawork-account-coordinator-attempt-test");
+    var runtime = try initRuntimeForTest();
     defer runtime.deinit();
     var sink: RecordingSink = .{ .runtime = &runtime };
     var coordinator = Coordinator.init(
@@ -366,10 +358,7 @@ test "Account test platform exposes deterministic clock timer and credential fau
 }
 
 test "Account coordinator rejects an initial effect collision without committing" {
-    var runtime = try initRuntimeForTest(if (builtin.os.tag == .windows)
-        "C:\\metawork-account-coordinator-initial-admission-test"
-    else
-        "/tmp/metawork-account-coordinator-initial-admission-test");
+    var runtime = try initRuntimeForTest();
     defer runtime.deinit();
     var sink: RecordingSink = .{ .runtime = &runtime };
     var coordinator = Coordinator.init(
@@ -394,10 +383,7 @@ test "Account coordinator rejects an initial effect collision without committing
 }
 
 test "Account coordinator closes a continuation effect collision with one terminal fact" {
-    var runtime = try initRuntimeForTest(if (builtin.os.tag == .windows)
-        "C:\\metawork-account-coordinator-continuation-admission-test"
-    else
-        "/tmp/metawork-account-coordinator-continuation-admission-test");
+    var runtime = try initRuntimeForTest();
     defer runtime.deinit();
     var sink: RecordingSink = .{ .runtime = &runtime };
     var coordinator = Coordinator.init(
@@ -439,10 +425,7 @@ test "Account coordinator closes a continuation effect collision with one termin
 }
 
 test "Account cancel admission collision rejects without committing or panicking" {
-    var runtime = try initRuntimeForTest(if (builtin.os.tag == .windows)
-        "C:\\metawork-account-cancel-admission-test"
-    else
-        "/tmp/metawork-account-cancel-admission-test");
+    var runtime = try initRuntimeForTest();
     defer runtime.deinit();
     var sink: RecordingSink = .{ .runtime = &runtime };
     var coordinator = Coordinator.init(
@@ -469,10 +452,7 @@ test "Account cancel admission collision rejects without committing or panicking
 }
 
 test "Account cancel discards a late callback exchange secret" {
-    var runtime = try initRuntimeForTest(if (builtin.os.tag == .windows)
-        "C:\\metawork-account-late-callback-test"
-    else
-        "/tmp/metawork-account-late-callback-test");
+    var runtime = try initRuntimeForTest();
     defer runtime.deinit();
     var sink: RecordingSink = .{ .runtime = &runtime };
     var coordinator = Coordinator.init(
@@ -509,10 +489,7 @@ test "Account cancel discards a late callback exchange secret" {
 }
 
 test "Account shutdown discards an uncommitted effect and closes the active attempt" {
-    var runtime = try initRuntimeForTest(if (builtin.os.tag == .windows)
-        "C:\\metawork-account-shutdown-admission-test"
-    else
-        "/tmp/metawork-account-shutdown-admission-test");
+    var runtime = try initRuntimeForTest();
     defer runtime.deinit();
     var sink: RecordingSink = .{ .runtime = &runtime };
     var coordinator = Coordinator.init(
@@ -533,10 +510,7 @@ test "Account shutdown discards an uncommitted effect and closes the active atte
 }
 
 test "Account mailbox collision becomes one typed terminal failure" {
-    var runtime = try initRuntimeForTest(if (builtin.os.tag == .windows)
-        "C:\\metawork-account-mailbox-collision-test"
-    else
-        "/tmp/metawork-account-mailbox-collision-test");
+    var runtime = try initRuntimeForTest();
     defer runtime.deinit();
     var sink: RecordingSink = .{ .runtime = &runtime };
     var coordinator = Coordinator.init(
@@ -578,10 +552,7 @@ test "Account mailbox collision becomes one typed terminal failure" {
 }
 
 test "Account stale callback is ignored and its exchange secret is cleared" {
-    var runtime = try initRuntimeForTest(if (builtin.os.tag == .windows)
-        "C:\\metawork-account-stale-callback-test"
-    else
-        "/tmp/metawork-account-stale-callback-test");
+    var runtime = try initRuntimeForTest();
     defer runtime.deinit();
     var sink: RecordingSink = .{ .runtime = &runtime };
     var coordinator = Coordinator.init(
@@ -618,10 +589,7 @@ test "Account stale callback is ignored and its exchange secret is cleared" {
 }
 
 test "Account shutdown publishes one terminal fact for an active attempt" {
-    var runtime = try initRuntimeForTest(if (builtin.os.tag == .windows)
-        "C:\\metawork-account-shutdown-terminal-test"
-    else
-        "/tmp/metawork-account-shutdown-terminal-test");
+    var runtime = try initRuntimeForTest();
     defer runtime.deinit();
     var sink: RecordingSink = .{ .runtime = &runtime };
     var coordinator = Coordinator.init(
@@ -641,10 +609,7 @@ test "Account shutdown publishes one terminal fact for an active attempt" {
 }
 
 test "Account refresh scheduling failure is visible and explicitly retryable" {
-    var runtime = try initRuntimeForTest(if (builtin.os.tag == .windows)
-        "C:\\metawork-account-refresh-schedule-test"
-    else
-        "/tmp/metawork-account-refresh-schedule-test");
+    var runtime = try initRuntimeForTest();
     var platform: account_api.TestSupport.Platform = .{
         .now_unix_seconds = 100,
         .timer_start_fails = true,
@@ -693,10 +658,7 @@ test "Account refresh scheduling failure is visible and explicitly retryable" {
 }
 
 test "Account clock and refresh retry arm failures publish refresh schedule failure" {
-    var runtime = try initRuntimeForTest(if (builtin.os.tag == .windows)
-        "C:\\metawork-account-refresh-retry-arm-test"
-    else
-        "/tmp/metawork-account-refresh-retry-arm-test");
+    var runtime = try initRuntimeForTest();
     var platform: account_api.TestSupport.Platform = .{
         .now_unix_seconds = null,
     };
@@ -741,10 +703,7 @@ test "Account clock and refresh retry arm failures publish refresh schedule fail
 }
 
 test "Account observer retains a healthy in-flight authorization during refresh" {
-    var runtime = try initRuntimeForTest(if (builtin.os.tag == .windows)
-        "C:\\metawork-account-refresh-observer-test"
-    else
-        "/tmp/metawork-account-refresh-observer-test");
+    var runtime = try initRuntimeForTest();
     var platform: account_api.TestSupport.Platform = .{ .now_unix_seconds = 100 };
     account_api.TestSupport.attachPlatform(&runtime, &platform);
     defer {

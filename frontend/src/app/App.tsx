@@ -2486,6 +2486,7 @@ export default function App() {
     return (
       <AccountGate
         account={snapshot.account}
+        beginLoginDisabled={viewSyncFailed || !bridgeReady || accountBusy}
         cancelDisabled={viewSyncFailed || !bridgeReady || accountCancelBusy}
         connectionFailed={viewSyncFailed}
         connectionRetryable={connectionRetryable}
@@ -2500,6 +2501,7 @@ export default function App() {
             : ""
         }
         onReconnect={() => void retryViewSynchronization()}
+        onBeginLogin={() => void runAccountCommand(() => client.beginLogin())}
         onCancel={() => void cancelAccountOperation()}
       />
     );
@@ -2945,10 +2947,12 @@ export default function App() {
             account={snapshot.account}
             active={settingsOpen}
             disabled={bridgeUnavailable || accountBusy}
+            cancelDisabled={viewSyncFailed || !bridgeReady || accountCancelBusy}
             onOpenSettings={openSettings}
             onBeginLogin={() =>
               void runAccountCommand(() => client.beginLogin())
             }
+            onCancel={() => void cancelAccountOperation()}
             onLogout={() => void runAccountCommand(() => client.logout())}
           />
         </div>

@@ -265,8 +265,7 @@ pub const Account = struct {
     }
 
     pub fn prepareRestoredTokenRefresh(self: *const Account) PrepareResult {
-        if ((self.state.session_state != .restoring and
-            self.state.session_state != .signed_out) or
+        if (self.state.session_state != .restoring or
             self.state.activeAttempt() != null)
             return .{ .rejected = .invalid_state };
         return self.prepareRefreshTransition();
@@ -883,12 +882,13 @@ test "refresh failure distinguishes retryable and invalid credentials" {
     commitPrepared(&cold, &retryable);
     try std.testing.expectEqual(contract.AccountState.signed_out, cold.view().state);
     try std.testing.expectEqual(contract.ErrorCode.metask_service_unavailable, cold.view().error_code);
-    var retry = switch (cold.prepareRestoredTokenRefresh()) {
+    try std.testing.expect(cold.prepareRestoredTokenRefresh() == .rejected);
+    var explicit_login = switch (cold.prepareCommand(.begin_login)) {
         .transition => |value| value,
         else => return error.TestUnexpectedResult,
     };
-    defer retry.deinit();
-    try std.testing.expect(retry.takeEffect().? == .refresh_token);
+    defer explicit_login.deinit();
+    try std.testing.expect(explicit_login.takeEffect().? == .begin_oauth);
 
     var active = Account.initRestoring();
     var active_restore = try TestSupport.prepareAuthenticated(

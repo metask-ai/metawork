@@ -144,6 +144,7 @@ function renderGate(account, props = {}) {
   return withI18n(
     createElement(AccountGate, {
       account,
+      beginLoginDisabled: false,
       cancelDisabled: false,
       connectionFailed: false,
       connectionRetryable: true,
@@ -190,7 +191,7 @@ function renderSettings(account, models = readyModels) {
   );
 }
 
-test("only checking and authorizing request the Account onboarding surface", () => {
+test("checking signed-out and authorizing request the Account onboarding surface", () => {
   assert.equal(
     requiresAccountGate({ state: "checking" }, unavailableModels),
     true,
@@ -201,7 +202,7 @@ test("only checking and authorizing request the Account onboarding surface", () 
   );
   assert.equal(
     requiresAccountGate({ state: "signed_out" }, unavailableModels),
-    false,
+    true,
   );
   assert.equal(
     requiresAccountGate({ state: "authenticated" }, readyModels),
@@ -216,6 +217,48 @@ test("only checking and authorizing request the Account onboarding surface", () 
     ),
     false,
   );
+});
+
+test("an empty signed-out Workbench exposes one explicit sign-in action", () => {
+  const surface = accountSurfacePolicy(
+    { ...signedOut, state: "signed_out" },
+    unavailableModels,
+    false,
+  );
+  assert.deepEqual(surface, { gateRequired: true, setupRequired: false });
+  const markup = renderGate(signedOut);
+  assert.match(markup, /Sign in to MetaWork/);
+  assert.match(markup, />Sign in with Metask</);
+  assert.doesNotMatch(markup, /Cancel current action/);
+});
+
+test("Account settings render each public session state with only its valid action", () => {
+  const checkingMarkup = renderSettings(
+    { ...signedOut, state: "checking" },
+    unavailableModels,
+  );
+  assert.match(checkingMarkup, /Checking sign-in/);
+  assert.doesNotMatch(checkingMarkup, />Sign in</);
+
+  const callbackMarkup = renderSettings(
+    { ...signedOut, state: "authorizing", canCancel: true },
+    unavailableModels,
+  );
+  assert.match(callbackMarkup, /Complete authorization in your browser/);
+  assert.match(callbackMarkup, />Cancel</);
+  assert.doesNotMatch(callbackMarkup, />Sign in</);
+
+  const exchangeMarkup = renderSettings(
+    { ...signedOut, state: "authorizing", canCancel: false },
+    unavailableModels,
+  );
+  assert.match(exchangeMarkup, /Finishing Metask sign-in/);
+  assert.doesNotMatch(exchangeMarkup, />Cancel</);
+  assert.doesNotMatch(exchangeMarkup, />Sign in</);
+
+  const signedOutMarkup = renderSettings(signedOut, unavailableModels);
+  assert.match(signedOutMarkup, /Sign in to MetaWork/);
+  assert.match(signedOutMarkup, />Sign in with Metask</);
 });
 
 test("unresolved authenticated catalog opens account setup", () => {

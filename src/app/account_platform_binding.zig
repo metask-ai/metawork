@@ -1,12 +1,10 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const native_sdk = @import("native_sdk");
 const ports_api = @import("account_ports");
 const store = @import("account_credential_store");
 
 pub const InitError = error{
     WrongThread,
-    AccountDirectoryUnavailable,
 };
 
 /// Application-owned binding for the platform effects required by Account.
@@ -16,31 +14,18 @@ pub const Adapter = struct {
     services: native_sdk.platform.PlatformServices,
     io: std.Io,
     main_thread_id: std.Thread.Id,
-    account_dir: std.Io.Dir,
 
     pub fn init(
         services: native_sdk.platform.PlatformServices,
         io: std.Io,
         main_thread_id: std.Thread.Id,
-        absolute_account_dir: []const u8,
-    ) (InitError || store.StoreError)!Adapter {
+    ) InitError!Adapter {
         if (std.Thread.getCurrentId() != main_thread_id)
             return error.WrongThread;
-        if (!std.fs.path.isAbsolute(absolute_account_dir))
-            return error.AccountDirectoryUnavailable;
-        const dir = std.Io.Dir.cwd().createDirPathOpen(
-            io,
-            absolute_account_dir,
-            .{
-                .open_options = .{ .follow_symlinks = false },
-                .permissions = directoryPermissions(),
-            },
-        ) catch return error.AccountDirectoryUnavailable;
         return .{
             .services = services,
             .io = io,
             .main_thread_id = main_thread_id,
-            .account_dir = dir,
         };
     }
 
@@ -48,7 +33,6 @@ pub const Adapter = struct {
         self.assertMainThread() catch @panic(
             "Account platform binding released off main thread",
         );
-        self.account_dir.close(self.io);
         self.* = undefined;
     }
 
@@ -157,10 +141,3 @@ pub const Adapter = struct {
         };
     }
 };
-
-fn directoryPermissions() std.Io.File.Permissions {
-    return if (builtin.os.tag == .windows)
-        .default_dir
-    else
-        .fromMode(0o700);
-}

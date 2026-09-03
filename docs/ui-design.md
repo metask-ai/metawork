@@ -994,9 +994,9 @@ MetaWork
 [ 使用 Metask 登录 ]
 ```
 
-首次启动不显示四步进度条，不要求用户点击“加载 API Key”，不出现 C1/C2、protocol target、generation或 Keychain等技术术语。`checking`只显示稳定品牌与检查状态；`authorizing`只显示等待和取消，不提供“重新打开登录页”。OAuth已成功而 Models目录准备失败时保持当前 identity，在模型配置区提供目录重试；Models已就绪而 Schedule/Execution不可用时保持 Account/Models事实，在 Product recovery surface提供恢复。登录无效直接成为 `signed_out`，进入 Workbench shell后左下角账号入口显示统一登录动作；模型连接设置是否出现只取决于完整 Host capability gate，不显示已保存账号、重新认证、账号不匹配或上一次登录信息。
+首次启动不显示四步进度条，不要求用户点击“加载 API Key”，不出现 C1/C2、protocol target、generation或 Keychain等技术术语。`checking`只显示稳定品牌与检查状态；`authorizing`只显示等待和取消，不提供“重新打开登录页”。OAuth已成功而 Models目录准备失败时保持当前 identity，在模型配置区提供目录重试；Models已就绪而 Schedule/Execution不可用时保持 Account/Models事实，在 Product recovery surface提供恢复。零 Task、Metask 为默认来源且登录无效时，`signed_out` 显示独立登录表面和唯一登录动作；已有 durable Task 时进入 Workbench shell并在左下角账号入口显示统一登录动作。模型连接设置是否出现只取决于完整 Host capability gate，不显示已保存账号、重新认证、账号不匹配或上一次登录信息。
 
-冷启动检查或 OAuth 授权期间使用稳定的品牌状态。确认 `signed_out` 后进入 Workbench shell 并保留本地历史；如果没有 ready Model Connection，只关闭 New task admission。完整 Model Connection capability gate 已成立的平台仍显示模型连接设置，使用户可以在不登录 Metask 时创建并验证自定义来源；Gate 未成立的平台隐藏整个入口。确认 `authenticated` 后继续目录准备。任何 live Task 若仍在运行，必须继续可查看和停止。
+冷启动检查或 OAuth 授权期间使用稳定的品牌状态。确认 `signed_out` 后，零 Task 的 Metask 默认路径显示独立登录表面；有 durable Task 时保留 Workbench 与本地历史。如果没有 ready Model Connection，只关闭 New task admission。完整 Model Connection capability gate 已成立的平台仍显示模型连接设置，使用户可以在不登录 Metask 时创建并验证自定义来源；Gate 未成立的平台隐藏整个入口。确认 `authenticated` 后继续目录准备。任何 live Task 若仍在运行，必须继续可查看和停止。
 
 ### 14.2 设置结构
 
@@ -1291,7 +1291,7 @@ Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成
 ### 19.4 Account 与首次启动
 
 - cold restore 不闪现 disabled Workbench；
-- 首次 signed out 且没有本地历史：Workbench shell 直接提供唯一登录动作；不得制造 saved account、上一次登录或 mismatch 分支；
+- 首次 signed out、Metask 为默认来源且没有本地历史：独立登录表面直接提供唯一登录动作；不得制造 saved account、上一次登录或 mismatch 分支；
 - OAuth 正常完成、浏览器未回调、重新打开、取消和 hard deadline；
 - 历史选择命中、唯一 Key/模型自动推进；
 - 多 API、多模型真实选择以及选择期间 reload；OAuth identity 成功后不退回未登录；

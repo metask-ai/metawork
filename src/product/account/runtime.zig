@@ -18,7 +18,6 @@ const network_attempt = @import("account_network_attempt");
 const refresh_timer_id: u64 = 0x4d57_4143_4354_5246;
 const refresh_skew_seconds: i64 = 60;
 const refresh_retry_ns: u64 = 30 * std.time.ns_per_s;
-const account_path_capacity = 4096;
 
 pub const WakeSink = struct {
     context: *anyopaque,
@@ -435,8 +434,6 @@ pub const PrepareResult = union(enum) {
     ignored_stale,
 };
 
-pub const InitError = error{AccountDirectoryUnavailable};
-
 pub const Runtime = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -451,15 +448,10 @@ pub const Runtime = struct {
         allocator: std.mem.Allocator,
         io: std.Io,
         main_thread_id: std.Thread.Id,
-        account_path: []const u8,
         transport: metask_client.Transport,
         loopback_endpoint: loopback_impl.Endpoint,
         wake: WakeSink,
-    ) InitError!Runtime {
-        if (!std.fs.path.isAbsolute(account_path) or
-            account_path.len == 0 or
-            account_path.len > account_path_capacity)
-            return error.AccountDirectoryUnavailable;
+    ) Runtime {
         return .{
             .allocator = allocator,
             .io = io,
@@ -500,10 +492,6 @@ pub const Runtime = struct {
     ) PrepareResult {
         self.assertMainThread();
         if (command == .retry_refresh) return self.prepareRetryRefresh();
-        if (command == .begin_login and
-            self.account.view().state == .signed_out and
-            self.credentials.refreshAvailable())
-            return wrapPrepareResult(self.account.prepareRestoredTokenRefresh());
         return wrapPrepareResult(self.account.prepareCommand(command));
     }
 
@@ -1505,10 +1493,6 @@ fn initRuntimeForUnitTest(transport: *RuntimeTestTransport) !Runtime {
         std.testing.allocator,
         std.testing.io,
         std.Thread.getCurrentId(),
-        if (builtin.os.tag == .windows)
-            "C:\\metawork-account-runtime-test"
-        else
-            "/tmp/metawork-account-runtime-test",
         transport.port(),
         TestSupport.loopbackEndpoint(),
         .{ .context = transport, .notify_fn = runtimeTestWake },
@@ -1599,6 +1583,55 @@ test "prepared attempt disposition distinguishes all four transition classes" {
         AttemptDisposition.continues,
         runtime.attemptDisposition(&continues),
     );
+}
+
+test "cold restore alone consumes a retained refresh credential" {
+    var transport: RuntimeTestTransport = .{};
+    var runtime = try initRuntimeForUnitTest(&transport);
+    var platform: TestSupport.Platform = .{};
+    try platform.setStoredRefreshToken("retained-refresh-token");
+    defer {
+        TestSupport.detachPlatform(&runtime);
+        runtime.deinit();
+    }
+
+    var restored = runtime.prepareStart(platform.ports());
+    defer restored.deinit();
+    try std.testing.expectEqual(contract.AccountState.checking, restored.transition.view().state);
+    try std.testing.expect(runtime.takeRefreshAfterCommit(&restored));
+    runtime.commit(&restored);
+
+    var refresh = runtime.prepareRestoredRefresh();
+    defer refresh.deinit();
+    try std.testing.expectEqual(
+        AttemptDisposition.starts,
+        runtime.attemptDisposition(&refresh),
+    );
+    try std.testing.expect(refresh.transition.takeEffect().? == .refresh_token);
+}
+
+test "explicit login starts new OAuth even when a retained refresh remains" {
+    var transport: RuntimeTestTransport = .{};
+    var runtime = try initRuntimeForUnitTest(&transport);
+    defer runtime.deinit();
+    var signed_out = runtime.prepareAutomationStart();
+    defer signed_out.deinit();
+    runtime.commit(&signed_out);
+    try runtime.credentials.installStored(
+        std.testing.allocator,
+        "stale-access",
+        "retained-refresh",
+        200,
+        "account-1",
+    );
+
+    var login = switch (runtime.prepareCommand(.begin_login)) {
+        .prepared => |prepared| prepared,
+        else => return error.TestUnexpectedResult,
+    };
+    defer login.deinit();
+    try std.testing.expectEqual(contract.AccountState.authorizing, login.transition.view().state);
+    try std.testing.expect(login.transition.takeEffect().? == .begin_oauth);
 }
 
 test "authorization lease rejects authorizing and mismatched principals" {

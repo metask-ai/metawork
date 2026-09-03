@@ -105,8 +105,8 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - 普通用户通过 Metask OAuth 登录，不需要手工填写 protocol、model、base URL 或 API Key；
 - Metask managed connection 继续遵循 OAuth、API Key catalog 和 fixed protocol/base URL 合同；用户管理的 Model Connection 不要求 Metask 登录，但必须先显式创建、验证并安装到 Host-owned execution registry；
 - `AccountView` 只发布 `state`、脱敏 identity、`canCancel` 和 Account-owned稳定错误；不得包含 catalog、model、selection、source、execution、Task admission 或 Model Connection。`ModelsView` 独立发布 Metask/custom source目录、Provider-local/global desired selection、Models revisions、persistence health与脱敏 Model Connection；`NewTaskAdmissionView` 只发布 Product Control active binding、replacement、安装状态、新 Task admission与 active generation。三者不得互相伪装；
-- `checking` 与 `authorizing` 可以暂时占用登录表面；`signed_out` 在没有 ready user-managed Model Connection 时禁止新 Task admission，但不隐藏 Workspace、durable Task 或历史记录。Model Connection 设置入口在 management、secure capture、连接测试等产品能力形成完整 gate 前整体隐藏；已有 live Task 仍必须可查看和停止；
-- 登录无效即进入 `signed_out`。Renderer 对建立 identity 只提供统一的 `beginLogin`，不保留“重新认证”“重新打开登录页”“匹配上次账号”等分支；已验证会话出现 `refresh_schedule_failed` 时提供独立的 `retryRefresh`，它只恢复 Host refresh 调度，不建立第二条登录路径；
+- `checking` 与 `authorizing` 可以暂时占用登录表面；零 Task 且 Metask 是默认来源时，`signed_out` 显示独立登录表面和唯一登录动作。有 durable Task 时始终保留 Workbench、Workspace 与历史记录；没有 ready user-managed Model Connection 时只禁止新 Task admission。Model Connection 设置入口在 management、secure capture、连接测试等产品能力形成完整 gate 前整体隐藏；已有 live Task 仍必须可查看和停止；
+- 登录无效即进入 `signed_out`。Renderer 对建立 identity 只提供统一的 `beginLogin`，每次都开始新的 OAuth，不保留“重新认证”“重新打开登录页”“匹配上次账号”或重用 retained refresh token 的分支；retained refresh 只供一次冷启动 restore。已验证会话出现 `refresh_schedule_failed` 时提供独立的 `retryRefresh`，它只恢复 Host refresh 调度，不建立第二条登录路径；
 - OAuth 浏览器授权、identity 提交和执行目录准备不得暴露内部 C1/C2、operation、generation 或凭据存储步骤；
 - OAuth 成功提交 token rotation 并以 `/me` 验证 authenticated identity 后，Application 必须把一份有界、可清零、绑定 authorization generation 的 lease交给独立 Models catalog continuation。仍有效的 Models-owned历史选择优先恢复；没有历史选择时按 Models 合同选择默认项；只有真实歧义才请求用户选择；
 - Models continuation 失败不能把已验证 Account identity回滚成未登录，也不能根据显示名称、列表顺序或模型名猜测 source identity、protocol 或 target；

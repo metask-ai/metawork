@@ -182,6 +182,10 @@ test("transitional Account states never turn signed-out history into a security 
     resolve(sourceRoot, "features", "account", "gating.ts"),
     "utf8",
   );
+  const accountIdentity = await readFile(
+    resolve(sourceRoot, "features", "account", "AccountIdentity.tsx"),
+    "utf8",
+  );
   assert.match(app, /<AccountGate/);
   assert.match(app, /const hasTasks = snapshot\.tasks\.length !== 0;/);
   assert.match(
@@ -199,7 +203,15 @@ test("transitional Account states never turn signed-out history into a security 
   assert.match(app, /selectAccountGateStatus\(statuses\)/);
   assert.match(
     gating,
-    /state === "checking" \|\| account\.state === "authorizing"/,
+    /state === "checking" \|\|[\s\S]*?state === "signed_out" \|\|[\s\S]*?state === "authorizing"/,
+  );
+  assert.match(
+    accountIdentity,
+    /account\.state === "signed_out"[\s\S]*?onBeginLogin/,
+  );
+  assert.match(
+    accountIdentity,
+    /account\.state === "authorizing" && account\.canCancel[\s\S]*?onCancel/,
   );
   assert.doesNotMatch(app, /workbenchEntered|setWorkbenchEntered/);
   assert.match(

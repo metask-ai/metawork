@@ -115,7 +115,7 @@ none
 
 每个非 `none` transaction 拥有非零 attempt identity、唯一合法阶段、至多一个 worker/effect，以及成功、明确失败、取消、deadline 和 shutdown 的 terminal 规则。command 和 completion 先产生 prepared transition；coordinator 必须按 committed current 与 prepared next 把它精确分类为 `starts | continues | finishes | no_attempt`。新 attempt 的 effect admission 失败不得提交；continuation admission 失败先提交已经观察到的外部阶段，再以 typed failure 关闭同一 attempt；terminal/no-attempt admission 失败不得误判为 continuation 或触发无 active attempt 的 panic，shutdown 必须在销毁未提交 effect 后完成收口。
 
-登录路径为：OAuth callback → token exchange → refresh token durable commit → `/me` identity validation → Account terminal commit。loopback worker 只等待 callback并交付包含 authorization code、PKCE verifier、callback port 与总 deadline 的 owned exchange input；主线程必须先提交 `token_exchange(login)`，再由独立 network attempt 发出一次 token request，不得在 callback worker 内跨过 commit boundary或自动重放 code exchange。登录总 deadline 为 5 分钟，exchange deadline 为 `min(总 deadline 剩余时间, 30 秒)`。token 已提交后，identity 请求失败不能回滚旧 token。显式重新登录可以替换 identity，但旧 identity 在新 `/me` 验证成功前不得被新值冒充。
+登录路径为：OAuth callback → token exchange → refresh token durable commit → `/me` identity validation → Account terminal commit。loopback worker 只等待 callback并交付包含 authorization code、PKCE verifier、callback port 与总 deadline 的 owned exchange input；主线程必须先提交 `token_exchange(login)`，再由独立 network attempt 发出一次 token request，不得在 callback worker 内跨过 commit boundary或自动重放 code exchange。登录总 deadline 为 5 分钟，exchange deadline 为 `min(总 deadline 剩余时间, 30 秒)`。token 已提交后，identity 请求失败不能回滚旧 token。每次显式 `begin_login` 都开始新的 OAuth，不得消费安全存储中保留的 refresh token；显式重新登录可以替换 identity，但旧 identity 在新 `/me` 验证成功前不得被新值冒充。
 
 Account coordinator 必须先提交 Account Runtime，再把 canonical Account fact提交给 Product Control，最后通知 Application 的 Models observer。Models 的 refresh/clear/install 结果不得回写、回滚或补充 Account transaction。
 
@@ -131,8 +131,9 @@ Account durable authority 只有系统安全存储中的 Metask refresh token：
 - 固定 account name 为 `metask-refresh-token`；
 - Account 不读写 `preferences.json`、`model-connections.json` 或 `models.json`；这些格式归 Models；
 - production 与 automation 的 credential service 隔离，不得相互恢复。
+- Account Runtime 和平台 binding 不拥有数据目录、路径创建或文件权限；Models 等其他 owner 的持久化路径不得作为 Account 初始化前置条件。
 
-冷启动没有 refresh token 时直接进入 `signed_out`；存在时先 refresh并提交 rotation，再以 `/me` 建立 identity。credential-store read failure 是 Account error，不得伪造成有效登录或 Models catalog failure。
+冷启动是唯一可以消费 retained refresh token 的入口：没有 refresh token 时直接进入 `signed_out`；存在时只尝试一次 restore，先 refresh并提交 rotation，再以 `/me` 建立 identity。retryable restore failure 保留 credential 和错误事实，但后续显式登录必须开始新 OAuth，不能重新进入隐式 restore 或形成无出口循环。credential-store read failure 是 Account error，不得伪造成有效登录或 Models catalog failure。
 
 ## 8. 并发、取消、shutdown 与回归不变量
 
