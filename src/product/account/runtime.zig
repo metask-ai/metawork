@@ -35,20 +35,28 @@ const EffectQueue = struct {
     const Entry = struct {
         attempt_id: ?u64,
         effect: state_impl.Effect,
+        login_exchange: ?login_attempt.CallbackExchangeInput = null,
+
+        fn deinit(self: *Entry) void {
+            if (self.login_exchange) |*input| input.deinit();
+            self.login_exchange = null;
+        }
     };
 
-    fn sink(self: *EffectQueue) state_impl.EffectSink {
-        return .{ .context = self, .submit_fn = submit };
-    }
-
     fn submit(
-        context: *anyopaque,
+        self: *EffectQueue,
         attempt_id: ?u64,
         effect: state_impl.Effect,
+        login_exchange: *?login_attempt.CallbackExchangeInput,
     ) bool {
-        const self: *EffectQueue = @ptrCast(@alignCast(context));
+        std.debug.assert((effect == .exchange_login) == (login_exchange.* != null));
         if (self.entry != null) return false;
-        self.entry = .{ .attempt_id = attempt_id, .effect = effect };
+        self.entry = .{
+            .attempt_id = attempt_id,
+            .effect = effect,
+            .login_exchange = if (login_exchange.*) |*input| input.take() else null,
+        };
+        login_exchange.* = null;
         return true;
     }
 
@@ -61,9 +69,13 @@ const EffectQueue = struct {
 
 const Effects = struct {
     const MailboxResult = union(enum) {
-        login: struct {
+        login_callback: struct {
             attempt_id: u64,
             result: login_attempt.WorkerResult,
+        },
+        login_exchange: struct {
+            attempt_id: u64,
+            tokens: metask_client.AuthorizationResult,
         },
         refresh: struct {
             attempt_id: u64,
@@ -73,7 +85,8 @@ const Effects = struct {
 
         fn deinit(self: *MailboxResult) void {
             switch (self.*) {
-                .login => |*entry| entry.result.deinit(),
+                .login_callback => |*entry| entry.result.deinit(),
+                .login_exchange => |*entry| entry.tokens.deinit(),
                 .refresh => |*entry| entry.rotation.deinit(),
                 .completion => |*completion| completion.deinit(),
             }
@@ -81,7 +94,8 @@ const Effects = struct {
 
         fn attemptId(self: *const MailboxResult) u64 {
             return switch (self.*) {
-                .login => |entry| entry.attempt_id,
+                .login_callback => |entry| entry.attempt_id,
+                .login_exchange => |entry| entry.attempt_id,
                 .refresh => |entry| entry.attempt_id,
                 .completion => |completion| completion.attempt_id,
             };
@@ -133,7 +147,7 @@ const Effects = struct {
             self.unlockMailbox();
             return false;
         }
-        self.mailbox = .{ .login = .{
+        self.mailbox = .{ .login_callback = .{
             .attempt_id = attempt_id,
             .result = result.take(),
         } };
@@ -159,6 +173,10 @@ const Effects = struct {
             return false;
         }
         self.mailbox = switch (result.take()) {
+            .login => |tokens| .{ .login_exchange = .{
+                .attempt_id = attempt_id,
+                .tokens = tokens,
+            } },
             .refresh => |rotation| .{ .refresh = .{
                 .attempt_id = attempt_id,
                 .rotation = rotation,
@@ -211,7 +229,6 @@ const Effects = struct {
         self: *Effects,
         attempt_id: u64,
         authorization_url: ports_impl.AuthorizationUrl,
-        now_unix_seconds: i64,
     ) void {
         std.debug.assert(!self.login_active);
         self.login_attempt.start(
@@ -219,9 +236,7 @@ const Effects = struct {
             self.io,
             self.loopback_endpoint,
             attempt_id,
-            self.transport,
             self.loginSink(),
-            now_unix_seconds,
         ) catch |err| {
             self.publishCompletion(.{
                 .attempt_id = attempt_id,
@@ -236,6 +251,26 @@ const Effects = struct {
             attempt_id,
             .oauth_browser_open_failed,
         );
+    }
+
+    fn startLoginExchange(
+        self: *Effects,
+        attempt_id: u64,
+        input: *login_attempt.CallbackExchangeInput,
+        now_unix_seconds: i64,
+    ) void {
+        self.network_attempt.startLoginExchange(
+            self.allocator,
+            self.io,
+            attempt_id,
+            self.transport,
+            input,
+            self.networkSink(),
+            now_unix_seconds,
+        ) catch self.publishCompletion(.{
+            .attempt_id = attempt_id,
+            .payload = .{ .failed = .fromCode(.local_resource_exhausted) },
+        });
     }
 
     fn failLoginAttempt(
@@ -360,6 +395,7 @@ const Effects = struct {
 
 pub const Prepared = struct {
     transition: state_impl.PreparedTransition,
+    login_exchange: ?login_attempt.CallbackExchangeInput = null,
     refresh_after_commit: bool = false,
     schedule_refresh_after_commit: bool = false,
     retry_refresh_after_commit: bool = false,
@@ -377,11 +413,20 @@ pub const Prepared = struct {
     }
 
     pub fn deinit(self: *Prepared) void {
+        if (self.login_exchange) |*input| input.deinit();
+        self.login_exchange = null;
         self.transition.deinit();
         self.refresh_after_commit = false;
         self.schedule_refresh_after_commit = false;
         self.retry_refresh_after_commit = false;
     }
+};
+
+pub const AttemptDisposition = enum {
+    starts,
+    continues,
+    finishes,
+    no_attempt,
 };
 
 pub const PrepareResult = union(enum) {
@@ -500,12 +545,31 @@ pub const Runtime = struct {
         return preparedFromState(self.account.prepareCompletion(&completion));
     }
 
-    pub fn preparedContinuesActiveAttempt(
+    pub fn attemptDisposition(
         self: *const Runtime,
         prepared: *const Prepared,
-    ) bool {
-        const attempt_id = prepared.attemptId() orelse return false;
-        return self.account.activeAttempt() == attempt_id;
+    ) AttemptDisposition {
+        const current = self.account.activeAttempt();
+        const next = prepared.transition.nextAttemptId();
+        const prepared_attempt = prepared.attemptId();
+        return if (current == null and next == null)
+            .no_attempt
+        else if (current == null and next != null and prepared_attempt == next)
+            .starts
+        else if (current != null and next == current and prepared_attempt == current)
+            .continues
+        else if (current != null and next == null and prepared_attempt == current)
+            .finishes
+        else
+            unreachable;
+    }
+
+    pub fn discardQueuedEffectForShutdown(self: *Runtime) void {
+        self.assertMainThread();
+        if (self.effects.queue.take()) |entry_value| {
+            var entry = entry_value;
+            entry.deinit();
+        }
     }
 
     pub fn prepareShutdown(self: *Runtime) Prepared {
@@ -520,17 +584,25 @@ pub const Runtime = struct {
         defer mailbox.deinit();
         const collision = self.effects.takeCollision();
         return switch (mailbox) {
-            .login => |*entry| result: {
+            .login_callback => |*entry| result: {
                 self.effects.joinLogin();
                 if (self.account.activeAttempt() != entry.attempt_id)
                     break :result .ignored_stale;
                 if (collision)
                     break :result self.prepareFailure(entry.attempt_id, .account_operation_failed);
                 break :result switch (entry.result) {
-                    .authorized => |*tokens| self.prepareAuthorizedLogin(entry.attempt_id, tokens),
+                    .exchange => |*input| self.prepareLoginExchange(entry.attempt_id, input),
                     .failed => |failure| self.prepareFailureValue(entry.attempt_id, failure),
                     .consumed => @panic("Account login mailbox contains consumed result"),
                 };
+            },
+            .login_exchange => |*entry| result: {
+                self.effects.joinNetwork(entry.attempt_id);
+                if (self.account.activeAttempt() != entry.attempt_id)
+                    break :result .ignored_stale;
+                if (collision)
+                    break :result self.prepareFailure(entry.attempt_id, .account_operation_failed);
+                break :result self.prepareAuthorizedLogin(entry.attempt_id, &entry.tokens);
             },
             .refresh => |*entry| result: {
                 self.effects.joinNetwork(entry.attempt_id);
@@ -590,7 +662,11 @@ pub const Runtime = struct {
     pub fn admitEffect(self: *Runtime, prepared: *Prepared) bool {
         self.assertMainThread();
         if (prepared.transition.takeEffect()) |effect|
-            return self.effects.queue.sink().submit(prepared.transition.attempt_id, effect);
+            return self.effects.queue.submit(
+                prepared.transition.attempt_id,
+                effect,
+                &prepared.login_exchange,
+            );
         return true;
     }
 
@@ -619,7 +695,11 @@ pub const Runtime = struct {
             self.scheduleRefreshRetry()
         else
             null;
-        if (self.effects.queue.take()) |entry| self.dispatchEffect(entry);
+        if (self.effects.queue.take()) |entry_value| {
+            var entry = entry_value;
+            defer entry.deinit();
+            self.dispatchEffect(&entry);
+        }
         return follow_up;
     }
 
@@ -698,6 +778,21 @@ pub const Runtime = struct {
         return wrapPrepareResult(self.account.prepareCompletion(&completion));
     }
 
+    fn prepareLoginExchange(
+        self: *Runtime,
+        attempt_id: u64,
+        input: *login_attempt.CallbackExchangeInput,
+    ) PrepareResult {
+        return switch (self.account.prepareLoginExchange(attempt_id)) {
+            .transition => |transition| .{ .prepared = .{
+                .transition = transition,
+                .login_exchange = input.take(),
+            } },
+            .rejected => |error_code| .{ .rejected = error_code },
+            .ignored_stale => .ignored_stale,
+        };
+    }
+
     fn prepareRefreshedTokens(
         self: *Runtime,
         attempt_id: u64,
@@ -756,7 +851,7 @@ pub const Runtime = struct {
         return wrapPrepareResult(self.account.prepareCompletion(&completion));
     }
 
-    fn dispatchEffect(self: *Runtime, entry: EffectQueue.Entry) void {
+    fn dispatchEffect(self: *Runtime, entry: *EffectQueue.Entry) void {
         switch (entry.effect) {
             .begin_oauth => {
                 const attempt_id = entry.attempt_id orelse
@@ -765,11 +860,24 @@ pub const Runtime = struct {
                     self.publishFailure(attempt_id, .credential_store_read_failed);
                     return;
                 };
+                self.effects.startLogin(attempt_id, platform.authorization_url);
+            },
+            .exchange_login => {
+                const attempt_id = entry.attempt_id orelse
+                    @panic("login exchange effect has no attempt");
+                const platform = self.platform orelse {
+                    self.publishFailure(attempt_id, .credential_store_read_failed);
+                    return;
+                };
                 const now = platform.wall_clock.nowUnixSeconds() orelse {
                     self.publishFailure(attempt_id, .account_operation_failed);
                     return;
                 };
-                self.effects.startLogin(attempt_id, platform.authorization_url, now);
+                const input = if (entry.login_exchange) |*value| value else {
+                    self.publishFailure(attempt_id, .account_operation_failed);
+                    return;
+                };
+                self.effects.startLoginExchange(attempt_id, input, now);
             },
             .refresh_token => {
                 const attempt_id = entry.attempt_id orelse
@@ -1244,6 +1352,30 @@ pub const TestSupport = if (builtin.is_test) struct {
         return preparedFromState(runtime.account.prepareCompletion(&completion));
     }
 
+    pub fn prepareLoginExchange(
+        runtime: *Runtime,
+        input: *login_attempt.CallbackExchangeInput,
+    ) Prepared {
+        const attempt_id = runtime.account.activeAttempt() orelse
+            @panic("test Account has no active login attempt");
+        return switch (runtime.prepareLoginExchange(attempt_id, input)) {
+            .prepared => |prepared| prepared,
+            else => @panic("test Account cannot continue to login exchange"),
+        };
+    }
+
+    pub fn exchangeInput(
+        allocator: std.mem.Allocator,
+        code_value: []const u8,
+    ) !login_attempt.CallbackExchangeInput {
+        return login_attempt.TestSupport.exchangeInput(
+            allocator,
+            std.testing.io,
+            code_value,
+            .{ .raw = .fromSeconds(5 * 60), .clock = .boot },
+        );
+    }
+
     pub fn prepareTokenRefreshWithoutEffect(runtime: *Runtime) Prepared {
         var prepared = switch (runtime.prepareTokenRefresh()) {
             .prepared => |value| value,
@@ -1270,13 +1402,25 @@ pub const TestSupport = if (builtin.is_test) struct {
         runtime.publishFailure(attempt_id, error_code);
     }
 
+    pub fn publishLoginExchange(
+        runtime: *Runtime,
+        attempt_id: u64,
+        input: *login_attempt.CallbackExchangeInput,
+    ) void {
+        var result: login_attempt.WorkerResult = .{ .exchange = input.take() };
+        runtime.effects.loginSink().publish(attempt_id, &result);
+    }
+
     pub fn occupyEffectQueue(runtime: *Runtime) void {
         std.debug.assert(runtime.effects.queue.entry == null);
         runtime.effects.queue.entry = .{ .attempt_id = 99, .effect = .begin_oauth };
     }
 
     pub fn clearEffectQueue(runtime: *Runtime) void {
-        _ = runtime.effects.queue.take();
+        if (runtime.effects.queue.take()) |entry_value| {
+            var entry = entry_value;
+            entry.deinit();
+        }
     }
 
     fn testLoopbackOpen(_: *anyopaque) loopback_impl.ServerError!u16 {
@@ -1399,6 +1543,62 @@ test "authorization lease requires authenticated matching unexpired credentials"
     platform.now_unix_seconds = 101;
     try std.testing.expect((try runtime.authorizationLease()) == null);
     try std.testing.expect(!runtime.acceptsAuthorizationGeneration(generation));
+}
+
+test "prepared attempt disposition distinguishes all four transition classes" {
+    var transport: RuntimeTestTransport = .{};
+    var runtime = try initRuntimeForUnitTest(&transport);
+    defer runtime.deinit();
+
+    var no_attempt = runtime.prepareAutomationStart();
+    defer no_attempt.deinit();
+    try std.testing.expectEqual(
+        AttemptDisposition.no_attempt,
+        runtime.attemptDisposition(&no_attempt),
+    );
+    runtime.commit(&no_attempt);
+
+    var starts = switch (runtime.prepareCommand(.begin_login)) {
+        .prepared => |prepared| prepared,
+        else => return error.TestUnexpectedResult,
+    };
+    defer starts.deinit();
+    try std.testing.expectEqual(
+        AttemptDisposition.starts,
+        runtime.attemptDisposition(&starts),
+    );
+    _ = starts.transition.takeEffect();
+    runtime.commit(&starts);
+
+    var finishes = switch (runtime.prepareCommand(.cancel_operation)) {
+        .prepared => |prepared| prepared,
+        else => return error.TestUnexpectedResult,
+    };
+    defer finishes.deinit();
+    try std.testing.expectEqual(
+        AttemptDisposition.finishes,
+        runtime.attemptDisposition(&finishes),
+    );
+
+    var input = try login_attempt.TestSupport.exchangeInput(
+        std.testing.allocator,
+        std.testing.io,
+        "authorization-code",
+        .{ .raw = .fromSeconds(5 * 60), .clock = .boot },
+    );
+    defer input.deinit();
+    var continues = switch (runtime.prepareLoginExchange(
+        runtime.account.activeAttempt().?,
+        &input,
+    )) {
+        .prepared => |prepared| prepared,
+        else => return error.TestUnexpectedResult,
+    };
+    defer continues.deinit();
+    try std.testing.expectEqual(
+        AttemptDisposition.continues,
+        runtime.attemptDisposition(&continues),
+    );
 }
 
 test "authorization lease rejects authorizing and mismatched principals" {

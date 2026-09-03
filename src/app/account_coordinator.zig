@@ -111,11 +111,10 @@ pub const Coordinator = struct {
         const fact = self.runtime.preparedFact(&prepared);
         const attempt_id = prepared.attemptId();
         const attempt_terminal = prepared.finishesAttempt();
-        const continues_active_attempt =
-            self.runtime.preparedContinuesActiveAttempt(&prepared);
+        const attempt_disposition = self.runtime.attemptDisposition(&prepared);
 
         const effect_admitted = self.runtime.admitEffect(&prepared);
-        if (!effect_admitted and !continues_active_attempt)
+        if (!effect_admitted and attempt_disposition != .continues)
             return .rejected(.local_resource_exhausted);
 
         // Account commits its own state first. The Product callback is no-fail,
@@ -155,7 +154,11 @@ pub const Coordinator = struct {
 
     pub fn shutdown(self: *Coordinator) void {
         self.assertMainThread();
-        const result = self.commitPrepared(self.runtime.prepareShutdown());
+        var result = self.commitPrepared(self.runtime.prepareShutdown());
+        if (!result.accepted and result.error_code == .local_resource_exhausted) {
+            self.runtime.discardQueuedEffectForShutdown();
+            result = self.commitPrepared(self.runtime.prepareShutdown());
+        }
         std.debug.assert(result.accepted);
     }
 
@@ -406,9 +409,17 @@ test "Account coordinator closes a continuation effect collision with one termin
     sink.count = 0;
     _ = account_api.TestSupport.commitBeginLoginWithoutDispatch(&runtime);
     account_api.TestSupport.occupyEffectQueue(&runtime);
+    var exchange_backing: [1024]u8 = undefined;
+    @memset(&exchange_backing, 0xaa);
+    var exchange_fixed = std.heap.FixedBufferAllocator.init(&exchange_backing);
+    var exchange_input = try account_api.TestSupport.exchangeInput(
+        exchange_fixed.allocator(),
+        "authorization-code",
+    );
+    defer exchange_input.deinit();
 
     const result = coordinator.commitPrepared(
-        account_api.TestSupport.prepareTokensPersisted(&runtime),
+        account_api.TestSupport.prepareLoginExchange(&runtime, &exchange_input),
     );
 
     try std.testing.expect(result.accepted);
@@ -420,6 +431,105 @@ test "Account coordinator closes a continuation effect collision with one termin
         account_contract.ErrorCode.local_resource_exhausted,
         runtime.view().error_code,
     );
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        &exchange_backing,
+        "authorization-code",
+    ) == null);
+}
+
+test "Account cancel admission collision rejects without committing or panicking" {
+    var runtime = try initRuntimeForTest(if (builtin.os.tag == .windows)
+        "C:\\metawork-account-cancel-admission-test"
+    else
+        "/tmp/metawork-account-cancel-admission-test");
+    defer runtime.deinit();
+    var sink: RecordingSink = .{ .runtime = &runtime };
+    var coordinator = Coordinator.init(
+        &runtime,
+        sink.port(),
+        std.Thread.getCurrentId(),
+    );
+    coordinator.startAutomation();
+    sink.count = 0;
+    _ = account_api.TestSupport.commitBeginLoginWithoutDispatch(&runtime);
+    account_api.TestSupport.occupyEffectQueue(&runtime);
+    defer account_api.TestSupport.clearEffectQueue(&runtime);
+
+    const result = coordinator.commandSink().submit(.cancel_operation);
+
+    try std.testing.expect(!result.accepted);
+    try std.testing.expectEqual(
+        account_contract.ErrorCode.local_resource_exhausted,
+        result.error_code,
+    );
+    try std.testing.expectEqual(account_contract.AccountState.authorizing, runtime.view().state);
+    try std.testing.expect(runtime.view().can_cancel);
+    try std.testing.expectEqual(@as(usize, 0), sink.count);
+}
+
+test "Account cancel discards a late callback exchange secret" {
+    var runtime = try initRuntimeForTest(if (builtin.os.tag == .windows)
+        "C:\\metawork-account-late-callback-test"
+    else
+        "/tmp/metawork-account-late-callback-test");
+    defer runtime.deinit();
+    var sink: RecordingSink = .{ .runtime = &runtime };
+    var coordinator = Coordinator.init(
+        &runtime,
+        sink.port(),
+        std.Thread.getCurrentId(),
+    );
+    coordinator.startAutomation();
+    sink.count = 0;
+    const attempt_id = account_api.TestSupport.commitBeginLoginWithoutDispatch(&runtime);
+    var backing: [1024]u8 = undefined;
+    @memset(&backing, 0xaa);
+    var fixed = std.heap.FixedBufferAllocator.init(&backing);
+    var exchange_input = try account_api.TestSupport.exchangeInput(
+        fixed.allocator(),
+        "late-authorization-code",
+    );
+    account_api.TestSupport.publishLoginExchange(
+        &runtime,
+        attempt_id,
+        &exchange_input,
+    );
+
+    const result = coordinator.commandSink().submit(.cancel_operation);
+
+    try std.testing.expect(result.accepted);
+    try std.testing.expectEqual(@as(usize, 1), sink.count);
+    try std.testing.expect(sink.records[0].attempt_terminal);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        &backing,
+        "late-authorization-code",
+    ) == null);
+}
+
+test "Account shutdown discards an uncommitted effect and closes the active attempt" {
+    var runtime = try initRuntimeForTest(if (builtin.os.tag == .windows)
+        "C:\\metawork-account-shutdown-admission-test"
+    else
+        "/tmp/metawork-account-shutdown-admission-test");
+    defer runtime.deinit();
+    var sink: RecordingSink = .{ .runtime = &runtime };
+    var coordinator = Coordinator.init(
+        &runtime,
+        sink.port(),
+        std.Thread.getCurrentId(),
+    );
+    coordinator.startAutomation();
+    sink.count = 0;
+    _ = account_api.TestSupport.commitBeginLoginWithoutDispatch(&runtime);
+    account_api.TestSupport.occupyEffectQueue(&runtime);
+
+    coordinator.shutdown();
+
+    try std.testing.expectEqual(@as(usize, 1), sink.count);
+    try std.testing.expect(sink.records[0].attempt_terminal);
+    try std.testing.expectEqual(account_contract.AccountState.signed_out, runtime.view().state);
 }
 
 test "Account mailbox collision becomes one typed terminal failure" {
@@ -437,7 +547,18 @@ test "Account mailbox collision becomes one typed terminal failure" {
     coordinator.startAutomation();
     sink.count = 0;
     const attempt_id = account_api.TestSupport.commitBeginLoginWithoutDispatch(&runtime);
-    account_api.TestSupport.publishFailure(&runtime, attempt_id, .oauth_callback_rejected);
+    var backing: [1024]u8 = undefined;
+    @memset(&backing, 0xaa);
+    var fixed = std.heap.FixedBufferAllocator.init(&backing);
+    var exchange_input = try account_api.TestSupport.exchangeInput(
+        fixed.allocator(),
+        "collided-authorization-code",
+    );
+    account_api.TestSupport.publishLoginExchange(
+        &runtime,
+        attempt_id,
+        &exchange_input,
+    );
     account_api.TestSupport.publishFailure(&runtime, attempt_id, .deadline_exceeded);
 
     coordinator.drain();
@@ -449,6 +570,51 @@ test "Account mailbox collision becomes one typed terminal failure" {
         account_contract.ErrorCode.account_operation_failed,
         runtime.view().error_code,
     );
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        &backing,
+        "collided-authorization-code",
+    ) == null);
+}
+
+test "Account stale callback is ignored and its exchange secret is cleared" {
+    var runtime = try initRuntimeForTest(if (builtin.os.tag == .windows)
+        "C:\\metawork-account-stale-callback-test"
+    else
+        "/tmp/metawork-account-stale-callback-test");
+    defer runtime.deinit();
+    var sink: RecordingSink = .{ .runtime = &runtime };
+    var coordinator = Coordinator.init(
+        &runtime,
+        sink.port(),
+        std.Thread.getCurrentId(),
+    );
+    coordinator.startAutomation();
+    sink.count = 0;
+    const attempt_id = account_api.TestSupport.commitBeginLoginWithoutDispatch(&runtime);
+    var backing: [1024]u8 = undefined;
+    @memset(&backing, 0xaa);
+    var fixed = std.heap.FixedBufferAllocator.init(&backing);
+    var exchange_input = try account_api.TestSupport.exchangeInput(
+        fixed.allocator(),
+        "stale-authorization-code",
+    );
+    account_api.TestSupport.publishLoginExchange(
+        &runtime,
+        attempt_id + 1,
+        &exchange_input,
+    );
+
+    coordinator.drain();
+
+    try std.testing.expectEqual(@as(usize, 0), sink.count);
+    try std.testing.expectEqual(account_contract.AccountState.authorizing, runtime.view().state);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        &backing,
+        "stale-authorization-code",
+    ) == null);
+    coordinator.shutdown();
 }
 
 test "Account shutdown publishes one terminal fact for an active attempt" {

@@ -57,7 +57,10 @@ const IdentityAttemptKind = enum { login, refresh_token };
 const Transaction = union(enum) {
     none,
     oauth_callback: u64,
-    token_exchange: u64,
+    token_exchange: struct {
+        attempt_id: u64,
+        kind: IdentityAttemptKind,
+    },
     loading_identity: struct {
         attempt_id: u64,
         kind: IdentityAttemptKind,
@@ -67,7 +70,8 @@ const Transaction = union(enum) {
     fn attemptId(self: Transaction) ?u64 {
         return switch (self) {
             .none => null,
-            .oauth_callback, .token_exchange, .logging_out => |id| id,
+            .oauth_callback, .logging_out => |id| id,
+            .token_exchange => |value| value.attempt_id,
             .loading_identity => |value| value.attempt_id,
         };
     }
@@ -76,7 +80,10 @@ const Transaction = union(enum) {
         return switch (self) {
             .none => null,
             .oauth_callback => .login,
-            .token_exchange => .refresh_token,
+            .token_exchange => |value| switch (value.kind) {
+                .login => .login,
+                .refresh_token => .refresh_token,
+            },
             .loading_identity => |value| switch (value.kind) {
                 .login => .login,
                 .refresh_token => .refresh_token,
@@ -88,6 +95,7 @@ const Transaction = union(enum) {
 
 pub const Effect = union(enum) {
     begin_oauth,
+    exchange_login,
     refresh_token,
     load_identity,
     cancel_attempt: u64,
@@ -269,10 +277,31 @@ pub const Account = struct {
             return .{ .rejected = .generation_mismatch };
         var next = self.state;
         next.session_state = .refreshing;
-        next.transaction = .{ .token_exchange = attempt.current };
+        next.transaction = .{ .token_exchange = .{
+            .attempt_id = attempt.current,
+            .kind = .refresh_token,
+        } };
         next.next_attempt_id = attempt.next;
         next.clearError();
         return transition(next, .session_changed, attempt.current, .refresh_token);
+    }
+
+    pub fn prepareLoginExchange(
+        self: *const Account,
+        attempt_id: u64,
+    ) PrepareResult {
+        const active = switch (self.state.transaction) {
+            .oauth_callback => |value| value,
+            else => return .{ .rejected = .invalid_state },
+        };
+        if (active != attempt_id) return .ignored_stale;
+        var next = self.state;
+        next.transaction = .{ .token_exchange = .{
+            .attempt_id = attempt_id,
+            .kind = .login,
+        } };
+        next.clearError();
+        return transition(next, .session_changed, attempt_id, .exchange_login);
     }
 
     pub fn prepareCompletion(
@@ -381,8 +410,12 @@ pub const Account = struct {
     fn prepareTokensPersisted(self: *const Account) PrepareResult {
         const kind = self.state.attemptKind() orelse
             return .{ .rejected = .invalid_state };
-        if ((kind == .login and self.state.transaction != .oauth_callback) or
-            (kind == .refresh_token and self.state.transaction != .token_exchange))
+        const exchange_kind = switch (self.state.transaction) {
+            .token_exchange => |value| value.kind,
+            else => return .{ .rejected = .invalid_state },
+        };
+        if ((kind == .login and exchange_kind != .login) or
+            (kind == .refresh_token and exchange_kind != .refresh_token))
             return .{ .rejected = .invalid_state };
         var next = self.state;
         if (kind == .login or next.account_id.len == 0) {
@@ -519,6 +552,10 @@ pub const PreparedTransition = struct {
         return self.attempt_id != null and self.next.activeAttempt() == null;
     }
 
+    pub fn nextAttemptId(self: *const PreparedTransition) ?u64 {
+        return self.next.activeAttempt();
+    }
+
     pub fn takeEffect(self: *PreparedTransition) ?Effect {
         const effect = self.effect;
         self.effect = null;
@@ -617,6 +654,16 @@ fn commitPrepared(account: *Account, prepared: *PreparedTransition) void {
     prepared.deinit();
 }
 
+fn commitLoginExchange(account: *Account) !void {
+    var exchange = switch (account.prepareLoginExchange(account.activeAttempt().?)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(exchange.takeEffect().? == .exchange_login);
+    exchange.commit(account);
+    exchange.deinit();
+}
+
 test "command prepare does not mutate committed identity before commit" {
     var account = Account.initSignedOutForTest();
     var prepared = switch (account.prepareCommand(.begin_login)) {
@@ -682,6 +729,9 @@ test "explicit login persists tokens before publishing identity" {
         else => return error.TestUnexpectedResult,
     };
     commitPrepared(&account, &begin);
+    try commitLoginExchange(&account);
+    try std.testing.expect(!account.view().can_cancel);
+    try std.testing.expect(account.prepareCommand(.cancel_operation) == .rejected);
 
     var persisted: WorkerCompletion = .{ .attempt_id = account.activeAttempt().?, .payload = .tokens_persisted };
     var load_identity = switch (account.prepareCompletion(&persisted)) {
@@ -720,6 +770,7 @@ test "explicit login accepts a newly verified identity" {
         else => return error.TestUnexpectedResult,
     };
     commitPrepared(&account, &begin);
+    try commitLoginExchange(&account);
     var persisted: WorkerCompletion = .{
         .attempt_id = account.activeAttempt().?,
         .payload = .tokens_persisted,
@@ -755,6 +806,7 @@ test "failed login before token commit preserves the current identity" {
         else => return error.TestUnexpectedResult,
     };
     commitPrepared(&account, &begin);
+    try commitLoginExchange(&account);
     var completion: WorkerCompletion = .{
         .attempt_id = account.activeAttempt().?,
         .payload = .{ .failed = .fromCode(.oauth_exchange_failed) },

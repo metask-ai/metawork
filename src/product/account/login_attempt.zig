@@ -7,14 +7,14 @@ const loopback = @import("account_loopback");
 const metask = @import("metask_client");
 
 pub const WorkerResult = union(enum) {
-    authorized: oauth.TokenSet,
+    exchange: CallbackExchangeInput,
     failed: state.WorkerFailure,
     consumed,
 
     pub fn take(self: *WorkerResult) WorkerResult {
         const result: WorkerResult = switch (self.*) {
-            .authorized => |*tokens| .{
-                .authorized = tokens.take(),
+            .exchange => |*input| .{
+                .exchange = input.take(),
             },
             .failed => |failure| .{ .failed = failure },
             .consumed => .consumed,
@@ -25,10 +25,51 @@ pub const WorkerResult = union(enum) {
 
     pub fn deinit(self: *WorkerResult) void {
         switch (self.*) {
-            .authorized => |*tokens| tokens.deinit(),
+            .exchange => |*input| input.deinit(),
             .failed, .consumed => {},
         }
         self.* = .consumed;
+    }
+};
+
+pub const CallbackExchangeInput = struct {
+    code: oauth.Secret = .{},
+    verifier: [oauth.Limits.verifier_bytes]u8 = undefined,
+    callback_port: u16 = 0,
+    attempt_deadline: std.Io.Clock.Timestamp = undefined,
+    owned: bool = false,
+
+    fn init(
+        code: *oauth.Secret,
+        verifier: *const [oauth.Limits.verifier_bytes]u8,
+        callback_port: u16,
+        attempt_deadline: std.Io.Clock.Timestamp,
+    ) CallbackExchangeInput {
+        return .{
+            .code = code.take(),
+            .verifier = verifier.*,
+            .callback_port = callback_port,
+            .attempt_deadline = attempt_deadline,
+            .owned = true,
+        };
+    }
+
+    pub fn take(self: *CallbackExchangeInput) CallbackExchangeInput {
+        std.debug.assert(self.owned);
+        const result = self.*;
+        self.code = .{};
+        std.crypto.secureZero(u8, &self.verifier);
+        self.callback_port = 0;
+        self.owned = false;
+        return result;
+    }
+
+    pub fn deinit(self: *CallbackExchangeInput) void {
+        if (!self.owned) return;
+        self.code.deinit();
+        std.crypto.secureZero(u8, &self.verifier);
+        self.callback_port = 0;
+        self.owned = false;
     }
 };
 
@@ -73,8 +114,6 @@ pub const LoginAttempt = struct {
     allocator: std.mem.Allocator = undefined,
     io: std.Io = undefined,
     attempt_id: u64 = 0,
-    now_unix_seconds: i64 = 0,
-    transport: metask.Transport = undefined,
     sink: ResultSink = undefined,
     cancellation: metask.Cancellation = undefined,
     deadline: std.Io.Clock.Timestamp = undefined,
@@ -97,20 +136,15 @@ pub const LoginAttempt = struct {
         io: std.Io,
         loopback_endpoint: loopback.Endpoint,
         attempt_id: u64,
-        transport: metask.Transport,
         sink: ResultSink,
-        now_unix_seconds: i64,
     ) StartError!void {
         if (self.started) return error.AlreadyStarted;
-        if (attempt_id == 0 or now_unix_seconds < 0)
-            return error.InvalidAttempt;
+        if (attempt_id == 0) return error.InvalidAttempt;
         self.* = .{
             .allocator = allocator,
             .io = io,
             .loopback_endpoint = loopback_endpoint,
             .attempt_id = attempt_id,
-            .now_unix_seconds = now_unix_seconds,
-            .transport = transport,
             .sink = sink,
             .cancellation = .init(io),
             .deadline = std.Io.Clock.Timestamp.fromNow(
@@ -219,30 +253,15 @@ pub const LoginAttempt = struct {
                 self.sink.publish(self.attempt_id, &failure);
             },
             .code => |*code| {
-                var tokens = metask.exchangeAuthorizationCode(
-                    self.allocator,
-                    self.transport,
+                var exchange = CallbackExchangeInput.init(
                     code,
                     &self.material.verifier,
                     self.callback_port,
-                    self.now_unix_seconds,
-                    .{
-                        .cancellation = &self.cancellation,
-                        .deadline = self.deadline,
-                    },
-                ) catch |err| {
-                    var failure: WorkerResult = .{
-                        .failed = metask.workerFailure(err),
-                    };
-                    self.sink.publish(
-                        self.attempt_id,
-                        &failure,
-                    );
-                    return;
-                };
-                defer tokens.deinit();
+                    self.deadline,
+                );
+                defer exchange.deinit();
                 var worker_result: WorkerResult = .{
-                    .authorized = tokens.take(),
+                    .exchange = exchange.take(),
                 };
                 self.sink.publish(
                     self.attempt_id,
@@ -264,6 +283,29 @@ fn loopbackFailure(failure: loopback.ServerError) contract.ErrorCode {
         => .oauth_callback_rejected,
     };
 }
+
+pub const TestSupport = if (@import("builtin").is_test) struct {
+    pub fn exchangeInput(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        code_value: []const u8,
+        remaining: std.Io.Clock.Duration,
+    ) !CallbackExchangeInput {
+        var code = try oauth.Secret.init(allocator, code_value);
+        errdefer code.deinit();
+        var material = oauth.AttemptMaterial.fromSeeds(
+            [_]u8{1} ** 32,
+            [_]u8{2} ** 32,
+        );
+        defer material.deinit();
+        return CallbackExchangeInput.init(
+            &code,
+            &material.verifier,
+            49152,
+            std.Io.Clock.Timestamp.fromNow(io, remaining),
+        );
+    }
+} else struct {};
 
 const CaptureSink = struct {
     attempt_id: u64 = 0,
@@ -419,16 +461,21 @@ test "rejected login result publication releases stale token ownership" {
     var backing: [1024]u8 = undefined;
     @memset(&backing, 0xaa);
     var fixed = std.heap.FixedBufferAllocator.init(&backing);
-    var result: WorkerResult = .{ .authorized = try oauth.TokenSet.fromStored(
-        fixed.allocator(),
-        "stale-access-token",
-        "stale-refresh-token",
-        100,
-        oauth.scope,
-        "account-1",
-    ) };
-    const access_storage = result.authorized.access_token.bytes;
-    const refresh_storage = result.authorized.refresh_token.bytes;
+    var code = try oauth.Secret.init(fixed.allocator(), "stale-code");
+    var material = oauth.AttemptMaterial.fromSeeds(
+        [_]u8{1} ** 32,
+        [_]u8{2} ** 32,
+    );
+    defer material.deinit();
+    var input = CallbackExchangeInput.init(
+        &code,
+        &material.verifier,
+        49152,
+        std.Io.Clock.Timestamp.fromNow(std.testing.io, LoginAttempt.attempt_timeout),
+    );
+    var result: WorkerResult = .{ .exchange = input.take() };
+    const code_storage = result.exchange.code.bytes;
+    const verifier_storage = &result.exchange.verifier;
     const RejectingSink = struct {
         fn publish(_: *anyopaque, _: u64, _: *WorkerResult) bool {
             return false;
@@ -443,12 +490,11 @@ test "rejected login result publication releases stale token ownership" {
     sink.publish(9, &result);
 
     try std.testing.expect(result == .consumed);
-    try std.testing.expect(!std.mem.eql(u8, access_storage, "stale-access-token"));
-    try std.testing.expect(!std.mem.eql(u8, refresh_storage, "stale-refresh-token"));
+    try std.testing.expect(!std.mem.eql(u8, code_storage, "stale-code"));
+    try std.testing.expect(std.mem.allEqual(u8, verifier_storage, 0));
 }
 
-test "login attempt publishes exchanged tokens before identity lookup" {
-    var fake_transport: FakeTransport = .{};
+test "login attempt publishes owned callback exchange input" {
     var fake_loopback: FakeLoopback = .{ .io = std.testing.io };
     var capture: CaptureSink = .{};
     var attempt: LoginAttempt = .{};
@@ -457,9 +503,7 @@ test "login attempt publishes exchanged tokens before identity lookup" {
         std.testing.io,
         fake_loopback.endpoint(),
         7,
-        fake_transport.transport(),
         capture.sink(),
-        100,
     );
     defer attempt.deinit();
     try std.testing.expect(std.mem.startsWith(
@@ -472,15 +516,16 @@ test "login attempt publishes exchanged tokens before identity lookup" {
     try std.testing.expectEqual(@as(u64, 7), capture.attempt_id);
     var result = capture.result orelse return error.TestUnexpectedResult;
     defer result.deinit();
-    try std.testing.expectEqualStrings(
-        "acct-1",
-        result.authorized.accountId(),
+    try std.testing.expectEqualStrings("code", result.exchange.code.view());
+    try std.testing.expectEqual(@as(u16, 49152), result.exchange.callback_port);
+    try std.testing.expectEqualSlices(
+        u8,
+        &attempt.material.verifier,
+        &result.exchange.verifier,
     );
-    try std.testing.expectEqual(@as(usize, 1), fake_transport.step);
 }
 
 test "cancel plus join publishes one typed cancellation" {
-    var fake_transport: FakeTransport = .{};
     var fake_loopback: FakeLoopback = .{ .io = std.testing.io };
     var capture: CaptureSink = .{};
     var attempt: LoginAttempt = .{};
@@ -489,9 +534,7 @@ test "cancel plus join publishes one typed cancellation" {
         std.testing.io,
         fake_loopback.endpoint(),
         8,
-        fake_transport.transport(),
         capture.sink(),
-        100,
     );
     attempt.cancel();
     attempt.join();
@@ -502,8 +545,7 @@ test "cancel plus join publishes one typed cancellation" {
     );
 }
 
-test "cancel interrupts token exchange and join does not wait for network" {
-    var blocking_transport: BlockingTransport = .{};
+test "callback completion leaves exchange outside the cancellable login worker" {
     var fake_loopback: FakeLoopback = .{ .io = std.testing.io };
     var capture: CaptureSink = .{};
     var attempt: LoginAttempt = .{};
@@ -512,17 +554,13 @@ test "cancel interrupts token exchange and join does not wait for network" {
         std.testing.io,
         fake_loopback.endpoint(),
         9,
-        blocking_transport.transport(),
         capture.sink(),
-        100,
     );
     defer attempt.deinit();
     try fake_loopback.provideCode(&attempt.material.state);
-    blocking_transport.waitUntilStarted(std.testing.io);
-    attempt.cancel();
     attempt.join();
-    try std.testing.expectEqual(
-        contract.ErrorCode.user_cancelled,
-        capture.result.?.failed.error_code,
-    );
+    var result = capture.result orelse return error.TestUnexpectedResult;
+    defer result.deinit();
+    try std.testing.expect(result == .exchange);
+    attempt.cancel();
 }

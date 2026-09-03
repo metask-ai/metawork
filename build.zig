@@ -1060,6 +1060,7 @@ fn wireAgentCore(
     account_network_attempt.addImport("account_oauth", account_oauth);
     account_network_attempt.addImport("metask_client", metask_client);
     account_network_attempt.addImport("account_credentials_runtime", account_credentials_runtime);
+    account_network_attempt.addImport("account_login_attempt", account_login_attempt);
     const account_credential_store = b.createModule(.{
         .root_source_file = b.path("src/product/account/credential_store.zig"),
         .target = target,

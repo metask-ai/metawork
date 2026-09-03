@@ -723,3 +723,7 @@ test "MCP Application composition imports the startup owner" {
     std.testing.refAllDecls(mcp_oauth);
     std.testing.refAllDecls(mcp_management_coordinator);
 }
+
+test {
+    std.testing.refAllDecls(account_coordinator);
+}

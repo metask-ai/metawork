@@ -108,14 +108,14 @@ Account 只允许一个 identity transaction：
 ```text
 none
 | oauth_callback(attempt)
-| token_exchange(attempt)
+| token_exchange(attempt, login | refresh_token)
 | loading_identity(attempt, login | refresh_token)
 | logging_out(attempt)
 ```
 
-每个非 `none` transaction 拥有非零 attempt identity、唯一合法阶段、至多一个 worker/effect，以及成功、明确失败、取消、deadline 和 shutdown 的 terminal 规则。command 和 completion 先产生 prepared transition；prepared 被拒绝或 effect admission 失败时不得修改 committed Account state。
+每个非 `none` transaction 拥有非零 attempt identity、唯一合法阶段、至多一个 worker/effect，以及成功、明确失败、取消、deadline 和 shutdown 的 terminal 规则。command 和 completion 先产生 prepared transition；coordinator 必须按 committed current 与 prepared next 把它精确分类为 `starts | continues | finishes | no_attempt`。新 attempt 的 effect admission 失败不得提交；continuation admission 失败先提交已经观察到的外部阶段，再以 typed failure 关闭同一 attempt；terminal/no-attempt admission 失败不得误判为 continuation 或触发无 active attempt 的 panic，shutdown 必须在销毁未提交 effect 后完成收口。
 
-登录路径为：OAuth callback → token exchange → refresh token durable commit → `/me` identity validation → Account terminal commit。token 已提交后，identity 请求失败不能回滚旧 token。显式重新登录可以替换 identity，但旧 identity 在新 `/me` 验证成功前不得被新值冒充。
+登录路径为：OAuth callback → token exchange → refresh token durable commit → `/me` identity validation → Account terminal commit。loopback worker 只等待 callback并交付包含 authorization code、PKCE verifier、callback port 与总 deadline 的 owned exchange input；主线程必须先提交 `token_exchange(login)`，再由独立 network attempt 发出一次 token request，不得在 callback worker 内跨过 commit boundary或自动重放 code exchange。登录总 deadline 为 5 分钟，exchange deadline 为 `min(总 deadline 剩余时间, 30 秒)`。token 已提交后，identity 请求失败不能回滚旧 token。显式重新登录可以替换 identity，但旧 identity 在新 `/me` 验证成功前不得被新值冒充。
 
 Account coordinator 必须先提交 Account Runtime，再把 canonical Account fact提交给 Product Control，最后通知 Application 的 Models observer。Models 的 refresh/clear/install 结果不得回写、回滚或补充 Account transaction。
 
@@ -138,7 +138,7 @@ Account durable authority 只有系统安全存储中的 Metask refresh token：
 
 - 所有 Account state commit 与 projection 发生在主线程；worker 只通过有界 mailbox 交付 owned completion；
 - 每个 attempt 最多一个 terminal completion，stale completion 必须销毁 owned secret且不能改变 state；
-- 只有仍在等待 OAuth callback 的登录可以取消；credential persistence 一旦可能提交即跨过取消边界；
+- 只有仍在等待 OAuth callback 的登录可以取消；callback 被主线程提交为 `token_exchange(login)` 后取消命令即失效，credential persistence 一旦可能提交即跨过取消边界；
 - refresh timer、网络、loopback、deadline 与 cancellation 由 Account-owned policy和 Application byte/platform adapter协作收口；
 - refresh timer 或 wall clock 失败不得静默；`refresh_schedule_failed` 必须保留 `authenticated` identity、提供显式 retry，并与 hard-expiry lease gate 共同 fail closed；
 - shutdown 停止新 command，取消 timer，cancel/join worker，消费或销毁 mailbox，清零 access/refresh token，最后断开 ports；`deinit` 不执行平台 effect；
