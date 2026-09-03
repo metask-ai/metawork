@@ -588,21 +588,39 @@ pub const Registry = struct {
         protocol: ?contract.Protocol,
         source_generation: u64,
         selection_revision: u64,
+        next_default_selection_revision: ?u64,
     ) (std.mem.Allocator.Error || Error)!void {
         const same_selection = std.mem.eql(u8, principal_ref, self.metask_principal_ref) and
             std.mem.eql(u8, api_key_id, self.metask_api_key_id) and
             std.mem.eql(u8, model_id, self.metask_model_id);
+        const updates_default = self.metaskChangeUpdatesDefault(api_key_id, model_id);
         if (principal_ref.len == 0 or principal_ref.len > contract.Limits.principal_ref_bytes or
             api_key_id.len == 0 or api_key_id.len > contract.Limits.api_key_id_bytes or
             model_id.len == 0 or model_id.len > contract.Limits.model_id_bytes or
             ((protocol == null) != (source_generation == 0)) or selection_revision == 0 or
             (!same_selection and selection_revision == self.metask_selection_revision))
             return error.InvalidData;
+        if (updates_default) {
+            const revision = next_default_selection_revision orelse return error.InvalidData;
+            if (revision == 0 or revision == self.selection_revision)
+                return error.InvalidData;
+        } else if (next_default_selection_revision != null) {
+            return error.InvalidData;
+        }
         const principal = try self.allocator.dupe(u8, principal_ref);
         errdefer self.allocator.free(principal);
         const api_key = try self.allocator.dupe(u8, api_key_id);
         errdefer self.allocator.free(api_key);
         const model = try self.allocator.dupe(u8, model_id);
+        errdefer self.allocator.free(model);
+        var default_source: []u8 = &.{};
+        if (updates_default)
+            default_source = try metaskSourceIdAlloc(self.allocator, api_key_id);
+        errdefer if (default_source.len != 0) self.allocator.free(default_source);
+        var default_model: []u8 = &.{};
+        if (updates_default)
+            default_model = try self.allocator.dupe(u8, model_id);
+        errdefer if (default_model.len != 0) self.allocator.free(default_model);
         self.freeSelectionText(&self.metask_principal_ref);
         self.freeSelectionText(&self.metask_api_key_id);
         self.freeSelectionText(&self.metask_model_id);
@@ -612,6 +630,12 @@ pub const Registry = struct {
         self.metask_protocol = protocol;
         self.metask_source_generation = source_generation;
         self.metask_selection_revision = selection_revision;
+        if (updates_default) {
+            self.clearDefaultSelection();
+            self.default_source_id = default_source;
+            self.default_model_id = default_model;
+            self.selection_revision = next_default_selection_revision.?;
+        }
     }
 
     pub fn clearMetaskRuntimeAuthority(self: *Registry) void {
@@ -675,6 +699,28 @@ pub const Registry = struct {
         }
         const index = self.findIndex(source_id) orelse return false;
         return connectionHasReadyModel(&self.connections.items[index], model_id);
+    }
+
+    fn defaultTracksMetaskIntent(self: *const Registry) bool {
+        const intent = self.metaskIntent() orelse return false;
+        var source_storage: ["metask:".len + contract.Limits.api_key_id_bytes]u8 = undefined;
+        const source_id = std.fmt.bufPrint(
+            &source_storage,
+            "metask:{s}",
+            .{intent.api_key_id},
+        ) catch return false;
+        return std.mem.eql(u8, self.default_source_id, source_id) and
+            std.mem.eql(u8, self.default_model_id, intent.model_id);
+    }
+
+    pub fn metaskChangeUpdatesDefault(
+        self: *const Registry,
+        api_key_id: []const u8,
+        model_id: []const u8,
+    ) bool {
+        return self.defaultTracksMetaskIntent() and
+            (!std.mem.eql(u8, api_key_id, self.metask_api_key_id) or
+                !std.mem.eql(u8, model_id, self.metask_model_id));
     }
 
     pub fn selectMetaskDefault(
@@ -754,13 +800,27 @@ pub const Registry = struct {
     pub fn markCredentialMissing(
         self: *Registry,
         selection: contract.ModelConnectionSelectionCommand,
+        next_selection_revision: ?u64,
     ) Error!void {
         const connection = try self.selected(selection);
+        const clears_default = std.mem.eql(u8, self.default_source_id, connection.id);
+        if (clears_default) {
+            const revision = next_selection_revision orelse return error.InvalidConnection;
+            if (revision == 0 or revision == self.selection_revision)
+                return error.InvalidConnection;
+        } else if (next_selection_revision != null) {
+            return error.InvalidConnection;
+        }
+
         connection.credential_status = .missing;
         connection.state = .configuring;
         for (connection.models.items) |*model| {
             model.test_status = .untested;
             model.ready_source_generation = 0;
+        }
+        if (clears_default) {
+            self.clearDefaultSelection();
+            self.selection_revision = next_selection_revision.?;
         }
     }
 
@@ -1416,6 +1476,7 @@ pub fn decode(
             metask.protocol,
             metask.source_generation,
             metask.selection_revision,
+            null,
         );
     }
     for (wire.pending_credential_deletions, 0..) |connection_id, index| {
@@ -1819,6 +1880,74 @@ test "registry updates public metadata without exposing credential bytes" {
     try std.testing.expect(view.credential_status == .ready);
 }
 
+test "registry keeps a tracked Metask default coherent with intent changes" {
+    var registry = Registry.init(std.testing.allocator);
+    defer registry.deinit();
+    try registry.configureMetask(
+        "principal-1",
+        "api-1",
+        "model-1",
+        .anthropic_messages,
+        3,
+        5,
+        null,
+    );
+    try registry.selectMetaskDefault(7);
+
+    try std.testing.expectError(
+        error.InvalidData,
+        registry.configureMetask(
+            "principal-1",
+            "api-1",
+            "model-2",
+            .anthropic_messages,
+            3,
+            6,
+            null,
+        ),
+    );
+    try std.testing.expectEqualStrings("model-1", registry.metaskIntent().?.model_id);
+    try std.testing.expectEqualStrings("model-1", registry.defaultSelection().?.model_id);
+
+    try registry.configureMetask(
+        "principal-1",
+        "api-1",
+        "model-2",
+        .anthropic_messages,
+        3,
+        6,
+        8,
+    );
+    try std.testing.expectEqualStrings("model-2", registry.metaskIntent().?.model_id);
+    try std.testing.expectEqualStrings("metask:api-1", registry.defaultSelection().?.source_id);
+    try std.testing.expectEqualStrings("model-2", registry.defaultSelection().?.model_id);
+    try std.testing.expectEqual(@as(u64, 8), registry.selection_revision);
+
+    try registry.configureMetask(
+        "principal-1",
+        "api-2",
+        "model-2",
+        .openai_responses,
+        9,
+        10,
+        11,
+    );
+    try std.testing.expectEqualStrings("api-2", registry.metaskIntent().?.api_key_id);
+    try std.testing.expectEqualStrings("metask:api-2", registry.defaultSelection().?.source_id);
+    try std.testing.expectEqualStrings("model-2", registry.defaultSelection().?.model_id);
+    try std.testing.expectEqual(@as(u64, 11), registry.selection_revision);
+
+    const encoded = try encodeAlloc(std.testing.allocator, &registry);
+    defer std.testing.allocator.free(encoded);
+    var restored = try decode(std.testing.allocator, encoded);
+    defer restored.deinit();
+    try std.testing.expectEqualStrings("api-2", restored.metaskIntent().?.api_key_id);
+    try std.testing.expectEqualStrings("model-2", restored.metaskIntent().?.model_id);
+    try std.testing.expectEqualStrings("metask:api-2", restored.defaultSelection().?.source_id);
+    try std.testing.expectEqualStrings("model-2", restored.defaultSelection().?.model_id);
+    try std.testing.expectEqual(@as(u64, 11), restored.selection_revision);
+}
+
 test "registry fails closed when a durable credential disappears" {
     var registry = Registry.init(std.testing.allocator);
     defer registry.deinit();
@@ -1846,13 +1975,38 @@ test "registry fails closed when a durable credential disappears" {
     try registry.completeTest(probe, true);
     try registry.selectDefault(selection, "gpt-5", 7);
 
-    try registry.markCredentialMissing(selection);
+    try std.testing.expectError(
+        error.InvalidConnection,
+        registry.markCredentialMissing(selection, null),
+    );
+    try std.testing.expectEqual(
+        contract.ModelConnectionCredentialStatus.ready,
+        registry.views()[0].credential_status,
+    );
+    try std.testing.expect(registry.defaultSelection() != null);
+
+    try registry.markCredentialMissing(selection, 8);
 
     const view = registry.views()[0];
     try std.testing.expectEqual(contract.ModelConnectionCredentialStatus.missing, view.credential_status);
     try std.testing.expectEqual(contract.ModelConnectionState.configuring, view.state);
     try std.testing.expectEqual(contract.ModelConnectionTestStatus.untested, view.test_status);
+    try std.testing.expect(registry.defaultSelection() == null);
     try std.testing.expect(registry.defaultBinding() == null);
+    try std.testing.expectEqual(@as(u64, 8), registry.selection_revision);
+
+    const encoded = try encodeAlloc(std.testing.allocator, &registry);
+    defer std.testing.allocator.free(encoded);
+    var restored = try decode(std.testing.allocator, encoded);
+    defer restored.deinit();
+    try std.testing.expect(restored.defaultSelection() == null);
+    try std.testing.expectEqual(@as(u64, 8), restored.selection_revision);
+    const restored_view = restored.views()[0];
+    try std.testing.expectEqual(
+        contract.ModelConnectionCredentialStatus.missing,
+        restored_view.credential_status,
+    );
+    try std.testing.expectEqual(contract.ModelConnectionState.configuring, restored_view.state);
 }
 
 test "registry codec restores opaque slots and the durable default binding" {

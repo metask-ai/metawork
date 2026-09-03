@@ -38,6 +38,10 @@ pub const TestSupport = if (builtin.is_test) struct {
         );
         if (!runtime.metask_catalog.hasModel(selected_model))
             return error.InvalidTestModel;
+        const configure_updates_default = runtime.registry.metaskChangeUpdatesDefault(
+            api_key.id,
+            selected_model,
+        );
         try runtime.registry.configureMetask(
             principal_ref,
             api_key.id,
@@ -45,8 +49,10 @@ pub const TestSupport = if (builtin.is_test) struct {
             api_key.protocol,
             source_generation,
             metask_selection_revision,
+            if (configure_updates_default) default_selection_revision else null,
         );
-        try runtime.registry.selectMetaskDefault(default_selection_revision);
+        if (!configure_updates_default)
+            try runtime.registry.selectMetaskDefault(default_selection_revision);
         runtime.metask_catalog_state = .ready;
         runtime.metask_catalog_generation = catalog_generation;
         runtime.metask_error = .none;
@@ -327,6 +333,15 @@ pub const Runtime = struct {
             self.metask_error = .local_resource_exhausted;
             return self.metask_error;
         };
+        const updates_default = candidate.metaskChangeUpdatesDefault(api_key_id, selected_model_id);
+        const default_selection_revision = if (updates_default)
+            self.freshGeneration(candidate.selection_revision) catch {
+                self.metask_catalog_state = .failed;
+                self.metask_error = .local_resource_exhausted;
+                return self.metask_error;
+            }
+        else
+            null;
         candidate.configureMetask(
             attempt.principal_ref.view(),
             api_key_id,
@@ -334,6 +349,7 @@ pub const Runtime = struct {
             protocol,
             source_generation,
             selection_revision,
+            default_selection_revision,
         ) catch {
             self.metask_catalog_state = .failed;
             self.metask_error = .catalog_invalid;
@@ -422,7 +438,6 @@ pub const Runtime = struct {
         var candidate = self.registry.clone() catch
             return .rejected(.local_resource_exhausted);
         defer candidate.deinit();
-        const old_default_is_metask = registryDefaultIsMetask(&candidate);
         const same_authority = if (current) |value|
             std.mem.eql(u8, value.principal_ref, principal_ref) and
                 std.mem.eql(u8, value.api_key_id, api_key_id) and
@@ -436,6 +451,15 @@ pub const Runtime = struct {
                 return .rejected(.local_resource_exhausted);
         const metask_selection_revision = self.freshGeneration(current_revision) catch
             return .rejected(.local_resource_exhausted);
+        const updates_default = candidate.metaskChangeUpdatesDefault(
+            api_key_id,
+            command.selection.model_id,
+        );
+        const default_selection_revision = if (updates_default)
+            self.freshGeneration(candidate.selection_revision) catch
+                return .rejected(.local_resource_exhausted)
+        else
+            null;
         candidate.configureMetask(
             principal_ref,
             api_key_id,
@@ -443,13 +467,8 @@ pub const Runtime = struct {
             protocol,
             source_generation,
             metask_selection_revision,
+            default_selection_revision,
         ) catch |err| return .rejected(mapRegistryError(err));
-        if (old_default_is_metask) {
-            const selection_revision = self.freshGeneration(candidate.selection_revision) catch
-                return .rejected(.local_resource_exhausted);
-            candidate.selectMetaskDefault(selection_revision) catch |err|
-                return .rejected(mapRegistryError(err));
-        }
         return self.commitCandidate(&candidate, true);
     }
 
@@ -1073,6 +1092,7 @@ pub const Runtime = struct {
                     null,
                     0,
                     metask_selection_revision,
+                    null,
                 ) catch {
                     self.store_healthy = false;
                     return;
@@ -1144,22 +1164,25 @@ pub const Runtime = struct {
     }
 
     fn markCredentialMissing(self: *Runtime, binding: registry_impl.Registry.DefaultBinding) void {
-        self.registry.markCredentialMissing(.{
+        var candidate = self.registry.clone() catch {
+            self.store_healthy = false;
+            return;
+        };
+        defer candidate.deinit();
+        const selection_revision = self.freshGeneration(candidate.selection_revision) catch {
+            self.store_healthy = false;
+            return;
+        };
+        candidate.markCredentialMissing(.{
             .source_id = binding.connection_id,
             .expected_connection_revision = binding.connection_revision,
-        }) catch return;
-        const encoded = registry_impl.encodeAlloc(self.allocator, &self.registry) catch {
+        }, selection_revision) catch {
             self.store_healthy = false;
             return;
         };
-        defer self.allocator.free(encoded);
-        const store = if (self.store) |*value| value else {
+        if (!self.commitCandidate(&candidate, false).accepted) {
             self.store_healthy = false;
-            return;
-        };
-        store.commit(encoded) catch {
-            self.store_healthy = false;
-        };
+        }
     }
 
     fn drainCredentialCleanup(self: *Runtime) void {
@@ -1219,12 +1242,6 @@ fn metaskSourceMatches(source_id: []const u8, api_key_id: []const u8) bool {
         .{api_key_id},
     ) catch return false;
     return std.mem.eql(u8, source_id, expected);
-}
-
-fn registryDefaultIsMetask(registry: *const registry_impl.Registry) bool {
-    const selection = registry.defaultSelection() orelse return false;
-    const intent = registry.metaskIntent() orelse return false;
-    return metaskSourceMatches(selection.source_id, intent.api_key_id);
 }
 
 const TestVault = struct {
@@ -1347,11 +1364,46 @@ test "Models Runtime owns durable model connections and source resolution" {
             restored.deinit();
         }
         try std.testing.expectEqual(@as(usize, 1), restored.views().len);
-        var candidate = (try restored.resolveDefault()) orelse
-            return error.TestUnexpectedResult;
-        defer candidate.deinit();
-        try std.testing.expectEqualStrings("provider-secret", candidate.input().api_key);
-        try std.testing.expectEqualStrings("model_connection:" ++ TestVault.slot, candidate.input().target.provider_id);
+        {
+            var candidate = (try restored.resolveDefault()) orelse
+                return error.TestUnexpectedResult;
+            defer candidate.deinit();
+            try std.testing.expectEqualStrings("provider-secret", candidate.input().api_key);
+            try std.testing.expectEqualStrings("model_connection:" ++ TestVault.slot, candidate.input().target.provider_id);
+        }
+
+        const previous_selection_revision = restored.view().selection_revision;
+        try TestVault.delete(&vault, TestVault.slot);
+        try std.testing.expect((try restored.resolveDefault()) == null);
+        try std.testing.expect(restored.store_healthy);
+        try std.testing.expect(restored.defaultAuthority() == null);
+        try std.testing.expect(restored.view().default_selection == null);
+        try std.testing.expect(restored.view().selection_revision != previous_selection_revision);
+        const missing = restored.views()[0];
+        try std.testing.expectEqual(
+            contract.ModelConnectionCredentialStatus.missing,
+            missing.credential_status,
+        );
+        try std.testing.expectEqual(contract.ModelConnectionState.configuring, missing.state);
+    }
+
+    {
+        var restarted = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
+        try restarted.start(directory, vault.port());
+        defer {
+            restarted.stop();
+            restarted.deinit();
+        }
+        try std.testing.expect(restarted.store_healthy);
+        try std.testing.expectEqual(@as(usize, 1), restarted.views().len);
+        try std.testing.expect(restarted.defaultAuthority() == null);
+        try std.testing.expect(restarted.view().default_selection == null);
+        const missing = restarted.views()[0];
+        try std.testing.expectEqual(
+            contract.ModelConnectionCredentialStatus.missing,
+            missing.credential_status,
+        );
+        try std.testing.expectEqual(contract.ModelConnectionState.configuring, missing.state);
     }
 }
 
@@ -1496,6 +1548,125 @@ test "Models owns Metask catalog authority without changing global default" {
     try std.testing.expectEqualStrings("model-1", unavailable.metask_selection.?.model_id);
     try std.testing.expect(!runtime.defaultResolvable());
     try std.testing.expect((try runtime.resolveDefault()) == null);
+}
+
+test "Metask catalog drift keeps a tracked global default durable" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
+    const directory = directory_storage[0..directory_len];
+    var vault: TestVault = .{};
+    var committed_selection_revision: u64 = 0;
+
+    {
+        var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
+        try runtime.start(directory, vault.port());
+        defer {
+            runtime.stop();
+            runtime.deinit();
+        }
+
+        const initial = switch (runtime.prepareMetaskCatalogRefresh("principal-1", 5)) {
+            .ready => |value| value,
+            .rejected => return error.TestUnexpectedResult,
+        };
+        var initial_catalog = metask_provider.CatalogSession.init(std.testing.allocator);
+        defer initial_catalog.deinit();
+        try metask_provider.TestSupport.replaceOwnedSelection(
+            &initial_catalog,
+            "principal-1",
+            .{
+                .id = "api-1",
+                .name = "Primary",
+                .suffix = "1111",
+                .protocol = .anthropic_messages,
+            },
+            "initial-secret",
+            &.{.{ .id = "model-1", .display_name = "Model One" }},
+        );
+        var initial_completion = try metask_provider.OwnedCatalogCompletion.init(
+            std.testing.allocator,
+            &initial_catalog,
+            "model-1",
+        );
+        try std.testing.expectEqual(
+            contract.ModelsError.none,
+            runtime.completeMetaskCatalogRefresh(
+                initial.attempt_id,
+                initial.authorization_generation,
+                &initial_completion,
+            ),
+        );
+        const initial_view = runtime.view();
+        try std.testing.expect(runtime.selectMetaskDefault(.{
+            .selection = .{ .source_id = "metask:api-1", .model_id = "model-1" },
+            .expected_selection_revision = initial_view.selection_revision,
+            .expected_source_generation = initial_view.providers[0].source_generation,
+            .expected_catalog_generation = initial_view.providers[0].catalog_generation,
+        }).accepted);
+        const previous_selection_revision = runtime.view().selection_revision;
+
+        const refresh = switch (runtime.prepareMetaskCatalogRefresh("principal-1", 6)) {
+            .ready => |value| value,
+            .rejected => return error.TestUnexpectedResult,
+        };
+        try std.testing.expectEqualStrings("api-1", refresh.preferred_api_key_id);
+        try std.testing.expectEqualStrings("model-1", refresh.preferred_model_id);
+        var replacement_catalog = metask_provider.CatalogSession.init(std.testing.allocator);
+        defer replacement_catalog.deinit();
+        try metask_provider.TestSupport.replaceOwnedSelection(
+            &replacement_catalog,
+            "principal-1",
+            .{
+                .id = "api-2",
+                .name = "Replacement",
+                .suffix = "2222",
+                .protocol = .openai_responses,
+            },
+            "replacement-secret",
+            &.{.{ .id = "model-2", .display_name = "Model Two" }},
+        );
+        var replacement_completion = try metask_provider.OwnedCatalogCompletion.init(
+            std.testing.allocator,
+            &replacement_catalog,
+            "model-2",
+        );
+        try std.testing.expectEqual(
+            contract.ModelsError.none,
+            runtime.completeMetaskCatalogRefresh(
+                refresh.attempt_id,
+                refresh.authorization_generation,
+                &replacement_completion,
+            ),
+        );
+
+        const drifted = runtime.view();
+        try std.testing.expect(runtime.store_healthy);
+        try std.testing.expectEqualStrings("api-2", drifted.providers[0].selected_api_key_id);
+        try std.testing.expectEqualStrings("metask:api-2", drifted.metask_selection.?.source_id);
+        try std.testing.expectEqualStrings("model-2", drifted.metask_selection.?.model_id);
+        try std.testing.expectEqualStrings("metask:api-2", drifted.default_selection.?.source_id);
+        try std.testing.expectEqualStrings("model-2", drifted.default_selection.?.model_id);
+        try std.testing.expect(drifted.selection_revision != previous_selection_revision);
+        committed_selection_revision = drifted.selection_revision;
+    }
+
+    {
+        var restarted = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
+        try restarted.start(directory, vault.port());
+        defer {
+            restarted.stop();
+            restarted.deinit();
+        }
+        try std.testing.expect(restarted.store_healthy);
+        const restored = restarted.view();
+        try std.testing.expectEqualStrings("metask:api-2", restored.metask_selection.?.source_id);
+        try std.testing.expectEqualStrings("model-2", restored.metask_selection.?.model_id);
+        try std.testing.expectEqualStrings("metask:api-2", restored.default_selection.?.source_id);
+        try std.testing.expectEqualStrings("model-2", restored.default_selection.?.model_id);
+        try std.testing.expectEqual(committed_selection_revision, restored.selection_revision);
+    }
 }
 
 test "Models bootstrap migrates both legacy stores with custom default precedence" {
