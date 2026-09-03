@@ -511,14 +511,6 @@ pub const Runtime = struct {
         return preparedFromState(self.account.prepareRestoredTokenRefresh());
     }
 
-    pub fn prepareContinuationFailure(
-        self: *Runtime,
-        error_code: contract.ErrorCode,
-    ) Prepared {
-        self.assertMainThread();
-        return preparedFromState(self.account.prepareIdleFailure(error_code));
-    }
-
     pub fn prepareActiveAttemptFailure(
         self: *Runtime,
         error_code: contract.ErrorCode,
@@ -987,7 +979,7 @@ pub const Runtime = struct {
 
     fn prepareRefreshScheduleFailure(self: *Runtime) Prepared {
         return preparedFromState(
-            self.account.prepareIdleFailure(.refresh_schedule_failed),
+            self.account.prepareRefreshScheduleFailure(),
         );
     }
 
@@ -1331,15 +1323,6 @@ pub const TestSupport = if (builtin.is_test) struct {
             @panic("test login has no active attempt");
     }
 
-    pub fn prepareTokensPersisted(runtime: *Runtime) Prepared {
-        var completion: state_impl.WorkerCompletion = .{
-            .attempt_id = runtime.account.activeAttempt() orelse
-                @panic("test Account has no active attempt"),
-            .payload = .tokens_persisted,
-        };
-        return preparedFromState(runtime.account.prepareCompletion(&completion));
-    }
-
     pub fn prepareLoginExchange(
         runtime: *Runtime,
         input: *login_attempt.CallbackExchangeInput,
@@ -1375,11 +1358,19 @@ pub const TestSupport = if (builtin.is_test) struct {
     }
 
     pub fn prepareRefreshRetrySchedule(runtime: *Runtime) Prepared {
-        var prepared = preparedFromState(
-            runtime.account.prepareIdleFailure(.token_refresh_failed),
-        );
-        prepared.retry_refresh_after_commit = true;
-        return prepared;
+        var refresh = prepareTokenRefreshWithoutEffect(runtime);
+        runtime.commit(&refresh);
+        refresh.deinit();
+        var completion: state_impl.WorkerCompletion = .{
+            .attempt_id = runtime.account.activeAttempt() orelse
+                @panic("test Account has no active refresh attempt"),
+            .payload = .{ .failed = .fromCode(.token_refresh_failed) },
+        };
+        defer completion.deinit();
+        return switch (runtime.prepareWorkerCompletion(&completion, false)) {
+            .prepared => |prepared| prepared,
+            else => @panic("test Account cannot fail token refresh"),
+        };
     }
 
     pub fn publishFailure(

@@ -22,7 +22,6 @@ pub const Limits = struct {
     pub const callback_error_description_bytes: usize = 4096;
     pub const token_body_bytes: usize = 16 * 1024;
     pub const current_user_body_bytes: usize = 16 * 1024;
-    pub const scope_bytes: usize = 256;
 };
 
 pub const ProtocolError = error{
@@ -186,14 +185,8 @@ pub const TokenSet = struct {
     access_token: Secret,
     refresh_token: Secret,
     expires_at: i64,
-    scope_value: [Limits.scope_bytes]u8 = undefined,
-    scope_len: usize = 0,
     account_id: [contract.Limits.account_id_bytes]u8 = undefined,
     account_id_len: usize = 0,
-
-    pub fn scopeView(self: *const TokenSet) []const u8 {
-        return self.scope_value[0..self.scope_len];
-    }
 
     pub fn accountId(self: *const TokenSet) []const u8 {
         return self.account_id[0..self.account_id_len];
@@ -202,9 +195,7 @@ pub const TokenSet = struct {
     pub fn deinit(self: *TokenSet) void {
         self.access_token.deinit();
         self.refresh_token.deinit();
-        std.crypto.secureZero(u8, &self.scope_value);
         std.crypto.secureZero(u8, &self.account_id);
-        self.scope_len = 0;
         self.account_id_len = 0;
         self.expires_at = 0;
     }
@@ -213,9 +204,7 @@ pub const TokenSet = struct {
         var result = self.*;
         result.access_token = self.access_token.take();
         result.refresh_token = self.refresh_token.take();
-        std.crypto.secureZero(u8, &self.scope_value);
         std.crypto.secureZero(u8, &self.account_id);
-        self.scope_len = 0;
         self.account_id_len = 0;
         self.expires_at = 0;
         return result;
@@ -226,11 +215,9 @@ pub const TokenSet = struct {
         access_token: []const u8,
         refresh_token: []const u8,
         expires_at: i64,
-        stored_scope: []const u8,
         stored_account_id: []const u8,
     ) (ProtocolError || std.mem.Allocator.Error)!TokenSet {
         if (expires_at < 0 or
-            !std.mem.eql(u8, stored_scope, scope) or
             stored_account_id.len == 0 or
             stored_account_id.len > contract.Limits.account_id_bytes)
             return error.InvalidTokenResponse;
@@ -242,8 +229,6 @@ pub const TokenSet = struct {
         errdefer result.access_token.deinit();
         result.refresh_token = try Secret.init(allocator, refresh_token);
         errdefer result.refresh_token.deinit();
-        @memcpy(result.scope_value[0..stored_scope.len], stored_scope);
-        result.scope_len = stored_scope.len;
         @memcpy(result.account_id[0..stored_account_id.len], stored_account_id);
         result.account_id_len = stored_account_id.len;
         return result;
@@ -301,8 +286,6 @@ pub fn parseTokenResponse(
 
     if (!std.mem.eql(u8, raw.scope, scope))
         return error.InvalidTokenResponse;
-    @memcpy(result.scope_value[0..raw.scope.len], raw.scope);
-    result.scope_len = raw.scope.len;
     if (raw.account_id.len == 0 or raw.account_id.len > result.account_id.len)
         return error.FieldTooLarge;
     if (!std.unicode.utf8ValidateSlice(raw.account_id))

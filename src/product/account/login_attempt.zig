@@ -186,11 +186,6 @@ pub const LoginAttempt = struct {
             self.attempt_id == attempt_id;
     }
 
-    pub fn callbackPort(self: *const LoginAttempt) u16 {
-        std.debug.assert(self.started);
-        return self.callback_port;
-    }
-
     pub fn cancel(self: *LoginAttempt) void {
         if (!self.started or self.joined) return;
         self.cancellation.cancel();
@@ -325,76 +320,6 @@ const CaptureSink = struct {
         self.attempt_id = attempt_id;
         self.result = result.take();
         return true;
-    }
-};
-
-const FakeTransport = struct {
-    step: usize = 0,
-
-    fn transport(self: *FakeTransport) metask.Transport {
-        return .{ .context = self, .perform_fn = perform };
-    }
-
-    fn perform(
-        context: *anyopaque,
-        request: metask.Request,
-        output: []u8,
-    ) metask.TransportError!metask.Response {
-        const self: *FakeTransport = @ptrCast(@alignCast(context));
-        const body = switch (self.step) {
-            0 => blk: {
-                if (request.kind != .exchange_code)
-                    return error.ProtocolFailed;
-                break :blk
-                \\{"access_token":"access","refresh_token":"refresh","token_type":"Bearer","expires_in":3600,"scope":"metawork:use","account_id":"acct-1"}
-                ;
-            },
-            1 => blk: {
-                if (request.kind != .current_user)
-                    return error.ProtocolFailed;
-                break :blk
-                \\{"code":0,"message":"success","data":{"id":1,"username":"Metask User"}}
-                ;
-            },
-            else => return error.ProtocolFailed,
-        };
-        @memcpy(output[0..body.len], body);
-        self.step += 1;
-        return .{ .status = 200, .body = output[0..body.len] };
-    }
-};
-
-const BlockingTransport = struct {
-    started: std.atomic.Value(u32) = .init(0),
-
-    fn transport(self: *BlockingTransport) metask.Transport {
-        return .{ .context = self, .perform_fn = perform };
-    }
-
-    fn perform(
-        context: *anyopaque,
-        request: metask.Request,
-        _: []u8,
-    ) metask.TransportError!metask.Response {
-        const self: *BlockingTransport = @ptrCast(@alignCast(context));
-        if (request.kind != .exchange_code)
-            return error.ProtocolFailed;
-        const control = request.control orelse
-            return error.ProtocolFailed;
-        self.started.store(1, .release);
-        control.cancellation.io.futexWake(
-            u32,
-            &self.started.raw,
-            std.math.maxInt(u32),
-        );
-        control.cancellation.wait();
-        return error.Cancelled;
-    }
-
-    fn waitUntilStarted(self: *BlockingTransport, io: std.Io) void {
-        while (self.started.load(.acquire) == 0) {
-            io.futexWait(u32, &self.started.raw, 0) catch return;
-        }
     }
 };
 

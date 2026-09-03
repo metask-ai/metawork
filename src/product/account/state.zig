@@ -341,14 +341,12 @@ pub const Account = struct {
         };
     }
 
-    pub fn prepareIdleFailure(
-        self: *const Account,
-        error_code: contract.ErrorCode,
-    ) PrepareResult {
-        if (error_code == .none or self.state.activeAttempt() != null)
+    pub fn prepareRefreshScheduleFailure(self: *const Account) PrepareResult {
+        if (self.state.session_state != .authenticated or
+            self.state.activeAttempt() != null)
             return .{ .rejected = .invalid_state };
         var next = self.state;
-        next.error_code = error_code;
+        next.error_code = .refresh_schedule_failed;
         next.safe_diagnostic.clear();
         return transitionNoAttempt(next, .operation_failed);
     }
@@ -594,15 +592,6 @@ pub const AccountIdentity = struct {
 pub const WorkerFailure = struct {
     error_code: contract.ErrorCode,
     safe_diagnostic: SafeDiagnostic = .{},
-
-    pub fn init(error_code: contract.ErrorCode, safe_diagnostic: []const u8) contract.ValidationError!WorkerFailure {
-        if (error_code == .none) return error.InconsistentState;
-        return .{ .error_code = error_code, .safe_diagnostic = try .init(safe_diagnostic) };
-    }
-
-    pub fn diagnostic(self: *const WorkerFailure) []const u8 {
-        return self.safe_diagnostic.view();
-    }
 
     pub fn fromCode(error_code: contract.ErrorCode) WorkerFailure {
         std.debug.assert(error_code != .none);
@@ -942,6 +931,33 @@ test "restore failure returns to sign-in without restart semantics" {
     try std.testing.expectEqual(contract.AccountState.signed_out, account.view().state);
     try std.testing.expectEqual(
         contract.ErrorCode.credential_store_read_failed,
+        account.view().error_code,
+    );
+}
+
+test "refresh schedule failure is restricted to authenticated idle state" {
+    var signed_out = Account.initSignedOutForTest();
+    try std.testing.expect(
+        signed_out.prepareRefreshScheduleFailure() == .rejected,
+    );
+
+    var account = Account.initRestoring();
+    var restored = try TestSupport.prepareAuthenticated(
+        &account,
+        try AccountIdentity.init("account-1", "Metask User"),
+    );
+    commitPrepared(&account, &restored);
+    var failed = switch (account.prepareRefreshScheduleFailure()) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    commitPrepared(&account, &failed);
+    try std.testing.expectEqual(
+        contract.AccountState.authenticated,
+        account.view().state,
+    );
+    try std.testing.expectEqual(
+        contract.ErrorCode.refresh_schedule_failed,
         account.view().error_code,
     );
 }

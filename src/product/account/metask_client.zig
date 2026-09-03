@@ -55,10 +55,6 @@ pub const ClientError = error{
 
 pub const AuthorizationResult = oauth.TokenSet;
 
-pub fn workerFailure(client_error: ClientError) state.WorkerFailure {
-    return .fromCode(errorCode(client_error));
-}
-
 pub fn errorCode(client_error: ClientError) contract.ErrorCode {
     return switch (client_error) {
         error.OAuthExchangeFailed => .oauth_exchange_failed,
@@ -286,7 +282,6 @@ test "current-user failure never falls back to the token account id" {
         "access",
         "refresh",
         100,
-        oauth.scope,
         "1",
     );
     defer tokens.deinit();

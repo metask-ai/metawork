@@ -81,7 +81,6 @@ pub const CredentialOwner = struct {
             access_token,
             refresh_token,
             expires_at,
-            oauth.scope,
             account_id,
         );
         self.replace(&stored);
@@ -199,7 +198,6 @@ test "CredentialOwner replaces and clears OAuth secret ownership" {
         "access-1",
         "refresh-1",
         10,
-        oauth.scope,
         "account-1",
     );
     defer first.deinit();
@@ -208,7 +206,6 @@ test "CredentialOwner replaces and clears OAuth secret ownership" {
         "access-2",
         "refresh-2",
         20,
-        oauth.scope,
         "account-1",
     );
     defer second.deinit();
@@ -343,7 +340,6 @@ test "refresh rotation identity is captured before ownership transfer" {
         "new-access",
         "new-refresh",
         20,
-        oauth.scope,
         "account-1",
     );
     var rotation: CredentialRotation = .{
