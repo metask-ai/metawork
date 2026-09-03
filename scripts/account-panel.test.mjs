@@ -158,11 +158,12 @@ function renderGate(account, props = {}) {
   );
 }
 
-function renderSettings(account, models = readyModels) {
+function renderSettings(account, models = readyModels, options = {}) {
   return withI18n(
     createElement(SettingsPage, {
       account,
       models,
+      initialSection: options.initialSection ?? "general",
       modelConnectionCapabilities: {
         management: false,
         secretCapture: false,
@@ -187,6 +188,7 @@ function renderSettings(account, models = readyModels) {
       onActivateMetask() {},
       onSetDefaultPermissionProfile() {},
       ...callbacks,
+      ...options,
     }),
   );
 }
@@ -236,6 +238,7 @@ test("Account settings render each public session state with only its valid acti
   const checkingMarkup = renderSettings(
     { ...signedOut, state: "checking" },
     unavailableModels,
+    { initialSection: "account" },
   );
   assert.match(checkingMarkup, /Checking sign-in/);
   assert.doesNotMatch(checkingMarkup, />Sign in</);
@@ -243,6 +246,7 @@ test("Account settings render each public session state with only its valid acti
   const callbackMarkup = renderSettings(
     { ...signedOut, state: "authorizing", canCancel: true },
     unavailableModels,
+    { initialSection: "account" },
   );
   assert.match(callbackMarkup, /Complete authorization in your browser/);
   assert.match(callbackMarkup, />Cancel</);
@@ -251,12 +255,15 @@ test("Account settings render each public session state with only its valid acti
   const exchangeMarkup = renderSettings(
     { ...signedOut, state: "authorizing", canCancel: false },
     unavailableModels,
+    { initialSection: "account" },
   );
   assert.match(exchangeMarkup, /Finishing Metask sign-in/);
   assert.doesNotMatch(exchangeMarkup, />Cancel</);
   assert.doesNotMatch(exchangeMarkup, />Sign in</);
 
-  const signedOutMarkup = renderSettings(signedOut, unavailableModels);
+  const signedOutMarkup = renderSettings(signedOut, unavailableModels, {
+    initialSection: "account",
+  });
   assert.match(signedOutMarkup, /Sign in to MetaWork/);
   assert.match(signedOutMarkup, />Sign in with Metask</);
 });
@@ -360,25 +367,36 @@ test("Account errors stay inside the Account failure domain", () => {
 });
 
 test("refresh scheduling failure exposes the explicit Account retry", () => {
-  const markup = renderSettings({
-    ...readyAccount,
-    errorCode: "refresh_schedule_failed",
-  });
+  const markup = renderSettings(
+    {
+      ...readyAccount,
+      errorCode: "refresh_schedule_failed",
+    },
+    readyModels,
+    { initialSection: "account" },
+  );
   assert.match(markup, /Automatic sign-in refresh could not be scheduled/);
   assert.match(markup, />Retry sign-in refresh</);
 });
 
 test("Models preference recovery preserves Account identity and freezes selectors", () => {
-  const markup = renderSettings(readyAccount, {
-    ...readyModels,
-    persistenceHealth: "recovery_required",
-    errorCode: "migration_required",
+  const accountMarkup = renderSettings(readyAccount, readyModels, {
+    initialSection: "account",
   });
-  assert.match(markup, /Metask User/);
-  assert.match(markup, /Model configuration needs attention/);
-  assert.doesNotMatch(markup, />Sign in with Metask</);
-  assert.match(markup, /id="settings-api"[^>]*disabled/);
-  assert.match(markup, /id="settings-model"[^>]*disabled/);
+  const modelsMarkup = renderSettings(
+    readyAccount,
+    {
+      ...readyModels,
+      persistenceHealth: "recovery_required",
+      errorCode: "migration_required",
+    },
+    { initialSection: "models" },
+  );
+  assert.match(accountMarkup, /Metask User/);
+  assert.match(modelsMarkup, /Model configuration needs attention/);
+  assert.doesNotMatch(modelsMarkup, />Sign in with Metask</);
+  assert.match(modelsMarkup, /id="settings-api"[^>]*disabled/);
+  assert.match(modelsMarkup, /id="settings-model"[^>]*disabled/);
 });
 
 test("Execution commands never enter the Account busy or error scope", () => {
@@ -414,33 +432,44 @@ test("authorization has one cancel path and no reopen or reauthenticate branch",
 });
 
 test("signed-out settings keep local history reachable and expose sign-in", () => {
-  const markup = renderSettings(signedOut, unavailableModels);
+  const markup = renderSettings(signedOut, unavailableModels, {
+    initialSection: "account",
+  });
   assert.match(markup, /Sign in to MetaWork/);
   assert.match(markup, />Sign in with Metask</);
   assert.doesNotMatch(markup, /Sign out on this device/);
 });
 
 test("authenticated settings project current catalog defaults", () => {
-  const markup = renderSettings(readyAccount, readyModels);
-  assert.match(markup, /Metask User/);
-  assert.match(markup, /Primary/);
-  assert.match(markup, /Model One/);
-  assert.match(markup, /Sign out on this device/);
-  assert.match(markup, /id="settings-model-connections"[^>]*hidden=""/);
+  const accountMarkup = renderSettings(readyAccount, readyModels, {
+    initialSection: "account",
+  });
+  const modelsMarkup = renderSettings(readyAccount, readyModels, {
+    initialSection: "models",
+  });
+  assert.match(accountMarkup, /Metask User/);
+  assert.match(accountMarkup, /Sign out on this device/);
+  assert.match(modelsMarkup, /Primary/);
+  assert.match(modelsMarkup, /Model One/);
+  assert.doesNotMatch(modelsMarkup, /<section[^>]*settings-model-connections/);
 });
 
 test("catalog failure remains an authenticated retryable settings state", () => {
-  const markup = renderSettings(readyAccount, {
-    ...readyModels,
-    providers: [
-      {
-        ...readyModels.providers[0],
-        catalogState: "failed",
-        errorCode: "catalog_unavailable",
-      },
-    ],
-    errorCode: "catalog_unavailable",
-  });
+  const markup = renderSettings(
+    readyAccount,
+    {
+      ...readyModels,
+      providers: [
+        {
+          ...readyModels.providers[0],
+          catalogState: "failed",
+          errorCode: "catalog_unavailable",
+        },
+      ],
+      errorCode: "catalog_unavailable",
+    },
+    { initialSection: "models" },
+  );
   assert.match(markup, /Model configuration needs attention/);
   assert.match(markup, /Sync again/);
   assert.doesNotMatch(markup, /Sign in again/);

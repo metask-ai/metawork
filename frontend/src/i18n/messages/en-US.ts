@@ -766,11 +766,15 @@ export const enUS = {
   "settings.intro":
     "Manage the defaults MetaWork uses when you start new work.",
   "settings.sections": "Settings sections",
-  "settings.section_label": "Settings",
   "settings.general": "General",
   "settings.permissions": "Permissions",
   "settings.account": "Account",
   "settings.models": "Models",
+  "settings.general_basics": "Basics",
+  "settings.permission_defaults": "Defaults for new tasks",
+  "settings.account_profile": "Account information",
+  "settings.account_security": "Security",
+  "settings.model_connections_saved": "Saved connections",
   "settings.models_error": "Model configuration needs attention",
   "settings.models_error_help":
     "Refresh the Metask catalog or review the saved model configuration.",

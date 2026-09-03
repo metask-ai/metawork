@@ -256,6 +256,9 @@ export default function App() {
   const [bridgeReady, setBridgeReady] = useState(false);
   const [bridgeGeneration, setBridgeGeneration] = useState("0");
   const [viewSyncFailed, setViewSyncFailed] = useState(false);
+  const [rootRenderBlockReason, setRootRenderBlockReason] = useState<
+    "bootstrap_failed" | null
+  >(null);
   const {
     states: uiResponseStates,
     begin: beginUiResponse,
@@ -641,12 +644,16 @@ export default function App() {
   ]);
   const bridgeUnavailable = viewSyncFailed || !bridgeReady;
   const hasTasks = snapshot.tasks.length !== 0;
+  const snapshotAcceptedForCurrentGeneration =
+    workbench.connectionGeneration !== "0" &&
+    workbench.snapshotGeneration === workbench.connectionGeneration;
   const accountSurface = accountSurfacePolicy(
     snapshot.account,
     snapshot.models,
     hasTasks,
   );
-  const accountGateRequired = accountSurface.gateRequired;
+  const accountGateRequired =
+    snapshotAcceptedForCurrentGeneration && accountSurface.gateRequired;
   const accountSetupRequired = accountSurface.setupRequired;
 
   useEffect(() => {
@@ -953,7 +960,7 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
     const current = new WorkbenchConnection(client, {
-      onSnapshot: (next) => {
+      onSnapshot: (next, generation) => {
         if (!cancelled) {
           observeContinuationSnapshot(next);
           observeUiResponseSnapshot(next);
@@ -968,7 +975,11 @@ export default function App() {
               .catch(() => undefined);
           for (const taskId of projectedTaskIds)
             pendingTaskDraftRetention.current.delete(taskId);
-          dispatchWorkbench({ type: "snapshot.accepted", snapshot: next });
+          dispatchWorkbench({
+            type: "snapshot.accepted",
+            snapshot: next,
+            generation,
+          });
           const pendingTaskId = pendingTaskSelection.current;
           if (
             pendingTaskId &&
@@ -983,13 +994,22 @@ export default function App() {
         }
       },
       onStatus: (next) => {
-        if (!cancelled) setStatus(connectionStatus(next));
+        if (!cancelled) {
+          if (next.kind === "connected") setRootRenderBlockReason(null);
+          else if (next.failure === "bootstrap_failed")
+            setRootRenderBlockReason("bootstrap_failed");
+          setStatus(connectionStatus(next));
+        }
       },
       onReady: (ready) => {
         if (!cancelled) setBridgeReady(ready);
       },
       onGeneration: (generation) => {
-        if (!cancelled) setBridgeGeneration(generation);
+        if (!cancelled) {
+          dispatchWorkbench({ type: "generation.started", generation });
+          setBridgeGeneration(generation);
+          if (generation !== "0") setRootRenderBlockReason(null);
+        }
       },
       onViewSyncFailed: (failed) => {
         if (!cancelled) setViewSyncFailed(failed);
@@ -999,16 +1019,6 @@ export default function App() {
     void current.start().catch((error) => {
       if (!cancelled) {
         setViewSyncFailed(true);
-        if (!(error instanceof RendererBridgeContractError))
-          setStatus(
-            attentionStatus(
-              "connection.failed",
-              { scope: "connection" },
-              {
-                diagnostic: errorText(error),
-              },
-            ),
-          );
       }
     });
 
@@ -1020,6 +1030,7 @@ export default function App() {
       cancelled = true;
       if (connection.current === current) connection.current = null;
       setBridgeReady(false);
+      setRootRenderBlockReason(null);
       window.removeEventListener("pagehide", onPageHide);
       void current.stop();
     };
@@ -1188,15 +1199,9 @@ export default function App() {
     } catch (error) {
       setViewSyncFailed(true);
       setBridgeReady(false);
-      setStatus(
-        attentionStatus(
-          "connection.failed",
-          { scope: "connection" },
-          {
-            diagnostic: errorText(error),
-          },
-        ),
-      );
+      // WorkbenchConnection has already published the typed failure status.
+      // Keep the last classification intact so retry failures cannot become a
+      // generic render-gate signal.
     } finally {
       connectionBusyRef.current = false;
       setConnectionBusy(false);
@@ -2482,6 +2487,30 @@ export default function App() {
   );
   const connectionRetryable = connectionFailure.retryable;
   const accountGateStatus = selectAccountGateStatus(statuses);
+  if (rootRenderBlockReason === "bootstrap_failed")
+    return (
+      <AccountGate
+        account={snapshot.account}
+        beginLoginDisabled={viewSyncFailed || !bridgeReady || accountBusy}
+        cancelDisabled={viewSyncFailed || !bridgeReady || accountCancelBusy}
+        connectionFailed={viewSyncFailed}
+        connectionRetryable={connectionRetryable}
+        connectionTitleId={connectionFailure.titleId}
+        connectionHelpId={connectionFailure.helpId}
+        connectionSourceId={connectionShellStatus?.sourceId}
+        connectionDiagnostic={connectionShellStatus?.diagnostic}
+        reconnecting={connectionBusy}
+        notice={
+          accountGateStatus
+            ? t(accountGateStatus.id, accountGateStatus.values)
+            : ""
+        }
+        onReconnect={() => void retryViewSynchronization()}
+        onBeginLogin={() => void runAccountCommand(() => client.beginLogin())}
+        onCancel={() => void cancelAccountOperation()}
+      />
+    );
+
   if (accountGateRequired)
     return (
       <AccountGate

@@ -8,18 +8,37 @@ import { RevisionNotificationQueue } from "./revision-notification.ts";
 import { SnapshotDemand } from "./snapshot/snapshot-demand.ts";
 
 export type WorkbenchConnectionCallbacks = {
-  onSnapshot: (snapshot: WorkbenchSnapshot) => void;
+  onSnapshot: (snapshot: WorkbenchSnapshot, generation: string) => void;
   onStatus: (status: WorkbenchConnectionStatus) => void;
   onReady: (ready: boolean) => void;
   onViewSyncFailed: (failed: boolean) => void;
   onGeneration?: (generation: string) => void;
 };
 
+export type WorkbenchConnectionFailure =
+  | "bootstrap_failed"
+  | "connection_unavailable"
+  | "snapshot_sync_failed"
+  | "snapshot_contract_failed";
+
 export type WorkbenchConnectionStatus =
   | { kind: "connected"; recovered: boolean }
-  | { kind: "refresh_failed"; diagnostic: string }
+  | {
+      kind: "refresh_failed";
+      failure: "snapshot_sync_failed";
+      diagnostic: string;
+    }
+  | {
+      kind: "connection_failed";
+      failure: "bootstrap_failed" | "connection_unavailable";
+      diagnostic: string;
+    }
   | {
       kind: "contract_failed";
+      failure:
+        | "bootstrap_failed"
+        | "connection_unavailable"
+        | "snapshot_contract_failed";
       source:
         | "bootstrap"
         | "snapshot"
@@ -61,6 +80,7 @@ export class WorkbenchConnection {
         if (error instanceof RendererBridgeContractError) return;
         this.callbacks.onStatus({
           kind: "refresh_failed",
+          failure: "snapshot_sync_failed",
           diagnostic: errorText(error),
         });
       });
@@ -81,12 +101,15 @@ export class WorkbenchConnection {
       },
       (error) => this.failNotification("host_signal", error),
     );
-    await this.connect();
+    await this.connect("bootstrap_failed");
     if (this.stopped) return;
     try {
       await this.confirmConnection(false);
     } catch (error) {
       await this.disconnectCurrent();
+      if (error instanceof RendererBridgeContractError)
+        this.failNotification("bootstrap", error);
+      else this.failConnection("bootstrap_failed", error);
       throw error;
     }
   }
@@ -110,9 +133,16 @@ export class WorkbenchConnection {
     for (const delay of [0, 50, 200, 500, 1000]) {
       if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
       try {
-        await this.connect();
+        await this.connect("connection_unavailable");
         if (this.stopped) throw new Error("Workbench connection is stopped");
-        await this.confirmConnection(true);
+        try {
+          await this.confirmConnection(true);
+        } catch (error) {
+          if (error instanceof RendererBridgeContractError)
+            this.failNotification("bootstrap", error, "connection_unavailable");
+          else this.failConnection("connection_unavailable", error);
+          throw error;
+        }
         return;
       } catch (error) {
         await this.disconnectCurrent();
@@ -150,7 +180,7 @@ export class WorkbenchConnection {
               throw new Error("Host returned an invalid Workbench revision");
             if (!this.demand.accept(revision))
               throw new Error("Host returned a stale Workbench revision");
-            this.callbacks.onSnapshot(next);
+            this.callbacks.onSnapshot(next, attemptGeneration);
             if (this.demand.needsRefresh())
               throw new Error(
                 "Host snapshot did not reach the notified Workbench revision",
@@ -168,6 +198,11 @@ export class WorkbenchConnection {
             if (delay === null) {
               this.callbacks.onViewSyncFailed(true);
               this.callbacks.onReady(false);
+              this.callbacks.onStatus({
+                kind: "refresh_failed",
+                failure: "snapshot_sync_failed",
+                diagnostic: errorText(error),
+              });
               throw error;
             }
             await new Promise((resolve) => setTimeout(resolve, delay));
@@ -195,13 +230,16 @@ export class WorkbenchConnection {
       await this.client.disconnect(active).catch(() => undefined);
   }
 
-  private async connect() {
+  private async connect(
+    connectFailure: "bootstrap_failed" | "connection_unavailable",
+  ) {
     let next: string;
     try {
       next = await this.client.connect();
     } catch (error) {
       if (error instanceof RendererBridgeContractError)
-        this.failNotification("bootstrap", error);
+        this.failNotification("bootstrap", error, "bootstrap_failed");
+      else this.failConnection(connectFailure, error);
       throw error;
     }
     if (this.stopped) {
@@ -251,17 +289,42 @@ export class WorkbenchConnection {
       { kind: "contract_failed" }
     >["source"],
     error: unknown,
+    failureOverride?:
+      | "bootstrap_failed"
+      | "connection_unavailable"
+      | "snapshot_contract_failed",
   ) {
     if (this.stopped) return;
     this.callbacks.onViewSyncFailed(true);
     this.callbacks.onReady(false);
     this.callbacks.onStatus({
       kind: "contract_failed",
+      failure:
+        failureOverride ??
+        (source === "bootstrap"
+          ? "bootstrap_failed"
+          : source === "snapshot"
+            ? "snapshot_contract_failed"
+            : "connection_unavailable"),
       source,
       code:
         error instanceof RendererBridgeContractError
           ? error.code
           : "invalid_response",
+      diagnostic: errorText(error),
+    });
+  }
+
+  private failConnection(
+    failure: "bootstrap_failed" | "connection_unavailable",
+    error: unknown,
+  ) {
+    if (this.stopped) return;
+    this.callbacks.onViewSyncFailed(true);
+    this.callbacks.onReady(false);
+    this.callbacks.onStatus({
+      kind: "connection_failed",
+      failure,
       diagnostic: errorText(error),
     });
   }

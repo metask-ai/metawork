@@ -3,13 +3,23 @@ import { navigableTasks } from "./task-visibility.ts";
 
 export type WorkbenchState = {
   snapshot: WorkbenchSnapshot;
+  connectionGeneration: string;
+  snapshotGeneration: string | null;
   activeTaskId: string | null;
   draftOpen: boolean;
   draftWorkspaceId: string | null;
 };
 
 export type WorkbenchAction =
-  | { type: "snapshot.accepted"; snapshot: WorkbenchSnapshot }
+  | {
+      type: "generation.started";
+      generation: string;
+    }
+  | {
+      type: "snapshot.accepted";
+      snapshot: WorkbenchSnapshot;
+      generation?: string;
+    }
   | { type: "task.selected"; taskId: string }
   | { type: "task.draft.opened"; workspaceId: string | null }
   | { type: "task.draft.closed" };
@@ -113,6 +123,8 @@ export const initialWorkbenchState: WorkbenchState = {
     scheduledTasks: [],
     tasks: [],
   },
+  connectionGeneration: "0",
+  snapshotGeneration: null,
   activeTaskId: null,
   draftOpen: false,
   draftWorkspaceId: null,
@@ -149,10 +161,27 @@ export function workbenchReducer(
       draftWorkspaceId: null,
     };
 
+  if (action.type === "generation.started") {
+    if (action.generation === state.connectionGeneration) return state;
+    return {
+      ...state,
+      connectionGeneration: action.generation,
+      snapshotGeneration: null,
+      snapshot: initialWorkbenchState.snapshot,
+      activeTaskId: null,
+      draftOpen: false,
+      draftWorkspaceId: null,
+    };
+  }
+
+  const generation = action.generation ?? state.connectionGeneration;
+  if (generation !== state.connectionGeneration) return state;
+
   if (state.draftOpen)
     return {
       ...state,
       snapshot: action.snapshot,
+      snapshotGeneration: generation,
       activeTaskId: null,
       // A removed Workspace loses authorization, but its local draft identity
       // must survive so reauthorization can restore the same text.
@@ -170,6 +199,8 @@ export function workbenchReducer(
   const activeTaskId = activeTaskStillExists ? state.activeTaskId : null;
   return {
     snapshot: action.snapshot,
+    connectionGeneration: state.connectionGeneration,
+    snapshotGeneration: generation,
     activeTaskId,
     draftOpen: false,
     draftWorkspaceId: null,
