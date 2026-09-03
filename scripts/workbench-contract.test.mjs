@@ -37,6 +37,16 @@ const fixture = JSON.parse(
   ),
 );
 
+const modelsUnavailableFixture = JSON.parse(
+  readFileSync(
+    new URL(
+      "../frontend/src/bridge/__fixtures__/models-unavailable.fixture",
+      import.meta.url,
+    ),
+    "utf8",
+  ),
+);
+
 function clone(value) {
   return structuredClone(value);
 }
@@ -64,6 +74,32 @@ test("the canonical Workbench fixture decodes without normalization", () => {
   assert.throws(
     () => decodeWorkbenchSnapshot(impossibleRecovery),
     /recovery requires recoverable persistence health/,
+  );
+});
+
+test("durable Metask intent remains decodable when the current catalog is unavailable", () => {
+  const catalogUnavailable = clone(fixture);
+  catalogUnavailable.models = modelsUnavailableFixture;
+  catalogUnavailable.account = {
+    state: "signed_out",
+    canCancel: false,
+    accountId: "",
+    displayName: "",
+    errorCode: "none",
+    safeDiagnostic: "",
+  };
+  catalogUnavailable.newTaskAdmission = {
+    available: false,
+    reason: "credential_unavailable",
+    activeModelRef: null,
+    activeGeneration: "0",
+    activeSelectionRevision: "0",
+    state: "unavailable",
+  };
+
+  assert.deepEqual(
+    decodeWorkbenchSnapshot(catalogUnavailable).models,
+    modelsUnavailableFixture,
   );
 });
 

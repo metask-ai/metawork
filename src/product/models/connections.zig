@@ -254,19 +254,27 @@ pub const Registry = struct {
         if (self.pending_credential_deletions.items.len >=
             max_pending_credential_deletions)
             return error.Capacity;
+        const clears_default = std.mem.eql(
+            u8,
+            self.default_source_id,
+            selection.source_id,
+        );
+        if (clears_default) {
+            const revision = next_selection_revision orelse
+                return error.InvalidConnection;
+            if (revision == 0 or revision == self.selection_revision)
+                return error.InvalidConnection;
+        } else if (next_selection_revision != null) {
+            return error.InvalidConnection;
+        }
         const cleanup_id = try self.allocator.dupe(u8, connection.id);
         errdefer self.allocator.free(cleanup_id);
         try self.pending_credential_deletions.append(self.allocator, cleanup_id);
         connection.deinit(self.allocator);
         _ = self.connections.orderedRemove(index);
-        if (std.mem.eql(u8, self.default_source_id, selection.source_id)) {
-            const revision = next_selection_revision orelse return error.InvalidConnection;
-            if (revision == 0 or revision == self.selection_revision)
-                return error.InvalidConnection;
+        if (clears_default) {
             self.clearDefaultSelection();
-            self.selection_revision = revision;
-        } else if (next_selection_revision != null) {
-            return error.InvalidConnection;
+            self.selection_revision = next_selection_revision.?;
         }
     }
 
@@ -339,6 +347,16 @@ pub const Registry = struct {
                 next_source_generation.? == connection.source_generation)) or
             (!binding_changed and next_source_generation != null))
             return error.InvalidConnection;
+        const clears_default = binding_changed and
+            std.mem.eql(u8, self.default_source_id, connection.id);
+        if (clears_default) {
+            const revision = next_selection_revision orelse
+                return error.InvalidConnection;
+            if (revision == 0 or revision == self.selection_revision)
+                return error.InvalidConnection;
+        } else if (next_selection_revision != null) {
+            return error.InvalidConnection;
+        }
         const display_name = try self.allocator.dupe(u8, input.spec.display_name);
         errdefer self.allocator.free(display_name);
         const base_url = try self.allocator.dupe(u8, input.spec.normalized_base_url);
@@ -356,17 +374,12 @@ pub const Registry = struct {
                 model.ready_source_generation = 0;
             }
             connection.source_generation = next_source_generation.?;
-            if (std.mem.eql(u8, self.default_source_id, connection.id)) {
-                const revision = next_selection_revision orelse return error.InvalidConnection;
-                if (revision == 0 or revision == self.selection_revision)
-                    return error.InvalidConnection;
+            if (clears_default) {
                 self.clearDefaultSelection();
-                self.selection_revision = revision;
-            } else if (next_selection_revision != null) {
-                return error.InvalidConnection;
+                self.selection_revision = next_selection_revision.?;
             }
-        } else if (next_selection_revision != null) {
-            return error.InvalidConnection;
+        } else {
+            _ = settleTesting(connection);
         }
     }
 
@@ -423,6 +436,7 @@ pub const Registry = struct {
         try connection.models.append(self.allocator, model);
         connection.connection_revision = next_connection_revision;
         connection.catalog_generation = next_catalog_generation;
+        _ = settleTesting(connection);
     }
 
     pub fn replaceCustomModel(
@@ -458,6 +472,21 @@ pub const Registry = struct {
             command.selection.model_id,
             command.replacement.id,
         );
+        const selected_changed = std.mem.eql(
+            u8,
+            connection.selected_model,
+            command.selection.model_id,
+        );
+        const default_changed = identity_changed and
+            std.mem.eql(u8, self.default_source_id, connection.id) and
+            std.mem.eql(u8, self.default_model_id, command.selection.model_id);
+        if (default_changed) {
+            const revision = next_selection_revision orelse return error.InvalidConnection;
+            if (revision == 0 or revision == self.selection_revision)
+                return error.InvalidConnection;
+        } else if (next_selection_revision != null) {
+            return error.InvalidConnection;
+        }
         var replacement: OwnedModel = .{
             .id = try self.allocator.dupe(u8, command.replacement.id),
             .display_name = try self.allocator.dupe(u8, command.replacement.display_name),
@@ -473,25 +502,17 @@ pub const Registry = struct {
                 connection.models.items[index].ready_source_generation,
         };
         errdefer replacement.deinit(self.allocator);
-        const selected_changed = std.mem.eql(
-            u8,
-            connection.selected_model,
-            command.selection.model_id,
-        );
-        const default_changed = identity_changed and
-            std.mem.eql(u8, self.default_source_id, connection.id) and
-            std.mem.eql(u8, self.default_model_id, command.selection.model_id);
-        if (default_changed) {
-            const revision = next_selection_revision orelse return error.InvalidConnection;
-            if (revision == 0 or revision == self.selection_revision)
-                return error.InvalidConnection;
-            self.clearDefaultSelection();
-            self.selection_revision = revision;
-        } else if (next_selection_revision != null) {
-            return error.InvalidConnection;
-        }
+        var selected_model: []u8 = &.{};
         if (selected_changed and identity_changed) {
-            const selected_model = try self.allocator.dupe(u8, command.replacement.id);
+            selected_model = try self.allocator.dupe(u8, command.replacement.id);
+        }
+        errdefer if (selected_model.len != 0) self.allocator.free(selected_model);
+
+        if (default_changed) {
+            self.clearDefaultSelection();
+            self.selection_revision = next_selection_revision.?;
+        }
+        if (selected_model.len != 0) {
             self.allocator.free(connection.selected_model);
             connection.selected_model = selected_model;
         }
@@ -499,7 +520,7 @@ pub const Registry = struct {
         connection.models.items[index] = replacement;
         connection.connection_revision = next_connection_revision;
         connection.catalog_generation = next_catalog_generation;
-        refreshConnectionState(connection);
+        _ = settleTesting(connection);
     }
 
     pub fn removeCustomModel(
@@ -533,8 +554,6 @@ pub const Registry = struct {
             const revision = next_selection_revision orelse return error.InvalidConnection;
             if (revision == 0 or revision == self.selection_revision)
                 return error.InvalidConnection;
-            self.clearDefaultSelection();
-            self.selection_revision = revision;
         } else if (next_selection_revision != null) {
             return error.InvalidConnection;
         }
@@ -543,16 +562,29 @@ pub const Registry = struct {
             connection.selected_model,
             command.selection.model_id,
         );
+        var selected_model: []u8 = &.{};
+        if (selected_changed) {
+            const replacement_index: usize = if (index == 0) 1 else 0;
+            selected_model = try self.allocator.dupe(
+                u8,
+                connection.models.items[replacement_index].id,
+            );
+        }
+        errdefer if (selected_model.len != 0) self.allocator.free(selected_model);
+
+        if (default_changed) {
+            self.clearDefaultSelection();
+            self.selection_revision = next_selection_revision.?;
+        }
         connection.models.items[index].deinit(self.allocator);
         _ = connection.models.orderedRemove(index);
         if (selected_changed) {
-            const selected_model = try self.allocator.dupe(u8, connection.models.items[0].id);
             self.allocator.free(connection.selected_model);
             connection.selected_model = selected_model;
         }
         connection.connection_revision = next_connection_revision;
         connection.catalog_generation = next_catalog_generation;
-        refreshConnectionState(connection);
+        _ = settleTesting(connection);
     }
 
     /// A connection test has no durable worker. A persisted `testing` value
@@ -562,12 +594,7 @@ pub const Registry = struct {
     pub fn reconcileInterruptedTests(self: *Registry) bool {
         var changed = false;
         for (self.connections.items) |*connection| {
-            for (connection.models.items) |*model| {
-                if (model.test_status != .testing) continue;
-                model.test_status = .failed;
-                changed = true;
-            }
-            refreshConnectionState(connection);
+            if (settleTesting(connection)) changed = true;
         }
         return changed;
     }
@@ -1626,6 +1653,20 @@ fn refreshConnectionState(connection: *OwnedConnection) void {
     connection.state = .configuring;
 }
 
+fn settleTesting(connection: *OwnedConnection) bool {
+    // A revision or catalog generation advance invalidates every outstanding
+    // completion token for this connection. Publish a terminal probe state in
+    // the same transaction while retaining any already-proven source readiness.
+    var changed = false;
+    for (connection.models.items) |*model| {
+        if (model.test_status != .testing) continue;
+        model.test_status = .failed;
+        changed = true;
+    }
+    refreshConnectionState(connection);
+    return changed;
+}
+
 pub const FileStore = struct {
     io: std.Io,
     dir: std.Io.Dir,
@@ -1893,6 +1934,140 @@ test "registry updates public metadata without exposing credential bytes" {
     try std.testing.expect(view.credential_status == .ready);
 }
 
+test "registry validates default revisions before update and remove commit" {
+    var registry = Registry.init(std.testing.allocator);
+    defer registry.deinit();
+    try testCreate(&registry, .{
+        .connection_id = "slot-transaction",
+        .spec = .{
+            .display_name = "OpenAI",
+            .protocol = .openai_chat_completions,
+            .normalized_base_url = "https://api.openai.com/v1/chat/completions",
+        },
+        .credential_slot = .{ .id = "slot-transaction" },
+        .model = .{ .id = "gpt-5" },
+    });
+    const selection: contract.ModelConnectionSelectionCommand = .{
+        .source_id = "slot-transaction",
+        .expected_connection_revision = 1,
+    };
+    const probe: contract.ModelConnectionTestCommand = .{
+        .model = .{ .source_id = "slot-transaction", .model_id = "gpt-5" },
+        .expected_connection_revision = 1,
+        .expected_source_generation = 2,
+        .expected_catalog_generation = 3,
+    };
+    try registry.markTesting(probe);
+    try registry.completeTest(probe, true);
+    try registry.selectDefault(selection, "gpt-5", 7);
+    const before = try encodeAlloc(std.testing.allocator, &registry);
+    defer std.testing.allocator.free(before);
+
+    try std.testing.expectError(error.InvalidConnection, registry.update(.{
+        .selection = selection,
+        .spec = .{
+            .display_name = "OpenAI renamed",
+            .protocol = .openai_chat_completions,
+            .normalized_base_url = "https://api.openai.com/v1/chat/completions",
+        },
+    }, 4, null, 8));
+    const after_display = try encodeAlloc(std.testing.allocator, &registry);
+    defer std.testing.allocator.free(after_display);
+    try std.testing.expectEqualStrings(before, after_display);
+
+    try std.testing.expectError(error.InvalidConnection, registry.update(.{
+        .selection = selection,
+        .spec = .{
+            .display_name = "OpenAI Responses",
+            .protocol = .openai_responses,
+            .normalized_base_url = "https://api.openai.com/v1/responses",
+        },
+    }, 4, 5, null));
+    const after_binding = try encodeAlloc(std.testing.allocator, &registry);
+    defer std.testing.allocator.free(after_binding);
+    try std.testing.expectEqualStrings(before, after_binding);
+
+    try std.testing.expectError(error.InvalidConnection, registry.remove(selection, null));
+    const after_remove = try encodeAlloc(std.testing.allocator, &registry);
+    defer std.testing.allocator.free(after_remove);
+    try std.testing.expectEqualStrings(before, after_remove);
+    try std.testing.expectEqual(@as(usize, 1), registry.connectionCount());
+    try std.testing.expect(registry.nextCredentialDeletion() == null);
+    try std.testing.expect(registry.defaultSelection() != null);
+}
+
+test "display-only connection updates settle stale probes without revoking readiness" {
+    var registry = Registry.init(std.testing.allocator);
+    defer registry.deinit();
+    try testCreate(&registry, .{
+        .connection_id = "slot-retest",
+        .spec = .{
+            .display_name = "OpenAI",
+            .protocol = .openai_responses,
+            .normalized_base_url = "https://api.openai.com/v1/responses",
+        },
+        .credential_slot = .{ .id = "slot-retest" },
+        .model = .{ .id = "gpt-5" },
+    });
+    const probe: contract.ModelConnectionTestCommand = .{
+        .model = .{ .source_id = "slot-retest", .model_id = "gpt-5" },
+        .expected_connection_revision = 1,
+        .expected_source_generation = 2,
+        .expected_catalog_generation = 3,
+    };
+    try registry.markTesting(probe);
+    try registry.completeTest(probe, true);
+    try registry.selectDefault(.{
+        .source_id = "slot-retest",
+        .expected_connection_revision = 1,
+    }, "gpt-5", 7);
+    try registry.markTesting(probe);
+
+    try registry.update(.{
+        .selection = .{
+            .source_id = "slot-retest",
+            .expected_connection_revision = 1,
+        },
+        .spec = .{
+            .display_name = "OpenAI renamed",
+            .protocol = .openai_responses,
+            .normalized_base_url = "https://api.openai.com/v1/responses",
+        },
+    }, 4, null, null);
+
+    const settled = registry.views()[0];
+    try std.testing.expectEqual(contract.ModelConnectionState.ready, settled.state);
+    try std.testing.expectEqual(contract.ModelConnectionTestStatus.failed, settled.test_status);
+    try std.testing.expect(settled.models[0].ready);
+    try std.testing.expect(registry.defaultBinding() != null);
+    try std.testing.expectError(error.GenerationMismatch, registry.completeTest(probe, true));
+    try registry.markTesting(.{
+        .model = probe.model,
+        .expected_connection_revision = 4,
+        .expected_source_generation = 2,
+        .expected_catalog_generation = 3,
+    });
+
+    try registry.update(.{
+        .selection = .{
+            .source_id = "slot-retest",
+            .expected_connection_revision = 4,
+        },
+        .spec = .{
+            .display_name = "OpenAI Chat",
+            .protocol = .openai_chat_completions,
+            .normalized_base_url = "https://api.openai.com/v1/chat/completions",
+        },
+    }, 5, 6, 8);
+    const rebound = registry.views()[0];
+    try std.testing.expectEqual(contract.ModelConnectionState.configuring, rebound.state);
+    try std.testing.expectEqual(contract.ModelConnectionTestStatus.untested, rebound.test_status);
+    try std.testing.expect(!rebound.models[0].ready);
+    try std.testing.expectEqual(@as(u64, 6), rebound.source_generation);
+    try std.testing.expect(registry.defaultSelection() == null);
+    try std.testing.expectEqual(@as(u64, 8), registry.selection_revision);
+}
+
 test "registry keeps a tracked Metask default coherent with intent changes" {
     var registry = Registry.init(std.testing.allocator);
     defer registry.deinit();
@@ -2110,6 +2285,7 @@ test "custom models use source-qualified atomic CRUD and exact probe tokens" {
         .source_id = "slot-multi",
         .expected_connection_revision = 1,
     }, "model-a", 10);
+    try registry.markTesting(model_a_probe);
 
     try registry.addCustomModel(.{
         .source_id = "slot-multi",
@@ -2129,6 +2305,17 @@ test "custom models use source-qualified atomic CRUD and exact probe tokens" {
     try std.testing.expectEqual(contract.ModelMetadataProvenance.user_declared, view.models[1].metadata_provenance);
     try std.testing.expectEqual(@as(?u64, 128_000), view.models[1].metadata.max_input_tokens);
     try std.testing.expect(!view.models[1].ready);
+    try std.testing.expectEqual(contract.ModelConnectionTestStatus.failed, view.models[0].test_status);
+    try std.testing.expect(view.models[0].ready);
+    try std.testing.expectEqual(contract.ModelConnectionState.ready, view.state);
+    try std.testing.expectError(error.GenerationMismatch, registry.completeTest(model_a_probe, true));
+    const model_a_after_add: contract.ModelConnectionTestCommand = .{
+        .model = model_a_probe.model,
+        .expected_connection_revision = 4,
+        .expected_source_generation = 2,
+        .expected_catalog_generation = 5,
+    };
+    try registry.markTesting(model_a_after_add);
 
     try registry.replaceCustomModel(.{
         .selection = .{ .source_id = "slot-multi", .model_id = "model-b" },
@@ -2140,23 +2327,50 @@ test "custom models use source-qualified atomic CRUD and exact probe tokens" {
             .metadata = .{ .max_output_tokens = 32_000 },
         },
     }, 6, 7, null);
-    const model_b_probe: contract.ModelConnectionTestCommand = .{
-        .model = .{ .source_id = "slot-multi", .model_id = "model-b" },
+    view = registry.views()[0];
+    try std.testing.expectEqual(contract.ModelConnectionTestStatus.failed, view.models[0].test_status);
+    try std.testing.expect(view.models[0].ready);
+    try std.testing.expectEqual(contract.ModelConnectionState.ready, view.state);
+    try std.testing.expectError(
+        error.GenerationMismatch,
+        registry.completeTest(model_a_after_add, true),
+    );
+    const model_a_after_replace: contract.ModelConnectionTestCommand = .{
+        .model = model_a_probe.model,
         .expected_connection_revision = 6,
         .expected_source_generation = 2,
         .expected_catalog_generation = 7,
     };
-    try registry.markTesting(model_b_probe);
+    try registry.markTesting(model_a_after_replace);
     try registry.addCustomModel(.{
         .source_id = "slot-multi",
         .expected_connection_revision = 6,
         .expected_catalog_generation = 7,
         .model = .{ .id = "model-c" },
     }, 8, 9);
+    view = registry.views()[0];
+    try std.testing.expectEqual(contract.ModelConnectionTestStatus.failed, view.models[0].test_status);
+    try std.testing.expect(view.models[0].ready);
+    try std.testing.expectEqual(contract.ModelConnectionState.ready, view.state);
     try std.testing.expectError(
         error.GenerationMismatch,
-        registry.completeTest(model_b_probe, true),
+        registry.completeTest(model_a_after_replace, true),
     );
+
+    const model_b_probe: contract.ModelConnectionTestCommand = .{
+        .model = .{ .source_id = "slot-multi", .model_id = "model-b" },
+        .expected_connection_revision = 8,
+        .expected_source_generation = 2,
+        .expected_catalog_generation = 9,
+    };
+    const model_c_probe: contract.ModelConnectionTestCommand = .{
+        .model = .{ .source_id = "slot-multi", .model_id = "model-c" },
+        .expected_connection_revision = 8,
+        .expected_source_generation = 2,
+        .expected_catalog_generation = 9,
+    };
+    try registry.markTesting(model_b_probe);
+    try registry.markTesting(model_c_probe);
 
     try registry.removeCustomModel(.{
         .selection = .{ .source_id = "slot-multi", .model_id = "model-a" },
@@ -2167,6 +2381,16 @@ test "custom models use source-qualified atomic CRUD and exact probe tokens" {
     view = registry.views()[0];
     try std.testing.expectEqual(@as(usize, 2), view.models.len);
     try std.testing.expectEqual(@as(u64, 2), view.source_generation);
+    try std.testing.expectEqual(contract.ModelConnectionTestStatus.failed, view.models[0].test_status);
+    try std.testing.expectEqual(contract.ModelConnectionTestStatus.failed, view.models[1].test_status);
+    try std.testing.expectError(error.GenerationMismatch, registry.completeTest(model_b_probe, true));
+    try std.testing.expectError(error.GenerationMismatch, registry.completeTest(model_c_probe, true));
+    try registry.markTesting(.{
+        .model = model_b_probe.model,
+        .expected_connection_revision = 11,
+        .expected_source_generation = 2,
+        .expected_catalog_generation = 12,
+    });
 }
 
 test "model connection file store atomically restores registry bytes" {

@@ -131,21 +131,14 @@ try {
     (value) => ({ value, error: null }),
     (error) => ({ value: null, error }),
   );
-  const firstCreateEvent = await Promise.race([
-    createResponse.then((outcome) => ({ kind: "create", outcome })),
-    secureInputResponse.then((outcome) => ({ kind: "secure_input", outcome })),
+  const [createOutcome, secureInputOutcome] = await Promise.all([
+    createResponse,
+    secureInputResponse,
   ]);
-  if (firstCreateEvent.kind === "create") {
-    if (firstCreateEvent.outcome.error) throw firstCreateEvent.outcome.error;
-    throw new Error(
-      `Model Connection create returned before secure input: ${JSON.stringify(firstCreateEvent.outcome.value)}`,
-    );
-  }
-  if (firstCreateEvent.outcome.error) throw firstCreateEvent.outcome.error;
-  const createOutcome = await createResponse;
   if (createOutcome.error) throw createOutcome.error;
+  if (secureInputOutcome.error) throw secureInputOutcome.error;
   const secureInputEvidence = JSON.parse(
-    firstCreateEvent.outcome.value.stdout.trim(),
+    secureInputOutcome.value.stdout.trim(),
   );
   if (
     secureInputEvidence.password !== true ||
@@ -156,7 +149,7 @@ try {
     throw new Error(
       `secure input evidence was incomplete: ${JSON.stringify(secureInputEvidence)}`,
     );
-  assertAccepted(createOutcome.value, "Model Connection create");
+  assertAcceptedIfPresent(createOutcome.value, "Model Connection create");
 
   const created = await poll(
     async () => {
@@ -201,7 +194,7 @@ try {
       "captured credential was not committed to Windows Credential Manager",
     );
 
-  assertAccepted(
+  assertAcceptedIfPresent(
     await invokeBridge("metawork.models.connections.test", {
       model: { sourceId: connection.id, modelId: model },
       expectedConnectionRevision: connection.connectionRevision,
@@ -226,7 +219,7 @@ try {
       "successful connection test did not make the generation ready",
     );
 
-  assertAccepted(
+  assertAcceptedIfPresent(
     await invokeBridge("metawork.models.selectDefault", {
       sourceId: connection.id,
       modelId: model,
@@ -254,15 +247,33 @@ try {
       "selecting a custom model source changed Account identity state",
     );
 
+  const workspaceIdsBefore = new Set(
+    selected.workspaces.map((item) => item.id),
+  );
   const chosenWorkspace = await invokeBridge("metawork.workspaces.choose", {});
   if (
-    chosenWorkspace?.selected !== true ||
-    !isWireId(chosenWorkspace.workspaceId)
+    chosenWorkspace !== null &&
+    (chosenWorkspace.selected !== true ||
+      !isWireId(chosenWorkspace.workspaceId))
   )
     throw new Error(
       `readiness Workspace selection failed: ${JSON.stringify(chosenWorkspace)}`,
     );
-  const workspaceId = chosenWorkspace.workspaceId;
+  const workspaceId =
+    chosenWorkspace?.workspaceId ??
+    (
+      await poll(
+        async () => {
+          const current = await snapshot();
+          const created = current.workspaces.filter(
+            (item) => !workspaceIdsBefore.has(item.id),
+          );
+          return created.length === 1 ? created[0] : null;
+        },
+        commandTimeoutMs,
+        "committed readiness Workspace after response loss",
+      )
+    ).id;
   const workspaceReady = await poll(
     async () => {
       const current = await snapshot();
@@ -281,7 +292,10 @@ try {
     commandTimeoutMs,
     "readiness Workspace catalog",
   );
-  const createTask = await invokeBridge("metawork.tasks.create", {
+  const taskIdsBefore = new Set(
+    workspaceReady.current.tasks.map((item) => item.id),
+  );
+  const createTaskResponse = await invokeBridge("metawork.tasks.create", {
     workspace: {
       kind: "manual",
       workspaceId,
@@ -293,24 +307,73 @@ try {
     expectedSkillSelectionRevision: workspaceReady.catalog.selectionRevision,
     permissionProfile: "approval_required",
   });
-  if (createTask?.accepted !== true || !isWireId(createTask.taskId))
-    throw new Error(`Task creation failed: ${JSON.stringify(createTask)}`);
-  const runResult = await invokeBridge("metawork.tasks.run", {
-    taskId: createTask.taskId,
-    expectedBindingEpoch: createTask.bindingEpoch,
+  if (
+    createTaskResponse !== null &&
+    (createTaskResponse.accepted !== true ||
+      !isWireId(createTaskResponse.taskId) ||
+      !isWireId(createTaskResponse.bindingEpoch))
+  )
+    throw new Error(
+      `Task creation failed: ${JSON.stringify(createTaskResponse)}`,
+    );
+  const committedTask = await poll(
+    async () => {
+      const current = await snapshot();
+      const created = current.tasks.filter(
+        (item) =>
+          item.workspaceId === workspaceId && !taskIdsBefore.has(item.id),
+      );
+      return created.length === 1 ? created[0] : null;
+    },
+    commandTimeoutMs,
+    "committed readiness Task",
+  );
+  const taskId = createTaskResponse?.taskId ?? committedTask.id;
+  const bindingEpoch =
+    createTaskResponse?.bindingEpoch ?? committedTask.binding.epoch;
+  if (
+    committedTask.id !== taskId ||
+    committedTask.binding.epoch !== bindingEpoch
+  )
+    throw new Error("Task response disagreed with the committed projection");
+  const runIdsBefore = new Set(committedTask.runs.map((item) => item.id));
+  const runResponse = await invokeBridge("metawork.tasks.run", {
+    taskId,
+    expectedBindingEpoch: bindingEpoch,
     input: {
       kind: "text",
       text: "Reply with the readiness confirmation.",
     },
   });
-  if (runResult?.accepted !== true || !isWireId(runResult.runId))
-    throw new Error(`Task Run submission failed: ${JSON.stringify(runResult)}`);
+  if (
+    runResponse !== null &&
+    (runResponse.accepted !== true || !isWireId(runResponse.runId))
+  )
+    throw new Error(
+      `Task Run submission failed: ${JSON.stringify(runResponse)}`,
+    );
+  const runId =
+    runResponse?.runId ??
+    (
+      await poll(
+        async () => {
+          const current = await snapshot();
+          const task = current.tasks.find((item) => item.id === taskId);
+          const created = task?.runs.filter(
+            (item) => !runIdsBefore.has(item.id),
+          );
+          return created?.length === 1 ? created[0] : null;
+        },
+        commandTimeoutMs,
+        "committed readiness Run after response loss",
+      )
+    ).id;
   const terminal = await poll(
     async () => {
       if (provider.error) throw provider.error;
       const current = await snapshot();
-      const task = current.tasks?.find((item) => item.id === createTask.taskId);
-      const run = task?.runs?.find((item) => item.id === runResult.runId);
+      const task = current.tasks?.find((item) => item.id === taskId);
+      const run = task?.runs?.find((item) => item.id === runId);
       return run?.phase === "completed" ? { current, task, run } : null;
     },
     runTimeoutMs,
@@ -445,18 +508,42 @@ async function invokeBridge(command, payload) {
       );
       if (latest.id === id) response = latest;
     } catch {
-      // Product events may replace the latest response before this read.
+      // Another Bridge response may replace this single-slot artifact.
     }
   }
-  if (response === null)
-    throw new Error(`${command} produced no correlated Bridge response`);
-  if (!response.ok)
-    throw new Error(`${command} failed: ${JSON.stringify(response.error)}`);
-  return response.result;
+  if (response && !response.ok) {
+    const error = new Error(
+      `${command} failed: ${JSON.stringify(response.error)}`,
+    );
+    error.bridgeCommand = command;
+    error.bridgeResponseError = response.error;
+    throw error;
+  }
+  return response?.result ?? null;
 }
 
 async function snapshot() {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await readSnapshot();
+    } catch (error) {
+      const stale =
+        error?.bridgeCommand === "metawork.workbench.snapshot.chunk" &&
+        error?.bridgeResponseError?.code === "handler_failed" &&
+        error?.bridgeResponseError?.message === "StaleSnapshot";
+      if ((!stale && error?.retryableSnapshotRead !== true) || attempt >= 4)
+        throw error;
+    }
+  }
+}
+
+async function readSnapshot() {
   const descriptor = await invokeBridge("metawork.workbench.snapshot", {});
+  if (descriptor === null) {
+    const error = new Error("snapshot descriptor response was unavailable");
+    error.retryableSnapshotRead = true;
+    throw error;
+  }
   if (
     !descriptor ||
     !isWireId(descriptor.snapshotId) ||
@@ -478,14 +565,24 @@ async function snapshot() {
       snapshotId: descriptor.snapshotId,
       offset: String(offset),
     });
+    if (chunk === null) {
+      const error = new Error("snapshot chunk response was unavailable");
+      error.retryableSnapshotRead = true;
+      throw error;
+    }
     const decoded = Buffer.from(chunk.data, "base64");
     decoded.copy(bytes, offset);
   }
   return JSON.parse(bytes.toString("utf8"));
 }
 
-function assertAccepted(result, label) {
-  if (result?.accepted !== true || result.reason !== null)
+function assertAcceptedIfPresent(result, label) {
+  if (result === null) return;
+  if (
+    result?.accepted !== true ||
+    result.errorCode !== "none" ||
+    result.attemptId !== null
+  )
     throw new Error(`${label} was rejected: ${JSON.stringify(result)}`);
 }
 

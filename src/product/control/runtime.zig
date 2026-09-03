@@ -2318,51 +2318,93 @@ pub const Runtime = struct {
         return self.execution_state.generation();
     }
 
-    /// The AgentCore vertical fixture keeps its local protocol outside the production Execution
-    /// contract. This path is compiled only into `-Dautomation=true` builds;
-    /// release builds reject it before observing any input.
+    /// Automation composes its fixture through the same Models authority and
+    /// Product reconciliation path as a user-created Model Connection. Release
+    /// builds reject this Application-only bootstrap before observing input.
     pub fn installAutomationExecution(
         self: *Runtime,
         input: AutomationExecutionInput,
     ) Error!void {
-        defer self.publishScheduleChangesNoFail();
         if (!build_options.automation)
             return error.InvalidAutomationExecution;
-        if (input.credential.len == 0 or
-            input.credential.len > models_contract.Limits.credential_bytes or
-            input.model.len == 0 or
-            input.model.len > models_contract.Limits.model_id_bytes or
-            input.base_url.len == 0 or
-            input.base_url.len > models_contract.Limits.base_url_bytes or
-            !std.unicode.utf8ValidateSlice(input.model) or
-            !std.unicode.utf8ValidateSlice(input.base_url) or
-            std.mem.indexOfAny(u8, input.base_url, "\r\n") != null)
+        var view = self.modelsView();
+        if (view.model_connections.len > 1)
             return error.InvalidAutomationExecution;
-        try self.beginExecutionReplacement();
-        errdefer self.endExecutionReplacementNoFail();
-        const execution_input: models_contract.ConfigInput = .{
-            .target = .{
-                .provider_id = "metask:automation-key",
-                .protocol = input.protocol,
-                .model = input.model,
-                .base_url = input.base_url,
-            },
-            .api_key = input.credential,
-            .execution_generation = 1,
+
+        if (view.model_connections.len == 0) {
+            if (!self.createModelConnectionWithCredential(
+                input.credential,
+                .{
+                    .display_name = "Automation fixture",
+                    .protocol = input.protocol,
+                    .normalized_base_url = input.base_url,
+                },
+                .{
+                    .id = input.model,
+                    .display_name = input.model,
+                },
+            ).accepted) return error.InvalidAutomationExecution;
+        } else {
+            const restored = view.model_connections[0];
+            if (restored.credential_status != .missing or
+                !std.mem.eql(u8, restored.display_name, "Automation fixture") or
+                restored.protocol != input.protocol or
+                !std.mem.eql(u8, restored.normalized_base_url, input.base_url) or
+                restored.models.len != 1 or
+                !std.mem.eql(u8, restored.models[0].id, input.model) or
+                !self.replaceModelConnectionCredential(input.credential, .{
+                    .source_id = restored.id,
+                    .expected_connection_revision = restored.connection_revision,
+                }).accepted) return error.InvalidAutomationExecution;
+        }
+
+        view = self.modelsView();
+        if (view.model_connections.len != 1)
+            return error.InvalidAutomationExecution;
+        const created = view.model_connections[0];
+        if (created.models.len != 1 or
+            !std.mem.eql(u8, created.models[0].id, input.model))
+            return error.InvalidAutomationExecution;
+        // Every accepted Models command swaps the committed Registry. Keep the
+        // connection identity owned across those commits instead of borrowing
+        // it from a view that the first probe commit invalidates.
+        const connection_id = try self.allocator.dupe(u8, created.id);
+        defer self.allocator.free(connection_id);
+        const probe_command: models_contract.ModelConnectionTestCommand = .{
+            .model = .{ .source_id = connection_id, .model_id = input.model },
+            .expected_connection_revision = created.connection_revision,
+            .expected_source_generation = created.source_generation,
+            .expected_catalog_generation = created.catalog_generation,
         };
-        try self.execution_state.prepareInstall(
-            execution_input,
-            ScheduleCredentialRedaction{ .owner = self },
-        );
-        self.execution_state.installAutomationNoFail(.{
-            .protocol = input.protocol,
-            .credential = input.credential,
-            .model = input.model,
-            .base_url = input.base_url,
-            .generation = 1,
-        }, self.executionProjectionRedaction());
-        self.endExecutionReplacementNoFail();
-        self.finishExecutionCommitNoFail();
+        var probe = switch (self.beginModelConnectionProbe(probe_command)) {
+            .ready => |execution| execution,
+            .rejected => return error.InvalidAutomationExecution,
+        };
+        // The vertical provides the endpoint; it does not perform a second
+        // network probe during Application bootstrap. Releasing this owned
+        // config before completion preserves the normal probe ownership shape.
+        probe.deinit();
+        if (!self.completeModelConnectionTest(probe_command, true).accepted)
+            return error.InvalidAutomationExecution;
+
+        view = self.modelsView();
+        if (view.model_connections.len != 1)
+            return error.InvalidAutomationExecution;
+        const ready = view.model_connections[0];
+        if (!self.selectModelsDefault(.{
+            .selection = .{ .source_id = connection_id, .model_id = input.model },
+            .expected_selection_revision = view.selection_revision,
+            .expected_source_generation = ready.source_generation,
+            .expected_catalog_generation = ready.catalog_generation,
+        }).accepted) return error.InvalidAutomationExecution;
+
+        const default_authority = self.model_connections.defaultAuthority() orelse
+            return error.InvalidAutomationExecution;
+        if (default_authority.source != .model_connection or
+            default_authority.source_generation == 0 or
+            default_authority.selection_revision == 0 or
+            !self.modelConnectionExecutionActive(connection_id) or
+            !self.canCreateTask()) return error.InvalidAutomationExecution;
     }
 
     pub fn beginExecutionReplacement(self: *Runtime) Error!void {
@@ -9337,7 +9379,7 @@ test "explicit Schedule recovery is revision bound and reopens only its Product 
     try std.testing.expectEqual(TaskPersistenceHealth.unavailable, control.task_persistence_health);
 }
 
-test "Account authorization loss invalidates only Models Metask resolution" {
+test "Product Control snapshot serializer keeps durable Metask intent after authorization loss" {
     var control = try testRuntime();
     defer control.deinit();
     const task_id = control.task_runtime.tasks[0].?.durable.id;
@@ -9362,6 +9404,8 @@ test "Account authorization loss invalidates only Models Metask resolution" {
         after.providers[0].catalog_state,
     );
     try std.testing.expectEqual(@as(usize, 0), after.providers[0].models.len);
+    try std.testing.expectEqual(@as(usize, 0), after.providers[0].api_keys.len);
+    try std.testing.expectEqualStrings("", after.providers[0].selected_api_key_id);
     try std.testing.expectEqualStrings(
         metask_selection.model_id,
         after.metask_selection.?.model_id,
@@ -9372,6 +9416,16 @@ test "Account authorization loss invalidates only Models Metask resolution" {
     );
     try std.testing.expect(!control.canCreateTask());
     try std.testing.expectEqual(binding_epoch, try control.taskBindingEpoch(task_id));
+
+    var models_storage: [4096]u8 = undefined;
+    var models_writer = std.Io.Writer.fixed(&models_storage);
+    try control.writeModels(&models_writer);
+    const models_fixture = std.mem.trimEnd(
+        u8,
+        contract_fixture.models_unavailable,
+        "\r\n",
+    );
+    try std.testing.expectEqualStrings(models_fixture, models_writer.buffered());
 }
 
 test "Scheduled Task admission is bounded redacted and arms the Runtime clock" {
@@ -10555,6 +10609,169 @@ const TestModelConnectionVault = struct {
         self.present = false;
     }
 };
+
+test "automation installs one ordinary Model Connection without publishing its credential" {
+    if (!build_options.automation) return error.SkipZigTest;
+    test_agent_runtime.io = std.testing.io;
+    var control = try Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        &test_agent_runtime,
+        .{
+            .max_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        .{},
+    );
+    defer control.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
+    var vault: TestModelConnectionVault = .{};
+    try control.startModelConnections(
+        directory_storage[0..directory_len],
+        vault.port(),
+    );
+    defer control.stopModelConnections();
+
+    const fixture: AutomationExecutionInput = .{
+        .protocol = .anthropic_messages,
+        .credential = "AUTOMATION-FIXTURE-SECRET",
+        .model = "automation-model",
+        .base_url = "http://127.0.0.1:43123/v1/messages",
+    };
+    try control.installAutomationExecution(fixture);
+
+    const view = control.modelsView();
+    try std.testing.expectEqual(@as(usize, 1), view.model_connections.len);
+    const connection = view.model_connections[0];
+    try std.testing.expectEqual(models_contract.ModelConnectionState.ready, connection.state);
+    try std.testing.expectEqual(models_contract.ModelConnectionTestStatus.connected, connection.test_status);
+    try std.testing.expect(connection.models[0].ready);
+    try std.testing.expectEqualStrings(fixture.model, connection.models[0].id);
+    try std.testing.expectEqualStrings(fixture.base_url, connection.normalized_base_url);
+    try std.testing.expectEqualStrings(connection.id, view.default_selection.?.source_id);
+    try std.testing.expectEqualStrings(fixture.model, view.default_selection.?.model_id);
+    const authority = control.model_connections.defaultAuthority().?;
+    try std.testing.expectEqual(models_contract.Source.model_connection, authority.source);
+    try std.testing.expect(authority.source_generation != 0);
+    try std.testing.expect(authority.selection_revision != 0);
+    try std.testing.expect(control.modelConnectionExecutionActive(connection.id));
+    try std.testing.expect(control.newTaskAdmissionView().available);
+    try std.testing.expect(control.executionGeneration() != 0);
+
+    var snapshot_storage: [256 * 1024]u8 = undefined;
+    const snapshot = try control.writeSnapshot(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, fixture.credential) == null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "metask:automation-key") == null);
+
+    const generation = control.executionGeneration();
+    try std.testing.expectError(
+        error.InvalidAutomationExecution,
+        control.installAutomationExecution(fixture),
+    );
+    try std.testing.expectEqual(@as(usize, 1), control.modelsView().model_connections.len);
+    try std.testing.expectEqual(generation, control.executionGeneration());
+    try std.testing.expectEqualStrings(fixture.credential, vault.secret[0..vault.secret_len]);
+}
+
+test "production rejects automation execution before observing fixture input" {
+    if (build_options.automation) return error.SkipZigTest;
+    test_agent_runtime.io = std.testing.io;
+    var control = try Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        &test_agent_runtime,
+        .{
+            .max_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        .{},
+    );
+    defer control.deinit();
+    try std.testing.expectError(
+        error.InvalidAutomationExecution,
+        control.installAutomationExecution(.{
+            .protocol = .anthropic_messages,
+            .credential = "must-not-be-observed",
+            .model = "must-not-be-observed",
+            .base_url = "must-not-be-observed",
+        }),
+    );
+    try std.testing.expectEqual(@as(u64, 0), control.executionGeneration());
+    try std.testing.expectEqual(@as(usize, 0), control.modelsView().model_connections.len);
+}
+
+test "automation cold restore rehydrates the persisted connection through credential replacement" {
+    if (!build_options.automation) return error.SkipZigTest;
+    test_agent_runtime.io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
+    const directory = directory_storage[0..directory_len];
+    const fixture: AutomationExecutionInput = .{
+        .protocol = .anthropic_messages,
+        .credential = "AUTOMATION-RESTORE-SECRET",
+        .model = "automation-restore-model",
+        .base_url = "http://127.0.0.1:43124/v1/messages",
+    };
+
+    {
+        var first = try Runtime.init(
+            std.testing.allocator,
+            std.testing.io,
+            &test_agent_runtime,
+            .{
+                .max_tasks = 1,
+                .max_runs_per_task = 1,
+                .max_tools_per_run = 1,
+            },
+            .{},
+        );
+        defer first.deinit();
+        var first_vault: TestModelConnectionVault = .{};
+        try first.startModelConnections(directory, first_vault.port());
+        defer first.stopModelConnections();
+        try first.installAutomationExecution(fixture);
+    }
+
+    {
+        var restored = try Runtime.init(
+            std.testing.allocator,
+            std.testing.io,
+            &test_agent_runtime,
+            .{
+                .max_tasks = 1,
+                .max_runs_per_task = 1,
+                .max_tools_per_run = 1,
+            },
+            .{},
+        );
+        defer restored.deinit();
+        var restored_vault: TestModelConnectionVault = .{};
+        try restored.startModelConnections(directory, restored_vault.port());
+        defer restored.stopModelConnections();
+        try std.testing.expectEqual(
+            models_contract.ModelConnectionCredentialStatus.missing,
+            restored.modelsView().model_connections[0].credential_status,
+        );
+
+        try restored.installAutomationExecution(fixture);
+        const view = restored.modelsView();
+        try std.testing.expectEqual(@as(usize, 1), view.model_connections.len);
+        try std.testing.expectEqual(models_contract.ModelConnectionState.ready, view.model_connections[0].state);
+        try std.testing.expect(view.default_selection != null);
+        try std.testing.expect(restored.newTaskAdmissionView().available);
+        try std.testing.expectEqualStrings(
+            fixture.credential,
+            restored_vault.secret[0..restored_vault.secret_len],
+        );
+    }
+}
 
 fn createReadyTestModelConnection(
     control: *Runtime,

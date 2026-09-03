@@ -176,14 +176,6 @@ pub const ExecutionIdentity = struct {
     protocol: models_contract.Protocol,
 };
 
-pub const AutomationInput = struct {
-    protocol: models_contract.Protocol,
-    credential: []const u8,
-    model: []const u8,
-    base_url: []const u8,
-    generation: u64,
-};
-
 pub const ProjectionRedaction = struct {
     context: *anyopaque,
     apply_fn: *const fn (*anyopaque, []const u8) void,
@@ -288,31 +280,6 @@ pub const State = struct {
         if (self.custom_binding) |*previous| previous.deinit();
         self.custom_binding = prepared_binding.*;
         prepared_binding.* = undefined;
-    }
-
-    pub fn installAutomationNoFail(
-        self: *State,
-        input: AutomationInput,
-        redaction: ProjectionRedaction,
-    ) void {
-        const execution_input: models_contract.ConfigInput = .{
-            .target = .{
-                .provider_id = "metask:automation-key",
-                .protocol = input.protocol,
-                .model = input.model,
-                .base_url = input.base_url,
-            },
-            .api_key = input.credential,
-            .execution_generation = input.generation,
-        };
-        self.consumeInstallPreparation(execution_input);
-        redaction.apply(self.execution.credential());
-        redaction.apply(input.credential);
-        if (self.custom_binding) |*binding| binding.deinit();
-        self.custom_binding = null;
-        self.execution.installBytesNoFail(execution_input);
-        self.metask_source_binding_generation = 0;
-        self.default_selection_revision = 0;
     }
 
     pub fn clearNoFail(self: *State, redaction: ProjectionRedaction) void {

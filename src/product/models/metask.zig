@@ -576,30 +576,6 @@ pub const PublicCatalog = struct {
         self.model_count = source.model_count;
     }
 
-    /// A restored source preference contains the selected catalog identities
-    /// but no complete Metask catalog. Publish the smallest truthful catalog
-    /// until the authenticated catalog refresh replaces it. This keeps a ready
-    /// ModelsView internally consistent without inventing display metadata.
-    pub fn replaceRestoredSelection(
-        self: *PublicCatalog,
-        api_key_id: []const u8,
-        protocol: contract.Protocol,
-        model_id: []const u8,
-    ) void {
-        std.debug.assert(api_key_id.len > 0);
-        std.debug.assert(model_id.len > 0);
-        self.api_key_count = 1;
-        self.model_catalog_api_key_id.set(api_key_id);
-        self.api_keys[0].id.set(api_key_id);
-        self.api_keys[0].name.set("");
-        self.api_keys[0].suffix.set("");
-        self.api_keys[0].protocol = protocol;
-        self.model_count = 1;
-        self.models[0].id.set(model_id);
-        self.models[0].display_name.set("");
-        self.models[0].metadata = .{};
-    }
-
     pub fn clear(self: *PublicCatalog) void {
         self.model_catalog_api_key_id.set("");
         self.api_key_count = 0;
@@ -1206,10 +1182,9 @@ test "model declarations survive owned catalog copies and never leak into a repl
     var committed: PublicCatalog = .{};
     committed.replaceFromPublic(&candidate);
     session.reset();
-    candidate.replaceRestoredSelection("other-key", .openai_chat_completions, "model-1");
+    candidate.clear();
     try std.testing.expectEqualDeep(expected, committed.modelViews()[0].metadata);
-
-    try std.testing.expectEqualDeep(contract.ModelMetadata{}, candidate.modelViews()[0].metadata);
+    try std.testing.expectEqual(@as(usize, 0), candidate.modelViews().len);
 
     parsed = try parseModels(std.testing.allocator, model_fixture);
     session.models.deinit(session.allocator);
