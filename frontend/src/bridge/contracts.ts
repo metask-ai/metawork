@@ -166,8 +166,7 @@ export type ModelsErrorCode =
 
 export type ModelsView = {
   availability: ModelsCatalogState;
-  persistenceHealth:
-    "ready" | "recovery_required" | "unavailable";
+  persistenceHealth: "ready" | "recovery_required" | "unavailable";
   providers: {
     id: string;
     displayName: string;

@@ -1842,7 +1842,7 @@ test "Models bootstrap initializes canonical store and ignores retired files" {
 
 test "Models bootstrap rejects retired and damaged canonical shapes" {
     const inputs = [_][]const u8{
-        "{\"schema\":1,\"metask\":null,\"default_selection\":null,\"selection_revision\":0,\"migration\":{\"preference_recovery_required\":false,\"connections_recovery_required\":false,\"default_migration_required\":false},\"pending_credential_deletions\":[],\"connections\":[]}",
+        "{\"default_connection_id\":null,\"default_execution_generation\":0,\"pending_credential_deletions\":[],\"connections\":[]}",
         "not-json",
     };
     for (inputs) |input| {
