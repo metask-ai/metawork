@@ -2327,23 +2327,38 @@ pub const Runtime = struct {
     ) Error!void {
         if (!build_options.automation)
             return error.InvalidAutomationExecution;
-        if (self.modelsView().model_connections.len != 0)
+        var view = self.modelsView();
+        if (view.model_connections.len > 1)
             return error.InvalidAutomationExecution;
 
-        if (!self.createModelConnectionWithCredential(
-            input.credential,
-            .{
-                .display_name = "Automation fixture",
-                .protocol = input.protocol,
-                .normalized_base_url = input.base_url,
-            },
-            .{
-                .id = input.model,
-                .display_name = input.model,
-            },
-        ).accepted) return error.InvalidAutomationExecution;
+        if (view.model_connections.len == 0) {
+            if (!self.createModelConnectionWithCredential(
+                input.credential,
+                .{
+                    .display_name = "Automation fixture",
+                    .protocol = input.protocol,
+                    .normalized_base_url = input.base_url,
+                },
+                .{
+                    .id = input.model,
+                    .display_name = input.model,
+                },
+            ).accepted) return error.InvalidAutomationExecution;
+        } else {
+            const restored = view.model_connections[0];
+            if (restored.credential_status != .missing or
+                !std.mem.eql(u8, restored.display_name, "Automation fixture") or
+                restored.protocol != input.protocol or
+                !std.mem.eql(u8, restored.normalized_base_url, input.base_url) or
+                restored.models.len != 1 or
+                !std.mem.eql(u8, restored.models[0].id, input.model) or
+                !self.replaceModelConnectionCredential(input.credential, .{
+                    .source_id = restored.id,
+                    .expected_connection_revision = restored.connection_revision,
+                }).accepted) return error.InvalidAutomationExecution;
+        }
 
-        var view = self.modelsView();
+        view = self.modelsView();
         if (view.model_connections.len != 1)
             return error.InvalidAutomationExecution;
         const created = view.model_connections[0];
@@ -10688,6 +10703,74 @@ test "production rejects automation execution before observing fixture input" {
     );
     try std.testing.expectEqual(@as(u64, 0), control.executionGeneration());
     try std.testing.expectEqual(@as(usize, 0), control.modelsView().model_connections.len);
+}
+
+test "automation cold restore rehydrates the persisted connection through credential replacement" {
+    if (!build_options.automation) return error.SkipZigTest;
+    test_agent_runtime.io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
+    const directory = directory_storage[0..directory_len];
+    const fixture: AutomationExecutionInput = .{
+        .protocol = .anthropic_messages,
+        .credential = "AUTOMATION-RESTORE-SECRET",
+        .model = "automation-restore-model",
+        .base_url = "http://127.0.0.1:43124/v1/messages",
+    };
+
+    {
+        var first = try Runtime.init(
+            std.testing.allocator,
+            std.testing.io,
+            &test_agent_runtime,
+            .{
+                .max_tasks = 1,
+                .max_runs_per_task = 1,
+                .max_tools_per_run = 1,
+            },
+            .{},
+        );
+        defer first.deinit();
+        var first_vault: TestModelConnectionVault = .{};
+        try first.startModelConnections(directory, first_vault.port());
+        defer first.stopModelConnections();
+        try first.installAutomationExecution(fixture);
+    }
+
+    {
+        var restored = try Runtime.init(
+            std.testing.allocator,
+            std.testing.io,
+            &test_agent_runtime,
+            .{
+                .max_tasks = 1,
+                .max_runs_per_task = 1,
+                .max_tools_per_run = 1,
+            },
+            .{},
+        );
+        defer restored.deinit();
+        var restored_vault: TestModelConnectionVault = .{};
+        try restored.startModelConnections(directory, restored_vault.port());
+        defer restored.stopModelConnections();
+        try std.testing.expectEqual(
+            models_contract.ModelConnectionCredentialStatus.missing,
+            restored.modelsView().model_connections[0].credential_status,
+        );
+
+        try restored.installAutomationExecution(fixture);
+        const view = restored.modelsView();
+        try std.testing.expectEqual(@as(usize, 1), view.model_connections.len);
+        try std.testing.expectEqual(models_contract.ModelConnectionState.ready, view.model_connections[0].state);
+        try std.testing.expect(view.default_selection != null);
+        try std.testing.expect(restored.newTaskAdmissionView().available);
+        try std.testing.expectEqualStrings(
+            fixture.credential,
+            restored_vault.secret[0..restored_vault.secret_len],
+        );
+    }
 }
 
 fn createReadyTestModelConnection(
