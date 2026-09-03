@@ -69,6 +69,10 @@ pub const Adapter = struct {
                 .start_fn = startTimer,
                 .cancel_fn = cancelTimer,
             },
+            .wall_clock = .{
+                .context = self,
+                .now_unix_seconds_fn = nowUnixSeconds,
+            },
         };
     }
 
@@ -98,6 +102,16 @@ pub const Adapter = struct {
         const self: *Adapter = @ptrCast(@alignCast(context));
         try self.assertMainThread();
         try self.services.cancelTimer(timer_id);
+    }
+
+    fn nowUnixSeconds(context: *anyopaque) ?i64 {
+        const self: *Adapter = @ptrCast(@alignCast(context));
+        self.assertMainThread() catch return null;
+        const nanoseconds = std.Io.Timestamp.now(self.io, .real).nanoseconds;
+        if (nanoseconds < 0) return null;
+        const seconds = @divFloor(nanoseconds, std.time.ns_per_s);
+        if (seconds > std.math.maxInt(i64)) return null;
+        return @intCast(seconds);
     }
 
     fn setRefreshToken(

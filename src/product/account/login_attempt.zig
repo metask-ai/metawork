@@ -415,6 +415,38 @@ const FakeLoopback = struct {
     fn close(_: *anyopaque) void {}
 };
 
+test "rejected login result publication releases stale token ownership" {
+    var backing: [1024]u8 = undefined;
+    @memset(&backing, 0xaa);
+    var fixed = std.heap.FixedBufferAllocator.init(&backing);
+    var result: WorkerResult = .{ .authorized = try oauth.TokenSet.fromStored(
+        fixed.allocator(),
+        "stale-access-token",
+        "stale-refresh-token",
+        100,
+        oauth.scope,
+        "account-1",
+    ) };
+    const access_storage = result.authorized.access_token.bytes;
+    const refresh_storage = result.authorized.refresh_token.bytes;
+    const RejectingSink = struct {
+        fn publish(_: *anyopaque, _: u64, _: *WorkerResult) bool {
+            return false;
+        }
+    };
+    var context: u8 = 0;
+    const sink: ResultSink = .{
+        .context = &context,
+        .publish_fn = RejectingSink.publish,
+    };
+
+    sink.publish(9, &result);
+
+    try std.testing.expect(result == .consumed);
+    try std.testing.expect(!std.mem.eql(u8, access_storage, "stale-access-token"));
+    try std.testing.expect(!std.mem.eql(u8, refresh_storage, "stale-refresh-token"));
+}
+
 test "login attempt publishes exchanged tokens before identity lookup" {
     var fake_transport: FakeTransport = .{};
     var fake_loopback: FakeLoopback = .{ .io = std.testing.io };

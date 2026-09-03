@@ -35,8 +35,18 @@ pub const Timer = struct {
     }
 };
 
+pub const WallClock = struct {
+    context: *anyopaque,
+    now_unix_seconds_fn: *const fn (*anyopaque) ?i64,
+
+    pub fn nowUnixSeconds(self: WallClock) ?i64 {
+        return self.now_unix_seconds_fn(self.context);
+    }
+};
+
 pub const Platform = struct {
     credentials: credential_store.Backend,
     authorization_url: AuthorizationUrl,
     timer: Timer,
+    wall_clock: WallClock,
 };

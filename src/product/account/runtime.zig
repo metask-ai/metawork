@@ -770,7 +770,7 @@ pub const Runtime = struct {
                     self.publishFailure(attempt_id, .credential_store_read_failed);
                     return;
                 };
-                const now = wallUnixSeconds(self.io) orelse {
+                const now = platform.wall_clock.nowUnixSeconds() orelse {
                     self.publishFailure(attempt_id, .account_operation_failed);
                     return;
                 };
@@ -783,7 +783,11 @@ pub const Runtime = struct {
                     self.publishFailure(attempt_id, .credential_store_read_failed);
                     return;
                 }
-                const now = wallUnixSeconds(self.io) orelse {
+                const platform = self.platform orelse {
+                    self.publishFailure(attempt_id, .credential_store_read_failed);
+                    return;
+                };
+                const now = platform.wall_clock.nowUnixSeconds() orelse {
                     self.publishFailure(attempt_id, .account_operation_failed);
                     return;
                 };
@@ -839,7 +843,7 @@ pub const Runtime = struct {
             platform.timer.cancel(refresh_timer_id) catch {};
             return;
         };
-        const now = wallUnixSeconds(self.io) orelse return;
+        const now = platform.wall_clock.nowUnixSeconds() orelse return;
         const refresh_at = expires_at -| refresh_skew_seconds;
         const interval_ns = if (refresh_at <= now)
             refresh_retry_ns
@@ -901,6 +905,167 @@ pub const Runtime = struct {
 
 pub const TestSupport = if (builtin.is_test) struct {
     var loopback_context: u8 = 0;
+    const credential_capacity = 4096;
+
+    pub const Platform = struct {
+        now_unix_seconds: ?i64 = 100,
+        refresh_token: [credential_capacity]u8 = undefined,
+        refresh_token_len: ?usize = null,
+        credential_read_fails: bool = false,
+        credential_write_fails: bool = false,
+        credential_delete_fails: bool = false,
+        authorization_open_fails: bool = false,
+        timer_start_fails: bool = false,
+        timer_cancel_fails: bool = false,
+        authorization_open_count: usize = 0,
+        timer_start_count: usize = 0,
+        timer_cancel_count: usize = 0,
+        last_timer_id: ?u64 = null,
+        last_timer_interval_ns: u64 = 0,
+
+        pub fn ports(self: *Platform) ports_impl.Platform {
+            return .{
+                .credentials = .{
+                    .context = self,
+                    .set_refresh_token_fn = setRefreshToken,
+                    .get_refresh_token_fn = getRefreshToken,
+                    .delete_refresh_token_fn = deleteRefreshToken,
+                },
+                .authorization_url = .{
+                    .context = self,
+                    .open_fn = openAuthorizationUrl,
+                },
+                .timer = .{
+                    .context = self,
+                    .start_fn = startTimer,
+                    .cancel_fn = cancelTimer,
+                },
+                .wall_clock = .{
+                    .context = self,
+                    .now_unix_seconds_fn = nowUnixSeconds,
+                },
+            };
+        }
+
+        pub fn setStoredRefreshToken(self: *Platform, value: []const u8) !void {
+            if (value.len == 0 or value.len > self.refresh_token.len)
+                return error.InvalidTestCredential;
+            @memcpy(self.refresh_token[0..value.len], value);
+            self.refresh_token_len = value.len;
+        }
+
+        fn setRefreshToken(
+            context: *anyopaque,
+            value: []const u8,
+        ) credential_store.StoreError!void {
+            const self: *Platform = @ptrCast(@alignCast(context));
+            if (self.credential_write_fails or value.len > self.refresh_token.len)
+                return error.WriteFailed;
+            @memcpy(self.refresh_token[0..value.len], value);
+            self.refresh_token_len = value.len;
+        }
+
+        fn getRefreshToken(
+            context: *anyopaque,
+            output: []u8,
+        ) credential_store.StoreError!?[]const u8 {
+            const self: *Platform = @ptrCast(@alignCast(context));
+            if (self.credential_read_fails) return error.ReadFailed;
+            const len = self.refresh_token_len orelse return null;
+            if (len > output.len) return error.ReadFailed;
+            @memcpy(output[0..len], self.refresh_token[0..len]);
+            return output[0..len];
+        }
+
+        fn deleteRefreshToken(context: *anyopaque) credential_store.StoreError!void {
+            const self: *Platform = @ptrCast(@alignCast(context));
+            if (self.credential_delete_fails) return error.DeleteFailed;
+            if (self.refresh_token_len) |len|
+                std.crypto.secureZero(u8, self.refresh_token[0..len]);
+            self.refresh_token_len = null;
+        }
+
+        fn openAuthorizationUrl(context: *anyopaque, _: []const u8) !void {
+            const self: *Platform = @ptrCast(@alignCast(context));
+            self.authorization_open_count += 1;
+            if (self.authorization_open_fails) return error.OpenFailed;
+        }
+
+        fn startTimer(
+            context: *anyopaque,
+            timer_id: u64,
+            interval_ns: u64,
+            repeats: bool,
+        ) !void {
+            const self: *Platform = @ptrCast(@alignCast(context));
+            std.debug.assert(!repeats);
+            self.timer_start_count += 1;
+            self.last_timer_id = timer_id;
+            self.last_timer_interval_ns = interval_ns;
+            if (self.timer_start_fails) return error.TimerStartFailed;
+        }
+
+        fn cancelTimer(context: *anyopaque, timer_id: u64) !void {
+            const self: *Platform = @ptrCast(@alignCast(context));
+            self.timer_cancel_count += 1;
+            self.last_timer_id = timer_id;
+            if (self.timer_cancel_fails) return error.TimerCancelFailed;
+        }
+
+        fn nowUnixSeconds(context: *anyopaque) ?i64 {
+            const self: *Platform = @ptrCast(@alignCast(context));
+            return self.now_unix_seconds;
+        }
+    };
+
+    pub const Loopback = struct {
+        open_fails: bool = false,
+        wait_failure: enum { cancelled, deadline_exceeded } = .cancelled,
+        open_count: usize = 0,
+        wait_count: usize = 0,
+        cancel_count: usize = 0,
+        close_count: usize = 0,
+
+        pub fn endpoint(self: *Loopback) loopback_impl.Endpoint {
+            return .{
+                .context = self,
+                .open_fn = open,
+                .wait_fn = wait,
+                .cancel_fn = cancel,
+                .close_fn = close,
+            };
+        }
+
+        fn open(context: *anyopaque) loopback_impl.ServerError!u16 {
+            const self: *Loopback = @ptrCast(@alignCast(context));
+            self.open_count += 1;
+            if (self.open_fails) return error.BindFailed;
+            return 49152;
+        }
+
+        fn wait(
+            context: *anyopaque,
+            _: loopback_impl.RequestSink,
+            _: std.Io.Clock.Timestamp,
+        ) loopback_impl.ServerError!void {
+            const self: *Loopback = @ptrCast(@alignCast(context));
+            self.wait_count += 1;
+            return switch (self.wait_failure) {
+                .cancelled => error.Cancelled,
+                .deadline_exceeded => error.DeadlineExceeded,
+            };
+        }
+
+        fn cancel(context: *anyopaque) void {
+            const self: *Loopback = @ptrCast(@alignCast(context));
+            self.cancel_count += 1;
+        }
+
+        fn close(context: *anyopaque) void {
+            const self: *Loopback = @ptrCast(@alignCast(context));
+            self.close_count += 1;
+        }
+    };
 
     pub fn loopbackEndpoint() loopback_impl.Endpoint {
         return .{
@@ -950,6 +1115,36 @@ pub const TestSupport = if (builtin.is_test) struct {
             .payload = .logged_out,
         };
         return preparedFromState(runtime.account.prepareCompletion(&completion));
+    }
+
+    pub fn commitBeginLoginWithoutDispatch(runtime: *Runtime) u64 {
+        var begin = switch (runtime.prepareCommand(.begin_login)) {
+            .prepared => |prepared| prepared,
+            else => @panic("test Account cannot begin login"),
+        };
+        defer begin.deinit();
+        _ = begin.transition.takeEffect() orelse
+            @panic("test login has no OAuth effect");
+        runtime.commit(&begin);
+        return runtime.account.activeAttempt() orelse
+            @panic("test login has no active attempt");
+    }
+
+    pub fn prepareTokensPersisted(runtime: *Runtime) Prepared {
+        var completion: state_impl.WorkerCompletion = .{
+            .attempt_id = runtime.account.activeAttempt() orelse
+                @panic("test Account has no active attempt"),
+            .payload = .tokens_persisted,
+        };
+        return preparedFromState(runtime.account.prepareCompletion(&completion));
+    }
+
+    pub fn publishFailure(
+        runtime: *Runtime,
+        attempt_id: u64,
+        error_code: contract.ErrorCode,
+    ) void {
+        runtime.publishFailure(attempt_id, error_code);
     }
 
     pub fn occupyEffectQueue(runtime: *Runtime) void {
@@ -1016,12 +1211,4 @@ fn loginStartError(err: login_attempt.StartError) contract.ErrorCode {
         error.AuthorizationUrlFailed, error.RandomFailed => .oauth_callback_rejected,
         error.ThreadSpawnFailed, error.AlreadyStarted, error.InvalidAttempt => .local_resource_exhausted,
     };
-}
-
-fn wallUnixSeconds(io: std.Io) ?i64 {
-    const nanoseconds = std.Io.Timestamp.now(io, .real).nanoseconds;
-    if (nanoseconds < 0) return null;
-    const seconds = @divFloor(nanoseconds, std.time.ns_per_s);
-    if (seconds > std.math.maxInt(i64)) return null;
-    return @intCast(seconds);
 }

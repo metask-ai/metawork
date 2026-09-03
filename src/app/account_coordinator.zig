@@ -300,3 +300,146 @@ test "Account coordinator publishes explicit terminal attempt metadata" {
     try std.testing.expect(sink.records[1].attempt_id != null);
     try std.testing.expect(sink.records[1].attempt_terminal);
 }
+
+test "Account test platform exposes deterministic clock timer and credential faults" {
+    var platform: account_api.TestSupport.Platform = .{};
+    const ports = platform.ports();
+
+    try platform.setStoredRefreshToken("retained-refresh");
+    var output: [64]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "retained-refresh",
+        (try ports.credentials.getRefreshToken(&output)).?,
+    );
+    try std.testing.expectEqual(@as(?i64, 100), ports.wall_clock.nowUnixSeconds());
+
+    try ports.timer.start(7, 123, false);
+    try std.testing.expectEqual(@as(usize, 1), platform.timer_start_count);
+    try std.testing.expectEqual(@as(?u64, 7), platform.last_timer_id);
+    try std.testing.expectEqual(@as(u64, 123), platform.last_timer_interval_ns);
+
+    platform.timer_start_fails = true;
+    try std.testing.expectError(
+        error.TimerStartFailed,
+        ports.timer.start(8, 456, false),
+    );
+    platform.credential_read_fails = true;
+    try std.testing.expectError(
+        error.ReadFailed,
+        ports.credentials.getRefreshToken(&output),
+    );
+    platform.now_unix_seconds = null;
+    try std.testing.expect(ports.wall_clock.nowUnixSeconds() == null);
+}
+
+test "Account coordinator rejects an initial effect collision without committing" {
+    var runtime = try initRuntimeForTest(if (builtin.os.tag == .windows)
+        "C:\\metawork-account-coordinator-initial-admission-test"
+    else
+        "/tmp/metawork-account-coordinator-initial-admission-test");
+    defer runtime.deinit();
+    var sink: RecordingSink = .{ .runtime = &runtime };
+    var coordinator = Coordinator.init(
+        &runtime,
+        sink.port(),
+        std.Thread.getCurrentId(),
+    );
+    coordinator.startAutomation();
+    sink.count = 0;
+
+    account_api.TestSupport.occupyEffectQueue(&runtime);
+    defer account_api.TestSupport.clearEffectQueue(&runtime);
+    const result = coordinator.commandSink().submit(.begin_login);
+
+    try std.testing.expect(!result.accepted);
+    try std.testing.expectEqual(
+        account_contract.ErrorCode.local_resource_exhausted,
+        result.error_code,
+    );
+    try std.testing.expectEqual(account_contract.AccountState.signed_out, runtime.view().state);
+    try std.testing.expectEqual(@as(usize, 0), sink.count);
+}
+
+test "Account coordinator closes a continuation effect collision with one terminal fact" {
+    var runtime = try initRuntimeForTest(if (builtin.os.tag == .windows)
+        "C:\\metawork-account-coordinator-continuation-admission-test"
+    else
+        "/tmp/metawork-account-coordinator-continuation-admission-test");
+    defer runtime.deinit();
+    var sink: RecordingSink = .{ .runtime = &runtime };
+    var coordinator = Coordinator.init(
+        &runtime,
+        sink.port(),
+        std.Thread.getCurrentId(),
+    );
+    coordinator.startAutomation();
+    sink.count = 0;
+    _ = account_api.TestSupport.commitBeginLoginWithoutDispatch(&runtime);
+    account_api.TestSupport.occupyEffectQueue(&runtime);
+
+    const result = coordinator.commitPrepared(
+        account_api.TestSupport.prepareTokensPersisted(&runtime),
+    );
+
+    try std.testing.expect(result.accepted);
+    try std.testing.expectEqual(@as(usize, 2), sink.count);
+    try std.testing.expect(!sink.records[0].attempt_terminal);
+    try std.testing.expect(sink.records[1].attempt_terminal);
+    try std.testing.expectEqual(account_contract.AccountState.signed_out, runtime.view().state);
+    try std.testing.expectEqual(
+        account_contract.ErrorCode.local_resource_exhausted,
+        runtime.view().error_code,
+    );
+}
+
+test "Account mailbox collision becomes one typed terminal failure" {
+    var runtime = try initRuntimeForTest(if (builtin.os.tag == .windows)
+        "C:\\metawork-account-mailbox-collision-test"
+    else
+        "/tmp/metawork-account-mailbox-collision-test");
+    defer runtime.deinit();
+    var sink: RecordingSink = .{ .runtime = &runtime };
+    var coordinator = Coordinator.init(
+        &runtime,
+        sink.port(),
+        std.Thread.getCurrentId(),
+    );
+    coordinator.startAutomation();
+    sink.count = 0;
+    const attempt_id = account_api.TestSupport.commitBeginLoginWithoutDispatch(&runtime);
+    account_api.TestSupport.publishFailure(&runtime, attempt_id, .oauth_callback_rejected);
+    account_api.TestSupport.publishFailure(&runtime, attempt_id, .deadline_exceeded);
+
+    coordinator.drain();
+
+    try std.testing.expectEqual(@as(usize, 1), sink.count);
+    try std.testing.expect(sink.records[0].attempt_terminal);
+    try std.testing.expectEqual(account_contract.AccountState.signed_out, runtime.view().state);
+    try std.testing.expectEqual(
+        account_contract.ErrorCode.account_operation_failed,
+        runtime.view().error_code,
+    );
+}
+
+test "Account shutdown publishes one terminal fact for an active attempt" {
+    var runtime = try initRuntimeForTest(if (builtin.os.tag == .windows)
+        "C:\\metawork-account-shutdown-terminal-test"
+    else
+        "/tmp/metawork-account-shutdown-terminal-test");
+    defer runtime.deinit();
+    var sink: RecordingSink = .{ .runtime = &runtime };
+    var coordinator = Coordinator.init(
+        &runtime,
+        sink.port(),
+        std.Thread.getCurrentId(),
+    );
+    coordinator.startAutomation();
+    sink.count = 0;
+    _ = account_api.TestSupport.commitBeginLoginWithoutDispatch(&runtime);
+
+    coordinator.shutdown();
+
+    try std.testing.expectEqual(@as(usize, 1), sink.count);
+    try std.testing.expect(sink.records[0].attempt_terminal);
+    try std.testing.expectEqual(account_contract.AccountState.signed_out, runtime.view().state);
+}
