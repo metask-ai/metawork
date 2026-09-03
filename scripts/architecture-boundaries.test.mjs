@@ -2115,13 +2115,22 @@ test("Account owns platform ports while Application binds Native SDK effects", (
   assert.match(ports, /timer: Timer/);
   assert.doesNotMatch(ports, /ModelCredentialVault|model_credentials/);
   assert.match(runtime, /@import\("account_ports"\)/);
+  assert.doesNotMatch(
+    runtime,
+    /account_path|account_dir|AccountDirectoryUnavailable/,
+  );
   assert.match(binding, /native_sdk\.platform\.PlatformServices/);
   assert.match(binding, /pub fn ports\(self: \*Adapter\) ports_api\.Platform/);
+  assert.doesNotMatch(
+    binding,
+    /account_path|account_dir|createDirPathOpen|AccountDirectoryUnavailable/,
+  );
   assert.doesNotMatch(binding, /preference|Preference|model|Model/);
   assert.match(binding, /\.set_refresh_token_fn = setRefreshToken/);
   assert.match(binding, /\.get_refresh_token_fn = getRefreshToken/);
   assert.match(binding, /\.delete_refresh_token_fn = deleteRefreshToken/);
   assert.match(app, /account_platform_binding\.Adapter\.init/);
+  assert.match(app, /models_management\.start\(\s*self\.account_path,/);
   assert.match(
     app,
     /coordinator\.shutdown\(\);[\s\S]*coordinator\.drain\(\);[\s\S]*binding\.deinit\(\)/,
@@ -2153,6 +2162,10 @@ test("OAuth mechanics are neutral while callers own policy and Application owns 
   assert.match(transport, /listener: std\.Io\.net\.Server/);
   assert.match(transport, /pub const Adapter = struct/);
   assert.match(transport, /sink\.handle/);
+  assert.match(
+    transport,
+    /var read_buffer:[\s\S]*?defer std\.crypto\.secureZero\(u8, &read_buffer\);/,
+  );
   assert.match(loginAttempt, /loopback_endpoint: loopback\.Endpoint/);
   assert.match(mcpOauth, /oauth_loopback_transport\.Server/);
   assert.match(oauthMechanics, /pub const AttemptMaterial = struct/);

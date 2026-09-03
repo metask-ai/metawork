@@ -11,15 +11,19 @@ export function AccountIdentity({
   account,
   active,
   disabled,
+  cancelDisabled,
   onOpenSettings,
   onBeginLogin,
+  onCancel,
   onLogout,
 }: {
   account: AccountView;
   active: boolean;
   disabled: boolean;
+  cancelDisabled: boolean;
   onOpenSettings: () => void;
   onBeginLogin: () => void;
+  onCancel: () => void;
   onLogout: () => void;
 }) {
   const { t } = useI18n();
@@ -29,9 +33,14 @@ export function AccountIdentity({
   const identityName = authenticated
     ? account.displayName || t("account.signed_in")
     : t("account.provider");
-  const identityStatus = authenticated
-    ? t("account.connected")
-    : t("account.signed_out");
+  const identityStatus =
+    account.state === "authenticated"
+      ? t("account.connected")
+      : account.state === "checking"
+        ? t("account.checking.title")
+        : account.state === "authorizing"
+          ? t("account.authorizing.title")
+          : t("account.signed_out");
   const initial = [...identityName.trim()][0]?.toLocaleUpperCase() || "M";
 
   useEffect(() => {
@@ -58,7 +67,7 @@ export function AccountIdentity({
                     <strong title={identityName}>{identityName}</strong>
                   </div>
                 )}
-                {!authenticated && (
+                {account.state === "signed_out" && (
                   <Menu.Item
                     className="account-menu-item focus-ring"
                     disabled={disabled}
@@ -66,6 +75,16 @@ export function AccountIdentity({
                   >
                     <Icon name="account" />
                     {t("account.login")}
+                  </Menu.Item>
+                )}
+                {account.state === "authorizing" && account.canCancel && (
+                  <Menu.Item
+                    className="account-menu-item focus-ring"
+                    disabled={cancelDisabled}
+                    onClick={() => choose(onCancel)}
+                  >
+                    <Icon name="close" />
+                    {t("account.cancel")}
                   </Menu.Item>
                 )}
                 <Menu.Item

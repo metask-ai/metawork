@@ -81,7 +81,6 @@ pub const CredentialOwner = struct {
             access_token,
             refresh_token,
             expires_at,
-            oauth.scope,
             account_id,
         );
         self.replace(&stored);
@@ -113,6 +112,14 @@ pub const CredentialOwner = struct {
 
     pub fn expiresAt(self: *const CredentialOwner) ?i64 {
         return if (self.tokens) |*tokens| tokens.expires_at else null;
+    }
+
+    pub fn belongsToPrincipal(
+        self: *const CredentialOwner,
+        principal_ref: []const u8,
+    ) bool {
+        const current = if (self.tokens) |*value| value else return false;
+        return std.mem.eql(u8, current.accountId(), principal_ref);
     }
 
     pub fn refresh(
@@ -191,7 +198,6 @@ test "CredentialOwner replaces and clears OAuth secret ownership" {
         "access-1",
         "refresh-1",
         10,
-        oauth.scope,
         "account-1",
     );
     defer first.deinit();
@@ -200,7 +206,6 @@ test "CredentialOwner replaces and clears OAuth secret ownership" {
         "access-2",
         "refresh-2",
         20,
-        oauth.scope,
         "account-1",
     );
     defer second.deinit();
@@ -335,7 +340,6 @@ test "refresh rotation identity is captured before ownership transfer" {
         "new-access",
         "new-refresh",
         20,
-        oauth.scope,
         "account-1",
     );
     var rotation: CredentialRotation = .{

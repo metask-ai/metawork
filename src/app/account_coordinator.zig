@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const account_contract = @import("metawork_account_contract");
 const account_api = @import("metawork_account");
 const control_ports = @import("metawork_product_control_ports");
@@ -111,11 +110,10 @@ pub const Coordinator = struct {
         const fact = self.runtime.preparedFact(&prepared);
         const attempt_id = prepared.attemptId();
         const attempt_terminal = prepared.finishesAttempt();
-        const continues_active_attempt =
-            self.runtime.preparedContinuesActiveAttempt(&prepared);
+        const attempt_disposition = self.runtime.attemptDisposition(&prepared);
 
         const effect_admitted = self.runtime.admitEffect(&prepared);
-        if (!effect_admitted and !continues_active_attempt)
+        if (!effect_admitted and attempt_disposition != .continues)
             return .rejected(.local_resource_exhausted);
 
         // Account commits its own state first. The Product callback is no-fail,
@@ -139,7 +137,11 @@ pub const Coordinator = struct {
             );
 
         const refresh_after_commit = self.runtime.takeRefreshAfterCommit(&prepared);
-        self.runtime.dispatchCommitted(&prepared);
+        const dispatch_follow_up = self.runtime.dispatchCommitted(&prepared);
+        if (dispatch_follow_up) |follow_up| {
+            const followed = self.commitPrepared(follow_up);
+            std.debug.assert(followed.accepted);
+        }
         if (refresh_after_commit) {
             const refreshed = self.commitPrepared(
                 self.runtime.prepareRestoredRefresh(),
@@ -151,7 +153,11 @@ pub const Coordinator = struct {
 
     pub fn shutdown(self: *Coordinator) void {
         self.assertMainThread();
-        const result = self.commitPrepared(self.runtime.prepareShutdown());
+        var result = self.commitPrepared(self.runtime.prepareShutdown());
+        if (!result.accepted and result.error_code == .local_resource_exhausted) {
+            self.runtime.discardQueuedEffectForShutdown();
+            result = self.commitPrepared(self.runtime.prepareShutdown());
+        }
         std.debug.assert(result.accepted);
     }
 
@@ -203,6 +209,32 @@ const RecordingSink = struct {
     }
 };
 
+const AuthorizationObserver = struct {
+    runtime: *account_api.Runtime,
+    expected_generation: u64,
+    calls: usize = 0,
+    unavailable: bool = false,
+
+    fn port(self: *AuthorizationObserver) CommitObserver {
+        return .{ .context = self, .notify_fn = notify };
+    }
+
+    fn notify(context: *anyopaque) void {
+        const self: *AuthorizationObserver = @ptrCast(@alignCast(context));
+        self.calls += 1;
+        var lease = (self.runtime.authorizationLease() catch {
+            self.unavailable = true;
+            return;
+        }) orelse {
+            self.unavailable = true;
+            return;
+        };
+        defer lease.deinit();
+        if (lease.authorization_generation != self.expected_generation)
+            self.unavailable = true;
+    }
+};
+
 var testing_transport_context: u8 = 0;
 var testing_wake_context: u8 = 0;
 
@@ -223,12 +255,11 @@ fn testingPerform(
 
 fn testingWake(_: *anyopaque) void {}
 
-fn initRuntimeForTest(path: []const u8) !account_api.Runtime {
+fn initRuntimeForTest() !account_api.Runtime {
     return account_api.Runtime.init(
         std.testing.allocator,
         std.testing.io,
         std.Thread.getCurrentId(),
-        path,
         testingTransport(),
         account_api.TestSupport.loopbackEndpoint(),
         .{ .context = &testing_wake_context, .notify_fn = testingWake },
@@ -236,10 +267,7 @@ fn initRuntimeForTest(path: []const u8) !account_api.Runtime {
 }
 
 test "Account coordinator commits identity before notifying Product" {
-    var runtime = try initRuntimeForTest(if (builtin.os.tag == .windows)
-        "C:\\metawork-account-coordinator-order-test"
-    else
-        "/tmp/metawork-account-coordinator-order-test");
+    var runtime = try initRuntimeForTest();
     defer runtime.deinit();
     var sink: RecordingSink = .{ .runtime = &runtime };
     var coordinator = Coordinator.init(
@@ -267,10 +295,7 @@ test "Account coordinator commits identity before notifying Product" {
 }
 
 test "Account coordinator publishes explicit terminal attempt metadata" {
-    var runtime = try initRuntimeForTest(if (builtin.os.tag == .windows)
-        "C:\\metawork-account-coordinator-attempt-test"
-    else
-        "/tmp/metawork-account-coordinator-attempt-test");
+    var runtime = try initRuntimeForTest();
     defer runtime.deinit();
     var sink: RecordingSink = .{ .runtime = &runtime };
     var coordinator = Coordinator.init(
@@ -299,4 +324,422 @@ test "Account coordinator publishes explicit terminal attempt metadata" {
     try std.testing.expectEqual(account_contract.AccountState.signed_out, sink.records[1].state);
     try std.testing.expect(sink.records[1].attempt_id != null);
     try std.testing.expect(sink.records[1].attempt_terminal);
+}
+
+test "Account test platform exposes deterministic clock timer and credential faults" {
+    var platform: account_api.TestSupport.Platform = .{};
+    const ports = platform.ports();
+
+    try platform.setStoredRefreshToken("retained-refresh");
+    var output: [64]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "retained-refresh",
+        (try ports.credentials.getRefreshToken(&output)).?,
+    );
+    try std.testing.expectEqual(@as(?i64, 100), ports.wall_clock.nowUnixSeconds());
+
+    try ports.timer.start(7, 123, false);
+    try std.testing.expectEqual(@as(usize, 1), platform.timer_start_count);
+    try std.testing.expectEqual(@as(?u64, 7), platform.last_timer_id);
+    try std.testing.expectEqual(@as(u64, 123), platform.last_timer_interval_ns);
+
+    platform.timer_start_fails = true;
+    try std.testing.expectError(
+        error.TimerStartFailed,
+        ports.timer.start(8, 456, false),
+    );
+    platform.credential_read_fails = true;
+    try std.testing.expectError(
+        error.ReadFailed,
+        ports.credentials.getRefreshToken(&output),
+    );
+    platform.now_unix_seconds = null;
+    try std.testing.expect(ports.wall_clock.nowUnixSeconds() == null);
+}
+
+test "Account coordinator rejects an initial effect collision without committing" {
+    var runtime = try initRuntimeForTest();
+    defer runtime.deinit();
+    var sink: RecordingSink = .{ .runtime = &runtime };
+    var coordinator = Coordinator.init(
+        &runtime,
+        sink.port(),
+        std.Thread.getCurrentId(),
+    );
+    coordinator.startAutomation();
+    sink.count = 0;
+
+    account_api.TestSupport.occupyEffectQueue(&runtime);
+    defer account_api.TestSupport.clearEffectQueue(&runtime);
+    const result = coordinator.commandSink().submit(.begin_login);
+
+    try std.testing.expect(!result.accepted);
+    try std.testing.expectEqual(
+        account_contract.ErrorCode.local_resource_exhausted,
+        result.error_code,
+    );
+    try std.testing.expectEqual(account_contract.AccountState.signed_out, runtime.view().state);
+    try std.testing.expectEqual(@as(usize, 0), sink.count);
+}
+
+test "Account coordinator closes a continuation effect collision with one terminal fact" {
+    var runtime = try initRuntimeForTest();
+    defer runtime.deinit();
+    var sink: RecordingSink = .{ .runtime = &runtime };
+    var coordinator = Coordinator.init(
+        &runtime,
+        sink.port(),
+        std.Thread.getCurrentId(),
+    );
+    coordinator.startAutomation();
+    sink.count = 0;
+    _ = account_api.TestSupport.commitBeginLoginWithoutDispatch(&runtime);
+    account_api.TestSupport.occupyEffectQueue(&runtime);
+    var exchange_backing: [1024]u8 = undefined;
+    @memset(&exchange_backing, 0xaa);
+    var exchange_fixed = std.heap.FixedBufferAllocator.init(&exchange_backing);
+    var exchange_input = try account_api.TestSupport.exchangeInput(
+        exchange_fixed.allocator(),
+        "authorization-code",
+    );
+    defer exchange_input.deinit();
+
+    const result = coordinator.commitPrepared(
+        account_api.TestSupport.prepareLoginExchange(&runtime, &exchange_input),
+    );
+
+    try std.testing.expect(result.accepted);
+    try std.testing.expectEqual(@as(usize, 2), sink.count);
+    try std.testing.expect(!sink.records[0].attempt_terminal);
+    try std.testing.expect(sink.records[1].attempt_terminal);
+    try std.testing.expectEqual(account_contract.AccountState.signed_out, runtime.view().state);
+    try std.testing.expectEqual(
+        account_contract.ErrorCode.local_resource_exhausted,
+        runtime.view().error_code,
+    );
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        &exchange_backing,
+        "authorization-code",
+    ) == null);
+}
+
+test "Account cancel admission collision rejects without committing or panicking" {
+    var runtime = try initRuntimeForTest();
+    defer runtime.deinit();
+    var sink: RecordingSink = .{ .runtime = &runtime };
+    var coordinator = Coordinator.init(
+        &runtime,
+        sink.port(),
+        std.Thread.getCurrentId(),
+    );
+    coordinator.startAutomation();
+    sink.count = 0;
+    _ = account_api.TestSupport.commitBeginLoginWithoutDispatch(&runtime);
+    account_api.TestSupport.occupyEffectQueue(&runtime);
+    defer account_api.TestSupport.clearEffectQueue(&runtime);
+
+    const result = coordinator.commandSink().submit(.cancel_operation);
+
+    try std.testing.expect(!result.accepted);
+    try std.testing.expectEqual(
+        account_contract.ErrorCode.local_resource_exhausted,
+        result.error_code,
+    );
+    try std.testing.expectEqual(account_contract.AccountState.authorizing, runtime.view().state);
+    try std.testing.expect(runtime.view().can_cancel);
+    try std.testing.expectEqual(@as(usize, 0), sink.count);
+}
+
+test "Account cancel discards a late callback exchange secret" {
+    var runtime = try initRuntimeForTest();
+    defer runtime.deinit();
+    var sink: RecordingSink = .{ .runtime = &runtime };
+    var coordinator = Coordinator.init(
+        &runtime,
+        sink.port(),
+        std.Thread.getCurrentId(),
+    );
+    coordinator.startAutomation();
+    sink.count = 0;
+    const attempt_id = account_api.TestSupport.commitBeginLoginWithoutDispatch(&runtime);
+    var backing: [1024]u8 = undefined;
+    @memset(&backing, 0xaa);
+    var fixed = std.heap.FixedBufferAllocator.init(&backing);
+    var exchange_input = try account_api.TestSupport.exchangeInput(
+        fixed.allocator(),
+        "late-authorization-code",
+    );
+    account_api.TestSupport.publishLoginExchange(
+        &runtime,
+        attempt_id,
+        &exchange_input,
+    );
+
+    const result = coordinator.commandSink().submit(.cancel_operation);
+
+    try std.testing.expect(result.accepted);
+    try std.testing.expectEqual(@as(usize, 1), sink.count);
+    try std.testing.expect(sink.records[0].attempt_terminal);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        &backing,
+        "late-authorization-code",
+    ) == null);
+}
+
+test "Account shutdown discards an uncommitted effect and closes the active attempt" {
+    var runtime = try initRuntimeForTest();
+    defer runtime.deinit();
+    var sink: RecordingSink = .{ .runtime = &runtime };
+    var coordinator = Coordinator.init(
+        &runtime,
+        sink.port(),
+        std.Thread.getCurrentId(),
+    );
+    coordinator.startAutomation();
+    sink.count = 0;
+    _ = account_api.TestSupport.commitBeginLoginWithoutDispatch(&runtime);
+    account_api.TestSupport.occupyEffectQueue(&runtime);
+
+    coordinator.shutdown();
+
+    try std.testing.expectEqual(@as(usize, 1), sink.count);
+    try std.testing.expect(sink.records[0].attempt_terminal);
+    try std.testing.expectEqual(account_contract.AccountState.signed_out, runtime.view().state);
+}
+
+test "Account mailbox collision becomes one typed terminal failure" {
+    var runtime = try initRuntimeForTest();
+    defer runtime.deinit();
+    var sink: RecordingSink = .{ .runtime = &runtime };
+    var coordinator = Coordinator.init(
+        &runtime,
+        sink.port(),
+        std.Thread.getCurrentId(),
+    );
+    coordinator.startAutomation();
+    sink.count = 0;
+    const attempt_id = account_api.TestSupport.commitBeginLoginWithoutDispatch(&runtime);
+    var backing: [1024]u8 = undefined;
+    @memset(&backing, 0xaa);
+    var fixed = std.heap.FixedBufferAllocator.init(&backing);
+    var exchange_input = try account_api.TestSupport.exchangeInput(
+        fixed.allocator(),
+        "collided-authorization-code",
+    );
+    account_api.TestSupport.publishLoginExchange(
+        &runtime,
+        attempt_id,
+        &exchange_input,
+    );
+    account_api.TestSupport.publishFailure(&runtime, attempt_id, .deadline_exceeded);
+
+    coordinator.drain();
+
+    try std.testing.expectEqual(@as(usize, 1), sink.count);
+    try std.testing.expect(sink.records[0].attempt_terminal);
+    try std.testing.expectEqual(account_contract.AccountState.signed_out, runtime.view().state);
+    try std.testing.expectEqual(
+        account_contract.ErrorCode.account_operation_failed,
+        runtime.view().error_code,
+    );
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        &backing,
+        "collided-authorization-code",
+    ) == null);
+}
+
+test "Account stale callback is ignored and its exchange secret is cleared" {
+    var runtime = try initRuntimeForTest();
+    defer runtime.deinit();
+    var sink: RecordingSink = .{ .runtime = &runtime };
+    var coordinator = Coordinator.init(
+        &runtime,
+        sink.port(),
+        std.Thread.getCurrentId(),
+    );
+    coordinator.startAutomation();
+    sink.count = 0;
+    const attempt_id = account_api.TestSupport.commitBeginLoginWithoutDispatch(&runtime);
+    var backing: [1024]u8 = undefined;
+    @memset(&backing, 0xaa);
+    var fixed = std.heap.FixedBufferAllocator.init(&backing);
+    var exchange_input = try account_api.TestSupport.exchangeInput(
+        fixed.allocator(),
+        "stale-authorization-code",
+    );
+    account_api.TestSupport.publishLoginExchange(
+        &runtime,
+        attempt_id + 1,
+        &exchange_input,
+    );
+
+    coordinator.drain();
+
+    try std.testing.expectEqual(@as(usize, 0), sink.count);
+    try std.testing.expectEqual(account_contract.AccountState.authorizing, runtime.view().state);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        &backing,
+        "stale-authorization-code",
+    ) == null);
+    coordinator.shutdown();
+}
+
+test "Account shutdown publishes one terminal fact for an active attempt" {
+    var runtime = try initRuntimeForTest();
+    defer runtime.deinit();
+    var sink: RecordingSink = .{ .runtime = &runtime };
+    var coordinator = Coordinator.init(
+        &runtime,
+        sink.port(),
+        std.Thread.getCurrentId(),
+    );
+    coordinator.startAutomation();
+    sink.count = 0;
+    _ = account_api.TestSupport.commitBeginLoginWithoutDispatch(&runtime);
+
+    coordinator.shutdown();
+
+    try std.testing.expectEqual(@as(usize, 1), sink.count);
+    try std.testing.expect(sink.records[0].attempt_terminal);
+    try std.testing.expectEqual(account_contract.AccountState.signed_out, runtime.view().state);
+}
+
+test "Account refresh scheduling failure is visible and explicitly retryable" {
+    var runtime = try initRuntimeForTest();
+    var platform: account_api.TestSupport.Platform = .{
+        .now_unix_seconds = 100,
+        .timer_start_fails = true,
+    };
+    account_api.TestSupport.attachPlatform(&runtime, &platform);
+    defer {
+        account_api.TestSupport.detachPlatform(&runtime);
+        runtime.deinit();
+    }
+    var sink: RecordingSink = .{ .runtime = &runtime };
+    var coordinator = Coordinator.init(
+        &runtime,
+        sink.port(),
+        std.Thread.getCurrentId(),
+    );
+
+    const authenticated = coordinator.commitPrepared(
+        try account_api.TestSupport.prepareAuthenticatedAndSchedule(
+            &runtime,
+            "account-1",
+            "Metask User",
+            "access-token",
+            "refresh-token",
+            200,
+        ),
+    );
+
+    try std.testing.expect(authenticated.accepted);
+    try std.testing.expectEqual(@as(usize, 2), sink.count);
+    try std.testing.expectEqual(
+        account_contract.ErrorCode.refresh_schedule_failed,
+        runtime.view().error_code,
+    );
+    var lease = (try runtime.authorizationLease()).?;
+    lease.deinit();
+
+    platform.timer_start_fails = false;
+    sink.count = 0;
+    const retried = coordinator.commandSink().submit(.retry_refresh);
+
+    try std.testing.expect(retried.accepted);
+    try std.testing.expectEqual(@as(usize, 1), sink.count);
+    try std.testing.expectEqual(account_contract.ErrorCode.none, runtime.view().error_code);
+    try std.testing.expectEqual(@as(usize, 2), platform.timer_start_count);
+    try std.testing.expectEqual(@as(u64, 40 * std.time.ns_per_s), platform.last_timer_interval_ns);
+}
+
+test "Account clock and refresh retry arm failures publish refresh schedule failure" {
+    var runtime = try initRuntimeForTest();
+    var platform: account_api.TestSupport.Platform = .{
+        .now_unix_seconds = null,
+    };
+    account_api.TestSupport.attachPlatform(&runtime, &platform);
+    defer {
+        account_api.TestSupport.detachPlatform(&runtime);
+        runtime.deinit();
+    }
+    var sink: RecordingSink = .{ .runtime = &runtime };
+    var coordinator = Coordinator.init(
+        &runtime,
+        sink.port(),
+        std.Thread.getCurrentId(),
+    );
+
+    _ = coordinator.commitPrepared(
+        try account_api.TestSupport.prepareAuthenticatedAndSchedule(
+            &runtime,
+            "account-1",
+            "Metask User",
+            "access-token",
+            "refresh-token",
+            200,
+        ),
+    );
+    try std.testing.expectEqual(
+        account_contract.ErrorCode.refresh_schedule_failed,
+        runtime.view().error_code,
+    );
+
+    platform.now_unix_seconds = 100;
+    platform.timer_start_fails = true;
+    sink.count = 0;
+    _ = coordinator.commitPrepared(
+        account_api.TestSupport.prepareRefreshRetrySchedule(&runtime),
+    );
+    try std.testing.expectEqual(@as(usize, 2), sink.count);
+    try std.testing.expectEqual(
+        account_contract.ErrorCode.refresh_schedule_failed,
+        runtime.view().error_code,
+    );
+}
+
+test "Account observer retains a healthy in-flight authorization during refresh" {
+    var runtime = try initRuntimeForTest();
+    var platform: account_api.TestSupport.Platform = .{ .now_unix_seconds = 100 };
+    account_api.TestSupport.attachPlatform(&runtime, &platform);
+    defer {
+        account_api.TestSupport.detachPlatform(&runtime);
+        runtime.deinit();
+    }
+    var sink: RecordingSink = .{ .runtime = &runtime };
+    var coordinator = Coordinator.init(
+        &runtime,
+        sink.port(),
+        std.Thread.getCurrentId(),
+    );
+    _ = coordinator.commitPrepared(
+        try account_api.TestSupport.prepareAuthenticated(
+            &runtime,
+            "account-1",
+            "Metask User",
+            "access-token",
+            "refresh-token",
+            150,
+        ),
+    );
+    var lease = (try runtime.authorizationLease()).?;
+    const generation = lease.authorization_generation;
+    lease.deinit();
+    var observer: AuthorizationObserver = .{
+        .runtime = &runtime,
+        .expected_generation = generation,
+    };
+    coordinator.setCommitObserver(observer.port());
+
+    const refreshed = coordinator.commitPrepared(
+        account_api.TestSupport.prepareTokenRefreshWithoutEffect(&runtime),
+    );
+
+    try std.testing.expect(refreshed.accepted);
+    try std.testing.expectEqual(@as(usize, 1), observer.calls);
+    try std.testing.expect(!observer.unavailable);
 }

@@ -59,6 +59,7 @@
             .{ .name = "metawork.attachments.release", .origins = .{"zero://app"} },
             .{ .name = "metawork.account.beginLogin", .origins = .{"zero://app"} },
             .{ .name = "metawork.account.cancelOperation", .origins = .{"zero://app"} },
+            .{ .name = "metawork.account.retryRefresh", .origins = .{"zero://app"} },
             .{ .name = "metawork.account.logout", .origins = .{"zero://app"} },
             .{ .name = "metawork.models.refreshCatalog", .origins = .{"zero://app"} },
             .{ .name = "metawork.models.selectMetaskApiKey", .origins = .{"zero://app"} },

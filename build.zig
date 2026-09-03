@@ -184,6 +184,49 @@ pub fn build(b: *std.Build) void {
         const tests = b.addTest(.{ .name = spec.name, .root_module = spec.root_module });
         artifacts.tests.step.dependOn(&b.addRunArtifact(tests).step);
     }
+    const account_test_step = b.step(
+        "test-account",
+        "Run Account owner and Application coordinator tests",
+    );
+    const account_focused_modules = [_]struct {
+        name: []const u8,
+        root_module: *std.Build.Module,
+    }{
+        .{ .name = "metawork-account-contract-focused", .root_module = test_modules.account_contract },
+        .{ .name = "metawork-account-oauth-focused", .root_module = test_modules.account_oauth },
+        .{ .name = "metawork-metask-client-focused", .root_module = test_modules.metask_client },
+        .{ .name = "metawork-account-credential-store-focused", .root_module = test_modules.account_credential_store },
+        .{ .name = "metawork-account-ports-focused", .root_module = test_modules.account_ports },
+        .{ .name = "metawork-account-loopback-focused", .root_module = test_modules.account_loopback },
+        .{ .name = "metawork-account-login-attempt-focused", .root_module = test_modules.account_login_attempt },
+        .{ .name = "metawork-account-credentials-runtime-focused", .root_module = test_modules.account_credentials_runtime },
+        .{ .name = "metawork-account-network-attempt-focused", .root_module = test_modules.account_network_attempt },
+        .{ .name = "metawork-account-state-focused", .root_module = test_modules.account_state },
+        .{ .name = "metawork-account-runtime-focused", .root_module = test_modules.account_runtime },
+        .{ .name = "metawork-account-focused", .root_module = test_modules.account },
+    };
+    for (account_focused_modules) |spec| {
+        const tests = b.addTest(.{
+            .name = spec.name,
+            .root_module = spec.root_module,
+        });
+        account_test_step.dependOn(&b.addRunArtifact(tests).step);
+    }
+    const account_coordinator_tests = b.addTest(.{
+        .name = "metawork-account-coordinator-focused",
+        .root_module = test_modules.app,
+        .filters = &.{"Account"},
+    });
+    account_test_step.dependOn(&b.addRunArtifact(account_coordinator_tests).step);
+    const account_bridge_tests = b.addTest(.{
+        .name = "metawork-account-bridge-focused",
+        .root_module = test_modules.bridge,
+        .filters = &.{
+            "Account command response encoding",
+            "Dispatcher validates authority",
+        },
+    });
+    account_test_step.dependOn(&b.addRunArtifact(account_bridge_tests).step);
     const storage_tests = b.addTest(.{
         .name = "metawork-storage",
         .root_module = test_modules.storage,
@@ -1017,6 +1060,7 @@ fn wireAgentCore(
     account_network_attempt.addImport("account_oauth", account_oauth);
     account_network_attempt.addImport("metask_client", metask_client);
     account_network_attempt.addImport("account_credentials_runtime", account_credentials_runtime);
+    account_network_attempt.addImport("account_login_attempt", account_login_attempt);
     const account_credential_store = b.createModule(.{
         .root_source_file = b.path("src/product/account/credential_store.zig"),
         .target = target,

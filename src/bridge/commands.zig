@@ -46,6 +46,7 @@ pub const choose_attachments = "metawork.attachments.choose";
 pub const release_attachment = "metawork.attachments.release";
 pub const account_begin_login = "metawork.account.beginLogin";
 pub const account_cancel_operation = "metawork.account.cancelOperation";
+pub const account_retry_refresh = "metawork.account.retryRefresh";
 pub const models_refresh_catalog = "metawork.models.refreshCatalog";
 pub const models_select_metask_api_key = "metawork.models.selectMetaskApiKey";
 pub const models_configure_metask_selection = "metawork.models.configureMetaskSelection";
@@ -124,6 +125,7 @@ pub const product = [_][]const u8{
     release_attachment,
     account_begin_login,
     account_cancel_operation,
+    account_retry_refresh,
     models_refresh_catalog,
     models_select_metask_api_key,
     models_configure_metask_selection,

@@ -57,7 +57,10 @@ const IdentityAttemptKind = enum { login, refresh_token };
 const Transaction = union(enum) {
     none,
     oauth_callback: u64,
-    token_exchange: u64,
+    token_exchange: struct {
+        attempt_id: u64,
+        kind: IdentityAttemptKind,
+    },
     loading_identity: struct {
         attempt_id: u64,
         kind: IdentityAttemptKind,
@@ -67,7 +70,8 @@ const Transaction = union(enum) {
     fn attemptId(self: Transaction) ?u64 {
         return switch (self) {
             .none => null,
-            .oauth_callback, .token_exchange, .logging_out => |id| id,
+            .oauth_callback, .logging_out => |id| id,
+            .token_exchange => |value| value.attempt_id,
             .loading_identity => |value| value.attempt_id,
         };
     }
@@ -76,7 +80,10 @@ const Transaction = union(enum) {
         return switch (self) {
             .none => null,
             .oauth_callback => .login,
-            .token_exchange => .refresh_token,
+            .token_exchange => |value| switch (value.kind) {
+                .login => .login,
+                .refresh_token => .refresh_token,
+            },
             .loading_identity => |value| switch (value.kind) {
                 .login => .login,
                 .refresh_token => .refresh_token,
@@ -88,6 +95,7 @@ const Transaction = union(enum) {
 
 pub const Effect = union(enum) {
     begin_oauth,
+    exchange_login,
     refresh_token,
     load_identity,
     cancel_attempt: u64,
@@ -206,6 +214,7 @@ pub const Account = struct {
         return switch (command) {
             .begin_login => self.prepareBeginLogin(),
             .cancel_operation => self.prepareCancel(),
+            .retry_refresh => self.prepareRetryRefresh(),
             .logout => self.prepareLogout(),
         };
     }
@@ -256,8 +265,7 @@ pub const Account = struct {
     }
 
     pub fn prepareRestoredTokenRefresh(self: *const Account) PrepareResult {
-        if ((self.state.session_state != .restoring and
-            self.state.session_state != .signed_out) or
+        if (self.state.session_state != .restoring or
             self.state.activeAttempt() != null)
             return .{ .rejected = .invalid_state };
         return self.prepareRefreshTransition();
@@ -268,10 +276,31 @@ pub const Account = struct {
             return .{ .rejected = .generation_mismatch };
         var next = self.state;
         next.session_state = .refreshing;
-        next.transaction = .{ .token_exchange = attempt.current };
+        next.transaction = .{ .token_exchange = .{
+            .attempt_id = attempt.current,
+            .kind = .refresh_token,
+        } };
         next.next_attempt_id = attempt.next;
         next.clearError();
         return transition(next, .session_changed, attempt.current, .refresh_token);
+    }
+
+    pub fn prepareLoginExchange(
+        self: *const Account,
+        attempt_id: u64,
+    ) PrepareResult {
+        const active = switch (self.state.transaction) {
+            .oauth_callback => |value| value,
+            else => return .{ .rejected = .invalid_state },
+        };
+        if (active != attempt_id) return .ignored_stale;
+        var next = self.state;
+        next.transaction = .{ .token_exchange = .{
+            .attempt_id = attempt_id,
+            .kind = .login,
+        } };
+        next.clearError();
+        return transition(next, .session_changed, attempt_id, .exchange_login);
     }
 
     pub fn prepareCompletion(
@@ -312,16 +341,23 @@ pub const Account = struct {
         };
     }
 
-    pub fn prepareIdleFailure(
-        self: *const Account,
-        error_code: contract.ErrorCode,
-    ) PrepareResult {
-        if (error_code == .none or self.state.activeAttempt() != null)
+    pub fn prepareRefreshScheduleFailure(self: *const Account) PrepareResult {
+        if (self.state.session_state != .authenticated or
+            self.state.activeAttempt() != null)
             return .{ .rejected = .invalid_state };
         var next = self.state;
-        next.error_code = error_code;
+        next.error_code = .refresh_schedule_failed;
         next.safe_diagnostic.clear();
         return transitionNoAttempt(next, .operation_failed);
+    }
+
+    pub fn prepareRetryRefresh(self: *const Account) PrepareResult {
+        if (self.state.session_state != .authenticated or
+            self.state.activeAttempt() != null)
+            return .{ .rejected = .invalid_state };
+        var next = self.state;
+        next.clearError();
+        return transitionNoAttempt(next, .session_changed);
     }
 
     fn prepareBeginLogin(self: *const Account) PrepareResult {
@@ -371,8 +407,12 @@ pub const Account = struct {
     fn prepareTokensPersisted(self: *const Account) PrepareResult {
         const kind = self.state.attemptKind() orelse
             return .{ .rejected = .invalid_state };
-        if ((kind == .login and self.state.transaction != .oauth_callback) or
-            (kind == .refresh_token and self.state.transaction != .token_exchange))
+        const exchange_kind = switch (self.state.transaction) {
+            .token_exchange => |value| value.kind,
+            else => return .{ .rejected = .invalid_state },
+        };
+        if ((kind == .login and exchange_kind != .login) or
+            (kind == .refresh_token and exchange_kind != .refresh_token))
             return .{ .rejected = .invalid_state };
         var next = self.state;
         if (kind == .login or next.account_id.len == 0) {
@@ -509,6 +549,10 @@ pub const PreparedTransition = struct {
         return self.attempt_id != null and self.next.activeAttempt() == null;
     }
 
+    pub fn nextAttemptId(self: *const PreparedTransition) ?u64 {
+        return self.next.activeAttempt();
+    }
+
     pub fn takeEffect(self: *PreparedTransition) ?Effect {
         const effect = self.effect;
         self.effect = null;
@@ -548,15 +592,6 @@ pub const AccountIdentity = struct {
 pub const WorkerFailure = struct {
     error_code: contract.ErrorCode,
     safe_diagnostic: SafeDiagnostic = .{},
-
-    pub fn init(error_code: contract.ErrorCode, safe_diagnostic: []const u8) contract.ValidationError!WorkerFailure {
-        if (error_code == .none) return error.InconsistentState;
-        return .{ .error_code = error_code, .safe_diagnostic = try .init(safe_diagnostic) };
-    }
-
-    pub fn diagnostic(self: *const WorkerFailure) []const u8 {
-        return self.safe_diagnostic.view();
-    }
 
     pub fn fromCode(error_code: contract.ErrorCode) WorkerFailure {
         std.debug.assert(error_code != .none);
@@ -605,6 +640,16 @@ fn commitPrepared(account: *Account, prepared: *PreparedTransition) void {
     _ = prepared.takeEffect();
     prepared.commit(account);
     prepared.deinit();
+}
+
+fn commitLoginExchange(account: *Account) !void {
+    var exchange = switch (account.prepareLoginExchange(account.activeAttempt().?)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(exchange.takeEffect().? == .exchange_login);
+    exchange.commit(account);
+    exchange.deinit();
 }
 
 test "command prepare does not mutate committed identity before commit" {
@@ -672,6 +717,9 @@ test "explicit login persists tokens before publishing identity" {
         else => return error.TestUnexpectedResult,
     };
     commitPrepared(&account, &begin);
+    try commitLoginExchange(&account);
+    try std.testing.expect(!account.view().can_cancel);
+    try std.testing.expect(account.prepareCommand(.cancel_operation) == .rejected);
 
     var persisted: WorkerCompletion = .{ .attempt_id = account.activeAttempt().?, .payload = .tokens_persisted };
     var load_identity = switch (account.prepareCompletion(&persisted)) {
@@ -710,6 +758,7 @@ test "explicit login accepts a newly verified identity" {
         else => return error.TestUnexpectedResult,
     };
     commitPrepared(&account, &begin);
+    try commitLoginExchange(&account);
     var persisted: WorkerCompletion = .{
         .attempt_id = account.activeAttempt().?,
         .payload = .tokens_persisted,
@@ -745,6 +794,7 @@ test "failed login before token commit preserves the current identity" {
         else => return error.TestUnexpectedResult,
     };
     commitPrepared(&account, &begin);
+    try commitLoginExchange(&account);
     var completion: WorkerCompletion = .{
         .attempt_id = account.activeAttempt().?,
         .payload = .{ .failed = .fromCode(.oauth_exchange_failed) },
@@ -821,12 +871,13 @@ test "refresh failure distinguishes retryable and invalid credentials" {
     commitPrepared(&cold, &retryable);
     try std.testing.expectEqual(contract.AccountState.signed_out, cold.view().state);
     try std.testing.expectEqual(contract.ErrorCode.metask_service_unavailable, cold.view().error_code);
-    var retry = switch (cold.prepareRestoredTokenRefresh()) {
+    try std.testing.expect(cold.prepareRestoredTokenRefresh() == .rejected);
+    var explicit_login = switch (cold.prepareCommand(.begin_login)) {
         .transition => |value| value,
         else => return error.TestUnexpectedResult,
     };
-    defer retry.deinit();
-    try std.testing.expect(retry.takeEffect().? == .refresh_token);
+    defer explicit_login.deinit();
+    try std.testing.expect(explicit_login.takeEffect().? == .begin_oauth);
 
     var active = Account.initRestoring();
     var active_restore = try TestSupport.prepareAuthenticated(
@@ -880,6 +931,33 @@ test "restore failure returns to sign-in without restart semantics" {
     try std.testing.expectEqual(contract.AccountState.signed_out, account.view().state);
     try std.testing.expectEqual(
         contract.ErrorCode.credential_store_read_failed,
+        account.view().error_code,
+    );
+}
+
+test "refresh schedule failure is restricted to authenticated idle state" {
+    var signed_out = Account.initSignedOutForTest();
+    try std.testing.expect(
+        signed_out.prepareRefreshScheduleFailure() == .rejected,
+    );
+
+    var account = Account.initRestoring();
+    var restored = try TestSupport.prepareAuthenticated(
+        &account,
+        try AccountIdentity.init("account-1", "Metask User"),
+    );
+    commitPrepared(&account, &restored);
+    var failed = switch (account.prepareRefreshScheduleFailure()) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    commitPrepared(&account, &failed);
+    try std.testing.expectEqual(
+        contract.AccountState.authenticated,
+        account.view().state,
+    );
+    try std.testing.expectEqual(
+        contract.ErrorCode.refresh_schedule_failed,
         account.view().error_code,
     );
 }

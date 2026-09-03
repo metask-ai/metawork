@@ -70,9 +70,11 @@ export const enUS = {
   "account.error.service":
     "Metask is temporarily unavailable. Try again shortly.",
   "account.error.metask_access":
-    "Sign-in completed, but Metask rejected the account API request. Your authorization was kept; retry loading the account configuration.",
+    "Metask rejected this sign-in credential. It was removed from this device; sign in again.",
   "account.error.credentials":
     "MetaWork could not confirm the credential update on this device.",
+  "account.error.refresh_schedule":
+    "Automatic sign-in refresh could not be scheduled. Retry now to restore it.",
   "account.error.local":
     "MetaWork could not finish preparing this task on this device. Try again.",
   "account.error.generic": "MetaWork could not finish preparing this account.",
@@ -86,6 +88,7 @@ export const enUS = {
   "account.choose_model": "Choose a model",
   "account.cancel": "Cancel current action",
   "account.refresh_catalog": "Sync again",
+  "account.retry_refresh": "Retry sign-in refresh",
   "account.logout": "Sign out and clear this device",
   "account.logout_confirm":
     "This removes the Metask sign-in credentials from this device. Your local tasks and history will remain. Continue?",

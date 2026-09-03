@@ -50,6 +50,7 @@ pub const Server = struct {
             var connection = try self.acceptUntil(deadline);
             defer connection.close(self.io);
             var read_buffer: [request_head_bytes]u8 = undefined;
+            defer std.crypto.secureZero(u8, &read_buffer);
             var write_buffer: [response_bytes]u8 = undefined;
             var reader = connection.reader(self.io, &read_buffer);
             var writer = connection.writer(self.io, &write_buffer);

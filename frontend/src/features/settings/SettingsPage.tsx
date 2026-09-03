@@ -118,6 +118,7 @@ export function SettingsPage({
   onTestModelConnection,
   onSelectModelConnection,
   onBeginLogin,
+  onRetryRefresh,
   onLogout,
   onSetDefaultPermissionProfile,
 }: {
@@ -170,6 +171,7 @@ export function SettingsPage({
     modelId: string,
   ) => void;
   onBeginLogin: () => void;
+  onRetryRefresh: () => void;
   onLogout: () => void;
   onSetDefaultPermissionProfile: (profile: PermissionProfile) => void;
 }) {
@@ -231,6 +233,20 @@ export function SettingsPage({
   const apiBusy = modelCatalogLoading;
   const modelBusy = modelCatalogLoading;
   const authenticated = account.state === "authenticated";
+  const accountIdentityTitle = authenticated
+    ? account.displayName || t("account.signed_in")
+    : account.state === "checking"
+      ? t("account.checking.title")
+      : account.state === "authorizing"
+        ? t("account.authorizing.title")
+        : t("account.sign_in_required.title");
+  const accountIdentityBody = authenticated
+    ? t("account.connected")
+    : account.state === "checking"
+      ? t("account.checking.body")
+      : account.state === "authorizing"
+        ? t("account.authorizing.body")
+        : t("account.sign_in_required.body");
   const preferenceRecovery = models.persistenceHealth === "recovery_required";
   const canChooseApi =
     authenticated && !preferenceRecovery && !modelCatalogLoading;
@@ -795,15 +811,9 @@ export function SettingsPage({
               </span>
               <div className="settings-identity-copy">
                 <strong title={account.displayName}>
-                  {authenticated
-                    ? account.displayName || t("account.signed_in")
-                    : t("account.sign_in_required.title")}
+                  {accountIdentityTitle}
                 </strong>
-                <span>
-                  {authenticated
-                    ? t("account.connected")
-                    : t("account.sign_in_required.body")}
-                </span>
+                <span>{accountIdentityBody}</span>
               </div>
               {account.canCancel ? (
                 <Button
@@ -814,7 +824,7 @@ export function SettingsPage({
                 >
                   {t("common.cancel")}
                 </Button>
-              ) : !authenticated ? (
+              ) : account.state === "signed_out" ? (
                 <Button
                   variant="secondary"
                   size="sm"
@@ -839,6 +849,16 @@ export function SettingsPage({
                       </span>
                     )}
                   </span>
+                  {account.errorCode === "refresh_schedule_failed" && (
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      disabled={disabled || accountDisabled}
+                      onClick={onRetryRefresh}
+                    >
+                      {t("account.retry_refresh")}
+                    </Button>
+                  )}
                 </div>
               )}
 

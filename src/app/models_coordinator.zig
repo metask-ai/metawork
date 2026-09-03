@@ -406,7 +406,7 @@ pub const Coordinator = struct {
 
     pub fn authorizationChanged(self: *Coordinator) void {
         self.assertMainThread();
-        var lease = self.account.authorizationLease() orelse {
+        var lease = (self.account.authorizationLease() catch return) orelse {
             if (self.catalog_job) |job| {
                 job.cancel();
                 job.join();
@@ -447,7 +447,8 @@ pub const Coordinator = struct {
         self.assertMainThread();
         if (self.catalog_job != null)
             return .rejected(.operation_in_progress);
-        var lease = self.account.authorizationLease() orelse {
+        var lease = (self.account.authorizationLease() catch
+            return .rejected(.local_resource_exhausted)) orelse {
             self.management.setMetaskAuthorizationUnavailable();
             self.observed_authorization_generation = 0;
             return .rejected(.authorization_unavailable);
@@ -464,7 +465,8 @@ pub const Coordinator = struct {
         self.assertMainThread();
         if (self.catalog_job != null)
             return .rejected(.operation_in_progress);
-        var lease = self.account.authorizationLease() orelse {
+        var lease = (self.account.authorizationLease() catch
+            return .rejected(.local_resource_exhausted)) orelse {
             self.management.setMetaskAuthorizationUnavailable();
             self.observed_authorization_generation = 0;
             return .rejected(.authorization_unavailable);

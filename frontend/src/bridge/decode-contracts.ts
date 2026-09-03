@@ -186,6 +186,7 @@ const accountErrorCodes = [
   "credential_store_delete_failed",
   "generation_mismatch",
   "recovery_state_invalid",
+  "refresh_schedule_failed",
   "local_resource_exhausted",
   "account_operation_failed",
 ] as const;
@@ -1016,26 +1017,36 @@ function decodeAccount(value: unknown, path: string): AccountView {
   const canCancel = booleanValue(item.canCancel, `${path}.canCancel`);
   const accountId = stringValue(item.accountId, `${path}.accountId`);
   const displayName = stringValue(item.displayName, `${path}.displayName`);
+  const errorCode = enumValue(
+    item.errorCode,
+    `${path}.errorCode`,
+    accountErrorCodes,
+  );
+  const safeDiagnostic = stringValue(
+    item.safeDiagnostic,
+    `${path}.safeDiagnostic`,
+  );
   if (
     state !== "authenticated" &&
     (accountId.length !== 0 || displayName.length !== 0)
   )
     fail(path, "a non-authenticated Account must hide identity");
-  if (state === "authenticated" && accountId.length === 0)
+  if (
+    state === "authenticated" &&
+    (accountId.length === 0 || displayName.length === 0)
+  )
     fail(path, "an authenticated Account requires identity");
   if (canCancel && state !== "authorizing")
     fail(path, "cancellation requires active authorization");
+  if (errorCode === "none" && safeDiagnostic.length !== 0)
+    fail(path, "safe diagnostic requires an Account error");
   return {
     state,
     canCancel,
     accountId,
     displayName,
-    errorCode: enumValue(
-      item.errorCode,
-      `${path}.errorCode`,
-      accountErrorCodes,
-    ),
-    safeDiagnostic: stringValue(item.safeDiagnostic, `${path}.safeDiagnostic`),
+    errorCode,
+    safeDiagnostic,
   };
 }
 

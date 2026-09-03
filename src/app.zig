@@ -239,7 +239,6 @@ const App = struct {
                 services,
                 self.io,
                 self.main_thread_id,
-                self.account_path,
             ) catch null;
             models_management.start(
                 self.account_path,
@@ -615,11 +614,10 @@ pub fn run(init: std.process.Init) !void {
     };
     var account_loopback = oauth_loopback_transport.Adapter.init(init.io);
     defer account_loopback.deinit();
-    var account_runtime = try account_api.Runtime.init(
+    var account_runtime = account_api.Runtime.init(
         std.heap.c_allocator,
         init.io,
         app.main_thread_id,
-        paths_state.accountDir(),
         account_http.accountTransport(),
         account_loopback.endpoint(),
         .{
@@ -722,4 +720,8 @@ test "MCP Application composition imports the startup owner" {
     std.testing.refAllDecls(mcp_startup);
     std.testing.refAllDecls(mcp_oauth);
     std.testing.refAllDecls(mcp_management_coordinator);
+}
+
+test {
+    std.testing.refAllDecls(account_coordinator);
 }

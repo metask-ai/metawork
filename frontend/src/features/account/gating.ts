@@ -15,7 +15,9 @@ export function requiresAccountGate(
 ): boolean {
   return (
     metaskIsDefault(models) &&
-    (account.state === "checking" || account.state === "authorizing")
+    (account.state === "checking" ||
+      account.state === "signed_out" ||
+      account.state === "authorizing")
   );
 }
 

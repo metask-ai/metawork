@@ -45,6 +45,7 @@ export const commands = {
   releaseAttachment: "metawork.attachments.release",
   accountBeginLogin: "metawork.account.beginLogin",
   accountCancelOperation: "metawork.account.cancelOperation",
+  accountRetryRefresh: "metawork.account.retryRefresh",
   modelsRefreshCatalog: "metawork.models.refreshCatalog",
   selectMetaskApiKey: "metawork.models.selectMetaskApiKey",
   configureMetaskSelection: "metawork.models.configureMetaskSelection",

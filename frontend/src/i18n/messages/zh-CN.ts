@@ -66,8 +66,10 @@ export const zhCN: Record<MessageId, string> = {
   "account.error.session_expired": "登录已失效，请登录后继续。",
   "account.error.service": "Metask 暂时不可用，请稍后重试。",
   "account.error.metask_access":
-    "登录已完成，但 Metask 拒绝了账户接口请求。授权信息已保留，请重试获取账户配置。",
+    "Metask 已拒绝此登录凭据。该凭据已从这台设备移除，请重新登录。",
   "account.error.credentials": "MetaWork 无法确认这台设备上的凭据更新结果。",
+  "account.error.refresh_schedule":
+    "无法安排自动登录刷新。请立即重试以恢复自动刷新。",
   "account.error.local": "MetaWork 无法在这台设备上完成任务准备，请重试。",
   "account.error.generic": "MetaWork 无法完成账号准备。",
   "account.cancelled": "账号操作已取消。",
@@ -80,6 +82,7 @@ export const zhCN: Record<MessageId, string> = {
   "account.choose_model": "选择模型",
   "account.cancel": "取消当前操作",
   "account.refresh_catalog": "重新同步",
+  "account.retry_refresh": "重试登录刷新",
   "account.logout": "退出并清除这台设备上的信息",
   "account.logout_confirm":
     "这会清除这台设备上的 Metask 登录凭据，本地任务和历史记录会保留。是否继续？",
