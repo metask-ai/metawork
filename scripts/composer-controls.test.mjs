@@ -384,6 +384,7 @@ function settingsElement(account, overrides = {}) {
         busy: false,
       },
       focusTarget: "title",
+      initialSection: "models",
       disabled: false,
       accountDisabled: false,
       executionDisabled: false,
@@ -459,6 +460,7 @@ test("Settings exposes Model connections only for the complete Host gate", () =>
       },
     }),
   );
+  fireEvent.click(screen.getByRole("link", { name: "Model connections" }));
   assert.ok(screen.getByRole("heading", { name: "Model connections" }));
   assert.ok(screen.getByRole("button", { name: "Add connection" }));
 });
@@ -654,6 +656,8 @@ test("Settings keeps Account cancellation independent from Models loading", asyn
       .hasAttribute("disabled"),
     true,
   );
+
+  await user.click(screen.getByRole("link", { name: "General" }));
   assert.equal(
     screen.getByRole("combobox", { name: "Language" }).hasAttribute("disabled"),
     false,
@@ -663,13 +667,16 @@ test("Settings keeps Account cancellation independent from Models loading", asyn
     false,
   );
 
+  await user.click(screen.getByRole("link", { name: "Account" }));
   await user.click(screen.getByRole("button", { name: "Cancel" }));
   assert.equal(cancellations, 1);
 });
 
-test("Settings reports Models failure without changing Account identity", () => {
+test("Settings reports Models failure without changing Account identity", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
   const view = renderSettings(readySettingsAccount, {
     models: settingsModels({}, { errorCode: "catalog_unavailable" }),
+    initialSection: "models",
   });
 
   assert.match(
@@ -684,63 +691,41 @@ test("Settings reports Models failure without changing Account identity", () => 
     screen.getByRole("alert").textContent,
     /Model configuration needs attention/,
   );
+
+  await user.click(screen.getByRole("link", { name: "Account" }));
   assert.match(screen.getByText("Metask User").textContent, /Metask User/);
+  await user.click(screen.getByRole("link", { name: "Models" }));
 
   view.rerenderModels(readySettingsModels);
   assert.equal(screen.queryByRole("alert"), null);
 });
 
-test("Settings keeps section navigation fixed while content scrolls independently", () => {
-  renderSettings(readySettingsAccount);
-  const page = document.querySelector(".settings-page");
-  const content = document.querySelector(".settings-content");
-  const accountSection = document.querySelector("#settings-account");
-  const modelsSection = document.querySelector("#settings-models");
-  const modelConnectionsSection = document.querySelector(
-    "#settings-model-connections",
-  );
-  Object.defineProperty(content, "clientHeight", {
-    configurable: true,
-    value: 680,
-  });
-  content.getBoundingClientRect = () => ({ top: 100 });
-  accountSection.getBoundingClientRect = () => ({
-    top: 520 - content.scrollTop,
-  });
-  modelsSection.getBoundingClientRect = () => ({
-    top: 920 - content.scrollTop,
-  });
-  modelConnectionsSection.getBoundingClientRect = () => ({
-    top: 1320 - content.scrollTop,
-  });
-
-  page.scrollTop = 300;
-  fireEvent.scroll(page);
+test("Settings switches between one section page at a time", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  renderSettings(readySettingsAccount, { initialSection: "general" });
   assert.equal(
     screen.getByRole("link", { name: "General" }).getAttribute("aria-current"),
     "location",
   );
 
-  content.scrollTop = 0;
-  fireEvent.scroll(content);
-  assert.equal(
-    screen.getByRole("link", { name: "General" }).getAttribute("aria-current"),
-    "location",
-  );
+  assert.ok(screen.getByRole("heading", { name: "General" }));
+  assert.equal(screen.queryByRole("heading", { name: "Account" }), null);
 
-  content.scrollTop = 300;
-  fireEvent.scroll(content);
+  await user.click(screen.getByRole("link", { name: "Account" }));
   assert.equal(
     screen.getByRole("link", { name: "Account" }).getAttribute("aria-current"),
     "location",
   );
+  assert.ok(screen.getByRole("heading", { name: "Account" }));
+  assert.equal(screen.queryByRole("heading", { name: "General" }), null);
 
-  content.scrollTop = 720;
-  fireEvent.scroll(content);
+  await user.click(screen.getByRole("link", { name: "Models" }));
   assert.equal(
     screen.getByRole("link", { name: "Models" }).getAttribute("aria-current"),
     "location",
   );
+  assert.ok(screen.getByRole("heading", { name: "Models" }));
+  assert.equal(screen.queryByRole("heading", { name: "Account" }), null);
 });
 
 test("Settings changes only the future Task permission default in one action", async () => {
@@ -753,6 +738,7 @@ test("Settings changes only the future Task permission default in one action", a
       defaultProfile: "approval_required",
       busy: false,
     },
+    initialSection: "permissions",
     onSetDefaultPermissionProfile(profile) {
       selected.push(profile);
     },
@@ -817,6 +803,7 @@ function renderComposer(overrides = {}) {
         skills: [],
         issues: [],
       },
+      initialSection: "permissions",
       slashCommands: [],
       composeDisabled: false,
       canSubmit: true,

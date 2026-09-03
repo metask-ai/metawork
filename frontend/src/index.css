@@ -848,16 +848,6 @@ summary::-webkit-details-marker {
   scrollbar-gutter: stable;
 }
 
-.settings-section {
-  scroll-margin-top: 20px;
-}
-
-.settings-section + .settings-section {
-  margin-top: 36px;
-  padding-top: 32px;
-  border-top: 1px solid var(--settings-line);
-}
-
 .settings-section-heading p,
 .settings-section-heading h2 {
   margin: 0;
