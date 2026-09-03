@@ -1711,6 +1711,47 @@ test "healthy refresh window preserves authorization generation" {
     try std.testing.expect(runtime.acceptsAuthorizationGeneration(generation));
 }
 
+test "unauthorized refresh deletes the retained credential before signing out" {
+    var transport: RuntimeTestTransport = .{};
+    var runtime = try initRuntimeForUnitTest(&transport);
+    var platform: TestSupport.Platform = .{ .now_unix_seconds = 100 };
+    try platform.setStoredRefreshToken("refresh-token");
+    TestSupport.attachPlatform(&runtime, &platform);
+    defer {
+        TestSupport.detachPlatform(&runtime);
+        runtime.deinit();
+    }
+    var authenticated = try TestSupport.prepareAuthenticated(
+        &runtime,
+        "account-1",
+        "Metask User",
+        "access-token",
+        "refresh-token",
+        150,
+    );
+    defer authenticated.deinit();
+    runtime.commit(&authenticated);
+    var refreshing = TestSupport.prepareTokenRefreshWithoutEffect(&runtime);
+    defer refreshing.deinit();
+    runtime.commit(&refreshing);
+
+    TestSupport.publishFailure(
+        &runtime,
+        runtime.account.activeAttempt().?,
+        .metask_unauthorized,
+    );
+    var signed_out = switch (runtime.prepareNextCompletion().?) {
+        .prepared => |prepared| prepared,
+        else => return error.TestUnexpectedResult,
+    };
+    defer signed_out.deinit();
+    try std.testing.expectEqual(@as(?usize, null), platform.refresh_token_len);
+    runtime.commit(&signed_out);
+    try std.testing.expectEqual(contract.AccountState.signed_out, runtime.view().state);
+    try std.testing.expectEqual(contract.ErrorCode.metask_unauthorized, runtime.view().error_code);
+    try std.testing.expect((try runtime.authorizationLease()) == null);
+}
+
 test "retry refresh schedules fresh credentials and refreshes inside skew" {
     var transport: RuntimeTestTransport = .{};
     var runtime = try initRuntimeForUnitTest(&transport);

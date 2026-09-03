@@ -59,6 +59,13 @@ test("command bar product copy never interpolates raw diagnostics", () => {
   }
 });
 
+test("Metask authorization rejection tells the user to sign in again", () => {
+  assert.match(enUS["account.error.metask_access"], /sign in again/iu);
+  assert.doesNotMatch(enUS["account.error.metask_access"], /kept/iu);
+  assert.match(zhCN["account.error.metask_access"], /重新登录/u);
+  assert.doesNotMatch(zhCN["account.error.metask_access"], /保留/u);
+});
+
 test("task counts follow locale plural rules", () => {
   assert.equal(taskCountMessageId("en-US", 1), "task.count.one");
   assert.equal(taskCountMessageId("en-US", 0), "task.count.other");

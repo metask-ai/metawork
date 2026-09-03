@@ -66,7 +66,7 @@ export const zhCN: Record<MessageId, string> = {
   "account.error.session_expired": "登录已失效，请登录后继续。",
   "account.error.service": "Metask 暂时不可用，请稍后重试。",
   "account.error.metask_access":
-    "登录已完成，但 Metask 拒绝了账户接口请求。授权信息已保留，请重试获取账户配置。",
+    "Metask 已拒绝此登录凭据。该凭据已从这台设备移除，请重新登录。",
   "account.error.credentials": "MetaWork 无法确认这台设备上的凭据更新结果。",
   "account.error.refresh_schedule":
     "无法安排自动登录刷新。请立即重试以恢复自动刷新。",

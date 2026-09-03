@@ -2162,6 +2162,10 @@ test("OAuth mechanics are neutral while callers own policy and Application owns 
   assert.match(transport, /listener: std\.Io\.net\.Server/);
   assert.match(transport, /pub const Adapter = struct/);
   assert.match(transport, /sink\.handle/);
+  assert.match(
+    transport,
+    /var read_buffer:[\s\S]*?defer std\.crypto\.secureZero\(u8, &read_buffer\);/,
+  );
   assert.match(loginAttempt, /loopback_endpoint: loopback\.Endpoint/);
   assert.match(mcpOauth, /oauth_loopback_transport\.Server/);
   assert.match(oauthMechanics, /pub const AttemptMaterial = struct/);

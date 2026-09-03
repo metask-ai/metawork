@@ -255,7 +255,7 @@ const TokenResponse = struct {
     refresh_token: []const u8,
     token_type: []const u8,
     expires_in: u64,
-    scope: ?[]const u8 = null,
+    scope: []const u8,
     account_id: []const u8,
 };
 
@@ -299,11 +299,10 @@ pub fn parseTokenResponse(
     result.refresh_token = try Secret.init(allocator, raw.refresh_token);
     errdefer result.refresh_token.deinit();
 
-    const response_scope = raw.scope orelse scope;
-    if (!std.mem.eql(u8, response_scope, scope))
+    if (!std.mem.eql(u8, raw.scope, scope))
         return error.InvalidTokenResponse;
-    @memcpy(result.scope_value[0..response_scope.len], response_scope);
-    result.scope_len = response_scope.len;
+    @memcpy(result.scope_value[0..raw.scope.len], raw.scope);
+    result.scope_len = raw.scope.len;
     if (raw.account_id.len == 0 or raw.account_id.len > result.account_id.len)
         return error.FieldTooLarge;
     if (!std.unicode.utf8ValidateSlice(raw.account_id))
@@ -558,11 +557,20 @@ test "token decoder validates consumed fields and tolerates additive metadata" {
     try std.testing.expectEqualStrings("acct-1", tokens.accountId());
     var extended = try parseTokenResponse(
         std.testing.allocator,
-        \\{"access_token":"a","refresh_token":"r","token_type":"Bearer","expires_in":1,"account_id":"acct-1","unknown":true}
+        \\{"access_token":"a","refresh_token":"r","token_type":"Bearer","expires_in":1,"scope":"metawork:use","account_id":"acct-1","unknown":true}
     ,
         0,
     );
     extended.deinit();
+    try std.testing.expectError(
+        error.InvalidTokenResponse,
+        parseTokenResponse(
+            std.testing.allocator,
+            \\{"access_token":"a","refresh_token":"r","token_type":"Bearer","expires_in":1,"account_id":"acct-1"}
+        ,
+            0,
+        ),
+    );
     try std.testing.expectError(
         error.InvalidTokenResponse,
         parseTokenResponse(

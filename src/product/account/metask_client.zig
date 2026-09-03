@@ -199,6 +199,13 @@ fn classifyStatus(status: u16, exchange: bool) ClientError {
     };
 }
 
+test "401 and 403 invalidate retained credentials outside code exchange" {
+    try std.testing.expectEqual(error.Unauthorized, classifyStatus(401, false));
+    try std.testing.expectEqual(error.Unauthorized, classifyStatus(403, false));
+    try std.testing.expectEqual(error.Unauthorized, classifyStatus(403, true));
+    try std.testing.expectEqual(error.OAuthExchangeFailed, classifyStatus(401, true));
+}
+
 const FakeTransport = struct {
     step: usize = 0,
 

@@ -70,7 +70,7 @@ export const enUS = {
   "account.error.service":
     "Metask is temporarily unavailable. Try again shortly.",
   "account.error.metask_access":
-    "Sign-in completed, but Metask rejected the account API request. Your authorization was kept; retry loading the account configuration.",
+    "Metask rejected this sign-in credential. It was removed from this device; sign in again.",
   "account.error.credentials":
     "MetaWork could not confirm the credential update on this device.",
   "account.error.refresh_schedule":

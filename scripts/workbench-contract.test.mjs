@@ -1363,6 +1363,20 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     /cancellation requires active authorization/,
   );
 
+  const authenticatedWithoutDisplayName = clone(fixture);
+  authenticatedWithoutDisplayName.account.displayName = "";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(authenticatedWithoutDisplayName),
+    /authenticated Account requires identity/,
+  );
+
+  const diagnosticWithoutError = clone(fixture);
+  diagnosticWithoutError.account.safeDiagnostic = "must have an error code";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(diagnosticWithoutError),
+    /safe diagnostic requires an Account error/,
+  );
+
   const refreshingCatalog = clone(fixture);
   refreshingCatalog.models.operation = "refreshing_catalog";
   refreshingCatalog.models.availability = "loading";
