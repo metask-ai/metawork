@@ -1,11 +1,13 @@
 const std = @import("std");
 const oauth = @import("account_oauth");
 const account_metask = @import("metask_client");
+const metask_transport = @import("metask_transport");
 const models_metask = @import("product_models_metask");
 
-/// Application-owned network adapter for the Account-defined Metask
-/// transport port. Account retains request kinds, response classification,
-/// bounded decoding, and credential lifecycle policy.
+/// Application-owned HTTP execution shared by Account's narrow transport port
+/// and the Models Metask provider transport leaf. Account owns OAuth and
+/// identity request policy; Models owns catalog request policy. This adapter
+/// only maps their request kinds to network effects.
 pub const Adapter = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -31,18 +33,54 @@ pub const Adapter = struct {
         cancelled,
     };
 
-    pub fn transport(self: *Adapter) account_metask.Transport {
+    pub fn accountTransport(self: *Adapter) account_metask.Transport {
         return .{
             .context = self,
-            .perform_fn = perform,
+            .perform_fn = performAccount,
         };
     }
 
-    fn perform(
+    pub fn modelsTransport(self: *Adapter) metask_transport.Transport {
+        return .{
+            .context = self,
+            .perform_fn = performModels,
+        };
+    }
+
+    fn performAccount(
         context: *anyopaque,
         request: account_metask.Request,
         response_buffer: []u8,
     ) account_metask.TransportError!account_metask.Response {
+        return perform(
+            context,
+            .{
+                .kind = switch (request.kind) {
+                    .exchange_code => .exchange_code,
+                    .refresh_token => .refresh_token,
+                    .current_user => .current_user,
+                },
+                .body = request.body,
+                .bearer = request.bearer,
+                .control = request.control,
+            },
+            response_buffer,
+        );
+    }
+
+    fn performModels(
+        context: *anyopaque,
+        request: metask_transport.Request,
+        response_buffer: []u8,
+    ) metask_transport.TransportError!metask_transport.Response {
+        return perform(context, request, response_buffer);
+    }
+
+    fn perform(
+        context: *anyopaque,
+        request: metask_transport.Request,
+        response_buffer: []u8,
+    ) metask_transport.TransportError!metask_transport.Response {
         const self: *Adapter = @ptrCast(@alignCast(context));
         const deadline = if (request.control) |control|
             control.deadline
@@ -107,7 +145,7 @@ pub const Adapter = struct {
 
     fn fetch(
         self: *Adapter,
-        request: account_metask.Request,
+        request: metask_transport.Request,
         response_buffer: []u8,
     ) FetchResult {
         var response_writer = std.Io.Writer.fixed(response_buffer);
@@ -188,7 +226,7 @@ pub const Adapter = struct {
         deadline.wait(io) catch {};
     }
 
-    fn waitCancellation(cancellation: *const account_metask.Cancellation) void {
+    fn waitCancellation(cancellation: *const metask_transport.Cancellation) void {
         cancellation.wait();
     }
 };

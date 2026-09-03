@@ -614,7 +614,7 @@ pub fn run(init: std.process.Init) !void {
         init.io,
         app.main_thread_id,
         paths_state.accountDir(),
-        account_http.transport(),
+        account_http.accountTransport(),
         account_loopback.endpoint(),
         .{
             .context = &app.platform,
@@ -628,7 +628,7 @@ pub fn run(init: std.process.Init) !void {
     );
     var models_coordinator_state = models_coordinator.Coordinator.init(
         &account_runtime,
-        account_http.transport(),
+        account_http.modelsTransport(),
         control.modelsManagement(),
         app.main_thread_id,
         init.io,

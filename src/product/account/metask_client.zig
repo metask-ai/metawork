@@ -7,13 +7,40 @@ const transport_api = @import("metask_transport");
 
 pub const current_user_url = "https://napi.metask-ai.com/api/v1/auth/me";
 
-pub const RequestKind = transport_api.RequestKind;
-pub const Request = transport_api.Request;
+pub const RequestKind = enum {
+    exchange_code,
+    refresh_token,
+    current_user,
+};
+
+pub const Request = struct {
+    kind: RequestKind,
+    body: []const u8 = "",
+    bearer: ?[]const u8 = null,
+    control: ?RequestControl = null,
+};
+
 pub const Response = transport_api.Response;
 pub const TransportError = transport_api.TransportError;
 pub const Cancellation = transport_api.Cancellation;
 pub const RequestControl = transport_api.RequestControl;
-pub const Transport = transport_api.Transport;
+
+pub const Transport = struct {
+    context: *anyopaque,
+    perform_fn: *const fn (
+        context: *anyopaque,
+        request: Request,
+        response_buffer: []u8,
+    ) TransportError!Response,
+
+    pub fn perform(
+        self: Transport,
+        request: Request,
+        response_buffer: []u8,
+    ) TransportError!Response {
+        return self.perform_fn(self.context, request, response_buffer);
+    }
+};
 
 pub const ClientError = error{
     OAuthExchangeFailed,

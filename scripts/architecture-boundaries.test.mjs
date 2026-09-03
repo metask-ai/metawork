@@ -2084,7 +2084,7 @@ test("Product Account owns Metask protocol without a concrete HTTP client", () =
   assert.doesNotMatch(accountSource, /std\.http\.Client|StdHttpTransport/);
   assert.match(adapter, /std\.http\.Client/);
   assert.match(adapter, /pub const Adapter = struct/);
-  assert.match(app, /account_http\.transport\(\)/);
+  assert.match(app, /account_http\.accountTransport\(\)/);
 });
 
 test("Account owns platform ports while Application binds Native SDK effects", () => {
