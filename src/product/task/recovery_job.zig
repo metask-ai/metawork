@@ -5,7 +5,7 @@
 
 const std = @import("std");
 const agent = @import("metawork_agent");
-const execution_contract = @import("metawork_product_execution_contract");
+const models_contract = @import("metawork_product_models_contract");
 const agent_session = @import("product_task_agent_session");
 const checkpoint_record = @import("product_task_checkpoint_record");
 const checkpoint_store = @import("product_task_checkpoint_store");
@@ -76,7 +76,7 @@ pub const PreparedAttempt = struct {
     source_execution_generation: u64,
     target_execution_generation: u64,
     task_model: []u8,
-    protocol: execution_contract.Protocol,
+    protocol: models_contract.Protocol,
     permission_mode: agent.PermissionMode,
     shell_policy: agent.ShellPolicy,
     permission_interaction: agent.PermissionInteraction,
@@ -96,7 +96,7 @@ pub const CommitAuthority = struct {
     source_execution_generation: u64,
     target_execution_generation: u64,
     task_model: []const u8,
-    protocol: execution_contract.Protocol,
+    protocol: models_contract.Protocol,
     active_attempt_id: ?u64,
     shutting_down: bool,
     archived: bool,
@@ -118,7 +118,7 @@ pub const AttemptAuthority = struct {
     source_execution_generation: u64,
     target_execution_generation: u64,
     task_model: []const u8,
-    protocol: execution_contract.Protocol,
+    protocol: models_contract.Protocol,
 };
 
 /// A restore completion is publishable only while every authority token that

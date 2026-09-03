@@ -706,6 +706,10 @@ export const zhCN: Record<MessageId, string> = {
   "settings.general": "通用",
   "settings.permissions": "权限",
   "settings.account": "账号",
+  "settings.models": "模型",
+  "settings.models_error": "模型配置需要处理",
+  "settings.models_error_help":
+    "请刷新 Metask 模型目录或检查已保存的模型配置。",
   "permission.profile.approval_required": "请求批准",
   "permission.profile.approval_required.help":
     "常规工作区编辑自动执行；当前策略未覆盖的操作会先征求你的决定。",
@@ -749,6 +753,7 @@ export const zhCN: Record<MessageId, string> = {
     "请先选择其他默认连接，再编辑或删除当前连接。",
   "settings.model_connection_edit_help":
     "修改协议或服务地址后需要重新测试连接；这里不会显示或修改 API Key。",
+  "settings.model_connection_replace_credential": "替换 API Key",
   "settings.model_connection_remove_confirm":
     "删除这个连接及其保存的凭据？已有任务仍保留当前绑定。",
   "settings.model_connection_removing": "正在删除…",
@@ -812,7 +817,7 @@ export const zhCN: Record<MessageId, string> = {
     "默认配置只影响新任务。已有任务的绑定和历史不会被改写。",
   "settings.signout_title": "在这台设备上退出",
   "settings.signout_help":
-    "这会清除本机 Metask 凭据。任务记录和工作区文件会保留；正在运行的工作可能需要先结束。",
+    "这会清除本机 Metask 凭据，新的 Metask 模型使用将不可用；自定义模型、任务记录、工作区文件和已有任务绑定都会保留。",
   "settings.task_binding_model":
     "此任务保留原执行配置；当前默认配置无法安全修改它的模型。",
   "settings.task_model_help": "选择此任务下一轮使用的模型。",
@@ -957,11 +962,17 @@ export const zhCN: Record<MessageId, string> = {
   "scheduled.occurrence.skipped": "已跳过",
   "scheduled.occurrence.rejected": "未能开始",
   "scheduled.occurrence.starting": "正在启动",
+  "scheduled.binding_migration_required":
+    "此定时任务仍使用旧版模型绑定。保存后会将其明确绑定到当前默认模型。",
   "scheduled.persistence.unavailable": "当前设备不支持持久定时任务。",
   "scheduled.persistence.read_failed": "无法读取已保存的定时任务。",
   "scheduled.persistence.corrupt":
     "定时任务数据已损坏。为避免重复运行，自动触发已停止。",
   "scheduled.persistence.write_failed": "最近的更改未能保存，自动触发已停止。",
+  "scheduled.persistence.migration_failed":
+    "无法升级已保存的定时任务。原始数据已保留，自动触发已停止。",
+  "scheduled.persistence.migration_failed_detail":
+    "请重启 MetaWork 以重试升级；原始定时任务存储不会被覆盖。",
   "scheduled.persistence.outcome_unknown":
     "无法确认最近的更改是否保存。为避免重复运行，自动触发已停止。",
   "scheduled.persistence.ready": "定时任务存储已就绪。",

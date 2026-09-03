@@ -47,7 +47,7 @@ function snapshot(revision, tasks, workspaceIds = null) {
     revision,
     capabilities: initialWorkbenchState.snapshot.capabilities,
     account: initialWorkbenchState.snapshot.account,
-    execution: initialWorkbenchState.snapshot.execution,
+    newTaskAdmission: initialWorkbenchState.snapshot.newTaskAdmission,
     workspaces: ids.map((id) => workspace(id)),
     tasks,
   };
@@ -96,7 +96,7 @@ test("a signed-out Host snapshot restores an active Run instead of hiding it", (
   });
 
   assert.equal(signedOut.activeTaskId, null);
-  assert.equal(signedOut.snapshot.execution.taskCreationAvailable, false);
+  assert.equal(signedOut.snapshot.newTaskAdmission.available, false);
   assert.equal(signedOut.snapshot.tasks[0]?.currentRunPhase, "running");
   assert.deepEqual(signedOut.snapshot.tasks[0]?.activeOperation, {
     kind: "run",

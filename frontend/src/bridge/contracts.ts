@@ -1,14 +1,17 @@
 export type AccountState =
   "checking" | "signed_out" | "authorizing" | "authenticated";
 
-export type CatalogState =
-  "unavailable" | "loading" | "choosing" | "ready" | "failed";
+export type ModelsCatalogState =
+  | "needs_authentication"
+  | "loading"
+  | "choosing"
+  | "ready"
+  | "failed"
+  | "unavailable";
 
-export type ExecutionSource = "metask" | "model_connection";
+export type NewTaskAdmissionState = "unavailable" | "ready" | "replacing";
 
-export type ExecutionState = "unavailable" | "ready" | "replacing";
-
-export type ExecutionErrorCode =
+export type NewTaskAdmissionReason =
   | "none"
   | "model_connection_persistence_unavailable"
   | "credential_unavailable"
@@ -35,10 +38,6 @@ export type AccountErrorCode =
   | "metask_rate_limited"
   | "metask_service_unavailable"
   | "metask_protocol_invalid"
-  | "catalog_too_large"
-  | "catalog_field_too_large"
-  | "no_api_keys"
-  | "no_models"
   | "metask_platform_unsupported"
   | "credential_store_read_failed"
   | "credential_store_write_failed"
@@ -56,7 +55,6 @@ export type ExecutionCommandErrorCode =
   | "no_models"
   | "local_resource_exhausted"
   | "credential_store_write_failed"
-  | "execution_in_use"
   | "model_connection_invalid"
   | "model_connection_not_found"
   | "model_connection_capture_unavailable"
@@ -81,6 +79,9 @@ export type ModelConnectionTestStatus =
 export type ModelConnectionCredentialStatus =
   "missing" | "ready" | "invalid" | "capture_unavailable";
 
+export type ModelMetadataProvenance =
+  "unknown" | "user_declared" | "provider_declared" | "runtime_verified";
+
 export type ModelConnectionView = {
   id: string;
   displayName: string;
@@ -90,9 +91,23 @@ export type ModelConnectionView = {
   testStatus: ModelConnectionTestStatus;
   credentialStatus: ModelConnectionCredentialStatus;
   enabled: boolean;
-  models: { id: string; displayName: string }[];
+  models: {
+    id: string;
+    displayName: string;
+    metadata: ModelMetadata;
+    metadataProvenance: ModelMetadataProvenance;
+    testStatus: ModelConnectionTestStatus;
+    ready: boolean;
+  }[];
   selectedModel: string;
-  connectionGeneration: string;
+  connectionRevision: string;
+  sourceGeneration: string;
+  catalogGeneration: string;
+};
+
+export type ModelRef = {
+  sourceId: string;
+  modelId: string;
 };
 
 /** Server declarations only; null means unknown, not unsupported. */
@@ -129,40 +144,70 @@ export type ModelMetadata = {
 
 export type AccountView = {
   state: AccountState;
-  catalogState: CatalogState;
   canCancel: boolean;
   accountId: string;
   displayName: string;
-  apiKeys: {
-    selectionId: string;
-    name: string;
-    suffix: string;
-    protocol: Protocol;
-  }[];
-  models: {
-    selectionId: string;
-    displayName: string;
-    metadata: ModelMetadata;
-  }[];
-  selectedApiKeySelectionId: string;
-  selectedModelSelectionId: string;
-  candidateApiKeySelectionId: string;
-  candidateModelSelectionId: string;
-  modelCatalogApiKeySelectionId: string;
   errorCode: AccountErrorCode;
   safeDiagnostic: string;
-  catalogGeneration: string;
 };
 
-export type ExecutionView = {
-  state: ExecutionState;
-  defaultSource: ExecutionSource | null;
-  activeSource: ExecutionSource | null;
+export type ModelsErrorCode =
+  | "none"
+  | "authorization_unavailable"
+  | "persistence_unavailable"
+  | "migration_required"
+  | "catalog_unavailable"
+  | "catalog_invalid"
+  | "catalog_too_large"
+  | "no_api_keys"
+  | "no_models"
+  | "operation_in_progress"
+  | "local_resource_exhausted";
+
+export type ModelsView = {
+  availability: ModelsCatalogState;
+  persistenceHealth:
+    "ready" | "migration_required" | "recovery_required" | "unavailable";
+  providers: {
+    id: string;
+    displayName: string;
+    recommended: boolean;
+    catalogState: ModelsCatalogState;
+    principalRef: string;
+    apiKeys: {
+      id: string;
+      name: string;
+      suffix: string;
+      protocol: Protocol;
+    }[];
+    models: {
+      id: string;
+      displayName: string;
+      metadata: ModelMetadata;
+      metadataProvenance: ModelMetadataProvenance;
+    }[];
+    selectedApiKeyId: string;
+    catalogGeneration: string;
+    sourceGeneration: string;
+    errorCode: ModelsErrorCode;
+    safeDiagnostic: string;
+  }[];
+  metaskSelection: ModelRef | null;
+  metaskSelectionRevision: string;
+  defaultSelection: ModelRef | null;
+  selectionRevision: string;
+  operation: "idle" | "refreshing_catalog";
+  errorCode: ModelsErrorCode;
+  connections: ModelConnectionView[];
+};
+
+export type NewTaskAdmissionView = {
+  available: boolean;
+  reason: NewTaskAdmissionReason;
+  activeModelRef: ModelRef | null;
   activeGeneration: string;
-  taskCreationAvailable: boolean;
-  selectedModelConnectionId: string;
-  modelConnections: ModelConnectionView[];
-  errorCode: ExecutionErrorCode;
+  activeSelectionRevision: string;
+  state: NewTaskAdmissionState;
 };
 
 export type AccountCommandResult = {
@@ -305,6 +350,24 @@ export type ScheduledTaskRecurrence =
       everySeconds: string;
     };
 
+export type ScheduledTaskBinding = {
+  modelRef: ModelRef;
+  sourceGeneration: string;
+  selectionRevision: string;
+  protocol: Protocol;
+};
+
+export type ScheduledTaskStoredBinding =
+  | ({ status: "bound" } & ScheduledTaskBinding)
+  | {
+      status: "migration_required";
+      legacyExecution: {
+        generation: string;
+        protocol: Protocol;
+        model: string;
+      };
+    };
+
 export type ScheduledTaskView = {
   id: string;
   epoch: string;
@@ -324,12 +387,9 @@ export type ScheduledTaskView = {
     | "persistence_failed"
     | "host_interrupted"
     | "permission_required"
+    | "binding_migration_required"
     | null;
-  execution: {
-    generation: string;
-    protocol: Protocol;
-    model: string;
-  };
+  binding: ScheduledTaskStoredBinding;
   input: { kind: "text"; text: string; redacted: boolean };
   recurrence: ScheduledTaskRecurrence;
   nextRunAtUnixSeconds: string | null;
@@ -353,7 +413,7 @@ export type ScheduledTaskView = {
 
 export type ScheduledTaskMutation = {
   title: string;
-  expectedExecutionGeneration: string;
+  binding: ScheduledTaskBinding;
   permissionProfile: PermissionProfile;
   input: Extract<TaskRunInput, { kind: "text" }>;
   recurrence: ScheduledTaskRecurrence;
@@ -658,6 +718,7 @@ export type WorkbenchSnapshot = {
       | "read_failed"
       | "corrupt"
       | "write_failed"
+      | "migration_failed"
       | "outcome_unknown";
     scheduledTaskRecoveryAvailable: boolean;
     backgroundScheduleWake: boolean;
@@ -691,7 +752,8 @@ export type WorkbenchSnapshot = {
     defaultProfile: PermissionProfile;
   };
   account: AccountView;
-  execution: ExecutionView;
+  models: ModelsView;
+  newTaskAdmission: NewTaskAdmissionView;
   skillCatalog: SkillCatalogView;
   skillManagement: SkillManagementView;
   mcp: McpManagementView;

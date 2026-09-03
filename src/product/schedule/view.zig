@@ -61,12 +61,30 @@ fn writeItem(
             return error.SnapshotTooLarge
     else
         writer.writeAll("null") catch return error.SnapshotTooLarge;
-    writer.print(
-        ",\"execution\":{{\"generation\":\"{d}\",\"protocol\":\"{s}\",\"model\":",
-        .{ item.execution_generation, @tagName(item.execution_protocol) },
-    ) catch return error.SnapshotTooLarge;
-    try text.writeJson(writer, item.execution_model);
-    writer.print("}},\"permissionProfile\":\"{s}\",\"input\":{{\"kind\":\"text\",\"text\":", .{
+    writer.writeAll(",\"binding\":") catch return error.SnapshotTooLarge;
+    switch (item.bindingView()) {
+        .current => |binding| {
+            writer.writeAll("{\"status\":\"bound\",\"modelRef\":{\"sourceId\":") catch
+                return error.SnapshotTooLarge;
+            try text.writeJson(writer, binding.model_ref.source_id);
+            writer.writeAll(",\"modelId\":") catch return error.SnapshotTooLarge;
+            try text.writeJson(writer, binding.model_ref.model_id);
+            writer.print("}},\"sourceGeneration\":\"{d}\",\"selectionRevision\":\"{d}\",\"protocol\":\"{s}\"}}", .{
+                binding.source_generation,
+                binding.selection_revision,
+                @tagName(binding.protocol),
+            }) catch return error.SnapshotTooLarge;
+        },
+        .migration_required => |legacy| {
+            writer.print("{{\"status\":\"migration_required\",\"legacyExecution\":{{\"generation\":\"{d}\",\"protocol\":\"{s}\",\"model\":", .{
+                legacy.execution_generation,
+                @tagName(legacy.protocol),
+            }) catch return error.SnapshotTooLarge;
+            try text.writeJson(writer, legacy.model);
+            writer.writeAll("}}") catch return error.SnapshotTooLarge;
+        },
+    }
+    writer.print(",\"permissionProfile\":\"{s}\",\"input\":{{\"kind\":\"text\",\"text\":", .{
         @tagName(item.permission_profile),
     }) catch
         return error.SnapshotTooLarge;

@@ -5,20 +5,19 @@
 const std = @import("std");
 const agent = @import("metawork_agent");
 const account = @import("metawork_account_contract");
-const execution_contract = @import("metawork_product_execution_contract");
-const execution_ports = @import("product_execution_ports");
+const models_contract = @import("metawork_product_models_contract");
+const models_ports = @import("product_models_ports");
 const product_schedule = @import("metawork_product_schedule");
 const mcp = @import("metawork_product_mcp");
 const mcp_contract = mcp.contract;
 
 /// One committed Account revision delivered to Product Control. Attempt
-/// identity is explicit so Product never infers operation lifetime from a
-/// transient Account view such as `catalog_state`.
+/// identity remains explicit for Account command lifecycle observation; model
+/// availability is owned and delivered independently by Models.
 pub const AccountCommit = struct {
     fact: account.AccountFact,
     attempt_id: ?u64,
     attempt_terminal: bool,
-    candidate: ?execution_contract.OwnedSourceCandidateTransfer = null,
 
     pub fn assertValid(self: AccountCommit) void {
         account.validateFact(self.fact) catch
@@ -27,9 +26,8 @@ pub const AccountCommit = struct {
     }
 };
 
-/// Narrow no-fail sink for a committed Account revision and its optional
-/// linear source candidate. Product Control owns every reconciliation decision
-/// after this call; no result flows back into Account.
+/// Narrow no-fail sink for a committed Account revision. No model catalog,
+/// selection, source candidate, or credential crosses this identity boundary.
 pub const AccountCommitSink = struct {
     context: *anyopaque,
     commit_fn: *const fn (*anyopaque, AccountCommit) void,
@@ -40,37 +38,61 @@ pub const AccountCommitSink = struct {
     }
 };
 
-/// Application-facing capability for Execution lifecycle and effects. Product
+/// Application-facing capability for Models lifecycle and effects. Product
 /// Control keeps registry/default-selection transactions behind these calls.
-pub const ExecutionManagement = struct {
+pub const ModelsManagement = struct {
     context: *anyopaque,
-    start_model_connections_fn: *const fn (*anyopaque, []const u8, execution_ports.CredentialVault) anyerror!void,
+    start_model_connections_fn: *const fn (*anyopaque, []const u8, models_ports.CredentialVault) anyerror!void,
     start_model_connections_unavailable_fn: *const fn (*anyopaque) void,
     stop_model_connections_fn: *const fn (*anyopaque) void,
-    create_model_connection_fn: *const fn (*anyopaque, []const u8, execution_contract.ModelConnectionSpec, []const u8, []const u8) execution_contract.CommandResult,
-    submit_model_connection_fn: *const fn (*anyopaque, execution_contract.ModelConnectionCommand) execution_contract.CommandResult,
-    begin_model_connection_probe_fn: *const fn (*anyopaque, execution_contract.ModelConnectionTestCommand) execution_contract.Preparation,
-    complete_model_connection_test_fn: *const fn (*anyopaque, execution_contract.ModelConnectionTestCommand, bool) execution_contract.CommandResult,
-    pub fn startModelConnections(self: ExecutionManagement, directory: []const u8, vault: execution_ports.CredentialVault) anyerror!void {
+    create_model_connection_fn: *const fn (*anyopaque, []const u8, models_contract.ModelConnectionSpec, models_contract.CustomModelInput) models_contract.CommandResult,
+    replace_model_connection_credential_fn: *const fn (*anyopaque, []const u8, models_contract.ModelConnectionSelectionCommand) models_contract.CommandResult,
+    submit_model_connection_fn: *const fn (*anyopaque, models_contract.ModelConnectionCommand) models_contract.CommandResult,
+    begin_model_connection_probe_fn: *const fn (*anyopaque, models_contract.ModelConnectionTestCommand) models_contract.Preparation,
+    complete_model_connection_test_fn: *const fn (*anyopaque, models_contract.ModelConnectionTestCommand, bool) models_contract.CommandResult,
+    prepare_metask_catalog_refresh_fn: *const fn (*anyopaque, []const u8, u64) models_contract.CatalogRefreshPrepareResult,
+    prepare_metask_api_key_selection_fn: *const fn (*anyopaque, []const u8, u64, models_contract.SelectMetaskApiKeyCommand) models_contract.CatalogSelectionPrepareResult,
+    complete_metask_catalog_refresh_fn: *const fn (*anyopaque, u64, u64, *models_ports.OwnedCatalogCompletion) models_contract.ModelsError,
+    fail_metask_catalog_refresh_fn: *const fn (*anyopaque, u64, u64, models_contract.ModelsError, []const u8) void,
+    metask_authorization_unavailable_fn: *const fn (*anyopaque) void,
+    pub fn startModelConnections(self: ModelsManagement, directory: []const u8, vault: models_ports.CredentialVault) anyerror!void {
         try self.start_model_connections_fn(self.context, directory, vault);
     }
-    pub fn startModelConnectionsUnavailable(self: ExecutionManagement) void {
+    pub fn startModelConnectionsUnavailable(self: ModelsManagement) void {
         self.start_model_connections_unavailable_fn(self.context);
     }
-    pub fn stopModelConnections(self: ExecutionManagement) void {
+    pub fn stopModelConnections(self: ModelsManagement) void {
         self.stop_model_connections_fn(self.context);
     }
-    pub fn createModelConnectionWithCredential(self: ExecutionManagement, secret: []const u8, spec: execution_contract.ModelConnectionSpec, model_id: []const u8, display_name: []const u8) execution_contract.CommandResult {
-        return self.create_model_connection_fn(self.context, secret, spec, model_id, display_name);
+    pub fn createModelConnectionWithCredential(self: ModelsManagement, secret: []const u8, spec: models_contract.ModelConnectionSpec, model: models_contract.CustomModelInput) models_contract.CommandResult {
+        return self.create_model_connection_fn(self.context, secret, spec, model);
     }
-    pub fn submitModelConnectionCommand(self: ExecutionManagement, command: execution_contract.ModelConnectionCommand) execution_contract.CommandResult {
+    pub fn replaceModelConnectionCredential(self: ModelsManagement, secret: []const u8, selection: models_contract.ModelConnectionSelectionCommand) models_contract.CommandResult {
+        return self.replace_model_connection_credential_fn(self.context, secret, selection);
+    }
+    pub fn submitModelConnectionCommand(self: ModelsManagement, command: models_contract.ModelConnectionCommand) models_contract.CommandResult {
         return self.submit_model_connection_fn(self.context, command);
     }
-    pub fn beginModelConnectionProbe(self: ExecutionManagement, command: execution_contract.ModelConnectionTestCommand) execution_contract.Preparation {
+    pub fn beginModelConnectionProbe(self: ModelsManagement, command: models_contract.ModelConnectionTestCommand) models_contract.Preparation {
         return self.begin_model_connection_probe_fn(self.context, command);
     }
-    pub fn completeModelConnectionTest(self: ExecutionManagement, command: execution_contract.ModelConnectionTestCommand, succeeded: bool) execution_contract.CommandResult {
+    pub fn completeModelConnectionTest(self: ModelsManagement, command: models_contract.ModelConnectionTestCommand, succeeded: bool) models_contract.CommandResult {
         return self.complete_model_connection_test_fn(self.context, command, succeeded);
+    }
+    pub fn prepareMetaskCatalogRefresh(self: ModelsManagement, principal_ref: []const u8, authorization_generation: u64) models_contract.CatalogRefreshPrepareResult {
+        return self.prepare_metask_catalog_refresh_fn(self.context, principal_ref, authorization_generation);
+    }
+    pub fn prepareMetaskApiKeySelection(self: ModelsManagement, principal_ref: []const u8, authorization_generation: u64, command: models_contract.SelectMetaskApiKeyCommand) models_contract.CatalogSelectionPrepareResult {
+        return self.prepare_metask_api_key_selection_fn(self.context, principal_ref, authorization_generation, command);
+    }
+    pub fn completeMetaskCatalogRefresh(self: ModelsManagement, attempt_id: u64, authorization_generation: u64, completion: *models_ports.OwnedCatalogCompletion) models_contract.ModelsError {
+        return self.complete_metask_catalog_refresh_fn(self.context, attempt_id, authorization_generation, completion);
+    }
+    pub fn failMetaskCatalogRefresh(self: ModelsManagement, attempt_id: u64, authorization_generation: u64, error_code: models_contract.ModelsError, safe_diagnostic: []const u8) void {
+        self.fail_metask_catalog_refresh_fn(self.context, attempt_id, authorization_generation, error_code, safe_diagnostic);
+    }
+    pub fn setMetaskAuthorizationUnavailable(self: ModelsManagement) void {
+        self.metask_authorization_unavailable_fn(self.context);
     }
 };
 

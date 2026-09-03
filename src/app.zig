@@ -4,6 +4,7 @@ const native_sdk = @import("native_sdk");
 const bridge_api = @import("metawork_bridge");
 const agent = @import("metawork_agent");
 const product_control = @import("metawork_product_control");
+const models_contract = @import("metawork_product_models_contract");
 const mcp_configuration = @import("metawork_product_mcp").contract;
 const account_api = @import("metawork_account");
 const product_identity = @import("metawork_product_identity");
@@ -11,8 +12,9 @@ const mcp_platform = @import("metawork_mcp_platform");
 const mcp_oauth = @import("metawork_mcp_oauth");
 const account_coordinator = @import("app/account_coordinator.zig");
 const account_platform_binding = @import("app/account_platform_binding.zig");
-const execution_coordinator = @import("app/execution_coordinator.zig");
-const execution_platform_binding = @import("app/execution_platform_binding.zig");
+const models_coordinator = @import("app/models_coordinator.zig");
+const model_connection_host = @import("app/model_connection_host.zig");
+const models_platform_binding = @import("app/models_platform_binding.zig");
 const metask_http_transport = @import("app/metask_http_transport.zig");
 const completion_http_transport = @import("app/completion_http_transport.zig");
 const oauth_loopback_transport = @import("oauth_loopback_transport");
@@ -51,16 +53,17 @@ const App = struct {
     completion_transport: completion_http_transport.Backend,
     account_path: []const u8 = "",
     account_platform_binding: ?account_platform_binding.Adapter = null,
-    execution_platform_binding: ?execution_platform_binding.Adapter = null,
+    models_platform_binding: ?models_platform_binding.Adapter = null,
     dispatcher: ?*bridge_api.Dispatcher = null,
     agent_runtime: ?*agent.Runtime = null,
     control: ?*product_control.Runtime = null,
     agent_shutdown: bool = false,
     agent_events: agent_event_coordinator.Coordinator = .{},
     account_coordinator: ?*account_coordinator.Coordinator = null,
-    execution_coordinator: ?*execution_coordinator.Coordinator = null,
+    models_coordinator: ?*models_coordinator.Coordinator = null,
+    model_connection_host: ?*model_connection_host.Host = null,
     account_started: bool = false,
-    execution_started: bool = false,
+    models_started: bool = false,
     control_storage: ?*product_control.Runtime = null,
     control_configuration: product_control.Configuration = .{},
     control_initialized: bool = false,
@@ -127,13 +130,14 @@ const App = struct {
         const control_storage = self.control_storage orelse
             @panic("Product Control storage is not composed");
         var configuration = self.control_configuration;
-        const model_connection_platform_available = self.platform.services() != null;
+        const model_connection_capability_available =
+            !self.automation.active() and
+            self.platform.services() != null and
+            if (self.model_connection_host) |host| host.available() else false;
         configuration.model_connections = .{
-            .management = model_connection_platform_available,
-            // Native SDK currently exposes no trusted secret text-input
-            // surface. Keep create/credential replacement fail closed.
-            .secret_capture = false,
-            .connection_test = model_connection_platform_available,
+            .management = model_connection_capability_available,
+            .secret_capture = model_connection_capability_available,
+            .connection_test = model_connection_capability_available,
         };
         configuration.mcp = .{
             .preparation = &preparation,
@@ -203,15 +207,15 @@ const App = struct {
         self.mcp_oauth_refresh.?.start();
         const account = self.account_coordinator orelse
             @panic("Account coordinator is not composed");
-        const execution_management = self.execution_coordinator orelse
-            @panic("Execution coordinator is not composed");
-        execution_management.setProbeNotifier(.{
+        const models_management = self.models_coordinator orelse
+            @panic("Models coordinator is not composed");
+        models_management.setProbeNotifier(.{
             .context = &self.platform,
             .notify_fn = app_platform.Adapter.notifyRequired,
         });
         if (self.automation.active()) {
-            execution_management.startUnavailable();
-            self.execution_started = true;
+            models_management.startUnavailable();
+            self.models_started = true;
             account.startAutomation();
             if (self.automation.executionFixture()) |execution| {
                 const control = self.control orelse
@@ -226,7 +230,7 @@ const App = struct {
                 );
             }
         } else if (self.platform.services()) |services| {
-            self.execution_platform_binding = execution_platform_binding.Adapter.init(
+            self.models_platform_binding = models_platform_binding.Adapter.init(
                 services,
                 self.io,
                 self.main_thread_id,
@@ -237,22 +241,33 @@ const App = struct {
                 self.main_thread_id,
                 self.account_path,
             ) catch null;
-            execution_management.start(
+            models_management.start(
                 self.account_path,
-                self.execution_platform_binding.?.ports(),
+                self.models_platform_binding.?.ports(),
             );
-            self.execution_started = true;
+            self.models_started = true;
             if (self.account_platform_binding) |*binding| {
                 account.start(binding.ports());
             } else {
                 account.startUnavailable();
             }
         } else {
-            execution_management.startUnavailable();
-            self.execution_started = true;
+            models_management.startUnavailable();
+            self.models_started = true;
             account.startUnavailable();
         }
         self.account_started = true;
+        (self.dispatcher orelse @panic("Bridge Dispatcher is not composed")).setModelConnectionHost(
+            if (model_connection_capability_available)
+                self.model_connection_host.?.bridgeHost()
+            else
+                null,
+        );
+        (self.dispatcher orelse @panic("Bridge Dispatcher is not composed")).setModelsHost(.{
+            .context = models_management,
+            .refresh_catalog_fn = refreshModelsCatalog,
+            .select_metask_api_key_fn = selectMetaskApiKey,
+        });
         (self.dispatcher orelse @panic("Bridge Dispatcher is not composed")).startIngress();
     }
 
@@ -280,10 +295,12 @@ const App = struct {
             dispatcher.assertQuiescent();
             dispatcher.breakConnection();
             dispatcher.detachProductControl();
+            dispatcher.setModelConnectionHost(null);
+            dispatcher.setModelsHost(null);
         }
         if (self.mcp_management) |*coordinator| coordinator.shutdown();
         if (self.mcp_oauth_refresh) |*coordinator| coordinator.shutdown();
-        if (self.execution_started) if (self.execution_coordinator) |coordinator| {
+        if (self.models_started) if (self.models_coordinator) |coordinator| {
             coordinator.shutdown();
             coordinator.drain();
         };
@@ -293,7 +310,7 @@ const App = struct {
         };
         if (self.account_platform_binding) |*binding| binding.deinit();
         self.account_platform_binding = null;
-        self.execution_platform_binding = null;
+        self.models_platform_binding = null;
         if (self.control) |control| control.shutdownExecutor();
         if (self.agent_runtime) |agent_runtime| {
             try agent_runtime.shutdown();
@@ -307,7 +324,7 @@ const App = struct {
         self.platform.stop(native_runtime);
         self.control = null;
         self.account_started = false;
-        self.execution_started = false;
+        self.models_started = false;
     }
 
     fn event(
@@ -323,7 +340,7 @@ const App = struct {
                     if (coordinator.drain()) self.platform.activateMainWindow();
                 if (self.account_coordinator) |coordinator|
                     coordinator.drain();
-                if (self.execution_coordinator) |coordinator|
+                if (self.models_coordinator) |coordinator|
                     coordinator.drain();
                 if (self.mcp_oauth_refresh) |*coordinator|
                     if (!coordinator.drain()) coordinator.reconcileTimer();
@@ -521,6 +538,7 @@ pub fn run(init: std.process.Init) !void {
             .restore_failed = stores_state.scheduled_task_restore_failed,
             .commit_fn = app_stores.commitScheduledTaskStore,
             .recover_fn = app_stores.recoverScheduledTaskStore,
+            .observe_fn = app_stores.observeScheduledTaskStore,
         },
         .task_persistence = .{
             .context = if (stores_state.task) |*store| store else null,
@@ -602,7 +620,7 @@ pub fn run(init: std.process.Init) !void {
         init.io,
         app.main_thread_id,
         paths_state.accountDir(),
-        account_http.transport(),
+        account_http.accountTransport(),
         account_loopback.endpoint(),
         .{
             .context = &app.platform,
@@ -614,18 +632,30 @@ pub fn run(init: std.process.Init) !void {
         control.accountCommitSink(),
         app.main_thread_id,
     );
-    var execution_coordinator_state = execution_coordinator.Coordinator.init(
-        control.executionManagement(),
+    var models_coordinator_state = models_coordinator.Coordinator.init(
+        &account_runtime,
+        account_http.modelsTransport(),
+        control.modelsManagement(),
         app.main_thread_id,
         init.io,
     );
-    execution_coordinator_state.setCompletionTransport(
+    models_coordinator_state.setCompletionTransport(
         app.completion_transport.transport(),
     );
+    account_coordinator_state.setCommitObserver(.{
+        .context = &models_coordinator_state,
+        .notify_fn = notifyModelsAuthorizationChanged,
+    });
+    var model_connection_host_state = model_connection_host.Host.init(
+        &app.platform,
+        &models_coordinator_state,
+    );
     app.account_coordinator = &account_coordinator_state;
-    app.execution_coordinator = &execution_coordinator_state;
+    app.models_coordinator = &models_coordinator_state;
+    app.model_connection_host = &model_connection_host_state;
     defer {
-        app.execution_coordinator = null;
+        app.model_connection_host = null;
+        app.models_coordinator = null;
         app.account_coordinator = null;
         account_runtime.deinit();
     }
@@ -634,7 +664,7 @@ pub fn run(init: std.process.Init) !void {
         std.heap.c_allocator,
         &control,
         account_coordinator_state.commandSink(),
-        execution_coordinator_state.commandSink(),
+        models_coordinator_state.commandSink(),
         app.platform.dispatcherPlatform(),
         app.automation.dispatcherAuthority(),
         app_window.main_window_id,
@@ -660,6 +690,24 @@ pub fn run(init: std.process.Init) !void {
             },
         },
     }, init);
+}
+
+fn notifyModelsAuthorizationChanged(context: *anyopaque) void {
+    const coordinator: *models_coordinator.Coordinator = @ptrCast(@alignCast(context));
+    coordinator.authorizationChanged();
+}
+
+fn refreshModelsCatalog(context: *anyopaque) models_contract.CommandResult {
+    const coordinator: *models_coordinator.Coordinator = @ptrCast(@alignCast(context));
+    return coordinator.refreshCatalog();
+}
+
+fn selectMetaskApiKey(
+    context: *anyopaque,
+    command: models_contract.SelectMetaskApiKeyCommand,
+) models_contract.CommandResult {
+    const coordinator: *models_coordinator.Coordinator = @ptrCast(@alignCast(context));
+    return coordinator.selectMetaskApiKey(command);
 }
 
 test "Application remains a composition root with explicit platform limits" {

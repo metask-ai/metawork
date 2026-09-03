@@ -1,6 +1,6 @@
 import type {
-  AccountView,
-  ExecutionView,
+  ModelsView,
+  NewTaskAdmissionView,
   TaskView,
 } from "../bridge/contracts.ts";
 
@@ -15,8 +15,8 @@ export type TaskModelSelectionPolicy = {
  * authorization boundary.
  */
 export function taskModelSelectionPolicy(
-  account: AccountView,
-  execution: ExecutionView,
+  models: ModelsView,
+  admission: NewTaskAdmissionView,
   task: TaskView | null,
 ): TaskModelSelectionPolicy {
   if (task === null)
@@ -25,23 +25,24 @@ export function taskModelSelectionPolicy(
       catalogUsable: false,
     };
 
-  const selectedApi = account.apiKeys.find(
-    (candidate) => candidate.selectionId === account.selectedApiKeySelectionId,
+  const metask = models.providers.find((provider) => provider.id === "metask");
+  const selectedApi = metask?.apiKeys.find(
+    (candidate) => candidate.id === metask.selectedApiKeyId,
   );
   const authorityExact =
-    account.state === "authenticated" &&
-    execution.taskCreationAvailable &&
-    execution.activeSource === "metask" &&
-    execution.activeGeneration !== "0" &&
-    task.binding.executionGeneration === execution.activeGeneration &&
+    admission.available &&
+    admission.activeModelRef?.sourceId === models.metaskSelection?.sourceId &&
+    admission.activeGeneration !== "0" &&
+    admission.activeSelectionRevision === models.selectionRevision &&
+    task.binding.executionGeneration === admission.activeGeneration &&
     selectedApi?.protocol === task.binding.protocol;
 
   return {
     authorityExact,
     catalogUsable:
       authorityExact &&
-      account.catalogState === "ready" &&
-      account.catalogGeneration !== "0" &&
-      account.models.length !== 0,
+      metask?.catalogState === "ready" &&
+      metask.catalogGeneration !== "0" &&
+      metask.models.length !== 0,
   };
 }

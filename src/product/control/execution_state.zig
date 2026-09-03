@@ -5,7 +5,35 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const execution_contract = @import("metawork_product_execution_contract");
+const models_contract = @import("metawork_product_models_contract");
+
+pub const AdmissionState = enum {
+    unavailable,
+    ready,
+    replacing,
+};
+
+pub const AdmissionReason = enum {
+    none,
+    model_connection_persistence_unavailable,
+    credential_unavailable,
+    invalid_candidate,
+    resource_exhausted,
+    schedule_persistence_unavailable,
+    schedule_persistence_failed,
+    schedule_persistence_outcome_unknown,
+};
+
+/// Product Control-owned process-local admission projection. Models publishes
+/// desired source intent; this view only describes the installed authority.
+pub const NewTaskAdmissionView = struct {
+    available: bool,
+    reason: AdmissionReason,
+    active_model_ref: ?models_contract.ModelRef = null,
+    active_generation: u64 = 0,
+    active_selection_revision: u64 = 0,
+    state: AdmissionState,
+};
 
 const ActiveExecution = struct {
     allocator: std.mem.Allocator,
@@ -15,17 +43,17 @@ const ActiveExecution = struct {
     credential_len: usize = 0,
     model_len: usize = 0,
     base_url_len: usize = 0,
-    provider_id_storage: [execution_contract.Limits.provider_id_bytes]u8 = undefined,
+    provider_id_storage: [models_contract.Limits.provider_id_bytes]u8 = undefined,
     provider_id_len: usize = 0,
-    protocol: ?execution_contract.Protocol = null,
+    protocol: ?models_contract.Protocol = null,
     generation: u64 = 0,
 
     fn init(allocator: std.mem.Allocator) std.mem.Allocator.Error!ActiveExecution {
-        const credential_storage = try allocator.alloc(u8, execution_contract.Limits.credential_bytes);
+        const credential_storage = try allocator.alloc(u8, models_contract.Limits.credential_bytes);
         errdefer allocator.free(credential_storage);
-        const model_storage = try allocator.alloc(u8, execution_contract.Limits.model_id_bytes);
+        const model_storage = try allocator.alloc(u8, models_contract.Limits.model_id_bytes);
         errdefer allocator.free(model_storage);
-        const base_url_storage = try allocator.alloc(u8, execution_contract.Limits.base_url_bytes);
+        const base_url_storage = try allocator.alloc(u8, models_contract.Limits.base_url_bytes);
         errdefer allocator.free(base_url_storage);
         return .{
             .allocator = allocator,
@@ -43,18 +71,18 @@ const ActiveExecution = struct {
         self.* = undefined;
     }
 
-    fn installNoFail(self: *ActiveExecution, execution: *execution_contract.OwnedConfig) void {
+    fn installNoFail(self: *ActiveExecution, execution: *models_contract.OwnedConfig) void {
         const input = execution.input();
         const validation = if (execution.source == .model_connection)
-            execution_contract.validateModelConnectionExecutionConfig(input)
+            models_contract.validateModelConnectionExecutionConfig(input)
         else
-            execution_contract.validateConfigStructure(input);
+            models_contract.validateConfigStructure(input);
         validation catch @panic("Product received an invalid ExecutionConfig");
         self.installBytesNoFail(input);
         execution.deinit();
     }
 
-    fn installBytesNoFail(self: *ActiveExecution, input: execution_contract.ConfigInput) void {
+    fn installBytesNoFail(self: *ActiveExecution, input: models_contract.ConfigInput) void {
         const credential_bytes = input.api_key;
         const model_id = input.target.model;
         const base_url = input.target.base_url;
@@ -145,11 +173,11 @@ pub const PreparedModelConnectionBinding = struct {
 
 pub const ExecutionIdentity = struct {
     generation: u64,
-    protocol: execution_contract.Protocol,
+    protocol: models_contract.Protocol,
 };
 
 pub const AutomationInput = struct {
-    protocol: execution_contract.Protocol,
+    protocol: models_contract.Protocol,
     credential: []const u8,
     model: []const u8,
     base_url: []const u8,
@@ -168,10 +196,12 @@ pub const ProjectionRedaction = struct {
 pub const State = struct {
     execution: ActiveExecution,
     metask_source_binding_generation: u64 = 0,
+    default_source_generation: u64 = 0,
     replacement: ReplacementKind = .none,
     redaction_preparation: RedactionPreparation = .none,
     custom_binding: ?PreparedModelConnectionBinding = null,
-    availability_error: execution_contract.AvailabilityError = .none,
+    default_selection_revision: u64 = 0,
+    availability_error: AdmissionReason = .none,
 
     pub fn init(allocator: std.mem.Allocator) std.mem.Allocator.Error!State {
         return .{
@@ -205,7 +235,7 @@ pub const State = struct {
         self.redaction_preparation = .none;
     }
 
-    pub fn prepareInstall(self: *State, input: execution_contract.ConfigInput, durable: anytype) !void {
+    pub fn prepareInstall(self: *State, input: models_contract.ConfigInput, durable: anytype) !void {
         std.debug.assert(self.replacement != .none);
         std.debug.assert(self.redaction_preparation == .none);
         try durable.apply(input.api_key);
@@ -225,7 +255,7 @@ pub const State = struct {
 
     pub fn installMetaskNoFail(
         self: *State,
-        execution: *execution_contract.OwnedConfig,
+        execution: *models_contract.OwnedConfig,
         source_generation: u64,
         redaction: ProjectionRedaction,
     ) void {
@@ -239,11 +269,12 @@ pub const State = struct {
         self.custom_binding = null;
         self.execution.installNoFail(execution);
         self.metask_source_binding_generation = source_generation;
+        self.default_selection_revision = 0;
     }
 
     pub fn installModelConnectionNoFail(
         self: *State,
-        execution: *execution_contract.OwnedConfig,
+        execution: *models_contract.OwnedConfig,
         prepared_binding: *PreparedModelConnectionBinding,
         redaction: ProjectionRedaction,
     ) void {
@@ -253,6 +284,7 @@ pub const State = struct {
         redaction.apply(execution.input().api_key);
         self.execution.installNoFail(execution);
         self.metask_source_binding_generation = 0;
+        self.default_selection_revision = 0;
         if (self.custom_binding) |*previous| previous.deinit();
         self.custom_binding = prepared_binding.*;
         prepared_binding.* = undefined;
@@ -263,7 +295,7 @@ pub const State = struct {
         input: AutomationInput,
         redaction: ProjectionRedaction,
     ) void {
-        const execution_input: execution_contract.ConfigInput = .{
+        const execution_input: models_contract.ConfigInput = .{
             .target = .{
                 .provider_id = "metask:automation-key",
                 .protocol = input.protocol,
@@ -280,6 +312,7 @@ pub const State = struct {
         self.custom_binding = null;
         self.execution.installBytesNoFail(execution_input);
         self.metask_source_binding_generation = 0;
+        self.default_selection_revision = 0;
     }
 
     pub fn clearNoFail(self: *State, redaction: ProjectionRedaction) void {
@@ -288,11 +321,13 @@ pub const State = struct {
         redaction.apply(self.execution.credential());
         self.execution.clearNoFail();
         self.metask_source_binding_generation = 0;
+        self.default_source_generation = 0;
+        self.default_selection_revision = 0;
         if (self.custom_binding) |*binding| binding.deinit();
         self.custom_binding = null;
     }
 
-    fn consumeInstallPreparation(self: *State, input: execution_contract.ConfigInput) void {
+    fn consumeInstallPreparation(self: *State, input: models_contract.ConfigInput) void {
         switch (self.redaction_preparation) {
             .install => |prepared| {
                 std.debug.assert(prepared.generation == input.execution_generation);
@@ -328,18 +363,18 @@ pub const State = struct {
                 metask_authority_current;
     }
 
-    pub fn availability(self: *const State) execution_contract.Availability {
+    pub fn availability(self: *const State) AdmissionState {
         if (self.replacement != .none) return .replacing;
         return if (self.execution.ready()) .ready else .unavailable;
     }
 
-    pub fn availabilityError(self: *const State) execution_contract.AvailabilityError {
+    pub fn availabilityError(self: *const State) AdmissionReason {
         return self.availability_error;
     }
 
     pub fn rejectReplacementNoFail(
         self: *State,
-        error_code: execution_contract.AvailabilityError,
+        error_code: AdmissionReason,
     ) void {
         std.debug.assert(error_code != .none);
         std.debug.assert(self.replacement != .none);
@@ -349,7 +384,7 @@ pub const State = struct {
 
     pub fn recordAvailabilityErrorNoFail(
         self: *State,
-        error_code: execution_contract.AvailabilityError,
+        error_code: AdmissionReason,
     ) void {
         std.debug.assert(error_code != .none);
         self.availability_error = error_code;
@@ -373,7 +408,7 @@ pub const State = struct {
 
     pub fn supportsTaskExecution(
         self: *const State,
-        expected_protocol: execution_contract.Protocol,
+        expected_protocol: models_contract.Protocol,
         model_id: []const u8,
         metask_authority_current: bool,
         metask_model_available: bool,
@@ -390,7 +425,7 @@ pub const State = struct {
     pub fn recoveryAuthorityExact(
         self: *const State,
         execution_generation: u64,
-        expected_protocol: execution_contract.Protocol,
+        expected_protocol: models_contract.Protocol,
         model_id: []const u8,
         metask_authority_current: bool,
         metask_model_available: bool,
@@ -413,7 +448,7 @@ pub const State = struct {
             (self.custom_binding != null or metask_authority_current);
     }
 
-    pub fn executionInput(self: *const State) ?execution_contract.ConfigInput {
+    pub fn executionInput(self: *const State) ?models_contract.ConfigInput {
         if (!self.execution.ready()) return null;
         return .{
             .target = .{
@@ -433,7 +468,7 @@ pub const State = struct {
     pub fn generation(self: *const State) u64 {
         return self.execution.generation;
     }
-    pub fn protocol(self: *const State) ?execution_contract.Protocol {
+    pub fn protocol(self: *const State) ?models_contract.Protocol {
         return self.execution.protocol;
     }
     pub fn model(self: *const State) []const u8 {
@@ -443,6 +478,70 @@ pub const State = struct {
         return self.custom_binding == null and
             source_generation != 0 and
             self.metask_source_binding_generation == source_generation;
+    }
+
+    /// Records the exact Models desired identity after an installation has
+    /// consumed its owned credential. This is Product Control's process-local
+    /// equality authority; it is never persisted by Models.
+    pub fn recordDefaultAuthorityNoFail(
+        self: *State,
+        authority: models_contract.DefaultSelectionAuthority,
+    ) void {
+        std.debug.assert(self.execution.ready());
+        std.debug.assert(authority.source_generation != 0);
+        std.debug.assert(authority.selection_revision != 0);
+        std.debug.assert(authority.protocol == self.execution.protocol.?);
+        std.debug.assert(std.mem.eql(u8, authority.selection.model_id, self.execution.model()));
+        switch (authority.source) {
+            .metask => {
+                std.debug.assert(self.custom_binding == null);
+                std.debug.assert(self.metask_source_binding_generation == authority.source_generation);
+                std.debug.assert(std.mem.eql(
+                    u8,
+                    authority.selection.source_id,
+                    self.execution.providerId(),
+                ));
+            },
+            .model_connection => {
+                const binding = self.custom_binding orelse unreachable;
+                std.debug.assert(std.mem.eql(
+                    u8,
+                    authority.selection.source_id,
+                    binding.connection_id,
+                ));
+            },
+        }
+        self.default_source_generation = authority.source_generation;
+        self.default_selection_revision = authority.selection_revision;
+    }
+
+    pub fn defaultAuthorityMatches(
+        self: *const State,
+        authority: models_contract.DefaultSelectionAuthority,
+    ) bool {
+        if (!self.execution.ready() or
+            self.replacement != .none or
+            self.default_source_generation != authority.source_generation or
+            self.default_selection_revision != authority.selection_revision or
+            self.execution.protocol.? != authority.protocol or
+            !std.mem.eql(u8, self.execution.model(), authority.selection.model_id))
+            return false;
+        return switch (authority.source) {
+            .metask => self.custom_binding == null and
+                self.metask_source_binding_generation == authority.source_generation and
+                std.mem.eql(
+                    u8,
+                    self.execution.providerId(),
+                    authority.selection.source_id,
+                ),
+            .model_connection => if (self.custom_binding) |binding|
+                std.mem.eql(u8, binding.connection_id, authority.selection.source_id)
+            else
+                false,
+        };
+    }
+    pub fn hasRecordedDefaultAuthority(self: *const State) bool {
+        return self.default_selection_revision != 0;
     }
     pub fn ready(self: *const State) bool {
         return self.execution.ready();
@@ -464,9 +563,32 @@ pub const State = struct {
         return self.custom_binding != null;
     }
 
-    pub fn activeSource(self: *const State) ?execution_contract.Source {
+    pub fn activeSource(self: *const State) ?models_contract.Source {
         if (!self.execution.ready()) return null;
         return if (self.custom_binding == null) .metask else .model_connection;
+    }
+
+    pub fn activeModelRef(self: *const State) ?models_contract.ModelRef {
+        if (!self.execution.ready()) return null;
+        return .{
+            .source_id = if (self.custom_binding) |binding|
+                binding.connection_id
+            else
+                self.execution.providerId(),
+            .model_id = self.execution.model(),
+        };
+    }
+
+    pub fn activeSelectionRevision(self: *const State) u64 {
+        return self.default_selection_revision;
+    }
+
+    pub fn activeSourceGeneration(self: *const State) u64 {
+        return self.default_source_generation;
+    }
+
+    pub fn metaskSourceGeneration(self: *const State) u64 {
+        return self.metask_source_binding_generation;
     }
 
     pub fn selectedModelConnectionId(self: *const State) []const u8 {
@@ -532,11 +654,11 @@ fn secureFreeTest(bytes: []u8) void {
 }
 
 fn testExecution(
-    protocol: execution_contract.Protocol,
+    protocol: models_contract.Protocol,
     model: []const u8,
     generation: u64,
     credential: []const u8,
-) !execution_contract.OwnedConfig {
+) !models_contract.OwnedConfig {
     const owned_model = try std.testing.allocator.dupe(u8, model);
     errdefer std.testing.allocator.free(owned_model);
     const owned_base_url = try std.testing.allocator.dupe(
@@ -546,7 +668,7 @@ fn testExecution(
     errdefer std.testing.allocator.free(owned_base_url);
     const owned_credential = try std.testing.allocator.dupe(u8, credential);
     errdefer secureFreeTest(owned_credential);
-    return execution_contract.OwnedConfig.initOwned(
+    return models_contract.OwnedConfig.initOwned(
         std.testing.allocator,
         .metask,
         protocol,
@@ -558,7 +680,7 @@ fn testExecution(
     ) catch unreachable;
 }
 
-fn testModelConnectionExecution() !execution_contract.OwnedConfig {
+fn testModelConnectionExecution() !models_contract.OwnedConfig {
     const owned_model = try std.testing.allocator.dupe(u8, "gpt-5");
     errdefer std.testing.allocator.free(owned_model);
     const owned_base_url = try std.testing.allocator.dupe(
@@ -568,7 +690,7 @@ fn testModelConnectionExecution() !execution_contract.OwnedConfig {
     errdefer std.testing.allocator.free(owned_base_url);
     const owned_credential = try std.testing.allocator.dupe(u8, "SECRET-TWO");
     errdefer secureFreeTest(owned_credential);
-    return execution_contract.OwnedConfig.initOwned(
+    return models_contract.OwnedConfig.initOwned(
         std.testing.allocator,
         .model_connection,
         .openai_chat_completions,
@@ -596,6 +718,17 @@ test "Metask installation owns only execution and source binding" {
     var projection_redaction: TestProjectionRedaction = .{};
     state.installMetaskNoFail(&execution, 11, projection_redaction.capability());
     execution_owned = false;
+    const authority: models_contract.DefaultSelectionAuthority = .{
+        .selection = .{
+            .source_id = "metask:fixture-provider",
+            .model_id = "model-old",
+        },
+        .source = .metask,
+        .source_generation = 11,
+        .selection_revision = 13,
+        .protocol = .anthropic_messages,
+    };
+    state.recordDefaultAuthorityNoFail(authority);
     state.endReplacementNoFail();
 
     try std.testing.expectEqual(@as(usize, 1), durable_calls);
@@ -610,6 +743,10 @@ test "Metask installation owns only execution and source binding" {
     }));
     try std.testing.expect(state.canCreateTask(true, true));
     try std.testing.expect(!state.canCreateTask(true, false));
+    try std.testing.expect(state.defaultAuthorityMatches(authority));
+    var stale = authority;
+    stale.selection_revision = 14;
+    try std.testing.expect(!state.defaultAuthorityMatches(stale));
 }
 
 test "Model Connection execution never borrows Metask model authority" {
@@ -639,12 +776,24 @@ test "Model Connection execution never borrows Metask model authority" {
     );
     execution_owned = false;
     binding_owned = false;
+    const authority: models_contract.DefaultSelectionAuthority = .{
+        .selection = .{
+            .source_id = "connection-1",
+            .model_id = "gpt-5",
+        },
+        .source = .model_connection,
+        .source_generation = 19,
+        .selection_revision = 23,
+        .protocol = .openai_chat_completions,
+    };
+    state.recordDefaultAuthorityNoFail(authority);
     state.endReplacementNoFail();
 
     try std.testing.expect(state.modelConnectionSelected());
+    try std.testing.expect(state.defaultAuthorityMatches(authority));
     const resolved = state.executionInput().?;
     try std.testing.expectEqualStrings("model_connection:fixture-provider", resolved.target.provider_id);
-    try std.testing.expectEqual(execution_contract.Protocol.openai_chat_completions, resolved.target.protocol);
+    try std.testing.expectEqual(models_contract.Protocol.openai_chat_completions, resolved.target.protocol);
     try std.testing.expect(!state.taskModelSelectionBaseAuthorized(.{
         .generation = 3,
         .protocol = .openai_chat_completions,

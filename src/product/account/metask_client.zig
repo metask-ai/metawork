@@ -3,18 +3,14 @@ const std = @import("std");
 const contract = @import("metawork_account_contract");
 const state = @import("account_state");
 const oauth = @import("account_oauth");
+const transport_api = @import("metask_transport");
 
-pub const api_keys_url =
-    "https://napi.metask-ai.com/api/v1/keys?page=1&page_size=100";
-pub const models_url = "https://napi.metask-ai.com/v1/models";
 pub const current_user_url = "https://napi.metask-ai.com/api/v1/auth/me";
 
 pub const RequestKind = enum {
     exchange_code,
     refresh_token,
     current_user,
-    keys,
-    models,
 };
 
 pub const Request = struct {
@@ -24,51 +20,10 @@ pub const Request = struct {
     control: ?RequestControl = null,
 };
 
-pub const Response = struct {
-    status: u16,
-    body: []const u8,
-};
-
-pub const TransportError = error{
-    NetworkFailed,
-    ResponseTooLarge,
-    ProtocolFailed,
-    Cancelled,
-    DeadlineExceeded,
-};
-
-pub const Cancellation = struct {
-    io: std.Io,
-    state: std.atomic.Value(u32) = .init(0),
-
-    pub fn init(io: std.Io) Cancellation {
-        return .{ .io = io };
-    }
-
-    pub fn cancel(self: *Cancellation) void {
-        self.state.store(1, .release);
-        self.io.futexWake(u32, &self.state.raw, std.math.maxInt(u32));
-    }
-
-    pub fn isCancelled(self: *const Cancellation) bool {
-        return self.state.load(.acquire) != 0;
-    }
-
-    pub fn wait(self: *const Cancellation) void {
-        while (!self.isCancelled()) {
-            self.io.futexWait(
-                u32,
-                &self.state.raw,
-                0,
-            ) catch return;
-        }
-    }
-};
-
-pub const RequestControl = struct {
-    cancellation: *const Cancellation,
-    deadline: std.Io.Clock.Timestamp,
-};
+pub const Response = transport_api.Response;
+pub const TransportError = transport_api.TransportError;
+pub const Cancellation = transport_api.Cancellation;
+pub const RequestControl = transport_api.RequestControl;
 
 pub const Transport = struct {
     context: *anyopaque,

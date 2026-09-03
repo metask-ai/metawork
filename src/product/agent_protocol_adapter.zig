@@ -6,9 +6,9 @@
 
 const std = @import("std");
 const agent = @import("metawork_agent");
-const execution_contract = @import("metawork_product_execution_contract");
+const models_contract = @import("metawork_product_models_contract");
 
-pub fn toAgent(protocol: execution_contract.Protocol) agent.Protocol {
+pub fn toAgent(protocol: models_contract.Protocol) agent.Protocol {
     return switch (protocol) {
         .openai_responses => .openai_responses,
         .openai_chat_completions => .openai_chat_completions,

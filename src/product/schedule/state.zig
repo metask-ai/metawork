@@ -1,7 +1,7 @@
 //! Product Schedule-owned bounded state and occurrence transitions.
 
 const std = @import("std");
-const execution_contract = @import("metawork_product_execution_contract");
+const models_contract = @import("metawork_product_models_contract");
 
 pub const minimum_interval_seconds: u64 = 60;
 pub const max_occurrence_history: usize = 16;
@@ -17,7 +17,7 @@ pub const Error = std.mem.Allocator.Error || error{
     ProjectionCapacity,
 };
 
-pub const Protocol = execution_contract.Protocol;
+pub const Protocol = models_contract.Protocol;
 
 pub const PermissionProfile = enum {
     approval_required,
@@ -112,6 +112,7 @@ pub const Health = enum {
 };
 
 pub const FailureReason = enum {
+    binding_migration_required,
     previous_task_running,
     execution_changed,
     workspace_unavailable,
@@ -158,12 +159,39 @@ pub const Occurrence = struct {
 
 pub const Definition = struct {
     title: []const u8,
-    execution_generation: u64,
-    execution_protocol: Protocol,
-    execution_model: []const u8,
+    binding: Binding,
     permission_profile: PermissionProfile,
     input: []const u8,
     recurrence: Recurrence,
+};
+
+pub const Binding = union(enum) {
+    current: struct {
+        model_ref: models_contract.ModelRef,
+        source_generation: u64,
+        selection_revision: u64,
+        protocol: Protocol,
+    },
+    migration_required: struct {
+        execution_generation: u64,
+        protocol: Protocol,
+        model: []const u8,
+    },
+};
+
+const OwnedBinding = union(enum) {
+    current: struct {
+        source_id: []u8,
+        model_id: []u8,
+        source_generation: u64,
+        selection_revision: u64,
+        protocol: Protocol,
+    },
+    migration_required: struct {
+        execution_generation: u64,
+        protocol: Protocol,
+        model: []u8,
+    },
 };
 
 pub const Item = struct {
@@ -171,9 +199,7 @@ pub const Item = struct {
     epoch: u64 = 1,
     title: []u8,
     title_redacted: bool = false,
-    execution_generation: u64,
-    execution_protocol: Protocol,
-    execution_model: []u8,
+    binding: OwnedBinding,
     permission_profile: PermissionProfile,
     input: OwnedInput,
     recurrence: Recurrence,
@@ -187,6 +213,32 @@ pub const Item = struct {
 
     pub fn occurrences(self: *const Item) []const Occurrence {
         return self.occurrence_history[0..self.occurrence_count];
+    }
+
+    pub fn bindingView(self: *const Item) Binding {
+        return switch (self.binding) {
+            .current => |binding| .{ .current = .{
+                .model_ref = .{
+                    .source_id = binding.source_id,
+                    .model_id = binding.model_id,
+                },
+                .source_generation = binding.source_generation,
+                .selection_revision = binding.selection_revision,
+                .protocol = binding.protocol,
+            } },
+            .migration_required => |binding| .{ .migration_required = .{
+                .execution_generation = binding.execution_generation,
+                .protocol = binding.protocol,
+                .model = binding.model,
+            } },
+        };
+    }
+
+    pub fn bindingModelMutable(self: *Item) []u8 {
+        return switch (self.binding) {
+            .current => |binding| binding.model_id,
+            .migration_required => |binding| binding.model,
+        };
     }
 };
 
@@ -254,9 +306,7 @@ pub const Store = struct {
                 .epoch = item.epoch,
                 .definition = .{
                     .title = item.title,
-                    .execution_generation = item.execution_generation,
-                    .execution_protocol = item.execution_protocol,
-                    .execution_model = item.execution_model,
+                    .binding = item.bindingView(),
                     .permission_profile = item.permission_profile,
                     .input = item.input.borrowed(),
                     .recurrence = item.recurrence,
@@ -641,17 +691,15 @@ pub const Store = struct {
         var item: Item = undefined;
         const title = try self.copy(definition.title);
         errdefer self.free(title);
-        const model = try self.copy(definition.execution_model);
-        errdefer self.free(model);
+        var binding = try self.cloneBinding(definition.binding);
+        errdefer self.deinitBinding(&binding);
         var input = try self.cloneInput(definition.input);
         errdefer self.deinitInput(&input);
         item = .{
             .id = id,
             .epoch = epoch,
             .title = title,
-            .execution_generation = definition.execution_generation,
-            .execution_protocol = definition.execution_protocol,
-            .execution_model = model,
+            .binding = binding,
             .permission_profile = definition.permission_profile,
             .input = input,
             .recurrence = definition.recurrence,
@@ -660,15 +708,47 @@ pub const Store = struct {
         return item;
     }
 
+    fn cloneBinding(self: *Store, binding: Binding) Error!OwnedBinding {
+        return switch (binding) {
+            .current => |current| current_binding: {
+                const source_id = try self.copy(current.model_ref.source_id);
+                errdefer self.free(source_id);
+                break :current_binding .{ .current = .{
+                    .source_id = source_id,
+                    .model_id = try self.copy(current.model_ref.model_id),
+                    .source_generation = current.source_generation,
+                    .selection_revision = current.selection_revision,
+                    .protocol = current.protocol,
+                } };
+            },
+            .migration_required => |legacy| .{ .migration_required = .{
+                .execution_generation = legacy.execution_generation,
+                .protocol = legacy.protocol,
+                .model = try self.copy(legacy.model),
+            } },
+        };
+    }
+
     fn cloneInput(self: *Store, input: []const u8) Error!OwnedInput {
         return .{ .value = try self.copy(input) };
     }
 
     fn deinitItem(self: *Store, item: *Item) void {
         self.free(item.title);
-        self.free(item.execution_model);
+        self.deinitBinding(&item.binding);
         self.deinitInput(&item.input);
         item.* = undefined;
+    }
+
+    fn deinitBinding(self: *Store, binding: *OwnedBinding) void {
+        switch (binding.*) {
+            .current => |current| {
+                self.free(current.source_id);
+                self.free(current.model_id);
+            },
+            .migration_required => |legacy| self.free(legacy.model),
+        }
+        binding.* = undefined;
     }
 
     fn deinitInput(self: *Store, input: *OwnedInput) void {
@@ -734,6 +814,11 @@ fn advanceAfterTimer(
 }
 
 fn validRestoredState(restored: RestoredItem) bool {
+    if (restored.definition.binding == .migration_required)
+        return !restored.enabled and
+            restored.health == .needs_attention and
+            restored.failure_reason == .binding_migration_required and
+            restored.next_run_at_unix_seconds == null;
     if (restored.enabled) {
         return restored.health == .ready and
             restored.failure_reason == null and
@@ -752,11 +837,26 @@ fn validRestoredState(restored: RestoredItem) bool {
 
 fn validDefinition(definition: Definition) bool {
     if (definition.title.len == 0 or
-        !std.unicode.utf8ValidateSlice(definition.title) or
-        definition.execution_generation == 0 or
-        definition.execution_model.len == 0 or
-        !std.unicode.utf8ValidateSlice(definition.execution_model))
+        !std.unicode.utf8ValidateSlice(definition.title))
         return false;
+    switch (definition.binding) {
+        .current => |binding| {
+            if (binding.model_ref.source_id.len == 0 or
+                binding.model_ref.source_id.len > models_contract.Limits.provider_id_bytes or
+                !std.unicode.utf8ValidateSlice(binding.model_ref.source_id) or
+                binding.model_ref.model_id.len == 0 or
+                binding.model_ref.model_id.len > models_contract.Limits.model_id_bytes or
+                !std.unicode.utf8ValidateSlice(binding.model_ref.model_id) or
+                binding.source_generation == 0 or binding.selection_revision == 0)
+                return false;
+        },
+        .migration_required => |legacy| {
+            if (legacy.execution_generation == 0 or legacy.model.len == 0 or
+                legacy.model.len > models_contract.Limits.model_id_bytes or
+                !std.unicode.utf8ValidateSlice(legacy.model))
+                return false;
+        },
+    }
     if (definition.input.len == 0 or
         !std.unicode.utf8ValidateSlice(definition.input)) return false;
     return true;
@@ -823,9 +923,12 @@ test "store updates optimistically and a one-time occurrence completes" {
     defer store.deinit();
     const id = try store.create(.{
         .title = "Daily summary",
-        .execution_generation = 9,
-        .execution_protocol = .openai_chat_completions,
-        .execution_model = "gpt-test",
+        .binding = .{ .current = .{
+            .model_ref = .{ .source_id = "metask:test", .model_id = "gpt-test" },
+            .source_generation = 9,
+            .selection_revision = 11,
+            .protocol = .openai_chat_completions,
+        } },
         .permission_profile = .approval_required,
         .input = "Summarize the project",
         .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },

@@ -3,12 +3,12 @@
 
 const std = @import("std");
 const native_sdk = @import("native_sdk");
-const execution_contract = @import("metawork_product_execution_contract");
+const models_contract = @import("metawork_product_models_contract");
 
 pub const enabled = false;
 
 pub const ExecutionFixture = struct {
-    protocol: execution_contract.Protocol,
+    protocol: models_contract.Protocol,
     credential: []const u8,
     model: []const u8,
     base_url: []const u8,
@@ -22,6 +22,14 @@ pub const Runtime = struct {
     pub fn deinit(_: *Runtime) void {}
 
     pub fn active(_: *const Runtime) bool {
+        return false;
+    }
+
+    pub fn modelConnectionReadinessActive(_: *const Runtime) bool {
+        return false;
+    }
+
+    pub fn bridgeHarnessActive(_: *const Runtime) bool {
         return false;
     }
 
@@ -60,6 +68,8 @@ test "release automation boundary is inert" {
     var runtime = Runtime.init(&env);
     defer runtime.deinit();
     try std.testing.expect(!runtime.active());
+    try std.testing.expect(!runtime.modelConnectionReadinessActive());
+    try std.testing.expect(!runtime.bridgeHarnessActive());
     try std.testing.expectEqual(@as(?[]const u8, null), runtime.workspaceRoot());
     try std.testing.expectEqual(@as(?[]const u8, null), runtime.attachmentPaths());
     try std.testing.expectEqual(@as(?[]const u8, null), runtime.canonicalUserHome());

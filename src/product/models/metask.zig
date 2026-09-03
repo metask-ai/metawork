@@ -1,12 +1,12 @@
-//! Product Account catalog policy.
+//! Models-owned Metask provider catalog policy.
 const std = @import("std");
 const builtin = @import("builtin");
-const contract = @import("metawork_account_contract");
-const execution_contract = @import("metawork_product_execution_contract");
-const metask = @import("metask_client");
+const contract = @import("metawork_product_models_contract");
+const models_ports = @import("product_models_ports");
+const transport_api = @import("metask_transport");
 
-pub const api_keys_url = metask.api_keys_url;
-pub const models_url = metask.models_url;
+pub const api_keys_url = "https://napi.metask-ai.com/api/v1/keys?page=1&page_size=100";
+pub const models_url = "https://napi.metask-ai.com/v1/models";
 pub const anthropic_messages_url =
     contract.metask_anthropic_messages_url;
 pub const openai_chat_completions_url =
@@ -37,22 +37,23 @@ pub const Error = error{
     OutOfMemory,
 };
 
-pub fn errorCode(err: Error) contract.ErrorCode {
+pub fn errorCode(err: Error) contract.ModelsError {
     return switch (err) {
-        error.Unauthorized => .metask_unauthorized,
-        error.RateLimited => .metask_rate_limited,
-        error.ServiceUnavailable => .metask_service_unavailable,
-        error.Cancelled => .user_cancelled,
-        error.DeadlineExceeded => .deadline_exceeded,
-        error.ProtocolInvalid => .metask_protocol_invalid,
+        error.Unauthorized => .authorization_unavailable,
+        error.RateLimited,
+        error.ServiceUnavailable,
+        error.Cancelled,
+        error.DeadlineExceeded,
+        => .catalog_unavailable,
+        error.ProtocolInvalid => .catalog_invalid,
         error.CatalogTooLarge => .catalog_too_large,
-        error.CatalogFieldTooLarge => .catalog_field_too_large,
+        error.CatalogFieldTooLarge => .catalog_too_large,
         error.NoApiKeys => .no_api_keys,
         error.NoModels => .no_models,
-        error.ApiKeyNotFound, error.ModelNotFound => .invalid_command,
+        error.ApiKeyNotFound, error.ModelNotFound => .catalog_invalid,
         error.UnsupportedProvider,
         error.SourceCandidateInvalid,
-        => .metask_platform_unsupported,
+        => .catalog_invalid,
         error.OutOfMemory => .local_resource_exhausted,
     };
 }
@@ -87,7 +88,7 @@ fn BoundedString(comptime capacity: usize) type {
 }
 
 const ApiKeyId = BoundedString(contract.Limits.api_key_id_bytes);
-const AccountId = BoundedString(contract.Limits.account_id_bytes);
+const AccountId = BoundedString(contract.Limits.principal_ref_bytes);
 const ApiKeyName = BoundedString(contract.Limits.api_key_name_bytes);
 const ApiKeySuffix = BoundedString(contract.Limits.api_key_suffix_bytes);
 const ModelId = BoundedString(contract.Limits.model_id_bytes);
@@ -105,7 +106,7 @@ const Secret = struct {
     ) Error!Secret {
         if (!validHeaderCredential(value))
             return error.ProtocolInvalid;
-        if (value.len > contract.Limits.api_key_bytes)
+        if (value.len > contract.Limits.credential_bytes)
             return error.CatalogFieldTooLarge;
         return .{
             .allocator = allocator,
@@ -137,7 +138,7 @@ const ApiKeyEntry = struct {
     id: ApiKeyId,
     name: ApiKeyName,
     suffix: ApiKeySuffix,
-    protocol: execution_contract.Protocol,
+    protocol: contract.Protocol,
     secret: Secret,
 
     fn deinit(self: *ApiKeyEntry) void {
@@ -174,16 +175,22 @@ pub const CatalogSession = struct {
         self.* = undefined;
     }
 
+    pub fn take(self: *CatalogSession) CatalogSession {
+        const result = self.*;
+        self.* = .{ .allocator = result.allocator };
+        return result;
+    }
+
     pub fn reset(self: *CatalogSession) void {
         self.clearApiKeys();
     }
 
     pub fn loadApiKeys(
         self: *CatalogSession,
-        transport: metask.Transport,
+        transport: transport_api.Transport,
         oauth_access_token: []const u8,
         account_id: []const u8,
-        control: ?metask.RequestControl,
+        control: ?transport_api.RequestControl,
     ) Error!void {
         const validated_account_id = try AccountId.init(account_id);
         self.last_http_status = 0;
@@ -217,8 +224,8 @@ pub const CatalogSession = struct {
 
     pub fn loadModels(
         self: *CatalogSession,
-        transport: metask.Transport,
-        control: ?metask.RequestControl,
+        transport: transport_api.Transport,
+        control: ?transport_api.RequestControl,
     ) Error!void {
         const index = self.selected_key_index orelse
             return error.ApiKeyNotFound;
@@ -228,8 +235,8 @@ pub const CatalogSession = struct {
     pub fn loadModelsForApiKey(
         self: *CatalogSession,
         id: []const u8,
-        transport: metask.Transport,
-        control: ?metask.RequestControl,
+        transport: transport_api.Transport,
+        control: ?transport_api.RequestControl,
     ) Error!void {
         const index = self.findApiKey(id) orelse
             return error.ApiKeyNotFound;
@@ -239,8 +246,8 @@ pub const CatalogSession = struct {
     fn loadModelsForApiKeyIndex(
         self: *CatalogSession,
         index: usize,
-        transport: metask.Transport,
-        control: ?metask.RequestControl,
+        transport: transport_api.Transport,
+        control: ?transport_api.RequestControl,
     ) Error!void {
         const credential = self.api_keys.items[index].secret.view();
         if (credential.len == 0) return error.ApiKeyNotFound;
@@ -263,7 +270,7 @@ pub const CatalogSession = struct {
         self: *CatalogSession,
         model_id: []const u8,
         metask_source_generation: u64,
-    ) Error!execution_contract.OwnedSourceCandidate {
+    ) Error!contract.OwnedSourceCandidate {
         if (metask_source_generation == 0)
             return error.SourceCandidateInvalid;
         const key_index = self.selected_key_index orelse
@@ -286,12 +293,18 @@ pub const CatalogSession = struct {
             base_url,
         ) catch return error.OutOfMemory;
         errdefer if (owned_base_url) |bytes| self.allocator.free(bytes);
-        const owned_secret = entry.secret.takeBytes();
+        // The Models source retains its runtime credential so it can issue
+        // more than one independently owned binding. Each candidate receives
+        // a bounded copy that it will secure-zero on every terminal path.
+        const owned_secret = self.allocator.dupe(
+            u8,
+            entry.secret.view(),
+        ) catch return error.OutOfMemory;
         const transferred_model = owned_model.?;
         const transferred_base_url = owned_base_url.?;
         owned_model = null;
         owned_base_url = null;
-        var result = execution_contract.OwnedSourceCandidate.initOwned(
+        var result = contract.OwnedSourceCandidate.initOwned(
             self.allocator,
             .metask,
             entry.protocol,
@@ -302,7 +315,7 @@ pub const CatalogSession = struct {
             entry.id.view(),
         ) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.SourceCandidateInvalid;
         errdefer result.deinit();
-        contract.validateSourceCandidate(result.input()) catch
+        contract.validateMetaskSourceCandidate(result.input()) catch
             return error.SourceCandidateInvalid;
         return result;
     }
@@ -349,6 +362,11 @@ pub const CatalogSession = struct {
     ) []const u8 {
         const index = self.selected_key_index orelse return "";
         return self.api_keys.items[index].id.view();
+    }
+
+    pub fn selectedProtocol(self: *const CatalogSession) ?contract.Protocol {
+        const index = self.selected_key_index orelse return null;
+        return self.api_keys.items[index].protocol;
     }
 
     pub fn ownsSourceSelection(
@@ -412,6 +430,56 @@ pub const CatalogSession = struct {
     }
 };
 
+pub const OwnedCatalogCompletion = struct {
+    allocator: std.mem.Allocator,
+    session: CatalogSession,
+    selected_model_id: []u8,
+    owned: bool = true,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        session: *CatalogSession,
+        selected_model_id: []const u8,
+    ) Error!OwnedCatalogCompletion {
+        if (!session.hasModel(selected_model_id)) return error.ModelNotFound;
+        const model = allocator.dupe(u8, selected_model_id) catch return error.OutOfMemory;
+        return .{
+            .allocator = allocator,
+            .session = session.take(),
+            .selected_model_id = model,
+        };
+    }
+
+    pub fn deinit(self: *OwnedCatalogCompletion) void {
+        if (!self.owned) return;
+        self.session.deinit();
+        self.allocator.free(self.selected_model_id);
+        self.* = undefined;
+    }
+
+    /// Erases the provider-private completion at the Application/Control
+    /// boundary. The returned port borrows this object and must be consumed
+    /// exactly once before its storage is released.
+    pub fn ownedPort(self: *OwnedCatalogCompletion) models_ports.OwnedCatalogCompletion {
+        return .{
+            .context = self,
+            .deinit_fn = deinitErasedCatalogCompletion,
+        };
+    }
+};
+
+pub fn fromOwnedPort(
+    completion: *models_ports.OwnedCatalogCompletion,
+) ?*OwnedCatalogCompletion {
+    if (completion.deinit_fn != deinitErasedCatalogCompletion) return null;
+    return @ptrCast(@alignCast(completion.context));
+}
+
+fn deinitErasedCatalogCompletion(context: *anyopaque) void {
+    const completion: *OwnedCatalogCompletion = @ptrCast(@alignCast(context));
+    completion.deinit();
+}
+
 fn PublicText(comptime capacity: usize) type {
     return struct {
         bytes: [capacity]u8 = undefined,
@@ -433,7 +501,7 @@ const PublicApiKey = struct {
     id: PublicText(contract.Limits.api_key_id_bytes) = .{},
     name: PublicText(contract.Limits.api_key_name_bytes) = .{},
     suffix: PublicText(contract.Limits.api_key_suffix_bytes) = .{},
-    protocol: execution_contract.Protocol = .anthropic_messages,
+    protocol: contract.Protocol = .anthropic_messages,
 };
 
 const PublicModel = struct {
@@ -442,7 +510,7 @@ const PublicModel = struct {
     metadata: contract.ModelMetadata = .{},
 };
 
-/// Secret-free, fixed-capacity Account projection. Network workers mutate the
+/// Secret-free, fixed-capacity Models projection. Network workers mutate the
 /// private candidate CatalogSession, then the App main thread snapshots a
 /// successful stage here. The composition root keeps committed and candidate
 /// PublicCatalog slots stay separate until source preference persistence succeeds. Other
@@ -511,11 +579,11 @@ pub const PublicCatalog = struct {
     /// A restored source preference contains the selected catalog identities
     /// but no complete Metask catalog. Publish the smallest truthful catalog
     /// until the authenticated catalog refresh replaces it. This keeps a ready
-    /// AccountView internally consistent without inventing display metadata.
+    /// ModelsView internally consistent without inventing display metadata.
     pub fn replaceRestoredSelection(
         self: *PublicCatalog,
         api_key_id: []const u8,
-        protocol: execution_contract.Protocol,
+        protocol: contract.Protocol,
         model_id: []const u8,
     ) void {
         std.debug.assert(api_key_id.len > 0);
@@ -547,7 +615,7 @@ pub const PublicCatalog = struct {
     pub fn protocolForApiKey(
         self: *const PublicCatalog,
         id: []const u8,
-    ) ?execution_contract.Protocol {
+    ) ?contract.Protocol {
         for (self.api_keys[0..self.api_key_count]) |*entry|
             if (std.mem.eql(u8, entry.id.view(), id)) return entry.protocol;
         return null;
@@ -559,34 +627,37 @@ pub const PublicCatalog = struct {
         return false;
     }
 
-    pub fn decorate(
-        self: *PublicCatalog,
-        view: *contract.AccountView,
-    ) void {
+    pub fn apiKeyViews(self: *PublicCatalog) []const contract.ApiKeyView {
         for (
             self.api_keys[0..self.api_key_count],
             self.api_key_views[0..self.api_key_count],
-        ) |*storage, *api_key_view| {
-            api_key_view.* = .{
+        ) |*storage, *view| {
+            view.* = .{
                 .id = storage.id.view(),
                 .name = storage.name.view(),
                 .suffix = storage.suffix.view(),
                 .protocol = storage.protocol,
             };
         }
+        return self.api_key_views[0..self.api_key_count];
+    }
+
+    pub fn modelViews(self: *PublicCatalog) []const contract.ModelView {
         for (
             self.models[0..self.model_count],
             self.model_views[0..self.model_count],
-        ) |*storage, *model_view| {
-            model_view.* = .{
+        ) |*storage, *view| {
+            view.* = .{
                 .id = storage.id.view(),
                 .display_name = storage.display_name.view(),
                 .metadata = storage.metadata,
             };
         }
-        view.api_keys = self.api_key_views[0..self.api_key_count];
-        view.models = self.model_views[0..self.model_count];
-        view.model_catalog_api_key_id = self.model_catalog_api_key_id.view();
+        return self.model_views[0..self.model_count];
+    }
+
+    pub fn catalogApiKeyId(self: *const PublicCatalog) []const u8 {
+        return self.model_catalog_api_key_id.view();
     }
 };
 
@@ -686,9 +757,9 @@ const ParsedModels = struct {
 
 fn fetchApiKeys(
     allocator: std.mem.Allocator,
-    transport: metask.Transport,
+    transport: transport_api.Transport,
     oauth_access_token: []const u8,
-    control: ?metask.RequestControl,
+    control: ?transport_api.RequestControl,
     status_out: *u16,
 ) Error!ParsedApiKeys {
     const response_buffer = allocator.alloc(
@@ -711,9 +782,9 @@ fn fetchApiKeys(
 
 fn fetchModels(
     allocator: std.mem.Allocator,
-    transport: metask.Transport,
+    transport: transport_api.Transport,
     api_key: []const u8,
-    control: ?metask.RequestControl,
+    control: ?transport_api.RequestControl,
     status_out: *u16,
 ) Error!ParsedModels {
     const response_buffer = allocator.alloc(
@@ -877,7 +948,7 @@ fn parseApiKeys(
         body,
         .{
             .ignore_unknown_fields = true,
-            .max_value_len = contract.Limits.api_key_bytes,
+            .max_value_len = contract.Limits.credential_bytes,
             .allocate = .alloc_if_needed,
         },
     ) catch |err| return parseError(err);
@@ -984,7 +1055,7 @@ fn parseModels(
     return result;
 }
 
-fn protocolForPlatform(platform: []const u8) ?execution_contract.Protocol {
+fn protocolForPlatform(platform: []const u8) ?contract.Protocol {
     if (std.mem.eql(u8, platform, "anthropic")) return .anthropic_messages;
     if (std.mem.eql(u8, platform, "openai")) return .openai_chat_completions;
     if (std.mem.eql(u8, platform, "gemini")) return .gemini_native;
@@ -999,7 +1070,7 @@ fn jsonScratchSize(body_len: usize) usize {
     );
 }
 
-fn baseUrl(protocol: execution_contract.Protocol) ?[]const u8 {
+fn baseUrl(protocol: contract.Protocol) ?[]const u8 {
     return switch (protocol) {
         .openai_responses => null,
         .anthropic_messages => anthropic_messages_url,
@@ -1010,7 +1081,7 @@ fn baseUrl(protocol: execution_contract.Protocol) ?[]const u8 {
 
 fn validHeaderCredential(value: []const u8) bool {
     if (value.len == 0 or
-        value.len > contract.Limits.api_key_bytes)
+        value.len > contract.Limits.credential_bytes)
         return false;
     for (value) |byte| {
         if (byte < 0x21 or byte > 0x7e) return false;
@@ -1028,7 +1099,7 @@ fn requireSuccess(status: u16) Error!void {
     };
 }
 
-fn transportError(err: metask.TransportError) Error {
+fn transportError(err: transport_api.TransportError) Error {
     return switch (err) {
         error.NetworkFailed => error.ServiceUnavailable,
         error.ResponseTooLarge => error.CatalogTooLarge,
@@ -1136,23 +1207,16 @@ test "model declarations survive owned catalog copies and never leak into a repl
     committed.replaceFromPublic(&candidate);
     session.reset();
     candidate.replaceRestoredSelection("other-key", .openai_chat_completions, "model-1");
-    var view: contract.AccountView = .{
-        .state = .authenticated,
-        .catalog_state = .ready,
-    };
-    committed.decorate(&view);
-    try std.testing.expectEqualDeep(expected, view.models[0].metadata);
+    try std.testing.expectEqualDeep(expected, committed.modelViews()[0].metadata);
 
-    candidate.decorate(&view);
-    try std.testing.expectEqualDeep(contract.ModelMetadata{}, view.models[0].metadata);
+    try std.testing.expectEqualDeep(contract.ModelMetadata{}, candidate.modelViews()[0].metadata);
 
     parsed = try parseModels(std.testing.allocator, model_fixture);
     session.models.deinit(session.allocator);
     session.models = parsed.entries;
     parsed.entries = .empty;
     committed.replaceFromSession(&session);
-    committed.decorate(&view);
-    try std.testing.expectEqualDeep(contract.ModelMetadata{}, view.models[0].metadata);
+    try std.testing.expectEqualDeep(contract.ModelMetadata{}, committed.modelViews()[0].metadata);
 }
 
 test "model declarations distinguish unknown, supported, and unsupported without coercion" {
@@ -1194,7 +1258,7 @@ test "model declarations distinguish unknown, supported, and unsupported without
     }
 }
 
-test "live-shape catalogs expose only masked views and move one key owner" {
+test "live-shape catalogs expose masked views and issue independent candidates" {
     var keys = try parseApiKeys(std.testing.allocator, key_fixture);
     var session = CatalogSession.init(std.testing.allocator);
     defer session.deinit();
@@ -1223,7 +1287,7 @@ test "live-shape catalogs expose only masked views and move one key owner" {
     var candidate = try session.prepareSourceCandidate("model-1", 1);
     defer candidate.deinit();
     try std.testing.expectEqual(
-        execution_contract.Protocol.anthropic_messages,
+        contract.Protocol.anthropic_messages,
         candidate.input().target.protocol,
     );
     try std.testing.expectEqualStrings(
@@ -1234,20 +1298,19 @@ test "live-shape catalogs expose only masked views and move one key owner" {
         "test-api-key-1234",
         candidate.input().api_key,
     );
-    try std.testing.expectError(
-        error.ApiKeyNotFound,
-        session.prepareSourceCandidate("model-1", 2),
+    var second_candidate = try session.prepareSourceCandidate("model-1", 2);
+    defer second_candidate.deinit();
+    try std.testing.expectEqualStrings(
+        "test-api-key-1234",
+        second_candidate.input().api_key,
     );
     session.reset();
-    var public_view: contract.AccountView = .{
-        .state = .authenticated,
-        .catalog_state = .ready,
-    };
-    public_catalog.decorate(&public_view);
-    try std.testing.expectEqual(@as(usize, 1), public_view.api_keys.len);
-    try std.testing.expectEqualStrings("325", public_view.api_keys[0].id);
-    try std.testing.expectEqual(@as(usize, 1), public_view.models.len);
-    try std.testing.expectEqualStrings("model-1", public_view.models[0].id);
+    const public_keys = public_catalog.apiKeyViews();
+    const public_models = public_catalog.modelViews();
+    try std.testing.expectEqual(@as(usize, 1), public_keys.len);
+    try std.testing.expectEqualStrings("325", public_keys[0].id);
+    try std.testing.expectEqual(@as(usize, 1), public_models.len);
+    try std.testing.expectEqualStrings("model-1", public_models[0].id);
 }
 
 test "catalog maps Gemini platform to AgentCore Gemini target" {
@@ -1273,7 +1336,7 @@ test "catalog maps Gemini platform to AgentCore Gemini target" {
     var candidate = try session.prepareSourceCandidate("model-1", 1);
     defer candidate.deinit();
     try std.testing.expectEqual(
-        execution_contract.Protocol.gemini_native,
+        contract.Protocol.gemini_native,
         candidate.input().target.protocol,
     );
     try std.testing.expectEqualStrings(
@@ -1386,9 +1449,9 @@ test "catalog request flow uses OAuth then direct API key credentials" {
 
         fn perform(
             context: *anyopaque,
-            request: metask.Request,
+            request: transport_api.Request,
             response_buffer: []u8,
-        ) metask.TransportError!metask.Response {
+        ) transport_api.TransportError!transport_api.Response {
             const self: *@This() = @ptrCast(@alignCast(context));
             const body = switch (self.step) {
                 0 => blk: {
@@ -1419,7 +1482,7 @@ test "catalog request flow uses OAuth then direct API key credentials" {
     var fake: Fake = .{};
     var session = CatalogSession.init(std.testing.allocator);
     defer session.deinit();
-    const transport: metask.Transport = .{
+    const transport: transport_api.Transport = .{
         .context = &fake,
         .perform_fn = Fake.perform,
     };
@@ -1444,9 +1507,9 @@ test "failed model reload preserves the committed private catalog" {
 
         fn perform(
             context: *anyopaque,
-            request: metask.Request,
+            request: transport_api.Request,
             response_buffer: []u8,
-        ) metask.TransportError!metask.Response {
+        ) transport_api.TransportError!transport_api.Response {
             const self: *@This() = @ptrCast(@alignCast(context));
             if (request.kind != .models) return error.ProtocolFailed;
             const body = switch (self.step) {
@@ -1474,7 +1537,7 @@ test "failed model reload preserves the committed private catalog" {
     keys.entries = .empty;
     session.owner_account_id = try .init("account-1");
     var fake: Fake = .{};
-    const transport: metask.Transport = .{
+    const transport: transport_api.Transport = .{
         .context = &fake,
         .perform_fn = Fake.perform,
     };

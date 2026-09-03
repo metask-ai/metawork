@@ -3,15 +3,21 @@ const builtin = @import("builtin");
 const account_contract = @import("metawork_account_contract");
 const account_api = @import("metawork_account");
 const control_ports = @import("metawork_product_control_ports");
-const execution_contract = if (builtin.is_test)
-    @import("metawork_product_execution_contract")
-else
-    struct {};
+
+pub const CommitObserver = struct {
+    context: *anyopaque,
+    notify_fn: *const fn (*anyopaque) void,
+
+    fn notify(self: CommitObserver) void {
+        self.notify_fn(self.context);
+    }
+};
 
 pub const Coordinator = struct {
     runtime: *account_api.Runtime,
     control: control_ports.AccountCommitSink,
     main_thread_id: std.Thread.Id,
+    commit_observer: ?CommitObserver = null,
 
     pub fn init(
         runtime: *account_api.Runtime,
@@ -27,6 +33,11 @@ pub const Coordinator = struct {
 
     pub fn commandSink(self: *Coordinator) account_contract.AccountCommandSink {
         return .{ .context = self, .submit_fn = submitCommand };
+    }
+
+    pub fn setCommitObserver(self: *Coordinator, observer: ?CommitObserver) void {
+        self.assertMainThread();
+        self.commit_observer = observer;
     }
 
     fn submitCommand(
@@ -107,16 +118,15 @@ pub const Coordinator = struct {
         if (!effect_admitted and !continues_active_attempt)
             return .rejected(.local_resource_exhausted);
 
-        // Account commits its own state first. The Product callback is no-fail
-        // and synchronously takes the optional candidate, so no Product result
-        // can re-enter or roll back the Account transaction.
+        // Account commits its own state first. The Product callback is no-fail,
+        // so no Product result can re-enter or roll back the Account transaction.
         self.runtime.commit(&prepared);
         self.control.commitNoFail(.{
             .fact = fact,
             .attempt_id = attempt_id,
             .attempt_terminal = attempt_terminal,
-            .candidate = prepared.sourceCandidateTransfer(),
         });
+        if (self.commit_observer) |observer| observer.notify();
 
         // A continuation effect can fail admission only after its preceding
         // external step has completed. Commit that observed step first, then
@@ -129,7 +139,6 @@ pub const Coordinator = struct {
             );
 
         const refresh_after_commit = self.runtime.takeRefreshAfterCommit(&prepared);
-        const follow_up = self.runtime.takeFollowUpCommand(&prepared);
         self.runtime.dispatchCommitted(&prepared);
         if (refresh_after_commit) {
             const refreshed = self.commitPrepared(
@@ -137,25 +146,7 @@ pub const Coordinator = struct {
             );
             std.debug.assert(refreshed.accepted);
         }
-        if (follow_up) |command| self.submitFollowUp(command);
         return .acceptedAttempt(attempt_id);
-    }
-
-    fn submitFollowUp(
-        self: *Coordinator,
-        command: account_contract.AccountCommand,
-    ) void {
-        const result = submitCommand(self, command);
-        if (result.accepted) return;
-        switch (command) {
-            .refresh_catalog => {
-                const recovered = self.commitPrepared(
-                    self.runtime.prepareContinuationFailure(result.error_code),
-                );
-                std.debug.assert(recovered.accepted);
-            },
-            else => {},
-        }
     }
 
     pub fn shutdown(self: *Coordinator) void {
@@ -174,7 +165,6 @@ const RecordedCommit = struct {
     state: account_contract.AccountState,
     attempt_id: ?u64,
     attempt_terminal: bool,
-    candidate_source_generation: ?u64,
 };
 
 const RecordingSink = struct {
@@ -197,25 +187,17 @@ const RecordingSink = struct {
         // cannot observe the fact before Account has committed it.
         const committed_view = self.runtime.view();
         std.debug.assert(committed_view.state == value.fact.view.state);
-        std.debug.assert(committed_view.catalog_state == value.fact.view.catalog_state);
         std.debug.assert(std.mem.eql(
             u8,
             committed_view.account_id,
             value.fact.view.account_id,
         ));
 
-        var candidate_source_generation: ?u64 = null;
-        if (value.candidate) |transfer| {
-            var candidate = transfer.take();
-            defer candidate.deinit();
-            candidate_source_generation = candidate.input().source_generation;
-        }
         self.records[self.count] = .{
             .kind = value.fact.kind,
             .state = value.fact.view.state,
             .attempt_id = value.attempt_id,
             .attempt_terminal = value.attempt_terminal,
-            .candidate_source_generation = candidate_source_generation,
         };
         self.count += 1;
     }
@@ -253,25 +235,7 @@ fn initRuntimeForTest(path: []const u8) !account_api.Runtime {
     );
 }
 
-fn testSourceCandidate(
-    source_generation: u64,
-) !execution_contract.OwnedSourceCandidate {
-    return execution_contract.OwnedSourceCandidate.initOwned(
-        std.testing.allocator,
-        .metask,
-        .anthropic_messages,
-        try std.testing.allocator.dupe(u8, "model-1"),
-        try std.testing.allocator.dupe(
-            u8,
-            account_contract.metask_anthropic_messages_url,
-        ),
-        source_generation,
-        try std.testing.allocator.dupe(u8, "secret-key"),
-        "key-1",
-    );
-}
-
-test "Account coordinator commits before transferring one source candidate" {
+test "Account coordinator commits identity before notifying Product" {
     var runtime = try initRuntimeForTest(if (builtin.os.tag == .windows)
         "C:\\metawork-account-coordinator-order-test"
     else
@@ -283,11 +247,15 @@ test "Account coordinator commits before transferring one source candidate" {
         sink.port(),
         std.Thread.getCurrentId(),
     );
-    var candidate = try testSourceCandidate(41);
-    defer candidate.deinit();
-
     const result = coordinator.commitPrepared(
-        try account_api.TestSupport.prepareReadyRestore(&runtime, &candidate),
+        try account_api.TestSupport.prepareAuthenticated(
+            &runtime,
+            "account-1",
+            "Metask User",
+            "access-token",
+            "refresh-token",
+            100,
+        ),
     );
 
     try std.testing.expect(result.accepted);
@@ -296,7 +264,6 @@ test "Account coordinator commits before transferring one source candidate" {
     try std.testing.expectEqual(account_contract.AccountState.authenticated, sink.records[0].state);
     try std.testing.expectEqual(@as(?u64, null), sink.records[0].attempt_id);
     try std.testing.expect(!sink.records[0].attempt_terminal);
-    try std.testing.expectEqual(@as(?u64, 41), sink.records[0].candidate_source_generation);
 }
 
 test "Account coordinator publishes explicit terminal attempt metadata" {
@@ -311,10 +278,15 @@ test "Account coordinator publishes explicit terminal attempt metadata" {
         sink.port(),
         std.Thread.getCurrentId(),
     );
-    var candidate = try testSourceCandidate(51);
-    defer candidate.deinit();
     _ = coordinator.commitPrepared(
-        try account_api.TestSupport.prepareReadyRestore(&runtime, &candidate),
+        try account_api.TestSupport.prepareAuthenticated(
+            &runtime,
+            "account-1",
+            "Metask User",
+            "access-token",
+            "refresh-token",
+            100,
+        ),
     );
 
     const result = coordinator.commitPrepared(
@@ -327,5 +299,4 @@ test "Account coordinator publishes explicit terminal attempt metadata" {
     try std.testing.expectEqual(account_contract.AccountState.signed_out, sink.records[1].state);
     try std.testing.expect(sink.records[1].attempt_id != null);
     try std.testing.expect(sink.records[1].attempt_terminal);
-    try std.testing.expectEqual(@as(?u64, null), sink.records[1].candidate_source_generation);
 }

@@ -158,20 +158,35 @@ test("multimodal Run history keeps only ordered safe attachment metadata", () =>
 
 test("Workbench snapshot hard cut rejects retired provider fields", () => {
   const retiredApiKey = clone(fixture);
-  retiredApiKey.account.apiKeys[0].provider = "anthropic";
-  delete retiredApiKey.account.apiKeys[0].protocol;
+  retiredApiKey.models.providers[0].apiKeys[0].provider = "anthropic";
+  delete retiredApiKey.models.providers[0].apiKeys[0].protocol;
   assert.throws(() => decodeWorkbenchSnapshot(retiredApiKey), /expected keys/);
 
   const retiredBinding = clone(fixture);
   retiredBinding.tasks[0].binding.provider = "anthropic";
   delete retiredBinding.tasks[0].binding.protocol;
   assert.throws(() => decodeWorkbenchSnapshot(retiredBinding), /expected keys/);
+
+  const retiredExecutionRoot = clone(fixture);
+  retiredExecutionRoot.execution = {
+    state: "ready",
+    defaultSource: "metask",
+    activeSource: "metask",
+    activeGeneration: "1",
+    taskCreationAvailable: true,
+    errorCode: "none",
+  };
+  delete retiredExecutionRoot.newTaskAdmission;
+  assert.throws(
+    () => decodeWorkbenchSnapshot(retiredExecutionRoot),
+    /expected keys/,
+  );
 });
 
 test("model metadata preserves nullable declarations and exact positive u64 limits", () => {
   for (const declaration of [null, true, false]) {
     const candidate = clone(fixture);
-    const metadata = candidate.account.models[0].metadata;
+    const metadata = candidate.models.providers[0].models[0].metadata;
     for (const [key, value] of Object.entries(metadata.capabilities)) {
       if (value !== null && typeof value === "object") {
         for (const child of Object.keys(value)) value[child] = declaration;
@@ -217,7 +232,7 @@ test("model metadata rejects missing fields, coercion and overflowing limits", (
       });
     }
   }
-  const caps = fixture.account.models[0].metadata.capabilities;
+  const caps = fixture.models.providers[0].models[0].metadata.capabilities;
   for (const [key, value] of Object.entries(caps)) {
     for (const invalid of [undefined, null, true, []]) {
       if (value !== null && typeof value === "object") {
@@ -242,7 +257,7 @@ test("model metadata rejects missing fields, coercion and overflowing limits", (
   }
   for (const change of changes) {
     const candidate = clone(fixture);
-    change(candidate.account.models[0]);
+    change(candidate.models.providers[0].models[0]);
     assert.throws(() => decodeWorkbenchSnapshot(candidate), /metadata/);
   }
 });
@@ -470,10 +485,12 @@ test("Scheduled Task projection decodes recurrence and occurrence without secret
       enabled: true,
       health: "ready",
       failureReason: null,
-      execution: {
-        generation: "1",
+      binding: {
+        status: "bound",
+        modelRef: { sourceId: "metask:key-1", modelId: "fixture-model" },
+        sourceGeneration: "1",
+        selectionRevision: "3",
         protocol: "anthropic_messages",
-        model: "fixture-model",
       },
       input: {
         kind: "text",
@@ -500,6 +517,25 @@ test("Scheduled Task projection decodes recurrence and occurrence without secret
     },
   ];
   assert.deepEqual(decodeWorkbenchSnapshot(scheduled), scheduled);
+
+  const migrationRequired = clone(scheduled);
+  migrationRequired.scheduledTasks[0].enabled = false;
+  migrationRequired.scheduledTasks[0].health = "needs_attention";
+  migrationRequired.scheduledTasks[0].failureReason =
+    "binding_migration_required";
+  migrationRequired.scheduledTasks[0].binding = {
+    status: "migration_required",
+    legacyExecution: {
+      generation: "19",
+      protocol: "anthropic_messages",
+      model: "legacy-model",
+    },
+  };
+  migrationRequired.scheduledTasks[0].nextRunAtUnixSeconds = null;
+  assert.deepEqual(
+    decodeWorkbenchSnapshot(migrationRequired),
+    migrationRequired,
+  );
 
   const updatedDefinitionProfile = clone(scheduled);
   updatedDefinitionProfile.scheduledTasks[0].permissionProfile = "full_access";
@@ -917,28 +953,20 @@ test("Model Connection readiness survives an isolated failed retest", () => {
   const snapshot = clone(fixture);
   snapshot.account = {
     state: "signed_out",
-    catalogState: "unavailable",
     canCancel: false,
     accountId: "",
     displayName: "",
-    apiKeys: [],
-    models: [],
-    selectedApiKeySelectionId: "",
-    selectedModelSelectionId: "",
-    candidateApiKeySelectionId: "",
-    candidateModelSelectionId: "",
-    modelCatalogApiKeySelectionId: "",
     errorCode: "none",
     safeDiagnostic: "",
-    catalogGeneration: "0",
   };
-  snapshot.execution = {
-    state: "ready",
-    defaultSource: "model_connection",
-    activeSource: "model_connection",
-    activeGeneration: "9",
-    taskCreationAvailable: true,
-    modelConnections: [
+  const customMetadata = clone(snapshot.models.providers[0].models[0].metadata);
+  snapshot.models = {
+    ...snapshot.models,
+    availability: "ready",
+    providers: [],
+    metaskSelection: null,
+    defaultSelection: { sourceId: "connection-1", modelId: "gpt-5" },
+    connections: [
       {
         id: "connection-1",
         displayName: "OpenAI",
@@ -948,29 +976,46 @@ test("Model Connection readiness survives an isolated failed retest", () => {
         testStatus: "failed",
         credentialStatus: "ready",
         enabled: true,
-        connectionGeneration: "1",
+        connectionRevision: "1",
+        sourceGeneration: "2",
+        catalogGeneration: "3",
         selectedModel: "gpt-5",
-        models: [{ id: "gpt-5", displayName: "GPT-5" }],
+        models: [
+          {
+            id: "gpt-5",
+            displayName: "GPT-5",
+            metadata: customMetadata,
+            metadataProvenance: "user_declared",
+            testStatus: "failed",
+            ready: true,
+          },
+        ],
       },
     ],
-    selectedModelConnectionId: "connection-1",
-    errorCode: "none",
+  };
+  snapshot.newTaskAdmission = {
+    available: true,
+    reason: "none",
+    activeModelRef: { sourceId: "connection-1", modelId: "gpt-5" },
+    activeGeneration: "9",
+    activeSelectionRevision: snapshot.models.selectionRevision,
+    state: "ready",
   };
   assert.doesNotThrow(() => decodeWorkbenchSnapshot(snapshot));
 
   const neverVerified = clone(snapshot);
-  neverVerified.execution.modelConnections[0].testStatus = "untested";
+  neverVerified.models.connections[0].models[0].ready = false;
   assert.throws(
     () => decodeWorkbenchSnapshot(neverVerified),
     /ready connection must be verified/,
   );
 
   const impossibleConnected = clone(snapshot);
-  impossibleConnected.execution.modelConnections[0].state = "configuring";
-  impossibleConnected.execution.modelConnections[0].testStatus = "connected";
+  impossibleConnected.models.connections[0].state = "configuring";
+  impossibleConnected.models.connections[0].testStatus = "connected";
   assert.throws(
     () => decodeWorkbenchSnapshot(impossibleConnected),
-    /only a ready connection can have a connected test/,
+    /only a ready connection can retain model readiness/,
   );
 });
 
@@ -1273,140 +1318,82 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   );
 
   const readyAccountWithoutInstalledExecution = clone(fixture);
-  readyAccountWithoutInstalledExecution.execution = {
-    state: "unavailable",
-    defaultSource: "metask",
-    activeSource: null,
+  readyAccountWithoutInstalledExecution.newTaskAdmission = {
+    available: false,
+    reason: "none",
+    activeModelRef: null,
     activeGeneration: "0",
-    taskCreationAvailable: false,
-    selectedModelConnectionId: "",
-    modelConnections: [],
-    errorCode: "none",
+    activeSelectionRevision: "0",
+    state: "unavailable",
   };
   assert.doesNotThrow(() =>
     decodeWorkbenchSnapshot(readyAccountWithoutInstalledExecution),
   );
 
   const keyOutsideCatalog = clone(fixture);
-  keyOutsideCatalog.account.selectedApiKeySelectionId = "missing-key";
+  keyOutsideCatalog.models.providers[0].selectedApiKeyId = "missing-key";
   assert.throws(
     () => decodeWorkbenchSnapshot(keyOutsideCatalog),
-    /selected catalog membership/,
+    /selected API Key must belong/,
   );
 
   const modelOutsideCatalog = clone(fixture);
-  modelOutsideCatalog.account.selectedModelSelectionId = "missing-model";
+  modelOutsideCatalog.models.metaskSelection.modelId = "missing-model";
   assert.throws(
     () => decodeWorkbenchSnapshot(modelOutsideCatalog),
-    /selected catalog membership/,
+    /selected Metask model must belong/,
   );
 
   const mismatchedCancellation = clone(fixture);
   mismatchedCancellation.account.canCancel = true;
   assert.throws(
     () => decodeWorkbenchSnapshot(mismatchedCancellation),
-    /cancellation requires active authorization or catalog work/,
+    /cancellation requires active authorization/,
   );
 
-  const persistenceCommitted = clone(fixture);
-  persistenceCommitted.account.catalogState = "loading";
-  persistenceCommitted.execution.state = "replacing";
-  persistenceCommitted.execution.taskCreationAvailable = false;
-  persistenceCommitted.account.candidateApiKeySelectionId = "key-1";
-  persistenceCommitted.account.candidateModelSelectionId = "fixture-model";
-  assert.doesNotThrow(() => decodeWorkbenchSnapshot(persistenceCommitted));
+  const refreshingCatalog = clone(fixture);
+  refreshingCatalog.models.operation = "refreshing_catalog";
+  refreshingCatalog.models.availability = "loading";
+  refreshingCatalog.models.providers[0].catalogState = "loading";
+  refreshingCatalog.newTaskAdmission.state = "replacing";
+  refreshingCatalog.newTaskAdmission.available = false;
+  assert.doesNotThrow(() => decodeWorkbenchSnapshot(refreshingCatalog));
 
-  const cancellablePersistence = clone(persistenceCommitted);
-  cancellablePersistence.account.canCancel = true;
-  assert.doesNotThrow(() => decodeWorkbenchSnapshot(cancellablePersistence));
-
-  const candidateAtRest = clone(fixture);
-  candidateAtRest.account.candidateApiKeySelectionId = "key-1";
-  assert.throws(
-    () => decodeWorkbenchSnapshot(candidateAtRest),
-    /candidate execution identities require reconfiguration/,
-  );
-
-  const unresolvedCandidate = clone(fixture);
-  unresolvedCandidate.account.catalogState = "loading";
-  unresolvedCandidate.account.canCancel = true;
-  unresolvedCandidate.execution.state = "replacing";
-  unresolvedCandidate.execution.taskCreationAvailable = false;
-  unresolvedCandidate.account.candidateApiKeySelectionId = "key-pending";
-  assert.doesNotThrow(() => decodeWorkbenchSnapshot(unresolvedCandidate));
-
-  const incompletePersistence = clone(persistenceCommitted);
-  incompletePersistence.account.candidateModelSelectionId = "";
-  assert.doesNotThrow(() => decodeWorkbenchSnapshot(incompletePersistence));
-
-  const emptyKeyChoice = clone(fixture);
-  emptyKeyChoice.account.catalogState = "choosing";
-  emptyKeyChoice.account.canCancel = true;
-  emptyKeyChoice.execution.state = "replacing";
-  emptyKeyChoice.execution.taskCreationAvailable = false;
-  emptyKeyChoice.account.apiKeys = [];
-  emptyKeyChoice.account.models = [];
-  emptyKeyChoice.account.modelCatalogApiKeySelectionId = "";
-  assert.throws(
-    () => decodeWorkbenchSnapshot(emptyKeyChoice),
-    /catalog choice requires at least one API/,
-  );
-
-  const emptyModelChoice = clone(emptyKeyChoice);
-  emptyModelChoice.account.apiKeys = fixture.account.apiKeys;
-  emptyModelChoice.account.models = [];
-  emptyModelChoice.account.candidateApiKeySelectionId = "key-1";
-  assert.doesNotThrow(() => decodeWorkbenchSnapshot(emptyModelChoice));
-
-  const loadingModelCandidate = clone(fixture);
-  loadingModelCandidate.account.catalogState = "loading";
-  loadingModelCandidate.execution.state = "replacing";
-  loadingModelCandidate.execution.taskCreationAvailable = false;
-  loadingModelCandidate.account.models = [];
-  loadingModelCandidate.account.candidateApiKeySelectionId = "key-1";
-  loadingModelCandidate.account.candidateModelSelectionId = "model-pending";
-  assert.doesNotThrow(() => decodeWorkbenchSnapshot(loadingModelCandidate));
-
-  const loadingIdentity = clone(fixture);
-  loadingIdentity.account.state = "authorizing";
-  loadingIdentity.account.catalogState = "unavailable";
-  loadingIdentity.account.canCancel = false;
-  loadingIdentity.account.accountId = "";
-  loadingIdentity.account.displayName = "";
-  loadingIdentity.account.apiKeys = [];
-  loadingIdentity.account.models = [];
-  loadingIdentity.account.selectedApiKeySelectionId = "";
-  loadingIdentity.account.selectedModelSelectionId = "";
-  loadingIdentity.account.modelCatalogApiKeySelectionId = "";
-  loadingIdentity.execution = {
-    state: "unavailable",
-    defaultSource: null,
-    activeSource: null,
-    activeGeneration: "0",
-    taskCreationAvailable: false,
-    selectedModelConnectionId: "",
-    modelConnections: [],
+  const signedOut = clone(fixture);
+  signedOut.account = {
+    state: "signed_out",
+    canCancel: false,
+    accountId: "",
+    displayName: "",
     errorCode: "none",
+    safeDiagnostic: "",
   };
-  assert.doesNotThrow(() => decodeWorkbenchSnapshot(loadingIdentity));
-
-  const loggingOut = clone(fixture);
-  loggingOut.account.catalogState = "unavailable";
-  loggingOut.account.models = [];
-  loggingOut.account.modelCatalogApiKeySelectionId = "";
-  loggingOut.execution.taskCreationAvailable = false;
-  assert.doesNotThrow(() => decodeWorkbenchSnapshot(loggingOut));
+  signedOut.models.availability = "needs_authentication";
+  signedOut.models.providers[0].catalogState = "needs_authentication";
+  signedOut.models.providers[0].principalRef = "";
+  signedOut.models.providers[0].apiKeys = [];
+  signedOut.models.providers[0].models = [];
+  signedOut.models.providers[0].selectedApiKeyId = "";
+  signedOut.models.providers[0].catalogGeneration = "0";
+  signedOut.models.providers[0].sourceGeneration = "0";
+  signedOut.models.providers[0].errorCode = "authorization_unavailable";
+  signedOut.newTaskAdmission.state = "unavailable";
+  signedOut.newTaskAdmission.activeModelRef = null;
+  signedOut.newTaskAdmission.activeGeneration = "0";
+  signedOut.newTaskAdmission.activeSelectionRevision = "0";
+  signedOut.newTaskAdmission.available = false;
+  assert.doesNotThrow(() => decodeWorkbenchSnapshot(signedOut));
 
   const duplicateModel = clone(fixture);
-  duplicateModel.account.models = [
+  duplicateModel.models.providers[0].models = [
     {
-      ...fixture.account.models[0],
-      selectionId: "model-1",
+      ...fixture.models.providers[0].models[0],
+      id: "model-1",
       displayName: "One",
     },
     {
-      ...fixture.account.models[0],
-      selectionId: "model-1",
+      ...fixture.models.providers[0].models[0],
+      id: "model-1",
       displayName: "Two",
     },
   ];

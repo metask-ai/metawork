@@ -1,29 +1,39 @@
-import type { AccountView, ExecutionView } from "../../bridge/contracts.ts";
+import type { AccountView, ModelsView } from "../../bridge/contracts.ts";
+
+function metaskIsDefault(
+  models: Pick<ModelsView, "defaultSelection">,
+): boolean {
+  return (
+    models.defaultSelection === null ||
+    models.defaultSelection.sourceId.startsWith("metask:")
+  );
+}
 
 export function requiresAccountGate(
   account: Pick<AccountView, "state">,
-  execution: Pick<ExecutionView, "defaultSource">,
+  models: Pick<ModelsView, "defaultSelection">,
 ): boolean {
   return (
-    execution.defaultSource !== "model_connection" &&
+    metaskIsDefault(models) &&
     (account.state === "checking" || account.state === "authorizing")
   );
 }
 
 /**
- * An authenticated account that needs a user decision must use the Host-owned
- * account settings surface: `choosing` requires an API/model pick and `failed`
- * owns the retry action. `loading` is deliberately excluded — post-login
+ * A Metask provider that needs a user decision must use the Host-owned Models
+ * settings surface: `choosing` requires an API/model pick and `failed` owns the
+ * retry action. `loading` is deliberately excluded — post-login
  * continuation resolves it automatically, and redirecting on a transient
  * state flashes the settings page on every startup while the catalog loads.
  */
 export function requiresAccountSetup(
-  account: Pick<AccountView, "state" | "catalogState">,
-  execution: Pick<ExecutionView, "defaultSource">,
+  account: Pick<AccountView, "state">,
+  models: Pick<ModelsView, "providers" | "defaultSelection">,
 ): boolean {
+  const metask = models.providers.find((provider) => provider.id === "metask");
   return (
     account.state === "authenticated" &&
-    execution.defaultSource !== "model_connection" &&
-    (account.catalogState === "choosing" || account.catalogState === "failed")
+    metaskIsDefault(models) &&
+    (metask?.catalogState === "choosing" || metask?.catalogState === "failed")
   );
 }

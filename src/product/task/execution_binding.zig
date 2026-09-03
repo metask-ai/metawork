@@ -1,12 +1,12 @@
 //! Process-local execution authority owned by one Task attachment.
 
 const std = @import("std");
-const execution_contract = @import("metawork_product_execution_contract");
+const models_contract = @import("metawork_product_models_contract");
 
 pub const OwnedTaskExecution = struct {
     allocator: std.mem.Allocator,
     provider_id: []u8,
-    protocol: execution_contract.Protocol,
+    protocol: models_contract.Protocol,
     model: []u8,
     base_url: []u8,
     execution_generation: u64,
@@ -15,7 +15,7 @@ pub const OwnedTaskExecution = struct {
 
     pub fn clone(
         allocator: std.mem.Allocator,
-        source: execution_contract.ConfigInput,
+        source: models_contract.ConfigInput,
     ) std.mem.Allocator.Error!OwnedTaskExecution {
         const model = source.target.model;
         const base_url = source.target.base_url;
@@ -59,7 +59,7 @@ pub const OwnedTaskExecution = struct {
         return result;
     }
 
-    pub fn input(self: *const OwnedTaskExecution) execution_contract.ConfigInput {
+    pub fn input(self: *const OwnedTaskExecution) models_contract.ConfigInput {
         std.debug.assert(self.owned);
         return .{
             .target = .{

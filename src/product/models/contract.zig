@@ -1,4 +1,4 @@
-//! Product Control-owned execution value contract.
+//! Product Models value contract.
 //!
 //! This leaf owns the protocol axis, frozen execution configuration, and
 //! user-managed model-connection values. It has no runtime, Account, Agent,
@@ -14,32 +14,33 @@ pub const Limits = struct {
     pub const model_display_name_bytes: usize = 256;
     pub const base_url_bytes: usize = 2048;
     pub const credential_bytes: usize = 4096;
+    pub const principal_ref_bytes: usize = 256;
+    pub const api_key_id_bytes: usize = 128;
+    pub const api_key_name_bytes: usize = 256;
+    pub const api_key_suffix_bytes: usize = 32;
+    pub const safe_diagnostic_bytes: usize = 512;
+    pub const api_key_entries: usize = 256;
+    pub const model_entries: usize = 512;
     pub const model_connection_entries: usize = 8;
     pub const model_connection_model_entries: usize = 16;
+};
+
+pub const metask_source_id = "metask";
+pub const metask_anthropic_messages_url =
+    "https://napi.metask-ai.com/v1/messages";
+pub const metask_openai_chat_completions_url =
+    "https://napi.metask-ai.com/v1/chat/completions";
+pub const metask_gemini_base_url =
+    "https://generativelanguage.googleapis.com";
+
+pub const ModelRef = struct {
+    source_id: []const u8,
+    model_id: []const u8,
 };
 
 pub const Source = enum {
     metask,
     model_connection,
-};
-
-pub const Availability = enum {
-    unavailable,
-    ready,
-    replacing,
-};
-
-/// Stable Product Execution availability cause. Command rejection remains a
-/// separate result and Account never publishes these failures.
-pub const AvailabilityError = enum {
-    none,
-    model_connection_persistence_unavailable,
-    credential_unavailable,
-    invalid_candidate,
-    resource_exhausted,
-    schedule_persistence_unavailable,
-    schedule_persistence_failed,
-    schedule_persistence_outcome_unknown,
 };
 
 /// Exact request/response wire dialect. This is not a vendor category.
@@ -48,6 +49,138 @@ pub const Protocol = enum {
     anthropic_messages,
     openai_chat_completions,
     gemini_native,
+};
+
+pub const CatalogState = enum {
+    needs_authentication,
+    loading,
+    choosing,
+    ready,
+    failed,
+    unavailable,
+};
+
+pub const PersistenceHealth = enum {
+    ready,
+    migration_required,
+    recovery_required,
+    unavailable,
+};
+
+pub const ModelsOperation = enum {
+    idle,
+    refreshing_catalog,
+};
+
+pub const ModelsError = enum {
+    none,
+    authorization_unavailable,
+    persistence_unavailable,
+    migration_required,
+    catalog_unavailable,
+    catalog_invalid,
+    catalog_too_large,
+    no_api_keys,
+    no_models,
+    operation_in_progress,
+    local_resource_exhausted,
+};
+
+pub const ApiKeyView = struct {
+    id: []const u8,
+    name: []const u8,
+    suffix: []const u8,
+    protocol: Protocol,
+};
+
+/// Provider declarations, not MetaWork feature gates. null means unknown.
+pub const ModelCapabilities = struct {
+    image_input: ?bool = null,
+    pdf_input: ?bool = null,
+    batch: ?bool = null,
+    citations: ?bool = null,
+    code_execution: ?bool = null,
+    structured_outputs: ?bool = null,
+    thinking: struct {
+        supported: ?bool = null,
+        adaptive: ?bool = null,
+        enabled: ?bool = null,
+    } = .{},
+    effort: struct {
+        supported: ?bool = null,
+        low: ?bool = null,
+        medium: ?bool = null,
+        high: ?bool = null,
+        max: ?bool = null,
+    } = .{},
+    context_management: struct {
+        supported: ?bool = null,
+        clear_thinking_20251015: ?bool = null,
+        clear_tool_uses_20250919: ?bool = null,
+        compact_20260112: ?bool = null,
+    } = .{},
+};
+
+pub const ModelMetadata = struct {
+    max_input_tokens: ?u64 = null,
+    max_output_tokens: ?u64 = null,
+    capabilities: ModelCapabilities = .{},
+};
+
+pub const ModelMetadataProvenance = enum {
+    unknown,
+    user_declared,
+    provider_declared,
+    runtime_verified,
+};
+
+pub const ModelView = struct {
+    id: []const u8,
+    display_name: []const u8,
+    metadata: ModelMetadata = .{},
+    metadata_provenance: ModelMetadataProvenance = .provider_declared,
+};
+
+pub const ProviderView = struct {
+    id: []const u8,
+    display_name: []const u8,
+    recommended: bool,
+    catalog_state: CatalogState,
+    principal_ref: []const u8 = "",
+    api_keys: []const ApiKeyView = &.{},
+    models: []const ModelView = &.{},
+    selected_api_key_id: []const u8 = "",
+    catalog_generation: u64 = 0,
+    source_generation: u64 = 0,
+    error_code: ModelsError = .none,
+    safe_diagnostic: []const u8 = "",
+};
+
+pub const ModelsView = struct {
+    availability: CatalogState,
+    persistence_health: PersistenceHealth,
+    providers: []const ProviderView = &.{},
+    metask_selection: ?ModelRef = null,
+    metask_selection_revision: u64 = 0,
+    default_selection: ?ModelRef = null,
+    selection_revision: u64 = 0,
+    operation: ModelsOperation = .idle,
+    error_code: ModelsError = .none,
+    model_connections: []const ModelConnectionView = &.{},
+};
+
+pub const CatalogRefreshPreparation = struct {
+    attempt_id: u64,
+    principal_ref: []const u8,
+    authorization_generation: u64,
+    preferred_api_key_id: []const u8,
+    preferred_model_id: []const u8,
+    required_api_key_id: []const u8 = "",
+};
+
+pub const CatalogRefreshPrepareResult = union(enum) {
+    ready: CatalogRefreshPreparation,
+    rejected: ModelsError,
 };
 
 pub const Target = struct {
@@ -97,6 +230,12 @@ pub const ModelConnectionCredentialStatus = enum {
 pub const ModelConnectionModelView = struct {
     id: []const u8,
     display_name: []const u8 = "",
+    metadata: ModelMetadata = .{},
+    metadata_provenance: ModelMetadataProvenance = .unknown,
+    test_status: ModelConnectionTestStatus = .untested,
+    /// A successful probe for the current source authority exists. A later
+    /// failed retry updates test_status without revoking that proof.
+    ready: bool = false,
 };
 
 pub const ModelConnectionView = struct {
@@ -110,21 +249,9 @@ pub const ModelConnectionView = struct {
     enabled: bool,
     models: []const ModelConnectionModelView = &.{},
     selected_model: []const u8 = "",
-    connection_generation: u64,
-};
-
-/// Borrowed, secret-free Product Control projection. The default source is
-/// durable user intent; the active source is the process-local installed
-/// execution and may be absent independently.
-pub const ExecutionView = struct {
-    state: Availability,
-    default_source: ?Source = null,
-    active_source: ?Source = null,
-    active_generation: u64 = 0,
-    task_creation_available: bool = false,
-    selected_model_connection_id: []const u8 = "",
-    model_connections: []const ModelConnectionView = &.{},
-    error_code: AvailabilityError = .none,
+    connection_revision: u64,
+    source_generation: u64,
+    catalog_generation: u64,
 };
 
 pub const ModelConnectionSpec = struct {
@@ -138,27 +265,83 @@ pub const ModelConnectionCredentialSlot = struct {
 };
 
 pub const ModelConnectionSelectionCommand = struct {
-    connection_id: []const u8,
-    expected_connection_generation: u64,
+    source_id: []const u8,
+    expected_connection_revision: u64,
+};
+
+pub const CustomModelInput = struct {
+    id: []const u8,
+    display_name: []const u8 = "",
+    metadata: ModelMetadata = .{},
 };
 
 pub const ModelConnectionCreateCommand = struct {
     connection_id: []const u8,
     spec: ModelConnectionSpec,
     credential_slot: ModelConnectionCredentialSlot,
-    model_id: []const u8,
-    model_display_name: []const u8 = "",
+    model: CustomModelInput,
 };
 
 pub const ModelConnectionUpdateCommand = struct {
     selection: ModelConnectionSelectionCommand,
     spec: ModelConnectionSpec,
-    credential_slot: ?ModelConnectionCredentialSlot = null,
 };
 
 pub const ModelConnectionTestCommand = struct {
-    selection: ModelConnectionSelectionCommand,
-    model_id: []const u8,
+    model: ModelRef,
+    expected_connection_revision: u64,
+    expected_source_generation: u64,
+    expected_catalog_generation: u64,
+};
+
+pub const CustomModelAddCommand = struct {
+    source_id: []const u8,
+    expected_connection_revision: u64,
+    expected_catalog_generation: u64,
+    model: CustomModelInput,
+};
+
+pub const CustomModelReplaceCommand = struct {
+    selection: ModelRef,
+    expected_connection_revision: u64,
+    expected_catalog_generation: u64,
+    replacement: CustomModelInput,
+};
+
+pub const CustomModelRemoveCommand = struct {
+    selection: ModelRef,
+    expected_connection_revision: u64,
+    expected_catalog_generation: u64,
+};
+
+pub const ConfigureMetaskSelectionCommand = struct {
+    selection: ModelRef,
+    expected_metask_selection_revision: u64,
+    expected_catalog_generation: u64,
+};
+
+pub const SelectMetaskApiKeyCommand = struct {
+    source_id: []const u8,
+    expected_metask_selection_revision: u64,
+    expected_catalog_generation: u64,
+};
+
+pub const SelectDefaultCommand = struct {
+    selection: ModelRef,
+    expected_selection_revision: u64,
+    expected_source_generation: u64,
+    expected_catalog_generation: u64,
+};
+
+/// Borrowed durable default identity published by Models for Product Control
+/// reconciliation. This describes desired authority only and carries no
+/// credential or Product binding generation.
+pub const DefaultSelectionAuthority = struct {
+    selection: ModelRef,
+    source: Source,
+    source_generation: u64,
+    selection_revision: u64,
+    protocol: Protocol,
 };
 
 pub const ModelConnectionCommand = union(enum) {
@@ -166,15 +349,16 @@ pub const ModelConnectionCommand = union(enum) {
     update: ModelConnectionUpdateCommand,
     remove: ModelConnectionSelectionCommand,
     test_connection: ModelConnectionTestCommand,
-    select_default: struct {
-        selection: ModelConnectionSelectionCommand,
-        model_id: []const u8,
-    },
+    add_custom_model: CustomModelAddCommand,
+    replace_custom_model: CustomModelReplaceCommand,
+    remove_custom_model: CustomModelRemoveCommand,
 };
 
-/// Product-internal management result. Bridge adapters may map these stable
-/// execution-domain failures onto their existing wire error vocabulary.
+/// Product-internal Models management result. Bridge adapters may map these
+/// stable failures onto the Renderer wire error vocabulary.
 pub const ManagementError = enum {
+    authorization_unavailable,
+    catalog_unavailable,
     invalid_connection,
     connection_not_found,
     generation_mismatch,
@@ -183,11 +367,15 @@ pub const ManagementError = enum {
     persistence_unavailable,
     capture_unavailable,
     credential_write_failed,
-    execution_in_use,
     operation_in_progress,
     test_unavailable,
     user_cancelled,
     local_resource_exhausted,
+};
+
+pub const CatalogSelectionPrepareResult = union(enum) {
+    ready: CatalogRefreshPreparation,
+    rejected: ManagementError,
 };
 
 pub const CommandResult = struct {
@@ -229,6 +417,7 @@ pub const ValidationError = error{
     InvalidGeneration,
     InvalidBaseUrl,
     InvalidEncoding,
+    InvalidMetadata,
     InconsistentState,
     SecretExposed,
     UnsupportedProtocol,
@@ -406,8 +595,8 @@ pub const OwnedSourceCandidate = struct {
     }
 };
 
-/// Linear owned configuration transferred from a Product execution source
-/// into Product Control and then into Task-owned execution attachments.
+/// Linear resolved configuration carrying a generation assigned by its
+/// receiving owner. The provider does not choose that consumer identity.
 pub const OwnedConfig = struct {
     provider_id: OwnedBuffer,
     protocol: Protocol,
@@ -527,35 +716,58 @@ pub fn validateModelConnectionCommand(command: ModelConnectionCommand) Validatio
             try validateRequired(value.connection_id, Limits.instance_id_bytes);
             try validateModelConnectionSpec(value.spec);
             try validateRequired(value.credential_slot.id, Limits.instance_id_bytes);
-            try validateRequired(value.model_id, Limits.model_id_bytes);
-            try validateOptional(value.model_display_name, Limits.model_display_name_bytes);
+            try validateCustomModelInput(value.model);
         },
         .update => |value| {
-            try validateRequired(value.selection.connection_id, Limits.instance_id_bytes);
-            if (value.selection.expected_connection_generation == 0)
+            try validateRequired(value.selection.source_id, Limits.instance_id_bytes);
+            if (value.selection.expected_connection_revision == 0)
                 return error.InvalidGeneration;
             try validateModelConnectionSpec(value.spec);
-            if (value.credential_slot) |slot|
-                try validateRequired(slot.id, Limits.instance_id_bytes);
         },
         .remove => |value| {
-            try validateRequired(value.connection_id, Limits.instance_id_bytes);
-            if (value.expected_connection_generation == 0)
+            try validateRequired(value.source_id, Limits.instance_id_bytes);
+            if (value.expected_connection_revision == 0)
                 return error.InvalidGeneration;
         },
         .test_connection => |value| {
-            try validateRequired(value.selection.connection_id, Limits.instance_id_bytes);
-            if (value.selection.expected_connection_generation == 0)
+            try validateRequired(value.model.source_id, Limits.instance_id_bytes);
+            try validateRequired(value.model.model_id, Limits.model_id_bytes);
+            if (value.expected_connection_revision == 0 or
+                value.expected_source_generation == 0 or
+                value.expected_catalog_generation == 0)
                 return error.InvalidGeneration;
-            try validateRequired(value.model_id, Limits.model_id_bytes);
         },
-        .select_default => |value| {
-            try validateRequired(value.selection.connection_id, Limits.instance_id_bytes);
-            if (value.selection.expected_connection_generation == 0)
+        .add_custom_model => |value| {
+            try validateRequired(value.source_id, Limits.instance_id_bytes);
+            if (value.expected_connection_revision == 0 or
+                value.expected_catalog_generation == 0)
                 return error.InvalidGeneration;
-            try validateRequired(value.model_id, Limits.model_id_bytes);
+            try validateCustomModelInput(value.model);
+        },
+        .replace_custom_model => |value| {
+            try validateRequired(value.selection.source_id, Limits.instance_id_bytes);
+            try validateRequired(value.selection.model_id, Limits.model_id_bytes);
+            if (value.expected_connection_revision == 0 or
+                value.expected_catalog_generation == 0)
+                return error.InvalidGeneration;
+            try validateCustomModelInput(value.replacement);
+        },
+        .remove_custom_model => |value| {
+            try validateRequired(value.selection.source_id, Limits.instance_id_bytes);
+            try validateRequired(value.selection.model_id, Limits.model_id_bytes);
+            if (value.expected_connection_revision == 0 or
+                value.expected_catalog_generation == 0)
+                return error.InvalidGeneration;
         },
     }
+}
+
+pub fn validateCustomModelInput(model: CustomModelInput) ValidationError!void {
+    try validateRequired(model.id, Limits.model_id_bytes);
+    try validateOptional(model.display_name, Limits.model_display_name_bytes);
+    if ((model.metadata.max_input_tokens orelse 1) == 0 or
+        (model.metadata.max_output_tokens orelse 1) == 0)
+        return error.InvalidMetadata;
 }
 
 pub fn validateModelConnectionSpec(spec: ModelConnectionSpec) ValidationError!void {
@@ -634,30 +846,42 @@ pub fn validateModelConnectionView(view: ModelConnectionView) ValidationError!vo
         return error.UnsupportedProtocol;
     if (!validModelConnectionEndpoint(view.protocol, view.normalized_base_url))
         return error.InvalidBaseUrl;
-    if (view.connection_generation == 0) return error.InvalidGeneration;
-    if (view.models.len > Limits.model_connection_model_entries)
+    if (view.connection_revision == 0 or view.source_generation == 0 or
+        view.catalog_generation == 0)
+        return error.InvalidGeneration;
+    if (view.models.len == 0 or
+        view.models.len > Limits.model_connection_model_entries)
         return error.CollectionTooLarge;
-    if (view.selected_model.len != 0)
-        try validateRequired(view.selected_model, Limits.model_id_bytes);
+    try validateRequired(view.selected_model, Limits.model_id_bytes);
+    var ready_models: usize = 0;
+    var selected_test_status: ?ModelConnectionTestStatus = null;
     for (view.models, 0..) |model, index| {
-        try validateRequired(model.id, Limits.model_id_bytes);
-        try validateOptional(model.display_name, Limits.model_display_name_bytes);
+        try validateCustomModelInput(.{
+            .id = model.id,
+            .display_name = model.display_name,
+            .metadata = model.metadata,
+        });
+        if (model.ready) ready_models += 1;
+        if ((model.test_status == .connected and !model.ready) or
+            (model.ready and model.test_status == .untested))
+            return error.InconsistentState;
+        if (std.mem.eql(u8, model.id, view.selected_model))
+            selected_test_status = model.test_status;
         for (view.models[0..index]) |prior|
             if (std.mem.eql(u8, prior.id, model.id))
                 return error.InconsistentState;
     }
-    if (view.selected_model.len != 0) {
-        var matches: usize = 0;
-        for (view.models) |model| {
-            if (std.mem.eql(u8, model.id, view.selected_model)) matches += 1;
-        }
-        if (matches != 1) return error.InconsistentState;
+    var matches: usize = 0;
+    for (view.models) |model| {
+        if (std.mem.eql(u8, model.id, view.selected_model)) matches += 1;
     }
-    if (view.state == .ready and
-        (view.credential_status != .ready or !view.enabled or
-            view.selected_model.len == 0 or view.test_status == .untested))
+    if (matches != 1) return error.InconsistentState;
+    if (selected_test_status.? != view.test_status)
         return error.InconsistentState;
-    if (view.state != .ready and view.test_status == .connected)
+    if (view.state == .ready and
+        (view.credential_status != .ready or !view.enabled or ready_models == 0))
+        return error.InconsistentState;
+    if (view.state != .ready and ready_models != 0)
         return error.InconsistentState;
 }
 
@@ -675,6 +899,22 @@ pub fn validateSourceCandidateStructure(input: SourceCandidateInput) ValidationE
     try validateRequired(input.target.base_url, Limits.base_url_bytes);
     try validateOpaqueRequired(input.api_key, Limits.credential_bytes);
     if (input.source_generation == 0) return error.InvalidGeneration;
+}
+
+pub fn validateMetaskSourceCandidate(input: SourceCandidateInput) ValidationError!void {
+    try validateSourceCandidateStructure(input);
+    const prefix = @tagName(Source.metask) ++ ":";
+    if (!std.mem.startsWith(u8, input.target.provider_id, prefix) or
+        input.target.provider_id.len == prefix.len)
+        return error.InconsistentState;
+    const expected_endpoint: []const u8 = switch (input.target.protocol) {
+        .openai_responses => return error.UnsupportedProtocol,
+        .anthropic_messages => metask_anthropic_messages_url,
+        .openai_chat_completions => metask_openai_chat_completions_url,
+        .gemini_native => metask_gemini_base_url,
+    };
+    if (!std.mem.eql(u8, input.target.base_url, expected_endpoint))
+        return error.InvalidBaseUrl;
 }
 
 pub fn validateModelConnectionExecutionConfig(input: ConfigInput) ValidationError!void {
@@ -949,8 +1189,12 @@ test "model connection endpoint normalization is deterministic" {
     ));
 }
 
-test "ready model connection view requires a ready credential and selected model" {
-    const models = [_]ModelConnectionModelView{.{ .id = "gemini-2.5-flash" }};
+test "ready model connection view requires a ready credential and exact model proof" {
+    const models = [_]ModelConnectionModelView{.{
+        .id = "gemini-2.5-flash",
+        .test_status = .connected,
+        .ready = true,
+    }};
     try std.testing.expectError(error.InconsistentState, validateModelConnectionView(.{
         .id = "connection-1",
         .display_name = "Gemini",
@@ -961,7 +1205,10 @@ test "ready model connection view requires a ready credential and selected model
         .credential_status = .capture_unavailable,
         .enabled = true,
         .models = &models,
-        .connection_generation = 1,
+        .selected_model = "gemini-2.5-flash",
+        .connection_revision = 1,
+        .source_generation = 2,
+        .catalog_generation = 3,
     }));
     try validateModelConnectionView(.{
         .id = "connection-1",
@@ -974,6 +1221,8 @@ test "ready model connection view requires a ready credential and selected model
         .enabled = true,
         .models = &models,
         .selected_model = "gemini-2.5-flash",
-        .connection_generation = 1,
+        .connection_revision = 1,
+        .source_generation = 2,
+        .catalog_generation = 3,
     });
 }

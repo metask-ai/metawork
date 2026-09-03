@@ -3614,6 +3614,7 @@ test "task file store recovery quarantines the previous canonical bytes" {
         name,
         .{ .follow_symlinks = false },
     );
+    if (builtin.os.tag == .windows) quarantine.flags.nonblocking = true;
     defer quarantine.close(std.testing.io);
     var quarantine_bytes: [previous.len]u8 = undefined;
     try std.testing.expectEqual(

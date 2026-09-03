@@ -1,6 +1,6 @@
 const std = @import("std");
 const native_sdk = @import("native_sdk");
-const execution_ports = @import("product_execution_ports");
+const models_ports = @import("product_models_ports");
 const product_identity = @import("metawork_product_identity");
 
 // This exact service identity predates the Execution owner split. Keep it
@@ -8,7 +8,7 @@ const product_identity = @import("metawork_product_identity");
 // depend on Account's credential-store implementation.
 const model_connection_service = product_identity.modelConnectionCredentialService();
 
-/// Application-owned platform adapter for Product Execution credentials.
+/// Application-owned platform adapter for Product Models credentials.
 /// It owns no registry state and never exposes credential bytes to Bridge or
 /// Renderer.
 pub const Adapter = struct {
@@ -28,7 +28,7 @@ pub const Adapter = struct {
         };
     }
 
-    pub fn ports(self: *Adapter) execution_ports.CredentialVault {
+    pub fn ports(self: *Adapter) models_ports.CredentialVault {
         return .{
             .context = self,
             .generate_slot_fn = generateCredentialSlot,
@@ -45,7 +45,7 @@ pub const Adapter = struct {
 
     fn generateCredentialSlot(
         context: *anyopaque,
-        output: *[execution_ports.credential_slot_bytes]u8,
+        output: *[models_ports.credential_slot_bytes]u8,
     ) anyerror!void {
         const self: *Adapter = @ptrCast(@alignCast(context));
         try self.assertMainThread();
@@ -53,11 +53,11 @@ pub const Adapter = struct {
         defer std.crypto.secureZero(u8, &random);
         try std.Io.randomSecure(self.io, &random);
         @memcpy(
-            output[0..execution_ports.credential_slot_prefix.len],
-            execution_ports.credential_slot_prefix,
+            output[0..models_ports.credential_slot_prefix.len],
+            models_ports.credential_slot_prefix,
         );
         const hex = std.fmt.bytesToHex(random, .lower);
-        @memcpy(output[execution_ports.credential_slot_prefix.len..], &hex);
+        @memcpy(output[models_ports.credential_slot_prefix.len..], &hex);
     }
 
     fn storeCredential(

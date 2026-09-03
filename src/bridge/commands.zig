@@ -46,15 +46,18 @@ pub const choose_attachments = "metawork.attachments.choose";
 pub const release_attachment = "metawork.attachments.release";
 pub const account_begin_login = "metawork.account.beginLogin";
 pub const account_cancel_operation = "metawork.account.cancelOperation";
-pub const account_refresh_catalog = "metawork.account.refreshCatalog";
-pub const account_select_api_key = "metawork.account.selectApiKey";
-pub const account_select_model = "metawork.account.selectModel";
-pub const select_metask_default = "metawork.modelSources.selectMetaskDefault";
-pub const model_connection_create = "metawork.modelConnections.create";
-pub const model_connection_update = "metawork.modelConnections.update";
-pub const model_connection_remove = "metawork.modelConnections.remove";
-pub const model_connection_test = "metawork.modelConnections.test";
-pub const model_connection_select_default = "metawork.modelConnections.selectDefault";
+pub const models_refresh_catalog = "metawork.models.refreshCatalog";
+pub const models_select_metask_api_key = "metawork.models.selectMetaskApiKey";
+pub const models_configure_metask_selection = "metawork.models.configureMetaskSelection";
+pub const models_select_default = "metawork.models.selectDefault";
+pub const model_connection_create = "metawork.models.connections.create";
+pub const model_connection_update = "metawork.models.connections.update";
+pub const model_connection_replace_credential = "metawork.models.connections.replaceCredential";
+pub const model_connection_remove = "metawork.models.connections.remove";
+pub const model_connection_test = "metawork.models.connections.test";
+pub const custom_model_add = "metawork.models.customModels.add";
+pub const custom_model_replace = "metawork.models.customModels.replace";
+pub const custom_model_remove = "metawork.models.customModels.remove";
 pub const account_logout = "metawork.account.logout";
 pub const set_default_permission_profile = "metawork.permissions.setDefaultProfile";
 pub const create_task = "metawork.tasks.create";
@@ -121,15 +124,18 @@ pub const product = [_][]const u8{
     release_attachment,
     account_begin_login,
     account_cancel_operation,
-    account_refresh_catalog,
-    account_select_api_key,
-    account_select_model,
-    select_metask_default,
+    models_refresh_catalog,
+    models_select_metask_api_key,
+    models_configure_metask_selection,
+    models_select_default,
     model_connection_create,
     model_connection_update,
+    model_connection_replace_credential,
     model_connection_remove,
     model_connection_test,
-    model_connection_select_default,
+    custom_model_add,
+    custom_model_replace,
+    custom_model_remove,
     account_logout,
     set_default_permission_profile,
     create_task,

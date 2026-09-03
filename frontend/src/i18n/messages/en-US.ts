@@ -767,6 +767,10 @@ export const enUS = {
   "settings.general": "General",
   "settings.permissions": "Permissions",
   "settings.account": "Account",
+  "settings.models": "Models",
+  "settings.models_error": "Model configuration needs attention",
+  "settings.models_error_help":
+    "Refresh the Metask catalog or review the saved model configuration.",
   "permission.profile.approval_required": "Request approval",
   "permission.profile.approval_required.help":
     "Routine workspace edits run automatically. MetaWork asks before operations the current policy does not cover.",
@@ -814,6 +818,7 @@ export const enUS = {
     "Choose another default connection before editing or removing this one.",
   "settings.model_connection_edit_help":
     "Changing the protocol or endpoint requires another connection test. The API key is not shown or changed here.",
+  "settings.model_connection_replace_credential": "Replace API key",
   "settings.model_connection_remove_confirm":
     "Remove this connection and its stored credential? Existing tasks keep their current binding.",
   "settings.model_connection_removing": "Removing…",
@@ -887,7 +892,7 @@ export const enUS = {
     "Default changes apply only to new tasks. Existing task bindings and history remain unchanged.",
   "settings.signout_title": "Sign out on this device",
   "settings.signout_help":
-    "This clears Metask credentials from this device. Task records and workspace files are preserved; live work may need to finish first.",
+    "This clears Metask credentials from this device. New Metask model use becomes unavailable; custom models, task records, workspace files, and existing task bindings are preserved.",
   "settings.task_binding_model":
     "This task keeps its pinned execution. The current default cannot safely change its model.",
   "settings.task_model_help": "Choose the model for this task's next run.",
@@ -1052,6 +1057,8 @@ export const enUS = {
   "scheduled.occurrence.skipped": "Skipped",
   "scheduled.occurrence.rejected": "Could not start",
   "scheduled.occurrence.starting": "Starting",
+  "scheduled.binding_migration_required":
+    "This schedule uses an older model binding. Saving it will explicitly bind it to your current default model.",
   "scheduled.persistence.unavailable":
     "Durable schedules are not available on this device.",
   "scheduled.persistence.read_failed": "Saved schedules could not be read.",
@@ -1059,6 +1066,10 @@ export const enUS = {
     "Schedule data is damaged. Automatic runs are stopped to prevent duplicates.",
   "scheduled.persistence.write_failed":
     "The latest change could not be saved. Automatic runs are stopped.",
+  "scheduled.persistence.migration_failed":
+    "Saved schedules could not be upgraded. The original data was kept and automatic runs are stopped.",
+  "scheduled.persistence.migration_failed_detail":
+    "Restart MetaWork to retry the upgrade. The original schedule store will not be overwritten.",
   "scheduled.persistence.outcome_unknown":
     "MetaWork cannot confirm whether the latest change was saved. Automatic runs are stopped to prevent duplicates.",
   "scheduled.persistence.ready": "Schedule storage is ready.",

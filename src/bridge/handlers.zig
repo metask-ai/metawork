@@ -41,32 +41,103 @@ pub const WindowChromeControl = struct {
     action: []const u8,
 };
 pub const WindowChromeDisconnect = struct { generation: []const u8 };
-pub const AccountSelection = struct {
-    selectionId: []const u8,
+pub const ModelDefaultSelection = struct {
+    sourceId: []const u8,
+    modelId: []const u8,
+    expectedSelectionRevision: []const u8,
+    expectedSourceGeneration: []const u8,
     expectedCatalogGeneration: []const u8,
+};
+pub const ConfigureMetaskSelection = struct {
+    sourceId: []const u8,
+    modelId: []const u8,
+    expectedMetaskSelectionRevision: []const u8,
+    expectedCatalogGeneration: []const u8,
+};
+pub const SelectMetaskApiKey = struct {
+    sourceId: []const u8,
+    expectedMetaskSelectionRevision: []const u8,
+    expectedCatalogGeneration: []const u8,
+};
+pub const ModelCapabilities = struct {
+    imageInput: ?bool = null,
+    pdfInput: ?bool = null,
+    batch: ?bool = null,
+    citations: ?bool = null,
+    codeExecution: ?bool = null,
+    structuredOutputs: ?bool = null,
+    thinking: struct {
+        supported: ?bool = null,
+        adaptive: ?bool = null,
+        enabled: ?bool = null,
+    } = .{},
+    effort: struct {
+        supported: ?bool = null,
+        low: ?bool = null,
+        medium: ?bool = null,
+        high: ?bool = null,
+        max: ?bool = null,
+    } = .{},
+    contextManagement: struct {
+        supported: ?bool = null,
+        clearThinking20251015: ?bool = null,
+        clearToolUses20250919: ?bool = null,
+        compact20260112: ?bool = null,
+    } = .{},
+};
+pub const ModelMetadata = struct {
+    maxInputTokens: ?[]const u8 = null,
+    maxOutputTokens: ?[]const u8 = null,
+    capabilities: ModelCapabilities = .{},
+};
+pub const CustomModel = struct {
+    id: []const u8,
+    displayName: []const u8 = "",
+    metadata: ModelMetadata = .{},
+};
+pub const ModelRef = struct {
+    sourceId: []const u8,
+    modelId: []const u8,
 };
 pub const ModelConnectionCreate = struct {
     displayName: []const u8,
     protocol: []const u8,
     normalizedBaseUrl: []const u8,
-    modelId: []const u8,
-    modelDisplayName: []const u8 = "",
+    model: CustomModel,
 };
 pub const ModelConnectionUpdate = struct {
-    connectionId: []const u8,
-    expectedConnectionGeneration: []const u8,
+    sourceId: []const u8,
+    expectedConnectionRevision: []const u8,
     displayName: []const u8,
     protocol: []const u8,
     normalizedBaseUrl: []const u8,
 };
 pub const ModelConnectionSelection = struct {
-    connectionId: []const u8,
-    expectedConnectionGeneration: []const u8,
+    sourceId: []const u8,
+    expectedConnectionRevision: []const u8,
 };
-pub const ModelConnectionModelSelection = struct {
-    connectionId: []const u8,
-    expectedConnectionGeneration: []const u8,
-    modelId: []const u8,
+pub const ModelConnectionTest = struct {
+    model: ModelRef,
+    expectedConnectionRevision: []const u8,
+    expectedSourceGeneration: []const u8,
+    expectedCatalogGeneration: []const u8,
+};
+pub const CustomModelAdd = struct {
+    sourceId: []const u8,
+    expectedConnectionRevision: []const u8,
+    expectedCatalogGeneration: []const u8,
+    model: CustomModel,
+};
+pub const CustomModelReplace = struct {
+    selection: ModelRef,
+    expectedConnectionRevision: []const u8,
+    expectedCatalogGeneration: []const u8,
+    replacement: CustomModel,
+};
+pub const CustomModelRemove = struct {
+    selection: ModelRef,
+    expectedConnectionRevision: []const u8,
+    expectedCatalogGeneration: []const u8,
 };
 pub const WorkspaceIdentity = struct {
     workspaceId: []const u8,
@@ -193,8 +264,13 @@ pub const TaskRun = struct {
 pub const TaskModelSelection = struct {
     taskId: []const u8,
     expectedModel: []const u8,
+    expectedExecutionGeneration: []const u8,
+    targetModelRef: struct {
+        sourceId: []const u8,
+        modelId: []const u8,
+    },
+    expectedSourceGeneration: []const u8,
     expectedCatalogGeneration: []const u8,
-    selectionId: []const u8,
 };
 pub const TaskRestore = struct {
     taskId: []const u8,
@@ -256,7 +332,7 @@ pub const TaskDelete = struct { taskId: []const u8 };
 pub const PersistenceRecovery = struct { expectedRevision: []const u8 };
 pub const ScheduledTaskMutation = struct {
     title: []const u8,
-    expectedExecutionGeneration: []const u8,
+    binding: ScheduledTaskBinding,
     permissionProfile: []const u8,
     input: std.json.Value,
     recurrence: std.json.Value,
@@ -265,10 +341,16 @@ pub const ScheduledTaskUpdate = struct {
     scheduledTaskId: []const u8,
     expectedEpoch: []const u8,
     title: []const u8,
-    expectedExecutionGeneration: []const u8,
+    binding: ScheduledTaskBinding,
     permissionProfile: []const u8,
     input: std.json.Value,
     recurrence: std.json.Value,
+};
+pub const ScheduledTaskBinding = struct {
+    modelRef: ModelRef,
+    sourceGeneration: []const u8,
+    selectionRevision: []const u8,
+    protocol: []const u8,
 };
 pub const ScheduledTaskIdentity = struct {
     scheduledTaskId: []const u8,
@@ -657,6 +739,19 @@ test "Scheduled Task recurrence is exact and uses wire integers" {
 }
 
 test "Scheduled Task payload rejects Workspace and Skill configuration" {
+    var current = try parsePayload(ScheduledTaskMutation,
+        \\{"title":"Current","binding":{"modelRef":{"sourceId":"metask:key-1","modelId":"model-1"},"sourceGeneration":"7","selectionRevision":"9","protocol":"anthropic_messages"},"permissionProfile":"approval_required","input":{"kind":"text","text":"inspect"},"recurrence":{"kind":"once","atUnixSeconds":"2"}}
+    );
+    defer current.deinit();
+    try std.testing.expectEqualStrings(
+        "metask:key-1",
+        current.value.binding.modelRef.sourceId,
+    );
+    try std.testing.expectEqualStrings("model-1", current.value.binding.modelRef.modelId);
+    try std.testing.expectEqualStrings("7", current.value.binding.sourceGeneration);
+    try std.testing.expectEqualStrings("9", current.value.binding.selectionRevision);
+    try std.testing.expectEqualStrings("anthropic_messages", current.value.binding.protocol);
+
     try std.testing.expectError(
         error.InvalidBridgePayload,
         parsePayload(ScheduledTaskMutation,

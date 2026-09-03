@@ -2,7 +2,7 @@ const fixture = @import("lifecycle_fixture");
 const std = fixture.std;
 const lifecycle = fixture.lifecycle;
 const product_control = fixture.product_control;
-const execution_contract = fixture.execution_contract;
+const models_contract = fixture.models_contract;
 const product_skill = fixture.product_skill;
 const product_task = fixture.product_task;
 const account_contract = fixture.account_contract;
@@ -19,6 +19,12 @@ const productControlTaskInput = fixture.productControlTaskInput;
 const waitControlSnapshot = fixture.waitProductControlSnapshot;
 const installControlExecution = fixture.installProductControlExecution;
 const installControlExecutionGeneration = fixture.installProductControlExecutionGeneration;
+
+fn scheduledBinding(
+    workbench: *product_control.Runtime,
+) product_control.ScheduledTaskBindingInput {
+    return product_control.TestSupport.scheduledBinding(workbench);
+}
 
 const ShutdownContext = struct {
     workbench: *product_control.Runtime,
@@ -196,39 +202,34 @@ fn expectFakeSessionModel(index: usize, expected: []const u8) !void {
 }
 
 fn installTwoModelCatalog(workbench: *product_control.Runtime) void {
-    const api_keys = [_]account_contract.ApiKeyView{.{
-        .id = "key-1",
-        .name = "Fixture API",
-        .suffix = "ture",
-        .protocol = .anthropic_messages,
-    }};
-    const models = [_]account_contract.ModelView{
+    const models = [_]models_contract.ModelView{
         .{ .id = "fixture-model", .display_name = "Fixture model" },
         .{ .id = "fixture-model-2", .display_name = "Fixture model 2" },
     };
-    workbench.commitAccountFactNoFail(.{
-        .kind = .catalog_changed,
-        .view = .{
-            .state = .authenticated,
-            .catalog_state = .ready,
-            .account_id = "account-1",
-            .display_name = "Fixture User",
-            .api_keys = &api_keys,
-            .models = &models,
-            .selected_api_key_id = "key-1",
-            .selected_model = "fixture-model",
-            .model_catalog_api_key_id = "key-1",
-            .catalog_generation = 2,
+    product_control.TestSupport.replaceMetaskCatalog(
+        workbench,
+        &models,
+        "fixture-model",
+    ) catch unreachable;
+}
+
+fn taskModelSelectionInput(
+    workbench: *product_control.Runtime,
+    expected_model: []const u8,
+    expected_execution_generation: u64,
+    target_model: []const u8,
+) product_control.TaskModelSelectionInput {
+    const models = workbench.modelsView();
+    return .{
+        .expected_model = expected_model,
+        .expected_execution_generation = expected_execution_generation,
+        .target = .{
+            .source_id = models.metask_selection.?.source_id,
+            .model_id = target_model,
         },
-        .authority = .{
-            .account_id = "account-1",
-            .api_key_id = "key-1",
-            .model_id = "fixture-model",
-            .protocol = .anthropic_messages,
-            .source_generation = 1,
-        },
-    });
-    workbench.finishAccountCommitNoFail();
+        .expected_source_generation = models.providers[0].source_generation,
+        .expected_catalog_generation = models.providers[0].catalog_generation,
+    };
 }
 
 fn waitCatalogReady(
@@ -1832,7 +1833,7 @@ const TestScheduleSupport = struct {
     }
 };
 
-test "retired Schedule data leaves Account ready and Execution unavailable as a valid snapshot" {
+test "retired Schedule data leaves Account ready and New Task admission unavailable" {
     fake_core.reset();
     const runtime = try createTestComposition(.{
         .worker_count = 1,
@@ -1864,51 +1865,20 @@ test "retired Schedule data leaves Account ready and Execution unavailable as a 
     );
     defer workbench.deinit();
 
-    const api_keys = [_]account_contract.ApiKeyView{.{
-        .id = "key-1",
-        .name = "Primary",
-        .suffix = "1234",
-        .protocol = .anthropic_messages,
-    }};
-    const models = [_]account_contract.ModelView{.{
-        .id = "fixture-model",
-        .display_name = "Fixture model",
-    }};
+    try product_control.TestSupport.prepareMetaskDefault(&workbench, 1);
     try workbench.beginExecutionReplacement();
-    workbench.commitAccountFactNoFail(.{
-        .kind = .source_authority_changed,
-        .view = .{
-            .state = .authenticated,
-            .catalog_state = .ready,
-            .account_id = "account-1",
-            .display_name = "Metask User",
-            .api_keys = &api_keys,
-            .models = &models,
-            .selected_api_key_id = "key-1",
-            .selected_model = "fixture-model",
-            .model_catalog_api_key_id = "key-1",
-            .catalog_generation = 1,
-        },
-        .authority = .{
-            .account_id = "account-1",
-            .api_key_id = "key-1",
-            .model_id = "fixture-model",
-            .protocol = .anthropic_messages,
-            .source_generation = 1,
-        },
-    });
-    var execution = try execution_contract.OwnedConfig.initOwned(
+    var execution = try models_contract.OwnedConfig.initOwned(
         std.testing.allocator,
         .metask,
         .anthropic_messages,
         try std.testing.allocator.dupe(u8, "fixture-model"),
         try std.testing.allocator.dupe(
             u8,
-            account_contract.metask_anthropic_messages_url,
+            models_contract.metask_anthropic_messages_url,
         ),
         1,
         try std.testing.allocator.dupe(u8, "fixture-secret"),
-        "metask:key-1",
+        "key-1",
     );
     var execution_owned = true;
     defer if (execution_owned) execution.deinit();
@@ -1920,11 +1890,10 @@ test "retired Schedule data leaves Account ready and Execution unavailable as a 
     workbench.finishAccountCommitNoFail();
 
     try account_contract.validateView(workbench.accountView());
-    const execution_view = workbench.executionView();
-    try std.testing.expect(execution_view.state == .unavailable);
-    try std.testing.expect(execution_view.default_source.? == .metask);
-    try std.testing.expect(execution_view.active_source == null);
-    try std.testing.expect(!execution_view.task_creation_available);
+    const admission = workbench.newTaskAdmissionView();
+    try std.testing.expect(admission.state == .unavailable);
+    try std.testing.expect(admission.active_model_ref == null);
+    try std.testing.expect(!admission.available);
 
     var snapshot_storage: [128 * 1024]u8 = undefined;
     const snapshot = try workbench.writeSnapshot(&snapshot_storage);
@@ -1936,7 +1905,7 @@ test "retired Schedule data leaves Account ready and Execution unavailable as a 
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
-        "\"execution\":{\"state\":\"unavailable\",\"defaultSource\":\"metask\",\"activeSource\":null,\"activeGeneration\":\"0\",\"taskCreationAvailable\":false",
+        "\"newTaskAdmission\":{\"available\":false,\"reason\":\"none\",\"activeModelRef\":null,\"activeGeneration\":\"0\",\"activeSelectionRevision\":\"0\",\"state\":\"unavailable\"}",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
@@ -1958,10 +1927,13 @@ test "retired Schedule data leaves Account ready and Execution unavailable as a 
     try workbench.beginExecutionReplacement();
     try workbench.prepareExecutionInstall(execution.input());
     workbench.installExecutionNoFail(&execution);
+    workbench.execution_state.recordDefaultAuthorityNoFail(
+        workbench.model_connections.defaultAuthority().?,
+    );
     execution_owned = false;
     workbench.endExecutionReplacementNoFail();
     workbench.finishAccountCommitNoFail();
-    try std.testing.expect(workbench.executionView().task_creation_available);
+    try std.testing.expect(workbench.newTaskAdmissionView().available);
 }
 
 test "scheduled noninteractive permission request automatically stops the Product Run" {
@@ -2014,7 +1986,7 @@ test "scheduled noninteractive permission request automatically stops the Produc
 
     const schedule_id = try workbench.createScheduledTask(.{
         .title = "Permission boundary",
-        .expected_execution_generation = 1,
+        .binding = scheduledBinding(&workbench),
         .permission_profile = .approval_required,
         .input = "Perform an operation requiring permission",
         .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
@@ -2102,7 +2074,7 @@ test "scheduled admission rejects an unconfigured Task persistence capability" {
 
     const schedule_id = try workbench.createScheduledTask(.{
         .title = "Required durability",
-        .expected_execution_generation = 1,
+        .binding = scheduledBinding(&workbench),
         .permission_profile = .approval_required,
         .input = "Do not run without durable Task history",
         .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
@@ -2175,7 +2147,7 @@ test "scheduled durable admission failure does not block an interactive Product 
 
     const schedule_id = try workbench.createScheduledTask(.{
         .title = "Durable automatic run",
-        .expected_execution_generation = 1,
+        .binding = scheduledBinding(&workbench),
         .permission_profile = .approval_required,
         .input = "Run only after durable admission",
         .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
@@ -2697,7 +2669,15 @@ test "Idle Task model persistence failure keeps the selected model and Session u
         const projection_before = workbench.projectionBytesForTest();
         try expectFakeSessionModel(0, "fixture-model");
         persistence.result = .failed;
-        try workbench.selectTaskModel(task_id, before.model, 2, "fixture-model-2");
+        try workbench.selectTaskModel(
+            task_id,
+            taskModelSelectionInput(
+                &workbench,
+                before.model,
+                before.generation,
+                "fixture-model-2",
+            ),
+        );
         const after = try workbench.taskExecutionIdentity(task_id);
         try std.testing.expectEqualStrings("fixture-model-2", after.model);
         try expectFakeSessionModel(0, "fixture-model-2");
@@ -2729,7 +2709,15 @@ test "Idle Task model persistence failure keeps the selected model and Session u
         const before = try workbench.taskExecutionIdentity(task_id);
         const projection_before = workbench.projectionBytesForTest();
         persistence.result = .outcome_unknown;
-        try workbench.selectTaskModel(task_id, before.model, 2, "fixture-model-2");
+        try workbench.selectTaskModel(
+            task_id,
+            taskModelSelectionInput(
+                &workbench,
+                before.model,
+                before.generation,
+                "fixture-model-2",
+            ),
+        );
         const after = try workbench.taskExecutionIdentity(task_id);
         try std.testing.expectEqualStrings("fixture-model-2", after.model);
         try expectFakeSessionModel(0, "fixture-model-2");
@@ -3012,7 +3000,7 @@ test "Text schedule updates preserve historical Task profiles and create fresh a
 
     const default_schedule = try workbench.createScheduledTask(.{
         .title = "Independent brief",
-        .expected_execution_generation = 1,
+        .binding = scheduledBinding(&workbench),
         .permission_profile = .full_access,
         .input = "Summarize current work",
         .recurrence = .{ .interval = .{
@@ -3025,7 +3013,7 @@ test "Text schedule updates preserve historical Task profiles and create fresh a
         error.InvalidScheduledTaskInput,
         workbench.createScheduledTask(.{
             .title = "Empty schedule input",
-            .expected_execution_generation = 1,
+            .binding = scheduledBinding(&workbench),
             .permission_profile = .approval_required,
             .input = "",
             .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
@@ -3047,7 +3035,7 @@ test "Text schedule updates preserve historical Task profiles and create fresh a
 
     try workbench.updateScheduledTask(default_schedule, 1, .{
         .title = "Independent brief",
-        .expected_execution_generation = 1,
+        .binding = scheduledBinding(&workbench),
         .permission_profile = .approval_required,
         .input = "Summarize current work",
         .recurrence = .{ .interval = .{
@@ -3174,7 +3162,7 @@ test "schedule rejection retains the automatic Task created before a full Run qu
 
     const schedule_id = try workbench.createScheduledTask(.{
         .title = "Queued brief",
-        .expected_execution_generation = 1,
+        .binding = scheduledBinding(&workbench),
         .permission_profile = .approval_required,
         .input = "Summarize current work",
         .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },

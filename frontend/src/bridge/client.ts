@@ -19,6 +19,7 @@ import type {
   WorkspaceChoice,
   FilePreview,
   FileChangeDiffResult,
+  ModelMetadata,
 } from "./contracts.ts";
 import {
   assertCancelAccepted,
@@ -512,33 +513,42 @@ export class BridgeClient {
     );
   }
 
-  async refreshAccountCatalog() {
-    return decodeAccountCommandResult(
-      await this.invoke(commands.accountRefreshCatalog, {}),
-    );
-  }
-
-  async selectApiKey(selectionId: string, expectedCatalogGeneration: string) {
-    return decodeAccountCommandResult(
-      await this.invoke(commands.accountSelectApiKey, {
-        selectionId,
-        expectedCatalogGeneration,
-      }),
-    );
-  }
-
-  async selectModel(selectionId: string, expectedCatalogGeneration: string) {
-    return decodeAccountCommandResult(
-      await this.invoke(commands.accountSelectModel, {
-        selectionId,
-        expectedCatalogGeneration,
-      }),
-    );
-  }
-
-  async selectMetaskDefault() {
+  async refreshModelsCatalog() {
     return decodeExecutionCommandResult(
-      await this.invoke(commands.selectMetaskDefault, {}),
+      await this.invoke(commands.modelsRefreshCatalog, {}),
+    );
+  }
+
+  async selectMetaskApiKey(input: {
+    sourceId: string;
+    expectedMetaskSelectionRevision: string;
+    expectedCatalogGeneration: string;
+  }) {
+    return decodeExecutionCommandResult(
+      await this.invoke(commands.selectMetaskApiKey, input),
+    );
+  }
+
+  async configureMetaskSelection(input: {
+    sourceId: string;
+    modelId: string;
+    expectedMetaskSelectionRevision: string;
+    expectedCatalogGeneration: string;
+  }) {
+    return decodeExecutionCommandResult(
+      await this.invoke(commands.configureMetaskSelection, input),
+    );
+  }
+
+  async selectModelsDefault(input: {
+    sourceId: string;
+    modelId: string;
+    expectedSelectionRevision: string;
+    expectedSourceGeneration: string;
+    expectedCatalogGeneration: string;
+  }) {
+    return decodeExecutionCommandResult(
+      await this.invoke(commands.selectModelsDefault, input),
     );
   }
 
@@ -550,13 +560,18 @@ export class BridgeClient {
     modelDisplayName?: string;
   }) {
     return decodeExecutionCommandResult(
-      await this.invoke(commands.modelConnectionCreate, input),
+      await this.invoke(commands.modelConnectionCreate, {
+        displayName: input.displayName,
+        protocol: input.protocol,
+        normalizedBaseUrl: input.normalizedBaseUrl,
+        model: { id: input.modelId, displayName: input.modelDisplayName ?? "" },
+      }),
     );
   }
 
   async updateModelConnection(input: {
-    connectionId: string;
-    expectedConnectionGeneration: string;
+    sourceId: string;
+    expectedConnectionRevision: string;
     displayName: string;
     protocol: Protocol;
     normalizedBaseUrl: string;
@@ -566,43 +581,76 @@ export class BridgeClient {
     );
   }
 
+  async replaceModelConnectionCredential(
+    sourceId: string,
+    expectedConnectionRevision: string,
+  ) {
+    return decodeExecutionCommandResult(
+      await this.invoke(commands.modelConnectionReplaceCredential, {
+        sourceId,
+        expectedConnectionRevision,
+      }),
+    );
+  }
+
   async removeModelConnection(
-    connectionId: string,
-    expectedConnectionGeneration: string,
+    sourceId: string,
+    expectedConnectionRevision: string,
   ) {
     return decodeExecutionCommandResult(
       await this.invoke(commands.modelConnectionRemove, {
-        connectionId,
-        expectedConnectionGeneration,
+        sourceId,
+        expectedConnectionRevision,
       }),
     );
   }
 
   async testModelConnection(
-    connectionId: string,
-    expectedConnectionGeneration: string,
+    sourceId: string,
+    expectedConnectionRevision: string,
     modelId: string,
+    expectedSourceGeneration: string,
+    expectedCatalogGeneration: string,
   ) {
     return decodeExecutionCommandResult(
       await this.invoke(commands.modelConnectionTest, {
-        connectionId,
-        expectedConnectionGeneration,
-        modelId,
+        model: { sourceId, modelId },
+        expectedConnectionRevision,
+        expectedSourceGeneration,
+        expectedCatalogGeneration,
       }),
     );
   }
 
-  async selectDefaultModelConnection(
-    connectionId: string,
-    expectedConnectionGeneration: string,
-    modelId: string,
-  ) {
+  async addCustomModel(input: {
+    sourceId: string;
+    expectedConnectionRevision: string;
+    expectedCatalogGeneration: string;
+    model: { id: string; displayName?: string; metadata?: ModelMetadata };
+  }) {
     return decodeExecutionCommandResult(
-      await this.invoke(commands.modelConnectionSelectDefault, {
-        connectionId,
-        expectedConnectionGeneration,
-        modelId,
-      }),
+      await this.invoke(commands.customModelAdd, input),
+    );
+  }
+
+  async replaceCustomModel(input: {
+    selection: { sourceId: string; modelId: string };
+    expectedConnectionRevision: string;
+    expectedCatalogGeneration: string;
+    replacement: { id: string; displayName?: string; metadata?: ModelMetadata };
+  }) {
+    return decodeExecutionCommandResult(
+      await this.invoke(commands.customModelReplace, input),
+    );
+  }
+
+  async removeCustomModel(input: {
+    selection: { sourceId: string; modelId: string };
+    expectedConnectionRevision: string;
+    expectedCatalogGeneration: string;
+  }) {
+    return decodeExecutionCommandResult(
+      await this.invoke(commands.customModelRemove, input),
     );
   }
 
@@ -663,15 +711,19 @@ export class BridgeClient {
   async selectTaskModel(
     taskId: string,
     expectedModel: string,
+    expectedExecutionGeneration: string,
+    targetModelRef: { sourceId: string; modelId: string },
+    expectedSourceGeneration: string,
     expectedCatalogGeneration: string,
-    selectionId: string,
   ) {
     return decodeTaskModelSelectionResult(
       await this.invoke(commands.selectTaskModel, {
         taskId,
         expectedModel,
+        expectedExecutionGeneration,
+        targetModelRef,
+        expectedSourceGeneration,
         expectedCatalogGeneration,
-        selectionId,
       }),
       taskId,
     );

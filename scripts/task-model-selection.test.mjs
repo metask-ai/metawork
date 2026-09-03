@@ -19,35 +19,39 @@ test.after(async () => {
   await vite.close();
 });
 
-function account(overrides = {}) {
+function models(providerOverrides = {}) {
   return {
-    state: "authenticated",
-    catalogState: "ready",
-    apiKeys: [
+    metaskSelection: { sourceId: "metask:key-1", modelId: "gpt-5" },
+    selectionRevision: "11",
+    providers: [
       {
-        selectionId: "key-1",
-        name: "Primary",
-        suffix: "1234",
-        protocol: "openai_chat_completions",
+        id: "metask",
+        catalogState: "ready",
+        apiKeys: [
+          {
+            id: "key-1",
+            name: "Primary",
+            suffix: "1234",
+            protocol: "openai_chat_completions",
+          },
+        ],
+        models: [{ id: "gpt-5", displayName: "GPT-5" }],
+        selectedApiKeyId: "key-1",
+        catalogGeneration: "9",
+        ...providerOverrides,
       },
     ],
-    models: [{ selectionId: "gpt-5", displayName: "GPT-5" }],
-    selectedApiKeySelectionId: "key-1",
-    catalogGeneration: "9",
-    ...overrides,
   };
 }
 
-function execution(overrides = {}) {
+function admission(overrides = {}) {
   return {
-    state: "ready",
-    defaultSource: "metask",
-    activeSource: "metask",
+    available: true,
+    reason: "none",
+    activeModelRef: { sourceId: "metask:key-1", modelId: "gpt-5" },
     activeGeneration: "7",
-    taskCreationAvailable: true,
-    selectedModelConnectionId: "",
-    modelConnections: [],
-    errorCode: "none",
+    activeSelectionRevision: "11",
+    state: "ready",
     ...overrides,
   };
 }
@@ -64,7 +68,7 @@ function task(overrides = {}) {
 }
 
 test("exact Metask authority can replace a model removed from the current catalog", () => {
-  assert.deepEqual(taskModelSelectionPolicy(account(), execution(), task()), {
+  assert.deepEqual(taskModelSelectionPolicy(models(), admission(), task()), {
     authorityExact: true,
     catalogUsable: true,
   });
@@ -73,45 +77,61 @@ test("exact Metask authority can replace a model removed from the current catalo
 test("catalog loading preserves authority but disables selection", () => {
   assert.deepEqual(
     taskModelSelectionPolicy(
-      account({ catalogState: "loading" }),
-      execution(),
+      models({ catalogState: "loading" }),
+      admission(),
       task(),
     ),
     { authorityExact: true, catalogUsable: false },
   );
 });
 
-test("credential generation, protocol, and execution source are exact", () => {
+test("generation, protocol, and installed source are exact", () => {
   assert.equal(
     taskModelSelectionPolicy(
-      account(),
-      execution(),
+      models(),
+      admission(),
       task({ executionGeneration: "6" }),
     ).authorityExact,
     false,
   );
   assert.equal(
     taskModelSelectionPolicy(
-      account(),
-      execution(),
+      models(),
+      admission(),
       task({ protocol: "gemini_native" }),
     ).authorityExact,
     false,
   );
   assert.equal(
     taskModelSelectionPolicy(
-      account(),
-      execution({ activeSource: "model_connection" }),
+      models(),
+      admission({
+        activeModelRef: { sourceId: "connection-1", modelId: "gpt-5" },
+      }),
       task(),
     ).authorityExact,
     false,
   );
   assert.equal(
-    taskModelSelectionPolicy(
-      account(),
-      execution({ taskCreationAvailable: false }),
-      task(),
-    ).authorityExact,
+    taskModelSelectionPolicy(models(), admission({ available: false }), task())
+      .authorityExact,
     false,
+  );
+});
+
+test("Metask provider authorization loss disables selection without consulting Account", () => {
+  assert.deepEqual(
+    taskModelSelectionPolicy(
+      models({
+        catalogState: "needs_authentication",
+        apiKeys: [],
+        models: [],
+        selectedApiKeyId: "",
+        catalogGeneration: "0",
+      }),
+      admission(),
+      task(),
+    ),
+    { authorityExact: false, catalogUsable: false },
   );
 });

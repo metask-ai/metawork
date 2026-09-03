@@ -3,6 +3,7 @@
 const std = @import("std");
 const secure_input = @import("../secure_input.zig");
 const startup_window = @import("../system_webview_startup_window.zig");
+const windows_uia = @import("windows_uia.zig");
 
 pub const Result = union(enum) { submitted: usize, cancelled };
 
@@ -285,6 +286,7 @@ fn createDialog(
         dpi,
         instance,
     );
+    try windows_uia.install(dialog.edit);
     dialog.error_label = try child(
         dialog.window,
         staticClass(),
@@ -465,6 +467,7 @@ fn finishCancelled(dialog: *Dialog) void {
 
 fn cleanupModal(root: HWND, owner_was_enabled: bool, dialog: *Dialog) void {
     if (dialog.edit) |edit| _ = SetWindowTextW(edit, emptyWide());
+    if (dialog.edit) |edit| windows_uia.uninstall(edit);
     if (owner_was_enabled) _ = EnableWindow(root, 1);
     if (dialog.window) |window| {
         if (IsWindow(window) != 0) _ = DestroyWindow(window);

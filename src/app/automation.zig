@@ -18,6 +18,10 @@ pub const Adapter = struct {
         return self.runtime.active();
     }
 
+    pub fn bridgeHarnessActive(self: *const Adapter) bool {
+        return self.runtime.bridgeHarnessActive();
+    }
+
     pub fn productDeliveryTraceEnabled(self: *const Adapter) bool {
         return self.active();
     }
@@ -70,7 +74,7 @@ pub const Adapter = struct {
 
     fn activeCallback(context: ?*anyopaque) bool {
         const self: *Adapter = @ptrCast(@alignCast(context.?));
-        return self.active();
+        return self.bridgeHarnessActive();
     }
 
     fn workspaceRootCallback(context: ?*anyopaque) ?[]const u8 {

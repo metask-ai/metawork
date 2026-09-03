@@ -35,6 +35,24 @@ function assertNoImports(files, forbidden) {
   }
 }
 
+function moduleImportEdges(buildSource) {
+  return [
+    ...buildSource.matchAll(
+      /\b([A-Za-z_]\w*)\.addImport\(\s*"([^"]+)"\s*,\s*([A-Za-z_]\w*)\s*\)/g,
+    ),
+  ].map((match) => ({ owner: match[1], name: match[2], target: match[3] }));
+}
+
+function assertNoModuleTargets(buildSource, owners, forbiddenTargets) {
+  for (const edge of moduleImportEdges(buildSource)) {
+    if (!owners.includes(edge.owner) || !forbiddenTargets.includes(edge.target))
+      continue;
+    assert.fail(
+      `${edge.owner} imports forbidden build module ${edge.target} as ${edge.name}`,
+    );
+  }
+}
+
 function externSymbols(source, libraries) {
   const libraryPattern = libraries.join("|");
   return [
@@ -142,9 +160,10 @@ test("the root test entry discovers Node tests and reaches the Native graph", ()
   assert.match(runner, /nativeCli, "test", "\."/);
 });
 
-test("Product execution identity has one protocol axis and no ProviderKind", () => {
+test("Product Models contract has one protocol axis and no ProviderKind", () => {
   const productProtocolOwners = [
-    ...zigFiles("src/product/execution/"),
+    "src/product/models.zig",
+    ...zigFiles("src/product/models/"),
     ...zigFiles("src/product/account/"),
     ...zigFiles("src/product/control/"),
     ...zigFiles("src/product/task/"),
@@ -170,9 +189,9 @@ test("Product execution identity has one protocol axis and no ProviderKind", () 
     );
   }
 
-  const executionContract = read("src/product/execution/contract.zig");
+  const modelsContract = read("src/product/models/contract.zig");
   assert.match(
-    executionContract,
+    modelsContract,
     /pub const Protocol = enum \{[\s\S]*openai_responses,[\s\S]*anthropic_messages,[\s\S]*openai_chat_completions,[\s\S]*gemini_native,[\s\S]*\};/u,
   );
   assert.doesNotMatch(
@@ -181,15 +200,21 @@ test("Product execution identity has one protocol axis and no ProviderKind", () 
   );
   assert.match(
     read("src/product/task/state.zig"),
-    /pub const Protocol = execution_contract\.Protocol;/u,
+    /pub const Protocol = models_contract\.Protocol;/u,
   );
   assert.match(
     read("src/product/schedule/state.zig"),
-    /pub const Protocol = execution_contract\.Protocol;/u,
+    /pub const Protocol = models_contract\.Protocol;/u,
   );
   assertNoImports(
     [...zigFiles("src/product/task/"), ...zigFiles("src/product/schedule/")],
-    ["metawork_account_contract"],
+    [
+      "metawork_account_contract",
+      "metawork_product_models",
+      "product_models_runtime",
+      "product_models_ports",
+      "product_models_connections",
+    ],
   );
   assert.doesNotMatch(
     read("src/product/task/state.zig"),
@@ -206,7 +231,7 @@ test("Product maps admitted protocols to Agent at one exhaustive boundary", () =
   const adapterPath = "src/product/agent_protocol_adapter.zig";
   const adapter = read(adapterPath);
   const consumers = [
-    "src/app/execution_coordinator.zig",
+    "src/app/models_coordinator.zig",
     "src/product/task/execution.zig",
     "src/product/task/recovery_job.zig",
     "src/product/task/runtime.zig",
@@ -215,7 +240,7 @@ test("Product maps admitted protocols to Agent at one exhaustive boundary", () =
   assert.match(build, /src\/product\/agent_protocol_adapter\.zig/);
   assert.match(build, /product_agent_protocol_adapter/);
   assert.match(adapter, /@import\("metawork_agent"\)/);
-  assert.match(adapter, /@import\("metawork_product_execution_contract"\)/);
+  assert.match(adapter, /@import\("metawork_product_models_contract"\)/);
   assert.match(
     adapter,
     /return switch \(protocol\) \{[\s\S]*\.openai_responses => \.openai_responses,[\s\S]*\.openai_chat_completions => \.openai_chat_completions,[\s\S]*\.anthropic_messages => \.anthropic_messages,[\s\S]*\.gemini_native => \.gemini_native,[\s\S]*\};/,
@@ -248,44 +273,72 @@ test("Product maps admitted protocols to Agent at one exhaustive boundary", () =
   );
   assertNoImports(
     ["src/agent.zig", ...zigFiles("src/agent/")],
-    ["metawork_product_execution_contract", "product_agent_protocol_adapter"],
+    [
+      "metawork_product_models",
+      "metawork_product_models_contract",
+      "product_agent_protocol_adapter",
+    ],
   );
 });
 
-test("Product Execution owns model connections independently of Account", () => {
-  const executionContract = read("src/product/execution/contract.zig");
-  const executionRuntime = read("src/product/execution/runtime.zig");
-  const executionRegistry = read("src/product/execution/model_connections.zig");
+test("Product Models owns model connections independently of Account", () => {
+  const build = read("build.zig");
+  const modelsRoot = read("src/product/models.zig");
+  const modelsContract = read("src/product/models/contract.zig");
+  const modelsRuntime = read("src/product/models/runtime.zig");
+  const modelsRegistry = read("src/product/models/connections.zig");
   const accountContract = read("src/product/account/contract.zig");
   const accountRuntime = read("src/product/account/runtime.zig");
   const accountPorts = read("src/product/account/ports.zig");
   const accountBinding = read("src/app/account_platform_binding.zig");
-  const executionBinding = read("src/app/execution_platform_binding.zig");
-  const coordinator = read("src/app/execution_coordinator.zig");
+  const modelsBinding = read("src/app/models_platform_binding.zig");
+  const modelConnectionHost = read("src/app/model_connection_host.zig");
+  const modelsCoordinator = read("src/app/models_coordinator.zig");
   const control = read("src/product/control/runtime.zig");
   const app = read("src/app.zig");
+  const windowsBringup = read("scripts/run-windows-bringup.mjs");
   const identity = read("src/product_identity.zig");
 
   assertNoImports(
     [
-      "src/product/execution/contract.zig",
-      "src/product/execution/model_connections.zig",
-      "src/product/execution/ports.zig",
-      "src/product/execution/runtime.zig",
+      "src/product/models.zig",
+      "src/product/models/contract.zig",
+      "src/product/models/connections.zig",
+      "src/product/models/ports.zig",
+      "src/product/models/runtime.zig",
+      "src/product/models/metask.zig",
     ],
     [
       "metawork_account_contract",
       "metawork_account",
       "metawork_product_control",
+      "metawork_product_task",
+      "metawork_product_schedule",
       "metawork_app",
       "metawork_bridge",
+      "metawork_agent",
     ],
   );
-  assert.match(executionContract, /pub const ModelConnectionCommand = union/);
-  assert.match(executionRuntime, /registry: registry_impl\.Registry/);
+  assert.match(modelsRoot, /@import\("product_models_runtime"\)/);
+  assert.doesNotMatch(
+    modelsRoot,
+    /@import\("(?:metawork_product_models_contract|product_models_ports)"\)/,
+  );
+  assertNoModuleTargets(
+    build,
+    ["product_control_ports", "product_control_runtime"],
+    ["models_metask"],
+  );
+  assert.match(modelsContract, /pub const ModelConnectionCommand = union/);
+  assert.match(modelsRuntime, /registry: registry_impl\.Registry/);
+  assert.doesNotMatch(
+    modelsRuntime,
+    /\bexecution_generation\b|resolve(?:Default|Probe)Execution|prepareExecution/,
+  );
+  assert.match(modelsRegistry, /store_file_name = "models\.json"/);
   assert.match(
-    executionRegistry,
-    /store_file_name = "model-connections\.json"/,
+    modelsRegistry,
+    /legacy_connection_store_file_name = "model-connections\.json"/,
   );
   assert.doesNotMatch(accountRuntime, /ModelConnection|model_connections/);
   assert.doesNotMatch(
@@ -296,12 +349,67 @@ test("Product Execution owns model connections independently of Account", () => 
     /pub const AccountView = struct \{([\s\S]*?)\n\};/,
   )?.[1];
   const accountCommand = accountContract.match(
-    /pub const AccountCommand = union\(enum\) \{([\s\S]*?)\n\};/,
+    /pub const AccountCommand = enum \{([\s\S]*?)\n\};/,
   )?.[1];
   assert.ok(accountView, "AccountView must remain inspectable");
   assert.ok(accountCommand, "AccountCommand must remain inspectable");
   assert.doesNotMatch(accountView, /ModelConnection|model_connection/);
   assert.doesNotMatch(accountCommand, /ModelConnection|model_connection/);
+  assertNoImports(
+    ["src/product/account.zig", ...zigFiles("src/product/account/")],
+    [
+      "metawork_product_models",
+      "metawork_product_models_contract",
+      "product_models_ports",
+      "product_models_runtime",
+      "product_models_connections",
+      "product_models_metask",
+    ],
+  );
+  assertNoModuleTargets(
+    build,
+    [
+      "account",
+      "account_contract",
+      "account_state",
+      "account_runtime",
+      "account_credentials_runtime",
+      "account_network_attempt",
+    ],
+    [
+      "models",
+      "models_contract",
+      "models_ports",
+      "models_runtime",
+      "models_connections",
+      "models_metask",
+    ],
+  );
+  assertNoModuleTargets(
+    build,
+    ["models", "models_runtime", "models_connections", "models_metask"],
+    [
+      "account",
+      "account_contract",
+      "account_runtime",
+      "product_control",
+      "product_task",
+      "task_runtime",
+      "product_schedule",
+      "product_schedule_runtime",
+      "agent",
+      "bridge",
+    ],
+  );
+  assert.throws(
+    () =>
+      assertNoModuleTargets(
+        `${build}\nmodels_runtime.addImport("consumer", product_task);`,
+        ["models", "models_runtime", "models_connections", "models_metask"],
+        ["product_task"],
+      ),
+    /models_runtime imports forbidden build module product_task as consumer/,
+  );
   assert.doesNotMatch(
     accountContract,
     /model_connection_(?:invalid|not_found|capture_unavailable|persistence_unavailable|test_unavailable)/,
@@ -310,34 +418,66 @@ test("Product Execution owns model connections independently of Account", () => 
     accountBinding,
     /CredentialVault|model_connection|executionPorts/,
   );
-  assert.match(executionBinding, /product_execution_ports/);
-  assert.match(executionBinding, /modelConnectionCredentialService/);
+  assert.match(modelsBinding, /product_models_ports/);
+  assert.match(modelsBinding, /modelConnectionCredentialService/);
+  assert.match(modelConnectionHost, /std\.crypto\.secureZero/);
+  assert.match(modelConnectionHost, /platform\.supportsSecureInput\(\)/);
+  assert.match(modelConnectionHost, /createWithCapturedCredential/);
+  assert.doesNotMatch(
+    modelConnectionHost,
+    /frontend|Renderer|ModelConnectionCreate\s*=/,
+  );
+  assert.match(app, /setModelConnectionHost/);
+  assert.match(
+    app,
+    /\.management = model_connection_capability_available,[\s\S]*\.secret_capture = model_connection_capability_available,[\s\S]*\.connection_test = model_connection_capability_available/,
+  );
+  assert.doesNotMatch(
+    read("frontend/src/features/settings/SettingsPage.tsx"),
+    /MODEL_CONNECTION_SETTINGS_ENABLED/,
+  );
+  assert.match(windowsBringup, /test-model-connection-readiness-windows\.mjs/);
   assert.match(identity, /pub fn modelConnectionCredentialService/);
-  const selectDefault = control.indexOf("fn selectModelConnectionDefault(");
-  const scrubPreparation = control.indexOf(
-    "self.prepareExecutionInstall(",
-    selectDefault,
-  );
+  const selectDefault = control.indexOf("pub fn selectModelsDefault(");
   const registryCommit = control.indexOf(
-    "self.model_connections.submitCommandWithExecutionGeneration(",
+    "self.model_connections.selectDefault(command)",
     selectDefault,
   );
-  assert.ok(selectDefault >= 0 && scrubPreparation > selectDefault);
-  assert.ok(
-    registryCommit > scrubPreparation,
-    "fallible durable scrub must precede the Execution registry default commit",
+  const reconcile = control.indexOf(
+    "self.reconcileModelsDefaultNoFail(false, false)",
+    registryCommit,
   );
-  assert.match(app, /execution_platform_binding\.Adapter\.init/);
-  assert.match(app, /execution_management\.start\(/);
+  assert.ok(selectDefault >= 0 && registryCommit > selectDefault);
+  assert.ok(
+    reconcile > registryCommit,
+    "Models desired state must commit before consumer reconciliation",
+  );
+  const reconcileOwner = control.indexOf("fn reconcileModelsDefaultNoFail(");
+  const scrubPreparation = control.indexOf(
+    "self.execution_state.prepareInstall(",
+    reconcileOwner,
+  );
+  const activeInstall = control.indexOf(
+    "self.execution_state.installMetaskNoFail(",
+    scrubPreparation,
+  );
+  assert.ok(reconcileOwner >= 0 && scrubPreparation > reconcileOwner);
+  assert.ok(activeInstall > scrubPreparation);
+  assert.match(app, /models_platform_binding\.Adapter\.init/);
+  assert.match(app, /models_management\.start\(/);
   assert.doesNotMatch(app, /startWithAccountUnavailable/);
-  assert.match(coordinator, /control_ports\.ExecutionManagement/);
-  assert.doesNotMatch(coordinator, /metawork_account|AccountExecutionHandoff/);
+  assert.match(modelsCoordinator, /control_ports\.ModelsManagement/);
+  assert.doesNotMatch(
+    modelsCoordinator,
+    /AccountExecutionHandoff|OwnedSourceCandidate|ModelView|ModelMetadata/,
+  );
 });
 
 test("named module roots exist and lower owners cannot import composition", () => {
   for (const path of [
     "src/app.zig",
     "src/product/account.zig",
+    "src/product/models.zig",
     "src/product/mcp.zig",
     "src/product/skill.zig",
     "src/product/task.zig",
@@ -354,6 +494,7 @@ test("named module roots exist and lower owners cannot import composition", () =
   assert.equal(existsSync(new URL("src/agentcore/", root)), false);
   assert.equal(existsSync(new URL("src/account.zig", root)), false);
   assert.equal(existsSync(new URL("src/account/", root)), false);
+  assert.equal(existsSync(new URL("src/product/execution/", root)), false);
   assert.equal(
     existsSync(new URL("src/product/control/runtime.zig", root)),
     true,
@@ -626,9 +767,10 @@ test("Product Control is the only composition owner identity", () => {
   assert.match(build, /src\/product\/control\/runtime\.zig/);
   assert.match(build, /src\/product\/control\/account_projection\.zig/);
   assert.match(build, /src\/product\/control\/execution_state\.zig/);
-  assert.match(build, /src\/product\/execution\/contract\.zig/);
-  assert.match(build, /src\/product\/execution\/model_connections\.zig/);
-  assert.match(build, /src\/product\/execution\/runtime\.zig/);
+  assert.match(build, /src\/product\/models\.zig/);
+  assert.match(build, /src\/product\/models\/contract\.zig/);
+  assert.match(build, /src\/product\/models\/connections\.zig/);
+  assert.match(build, /src\/product\/models\/runtime\.zig/);
   assert.match(build, /src\/product\/control\/executor\.zig/);
   assert.match(build, /src\/product\/control\/file_preview\.zig/);
   assert.match(build, /src\/product\/schedule\.zig/);
@@ -638,8 +780,9 @@ test("Product Control is the only composition owner identity", () => {
   assert.match(build, /product_control_executor/);
   assert.match(build, /product_control_account_projection/);
   assert.match(build, /product_control_execution_state/);
-  assert.match(build, /metawork_product_execution_contract/);
-  assert.match(build, /product_execution_runtime/);
+  assert.match(build, /metawork_product_models_contract/);
+  assert.match(build, /metawork_product_models/);
+  assert.match(build, /product_models_runtime/);
   assert.match(build, /product_control_file_preview/);
   assert.match(build, /metawork_product_schedule/);
   assert.match(build, /product_schedule_runtime/);
@@ -650,29 +793,17 @@ test("Product Control is the only composition owner identity", () => {
   assert.match(runtime, /account_projection: account_projection\.Projection/);
   assert.match(runtime, /execution_state: execution_state\.State/);
   assert.match(accountProjection, /@import\("metawork_account_contract"\)/);
-  assert.match(
-    accountProjection,
-    /@import\("metawork_product_execution_contract"\)/,
-  );
+  assert.doesNotMatch(accountProjection, /metawork_product_models/);
   assert.match(accountProjection, /pub const Projection = struct/);
-  const authorityStart = accountProjection.indexOf("pub fn authorityMatches");
-  assert.ok(
-    authorityStart >= 0,
-    "Account authority projection must be explicit",
+  assert.doesNotMatch(
+    accountProjection,
+    /authority_protocol|metask_source_generation|catalog_state|selected_model/,
   );
-  const authorityEnd = accountProjection.indexOf("\n};", authorityStart);
-  const authorityMatch = accountProjection.slice(authorityStart, authorityEnd);
-  assert.match(authorityMatch, /authority_protocol/);
-  assert.match(authorityMatch, /metask_source_generation/);
-  assert.doesNotMatch(authorityMatch, /catalog_state/);
   assert.doesNotMatch(
     executionState,
     /metawork_account_contract|AccountProjection|AccountFact|AccountView|account_id|catalog_generation|selected_model/,
   );
-  assert.match(
-    executionState,
-    /@import\("metawork_product_execution_contract"\)/,
-  );
+  assert.match(executionState, /@import\("metawork_product_models_contract"\)/);
   assert.match(executionState, /pub const State = struct/);
   assert.match(executionState, /pub const ProjectionRedaction = struct/);
   assert.match(executionState, /const ActiveExecution = struct/);
@@ -950,7 +1081,7 @@ test("Application coordinators consume scoped Product Control capabilities", () 
   const ports = read("src/product/control/ports.zig");
   const projection = read("src/product/control/runtime.zig");
   const accountCoordinator = read("src/app/account_coordinator.zig");
-  const executionCoordinator = read("src/app/execution_coordinator.zig");
+  const executionCoordinator = read("src/app/models_coordinator.zig");
   const agentEvents = read("src/app/agent_event_coordinator.zig");
   const mcpManagement = read("src/app/mcp_management_coordinator.zig");
   const mcpOauth = read("src/app/mcp_oauth_coordinator.zig");
@@ -961,7 +1092,7 @@ test("Application coordinators consume scoped Product Control capabilities", () 
   assert.match(build, /metawork_product_control_ports/);
   for (const name of [
     "AccountCommitSink",
-    "ExecutionManagement",
+    "ModelsManagement",
     "AgentEventConsumer",
     "McpManagementPort",
     "McpOauthPort",
@@ -975,7 +1106,7 @@ test("Application coordinators consume scoped Product Control capabilities", () 
     /Workbench|product_control\.Runtime|rawRuntime|rawOwner/,
   );
   assert.match(projection, /pub fn accountCommitSink/);
-  assert.match(projection, /pub fn executionManagement/);
+  assert.match(projection, /pub fn modelsManagement/);
   assert.match(projection, /pub fn agentEventConsumer/);
   assert.match(projection, /pub fn mcpManagementPort/);
   assert.match(projection, /pub fn mcpOauthPort/);
@@ -998,7 +1129,7 @@ test("Application coordinators consume scoped Product Control capabilities", () 
   )?.[1];
   assert.doesNotMatch(
     accountState,
-    /CompletionTransport|ProbeJob|ExecutionManagement|CredentialVault/,
+    /CompletionTransport|ProbeJob|ModelsManagement|CredentialVault/,
   );
   assert.doesNotMatch(
     accountCoordinator,
@@ -1018,51 +1149,26 @@ test("Application coordinators consume scoped Product Control capabilities", () 
   );
 });
 
-test("Product Control owns post-Account source reconciliation", () => {
+test("Account authorization and Models provider state remain separate owners", () => {
   const ports = read("src/product/control/ports.zig");
   const control = read("src/product/control/runtime.zig");
-  const executionContract = read("src/product/execution/contract.zig");
   const accountCoordinator = read("src/app/account_coordinator.zig");
+  const modelsCoordinator = read("src/app/models_coordinator.zig");
   const accountRuntime = read("src/product/account/runtime.zig");
   const accountState = read("src/product/account/state.zig");
   const accountContract = read("src/product/account/contract.zig");
-  const accountCatalog = read("src/product/account/catalog.zig");
+  const modelsRuntime = read("src/product/models/runtime.zig");
 
   assert.match(ports, /pub const AccountCommitSink = struct/);
-  assert.match(ports, /OwnedSourceCandidateTransfer/);
-  assert.match(executionContract, /pub const OwnedSourceCandidateTransfer/);
-  assert.doesNotMatch(executionContract, /OwnedConfigTransfer/);
   assert.doesNotMatch(
     ports,
-    /MetaskStageToken|MetaskStageResult|prepare_metask_|finalize_metask_|abort_metask_|begin_default_replacement_fn/,
+    /OwnedSourceCandidateTransfer|source_candidate|Account.*Models|Models.*Account/,
   );
-
   const commitStart = control.indexOf("pub fn commitAccountChangeNoFail");
-  const reconcileStart = control.indexOf("fn reconcileMetaskCandidateNoFail");
-  const clearStart = control.indexOf("fn reconcileMetaskClearNoFail");
-  assert.ok(commitStart >= 0, "Account commit sink must exist");
-  assert.ok(reconcileStart > commitStart, "Metask reconciliation must exist");
-  assert.ok(
-    clearStart > reconcileStart,
-    "Metask clear reconciliation must exist",
-  );
-  const commit = control.slice(commitStart, reconcileStart);
-  assert.match(commit, /self\.commitAccountFactNoFail\(fact\)/);
-  assert.match(commit, /self\.reconcileMetaskCandidateNoFail/);
-  const replacement = control.slice(reconcileStart, clearStart);
-  const prepareAt = replacement.indexOf("self.execution_state.prepareInstall");
-  const clearDefaultAt = replacement.indexOf(
-    "self.clearModelConnectionDefault()",
-  );
-  assert.ok(prepareAt >= 0, "replacement must prepare all fallible effects");
-  assert.ok(
-    clearDefaultAt > prepareAt,
-    "durable custom default may clear only after preparation",
-  );
-  assert.match(replacement, /self\.execution_state.installMetaskNoFail/);
-
-  assert.match(control, /metask_default_selection_attempt_id: \?u64/);
-  assert.doesNotMatch(control, /metask_default_selection_requested/);
+  const nextMethod = control.indexOf("\n    pub fn ", commitStart + 1);
+  const accountCommit = control.slice(commitStart, nextMethod);
+  assert.match(accountCommit, /self\.commitAccountFactNoFail\(commit\.fact\)/);
+  assert.doesNotMatch(accountCommit, /model|Model|source|Source|credential/);
 
   const accountCommitAt = accountCoordinator.indexOf(
     "self.runtime.commit(&prepared);",
@@ -1071,21 +1177,19 @@ test("Product Control owns post-Account source reconciliation", () => {
     "self.control.commitNoFail",
   );
   assert.ok(accountCommitAt >= 0 && productCommitAt > accountCommitAt);
-  assert.doesNotMatch(
-    accountCoordinator,
-    /prepareMetaskExecutionCandidate|prepareMetaskExecutionClear|finalizeMetaskStageNoFail|abortMetaskStageNoFail|prepareExecutionInstall|prepareExecutionClear/,
+  const observerAt = accountCoordinator.indexOf("observer.notify();");
+  assert.ok(observerAt > productCommitAt);
+  assert.match(accountRuntime, /pub fn authorizationLease/);
+  assert.match(modelsCoordinator, /self\.account\.authorizationLease\(\)/);
+  assert.match(
+    modelsCoordinator,
+    /self\.management\.setMetaskAuthorizationUnavailable\(\)/,
   );
+  assert.match(modelsRuntime, /pub fn setMetaskAuthorizationUnavailable/);
+  assert.match(modelsRuntime, /clearMetaskRuntime\(\.needs_authentication/);
   assert.doesNotMatch(
-    accountRuntime,
-    /prepareAndPersistExecution|prepareCommittedPhaseFailure/,
-  );
-  assert.doesNotMatch(accountState, /prepareCommittedPhaseFailure/);
-  assert.doesNotMatch(accountState, /begin_default/);
-  assert.match(accountState, /AttemptKind = enum \{[\s\S]*source_resolution/);
-  assert.doesNotMatch(accountState, /activation/);
-  assert.doesNotMatch(
-    [accountContract, accountCatalog, accountRuntime, accountState].join("\n"),
-    /ExecutionIntent|ReplacementIntent|execution_intent|replacement_intent|ExecutionTargetInvalid|ownsExecutionSelection|resolve_metask_source|dependency_contract_invalid|execution_target_invalid|session_in_use|execution_in_use/,
+    [accountContract, accountRuntime, accountState].join("\n"),
+    /ModelView|ModelMetadata|CatalogState|source_resolution|selected_model|OwnedSourceCandidate|execution_generation/,
   );
 });
 
@@ -1985,7 +2089,7 @@ test("Product Account owns Metask protocol without a concrete HTTP client", () =
   assert.doesNotMatch(accountSource, /std\.http\.Client|StdHttpTransport/);
   assert.match(adapter, /std\.http\.Client/);
   assert.match(adapter, /pub const Adapter = struct/);
-  assert.match(app, /account_http\.transport\(\)/);
+  assert.match(app, /account_http\.accountTransport\(\)/);
 });
 
 test("Account owns platform ports while Application binds Native SDK effects", () => {
@@ -2013,9 +2117,10 @@ test("Account owns platform ports while Application binds Native SDK effects", (
   assert.match(runtime, /@import\("account_ports"\)/);
   assert.match(binding, /native_sdk\.platform\.PlatformServices/);
   assert.match(binding, /pub fn ports\(self: \*Adapter\) ports_api\.Platform/);
-  assert.match(binding, /\.load_preference_fn = loadPreference/);
-  assert.match(binding, /\.commit_preference_fn = commitPreference/);
-  assert.match(binding, /\.delete_preference_fn = deletePreference/);
+  assert.doesNotMatch(binding, /preference|Preference|model|Model/);
+  assert.match(binding, /\.set_refresh_token_fn = setRefreshToken/);
+  assert.match(binding, /\.get_refresh_token_fn = getRefreshToken/);
+  assert.match(binding, /\.delete_refresh_token_fn = deleteRefreshToken/);
   assert.match(app, /account_platform_binding\.Adapter\.init/);
   assert.match(
     app,
@@ -2298,6 +2403,8 @@ test("Native compatibility seams have exact owners and symbol allowlists", () =>
     "src/native_sdk_compat/system_webview_startup_window/windows.zig";
   const securePath = "src/native_sdk_compat/secure_input.zig";
   const secureWindowsPath = "src/native_sdk_compat/secure_input/windows.zig";
+  const secureWindowsUiaPath =
+    "src/native_sdk_compat/secure_input/windows_uia.zig";
   const secureMacosPath = "src/native_sdk_compat/secure_input/macos.zig";
   const instancePath = "src/native_sdk_compat/app_single_instance.zig";
   const instanceWindowsPath =
@@ -2397,6 +2504,32 @@ test("Native compatibility seams have exact owners and symbol allowlists", () =>
       "UpdateWindow",
       "WideCharToMultiByte",
     ].sort(),
+  );
+  assert.deepEqual(
+    zigFiles("src/").filter((file) =>
+      read(file).includes('@import("windows_uia.zig")'),
+    ),
+    [secureWindowsPath],
+  );
+  assert.deepEqual(
+    externSymbols(read(secureWindowsUiaPath), [
+      "user32",
+      "kernel32",
+      "uiautomationcore",
+    ]),
+    [
+      "CallWindowProcW",
+      "DefWindowProcW",
+      "GetLastError",
+      "SetLastError",
+      "SetWindowLongPtrW",
+      "UiaHostProviderFromHwnd",
+      "UiaReturnRawElementProvider",
+    ].sort(),
+  );
+  assert.match(
+    read("build.zig"),
+    /target\.result\.os\.tag == \.windows[\s\S]*app\.linkSystemLibrary\("uiautomationcore"/u,
   );
   assert.deepEqual(
     externSymbols(read(startupWindowsPath), ["user32", "kernel32", "comctl32"]),

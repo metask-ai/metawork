@@ -1,10 +1,23 @@
-//! Product Execution effect ports. Credential bytes remain Host-owned and
+//! Product Models effect ports. Credential bytes remain Host-owned and
 //! are borrowed only for bounded synchronous resolution.
 
 const std = @import("std");
 
 pub const credential_slot_prefix = "model-connection-";
 pub const credential_slot_bytes = credential_slot_prefix.len + 32;
+
+/// Type-erased, single-owner provider completion. Application may transport
+/// this value across Product Control without exposing provider-private state.
+/// The Models runtime is the only consumer.
+pub const OwnedCatalogCompletion = struct {
+    context: *anyopaque,
+    deinit_fn: *const fn (*anyopaque) void,
+
+    pub fn deinit(self: *OwnedCatalogCompletion) void {
+        self.deinit_fn(self.context);
+        self.* = undefined;
+    }
+};
 
 pub const CredentialVault = struct {
     context: *anyopaque,

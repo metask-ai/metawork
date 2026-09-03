@@ -7,7 +7,6 @@ const credential_store_impl = @import("account_credential_store");
 const ports_impl = @import("account_ports");
 const loopback_impl = @import("account_loopback");
 const login_attempt_impl = @import("account_login_attempt");
-const catalog_impl = @import("account_catalog");
 const credentials_impl = @import("account_credentials_runtime");
 const network_attempt_impl = @import("account_network_attempt");
 const runtime_impl = @import("account_runtime");
@@ -29,7 +28,6 @@ test {
     _ = ports_impl;
     _ = loopback_impl;
     _ = login_attempt_impl;
-    _ = catalog_impl;
     _ = credentials_impl;
     _ = network_attempt_impl;
     _ = runtime_impl;

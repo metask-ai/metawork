@@ -40,61 +40,76 @@ test.after(async () => vite.close());
 
 const signedOut = {
   state: "signed_out",
-  catalogState: "unavailable",
   canCancel: false,
   accountId: "",
   displayName: "",
-  apiKeys: [],
-  models: [],
-  selectedApiKeySelectionId: "",
-  selectedModelSelectionId: "",
-  candidateApiKeySelectionId: "",
-  candidateModelSelectionId: "",
-  modelCatalogApiKeySelectionId: "",
   errorCode: "none",
   safeDiagnostic: "",
-  catalogGeneration: "0",
 };
 
-const unavailableExecution = {
-  state: "unavailable",
-  defaultSource: null,
-  activeSource: null,
-  activeGeneration: "0",
-  taskCreationAvailable: false,
-  selectedModelConnectionId: "",
-  modelConnections: [],
-  errorCode: "none",
-};
-
-const readyExecution = {
-  ...unavailableExecution,
-  state: "ready",
-  defaultSource: "metask",
-  activeSource: "metask",
-  activeGeneration: "1",
-  taskCreationAvailable: true,
-};
-
-const ready = {
-  ...signedOut,
-  state: "authenticated",
-  catalogState: "ready",
-  accountId: "account-1",
-  displayName: "Metask User",
-  apiKeys: [
+const unavailableModels = {
+  availability: "needs_authentication",
+  persistenceHealth: "ready",
+  providers: [
     {
-      selectionId: "key-1",
-      name: "Primary",
-      suffix: "1234",
-      protocol: "anthropic_messages",
+      id: "metask",
+      displayName: "Metask",
+      recommended: true,
+      catalogState: "needs_authentication",
+      principalRef: "",
+      apiKeys: [],
+      models: [],
+      selectedApiKeyId: "",
+      catalogGeneration: "0",
+      sourceGeneration: "0",
+      errorCode: "authorization_unavailable",
+      safeDiagnostic: "",
     },
   ],
-  models: [{ selectionId: "model-1", displayName: "Model One" }],
-  selectedApiKeySelectionId: "key-1",
-  selectedModelSelectionId: "model-1",
-  modelCatalogApiKeySelectionId: "key-1",
-  catalogGeneration: "1",
+  metaskSelection: null,
+  metaskSelectionRevision: "0",
+  defaultSelection: null,
+  selectionRevision: "0",
+  operation: "idle",
+  errorCode: "authorization_unavailable",
+  connections: [],
+};
+
+const readyAccount = {
+  ...signedOut,
+  state: "authenticated",
+  accountId: "account-1",
+  displayName: "Metask User",
+};
+
+const readyModels = {
+  ...unavailableModels,
+  availability: "ready",
+  providers: [
+    {
+      ...unavailableModels.providers[0],
+      catalogState: "ready",
+      principalRef: "account-1",
+      apiKeys: [
+        {
+          id: "key-1",
+          name: "Primary",
+          suffix: "1234",
+          protocol: "anthropic_messages",
+        },
+      ],
+      models: [{ id: "model-1", displayName: "Model One" }],
+      selectedApiKeyId: "key-1",
+      catalogGeneration: "1",
+      sourceGeneration: "1",
+      errorCode: "none",
+    },
+  ],
+  metaskSelection: { sourceId: "metask:key-1", modelId: "model-1" },
+  metaskSelectionRevision: "1",
+  defaultSelection: { sourceId: "metask:key-1", modelId: "model-1" },
+  selectionRevision: "1",
+  errorCode: "none",
 };
 
 const callbacks = {
@@ -141,11 +156,11 @@ function renderGate(account, props = {}) {
   );
 }
 
-function renderSettings(account, execution = readyExecution) {
+function renderSettings(account, models = readyModels) {
   return withI18n(
     createElement(SettingsPage, {
       account,
-      execution,
+      models,
       modelConnectionCapabilities: {
         management: false,
         secretCapture: false,
@@ -176,28 +191,27 @@ function renderSettings(account, execution = readyExecution) {
 
 test("only checking and authorizing request the Account onboarding surface", () => {
   assert.equal(
-    requiresAccountGate({ state: "checking" }, { defaultSource: "metask" }),
+    requiresAccountGate({ state: "checking" }, unavailableModels),
     true,
   );
   assert.equal(
-    requiresAccountGate({ state: "authorizing" }, { defaultSource: "metask" }),
+    requiresAccountGate({ state: "authorizing" }, unavailableModels),
     true,
   );
   assert.equal(
-    requiresAccountGate({ state: "signed_out" }, { defaultSource: "metask" }),
+    requiresAccountGate({ state: "signed_out" }, unavailableModels),
     false,
   );
   assert.equal(
-    requiresAccountGate(
-      { state: "authenticated" },
-      { defaultSource: "metask" },
-    ),
+    requiresAccountGate({ state: "authenticated" }, readyModels),
     false,
   );
   assert.equal(
     requiresAccountGate(
       { state: "checking" },
-      { defaultSource: "model_connection" },
+      {
+        defaultSelection: { sourceId: "connection-1", modelId: "model-1" },
+      },
     ),
     false,
   );
@@ -206,15 +220,21 @@ test("only checking and authorizing request the Account onboarding surface", () 
 test("unresolved authenticated catalog opens account setup", () => {
   assert.equal(
     requiresAccountSetup(
-      { state: "authenticated", catalogState: "choosing" },
-      { defaultSource: "metask", taskCreationAvailable: false },
+      { state: "authenticated" },
+      {
+        providers: [{ ...readyModels.providers[0], catalogState: "choosing" }],
+        defaultSelection: readyModels.defaultSelection,
+      },
     ),
     true,
   );
   assert.equal(
     requiresAccountSetup(
-      { state: "authenticated", catalogState: "failed" },
-      { defaultSource: "metask", taskCreationAvailable: false },
+      { state: "authenticated" },
+      {
+        providers: [{ ...readyModels.providers[0], catalogState: "failed" }],
+        defaultSelection: readyModels.defaultSelection,
+      },
     ),
     true,
   );
@@ -222,41 +242,32 @@ test("unresolved authenticated catalog opens account setup", () => {
   // continuation; redirecting on it flashes settings on every startup.
   assert.equal(
     requiresAccountSetup(
-      { state: "authenticated", catalogState: "loading" },
-      { defaultSource: "metask", taskCreationAvailable: false },
+      { state: "authenticated" },
+      {
+        providers: [{ ...readyModels.providers[0], catalogState: "loading" }],
+        defaultSelection: readyModels.defaultSelection,
+      },
     ),
     false,
   );
   assert.equal(
-    requiresAccountSetup(
-      { state: "authenticated", catalogState: "ready" },
-      { defaultSource: "metask", taskCreationAvailable: true },
-    ),
+    requiresAccountSetup({ state: "authenticated" }, readyModels),
     false,
   );
   assert.equal(
-    requiresAccountSetup(
-      { state: "authenticated", catalogState: "ready" },
-      { defaultSource: "metask", taskCreationAvailable: false },
-    ),
+    requiresAccountSetup({ state: "authenticated" }, readyModels),
     false,
   );
 });
 
 test("Product execution failure never opens Account setup", () => {
   assert.equal(
-    requiresAccountSetup(
-      { state: "authenticated", catalogState: "ready" },
-      { defaultSource: "metask", taskCreationAvailable: false },
-    ),
+    requiresAccountSetup({ state: "authenticated" }, readyModels),
     false,
   );
   assert.equal(
-    accountSurfacePolicy(
-      { state: "authenticated", catalogState: "ready" },
-      { defaultSource: "metask", taskCreationAvailable: false },
-      false,
-    ).setupRequired,
+    accountSurfacePolicy({ state: "authenticated" }, readyModels, false)
+      .setupRequired,
     false,
   );
 });
@@ -264,7 +275,7 @@ test("Product execution failure never opens Account setup", () => {
 test("Account onboarding never replaces a Workbench that already owns Tasks", () => {
   const checking = accountSurfacePolicy(
     { ...signedOut, state: "checking" },
-    { defaultSource: "metask", taskCreationAvailable: false },
+    unavailableModels,
     true,
   );
   assert.deepEqual(checking, {
@@ -273,8 +284,11 @@ test("Account onboarding never replaces a Workbench that already owns Tasks", ()
   });
 
   const unresolved = accountSurfacePolicy(
-    { ...signedOut, state: "authenticated", catalogState: "failed" },
-    { defaultSource: "metask", taskCreationAvailable: false },
+    { ...readyAccount },
+    {
+      ...readyModels,
+      providers: [{ ...readyModels.providers[0], catalogState: "failed" }],
+    },
     true,
   );
   assert.deepEqual(unresolved, {
@@ -284,7 +298,7 @@ test("Account onboarding never replaces a Workbench that already owns Tasks", ()
 
   const empty = accountSurfacePolicy(
     { ...signedOut, state: "checking" },
-    { defaultSource: "metask", taskCreationAvailable: false },
+    unavailableModels,
     false,
   );
   assert.equal(empty.gateRequired, true);
@@ -297,12 +311,15 @@ test("Account errors stay inside the Account failure domain", () => {
   );
 });
 
-test("Account preference recovery exposes the canonical login repair and freezes selectors", () => {
-  const markup = renderSettings({
-    ...ready,
-    errorCode: "recovery_state_invalid",
+test("Models preference recovery preserves Account identity and freezes selectors", () => {
+  const markup = renderSettings(readyAccount, {
+    ...readyModels,
+    persistenceHealth: "recovery_required",
+    errorCode: "migration_required",
   });
-  assert.match(markup, /Sign in with Metask/);
+  assert.match(markup, /Metask User/);
+  assert.match(markup, /Model configuration needs attention/);
+  assert.doesNotMatch(markup, />Sign in with Metask</);
   assert.match(markup, /id="settings-api"[^>]*disabled/);
   assert.match(markup, /id="settings-model"[^>]*disabled/);
 });
@@ -310,11 +327,11 @@ test("Account preference recovery exposes the canonical login repair and freezes
 test("Execution commands never enter the Account busy or error scope", () => {
   assert.doesNotMatch(
     appSource,
-    /runAccountCommand\(\(\) =>\s*client\.(?:selectMetaskDefault|selectDefaultModelConnection|createModelConnection|updateModelConnection|removeModelConnection|testModelConnection)/,
+    /runAccountCommand\(\(\) =>\s*client\.(?:refreshModelsCatalog|selectMetaskApiKey|configureMetaskSelection|selectModelsDefault|createModelConnection|updateModelConnection|replaceModelConnectionCredential|removeModelConnection|testModelConnection)/,
   );
   assert.match(
     appSource,
-    /runExecutionCommand\(\(\) =>\s*client\.selectDefaultModelConnection/,
+    /runExecutionCommand\(\(\) =>\s*client\.selectModelsDefault/,
   );
 });
 
@@ -340,14 +357,14 @@ test("authorization has one cancel path and no reopen or reauthenticate branch",
 });
 
 test("signed-out settings keep local history reachable and expose sign-in", () => {
-  const markup = renderSettings(signedOut);
+  const markup = renderSettings(signedOut, unavailableModels);
   assert.match(markup, /Sign in to MetaWork/);
   assert.match(markup, />Sign in with Metask</);
   assert.doesNotMatch(markup, /Sign out on this device/);
 });
 
 test("authenticated settings project current catalog defaults", () => {
-  const markup = renderSettings(ready);
+  const markup = renderSettings(readyAccount, readyModels);
   assert.match(markup, /Metask User/);
   assert.match(markup, /Primary/);
   assert.match(markup, /Model One/);
@@ -356,12 +373,18 @@ test("authenticated settings project current catalog defaults", () => {
 });
 
 test("catalog failure remains an authenticated retryable settings state", () => {
-  const markup = renderSettings({
-    ...ready,
-    catalogState: "failed",
-    errorCode: "metask_service_unavailable",
+  const markup = renderSettings(readyAccount, {
+    ...readyModels,
+    providers: [
+      {
+        ...readyModels.providers[0],
+        catalogState: "failed",
+        errorCode: "catalog_unavailable",
+      },
+    ],
+    errorCode: "catalog_unavailable",
   });
-  assert.match(markup, /Account action needs attention/);
+  assert.match(markup, /Model configuration needs attention/);
   assert.match(markup, /Sync again/);
   assert.doesNotMatch(markup, /Sign in again/);
 });

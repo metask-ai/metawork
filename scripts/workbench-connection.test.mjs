@@ -33,15 +33,13 @@ function snapshot(revision, tasks = []) {
       safeDiagnostic: "",
       catalogGeneration: "0",
     },
-    execution: {
-      state: "unavailable",
-      defaultSource: null,
-      activeSource: null,
+    newTaskAdmission: {
+      available: false,
+      reason: "none",
+      activeModelRef: null,
       activeGeneration: "0",
-      taskCreationAvailable: false,
-      selectedModelConnectionId: "",
-      modelConnections: [],
-      errorCode: "none",
+      activeSelectionRevision: "0",
+      state: "unavailable",
     },
     capabilities: {
       taskHistoryPersistence: false,

@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const models_contract = @import("metawork_product_models_contract");
 const state = @import("product_schedule_state");
 const persistence = @import("product_schedule_persistence");
 const view = @import("product_schedule_view");
@@ -37,6 +38,7 @@ pub const Limits = struct {
 };
 
 pub const PersistenceCommit = enum { committed, failed, outcome_unknown };
+pub const PersistenceObservation = enum { before, after, unknown };
 
 pub const Persistence = struct {
     context: ?*anyopaque = null,
@@ -45,6 +47,11 @@ pub const Persistence = struct {
     restore_failed: bool = false,
     commit_fn: *const fn (?*anyopaque, []const u8) PersistenceCommit = unsupportedCommit,
     recover_fn: *const fn (?*anyopaque, []const u8) PersistenceCommit = unsupportedCommit,
+    observe_fn: *const fn (
+        ?*anyopaque,
+        []const u8,
+        []const u8,
+    ) PersistenceObservation = unsupportedObserve,
 
     fn commit(self: Persistence, bytes: []const u8) PersistenceCommit {
         if (!self.enabled) return .failed;
@@ -56,8 +63,25 @@ pub const Persistence = struct {
         return self.recover_fn(self.context, bytes);
     }
 
+    fn observe(
+        self: Persistence,
+        before: []const u8,
+        after: []const u8,
+    ) PersistenceObservation {
+        if (!self.enabled) return .unknown;
+        return self.observe_fn(self.context, before, after);
+    }
+
     fn unsupportedCommit(_: ?*anyopaque, _: []const u8) PersistenceCommit {
         return .failed;
+    }
+
+    fn unsupportedObserve(
+        _: ?*anyopaque,
+        _: []const u8,
+        _: []const u8,
+    ) PersistenceObservation {
+        return .unknown;
     }
 };
 
@@ -66,6 +90,7 @@ pub const PersistenceHealth = enum {
     ready,
     read_failed,
     corrupt,
+    migration_failed,
     write_failed,
     outcome_unknown,
 };
@@ -76,6 +101,63 @@ pub const PersistenceRecoveryOutcome = enum {
     failed,
     outcome_unknown,
 };
+
+fn bootstrapStore(
+    allocator: std.mem.Allocator,
+    limits: state.Limits,
+    persistence_capability: Persistence,
+    health: *PersistenceHealth,
+) Error!state.Store {
+    if (health.* != .ready or persistence_capability.restored_bytes == null)
+        return state.Store.init(allocator, limits);
+    const restored_bytes = persistence_capability.restored_bytes.?;
+    const decoded = persistence.decodeForBootstrap(
+        allocator,
+        restored_bytes,
+        limits,
+    ) catch {
+        health.* = .corrupt;
+        return state.Store.init(allocator, limits);
+    };
+    return switch (decoded) {
+        .current => |store| store,
+        .migrated => |store_value| migrated: {
+            var store = store_value;
+            var owned = true;
+            defer if (owned) store.deinit();
+            const output = allocator.alloc(u8, persistence.max_store_bytes) catch {
+                health.* = .migration_failed;
+                break :migrated try state.Store.init(allocator, limits);
+            };
+            defer allocator.free(output);
+            const next_bytes = persistence.encode(output, &store) catch {
+                health.* = .migration_failed;
+                break :migrated try state.Store.init(allocator, limits);
+            };
+            const committed = switch (persistence_capability.commit(next_bytes)) {
+                .committed => true,
+                .failed => false,
+                .outcome_unknown => switch (persistence_capability.observe(
+                    restored_bytes,
+                    next_bytes,
+                )) {
+                    .after => true,
+                    .before => false,
+                    .unknown => {
+                        health.* = .outcome_unknown;
+                        break :migrated try state.Store.init(allocator, limits);
+                    },
+                },
+            };
+            if (!committed) {
+                health.* = .migration_failed;
+                break :migrated try state.Store.init(allocator, limits);
+            }
+            owned = false;
+            break :migrated store;
+        },
+    };
+}
 
 pub const Timer = struct {
     context: ?*anyopaque = null,
@@ -137,7 +219,7 @@ pub const Configuration = struct {
 pub const MutableProjection = struct {
     title: []u8,
     title_redacted: *bool,
-    execution_model: []u8,
+    binding_model: []u8,
     input: []u8,
     input_redacted: *bool,
 };
@@ -155,7 +237,7 @@ pub const Redaction = struct {
         return self.redact_fn(self.context, .{
             .title = item.title,
             .title_redacted = &item.title_redacted,
-            .execution_model = item.execution_model,
+            .binding_model = item.bindingModelMutable(),
             .input = item.input.value,
             .input_redacted = &item.input.redacted,
         }, additional_credential);
@@ -168,9 +250,10 @@ pub const Redaction = struct {
 
 pub const ExecutionBinding = struct {
     available: bool,
-    generation: u64 = 0,
+    model_ref: ?models_contract.ModelRef = null,
+    source_generation: u64 = 0,
+    selection_revision: u64 = 0,
     protocol: ?Protocol = null,
-    model: []const u8 = "",
     automatic_workspace_available: bool,
 };
 
@@ -188,12 +271,18 @@ const Claim = struct {
     source: OccurrenceSource,
     title: []u8,
     input: []u8,
-    execution_generation: u64,
+    source_id: []u8,
+    model_id: []u8,
+    source_generation: u64,
+    selection_revision: u64,
+    protocol: Protocol,
     permission_profile: PermissionProfile,
 
     pub fn deinit(self: *Claim) void {
         self.allocator.free(self.title);
         self.allocator.free(self.input);
+        self.allocator.free(self.source_id);
+        self.allocator.free(self.model_id);
         self.* = undefined;
     }
 };
@@ -216,7 +305,10 @@ const PendingCompletion = struct {
 pub const TaskLaunch = struct {
     title: []const u8,
     input: []const u8,
-    execution_generation: u64,
+    model_ref: models_contract.ModelRef,
+    source_generation: u64,
+    selection_revision: u64,
+    protocol: Protocol,
     permission_profile: PermissionProfile,
 };
 
@@ -277,18 +369,12 @@ pub const Runtime = struct {
         var health: PersistenceHealth =
             if (configuration.persistence.enabled) .ready else .unavailable;
         if (configuration.persistence.restore_failed) health = .read_failed;
-        const store = if (health == .ready and
-            configuration.persistence.restored_bytes != null)
-            persistence.decode(
-                allocator,
-                configuration.persistence.restored_bytes.?,
-                state_limits,
-            ) catch restored: {
-                health = .corrupt;
-                break :restored try state.Store.init(allocator, state_limits);
-            }
-        else
-            try state.Store.init(allocator, state_limits);
+        const store = try bootstrapStore(
+            allocator,
+            state_limits,
+            configuration.persistence,
+            &health,
+        );
         return .{
             .allocator = allocator,
             .store = store,
@@ -321,7 +407,7 @@ pub const Runtime = struct {
         if (!self.persistence.enabled) return false;
         return switch (self.persistence_health) {
             .read_failed, .corrupt, .write_failed, .outcome_unknown => true,
-            .unavailable, .ready => false,
+            .unavailable, .ready, .migration_failed => false,
         };
     }
 
@@ -602,6 +688,20 @@ pub const Runtime = struct {
         errdefer self.allocator.free(title);
         const input = try self.allocator.dupe(u8, candidate_item.input.borrowed());
         errdefer self.allocator.free(input);
+        const current_binding = switch (candidate_item.bindingView()) {
+            .current => |binding| binding,
+            .migration_required => return error.InvalidSchedule,
+        };
+        const source_id = try self.allocator.dupe(
+            u8,
+            current_binding.model_ref.source_id,
+        );
+        errdefer self.allocator.free(source_id);
+        const model_id = try self.allocator.dupe(
+            u8,
+            current_binding.model_ref.model_id,
+        );
+        errdefer self.allocator.free(model_id);
         try self.commitCandidate(&candidate, redaction);
         self.replace(&candidate);
         owned = false;
@@ -612,7 +712,11 @@ pub const Runtime = struct {
             .source = source,
             .title = title,
             .input = input,
-            .execution_generation = candidate_item.execution_generation,
+            .source_id = source_id,
+            .model_id = model_id,
+            .source_generation = current_binding.source_generation,
+            .selection_revision = current_binding.selection_revision,
+            .protocol = current_binding.protocol,
             .permission_profile = candidate_item.permission_profile,
         } };
     }
@@ -749,7 +853,13 @@ pub const Runtime = struct {
         const task_id = switch (tasks.launch(.{
             .title = claim.title,
             .input = claim.input,
-            .execution_generation = claim.execution_generation,
+            .model_ref = .{
+                .source_id = claim.source_id,
+                .model_id = claim.model_id,
+            },
+            .source_generation = claim.source_generation,
+            .selection_revision = claim.selection_revision,
+            .protocol = claim.protocol,
             .permission_profile = claim.permission_profile,
         })) {
             .submitted => |task_id| task_id,
@@ -927,6 +1037,7 @@ pub const testing = if (builtin.is_test) struct {
         title: []const u8,
         title_redacted: bool,
         input: []const u8,
+        binding: state.Binding,
         enabled: bool,
         health: Health,
         failure_reason: ?FailureReason,
@@ -959,6 +1070,7 @@ pub const testing = if (builtin.is_test) struct {
             .title = stored.title,
             .title_redacted = stored.title_redacted,
             .input = stored.input.borrowed(),
+            .binding = stored.bindingView(),
             .enabled = stored.enabled,
             .health = stored.health,
             .failure_reason = stored.failure_reason,
@@ -998,11 +1110,25 @@ fn reconcileBindingsInStore(
     for (store.items) |*entry| {
         const item = &(entry.* orelse continue);
         if (!item.enabled or item.health != .ready) continue;
+        const current = switch (item.bindingView()) {
+            .current => |value| value,
+            .migration_required => {
+                store.markNeedsAttention(item, .binding_migration_required);
+                changed = true;
+                continue;
+            },
+        };
+        const exact_model = if (binding.model_ref) |model_ref|
+            std.mem.eql(u8, current.model_ref.source_id, model_ref.source_id) and
+                std.mem.eql(u8, current.model_ref.model_id, model_ref.model_id)
+        else
+            false;
         const reason: ?FailureReason = if (!binding.available or
-            item.execution_generation != binding.generation or
+            !exact_model or
+            current.source_generation != binding.source_generation or
+            current.selection_revision != binding.selection_revision or
             binding.protocol == null or
-            item.execution_protocol != binding.protocol.? or
-            !std.mem.eql(u8, item.execution_model, binding.model))
+            current.protocol != binding.protocol.?)
             .execution_changed
         else if (!binding.automatic_workspace_available)
             .workspace_unavailable
@@ -1018,8 +1144,11 @@ fn reconcileBindingsInStore(
 
 const TestEffects = struct {
     now: u64 = 100,
+    restored_bytes: ?[]const u8 = null,
     commit_result: PersistenceCommit = .committed,
     recovery_result: PersistenceCommit = .committed,
+    observation: PersistenceObservation = .unknown,
+    commits: usize = 0,
     recoveries: usize = 0,
     notification_kind: ?NotificationKind = null,
     notification_task_id: u64 = 0,
@@ -1037,7 +1166,17 @@ const TestEffects = struct {
 
     fn commit(context: ?*anyopaque, _: []const u8) PersistenceCommit {
         const self: *TestEffects = @ptrCast(@alignCast(context.?));
+        self.commits += 1;
         return self.commit_result;
+    }
+
+    fn observe(
+        context: ?*anyopaque,
+        _: []const u8,
+        _: []const u8,
+    ) PersistenceObservation {
+        const self: *TestEffects = @ptrCast(@alignCast(context.?));
+        return self.observation;
     }
 
     fn recover(context: ?*anyopaque, _: []const u8) PersistenceCommit {
@@ -1060,8 +1199,10 @@ const TestEffects = struct {
         return .{
             .context = self,
             .enabled = true,
+            .restored_bytes = self.restored_bytes,
             .commit_fn = commit,
             .recover_fn = recover,
+            .observe_fn = observe,
         };
     }
 
@@ -1129,9 +1270,10 @@ fn testRedaction(context: *anyopaque) Redaction {
 fn testBinding() ExecutionBinding {
     return .{
         .available = true,
-        .generation = 1,
+        .model_ref = .{ .source_id = "metask:test", .model_id = "model" },
+        .source_generation = 1,
+        .selection_revision = 1,
         .protocol = .anthropic_messages,
-        .model = "model",
         .automatic_workspace_available = true,
     };
 }
@@ -1139,13 +1281,127 @@ fn testBinding() ExecutionBinding {
 fn testDefinition(title: []const u8, input: []const u8) Definition {
     return .{
         .title = title,
-        .execution_generation = 1,
-        .execution_protocol = .anthropic_messages,
-        .execution_model = "model",
+        .binding = .{ .current = .{
+            .model_ref = .{ .source_id = "metask:test", .model_id = "model" },
+            .source_generation = 1,
+            .selection_revision = 1,
+            .protocol = .anthropic_messages,
+        } },
         .permission_profile = .approval_required,
         .input = input,
         .recurrence = .{ .once = .{ .at_unix_seconds = 200 } },
     };
+}
+
+const legacy_schedule_bytes =
+    "{\"schema_version\":1,\"next_id\":8,\"items\":[{\"id\":7,\"epoch\":3,\"title\":\"Legacy schedule\",\"execution_generation\":19,\"execution_protocol\":\"anthropic_messages\",\"execution_model\":\"legacy-model\",\"permission_profile\":\"approval_required\",\"input\":{\"kind\":\"text\",\"text\":\"inspect\"},\"recurrence\":{\"kind\":\"once\",\"at_unix_seconds\":200},\"enabled\":true,\"health\":\"ready\",\"failure_reason\":null,\"next_run_at_unix_seconds\":200,\"occurrences\":[]}]}";
+
+test "schema 1 bootstrap persists a disabled explicit-rebind definition" {
+    var effects: TestEffects = .{ .restored_bytes = legacy_schedule_bytes };
+    var runtime = try Runtime.init(std.testing.allocator, .{
+        .max_items = 2,
+        .max_projection_bytes = 4096,
+    }, .{
+        .timer = effects.timer(),
+        .persistence = effects.persistence(),
+    });
+    defer runtime.deinit();
+
+    try std.testing.expectEqual(PersistenceHealth.ready, runtime.persistenceHealth());
+    try std.testing.expectEqual(@as(usize, 1), effects.commits);
+    const item = testing.item(&runtime, 7).?;
+    try std.testing.expect(!item.enabled);
+    try std.testing.expectEqual(Health.needs_attention, item.health);
+    try std.testing.expectEqual(
+        FailureReason.binding_migration_required,
+        item.failure_reason.?,
+    );
+    switch (item.binding) {
+        .migration_required => |legacy| {
+            try std.testing.expectEqual(@as(u64, 19), legacy.execution_generation);
+            try std.testing.expectEqualStrings("legacy-model", legacy.model);
+        },
+        .current => return error.TestUnexpectedResult,
+    }
+
+    try runtime.update(
+        7,
+        3,
+        testDefinition("Rebound schedule", "inspect"),
+        testBinding(),
+        testRedaction(&effects),
+    );
+    const rebound = testing.item(&runtime, 7).?;
+    try std.testing.expect(rebound.enabled);
+    try std.testing.expectEqual(Health.ready, rebound.health);
+    try std.testing.expect(rebound.failure_reason == null);
+    try std.testing.expectEqual(@as(u64, 4), rebound.epoch);
+    switch (rebound.binding) {
+        .current => |binding| try std.testing.expectEqualStrings(
+            "metask:test",
+            binding.model_ref.source_id,
+        ),
+        .migration_required => return error.TestUnexpectedResult,
+    }
+}
+
+test "schema 1 bootstrap fails closed around migration commit certainty" {
+    const limits: Limits = .{ .max_items = 2, .max_projection_bytes = 4096 };
+
+    var failed_effects: TestEffects = .{
+        .restored_bytes = legacy_schedule_bytes,
+        .commit_result = .failed,
+    };
+    var failed = try Runtime.init(
+        std.testing.allocator,
+        limits,
+        .{ .persistence = failed_effects.persistence() },
+    );
+    defer failed.deinit();
+    try std.testing.expectEqual(PersistenceHealth.migration_failed, failed.persistenceHealth());
+    try std.testing.expect(testing.item(&failed, 7) == null);
+    try std.testing.expect(!failed.persistenceRecoveryAvailable());
+
+    var before_effects: TestEffects = .{
+        .restored_bytes = legacy_schedule_bytes,
+        .commit_result = .outcome_unknown,
+        .observation = .before,
+    };
+    var before = try Runtime.init(
+        std.testing.allocator,
+        limits,
+        .{ .persistence = before_effects.persistence() },
+    );
+    defer before.deinit();
+    try std.testing.expectEqual(PersistenceHealth.migration_failed, before.persistenceHealth());
+    try std.testing.expect(testing.item(&before, 7) == null);
+
+    var after_effects: TestEffects = .{
+        .restored_bytes = legacy_schedule_bytes,
+        .commit_result = .outcome_unknown,
+        .observation = .after,
+    };
+    var after = try Runtime.init(
+        std.testing.allocator,
+        limits,
+        .{ .persistence = after_effects.persistence() },
+    );
+    defer after.deinit();
+    try std.testing.expectEqual(PersistenceHealth.ready, after.persistenceHealth());
+    try std.testing.expect(testing.item(&after, 7) != null);
+
+    var unknown_effects: TestEffects = .{
+        .restored_bytes = legacy_schedule_bytes,
+        .commit_result = .outcome_unknown,
+    };
+    var unknown = try Runtime.init(
+        std.testing.allocator,
+        limits,
+        .{ .persistence = unknown_effects.persistence() },
+    );
+    defer unknown.deinit();
+    try std.testing.expectEqual(PersistenceHealth.outcome_unknown, unknown.persistenceHealth());
+    try std.testing.expect(testing.item(&unknown, 7) == null);
 }
 
 test "occurrence claim owns launch facts across later store replacement" {
@@ -1184,6 +1440,31 @@ test "occurrence claim owns launch facts across later store replacement" {
     );
     try std.testing.expectEqualStrings("first", claim.title);
     try std.testing.expectEqualStrings("launch input", claim.input);
+}
+
+test "selection revision prevents default-binding ABA from launching" {
+    var effects: TestEffects = .{};
+    var runtime = try Runtime.init(std.testing.allocator, .{
+        .max_items = 1,
+        .max_projection_bytes = 4096,
+    }, .{
+        .timer = effects.timer(),
+        .persistence = effects.persistence(),
+    });
+    defer runtime.deinit();
+    const redaction = testRedaction(&effects);
+    const id = try runtime.create(
+        testDefinition("ABA", "inspect"),
+        testBinding(),
+        redaction,
+    );
+    var changed_binding = testBinding();
+    changed_binding.selection_revision = 3;
+    try std.testing.expect(runtime.refreshBindingNoFail(changed_binding, redaction));
+    const item = testing.item(&runtime, id).?;
+    try std.testing.expect(!item.enabled);
+    try std.testing.expectEqual(Health.needs_attention, item.health);
+    try std.testing.expectEqual(FailureReason.execution_changed, item.failure_reason.?);
 }
 
 test "persistence health failure remains observable through change latch" {

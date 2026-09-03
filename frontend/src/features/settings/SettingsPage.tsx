@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import type {
   AccountView,
-  ExecutionView,
+  ModelsView,
   Protocol,
   PermissionProfile,
 } from "../../bridge/contracts.ts";
@@ -15,11 +15,9 @@ import {
 import { useI18n, type Locale } from "../../i18n/context.ts";
 import { accountErrorText } from "../../i18n/account-error.ts";
 
-const MODEL_CONNECTION_SETTINGS_ENABLED: boolean = false;
-
 export type SettingsFocusTarget = "title" | "account" | "model_connections";
 type SettingsSection =
-  "general" | "permissions" | "account" | "model_connections";
+  "general" | "permissions" | "account" | "models" | "model_connections";
 type RequestedSelection = {
   selectionId: string;
   label: string;
@@ -32,11 +30,11 @@ type ModelConnectionDraft = {
 };
 type ModelConnectionEditDraft = Omit<ModelConnectionDraft, "modelId"> & {
   connectionId: string;
-  expectedConnectionGeneration: string;
+  expectedConnectionRevision: string;
 };
 type ModelConnectionRemoval = {
   connectionId: string;
-  expectedConnectionGeneration: string;
+  expectedConnectionRevision: string;
 };
 
 const modelConnectionEndpointDefaults: Record<Protocol, string> = {
@@ -56,17 +54,17 @@ function newModelConnectionDraft(): ModelConnectionDraft {
 }
 
 function apiLabel(
-  api: AccountView["apiKeys"][number],
+  api: ModelsView["providers"][number]["apiKeys"][number],
   t: ReturnType<typeof useI18n>["t"],
 ) {
-  return api.name.trim() || `${t("account.api_fallback")} ${api.selectionId}`;
+  return api.name.trim() || `${t("account.api_fallback")} ${api.id}`;
 }
 
 function modelLabel(
-  model: AccountView["models"][number],
+  model: ModelsView["providers"][number]["models"][number],
   t: ReturnType<typeof useI18n>["t"],
 ) {
-  return model.displayName.trim() || model.selectionId;
+  return model.displayName.trim() || model.id;
 }
 
 function modelConnectionProtocolLabel(
@@ -77,21 +75,21 @@ function modelConnectionProtocolLabel(
 }
 
 function modelConnectionCredentialLabel(
-  status: ExecutionView["modelConnections"][number]["credentialStatus"],
+  status: ModelsView["connections"][number]["credentialStatus"],
   t: ReturnType<typeof useI18n>["t"],
 ) {
   return t(`settings.model_connection_credential.${status}`);
 }
 
 function modelConnectionStateLabel(
-  state: ExecutionView["modelConnections"][number]["state"],
+  state: ModelsView["connections"][number]["state"],
   t: ReturnType<typeof useI18n>["t"],
 ) {
   return t(`settings.model_connection_state.${state}`);
 }
 
 function modelConnectionTestStatusLabel(
-  status: ExecutionView["modelConnections"][number]["testStatus"],
+  status: ModelsView["connections"][number]["testStatus"],
   t: ReturnType<typeof useI18n>["t"],
 ) {
   return t(`settings.model_connection_test_status.${status}`);
@@ -99,7 +97,7 @@ function modelConnectionTestStatusLabel(
 
 export function SettingsPage({
   account,
-  execution,
+  models,
   modelConnectionCapabilities,
   permissionProfiles,
   focusTarget,
@@ -115,6 +113,7 @@ export function SettingsPage({
   onActivateMetask,
   onCreateModelConnection,
   onUpdateModelConnection,
+  onReplaceModelConnectionCredential,
   onRemoveModelConnection,
   onTestModelConnection,
   onSelectModelConnection,
@@ -123,7 +122,7 @@ export function SettingsPage({
   onSetDefaultPermissionProfile,
 }: {
   account: AccountView;
-  execution: ExecutionView;
+  models: ModelsView;
   modelConnectionCapabilities: {
     management: boolean;
     secretCapture: boolean;
@@ -150,18 +149,24 @@ export function SettingsPage({
   onUpdateModelConnection: (
     input: ModelConnectionEditDraft,
   ) => Promise<boolean>;
+  onReplaceModelConnectionCredential: (
+    connectionId: string,
+    expectedConnectionRevision: string,
+  ) => Promise<boolean>;
   onRemoveModelConnection: (
     connectionId: string,
-    expectedConnectionGeneration: string,
+    expectedConnectionRevision: string,
   ) => Promise<boolean>;
   onTestModelConnection: (
     connectionId: string,
-    connectionGeneration: string,
+    connectionRevision: string,
     modelId: string,
+    sourceGeneration: string,
+    catalogGeneration: string,
   ) => void;
   onSelectModelConnection: (
     connectionId: string,
-    connectionGeneration: string,
+    connectionRevision: string,
     modelId: string,
   ) => void;
   onBeginLogin: () => void;
@@ -170,7 +175,6 @@ export function SettingsPage({
 }) {
   const { locale, setLocale, t } = useI18n();
   const modelConnectionSettingsAvailable =
-    MODEL_CONNECTION_SETTINGS_ENABLED &&
     modelConnectionCapabilities.management &&
     modelConnectionCapabilities.secretCapture &&
     modelConnectionCapabilities.connectionTest;
@@ -193,54 +197,47 @@ export function SettingsPage({
   const content = useRef<HTMLDivElement>(null);
   const title = useRef<HTMLHeadingElement>(null);
   const accountSection = useRef<HTMLElement>(null);
+  const modelsSection = useRef<HTMLElement>(null);
   const permissionsSection = useRef<HTMLElement>(null);
   const accountHeading = useRef<HTMLHeadingElement>(null);
+  const modelsHeading = useRef<HTMLHeadingElement>(null);
   const modelConnectionsSection = useRef<HTMLDivElement>(null);
   const modelConnectionsHeading = useRef<HTMLHeadingElement>(null);
   const signOut = useRef<HTMLButtonElement>(null);
   const signOutCancel = useRef<HTMLButtonElement>(null);
-  const modelCatalogApi = useMemo(
-    () =>
-      account.apiKeys.find(
-        (key) => key.selectionId === account.modelCatalogApiKeySelectionId,
-      ) ?? null,
-    [account.apiKeys, account.modelCatalogApiKeySelectionId],
+  const metaskProvider = models.providers.find(
+    (provider) => provider.id === "metask",
   );
-  const committedApi = account.apiKeys.find(
-    (key) => key.selectionId === account.selectedApiKeySelectionId,
+  const metaskApiKeys = metaskProvider?.apiKeys ?? [];
+  const metaskModels = metaskProvider?.models ?? [];
+  const metaskCatalogState =
+    metaskProvider?.catalogState ?? "needs_authentication";
+  const selectedApiId = metaskProvider?.selectedApiKeyId ?? "";
+  const selectedModelId = models.metaskSelection?.modelId ?? "";
+  const customDefaultSelected = models.connections.some(
+    (connection) => connection.id === models.defaultSelection?.sourceId,
   );
-  const committedModel = account.models.find(
-    (model) => model.selectionId === account.selectedModelSelectionId,
+  const committedApi = metaskApiKeys.find((key) => key.id === selectedApiId);
+  const committedModel = metaskModels.find(
+    (model) => model.id === selectedModelId,
   );
-  const hostCandidateApi = account.apiKeys.find(
-    (key) => key.selectionId === account.candidateApiKeySelectionId,
-  );
-  const hostCandidateModel = account.models.find(
-    (model) => model.selectionId === account.candidateModelSelectionId,
-  );
-  const candidateApiId =
-    account.candidateApiKeySelectionId || requestedApi?.selectionId || "";
-  const candidateModelId =
-    account.candidateModelSelectionId || requestedModel?.selectionId || "";
+  const candidateApiId = requestedApi?.selectionId ?? "";
+  const candidateModelId = requestedModel?.selectionId ?? "";
   const candidateApi =
-    hostCandidateApi ??
-    account.apiKeys.find((key) => key.selectionId === candidateApiId) ??
-    null;
+    metaskApiKeys.find((key) => key.id === candidateApiId) ?? null;
   const candidateModel =
-    hostCandidateModel ??
-    account.models.find((model) => model.selectionId === candidateModelId) ??
-    null;
-  const modelCatalogLoading =
-    account.catalogState === "loading" &&
-    account.candidateApiKeySelectionId.length > 0;
-  const apiBusy = account.catalogState === "loading";
-  const modelBusy = account.catalogState === "loading";
+    metaskModels.find((model) => model.id === candidateModelId) ?? null;
+  const modelCatalogLoading = models.operation === "refreshing_catalog";
+  const apiBusy = modelCatalogLoading;
+  const modelBusy = modelCatalogLoading;
   const authenticated = account.state === "authenticated";
-  const preferenceRecovery = account.errorCode === "recovery_state_invalid";
+  const preferenceRecovery = models.persistenceHealth === "recovery_required";
   const canChooseApi =
-    authenticated && !preferenceRecovery && account.catalogState !== "loading";
+    authenticated && !preferenceRecovery && !modelCatalogLoading;
   const canChooseModel =
-    authenticated && !preferenceRecovery && account.catalogState !== "loading";
+    authenticated &&
+    !preferenceRecovery &&
+    (metaskCatalogState === "ready" || metaskCatalogState === "choosing");
   const languageOptions = useMemo<SelectionMenuOption[]>(
     () => [
       { value: "en-US", label: t("app.language.en-US") },
@@ -263,18 +260,18 @@ export function SettingsPage({
   );
   const apiOptions = useMemo<SelectionMenuOption[]>(
     () =>
-      account.apiKeys.map((key) => ({
-        value: key.selectionId,
+      metaskApiKeys.map((key) => ({
+        value: key.id,
         label: apiLabel(key, t),
         description: modelConnectionProtocolLabel(key.protocol, t),
         descriptionKind: "text",
         trailing: key.suffix ? `•••• ${key.suffix}` : undefined,
       })),
-    [account.apiKeys, t],
+    [metaskApiKeys, t],
   );
   const modelOptions = useMemo<SelectionMenuOption[]>(() => {
-    const options = account.models.map((model) => ({
-      value: model.selectionId,
+    const options = metaskModels.map((model) => ({
+      value: model.id,
       label: modelLabel(model, t),
     }));
     if (
@@ -287,7 +284,7 @@ export function SettingsPage({
       });
     }
     return options;
-  }, [account.models, requestedModel, t]);
+  }, [metaskModels, requestedModel, t]);
   const modelConnectionProtocolOptions = useMemo<SelectionMenuOption[]>(
     () =>
       (["openai_chat_completions", "gemini_native"] as const).map(
@@ -298,32 +295,6 @@ export function SettingsPage({
       ),
     [t],
   );
-  // While the host is asking for a choice (parked "choosing" with no
-  // candidate), the selector must not pre-fill the committed value: the
-  // select control never fires for the already-displayed value, which would
-  // make retrying the same key/model impossible after a failure park.
-  const awaitingApiChoice =
-    account.catalogState === "choosing" &&
-    account.candidateApiKeySelectionId.length === 0;
-  const awaitingModelChoice =
-    account.catalogState === "choosing" &&
-    account.candidateApiKeySelectionId.length > 0 &&
-    account.candidateModelSelectionId.length === 0;
-  const selectedApiId = awaitingApiChoice
-    ? requestedApi?.selectionId || ""
-    : candidateApi?.selectionId ||
-      modelCatalogApi?.selectionId ||
-      committedApi?.selectionId ||
-      "";
-  const selectedModelId = awaitingModelChoice
-    ? requestedModel?.selectionId || ""
-    : candidateModel
-      ? candidateModel.selectionId
-      : account.models.some(
-            (model) => model.selectionId === account.selectedModelSelectionId,
-          )
-        ? account.selectedModelSelectionId
-        : "";
   const apiHasAlternative = apiOptions.some(
     (option) => option.value !== selectedApiId,
   );
@@ -338,7 +309,7 @@ export function SettingsPage({
     !modelHasAlternative;
   const modelPlaceholder = modelCatalogLoading
     ? t("settings.model_loading")
-    : account.catalogState === "choosing" && candidateApiId.length === 0
+    : metaskCatalogState === "choosing" && candidateApiId.length === 0
       ? t("settings.model_waiting_api")
       : t("account.choose_model");
   const committedApiName = committedApi
@@ -346,7 +317,7 @@ export function SettingsPage({
     : t("account.api_fallback");
   const committedModelName =
     (committedModel ? modelLabel(committedModel, t) : "") ||
-    account.selectedModelSelectionId ||
+    selectedModelId ||
     t("account.model_fallback");
   const candidateApiName =
     (candidateApi ? apiLabel(candidateApi, t) : "") ||
@@ -361,13 +332,13 @@ export function SettingsPage({
       : candidateModelId) ||
     t("account.model_fallback");
   const apiHasPendingChange =
-    candidateApiId.length > 0 &&
-    candidateApiId !== account.selectedApiKeySelectionId;
+    candidateApiId.length > 0 && candidateApiId !== selectedApiId;
   const modelHasPendingChange =
-    candidateModelId.length > 0 &&
-    candidateModelId !== account.selectedModelSelectionId;
+    candidateModelId.length > 0 && candidateModelId !== selectedModelId;
   const transactionStatus = (() => {
-    switch (account.catalogState) {
+    switch (metaskCatalogState) {
+      case "needs_authentication":
+        return null;
       case "loading":
         if (modelHasPendingChange) {
           return {
@@ -463,39 +434,39 @@ export function SettingsPage({
   useEffect(() => {
     setModelConnectionEdit((current) => {
       if (!current) return null;
-      const connection = execution.modelConnections.find(
+      const connection = models.connections.find(
         (candidate) => candidate.id === current.connectionId,
       );
-      return connection?.connectionGeneration ===
-        current.expectedConnectionGeneration
+      return connection?.connectionRevision ===
+        current.expectedConnectionRevision
         ? current
         : null;
     });
     setModelConnectionRemoval((current) => {
       if (!current) return null;
-      const connection = execution.modelConnections.find(
+      const connection = models.connections.find(
         (candidate) => candidate.id === current.connectionId,
       );
-      return connection?.connectionGeneration ===
-        current.expectedConnectionGeneration
+      return connection?.connectionRevision ===
+        current.expectedConnectionRevision
         ? current
         : null;
     });
-  }, [execution.modelConnections]);
+  }, [models.connections]);
 
   useEffect(() => {
     if (
-      account.errorCode !== "none" ||
+      models.errorCode !== "none" ||
       account.state !== "authenticated" ||
-      (account.catalogState === "ready" && !disabled)
+      (metaskCatalogState === "ready" && !disabled)
     ) {
       setRequestedApi(null);
       setRequestedModel(null);
     }
   }, [
-    account.errorCode,
-    account.catalogState,
-    account.selectedModelSelectionId,
+    models.errorCode,
+    metaskCatalogState,
+    models.metaskSelection,
     account.state,
     disabled,
   ]);
@@ -546,7 +517,7 @@ export function SettingsPage({
       if (
         await onRemoveModelConnection(
           modelConnectionRemoval.connectionId,
-          modelConnectionRemoval.expectedConnectionGeneration,
+          modelConnectionRemoval.expectedConnectionRevision,
         )
       )
         setModelConnectionRemoval(null);
@@ -568,6 +539,7 @@ export function SettingsPage({
     if (
       !content.current ||
       !accountSection.current ||
+      !modelsSection.current ||
       !modelConnectionsSection.current ||
       (permissionProfiles.enabled && !permissionsSection.current)
     )
@@ -580,6 +552,8 @@ export function SettingsPage({
       contentTop(modelConnectionsSection.current) <= readingLine
     )
       setActiveSection("model_connections");
+    else if (contentTop(modelsSection.current) <= readingLine)
+      setActiveSection("models");
     else if (contentTop(accountSection.current) <= readingLine)
       setActiveSection("account");
     else if (
@@ -680,6 +654,25 @@ export function SettingsPage({
               <Icon name="account" />
             </span>
             <span>{t("settings.account")}</span>
+          </a>
+          <a
+            className="focus-ring"
+            href="#settings-models"
+            aria-current={activeSection === "models" ? "location" : undefined}
+            onClick={(event) => {
+              event.preventDefault();
+              setActiveSection("models");
+              if (!content.current || !modelsHeading.current) return;
+              content.current.scrollTo({
+                top: contentTop(modelsHeading.current) - 18,
+                behavior: "smooth",
+              });
+            }}
+          >
+            <span className="settings-nav-icon" aria-hidden="true">
+              <Icon name="model" />
+            </span>
+            <span>{t("settings.models")}</span>
           </a>
           <a
             className="focus-ring"
@@ -812,7 +805,16 @@ export function SettingsPage({
                     : t("account.sign_in_required.body")}
                 </span>
               </div>
-              {(!authenticated || preferenceRecovery) && (
+              {account.canCancel ? (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  disabled={cancelDisabled}
+                  onClick={onCancel}
+                >
+                  {t("common.cancel")}
+                </Button>
+              ) : !authenticated ? (
                 <Button
                   variant="secondary"
                   size="sm"
@@ -821,7 +823,92 @@ export function SettingsPage({
                 >
                   {t("account.login")}
                 </Button>
+              ) : null}
+            </div>
+
+            {account.errorCode !== "none" &&
+              account.errorCode !== "user_cancelled" && (
+                <div className="settings-error" role="alert">
+                  <Icon name="warning" />
+                  <span className="settings-error-copy">
+                    <strong>{t("account.action_failed")}</strong>
+                    <span>{accountErrorText(account.errorCode, t)}</span>
+                    {account.safeDiagnostic && (
+                      <span className="settings-error-diagnostic">
+                        {account.safeDiagnostic}
+                      </span>
+                    )}
+                  </span>
+                </div>
               )}
+
+            {authenticated && (
+              <div className="settings-danger-zone">
+                <div>
+                  <h3 id="settings-signout-title">
+                    {t("settings.signout_title")}
+                  </h3>
+                  <p>{t("settings.signout_help")}</p>
+                </div>
+                {!confirmSignOut ? (
+                  <Button
+                    variant="danger"
+                    size="sm"
+                    ref={signOut}
+                    disabled={disabled || accountDisabled}
+                    onClick={() => setConfirmSignOut(true)}
+                  >
+                    {t("account.logout_short")}
+                  </Button>
+                ) : (
+                  <div
+                    className="settings-signout-confirmation"
+                    role="group"
+                    aria-labelledby="settings-signout-title"
+                    aria-describedby="settings-signout-confirmation-copy"
+                    onKeyDown={(event) => {
+                      if (event.key !== "Escape") return;
+                      event.preventDefault();
+                      closeSignOutConfirmation();
+                    }}
+                  >
+                    <p id="settings-signout-confirmation-copy">
+                      {t("account.logout_confirm")}
+                    </p>
+                    <span>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        ref={signOutCancel}
+                        onClick={closeSignOutConfirmation}
+                      >
+                        {t("common.cancel")}
+                      </Button>
+                      <Button
+                        variant="danger"
+                        size="sm"
+                        disabled={disabled || accountDisabled}
+                        onClick={onLogout}
+                      >
+                        {t("account.logout")}
+                      </Button>
+                    </span>
+                  </div>
+                )}
+              </div>
+            )}
+          </section>
+
+          <section
+            ref={modelsSection}
+            id="settings-models"
+            className="settings-section"
+          >
+            <div className="settings-section-heading">
+              <p>{t("settings.section_label")}</p>
+              <h2 ref={modelsHeading} tabIndex={-1}>
+                {t("settings.models")}
+              </h2>
             </div>
 
             <div
@@ -834,9 +921,9 @@ export function SettingsPage({
                   {t("settings.execution_defaults")}
                 </h3>
                 <div className="settings-execution-actions">
-                  {execution.defaultSource === "model_connection" &&
+                  {customDefaultSelected &&
                     authenticated &&
-                    account.catalogState === "ready" && (
+                    metaskCatalogState === "ready" && (
                       <Button
                         variant="secondary"
                         size="sm"
@@ -848,8 +935,8 @@ export function SettingsPage({
                     )}
                   <span className="settings-catalog-count">
                     {t("settings.catalog_count", {
-                      apis: account.apiKeys.length,
-                      models: account.models.length,
+                      apis: metaskApiKeys.length,
+                      models: metaskModels.length,
                     })}
                   </span>
                   <button
@@ -884,7 +971,7 @@ export function SettingsPage({
                 <div className="settings-control-stack">
                   <SelectionMenu
                     triggerId="settings-api"
-                    value={selectedApiId}
+                    value={candidateApiId || selectedApiId}
                     options={apiOptions}
                     placeholder={t("account.choose_key")}
                     ariaLabel={t("settings.default_api")}
@@ -900,7 +987,7 @@ export function SettingsPage({
                       disabled ||
                       accountDisabled ||
                       !canChooseApi ||
-                      account.apiKeys.length === 0
+                      metaskApiKeys.length === 0
                     }
                     busy={apiBusy}
                     valueLayout="detailed"
@@ -908,8 +995,8 @@ export function SettingsPage({
                     triggerClassName="settings-control settings-control-detailed"
                     contentClassName="settings-selection-menu"
                     onValueChange={(value) => {
-                      const api = account.apiKeys.find(
-                        (candidate) => candidate.selectionId === value,
+                      const api = metaskApiKeys.find(
+                        (candidate) => candidate.id === value,
                       );
                       if (!api) return;
                       setRequestedApi({
@@ -938,11 +1025,11 @@ export function SettingsPage({
                     {t("settings.default_model")}
                   </label>
                   <p>
-                    {modelCatalogLoading && (candidateApi || modelCatalogApi)
+                    {modelCatalogLoading && (candidateApi || committedApi)
                       ? t("settings.loading_models_for", {
                           api:
                             candidateApi?.name ||
-                            modelCatalogApi?.name ||
+                            committedApi?.name ||
                             t("account.api_fallback"),
                         })
                       : t(
@@ -955,7 +1042,7 @@ export function SettingsPage({
                 <div className="settings-control-stack">
                   <SelectionMenu
                     triggerId="settings-model"
-                    value={selectedModelId}
+                    value={candidateModelId || selectedModelId}
                     options={modelOptions}
                     placeholder={modelPlaceholder}
                     ariaLabel={t("settings.default_model")}
@@ -971,15 +1058,15 @@ export function SettingsPage({
                       disabled ||
                       accountDisabled ||
                       !canChooseModel ||
-                      account.models.length === 0
+                      metaskModels.length === 0
                     }
                     busy={modelBusy}
                     leading={<Icon name="model" />}
                     triggerClassName="settings-control"
                     contentClassName="settings-selection-menu"
                     onValueChange={(value) => {
-                      const model = account.models.find(
-                        (candidate) => candidate.selectionId === value,
+                      const model = metaskModels.find(
+                        (candidate) => candidate.id === value,
                       );
                       if (!model) return;
                       setRequestedModel({
@@ -1009,122 +1096,25 @@ export function SettingsPage({
                     <strong>{transactionStatus.title}</strong>
                     <span>{transactionStatus.detail}</span>
                   </span>
-                  {account.canCancel && (
-                    <button
-                      className="text-button focus-ring"
-                      disabled={cancelDisabled}
-                      onClick={onCancel}
-                    >
-                      {t("common.cancel")}
-                    </button>
-                  )}
                 </div>
               )}
             </div>
-
-            {account.errorCode === "user_cancelled" &&
-              account.catalogState === "ready" && (
-                <p className="settings-outcome" role="status">
-                  <Icon name="check" />
-                  {t("settings.switch.cancelled", {
-                    api: committedApiName,
-                    model: committedModelName,
-                  })}
-                </p>
-              )}
 
             <p className="settings-binding-note">
               <Icon name="check" />
               {t("settings.existing_tasks_unchanged")}
             </p>
 
-            {account.errorCode !== "none" &&
-              account.errorCode !== "user_cancelled" && (
+            {models.errorCode !== "none" &&
+              models.errorCode !== "authorization_unavailable" && (
                 <div className="settings-error" role="alert">
                   <Icon name="warning" />
                   <span className="settings-error-copy">
-                    <strong>{t("account.action_failed")}</strong>
-                    <span>{accountErrorText(account.errorCode, t)}</span>
-                    {account.safeDiagnostic && (
-                      <span className="settings-error-diagnostic">
-                        {account.safeDiagnostic}
-                      </span>
-                    )}
-                    {account.catalogState === "ready" && (
-                      <span>
-                        {t("settings.switch.failure_preserved", {
-                          api: committedApiName,
-                          model: committedModelName,
-                        })}
-                      </span>
-                    )}
+                    <strong>{t("settings.models_error")}</strong>
+                    <span>{t("settings.models_error_help")}</span>
                   </span>
                 </div>
               )}
-
-            {authenticated && (
-              <div className="settings-danger-zone">
-                <div>
-                  <h3 id="settings-signout-title">
-                    {t("settings.signout_title")}
-                  </h3>
-                  <p>{t("settings.signout_help")}</p>
-                </div>
-                {!confirmSignOut ? (
-                  <Button
-                    variant="danger"
-                    size="sm"
-                    ref={signOut}
-                    disabled={
-                      disabled ||
-                      accountDisabled ||
-                      account.catalogState === "loading"
-                    }
-                    onClick={() => setConfirmSignOut(true)}
-                  >
-                    {t("account.logout_short")}
-                  </Button>
-                ) : (
-                  <div
-                    className="settings-signout-confirmation"
-                    role="group"
-                    aria-labelledby="settings-signout-title"
-                    aria-describedby="settings-signout-confirmation-copy"
-                    onKeyDown={(event) => {
-                      if (event.key !== "Escape") return;
-                      event.preventDefault();
-                      closeSignOutConfirmation();
-                    }}
-                  >
-                    <p id="settings-signout-confirmation-copy">
-                      {t("account.logout_confirm")}
-                    </p>
-                    <span>
-                      <Button
-                        variant="secondary"
-                        size="sm"
-                        ref={signOutCancel}
-                        onClick={closeSignOutConfirmation}
-                      >
-                        {t("common.cancel")}
-                      </Button>
-                      <Button
-                        variant="danger"
-                        size="sm"
-                        disabled={
-                          disabled ||
-                          accountDisabled ||
-                          account.catalogState === "loading"
-                        }
-                        onClick={onLogout}
-                      >
-                        {t("account.logout")}
-                      </Button>
-                    </span>
-                  </div>
-                )}
-              </div>
-            )}
           </section>
 
           <section
@@ -1301,13 +1291,13 @@ export function SettingsPage({
               <p className="settings-model-connections-empty">
                 {t("settings.model_connections_unavailable")}
               </p>
-            ) : execution.modelConnections.length === 0 ? (
+            ) : models.connections.length === 0 ? (
               <p className="settings-model-connections-empty">
                 {t("settings.model_connections_empty")}
               </p>
             ) : (
               <div className="settings-model-connection-list">
-                {execution.modelConnections.map((connection) => (
+                {models.connections.map((connection) => (
                   <div
                     className="settings-model-connection"
                     key={connection.id}
@@ -1339,6 +1329,23 @@ export function SettingsPage({
                         disabled={
                           disabled ||
                           executionDisabled ||
+                          mutatingModelConnection ||
+                          !modelConnectionCapabilities.secretCapture
+                        }
+                        onClick={() =>
+                          void onReplaceModelConnectionCredential(
+                            connection.id,
+                            connection.connectionRevision,
+                          )
+                        }
+                      >
+                        {t("settings.model_connection_replace_credential")}
+                      </button>
+                      <button
+                        className="text-button focus-ring"
+                        disabled={
+                          disabled ||
+                          executionDisabled ||
                           !modelConnectionCapabilities.connectionTest ||
                           connection.testStatus === "testing" ||
                           connection.credentialStatus !== "ready" ||
@@ -1347,8 +1354,10 @@ export function SettingsPage({
                         onClick={() =>
                           onTestModelConnection(
                             connection.id,
-                            connection.connectionGeneration,
+                            connection.connectionRevision,
                             connection.selectedModel,
+                            connection.sourceGeneration,
+                            connection.catalogGeneration,
                           )
                         }
                       >
@@ -1358,13 +1367,14 @@ export function SettingsPage({
                       </button>
                       <SelectionMenu
                         value={
-                          execution.selectedModelConnectionId === connection.id
-                            ? connection.selectedModel
+                          models.defaultSelection?.sourceId === connection.id
+                            ? models.defaultSelection.modelId
                             : ""
                         }
                         options={connection.models.map((model) => ({
                           value: model.id,
                           label: model.displayName || model.id,
+                          disabled: !model.ready,
                         }))}
                         placeholder={t("settings.model_connection_set_default")}
                         ariaLabel={t(
@@ -1384,7 +1394,7 @@ export function SettingsPage({
                         onValueChange={(modelId) =>
                           onSelectModelConnection(
                             connection.id,
-                            connection.connectionGeneration,
+                            connection.connectionRevision,
                             modelId,
                           )
                         }
@@ -1395,14 +1405,14 @@ export function SettingsPage({
                           disabled ||
                           executionDisabled ||
                           mutatingModelConnection ||
-                          execution.selectedModelConnectionId === connection.id
+                          models.defaultSelection?.sourceId === connection.id
                         }
                         onClick={() => {
                           setModelConnectionRemoval(null);
                           setModelConnectionEdit({
                             connectionId: connection.id,
-                            expectedConnectionGeneration:
-                              connection.connectionGeneration,
+                            expectedConnectionRevision:
+                              connection.connectionRevision,
                             displayName: connection.displayName,
                             protocol: connection.protocol,
                             normalizedBaseUrl: connection.normalizedBaseUrl,
@@ -1417,21 +1427,21 @@ export function SettingsPage({
                           disabled ||
                           executionDisabled ||
                           mutatingModelConnection ||
-                          execution.selectedModelConnectionId === connection.id
+                          models.defaultSelection?.sourceId === connection.id
                         }
                         onClick={() => {
                           setModelConnectionEdit(null);
                           setModelConnectionRemoval({
                             connectionId: connection.id,
-                            expectedConnectionGeneration:
-                              connection.connectionGeneration,
+                            expectedConnectionRevision:
+                              connection.connectionRevision,
                           });
                         }}
                       >
                         {t("common.remove")}
                       </button>
                     </div>
-                    {execution.selectedModelConnectionId === connection.id && (
+                    {models.defaultSelection?.sourceId === connection.id && (
                       <p className="settings-model-connection-active-note">
                         {t("settings.model_connection_active_mutation_help")}
                       </p>

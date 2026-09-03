@@ -300,50 +300,66 @@ test("SelectionMenu exposes a visible busy state without a false chevron", () =>
 
 const readySettingsAccount = {
   state: "authenticated",
-  catalogState: "ready",
   canCancel: false,
   accountId: "account-1",
   displayName: "Metask User",
-  apiKeys: [
-    {
-      selectionId: "key-1",
-      name: "Primary",
-      suffix: "1234",
-      protocol: "anthropic_messages",
-    },
-    {
-      selectionId: "key-2",
-      name: "Backup",
-      suffix: "5678",
-      protocol: "openai_chat_completions",
-    },
-  ],
-  models: [
-    { selectionId: "model-1", displayName: "Model One" },
-    { selectionId: "model-2", displayName: "Model Two" },
-  ],
-  selectedApiKeySelectionId: "key-1",
-  selectedModelSelectionId: "model-1",
-  candidateApiKeySelectionId: "",
-  candidateModelSelectionId: "",
-  modelCatalogApiKeySelectionId: "key-1",
   errorCode: "none",
   safeDiagnostic: "",
-  catalogGeneration: "1",
 };
 
-const readySettingsExecution = {
-  state: "ready",
-  defaultSource: "metask",
-  activeSource: "metask",
-  activeGeneration: "1",
-  taskCreationAvailable: true,
-  selectedModelConnectionId: "",
-  modelConnections: [],
+const readySettingsModels = {
+  availability: "ready",
+  persistenceHealth: "ready",
+  providers: [
+    {
+      id: "metask",
+      displayName: "Metask",
+      recommended: true,
+      catalogState: "ready",
+      principalRef: "account-1",
+      apiKeys: [
+        {
+          id: "key-1",
+          name: "Primary",
+          suffix: "1234",
+          protocol: "anthropic_messages",
+        },
+        {
+          id: "key-2",
+          name: "Backup",
+          suffix: "5678",
+          protocol: "openai_chat_completions",
+        },
+      ],
+      models: [
+        { id: "model-1", displayName: "Model One" },
+        { id: "model-2", displayName: "Model Two" },
+      ],
+      selectedApiKeyId: "key-1",
+      catalogGeneration: "1",
+      sourceGeneration: "1",
+      errorCode: "none",
+      safeDiagnostic: "",
+    },
+  ],
+  metaskSelection: { sourceId: "metask:key-1", modelId: "model-1" },
+  metaskSelectionRevision: "1",
+  defaultSelection: { sourceId: "metask:key-1", modelId: "model-1" },
+  selectionRevision: "1",
+  operation: "idle",
   errorCode: "none",
+  connections: [],
 };
 
-function settingsElement(account, execution, overrides = {}) {
+function settingsModels(provider = {}, view = {}) {
+  return {
+    ...readySettingsModels,
+    ...view,
+    providers: [{ ...readySettingsModels.providers[0], ...provider }],
+  };
+}
+
+function settingsElement(account, overrides = {}) {
   return createElement(
     I18nContext.Provider,
     {
@@ -355,7 +371,7 @@ function settingsElement(account, execution, overrides = {}) {
     },
     createElement(SettingsPage, {
       account,
-      execution,
+      models: readySettingsModels,
       modelConnectionCapabilities: {
         management: true,
         secretCapture: false,
@@ -397,11 +413,7 @@ function settingsElement(account, execution, overrides = {}) {
   );
 }
 
-function renderSettings(
-  account,
-  overrides = {},
-  execution = readySettingsExecution,
-) {
+function renderSettings(account, overrides = {}) {
   const selections = { api: [], model: [] };
   const callbacks = {
     onSelectApiKey(value) {
@@ -412,15 +424,44 @@ function renderSettings(
     },
     ...overrides,
   };
-  const view = render(settingsElement(account, execution, callbacks));
+  const view = render(settingsElement(account, callbacks));
   return {
     ...view,
     selections,
     rerenderAccount(nextAccount) {
-      view.rerender(settingsElement(nextAccount, execution, callbacks));
+      view.rerender(settingsElement(nextAccount, callbacks));
+    },
+    rerenderModels(nextModels) {
+      view.rerender(
+        settingsElement(account, {
+          ...callbacks,
+          models: nextModels,
+        }),
+      );
     },
   };
 }
+
+test("Settings exposes Model connections only for the complete Host gate", () => {
+  const incomplete = renderSettings(readySettingsAccount);
+  assert.equal(
+    screen.queryByRole("heading", { name: "Model connections" }),
+    null,
+  );
+  incomplete.unmount();
+
+  render(
+    settingsElement(readySettingsAccount, {
+      modelConnectionCapabilities: {
+        management: true,
+        secretCapture: true,
+        connectionTest: true,
+      },
+    }),
+  );
+  assert.ok(screen.getByRole("heading", { name: "Model connections" }));
+  assert.ok(screen.getByRole("button", { name: "Add connection" }));
+});
 
 test("Settings completes the API transaction before replacing committed defaults", async () => {
   const user = userEvent.setup({ document: dom.window.document });
@@ -435,12 +476,12 @@ test("Settings completes the API transaction before replacing committed defaults
   );
   assert.match(screen.getByText("Pending change").textContent, /Pending/);
 
-  view.rerenderAccount({
-    ...readySettingsAccount,
-    catalogState: "loading",
-    candidateApiKeySelectionId: "key-2",
-    canCancel: true,
-  });
+  view.rerenderModels(
+    settingsModels(
+      { catalogState: "loading" },
+      { operation: "refreshing_catalog" },
+    ),
+  );
   assert.match(screen.getByRole("status").textContent, /Preparing Backup/);
   assert.match(
     screen.getByRole("status").textContent,
@@ -451,14 +492,12 @@ test("Settings completes the API transaction before replacing committed defaults
     /Model One/,
   );
 
-  view.rerenderAccount({
-    ...readySettingsAccount,
-    catalogState: "loading",
-    candidateApiKeySelectionId: "key-2",
-    modelCatalogApiKeySelectionId: "key-2",
-    models: [],
-    canCancel: true,
-  });
+  view.rerenderModels(
+    settingsModels(
+      { catalogState: "loading", models: [] },
+      { operation: "refreshing_catalog" },
+    ),
+  );
 
   const api = screen.getByRole("combobox", { name: "Default API" });
   const model = screen.getByRole("combobox", { name: "Default model" });
@@ -467,14 +506,12 @@ test("Settings completes the API transaction before replacing committed defaults
   assert.match(model.textContent, /Loading models/);
   assert.equal(model.hasAttribute("disabled"), true);
 
-  view.rerenderAccount({
-    ...readySettingsAccount,
-    catalogState: "choosing",
-    candidateApiKeySelectionId: "key-2",
-    modelCatalogApiKeySelectionId: "key-2",
-    models: [{ selectionId: "model-2", displayName: "Model Two" }],
-    canCancel: true,
-  });
+  view.rerenderModels(
+    settingsModels({
+      catalogState: "choosing",
+      models: [{ id: "model-2", displayName: "Model Two" }],
+    }),
+  );
   assert.match(
     screen.getByRole("status").textContent,
     /Choose a model for Backup/,
@@ -489,25 +526,30 @@ test("Settings completes the API transaction before replacing committed defaults
   await user.click(await screen.findByRole("option", { name: /Model Two/ }));
   assert.deepEqual(view.selections.model, ["model-2"]);
 
-  view.rerenderAccount({
-    ...readySettingsAccount,
-    catalogState: "loading",
-    candidateApiKeySelectionId: "key-2",
-    candidateModelSelectionId: "model-2",
-    modelCatalogApiKeySelectionId: "key-2",
-    models: [{ selectionId: "model-2", displayName: "Model Two" }],
-    canCancel: false,
-  });
+  view.rerenderModels(
+    settingsModels(
+      {
+        catalogState: "loading",
+        models: [{ id: "model-2", displayName: "Model Two" }],
+      },
+      { operation: "refreshing_catalog" },
+    ),
+  );
   assert.match(screen.getByRole("status").textContent, /Preparing Model Two/);
   assert.equal(screen.queryByRole("button", { name: "Cancel" }), null);
 
-  view.rerenderAccount({
-    ...readySettingsAccount,
-    models: [{ selectionId: "model-2", displayName: "Model Two" }],
-    selectedApiKeySelectionId: "key-2",
-    selectedModelSelectionId: "model-2",
-    modelCatalogApiKeySelectionId: "key-2",
-  });
+  view.rerenderModels(
+    settingsModels(
+      {
+        models: [{ id: "model-2", displayName: "Model Two" }],
+        selectedApiKeyId: "key-2",
+      },
+      {
+        metaskSelection: { sourceId: "metask:key-2", modelId: "model-2" },
+        defaultSelection: { sourceId: "metask:key-2", modelId: "model-2" },
+      },
+    ),
+  );
   assert.match(
     screen.getByRole("combobox", { name: "Default API" }).textContent,
     /Backup/,
@@ -532,24 +574,17 @@ test("Settings keeps a model choice visibly pending without declaring it committ
     screen.getByRole("combobox", { name: "Default model" }).textContent,
     /Model Two/,
   );
-  assert.equal(readySettingsAccount.selectedModelSelectionId, "model-1");
+  assert.equal(readySettingsModels.metaskSelection.modelId, "model-1");
 });
 
 test("Settings keeps Metask available while a model connection is the default", async () => {
   const user = userEvent.setup({ document: dom.window.document });
   let activations = 0;
-  renderSettings(
-    readySettingsAccount,
-    {
-      onActivateMetask() {
-        activations += 1;
-      },
-    },
-    {
-      ...readySettingsExecution,
-      defaultSource: "model_connection",
-      activeSource: "model_connection",
-      modelConnections: [
+  renderSettings(readySettingsAccount, {
+    models: {
+      ...readySettingsModels,
+      defaultSelection: { sourceId: "connection-1", modelId: "gpt-5" },
+      connections: [
         {
           id: "connection-1",
           displayName: "Team OpenAI",
@@ -559,15 +594,27 @@ test("Settings keeps Metask available while a model connection is the default", 
           testStatus: "connected",
           credentialStatus: "ready",
           enabled: true,
-          models: [{ id: "gpt-5", displayName: "GPT-5" }],
+          models: [
+            {
+              id: "gpt-5",
+              displayName: "GPT-5",
+              metadata: readySettingsModels.providers[0].models[0].metadata,
+              metadataProvenance: "user_declared",
+              testStatus: "connected",
+              ready: true,
+            },
+          ],
           selectedModel: "gpt-5",
-          connectionGeneration: "1",
+          connectionRevision: "1",
+          sourceGeneration: "1",
+          catalogGeneration: "1",
         },
       ],
-      selectedModelConnectionId: "connection-1",
-      activeGeneration: "9",
     },
-  );
+    onActivateMetask() {
+      activations += 1;
+    },
+  });
 
   assert.match(
     screen.getByRole("combobox", { name: "Default model" }).textContent,
@@ -579,19 +626,16 @@ test("Settings keeps Metask available while a model connection is the default", 
   assert.equal(activations, 1);
 });
 
-test("Settings limits API transaction locking and keeps a real cancel path", async () => {
+test("Settings keeps Account cancellation independent from Models loading", async () => {
   const user = userEvent.setup({ document: dom.window.document });
   let cancellations = 0;
   renderSettings(
+    { ...readySettingsAccount, state: "authorizing", canCancel: true },
     {
-      ...readySettingsAccount,
-      catalogState: "loading",
-      candidateApiKeySelectionId: "key-2",
-      modelCatalogApiKeySelectionId: "key-2",
-      models: [],
-      canCancel: true,
-    },
-    {
+      models: settingsModels(
+        { catalogState: "loading", models: [] },
+        { operation: "refreshing_catalog" },
+      ),
       onCancel() {
         cancellations += 1;
       },
@@ -623,10 +667,9 @@ test("Settings limits API transaction locking and keeps a real cancel path", asy
   assert.equal(cancellations, 1);
 });
 
-test("Settings reports failed and cancelled switches without replacing committed defaults", () => {
-  const view = renderSettings({
-    ...readySettingsAccount,
-    errorCode: "metask_service_unavailable",
+test("Settings reports Models failure without changing Account identity", () => {
+  const view = renderSettings(readySettingsAccount, {
+    models: settingsModels({}, { errorCode: "catalog_unavailable" }),
   });
 
   assert.match(
@@ -637,16 +680,14 @@ test("Settings reports failed and cancelled switches without replacing committed
     screen.getByRole("combobox", { name: "Default model" }).textContent,
     /Model One/,
   );
-  assert.match(screen.getByRole("alert").textContent, /No default was changed/);
-  assert.match(screen.getByRole("alert").textContent, /Primary · Model One/);
+  assert.match(
+    screen.getByRole("alert").textContent,
+    /Model configuration needs attention/,
+  );
+  assert.match(screen.getByText("Metask User").textContent, /Metask User/);
 
-  view.rerenderAccount({
-    ...readySettingsAccount,
-    errorCode: "user_cancelled",
-  });
+  view.rerenderModels(readySettingsModels);
   assert.equal(screen.queryByRole("alert"), null);
-  assert.match(screen.getByRole("status").textContent, /Change cancelled/);
-  assert.match(screen.getByRole("status").textContent, /Primary · Model One/);
 });
 
 test("Settings keeps section navigation fixed while content scrolls independently", () => {
@@ -654,6 +695,10 @@ test("Settings keeps section navigation fixed while content scrolls independentl
   const page = document.querySelector(".settings-page");
   const content = document.querySelector(".settings-content");
   const accountSection = document.querySelector("#settings-account");
+  const modelsSection = document.querySelector("#settings-models");
+  const modelConnectionsSection = document.querySelector(
+    "#settings-model-connections",
+  );
   Object.defineProperty(content, "clientHeight", {
     configurable: true,
     value: 680,
@@ -661,6 +706,12 @@ test("Settings keeps section navigation fixed while content scrolls independentl
   content.getBoundingClientRect = () => ({ top: 100 });
   accountSection.getBoundingClientRect = () => ({
     top: 520 - content.scrollTop,
+  });
+  modelsSection.getBoundingClientRect = () => ({
+    top: 920 - content.scrollTop,
+  });
+  modelConnectionsSection.getBoundingClientRect = () => ({
+    top: 1320 - content.scrollTop,
   });
 
   page.scrollTop = 300;
@@ -687,7 +738,7 @@ test("Settings keeps section navigation fixed while content scrolls independentl
   content.scrollTop = 720;
   fireEvent.scroll(content);
   assert.equal(
-    screen.getByRole("link", { name: "Account" }).getAttribute("aria-current"),
+    screen.getByRole("link", { name: "Models" }).getAttribute("aria-current"),
     "location",
   );
 });

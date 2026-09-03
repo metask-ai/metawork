@@ -5,8 +5,10 @@ import {
   type AccountCommandResult,
   type ExecutionCommandResult,
   type AccountView,
-  type ExecutionView,
+  type ModelsView,
+  type NewTaskAdmissionView,
   type ModelMetadata,
+  type ModelMetadataProvenance,
   type ModelConnectionCredentialStatus,
   type Protocol,
   type ModelConnectionState,
@@ -153,12 +155,13 @@ const accountStates = [
   "authorizing",
   "authenticated",
 ] as const;
-const catalogStates = [
-  "unavailable",
+const modelsCatalogStates = [
+  "needs_authentication",
   "loading",
   "choosing",
   "ready",
   "failed",
+  "unavailable",
 ] as const;
 const accountErrorCodes = [
   "none",
@@ -177,10 +180,6 @@ const accountErrorCodes = [
   "metask_rate_limited",
   "metask_service_unavailable",
   "metask_protocol_invalid",
-  "catalog_too_large",
-  "catalog_field_too_large",
-  "no_api_keys",
-  "no_models",
   "metask_platform_unsupported",
   "credential_store_read_failed",
   "credential_store_write_failed",
@@ -190,6 +189,19 @@ const accountErrorCodes = [
   "local_resource_exhausted",
   "account_operation_failed",
 ] as const;
+const modelsErrorCodes = [
+  "none",
+  "authorization_unavailable",
+  "persistence_unavailable",
+  "migration_required",
+  "catalog_unavailable",
+  "catalog_invalid",
+  "catalog_too_large",
+  "no_api_keys",
+  "no_models",
+  "operation_in_progress",
+  "local_resource_exhausted",
+] as const;
 const executionCommandErrorCodes = [
   "none",
   "operation_in_progress",
@@ -198,7 +210,6 @@ const executionCommandErrorCodes = [
   "no_models",
   "local_resource_exhausted",
   "credential_store_write_failed",
-  "execution_in_use",
   "model_connection_invalid",
   "model_connection_not_found",
   "model_connection_capture_unavailable",
@@ -215,9 +226,8 @@ const protocols = [
   "openai_chat_completions",
   "gemini_native",
 ] as const;
-const executionSources = ["metask", "model_connection"] as const;
-const executionStates = ["unavailable", "ready", "replacing"] as const;
-const executionErrorCodes = [
+const newTaskAdmissionStates = ["unavailable", "ready", "replacing"] as const;
+const newTaskAdmissionReasons = [
   "none",
   "model_connection_persistence_unavailable",
   "credential_unavailable",
@@ -239,6 +249,12 @@ const modelConnectionTestStatuses = [
   "testing",
   "connected",
   "failed",
+] as const;
+const modelMetadataProvenances = [
+  "unknown",
+  "user_declared",
+  "provider_declared",
+  "runtime_verified",
 ] as const;
 const modelConnectionCredentialStatuses = [
   "missing",
@@ -283,6 +299,7 @@ const scheduledTaskFailureReasons = [
   "persistence_failed",
   "host_interrupted",
   "permission_required",
+  "binding_migration_required",
 ] as const;
 const taskCreateReasons = [
   "execution_changed",
@@ -987,289 +1004,169 @@ function decodeModelMetadata(value: unknown, path: string): ModelMetadata {
 }
 
 function decodeAccount(value: unknown, path: string): AccountView {
-  const raw = record(value, path);
-  const item = object(raw, path, [
+  const item = object(value, path, [
     "state",
-    "catalogState",
     "canCancel",
     "accountId",
     "displayName",
-    "apiKeys",
-    "models",
-    "selectedApiKeySelectionId",
-    "selectedModelSelectionId",
-    "candidateApiKeySelectionId",
-    "candidateModelSelectionId",
-    "modelCatalogApiKeySelectionId",
     "errorCode",
     "safeDiagnostic",
-    "catalogGeneration",
   ]);
-  const apiKeys = arrayValue(
-    item.apiKeys,
-    `${path}.apiKeys`,
-    (value, itemPath) => {
-      const key = object(value, itemPath, [
-        "selectionId",
-        "name",
-        "suffix",
-        "protocol",
-      ]);
-      return {
-        selectionId: stringValue(key.selectionId, `${itemPath}.selectionId`),
-        name: stringValue(key.name, `${itemPath}.name`),
-        suffix: stringValue(key.suffix, `${itemPath}.suffix`),
-        protocol: enumValue(key.protocol, `${itemPath}.protocol`, protocols),
-      };
-    },
-  );
-  const models = arrayValue(
-    item.models,
-    `${path}.models`,
-    (value, itemPath) => {
-      const model = object(value, itemPath, [
-        "selectionId",
-        "displayName",
-        "metadata",
-      ]);
-      return {
-        selectionId: stringValue(model.selectionId, `${itemPath}.selectionId`),
-        displayName: stringValue(model.displayName, `${itemPath}.displayName`),
-        metadata: decodeModelMetadata(model.metadata, `${itemPath}.metadata`),
-      };
-    },
-  );
-  if (new Set(apiKeys.map((key) => key.selectionId)).size !== apiKeys.length)
-    fail(`${path}.apiKeys`, "API Key identities must be unique");
-  if (new Set(models.map((model) => model.selectionId)).size !== models.length)
-    fail(`${path}.models`, "model identities must be unique");
   const state = enumValue(item.state, `${path}.state`, accountStates);
-  const catalogState = enumValue(
-    item.catalogState,
-    `${path}.catalogState`,
-    catalogStates,
-  );
   const canCancel = booleanValue(item.canCancel, `${path}.canCancel`);
   const accountId = stringValue(item.accountId, `${path}.accountId`);
   const displayName = stringValue(item.displayName, `${path}.displayName`);
-  const selectedApiKeySelectionId = stringValue(
-    item.selectedApiKeySelectionId,
-    `${path}.selectedApiKeySelectionId`,
-  );
-  const selectedModelSelectionId = stringValue(
-    item.selectedModelSelectionId,
-    `${path}.selectedModelSelectionId`,
-  );
-  const candidateApiKeySelectionId = stringValue(
-    item.candidateApiKeySelectionId,
-    `${path}.candidateApiKeySelectionId`,
-  );
-  const candidateModelSelectionId = stringValue(
-    item.candidateModelSelectionId,
-    `${path}.candidateModelSelectionId`,
-  );
-  const modelCatalogApiKeySelectionId = stringValue(
-    item.modelCatalogApiKeySelectionId,
-    `${path}.modelCatalogApiKeySelectionId`,
-  );
-  const catalogGeneration = wireId(
-    item.catalogGeneration,
-    `${path}.catalogGeneration`,
-  );
-  if (
-    catalogState === "ready" &&
-    (accountId.length === 0 ||
-      selectedApiKeySelectionId.length === 0 ||
-      selectedModelSelectionId.length === 0)
-  )
-    fail(path, "a ready catalog requires selected identities");
-  const candidateAllowed =
-    state === "authenticated" &&
-    (catalogState === "loading" || catalogState === "choosing");
-  if (
-    !candidateAllowed &&
-    (candidateApiKeySelectionId.length > 0 ||
-      candidateModelSelectionId.length > 0)
-  )
-    fail(path, "candidate execution identities require reconfiguration");
-  if (
-    candidateModelSelectionId.length > 0 &&
-    candidateApiKeySelectionId.length === 0
-  )
-    fail(path, "a candidate model requires its candidate API");
-  if (
-    candidateApiKeySelectionId.length > 0 &&
-    catalogState === "choosing" &&
-    !apiKeys.some((key) => key.selectionId === candidateApiKeySelectionId)
-  )
-    fail(path, "candidate API must belong to the API catalog");
-  if (
-    candidateModelSelectionId.length > 0 &&
-    models.length > 0 &&
-    !models.some((model) => model.selectionId === candidateModelSelectionId)
-  )
-    fail(path, "candidate model must belong to the model catalog");
-  if (
-    catalogState === "ready" &&
-    (!apiKeys.some((key) => key.selectionId === selectedApiKeySelectionId) ||
-      !models.some((model) => model.selectionId === selectedModelSelectionId))
-  )
-    fail(path, "a ready catalog requires selected catalog membership");
-  if (
-    models.length === 0 &&
-    modelCatalogApiKeySelectionId.length > 0 &&
-    catalogState !== "loading"
-  )
-    fail(path, "an empty model catalog can only name its owner while loading");
-  if (models.length > 0 && modelCatalogApiKeySelectionId.length === 0)
-    fail(path, "an available model catalog requires its API owner");
-  if (
-    modelCatalogApiKeySelectionId.length > 0 &&
-    !apiKeys.some((key) => key.selectionId === modelCatalogApiKeySelectionId)
-  )
-    fail(path, "model catalog owner must belong to the API catalog");
   if (
     state !== "authenticated" &&
-    (catalogState !== "unavailable" ||
-      accountId.length !== 0 ||
-      displayName.length !== 0 ||
-      apiKeys.length !== 0 ||
-      models.length !== 0 ||
-      selectedApiKeySelectionId.length !== 0 ||
-      selectedModelSelectionId.length !== 0 ||
-      candidateApiKeySelectionId.length !== 0 ||
-      candidateModelSelectionId.length !== 0 ||
-      modelCatalogApiKeySelectionId.length !== 0)
+    (accountId.length !== 0 || displayName.length !== 0)
   )
-    fail(path, "a non-authenticated Account must hide identity and catalog");
+    fail(path, "a non-authenticated Account must hide identity");
   if (state === "authenticated" && accountId.length === 0)
     fail(path, "an authenticated Account requires identity");
-  if (
-    canCancel &&
-    state !== "authorizing" &&
-    !(
-      state === "authenticated" &&
-      (catalogState === "loading" || catalogState === "choosing")
-    )
-  )
-    fail(path, "cancellation requires active authorization or catalog work");
-  if (catalogState === "choosing" && apiKeys.length === 0)
-    fail(path, "catalog choice requires at least one API");
+  if (canCancel && state !== "authorizing")
+    fail(path, "cancellation requires active authorization");
   return {
     state,
-    catalogState,
     canCancel,
     accountId,
     displayName,
-    apiKeys,
-    models,
-    selectedApiKeySelectionId,
-    selectedModelSelectionId,
-    candidateApiKeySelectionId,
-    candidateModelSelectionId,
-    modelCatalogApiKeySelectionId,
     errorCode: enumValue(
       item.errorCode,
       `${path}.errorCode`,
       accountErrorCodes,
     ),
     safeDiagnostic: stringValue(item.safeDiagnostic, `${path}.safeDiagnostic`),
-    catalogGeneration,
   };
 }
 
-function decodeExecution(value: unknown, path: string): ExecutionView {
-  const item = object(value, path, [
-    "state",
-    "defaultSource",
-    "activeSource",
-    "activeGeneration",
-    "taskCreationAvailable",
-    "selectedModelConnectionId",
-    "modelConnections",
-    "errorCode",
-  ]);
-  const modelConnections = arrayValue(
-    item.modelConnections,
-    `${path}.modelConnections`,
-    (value, itemPath) => {
-      const connection = object(value, itemPath, [
-        "id",
-        "displayName",
-        "protocol",
-        "normalizedBaseUrl",
-        "state",
-        "testStatus",
-        "credentialStatus",
-        "enabled",
-        "connectionGeneration",
-        "selectedModel",
-        "models",
-      ]);
-      const models = arrayValue(
-        connection.models,
-        `${itemPath}.models`,
-        (modelValue, modelPath) => {
-          const model = object(modelValue, modelPath, ["id", "displayName"]);
-          return {
-            id: stringValue(model.id, `${modelPath}.id`),
-            displayName: stringValue(
-              model.displayName,
-              `${modelPath}.displayName`,
-            ),
-          };
-        },
-      );
-      return {
-        id: stringValue(connection.id, `${itemPath}.id`),
-        displayName: stringValue(
-          connection.displayName,
-          `${itemPath}.displayName`,
-        ),
-        protocol: enumValue(
-          connection.protocol,
-          `${itemPath}.protocol`,
-          modelConnectionProtocols,
-        ) as Protocol,
-        normalizedBaseUrl: stringValue(
-          connection.normalizedBaseUrl,
-          `${itemPath}.normalizedBaseUrl`,
-        ),
-        state: enumValue(
-          connection.state,
-          `${itemPath}.state`,
-          modelConnectionStates,
-        ) as ModelConnectionState,
-        testStatus: enumValue(
-          connection.testStatus,
-          `${itemPath}.testStatus`,
-          modelConnectionTestStatuses,
-        ) as ModelConnectionTestStatus,
-        credentialStatus: enumValue(
-          connection.credentialStatus,
-          `${itemPath}.credentialStatus`,
-          modelConnectionCredentialStatuses,
-        ) as ModelConnectionCredentialStatus,
-        enabled: booleanValue(connection.enabled, `${itemPath}.enabled`),
-        connectionGeneration: wireId(
-          connection.connectionGeneration,
-          `${itemPath}.connectionGeneration`,
-        ),
-        selectedModel: stringValue(
-          connection.selectedModel,
-          `${itemPath}.selectedModel`,
-        ),
-        models,
-      };
-    },
-  );
+function decodeModelRef(value: unknown, path: string) {
+  if (value === null) return null;
+  const item = object(value, path, ["sourceId", "modelId"]);
+  const result = {
+    sourceId: stringValue(item.sourceId, `${path}.sourceId`),
+    modelId: stringValue(item.modelId, `${path}.modelId`),
+  };
+  if (result.sourceId.length === 0 || result.modelId.length === 0)
+    fail(path, "a model reference requires source and model identities");
+  return result;
+}
+
+function decodeRequiredModelRef(value: unknown, path: string) {
+  const result = decodeModelRef(value, path);
+  if (result === null) fail(path, "expected model reference");
+  return result;
+}
+
+function decodeModelConnections(value: unknown, path: string) {
+  const modelConnections = arrayValue(value, path, (value, itemPath) => {
+    const connection = object(value, itemPath, [
+      "id",
+      "displayName",
+      "protocol",
+      "normalizedBaseUrl",
+      "state",
+      "testStatus",
+      "credentialStatus",
+      "enabled",
+      "connectionRevision",
+      "sourceGeneration",
+      "catalogGeneration",
+      "selectedModel",
+      "models",
+    ]);
+    const models = arrayValue(
+      connection.models,
+      `${itemPath}.models`,
+      (modelValue, modelPath) => {
+        const model = object(modelValue, modelPath, [
+          "id",
+          "displayName",
+          "metadata",
+          "metadataProvenance",
+          "testStatus",
+          "ready",
+        ]);
+        return {
+          id: stringValue(model.id, `${modelPath}.id`),
+          displayName: stringValue(
+            model.displayName,
+            `${modelPath}.displayName`,
+          ),
+          metadata: decodeModelMetadata(
+            model.metadata,
+            `${modelPath}.metadata`,
+          ),
+          metadataProvenance: enumValue(
+            model.metadataProvenance,
+            `${modelPath}.metadataProvenance`,
+            modelMetadataProvenances,
+          ) as ModelMetadataProvenance,
+          testStatus: enumValue(
+            model.testStatus,
+            `${modelPath}.testStatus`,
+            modelConnectionTestStatuses,
+          ) as ModelConnectionTestStatus,
+          ready: booleanValue(model.ready, `${modelPath}.ready`),
+        };
+      },
+    );
+    return {
+      id: stringValue(connection.id, `${itemPath}.id`),
+      displayName: stringValue(
+        connection.displayName,
+        `${itemPath}.displayName`,
+      ),
+      protocol: enumValue(
+        connection.protocol,
+        `${itemPath}.protocol`,
+        modelConnectionProtocols,
+      ) as Protocol,
+      normalizedBaseUrl: stringValue(
+        connection.normalizedBaseUrl,
+        `${itemPath}.normalizedBaseUrl`,
+      ),
+      state: enumValue(
+        connection.state,
+        `${itemPath}.state`,
+        modelConnectionStates,
+      ) as ModelConnectionState,
+      testStatus: enumValue(
+        connection.testStatus,
+        `${itemPath}.testStatus`,
+        modelConnectionTestStatuses,
+      ) as ModelConnectionTestStatus,
+      credentialStatus: enumValue(
+        connection.credentialStatus,
+        `${itemPath}.credentialStatus`,
+        modelConnectionCredentialStatuses,
+      ) as ModelConnectionCredentialStatus,
+      enabled: booleanValue(connection.enabled, `${itemPath}.enabled`),
+      connectionRevision: wireId(
+        connection.connectionRevision,
+        `${itemPath}.connectionRevision`,
+      ),
+      sourceGeneration: wireId(
+        connection.sourceGeneration,
+        `${itemPath}.sourceGeneration`,
+      ),
+      catalogGeneration: wireId(
+        connection.catalogGeneration,
+        `${itemPath}.catalogGeneration`,
+      ),
+      selectedModel: stringValue(
+        connection.selectedModel,
+        `${itemPath}.selectedModel`,
+      ),
+      models,
+    };
+  });
   if (
     new Set(modelConnections.map((connection) => connection.id)).size !==
     modelConnections.length
   )
-    fail(`${path}.modelConnections`, "connection identities must be unique");
+    fail(path, "connection identities must be unique");
   for (const [index, connection] of modelConnections.entries()) {
-    const connectionPath = `${path}.modelConnections[${index}]`;
+    const connectionPath = `${path}[${index}]`;
     if (
       new Set(connection.models.map((model) => model.id)).size !==
       connection.models.length
@@ -1285,78 +1182,266 @@ function decodeExecution(value: unknown, path: string): ExecutionView {
       connection.state === "ready" &&
       (connection.credentialStatus !== "ready" ||
         !connection.enabled ||
-        connection.selectedModel.length === 0 ||
-        connection.testStatus === "untested")
+        !connection.models.some((model) => model.ready))
     )
       fail(connectionPath, "a ready connection must be verified and usable");
-    if (connection.state !== "ready" && connection.testStatus === "connected")
-      fail(connectionPath, "only a ready connection can have a connected test");
+    if (
+      connection.state !== "ready" &&
+      connection.models.some((model) => model.ready)
+    )
+      fail(
+        connectionPath,
+        "only a ready connection can retain model readiness",
+      );
   }
+  return modelConnections;
+}
 
-  const state = enumValue(item.state, `${path}.state`, executionStates);
-  const defaultSource = nullableEnum(
-    item.defaultSource,
-    `${path}.defaultSource`,
-    executionSources,
-  ) as ExecutionView["defaultSource"];
-  const activeSource = nullableEnum(
-    item.activeSource,
-    `${path}.activeSource`,
-    executionSources,
-  ) as ExecutionView["activeSource"];
+function decodeModels(value: unknown, path: string): ModelsView {
+  const item = object(value, path, [
+    "availability",
+    "persistenceHealth",
+    "providers",
+    "metaskSelection",
+    "metaskSelectionRevision",
+    "defaultSelection",
+    "selectionRevision",
+    "operation",
+    "errorCode",
+    "connections",
+  ]);
+  const providers = arrayValue(
+    item.providers,
+    `${path}.providers`,
+    (value, itemPath) => {
+      const provider = object(value, itemPath, [
+        "id",
+        "displayName",
+        "recommended",
+        "catalogState",
+        "principalRef",
+        "apiKeys",
+        "models",
+        "selectedApiKeyId",
+        "catalogGeneration",
+        "sourceGeneration",
+        "errorCode",
+        "safeDiagnostic",
+      ]);
+      const apiKeys = arrayValue(
+        provider.apiKeys,
+        `${itemPath}.apiKeys`,
+        (value, keyPath) => {
+          const key = object(value, keyPath, [
+            "id",
+            "name",
+            "suffix",
+            "protocol",
+          ]);
+          return {
+            id: stringValue(key.id, `${keyPath}.id`),
+            name: stringValue(key.name, `${keyPath}.name`),
+            suffix: stringValue(key.suffix, `${keyPath}.suffix`),
+            protocol: enumValue(key.protocol, `${keyPath}.protocol`, protocols),
+          };
+        },
+      );
+      const models = arrayValue(
+        provider.models,
+        `${itemPath}.models`,
+        (value, modelPath) => {
+          const model = object(value, modelPath, [
+            "id",
+            "displayName",
+            "metadata",
+            "metadataProvenance",
+          ]);
+          return {
+            id: stringValue(model.id, `${modelPath}.id`),
+            displayName: stringValue(
+              model.displayName,
+              `${modelPath}.displayName`,
+            ),
+            metadata: decodeModelMetadata(
+              model.metadata,
+              `${modelPath}.metadata`,
+            ),
+            metadataProvenance: enumValue(
+              model.metadataProvenance,
+              `${modelPath}.metadataProvenance`,
+              modelMetadataProvenances,
+            ) as ModelMetadataProvenance,
+          };
+        },
+      );
+      if (new Set(apiKeys.map((key) => key.id)).size !== apiKeys.length)
+        fail(`${itemPath}.apiKeys`, "API Key identities must be unique");
+      if (new Set(models.map((model) => model.id)).size !== models.length)
+        fail(`${itemPath}.models`, "model identities must be unique");
+      const selectedApiKeyId = stringValue(
+        provider.selectedApiKeyId,
+        `${itemPath}.selectedApiKeyId`,
+      );
+      if (
+        selectedApiKeyId.length > 0 &&
+        !apiKeys.some((key) => key.id === selectedApiKeyId)
+      )
+        fail(itemPath, "the selected API Key must belong to its provider");
+      return {
+        id: stringValue(provider.id, `${itemPath}.id`),
+        displayName: stringValue(
+          provider.displayName,
+          `${itemPath}.displayName`,
+        ),
+        recommended: booleanValue(
+          provider.recommended,
+          `${itemPath}.recommended`,
+        ),
+        catalogState: enumValue(
+          provider.catalogState,
+          `${itemPath}.catalogState`,
+          modelsCatalogStates,
+        ),
+        principalRef: stringValue(
+          provider.principalRef,
+          `${itemPath}.principalRef`,
+        ),
+        apiKeys,
+        models,
+        selectedApiKeyId,
+        catalogGeneration: wireId(
+          provider.catalogGeneration,
+          `${itemPath}.catalogGeneration`,
+        ),
+        sourceGeneration: wireId(
+          provider.sourceGeneration,
+          `${itemPath}.sourceGeneration`,
+        ),
+        errorCode: enumValue(
+          provider.errorCode,
+          `${itemPath}.errorCode`,
+          modelsErrorCodes,
+        ),
+        safeDiagnostic: stringValue(
+          provider.safeDiagnostic,
+          `${itemPath}.safeDiagnostic`,
+        ),
+      };
+    },
+  );
+  if (
+    new Set(providers.map((provider) => provider.id)).size !== providers.length
+  )
+    fail(`${path}.providers`, "provider identities must be unique");
+  const metaskSelection = decodeModelRef(
+    item.metaskSelection,
+    `${path}.metaskSelection`,
+  );
+  const defaultSelection = decodeModelRef(
+    item.defaultSelection,
+    `${path}.defaultSelection`,
+  );
+  for (const [name, selection] of [
+    ["metaskSelection", metaskSelection],
+    ["defaultSelection", defaultSelection],
+  ] as const) {
+    if (selection && selection.sourceId.startsWith("metask:")) {
+      const provider = providers.find((candidate) => candidate.id === "metask");
+      if (
+        provider?.catalogState === "ready" &&
+        !provider.models.some((model) => model.id === selection.modelId)
+      )
+        fail(
+          `${path}.${name}`,
+          "the selected Metask model must belong to its ready catalog",
+        );
+    }
+  }
+  return {
+    availability: enumValue(
+      item.availability,
+      `${path}.availability`,
+      modelsCatalogStates,
+    ),
+    persistenceHealth: enumValue(
+      item.persistenceHealth,
+      `${path}.persistenceHealth`,
+      [
+        "ready",
+        "migration_required",
+        "recovery_required",
+        "unavailable",
+      ] as const,
+    ),
+    providers,
+    metaskSelection,
+    metaskSelectionRevision: wireId(
+      item.metaskSelectionRevision,
+      `${path}.metaskSelectionRevision`,
+    ),
+    defaultSelection,
+    selectionRevision: wireId(
+      item.selectionRevision,
+      `${path}.selectionRevision`,
+    ),
+    operation: enumValue(item.operation, `${path}.operation`, [
+      "idle",
+      "refreshing_catalog",
+    ] as const),
+    errorCode: enumValue(item.errorCode, `${path}.errorCode`, modelsErrorCodes),
+    connections: decodeModelConnections(
+      item.connections,
+      `${path}.connections`,
+    ),
+  };
+}
+
+function decodeNewTaskAdmission(
+  value: unknown,
+  path: string,
+): NewTaskAdmissionView {
+  const item = object(value, path, [
+    "available",
+    "reason",
+    "activeModelRef",
+    "activeGeneration",
+    "activeSelectionRevision",
+    "state",
+  ]);
+
+  const state = enumValue(item.state, `${path}.state`, newTaskAdmissionStates);
+  const activeModelRef = decodeModelRef(
+    item.activeModelRef,
+    `${path}.activeModelRef`,
+  );
   const activeGeneration = wireId(
     item.activeGeneration,
     `${path}.activeGeneration`,
   );
-  const taskCreationAvailable = booleanValue(
-    item.taskCreationAvailable,
-    `${path}.taskCreationAvailable`,
+  const activeSelectionRevision = wireId(
+    item.activeSelectionRevision,
+    `${path}.activeSelectionRevision`,
   );
-  const selectedModelConnectionId = stringValue(
-    item.selectedModelConnectionId,
-    `${path}.selectedModelConnectionId`,
-  );
-
-  if ((activeSource === null) !== (activeGeneration === "0"))
-    fail(path, "active source and generation must be present together");
-  if (state === "unavailable" && activeSource !== null)
-    fail(path, "an unavailable execution cannot publish an active source");
-  if (state === "ready" && activeSource === null)
-    fail(path, "a ready execution requires an active source");
-  if (state === "replacing" && taskCreationAvailable)
-    fail(path, "a replacing execution cannot admit new Tasks");
-  if (taskCreationAvailable && state !== "ready")
-    fail(path, "Task creation requires a ready execution");
-  if (defaultSource === "model_connection") {
-    const selected = modelConnections.find(
-      (connection) => connection.id === selectedModelConnectionId,
-    );
-    if (!selected)
-      fail(path, "a Model Connection default requires its selected identity");
-    if (
-      taskCreationAvailable &&
-      (activeSource !== "model_connection" ||
-        selected.state !== "ready" ||
-        selected.credentialStatus !== "ready")
-    )
-      fail(path, "a usable Model Connection default must be active and ready");
-  } else if (selectedModelConnectionId.length !== 0) {
-    fail(path, "only a Model Connection default can name a connection");
-  }
-
+  const available = booleanValue(item.available, `${path}.available`);
+  if ((activeModelRef === null) !== (activeGeneration === "0"))
+    fail(path, "active model and generation must be present together");
+  if (activeModelRef === null && activeSelectionRevision !== "0")
+    fail(path, "an absent active model cannot publish a selection revision");
+  if (state === "unavailable" && activeModelRef !== null)
+    fail(path, "an unavailable admission cannot publish an active model");
+  if (state === "ready" && activeModelRef === null)
+    fail(path, "a ready admission requires an active model");
+  if (state === "replacing" && available)
+    fail(path, "a replacing admission cannot admit new Tasks");
+  if (available && state !== "ready")
+    fail(path, "Task admission requires ready installed authority");
   return {
-    state,
-    defaultSource,
-    activeSource,
+    available,
+    reason: enumValue(item.reason, `${path}.reason`, newTaskAdmissionReasons),
+    activeModelRef,
     activeGeneration,
-    taskCreationAvailable,
-    selectedModelConnectionId,
-    modelConnections,
-    errorCode: enumValue(
-      item.errorCode,
-      `${path}.errorCode`,
-      executionErrorCodes,
-    ),
+    activeSelectionRevision,
+    state,
   };
 }
 
@@ -2428,17 +2513,73 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
     "enabled",
     "health",
     "failureReason",
-    "execution",
+    "binding",
     "input",
     "recurrence",
     "nextRunAtUnixSeconds",
     "occurrences",
   ]);
-  const execution = object(item.execution, `${path}.execution`, [
-    "generation",
-    "protocol",
-    "model",
+  const bindingRoot = object(item.binding, `${path}.binding`, [
+    "status",
+    ...(typeof item.binding === "object" &&
+    item.binding !== null &&
+    !Array.isArray(item.binding) &&
+    (item.binding as JsonObject).status === "bound"
+      ? ["modelRef", "sourceGeneration", "selectionRevision", "protocol"]
+      : ["legacyExecution"]),
   ]);
+  const bindingStatus = enumValue(
+    bindingRoot.status,
+    `${path}.binding.status`,
+    ["bound", "migration_required"] as const,
+  );
+  const binding =
+    bindingStatus === "bound"
+      ? {
+          status: "bound" as const,
+          modelRef: decodeRequiredModelRef(
+            bindingRoot.modelRef,
+            `${path}.binding.modelRef`,
+          ),
+          sourceGeneration: positiveWireId(
+            bindingRoot.sourceGeneration,
+            `${path}.binding.sourceGeneration`,
+          ),
+          selectionRevision: positiveWireId(
+            bindingRoot.selectionRevision,
+            `${path}.binding.selectionRevision`,
+          ),
+          protocol: enumValue(
+            bindingRoot.protocol,
+            `${path}.binding.protocol`,
+            protocols,
+          ),
+        }
+      : (() => {
+          const legacy = object(
+            bindingRoot.legacyExecution,
+            `${path}.binding.legacyExecution`,
+            ["generation", "protocol", "model"],
+          );
+          return {
+            status: "migration_required" as const,
+            legacyExecution: {
+              generation: positiveWireId(
+                legacy.generation,
+                `${path}.binding.legacyExecution.generation`,
+              ),
+              protocol: enumValue(
+                legacy.protocol,
+                `${path}.binding.legacyExecution.protocol`,
+                protocols,
+              ),
+              model: stringValue(
+                legacy.model,
+                `${path}.binding.legacyExecution.model`,
+              ),
+            },
+          };
+        })();
   if (
     typeof item.input !== "object" ||
     item.input === null ||
@@ -2611,6 +2752,11 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
     fail(path, "enabled schedule must be ready and expose its next run");
   if ((health === "needs_attention") !== (failureReason !== null))
     fail(path, "Schedule attention and failure reason must agree");
+  if (
+    (binding.status === "migration_required") !==
+    (failureReason === "binding_migration_required")
+  )
+    fail(path, "Schedule binding migration state and reason must agree");
   return {
     id: positiveWireId(item.id, `${path}.id`),
     epoch: positiveWireId(item.epoch, `${path}.epoch`),
@@ -2624,18 +2770,7 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
     enabled,
     health,
     failureReason,
-    execution: {
-      generation: positiveWireId(
-        execution.generation,
-        `${path}.execution.generation`,
-      ),
-      protocol: enumValue(
-        execution.protocol,
-        `${path}.execution.protocol`,
-        protocols,
-      ),
-      model: stringValue(execution.model, `${path}.execution.model`),
-    },
+    binding,
     input,
     recurrence,
     nextRunAtUnixSeconds,
@@ -3091,7 +3226,8 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     "capabilities",
     "permissions",
     "account",
-    "execution",
+    "models",
+    "newTaskAdmission",
     "skillCatalog",
     "skillManagement",
     "mcp",
@@ -3211,6 +3347,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
         "read_failed",
         "corrupt",
         "write_failed",
+        "migration_failed",
         "outcome_unknown",
       ] as const,
     ),
@@ -3455,7 +3592,11 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     capabilities,
     permissions,
     account: decodeAccount(root.account, "$.account"),
-    execution: decodeExecution(root.execution, "$.execution"),
+    models: decodeModels(root.models, "$.models"),
+    newTaskAdmission: decodeNewTaskAdmission(
+      root.newTaskAdmission,
+      "$.newTaskAdmission",
+    ),
     skillCatalog: decodeSkillCatalog(root.skillCatalog, "$.skillCatalog"),
     skillManagement: decodeSkillManagement(
       root.skillManagement,

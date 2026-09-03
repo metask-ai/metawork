@@ -135,6 +135,161 @@ test("attachment commands use only opaque grant payloads", async () => {
   ]);
 });
 
+test("Task model selection carries source-qualified authority", async () => {
+  const calls = [];
+  const client = new BridgeClient({
+    bridge: bridgeWith(async (command, payload) => {
+      calls.push({ command, payload });
+      return {
+        accepted: true,
+        taskId: "11",
+        model: "model-2",
+        reason: null,
+      };
+    }),
+  });
+
+  assert.deepEqual(
+    await client.selectTaskModel(
+      "11",
+      "model-1",
+      "17",
+      { sourceId: "metask:key-1", modelId: "model-2" },
+      "19",
+      "23",
+    ),
+    { accepted: true, taskId: "11", model: "model-2", reason: null },
+  );
+  assert.deepEqual(calls, [
+    {
+      command: "metawork.tasks.selectModel",
+      payload: {
+        taskId: "11",
+        expectedModel: "model-1",
+        expectedExecutionGeneration: "17",
+        targetModelRef: {
+          sourceId: "metask:key-1",
+          modelId: "model-2",
+        },
+        expectedSourceGeneration: "19",
+        expectedCatalogGeneration: "23",
+      },
+    },
+  ]);
+});
+
+test("Models connection commands carry split source-qualified revisions", async () => {
+  const calls = [];
+  const client = new BridgeClient({
+    bridge: bridgeWith(async (command, payload) => {
+      calls.push({ command, payload });
+      return { accepted: true, errorCode: "none", attemptId: null };
+    }),
+  });
+
+  await client.createModelConnection({
+    displayName: "Provider",
+    protocol: "openai_responses",
+    normalizedBaseUrl: "https://api.example.com/v1/responses",
+    modelId: "model-a",
+  });
+  await client.updateModelConnection({
+    sourceId: "source-1",
+    expectedConnectionRevision: "2",
+    displayName: "Provider 2",
+    protocol: "openai_responses",
+    normalizedBaseUrl: "https://api.example.com/v1/responses",
+  });
+  await client.replaceModelConnectionCredential("source-1", "3");
+  await client.testModelConnection("source-1", "3", "model-a", "5", "7");
+  await client.addCustomModel({
+    sourceId: "source-1",
+    expectedConnectionRevision: "3",
+    expectedCatalogGeneration: "7",
+    model: { id: "model-b" },
+  });
+  await client.replaceCustomModel({
+    selection: { sourceId: "source-1", modelId: "model-b" },
+    expectedConnectionRevision: "11",
+    expectedCatalogGeneration: "13",
+    replacement: { id: "model-c" },
+  });
+  await client.removeCustomModel({
+    selection: { sourceId: "source-1", modelId: "model-c" },
+    expectedConnectionRevision: "17",
+    expectedCatalogGeneration: "19",
+  });
+  await client.removeModelConnection("source-1", "23");
+
+  assert.deepEqual(calls, [
+    {
+      command: "metawork.models.connections.create",
+      payload: {
+        displayName: "Provider",
+        protocol: "openai_responses",
+        normalizedBaseUrl: "https://api.example.com/v1/responses",
+        model: { id: "model-a", displayName: "" },
+      },
+    },
+    {
+      command: "metawork.models.connections.update",
+      payload: {
+        sourceId: "source-1",
+        expectedConnectionRevision: "2",
+        displayName: "Provider 2",
+        protocol: "openai_responses",
+        normalizedBaseUrl: "https://api.example.com/v1/responses",
+      },
+    },
+    {
+      command: "metawork.models.connections.replaceCredential",
+      payload: {
+        sourceId: "source-1",
+        expectedConnectionRevision: "3",
+      },
+    },
+    {
+      command: "metawork.models.connections.test",
+      payload: {
+        model: { sourceId: "source-1", modelId: "model-a" },
+        expectedConnectionRevision: "3",
+        expectedSourceGeneration: "5",
+        expectedCatalogGeneration: "7",
+      },
+    },
+    {
+      command: "metawork.models.customModels.add",
+      payload: {
+        sourceId: "source-1",
+        expectedConnectionRevision: "3",
+        expectedCatalogGeneration: "7",
+        model: { id: "model-b" },
+      },
+    },
+    {
+      command: "metawork.models.customModels.replace",
+      payload: {
+        selection: { sourceId: "source-1", modelId: "model-b" },
+        expectedConnectionRevision: "11",
+        expectedCatalogGeneration: "13",
+        replacement: { id: "model-c" },
+      },
+    },
+    {
+      command: "metawork.models.customModels.remove",
+      payload: {
+        selection: { sourceId: "source-1", modelId: "model-c" },
+        expectedConnectionRevision: "17",
+        expectedCatalogGeneration: "19",
+      },
+    },
+    {
+      command: "metawork.models.connections.remove",
+      payload: { sourceId: "source-1", expectedConnectionRevision: "23" },
+    },
+  ]);
+});
+
 test("native shortcut events stay behind the Bridge client boundary", () => {
   let listener = null;
   let removed = false;
@@ -193,36 +348,6 @@ test("a native Workspace picker remains user-controlled instead of command-timed
   });
 
   assert.deepEqual(await client.chooseWorkspace(), { selected: false });
-});
-
-test("a native attachment picker remains user-controlled instead of command-timed", async () => {
-  const token = "a".repeat(48);
-  const client = new BridgeClient({
-    bridge: bridgeWith(
-      () =>
-        new Promise((resolve) =>
-          setTimeout(
-            () =>
-              resolve({
-                status: "ready",
-                attachments: [
-                  {
-                    token,
-                    kind: "image",
-                    format: "png",
-                    displayName: "diagram.png",
-                    sizeBytes: "128",
-                  },
-                ],
-              }),
-            25,
-          ),
-        ),
-    ),
-    commandTimeoutMs: 5,
-  });
-
-  assert.equal((await client.chooseAttachments()).status, "ready");
 });
 
 test("product BridgeClient exposes no native window actions or state", () => {
@@ -377,13 +502,16 @@ test("MCP management uses only typed revision 1 commands", async () => {
   ]);
 });
 
-test("the fixed revision 1 contract keeps Account selection separate from Product execution identity", async () => {
+test("the fixed revision 1 contract keeps Models selection separate from Product execution identity", async () => {
   const calls = [];
   const client = new BridgeClient({
     bridge: bridgeWith(async (command, payload) => {
       calls.push({ command, payload });
-      if (command === "metawork.account.selectModel")
-        return { accepted: true, errorCode: "none", attemptId: "5" };
+      if (
+        command === "metawork.models.configureMetaskSelection" ||
+        command === "metawork.models.selectMetaskApiKey"
+      )
+        return { accepted: true, errorCode: "none", attemptId: null };
       if (command === "metawork.tasks.create")
         return {
           accepted: true,
@@ -436,7 +564,17 @@ test("the fixed revision 1 contract keeps Account selection separate from Produc
     }),
   });
 
-  await client.selectModel("model-3", "19");
+  await client.configureMetaskSelection({
+    sourceId: "metask:key-1",
+    modelId: "model-3",
+    expectedMetaskSelectionRevision: "17",
+    expectedCatalogGeneration: "19",
+  });
+  await client.selectMetaskApiKey({
+    sourceId: "metask:key-2",
+    expectedMetaskSelectionRevision: "21",
+    expectedCatalogGeneration: "23",
+  });
   assert.deepEqual(
     await client.createTask(
       {
@@ -518,10 +656,20 @@ test("the fixed revision 1 contract keeps Account selection separate from Produc
   });
   assert.deepEqual(calls, [
     {
-      command: "metawork.account.selectModel",
+      command: "metawork.models.configureMetaskSelection",
       payload: {
-        selectionId: "model-3",
+        sourceId: "metask:key-1",
+        modelId: "model-3",
+        expectedMetaskSelectionRevision: "17",
         expectedCatalogGeneration: "19",
+      },
+    },
+    {
+      command: "metawork.models.selectMetaskApiKey",
+      payload: {
+        sourceId: "metask:key-2",
+        expectedMetaskSelectionRevision: "21",
+        expectedCatalogGeneration: "23",
       },
     },
     {

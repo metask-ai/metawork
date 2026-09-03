@@ -1,6 +1,6 @@
 const std = @import("std");
 const account_contract = @import("metawork_account_contract");
-const execution_contract = @import("metawork_product_execution_contract");
+const models_contract = @import("metawork_product_models_contract");
 const agent = @import("metawork_agent");
 const mcp_platform = @import("metawork_mcp_platform");
 const options = @import("mcp_interop_options");
@@ -251,57 +251,7 @@ fn managementConfiguration(
 }
 
 fn installExecution(workbench_value: *product_control.Runtime) !void {
-    var execution = try execution_contract.OwnedConfig.initOwned(
-        std.testing.allocator,
-        .metask,
-        .anthropic_messages,
-        try std.testing.allocator.dupe(u8, "fixture-model"),
-        try std.testing.allocator.dupe(
-            u8,
-            account_contract.metask_anthropic_messages_url,
-        ),
-        1,
-        try std.testing.allocator.dupe(u8, "fixture-credential"),
-        "fixture-provider",
-    );
-    errdefer execution.deinit();
-    try workbench_value.beginExecutionReplacement();
-    const api_keys = [_]account_contract.ApiKeyView{.{
-        .id = "key-1",
-        .name = "Fixture",
-        .suffix = "",
-        .protocol = .anthropic_messages,
-    }};
-    const models = [_]account_contract.ModelView{.{
-        .id = "fixture-model",
-        .display_name = "Fixture model",
-    }};
-    workbench_value.commitAccountFactNoFail(.{
-        .kind = .source_authority_changed,
-        .view = .{
-            .state = .authenticated,
-            .catalog_state = .ready,
-            .account_id = "account-1",
-            .display_name = "Fixture",
-            .api_keys = &api_keys,
-            .models = &models,
-            .selected_api_key_id = "key-1",
-            .selected_model = "fixture-model",
-            .model_catalog_api_key_id = "key-1",
-            .catalog_generation = 1,
-        },
-        .authority = .{
-            .account_id = "account-1",
-            .api_key_id = "key-1",
-            .model_id = "fixture-model",
-            .protocol = .anthropic_messages,
-            .source_generation = 1,
-        },
-    });
-    try workbench_value.prepareExecutionInstall(execution.input());
-    workbench_value.installExecutionNoFail(&execution);
-    workbench_value.endExecutionReplacementNoFail();
-    workbench_value.finishAccountCommitNoFail();
+    try product_control.TestSupport.installMetaskExecution(workbench_value, 1);
 }
 
 fn shutdownProduct(workbench_value: *product_control.Runtime, runtime: *agent.Runtime) void {
