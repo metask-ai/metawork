@@ -16,6 +16,7 @@ pub const RendererBridgeConnect = struct {
     contractRevision: u32,
 };
 pub const EventDisconnect = struct { generation: []const u8 };
+pub const ModelsResetStore = struct { expectedRevision: []const u8 };
 pub const ProductSnapshotChunk = struct { snapshotId: []const u8, offset: []const u8 };
 pub const Empty = struct {};
 pub const WindowChromeRegion = struct {

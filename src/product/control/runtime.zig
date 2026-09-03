@@ -1984,6 +1984,26 @@ pub const Runtime = struct {
         self.model_connections.stop();
     }
 
+    /// Hard-resets the Models canonical store after an explicit user
+    /// confirmation. The snapshot revision is the Product CAS boundary;
+    /// Models itself owns the canonical file and credential scrub.
+    pub fn resetModelsStore(
+        self: *Runtime,
+        expected_revision: u64,
+    ) models_contract.CommandResult {
+        if (self.shutting_down)
+            return .rejected(.operation_in_progress);
+        if (expected_revision != self.revision)
+            return .rejected(.generation_mismatch);
+        if (self.executionReplacementPending())
+            return .rejected(.operation_in_progress);
+        const result = self.model_connections.resetStore();
+        if (!result.accepted) return result;
+        self.reconcileModelsDefaultNoFail(false, false);
+        self.finishExecutionCommitNoFail();
+        return result;
+    }
+
     pub fn selectModelsDefault(
         self: *Runtime,
         command: models_contract.SelectDefaultCommand,
@@ -6820,6 +6840,7 @@ pub const Runtime = struct {
             .start_model_connections_fn = controlStartModelConnections,
             .start_model_connections_unavailable_fn = controlStartModelConnectionsUnavailable,
             .stop_model_connections_fn = controlStopModelConnections,
+            .reset_model_store_fn = controlResetModelStore,
             .create_model_connection_fn = controlCreateModelConnection,
             .replace_model_connection_credential_fn = controlReplaceModelConnectionCredential,
             .submit_model_connection_fn = controlSubmitModelConnection,
@@ -7078,6 +7099,9 @@ fn controlStartModelConnectionsUnavailable(context: *anyopaque) void {
 }
 fn controlStopModelConnections(context: *anyopaque) void {
     controlOwner(context).stopModelConnections();
+}
+fn controlResetModelStore(context: *anyopaque, expected_revision: u64) models_contract.CommandResult {
+    return controlOwner(context).resetModelsStore(expected_revision);
 }
 fn controlCreateModelConnection(context: *anyopaque, secret: []const u8, spec: models_contract.ModelConnectionSpec, model: models_contract.CustomModelInput) models_contract.CommandResult {
     return controlOwner(context).createModelConnectionWithCredential(secret, spec, model);
@@ -11071,6 +11095,44 @@ test "explicit Metask default activation restores admission from an empty global
     try std.testing.expect(control.modelsView().default_selection != null);
     try std.testing.expect(control.newTaskAdmissionView().available);
     try std.testing.expect(control.newTaskAdmissionView().active_generation != 0);
+}
+
+test "Product Control reset clears Models admission without touching task state" {
+    test_agent_runtime.io = std.testing.io;
+    var control = try Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        &test_agent_runtime,
+        testLimits(),
+        .{},
+    );
+    defer control.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
+    var vault: TestModelConnectionVault = .{};
+    try control.startModelConnections(directory_storage[0..directory_len], vault.port());
+    defer control.stopModelConnections();
+    const selection = try createReadyTestModelConnection(&control);
+    const connection = control.modelsView().model_connections[0];
+    try std.testing.expect(control.selectModelsDefault(.{
+        .selection = .{ .source_id = selection.source_id, .model_id = "gpt-5" },
+        .expected_selection_revision = control.modelsView().selection_revision,
+        .expected_source_generation = connection.source_generation,
+        .expected_catalog_generation = connection.catalog_generation,
+    }).accepted);
+    try std.testing.expect(control.canCreateTask());
+    const revision = control.currentRevision();
+    try std.testing.expectEqual(
+        models_contract.ManagementError.generation_mismatch,
+        control.resetModelsStore(revision - 1).error_code.?,
+    );
+    try std.testing.expect(control.resetModelsStore(revision).accepted);
+    try std.testing.expectEqual(@as(usize, 0), control.modelsView().model_connections.len);
+    try std.testing.expect(control.modelsView().default_selection == null);
+    try std.testing.expect(!control.newTaskAdmissionView().available);
+    try std.testing.expect(!vault.present);
 }
 
 test "identity replacement does not disturb live Task runtime references" {

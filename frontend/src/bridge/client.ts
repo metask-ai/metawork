@@ -525,6 +525,12 @@ export class BridgeClient {
     );
   }
 
+  async resetModelsStore(expectedRevision: string) {
+    return decodeExecutionCommandResult(
+      await this.invoke(commands.modelsResetStore, { expectedRevision }),
+    );
+  }
+
   async selectMetaskApiKey(input: {
     sourceId: string;
     expectedMetaskSelectionRevision: string;

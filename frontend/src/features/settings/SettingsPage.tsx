@@ -8,6 +8,7 @@ import type {
 } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { Button } from "../../components/ui/button.tsx";
+import { ConfirmationNotice } from "../../components/ConfirmationNotice.tsx";
 import {
   SelectionMenu,
   type SelectionMenuOption,
@@ -108,6 +109,7 @@ export function SettingsPage({
   cancelDisabled,
   onBack,
   onRefresh,
+  onResetModels,
   onCancel,
   onSelectApiKey,
   onSelectModel,
@@ -144,6 +146,7 @@ export function SettingsPage({
   cancelDisabled: boolean;
   onBack: () => void;
   onRefresh: () => void;
+  onResetModels: () => Promise<boolean>;
   onCancel: () => void;
   onSelectApiKey: (id: string) => void;
   onSelectModel: (id: string) => void;
@@ -1100,6 +1103,28 @@ export function SettingsPage({
                   <Icon name="check" />
                   {t("settings.existing_tasks_unchanged")}
                 </p>
+
+                {models.persistenceHealth !== "ready" && (
+                  <ConfirmationNotice
+                    className="task-persistence-error settings-model-reset-notice"
+                    message={t("settings.models_reset_message")}
+                    detail={t("settings.models_reset_detail")}
+                    actionLabel={t("settings.models_reset_action")}
+                    dialogTitle={t("settings.models_reset_dialog_title")}
+                    dialogDescription={t("settings.models_reset_dialog_body")}
+                    cancelLabel={t("common.cancel")}
+                    confirmLabel={t("settings.models_reset_confirm")}
+                    pendingLabel={t("settings.models_reset_pending")}
+                    failureMessage={t("settings.models_reset_failed")}
+                    actionAvailable
+                    disabled={disabled || executionDisabled}
+                    onConfirm={async () =>
+                      (await onResetModels())
+                        ? null
+                        : t("settings.models_reset_failed")
+                    }
+                  />
+                )}
 
                 {models.errorCode !== "none" &&
                   models.errorCode !== "authorization_unavailable" && (

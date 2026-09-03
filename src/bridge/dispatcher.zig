@@ -186,10 +186,15 @@ pub const ModelConnectionHost = struct {
 pub const ModelsHost = struct {
     context: *anyopaque,
     refresh_catalog_fn: *const fn (*anyopaque) models_contract.CommandResult,
+    reset_store_fn: *const fn (*anyopaque, u64) models_contract.CommandResult,
     select_metask_api_key_fn: *const fn (*anyopaque, models_contract.SelectMetaskApiKeyCommand) models_contract.CommandResult,
 
     fn refreshCatalog(self: ModelsHost) models_contract.CommandResult {
         return self.refresh_catalog_fn(self.context);
+    }
+
+    fn resetStore(self: ModelsHost, expected_revision: u64) models_contract.CommandResult {
+        return self.reset_store_fn(self.context, expected_revision);
     }
 
     fn selectMetaskApiKey(self: ModelsHost, command: models_contract.SelectMetaskApiKeyCommand) models_contract.CommandResult {
@@ -359,6 +364,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.account_cancel_operation, .function = accountCancelOperation },
             .{ .name = commands.account_retry_refresh, .function = accountRetryRefresh },
             .{ .name = commands.models_refresh_catalog, .function = modelsRefreshCatalog },
+            .{ .name = commands.models_reset_store, .function = modelsResetStore },
             .{ .name = commands.models_select_metask_api_key, .function = selectMetaskApiKey },
             .{ .name = commands.models_configure_metask_selection, .function = configureMetaskSelection },
             .{ .name = commands.models_select_default, .function = selectModelsDefault },
@@ -1510,6 +1516,28 @@ pub const Dispatcher = struct {
         const host = self.models_host orelse
             return encodeExecutionResult(output, .rejected(.catalog_unavailable));
         return encodeExecutionResult(output, host.refreshCatalog());
+    }
+
+    fn modelsResetStore(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireManagementAuthority(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(
+            handlers.ModelsResetStore,
+            invocation.request.payload,
+        );
+        defer parsed.deinit();
+        const host = self.models_host orelse
+            return encodeExecutionResult(output, .rejected(.persistence_unavailable));
+        return encodeExecutionResult(
+            output,
+            host.resetStore(try handlers.parseWireId(parsed.value.expectedRevision)),
+        );
     }
 
     fn selectMetaskApiKey(
@@ -5089,6 +5117,13 @@ test "Dispatcher validates authority before domain calls and preserves committed
             return self.models_result;
         }
 
+        fn resetModels(
+            context: *anyopaque,
+            _: u64,
+        ) models_contract.CommandResult {
+            return refreshModels(context);
+        }
+
         fn selectMetaskApiKey(
             context: *anyopaque,
             _: models_contract.SelectMetaskApiKeyCommand,
@@ -5148,6 +5183,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
     dispatcher.setModelsHost(.{
         .context = &harness,
         .refresh_catalog_fn = Harness.refreshModels,
+        .reset_store_fn = Harness.resetModels,
         .select_metask_api_key_fn = Harness.selectMetaskApiKey,
     });
     const native_dispatcher = dispatcher.register(
@@ -5415,6 +5451,25 @@ test "Dispatcher validates authority before domain calls and preserves committed
     ) != null);
     try std.testing.expectEqual(@as(usize, 1), harness.account_calls);
     try std.testing.expectEqual(@as(usize, 1), harness.models_calls);
+    var reset_request_storage: [256]u8 = undefined;
+    const reset_request = try std.fmt.bufPrint(
+        &reset_request_storage,
+        "{{\"id\":\"reset-models\",\"command\":\"metawork.models.resetStore\",\"payload\":{{\"expectedRevision\":\"{d}\"}}}}",
+        .{workbench.currentRevision()},
+    );
+    const reset_response = native_dispatcher.dispatch(
+        reset_request,
+        source,
+        &response,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, reset_response, "\"accepted\":true") != null);
+    try std.testing.expectEqual(@as(usize, 2), harness.models_calls);
+    const malformed_reset = native_dispatcher.dispatch(
+        "{\"id\":\"bad-reset\",\"command\":\"metawork.models.resetStore\",\"payload\":{\"expectedRevision\":\"1\",\"extra\":true}}",
+        source,
+        &response,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, malformed_reset, "\"handler_failed\"") != null);
     const selected_api_key = native_dispatcher.dispatch(
         "{\"id\":\"select-api\",\"command\":\"metawork.models.selectMetaskApiKey\",\"payload\":{\"sourceId\":\"metask:key-2\",\"expectedMetaskSelectionRevision\":\"3\",\"expectedCatalogGeneration\":\"5\"}}",
         source,
@@ -5425,7 +5480,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
         selected_api_key,
         "\"accepted\":true",
     ) != null);
-    try std.testing.expectEqual(@as(usize, 2), harness.models_calls);
+    try std.testing.expectEqual(@as(usize, 3), harness.models_calls);
     harness.on_main_thread = false;
     _ = native_dispatcher.dispatch(
         "{\"id\":\"wrong-thread\",\"command\":\"metawork.account.logout\",\"payload\":{}}",
@@ -5548,7 +5603,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
     // Models commands are routed through the Models host and never manufacture
     // an Account attempt identity.
     try std.testing.expectEqual(@as(usize, 3), harness.account_calls);
-    try std.testing.expectEqual(@as(usize, 3), harness.models_calls);
+    try std.testing.expectEqual(@as(usize, 4), harness.models_calls);
     try std.testing.expect(std.mem.indexOf(
         u8,
         metask_default,
