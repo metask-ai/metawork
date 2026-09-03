@@ -86,6 +86,8 @@ pub fn commitSignedOut(backend: Backend) StoreError!void {
 
 const FakeBackend = struct {
     refresh_token: ?[]const u8 = null,
+    write_fails: bool = false,
+    delete_fails: bool = false,
 
     fn backend(self: *FakeBackend) Backend {
         return .{
@@ -98,6 +100,7 @@ const FakeBackend = struct {
 
     fn setRefreshToken(context: *anyopaque, value: []const u8) StoreError!void {
         const self: *FakeBackend = @ptrCast(@alignCast(context));
+        if (self.write_fails) return error.WriteFailed;
         self.refresh_token = value;
     }
 
@@ -114,6 +117,7 @@ const FakeBackend = struct {
 
     fn deleteRefreshToken(context: *anyopaque) StoreError!void {
         const self: *FakeBackend = @ptrCast(@alignCast(context));
+        if (self.delete_fails) return error.DeleteFailed;
         self.refresh_token = null;
     }
 };
@@ -132,4 +136,38 @@ test "Account logout deletes only its refresh credential" {
     var fake: FakeBackend = .{ .refresh_token = "refresh-token" };
     try commitSignedOut(fake.backend());
     try std.testing.expect(fake.refresh_token == null);
+}
+
+test "definite credential write failure preserves the committed credential" {
+    var fake: FakeBackend = .{
+        .refresh_token = "old-refresh-token",
+        .write_fails = true,
+    };
+    var replacement = try oauth.Secret.init(
+        std.testing.allocator,
+        "new-refresh-token",
+    );
+    defer replacement.deinit();
+
+    try std.testing.expectError(
+        error.WriteFailed,
+        commitRefresh(fake.backend(), &replacement),
+    );
+    try std.testing.expectEqualStrings(
+        "old-refresh-token",
+        fake.refresh_token.?,
+    );
+}
+
+test "definite credential delete failure preserves the committed credential" {
+    var fake: FakeBackend = .{
+        .refresh_token = "refresh-token",
+        .delete_fails = true,
+    };
+
+    try std.testing.expectError(
+        error.DeleteFailed,
+        commitSignedOut(fake.backend()),
+    );
+    try std.testing.expectEqualStrings("refresh-token", fake.refresh_token.?);
 }
