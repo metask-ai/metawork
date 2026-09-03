@@ -322,8 +322,7 @@ pub const Registry = struct {
             return error.InvalidConnection;
         const connection = try self.selected(input.selection);
         const binding_changed = connection.protocol != input.spec.protocol or
-            !std.mem.eql(u8, connection.normalized_base_url, input.spec.normalized_base_url) or
-            input.credential_slot != null;
+            !std.mem.eql(u8, connection.normalized_base_url, input.spec.normalized_base_url);
         for (self.connections.items) |candidate|
             if (!std.mem.eql(u8, candidate.id, connection.id) and
                 candidate.protocol == input.spec.protocol and
@@ -344,17 +343,10 @@ pub const Registry = struct {
         errdefer self.allocator.free(display_name);
         const base_url = try self.allocator.dupe(u8, input.spec.normalized_base_url);
         errdefer self.allocator.free(base_url);
-        if (input.credential_slot) |slot| {
-            if (!std.mem.eql(u8, slot.id, connection.id))
-                return error.InvalidConnection;
-        }
         self.allocator.free(connection.display_name);
         self.allocator.free(connection.normalized_base_url);
         connection.display_name = display_name;
         connection.normalized_base_url = base_url;
-        if (input.credential_slot != null) {
-            connection.credential_status = .ready;
-        }
         connection.protocol = input.spec.protocol;
         connection.connection_revision = next_connection_revision;
         if (binding_changed) {
@@ -376,6 +368,27 @@ pub const Registry = struct {
         } else if (next_selection_revision != null) {
             return error.InvalidConnection;
         }
+    }
+
+    /// Restores a Host-written credential only after the durable registry has
+    /// first revoked the prior authority with markCredentialMissing.
+    pub fn restoreCredential(
+        self: *Registry,
+        selection: contract.ModelConnectionSelectionCommand,
+        next_connection_revision: u64,
+        next_source_generation: u64,
+    ) Error!void {
+        const connection = try self.selected(selection);
+        if (connection.credential_status != .missing or
+            next_connection_revision == 0 or
+            next_connection_revision == connection.connection_revision or
+            next_source_generation == 0 or
+            next_source_generation == connection.source_generation)
+            return error.InvalidConnection;
+        connection.credential_status = .ready;
+        connection.state = .configuring;
+        connection.connection_revision = next_connection_revision;
+        connection.source_generation = next_source_generation;
     }
 
     pub fn addCustomModel(

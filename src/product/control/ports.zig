@@ -7,7 +7,6 @@ const agent = @import("metawork_agent");
 const account = @import("metawork_account_contract");
 const models_contract = @import("metawork_product_models_contract");
 const models_ports = @import("product_models_ports");
-const models_metask = @import("product_models_metask");
 const product_schedule = @import("metawork_product_schedule");
 const mcp = @import("metawork_product_mcp");
 const mcp_contract = mcp.contract;
@@ -47,11 +46,13 @@ pub const ModelsManagement = struct {
     start_model_connections_unavailable_fn: *const fn (*anyopaque) void,
     stop_model_connections_fn: *const fn (*anyopaque) void,
     create_model_connection_fn: *const fn (*anyopaque, []const u8, models_contract.ModelConnectionSpec, models_contract.CustomModelInput) models_contract.CommandResult,
+    replace_model_connection_credential_fn: *const fn (*anyopaque, []const u8, models_contract.ModelConnectionSelectionCommand) models_contract.CommandResult,
     submit_model_connection_fn: *const fn (*anyopaque, models_contract.ModelConnectionCommand) models_contract.CommandResult,
     begin_model_connection_probe_fn: *const fn (*anyopaque, models_contract.ModelConnectionTestCommand) models_contract.Preparation,
     complete_model_connection_test_fn: *const fn (*anyopaque, models_contract.ModelConnectionTestCommand, bool) models_contract.CommandResult,
     prepare_metask_catalog_refresh_fn: *const fn (*anyopaque, []const u8, u64) models_contract.CatalogRefreshPrepareResult,
-    complete_metask_catalog_refresh_fn: *const fn (*anyopaque, u64, u64, *models_metask.OwnedCatalogCompletion) models_contract.ModelsError,
+    prepare_metask_api_key_selection_fn: *const fn (*anyopaque, []const u8, u64, models_contract.SelectMetaskApiKeyCommand) models_contract.CatalogSelectionPrepareResult,
+    complete_metask_catalog_refresh_fn: *const fn (*anyopaque, u64, u64, *models_ports.OwnedCatalogCompletion) models_contract.ModelsError,
     fail_metask_catalog_refresh_fn: *const fn (*anyopaque, u64, u64, models_contract.ModelsError, []const u8) void,
     metask_authorization_unavailable_fn: *const fn (*anyopaque) void,
     pub fn startModelConnections(self: ModelsManagement, directory: []const u8, vault: models_ports.CredentialVault) anyerror!void {
@@ -66,6 +67,9 @@ pub const ModelsManagement = struct {
     pub fn createModelConnectionWithCredential(self: ModelsManagement, secret: []const u8, spec: models_contract.ModelConnectionSpec, model: models_contract.CustomModelInput) models_contract.CommandResult {
         return self.create_model_connection_fn(self.context, secret, spec, model);
     }
+    pub fn replaceModelConnectionCredential(self: ModelsManagement, secret: []const u8, selection: models_contract.ModelConnectionSelectionCommand) models_contract.CommandResult {
+        return self.replace_model_connection_credential_fn(self.context, secret, selection);
+    }
     pub fn submitModelConnectionCommand(self: ModelsManagement, command: models_contract.ModelConnectionCommand) models_contract.CommandResult {
         return self.submit_model_connection_fn(self.context, command);
     }
@@ -78,7 +82,10 @@ pub const ModelsManagement = struct {
     pub fn prepareMetaskCatalogRefresh(self: ModelsManagement, principal_ref: []const u8, authorization_generation: u64) models_contract.CatalogRefreshPrepareResult {
         return self.prepare_metask_catalog_refresh_fn(self.context, principal_ref, authorization_generation);
     }
-    pub fn completeMetaskCatalogRefresh(self: ModelsManagement, attempt_id: u64, authorization_generation: u64, completion: *models_metask.OwnedCatalogCompletion) models_contract.ModelsError {
+    pub fn prepareMetaskApiKeySelection(self: ModelsManagement, principal_ref: []const u8, authorization_generation: u64, command: models_contract.SelectMetaskApiKeyCommand) models_contract.CatalogSelectionPrepareResult {
+        return self.prepare_metask_api_key_selection_fn(self.context, principal_ref, authorization_generation, command);
+    }
+    pub fn completeMetaskCatalogRefresh(self: ModelsManagement, attempt_id: u64, authorization_generation: u64, completion: *models_ports.OwnedCatalogCompletion) models_contract.ModelsError {
         return self.complete_metask_catalog_refresh_fn(self.context, attempt_id, authorization_generation, completion);
     }
     pub fn failMetaskCatalogRefresh(self: ModelsManagement, attempt_id: u64, authorization_generation: u64, error_code: models_contract.ModelsError, safe_diagnostic: []const u8) void {

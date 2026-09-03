@@ -957,12 +957,18 @@ fn wireAgentCore(
     account_login_attempt.addImport("account_oauth", account_oauth);
     account_login_attempt.addImport("account_loopback", account_loopback);
     account_login_attempt.addImport("metask_client", metask_client);
+    const models_ports = b.createModule(.{
+        .root_source_file = b.path("src/product/models/ports.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
     const models_metask = b.createModule(.{
         .root_source_file = b.path("src/product/models/metask.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     models_metask.addImport("metawork_product_models_contract", models_contract);
+    models_metask.addImport("product_models_ports", models_ports);
     models_metask.addImport("metask_transport", metask_transport);
     const account_credentials_runtime = b.createModule(.{
         .root_source_file = b.path("src/product/account/credentials.zig"),
@@ -982,11 +988,6 @@ fn wireAgentCore(
         "metawork_product_models_contract",
         models_contract,
     );
-    const models_ports = b.createModule(.{
-        .root_source_file = b.path("src/product/models/ports.zig"),
-        .target = target,
-        .optimize = root_module.optimize,
-    });
     const models_runtime = b.createModule(.{
         .root_source_file = b.path("src/product/models/runtime.zig"),
         .target = target,
@@ -1460,7 +1461,6 @@ fn wireAgentCore(
     product_control_ports.addImport("metawork_account_contract", account_contract);
     product_control_ports.addImport("metawork_product_models_contract", models_contract);
     product_control_ports.addImport("product_models_ports", models_ports);
-    product_control_ports.addImport("product_models_metask", models_metask);
     product_control_ports.addImport("metawork_product_mcp", product_mcp);
     product_control_ports.addImport("metawork_product_schedule", product_schedule);
     const product_workspace_runtime = b.createModule(.{
@@ -1495,7 +1495,6 @@ fn wireAgentCore(
     product_control_runtime.addImport("metawork_product_models_contract", models_contract);
     product_control_runtime.addImport("metawork_product_models", models);
     product_control_runtime.addImport("product_models_ports", models_ports);
-    product_control_runtime.addImport("product_models_metask", models_metask);
     product_control_runtime.addImport(
         "product_control_account_projection",
         product_control_account_projection,

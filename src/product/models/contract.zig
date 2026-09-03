@@ -175,6 +175,7 @@ pub const CatalogRefreshPreparation = struct {
     authorization_generation: u64,
     preferred_api_key_id: []const u8,
     preferred_model_id: []const u8,
+    required_api_key_id: []const u8 = "",
 };
 
 pub const CatalogRefreshPrepareResult = union(enum) {
@@ -284,7 +285,6 @@ pub const ModelConnectionCreateCommand = struct {
 pub const ModelConnectionUpdateCommand = struct {
     selection: ModelConnectionSelectionCommand,
     spec: ModelConnectionSpec,
-    credential_slot: ?ModelConnectionCredentialSlot = null,
 };
 
 pub const ModelConnectionTestCommand = struct {
@@ -316,6 +316,12 @@ pub const CustomModelRemoveCommand = struct {
 
 pub const ConfigureMetaskSelectionCommand = struct {
     selection: ModelRef,
+    expected_metask_selection_revision: u64,
+    expected_catalog_generation: u64,
+};
+
+pub const SelectMetaskApiKeyCommand = struct {
+    source_id: []const u8,
     expected_metask_selection_revision: u64,
     expected_catalog_generation: u64,
 };
@@ -365,6 +371,11 @@ pub const ManagementError = enum {
     test_unavailable,
     user_cancelled,
     local_resource_exhausted,
+};
+
+pub const CatalogSelectionPrepareResult = union(enum) {
+    ready: CatalogRefreshPreparation,
+    rejected: ManagementError,
 };
 
 pub const CommandResult = struct {
@@ -712,8 +723,6 @@ pub fn validateModelConnectionCommand(command: ModelConnectionCommand) Validatio
             if (value.selection.expected_connection_revision == 0)
                 return error.InvalidGeneration;
             try validateModelConnectionSpec(value.spec);
-            if (value.credential_slot) |slot|
-                try validateRequired(slot.id, Limits.instance_id_bytes);
         },
         .remove => |value| {
             try validateRequired(value.source_id, Limits.instance_id_bytes);

@@ -44,10 +44,13 @@ export const commands = {
   accountBeginLogin: "metawork.account.beginLogin",
   accountCancelOperation: "metawork.account.cancelOperation",
   modelsRefreshCatalog: "metawork.models.refreshCatalog",
+  selectMetaskApiKey: "metawork.models.selectMetaskApiKey",
   configureMetaskSelection: "metawork.models.configureMetaskSelection",
   selectModelsDefault: "metawork.models.selectDefault",
   modelConnectionCreate: "metawork.models.connections.create",
   modelConnectionUpdate: "metawork.models.connections.update",
+  modelConnectionReplaceCredential:
+    "metawork.models.connections.replaceCredential",
   modelConnectionRemove: "metawork.models.connections.remove",
   modelConnectionTest: "metawork.models.connections.test",
   customModelAdd: "metawork.models.customModels.add",

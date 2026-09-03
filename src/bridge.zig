@@ -22,6 +22,7 @@ pub const McpConfigurationApplyStartOutcome = dispatcher_impl.McpConfigurationAp
 pub const McpSecretSlot = dispatcher_impl.McpSecretSlot;
 pub const ModelConnectionHost = dispatcher_impl.ModelConnectionHost;
 pub const ModelConnectionCreateOutcome = dispatcher_impl.ModelConnectionCreateOutcome;
+pub const ModelConnectionCredentialOutcome = dispatcher_impl.ModelConnectionCredentialOutcome;
 pub const WindowChromeRegion = dispatcher_impl.WindowChromeRegion;
 pub const WindowChromePlatformEnvironment = dispatcher_impl.WindowChromePlatformEnvironment;
 pub const WindowChromeControlAction = dispatcher_impl.WindowChromeControlAction;

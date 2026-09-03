@@ -517,6 +517,16 @@ export class BridgeClient {
     );
   }
 
+  async selectMetaskApiKey(input: {
+    sourceId: string;
+    expectedMetaskSelectionRevision: string;
+    expectedCatalogGeneration: string;
+  }) {
+    return decodeExecutionCommandResult(
+      await this.invoke(commands.selectMetaskApiKey, input),
+    );
+  }
+
   async configureMetaskSelection(input: {
     sourceId: string;
     modelId: string;
@@ -566,6 +576,18 @@ export class BridgeClient {
   }) {
     return decodeExecutionCommandResult(
       await this.invoke(commands.modelConnectionUpdate, input),
+    );
+  }
+
+  async replaceModelConnectionCredential(
+    sourceId: string,
+    expectedConnectionRevision: string,
+  ) {
+    return decodeExecutionCommandResult(
+      await this.invoke(commands.modelConnectionReplaceCredential, {
+        sourceId,
+        expectedConnectionRevision,
+      }),
     );
   }
 

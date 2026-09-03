@@ -4,7 +4,6 @@ const lifecycle = @import("metawork_agent");
 const account_contract = @import("metawork_account_contract");
 const models_contract = @import("metawork_product_models_contract");
 const models_ports = @import("product_models_ports");
-const models_metask = @import("product_models_metask");
 const models_aggregate = @import("metawork_product_models");
 const account_projection = @import("product_control_account_projection");
 const execution_state = @import("product_control_execution_state");
@@ -1907,11 +1906,24 @@ pub const Runtime = struct {
         );
     }
 
+    pub fn prepareMetaskApiKeySelection(
+        self: *Runtime,
+        principal_ref: []const u8,
+        authorization_generation: u64,
+        command: models_contract.SelectMetaskApiKeyCommand,
+    ) models_contract.CatalogSelectionPrepareResult {
+        return self.model_connections.prepareMetaskApiKeySelection(
+            principal_ref,
+            authorization_generation,
+            command,
+        );
+    }
+
     pub fn completeMetaskCatalogRefresh(
         self: *Runtime,
         attempt_id: u64,
         authorization_generation: u64,
-        completion: *models_metask.OwnedCatalogCompletion,
+        completion: *models_ports.OwnedCatalogCompletion,
     ) models_contract.ModelsError {
         const result = self.model_connections.completeMetaskCatalogRefresh(
             attempt_id,
@@ -1958,6 +1970,19 @@ pub const Runtime = struct {
             model,
         );
         if (result.accepted) self.finishExecutionCommitNoFail();
+        return result;
+    }
+
+    pub fn replaceModelConnectionCredential(
+        self: *Runtime,
+        secret: []const u8,
+        selection: models_contract.ModelConnectionSelectionCommand,
+    ) models_contract.CommandResult {
+        const result = self.model_connections.replaceCredential(secret, selection);
+        // The fail-closed first phase may revoke stale readiness even when the
+        // subsequent credential write or final commit fails.
+        self.reconcileModelsDefaultNoFail(false, false);
+        self.finishExecutionCommitNoFail();
         return result;
     }
 
@@ -6493,10 +6518,12 @@ pub const Runtime = struct {
             .start_model_connections_unavailable_fn = controlStartModelConnectionsUnavailable,
             .stop_model_connections_fn = controlStopModelConnections,
             .create_model_connection_fn = controlCreateModelConnection,
+            .replace_model_connection_credential_fn = controlReplaceModelConnectionCredential,
             .submit_model_connection_fn = controlSubmitModelConnection,
             .begin_model_connection_probe_fn = controlBeginModelConnectionProbe,
             .complete_model_connection_test_fn = controlCompleteModelConnectionTest,
             .prepare_metask_catalog_refresh_fn = controlPrepareMetaskCatalogRefresh,
+            .prepare_metask_api_key_selection_fn = controlPrepareMetaskApiKeySelection,
             .complete_metask_catalog_refresh_fn = controlCompleteMetaskCatalogRefresh,
             .fail_metask_catalog_refresh_fn = controlFailMetaskCatalogRefresh,
             .metask_authorization_unavailable_fn = controlMetaskAuthorizationUnavailable,
@@ -6752,6 +6779,9 @@ fn controlStopModelConnections(context: *anyopaque) void {
 fn controlCreateModelConnection(context: *anyopaque, secret: []const u8, spec: models_contract.ModelConnectionSpec, model: models_contract.CustomModelInput) models_contract.CommandResult {
     return controlOwner(context).createModelConnectionWithCredential(secret, spec, model);
 }
+fn controlReplaceModelConnectionCredential(context: *anyopaque, secret: []const u8, selection: models_contract.ModelConnectionSelectionCommand) models_contract.CommandResult {
+    return controlOwner(context).replaceModelConnectionCredential(secret, selection);
+}
 fn controlSubmitModelConnection(context: *anyopaque, command: models_contract.ModelConnectionCommand) models_contract.CommandResult {
     return controlOwner(context).submitModelConnectionCommand(command);
 }
@@ -6764,7 +6794,10 @@ fn controlCompleteModelConnectionTest(context: *anyopaque, command: models_contr
 fn controlPrepareMetaskCatalogRefresh(context: *anyopaque, principal_ref: []const u8, authorization_generation: u64) models_contract.CatalogRefreshPrepareResult {
     return controlOwner(context).prepareMetaskCatalogRefresh(principal_ref, authorization_generation);
 }
-fn controlCompleteMetaskCatalogRefresh(context: *anyopaque, attempt_id: u64, authorization_generation: u64, completion: *models_metask.OwnedCatalogCompletion) models_contract.ModelsError {
+fn controlPrepareMetaskApiKeySelection(context: *anyopaque, principal_ref: []const u8, authorization_generation: u64, command: models_contract.SelectMetaskApiKeyCommand) models_contract.CatalogSelectionPrepareResult {
+    return controlOwner(context).prepareMetaskApiKeySelection(principal_ref, authorization_generation, command);
+}
+fn controlCompleteMetaskCatalogRefresh(context: *anyopaque, attempt_id: u64, authorization_generation: u64, completion: *models_ports.OwnedCatalogCompletion) models_contract.ModelsError {
     return controlOwner(context).completeMetaskCatalogRefresh(attempt_id, authorization_generation, completion);
 }
 fn controlFailMetaskCatalogRefresh(context: *anyopaque, attempt_id: u64, authorization_generation: u64, error_code: models_contract.ModelsError, safe_diagnostic: []const u8) void {
@@ -10207,6 +10240,7 @@ const TestModelConnectionVault = struct {
     secret: [models_contract.Limits.credential_bytes]u8 = undefined,
     secret_len: usize = 0,
     present: bool = false,
+    write_fails: bool = false,
     read_fails: bool = false,
 
     fn port(self: *@This()) models_ports.CredentialVault {
@@ -10232,6 +10266,7 @@ const TestModelConnectionVault = struct {
         secret: []const u8,
     ) anyerror!void {
         const self: *@This() = @ptrCast(@alignCast(context));
+        if (self.write_fails) return error.WriteFailed;
         if (secret.len > self.secret.len) return error.WriteFailed;
         @memcpy(self.secret[0..secret.len], secret);
         self.secret_len = secret.len;
@@ -10369,6 +10404,71 @@ test "Product Control atomically manages and installs a Model Connection default
         TestModelConnectionVault.slot,
         control.execution_state.selectedModelConnectionId(),
     );
+}
+
+test "credential replacement revokes Product Control admission after every durable revoke" {
+    for ([_]bool{ false, true }) |vault_write_fails| {
+        test_agent_runtime.io = std.testing.io;
+        var control = try Runtime.init(
+            std.testing.allocator,
+            std.testing.io,
+            &test_agent_runtime,
+            .{
+                .max_tasks = 1,
+                .max_runs_per_task = 1,
+                .max_tools_per_run = 1,
+            },
+            .{},
+        );
+        defer control.deinit();
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
+        var vault: TestModelConnectionVault = .{};
+        try control.startModelConnections(
+            directory_storage[0..directory_len],
+            vault.port(),
+        );
+        defer control.stopModelConnections();
+
+        const selection = try createReadyTestModelConnection(&control);
+        const ready_connection = control.modelsView().model_connections[0];
+        try std.testing.expect(control.selectModelsDefault(.{
+            .selection = .{ .source_id = selection.source_id, .model_id = "gpt-5" },
+            .expected_selection_revision = control.modelsView().selection_revision,
+            .expected_source_generation = ready_connection.source_generation,
+            .expected_catalog_generation = ready_connection.catalog_generation,
+        }).accepted);
+        try std.testing.expect(control.canCreateTask());
+        try std.testing.expect(control.newTaskAdmissionView().active_selection_revision != 0);
+
+        vault.write_fails = vault_write_fails;
+        const result = control.replaceModelConnectionCredential("next-secret", selection);
+        if (vault_write_fails) {
+            try std.testing.expect(!result.accepted);
+            try std.testing.expectEqual(
+                models_contract.ManagementError.credential_write_failed,
+                result.error_code.?,
+            );
+        } else {
+            try std.testing.expect(result.accepted);
+        }
+
+        try std.testing.expect(control.modelsView().default_selection == null);
+        const admission = control.newTaskAdmissionView();
+        try std.testing.expect(!admission.available);
+        try std.testing.expect(admission.active_model_ref == null);
+        try std.testing.expectEqual(@as(u64, 0), admission.active_generation);
+        try std.testing.expectEqual(@as(u64, 0), admission.active_selection_revision);
+        try std.testing.expectError(
+            error.ExecutionUnavailable,
+            control.createTask(.{
+                .workspace_root = "/tmp",
+                .trust = .{ .temporary = "/tmp" },
+            }),
+        );
+    }
 }
 
 test "Account authorization loss leaves a custom Models default available" {

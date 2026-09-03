@@ -730,6 +730,7 @@ export const zhCN: Record<MessageId, string> = {
     "请先选择其他默认连接，再编辑或删除当前连接。",
   "settings.model_connection_edit_help":
     "修改协议或服务地址后需要重新测试连接；这里不会显示或修改 API Key。",
+  "settings.model_connection_replace_credential": "替换 API Key",
   "settings.model_connection_remove_confirm":
     "删除这个连接及其保存的凭据？已有任务仍保留当前绑定。",
   "settings.model_connection_removing": "正在删除…",

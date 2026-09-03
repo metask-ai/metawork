@@ -266,6 +266,7 @@ const App = struct {
         (self.dispatcher orelse @panic("Bridge Dispatcher is not composed")).setModelsHost(.{
             .context = models_management,
             .refresh_catalog_fn = refreshModelsCatalog,
+            .select_metask_api_key_fn = selectMetaskApiKey,
         });
         (self.dispatcher orelse @panic("Bridge Dispatcher is not composed")).startIngress();
     }
@@ -694,6 +695,14 @@ fn notifyModelsAuthorizationChanged(context: *anyopaque) void {
 fn refreshModelsCatalog(context: *anyopaque) models_contract.CommandResult {
     const coordinator: *models_coordinator.Coordinator = @ptrCast(@alignCast(context));
     return coordinator.refreshCatalog();
+}
+
+fn selectMetaskApiKey(
+    context: *anyopaque,
+    command: models_contract.SelectMetaskApiKeyCommand,
+) models_contract.CommandResult {
+    const coordinator: *models_coordinator.Coordinator = @ptrCast(@alignCast(context));
+    return coordinator.selectMetaskApiKey(command);
 }
 
 test "Application remains a composition root with explicit platform limits" {

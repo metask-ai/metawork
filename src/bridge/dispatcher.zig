@@ -150,15 +150,16 @@ pub const McpSecretSlot = union(enum) {
     oauth_client_secret,
 };
 
-/// Host-owned create transaction. Its owner must complete secure capture,
+/// Host-owned credential mutation. Its owner must complete secure capture,
 /// credential persistence, Models registry commit, and definite-failure
 /// rollback before returning. Bridge never receives either the secret or an
 /// intermediate credential slot that it could commit separately.
-pub const ModelConnectionCreateOutcome = union(enum) {
+pub const ModelConnectionCredentialOutcome = union(enum) {
     submitted: models_contract.CommandResult,
     cancelled,
     unavailable,
 };
+pub const ModelConnectionCreateOutcome = ModelConnectionCredentialOutcome;
 
 pub const ModelConnectionHost = struct {
     context: *anyopaque,
@@ -167,15 +168,24 @@ pub const ModelConnectionHost = struct {
         models_contract.ModelConnectionSpec,
         models_contract.CustomModelInput,
     ) ModelConnectionCreateOutcome,
+    replace_credential_fn: *const fn (
+        *anyopaque,
+        models_contract.ModelConnectionSelectionCommand,
+    ) ModelConnectionCredentialOutcome,
 };
 
 /// Application-owned Models effects that cannot run inside Product Control.
 pub const ModelsHost = struct {
     context: *anyopaque,
     refresh_catalog_fn: *const fn (*anyopaque) models_contract.CommandResult,
+    select_metask_api_key_fn: *const fn (*anyopaque, models_contract.SelectMetaskApiKeyCommand) models_contract.CommandResult,
 
     fn refreshCatalog(self: ModelsHost) models_contract.CommandResult {
         return self.refresh_catalog_fn(self.context);
+    }
+
+    fn selectMetaskApiKey(self: ModelsHost, command: models_contract.SelectMetaskApiKeyCommand) models_contract.CommandResult {
+        return self.select_metask_api_key_fn(self.context, command);
     }
 };
 
@@ -321,10 +331,12 @@ pub const Dispatcher = struct {
             .{ .name = commands.account_begin_login, .function = accountBeginLogin },
             .{ .name = commands.account_cancel_operation, .function = accountCancelOperation },
             .{ .name = commands.models_refresh_catalog, .function = modelsRefreshCatalog },
+            .{ .name = commands.models_select_metask_api_key, .function = selectMetaskApiKey },
             .{ .name = commands.models_configure_metask_selection, .function = configureMetaskSelection },
             .{ .name = commands.models_select_default, .function = selectModelsDefault },
             .{ .name = commands.model_connection_create, .function = modelConnectionCreate },
             .{ .name = commands.model_connection_update, .function = modelConnectionUpdate },
+            .{ .name = commands.model_connection_replace_credential, .function = modelConnectionReplaceCredential },
             .{ .name = commands.model_connection_remove, .function = modelConnectionRemove },
             .{ .name = commands.model_connection_test, .function = modelConnectionTest },
             .{ .name = commands.custom_model_add, .function = customModelAdd },
@@ -1193,6 +1205,37 @@ pub const Dispatcher = struct {
         return encodeExecutionResult(output, host.refreshCatalog());
     }
 
+    fn selectMetaskApiKey(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireManagementAuthority(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(
+            handlers.SelectMetaskApiKey,
+            invocation.request.payload,
+        );
+        defer parsed.deinit();
+        if (!std.mem.startsWith(u8, parsed.value.sourceId, "metask:") or
+            parsed.value.sourceId.len <= "metask:".len or
+            parsed.value.sourceId.len > "metask:".len + models_contract.Limits.api_key_id_bytes)
+            return error.InvalidBridgePayload;
+        const host = self.models_host orelse
+            return encodeExecutionResult(output, .rejected(.catalog_unavailable));
+        return encodeExecutionResult(output, host.selectMetaskApiKey(.{
+            .source_id = parsed.value.sourceId,
+            .expected_metask_selection_revision = try handlers.parseWireId(
+                parsed.value.expectedMetaskSelectionRevision,
+            ),
+            .expected_catalog_generation = try handlers.parseWireId(
+                parsed.value.expectedCatalogGeneration,
+            ),
+        }));
+    }
+
     fn configureMetaskSelection(
         context: *anyopaque,
         invocation: native_sdk.bridge.Invocation,
@@ -1354,6 +1397,40 @@ pub const Dispatcher = struct {
                 .spec = spec,
             },
         }));
+    }
+
+    fn modelConnectionReplaceCredential(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireManagementAuthority(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(
+            handlers.ModelConnectionSelection,
+            invocation.request.payload,
+        );
+        defer parsed.deinit();
+        if (parsed.value.sourceId.len == 0 or
+            parsed.value.sourceId.len > models_contract.Limits.instance_id_bytes)
+            return error.InvalidBridgePayload;
+        const host = self.model_connection_host orelse
+            return encodeExecutionResult(output, .rejected(.capture_unavailable));
+        return encodeExecutionResult(output, switch (host.replace_credential_fn(
+            host.context,
+            .{
+                .source_id = parsed.value.sourceId,
+                .expected_connection_revision = try handlers.parseWireId(
+                    parsed.value.expectedConnectionRevision,
+                ),
+            },
+        )) {
+            .submitted => |result| result,
+            .cancelled => .rejected(.user_cancelled),
+            .unavailable => .rejected(.capture_unavailable),
+        });
     }
 
     fn modelConnectionRemove(
@@ -4608,6 +4685,13 @@ test "Dispatcher validates authority before domain calls and preserves committed
             self.models_calls += 1;
             return self.models_result;
         }
+
+        fn selectMetaskApiKey(
+            context: *anyopaque,
+            _: models_contract.SelectMetaskApiKeyCommand,
+        ) models_contract.CommandResult {
+            return refreshModels(context);
+        }
     };
 
     fixture.fake_core.reset();
@@ -4661,6 +4745,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
     dispatcher.setModelsHost(.{
         .context = &harness,
         .refresh_catalog_fn = Harness.refreshModels,
+        .select_metask_api_key_fn = Harness.selectMetaskApiKey,
     });
     const native_dispatcher = dispatcher.register(
         @import("policy.zig").product(.release),
@@ -4927,6 +5012,17 @@ test "Dispatcher validates authority before domain calls and preserves committed
     ) != null);
     try std.testing.expectEqual(@as(usize, 1), harness.account_calls);
     try std.testing.expectEqual(@as(usize, 1), harness.models_calls);
+    const selected_api_key = native_dispatcher.dispatch(
+        "{\"id\":\"select-api\",\"command\":\"metawork.models.selectMetaskApiKey\",\"payload\":{\"sourceId\":\"metask:key-2\",\"expectedMetaskSelectionRevision\":\"3\",\"expectedCatalogGeneration\":\"5\"}}",
+        source,
+        &response,
+    );
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        selected_api_key,
+        "\"accepted\":true",
+    ) != null);
+    try std.testing.expectEqual(@as(usize, 2), harness.models_calls);
     harness.on_main_thread = false;
     _ = native_dispatcher.dispatch(
         "{\"id\":\"wrong-thread\",\"command\":\"metawork.account.logout\",\"payload\":{}}",
@@ -5035,7 +5131,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
     // Models commands are routed through the Models host and never manufacture
     // an Account attempt identity.
     try std.testing.expectEqual(@as(usize, 2), harness.account_calls);
-    try std.testing.expectEqual(@as(usize, 2), harness.models_calls);
+    try std.testing.expectEqual(@as(usize, 3), harness.models_calls);
     try std.testing.expect(std.mem.indexOf(
         u8,
         metask_default,

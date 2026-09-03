@@ -113,6 +113,7 @@ export function SettingsPage({
   onActivateMetask,
   onCreateModelConnection,
   onUpdateModelConnection,
+  onReplaceModelConnectionCredential,
   onRemoveModelConnection,
   onTestModelConnection,
   onSelectModelConnection,
@@ -147,6 +148,10 @@ export function SettingsPage({
   onCreateModelConnection: (input: ModelConnectionDraft) => Promise<boolean>;
   onUpdateModelConnection: (
     input: ModelConnectionEditDraft,
+  ) => Promise<boolean>;
+  onReplaceModelConnectionCredential: (
+    connectionId: string,
+    expectedConnectionRevision: string,
   ) => Promise<boolean>;
   onRemoveModelConnection: (
     connectionId: string,
@@ -1319,6 +1324,23 @@ export function SettingsPage({
                       </span>
                     </div>
                     <div className="settings-model-connection-actions">
+                      <button
+                        className="text-button focus-ring"
+                        disabled={
+                          disabled ||
+                          executionDisabled ||
+                          mutatingModelConnection ||
+                          !modelConnectionCapabilities.secretCapture
+                        }
+                        onClick={() =>
+                          void onReplaceModelConnectionCredential(
+                            connection.id,
+                            connection.connectionRevision,
+                          )
+                        }
+                      >
+                        {t("settings.model_connection_replace_credential")}
+                      </button>
                       <button
                         className="text-button focus-ring"
                         disabled={

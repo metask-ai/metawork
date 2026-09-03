@@ -135,6 +135,7 @@ const CatalogJob = struct {
     authorization_generation: u64,
     preferred_api_key_id: []u8,
     preferred_model_id: []u8,
+    required_api_key_id: []u8,
     lease: account_contract.OwnedAuthorizationLease,
     lease_active: bool = true,
     cancellation: metask_transport.Cancellation,
@@ -159,6 +160,8 @@ const CatalogJob = struct {
         errdefer allocator.free(preferred_api_key_id);
         const preferred_model_id = try allocator.dupe(u8, preparation.preferred_model_id);
         errdefer allocator.free(preferred_model_id);
+        const required_api_key_id = try allocator.dupe(u8, preparation.required_api_key_id);
+        errdefer allocator.free(required_api_key_id);
         self.* = .{
             .allocator = allocator,
             .io = io,
@@ -168,6 +171,7 @@ const CatalogJob = struct {
             .authorization_generation = preparation.authorization_generation,
             .preferred_api_key_id = preferred_api_key_id,
             .preferred_model_id = preferred_model_id,
+            .required_api_key_id = required_api_key_id,
             .lease = lease.take(),
             .cancellation = metask_transport.Cancellation.init(io),
         };
@@ -204,7 +208,13 @@ const CatalogJob = struct {
             self.error_code = models_metask.errorCode(err);
             return;
         };
-        const api_key_id = if (self.preferred_api_key_id.len != 0 and
+        const api_key_id = if (self.required_api_key_id.len != 0) required: {
+            if (!session.hasApiKey(self.required_api_key_id)) {
+                self.error_code = .catalog_invalid;
+                return;
+            }
+            break :required self.required_api_key_id;
+        } else if (self.preferred_api_key_id.len != 0 and
             session.hasApiKey(self.preferred_api_key_id))
             self.preferred_api_key_id
         else
@@ -254,6 +264,7 @@ const CatalogJob = struct {
         if (self.lease_active) self.lease.deinit();
         self.allocator.free(self.preferred_model_id);
         self.allocator.free(self.preferred_api_key_id);
+        self.allocator.free(self.required_api_key_id);
         const allocator = self.allocator;
         self.* = undefined;
         allocator.destroy(self);
@@ -331,6 +342,15 @@ pub const Coordinator = struct {
             spec,
             model,
         );
+    }
+
+    pub fn replaceCapturedCredential(
+        self: *Coordinator,
+        secret: []const u8,
+        selection: models_contract.ModelConnectionSelectionCommand,
+    ) models_contract.CommandResult {
+        self.assertMainThread();
+        return self.management.replaceModelConnectionCredential(secret, selection);
     }
 
     fn startProbe(
@@ -420,7 +440,7 @@ pub const Coordinator = struct {
             self.catalog_job = null;
         }
         self.observed_authorization_generation = lease.authorization_generation;
-        _ = self.startCatalogJob(&lease);
+        _ = self.startCatalogJob(&lease, null);
     }
 
     pub fn refreshCatalog(self: *Coordinator) models_contract.CommandResult {
@@ -434,26 +454,50 @@ pub const Coordinator = struct {
         };
         defer lease.deinit();
         self.observed_authorization_generation = lease.authorization_generation;
-        return self.startCatalogJob(&lease);
+        return self.startCatalogJob(&lease, null);
+    }
+
+    pub fn selectMetaskApiKey(
+        self: *Coordinator,
+        command: models_contract.SelectMetaskApiKeyCommand,
+    ) models_contract.CommandResult {
+        self.assertMainThread();
+        if (self.catalog_job != null)
+            return .rejected(.operation_in_progress);
+        var lease = self.account.authorizationLease() orelse {
+            self.management.setMetaskAuthorizationUnavailable();
+            self.observed_authorization_generation = 0;
+            return .rejected(.authorization_unavailable);
+        };
+        defer lease.deinit();
+        self.observed_authorization_generation = lease.authorization_generation;
+        return self.startCatalogJob(&lease, command);
     }
 
     fn startCatalogJob(
         self: *Coordinator,
         lease: *account_contract.OwnedAuthorizationLease,
+        selection: ?models_contract.SelectMetaskApiKeyCommand,
     ) models_contract.CommandResult {
         const notifier = self.probe_notifier orelse {
             self.management.setMetaskAuthorizationUnavailable();
             return .rejected(.catalog_unavailable);
         };
-        const preparation = switch (self.management.prepareMetaskCatalogRefresh(
+        const preparation = if (selection) |command|
+            switch (self.management.prepareMetaskApiKeySelection(
+                lease.principal_ref,
+                lease.authorization_generation,
+                command,
+            )) {
+                .ready => |value| value,
+                .rejected => |error_code| return .rejected(error_code),
+            }
+        else switch (self.management.prepareMetaskCatalogRefresh(
             lease.principal_ref,
             lease.authorization_generation,
         )) {
             .ready => |value| value,
-            // The Models owner already exposes the precise rejection
-            // (persistence unavailable, operation in progress, and so on).
-            // Application must not rewrite those failures as an Account
-            // authorization loss.
+            // The Models owner already exposes the precise rejection.
             .rejected => |error_code| return .rejected(managementError(error_code)),
         };
         const job = CatalogJob.create(
@@ -495,10 +539,11 @@ pub const Coordinator = struct {
                     job.authorization_generation,
                 )) {
                     if (job.completion) |*completion| {
+                        var completion_port = completion.ownedPort();
                         _ = self.management.completeMetaskCatalogRefresh(
                             job.attempt_id,
                             job.authorization_generation,
-                            completion,
+                            &completion_port,
                         );
                         job.completion = null;
                     } else {

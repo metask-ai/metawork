@@ -108,7 +108,7 @@ Models 每次 resolve 只产生一个调用方 owned candidate，绑定精确 `M
 
 首次 bootstrap在一个 Models transaction 中读取 legacy `preferences.json` 与 `model-connections.json`，严格验证后写入并确认 `models.json`，再把 legacy 文件改名保留为 migration artifact；不双写、不建立运行时 fallback。legacy read/decode failure、canonical write definite failure和 outcome unknown分别进入对应 recovery状态，不能被描述为已经迁移，也不能覆盖不可信输入。canonical store一旦存在，legacy 文件不再参与 authority。
 
-连接删除先提交 credential cleanup tombstone，再删除系统 credential，最后原子清除 tombstone；创建先提交目标 id tombstone，再写 credential，最后以一次 registry commit 替换为完整连接。启动与后续 mutation 必须排空 tombstone。确认 credential 缺失时撤销对应 default 并持久化 `credential_status = missing`；安全存储暂时不可读不能被误写成已确认缺失。Execution 恢复与 Account identity 恢复相互独立，一方 unavailable 不得使另一方的持久化事实被清空或覆盖。
+连接删除先提交 credential cleanup tombstone，再删除系统 credential，最后原子清除 tombstone；创建先提交目标 id tombstone，再写 credential，最后以一次 registry commit 替换为完整连接。credential 替换先持久撤销旧 readiness 和对应 default，再覆盖同一稳定 connection locator，最后以新的 connection/source generation 恢复为待测试状态；写入或最终提交失败时连接必须保持 `missing/configuring`，不得让旧 readiness 配上新 credential。启动与后续 mutation 必须排空 tombstone。确认 credential 缺失时撤销对应 default 并持久化 `credential_status = missing`；安全存储暂时不可读不能被误写成已确认缺失。Execution 恢复与 Account identity 恢复相互独立，一方 unavailable 不得使另一方的持久化事实被清空或覆盖。
 
 ### 2.2 Workspace 与 Task admission
 

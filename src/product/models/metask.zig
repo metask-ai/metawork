@@ -2,6 +2,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const contract = @import("metawork_product_models_contract");
+const models_ports = @import("product_models_ports");
 const transport_api = @import("metask_transport");
 
 pub const api_keys_url = "https://napi.metask-ai.com/api/v1/keys?page=1&page_size=100";
@@ -455,7 +456,29 @@ pub const OwnedCatalogCompletion = struct {
         self.allocator.free(self.selected_model_id);
         self.* = undefined;
     }
+
+    /// Erases the provider-private completion at the Application/Control
+    /// boundary. The returned port borrows this object and must be consumed
+    /// exactly once before its storage is released.
+    pub fn ownedPort(self: *OwnedCatalogCompletion) models_ports.OwnedCatalogCompletion {
+        return .{
+            .context = self,
+            .deinit_fn = deinitErasedCatalogCompletion,
+        };
+    }
 };
+
+pub fn fromOwnedPort(
+    completion: *models_ports.OwnedCatalogCompletion,
+) ?*OwnedCatalogCompletion {
+    if (completion.deinit_fn != deinitErasedCatalogCompletion) return null;
+    return @ptrCast(@alignCast(completion.context));
+}
+
+fn deinitErasedCatalogCompletion(context: *anyopaque) void {
+    const completion: *OwnedCatalogCompletion = @ptrCast(@alignCast(context));
+    completion.deinit();
+}
 
 fn PublicText(comptime capacity: usize) type {
     return struct {
@@ -487,7 +510,7 @@ const PublicModel = struct {
     metadata: contract.ModelMetadata = .{},
 };
 
-/// Secret-free, fixed-capacity Account projection. Network workers mutate the
+/// Secret-free, fixed-capacity Models projection. Network workers mutate the
 /// private candidate CatalogSession, then the App main thread snapshots a
 /// successful stage here. The composition root keeps committed and candidate
 /// PublicCatalog slots stay separate until source preference persistence succeeds. Other
@@ -556,7 +579,7 @@ pub const PublicCatalog = struct {
     /// A restored source preference contains the selected catalog identities
     /// but no complete Metask catalog. Publish the smallest truthful catalog
     /// until the authenticated catalog refresh replaces it. This keeps a ready
-    /// AccountView internally consistent without inventing display metadata.
+    /// ModelsView internally consistent without inventing display metadata.
     pub fn replaceRestoredSelection(
         self: *PublicCatalog,
         api_key_id: []const u8,

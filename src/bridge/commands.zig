@@ -45,10 +45,12 @@ pub const diff_file = "metawork.files.diff";
 pub const account_begin_login = "metawork.account.beginLogin";
 pub const account_cancel_operation = "metawork.account.cancelOperation";
 pub const models_refresh_catalog = "metawork.models.refreshCatalog";
+pub const models_select_metask_api_key = "metawork.models.selectMetaskApiKey";
 pub const models_configure_metask_selection = "metawork.models.configureMetaskSelection";
 pub const models_select_default = "metawork.models.selectDefault";
 pub const model_connection_create = "metawork.models.connections.create";
 pub const model_connection_update = "metawork.models.connections.update";
+pub const model_connection_replace_credential = "metawork.models.connections.replaceCredential";
 pub const model_connection_remove = "metawork.models.connections.remove";
 pub const model_connection_test = "metawork.models.connections.test";
 pub const custom_model_add = "metawork.models.customModels.add";
@@ -119,10 +121,12 @@ pub const product = [_][]const u8{
     account_begin_login,
     account_cancel_operation,
     models_refresh_catalog,
+    models_select_metask_api_key,
     models_configure_metask_selection,
     models_select_default,
     model_connection_create,
     model_connection_update,
+    model_connection_replace_credential,
     model_connection_remove,
     model_connection_test,
     custom_model_add,

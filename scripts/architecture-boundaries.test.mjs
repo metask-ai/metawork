@@ -324,6 +324,11 @@ test("Product Models owns model connections independently of Account", () => {
     modelsRoot,
     /@import\("(?:metawork_product_models_contract|product_models_ports)"\)/,
   );
+  assertNoModuleTargets(
+    build,
+    ["product_control_ports", "product_control_runtime"],
+    ["models_metask"],
+  );
   assert.match(modelsContract, /pub const ModelConnectionCommand = union/);
   assert.match(modelsRuntime, /registry: registry_impl\.Registry/);
   assert.doesNotMatch(

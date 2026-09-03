@@ -54,6 +54,11 @@ pub const ConfigureMetaskSelection = struct {
     expectedMetaskSelectionRevision: []const u8,
     expectedCatalogGeneration: []const u8,
 };
+pub const SelectMetaskApiKey = struct {
+    sourceId: []const u8,
+    expectedMetaskSelectionRevision: []const u8,
+    expectedCatalogGeneration: []const u8,
+};
 pub const ModelCapabilities = struct {
     imageInput: ?bool = null,
     pdfInput: ?bool = null,

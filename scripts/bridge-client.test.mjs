@@ -169,6 +169,7 @@ test("Models connection commands carry split source-qualified revisions", async 
     protocol: "openai_responses",
     normalizedBaseUrl: "https://api.example.com/v1/responses",
   });
+  await client.replaceModelConnectionCredential("source-1", "3");
   await client.testModelConnection("source-1", "3", "model-a", "5", "7");
   await client.addCustomModel({
     sourceId: "source-1",
@@ -207,6 +208,13 @@ test("Models connection commands carry split source-qualified revisions", async 
         displayName: "Provider 2",
         protocol: "openai_responses",
         normalizedBaseUrl: "https://api.example.com/v1/responses",
+      },
+    },
+    {
+      command: "metawork.models.connections.replaceCredential",
+      payload: {
+        sourceId: "source-1",
+        expectedConnectionRevision: "3",
       },
     },
     {
@@ -468,7 +476,10 @@ test("the fixed revision 1 contract keeps Models selection separate from Product
   const client = new BridgeClient({
     bridge: bridgeWith(async (command, payload) => {
       calls.push({ command, payload });
-      if (command === "metawork.models.configureMetaskSelection")
+      if (
+        command === "metawork.models.configureMetaskSelection" ||
+        command === "metawork.models.selectMetaskApiKey"
+      )
         return { accepted: true, errorCode: "none", attemptId: null };
       if (command === "metawork.tasks.create")
         return {
@@ -527,6 +538,11 @@ test("the fixed revision 1 contract keeps Models selection separate from Product
     modelId: "model-3",
     expectedMetaskSelectionRevision: "17",
     expectedCatalogGeneration: "19",
+  });
+  await client.selectMetaskApiKey({
+    sourceId: "metask:key-2",
+    expectedMetaskSelectionRevision: "21",
+    expectedCatalogGeneration: "23",
   });
   assert.deepEqual(
     await client.createTask(
@@ -615,6 +631,14 @@ test("the fixed revision 1 contract keeps Models selection separate from Product
         modelId: "model-3",
         expectedMetaskSelectionRevision: "17",
         expectedCatalogGeneration: "19",
+      },
+    },
+    {
+      command: "metawork.models.selectMetaskApiKey",
+      payload: {
+        sourceId: "metask:key-2",
+        expectedMetaskSelectionRevision: "21",
+        expectedCatalogGeneration: "23",
       },
     },
     {

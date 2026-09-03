@@ -26,6 +26,11 @@ const CreateFn = *const fn (
     models_contract.ModelConnectionSpec,
     models_contract.CustomModelInput,
 ) models_contract.CommandResult;
+const ReplaceCredentialFn = *const fn (
+    *anyopaque,
+    []const u8,
+    models_contract.ModelConnectionSelectionCommand,
+) models_contract.CommandResult;
 
 pub const Host = struct {
     capture_context: *anyopaque,
@@ -33,6 +38,7 @@ pub const Host = struct {
     capture_fn: CaptureFn,
     create_context: *anyopaque,
     create_fn: CreateFn,
+    replace_credential_fn: ReplaceCredentialFn,
 
     pub fn init(
         platform: *app_platform.Adapter,
@@ -44,6 +50,7 @@ pub const Host = struct {
             .capture_fn = platformCapture,
             .create_context = coordinator,
             .create_fn = coordinatorCreate,
+            .replace_credential_fn = coordinatorReplaceCredential,
         };
     }
 
@@ -57,6 +64,7 @@ pub const Host = struct {
         return .{
             .context = self,
             .create_fn = create,
+            .replace_credential_fn = replaceCredential,
         };
     }
 
@@ -104,6 +112,44 @@ pub const Host = struct {
             model,
         ) };
     }
+
+    fn replaceCredential(
+        context: *anyopaque,
+        selection: models_contract.ModelConnectionSelectionCommand,
+    ) bridge.ModelConnectionCredentialOutcome {
+        const self: *Host = @ptrCast(@alignCast(context));
+        var secret_storage: [models_contract.Limits.credential_bytes]u8 = undefined;
+        return self.replaceCredentialWithStorage(selection, &secret_storage);
+    }
+
+    fn replaceCredentialWithStorage(
+        self: *Host,
+        selection: models_contract.ModelConnectionSelectionCommand,
+        secret_storage: []u8,
+    ) bridge.ModelConnectionCredentialOutcome {
+        std.crypto.secureZero(u8, secret_storage);
+        defer std.crypto.secureZero(u8, secret_storage);
+        if (!self.available()) return .unavailable;
+        const result = self.capture_fn(
+            self.capture_context,
+            "Replace model connection credential",
+            "Enter the new API credential for this connection.",
+            "Replace credential",
+            "Cancel",
+            secret_storage,
+        ) orelse return .unavailable;
+        const captured = switch (result) {
+            .submitted => |length| length,
+            .cancelled => return .cancelled,
+        };
+        if (captured == 0 or captured > secret_storage.len)
+            return .{ .submitted = .rejected(.invalid_connection) };
+        return .{ .submitted = self.replace_credential_fn(
+            self.create_context,
+            secret_storage[0..captured],
+            selection,
+        ) };
+    }
 };
 
 fn platformCaptureAvailable(context: *anyopaque) bool {
@@ -141,6 +187,15 @@ fn coordinatorCreate(
         spec,
         model,
     );
+}
+
+fn coordinatorReplaceCredential(
+    context: *anyopaque,
+    secret: []const u8,
+    selection: models_contract.ModelConnectionSelectionCommand,
+) models_contract.CommandResult {
+    const coordinator: *models_coordinator.Coordinator = @ptrCast(@alignCast(context));
+    return coordinator.replaceCapturedCredential(secret, selection);
 }
 
 const TestContext = struct {
@@ -191,6 +246,19 @@ const TestContext = struct {
             .acceptedResult();
     }
 
+    fn replaceConnectionCredential(
+        context: *anyopaque,
+        secret: []const u8,
+        _: models_contract.ModelConnectionSelectionCommand,
+    ) models_contract.CommandResult {
+        return createConnection(
+            context,
+            secret,
+            test_spec,
+            .{ .id = "model", .display_name = "Model" },
+        );
+    }
+
     fn host(self: *TestContext) Host {
         return .{
             .capture_context = self,
@@ -198,6 +266,7 @@ const TestContext = struct {
             .capture_fn = captureSecret,
             .create_context = self,
             .create_fn = createConnection,
+            .replace_credential_fn = replaceConnectionCredential,
         };
     }
 };
@@ -276,5 +345,24 @@ test "Model Connection host clears plaintext after Models rejects create" {
     try std.testing.expect(result == .submitted);
     try std.testing.expect(!result.submitted.accepted);
     try std.testing.expect(context.create_called);
+    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** storage.len), &storage);
+}
+
+test "Model Connection host clears replacement plaintext after submission" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var context: TestContext = .{};
+    var host = context.host();
+    var storage: [32]u8 = @splat(0xa5);
+    const result = host.replaceCredentialWithStorage(.{
+        .source_id = "model-connection-00000000000000000000000000000001",
+        .expected_connection_revision = 7,
+    }, &storage);
+    try std.testing.expect(result == .submitted);
+    try std.testing.expect(result.submitted.accepted);
+    try std.testing.expect(context.create_called);
+    try std.testing.expectEqualStrings(
+        "secret",
+        context.observed_secret[0..context.observed_secret_len],
+    );
     try std.testing.expectEqualSlices(u8, &([_]u8{0} ** storage.len), &storage);
 }

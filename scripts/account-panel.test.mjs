@@ -327,7 +327,7 @@ test("Models preference recovery preserves Account identity and freezes selector
 test("Execution commands never enter the Account busy or error scope", () => {
   assert.doesNotMatch(
     appSource,
-    /runAccountCommand\(\(\) =>\s*client\.(?:refreshModelsCatalog|configureMetaskSelection|selectModelsDefault|createModelConnection|updateModelConnection|removeModelConnection|testModelConnection)/,
+    /runAccountCommand\(\(\) =>\s*client\.(?:refreshModelsCatalog|selectMetaskApiKey|configureMetaskSelection|selectModelsDefault|createModelConnection|updateModelConnection|replaceModelConnectionCredential|removeModelConnection|testModelConnection)/,
   );
   assert.match(
     appSource,

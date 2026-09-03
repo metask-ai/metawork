@@ -2844,8 +2844,18 @@ export default function App() {
               void runExecutionCommand(() => client.refreshModelsCatalog())
             }
             onCancel={() => void cancelAccountOperation()}
-            onSelectApiKey={() =>
-              void runExecutionCommand(() => client.refreshModelsCatalog())
+            onSelectApiKey={(id) =>
+              metaskProvider
+                ? void runExecutionCommand(() =>
+                    client.selectMetaskApiKey({
+                      sourceId: `metask:${id}`,
+                      expectedMetaskSelectionRevision:
+                        snapshot.models.metaskSelectionRevision,
+                      expectedCatalogGeneration:
+                        metaskProvider.catalogGeneration,
+                    }),
+                  )
+                : undefined
             }
             onSelectModel={(id) =>
               metaskProvider
@@ -2888,6 +2898,11 @@ export default function App() {
                   protocol: input.protocol,
                   normalizedBaseUrl: input.normalizedBaseUrl,
                 }),
+              )
+            }
+            onReplaceModelConnectionCredential={(connectionId, revision) =>
+              runExecutionCommand(() =>
+                client.replaceModelConnectionCredential(connectionId, revision),
               )
             }
             onRemoveModelConnection={(connectionId, generation) =>

@@ -791,6 +791,7 @@ export const enUS = {
     "Choose another default connection before editing or removing this one.",
   "settings.model_connection_edit_help":
     "Changing the protocol or endpoint requires another connection test. The API key is not shown or changed here.",
+  "settings.model_connection_replace_credential": "Replace API key",
   "settings.model_connection_remove_confirm":
     "Remove this connection and its stored credential? Existing tasks keep their current binding.",
   "settings.model_connection_removing": "Removing…",

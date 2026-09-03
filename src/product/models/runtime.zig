@@ -223,6 +223,55 @@ pub const Runtime = struct {
         authorization_generation: u64,
     ) contract.CatalogRefreshPrepareResult {
         self.assertMainThread();
+        return self.beginMetaskCatalogRefresh(
+            principal_ref,
+            authorization_generation,
+            "",
+        );
+    }
+
+    pub fn prepareMetaskApiKeySelection(
+        self: *Runtime,
+        principal_ref: []const u8,
+        authorization_generation: u64,
+        command: contract.SelectMetaskApiKeyCommand,
+    ) contract.CatalogSelectionPrepareResult {
+        self.assertMainThread();
+        if (!self.store_healthy) return .{ .rejected = .persistence_unavailable };
+        if (self.catalog_attempt != null) return .{ .rejected = .operation_in_progress };
+        if (self.metask_catalog_state != .ready or
+            self.metask_catalog_generation == 0 or
+            command.expected_catalog_generation != self.metask_catalog_generation)
+            return .{ .rejected = .generation_mismatch };
+        const intent = self.registry.metaskIntent() orelse
+            return .{ .rejected = .invalid_connection };
+        if (command.expected_metask_selection_revision != intent.selection_revision or
+            !std.mem.eql(u8, principal_ref, intent.principal_ref))
+            return .{ .rejected = .generation_mismatch };
+        if (!std.mem.startsWith(u8, command.source_id, "metask:") or
+            command.source_id.len == "metask:".len)
+            return .{ .rejected = .invalid_connection };
+        const api_key_id = command.source_id["metask:".len..];
+        if (api_key_id.len > contract.Limits.api_key_id_bytes or
+            self.metask_public_catalog == null or
+            !self.metask_public_catalog.?.hasApiKey(api_key_id))
+            return .{ .rejected = .invalid_connection };
+        return switch (self.beginMetaskCatalogRefresh(
+            principal_ref,
+            authorization_generation,
+            api_key_id,
+        )) {
+            .ready => |value| .{ .ready = value },
+            .rejected => |error_code| .{ .rejected = mapModelsError(error_code) },
+        };
+    }
+
+    fn beginMetaskCatalogRefresh(
+        self: *Runtime,
+        principal_ref: []const u8,
+        authorization_generation: u64,
+        required_api_key_id: []const u8,
+    ) contract.CatalogRefreshPrepareResult {
         if (!self.store_healthy) return .{ .rejected = .persistence_unavailable };
         if (self.catalog_attempt != null) return .{ .rejected = .operation_in_progress };
         if (principal_ref.len == 0 or
@@ -254,7 +303,13 @@ pub const Runtime = struct {
             .principal_ref = self.catalog_attempt.?.principal_ref.view(),
             .authorization_generation = authorization_generation,
             .preferred_api_key_id = if (same_principal) intent.?.api_key_id else "",
-            .preferred_model_id = if (same_principal) intent.?.model_id else "",
+            .preferred_model_id = if (same_principal and
+                (required_api_key_id.len == 0 or std.mem.eql(
+                    u8,
+                    required_api_key_id,
+                    intent.?.api_key_id,
+                ))) intent.?.model_id else "",
+            .required_api_key_id = required_api_key_id,
         } };
     }
 
@@ -262,10 +317,17 @@ pub const Runtime = struct {
         self: *Runtime,
         attempt_id: u64,
         authorization_generation: u64,
-        completion: *metask_provider.OwnedCatalogCompletion,
+        completion_port: *ports.OwnedCatalogCompletion,
     ) contract.ModelsError {
         self.assertMainThread();
-        defer completion.deinit();
+        const completion = metask_provider.fromOwnedPort(completion_port) orelse {
+            completion_port.deinit();
+            self.catalog_attempt = null;
+            self.metask_catalog_state = .failed;
+            self.metask_error = .catalog_invalid;
+            return .catalog_invalid;
+        };
+        defer completion_port.deinit();
         const session = &completion.session;
         const selected_model_id = completion.selected_model_id;
         const attempt = self.catalog_attempt orelse return .catalog_invalid;
@@ -679,8 +741,7 @@ pub const Runtime = struct {
                 const current = findConnectionView(candidate.views(), value.selection.source_id) orelse
                     return .rejected(.connection_not_found);
                 const authority_changed = current.protocol != value.spec.protocol or
-                    !std.mem.eql(u8, current.normalized_base_url, value.spec.normalized_base_url) or
-                    value.credential_slot != null;
+                    !std.mem.eql(u8, current.normalized_base_url, value.spec.normalized_base_url);
                 const connection_revision = self.freshGeneration(current.connection_revision) catch
                     return .rejected(.local_resource_exhausted);
                 const source_generation = if (authority_changed)
@@ -853,6 +914,52 @@ pub const Runtime = struct {
         return result;
     }
 
+    /// Replaces a credential using a fail-closed two-commit transaction:
+    /// first revoke durable readiness, then write the Host secret, and only
+    /// then publish a fresh source authority. A partial failure therefore
+    /// leaves a repairable non-runnable connection, never stale readiness.
+    pub fn replaceCredential(
+        self: *Runtime,
+        secret: []const u8,
+        selection: contract.ModelConnectionSelectionCommand,
+    ) contract.CommandResult {
+        self.assertMainThread();
+        if (!self.store_healthy) return .rejected(.persistence_unavailable);
+        if (secret.len == 0 or secret.len > contract.Limits.credential_bytes)
+            return .rejected(.invalid_connection);
+        const vault = self.credential_vault orelse return .rejected(.capture_unavailable);
+
+        var revoked = self.registry.clone() catch
+            return .rejected(.local_resource_exhausted);
+        defer revoked.deinit();
+        const clears_default = isDefaultConnection(&revoked, selection.source_id);
+        const selection_revision = if (clears_default)
+            self.freshGeneration(revoked.selection_revision) catch
+                return .rejected(.local_resource_exhausted)
+        else
+            null;
+        revoked.markCredentialMissing(selection, selection_revision) catch |err|
+            return .rejected(mapRegistryError(err));
+        const revoke_result = self.commitCandidate(&revoked, false);
+        if (!revoke_result.accepted) return revoke_result;
+
+        vault.store(selection.source_id, secret) catch
+            return .rejected(.credential_write_failed);
+
+        const current = findConnectionView(self.registry.views(), selection.source_id) orelse
+            return .rejected(.connection_not_found);
+        var restored = self.registry.clone() catch
+            return .rejected(.local_resource_exhausted);
+        defer restored.deinit();
+        const connection_revision = self.freshGeneration(current.connection_revision) catch
+            return .rejected(.local_resource_exhausted);
+        const source_generation = self.freshGeneration(current.source_generation) catch
+            return .rejected(.local_resource_exhausted);
+        restored.restoreCredential(selection, connection_revision, source_generation) catch |err|
+            return .rejected(mapRegistryError(err));
+        return self.commitCandidate(&restored, true);
+    }
+
     pub fn nextGeneration(self: *Runtime, current_generation: u64) !u64 {
         return self.freshGeneration(current_generation);
     }
@@ -944,14 +1051,23 @@ pub const Runtime = struct {
         defer std.crypto.secureZero(u8, &secret_storage);
         const secret = (try vault.get(binding.connection_id, &secret_storage)) orelse
             return error.CredentialNotFound;
+        const model_id = try self.allocator.dupe(u8, binding.model_id);
+        errdefer self.allocator.free(model_id);
+        const normalized_base_url = try self.allocator.dupe(u8, binding.normalized_base_url);
+        errdefer self.allocator.free(normalized_base_url);
+        const credential = try self.allocator.dupe(u8, secret);
+        errdefer {
+            std.crypto.secureZero(u8, credential);
+            self.allocator.free(credential);
+        }
         return contract.OwnedSourceCandidate.initOwned(
             self.allocator,
             .model_connection,
             binding.protocol,
-            try self.allocator.dupe(u8, binding.model_id),
-            try self.allocator.dupe(u8, binding.normalized_base_url),
+            model_id,
+            normalized_base_url,
             binding.source_generation,
-            try self.allocator.dupe(u8, secret),
+            credential,
             binding.connection_id,
         );
     }
@@ -1214,6 +1330,22 @@ fn mapRegistryError(err: anyerror) contract.ManagementError {
     };
 }
 
+fn mapModelsError(error_code: contract.ModelsError) contract.ManagementError {
+    return switch (error_code) {
+        .none => unreachable,
+        .authorization_unavailable => .authorization_unavailable,
+        .persistence_unavailable, .migration_required => .persistence_unavailable,
+        .operation_in_progress => .operation_in_progress,
+        .local_resource_exhausted => .local_resource_exhausted,
+        .catalog_unavailable,
+        .catalog_invalid,
+        .catalog_too_large,
+        .no_api_keys,
+        .no_models,
+        => .catalog_unavailable,
+    };
+}
+
 fn findConnectionView(
     views: []const contract.ModelConnectionView,
     connection_id: []const u8,
@@ -1250,6 +1382,7 @@ const TestVault = struct {
     secret: [contract.Limits.credential_bytes]u8 = undefined,
     secret_len: usize = 0,
     present: bool = false,
+    fail_store: bool = false,
 
     fn port(self: *TestVault) ports.CredentialVault {
         return .{
@@ -1267,6 +1400,7 @@ const TestVault = struct {
 
     fn store(context: *anyopaque, _: []const u8, secret: []const u8) anyerror!void {
         const self: *TestVault = @ptrCast(@alignCast(context));
+        if (self.fail_store) return error.WriteFailed;
         if (secret.len > self.secret.len) return error.WriteFailed;
         @memcpy(self.secret[0..secret.len], secret);
         self.secret_len = secret.len;
@@ -1407,6 +1541,77 @@ test "Models Runtime owns durable model connections and source resolution" {
     }
 }
 
+test "credential replacement revokes readiness before writing and restores fresh authority" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
+    const directory = directory_storage[0..directory_len];
+    var vault: TestVault = .{};
+
+    var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
+    try runtime.start(directory, vault.port());
+    defer {
+        runtime.stop();
+        runtime.deinit();
+    }
+    try std.testing.expect(runtime.createWithCredential(
+        "old-secret",
+        .{
+            .display_name = "Provider",
+            .protocol = .openai_responses,
+            .normalized_base_url = "https://api.example.com/v1/responses",
+        },
+        .{ .id = "model-1", .display_name = "Model 1" },
+    ).accepted);
+    const initial = runtime.views()[0];
+    const selection: contract.ModelConnectionSelectionCommand = .{
+        .source_id = TestVault.slot,
+        .expected_connection_revision = initial.connection_revision,
+    };
+    try std.testing.expect(runtime.submitCommand(.{ .test_connection = .{
+        .model = .{ .source_id = TestVault.slot, .model_id = "model-1" },
+        .expected_connection_revision = initial.connection_revision,
+        .expected_source_generation = initial.source_generation,
+        .expected_catalog_generation = initial.catalog_generation,
+    } }).accepted);
+    try std.testing.expect(runtime.completeTest(.{
+        .model = .{ .source_id = TestVault.slot, .model_id = "model-1" },
+        .expected_connection_revision = initial.connection_revision,
+        .expected_source_generation = initial.source_generation,
+        .expected_catalog_generation = initial.catalog_generation,
+    }, true).accepted);
+    const ready = runtime.views()[0];
+    try std.testing.expect(runtime.selectDefault(.{
+        .selection = .{ .source_id = TestVault.slot, .model_id = "model-1" },
+        .expected_selection_revision = runtime.view().selection_revision,
+        .expected_source_generation = ready.source_generation,
+        .expected_catalog_generation = ready.catalog_generation,
+    }).accepted);
+
+    vault.fail_store = true;
+    const failed = runtime.replaceCredential("new-secret", selection);
+    try std.testing.expect(!failed.accepted);
+    try std.testing.expectEqual(contract.ManagementError.credential_write_failed, failed.error_code.?);
+    try std.testing.expect(runtime.view().default_selection == null);
+    const revoked = runtime.views()[0];
+    try std.testing.expectEqual(contract.ModelConnectionCredentialStatus.missing, revoked.credential_status);
+    try std.testing.expectEqual(contract.ModelConnectionState.configuring, revoked.state);
+    try std.testing.expect(!revoked.models[0].ready);
+
+    vault.fail_store = false;
+    try std.testing.expect(runtime.replaceCredential("new-secret", .{
+        .source_id = TestVault.slot,
+        .expected_connection_revision = revoked.connection_revision,
+    }).accepted);
+    const restored = runtime.views()[0];
+    try std.testing.expectEqual(contract.ModelConnectionCredentialStatus.ready, restored.credential_status);
+    try std.testing.expectEqual(contract.ModelConnectionState.configuring, restored.state);
+    try std.testing.expect(restored.connection_revision != initial.connection_revision);
+    try std.testing.expect(restored.source_generation != initial.source_generation);
+    try std.testing.expectEqualStrings("new-secret", vault.secret[0..vault.secret_len]);
+}
+
 test "Models owns Metask catalog authority without changing global default" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1438,17 +1643,28 @@ test "Models owns Metask catalog authority without changing global default" {
         "model-secret",
         &.{.{ .id = "model-1", .display_name = "Model One" }},
     );
+    try metask_provider.TestSupport.appendOwnedApiKey(
+        &catalog,
+        .{
+            .id = "api-2",
+            .name = "Secondary",
+            .suffix = "5678",
+            .protocol = .openai_responses,
+        },
+        "secondary-secret",
+    );
     var completion = try metask_provider.OwnedCatalogCompletion.init(
         std.testing.allocator,
         &catalog,
         "model-1",
     );
+    var completion_port = completion.ownedPort();
     try std.testing.expectEqual(
         contract.ModelsError.none,
         runtime.completeMetaskCatalogRefresh(
             prepared.attempt_id,
             prepared.authorization_generation,
-            &completion,
+            &completion_port,
         ),
     );
 
@@ -1463,6 +1679,36 @@ test "Models owns Metask catalog authority without changing global default" {
     const first_source_generation = first.providers[0].source_generation;
     const first_selection_revision = first.metask_selection_revision;
     const first_catalog_generation = first.providers[0].catalog_generation;
+
+    try std.testing.expect(runtime.prepareMetaskApiKeySelection(
+        "principal-1",
+        6,
+        .{
+            .source_id = "metask:api-2",
+            .expected_metask_selection_revision = first_selection_revision +% 1,
+            .expected_catalog_generation = first_catalog_generation,
+        },
+    ) == .rejected);
+    const key_switch = switch (runtime.prepareMetaskApiKeySelection(
+        "principal-1",
+        6,
+        .{
+            .source_id = "metask:api-2",
+            .expected_metask_selection_revision = first_selection_revision,
+            .expected_catalog_generation = first_catalog_generation,
+        },
+    )) {
+        .ready => |value| value,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqualStrings("api-2", key_switch.required_api_key_id);
+    try std.testing.expectEqualStrings("", key_switch.preferred_model_id);
+    runtime.failMetaskCatalogRefresh(
+        key_switch.attempt_id,
+        key_switch.authorization_generation,
+        .catalog_invalid,
+        "",
+    );
 
     const refreshed = switch (runtime.prepareMetaskCatalogRefresh("principal-1", 6)) {
         .ready => |value| value,
@@ -1488,12 +1734,13 @@ test "Models owns Metask catalog authority without changing global default" {
         &same_catalog,
         "model-1",
     );
+    var refreshed_completion_port = refreshed_completion.ownedPort();
     try std.testing.expectEqual(
         contract.ModelsError.none,
         runtime.completeMetaskCatalogRefresh(
             refreshed.attempt_id,
             refreshed.authorization_generation,
-            &refreshed_completion,
+            &refreshed_completion_port,
         ),
     );
     const second = runtime.view();
@@ -1590,12 +1837,13 @@ test "Metask catalog drift keeps a tracked global default durable" {
             &initial_catalog,
             "model-1",
         );
+        var initial_completion_port = initial_completion.ownedPort();
         try std.testing.expectEqual(
             contract.ModelsError.none,
             runtime.completeMetaskCatalogRefresh(
                 initial.attempt_id,
                 initial.authorization_generation,
-                &initial_completion,
+                &initial_completion_port,
             ),
         );
         const initial_view = runtime.view();
@@ -1632,12 +1880,13 @@ test "Metask catalog drift keeps a tracked global default durable" {
             &replacement_catalog,
             "model-2",
         );
+        var replacement_completion_port = replacement_completion.ownedPort();
         try std.testing.expectEqual(
             contract.ModelsError.none,
             runtime.completeMetaskCatalogRefresh(
                 refresh.attempt_id,
                 refresh.authorization_generation,
-                &replacement_completion,
+                &replacement_completion_port,
             ),
         );
 
