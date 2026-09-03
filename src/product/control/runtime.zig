@@ -11031,6 +11031,48 @@ test "Account identity and Models execution publish through separate projections
     try std.testing.expect(control.newTaskAdmissionView().available);
 }
 
+test "explicit Metask default activation restores admission from an empty global default" {
+    test_agent_runtime.io = std.testing.io;
+    var control = try Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        &test_agent_runtime,
+        testLimits(),
+        .{},
+    );
+    defer control.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
+    var vault: TestModelConnectionVault = .{};
+    try control.startModelConnections(
+        directory_storage[0..directory_len],
+        vault.port(),
+    );
+    defer control.stopModelConnections();
+    try TestSupport.installMetaskExecution(&control, 1);
+
+    try std.testing.expect(control.model_connections.clearDefault().accepted);
+    control.reconcileModelsDefaultNoFail(false, false);
+    control.finishExecutionCommitNoFail();
+    try std.testing.expect(control.modelsView().default_selection == null);
+    try std.testing.expect(!control.newTaskAdmissionView().available);
+
+    const view = control.modelsView();
+    const provider = view.providers[0];
+    const selection = view.metask_selection orelse return error.TestUnexpectedResult;
+    try std.testing.expect(control.selectModelsDefault(.{
+        .selection = selection,
+        .expected_selection_revision = view.selection_revision,
+        .expected_source_generation = provider.source_generation,
+        .expected_catalog_generation = provider.catalog_generation,
+    }).accepted);
+    try std.testing.expect(control.modelsView().default_selection != null);
+    try std.testing.expect(control.newTaskAdmissionView().available);
+    try std.testing.expect(control.newTaskAdmissionView().active_generation != 0);
+}
+
 test "identity replacement does not disturb live Task runtime references" {
     var control = try testRuntime();
     defer control.deinit();
