@@ -44,6 +44,7 @@ export type AccountErrorCode =
   | "credential_store_delete_failed"
   | "generation_mismatch"
   | "recovery_state_invalid"
+  | "refresh_schedule_failed"
   | "local_resource_exhausted"
   | "account_operation_failed";
 

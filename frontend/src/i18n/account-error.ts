@@ -22,6 +22,8 @@ export function accountErrorMessageId(code: AccountErrorCode): MessageId {
     case "credential_store_write_failed":
     case "credential_store_delete_failed":
       return "account.error.credentials";
+    case "refresh_schedule_failed":
+      return "account.error.refresh_schedule";
     case "local_resource_exhausted":
       return "account.error.local";
     default:

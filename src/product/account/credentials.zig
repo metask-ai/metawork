@@ -115,6 +115,14 @@ pub const CredentialOwner = struct {
         return if (self.tokens) |*tokens| tokens.expires_at else null;
     }
 
+    pub fn belongsToPrincipal(
+        self: *const CredentialOwner,
+        principal_ref: []const u8,
+    ) bool {
+        const current = if (self.tokens) |*value| value else return false;
+        return std.mem.eql(u8, current.accountId(), principal_ref);
+    }
+
     pub fn refresh(
         self: *const CredentialOwner,
         allocator: std.mem.Allocator,

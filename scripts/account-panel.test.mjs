@@ -115,6 +115,7 @@ const readyModels = {
 const callbacks = {
   onReconnect() {},
   onBeginLogin() {},
+  onRetryRefresh() {},
   onCancel() {},
   onRefresh() {},
   onSelectApiKey() {},
@@ -309,6 +310,19 @@ test("Account errors stay inside the Account failure domain", () => {
     accountErrorMessageId("account_operation_failed"),
     "account.error.generic",
   );
+  assert.equal(
+    accountErrorMessageId("refresh_schedule_failed"),
+    "account.error.refresh_schedule",
+  );
+});
+
+test("refresh scheduling failure exposes the explicit Account retry", () => {
+  const markup = renderSettings({
+    ...readyAccount,
+    errorCode: "refresh_schedule_failed",
+  });
+  assert.match(markup, /Automatic sign-in refresh could not be scheduled/);
+  assert.match(markup, />Retry sign-in refresh</);
 });
 
 test("Models preference recovery preserves Account identity and freezes selectors", () => {

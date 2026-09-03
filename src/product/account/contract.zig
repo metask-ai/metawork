@@ -94,6 +94,7 @@ pub const ErrorCode = enum {
     credential_store_delete_failed,
     generation_mismatch,
     recovery_state_invalid,
+    refresh_schedule_failed,
     local_resource_exhausted,
     account_operation_failed,
 };
@@ -126,6 +127,7 @@ pub const AccountFact = struct {
 pub const AccountCommand = enum {
     begin_login,
     cancel_operation,
+    retry_refresh,
     logout,
 };
 

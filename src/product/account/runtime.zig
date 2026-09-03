@@ -454,6 +454,7 @@ pub const Runtime = struct {
         command: contract.AccountCommand,
     ) PrepareResult {
         self.assertMainThread();
+        if (command == .retry_refresh) return self.prepareRetryRefresh();
         if (command == .begin_login and
             self.account.view().state == .signed_out and
             self.credentials.refreshAvailable())
@@ -469,19 +470,7 @@ pub const Runtime = struct {
     pub fn prepareTimer(self: *Runtime, timer_id: u64) ?PrepareResult {
         self.assertMainThread();
         if (timer_id != refresh_timer_id) return null;
-        const result = wrapPrepareResult(self.account.prepareTokenRefresh());
-        switch (result) {
-            .prepared => {},
-            .rejected, .ignored_stale => if (self.credentials.available()) {
-                const platform = self.platform orelse return result;
-                platform.timer.start(
-                    refresh_timer_id,
-                    refresh_retry_ns,
-                    false,
-                ) catch {};
-            },
-        }
-        return result;
+        return wrapPrepareResult(self.account.prepareTokenRefresh());
     }
 
     pub fn prepareRestoredRefresh(self: *Runtime) Prepared {
@@ -563,21 +552,25 @@ pub const Runtime = struct {
         return result;
     }
 
-    pub fn authorizationLease(self: *Runtime) ?contract.OwnedAuthorizationLease {
+    pub fn authorizationLease(
+        self: *Runtime,
+    ) std.mem.Allocator.Error!?contract.OwnedAuthorizationLease {
         self.assertMainThread();
-        const identity = self.account.currentIdentity() orelse return null;
-        if (self.authorization_generation == 0) return null;
+        const identity = self.availableAuthorizationIdentity() orelse return null;
         return self.credentials.authorizationLease(
             self.allocator,
             identity.accountId(),
             self.authorization_generation,
-        ) catch null;
+        ) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => unreachable,
+        };
     }
 
-    pub fn acceptsAuthorizationGeneration(self: *const Runtime, generation: u64) bool {
+    pub fn acceptsAuthorizationGeneration(self: *Runtime, generation: u64) bool {
         self.assertMainThread();
         return generation != 0 and generation == self.authorization_generation and
-            self.account.currentIdentity() != null and self.credentials.available();
+            self.availableAuthorizationIdentity() != null;
     }
 
     pub fn preparedFact(
@@ -616,18 +609,18 @@ pub const Runtime = struct {
         return result;
     }
 
-    pub fn dispatchCommitted(self: *Runtime, prepared: *Prepared) void {
+    pub fn dispatchCommitted(self: *Runtime, prepared: *Prepared) ?Prepared {
         self.assertMainThread();
-        if (prepared.schedule_refresh_after_commit) self.scheduleRefresh();
-        if (prepared.retry_refresh_after_commit) {
-            if (self.platform) |platform|
-                platform.timer.start(
-                    refresh_timer_id,
-                    refresh_retry_ns,
-                    false,
-                ) catch {};
-        }
+        std.debug.assert(!(prepared.schedule_refresh_after_commit and
+            prepared.retry_refresh_after_commit));
+        const follow_up = if (prepared.schedule_refresh_after_commit)
+            self.scheduleRefresh()
+        else if (prepared.retry_refresh_after_commit)
+            self.scheduleRefreshRetry()
+        else
+            null;
         if (self.effects.queue.take()) |entry| self.dispatchEffect(entry);
+        return follow_up;
     }
 
     pub fn cancelRefreshTimer(self: *Runtime) void {
@@ -656,6 +649,8 @@ pub const Runtime = struct {
             completion.payload.failed.error_code = self.deleteInvalidCredential();
 
         const loaded_identity = completion.payload == .identity_loaded;
+        const login_failed_with_identity = self.account.currentIdentity() != null and
+            !refresh_attempt and completion.payload == .failed;
         const retry_refresh = refresh_attempt and
             completion.payload == .failed and
             completion.payload.failed.error_code != .metask_unauthorized and
@@ -664,8 +659,8 @@ pub const Runtime = struct {
         return switch (self.account.prepareCompletion(completion)) {
             .transition => |transition| .{ .prepared = .{
                 .transition = transition,
-                .schedule_refresh_after_commit = loaded_identity and
-                    transition.view().state == .authenticated,
+                .schedule_refresh_after_commit = transition.view().state == .authenticated and
+                    (loaded_identity or login_failed_with_identity),
                 .retry_refresh_after_commit = retry_refresh,
             } },
             .rejected => |error_code| .{ .rejected = error_code },
@@ -837,23 +832,81 @@ pub const Runtime = struct {
         });
     }
 
-    fn scheduleRefresh(self: *Runtime) void {
-        const platform = self.platform orelse return;
+    fn scheduleRefresh(self: *Runtime) ?Prepared {
+        const platform = self.platform orelse
+            return self.prepareRefreshScheduleFailure();
         const expires_at = self.credentials.expiresAt() orelse {
-            platform.timer.cancel(refresh_timer_id) catch {};
-            return;
+            platform.timer.cancel(refresh_timer_id) catch
+                return self.prepareRefreshScheduleFailure();
+            return null;
         };
-        const now = platform.wall_clock.nowUnixSeconds() orelse return;
+        const now = platform.wall_clock.nowUnixSeconds() orelse
+            return self.prepareRefreshScheduleFailure();
         const refresh_at = expires_at -| refresh_skew_seconds;
-        const interval_ns = if (refresh_at <= now)
-            refresh_retry_ns
-        else
-            std.math.mul(
-                u64,
-                @intCast(refresh_at - now),
-                std.time.ns_per_s,
-            ) catch std.math.maxInt(u64);
-        platform.timer.start(refresh_timer_id, @max(interval_ns, 1), false) catch {};
+        if (refresh_at <= now)
+            return preparedFromState(self.account.prepareTokenRefresh());
+        const interval_ns = std.math.mul(
+            u64,
+            @intCast(refresh_at - now),
+            std.time.ns_per_s,
+        ) catch std.math.maxInt(u64);
+        platform.timer.start(refresh_timer_id, @max(interval_ns, 1), false) catch
+            return self.prepareRefreshScheduleFailure();
+        return null;
+    }
+
+    fn scheduleRefreshRetry(self: *Runtime) ?Prepared {
+        const platform = self.platform orelse
+            return self.prepareRefreshScheduleFailure();
+        platform.timer.start(
+            refresh_timer_id,
+            refresh_retry_ns,
+            false,
+        ) catch return self.prepareRefreshScheduleFailure();
+        return null;
+    }
+
+    fn prepareRetryRefresh(self: *Runtime) PrepareResult {
+        if (self.account.view().state != .authenticated or
+            self.account.activeAttempt() != null or
+            !self.credentials.available())
+            return .{ .rejected = .invalid_state };
+        const platform = self.platform orelse
+            return .{ .prepared = self.prepareRefreshScheduleFailure() };
+        const expires_at = self.credentials.expiresAt() orelse
+            return .{ .prepared = self.prepareRefreshScheduleFailure() };
+        const now = platform.wall_clock.nowUnixSeconds() orelse
+            return .{ .prepared = self.prepareRefreshScheduleFailure() };
+        if (expires_at -| refresh_skew_seconds <= now)
+            return wrapPrepareResult(self.account.prepareTokenRefresh());
+        return switch (self.account.prepareRetryRefresh()) {
+            .transition => |transition| .{ .prepared = .{
+                .transition = transition,
+                .schedule_refresh_after_commit = true,
+            } },
+            .rejected => |error_code| .{ .rejected = error_code },
+            .ignored_stale => .ignored_stale,
+        };
+    }
+
+    fn prepareRefreshScheduleFailure(self: *Runtime) Prepared {
+        return preparedFromState(
+            self.account.prepareIdleFailure(.refresh_schedule_failed),
+        );
+    }
+
+    fn availableAuthorizationIdentity(self: *Runtime) ?state_impl.AccountIdentity {
+        if (self.account.view().state != .authenticated or
+            self.authorization_generation == 0 or
+            !self.credentials.available())
+            return null;
+        const platform = self.platform orelse return null;
+        const expires_at = self.credentials.expiresAt() orelse return null;
+        const now = platform.wall_clock.nowUnixSeconds() orelse return null;
+        if (expires_at <= now) return null;
+        const identity = self.account.currentIdentity() orelse return null;
+        if (!self.credentials.belongsToPrincipal(identity.accountId())) return null;
+        return identity;
     }
 
     fn clearCredentials(self: *Runtime) void {
@@ -1099,6 +1152,58 @@ pub const TestSupport = if (builtin.is_test) struct {
         ) };
     }
 
+    pub fn prepareAuthenticatedWithCredentialPrincipal(
+        runtime: *Runtime,
+        identity_account_id: []const u8,
+        credential_account_id: []const u8,
+        display_name: []const u8,
+        access_token: []const u8,
+        refresh_token: []const u8,
+        expires_at: i64,
+    ) !Prepared {
+        try runtime.credentials.installStored(
+            runtime.allocator,
+            access_token,
+            refresh_token,
+            expires_at,
+            credential_account_id,
+        );
+        runtime.bumpAuthorizationGeneration();
+        return .{ .transition = try state_impl.TestSupport.prepareAuthenticated(
+            &runtime.account,
+            try state_impl.AccountIdentity.init(identity_account_id, display_name),
+        ) };
+    }
+
+    pub fn prepareAuthenticatedAndSchedule(
+        runtime: *Runtime,
+        account_id: []const u8,
+        display_name: []const u8,
+        access_token: []const u8,
+        refresh_token: []const u8,
+        expires_at: i64,
+    ) !Prepared {
+        var prepared = try prepareAuthenticated(
+            runtime,
+            account_id,
+            display_name,
+            access_token,
+            refresh_token,
+            expires_at,
+        );
+        prepared.schedule_refresh_after_commit = true;
+        return prepared;
+    }
+
+    pub fn attachPlatform(runtime: *Runtime, platform: *Platform) void {
+        std.debug.assert(runtime.platform == null);
+        runtime.platform = platform.ports();
+    }
+
+    pub fn detachPlatform(runtime: *Runtime) void {
+        runtime.platform = null;
+    }
+
     pub fn prepareLoggedOutAfterExternalCommit(runtime: *Runtime) Prepared {
         var begin = switch (runtime.prepareCommand(.logout)) {
             .prepared => |prepared| prepared,
@@ -1137,6 +1242,24 @@ pub const TestSupport = if (builtin.is_test) struct {
             .payload = .tokens_persisted,
         };
         return preparedFromState(runtime.account.prepareCompletion(&completion));
+    }
+
+    pub fn prepareTokenRefreshWithoutEffect(runtime: *Runtime) Prepared {
+        var prepared = switch (runtime.prepareTokenRefresh()) {
+            .prepared => |value| value,
+            else => @panic("test Account cannot begin token refresh"),
+        };
+        _ = prepared.transition.takeEffect() orelse
+            @panic("test token refresh has no effect");
+        return prepared;
+    }
+
+    pub fn prepareRefreshRetrySchedule(runtime: *Runtime) Prepared {
+        var prepared = preparedFromState(
+            runtime.account.prepareIdleFailure(.token_refresh_failed),
+        );
+        prepared.retry_refresh_after_commit = true;
+        return prepared;
     }
 
     pub fn publishFailure(
@@ -1211,4 +1334,184 @@ fn loginStartError(err: login_attempt.StartError) contract.ErrorCode {
         error.AuthorizationUrlFailed, error.RandomFailed => .oauth_callback_rejected,
         error.ThreadSpawnFailed, error.AlreadyStarted, error.InvalidAttempt => .local_resource_exhausted,
     };
+}
+
+const RuntimeTestTransport = struct {
+    calls: usize = 0,
+
+    fn port(self: *RuntimeTestTransport) metask_client.Transport {
+        return .{ .context = self, .perform_fn = perform };
+    }
+
+    fn perform(
+        context: *anyopaque,
+        _: metask_client.Request,
+        _: []u8,
+    ) metask_client.TransportError!metask_client.Response {
+        const self: *RuntimeTestTransport = @ptrCast(@alignCast(context));
+        self.calls += 1;
+        return error.NetworkFailed;
+    }
+};
+
+fn runtimeTestWake(_: *anyopaque) void {}
+
+fn initRuntimeForUnitTest(transport: *RuntimeTestTransport) !Runtime {
+    return Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        std.Thread.getCurrentId(),
+        if (builtin.os.tag == .windows)
+            "C:\\metawork-account-runtime-test"
+        else
+            "/tmp/metawork-account-runtime-test",
+        transport.port(),
+        TestSupport.loopbackEndpoint(),
+        .{ .context = transport, .notify_fn = runtimeTestWake },
+    );
+}
+
+test "authorization lease requires authenticated matching unexpired credentials" {
+    var transport: RuntimeTestTransport = .{};
+    var runtime = try initRuntimeForUnitTest(&transport);
+    var platform: TestSupport.Platform = .{ .now_unix_seconds = 100 };
+    TestSupport.attachPlatform(&runtime, &platform);
+    defer {
+        TestSupport.detachPlatform(&runtime);
+        runtime.deinit();
+    }
+    var authenticated = try TestSupport.prepareAuthenticated(
+        &runtime,
+        "account-1",
+        "Metask User",
+        "access-token",
+        "refresh-token",
+        101,
+    );
+    defer authenticated.deinit();
+    runtime.commit(&authenticated);
+
+    var lease = (try runtime.authorizationLease()).?;
+    const generation = lease.authorization_generation;
+    lease.deinit();
+    try std.testing.expect(runtime.acceptsAuthorizationGeneration(generation));
+
+    platform.now_unix_seconds = 101;
+    try std.testing.expect((try runtime.authorizationLease()) == null);
+    try std.testing.expect(!runtime.acceptsAuthorizationGeneration(generation));
+}
+
+test "authorization lease rejects authorizing and mismatched principals" {
+    var transport: RuntimeTestTransport = .{};
+    var runtime = try initRuntimeForUnitTest(&transport);
+    var platform: TestSupport.Platform = .{ .now_unix_seconds = 100 };
+    TestSupport.attachPlatform(&runtime, &platform);
+    defer {
+        TestSupport.detachPlatform(&runtime);
+        runtime.deinit();
+    }
+    var authenticated = try TestSupport.prepareAuthenticated(
+        &runtime,
+        "account-1",
+        "Metask User",
+        "access-token",
+        "refresh-token",
+        200,
+    );
+    defer authenticated.deinit();
+    runtime.commit(&authenticated);
+    _ = TestSupport.commitBeginLoginWithoutDispatch(&runtime);
+    try std.testing.expect((try runtime.authorizationLease()) == null);
+
+    var mismatched_transport: RuntimeTestTransport = .{};
+    var mismatched = try initRuntimeForUnitTest(&mismatched_transport);
+    var mismatched_platform: TestSupport.Platform = .{ .now_unix_seconds = 100 };
+    TestSupport.attachPlatform(&mismatched, &mismatched_platform);
+    defer {
+        TestSupport.detachPlatform(&mismatched);
+        mismatched.deinit();
+    }
+    var mismatched_authenticated = try TestSupport.prepareAuthenticatedWithCredentialPrincipal(
+        &mismatched,
+        "account-1",
+        "account-2",
+        "Metask User",
+        "access-token",
+        "refresh-token",
+        200,
+    );
+    defer mismatched_authenticated.deinit();
+    mismatched.commit(&mismatched_authenticated);
+    try std.testing.expect((try mismatched.authorizationLease()) == null);
+}
+
+test "healthy refresh window preserves authorization generation" {
+    var transport: RuntimeTestTransport = .{};
+    var runtime = try initRuntimeForUnitTest(&transport);
+    var platform: TestSupport.Platform = .{ .now_unix_seconds = 100 };
+    TestSupport.attachPlatform(&runtime, &platform);
+    defer {
+        TestSupport.detachPlatform(&runtime);
+        runtime.deinit();
+    }
+    var authenticated = try TestSupport.prepareAuthenticated(
+        &runtime,
+        "account-1",
+        "Metask User",
+        "access-token",
+        "refresh-token",
+        150,
+    );
+    defer authenticated.deinit();
+    runtime.commit(&authenticated);
+    var before = (try runtime.authorizationLease()).?;
+    const generation = before.authorization_generation;
+    before.deinit();
+
+    var refreshing = TestSupport.prepareTokenRefreshWithoutEffect(&runtime);
+    defer refreshing.deinit();
+    runtime.commit(&refreshing);
+
+    var during = (try runtime.authorizationLease()).?;
+    defer during.deinit();
+    try std.testing.expectEqual(generation, during.authorization_generation);
+    try std.testing.expect(runtime.acceptsAuthorizationGeneration(generation));
+}
+
+test "retry refresh schedules fresh credentials and refreshes inside skew" {
+    var transport: RuntimeTestTransport = .{};
+    var runtime = try initRuntimeForUnitTest(&transport);
+    var platform: TestSupport.Platform = .{ .now_unix_seconds = 100 };
+    TestSupport.attachPlatform(&runtime, &platform);
+    defer {
+        TestSupport.detachPlatform(&runtime);
+        runtime.deinit();
+    }
+    var authenticated = try TestSupport.prepareAuthenticated(
+        &runtime,
+        "account-1",
+        "Metask User",
+        "access-token",
+        "refresh-token",
+        200,
+    );
+    defer authenticated.deinit();
+    runtime.commit(&authenticated);
+
+    var scheduled = switch (runtime.prepareCommand(.retry_refresh)) {
+        .prepared => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(scheduled.attemptId() == null);
+    try std.testing.expect(scheduled.schedule_refresh_after_commit);
+    scheduled.deinit();
+
+    platform.now_unix_seconds = 150;
+    var refresh = switch (runtime.prepareCommand(.retry_refresh)) {
+        .prepared => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer refresh.deinit();
+    try std.testing.expect(refresh.attemptId() != null);
+    try std.testing.expect(refresh.transition.takeEffect().? == .refresh_token);
 }

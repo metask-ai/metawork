@@ -1028,7 +1028,8 @@ Workspace 生命周期不属于 Settings surface。New task 路径控件负责�
 
 `Account`规则：
 
-- 只显示 Metask identity、授权状态、登录/取消和退出；不得把 API/model catalog、默认模型、Models错误或连接状态显示成 Account字段；
+- 只显示 Metask identity、授权状态、登录/取消、refresh 恢复和退出；不得把 API/model catalog、默认模型、Models错误或连接状态显示成 Account字段；
+- 已验证 identity 的 refresh timer 或 wall clock 无法安排时继续显示 `authenticated`，在 Account 设置错误区说明自动刷新未安排并提供唯一 `重试登录刷新`；该动作调用 Host `retryRefresh`，不得由 Renderer timer、reload 或普通 snapshot update 自动重放；hard expiry 后 Metask 新目录/解析由 Host fail closed；
 - 重新登录或退出登录不得因 Models、Task、Session、Run、job、worker或 Task-owned credential的运行时引用而被阻止，也不得静默终止或改写这些引用；既有 Task按创建时取得的 ExecutionConfig继续收口；
 - 退出登录必须说明 Account设备凭据会清理、Metask模型将暂时不可用于新 Task、自定义模型不受影响且历史保留；不能把它描述成对 live Task的热撤权。
 
@@ -1228,7 +1229,7 @@ Foundation 组件只消费 `--ui-*`；只有直接表现品牌或状态本身时
 3. 用户可以采取什么动作；
 4. 技术详情入口。
 
-Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成时提供取消；已认证后的目录失败保持 `authenticated` 并提供重试；凭据失效直接进入 `signed_out`，由普通登录建立新 identity。Product/Schedule error 不得进入 Account error 或触发 Account 设置 redirect；对应 recovery action 必须在 Account ready 时仍可见、可操作。错误动作必须与当前四态合同一致，普通异常不能留下无动作 spinner。
+Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成时提供取消；已认证后的 Account refresh 调度失败保持 `authenticated`，在 Account 设置错误区提供显式 `重试登录刷新`；Models目录失败仍由 Models区域重试。凭据失效直接进入 `signed_out`，由普通登录建立新 identity。Product/Schedule error 不得进入 Account error 或触发 Account 设置 redirect；对应 recovery action 必须在 Account ready 时仍可见、可操作。错误动作必须与当前四态合同一致，普通异常不能留下无动作 spinner。
 
 工具失败但 Agent 已恢复时不能把整个 Task 标记为失败。任务级失败才进入左栏 Failed 状态。
 

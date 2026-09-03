@@ -3097,6 +3097,9 @@ export default function App() {
             onBeginLogin={() =>
               void runAccountCommand(() => client.beginLogin())
             }
+            onRetryRefresh={() =>
+              void runAccountCommand(() => client.retryAccountRefresh())
+            }
             onLogout={() => void runAccountCommand(() => client.logout())}
             onSetDefaultPermissionProfile={(profile) =>
               void setDefaultPermissionProfile(profile)

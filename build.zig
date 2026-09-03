@@ -218,6 +218,15 @@ pub fn build(b: *std.Build) void {
         .filters = &.{"Account"},
     });
     account_test_step.dependOn(&b.addRunArtifact(account_coordinator_tests).step);
+    const account_bridge_tests = b.addTest(.{
+        .name = "metawork-account-bridge-focused",
+        .root_module = test_modules.bridge,
+        .filters = &.{
+            "Account command response encoding",
+            "Dispatcher validates authority",
+        },
+    });
+    account_test_step.dependOn(&b.addRunArtifact(account_bridge_tests).step);
     const storage_tests = b.addTest(.{
         .name = "metawork-storage",
         .root_module = test_modules.storage,

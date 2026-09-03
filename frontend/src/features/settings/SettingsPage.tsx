@@ -118,6 +118,7 @@ export function SettingsPage({
   onTestModelConnection,
   onSelectModelConnection,
   onBeginLogin,
+  onRetryRefresh,
   onLogout,
   onSetDefaultPermissionProfile,
 }: {
@@ -170,6 +171,7 @@ export function SettingsPage({
     modelId: string,
   ) => void;
   onBeginLogin: () => void;
+  onRetryRefresh: () => void;
   onLogout: () => void;
   onSetDefaultPermissionProfile: (profile: PermissionProfile) => void;
 }) {
@@ -839,6 +841,16 @@ export function SettingsPage({
                       </span>
                     )}
                   </span>
+                  {account.errorCode === "refresh_schedule_failed" && (
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      disabled={disabled || accountDisabled}
+                      onClick={onRetryRefresh}
+                    >
+                      {t("account.retry_refresh")}
+                    </Button>
+                  )}
                 </div>
               )}
 

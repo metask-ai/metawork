@@ -206,6 +206,7 @@ pub const Account = struct {
         return switch (command) {
             .begin_login => self.prepareBeginLogin(),
             .cancel_operation => self.prepareCancel(),
+            .retry_refresh => self.prepareRetryRefresh(),
             .logout => self.prepareLogout(),
         };
     }
@@ -322,6 +323,15 @@ pub const Account = struct {
         next.error_code = error_code;
         next.safe_diagnostic.clear();
         return transitionNoAttempt(next, .operation_failed);
+    }
+
+    pub fn prepareRetryRefresh(self: *const Account) PrepareResult {
+        if (self.state.session_state != .authenticated or
+            self.state.activeAttempt() != null)
+            return .{ .rejected = .invalid_state };
+        var next = self.state;
+        next.clearError();
+        return transitionNoAttempt(next, .session_changed);
     }
 
     fn prepareBeginLogin(self: *const Account) PrepareResult {

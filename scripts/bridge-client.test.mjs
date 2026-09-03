@@ -336,6 +336,25 @@ test("a wedged mutation times out once and is never replayed by the Bridge clien
   assert.equal(calls, 1);
 });
 
+test("Account refresh retry uses one explicit empty-payload command", async () => {
+  const calls = [];
+  const client = new BridgeClient({
+    bridge: bridgeWith(async (command, payload) => {
+      calls.push({ command, payload });
+      return { accepted: true, errorCode: "none", attemptId: null };
+    }),
+  });
+
+  assert.deepEqual(await client.retryAccountRefresh(), {
+    accepted: true,
+    errorCode: "none",
+    attemptId: null,
+  });
+  assert.deepEqual(calls, [
+    { command: "metawork.account.retryRefresh", payload: {} },
+  ]);
+});
+
 test("a native Workspace picker remains user-controlled instead of command-timed", async () => {
   const client = new BridgeClient({
     bridge: bridgeWith(

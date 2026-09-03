@@ -357,6 +357,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.snapshot_chunk, .function = fetchSnapshotChunk },
             .{ .name = commands.account_begin_login, .function = accountBeginLogin },
             .{ .name = commands.account_cancel_operation, .function = accountCancelOperation },
+            .{ .name = commands.account_retry_refresh, .function = accountRetryRefresh },
             .{ .name = commands.models_refresh_catalog, .function = modelsRefreshCatalog },
             .{ .name = commands.models_select_metask_api_key, .function = selectMetaskApiKey },
             .{ .name = commands.models_configure_metask_selection, .function = configureMetaskSelection },
@@ -1445,6 +1446,19 @@ pub const Dispatcher = struct {
             invocation,
             output,
             .cancel_operation,
+        );
+    }
+
+    fn accountRetryRefresh(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        return submitEmptyAccountCommand(
+            context,
+            invocation,
+            output,
+            .retry_refresh,
         );
     }
 
@@ -5050,6 +5064,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
             switch (command) {
                 .begin_login,
                 .cancel_operation,
+                .retry_refresh,
                 .logout,
                 => {},
             }
@@ -5433,6 +5448,20 @@ test "Dispatcher validates authority before domain calls and preserves committed
             "\"accepted\":false,\"errorCode\":\"invalid_state\",\"attemptId\":null",
         ) != null,
     );
+    harness.account_result = .acceptedAttempt(null);
+    const retried_refresh = native_dispatcher.dispatch(
+        "{\"id\":\"retry-refresh\",\"command\":\"metawork.account.retryRefresh\",\"payload\":{}}",
+        source,
+        &response,
+    );
+    try std.testing.expectEqual(@as(usize, 3), harness.account_calls);
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            retried_refresh,
+            "\"accepted\":true,\"errorCode\":\"none\",\"attemptId\":null",
+        ) != null,
+    );
     const chosen = native_dispatcher.dispatch(
         "{\"id\":\"choose\",\"command\":\"metawork.workspaces.choose\",\"payload\":{}}",
         source,
@@ -5518,7 +5547,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
     );
     // Models commands are routed through the Models host and never manufacture
     // an Account attempt identity.
-    try std.testing.expectEqual(@as(usize, 2), harness.account_calls);
+    try std.testing.expectEqual(@as(usize, 3), harness.account_calls);
     try std.testing.expectEqual(@as(usize, 3), harness.models_calls);
     try std.testing.expect(std.mem.indexOf(
         u8,

@@ -766,6 +766,18 @@ test("MCP command results preserve persistence certainty and refresh admission",
 test("Account command acknowledgements preserve state-machine and attempt identity", () => {
   assert.deepEqual(
     decodeAccountCommandResult({
+      accepted: false,
+      errorCode: "refresh_schedule_failed",
+      attemptId: null,
+    }),
+    {
+      accepted: false,
+      errorCode: "refresh_schedule_failed",
+      attemptId: null,
+    },
+  );
+  assert.deepEqual(
+    decodeAccountCommandResult({
       accepted: true,
       errorCode: "none",
       attemptId: "41",

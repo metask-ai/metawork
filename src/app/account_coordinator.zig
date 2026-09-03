@@ -139,7 +139,11 @@ pub const Coordinator = struct {
             );
 
         const refresh_after_commit = self.runtime.takeRefreshAfterCommit(&prepared);
-        self.runtime.dispatchCommitted(&prepared);
+        const dispatch_follow_up = self.runtime.dispatchCommitted(&prepared);
+        if (dispatch_follow_up) |follow_up| {
+            const followed = self.commitPrepared(follow_up);
+            std.debug.assert(followed.accepted);
+        }
         if (refresh_after_commit) {
             const refreshed = self.commitPrepared(
                 self.runtime.prepareRestoredRefresh(),
@@ -200,6 +204,32 @@ const RecordingSink = struct {
             .attempt_terminal = value.attempt_terminal,
         };
         self.count += 1;
+    }
+};
+
+const AuthorizationObserver = struct {
+    runtime: *account_api.Runtime,
+    expected_generation: u64,
+    calls: usize = 0,
+    unavailable: bool = false,
+
+    fn port(self: *AuthorizationObserver) CommitObserver {
+        return .{ .context = self, .notify_fn = notify };
+    }
+
+    fn notify(context: *anyopaque) void {
+        const self: *AuthorizationObserver = @ptrCast(@alignCast(context));
+        self.calls += 1;
+        var lease = (self.runtime.authorizationLease() catch {
+            self.unavailable = true;
+            return;
+        }) orelse {
+            self.unavailable = true;
+            return;
+        };
+        defer lease.deinit();
+        if (lease.authorization_generation != self.expected_generation)
+            self.unavailable = true;
     }
 };
 
@@ -442,4 +472,149 @@ test "Account shutdown publishes one terminal fact for an active attempt" {
     try std.testing.expectEqual(@as(usize, 1), sink.count);
     try std.testing.expect(sink.records[0].attempt_terminal);
     try std.testing.expectEqual(account_contract.AccountState.signed_out, runtime.view().state);
+}
+
+test "Account refresh scheduling failure is visible and explicitly retryable" {
+    var runtime = try initRuntimeForTest(if (builtin.os.tag == .windows)
+        "C:\\metawork-account-refresh-schedule-test"
+    else
+        "/tmp/metawork-account-refresh-schedule-test");
+    var platform: account_api.TestSupport.Platform = .{
+        .now_unix_seconds = 100,
+        .timer_start_fails = true,
+    };
+    account_api.TestSupport.attachPlatform(&runtime, &platform);
+    defer {
+        account_api.TestSupport.detachPlatform(&runtime);
+        runtime.deinit();
+    }
+    var sink: RecordingSink = .{ .runtime = &runtime };
+    var coordinator = Coordinator.init(
+        &runtime,
+        sink.port(),
+        std.Thread.getCurrentId(),
+    );
+
+    const authenticated = coordinator.commitPrepared(
+        try account_api.TestSupport.prepareAuthenticatedAndSchedule(
+            &runtime,
+            "account-1",
+            "Metask User",
+            "access-token",
+            "refresh-token",
+            200,
+        ),
+    );
+
+    try std.testing.expect(authenticated.accepted);
+    try std.testing.expectEqual(@as(usize, 2), sink.count);
+    try std.testing.expectEqual(
+        account_contract.ErrorCode.refresh_schedule_failed,
+        runtime.view().error_code,
+    );
+    var lease = (try runtime.authorizationLease()).?;
+    lease.deinit();
+
+    platform.timer_start_fails = false;
+    sink.count = 0;
+    const retried = coordinator.commandSink().submit(.retry_refresh);
+
+    try std.testing.expect(retried.accepted);
+    try std.testing.expectEqual(@as(usize, 1), sink.count);
+    try std.testing.expectEqual(account_contract.ErrorCode.none, runtime.view().error_code);
+    try std.testing.expectEqual(@as(usize, 2), platform.timer_start_count);
+    try std.testing.expectEqual(@as(u64, 40 * std.time.ns_per_s), platform.last_timer_interval_ns);
+}
+
+test "Account clock and refresh retry arm failures publish refresh schedule failure" {
+    var runtime = try initRuntimeForTest(if (builtin.os.tag == .windows)
+        "C:\\metawork-account-refresh-retry-arm-test"
+    else
+        "/tmp/metawork-account-refresh-retry-arm-test");
+    var platform: account_api.TestSupport.Platform = .{
+        .now_unix_seconds = null,
+    };
+    account_api.TestSupport.attachPlatform(&runtime, &platform);
+    defer {
+        account_api.TestSupport.detachPlatform(&runtime);
+        runtime.deinit();
+    }
+    var sink: RecordingSink = .{ .runtime = &runtime };
+    var coordinator = Coordinator.init(
+        &runtime,
+        sink.port(),
+        std.Thread.getCurrentId(),
+    );
+
+    _ = coordinator.commitPrepared(
+        try account_api.TestSupport.prepareAuthenticatedAndSchedule(
+            &runtime,
+            "account-1",
+            "Metask User",
+            "access-token",
+            "refresh-token",
+            200,
+        ),
+    );
+    try std.testing.expectEqual(
+        account_contract.ErrorCode.refresh_schedule_failed,
+        runtime.view().error_code,
+    );
+
+    platform.now_unix_seconds = 100;
+    platform.timer_start_fails = true;
+    sink.count = 0;
+    _ = coordinator.commitPrepared(
+        account_api.TestSupport.prepareRefreshRetrySchedule(&runtime),
+    );
+    try std.testing.expectEqual(@as(usize, 2), sink.count);
+    try std.testing.expectEqual(
+        account_contract.ErrorCode.refresh_schedule_failed,
+        runtime.view().error_code,
+    );
+}
+
+test "Account observer retains a healthy in-flight authorization during refresh" {
+    var runtime = try initRuntimeForTest(if (builtin.os.tag == .windows)
+        "C:\\metawork-account-refresh-observer-test"
+    else
+        "/tmp/metawork-account-refresh-observer-test");
+    var platform: account_api.TestSupport.Platform = .{ .now_unix_seconds = 100 };
+    account_api.TestSupport.attachPlatform(&runtime, &platform);
+    defer {
+        account_api.TestSupport.detachPlatform(&runtime);
+        runtime.deinit();
+    }
+    var sink: RecordingSink = .{ .runtime = &runtime };
+    var coordinator = Coordinator.init(
+        &runtime,
+        sink.port(),
+        std.Thread.getCurrentId(),
+    );
+    _ = coordinator.commitPrepared(
+        try account_api.TestSupport.prepareAuthenticated(
+            &runtime,
+            "account-1",
+            "Metask User",
+            "access-token",
+            "refresh-token",
+            150,
+        ),
+    );
+    var lease = (try runtime.authorizationLease()).?;
+    const generation = lease.authorization_generation;
+    lease.deinit();
+    var observer: AuthorizationObserver = .{
+        .runtime = &runtime,
+        .expected_generation = generation,
+    };
+    coordinator.setCommitObserver(observer.port());
+
+    const refreshed = coordinator.commitPrepared(
+        account_api.TestSupport.prepareTokenRefreshWithoutEffect(&runtime),
+    );
+
+    try std.testing.expect(refreshed.accepted);
+    try std.testing.expectEqual(@as(usize, 1), observer.calls);
+    try std.testing.expect(!observer.unavailable);
 }
