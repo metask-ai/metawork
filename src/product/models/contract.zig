@@ -62,7 +62,6 @@ pub const CatalogState = enum {
 
 pub const PersistenceHealth = enum {
     ready,
-    migration_required,
     recovery_required,
     unavailable,
 };
@@ -76,7 +75,6 @@ pub const ModelsError = enum {
     none,
     authorization_unavailable,
     persistence_unavailable,
-    migration_required,
     catalog_unavailable,
     catalog_invalid,
     catalog_too_large,

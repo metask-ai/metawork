@@ -156,7 +156,6 @@ export type ModelsErrorCode =
   | "none"
   | "authorization_unavailable"
   | "persistence_unavailable"
-  | "migration_required"
   | "catalog_unavailable"
   | "catalog_invalid"
   | "catalog_too_large"
@@ -168,7 +167,7 @@ export type ModelsErrorCode =
 export type ModelsView = {
   availability: ModelsCatalogState;
   persistenceHealth:
-    "ready" | "migration_required" | "recovery_required" | "unavailable";
+    "ready" | "recovery_required" | "unavailable";
   providers: {
     id: string;
     displayName: string;

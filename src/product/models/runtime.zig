@@ -1101,7 +1101,7 @@ pub const Runtime = struct {
             return;
         };
         const bytes = bytes_optional orelse {
-            self.migrateLegacyStores();
+            self.initializeEmptyStore();
             return;
         };
         defer self.allocator.free(bytes);
@@ -1130,126 +1130,10 @@ pub const Runtime = struct {
         self.drainCredentialCleanup();
     }
 
-    fn migrateLegacyStores(self: *Runtime) void {
-        var candidate = registry_impl.Registry.init(self.allocator);
-        defer candidate.deinit();
-        const store = if (self.store) |*value| value else {
-            self.store_healthy = false;
-            return;
-        };
-
-        var connection_sector_valid = false;
-        const connection_bytes = store.loadNamedAlloc(
-            self.allocator,
-            registry_impl.legacy_connection_store_file_name,
-            registry_impl.max_store_bytes,
-        ) catch blk: {
-            candidate.connections_recovery_required = true;
-            break :blk null;
-        };
-        if (connection_bytes) |bytes| {
-            defer self.allocator.free(bytes);
-            var legacy: ?registry_impl.Registry = legacy_decode: {
-                const decoded = registry_impl.decodeLegacy(self.allocator, bytes) catch {
-                    candidate.connections_recovery_required = true;
-                    break :legacy_decode null;
-                };
-                break :legacy_decode decoded;
-            };
-            if (legacy) |*decoded| {
-                candidate.replace(decoded);
-                decoded.deinit();
-                connection_sector_valid = true;
-            }
-        }
-
-        var prior_generation: u64 = 0;
-        for (0..candidate.connectionCount()) |index| {
-            const source_generation = self.freshGeneration(prior_generation) catch {
-                self.store_healthy = false;
-                return;
-            };
-            const catalog_generation = self.freshGeneration(source_generation) catch {
-                self.store_healthy = false;
-                return;
-            };
-            candidate.reseedLegacyConnection(index, source_generation, catalog_generation) catch {
-                self.store_healthy = false;
-                return;
-            };
-            prior_generation = catalog_generation;
-        }
-
-        var preference_sector_valid = false;
-        const preference_bytes = store.loadNamedAlloc(
-            self.allocator,
-            registry_impl.legacy_preference_store_file_name,
-            registry_impl.legacy_preference_bytes,
-        ) catch blk: {
-            candidate.preference_recovery_required = true;
-            break :blk null;
-        };
-        if (preference_bytes) |bytes| {
-            defer self.allocator.free(bytes);
-            var preference: ?registry_impl.LegacyPreference = preference_decode: {
-                const decoded = registry_impl.decodeLegacyPreference(self.allocator, bytes) catch {
-                    candidate.preference_recovery_required = true;
-                    break :preference_decode null;
-                };
-                break :preference_decode decoded;
-            };
-            if (preference) |*value| {
-                defer value.deinit();
-                const metask_selection_revision = self.freshGeneration(prior_generation) catch {
-                    self.store_healthy = false;
-                    return;
-                };
-                candidate.configureMetask(
-                    value.principal_ref,
-                    value.api_key_id,
-                    value.model_id,
-                    null,
-                    0,
-                    metask_selection_revision,
-                    null,
-                ) catch {
-                    self.store_healthy = false;
-                    return;
-                };
-                prior_generation = metask_selection_revision;
-                preference_sector_valid = true;
-            }
-        }
-
-        if (candidate.defaultSelection() != null) {
-            const revision = self.freshGeneration(prior_generation) catch {
-                self.store_healthy = false;
-                return;
-            };
-            candidate.activateMigratedDefault(revision) catch {
-                self.store_healthy = false;
-                return;
-            };
-        } else if (preference_sector_valid and !candidate.connections_recovery_required) {
-            const revision = self.freshGeneration(prior_generation) catch {
-                self.store_healthy = false;
-                return;
-            };
-            candidate.selectMetaskDefault(revision) catch {
-                self.store_healthy = false;
-                return;
-            };
-        } else if (candidate.preference_recovery_required or
-            candidate.connections_recovery_required)
-        {
-            candidate.default_migration_required = true;
-            candidate.selection_revision = self.freshGeneration(prior_generation) catch {
-                self.store_healthy = false;
-                return;
-            };
-        }
-
-        const encoded = registry_impl.encodeAlloc(self.allocator, &candidate) catch {
+    fn initializeEmptyStore(self: *Runtime) void {
+        var empty = registry_impl.Registry.init(self.allocator);
+        defer empty.deinit();
+        const encoded = registry_impl.encodeAlloc(self.allocator, &empty) catch {
             self.store_healthy = false;
             return;
         };
@@ -1258,16 +1142,7 @@ pub const Runtime = struct {
             self.store_healthy = false;
             return;
         }
-        self.registry.replace(&candidate);
-        if (connection_sector_valid) store.archiveLegacy(
-            registry_impl.legacy_connection_store_file_name,
-            registry_impl.legacy_connection_store_file_name ++ ".migrated",
-        );
-        if (preference_sector_valid) store.archiveLegacy(
-            registry_impl.legacy_preference_store_file_name,
-            registry_impl.legacy_preference_store_file_name ++ ".migrated",
-        );
-        self.drainCredentialCleanup();
+        self.registry.replace(&empty);
     }
 
     fn commitVerified(self: *Runtime, bytes: []const u8) bool {
@@ -1337,7 +1212,7 @@ fn mapModelsError(error_code: contract.ModelsError) contract.ManagementError {
     return switch (error_code) {
         .none => unreachable,
         .authorization_unavailable => .authorization_unavailable,
-        .persistence_unavailable, .migration_required => .persistence_unavailable,
+        .persistence_unavailable => .persistence_unavailable,
         .operation_in_progress => .operation_in_progress,
         .local_resource_exhausted => .local_resource_exhausted,
         .catalog_unavailable,
@@ -1930,46 +1805,18 @@ test "Metask catalog drift keeps a tracked global default durable" {
     }
 }
 
-test "Models bootstrap migrates both legacy stores with custom default precedence" {
+test "Models bootstrap initializes canonical store and ignores retired files" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
     const directory = directory_storage[0..directory_len];
-
-    var legacy = registry_impl.Registry.init(std.testing.allocator);
-    defer legacy.deinit();
-    try legacy.create(.{
-        .connection_id = "legacy-slot",
-        .spec = .{
-            .display_name = "Legacy",
-            .protocol = .openai_responses,
-            .normalized_base_url = "https://api.openai.com/v1/responses",
-        },
-        .credential_slot = .{ .id = "legacy-slot" },
-        .model = .{ .id = "gpt-5" },
-    }, 7, 8, 9);
-    const legacy_selection: contract.ModelConnectionSelectionCommand = .{
-        .source_id = "legacy-slot",
-        .expected_connection_revision = 7,
-    };
-    const legacy_probe: contract.ModelConnectionTestCommand = .{
-        .model = .{ .source_id = "legacy-slot", .model_id = "gpt-5" },
-        .expected_connection_revision = 7,
-        .expected_source_generation = 8,
-        .expected_catalog_generation = 9,
-    };
-    try legacy.markTesting(legacy_probe);
-    try legacy.completeTest(legacy_probe, true);
-    try legacy.selectDefault(legacy_selection, "gpt-5", 11);
-    const connection_bytes = try registry_impl.encodeLegacyAlloc(std.testing.allocator, &legacy);
-    defer std.testing.allocator.free(connection_bytes);
-    try writeTestFile(&tmp.dir, registry_impl.legacy_connection_store_file_name, connection_bytes);
     try writeTestFile(
         &tmp.dir,
-        registry_impl.legacy_preference_store_file_name,
-        "{\"selection_owner_account_id\":\"principal-1\",\"api_key_id\":\"api-1\",\"model_id\":\"metask-model\",\"metask_source_generation\":13}",
+        "preferences.json",
+        "{\"selection_owner_account_id\":\"retired\"}",
     );
+    try writeTestFile(&tmp.dir, "model-connections.json", "not-json");
 
     var vault: TestVault = .{};
     var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
@@ -1978,104 +1825,48 @@ test "Models bootstrap migrates both legacy stores with custom default precedenc
         runtime.stop();
         runtime.deinit();
     }
+
     try std.testing.expect(runtime.store_healthy);
-    const default_selection = runtime.registry.defaultSelection() orelse
+    const view = runtime.view();
+    try std.testing.expect(view.metask_selection == null);
+    try std.testing.expect(view.default_selection == null);
+    try std.testing.expectEqual(@as(usize, 0), view.model_connections.len);
+    const bytes = (try runtime.store.?.loadAlloc(std.testing.allocator)) orelse
         return error.TestExpectedEqual;
-    try std.testing.expectEqualStrings("legacy-slot", default_selection.source_id);
-    try std.testing.expectEqualStrings("gpt-5", default_selection.model_id);
-    const metask = runtime.registry.metaskIntent() orelse return error.TestExpectedEqual;
-    try std.testing.expectEqualStrings("principal-1", metask.principal_ref);
-    try std.testing.expectEqualStrings("api-1", metask.api_key_id);
-    try std.testing.expect(metask.protocol == null);
-    try std.testing.expectEqual(@as(u64, 0), metask.source_generation);
-    try std.testing.expect(runtime.registry.sourceGenerationForConnection("legacy-slot").? != 7);
-    try std.testing.expect(!runtime.registry.preference_recovery_required);
-    try std.testing.expect(!runtime.registry.connections_recovery_required);
-    try std.testing.expect(!runtime.registry.default_migration_required);
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings(
+        "{\"schema\":1,\"metask\":null,\"default_selection\":null,\"selection_revision\":0,\"pending_credential_deletions\":[],\"connections\":[]}",
+        bytes,
+    );
 }
 
-test "Models bootstrap isolates damaged connection sector from valid Metask intent" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
-    const directory = directory_storage[0..directory_len];
-    try writeTestFile(
-        &tmp.dir,
-        registry_impl.legacy_connection_store_file_name,
+test "Models bootstrap rejects retired and damaged canonical shapes" {
+    const inputs = [_][]const u8{
+        "{\"schema\":1,\"metask\":null,\"default_selection\":null,\"selection_revision\":0,\"migration\":{\"preference_recovery_required\":false,\"connections_recovery_required\":false,\"default_migration_required\":false},\"pending_credential_deletions\":[],\"connections\":[]}",
         "not-json",
-    );
-    try writeTestFile(
-        &tmp.dir,
-        registry_impl.legacy_preference_store_file_name,
-        "{\"selection_owner_account_id\":\"principal-1\",\"api_key_id\":\"api-1\",\"model_id\":\"metask-model\",\"metask_source_generation\":13}",
-    );
-
-    var vault: TestVault = .{};
-    var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
-    try runtime.start(directory, vault.port());
-    defer {
-        runtime.stop();
-        runtime.deinit();
-    }
-    try std.testing.expect(runtime.store_healthy);
-    try std.testing.expect(runtime.registry.metaskIntent() != null);
-    try std.testing.expect(runtime.registry.defaultSelection() == null);
-    try std.testing.expect(runtime.registry.connections_recovery_required);
-    try std.testing.expect(!runtime.registry.preference_recovery_required);
-    try std.testing.expect(runtime.registry.default_migration_required);
-    try std.testing.expect(runtime.registry.selection_revision != 0);
-}
-
-test "Models bootstrap preserves proven custom default when preference sector is damaged" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
-    const directory = directory_storage[0..directory_len];
-
-    var legacy = registry_impl.Registry.init(std.testing.allocator);
-    defer legacy.deinit();
-    try legacy.create(.{
-        .connection_id = "legacy-slot",
-        .spec = .{
-            .display_name = "Legacy",
-            .protocol = .openai_responses,
-            .normalized_base_url = "https://api.openai.com/v1/responses",
-        },
-        .credential_slot = .{ .id = "legacy-slot" },
-        .model = .{ .id = "gpt-5" },
-    }, 7, 8, 9);
-    const legacy_selection: contract.ModelConnectionSelectionCommand = .{
-        .source_id = "legacy-slot",
-        .expected_connection_revision = 7,
     };
-    const legacy_probe: contract.ModelConnectionTestCommand = .{
-        .model = .{ .source_id = "legacy-slot", .model_id = "gpt-5" },
-        .expected_connection_revision = 7,
-        .expected_source_generation = 8,
-        .expected_catalog_generation = 9,
-    };
-    try legacy.markTesting(legacy_probe);
-    try legacy.completeTest(legacy_probe, true);
-    try legacy.selectDefault(legacy_selection, "gpt-5", 11);
-    const connection_bytes = try registry_impl.encodeLegacyAlloc(std.testing.allocator, &legacy);
-    defer std.testing.allocator.free(connection_bytes);
-    try writeTestFile(&tmp.dir, registry_impl.legacy_connection_store_file_name, connection_bytes);
-    try writeTestFile(&tmp.dir, registry_impl.legacy_preference_store_file_name, "not-json");
+    for (inputs) |input| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
+        try writeTestFile(&tmp.dir, registry_impl.store_file_name, input);
 
-    var vault: TestVault = .{};
-    var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
-    try runtime.start(directory, vault.port());
-    defer {
-        runtime.stop();
-        runtime.deinit();
+        var vault: TestVault = .{};
+        var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
+        try runtime.start(directory_storage[0..directory_len], vault.port());
+        defer {
+            runtime.stop();
+            runtime.deinit();
+        }
+
+        try std.testing.expect(!runtime.store_healthy);
+        try std.testing.expectEqual(contract.CatalogState.unavailable, runtime.view().availability);
+        const bytes = (try runtime.store.?.loadAlloc(std.testing.allocator)) orelse
+            return error.TestExpectedEqual;
+        defer std.testing.allocator.free(bytes);
+        try std.testing.expectEqualStrings(input, bytes);
     }
-    try std.testing.expect(runtime.store_healthy);
-    try std.testing.expect(runtime.registry.defaultSelection() != null);
-    try std.testing.expect(runtime.registry.preference_recovery_required);
-    try std.testing.expect(!runtime.registry.connections_recovery_required);
-    try std.testing.expect(!runtime.registry.default_migration_required);
 }
 
 fn writeTestFile(dir: *std.Io.Dir, name: []const u8, bytes: []const u8) !void {

@@ -194,7 +194,6 @@ const modelsErrorCodes = [
   "none",
   "authorization_unavailable",
   "persistence_unavailable",
-  "migration_required",
   "catalog_unavailable",
   "catalog_invalid",
   "catalog_too_large",
